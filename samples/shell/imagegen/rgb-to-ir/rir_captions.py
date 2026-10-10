@@ -96,6 +96,15 @@ def clause(name: str, polarity: str, rng: np.random.Generator | None, held_out: 
     return f"{subject.format(name=name)} {predicate}."
 
 
+def evaluation_clause(name: str, polarity: str, template: int, held_out: bool = False) -> str:
+    """One sentence for an instruction experiment: `template` numbers the (subject, predicate) pair, so that the
+    clauses of two polarities with the same number differ only in the predicate. Held-out wording replaces the
+    predicate (warmer and cooler only; KeyError for "same")."""
+    options = TRAIN_PREDICATES[polarity]
+    predicate = HELD_OUT[polarity] if held_out else options[template % len(options)]
+    return f"{SUBJECTS[(template // len(options)) % len(SUBJECTS)].format(name=name)} {predicate}."
+
+
 def has_polarity(caption: str, cls: str, polarity: str, part: str | None = None) -> bool:
     """Whether `caption` states `polarity` for the class (training or held-out wording)."""
     name = subject_name(cls, part)

@@ -268,6 +268,28 @@ class Neutral(unittest.TestCase):
         self.assertIsNone(person(evaluate(make_pairs(Generators.obeying, n=10)))["neutral_shift"])
 
 
+class FidelityAgainstTheRealIr(unittest.TestCase):
+    def test_the_oracle_fidelity_keeps_only_renders_whose_instruction_is_what_the_real_ir_shows(self):
+        pairs = make_pairs(Generators.obeying, n=40, source="forced", counterfactual=False)
+        for i, p in enumerate(pairs):
+            # the real IR shows an object that is warmer, whatever the instruction says
+            p.real_ir = paint(background_ir(5000 + i), p.mask, STEP)
+        r = person(evaluate(pairs), "forced")
+        self.assertEqual(r["fidelity"]["n"], 40)
+        self.assertEqual(r["oracle_fidelity"]["n"], 20)  # the warmer half
+        self.assertLess(r["oracle_fidelity"]["estimate"], 1.5)
+        self.assertGreater(r["fidelity"]["estimate"], r["oracle_fidelity"]["estimate"] + 2.0)
+
+    def test_the_neutral_render_has_its_own_fidelity(self):
+        pairs = make_pairs(Generators.obeying, n=30, source="forced", counterfactual=False)
+        for i, p in enumerate(pairs):
+            p.real_ir = paint(background_ir(5000 + i), p.mask, STEP)
+            p.neutral = paint(background_ir(i), p.mask, 0.0)
+        r = person(evaluate(pairs), "forced")["neutral_fidelity"]
+        self.assertGreater(r["estimate"], 5.0)  # an unprompted render misses a warm object by about STEP / MAD
+        self.assertEqual(r["n"], 30)
+
+
 class Plumbing(unittest.TestCase):
     def test_the_contrast_is_the_one_of_rir_regions(self):
         with mock.patch.object(R, "object_contrast", wraps=R.object_contrast) as spy:

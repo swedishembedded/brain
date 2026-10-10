@@ -36,7 +36,9 @@ that excludes other objects, over the frame's MAD):
                       translator puts it unprompted, which controllability alone cannot split (a generator
                       that only ever obeys "warmer" has a controllability and a zero cooler shift).
     fidelity          |c_gen - c_real|, c_real from `real_ir` or given; how far the generated
-                      contrast is from the real one. With an oracle instruction (measured on
+                      contrast is from the real one. `oracle_fidelity` keeps the renders whose instruction
+                      is what the real IR shows (polarity of c_real against tau): the quality of the rendering
+                      when told the truth. `neutral_fidelity` is the same distance for the neutral render. With an oracle instruction (measured on
                       the real IR) this is the quality of the rendering; with a prior it also
                       shows where the prior was wrong.
 
@@ -138,7 +140,7 @@ def measure_pair(pair: ObeyPair, params: R.RegionParams, seed: int) -> dict | st
     if pair.counterfactual is not None and pair.instruction in FLIP:
         c_cf = _contrast(pair.counterfactual, pair, params, seed)
     c_neutral = None
-    if pair.neutral is not None and pair.instruction in SIGN:
+    if pair.neutral is not None:
         c_neutral = _contrast(pair.neutral, pair, params, seed)
     c_real = pair.c_real
     if c_real is None and pair.real_ir is not None:
@@ -147,7 +149,10 @@ def measure_pair(pair: ObeyPair, params: R.RegionParams, seed: int) -> dict | st
         "c_gen": c_gen,
         "correct": None if tau is None else R.polarity(c_gen, tau) == pair.instruction,
         "delta": None if c_cf is None else SIGN[pair.instruction] * (c_gen - c_cf),
-        "neutral_delta": None if c_neutral is None else SIGN[pair.instruction] * (c_gen - c_neutral),
+        "neutral_delta": None if c_neutral is None or pair.instruction not in SIGN
+        else SIGN[pair.instruction] * (c_gen - c_neutral),
+        "neutral_fidelity": None if c_neutral is None or c_real is None else abs(c_neutral - c_real),
+        "real_polarity": None if c_real is None else R.polarity(c_real, tau),
         "within_noise": None if tau is None else abs(c_gen) < tau,
         "c_rgb": None if pair.rgb is None else _contrast(D.to_gray(pair.rgb), pair, params, seed),
         "fidelity": None if c_real is None else abs(c_gen - c_real),
@@ -216,7 +221,9 @@ def _region_report(rows: list, n_resamples: int, seed: int) -> dict:
            "within_noise_floor": stat("within_noise", value=lambda r: float(r["within_noise"])),
            "neutral_shift": _neutral_shift(stat),
            "luminance_shortcut": _shortcut(rows, n_resamples, seed),
-           "fidelity": stat("fidelity")}
+           "fidelity": stat("fidelity"),
+           "oracle_fidelity": stat("fidelity", lambda r: r["real_polarity"] == r["instruction"]),
+           "neutral_fidelity": stat("neutral_fidelity")}
     margin = stat("correct", directional, lambda r: float(r["correct"]) - CHANCE)
     out["effect"] = ({"measure": "controllability", **out["controllability"]} if out["controllability"]
                      else {"measure": "direction", **margin} if margin else None)

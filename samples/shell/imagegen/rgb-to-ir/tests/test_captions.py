@@ -178,6 +178,32 @@ class Training(unittest.TestCase):
         self.assertTrue(all("car" in t for t in caps.values()), "a paraphrase that loses the object falls back to the template")
 
 
+class EvaluationClause(unittest.TestCase):
+    """A clause chosen by template number, so a warmer and a cooler render differ only in polarity."""
+
+    def test_the_template_picks_subject_and_predicate_from_the_training_wording(self):
+        seen = {C.evaluation_clause("car", "warmer", t) for t in range(8)}
+        self.assertEqual(len(seen), 8)
+        for clause in seen:
+            self.assertTrue(C.has_polarity(clause, "car", "warmer"))
+            self.assertFalse(any(C.HELD_OUT[p] in clause for p in C.HELD_OUT))
+
+    def test_the_two_polarities_of_one_template_share_the_subject(self):
+        for t in range(8):
+            warm, cool = (C.evaluation_clause("person", p, t) for p in ("warmer", "cooler"))
+            self.assertEqual(warm.split(" ", 2)[:2], cool.split(" ", 2)[:2])
+
+    def test_held_out_wording_is_the_held_out_predicate_and_still_reads_as_the_polarity(self):
+        for polarity in ("warmer", "cooler"):
+            clause = C.evaluation_clause("car", polarity, 3, held_out=True)
+            self.assertIn(C.HELD_OUT[polarity], clause)
+            self.assertTrue(C.has_polarity(clause, "car", polarity))
+
+    def test_the_neutral_polarity_has_no_held_out_wording(self):
+        with self.assertRaises(KeyError):
+            C.evaluation_clause("car", "same", 0, held_out=True)
+
+
 class Balance(unittest.TestCase):
     def test_classes_with_a_polarity_under_ten_percent_are_flagged_not_controllable(self):
         specs = ([[obj("person", "warmer")]] * 95 + [[obj("person", "cooler")]] * 3 + [[obj("person", "same")]] * 40
