@@ -318,6 +318,61 @@ class Generation(World):
         self.assertEqual(self.calls(), [])
 
 
+class ExplicitInstructions(World):
+    """The instruction of each frame comes from a file: one text per frame for each condition label."""
+
+    def setUp(self):
+        super().setUp()
+        self.texts = {"warmer": {f"d/f{k}": f"{C.NEUTRAL_CAPTION} The car is warmer than its surroundings. #{k}" for k in range(3)},
+                      "cooler": {f"d/f{k}": f"{C.NEUTRAL_CAPTION} The car is cooler than its surroundings. #{k}" for k in range(3)}}
+
+    def generate_explicit(self, modes, texts=None, **selection):
+        job = S.Job(self.doc, S.Selection(**selection), modes, ("person", "car", "bicycle"), None, self.out,
+                    self.texts if texts is None else texts)
+        return S.generate(job, S.BrainRunner(self.brain, self.config(), S.Retry(4, 0.0, 60.0), lambda s: None))
+
+    def test_each_frame_is_rendered_with_its_own_text_in_a_directory_per_condition(self):
+        self.generate_explicit(("explicit-warmer", "explicit-cooler"))
+        self.assertEqual(sorted(os.listdir(self.out)), ["explicit-cooler", "explicit-warmer", "progress.log"])
+        warm = self.records("explicit-warmer")
+        self.assertEqual(warm["d_f1.json"]["instruction"], self.texts["warmer"]["d/f1"])
+        self.assertEqual(self.records("explicit-cooler")["d_f2.json"]["instruction"], self.texts["cooler"]["d/f2"])
+        prompts = [opt(argv, "--prompt") for argv in self.calls()]
+        self.assertEqual(sorted(prompts), sorted(t for label in self.texts.values() for t in label.values()))
+
+    def test_conditions_share_the_seed_and_the_adapter_so_they_are_paired(self):
+        self.generate_explicit(("explicit-warmer", "explicit-cooler"))
+        recs = [r for m in ("explicit-warmer", "explicit-cooler") for r in self.records(m).values()]
+        self.assertEqual({r["seed"] for r in recs}, {3})
+        self.assertEqual({r["adapter_sha256"] for r in recs}, {hashlib.sha256(ADAPTER_BYTES).hexdigest()})
+
+    def test_a_missing_text_or_label_is_refused_before_brain_runs(self):
+        del self.texts["warmer"]["d/f1"]
+        with self.assertRaisesRegex(ValueError, "d/f1"):
+            self.generate_explicit(("explicit-warmer",))
+        with self.assertRaisesRegex(ValueError, "explicit-neutral"):
+            self.generate_explicit(("explicit-neutral",))
+        self.assertEqual(self.calls(), [])
+
+    def test_a_rerun_with_a_changed_text_is_refused_and_an_unchanged_one_skips(self):
+        self.generate_explicit(("explicit-warmer",))
+        self.assertEqual(self.generate_explicit(("explicit-warmer",))["skipped"], 3)
+        self.texts["warmer"]["d/f0"] += " Changed."
+        with self.assertRaises(S.ConfigMismatch):
+            self.generate_explicit(("explicit-warmer",))
+
+    def test_the_cli_reads_the_texts_from_a_json_file_and_requires_it(self):
+        self.write_json("instructions.json", self.texts)
+        args = ["generate", "--splits", self.splits, "--config", self.path("synth.json"), "--brain", self.brain,
+                "--out", self.out, "--modes", "explicit-warmer,explicit-cooler", "--retry-sleep", "0"]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            S.main(args)
+        self.assertIn("--instructions", err.getvalue())
+        self.assertEqual(S.main([*args, "--instructions", self.path("instructions.json")]), 0)
+        self.assertEqual(len(self.calls()), 6)
+
+
 class VaeRoundTrip(World):
     """The control arm: the REAL IR through the autoencoder alone, so its artefacts can be measured as an arm."""
 

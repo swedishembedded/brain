@@ -58,6 +58,13 @@ Modes (the instruction and the source image):
     neutral   the neutral caption; the RGB frame
     prior     the neutral caption plus one clause per class of the frame that has a
               class prior (`prior_polarities`); the RGB frame
+    explicit-<label>
+              the text that `--instructions FILE` gives the frame under <label>, which
+              the caller composes (an instruction experiment renders the same frames with
+              statements that differ only in polarity, and the same seed, so that the
+              renders are paired); the RGB frame. FILE is JSON, {label: {"dataset/id": text}}, and
+              must cover every selected frame; a changed text in an existing output
+              directory is a `ConfigMismatch` like any other changed instruction.
     vae-roundtrip
               the frame's REAL IR (one channel replicated to three) as the reference at
               `--strength 0`, which `brain flux2 generate` documents as the source itself
@@ -245,9 +252,22 @@ class ModeSpec:
 
 MODES = {"neutral": ModeSpec("rgb", True, None), "prior": ModeSpec("rgb", True, None),
          "vae-roundtrip": ModeSpec("real-ir", False, 0.0)}
+EXPLICIT_PREFIX = "explicit-"
+EXPLICIT_SPEC = ModeSpec("rgb", True, None)
 
 
-def mode_instruction(mode: str, row: dict, classes, priors: dict[str, str] | None, seed: int) -> str:
+def mode_spec(mode: str) -> ModeSpec:
+    return EXPLICIT_SPEC if mode.startswith(EXPLICIT_PREFIX) else MODES[mode]
+
+
+def frame_key(row: dict) -> str:
+    return f"{row['dataset']}/{row['id']}"
+
+
+def mode_instruction(mode: str, row: dict, classes, priors: dict[str, str] | None, seed: int,
+                     explicit: dict[str, dict[str, str]] | None = None) -> str:
+    if mode.startswith(EXPLICIT_PREFIX):
+        return (explicit or {})[mode[len(EXPLICIT_PREFIX):]][frame_key(row)]
     if mode == "prior":
         rng = np.random.default_rng([seed, zlib.crc32(f"{row['dataset']}/{row['id']}".encode())])
         return prior_instruction([classes[b[0]] for b in D.class_boxes(row, classes)], priors or {}, rng)
@@ -361,6 +381,7 @@ class Job:
     classes: tuple
     priors: dict | None  # class -> polarity, needed by the prior mode
     out_dir: str
+    instructions: dict | None = None  # label -> {"dataset/id": text}, read by the explicit-<label> modes
 
 
 def parse_shard(text: str) -> tuple[int, int]:
@@ -406,14 +427,14 @@ def _write_json_atomic(path: str, doc: dict) -> None:
 
 def _generate_one(job: Job, runner: BrainRunner, row: dict, mode: str, log: ProgressLog) -> str:
     """One frame in one mode; returns "generated" or "skipped"."""
-    spec = MODES[mode]
+    spec = mode_spec(mode)
     name = frame_name(row)
     mode_dir = os.path.join(job.out_dir, mode)
     out, record_path = os.path.join(mode_dir, f"{name}.ppm"), os.path.join(mode_dir, f"{name}.json")
     width, height = D.image_size(row)
     crop = crop_for(width, height)
     strength = runner.config.strength if spec.strength is None else spec.strength
-    identity = {"mode": mode, "instruction": mode_instruction(mode, row, job.classes, job.priors, job.selection.seed),
+    identity = {"mode": mode, "instruction": mode_instruction(mode, row, job.classes, job.priors, job.selection.seed, job.instructions),
                 "seed": runner.config.seed, "strength": strength, "crop": crop.to_dict(), "source": spec.source,
                 "adapter_sha256": runner.adapter_sha256 if spec.adapter else None}
     if os.path.isfile(record_path):
@@ -448,14 +469,26 @@ def _generate_one(job: Job, runner: BrainRunner, row: dict, mode: str, log: Prog
     return "generated"
 
 
+def _check_explicit(job: Job, rows: list[dict]) -> None:
+    """Every explicit mode needs its label in the instruction file and a text for every selected frame."""
+    for mode in (m for m in job.modes if m.startswith(EXPLICIT_PREFIX)):
+        texts = (job.instructions or {}).get(mode[len(EXPLICIT_PREFIX):])
+        if texts is None:
+            raise ValueError(f"mode {mode} needs the label {mode[len(EXPLICIT_PREFIX):]!r} in the instructions file")
+        missing = [frame_key(r) for r in rows if frame_key(r) not in texts]
+        if missing:
+            raise ValueError(f"mode {mode}: no instruction for {len(missing)} selected frames, first {missing[0]}")
+
+
 def generate(job: Job, runner: BrainRunner) -> dict:
     """Generate every selected frame in every mode; returns the counts and timings."""
-    unknown = sorted(set(job.modes) - set(MODES))
+    unknown = sorted(m for m in job.modes if m not in MODES and not m.startswith(EXPLICIT_PREFIX))
     if unknown:
-        raise ValueError(f"unknown mode {unknown}; expected a subset of {sorted(MODES)}")
+        raise ValueError(f"unknown mode {unknown}; expected a subset of {sorted(MODES)} or {EXPLICIT_PREFIX}<label>")
     if "prior" in job.modes and job.priors is None:
         raise ValueError("the prior mode needs the class priors (a captions report)")
     rows = select_frames(job.doc, job.selection)
+    _check_explicit(job, rows)
     for mode in job.modes:
         os.makedirs(os.path.join(job.out_dir, mode), exist_ok=True)
     log = ProgressLog(os.path.join(job.out_dir, "progress.log"))
@@ -680,7 +713,8 @@ def _add_generate(sub) -> None:
     g.add_argument("--config", required=True, help="synth config JSON (components, adapter, strength, seed, device)")
     g.add_argument("--brain", required=True, help="the brain binary")
     g.add_argument("--out", required=True, help="output directory: <mode>/<frame>.ppm and .json, progress.log")
-    g.add_argument("--modes", default="neutral", help=f"comma-separated, from {sorted(MODES)}")
+    g.add_argument("--modes", default="neutral", help=f"comma-separated, from {sorted(MODES)} and explicit-<label>")
+    g.add_argument("--instructions", help="JSON {label: {\"dataset/id\": text}}: the texts of the explicit-<label> modes")
     g.add_argument("--captions-report", help="captions-report.json of split T (the prior mode's class priors)")
     g.add_argument("--split", default="S", choices=("T", "S", "V", "Test"))
     g.add_argument("--datasets", default="", help="comma-separated dataset ids; default: all in splits.json")
@@ -699,10 +733,13 @@ def _run_generate(a, ap) -> int:
     modes = _csv(a.modes)
     if "prior" in modes and not a.captions_report:
         ap.error("--modes prior needs --captions-report")
+    if any(m.startswith(EXPLICIT_PREFIX) for m in modes) and not a.instructions:
+        ap.error("--modes explicit-<label> needs --instructions")
     config = load_config(a.config)
     config = SynthConfig(**{**asdict(config), **{k: v for k, v in (("device", a.device), ("backend", a.backend)) if v}})
     job = Job(_load_json(a.splits), Selection(a.split, _csv(a.datasets), a.limit, parse_shard(a.shard), a.seed), modes,
-              _csv(a.classes), prior_polarities(_load_json(a.captions_report)) if a.captions_report else None, a.out)
+              _csv(a.classes), prior_polarities(_load_json(a.captions_report)) if a.captions_report else None, a.out,
+              _load_json(a.instructions) if a.instructions else None)
     summary = generate(job, BrainRunner(a.brain, config, Retry(a.max_retries, a.retry_sleep, a.timeout)))
     print(json.dumps(summary), file=sys.stderr)
     return 0
