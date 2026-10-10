@@ -213,6 +213,61 @@ class Sources(unittest.TestCase):
         self.assertEqual(O.class_priors(report), {"person": "same", "car": "same", "bicycle": "cooler"})
 
 
+class ForcedInstructions(unittest.TestCase):
+    """The instruction is chosen by the experimenter, not measured: forced wording, training or held-out."""
+
+    def test_forced_instructions_are_a_source_of_their_own_apart_from_held_out_wording(self):
+        report = evaluate(make_pairs(Generators.obeying, n=30, source="forced")
+                          + make_pairs(Generators.obeying, n=30, source="forced_heldout"))
+        self.assertEqual(sorted(report["sources"]), ["forced", "forced_heldout"])
+        self.assertGreater(person(report, "forced_heldout")["controllability"]["ci"][0], 0.0)
+
+    def test_the_fraction_of_renders_within_the_noise_floor_separates_a_flat_render_from_an_obeyed_one(self):
+        flat = make_pairs(Generators.obeying, n=30, source="forced", counterfactual=False)
+        for p in flat:
+            p.generated = paint(background_ir(int(p.key[1:])), p.mask, 0.0)
+        obeyed = make_pairs(Generators.obeying, n=30, source="forced", counterfactual=False)
+        self.assertLess(person(evaluate(obeyed), "forced")["within_noise_floor"]["estimate"], 0.1)
+        self.assertGreater(person(evaluate(flat), "forced")["within_noise_floor"]["estimate"], 0.5)
+        self.assertEqual(person(evaluate(flat), "forced")["within_noise_floor"]["n"], 30)
+
+
+class Strata(unittest.TestCase):
+    def test_day_and_night_are_reported_apart_and_a_stratum_where_nothing_is_obeyed_shows_it(self):
+        day = make_pairs(Generators.obeying, n=40, source="forced")
+        night = make_pairs(Generators.ignoring, n=40, source="forced")
+        for p in day:
+            p.stratum = "day"
+        for p in night:
+            p.stratum, p.sequence = "night", "n" + p.sequence
+        report = person(evaluate(day + night), "forced")
+        self.assertEqual(sorted(report["strata"]), ["day", "night"])
+        self.assertGreater(report["strata"]["day"]["controllability"]["ci"][0], 0.0)
+        self.assertLessEqual(report["strata"]["night"]["controllability"]["ci"][0], 0.0)
+        self.assertEqual(report["strata"]["night"]["n"], 40)
+        self.assertEqual(report["n"], 80)
+
+    def test_pairs_without_a_stratum_have_no_strata_entry(self):
+        self.assertNotIn("strata", person(evaluate(make_pairs(Generators.obeying, n=10))))
+
+
+class Neutral(unittest.TestCase):
+    def test_the_shift_from_the_neutral_render_shows_which_direction_the_instruction_actually_moves(self):
+        # warmer is obeyed (the object is warmed above the neutral render); cooler is not (it equals the neutral render)
+        pairs = make_pairs(Generators.obeying, n=40, source="forced")
+        for i, p in enumerate(pairs):
+            p.neutral = paint(background_ir(i), p.mask, 0.0)
+            if p.instruction == "cooler":
+                p.generated = p.neutral
+        r = person(evaluate(pairs), "forced")["neutral_shift"]
+        self.assertGreater(r["warmer"]["ci"][0], 1.0)
+        self.assertAlmostEqual(r["cooler"]["estimate"], 0.0, delta=0.3)
+        self.assertEqual((r["warmer"]["n"], r["cooler"]["n"]), (20, 20))
+
+    def test_without_a_neutral_render_there_is_no_shift(self):
+        self.assertIsNone(person(evaluate(make_pairs(Generators.obeying, n=10)))["neutral_shift"])
+
+
 class Plumbing(unittest.TestCase):
     def test_the_contrast_is_the_one_of_rir_regions(self):
         with mock.patch.object(R, "object_contrast", wraps=R.object_contrast) as spy:
@@ -251,22 +306,27 @@ class Plumbing(unittest.TestCase):
         rows = []
         for i, p in enumerate(pairs):
             files = {}
+            p.neutral = p.generated
             for name, img in (("generated", p.generated), ("rgb", p.rgb), ("counterfactual", p.counterfactual),
-                              ("mask", p.mask.astype(np.uint8) * 255)):
+                              ("neutral", p.neutral), ("mask", p.mask.astype(np.uint8) * 255)):
                 if img is not None:
                     files[name] = f"{name}{i}.png"
                     cv2.imwrite(os.path.join(tmp, files[name]), img)
             rows.append({"sequence": p.sequence, "region_type": p.region_type, "instruction": p.instruction, "source": p.source,
-                         "key": p.key, **files})
+                         "key": p.key, "stratum": "day", **files})
         with open(os.path.join(tmp, "pairs.jsonl"), "w") as fh:
             fh.write("\n".join(json.dumps(r) for r in rows) + "\n")
         out = os.path.join(tmp, "obedience.json")
         self.assertEqual(O.main([os.path.join(tmp, "pairs.jsonl"), "--out", out, "--resamples", "200"]), 0)
         with open(out) as fh:
             cli = json.load(fh)
+        for p in pairs:
+            p.stratum = "day"
         direct = json.loads(json.dumps(O.evaluate(pairs, n_resamples=200, seed=1)))
         self.assertEqual(cli["sources"]["oracle"]["region_types"]["person"]["direction_accuracy"],
                          direct["sources"]["oracle"]["region_types"]["person"]["direction_accuracy"])
+        self.assertEqual(cli["sources"]["oracle"]["region_types"]["person"]["strata"]["day"]["neutral_shift"],
+                         direct["sources"]["oracle"]["region_types"]["person"]["strata"]["day"]["neutral_shift"])
 
 
 if __name__ == "__main__":

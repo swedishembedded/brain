@@ -29,6 +29,12 @@ that excludes other objects, over the frame's MAD):
                       RGB luma (the same function on the source tile), holding the instruction
                       fixed (residuals of the within-instruction means). Near 1 means the
                       generator reads brightness instead of the instruction.
+    within_noise      the share of renders whose |c_gen| is under the noise floor tau: the instruction left
+                      no measurable trace on the object, whichever way it pointed.
+    neutral shift     s * (c_gen - c_neutral) against the render of the same tile with the neutral caption
+                      (no statement), per instruction: how far each polarity moves the object from where the
+                      translator puts it unprompted, which controllability alone cannot split (a generator
+                      that only ever obeys "warmer" has a controllability and a zero cooler shift).
     fidelity          |c_gen - c_real|, c_real from `real_ir` or given; how far the generated
                       contrast is from the real one. With an oracle instruction (measured on
                       the real IR) this is the quality of the rendering; with a prior it also
@@ -36,8 +42,10 @@ that excludes other objects, over the frame's MAD):
 
 Every number is a mean over pairs with a 95 percent percentile interval from a bootstrap that
 resamples SEQUENCES (rir_bootstrap.resample_weights), per instruction source and region type.
-Oracle instructions (measured from the real IR) and prior instructions (class priors,
-`class_priors`) are reported apart under `sources`. A region too small to measure is counted in
+Oracle instructions (measured from the real IR), prior instructions (class priors,
+`class_priors`) and forced instructions (chosen by the experimenter whatever the real IR shows, with the training
+wording as `forced` and the held-out wording as `forced_heldout`) are reported apart under `sources`. Pairs that
+carry a `stratum` (day or night, say) are also reported per stratum under `strata` of each region type. A region too small to measure is counted in
 `n_skipped` and is in no mean. `effect` is the number rir_decide's K5 reads: the controllability
 when counterfactuals exist, else the direction margin (accuracy less the 0.5 chance level over
 warmer / cooler instructions).
@@ -46,7 +54,7 @@ warmer / cooler instructions).
 
 PAIRS.jsonl has one pair per line, paths relative to the file: sequence, region_type,
 instruction, source ("oracle" | "prior"), generated, mask (PNG, non-zero is the object), and
-optionally rgb, other_masks [paths], counterfactual, real_ir, tau, c_real, key.
+optionally rgb, other_masks [paths], counterfactual, neutral, real_ir, stratum, tau, c_real, key.
 """
 from __future__ import annotations
 
@@ -66,7 +74,7 @@ import rir_data as D
 import rir_regions as R
 
 INSTRUCTIONS = C.POLARITIES
-SOURCES = ("oracle", "prior")
+SOURCES = ("oracle", "prior", "forced", "forced_heldout")
 FLIP = {"warmer": "cooler", "cooler": "warmer"}
 SIGN = {"warmer": 1.0, "cooler": -1.0}
 CHANCE = 0.5  # direction accuracy of a generator that guesses warmer or cooler
@@ -83,6 +91,8 @@ class ObeyPair:
     rgb: np.ndarray | None = None  # BGR source tile, for the luminance shortcut
     other_masks: list = field(default_factory=list)
     counterfactual: np.ndarray | None = None  # same tile, flipped instruction
+    neutral: np.ndarray | None = None  # same tile, neutral caption
+    stratum: str | None = None  # e.g. day / night: also reported apart
     real_ir: np.ndarray | None = None
     tau: float | None = None
     c_real: float | None = None
@@ -127,6 +137,9 @@ def measure_pair(pair: ObeyPair, params: R.RegionParams, seed: int) -> dict | st
     c_cf = None
     if pair.counterfactual is not None and pair.instruction in FLIP:
         c_cf = _contrast(pair.counterfactual, pair, params, seed)
+    c_neutral = None
+    if pair.neutral is not None and pair.instruction in SIGN:
+        c_neutral = _contrast(pair.neutral, pair, params, seed)
     c_real = pair.c_real
     if c_real is None and pair.real_ir is not None:
         c_real = _contrast(pair.real_ir, pair, params, seed)
@@ -134,6 +147,8 @@ def measure_pair(pair: ObeyPair, params: R.RegionParams, seed: int) -> dict | st
         "c_gen": c_gen,
         "correct": None if tau is None else R.polarity(c_gen, tau) == pair.instruction,
         "delta": None if c_cf is None else SIGN[pair.instruction] * (c_gen - c_cf),
+        "neutral_delta": None if c_neutral is None else SIGN[pair.instruction] * (c_gen - c_neutral),
+        "within_noise": None if tau is None else abs(c_gen) < tau,
         "c_rgb": None if pair.rgb is None else _contrast(D.to_gray(pair.rgb), pair, params, seed),
         "fidelity": None if c_real is None else abs(c_gen - c_real),
     }
@@ -183,6 +198,11 @@ def _shortcut(rows: list, n_resamples: int, seed: int) -> dict | None:
     return _summary(partial_correlation(x, y, groups, np.ones(len(x))), reps, len(rows))
 
 
+def _neutral_shift(stat) -> dict | None:
+    shift = {i: stat("neutral_delta", lambda r, i=i: r["instruction"] == i) for i in FLIP}
+    return shift if any(shift.values()) else None
+
+
 def _region_report(rows: list, n_resamples: int, seed: int) -> dict:
     def stat(key, keep=lambda r: True, value=None):
         value = value or (lambda r: r[key])
@@ -193,11 +213,22 @@ def _region_report(rows: list, n_resamples: int, seed: int) -> dict:
     out = {"n": len(rows),
            "direction_accuracy": stat("correct", value=lambda r: float(r["correct"])),
            "controllability": stat("delta"),
+           "within_noise_floor": stat("within_noise", value=lambda r: float(r["within_noise"])),
+           "neutral_shift": _neutral_shift(stat),
            "luminance_shortcut": _shortcut(rows, n_resamples, seed),
            "fidelity": stat("fidelity")}
     margin = stat("correct", directional, lambda r: float(r["correct"]) - CHANCE)
     out["effect"] = ({"measure": "controllability", **out["controllability"]} if out["controllability"]
                      else {"measure": "direction", **margin} if margin else None)
+    return out
+
+
+def _typed_report(rows: list, n_resamples: int, seed: int) -> dict:
+    """The region report of all rows and, when rows carry a stratum, of each stratum apart."""
+    out = _region_report(rows, n_resamples, seed)
+    strata = sorted({r["stratum"] for r in rows if r["stratum"] is not None})
+    if strata:
+        out["strata"] = {s: _region_report([r for r in rows if r["stratum"] == s], n_resamples, seed) for s in strata}
     return out
 
 
@@ -211,11 +242,12 @@ def evaluate(pairs: list[ObeyPair], params: R.RegionParams = R.RegionParams(), n
         if isinstance(m, str):
             skipped[pair.source][m] += 1
         else:
-            rows[pair.source][pair.region_type].append({**m, "instruction": pair.instruction, "sequence": pair.sequence})
+            rows[pair.source][pair.region_type].append({**m, "instruction": pair.instruction, "sequence": pair.sequence,
+                                                       "stratum": pair.stratum})
     sources = {}
     for src in sorted(set(rows) | set(skipped)):
         sources[src] = {"n_pairs": sum(len(r) for r in rows[src].values()), "n_skipped": dict(skipped[src]),
-                        "region_types": {t: _region_report(r, n_resamples, seed) for t, r in sorted(rows[src].items())}}
+                        "region_types": {t: _typed_report(r, n_resamples, seed) for t, r in sorted(rows[src].items())}}
     return {"n_resamples": n_resamples, "seed": seed, "sources": sources}
 
 
@@ -246,7 +278,7 @@ def load_pairs(path: str) -> list[ObeyPair]:
                 generated=ir("generated"), mask=D.to_gray(_read(base, row["mask"])) > 0,
                 rgb=None if "rgb" not in row else _read(base, row["rgb"], cv2.IMREAD_COLOR),
                 other_masks=[D.to_gray(_read(base, p)) > 0 for p in row.get("other_masks", [])],
-                counterfactual=ir("counterfactual"), real_ir=ir("real_ir"), tau=row.get("tau"), c_real=row.get("c_real"),
+                counterfactual=ir("counterfactual"), neutral=ir("neutral"), real_ir=ir("real_ir"), stratum=row.get("stratum"), tau=row.get("tau"), c_real=row.get("c_real"),
                 key=row.get("key", f"line{n}")))
     return pairs
 
