@@ -162,6 +162,40 @@ impl TtsPolicy {
         Ok(PolicyStats { loss: stats.loss, mean_logprob: stats.mean_logprob, mean_kl: stats.mean_kl, tokens: stats.tokens })
     }
 
+    /// One direct-preference step on a pair of takes of the same sentence:
+    /// raise the log-likelihood margin of `chosen` over `rejected` relative to the
+    /// original policy, `-log sigmoid(beta * (margin_policy - margin_reference))`.
+    /// Returns the preference probability the policy gave before the step.
+    pub fn update_preference(&mut self, chosen: &Take, rejected: &Take, beta: f32, opts: &PolicyUpdate) -> Result<f32> {
+        let mut rows = Vec::with_capacity(2);
+        let mut margins = [0.0f32; 2];
+        let mut sums = [0.0f32; 2];
+        for (i, take) in [chosen, rejected].into_iter().enumerate() {
+            let r = self.reference.policy_rows(&take.rollout).map_err(backend)?;
+            if r.len() > self.trainer_block() {
+                return Err(backend(format!("a take of {} rows does not fit the trainer's block", r.len())));
+            }
+            let reference = qwen3tts::train::logprobs(&self.reference.score(&r).map_err(backend)?, &r);
+            let policy = qwen3tts::train::logprobs(&self.trainer.logits(&r), &r);
+            margins[i] = policy.iter().sum::<f32>() - reference.iter().sum::<f32>();
+            sums[i] = reference.len() as f32;
+            rows.push((r, reference));
+        }
+        let z = beta * (margins[0] - margins[1]);
+        let probability = 1.0 / (1.0 + (-z).exp());
+        // d(-log sigmoid(z))/d(log pi of every token of the chosen) = -beta (1 - sigmoid), and the
+        // opposite for the rejected; the trainer averages over all tokens, so scale back to a sum.
+        let total = sums[0] + sums[1];
+        let weight = beta * (1.0 - probability) * total;
+        let samples = [
+            qwen3tts::train::Sample { rows: &rows[0].0, advantage: weight, reference_logprobs: rows[0].1.clone() },
+            qwen3tts::train::Sample { rows: &rows[1].0, advantage: -weight, reference_logprobs: rows[1].1.clone() },
+        ];
+        self.trainer.update(&samples, &qwen3tts::train::UpdateOpts { lr: opts.lr, kl_beta: 0.0, clip: Some(opts.clip), weight_decay: 0.0 });
+        self.engine.set_talker_weights(&self.trainer.folded_weights()).map_err(backend)?;
+        Ok(probability)
+    }
+
     fn trainer_block(&self) -> usize {
         self.trainer.block()
     }

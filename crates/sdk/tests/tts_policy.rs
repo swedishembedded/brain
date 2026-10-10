@@ -39,3 +39,26 @@ fn takes_scored_above_their_group_become_likelier_and_the_next_take_changes() {
     let after = policy.rollout(TEXT, &opts(21)).unwrap();
     assert_ne!(before.audio().samples(), after.audio().samples(), "the same seed gives another take once the policy has moved");
 }
+
+#[test]
+fn a_preference_step_raises_the_margin_of_the_chosen_take_over_the_rejected() {
+    let _serial = brain_testutil::env_lock();
+    let Ok(pipe) = TtsPipeline::from_pretrained(MODEL) else {
+        brain_testutil::skip("Qwen3-TTS checkpoint is not in the model store");
+        return;
+    };
+    let Ok(mut policy) = pipe.policy(PolicyOptions { block: 160, ..PolicyOptions::default() }) else {
+        brain_testutil::skip("no device for the trainable synthesizer");
+        return;
+    };
+    let opts = |seed| TtsOptions::new().seed(seed).max_frames(40);
+    let (chosen, rejected) = (policy.rollout(TEXT, &opts(31)).unwrap(), policy.rollout(TEXT, &opts(32)).unwrap());
+    let update = PolicyUpdate { lr: 3e-4, kl_beta: 0.0, clip: 1.0 };
+    let first = policy.update_preference(&chosen, &rejected, 0.5, &update).unwrap();
+    assert!((first - 0.5).abs() < 0.05, "the policy starts as the reference: {first}");
+    let mut last = first;
+    for _ in 0..6 {
+        last = policy.update_preference(&chosen, &rejected, 0.5, &update).unwrap();
+    }
+    assert!(last > first + 0.05, "the margin grew: {first} -> {last}");
+}
