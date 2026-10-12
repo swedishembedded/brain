@@ -18,6 +18,12 @@ brain-gpu-core.workspace = true
 brain-s3dit.workspace = true
 brain-flux2.workspace = true
 brain-wan.workspace = true
+# `resident_minimaxh3`: the residency-scheduled MiniMax-H3 adapter, and the
+# `ModelEntry` below it (`caps::manifest`/`Paths::from_assembly`/`H3Spec`).
+brain-minimaxh3.workspace = true
+# `resident_minimaxh3`'s per-call VAE weight map type
+# (`minimaxh3::caps::VaeWeights` holds `vae::blocks::Tensors`).
+brain-vae.workspace = true
 brain-ltxv.workspace = true
 brain-qwen3.workspace = true
 brain-glmdsa.workspace = true

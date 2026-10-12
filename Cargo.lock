@@ -749,6 +749,7 @@ dependencies = [
  "brain-loader",
  "brain-lpips",
  "brain-ltxv",
+ "brain-minimaxh3",
  "brain-minimaxmusic3",
  "brain-model",
  "brain-modelstore",
@@ -777,6 +778,7 @@ dependencies = [
  "brain-t5encoder",
  "brain-testutil",
  "brain-timesfm3",
+ "brain-vae",
  "brain-vqgan",
  "brain-wan",
  "brain-worldmirror2",
@@ -1508,6 +1510,7 @@ dependencies = [
  "brain-kernels",
  "brain-lfm2",
  "brain-ltxv",
+ "brain-minimaxh3",
  "brain-minimaxmusic3",
  "brain-model",
  "brain-modernbert",
@@ -1773,6 +1776,25 @@ dependencies = [
  "brain-testutil",
  "bytemuck",
  "serde_json",
+]
+
+[[package]]
+name = "brain-minimaxh3"
+version = "2.0.0"
+dependencies = [
+ "brain-audio",
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-modelstore",
+ "brain-qwen3vl",
+ "brain-testutil",
+ "brain-vae",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -2469,6 +2491,7 @@ dependencies = [
  "brain-loader",
  "brain-ltxv",
  "brain-memauth",
+ "brain-minimaxh3",
  "brain-modelstore",
  "brain-moondream3",
  "brain-npu",

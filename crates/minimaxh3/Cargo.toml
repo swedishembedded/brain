@@ -1,0 +1,55 @@
+[package]
+name = "brain-minimaxh3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MiniMax-H3 joint video+audio rectified-flow diffusion transformer (33B): one packed self-attention stack over video+audio+condition rows (not a two-stream architecture like ltxv), dual video/audio Euler schedules in one forward, AdaLN-precomputable to a ~19.3B resident backbone. Qwen3-VL text conditioning via brain-qwen3vl's truncated hidden-state encoder; causal-3D video VAE + DAC-lineage audio VAE, built on brain-model / brain-audio / brain-vae / brain-checkpoint / brain-gpu-core / brain-kernels."
+
+[lib]
+name = "minimaxh3"
+path = "src/lib.rs"
+
+[dependencies]
+# The serving surface: `caps.rs`'s manifest/action types, plus
+# `check_license`'s call sites (every `gen_params_from`-equivalent entry
+# point) - the license gate is part of the capability contract, not bolted
+# on separately.
+brain-capability.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+# `AttentionGeometry`-shaped dispatch (QKV width != hidden width) and QK-norm
+# reuse the same pattern `wan`/`qwen3vl` already established in
+# `model::block` (`pick_gemm`, `rope2d_partial_fwd`, the flash-attention
+# family, `hostmath`'s timestep embedding).
+brain-model.workspace = true
+# The model-store resolver: `spec.rs`'s `H3Spec` classifies/validates the
+# component directories through `inventory`/`resolve`, the same seam
+# `wan::spec`/`s3dit::spec`/`ltxv::spec` build on.
+brain-modelstore.workspace = true
+# `crate::video_vae`: dispatches the same shared catalogue kernels
+# (`conv3d`, the `gn_*` GroupNorm family, `pad2d_reflect`) ltxv/wan's 3D
+# VAEs use; `vae::blocks::Tensors` is the weight-map type both VAE loaders
+# produce. H3's causal conv is deliberately NOT `vae::blocks3d::Builder3d`
+# (chunk-independent, no feat cache - see `video_vae.rs`'s own module doc).
+brain-vae.workspace = true
+# `crate::audio_vae`: DAC-lineage strided causal convs + BigVGAN decoder,
+# reusing `audio::conv`'s 1D (transposed) conv Step-builders wherever the op
+# already exists (SnakeBeta activation is the one genuinely new piece).
+brain-audio.workspace = true
+# `qwen3vl::Qwen3Vl::encode_hidden`/`encode_hiddens` - H3's text
+# conditioning IS a Qwen3-VL forward truncated to an intermediate hidden
+# layer, never a second encoder implementation.
+brain-qwen3vl.workspace = true
+# Seeded noise/weight-init RNG (`data::rng::Rng`), the same SplitMix64 +
+# Box-Muller stream every other diffusion pipeline in this workspace uses for
+# reproducible `--seed` runs.
+brain-data.workspace = true
+serde_json.workspace = true
+# The `tracing` FACADE only, never a subscriber - `--trace-minimaxh3 <0-5>`
+# turns per-block/per-step events on; with no subscriber installed every
+# macro is a predictable-branch no-op.
+tracing.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

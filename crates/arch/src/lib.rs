@@ -710,6 +710,22 @@ pub const ARCHS: &[Arch] = &[
     arch!("ltxv", "LTX-2.5 two-stream audio+video diffusion transformer", Video, Brain, "brain-ltxv",
           hf: &["AVTransformer3DModel"],
           default_ref: Some("Lightricks/LTX-2.5")),
+    // MiniMax-H3: ONE packed self-attention stack over video+audio+condition
+    // rows (not a two-stream architecture like `ltxv` above), dual
+    // video/audio Euler schedules in one forward. No `hf:` - the release's
+    // `model_index.json` names classes brain's `weights_env`/GGUF lanes
+    // never read (all five roles resolve through `minimaxh3::spec::H3Spec`/
+    // `H3Recipe` instead), and the DiT class name is not a registry key for
+    // any lane this row serves.
+    //
+    // No `default_ref`: `H3Recipe` pins the release repo
+    // (`MiniMaxAI/MiniMax-H3`), but the H3 Community License gates serving
+    // behind an explicit acceptance (`BRAIN_MINIMAXH3_ALLOW_COMMUNITY=1`,
+    // `minimaxh3::caps`'s own gate), so a flagless command must never
+    // silently download it - the user pulls and accepts deliberately.
+    // No `weights_env` for the same reason all five roles go through the
+    // model-store resolver, and no vendor GGUF exists.
+    arch!("minimaxh3", "MiniMax-H3 joint video+audio diffusion transformer (t2va/fl2va)", Video, Brain, "brain-minimaxh3"),
     // -- 3D -----------------------------------------------------------
     arch!("worldmirror2", "WorldMirror-2 multi-view 3D reconstruction", ThreeD, Brain, "brain-worldmirror2"),
     arch!("splat", "3D Gaussian Splatting rasterizer", ThreeD, Brain, "brain-splat"),

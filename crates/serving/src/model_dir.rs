@@ -47,7 +47,8 @@
 //! A model that is FOUR distinct-role files (DiT/VAE/text-encoder/tokenizer)
 //! has no single weights path, so it registers through
 //! [`resident_for_compound`] instead, keyed on the roles a
-//! `brain.manifest.json` names: `zimage` and `wan` today. `flux2` is the same
+//! `brain.manifest.json` names: `zimage`, `wan` and `minimaxh3` (five roles)
+//! today. `flux2` is the same
 //! shape and still has no arm there -- it is reachable only through its own
 //! `BRAIN_FLUX2_*` variables.
 
@@ -454,6 +455,11 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
         // Unlike zimage's, this construction cannot fail: the four roles ARE
         // the model, and the weights are read lazily at activate().
         "wan" => wan_paths_from_roles(roles).map(|paths| Arc::new(catalog::resident_wan::WanResident::from_paths(card.id.clone(), paths)) as Arc<dyn ResidentModel>),
+        // Same shape as wan's: five roles ARE the model (a 33B fp32 DiT is
+        // loaded lazily at the first request - see `catalog::
+        // resident_minimaxh3`'s own doc for why one hot transformer serves
+        // every request shape).
+        "minimaxh3" => minimaxh3_paths_from_roles(roles).map(|paths| Arc::new(catalog::resident_minimaxh3::MiniMaxH3Resident::from_paths(card.id.clone(), paths)) as Arc<dyn ResidentModel>),
         other => Err(format!("compound family '{other}' not servable from the model dir yet")),
     }
 }
@@ -476,6 +482,17 @@ fn zimage_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) 
 fn wan_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) -> Result<wan::Paths, String> {
     let get = |role: &str| roles.get(role).and_then(|p| p.to_str()).map(str::to_string).ok_or_else(|| format!("compound manifest missing role {role:?}"));
     Ok(wan::Paths { dit: get("dit")?, vae: get("vae")?, t5: get("text_encoder")?, tokenizer: get("tokenizer")? })
+}
+
+/// Build a `minimaxh3::caps::Paths` from a compound manifest's roles -- the
+/// SAME five role names `brain_modelstore::recipe::H3Recipe`'s finish step
+/// (`loader::supply::convert_h3`) writes and `minimaxh3::spec::H3Spec`
+/// classifies on, from a `brain.manifest.json` the pull produced. Each role
+/// is one of the release's own role directories
+/// (`transformer`/`vae`/`audio_vae`/`text_encoder`/`tokenizer`).
+fn minimaxh3_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) -> Result<minimaxh3::caps::Paths, String> {
+    let get = |role: &str| roles.get(role).and_then(|p| p.to_str()).map(str::to_string).ok_or_else(|| format!("compound manifest missing role {role:?}"));
+    Ok(minimaxh3::caps::Paths { dit: get("dit")?, video_vae: get("video_vae")?, vocoder: get("vocoder")?, text_encoder: get("text_encoder")?, tokenizer: get("tokenizer")? })
 }
 
 #[cfg(test)]

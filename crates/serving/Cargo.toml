@@ -36,4 +36,7 @@ brain-qwen3vlmoe.workspace = true
 brain-s3dit.workspace = true
 brain-supir.workspace = true
 brain-wan.workspace = true
+# `model_dir`'s "minimaxh3" compound arm builds the resident's
+# `caps::Paths` from a pulled manifest's roles.
+brain-minimaxh3.workspace = true
 serde_json.workspace = true

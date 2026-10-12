@@ -189,6 +189,15 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     } else {
         eprintln!("brain: wan not served over the scheduler (set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER)");
     }
+    // MiniMax-H3 joint video+audio (BRAIN_MINIMAXH3_DIR):
+    // ONE hot 33B transformer shared across every request shape (no compiled
+    // graph is sized per-extent) - see resident_minimaxh3.rs. The env-var
+    // lane is the out-of-store developer path; a pulled `MiniMaxAI/MiniMax-H3`
+    // reaches the same adapter through `model_dir::resident_for_compound`'s
+    // `"minimaxh3"` arm instead, and is not announced here.
+    if let Some(h) = catalog::resident_minimaxh3::MiniMaxH3Resident::from_env() {
+        models.push(Arc::new(h));
+    }
     // LTX-2.5 text-to-video (BRAIN_LTXV_VAE): a smoke-test pipeline (real VAE,
     // tiny random-weight DiT, no real text encoder yet) with nothing worth
     // caching resident - see resident_ltxv.rs's module doc.

@@ -65,6 +65,7 @@ pub mod resident_horizon;
 pub mod resident_lfm;
 pub mod resident_llm;
 pub mod resident_ltxv;
+pub mod resident_minimaxh3;
 pub mod resident_minimaxmusic3;
 pub mod resident_mock;
 pub mod resident_moondream3;
@@ -399,6 +400,24 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(wan::caps::WanProvider::from_paths(paths)) as Arc<dyn Provider>)
             },
             spec: Some(("wan", &wan::spec::WanSpec)),
+            resident: None,
+        },
+        // MiniMax-H3 joint video+audio generation. The provider builds its
+        // five weight paths from the resolved Assembly
+        // (`minimaxh3::caps::Paths::from_assembly`) instead of `BRAIN_MINIMAXH3_*`;
+        // there is no default checkpoint (`H3Recipe` pins the release repo,
+        // but the H3 Community License forbids auto-fetch - the arch row
+        // carries no `default_ref` either). The residency adapter is
+        // registered directly by `serving::build_executor`'s env-gated
+        // `from_env` lane and `serving::model_dir`'s compound-model scan,
+        // not from here.
+        ModelEntry {
+            manifest: minimaxh3::caps::manifest,
+            provider: |assembly: &Assembly| {
+                let paths = minimaxh3::caps::Paths::from_assembly(assembly)?;
+                Ok(Arc::new(minimaxh3::caps::MiniMaxH3Provider::from_paths(paths)) as Arc<dyn Provider>)
+            },
+            spec: Some(("minimaxh3", &minimaxh3::spec::H3Spec)),
             resident: None,
         },
         // LTX-2.5 text-to-video: a smoke-test pipeline (real VAE +

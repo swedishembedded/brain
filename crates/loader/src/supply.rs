@@ -228,6 +228,7 @@ pub fn convert(store: &Store, vendor: &str, repo: &str, recipe: &str) -> Result<
         // identical to what the fallback would have produced.
         "flux2" => convert_flux2(store, vendor, repo),
         "wan" => convert_wan(store, vendor, repo),
+        "minimaxh3" => convert_h3(store, vendor, repo),
         "yolo" => convert_yolo(store, vendor, repo),
         "gguf" => convert_gguf(store, vendor, repo),
         other => match brain_modelstore::recipe::files_recipe_roles(other) {
@@ -393,6 +394,26 @@ fn convert_wan(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     let manifest = CompoundManifest { id: format!("{vendor}/{repo}"), family: "wan".to_string(), roles };
     let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| format!("{vendor}/{repo}: convert: encode manifest: {e}"))?;
     std::fs::write(dir.join(MANIFEST_FILE), bytes).map_err(|e| format!("{vendor}/{repo}: convert: write manifest: {e}"))
+}
+
+/// The minimaxh3 recipe: like [`convert_wan`], no tensor rewrite is needed
+/// (`minimaxh3::import` remaps every name in memory at load time and each
+/// component's shards are read straight off disk through
+/// `checkpoint::safetensors::read_model_dir`), so "finish" is writing the
+/// `brain.manifest.json` naming the five roles the released
+/// `MiniMaxAI/MiniMax-H3` repo ships as role directories - the SAME role
+/// names and rel paths `minimaxh3::spec::H3Spec` and
+/// `minimaxh3::caps::Paths::from_assembly` read, not a second spelling.
+/// (`transformer_ref/` - `ref2va`'s second DiT - is deliberately absent, per
+/// `H3Recipe::SKIP_BY_DEFAULT`.)
+fn convert_h3(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+    convert_files(
+        store,
+        vendor,
+        repo,
+        "minimaxh3",
+        &[("dit", "transformer"), ("video_vae", "vae"), ("vocoder", "audio_vae"), ("text_encoder", "text_encoder"), ("tokenizer", "tokenizer")],
+    )
 }
 
 /// The original (and still only) family: an HF `transformers`-shaped repo.
@@ -647,6 +668,46 @@ mod tests {
         let hub = FakeHub::new();
         let err = ensure_default_weights_with("totally-bogus", &store, &hub, DownloadPolicy::default()).unwrap_err();
         assert!(err.contains("not a registered architecture"), "{err}");
+    }
+
+    /// The minimaxh3 recipe's finish step names the five role directories
+    /// the released `MiniMaxAI/MiniMax-H3` repo ships, with the SAME role
+    /// names `minimaxh3::spec::H3Spec` classifies on - and the download is
+    /// kept byte-for-byte (the importer reads it in place).
+    #[test]
+    fn convert_h3_writes_a_manifest_naming_the_release_role_directories() {
+        let store = store(&format!("loader-supply-test-h3-{}", std::process::id()));
+        let reference = ModelRef::parse("MiniMaxAI/MiniMax-H3").unwrap();
+        let dir = store.repo_dir(&reference);
+        for role_dir in ["transformer", "vae", "audio_vae", "text_encoder", "tokenizer"] {
+            std::fs::create_dir_all(dir.join(role_dir)).unwrap();
+        }
+        std::fs::write(dir.join("model_index.json"), b"{}").unwrap();
+        std::fs::write(dir.join("transformer/diffusion_pytorch_model.safetensors"), b"stub").unwrap();
+        convert_h3(&store, "MiniMaxAI", "MiniMax-H3").unwrap();
+        let manifest: CompoundManifest = serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manifest.family, "minimaxh3");
+        for (role, rel) in [("dit", "transformer"), ("video_vae", "vae"), ("vocoder", "audio_vae"), ("text_encoder", "text_encoder"), ("tokenizer", "tokenizer")] {
+            assert_eq!(manifest.roles.get(role).map(String::as_str), Some(rel), "{role}");
+        }
+        assert_eq!(std::fs::read(dir.join("transformer/diffusion_pytorch_model.safetensors")).unwrap(), b"stub", "the download is kept as is");
+        assert!(!dir.join("model.brain.safetensors").exists(), "nothing is converted on disk");
+    }
+
+    /// A missing role directory is a loud error, never a partial manifest
+    /// (`transformer_ref/` is skipped by the recipe, but every fetched role
+    /// must have landed).
+    #[test]
+    fn convert_h3_refuses_when_a_role_directory_did_not_download() {
+        let store = store(&format!("loader-supply-test-h3-missing-{}", std::process::id()));
+        let reference = ModelRef::parse("MiniMaxAI/MiniMax-H3").unwrap();
+        let dir = store.repo_dir(&reference);
+        for role_dir in ["transformer", "vae", "audio_vae", "text_encoder"] {
+            std::fs::create_dir_all(dir.join(role_dir)).unwrap();
+        }
+        let err = convert_h3(&store, "MiniMaxAI", "MiniMax-H3").unwrap_err();
+        assert!(err.contains("tokenizer"), "{err}");
+        assert!(!dir.join(MANIFEST_FILE).exists(), "no manifest is written for a partial download");
     }
 
     /// The safety net a `repos` pin alone cannot guarantee: a recipe's shape

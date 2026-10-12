@@ -169,6 +169,7 @@ docs/models/vqgan.md
 docs/models/imgpipe.md
 docs/models/wan.md
 docs/models/ltxv.md
+docs/models/minimaxh3.md
 docs/models/worldmirror2.md
 docs/models/splat.md
 docs/models/forecast.md

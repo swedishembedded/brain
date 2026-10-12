@@ -79,6 +79,7 @@ named on the model's own page (see
 |---|---|:---:|:---:|
 | [`wan`](wan.md) ⤓ | text-to-video (image-to-video not implemented) | [x] | library only |
 | [`ltxv`](ltxv.md) | text-to-video+audio (two-stream A/V DiT); the pipeline runs end to end as a **smoke test** only - the real 22B transformer and the Gemma-4 text encoder are not yet imported, so it does not generate usable video | [ ] | [ ] |
+| [`minimaxh3`](minimaxh3.md) | text/first-last-frame/reference -> synchronized video+audio (one packed DiT stack over video, audio and condition rows) | [ ] | [ ] |
 
 ## Vision and 3D
 
