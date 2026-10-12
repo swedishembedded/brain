@@ -88,11 +88,9 @@ application", "an orchestrator"). Enforced by `make check/scope`
    HTTP/D-Bus/batched serving (`caps.rs`/`serve.rs`), and cross-GPU pipeline
    sharding (`model::shard::Shardable`). Gradient-checked
    (`gradcheck::check_qwen35`, `check_qwen35_lora`, `check_qwen35_mtp`).
-   `brain qwen35 infer`. **A path to serve the REAL checkpoint from its
-   released Q8_0 GGUF exists and LOADS but does not yet generate correct
-   text** (its correctness gate is deliberately red - see
-   `.agents/roadmap/qwen35.md` M21): `int8_gguf_resident.rs` (model id
-   `unsloth/Qwen3.8-27B-Q8_0`, `BRAIN_QWEN35_GGUF`) streams each leaf out of
+   `brain qwen35 infer`. **The REAL checkpoint serves straight from its
+   released Q8_0 GGUF**: `int8_gguf_resident.rs` (model id derived from the
+   artifact's store position, named by `--qwen35-gguf`) streams each leaf out of
    `MmapGguf` (a `TensorSource`) into a group-wise INT8 `new_i8_shard` stage
    per card, layer-sharded by `model::shard::plan_fewest_devices` over real
    per-layer bytes - measured 27.05 GiB across 2x24 GiB P40 (layers 0..34 /
@@ -102,12 +100,16 @@ application", "an orchestrator"). Enforced by `make check/scope`
    the 2047 MiB storage-binding limit, so the embedding is read a row at a
    time from the mapping and the `lm_head` is INT8 (see
    `.agents/knowledge/` #69). No MTP on that path (MTP requires a whole
-   shard). The open defect is a GGUF-vs-safetensors weight difference, NOT
-   the sharding, the int8 decode tape, or `ssm_a` (that one was found and
-   fixed - lesson #70); see `.agents/roadmap/qwen35.md` M21 for the
-   rule-out table.
+   shard). The early output-correctness defect (wrong GDN value-head
+   grouping in the GGUF release) is FIXED - M23 in `.agents/roadmap/
+   qwen35.md`; chunked prefill (M26) and YaRN long context (M27) landed on
+   the same path. `brain serve --qwen35-gguf <store-ref-or-path>` enables
+   the resident; the artifact resolves through the model store
+   (`catalog::resident_qwen35::multi_gpu_gguf`) and the served model id
+   comes from the artifact's own store position, so two quants are two
+   separately addressable models.
    That resident's 16 GQA layers store their KV cache `f32` (default), `bf16`
-   or per-row `int8` (`BRAIN_QWEN35_KV`, `model::kv_tier`: 4 / 8 / 15 sequences
+   or per-row `int8` (`--qwen35-kv`, `model::kv_tier`: 4 / 8 / 15 sequences
    of 128k on one GH200) and decode through a fused split-key attention
    (`paged_flash_decode_gqa_hd256`) in every tier; see M30 in the same ledger.
 3. **Sparse MoE Transformer** (`crates/toymoe`) - RMSNorm/RoPE, top-k experts; with
