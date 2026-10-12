@@ -211,6 +211,26 @@ QWEN3 SERVING TUNABLES  (which checkpoint to serve stays BRAIN_QWEN_WEIGHTS/
                          attention scratch buffer linearly, the single
                          largest per-token-scaling cost in the engine.
 
+QWEN3.8 SERVING TUNABLES  (released-GGUF multi-card resident; the brain-
+                          checkpoint fp32 resident is sized by the --qwen35-
+                          fp32-* flags below. What got us here stays BRAIN_*
+                          env as for every model; everything about HOW is a
+                          flag. GGUF accepts a store reference - `vendor/repo`
+                          or a quant-suffixed form like
+                          `unsloth/Qwen3.8-27B-GGUF-Q8_0` - or a .gguf path.)
+  --qwen35-gguf REF|PATH serve the released-GGUF multi-card INT8 resident for
+                         the named artifact (required to enable it).
+  --qwen35-ctx N         built context length (default 2048).
+  --qwen35-tier SPEC     weight tier, uniform or per-leaf rules:
+                         `i8` or e.g. `i8,blk.0.attn_q=f32` (default: uniform
+                         int8 - what the checkpoints are released as).
+  --qwen35-kv TIER       GQA cache storage: f32|bf16|int8 (default f32).
+  --qwen35-max-batch N   concurrent decode slots (default 1).
+  --qwen35-fp32-ctx N    context for the fp32 resident from a brain checkpoint
+                         (default 4096).
+  --qwen35-fp32-max-batch N
+                         decode slots for it (default 4).
+
 STDIO CONTROLLER  (the default, with no surface flag)
   --gpt PATH             GPT checkpoint (else $BRAIN_GPT2; else a fake echo model)
   --yolo PATH             YOLO checkpoint (else $BRAIN_YOLOV8; else a fake detector)
@@ -222,10 +242,12 @@ STDIO CONTROLLER  (the default, with no surface flag)
 MODEL CONFIGURATION (WHICH models: env vars; HOW to serve one: flags)
   Which models this server actually serves is chosen ENTIRELY by BRAIN_* env
   vars (BRAIN_QWEN_WEIGHTS, BRAIN_LFM2, BRAIN_NEMOTRONASR, ...): a model whose
-  weights var is unset is simply not served. Tuning an already-selected
-  model (context length, batching, precision, ...) is a flag where one
-  exists - see QWEN3 SERVING TUNABLES above for Qwen3's. Run `brain serve
-  --help` for the full reference table of every serving variable.
+  weights var is unset is simply not served - with ONE exception: the
+  Qwen3.8 released-GGUF resident is named by --qwen35-gguf (below). Tuning
+  an already-selected model (context length, batching, precision, ...) is a
+  flag where one exists - see QWEN3 / QWEN3.8 SERVING TUNABLES above. Run
+  `brain serve --help` for the full reference table of every serving
+  variable.
 
   FETCHING: a request for a model that is not pulled errors with zero network
   I/O unless --autofetch (or $BRAIN_AUTO_FETCH=1) was passed; `brain pull`
@@ -394,6 +416,11 @@ pub fn run_serve(args: &[String]) {
     // `catalog::resident_llm::QwenServeConfig`'s own `Default` is every
     // historical env-var default, byte for byte.
     let mut qwen_cfg = catalog::resident_llm::QwenServeConfig::default();
+    // Every `--qwen35-*` flag, same story: `Qwen35ServeConfig`'s `Default`
+    // is every historical env-var default. `fp32` sizes the brain-checkpoint
+    // resident, `gguf` configures the released-GGUF multi-card resident -
+    // two different models, so the flags are name-spaced apart.
+    let mut qwen35_cfg = catalog::resident_qwen35::Qwen35ServeConfig::default();
     // HTTP inference APIs (`--anthropic|--openai|--openrouter [ADDR]`), each
     // bound on one or more addresses (127.0.0.1 by default) with ONE
     // per-dialect key generated at startup regardless of how many addresses
@@ -463,6 +490,31 @@ pub fn run_serve(args: &[String]) {
             "--qwen-weights-int8" => qwen_cfg.weights_int8 = Some(true),
             "--qwen-weights-fp32" => qwen_cfg.weights_int8 = Some(false),
             "--qwen-max-prefill" => qwen_cfg.max_prefill_cap = parsed(args, &mut i, "--qwen-max-prefill"),
+            // Released-GGUF resident (Qwen3.8): `--qwen35-gguf` both enables
+            // the resident and names the artifact - a store reference
+            // (`vendor/repo` or a quant-suffixed form) or a `.gguf` path.
+            "--qwen35-gguf" => qwen35_cfg.gguf.gguf = Some(val(args, &mut i, "--qwen35-gguf")),
+            "--qwen35-ctx" => qwen35_cfg.gguf.ctx = Some(parsed(args, &mut i, "--qwen35-ctx")),
+            "--qwen35-tier" => {
+                let spec = val(args, &mut i, "--qwen35-tier");
+                qwen35_cfg.gguf.tier = Some(model::ops::TierPolicy::parse(&spec).unwrap_or_else(|e| {
+                    eprintln!("brain serve: --qwen35-tier {spec:?}: {e}\n");
+                    eprint!("{HELP}");
+                    std::process::exit(2);
+                }));
+            }
+            "--qwen35-kv" => {
+                let tier = val(args, &mut i, "--qwen35-kv");
+                qwen35_cfg.gguf.kv = Some(model::kv_tier::KvTier::parse(&tier).unwrap_or_else(|e| {
+                    eprintln!("brain serve: --qwen35-kv {tier:?}: {e}\n");
+                    eprint!("{HELP}");
+                    std::process::exit(2);
+                }));
+            }
+            "--qwen35-max-batch" => qwen35_cfg.gguf.max_batch = Some(parsed(args, &mut i, "--qwen35-max-batch")),
+            // Brain-checkpoint fp32 resident: same knobs, the `fp32` infix.
+            "--qwen35-fp32-ctx" => qwen35_cfg.fp32.ctx = parsed(args, &mut i, "--qwen35-fp32-ctx"),
+            "--qwen35-fp32-max-batch" => qwen35_cfg.fp32.max_batch = parsed(args, &mut i, "--qwen35-fp32-max-batch"),
             "--anthropic" => anthropic = Some(take_addrs(args, &mut i, 8787)),
             "--openai" => openai = Some(take_addrs(args, &mut i, 8788)),
             "--openrouter" => openrouter = Some(take_addrs(args, &mut i, 8789)),
@@ -542,6 +594,7 @@ pub fn run_serve(args: &[String]) {
             ready,
             adapter_mode,
             qwen_cfg,
+            qwen35_cfg,
         });
     }
 
@@ -636,7 +689,12 @@ pub fn run_serve(args: &[String]) {
 /// Returns `serving::Serving`, not a bare `Executor`: the
 /// continuous-learning hot swap needs the CONCRETE `QwenResident` handle
 /// alongside the type-erased one the executor holds - see that type's doc.
-fn build_serving_executor(reserve_gb: u64, models_dir: Option<&Path>, qwen_cfg: catalog::resident_llm::QwenServeConfig) -> serving::Serving {
+fn build_serving_executor(
+    reserve_gb: u64,
+    models_dir: Option<&Path>,
+    qwen_cfg: catalog::resident_llm::QwenServeConfig,
+    qwen35_cfg: catalog::resident_qwen35::Qwen35ServeConfig,
+) -> serving::Serving {
     let machine = serving::Machine::probe(crate::compute_set());
     let reserved = reserve_gb << 30;
     eprintln!(
@@ -660,7 +718,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<&Path>, qwen_cfg: 
         }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
-    serving::build_executor(&machine, reserved, models_dir, residency::Policy::from_env(), qwen_cfg)
+    serving::build_executor(&machine, reserved, models_dir, residency::Policy::from_env(), qwen_cfg, qwen35_cfg)
 }
 
 /// Live host RAM this process could actually get right now: `MemAvailable`
@@ -700,6 +758,9 @@ struct RunApis {
     /// Every `--qwen-*` flag, parsed once here - see
     /// `resident_llm::QwenServeConfig`'s own doc for each field.
     qwen_cfg: catalog::resident_llm::QwenServeConfig,
+    /// Every `--qwen35-*` flag, same story - see `resident_qwen35::
+    /// Qwen35ServeConfig`'s own doc.
+    qwen35_cfg: catalog::resident_qwen35::Qwen35ServeConfig,
 }
 
 /// Build the one shared executor and bring up the requested surfaces: D-Bus
@@ -764,7 +825,7 @@ fn run_apis(a: RunApis) {
     // supplier and the healer - so the flag decides the store everywhere.
     let models_dir = loader::model_dir::resolve(a.models_dir.as_deref());
     let supplier = build_auto_fetch_supplier(models_dir.as_deref());
-    let serving::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.qwen_cfg);
+    let serving::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.qwen_cfg, a.qwen35_cfg);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("brain serve: models: {}", served.join(", "));

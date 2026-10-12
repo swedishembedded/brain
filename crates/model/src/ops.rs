@@ -771,8 +771,8 @@ impl TierPolicy {
 
     /// Round-trippable string form: `"q4"` (uniform), or
     /// `"q4,in_proj_a.weight=f32,in_proj_b.weight=f32"` (default, then
-    /// `pattern=tier` rules in declaration order) - what
-    /// `BRAIN_QWEN35_GGUF_TIER` parses.
+    /// `pattern=tier` rules in declaration order) - what the serving CLI's
+    /// `--qwen35-tier` flag parses.
     pub fn describe(&self) -> String {
         let mut s = self.default.name().to_string();
         for (pat, dt) in &self.rules {

@@ -144,7 +144,6 @@ use data::tokenizer::Tokenizer;
 use data::rng::Rng;
 use gguf::import::Mapped;
 use gguf::GdnFixSource;
-use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::kv_tier::{KvLayer, KvTier};
 use model::ops::TierPolicy;
@@ -164,18 +163,9 @@ use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, Qwen35, SpecDecode
 /// path, is).
 pub const MODEL: &str = "unsloth/Qwen3.8-27B-Q8_0";
 
-/// The environment variable naming the `.gguf` to serve - the same name the
-/// existing real-checkpoint gate in [`crate::gguf_import`] already uses, so a
-/// box configured for one is configured for both.
-pub const GGUF_ENV: &str = "BRAIN_QWEN35_GGUF";
-
-/// The environment variable [`Qwen35GgufResident::kv_tier_from_env`] reads:
-/// `f32` (default), `bf16` or `int8`.
-pub const KV_ENV: &str = "BRAIN_QWEN35_KV";
-
 /// Default per-sequence `prompt + max_new` cap (also this resident's KV/GDN
 /// cache capacity, since every sequence gets the whole cache).
-const DEFAULT_CTX: u32 = 2048;
+pub const DEFAULT_CTX: u32 = 2048;
 
 /// How many prompt tokens [`Qwen35GgufInstance::generate`] pushes through the
 /// whole pipeline per round.
@@ -2287,12 +2277,48 @@ pub struct Qwen35GgufResident {
     /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`]. Charged
     /// into [`layer_cost`] at the bytes that tier really occupies.
     kv_tier: KvTier,
+    /// The id this resident is SERVED under (`Manifest::model`,
+    /// `InstanceKey::model`) - set by the caller that resolved the
+    /// checkpoint ([`Self::with_model_id`], what
+    /// `catalog::resident_qwen35::multi_gpu_gguf` does with the artifact's
+    /// own store-relative `<vendor>/<repo>`). Defaults to [`MODEL`], the
+    /// well-known release id, for a caller that resolved nothing to derive
+    /// from.
+    model_id: String,
     plan: OnceLock<Plan>,
 }
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, kv_tier: KvTier::F32, plan: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, kv_tier: KvTier::F32, model_id: MODEL.to_string(), plan: OnceLock::new() }
+    }
+
+    /// Serve this resident under `id` instead of [`MODEL`] - what the
+    /// resolver-derived id needs when the configured artifact is not the
+    /// well-known release file (a different quant, a different fork of the
+    /// same architecture): two checkpoints on disk are two models, each
+    /// addressable under the name its own store position carries.
+    /// Must be set before the first `manifest()`/`instance_key()` call.
+    pub fn with_model_id(mut self, id: impl Into<String>) -> Qwen35GgufResident {
+        self.model_id = id.into();
+        self
+    }
+
+    /// The id this resident is served under - [`Self::with_model_id`]'s
+    /// value, [`MODEL`] by default.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// The per-sequence `prompt + max_new` ceiling - the constructor's
+    /// `cap`, floored at 1.
+    pub fn cap(&self) -> u32 {
+        self.cap
+    }
+
+    /// The configured checkpoint path - the artifact this resident loads.
+    pub fn gguf_path(&self) -> &str {
+        &self.gguf_path
     }
 
     /// How many sequences one [`Instance::run_batch`] call may decode
@@ -2336,36 +2362,6 @@ impl Qwen35GgufResident {
     /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`].
     pub fn kv_tier(&self) -> KvTier {
         self.kv_tier
-    }
-
-    /// The KV tier named by `BRAIN_QWEN35_KV` ([`KV_ENV`]: `f32`, `bf16` or
-    /// `int8`), default `f32` (unchanged behaviour). An unrecognised value is
-    /// an error rather than a silent fallback, for the reason
-    /// [`Self::tier_from_env`] gives.
-    pub fn kv_tier_from_env() -> Result<KvTier, String> {
-        KvTier::from_env(KV_ENV)
-    }
-
-    /// Per-sequence `prompt + max_new` ceiling, from `BRAIN_QWEN35_GGUF_CTX`
-    /// (default [`DEFAULT_CTX`]). It is also every stage's KV/GDN cache
-    /// capacity, so it is charged into [`layer_cost`] and therefore into the
-    /// placement - raising it makes the model need more cards, honestly,
-    /// rather than silently overrunning one.
-    pub fn ctx_from_env() -> u32 {
-        std::env::var("BRAIN_QWEN35_GGUF_CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_CTX).max(1)
-    }
-
-    /// The per-leaf tier policy, from `BRAIN_QWEN35_GGUF_TIER`
-    /// (`TierPolicy::parse`'s grammar - `"i8"`, `"q4"`, or
-    /// `"q4,in_proj_a.weight=f32,in_proj_b.weight=f32"`), default uniform
-    /// INT8 (unchanged behaviour). A parse failure panics rather than
-    /// silently serving the wrong precision - the same rule
-    /// `TierPolicy::parse` documents for itself.
-    pub fn tier_from_env() -> TierPolicy {
-        match std::env::var("BRAIN_QWEN35_GGUF_TIER") {
-            Ok(s) => TierPolicy::parse(&s).unwrap_or_else(|e| panic!("BRAIN_QWEN35_GGUF_TIER={s:?}: {e}")),
-            Err(_) => TierPolicy::uniform(Dtype::I8),
-        }
     }
 
     /// The placement, computed once. Returns a plan naming ZERO devices -
@@ -2486,7 +2482,7 @@ impl ResidentModel for Qwen35GgufResident {
     fn manifest(&self) -> Manifest {
         let generate = ActionSpec::new(
             "generate",
-            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from the released Q8_0 GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16 or int8 (BRAIN_QWEN35_KV); one sequence per dispatch)",
+            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from the released Q8_0 GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16 or int8 (`--qwen35-kv`); one sequence per dispatch)",
         )
         .streaming()
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
@@ -2507,7 +2503,7 @@ impl ResidentModel for Qwen35GgufResident {
         .param(ParamSpec::new("template_flavor", ParamType::Str, "chat template flavor: qwen3.8 (default; XML <function=> tool-call payloads, prefilled open <think>, preserve_thinking kwarg) or qwen3 (JSON <tool_call> payloads, positional think framing)").default(json!("qwen3.8")))
         .output(BlobSpec::new("text", Media::Text, "the generated text"));
         Manifest::new(
-            MODEL,
+            &self.model_id,
             "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, served INT8 and GPU-resident directly from the released Q8_0 GGUF (no fp32 intermediate on disk), layer-sharded across as many cards as its real per-layer bytes need. Text only; no MTP self-speculative decode; one sequence per dispatch.",
             vec![generate],
         )
@@ -2515,7 +2511,7 @@ impl ResidentModel for Qwen35GgufResident {
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(MODEL, "default")
+        InstanceKey::new(&self.model_id, "default")
     }
 
     /// Deliberately unusable: this model occupies real bytes on SEVERAL cards
@@ -2642,6 +2638,7 @@ impl Qwen35GgufResident {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpu_core::select::Dtype;
 
     const GB: u64 = 1 << 30;
 
@@ -2667,8 +2664,12 @@ mod tests {
     /// passed clean at this same round count and real dims).
     #[test]
     fn token_by_token_replay_on_the_real_checkpoint_past_where_chunked_replay_diverges() {
-        let Ok(path) = std::env::var(GGUF_ENV) else {
-            brain_testutil::skip(&format!("{GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
+        // Test-gating convention only - selects the real-checkpoint gate, it
+        // is not a serving knob. The serving path names its GGUF with a
+        // parameter (`--qwen35-gguf`).
+        const REAL_GGUF_ENV: &str = "BRAIN_QWEN35_GGUF";
+        let Ok(path) = std::env::var(REAL_GGUF_ENV) else {
+            brain_testutil::skip(&format!("{REAL_GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
             return;
         };
         const RESERVE: u64 = 2 * GB;
@@ -2738,26 +2739,37 @@ mod tests {
         assert_eq!(large.per_layer[gdn], small.per_layer[gdn], "GDN state is O(1) in context, not O(T)");
     }
 
-    /// `BRAIN_QWEN35_KV` selects the cache storage by name, defaults to f32, and
-    /// refuses an unknown name by naming the variable - serving a different
-    /// precision than was asked for is worse than not serving.
+    /// The KV tier is constructor data (`with_kv_tier`), parsed by the CLI
+    /// from `KvTier::parse`'s names - the parse contract the serve flag
+    /// inherits: known names map, an unknown name is refused (never a silent
+    /// fallback to a different precision than was asked for).
     #[test]
-    fn the_kv_tier_comes_from_the_environment_and_refuses_unknown_names() {
-        let _g = brain_testutil::env_lock();
-        let saved = std::env::var(KV_ENV).ok();
-        std::env::remove_var(KV_ENV);
-        assert_eq!(Qwen35GgufResident::kv_tier_from_env(), Ok(KvTier::F32));
-        std::env::set_var(KV_ENV, "int8");
-        assert_eq!(Qwen35GgufResident::kv_tier_from_env(), Ok(KvTier::Int8));
-        std::env::set_var(KV_ENV, "bf16");
-        assert_eq!(Qwen35GgufResident::kv_tier_from_env(), Ok(KvTier::Bf16));
-        std::env::set_var(KV_ENV, "fp8");
-        let e = Qwen35GgufResident::kv_tier_from_env().unwrap_err();
-        assert!(e.contains(KV_ENV) && e.contains("fp8"), "{e}");
-        match saved {
-            Some(v) => std::env::set_var(KV_ENV, v),
-            None => std::env::remove_var(KV_ENV),
-        }
+    fn the_kv_tier_is_parsed_data_refusing_unknown_names() {
+        assert_eq!(KvTier::parse("int8"), Ok(KvTier::Int8));
+        assert_eq!(KvTier::parse("bf16"), Ok(KvTier::Bf16));
+        assert_eq!(KvTier::parse("f32"), Ok(KvTier::F32));
+        let e = KvTier::parse("fp8").unwrap_err();
+        assert!(e.contains("fp8"), "{e}");
+        // ...and the constructor carries it through.
+        let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![], 2048, TierPolicy::uniform(Dtype::I8)).with_kv_tier(KvTier::parse("int8").unwrap());
+        assert_eq!(r.kv_tier(), KvTier::Int8);
+    }
+
+    /// The served id is caller-set constructor data
+    /// (`with_model_id`): a checkpoint resolved from a non-canonical store
+    /// position is served under the id its own position carries, not the
+    /// [`MODEL`] constant, and `manifest()`/`instance_key()` agree on it -
+    /// the property that makes two quants of one release two separately
+    /// addressable models.
+    #[test]
+    fn the_served_id_is_constructor_data_shared_by_manifest_and_instance_key() {
+        let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![], 2048, TierPolicy::uniform(Dtype::I8)).with_model_id("unsloth/Qwen3.8-27B-GGUF");
+        assert_eq!(r.model_id(), "unsloth/Qwen3.8-27B-GGUF");
+        assert_eq!(r.manifest().model, "unsloth/Qwen3.8-27B-GGUF");
+        assert_eq!(r.instance_key("generate", &Invocation::new()).model, "unsloth/Qwen3.8-27B-GGUF");
+        // No override: the well-known release id, unchanged.
+        let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![], 2048, TierPolicy::uniform(Dtype::I8));
+        assert_eq!(r.manifest().model, MODEL);
     }
 
     /// The most sequences of `cap` tokens the planner admits on ONE card of

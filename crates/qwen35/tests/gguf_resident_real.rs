@@ -571,8 +571,8 @@ fn decode_throughput_at_a_real_long_context() {
     }
     // ~1050 real English tokens (not repeated filler - repetition can let a
     // decoder degenerate into a trivial attention pattern) sized so a full
-    // BRAIN_QWEN35_GGUF_CTX-style budget isn't needed: prompt + a modest
-    // decode window must fit under this test's own CAP.
+    // serving-sized context budget isn't needed: prompt + a modest decode
+    // window must fit under this test's own CAP.
     let paragraph = "The Antikythera mechanism is an ancient Greek hand-powered orrery, described as the oldest known example of an analogue computer, used to predict astronomical positions and eclipses decades in advance. It could also be used to track the four-year cycle of athletic games which was similar to an Olympiad, the cycle of the ancient Olympic Games. This artefact was retrieved from the sea in 1901, and identified in 1902 as containing a gear, which was found in the same location as a shipwreck off Point Antikythera in Greece. Study of the object was subsequently neglected until Derek J. de Solla Price took an interest in it and, with Charalampos Karakalos, published a seminal paper in 1974. After much modern scholarship since the 1970s, current understanding is that the artefact was made from a single sheet of bronze that was formed and then engraved with astronomical scales and text, and further sheets were later added to hold the mechanism together, making the object more resemble a book than a machine. ";
     let mut prompt = String::new();
     while prompt.split_whitespace().count() < 1050 {

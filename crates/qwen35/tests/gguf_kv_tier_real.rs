@@ -46,7 +46,7 @@
 use model::kv_tier::KvTier;
 use model::ops::TierPolicy;
 use gpu_core::select::Dtype;
-use qwen35::int8_gguf_resident::{Qwen35GgufInstance, Qwen35GgufResident, GGUF_ENV};
+use qwen35::int8_gguf_resident::{Qwen35GgufInstance, Qwen35GgufResident};
 use residency::multi::MultiDeviceResidentModel;
 use residency::{Device, ResidentModel};
 
@@ -97,8 +97,12 @@ fn prompt_text() -> String {
 
 #[test]
 fn compact_kv_tiers_agree_with_the_f32_cache_on_a_real_prompt() {
-    let Ok(path) = std::env::var(GGUF_ENV) else {
-        brain_testutil::skip(&format!("{GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
+    // Test-gating convention only - selects the real-checkpoint gate, it is
+    // not a serving knob. The serving path names its GGUF with a parameter
+    // (`--qwen35-gguf`).
+    const REAL_GGUF_ENV: &str = "BRAIN_QWEN35_GGUF";
+    let Ok(path) = std::env::var(REAL_GGUF_ENV) else {
+        brain_testutil::skip(&format!("{REAL_GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
         return;
     };
     let text = prompt_text();

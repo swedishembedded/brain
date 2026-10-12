@@ -8,15 +8,15 @@
 //! ways across this codebase - `caps.rs`'s served action read
 //! `BRAIN_QWEN35_WEIGHTS`/`BRAIN_QWEN35_TOKENIZER`, `crates/cli/src/
 //! resident_qwen35.rs`'s scheduler adapter read the same two variables a
-//! second time, and `crates/serving/src/executor.rs`'s separate
-//! `multi_gpu_gguf_from_env` read a THIRD, `BRAIN_QWEN35_GGUF`, for the
-//! int8/GGUF release. All three now resolve through this one `ArchSpec`
-//! instead: `weights` accepts EITHER a brain-format `.safetensors` checkpoint
+//! second time, and `crates/serving/src/executor.rs`'s separate GGUF factory
+//! read a THIRD variable, `BRAIN_QWEN35_GGUF`, for the int8/GGUF release.
+//! All three now resolve through this one `ArchSpec` instead: `weights`
+//! accepts EITHER a brain-format `.safetensors` checkpoint
 //! (`ModelCard.family == "qwen35"`, `checkpoint::st::read_card`) or a
-//! `general.architecture == "qwen35"` GGUF - the same shipped-release-vs-
-//! locally-trained-checkpoint duality `BRAIN_QWEN35_WEIGHTS`/
-//! `BRAIN_QWEN35_GGUF` used to express as two separate variables a caller had
-//! to know to pick between.
+//! `general.architecture == "qwen35"` GGUF - the shipped-release-vs-
+//! locally-trained-checkpoint duality those variables used to express as two
+//! separate env entries a caller had to know to pick between (the serving
+//! path names the GGUF with the `--qwen35-gguf` flag now, not an env var).
 //!
 //! `tokenizer` is classified through the shared
 //! [`brain_modelstore::resolve::classify_tokenizer_role`] - real vendor

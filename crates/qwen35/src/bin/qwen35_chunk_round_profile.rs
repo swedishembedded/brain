@@ -16,7 +16,7 @@
 //! sending an email to info@swedishembedded.com.
 //!
 //! Usage:
-//!   BRAIN_QWEN35_GGUF=<path to Qwen3.8-27B*.gguf> qwen35_chunk_round_profile [rows] [rounds]
+//!   qwen35_chunk_round_profile <path to Qwen3.8-27B*.gguf> [rows] [rounds]
 
 use qwen35::int8_gguf_resident::Qwen35GgufResident;
 use residency::multi::MultiDeviceResidentModel;
@@ -28,11 +28,11 @@ const CAP: u32 = 1024;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let rows: u32 = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-    let rounds: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(6);
+    let rows: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let rounds: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(6);
 
-    let Ok(path) = std::env::var("BRAIN_QWEN35_GGUF") else {
-        eprintln!("set BRAIN_QWEN35_GGUF to a downloaded Qwen3.8-27B*.gguf");
+    let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
+        eprintln!("usage: qwen35_chunk_round_profile <path to Qwen3.8-27B*.gguf> [rows] [rounds]");
         std::process::exit(2);
     };
     let devices: Vec<(Device, u64)> = gpu_core::devices::gpus()
@@ -44,7 +44,7 @@ fn main() {
         eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
         std::process::exit(2);
     }
-    let r = Qwen35GgufResident::new(path, devices, CAP, Qwen35GgufResident::tier_from_env());
+    let r = Qwen35GgufResident::new(path, devices, CAP, model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8));
     let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
     let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
 

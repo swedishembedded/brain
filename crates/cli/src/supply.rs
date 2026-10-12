@@ -395,7 +395,7 @@ impl StoreSupplier {
         // auto-fetch gets the historical 24576 default rather than
         // auto-sized context, unlike one already on disk at startup
         // (`model_dir::discover`, which DOES receive the real config).
-        let resident = serving::model_dir::resident_for_local(&local, catalog::resident_llm::QwenServeConfig::default()).map_err(|e| format!("{model}: {e}"))?;
+        let resident = serving::model_dir::resident_for_local(&local, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).map_err(|e| format!("{model}: {e}"))?;
         exec.register_if_absent(resident);
         Ok(())
     }

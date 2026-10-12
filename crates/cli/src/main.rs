@@ -153,7 +153,11 @@ CONFIG FILE (global - valid on any subcommand)
                            Else $BRAIN_CONFIG.
   Example config.yaml:
     BRAIN_API_KEY: sk-brain-your-own-fixed-key
-    BRAIN_QWEN35_CTX: 8192
+    BRAIN_QWEN_WEIGHTS: checkpoints/qwen3.8-27b
+
+  Per-model serving tunables (context, batching, KV storage) are command-line
+  flags, not config keys - `brain serve --qwen35-ctx 8192` and friends; run
+  `brain serve --help` for the full list.
 
 MODEL STORE (global - valid on any subcommand)
   --brain-data-dir <DIR>   brain's data root; models live in <DIR>/models.

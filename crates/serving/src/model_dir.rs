@@ -78,7 +78,7 @@ pub struct DiscoveryError {
 ///
 /// Returns every [`DiscoveryError`] a compound model produced alongside the
 /// residents that DID construct -- a partial scan still serves what it can.
-pub fn discover(dir: &Path, qwen_cfg: catalog::resident_llm::QwenServeConfig) -> (Vec<Arc<dyn ResidentModel>>, Vec<DiscoveryError>) {
+pub fn discover(dir: &Path, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> (Vec<Arc<dyn ResidentModel>>, Vec<DiscoveryError>) {
     let mut out: Vec<Arc<dyn ResidentModel>> = Vec::new();
     let mut errors: Vec<DiscoveryError> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -91,13 +91,13 @@ pub fn discover(dir: &Path, qwen_cfg: catalog::resident_llm::QwenServeConfig) ->
             // the manifest file itself) -- `register`/`resident_for` is the
             // single-file dispatcher and must never see one of these; go
             // through the compound-aware dispatch instead.
-            register_compound(local, &mut seen, &mut out, &mut errors, qwen_cfg);
+            register_compound(local, &mut seen, &mut out, &mut errors, qwen_cfg, qwen35_sizing);
             continue;
         }
-        register(&local.weights, &local.card, &local.dir, local.adapter.as_deref(), &mut seen, &mut out, qwen_cfg);
+        register(&local.weights, &local.card, &local.dir, local.adapter.as_deref(), &mut seen, &mut out, qwen_cfg, qwen35_sizing);
     }
 
-    discover_flat(dir, &mut seen, &mut out, qwen_cfg);
+    discover_flat(dir, &mut seen, &mut out, qwen_cfg, qwen35_sizing);
     (out, errors)
 }
 
@@ -106,7 +106,7 @@ pub fn discover(dir: &Path, qwen_cfg: catalog::resident_llm::QwenServeConfig) ->
 /// [`resident_for`] -- kept a separate function (not folded into `register`,
 /// which takes a bare weights path a compound model doesn't have) so the two
 /// dispatchers stay independently readable.
-fn register_compound(local: &brain_modelstore::LocalModel, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>, errors: &mut Vec<DiscoveryError>, qwen_cfg: catalog::resident_llm::QwenServeConfig) {
+fn register_compound(local: &brain_modelstore::LocalModel, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>, errors: &mut Vec<DiscoveryError>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) {
     let family = local.card.as_ref().map(|c| c.family.clone()).unwrap_or_default();
     let id = match local.card.as_ref() {
         Some(c) => c.id.clone(),
@@ -123,7 +123,7 @@ fn register_compound(local: &brain_modelstore::LocalModel, seen: &mut BTreeSet<S
         errors.push(DiscoveryError { dir: local.dir.clone(), family, reason: format!("duplicate model id '{id}'") });
         return;
     }
-    match resident_for_local(local, qwen_cfg) {
+    match resident_for_local(local, qwen_cfg, qwen35_sizing) {
         Ok(r) => out.push(r),
         Err(reason) => {
             seen.remove(&id); // free the id if the family declined, same as `register`
@@ -136,7 +136,7 @@ static FLAT_LAYOUT_WARNING: Once = Once::new();
 
 /// The original single-level flat scan, predating the `<vendor>/<repo>` store
 /// layout. Kept for back-compat; a hit warns once per process.
-fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>, qwen_cfg: catalog::resident_llm::QwenServeConfig) {
+fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
@@ -190,7 +190,7 @@ fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn 
     // Sorted for a deterministic catalog order.
     singles.sort();
     for path in &singles {
-        register(path, &card_of(path), dir, None, seen, out, qwen_cfg);
+        register(path, &card_of(path), dir, None, seen, out, qwen_cfg, qwen35_sizing);
     }
     for (base, mut group) in shards {
         group.sort_by_key(|(idx, _)| *idx);
@@ -198,12 +198,12 @@ fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn 
         // Prefer the `<base>.safetensors.index.json` handle if it exists.
         let index = dir.join(format!("{base}.safetensors.index.json"));
         let handle = if index.exists() { index } else { first.clone() };
-        register(&handle, &card_of(first), dir, None, seen, out, qwen_cfg);
+        register(&handle, &card_of(first), dir, None, seen, out, qwen_cfg, qwen35_sizing);
     }
     for (_base, mut group) in gguf_splits {
         group.sort_by_key(|(part, _)| *part);
         let part1 = &group[0].1; // MmapGguf::open finds every sibling from part 1's path
-        register(part1, &card_of(part1), dir, None, seen, out, qwen_cfg);
+        register(part1, &card_of(part1), dir, None, seen, out, qwen_cfg, qwen35_sizing);
     }
 }
 
@@ -234,7 +234,7 @@ fn card_of(path: &Path) -> Option<ModelCard> {
 /// Dispatch one carded file to its family's resident and push it (deduped by
 /// id). `adapter` is the adapter's own weight file when `card.id` names one
 /// (`brain_modelstore::LocalModel::adapter`) -- `None` for a plain base/quant.
-fn register(weights: &Path, card: &Option<ModelCard>, dir: &Path, adapter: Option<&Path>, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>, qwen_cfg: catalog::resident_llm::QwenServeConfig) {
+fn register(weights: &Path, card: &Option<ModelCard>, dir: &Path, adapter: Option<&Path>, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) {
     let wp = weights.to_string_lossy();
     let card = match card {
         Some(c) => c,
@@ -267,7 +267,7 @@ fn register(weights: &Path, card: &Option<ModelCard>, dir: &Path, adapter: Optio
     };
 
     let adapter = adapter.map(|p| p.to_string_lossy().into_owned());
-    match resident_for(&wp, card, tokenizer.as_deref(), adapter.as_deref(), qwen_cfg) {
+    match resident_for(&wp, card, tokenizer.as_deref(), adapter.as_deref(), qwen_cfg, qwen35_sizing) {
         Some(r) => out.push(r),
         None => {
             seen.remove(&card.id); // free the id if the family declined
@@ -335,7 +335,7 @@ fn gguf_advice(weights: &str, architecture: &str) -> String {
 /// [`brain_family`]), or log + `None` for an unknown / not-yet-dispatchable
 /// family. `adapter` (a named LoRA adapter's own weight file) is meaningful
 /// only to the `qwen` family today -- other families ignore it.
-fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapter: Option<&str>, qwen_cfg: catalog::resident_llm::QwenServeConfig) -> Option<Arc<dyn ResidentModel>> {
+fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapter: Option<&str>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Option<Arc<dyn ResidentModel>> {
     let family = brain_family(&card.family);
     // The GGUF gate, BEFORE the family match: a GGUF card's family is its
     // `general.architecture` copied verbatim, so an architecture string is
@@ -376,7 +376,7 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
         // its own checkpoints - a distinct family from "qwen35moe" above
         // (a pre-existing collision between the two crates, fixed in the
         // same commit that added this arm).
-        "qwen35" => match catalog::resident_qwen35::Qwen35Resident::from_card(weights, card, tokenizer) {
+        "qwen35" => match catalog::resident_qwen35::Qwen35Resident::from_card_sized(weights, card, tokenizer, qwen35_sizing) {
             Ok(q) => Some(Arc::new(q)),
             Err(e) => {
                 eprintln!("brain: skip {} ({e})", card.id);
@@ -404,7 +404,7 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
 /// callers decide for themselves what to do with the reason (`discover`
 /// collects it as a [`DiscoveryError`]; `supply::StoreSupplier::ensure`
 /// folds it into the error it already returns to ITS caller).
-pub fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig) -> Result<Arc<dyn ResidentModel>, String> {
+pub fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Result<Arc<dyn ResidentModel>, String> {
     let card = local.card.as_ref().ok_or_else(|| "no model card".to_string())?;
     if let Some(roles) = &local.roles {
         let adapter = local.adapter.as_deref().and_then(|p| p.to_str());
@@ -413,7 +413,7 @@ pub fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalo
     let weights = local.weights.to_str().ok_or_else(|| "weights path is not valid UTF-8".to_string())?;
     let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
     let adapter = local.adapter.as_deref().and_then(|p| p.to_str());
-    resident_for(weights, card, tokenizer, adapter, qwen_cfg).ok_or_else(|| format!("family '{}' not servable from the model dir yet", card.family))
+    resident_for(weights, card, tokenizer, adapter, qwen_cfg, qwen35_sizing).ok_or_else(|| format!("family '{}' not servable from the model dir yet", card.family))
 }
 
 /// The compound-model counterpart of [`resident_for`]: family dispatch keyed
@@ -658,7 +658,7 @@ mod tests {
         let dir = tmp_dir("ggufqwensplit");
         write_gguf_qwen_split(&dir, "qwen3-split", "toy-qwen-gguf-split");
 
-        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default());
+        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
         let matching: Vec<&Arc<dyn ResidentModel>> = residents.iter().filter(|r| r.manifest().model == "toy-qwen-gguf-split").collect();
         assert_eq!(matching.len(), 1, "the 3-part split must register exactly once, not once per part");
 
@@ -687,7 +687,7 @@ mod tests {
         // GGUF card is synthesized from KV and dispatched by family.
         write_gguf(&dir, "toy.gguf", "gpt", "toy-gguf");
 
-        let got = ids(&discover(&dir, catalog::resident_llm::QwenServeConfig::default()).0);
+        let got = ids(&discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).0);
         assert!(got.contains(&"toy-base".to_string()), "base missing: {got:?}");
         assert!(got.contains(&"toy-ft".to_string()), "ft missing: {got:?}");
         assert!(!got.contains(&"toy-unknown".to_string()), "unknown family not skipped: {got:?}");
@@ -710,7 +710,7 @@ mod tests {
         write_st(&dir, "yolo.safetensors", "toy-yolo", "yolo");
         write_st(&dir, "depth.safetensors", "toy-depth", "depth");
 
-        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default());
+        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
         let got = ids(&residents);
         assert!(got.contains(&"toy-glm".to_string()), "glm missing: {got:?}");
         assert!(got.contains(&"toy-yolo".to_string()), "yolo missing: {got:?}");
@@ -723,7 +723,7 @@ mod tests {
         // No tokenizer.json → the encoder cannot construct → skipped (not fatal).
         let dir = tmp_dir("notok");
         write_st(&dir, "enc.safetensors", "toy-enc", "lfm");
-        let got = ids(&discover(&dir, catalog::resident_llm::QwenServeConfig::default()).0);
+        let got = ids(&discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).0);
         assert!(!got.contains(&"toy-enc".to_string()), "lfm registered without a tokenizer: {got:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -742,7 +742,7 @@ mod tests {
         // tokenizer.json, and advertises the streaming chat `generate` action.
         let dir = tmp_dir("ggufqwen");
         write_gguf_qwen(&dir, "qwen3.gguf", "toy-qwen-gguf");
-        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default());
+        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
         let got = ids(&residents);
         assert!(got.contains(&"toy-qwen-gguf".to_string()), "qwen gguf not registered: {got:?}");
 
@@ -783,7 +783,7 @@ mod tests {
             let card = card_of(&p).expect("gguf card");
             assert_eq!(card.family, arch, "a GGUF card's family IS general.architecture, verbatim");
             assert!(
-                resident_for(p.to_str().unwrap(), &card, tok, None, catalog::resident_llm::QwenServeConfig::default()).is_none(),
+                resident_for(p.to_str().unwrap(), &card, tok, None, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).is_none(),
                 "raw {arch}.gguf routed into the brain-native '{arch}' resident, which cannot read GGUF bytes"
             );
         }
@@ -797,7 +797,7 @@ mod tests {
         write_gguf_qwen(&dir, "qwen3.gguf", "toy-qwen-gguf");
         let p = dir.join("qwen3.gguf");
         let card = card_of(&p).expect("gguf card");
-        assert!(resident_for(p.to_str().unwrap(), &card, None, None, catalog::resident_llm::QwenServeConfig::default()).is_some(), "a qwen3 GGUF must still serve from the scan");
+        assert!(resident_for(p.to_str().unwrap(), &card, None, None, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).is_some(), "a qwen3 GGUF must still serve from the scan");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -833,7 +833,7 @@ mod tests {
         )
         .unwrap();
 
-        let got = ids(&discover(&dir, catalog::resident_llm::QwenServeConfig::default()).0);
+        let got = ids(&discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).0);
         assert!(got.contains(&"VendorA/RepoX".to_string()), "A missing: {got:?}");
         assert!(
             !got.contains(&"VendorB/RepoY".to_string()),
@@ -876,7 +876,7 @@ mod tests {
         )
         .unwrap();
 
-        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default());
+        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
         let got = ids(&residents);
         assert!(got.contains(&"Qwen/Qwen3-Toy".to_string()), "base missing: {got:?}");
         assert!(got.contains(&"Qwen/Qwen3-Toy:swedishembedded-com:generic-sft:latest".to_string()), "adapter missing: {got:?}");
@@ -910,7 +910,7 @@ mod tests {
         std::fs::create_dir_all(&repo_dir).unwrap();
         let manifest = brain_modelstore::CompoundManifest { id: "deepseek-ai/tiny-llama".into(), family: "llama".into(), roles: [("weights".to_string(), ".".to_string())].into() };
         std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
-        let (residents, errors) = discover(&root, catalog::resident_llm::QwenServeConfig::default());
+        let (residents, errors) = discover(&root, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
         assert_eq!(ids(&residents), ["deepseek-ai/tiny-llama"]);
         let _ = std::fs::remove_dir_all(&root);
@@ -925,7 +925,7 @@ mod tests {
         std::fs::create_dir_all(&repo_dir).unwrap();
         let manifest = brain_modelstore::CompoundManifest { id: "zai-org/tiny-glm".into(), family: "glmdsa".into(), roles: [("weights".to_string(), ".".to_string())].into() };
         std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
-        let (residents, errors) = discover(&root, catalog::resident_llm::QwenServeConfig::default());
+        let (residents, errors) = discover(&root, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
         assert_eq!(ids(&residents), ["zai-org/tiny-glm"]);
         let _ = std::fs::remove_dir_all(&root);
@@ -936,7 +936,7 @@ mod tests {
         let dir = tmp_dir("compound-wan");
         write_compound_fixture(&dir, "Wan-AI", "Wan2.1-T2V-1.3B", "wan");
 
-        let (residents, errors) = discover(&dir, catalog::resident_llm::QwenServeConfig::default());
+        let (residents, errors) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
         let got = ids(&residents);
         assert!(got.contains(&"Wan-AI/Wan2.1-T2V-1.3B".to_string()), "wan compound model not discovered: {got:?}");
@@ -948,7 +948,7 @@ mod tests {
         let dir = tmp_dir("compound-unknown-family");
         write_compound_fixture(&dir, "Some-Vendor", "Mystery-Compound", "flux2");
 
-        let (residents, errors) = discover(&dir, catalog::resident_llm::QwenServeConfig::default());
+        let (residents, errors) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
         let got = ids(&residents);
         assert!(!got.contains(&"Some-Vendor/Mystery-Compound".to_string()), "unrecognized compound family must not register: {got:?}");
         assert_eq!(errors.len(), 1, "expected exactly one discovery error, got: {errors:?}");

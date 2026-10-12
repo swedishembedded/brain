@@ -80,7 +80,13 @@ fn register_qwen(models: &mut Vec<Arc<dyn ResidentModel>>, qwen: Option<QwenResi
 /// a 10s admission timeout and a generic 429, since a claim failure never fires
 /// `on_admit`. The physical RAM does not disappear just because CPU-side compute is
 /// disabled, so `pool_ram` must always be the real, ungated host RAM figure.
-pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std::path::Path>, policy: Policy, qwen_cfg: catalog::resident_llm::QwenServeConfig) -> Serving {
+///
+/// `qwen_cfg` and `qwen35` carry each decoder's sizing knobs as parsed data
+/// (the CLI parses flags, this code never reads env): `qwen_cfg` for the
+/// Qwen3 paged engine, `qwen35.gguf` selecting the released GGUF served
+/// through the multi-card INT8 resident and `qwen35.fp32` sizing the
+/// brain-checkpoint resident resolved through `qwen35::spec::Qwen35Spec`.
+pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std::path::Path>, policy: Policy, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35: catalog::resident_qwen35::Qwen35ServeConfig) -> Serving {
     let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
     let (cpu_ram, pool_ram) = (machine.cpu_compute_ram, machine.pool_ram);
     let mut budgets = residency::budget::Budgets::new();
@@ -153,12 +159,13 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
         models.push(Arc::new(q));
     }
     // Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, resolved through
-    // `qwen35::spec::Qwen35Spec`'s `weights`/`tokenizer` roles instead of
-    // `BRAIN_QWEN35_{WEIGHTS,TOKENIZER}` -- same single-GPU, fp32 weights +
-    // KV scope as qwen35moe above (see resident_qwen35.rs's own module doc).
+    // `qwen35::spec::Qwen35Spec`'s `weights`/`tokenizer` roles -- same
+    // single-GPU, fp32 weights + KV scope as qwen35moe above (see
+    // resident_qwen35.rs's own module doc). Sized from the caller's parsed
+    // `fp32` knobs (context, batch ceiling).
     match loader::resolver::try_resolve(models_dir, "qwen35", &qwen35::spec::Qwen35Spec, &Default::default()) {
         Ok(assembly) => {
-            if let Some(q) = catalog::resident_qwen35::Qwen35Resident::from_assembly(&assembly) {
+            if let Some(q) = catalog::resident_qwen35::Qwen35Resident::from_assembly_sized(&assembly, qwen35.fp32.sanitized()) {
                 models.push(Arc::new(q));
             }
         }
@@ -313,7 +320,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // on its own when no dir is configured or the scan finds nothing.
     if let Some(dir) = models_dir {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
-        let (discovered, errors) = crate::model_dir::discover(dir, qwen_cfg);
+        let (discovered, errors) = crate::model_dir::discover(dir, qwen_cfg, qwen35.fp32);
         for r in discovered {
             let id = r.manifest().model;
             if existing.contains(&id) {
@@ -375,8 +382,10 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // so registered here rather than folded into `models` above -- same reason
     // as the two residents just above it. A separate model from `brain/qwen35`
     // (the single-GPU fp32 brain-checkpoint path), not a mode of it; see
-    // `resident_qwen35::multi_gpu_gguf_from_env`'s own doc.
-    if let Some(q) = catalog::resident_qwen35::multi_gpu_gguf_from_env(models_dir, gpus, reserved) {
+    // `resident_qwen35::multi_gpu_gguf`'s own doc. The GGUF named, its context
+    // and its KV tier arrive as the parsed `gguf` config -- nothing is read
+    // from the environment.
+    if let Some((q, _id)) = catalog::resident_qwen35::multi_gpu_gguf(models_dir, gpus, reserved, &qwen35.gguf) {
         exec.register_multi(Arc::new(q));
     }
     Serving { executor: exec, qwen }

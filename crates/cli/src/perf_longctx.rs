@@ -72,11 +72,11 @@ fn elapsed_ms(started: Instant) -> f64 {
 
 // ------------------------------------------------------------------ qwen35
 
-/// The Qwen3.8 GGUF resident (`qwen35:<gguf>` / `qwen35-gguf`).
+/// The Qwen3.8 GGUF resident (`qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]`).
 pub struct Qwen35Engine {
     path: String,
     tier: model::ops::TierPolicy,
-    /// How the GQA layers' K/V are stored (`BRAIN_QWEN35_KV`).
+    /// How the GQA layers' K/V are stored - the target's `:kv*` suffix.
     kv_tier: model::kv_tier::KvTier,
     gpus: Vec<(u32, String, u64)>,
     max_context: Option<u32>,
@@ -96,17 +96,23 @@ fn kv_label(kv: model::kv_tier::KvTier) -> &'static str {
 }
 
 impl Qwen35Engine {
-    pub fn open(path: &str) -> Result<Qwen35Engine, String> {
+    /// Open a Qwen3.8 GGUF for long-context measurement. `kv_tier` is the
+    /// parsed KV storage choice (f32 when unset - the historical default
+    /// the removed `BRAIN_QWEN35_KV` reader used); the weight tier stays
+    /// uniform INT8, what the checkpoints are released as.
+    pub fn open(path: &str, kv_tier: model::kv_tier::KvTier) -> Result<Qwen35Engine, String> {
         let gpus = gpu_budget();
         if gpus.is_empty() {
             return Err("no GPU with queryable memory: longctx is GPU-only and has no host fallback".into());
         }
-        let mg = MmapGguf::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        // `MmapGguf::open`'s error already names the path ("gguf: open …");
+        // wrapping it again double-prefixed every message.
+        let mg = MmapGguf::open(path).map_err(|e| e.to_string())?;
         let cfg = resident_config(&mg, 1)?;
         Ok(Qwen35Engine {
             path: path.to_string(),
-            tier: Qwen35GgufResident::tier_from_env(),
-            kv_tier: Qwen35GgufResident::kv_tier_from_env()?,
+            tier: model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8),
+            kv_tier,
             gpus,
             max_context: Some(cfg.max_position_embeddings).filter(|&n| n > 0),
             inst: None,
@@ -538,9 +544,20 @@ pub fn run(spec: &str, args: &Args, device: &str, smoke: bool) -> Result<perf::s
 }
 
 /// Build the engine a `--target` names, or say why it cannot run `longctx`.
+///
+/// The path-bearing targets (`qwen35:<gguf>`, `qwen35moe:<gguf>`,
+/// `qwen:<weights>`) replaced the bare `-gguf` forms that read env vars: the
+/// checkpoint is named on the command line, as the env-variable phase-out
+/// wants, so artifacts record exactly which file was measured.
 pub fn build_engine(spec: &str) -> Result<Box<dyn LongContextEngine>, String> {
-    if let Some(path) = spec.strip_prefix("qwen35:") {
-        return Ok(Box::new(Qwen35Engine::open(path)?));
+    if let Some(rest) = spec.strip_prefix("qwen35:") {
+        // `:kv<tier>` names the GQA cache storage; f32 when absent.
+        let (path, kv) = match rest.rsplit_once(":kv") {
+            Some((p, tier)) if tier == "f32" || tier == "bf16" || tier == "int8" => (p, model::kv_tier::KvTier::parse(tier).expect("matched")),
+            Some((_p, tier)) => return Err(format!("longctx target {spec:?}: :kv{tier} is not a KV tier - use :kvf32, :kvbf16 or :kvint8")),
+            None => (rest, model::kv_tier::KvTier::F32),
+        };
+        return Ok(Box::new(Qwen35Engine::open(path, kv)?));
     }
     if let Some(path) = spec.strip_prefix("qwen35moe:") {
         return Ok(Box::new(Qwen35MoeEngine::open(path)?));
@@ -549,14 +566,10 @@ pub fn build_engine(spec: &str) -> Result<Box<dyn LongContextEngine>, String> {
         let path = std::env::var(qwen35moe::gguf_load::GGUF_ENV).map_err(|_| format!("target qwen35moe-gguf reads {}; set it to a Qwen3.6-35B-A3B GGUF", qwen35moe::gguf_load::GGUF_ENV))?;
         return Ok(Box::new(Qwen35MoeEngine::open(&path)?));
     }
-    if spec == "qwen35-gguf" {
-        let path = std::env::var(qwen35::int8_gguf_resident::GGUF_ENV).map_err(|_| format!("target qwen35-gguf reads {}; set it to a Qwen3.8 GGUF", qwen35::int8_gguf_resident::GGUF_ENV))?;
-        return Ok(Box::new(Qwen35Engine::open(&path)?));
-    }
     if let Some(weights) = spec.strip_prefix("qwen:") {
         return Ok(Box::new(QwenPagedEngine::open(weights)?));
     }
-    Err(format!("longctx does not support target {spec:?}: use qwen35:<gguf>, qwen35-gguf, qwen35moe:<gguf>, qwen35moe-gguf or qwen:<weights>[:i8w][:kvf32]"))
+    Err(format!("longctx does not support target {spec:?}: use qwen35:<gguf>[:kvf32|:kvbf16|:kvint8], qwen35moe:<gguf>, qwen35moe-gguf or qwen:<weights>[:i8w][:kvf32]"))
 }
 
 #[cfg(test)]
@@ -625,16 +638,18 @@ mod tests {
         assert!(e.contains("yolo:/nowhere") && e.contains("qwen35:<gguf>"), "{e}");
     }
 
+    /// The env-reading `qwen35-gguf` target is gone: the checkpoint is part of
+    /// the spec, and the `:kv*` suffix is the KV tier as parsed data.
     #[test]
-    fn qwen35_gguf_without_its_env_names_the_variable() {
-        let _g = brain_testutil::env_lock();
-        let saved = std::env::var(qwen35::int8_gguf_resident::GGUF_ENV).ok();
-        std::env::remove_var(qwen35::int8_gguf_resident::GGUF_ENV);
+    fn the_qwen35_target_carries_the_path_and_kv_tier() {
         let e = build_engine("qwen35-gguf").err().unwrap();
-        if let Some(v) = saved {
-            std::env::set_var(qwen35::int8_gguf_resident::GGUF_ENV, v);
-        }
-        assert!(e.contains("BRAIN_QWEN35_GGUF"), "{e}");
+        assert!(e.contains("qwen35-gguf") && e.contains("qwen35:<gguf>"), "{e}");
+        // `Qwen35Engine::open` propagates `MmapGguf::open`'s error verbatim
+        // (its own GPU-only gate runs first, so the propagation is asserted
+        // through the mapping constructor directly - this suite must not
+        // depend on card visibility; the tier threading has its own test).
+        let open_err = MmapGguf::open("/nonexistent/none.gguf").err().unwrap();
+        assert!(open_err.contains("gguf: open /nonexistent/none.gguf") && open_err.contains("No such file or directory"), "{open_err}");
     }
 
     #[test]

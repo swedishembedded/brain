@@ -796,7 +796,7 @@ mod tests {
         // The end of the loop: auto-discovery serves the conversion with no env
         // vars and no per-model wiring. The `.gguf` itself stays unregistered
         // (it needs the conversion, which is the whole design decision above).
-        let ids: Vec<String> = crate::model_dir::discover(&dir, catalog::resident_llm::QwenServeConfig::default()).0.iter().map(|r| r.manifest().model).collect();
+        let ids: Vec<String> = crate::model_dir::discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).0.iter().map(|r| r.manifest().model).collect();
         assert!(ids.contains(&"test/qwen35-tiny".to_string()), "the imported checkpoint must be discovered: {ids:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -837,7 +837,7 @@ mod tests {
         assert!(reader.tensor("mtp.fc_e.weight").is_some(), "the MTP head must be imported, unlike qwen35moe's own GGUF route");
         assert_eq!(reader.card().expect("a model card must be written").id, "test/qwen35-dense-tiny");
 
-        let ids: Vec<String> = crate::model_dir::discover(&dir, catalog::resident_llm::QwenServeConfig::default()).0.iter().map(|r| r.manifest().model).collect();
+        let ids: Vec<String> = crate::model_dir::discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).0.iter().map(|r| r.manifest().model).collect();
         assert!(ids.contains(&"test/qwen35-dense-tiny".to_string()), "the imported checkpoint must be discovered: {ids:?}");
         std::fs::remove_dir_all(&dir).ok();
     }

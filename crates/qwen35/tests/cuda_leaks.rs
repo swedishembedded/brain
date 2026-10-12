@@ -192,13 +192,16 @@ fn a_paged_engine_in_every_kv_tier_returns_every_device_object_it_took() {
 /// would also run out.
 #[test]
 fn dropping_a_real_gguf_instance_returns_all_device_memory() {
-    use qwen35::int8_gguf_resident::{Qwen35GgufResident, GGUF_ENV};
+    use qwen35::int8_gguf_resident::Qwen35GgufResident;
     use residency::multi::MultiDeviceResidentModel;
     use residency::{Device, ResidentModel};
 
+    // Test-gating convention only - selects the real-checkpoint gate, it is
+    // not a serving knob. The serving path names its GGUF with a parameter.
+    const REAL_GGUF_ENV: &str = "BRAIN_QWEN35_GGUF";
     let _s = serial();
-    let Ok(path) = std::env::var(GGUF_ENV) else {
-        brain_testutil::skip(&format!("{GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
+    let Ok(path) = std::env::var(REAL_GGUF_ENV) else {
+        brain_testutil::skip(&format!("{REAL_GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
         return;
     };
     let Ok(probe) = Context::open(0) else {
@@ -244,13 +247,16 @@ fn dropping_a_real_gguf_instance_returns_all_device_memory() {
 #[test]
 fn dropping_a_real_gguf_instance_with_a_compact_kv_cache_returns_every_device_object() {
     use model::kv_tier::KvTier;
-    use qwen35::int8_gguf_resident::{Qwen35GgufResident, GGUF_ENV};
+    use qwen35::int8_gguf_resident::Qwen35GgufResident;
     use residency::multi::MultiDeviceResidentModel;
     use residency::{Device, ResidentModel};
 
+    // Test-gating convention only - selects the real-checkpoint gate, it is
+    // not a serving knob. The serving path names its GGUF with a parameter.
+    const REAL_GGUF_ENV: &str = "BRAIN_QWEN35_GGUF";
     let _s = serial();
-    let Ok(path) = std::env::var(GGUF_ENV) else {
-        brain_testutil::skip(&format!("{GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
+    let Ok(path) = std::env::var(REAL_GGUF_ENV) else {
+        brain_testutil::skip(&format!("{REAL_GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
         return;
     };
     let Ok(_probe) = Context::open(0) else {

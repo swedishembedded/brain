@@ -19,7 +19,7 @@
 //! the whole-pass number should be read against.
 //!
 //! Usage:
-//!   BRAIN_QWEN35_GGUF=<path to Qwen3.8-27B*.gguf> qwen35_decode_profile [steps] [json-out]
+//!   qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out]
 //!
 //! `steps` defaults to 8 profiled decode passes per region. `json-out`, when
 //! given, writes a `brain perf`-shaped baseline artifact to that path.
@@ -27,9 +27,9 @@
 //! **Long-context batches** - `BRAIN_PROFILE_CONTEXT=<tokens>` switches to a
 //! SYNTHETIC context (fresh caches, decode work at a real position, as `brain
 //! perf run longctx` does) and `BRAIN_PROFILE_BATCH=<n>` (default 1) sets the
-//! batch; the KV cache storage comes from `BRAIN_QWEN35_KV`. The report is the
-//! per-kernel DEVICE time per decode step, which a loaded host cannot distort
-//! the way it stretches the wall clock.
+//! batch; the KV cache storage comes from `--kv <f32|bf16|int8>` (default
+//! f32). The report is the per-kernel DEVICE time per decode step, which a
+//! loaded host cannot distort the way it stretches the wall clock.
 
 use std::time::Instant;
 
@@ -56,11 +56,17 @@ fn real_devices() -> Vec<(Device, u64)> {
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let steps: u32 = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(8);
-    let json_out = a.get(2).cloned();
+    let steps: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
+    let json_out = a.get(3).cloned();
+    let mut kv: Option<model::kv_tier::KvTier> = None;
+    for (i, arg) in a.iter().enumerate() {
+        if arg == "--kv" {
+            kv = a.get(i + 1).map(|s| model::kv_tier::KvTier::parse(s).unwrap_or_else(|e| panic!("{e}")));
+        }
+    }
 
-    let Ok(path) = std::env::var("BRAIN_QWEN35_GGUF") else {
-        eprintln!("set BRAIN_QWEN35_GGUF to a downloaded Qwen3.8-27B*.gguf");
+    let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
+        eprintln!("usage: qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out] [--kv f32|bf16|int8]");
         std::process::exit(2);
     };
     let devices = real_devices();
@@ -69,11 +75,11 @@ fn main() {
         std::process::exit(2);
     }
 
-    let tier = Qwen35GgufResident::tier_from_env();
+    let tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
     println!("weight tier: {}", tier.describe());
     if let Some(context) = std::env::var("BRAIN_PROFILE_CONTEXT").ok().and_then(|s| s.parse::<u32>().ok()) {
         let batch = std::env::var("BRAIN_PROFILE_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
-        return synthetic_context(&path, devices, &tier, context, batch, steps);
+        return synthetic_context(&path, devices, &tier, kv, context, batch, steps);
     }
 
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
@@ -147,8 +153,8 @@ fn main() {
 /// `batch` rows decoding at a synthetic `context`: the per-kernel device time
 /// per step, and what share the attention kernels (the ones the KV tier changes)
 /// take.
-fn synthetic_context(path: &str, devices: Vec<(Device, u64)>, tier: &model::ops::TierPolicy, context: u32, batch: u32, steps: u32) {
-    let kv = Qwen35GgufResident::kv_tier_from_env().unwrap_or_else(|e| panic!("{e}"));
+fn synthetic_context(path: &str, devices: Vec<(Device, u64)>, tier: &model::ops::TierPolicy, kv: Option<model::kv_tier::KvTier>, context: u32, batch: u32, steps: u32) {
+    let kv = kv.unwrap_or(model::kv_tier::KvTier::F32);
     let r = Qwen35GgufResident::new(path.to_string(), devices, context, tier.clone()).with_kv_tier(kv).with_max_batch(batch);
     let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
     if placed.is_empty() {

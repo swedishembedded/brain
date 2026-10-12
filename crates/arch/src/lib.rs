@@ -356,11 +356,12 @@ pub const ARCHS: &[Arch] = &[
     // `weights_env` is empty: this row used to declare a FOURTH spelling
     // (`BRAIN_QWEN35_DIR`) that matched none of the three the crate's own
     // code actually checked (`BRAIN_QWEN35_WEIGHTS`/`BRAIN_QWEN35_TOKENIZER`
-    // in `caps.rs`, `BRAIN_QWEN35_GGUF` in `crates/serving/src/executor.rs`'s
-    // `multi_gpu_gguf_from_env`) - already dead on arrival. All three (and
-    // this row's own stale one) are now resolved through
-    // `qwen35::spec::Qwen35Spec`'s `weights`/`tokenizer` roles instead - see
-    // `crates/catalog/src/lib.rs`'s `resolved_assembly_for`.
+    // in `caps.rs`, plus the serving executor's third GGUF variable) - the
+    // row was already dead on arrival. All three (and this row's own stale
+    // one) are now resolved through `qwen35::spec::Qwen35Spec`'s
+    // `weights`/`tokenizer` roles instead - see `crates/catalog/src/lib.rs`'s
+    // `resolved_assembly_for`; the serving path names the GGUF release with
+    // the `--qwen35-gguf` flag.
     arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8")),
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa"),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),

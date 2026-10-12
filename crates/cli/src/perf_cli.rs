@@ -112,7 +112,7 @@ OPTIONS
   --device cpu|gpu|vulkan  (global flag, handled by the main dispatcher)
 
 LONG CONTEXT
-  brain perf run longctx --target <qwen35:<gguf> | qwen35-gguf | qwen35moe:<gguf> | qwen35moe-gguf | qwen:<weights>>
+  brain perf run longctx --target <qwen35:<gguf>[:kvf32|:kvbf16|:kvint8] | qwen35moe:<gguf> | qwen35moe-gguf | qwen:<weights>>
                          --context N [--ladder 1,2,4,...] [--prefill 1024,4096,...]
                          [--steps N]
       One model on one GPU at a long context: prefill speed, single-stream
@@ -136,9 +136,10 @@ NOTES
 const TARGET_LIST: &str = "
 targets (--target):
   qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]][:i8w][:kvf32]   the real paged serving engine on random weights
-  qwen35:<gguf>, qwen35-gguf         `longctx` only: the Qwen3.8 GGUF resident (qwen35-gguf reads
-                                     BRAIN_QWEN35_GGUF); tier from BRAIN_QWEN35_GGUF_TIER; KV cache
-                                     storage from BRAIN_QWEN35_KV = f32 (default) | bf16 | int8
+  qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]
+                                     `longctx` only: the Qwen3.8 GGUF resident; weights are int8
+                                     (what the checkpoints are released as), the `:kv` suffix picks
+                                     the GQA cache storage (f32 when absent)
   qwen:<weights.brain>[:i8w][:kvf32]         the paged serving engine on a real checkpoint (also `longctx`)
                                      (:i8w opts IN to int8 weights, off by default; :kvf32 opts
                                      OUT of int8 KV, which is ON by default -- either order, both optional.
@@ -401,7 +402,7 @@ fn run(args: &[String]) {
         let art = match scenario.as_str() {
             "longctx" => target_spec
                 .as_deref()
-                .ok_or_else(|| "longctx needs --target qwen35:<gguf> | qwen35-gguf | qwen35moe:<gguf> | qwen35moe-gguf | qwen:<weights>".to_string())
+                .ok_or_else(|| "longctx needs --target qwen35:<gguf>[:kvf32|:kvbf16|:kvint8] | qwen35moe:<gguf> | qwen35moe-gguf | qwen:<weights>".to_string())
                 .and_then(|spec| crate::perf_longctx::run(spec, &longctx, &opt.device, opt.smoke)),
             "residency" => crate::perf_engine::run_residency_with(&opt, 24, 4.0, &policy),
             // Budget (device slots) and passes (denoise steps) are fixed,

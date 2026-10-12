@@ -19,7 +19,7 @@
 //! services by sending an email to info@swedishembedded.com.
 //!
 //! Usage:
-//!   BRAIN_QWEN35_GGUF=<path to Qwen3.8-27B*.gguf> qwen35_gguf_prefill_profile [depth] [rows] [rounds]
+//!   qwen35_gguf_prefill_profile <path to Qwen3.8-27B*.gguf> [depth] [rows] [rounds]
 //!
 //! `depth` (default 256) prompt tokens establish the KV depth first, `rows`
 //! (default 256) is the round width, `rounds` (default 4) the rounds per
@@ -35,13 +35,13 @@ const RESERVE: u64 = 2 << 30;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let depth: u32 = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(256);
-    let rows: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(256);
-    let rounds: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
+    let depth: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(256);
+    let rows: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(256);
+    let rounds: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(4);
     let cap = depth + 2 * rows * rounds;
 
-    let Ok(path) = std::env::var("BRAIN_QWEN35_GGUF") else {
-        eprintln!("set BRAIN_QWEN35_GGUF to a downloaded Qwen3.8-27B*.gguf");
+    let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
+        eprintln!("usage: qwen35_gguf_prefill_profile <path to Qwen3.8-27B*.gguf> [depth] [rows] [rounds]");
         std::process::exit(2);
     };
     let devices: Vec<(Device, u64)> = gpu_core::devices::gpus()
@@ -54,7 +54,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    let tier = Qwen35GgufResident::tier_from_env();
+    let tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
     let cfg = resident_config(&mg, cap).expect("resident_config");
     drop(mg);
