@@ -16,6 +16,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress};
+use futures::StreamExt;
 use residency::budget::Budgets;
 use residency::{Device, Executor, Instance, InstanceKey, MemCost, Policy, ResidentModel};
 use serde_json::{json, Value};
@@ -2598,6 +2599,60 @@ fn anthropic_stream_content(text: &str) -> String {
         .filter_map(|(_, d)| serde_json::from_str::<Value>(d).ok())
         .filter_map(|v| v["delta"]["text"].as_str().map(str::to_string))
         .collect()
+}
+
+#[tokio::test]
+async fn openai_chat_stream_sends_keepalive_comments_while_the_model_is_silent() {
+    // A model that sits silent on the lane (a long local prefill is minutes of
+    // exactly this) while the client reads the SSE body frame by frame: the
+    // connection must carry SSE comment keepalives during the silence, so a
+    // client's idle watchdog (any compliant SSE parser resets on bytes, and
+    // comments are invisible to `data:`/`event:` parsing) never declares the
+    // stream stale. Before the keep-alive the body emitted NOTHING between the
+    // response headers and the first token.
+    let gate = Gate::new();
+    let key = "sk-brain-test-key".to_string();
+    let state = AppState::new(slow_executor(gate.clone()), key.clone(), Provider::OpenAI);
+    let app = router(state);
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let req = auth(Request::builder().method(Method::POST).uri("/v1/chat/completions"), Provider::OpenAI, &key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut frames = resp.into_body().into_data_stream();
+
+    // Wait for the model to actually be on the lane, then hold it silent.
+    let until = Instant::now() + Duration::from_secs(5);
+    while gate.started() == 0 {
+        assert!(Instant::now() < until, "job never started on the lane");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // The keepalive interval is 15s; a comment frame must arrive within it
+    // while the model is still blocked. (First frame may be nothing at all -
+    // there is no role chunk until the first delta - so keep reading until a
+    // comment shows up, bounded by the interval itself.) Each frame wait is
+    // itself bounded so a body that stays silent forever fails the assert
+    // instead of hanging the test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+    let mut saw_comment = false;
+    loop {
+        match tokio::time::timeout_at(deadline, frames.next()).await {
+            Err(_elapsed) => break,
+            Ok(None) => panic!("stream ended before any keepalive"),
+            Ok(Some(frame)) => {
+                let bytes = frame.expect("stream frame");
+                if bytes.iter().any(|&b| b == b':') {
+                    saw_comment = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(saw_comment, "no SSE comment keepalive arrived while the model was silent");
+    gate.release();
 }
 
 #[tokio::test]

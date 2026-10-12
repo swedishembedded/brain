@@ -11,7 +11,7 @@
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -403,7 +403,7 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
         }).to_string()));
         yield Ok(Event::default().event("message_stop").data(json!({ "type": "message_stop" }).to_string()));
     };
-    Sse::new(events.boxed()).into_response()
+    Sse::new(events.boxed()).keep_alive(KeepAlive::default()).into_response()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

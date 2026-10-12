@@ -10,7 +10,7 @@
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -843,7 +843,7 @@ fn render_completion_stream(mut src: bridge::EventStream, model: String, want_us
         }
         yield Ok(Event::default().data("[DONE]"));
     };
-    Sse::new(events.boxed()).into_response()
+    Sse::new(events.boxed()).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// The internal `{id,name,arguments}` tool-call shape ([`bridge::ChatOutcome`]) →
@@ -1226,7 +1226,7 @@ async fn stream_images(state: AppState, req: ImageRequest, action: String) -> Re
             }
         }
     };
-    Sse::new(events.boxed()).into_response()
+    Sse::new(events.boxed()).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// The SSE `chat.completion.chunk` stream: a role chunk, one content chunk per token
@@ -1346,7 +1346,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
         }
         yield Ok(Event::default().data("[DONE]"));
     };
-    Sse::new(events.boxed()).into_response()
+    Sse::new(events.boxed()).keep_alive(KeepAlive::default()).into_response()
 }
 
 #[cfg(test)]
