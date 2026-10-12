@@ -80,7 +80,11 @@ fn the_path_predicate_recognises_every_declared_host_path() {
         .iter()
         .flat_map(|m| m.actions.iter().flat_map(move |a| a.params.iter().map(move |p| (m.model.clone(), a.name.clone(), p))))
         .filter(|(_, _, p)| p.host_env.is_some() || p.host_resolved)
-        .filter(|(_, _, p)| !names_a_filesystem_path(p))
+        // `names_a_filesystem_path` itself only reads `Str` params, so a
+        // non-Str knob declared host-resolved (a `force` flag whose meaning
+        // depends on host state, say) is not a path the predicate could
+        // recognise - demanding that would fail every such declaration.
+        .filter(|(_, _, p)| p.ty == ParamType::Str && !names_a_filesystem_path(p))
         .map(|(model, action, p)| format!("{model}:{action}:{} ({})", p.name, p.help))
         .collect();
     assert!(host_declared.is_empty(), "host-resolved params the path predicate does not recognise:\n{}", host_declared.join("\n"));

@@ -126,7 +126,7 @@ pub fn calibrate_spec() -> ActionSpec {
     .param(ParamSpec::new("horizons", ParamType::Str, "comma-separated horizons after entry to calibrate, each within the model's knots").required())
     .param(ParamSpec::new("kind", ParamType::Str, "logistic (intercept, and slope where the data show it is not one; no interval) or venn_abers (isotonic with its interval)").default(json!(calibration::Kind::default().name())))
     .param(ParamSpec::new("min_events", ParamType::Int, "a (code, horizon) with fewer validation events by then (and as many still event-free) is not calibrated; default 100 for logistic, 500 for venn_abers").min(1.0))
-    .param(ParamSpec::new("out", ParamType::Str, "write a calibrated copy of the model here instead of calibration.json into 'weights' (must not exist)").host_resolved())
+    .param(ParamSpec::new("out", ParamType::Str, "write a calibrated copy of the model into this directory instead of calibration.json into 'weights' (must not exist)").host_resolved())
     .param(ParamSpec::new("force", ParamType::Bool, "overwrite an existing calibration.json (or the directory at 'out')").default(json!(false)).host_resolved())
     .input(BlobSpec::new("validation", Media::Text, "validation subjects: timeline-v1").required())
     .output(BlobSpec::new("calibration", Media::Text, "the calibration.json content: bound to the weights' SHA-256, per (code, horizon) the events and the calibrator"))
