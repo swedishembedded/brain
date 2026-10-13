@@ -15,7 +15,9 @@
 //!     Q8_0.gguf                                             # downloaded OR locally produced
 //! ```
 //!
-//! This crate has three responsibilities, each in its own module:
+//! This crate has three responsibilities, each in its own module (and
+//! [`adapter_manifest`], the file a release step publishes for a server to
+//! follow):
 //! [`Store`] (here) finds what already exists on disk; [`hub`] talks to a
 //! remote model host; [`plan`] is the pure resolution ladder that decides
 //! what to do when nothing is on disk yet. It deliberately depends on nothing
@@ -23,6 +25,7 @@
 //! crates -- so it can be used by `crates/cli` (today's `model_dir.rs`) and
 //! later by a residency-side supplier without either pulling in the other.
 
+pub mod adapter_manifest;
 pub mod fetch;
 pub mod hub;
 pub mod inventory;

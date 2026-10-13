@@ -279,6 +279,11 @@ mod vlm;
 
 pub use error::{Error, ForecastFailure};
 
+/// The release manifest `brain serve --adapter-manifest` follows. Re-exported,
+/// not reinvented: the SAME type the server reads, so a release step that
+/// writes one with [`AdapterManifest::write_atomically`] cannot drift from it.
+pub use brain_modelstore::adapter_manifest::AdapterManifest;
+
 /// A device/backend selection. Re-exported, not reinvented: the SAME type
 /// `--device` parses into (`gpu_core::devices::DeviceSpec`). An empty
 /// [`Device::default`] is the existing "auto" concept -- schedule on

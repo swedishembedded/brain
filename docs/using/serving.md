@@ -81,9 +81,11 @@ The digest is the SHA-256 of the adapter file, the same value
   check - unparseable, a digest that does not match the file, an adapter for
   another base - keeps the previous adapter served and prints why.
 - Replace the manifest atomically (write it beside, then rename it over the
-  old one), and publish every release under a new file name: an adapter file
-  is verified when its manifest changes and read again when the model next
-  loads, so rewriting a published file in place is served unverified.
+  old one); a release step in Rust does this with
+  `brain::AdapterManifest { adapter, digest }.write_atomically(path)`.
+  Publish every release under a new file name: an adapter file is verified
+  when its manifest changes and read again when the model next loads, so
+  rewriting a published file in place is served unverified.
 - At startup a manifest that exists must verify, or the server does not
   start. A manifest that does not exist yet serves the base until one is
   published.

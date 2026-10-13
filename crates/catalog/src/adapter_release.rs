@@ -25,8 +25,9 @@
 //! the same id.
 //!
 //! **Following a release manifest.** [`ManifestFollower`] re-reads a small
-//! JSON file, `{"adapter": "<path>", "digest": "sha256:<hex>"}`, that a
-//! release step replaces atomically (write beside it, then rename over it).
+//! JSON file, `{"adapter": "<path>", "digest": "sha256:<hex>"}`
+//! ([`AdapterManifest`]), that a release step replaces atomically
+//! ([`AdapterManifest::write_atomically`]: write beside it, then rename over it).
 //! A new manifest yields a release only after the named file hashes to the
 //! digest the manifest states AND the file verifies against the base; a
 //! manifest that fails any check is reported once and yields nothing, so the
@@ -37,6 +38,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+pub use brain_modelstore::adapter_manifest::AdapterManifest;
 
 /// The base checkpoint a server folds adapters into: its file (or a
 /// `transformers` directory), the id it was resolved under (when it came from
@@ -124,16 +127,6 @@ pub fn verify_adapter(path: &Path, base: &ServedBase) -> Result<AdapterRelease, 
     Ok(AdapterRelease { id: card.id, path: path.to_path_buf(), digest })
 }
 
-/// The release manifest's shape. Unknown fields are refused: a manifest
-/// carrying a field this reader does not know was written for a different
-/// reader, and guessing what it meant would serve the wrong thing.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Manifest {
-    adapter: String,
-    digest: String,
-}
-
 /// What one look at the manifest found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ManifestPoll {
@@ -203,14 +196,14 @@ impl ManifestFollower {
 
     fn release_of(&self, bytes: &[u8]) -> Result<AdapterRelease, String> {
         let shown = self.path.display();
-        let manifest: Manifest = serde_json::from_slice(bytes).map_err(|e| format!("manifest {shown}: {e}"))?;
+        let manifest: AdapterManifest = serde_json::from_slice(bytes).map_err(|e| format!("manifest {shown}: {e}"))?;
         let hex = manifest.digest.strip_prefix("sha256:").unwrap_or_default();
         if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
             return Err(format!("manifest {shown}: digest {:?} is not sha256:<64 lowercase hex digits>", manifest.digest));
         }
         // A relative adapter path is relative to the manifest, so a release
         // directory can be moved as a whole.
-        let named = PathBuf::from(&manifest.adapter);
+        let named = manifest.adapter.clone();
         let adapter = if named.is_relative() { self.path.parent().unwrap_or_else(|| Path::new(".")).join(named) } else { named };
         let release = verify_adapter(&adapter, &self.base).map_err(|e| format!("manifest {shown}: {e}"))?;
         if release.digest != manifest.digest {
@@ -281,6 +274,26 @@ mod tests {
         let err = verify_adapter(&adapter, &ServedBase::new(&base, Some("Qwen/Qwen3-8B".to_string()))).unwrap_err();
         assert!(err.contains("Qwen/Qwen3-0.6B") && err.contains("Qwen/Qwen3-8B"), "{err}");
         assert!(verify_adapter(&base, &ServedBase::new(&base, None)).unwrap_err().contains("no model card"), "a bare checkpoint is not an adapter");
+    }
+
+    /// The manifest a release step writes is the one the follower reads: a
+    /// manifest written by [`AdapterManifest::write_atomically`] yields its
+    /// release, and one whose digest is not the file's is rejected.
+    #[test]
+    fn a_written_manifest_is_accepted_and_a_digest_mismatch_is_rejected() {
+        let dir = tmp("written-manifest");
+        let base = dir.join("base.safetensors");
+        write_base(&base, 1.0);
+        let adapter = dir.join("adapter-1.safetensors");
+        write_adapter(&adapter, "one", "local/base", Some(digest(&base)), 0.5);
+        let manifest = dir.join("release.json");
+        let mut follower = ManifestFollower::new(&manifest, ServedBase::new(&base, None));
+
+        AdapterManifest { adapter: adapter.clone(), digest: format!("sha256:{}", "0".repeat(64)) }.write_atomically(&manifest).unwrap();
+        assert!(matches!(follower.poll(), ManifestPoll::Rejected(why) if why.contains(&digest(&adapter))));
+
+        AdapterManifest { adapter: adapter.clone(), digest: digest(&adapter) }.write_atomically(&manifest).unwrap();
+        assert_eq!(follower.poll(), ManifestPoll::Release(AdapterRelease { id: "one".to_string(), path: adapter.clone(), digest: digest(&adapter) }));
     }
 
     /// A manifest yields a release once, only when the file matches the
