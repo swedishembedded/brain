@@ -589,6 +589,61 @@ get_url() {
   ! grep -qi "huggingface\|hub error\|/home/\|/data/\|\.local/share" "$RESP"
 }
 
+@test "security: an adapter reference is never fetched for a request - it is an unknown model, fast, on every provider" {
+  # An adapter is loaded by the operator (--adapter, --adapter-manifest,
+  # --watch-adapters, or a model directory), never fetched on a request. The
+  # base of this ref IS fetchable and auto-fetch is on for this server, so a
+  # regression that classified the adapter ref as fetchable (or stripped its
+  # suffix) would hit the network: classify() must refuse it with zero I/O, and
+  # the answer must be the exact 404 an unknown model gets.
+  local t0 t1 ref='Qwen/Qwen3-0.6B:lab:never-trained:latest'
+  for prov in openai anthropic openrouter; do
+    case "$prov" in
+      openai) path=/v1/chat/completions ;;
+      anthropic) path=/v1/messages ;;
+      openrouter) path=/chat/completions ;;
+    esac
+    post_json "$prov" "$path" '{"model":"nope","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
+    [ "$STATUS" -eq 404 ]
+    local unknown_body
+    unknown_body=$(jq -S -c . "$RESP" | sed 's/nope/<id>/g')
+    t0=$(date +%s%N)
+    post_json "$prov" "$path" '{"model":"'"$ref"'","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
+    t1=$(date +%s%N)
+    [ "$STATUS" -eq 404 ]
+    [ $(( (t1 - t0) / 1000000 )) -lt 3000 ]
+    [ "$(jq -S -c . "$RESP" | sed "s|$ref|<id>|g")" = "$unknown_body" ]
+    ! grep -qi "huggingface\|hub error\|adapter\|/home/\|/data/\|\.local/share" "$RESP"
+  done
+  # Malformed adapter spellings are the same 404, not a traversal or a 500.
+  for ref in 'Qwen/Qwen3-0.6B:lab:../x:v1' 'Qwen/Qwen3-0.6B:a:b:c:d' 'Qwen/Qwen3-0.6B:lab:x'; do
+    post_json openai /v1/chat/completions '{"model":"'"$ref"'","messages":[{"role":"user","content":"hi"}]}'
+    [ "$STATUS" -eq 404 ]
+  done
+}
+
+@test "security: an adapter-shaped model id needs the key exactly as any other id" {
+  local st
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
+    -X POST "$(base openai)/v1/chat/completions" -d '{"model":"Qwen/Qwen3-0.6B:lab:canary:v1","messages":[{"role":"user","content":"hi"}]}')
+  [ "$st" -eq 401 ]
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$(base openai)/v1/models/Qwen%2FQwen3-0.6B:lab:canary:v1")
+  [ "$st" -eq 401 ]
+}
+
+@test "security: the param that selects an adapter is the host's - /v1/run and /v1/jobs refuse it as unknown" {
+  for param in __adapter adapter; do
+    for path in /v1/run /v1/jobs; do
+      post_json openai "$path" '{"model":"brain/mock","action":"generate","params":{"prompt":"hi","'"$param"'":"Qwen/Qwen3-0.6B:lab:canary:v1"},"blobs":{}}'
+      [ "$STATUS" -eq 400 ]
+      grep -q "unknown param" "$RESP"
+    done
+  done
+  # A chat body carrying it is answered by the model the caller named, as if it were absent.
+  post_json openai /v1/chat/completions '{"model":"brain/mock","__adapter":"Qwen/Qwen3-0.6B:lab:canary:v1","messages":[{"role":"user","content":"hi"}]}'
+  [ "$STATUS" -eq 200 ]
+}
+
 # ============================================================ security audit
 # These drive the docs/api-security-audit.md invariants over the REAL socket, so a
 # regression that reopens a hole fails CI. Everything below reuses the ONE mock server
