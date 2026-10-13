@@ -75,17 +75,60 @@ impl BlockAllocator {
     }
 }
 
+/// Which K/V computation a block belongs to. K/V depend on every weight that
+/// produced them, so blocks computed under one runtime adapter are wrong under
+/// another adapter or under the base model: a sequence's blocks, and the
+/// prefix-cache entries pointing at them, live in exactly one namespace.
+pub type KvNamespace = u32;
+
+/// The base model's namespace: the only one a decoder without adapters uses.
+pub const BASE_KV_NAMESPACE: KvNamespace = 0;
+
+/// Hands out adapter namespaces, strictly increasing and never repeated for
+/// the life of the allocator, so an id retired by an unload can never name a
+/// later adapter's blocks. Owned by whatever assigns adapter identities (one
+/// per serving engine); [`BASE_KV_NAMESPACE`] is never handed out.
+#[derive(Clone, Debug, Default)]
+pub struct NamespaceIds {
+    issued: KvNamespace,
+}
+
+impl NamespaceIds {
+    /// The next unused namespace. Panics after `u32::MAX` namespaces, which
+    /// would take billions of adapter loads in one process lifetime.
+    pub fn fresh(&mut self) -> KvNamespace {
+        self.issued = self.issued.checked_add(1).expect("KV namespace ids exhausted");
+        self.issued
+    }
+}
+
 /// A sequence's logical→physical block map. `len` is the number of tokens whose
 /// K/V are stored; the cache grows a block at a time as tokens are appended.
+///
+/// The table also carries the sequence's [`KvNamespace`], so the adapter a
+/// sequence's K/V were computed under travels with the blocks through prefill,
+/// batched decode, fork and host-RAM offload instead of being a side channel
+/// that can disagree with them.
 #[derive(Clone, Debug, Default)]
 pub struct BlockTable {
     blocks: Vec<u32>, // logical block index -> physical block id
     len: u32,         // tokens stored
+    kv_namespace: KvNamespace,
 }
 
 impl BlockTable {
+    /// An empty table in the base namespace.
     pub fn new() -> BlockTable {
         BlockTable::default()
+    }
+    /// An empty table whose K/V will be computed in `kv_namespace`.
+    pub fn with_namespace(kv_namespace: KvNamespace) -> BlockTable {
+        BlockTable { kv_namespace, ..BlockTable::default() }
+    }
+    /// The namespace this sequence's K/V belong to; fixed for its lifetime,
+    /// including across [`Self::release`].
+    pub fn kv_namespace(&self) -> KvNamespace {
+        self.kv_namespace
     }
     /// Tokens stored so far (== the next token's absolute position).
     pub fn len(&self) -> u32 {
@@ -165,7 +208,7 @@ impl BlockTable {
         for &b in &self.blocks {
             alloc.incref(b);
         }
-        BlockTable { blocks: self.blocks.clone(), len: self.len }
+        BlockTable { blocks: self.blocks.clone(), len: self.len, kv_namespace: self.kv_namespace }
     }
 
     /// Copy-on-write the last (writable) block if it is shared: allocate a private
@@ -193,10 +236,11 @@ impl BlockTable {
     /// blocks that stay owned by the prefix cache) and forces the length to a
     /// whole number of blocks. A restored sequence owns its blocks outright
     /// and its length is whatever it was when it was demoted - usually a
-    /// partially-filled tail block.
-    pub fn restore(blocks: Vec<u32>, len: u32) -> BlockTable {
+    /// partially-filled tail block. `kv_namespace` is the one the sequence was
+    /// demoted from: the restored bytes are only valid under it.
+    pub fn restore(kv_namespace: KvNamespace, blocks: Vec<u32>, len: u32) -> BlockTable {
         assert!(!blocks.is_empty() || len == 0, "restore: {len} tokens cannot live in zero blocks");
-        BlockTable { blocks, len }
+        BlockTable { blocks, len, kv_namespace }
     }
 
     /// Start a FRESH table from shared full prefix blocks (incref each): the
@@ -214,8 +258,13 @@ impl BlockTable {
 }
 
 /// Content-addressed index of FULL, immutable KV blocks for prompt-prefix
-/// reuse. An entry maps `(parent physical block, this block's token ids)` to
-/// the physical block holding that prefix's K/V.
+/// reuse. An entry maps `(namespace, parent physical block, this block's
+/// token ids)` to the physical block holding that prefix's K/V.
+///
+/// The namespace is part of the key at the root of every chain, so identical
+/// prompts under the base model and under different adapters index disjoint
+/// chains: a lookup in one namespace can never reach another's blocks (and
+/// below the root, chaining by physical parent keeps it that way).
 ///
 /// Chaining by the parent's *physical identity* rather than by a rolling hash
 /// makes a hit exact **by construction**: two different prefixes can never
@@ -230,11 +279,14 @@ impl BlockTable {
 /// a live sequence stays.
 #[derive(Debug, Default)]
 pub struct PrefixCache {
-    map: std::collections::HashMap<(u32, Vec<u32>), PrefixEntry>,
+    map: std::collections::HashMap<PrefixKey, PrefixEntry>,
     /// Reverse index for eviction bookkeeping.
-    by_block: std::collections::HashMap<u32, (u32, Vec<u32>)>,
+    by_block: std::collections::HashMap<u32, PrefixKey>,
     tick: u64,
 }
+
+/// `(namespace, parent physical block or [`PREFIX_ROOT`], token ids)`.
+type PrefixKey = (KvNamespace, u32, Vec<u32>);
 
 #[derive(Debug)]
 struct PrefixEntry {
@@ -262,6 +314,12 @@ impl PrefixCache {
     /// covering at most `max_tokens` tokens. Returns the physical blocks to
     /// adopt (possibly empty). Touches each hit's LRU stamp.
     pub fn lookup(&mut self, prompt: &[u32], block_size: u32, max_tokens: usize) -> Vec<u32> {
+        self.lookup_in(BASE_KV_NAMESPACE, prompt, block_size, max_tokens)
+    }
+
+    /// [`Self::lookup`] within `namespace`: only chains cached under that
+    /// namespace are visible.
+    pub fn lookup_in(&mut self, namespace: KvNamespace, prompt: &[u32], block_size: u32, max_tokens: usize) -> Vec<u32> {
         let bs = block_size as usize;
         let mut parent = PREFIX_ROOT;
         let mut out = Vec::new();
@@ -269,7 +327,7 @@ impl PrefixCache {
             if (out.len() + 1) * bs > max_tokens {
                 break;
             }
-            match self.map.get_mut(&(parent, chunk.to_vec())) {
+            match self.map.get_mut(&(namespace, parent, chunk.to_vec())) {
                 Some(e) => {
                     self.tick += 1;
                     e.last_use = self.tick;
@@ -286,8 +344,16 @@ impl PrefixCache {
     /// now live in `blocks[from..]` (the sequence's own freshly-prefilled
     /// blocks). Takes a cache reference on each newly indexed block. Blocks
     /// `0..from` must be the chain a preceding [`Self::lookup`] returned.
-    pub fn insert_chain(
+    pub fn insert_chain(&mut self, prompt: &[u32], blocks: &[u32], from: usize, alloc: &mut BlockAllocator) {
+        self.insert_chain_in(BASE_KV_NAMESPACE, prompt, blocks, from, alloc)
+    }
+
+    /// [`Self::insert_chain`] within `namespace`: `blocks` must hold K/V
+    /// computed in that namespace, and the preceding lookup must have been
+    /// made in it too.
+    pub fn insert_chain_in(
         &mut self,
+        namespace: KvNamespace,
         prompt: &[u32],
         blocks: &[u32],
         from: usize,
@@ -297,7 +363,7 @@ impl PrefixCache {
         let full = (prompt.len() / bs).min(blocks.len());
         let mut parent = if from == 0 { PREFIX_ROOT } else { blocks[from - 1] };
         for i in from..full {
-            let key = (parent, prompt[i * bs..(i + 1) * bs].to_vec());
+            let key = (namespace, parent, prompt[i * bs..(i + 1) * bs].to_vec());
             if let Some(e) = self.map.get(&key) {
                 // An identical prefix was cached by another sequence; keep the
                 // canonical chain (later lookups follow the cached block).
@@ -340,6 +406,23 @@ impl PrefixCache {
             freed += 1;
         }
         freed
+    }
+
+    /// Drop every entry indexed under `namespace` - an adapter unload. The
+    /// cache releases its reference on each block; a block no sequence still
+    /// reads returns to the pool, one a live sequence reads stays allocated
+    /// until that sequence releases it (it is merely no longer reachable by
+    /// lookup). Returns how many blocks went back to the pool. Idempotent,
+    /// and other namespaces are untouched.
+    pub fn evict_namespace(&mut self, namespace: KvNamespace, alloc: &mut BlockAllocator) -> u32 {
+        let free_before = alloc.free_blocks();
+        let doomed: Vec<PrefixKey> = self.map.keys().filter(|k| k.0 == namespace).cloned().collect();
+        for key in doomed {
+            let entry = self.map.remove(&key).expect("key just listed");
+            self.by_block.remove(&entry.block);
+            alloc.decref(entry.block);
+        }
+        alloc.free_blocks() - free_before
     }
 }
 
@@ -489,6 +572,138 @@ mod tests {
         t2.release(&mut a);
         assert_eq!(cache.evict(2, &mut a), 1);
         assert_eq!(a.free_blocks(), 8, "everything returned to the pool");
+    }
+
+    /// Cache `prompt` under `ns` the way an engine does after a cold prefill,
+    /// returning the sequence's blocks.
+    fn prefill_into(
+        cache: &mut PrefixCache,
+        a: &mut BlockAllocator,
+        ns: KvNamespace,
+        prompt: &[u32],
+    ) -> BlockTable {
+        let mut t = BlockTable::with_namespace(ns);
+        t.reserve(prompt.len() as u32, a).unwrap();
+        cache.insert_chain_in(ns, prompt, t.blocks(), 0, a);
+        t
+    }
+
+    /// The same prompt prefilled under the base, adapter A and adapter B is
+    /// three different K/V computations: no namespace may adopt another's
+    /// blocks, in either direction, and each still hits its own.
+    #[test]
+    fn prefix_cache_isolates_namespaces() {
+        let mut a = BlockAllocator::new(32, 4);
+        let mut cache = PrefixCache::new();
+        let mut ids = NamespaceIds::default();
+        let (adapter_a, adapter_b) = (ids.fresh(), ids.fresh());
+        let prompt: Vec<u32> = (1..=8).collect();
+
+        let tb = prefill_into(&mut cache, &mut a, BASE_KV_NAMESPACE, &prompt);
+        let ta = prefill_into(&mut cache, &mut a, adapter_a, &prompt);
+        let tc = prefill_into(&mut cache, &mut a, adapter_b, &prompt);
+        assert_eq!(cache.len(), 6, "each namespace indexes its own two blocks");
+
+        for (ns, t) in [(BASE_KV_NAMESPACE, &tb), (adapter_a, &ta), (adapter_b, &tc)] {
+            assert_eq!(cache.lookup_in(ns, &prompt, 4, 8), t.blocks().to_vec(), "ns {ns} hits itself");
+        }
+        let all = [tb.blocks(), ta.blocks(), tc.blocks()];
+        for (i, x) in all.iter().enumerate() {
+            for y in &all[i + 1..] {
+                assert!(x.iter().all(|b| !y.contains(b)), "no physical block is shared across namespaces");
+            }
+        }
+
+        // A namespace that cached nothing sees nothing, whatever the others hold.
+        assert!(cache.lookup_in(ids.fresh(), &prompt, 4, 8).is_empty());
+    }
+
+    /// Everything in namespace 0 behaves as before namespaces existed: the
+    /// namespace-free entry points ARE the base namespace.
+    #[test]
+    fn namespace_free_entry_points_are_the_base_namespace() {
+        let mut a = BlockAllocator::new(8, 4);
+        let mut cache = PrefixCache::new();
+        let prompt: Vec<u32> = (1..=8).collect();
+        let mut t = BlockTable::new();
+        t.reserve(8, &mut a).unwrap();
+        assert_eq!(t.kv_namespace(), BASE_KV_NAMESPACE);
+        cache.insert_chain(&prompt, t.blocks(), 0, &mut a);
+        assert_eq!(cache.lookup_in(BASE_KV_NAMESPACE, &prompt, 4, 8), t.blocks().to_vec());
+        let mut u = BlockTable::new();
+        u.reserve(8, &mut a).unwrap();
+        cache.insert_chain_in(BASE_KV_NAMESPACE, &(9..=16).collect::<Vec<u32>>(), u.blocks(), 0, &mut a);
+        assert_eq!(cache.lookup(&(9..=16).collect::<Vec<u32>>(), 4, 8), u.blocks().to_vec());
+    }
+
+    /// Unloading an adapter frees the blocks only it was keeping alive,
+    /// leaves blocks a live sequence still reads until that sequence
+    /// finishes, and never touches another namespace.
+    #[test]
+    fn evict_namespace_frees_that_namespaces_cached_blocks_only() {
+        let mut a = BlockAllocator::new(16, 4);
+        let mut cache = PrefixCache::new();
+        let mut ids = NamespaceIds::default();
+        let adapter = ids.fresh();
+        let prompt: Vec<u32> = (1..=8).collect();
+        let mut base = prefill_into(&mut cache, &mut a, BASE_KV_NAMESPACE, &prompt);
+        let mut live = prefill_into(&mut cache, &mut a, adapter, &prompt);
+        let mut done = prefill_into(&mut cache, &mut a, adapter, &(11..=18).collect::<Vec<u32>>());
+        done.release(&mut a);
+        assert_eq!(cache.len(), 6);
+        let free_before = a.free_blocks();
+
+        // `done` was cache-only (2 blocks); `live` still backs a sequence.
+        assert_eq!(cache.evict_namespace(adapter, &mut a), 2);
+        assert_eq!(a.free_blocks(), free_before + 2);
+        assert_eq!(cache.len(), 2, "only the base entries remain");
+        assert!(cache.lookup_in(adapter, &prompt, 4, 8).is_empty());
+        assert_eq!(cache.lookup_in(BASE_KV_NAMESPACE, &prompt, 4, 8), base.blocks().to_vec());
+
+        // The live sequence keeps its blocks; releasing it returns them.
+        live.release(&mut a);
+        base.release(&mut a);
+        assert_eq!(cache.evict(8, &mut a), 2);
+        assert_eq!(a.free_blocks(), 16, "nothing leaked");
+        assert_eq!(cache.evict_namespace(adapter, &mut a), 0, "idempotent");
+    }
+
+    /// A namespace id handed out after an unload never equals an earlier one,
+    /// so a stale id can never reach a newer adapter's blocks.
+    #[test]
+    fn fresh_namespace_never_aliases_an_evicted_one() {
+        let mut a = BlockAllocator::new(16, 4);
+        let mut cache = PrefixCache::new();
+        let mut ids = NamespaceIds::default();
+        let old = ids.fresh();
+        assert_ne!(old, BASE_KV_NAMESPACE);
+        let prompt: Vec<u32> = (1..=8).collect();
+        let mut t = prefill_into(&mut cache, &mut a, old, &prompt);
+        t.release(&mut a);
+        cache.evict_namespace(old, &mut a);
+        let new = ids.fresh();
+        assert!(new > old);
+        // Even without the eviction the new id would not see the old chain.
+        let mut t = prefill_into(&mut cache, &mut a, old, &prompt);
+        assert!(cache.lookup_in(new, &prompt, 4, 8).is_empty());
+        t.release(&mut a);
+    }
+
+    /// The namespace is part of a sequence's identity: it survives fork,
+    /// truncate and release (a released table is reused for nothing, but a
+    /// forked child must read the parent's blocks under the same adapter) and
+    /// a KV swap-in restores it.
+    #[test]
+    fn block_table_namespace_travels_with_the_sequence() {
+        let mut a = BlockAllocator::new(8, 4);
+        let mut t = BlockTable::with_namespace(7);
+        t.reserve(6, &mut a).unwrap();
+        let child = t.fork(&mut a);
+        assert_eq!(child.kv_namespace(), 7);
+        t.release(&mut a);
+        assert_eq!(t.kv_namespace(), 7);
+        let blocks = child.blocks().to_vec();
+        assert_eq!(BlockTable::restore(7, blocks, 6).kv_namespace(), 7);
     }
 
     #[test]

@@ -61,7 +61,7 @@
 
 use std::collections::HashMap;
 
-use crate::paged::{BlockAllocator, BlockTable};
+use crate::paged::{BlockAllocator, BlockTable, KvNamespace};
 
 /// Why a demote/promote could not be done. Every variant leaves the caller's
 /// state exactly as it was - a refused swap is never a half-swapped sequence.
@@ -122,6 +122,9 @@ struct HostRecord {
     /// Tokens the sequence had cached - restored onto the new block table so
     /// a partially-filled tail block resumes exactly where it left off.
     len: u32,
+    /// The namespace the sequence's K/V were computed in; the restored table
+    /// must carry it or the bytes would be read under the wrong adapter.
+    kv_namespace: KvNamespace,
     /// The device words of every block, in block order, `block_words` each.
     /// Raw `u32`, never `f32`: the pool's dtype is the engine's business
     /// (fp32, packed int8 plus its dequant scales, bf16 …) and a swap must
@@ -254,6 +257,7 @@ pub trait KvOffload {
     fn demote_kv(&mut self, key: u64, table: &mut BlockTable) -> Result<u32, KvOffloadError> {
         let blocks = table.blocks().to_vec();
         let len = table.len();
+        let kv_namespace = table.kv_namespace();
         if blocks.is_empty() {
             return Ok(0);
         }
@@ -275,7 +279,7 @@ pub trait KvOffload {
 
         let bytes = (words.len() * 4) as u64;
         let pool = self.host_kv_mut();
-        pool.records.insert(key, HostRecord { len, words });
+        pool.records.insert(key, HostRecord { len, kv_namespace, words });
         pool.bytes += bytes;
         pool.stats.peak_bytes = pool.stats.peak_bytes.max(pool.bytes);
         pool.stats.demotions += 1;
@@ -320,7 +324,7 @@ pub trait KvOffload {
         pool.bytes -= (rec.words.len() * 4) as u64;
         pool.stats.promotions += 1;
         pool.stats.blocks_in += n as u64;
-        Ok(BlockTable::restore(blocks, rec.len))
+        Ok(BlockTable::restore(rec.kv_namespace, blocks, rec.len))
     }
 
     /// Drop a demoted sequence's KV without restoring it (cancellation).
@@ -405,6 +409,18 @@ mod tests {
             }
             out
         }
+    }
+
+    /// A sequence swapped out of an adapter's namespace comes back in it:
+    /// the restored bytes are only valid under the weights that wrote them.
+    #[test]
+    fn promote_restores_the_kv_namespace() {
+        let mut e = MockEngine::new(8, 4, 7, 1 << 20);
+        let mut t = BlockTable::with_namespace(5);
+        t.reserve(6, &mut e.alloc).unwrap();
+        e.demote_kv(1, &mut t).unwrap();
+        assert_eq!(t.kv_namespace(), 5, "release keeps the namespace");
+        assert_eq!(e.promote_kv(1).unwrap().kv_namespace(), 5);
     }
 
     /// **The correctness gate.** A demoted-and-restored sequence's KV must be
