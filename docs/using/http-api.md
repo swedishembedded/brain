@@ -134,6 +134,25 @@ callers, another caller gets 404 for an id that exists. Jobs live in memory, at 
 32 per caller and 1024 per surface, finished results are forgotten after an hour or
 when more than 1 GiB is retained, and a restart forgets them all.
 
+## Typed decisions: `/v1/systemone`
+
+`POST /v1/systemone` asks a decision model typed questions (`choice`, `score`,
+`noul`) about one state, in the System One wire shape, and is a thin layer over
+the `decide` action every decision model serves. The request is
+`{"model", "state", "questions": {name: {"type", "instructions", "criteria"}}}`;
+the response is `{"model", "answers": {name: ...}, "usage": {"output_tokens": 0},
+"brain": {...}}`, with probabilities keyed in the caller's option order.
+`"model"` is a decision model id or `"auto"` (the default): the configured
+model, else a validated Laya model, else a validated `decide` model, and a
+`not_installed` error with the reason when none qualifies. A request outside the
+published limits (255 options, 2 to 10 levels) is a 422 naming the question.
+See [Decision models](../models/decision.md) for the full contract.
+
+Any model that classes its own failure reaches a client as that class, in the
+error `code`: `not_installed` (404), `failed_to_load` (500),
+`unsupported_capability` (422), `timeout` (504), `invalid_request` (422) or
+`backend_failure` (500).
+
 ## Which models each provider exposes
 
 `/models` per provider lists only the loaded models whose capability fits that

@@ -106,6 +106,12 @@ named on the model's own page (see
 |---|---|:---:|:---:|
 | [`horizon`](horizon.md) | per-outcome risk by any horizon from irregular records, competing outcomes, censored follow-up | [x] | [x] |
 
+## Decisions
+
+| Family | Solves | Infer | Train |
+|---|---|:---:|:---:|
+| [`decision`](decision.md) | calibrated answers to typed questions over options the request supplies: `decide` (MiniLM-family encoder plus a trained head) and Laya (ModernBERT-large), served as a `decide` action, over D-Bus and over `POST /v1/systemone` | [x] | [x] (SDK) |
+
 ## World models and control
 
 | Architecture | Solves | Infer | Train |

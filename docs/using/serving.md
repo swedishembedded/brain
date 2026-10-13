@@ -29,6 +29,9 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
 - `--adapter FILE`, `--adapter-manifest FILE` - see **Serving an adapter
   release** below. At most one of these two and `--watch-adapters` may be
   given.
+- `--decision-model REF|DIR` (repeatable), `--decision-default ID` - serve
+  decision models beyond the ones found in the model store, and name the one
+  `auto` resolves to. See [Decision models](../models/decision.md).
 
 At least one surface flag is meaningful for a useful server; an unknown flag
 is a hard error (exit 2), not a warning. Run `brain serve --help` for the

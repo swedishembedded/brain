@@ -318,7 +318,12 @@ impl LayaEngine {
         let answer = match q {
             Question::Choice { options, .. } => {
                 if p.len() != options.len() {
-                    return Err(format!("laya: scored {} options for a {}-option choice", p.len(), options.len()));
+                    return Err(format!(
+                        "laya: only {} of the {} options fit the model's {}-token context; send fewer or shorter options",
+                        p.len(),
+                        options.len(),
+                        self.model.max_len()
+                    ));
                 }
                 Answer::Choice {
                     choice: options[argmax(&p)].name.clone(),
@@ -328,7 +333,12 @@ impl LayaEngine {
             }
             Question::Score { levels, .. } => {
                 if p.len() != levels.len() {
-                    return Err(format!("laya: scored {} levels for a {}-level score", p.len(), levels.len()));
+                    return Err(format!(
+                        "laya: only {} of the {} levels fit the model's {}-token context; send fewer or shorter levels",
+                        p.len(),
+                        levels.len(),
+                        self.model.max_len()
+                    ));
                 }
                 // The 0-BASED expectation over level indices, the reading
                 // `decide::primitives::Question::answer` applies.

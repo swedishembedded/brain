@@ -20,6 +20,9 @@
 //!   (Anthropic `x-api-key`, others `Bearer`), and the middleware that applies it.
 //! - [`capabilities`] - routes that reach every model class: the catalogue, `run`,
 //!   and background jobs for work too long to hold a request open.
+//! - [`systemone`] - `POST /v1/systemone`: typed decisions in the System One wire
+//!   shape, a thin layer over the `decide` capability of whichever decision model
+//!   answers.
 //! - [`hooks`] - the [`RequestHooks`] seam: a say in whether a call runs, and a
 //!   record of what it cost, settled exactly once.
 //! - [`error`] — provider-shaped error bodies.
@@ -51,6 +54,7 @@ pub mod png;
 pub mod sampling;
 pub mod state;
 pub mod surface;
+pub mod systemone;
 
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, State};
@@ -112,7 +116,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .merge(models::routes())
-        .merge(provider_routes.merge(capabilities::routes()).layer(edge))
+        .merge(provider_routes.merge(capabilities::routes()).merge(systemone::routes()).layer(edge))
         .fallback(fallback)
         // Auth wraps everything (incl. the fallback): an unauthenticated caller
         // never learns which routes exist.

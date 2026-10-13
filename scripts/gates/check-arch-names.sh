@@ -153,10 +153,12 @@ done
 # Pages that are deliberately NOT one architecture: the catalog landing page,
 # and family-comparison pages that editorially discuss several related
 # architectures side by side (when to reach for which) with the per-model
-# reference detail living on each architecture's own page instead. A new
+# reference detail living on each architecture's own page instead. `decision`
+# is the contract both decision architectures (`decide`, Laya) are served
+# under, and the page `optionhead` links to for it. A new
 # entry here needs the same justification: real comparative content, not a
 # place to leave a rename unfinished.
-overview_pages="index asr vlm world-models forecast imgpipe"
+overview_pages="index asr vlm world-models forecast imgpipe decision"
 
 # Pages for something brain RUNS that is not a registry architecture: `fly`
 # executes a connectome (a wiring diagram, no checkpoint to import) and

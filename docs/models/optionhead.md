@@ -9,6 +9,10 @@ It is a ranker, not a generator. It never writes an action; it scores the ones
 it is handed. Everything trainable is a 445k-parameter head over a frozen
 sentence encoder, which is what makes the whole model 1.7 MB.
 
+This is the `decide` architecture of the decision family; [Decision
+models](decision.md) covers the family - this architecture and Laya - and how
+a decision model is served, addressed and chosen.
+
 `swedishembedded/minilm-l6-option-head` is the architecture.
 `swedishembedded/minilm-l6-option-head-<task>` is a trained one.
 

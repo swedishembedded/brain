@@ -33,6 +33,15 @@ struct Rig {
     exec: Executor,
 }
 
+impl Drop for Rig {
+    /// Stop the scheduler and let its resident models release their devices
+    /// in an orderly way: a device still alive at process exit can crash the
+    /// driver's worker threads and fail a test binary whose tests all passed.
+    fn drop(&mut self) {
+        self.exec.shutdown();
+    }
+}
+
 /// The serving stack over `store`, registered the way a serving process
 /// registers it: each servable checkpoint as its own model, plus the family
 /// model that answers inventory and selection.
@@ -198,6 +207,120 @@ async fn every_way_a_call_can_fail_is_a_distinct_machine_readable_class() {
     assert_eq!((status, code(&body)), (StatusCode::UNPROCESSABLE_ENTITY, "invalid_request"), "{body}");
 }
 
+// ------------------------------------------------------------------ /v1/systemone
+
+/// A request written the way a caller would: state keys NOT alphabetical,
+/// options NOT alphabetical.
+const STATE_TEXT: &str = r#"{"ticket": "payments failing", "days": 3}"#;
+const SYSTEMONE: &str = r#"{
+  "model": "acme/laya",
+  "state": {"ticket": "payments failing", "days": 3},
+  "questions": {
+    "is_urgent": {"type": "noul", "instructions": "Does this convey urgency?"},
+    "department": {"type": "choice", "instructions": "Which team?",
+                   "criteria": {"technical": "Outages", "billing": "Payments", "sales": "Pricing"}},
+    "frustration": {"type": "score", "instructions": "How frustrated?", "criteria": ["Calm", "Frustrated", "Very angry"]}
+  }
+}"#;
+
+#[tokio::test]
+async fn systemone_answers_in_the_shared_wire_shape_in_the_callers_order() {
+    let s = store_with_both();
+    let r = rig(&s, &[], None);
+    let (status, text) = post_raw(&r.app, "/v1/systemone", SYSTEMONE).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let doc: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(doc["model"], "acme/laya");
+    assert_eq!(doc["usage"], json!({"output_tokens": 0}));
+    assert_eq!(doc["brain"]["backend"], "laya");
+
+    let a = &doc["answers"];
+    assert_eq!(a["is_urgent"]["type"], "noul");
+    assert!(a["is_urgent"].get("confidence").is_none(), "a noul is its own confidence");
+    assert_eq!(a["department"]["type"], "choice");
+    assert!(a["department"]["confidence"].is_number());
+    assert_eq!(a["frustration"]["type"], "score");
+    assert_eq!(a["frustration"]["legend"], json!({"0": "Calm", "1": "Frustrated", "2": "Very angry"}));
+    assert_eq!(a["frustration"]["probabilities"].as_object().unwrap().len(), 3);
+
+    // Order is part of the wire: questions as asked, options as listed.
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} missing from {text}"));
+    assert!(at("\"is_urgent\"") < at("\"department\"") && at("\"department\"") < at("\"frustration\""), "{text}");
+    assert!(at("\"technical\": 0") < at("\"billing\": 0") && at("\"billing\": 0") < at("\"sales\": 0"), "options keep the caller's order: {text}");
+}
+
+#[tokio::test]
+async fn systemone_and_the_capability_return_the_same_numbers_for_the_same_request() {
+    let s = store_with_both();
+    let r = rig(&s, &[], None);
+    for model in ["acme/laya", "acme/triage"] {
+        let body = SYSTEMONE.replace("acme/laya", model);
+        let (status, text) = post_raw(&r.app, "/v1/systemone", &body).await;
+        assert_eq!(status, StatusCode::OK, "{model}: {text}");
+        let one: Value = serde_json::from_str(&text).unwrap();
+
+        let questions = r#"{"is_urgent": {"type": "noul", "instructions": "Does this convey urgency?"},
+            "department": {"type": "choice", "instructions": "Which team?",
+                           "criteria": {"technical": "Outages", "billing": "Payments", "sales": "Pricing"}},
+            "frustration": {"type": "score", "instructions": "How frustrated?", "criteria": ["Calm", "Frustrated", "Very angry"]}}"#;
+        let (status, full) = run(&r.app, model, json!({"state": STATE_TEXT, "state_format": "json", "questions": questions})).await;
+        assert_eq!(status, StatusCode::OK, "{model}: {full}");
+        let answers = full["outputs"]["answers"].as_array().unwrap();
+
+        let dept = answers.iter().find(|a| a["id"] == "department").unwrap();
+        assert_eq!(one["answers"]["department"]["choice"], dept["selected"], "{model}");
+        for cand in dept["ranked"].as_array().unwrap() {
+            let id = cand["id"].as_str().unwrap();
+            assert_eq!(one["answers"]["department"]["probabilities"][id], cand["probability"], "{model}: {id}");
+        }
+        let urgent = answers.iter().find(|a| a["id"] == "is_urgent").unwrap();
+        assert_eq!(one["answers"]["is_urgent"]["noul"], urgent["noul"], "{model}");
+        let anger = answers.iter().find(|a| a["id"] == "frustration").unwrap();
+        assert_eq!(one["answers"]["frustration"]["score"], anger["score"], "{model}");
+    }
+}
+
+#[tokio::test]
+async fn systemone_refuses_what_is_outside_the_published_limits_with_a_422() {
+    let s = store_with_both();
+    let r = rig(&s, &[], None);
+    let many = |n: usize| (0..n).map(|i| format!("\"o{i}\": \"d\"")).collect::<Vec<_>>().join(", ");
+    let levels = |n: usize| (0..n).map(|i| format!("\"l{i}\"")).collect::<Vec<_>>().join(", ");
+    let req = |q: String| format!(r#"{{"model": "acme/laya", "state": "s", "questions": {{"q": {q}}}}}"#);
+    let cases = [
+        ("256 options", req(format!(r#"{{"type": "choice", "instructions": "x", "criteria": {{{}}}}}"#, many(256)))),
+        ("11 levels", req(format!(r#"{{"type": "score", "instructions": "x", "criteria": [{}]}}"#, levels(11)))),
+        ("1 level", req(format!(r#"{{"type": "score", "instructions": "x", "criteria": [{}]}}"#, levels(1)))),
+        ("unknown type", req(r#"{"type": "vibes", "instructions": "x"}"#.to_string())),
+        ("missing instructions", req(r#"{"type": "noul"}"#.to_string())),
+    ];
+    for (what, body) in cases {
+        let (status, text) = post_raw(&r.app, "/v1/systemone", &body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{what}: {text}");
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(code(&doc), "invalid_request", "{what}: {text}");
+        assert!(doc["error"]["message"].as_str().unwrap().contains("\"q\""), "{what}: the failing question is named: {text}");
+    }
+    // The limits are inclusive at the wire (`decisions::wire`'s tests take 255
+    // options). How many options a model can HOLD is bounded by its context,
+    // so a model that cannot hold them says how many fit.
+    let ok = req(format!(r#"{{"type": "score", "instructions": "x", "criteria": [{}]}}"#, levels(10)));
+    assert_eq!(post_raw(&r.app, "/v1/systemone", &ok).await.0, StatusCode::OK);
+    let too_long = req(format!(r#"{{"type": "choice", "instructions": "x", "criteria": {{{}}}}}"#, many(255)));
+    let (status, text) = post_raw(&r.app, "/v1/systemone", &too_long).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+    assert!(text.contains("token context") && text.contains("of the 255 options"), "the refusal says why: {text}");
+}
+
+#[tokio::test]
+async fn systemone_distinguishes_a_malformed_body_a_missing_field_and_an_unknown_model() {
+    let s = store_with_both();
+    let r = rig(&s, &[], None);
+    assert_eq!(post_raw(&r.app, "/v1/systemone", "not json").await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(post_raw(&r.app, "/v1/systemone", r#"{"questions": {}}"#).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(post_raw(&r.app, "/v1/systemone", r#"{"model": "nobody/home", "state": "s", "questions": {"q": {"type": "noul", "instructions": "x"}}}"#).await.0, StatusCode::NOT_FOUND);
+}
+
 // ------------------------------------------------------------------ selection
 
 fn validate(model_dir: &std::path::Path) {
@@ -206,19 +329,18 @@ fn validate(model_dir: &std::path::Path) {
     std::fs::write(model_dir.join(MANIFEST_FILE), manifest).unwrap();
 }
 
-async fn select(app: &Router) -> Value {
-    post(app, "/v1/run", json!({"model": "brain/decision", "action": "select", "params": {}})).await.1["outputs"].clone()
-}
+const AUTO: &str = r#"{"state": "s", "questions": {"q": {"type": "noul", "instructions": "x"}}}"#;
 
 #[tokio::test]
-async fn auto_selects_nothing_when_no_model_was_validated_and_says_why() {
+async fn auto_refuses_to_answer_from_a_model_nobody_validated_and_says_why() {
     let s = store_with_both();
     let r = rig(&s, &[], None);
-    let sel = select(&r.app).await;
-    assert_eq!(sel["chosen"], Value::Null);
-    assert_eq!(sel["rule"], "none");
-    let reason = sel["reason"].as_str().unwrap();
-    assert!(reason.contains("acme/laya") && reason.contains("no recorded validation"), "{reason}");
+    let (status, text) = post_raw(&r.app, "/v1/systemone", AUTO).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{text}");
+    let doc: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(code(&doc), "not_installed");
+    let msg = doc["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("acme/laya") && msg.contains("no recorded validation"), "{msg}");
 }
 
 #[tokio::test]
@@ -226,22 +348,30 @@ async fn auto_prefers_a_validated_laya_over_a_validated_decide_model() {
     let s = store_with_both();
     validate(&s.join("acme/laya"));
     validate(&s.join("acme/triage"));
-    let sel = select(&rig(&s, &[], None).app).await;
-    assert_eq!((sel["chosen"].as_str(), sel["rule"].as_str()), (Some("acme/laya"), Some("validated-laya")));
+    let r = rig(&s, &[], None);
+    let (status, text) = post_raw(&r.app, "/v1/systemone", AUTO).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap()["model"], "acme/laya");
 
     // Remove the Laya validation: the validated decide model is next.
     std::fs::remove_file(s.join("acme/laya").join(MANIFEST_FILE)).unwrap();
-    let sel = select(&rig(&s, &[], None).app).await;
-    assert_eq!((sel["chosen"].as_str(), sel["rule"].as_str()), (Some("acme/triage"), Some("validated-decide")));
+    let r = rig(&s, &[], None);
+    let (status, text) = post_raw(&r.app, "/v1/systemone", AUTO).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap()["model"], "acme/triage");
 }
 
 #[tokio::test]
 async fn an_explicitly_configured_default_beats_validation_and_is_reported() {
     let s = store_with_both();
     validate(&s.join("acme/laya"));
-    let sel = select(&rig(&s, &["acme/triage"], Some("acme/triage")).app).await;
-    assert_eq!((sel["chosen"].as_str(), sel["rule"].as_str()), (Some("acme/triage"), Some("configured")));
-    assert!(sel["reason"].as_str().unwrap().contains("explicitly configured"));
+    let r = rig(&s, &["acme/triage"], Some("acme/triage"));
+    let (status, text) = post_raw(&r.app, "/v1/systemone", AUTO).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap()["model"], "acme/triage");
+    let (_, sel) = post(&r.app, "/v1/run", json!({"model": "brain/decision", "action": "select", "params": {}})).await;
+    assert_eq!(sel["outputs"]["rule"], "configured");
+    assert!(sel["outputs"]["reason"].as_str().unwrap().contains("explicitly configured"));
 }
 
 #[tokio::test]

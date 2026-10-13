@@ -1117,4 +1117,45 @@ mod tests {
         mgr.run(HOST_PATH_MODEL.into(), "ingest".into(), r#"{"prompt": "hi"}"#.into(), Default::default(), String::new(), String::new()).await.expect("a served param is accepted");
         assert_eq!(reached.load(Ordering::SeqCst), 1);
     }
+
+    /// A decision model needs nothing from this crate: it is a capability like
+    /// any other, so `Run` carries its request and its answer, and its failure
+    /// classes, with no decision-specific code here.
+    #[tokio::test]
+    async fn run_carries_a_decision_model_request_answer_and_failure_class() {
+        use catalog::resident_decision::DecisionResident;
+        use decisions::fixtures::{write_laya, Scratch};
+
+        let store = Scratch::new("dbus-decision");
+        write_laya(&store.join("acme/laya"), 48);
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 8 * GB, 0);
+        let models: Vec<std::sync::Arc<dyn ResidentModel>> = vec![
+            std::sync::Arc::new(DecisionResident::new("acme/laya", store.join("acme/laya"))),
+            std::sync::Arc::new(DecisionResident::new("acme/gone", store.join("acme/gone"))),
+        ];
+        let mgr = Manager::new(Executor::start(models, budgets, Policy::default()));
+
+        let listed: Vec<String> = mgr.list_models().await;
+        assert_eq!(listed, ["acme/gone", "acme/laya"]);
+
+        let params = serde_json::json!({
+            "state": "my payment failed again today",
+            "questions": r#"[{"id": "team", "type": "choice", "instruction": "who", "options": ["billing", "tech"]}]"#,
+        })
+        .to_string();
+        let (result, _fds, _meta) = mgr.run("acme/laya".into(), "decide".into(), params.clone(), Default::default(), String::new(), String::new()).await.expect("Run must carry the decision");
+        let out: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(out["backend"], "laya");
+        assert_eq!(out["answers"][0]["id"], "team");
+        assert_eq!(out["answers"][0]["ranked"].as_array().unwrap().len(), 2);
+
+        let err = mgr.run("acme/gone".into(), "decide".into(), params, Default::default(), String::new(), String::new()).await.expect_err("an uninstalled model must fail");
+        let text = err.to_string();
+        let (class, message) = capability::classify(&text).unwrap_or_else(|| panic!("the failure class must survive the bus: {text}"));
+        assert_eq!(class, capability::FailureClass::NotInstalled);
+        assert!(message.contains("brain pull acme/gone"), "{message}");
+        // Release the device in an orderly way before the test binary exits.
+        mgr.executor.shutdown();
+    }
 }
