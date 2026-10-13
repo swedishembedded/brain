@@ -139,3 +139,25 @@ fn the_head_and_embedding_are_held_in_bf16_and_train_the_same_adapters() {
         assert_eq!(host, init[half.cfg.head_weight()], "tie={tie}: the packed table reads back as the values it was built from");
     }
 }
+
+/// A bf16 base reads the fp32 activations, never an int8 packing of them, so
+/// building its forward and backward tapes must not allocate a packed copy
+/// per linear and drop it: the recorded steps do not bind those buffers, and
+/// the dropped bytes count against the backend's reclaim ceiling. At 8192
+/// tokens on an 8B model they summed past it (4 GiB) and the build panicked.
+/// The fp32 build is the control: it drops nothing.
+#[test]
+fn building_a_bf16_base_leaves_no_dropped_device_buffers_behind() {
+    if gpu_disabled() {
+        return;
+    }
+    let cfg = QwenConfig { block_size: 64, ..config() };
+    let init = weights(&cfg, 0.3);
+    let control = Qwen::new_lora_dt(cfg.clone(), 1, 64, &init, Dtype::F32);
+    assert_eq!(control.gpu().pending_reclaim_bytes(), 0, "the fp32 control drops nothing while building");
+    let half = Qwen::new_lora_dt(cfg, 1, 64, &init, Dtype::BF16);
+    if half.linear_dtype() != Some(Dtype::BF16) {
+        return;
+    }
+    assert_eq!(half.gpu().pending_reclaim_bytes(), 0, "a bf16 base builds without abandoning device buffers");
+}

@@ -1787,14 +1787,20 @@ impl Qwen {
     ///
     /// `Ops::act`'s packing is two dispatches and one `I8Scratch` allocation
     /// per activation, and a decode tape builds four of them per layer per
-    /// token - all of it dead on an fp32 model, which is what every
-    /// `from_tensors_decode`/`load_inference` build is. The tier is read off
-    /// the resident weights rather than off a remembered request, the same
-    /// rule `Self::linear_dtype` states, so a tier that silently fell back to
+    /// token - all of it dead on a model whose weights are all fp32, bf16 or
+    /// f16 (those tiers read the raw fp32 rows, `Ops::matmul`), which is what
+    /// every `from_tensors_decode`/`load_inference` build and every bf16 LoRA
+    /// base is. On a bf16 base the dead packing was `n` bytes per input
+    /// element per linear per layer, dropped as the tape was recorded: 4 GiB
+    /// of abandoned buffers at 8192 tokens on an 8B stage, enough to trip
+    /// the backend's reclaim ceiling. The tier is read off the resident
+    /// weights rather than off a remembered request, the same rule
+    /// `Self::linear_dtype` states, so a tier that silently fell back to
     /// fp32 gets the cheap path it deserves.
     fn ops_act(&self, s: &mut Vec<Step>, x: &DeviceBuffer, rows: u32, k: u32) -> Act {
         // An int8 base reads fp32 activations: its kernels decode the weight.
-        if self.int8_base || self.weights.values().all(|w| matches!(w, Weight::F32 { .. })) {
+        let reads_f32_rows = |w: &Weight| matches!(w, Weight::F32 { .. } | Weight::BF16 { .. } | Weight::F16 { .. });
+        if self.int8_base || self.weights.values().all(reads_f32_rows) {
             return self.ops.act_f32(x, 0, rows, k);
         }
         self.ops.act(s, x, 0, rows, k)
