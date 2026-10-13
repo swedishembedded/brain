@@ -14,4 +14,7 @@ publish = false
 brain = { workspace = true, features = ["decision"] }
 
 [package.metadata.brain]
-max-brain-crates = 30
+# 30 -> 31: the "decision" surface gained brain-decisions, the one engine
+# over both decision architectures that the SDK and the served `decide`
+# capability now share (it used to be private to the SDK).
+max-brain-crates = 31

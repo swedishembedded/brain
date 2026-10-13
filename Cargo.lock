@@ -404,6 +404,7 @@ dependencies = [
  "brain-cosyvoice",
  "brain-data",
  "brain-decide",
+ "brain-decisions",
  "brain-eval",
  "brain-florence2",
  "brain-flux2",
@@ -716,6 +717,7 @@ name = "brain-catalog"
 version = "2.0.0"
 dependencies = [
  "axum",
+ "brain",
  "brain-apiserve",
  "brain-arcface",
  "brain-audio",
@@ -727,6 +729,7 @@ dependencies = [
  "brain-controlnet",
  "brain-cosyvoice",
  "brain-data",
+ "brain-decisions",
  "brain-deepseek2ocr",
  "brain-deepseekocr2",
  "brain-deepseekvl",
@@ -1064,6 +1067,8 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "brain-capability",
+ "brain-catalog",
+ "brain-decisions",
  "brain-modelref",
  "brain-residency",
  "brain-shutdown",
@@ -1087,6 +1092,21 @@ dependencies = [
  "brain-optim",
  "brain-paramstore",
  "brain-rlcd",
+ "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-decisions"
+version = "2.0.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-decide",
+ "brain-gpu-core",
+ "brain-modelstore",
+ "brain-modernbert",
  "brain-testutil",
  "serde_json",
 ]

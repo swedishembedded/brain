@@ -23,4 +23,7 @@ brain = { workspace = true, features = ["decision", "viewport"] }
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # Matches samples/decision/doom's "decision" + "viewport" combination.
-max-brain-crates = 37
+# 37 -> 38: the "decision" surface gained brain-decisions, the one engine
+# over both decision architectures that the SDK and the served `decide`
+# capability now share (it used to be private to the SDK).
+max-brain-crates = 38

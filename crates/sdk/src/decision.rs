@@ -42,6 +42,12 @@
 //! `convaiinnovations/laya`'s ModernBERT-large trunk + its own decision head
 //! (`crates/modernbert`).
 //!
+//! The loading, the Laya serving calibration and the typed question-to-answer
+//! mapping live in `crates/decisions` ([`decisions::engine`]), not here: the
+//! same engine answers a request that reaches a served model over D-Bus or
+//! HTTP, so the two paths cannot drift apart. This module adds what only a
+//! library caller has - training, saving, the stage chain.
+//!
 //! `choose`/`probability`/`set_question` and the [`Flow`]/[`Stages`]
 //! `train`/`evaluate`/`save`/`turn` chain answer the same way on either
 //! backend, because they mean the same thing for both.
@@ -149,6 +155,8 @@ pub use decide::primitives::{Answer, Opt, Question};
 /// (`json.dumps(..., ensure_ascii=False)`'s own formatting), for a caller
 /// rendering a response the same way it read the request.
 pub use modernbert::{write_json, OrderedJson, State};
+
+use decisions::engine::{argmax, scaled, DecideWeights, LayaEngine, LayaWeights};
 
 use crate::flow::{EvalReport, Flow, Stages, TrainReport};
 use crate::{Device, Error, Result};
@@ -283,209 +291,51 @@ enum Backend {
     /// the pre-existing, unchanged path ([`load_decide`]).
     Decide(Decide),
     /// `convaiinnovations/laya`'s ModernBERT-large trunk + its own decision
-    /// head (`crates/modernbert`). Boxed: [`LayaBackend`] carries two whole
+    /// head (`crates/modernbert`). Boxed: [`LayaEngine`] carries two whole
     /// on-device models, and would otherwise make every `Backend::Decide`
     /// significantly larger than the `Decide` it actually holds.
-    Laya(Box<LayaBackend>),
+    Laya(Box<LayaEngine>),
 }
 
-/// The Laya (`convaiinnovations/laya`) backend: `crates/modernbert`'s own
-/// trunk+head+tokenizer composition, plus the SERVING CALIBRATION this SDK
-/// owns on top of it. Trunk frozen, head trainable - see
-/// [`DecisionPipeline::train_choices`]'s Laya arm.
-///
-/// **`choose`/`probability` pass exactly ONE question at a time** (the same
-/// SDK contract the `Decide` arm has), so `crates/modernbert`'s trunk is
-/// re-encoded from scratch on every call - see this module's doc, "Two
-/// architectures, one surface", for the honest cost statement this implies.
-struct LayaBackend {
-    /// The trunk, head and tokenizer as one model - `crates/modernbert`'s own
-    /// composition, the direct counterpart of the [`Decide`] this enum's
-    /// other arm holds. This SDK owns the CALIBRATION below and nothing else
-    /// about the architecture, which is what lets `crates/modernbert` train
-    /// and test a Laya model without the SDK on top of it.
-    model: modernbert::LayaDecision,
-    /// Per-qtype (`choice`/`score`/`noul`, [`modernbert::QType::index`]
-    /// order) serving calibration scalar, `rl_agent_config.json`'s own
-    /// `temperature` table - the FALLBACK, consulted only when
-    /// [`LayaBackend::temperature_by_options`] has no entry for this call's
-    /// own bucket.
-    temperature: Vec<f32>,
-    /// `rl_agent_config.json`'s finer per-(qtype, option-count) table, keyed
-    /// by [`modernbert::temp_bucket`]. Consulted FIRST, which is what
-    /// `rl_agent_api.py` does - and it is not a detail: the released
-    /// checkpoint fits a 2-option choice at 1.9064 and an 11-or-more-option
-    /// one at 0.1006 against a per-qtype 1.6369, so reading only the scalar
-    /// publishes a distribution the reference never produces. Argmax is
-    /// unaffected by any positive temperature, which is exactly why this was
-    /// invisible until the two implementations were compared number by
-    /// number.
-    temperature_by_options: std::collections::HashMap<String, f32>,
+/// [`DecisionPipeline::route`]'s Laya arm: the noul probability plus the act
+/// head's own softmax and argmax.
+fn laya_route(l: &mut LayaEngine, state: &str, proposition: &str) -> Result<RouteVerdict> {
+    let q = modernbert::Question::Noul { ins: proposition.to_string(), false_text: None, true_text: None };
+    let scored = l.score_raw(&State::Str(state.to_string()), &q).map_err(Error::Backend)?;
+    let (raw, act_raw) = (scored.logits, scored.act_logits);
+    if raw.len() != 2 {
+        return Err(Error::Backend(format!("laya: a noul question must score exactly 2 options (false, true), got {}", raw.len())));
+    }
+    let t = l.temperature_for(modernbert::QType::Noul, raw.len());
+    let p = softmax(&scaled(&raw, t));
+    // The act head's own calibration is not the option head's - see
+    // `RouteVerdict`'s own doc: the temperature table is keyed by
+    // qtype/cardinality for the OPTION head and names nothing for the act
+    // head, so no temperature is applied here.
+    let act_p = softmax(&act_raw);
+    let act_index = act_p.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0);
+    Ok(RouteVerdict { probability: p[1], act_probabilities: act_p, act_index })
 }
 
-impl LayaBackend {
-    /// The serving temperature for one call: the per-cardinality bucket if
-    /// the checkpoint fitted one, else the per-qtype scalar, else 1.0 - the
-    /// same ladder `rl_agent_api.py` walks.
-    fn temperature_for(&self, qtype: modernbert::QType, options: usize) -> f32 {
-        if let Some(t) = self.temperature_by_options.get(&modernbert::temp_bucket(qtype, options)) {
-            return *t;
-        }
-        self.temperature.get(qtype.index() as usize).copied().unwrap_or(1.0)
+fn laya_choose(l: &mut LayaEngine, state: &str, instructions: &str, options: &[&str]) -> Result<Choice> {
+    if options.is_empty() {
+        return Err(Error::MissingArgument("choose needs at least one option".into()));
     }
-
-    /// Run one packed `(state, question)` call through the trunk and head,
-    /// returning raw (unsoftmaxed) option logits AND the act head's own raw
-    /// logits (`[n_act]` - always exactly one question per call here, see
-    /// this module's "Two architectures, one surface" doc). [`Self::score`]
-    /// and [`Self::route`] are both thin callers of this, so the two-wait
-    /// cross-`Gpu`-handle dispatch below exists in exactly one place.
-    fn score_raw(&mut self, state: &State, q: &modernbert::Question) -> Result<(Vec<f32>, Vec<f32>)> {
-        self.model.score(state, q, None).map_err(Error::Backend)
-    }
-
-    /// [`Self::score_raw`], option logits only - [`Self::ask`]'s own caller.
-    fn score(&mut self, state: &State, q: &modernbert::Question) -> Result<Vec<f32>> {
-        self.score_raw(state, q).map(|(logits, _act_logits)| logits)
-    }
-
-    /// Answer ONE typed question about `state` - the Laya arm of
-    /// [`DecisionPipeline::decide`], and the single place this backend turns
-    /// scores into an [`Answer`]. [`Self::choose`]/[`Self::probability`] are
-    /// its callers, so the three question types cannot drift apart in how
-    /// they are calibrated.
-    fn ask(&mut self, state: &State, q: &Question) -> Result<Answer> {
-        let mq = laya_question(q);
-        let raw = self.score(state, &mq)?;
-        // Calibrated by how many options were actually SCORED (markers that
-        // survived `build_sequence`'s budget), not by how many the caller
-        // asked about - the reference keys its bucket off the same count.
-        let p = softmax(&scaled(&raw, self.temperature_for(mq.qtype(), raw.len())));
-        match q {
-            Question::Choice { options, .. } => {
-                if p.len() != options.len() {
-                    return Err(Error::Backend(format!("laya: scored {} options for a {}-option choice", p.len(), options.len())));
-                }
-                Ok(Answer::Choice {
-                    choice: options[argmax(&p)].name.clone(),
-                    probabilities: options.iter().map(|o| o.name.clone()).zip(p.iter().copied()).collect(),
-                    confidence: confidence(&p),
-                })
-            }
-            Question::Score { levels, .. } => {
-                if p.len() != levels.len() {
-                    return Err(Error::Backend(format!("laya: scored {} levels for a {}-level score", p.len(), levels.len())));
-                }
-                // The 0-BASED expectation over level indices, the same
-                // reading `decide::primitives::Question::answer` applies -
-                // all the mass on the first level scores 0, not 1.
-                Ok(Answer::Score {
-                    score: p.iter().enumerate().map(|(i, &pi)| i as f32 * pi).sum(),
-                    legend: levels.clone(),
-                    confidence: confidence(&p),
-                    probabilities: p,
-                })
-            }
-            Question::Noul { .. } => {
-                if p.len() != 2 {
-                    return Err(Error::Backend(format!("laya: a noul question must score exactly 2 options (false, true), got {}", p.len())));
-                }
-                // render_options() puts the "true" reading at index 1 - see
-                // modernbert::sequence's own module doc.
-                Ok(Answer::Noul { noul: p[1] })
-            }
+    let q = Question::Choice { instructions: instructions.to_string(), options: options.iter().map(|o| Opt::new(*o)).collect() };
+    match l.ask(&State::Str(state.to_string()), &q).map_err(Error::Backend)? {
+        Answer::Choice { choice, probabilities, confidence } => {
+            let index = argmax(&probabilities.iter().map(|(_, p)| *p).collect::<Vec<f32>>());
+            Ok(Choice { choice, index, probabilities, confidence })
         }
-    }
-
-    /// [`DecisionPipeline::route`]'s own Laya-arm implementation: the noul
-    /// probability plus the act head's own softmax and argmax.
-    fn route(&mut self, state: &str, proposition: &str) -> Result<RouteVerdict> {
-        let q = modernbert::Question::Noul { ins: proposition.to_string(), false_text: None, true_text: None };
-        let (raw, act_raw) = self.score_raw(&State::Str(state.to_string()), &q)?;
-        if raw.len() != 2 {
-            return Err(Error::Backend(format!(
-                "laya: a noul question must score exactly 2 options (false, true), got {}",
-                raw.len()
-            )));
-        }
-        let t = self.temperature_for(modernbert::QType::Noul, raw.len());
-        let p = softmax(&scaled(&raw, t));
-        // The act head's own calibration is not the option head's - see
-        // `RouteVerdict`'s own doc: `rl_agent_config.json`'s temperature
-        // table is keyed by qtype/cardinality for the OPTION head, and names
-        // nothing for the act head, so no temperature is applied here.
-        let act_p = softmax(&act_raw);
-        let act_index = act_p.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0);
-        Ok(RouteVerdict { probability: p[1], act_probabilities: act_p, act_index })
-    }
-
-    fn choose(&mut self, state: &str, instructions: &str, options: &[&str]) -> Result<Choice> {
-        if options.is_empty() {
-            return Err(Error::MissingArgument("choose needs at least one option".into()));
-        }
-        let q = Question::Choice {
-            instructions: instructions.to_string(),
-            options: options.iter().map(|o| Opt::new(*o)).collect(),
-        };
-        match self.ask(&State::Str(state.to_string()), &q)? {
-            Answer::Choice { choice, probabilities, confidence } => {
-                let index = argmax(&probabilities.iter().map(|(_, p)| *p).collect::<Vec<f32>>());
-                Ok(Choice { choice, index, probabilities, confidence })
-            }
-            other => Err(Error::Backend(format!("laya: a choice question answered as {other:?}"))),
-        }
-    }
-
-    fn probability(&mut self, state: &str, proposition: &str) -> Result<f32> {
-        let q = Question::Noul { instructions: proposition.to_string(), yes: None, no: None };
-        match self.ask(&State::Str(state.to_string()), &q)? {
-            Answer::Noul { noul } => Ok(noul),
-            other => Err(Error::Backend(format!("laya: a noul question answered as {other:?}"))),
-        }
+        other => Err(Error::Backend(format!("laya: a choice question answered as {other:?}"))),
     }
 }
 
-/// The typed question, in Laya's own `render_options` vocabulary. One place,
-/// so the mapping (a `Choice`'s per-option description, a `Score`'s ordered
-/// levels, a `Noul`'s two criteria texts - `yes` is the TRUE reading) cannot
-/// be spelled differently by two callers.
-fn laya_question(q: &Question) -> modernbert::Question {
-    match q {
-        Question::Choice { instructions, options } => modernbert::Question::Choice {
-            ins: instructions.clone(),
-            options: options.iter().map(|o| (o.name.clone(), o.description.clone())).collect(),
-        },
-        Question::Score { instructions, levels } => {
-            modernbert::Question::Score { ins: instructions.clone(), options: levels.clone() }
-        }
-        Question::Noul { instructions, yes, no } => {
-            modernbert::Question::Noul { ins: instructions.clone(), false_text: no.clone(), true_text: yes.clone() }
-        }
-    }
-}
-
-/// First maximal index, so ties resolve to the option the caller listed
-/// first - `decide::primitives`' own convention, reproduced here because its
-/// `argmax` is private to that crate.
-fn argmax(p: &[f32]) -> usize {
-    let mut best = 0;
-    for (i, &v) in p.iter().enumerate() {
-        if v > p[best] {
-            best = i;
-        }
-    }
-    best
-}
-
-/// Divide raw scores by a serving-time temperature before the host softmax -
-/// a no-op (returns `scores` unchanged) on a non-finite or non-positive `t`,
-/// which a malformed `rl_agent_config.json` should not be able to turn into
-/// a NaN/Inf softmax input.
-fn scaled(scores: &[f32], t: f32) -> Vec<f32> {
-    if t.is_finite() && t > 0.0 {
-        scores.iter().map(|&s| s / t).collect()
-    } else {
-        scores.to_vec()
+fn laya_probability(l: &mut LayaEngine, state: &str, proposition: &str) -> Result<f32> {
+    let q = Question::Noul { instructions: proposition.to_string(), yes: None, no: None };
+    match l.ask(&State::Str(state.to_string()), &q).map_err(Error::Backend)? {
+        Answer::Noul { noul } => Ok(noul),
+        other => Err(Error::Backend(format!("laya: a noul question answered as {other:?}"))),
     }
 }
 
@@ -598,7 +448,7 @@ impl DecisionPipeline {
                 }
                 Ok(answers)
             }
-            Backend::Laya(l) => questions.iter().map(|q| l.ask(state, q)).collect(),
+            Backend::Laya(l) => questions.iter().map(|q| l.ask(state, q).map_err(Error::Backend)).collect(),
         }
     }
 
@@ -624,7 +474,7 @@ impl DecisionPipeline {
                     _ => Err(Error::Backend("the model did not return a choice".into())),
                 }
             }
-            Backend::Laya(l) => l.choose(state, instructions, options),
+            Backend::Laya(l) => laya_choose(l, state, instructions, options),
         }
     }
 
@@ -639,7 +489,7 @@ impl DecisionPipeline {
                     _ => Err(Error::Backend("the model did not return a probability".into())),
                 }
             }
-            Backend::Laya(l) => l.probability(state, proposition),
+            Backend::Laya(l) => laya_probability(l, state, proposition),
         }
     }
 
@@ -657,7 +507,7 @@ impl DecisionPipeline {
                  semantic/convergence/learned signal ensemble on top of a trained Decide model."
                     .into(),
             )),
-            Backend::Laya(l) => l.route(state, proposition),
+            Backend::Laya(l) => laya_route(l, state, proposition),
         }
     }
 
@@ -1342,246 +1192,42 @@ impl DecisionPipelineBuilder {
 /// the part they genuinely have in common - the checkpoint, the tokenizer and
 /// the device are the same three things whatever question the head is later
 /// asked. What differs is only what gets trained on top.
-pub(crate) fn load_decide(
-    dir: &str,
-    head: Option<&str>,
-    device: &Device,
-    limits: Limits,
-    seed: u64,
-) -> Result<Decide> {
-    let path = Path::new(dir);
-    let cfg_json = std::fs::read_to_string(path.join("config.json"))
-        .map_err(|e| Error::Backend(format!("read {dir}/config.json: {e}")))?;
-    let weights = path.join("model.safetensors");
-    let tensors = checkpoint::safetensors::read(
-        weights.to_str().ok_or_else(|| Error::Backend("non-UTF-8 weights path".into()))?,
-    )
-    .map_err(|e| Error::Backend(format!("read {}: {e}", weights.display())))?;
-
-    // ONE load path for both conventions, and the FILE says which it is -
-    // a caller passes a directory, not a format. A published
-    // `sentence-transformers` checkpoint is named the Hugging Face way; one
-    // written by `Decide::save_model` (a model whose encoder has been
-    // trained, so a head-only adapter could not reproduce it) is named the
-    // way this crate names its own parameters, and carries its head in the
-    // same file.
-    let names: Vec<String> = tensors.iter().map(|t| t.name.clone()).collect();
-    let probe = decide::import::config_from_hf(&cfg_json)
-        .or_else(|_| decide::config::EncoderConfig::from_json_strict(&cfg_json))
-        .map_err(Error::Backend)?;
-    let naming = decide::import::sniff_naming(&names, &probe).map_err(Error::Backend)?;
-    let (cfg, enc_init, saved_head) = match naming {
-        decide::import::Naming::Hf => {
-            let cfg = decide::import::config_from_hf(&cfg_json).map_err(Error::Backend)?;
-            let enc = decide::import::brain_init_from_hf(tensors, &cfg).map_err(Error::Backend)?;
-            (cfg, enc, None)
-        }
-        decide::import::Naming::Brain => {
-            let cfg = decide::config::EncoderConfig::from_json_strict(&cfg_json).map_err(Error::Backend)?;
-            let (enc, rest) = decide::import::split_brain_tensors(tensors, &cfg).map_err(Error::Backend)?;
-            (cfg, enc, Some(rest))
-        }
-    };
-
-    let tok_path = path.join("tokenizer.json");
-    let tok = data::wordpiece::WordPiece::from_file(
-        tok_path.to_str().ok_or_else(|| Error::Backend("non-UTF-8 tokenizer path".into()))?,
-    )
-    .map_err(Error::Backend)?;
-
-    let head_init = match (head, saved_head) {
-        // An explicitly supplied head wins over the one in the checkpoint:
-        // a caller naming a file means to use that file.
-        (Some(p), _) => {
-            let t = checkpoint::safetensors::read(p).map_err(|e| Error::Backend(format!("read {p}: {e}")))?;
-            t.into_iter().map(|x| (x.name, x.data)).collect()
-        }
-        // A saved decision model carries the head it was trained with. It is
-        // checked against the head manifest rather than trusted, so a file
-        // missing one is a named error and not a silently re-initialized
-        // head - which would load, answer, and be a different model.
-        (None, Some(mut saved)) => {
-            let mut head_init = std::collections::HashMap::new();
-            for (name, shape) in decide::head::tensor_manifest(&cfg) {
-                let numel: usize = shape.iter().product();
-                match saved.remove(&name) {
-                    Some(v) if v.len() == numel => {
-                        head_init.insert(name, v);
-                    }
-                    Some(v) => {
-                        return Err(Error::Backend(format!(
-                            "{dir}: head parameter {name} has {} elements, expected {numel}",
-                            v.len()
-                        )))
-                    }
-                    None => {
-                        return Err(Error::Backend(format!(
-                            "{dir}: a decision checkpoint in this crate's own naming must carry its \
-                             head, and {name} is missing"
-                        )))
-                    }
-                }
-            }
-            // Coverage BOTH ways: a tensor in the file that no parameter
-            // claims is a checkpoint this code does not fully understand,
-            // and loading it anyway would quietly drop whatever it was.
-            if !saved.is_empty() {
-                let mut extra: Vec<&String> = saved.keys().collect();
-                extra.sort();
-                return Err(Error::Backend(format!("{dir}: {} unclaimed tensors: {extra:?}", extra.len())));
-            }
-            head_init
-        }
-        (None, None) => decide::init::init_head(&cfg, seed),
-    };
-
+pub(crate) fn load_decide(dir: &str, head: Option<&str>, device: &Device, limits: Limits, seed: u64) -> Result<Decide> {
+    let weights = DecideWeights::read(dir, head, seed).map_err(Error::Backend)?;
     crate::device::resolve(device)?;
     let gpu = gpu_core::Gpu::new(decide::kern::PIPELINES);
-    let mut model = Decide::new_on(gpu, cfg, tok, limits, &enc_init, &head_init, true);
-    model.set_provenance(decide::decide::Provenance {
-        base: base_reference(path),
-        ..Default::default()
-    });
-    Ok(model)
+    Ok(weights.build(gpu, limits, true))
 }
 
-/// Resolve `dir` to a [`Backend`]: [`is_laya_dir`] sniffs the directory
+/// Resolve `dir` to a [`Backend`]: [`decisions::engine::is_laya_dir`] sniffs the directory
 /// STRUCTURE and routes to [`load_laya`] when it matches, else falls
 /// through to the pre-existing [`load_decide`] path unchanged - mirroring
 /// [`crate::embedding::resolve_text_backend`]'s own two-way shape one level
 /// up (try the more specific classification first, fall back to the
 /// default).
 fn resolve_decision_backend(dir: &str, head: Option<&str>, device: &Device, limits: Limits, seed: u64) -> Result<Backend> {
-    if is_laya_dir(Path::new(dir)) {
+    if decisions::engine::is_laya_dir(Path::new(dir)) {
         return Ok(Backend::Laya(Box::new(load_laya(dir, head, device, seed)?)));
     }
     Ok(Backend::Decide(load_decide(dir, head, device, limits, seed)?))
 }
 
-/// Sniff `dir`'s own directory STRUCTURE to tell a Laya checkpoint from a
-/// `decide`-shaped one - they do NOT share a root `config.json` shape at
-/// all, so classifying by "does `config.json` parse as one or the other"
-/// (the naive approach) is not available here. `decide::import::
-/// config_from_hf` expects a root `config.json` naming `model_type: "bert"`.
-/// A Laya checkpoint (what `modernbert::import_dir` reads) has NO root
-/// `config.json` whatsoever - only a NESTED `encoder/config.json`
-/// (`model_type: "modernbert"`), plus a Laya-specific marker file,
-/// `rl_agent_config.json`, at the root. Both conditions are checked (not just
-/// the marker file's existence) so an unrelated directory that happens to
-/// carry a stray `rl_agent_config.json` cannot be misrouted.
-fn is_laya_dir(dir: &Path) -> bool {
-    if !dir.join("rl_agent_config.json").is_file() {
-        return false;
-    }
-    let Ok(cfg_text) = std::fs::read_to_string(dir.join("encoder").join("config.json")) else {
-        return false;
-    };
-    let Ok(cfg_v) = serde_json::from_str::<serde_json::Value>(&cfg_text) else {
-        return false;
-    };
-    cfg_v.get("model_type").and_then(serde_json::Value::as_str) == Some("modernbert")
-}
-
-/// Build a [`LayaBackend`] from a `convaiinnovations/laya`-shaped checkpoint
-/// directory - the arm [`resolve_decision_backend`] routes to when
-/// [`is_laya_dir`] recognizes `dir`.
+/// Build a [`LayaEngine`] from a `convaiinnovations/laya`-shaped checkpoint
+/// directory - the arm [`resolve_decision_backend`] routes to when the
+/// directory is recognised as one.
 ///
 /// `limits` plays no part here (see [`DecisionPipelineBuilder::limits`]'s own
 /// doc) - Laya always sizes and truncates to `rl_agent_config.json`'s own
-/// `max_len`/`head_max_len`, read at import time. `seed` likewise: unlike
-/// `load_decide`, there is no fresh-random-head path to seed here - a Laya
-/// checkpoint SHIPS a trained head, so `head` REPLACES it rather than
-/// replacing a random initialization.
+/// `max_len`/`head_max_len`. `head` REPLACES the head the checkpoint ships.
 ///
-/// Built [`modernbert::Training::HeadOnly`], so the same object a
-/// caller loads is the one it can fine-tune, exactly as on the `Decide` arm.
-/// That mode is not a tuning preference at this size: a `Role::Trainable`
-/// ModernBERT-large trunk would carry a gradient and two AdamW moments for
-/// every one of its 395M parameters (~6.3 GB of device memory) before a
-/// single activation, so making the trunk trainable *by default* would turn
-/// loading a Laya pipeline for INFERENCE into an out-of-memory failure on
-/// most hardware. See `modernbert::decision`'s own module doc.
-fn load_laya(dir: &str, head: Option<&str>, device: &Device, _seed: u64) -> Result<LayaBackend> {
-    let ckpt = modernbert::import_dir(dir).map_err(Error::Backend)?;
-
-    let tok_path = Path::new(dir).join("tokenizer").join("tokenizer.json");
-    let tok = data::qwen_tokenizer::QwenBpe::from_file(
-        tok_path.to_str().ok_or_else(|| Error::Backend("non-UTF-8 tokenizer path".into()))?,
-    )
-    .map_err(Error::Backend)?;
-
-    // A supplied head is folded into the init map rather than written after
-    // construction, so a reloaded pipeline is built the same way a fresh one
-    // is - one construction path, no "loaded" state a later `set_weights`
-    // could half-apply.
-    let mut head_init = ckpt.head_init;
-    if let Some(p) = head {
-        let trained = modernbert::LayaDecision::read_head_file(p).map_err(Error::Backend)?;
-        for (name, v) in trained {
-            match head_init.get(&name) {
-                Some(existing) if existing.len() != v.len() => {
-                    return Err(Error::Backend(format!(
-                        "{p}: tensor {name} has {} floats, this checkpoint's head wants {}",
-                        v.len(),
-                        existing.len()
-                    )))
-                }
-                // An unknown name is a `decide` head, or a head for a
-                // different `d_model` - either way not this architecture's.
-                None => {
-                    return Err(Error::Backend(format!(
-                        "{p}: tensor {name} is not a Laya decision-head parameter - is this a \
-                         `decide` head file rather than a Laya one?"
-                    )))
-                }
-                Some(_) => {}
-            }
-            head_init.insert(name, v);
-        }
-    }
-
+/// Built [`modernbert::Training::HeadOnly`], so the same object a caller loads
+/// is the one it can fine-tune. That mode is not a tuning preference at this
+/// size: a `Role::Trainable` ModernBERT-large trunk would carry a gradient and
+/// two AdamW moments for every one of its 395M parameters (~6.3 GB of device
+/// memory) before a single activation. See `modernbert::decision`'s module doc.
+fn load_laya(dir: &str, head: Option<&str>, device: &Device, _seed: u64) -> Result<LayaEngine> {
+    let weights = LayaWeights::read(dir, head).map_err(Error::Backend)?;
     crate::device::resolve(device)?;
     let gpu = gpu_core::Gpu::new(modernbert::kern::PIPELINES);
-    let max_len = ckpt.rl.max_len;
-    let model = modernbert::LayaDecision::new_on(
-        gpu,
-        ckpt.cfg,
-        ckpt.laya_cfg,
-        tok,
-        max_len,
-        ckpt.rl.head_max_len,
-        &ckpt.encoder_init,
-        &head_init,
-        modernbert::Training::HeadOnly,
-    );
-    let mut model = model;
-    model.set_provenance(modernbert::Provenance {
-        base: base_reference(Path::new(dir)),
-        ..Default::default()
-    });
-
-    Ok(LayaBackend {
-        model,
-        temperature: ckpt.rl.temperature,
-        temperature_by_options: ckpt.rl.temperature_by_options,
-    })
-}
-
-/// The encoder directory, as the Hugging Face reference it came from.
-///
-/// A head is an adapter and an adapter that does not name its base is
-/// unloadable. `brain pull` lays a model down under `<vendor>/<repo>`, so the
-/// last two components of the directory ARE the reference; anything else
-/// falls back to the leaf, which is at least a name someone can search for.
-fn base_reference(dir: &Path) -> String {
-    let parts: Vec<&str> = dir
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .filter(|s| !s.is_empty() && *s != "/")
-        .collect();
-    match parts.len() {
-        0 => String::new(),
-        1 => parts[0].to_string(),
-        n => format!("{}/{}", parts[n - 2], parts[n - 1]),
-    }
+    Ok(weights.build(gpu, modernbert::Training::HeadOnly))
 }

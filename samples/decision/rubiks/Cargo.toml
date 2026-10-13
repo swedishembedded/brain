@@ -31,4 +31,7 @@ serde_json.workspace = true
 # links it because it names the surface.
 # 36 -> 37: the "decision" surface gained brain-solve, the learned-policy
 # trainer this sample's --net mode drives.
-max-brain-crates = 37
+# 37 -> 38: the "decision" surface gained brain-decisions, the one engine
+# over both decision architectures that the SDK and the served `decide`
+# capability now share (it used to be private to the SDK).
+max-brain-crates = 38

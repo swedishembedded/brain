@@ -48,4 +48,7 @@ libc = { workspace = true }
 # re-exported surfaces. Measured via scripts/gates/check-samples.sh against
 # the actual current closure; samples/decision/rubiks and
 # samples/learning/visualclick carry the same combination at the same 37.
-max-brain-crates = 37
+# 37 -> 38: the "decision" surface gained brain-decisions, the one engine
+# over both decision architectures that the SDK and the served `decide`
+# capability now share (it used to be private to the SDK).
+max-brain-crates = 38

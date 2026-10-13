@@ -20,4 +20,7 @@ brain = { workspace = true, features = ["decision"] }
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # The same surface samples/decision/json names, so the same budget.
-max-brain-crates = 30
+# 30 -> 31: the "decision" surface gained brain-decisions, the one engine
+# over both decision architectures that the SDK and the served `decide`
+# capability now share (it used to be private to the SDK).
+max-brain-crates = 31

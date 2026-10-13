@@ -1,0 +1,23 @@
+[package]
+name = "brain-decisions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Decision models as a served capability: one engine over both decision architectures (decide, Laya), the wire formats, the model manifest and selection, and the `decide` capability."
+
+[lib]
+name = "decisions"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+brain-checkpoint.workspace = true
+brain-data.workspace = true
+brain-decide.workspace = true
+brain-gpu-core.workspace = true
+brain-modelstore.workspace = true
+brain-modernbert.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
