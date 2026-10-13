@@ -231,6 +231,15 @@ QWEN3.8 SERVING TUNABLES  (released-GGUF multi-card resident; the brain-
   --qwen35-fp32-max-batch N
                          decode slots for it (default 4).
 
+DECISION MODELS  (decide + Laya; every servable one in the model store is
+                 served under its store id, e.g. convaiinnovations/laya)
+  --decision-model REF|DIR  also serve this model, whatever state its files
+                         are in (a missing one answers `not-installed`
+                         instead of vanishing). Repeatable.
+  --decision-default ID  the model `auto` resolves to, validated or not.
+                         Without it `auto` serves a validated Laya model, else
+                         a validated decide model, else fails with the reason.
+
 STDIO CONTROLLER  (the default, with no surface flag)
   --gpt PATH             GPT checkpoint (else $BRAIN_GPT2; else a fake echo model)
   --yolo PATH             YOLO checkpoint (else $BRAIN_YOLOV8; else a fake detector)
@@ -421,6 +430,9 @@ pub fn run_serve(args: &[String]) {
     // resident, `gguf` configures the released-GGUF multi-card resident -
     // two different models, so the flags are name-spaced apart.
     let mut qwen35_cfg = catalog::resident_qwen35::Qwen35ServeConfig::default();
+    // `--decision-model` / `--decision-default`: the decision models served
+    // beyond those the model store holds, and the one `auto` resolves to.
+    let mut decision_cfg = catalog::resident_decision::DecisionServeConfig::default();
     // HTTP inference APIs (`--anthropic|--openai|--openrouter [ADDR]`), each
     // bound on one or more addresses (127.0.0.1 by default) with ONE
     // per-dialect key generated at startup regardless of how many addresses
@@ -493,6 +505,8 @@ pub fn run_serve(args: &[String]) {
             // Released-GGUF resident (Qwen3.8): `--qwen35-gguf` both enables
             // the resident and names the artifact - a store reference
             // (`vendor/repo` or a quant-suffixed form) or a `.gguf` path.
+            "--decision-model" => decision_cfg.models.push(val(args, &mut i, "--decision-model")),
+            "--decision-default" => decision_cfg.default = Some(val(args, &mut i, "--decision-default")),
             "--qwen35-gguf" => qwen35_cfg.gguf.gguf = Some(val(args, &mut i, "--qwen35-gguf")),
             "--qwen35-ctx" => qwen35_cfg.gguf.ctx = Some(parsed(args, &mut i, "--qwen35-ctx")),
             "--qwen35-tier" => {
@@ -593,8 +607,7 @@ pub fn run_serve(args: &[String]) {
             api_keys_out,
             ready,
             adapter_mode,
-            qwen_cfg,
-            qwen35_cfg,
+            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, decision: decision_cfg },
         });
     }
 
@@ -689,12 +702,7 @@ pub fn run_serve(args: &[String]) {
 /// Returns `serving::Serving`, not a bare `Executor`: the
 /// continuous-learning hot swap needs the CONCRETE `QwenResident` handle
 /// alongside the type-erased one the executor holds - see that type's doc.
-fn build_serving_executor(
-    reserve_gb: u64,
-    models_dir: Option<&Path>,
-    qwen_cfg: catalog::resident_llm::QwenServeConfig,
-    qwen35_cfg: catalog::resident_qwen35::Qwen35ServeConfig,
-) -> serving::Serving {
+fn build_serving_executor(reserve_gb: u64, models_dir: Option<&Path>, knobs: serving::ServeKnobs) -> serving::Serving {
     let machine = serving::Machine::probe(crate::compute_set());
     let reserved = reserve_gb << 30;
     eprintln!(
@@ -718,7 +726,7 @@ fn build_serving_executor(
         }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
-    serving::build_executor(&machine, reserved, models_dir, residency::Policy::from_env(), qwen_cfg, qwen35_cfg)
+    serving::build_executor(&machine, reserved, models_dir, residency::Policy::from_env(), knobs)
 }
 
 /// Live host RAM this process could actually get right now: `MemAvailable`
@@ -755,12 +763,9 @@ struct RunApis {
     /// Where the served Qwen3's adapter comes from: `--adapter`,
     /// `--adapter-manifest`, `--watch-adapters`, or none of them.
     adapter_mode: crate::continuous_train::AdapterMode,
-    /// Every `--qwen-*` flag, parsed once here - see
-    /// `resident_llm::QwenServeConfig`'s own doc for each field.
-    qwen_cfg: catalog::resident_llm::QwenServeConfig,
-    /// Every `--qwen35-*` flag, same story - see `resident_qwen35::
-    /// Qwen35ServeConfig`'s own doc.
-    qwen35_cfg: catalog::resident_qwen35::Qwen35ServeConfig,
+    /// Every per-model serving flag (`--qwen-*`, `--qwen35-*`,
+    /// `--decision-*`), parsed once here - see `serving::ServeKnobs`.
+    knobs: serving::ServeKnobs,
 }
 
 /// Build the one shared executor and bring up the requested surfaces: D-Bus
@@ -825,7 +830,7 @@ fn run_apis(a: RunApis) {
     // supplier and the healer - so the flag decides the store everywhere.
     let models_dir = loader::model_dir::resolve(a.models_dir.as_deref());
     let supplier = build_auto_fetch_supplier(models_dir.as_deref());
-    let serving::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.qwen_cfg, a.qwen35_cfg);
+    let serving::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.knobs);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("brain serve: models: {}", served.join(", "));

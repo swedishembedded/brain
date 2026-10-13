@@ -114,6 +114,11 @@ fn run_toymoe(args: &[String]) {
 pub(crate) const NO_ARCH_ROW: &[&str] = &["imageops", "demo", "imgpipe"];
 
 const ARCH_TO_MODEL: &[(&str, &str)] = &[
+    // The decision family (`decide` and Laya, which has no arch row of its
+    // own): `brain decide decide --state ... --questions ...` answers typed
+    // questions from the best installed model, `brain decide models` lists
+    // what is installed without loading it.
+    ("decide", "brain/decision"),
     ("s3dit", "brain/s3dit"),
     ("fastvlm", "brain/fastvlm"),
     ("llava", "brain/llava"),

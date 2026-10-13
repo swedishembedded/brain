@@ -55,6 +55,20 @@ fn register_qwen(models: &mut Vec<Arc<dyn ResidentModel>>, qwen: Option<QwenResi
     Some(q)
 }
 
+/// The per-model serving knobs, parsed from flags. The CLI parses, this
+/// crate never reads the environment for them.
+#[derive(Default)]
+pub struct ServeKnobs {
+    /// The Qwen3 paged engine.
+    pub qwen: catalog::resident_llm::QwenServeConfig,
+    /// Qwen3.8: `gguf` selects the released GGUF served through the
+    /// multi-card INT8 resident and `fp32` sizes the brain-checkpoint resident.
+    pub qwen35: catalog::resident_qwen35::Qwen35ServeConfig,
+    /// Which decision models to serve beyond the ones the model store holds,
+    /// and which one `"auto"` resolves to.
+    pub decision: catalog::resident_decision::DecisionServeConfig,
+}
+
 /// Build the shared executor with every model registered, sized to the given per-GPU
 /// budgets. `gpus` is `(index, total_bytes)` per card; `reserved` bytes are kept free
 /// on each. `unified_gpus` names the indices among `gpus` that physically share RAM
@@ -81,12 +95,14 @@ fn register_qwen(models: &mut Vec<Arc<dyn ResidentModel>>, qwen: Option<QwenResi
 /// `on_admit`. The physical RAM does not disappear just because CPU-side compute is
 /// disabled, so `pool_ram` must always be the real, ungated host RAM figure.
 ///
-/// `qwen_cfg` and `qwen35` carry each decoder's sizing knobs as parsed data
-/// (the CLI parses flags, this code never reads env): `qwen_cfg` for the
-/// Qwen3 paged engine, `qwen35.gguf` selecting the released GGUF served
-/// through the multi-card INT8 resident and `qwen35.fp32` sizing the
-/// brain-checkpoint resident resolved through `qwen35::spec::Qwen35Spec`.
-pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std::path::Path>, policy: Policy, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35: catalog::resident_qwen35::Qwen35ServeConfig) -> Serving {
+/// `knobs` carries each model's serving knobs as parsed data (the CLI parses
+/// flags, this code never reads env): `knobs.qwen` for the Qwen3 paged engine,
+/// `knobs.qwen35.gguf` selecting the released GGUF served through the
+/// multi-card INT8 resident and `knobs.qwen35.fp32` sizing the brain-checkpoint
+/// resident resolved through `qwen35::spec::Qwen35Spec`, and `knobs.decision`
+/// naming the decision models served beyond those the store holds.
+pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std::path::Path>, policy: Policy, knobs: ServeKnobs) -> Serving {
+    let ServeKnobs { qwen: qwen_cfg, qwen35, decision } = knobs;
     let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
     let (cpu_ram, pool_ram) = (machine.cpu_compute_ram, machine.pool_ram);
     let mut budgets = residency::budget::Budgets::new();
@@ -243,6 +259,10 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // `brain caps`/`brain do` and this executor can no longer disagree about
     // their existence.
     models.extend(catalog::residents(models_dir));
+    // Decision models (decide + Laya): one resident per checkpoint under its
+    // store id, plus the family model that answers inventory and `auto`
+    // selection without loading anything.
+    models.extend(catalog::resident_decision::serve_all(&decision, models_dir));
     // Deterministic mock model (BRAIN_MOCK): a real ResidentModel - no weights, no
     // GPU - registered as `mock` so the HTTP conformance harness can validate the
     // whole API surface through the true serving path (placement → activate →

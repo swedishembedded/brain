@@ -135,7 +135,6 @@ pub use decide::banking77::Banking77;
 use decide::banking77::OptionSampler;
 use decide::decide::{Decide, Limits};
 use decide::loss::{softmax, LossConfig};
-use decide::primitives::confidence;
 
 pub use decide::banking77::Row;
 pub use decide::decide::Limits as DecisionLimits;

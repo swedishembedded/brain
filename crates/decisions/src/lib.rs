@@ -16,6 +16,10 @@
 //! * [`caps`] - the `decide` action and its response.
 //! * [`manifest`] - what a checkpoint is made of and whether it was validated.
 //! * [`select`] - the pure policy behind `"auto"`.
+//! * [`store`] - which models the host has and whether each is ready, without
+//!   loading any.
+//! * [`load`] - a checkpoint into a session, every failure classed.
+//! * [`provider`] - the in-process provider behind `brain caps decide` / `brain decide`.
 //! * [`fixtures`] - tiny random-weight checkpoints for tests.
 //!
 //! Swedish Embedded AB implements decision services whose models can be
@@ -26,8 +30,11 @@
 pub mod caps;
 pub mod engine;
 pub mod fixtures;
+pub mod load;
 pub mod manifest;
+pub mod provider;
 pub mod select;
+pub mod store;
 pub mod wire;
 
 pub use engine::{Backend, Engine};

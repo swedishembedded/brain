@@ -47,6 +47,7 @@ brain-vqgan.workspace = true
 brain-codeformer.workspace = true
 brain-rrdbnet.workspace = true
 brain-clip.workspace = true
+brain-decisions.workspace = true
 brain-t5encoder.workspace = true
 brain-sdxlunet.workspace = true
 brain-controlnet.workspace = true

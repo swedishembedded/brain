@@ -52,6 +52,7 @@ pub mod resident_asr;
 pub mod resident_clip;
 pub mod resident_controlnet;
 pub mod resident_cosyvoice;
+pub mod resident_decision;
 pub mod resident_deepseekocr;
 pub mod resident_deepseekocr2;
 pub mod resident_deepseekvl;
@@ -493,6 +494,21 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(horizon::caps::HorizonProvider::new()),
             spec: None,
             resident: resident!(crate::resident_horizon::HorizonResident::from_env),
+        },
+        // Decision models (decide + Laya): `brain caps decide`,
+        // `brain decide decide ...`. The provider answers from the
+        // default model store; a serving process instead schedules each
+        // checkpoint as its own model (`resident_decision`) and serves this
+        // family for its inventory and `auto` selection, registered directly
+        // by the serving executor because that needs the operator's flags.
+        ModelEntry {
+            manifest: decisions::provider::manifest,
+            provider: |_assembly: &Assembly| {
+                let models_dir = brain_modelstore::default_root();
+                Ok(Arc::new(decisions::provider::DecisionProvider::new(decisions::store::Catalog::new(models_dir, Vec::new(), None))) as Arc<dyn Provider>)
+            },
+            spec: None,
+            resident: None,
         },
         ModelEntry {
             manifest: lfm2::caps::manifest,
