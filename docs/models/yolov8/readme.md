@@ -61,7 +61,7 @@ brain yolov8 detect --weights out/yolo.safetensors --image photo.ppm --conf 0.25
 
 ### The training data
 
-`make data/detect` generates the detection dataset brain trains against -
+`make yolo/data` generates the detection dataset brain trains against -
 coloured shapes on a dark field, with ground-truth boxes and classes. It is
 synthetic on purpose: every box is exact by construction, so a detector that
 misses one has a bug rather than a labelling dispute, and the generator can

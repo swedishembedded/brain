@@ -10,7 +10,7 @@
 //! TWO gates, deliberately:
 //!
 //! * **`tiny_*`** - a small config whose weights travel WITH the goldens, so it
-//!   runs anywhere `make fetch/testdata` has run, with no 67 MB checkpoint and
+//!   runs anywhere `make testdata/fetch` has run, with no 67 MB checkpoint and
 //!   no network. Its dims are chosen so `num_feat` (16), `num_grow_ch` (8) and
 //!   the image side (32) all differ: a degenerate config would hide a
 //!   width-for-width swap.
@@ -64,7 +64,7 @@ fn max_abs(a: &[f32], b: &[f32]) -> f32 {
 fn goldens() -> Option<Vec<checkpoint::safetensors::StTensor>> {
     let p = testdata("golden/esrgan/rrdbnet.safetensors");
     if !std::path::Path::new(&p).exists() {
-        brain_testutil::skip(&format!("{p} absent - run `make fetch/testdata` (or tools/goldens/rrdbnet_dump_reference.py)"));
+        brain_testutil::skip(&format!("{p} absent - run `make testdata/fetch` (or tools/goldens/rrdbnet_dump_reference.py)"));
         return None;
     }
     Some(checkpoint::safetensors::read(&p).expect("read goldens"))

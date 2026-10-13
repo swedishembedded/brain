@@ -62,7 +62,7 @@ python3 -m pip install pyarrow     # the one dependency, used only by this scrip
 Writes `testdata/decide/salesconv/{train,test}.jsonl` (gitignored). Override
 with `--data DIR` or `BRAIN_TESTDATA`.
 
-**Why a script rather than `make fetch/testdata`.** The published dataset is a
+**Why a script rather than `make testdata/fetch`.** The published dataset is a
 single **7.2 GB CSV** whose 3072 of 3088 columns are Azure OpenAI embeddings
 this sample does not use - it encodes the text itself, locally. The script
 reads the Hugging Face parquet conversion instead and projects the 9 columns it

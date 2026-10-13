@@ -336,7 +336,7 @@ nothing evicted to make room. See
 ```bash
 make build/release                    # build the optimized ./target/release/brain
 make test                             # full test suite
-make gradcheck                        # backprop correctness gate (finite differences)
+make test/gradcheck                        # backprop correctness gate (finite differences)
 ```
 
 ```bash
@@ -355,7 +355,7 @@ A framework that writes its own kernels has to prove they are right, and brain
 has no PyTorch to diff against. So:
 
 - **Backpropagation is gated by finite differences.** 78 gradient-check entry
-  points (`make gradcheck`) compare every analytic WGSL gradient against a
+  points (`make test/gradcheck`) compare every analytic WGSL gradient against a
   numerical one, on both the CPU and GPU backends - because a
   workgroup-barrier reduction can return all-zero gradients on one backend and
   correct ones on the other.
@@ -363,7 +363,7 @@ has no PyTorch to diff against. So:
   from the reference implementation, not eyeballed. Most ports land at cosine
   `1.000000000` per stage, and the number each one reached lives in the test
   that asserts it.
-- **Backends are gated against each other.** `make parity` checks CPU ==
+- **Backends are gated against each other.** `make test/parity` checks CPU ==
   Vulkan == NPU; one implementation of each op either runs correctly everywhere
   or it is a bug.
 - **The kernel catalogue is generated from the kernels themselves**

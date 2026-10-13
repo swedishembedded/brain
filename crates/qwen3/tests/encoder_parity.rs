@@ -17,7 +17,7 @@ use std::path::Path;
 
 use qwen3::{QwenConfig, Qwen};
 
-/// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
+/// Resolve a fixture under the fetched `testdata/` tree (`make testdata/fetch`;
 /// override the root with `BRAIN_TESTDATA`).
 use brain_testutil::testdata;
 
@@ -45,7 +45,7 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 fn qwen3_4b_penultimate_hidden_matches_transformers() {
     let fixture = testdata("golden/qwen/qwen3_4b_encoder.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make testdata/fetch`"));
         return;
     }
     let wpath = match std::env::var("BRAIN_QWEN3_4B") {

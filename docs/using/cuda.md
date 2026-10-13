@@ -115,7 +115,7 @@ as helper arguments and results, and as records in a storage binding), arrays
 as values, workgroup memory and barriers (including inside loops, when every
 thread of the workgroup reaches them), user helper functions, and the
 register-tiled matrix multiplies and fused attention kernels. Every kernel in
-the catalogue is translated; `make cuda-coverage` below shows it for the
+the catalogue is translated; `make cuda/coverage` below shows it for the
 device in front of you.
 
 An out-of-range array index never touches memory outside the array, as WGSL
@@ -154,7 +154,7 @@ the card starts before the host has built the rest of the step.
 per-token spread and the host calls per token (a steady-state token makes no
 allocation and no individual launch).
 
-`make cuda-coverage` generates and compiles every kernel for the device in
+`make cuda/coverage` generates and compiles every kernel for the device in
 front of it and writes which are runnable and which are refused, and why, to
 `cuda-coverage.json` (`OUT=path` to move it).
 
@@ -288,7 +288,7 @@ the grid that fills the device. `CudaLaunch::NONE` is the plain launch.
 
 ## Container image for Arm servers
 
-`make container` builds an aarch64 image for Grace-Hopper and other Arm + CUDA
+`make container/runtime` builds an aarch64 image for Grace-Hopper and other Arm + CUDA
 servers from `tools/container/aarch64-cuda.Containerfile`. The runtime image
 holds the `brain` binary and the ahead-of-time kernel images of both toolkit
 lanes and no CUDA toolkit: the driver comes from the host through the

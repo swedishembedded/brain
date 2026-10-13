@@ -411,7 +411,7 @@ LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
   brain lfm2 finetune  --weights F --tokenizer T [--data D --steps N --batch B --seq T]
   brain lfm2 eval      --weights F --tokenizer T [--data D]     # pseudo-ppl + masked-acc
   brain npu lfm        --weights F --seq S --out model.onnx [--int8]   # OpenVINO export
-  make perf/lfm                      # standalone concurrency benchmark (scheduler+residency)
+  make perf/model/lfm                      # standalone concurrency benchmark (scheduler+residency)
 
 QWEN3-TTS (Talker + MTP + neural codec; voice cloning)
   brain qwen3tts <import|clone|synth|design|serve|sim|finetune> ...
@@ -520,7 +520,7 @@ EXAMPLES
   brain federated split moe.safetensors out/shards && brain federated verify out/shards
   brain gradcheck
 
-Or drive everything via the Makefile:  make data/calculator train/gpt/calculator eval/gpt/calculator
+Or drive everything via the Makefile:  make gpt/calculator/data gpt/calculator/train gpt/calculator/eval
 ";
 
 /// Extract the two global compute flags from anywhere in the args and select

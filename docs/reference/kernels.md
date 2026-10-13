@@ -2,7 +2,7 @@
 
 Every GPU compute kernel brain ships, generated directly from each kernel's
 own source header - nothing here is inferred or hand-maintained. Regenerate
-with `make kernels-table`; `make kernels-table/check` fails the build if this
+with `make generate/kernels/wgsl-table`; `make check/generated/kernels-wgsl-table` fails the build if this
 page has drifted from the kernel sources.
 
 These are the **portable** kernels - the reference every backend runs and
@@ -14,7 +14,7 @@ page, the [native CUDA kernel catalogue](kernels-cuda.md).
 
 Every column is a field the kernel DECLARES in its own header
 (`@what` / `@how` / `@opt` / `@cpu` / `@gpu` / `@npu` / `@quant` / `@dtype`) - nothing
-here is inferred. `make kernels-table` regenerates; `make kernels-table/check` fails
+here is inferred. `make generate/kernels/wgsl-table` regenerates; `make check/generated/kernels-wgsl-table` fails
 when a kernel is missing a field, when a declaration contradicts the code, or when this
 table has drifted. Edit the kernel's header, never the row.
 

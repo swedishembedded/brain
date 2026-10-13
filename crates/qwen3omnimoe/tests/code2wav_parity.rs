@@ -67,7 +67,7 @@ fn matches_the_real_code2wav() {
     };
     let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_code2wav.safetensors");
     if !golden_path.exists() {
-        brain_testutil::skip(&format!("{golden_path:?} missing (run `make fetch/testdata`)"));
+        brain_testutil::skip(&format!("{golden_path:?} missing (run `make testdata/fetch`)"));
         return;
     }
 

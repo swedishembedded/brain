@@ -224,9 +224,9 @@ make build/debug                  # debug build, native default-members
 make build/release                # optimized ./target/release/brain
 make test                   # full suite (MOE_SKIP_GPU_TESTS=1 with no GPU;
                             # BRAIN_DEVICE=cpu runs the whole suite GPU-free)
-make gradcheck              # finite-difference backprop gate
-make parity                 # cross-backend parity gate: CPU == Vulkan == NPU
-make kernels-regen          # after adding/removing a crates/kernels/wgsl/*.wgsl
+make test/gradcheck              # finite-difference backprop gate
+make test/parity                 # cross-backend parity gate: CPU == Vulkan == NPU
+make generate/kernels/registry          # after adding/removing a crates/kernels/wgsl/*.wgsl
 make web/dev                # wasm32 + WebGPU demo (crates/web)
 ```
 

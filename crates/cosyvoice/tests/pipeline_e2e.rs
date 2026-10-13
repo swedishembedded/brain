@@ -159,7 +159,7 @@ fn spliced_flow_and_hift_reproduce_the_reference_given_golden_tokens_and_xvec() 
     let Some(noise) = read_f32(dir.join("hift_real_nsf_noise.f32")) else {
         brain_testutil::skip(
             "hift_real_nsf_noise.f32 absent - this ad-hoc RNG capture is not part of \
-             `make fetch/testdata`; see hift_parity.rs's module doc for how to regenerate it",
+             `make testdata/fetch`; see hift_parity.rs's module doc for how to regenerate it",
         );
         return;
     };

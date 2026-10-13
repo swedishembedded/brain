@@ -22,7 +22,7 @@ been wrong about **four** kernels all along:
 | `conv2d_tiled` | native only | native | 1 |
 
 Every one had a comment mentioning the barrier. Verified after correcting:
-`compile_all` and `make gradcheck` are both green on `BRAIN_DEVICE=cpu`, so the
+`compile_all` and `make test/gradcheck` are both green on `BRAIN_DEVICE=cpu`, so the
 CPU claims now hold.
 
 Two things worth keeping:

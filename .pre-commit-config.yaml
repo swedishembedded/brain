@@ -86,6 +86,20 @@ repos:
         language: system
         pass_filenames: true
         stages: [pre-commit]
+      - id: make-targets
+        name: "Make targets are a documented concept/subconcept/action tree"
+        description: >-
+          Every public make target is <concept>/<subconcept>/.../<action>,
+          every prefix is itself a target, and every target has a
+          "## name - description" line under a "##@ Section" line, so that
+          `make help` and tab completion can descend the tree. See AGENTS.md
+          "Make targets" and scripts/gates/check-make-targets.sh. Also run
+          by `make check/make-targets`.
+        entry: bash scripts/gates/check-make-targets.sh
+        language: system
+        files: '(^|/)Makefile$'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: no-em-dash
         name: "No new em dashes (U+2014)"
         description: >-

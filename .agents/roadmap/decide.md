@@ -259,7 +259,7 @@ verified **red** before the implementation lands.
 | # | Deliverable | Gate |
 |---|---|---|
 | 1 | `data::wordpiece` + `tools/goldens/wordpiece_dump_reference.py` | brain's ids == HF's ids on a corpus covering accents, CJK, punctuation, casing, OOV and >100-char words |
-| 2 | `decide::{config,import,model}` - MiniLM encoder | tiny-config smoke, then the parity ladder (embeddings -> layer 0 attention -> layer 0 -> all layers -> pooled) against dumped goldens; `make parity` |
+| 2 | `decide::{config,import,model}` - MiniLM encoder | tiny-config smoke, then the parity ladder (embeddings -> layer 0 attention -> layer 0 -> all layers -> pooled) against dumped goldens; `make test/parity` |
 | 3 | Gradcheck for the encoder | FD check green on **CPU and GPU**; no dead gradients |
 | 4 | B9/B10 windowed state encoding | single-window bit-identity; token count == input count; overlap correctness |
 | 5 | `decide::head` - candidate-to-state cross-attention + scorer | gradcheck fwd+bwd on both backends; option-permutation invariance |

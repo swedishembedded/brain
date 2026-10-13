@@ -295,7 +295,7 @@ There is **no usable GPU** in CI here; always select the CPU backend.
 
 ```bash
 BRAIN_DEVICE=cpu make bench          # run every registered benchmark, one table
-BRAIN_DEVICE=cpu make bench/mqar     # run a single benchmark
+BRAIN_DEVICE=cpu make bench/run/mqar     # run a single benchmark
 BRAIN_DEVICE=cpu cargo test -p brain-bench   # unit + integration tests
 
 # direct binary
@@ -347,8 +347,8 @@ pub trait Benchmark {
 
 1. Add `src/<name>.rs` with a type implementing `Benchmark`.
 2. Register it in `registry()` in `src/lib.rs`.
-3. Run it: `make bench/<name>` (the generic `bench/%` rule needs no Makefile
-   edit) or `brain bench <name>`.
+3. Run it: `make bench/run/<name>` (the target is generated from the `fn name`
+   literal, so no Makefile edit; underscores become hyphens) or `brain bench <name>`.
 4. Add a learnability test in `tests/`, gated by `MOE_SKIP_GPU_TESTS`, asserting
    the score clears a **measured** threshold.
 

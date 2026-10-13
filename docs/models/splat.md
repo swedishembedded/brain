@@ -189,7 +189,7 @@ releases that are not auto-fetched; this puts both in the models directory,
 checksum-verified, where brain finds them by content:
 
 ```bash
-python tools/goldens/lpips_dump_reference.py      # needs torch, safetensors and lpips (make requirements)
+python tools/goldens/lpips_dump_reference.py      # needs torch, safetensors and lpips (make environment/requirements)
 ```
 
 Without them the example says LPIPS was not scored and reports the other two.

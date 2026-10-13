@@ -17,7 +17,7 @@ use std::path::Path;
 
 use vae::{latent, VaeConfig, VaeDecoder, VaeEncoder};
 
-/// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
+/// Resolve a fixture under the fetched `testdata/` tree (`make testdata/fetch`;
 /// override the root with `BRAIN_TESTDATA`).
 use brain_testutil::testdata;
 
@@ -43,7 +43,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 fn flux2_vae_parity() {
     let fixture = testdata("flux2/klein-4b/vae.safetensors");
     if !Path::new(&fixture).exists() {
-        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make testdata/fetch`"));
         return;
     }
     let vae_env = match std::env::var("BRAIN_FLUX2_VAE") {

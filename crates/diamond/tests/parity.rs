@@ -5,7 +5,7 @@
 //! InnerModel was run by scripts/parity-dump/diamond.py on a fixed input; brain
 //! must reproduce its output within fp32 tolerance.
 //!
-//! Fixtures are NOT in git — regenerate with `make wm-fixtures` (needs torch).
+//! Fixtures are NOT in git - regenerate with `make wm/fixtures` (needs torch).
 //! The test SKIPS (with a message) when the fixture directory is absent.
 
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ impl Fixture {
         let dir = fixture_dir();
         let m = dir.join("manifest.json");
         if !m.exists() {
-            brain_testutil::skip(&format!("{} absent - run `make wm-fixtures` (needs torch)", m.display()));
+            brain_testutil::skip(&format!("{} absent - run `make wm/fixtures` (needs torch)", m.display()));
             return None;
         }
         let manifest: serde_json::Value =

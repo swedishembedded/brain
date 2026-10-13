@@ -338,7 +338,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     adapter (diagnostic); `BRAIN_WGPU_NO_SERIAL=1` disables the automatic
     trigger (diagnostic). Verified: `cargo build`/`cargo test -p
     brain-sam1 --release` (7+5+2+1 non-ignored tests, all green) and `make
-    gradcheck` (full workspace, 0 failures) both pass unchanged with the fix
+    test/gradcheck` (full workspace, 0 failures) both pass unchanged with the fix
     in place - it is a no-op everywhere except Intel+sliced batches, and
     introduces no regression.
   * **What this session could NOT do: confirm the fix against a live
@@ -432,7 +432,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     runs that would prove nothing new.
   * **Both required gates pass**: `cargo test -p brain-sam1 --release` (all
     non-ignored tests green, including `wgpu_real_weight_parity.rs`'s test
-    promoted out of `#[ignore]` - see below) and `make gradcheck` (full
+    promoted out of `#[ignore]` - see below) and `make test/gradcheck` (full
     workspace, 0 failures).
   * **Documentation updated to match reality**, all within this pass's
     scope (`crates/sam1`, `crates/model/src/vit.rs`,
@@ -1853,7 +1853,7 @@ token fails loudly.
       study with the real before/after wall-clock and per-kernel table.
       Stayed scoped to `crates/backend-cpu` (plus the ten touched `.wgsl`
       headers' `@cpu: yes -> native` field, required by `make
-      kernels-table/check` once `crates/backend-cpu/src/lib.rs`'s `FastIdx`
+      check/generated/kernels-wgsl-table` once `crates/backend-cpu/src/lib.rs`'s `FastIdx`
       gains a kernel's name - the generator derives `native` from that struct,
       not from a separate list, so a fast path and its catalogue entry cannot
       drift apart) - no `crates/deepseek2ocr`/`crates/sam1`/`crates/deepseek2`

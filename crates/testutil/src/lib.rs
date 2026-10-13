@@ -343,7 +343,7 @@ mod tests {
         assert_eq!(p.file_name().unwrap(), "clip.wav");
         // `..` components are left uncanonicalized (matching every one of the 36
         // call sites this replaces), and `testdata/` is populated by
-        // `make fetch/testdata`, so it need not exist in this checkout. Fold
+        // `make testdata/fetch`, so it need not exist in this checkout. Fold
         // the `..` lexically and check the DIRECTORY lands on the repo-root
         // `testdata/`, not `crates/testutil/testdata` or similar.
         let lexical = |p: &std::path::Path| {

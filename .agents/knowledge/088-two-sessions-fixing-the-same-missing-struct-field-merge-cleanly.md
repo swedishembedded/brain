@@ -34,7 +34,7 @@ landed.
 
 **Rules going forward**:
 - After ANY merge, rebase or fast-forward on a shared box, type-check before
-  believing the tree is sound. `make clippy` is sufficient on its own for
+  believing the tree is sound. `make check/clippy` is sufficient on its own for
   this - it is a full `--workspace --all-targets` compile - and it is also
   the gate that will refuse to tell you anything useful if the tree does not
   build.

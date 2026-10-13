@@ -100,7 +100,7 @@ This page intentionally stops short of citing specific timings or
 throughputs. Real, current, reproducible numbers live in places that stay
 honest as the code and hardware change under them, not frozen in prose here:
 
-- **`make perf`** / **`make perf/<scenario>`** - run brain's own performance
+- **`make perf`** / **`make perf/scenario/<scenario>`** - run brain's own performance
   harness (latency, throughput, serving-under-load, and a concurrency sweep)
   against your own device. See [Benchmarking your setup](benchmarking.md).
 - **`make perf/compare`** - a leaderboard over every saved run under

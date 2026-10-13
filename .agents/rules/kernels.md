@@ -311,7 +311,7 @@ existing caller. Assume nothing about units.
 - **Non-ReBAR cards accrue wgpu staging per `write` until a blocking
   readback.** Multi-GB uploads must flush periodically (~1 GiB) or the device
   OOMs at well under its VRAM — `paramstore`'s upload loop does this.
-- After adding/removing a `.wgsl`: **`make kernels-regen`**.
+- After adding/removing a `.wgsl`: **`make generate/kernels/registry`**.
 
 ## E. Optimizing: measure first, because the guess is wrong
 
@@ -466,7 +466,7 @@ So:
    optimizer. Optimizing yesterday's profile is how you get a large win worth
    a fraction of a percent of the step.
 4. **Correctness gates every time**: the model's parity test (cosine must not
-   move), `make gradcheck`, and — for anything touching the optimizer or a
+   move), `make test/gradcheck`, and - for anything touching the optimizer or a
    backward — **trajectory equivalence**: identical loss curves before/after, on
    the same seed. A drifted reduction changes training outcomes without failing
    a test. Know which kind of reduction you have: `max`/`min` are associative

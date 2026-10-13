@@ -41,7 +41,7 @@ fn matches_base(id: &str, base: &str) -> bool {
 /// and prepend it to `LD_LIBRARY_PATH` in-process before `Core::new`. Respects an
 /// already-configured OpenVINO env and is a no-op if nothing is found (the caller
 /// then reports `RuntimeNotFound`). This removes the manual env dance for
-/// `--device npu` inside a venv with `make requirements` installed.
+/// `--device npu` inside a venv with `make environment/requirements` installed.
 fn ensure_openvino_on_path() {
     use std::path::{Path, PathBuf};
     // Respect an explicit OpenVINO install env (e.g. a real setupvars.sh).

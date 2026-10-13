@@ -209,7 +209,7 @@ fn gemm_ids() -> GemmIds {
 ///   barriers where the Cranelift CPU JIT supports one, so on that backend
 ///   this is false and the materialized `attn_scores/softmax/apply_bidir`
 ///   trio stays the reference definition of the math - the branch
-///   `BRAIN_DEVICE=cpu` and `make gradcheck` take.
+///   `BRAIN_DEVICE=cpu` and `make test/gradcheck` take.
 /// * `head_dim <= 128` - the family's hard limit
 ///   (`block::flash_bidir_step` asserts it), checked here so an out-of-range
 ///   config is a fallback rather than a panic. `DitConfig::real()` runs at 64

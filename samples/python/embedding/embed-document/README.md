@@ -60,6 +60,6 @@ unchanged from before auto-fetch existed.
 | `BRAIN_LFM2_BATCH` | `2` - batched-forward slots per instance |
 | `BRAIN_DEVICE` | unset - which compute is schedulable |
 
-The benchmark twin of this sample is `make perf/lfm` - the same executor
+The benchmark twin of this sample is `make perf/model/lfm` - the same executor
 measured by the brain perf suite (`brain perf run sweep --target
 lfm:<weights>:<tokenizer> --input 8192 --ladder 1,2,4,8`).

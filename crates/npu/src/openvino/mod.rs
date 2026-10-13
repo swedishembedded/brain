@@ -38,7 +38,7 @@ impl fmt::Display for NpuError {
             ),
             NpuError::RuntimeNotFound(s) => write!(
                 f,
-                "OpenVINO runtime not found ({s}). Install it with `make requirements` \
+                "OpenVINO runtime not found ({s}). Install it with `make environment/requirements` \
                  (the `openvino` pip wheel) — brain auto-discovers it inside an active \
                  virtualenv. Otherwise set LD_LIBRARY_PATH to the dir containing \
                  libopenvino_c.so (or source an OpenVINO setupvars.sh). The Intel NPU \

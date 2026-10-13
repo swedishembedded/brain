@@ -21,7 +21,7 @@
 //! `vae::blocks::grad::Trace` walk, over the SAME conv/GroupNorm/transformer
 //! adjoints `sdxlunet::model::Rec` emits) on the identical block code; a
 //! second full pass over it here would duplicate that gate's coverage, not
-//! add a new signal, while slowing down `make gradcheck`. Gradient still
+//! add a new signal, while slowing down `make test/gradcheck`. Gradient still
 //! genuinely FLOWS through the backbone during this check - every adaptor
 //! reads the backbone's own up-path activations (`h_ori`, the popped skip),
 //! so a broken backbone backward would corrupt the trunk/adaptor gradients
@@ -79,7 +79,7 @@ use crate::{directional_check, elementwise_check, CheckModel, Report};
 // and `directional_check`/`elementwise_check` cost is linear in the number
 // of FULL forward passes (`2·n_dirs·n_tensors` and `2·numel` respectively),
 // so keeping the per-forward cost at `check_unet`'s own scale is what keeps
-// this gate inside `make gradcheck`'s normal budget rather than turning it
+// this gate inside `make test/gradcheck`'s normal budget rather than turning it
 // into a many-minute outlier.
 const H: u32 = 8;
 const W: u32 = 8;

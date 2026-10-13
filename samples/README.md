@@ -16,7 +16,7 @@ There are three kinds, one per way of reaching brain:
 | what it is | a **Rust application** | a **Python** client script | a **shell** client/CLI script |
 | how it reaches brain | by linking the `brain` SDK crate | over D-Bus / HTTP (`brain_py`) | over D-Bus (via `tools/dbus-session.sh`) or the `brain` CLI directly |
 | what it proves | the SDK is a real, usable library | the served surface works off-process | the CLI/served surface works off-process, no Python needed |
-| built by | `make samples/<path>/build` | nothing - run against a running brain | nothing - run against a running brain |
+| built by | `make samples/<category>/<name>/build` | nothing - run against a running brain | nothing - run against a running brain |
 
 A capability is only fully demonstrated when the ways that apply to it work:
 every served model gets at least a Python or shell client; a capability the
@@ -130,7 +130,7 @@ sample's `features = ["image"]` with the SDK's own `default = ["full"]` - and
 the sample's declaration becomes a silent no-op that links every model crate
 anyway. There is no per-package feature flag, and features cannot be
 subtracted. Narrow selection is the only mechanism that honours the
-declaration, which is what `make samples/<path>/build` does.
+declaration, which is what `make samples/<category>/<name>/build` does.
 
 `make` is still the right entry point, for two smaller reasons: it pins
 `CARGO_HOME` (cargo records the absolute source path of every registry crate in
@@ -185,4 +185,4 @@ reuse an existing one or add a new one only when the sample genuinely opens a
 new pipeline. These trees are **excluded from the Cargo workspace**
 (root `Cargo.toml`'s `exclude`) - they hold no `Cargo.toml` and are never
 built. `make check/samples` still validates their directory shape; `make
-samples/list` lists them alongside the Rust samples.
+samples` lists them alongside the Rust samples.

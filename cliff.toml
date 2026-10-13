@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-# git-cliff config (`make changelog`, `make release/notes`). Groups commits by
+# git-cliff config (`make release/changelog`, `make release/notes`). Groups commits by
 # brain's actual conventional-commit prefixes (see `git log --format=%s | sed
 # -E 's/^([a-z]+)(\(.*\))?:.*/\1/' | sort | uniq -c`); commits that don't match
 # any of these (a bare "crate: did a thing" subject, no type keyword) land in

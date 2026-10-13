@@ -20,7 +20,7 @@ pub use model::Qwen3Asr;
 
 /// Resolve a test-fixture path under the gitignored `testdata/` tree — never a
 /// hardcoded absolute path (enforced in `AGENTS.md`). Root is `$BRAIN_TESTDATA`,
-/// defaulting to `<repo>/testdata` (populated by `make fetch/testdata`).
+/// defaulting to `<repo>/testdata` (populated by `make testdata/fetch`).
 #[cfg(test)]
 use brain_testutil::testdata;
 /// Resolve the on-disk model-store directory for the real Qwen3-ASR

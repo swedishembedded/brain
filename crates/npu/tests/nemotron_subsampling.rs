@@ -5,7 +5,7 @@
 //! on the OpenVINO **CPU** device (fp32, tight tolerance) and check the output against
 //! the dumped HF golden. Skips without OpenVINO or the testdata checkpoint/golden.
 //!
-//! Run: `make fetch/testdata` then
+//! Run: `make testdata/fetch` then
 //! `LD_LIBRARY_PATH=<openvino/libs> cargo test -p brain-npu --test nemotron_subsampling -- --nocapture`
 
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ fn subsampling_matches_golden_on_cpu() {
     let ckpt = model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
     let gold = testdata("asr/golden/nemotron");
     if !Path::new(&format!("{ckpt}/model.safetensors")).exists() || !Path::new(&format!("{gold}/subsampling.f32")).exists() {
-        brain_testutil::skip("nemotron checkpoint/golden absent (run `make fetch/testdata`)");
+        brain_testutil::skip("nemotron checkpoint/golden absent (run `make testdata/fetch`)");
         return;
     }
     if available_devices().map(|d| d.is_empty()).unwrap_or(true) {

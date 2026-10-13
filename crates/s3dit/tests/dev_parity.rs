@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use s3dit::{ZImageConfig, ZImageDit};
 
-/// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
+/// Resolve a fixture under the fetched `testdata/` tree (`make testdata/fetch`;
 /// override the root with `BRAIN_TESTDATA`).
 use brain_testutil::testdata;
 
@@ -35,7 +35,7 @@ fn small_cfg() -> ZImageConfig {
 fn zimage_dev_matches_reference_golden() {
     let fixture = testdata("golden/zimage/zimage_model.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make testdata/fetch`"));
         return;
     }
     let st = checkpoint::safetensors::read(&fixture).expect("read model golden");

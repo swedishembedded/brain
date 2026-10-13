@@ -21,8 +21,8 @@
 //! ## Adding a benchmark
 //! 1. Add a module under `crates/bench/src/` implementing [`Benchmark`].
 //! 2. Register it in [`registry`].
-//! 3. (optional) Add a `make bench/<name>` shortcut — the generic
-//!    `bench/%` rule already runs any registered name.
+//! 3. Nothing else: `make bench/run/<name>` is generated from the `fn name`
+//!    literal (underscores become hyphens).
 //!
 //! ## Running
 //! - [`run_all`] runs every registered benchmark and prints one comparison table.
@@ -70,7 +70,7 @@ pub use axes::{axes, axis_of};
 /// [`prepare`](Benchmark::prepare) once to write the dataset, then
 /// [`evaluate`](Benchmark::evaluate) to train + score a model on it.
 pub trait Benchmark {
-    /// Stable identifier used on the CLI, in `make bench/<name>`, and as the
+    /// Stable identifier used on the CLI, in `make bench/run/<name>`, and as the
     /// table row label. Lowercase, no spaces.
     fn name(&self) -> &str;
 

@@ -801,7 +801,7 @@ this phase - a real gap, not a faked pass.
   uncommitted noise capture for BOTH generations
   (`testdata/golden/cosyvoice/hift_real_nsf_noise.f32`,
   `testdata/golden/cosyvoice3/hift_real_nsf_noise.f32`, neither provisioned
-  by `make fetch/testdata`) - a box with only the official goldens still
+  by `make testdata/fetch`) - a box with only the official goldens still
   runs each `hift`/`cv3_hift`'s own import-coverage and tiny-smoke tests,
   but not this specific rung. A proper capture script belongs in
   `tools/goldens/` as a follow-up if this needs to be routinely

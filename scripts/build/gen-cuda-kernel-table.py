@@ -153,8 +153,8 @@ def render(entries):
         BEGIN,
         "",
         "Every column is stated by the kernel's own registry entry in "
-        "`crates/kernels-cuda` - nothing here is inferred. `make cuda-table` "
-        "regenerates this block; `make cuda-table/check` fails when a kernel "
+        "`crates/kernels-cuda` - nothing here is inferred. `make generate/kernels/cuda-table` "
+        "regenerates this block; `make check/generated/kernels-cuda-table` fails when a kernel "
         "source is not registered, or when this table has drifted from the "
         "registry. Edit the registry, never the row.",
         "",
@@ -221,7 +221,7 @@ def main():
     if check:
         if updated != page:
             print("cuda-table: FAIL - the catalogue has drifted from the registry.")
-            print("  Run `make cuda-table` and commit the result.")
+            print("  Run `make generate/kernels/cuda-table` and commit the result.")
             return 1
         print(f"cuda-table: ok, {len(entries)} kernel(s), catalogue current")
         return 0

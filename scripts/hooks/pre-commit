@@ -6,9 +6,10 @@
 # the SPDX-License-Identifier/copyright header (scripts/spdx/check.py has the
 # actual rules), (2) adds a docs/ or .agents/ file-path citation in
 # crates/, scripts/, tools/, or samples/ (scripts/gates/check-no-doc-citations.sh
-# has the rationale), or (3) names a project brain does not depend on
-# (scripts/gates/check-repo-scope.sh). Installed via `make hooks/install`; this is the
-# no-extra-dependency path — see .pre-commit-config.yaml for the same checks
+# has the rationale), (3) names a project brain does not depend on
+# (scripts/gates/check-repo-scope.sh), or (4) breaks the make target tree
+# (scripts/gates/check-make-targets.sh, when a Makefile is staged). Installed
+# via `make hooks/install`; this is the no-extra-dependency path - see .pre-commit-config.yaml for the same checks
 # via the `pre-commit` framework, for anyone already using it.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -19,3 +20,10 @@ mapfile -d '' -t staged < <(git diff --cached --name-only --diff-filter=ACM -z)
 python3 scripts/spdx/check.py "${staged[@]}"
 bash scripts/gates/check-no-doc-citations.sh "${staged[@]}"
 bash scripts/gates/check-repo-scope.sh "${staged[@]}"
+
+# The make target tree is only re-checked when a Makefile is part of the commit.
+for f in "${staged[@]}"; do
+    case "$f" in
+        Makefile | */Makefile) bash scripts/gates/check-make-targets.sh; break ;;
+    esac
+done

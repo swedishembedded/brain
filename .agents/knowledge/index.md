@@ -21,7 +21,7 @@ that genuinely belongs beside an existing finding takes a letter suffix
 
 Write the finding down in the same change that fixes it - the reason is fresh
 exactly once. Create `.agents/knowledge/<NNN>-<slug>.md` with `# <NNN>. <title>`
-as its first heading, then run `make knowledge-index`. `make test/full` runs
+as its first heading, then run `make generate/knowledge/index`. `make test/full` runs
 `knowledge-index/check`, which fails if the index has drifted or two entries
 claim one id.
 
@@ -67,7 +67,7 @@ What belongs where:
 | 26 | A barrier kernel on `backend-cpu` corrupts memory; it does not refuse | [`026-a-barrier-kernel-on-backend-cpu-corrupts-memory-it-does-not.md`](026-a-barrier-kernel-on-backend-cpu-corrupts-memory-it-does-not.md) |
 | 27 | A "% of peak" divided by a hardcoded peak is not a measurement | [`027-a-of-peak-divided-by-a-hardcoded-peak-is-not-a-measurement.md`](027-a-of-peak-divided-by-a-hardcoded-peak-is-not-a-measurement.md) |
 | 28 | A partial FLOP numerator over a full denominator under-reports in silence | [`028-a-partial-flop-numerator-over-a-full-denominator-under-reports.md`](028-a-partial-flop-numerator-over-a-full-denominator-under-reports.md) |
-| 29 | `make kernels-regen` had been broken since the script moved | [`029-make-kernels-regen-had-been-broken-since-the-script-moved.md`](029-make-kernels-regen-had-been-broken-since-the-script-moved.md) |
+| 29 | `make generate/kernels/registry` had been broken since the script moved | [`029-make-kernels-regen-had-been-broken-since-the-script-moved.md`](029-make-kernels-regen-had-been-broken-since-the-script-moved.md) |
 | 30 | Two of three backends never implemented `stats()`, and a caller papered over it | [`030-two-of-three-backends-never-implemented-stats-and-a-caller.md`](030-two-of-three-backends-never-implemented-stats-and-a-caller.md) |
 | 31 | Timing a kernel by host wall-clock around a drained slice is not a measurement | [`031-timing-a-kernel-by-host-wall-clock-around-a-drained-slice-is-not.md`](031-timing-a-kernel-by-host-wall-clock-around-a-drained-slice-is-not.md) |
 | 32 | A profiler that drives the graph wrong measures a graph that does nothing | [`032-a-profiler-that-drives-the-graph-wrong-measures-a-graph-that.md`](032-a-profiler-that-drives-the-graph-wrong-measures-a-graph-that.md) |
@@ -146,7 +146,7 @@ What belongs where:
 | 103 | A detector head answers "what kind of thing", so ask something else "which one" | [`103-a-detector-head-answers-what-kind-of-thing-so-ask-something-else.md`](103-a-detector-head-answers-what-kind-of-thing-so-ask-something-else.md) |
 | 104 | A `poll_wait()` inside the loop body reclaims nothing, because the object holding the buffers is still alive when it runs | [`104-a-poll-wait-inside-the-loop-body-reclaims-nothing-because-the.md`](104-a-poll-wait-inside-the-loop-body-reclaims-nothing-because-the.md) |
 | 105 | Two kernels a DEVICE CAP picks between are interchangeable only if they read the same Params - a constant hardcoded in one of them is a cross-backend correctness bug, not a rounding difference | [`105-two-kernels-a-device-cap-picks-between-are-interchangeable-only.md`](105-two-kernels-a-device-cap-picks-between-are-interchangeable-only.md) |
-| 106 | `make parity` already catches CPU-only bugs - it just was not in `make test/full`, so nobody ran it | [`106-make-parity-already-catches-cpu-only-bugs-it-just-was-not-in.md`](106-make-parity-already-catches-cpu-only-bugs-it-just-was-not-in.md) |
+| 106 | `make test/parity` already catches CPU-only bugs - it just was not in `make test/full`, so nobody ran it | [`106-make-parity-already-catches-cpu-only-bugs-it-just-was-not-in.md`](106-make-parity-already-catches-cpu-only-bugs-it-just-was-not-in.md) |
 | 107 | `dlsym` does not apply the header's `_v2` rewriting - a runtime-loaded driver binds the OLD ABI unless the suffixed name is asked for | [`107-dlsym-does-not-apply-the-header-s-v2-rewriting-a-runtime-loaded.md`](107-dlsym-does-not-apply-the-header-s-v2-rewriting-a-runtime-loaded.md) |
 | 108 | A CUDA ordinal is not a device identity, and `CUDA_VISIBLE_DEVICES` is why | [`108-a-cuda-ordinal-is-not-a-device-identity-and-cuda-visible-devices.md`](108-a-cuda-ordinal-is-not-a-device-identity-and-cuda-visible-devices.md) |
 | 109 | A coverage ratchet written BEFORE the thing it ratchets exists cannot be a floor | [`109-a-coverage-ratchet-written-before-the-thing-it-ratchets-exists.md`](109-a-coverage-ratchet-written-before-the-thing-it-ratchets-exists.md) |

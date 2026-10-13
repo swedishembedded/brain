@@ -7957,7 +7957,7 @@ every digit this crate records:
   with no change in that crate at all; this is the gate that says so.
 * `cargo test -p brain-vae -p brain-gpu-core` - green, including the new
   `l2norm_scale2d` cost row and the coverage floor.
-* `make clippy` - exit 0, 0 warnings (baseline 0). `make kernels-table/check` -
+* `make check/clippy` - exit 0, 0 warnings (baseline 0). `make check/generated/kernels-wgsl-table` -
   up to date, 431 kernels, all fields declared.
 
 #### 6 - recorded, NOT done - and the largest one is not a kernel

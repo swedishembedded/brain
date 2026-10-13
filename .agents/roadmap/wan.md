@@ -1120,7 +1120,7 @@ genuine (3,3,3) convolution, and that is the one real gap.
 `docs/reference/kernels.md` claimed 401 kernels and was missing
 `flash_attn_causal_gqa`, which is present at
 `crates/kernels/wgsl/flash_attn_causal_gqa.wgsl` and registered in
-`crates/kernels/src/lib.rs`, so `make kernels-table/check` was already failing
+`crates/kernels/src/lib.rs`, so `make check/generated/kernels-wgsl-table` was already failing
 independent of this port. Regenerated alongside the `conv3d` kernels (401 -> 405:
 one stale omission plus the three new ones) so a real drift signal is not buried
 under a stale one. The kernel itself was never missing; only the catalogue was.

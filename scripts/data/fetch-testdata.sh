@@ -52,10 +52,10 @@
 # `brain fetch <vendor>/<repo>` is what puts one there.
 #
 # Usage:
-#   make fetch/testdata                      # populate everything missing
-#   BRAIN_ASR_MIRROR=/path make fetch/testdata
-#   BRAIN_TESTDATA=/scratch/td make fetch/testdata
-#   BRAIN_MODELS_DIR=/scratch/models make fetch/testdata
+#   make testdata/fetch                      # populate everything missing
+#   BRAIN_ASR_MIRROR=/path make testdata/fetch
+#   BRAIN_TESTDATA=/scratch/td make testdata/fetch
+#   BRAIN_MODELS_DIR=/scratch/models make testdata/fetch
 set -euo pipefail
 
 ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"

@@ -72,7 +72,7 @@ unresolvable, which every call site turns into an empty path via `unwrap_or_defa
 so the existing `Path::new(&format!("{ckpt}/…")).exists()` skip check stays correct
 either way.
 
-Populate `testdata/` with `make fetch/testdata` (hard-links goldens and media from
+Populate `testdata/` with `make testdata/fetch` (hard-links goldens and media from
 a local mirror - `BRAIN_*_MIRROR` env vars, the ONE place a machine-specific path
 may appear in this repo, per `AGENTS.md`). It does **not** download or copy the
 store's checkpoints: it reports each one present or absent and names the
@@ -84,7 +84,7 @@ itself**, and it does so through **`brain_testutil::skip(reason)`** - never a
 bare `eprintln!` + early return, and never `panic!`. The helper exists because
 cargo reports a skipped test as a PASS, so a skip that does not name itself is
 indistinguishable from a comparison that ran; routing through it also lets
-`BRAIN_REQUIRE_FIXTURES=1` (what `make parity/strict` sets) turn every
+`BRAIN_REQUIRE_FIXTURES=1` (what `make test/parity/strict` sets) turn every
 absent-fixture skip into a hard failure in a run whose purpose is to prove
 parity. A skip for absent HARDWARE is the other helper,
 **`brain_testutil::skip_unavailable(reason)`**, which no flag may turn fatal -
@@ -104,7 +104,7 @@ it - see "Test-only environment variables" below. Which bucket a skip is in is
 a judgement a reviewer must be able to check by reading the call, which is why
 there are three functions and not one flag.
 
-Verify a change here by removing `testdata/`, re-running `make fetch/testdata`,
+Verify a change here by removing `testdata/`, re-running `make testdata/fetch`,
 and re-running the crates in the table above; a fixture that stopped resolving
 shows up as a new skip, not a failure, which is itself the bug to look for.
 
@@ -116,7 +116,7 @@ central finite difference `(L(w+εv) − L(w−εv))/2ε` (ε=5e-3), over severa
 directions, with an `allclose`-style `|a−n| ≤ atol + rtol·max(|a|,|n|)` criterion
 (atol=4e-3, rtol=8e-2 - fp32 on a software GPU). This validates the GPT's GELU
 MLP, causal attention, LayerNorm, embeddings, and untied head across all 29
-tensors. Run with `make gradcheck`. (Extending the `CheckModel` impl to MoE/PID
+tensors. Run with `make test/gradcheck`. (Extending the `CheckModel` impl to MoE/PID
 needs a `write_weight` on those models - a small follow-up.)
 
 ## 3. Federated round-trip & integrity
@@ -126,7 +126,7 @@ needs a `write_weight` on those models - a small follow-up.)
   others byte-identical.
 - Manifests carry per-file SHA-256 + a base-config hash; `verify` rejects any
   tampering or config mismatch.
-- `make federated-demo` exercises the whole pipeline on a real trained MoE.
+- `make federated/demo` exercises the whole pipeline on a real trained MoE.
 
 ## 4. Same-input model comparison (the "which is best" answer)
 
@@ -142,9 +142,9 @@ a fixed seed/splits so runs are comparable.
 
 ## 5. Integration (Makefile, CI-time)
 
-`make data/<name>` → `make train/gpt/<name>` → `make eval/gpt/<name>` runs the
-full data→train→eval path; `make federated-demo` runs the federated round-trip;
-`make gradcheck` runs the correctness gate. All complete on tiny configs quickly
+`make gpt/<dataset>/data` -> `make gpt/<dataset>/train` -> `make gpt/<dataset>/eval` runs the
+full data->train->eval path; `make federated/demo` runs the federated round-trip;
+`make test/gradcheck` runs the correctness gate. All complete on tiny configs quickly
 enough for CI.
 
 ## 6. End-to-end (`bats`, real sockets/processes)
@@ -169,15 +169,15 @@ cargo lanes. `claude-code` and `scheduler` stay separate targets - they need rea
 weights/a real `claude` install/a GPU, which the fast lane deliberately does not
 require.
 
-`make test/full` also runs **`make parity/strict`**, and that is the one member
+`make test/full` also runs **`make test/parity/strict`**, and that is the one member
 of the release gate that can fail for want of DATA rather than for want of
 correct code. Everything else in the list is green on a box with no fixtures at
 all, because cargo reports a skipped test as a PASS - so the cargo lanes cannot,
 by construction, tell "every reference comparison matched" apart from "no
-reference comparison ran". `parity/strict` re-runs the fixture-gated parity
+reference comparison ran". `test/parity/strict` re-runs the fixture-gated parity
 suites with `BRAIN_REQUIRE_FIXTURES=1`, which turns each absent-fixture skip
 into a hard failure, so a green run is evidence the comparisons happened. Its
-default suite list is what `make fetch/testdata` provisions; where a suite
+default suite list is what `make testdata/fetch` provisions; where a suite
 genuinely cannot be provisioned, narrow the list visibly
 (`make test/full PARITY_STRICT_SUITES="..."`) rather than dropping the target,
 because a narrowed list still says which comparisons were certified.
@@ -269,7 +269,7 @@ falls back to `resources/ltxv/weights/<role>/<file>` under
 22B DiT and 12B Gemma-4 text encoder, read from the model store entry
 `Lightricks/LTX-2.5` (a released GGUF; see `docs/models/ltxv.md`).
 
-**`fetch-testdata` mirror paths** (local-mirror source for `make fetch/testdata`;
+**`fetch-testdata` mirror paths** (local-mirror source for `make testdata/fetch`;
 the one place a machine-specific path may appear in this repo). Two kinds:
 
 - `BRAIN_MODEL_MIRROR` - a populated **model store** (`<vendor>/<repo>` layout) to
@@ -296,7 +296,7 @@ Plus `BRAIN_DIAMOND_REPO`, `BRAIN_GENIEREDUX_REPO`.
   failure. Skipping an absent fixture is the right default, but cargo reports a
   skip as a PASS, so a green `cargo test -p <crate>` is on its own no evidence
   that a parity comparison happened at all. Set this in any run whose PURPOSE is
-  to prove parity (`make wan/parity` is the worked example) and every comparison
+  to prove parity (`make test/parity/wan` is the worked example) and every comparison
   that did not really run turns the suite red. This was not hypothetical: the
   Wan suite reported `ok` while 7 of its 9 VAE stage comparisons and its real
   1.3B transformer comparison were all silently skipping, because their weights

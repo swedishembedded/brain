@@ -57,7 +57,7 @@ that genuinely belongs beside an existing finding takes a letter suffix
 
 Write the finding down in the same change that fixes it - the reason is fresh
 exactly once. Create `.agents/knowledge/<NNN>-<slug>.md` with `# <NNN>. <title>`
-as its first heading, then run `make knowledge-index`. `make test/full` runs
+as its first heading, then run `make generate/knowledge/index`. `make test/full` runs
 `knowledge-index/check`, which fails if the index has drifted or two entries
 claim one id.
 
@@ -120,7 +120,7 @@ def main():
         have = INDEX.read_text() if INDEX.exists() else ""
         if have != want:
             sys.exit(
-                "knowledge index is out of date - run `make knowledge-index` and commit the result"
+                "knowledge index is out of date - run `make generate/knowledge/index` and commit the result"
             )
         print(f"knowledge index up to date ({len(rows)} entries)")
         return

@@ -178,7 +178,7 @@ side. Seven assertions, none needing a GPU (one builds the CPU device):
   `cost.rs`'s floor, deliberately: a tier requirement is a reviewed performance
   contract, so having to edit the number is the point.
 
-`make cuda-table` / `make cuda-table/check`
+`make generate/kernels/cuda-table` / `make check/generated/kernels-cuda-table`
 (`scripts/build/gen-cuda-kernel-table.py`, in `test/full`) regenerate and gate
 `docs/reference/kernels-cuda.md` from the registry, and fail when a `.cu` file
 exists that no entry embeds - which `include_str!` cannot catch, since it proves
@@ -356,7 +356,7 @@ linear select the naive `matmul` **without the test forcing a kernel choice**.
 The whole forward - `embed`, `pos_add`, `ln_stats`/`layernorm`, `matmul`,
 `bias_add`, `attn_scores`/`attn_softmax`/`attn_apply`, `gelu`, `add2` - then
 lands inside the supported subset. It is the smallest complete forward pass in
-the workspace that does. Nothing is wired into `make parity`.
+the workspace that does. Nothing is wired into `make test/parity`.
 
 The generator's real reach turned out to be much wider than the six kernels M2
 golden-tested: **448 of the 474** catalogue kernels generate. The 26 that do
@@ -1008,7 +1008,7 @@ tuned kernel are deferred.**
   M1 ratchet stays exercised only against fixture tables, and
   `the_shipped_policy_is_backed_by_the_shipped_cuda_registry`'s `CONTRACTS`
   stays 0.
-- **The tuned kernel is not in `make parity`.** It is covered by its own
+- **The tuned kernel is not in `make test/parity`.** It is covered by its own
   gate and by `parity-gate.sh`'s CUDA line (which runs that gate), not by the
   gradcheck package - that would demand the full catalogue and backward
   kernels, which this backend does not have.
@@ -1037,7 +1037,7 @@ tuned kernel are deferred.**
 - **One hand-written kernel.** `crates/kernels-cuda` registers
   `matmul_f32_tiled` (FP32 forward GEMM, preserving the reference reduction
   order); every other dispatch is `Generated`, and `POLICY` is empty. A native
-  tensor-core kernel does not exist. `make cuda-table/check` is a structure
+  tensor-core kernel does not exist. `make check/generated/kernels-cuda-table` is a structure
   gate only - compiling each declared kernel under NVRTC for its own floor
   needs a toolkit, so it would be an addition, not a replacement.
 - **`CudaProvider` produces CUDA `ImplChoice`s only for plain F32 forward
@@ -1063,7 +1063,7 @@ tuned kernel are deferred.**
   the same, and they are precisely the fast kernels, so the generated tier is
   slower than Vulkan by construction. A barrier inside a loop needs a guarded
   form the emitter does not have; a `Call` needs function emission.
-- **`make cuda-table/check` still does not compile anything under NVRTC.** The
+- **`make check/generated/kernels-cuda-table` still does not compile anything under NVRTC.** The
   machinery now exists (`nvrtc::compile`), but wiring a compile check into the
   gate means deciding what a box without a toolkit does, which is a gate
   question rather than a code one.
@@ -1168,7 +1168,7 @@ generation, and not a WGSL translation for anything performance-critical.
 | **8** | `CudaLibraryProvider`: cuBLASLt for the GEMM family (plain, register-tiled, and quantized), `dlopen`ed and declined cleanly where absent | golden agreement vs the WGSL reference at the project's 1e-6 floor, skip-if-library-absent, plus a decline-is-recorded test with the library deliberately not loaded |
 | **9** | Attention family: cuDNN's fused attention where the operand layout matches its contract; a hand-written flash-attention/paged-attention T2 kernel as the fallback that always exists, retiring every `flash_attn_*`/`paged_flash_*` refusal | decode-shaped and long-context shapes at 1e-6 vs the WGSL reference, run through whichever of the two answered, recorded distinctly in the dispatch trace |
 | **10** | Quantized tiers: `PolicyEntry` grows a dtype axis; a DP4A int8 T2 kernel; Q4/K-quant register-tiled kernels mirroring their WGSL counterparts | parity fixtures at each dtype's existing WGSL tolerance (not 1e-6 - the quant tiers already accept a looser bar there), plus the now-non-empty `POLICY` ratchet exercising a real entry for the first time |
-| **11** | Per-generation tensor-core packs (WMMA sm_70+, MMA sm_80+, WGMMA/TMA sm_90+) for the hottest kernels, each a `kernels-cuda` entry with its own `min_cc` floor, resolved automatically by `best_for` - no branch anywhere names an architecture | `make cuda-table/check` gains an NVRTC/nvcc compile-only check per declared floor via `-arch=compute_XX`, including floors above any card present; a numeric golden test runs wherever hardware exists to run it and the entry is marked "compiles, unverified numerically" otherwise - never claimed as verified `Tuned` parity that never ran |
+| **11** | Per-generation tensor-core packs (WMMA sm_70+, MMA sm_80+, WGMMA/TMA sm_90+) for the hottest kernels, each a `kernels-cuda` entry with its own `min_cc` floor, resolved automatically by `best_for` - no branch anywhere names an architecture | `make check/generated/kernels-cuda-table` gains an NVRTC/nvcc compile-only check per declared floor via `-arch=compute_XX`, including floors above any card present; a numeric golden test runs wherever hardware exists to run it and the entry is marked "compiles, unverified numerically" otherwise - never claimed as verified `Tuned` parity that never ran |
 | **12** | Multi-GPU: NCCL as a `dlopen`ed provider for `Collective`; `Shard.gpu_index`/`check-multi-gpu-sharding.sh` cover CUDA-identified devices; one `memauth::PoolId` shared between a CUDA and a Vulkan handle on the same physical card | a two-device collective test (skip-if-fewer-than-2) and a memauth test asserting one `PoolId` per physical card across both backend handles, so `--limit-vram-total` stops double-counting |
 | **13** | Surfacing and gate graduation: `brain devices` per-op tier column and per-card CUDA visibility; `--trace-impl`; `braintop`'s `DeviceBudget`-side field; cost formulas for CUDA steps in `gpu-core/src/cost.rs`; `StepMeta` for `step_native`; CI-built AOT cubins alongside the NVRTC dev path; CUDA joins `scripts/gates/parity-gate.sh` as a real line, not a skip | `cost.rs`'s existing coverage ratchet extended to CUDA steps and made red before the formulas land; `parity-gate.sh`'s CUDA line green on a full run, gated on M7-M11 landing first |
 
@@ -1281,7 +1281,7 @@ again at the point it is used.
   pattern the caller actually uses) came out of this work and are the things most likely to be
   re-learned the hard way.
 - Adding a tuned kernel is: the `.cu` file, its `kernels-cuda` registry entry,
-  `make cuda-table`, and - once `PolicyEntry` has a dtype axis - the `POLICY`
+  `make generate/kernels/cuda-table`, and - once `PolicyEntry` has a dtype axis - the `POLICY`
   entry plus the contract count in the ratchet test. Doing the policy entry
   first makes the ratchet red, which is the correct order to discover in. The
   `CudaProvider` needs an edit only if the kernel serves an operator or an

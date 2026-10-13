@@ -4,7 +4,7 @@
 # 36. `testdata/`'s "restorable from a mirror" claim needs auditing against a real machine, not assumed from the script
 
 `scripts/data/fetch-testdata.sh`'s own header states the design goal
-plainly: `testdata/` is disposable, gitignored, and `make fetch/testdata`
+plainly: `testdata/` is disposable, gitignored, and `make testdata/fetch`
 repopulates it from local mirrors (`BRAIN_*_MIRROR` env vars, each defaulting
 to a fixed path - the ONE place a machine-specific path may appear in this
 repo, per AGENTS.md). An audit of a real machine found several of the

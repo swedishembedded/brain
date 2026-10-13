@@ -61,7 +61,7 @@ fn ready() -> bool {
         }
     }
     if !std::path::Path::new(&CKPT).join("config.json").exists() {
-        brain_testutil::skip(&format!("{CKPT}/config.json absent (run `make fetch/testdata`)"));
+        brain_testutil::skip(&format!("{CKPT}/config.json absent (run `make testdata/fetch`)"));
         return false;
     }
     true

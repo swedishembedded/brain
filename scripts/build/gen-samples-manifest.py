@@ -47,7 +47,7 @@ def main() -> int:
 
     if check:
         if new != text:
-            print("docs/manifest.txt's Samples part is stale - run `make samples-manifest`.", file=sys.stderr)
+            print("docs/manifest.txt's Samples part is stale - run `make generate/samples/manifest`.", file=sys.stderr)
             return 1
         print(f"samples manifest up to date ({len(sample_readmes())} READMEs)")
         return 0

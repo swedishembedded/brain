@@ -15,7 +15,7 @@ use std::path::Path;
 
 use s3dit::{import::import_comfy, ZImageConfig, ZImageDitI8, ZImageDitShard, ZImageModel};
 
-/// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
+/// Resolve a fixture under the fetched `testdata/` tree (`make testdata/fetch`;
 /// override the root with `BRAIN_TESTDATA`).
 use brain_testutil::testdata;
 
@@ -37,7 +37,7 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 fn zimage_real_dit_matches_diffusers() {
     let fixture = testdata("golden/zimage/zimage_real.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make testdata/fetch`"));
         return;
     }
     let dit = match std::env::var("BRAIN_S3DIT_DIT") {
@@ -154,7 +154,7 @@ fn zimage_real_dit_matches_diffusers_at_512() {
 fn zimage_shard_matches_diffusers() {
     let fixture = testdata("golden/zimage/zimage_real.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make testdata/fetch`"));
         return;
     }
     if std::env::var("BRAIN_S3DIT_SHARD").as_deref() != Ok("1") {
@@ -195,7 +195,7 @@ fn zimage_shard_matches_diffusers() {
 fn zimage_int8_matches_diffusers() {
     let fixture = testdata("golden/zimage/zimage_real.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make testdata/fetch`"));
         return;
     }
     if std::env::var("BRAIN_S3DIT_I8").as_deref() != Ok("1") {

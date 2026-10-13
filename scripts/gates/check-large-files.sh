@@ -100,7 +100,7 @@ for f in "${files[@]}"; do
   if [ "$sz" -gt "$MAX_BYTES" ]; then
     echo "FILE TOO LARGE: $f ($((sz / 1024)) KiB, ceiling $((MAX_BYTES / 1024)) KiB)"
     echo "    If this is a documentation image, compress it. If it is test data,"
-    echo "    it belongs in the fixture tree that make fetch/testdata populates,"
+    echo "    it belongs in the fixture tree that make testdata/fetch populates,"
     echo "    not in the repository."
     fail=1
   fi

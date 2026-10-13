@@ -357,7 +357,7 @@ requirement does not apply to either:
   `dm[o] = dg[o]/n[o]` and `u[o] = -dg[o]*m[o]/(2*n[o]^3)`.
 
 Both need full `@what/@how/@opt/@cpu/@gpu/@npu/@quant/@dtype` headers, then
-`make kernels-regen` and `make kernels-table`.
+`make generate/kernels/registry` and `make generate/kernels/wgsl-table`.
 
 ## Identity at init, and what is exactly zero
 

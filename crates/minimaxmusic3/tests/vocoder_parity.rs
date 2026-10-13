@@ -61,7 +61,7 @@ fn check(tag: &str, cfg: &VocoderConfig, ident: &[(&str, i64)], weights_dir: &Pa
     let length = latents.len() / cfg.latent_channels as usize;
 
     // The pooled test device, NOT `Gpu::new_cpu`: this parity gate has to
-    // be runnable on BOTH backends (`make parity` is the cross-backend
+    // be runnable on BOTH backends (`make test/parity` is the cross-backend
     // gate, and this repo has already paid for a defect that appeared on
     // one backend only), and hardcoding the CPU JIT made that impossible.
     // `testgpu::dev` honours the ambient `--device`/`BRAIN_DEVICE`

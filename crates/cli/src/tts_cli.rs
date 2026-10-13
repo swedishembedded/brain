@@ -25,7 +25,7 @@
 //!                      [--full] [--out out/tts/talker_lora.safetensors]
 //!                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
 //!       Single-speaker SFT the Talker on a `text->codes` dataset (e.g.
-//!       `make data/tts`). Default: LoRA - freezes the base, trains the
+//!       `make tts/data`). Default: LoRA - freezes the base, trains the
 //!       attention adapters only. `--full`: every Talker weight trains,
 //!       matching Qwen's own documented single-speaker fine-tuning workflow
 //!       (`--out` then defaults to `talker_full.safetensors`). See

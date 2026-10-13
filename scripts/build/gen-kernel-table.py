@@ -216,7 +216,7 @@ def build_table():
     out += [
         "Every column is a field the kernel DECLARES in its own header",
         "(`@what` / `@how` / `@opt` / `@cpu` / `@gpu` / `@npu` / `@quant` / `@dtype`) - nothing",
-        "here is inferred. `make kernels-table` regenerates; `make kernels-table/check` fails",
+        "here is inferred. `make generate/kernels/wgsl-table` regenerates; `make check/generated/kernels-wgsl-table` fails",
         "when a kernel is missing a field, when a declaration contradicts the code, or when this",
         "table has drifted. Edit the kernel's header, never the row.",
         "",
@@ -285,7 +285,7 @@ def main():
 
     if check:
         if new != text:
-            print("kernel catalogue is stale - run `make kernels-table`.", file=sys.stderr)
+            print("kernel catalogue is stale - run `make generate/kernels/wgsl-table`.", file=sys.stderr)
             return 1
         print(f"kernel table up to date ({n_kernels()} kernels, all fields declared)")
         return 0

@@ -117,7 +117,7 @@ fn run() -> Result<(), String> {
     let s = parse()?;
     if !s.data.join("train.csv").exists() {
         return Err(format!(
-            "no BANKING77 at {}\n  run `make fetch/testdata`, or pass --data DIR",
+            "no BANKING77 at {}\n  run `make testdata/fetch`, or pass --data DIR",
             s.data.display()
         ));
     }

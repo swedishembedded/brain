@@ -35,7 +35,7 @@
 //! returns the bare sequence and the model pads.
 //!
 //! Skips itself when `$BRAIN_TESTDATA/decide/tokenizer/tokenizer.json` (default
-//! `<repo>/testdata`) is absent; `make fetch/testdata` puts one there.
+//! `<repo>/testdata`) is absent; `make testdata/fetch` puts one there.
 
 use std::path::PathBuf;
 
@@ -108,7 +108,7 @@ fn load() -> Option<WordPiece> {
     let path = testdata("decide/tokenizer/tokenizer.json");
     if !path.exists() {
         brain_testutil::skip(&format!(
-            "{} missing - run `make fetch/testdata` (a ~470 kB tokenizer.json, not a checkpoint)",
+            "{} missing - run `make testdata/fetch` (a ~470 kB tokenizer.json, not a checkpoint)",
             path.display()
         ));
         return None;

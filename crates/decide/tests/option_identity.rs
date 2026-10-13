@@ -18,7 +18,7 @@ use decide::primitives::{Opt, Question};
 fn model(cfg: &EncoderConfig) -> Option<Decide> {
     let tok_path = brain_testutil::testdata_path("decide/tokenizer/tokenizer.json");
     if !tok_path.exists() {
-        brain_testutil::skip(&format!("{} missing - run `make fetch/testdata`", tok_path.display()));
+        brain_testutil::skip(&format!("{} missing - run `make testdata/fetch`", tok_path.display()));
         return None;
     }
     let tok = WordPiece::from_file(tok_path.to_str().expect("path")).expect("tokenizer");

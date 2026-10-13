@@ -36,7 +36,7 @@ compiled graph, rather than dispatching brain's own kernels op by op. See
 Most from-scratch training code proves its backward pass is right by diffing
 against a PyTorch reference. brain doesn't have one to diff against - instead,
 every model's analytic WGSL gradients are checked against an in-repo
-finite-difference gradient checker (`make gradcheck`), on its own forward pass.
+finite-difference gradient checker (`make test/gradcheck`), on its own forward pass.
 That gate is what "correct" means here, and it runs as part of the normal test
 suite.
 

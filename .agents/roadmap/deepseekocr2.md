@@ -288,11 +288,11 @@ invoked (M6/M7's job, per M3's scope note).
 Confirmed pre-existing, unrelated to this milestone (matches M1's own
 finding almost exactly): `make check/scripts` fails on `check-env-docs.sh`
 - 9 undocumented `BRAIN_*` vars across `flux2`/`ltxv`/`qwen35`/the hub
-endpoint, none read anywhere in this crate. `make clippy` fails on 6
+endpoint, none read anywhere in this crate. `make check/clippy` fails on 6
 pre-existing warnings in `crates/model/src/adapter/*`,
 `crates/model/tests/adapter_lora_fa.rs`, `crates/cli/src/resolver_cli.rs`,
 and `crates/flux2/tests/resolve_layout.rs` - `cargo clippy -p
-brain-deepseekocr2 --all-targets` is itself warning-free. `make gradcheck`
+brain-deepseekocr2 --all-targets` is itself warning-free. `make test/gradcheck`
 (the full workspace suite, not just this crate) is green.
 
 M6 (real-weight parity and the decode loop) done, global view only.
@@ -540,7 +540,7 @@ new kernels, all composed from `matmul`/`matmul_dx`/`matmul_dw`/`axpy`/
 `grad_scale`, already registered for the optimizer.
 
 **A real defect the gradcheck-adjacent testing caught, not from `make
-gradcheck` itself:** every backward site that writes into a base weight's
+test/gradcheck` itself:** every backward site that writes into a base weight's
 grad buffer (`matmul_dw`, `bias_grad`, the two norms' `rmsnorm_bwd` grad
 output, the query banks, the separator, the projector) was unconditionally
 dispatched - correct when everything is trainable (full fine-tune, this

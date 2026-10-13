@@ -160,8 +160,8 @@ demonstrated by a sample under `samples/python/<pipeline>/` or
   `brain-py/brain_py/dbus.py`; samples: `samples/python/dbus/`, `samples/python/asr/`.
 
 ### 5. Verify it end to end
-- Cross-backend parity if imported (`make parity`), gradient-check if trained
-  (`make gradcheck`).
+- Cross-backend parity if imported (`make test/parity`), gradient-check if trained
+  (`make test/gradcheck`).
 - A capability/manifest unit test (cheap; no weights) asserting the action schema.
 - The sample must run against `brain serve --dbus` (WAV-file mode for a no-hardware
   smoke test where the input is live audio/video).

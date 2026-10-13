@@ -395,7 +395,7 @@ All three M7 slices (s3dit, ltxv, gemma4) are now done - M7 is closed.
       (gated against a checked-in text snapshot of the kernel exactly as it
       stood before this milestone,
       `fixtures/matmul_i8_dyn_pre_qpg.wgsl.snapshot` - not a `.wgsl` file,
-      so `kernels-regen`/`kernels-table` never scan it), `QPG=1` folds
+      so `generate/kernels/registry`/`generate/kernels/wgsl-table` never scan it), `QPG=1` folds
       twice per chunk instead (group=16). `matmul_i8_gemv`/
       `matmul_i8_gemv_reg`/`moe_linear_gated_i8` already had a plain `const
       WPG: u32 = 8u;` each - exactly the `const NAME: u32 = <lit>u;` shape
@@ -846,8 +846,8 @@ All three M7 slices (s3dit, ltxv, gemma4) are now done - M7 is closed.
       failure already recorded in M3's and M12's own entries above
       (`moe_compact_parity::compact_layer_submit_count_does_not_scale_with_
       expert_count` - confirmed via `git diff` that `expert_fwd_compact_
-      layer` is untouched by this milestone). `make kernels-regen && make
-      kernels-table`: both pass, no new kernel files (this milestone edits
+      layer` is untouched by this milestone). `make generate/kernels/registry && make
+      generate/kernels/wgsl-table`: both pass, no new kernel files (this milestone edits
       four existing `.wgsl` files in place, adds none).
       **Measured bytes/param** (`device_bytes_per_parameter_matches_the_
       recomputed_layout`, `bits/8 + 2/group + 4/spb`) vs the source GGUF

@@ -161,7 +161,7 @@ analysis, ground and flight checks, reward-sensitivity sweeps, the learning
 matrix with its controls, and `replay` for re-measuring a saved tuning cold:
 
 ```bash
-make crates/fly/examples/walk_search/run ENV="OUT=/tmp/walk.txt"
+make crates/fly/examples/walk-search/run ENV="OUT=/tmp/walk.txt"
 make crates/fly/examples/replay/run ARGS=/tmp/walk.txt
 ```
 

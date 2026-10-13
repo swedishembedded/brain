@@ -4,7 +4,7 @@
 # cargo alone. These power the tools/ scripts (inference benchmarks, parity
 # dumps) and provide the OpenVINO runtime that `brain … --device npu` loads at
 # run time (the pip `openvino` wheel bundles the native libraries the Rust
-# `openvino` crate dlopens). Install with `make requirements`.
+# `openvino` crate dlopens). Install with `make environment/requirements`.
 #
 # Kept in sync with what tools/**/*.py and scripts/**/*.py actually import —
 # `huggingface_hub` was removed from here because nothing imports it (brain

@@ -6,8 +6,8 @@
 # OpenVINO runtime `brain --device npu` / `brain npu run` dlopens at run time
 # (crates/npu/src/openvino/real.rs) is actually installed and can see it.
 #
-# Run by `make environment`. Safe on a box with no NPU: it detects that and
-# exits 0 having done nothing, so `make environment` never fails on a machine
+# Run by `make environment/full`. Safe on a box with no NPU: it detects that and
+# exits 0 having done nothing, so `make environment/full` never fails on a machine
 # without this hardware (most dev boxes).
 #
 # What "compatible version" means here, checked against Intel's own docs
@@ -71,11 +71,11 @@ fi
 
 # ---- 3. install/upgrade the OpenVINO runtime ------------------------------
 # The same `openvino` pip wheel requirements.txt already lists (this is not a
-# second, competing install path -- `make requirements` covers the rest of
+# second, competing install path -- `make environment/requirements` covers the rest of
 # the Python tooling; this step exists to (a) make sure openvino specifically
 # is present/current when an NPU was just detected, even if `make
 # requirements` was run before the NPU was attached/passed through, and
-# (b) verify it, which `make requirements` does not.
+# (b) verify it, which `make environment/requirements` does not.
 floor="$(grep -E '^openvino' "$REPO_ROOT/requirements.txt" | head -1 || true)"
 floor="${floor%%#*}"
 floor="$(echo "$floor" | xargs)"

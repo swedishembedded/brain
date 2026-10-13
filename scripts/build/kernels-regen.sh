@@ -26,7 +26,7 @@ WGSL_DIR="$REPO_ROOT/crates/kernels/wgsl"
 # script right here — after `header_end` has already been assigned, so the failure
 # looks like nothing happening rather than like an error. It is a race on grep
 # outrunning the pipe buffer, so it worked by luck for ~200 kernels and then
-# started aborting the regen; `make kernels-regen` does surface the 141, but a
+# started aborting the regen; `make generate/kernels/registry` does surface the 141, but a
 # caller that pipes the output (`| tail -1`) sees only silence and an unchanged
 # registry. -m1 makes grep stop on its own, so nothing is ever SIGPIPEd.
 header_end="$(grep -n -m1 '^/// `wgsl/' "$LIB" | cut -d: -f1)"

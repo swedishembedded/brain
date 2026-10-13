@@ -10,14 +10,14 @@ This trains brain's dense nanoGPT-parity baseline on a synthetic arithmetic
 task, end to end:
 
 ```bash
-make data/calculator                  # generate a toy addition dataset
-make train/gpt/calculator             # train -> out/gpt-calculator.safetensors
-make eval/gpt/calculator              # validation perplexity + task exact-match
+make gpt/calculator/data                  # generate a toy addition dataset
+make gpt/calculator/train             # train -> out/gpt-calculator.safetensors
+make gpt/calculator/eval              # validation perplexity + task exact-match
 ```
 
-`make data/calculator` writes a `train.bin`/`val.bin` dataset of arithmetic
-problems; `make train/gpt/calculator` trains a GPT decoder on it and writes
-`out/gpt-calculator.safetensors`; `make eval/gpt/calculator` loads that
+`make gpt/calculator/data` writes a `train.bin`/`val.bin` dataset of arithmetic
+problems; `make gpt/calculator/train` trains a GPT decoder on it and writes
+`out/gpt-calculator.safetensors`; `make gpt/calculator/eval` loads that
 checkpoint back and prints its validation perplexity and exact-match accuracy
 on held-out problems, so you can see it actually learned the task.
 

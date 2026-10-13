@@ -323,7 +323,7 @@ it was found:
 * The real blocker is verifiable in-repo and is stronger than either:
   **`crates/wgsl-cpu` has no atomic lowering whatsoever**, and neither does
   `crates/wgsl-cuda`. An atomic kernel is wgpu/Vulkan-only, which forfeits the
-  CPU backend - the `make parity` oracle, and the thing that catches the
+  CPU backend - the `make test/parity` oracle, and the thing that catches the
   silent-zero-gradient class this repo's own headline warning is about.
 
 If the event-driven path later proves worth it, the amendment arrives as a

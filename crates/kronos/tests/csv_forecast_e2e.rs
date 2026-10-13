@@ -8,7 +8,7 @@
 //! parity, KV-cache bit-identity, gradient checks). Those can all hold while
 //! `brain forecast predict` is broken, because none of them read a file, build
 //! a panel, or compare the result to anything a user would recognise as
-//! "right". This test is what makes `make forecast/parity` a gate on the thing
+//! "right". This test is what makes `make test/parity/forecast` a gate on the thing
 //! people actually run.
 //!
 //! Two halves, deliberately:

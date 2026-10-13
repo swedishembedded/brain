@@ -148,7 +148,7 @@ right computation.
 
 ```bash
 make perf                    # core scenarios (latency, throughput, serve, sweep) on the current device
-make perf/<scenario>         # one scenario, e.g. make perf/sweep
+make perf/scenario/<scenario>         # one scenario, e.g. make perf/scenario/sweep
 make perf/compare            # leaderboard over everything in results/
 make perf/smoke              # every scenario shrunk to CI-sized runs
 ```

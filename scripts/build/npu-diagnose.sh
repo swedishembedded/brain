@@ -176,7 +176,7 @@ fi
 # ---- 5. OpenVINO python install (self-heals its own venv only) ------------
 sect "5/7 OpenVINO install"
 if ! python3 -c "import openvino" 2>/dev/null; then
-  bad "python3 -c 'import openvino' failed -- run 'make requirements' / 'make environment'"
+  bad "python3 -c 'import openvino' failed -- run 'make environment/requirements' / 'make environment/full'"
 else
   ov_version="$(python3 -c "import openvino; print(openvino.__version__)" 2>/dev/null)"
   ok "openvino importable, version ${ov_version:-unknown}"

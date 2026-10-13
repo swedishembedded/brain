@@ -6,7 +6,7 @@
 //!
 //! Casanueva, Temcinas, Gerz, Henderson and Vulic, *Efficient Intent Detection
 //! with Dual Sentence Encoders*, NLP4ConvAI @ ACL 2020. CC-BY-4.0, taken from
-//! the authors' own repository; `make fetch/testdata` puts it in place.
+//! the authors' own repository; `make testdata/fetch` puts it in place.
 //!
 //! **Options are sampled, not fixed.** A model trained against all 77 intents
 //! every time learns a 77-way head wearing a costume: nothing forces it to

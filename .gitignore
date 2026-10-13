@@ -47,7 +47,7 @@ __pycache__/
 !.claude/commands/
 
 # Generated world-model artifacts: parity fixtures (regenerate with
-# `make wm-fixtures`) and demo output.
+# `make wm/fixtures`) and demo output.
 crates/diamond/tests/fixtures/
 /out/wm-demos/
 
@@ -63,7 +63,7 @@ out/depth.ppm
 # generated documentation bundle (regenerate with 'make docs')
 /build/
 
-# Test fixtures (checkpoints/goldens/audio) — populated by `make fetch/testdata`, never committed.
+# Test fixtures (checkpoints/goldens/audio) - populated by `make testdata/fetch`, never committed.
 /testdata/
 
 # brain perf baselines are a snapshot of one machine's absolute numbers, not

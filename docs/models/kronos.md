@@ -154,4 +154,4 @@ for the full how-to.
   while at `--context 512` the same comparison drifts apart to |z| 6.0 and the
   sampled band is ~15% narrower. Ask for the longer window explicitly if you
   want it; the command says on stderr that it is then an approximation.
-  `make forecast/parity` gates both regimes.
+  `make test/parity/forecast` gates both regimes.

@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 <!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
 
-# 29. `make kernels-regen` had been broken since the script moved
+# 29. `make generate/kernels/registry` had been broken since the script moved
 
 `scripts/build/kernels-regen.sh` computed its repo root relative to its own
 location, which was right when it lived directly under `scripts/` and became

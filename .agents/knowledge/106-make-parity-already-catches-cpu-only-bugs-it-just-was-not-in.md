@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 <!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
 
-# 106. `make parity` already catches CPU-only bugs - it just was not in `make test/full`, so nobody ran it
+# 106. `make test/parity` already catches CPU-only bugs - it just was not in `make test/full`, so nobody ran it
 
 Two real, unrelated CPU-backend bugs surfaced in one sitting: #105 above (a
 model pairing two kernels that do not share a Params contract), and
@@ -20,15 +20,15 @@ instead: same WGSL body, dispatched by its numeric index exactly as before
 label freeing the string for `BWD_KERNELS`'s copy.
 
 Neither bug is why this entry exists. `scripts/gates/parity-gate.sh`
-(`make parity`) already runs the full `brain-gradcheck` suite - `check_
+(`make test/parity`) already runs the full `brain-gradcheck` suite - `check_
 controlnet` included - under `BRAIN_DEVICE=cpu`, which is exactly the run
 that hits both failures immediately: an epsilon silently read on one backend
 and discarded on the other, and a kernel table that cannot even compile on
 CPU. That gate existed and was correct. It was simply never part of
-`make test/full`, which depended on `parity/strict` (the golden-fixture
+`make test/full`, which depended on `test/parity/strict` (the golden-fixture
 numeric suite) and stopped there - so "run everything" never actually ran
 the one check most likely to catch a backend-only defect, and both bugs sat
-merged until someone happened to invoke `make parity` by hand.
+merged until someone happened to invoke `make test/parity` by hand.
 
 **A correctness gate that exists but is not wired into the thing people
 actually run before calling something done is equivalent to a gate that does

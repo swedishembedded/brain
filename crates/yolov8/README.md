@@ -67,7 +67,7 @@ Or via the Makefile (CPU-friendly defaults: `YOLO_N`/`YOLO_STEPS`/`YOLO_BATCH`/
 `YOLO_LR`/`YOLO_CONF`/`YOLO_IOU`):
 
 ```bash
-make data/detect train/yolo eval/yolo detect/yolo
+make yolo/data yolo/train yolo/eval yolo/detect
 ```
 
 ---

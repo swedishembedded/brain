@@ -4,7 +4,7 @@
 
 """Bake the SDXL VAE decode golden for `crates/vae/tests/sdxl_decode_parity.rs`.
 
-Writes `<mirror>/vae/sdxl_vae_decode.safetensors`, which `make fetch/testdata`
+Writes `<mirror>/vae/sdxl_vae_decode.safetensors`, which `make testdata/fetch`
 links to `testdata/golden/vae/`: a fixed `[1,4,16,16]` latent and
 diffusers' `vae.decode(z).sample` `[1,3,128,128]`.
 
@@ -39,7 +39,7 @@ def main() -> None:
     ap.add_argument(
         "--out",
         default=f"{GOLDEN_MIRROR}/vae",
-        help="golden mirror dir that make fetch/testdata links from",
+        help="golden mirror dir that make testdata/fetch links from",
     )
     ap.add_argument("--seed", type=int, default=11)
     a = ap.parse_args()

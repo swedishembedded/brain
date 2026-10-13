@@ -30,7 +30,7 @@ site rather than five.
 
 ```bash
 brain pull sentence-transformers/all-MiniLM-L6-v2   # the encoder, once
-make fetch/testdata                                  # BANKING77, once
+make testdata/fetch                                  # BANKING77, once
 
 make samples/decision/triage/build
 make samples/decision/triage/run ARGS="--steps 600 --intents 8"

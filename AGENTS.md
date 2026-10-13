@@ -852,7 +852,7 @@ application", "an orchestrator"). Enforced by `make check/scope`
 
 17. **DIAMOND** (`crates/diamond`) - EDM diffusion world model (Atari-100k):
     pre-recorded UNet graph, torch `.pt` import, playable. Parity fixtures via
-    `make wm-fixtures`.
+    `make wm/fixtures`.
 18. **GenieRedux-G** (`crates/genieredux`) - CoinRun ST-transformer world model
     (QK-normalized biased attention, GEGLU FFN, PEG); tokenizer/MaskGIT dynamics
     in progress. `brain diamond {play,replay,bench,import,finetune,export}`
@@ -979,7 +979,7 @@ front-end to depend on.
 | `backend-cuda` | native CUDA Driver API eager backend (`libcuda.so.1` `dlopen`ed at run time, so there is no build-time CUDA dependency and a box with no NVIDIA driver still builds green). Compiles each kernel through `wgsl-cuda` + NVRTC **on first dispatch of that kernel**, never for the catalogue at construction. A kernel outside `wgsl-cuda`'s supported subset is refused by name - never approximated, never diverted to another device |
 | `wgsl-cpu` | the CPU backend's compiler: WGSL → naga IR → Cranelift JIT |
 | `wgsl-cuda` | the CUDA backend's compiler: WGSL → naga IR → CUDA C++ text. The **generated** (`ImplSource::Generated`) tier - it inherits the WGSL execution model and reports itself as such, so a hand-written kernel cannot be quietly replaced by it. Generates the whole catalogue (`backend-cuda`'s `catalogue_coverage` asserts none is refused): structs, arrays and matrices are scalarised or held in generated C++ structs, and device memory is only ever read and written leaf by leaf at WGSL layout offsets |
-| `kernels-cuda` | hand-written CUDA kernels and their metadata (name, op, tier, compute-capability floor, entry point), with its own registry and its own `make cuda-table/check`. A source-only leaf, so it builds anywhere including wasm |
+| `kernels-cuda` | hand-written CUDA kernels and their metadata (name, op, tier, compute-capability floor, entry point), with its own registry and its own `make check/generated/kernels-cuda-table`. A source-only leaf, so it builds anywhere including wasm |
 | `cuda-aot` | `brain-cuda-aot`, the offline builder behind `make cuda/aot`: compiles the generated tier and the native kernels into per-architecture cubins + PTX and a manifest that `backend-cuda` loads when present, so a driver-only machine runs them without NVRTC (images live in the cache directory, never in git) |
 | `vulkan` | **optional, non-default** `VK_KHR_cooperative_matrix` matmul path (excluded from `default-members`; build with `-p brain-vulkan` / cli feature `vulkan-coopmat`) |
 | `paramstore` / `optim` | param/grad/Adam buffers; AdamW + global grad-norm clip |
@@ -1070,7 +1070,7 @@ front-end to depend on.
 | Int8 serving weights + on-device decode window | `qwen3::serve` (`--weights-int8` / target suffix `:i8w`; `DECODE_WINDOW`) |
 | Engine internals | `docs/engine/{overview,training,vulkan,web}.md` |
 | **Profile a forward or a BACKWARD, per kernel kind** | `crates/sdxlunet/src/bin/unet_bench.rs` (forward, + a `gemm` mode that A/Bs kernels for correctness AND speed) and `crates/vqgan/src/bin/vqgan_bench.rs` (a full training step, both halves, + `gn`/`convbwd` A/B modes). Copy their shape; see `.agents/rules/kernels.md` §F.1 |
-| **Add/adjust/dispatch a WGSL kernel** | **`.agents/rules/kernels.md`** - read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make kernels-regen`** + **`make kernels-table`** |
+| **Add/adjust/dispatch a WGSL kernel** | **`.agents/rules/kernels.md`** - read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make generate/kernels/registry`** + **`make generate/kernels/wgsl-table`** |
 | **Which kernels already exist** (before writing a new one) | the catalogue in **`docs/reference/kernels.md`** - every kernel with what it does, how, its structural optimisation level, and per-backend support |
 | **Something is slow (model, kernel, training step)** | **`.agents/rules/kernels.md` §F** - the ORDERED loop that found the big wins (profile per kernel kind → check for an already-faster sibling → measure the branch your hardware skips → sweep for the crossover → fix it in the SELECTOR → mutation-verify → re-profile); then **§E** (measure-first rules + the killed hypotheses), `.agents/rules/porting.md` §10, case studies in `docs/performance/overview.md` |
 | **Save a trained decision model** (encoder MOVED, so a head-only adapter cannot reproduce it) | `Decide::save_model` / `DecisionPipeline::save_model` - a complete checkpoint DIRECTORY that `DecisionPipeline::builder(dir).load()` reads back; `decide::import::sniff_naming` tells a published HF checkpoint from one this crate wrote by the tensor NAMES, so a caller passes a path and never a format. `save_head` still refuses a moved encoder, on purpose |
@@ -1142,8 +1142,8 @@ front-end to depend on.
 | **"change only X" end to end** (segment -> refine -> restore -> composite) | `crates/imgpipe` - the bit-exactness contract and why it holds is in its module docs |
 | Image handling of ANY kind (resize/pad/crop/letterbox/masks/tiling/codecs) | `crates/imaging` - check here BEFORE writing a pixel loop; five copies of `chw_to_hwc` is what created it |
 | Identity conditioning (ArcFace -> ID tokens -> diffusion attention) | `crates/pulid` (FLUX.1, wired), `crates/instantid` (SDXL, shapes only); `pulid::idcond` documents the raw-vs-normalised asymmetry that silently breaks it |
-| Clippy gate (exit code + a warning ratchet) | `make clippy`, `scripts/gates/clippy-gate.sh` - clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
-| **Standalone samples** - Rust applications (`make samples/<path>/{build,run}`, link the public `brain` SDK the way a product would) plus Python/shell client scripts (`samples/python/<pipeline>/`, `samples/shell/<pipeline>/`, driven off-process over D-Bus/HTTP/the CLI) | `samples/README.md` (the contract for all three kinds: SDK-only dependency for a Rust sample, each Rust sample NAMES the SDK surfaces it uses, why Rust samples are workspace members but never `default-members`, why a Rust sample is built with `-p <sample>` alone, and the directory/README/fetch-data.sh shape every sample follows), `scripts/gates/check-samples.sh` (`make check/samples`, which MEASURES a Rust sample's dependency closure and checks the shell/Python trees structurally) |
+| Clippy gate (exit code + a warning ratchet) | `make check/clippy`, `scripts/gates/clippy-gate.sh` - clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
+| **Standalone samples** - Rust applications (`make samples/<category>/<name>/{build,run}`, link the public `brain` SDK the way a product would) plus Python/shell client scripts (`samples/python/<pipeline>/`, `samples/shell/<pipeline>/`, driven off-process over D-Bus/HTTP/the CLI) | `samples/README.md` (the contract for all three kinds: SDK-only dependency for a Rust sample, each Rust sample NAMES the SDK surfaces it uses, why Rust samples are workspace members but never `default-members`, why a Rust sample is built with `-p <sample>` alone, and the directory/README/fetch-data.sh shape every sample follows), `scripts/gates/check-samples.sh` (`make check/samples`, which MEASURES a Rust sample's dependency closure and checks the shell/Python trees structurally) |
 | **The SDK's feature vocabulary** (what a consumer may name, and what it costs) | `crates/sdk/Cargo.toml`'s `[features]` - surfaces are `brain_arch::Domain` names, `device`/`resolve` are tiers a surface selects; `scripts/gates/check-sdk-features.sh` (`make check/sdk-features`) pins the vocabulary, compiles every surface alone, and keeps `crates/catalog` un-featurized. `brain-loader` links no model crate: `brain pull` finishes every family with a manifest over the files as downloaded |
 | **Public API / SDK design** (progressive disclosure, `from_pretrained`, one pipeline type per task, domain objects, CLI-must-call-the-SDK) | **`.agents/rules/sdk-design.md`** - read BEFORE adding or changing a public type in `crates/sdk`, a CLI subcommand, or `brain-py`; pairs with `.agents/rules/serving-contract.md` (that one is the D-Bus/scheduler half, this one the library half). `crates/sdk`, `.agents/roadmap/sdk.md` |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
@@ -1155,6 +1155,46 @@ front-end to depend on.
 | **Quantize any checkpoint to a GGUF** (tier, per-tensor policy, streaming write, two-way coverage) | `crates/checkpoint/src/quantize.rs` (`Tier`/`Policy`/`plan`/`convert`), `checkpoint::quant::quantize_par`, `checkpoint::gguf_write::Writer`; CLI `brain quantize` in `crates/cli/src/quantize_cli.rs` |
 
 ---
+
+## Make targets
+
+HARD RULE. Every public make target is `make <concept>/<subconcept>/.../<action>`:
+
+- The concept comes first (a noun for the area: `build`, `test`, `check`,
+  `bench`, `perf`, `docs`, `package`, `release`, `samples`, `generate`, or a
+  model family such as `gpt`, `yolo`, `flux2`), the verb or variant comes last,
+  and there are as many levels as the thing needs, usually two or three. A test,
+  sample or example hierarchy with subdirectories gets one segment per directory
+  level: `test/e2e/api-conformance`, `samples/study/chat/run`,
+  `crates/fly/examples/walk-search/run`. Never put the verb or area second
+  (`test/parity`, not `parity/test`; `yolo/train`, not `train/yolo`).
+- Names are lowercase `[a-z0-9-]` segments joined by `/` (an underscore in a
+  source name becomes a hyphen in the target). Private helper targets start
+  with `_`.
+- Every prefix is itself a target, so `make <TAB>` descends one level at a time.
+  An area target is the default action for its area (`test`, `test/e2e`,
+  `test/parity`, `bench`, `perf`, `docs`, `package/deb`, `check/generated`: it
+  runs its default set, named in its doc line) or, where no default is safe or
+  sensible (`build`, `package`, `release`, `hooks`, `generate`, `testdata`,
+  `environment`, every model-family area, `samples`), it only lists its children
+  and does nothing else. An umbrella of anything that tags, pushes, installs or
+  writes outside the working tree never acts.
+- A set that follows from the tree is generated, never hand-listed: explicit
+  targets from a static pattern rule over a computed list (never `%` pattern
+  rules, which bash completion cannot see). Here:
+  `samples/<category>/<name>/{build,run}`,
+  `crates/<crate>/examples/<name>/{build,run}`, `gpt/<dataset>/{data,train,eval}`,
+  `bench/run/<name>`, `perf/scenario/<scenario>`. Adding a directory adds a
+  target.
+- A bare single-segment target is allowed only for an area, or for the leaves
+  `clean` and `help` (one action each).
+- Every target has a `## name - description` line (a generated family has one
+  line with a `<placeholder>`), and sits under a `##@ Section` line; `make help`
+  is generated from them by `scripts/make-help.sh`.
+  `scripts/gates/check-make-targets.sh` (`make check/make-targets`, also a
+  pre-commit hook, and part of `make test/full`) enforces the machine-checkable
+  part. Renaming a target means a single clean rename: update every reference
+  (docs, scripts, hint strings, hooks) in the same commit, no aliases.
 
 ## Essential commands
 
@@ -1177,26 +1217,27 @@ make build/debug                     # debug build
 make build/release && make test      # optimized build + full suite (MOE_SKIP_GPU_TESTS=1 to skip GPU;
                                      # tests run at TEST_THREADS=8 on the pooled test device - every
                                      # test binary shares one device via gpu_core::testgpu)
-make gradcheck                       # backprop correctness gate
-make parity                          # cross-backend parity: CPU == Vulkan == NPU (scripts/gates/parity-gate.sh)
-make kernels-regen                   # regenerate the kernel const block after adding/removing a .wgsl
-make kernels-table                   # regenerate README.md's kernel catalogue (gated by kernels-table/check)
+make test/gradcheck                       # backprop correctness gate
+make test/parity                          # cross-backend parity: CPU == Vulkan == NPU (scripts/gates/parity-gate.sh)
+make generate/kernels/registry      # regenerate the kernel const block after adding/removing a .wgsl
+make generate/kernels/wgsl-table    # regenerate the kernel catalogue (gated by check/generated/kernels-wgsl-table)
 make docs                            # docs bundle -> build/docs/brain-docs.{md,pdf} (needs pandoc + xelatex)
 
-make data/<name>                     # calculator|reverser|wordcalc|timeseries|shakespeare_char|gpt|detect|tts
-make train/gpt/<name>                # train GPT -> out/gpt-<name>.safetensors
-make eval/gpt/<name>                 # perplexity + exact-match
-make train/yolo | eval/yolo | detect/yolo
-make depth/demo | depth/smoke | depth/camera | train/zipdepth
+make gpt/<dataset>/data             # calculator|reverser|wordcalc|timeseries|shakespeare-char|gpt
+make gpt/<dataset>/train            # train GPT -> out/gpt-<dataset>.safetensors
+make gpt/<dataset>/eval             # perplexity + exact-match
+make yolo/data | yolo/train | yolo/eval | yolo/detect
+make tts/data                       # synthetic TTS text->codes dataset
+make depth/demo | depth/smoke | depth/camera | depth/train
 make mirror/import | mirror/infer | mirror/demo | splat/view
-make wm/play | wm-fixtures           # world models (SDL window; fixtures need torch)
+make wm/play | wm/fixtures         # world models (SDL window; fixtures need torch)
 make forecast/compare | forecast/serve
-make export/yolo-onnx | quantize/yolo | sim/yolo-int8 | run/yolo-npu | bench/yolo-npu
-make federated-demo                  # MoE train -> split -> verify -> merge
+make yolo/npu/export | yolo/npu/quantize | yolo/npu/sim-int8 | yolo/npu/run | yolo/npu/bench
+make federated/demo                  # MoE train -> split -> verify -> merge
 make web/dev                         # WebGPU browser demo (crates/web)
-make samples/list                    # the standalone sample applications
-make samples/<path>/build            # build one; reuses brain's warm ./target
-make samples/<path>/run ARGS="..."   # run one, rebuilding if stale
+make samples                    # the standalone sample applications
+make samples/<category>/<name>/build            # build one; reuses brain's warm ./target
+make samples/<category>/<name>/run ARGS="..."   # run one, rebuilding if stale
 make bench                           # architecture-evaluation suite (see below)
 ```
 
@@ -1390,7 +1431,7 @@ rasteriser, and such runs must never be reported as GPU numbers):
 
 ```bash
 BRAIN_DEVICE=cpu make bench          # every registered benchmark, one table
-BRAIN_DEVICE=cpu make bench/mqar     # a single benchmark
+BRAIN_DEVICE=cpu make bench/run/mqar     # a single benchmark
 ./target/release/brain bench [--device cpu] [<name>] [--seed S]
 ```
 
@@ -1405,7 +1446,8 @@ scored exact-match on the assistant span only), the MAD family (`mad_recall`,
 `Benchmark` (`name`/`description`/`prepare`/`evaluate`/`threshold`) → register in
 `bench::registry()` (and `registry_smoke()`) → add a learnability test in
 `crates/bench/tests/` gated by `MOE_SKIP_GPU_TESTS` asserting a **measured**
-threshold. The generic `make bench/%` rule picks it up with no further wiring.
+threshold. `make bench/run/<name>` picks it up with no further wiring (the target set is read from the
+`fn name` literals in `crates/bench/src`).
 
 ### Evaluating a new architecture (turn-key harness)
 
@@ -1503,7 +1545,7 @@ and time?** Full design in `docs/performance/benchmarking.md`.
 ```bash
 brain perf list                       # scenarios + the standard workload matrix
 make perf                             # latency + throughput + serve + sweep
-make perf/sweep                       # one scenario
+make perf/scenario/sweep                       # one scenario
 make perf/compare                     # leaderboard over results/perf-*.json
 make perf/smoke                       # CI-sized run of everything
 ```
@@ -1550,10 +1592,10 @@ a metric that isn't there was simply forgotten.
   it cost someone a day.
 
   **One finding, one file** - `.agents/knowledge/<NNN>-<slug>.md`, starting with
-  `# <NNN>. <title>`, then `make knowledge-index`. The id is the citation key
+  `# <NNN>. <title>`, then `make generate/knowledge/index`. The id is the citation key
   the whole repository uses and it is never reused or renumbered, so `#55`
   written today still resolves after the base is reorganised;
-  `make knowledge-index/check` (in `test/full`) fails if the index has drifted
+  `make check/generated/knowledge-index` (in `test/full`) fails if the index has drifted
   or two entries claim one id. Start at **`.agents/knowledge/index.md`**, which
   lists every entry with its title - it is the file to read when routing, not
   the directory.
@@ -1636,9 +1678,9 @@ a metric that isn't there was simply forgotten.
 
 - **WGSL is the source of truth.** Kernels live only in `crates/kernels/wgsl/`,
   embedded as consts; no kernel text is duplicated. After adding/removing a
-  `.wgsl`, run **`make kernels-regen`** (`scripts/build/kernels-regen.sh`) to
+  `.wgsl`, run **`make generate/kernels/registry`** (`scripts/build/kernels-regen.sh`) to
   regenerate the const block + `ALL` registry in `crates/kernels/src/lib.rs`,
-  **and `make kernels-table`** to regenerate README.md's kernel catalogue.
+  **and `make generate/kernels/wgsl-table`** to regenerate README.md's kernel catalogue.
 
   **Keep the catalogue current - it is the list §F.3 tells you to check before
   writing a kernel, so a stale one causes the exact defect this repo pays for
@@ -1662,7 +1704,7 @@ a metric that isn't there was simply forgotten.
   workgroup stage - changes its row, so update the block and regenerate after
   edits too, not only after adding or deleting a file.
 
-  This is not optional bookkeeping. `make kernels-table/check` fails the build
+  This is not optional bookkeeping. `make check/generated/kernels-wgsl-table` fails the build
   (via `test/full`) when a kernel is missing a field, when the table has drifted,
   **and when a declaration contradicts the code** - `@cpu` is cross-checked
   against the barrier count, `@gpu` against `@workgroup_size`, `@quant` against
@@ -1915,7 +1957,7 @@ a metric that isn't there was simply forgotten.
 - **Imported models are parity-gated, not gradient-guessed.** `worldmirror2`,
   `chronos2`, `kronos`, `fincast`, `zipdepth`, `diamond` are imported 1:1 from a
   reference checkpoint and verified stage-by-stage against dumped goldens
-  (`scripts/parity-dump/`, `tools/goldens/*_dump_reference.py`). `make parity` is the
+  (`scripts/parity-dump/`, `tools/goldens/*_dump_reference.py`). `make test/parity` is the
   cross-backend gate (CPU == Vulkan == NPU). Parity proves the *forward* pass
   matches the reference; it is not a substitute for `gradcheck` on a model
   that trains - see the "full backward is the default" note above.
@@ -2066,7 +2108,7 @@ a metric that isn't there was simply forgotten.
      36 byte-identical copy-pasted helpers, one per crate). A test **skips
      itself** when its fixture is absent - through **`brain_testutil::skip`**
      (absent FIXTURE: a hard failure under `BRAIN_REQUIRE_FIXTURES=1`, which is
-     what `make parity/strict` sets) or **`brain_testutil::skip_unavailable`**
+     what `make test/parity/strict` sets) or **`brain_testutil::skip_unavailable`**
      (absent HARDWARE - no discrete GPU, no NPU, no OpenVINO, no ffmpeg - which
      no flag may turn fatal, or the gate becomes one nobody can run). Never a
      bare `eprintln!` + `return`: cargo reports a skipped test as a PASS, so an
@@ -2075,7 +2117,7 @@ a metric that isn't there was simply forgotten.
      enforced by `brain_testutil::golden::Source`), so a golden paired with the
      wrong tier is a named skip rather than a shape error deep in the importer.
      Populate the tree with
-     **`make fetch/testdata`** (`scripts/data/fetch-testdata.sh`) - it hard-links from
+     **`make testdata/fetch`** (`scripts/data/fetch-testdata.sh`) - it hard-links from
      a local mirror, fetching only files not already present, organised as a tree
      (`testdata/<domain>/<model>/…`); there is currently no URL-download fallback
      (say so if you add one - don't leave the claim stale). The mirror location

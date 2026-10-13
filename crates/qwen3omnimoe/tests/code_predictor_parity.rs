@@ -29,7 +29,7 @@
 //! Real-weight-adjacent: skips cleanly when the checkpoint shards holding
 //! `talker.code_predictor.*` (shards 14-15 of 15) are absent.
 //!
-//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=[path/to/hf/Qwen3-Omni-30B-A3B-Instruct] \
 //!         cargo test --release -p brain-omni --test code_predictor_parity -- --ignored --nocapture`
 
 use std::collections::HashMap;
@@ -72,7 +72,7 @@ fn matches_the_real_code_predictor() {
     };
     let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_code_predictor.safetensors");
     if !golden_path.exists() {
-        brain_testutil::skip(&format!("{golden_path:?} missing (run `make fetch/testdata`)"));
+        brain_testutil::skip(&format!("{golden_path:?} missing (run `make testdata/fetch`)"));
         return;
     }
 

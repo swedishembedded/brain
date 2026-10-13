@@ -6,7 +6,7 @@
 //! every layer output, final hidden, MLM-logit probe rows, fill-mask top-1).
 //!
 //! Golden fixtures (`testdata/golden/lfm/lfm25_encoder_{230m,350m}.safetensors`,
-//! fetched via `make fetch/testdata`, never committed) are baked by `tools/goldens/lfm2_dump_reference.py` from the released fp32
+//! fetched via `make testdata/fetch`, never committed) are baked by `tools/goldens/lfm2_dump_reference.py` from the released fp32
 //! checkpoints with FIXED token ids — tokenizer parity is tested separately in
 //! `crates/data`. The ~1–1.4 GB weights are NOT committed: set
 //! `BRAIN_LFM25_230M` / `BRAIN_LFM25_350M` to the HF checkpoint dirs; the tests
@@ -36,7 +36,7 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
     (num / den).sqrt()
 }
 
-/// Resolve a golden under the fetched `testdata/` tree (`make fetch/testdata`;
+/// Resolve a golden under the fetched `testdata/` tree (`make testdata/fetch`;
 /// override the root with `BRAIN_TESTDATA`).
 fn fixture(name: &str) -> String {
     let root = std::env::var("BRAIN_TESTDATA")
@@ -82,7 +82,7 @@ fn run_parity(env_var: &str, fixture_name: &str, cfg: LfmConfig) {
 
     let fx_path = fixture(fixture_name);
     if !std::path::Path::new(&fx_path).exists() {
-        brain_testutil::skip(&format!("fixture {fx_path} absent - run `make fetch/testdata`"));
+        brain_testutil::skip(&format!("fixture {fx_path} absent - run `make testdata/fetch`"));
         return;
     }
     let golden = Golden { tensors: checkpoint::safetensors::read(&fx_path).expect("read fixture") };

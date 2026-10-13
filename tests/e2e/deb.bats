@@ -3,22 +3,22 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 # End-to-end: the release .deb produced by scripts/build/build-deb.sh
-# (`make deb/release`) is a real, correctly-formed Debian package - not just
+# (`make package/deb/release`) is a real, correctly-formed Debian package - not just
 # "dpkg-deb didn't crash". Covers the properties that were silently wrong
 # before this suite existed: `Depends` derived from the actual binary
 # (dpkg-shlibdeps) instead of a hardcoded libc6-only guess, a real
 # Installed-Size, md5sums for every shipped file, and that `--flavor debug`
-# writes a distinct filename so `make deb/debug` can never overwrite the
+# writes a distinct filename so `make package/deb/debug` can never overwrite the
 # release package.
 #
-# Needs a release build (`make deb/release` builds one) and dpkg-deb.
+# Needs a release build (`make package/deb/release` builds one) and dpkg-deb.
 
 setup_file() {
   command -v dpkg-deb >/dev/null 2>&1 || skip "dpkg-deb not installed"
   REPO="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
   export REPO
   DEB="$(find "$REPO/target/debian" -maxdepth 1 -name 'brain_*.deb' ! -name '*-debug.deb' 2>/dev/null | sort | tail -1)"
-  [ -n "$DEB" ] && [ -f "$DEB" ] || skip "no release .deb found (build with: make deb/release)"
+  [ -n "$DEB" ] && [ -f "$DEB" ] || skip "no release .deb found (build with: make package/deb/release)"
   export DEB
 }
 
@@ -69,6 +69,6 @@ setup_file() {
 
 @test "deb: --flavor debug produces a distinct filename from the release package" {
   DEBUG_DEB="$(find "$REPO/target/debian" -maxdepth 1 -name 'brain_*-debug.deb' 2>/dev/null | sort | tail -1)"
-  [ -n "$DEBUG_DEB" ] || skip "no debug .deb found (build with: make deb/debug)"
+  [ -n "$DEBUG_DEB" ] || skip "no debug .deb found (build with: make package/deb/debug)"
   [ "$DEBUG_DEB" != "$DEB" ]
 }

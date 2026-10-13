@@ -15,7 +15,7 @@ A few things are optional, needed only for specific paths:
   the in-browser WebGPU demo (`make web/dev`).
 - **Python + OpenVINO** — only for the Intel NPU export/run path
   (`brain npu …`) and a couple of benchmark reference scripts. `make
-  requirements` installs this tooling; the Rust engine itself never needs it,
+  environment/requirements` installs this tooling; the Rust engine itself never needs it,
   and `make build/debug`/`make test` stay green without it installed.
 
 ## Build
@@ -47,7 +47,7 @@ build.
 ## Correctness gate
 
 ```bash
-make gradcheck         # finite-difference backprop correctness gate
+make test/gradcheck         # finite-difference backprop correctness gate
 ```
 
 This is the check that stands in for a PyTorch reference: every model's

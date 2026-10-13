@@ -136,7 +136,7 @@ fn main() {
     require(
         &std::path::Path::new(&args.data).join("train.csv"),
         "BANKING77 data",
-        "run `make fetch/testdata`, or pass --data DIR",
+        "run `make testdata/fetch`, or pass --data DIR",
     );
 
     let data = match brain::decision::banking77(&args.data) {

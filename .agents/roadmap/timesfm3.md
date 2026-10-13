@@ -226,7 +226,7 @@ redistributable) - see `docs/models/timesfm3.md`.
       entry in `scripts/data/fetch-testdata.sh`) but is UNVERIFIED: it was
       added on a box with neither `BRAIN_TIMESFM3_REF` (a
       `google-research/timesfm` checkout) nor the real checkpoint, so
-      `make parity/strict` has never actually run this suite's real
+      `make test/parity/strict` has never actually run this suite's real
       comparisons end to end, only been confirmed to hard-fail correctly when
       the fixture is absent (`BRAIN_REQUIRE_FIXTURES=1`). The new
       `padtiny`/`padtiny_full`/`nantiny` dumper cases (left-padding/missing-

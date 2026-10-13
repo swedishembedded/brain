@@ -40,7 +40,7 @@ HEADER = """// SPDX-License-Identifier: Apache-2.0
 //! Canonical decomposition minus nonspacing marks - GENERATED, do not edit.
 //!
 //! Regenerate with `scripts/build/gen-wordpiece-unicode.py` (and verify a
-//! checked-in copy with `--verify`, which `make wordpiece-table/check` runs).
+//! checked-in copy with `--verify`, which `make check/generated/wordpiece-table` runs).
 //!
 //! This is the table half of [`crate::wordpiece`]'s accent-stripping stage:
 //! for every scalar whose `NFD(c)`-with-Mn-removed differs from `c` itself, the

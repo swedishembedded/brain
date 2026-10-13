@@ -28,7 +28,7 @@ brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dat
   contribute to the loss, so a dataset can mix turns you want the model to
   learn from with context turns it shouldn't be scored against.
 
-This target is also wrapped by `make train/qwen/lora DATASET=<dir>
+This target is also wrapped by `make qwen/finetune DATASET=<dir>
 ADAPTER=<owner/name[:tag]>`, which builds the release binary first.
 
 ## Adapter references

@@ -274,7 +274,7 @@ Commit `1ab6f562`.
 deletion), still declared in the workspace. Removed the crate, its workspace-
 member entry, its `Cargo.lock` entry, and its `AGENTS.md` row (the
 placeholder note now names only `crates/timeseries`). `make build/release`,
-`make check/doc-links`, `make check/scripts` all green. Commit `6eee2197`.
+`scripts/gates/check-doc-links.sh`, `make check/scripts` all green. Commit `6eee2197`.
 
 ### M0.4c - CPU ISA tier resolved once per call, not per row/chunk
 
@@ -389,7 +389,7 @@ original ungated code was correct. Gating it anyway was a real regression:
 on `backend-cpu` (`int8_dot: false`), a `kv_int8: true` request would
 silently degrade to fp32 KV even though the int8 KV kernels work correctly
 there - caught by 5 failing `BRAIN_DEVICE=cpu cargo test -p brain-qwen3
---lib serve::` tests (exactly the run `make parity` exercises). Reverted
+--lib serve::` tests (exactly the run `make test/parity` exercises). Reverted
 in commit `3c690652`, restoring the original doc comment's claim ("int8 KV
 has no capability gate to fall back from") which was correct all along,
 with a note on why so the next reader does not re-derive the same false
@@ -669,7 +669,7 @@ extra)` points. Verified: `brain-model` (153 tests, incl. the new test),
 real-weight `dit_parity`/`gguf_import_real`/`gguf_direct_real` included); the
 full `brain-ltxv` suite (41 integration test files, incl. real-weight
 `dit_parity`/`av_dit_parity`/`upscale`/`vae_tiling`) green end to end; zero
-clippy warnings on all five crates. `make parity`'s CPU-backend gradcheck
+clippy warnings on all five crates. `make test/parity`'s CPU-backend gradcheck
 suite passed clean (61/61); its Vulkan-backend gradcheck suite could not be
 run clean on this box - it hard-fails on `bf16_train::tests::matmul_bf16_
 weight_eps_plateau` ("this harness requires a real bf16 weight" - `Weight::
@@ -1261,7 +1261,7 @@ done" section below has carried since M2.1.
 throughput benchmark) - no failures across several full runs; the
 pre-existing NVIDIA-driver teardown SIGSEGV-on-exit flake `backend-vulkan.md`
 already documents was seen once, always AFTER every test's own `ok` line,
-not caused by this change. `make gradcheck`: 21 suites, 0 failed (forward-only
+not caused by this change. `make test/gradcheck`: 21 suites, 0 failed (forward-only
 change, no new backward-differentiable `Op` variant, but run anyway since the
 milestone touches a live kernel dispatch). `make check/scripts`'
 `check-kernel-selection.sh` and `check-no-perf-numbers.sh` both clean against
@@ -1285,10 +1285,10 @@ calls it by name. Re-verified: `no_kernel_names.rs` (3 passed),
 sibling in the catalogue either way), full `brain-qwen3` `--lib` and
 `--tests` (104 + 19 binaries, 0 failed) after the move.
 
-**`make parity`/`make test`, run last, at the same time this ledger entry
+**`make test/parity`/`make test`, run last, at the same time this ledger entry
 was being written on a box already running several other sessions' own
 builds against the SAME checkout.** `scripts/gates/parity-gate.sh`'s CPU-
-backend gradcheck stage - the identical suite `make gradcheck` above already
+backend gradcheck stage - the identical suite `make test/gradcheck` above already
 covers - passed clean a second time. Its Vulkan-backend stage hit `backend-
 vulkan.md`'s own documented pre-existing NVIDIA-driver hang (distinct from
 that file's SIGSEGV-on-exit entry, the sibling failure mode the same section
@@ -1531,7 +1531,7 @@ same well-known merge identity, independently re-derived from this repo's
 own existing per-tile update. `tiles_per_split` is a RUNTIME `Params` field,
 not a compile constant - it changes the tile-loop trip count only, never the
 ~8.8 KiB shared-memory footprint `paged_flash_decode` already has, so
-sweeping it needs no recompile. `make kernels-table` / `gen-kernel-table.py
+sweeping it needs no recompile. `make generate/kernels/wgsl-table` / `gen-kernel-table.py
 --check` clean (both kernels' `@cpu`/`@gpu`/`@opt` are mechanically derived
 from their own barrier count and `var<workgroup>` presence, not hand-typed).
 
@@ -1682,7 +1682,7 @@ complexity` violation in `crates/gpu-core/tests/step_cache.rs` (a file this
 milestone otherwise never touches) that `--all-targets` on `brain-gpu-core`
 surfaced only because this milestone's own new speed-bench test lives in
 that same crate. `python3 scripts/spdx/check.py` clean on every new/touched
-file. `make kernels-table` / `gen-kernel-table.py --check` clean (473
+file. `make generate/kernels/wgsl-table` / `gen-kernel-table.py --check` clean (473
 kernels). `bash scripts/gates/check-kernel-selection.sh` clean (30 flagged
 kernels, all 49 allow-listed, no new unallowed violation). `bash
 scripts/gates/check-no-doc-citations.sh` clean. `cargo test --release
@@ -1821,7 +1821,7 @@ draws. Pinned by a `no_dp4a` arm in the selector's own test.
 `BRAIN_DEVICE=vulkan`; `brain-backend-api` 63/63; `brain-qwen3 --lib`
 154 passed / 0 failed / 3 ignored on `wgpu`. `brain-wgsl-cpu --test
 compile_all` green (the new kernel parses under the JIT, as every catalogue
-kernel must). `make kernels-regen` (478 kernels) + `make kernels-table`
+kernel must). `make generate/kernels/registry` (478 kernels) + `make generate/kernels/wgsl-table`
 clean. `check-kernel-selection.sh`, `check-no-doc-citations.sh`,
 `check-no-machine-paths.sh`, `scripts/spdx/check.py` clean. Per-crate
 `clippy --all-targets --all-features -- -D warnings` clean on every touched
@@ -1966,7 +1966,7 @@ ceilings on what this engine can serve in aggregate.
 
 **Verified**: `brain-qwen3 --lib` 161/161 (up from 160 - the new `bsz==1`
 dispatch pin), `brain-backend-api --lib` 63/63, `brain-model --lib` 227/227.
-`make kernels-regen` (481 kernels). `cargo check --workspace --all-targets`
+`make generate/kernels/registry` (481 kernels). `cargo check --workspace --all-targets`
 clean.
 
 **Investigated and confirmed UNRELATED to this milestone's own correctness,
@@ -2418,7 +2418,7 @@ every pre-existing forward/decode/int8 parity test
 (`int8_weights_track_fp32`, `int8_kv_close_to_fp32`, both `qk_norm_rope_
 fused_is_bit_identical_to_the_unfused_pair{,_kv_int8}`, `fused_qkv_and_
 gateup_are_bit_identical_to_split`). `cargo clippy -p brain-qwen3
---all-targets`: zero warnings. `make kernels-table/check`: green (439
+--all-targets`: zero warnings. `make check/generated/kernels-wgsl-table`: green (439
 kernels, the new one's `@cpu`/`@gpu`/`@opt`/`@quant` fields cross-checked
 against its own barrier count and shared-memory use).
 
@@ -2670,7 +2670,7 @@ false and the fallback runs instead, so the two independent-oracle KV tests
 free coverage M4.5's own report noted for its fallback path). `cargo
 clippy -p brain-qwen3tts -p brain-kernels --all-targets --all-features --
 -D warnings` clean. `scripts/build/gen-kernel-table.py --check` (471
-kernels, regenerated via `make kernels-regen` then `make kernels-table`)
+kernels, regenerated via `make generate/kernels/registry` then `make generate/kernels/wgsl-table`)
 and `check-kernel-selection.sh` both clean.
 
 **Commit**: one.
@@ -2815,7 +2815,7 @@ migration verified against `brain-arcface`'s existing kernel-registration
 gates; `router_gate_sigmoid`'s host-oracle test written to fail against the
 pre-fix kernel at `n_experts > 64` by construction, since that kernel could
 not even run correctly there before). `cargo clippy --all-targets` zero
-warnings on every touched crate. `make kernels-table` regenerated for the
+warnings on every touched crate. `make generate/kernels/wgsl-table` regenerated for the
 two new kernels and `router_gate_sigmoid`'s updated `@how`.
 **Commits**: four (`0f99f1a0` bias_grad, `f0071d2b` arcface ce_grad,
 `cad544bc` router_gate_sigmoid, `b2c9b1ed` this table regen), plus this
@@ -3164,7 +3164,7 @@ never_submits_internally` pins the actual point of this milestone via
 `Gpu::stats().submits`: building the steps must not move the submit counter
 at all. `undersized_grouped_scratch_panics_loudly` mirrors `CompactExpert
 Scratch`'s existing mutation-verify test for the new scratch type. Full
-suite green: 4/4. New kernel headers pass `make kernels-table/check` (461
+suite green: 4/4. New kernel headers pass `make check/generated/kernels-wgsl-table` (461
 kernels, all fields declared, cross-checked against `scripts/build/
 kernelmeta.py`). `cargo clippy -p brain-model -p brain-kernels
 --all-targets`: zero warnings.
@@ -3272,7 +3272,7 @@ KV-cached path - grouped - and demands identical ids);
 `deepseek2ocr/tests/real_weight.rs::chunked_and_batched_composites_agree_at_
 real_scale`; a new default-backend twin of `chunked_prefill.rs`'s
 independent cross-check so the grouped pass is checked against the
-per-expert one on the GPU too; `make gradcheck` on both backends.
+per-expert one on the GPU too; `make test/gradcheck` on both backends.
 
 ### M5.5 - Q4/W4A8: `matmul_q4_dyn_reg` is a clean win, `matmul_q4_gemv_reg` is a killed hypothesis
 
@@ -3451,7 +3451,7 @@ further caller still owes its own numerical-agreement gate before
 adopting a non-bit-identical kernel swap.
 
 `cargo clippy -p brain-backend-api -p brain-gpu-core -p brain-kernels -p
-brain-gpt2 --all-targets` clean; `kernels-regen`/`kernels-table` run.
+brain-gpt2 --all-targets` clean; `generate/kernels/registry`/`generate/kernels/wgsl-table` run.
 **Commits**: four (`Op::AttnBwdDScores`; the four cooperative kernels +
 cost-model wiring; a same-turn fix restoring a concurrent session's
 `rmsnorm_dx_rows` cost-model arm this milestone's own file reconstruction
@@ -3563,8 +3563,8 @@ synchronously verified past the library level in this pass because their
 `brain-minimaxmusic3`, which had an unrelated, concurrently-edited syntax
 error in `dit.rs` (a large in-progress rewrite in another session) at
 commit time - not this milestone's code. `docs/reference/kernels.md`/
-`crates/kernels/src/lib.rs` regenerated via `make kernels-regen`/
-`make kernels-table`, each change isolated to this milestone's own row
+`crates/kernels/src/lib.rs` regenerated via `make generate/kernels/registry`/
+`make generate/kernels/wgsl-table`, each change isolated to this milestone's own row
 before committing (a shared, concurrently-edited generated file - see
 `.agents/knowledge/` #83/#84). **Commits**: four (kernel + registration; cost
 model; the selector/host-oracle seam + the workspace-wide field addition
@@ -3758,7 +3758,7 @@ kernel-catalogue validation) is also green, exercising real multi-dispatch
 chains through this backend end to end. Both touched crates build and
 `cargo clippy --all-targets` clean with zero warnings.
 
-`make parity`'s cross-backend gradcheck run was blocked by an unrelated,
+`make test/parity`'s cross-backend gradcheck run was blocked by an unrelated,
 concurrently-edited syntax error in `crates/minimaxmusic3/src/dit.rs` (a
 large in-progress rewrite in another session - the same defect the M5.1
 entry above already recorded hitting). Confirmed via `git stash` that both
@@ -3862,7 +3862,7 @@ keep green. `cargo test -p brain-gpu-core --lib --tests` green end to end
 `concurrent_shared_handles_do_not_deadlock` - the regression test
 `queue_lock`'s own doc names for the exact lock this milestone changed the
 semantics of. `cargo clippy --all-targets` clean on every touched crate.
-`make parity`'s Vulkan gradcheck arm could not be run to completion: `brain-
+`make test/parity`'s Vulkan gradcheck arm could not be run to completion: `brain-
 gradcheck`'s dependency graph transitively pulls in `brain-minimaxmusic3`,
 mid-edit in another session with an unclosed delimiter at commit time - the
 same concurrent-edit blocker the M5.1 and M6.1 entries above both already
@@ -3967,7 +3967,7 @@ logic, not the policy. `cargo clippy -p brain-qwen3 --all-targets` clean.
 
 **Verification scope**: `cargo test --release -p brain-qwen3 --lib --tests
 --bins` (both `BRAIN_DEVICE=gpu` and `BRAIN_DEVICE=cpu`) green end to end.
-The workspace-wide `make build/release`/`make test`/`make parity` could not
+The workspace-wide `make build/release`/`make test`/`make test/parity` could not
 be run to completion: `crates/minimaxmusic3/src/dit.rs` has an unclosed
 delimiter from an in-progress rewrite in another concurrent session (446
 lines mid-removal at time of writing) - the identical blocker the M5.1/M6.1/
@@ -5473,7 +5473,7 @@ if `Q4` used this codebook, not an approximation of it (see each kernel's
 own header for the full derivation). Named with a `q4` marker
 (`matmul_q4_gemv_nf4`/`matmul_q4_gemv_f4e2m1`) per `scripts/build/
 kernelmeta.py`'s own `@quant q4` naming convention; headers validated by
-`make kernels-table` (`docs/reference/kernels.md` regenerated clean, zero
+`make generate/kernels/wgsl-table` (`docs/reference/kernels.md` regenerated clean, zero
 declaration/code mismatches).
 
 **`DType` wiring**: `bits()=4, per_word()=8 (derived), bytes()=1`, `promote()`
@@ -5585,7 +5585,7 @@ super-block indexed): one workgroup owns exactly one weight ROW, so the row-
 block index (`rb = col/128`) is a per-workgroup constant, while the column-
 block index (`bc = k/128`) advances every 128 elements as the k-loop runs -
 `scale[rb*cb + bc]`, `cb` passed as a `Params` field. Headers validated by
-`make kernels-table` (`docs/reference/kernels.md` regenerated clean).
+`make generate/kernels/wgsl-table` (`docs/reference/kernels.md` regenerated clean).
 
 **`DType` wiring**: `bits()=8, per_word()=4 (derived), bytes()=1`. A NEW
 `NumericSupport.fp8_storage`/`select::Requirement.fp8_storage` capability
@@ -7060,7 +7060,7 @@ number, per decision 4, rather than fabricating a shape to measure against.
 clean (no new files). `bash scripts/gates/check-kernel-selection.sh` and
 `bash scripts/gates/check-no-doc-citations.sh` both clean, unchanged from
 their pre-change baseline (no new kernel usage, no `.wgsl` touched, so no
-`make kernels-table` regeneration was needed).
+`make generate/kernels/wgsl-table` regeneration was needed).
 
 **Commit**: one - `model: GEMM-ify GDN's UT-transform backward via closed
 form (M5.11)`.
@@ -7223,7 +7223,7 @@ motivating idea: `matmul_reg3`'s tile grid is `ceil(m/128)*ceil(n/128)`, so a
 prefill chunk whose row count is not a multiple of 128 wastes real lanes - a
 48-row chunk on a 128-row tile computes 80 wasted rows (62.5%) - and a 64-row
 tile would halve that waste while roughly quadrupling the (cheaper) tile
-count. Registered in the catalogue (`kernels-regen`, 474 kernels now,
+count. Registered in the catalogue (`generate/kernels/registry`, 474 kernels now,
 `gen-kernel-table.py --check` clean) and in `qwen3::serve::Engine`'s own
 `PIPELINES` table, appended at the END (index 41) - inserting it anywhere
 else would have silently shifted every subsequent `const NAME: usize = N`

@@ -11,7 +11,7 @@
 //!   1. the membrane dynamics match an INDEPENDENTLY DERIVED closed form, to
 //!      the fp32 noise floor rather than to a tolerance;
 //!   2. the CPU and GPU backends agree on a real, irregular connectome -- the
-//!      cross-backend discipline `make parity` applies to every other model;
+//!      cross-backend discipline `make test/parity` applies to every other model;
 //!   3. a restored snapshot replays bit-for-bit, which is what makes "stop it,
 //!      start it, and it still knows what it learned" checkable.
 

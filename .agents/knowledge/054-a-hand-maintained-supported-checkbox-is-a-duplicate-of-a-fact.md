@@ -54,6 +54,6 @@ Two things to carry:
 
 The durable fix is a test that derives each table's HTTP row from `api_caps`
 over the real catalog instead of trusting the checkbox - the same reasoning as
-`make kernels-table/check`, which exists because a hand-written table of a
+`make check/generated/kernels-wgsl-table`, which exists because a hand-written table of a
 derivable fact always drifts. Not yet written; the model-id-to-doc-page mapping
 it needs is itself drift-prone and wants designing rather than guessing.

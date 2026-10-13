@@ -33,7 +33,7 @@ The third is the cheapest check here and the one nobody runs.
 ## Running it
 
 ```bash
-make fetch/testdata                      # BANKING77 (PolyAI, CC-BY-4.0)
+make testdata/fetch                      # BANKING77 (PolyAI, CC-BY-4.0)
 make samples/decision/intents/build
 make samples/decision/intents/run ARGS="--encoder DIR --unseen 12 --steps 8000"
 ```

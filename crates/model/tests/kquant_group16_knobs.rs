@@ -24,7 +24,7 @@
 //!    not a tolerance, since this touches the production prefill GEMM every
 //!    existing int8 model already depends on. The pre-`QPG` source is a
 //!    checked-in text snapshot (`fixtures/matmul_i8_dyn_pre_qpg.wgsl.snapshot`
-//!    -- NOT a `.wgsl` file, so `kernels-regen`/`kernels-table` never scan
+//!    -- NOT a `.wgsl` file, so `generate/kernels/registry`/`generate/kernels/wgsl-table` never scan
 //!    it), taken verbatim from this kernel's own text immediately before
 //!    this milestone's edit.
 //! 2. Every group=16 variant (`matmul_i8_dyn#QPG=1`, and the three `#WPG=4`

@@ -487,7 +487,7 @@ const FLASH_IDS: model::block::FlashIds =
 ///   supports one top-level barrier per kernel where these need two or three.
 ///   `flash_bidir_fwd`'s own doc names [`attn_scores_kt`]'s materialized trio
 ///   as the fallback contract, which is exactly what the `else` arm below is.
-///   This is the branch `make gradcheck` and every `BRAIN_DEVICE=cpu` test
+///   This is the branch `make test/gradcheck` and every `BRAIN_DEVICE=cpu` test
 ///   take, so it stays the reference definition of the math. `self_attn &&
 ///   head_dim <= 128` is this crate's own `extra` condition to that shared
 ///   gate.
@@ -504,7 +504,7 @@ fn flash_self_attn(gpu: &Gpu, self_attn: bool, head_dim: u32) -> bool {
 /// 48 KiB of workgroup memory and a 256-thread workgroup. Anything it refuses
 /// keeps the materialized
 /// scores/softmax/apply trio, which stays the reference definition of the math
-/// (it is the branch `make gradcheck` and every `BRAIN_DEVICE=cpu` test take).
+/// (it is the branch `make test/gradcheck` and every `BRAIN_DEVICE=cpu` test take).
 ///
 /// `!self_attn` rather than `nq != nk`: `nq == nk` is a coincidence a tiny test
 /// config can satisfy for cross-attention, and routing a genuine
@@ -579,7 +579,7 @@ fn attn_context(
 
 /// The materialized scores/softmax/apply arm of [`attn_context`], as its own
 /// function: it is the REFERENCE definition of the math (the branch every
-/// device without workgroup reductions takes, hence the one `make gradcheck`
+/// device without workgroup reductions takes, hence the one `make test/gradcheck`
 /// and `BRAIN_DEVICE=cpu` exercise), so the A/B gate has to be able to reach
 /// it on a device that would otherwise always pick a fused kernel. Calling it
 /// rather than re-spelling the three dispatches in the test is what keeps the

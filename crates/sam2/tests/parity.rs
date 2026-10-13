@@ -19,7 +19,7 @@
 //! [`brain_testutil::skip`] - so `BRAIN_REQUIRE_FIXTURES=1` turns the skip into
 //! a failure and a green run under that flag means every comparison below
 //! really ran. `tools/goldens/sam2_dump_reference.py` populates the tree from
-//! the released checkpoint; `make fetch/testdata` hard-links the checkpoint in.
+//! the released checkpoint; `make testdata/fetch` hard-links the checkpoint in.
 
 use std::path::Path;
 
@@ -76,7 +76,7 @@ fn check_block_table(base: &Path, cfg: &Sam2Config) {
     println!("  block table: {} blocks match the reference manifest", got.len());
 }
 
-/// The released `.pt`, from the goldens directory if `make fetch/testdata`
+/// The released `.pt`, from the goldens directory if `make testdata/fetch`
 /// hard-linked one in, else straight out of the model store where `brain fetch
 /// facebook/sam2.1-<variant>` leaves it. The second is what actually holds it on
 /// a box that has the checkpoint but no `sam2/` testdata mirror, and the import

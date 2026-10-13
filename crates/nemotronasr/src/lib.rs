@@ -22,7 +22,7 @@ pub use config::NemotronConfig;
 /// Resolve a test-fixture path under the gitignored `testdata/` tree — never a
 /// hardcoded absolute path (that invariant is enforced in `AGENTS.md`). The root is
 /// `$BRAIN_TESTDATA`, defaulting to `<repo>/testdata` (populated by
-/// `make fetch/testdata`). Tests skip themselves when the file is absent.
+/// `make testdata/fetch`). Tests skip themselves when the file is absent.
 #[cfg(test)]
 use brain_testutil::testdata;
 /// Resolve the on-disk model-store directory for the real Nemotron checkpoint

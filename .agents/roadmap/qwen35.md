@@ -361,9 +361,9 @@ structurally and never parity-claimed here.
     `gdn_mixer_equivalence.rs`'s 2 hoisted-mixer cross-pipeline tests);
     `cargo clippy -p brain-qwen35 -p brain-qwen35moe -p brain-gradcheck -p
     brain-model --all-targets -- -D warnings` exits 0, 0 warnings; `make
-    clippy` (whole-workspace ratchet gate) exits 0 at its 0-warning
+    check/clippy` (whole-workspace ratchet gate) exits 0 at its 0-warning
     baseline; `make build` (dev profile, whole workspace) succeeds; `make
-    gradcheck` succeeds (20 test binaries, 0 failed).
+    test/gradcheck` succeeds (20 test binaries, 0 failed).
   Found and fixed one real bug while doing this: `crates/cli/src/
   qwen35_cli.rs`'s `infer` subcommand still imported the old `qwen35::
   model::PIPELINES` const directly - the `pipelines()` function this
@@ -371,7 +371,7 @@ structurally and never parity-claimed here.
   façade kernels and `Ops::REQUIRED_KERNELS`'s dtype-variant kernels have
   somewhere to be added without a second hand-maintained kernel-index list)
   broke that one caller. Fixed by switching the CLI to `pipelines()` too;
-  caught by the whole-workspace `make clippy` gate, not by the
+  caught by the whole-workspace `make check/clippy` gate, not by the
   crate-scoped one (a scoped clippy/test run cannot see a caller living in
   a different crate).
   **Not done, left for a future pass**: no int8 KV cache; no int8 tier
@@ -465,9 +465,9 @@ structurally and never parity-claimed here.
     19 test binaries, all green, 0 failed (unchanged from M14 plus the new
     `streaming_forward.rs`'s 4 tests, which self-skip as `ignored` here).
   - `cargo clippy -p brain-qwen35 --all-targets -- -D warnings` exits 0;
-    `make clippy` (whole-workspace ratchet gate) exits 0 at its 0-warning
+    `make check/clippy` (whole-workspace ratchet gate) exits 0 at its 0-warning
     baseline; `make build` (dev profile, whole workspace) succeeds; `make
-    gradcheck` succeeds (`cargo test -p brain-gradcheck`, 20 test binaries,
+    test/gradcheck` succeeds (`cargo test -p brain-gradcheck`, 20 test binaries,
     0 failed - `stream.rs` only touches inference-only forward paths, but
     this confirms the shared `model::gdn_mixer`/`model::gqa_mixer`/`model::
     ops` machinery it reuses is unaffected).
@@ -545,7 +545,7 @@ wasm32 builds only - wasm32 keeps the identical-arithmetic sequential loop):
 - `cargo test -p brain-qwen35 --lib import::`: pass, 11/11 (import.rs itself
   is unmodified, but exercises `dequant_block128` directly).
 - `cargo clippy -p brain-model --all-targets -- -D warnings`: clean.
-- `make build` / `make gradcheck`: see this task's own commit for the
+- `make build` / `make test/gradcheck`: see this task's own commit for the
   confirmed run.
 
 **Not fixed by this task (explicitly out of scope at the time):**
@@ -594,7 +594,7 @@ Verification: `cargo test -p brain-checkpoint` (96 tests), `cargo test -p
 brain-model` (full), `cargo test -p brain-qwen35 --lib` (30 tests, including
 `stream::tests::gdn_end_padding_does_not_change_real_position_outputs`),
 `cargo clippy -p brain-checkpoint --all-targets -- -D warnings`, `make
-build`, `make gradcheck` (20 suites) - all clean.
+build`, `make test/gradcheck` (20 suites) - all clean.
 
 ### M16: real end-to-end generation (real prompt -> real tokenizer -> streaming engine -> real lm_head -> real sampling -> real text)
 
@@ -736,7 +736,7 @@ generate_streaming -- --ignored --nocapture --test-threads=1`), prompt
 - `cargo clippy -p brain-qwen35 -p brain-checkpoint --all-targets -- -D
   warnings`: clean.
 - `make build` (whole workspace, dev profile): succeeds.
-- `make gradcheck`: succeeds (20 test binaries, 0 failed) - this milestone
+- `make test/gradcheck`: succeeds (20 test binaries, 0 failed) - this milestone
   only touches inference-only forward paths, but confirms the shared
   `model::gdn`/`model::gdn_mixer`/`model::gqa_mixer`/`model::ops`/
   `model::int8` machinery it reuses is unaffected.
@@ -898,7 +898,7 @@ prompt `"The capital of France is"`, `max_new=4`, `window_budget=4`,
   words). This run's own process accounting (`ps`/`free`/`loadavg`) showed
   heavy concurrent CPU contention for a large share of its wall-clock time
   - this milestone's own `cargo test -p brain-gradcheck --lib` (full suite,
-  ~14 min) and `make gradcheck` (release rebuild + full suite, ~20 min)
+  ~14 min) and `make test/gradcheck` (release rebuild + full suite, ~20 min)
   ran concurrently on the same shared, multi-session box, competing for
   the same CPU cores the per-layer FP8/int8 host-side dequant work needs.
   Recorded here as the likely cause, not confirmed by an isolated
@@ -913,7 +913,7 @@ prompt `"The capital of France is"`, `max_new=4`, `window_budget=4`,
   --test-threads=1` against the real checkpoint: both pass (numbers above).
 - `cargo test -p brain-gradcheck --lib qwen35 -- --nocapture` (targeted
   re-confirmation) AND the full `cargo test -p brain-gradcheck --lib` (51
-  tests) AND `make gradcheck` (20 suites, release): all green, 0 failed -
+  tests) AND `make test/gradcheck` (20 suites, release): all green, 0 failed -
   **`qwen35_mtp_analytic_grads_match_finite_differences` explicitly
   re-confirmed passing in all three runs**, proving this milestone's new
   import/streaming-decode code never touched `model.rs`'s shared
@@ -1147,7 +1147,7 @@ specific bottleneck, not a downgrade of convenience.
   unaffected (this milestone builds a new PARALLEL streaming path, `model.
   rs`'s own backward math is untouched).
 - `cargo clippy -p brain-qwen35 --all-targets -- -D warnings`: clean.
-- `make build` / `make gradcheck`: both succeed.
+- `make build` / `make test/gradcheck`: both succeed.
 - Every real-checkpoint number above is measured, not projected; the split-
   binary/single-test discrepancy is a session-environment artifact,
   documented above, not a correctness concern.
@@ -1376,7 +1376,7 @@ clippy -p brain-perf -p brain-qwen35 -p brain-checkpoint --all-targets -- -D
 warnings` (clean); the same command WITH `-p brain-cli` added surfaces only
 the 19 already-recorded, pre-existing `crates/ltxv` errors (pulled in
 because `brain-cli` depends on it; not touched by, or related to, this
-milestone); `make build` and `make gradcheck` both pass.
+milestone); `make build` and `make test/gradcheck` both pass.
 
 ### M20: GGUF import (`crates/qwen35/src/gguf_import.rs`), including MTP - on a NEW box (2x P40, 48 AVX2 cores, 184 GiB RAM)
 

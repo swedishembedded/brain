@@ -44,12 +44,12 @@ struct Fixture {
 fn fixture() -> Option<Fixture> {
     let dir = brain_testutil::testdata_path("decide/banking77");
     if !dir.join("train.csv").exists() {
-        brain_testutil::skip(&format!("{} missing - run `make fetch/testdata`", dir.display()));
+        brain_testutil::skip(&format!("{} missing - run `make testdata/fetch`", dir.display()));
         return None;
     }
     let tok_path = brain_testutil::testdata_path("decide/tokenizer/tokenizer.json");
     if !tok_path.exists() {
-        brain_testutil::skip(&format!("{} missing - run `make fetch/testdata`", tok_path.display()));
+        brain_testutil::skip(&format!("{} missing - run `make testdata/fetch`", tok_path.display()));
         return None;
     }
     let hf = brain_testutil::model_dir("sentence-transformers/all-MiniLM-L6-v2")?;

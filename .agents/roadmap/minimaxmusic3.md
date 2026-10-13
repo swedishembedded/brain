@@ -159,7 +159,7 @@ against EVERY one of the vocoder's ~38 named parameters (every conv/
 conv-transpose weight and bias across all 4 blocks x 3 residual units,
 every Snake alpha), and every one passes with relative error under 8e-4 -
 an order of magnitude inside the workspace's `(4e-3, 8e-2)` gate. Wired
-into `make gradcheck` via `crates/gradcheck/tests/imaging_models.rs`'s
+into `make test/gradcheck` via `crates/gradcheck/tests/imaging_models.rs`'s
 `check!` macro, same as every other model's gate.
 
 The loss used to gradcheck is a plain MSE reconstruction loss - enough to
@@ -940,7 +940,7 @@ evidence.
 
 The fallback is the branch the CPU JIT takes, gated on the same QUERIED
 `workgroup_reductions` capability `linear_step` already reads, so
-`BRAIN_DEVICE=cpu`, `make gradcheck` and the whole backward (`bidir_bwd`,
+`BRAIN_DEVICE=cpu`, `make test/gradcheck` and the whole backward (`bidir_bwd`,
 `dit_train`) keep the materialized trio unchanged - the flash family is
 forward-only and the backward reads the `probs` slab the flash path never
 writes.
