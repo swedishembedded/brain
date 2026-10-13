@@ -162,6 +162,10 @@ enum Msg {
     /// [`Msg::Register`]'s multi-device sibling - see
     /// [`Executor::register_multi`].
     RegisterMulti(Arc<dyn MultiDeviceResidentModel>),
+    /// Retire a single-device model: it resolves for no new job and is
+    /// dropped once no queued or running job names it - see
+    /// [`Executor::unregister`].
+    Unregister(String),
     Built { key: InstanceKey, handle: InstanceHandle },
     /// [`Msg::Built`]'s multi-device sibling. A SEPARATE variant (rather than
     /// reusing `Built`) purely so `ResidencyManager::adopt_multi` runs instead
@@ -267,6 +271,10 @@ impl Executor {
         capacity: Option<CapacityProbe>,
     ) -> Executor {
         let manifests: Vec<Manifest> = models.iter().map(|m| m.manifest()).collect();
+        let adapters = Arc::new(ServedAdapters::default());
+        for m in &models {
+            adapters.seed(&m.manifest().model, m.adapter_identity());
+        }
         let devices: Vec<Device> = budgets.devices().collect();
         let mut mgr = ResidencyManager::new(budgets);
         for m in models {
@@ -300,7 +308,7 @@ impl Executor {
         Executor {
             tx,
             manifests: Arc::new(RwLock::new(Arc::new(manifests))),
-            adapters: Arc::default(),
+            adapters,
             stats,
             join_handles: Arc::new(Mutex::new(Some(join_handles))),
         }
@@ -365,6 +373,7 @@ impl Executor {
     /// with no extra synchronization.
     pub fn register(&self, model: Arc<dyn ResidentModel>) {
         let manifest = model.manifest();
+        self.adapters.seed(&manifest.model, model.adapter_identity());
         {
             // Copy-on-write: readers hold cheap Arc snapshots, so a (rare)
             // registration rebuilds the Vec once instead of every reader
@@ -398,9 +407,32 @@ impl Executor {
             let mut v = (**g).clone();
             v.push(manifest);
             *g = Arc::new(v);
+            self.adapters.seed(&name, model.adapter_identity());
         }
         let _ = self.tx.send(Msg::Register(model));
         true
+    }
+
+    /// Withdraw a model registered with [`Self::register`]: it disappears from
+    /// [`Self::manifests`] and [`Self::served_adapter`] at once, so no front
+    /// end lists it or accepts a new request for it, and is dropped by the
+    /// dispatcher once no queued or running job names it. A job submitted
+    /// before the call still runs to completion; one submitted after it is
+    /// answered "no model". Dropping the model is how it gives back anything
+    /// it leased from shared state, so that happens only after its last job.
+    ///
+    /// Registering the same name again before the drop revives it. An unknown
+    /// name is a no-op.
+    pub fn unregister(&self, model: &str) {
+        {
+            let mut g = self.manifests.write().unwrap();
+            if g.iter().any(|m| m.model == model) {
+                let v: Vec<Manifest> = g.iter().filter(|m| m.model != model).cloned().collect();
+                *g = Arc::new(v);
+            }
+        }
+        self.adapters.set(model, None);
+        let _ = self.tx.send(Msg::Unregister(model.to_string()));
     }
 
     /// [`Self::register`]'s multi-device sibling - registers a
@@ -666,6 +698,13 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         })) {
             eprintln!("[residency] dispatcher: panic during assign: {} -- continuing", panic_message(p.as_ref()));
         }
+        // After `assign`, so a job it just claimed is in `running_jobs` and a
+        // retired model it names is kept until that job's group is done.
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mgr.sweep_retired(|model| queue.iter().any(|j| j.model == model) || running_jobs.iter().any(|j| j.model == model));
+        })) {
+            eprintln!("[residency] dispatcher: panic retiring a model: {} -- continuing", panic_message(p.as_ref()));
+        }
         // Re-measure the machine on a cadence, never per message: the probe
         // shells out to `nvidia-smi`, and the dispatcher thread is the one
         // thread the whole server's scheduling runs on.
@@ -692,8 +731,9 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
 #[allow(clippy::too_many_arguments)]
 fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, next_id: &mut u64) {
     match msg {
-        Msg::Submit(job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
+        Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
             Some(key) => {
+                mgr.stamp(&job.model, &mut job.inv);
                 let id = *next_id;
                 *next_id += 1;
                 queue.push(Pending {
@@ -716,6 +756,10 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
         Msg::Register(model) => {
             crate::log::info(&format!("model registered: {}", model.manifest().model));
             mgr.register(model);
+        }
+        Msg::Unregister(model) => {
+            crate::log::info(&format!("model unregistered: {model}"));
+            mgr.retire(&model);
         }
         Msg::RegisterMulti(model) => {
             crate::log::info(&format!("model registered (multi-device): {}", model.manifest().model));

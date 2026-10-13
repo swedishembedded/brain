@@ -197,6 +197,10 @@ pub struct ResidencyManager {
     /// under the same name if it wants to be reachable either way (not
     /// required by anything here).
     multi_models: HashMap<String, Arc<dyn MultiDeviceResidentModel>>,
+    /// Single-device models [`Self::retire`] was told to drop: kept resolvable
+    /// until [`Self::sweep_retired`] finds no job left that names them, so a
+    /// job already queued for a retired model still runs.
+    retiring: HashSet<String>,
     budgets: Budgets,
     residents: Residents,
     /// Multi-device residents' bookkeeping - parallel to `residents` but
@@ -244,6 +248,7 @@ impl ResidencyManager {
         ResidencyManager {
             models: HashMap::new(),
             multi_models: HashMap::new(),
+            retiring: HashSet::new(),
             budgets,
             residents: Residents::new(),
             multi_residents: HashMap::new(),
@@ -297,7 +302,41 @@ impl ResidencyManager {
     }
 
     pub fn register(&mut self, model: Arc<dyn ResidentModel>) {
-        self.models.insert(model.manifest().model.clone(), model);
+        let name = model.manifest().model;
+        self.retiring.remove(&name);
+        self.models.insert(name, model);
+    }
+
+    /// Stop resolving `model` for new work once nothing in flight names it:
+    /// the dispatcher half of [`Executor::unregister`](crate::Executor::unregister).
+    /// The entry stays until [`Self::sweep_retired`] sees no job for it, so a
+    /// job queued before the retirement is still served.
+    pub fn retire(&mut self, model: &str) {
+        if self.models.contains_key(model) {
+            self.retiring.insert(model.to_string());
+        }
+    }
+
+    /// Drop every retired model for which `in_use` says no queued or running
+    /// job names it; the dropped [`ResidentModel`] is released here, which is
+    /// how a model that holds a lease on shared state gives it back exactly
+    /// when its last job is done.
+    pub fn sweep_retired(&mut self, in_use: impl Fn(&str) -> bool) {
+        let done: Vec<String> = self.retiring.iter().filter(|m| !in_use(m)).cloned().collect();
+        for model in done {
+            self.retiring.remove(&model);
+            self.models.remove(&model);
+            self.event(format!("retired {model}"));
+        }
+    }
+
+    /// Let the model `model` name mark `inv` (see [`ResidentModel::stamp`]).
+    /// A model that is not registered leaves `inv` alone: the caller's
+    /// "no model" reply is the only outcome.
+    pub fn stamp(&self, model: &str, inv: &mut Invocation) {
+        if let Some(m) = self.models.get(model) {
+            m.stamp(inv);
+        }
     }
 
     /// Register a model reachable via [`Self::claim_multi`] - a SEPARATE
@@ -318,8 +357,11 @@ impl ResidencyManager {
     /// that previously produced `None` here (and, downstream, the executor's
     /// `Msg::Submit` handler's `no model 'x'` reply).
     pub fn instance_key_for(&self, model: &str, action: &str, inv: &Invocation) -> Option<InstanceKey> {
+        // A retired model stays resolvable for the jobs already queued under
+        // it (`claim` finds it) but takes no new one.
         self.models
             .get(model)
+            .filter(|_| !self.retiring.contains(model))
             .map(|m| m.instance_key(action, inv))
             .or_else(|| self.multi_models.get(model).map(|m| m.instance_key(action, inv)))
     }

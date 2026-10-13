@@ -42,6 +42,15 @@ impl ServedAdapters {
         };
     }
 
+    /// Record `adapter` for a model being registered, if it names one: a
+    /// registration with no adapter leaves whatever was recorded alone, so a
+    /// model that is not an adapter view can never erase a recorded identity.
+    pub(crate) fn seed(&self, model: &str, adapter: Option<AdapterIdentity>) {
+        if adapter.is_some() {
+            self.set(model, adapter);
+        }
+    }
+
     pub(crate) fn get(&self, model: &str) -> Option<AdapterIdentity> {
         self.0.read().unwrap_or_else(|e| e.into_inner()).get(model).cloned()
     }

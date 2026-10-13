@@ -13,7 +13,7 @@
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 
-use crate::{Device, InstanceKey, MemCost, Tier};
+use crate::{AdapterIdentity, Device, InstanceKey, MemCost, Tier};
 
 /// A model family that can be made resident on demand.
 pub trait ResidentModel: Send + Sync {
@@ -40,6 +40,37 @@ pub trait ResidentModel: Send + Sync {
     /// for anything but `Tier::Hot` unless a model opts into both together.
     fn estimate_at(&self, key: &InstanceKey, _tier: Tier) -> MemCost {
         self.estimate(key)
+    }
+
+    /// Mark an invocation the executor accepted for this model, before it is
+    /// grouped and run. The one seam through which a model that serves several
+    /// selectable ids from one built instance (a base and the adapters riding
+    /// on it, each its own model id sharing an [`InstanceKey`]) tells the
+    /// instance WHICH id the caller asked for: the instance only ever sees
+    /// [`Invocation`]s, never the model string.
+    ///
+    /// Runs on the dispatcher thread, after the caller's params were
+    /// validated and never before: a param written here is the host's word,
+    /// not the caller's, so it must not be a name the model's manifest
+    /// declares (validation refuses an undeclared param from a caller, which
+    /// is what keeps a reserved param unforgeable). A model that serves more
+    /// than one id and reads such a param must also override this on its
+    /// base id to remove it, or a caller reaching the base through a path
+    /// that skips validation could select a sibling.
+    ///
+    /// Defaulted to a no-op: a model serving one id has nothing to say.
+    fn stamp(&self, _inv: &mut Invocation) {}
+
+    /// The fine-tune this model id serves, when it is an adapter view: its
+    /// card id and content digest, the facts a model card reports. The
+    /// executor records it under the model id when the model is registered,
+    /// so a model listing names the adapter without a second call; a later
+    /// change of the served release is recorded with
+    /// [`Executor::set_served_adapter`](crate::Executor::set_served_adapter).
+    ///
+    /// Defaulted to `None`: no adapter is known, and none is invented.
+    fn adapter_identity(&self) -> Option<AdapterIdentity> {
+        None
     }
 }
 
