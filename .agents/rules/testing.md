@@ -199,6 +199,12 @@ tuned from the environment instead of a recompile.
 **Device / GPU selection for tests:**
 - `BRAIN_DEV_GPU` - selects/forces a GPU device for a test run.
 - `BRAIN_NPU_DEVICE` - selects the NPU device for npu-crate tests.
+- `BRAIN_MINIMAXH3_TEST_DEVICE` - device the minimaxh3 crate's real-weight
+  parity unit tests run on (default `cpu`; the flash-attention comparison skips
+  unless it is set, because that kernel family is GPU-only). It stays a variable
+  rather than a flag because the readers are `#[test]` functions inside the
+  library's own unit-test binary, whose harness owns the command line and has
+  nowhere to take a repo-defined flag; it is read by no shipped code.
 - `MOE_SKIP_GPU_TESTS` - skips device-dependent tests on a machine with no GPU.
 - `SHARD_TEST_GPUS` - how many GPUs a pipeline/tensor-parallel sharding test should assume.
 - `BRAIN_GPU_RECLAIM_CEILING` - overrides `backend_api::hardware::reclaim_ceiling`'s
