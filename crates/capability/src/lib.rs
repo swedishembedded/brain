@@ -36,8 +36,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde_json::{json, Value};
 
 pub mod blob;
+pub mod failure;
 pub mod presentation;
 
+pub use failure::{classify, tag, FailureClass};
 pub use presentation::{ActionPresentation, ModelPresentation};
 
 // ===================== descriptors (the self-describing schema) =====================
