@@ -5,6 +5,13 @@ concurrent paged-KV serving engine. Training, LoRA fine-tuning, INT8 weights,
 INT8 KV cache, sharding, and continuous batching are built and verified
 against the reference.
 
+## Sizing: Qwen3-8B bf16 LoRA (rank 16, batch 1)
+
+Measured on two Tesla P40: one card does not train at 4096 tokens (out of
+memory); both cards train 4096 tokens at 15.4 / 17.7 GiB peak and 61.8 s per
+step; 8192 tokens failed to build on both cards and nothing longer was run.
+Method and limits: knowledge entry 215.
+
 ## Fixed: `brain serve --openai` panicked on its first real request
 
 `brain serve --openai PORT` against a real, already-fetched-and-converted

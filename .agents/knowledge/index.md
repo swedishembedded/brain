@@ -255,3 +255,4 @@ What belongs where:
 | 212 | A shared device bills another context's time slice to your next kernel | [`212-a-shared-device-bills-another-contexts-time-slice-to-your-next-kernel.md`](212-a-shared-device-bills-another-contexts-time-slice-to-your-next-kernel.md) |
 | 213 | A roof probe must issue the instruction it names | [`213-a-roof-probe-must-issue-the-instruction-it-names.md`](213-a-roof-probe-must-issue-the-instruction-it-names.md) |
 | 214 | A tool conversation cannot be masked by message boundary | [`214-a-tool-conversation-cannot-be-masked-by-message-boundary.md`](214-a-tool-conversation-cannot-be-masked-by-message-boundary.md) |
+| 215 | Qwen3-8B bf16 LoRA (rank 16) fits 4096 tokens on two P40s and nothing longer was measured | [`215-qwen3-8b-bf16-lora-fits-4096-on-two-p40s-and-no-further.md`](215-qwen3-8b-bf16-lora-fits-4096-on-two-p40s-and-no-further.md) |
