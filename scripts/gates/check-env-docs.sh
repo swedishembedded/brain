@@ -33,8 +33,9 @@ TESTING_DOC=.agents/rules/testing.md
 MODELS_DIR=docs/models
 fail=0
 
-vars=$(grep -rhoE '\("BRAIN_[A-Z0-9_]+"' crates/*/src 2>/dev/null \
-      | grep -oE 'BRAIN_[A-Z0-9_]+' | sort -u)
+# Detection is shared with check-env-reads.sh (scripts/gates/env-reads.py).
+vars=$(python3 scripts/gates/env-reads.py 'crates/*/src/**/*.rs' \
+      | cut -f2 | grep '^BRAIN_' | sort -u)
 
 for v in $vars; do
   if grep -q "$v" "$CONFIG_DOC" 2>/dev/null; then continue; fi

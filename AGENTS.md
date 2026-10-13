@@ -2158,6 +2158,16 @@ a metric that isn't there was simply forgotten.
   `${VAR:-/path}` / `os.environ.get(V, "/path")` default. Adding a script means
   citing it from whatever actually uses it in the same change - an uncited
   script is indistinguishable from a dead one on the next `check/scripts` run.
+- **Env reads are phased out: add a flag, not a variable.** Settings come in as
+  CLI flags or as values passed down. `make check/env-reads`
+  (`scripts/gates/check-env-reads.sh`, also a pre-commit hook) fails on any
+  environment read under `crates/` that is not on
+  `scripts/gates/env-reads.allow`, and on any allowlist entry whose read is
+  gone, so the list only shrinks: delete the line when you remove a read, never
+  add one. Its spec is `make test/gates/env-reads`. A test-only variable read
+  from a `#[test]` in a lib unit-test binary (which has no command line of its
+  own) is the one case that still needs documenting in
+  `.agents/rules/testing.md` (`make check/scripts`, check-env-docs).
 - **Validate everything crossing into brain from outside, at the point of
   entry - structurally AND semantically.** Anything brain did not itself
   produce is untrusted: a bench-exported training JSONL, an imported HF

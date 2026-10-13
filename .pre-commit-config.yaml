@@ -100,6 +100,19 @@ repos:
         files: '(^|/)Makefile$'
         pass_filenames: false
         stages: [pre-commit]
+      - id: env-reads
+        name: "No new environment reads under crates/ (add a flag, not a variable)"
+        description: >-
+          Environment variables are being phased out in favour of CLI flags.
+          Every env read under crates/ is on scripts/gates/env-reads.allow and
+          the list only shrinks: a new read, or an entry whose read is gone,
+          fails. See scripts/gates/check-env-reads.sh. Also run by
+          `make check/env-reads`.
+        entry: bash scripts/gates/check-env-reads.sh
+        language: system
+        files: '(^crates/.*\.rs$|^scripts/gates/env-reads\.(allow|py)$)'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: no-em-dash
         name: "No new em dashes (U+2014)"
         description: >-

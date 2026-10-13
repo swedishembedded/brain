@@ -388,7 +388,7 @@ test/slow:
 # "green because skipped" risk.
 ## test/full - release gate: test + test/doc + test/slow + test/e2e + every check/* gate
 ##   + test/parity + test/parity/strict (needs make testdata/fetch)
-test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
+test/full: test test/doc test/slow test/e2e check/scripts check/env-reads test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -637,6 +637,21 @@ test/e2e/s3dit-int8:
 ## check - lists the check targets; runs nothing (test/full runs them all)
 check:
 	$(LIST_CHILDREN)
+
+# Environment variables are being phased out in favour of CLI flags: every env
+# read under crates/ is on scripts/gates/env-reads.allow and the list only
+# shrinks. See scripts/gates/check-env-reads.sh.
+## check/env-reads - no new environment reads under crates/ (add a flag); allowlist entries must still exist
+check/env-reads:
+	bash scripts/gates/check-env-reads.sh
+
+# Spec for the gate above, run against throwaway trees (needs only bats).
+## test/gates - default: every gate self-test (env-reads)
+test/gates: test/gates/env-reads
+
+## test/gates/env-reads - the env-read ratchet fails on a new read and on a stale entry, passes on a match
+test/gates/env-reads:
+	bats tests/gates/env_reads.bats
 
 # Runs BEFORE the clippy gate: if a manifest is broken, cargo fails at
 # manifest-parse time with an error naming an innocent crate, and every other
@@ -1770,7 +1785,7 @@ help:
         test/e2e test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
-        check check/workspace check/clippy check/scripts check/spdx check/paths check/scope \
+        check check/workspace check/clippy check/scripts check/env-reads test/gates test/gates/env-reads check/spdx check/paths check/scope \
         check/files check/samples check/sdk-features check/make-targets \
         check/generated check/generated/kernels-wgsl-table check/generated/kernels-cuda-table \
         check/generated/wordpiece-table check/generated/samples-manifest \
