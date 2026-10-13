@@ -24,6 +24,8 @@
 //! - Direct tool calls/results only; a subagent-delegated observation
 //!   (`ObservationEntry::subagent_trajectory_ref`) is a hard error - walking
 //!   into embedded subagent trajectories is not implemented yet.
+//! - The agent's `tool_definitions` become the sample's `tools`, so the
+//!   template's tools block is what the agent was shown.
 //! - Trajectory-level reward only (the producer's stamp on
 //!   `Trajectory.final_metrics.extra.reward`), broadcast across every token
 //!   the trajectory contributes - matching lecture 3's finding (cited in
@@ -100,7 +102,8 @@ fn tool_call_args(v: &serde_json::Value) -> String {
 /// Convert one ATIF trajectory's SFT-eligible steps ([`Trajectory::
 /// sft_steps`]) into brain's packed [`ChatSample`] format - reusing
 /// `data::chat`'s existing message/tool-call model rather than inventing a
-/// second one. See this module's doc comment for the v1 scope limits.
+/// second one, with the agent's tool definitions as the sample's tools. See
+/// this module's doc comment for the v1 scope limits.
 pub fn to_chat_sample(traj: &Trajectory) -> Result<ChatSample, String> {
     let mut messages: Vec<ChatMessage> = Vec::new();
     for step in traj.sft_steps() {
@@ -109,7 +112,11 @@ pub fn to_chat_sample(traj: &Trajectory) -> Result<ChatSample, String> {
     if messages.is_empty() {
         return Err("trajectory has no SFT-eligible steps".to_string());
     }
-    Ok(ChatSample { messages, tools: Vec::new(), rendered: None })
+    // The tools the agent was offered are part of the prompt it answered. They
+    // are handed over in the order serde_json holds them (sorted by key), the
+    // same order the SDK's serving path renders a request's tool schemas in.
+    let tools = traj.agent.tool_definitions.iter().flatten().map(minijinja::Value::from_serialize).collect();
+    Ok(ChatSample { messages, tools, rendered: None })
 }
 
 fn push_step(step: &TraceStep, out: &mut Vec<ChatMessage>) -> Result<(), String> {
@@ -308,6 +315,26 @@ mod tests {
         assert_eq!(sample.messages[2].role, "tool");
         assert!(!sample.messages[2].train);
         assert_eq!(sample.messages[2].tool_call_id.as_deref(), Some("call-1"));
+    }
+
+    /// The tools an agent was offered are part of the prompt it answered, so a
+    /// trajectory's tool definitions reach the sample and the template's tools
+    /// block, rendered as the serving renderer renders the same schemas.
+    #[test]
+    fn to_chat_sample_carries_the_agent_tool_definitions_into_the_tools_block() {
+        let schema = serde_json::json!({ "type": "function", "function": { "name": "get_weather", "description": "Current weather", "parameters": { "type": "object", "properties": { "city": { "type": "string" } } } } });
+        let mut traj = trajectory_with_reward(Some(1.0));
+        traj.agent.tool_definitions = Some(vec![schema.clone()]);
+        let sample = to_chat_sample(&traj).expect("to_chat_sample");
+        assert_eq!(sample.tools.len(), 1);
+
+        let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
+        let messages = minijinja::Value::from(vec![minijinja::Value::from_serialize(serde_json::json!({ "role": "user", "content": "hi" }))]);
+        let got = tmpl.render(messages, Some(minijinja::Value::from(sample.tools.clone())), true, &BTreeMap::new()).unwrap();
+        let served = data::qwen_chat::render_for_generation(&[data::qwen_chat::ChatMessage::user("hi")], &[schema.to_string()], data::qwen_chat::TemplateOpts::default()).unwrap();
+        assert!(got.contains("<tools>") && got.contains("get_weather"), "{got}");
+        assert_eq!(got, served);
+        assert!(to_chat_sample(&trajectory_with_reward(Some(1.0))).unwrap().tools.is_empty());
     }
 
     #[test]

@@ -39,6 +39,9 @@ brain-qwen3 = { workspace = true, optional = true }
 brain-bench.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `atif::to_chat_sample` hands an agent's tool definitions to the chat
+# template as the order-preserving values `data::chat::ChatSample::tools` holds.
+minijinja.workspace = true
 # `ExternalVerifier` kills its command's whole process group.
 libc.workspace = true
 # `document::CurriculumError` - named, `Display`-able variants for
@@ -49,6 +52,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+brain-testutil.workspace = true
 # `tests/grpo_gradcheck.rs` - GRPO's local `CheckModel` harness (self-improve
 # roadmap P12's gate).
 brain-gradcheck.workspace = true
