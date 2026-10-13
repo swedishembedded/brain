@@ -15,6 +15,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use capability::FailureClass;
 use serde_json::{json, Value};
 
 use crate::surface::Provider;
@@ -52,6 +53,13 @@ pub enum Kind {
     /// was saturated and the request was load-shed — HTTP 503, carries a
     /// `Retry-After`.
     Saturated,
+    /// A model reported a [`capability::FailureClass`] in its own error: the
+    /// status and `code` say which of the six it was, so a client can tell an
+    /// uninstalled model from a malformed request from a passed deadline
+    /// without reading prose. A semantic refusal (`InvalidRequest`,
+    /// `UnsupportedCapability`) is a 422: the body parsed, the request cannot
+    /// be served as sent.
+    Failure(capability::FailureClass),
 }
 
 impl Kind {
@@ -67,11 +75,17 @@ impl Kind {
             Kind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             Kind::Overloaded => StatusCode::TOO_MANY_REQUESTS,
             Kind::Saturated => StatusCode::SERVICE_UNAVAILABLE,
+            Kind::Failure(class) => match class {
+                FailureClass::NotInstalled => StatusCode::NOT_FOUND,
+                FailureClass::FailedToLoad | FailureClass::BackendFailure => StatusCode::INTERNAL_SERVER_ERROR,
+                FailureClass::UnsupportedCapability | FailureClass::InvalidRequest => StatusCode::UNPROCESSABLE_ENTITY,
+                FailureClass::Timeout => StatusCode::GATEWAY_TIMEOUT,
+            },
         }
     }
     /// `true` when the client should back off and retry — surfaced as `Retry-After`.
     fn retryable(&self) -> bool {
-        matches!(self, Kind::Overloaded | Kind::Saturated | Kind::RateLimited)
+        matches!(self, Kind::Overloaded | Kind::Saturated | Kind::RateLimited | Kind::Failure(FailureClass::Timeout))
     }
     /// Anthropic's `error.type` value (one of its discriminated error variants).
     fn anthropic_type(&self) -> &'static str {
@@ -89,6 +103,9 @@ impl Kind {
             // Anthropic has no "not_implemented"; api_error is its catch-all.
             Kind::NotImplemented => "api_error",
             Kind::Overloaded | Kind::Saturated => "overloaded_error",
+            Kind::Failure(FailureClass::NotInstalled) => "not_found_error",
+            Kind::Failure(FailureClass::UnsupportedCapability | FailureClass::InvalidRequest) => "invalid_request_error",
+            Kind::Failure(FailureClass::FailedToLoad | FailureClass::BackendFailure | FailureClass::Timeout) => "api_error",
         }
     }
     /// OpenAI's `error.type` value.
@@ -105,6 +122,8 @@ impl Kind {
             Kind::NotImplemented => "not_implemented",
             Kind::Overloaded => "rate_limit_exceeded",
             Kind::Saturated => "server_error",
+            Kind::Failure(FailureClass::NotInstalled | FailureClass::UnsupportedCapability | FailureClass::InvalidRequest) => "invalid_request_error",
+            Kind::Failure(FailureClass::FailedToLoad | FailureClass::BackendFailure | FailureClass::Timeout) => "server_error",
         }
     }
     /// OpenAI's short `error.code` slug.
@@ -123,7 +142,20 @@ impl Kind {
             Kind::NotImplemented => "not_implemented",
             Kind::Overloaded => "rate_limit_exceeded",
             Kind::Saturated => "server_error",
+            // The class's own wire name with `_` for `-`.
+            Kind::Failure(class) => failure_code(*class),
         }
+    }
+}
+
+fn failure_code(class: FailureClass) -> &'static str {
+    match class {
+        FailureClass::NotInstalled => "not_installed",
+        FailureClass::FailedToLoad => "failed_to_load",
+        FailureClass::UnsupportedCapability => "unsupported_capability",
+        FailureClass::Timeout => "timeout",
+        FailureClass::InvalidRequest => "invalid_request",
+        FailureClass::BackendFailure => "backend_failure",
     }
 }
 
@@ -174,6 +206,10 @@ impl ApiError {
     }
     pub fn saturated(provider: Provider, message: impl Into<String>) -> ApiError {
         ApiError::new(provider, Kind::Saturated, message)
+    }
+    /// A model-reported [`FailureClass`].
+    pub fn failure(provider: Provider, class: FailureClass, message: impl Into<String>) -> ApiError {
+        ApiError::new(provider, Kind::Failure(class), message)
     }
 
     /// The provider-shaped JSON body (without the HTTP status).

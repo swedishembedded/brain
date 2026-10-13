@@ -83,7 +83,21 @@ pub fn tag(class: FailureClass, message: impl AsRef<str>) -> String {
 }
 
 /// The class and message of a [`tag`]ged error, or `None` for any other string.
+///
+/// A transport may prefix context to an error as it passes it on
+/// (`activate <model>/<config>: [not-installed] ...`), so a tag is also found
+/// after any `": "`.
 pub fn classify(error: &str) -> Option<(FailureClass, &str)> {
+    let mut rest = error;
+    loop {
+        if let Some(found) = classify_here(rest) {
+            return Some(found);
+        }
+        rest = &rest[rest.find(": ")? + 2..];
+    }
+}
+
+fn classify_here(error: &str) -> Option<(FailureClass, &str)> {
     let rest = error.strip_prefix('[')?;
     let (slug, message) = rest.split_once(']')?;
     let class = FailureClass::parse(slug)?;
@@ -120,8 +134,14 @@ mod tests {
         assert_eq!(classify("[nonsense] hi"), None);
         assert_eq!(classify("[timeout"), None);
         assert_eq!(classify(""), None);
-        // A tag in the middle of a message is prose, not a class.
-        assert_eq!(classify("clip: [timeout] mentioned"), None);
+        // Only a tag at the start, or right after a "context: " prefix, counts.
+        assert_eq!(classify("clip says [timeout] in prose"), None);
+    }
+
+    #[test]
+    fn a_transport_prefix_does_not_hide_the_tag() {
+        let e = "activate acme/model/default: [failed-to-load] the checkpoint is corrupt";
+        assert_eq!(classify(e), Some((FailureClass::FailedToLoad, "the checkpoint is corrupt")));
     }
 
     #[test]

@@ -177,7 +177,21 @@ fn parse_exceeds_capacity(e: &str) -> Option<(u64, u64)> {
 /// in the middle of (the end of `qwen3::chat::NO_FIM_TOKENS`'s message).
 const NO_FIM_TOKENS: &str = "has no fill-in-the-middle tokens";
 
+/// How `residency`'s lane loop words a panic it isolated.
+const PANICKED: &str = ": panicked while running: ";
+
 pub fn map_reply_err(provider: Provider, model: &str, e: &str) -> ApiError {
+    // A model that classed its own failure is believed: the tag is a promise
+    // that the message names no path or backend internals.
+    if let Some((class, message)) = capability::classify(e) {
+        return ApiError::failure(provider, class, message);
+    }
+    if e.contains(PANICKED) {
+        // The scheduler's own wording for a lane that panicked while running
+        // a request: a backend fault, whose text can carry internals.
+        eprintln!("apiserve: model '{model}' request failed: {e}");
+        return ApiError::failure(provider, capability::FailureClass::BackendFailure, "the model faulted while running the request");
+    }
     if e.starts_with("no model") || e.contains("no action") {
         ApiError::model_not_found(provider, model)
     } else if e.ends_with(NO_FIM_TOKENS) {
@@ -614,6 +628,49 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── failure classes ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_classed_failure_maps_to_its_own_status_and_code_with_its_message() {
+        use capability::{tag, FailureClass};
+        let cases = [
+            (FailureClass::NotInstalled, 404, "not_installed"),
+            (FailureClass::FailedToLoad, 500, "failed_to_load"),
+            (FailureClass::UnsupportedCapability, 422, "unsupported_capability"),
+            (FailureClass::Timeout, 504, "timeout"),
+            (FailureClass::InvalidRequest, 422, "invalid_request"),
+            (FailureClass::BackendFailure, 500, "backend_failure"),
+        ];
+        for (class, status, code) in cases {
+            let e = map_reply_err(Provider::OpenAI, "m", &tag(class, "the message"));
+            assert_eq!(e.kind.status().as_u16(), status, "{code}");
+            let body = e.body();
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["message"], "the message");
+        }
+    }
+
+    #[test]
+    fn a_scheduler_prefix_does_not_hide_the_class() {
+        let e = map_reply_err(Provider::OpenAI, "m", "activate acme/model/default: [failed-to-load] the checkpoint is corrupt");
+        assert_eq!(e.body()["error"]["code"], "failed_to_load");
+        assert_eq!(e.body()["error"]["message"], "the checkpoint is corrupt");
+    }
+
+    #[test]
+    fn a_lane_panic_is_a_backend_failure_that_leaks_nothing() {
+        let e = map_reply_err(Provider::OpenAI, "m", "m/default: panicked while running: index out of bounds at /home/secret/weights.rs");
+        let body = e.body();
+        assert_eq!(body["error"]["code"], "backend_failure");
+        assert!(!body["error"]["message"].as_str().unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn an_unclassed_failure_is_still_the_generic_refusal() {
+        let e = map_reply_err(Provider::OpenAI, "m", "backend panic at /home/secret/weights.gguf: kernel exploded");
+        assert_eq!(e.body()["error"]["message"], "the model failed to process the request");
+    }
 
     // ── parse_exceeds_capacity ──────────────────────────────────────────────
 
