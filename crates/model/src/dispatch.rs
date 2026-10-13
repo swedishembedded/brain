@@ -146,6 +146,145 @@ pub fn lora_rows_off(
     [proj, add]
 }
 
+/// The slot value that means "this row uses no adapter". The bank kernels treat
+/// ANY slot `>= LoraBank::slots` the same way (the row is left untouched), so a
+/// stale or corrupt slot can never index outside the bank.
+pub const LORA_SLOT_NONE: u32 = u32::MAX;
+
+/// A device-resident bank of LoRA adapters for ONE linear, so a single batch can
+/// apply a different adapter (or none) to each row: the multi-adapter sibling of
+/// [`LoraW`], which holds exactly one.
+///
+/// Every slot holds one adapter in [`LoraW`]'s layout, padded to `r_max` rows:
+///
+/// * `a`: `[slots, r_max, k]` - slot `s`'s `A [r, k]` at `s·r_max·k`;
+/// * `bt`: `[slots, r_max, n]` - slot `s`'s `B` transposed to `[r, n]`, `α/r`
+///   (and any strength) folded in, at `s·r_max·n`;
+/// * `rank`: `[slots]` u32 - the live rank of each slot.
+///
+/// Rows `rank..r_max` of a slot are never read, so they need not be zeroed and
+/// loading a lower-rank adapter into a slot only overwrites its own rows. A rank
+/// above `r_max` is clamped to it. Loading or unloading an adapter is a buffer
+/// write; no recorded step has to change.
+pub struct LoraBank {
+    /// `A_bank [slots, r_max, k]`.
+    pub a: DeviceBuffer,
+    /// `Bt_bank [slots, r_max, n]`.
+    pub bt: DeviceBuffer,
+    /// Live rank of each slot, `[slots]` u32.
+    pub rank: DeviceBuffer,
+    /// Number of slots.
+    pub slots: u32,
+    /// Rank capacity of every slot.
+    pub r_max: u32,
+}
+
+/// The three pipeline indices [`lora_bank_rows`] chooses among, as the caller
+/// registered them.
+#[derive(Clone, Copy, Debug)]
+pub struct LoraBankKernels {
+    /// `lora_xa_rows` (workgroup per row and rank index).
+    pub xa: usize,
+    /// `lora_xa_rows_serial` (the barrier-free twin for devices without
+    /// workgroup reductions).
+    pub xa_serial: usize,
+    /// `lora_delta_rows`.
+    pub delta: usize,
+}
+
+impl LoraBankKernels {
+    /// Look the three kernels up by name on `g`; `None` when the model did not
+    /// register all of them. All three are needed because which projection
+    /// runs is decided at record time from the device, not by the caller.
+    pub fn resolve(g: &Gpu) -> Option<LoraBankKernels> {
+        Some(LoraBankKernels {
+            xa: g.kernel_index("lora_xa_rows")?,
+            xa_serial: g.kernel_index("lora_xa_rows_serial")?,
+            delta: g.kernel_index("lora_delta_rows")?,
+        })
+    }
+}
+
+/// One per-row-adapter LoRA correction over a window of rows: what
+/// [`lora_bank_rows`] records.
+pub struct LoraBankRows<'a> {
+    /// Pipeline indices of the bank kernels.
+    pub kernels: LoraBankKernels,
+    /// The adapters of this linear.
+    pub bank: &'a LoraBank,
+    /// The u32 slot of every row, indexed like `x` (the window is
+    /// `row0..row0 + rows`); [`LORA_SLOT_NONE`] or any slot `>= bank.slots`
+    /// leaves the row untouched.
+    pub slot: &'a DeviceBuffer,
+    /// `[rows, bank.r_max]` scratch the caller owns, overwritten by the
+    /// projection and consumed by the epilogue (the two steps are adjacent, so
+    /// one buffer serves every corrected linear in a forward).
+    pub tscr: &'a DeviceBuffer,
+    /// The fp32 activation `[.., k]` the base linear read.
+    pub x: &'a DeviceBuffer,
+    /// The base linear's output, `out_stride` floats per row.
+    pub out: &'a DeviceBuffer,
+    /// First row of the window in `x`, `slot` and `out`.
+    pub row0: u32,
+    /// Rows in the window.
+    pub rows: u32,
+    /// Contraction width of the linear.
+    pub k: u32,
+    /// Output width of THIS projection.
+    pub n: u32,
+    /// Floats between consecutive output rows (`>= out_col0 + n`).
+    pub out_stride: u32,
+    /// First output column of this projection inside a row: 0 for a plain
+    /// linear, and the q/k/v (or gate/up) offset when the base wrote a fused
+    /// projection, so the correction lands in place with no gather or split.
+    pub out_col0: u32,
+}
+
+/// Record the two steps of a per-row-adapter LoRA correction:
+/// `out[i, out_col0 + j] += s·B_slot(i)·(A_slot(i)·x_i)` for every row `i` of the
+/// window, with the adapter chosen per row by `slot` (see [`LoraBank`]).
+///
+/// Rows need not be contiguous or sorted by adapter, and the number of
+/// dispatches is two whatever number of distinct adapters the window holds. A
+/// row whose slot is [`LORA_SLOT_NONE`] (or out of range, or whose slot has rank
+/// 0) is not touched: its output bits are exactly what the base linear wrote.
+/// Each corrected row equals [`lora_rows_off`] run on that row alone with its
+/// adapter, up to fp32 accumulation order in `A·x`.
+///
+/// The projection runs as the cooperative `lora_xa_rows` on a device with
+/// workgroup reductions and as `lora_xa_rows_serial` otherwise - the choice is
+/// `backend_api::select`'s `Op::LoraBankProject`, keyed on the queried
+/// capabilities.
+///
+/// # Panics
+///
+/// On a window whose geometry cannot be right: zero `rows`, `k`, `n`, or bank
+/// extent, or `out_col0 + n > out_stride`.
+pub fn lora_bank_rows(g: &Gpu, rq: &LoraBankRows) -> [Step; 2] {
+    use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
+
+    let LoraBankRows { kernels, bank, slot, tscr, x, out, row0, rows, k, n, out_stride, out_col0 } = *rq;
+    assert!(rows > 0 && k > 0 && n > 0 && bank.slots > 0 && bank.r_max > 0, "lora_bank_rows: empty window or bank");
+    assert!(out_col0 as u64 + n as u64 <= out_stride as u64, "lora_bank_rows: columns {out_col0}..{} overrun the {out_stride}-float output row", out_col0 + n);
+
+    let shape = OpShape { m: rows, n: bank.r_max, k, dtype: Dtype::F32 };
+    let (xa_kernel, xa_grid) = match gpu_core::select::DefaultSelector.select(Op::LoraBankProject, shape, &g.caps()) {
+        KernelVariant::WorkgroupPerOutput => (kernels.xa, gpu_core::Dispatch::Workgroups(rows * bank.r_max)),
+        _ => (kernels.xa_serial, gpu_core::Dispatch::Threads(rows * bank.r_max)),
+    };
+    // Every buffer is bound whole and the window is a Param: a bind offset
+    // must respect the device's storage-buffer offset alignment (256 bytes),
+    // which an arbitrary `row0` does not.
+    let project = g.dispatch(xa_kernel, &[x, &bank.a, slot, &bank.rank, tscr], &[rows, k, bank.r_max, bank.slots, row0], xa_grid);
+    let add = g.dispatch(
+        kernels.delta,
+        &[out, tscr, &bank.bt, slot, &bank.rank],
+        &[rows, n, bank.r_max, bank.slots, out_stride, out_col0, row0],
+        gpu_core::Dispatch::Threads(rows * n),
+    );
+    [project, add]
+}
+
 /// Int8 activation-quantization scratch: the per-token dynamic scale plus one
 /// packed-activation buffer per contraction width. ONE quant feeds every
 /// linear reading that activation. The widths are distinct within a model,

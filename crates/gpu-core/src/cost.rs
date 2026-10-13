@@ -409,6 +409,25 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, n, r) = (p(0)?, p(1)?, p(2)?);
             f(2 * m * n * r, 4 * (m * r + r * n + 2 * m * n))
         }
+        // Per-row-adapter LoRA, projection half: t[rows,r_max] = x[rows,k] .
+        // A_bank[slot[row]]^T, params [rows, k, r_max, slots, row0]. Reported as the
+        // dense upper bound (every row live at the full `r_max`), the same
+        // data-independent convention `moe_linear_gated` documents. The bank
+        // is gathered per row, but its UNIQUE footprint is at most
+        // `min(rows, slots)` slots of `r_max*k`, which is what the byte count
+        // charges (the rest is re-reading, which the L2 serves).
+        "lora_xa_rows" | "lora_xa_rows_serial" => {
+            let (rows, k, r_max, slots) = (p(0)?, p(1)?, p(2)?, p(3)?);
+            f(2 * rows * r_max * k, 4 * (rows * k + rows.min(slots) * r_max * k + rows * r_max))
+        }
+        // Per-row-adapter LoRA, epilogue half: out[i, col0 + j] += t[i,:] .
+        // bt_bank[slot[i], :, j], params [rows, n, r_max, slots, out_stride,
+        // out_col0, row0]. `lora_delta`'s formula with the bank's unique footprint in
+        // place of the single `bt`; `out` is read-modify-write.
+        "lora_delta_rows" => {
+            let (rows, n, r_max, slots) = (p(0)?, p(1)?, p(2)?, p(3)?);
+            f(2 * rows * n * r_max, 4 * (rows * r_max + rows.min(slots) * r_max * n + 2 * rows * n))
+        }
         // Sparse-MoE expert linear: params [m, k, n, n_experts, e_idx] - same
         // (m, k, n) GEMM shape as `matmul` in the first three slots, plus two
         // routing params that do not change the dispatch shape. A non-routed
@@ -1634,6 +1653,23 @@ mod tests {
     }
 
     /// Hand-computed expectations for the load-bearing formulas.
+    /// The per-row-adapter LoRA pair is costed as its two skinny GEMMs, and the
+    /// serial and cooperative projections share a formula (same math).
+    #[test]
+    fn lora_bank_costs() {
+        // t[6,r_max=4] from x[6,k=8]: 6*4 outputs x 8 MACs x 2 = 384 flops; the
+        // bank's unique footprint is min(rows=6, slots=2) slots of r_max*k.
+        let xa = cost("lora_xa_rows", &[6, 8, 4, 2, 0], 6 * 4 * 64);
+        assert_eq!(xa.flops, 384);
+        assert_eq!(xa.bytes, 4 * (6 * 8 + 2 * 4 * 8 + 6 * 4));
+        assert_eq!(cost("lora_xa_rows_serial", &[6, 8, 4, 2, 0], 6 * 4).flops, 384);
+        // out[6,n=5] += t[6,4] @ bt: 6*5 outputs x 4 MACs x 2 = 240 flops;
+        // out_stride/out_col0/row0 (the last three words) do not change the volume.
+        let delta = cost("lora_delta_rows", &[6, 5, 4, 2, 15, 5, 3], 30);
+        assert_eq!(delta.flops, 240);
+        assert_eq!(delta.bytes, 4 * (6 * 4 + 2 * 4 * 5 + 2 * 6 * 5));
+    }
+
     #[test]
     fn gemm_costs() {
         // out[8,6] = x[8,4] @ w[6,4]ᵀ: 8*6 outputs × 4 MACs × 2 = 384 flops.

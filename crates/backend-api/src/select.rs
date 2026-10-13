@@ -292,6 +292,20 @@ pub enum Op {
     /// accumulation is always f32 by construction. Shape: the forward
     /// linear's `(m, n, k)`.
     MatMulDw,
+    /// The projection half of a per-row-adapter LoRA correction:
+    /// `t[i, j] = sum_c x[i, c] * A_bank[slot[i], j, c]` (`lora_xa_rows` vs
+    /// its barrier-free twin `lora_xa_rows_serial`).
+    ///
+    /// The output is only `r_max` (8-32) wide against a contraction of the
+    /// model width, so this is a long reduction behind a short output - the
+    /// shape of [`Op::MaxAbsRow`], and it takes that Op's rule for the same
+    /// reason: one thread walking `k` serially is uncoalesced and a chain of
+    /// `k` dependent loads, which more rows do not fix, so there is no shape
+    /// gate; `workgroup_reductions` alone decides (the CPU JIT mis-executes
+    /// the cooperative form). The second half, `lora_delta_rows`, is a
+    /// thread-per-output epilogue with a single kernel and so no Op of its
+    /// own. Shape: `m` = rows, `n` = `r_max`, `k` = the contraction width.
+    LoraBankProject,
 }
 
 /// Element type an op runs over - an alias for the engine's ONE dtype enum
@@ -897,6 +911,13 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // trade either. `workgroup_reductions` is the correctness gate: the CPU
         // JIT mis-executes the barrier.
         Op::MaxAbsRow => vec![WorkgroupPerOutput, Reference],
+        // Per-row-adapter LoRA projection: `Op::MaxAbsRow`'s exact rule (a long
+        // reduction behind a short output, no shape gate, `workgroup_reductions`
+        // the correctness gate) - see `Op::LoraBankProject`. The cooperative
+        // form is NOT bit-identical to the serial one (64 partial sums fold in a
+        // different order), so an adopter owes a numerical gate, not an
+        // `assert_eq!` on bits.
+        Op::LoraBankProject => vec![WorkgroupPerOutput, Reference],
         // Standalone attention softmax has NO shape gate either, for the
         // same reason `Op::MaxAbsRow` does not: it is a per-row reduction
         // (max, then exp-sum, then normalise), so the loss from one thread
@@ -1872,6 +1893,22 @@ mod tests {
         }
     }
 
+    /// The per-row-adapter LoRA projection is cooperative at every shape on a
+    /// device that runs workgroup reductions (a long reduction behind an
+    /// `r_max`-wide output, `Op::MaxAbsRow`'s shape) and falls back to the
+    /// barrier-free twin where it does not - decode (`m = 1`) and prefill alike.
+    #[test]
+    fn lora_bank_projection_is_cooperative_at_every_shape_and_serial_without_reductions() {
+        let s = DefaultSelector;
+        for m in [1u32, 8, 32, 512] {
+            for k in [256u32, 1024, 4096, 12288] {
+                let sh = shape(m, 16, k, Dtype::F32);
+                assert_eq!(s.select(Op::LoraBankProject, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m} k={k}");
+                assert_eq!(s.select(Op::LoraBankProject, sh, &cpu_caps()), KernelVariant::Reference, "m={m} k={k}");
+            }
+        }
+    }
+
     /// Standalone attention-probability softmax (`softmax_rows` vs
     /// `attn_softmax`/`decode_softmax`/`attn_softmax_{cross,bidir}`) has the
     /// same shape as `Op::MaxAbsRow`: a per-row reduction with NO shape gate
@@ -2114,6 +2151,7 @@ mod tests {
                 Op::ArgMaxRow,
                 Op::GradNorm,
                 Op::MaxAbsRow,
+                Op::LoraBankProject,
                 Op::Softmax,
                 Op::AttnBwdDScores,
                 Op::PagedAttention,
@@ -2234,6 +2272,7 @@ mod tests {
             Op::ArgMaxRow,
             Op::GradNorm,
             Op::MaxAbsRow,
+            Op::LoraBankProject,
             Op::PagedAttention,
         ];
         let dtypes = [
