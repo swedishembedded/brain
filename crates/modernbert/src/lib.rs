@@ -35,8 +35,8 @@ pub mod model;
 pub mod sequence;
 
 pub use config::ModernBertConfig;
-pub use decision::{LayaDecision, Provenance, Training, MAX_OPTIONS};
+pub use decision::{LayaDecision, Provenance, Scored, Training, MAX_OPTIONS};
 pub use import::{import_dir, LayaCheckpoint};
 pub use laya::{LayaConfig, LayaHead};
 pub use model::ModernBert;
-pub use sequence::{build_sequence, temp_bucket, write_json, OrderedJson, QType, Question, State};
+pub use sequence::{build_sequence, build_sequence_report, state_fit, temp_bucket, write_json, Built, OrderedJson, QType, Question, State, StateFit};

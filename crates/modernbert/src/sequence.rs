@@ -379,6 +379,55 @@ pub fn build_sequence(
     option_order: Option<&[usize]>,
     truncate_left: bool,
 ) -> (Vec<u32>, Vec<usize>) {
+    let built = build_sequence_report(tok, cfg, state, q, max_len, head_max_len, option_order, truncate_left);
+    (built.ids, built.markers)
+}
+
+/// How much of a state's tokens made it into the packed sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateFit {
+    /// Tokens the serialized state encodes to.
+    pub total: usize,
+    /// Tokens of it that fit under `max_len`; the rest were dropped.
+    pub kept: usize,
+}
+
+impl StateFit {
+    /// Whether any of the state was dropped.
+    pub fn truncated(&self) -> bool {
+        self.kept < self.total
+    }
+}
+
+/// The room a state of `total` tokens has after `used` packed tokens
+/// (head, options and separators) under `max_len`, keeping one slot for the
+/// closing separator - the arithmetic [`build_sequence`] applies.
+pub fn state_fit(total: usize, used: usize, max_len: u32) -> StateFit {
+    let room = (max_len as i64 - used as i64 - 1).max(0) as usize;
+    StateFit { total, kept: total.min(room) }
+}
+
+/// [`build_sequence`]'s result plus what it had to drop to fit.
+#[derive(Clone, Debug)]
+pub struct Built {
+    pub ids: Vec<u32>,
+    pub markers: Vec<usize>,
+    pub state: StateFit,
+}
+
+/// [`build_sequence`], also reporting how much of the state fit. A caller
+/// publishing an answer needs to say when the model answered from a prefix of
+/// the state rather than all of it.
+pub fn build_sequence_report(
+    tok: &QwenBpe,
+    cfg: &ModernBertConfig,
+    state: &State,
+    q: &Question,
+    max_len: u32,
+    head_max_len: u32,
+    option_order: Option<&[usize]>,
+    truncate_left: bool,
+) -> Built {
     let mask_tok = tok.decode(&[cfg.mask_token_id]);
     let opts = q.render_options();
     let order: Vec<usize> = match option_order {
@@ -427,22 +476,22 @@ pub fn build_sequence(
     }
     ids.push(cfg.sep_token_id);
 
-    let room = (max_len as i64 - ids.len() as i64 - 1).max(0) as usize;
     let state_text = state.serialize().replace(&mask_tok, " ");
     let mut st = tok.encode(&state_text);
+    let fit = state_fit(st.len(), ids.len(), max_len);
     if truncate_left {
-        if st.len() > room {
-            st = st.split_off(st.len() - room);
+        if st.len() > fit.kept {
+            st = st.split_off(st.len() - fit.kept);
         }
     } else {
-        st.truncate(room);
+        st.truncate(fit.kept);
     }
     ids.extend(st);
     ids.push(cfg.sep_token_id);
 
     ids.truncate(max_len as usize);
     let markers: Vec<usize> = markers.into_iter().filter(|&m| m < max_len as usize).collect();
-    (ids, markers)
+    Built { ids, markers, state: fit }
 }
 
 #[cfg(test)]
@@ -586,5 +635,32 @@ mod tests {
         assert_eq!(temp_bucket(QType::Choice, 11), "choice:11+");
         assert_eq!(temp_bucket(QType::Choice, 255), "choice:11+");
         assert_eq!(temp_bucket(QType::Score, 4), "score:3-5");
+    }
+
+    #[test]
+    fn a_state_that_fits_the_room_is_not_truncated() {
+        // 100 packed so far, one reserved for the closing separator.
+        let fit = state_fit(50, 100, 512);
+        assert_eq!((fit.total, fit.kept, fit.truncated()), (50, 50, false));
+    }
+
+    #[test]
+    fn a_state_larger_than_the_room_reports_what_was_dropped() {
+        let fit = state_fit(900, 100, 512);
+        assert_eq!(fit.total, 900);
+        assert_eq!(fit.kept, 512 - 100 - 1);
+        assert!(fit.truncated());
+    }
+
+    #[test]
+    fn a_state_exactly_filling_the_room_is_not_truncated() {
+        let fit = state_fit(411, 100, 512);
+        assert_eq!((fit.kept, fit.truncated()), (411, false));
+    }
+
+    #[test]
+    fn no_room_at_all_keeps_nothing_and_says_so() {
+        let fit = state_fit(5, 600, 512);
+        assert_eq!((fit.kept, fit.truncated()), (0, true));
     }
 }

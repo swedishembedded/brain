@@ -81,7 +81,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 use crate::config::ModernBertConfig;
 use crate::laya::{tensor_manifest, LayaConfig, LayaHead};
 use crate::model::ModernBert;
-use crate::sequence::{build_sequence, Question, State};
+use crate::sequence::{build_sequence_report, Built, Question, State, StateFit};
 
 /// How many option markers one call may carry. The head's marker buffers are
 /// sized once at build time, so this is a capacity rather than a per-call
@@ -119,6 +119,18 @@ pub enum Training {
     /// Both halves learn, at separate learning rates. Costs ~4x the trunk's
     /// weight bytes in device memory.
     HeadAndTrunk,
+}
+
+/// One scored call: the raw head outputs and how much of the state fit.
+#[derive(Clone, Debug)]
+pub struct Scored {
+    /// Raw option logits, before any serving temperature.
+    pub logits: Vec<f32>,
+    /// Raw act/escalate logits.
+    pub act_logits: Vec<f32>,
+    /// How much of the state the packed sequence held. The model answers from
+    /// the kept prefix; a caller must be able to say so.
+    pub state: StateFit,
 }
 
 /// A loaded Laya decision model: ModernBERT trunk + decision head +
@@ -213,7 +225,7 @@ impl LayaDecision {
     }
 
     /// `rl_agent_config.json`'s own `max_len` - the checkpoint's real trained
-    /// context, which [`build_sequence`] truncates to.
+    /// context, which [`crate::sequence::build_sequence`] truncates to.
     pub fn max_len(&self) -> u32 {
         self.max_len
     }
@@ -251,18 +263,24 @@ impl LayaDecision {
     /// temperature: calibration belongs to whoever publishes the number, not
     /// to the model. `option_order` permutes the options within the packed
     /// sequence exactly as `rl_common.py::encode_record` does when training
-    /// (see [`build_sequence`]); the returned logits are in THAT order.
+    /// (see [`crate::sequence::build_sequence`]); the returned logits are in THAT order.
     pub fn score(
         &mut self,
         state: &State,
         q: &Question,
         option_order: Option<&[usize]>,
     ) -> Result<(Vec<f32>, Vec<f32>), String> {
+        self.score_reporting(state, q, option_order).map(|s| (s.logits, s.act_logits))
+    }
+
+    /// [`LayaDecision::score`], also reporting how much of the state the
+    /// packed sequence could hold - see [`Scored::state`].
+    pub fn score_reporting(&mut self, state: &State, q: &Question, option_order: Option<&[usize]>) -> Result<Scored, String> {
         let n_opts = q.render_options().len();
         if n_opts > MAX_OPTIONS {
             return Err(format!("{n_opts} options exceeds the {MAX_OPTIONS} this head is built for"));
         }
-        let (ids, markers) = build_sequence(
+        let Built { ids, markers, state: state_fit } = build_sequence_report(
             &self.tok,
             &self.cfg,
             state,
@@ -305,7 +323,7 @@ impl LayaDecision {
         }
         let (logits, act_logits) = self.head.forward();
         self.head.poll_wait();
-        Ok((logits, act_logits))
+        Ok(Scored { logits, act_logits, state: state_fit })
     }
 
     /// Clear both halves' parameter gradients.
