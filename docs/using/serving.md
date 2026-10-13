@@ -92,6 +92,12 @@ The digest is the SHA-256 of the adapter file, the same value
 - As with `--watch-adapters`, a request already running finishes on the
   adapter it started with.
 
+Whichever flag put an adapter in front of the model, `GET /models` reports it
+on that model's entry as `adapter: {id, digest}` (see
+[`docs/using/http-api.md`](http-api.md)), updated when a swap is applied. A
+watched-directory adapter is named by its card id and file digest too; one
+whose card cannot be read is served and simply reported without an `adapter`.
+
 All three adapter flags need a served Qwen3 (`BRAIN_QWEN_WEIGHTS`) behind an
 HTTP or D-Bus surface; `--adapter` and `--adapter-manifest` without one stop
 the server, and the stdio controller refuses all three.

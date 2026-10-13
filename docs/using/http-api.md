@@ -150,6 +150,19 @@ testing, the `BRAIN_MOCK` model.
 Import a HuggingFace checkpoint into brain's format:
 `brain qwen3 import --hf <hf_dir> --out qwen3.safetensors`.
 
+### Discovery fields on a model entry
+
+On the OpenAI and OpenRouter dialects every entry of `GET /models` and
+`GET /models/{id}` may carry these optional fields, in addition to the dialect's own.
+A field is absent when its value is unknown; it is never `null` or `0` as a stand-in.
+The Anthropic entry is unchanged.
+
+| Field | Meaning |
+|---|---|
+| `capabilities` | Names derived from the model's manifest: `chat`, `tools` (chat whose `generate` accepts `tools`), `embeddings`, `images`. |
+| `max_output_tokens` | The most new tokens one request may ask for, when the model's `generate` action declares an upper bound. On OpenRouter it is also `top_provider.max_completion_tokens`. |
+| `adapter` | `{ "id": "<adapter card id>", "digest": "sha256:<hex>" }` for the LoRA adapter now in front of the model (`--adapter`, `--adapter-manifest`, `--watch-adapters`). The id is the adapter's name and the digest is that of its file; no file path is ever included. A hot swap changes it on the next read. |
+
 ## Model card
 
 brain's safetensors containers carry a model card in their metadata - id, family,

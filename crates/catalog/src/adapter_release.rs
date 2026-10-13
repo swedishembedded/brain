@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 pub use brain_modelstore::adapter_manifest::AdapterManifest;
+use residency::AdapterIdentity;
 
 /// The base checkpoint a server folds adapters into: its file (or a
 /// `transformers` directory), the id it was resolved under (when it came from
@@ -75,6 +76,11 @@ pub struct AdapterRelease {
 }
 
 impl AdapterRelease {
+    /// What the serving surface calls this release: id and digest, no path.
+    pub fn identity(&self) -> AdapterIdentity {
+        AdapterIdentity { id: self.id.clone(), digest: self.digest.clone() }
+    }
+
     /// The line `brain serve` prints when `model` starts serving this
     /// release, the one a caller greps to confirm what is served.
     pub fn serving_line(&self, model: &str) -> String {
@@ -82,14 +88,27 @@ impl AdapterRelease {
     }
 }
 
+/// Name the adapter file at `path` as a release is named: its card's id and
+/// the digest of its bytes. Checks nothing about the base; [`verify_adapter`]
+/// does, on top of this, so the name of a verified release and of an unverified
+/// one (a watched directory's) is produced by one function.
+pub fn identify_adapter(path: &Path) -> Result<AdapterRelease, String> {
+    let shown = path.display();
+    let path_str = path.to_str().ok_or_else(|| format!("adapter {shown}: not a UTF-8 path"))?;
+    let digest = brain_modelstore::fetch::file_digest(path).map_err(|e| format!("adapter {shown}: {e}"))?;
+    let card = checkpoint::st::read_card(path_str)
+        .map_err(|e| format!("adapter {shown}: {e}"))?
+        .ok_or_else(|| format!("adapter {shown}: no model card, so nothing says which base it belongs to"))?;
+    Ok(AdapterRelease { id: card.id, path: path.to_path_buf(), digest })
+}
+
 /// Read `path` as a Qwen3 LoRA adapter, bind it to `base` and digest it.
 /// Every refusal names the file and what was wrong with it; a base mismatch
 /// names both digests.
 pub fn verify_adapter(path: &Path, base: &ServedBase) -> Result<AdapterRelease, String> {
     let shown = path.display();
-    let path_str = path.to_str().ok_or_else(|| format!("adapter {shown}: not a UTF-8 path"))?;
-    let digest = brain_modelstore::fetch::file_digest(path).map_err(|e| format!("adapter {shown}: {e}"))?;
-    let st = checkpoint::st::load_safetensors(path_str).map_err(|e| format!("adapter {shown}: {e}"))?;
+    let release = identify_adapter(path)?;
+    let st = checkpoint::st::load_safetensors(&path.to_string_lossy()).map_err(|e| format!("adapter {shown}: {e}"))?;
     let card = st.card().ok_or_else(|| format!("adapter {shown}: no model card, so nothing says which base it belongs to"))?;
     let adapter = card.adapter.as_ref().ok_or_else(|| format!("adapter {shown}: its card ({}) describes a model, not an adapter", card.id))?;
     // The serving fold implements exactly this family and kind; anything
@@ -124,7 +143,7 @@ pub fn verify_adapter(path: &Path, base: &ServedBase) -> Result<AdapterRelease, 
         }
         (None, None) => return Err(format!("adapter {shown}: its card names no base (neither a base digest nor a base id)")),
     }
-    Ok(AdapterRelease { id: card.id, path: path.to_path_buf(), digest })
+    Ok(release)
 }
 
 /// What one look at the manifest found.

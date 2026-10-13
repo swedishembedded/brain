@@ -488,6 +488,118 @@ async fn model_card_advertises_real_capacity_when_known() {
     assert_eq!(body["context_length"], 4096, "unreported capacity falls back to the conservative default");
 }
 
+/// An agent-grade chat model: `generate` declares `tools` and a hard `max_new` bound.
+fn agent_chat_manifest() -> Manifest {
+    Manifest::new(
+        "brain-agent",
+        "a tool-calling chat model",
+        vec![ActionSpec::new("generate", "generate text")
+            .streaming()
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
+            .param(ParamSpec::new("max_new", ParamType::Int, "new tokens").default(json!(128)).max(8192.0))
+            .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions"))
+            .output(BlobSpec::new("text", Media::Text, "generated text"))],
+    )
+}
+
+/// An app over `models` for `provider`, plus the executor it serves from, so a test
+/// can change what is attached to a model the way a hot swap does.
+fn app_over(models: Vec<Manifest>, provider: Provider) -> (Router, Executor, String) {
+    let models: Vec<Arc<dyn ResidentModel>> = models.into_iter().map(|m| Arc::new(Carded(m)) as Arc<dyn ResidentModel>).collect();
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let exec = Executor::start(models, budgets, Policy::default());
+    let key = "sk-brain-test-key".to_string();
+    (router(AppState::new(exec.clone(), key.clone(), provider)), exec, key)
+}
+
+async fn get_json(app: &Router, provider: Provider, uri: &str, key: &str) -> Value {
+    let (st, body) = send(app, auth(Request::builder().uri(uri), provider, key).body(Body::empty()).unwrap()).await;
+    assert_eq!(st, StatusCode::OK, "{provider} GET {uri}");
+    body
+}
+
+/// The card of an attached adapter names it by identity (`id`, `digest`) and tracks a
+/// hot swap; with nothing attached the field is absent (an unknown is not a guess);
+/// the card never carries a filesystem path. Both dialects stay schema-valid.
+#[tokio::test]
+async fn model_card_names_the_attached_adapter_and_tracks_a_swap() {
+    for (provider, list_uri, one_uri, model_schema) in [
+        (Provider::OpenAI, "/v1/models", "/v1/models/brain-agent", ("openai.json", "Model")),
+        (Provider::OpenRouter, "/models", "/models/brain-agent", ("openrouter.json", "Model")),
+    ] {
+        let (app, exec, key) = app_over(vec![agent_chat_manifest(), embed_manifest()], provider);
+
+        let card = get_json(&app, provider, one_uri, &key).await;
+        assert_valid(model_schema.0, model_schema.1, &card);
+        assert!(card.get("adapter").is_none(), "{provider}: no adapter attached, so none is advertised: {card}");
+
+        let first = residency::AdapterIdentity { id: "acme/tuned".into(), digest: format!("sha256:{}", "a".repeat(64)) };
+        exec.set_served_adapter("brain-agent", Some(first.clone()));
+        let card = get_json(&app, provider, one_uri, &key).await;
+        assert_valid(model_schema.0, model_schema.1, &card);
+        assert_eq!(card["adapter"], json!({ "id": first.id, "digest": first.digest }), "{provider}: {card}");
+        let listed = get_json(&app, provider, list_uri, &key).await;
+        let entry = listed["data"].as_array().unwrap().iter().find(|m| m["id"] == "brain-agent").unwrap();
+        assert_eq!(entry["adapter"]["digest"], json!(first.digest), "{provider}: the list carries it too");
+        let embed = listed["data"].as_array().unwrap().iter().find(|m| m["id"] == "brain-embed").unwrap();
+        assert!(embed.get("adapter").is_none(), "{provider}: an adapter is advertised on its own model only");
+
+        let second = residency::AdapterIdentity { id: "acme/tuned".into(), digest: format!("sha256:{}", "b".repeat(64)) };
+        exec.set_served_adapter("brain-agent", Some(second.clone()));
+        let card = get_json(&app, provider, one_uri, &key).await;
+        assert_eq!(card["adapter"]["digest"], json!(second.digest), "{provider}: a hot swap is visible on the next read");
+
+        let text = card.to_string();
+        assert!(!text.contains(".safetensors") && !text.contains("/tmp") && !text.contains("/home"), "{provider}: no path in the card: {text}");
+        assert_eq!(card["adapter"].as_object().unwrap().len(), 2, "{provider}: the adapter object is exactly id + digest");
+
+        exec.set_served_adapter("brain-agent", None);
+        let card = get_json(&app, provider, one_uri, &key).await;
+        assert!(card.get("adapter").is_none(), "{provider}: detaching removes the field: {card}");
+    }
+}
+
+/// `capabilities` comes from the manifest's action shapes and `max_output_tokens` from
+/// the `generate` action's declared `max_new` bound; neither is invented when the
+/// manifest does not say.
+#[tokio::test]
+async fn model_card_derives_capabilities_and_output_limit_from_the_manifest() {
+    for (provider, uri_prefix, model_schema) in [
+        (Provider::OpenAI, "/v1/models", ("openai.json", "Model")),
+        (Provider::OpenRouter, "/models", ("openrouter.json", "Model")),
+    ] {
+        let (app, _exec, key) = app_over(vec![agent_chat_manifest(), chat_manifest(), embed_manifest()], provider);
+
+        let agent = get_json(&app, provider, &format!("{uri_prefix}/brain-agent"), &key).await;
+        assert_valid(model_schema.0, model_schema.1, &agent);
+        assert_eq!(agent["capabilities"], json!(["chat", "tools"]), "{provider}: {agent}");
+        assert_eq!(agent["max_output_tokens"], 8192, "{provider}: {agent}");
+
+        let plain = get_json(&app, provider, &format!("{uri_prefix}/brain-chat"), &key).await;
+        assert_valid(model_schema.0, model_schema.1, &plain);
+        assert_eq!(plain["capabilities"], json!(["chat"]), "{provider}: a chat model without tools does not claim them");
+        assert!(plain.get("max_output_tokens").is_none(), "{provider}: an undeclared bound is absent, not 0: {plain}");
+
+        let embed = get_json(&app, provider, &format!("{uri_prefix}/brain-embed"), &key).await;
+        assert_eq!(embed["capabilities"], json!(["embeddings"]), "{provider}: {embed}");
+    }
+}
+
+/// A single model card is as key-gated as the list: it now names what is attached.
+#[tokio::test]
+async fn model_card_route_requires_the_key() {
+    for (p, uri) in [(Provider::OpenAI, "/v1/models/brain-chat"), (Provider::OpenRouter, "/models/brain-chat")] {
+        let (app, key) = build_app(p);
+        let (st, _) = send(&app, Request::builder().uri(uri).body(Body::empty()).unwrap()).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{p}: {uri} without a key");
+        let (st, _) = send(&app, auth(Request::builder().uri(uri), p, "wrong").body(Body::empty()).unwrap()).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{p}: {uri} with a wrong key");
+        let (st, _) = send(&app, auth(Request::builder().uri(uri), p, &key).body(Body::empty()).unwrap()).await;
+        assert_eq!(st, StatusCode::OK, "{p}: {uri} with the key");
+    }
+}
+
 #[tokio::test]
 async fn unknown_path_is_404() {
     for p in ALL {

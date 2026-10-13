@@ -207,6 +207,29 @@ get_url() {
   [ "$(jq -r '.data[0].type' "$RESP")" = "model" ]
 }
 
+@test "model cards: capabilities derived from the manifest, no adapter when none is attached, no path leakage" {
+  # The mock serves no adapter, so the optional `adapter` field must be absent
+  # (not null, not empty); `capabilities` comes from its manifest; nothing in a
+  # card names a file on the serving machine.
+  for spec in "openai /v1/models" "openrouter /models"; do
+    set -- $spec
+    get_url "$1" "$2"
+    [ "$STATUS" -eq 200 ]
+    [ "$(jq -r '.data[] | select(.id == "brain/mock") | .capabilities | index("chat")' "$RESP")" != "null" ]
+    [ "$(jq -r '.data[] | select(.id == "brain/mock") | has("adapter")' "$RESP")" = "false" ]
+    [ "$(jq -r '.data[] | select(.id == "brain/mock") | has("max_output_tokens")' "$RESP")" = "false" ]
+    ! grep -qE "safetensors|$CONF_DIR|/home/|/tmp/" "$RESP"
+  done
+}
+
+@test "model cards: a single-model route is key-gated like the list" {
+  local st
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$(base openai)/v1/models/brain%2Fmock")
+  [ "$st" -eq 401 ]
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" "$(base openrouter)/models/brain%2Fmock")
+  [ "$st" -eq 401 ]
+}
+
 @test "legacy short model name 'mock' still resolves via the alias table, but is never listed" {
   # A deprecation, not a second id: an old client sending the bare short name
   # still dispatches successfully...

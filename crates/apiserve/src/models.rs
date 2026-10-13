@@ -10,7 +10,9 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-use crate::catalog::{self, CapSet};
+use residency::AdapterIdentity;
+
+use crate::catalog::{self, ModelInfo};
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::surface::Provider;
@@ -34,17 +36,23 @@ pub fn routes() -> Router<AppState> {
 /// `GET /models` — the provider-shaped list of exposed models.
 async fn list(State(state): State<AppState>) -> Json<Value> {
     let models = catalog::exposed(&state.exec, state.provider);
-    let cards: Vec<Value> = models.iter().filter(|(name, _, _)| state.lists(name)).map(|(name, caps, ctx)| card(state.provider, name, *caps, *ctx)).collect();
+    let cards: Vec<Value> = models.iter().filter(|info| state.lists(&info.name)).map(|info| card_of(&state, info)).collect();
     Json(envelope(state.provider, cards))
 }
 
 /// `GET /models/{id}` — one model card, or 404 if it is not exposed here.
 async fn get_one(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    let found = catalog::exposed(&state.exec, state.provider).into_iter().find(|(n, _, _)| *n == id && state.lists(n));
+    let found = catalog::exposed(&state.exec, state.provider).into_iter().find(|info| info.name == id && state.lists(&info.name));
     match found {
-        Some((name, caps, ctx)) => Ok(Json(card(state.provider, &name, caps, ctx))),
+        Some(info) => Ok(Json(card_of(&state, &info))),
         None => Err(ApiError::model_not_found(state.provider, &id)),
     }
+}
+
+/// `info`'s card with the adapter currently attached to it, read at request time
+/// from the executor (a hot swap changes it without re-registering the model).
+fn card_of(state: &AppState, info: &ModelInfo) -> Value {
+    card(state.provider, info, state.exec.served_adapter(&info.name).as_ref())
 }
 
 /// Wrap the model cards in the provider's list envelope.
@@ -72,8 +80,13 @@ const FALLBACK_CONTEXT_LENGTH: u64 = 4096;
 /// (`None` for non-chat models or kinds that don't report it yet) — this is
 /// what makes the advertised number trustworthy: a client that reads it and
 /// builds a prompt within it should never be rejected by the actual engine.
-pub fn card(provider: Provider, name: &str, _caps: CapSet, max_context_tokens: Option<u64>) -> Value {
-    match provider {
+///
+/// OpenAI and OpenRouter cards also carry the additive, optional fields
+/// `capabilities`, `max_output_tokens` and `adapter` (see [`add_discovery`]);
+/// the Anthropic card is unchanged.
+pub fn card(provider: Provider, info: &ModelInfo, adapter: Option<&AdapterIdentity>) -> Value {
+    let name = info.name.as_str();
+    let mut card = match provider {
         // The real OpenAI `Model` object has no context-length field at all
         // (see tests/specs/openai.json's `Model` schema) - this is an
         // additive, schema-safe (no `additionalProperties: false`) extension
@@ -85,27 +98,51 @@ pub fn card(provider: Provider, name: &str, _caps: CapSet, max_context_tokens: O
                 "created": CREATED_UNIX,
                 "owned_by": "brain",
             });
-            if let Some(ctx) = max_context_tokens {
+            if let Some(ctx) = info.max_context_tokens {
                 v["context_length"] = json!(ctx);
             }
             v
         }
-        Provider::Anthropic => json!({
-            "type": "model",
-            "id": name,
-            "display_name": name,
-            "created_at": CREATED_RFC3339,
-        }),
-        Provider::OpenRouter => openrouter_card(name, max_context_tokens),
+        Provider::Anthropic => {
+            return json!({
+                "type": "model",
+                "id": name,
+                "display_name": name,
+                "created_at": CREATED_RFC3339,
+            })
+        }
+        Provider::OpenRouter => openrouter_card(info),
+    };
+    add_discovery(&mut card, info, adapter);
+    card
+}
+
+/// The fields an agent runtime reads to discover what a served model can do and
+/// which fine-tune is in front of it. Each is optional and absent when unknown:
+/// an unmeasured limit is never `0`, and an adapter is named only by the
+/// identity (`id`, `digest`) its release was verified under, never by where its
+/// file lives.
+fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIdentity>) {
+    let capabilities = info.caps.names();
+    if !capabilities.is_empty() {
+        card["capabilities"] = json!(capabilities);
+    }
+    if let Some(max) = info.max_output_tokens {
+        card["max_output_tokens"] = json!(max);
+    }
+    if let Some(adapter) = adapter {
+        card["adapter"] = json!({ "id": adapter.id, "digest": adapter.digest });
     }
 }
 
 /// OpenRouter's richer model card (validates against its `Model` schema).
 /// `context_length` is a real, documented field of this dialect (unlike
 /// OpenAI's) - use the model's actual capacity when known, the conservative
-/// fallback otherwise.
-fn openrouter_card(name: &str, max_context_tokens: Option<u64>) -> Value {
-    let ctx = max_context_tokens.unwrap_or(FALLBACK_CONTEXT_LENGTH);
+/// fallback otherwise. `top_provider.max_completion_tokens` is its documented
+/// home for the output limit.
+fn openrouter_card(info: &ModelInfo) -> Value {
+    let name = info.name.as_str();
+    let ctx = info.max_context_tokens.unwrap_or(FALLBACK_CONTEXT_LENGTH);
     json!({
         "id": name,
         "canonical_slug": name,
@@ -121,7 +158,7 @@ fn openrouter_card(name: &str, max_context_tokens: Option<u64>) -> Value {
             "instruct_type": Value::Null,
         },
         "pricing": { "prompt": "0", "completion": "0", "request": "0", "image": "0" },
-        "top_provider": { "context_length": ctx, "max_completion_tokens": Value::Null, "is_moderated": false },
+        "top_provider": { "context_length": ctx, "max_completion_tokens": info.max_output_tokens, "is_moderated": false },
         "per_request_limits": Value::Null,
         "supported_parameters": ["temperature", "top_p", "max_tokens"],
         "default_parameters": Value::Null,

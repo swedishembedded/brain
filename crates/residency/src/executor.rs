@@ -23,6 +23,7 @@ use std::time::Instant;
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 
+use crate::adapter::{AdapterIdentity, ServedAdapters};
 use crate::manager::{ClaimError, Claimed, ClaimedMulti, InstanceHandle};
 use crate::scheduler::{choose_next, Group, Policy};
 use crate::{Device, InstanceKey, MultiDeviceResidentModel, ResidencyManager, ResidentModel};
@@ -226,6 +227,8 @@ struct RunReq {
 pub struct Executor {
     tx: Sender<Msg>,
     manifests: Arc<RwLock<Arc<Vec<Manifest>>>>,
+    /// The adapter attached to each model right now; see [`crate::adapter`].
+    adapters: Arc<ServedAdapters>,
     stats: Arc<Mutex<Stats>>,
     /// The dispatcher thread's handle plus one per lane, spawned in
     /// [`Self::start`] - see [`Self::shutdown`]'s doc for why a real,
@@ -297,6 +300,7 @@ impl Executor {
         Executor {
             tx,
             manifests: Arc::new(RwLock::new(Arc::new(manifests))),
+            adapters: Arc::default(),
             stats,
             join_handles: Arc::new(Mutex::new(Some(join_handles))),
         }
@@ -543,6 +547,18 @@ impl Executor {
     /// copy-on-write, so this clone is one refcount bump.
     pub fn manifests(&self) -> Arc<Vec<Manifest>> {
         self.manifests.read().unwrap().clone()
+    }
+
+    /// Record which adapter is attached to `model` (`None`: none is). Called by
+    /// whoever attaches or swaps an adapter, so [`Self::served_adapter`] never
+    /// names one that is no longer in front of the model.
+    pub fn set_served_adapter(&self, model: &str, adapter: Option<AdapterIdentity>) {
+        self.adapters.set(model, adapter);
+    }
+
+    /// The adapter currently attached to `model`, when one is known.
+    pub fn served_adapter(&self, model: &str) -> Option<AdapterIdentity> {
+        self.adapters.get(model)
     }
 }
 

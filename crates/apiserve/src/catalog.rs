@@ -42,6 +42,8 @@ use crate::surface::Provider;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CapSet {
     pub chat: bool,
+    /// Chat whose `generate` action accepts `tools` (function calling).
+    pub tools: bool,
     pub embeddings: bool,
     pub image: bool,
 }
@@ -50,6 +52,40 @@ impl CapSet {
     /// Does this model advertise any exposable capability?
     pub fn any(&self) -> bool {
         self.chat || self.embeddings || self.image
+    }
+
+    /// The capability names a model card lists, in a fixed order.
+    pub fn names(&self) -> Vec<&'static str> {
+        [("chat", self.chat), ("tools", self.tools), ("embeddings", self.embeddings), ("images", self.image)]
+            .into_iter()
+            .filter_map(|(name, on)| on.then_some(name))
+            .collect()
+    }
+}
+
+/// What a `/models` card is built from: one exposed model's manifest-derived facts.
+/// A limit the manifest does not state is `None`, never a guessed number.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub name: String,
+    pub caps: CapSet,
+    pub max_context_tokens: Option<u64>,
+    /// The most new tokens one request may ask for: the `generate` action's declared
+    /// `max_new` upper bound.
+    pub max_output_tokens: Option<u64>,
+}
+
+impl ModelInfo {
+    fn of(m: &Manifest) -> ModelInfo {
+        let max_output_tokens = m
+            .actions
+            .iter()
+            .find(|a| a.name == "generate")
+            .and_then(|a| a.params.iter().find(|p| p.name == "max_new"))
+            .and_then(|p| p.max)
+            .filter(|max| max.is_finite() && *max >= 1.0)
+            .map(|max| max as u64);
+        ModelInfo { name: m.model.clone(), caps: api_caps(m), max_context_tokens: m.max_context_tokens, max_output_tokens }
     }
 }
 
@@ -63,7 +99,8 @@ pub fn api_caps(m: &Manifest) -> CapSet {
     });
     let embeddings = m.actions.iter().any(|a| a.name == "embed" && a.params.iter().any(|p| p.name == "text"));
     let image = text2image_action(m).is_some();
-    CapSet { chat, embeddings, image }
+    let tools = chat && m.actions.iter().any(|a| a.name == "generate" && a.params.iter().any(|p| p.name == "tools"));
+    CapSet { chat, tools, embeddings, image }
 }
 
 /// Does `provider` expose a model with capabilities `caps`?
@@ -76,16 +113,11 @@ pub fn exposes(provider: Provider, caps: CapSet) -> bool {
     }
 }
 
-/// The models `provider` exposes, as `(model_name, caps, max_context_tokens)`,
-/// sorted by name — the input to every `/models` response.
-pub fn exposed(exec: &Executor, provider: Provider) -> Vec<(String, CapSet, Option<u64>)> {
-    let mut out: Vec<(String, CapSet, Option<u64>)> = exec
-        .manifests()
-        .iter()
-        .map(|m| (m.model.clone(), api_caps(m), m.max_context_tokens))
-        .filter(|(_, caps, _)| exposes(provider, *caps))
-        .collect();
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+/// The models `provider` exposes, sorted by name - the input to every `/models`
+/// response.
+pub fn exposed(exec: &Executor, provider: Provider) -> Vec<ModelInfo> {
+    let mut out: Vec<ModelInfo> = exec.manifests().iter().map(ModelInfo::of).filter(|info| exposes(provider, info.caps)).collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 

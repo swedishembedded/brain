@@ -24,6 +24,7 @@
 //! P0 (this file + the three above) is pure CPU logic — the memory model — with no
 //! GPU or model dependency, so it is fully unit-testable.
 
+pub mod adapter;
 pub mod admission;
 pub mod bridge;
 pub mod budget;
@@ -43,6 +44,7 @@ pub mod staged;
 pub mod supply;
 
 
+pub use adapter::AdapterIdentity;
 pub use devpool::DevicePool;
 pub use executor::{Executor, InFlightJob, Job};
 pub use manager::{DeviceBudget, InstancePlacement, ResidencyManager, ResidencyReport};
