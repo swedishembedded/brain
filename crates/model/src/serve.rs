@@ -780,6 +780,15 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.dec.offload_stats()
     }
 
+    /// The decoder, for an operation between scheduling steps that must not
+    /// rebuild it (registering or unloading an adapter on a live engine).
+    /// Nothing the scheduler tracks refers into the decoder, so changing the
+    /// decoder's own registries is safe; changing what a running sequence
+    /// reads is not, and is the caller's to avoid.
+    pub fn decoder_mut(&mut self) -> &mut D {
+        &mut self.dec
+    }
+
     /// Consume the scheduler and hand the decoder back, releasing every
     /// sequence it still holds (running blocks to the pool, preempted KV out
     /// of host RAM) so the decoder comes back with nothing leaked.

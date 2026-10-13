@@ -468,6 +468,22 @@ fn a_full_bank_makes_a_cold_adapter_wait_without_blocking_and_lru_picks_the_vict
     assert_eq!(resident, [false, true, true], "the least recently used unpinned adapter is evicted");
 }
 
+/// A caller that places the engine budgets the bank before the engine exists;
+/// the size it computes is the size the engine allocates, for every target
+/// set.
+#[test]
+fn the_bank_size_is_known_before_the_engine_exists() {
+    let s = Setup::new(QwenConfig::tiny(), false, false);
+    let rows = 16; // max(max_batch 8, max_prefill 16), as `Setup::engine` builds it
+    for targets in [&LoraSite::ATTENTION[..], &LoraSite::ALL[..], &[LoraSite::Down][..]] {
+        let cfg = AdapterBankConfig::new(3, R_MAX, targets);
+        let mut e = s.engine(None);
+        assert_eq!(e.adapter_bank_bytes(), 0, "no bank, no bytes");
+        e.enable_adapters(cfg.clone()).unwrap();
+        assert_eq!(e.adapter_bank_bytes(), cfg.device_bytes(&s.cfg, rows), "targets {targets:?}");
+    }
+}
+
 #[test]
 fn a_cold_load_is_spread_over_calls_and_unknown_or_unfit_adapters_are_refused() {
     let s = Setup::new(QwenConfig::tiny(), false, false);

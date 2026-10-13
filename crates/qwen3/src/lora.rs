@@ -50,7 +50,7 @@ pub fn save_adapter_with_lineage<M: model::Model<Config = QwenConfig>>(
 
 /// An adapter file read and validated into host memory, with no base model
 /// involved - what [`crate::Qwen::attach_adapter_pairs`] applies at runtime.
-pub use model::lora::device_adapter::{read_adapter, AdapterSite, DeviceAdapter};
+pub use model::lora::device_adapter::{parse_adapter, read_adapter, AdapterSite, DeviceAdapter};
 
 /// Fold an adapter saved by [`save_adapter`] into a base model's host tensor
 /// map (name -> row-major `[out, in]` data), in place. `base` must already

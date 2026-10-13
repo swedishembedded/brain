@@ -160,6 +160,26 @@ impl AdapterBankConfig {
     pub fn new(slots: u32, r_max: u32, targets: &[LoraSite]) -> AdapterBankConfig {
         AdapterBankConfig { slots, r_max, targets: targets.to_vec(), max_registered: 64, upload_quantum_bytes: 4 << 20 }
     }
+
+    /// Device bytes the bank allocates for `model` in an engine whose batches
+    /// hold at most `rows` rows (the larger of its decode batch and prefill
+    /// chunk): [`Engine::adapter_bank_bytes`] once the bank exists, known
+    /// before any engine does, so a caller can budget the bank when it places
+    /// the engine. The one place this arithmetic lives; allocation sums the
+    /// buffers it makes and a test holds the two equal.
+    pub fn device_bytes(&self, model: &QwenConfig, rows: u32) -> u64 {
+        let (s, r) = (self.slots as u64, self.r_max as u64);
+        let rows = rows as u64;
+        let per_layer: u64 = self
+            .targets
+            .iter()
+            .map(|site| {
+                let (k, n) = site.dims(model);
+                s * r * (k + n) as u64 * 4 + s * 4
+            })
+            .sum();
+        per_layer * model.n_layers as u64 + rows * 4 + rows * r * 4
+    }
 }
 
 /// An adapter the caller has verified against the served base, in host

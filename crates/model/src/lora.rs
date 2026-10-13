@@ -1200,6 +1200,7 @@ pub mod device_adapter {
     /// One linear's low-rank pair as an adapter file stores it: `A [r, in]`
     /// and `B [out, r]`, row-major, UNSCALED - the adapter's `alpha/rank`
     /// lives once on [`DeviceAdapter`], not multiplied into either factor.
+    #[derive(Clone)]
     pub struct AdapterSite {
         /// The base weight this pair corrects (e.g. `blocks.0.attn.wq.weight`).
         pub base: String,
@@ -1220,6 +1221,7 @@ pub mod device_adapter {
     /// adapter start here: [`fold_adapter_into`] adds its delta into a host
     /// base, and a model that applies it at runtime uploads the pairs beside
     /// an unmodified resident base.
+    #[derive(Clone)]
     pub struct DeviceAdapter {
         pub rank: u32,
         pub alpha: f32,
@@ -1247,7 +1249,22 @@ pub mod device_adapter {
     /// family writes one rank for every target, and applying the scalar pair
     /// to a file that says otherwise would scale some targets wrongly.
     pub fn read_adapter(adapter_path: &str) -> std::io::Result<DeviceAdapter> {
-        let mut st = checkpoint::st::load_safetensors(adapter_path)?;
+        adapter_from_model(checkpoint::st::load_safetensors(adapter_path)?, adapter_path).map(|(adapter, _card)| adapter)
+    }
+
+    /// [`read_adapter`] over bytes the caller already holds, so the bytes a
+    /// caller hashed or verified are the very bytes the factors come from -
+    /// there is no second read of the file for it to change under. Returns the
+    /// file's card too, parsed from the same bytes, for a caller that checks
+    /// what the card says (its base, its family). `origin` only names the
+    /// bytes in an error.
+    pub fn parse_adapter(bytes: &[u8], origin: &str) -> std::io::Result<(DeviceAdapter, ModelCard)> {
+        adapter_from_model(checkpoint::st::parse_safetensors(bytes).map_err(|e| invalid(origin, e))?, origin)
+    }
+
+    /// The validation both readers share. Consumes `st`: the factors move out
+    /// of its tensor map instead of being copied.
+    fn adapter_from_model(mut st: checkpoint::st::StModel, adapter_path: &str) -> std::io::Result<(DeviceAdapter, ModelCard)> {
         let card = st.card().ok_or_else(|| invalid(adapter_path, "has no ModelCard".into()))?;
         let a = card.adapter.as_ref().ok_or_else(|| invalid(adapter_path, "its card has no adapter descriptor".into()))?;
         // `Adapter.kind` is load-bearing: the math below IS the lora
@@ -1284,7 +1301,7 @@ pub mod device_adapter {
         if sites.is_empty() {
             return Err(invalid(adapter_path, "contains no .lora_a/.lora_b pairs".into()));
         }
-        Ok(DeviceAdapter { rank, alpha, sites })
+        Ok((DeviceAdapter { rank, alpha, sites }, card))
     }
 
     /// Fold an adapter saved by [`save_adapter`] into a base model's host
