@@ -92,3 +92,6 @@ brain-perf.workspace = true
 tokio.workspace = true
 tower.workspace = true
 brain-testutil.workspace = true
+# The agreement gate for decision models compares the SDK's answer with the
+# served one for the same request, so it needs both sides in one test binary.
+brain = { workspace = true, features = ["decision"] }
