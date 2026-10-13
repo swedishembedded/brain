@@ -42,11 +42,13 @@ tokens: 4.3 s per step, the same order as the 3.61 s a release
 |---|---|---|---|---|
 | 4096 | one P40 (`--device gpu0`) | out of memory while building the trainer ("this device has requested 24151.5 MiB across 2569 buffers") | 24240 / - | none |
 | 4096 | both (placer: 2 stages, layers 0..18 and 18..36) | 2 steps completed, loss 0.0357 -> 0.0243 | 15352 / 17670 (1-step run: 15349 / 17670) | 61.8 (66 tok/s) |
-| 8192 | both (same layout) | failed in both of 2 attempts, 218 s and 221 s in, before the load finished: backend guard panic "4331569152 bytes of device buffers were dropped without an intervening poll_wait()" | 22134 / 1 and 15894 / 1 (gpu1 never built) | none |
+| 8192 | both (same layout) | failed in all 3 attempts, 218 s, 221 s and 230 s in, before the load finished: backend guard panic "4331569152 bytes of device buffers were dropped without an intervening poll_wait()" | 22134 / 1, 15894 / 1 and 17174 / 1 (gpu1 never built) | none |
 | 16384, 24576 | - | not run: the ladder stops at the first failure | - | absent |
 
-A tiny 0.6B run (512 tokens, one card) between the two 8192 attempts
-succeeded, so the 8192 failure is not a wedged driver.
+A tiny 0.6B run (512 tokens, one card) between the first two 8192 attempts
+succeeded, and the third attempt ran with both cards idle, so the 8192
+failure is not a wedged driver or contention. The dropped-buffer size was
+identical (4331569152 bytes) in all three.
 
 What this says and does not say.
 
