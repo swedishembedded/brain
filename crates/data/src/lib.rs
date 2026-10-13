@@ -36,7 +36,6 @@ pub mod rng;
 pub mod tokenizer;
 pub mod unigram;
 pub mod wordpiece;
-mod wordpiece_unicode;
 pub mod videoset;
 
 // Dataset generators (one module per source), ported 1:1 from

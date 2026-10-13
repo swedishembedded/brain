@@ -53,21 +53,9 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 use unicode_general_category::{get_general_category, GeneralCategory};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::tokenizer::Tokenizer;
-use crate::wordpiece_unicode::{KEYS, OFFS, VALS};
-
-/// Start of the Hangul syllable block, whose decomposition is arithmetic rather
-/// than tabulated (see `crates/data/src/wordpiece_unicode.rs`).
-const HANGUL_BASE: u32 = 0xAC00;
-const HANGUL_COUNT: u32 = 11172;
-const JAMO_L: u32 = 0x1100;
-const JAMO_V: u32 = 0x1161;
-const JAMO_T: u32 = 0x11A7;
-/// Vowel-jamo count times trailing-jamo count: the stride of one leading jamo.
-const JAMO_VT: u32 = 588;
-/// Trailing-jamo count, including "no trailing jamo" at index 0.
-const JAMO_T_COUNT: u32 = 28;
 
 pub struct WordPiece {
     vocab: HashMap<String, u32>,
@@ -148,38 +136,18 @@ fn is_chinese_char(c: char) -> bool {
         || (0x2F800..=0x2FA1F).contains(&cp)
 }
 
-/// Append `c`'s canonical decomposition with nonspacing marks already removed.
-///
-/// The composition of both steps is what the generated table stores, so this is
-/// one binary search and no intermediate allocation. Hangul is computed rather
-/// than looked up, which keeps 11,172 rows out of the table.
+/// Append `c`'s canonical decomposition with nonspacing marks already removed -
+/// BERT's `strip_accents` step for one scalar, via `unicode-normalization`'s
+/// NFD. Canonical reordering is not modelled because it only permutes
+/// characters with a nonzero combining class among themselves, and every such
+/// character in a canonical decomposition of an accented letter is a
+/// nonspacing mark deleted here.
 fn push_decomposed(c: char, out: &mut String) {
-    let cp = c as u32;
-    if (HANGUL_BASE..HANGUL_BASE + HANGUL_COUNT).contains(&cp) {
-        let s = cp - HANGUL_BASE;
-        push_scalar(JAMO_L + s / JAMO_VT, out);
-        push_scalar(JAMO_V + (s % JAMO_VT) / JAMO_T_COUNT, out);
-        let t = s % JAMO_T_COUNT;
-        if t != 0 {
-            push_scalar(JAMO_T + t, out);
+    for d in c.nfd() {
+        if get_general_category(d) != GeneralCategory::NonspacingMark {
+            out.push(d);
         }
-        return;
     }
-    match KEYS.binary_search(&cp) {
-        Ok(i) => {
-            let (off, len) = ((OFFS[i] >> 8) as usize, (OFFS[i] & 0xFF) as usize);
-            for &v in &VALS[off..off + len] {
-                push_scalar(v, out);
-            }
-        }
-        Err(_) => out.push(c),
-    }
-}
-
-/// Every scalar in the generated table and in the Hangul range is a valid
-/// `char` by construction, so a failed conversion is a corrupt table, not input.
-fn push_scalar(v: u32, out: &mut String) {
-    out.push(char::from_u32(v).expect("wordpiece_unicode table holds only valid scalars"));
 }
 
 /// One stretch of input: either raw text to be tokenized, or an added token

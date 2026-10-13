@@ -778,7 +778,7 @@ check/make-targets:
 # target fails when the file has drifted from what its `generate/*` twin would
 # write; a stale table is wrong silently, which no accuracy metric shows.
 ## check/generated - default: every generated-file drift check below (read-only)
-check/generated: check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/wordpiece-table check/generated/samples-manifest check/generated/knowledge-index
+check/generated: check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest check/generated/knowledge-index
 
 # Every column of docs/reference/kernels.md is derived from the sources, so the
 # table cannot be edited by hand - and this check is what stops it drifting
@@ -791,13 +791,6 @@ check/generated/kernels-wgsl-table:
 ## check/generated/kernels-cuda-table - the CUDA catalogue matches crates/kernels-cuda, and no .cu is unregistered
 check/generated/kernels-cuda-table:
 	scripts/build/gen-cuda-kernel-table.py --check
-
-# Verify the checked-in Unicode table `data::wordpiece` reads is what the
-# current UCD produces. A stale table is a tokenizer that is wrong only on
-# accented/CJK input, which no accuracy metric would obviously show.
-## check/generated/wordpiece-table - the wordpiece Unicode table matches the current UCD
-check/generated/wordpiece-table:
-	python3 scripts/build/gen-wordpiece-unicode.py --verify
 
 ## check/generated/samples-manifest - docs/manifest.txt's Samples part matches the READMEs under samples/
 check/generated/samples-manifest:
@@ -1788,7 +1781,7 @@ help:
         check check/workspace check/clippy check/scripts check/env-reads test/gates test/gates/env-reads check/spdx check/paths check/scope \
         check/files check/samples check/sdk-features check/make-targets \
         check/generated check/generated/kernels-wgsl-table check/generated/kernels-cuda-table \
-        check/generated/wordpiece-table check/generated/samples-manifest \
+        check/generated/samples-manifest \
         check/generated/knowledge-index \
         gpt $(GPT_DATASET_TARGETS) $(GPT_SYNTHETIC_DATA_TARGETS) gpt/timeseries/data \
         gpt/shakespeare-char/data gpt/gpt/data $(GPT_TRAIN_TARGETS) $(GPT_EVAL_TARGETS) \
