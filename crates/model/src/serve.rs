@@ -20,7 +20,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use crate::paged::{BlockAllocator, BlockTable};
+use crate::paged::{BlockAllocator, BlockTable, KvNamespace};
 
 /// The seam a model's paged serving engine implements. Every method mirrors
 /// one qwen `Engine` method the [`Scheduler`] used to call directly (see
@@ -180,6 +180,78 @@ pub trait PagedDecoder {
     fn offload_stats(&self) -> crate::kv_offload::OffloadStats {
         crate::kv_offload::OffloadStats::default()
     }
+
+    // ---- runtime adapters (optional) ----
+    //
+    // Every method below has a default that reports "this decoder serves the
+    // base model only", so an existing `PagedDecoder` implementation keeps
+    // compiling and behaving exactly as it did, and refuses adapter requests
+    // instead of silently answering them with the base weights.
+    //
+    // A decoder that CAN apply an adapter at run time resolves each row's
+    // adapter from its block table: [`BlockTable::kv_namespace`] is the
+    // sequence's [`AdapterId`] namespace (or the base's), so `prefill` and the
+    // batched forwards need no extra argument.
+
+    /// Can sequences using `adapter` be admitted now? A decoder with a bounded
+    /// set of resident adapters starts making `adapter` resident here when it
+    /// is not (loading, or evicting an unpinned one) and answers
+    /// [`AdapterAvailability::Loading`] until that finishes, so the call must
+    /// be cheap and idempotent: the scheduler repeats it every iteration while
+    /// a request waits. An answer of `Resident` holds until the scheduler's
+    /// next [`Self::pin_adapter`] for it, which follows immediately.
+    fn adapter_availability(&mut self, adapter: AdapterId) -> AdapterAvailability {
+        let _ = adapter;
+        AdapterAvailability::Unknown
+    }
+
+    /// A sequence using `adapter` was admitted: keep it resident until the
+    /// matching [`Self::unpin_adapter`]. Called once per admitted sequence,
+    /// only for an adapter that just answered `Resident`.
+    fn pin_adapter(&mut self, adapter: AdapterId) {
+        let _ = adapter;
+    }
+
+    /// The sequence that pinned `adapter` finished or was cancelled; its
+    /// slot may be reclaimed once no sequence pins it.
+    fn unpin_adapter(&mut self, adapter: AdapterId) {
+        let _ = adapter;
+    }
+}
+
+/// Which adapter a request runs under. It doubles as the adapter's
+/// [`KvNamespace`]: the owner of adapter identities (one per resident
+/// adapter, from [`crate::paged::NamespaceIds`]) never reuses a value, and
+/// "no adapter" (the base model) is the absence of an `AdapterId`, never a
+/// reserved value inside one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AdapterId(std::num::NonZeroU32);
+
+impl AdapterId {
+    /// The adapter whose KV namespace is `namespace`; `None` for the base
+    /// namespace, which no adapter can have.
+    pub fn new(namespace: KvNamespace) -> Option<AdapterId> {
+        std::num::NonZeroU32::new(namespace).map(AdapterId)
+    }
+
+    /// The KV namespace this adapter's sequences compute and cache K/V in.
+    pub fn kv_namespace(self) -> KvNamespace {
+        self.0.get()
+    }
+}
+
+/// A decoder's answer to [`PagedDecoder::adapter_availability`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdapterAvailability {
+    /// Resident now: the request may be admitted.
+    Resident,
+    /// Not resident yet but becoming so (loading, or waiting for a slot to
+    /// free up). The request is skipped, not blocked on: requests behind it
+    /// are admitted past it and it is asked again next iteration.
+    Loading,
+    /// Not served by this decoder (never registered, unloaded, or the decoder
+    /// has no adapter support): the request is rejected.
+    Unknown,
 }
 
 /// Temperature / top-k / top-p sampling parameters for one sequence.
@@ -364,6 +436,10 @@ pub enum RejectReason {
     /// per-access clamps), so the failure would be silent garbage, not an
     /// error.
     InvalidToken { token: u32, vocab: u32 },
+    /// The request names an adapter the decoder does not serve (see
+    /// [`AdapterAvailability::Unknown`]). Refusing beats answering with the
+    /// base model's weights.
+    AdapterUnavailable { adapter: AdapterId },
 }
 
 impl std::fmt::Display for RejectReason {
@@ -375,6 +451,9 @@ impl std::fmt::Display for RejectReason {
             RejectReason::PolicyRejected { policy } => write!(f, "rejected by {policy}"),
             RejectReason::InvalidToken { token, vocab } => {
                 write!(f, "token {token} is outside the vocabulary ({vocab})")
+            }
+            RejectReason::AdapterUnavailable { adapter } => {
+                write!(f, "adapter {} is not available", adapter.kv_namespace())
             }
         }
     }
@@ -472,10 +551,23 @@ pub struct StepReport {
     pub promoted: Vec<u64>,
 }
 
+/// A submitted request that has not been admitted yet.
+struct Waiting {
+    id: u64,
+    req: Request,
+    /// The adapter the request runs under; `None` is the base model.
+    adapter: Option<AdapterId>,
+    sample: SampleParams,
+    seed: u64,
+}
+
 /// A sequence the scheduler is actively decoding.
 struct Running {
     id: u64,
     table: BlockTable,
+    /// Pinned in the decoder from admission until the sequence is dropped
+    /// (finished, cancelled, or the scheduler torn down), preempted or not.
+    adapter: Option<AdapterId>,
     generated: Vec<u32>,
     max_new: usize,
     stop: Vec<u32>,
@@ -519,7 +611,7 @@ fn accept_token(r: &mut Running, next: u32) {
 /// [`PagedDecoder`]; `qwen3::serve::Scheduler` is `Scheduler<qwen3::serve::Engine>`.
 pub struct Scheduler<D: PagedDecoder> {
     dec: D,
-    waiting: VecDeque<(u64, Request, SampleParams, u64)>,
+    waiting: VecDeque<Waiting>,
     running: Vec<Running>,
     next_id: u64,
     max_running: usize,
@@ -603,6 +695,23 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// the batch alongside it, since each `Running` sequence carries its own
     /// RNG stream (see `Running::rng`), never a batch-shared one.
     pub fn submit_sampled(&mut self, req: Request, sample: SampleParams, seed: u64) -> u64 {
+        self.enqueue(req, None, sample, seed)
+    }
+
+    /// [`Self::submit_sampled`] for a request that runs under `adapter`.
+    ///
+    /// While the adapter is not resident ([`AdapterAvailability::Loading`])
+    /// the request waits WITHOUT holding up the requests behind it, so a cold
+    /// adapter cannot delay base traffic; a decoder that does not serve the
+    /// adapter makes the request come back in [`StepReport::rejected`] as
+    /// [`RejectReason::AdapterUnavailable`]. Once admitted, the sequence's
+    /// block table is in the adapter's KV namespace and the adapter stays
+    /// pinned in the decoder until the sequence is gone.
+    pub fn submit_for_adapter(&mut self, req: Request, adapter: AdapterId, sample: SampleParams, seed: u64) -> u64 {
+        self.enqueue(req, Some(adapter), sample, seed)
+    }
+
+    fn enqueue(&mut self, req: Request, adapter: Option<AdapterId>, sample: SampleParams, seed: u64) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let state = QueueState {
@@ -616,7 +725,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             return id;
         }
         self.started.insert(id, std::time::Instant::now());
-        self.waiting.push_back((id, req, sample, seed));
+        self.waiting.push_back(Waiting { id, req, adapter, sample, seed });
         id
     }
 
@@ -629,7 +738,7 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// requests still being waited on need. Reclaiming on cancel is what stops a
     /// server under normal churn from losing its cache to dead sequences.
     pub fn cancel(&mut self, id: u64) -> Option<Vec<u32>> {
-        if let Some(pos) = self.waiting.iter().position(|(qid, ..)| *qid == id) {
+        if let Some(pos) = self.waiting.iter().position(|w| w.id == id) {
             self.waiting.remove(pos);
             return Some(Vec::new()); // never admitted, so nothing was produced
         }
@@ -638,12 +747,20 @@ impl<D: PagedDecoder> Scheduler<D> {
             // in host RAM. Dropping the host record is the whole reclaim.
             let r = self.swapped.remove(pos).expect("position just found it");
             self.dec.discard_offloaded(id);
+            self.unpin(r.adapter);
             return Some(r.generated);
         }
         let pos = self.running.iter().position(|r| r.id == id)?;
         let mut r = self.running.remove(pos);
         self.dec.release_table(&mut r.table);
+        self.unpin(r.adapter);
         Some(r.generated)
+    }
+
+    fn unpin(&mut self, adapter: Option<AdapterId>) {
+        if let Some(adapter) = adapter {
+            self.dec.unpin_adapter(adapter);
+        }
     }
 
     /// Requests currently admitted and decoding.
@@ -673,9 +790,15 @@ impl<D: PagedDecoder> Scheduler<D> {
     pub fn into_decoder(mut self) -> D {
         for r in &mut self.running {
             self.dec.release_table(&mut r.table);
+            if let Some(adapter) = r.adapter {
+                self.dec.unpin_adapter(adapter);
+            }
         }
         for r in &self.swapped {
             self.dec.discard_offloaded(r.id);
+            if let Some(adapter) = r.adapter {
+                self.dec.unpin_adapter(adapter);
+            }
         }
         self.dec
     }
@@ -886,6 +1009,47 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
     }
 
+    /// Index of the first waiting request that can be admitted this
+    /// iteration, in arrival order.
+    ///
+    /// On the way, requests that can never be served are removed and reported
+    /// rejected - a prompt that exceeds the engine's capacity, a token outside
+    /// the vocabulary, an adapter the decoder does not serve - since leaving
+    /// them would block the queue forever (or, before the capacity check,
+    /// corrupt the block table). A request whose adapter is still loading is
+    /// stepped over: it stays queued in place and is asked about again next
+    /// iteration. Only adapter residency is skipped; a request that merely
+    /// does not fit the pool yet still holds the line (the caller stops at
+    /// it), exactly as before adapters existed.
+    fn next_admissible(&mut self, report: &mut StepReport) -> Option<usize> {
+        let cap = self.dec.max_seq_len();
+        let vocab = self.dec.vocab() as u32;
+        let mut pos = 0;
+        while let Some(w) = self.waiting.get(pos) {
+            let need = w.req.prompt.len() + w.req.max_new;
+            let bad_token = w.req.prompt.iter().find(|&&t| t >= vocab).copied();
+            let reject = if let Some(token) = bad_token {
+                RejectReason::InvalidToken { token, vocab }
+            } else if need > cap {
+                RejectReason::ExceedsCapacity { need: need as u32, capacity: cap as u32 }
+            } else {
+                match w.adapter.map(|a| (a, self.dec.adapter_availability(a))) {
+                    None | Some((_, AdapterAvailability::Resident)) => return Some(pos),
+                    Some((_, AdapterAvailability::Loading)) => {
+                        pos += 1;
+                        continue;
+                    }
+                    Some((adapter, AdapterAvailability::Unknown)) => RejectReason::AdapterUnavailable { adapter },
+                }
+            };
+            let id = w.id;
+            self.waiting.remove(pos);
+            self.started.remove(&id);
+            report.rejected.push((id, reject));
+        }
+        None
+    }
+
     fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
         // 0. Resume preempted sequences before anything else touches the pool:
         //    work already in flight outranks work still queued.
@@ -899,28 +1063,12 @@ impl<D: PagedDecoder> Scheduler<D> {
         let mut budget_left = self.prefill_budget;
         let mut admitted_this_iter = 0u32;
         while self.swapped.is_empty() && self.running.len() < self.max_running {
-            // Drop anything that can never fit, whatever the pool does — it
-            // would otherwise block the queue forever (or, before the capacity
-            // check, corrupt the block table).
-            let cap = self.dec.max_seq_len();
-            let vocab = self.dec.vocab() as u32;
-            while let Some((id, req, ..)) = self.waiting.front() {
-                let need = req.prompt.len() + req.max_new;
-                let bad = req.prompt.iter().find(|&&t| t >= vocab).copied();
-                if need <= cap && bad.is_none() {
-                    break;
-                }
-                let (id, need) = (*id, need as u32);
-                self.waiting.pop_front();
-                self.started.remove(&id);
-                let reason = match bad {
-                    Some(token) => RejectReason::InvalidToken { token, vocab },
-                    None => RejectReason::ExceedsCapacity { need, capacity: cap as u32 },
-                };
-                report.rejected.push((id, reason));
-            }
-            let fits = match self.waiting.front() {
-                Some((_, req, ..)) => {
+            // The first waiting request that can be admitted at all; one
+            // that can never be (see `next_admissible`) is rejected on the way
+            // and one whose adapter is still loading is stepped over.
+            let Some(pos) = self.next_admissible(report) else { break };
+            let fits = match self.waiting.get(pos) {
+                Some(Waiting { req, .. }) => {
                     let need = req.prompt.len() as u32;
                     // Always admit at least one request per iteration (no
                     // starvation); after that, stop once the budget is spent.
@@ -941,10 +1089,16 @@ impl<D: PagedDecoder> Scheduler<D> {
             if !fits {
                 break;
             }
-            let (id, req, sample, seed) = self.waiting.pop_front().unwrap();
+            let Waiting { id, req, adapter, sample, seed } = self.waiting.remove(pos).expect("admissible position");
             budget_left = budget_left.saturating_sub(req.prompt.len() as u32);
             admitted_this_iter += 1;
-            let mut table = BlockTable::new();
+            let mut table = match adapter {
+                Some(adapter) => {
+                    self.dec.pin_adapter(adapter);
+                    BlockTable::with_namespace(adapter.kv_namespace())
+                }
+                None => BlockTable::new(),
+            };
             let hidden = self.dec.prefill(&mut table, &req.prompt);
             let mut rng = data::rng::Rng::new(seed);
             // `admit_greedy`/`admit_topk` are on-device for a decoder that has
@@ -958,7 +1112,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 let candidates = self.dec.admit_topk(&hidden, k);
                 sample_from_topk(&candidates, sample, &mut rng)
             };
-            let mut r = Running { id, table, generated: Vec::new(), max_new: req.max_new, stop: req.stop, next_input: first, done: false, sample, rng };
+            let mut r = Running { id, table, adapter, generated: Vec::new(), max_new: req.max_new, stop: req.stop, next_input: first, done: false, sample, rng };
             accept_token(&mut r, first);
             report.admitted.push(id);
             self.running.push(r);
@@ -1071,6 +1225,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             if self.running[i].done {
                 let mut r = self.running.remove(i);
                 self.dec.release_table(&mut r.table);
+                self.unpin(r.adapter);
                 completed.push((r.id, r.generated));
             } else {
                 i += 1;
@@ -1199,6 +1354,7 @@ mod tests {
         Running {
             id: 0,
             table: BlockTable::new(),
+            adapter: None,
             generated: Vec::new(),
             max_new,
             stop: stop.to_vec(),
