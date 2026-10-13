@@ -48,8 +48,7 @@ requirements:
 		echo "ok: rust target $(WASM_TARGET) installed" ; \
 	else \
 		echo "installing rust target $(WASM_TARGET)..." ; \
-		rustup target add $(WASM_TARGET) \
-		|| sudo env "PATH=$$PATH" RUSTUP_HOME="$$RUSTUP_HOME" CARGO_HOME="$${CARGO_HOME:-$$RUSTUP_HOME}" rustup target add $(WASM_TARGET) ; \
+		rustup target add $(WASM_TARGET) ; \
 	fi
 	@if [ "$$('$(WASM_BINDGEN)' --version 2>/dev/null | awk '{print $$2}')" = "$(WASM_BINDGEN_VERSION)" ]; then \
 		echo "ok: wasm-bindgen-cli $(WASM_BINDGEN_VERSION) installed" ; \
