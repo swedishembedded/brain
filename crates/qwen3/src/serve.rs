@@ -29,6 +29,10 @@ use paramstore::ParamStore;
 use crate::config::QwenConfig;
 use crate::model::PrefillInput;
 
+mod adapters;
+pub use adapters::{AdapterBankConfig, AdapterError, AdapterInfo, LoraSite, UnloadStatus, VerifiedAdapter};
+use adapters::AdapterBank;
+
 // The untiled whole-table gather `Self::embed_tiled`/`EMBED_TILE` replaced in
 // `Self::batched_tape` - kept registered (and named) only as the oracle
 // `embed_tiled_matches_the_plain_embed_kernel` dispatches directly, at a
@@ -224,6 +228,11 @@ const PIPELINES: &[(&str, &str)] = &[
     ("paged_flash_decode_split_i8", kernels::PAGED_FLASH_DECODE_SPLIT_I8),
     ("paged_flash_decode_combine_i8", kernels::PAGED_FLASH_DECODE_COMBINE_I8),
     ("bias_add", kernels::BIAS_ADD),
+    // The per-row-adapter LoRA bank kernels (`adapters`); resolved by name
+    // (`LoraBankKernels::resolve`), so their position carries no meaning.
+    ("lora_xa_rows", kernels::LORA_XA_ROWS),
+    ("lora_xa_rows_serial", kernels::LORA_XA_ROWS_SERIAL),
+    ("lora_delta_rows", kernels::LORA_DELTA_ROWS),
 ];
 
 /// [`PIPELINES`] plus the half-precision (bf16 and f16) weight variants of
@@ -347,12 +356,33 @@ const ARGMAX_CHUNKS: u32 = 256;
 /// a wider top-p nucleus; a request asking for more is clamped to this.
 pub const TOPK_CAPACITY: u32 = 64;
 
-/// One batched decode step's paged-KV metadata, as
-/// [`Engine::append_meta`] returns it: `(batch size, positions, sequence
-/// lengths, block ids, in-block offsets, the flattened block table)`. The last
-/// four are one entry per sequence except `bt`, which is
-/// `bsz * max_blocks_per_seq` wide.
-type BatchMeta = (u32, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>);
+/// One batched forward's per-row metadata: the paged-KV addressing every
+/// kernel reads, plus which adapter each row runs under.
+struct BatchMeta {
+    /// Rows in the forward.
+    bsz: u32,
+    /// RoPE position of each row.
+    positions: Vec<u32>,
+    /// Cached length each row attends.
+    seqlens: Vec<u32>,
+    /// Pool block each row's K/V is written to.
+    blocks: Vec<u32>,
+    /// In-block offset each row's K/V is written to.
+    offsets: Vec<u32>,
+    /// The flattened per-row block tables, `bsz * max_blocks_per_seq` wide.
+    bt: Vec<u32>,
+    /// Adapter bank slot of each row ([`model::dispatch::LORA_SLOT_NONE`] =
+    /// base). Empty on an engine without an adapter bank.
+    slots: Vec<u32>,
+}
+
+impl BatchMeta {
+    /// Does any row run under an adapter? Only then is the adapter variant of
+    /// the tape recorded; a base-only batch replays the base tape untouched.
+    fn has_adapter_rows(&self) -> bool {
+        self.slots.iter().any(|&s| s != model::dispatch::LORA_SLOT_NONE)
+    }
+}
 
 fn fb(x: f32) -> u32 {
     x.to_bits()
@@ -862,7 +892,12 @@ pub struct Engine {
     /// a structurally different shape at the same `bsz`) - both keep
     /// rebuilding via `Self::run_batched_steps`, unchanged from before this
     /// cache existed.
-    tape_cache: HashMap<u32, Vec<Step>>,
+    tape_cache: HashMap<(u32, bool), Vec<Step>>,
+    /// The per-row-adapter LoRA bank, when [`Engine::enable_adapters`] made
+    /// one. `None` keeps every path below exactly as it was without adapters.
+    bank: Option<AdapterBank>,
+    /// Has the KV-calibration-with-adapters warning been printed yet?
+    warned_calib_with_adapters: bool,
     /// Host-RAM KV offload (`model::kv_offload`): the host pool demoted
     /// sequences' KV lives in. Zero-capacity (offload off) until
     /// [`Engine::set_kv_offload_bytes`] is called, so an engine nobody asked
@@ -1330,6 +1365,8 @@ impl Engine {
             topk_vals_dev,
             topk_idx_dev,
             tape_cache: HashMap::new(),
+            bank: None,
+            warned_calib_with_adapters: false,
             host_kv: HostKvPool::new(block_words, 0),
             kv_block_words: block_words,
             swap: None,
@@ -1394,6 +1431,7 @@ impl Engine {
             }
         }
         self.kv_calib = calib;
+        self.warn_if_calib_with_adapters();
     }
 
     /// True when the decode path runs on int8 weights (the request survived the
@@ -1464,11 +1502,37 @@ impl Engine {
         self.cfg.vocab as usize
     }
 
+    /// The metadata of `rows` consecutive positions of ONE sequence starting
+    /// at `start` (a prefill chunk or a speculative verify forward): row `i`
+    /// writes position `start + i` and attends everything up to and including
+    /// it, over the sequence's single block table duplicated into every row.
+    /// Every row runs under the sequence's own adapter.
+    fn chunk_meta(&self, table: &BlockTable, start: u32, rows: u32) -> BatchMeta {
+        let bs = self.block_size;
+        let mbt = self.max_blocks_per_seq as usize;
+        let slots = self.row_slots(std::iter::repeat_n(table.kv_namespace(), rows as usize));
+        let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut bt = vec![0u32; rows as usize * mbt];
+        for i in 0..rows {
+            let pos = start + i;
+            let (bl, off) = table.locate(pos, bs);
+            positions.push(pos);
+            seqlens.push(pos + 1); // causal: query i attends positions 0..=pos
+            blocks.push(bl);
+            offsets.push(off);
+            for (lb, &phys) in table.blocks().iter().enumerate() {
+                bt[i as usize * mbt + lb] = phys;
+            }
+        }
+        BatchMeta { bsz: rows, positions, seqlens, blocks, offsets, bt, slots }
+    }
+
     /// Append one slot per sequence and gather the batched-forward metadata.
     fn append_meta(&mut self, tables: &mut [&mut BlockTable]) -> BatchMeta {
         let mbt = self.max_blocks_per_seq as usize;
         let bsz = tables.len() as u32;
         assert!(bsz <= self.max_batch);
+        let slots = self.row_slots(tables.iter().map(|t| t.kv_namespace()));
         let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut bt = vec![0u32; bsz as usize * mbt];
         for (i, table) in tables.iter_mut().enumerate() {
@@ -1482,33 +1546,33 @@ impl Engine {
                 bt[i * mbt + lb] = phys;
             }
         }
-        (bsz, positions, seqlens, blocks, offsets, bt)
+        BatchMeta { bsz, positions, seqlens, blocks, offsets, bt, slots }
     }
 
     /// Advance every sequence by one token (decode).
     pub(crate) fn forward_batched(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<f32> {
-        let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
-        self.run_batched(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt, false)
+        let meta = self.append_meta(tables);
+        self.run_batched(&meta, Input::Tokens(inputs), false)
     }
 
     /// Advance every sequence by one token and return the **greedy next token**
     /// per row, with the LM head applied on the device (see
     /// [`Engine::run_batched_greedy`]).
     pub(crate) fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
-        let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
-        self.run_batched_greedy(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt, false)
+        let meta = self.append_meta(tables);
+        self.run_batched_greedy(&meta, Input::Tokens(inputs), false)
     }
 
     /// Advance every sequence by one token from a ready-made embedding per sequence
     /// (`[bsz, d_model]`) - the tts Talker multi-stream path: concurrent voice
     /// streams decode together on the shared paged pool.
     pub fn forward_batched_embed(&mut self, tables: &mut [&mut BlockTable], embeds: &[f32]) -> Vec<f32> {
-        let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
-        assert_eq!(embeds.len(), bsz as usize * self.cfg.d_model as usize);
-        self.run_batched(bsz, Input::Embeds(embeds), &positions, &seqlens, &blocks, &offsets, &bt, false)
+        let meta = self.append_meta(tables);
+        assert_eq!(embeds.len(), meta.bsz as usize * self.cfg.d_model as usize);
+        self.run_batched(&meta, Input::Embeds(embeds), false)
     }
 
-    /// Run one batched forward over `bsz` rows given fully-computed metadata:
+    /// Run one batched forward over `meta.bsz` rows given fully-computed metadata:
     /// `positions[i]` RoPE position, `seqlens[i]` the cached length row i attends
     /// (row i's query attends `j < seqlens[i]` - set to start+i+1 for causal
     /// prefill), `(blocks[i], offsets[i])` the pool slot to write row i's K/V, and
@@ -1516,9 +1580,8 @@ impl Engine {
     /// (one new token per sequence) and prefill chunks alike - `causal_chunk`
     /// tells the two apart for `Op::PagedAttentionFused` (M2.4; see
     /// `run_batched_steps`'s own doc).
-    #[allow(clippy::too_many_arguments)]
-    fn run_batched(&mut self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> Vec<f32> {
-        let b = self.run_batched_submit(bsz, input, positions, seqlens, blocks, offsets, bt, causal_chunk);
+    fn run_batched(&mut self, meta: &BatchMeta, input: Input, causal_chunk: bool) -> Vec<f32> {
+        let b = self.run_batched_submit(meta, input, causal_chunk);
         self.gpu.read(&self.sc.xn_final, (b * self.cfg.d_model) as usize)
     }
 
@@ -2014,9 +2077,14 @@ impl Engine {
     /// `workgroup_reductions` (the fused kernel carries 3 barriers, gated
     /// exactly like `Self::rms`'s own cooperative arm and `Self::
     /// qk_norm_rope`'s fused pair).
-    fn rms_quant(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, d: u32, rows: u32) {
+    ///
+    /// `keep_fp32` forces the unfused pair on an int8 engine: a per-row
+    /// adapter correction `A.x` reads the fp32 activation, which the fused
+    /// kernel never writes.
+    #[allow(clippy::too_many_arguments)]
+    fn rms_quant(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, d: u32, rows: u32, keep_fp32: bool) {
         match &self.i8_scratch {
-            Some(scratch) if self.caps.workgroup_reductions => {
+            Some(scratch) if self.caps.workgroup_reductions && !keep_fp32 => {
                 s.push(self.gpu.dispatch(
                     RMSNORM_QUANT_FUSED,
                     &[x, w, &scratch.sx, scratch.xq_for(d)],
@@ -2149,14 +2217,19 @@ impl Engine {
     /// Resident mode (A4): every input - token ids AND paged metadata - was
     /// produced on the device by `decode_feed`/`decode_advance`, so writing
     /// host copies here would both be wrong (stale) and force a flush.
-    fn write_batch_meta(&self, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) {
+    fn write_batch_meta(&self, input: Input, meta: &BatchMeta) {
         if !matches!(input, Input::Resident) {
             let g = &self.gpu;
-            g.write(&self.sc.pos_buf, positions);
-            g.write(&self.sc.seqlen_buf, seqlens);
-            g.write(&self.sc.blk_buf, blocks);
-            g.write(&self.sc.off_buf, offsets);
-            g.write(&self.sc.bt_buf, bt);
+            g.write(&self.sc.pos_buf, &meta.positions);
+            g.write(&self.sc.seqlen_buf, &meta.seqlens);
+            g.write(&self.sc.blk_buf, &meta.blocks);
+            g.write(&self.sc.off_buf, &meta.offsets);
+            g.write(&self.sc.bt_buf, &meta.bt);
+            // The slot vector is read only by the adapter variant of the tape,
+            // so a base-only batch uploads nothing for it.
+            if let (Some(bank), true) = (&self.bank, meta.has_adapter_rows()) {
+                g.write(&bank.slot_buf, &meta.slots);
+            }
         }
     }
 
@@ -2192,7 +2265,13 @@ impl Engine {
     /// safe: caching this method's OUTPUT and replaying it unchanged for a
     /// later call at the same key reuses the same kernels/buffers/uniform
     /// values a fresh call would have produced, byte for byte.
-    fn batched_tape(&self, bsz: u32, input: Input, causal_chunk: bool) -> Vec<Step> {
+    ///
+    /// `lora` selects the adapter variant (see [`Engine::enable_adapters`]):
+    /// the bank's two dispatches after every targeted linear and, on an int8
+    /// engine, the unfused norm so the fp32 activation `A.x` reads exists.
+    /// `lora = false` is the tape an engine without a bank records, byte for
+    /// byte. The key of the decode tape cache is `(bsz, lora)`.
+    fn batched_tape(&self, bsz: u32, input: Input, causal_chunk: bool, lora: bool) -> Vec<Step> {
         let c = &self.cfg;
         let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
         let (hq, hkv) = (c.q_dim(), c.kv_dim());
@@ -2226,7 +2305,7 @@ impl Engine {
             // shared by every linear reading the quantized result (xn1 ->
             // q/k/v). Falls back to the unfused `rms` + `Self::quant_once`
             // pair (a no-op on an all-fp32 engine) otherwise.
-            self.rms_quant(&mut s, &sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b);
+            self.rms_quant(&mut s, &sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b, lora && self.lora_reads(&[LoraSite::Wq, LoraSite::Wk, LoraSite::Wv]));
             // M4.1: one fused GEMM (`wq;wk;wv` concatenated at weight-load
             // time - see `from_map_with_gpu`) instead of three, then
             // `concat_split` narrows the wide `[b, hq+2*hkv]` output back
@@ -2234,6 +2313,13 @@ impl Engine {
             // RoPE/KV-append already require.
             self.linear(&mut s, &self.lin_weights[&p(WQKV)], &sc.xn1, &sc.qkv_pre, b);
             let qkv_width = hq + 2 * hkv;
+            if lora {
+                // The corrections land in the fused output's own columns
+                // (q, then k, then v), so no gather or split changes.
+                for (site, col0) in [(LoraSite::Wq, 0), (LoraSite::Wk, hq), (LoraSite::Wv, hq + hkv)] {
+                    self.lora_correct(&mut s, l, site, &sc.xn1, &sc.qkv_pre, b, qkv_width, col0);
+                }
+            }
             if let Some(bias) = self.qkv_bias.get(l) {
                 s.push(g.step(BIAS_ADD, &[&sc.qkv_pre, bias], &[b, qkv_width], b * qkv_width));
             }
@@ -2381,19 +2467,30 @@ impl Engine {
             }
             self.quant_once(&mut s, &sc.ctx, hq, b);
             self.linear(&mut s, &self.lin_weights[&p("attn.wo.weight")], &sc.ctx, &sc.proj, b);
+            if lora {
+                self.lora_correct(&mut s, l, LoraSite::Wo, &sc.ctx, &sc.proj, b, d, 0);
+            }
             s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
             // M4.3: same fusion as ln1 above, for `sc.xn2` -> gate/up.
-            self.rms_quant(&mut s, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b);
+            self.rms_quant(&mut s, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b, lora && self.lora_reads(&[LoraSite::Gate, LoraSite::Up]));
             // M4.1: one fused GEMM (`gate;up` concatenated at weight-load
             // time) instead of two, `concat_split` narrowing its `[b, 2*ff]`
             // output back into the compact `gate_pre`/`up` buffers
             // `swiglu_fwd` requires.
             self.linear(&mut s, &self.lin_weights[&p(WGATEUP)], &sc.xn2, &sc.gateup_pre, b);
+            if lora {
+                for (site, col0) in [(LoraSite::Gate, 0), (LoraSite::Up, ff)] {
+                    self.lora_correct(&mut s, l, site, &sc.xn2, &sc.gateup_pre, b, 2 * ff, col0);
+                }
+            }
             s.push(concat_split_step(g, &sc.gateup_pre, &sc.gate_pre, b, 2 * ff, ff, 0));
             s.push(concat_split_step(g, &sc.gateup_pre, &sc.up, b, 2 * ff, ff, ff));
             s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
             self.quant_once(&mut s, &sc.h, ff, b);
             self.linear(&mut s, &self.lin_weights[&p("mlp.down.weight")], &sc.h, &sc.mlp_out, b);
+            if lora {
+                self.lora_correct(&mut s, l, LoraSite::Down, &sc.h, &sc.mlp_out, b, d, 0);
+            }
             s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[b * d], b * d));
         }
         let last = c.n_layers as usize;
@@ -2416,38 +2513,44 @@ impl Engine {
         if fault::take_kernel_failure() {
             panic!("injected fault: kernel dispatch failure");
         }
-        self.write_batch_meta(input, positions, seqlens, blocks, offsets, bt);
+        // Base rows only: this entry point serves the profiler and the
+        // kernel-selection tests, neither of which runs adapters.
+        let meta = BatchMeta { bsz, positions: positions.to_vec(), seqlens: seqlens.to_vec(), blocks: blocks.to_vec(), offsets: offsets.to_vec(), bt: bt.to_vec(), slots: Vec::new() };
+        self.write_batch_meta(input, &meta);
         self.write_batch_input(input);
-        (self.batched_tape(bsz, input, causal_chunk), bsz)
+        (self.batched_tape(bsz, input, causal_chunk, false), bsz)
     }
 
     /// [`Self::run_batched_steps`] plus the submit - decode's hot path
     /// (`causal_chunk = false`, `bsz <= DECODE_REGIME_MAX_ROWS`,
     /// `Input::Tokens`/`Input::Resident`) goes through M6.3's tape cache
     /// instead: `Self::batched_tape` is a pure function of `(bsz, causal_chunk,
-    /// matches!(input, Embeds))` (see its own doc), so the FIRST call at a
-    /// given `bsz` records the tape into `self.tape_cache` and every later
-    /// call at that same `bsz` replays it unchanged - `write_batch_meta`/
+    /// matches!(input, Embeds), lora)` (see its own doc), so the FIRST call at
+    /// a given `(bsz, lora)` records the tape into `self.tape_cache` and every
+    /// later call at that key replays it unchanged - `write_batch_meta`/
     /// `write_batch_input` still run every call (real per-step values, not
     /// cacheable), only the uniform-buffer/bind-group churn `batched_tape`
-    /// itself costs is skipped on a hit. Prefill's chunked rows
-    /// (`causal_chunk = true`, an unbucketed row count) and `Input::Embeds`
-    /// (a structurally different tape at the same `bsz` - no embed step at
-    /// all) keep rebuilding every call, exactly as before this cache existed.
-    #[allow(clippy::too_many_arguments)]
-    fn run_batched_submit(&mut self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> u32 {
-        self.write_batch_meta(input, positions, seqlens, blocks, offsets, bt);
+    /// itself costs is skipped on a hit. A batch with no adapter row keys
+    /// `lora = false`, the tape an engine without a bank records. Prefill's
+    /// chunked rows (`causal_chunk = true`, an unbucketed row count) and
+    /// `Input::Embeds` (a structurally different tape at the same `bsz` - no
+    /// embed step at all) keep rebuilding every call, exactly as before this
+    /// cache existed.
+    fn run_batched_submit(&mut self, meta: &BatchMeta, input: Input, causal_chunk: bool) -> u32 {
+        let bsz = meta.bsz;
+        let lora = meta.has_adapter_rows();
+        self.write_batch_meta(input, meta);
         self.write_batch_input(input);
         if !causal_chunk && bsz <= DECODE_REGIME_MAX_ROWS && !matches!(input, Input::Embeds(_)) {
-            if !self.tape_cache.contains_key(&bsz) {
-                let s = self.batched_tape(bsz, input, causal_chunk);
-                self.tape_cache.insert(bsz, s);
+            if !self.tape_cache.contains_key(&(bsz, lora)) {
+                let s = self.batched_tape(bsz, input, causal_chunk, lora);
+                self.tape_cache.insert((bsz, lora), s);
             }
-            let cached = self.tape_cache.get(&bsz).expect("just inserted or already present");
+            let cached = self.tape_cache.get(&(bsz, lora)).expect("just inserted or already present");
             self.gpu.submit(&[], cached);
             return bsz;
         }
-        let s = self.batched_tape(bsz, input, causal_chunk);
+        let s = self.batched_tape(bsz, input, causal_chunk, lora);
         self.gpu.submit(&[], &s);
         bsz
     }
@@ -2466,15 +2569,15 @@ impl Engine {
     /// `[bsz, vocab]` logits (parallel over every output element) and
     /// `argmax_row` reduces each row, so only `bsz` indices are read back
     /// instead of a `[bsz, vocab]` block.
-    #[allow(clippy::too_many_arguments)]
-    fn run_batched_greedy(&mut self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> Vec<u32> {
+    fn run_batched_greedy(&mut self, meta: &BatchMeta, input: Input, causal_chunk: bool) -> Vec<u32> {
         assert!(
-            bsz <= self.max_batch,
-            "greedy decode is sized for max_batch={} rows, got {bsz}",
-            self.max_batch
+            meta.bsz <= self.max_batch,
+            "greedy decode is sized for max_batch={} rows, got {}",
+            self.max_batch,
+            meta.bsz
         );
-        self.run_batched_submit(bsz, input, positions, seqlens, blocks, offsets, bt, causal_chunk);
-        self.greedy_from_hidden(bsz)
+        self.run_batched_submit(meta, input, causal_chunk);
+        self.greedy_from_hidden(meta.bsz)
     }
 
     /// `argmax(xn_final @ head^T)` per row, entirely on the device.
@@ -2594,9 +2697,9 @@ impl Engine {
     /// the extraction, exactly as `argmax_dev` already is by the greedy path -
     /// callers never read either between decode steps.
     pub(crate) fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: u32) -> Vec<Vec<(u32, f32)>> {
-        let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
-        self.run_batched_submit(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt, false);
-        self.topk_from_hidden(bsz, k)
+        let meta = self.append_meta(tables);
+        self.run_batched_submit(&meta, Input::Tokens(inputs), false);
+        self.topk_from_hidden(meta.bsz, k)
     }
 
     /// Advance every sequence by `k` tokens with ONE host round-trip (A4).
@@ -2618,7 +2721,8 @@ impl Engine {
         k: usize,
     ) -> Vec<Vec<u32>> {
         assert!((1..=DECODE_WINDOW).contains(&k), "window {k} out of range");
-        let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
+        let meta = self.append_meta(tables);
+        let bsz = meta.bsz;
         let mbt = self.max_blocks_per_seq;
         // Pre-allocate sub-steps 1..k and build the device schedule:
         // (block, offset, bt_index | NO_BT) per row per sub-step.
@@ -2646,7 +2750,7 @@ impl Engine {
             g.write(&self.sc.sched_buf, &sched);
         }
         // Sub-step 0: host-fed, as today - but the argmax stays on the device.
-        self.run_batched_submit(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt, false);
+        self.run_batched_submit(&meta, Input::Tokens(inputs), false);
         self.submit_greedy_head(bsz);
         for s in 1..k {
             let g = &self.gpu;
@@ -2670,7 +2774,7 @@ impl Engine {
                 bsz,
             );
             g.submit(&[], &[feed, adv]);
-            self.run_batched_submit(bsz, Input::Resident, &[], &[], &[], &[], &[], false);
+            self.run_batched_submit(&meta, Input::Resident, false);
             self.submit_greedy_head(bsz);
         }
         // Record the final sub-step's tokens, then read the whole window once.
@@ -2742,7 +2846,6 @@ impl Engine {
             })
             .collect();
         let bs = self.block_size;
-        let mbt = self.max_blocks_per_seq as usize;
         let n = inputs.len() as u32;
         let chunk = self.max_prefill.max(1);
         // Prefix reuse (D): adopt the longest cached chain of full prompt
@@ -2750,7 +2853,13 @@ impl Engine {
         // compute - the caller needs the LAST token's hidden state, which only
         // a real forward produces.
         let max_reuse = lead.len().min(inputs.len() - 1);
-        let hits = self.prefix.lookup(&lead, bs, max_reuse);
+        // Cached K/V is valid only under the adapter that computed it, so the
+        // lookup and the insert below stay inside the sequence's own KV
+        // namespace: a base request never adopts an adapter's blocks.
+        let ns = table.kv_namespace();
+        // Refuse an adapter that is not resident before touching the cache.
+        self.row_slots(std::iter::once(ns));
+        let hits = self.prefix.lookup_in(ns, &lead, bs, max_reuse);
         let matched = hits.len();
         if matched > 0 {
             table.adopt_prefix(&hits, &mut self.alloc);
@@ -2764,19 +2873,7 @@ impl Engine {
             let run = inputs[start as usize..].iter().take(chunk as usize).take_while(|i| matches!(i, PrefillInput::Embed(_)) == embeds).count();
             let cc = run as u32;
             table.reserve(cc, &mut self.alloc).expect("KV pool exhausted");
-            let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            let mut bt = vec![0u32; cc as usize * mbt];
-            for i in 0..cc {
-                let pos = start + i;
-                let (bl, off) = table.locate(pos, bs);
-                positions.push(pos);
-                seqlens.push(pos + 1); // causal: query i attends positions 0..=pos
-                blocks.push(bl);
-                offsets.push(off);
-                for (lb, &phys) in table.blocks().iter().enumerate() {
-                    bt[i as usize * mbt + lb] = phys;
-                }
-            }
+            let meta = self.chunk_meta(table, start, cc);
             let part = &inputs[start as usize..start as usize + run];
             let (mut tokens, mut rows) = (Vec::new(), Vec::new());
             for input in part {
@@ -2786,13 +2883,13 @@ impl Engine {
                 }
             }
             let input = if embeds { Input::Embeds(&rows) } else { Input::Tokens(&tokens) };
-            let hidden = self.run_batched(cc, input, &positions, &seqlens, &blocks, &offsets, &bt, true);
+            let hidden = self.run_batched(&meta, input, true);
             last = hidden[(run - 1) * d..run * d].to_vec();
             start += cc;
         }
         // Index this prompt's freshly-computed full leading-token blocks for
         // later prompts.
-        self.prefix.insert_chain(&lead, table.blocks(), matched, &mut self.alloc);
+        self.prefix.insert_chain_in(ns, &lead, table.blocks(), matched, &mut self.alloc);
         last
     }
 
@@ -2821,8 +2918,6 @@ impl Engine {
             panic!("prompt token {bad} is outside the model vocabulary ({})", self.cfg.vocab);
         }
         let d = self.cfg.d_model as usize;
-        let bs = self.block_size;
-        let mbt = self.max_blocks_per_seq as usize;
         let n = prompt.len() as u32;
         let chunk = self.max_prefill.max(1);
         let mut out = vec![0f32; prompt.len() * d];
@@ -2830,20 +2925,8 @@ impl Engine {
         while start < n {
             let cc = (n - start).min(chunk);
             table.reserve(cc, &mut self.alloc).expect("KV pool exhausted");
-            let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            let mut bt = vec![0u32; cc as usize * mbt];
-            for i in 0..cc {
-                let pos = start + i;
-                let (bl, off) = table.locate(pos, bs);
-                positions.push(pos);
-                seqlens.push(pos + 1);
-                blocks.push(bl);
-                offsets.push(off);
-                for (lb, &phys) in table.blocks().iter().enumerate() {
-                    bt[i as usize * mbt + lb] = phys;
-                }
-            }
-            let hidden = self.run_batched(cc, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), &positions, &seqlens, &blocks, &offsets, &bt, true);
+            let meta = self.chunk_meta(table, start, cc);
+            let hidden = self.run_batched(&meta, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), true);
             out[start as usize * d..(start + cc) as usize * d].copy_from_slice(&hidden[..cc as usize * d]);
             start += cc;
         }
@@ -3228,8 +3311,6 @@ impl Engine {
     pub fn spec_decode<D: FnMut(&[u32], u32) -> Vec<u32>>(&mut self, prompt: &[u32], max_new: usize, k: u32, mut draft: D) -> (Vec<u32>, usize) {
         assert!(!prompt.is_empty() && k >= 1);
         let d = self.cfg.d_model as usize;
-        let bs = self.block_size;
-        let mbt = self.max_blocks_per_seq as usize;
         let mut table = BlockTable::new();
         // Prefill all but the last prompt token; the last is the first `pending`.
         if prompt.len() > 1 {
@@ -3251,19 +3332,7 @@ impl Engine {
             let inputs: Vec<u32> = std::iter::once(pending).chain(props.iter().copied()).collect();
             let rows = kk + 1;
             table.reserve(rows, &mut self.alloc).expect("KV pool exhausted");
-            let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            let mut bt = vec![0u32; rows as usize * mbt];
-            for i in 0..rows {
-                let pos = base + i;
-                let (bl, off) = table.locate(pos, bs);
-                positions.push(pos);
-                seqlens.push(pos + 1);
-                blocks.push(bl);
-                offsets.push(off);
-                for (lb, &phys) in table.blocks().iter().enumerate() {
-                    bt[i as usize * mbt + lb] = phys;
-                }
-            }
+            let meta = self.chunk_meta(&table, base, rows);
             // `causal_chunk = false`: this verify-forward structurally
             // matches the fused kernel's contract too (one sequence, one
             // shared block table, causally-increasing `seqlens`) but is left
@@ -3271,7 +3340,7 @@ impl Engine {
             // correctness gate and M2.4's own wiring test only cover
             // `Engine::prefill`/`score_positions`'s own construction; wiring
             // this call site in as well is a follow-on, not re-litigated here.
-            let hidden = self.run_batched(rows, Input::Tokens(&inputs), &positions, &seqlens, &blocks, &offsets, &bt, false);
+            let hidden = self.run_batched(&meta, Input::Tokens(&inputs), false);
             forwards += 1;
 
             // hidden[j] gives the target distribution that should have produced
@@ -3446,6 +3515,15 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn offload_stats(&self) -> OffloadStats {
         self.host_kv.stats()
+    }
+    fn adapter_availability(&mut self, adapter: model::serve::AdapterId) -> model::serve::AdapterAvailability {
+        self.bank_availability(adapter)
+    }
+    fn pin_adapter(&mut self, adapter: model::serve::AdapterId) {
+        self.bank_pin(adapter)
+    }
+    fn unpin_adapter(&mut self, adapter: model::serve::AdapterId) {
+        self.bank_unpin(adapter)
     }
 }
 
@@ -4731,7 +4809,7 @@ mod tests {
             let map = tiny_weights(&cfg);
             let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 32, 1, 12, 8, false, false);
             let has_table = eng.yarn.is_some();
-            let tape = eng.batched_tape(1, Input::Tokens(&[1]), false);
+            let tape = eng.batched_tape(1, Input::Tokens(&[1]), false, false);
             let k: Vec<usize> = tape.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
             assert_eq!(has_table, k.contains(&ROPE_PAGED_YARN), "the uploaded table and the dispatched kernel must agree");
             k
@@ -4899,7 +4977,7 @@ mod tests {
         let out = g.storage((rows * d) as u64); // unread by the fused branch; kept to match `rms_quant`'s signature.
 
         let mut fused_steps: Vec<Step> = Vec::new();
-        eng.rms_quant(&mut fused_steps, &x, &w, &out, d, rows);
+        eng.rms_quant(&mut fused_steps, &x, &w, &out, d, rows, false);
         g.submit(&[], &fused_steps);
         g.poll_wait();
         let scratch = eng.i8_scratch.as_ref().expect("weights_int8() true implies i8_scratch is Some");
@@ -5595,6 +5673,36 @@ mod tests {
         assert_ne!(h_uncal, h_cal, "an aggressively binding clip must change the decoded hidden state");
     }
 
+    /// Clip ceilings measured on the base are applied to adapter sequences
+    /// too, so installing them beside an adapter bank (in either order) must
+    /// say so, once; without a bank, or without a binding table, it stays quiet.
+    #[test]
+    fn kv_calibration_beside_an_adapter_bank_warns_once_in_either_order() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let table = || {
+            let mut c = model::kvcalib::KvCalib::disabled(cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize);
+            for row in c.k.iter_mut().chain(c.v.iter_mut()) {
+                row.fill(1.0);
+            }
+            c
+        };
+        let engine = || Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, true, false);
+        let bank = || AdapterBankConfig::new(1, 4, &LoraSite::ATTENTION);
+
+        let mut calib_first = engine();
+        calib_first.set_kv_calib(Some(table()));
+        assert!(!calib_first.warned_calib_with_adapters, "no bank, nothing to warn about");
+        calib_first.enable_adapters(bank()).unwrap();
+        assert!(calib_first.warned_calib_with_adapters);
+
+        let mut bank_first = engine();
+        bank_first.enable_adapters(bank()).unwrap();
+        assert!(!bank_first.warned_calib_with_adapters, "a bank without calibration is fine");
+        bank_first.set_kv_calib(Some(table()));
+        assert!(bank_first.warned_calib_with_adapters);
+    }
+
     /// `kv_calibrated()` must say `false` for a table installed on an fp32
     /// engine, even though `self.kv_calib` is internally `Some(_)` - the
     /// table is provably never dispatched there (the int8 branch of
@@ -6160,7 +6268,7 @@ mod tests {
 
         let tokens = [0u32, 55_555, cfg.vocab - 1];
         eng.gpu.write(&eng.sc.tok_buf, &tokens);
-        let steps = eng.batched_tape(tokens.len() as u32, Input::Tokens(&tokens), false);
+        let steps = eng.batched_tape(tokens.len() as u32, Input::Tokens(&tokens), false, false);
         eng.gpu.submit(&[], &steps);
 
         let d = cfg.d_model as usize;
