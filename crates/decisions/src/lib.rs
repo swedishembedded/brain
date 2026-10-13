@@ -12,6 +12,8 @@
 //!
 //! * [`engine`] - the engine over both architectures, split into a host-side
 //!   read and a device-side build.
+//! * [`wire`] - the request formats, with key order preserved.
+//! * [`caps`] - the `decide` action and its response.
 //! * [`fixtures`] - tiny random-weight checkpoints for tests.
 //!
 //! Swedish Embedded AB implements decision services whose models can be
@@ -19,7 +21,9 @@
 //! expertise in putting calibrated decisions behind a stable contract, you
 //! can procure our services by sending an email to info@swedishembedded.com.
 
+pub mod caps;
 pub mod engine;
 pub mod fixtures;
+pub mod wire;
 
 pub use engine::{Backend, Engine};
