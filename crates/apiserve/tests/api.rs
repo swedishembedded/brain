@@ -3436,3 +3436,252 @@ async fn anthropic_thinking_config_is_validated() {
         assert!(v["error"]["message"].as_str().unwrap().contains("thinking"), "{v}");
     }
 }
+
+// ------------------------------------------------- adapters as models of their own
+//
+// A LoRA adapter is served as a model id beside its base: the same resident
+// instance, a card of its own naming the adapter by identity, and a reserved
+// param the host stamps so the instance knows which id was asked for. The
+// resident layer (`crates/catalog`) owns the real thing; these fakes pin what
+// the API surface must do with it, whoever builds it.
+
+const ADAPTER_BASE: &str = "brain-chat";
+const ADAPTER_ID: &str = "brain-chat:lab:tuned:v1";
+const ADAPTER_PARAM: &str = "__adapter";
+
+/// A chat id served by the one shared instance: the base (`adapter: None`) or
+/// a view riding on it.
+struct SiblingChat {
+    name: String,
+    adapter: Option<residency::AdapterIdentity>,
+}
+
+struct SiblingChatInst;
+
+impl ResidentModel for SiblingChat {
+    fn manifest(&self) -> Manifest {
+        let mut m = chat_manifest();
+        m.model = self.name.clone();
+        m
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new(ADAPTER_BASE, "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(SiblingChatInst))
+    }
+    fn stamp(&self, inv: &mut Invocation) {
+        let Some(params) = inv.params.as_object_mut() else { return };
+        match &self.adapter {
+            Some(_) => params.insert(ADAPTER_PARAM.to_string(), json!(self.name)),
+            None => params.remove(ADAPTER_PARAM),
+        };
+    }
+    fn adapter_identity(&self) -> Option<residency::AdapterIdentity> {
+        self.adapter.clone()
+    }
+}
+
+impl Instance for SiblingChatInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        let answer = match inv.get_str(ADAPTER_PARAM) {
+            Some(adapter) => format!("answered by {adapter}"),
+            None => "answered by the base".to_string(),
+        };
+        Ok(Outcome::new().set("prompt_tokens", json!(5)).set("completion_tokens", json!(2)).set("finish_reason", json!("stop")).blob("text", Blob::new(Media::Text, answer.into_bytes())))
+    }
+}
+
+fn adapter_identity() -> residency::AdapterIdentity {
+    residency::AdapterIdentity { id: ADAPTER_ID.into(), digest: format!("sha256:{}", "c".repeat(64)) }
+}
+
+/// The base and one adapter riding on it, behind `provider`.
+fn adapter_app(provider: Provider) -> (Router, Executor, String) {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![
+        Arc::new(SiblingChat { name: ADAPTER_BASE.into(), adapter: None }),
+        Arc::new(SiblingChat { name: ADAPTER_ID.into(), adapter: Some(adapter_identity()) }),
+        Arc::new(Carded(embed_manifest())),
+    ];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let exec = Executor::start(models, budgets, Policy::default());
+    let key = "sk-brain-test-key".to_string();
+    (router(AppState::new(exec.clone(), key.clone(), provider)), exec, key)
+}
+
+fn chat_body(model: &str) -> Value {
+    json!({"model": model, "messages": [{"role": "user", "content": "hi"}]})
+}
+
+/// An adapter is listed as a model of its own, named by identity, and its base
+/// is listed exactly as before; no card carries a path.
+#[tokio::test]
+async fn an_adapter_is_a_listed_model_named_by_identity_and_never_by_a_path() {
+    for (provider, list_uri, one_uri) in [(Provider::OpenAI, "/v1/models", format!("/v1/models/{ADAPTER_ID}")), (Provider::OpenRouter, "/models", format!("/models/{ADAPTER_ID}"))] {
+        let (app, _exec, key) = adapter_app(provider);
+        let listed = get_json(&app, provider, list_uri, &key).await;
+        let cards = listed["data"].as_array().unwrap();
+        let base = cards.iter().find(|m| m["id"] == ADAPTER_BASE).unwrap_or_else(|| panic!("{provider}: base missing: {listed}"));
+        let adapter = cards.iter().find(|m| m["id"] == ADAPTER_ID).unwrap_or_else(|| panic!("{provider}: adapter missing: {listed}"));
+        assert!(base.get("adapter").is_none(), "{provider}: the base entry names no adapter: {base}");
+        assert_eq!(adapter["adapter"], json!({"id": ADAPTER_ID, "digest": adapter_identity().digest}), "{provider}: {adapter}");
+
+        let card = get_json(&app, provider, &one_uri, &key).await;
+        assert_eq!(card["adapter"]["digest"], json!(adapter_identity().digest), "{provider}: {card}");
+        let text = listed.to_string();
+        for path_like in [".safetensors", "/tmp", "/home", "/data", "\\"] {
+            assert!(!text.contains(path_like), "{provider}: no path in any card ({path_like}): {text}");
+        }
+        let embed = cards.iter().find(|m| m["id"] == "brain-embed").unwrap();
+        assert!(embed.get("adapter").is_none(), "{provider}: only an adapter view names an adapter");
+    }
+    // The Anthropic list is the same models, with its unchanged card shape.
+    let (app, _exec, key) = adapter_app(Provider::Anthropic);
+    let listed = get_json(&app, Provider::Anthropic, "/v1/models", &key).await;
+    let ids: Vec<&str> = listed["data"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&ADAPTER_ID) && ids.contains(&ADAPTER_BASE), "{ids:?}");
+}
+
+/// An adapter id is a model like any other for authentication: its card and its
+/// chat route need the key, and what an unauthenticated caller sees for it is
+/// what it sees for an id that does not exist, so no adapter can be enumerated.
+#[tokio::test]
+async fn an_adapter_model_id_requires_the_key_and_its_absence_of_one_reveals_nothing() {
+    for (provider, card_uri, chat_path, ghost_uri) in [
+        (Provider::OpenAI, format!("/v1/models/{ADAPTER_ID}"), "/v1/chat/completions", "/v1/models/brain-chat:lab:ghost:v9"),
+        (Provider::Anthropic, format!("/v1/models/{ADAPTER_ID}"), "/v1/messages", "/v1/models/brain-chat:lab:ghost:v9"),
+        (Provider::OpenRouter, format!("/models/{ADAPTER_ID}"), "/chat/completions", "/models/brain-chat:lab:ghost:v9"),
+    ] {
+        let (app, _exec, _key) = adapter_app(provider);
+        for key in [None, Some(""), Some("not-the-key")] {
+            let builder = |uri: &str| match key {
+                Some(k) => auth(Request::builder().uri(uri), provider, k),
+                None => Request::builder().uri(uri),
+            };
+            let (st_card, body_card) = send(&app, builder(&card_uri).body(Body::empty()).unwrap()).await;
+            let (st_ghost, body_ghost) = send(&app, builder(ghost_uri).body(Body::empty()).unwrap()).await;
+            assert_eq!(st_card, StatusCode::UNAUTHORIZED, "{provider}: the adapter's card needs the key ({key:?})");
+            assert_eq!((st_card, &body_card), (st_ghost, &body_ghost), "{provider}: an adapter id and an absent id are indistinguishable without the key");
+
+            let post = |model: &str| {
+                let mut req = builder(chat_path).method(Method::POST).header(header::CONTENT_TYPE, "application/json");
+                if provider == Provider::Anthropic {
+                    req = req.header("anthropic-version", "2023-06-01");
+                }
+                let mut body = chat_body(model);
+                body["max_tokens"] = json!(8);
+                req.body(Body::from(body.to_string())).unwrap()
+            };
+            let (st, _) = send(&app, post(ADAPTER_ID)).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED, "{provider}: chatting with the adapter needs the key ({key:?})");
+        }
+    }
+}
+
+/// Requests for the base and for an adapter, in flight together on the one
+/// instance, are each answered as the id they named.
+#[tokio::test]
+async fn mixed_base_and_adapter_requests_are_answered_as_the_ids_they_named() {
+    let (app, exec, key) = adapter_app(Provider::OpenAI);
+    let mut asked = Vec::new();
+    for i in 0..8 {
+        let model = if i % 2 == 0 { ADAPTER_BASE } else { ADAPTER_ID };
+        let app = app.clone();
+        let key = key.clone();
+        asked.push((model, tokio::spawn(async move { post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &chat_body(model)).await })));
+    }
+    for (model, handle) in asked {
+        let (st, v) = handle.await.unwrap();
+        assert_eq!(st, StatusCode::OK, "{model}: {v}");
+        let want = if model == ADAPTER_BASE { "answered by the base".to_string() } else { format!("answered by {ADAPTER_ID}") };
+        assert_eq!(v["choices"][0]["message"]["content"], json!(want), "{model} must be answered as itself");
+    }
+    assert_eq!(exec.stats().builds, 1, "one instance served both ids");
+
+    // The same through the Anthropic surface.
+    let (app, _exec, key) = adapter_app(Provider::Anthropic);
+    let mut body = chat_body(ADAPTER_ID);
+    body["max_tokens"] = json!(8);
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["content"][0]["text"], json!(format!("answered by {ADAPTER_ID}")));
+}
+
+/// An adapter that is not served - never loaded, or withdrawn - is exactly an
+/// unknown model: the same status and the same body shape, and nothing about
+/// adapters in it.
+#[tokio::test]
+async fn an_unserved_adapter_id_gets_the_same_404_as_an_unknown_model() {
+    for provider in ALL {
+        let (app, exec, key) = adapter_app(provider);
+        let (chat, card) = match provider {
+            Provider::OpenAI => ("/v1/chat/completions", "/v1/models/"),
+            Provider::Anthropic => ("/v1/messages", "/v1/models/"),
+            Provider::OpenRouter => ("/chat/completions", "/models/"),
+        };
+        let body_for = |model: &str| {
+            let mut b = chat_body(model);
+            b["max_tokens"] = json!(8);
+            b
+        };
+        // Shape of the answer with the id replaced by a placeholder.
+        let masked = |v: &Value, id: &str| v.to_string().replace(id, "<id>");
+
+        let (st_unknown, unknown) = post_json(&app, provider, &key, chat, &body_for("no-such-model")).await;
+        assert_eq!(st_unknown, StatusCode::NOT_FOUND);
+        let (st_card_unknown, card_unknown) = send(&app, auth(Request::builder().uri(format!("{card}no-such-model")), provider, &key).body(Body::empty()).unwrap()).await;
+
+        // Withdrawn after being served.
+        exec.unregister(ADAPTER_ID);
+        let mut candidates = vec!["brain-chat:lab:ghost:v9", "brain-chat:lab:../x:v1", "brain-chat:a:b:c:d", ADAPTER_ID];
+        candidates.push("Qwen/Qwen3-0.6B:lab:never-trained:latest");
+        for id in candidates {
+            let (st, v) = post_json(&app, provider, &key, chat, &body_for(id)).await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{provider}: {id}: {v}");
+            assert_eq!(masked(&v, id), masked(&unknown, "no-such-model"), "{provider}: {id} must read as an unknown model");
+            // A slash in an id travels percent-encoded in a path segment.
+            let encoded = id.replace('/', "%2F");
+            let (st, v) = send(&app, auth(Request::builder().uri(format!("{card}{encoded}")), provider, &key).body(Body::empty()).unwrap()).await;
+            assert_eq!((st, masked(&v, id)), (st_card_unknown, masked(&card_unknown, "no-such-model")), "{provider}: GET card for {id}");
+        }
+        let listed = get_json(&app, provider, if provider == Provider::OpenRouter { "/models" } else { "/v1/models" }, &key).await;
+        assert!(!listed.to_string().contains(ADAPTER_ID), "{provider}: a withdrawn adapter is no longer listed");
+    }
+}
+
+/// The param that carries the selection is the host's: a caller cannot set it,
+/// on any route, and a caller reaching the base never lands on an adapter.
+#[tokio::test]
+async fn the_reserved_adapter_param_cannot_be_set_by_a_caller() {
+    let (app, _exec, key) = adapter_app(Provider::OpenAI);
+
+    // Extra body fields on a chat request are not carried to the action.
+    let mut body = chat_body(ADAPTER_BASE);
+    body[ADAPTER_PARAM] = json!(ADAPTER_ID);
+    body["adapter"] = json!(ADAPTER_ID);
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["choices"][0]["message"]["content"], json!("answered by the base"), "a forged selection must not reach an adapter");
+
+    // The generic routes validate against the served manifest, which declares
+    // neither name, so both are refused as unknown params before anything runs.
+    for model in [ADAPTER_BASE, ADAPTER_ID] {
+        for forged in [ADAPTER_PARAM, "adapter"] {
+            let run = json!({"model": model, "action": "generate", "params": {"prompt": "hi", forged: ADAPTER_ID}, "blobs": {}});
+            for path in ["/v1/run", "/v1/jobs"] {
+                let (st, v) = post_json(&app, Provider::OpenAI, &key, path, &run).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{model} {path} {forged}: {v}");
+                assert!(v.to_string().contains("unknown param"), "{model} {path} {forged}: {v}");
+            }
+        }
+    }
+
+    // The served catalogue never advertises it either.
+    let (st, caps) = send(&app, auth(Request::builder().uri("/v1/capabilities"), Provider::OpenAI, &key).body(Body::empty()).unwrap()).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(!caps.to_string().contains(ADAPTER_PARAM), "{caps}");
+}

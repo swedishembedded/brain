@@ -338,6 +338,13 @@ impl StoreSupplier {
 
     fn do_ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
         let r = ModelRef::parse(model).map_err(|e| format!("{model}: {e}"))?;
+        // `classify` never offers an adapter for fetching, and this is the
+        // same refusal for a caller that does not go through it (the heal walk,
+        // an embedder): an adapter is loaded by the operator, so reaching the
+        // plan, and the hub behind it, with one is never right.
+        if r.adapter().is_some() {
+            return Err(format!("{model}: an adapter is loaded by the operator and is never fetched"));
+        }
         let plan = brain_modelstore::plan(&r, &self.store, self.hub.as_ref()).map_err(|e| format!("{model}: {e}"))?;
         // The last 10%-bucket logged per downloaded file, so a caller watching
         // `-v -v` sees "downloading X% ... 10% ... 20% ..." instead of either
@@ -410,6 +417,13 @@ impl ModelSupplier for StoreSupplier {
     fn classify(&self, model: &str) -> Supply {
         match ModelRef::parse(model) {
             Ok(r) if r.is_reserved() => Supply::Unknown(format!("{model}: reserved vendor, not on disk")),
+            // A request can name any adapter reference it likes, and an
+            // adapter is something only the operator puts in front of a base
+            // (`--adapter`, `--adapter-manifest`, `--watch-adapters`, or a
+            // model directory): an adapter that is not already served is an
+            // unknown model, and fetching anything for it would let a request
+            // choose what this server downloads and runs.
+            Ok(r) if r.adapter().is_some() => Supply::Unknown(format!("{model}: an adapter is not fetched on request")),
             Ok(_) => Supply::Fetchable,
             Err(e) => Supply::Unknown(format!("{model}: {e}")),
         }
@@ -672,6 +686,49 @@ pub(crate) mod tests {
     fn classify_refuses_an_invalid_name() {
         let supplier = StoreSupplier::new(store("supply-test-invalid"), Box::new(FakeHub::new()));
         assert!(matches!(supplier.classify("no-slash-here"), Supply::Unknown(_)));
+    }
+
+    /// A hub that fails the test on any contact: what an adapter reference
+    /// must never reach.
+    struct UntouchableHub;
+    impl brain_modelstore::Hub for UntouchableHub {
+        fn resolve_revision(&self, v: &str, r: &str, _: &str) -> Result<String, brain_modelstore::HubError> {
+            panic!("the hub was asked to resolve {v}/{r}")
+        }
+        fn list_files(&self, v: &str, r: &str, _: &str) -> Result<Vec<String>, brain_modelstore::HubError> {
+            panic!("the hub was asked to list {v}/{r}")
+        }
+        fn file_sizes(&self, v: &str, r: &str, _: &str) -> Result<std::collections::BTreeMap<String, u64>, brain_modelstore::HubError> {
+            panic!("the hub was asked for sizes of {v}/{r}")
+        }
+        fn read_file(&self, v: &str, r: &str, _: &str, f: &str) -> Result<Vec<u8>, brain_modelstore::HubError> {
+            panic!("the hub was asked to read {v}/{r}/{f}")
+        }
+        fn download(&self, v: &str, r: &str, _: &str, f: &str, _: &Path, _: &mut dyn FnMut(u64, Option<u64>)) -> Result<(), brain_modelstore::HubError> {
+            panic!("the hub was asked to download {v}/{r}/{f}")
+        }
+    }
+
+    /// An adapter reference is never fetched for a request: not classified
+    /// fetchable (so no front end calls `ensure`), and refused by `ensure`
+    /// itself before the plan, for a caller that does not classify. The hub
+    /// here fails the test on any contact, and the adapter's base IS
+    /// fetchable, so a regression that stripped the suffix and fetched the
+    /// base would be caught too.
+    #[test]
+    fn an_adapter_reference_is_never_fetched() {
+        let supplier = StoreSupplier::new(store("supply-test-adapter"), Box::new(UntouchableHub));
+        for adapter in ["Qwen/Qwen3-0.6B:lab:canary:v1", "Qwen/Qwen3-0.6B-Q8_0:lab:canary:v1", "Qwen/Qwen3-0.6B:lab:never-trained:latest"] {
+            assert!(matches!(supplier.classify(adapter), Supply::Unknown(_)), "{adapter} must not classify as fetchable");
+            let mut progress = |_: &str, _: u32, _: u32| {};
+            let err = supplier.ensure(adapter, &exec(), &mut progress).unwrap_err();
+            assert!(err.contains("never fetched"), "{err}");
+        }
+        assert_eq!(supplier.classify("Qwen/Qwen3-0.6B"), Supply::Fetchable, "the base of an adapter is still an ordinary fetchable model");
+        // The malformed spellings stay refused with zero I/O as well.
+        for bad in ["Qwen/Qwen3-0.6B:lab:../x:v1", "Qwen/Qwen3-0.6B:lab:x", "Qwen/Qwen3-0.6B:a:b:c:d", "../x/y:lab:canary:v1"] {
+            assert!(matches!(supplier.classify(bad), Supply::Unknown(_)), "{bad}");
+        }
     }
 
     #[test]
