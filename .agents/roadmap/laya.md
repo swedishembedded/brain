@@ -378,17 +378,6 @@ none).
       always uses the slower materialized `chunked_bidir_fwd_win` rung,
       even on a device where the fused path would otherwise be selected for
       full-attention layers - correct, but not the fast path.
-- [ ] **No public docs surface added for the whole decide/Laya decision
-      family.** `crates/decide`/`DecisionPipeline` has zero presence in
-      `docs/models/`, `docs/manifest.txt`, or `docs/using/sdk.md` today - a
-      pre-existing gap, not something this milestone introduced. Laya
-      dispatches through the exact same `DecisionPipeline`, so giving Laya
-      alone a `docs/models/laya.md` page or catalog row would document the
-      new architecture ahead of the established one, the same asymmetry
-      `.agents/roadmap/decide.md`'s own plan (see this plan's "explicitly
-      not in scope") already refuses to create for the CLI surface.
-      Deliberately not done here; a real follow-up is documenting the whole
-      decision family at once, not Laya alone.
 
 ## Reusable, not Laya-specific
 

@@ -132,9 +132,17 @@ application", "an orchestrator"). Enforced by `make check/scope`
    ModernBERT-large backbone (pre-LN, GeGLU, per-layer-type RoPE) + Laya's
    own 2-layer self-attention decision head (`[MASK]`-marker gather, scorer,
    act/escalate head). Same `(state, question, options) -> P(answer)`
-   contract as `crates/decide`, a different backbone; no CLI of its own,
-   reached only via `brain::DecisionPipeline` (`decision` SDK feature), which
-   dispatches to either architecture. Real checkpoint imports and is
+   contract as `crates/decide`, a different backbone; no CLI verb of its own.
+   Reached in-process via `brain::DecisionPipeline` (`decision` SDK feature),
+   which dispatches to either architecture, and **over the wire** through
+   `crates/decisions`, which serves BOTH architectures as one `decide`
+   capability: each checkpoint is its own model under its store id
+   (`catalog::resident_decision`), D-Bus `Run`, HTTP `POST /v1/run`, and
+   `POST /v1/systemone`. A model's `decision.manifest.json` records its
+   identity hashes, lineage and validation; `auto` picks a configured model,
+   else a validated Laya, else a validated `decide` model, and never an
+   unvalidated one. Page: `docs/models/decision.md`.
+   Real checkpoint imports and is
    argmax-parity-tested against the Python reference; seeded backward through
    the full head+trunk is gradient-checked. **It TRAINS**, gated on the real
    checkpoint at held-out accuracy 0.350 -> 0.600 against a chance of 0.250
@@ -1073,6 +1081,7 @@ front-end to depend on.
 | **Add/adjust/dispatch a WGSL kernel** | **`.agents/rules/kernels.md`** - read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make generate/kernels/registry`** + **`make generate/kernels/wgsl-table`** |
 | **Which kernels already exist** (before writing a new one) | the catalogue in **`docs/reference/kernels.md`** - every kernel with what it does, how, its structural optimisation level, and per-backend support |
 | **Something is slow (model, kernel, training step)** | **`.agents/rules/kernels.md` §F** - the ORDERED loop that found the big wins (profile per kernel kind → check for an already-faster sibling → measure the branch your hardware skips → sweep for the crossover → fix it in the SELECTOR → mutation-verify → re-profile); then **§E** (measure-first rules + the killed hypotheses), `.agents/rules/porting.md` §10, case studies in `docs/performance/overview.md` |
+| **Serve or call a decision model** (decide + Laya) over D-Bus/HTTP: the `decide` capability, the wire formats, the manifest and `auto` selection, readiness without loading, failure classes | `crates/decisions/src/{engine,wire,caps,manifest,select,store,load,provider}.rs` (`fixtures` = tiny checkpoints of both architectures for tests), `crates/catalog/src/resident_decision.rs`, `crates/apiserve/src/systemone.rs`, `crates/capability/src/failure.rs` (the failure classes any action may tag its errors with); gates `crates/catalog/tests/{decision_served,decision_agreement}.rs`; user-facing page `docs/models/decision.md`; client `samples/python/decision/served-decide/` |
 | **Save a trained decision model** (encoder MOVED, so a head-only adapter cannot reproduce it) | `Decide::save_model` / `DecisionPipeline::save_model` - a complete checkpoint DIRECTORY that `DecisionPipeline::builder(dir).load()` reads back; `decide::import::sniff_naming` tells a published HF checkpoint from one this crate wrote by the tensor NAMES, so a caller passes a path and never a format. `save_head` still refuses a moved encoder, on purpose |
 | MoE toy task / honest eval methodology | `README.md` |
 | **Gate a candidate model against an incumbent** (the sign test, the four bars, the frozen probe contract) - from ANY crate, including a model crate | `crates/promote` - `promote::{env,gate,stats,document}`; `rl::{env,gate}` and `bench::metrics::sign_test` re-export it, and `scripts/gates/check-crate-layers.sh` keeps it a leaf |

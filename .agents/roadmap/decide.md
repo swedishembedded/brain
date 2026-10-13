@@ -208,21 +208,19 @@ doc for the three runs).
 
 ---
 
-## 6. Serving, SDK, sample
+## 6. Serving: what is open
 
-- Full serving contract in the same change: capability manifest, resident adapter,
-  catalog entry, D-Bus, CLI verb, `examples/` client.
-- `run_batch` does a **genuine batched state forward** across concurrent requests.
-- New `arch::Domain::Decision`. `Text` does not fit - no vocabulary, a runtime-defined
-  output space, and `infer` would mean something else. Required regardless: an SDK
-  surface feature name *is* a `Domain` variant.
-- SDK `brain::DecisionPipeline`, surface feature `decision`.
-- HTTP `POST /v1/systemone` in `apiserve`, wire-compatible: `choice`/`score`/`noul`,
-  `criteria`, `instructions`, `probabilities`, `confidence`, `legend`,
-  `usage.output_tokens: 0`, and 422s on the 255-option / 2-10-level limits.
-- `samples/decision/triage` (package `sample-decision-triage`),
-  `brain = { features = ["decision"] }`, declared closure budget, runs without
-  weights or exits cleanly saying what to pull.
+The serving contract is met for both decision architectures (see
+`docs/models/decision.md` and `crates/decisions`). One part of the plan is not:
+
+- **`run_batch` is the serial default.** The plan called for a genuine batched
+  state forward across concurrent requests. Within one request this arm already
+  encodes the state once for all its questions; across requests an instance
+  answers one at a time. `Decide::pack_batch` packs several states into one
+  encoder pass, but only for training (it keeps the activations the backward
+  needs); an inference path over it, with the per-request grouping and the
+  fall-back to a single request, is unbuilt. The Laya arm has no batched path at
+  all: `LayaDecision` builds its head for one call.
 
 `Noul` is TypeSafe's coinage, used for wire compatibility -> interface-compatibility
 attribution in `/NOTICE.md`.
@@ -270,8 +268,6 @@ verified **red** before the implementation lands.
 | 10 | `eval::calibration` | perfectly-calibrated synthetic -> ECE 0; maximally-overconfident -> ECE -> 1-acc |
 | 11 | **Run #1** + the two experiments (4-way loss sweep, 4-way confidence statistic) | measured numbers asserted as floors in the tests that produce them |
 | 12 | `decide_bench` + dispatch reduction + `perf gate` baseline | forward *and* backward profiled per kernel kind |
-| 13 | Serving contract | manifest test; model reachable over `brain serve --dbus`; `examples/` script runs |
-| 14 | `Domain::Decision`, SDK `DecisionPipeline`, `/v1/systemone` | `make check/sdk-features`; wire-format round-trip test |
 | 15 | `samples/decision/triage` | `make check/samples`; closure within declared budget |
 | 16 | Docs, NOTICE, compliance, AGENTS.md rows, .agents/knowledge/ entries | `make test/full` green, zero warnings |
 
