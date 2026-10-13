@@ -40,12 +40,70 @@ pub fn write_adapter(path: &Path, id: &str, base_id: &str, base_digest: Option<S
         cycle: 0,
     });
     let tensors = vec![
-        ("blocks.0.attn.wq.lora_a".to_string(), vec![2, 4], vec![fill; 8]),
-        ("blocks.0.attn.wq.lora_b".to_string(), vec![4, 2], vec![fill; 8]),
+        ("blocks.0.attn.wq.weight.lora_a".to_string(), vec![2, 4], vec![fill; 8]),
+        ("blocks.0.attn.wq.weight.lora_b".to_string(), vec![4, 2], vec![fill; 8]),
     ];
     checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({"rank": 2, "alpha": 4.0}), Some(&card)).unwrap();
 }
 
 pub fn file_digest(path: &Path) -> String {
     brain_modelstore::fetch::file_digest(path).unwrap()
+}
+
+/// One linear an adapter corrects: the base weight's name and its
+/// `[out, in]` shape.
+pub struct Linear {
+    /// The base weight (`blocks.0.attn.wq.weight`).
+    pub base: String,
+    /// Output width.
+    pub out: usize,
+    /// Input width.
+    pub inn: usize,
+}
+
+/// A Qwen3 LoRA adapter file over `linears` with deterministic pseudo-random
+/// factors (`seed`), big enough to move a tiny model's greedy decode. The card
+/// names `base_id` and carries no base digest, so the file is bound by id.
+pub fn write_lora_adapter(path: &Path, id: &str, base_id: &str, rank: u32, linears: &[Linear], seed: u64) {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut next = move || {
+        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+    };
+    let r = rank as usize;
+    let mut tensors = Vec::new();
+    for l in linears {
+        tensors.push((format!("{}.lora_a", l.base), vec![r as u64, l.inn as u64], (0..r * l.inn).map(|_| next()).collect::<Vec<f32>>()));
+        tensors.push((format!("{}.lora_b", l.base), vec![l.out as u64, r as u64], (0..l.out * r).map(|_| next()).collect::<Vec<f32>>()));
+    }
+    let alpha = 2.0 * rank as f32;
+    let mut card = ModelCard::new(id, "qwen");
+    card.variant_of = Some(base_id.to_string());
+    card.adapter = Some(Adapter { kind: "lora".to_string(), rank: Some(rank), base: Some(base_id.to_string()), alpha: Some(alpha), ..Default::default() });
+    checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({"rank": rank, "alpha": alpha}), Some(&card)).unwrap();
+}
+
+/// A `tokenizer.json` with one token per printable ASCII byte (plus space and
+/// newline) and no merges, with a ChatML template beside it, written into
+/// `dir`; returns the tokenizer's path. `QwenBpe` maps each byte through
+/// GPT-2's `bytes_to_unicode`, which is the IDENTITY on `0x21..=0x7E`, so every
+/// byte is its own token: enough to round-trip a test's text and the chat
+/// template's own `<|im_start|>`/`<|im_end|>` markers with no real tokenizer
+/// on the box.
+pub fn write_byte_tokenizer(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut vocab = serde_json::Map::new();
+    for (i, b) in (0x21u8..=0x7e).enumerate() {
+        vocab.insert((b as char).to_string(), serde_json::json!(i));
+    }
+    let n = vocab.len();
+    vocab.insert('\u{0120}'.to_string(), serde_json::json!(n)); // space
+    vocab.insert('\u{010a}'.to_string(), serde_json::json!(n + 1)); // newline
+    let path = dir.join("tokenizer.json");
+    std::fs::write(&path, serde_json::json!({"model": {"vocab": vocab, "merges": []}}).to_string()).unwrap();
+    // A checkpoint with no template serves raw prompts only, and this
+    // vocabulary has no `<|im_start|>` special to infer ChatML from.
+    let chatml = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}";
+    std::fs::write(dir.join("tokenizer_config.json"), serde_json::json!({ "chat_template": chatml }).to_string()).unwrap();
+    path
 }

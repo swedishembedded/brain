@@ -29,6 +29,11 @@ use checkpoint::st::ModelCard;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
+use crate::adapter_registry::{AdapterBankSettings, AdapterRegistry, AdapterSync, QwenAdapterView, ADAPTER_PARAM};
+use crate::adapter_release::{LoadedAdapter, ServedBase};
+
+use std::sync::Arc;
+
 use data::rng::Rng;
 use data::tokenizer::{CharTokenizer, Tokenizer};
 use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat, SeqState};
@@ -463,11 +468,20 @@ pub struct QwenServeConfig {
     pub weights_int8: Option<bool>,
     /// `--qwen-max-prefill N`, clamped to `1..=512`, default 512.
     pub max_prefill_cap: u32,
+    /// `--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`: the
+    /// size of the adapter bank built beside the base weights, which lets
+    /// requests run under LoRA adapters ([`crate::adapter_registry`]). `None`
+    /// (the default) builds no bank and costs nothing; `Some` costs
+    /// [`AdapterBankSettings::device_bytes`] of device memory, which the
+    /// resident's footprint estimate includes. A model directory that holds
+    /// adapters for a base turns the bank on for that base with the defaults
+    /// of [`AdapterBankSettings`] when this is `None`.
+    pub adapter_bank: Option<AdapterBankSettings>,
 }
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, max_prefill_cap: 512 }
+        QwenServeConfig { ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, max_prefill_cap: 512, adapter_bank: None }
     }
 }
 
@@ -565,33 +579,17 @@ fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config
 /// `BRAIN_QWEN_TOKENIZER` name WHICH checkpoint; [`QwenServeConfig`]'s
 /// `--qwen-*` flags configure HOW to serve it). Runs the CPU/GPU forward
 /// `generate` path (never the NPU branch).
+///
+/// One resident is one copy of the weights, however many LoRA adapters ride
+/// on it: each adapter is its own model id ([`QwenAdapterView`]) that shares
+/// this resident's [`InstanceKey`], so base and adapter requests run in the
+/// same batches on the same engine. See [`crate::adapter_registry`].
 pub struct QwenResident {
     id: String,
     path: String,
-    /// The id `BRAIN_QWEN_WEIGHTS` resolved the base under (`local/<stem>`
-    /// for a bare file, `vendor/repo` for a store directory) - the id a
-    /// trainer resolving the same spelling writes on an adapter's card.
-    /// `None` for a catalog entry, which is served under its card's id.
-    base_id: Option<String>,
     tokenizer: String,
-    /// A named LoRA adapter's own weight file (`qwen3::lora::save_adapter`'s
-    /// output), when this resident is the ADAPTER's catalog entry rather than
-    /// the base's -- folded into the base tensors at `activate` (see that
-    /// method's doc). `None` for a plain base/quant resident.
-    ///
-    /// `RwLock`, not a plain `Option<String>`: `activate(&self, ..)` only
-    /// ever gets `&self` (this resident is registered once as `Arc<dyn
-    /// ResidentModel>` and shared), but the self-improve continuous-training
-    /// hot-swap path (roadmap P4/P5) needs to point an ALREADY-registered
-    /// resident at a newly-trained adapter file without re-registering under
-    /// the same model id (which would duplicate the manifest entry --
-    /// `Executor::register` has no update-in-place semantics, only
-    /// `register`/`register_if_absent`). [`Self::set_adapter`] writes here;
-    /// callers pair it with `Executor::evict` (evicts the stale Hot/Warm
-    /// instance so the NEXT claim's `activate` reads the new value -- a
-    /// currently-running request is never interrupted, `evict`'s own
-    /// pinned-refusal contract) to actually take effect.
-    adapter: std::sync::RwLock<Option<String>>,
+    /// The adapters this base offers and the bank size they run on.
+    adapters: Arc<AdapterRegistry>,
     /// Resolved once at construction (see [`Self::resolve_ctx`]) - explicit,
     /// auto-sized, or the historical 24576 fallback. Fixed for this
     /// resident's whole lifetime, exactly like every other field below.
@@ -640,8 +638,9 @@ impl QwenResident {
         };
 
         // See GptResident::from_env's comment: env-loaded, no upstream provenance.
-        let resident = Self::from_card_configured(&path, &ModelCard::new("brain/qwen3", "qwen"), Some(&tokenizer), None, cfg);
-        Some(QwenResident { base_id, ..resident })
+        // Adapters are bound to the id the spelling resolved to, the id a
+        // trainer resolving the same spelling writes on an adapter's card.
+        Some(Self::build(&path, "brain/qwen3".to_string(), base_id, &tokenizer, cfg))
     }
 
     /// [`Self::from_card_configured`] at every historical default -
@@ -650,24 +649,27 @@ impl QwenResident {
     /// tunables (tests, `perf_cli.rs`, `model_dir.rs`'s catalog scan,
     /// `continuous_train.rs`) is unaffected by this constructor's own
     /// existence.
-    pub fn from_card(path: &str, card: &ModelCard, tokenizer: Option<&str>, adapter: Option<&str>) -> QwenResident {
-        Self::from_card_configured(path, card, tokenizer, adapter, QwenServeConfig::default())
+    pub fn from_card(path: &str, card: &ModelCard, tokenizer: Option<&str>) -> QwenResident {
+        Self::from_card_configured(path, card, tokenizer, QwenServeConfig::default())
     }
 
-    /// Construct under the card's id. `tokenizer` is the sibling `tokenizer.json`
-    /// (empty/None defers the "set a tokenizer" error to `activate`). `adapter`
-    /// is the adapter's own weight file when `card.id` names one
-    /// (`brain_modelstore::LocalModel::adapter`) -- `None` for a plain base.
-    /// `cfg` resolves `ctx` once, here (see [`Self::resolve_ctx`]), and is
-    /// otherwise copied straight into fields `estimate`/`activate` read.
-    pub fn from_card_configured(path: &str, card: &ModelCard, tokenizer: Option<&str>, adapter: Option<&str>, cfg: QwenServeConfig) -> QwenResident {
+    /// Construct under the card's id, which is also the id adapters trained
+    /// on this base name as theirs. `tokenizer` is the sibling
+    /// `tokenizer.json` (empty/None defers the "set a tokenizer" error to
+    /// `activate`). `cfg` resolves `ctx` once, here (see
+    /// [`Self::resolve_ctx`]), and is otherwise copied straight into fields
+    /// `estimate`/`activate` read.
+    pub fn from_card_configured(path: &str, card: &ModelCard, tokenizer: Option<&str>, cfg: QwenServeConfig) -> QwenResident {
+        Self::build(path, card.id.clone(), Some(card.id.clone()), tokenizer.unwrap_or_default(), cfg)
+    }
+
+    fn build(path: &str, id: String, base_id: Option<String>, tokenizer: &str, cfg: QwenServeConfig) -> QwenResident {
         let ctx = Self::resolve_ctx(path, &cfg);
         QwenResident {
-            id: card.id.clone(),
+            id,
             path: path.to_string(),
-            base_id: None,
-            tokenizer: tokenizer.unwrap_or_default().to_string(),
-            adapter: std::sync::RwLock::new(adapter.filter(|a| !a.is_empty()).map(str::to_string)),
+            tokenizer: tokenizer.to_string(),
+            adapters: AdapterRegistry::new(cfg.adapter_bank, ServedBase::new(path, base_id)),
             ctx,
             max_batch: cfg.max_batch.max(1),
             kv_int8_requested: cfg.kv_int8,
@@ -738,22 +740,31 @@ impl QwenResident {
         }
     }
 
-    /// Point this ALREADY-registered resident at a different (or no) LoRA
-    /// adapter file - the self-improve continuous-training hot-swap write
-    /// side (see [`Self::adapter`]'s doc for the full contract). Takes
-    /// effect for the next `activate` - pair with `Executor::evict(self.
-    /// instance_key(...))` (or just `Executor::evict(InstanceKey::new(&self.
-    /// id, "default"))`) so a cached Hot/Warm instance from the OLD adapter
-    /// isn't reused first. the CLI's `continuous_train::swap_in_adapter` does
-    /// exactly that pairing.
-    pub fn set_adapter(&self, adapter: Option<String>) {
-        *self.adapter.write().unwrap() = adapter.filter(|a| !a.is_empty());
+    /// The adapters this base offers.
+    pub fn adapters(&self) -> &Arc<AdapterRegistry> {
+        &self.adapters
     }
 
-    /// The base checkpoint this resident folds adapters into, for
-    /// `crate::adapter_release` to bind an adapter to before it is set.
-    pub fn served_base(&self) -> crate::adapter_release::ServedBase {
-        crate::adapter_release::ServedBase::new(&self.path, self.base_id.clone())
+    /// The base checkpoint adapters are bound to, for
+    /// `crate::adapter_release` to verify an adapter against before it is
+    /// offered.
+    pub fn served_base(&self) -> ServedBase {
+        self.adapters.base().clone()
+    }
+
+    /// Offer `adapter` as a model of its own and return the view to register
+    /// with the executor. The view shares this resident's instance: nothing
+    /// is built, and the adapter reaches the engine's bank when the instance
+    /// next starts a batch. Dropping the view withdraws the adapter.
+    ///
+    /// # Errors
+    ///
+    /// The adapter's id is not an adapter model reference, or the bank this
+    /// server was started with cannot hold the adapter
+    /// ([`AdapterRegistry::attach`] says which flag to change).
+    pub fn adapter_view(self: &Arc<Self>, adapter: LoadedAdapter) -> Result<QwenAdapterView, String> {
+        let lease = self.adapters.attach(adapter)?;
+        Ok(QwenAdapterView::new(self.clone(), lease))
     }
 
     /// KV-pool geometry for the batched serving engine - the ONE place
@@ -915,21 +926,19 @@ impl ResidentModel for QwenResident {
         Manifest::new(&self.id, "text generation (Qwen3 BPE decoder)", vec![generate_spec("generate text (Qwen3; chat template optional)", true)])
             .with_max_context_tokens(self.ctx as u64)
     }
-    /// Keyed on the ADAPTER, not a constant.
-    ///
-    /// The manager holds one instance per key, so a constant here means one
-    /// instance per model and a version change can only be applied by
-    /// destroying what was there: `set_adapter` then `evict`, after which
-    /// the old version no longer exists to compare against or fall back to.
-    /// Naming the adapter makes two versions two instances, which is what
-    /// `residency::staged` needs in order to validate a candidate while the
-    /// incumbent keeps answering.
-    ///
-    /// A resident with no adapter keys on `"base"`, so the common case is
-    /// one instance exactly as before.
+    /// One key for the base and every adapter riding on it: a constant, because
+    /// the instance holds the base weights once and the adapters beside them
+    /// in a bank, so a request for any of them runs on it, in the same batch as
+    /// the others ([`QwenAdapterView`] answers with this same key).
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        let adapter = self.adapter.read().unwrap_or_else(|e| e.into_inner());
-        InstanceKey::new(self.id.as_str(), adapter.as_deref().unwrap_or("base"))
+        InstanceKey::new(self.id.as_str(), "default")
+    }
+    /// A caller reaching the base never selects an adapter: the reserved
+    /// param is the host's, and only a [`QwenAdapterView`] writes it.
+    fn stamp(&self, inv: &mut Invocation) {
+        if let Some(params) = inv.params.as_object_mut() {
+            params.remove(ADAPTER_PARAM);
+        }
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         let cost = est_vram(&self.path);
@@ -961,16 +970,21 @@ impl ResidentModel for QwenResident {
         // below requests the identical `weights_int8` value, so the two
         // cannot silently disagree about which tensors are quantized.
         let weight_bytes = if self.weights_int8_requested { weights_int8_bytes(&cfg) } else { weights_fp32_bytes(&cfg) };
+        // The adapter bank is allocated beside the weights at activation, sized
+        // by the same settings, over the larger of the decode batch and the
+        // prefill chunk (the rows the engine sizes its row buffers for).
+        let bank_bytes = self.adapters.settings().map_or(0, |bank| bank.device_bytes(&cfg, max_batch.max(max_prefill)));
         residency::log::info(&format!(
-            "{}: estimate weights={:.2}GiB(int8={}) kv={:.2}GiB scratch={:.2}GiB total={:.2}GiB",
+            "{}: estimate weights={:.2}GiB(int8={}) kv={:.2}GiB scratch={:.2}GiB adapter-bank={:.2}GiB total={:.2}GiB",
             self.id,
             weight_bytes as f64 / (1u64 << 30) as f64,
             self.weights_int8_requested,
             kv_bytes as f64 / (1u64 << 30) as f64,
             scratch_bytes as f64 / (1u64 << 30) as f64,
-            (weight_bytes + kv_bytes + scratch_bytes) as f64 / (1u64 << 30) as f64,
+            bank_bytes as f64 / (1u64 << 30) as f64,
+            (weight_bytes + kv_bytes + scratch_bytes + bank_bytes) as f64 / (1u64 << 30) as f64,
         ));
-        MemCost::new(weight_bytes + kv_bytes + scratch_bytes, cost.ram)
+        MemCost::new(weight_bytes + kv_bytes + scratch_bytes + bank_bytes, cost.ram)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // Coarse stage progress -- NOT per-tensor (the actual weight upload
@@ -1005,18 +1019,15 @@ impl ResidentModel for QwenResident {
         let stage_t0 = std::time::Instant::now();
         residency::log::info(&format!("{}: step 3/3 building engine (uploading weights to {device:?})", self.id));
         let ctx = self.ctx;
-        // Every checkpoint - a Hugging Face directory, a GGUF or a brain file,
-        // with or without a named LoRA adapter - gets the paged,
-        // continuous-batching engine, which holds f32 or int8 weights.
+        // Every checkpoint - a Hugging Face directory, a GGUF or a brain file -
+        // gets the paged, continuous-batching engine, which holds f32 or int8
+        // weights and, when the server was started with an adapter bank, the
+        // LoRA adapters it offers beside them.
         let engine = on_device(device, || -> Result<Box<model::serve::Scheduler<qwen3::serve::Engine>>, String> {
             // See QwenResident::pool_sizing's doc comment for the arithmetic
             // -- the same derivation `estimate()` predicts a budget from, so
             // the two cannot silently drift apart.
             let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, self.max_batch, self.max_prefill_cap);
-            // Both branches MUST pass the same kv_int8 -- a base and its
-            // folded-adapter sibling serving on numerically different KV
-            // paths would be a confusing, undocumented split.
-            //
             // A DEFAULT-selecting caller degrades loudly rather than hitting
             // `Engine::from_map_with_gpu`'s hard assert: nobody explicitly
             // asked this checkpoint's unusual `head_dim` for int8, so a
@@ -1071,42 +1082,27 @@ impl ResidentModel for QwenResident {
             // field, so the two cannot silently disagree about what was
             // asked for.
             let weights_int8 = self.weights_int8_requested;
-            // Snapshot the adapter path under the lock, then release it before
-            // the (potentially slow) fold/load below -- `set_adapter` must
-            // never block on an in-progress activation, and this activation
-            // must not hold up a concurrent `set_adapter` either.
-            let adapter_path = self.adapter.read().unwrap().clone();
-            let mut eng = match &adapter_path {
-                None => {
-                    // `Engine::load` re-derives its own `QwenConfig` straight
-                    // from the file, with no seam for `ctx`'s own YaRN
-                    // decision below to reach it -- go through the same
-                    // load-tensors-then-`from_map` shape the adapter branch
-                    // already uses so both branches share one cfg mutation
-                    // point.
-                    let load_t0 = std::time::Instant::now();
-                    let tensors = self.engine_tensors()?;
-                    gpu_core::profile::stage_time(&format!("{}: re-load checkpoint tensors for engine build", self.id), load_t0);
-                    let mut cfg = checkpoint_cfg.clone();
-                    Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);
-                    qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
-                }
-                // Fold the adapter's delta into the base tensors first (the same
-                // fold `qwen3::eval::score_chat` uses to score one) -- the result
-                // is an ordinary frozen base, zero extra inference cost versus
-                // the base once folded.
-                Some(a) => {
-                    let mut tensors = self.engine_tensors()?;
-                    let mut cfg = checkpoint_cfg.clone();
-                    qwen3::lora::fold_adapter_into(&mut tensors, a).map_err(|e| format!("qwen: folding adapter {a}: {e}"))?;
-                    cfg.lora = None;
-                    Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);
-                    qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
-                }
-            };
+            // `Engine::load` re-derives its own `QwenConfig` straight from the
+            // file, with no seam for `ctx`'s own YaRN decision below to reach
+            // it - go through load-tensors-then-`from_map` so the config is
+            // mutated in one place.
+            let load_t0 = std::time::Instant::now();
+            let tensors = self.engine_tensors()?;
+            gpu_core::profile::stage_time(&format!("{}: re-load checkpoint tensors for engine build", self.id), load_t0);
+            let mut cfg = checkpoint_cfg.clone();
+            Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);
+            let mut eng = qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8);
+            // The adapter bank, once per engine, from the settings the
+            // estimate above budgeted. Refusing here is deliberate: a server
+            // asked for adapters that cannot give them must say so, not serve
+            // the base under their names.
+            if let Some(bank) = self.adapters.settings() {
+                eng.enable_adapters(bank.bank_config()).map_err(|e| format!("qwen: adapter bank: {e}"))?;
+            }
             // --qwen-kv-calib: opt IN to a kv_calib.json beside the
-            // BASE checkpoint (self.path, not the adapter's own file, since
-            // the adapter is folded into the base's K/V distribution) --
+            // BASE checkpoint (measured on the base's K/V distribution, which
+            // an adapter's differs from: the engine warns when the two are
+            // combined) --
             // KvCalib::from_model_dir already warns and returns None on a
             // missing file or a shape mismatch, so opting in without a real
             // file just serves uncalibrated, same as not opting in.
@@ -1129,19 +1125,31 @@ impl ResidentModel for QwenResident {
             Ok(Box::new(model::serve::Scheduler::new(eng, max_batch as usize)))
         })??;
         gpu_core::profile::stage_time(&format!("{}: build engine (total, on_device)", self.id), stage_t0);
-        Ok(Box::new(QwenInstance { tok, format, stop, engine }))
+        let mut instance = QwenInstance { decoding: Decoding { tok, format, stop }, engine, adapters: AdapterSync::new(self.adapters.clone()) };
+        // Every adapter offered so far is registered with the engine before
+        // the first request, so a cold instance answers an adapter request
+        // as soon as it answers a base one.
+        instance.adapters.sync(instance.engine.decoder_mut());
+        Ok(Box::new(instance))
     }
 }
 
-struct QwenInstance {
+/// What turns requests into prompts and tokens back into text.
+struct Decoding {
     tok: data::qwen_tokenizer::QwenBpe,
     /// How requests become prompt text (`ChatFormat`).
     format: ChatFormat,
     /// The ids that end a generation (`data::generation::stop_ids`).
     stop: Vec<u32>,
+}
+
+struct QwenInstance {
+    decoding: Decoding,
     /// The paged, continuous-batching serving engine, whatever the
     /// checkpoint's format. Boxed: `Scheduler<Engine>` is large by value.
     engine: Box<model::serve::Scheduler<qwen3::serve::Engine>>,
+    /// Which adapters the engine's bank holds, and the route to each.
+    adapters: AdapterSync,
 }
 
 impl Instance for QwenInstance {
@@ -1156,8 +1164,16 @@ impl Instance for QwenInstance {
     /// whatever the dispatcher grouped into this one call (admitting MORE
     /// work into an ALREADY-running call is a separate, known gap this does
     /// not yet do).
+    ///
+    /// The group may mix the base and any number of adapters: a request's
+    /// adapter is the reserved param its model id stamped
+    /// ([`ADAPTER_PARAM`]), and the engine applies each row's own adapter in
+    /// the one batched forward. The engine's bank is brought in line with the
+    /// registry first, between calls, when no sequence is running, so a hot
+    /// swap never changes what a running sequence reads.
     fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-        run_batch_scheduled(&mut self.engine, &self.tok, &self.format, &self.stop, invs, progress)
+        self.adapters.sync(self.engine.decoder_mut());
+        run_batch_scheduled(&mut self.engine, &self.decoding, &self.adapters, invs, progress)
     }
 
     /// The prefix cache's effectiveness, surfaced through
@@ -1178,12 +1194,12 @@ impl Instance for QwenInstance {
 /// `Scheduler` - see [`QwenInstance::run_batch`]'s doc.
 fn run_batch_scheduled(
     sched: &mut model::serve::Scheduler<qwen3::serve::Engine>,
-    tok: &data::qwen_tokenizer::QwenBpe,
-    format: &ChatFormat,
-    stop: &[u32],
+    decoding: &Decoding,
+    adapters: &AdapterSync,
     invs: &[Invocation],
     progress: &mut dyn FnMut(usize, Progress),
 ) -> Vec<ActionResult> {
+    let Decoding { tok, format, stop } = decoding;
     // The scheduler-level batch: how many concurrent requests residency
     // bundled onto this SAME persistent `Scheduler` pass, as opposed to
     // `bridge.rs`'s per-HTTP-request log, which knows nothing about
@@ -1194,13 +1210,29 @@ fn run_batch_scheduled(
     let mut id_for_bi: Vec<Option<u64>> = Vec::with_capacity(invs.len());
 
     for (bi, inv) in invs.iter().enumerate() {
+        // The adapter this request's model id stands for. A name the bank no
+        // longer holds is the caller's "no model", never the base's answer
+        // under another name.
+        let adapter = match inv.get_str(ADAPTER_PARAM).map(|name| adapters.route(&name)).transpose() {
+            Ok(adapter) => adapter,
+            Err(e) => {
+                results[bi] = Some(Err(e));
+                seq_for_bi.push(None);
+                id_for_bi.push(None);
+                continue;
+            }
+        };
         match parse_request_as(tok, format, inv) {
             Ok(req) => {
                 let sample = model::serve::SampleParams { temp: req.temp, top_k: req.top_k, top_p: req.top_p };
                 let seed = req.seed;
                 let max_new = req.max_new;
                 let seq = SeqState::new(&req, inv.cancel.clone());
-                let id = sched.submit_sampled(model::serve::Request { prompt: req.ids, max_new, stop: stop.to_vec() }, sample, seed);
+                let request = model::serve::Request { prompt: req.ids, max_new, stop: stop.to_vec() };
+                let id = match adapter {
+                    Some(adapter) => sched.submit_for_adapter(request, adapter, sample, seed),
+                    None => sched.submit_sampled(request, sample, seed),
+                };
                 progress(bi, Progress::step(0, max_new as u32, "generating"));
                 seq_for_bi.push(Some(seq));
                 id_for_bi.push(Some(id));
@@ -1266,7 +1298,12 @@ fn run_batch_scheduled(
         for (id, reason) in report.rejected {
             let bi = id_for_bi.iter().position(|x| *x == Some(id)).expect("rejected id must belong to this batch");
             seq_for_bi[bi] = None;
-            results[bi] = Some(Err(format!("qwen: {reason}")));
+            results[bi] = Some(Err(match (&reason, invs[bi].get_str(ADAPTER_PARAM)) {
+                // An adapter the engine unloaded between routing and
+                // admission: as an unknown model, with no engine detail.
+                (model::serve::RejectReason::AdapterUnavailable { .. }, Some(name)) => format!("no model '{name}'"),
+                _ => format!("qwen: {reason}"),
+            }));
             remaining.remove(&bi);
         }
         for (id, toks) in report.completed {
@@ -1359,7 +1396,7 @@ mod tests {
         let seven_b = qwen3::config::QwenConfig { vocab: 102_400, d_model: 4096, n_layers: 30, n_heads: 32, n_kv_heads: 32, head_dim: 128, d_ff: 11_008, qk_norm: false, tie_embeddings: false, ..qwen3::config::QwenConfig::tiny() };
         let (big, small) = (shaped("7b.safetensors", &seven_b), shaped("tiny.safetensors", &qwen3::config::QwenConfig::tiny()));
         let card = checkpoint::st::ModelCard::new("deepseek-ai/deepseek-llm-7b-chat", "qwen");
-        let with = |path: &str, w: Option<bool>| QwenResident::from_card_configured(path, &card, None, None, QwenServeConfig { weights_int8: w, ..QwenServeConfig::default() }).weights_int8_requested;
+        let with = |path: &str, w: Option<bool>| QwenResident::from_card_configured(path, &card, None, QwenServeConfig { weights_int8: w, ..QwenServeConfig::default() }).weights_int8_requested;
         assert!(with(&big, None), "6.9B parameters default to int8 linears");
         assert!(!with(&small, None), "a tiny checkpoint stays fp32");
         assert!(!with(&big, Some(false)) && with(&small, Some(true)), "the flags win over the size");
@@ -1427,7 +1464,7 @@ mod tests {
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
         for (requested, expected) in [(128u32, 128u32), (0, 1), (999_999, 512)] {
             let cfg = QwenServeConfig { max_prefill_cap: requested, ..QwenServeConfig::default() };
-            let resident = QwenResident::from_card_configured("unused.safetensors", &card, Some("unused.json"), None, cfg);
+            let resident = QwenResident::from_card_configured("unused.safetensors", &card, Some("unused.json"), cfg);
             assert_eq!(resident.max_prefill_cap, expected, "requested {requested}");
         }
     }
@@ -1515,11 +1552,11 @@ mod tests {
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
         let key = InstanceKey::new("brain/qwen3", "default");
 
-        let fp32_resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"), None);
+        let fp32_resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"));
         let fp32_total = fp32_resident.estimate(&key).vram;
 
         let int8_cfg = QwenServeConfig { weights_int8: Some(true), ..QwenServeConfig::default() };
-        let int8_resident = QwenResident::from_card_configured(path.to_str().unwrap(), &card, Some("unused.json"), None, int8_cfg);
+        let int8_resident = QwenResident::from_card_configured(path.to_str().unwrap(), &card, Some("unused.json"), int8_cfg);
         let int8_total = int8_resident.estimate(&key).vram;
 
         assert!(int8_total < fp32_total, "requesting int8 weights must shrink the estimate: fp32={fp32_total} int8={int8_total}");
@@ -1683,7 +1720,7 @@ mod tests {
         let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
         let ctx = 24576u32;
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
-        let resident = QwenResident::from_card("unused.safetensors", &card, Some("unused.json"), None);
+        let resident = QwenResident::from_card("unused.safetensors", &card, Some("unused.json"));
         assert_eq!(resident.ctx, ctx, "this test's premise is the new default -- update it if the default changes");
         let (block_size, _max_batch, _max_blocks_per_seq, num_blocks, _max_prefill) = QwenResident::pool_sizing(ctx, 16, 512);
 
@@ -1741,7 +1778,7 @@ mod tests {
 
         let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
-        let resident = QwenResident::from_card("unused.safetensors", &card, Some("unused.json"), None);
+        let resident = QwenResident::from_card("unused.safetensors", &card, Some("unused.json"));
         let ctx = resident.ctx;
         assert_eq!(ctx, 24576, "this test's premise is the new default");
         let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, 16, 512);
@@ -1785,7 +1822,7 @@ mod tests {
         let path = write_tiny_checkpoint(11, "estimate");
         let cfg = qwen3::config::QwenConfig { vocab: 151936, ..qwen3::config::QwenConfig::tiny() };
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
-        let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"), None);
+        let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"));
         let key = InstanceKey::new("brain/qwen3", "default");
 
         let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(resident.ctx, resident.max_batch, resident.max_prefill_cap);
@@ -1844,7 +1881,7 @@ mod tests {
         let before: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
 
         let card = checkpoint::st::ModelCard::new("test/tiny-llama", "llama");
-        let resident = QwenResident::from_card(dir.to_str().unwrap(), &card, dir.join("tokenizer.json").to_str(), None);
+        let resident = QwenResident::from_card(dir.to_str().unwrap(), &card, dir.join("tokenizer.json").to_str());
         let mut inst = resident.activate(&InstanceKey::new("test/tiny-llama", "default"), Device::Gpu(0)).expect("activate");
         let inv = Invocation::new().set("prompt", json!("hello")).set("chat", json!(false)).set("max_new", json!(6)).set("temp", json!(0.0));
         let got = inst.run("generate", &inv, &mut |_| {}).expect("generate");
@@ -1902,7 +1939,7 @@ mod tests {
         let path = write_tiny_checkpoint(5, "prefix");
 
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
-        let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some(&tok_path), None);
+        let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some(&tok_path));
         let models: Vec<std::sync::Arc<dyn ResidentModel>> = vec![std::sync::Arc::new(resident)];
         let mut budgets = residency::budget::Budgets::new();
         budgets.set(Device::Cpu, 8 << 30, 0);
@@ -1983,7 +2020,9 @@ mod tests {
 
         let inv = Invocation::new().set("prompt", json!("hello")).set("chat", json!(true)).set("max_new", json!(4));
         let start = std::time::Instant::now();
-        let results = run_batch_scheduled(&mut sched, &tok, &ChatFormat::Qwen, &[], std::slice::from_ref(&inv), &mut |_i, _p| {});
+        let decoding = Decoding { tok, format: ChatFormat::Qwen, stop: Vec::new() };
+        let adapters = AdapterSync::new(AdapterRegistry::new(None, ServedBase::new("unused", None)));
+        let results = run_batch_scheduled(&mut sched, &decoding, &adapters, std::slice::from_ref(&inv), &mut |_i, _p| {});
         assert!(start.elapsed() < std::time::Duration::from_secs(5), "rejected admission must resolve promptly, not hang");
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err(), "an out-of-vocab prompt must be reported as an error, not silently dropped");

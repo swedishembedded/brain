@@ -848,7 +848,7 @@ fn build_http_qwen(weights: &str, tokenizer: &str) -> Result<Box<dyn PerfTarget>
 /// `apiserve` OpenAI router, driven over HTTP by `HttpTarget`.
 fn build_http_target(weights: &str, tokenizer: &str, model_id: &str, info: TargetInfo) -> Result<Box<dyn PerfTarget>, String> {
     let card = checkpoint::st::ModelCard::new(model_id, "qwen");
-    let resident = catalog::resident_llm::QwenResident::from_card(weights, &card, Some(tokenizer), None);
+    let resident = catalog::resident_llm::QwenResident::from_card(weights, &card, Some(tokenizer));
 
     let set = crate::compute_set();
     let mut budgets = residency::budget::Budgets::new();

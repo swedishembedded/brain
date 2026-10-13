@@ -44,6 +44,7 @@
 //! assembling an executor (budgets, discovery of a models directory) is
 //! `crates/serving`'s job.
 
+pub mod adapter_registry;
 pub mod adapter_release;
 pub mod demo;
 pub mod imageops;

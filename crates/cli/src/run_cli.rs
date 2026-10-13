@@ -148,13 +148,14 @@ SERVING OPTIONS
                          (else $BRAIN_MODELS_DIR, else $XDG_DATA_HOME/brain/models)
   --api-keys-out FILE    write {\"openai\":\"sk-brain-…\", …} as JSON, mode 0600
   --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2)
-  --watch-adapters DIR   watch DIR for promoted LoRA adapters and hot-swap the
-                         served Qwen3 onto the newest one, with no restart. OFF
+  --watch-adapters DIR   watch DIR for promoted LoRA adapters and offer the
+                         newest as a model of its own, with no restart. OFF
                          unless given. The newest is the highest-versioned
                          adapter-NNNNNN.safetensors, never the newest mtime.
-                         A request already running is never interrupted: the
-                         swap applies to the next one.
-  --adapter FILE         serve the Qwen3 with exactly this LoRA adapter release,
+                         The previous release is withdrawn once the new one is
+                         offered; a request already running is never
+                         interrupted, it finishes on the adapter it started on.
+  --adapter FILE         offer this LoRA adapter release as a model of its own,
                          never replaced. It must verify against the served base
                          (the base digest its card records, else its base id)
                          or the server does not start. Prints
@@ -163,13 +164,37 @@ SERVING OPTIONS
                          follow a release manifest,
                          {\"adapter\": \"<path>\", \"digest\": \"sha256:<hex>\"}
                          (a relative path is relative to FILE), re-read when it
-                         changes: a new release is swapped in only once the file
-                         hashes to that digest and verifies against the base;
+                         changes: a new release is offered only once the file
+                         hashes to that digest and verifies against the base,
+                         then the previous one is withdrawn;
                          a bad manifest keeps the previous adapter and says why.
                          Replace FILE atomically (write aside, rename over it)
                          and never rewrite a published adapter file.
                          --adapter, --adapter-manifest and --watch-adapters are
                          mutually exclusive.
+
+ADAPTERS  (one resident copy of the Qwen3 weights serves the base and every
+           adapter at once, in the same batches. An adapter is a model: it is
+           selected by its card id, <vendor>/<repo>:<owner>:<name>:<tag>, which
+           GET /v1/models lists with its {id, digest}. The base keeps its own
+           id and answers with no adapter. A model directory holding adapters
+           for a served Qwen3 offers them the same way. Adapters are loaded
+           by the operator only: no request can load, name a file for, or
+           fetch an adapter. An id that is not offered is an unknown model.)
+  --adapter-slots N      adapters resident on the device at once (default 4).
+                         More adapters than slots are offered by swapping the
+                         least recently used idle one out. Giving this, or
+                         either flag below, or any adapter flag above, builds
+                         the adapter bank; without them none is built and the
+                         bank costs nothing.
+  --adapter-rank-cap R   highest LoRA rank a slot holds (default 16). An
+                         adapter of a higher rank is refused.
+  --adapter-targets LIST linears the bank corrects: attention (wq,wk,wv,wo,
+                         the default), all, or a comma-separated list of wq,
+                         wk, wv, wo, gate, up, down. An adapter that corrects
+                         any other linear is refused. The bank takes
+                         slots x rank-cap x (k + n) x 4 bytes per targeted
+                         linear per layer, counted in the model's footprint.
   --ready-file PATH      create PATH (empty) once EVERY surface requested above
                          has bound its listener. Because the APIKEY lines and
                          --api-keys-out are both written BEFORE any bind, PATH
@@ -421,6 +446,11 @@ pub fn run_serve(args: &[String]) {
     // or followed through a manifest (see `continuous_train::AdapterMode`).
     let mut adapter: Option<String> = None;
     let mut adapter_manifest: Option<String> = None;
+    // `--adapter-slots` / `--adapter-rank-cap` / `--adapter-targets`: the size
+    // of the adapter bank. Built only when one of them, or any adapter source
+    // above, asks for adapters.
+    let mut adapter_bank = catalog::adapter_registry::AdapterBankSettings::default();
+    let mut adapter_bank_asked = false;
     // Every `--qwen-*` flag, built up as its own arm below is matched -
     // `catalog::resident_llm::QwenServeConfig`'s own `Default` is every
     // historical env-var default, byte for byte.
@@ -494,6 +524,23 @@ pub fn run_serve(args: &[String]) {
             "--watch-adapters" => watch_adapters = Some(val(args, &mut i, "--watch-adapters")),
             "--adapter" => adapter = Some(val(args, &mut i, "--adapter")),
             "--adapter-manifest" => adapter_manifest = Some(val(args, &mut i, "--adapter-manifest")),
+            "--adapter-slots" => {
+                adapter_bank.slots = parsed(args, &mut i, "--adapter-slots");
+                adapter_bank_asked = true;
+            }
+            "--adapter-rank-cap" => {
+                adapter_bank.rank_cap = parsed(args, &mut i, "--adapter-rank-cap");
+                adapter_bank_asked = true;
+            }
+            "--adapter-targets" => {
+                let list = val(args, &mut i, "--adapter-targets");
+                adapter_bank.targets = catalog::adapter_registry::AdapterTargets::parse(&list).unwrap_or_else(|e| {
+                    eprintln!("brain serve: --adapter-targets {list:?}: {e}\n");
+                    eprint!("{HELP}");
+                    std::process::exit(2);
+                });
+                adapter_bank_asked = true;
+            }
             "--qwen-ctx" => qwen_cfg.ctx = Some(parsed(args, &mut i, "--qwen-ctx")),
             "--qwen-max-batch" => qwen_cfg.max_batch = parsed(args, &mut i, "--qwen-max-batch"),
             "--qwen-kv-fp32" => qwen_cfg.kv_int8 = false,
@@ -565,6 +612,16 @@ pub fn run_serve(args: &[String]) {
             std::process::exit(2);
         }
     };
+
+    // The adapter bank exists when adapters were asked for, by a source or by
+    // a size, and not otherwise.
+    if adapter_bank_asked || adapter_mode != crate::continuous_train::AdapterMode::Base {
+        if let Err(e) = adapter_bank.validate() {
+            eprintln!("brain serve: {e}");
+            std::process::exit(2);
+        }
+        qwen_cfg.adapter_bank = Some(adapter_bank);
+    }
 
     if !args.iter().any(|a| a == "--seed") {
         cfg.seed = data::rng::random_seed();
@@ -861,7 +918,7 @@ fn run_apis(a: RunApis) {
     // (`--watch-adapters DIR` / `--adapter-manifest FILE`). Held for the whole
     // serving lifetime: the handle stops and joins its thread on drop, so the
     // watcher cannot outlive the surfaces it was swapping models under. `qwen`
-    // is the CONCRETE resident handle -- `set_adapter` is inherent, so the
+    // is the CONCRETE resident handle -- `adapter_view` is inherent, so the
     // erased one the executor holds could not do this.
     let follow = match crate::continuous_train::start_adapter_mode(a.adapter_mode, qwen.as_ref(), &executor) {
         Ok((follow, serving_line)) => {

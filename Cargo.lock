@@ -2503,6 +2503,7 @@ version = "2.0.0"
 dependencies = [
  "brain-arch",
  "brain-backend-api",
+ "brain-capability",
  "brain-catalog",
  "brain-checkpoint",
  "brain-fastvlm",
@@ -2515,6 +2516,7 @@ dependencies = [
  "brain-ltxv",
  "brain-memauth",
  "brain-minimaxh3",
+ "brain-modelref",
  "brain-modelstore",
  "brain-moondream3",
  "brain-npu",

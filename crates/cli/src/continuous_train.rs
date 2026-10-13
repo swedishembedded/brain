@@ -1,69 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The hot-swap half of the self-improve loop: point an already-registered
-//! `QwenResident` at a new LoRA adapter file and evict its stale instance so
-//! the NEXT claim against that resident's key rebuilds with the adapter
-//! folded in -- an in-flight request is never interrupted (`evict`'s own
-//! pinned-refusal contract).
+//! The adapters `brain serve` offers beside its Qwen3 base, and the unattended
+//! loop that keeps them current: `--adapter FILE` offers one verified release,
+//! `--adapter-manifest FILE` follows a release manifest, and `--watch-adapters
+//! DIR` follows a directory a training or promotion step publishes into.
 //!
-//! [`swap_in_adapter`] is the pairing itself: `resident_llm::QwenResident::
-//! set_adapter` (crate `cli`) + `residency::Executor::evict` (crate
-//! `residency`). [`AdapterWatcher`] drives it unattended against a LIVE
-//! server: `brain serve --watch-adapters DIR` polls `DIR` for the
-//! highest-versioned adapter a publisher has dropped there -- a gated
-//! promotion (`rl::improve::cycle`) run elsewhere, a scheduled `lora_train`
-//! capability run, a promotion on another machine -- and applies it through
-//! [`swap_in_adapter`], with no restart and no re-registration.
-//! `--adapter-manifest FILE` follows a release manifest instead, swapping
-//! only releases whose digest verifies (`catalog::adapter_release`), and
-//! `--adapter FILE` pins one verified release with no watcher at all
-//! ([`AdapterMode`], [`start_adapter_mode`]).
+//! Every adapter is a model of its own, named by its card id
+//! (`<vendor>/<repo>:<owner>:<name>:<tag>`), served on the one resident copy of
+//! the base weights ([`catalog::adapter_registry`]). The base keeps answering
+//! under its own id. A new release has a new card id (a new tag) and digest:
+//! it is offered beside the old one, and only then is the old one withdrawn, so
+//! a client that selects the new id never sees a gap, and a request already
+//! running under the old one finishes on it. A release that keeps its card id
+//! under a new digest replaces the adapter under that id the same way.
+//!
+//! [`LiveAdapters`](catalog::adapter_registry::LiveAdapters) is the one place
+//! an adapter enters or leaves a running executor; [`AdapterWatcher`] drives it
+//! unattended against a LIVE server and [`start_adapter_mode`] does the same
+//! once, before anything binds ([`AdapterMode`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use catalog::adapter_release::{identify_adapter, verify_adapter, ManifestFollower, ManifestPoll};
+use catalog::adapter_registry::LiveAdapters;
+use catalog::adapter_release::{load_adapter, verify_adapter, LoadedAdapter, ManifestFollower, ManifestPoll};
 use catalog::resident_llm::QwenResident;
-use capability::Invocation;
-use residency::{AdapterIdentity, Executor, InstanceKey, ResidentModel};
-
-/// Point `resident` at `adapter` and drop the stale instance so the NEXT
-/// claim against `key` rebuilds with it folded in. Returns whether an
-/// instance was actually evicted.
-///
-/// The order is load-bearing and is why this is one function rather than two
-/// calls at each call site: `set_adapter` first, so that any activation from
-/// this instant on already reads the new path, and only then `evict`, whose
-/// job is limited to getting rid of an instance built BEFORE that write. A
-/// `false` return therefore never means the swap was lost - either nothing
-/// was resident (the next activation reads the new adapter anyway) or a
-/// request is in flight and `evict` refused rather than tearing down a
-/// running lane, which is exactly the pinned-safety contract that makes a
-/// mid-request swap harmless.
-///
-/// `identity` is what the serving surfaces then report as the model's adapter
-/// (`/models` cards): recorded in the same step, from the same `adapter`, so the
-/// two cannot drift. It is recorded as soon as the resident points at the new
-/// file, which is what every later request is served from. `None` clears it:
-/// an adapter whose identity is unknown is reported as unknown, never as the
-/// previous one.
-pub fn swap_in_adapter(resident: &QwenResident, executor: &Executor, adapter: &Path, identity: Option<AdapterIdentity>) -> bool {
-    // The key is read BEFORE the write, and that ordering is the contract
-    // now that a resident may key on the adapter it is pointing at
-    // (`QwenResident::instance_key`). What has to be evicted is the instance
-    // built from the OLD value; asking afterwards would name the new one,
-    // which is not resident yet, and leave the stale instance serving.
-    let stale = resident.instance_key("generate", &Invocation::new());
-    resident.set_adapter(adapter.to_str().map(str::to_string));
-    executor.set_served_adapter(&stale.model, identity);
-    executor.evict(stale)
-}
+use residency::Executor;
 
 /// Where `brain serve`'s Qwen3 gets its LoRA adapter from. One source at
-/// most: a pinned release combined with anything that could replace it
-/// would make "what is served" depend on timing.
+/// most. Each source names its adapters by their own card ids, so combining
+/// them would not make "what is served" depend on timing any more, but it would
+/// make "which id is the current one" depend on which source moved last; the
+/// flags stay exclusive until a deployment needs two sources.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdapterMode {
     /// No adapter flag: the base alone.
@@ -73,7 +43,7 @@ pub enum AdapterMode {
     Pinned(PathBuf),
     /// `--watch-adapters DIR`: the highest-versioned adapter in `DIR`.
     Latest(PathBuf),
-    /// `--adapter-manifest FILE`: the release a manifest names, swapped
+    /// `--adapter-manifest FILE`: the release a manifest names, offered
     /// only once its digest verifies.
     Manifest(PathBuf),
 }
@@ -93,11 +63,32 @@ impl AdapterMode {
 }
 
 /// What an [`AdapterWatcher`] follows after startup.
-pub enum Follow {
+pub struct Follow {
+    source: FollowSource,
+    /// The card id this source has offered so far, which the next release
+    /// withdraws once it is offered itself.
+    served: Option<String>,
+}
+
+enum FollowSource {
     /// The highest-versioned adapter in a directory.
     Latest(PathBuf),
     /// A release manifest.
     Manifest(ManifestFollower),
+}
+
+impl Follow {
+    /// Follow the highest-versioned adapter in `dir`.
+    pub fn latest(dir: PathBuf) -> Follow {
+        Follow { source: FollowSource::Latest(dir), served: None }
+    }
+
+    fn describe(&self) -> PathBuf {
+        match &self.source {
+            FollowSource::Latest(dir) => dir.clone(),
+            FollowSource::Manifest(follower) => follower.path().to_path_buf(),
+        }
+    }
 }
 
 /// Put `mode` into effect on `resident` before anything is served. Returns
@@ -107,41 +98,39 @@ pub enum Follow {
 /// A pinned adapter that does not verify is an error, and so is a manifest
 /// that exists but does not verify: at startup there is no previous release
 /// to keep serving, and serving the base in its place would answer requests
-/// from a model the operator did not ask for. A manifest that does not
-/// exist yet serves the base until one is published.
+/// for a model the operator did not ask for. A manifest that does not
+/// exist yet offers the base alone until one is published.
 pub fn start_adapter_mode(mode: AdapterMode, resident: Option<&Arc<QwenResident>>, executor: &Executor) -> Result<(Option<Follow>, Option<String>), String> {
-    let required = |flag: &str| resident.ok_or_else(|| format!("{flag} needs a served Qwen3 to fold the adapter into; name its checkpoint with BRAIN_QWEN_WEIGHTS=<dir-or-file>"));
+    let required = |flag: &str| resident.ok_or_else(|| format!("{flag} needs a served Qwen3 to put the adapter on; name its checkpoint with BRAIN_QWEN_WEIGHTS=<dir-or-file>"));
     match mode {
         AdapterMode::Base => Ok((None, None)),
-        AdapterMode::Latest(dir) => Ok((Some(Follow::Latest(dir)), None)),
+        AdapterMode::Latest(dir) => Ok((Some(Follow::latest(dir)), None)),
         AdapterMode::Pinned(path) => {
             let resident = required("--adapter")?;
-            let release = verify_adapter(&path, &resident.served_base())?;
-            swap_in_adapter(resident, executor, &release.path, Some(release.identity()));
-            Ok((None, Some(release.serving_line(&served_model(resident)))))
+            let loaded = verify_adapter(&path, &resident.served_base())?;
+            let line = loaded.release.serving_line(&loaded.release.id);
+            LiveAdapters::new(resident.clone(), executor.clone()).serve(loaded)?;
+            Ok((None, Some(line)))
         }
         AdapterMode::Manifest(path) => {
             let resident = required("--adapter-manifest")?;
             let mut follower = ManifestFollower::new(path, resident.served_base());
-            let line = match follower.poll() {
-                ManifestPoll::Release(release) => {
-                    swap_in_adapter(resident, executor, &release.path, Some(release.identity()));
-                    Some(release.serving_line(&served_model(resident)))
+            let (served, line) = match follower.poll() {
+                ManifestPoll::Release(loaded) => {
+                    let line = loaded.release.serving_line(&loaded.release.id);
+                    let id = loaded.release.id.clone();
+                    LiveAdapters::new(resident.clone(), executor.clone()).serve(*loaded)?;
+                    (Some(id), Some(line))
                 }
                 ManifestPoll::Rejected(why) => return Err(why),
                 ManifestPoll::Missing | ManifestPoll::Unchanged => {
-                    eprintln!("brain serve: no release manifest at {} yet; serving the base until one is published", follower.path().display());
-                    None
+                    eprintln!("brain serve: no release manifest at {} yet; serving the base alone until one is published", follower.path().display());
+                    (None, None)
                 }
             };
-            Ok((Some(Follow::Manifest(follower)), line))
+            Ok((Some(Follow { source: FollowSource::Manifest(follower), served }), line))
         }
     }
-}
-
-/// The model id `resident` serves under.
-fn served_model(resident: &QwenResident) -> String {
-    resident.instance_key("generate", &Invocation::new()).model
 }
 
 /// How often [`AdapterWatcher`] looks at its directory. Small enough that a
@@ -150,12 +139,12 @@ fn served_model(resident: &QwenResident) -> String {
 /// holding a handful of files per tick.
 const POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// A background thread watching one directory for a newer adapter and
-/// applying it to a live `QwenResident` through [`swap_in_adapter`].
+/// A background thread watching one directory or manifest for a newer adapter
+/// and offering it on a live `QwenResident` through [`LiveAdapters`].
 ///
 /// Opt-in (`brain serve --watch-adapters DIR`), never on by default: a
-/// serving process that silently reloads its weights because a file appeared
-/// on disk is not something an operator should get without asking.
+/// serving process that silently starts offering a model because a file
+/// appeared on disk is not something an operator should get without asking.
 ///
 /// Stops and joins on drop, so the thread's lifetime is exactly the serving
 /// surfaces' lifetime rather than "until the process exits" - a detached
@@ -168,10 +157,9 @@ pub struct AdapterWatcher {
 }
 
 impl AdapterWatcher {
-    /// How many adapters this watcher has fully applied - the resident
-    /// pointed at the new file AND no instance built before that write left
-    /// resident. Observable so a caller (and the test) can wait for a swap
-    /// to land instead of racing the poll interval.
+    /// How many adapters this watcher has offered. Observable so a caller
+    /// (and the test) can wait for a swap to land instead of racing the poll
+    /// interval.
     pub fn swaps(&self) -> u64 {
         self.swaps.load(Ordering::SeqCst)
     }
@@ -222,10 +210,6 @@ pub(crate) fn ignored_watch_warning(dir: Option<&Path>, has_resident: bool) -> O
 /// `follow` is `None` (no following flag was given - the default, or a
 /// pinned adapter) or `resident` is `None` (this process serves no Qwen3, so
 /// no adapter could be applied to anything).
-///
-/// Takes the CONCRETE `Arc<QwenResident>` rather than the erased
-/// `Arc<dyn ResidentModel>` the executor holds, because `set_adapter` is
-/// inherent - see `serving::Serving`.
 pub fn spawn_adapter_watcher(follow: Option<Follow>, resident: Option<Arc<QwenResident>>, executor: &Executor) -> Option<AdapterWatcher> {
     // No flag: the default, and correctly silent.
     let mut follow = follow?;
@@ -237,33 +221,23 @@ pub fn spawn_adapter_watcher(follow: Option<Follow>, resident: Option<Arc<QwenRe
     // concludes that training achieved nothing -- the process reports success
     // the whole way through.
     let Some(resident) = resident else {
-        let watched = match &follow {
-            Follow::Latest(dir) => dir.as_path(),
-            Follow::Manifest(follower) => follower.path(),
-        };
-        if let Some(warning) = ignored_watch_warning(Some(watched), false) {
+        if let Some(warning) = ignored_watch_warning(Some(&follow.describe()), false) {
             eprintln!("{warning}");
         }
         return None;
     };
-    // Asked of the resident each time rather than captured once: the
-    // variant string is the resident's business, and a resident that keys on
-    // its current adapter answers differently after every swap. A key held
-    // for the life of the process would name the instance that was resident
-    // at startup and silently evict nothing from the second swap onward.
-    let model = resident.instance_key("generate", &Invocation::new()).model;
     let stop = Arc::new(AtomicBool::new(false));
     let swaps = Arc::new(AtomicU64::new(0));
     let rejections = Arc::new(AtomicU64::new(0));
-    let executor = executor.clone();
+    let live = LiveAdapters::new(resident, executor.clone());
     let counters = WatchCounters { stop: stop.clone(), swaps: swaps.clone(), rejections: rejections.clone() };
-    match &follow {
-        Follow::Latest(dir) => eprintln!("brain serve: watching {} for promoted LoRA adapters ({model})", dir.display()),
-        Follow::Manifest(follower) => eprintln!("brain serve: following release manifest {} ({model})", follower.path().display()),
+    match &follow.source {
+        FollowSource::Latest(dir) => eprintln!("brain serve: watching {} for promoted LoRA adapters", dir.display()),
+        FollowSource::Manifest(follower) => eprintln!("brain serve: following release manifest {}", follower.path().display()),
     }
     let join = std::thread::Builder::new()
         .name("brain-adapter-watch".to_string())
-        .spawn(move || watch_loop(&mut follow, &resident, &executor, &counters))
+        .spawn(move || watch_loop(&mut follow, &live, &counters))
         .ok()?;
     Some(AdapterWatcher { stop, swaps, rejections, join: Some(join) })
 }
@@ -275,32 +249,51 @@ struct WatchCounters {
     rejections: Arc<AtomicU64>,
 }
 
-/// An adapter `follow` has named, with the identity to report for it when one
-/// could be established.
-struct NextAdapter {
-    path: PathBuf,
-    identity: Option<AdapterIdentity>,
+/// A file's size and modification time: whether a file that failed to load
+/// has been touched since, so a broken file is read again only when it
+/// changed.
+#[derive(Clone, PartialEq, Eq)]
+struct FileStamp(Option<(u64, std::time::SystemTime)>);
+
+impl FileStamp {
+    fn of(path: &Path) -> FileStamp {
+        FileStamp(std::fs::metadata(path).ok().and_then(|m| Some((m.len(), m.modified().ok()?))))
+    }
 }
 
-/// The adapter `follow` names that is not the one already `applied`, if any.
-/// A manifest's own refusals are said here, once each, since the previous
+/// What the watcher remembers between ticks about a directory.
+#[derive(Default)]
+struct DirMemory {
+    /// The newest file already offered.
+    offered: Option<PathBuf>,
+    /// A file that failed to load, and how it looked: said once, retried when
+    /// it changes.
+    failed: Option<(PathBuf, FileStamp)>,
+}
+
+/// The next adapter `follow` names that is not already offered, if any. A
+/// manifest's own refusals are said here, once each, since the previous
 /// adapter silently staying served would otherwise be their only symptom.
-fn next_adapter(follow: &mut Follow, applied: Option<&Path>, model: &str, rejections: &AtomicU64) -> Option<NextAdapter> {
-    match follow {
-        Follow::Latest(dir) => match rl::improve::latest_adapter(dir) {
-            // This directory's files are not verified against the base (a
-            // gated promotion put them there), but they are still named by
-            // their card id and content digest; a file that cannot be named
-            // is served all the same and simply reported as unidentified.
-            Ok(Some((_, path))) if applied != Some(path.as_path()) => {
-                let identity = match identify_adapter(&path) {
-                    Ok(release) => Some(release.identity()),
+fn next_adapter(source: &mut FollowSource, memory: &mut DirMemory, rejections: &AtomicU64) -> Option<LoadedAdapter> {
+    match source {
+        FollowSource::Latest(dir) => match rl::improve::latest_adapter(dir) {
+            // This directory's files are not bound to the base (a gated
+            // promotion put them there), but each is read once, named by its
+            // card id and content digest, and refused if it is not a Qwen3
+            // LoRA.
+            Ok(Some((_, path))) if memory.offered.as_deref() != Some(path.as_path()) => {
+                let stamp = FileStamp::of(&path);
+                if memory.failed.as_ref().is_some_and(|(p, s)| *p == path && *s == stamp) {
+                    return None;
+                }
+                match load_adapter(&path) {
+                    Ok(loaded) => Some(loaded),
                     Err(why) => {
-                        eprintln!("brain serve: {model}: serving an adapter that cannot be identified: {why}");
+                        eprintln!("brain serve: not offering the adapter {}: {why}", path.display());
+                        memory.failed = Some((path, stamp));
                         None
                     }
-                };
-                Some(NextAdapter { path, identity })
+                }
             }
             Ok(_) => None,
             // A directory that has not been created yet is the normal state
@@ -312,12 +305,9 @@ fn next_adapter(follow: &mut Follow, applied: Option<&Path>, model: &str, reject
             }
         },
         // The follower compares releases by digest, so a new release written
-        // under the path already served is still swapped in.
-        Follow::Manifest(follower) => match follower.poll() {
-            ManifestPoll::Release(release) => {
-                eprintln!("{}", release.serving_line(model));
-                Some(NextAdapter { identity: Some(release.identity()), path: release.path })
-            }
+        // under the path already served is still offered.
+        FollowSource::Manifest(follower) => match follower.poll() {
+            ManifestPoll::Release(loaded) => Some(*loaded),
             ManifestPoll::Rejected(why) => {
                 rejections.fetch_add(1, Ordering::SeqCst);
                 eprintln!("brain serve: keeping the adapter already served: {why}");
@@ -328,63 +318,41 @@ fn next_adapter(follow: &mut Follow, applied: Option<&Path>, model: &str, reject
     }
 }
 
-/// The watcher's body: adopt each new adapter `follow` names, then keep
-/// retrying the eviction half for as long as an in-flight request is
-/// pinning the stale instance.
-///
-/// `applied` tracks what was handed to `set_adapter`, so an unchanged
-/// directory costs one `read_dir` per tick and nothing else (an unchanged
-/// manifest, one small read). `pending` is the deferred half: `evict`
-/// refuses while a request runs, and the swap is then simply owed, not lost. It is cleared once the stale instance is
-/// gone - either evicted, or found not resident at all, which after the
-/// `set_adapter` above means every future activation already reads the new
-/// adapter and there is nothing left to drop.
-fn watch_loop(follow: &mut Follow, resident: &QwenResident, executor: &Executor, counters: &WatchCounters) {
+/// The watcher's body: offer each new adapter `follow` names, then withdraw
+/// the one it replaces. In that order, so a client that selects the new id
+/// never finds neither.
+fn watch_loop(follow: &mut Follow, live: &LiveAdapters, counters: &WatchCounters) {
     let WatchCounters { stop, swaps, rejections } = counters;
-    let model = served_model(resident);
-    let mut applied: Option<PathBuf> = None;
-    // The key whose instance is owed an eviction, captured at the moment the
-    // swap was applied. It cannot be re-derived later: by then the resident
-    // answers with the NEW adapter's key, and the instance still holding
-    // memory is the old one.
-    let mut pending: Option<InstanceKey> = None;
+    let mut memory = DirMemory::default();
     while !stop.load(Ordering::SeqCst) {
-        if let Some(NextAdapter { path, identity }) = next_adapter(follow, applied.as_deref(), &model, rejections) {
-            let stale = resident.instance_key("generate", &Invocation::new());
-            pending = (!swap_in_adapter(resident, executor, &path, identity)).then_some(stale);
-            applied = Some(path);
-            if pending.is_none() {
-                swaps.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        // Short-circuit order is the contract, not a style choice: ask
-        // whether anything stale is resident BEFORE attempting the eviction
-        // (see `is_resident`).
-        if let Some(stale) = pending.clone() {
-            if !is_resident(executor, &stale) || executor.evict(stale) {
-                pending = None;
-                swaps.fetch_add(1, Ordering::SeqCst);
+        if let Some(loaded) = next_adapter(&mut follow.source, &mut memory, rejections) {
+            let release = loaded.release.clone();
+            match live.serve(loaded) {
+                Ok(()) => {
+                    eprintln!("{}", release.serving_line(&release.id));
+                    memory.offered = Some(release.path.clone());
+                    if let Some(old) = follow.served.replace(release.id.clone()).filter(|old| *old != release.id) {
+                        live.retire(&old);
+                    }
+                    swaps.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(why) => {
+                    eprintln!("brain serve: not offering the adapter {}: {why}", release.path.display());
+                    memory.failed = Some((release.path.clone(), FileStamp::of(&release.path)));
+                }
             }
         }
         std::thread::sleep(POLL);
     }
 }
 
-/// Whether an instance for `key` is currently resident. Checked BEFORE
-/// retrying a refused eviction, never after: an `evict` that fails on a key
-/// nothing has claimed is indistinguishable from one refused by a pinned,
-/// in-flight request, and retrying the second case forever while treating
-/// the first as still-owed would evict a perfectly current instance the
-/// moment one is finally built.
-fn is_resident(executor: &Executor, key: &InstanceKey) -> bool {
-    executor.residency().placements.iter().any(|p| &p.key == key)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use brain_testutil::adapters::{file_digest as digest, scratch_dir as tmp, write_adapter, write_base, write_byte_tokenizer, write_lora_adapter, Linear};
+    use catalog::adapter_registry::AdapterBankSettings;
+    use catalog::resident_llm::QwenServeConfig;
     use checkpoint::st::ModelCard;
-    use data::chat_template::ChatTemplate;
     use qwen3::config::QwenConfig;
     use residency::{budget::Budgets, Device, Policy};
     use std::sync::Arc;
@@ -393,18 +361,17 @@ mod tests {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
     }
 
-    fn tmp(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("brain-cli-hot-swap-cycle-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// The card id the fixtures' adapters carry: an adapter reference.
+    const ONE: &str = "brain/qwen3:test:release:v1";
+    const TWO: &str = "brain/qwen3:test:release:v2";
+
+    /// A server config with the default adapter bank.
+    fn banked() -> QwenServeConfig {
+        QwenServeConfig { adapter_bank: Some(AdapterBankSettings::default()), ..QwenServeConfig::default() }
     }
 
-    /// Same tiny (vocab 23, a handful of layers) shape `resident_llm.rs`'s
-    /// own tests already use, at a caller-chosen vocab -- the live-serving
-    /// test below needs one wide enough for a real byte tokenizer.
-    fn write_tiny_base_cfg(path: &std::path::Path, seed: u64, cfg: QwenConfig) {
-        let init = qwen3::init_weights(&cfg, seed);
+    fn write_tiny_base(path: &std::path::Path, seed: u64, cfg: &QwenConfig) {
+        let init = qwen3::init_weights(cfg, seed);
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
             .param_list()
             .into_iter()
@@ -413,101 +380,28 @@ mod tests {
         checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
     }
 
-    fn tiny_tmpl() -> ChatTemplate {
-        ChatTemplate::compile("{% for m in messages %}<|{{ m.role }}|>{{ m.content }}{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}").unwrap()
+    /// Every attention linear of the tiny model, in the shapes an adapter
+    /// file stores them.
+    fn attention_linears(cfg: &QwenConfig) -> Vec<Linear> {
+        let (d, hq, hkv) = (cfg.d_model as usize, cfg.q_dim() as usize, cfg.kv_dim() as usize);
+        (0..cfg.n_layers)
+            .flat_map(|l| [("wq", hq, d), ("wk", hkv, d), ("wv", hkv, d), ("wo", d, hq)].map(|(leaf, out, inn)| Linear { base: format!("blocks.{l}.attn.{leaf}.weight"), out, inn }))
+            .collect()
     }
 
-    /// A `tokenizer.json` with one token per printable ASCII byte (plus space
-    /// and newline) and no merges, written into `dir` and returned. `QwenBpe`
-    /// maps each byte through GPT-2's `bytes_to_unicode`, which is the
-    /// IDENTITY on `0x21..=0x7E`, so every byte is its own token - enough to
-    /// round-trip both this test's fixture text and the chat template's own
-    /// `<|im_start|>`/`<|im_end|>` markers, which is what lets the live-serving
-    /// test below drive a real chat request with no real checkpoint and no
-    /// `QWEN_TOKENIZER` on the box.
-    fn write_byte_tokenizer(dir: &std::path::Path) -> std::path::PathBuf {
-        std::fs::create_dir_all(dir).unwrap();
-        let mut vocab = serde_json::Map::new();
-        for (i, b) in (0x21u8..=0x7e).enumerate() {
-            vocab.insert((b as char).to_string(), serde_json::json!(i));
-        }
-        let n = vocab.len();
-        vocab.insert('\u{0120}'.to_string(), serde_json::json!(n)); // space
-        vocab.insert('\u{010a}'.to_string(), serde_json::json!(n + 1)); // newline
-        let path = dir.join("tokenizer.json");
-        std::fs::write(&path, serde_json::json!({"model": {"vocab": vocab, "merges": []}}).to_string()).unwrap();
-        // A ChatML template beside it: a checkpoint with no template serves
-        // raw prompts only, and this vocabulary has no `<|im_start|>` special
-        // to infer ChatML from.
-        let chatml = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}";
-        std::fs::write(dir.join("tokenizer_config.json"), serde_json::json!({ "chat_template": chatml }).to_string()).unwrap();
-        path
+    fn cpu_executor(models: Vec<Arc<dyn residency::ResidentModel>>) -> Executor {
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Cpu, 8 << 30, 0);
+        Executor::start(models, budgets, Policy::default())
     }
 
-    /// One ATIF trajectory with a reward, the input [`stage_adapter`]
-    /// ingests -- long enough (and repetitive enough) that a few hundred
-    /// LoRA steps on a tiny model move the weights somewhere a greedy decode
-    /// can see.
-    fn write_trajectory(dir: &std::path::Path) {
-        std::fs::create_dir_all(dir).unwrap();
-        let traj = serde_json::json!({
-            "schema_version": "ATIF-v1.7",
-            "agent": {"name": "test-agent", "version": "0.0.1"},
-            "final_metrics": {"extra": {"reward": 1.0}},
-            "steps": [
-                {"step_id": 1, "source": "user", "message": "what colour is the sky"},
-                {"step_id": 2, "source": "agent", "message": "the sky is green green green green green green"}
-            ]
-        });
-        std::fs::write(dir.join("t1.json"), serde_json::to_string(&traj).unwrap()).unwrap();
-    }
-
-    /// Train and save a real, versioned LoRA adapter file straight to
-    /// `adapter_out_dir`, for the live-serve test below to drop into a
-    /// watched directory. Deliberately NOT `rl::improve::cycle`: it does
-    /// its own gating, and what this fixture stands in for is "some other
-    /// process already gated this and published the file" -- the property
-    /// under test here is [`AdapterWatcher`]'s live-swap behavior, not
-    /// promotion.
-    fn stage_adapter(
-        trajectories_dir: &std::path::Path,
-        base_checkpoint: &std::path::Path,
-        training_checkpoint: &std::path::Path,
-        adapter_out_dir: &std::path::Path,
-        tok: &data::qwen_tokenizer::QwenBpe,
-        tmpl: &ChatTemplate,
-        lora_rank: u32,
-        lora_alpha: f32,
-        opts: &model::FitOpts,
-    ) -> std::io::Result<PathBuf> {
-        let base = checkpoint::load(base_checkpoint.to_str().expect("utf-8 path"));
-        let base_cfg = QwenConfig::from_json_checked(&base.header["config"]).map_err(std::io::Error::other)?;
-        let vocab = base_cfg.vocab;
-
-        let dataset_dir = training_checkpoint.parent().unwrap_or_else(|| std::path::Path::new(".")).join("dataset");
-        let count = rl::atif::ingest_dir(trajectories_dir, tok, tmpl, vocab as usize, &dataset_dir)?;
-        assert!(count > 0, "stage_adapter: the fixture trajectory must ingest to a non-empty dataset");
-
-        let mut cfg = base_cfg;
-        cfg.lora = Some(qwen3::config::LoraCfg::attn(lora_rank, lora_alpha));
-        rl::fit_weighted::<qwen3::model::Qwen>(&dataset_dir, cfg, opts, Some(training_checkpoint))?;
-
-        let trained = checkpoint::load(training_checkpoint.to_str().expect("utf-8 path"));
-        let trained_cfg = QwenConfig::from_json_checked(&trained.header["config"]).map_err(std::io::Error::other)?;
-        let init = trained.by_role("");
-        let block = trained_cfg.block_size;
-        let model = qwen3::model::Qwen::new(trained_cfg, 1, block, &init);
-
-        std::fs::create_dir_all(adapter_out_dir)?;
-        let version = rl::improve::latest_adapter(adapter_out_dir)?.map(|(v, _)| v + 1).unwrap_or(0);
-        let adapter_path = adapter_out_dir.join(format!("adapter-{version:06}.safetensors"));
-        qwen3::lora::save_adapter(adapter_path.to_str().expect("utf-8 path"), &model, &format!("adapter-{version:06}"), "base", None)?;
-        Ok(adapter_path)
+    fn listed(executor: &Executor, model: &str) -> bool {
+        executor.manifests().iter().any(|m| m.model == model)
     }
 
     /// The watcher is OPT-IN: `brain serve` without `--watch-adapters` must
     /// spawn no background thread at all, and neither must a run that names a
-    /// directory but serves no Qwen3 (nothing to point at a new adapter).
+    /// directory but serves no Qwen3 (nothing to put an adapter on).
     #[test]
     fn no_watcher_is_spawned_unless_the_flag_names_an_adapter_directory() {
         let mut budgets = Budgets::new();
@@ -517,8 +411,8 @@ mod tests {
 
         assert!(spawn_adapter_watcher(None, None, &executor).is_none(), "no --watch-adapters must spawn no watcher");
         assert!(
-            spawn_adapter_watcher(Some(Follow::Latest(dir)), None, &executor).is_none(),
-            "a watched directory with no served Qwen3 has nothing to swap, so it must spawn no watcher either"
+            spawn_adapter_watcher(Some(Follow::latest(dir)), None, &executor).is_none(),
+            "a watched directory with no served Qwen3 has nothing to offer an adapter on, so it must spawn no watcher either"
         );
     }
 
@@ -533,86 +427,82 @@ mod tests {
         let dir = tmp("watcher-warns");
 
         assert!(ignored_watch_warning(None, false).is_none(), "no flag is the default, not a misconfiguration");
-        assert!(ignored_watch_warning(Some(&dir), true).is_none(), "a resident to swap under means nothing is wrong");
+        assert!(ignored_watch_warning(Some(&dir), true).is_none(), "a resident to put an adapter on means nothing is wrong");
 
         let warning = ignored_watch_warning(Some(&dir), false).expect("a flag that cannot work must be reported");
         assert!(warning.contains("IGNORED"), "it must say the flag is not in effect: {warning}");
         assert!(warning.contains("BRAIN_QWEN_WEIGHTS"), "and name the remedy: {warning}");
-        assert!(
-            warning.contains(&dir.display().to_string()),
-            "and name the directory it is ignoring: {warning}"
-        );
+        assert!(warning.contains(&dir.display().to_string()), "and name the directory it is ignoring: {warning}");
     }
 
-    /// The gap this milestone closes: the hot swap has been implemented,
-    /// pinned-safe and unit-tested for a while, but no cycle had ever run
-    /// unattended against a LIVE serving process. So: serve the tiny fixture
-    /// over the real OpenAI router, hold a request in flight, drop a real
-    /// trained adapter into the watched directory while that request is
-    /// running, and check both halves of the contract - the in-flight request
-    /// completes uncorrupted, and the NEXT request answers from the new
-    /// weights, with no restart and no re-registration.
-    ///
-    /// The fixture is a randomly initialised tiny model, so neither answer
-    /// means anything as TEXT - the checked property is that the served
-    /// weights changed, which is what a hot swap is. Mutation-verified:
-    /// dropping the `set_adapter` half of `swap_in_adapter` makes the two
-    /// answers identical and this test fail.
+    /// The flags pick exactly one source for the offered adapter.
     #[test]
-    fn a_promoted_adapter_changes_a_live_serve_response_without_restart() {
+    fn the_adapter_flags_pick_exactly_one_source() {
+        let p = || Some(PathBuf::from("x"));
+        assert!(matches!(AdapterMode::from_flags(None, None, None), Ok(AdapterMode::Base)));
+        assert!(matches!(AdapterMode::from_flags(p(), None, None), Ok(AdapterMode::Pinned(_))));
+        assert!(matches!(AdapterMode::from_flags(None, p(), None), Ok(AdapterMode::Manifest(_))));
+        assert!(matches!(AdapterMode::from_flags(None, None, p()), Ok(AdapterMode::Latest(_))));
+        for (a, m, w) in [(p(), p(), None), (p(), None, p()), (None, p(), p())] {
+            assert!(AdapterMode::from_flags(a, m, w).is_err(), "two adapter sources at once must be refused");
+        }
+    }
+
+    /// The live-serving gap: the directory watcher has to work against a
+    /// running server over the real OpenAI router. Serve the tiny fixture,
+    /// hold a base request in flight, publish an adapter into the watched
+    /// directory, and check the contract: the in-flight request completes,
+    /// the adapter is a model of its own (listed with its digest, never a
+    /// path) that answers differently, the BASE keeps answering exactly as it
+    /// did, and a later release replaces the earlier one as a model without a
+    /// restart or a gap.
+    #[test]
+    fn a_promoted_adapter_is_served_beside_the_base_without_restart() {
         if skip() {
             return;
         }
         let dir = tmp("live-swap");
         let tok_path = write_byte_tokenizer(&dir.join("tok"));
-        // Vocab 128 covers the 96-token byte tokenizer above with room to
-        // spare; everything else is the tiny CPU shape.
         let cfg = QwenConfig { vocab: 128, ..QwenConfig::tiny() };
         let base = dir.join("base.safetensors");
-        write_tiny_base_cfg(&base, 7, cfg);
+        write_tiny_base(&base, 7, &cfg);
 
-        // A REAL promoted adapter, trained OFFLINE into a staging directory --
-        // so the "drop" below is a single file appearing in the watched
-        // directory (what a publish step does), not a training run the test
-        // would be timing.
-        let tok = data::qwen_tokenizer::QwenBpe::from_file(tok_path.to_str().unwrap()).expect("byte tokenizer");
-        let trajectories = dir.join("trajectories");
-        write_trajectory(&trajectories);
+        // Two releases, staged OFF to the side so that publishing one is a
+        // single file appearing in the watched directory.
         let staging = dir.join("staging");
-        let opts = model::FitOpts { steps: 60, batch_size: 4, block_size: 8, lr: 3e-2, warmup: 0, decay_iters: 60, ..Default::default() };
-        let promoted =
-            stage_adapter(&trajectories, &base, &dir.join("train.safetensors"), &staging, &tok, &tiny_tmpl(), 4, 8.0, &opts).expect("stage_adapter");
+        std::fs::create_dir_all(&staging).unwrap();
+        let linears = attention_linears(&cfg);
+        let (first, second) = (staging.join("adapter-000000.safetensors"), staging.join("adapter-000001.safetensors"));
+        write_lora_adapter(&first, ONE, "brain/qwen3", 4, &linears, 31);
+        write_lora_adapter(&second, TWO, "brain/qwen3", 4, &linears, 32);
 
-        // The live server: one resident, one executor, the real OpenAI router.
         let card = ModelCard::new("brain/qwen3", "qwen");
-        let resident = Arc::new(QwenResident::from_card(base.to_str().unwrap(), &card, Some(tok_path.to_str().unwrap()), None));
-        let mut budgets = Budgets::new();
-        budgets.set(Device::Cpu, 8 << 30, 0);
-        let models: Vec<Arc<dyn residency::ResidentModel>> = vec![resident.clone()];
-        let executor = Executor::start(models, budgets, Policy::default());
-
+        let resident = Arc::new(QwenResident::from_card_configured(base.to_str().unwrap(), &card, Some(tok_path.to_str().unwrap()), banked()));
+        let executor = cpu_executor(vec![resident.clone()]);
         let watched = dir.join("adapters");
         std::fs::create_dir_all(&watched).unwrap();
-        let watcher = spawn_adapter_watcher(Some(Follow::Latest(watched.clone())), Some(resident.clone()), &executor).expect("a watched directory + a served Qwen3 spawns the watcher");
+        let watcher = spawn_adapter_watcher(Some(Follow::latest(watched.clone())), Some(resident.clone()), &executor).expect("a watched directory + a served Qwen3 spawns the watcher");
 
         let api_key = "sk-brain-test-key".to_string();
-        let list_key = api_key.clone();
         let state = apiserve::AppState::new(executor.clone(), api_key.clone(), apiserve::Provider::OpenAI);
         let app = apiserve::router(state);
-        let post = move |user: &str, max_tokens: u32| {
-            let body = serde_json::json!({
-                "model": "brain/qwen3",
-                "messages": [{"role": "user", "content": user}],
-                "max_tokens": max_tokens,
-                "temperature": 0,
-            });
-            axum::http::Request::builder()
-                .method(axum::http::Method::POST)
-                .uri("/v1/chat/completions")
-                .header(axum::http::header::AUTHORIZATION, format!("Bearer {api_key}"))
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(body.to_string()))
-                .unwrap()
+        let post = {
+            let api_key = api_key.clone();
+            move |model: &str, user: &str, max_tokens: u32| {
+                let body = serde_json::json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": user}],
+                    "max_tokens": max_tokens,
+                    "temperature": 0,
+                });
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/v1/chat/completions")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {api_key}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap()
+            }
         };
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
         let content = |app: axum::Router, req: axum::http::Request<axum::body::Body>| -> (axum::http::StatusCode, String) {
@@ -622,38 +512,31 @@ mod tests {
                 let status = r.status();
                 let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
                 let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-                let text = v["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string();
-                (status, text)
+                (status, v["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string())
             })
         };
-
-        // The `/v1/models` entry of the served model: what an agent runtime
-        // reads to learn which adapter is in front of it.
-        let card_adapter = |app: axum::Router| -> Option<serde_json::Value> {
+        // The `/v1/models` listing: what an agent runtime reads to learn which models, and which fine-tunes, are served.
+        let models = |app: axum::Router| -> Vec<serde_json::Value> {
             use tower::ServiceExt;
-            let req = axum::http::Request::builder()
-                .uri("/v1/models")
-                .header(axum::http::header::AUTHORIZATION, format!("Bearer {list_key}"))
-                .body(axum::body::Body::empty())
-                .unwrap();
+            let req = axum::http::Request::builder().uri("/v1/models").header(axum::http::header::AUTHORIZATION, format!("Bearer {api_key}")).body(axum::body::Body::empty()).unwrap();
             rt.block_on(async move {
                 let r = app.oneshot(req).await.unwrap();
                 let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
-                let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                let card = v["data"].as_array().unwrap().iter().find(|m| m["id"] == "brain/qwen3").unwrap().clone();
-                card.get("adapter").cloned()
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["data"].as_array().unwrap().clone()
             })
         };
-        assert_eq!(card_adapter(app.clone()), None, "a base with no adapter attached advertises none");
+        let card_of = |list: &[serde_json::Value], id: &str| list.iter().find(|m| m["id"] == id).cloned();
 
-        let (status, before) = content(app.clone(), post("what colour is the sky", 16));
-        assert_eq!(status, axum::http::StatusCode::OK, "the base model must serve before anything is swapped");
+        let listing = models(app.clone());
+        assert_eq!(listing.len(), 1, "before any release only the base is served: {listing:?}");
+        assert_eq!(card_of(&listing, "brain/qwen3").unwrap().get("adapter"), None, "a base names no adapter");
+
+        let (status, before) = content(app.clone(), post("brain/qwen3", "what colour is the sky", 16));
+        assert_eq!(status, axum::http::StatusCode::OK, "the base must serve before anything is published");
         assert!(!before.is_empty(), "the baseline answer must be non-empty, or 'the answer changed' means nothing");
 
-        // Hold a request in flight, and only drop the adapter once the
-        // executor really is running it -- otherwise "mid-flight" would be an
-        // assumption, not a fact this test established.
-        let (in_app, in_req) = (app.clone(), post("what colour is the sky", 192));
+        // Hold a request in flight, and only publish once the executor really is running it.
+        let (in_app, in_req) = (app.clone(), post("brain/qwen3", "what colour is the sky", 192));
         let in_flight = std::thread::spawn(move || {
             use tower::ServiceExt;
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -666,108 +549,102 @@ mod tests {
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while executor.in_flight().is_empty() {
-            assert!(std::time::Instant::now() < deadline, "the second request never reached the executor");
+            assert!(std::time::Instant::now() < deadline, "the long request never reached the executor");
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        std::fs::copy(&promoted, watched.join(promoted.file_name().unwrap())).expect("drop the promoted adapter into the watched dir");
+        std::fs::copy(&first, watched.join(first.file_name().unwrap())).expect("publish the first release");
 
         let (status, bytes) = in_flight.join().expect("the in-flight request thread must not panic");
-        assert_eq!(status, axum::http::StatusCode::OK, "a swap arriving mid-request must never break that request");
+        assert_eq!(status, axum::http::StatusCode::OK, "a release arriving mid-request must never break that request");
         let v: serde_json::Value = serde_json::from_slice(&bytes).expect("the in-flight response must still be well-formed JSON");
-        assert!(
-            !v["choices"][0]["message"]["content"].as_str().unwrap_or_default().is_empty(),
-            "the in-flight request must complete with real content, not a truncated or empty body"
-        );
+        assert!(!v["choices"][0]["message"]["content"].as_str().unwrap_or_default().is_empty(), "the in-flight request must complete with real content");
 
-        // The swap itself is deferred while that request pins the instance, so
-        // wait for the watcher to report it applied rather than racing it.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        while watcher.swaps() == 0 {
-            assert!(std::time::Instant::now() < deadline, "the watcher never applied the adapter it was pointed at");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        wait("the watcher to offer the first release", &|| watcher.swaps() == 1);
 
-        let (status, after) = content(app.clone(), post("what colour is the sky", 16));
-        assert_eq!(status, axum::http::StatusCode::OK, "the swapped-in adapter must still serve");
-        assert_ne!(after, before, "the next request after a promoted adapter landed must answer from the new weights, with no restart");
+        let listing = models(app.clone());
+        assert_eq!(listing.len(), 2, "the base and the release: {listing:?}");
+        let adapter_card = card_of(&listing, ONE).expect("the release is a model of its own");
+        assert_eq!(adapter_card["adapter"]["digest"], digest(&first), "named by the digest of the file now served");
+        assert_eq!(adapter_card["adapter"]["id"], ONE);
+        assert!(!listing.iter().any(|m| m.to_string().contains(".safetensors") || m.to_string().contains("staging") || m.to_string().contains("adapters/")), "and never by where the file lives: {listing:?}");
+        assert_eq!(card_of(&listing, "brain/qwen3").unwrap().get("adapter"), None, "the base entry is unchanged");
 
-        let card = card_adapter(app.clone()).expect("the model card names the adapter that was swapped in");
-        assert_eq!(card["digest"], brain_modelstore::fetch::file_digest(&promoted).unwrap(), "by the digest of the file now served");
-        assert!(!card.to_string().contains(".safetensors"), "and never by where that file lives: {card}");
+        let (status, tuned) = content(app.clone(), post(ONE, "what colour is the sky", 16));
+        assert_eq!(status, axum::http::StatusCode::OK, "the release serves");
+        assert_ne!(tuned, before, "the adapter changes the answer");
+        let (_, base_again) = content(app.clone(), post("brain/qwen3", "what colour is the sky", 16));
+        assert_eq!(base_again, before, "and the base still answers exactly as it did");
+
+        // The next release replaces the first as a model: offered, then the old one withdrawn.
+        std::fs::copy(&second, watched.join(second.file_name().unwrap())).expect("publish the second release");
+        wait("the watcher to offer the second release", &|| watcher.swaps() == 2);
+        wait("the first release to be withdrawn", &|| !listed(&executor, ONE));
+        let (status, newer) = content(app.clone(), post(TWO, "what colour is the sky", 16));
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_ne!(newer, tuned, "the later release answers differently");
+        let (status, _) = content(app.clone(), post(ONE, "what colour is the sky", 16));
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "the withdrawn release is an unknown model");
+        assert_eq!(models(app.clone()).len(), 2, "the base and the newest release");
     }
 
-    /// The adapter a resident currently folds in, as its instance key names it.
-    fn served_adapter(resident: &QwenResident) -> String {
-        resident.instance_key("generate", &Invocation::new()).config
-    }
-
-    fn cpu_executor(models: Vec<Arc<dyn residency::ResidentModel>>) -> Executor {
-        let mut budgets = Budgets::new();
-        budgets.set(Device::Cpu, 1 << 30, 0);
-        Executor::start(models, budgets, Policy::default())
-    }
-
-    /// The flags pick exactly one source for the served adapter: a pinned
-    /// release cannot be combined with anything that would replace it.
+    /// `--adapter`: the pinned release is a model of its own from startup,
+    /// reported by digest, and no watcher is left running that could replace
+    /// it. A release for another base is a startup error and offers nothing;
+    /// so is one on a server started without a bank.
     #[test]
-    fn a_pinned_adapter_excludes_every_following_mode() {
-        let p = || Some(PathBuf::from("x"));
-        assert!(matches!(AdapterMode::from_flags(None, None, None), Ok(AdapterMode::Base)));
-        assert!(matches!(AdapterMode::from_flags(p(), None, None), Ok(AdapterMode::Pinned(_))));
-        assert!(matches!(AdapterMode::from_flags(None, p(), None), Ok(AdapterMode::Manifest(_))));
-        assert!(matches!(AdapterMode::from_flags(None, None, p()), Ok(AdapterMode::Latest(_))));
-        for (a, m, w) in [(p(), p(), None), (p(), None, p()), (None, p(), p())] {
-            assert!(AdapterMode::from_flags(a, m, w).is_err(), "two adapter sources at once must be refused");
-        }
-    }
-
-    /// `--adapter`: the pinned release is served from startup, reported by
-    /// digest, and no watcher is left running that could replace it. A
-    /// release for another base is a startup error.
-    #[test]
-    fn a_pinned_adapter_is_served_and_never_followed() {
-        use brain_testutil::adapters::{file_digest as digest, scratch_dir as tmp, write_adapter, write_base};
+    fn a_pinned_adapter_is_offered_and_never_followed() {
         let dir = tmp("pinned");
         let (base, other) = (dir.join("base.safetensors"), dir.join("other.safetensors"));
         write_base(&base, 1.0);
         write_base(&other, 2.0);
         let adapter = dir.join("adapter.safetensors");
-        write_adapter(&adapter, "pinned", "local/base", Some(digest(&base)), 0.5);
+        write_adapter(&adapter, ONE, "local/base", Some(digest(&base)), 0.5);
 
         let card = ModelCard::new("brain/qwen3", "qwen");
-        let resident = Arc::new(QwenResident::from_card(base.to_str().unwrap(), &card, None, None));
+        let resident = Arc::new(QwenResident::from_card_configured(base.to_str().unwrap(), &card, None, banked()));
         let executor = cpu_executor(vec![resident.clone()]);
         let (follow, line) = start_adapter_mode(AdapterMode::Pinned(adapter.clone()), Some(&resident), &executor).expect("the adapter's own base serves it");
         assert!(follow.is_none(), "a pinned adapter must leave nothing to follow");
-        assert_eq!(line.as_deref(), Some(format!("brain serve: brain/qwen3 adapter=pinned digest={}", digest(&adapter)).as_str()));
-        assert_eq!(served_adapter(&resident), adapter.to_str().unwrap());
-        assert_eq!(
-            executor.served_adapter("brain/qwen3"),
-            Some(AdapterIdentity { id: "pinned".to_string(), digest: digest(&adapter) }),
-            "the serving surfaces are told the verified release, by id and digest"
-        );
+        assert_eq!(line.as_deref(), Some(format!("brain serve: {ONE} adapter={ONE} digest={}", digest(&adapter)).as_str()));
+        assert!(listed(&executor, ONE) && listed(&executor, "brain/qwen3"), "the adapter is a model beside the base");
+        assert_eq!(executor.served_adapter(ONE), Some(residency::AdapterIdentity { id: ONE.to_string(), digest: digest(&adapter) }), "the serving surfaces are told the verified release, by id and digest");
+        assert_eq!(executor.served_adapter("brain/qwen3"), None, "the base names none");
 
-        let wrong = Arc::new(QwenResident::from_card(other.to_str().unwrap(), &card, None, None));
-        let Err(err) = start_adapter_mode(AdapterMode::Pinned(adapter.clone()), Some(&wrong), &cpu_executor(vec![wrong.clone()])) else {
+        let wrong = Arc::new(QwenResident::from_card_configured(other.to_str().unwrap(), &card, None, banked()));
+        let wrong_exec = cpu_executor(vec![wrong.clone()]);
+        let Err(err) = start_adapter_mode(AdapterMode::Pinned(adapter.clone()), Some(&wrong), &wrong_exec) else {
             panic!("an adapter trained on another base must not start");
         };
         assert!(err.contains(&digest(&base)) && err.contains(&digest(&other)), "{err}");
-        assert_eq!(served_adapter(&wrong), "base", "a refused adapter is never set");
-        assert!(start_adapter_mode(AdapterMode::Pinned(adapter), None, &executor).is_err(), "an adapter with no Qwen3 to fold it into is an error");
+        assert!(!listed(&wrong_exec, ONE), "a refused adapter is never offered");
+
+        let bankless = Arc::new(QwenResident::from_card(base.to_str().unwrap(), &card, None));
+        let Err(err) = start_adapter_mode(AdapterMode::Pinned(adapter.clone()), Some(&bankless), &cpu_executor(vec![bankless.clone()])) else {
+            panic!("a server without an adapter bank cannot offer an adapter");
+        };
+        assert!(err.contains("--adapter-slots"), "{err}");
+        assert!(start_adapter_mode(AdapterMode::Pinned(adapter), None, &executor).is_err(), "an adapter with no Qwen3 to put it on is an error");
     }
 
-    /// `--adapter-manifest`: a replaced manifest swaps the served adapter
-    /// only after its digest verifies; a corrupt one, or one whose digest
-    /// does not match its file, keeps the previous adapter served.
+    /// `--adapter-manifest`: a replaced manifest offers the new release only
+    /// after its digest verifies, then withdraws the previous one; a corrupt
+    /// one, or one whose digest does not match its file, keeps the previous
+    /// adapter served.
     #[test]
-    fn a_followed_manifest_swaps_only_verified_releases() {
-        use brain_testutil::adapters::{file_digest as digest, scratch_dir as tmp, write_adapter, write_base};
+    fn a_followed_manifest_offers_only_verified_releases_and_retires_the_old_one() {
         let dir = tmp("manifest-watch");
         let base = dir.join("base.safetensors");
         write_base(&base, 1.0);
         let (one, two) = (dir.join("adapter-1.safetensors"), dir.join("adapter-2.safetensors"));
-        write_adapter(&one, "one", "local/base", Some(digest(&base)), 0.5);
-        write_adapter(&two, "two", "local/base", Some(digest(&base)), 0.25);
+        write_adapter(&one, ONE, "local/base", Some(digest(&base)), 0.5);
+        write_adapter(&two, TWO, "local/base", Some(digest(&base)), 0.25);
         let manifest = dir.join("release.json");
         // Replaced the way a release step replaces it: written aside, renamed over.
         let publish = |body: String| {
@@ -779,12 +656,12 @@ mod tests {
         publish(release(&one, digest(&one)));
 
         let card = ModelCard::new("brain/qwen3", "qwen");
-        let resident = Arc::new(QwenResident::from_card(base.to_str().unwrap(), &card, None, None));
+        let resident = Arc::new(QwenResident::from_card_configured(base.to_str().unwrap(), &card, None, banked()));
         let executor = cpu_executor(vec![resident.clone()]);
         let (follow, line) = start_adapter_mode(AdapterMode::Manifest(manifest.clone()), Some(&resident), &executor).expect("a valid manifest serves at startup");
-        assert_eq!(line.as_deref(), Some(format!("brain serve: brain/qwen3 adapter=one digest={}", digest(&one)).as_str()));
-        assert_eq!(served_adapter(&resident), one.to_str().unwrap());
-        assert_eq!(executor.served_adapter("brain/qwen3").map(|a| a.digest), Some(digest(&one)));
+        assert_eq!(line.as_deref(), Some(format!("brain serve: {ONE} adapter={ONE} digest={}", digest(&one)).as_str()));
+        assert!(listed(&executor, ONE));
+        assert_eq!(executor.served_adapter(ONE).map(|a| a.digest), Some(digest(&one)));
         let watcher = spawn_adapter_watcher(follow, Some(resident.clone()), &executor).expect("a manifest to follow spawns the watcher");
 
         let wait = |what: &str, done: &dyn Fn() -> bool| {
@@ -796,20 +673,18 @@ mod tests {
         };
         publish("{\"adapter\": ".to_string());
         wait("the corrupt manifest to be rejected", &|| watcher.rejections() == 1);
-        assert_eq!(served_adapter(&resident), one.to_str().unwrap(), "a corrupt manifest keeps the previous adapter");
-        assert_eq!(executor.served_adapter("brain/qwen3").map(|a| a.digest), Some(digest(&one)), "and keeps reporting it");
+        assert!(listed(&executor, ONE), "a corrupt manifest keeps the previous adapter");
+        assert_eq!(executor.served_adapter(ONE).map(|a| a.digest), Some(digest(&one)), "and keeps reporting it");
 
         publish(release(&two, digest(&one)));
         wait("the mismatched digest to be rejected", &|| watcher.rejections() == 2);
-        assert_eq!(served_adapter(&resident), one.to_str().unwrap(), "a release whose digest does not verify is never swapped in");
+        assert!(listed(&executor, ONE) && !listed(&executor, TWO), "a release whose digest does not verify is never offered");
 
         publish(release(&two, digest(&two)));
-        wait("the verified release to be swapped in", &|| watcher.swaps() == 1);
-        assert_eq!(served_adapter(&resident), two.to_str().unwrap());
-        assert_eq!(
-            executor.served_adapter("brain/qwen3"),
-            Some(AdapterIdentity { id: "two".to_string(), digest: digest(&two) }),
-            "a hot swap moves the reported identity with the served file"
-        );
+        wait("the verified release to be offered", &|| watcher.swaps() == 1);
+        wait("the previous release to be withdrawn", &|| !listed(&executor, ONE));
+        assert!(listed(&executor, TWO) && listed(&executor, "brain/qwen3"));
+        assert_eq!(executor.served_adapter(TWO), Some(residency::AdapterIdentity { id: TWO.to_string(), digest: digest(&two) }), "a hot swap moves the reported identity with the served file");
+        assert_eq!(executor.served_adapter(ONE), None);
     }
 }

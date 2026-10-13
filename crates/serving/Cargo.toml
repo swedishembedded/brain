@@ -10,6 +10,7 @@ name = "serving"
 path = "src/lib.rs"
 
 [dependencies]
+brain-capability.workspace = true
 brain-catalog.workspace = true
 brain-loader.workspace = true
 brain-residency.workspace = true
@@ -24,6 +25,7 @@ brain-januspro.workspace = true
 brain-llava.workspace = true
 brain-ltxv.workspace = true
 brain-memauth.workspace = true
+brain-modelref.workspace = true
 brain-modelstore.workspace = true
 brain-moondream3.workspace = true
 brain-npu.workspace = true

@@ -24,25 +24,25 @@ use crate::Machine;
 
 
 /// The one shared serving [`Executor`], plus the CONCRETE model handles a
-/// caller needs for an inherent method the erased `Arc<dyn ResidentModel>`
-/// does not carry.
+/// caller needs for an operation the erased `Arc<dyn ResidentModel>` does not
+/// carry.
 ///
-/// Today that is exactly one: [`QwenResident::set_adapter`], the write half
-/// of the continuous-learning hot swap (the CLI's `continuous_train`). It is
-/// inherent rather than a `ResidentModel` method because "point yourself at
-/// a new LoRA adapter" is not a concept the trait has - putting it there
-/// would put a decoder-LM-shaped method on every detector, VAE and
-/// forecaster that implements it - so the erased handle the executor holds
-/// cannot call it at all.
+/// Today that is exactly one: offering LoRA adapters beside the Qwen3 base
+/// ([`QwenResident::adapter_view`], what the CLI's `continuous_train` drives
+/// through `catalog::adapter_registry::LiveAdapters`). It is inherent rather
+/// than a `ResidentModel` method because "serve this adapter beside yourself"
+/// is not a concept the trait has - putting it there would put a decoder-LM-
+/// shaped method on every detector, VAE and forecaster that implements it - so
+/// the erased handle the executor holds cannot do it at all.
 ///
 /// The handle here is the SAME `Arc` that was registered, never a second
-/// `QwenResident` over the same checkpoint: `set_adapter` writes into that
-/// object's own `RwLock`, read by ITS `activate`, so a write to a copy is a
-/// hot swap that silently does nothing.
+/// `QwenResident` over the same checkpoint: an adapter view leases an entry of
+/// that object's own registry, read by ITS instance, so an adapter offered on
+/// a copy is a model no instance ever serves.
 pub struct Serving {
     pub executor: Executor,
     /// `None` when `BRAIN_QWEN_WEIGHTS` names no checkpoint, i.e. this
-    /// process serves no Qwen3 and there is nothing to hot-swap.
+    /// process serves no env-selected Qwen3 for an adapter flag to apply to.
     pub qwen: Option<Arc<QwenResident>>,
 }
 
@@ -158,7 +158,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
         models.push(Arc::new(g));
     }
     // The one resident kept BOTH ways: erased for the executor, concrete for
-    // the hot-swap path's inherent `set_adapter` -- see `Serving::qwen`.
+    // the adapter flags' `adapter_view` -- see `Serving::qwen`.
     // `auto_budget_bytes` is filled in HERE, from this call's own real
     // per-card free VRAM (never the caller's business - only this function
     // ever sees `gpus`/`reserved`), regardless of whether `qwen_cfg.ctx`
@@ -415,15 +415,15 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
 mod tests {
     use super::*;
 
-    /// `QwenResident::set_adapter` is INHERENT, not a `ResidentModel`
+    /// `QwenResident::adapter_view` is INHERENT, not a `ResidentModel`
     /// method, so the erased `Arc<dyn ResidentModel>` the executor holds
     /// cannot call it at all - which is why [`build_executor`] hands the
     /// concrete handle back alongside the executor.
     ///
     /// It must be the SAME object, not a second `QwenResident` built over
-    /// the same checkpoint: the adapter path lives in that object's own
-    /// `RwLock`, read by ITS `activate`, so a write to a copy is a write
-    /// nothing ever reads - a hot swap that silently does nothing.
+    /// the same checkpoint: the adapter registry lives in that object, read
+    /// by ITS instance, so an adapter offered on a copy is a model nothing
+    /// ever serves.
     #[test]
     fn the_registered_qwen_resident_and_the_concrete_handle_are_one_object() {
         let mut models: Vec<Arc<dyn ResidentModel>> = Vec::new();
@@ -431,12 +431,12 @@ mod tests {
         assert!(models.is_empty(), "and must register nothing");
 
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
-        let resident = catalog::resident_llm::QwenResident::from_card("unused.safetensors", &card, Some("unused.json"), None);
+        let resident = catalog::resident_llm::QwenResident::from_card("unused.safetensors", &card, Some("unused.json"));
         let handle = register_qwen(&mut models, Some(resident)).expect("a configured qwen resident yields a concrete handle");
         assert_eq!(models.len(), 1, "the erased handle is registered exactly once");
         assert!(
             std::ptr::eq(Arc::as_ptr(&handle) as *const (), Arc::as_ptr(&models[0]) as *const ()),
-            "the concrete handle and the registered erased one must be the same allocation, or set_adapter writes where no activate reads"
+            "the concrete handle and the registered erased one must be the same allocation, or an adapter is offered where no instance serves it"
         );
     }
 }

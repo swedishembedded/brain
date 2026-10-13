@@ -56,6 +56,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
 
+use catalog::adapter_registry::{AdapterBankSettings, AdapterTargets};
+use catalog::adapter_release::verify_adapter;
+use catalog::resident_llm::QwenResident;
 use checkpoint::st::{self, ModelCard};
 use residency::ResidentModel;
 
@@ -79,26 +82,181 @@ pub struct DiscoveryError {
 /// Returns every [`DiscoveryError`] a compound model produced alongside the
 /// residents that DID construct -- a partial scan still serves what it can.
 pub fn discover(dir: &Path, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> (Vec<Arc<dyn ResidentModel>>, Vec<DiscoveryError>) {
-    let mut out: Vec<Arc<dyn ResidentModel>> = Vec::new();
     let mut errors: Vec<DiscoveryError> = Vec::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
 
     let mut locals = brain_modelstore::Store::new(dir.to_path_buf()).scan();
     locals.sort_by(|a, b| a.weights.cmp(&b.weights)); // deterministic catalog order
-    for local in &locals {
+    let (adapters, bases): (Vec<_>, Vec<_>) = locals.iter().partition(|l| l.adapter.is_some());
+    let mut scan = Scan::new(qwen_cfg, qwen35_sizing, &adapters);
+
+    for local in bases {
         if local.roles.is_some() {
             // A compound model has no single weights path (`local.weights` is
             // the manifest file itself) -- `register`/`resident_for` is the
             // single-file dispatcher and must never see one of these; go
             // through the compound-aware dispatch instead.
-            register_compound(local, &mut seen, &mut out, &mut errors, qwen_cfg, qwen35_sizing);
+            register_compound(local, &mut scan, &mut errors);
             continue;
         }
-        register(&local.weights, &local.card, &local.dir, local.adapter.as_deref(), &mut seen, &mut out, qwen_cfg, qwen35_sizing);
+        scan.register(&local.weights, &local.card, &local.dir);
     }
 
-    discover_flat(dir, &mut seen, &mut out, qwen_cfg, qwen35_sizing);
-    (out, errors)
+    discover_flat(dir, &mut scan);
+    // Adapters last: each is a view over a Qwen3 base the passes above built.
+    for local in adapters {
+        scan.register_adapter(local);
+    }
+    (scan.out, errors)
+}
+
+/// What one [`discover`] accumulates: the residents, and the settings the
+/// next resident is built with.
+struct Scan {
+    /// Card ids registered so far (first wins).
+    seen: BTreeSet<String>,
+    out: Vec<Arc<dyn ResidentModel>>,
+    /// The Qwen3 bases built so far, by card id: the adapter found beside one
+    /// is served as a view over it ([`Scan::register_adapter`]).
+    qwen_bases: BTreeMap<String, Arc<QwenResident>>,
+    qwen_cfg: catalog::resident_llm::QwenServeConfig,
+    qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing,
+    /// The adapter bank each base that has adapters in the store is built
+    /// with, by base card id.
+    banks: BTreeMap<String, AdapterBankSettings>,
+}
+
+impl Scan {
+    fn new(qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, adapters: &[&brain_modelstore::LocalModel]) -> Scan {
+        let mut banks: BTreeMap<String, AdapterBankSettings> = BTreeMap::new();
+        for local in adapters {
+            let Some((base, card)) = local.card.as_ref().and_then(|c| Some((base_id_of(&c.id)?, c))) else { continue };
+            // The bank an operator sized with flags is theirs; otherwise it
+            // is sized to hold every adapter the store has for the base, so
+            // an adapter on disk is never refused for a limit nobody chose.
+            let bank = banks.entry(base).or_insert_with(|| qwen_cfg.adapter_bank.unwrap_or_default());
+            if qwen_cfg.adapter_bank.is_none() {
+                *bank = widen_to_hold(*bank, card);
+            }
+        }
+        Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), qwen_cfg, qwen35_sizing, banks }
+    }
+
+    /// The serving config for the Qwen3 base `id`: the operator's, plus a
+    /// bank when the store holds adapters for it.
+    fn qwen_cfg_for(&self, id: &str) -> catalog::resident_llm::QwenServeConfig {
+        catalog::resident_llm::QwenServeConfig { adapter_bank: self.banks.get(id).copied().or(self.qwen_cfg.adapter_bank), ..self.qwen_cfg }
+    }
+
+    /// Serve the adapter `local` as a model of its own over the Qwen3 base it
+    /// rides on. An adapter whose base is not served, that does not verify
+    /// against it, or that the bank cannot hold is skipped with the reason.
+    fn register_adapter(&mut self, local: &brain_modelstore::LocalModel) {
+        let (Some(card), Some(path)) = (local.card.as_ref(), local.adapter.as_ref()) else { return };
+        let shown = path.display();
+        if let Err(e) = checkpoint::license::redistributable(card.license.as_deref()) {
+            eprintln!("brain: skip {shown} ({e})");
+            return;
+        }
+        let Some(base) = base_id_of(&card.id).and_then(|b| self.qwen_bases.get(&b).cloned()) else {
+            eprintln!("brain: skip {shown} (its base is not served as a Qwen3 model, so adapter {} has nothing to ride on)", card.id);
+            return;
+        };
+        if !self.seen.insert(card.id.clone()) {
+            eprintln!("brain: skip {shown} (duplicate model id '{}')", card.id);
+            return;
+        }
+        let view = verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded));
+        match view {
+            Ok(view) => self.out.push(Arc::new(view)),
+            Err(e) => {
+                self.seen.remove(&card.id);
+                eprintln!("brain: skip {shown} ({e})");
+            }
+        }
+    }
+
+    /// Dispatch one carded file to its family's resident and keep it (deduped
+    /// by id). Adapters are not registered here: see [`Self::register_adapter`].
+    fn register(&mut self, weights: &Path, card: &Option<ModelCard>, dir: &Path) {
+        let wp = weights.to_string_lossy();
+        let card = match card {
+            Some(c) => c,
+            None => {
+                eprintln!("brain: skip {wp} (no model card)");
+                return;
+            }
+        };
+        if let Err(e) = checkpoint::license::redistributable(card.license.as_deref()) {
+            // Publishing a model into the served catalog IS redistribution: every
+            // registered model is reachable over the API. The refusal names the
+            // file, because the card that carries the licence is inside it.
+            eprintln!("brain: skip {wp} ({e})");
+            return;
+        }
+        if !self.seen.insert(card.id.clone()) {
+            eprintln!("brain: skip {wp} (duplicate model id '{}')", card.id);
+            return;
+        }
+        // GGUF carries its tokenizer in KV; a safetensors model reuses a sibling
+        // tokenizer.json (HF convention). Absent it, register anyway (limited chat).
+        let sibling = dir.join("tokenizer.json");
+        let tokenizer: Option<String> = if wp.ends_with(".gguf") {
+            None
+        } else if sibling.exists() {
+            Some(sibling.to_string_lossy().into_owned())
+        } else {
+            eprintln!("brain: {wp}: no sibling tokenizer.json ({} chat-templating may be limited)", card.id);
+            None
+        };
+
+        match resident_for(&wp, card, tokenizer.as_deref(), self.qwen_cfg_for(&card.id), self.qwen35_sizing) {
+            Some(built) => self.keep(&card.id, built),
+            None => {
+                self.seen.remove(&card.id); // free the id if the family declined
+            }
+        }
+    }
+
+    fn keep(&mut self, id: &str, built: Built) {
+        if let Built::Qwen(qwen) = &built {
+            self.qwen_bases.insert(id.to_string(), qwen.clone());
+        }
+        self.out.push(built.erased());
+    }
+}
+
+/// The card id of the base an adapter card id (`<base>:<owner>:<name>:<tag>`)
+/// rides on.
+fn base_id_of(adapter_id: &str) -> Option<String> {
+    let r = brain_modelref::ModelRef::parse(adapter_id).ok()?;
+    r.adapter()?;
+    Some(r.without_adapter().to_string())
+}
+
+/// `bank`, grown just enough to hold the adapter `card` describes: its rank
+/// and the linears it targets, as its card records them.
+fn widen_to_hold(bank: AdapterBankSettings, card: &ModelCard) -> AdapterBankSettings {
+    let Some(adapter) = card.adapter.as_ref() else { return bank };
+    let rank_cap = bank.rank_cap.max(adapter.rank.unwrap_or(0));
+    let named = adapter.targets.as_ref().and_then(|t| AdapterTargets::parse(&t.join(",")).ok());
+    let targets = named.map_or(bank.targets, |named| AdapterTargets::union(bank.targets, named));
+    AdapterBankSettings { rank_cap, targets, ..bank }
+}
+
+/// A resident the scan built: the concrete handle of a Qwen3 base is kept,
+/// because an adapter found beside it is served over it.
+enum Built {
+    Qwen(Arc<QwenResident>),
+    Other(Arc<dyn ResidentModel>),
+}
+
+impl Built {
+    fn erased(&self) -> Arc<dyn ResidentModel> {
+        match self {
+            Built::Qwen(q) => q.clone(),
+            Built::Other(o) => o.clone(),
+        }
+    }
 }
 
 /// [`register`]'s dedup-then-construct-then-free-on-failure dance, for a
@@ -106,7 +264,7 @@ pub fn discover(dir: &Path, qwen_cfg: catalog::resident_llm::QwenServeConfig, qw
 /// [`resident_for`] -- kept a separate function (not folded into `register`,
 /// which takes a bare weights path a compound model doesn't have) so the two
 /// dispatchers stay independently readable.
-fn register_compound(local: &brain_modelstore::LocalModel, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>, errors: &mut Vec<DiscoveryError>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) {
+fn register_compound(local: &brain_modelstore::LocalModel, scan: &mut Scan, errors: &mut Vec<DiscoveryError>) {
     let family = local.card.as_ref().map(|c| c.family.clone()).unwrap_or_default();
     let id = match local.card.as_ref() {
         Some(c) => c.id.clone(),
@@ -119,14 +277,14 @@ fn register_compound(local: &brain_modelstore::LocalModel, seen: &mut BTreeSet<S
         errors.push(DiscoveryError { dir: local.dir.clone(), family, reason: e });
         return;
     }
-    if !seen.insert(id.clone()) {
+    if !scan.seen.insert(id.clone()) {
         errors.push(DiscoveryError { dir: local.dir.clone(), family, reason: format!("duplicate model id '{id}'") });
         return;
     }
-    match resident_for_local(local, qwen_cfg, qwen35_sizing) {
-        Ok(r) => out.push(r),
+    match build_for_local(local, scan.qwen_cfg_for(&id), scan.qwen35_sizing) {
+        Ok(built) => scan.keep(&id, built),
         Err(reason) => {
-            seen.remove(&id); // free the id if the family declined, same as `register`
+            scan.seen.remove(&id); // free the id if the family declined, same as `register`
             errors.push(DiscoveryError { dir: local.dir.clone(), family, reason });
         }
     }
@@ -136,7 +294,7 @@ static FLAT_LAYOUT_WARNING: Once = Once::new();
 
 /// The original single-level flat scan, predating the `<vendor>/<repo>` store
 /// layout. Kept for back-compat; a hit warns once per process.
-fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) {
+fn discover_flat(dir: &Path, scan: &mut Scan) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
@@ -190,7 +348,7 @@ fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn 
     // Sorted for a deterministic catalog order.
     singles.sort();
     for path in &singles {
-        register(path, &card_of(path), dir, None, seen, out, qwen_cfg, qwen35_sizing);
+        scan.register(path, &card_of(path), dir);
     }
     for (base, mut group) in shards {
         group.sort_by_key(|(idx, _)| *idx);
@@ -198,12 +356,12 @@ fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn 
         // Prefer the `<base>.safetensors.index.json` handle if it exists.
         let index = dir.join(format!("{base}.safetensors.index.json"));
         let handle = if index.exists() { index } else { first.clone() };
-        register(&handle, &card_of(first), dir, None, seen, out, qwen_cfg, qwen35_sizing);
+        scan.register(&handle, &card_of(first), dir);
     }
     for (_base, mut group) in gguf_splits {
         group.sort_by_key(|(part, _)| *part);
         let part1 = &group[0].1; // MmapGguf::open finds every sibling from part 1's path
-        register(part1, &card_of(part1), dir, None, seen, out, qwen_cfg, qwen35_sizing);
+        scan.register(part1, &card_of(part1), dir);
     }
 }
 
@@ -227,50 +385,6 @@ fn card_of(path: &Path) -> Option<ModelCard> {
                 eprintln!("brain: skip {p} ({e})");
                 None
             }
-        }
-    }
-}
-
-/// Dispatch one carded file to its family's resident and push it (deduped by
-/// id). `adapter` is the adapter's own weight file when `card.id` names one
-/// (`brain_modelstore::LocalModel::adapter`) -- `None` for a plain base/quant.
-fn register(weights: &Path, card: &Option<ModelCard>, dir: &Path, adapter: Option<&Path>, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) {
-    let wp = weights.to_string_lossy();
-    let card = match card {
-        Some(c) => c,
-        None => {
-            eprintln!("brain: skip {wp} (no model card)");
-            return;
-        }
-    };
-    if let Err(e) = checkpoint::license::redistributable(card.license.as_deref()) {
-        // Publishing a model into the served catalog IS redistribution: every
-        // registered model is reachable over the API. The refusal names the
-        // file, because the card that carries the licence is inside it.
-        eprintln!("brain: skip {wp} ({e})");
-        return;
-    }
-    if !seen.insert(card.id.clone()) {
-        eprintln!("brain: skip {wp} (duplicate model id '{}')", card.id);
-        return;
-    }
-    // GGUF carries its tokenizer in KV; a safetensors model reuses a sibling
-    // tokenizer.json (HF convention). Absent it, register anyway (limited chat).
-    let sibling = dir.join("tokenizer.json");
-    let tokenizer: Option<String> = if wp.ends_with(".gguf") {
-        None
-    } else if sibling.exists() {
-        Some(sibling.to_string_lossy().into_owned())
-    } else {
-        eprintln!("brain: {wp}: no sibling tokenizer.json ({} chat-templating may be limited)", card.id);
-        None
-    };
-
-    let adapter = adapter.map(|p| p.to_string_lossy().into_owned());
-    match resident_for(&wp, card, tokenizer.as_deref(), adapter.as_deref(), qwen_cfg, qwen35_sizing) {
-        Some(r) => out.push(r),
-        None => {
-            seen.remove(&card.id); // free the id if the family declined
         }
     }
 }
@@ -333,9 +447,8 @@ fn gguf_advice(weights: &str, architecture: &str) -> String {
 
 /// Construct the resident matching `card.family` (normalized via
 /// [`brain_family`]), or log + `None` for an unknown / not-yet-dispatchable
-/// family. `adapter` (a named LoRA adapter's own weight file) is meaningful
-/// only to the `qwen` family today -- other families ignore it.
-fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapter: Option<&str>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Option<Arc<dyn ResidentModel>> {
+/// family.
+fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Option<Built> {
     let family = brain_family(&card.family);
     // The GGUF gate, BEFORE the family match: a GGUF card's family is its
     // `general.architecture` copied verbatim, so an architecture string is
@@ -349,10 +462,12 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
         eprintln!("brain: skip {} ({})", card.id, gguf_advice(weights, &card.family));
         return None;
     }
-    match family {
+    if family == "qwen" {
+        return Some(Built::Qwen(Arc::new(QwenResident::from_card_configured(weights, card, tokenizer, qwen_cfg))));
+    }
+    let other: Option<Arc<dyn ResidentModel>> = match family {
         "gpt" => Some(Arc::new(catalog::resident_llm::GptResident::from_card(weights, card, tokenizer))),
         "glm" => Some(Arc::new(catalog::resident_llm::GlmResident::from_card(weights, card, tokenizer))),
-        "qwen" => Some(Arc::new(catalog::resident_llm::QwenResident::from_card_configured(weights, card, tokenizer, adapter, qwen_cfg))),
         "lfm" => match catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer) {
             Ok(l) => Some(Arc::new(l)),
             Err(e) => {
@@ -389,7 +504,8 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
             eprintln!("brain: skip {} (family '{other}' not servable from the model dir yet)", card.id);
             None
         }
-    }
+    };
+    other.map(Built::Other)
 }
 
 /// [`resident_for`] over a [`brain_modelstore::LocalModel`] -- the same
@@ -404,16 +520,24 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
 /// callers decide for themselves what to do with the reason (`discover`
 /// collects it as a [`DiscoveryError`]; `supply::StoreSupplier::ensure`
 /// folds it into the error it already returns to ITS caller).
+///
+/// An adapter is not a resident of its own: it is served as a view over the
+/// base it rides on (`discover`), so `local` must be a base.
 pub fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Result<Arc<dyn ResidentModel>, String> {
+    build_for_local(local, qwen_cfg, qwen35_sizing).map(|built| built.erased())
+}
+
+fn build_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Result<Built, String> {
     let card = local.card.as_ref().ok_or_else(|| "no model card".to_string())?;
+    if local.adapter.is_some() {
+        return Err(format!("{}: an adapter is served by the base it rides on, not built as a model of its own", card.id));
+    }
     if let Some(roles) = &local.roles {
-        let adapter = local.adapter.as_deref().and_then(|p| p.to_str());
-        return resident_for_compound(card, roles, adapter, qwen_cfg);
+        return resident_for_compound(card, roles, qwen_cfg);
     }
     let weights = local.weights.to_str().ok_or_else(|| "weights path is not valid UTF-8".to_string())?;
     let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
-    let adapter = local.adapter.as_deref().and_then(|p| p.to_str());
-    resident_for(weights, card, tokenizer, adapter, qwen_cfg, qwen35_sizing).ok_or_else(|| format!("family '{}' not servable from the model dir yet", card.family))
+    resident_for(weights, card, tokenizer, qwen_cfg, qwen35_sizing).ok_or_else(|| format!("family '{}' not servable from the model dir yet", card.family))
 }
 
 /// The compound-model counterpart of [`resident_for`]: family dispatch keyed
@@ -422,21 +546,16 @@ pub fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalo
 /// A checkpoint of a family whose model reads a downloaded Hugging Face
 /// directory (the qwen3 decoder and its `llama`/`qwen2` rows, glmdsa, lfm2)
 /// is served straight from the directory its `weights` role names.
-fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, adapter: Option<&str>, qwen_cfg: catalog::resident_llm::QwenServeConfig) -> Result<Arc<dyn ResidentModel>, String> {
+fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, qwen_cfg: catalog::resident_llm::QwenServeConfig) -> Result<Built, String> {
     let implementation = brain_arch::by_id(&card.family).map(|a| a.implementation().id);
-    // A named LoRA adapter is folded into a qwen3-family base; no other
-    // compound family has that path.
-    if adapter.is_some() && implementation != Some("qwen3") {
-        return Err(format!("{}: a LoRA adapter is served on a qwen3-family base, not on a {} one", card.id, card.family));
-    }
     if matches!(implementation, Some("qwen3" | "glmdsa" | "lfm2" | "qwen3omnimoe")) {
         let dir = roles.get("weights").ok_or("compound manifest missing role \"weights\"")?;
         let weights = dir.to_str().ok_or("weights path is not valid UTF-8")?;
         let tokenizer = dir.join("tokenizer.json");
         return match implementation {
-            Some("qwen3") => Ok(Arc::new(catalog::resident_llm::QwenResident::from_card_configured(weights, card, tokenizer.to_str(), adapter, qwen_cfg))),
-            Some("glmdsa") => Ok(Arc::new(catalog::resident_llm::GlmResident::from_card(weights, card, None))),
-            Some("lfm2") => Ok(Arc::new(catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer.to_str())?)),
+            Some("qwen3") => Ok(Built::Qwen(Arc::new(QwenResident::from_card_configured(weights, card, tokenizer.to_str(), qwen_cfg)))),
+            Some("glmdsa") => Ok(Built::Other(Arc::new(catalog::resident_llm::GlmResident::from_card(weights, card, None)))),
+            Some("lfm2") => Ok(Built::Other(Arc::new(catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer.to_str())?))),
             // Sharded across several GPUs, so it is registered on its own
             // multi-device path rather than from the model directory.
             _ => Err(format!("{} is served across GPUs: set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT={weights}", card.id)),
@@ -445,9 +564,9 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
     // A pulled YOLOv8 is served from its downloaded `.pt`.
     if card.family == "yolo" {
         let pt = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
-        return Ok(Arc::new(catalog::resident_yolo::YoloResident::from_card(pt, card, None)));
+        return Ok(Built::Other(Arc::new(catalog::resident_yolo::YoloResident::from_card(pt, card, None))));
     }
-    match brain_family(&card.family) {
+    let other: Result<Arc<dyn ResidentModel>, String> = match brain_family(&card.family) {
         "zimage" => {
             let paths = zimage_paths_from_roles(roles)?;
             catalog::resident_zimage::ZImageResident::from_paths(card.id.clone(), paths).map(|z| Arc::new(z) as Arc<dyn ResidentModel>)
@@ -461,7 +580,8 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
         // every request shape).
         "minimaxh3" => minimaxh3_paths_from_roles(roles).map(|paths| Arc::new(catalog::resident_minimaxh3::MiniMaxH3Resident::from_paths(card.id.clone(), paths)) as Arc<dyn ResidentModel>),
         other => Err(format!("compound family '{other}' not servable from the model dir yet")),
-    }
+    };
+    other.map(Built::Other)
 }
 
 /// Build a `s3dit::pipeline::Paths` from a compound manifest's roles --
@@ -783,7 +903,7 @@ mod tests {
             let card = card_of(&p).expect("gguf card");
             assert_eq!(card.family, arch, "a GGUF card's family IS general.architecture, verbatim");
             assert!(
-                resident_for(p.to_str().unwrap(), &card, tok, None, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).is_none(),
+                resident_for(p.to_str().unwrap(), &card, tok, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).is_none(),
                 "raw {arch}.gguf routed into the brain-native '{arch}' resident, which cannot read GGUF bytes"
             );
         }
@@ -797,7 +917,7 @@ mod tests {
         write_gguf_qwen(&dir, "qwen3.gguf", "toy-qwen-gguf");
         let p = dir.join("qwen3.gguf");
         let card = card_of(&p).expect("gguf card");
-        assert!(resident_for(p.to_str().unwrap(), &card, None, None, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).is_some(), "a qwen3 GGUF must still serve from the scan");
+        assert!(resident_for(p.to_str().unwrap(), &card, None, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).is_some(), "a qwen3 GGUF must still serve from the scan");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -847,7 +967,8 @@ mod tests {
     /// (mirrors `brain_modelstore::Store`'s own
     /// `scan_finds_a_base_model_and_its_adapter_as_two_distinct_entries`,
     /// but as the CLI-facing gate: this is what `brain caps`/`brain do`
-    /// actually walk).
+    /// actually walk). The adapter is a view over the base: the base's one
+    /// instance key, its own id, and the adapter's digest as its identity.
     #[test]
     fn discover_surfaces_a_base_and_its_named_adapter_as_two_distinct_entries() {
         let dir = tmp_dir("adapter-catalog");
@@ -863,14 +984,16 @@ mod tests {
         .unwrap();
         write_tokenizer(&repo);
 
+        let adapter_id = "Qwen/Qwen3-Toy:swedishembedded-com:generic-sft:latest";
         let adapter_dir = repo.join("adapters").join("swedishembedded-com").join("generic-sft").join("latest");
         std::fs::create_dir_all(&adapter_dir).unwrap();
-        let mut adapter_card = ModelCard::new("Qwen/Qwen3-Toy:swedishembedded-com:generic-sft:latest", "qwen");
+        let mut adapter_card = ModelCard::new(adapter_id, "qwen");
         adapter_card.variant_of = Some("Qwen/Qwen3-Toy".to_string());
         adapter_card.adapter = Some(st::Adapter { kind: "lora".into(), rank: Some(4), base: Some("Qwen/Qwen3-Toy".to_string()), alpha: Some(8.0), targets: Some(vec!["wq".into()]), dataset_id: None, per_target: None });
+        let adapter_file = adapter_dir.join("adapter.brain.safetensors");
         st::save_safetensors(
-            adapter_dir.join("adapter.brain.safetensors").to_str().unwrap(),
-            &[("blocks.0.attn.wq.weight.lora_a".into(), vec![1u64], vec![0.1f32])],
+            adapter_file.to_str().unwrap(),
+            &[("blocks.0.attn.wq.weight.lora_a".into(), vec![4, 2], vec![0.1f32; 8]), ("blocks.0.attn.wq.weight.lora_b".into(), vec![2, 4], vec![0.1f32; 8])],
             &serde_json::json!({"rank": 4, "alpha": 8.0}),
             Some(&adapter_card),
         )
@@ -879,8 +1002,56 @@ mod tests {
         let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
         let got = ids(&residents);
         assert!(got.contains(&"Qwen/Qwen3-Toy".to_string()), "base missing: {got:?}");
-        assert!(got.contains(&"Qwen/Qwen3-Toy:swedishembedded-com:generic-sft:latest".to_string()), "adapter missing: {got:?}");
+        assert!(got.contains(&adapter_id.to_string()), "adapter missing: {got:?}");
         assert_eq!(got.len(), 2, "expected exactly base + adapter, got: {got:?}");
+
+        let by_id = |id: &str| residents.iter().find(|r| r.manifest().model == id).unwrap_or_else(|| panic!("{id} not registered"));
+        let (base, adapter) = (by_id("Qwen/Qwen3-Toy"), by_id(adapter_id));
+        let inv = capability::Invocation::new();
+        assert_eq!(adapter.instance_key("generate", &inv), base.instance_key("generate", &inv), "base and adapter are one instance, so they batch");
+        assert_eq!(adapter.adapter_identity().map(|a| (a.id, a.digest)), Some((adapter_id.to_string(), brain_modelstore::fetch::file_digest(&adapter_file).unwrap())));
+        assert_eq!(base.adapter_identity(), None, "the base names no adapter");
+        let mut stamped = capability::Invocation::new();
+        adapter.stamp(&mut stamped);
+        assert_eq!(stamped.get_str("__adapter").as_deref(), Some(adapter_id));
+        let mut forged = capability::Invocation::new().set("__adapter", serde_json::json!(adapter_id));
+        base.stamp(&mut forged);
+        assert_eq!(forged.get_str("__adapter"), None, "a caller reaching the base cannot select an adapter");
+        assert!(base.estimate(&base.instance_key("generate", &inv)).vram == adapter.estimate(&adapter.instance_key("generate", &inv)).vram, "the view is budgeted as the base");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An adapter whose rank or linears exceed the default bank widens the
+    /// bank built for ITS base (the store holds it, so it is served) unless the
+    /// operator sized the bank, in which case it is skipped with the flag to
+    /// change.
+    #[test]
+    fn the_bank_grows_to_hold_the_stores_adapters_unless_the_operator_sized_it() {
+        let dir = tmp_dir("adapter-bank-size");
+        let repo = dir.join("Qwen").join("Qwen3-Toy");
+        let adapter_dir = repo.join("adapters").join("lab").join("wide").join("v1");
+        std::fs::create_dir_all(&adapter_dir).unwrap();
+        let base_card = ModelCard::new("Qwen/Qwen3-Toy", "qwen");
+        st::save_safetensors(repo.join("model.brain.safetensors").to_str().unwrap(), &[("w".into(), vec![1u64], vec![0.0f32])], &serde_json::json!({}), Some(&base_card)).unwrap();
+        write_tokenizer(&repo);
+        let mut card = ModelCard::new("Qwen/Qwen3-Toy:lab:wide:v1", "qwen");
+        card.adapter = Some(st::Adapter { kind: "lora".into(), rank: Some(32), base: Some("Qwen/Qwen3-Toy".to_string()), alpha: Some(64.0), targets: Some(vec!["wq".into(), "down".into()]), dataset_id: None, per_target: None });
+        let (a, b) = (vec![0.1f32; 32 * 2], vec![0.1f32; 2 * 32]);
+        st::save_safetensors(
+            adapter_dir.join("adapter.brain.safetensors").to_str().unwrap(),
+            &[("blocks.0.attn.wq.weight.lora_a".into(), vec![32, 2], a.clone()), ("blocks.0.attn.wq.weight.lora_b".into(), vec![2, 32], b.clone()), ("blocks.0.mlp.down.weight.lora_a".into(), vec![32, 2], a), ("blocks.0.mlp.down.weight.lora_b".into(), vec![2, 32], b)],
+            &serde_json::json!({"rank": 32, "alpha": 64.0}),
+            Some(&card),
+        )
+        .unwrap();
+
+        let defaults = catalog::resident_llm::QwenServeConfig::default();
+        let (residents, _) = discover(&dir, defaults, catalog::resident_qwen35::Qwen35Sizing::default());
+        assert!(ids(&residents).contains(&"Qwen/Qwen3-Toy:lab:wide:v1".to_string()), "rank 32 on down is above the defaults, so the bank grew: {:?}", ids(&residents));
+
+        let sized = catalog::resident_llm::QwenServeConfig { adapter_bank: Some(AdapterBankSettings::default()), ..defaults };
+        let (residents, _) = discover(&dir, sized, catalog::resident_qwen35::Qwen35Sizing::default());
+        assert_eq!(ids(&residents), vec!["Qwen/Qwen3-Toy".to_string()], "an operator-sized bank is not widened for the store");
         std::fs::remove_dir_all(&dir).ok();
     }
 
