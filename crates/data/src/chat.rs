@@ -211,24 +211,34 @@ impl ChatSample {
         ChatSample { messages, tools: self.tools.clone(), rendered: None }
     }
 
+    /// Whether a supervised assistant turn calls a tool. Such a turn is not
+    /// prefix-stable under a template that renders only the last assistant
+    /// turn of a conversation differently, so it can only be trained through
+    /// [`ChatSample::answers_as_asked`].
+    #[must_use]
+    pub fn supervises_tool_calls(&self) -> bool {
+        self.messages.iter().any(|m| m.train && !m.tool_calls.is_empty())
+    }
+
     /// This sample as one example per supervised answer, each the way the
     /// model is asked for it: the prompt its template renders for the
     /// conversation so far (with reasoning off when `thinking` is `false`),
     /// then the answer as the template renders it after that prompt, so a
-    /// dialogue trains each reply on the prompt it will be given.
+    /// dialogue trains each reply on the prompt it will be given. An answer
+    /// may call tools: a turn that does is the same kind of example, and a
+    /// conversation of several calls and their results trains turn by turn.
     ///
     /// A template renders an earlier turn of a dialogue without its reasoning
     /// and an answer that is last with it, so one rendering of the whole
     /// conversation cannot show every answer the way it is asked for; and its
     /// message boundaries are refused as not prefix-stable. `None` when a
-    /// supervised message is not an assistant answer (a tool call, a
-    /// supervised prompt turn): such a sample is encoded as a whole.
+    /// supervised message is not an assistant turn (a supervised prompt
+    /// turn): such a sample is encoded as a whole.
     ///
     /// # Errors
     /// The template renders an answer that does not follow its prompt.
     pub fn answers_as_asked(&self, tmpl: &ChatTemplate, thinking: bool) -> Result<Option<Vec<ChatSample>>, TemplateError> {
-        let answers = |m: &ChatMessage| m.role == "assistant" && m.tool_calls.is_empty();
-        if self.messages.iter().any(|m| m.train && !answers(m)) {
+        if self.messages.iter().any(|m| m.train && m.role != "assistant") {
             return Ok(None);
         }
         let values: Vec<minijinja::Value> = self.messages.iter().map(ChatMessage::to_template_value).collect();
@@ -633,7 +643,7 @@ mod tests {
     /// block - with only the answer supervised.
     #[test]
     fn each_answer_of_a_dialogue_is_trained_as_the_model_is_asked_for_it() {
-        let tmpl = ChatTemplate::compile(include_str!("../testdata/qwen3_chat_template.jinja")).unwrap();
+        let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
         let turn = |role: &str, text: &str, train: bool| ChatMessage { role: role.into(), content: text.into(), tool_calls: Vec::new(), tool_call_id: None, train };
         let dialogue = ChatSample {
             messages: vec![turn("system", "s", false), turn("user", "q1", false), turn("assistant", "a1", true), turn("user", "q2", false), turn("assistant", "a2", true)],
@@ -656,6 +666,54 @@ mod tests {
         assert!(shown.contains("a1") && !shown.contains("<think>\n\n</think>\n\na1"), "an earlier answer has no reasoning block: {shown:?}");
         assert!(shown.ends_with("<think>\n\n</think>\n\n"), "{shown:?}");
         assert_eq!(said, "a2<|im_end|>\n");
+    }
+
+    /// A conversation in which the model calls a tool twice before it answers
+    /// trains under Qwen3's own template, in either thinking mode, with every
+    /// assistant turn supervised: one example per turn, whose prompt and
+    /// completion are what the serving renderer gives for the same prefix with
+    /// its generation prompt - the completion being the turn as the template
+    /// writes it after that prompt.
+    #[test]
+    fn every_turn_of_a_tool_conversation_is_trained_as_serving_renders_it() {
+        use crate::qwen_chat::{self, ChatMessage as Served, TemplateOpts, ToolCallMsg};
+        let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
+        let schema = r#"{"type":"function","function":{"name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}"#;
+        let call = |id: &str, city: &str| ToolCall { id: Some(id.into()), name: "get_weather".into(), arguments: format!(r#"{{"city": "{city}"}}"#) };
+        let served_call = |id: &str, city: &str| ToolCallMsg { id: id.into(), name: "get_weather".into(), arguments: format!(r#"{{"city": "{city}"}}"#) };
+        let conversation = ChatSample {
+            messages: vec![
+                ChatMessage::user("Weather in Paris and Rome?"),
+                ChatMessage::assistant_tool_calls("", vec![call("c1", "Paris")], true),
+                ChatMessage::tool_result("18C"),
+                ChatMessage::assistant_tool_calls("", vec![call("c2", "Rome")], true),
+                ChatMessage::tool_result("22C"),
+                ChatMessage::assistant("Paris 18C, Rome 22C.", true),
+            ],
+            tools: vec![crate::chat_template::parse_json_ordered(schema).unwrap()],
+            rendered: None,
+        };
+        let served = [
+            Served::user("Weather in Paris and Rome?"),
+            Served::assistant("").with_tool_calls(vec![served_call("c1", "Paris")]),
+            Served::tool("18C"),
+            Served::assistant("").with_tool_calls(vec![served_call("c2", "Rome")]),
+            Served::tool("22C"),
+            Served::assistant("Paris 18C, Rome 22C."),
+        ];
+        for thinking in [false, true] {
+            let opts = TemplateOpts { enable_thinking: thinking, ..TemplateOpts::default() };
+            let samples = conversation.answers_as_asked(&tmpl, thinking).unwrap().expect("every turn is an assistant turn");
+            assert_eq!(samples.len(), 3);
+            for (sample, at) in samples.iter().zip([1, 3, 5]) {
+                let prompt = qwen_chat::render_for_generation(&served[..at], &[schema.to_string()], opts.clone()).unwrap();
+                let full = qwen_chat::render(&served[..=at], &[schema.to_string()], TemplateOpts { add_generation_prompt: false, ..opts.clone() }).unwrap();
+                let rendered = sample.rendered.as_ref().expect("a rendered example");
+                assert_eq!(rendered.prompt, prompt, "thinking={thinking}, turn {at}");
+                assert_eq!(rendered.completion, full.strip_prefix(prompt.as_str()).unwrap(), "thinking={thinking}, turn {at}");
+            }
+            assert!(samples[0].rendered.as_ref().unwrap().completion.contains("<tool_call>"));
+        }
     }
 
     #[test]

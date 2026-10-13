@@ -236,6 +236,16 @@ let chat = brain::ChatPipeline::from(
 - The tokenizer (`tokenizer.json`) and chat template are read from the base
   checkpoint's directory, and every dataset is checked against them
   (`validate_chat_dataset_for`) before a device is claimed.
+- A conversation whose supervised turns call tools (assistant turn with
+  `tool_calls`, the tool results between them, a final answer) trains as is,
+  in thinking and no-think mode alike: each supervised turn becomes one
+  example, its prompt being what the template renders for the conversation
+  before it (with the generation prompt) and its completion the turn as the
+  template then writes it, which is what serving produces and parses. Qwen3's
+  template renders an empty reasoning block on the last assistant turn only,
+  so one rendering of the whole conversation cannot be masked by message; that
+  is why the examples are cut per turn. A record of plain answers is encoded
+  exactly as before.
 - `.replay(path)` mixes every record of another dataset into training; call
   it once per file. The mix is exactly the union of the files.
 - `.continue_from(adapter)` trains an existing adapter further at its own

@@ -786,8 +786,8 @@ pub fn score_chat(base: &str, adapter: Option<&Path>, held_out: &Path) -> Result
     let open = qwen3::store_checkpoint_path(&weights, &model_dir);
     let weights_str = utf8(&open)?;
     qwen3::checkpoint_config(weights_str).map_err(Error::Backend)?;
-    let records = read_checked(held_out, &model_dir)?;
     let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
+    let records = Asked { tok: &tok, tmpl: &tmpl, no_think: None, render: data::chat::RenderOpts::default() }.read(held_out)?;
     let mut longest = 0usize;
     for (i, r) in records.iter().enumerate() {
         let (ids, _) = r.encode(&tok, &tmpl).map_err(|e| Error::Backend(format!("{}: record {}: {e}", held_out.display(), i + 1)))?;
@@ -836,7 +836,7 @@ pub(crate) fn lora_shape(continue_from: Option<&Path>, rank: Option<u32>, alpha:
 /// How a fine-tune's records are asked for: the base's tokenizer and template,
 /// and for a model trained for no-think mode the block its prompt leaves open.
 pub(crate) struct Asked<'a> {
-    pub tok: &'a QwenBpe,
+    pub tok: &'a dyn data::tokenizer::Tokenizer,
     pub tmpl: &'a ChatTemplate,
     pub no_think: Option<&'a str>,
     pub render: data::chat::RenderOpts,
@@ -844,10 +844,12 @@ pub(crate) struct Asked<'a> {
 
 impl Asked<'_> {
     /// The samples of `path` as they are trained on, each checked to encode
-    /// against the template and to supervise something. For no-think mode a
-    /// dialogue is one example per answer, each as the model is asked for it
-    /// ([`ChatSample::answers_as_asked`]); a record that is not made of plain
-    /// answers keeps its shape, its answers following the block.
+    /// against the template and to supervise something. A dialogue is one
+    /// example per answer, each as the model is asked for it
+    /// ([`ChatSample::answers_as_asked`]), for a model trained for no-think
+    /// mode and, in thinking mode, for a record whose supervised turns call
+    /// tools (whole-record masking refuses those); any other record keeps its
+    /// shape, its answers following the no-think block when there is one.
     pub(crate) fn read(&self, path: &Path) -> Result<Vec<ChatSample>> {
         let summary = crate::validate_chat_dataset(path).map_err(Error::Backend)?;
         if summary.trained_messages == 0 {
@@ -857,12 +859,13 @@ impl Asked<'_> {
         let mut samples = Vec::with_capacity(records.len());
         for (at, record) in records.iter().enumerate() {
             let invalid = |e: &dyn std::fmt::Display| Error::Backend(format!("{}: record {} cannot be encoded for training: {e}", path.display(), at + 1));
-            match self.no_think {
-                None => samples.push(record.clone()),
-                Some(block) => match record.answers_as_asked(self.tmpl, false).map_err(|e| invalid(&e))? {
-                    Some(asked) => samples.extend(asked),
-                    None => samples.push(record.answering_without_thinking(block)),
-                },
+            // Whole-record masking is exact for plain answers in thinking mode
+            // and refuses tool calls; everywhere else each answer is asked for.
+            let per_answer = if self.no_think.is_some() || record.supervises_tool_calls() { record.answers_as_asked(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))? } else { None };
+            match (per_answer, self.no_think) {
+                (Some(asked), _) => samples.extend(asked),
+                (None, None) => samples.push(record.clone()),
+                (None, Some(block)) => samples.push(record.answering_without_thinking(block)),
             }
         }
         for (at, sample) in samples.iter().enumerate() {
@@ -873,14 +876,6 @@ impl Asked<'_> {
         }
         Ok(samples)
     }
-}
-
-fn read_checked(path: &Path, model_dir: &Path) -> Result<Vec<ChatSample>> {
-    let summary = crate::validate_chat_dataset_for(path, model_dir).map_err(Error::Backend)?;
-    if summary.trained_messages == 0 {
-        return Err(Error::Backend(format!("{}: holds no supervised turns (`\"train\": true`)", path.display())));
-    }
-    ChatSample::from_jsonl(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))
 }
 
 pub(crate) fn tokenizer_and_template(model_dir: &Path) -> Result<(QwenBpe, ChatTemplate)> {
@@ -1069,6 +1064,40 @@ mod tests {
         assert_eq!(block_for(100, Some(100)).unwrap(), 100);
         assert_eq!(block_for(70, Some(512)).unwrap(), 128);
         assert!(block_for(600, Some(512)).unwrap_err().to_string().contains("max_block"));
+    }
+
+    /// The samples `Asked` reads from a dataset of `lines`, in the mode asked.
+    fn read_lines(lines: &[&str], no_think: bool) -> Result<Vec<ChatSample>> {
+        let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
+        let chars: String = (32u8..127).map(char::from).chain(['\n']).collect();
+        let tok = data::tokenizer::CharTokenizer::from_corpus(&chars);
+        let path = std::env::temp_dir().join(format!("brain-asked-{}-{no_think}-{}.jsonl", std::process::id(), lines.len()));
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let no_think_block = no_think.then(|| tmpl.no_think_block().unwrap());
+        let render = data::chat::RenderOpts { keep_reasoning: no_think };
+        let read = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think_block.as_deref(), render }.read(&path);
+        std::fs::remove_file(&path).unwrap();
+        read
+    }
+
+    const ANSWER: &str = r#"{"messages":[{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true}]}"#;
+    const DIALOGUE: &str = r#"{"messages":[{"role":"user","content":"q1","train":false},{"role":"assistant","content":"a1","train":true},{"role":"user","content":"q2","train":false},{"role":"assistant","content":"a2","train":true}]}"#;
+    const TOOL_CONVERSATION: &str = r#"{"messages":[{"role":"user","content":"w","train":false},{"role":"assistant","content":"","train":true,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","content":"r","tool_call_id":"c1","train":false},{"role":"assistant","content":"done","train":true}]}"#;
+
+    /// A conversation with a supervised tool call trains turn by turn in both
+    /// thinking modes, while a dataset of plain answers keeps the shape it has
+    /// always had in thinking mode: one example per record, encoded whole.
+    #[test]
+    fn tool_conversations_train_per_turn_and_plain_ones_as_before() {
+        for no_think in [false, true] {
+            let samples = read_lines(&[TOOL_CONVERSATION], no_think).unwrap();
+            assert_eq!(samples.len(), 2, "no_think={no_think}");
+            assert!(samples.iter().all(|s| s.rendered.is_some()));
+        }
+        let plain = read_lines(&[ANSWER], false).unwrap();
+        assert_eq!(plain.len(), 1);
+        assert!(plain[0].rendered.is_none(), "thinking-mode plain answers are encoded as the record");
+        assert_eq!(read_lines(&[DIALOGUE], true).unwrap().len(), 2);
     }
 
     /// The share each group's rows make of the mix `repeats` lists.

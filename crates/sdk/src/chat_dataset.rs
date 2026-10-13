@@ -33,8 +33,6 @@
 use std::path::Path;
 
 use data::chat::ChatSample;
-use data::chat_template::ChatTemplate;
-use data::qwen_tokenizer::QwenBpe;
 
 /// What a dataset file contains, once it has been shown to parse.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -60,9 +58,11 @@ pub struct ChatDatasetSummary {
 /// loss mask is derived by rendering each message through the checkpoint's own
 /// chat template and some message shapes are not prefix-stable under it - the
 /// template's output for a message depends on what comes after it, so there is
-/// no honest boundary to mask at. `model::fit` refuses those rather than
+/// no honest boundary to mask at. Training refuses those rather than
 /// guessing, which is correct and also means the refusal arrives after a
-/// checkpoint has been loaded and a device claimed.
+/// checkpoint has been loaded and a device claimed. A record whose supervised
+/// turns call tools is not refused for that: each turn is encoded as the model
+/// is asked for it, as training does.
 ///
 /// This runs the same encode, needs no device, and reports the offending
 /// record and message.
@@ -72,34 +72,10 @@ pub fn validate_chat_dataset_for(
 ) -> Result<ChatDatasetSummary, String> {
     let path = path.as_ref();
     let summary = validate_chat_dataset(path)?;
-    let samples = ChatSample::from_jsonl(path).map_err(|e| e.to_string())?;
-
     let model_dir = model_dir.as_ref();
-    let tmpl = ChatTemplate::from_model_dir(model_dir).map_err(|e| {
-        format!("{}: could not load the chat template: {e}", model_dir.display())
-    })?;
-    let tok_path = model_dir.join("tokenizer.json");
-    let tok = QwenBpe::from_file(tok_path.to_str().unwrap_or_default())
-        .map_err(|e| format!("{}: could not load the tokenizer: {e}", tok_path.display()))?;
-
-    for (index, sample) in samples.iter().enumerate() {
-        let (ids, mask) = sample.encode(&tok, &tmpl).map_err(|e| {
-            format!(
-                "{}: record {} cannot be encoded for training: {e}",
-                path.display(),
-                index + 1
-            )
-        })?;
-        if !mask.iter().any(|m| *m) {
-            return Err(format!(
-                "{}: record {} encodes to {} token(s) with none supervised, so training on it \
-                 would be a no-op",
-                path.display(),
-                index + 1,
-                ids.len()
-            ));
-        }
-    }
+    let (tok, tmpl) = crate::finetune::tokenizer_and_template(model_dir).map_err(|e| e.to_string())?;
+    let render = data::chat::RenderOpts::default();
+    crate::finetune::Asked { tok: &tok, tmpl: &tmpl, no_think: None, render }.read(path).map_err(|e| e.to_string())?;
     Ok(summary)
 }
 

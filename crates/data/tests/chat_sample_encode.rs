@@ -87,7 +87,8 @@ fn encode_fails_loudly_rather_than_mismask_a_tool_call_then_final_answer_convers
     // turn, so a truncated prefix (where the tool-call turn looks last)
     // renders it differently than the true conversation does.
     // ChatSample::encode must propagate that as an error, not silently
-    // produce a wrong mask boundary.
+    // produce a wrong mask boundary. (Such a conversation trains through
+    // ChatSample::answers_as_asked, which needs no boundary.)
     let Some(dir) = qwen3_dir() else {
         brain_testutil::skip("QWEN3_DIR unset (needs a real Qwen3 tokenizer.json + tokenizer_config.json)");
         return;

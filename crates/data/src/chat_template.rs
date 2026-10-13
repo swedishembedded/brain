@@ -393,7 +393,9 @@ impl ChatTemplate {
     /// is always emitted before any content-dependent branching), which is a
     /// smaller but still real silent-mismask risk. Failing loudly on the
     /// hazard, as this does, is the safe choice until a provably exact fix
-    /// exists.
+    /// exists. A conversation that hits this hazard is trained through
+    /// [`crate::chat::ChatSample::answers_as_asked`] instead, which renders
+    /// each supervised turn after its own prefix and so needs no boundary.
     pub fn render_with_message_boundaries(&self, messages: &[Value], tools: Option<Value>) -> Result<(String, Vec<Range<usize>>), TemplateError> {
         let full = self.render(Value::from(messages.to_vec()), tools.clone(), false, &BTreeMap::new())?;
         let mut boundaries = Vec::with_capacity(messages.len());
