@@ -10,6 +10,8 @@
 //! decision head) - and this crate puts both behind one engine and one
 //! capability, so a caller on the other side of a wire needs neither.
 //!
+//! * [`examples`] - outcome-labelled decision examples: the JSONL loader, its
+//!   validation, leakage checks and summary.
 //! * [`engine`] - the engine over both architectures, split into a host-side
 //!   read and a device-side build.
 //! * [`wire`] - the request formats, with key order preserved.
@@ -29,6 +31,7 @@
 
 pub mod caps;
 pub mod engine;
+pub mod examples;
 pub mod fixtures;
 pub mod load;
 pub mod manifest;

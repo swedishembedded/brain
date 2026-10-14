@@ -246,6 +246,46 @@ with fewer than 2 or more than 10 levels, an unknown type, a missing field) is a
 422 naming the question; a body that is not JSON is a 400; an unknown model is a
 404. `brain` is an additive block a client of the shared shape can ignore.
 
+## Decision examples: the training data format
+
+Training, evaluation and promotion read outcome-labelled choice decisions from
+JSONL, one JSON object per line, written by an exporter (an agent runtime's
+benchmark harness, for instance). `decisions::examples` is the only reader.
+Unknown fields are ignored.
+
+```json
+{"decision_type": "tool_routing",
+ "state_ref": {"run": "r1", "task": "t1", "suite": "tool_selection", "seed": 3, "question_id": "q"},
+ "state": "find the function that parses headers",
+ "question": {"id": "q", "type": "choice", "instruction": "which tool"},
+ "options": [{"id": "grep", "description": "search text"}, {"id": "read"}],
+ "label": "grep", "label_index": 0, "label_source": "oracle",
+ "outcome": {"task_passed": true, "llm_tokens_saved": 120, "recovery_calls": 0},
+ "split": "train", "family": "tool_selection", "seed": 3}
+```
+
+| field | rule |
+|---|---|
+| `decision_type`, `split`, `label_source` | required; `split` is `train`, `validation` or `test`; `label_source` is `oracle`, `counterfactual_replay` or `scorer` |
+| `state` | text, or any JSON (its key order is kept); falls back to `question.state` |
+| `question` | `{id, type: "choice", instruction}`; only `choice` is trained on |
+| `options` | 1 to 255 entries, each an id or `{id, description?}`, ids unique; the text a model reads is the description, else the id |
+| `label` | one of the option ids; a `label_index`, if present, must agree |
+| `family`, `seed` | on the line, else `state_ref.suite` and `state_ref.seed`; a family is required |
+| `outcome` | optional; `task_passed`, `llm_tokens_saved`, `recovery_calls`, each optional |
+
+An example's identity is its `state_ref` (plus `question.id` when the
+`state_ref` is a plain string). A bad line, an unknown label id or a repeated
+identity is refused with an error that starts `line N:`.
+
+**Leakage.** A held-out score means nothing if the held-out example or its task
+was seen in training, so a file is refused, with a report naming the splits and
+lines, when any of these groups spans more than one split: the task
+(`state_ref.task`, or the whole `state_ref` when it names none), a family and
+seed together, or an identical state, instruction and option set. A family may
+appear in several splits through different seeds; a family that appears in one
+split only is a held-out family.
+
 ## What the checkpoint knows
 
 Laya is a System 1 model trained on agent and routing decisions over text. It
