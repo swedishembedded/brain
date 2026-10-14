@@ -180,7 +180,24 @@ The Anthropic entry is unchanged.
 |---|---|
 | `capabilities` | Names derived from the model's manifest: `chat`, `tools` (chat whose `generate` accepts `tools`), `embeddings`, `images`. |
 | `max_output_tokens` | The most new tokens one request may ask for, when the model's `generate` action declares an upper bound. On OpenRouter it is also `top_provider.max_completion_tokens`. |
-| `adapter` | `{ "id": "<adapter card id>", "digest": "sha256:<hex>" }` for the LoRA adapter now in front of the model (`--adapter`, `--adapter-manifest`, `--watch-adapters`). The id is the adapter's name and the digest is that of its file; no file path is ever included. A hot swap changes it on the next read. |
+| `adapter` | Present on an entry that IS a LoRA adapter: `{ "id": "<adapter card id>", "digest": "sha256:<hex>" }`. The id is the adapter's name and the digest is that of its file; no file path is ever included. A release that replaces an adapter under the same id changes the digest on the next read. |
+
+### Adapters are models
+
+A LoRA adapter served beside its base (see
+[`docs/using/serving.md`](serving.md#serving-lora-adapters)) has an entry of its
+own: `id` is the adapter's card id, `<vendor>/<repo>:<owner>:<name>:<tag>`, and
+it is selected by putting that id in `model` on any route (chat, completions,
+messages, `/v1/run`). Its base's entry is the same as without adapters and has
+no `adapter` field. Adapter and base requests are batched together on one copy
+of the weights.
+
+An adapter id needs the same API key as any model. An id that is not served -
+never loaded, withdrawn after a release, or merely adapter-shaped - is an
+unknown model: the same 404 and the same body, and nothing in a request can
+make the server load or fetch an adapter. The selection travels in a reserved
+parameter the server sets itself; `/v1/run`, `/v1/jobs` and D-Bus `Run` refuse
+`__adapter` (and `adapter`) as an unknown param like any other undeclared name.
 
 ## Model card
 

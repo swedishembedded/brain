@@ -24,11 +24,9 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
 - `--api-keys-out FILE` - also write the generated API keys to `FILE`, not
   just stdout.
 - `--ready-file PATH` - see **Readiness** below.
-- `--watch-adapters DIR` - see **Hot-swapping a LoRA adapter** below. Off
-  unless given.
-- `--adapter FILE`, `--adapter-manifest FILE` - see **Serving an adapter
-  release** below. At most one of these two and `--watch-adapters` may be
-  given.
+- `--adapter FILE`, `--adapter-manifest FILE`, `--watch-adapters DIR`,
+  `--adapter-slots N`, `--adapter-rank-cap R`, `--adapter-targets LIST` - see
+  **Serving LoRA adapters** below. At most one of the first three may be given.
 - `--decision-model REF|DIR` (repeatable), `--decision-default ID` - serve
   decision models beyond the ones found in the model store, and name the one
   `auto` resolves to. See [Decision models](../models/decision.md).
@@ -37,73 +35,96 @@ At least one surface flag is meaningful for a useful server; an unknown flag
 is a hard error (exit 2), not a warning. Run `brain serve --help` for the
 authoritative flag list.
 
-## Hot-swapping a LoRA adapter
+## Serving LoRA adapters
 
-`--watch-adapters DIR` points the server at a directory a training or
-promotion step publishes LoRA adapters into, and swaps the served Qwen3 onto
-the newest one **without a restart**. It is off unless the flag is given.
+One resident copy of a Qwen3's weights serves the base and any number of LoRA
+adapters **at the same time, in the same batches**. An adapter is a model: it
+is selected by its card id, `<vendor>/<repo>:<owner>:<name>:<tag>` (for
+example `Qwen/Qwen3-0.6B:lab:support:v3`), in the `model` field of any request
+over HTTP or D-Bus. The base keeps answering under its own id with no adapter.
+`GET /models` lists one entry per served adapter id, each with
+`adapter: {id, digest}` (see [`docs/using/http-api.md`](http-api.md)), and the
+base's entry unchanged.
 
-- "Newest" is the highest-versioned `adapter-NNNNNN.safetensors` in `DIR` -
-  the version, never the modification time, so republishing an older version
-  does not roll the server back onto it.
-- A request already running is never interrupted. The swap applies to the
-  next request against that model; the current one finishes on the weights it
-  started with.
-- The adapter is folded into the base weights when the model is next loaded,
-  so a swapped-in adapter costs nothing per request compared with the base.
-- Only the Qwen3 resident (`BRAIN_QWEN_WEIGHTS`) is watched. With no Qwen3
-  configured, the flag has nothing to swap and no watcher runs.
+Adapters are loaded by the operator only. No request parameter can load an
+adapter, name a file, or make the server fetch one: a model id that is not
+served, adapter-shaped or not, is an unknown model (404), the same answer and
+the same body as any other unknown id.
 
-## Serving an adapter release
+Three things put an adapter in front of the base:
 
-`--adapter FILE` serves the Qwen3 with exactly one LoRA adapter, and nothing
-replaces it while the server runs. Before any surface binds, the adapter is
-read and bound to the served base: when its card records the digest of the
-base it was trained against (`brain::ChatFineTune` records it), the served
-base must have that digest; an adapter without one must name the served
-base's id. A mismatch stops the server with both digests in the message.
-The startup line then says what is served:
+- a model directory (`--models-dir`) that holds adapters under
+  `<vendor>/<repo>/adapters/<owner>/<name>/<tag>/` for a served Qwen3 base
+  offers each as `<vendor>/<repo>:<owner>:<name>:<tag>`;
+- `--adapter FILE`, `--adapter-manifest FILE` or `--watch-adapters DIR` (below)
+  for the Qwen3 selected with `BRAIN_QWEN_WEIGHTS`.
 
-```
-brain serve: brain/qwen3 adapter=<card id> digest=sha256:<hex>
-```
+### The adapter bank
 
-The digest is the SHA-256 of the adapter file, the same value
-`ChatFineTuneOutcome::adapter_digest` reports for it.
+The adapters run from a fixed-size bank of device memory built beside the base
+weights. It is built only when adapters are asked for - by any adapter source
+above, or by one of these flags - and costs nothing otherwise:
 
-`--adapter-manifest FILE` follows a release manifest instead:
+- `--adapter-slots N` - adapters resident on the device at once (default 4).
+  More adapters than slots are still served: the least recently used idle one
+  is swapped out of its slot when another is needed.
+- `--adapter-rank-cap R` - the highest LoRA rank a slot holds (default 16).
+- `--adapter-targets LIST` - the linears the bank corrects: `attention`
+  (`wq,wk,wv,wo`, the default, what the default LoRA training targets), `all`,
+  or a comma-separated list of `wq wk wv wo gate up down`.
 
-```json
-{ "adapter": "releases/support-3.safetensors", "digest": "sha256:<hex>" }
-```
+An adapter above the rank cap, or correcting a linear outside the targets, is
+refused when it is loaded, with the flag that would admit it. For adapters in a
+model directory the bank is widened to hold them unless these flags were given.
+The bank's device bytes (`slots x rank-cap x (k + n) x 4` per targeted linear
+per layer) are part of the model's footprint, so placement budgets them.
 
-- A relative `adapter` path is relative to the manifest's directory.
-- The manifest is re-read when it changes. A new release is swapped in only
-  once the adapter file hashes to `digest` and binds to the served base, and
-  the new `adapter=... digest=...` line is printed. A manifest that fails any
-  check - unparseable, a digest that does not match the file, an adapter for
-  another base - keeps the previous adapter served and prints why.
-- Replace the manifest atomically (write it beside, then rename it over the
-  old one); a release step in Rust does this with
-  `brain::AdapterManifest { adapter, digest }.write_atomically(path)`.
-  Publish every release under a new file name: an adapter file is verified
-  when its manifest changes and read again when the model next loads, so
-  rewriting a published file in place is served unverified.
-- At startup a manifest that exists must verify, or the server does not
-  start. A manifest that does not exist yet serves the base until one is
-  published.
-- As with `--watch-adapters`, a request already running finishes on the
-  adapter it started with.
+### Following releases
 
-Whichever flag put an adapter in front of the model, `GET /models` reports it
-on that model's entry as `adapter: {id, digest}` (see
-[`docs/using/http-api.md`](http-api.md)), updated when a swap is applied. A
-watched-directory adapter is named by its card id and file digest too; one
-whose card cannot be read is served and simply reported without an `adapter`.
+- `--adapter FILE` offers exactly one release and nothing replaces it while the
+  server runs. Before any surface binds, the adapter is read once and bound to
+  the served base: when its card records the digest of the base it was trained
+  against (`brain::ChatFineTune` records it), the served base must have that
+  digest; an adapter without one must name the served base's id. A mismatch
+  stops the server with both digests in the message. The startup line says
+  what is served: `brain serve: <id> adapter=<id> digest=sha256:<hex>`. The
+  digest is the SHA-256 of the adapter file, the same value
+  `ChatFineTuneOutcome::adapter_digest` reports for it.
+- `--adapter-manifest FILE` follows a release manifest,
+  `{ "adapter": "releases/support-3.safetensors", "digest": "sha256:<hex>" }`
+  (a relative path is relative to the manifest). A new release is offered only
+  once the file hashes to `digest` and binds to the served base; a manifest
+  that fails any check keeps the previous adapter and prints why. Replace the
+  manifest atomically; a release step in Rust does this with
+  `brain::AdapterManifest { adapter, digest }.write_atomically(path)`. At
+  startup a manifest that exists must verify; one that does not exist yet
+  offers the base alone until it is published.
+- `--watch-adapters DIR` offers the highest-versioned
+  `adapter-NNNNNN.safetensors` in `DIR` (the version, never the modification
+  time). Files there are read once and checked to be Qwen3 LoRA adapters; they
+  are not bound to the base, since a gated promotion put them there.
+- The three are mutually exclusive: each names the adapter it offers by its own
+  card id, and with two sources "which id is current" would depend on which
+  moved last.
 
-All three adapter flags need a served Qwen3 (`BRAIN_QWEN_WEIGHTS`) behind an
-HTTP or D-Bus surface; `--adapter` and `--adapter-manifest` without one stop
-the server, and the stdio controller refuses all three.
+Each adapter file is read once: the digest reported is of the very bytes the
+engine was given, so there is no window in which the file can be rewritten
+between verification and serving. Publish each release under a new file name.
+
+A release has a new card id (a new tag) and a new digest. It is offered beside
+the old one first, then the old id is withdrawn: it leaves `GET /models` and
+takes no new request (404), requests already running or queued for it finish on
+it, and the engine unloads it afterwards. A swap interrupts nothing. A client
+that follows "the latest" reads the model list for the current id. A release
+that keeps its card id under a new digest replaces the adapter under that id.
+
+The adapter flags need a served Qwen3 (`BRAIN_QWEN_WEIGHTS`) behind an HTTP or
+D-Bus surface; `--adapter` and `--adapter-manifest` without one stop the
+server, and the stdio controller refuses all three.
+
+Adapters are served in fp32 on the fp32 activation, so they are exact on int8
+weights too. Clip ceilings calibrated on the base (`--qwen-kv-calib`) are
+applied to adapter sequences as well, and the server says so once.
 
 ## Access control is always on
 

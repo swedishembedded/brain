@@ -107,6 +107,18 @@ footprint the manager budgets against.
 - Reference: `crates/residency/src/{model,executor}.rs`; ASR:
   `crates/catalog/src/resident_asr.rs`; the pattern to copy: `resident.rs` (yolo/z-image).
 
+A fine-tune of a served model (a LoRA adapter) is **not** a second resident:
+it is a model id that rides on its base's instance. Give it a thin
+`ResidentModel` that answers `instance_key` with the BASE's key (so base and
+fine-tune requests share one instance and one batch), delegates `estimate` and
+`activate` to the base, tells the instance which id was asked for in
+`ResidentModel::stamp` (a reserved param no manifest declares, so no caller can
+set it, and the base's own `stamp` removes it), and names itself in
+`adapter_identity` for the model card. Reference: `QwenAdapterView`
+(`crates/catalog/src/adapter_registry.rs`); `Executor::unregister` withdraws
+such an id after its last job. Never fold an adapter into a second copy of the
+weights.
+
 ### 3. Batching — a real batched forward where the architecture allows
 Override `Instance::run_batch`. When the model has a batchable forward (a shared
 encoder, a per-frame matmul stack), do a **genuine** batch — one device forward over N

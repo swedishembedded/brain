@@ -56,12 +56,16 @@ on whether the adapter beats the base.
 
 ## Serving cost
 
-A served adapter is folded into its base weights at load time, so there is
-no extra per-token cost to serving a fine-tuned model versus the base
-model.
+`brain serve` does not fold a served adapter into a second copy of the
+weights. The base and every adapter run on one resident copy: a request for an
+adapter adds a low-rank product per targeted projection per token, for its own
+rows only, and a request for the base pays nothing. Memory is the adapter bank
+(`--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`), a few percent
+of the base, instead of a full weight copy per adapter. See
+[`docs/using/serving.md`](../using/serving.md#serving-lora-adapters).
 
 The SDK pipelines (`ChatPipeline`, `TextGenerationPipeline`) fold an
-adapter named at load into an fp32 base the same way. On an int8 base, and
+adapter named at load into an fp32 base. On an int8 base, and
 for an adapter switched in with `attach_adapter`, they apply it beside the
 resident base instead, which keeps the correction exact and needs no reload.
 The cost is an extra low-rank product per projection per token, which
@@ -116,7 +120,8 @@ promote. The dataset goes in, a verdict comes out.
 - `--adapter-dir DIR` - written to **only** on a promote, as
   `adapter-NNNNNN.safetensors`. That is exactly the name and ordering
   `brain serve --watch-adapters DIR` looks for, so a promoted adapter is
-  picked up by a running server with no restart.
+  picked up by a running server with no restart and offered as a model of its
+  own (its card id) beside the base.
 
 The probe questions are never trained on - only the facts are - so the
 score is a held-out measurement rather than a memorisation check. A run
