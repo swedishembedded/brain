@@ -33,7 +33,11 @@ train     Train a decision head on the `train` split of a JSONL file of
           encoder is frozen unless --finetune-encoder is given. The
           checkpoint's manifest records the base, data digest, split counts,
           hyperparameters, seed and brain commit, and says `unvalidated`:
-          only a promotion can change that.
+          only a promotion can change that. A Laya base (the preferred stock
+          model) always trains its head with the trunk frozen; the output is
+          the head plus a reference to the base by id and digest, not a copy of
+          the weights, and the base must stay installed to serve it.
+          --finetune-encoder is refused for Laya.
 eval      Measure a checkpoint on one split: accuracy against the majority and
           chance baselines, NLL, Brier, ECE/AdaECE with reliability bins,
           coverage versus accuracy, option-order instability under a seeded

@@ -5,7 +5,7 @@
 //! the training run behind `brain decide train`.
 //!
 //! [`train`] reads and validates a JSONL file (`decisions::examples`), trains a
-//! `decide` model's head on its `train` split through
+//! decision head, `decide` or Laya, on its `train` split through
 //! [`DecisionPipeline::train_cases`], and writes a checkpoint directory whose
 //! `decision.manifest.json` records where the weights came from: the base
 //! model's identity, the data's digest, the split counts, the hyperparameters,
@@ -21,6 +21,13 @@
 //! lineage honest (the base identity names exactly the encoder in the output).
 //!
 //! The same seed on the same data and base gives the same weights.
+//!
+//! **A Laya base is referenced, not copied.** Its trunk is always frozen, so
+//! the output holds the trained head and a reference to the base by store id
+//! and digest (`decisions::laya_head`) instead of 1.6 GB of unchanged weights.
+//! Training the trunk (`freeze_encoder = false`) is refused for Laya: it could
+//! only be saved as a full copy, and it costs a gradient and two optimizer
+//! moments for every one of 395M weights.
 //!
 //! [`promote_model`] and [`rollback_model`] close the loop: promotion
 //! re-measures the weights on the test split under a policy and, only if every
@@ -38,6 +45,7 @@
 use std::path::{Path, PathBuf};
 
 use decisions::engine::{is_laya_dir, Backend};
+use decisions::laya_head::{self, BaseRef};
 use decisions::evaluation::{evaluate, CostSpec, EvalRequest, Report, Scorer};
 use decisions::examples::{Dataset, Split, Summary};
 use decisions::manifest::{verify_identity, weights_identity, DecisionManifest, Lineage, Validation};
@@ -61,7 +69,8 @@ pub struct TrainRun {
     pub base: String,
     /// The checkpoint directory to create. It must not exist yet.
     pub out: PathBuf,
-    /// Train the head alone. `false` fine-tunes the encoder too.
+    /// Train the head alone. `false` fine-tunes the encoder too (`decide`
+    /// bases only; a Laya base refuses it).
     pub freeze_encoder: bool,
     pub steps: usize,
     /// Examples per optimizer update.
@@ -128,10 +137,16 @@ pub fn train(run: &TrainRun, log: &mut dyn FnMut(usize, f32)) -> Result<TrainOut
     if !base_dir.is_dir() {
         return Err(Error::ModelNotFound(format!("the base {base_id} is not installed; pull it with `brain pull`, or name a checkpoint directory")));
     }
-    if is_laya_dir(&base_dir) {
-        return Err(Error::MissingArgument(
-            "the base is a Laya checkpoint; writing a servable Laya checkpoint from a trained head is not supported, train from a `decide` base".into(),
-        ));
+    let laya_base = is_laya_dir(&base_dir);
+    if laya_base {
+        if laya_head::is_head_only(&base_dir) {
+            return Err(Error::MissingArgument(format!("the base {base_id} is itself a trained head; name the stock Laya checkpoint it was trained from")));
+        }
+        if !run.freeze_encoder {
+            return Err(Error::MissingArgument(
+                "--finetune-encoder is not supported for a Laya base: the 395M-parameter trunk is trained with a gradient and two optimizer moments per weight, and a trained trunk could only be saved as a full copy of the weights; train the head with the trunk frozen".into(),
+            ));
+        }
     }
     let base_sha256 = brain_modelstore::fetch::base_digest(&base_dir).map_err(|e| Error::Backend(format!("hashing the base {base_id}: {e}")))?;
     let base_str = base_dir.to_str().ok_or_else(|| Error::MissingArgument("the base path is not UTF-8".into()))?;
@@ -146,7 +161,8 @@ pub fn train(run: &TrainRun, log: &mut dyn FnMut(usize, f32)) -> Result<TrainOut
     if staging.exists() {
         std::fs::remove_dir_all(&staging).map_err(Error::Io)?;
     }
-    let staged = write_checkpoint(&pipeline, &staging, run, &dataset, &base_id, base_sha256, final_loss);
+    let record = RunRecord { run, dataset: &dataset, base: BaseModel { id: base_id, dir: base_dir, sha256: base_sha256 }, final_loss };
+    let staged = if laya_base { write_laya_checkpoint(&pipeline, &staging, &record) } else { write_decide_checkpoint(&pipeline, &staging, &record) };
     let manifest = match staged {
         Ok(m) => m,
         Err(e) => {
@@ -158,43 +174,84 @@ pub fn train(run: &TrainRun, log: &mut dyn FnMut(usize, f32)) -> Result<TrainOut
     Ok(TrainOutcome { out: run.out.clone(), final_loss, manifest, summary: dataset.summary() })
 }
 
-fn write_checkpoint(
-    pipeline: &DecisionPipeline,
-    dir: &Path,
-    run: &TrainRun,
-    dataset: &Dataset,
-    base_id: &str,
-    base_sha256: String,
+/// The base a run trained on top of.
+struct BaseModel {
+    id: String,
+    dir: PathBuf,
+    /// `modelstore::fetch::base_digest` of `dir`.
+    sha256: String,
+}
+
+/// Everything a finished run knows about itself, for the manifest.
+struct RunRecord<'a> {
+    run: &'a TrainRun,
+    dataset: &'a Dataset,
+    base: BaseModel,
     final_loss: f32,
-) -> Result<DecisionManifest> {
+}
+
+impl RunRecord<'_> {
+    /// The manifest of a run's output: its lineage, `unvalidated`, and the
+    /// hashes of the files it wrote (`weights_sha256` is the caller's, since
+    /// what the weights ARE differs by layout).
+    fn manifest(&self, backend: Backend, weights_sha256: String, tokenizer_sha256: String, recipe: &str) -> DecisionManifest {
+        let summary = self.dataset.summary();
+        let split_counts = Split::ALL.into_iter().map(|s| (s.slug().to_string(), summary.by_split.get(&s).map_or(0, |x| x.count))).collect();
+        let mut manifest = DecisionManifest::undeclared(backend);
+        manifest.weights_sha256 = Some(weights_sha256);
+        manifest.tokenizer_sha256 = Some(tokenizer_sha256);
+        manifest.question_types = vec![decisions::wire::QuestionType::Choice];
+        manifest.lineage = Lineage {
+            base: Some(self.base.id.clone()),
+            trained_on: Some(format!("{} examples ({})", summary.total, self.dataset.digest.as_deref().unwrap_or("unhashed"))),
+            recipe: Some(recipe.to_string()),
+            base_sha256: Some(self.base.sha256.clone()),
+            data_sha256: self.dataset.digest.clone(),
+            split_counts: Some(split_counts),
+            hyperparameters: Some(json!({
+                "steps": self.run.steps,
+                "batch": self.run.batch,
+                "freeze_encoder": self.run.freeze_encoder,
+                "final_loss": self.final_loss,
+            })),
+            seed: Some(self.run.seed),
+            brain_commit: Some(self.run.brain_commit.clone()),
+        };
+        manifest.validation = Validation::Unvalidated;
+        manifest
+    }
+}
+
+fn file_digest_in(dir: &Path, file: &str) -> Result<String> {
+    brain_modelstore::fetch::file_digest(&dir.join(file)).map_err(|e| Error::Backend(format!("hashing {file}: {e}")))
+}
+
+fn write_decide_checkpoint(pipeline: &DecisionPipeline, dir: &Path, record: &RunRecord) -> Result<DecisionManifest> {
     let dir_str = dir.to_str().ok_or_else(|| Error::MissingArgument("the output path is not UTF-8".into()))?;
     pipeline.save_model(dir_str)?;
     let (weights, tokenizer) = identity_files(Backend::Decide);
-    let digest = |file: &str| brain_modelstore::fetch::file_digest(&dir.join(file)).map_err(|e| Error::Backend(format!("hashing {file}: {e}")));
+    let manifest = record.manifest(Backend::Decide, file_digest_in(dir, weights)?, file_digest_in(dir, tokenizer)?, "head training on outcome-labelled choice decisions");
+    manifest.write(dir).map_err(Error::Backend)?;
+    Ok(manifest)
+}
 
-    let summary = dataset.summary();
-    let split_counts = Split::ALL.into_iter().map(|s| (s.slug().to_string(), summary.by_split.get(&s).map_or(0, |x| x.count))).collect();
-    let mut manifest = DecisionManifest::undeclared(Backend::Decide);
-    manifest.weights_sha256 = Some(digest(weights)?);
-    manifest.tokenizer_sha256 = Some(digest(tokenizer)?);
-    manifest.question_types = vec![decisions::wire::QuestionType::Choice];
-    manifest.lineage = Lineage {
-        base: Some(base_id.to_string()),
-        trained_on: Some(format!("{} examples ({})", summary.total, dataset.digest.as_deref().unwrap_or("unhashed"))),
-        recipe: Some("head training on outcome-labelled choice decisions".to_string()),
-        base_sha256: Some(base_sha256),
-        data_sha256: dataset.digest.clone(),
-        split_counts: Some(split_counts),
-        hyperparameters: Some(json!({
-            "steps": run.steps,
-            "batch": run.batch,
-            "freeze_encoder": run.freeze_encoder,
-            "final_loss": final_loss,
-        })),
-        seed: Some(run.seed),
-        brain_commit: Some(run.brain_commit.clone()),
-    };
-    manifest.validation = Validation::Unvalidated;
+/// Write a trained Laya head as a directory in the head-only layout
+/// (`decisions::laya_head`): the head, a reference to the stock backbone by
+/// store id and digest, the base's small configuration files, and the
+/// manifest. The 395M-parameter trunk was frozen, so it is not copied.
+fn write_laya_checkpoint(pipeline: &DecisionPipeline, dir: &Path, record: &RunRecord) -> Result<DecisionManifest> {
+    std::fs::create_dir_all(dir).map_err(Error::Io)?;
+    let head = dir.join(laya_head::HEAD_FILE);
+    pipeline.save_head(head.to_str().ok_or_else(|| Error::MissingArgument("the output path is not UTF-8".into()))?)?;
+    let base = BaseRef::with_digest(&record.base.id, &record.base.dir, record.base.sha256.clone()).map_err(Error::Backend)?;
+    laya_head::write_layout(dir, &record.base.dir, &base).map_err(Error::Backend)?;
+    let (_, tokenizer) = identity_files(Backend::Laya);
+    let manifest = record.manifest(
+        Backend::Laya,
+        weights_identity(dir, Backend::Laya).map_err(Error::Backend)?,
+        file_digest_in(dir, tokenizer)?,
+        "Laya decision-head training on outcome-labelled choice decisions; the backbone is frozen and referenced, not copied",
+    );
     manifest.write(dir).map_err(Error::Backend)?;
     Ok(manifest)
 }
