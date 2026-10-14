@@ -880,6 +880,20 @@ fn build_auto_fetch_supplier(models_dir: Option<&Path>) -> Option<Arc<dyn reside
     Some(Arc::new(crate::supply::StoreSupplier::new(store, hub)))
 }
 
+/// The startup line naming what is served. An empty list is said outright
+/// and pointed at `brain doctor`: a server listening with nothing behind it
+/// answers every request with an error, and the empty `models:` it used to
+/// print looked like any other startup.
+fn served_models_line(served: &[&str], models_dir: Option<&Path>) -> String {
+    if !served.is_empty() {
+        return format!("brain serve: models: {}", served.join(", "));
+    }
+    let store = models_dir.map_or_else(|| "no model store is configured".to_string(), |d| format!("the model store {}", d.display()));
+    format!(
+        "brain serve: no model is being served ({store} yielded none), so /v1/models is empty and every request will fail; run `brain doctor` to see why"
+    )
+}
+
 fn run_apis(a: RunApis) {
     // Resolved ONCE (`--models-dir`, else `BRAIN_MODELS_DIR`/XDG/HOME - see
     // `loader::model_dir::resolve`) and handed to everything that reads the
@@ -890,7 +904,7 @@ fn run_apis(a: RunApis) {
     let serving::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.knobs);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
-    eprintln!("brain serve: models: {}", served.join(", "));
+    eprintln!("{}", served_models_line(&served, models_dir.as_deref()));
 
     // `--autofetch` also proactively heals what the scan above already found
     // broken (an interrupted download, a GGUF still needing its one-time
@@ -1114,6 +1128,17 @@ pub(crate) fn query_ram_bytes() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_server_with_models_lists_them_and_one_without_says_so_and_names_the_check() {
+        use super::served_models_line;
+        use std::path::Path;
+        assert_eq!(served_models_line(&["qwen3", "flux2"], None), "brain serve: models: qwen3, flux2");
+        let none = served_models_line(&[], Some(Path::new("/models")));
+        assert!(none.contains("no model is being served") && none.contains("/models"), "{none}");
+        assert!(none.contains("brain doctor"), "{none}");
+        assert!(served_models_line(&[], None).contains("no model store is configured"));
+    }
+
     use super::HELP;
     use brain_testutil::env_lock;
 
