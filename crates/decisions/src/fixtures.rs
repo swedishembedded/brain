@@ -179,6 +179,26 @@ pub fn write_laya(dir: &Path, max_len: u32) {
     write_hf_safetensors_f32(&dir.join("model.safetensors"), &tensors);
 }
 
+/// A trained-head directory in the layout of [`crate::laya_head`], attached to
+/// the stock Laya checkpoint `base` (addressed as `base_id`): a head drawn from
+/// `head_seed` standing in for a trained one, the base reference and the files
+/// copied from the base. Carries no manifest; a caller that needs one writes it.
+pub fn write_laya_head_only(dir: &Path, base: &Path, base_id: &str, head_seed: u64) {
+    std::fs::create_dir_all(dir).expect("create head-only fixture directory");
+    let laya_cfg = modernbert::LayaConfig::new(64);
+    let head = modernbert::init::init_weights_laya(&laya_cfg, head_seed);
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = modernbert::laya::tensor_manifest(&laya_cfg)
+        .into_iter()
+        .map(|(name, shape)| {
+            let data = head.get(&name).unwrap_or_else(|| panic!("fixture: init missing {name}")).clone();
+            (name, shape.iter().map(|&d| d as u64).collect(), data)
+        })
+        .collect();
+    checkpoint::save_carded(dir.join(crate::laya_head::HEAD_FILE).to_str().expect("utf-8 path"), serde_json::json!({}), &tensors, &checkpoint::st::ModelCard::default());
+    let base_ref = crate::laya_head::BaseRef::of(base_id, base).expect("fixture base reference");
+    crate::laya_head::write_layout(dir, base, &base_ref).expect("fixture head-only layout");
+}
+
 /// A raw Hugging Face `.safetensors` file (`[u64 header_len][JSON header]
 /// [blob]`, F32 throughout), hand-assembled because the workspace writer
 /// produces brain's own carded container, not a foreign one.

@@ -69,7 +69,7 @@ use serde_json::{json, Value};
 use crate::engine::Backend;
 use crate::evaluation::{CostSpec, EvalRequest, Report};
 use crate::examples::Split;
-use crate::manifest::{write_atomic, DecisionManifest, Validation};
+use crate::manifest::{weights_identity, write_atomic, DecisionManifest, Validation};
 use crate::store::identity_files;
 
 /// The evaluation record's file name, inside the checkpoint directory.
@@ -404,8 +404,8 @@ fn withdraw(dir: &Path) -> Result<(), String> {
 /// the weights on disk are not the ones that were measured.
 pub fn commit(p: &Promotion) -> Result<Pointer, String> {
     let backend = backend_of(p.dir)?;
-    let (weights_file, tokenizer_file) = identity_files(backend);
-    let on_disk = brain_modelstore::fetch::file_digest(&p.dir.join(weights_file)).map_err(|e| format!("hashing {weights_file}: {e}"))?;
+    let (_, tokenizer_file) = identity_files(backend);
+    let on_disk = weights_identity(p.dir, backend)?;
     if on_disk != p.weights_sha256 {
         return Err(format!("the weights changed during the evaluation: measured {} but the file is {on_disk}", p.weights_sha256));
     }
@@ -459,8 +459,7 @@ pub fn rollback(dir: &Path) -> Result<Pointer, String> {
     let good = pointer.last_known_good.clone().ok_or_else(|| format!("profile {profile:?} has no last-known-good checkpoint"))?;
     let good_dir = parent.join(&good.dir);
     let good_backend = backend_of(&good_dir)?;
-    let (weights_file, _) = identity_files(good_backend);
-    let on_disk = brain_modelstore::fetch::file_digest(&good_dir.join(weights_file)).map_err(|e| format!("hashing {}: {e}", good_dir.display()))?;
+    let on_disk = weights_identity(&good_dir, good_backend).map_err(|e| format!("{}: {e}", good_dir.display()))?;
     if on_disk != good.weights_sha256 {
         return Err(format!("the last-known-good {} no longer has the weights that were validated: recorded {}, file {on_disk}", good.dir, good.weights_sha256));
     }

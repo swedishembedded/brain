@@ -87,7 +87,7 @@ impl DecisionResident {
     /// `not-installed` instead of vanishing from the catalog.
     pub fn new(id: impl Into<String>, dir: impl Into<PathBuf>) -> DecisionResident {
         let dir = dir.into();
-        let weights_bytes = std::fs::metadata(dir.join("model.safetensors")).map(|m| m.len()).unwrap_or(0);
+        let weights_bytes = decisions::store::weights_bytes(&dir);
         DecisionResident { id: id.into(), dir, weights_bytes }
     }
 

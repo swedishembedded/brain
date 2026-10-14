@@ -208,7 +208,17 @@ pub struct LayaCheckpoint {
 /// succeeds silently - any unmapped, missing, or mis-shaped tensor is an
 /// `Err`, not a quietly-zero-initialized parameter.
 pub fn import_dir(hf_dir: &str) -> Result<LayaCheckpoint, String> {
-    let dir = Path::new(hf_dir);
+    import_dir_split(hf_dir, hf_dir)
+}
+
+/// [`import_dir`] for a checkpoint whose weights live in a different directory
+/// than its configuration: `config_dir` supplies `encoder/config.json`,
+/// `rl_agent_config.json` and `tokenizer/tokenizer.json` (and with them the
+/// context length and the serving calibration), `weights_dir` supplies the
+/// `.safetensors` state dict. A trained head that names its backbone by
+/// reference instead of copying it is read this way.
+pub fn import_dir_split(config_dir: &str, weights_dir: &str) -> Result<LayaCheckpoint, String> {
+    let dir = Path::new(config_dir);
 
     let cfg_json = std::fs::read_to_string(dir.join("encoder").join("config.json"))
         .map_err(|e| format!("read encoder/config.json: {e}"))?;
@@ -249,7 +259,7 @@ pub fn import_dir(hf_dir: &str) -> Result<LayaCheckpoint, String> {
     cfg.pad_token_id = special_id("[PAD]")?;
     cfg.mask_token_id = special_id("[MASK]")?;
 
-    let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("open {hf_dir}: {e}"))?;
+    let reader = checkpoint::weightio::WeightReader::open_hf_dir(Path::new(weights_dir)).map_err(|e| format!("open {weights_dir}: {e}"))?;
     let mut encoder_brain: HashMap<String, Vec<f32>> = HashMap::new();
     let mut head_brain: HashMap<String, Vec<f32>> = HashMap::new();
     let mut temperature: Option<Vec<f32>> = None;

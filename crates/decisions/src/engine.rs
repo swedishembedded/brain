@@ -37,6 +37,8 @@ use data::tokenizer::Tokenizer as _;
 use gpu_core::Gpu;
 use modernbert::{LayaDecision, State, StateFit};
 
+use crate::laya_head::{BaseRef, HEAD_FILE};
+
 /// Which decision architecture a checkpoint is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
@@ -223,14 +225,40 @@ impl LayaWeights {
     /// Read a `convaiinnovations/laya`-shaped directory. A supplied `head`
     /// REPLACES the checkpoint's own trained head tensor by tensor, and is
     /// refused by name when it is the other architecture's or the wrong width.
+    ///
+    /// A directory in the head-only layout ([`crate::laya_head`]) reads the
+    /// same way: its configuration and tokenizer come from `dir`, its trunk
+    /// from the base it references (resolved and verified by digest), and its
+    /// own head file replaces the base's head, which must then be complete -
+    /// a trained directory that silently kept some of the base's head would
+    /// be a different model than the one that was measured.
     pub fn read(dir: &str, head: Option<&str>) -> Result<LayaWeights, String> {
-        let ckpt = modernbert::import_dir(dir)?;
-        let tok_path = Path::new(dir).join("tokenizer").join("tokenizer.json");
+        let path = Path::new(dir);
+        let (ckpt, head_file, complete) = match BaseRef::read(path)? {
+            None => (modernbert::import_dir(dir)?, head.map(str::to_string), false),
+            Some(base) => {
+                if head.is_some() {
+                    return Err("an explicit head cannot replace the head of a directory that carries its own".into());
+                }
+                let trunk = base.resolve(path)?;
+                let trunk = trunk.to_str().ok_or("non-UTF-8 base path")?;
+                let head_file = path.join(HEAD_FILE).to_str().ok_or("non-UTF-8 head path")?.to_string();
+                (modernbert::import_dir_split(dir, trunk)?, Some(head_file), true)
+            }
+        };
+        let tok_path = path.join("tokenizer").join("tokenizer.json");
         let tok = data::qwen_tokenizer::QwenBpe::from_file(tok_path.to_str().ok_or("non-UTF-8 tokenizer path")?)?;
 
         let mut head_init = ckpt.head_init.clone();
-        if let Some(p) = head {
-            let trained = LayaDecision::read_head_file(p)?;
+        if let Some(p) = head_file {
+            let trained = LayaDecision::read_head_file(&p)?;
+            if complete {
+                let mut absent: Vec<&String> = head_init.keys().filter(|name| !trained.contains_key(*name)).collect();
+                absent.sort();
+                if !absent.is_empty() {
+                    return Err(format!("{p}: the head is missing {} tensors, first {}", absent.len(), absent[0]));
+                }
+            }
             for (name, v) in trained {
                 match head_init.get(&name) {
                     Some(existing) if existing.len() != v.len() => {
@@ -246,7 +274,12 @@ impl LayaWeights {
                 head_init.insert(name, v);
             }
         }
-        Ok(LayaWeights { ckpt, tok, head_init, base: base_reference(Path::new(dir)) })
+        Ok(LayaWeights { ckpt, tok, head_init, base: base_reference(path) })
+    }
+
+    /// The head tensors this checkpoint will be built with, by brain name.
+    pub fn head_tensors(&self) -> &HashMap<String, Vec<f32>> {
+        &self.head_init
     }
 
     /// The context length this checkpoint was trained at.

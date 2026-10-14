@@ -29,7 +29,7 @@ use gpu_core::Gpu;
 use crate::caps::{Served, Session};
 use crate::engine::{Backend, DecideWeights, Engine, LayaWeights};
 use crate::manifest::{verify_identity, DecisionManifest};
-use crate::store::{identity_files, inspect, Readiness};
+use crate::store::{inspect, Readiness};
 
 /// The kernel set an architecture builds its device handle with.
 pub fn pipelines(backend: Backend) -> &'static [(&'static str, &'static str)] {
@@ -70,8 +70,7 @@ pub fn load(id: &str, dir: &Path, make_gpu: impl FnOnce(Backend) -> Result<Gpu, 
         (Some(b), Some(m)) => (b, m),
         _ => return Err(failed(id, dir, "the directory is not a decision checkpoint")),
     };
-    let (weights_file, tokenizer_file) = identity_files(backend);
-    verify_identity(&manifest, dir, weights_file, tokenizer_file).map_err(|e| failed(id, dir, &e))?;
+    verify_identity(&manifest, dir, backend).map_err(|e| failed(id, dir, &e))?;
 
     let dir_str = dir.to_str().ok_or_else(|| failed(id, dir, "the checkpoint path is not UTF-8"))?;
     let engine = match backend {
@@ -102,8 +101,9 @@ pub fn load(id: &str, dir: &Path, make_gpu: impl FnOnce(Backend) -> Result<Gpu, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{write_decide, write_laya, Scratch};
-    use crate::manifest::FILE;
+    use crate::fixtures::{write_decide, write_laya, write_laya_head_only, Scratch};
+    use crate::laya_head::{BASE_FILE, HEAD_FILE};
+    use crate::manifest::{weights_identity, FILE};
     use capability::classify;
 
     fn dev(b: Backend) -> Result<Gpu, String> {
@@ -187,5 +187,68 @@ mod tests {
         let loaded = load("a/decide", &d, dev).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(loaded.session.engine().backend(), Backend::Decide);
         assert_eq!(loaded.session.served().model, "a/decide");
+    }
+
+    /// A base and a head-only directory over it whose manifest declares the
+    /// weights identity, the way a training run writes it.
+    fn head_only(tag: &str) -> Scratch {
+        let s = Scratch::new(tag);
+        write_laya(&s.join("base"), 48);
+        write_laya_head_only(&s.join("out"), &s.join("base"), "acme/laya", 99);
+        let identity = weights_identity(&s.join("out"), Backend::Laya).unwrap();
+        std::fs::write(s.join("out").join(FILE), format!(r#"{{"schema": 1, "weights_sha256": "{identity}"}}"#)).unwrap();
+        s
+    }
+
+    #[test]
+    fn a_head_only_directory_loads_as_a_laya_model_with_the_bases_context() {
+        let s = head_only("load-head-only");
+        let loaded = load("acme/trained", &s.join("out"), dev).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(loaded.session.engine().backend(), Backend::Laya);
+        assert_eq!(loaded.session.engine().max_input_tokens(), 48);
+    }
+
+    #[test]
+    fn a_corrupt_head_or_base_reference_or_base_fails_to_load_without_leaking_a_path() {
+        type Damage = (&'static str, fn(&Scratch));
+        let damage: [Damage; 5] = [
+            ("head bytes", |s| {
+                let head = s.join("out").join(HEAD_FILE);
+                let mut bytes = std::fs::read(&head).unwrap();
+                let last = bytes.len() - 1;
+                bytes[last] ^= 1;
+                std::fs::write(head, bytes).unwrap();
+            }),
+            ("head not a safetensors file", |s| std::fs::write(s.join("out").join(HEAD_FILE), b"not a safetensors file").unwrap()),
+            ("reference unreadable", |s| std::fs::write(s.join("out").join(BASE_FILE), b"{").unwrap()),
+            ("reference names another base", |s| {
+                let text = std::fs::read_to_string(s.join("out").join(BASE_FILE)).unwrap();
+                let old = text.split("sha256:").nth(1).unwrap()[..64].to_string();
+                std::fs::write(s.join("out").join(BASE_FILE), text.replace(&old, &"0".repeat(64))).unwrap();
+            }),
+            ("base weights changed", |s| {
+                let weights = s.join("base").join("model.safetensors");
+                let mut bytes = std::fs::read(&weights).unwrap();
+                let last = bytes.len() - 1;
+                bytes[last] ^= 1;
+                std::fs::write(weights, bytes).unwrap();
+            }),
+        ];
+        for (what, apply) in damage {
+            let s = head_only("load-head-only-damage");
+            apply(&s);
+            let e = load("acme/trained", &s.join("out"), dev).err().unwrap_or_else(|| panic!("{what}: must fail"));
+            assert_eq!(class(&e), FailureClass::FailedToLoad, "{what}: {e}");
+            assert!(!e.contains(s.to_str().unwrap()), "{what}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_head_only_directory_missing_its_head_is_not_installed() {
+        let s = head_only("load-head-only-missing");
+        std::fs::remove_file(s.join("out").join(HEAD_FILE)).unwrap();
+        let e = load("acme/trained", &s.join("out"), dev).err().expect("must fail");
+        assert_eq!(class(&e), FailureClass::NotInstalled);
+        assert!(e.contains(HEAD_FILE), "{e}");
     }
 }

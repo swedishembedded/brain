@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::engine::Backend;
+use crate::laya_head;
 use crate::manifest::DecisionManifest;
 use crate::select::{select, Candidate, Selection};
 
@@ -105,6 +106,9 @@ impl ModelRecord {
 
 /// The files a Laya load reads, relative to the checkpoint directory.
 const LAYA_FILES: [&str; 4] = ["model.safetensors", "tokenizer/tokenizer.json", "encoder/config.json", "rl_agent_config.json"];
+/// The files a load of a Laya directory in the head-only layout reads: the
+/// trained head stands where the stock layout's `model.safetensors` is.
+const LAYA_HEAD_ONLY_FILES: [&str; 5] = [laya_head::HEAD_FILE, laya_head::BASE_FILE, "tokenizer/tokenizer.json", "encoder/config.json", "rl_agent_config.json"];
 /// The files a `decide` load reads.
 const DECIDE_FILES: [&str; 3] = ["model.safetensors", "tokenizer.json", "config.json"];
 
@@ -114,6 +118,18 @@ pub fn identity_files(backend: Backend) -> (&'static str, &'static str) {
         Backend::Laya => ("model.safetensors", "tokenizer/tokenizer.json"),
         Backend::Decide => ("model.safetensors", "tokenizer.json"),
     }
+}
+
+/// The bytes of weights a load of `dir` reads, for sizing a device
+/// reservation: `model.safetensors`, or for the head-only layout the head
+/// plus the weight files of the base it references. Looks the base up without
+/// hashing it (the load verifies it), and counts only the head when the base
+/// is not installed, since the load will fail before allocating anything.
+pub fn weights_bytes(dir: &Path) -> u64 {
+    let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let Ok(Some(base)) = laya_head::BaseRef::read(dir) else { return size(&dir.join("model.safetensors")) };
+    let base_bytes = base.locate(dir).map(|b| std::fs::read_dir(b).into_iter().flatten().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "safetensors")).map(|e| size(&e.path())).sum()).unwrap_or(0);
+    size(&dir.join(laya_head::HEAD_FILE)) + base_bytes
 }
 
 /// Whether a `decide` directory is a SAVED decision model: `save_model` marks
@@ -141,9 +157,17 @@ pub fn inspect(id: &str, dir: &Path, configured: bool) -> ModelRecord {
         };
         return record(None, None, readiness);
     };
-    let required: &[&str] = if backend == Backend::Laya { &LAYA_FILES } else { &DECIDE_FILES };
+    let head_only = backend == Backend::Laya && laya_head::is_head_only(dir);
+    let required: &[&str] = match (backend, head_only) {
+        (Backend::Laya, true) => &LAYA_HEAD_ONLY_FILES,
+        (Backend::Laya, false) => &LAYA_FILES,
+        (Backend::Decide, _) => &DECIDE_FILES,
+    };
     let missing: Vec<String> = required.iter().filter(|f| !dir.join(f).is_file()).map(|f| (*f).to_string()).collect();
-    let manifest = DecisionManifest::read(dir, backend);
+    let manifest = DecisionManifest::read(dir, backend).and_then(|m| match head_only {
+        true => laya_head::BaseRef::read(dir).map(|_| m),
+        false => Ok(m),
+    });
     let (manifest, manifest_err) = match manifest {
         Ok(m) => (Some(m), None),
         Err(e) => (None, Some(e)),
@@ -259,13 +283,25 @@ fn scan_store(root: &Path) -> Vec<(String, PathBuf)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{write_decide, write_laya, Scratch};
+    use crate::fixtures::{write_decide, write_laya, write_laya_head_only, Scratch};
     use crate::manifest::FILE;
 
     fn store() -> Scratch {
         let s = Scratch::new("store");
         write_laya(&s.join("convaiinnovations/laya"), 48);
         s
+    }
+
+    #[test]
+    fn the_weights_of_a_head_only_directory_are_its_head_plus_the_base_it_names() {
+        let s = Scratch::new("store-weights-bytes");
+        write_laya(&s.join("convai/laya"), 48);
+        write_laya_head_only(&s.join("acme/trained"), &s.join("convai/laya"), "convai/laya", 5);
+        let size = |p: &str| std::fs::metadata(s.join(p)).unwrap().len();
+        assert_eq!(weights_bytes(&s.join("convai/laya")), size("convai/laya/model.safetensors"));
+        assert_eq!(weights_bytes(&s.join("acme/trained")), size("acme/trained/head.safetensors") + size("convai/laya/model.safetensors"));
+        std::fs::remove_dir_all(s.join("convai")).unwrap();
+        assert_eq!(weights_bytes(&s.join("acme/trained")), size("acme/trained/head.safetensors"), "an absent base adds nothing");
     }
 
     #[test]

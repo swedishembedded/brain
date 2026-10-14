@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use decisions::engine::{is_laya_dir, Backend};
 use decisions::evaluation::{evaluate, CostSpec, EvalRequest, Report, Scorer};
 use decisions::examples::{Dataset, Split, Summary};
-use decisions::manifest::{verify_identity, DecisionManifest, Lineage, Validation};
+use decisions::manifest::{verify_identity, weights_identity, DecisionManifest, Lineage, Validation};
 use decisions::promotion::{self, Pointer, Policy, Promotion, Verdict};
 use decisions::store::{decide_dir_carries_a_head, identity_files, resolve_spec};
 use serde_json::{json, Value};
@@ -234,9 +234,8 @@ pub fn load_model(spec: &str) -> Result<LoadedModel> {
         return Err(Error::MissingArgument(format!("{id} is a bare encoder with no trained head; train one with `brain decide train`")));
     }
     let manifest = DecisionManifest::read(&dir, backend).map_err(Error::Backend)?;
-    let (weights, tokenizer) = identity_files(backend);
-    verify_identity(&manifest, &dir, weights, tokenizer).map_err(Error::Backend)?;
-    let weights_sha256 = brain_modelstore::fetch::file_digest(&dir.join(weights)).map_err(|e| Error::Backend(format!("hashing {weights}: {e}")))?;
+    verify_identity(&manifest, &dir, backend).map_err(Error::Backend)?;
+    let weights_sha256 = weights_identity(&dir, backend).map_err(Error::Backend)?;
     let dir_str = dir.to_str().ok_or_else(|| Error::MissingArgument("the model path is not UTF-8".into()))?;
     let pipeline = DecisionPipeline::builder(dir_str).load()?;
     Ok(LoadedModel { id, dir, manifest, weights_sha256, pipeline })

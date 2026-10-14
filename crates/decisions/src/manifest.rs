@@ -43,6 +43,8 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::engine::Backend;
+use crate::laya_head::{self, BaseRef};
+use crate::store::identity_files;
 use crate::wire::QuestionType;
 
 /// The manifest's file name, inside the checkpoint directory.
@@ -308,21 +310,49 @@ fn lineage_of(l: &serde_json::Map<String, Value>) -> Result<Lineage, String> {
     })
 }
 
-fn is_digest(h: &str) -> bool {
+pub(crate) fn is_digest(h: &str) -> bool {
     h.strip_prefix("sha256:").is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
+/// The identity of the weights `dir` serves, as the manifest's
+/// `weights_sha256` declares it: the digest of `model.safetensors`, or for a
+/// trained Laya head that references its backbone the digest of the head, the
+/// base it names and its calibration ([`crate::laya_head::identity`]).
+pub fn weights_identity(dir: &Path, backend: Backend) -> Result<String, String> {
+    if backend == Backend::Laya {
+        if let Some(base) = BaseRef::read(dir)? {
+            return laya_head::identity(dir, &base);
+        }
+    }
+    let (weights, _) = identity_files(backend);
+    brain_modelstore::fetch::file_digest(&dir.join(weights)).map_err(|e| format!("hashing {weights}: {e}"))
+}
+
+/// What to call the weights of `dir` in an error: the file, or for the
+/// head-only layout the set of things its identity covers.
+fn weights_label(dir: &Path, backend: Backend) -> &'static str {
+    if backend == Backend::Laya && laya_head::is_head_only(dir) {
+        "the head-only weights (head, base reference and calibration)"
+    } else {
+        identity_files(backend).0
+    }
 }
 
 /// Check the declared hashes against the files in `dir` - the step that keeps
 /// a recorded validation attached to the bytes it was measured on. Hashes only
 /// what the manifest declares, so an undeclared manifest costs nothing.
-///
-/// `weights` and `tokenizer` are the file names relative to `dir`.
-pub fn verify_identity(m: &DecisionManifest, dir: &Path, weights: &str, tokenizer: &str) -> Result<(), String> {
-    for (declared, file) in [(&m.weights_sha256, weights), (&m.tokenizer_sha256, tokenizer)] {
-        let Some(declared) = declared else { continue };
-        let actual = brain_modelstore::fetch::file_digest(&dir.join(file)).map_err(|e| format!("hashing {file}: {e}"))?;
+pub fn verify_identity(m: &DecisionManifest, dir: &Path, backend: Backend) -> Result<(), String> {
+    let (_, tokenizer) = identity_files(backend);
+    if let Some(declared) = &m.weights_sha256 {
+        let actual = weights_identity(dir, backend)?;
         if &actual != declared {
-            return Err(format!("{file} does not match the manifest: it declares {declared} but the file is {actual}"));
+            return Err(format!("{} does not match the manifest: it declares {declared} but the weights are {actual}", weights_label(dir, backend)));
+        }
+    }
+    if let Some(declared) = &m.tokenizer_sha256 {
+        let actual = brain_modelstore::fetch::file_digest(&dir.join(tokenizer)).map_err(|e| format!("hashing {tokenizer}: {e}"))?;
+        if &actual != declared {
+            return Err(format!("{tokenizer} does not match the manifest: it declares {declared} but the file is {actual}"));
         }
     }
     Ok(())
@@ -447,15 +477,17 @@ mod tests {
     #[test]
     fn a_declared_hash_must_match_the_file() {
         let d = crate::fixtures::Scratch::new("manifest-identity");
-        std::fs::write(d.join("w.bin"), b"abc").unwrap();
-        std::fs::write(d.join("t.json"), b"{}").unwrap();
-        let right = brain_modelstore::fetch::file_digest(&d.join("w.bin")).unwrap();
-        let mut m = DecisionManifest::undeclared(Backend::Laya);
-        assert!(verify_identity(&m, &d, "w.bin", "t.json").is_ok(), "nothing declared, nothing to check");
+        crate::fixtures::write_decide(&d, 1);
+        let right = brain_modelstore::fetch::file_digest(&d.join("model.safetensors")).unwrap();
+        let mut m = DecisionManifest::undeclared(Backend::Decide);
+        assert!(verify_identity(&m, &d, Backend::Decide).is_ok(), "nothing declared, nothing to check");
         m.weights_sha256 = Some(right);
-        assert!(verify_identity(&m, &d, "w.bin", "t.json").is_ok());
+        assert!(verify_identity(&m, &d, Backend::Decide).is_ok());
         m.tokenizer_sha256 = Some(H.to_string());
-        let err = verify_identity(&m, &d, "w.bin", "t.json").unwrap_err();
-        assert!(err.contains("t.json") && err.contains("does not match"), "{err}");
+        let err = verify_identity(&m, &d, Backend::Decide).unwrap_err();
+        assert!(err.contains("tokenizer.json") && err.contains("does not match"), "{err}");
+        m.weights_sha256 = Some(H.to_string());
+        let err = verify_identity(&m, &d, Backend::Decide).unwrap_err();
+        assert!(err.contains("model.safetensors") && err.contains("does not match"), "{err}");
     }
 }
