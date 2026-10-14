@@ -659,4 +659,40 @@ mod tests {
         assert!(e.contains("another promotion"), "{e}");
         assert!(!validated(&root, "v1"));
     }
+
+    #[test]
+    fn auto_picks_a_promoted_checkpoint_over_stock_unvalidated_ones_and_never_before_promotion() {
+        use crate::fixtures::write_laya;
+        use crate::select::Rule;
+        use crate::store::Catalog;
+
+        let root = Scratch::new("promotion-auto");
+        write_laya(&root.join("acme/stock-laya"), 48);
+        write_decide(&root.join("acme/stock-decide"), 1);
+        write_decide(&root.join("acme/tuned-v1"), 2);
+        write_decide(&root.join("acme/tuned-v2"), 3);
+        let series = root.join("acme");
+        let select = || Catalog::new(Some(root.to_path_buf()), vec![], None).select("auto");
+
+        // Four installed models and none validated: auto chooses nothing, and says why.
+        let before = select();
+        assert_eq!((before.chosen, before.rule), (None, Rule::None));
+        assert!(before.reason.contains("tuned-v1") && before.reason.contains("no recorded validation"), "{}", before.reason);
+
+        // Promotion makes the checkpoint choosable, ahead of the stock models.
+        promote(&series, "tuned-v1").unwrap();
+        let after = select();
+        assert_eq!((after.chosen.as_deref(), after.rule), (Some("acme/tuned-v1"), Rule::ValidatedDecide));
+
+        // The validation is bound to the bytes: the promoted checkpoint loads under its manifest.
+        let loaded = crate::load::load("acme/tuned-v1", &series.join("tuned-v1"), |b| Ok(gpu_core::testgpu::dev(crate::load::pipelines(b))));
+        assert!(loaded.is_ok(), "{:?}", loaded.err());
+
+        // Promoting the next checkpoint hands the choice over although "v1" sorts first,
+        // and a rollback hands it back.
+        promote(&series, "tuned-v2").unwrap();
+        assert_eq!(select().chosen.as_deref(), Some("acme/tuned-v2"));
+        rollback(&series.join("tuned-v2")).unwrap();
+        assert_eq!(select().chosen.as_deref(), Some("acme/tuned-v1"));
+    }
 }
