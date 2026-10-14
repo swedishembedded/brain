@@ -40,7 +40,10 @@ named reference of the form
 Qwen/Qwen3-0.6B:owner:name:tag
 ```
 
-and stored on disk under `adapters/<owner>/<name>/<tag>/`. A base model and
+and stored on disk under `adapters/<owner>/<name>/<tag>/`. For an adapter of
+your own, `Qwen/Qwen3-0.6B+name` is the short way to say
+`Qwen/Qwen3-0.6B:local:name:latest`, and `Qwen/Qwen3-0.6B+name:tag` names a tag;
+the long form is what is printed. A base model and
 any number of fine-tunes of it can sit side by side as distinct, separately
 selectable models.
 

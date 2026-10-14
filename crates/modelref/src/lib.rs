@@ -12,11 +12,15 @@
 //! # Grammar
 //!
 //! ```text
-//! ModelRef  ::= vendor "/" repo ("-" QUANT)?
+//! ModelRef  ::= vendor "/" repo ("-" QUANT)? ( ":" owner ":" name ":" tag | "+" name (":" tag)? )?
 //! vendor    ::= non-empty, no "/"
 //! repo      ::= non-empty, no "/", does not itself end in "-" QUANT
 //! QUANT     ::= one of the closed set in [`Quant`] (see below)
 //! ```
+//!
+//! `base+name` is the short way to select an adapter: it means
+//! `base:local:name:latest`, and `base+name:tag` means `base:local:name:tag`.
+//! `Display` always prints the long form.
 //!
 //! Three rules make this unambiguous, each earning its keep against a real
 //! upstream name:
@@ -140,25 +144,42 @@ impl ModelRef {
             return Err(RefError::BadChar);
         }
 
-        // Split off a `:owner:name:tag` adapter suffix BEFORE quant-stripping,
-        // so `...-Q8_0:owner:name:tag` still finds its quant on the left of the
-        // first `:` — quant tokens never contain `:`, so this ordering can't
-        // eat into the base repo name.
-        let (rest, adapter) = match rest.split_once(':') {
-            Some((repo_part, adapter_part)) => {
-                let segs: Vec<&str> = adapter_part.split(':').collect();
-                let [owner, name, tag] = segs[..] else {
-                    return Err(RefError::BadAdapter);
-                };
-                if owner.is_empty() || name.is_empty() || tag.is_empty() {
-                    return Err(RefError::BadAdapter);
-                }
-                if [owner, name, tag].iter().any(|s| **s == *"." || **s == *"..") {
-                    return Err(RefError::PathTraversal);
-                }
-                (repo_part, Some(AdapterRef { owner: owner.to_string(), name: name.to_string(), tag: tag.to_string() }))
+        // Split off the adapter suffix BEFORE quant-stripping, so
+        // `...-Q8_0:owner:name:tag` and `...-Q8_0+name` still find their quant
+        // on the left of the first `:` or `+` -- quant tokens never contain
+        // either, so this ordering can't eat into the base repo name.
+        let (rest, adapter) = if let Some((repo_part, plus_part)) = rest.split_once('+') {
+            // `+name[:tag]`: shorthand for the adapter `local:name:tag`
+            // (tag `latest` when none is given). Mixing it with the long
+            // form, or naming two adapters, is ambiguous and refused.
+            if repo_part.contains(':') || plus_part.contains('+') {
+                return Err(RefError::BadAdapter);
             }
-            None => (rest, None),
+            let (name, tag) = plus_part.split_once(':').unwrap_or((plus_part, "latest"));
+            if name.is_empty() || tag.is_empty() || tag.contains(':') {
+                return Err(RefError::BadAdapter);
+            }
+            if [name, tag].iter().any(|s| **s == *"." || **s == *"..") {
+                return Err(RefError::PathTraversal);
+            }
+            (repo_part, Some(AdapterRef::new("local", name, tag)))
+        } else {
+            match rest.split_once(':') {
+                Some((repo_part, adapter_part)) => {
+                    let segs: Vec<&str> = adapter_part.split(':').collect();
+                    let [owner, name, tag] = segs[..] else {
+                        return Err(RefError::BadAdapter);
+                    };
+                    if owner.is_empty() || name.is_empty() || tag.is_empty() {
+                        return Err(RefError::BadAdapter);
+                    }
+                    if [owner, name, tag].iter().any(|s| **s == *"." || **s == *"..") {
+                        return Err(RefError::PathTraversal);
+                    }
+                    (repo_part, Some(AdapterRef { owner: owner.to_string(), name: name.to_string(), tag: tag.to_string() }))
+                }
+                None => (rest, None),
+            }
         };
         if rest.is_empty() {
             // `vendor/-Q8_0:owner:name:tag` -- an adapter suffix with no repo left.
@@ -488,6 +509,35 @@ impl fmt::Display for Quant {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plus_name_selects_a_local_adapter_tagged_latest() {
+        let r = ModelRef::parse("Qwen/Qwen3-8B+maren").unwrap();
+        assert_eq!(r.repo(), "Qwen3-8B");
+        let a = r.adapter().unwrap();
+        assert_eq!((a.owner(), a.name(), a.tag()), ("local", "maren", "latest"));
+        assert_eq!(r.to_string(), "Qwen/Qwen3-8B:local:maren:latest");
+        assert_eq!(ModelRef::parse(&r.to_string()).unwrap(), r);
+    }
+
+    #[test]
+    fn a_plus_name_may_name_a_tag_and_follows_the_quant() {
+        let r = ModelRef::parse("Qwen/Qwen3-8B-Q8_0+maren:v2").unwrap();
+        assert_eq!(r.quant(), Some(Quant::Q8_0));
+        let a = r.adapter().unwrap();
+        assert_eq!((a.owner(), a.name(), a.tag()), ("local", "maren", "v2"));
+    }
+
+    #[test]
+    fn a_plus_name_that_is_empty_doubled_mixed_or_a_path_is_refused() {
+        for bad in ["Qwen/Qwen3-8B+", "Qwen/Qwen3-8B+a+b", "Qwen/Qwen3-8B+a:b:c", "Qwen/Qwen3-8B+a:"] {
+            assert_eq!(ModelRef::parse(bad), Err(RefError::BadAdapter), "{bad}");
+        }
+        assert_eq!(ModelRef::parse("Qwen/Qwen3-8B:o:n:t+x"), Err(RefError::BadAdapter));
+        assert_eq!(ModelRef::parse("Qwen/Qwen3-8B+.."), Err(RefError::PathTraversal));
+        assert_eq!(ModelRef::parse("+maren"), Err(RefError::NoVendor));
+        assert_eq!(ModelRef::parse("Qwen/+maren"), Err(RefError::EmptySegment));
+    }
 
     #[test]
     fn parses_vendor_repo() {
