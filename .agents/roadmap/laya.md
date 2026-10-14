@@ -373,6 +373,14 @@ none).
       M8 closed the "real training loop" half of that sentence, but NOT the
       `ConversionPipeline` half: `salesagent` still reaches Laya only
       through `DecisionPipeline::route`, zero-shot.
+- [ ] **`brain decide train` refuses a Laya base.** The Laya arm trains its
+      head (`DecisionPipeline::train_cases` works on it), but `save_head`
+      writes a head-only adapter and the served loader reads a complete Laya
+      directory, so a trained Laya head has no writer that produces a
+      checkpoint `auto` could choose. Lineage, evaluation and promotion are
+      architecture-agnostic and need nothing more; what is missing is writing
+      a Laya directory whose `model.safetensors` carries the trained head
+      beside the unchanged trunk, with the manifest hashes of the result.
 - [ ] **The fused `flash_attn_bidir_spans` kernel's windowing was
       deliberately deferred** (M1). Every local-attention layer therefore
       always uses the slower materialized `chunked_bidir_fwd_win` rung,
