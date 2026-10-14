@@ -280,11 +280,17 @@ pub struct SyntheticTask {
     /// The family the examples report; give two tasks different families to
     /// hold one family out of another's data.
     pub family: &'static str,
+    /// Rotate which desk handles which problem by this many places, so a model
+    /// that learned another task's mapping is wrong on this one.
+    pub label_shift: usize,
+    /// The number the first example's task, run and seed are counted from;
+    /// give two tasks that share a file different ranges.
+    pub first_id: u64,
 }
 
 impl SyntheticTask {
     pub fn new(train: usize, validation: usize, test: usize) -> SyntheticTask {
-        SyntheticTask { train, validation, test, seed: 1, shuffle_train_labels: false, family: "desks" }
+        SyntheticTask { train, validation, test, seed: 1, shuffle_train_labels: false, family: "desks", label_shift: 0, first_id: 1 }
     }
 }
 
@@ -294,11 +300,12 @@ const PROBLEMS: [(&str, &str); 4] = [("invoice", "billing"), ("router", "network
 pub fn synthetic_jsonl(task: &SyntheticTask) -> String {
     let mut rng = data::rng::Rng::new(task.seed);
     let mut lines = Vec::new();
-    let mut next = 0u64;
+    let mut next = task.first_id - 1;
     for (split, count) in [("train", task.train), ("validation", task.validation), ("test", task.test)] {
         for _ in 0..count {
             next += 1;
-            let truth = (rng.next_u64() % PROBLEMS.len() as u64) as usize;
+            let problem = (rng.next_u64() % PROBLEMS.len() as u64) as usize;
+            let truth = (problem + task.label_shift) % PROBLEMS.len();
             let label = if task.shuffle_train_labels && split == "train" { (rng.next_u64() % PROBLEMS.len() as u64) as usize } else { truth };
             let mut order: Vec<usize> = (0..PROBLEMS.len()).collect();
             for i in (1..order.len()).rev() {
@@ -309,7 +316,7 @@ pub fn synthetic_jsonl(task: &SyntheticTask) -> String {
                 serde_json::json!({
                     "decision_type": "desk_routing",
                     "state_ref": {"run": format!("run-{next}"), "task": format!("task-{next}"), "suite": task.family, "seed": next, "question_id": "q"},
-                    "state": format!("ticket {next} about the {}", PROBLEMS[truth].0),
+                    "state": format!("ticket {next} about the {}", PROBLEMS[problem].0),
                     "question": {"id": "q", "type": "choice", "instruction": "which desk handles this ticket"},
                     "options": options,
                     "label": PROBLEMS[label].1,

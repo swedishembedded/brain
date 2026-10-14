@@ -22,6 +22,10 @@
 //!
 //! The same seed on the same data and base gives the same weights.
 //!
+//! [`promote_model`] and [`rollback_model`] close the loop: promotion
+//! re-measures the weights on the test split under a policy and, only if every
+//! gate passes, records the validation the `auto` selector requires.
+//!
 //! [`evaluate_model`] is the other half: it loads a checkpoint (or a stock
 //! model), verifies its declared hashes against the files, and measures it on
 //! one split of the same kind of file with `decisions::evaluation`.
@@ -37,6 +41,7 @@ use decisions::engine::{is_laya_dir, Backend};
 use decisions::evaluation::{evaluate, CostSpec, EvalRequest, Report, Scorer};
 use decisions::examples::{Dataset, Split, Summary};
 use decisions::manifest::{verify_identity, DecisionManifest, Lineage, Validation};
+use decisions::promotion::{self, Pointer, Policy, Promotion, Verdict};
 use decisions::store::{decide_dir_carries_a_head, identity_files, resolve_spec};
 use serde_json::{json, Value};
 
@@ -289,4 +294,57 @@ pub fn evaluate_model(run: &EvalRun) -> Result<Evaluation> {
     let mut model = load_model(&run.model)?;
     let report = evaluate_pipeline(&mut model.pipeline, &dataset, &EvalRequest { split: run.split, order_seed: run.order_seed, costs })?;
     Ok(Evaluation { model_id: model.id, weights_sha256: model.weights_sha256, data_sha256: dataset.digest, report })
+}
+
+/// What a promotion is told.
+#[derive(Clone, Debug)]
+pub struct PromoteRun {
+    /// The checkpoint directory (or store id) to promote.
+    pub model: String,
+    pub data: PathBuf,
+    pub policy: PathBuf,
+}
+
+/// The result of asking for a promotion.
+#[derive(Clone, Debug)]
+pub struct PromoteOutcome {
+    /// The fresh measurement the gates were judged on.
+    pub evaluation: Evaluation,
+    pub verdict: Verdict,
+    /// The pointer after a successful promotion; `None` when a gate failed, in
+    /// which case nothing was changed.
+    pub pointer: Option<Pointer>,
+}
+
+/// Re-evaluate a checkpoint on the test split under a policy, and promote it
+/// only if every gate passes.
+///
+/// The numbers in the checkpoint's manifest are never consulted: the weights
+/// on disk are measured now, and the validation that is written names the
+/// digest of exactly those weights.
+pub fn promote_model(run: &PromoteRun) -> Result<PromoteOutcome> {
+    let policy = Policy::read(&run.policy).map_err(Error::MissingArgument)?;
+    let dataset = Dataset::read_file(&run.data).map_err(|e| Error::MissingArgument(format!("{}: {e}", run.data.display())))?;
+    let mut model = load_model(&run.model)?;
+    let report = evaluate_pipeline(&mut model.pipeline, &dataset, &policy.eval_request())?;
+    let evaluation = Evaluation { model_id: model.id.clone(), weights_sha256: model.weights_sha256.clone(), data_sha256: dataset.digest, report };
+    let verdict = policy.judge(&evaluation.report);
+    if !verdict.passed() {
+        return Ok(PromoteOutcome { evaluation, verdict, pointer: None });
+    }
+    let mut record = evaluation.to_json();
+    record["policy"] = policy.to_json();
+    record["verdict"] = verdict.to_json();
+    let pointer = promotion::commit(&Promotion { dir: &model.dir, policy: &policy, weights_sha256: &evaluation.weights_sha256, record: &record }).map_err(Error::Backend)?;
+    Ok(PromoteOutcome { evaluation, verdict, pointer: Some(pointer) })
+}
+
+/// Make the last-known-good checkpoint of `model`'s profile the validated one
+/// again. `model` must be the profile's current checkpoint.
+pub fn rollback_model(model: &str) -> Result<Pointer> {
+    let (id, dir) = resolve_model(model);
+    if !dir.is_dir() {
+        return Err(Error::ModelNotFound(format!("the model {id} is not installed")));
+    }
+    promotion::rollback(&dir).map_err(Error::Backend)
 }

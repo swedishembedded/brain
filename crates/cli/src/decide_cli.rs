@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use brain::decision_run::{evaluate_model, train, EvalRun, TrainRun, DEFAULT_STEPS};
+use brain::decision_run::{evaluate_model, promote_model, rollback_model, train, EvalRun, PromoteRun, TrainRun, DEFAULT_STEPS};
 use decisions::examples::{Dataset, Split};
 
 const USAGE: &str = "\
@@ -24,6 +24,8 @@ usage: brain decide train   --data FILE --base REF --out DIR [--freeze-encoder |
                             [--steps N] [--batch N] [--seed N]
        brain decide eval    --model DIR|REF --data FILE --split validation|test
                             [--costs FILE] [--order-seed N] [--json] [--out FILE]
+       brain decide promote --model DIR --data FILE --policy POLICY.json [--json]
+       brain decide rollback --model DIR
        brain decide inspect --data FILE [--json]
 
 train     Train a decision head on the `train` split of a JSONL file of
@@ -39,6 +41,15 @@ eval      Measure a checkpoint on one split: accuracy against the majority and
           {\"false_exclusion\": X, \"wasted_tokens\": Y}, and a per-family
           breakdown. Prints a table; --json prints the record instead and
           --out also writes it to FILE.
+promote   Re-evaluate DIR on the `test` split under the policy and, only if
+          every gate passes, mark it validated for the policy's profile (the
+          manifest gains the validation and weights_sha256 the `auto`
+          selector requires, the evaluation record is stored beside it, and
+          the checkpoint it supersedes becomes the last-known-good). A failed
+          gate is printed with how far it was missed, nothing changes, and
+          the exit code is 1. Numbers in the manifest are never trusted.
+rollback  Make the last-known-good checkpoint the validated one again. DIR
+          must be the profile's current checkpoint.
 inspect   Validate a JSONL file (schema, duplicate ids, leakage across
           splits) and print its summary: counts, label entropy and the
           majority-label baseline.
@@ -46,7 +57,7 @@ inspect   Validate a JSONL file (schema, duplicate ids, leakage across
 
 /// Whether `verb` is one this module runs rather than the capability family.
 pub fn handles(verb: Option<&str>) -> bool {
-    matches!(verb, Some("train" | "eval" | "inspect"))
+    matches!(verb, Some("train" | "eval" | "promote" | "rollback" | "inspect"))
 }
 
 /// `brain decide <verb> ...`; `argv` starts at the verb. Returns the exit code.
@@ -60,6 +71,8 @@ pub fn run_decide(argv: &[String]) -> i32 {
     match verb {
         "train" => train_verb(&mut args),
         "eval" => eval_verb(&mut args),
+        "promote" => promote_verb(&mut args),
+        "rollback" => rollback_verb(&mut args),
         "inspect" => inspect_verb(&mut args),
         other => {
             eprintln!("brain decide: unknown verb {other:?}\n\n{USAGE}");
@@ -130,6 +143,60 @@ fn eval_verb(args: &mut crate::args::Args) -> i32 {
                 println!("model {}  weights {}", evaluation.model_id, evaluation.weights_sha256);
                 print!("{}", evaluation.report.render());
             }
+            0
+        }
+        Err(e) => {
+            eprintln!("brain decide: {e}");
+            1
+        }
+    }
+}
+
+fn promote_verb(args: &mut crate::args::Args) -> i32 {
+    let (model, data, policy) = match (required(args, "--model"), required(args, "--data"), required(args, "--policy")) {
+        (Ok(m), Ok(d), Ok(p)) => (m, d, p),
+        _ => return 2,
+    };
+    let as_json = args.take_flag("--json");
+    args.finish();
+    let outcome = match promote_model(&PromoteRun { model, data: PathBuf::from(data), policy: PathBuf::from(policy) }) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("brain decide: {e}");
+            return 1;
+        }
+    };
+    if as_json {
+        println!("{}", serde_json::json!({"promoted": outcome.pointer.is_some(), "evaluation": outcome.evaluation.to_json(), "verdict": outcome.verdict.to_json()}));
+    } else {
+        print!("{}{}", outcome.evaluation.report.render(), outcome.verdict);
+    }
+    match &outcome.pointer {
+        Some(pointer) => {
+            if !as_json {
+                println!("promoted {} for profile {:?}; last-known-good: {}", pointer.current.dir, pointer.profile, pointer.last_known_good.as_ref().map_or("none", |e| e.dir.as_str()));
+            }
+            0
+        }
+        None => {
+            eprintln!("not promoted: {} gate(s) failed; nothing was changed", outcome.verdict.failures().count());
+            for gate in outcome.verdict.failures() {
+                eprintln!("  {}", gate.message);
+            }
+            1
+        }
+    }
+}
+
+fn rollback_verb(args: &mut crate::args::Args) -> i32 {
+    let model = match required(args, "--model") {
+        Ok(m) => m,
+        Err(code) => return code,
+    };
+    args.finish();
+    match rollback_model(&model) {
+        Ok(pointer) => {
+            println!("rolled back: {} is validated again for profile {:?}", pointer.current.dir, pointer.profile);
             0
         }
         Err(e) => {

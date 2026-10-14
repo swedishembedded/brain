@@ -228,6 +228,12 @@ DECIDE (decision-model training on outcome-labelled examples)
       Accuracy against the majority baseline, NLL, Brier, ECE/AdaECE, coverage
       versus accuracy, option-order instability, cost-weighted regret and a
       per-family breakdown, as a table or JSON.
+  brain decide promote --model DIR --data FILE --policy POLICY.json [--json]
+      Re-evaluates DIR on the test split under the policy; only if every gate
+      passes is it marked validated (what `auto` requires). A failed gate is
+      printed with its margin, nothing changes, the exit code is 1.
+  brain decide rollback --model DIR
+      Makes the last-known-good checkpoint the validated one again.
   brain decide inspect --data FILE [--json]
       Validates the file (schema, leakage across splits) and prints its summary.
       `brain caps decide` lists the served `decide` action.

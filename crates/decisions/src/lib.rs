@@ -19,6 +19,8 @@
 //! * [`wire`] - the request formats, with key order preserved.
 //! * [`caps`] - the `decide` action and its response.
 //! * [`manifest`] - what a checkpoint is made of and whether it was validated.
+//! * [`promotion`] - the policy a checkpoint must meet to be marked validated, the
+//!   pointer to the promoted checkpoint, and rollback.
 //! * [`select`] - the pure policy behind `"auto"`.
 //! * [`store`] - which models the host has and whether each is ready, without
 //!   loading any.
@@ -38,6 +40,7 @@ pub mod examples;
 pub mod fixtures;
 pub mod load;
 pub mod manifest;
+pub mod promotion;
 pub mod provider;
 pub mod select;
 pub mod store;

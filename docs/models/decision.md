@@ -354,6 +354,77 @@ is `{"false_exclusion": 5.0, "wasted_tokens": 1.0}`.
 | `regret` | with a cost file: the mean realized cost per example of acting on the model's own confidence. The action is *trust* the top option (wrong costs `false_exclusion`, the right option was excluded) or *defer* and keep every option (a right top option costs `wasted_tokens`); the model trusts when its `p_max` makes trusting the cheaper expected action. `always_trust` and `always_defer` are reported beside it |
 | `families` | accuracy, baseline and NLL within each task family |
 
+## Promoting a checkpoint
+
+A trained checkpoint is `unvalidated`, and `auto` never picks one. Promotion is
+the only step that changes that, and it does not trust the checkpoint's own
+numbers: it loads the weights, measures them on the **test** split of the data
+file now, and compares the measurement with a policy.
+
+```bash
+brain decide promote --model /models/triage-v2 --data decisions.jsonl --policy policy.json
+brain decide rollback --model /models/triage-v2
+```
+
+```json
+{"schema": 1,
+ "profile": "tool-routing",
+ "min_test_examples": 100,
+ "min_accuracy_lift": 0.10,
+ "max_ece": 0.10,
+ "max_order_instability": 0.05,
+ "max_regret": 1.0,
+ "costs": {"false_exclusion": 5.0, "wasted_tokens": 1.0},
+ "required_families": ["tool_selection", "noisy_output"],
+ "order_seed": 0}
+```
+
+| key | gate |
+|---|---|
+| `profile` (required) | the task profile written into the validation; letters, digits, `.`, `_`, `-` |
+| `min_test_examples` (required) | the test split holds at least this many examples |
+| `min_accuracy_lift` | accuracy minus the baseline accuracy is at least this |
+| `max_ece` | expected calibration error is at most this |
+| `max_order_instability` | at most this share of winners change when the options are reordered |
+| `max_regret` | mean cost per example of the model's own trust-or-defer policy is at most this; needs `costs` |
+| `required_families` | each family has test examples and, when `min_accuracy_lift` is set, meets it within the family |
+
+At least one of the four quality gates is required, unknown keys are refused,
+and `order_seed` seeds the reordering. The measures are the ones
+[above](#evaluating-a-decision-model).
+
+**A failed gate changes nothing.** Each failed gate is printed with its
+observed value, its limit and the margin, the exit code is 1, and no file is
+written. A checkpoint trained on one family and promoted under a policy that
+requires another fails: the family has no test examples, or the model does not
+beat that family's baseline.
+
+**A passed promotion** writes, in this order: the evaluation record
+(`decision.evaluation.json`: the report, the policy, the verdict, and the
+digests of the weights and data) beside the manifest; the superseded checkpoint's manifest back to `unvalidated`; the
+new manifest's `validation` (`validated`, the profile, the evidence file) and
+`weights_sha256`, the digest of exactly the weights that were measured; and the
+pointer `decision.promoted.<profile>.json` in the directory holding the
+checkpoints, written atomically:
+
+```json
+{"schema": 1, "profile": "tool-routing",
+ "current": {"dir": "triage-v2", "weights_sha256": "sha256:...", "evidence": "decision.evaluation.json"},
+ "last_known_good": {"dir": "triage-v1", "weights_sha256": "sha256:...", "evidence": "decision.evaluation.json"}}
+```
+
+So at most one checkpoint per profile is validated, and the checkpoints of a
+profile are siblings. A crash part-way leaves a profile with no validated
+checkpoint (`auto` then chooses nothing), never an unmeasured one; running the
+command again completes it. Two promotions of one profile cannot interleave: a
+lock file named in the error is held for the duration.
+
+**Rollback** makes the last-known-good checkpoint the validated one again and
+un-validates the current one. The model named must be the profile's current
+checkpoint, and the last-known-good must still hold the weights that were
+validated, or nothing changes. After a rollback there is no last-known-good
+until the next promotion.
+
 ## What the checkpoint knows
 
 Laya is a System 1 model trained on agent and routing decisions over text. It
