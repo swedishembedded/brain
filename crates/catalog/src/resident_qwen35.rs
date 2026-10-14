@@ -611,22 +611,38 @@ fn resolved_gguf_from(resolution: brain_modelstore::resolve::Resolution, _models
             Some((weights.to_string_lossy().into_owned(), store_id(weights)))
         }
         R::Ambiguous(a) => {
-            let mut s = String::from("brain: more than one qwen35 GGUF candidate and nothing named which - pass --qwen35-gguf with one of:\n");
-            for c in &a.choices {
-                for (_, value) in &c.selector {
-                    s.push_str(&format!("  --qwen35-gguf {value}\n"));
-                }
-            }
-            eprintln!("{s}");
+            let values: Vec<&str> = a.choices.iter().flat_map(|c| c.selector.iter().map(|(_, value)| value.as_str())).collect();
+            eprintln!("{}", ambiguous_gguf_message(&values));
             None
         }
         R::Missing(_) => None,
     }
 }
 
+/// What is said when the store holds several qwen35 GGUF files and nothing
+/// names one. It says what is and is not affected - only this model is left
+/// unserved - so a server that is otherwise serving reads as healthy, and
+/// lists each file as the flag value that selects it.
+fn ambiguous_gguf_message(candidates: &[&str]) -> String {
+    let mut s = String::from(
+        "brain: the qwen35 GGUF model is not being served: the store holds more than one candidate and nothing names which. Every other model is unaffected. To serve it, pass --qwen35-gguf with one of:\n",
+    );
+    for value in candidates {
+        s.push_str(&format!("  --qwen35-gguf {value}\n"));
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ambiguous_gguf_says_only_that_model_is_unserved_and_lists_the_flag_values() {
+        let text = ambiguous_gguf_message(&["/m/a/Q4_K_M.gguf", "/m/b/Q8_0.gguf"]);
+        assert!(text.contains("not being served") && text.contains("Every other model is unaffected"), "{text}");
+        assert!(text.contains("--qwen35-gguf /m/a/Q4_K_M.gguf") && text.contains("--qwen35-gguf /m/b/Q8_0.gguf"), "{text}");
+    }
 
     /// The sizing knobs are constructor data with the historical defaults,
     /// sanitized to their 1 floor - never read from the environment.
