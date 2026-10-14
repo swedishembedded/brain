@@ -366,7 +366,7 @@ fn try_auto_resolve(spec: &dyn ArchSpec, ambiguous: &[(&'static str, &Vec<(usize
 /// hypothetical [`Assembly`] built by holding every other already-decided
 /// role fixed and substituting this candidate in for `role`.
 fn role_ambiguity(spec: &dyn ArchSpec, arch: &str, role: &str, candidates: &[(usize, Confidence)], resolved: &BTreeMap<String, usize>, records: &[ArtifactRecord], overrides: &BTreeMap<String, String>) -> Ambiguity {
-    let choices = candidates
+    let mut choices: Vec<ModelCandidate> = candidates
         .iter()
         .map(|&(idx, _)| {
             let mut chosen = resolved.clone();
@@ -384,6 +384,9 @@ fn role_ambiguity(spec: &dyn ArchSpec, arch: &str, role: &str, candidates: &[(us
             ModelCandidate { summary: format!("{role}: {path}"), selector: vec![(format!("--{}", role.replace('_', "-")), path)], assembly: Box::new(assembly) }
         })
         .collect();
+    // Listed by path, not by the order the store happened to be enumerated in,
+    // so the same store asks the same question every time.
+    choices.sort_by(|a, b| a.selector.cmp(&b.selector));
     Ambiguity { arch: arch.to_string(), question: Question::Role { role: role.to_string() }, choices }
 }
 
@@ -1333,6 +1336,42 @@ mod tests {
         let specs: Vec<&dyn ArchSpec> = vec![&spec];
         let out = resolve("compat", &records, &specs, &BTreeMap::new());
         assert!(matches!(out, Resolution::Ambiguous(_)), "two genuinely valid candidates must still be asked about, never guessed: {out:?}");
+    }
+
+    /// What a resolution decided, in a form two runs can be compared by.
+    fn outcome_signature(out: &Resolution) -> String {
+        match out {
+            Resolution::Resolved(a) => format!("resolved {:?}", a.roles),
+            Resolution::Ambiguous(a) => format!("ambiguous {:?} {:?}", a.question, a.choices.iter().map(|c| c.selector.clone()).collect::<Vec<_>>()),
+            Resolution::Missing(m) => format!("missing {:?}", m.roles.iter().map(|r| r.role.clone()).collect::<Vec<_>>()),
+        }
+    }
+
+    /// A directory listing has no order a user can rely on, so neither may
+    /// the answer: the same store resolves to the same assembly, or asks the
+    /// same question with its candidates in the same order, however its
+    /// records were enumerated.
+    #[test]
+    fn resolution_does_not_depend_on_the_order_the_store_was_enumerated_in() {
+        let paths = ["/models/toy/vae.bin", "/models/toy/dit-a.bin", "/models/toy/dit-b.bin", "/models/toy/dit-c.bin"];
+        for marker in ["dit", "dit-b"] {
+            let spec = CompatCheckSpec { compatible_marker: marker };
+            let specs: Vec<&dyn ArchSpec> = vec![&spec];
+            let signatures: Vec<String> = (0..paths.len())
+                .flat_map(|rotation| {
+                    let mut order: Vec<&str> = paths.to_vec();
+                    order.rotate_left(rotation);
+                    let mut reversed = order.clone();
+                    reversed.reverse();
+                    [order, reversed]
+                })
+                .map(|order| {
+                    let records: Vec<_> = order.iter().map(|p| rec(p)).collect();
+                    outcome_signature(&resolve("compat", &records, &specs, &BTreeMap::new()))
+                })
+                .collect();
+            assert!(signatures.windows(2).all(|w| w[0] == w[1]), "marker {marker:?} resolved differently by enumeration order: {signatures:#?}");
+        }
     }
 
     #[test]
