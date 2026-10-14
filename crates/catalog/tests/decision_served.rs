@@ -21,8 +21,9 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use catalog::resident_decision::{serve_all, DecisionServeConfig};
-use decisions::fixtures::{write_decide, write_laya, Scratch};
-use decisions::manifest::FILE as MANIFEST_FILE;
+use decisions::engine::Backend;
+use decisions::fixtures::{write_decide, write_laya, write_laya_head_only, Scratch};
+use decisions::manifest::{weights_identity, FILE as MANIFEST_FILE};
 use residency::budget::Budgets;
 use residency::{Device, Executor, Policy};
 use serde_json::{json, Value};
@@ -385,6 +386,44 @@ async fn a_validation_that_no_longer_matches_the_weights_fails_to_load_rather_th
     std::fs::write(&weights, bytes).unwrap();
     let r = rig(&s, &[], None);
     let (status, body) = run(&r.app, "acme/laya", params()).await;
+    assert_eq!((status, code(&body)), (StatusCode::INTERNAL_SERVER_ERROR, "failed_to_load"), "{body}");
+    assert!(body["error"]["message"].as_str().unwrap().contains("does not match the manifest"), "{body}");
+}
+
+#[tokio::test]
+async fn a_trained_head_whose_file_or_base_changed_fails_to_load_rather_than_answering() {
+    let s = Scratch::new("served-head-only");
+    write_laya(&s.join("convai/laya"), 48);
+    write_laya_head_only(&s.join("acme/tuned"), &s.join("convai/laya"), "convai/laya", 9);
+    let identity = weights_identity(&s.join("acme/tuned"), Backend::Laya).unwrap();
+    std::fs::write(s.join("acme/tuned").join(MANIFEST_FILE), format!(r#"{{"schema": 1, "weights_sha256": "{identity}"}}"#)).unwrap();
+
+    let r = rig(&s, &["acme/tuned"], None);
+    let (status, body) = run(&r.app, "acme/tuned", params()).await;
+    assert_eq!(status, StatusCode::OK, "a head over an installed base serves like any checkpoint: {body}");
+    drop(r);
+
+    // The base is a different model than the head was trained on.
+    let weights = s.join("convai/laya/model.safetensors");
+    let original = std::fs::read(&weights).unwrap();
+    let mut changed = original.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    std::fs::write(&weights, changed).unwrap();
+    let r = rig(&s, &["acme/tuned"], None);
+    let (status, body) = run(&r.app, "acme/tuned", params()).await;
+    assert_eq!((status, code(&body)), (StatusCode::INTERNAL_SERVER_ERROR, "failed_to_load"), "{body}");
+    assert!(body["error"]["message"].as_str().unwrap().contains("not the one this head was trained on"), "{body}");
+    drop(r);
+
+    // The head itself was edited after the manifest recorded its identity.
+    std::fs::write(&weights, original).unwrap();
+    let head = s.join("acme/tuned/head.safetensors");
+    let mut bytes = std::fs::read(&head).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&head, bytes).unwrap();
+    let r = rig(&s, &["acme/tuned"], None);
+    let (status, body) = run(&r.app, "acme/tuned", params()).await;
     assert_eq!((status, code(&body)), (StatusCode::INTERNAL_SERVER_ERROR, "failed_to_load"), "{body}");
     assert!(body["error"]["message"].as_str().unwrap().contains("does not match the manifest"), "{body}");
 }

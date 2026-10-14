@@ -35,7 +35,8 @@ use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use brain::decision::{Answer, Opt, Question, State};
 use catalog::resident_decision::DecisionResident;
-use decisions::fixtures::{write_decide, write_laya, Scratch};
+use brain::decision_run::{train, TrainRun};
+use decisions::fixtures::{synthetic_jsonl, write_decide, write_laya, Scratch, SyntheticTask};
 use residency::budget::Budgets;
 use residency::{Device, Executor, Policy, ResidentModel};
 use serde_json::{json, Value};
@@ -115,11 +116,9 @@ async fn post(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
     (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
 }
 
-/// Compare the SDK's answers with the capability's response.
-fn agree_with_capability(sdk: &[Answer], out: &Value) {
-    let answers = out["outputs"]["answers"].as_array().unwrap_or_else(|| panic!("no answers: {out}"));
-    assert_eq!(answers.len(), sdk.len());
-    match (&sdk[0], &answers[0]) {
+/// One choice answer: the same option selected, the same full distribution.
+fn agree_on_choice(sdk: &Answer, served: &Value) {
+    match (sdk, served) {
         (Answer::Choice { choice, probabilities, confidence }, served) => {
             assert_eq!(served["selected"], json!(choice), "the same option is selected");
             close(*confidence as f64, f(&served["confidence"]), "choice confidence");
@@ -131,6 +130,13 @@ fn agree_with_capability(sdk: &[Answer], out: &Value) {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// Compare the SDK's answers with the capability's response.
+fn agree_with_capability(sdk: &[Answer], out: &Value) {
+    let answers = out["outputs"]["answers"].as_array().unwrap_or_else(|| panic!("no answers: {out}"));
+    assert_eq!(answers.len(), sdk.len());
+    agree_on_choice(&sdk[0], &answers[0]);
     match (&sdk[1], &answers[1]) {
         (Answer::Score { score, probabilities, confidence, .. }, served) => {
             close(*score as f64, f(&served["score"]), "score");
@@ -194,6 +200,37 @@ async fn decide_over_the_wire_agrees_with_decide_through_the_sdk() {
     let d = Scratch::new("agree-decide");
     write_decide(&d, 11);
     gate("acme/triage", &d).await;
+}
+
+/// The head `brain decide train` writes for a Laya base is served exactly as the
+/// SDK reads it: the directory holds no trunk, so this fails if either path
+/// resolves the referenced backbone differently or serves anything but the
+/// trained head.
+#[tokio::test]
+async fn a_trained_laya_head_over_the_wire_agrees_with_the_sdk() {
+    let root = Scratch::new("agree-laya-trained");
+    write_laya(&root.join("base"), 48);
+    std::fs::write(root.join("data.jsonl"), synthetic_jsonl(&SyntheticTask::new(12, 4, 4))).unwrap();
+    let mut run = TrainRun::new(root.join("data.jsonl"), root.join("base").to_str().unwrap(), root.join("tuned"));
+    run.steps = 6;
+    run.batch = 2;
+    train(&run, &mut |_, _| {}).unwrap();
+    assert!(!root.join("tuned/model.safetensors").exists(), "the trunk is referenced, not copied");
+
+    let (stock, tuned) = (sdk(&root.join("base")), sdk(&root.join("tuned")));
+    let probabilities = |a: &Answer| match a {
+        Answer::Choice { probabilities, .. } => probabilities.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    assert_ne!(probabilities(&stock[0]), probabilities(&tuned[0]), "the trained head, not the base's, is what answers");
+
+    // A training run declares the one question type it trained, so that is
+    // the one the served model answers; the others are flagged, not guessed.
+    let served = serve("acme/tuned", &root.join("tuned"));
+    let team = r#"[{"id": "team", "type": "choice", "instruction": "who handles this", "options": [{"id": "billing", "description": "payments"}, "tech", "sales"]}]"#;
+    let (status, out) = post(&served.app, "/v1/run", json!({"model": "acme/tuned", "action": "decide", "params": {"state": STATE, "questions": team}})).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    agree_on_choice(&tuned[0], &out["outputs"]["answers"][0]);
 }
 
 /// The same claim on the real released checkpoint. Skips by name when it is
