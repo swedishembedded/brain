@@ -118,3 +118,19 @@ fn a_layout_across_the_cards_is_preferred_to_homing_the_model_on_the_cpu() {
     assert_eq!(shards.len(), 2, "two stages on the cards, not one on the host");
     assert!(shards.iter().all(|sh| sh.gpu_index != model::Shard::ANY_GPU));
 }
+
+/// The cut balances the bytes each stage will occupy, not the parameter count:
+/// the head stage also carries the logits and cross-entropy scratch, which
+/// grows with the row length, so an even split by parameters leaves it
+/// several GiB heavier than its neighbour and refuses a plan the two cards
+/// can hold together. A bf16 Qwen3-8B at 12288 tokens is 41 GiB over two
+/// 21 GiB cards.
+#[test]
+fn the_cut_balances_stage_bytes_so_a_long_row_fits_two_cards() {
+    let cfg = QwenConfig { lora: Some(qwen3::LoraCfg::attn(16, 32.0)), ..QwenConfig::qwen3_8b() };
+    let shards = plan_lora_layout(&cfg, 1, 12_288, Dtype::BF16, 2, machine(&[21 * GIB, 21 * GIB])).expect("41 GiB over two 21 GiB cards");
+    assert_eq!(shards.len(), 2);
+    let bytes = |s: &qwen3::Shard| qwen3::footprint::estimate_vram_bytes(&cfg, s, Dtype::BF16, 1, 12_288, true, false);
+    assert!(shards.iter().all(|s| bytes(s) <= 21 * GIB));
+    assert!(shards[0].end > cfg.n_layers as usize / 2, "the head stage, heavier per layer, takes fewer layers than half");
+}

@@ -17,7 +17,7 @@ use std::path::Path;
 use checkpoint::TensorSource;
 use gpu_core::devices::{Home, Need};
 use gpu_core::select::Dtype;
-use model::{FitOpts, Pipeline, PipelineModel, Shard, Shardable};
+use model::{FitOpts, Pipeline, PipelineModel, Shard};
 
 use crate::config::{LoraCfg, QwenConfig};
 use crate::model::Qwen;
@@ -160,6 +160,42 @@ pub fn build_for_training(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSour
     .map_err(std::io::Error::other)
 }
 
+/// `stages` contiguous stages whose largest estimated footprint
+/// ([`crate::footprint::estimate_vram_bytes`]) is the smallest any cut can
+/// give (exact DP over the cut points). The parameter-count cut of
+/// [`model::plan_balanced`] ignores what only some stages carry and what grows
+/// with the row: the head stage's logits and cross-entropy scratch, every
+/// stage's residual checkpoints. Left even by parameters, the head stage is
+/// several GiB heavier and a plan the cards can hold together is refused.
+fn plan_by_bytes(cfg: &QwenConfig, b: u32, t: u32, dt: Dtype, stages: usize) -> Vec<Shard> {
+    let layers = cfg.n_layers as usize;
+    let stage = |start: usize, end: usize, s: usize| Shard { start, end, embed: s == 0, head: s + 1 == stages, gpu_index: s };
+    let bytes = |sh: &Shard| crate::footprint::estimate_vram_bytes(cfg, sh, dt, b, t, true, false);
+    // best[s][i]: the smallest largest-stage footprint covering layers [0, i)
+    // with stages 0..=s; cut[s][i] is where stage s then starts.
+    let mut best = vec![vec![u64::MAX; layers + 1]; stages];
+    let mut cut = vec![vec![0usize; layers + 1]; stages];
+    for i in 0..=layers {
+        best[0][i] = bytes(&stage(0, i, 0));
+    }
+    for s in 1..stages {
+        for i in 0..=layers {
+            for j in 0..=i {
+                let worst = best[s - 1][j].max(bytes(&stage(j, i, s)));
+                if worst < best[s][i] {
+                    best[s][i] = worst;
+                    cut[s][i] = j;
+                }
+            }
+        }
+    }
+    let mut ends = vec![layers; stages];
+    for s in (1..stages).rev() {
+        ends[s - 1] = cut[s][ends[s]];
+    }
+    (0..stages).map(|s| stage(if s == 0 { 0 } else { ends[s - 1] }, ends[s], s)).collect()
+}
+
 /// How a LoRA fine-tune is laid out over `cards` cards, by what they can
 /// hold and never by a flag: the whole model as one shard when `place`
 /// finds a card for it, else the fewest pipeline stages `place` can home
@@ -175,7 +211,6 @@ pub fn plan_lora_layout(
     cards: usize,
     place: impl Fn(&[Need]) -> Result<Vec<Home>, String>,
 ) -> Result<Vec<Shard>, String> {
-    let cost = <Qwen as Shardable>::shard_cost(cfg, b, t);
     let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
     let mut refused = Vec::new();
     // The cards first: a host with RAM to spare could home the whole model on
@@ -183,7 +218,7 @@ pub fn plan_lora_layout(
     // over any plan that homes a stage on the host; the host is the last resort.
     for cards_only in [true, false] {
         for stages in 1..=cards.max(1) {
-            let mut shards = model::plan_balanced(&cost, &(0..stages).collect::<Vec<_>>());
+            let mut shards = plan_by_bytes(cfg, b, t, dt, stages);
             let needs: Vec<Need> = shards
                 .iter()
                 .enumerate()
