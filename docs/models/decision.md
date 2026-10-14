@@ -192,7 +192,10 @@ stay true after the weights changed. At load, a declared hash that does not
 match its file, or a `max_input_tokens` the checkpoint does not hold, is a
 `failed-to-load`. A manifest that is present and wrong makes the model
 `incompatible` rather than quietly unvalidated. `architecture` must agree with
-the directory's layout. Hashes are checked when a model loads, not when it is
+the directory's layout. `weights_sha256` is the digest of `model.safetensors`; for
+a Laya head that references its backbone (below) it is the digest of the head,
+the base it names and its calibration, so a validation stays bound to exactly
+that model. Hashes are checked when a model loads, not when it is
 listed, so a listing reports what the manifest records.
 
 ## Choosing a model: `auto`
@@ -300,9 +303,9 @@ brain decide train --data decisions.jsonl --base sentence-transformers/all-MiniL
 | flag | |
 |---|---|
 | `--data FILE` | the JSONL above; only its `train` split is trained on |
-| `--base REF` | a `decide` checkpoint: a model-store id or a directory. A Laya base is refused |
+| `--base REF` | a `decide` checkpoint or a stock Laya checkpoint: a model-store id or a directory. A trained Laya directory is not a base; name the stock checkpoint it was trained from |
 | `--out DIR` | the checkpoint to create; it must not exist, and a failed run leaves nothing behind |
-| `--freeze-encoder` / `--finetune-encoder` | head only (the default) or encoder and head |
+| `--freeze-encoder` / `--finetune-encoder` | head only (the default) or encoder and head. A Laya base is always head only and `--finetune-encoder` is refused for it |
 | `--steps N`, `--batch N`, `--seed N` | optimizer updates (600), examples per update (16), seed (0) |
 
 Each case brings its own question and options. A step draws cases at random
@@ -328,6 +331,83 @@ validation:
 `data_sha256` the exact bytes of the JSONL, and `brain_commit` the code that
 trained it, `-dirty` when its tree had uncommitted changes. An unvalidated
 model is served only when named, never chosen by `auto`.
+
+### Training a Laya base
+
+Laya is the preferred stock decision model, and it trains the same way:
+
+```bash
+brain decide train --data decisions.jsonl --base convaiinnovations/laya \
+    --out /models/acme/routing-v1 --steps 600 --batch 16 --seed 7
+```
+
+The run uses the Laya arm's own head objective (REINFORCE with a group
+baseline over a strictly proper scoring reward, a cosine learning rate and
+annealed exploration), with the same case draws, batch semantics (one optimizer
+step per `--batch` cases, the summed gradient rescaled to a mean) and seed
+determinism as a `decide` run. The 395M-parameter trunk is **frozen**: it is
+held as weights only, with no gradient or optimizer moments, and its reverse
+pass is not run. That is what makes training fit in memory at all, and a
+frozen trunk keeps the lineage honest, since the base digest names exactly the
+trunk in the result.
+
+**`--finetune-encoder` is refused for a Laya base.** Training the trunk costs a
+gradient and two optimizer moments for every trunk weight, and the result could
+only be saved as a full copy of the weights; a head saved beside the published
+trunk would not be the model that was measured. Train the head.
+
+**The directory holds the head, not the backbone.** A stock Laya directory's
+`model.safetensors` is the trunk and the head together; copying it for every
+experiment would put the unchanged trunk on disk each time. A trained directory
+is instead:
+
+```text
+routing-v1/
+  decision.manifest.json    lineage, hashes, validation (unvalidated until promoted)
+  laya.base.json            the backbone: {"schema": 1, "id": "convaiinnovations/laya",
+                            "sha256": "sha256:...", "path": "<where it was>"}
+  head.safetensors          the trained decision head
+  rl_agent_config.json      } copied from the base: context lengths, and the
+  encoder/config.json       } temperature tables that turn the head's logits
+  tokenizer/tokenizer.json  } into probabilities; small
+```
+
+`brain-decisions` loads it exactly as it loads a stock checkpoint: it is a
+model of its own, addressed by its store id, and `decide`, `eval`, `promote`,
+`rollback` and `auto` need nothing Laya-specific.
+
+**Base reference semantics.** `sha256` is `modelstore::fetch::base_digest` of
+the stock directory, that is, the digest of its weight files, and it is the only
+thing that identifies the base. At load the backbone is looked for, in order, in
+the model store the trained directory sits in (`<root>/<vendor>/<repo>`), in the
+default model store, and at the recorded `path`; the first directory that exists
+**and** hashes to `sha256` is used. A base that is absent fails the load
+(`failed-to-load`, naming the id and "run `brain pull <id>`"); one that is
+present with other bytes is refused, since a head trained against one trunk
+answers noise on another. The base must therefore stay installed to serve the
+trained directory, and hashing its weight files is part of every load (it reads
+them in full). A head file that does not cover the whole head, an edited head,
+or an edited base reference fails the load the same way. A base named by directory path gets the id
+`local/<directory name>`, which only the recorded `path` can locate; name it by
+store id to make the trained directory relocatable.
+
+The manifest records what a `decide` run's does (base id and digest, data
+digest, split counts, steps, batch, seed, commit) with `"architecture": "laya"`
+and `question_types: ["choice"]`, because choice is the one question type the
+run trained; `score` and `noul` questions to it are flagged as unsupported
+rather than answered from a head that never saw them. `weights_sha256` covers
+the head file, the base digest and `rl_agent_config.json`. The base's
+temperature tables are kept unchanged, so check the trained model's calibration
+with `brain decide eval` (`ece`) before trusting its probabilities.
+
+Memory and speed follow from the frozen trunk. Serving a trained directory
+costs what serving the base costs (the head is a small addition), and the
+resident reservation counts the base's weights. A training step encodes every
+case through the whole trunk (the trunk is frozen but the head learns from its
+output, so there is no sharing across a batch) and runs the head's backward
+only; step time is therefore dominated by the trunk's forward and grows with
+`--batch` and with the sequence length of the cases. Plan runs by measuring a
+few steps on your own data and device.
 
 ## Evaluating a decision model
 
@@ -438,8 +518,8 @@ question is outside what it knows, `confidence` is usually the tell. See
 
 The act/escalate head of Laya is reachable through the SDK only
 (`DecisionPipeline::route`). Batching across requests is the serial default,
-for the reason given above. Training is an SDK and `samples/decision` matter:
-the served surface is inference.
+for the reason given above. Training is `brain decide train`, the SDK and
+`samples/decision`: the served surface is inference.
 
 ## Samples
 
