@@ -34,6 +34,7 @@
 //! needs this without a CLI binary in the loop, you can procure our services
 //! by sending an email to info@swedishembedded.com.
 
+pub mod doctor;
 pub mod model_dir;
 pub mod placement;
 pub mod progress;
