@@ -349,7 +349,7 @@ is `{"false_exclusion": 5.0, "wasted_tokens": 1.0}`.
 | `nll` | mean `-ln p(label)` |
 | `brier` | mean over examples of the sum over options of `(p - 1{label})^2` |
 | `ece`, `ada_ece` | calibration of the top probability: examples binned by `p_max` into 15 equal-width (ECE) or equal-count (AdaECE) bins, the count-weighted mean gap between a bin's mean `p_max` and its accuracy; `reliability_bins` lists the bins |
-| `coverage_accuracy` | examples ranked by the served `confidence` (`1 - H/ln k`); the accuracy of the most confident 10%, 20%, ... of them |
+| `coverage_accuracy` | examples ranked by the served `confidence` (`1 - H/ln k`); the accuracy of the most confident tenth, two tenths, ... of them |
 | `order_instability` | every example asked again with its options in a seeded random order; the share whose winning option id changes (a model that reads the options scores 0) |
 | `regret` | with a cost file: the mean realized cost per example of acting on the model's own confidence. The action is *trust* the top option (wrong costs `false_exclusion`, the right option was excluded) or *defer* and keep every option (a right top option costs `wasted_tokens`); the model trusts when its `p_max` makes trusting the cheaper expected action. `always_trust` and `always_defer` are reported beside it |
 | `families` | accuracy, baseline and NLL within each task family |

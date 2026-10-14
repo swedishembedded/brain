@@ -29,7 +29,7 @@
 //!   ECE and the bins beside it.
 //! * **coverage versus accuracy** - examples ranked by the model's `confidence`
 //!   (`1 - H/ln k`, the figure the served API reports); the accuracy of the
-//!   most confident 10%, 20%, ... of them. A model whose confidence means
+//!   most confident tenth, two tenths, ... of them. A model whose confidence means
 //!   something is more accurate at low coverage.
 //! * **order instability** - every example is asked again with its options in
 //!   a seeded random order; the share whose winning option *id* changes. A
@@ -555,7 +555,7 @@ mod tests {
         let first = r.coverage_accuracy.first().unwrap();
         let last = r.coverage_accuracy.last().unwrap();
         assert_eq!((first.1, last.0), (1.0, 1.0));
-        assert!(last.1 < first.1, "full-coverage accuracy {} must be below top-10% accuracy {}", last.1, first.1);
+        assert!(last.1 < first.1, "full-coverage accuracy {} must be below top-tenth accuracy {}", last.1, first.1);
     }
 
     #[test]
