@@ -37,6 +37,7 @@
 //! governance, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -72,6 +73,9 @@ impl Validation {
 }
 
 /// Where the weights came from.
+///
+/// A run of `brain decide train` fills every field; a hand-written manifest
+/// may name only some.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Lineage {
     /// The model this one descends from.
@@ -80,6 +84,17 @@ pub struct Lineage {
     pub trained_on: Option<String>,
     /// How it was trained.
     pub recipe: Option<String>,
+    /// `sha256:<hex>` identity of the base checkpoint (`modelstore::fetch::base_digest`).
+    pub base_sha256: Option<String>,
+    /// `sha256:<hex>` of the training JSONL file.
+    pub data_sha256: Option<String>,
+    /// Examples per split in the training file, by split name.
+    pub split_counts: Option<BTreeMap<String, usize>>,
+    /// The training knobs (steps, batch, encoder frozen, ...).
+    pub hyperparameters: Option<Value>,
+    pub seed: Option<u64>,
+    /// The commit of the brain that trained it, `-dirty` when its tree was not clean.
+    pub brain_commit: Option<String>,
 }
 
 /// A checkpoint's declared identity and provenance.
@@ -154,7 +169,7 @@ impl DecisionManifest {
 
         let text_of = |o: &serde_json::Map<String, Value>, k: &str| o.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
         let lineage = match obj.get("lineage") {
-            Some(Value::Object(l)) => Lineage { base: text_of(l, "base"), trained_on: text_of(l, "trained_on"), recipe: text_of(l, "recipe") },
+            Some(Value::Object(l)) => lineage_of(l)?,
             None | Some(Value::Null) => Lineage::default(),
             Some(_) => return Err(format!("{FILE}: `lineage` must be an object")),
         };
@@ -214,6 +229,13 @@ impl DecisionManifest {
         }
     }
 
+    /// Write the manifest into `dir`, atomically: a reader sees the old file
+    /// or the new one, never half of either.
+    pub fn write(&self, dir: &Path) -> Result<(), String> {
+        let text = serde_json::to_string_pretty(&self.to_json()).map_err(|e| format!("{FILE}: {e}"))?;
+        write_atomic(&dir.join(FILE), (text + "\n").as_bytes())
+    }
+
     /// The manifest as JSON, in the shape [`DecisionManifest::parse`] reads.
     pub fn to_json(&self) -> Value {
         let validation = match &self.validation {
@@ -226,12 +248,64 @@ impl DecisionManifest {
             "architecture": self.architecture.slug(),
             "weights_sha256": self.weights_sha256,
             "tokenizer_sha256": self.tokenizer_sha256,
-            "lineage": {"base": self.lineage.base, "trained_on": self.lineage.trained_on, "recipe": self.lineage.recipe},
+            "lineage": {
+                "base": self.lineage.base, "trained_on": self.lineage.trained_on, "recipe": self.lineage.recipe,
+                "base_sha256": self.lineage.base_sha256, "data_sha256": self.lineage.data_sha256,
+                "split_counts": self.lineage.split_counts, "hyperparameters": self.lineage.hyperparameters,
+                "seed": self.lineage.seed, "brain_commit": self.lineage.brain_commit,
+            },
             "max_input_tokens": self.max_input_tokens,
             "question_types": self.question_types.iter().map(|t| t.slug()).collect::<Vec<_>>(),
             "validation": validation,
         })
     }
+}
+
+/// Write `bytes` to `path` through a sibling temporary file and a rename, so
+/// the file is never observed half written.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
+    let mut file = std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    file.write_all(bytes).and_then(|_| file.sync_all()).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn lineage_of(l: &serde_json::Map<String, Value>) -> Result<Lineage, String> {
+    let text = |k: &str| l.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    let digest = |k: &str| match text(k) {
+        None => Ok(None),
+        Some(h) if is_digest(&h) => Ok(Some(h)),
+        Some(_) => Err(format!("{FILE}: `lineage.{k}` must be \"sha256:\" followed by 64 lowercase hex digits")),
+    };
+    let split_counts = match l.get("split_counts") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(m)) => {
+            let mut counts = BTreeMap::new();
+            for (split, n) in m {
+                let n = n.as_u64().ok_or_else(|| format!("{FILE}: `lineage.split_counts.{split}` must be a non-negative integer"))?;
+                counts.insert(split.clone(), n as usize);
+            }
+            Some(counts)
+        }
+        Some(_) => return Err(format!("{FILE}: `lineage.split_counts` must be an object")),
+    };
+    let seed = match l.get("seed") {
+        None | Some(Value::Null) => None,
+        Some(n) => Some(n.as_u64().ok_or_else(|| format!("{FILE}: `lineage.seed` must be a non-negative integer"))?),
+    };
+    Ok(Lineage {
+        base: text("base"),
+        trained_on: text("trained_on"),
+        recipe: text("recipe"),
+        base_sha256: digest("base_sha256")?,
+        data_sha256: digest("data_sha256")?,
+        split_counts,
+        hyperparameters: l.get("hyperparameters").filter(|v| !v.is_null()).cloned(),
+        seed,
+        brain_commit: text("brain_commit"),
+    })
 }
 
 fn is_digest(h: &str) -> bool {
@@ -327,6 +401,40 @@ mod tests {
         let d = crate::fixtures::Scratch::new("manifest-wrong");
         std::fs::write(d.join(FILE), "{").unwrap();
         assert!(DecisionManifest::read(&d, Backend::Laya).is_err());
+    }
+
+    #[test]
+    fn a_training_lineage_round_trips_and_a_malformed_one_is_refused_by_field() {
+        let text = format!(
+            r#"{{"schema": 1, "lineage": {{"base": "a/b", "base_sha256": "{H}", "data_sha256": "{H}",
+               "split_counts": {{"train": 8, "test": 2}}, "hyperparameters": {{"steps": 5}}, "seed": 7, "brain_commit": "abc123-dirty"}}}}"#
+        );
+        let m = DecisionManifest::parse(&text, Backend::Decide).unwrap();
+        assert_eq!(m.lineage.split_counts.as_ref().unwrap()["train"], 8);
+        assert_eq!((m.lineage.seed, m.lineage.brain_commit.as_deref()), (Some(7), Some("abc123-dirty")));
+        assert_eq!(DecisionManifest::parse(&m.to_json().to_string(), Backend::Decide).unwrap(), m);
+        for (bad, needle) in [
+            (r#"{"schema": 1, "lineage": {"data_sha256": "abc"}}"#, "data_sha256"),
+            (r#"{"schema": 1, "lineage": {"split_counts": {"train": -1}}}"#, "split_counts.train"),
+            (r#"{"schema": 1, "lineage": {"split_counts": []}}"#, "split_counts"),
+            (r#"{"schema": 1, "lineage": {"seed": "x"}}"#, "seed"),
+        ] {
+            let err = DecisionManifest::parse(bad, Backend::Decide).unwrap_err();
+            assert!(err.contains(needle), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_written_manifest_reads_back_and_leaves_no_temporary_file() {
+        let d = crate::fixtures::Scratch::new("manifest-write");
+        let mut m = DecisionManifest::undeclared(Backend::Decide);
+        m.lineage.seed = Some(3);
+        m.write(&d).unwrap();
+        m.lineage.seed = Some(4);
+        m.write(&d).unwrap();
+        assert_eq!(DecisionManifest::read(&d, Backend::Decide).unwrap().lineage.seed, Some(4));
+        let names: Vec<_> = std::fs::read_dir(&*d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, [FILE]);
     }
 
     #[test]

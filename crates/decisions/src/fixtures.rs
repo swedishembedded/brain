@@ -262,6 +262,70 @@ fn head_brain_name_to_hf(name: &str) -> String {
     .to_string()
 }
 
+/// A synthetic decision dataset whose right answer is known: the state names
+/// one of four problems and the correct option is the desk that handles it.
+/// Every option set is the same four desks in a fresh order, so position
+/// tells nothing, and every state is unique, so no example repeats across
+/// splits.
+#[derive(Clone, Debug)]
+pub struct SyntheticTask {
+    pub train: usize,
+    pub validation: usize,
+    pub test: usize,
+    /// Seeds the problem drawn per example and the option order.
+    pub seed: u64,
+    /// Replace the TRAIN labels with random desks, leaving validation and test
+    /// truthful: the negative control for "did the model learn the task".
+    pub shuffle_train_labels: bool,
+    /// The family the examples report; give two tasks different families to
+    /// hold one family out of another's data.
+    pub family: &'static str,
+}
+
+impl SyntheticTask {
+    pub fn new(train: usize, validation: usize, test: usize) -> SyntheticTask {
+        SyntheticTask { train, validation, test, seed: 1, shuffle_train_labels: false, family: "desks" }
+    }
+}
+
+const PROBLEMS: [(&str, &str); 4] = [("invoice", "billing"), ("router", "network"), ("backup", "storage"), ("mailbox", "email")];
+
+/// The JSONL of a [`SyntheticTask`], in the exporter's line format.
+pub fn synthetic_jsonl(task: &SyntheticTask) -> String {
+    let mut rng = data::rng::Rng::new(task.seed);
+    let mut lines = Vec::new();
+    let mut next = 0u64;
+    for (split, count) in [("train", task.train), ("validation", task.validation), ("test", task.test)] {
+        for _ in 0..count {
+            next += 1;
+            let truth = (rng.next_u64() % PROBLEMS.len() as u64) as usize;
+            let label = if task.shuffle_train_labels && split == "train" { (rng.next_u64() % PROBLEMS.len() as u64) as usize } else { truth };
+            let mut order: Vec<usize> = (0..PROBLEMS.len()).collect();
+            for i in (1..order.len()).rev() {
+                order.swap(i, (rng.next_u64() % (i as u64 + 1)) as usize);
+            }
+            let options: Vec<serde_json::Value> = order.iter().map(|&i| serde_json::json!({"id": PROBLEMS[i].1})).collect();
+            lines.push(
+                serde_json::json!({
+                    "decision_type": "desk_routing",
+                    "state_ref": {"run": format!("run-{next}"), "task": format!("task-{next}"), "suite": task.family, "seed": next, "question_id": "q"},
+                    "state": format!("ticket {next} about the {}", PROBLEMS[truth].0),
+                    "question": {"id": "q", "type": "choice", "instruction": "which desk handles this ticket"},
+                    "options": options,
+                    "label": PROBLEMS[label].1,
+                    "label_source": "oracle",
+                    "outcome": {"task_passed": true, "llm_tokens_saved": 0, "recovery_calls": 0},
+                    "split": split,
+                    "family": task.family,
+                    "seed": next,
+                })
+                .to_string(),
+            );
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

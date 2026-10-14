@@ -286,6 +286,49 @@ seed together, or an identical state, instruction and option set. A family may
 appear in several splits through different seeds; a family that appears in one
 split only is a held-out family.
 
+## Training a decision model
+
+`brain decide inspect --data FILE` validates a file of examples (schema,
+duplicate ids, leakage) and prints its counts, label entropy and
+majority-label baseline per split; `--json` prints the same machine-readably.
+
+```bash
+brain decide train --data decisions.jsonl --base sentence-transformers/all-MiniLM-L6-v2 \
+    --out /models/triage-v1 --steps 600 --batch 16 --seed 7
+```
+
+| flag | |
+|---|---|
+| `--data FILE` | the JSONL above; only its `train` split is trained on |
+| `--base REF` | a `decide` checkpoint: a model-store id or a directory. A Laya base is refused |
+| `--out DIR` | the checkpoint to create; it must not exist, and a failed run leaves nothing behind |
+| `--freeze-encoder` / `--finetune-encoder` | head only (the default) or encoder and head |
+| `--steps N`, `--batch N`, `--seed N` | optimizer updates (600), examples per update (16), seed (0) |
+
+Each case brings its own question and options. A step draws cases at random
+and shows each one's options in a fresh seeded order, so a position never
+stands in for reading the option text. The same data, base, flags and seed give
+the same weights.
+
+The checkpoint's `decision.manifest.json` records its lineage and never claims
+validation:
+
+```json
+{"schema": 1, "capability": "decide", "architecture": "decide",
+ "weights_sha256": "sha256:...", "tokenizer_sha256": "sha256:...",
+ "question_types": ["choice"],
+ "lineage": {"base": "sentence-transformers/all-MiniLM-L6-v2", "base_sha256": "sha256:...",
+             "data_sha256": "sha256:...", "split_counts": {"train": 800, "validation": 100, "test": 100},
+             "hyperparameters": {"steps": 600, "batch": 16, "freeze_encoder": true, "final_loss": 0.41},
+             "seed": 7, "brain_commit": "8b29b3e9e", "trained_on": "...", "recipe": "..."},
+ "validation": {"status": "unvalidated"}}
+```
+
+`base_sha256` identifies the base checkpoint (`modelstore::fetch::base_digest`),
+`data_sha256` the exact bytes of the JSONL, and `brain_commit` the code that
+trained it, `-dirty` when its tree had uncommitted changes. An unvalidated
+model is served only when named, never chosen by `auto`.
+
 ## What the checkpoint knows
 
 Laya is a System 1 model trained on agent and routing decisions over text. It

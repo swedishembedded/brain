@@ -15,6 +15,7 @@
 mod args;
 mod caps_cli;
 mod data_cli;
+mod decide_cli;
 mod depth_cli;
 mod devices_cli;
 mod federated_cli;
@@ -216,6 +217,15 @@ LABEL (caption a dataset with a vision-language model)
       captioned-image trainer read. Resumable and idempotent: a re-run fills in
       only what is missing and never overwrites a hand-edited caption unless
       --overwrite says so. `brain label --help` for the full flag list.
+
+DECIDE (decision-model training on outcome-labelled examples)
+  brain decide train --data FILE --base REF --out DIR [--freeze-encoder | --finetune-encoder]
+      [--steps N --batch N --seed N]
+      Trains a decision head on the `train` split of a JSONL file and writes a
+      checkpoint whose manifest records its lineage and says `unvalidated`.
+  brain decide inspect --data FILE [--json]
+      Validates the file (schema, leakage across splits) and prints its summary.
+      `brain caps decide` lists the served `decide` action.
 
 GPT2 (dense baseline)
   brain gpt2 train <data_dir> [--out F --steps N --batch B --block T
@@ -1313,6 +1323,7 @@ fn main() {
         Some("perf") => perf_cli::run_perf(&argv[2..]),
         Some("forecast") => forecast_cli::run_forecast(&argv[2..]),
         Some("label") => label_cli::run_label(&argv[2..]),
+        Some("decide") if decide_cli::handles(argv.get(2).map(String::as_str)) => std::process::exit(decide_cli::run_decide(&argv[2..])),
         Some("caps") => std::process::exit(caps_cli::run_caps(&argv[2..])),
         // `fetch` is an accepted alias, not a second verb: it is the spelling
         // several of this workspace's test-fixture instructions already tell a

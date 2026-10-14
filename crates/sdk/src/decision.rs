@@ -262,6 +262,26 @@ const LAYA_HEAD_LR_MIN: f32 = 1e-6;
 const LAYA_SIGMA_START: f32 = 0.4;
 const LAYA_SIGMA_END: f32 = 0.1;
 
+/// A labelled choice that carries its own question and options; what
+/// [`DecisionPipeline::train_cases`] trains on.
+#[derive(Clone, Debug)]
+pub struct ChoiceCase {
+    pub state: String,
+    pub instructions: String,
+    pub options: Vec<String>,
+    /// Index into `options` of the correct one.
+    pub label: usize,
+}
+
+/// One example as a training step draws it: the options in the order shown
+/// and the position of the correct one in that order.
+struct Draw<'a> {
+    state: &'a str,
+    instructions: &'a str,
+    options: Vec<&'a str>,
+    gold: usize,
+}
+
 pub struct DecisionPipeline {
     backend: Backend,
     /// The checkpoint directory this pipeline was loaded from.
@@ -591,6 +611,96 @@ impl DecisionPipeline {
         }
         let pool: Vec<usize> = (0..options.len()).collect();
         let sampler = OptionSampler::default();
+        let tail_sum = self.train_steps(steps, batch, seed, log, |rng| {
+            let (text, label) = examples[(rng.next_u64() % examples.len() as u64) as usize];
+            if label >= options.len() {
+                return Err(Error::MissingArgument(format!(
+                    "example label {label} has no option text ({} supplied)",
+                    options.len()
+                )));
+            }
+            // ONE sampler, one draw per example, both arms: each example
+            // is scored against a random SUBSET of the options, always
+            // containing the correct one, at a random position.
+            let (opts, gold) = sampler.draw(label, &pool, rng);
+            Ok(Draw { state: text, instructions, options: opts.iter().map(|&i| options[i].as_str()).collect(), gold })
+        })?;
+        // Record the fit, so the checkpoint this run saves can answer "which
+        // run produced this?". The architecture already in `config.json`
+        // cannot: every model in this family shares it, so two runs that
+        // differed in every setting that mattered write identical configs.
+        // A published number whose recipe was lost can be neither defended
+        // nor discarded, which is the whole cost this field exists to avoid.
+        self.record_task(serde_json::json!({
+            "task": "choice",
+            "steps": steps,
+            "batch": batch,
+            "examples": examples.len(),
+            "options": options.len(),
+            "seed": seed,
+            "final_loss": tail_sum,
+        }));
+        Ok(tail_sum)
+    }
+
+    /// Fine-tune on labelled cases that each carry their OWN question and
+    /// options, as outcome-labelled decisions do: a case is `(state,
+    /// instructions, options, label)`, and the options of one case need not
+    /// be the options of another.
+    ///
+    /// Everything [`DecisionPipeline::train_choices`] says about steps, batch
+    /// and the two arms' objectives holds here. What differs is the option
+    /// draw: a case's options are real, so none are dropped, and their order
+    /// is shuffled afresh from `seed` on every draw so that a position can
+    /// never stand in for reading the option text.
+    pub fn train_cases(
+        &mut self,
+        cases: &[ChoiceCase],
+        steps: usize,
+        batch: usize,
+        seed: u64,
+        log: &mut dyn FnMut(usize, f32),
+    ) -> Result<f32> {
+        if cases.is_empty() {
+            return Err(Error::MissingArgument("train_cases needs at least one case".into()));
+        }
+        if batch == 0 {
+            return Err(Error::MissingArgument("train_cases needs a batch of at least one case".into()));
+        }
+        if let Some((i, c)) = cases.iter().enumerate().find(|(_, c)| c.label >= c.options.len()) {
+            return Err(Error::MissingArgument(format!("case {i}: label {} has no option text ({} supplied)", c.label, c.options.len())));
+        }
+        let tail_sum = self.train_steps(steps, batch, seed, log, |rng| {
+            let case = &cases[(rng.next_u64() % cases.len() as u64) as usize];
+            let mut order: Vec<usize> = (0..case.options.len()).collect();
+            for i in (1..order.len()).rev() {
+                order.swap(i, (rng.next_u64() % (i as u64 + 1)) as usize);
+            }
+            let gold = order.iter().position(|&i| i == case.label).expect("a label is one of the case's options");
+            Ok(Draw { state: &case.state, instructions: &case.instructions, options: order.iter().map(|&i| case.options[i].as_str()).collect(), gold })
+        })?;
+        self.record_task(serde_json::json!({
+            "task": "choice",
+            "steps": steps,
+            "batch": batch,
+            "examples": cases.len(),
+            "seed": seed,
+            "final_loss": tail_sum,
+        }));
+        Ok(tail_sum)
+    }
+
+    /// The optimizer loop both `train_*` entry points share: `draw` yields one
+    /// example per call, a step accumulates `batch` of them and updates once.
+    /// Returns the mean loss over the last tenth of the run.
+    fn train_steps<'a>(
+        &mut self,
+        steps: usize,
+        batch: usize,
+        seed: u64,
+        log: &mut dyn FnMut(usize, f32),
+        mut draw: impl FnMut(&mut data::rng::Rng) -> Result<Draw<'a>>,
+    ) -> Result<f32> {
         let loss_cfg = LossConfig::cross_entropy();
         let mut rng = data::rng::Rng::new(seed);
         let tail = (steps / 10).max(1);
@@ -603,18 +713,7 @@ impl DecisionPipeline {
             // per-example loop this replaced.
             let mut drawn = Vec::with_capacity(batch);
             for _ in 0..batch {
-                let (text, label) = examples[(rng.next_u64() % examples.len() as u64) as usize];
-                if label >= options.len() {
-                    return Err(Error::MissingArgument(format!(
-                        "example label {label} has no option text ({} supplied)",
-                        options.len()
-                    )));
-                }
-                // ONE sampler, one draw per example, both arms: each example
-                // is scored against a random SUBSET of the options, always
-                // containing the correct one, at a random position.
-                let (opts, gold) = sampler.draw(label, &pool, &mut rng);
-                drawn.push((text, opts, gold));
+                drawn.push(draw(&mut rng)?);
             }
             let progress = step as f32 / steps.max(1) as f32;
 
@@ -638,13 +737,13 @@ impl DecisionPipeline {
                     // running again.
                     let qs: Vec<Question> = drawn
                         .iter()
-                        .map(|(_, opts, _)| Question::Choice {
-                            instructions: instructions.to_string(),
-                            options: opts.iter().map(|&i| Opt::new(options[i].clone())).collect(),
+                        .map(|d| Question::Choice {
+                            instructions: d.instructions.to_string(),
+                            options: d.options.iter().map(|o| Opt::new(o.to_string())).collect(),
                         })
                         .collect();
-                    let pack: Vec<(&str, &Question)> = drawn.iter().map(|(t, _, _)| *t).zip(&qs).collect();
-                    let gold: Vec<usize> = drawn.iter().map(|(_, _, g)| *g).collect();
+                    let pack: Vec<(&str, &Question)> = drawn.iter().map(|d| d.state).zip(&qs).collect();
+                    let gold: Vec<usize> = drawn.iter().map(|d| d.gold).collect();
                     let losses = model
                         .accumulate_batch(&pack, |i, scores| decide::loss::decision_loss(scores, gold[i], &loss_cfg))
                         .map_err(Error::Backend)?;
@@ -657,13 +756,13 @@ impl DecisionPipeline {
                     let obj = rlcd::reinforce::RlcdObjective::default()
                         .at(rlcd::reinforce::anneal(LAYA_SIGMA_START, LAYA_SIGMA_END, progress));
                     let mut sum = 0.0f32;
-                    for (text, opts, gold) in &drawn {
+                    for d in &drawn {
                         let q = modernbert::Question::Choice {
-                            ins: instructions.to_string(),
-                            options: opts.iter().map(|&i| (options[i].clone(), None)).collect(),
+                            ins: d.instructions.to_string(),
+                            options: d.options.iter().map(|o| (o.to_string(), None)).collect(),
                         };
-                        let target = rlcd::proper::hard_target(opts.len(), *gold);
-                        let state = State::Str(text.to_string());
+                        let target = rlcd::proper::hard_target(d.options.len(), d.gold);
+                        let state = State::Str(d.state.to_string());
                         sum += b
                             .model
                             .accumulate(&state, &q, None, |scores| {
@@ -696,26 +795,17 @@ impl DecisionPipeline {
             }
         }
 
-        // Record the fit, so the checkpoint this run saves can answer "which
-        // run produced this?". The architecture already in `config.json`
-        // cannot: every model in this family shares it, so two runs that
-        // differed in every setting that mattered write identical configs.
-        // A published number whose recipe was lost can be neither defended
-        // nor discarded, which is the whole cost this field exists to avoid.
+        Ok(tail_sum)
+    }
+
+    /// Store `task` as the recorded fit of a `Decide`-arm model (the Laya arm
+    /// saves no model of its own to carry it).
+    fn record_task(&mut self, task: serde_json::Value) {
         if let Backend::Decide(model) = &mut self.backend {
             let mut p = model.provenance().clone();
-            p.task = serde_json::json!({
-                "task": "choice",
-                "steps": steps,
-                "batch": batch,
-                "examples": examples.len(),
-                "options": options.len(),
-                "seed": seed,
-                "final_loss": tail_sum,
-            });
+            p.task = task;
             model.set_provenance(p);
         }
-        Ok(tail_sum)
     }
 
     /// Add caller-side settings to the fit [`Self::train_choices`] recorded,

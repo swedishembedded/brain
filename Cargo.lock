@@ -830,6 +830,7 @@ name = "brain-cli"
 version = "2.0.0"
 dependencies = [
  "axum",
+ "brain",
  "brain-apiserve",
  "brain-appopts",
  "brain-arcface",
@@ -850,6 +851,7 @@ dependencies = [
  "brain-cosyvoice",
  "brain-data",
  "brain-dbus",
+ "brain-decisions",
  "brain-deepseek2ocr",
  "brain-deepseekocr2",
  "brain-deepseekvl",

@@ -133,7 +133,11 @@ pub use survival;
 #[cfg(feature = "decision")]
 pub mod decision;
 #[cfg(feature = "decision")]
-pub use decision::{Choice, DecisionPipeline, DecisionPipelineBuilder, TrainSpec, DEFAULT_TRAIN_BATCH};
+pub use decision::{Choice, ChoiceCase, DecisionPipeline, DecisionPipelineBuilder, TrainSpec, DEFAULT_TRAIN_BATCH};
+/// Training a decision head on outcome-labelled examples and writing a
+/// checkpoint with its lineage: the run behind `brain decide train`.
+#[cfg(feature = "decision")]
+pub mod decision_run;
 
 /// Learning to reach a known goal state by retracing random walks away from
 /// it - a policy rolled out with one forward pass per action and no search.
