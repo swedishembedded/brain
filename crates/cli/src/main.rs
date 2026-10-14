@@ -18,6 +18,7 @@ mod data_cli;
 mod decide_cli;
 mod depth_cli;
 mod devices_cli;
+mod doctor_cli;
 mod federated_cli;
 mod flops_cli;
 mod flux2_cli;
@@ -205,6 +206,12 @@ TRACING (structured, per-component; global - valid on any subcommand)
 
 DEVICES
   brain devices                     # canonical GPU table + ambient selection
+
+DOCTOR
+  brain doctor [--model <vendor>/<repo>] [--models-dir DIR] [--json]
+      # can a model be served here? checks the model store, the free disk, each
+      # GPU's free memory and, with --model, that model's weights and tokenizer
+      # and whether some card has room for it. Loads nothing; exit 1 if a check fails.
 
 DATA
   brain data gen <name> [--out DIR --n N --seed S]
@@ -1316,6 +1323,7 @@ fn main() {
     match argv.get(1).map(|s| s.as_str()) {
         Some("data") => data_cli::run_data(&argv[2..]),
         Some("devices") => devices_cli::run_devices(&argv[2..]),
+        Some("doctor") => std::process::exit(doctor_cli::run_doctor(&argv[2..])),
         Some("npu") => npu_cli::run_npu(&argv[2..]),
         Some("federated") => federated_cli::run_federated(&argv[2..]),
         Some("flops") => flops_cli::run_flops(&argv[2..]),
