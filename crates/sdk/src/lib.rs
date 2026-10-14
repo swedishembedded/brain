@@ -98,7 +98,7 @@ mod detect;
 #[cfg(feature = "device")]
 mod device;
 #[cfg(feature = "device")]
-pub use device::select_backend;
+pub use device::{gpu_memory, select_backend, GpuMemory};
 mod error;
 #[cfg(any(feature = "vision", feature = "text"))]
 mod embedding;

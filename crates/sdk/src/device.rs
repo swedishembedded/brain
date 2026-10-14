@@ -48,3 +48,44 @@ pub(crate) fn apply(device: &Device) -> Result<()> {
 pub fn select_backend(backend: &str) -> Result<()> {
     gpu_core::devices::request_backend(backend).map_err(Error::Backend)
 }
+
+/// One GPU's memory right now, as the driver reports it: what a caller needs
+/// to say, before it loads a model, whether the model will fit on a card or be
+/// placed on the CPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuMemory {
+    /// The card's index, the `i` of `--device gpu<i>`.
+    pub index: u32,
+    /// The card's size in bytes.
+    pub total_bytes: u64,
+    /// Bytes free right now, other processes' allocations included.
+    pub free_bytes: u64,
+    /// False when the free figure could not be read from the driver and was
+    /// assumed, so a caller does not present a guess as a measurement.
+    pub measured: bool,
+}
+
+impl From<gpu_core::capacity::GpuMem> for GpuMemory {
+    fn from(card: gpu_core::capacity::GpuMem) -> Self {
+        Self { index: card.index, total_bytes: card.total, free_bytes: card.free, measured: card.measured }
+    }
+}
+
+/// The memory of every GPU in this machine, empty when it has none. Reads the
+/// driver; loads no model and allocates nothing on a card.
+pub fn gpu_memory() -> Vec<GpuMemory> {
+    gpu_core::capacity::probe_gpus().into_iter().map(GpuMemory::from).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cards_memory_keeps_its_index_sizes_and_whether_it_was_measured() {
+        let card = gpu_core::capacity::GpuMem { index: 1, total: 24 << 30, free: 3 << 30, measured: true };
+        assert_eq!(GpuMemory::from(card), GpuMemory { index: 1, total_bytes: 24 << 30, free_bytes: 3 << 30, measured: true });
+        let guessed = gpu_core::capacity::GpuMem { measured: false, ..card };
+        assert!(!GpuMemory::from(guessed).measured);
+    }
+}
