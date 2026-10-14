@@ -16,12 +16,14 @@
 
 use std::path::PathBuf;
 
-use brain::decision_run::{train, TrainRun, DEFAULT_STEPS};
-use decisions::examples::Dataset;
+use brain::decision_run::{evaluate_model, train, EvalRun, TrainRun, DEFAULT_STEPS};
+use decisions::examples::{Dataset, Split};
 
 const USAGE: &str = "\
 usage: brain decide train   --data FILE --base REF --out DIR [--freeze-encoder | --finetune-encoder]
                             [--steps N] [--batch N] [--seed N]
+       brain decide eval    --model DIR|REF --data FILE --split validation|test
+                            [--costs FILE] [--order-seed N] [--json] [--out FILE]
        brain decide inspect --data FILE [--json]
 
 train     Train a decision head on the `train` split of a JSONL file of
@@ -30,6 +32,13 @@ train     Train a decision head on the `train` split of a JSONL file of
           checkpoint's manifest records the base, data digest, split counts,
           hyperparameters, seed and brain commit, and says `unvalidated`:
           only a promotion can change that.
+eval      Measure a checkpoint on one split: accuracy against the majority and
+          chance baselines, NLL, Brier, ECE/AdaECE with reliability bins,
+          coverage versus accuracy, option-order instability under a seeded
+          permutation, cost-weighted regret when --costs names a file
+          {\"false_exclusion\": X, \"wasted_tokens\": Y}, and a per-family
+          breakdown. Prints a table; --json prints the record instead and
+          --out also writes it to FILE.
 inspect   Validate a JSONL file (schema, duplicate ids, leakage across
           splits) and print its summary: counts, label entropy and the
           majority-label baseline.
@@ -37,7 +46,7 @@ inspect   Validate a JSONL file (schema, duplicate ids, leakage across
 
 /// Whether `verb` is one this module runs rather than the capability family.
 pub fn handles(verb: Option<&str>) -> bool {
-    matches!(verb, Some("train" | "inspect"))
+    matches!(verb, Some("train" | "eval" | "inspect"))
 }
 
 /// `brain decide <verb> ...`; `argv` starts at the verb. Returns the exit code.
@@ -50,6 +59,7 @@ pub fn run_decide(argv: &[String]) -> i32 {
     }
     match verb {
         "train" => train_verb(&mut args),
+        "eval" => eval_verb(&mut args),
         "inspect" => inspect_verb(&mut args),
         other => {
             eprintln!("brain decide: unknown verb {other:?}\n\n{USAGE}");
@@ -85,6 +95,45 @@ fn inspect_verb(args: &mut crate::args::Args) -> i32 {
         }
         Err(e) => {
             eprintln!("brain decide: {}: {e}", data.display());
+            1
+        }
+    }
+}
+
+fn eval_verb(args: &mut crate::args::Args) -> i32 {
+    let (model, data, split) = match (required(args, "--model"), required(args, "--data"), required(args, "--split")) {
+        (Ok(m), Ok(d), Ok(s)) => (m, d, s),
+        _ => return 2,
+    };
+    let Some(split) = Split::parse(&split).filter(|s| *s != Split::Train) else {
+        eprintln!("brain decide: --split must be `validation` or `test`; the train split is not held out, got {split:?}");
+        return 2;
+    };
+    let mut run = EvalRun::new(model, data, split);
+    run.costs = args.take_str("--costs").map(PathBuf::from);
+    run.order_seed = args.u64_or("--order-seed", 0);
+    let as_json = args.take_flag("--json");
+    let out = args.take_str("--out").map(PathBuf::from);
+    args.finish();
+    match evaluate_model(&run) {
+        Ok(evaluation) => {
+            let record = serde_json::to_string_pretty(&evaluation.to_json()).expect("a JSON value serializes");
+            if let Some(path) = out {
+                if let Err(e) = std::fs::write(&path, format!("{record}\n")) {
+                    eprintln!("brain decide: {}: {e}", path.display());
+                    return 1;
+                }
+            }
+            if as_json {
+                println!("{record}");
+            } else {
+                println!("model {}  weights {}", evaluation.model_id, evaluation.weights_sha256);
+                print!("{}", evaluation.report.render());
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("brain decide: {e}");
             1
         }
     }

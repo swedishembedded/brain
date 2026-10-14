@@ -223,6 +223,11 @@ DECIDE (decision-model training on outcome-labelled examples)
       [--steps N --batch N --seed N]
       Trains a decision head on the `train` split of a JSONL file and writes a
       checkpoint whose manifest records its lineage and says `unvalidated`.
+  brain decide eval --model DIR|REF --data FILE --split validation|test
+      [--costs FILE] [--order-seed N] [--json] [--out FILE]
+      Accuracy against the majority baseline, NLL, Brier, ECE/AdaECE, coverage
+      versus accuracy, option-order instability, cost-weighted regret and a
+      per-family breakdown, as a table or JSON.
   brain decide inspect --data FILE [--json]
       Validates the file (schema, leakage across splits) and prints its summary.
       `brain caps decide` lists the served `decide` action.

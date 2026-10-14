@@ -329,6 +329,31 @@ validation:
 trained it, `-dirty` when its tree had uncommitted changes. An unvalidated
 model is served only when named, never chosen by `auto`.
 
+## Evaluating a decision model
+
+```bash
+brain decide eval --model /models/triage-v1 --data decisions.jsonl --split test \
+    --costs costs.json --order-seed 1 --out /tmp/triage-v1.eval.json
+```
+
+`--model` is a checkpoint directory or a store id (a stock model measures the
+same way; a checkpoint whose manifest declares a hash its file does not match is
+refused). `--split` is `validation` or `test`. The command prints a table, or
+with `--json` the record; `--out` also writes the record to a file. A cost file
+is `{"false_exclusion": 5.0, "wasted_tokens": 1.0}`.
+
+| measure | meaning |
+|---|---|
+| `accuracy` | the share of examples whose most probable option is the labelled one |
+| `baseline` | the larger of the *majority* baseline (always answer the `train` split's most common label id; the evaluated split's own majority when the file has no `train` examples, flagged `majority_from_train: false`) and the *chance* baseline (mean of `1/k`); `lift` is accuracy minus baseline |
+| `nll` | mean `-ln p(label)` |
+| `brier` | mean over examples of the sum over options of `(p - 1{label})^2` |
+| `ece`, `ada_ece` | calibration of the top probability: examples binned by `p_max` into 15 equal-width (ECE) or equal-count (AdaECE) bins, the count-weighted mean gap between a bin's mean `p_max` and its accuracy; `reliability_bins` lists the bins |
+| `coverage_accuracy` | examples ranked by the served `confidence` (`1 - H/ln k`); the accuracy of the most confident 10%, 20%, ... of them |
+| `order_instability` | every example asked again with its options in a seeded random order; the share whose winning option id changes (a model that reads the options scores 0) |
+| `regret` | with a cost file: the mean realized cost per example of acting on the model's own confidence. The action is *trust* the top option (wrong costs `false_exclusion`, the right option was excluded) or *defer* and keep every option (a right top option costs `wasted_tokens`); the model trusts when its `p_max` makes trusting the cheaper expected action. `always_trust` and `always_defer` are reported beside it |
+| `families` | accuracy, baseline and NLL within each task family |
+
 ## What the checkpoint knows
 
 Laya is a System 1 model trained on agent and routing decisions over text. It

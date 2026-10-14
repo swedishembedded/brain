@@ -119,7 +119,7 @@ pub fn identity_files(backend: Backend) -> (&'static str, &'static str) {
 /// Whether a `decide` directory is a SAVED decision model: `save_model` marks
 /// its `config.json` with `"head": "option-head"`. A bare encoder checkpoint
 /// has no such mark and no trained head, so scanning must not offer it.
-fn decide_dir_carries_a_head(dir: &Path) -> bool {
+pub fn decide_dir_carries_a_head(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join("config.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())

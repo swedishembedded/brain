@@ -1109,6 +1109,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-modelstore",
  "brain-modernbert",
+ "brain-rlcd",
  "brain-testutil",
  "serde_json",
 ]

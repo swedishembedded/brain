@@ -17,6 +17,7 @@ brain-decide.workspace = true
 brain-gpu-core.workspace = true
 brain-modelstore.workspace = true
 brain-modernbert.workspace = true
+brain-rlcd.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

@@ -22,6 +22,10 @@
 //!
 //! The same seed on the same data and base gives the same weights.
 //!
+//! [`evaluate_model`] is the other half: it loads a checkpoint (or a stock
+//! model), verifies its declared hashes against the files, and measures it on
+//! one split of the same kind of file with `decisions::evaluation`.
+//!
 //! Swedish Embedded AB implements training pipelines that turn recorded
 //! outcomes into governed model checkpoints, with lineage on every artifact.
 //! If your team needs expertise in decision-model training and provenance, you
@@ -30,10 +34,11 @@
 use std::path::{Path, PathBuf};
 
 use decisions::engine::{is_laya_dir, Backend};
+use decisions::evaluation::{evaluate, CostSpec, EvalRequest, Report, Scorer};
 use decisions::examples::{Dataset, Split, Summary};
-use decisions::manifest::{DecisionManifest, Lineage, Validation};
-use decisions::store::{identity_files, resolve_spec};
-use serde_json::json;
+use decisions::manifest::{verify_identity, DecisionManifest, Lineage, Validation};
+use decisions::store::{decide_dir_carries_a_head, identity_files, resolve_spec};
+use serde_json::{json, Value};
 
 use crate::decision::{ChoiceCase, DecisionPipeline, DEFAULT_BATCH};
 use crate::{Error, Result};
@@ -187,4 +192,101 @@ fn write_checkpoint(
     manifest.validation = Validation::Unvalidated;
     manifest.write(dir).map_err(Error::Backend)?;
     Ok(manifest)
+}
+
+impl Scorer for DecisionPipeline {
+    fn probabilities(&mut self, state: &str, instruction: &str, options: &[String]) -> std::result::Result<Vec<f32>, String> {
+        let options: Vec<&str> = options.iter().map(String::as_str).collect();
+        let choice = self.choose(state, instruction, &options).map_err(|e| e.to_string())?;
+        Ok(choice.probabilities.into_iter().map(|(_, p)| p).collect())
+    }
+}
+
+/// A decision model loaded from a checkpoint directory, with what it was
+/// loaded under.
+pub struct LoadedModel {
+    pub id: String,
+    pub dir: PathBuf,
+    pub manifest: DecisionManifest,
+    /// `sha256:<hex>` of the weights file, computed now.
+    pub weights_sha256: String,
+    pub pipeline: DecisionPipeline,
+}
+
+/// Load the decision model `spec` names (a store id or a directory) for
+/// measuring or answering.
+///
+/// A checkpoint whose manifest declares a hash its file does not match is
+/// refused: a recorded validation must stay attached to the bytes it was
+/// measured on. A bare encoder, which has no trained head, is refused too.
+pub fn load_model(spec: &str) -> Result<LoadedModel> {
+    let (id, dir) = resolve_model(spec);
+    if !dir.is_dir() {
+        return Err(Error::ModelNotFound(format!("the model {id} is not installed; pull it with `brain pull`, or name a checkpoint directory")));
+    }
+    let backend = Backend::sniff(&dir).ok_or_else(|| Error::MissingArgument(format!("{id} is not a decision checkpoint")))?;
+    if backend == Backend::Decide && !decide_dir_carries_a_head(&dir) {
+        return Err(Error::MissingArgument(format!("{id} is a bare encoder with no trained head; train one with `brain decide train`")));
+    }
+    let manifest = DecisionManifest::read(&dir, backend).map_err(Error::Backend)?;
+    let (weights, tokenizer) = identity_files(backend);
+    verify_identity(&manifest, &dir, weights, tokenizer).map_err(Error::Backend)?;
+    let weights_sha256 = brain_modelstore::fetch::file_digest(&dir.join(weights)).map_err(|e| Error::Backend(format!("hashing {weights}: {e}")))?;
+    let dir_str = dir.to_str().ok_or_else(|| Error::MissingArgument("the model path is not UTF-8".into()))?;
+    let pipeline = DecisionPipeline::builder(dir_str).load()?;
+    Ok(LoadedModel { id, dir, manifest, weights_sha256, pipeline })
+}
+
+/// What an evaluation is told.
+#[derive(Clone, Debug)]
+pub struct EvalRun {
+    /// The model: a store id or a checkpoint directory.
+    pub model: String,
+    pub data: PathBuf,
+    pub split: Split,
+    /// A cost file, for cost-weighted regret.
+    pub costs: Option<PathBuf>,
+    /// Seeds the option permutation of the order-stability pass.
+    pub order_seed: u64,
+}
+
+impl EvalRun {
+    pub fn new(model: impl Into<String>, data: impl Into<PathBuf>, split: Split) -> EvalRun {
+        EvalRun { model: model.into(), data: data.into(), split, costs: None, order_seed: 0 }
+    }
+}
+
+/// A measurement together with what was measured and on what.
+#[derive(Clone, Debug)]
+pub struct Evaluation {
+    pub model_id: String,
+    pub weights_sha256: String,
+    pub data_sha256: Option<String>,
+    pub report: Report,
+}
+
+impl Evaluation {
+    /// The record promotion stores next to the manifest.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "schema": 1,
+            "model": {"id": self.model_id, "weights_sha256": self.weights_sha256},
+            "data": {"sha256": self.data_sha256, "split": self.report.split.slug()},
+            "report": self.report.to_json(),
+        })
+    }
+}
+
+/// Evaluate a loaded pipeline on one split of a validated dataset.
+pub fn evaluate_pipeline(pipeline: &mut DecisionPipeline, dataset: &Dataset, request: &EvalRequest) -> Result<Report> {
+    evaluate(pipeline, dataset, request).map_err(Error::Backend)
+}
+
+/// Load the model, read the data and measure the model on the chosen split.
+pub fn evaluate_model(run: &EvalRun) -> Result<Evaluation> {
+    let costs = run.costs.as_deref().map(CostSpec::read).transpose().map_err(Error::MissingArgument)?;
+    let dataset = Dataset::read_file(&run.data).map_err(|e| Error::MissingArgument(format!("{}: {e}", run.data.display())))?;
+    let mut model = load_model(&run.model)?;
+    let report = evaluate_pipeline(&mut model.pipeline, &dataset, &EvalRequest { split: run.split, order_seed: run.order_seed, costs })?;
+    Ok(Evaluation { model_id: model.id, weights_sha256: model.weights_sha256, data_sha256: dataset.digest, report })
 }

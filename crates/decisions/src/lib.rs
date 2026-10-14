@@ -10,6 +10,8 @@
 //! decision head) - and this crate puts both behind one engine and one
 //! capability, so a caller on the other side of a wire needs neither.
 //!
+//! * [`evaluation`] - honest evaluation on held-out examples: accuracy against
+//!   baselines, calibration, order stability and cost-weighted regret.
 //! * [`examples`] - outcome-labelled decision examples: the JSONL loader, its
 //!   validation, leakage checks and summary.
 //! * [`engine`] - the engine over both architectures, split into a host-side
@@ -31,6 +33,7 @@
 
 pub mod caps;
 pub mod engine;
+pub mod evaluation;
 pub mod examples;
 pub mod fixtures;
 pub mod load;
