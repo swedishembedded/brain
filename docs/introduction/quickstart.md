@@ -21,6 +21,33 @@ problems; `make gpt/calculator/train` trains a GPT decoder on it and writes
 checkpoint back and prints its validation perplexity and exact-match accuracy
 on held-out problems, so you can see it actually learned the task.
 
+## Check that this machine can serve a model
+
+Before the first run, ask brain whether it can serve the model you have in mind.
+It reads the model store, the free disk and each GPU's free memory; it loads no
+weights and opens no network:
+
+```bash
+brain doctor --model Qwen/Qwen3-0.6B
+```
+
+```
+ok   store: ~/.local/share/brain/models holds 35 servable model(s)
+ok   disk: 159.5 GiB free
+ok   model: Qwen/Qwen3-0.6B: 2.2 GiB of weights on disk
+ok   tokenizer: ~/.local/share/brain/models/Qwen/Qwen3-0.6B/tokenizer.json
+ok   gpu: the weights (2.2 GiB) fit on gpu1 (gpu0 3.9 GiB free of 24.0 GiB, gpu1 5.8 GiB free of 24.0 GiB)
+ready: brain can serve here
+```
+
+(Paths are shortened here; brain prints them in full.) Each failed check is
+printed as `FAIL` with the command or flag that fixes it - a model that is not
+pulled names `brain pull <vendor>/<repo>`, a missing store names `--models-dir`
+- and the exit status is 1, so a script can stop on it. A `warn` does not stop
+anything: it says, for example, that no GPU has room for the weights right now,
+in which case brain would run the model on the CPU backend, far slower. `--json`
+prints the same report for tools.
+
 ## Run a real LLM locally
 
 This runs `Qwen/Qwen3-0.6B`, a real instruct/chat model, over brain's

@@ -342,6 +342,7 @@ make test/gradcheck                        # backprop correctness gate (finite d
 ```bash
 brain caps                            # every architecture and its actions
 brain devices                         # what hardware brain found, and what --device resolves to
+brain doctor --model Qwen/Qwen3-0.6B   # can this machine serve that model? checks the store, disk, GPU memory
 brain models list                     # what is on disk, and what it costs to run
 ```
 
