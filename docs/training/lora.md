@@ -47,6 +47,10 @@ the long form is what is printed. A base model and
 any number of fine-tunes of it can sit side by side as distinct, separately
 selectable models.
 
+Training with an adapter name that already exists continues that adapter from
+its own factors, at the rank and alpha it was trained at (a different rank is
+refused); `--fresh` starts over from the base and overwrites it.
+
 ## Evaluating an adapter
 
 ```

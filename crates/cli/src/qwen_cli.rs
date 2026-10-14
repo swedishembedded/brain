@@ -797,9 +797,9 @@ impl Drop for ScratchDir {
 ///
 /// Trains a NAMED LoRA adapter and saves ONLY the adapter tensors into the
 /// model store at `<models-dir>/<vendor>/<repo>/adapters/<owner>/<name>/<tag>/`
-/// -- retraining with the same `--adapter` always overwrites that tag. The
-/// full "retrain and overwrite" command bench's exported dataset needs:
-/// `--dataset DIR` is a bench `datasets build` output directory
+/// -- training with the same `--adapter` again continues that tag from its own
+/// factors (at the rank and alpha it was trained at), and `--fresh` starts over
+/// from the base and overwrites it. `--dataset DIR` is a bench `datasets build` output directory
 /// (`train.jsonl`, optionally `validation.jsonl`), rendered through the
 /// BASE checkpoint's own chat template (`data::chat_template`, from its
 /// `tokenizer_config.json` -- already on disk for any model fetched through
@@ -807,6 +807,7 @@ impl Drop for ScratchDir {
 fn finetune_lora(args: &[String]) {
     let mut base = String::new();
     let mut adapter_spec = String::new();
+    let mut fresh = false;
     let mut dataset_dir = String::new();
     let mut rank = 0u32;
     // Stop when the held-out loss stops improving, and keep the checkpoint
@@ -874,6 +875,7 @@ fn finetune_lora(args: &[String]) {
             "--adapter" => adapter_spec = val(args, &mut i, "--adapter"),
             "--dataset" => dataset_dir = val(args, &mut i, "--dataset"),
             "--lora" => rank = val(args, &mut i, "--lora").parse().unwrap_or(rank),
+            "--fresh" => fresh = true,
             "--patience" => patience = val(args, &mut i, "--patience").parse().unwrap_or(patience),
             "--alpha" => alpha = val(args, &mut i, "--alpha").parse().ok(),
             "--steps" => steps = val(args, &mut i, "--steps").parse().unwrap_or(steps),
@@ -896,7 +898,7 @@ fn finetune_lora(args: &[String]) {
             "usage: brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR \
              [--patience N] [--lora-targets wq,wk,...] [--keep-reasoning] [--base-dtype f32|bf16|int8] [--grad-accum N] \
              [--weight-decay W --grad-clip C --warmup N --min-lr X --beta1 B --beta2 B --adam-eps E] \
-             [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID]"
+             [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID] [--fresh]"
         );
         return;
     }
@@ -1044,7 +1046,16 @@ fn finetune_lora(args: &[String]) {
         eprintln!("--patience {patience} needs a validation.jsonl to watch; there is none, so nothing will stop early");
     }
     let target_names: Vec<&str> = targets.iter().map(String::as_str).collect();
-    let start = qwen3::finetune::LoraStart::FreshOn(&target_names);
+    // An adapter that is already there is trained further, from its own
+    // factors; `--fresh` starts over from the base and overwrites it.
+    let existing = adapter_out_path.to_str().filter(|_| adapter_out_path.is_file() && !fresh);
+    let start = match existing {
+        Some(path) => {
+            println!("continuing adapter {full_ref_str} from {path} (--fresh starts over)");
+            qwen3::finetune::LoraStart::Continue(path)
+        }
+        None => qwen3::finetune::LoraStart::FreshOn(&target_names),
+    };
     let trained = qwen3::finetune::finetune_lora_controlled(&base_open, scratch, &opts, rank, alpha, &start, model::FitControl::default(), base_dtype);
     let (report, trained) = match trained {
         Ok(r) => r,

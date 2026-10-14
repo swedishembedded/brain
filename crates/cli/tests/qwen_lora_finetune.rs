@@ -140,8 +140,10 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
     assert_eq!(adapter_meta.rank, Some(4));
     assert_eq!(adapter_meta.dataset_id.as_deref(), Some("test-dataset"));
 
-    // Retraining the SAME --adapter must OVERWRITE the tag, not fail or
-    // create a second copy -- the "fully retrain and overwrite" requirement.
+    // Retraining the SAME --adapter with --fresh must OVERWRITE the tag, not
+    // fail or create a second copy -- the "fully retrain and overwrite"
+    // requirement. (Without --fresh it continues the adapter; see the test
+    // below.)
     let out2 = Command::new(bin())
         .args([
             "qwen3",
@@ -162,10 +164,71 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
             "1",
             "--block",
             "48",
+            "--fresh",
         ])
         .env("BRAIN_DEVICE", "cpu")
         .output()
         .expect("run brain qwen3 finetune --lora a second time");
     assert!(out2.status.success(), "retrain-and-overwrite failed: {}", String::from_utf8_lossy(&out2.stderr));
     assert!(adapter_path.is_file(), "adapter file must still be there after overwrite");
+}
+
+/// The loss `brain qwen3 finetune` reports before the first step, from its
+/// `trained: loss A -> B` line.
+fn initial_loss(stdout: &str) -> f64 {
+    let line = stdout.lines().find(|l| l.starts_with("trained: loss ")).unwrap_or_else(|| panic!("no 'trained: loss' line in:\n{stdout}"));
+    line["trained: loss ".len()..].split_whitespace().next().unwrap().parse().unwrap()
+}
+
+#[test]
+#[ignore]
+fn training_an_adapter_that_exists_continues_it_unless_asked_to_start_over() {
+    let Some(qwen_dir) = qwen3_dir() else {
+        brain_testutil::skip("QWEN3_DIR unset (or missing qwen.brain.safetensors)");
+        return;
+    };
+    let scratch = tmp("continue");
+    let store_dir = scratch.join("models");
+    let repo_dir = store_dir.join("Qwen").join("Qwen3-0.6B");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    link(&qwen_dir.join("qwen.brain.safetensors"), &repo_dir.join("model.brain.safetensors"));
+    link(&qwen_dir.join("tokenizer.json"), &repo_dir.join("tokenizer.json"));
+    link(&qwen_dir.join("tokenizer_config.json"), &repo_dir.join("tokenizer_config.json"));
+    let dataset_dir = scratch.join("dataset");
+    write_dataset(&dataset_dir);
+
+    let run = |extra: &[&str]| {
+        let out = Command::new(bin())
+            .args([
+                "qwen3", "finetune", "--lora", "4", "--weights", "Qwen/Qwen3-0.6B", "--adapter", "test-owner/test-adapter", "--dataset",
+                dataset_dir.to_str().unwrap(), "--models-dir", store_dir.to_str().unwrap(), "--steps", "12", "--batch", "1", "--block", "48",
+                "--lr", "0.003", "--seed", "7",
+            ])
+            .args(extra)
+            .env("BRAIN_DEVICE", "cpu")
+            .output()
+            .expect("run brain qwen3 finetune --lora");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(out.status.success(), "finetune failed:\nstdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+        stdout
+    };
+
+    let first = run(&[]);
+    let again = run(&[]);
+    assert!(again.contains("continuing adapter"), "the second run says it continues the adapter:\n{again}");
+    assert!(
+        initial_loss(&again) < initial_loss(&first),
+        "a continued adapter starts where the last run ended: {} then {}",
+        initial_loss(&first),
+        initial_loss(&again)
+    );
+
+    let fresh = run(&["--fresh"]);
+    assert!(!fresh.contains("continuing adapter"));
+    assert!(
+        initial_loss(&fresh) > initial_loss(&again),
+        "--fresh starts over from the base: {} against {}",
+        initial_loss(&fresh),
+        initial_loss(&again)
+    );
 }
