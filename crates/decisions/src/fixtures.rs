@@ -130,6 +130,22 @@ pub fn write_decide(dir: &Path, seed: u64) {
 /// tensors, so `modernbert::import_dir`'s two-way coverage check runs for
 /// real. `max_len` is the trained context the checkpoint declares.
 pub fn write_laya(dir: &Path, max_len: u32) {
+    write_laya_trunk(dir, max_len, false);
+}
+
+/// [`write_laya`] with a trunk whose attention carries information between
+/// tokens: every block's value and output projections are the identity instead
+/// of weights near zero. At the usual random init the trunk's contribution is a
+/// rounding error beside the token embeddings, so every option marker (all the
+/// same `[MASK]` token) leaves it as the same vector and no head, however
+/// trained, can tell the options apart. A pretrained trunk does not have that
+/// problem, and this is the fixture standing in for one when a test needs a
+/// head to be able to learn through a frozen trunk.
+pub fn write_laya_mixing(dir: &Path, max_len: u32) {
+    write_laya_trunk(dir, max_len, true);
+}
+
+fn write_laya_trunk(dir: &Path, max_len: u32, mixing: bool) {
     std::fs::create_dir_all(dir.join("encoder")).expect("create encoder directory");
     std::fs::create_dir_all(dir.join("tokenizer")).expect("create tokenizer directory");
 
@@ -163,7 +179,18 @@ pub fn write_laya(dir: &Path, max_len: u32) {
 
     let cfg = modernbert::ModernBertConfig::from_hf_json(&encoder_cfg).expect("fixture encoder config");
     let laya_cfg = modernbert::LayaConfig::new(cfg.d_model);
-    let enc_init = modernbert::init::init_weights(&cfg, 7);
+    let mut enc_init = modernbert::init::init_weights(&cfg, 7);
+    if mixing {
+        let h = cfg.d_model as usize;
+        for l in 0..cfg.n_layers as usize {
+            let identity = |w: &mut Vec<f32>, row0: usize| (0..h).for_each(|i| w[(row0 + i) * h + i] = 1.0);
+            let qkv = enc_init.get_mut(&format!("blocks.{l}.qkv.weight")).expect("fixture: qkv");
+            identity(qkv, 2 * h);
+            let mut proj = vec![0.0; h * h];
+            identity(&mut proj, 0);
+            enc_init.insert(format!("blocks.{l}.proj.weight"), proj);
+        }
+    }
     let head_init = modernbert::init::init_weights_laya(&laya_cfg, 8);
 
     let mut tensors: Vec<(String, Vec<usize>, Vec<f32>)> = Vec::new();
