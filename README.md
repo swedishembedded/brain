@@ -331,19 +331,30 @@ batching rather than five sequential passes, with the model built once and
 nothing evicted to make room. See
 [`docs/using/monitoring.md`](docs/using/monitoring.md).
 
-## Install and first run
+## Compiling from source
 
 ```bash
-make build/release                    # build the optimized ./target/release/brain
-make test                             # full test suite
-make test/gradcheck                        # backprop correctness gate (finite differences)
+make build/release                          # the optimized build
+export PATH="$PWD/target/release:$PATH"     # once per shell; the commands below are bare
+brain doctor                                # is the model store, the disk and a GPU usable here?
+```
+
+`brain doctor` prints one `ok`, `warn` or `FAIL` line per check with the fix for each
+failure, and exits 1 on a failure. To validate that the build can serve a real model, pull
+one and check it, then serve it:
+
+```bash
+brain pull Qwen/Qwen3-0.6B                  # fetch the weights once
+brain doctor --model Qwen/Qwen3-0.6B        # can this machine serve that model?
+brain serve --openai 8788 &                 # prints the API key it minted
 ```
 
 ```bash
-brain caps                            # every architecture and its actions
-brain devices                         # what hardware brain found, and what --device resolves to
-brain doctor --model Qwen/Qwen3-0.6B   # can this machine serve that model? checks the store, disk, GPU memory
-brain models list                     # what is on disk, and what it costs to run
+brain caps                                  # every architecture and its actions
+brain devices                               # what hardware brain found, and what --device resolves to
+brain models list                           # what is on disk, and what it costs to run
+make test                                   # full test suite
+make test/gradcheck                         # backprop correctness gate (finite differences)
 ```
 
 Full instructions are in [`docs/introduction/install.md`](docs/introduction/install.md),
