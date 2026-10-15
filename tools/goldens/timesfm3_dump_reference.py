@@ -79,6 +79,7 @@ import argparse
 import json
 import os
 import sys
+import zlib
 
 import numpy as np
 import torch
@@ -111,6 +112,12 @@ def force_deterministic_attention(model):
 
 
 def sample(arr, k=64, seed=0):
+    """A `k`-value sample of `arr`. The indices come from `seed`, which the
+    caller derives from the tap name with `zlib.crc32`: Python's `hash(str)` is
+    salted per process, so a sample drawn from it could not be regenerated.
+    Goldens dumped before this change drew their sample indices from that
+    salted hash and cannot be reproduced; the values at the recorded indices
+    stay valid because the indices are stored next to them."""
     flat = np.asarray(arr).reshape(-1).astype(np.float64)
     if flat.size <= k:
         idx = np.arange(flat.size)
@@ -137,7 +144,7 @@ def tap(store, taps_manifest, name, t, full=False):
     if full:
         entry["full"] = arr.reshape(-1).astype(np.float64).tolist()
     else:
-        entry["sample"] = sample(arr, seed=hash(name) & 0xFFFFFFFF)
+        entry["sample"] = sample(arr, seed=zlib.crc32(name.encode()))
     taps_manifest[name] = entry
 
 
