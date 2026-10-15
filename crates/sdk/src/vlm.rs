@@ -76,7 +76,7 @@ impl VlmOptions {
     }
 
     /// Reproducible decoding. Left unset, every call gets a real random seed
-    /// (`Resident::generate`'s own `data::rng::random_seed()` fallback).
+    /// (`random_seed()`), which the generation outcome reports.
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = Some(seed);
         self
@@ -219,7 +219,12 @@ impl VisionLanguagePipeline {
         }
         inv.cancel = CancelToken::default();
 
-        let outcome = self.resident.generate(&inv, None, qwen3::chat::ToolChoice::Auto, &[], &mut |_| {}).map_err(Error::Backend)?;
+        let seed = match inv.seed() {
+            Ok(Some(seed)) => seed,
+            Ok(None) => crate::random_seed(),
+            Err(message) => return Err(Error::MissingArgument(message)),
+        };
+        let outcome = self.resident.generate(&inv, None, qwen3::chat::ToolChoice::Auto, &[], seed, &mut |_| {}).map_err(Error::Backend)?;
         crate::text::generated_text_from_outcome(outcome)
     }
 }
