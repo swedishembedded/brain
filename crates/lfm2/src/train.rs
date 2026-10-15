@@ -22,6 +22,8 @@ pub struct MlmTrainOpts {
     pub clip: Option<f32>,
     /// AdamW's β1, β2 and ε.
     pub adam: model::Adam,
+    /// Seeds the corruption and batch order. [`Default`] draws a random one;
+    /// [`finetune`] logs the one in force.
     pub seed: u64,
     pub eval_every: u32,
     pub eval_batches: u32,
@@ -37,7 +39,7 @@ impl Default for MlmTrainOpts {
             weight_decay: 0.01,
             clip: Some(1.0),
             adam: model::Adam::default(),
-            seed: 0,
+            seed: data::rng::random_seed(),
             eval_every: 50,
             eval_batches: 8,
             log_every: 10,
@@ -100,6 +102,7 @@ pub fn finetune(
     o: &MlmTrainOpts,
     log: &mut dyn FnMut(String),
 ) -> f32 {
+    log(format!("seed {} (pass it back to reproduce the run)", o.seed));
     let mut rng = Rng::new(o.seed);
     let mut last_val = f32::NAN;
     for step in 0..o.steps {
@@ -122,4 +125,15 @@ pub fn finetune(
         last_val = mlm_val_loss(model, val, mlm, o.eval_batches, b, t, o.seed ^ 0xe7a1);
     }
     last_val
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unset seed is random: two default option sets differ.
+    #[test]
+    fn default_options_draw_their_seed() {
+        assert_ne!(MlmTrainOpts::default().seed, MlmTrainOpts::default().seed);
+    }
 }
