@@ -45,6 +45,7 @@ fn spec() -> TrainSpec {
         .batch(32)
         .steps(20)
         .eval_interval(10)
+        // seed: the manifest assertion pins the members at base, base+1, base+2 = 7, 8, 9
         .seed(7)
 }
 

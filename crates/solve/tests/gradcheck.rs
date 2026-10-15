@@ -23,6 +23,7 @@ fn tiny() -> Config {
 
 /// Value targets for the fixture: a spread of plausible cost-to-go numbers.
 fn value_targets(rows: u32) -> Vec<f32> {
+    // seed: finite-difference fixture; tolerances measured against these targets
     let mut rng = solve::data::Rng::new(0xBEEF);
     // Small on purpose. Real training targets run to the walk depth, but a
     // squared error of ~150 against a cross-entropy of ~3 would make the
@@ -37,6 +38,7 @@ fn value_targets(rows: u32) -> Vec<f32> {
 const VALUE_WEIGHT: f32 = 1.0;
 
 fn fixture(cfg: &Config, rows: u32) -> (Vec<f32>, Vec<u32>) {
+    // seed: finite-difference fixture; tolerances measured against these inputs
     let mut rng = solve::data::Rng::new(0xC0FFEE);
     let mut x = vec![0.0f32; (rows * cfg.in_dim) as usize];
     // One-hot per row, which is the shape the stem is built for.
@@ -81,6 +83,7 @@ fn every_parameter_gradient_matches_a_finite_difference() {
     // EPS is a compromise: too small and fp32 cancellation dominates, too
     // large and the quadratic term does.
     const EPS: f32 = 2e-3;
+    // seed: sampled coordinates were checked against the tolerance at this draw
     let mut rng = solve::data::Rng::new(99);
     let mut checked = 0usize;
 
@@ -159,6 +162,7 @@ fn the_register_tiled_gemms_agree_with_finite_differences_too() {
         cfg.tensor_manifest().iter().map(|(n, _)| (n.clone(), net.grad(n))).collect();
 
     const EPS: f32 = 3e-3;
+    // seed: sampled coordinates were checked against the tolerance at this draw
     let mut rng = solve::data::Rng::new(4242);
     for (name, shape) in cfg.tensor_manifest() {
         let n: usize = shape.iter().product();

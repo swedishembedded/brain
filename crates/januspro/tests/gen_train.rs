@@ -45,6 +45,9 @@ fn parts() -> GenParts {
     let d = QwenConfig::tiny().d_model;
     let aligner = ProjectorConfig::from_type("mlp_gelu", 2, CODE_DIM as u32, d).unwrap();
     let head = ProjectorConfig::from_type("mlp_gelu", 2, d, 12).unwrap().with_out_dim(CODES as u32).unwrap();
+    // Every trainer in a test rebuilds these parts and the comparisons (fresh
+    // adapter, two-stage split) need identical weights.
+    // seed: identical parts per trainer; gradcheck tolerances measured on this draw
     let mut rng = Rng::new(5);
     GenParts {
         aligner: (aligner, random(&aligner, 6)),

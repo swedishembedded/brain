@@ -105,6 +105,7 @@ fn engine_learns_copy_via_cross_attention() {
         ..Default::default()
     };
 
+    // seed: the loss floors asserted below were measured on this batch stream
     let mut rng = Rng::new(7);
     // initial loss (averaged over a few batches)
     let mut init_loss = 0.0;

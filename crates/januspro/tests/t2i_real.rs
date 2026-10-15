@@ -60,6 +60,7 @@ fn janus_pro_generates_images_on_the_engine() {
     r.finish("Janus-Pro guided logits (bf16 engine)");
 
     // ---- a whole image ----
+    // seed: the image checked below was verified to decode to a real picture at this draw
     let req = Request { prompt, cfg_weight: weight, temperature: 1.0, seed: 7 };
     let mut last = 0;
     let images = t2i.generate(&req, &|| false, &mut |step, _| last = step).unwrap();
@@ -94,6 +95,7 @@ fn janus_pro_generates_images_on_the_engine() {
     .unwrap();
     batch.finish("Janus-Pro guided logits (two prompts in one batch)");
     assert!(apple_vs_boat.iter().all(|&differs| differs), "the two prompts steer their images apart");
+    // seed: the boat-bluer-than-apple ordering was verified at these two draws
     let reqs = [Request { prompt, cfg_weight: weight, temperature: 1.0, seed: 7 }, Request { prompt: "A blue boat on a calm sea.", cfg_weight: weight, temperature: 1.0, seed: 8 }];
     let pair = t2i.generate_many(&reqs, &|| false, &mut |_, _| {}).unwrap();
     assert_eq!(pair.len(), 2);

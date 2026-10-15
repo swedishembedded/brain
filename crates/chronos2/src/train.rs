@@ -626,6 +626,7 @@ mod tests {
     #[test]
     fn full_backbone_gradcheck() {
         let cfg = Chronos2Config::tiny(); // 2 layers
+        // seed: full-backbone gradcheck: the finite-difference tolerance was measured against this parameter draw
         let mut seed = 0xFACE_u64;
         let model = Chronos2Train { cfg: cfg.clone(), w: full_params(&cfg, &mut seed) };
 
@@ -678,6 +679,7 @@ mod tests {
         // fixed (input, target) under plain SGD — end-to-end proof the forward,
         // backward, and update compose correctly (not just locally consistent).
         let cfg = Chronos2Config::tiny();
+        // seed: the 0.5x loss-fall margin and the SGD step size were tuned on this parameter draw
         let mut seed = 0x5EED_u64;
         let mut model = Chronos2Train { cfg: cfg.clone(), w: full_params(&cfg, &mut seed) };
 
@@ -701,6 +703,7 @@ mod tests {
     #[test]
     fn block_gradcheck() {
         let cfg = Chronos2Config::tiny();
+        // seed: block gradcheck: the finite-difference tolerance was measured against this parameter draw
         let mut seed = 0xB10C_u64;
         let w = block_params(&cfg, 0, &mut seed);
         let model = Chronos2Train { cfg: cfg.clone(), w };
@@ -753,6 +756,7 @@ mod tests {
     #[test]
     fn head_path_gradcheck() {
         let cfg = Chronos2Config::tiny();
+        // seed: head-path gradcheck: the finite-difference tolerance was measured against this parameter draw
         let mut seed = 0x51ED_u64;
         let w = head_params(&cfg, &mut seed);
         let model = Chronos2Train { cfg: cfg.clone(), w };

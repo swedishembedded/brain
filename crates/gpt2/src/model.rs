@@ -1351,6 +1351,7 @@ mod tests {
         let d = cfg.d_model as usize;
         let v = cfg.vocab as usize;
         let seq = 10usize;
+        // seed: the cached-vs-recompute logit tolerance was measured on this weight draw
         let mut rng = data::rng::Rng::new(4321);
 
         let mut init: HashMap<String, Vec<f32>> = HashMap::new();

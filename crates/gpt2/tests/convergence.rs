@@ -110,6 +110,7 @@ fn train_opts(steps: u32, block: u32, lr: f32, mask: Option<char>) -> TrainOpts 
         warmup: 20,
         decay_iters: steps * 2,
         eval_interval: 0,
+        // seed: the loss floors asserted by every convergence test were measured at this run seed
         seed: 1234,
         mask_before: mask,
         mask_per_line: mask.is_some(),
