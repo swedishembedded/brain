@@ -1,2 +1,0 @@
-Makefile	-:SEED=1337	make-default	todo: SEED unset by default, the tool draws and prints one
-Makefile	-:WAN_FLAGS:--seed=7	make-flag	todo: SEED unset by default, the tool draws and prints one

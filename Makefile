@@ -70,7 +70,10 @@ BRAIN_VERSION := 2.0.0
 PIP    ?= python3 -m pip
 DATA   ?= data
 OUT    ?= out
-SEED   ?= 1337
+# SEED has no default: every `make` target that takes a seed draws a random
+# one per invocation and prints it to stderr (pass `SEED=<n>` to reproduce).
+SEED   ?=
+SEED_FLAG = $(if $(SEED),--seed $(SEED))
 STEPS  ?= 1000
 N      ?= 100000
 ARCH   ?= gpt2
@@ -855,10 +858,10 @@ $(GPT_DATASET_TARGETS):
 ## gpt/<dataset>/data - generate the dataset into data/<dataset>
 ##   (shakespeare-char and gpt download the tiny-shakespeare text first)
 $(GPT_SYNTHETIC_DATA_TARGETS): gpt/%/data: build/release
-	$(BRAIN) data gen $* --out $(DATA)/$* --n $(N) --seed $(SEED)
+	$(BRAIN) data gen $* --out $(DATA)/$* --n $(N) $(SEED_FLAG)
 
 gpt/timeseries/data: build/release
-	$(BRAIN) data gen timeseries --out $(DATA)/timeseries --n 200000 --seed $(SEED)
+	$(BRAIN) data gen timeseries --out $(DATA)/timeseries --n 200000 $(SEED_FLAG)
 
 $(DATA)/shakespeare_char/input.txt:
 	mkdir -p $(DATA)/shakespeare_char && curl -sSL -o $@ $(SHAKE_URL)
@@ -876,7 +879,7 @@ $(GPT_TRAIN_TARGETS): gpt/%/train: build/release
 	$(BRAIN) gpt2 train $(DATA)/$(gpt_dataset) --out $(OUT)/gpt-$(gpt_dataset).safetensors \
 		--steps $(STEPS) --batch $(BATCH) --block $(BLOCK) \
 		--layers $(LAYERS) --d-model $(DMODEL) --heads $(HEADS) --lr $(LR) \
-		--seed $(SEED) $(MASK_$(gpt_dataset))
+		$(SEED_FLAG) $(MASK_$(gpt_dataset))
 
 ## gpt/<dataset>/eval - perplexity + exact-match of a trained GPT
 $(GPT_EVAL_TARGETS): gpt/%/eval: build/release
@@ -894,13 +897,13 @@ yolo:
 
 ## yolo/data - synthetic object-detection dataset (shapes + exact boxes) -> data/detect
 yolo/data: build/release
-	$(BRAIN) data gen detect --out $(DATA)/detect --n $(YOLO_N) --seed $(SEED)
+	$(BRAIN) data gen detect --out $(DATA)/detect --n $(YOLO_N) $(SEED_FLAG)
 
 ## yolo/train - train the tiny YOLO on it -> out/yolo.safetensors
 yolo/train: build/release
 	@mkdir -p $(OUT)
 	$(BRAIN) yolov8 train $(DATA)/detect --out $(OUT)/yolo.safetensors \
-		--steps $(YOLO_STEPS) --batch $(YOLO_BATCH) --lr $(YOLO_LR) --seed $(SEED)
+		--steps $(YOLO_STEPS) --batch $(YOLO_BATCH) --lr $(YOLO_LR) $(SEED_FLAG)
 
 ## yolo/eval - mAP@0.5 + precision/recall of the trained YOLO
 yolo/eval: build/release
@@ -980,7 +983,7 @@ qwen/finetune: build/release
 	$(BRAIN) qwen3 finetune --lora $(LORA_RANK) --alpha $(LORA_ALPHA) \
 		--weights $(QWEN_BASE) --adapter $(ADAPTER) --dataset $(DATASET) \
 		--steps $(QWEN_STEPS) --lr $(QWEN_LR) --batch $(QWEN_BATCH) --block $(QWEN_BLOCK) \
-		--seed $(SEED) $(if $(MODELS_DIR),--models-dir $(MODELS_DIR)) $(if $(DATASET_ID),--dataset-id $(DATASET_ID))
+		$(SEED_FLAG) $(if $(MODELS_DIR),--models-dir $(MODELS_DIR)) $(if $(DATASET_ID),--dataset-id $(DATASET_ID))
 
 # ---- depth (ZipDepth) ------------------------------------------------------
 # Set ZIPDEPTH_PTH to a released checkpoint (see resources/depth-models).
@@ -1062,7 +1065,7 @@ tts:
 # Synthetic Qwen3-TTS `text -> codebook-0 codes` stream (for Talker SFT smokes).
 ## tts/data - synthetic TTS text->codes dataset (Talker SFT smokes) -> data/tts
 tts/data: build/release
-	$(BRAIN) data gen tts --out $(DATA)/tts --n $(N) --seed $(SEED)
+	$(BRAIN) data gen tts --out $(DATA)/tts --n $(N) $(SEED_FLAG)
 
 ## flux2 - lists the FLUX.2 Klein image targets (weights via BRAIN_FLUX2_* env); does nothing
 flux2:
@@ -1078,12 +1081,13 @@ flux2/edit: build/release
 	@test -n "$(FLUX2_REF)" || (echo "set FLUX2_REF=<ref.ppm> PROMPT=..."; exit 2)
 	$(BRAIN) flux2 generate --prompt "$(PROMPT)" --ref $(FLUX2_REF) --out out/flux2-edit.ppm $(FLUX2_FLAGS)
 
-# WAN_FLAGS is deliberately NOT upstream's sampling defaults: 81 frames at
+# WAN_FLAGS carries no seed: wan t2v draws one and prints it (add `--seed N` to
+# reproduce). It is deliberately NOT upstream's sampling defaults: 81 frames at
 # 832x480 over 50 steps is about an hour on a Tesla P40. These are the settings
 # a run can be checked with, and the ones the quickstart demo uses; drop
 # WAN_FLAGS entirely for the real thing.
 WAN_PROMPT ?= a golden retriever running along a sandy beach at sunset, waves in the background, cinematic
-WAN_FLAGS ?= --frames 9 --width 416 --height 240 --steps 20 --seed 7
+WAN_FLAGS ?= --frames 9 --width 416 --height 240 --steps 20
 
 ## wan - lists the Wan2.1 text-to-video targets (weights via BRAIN_WAN_* env); does nothing
 wan:
@@ -1108,7 +1112,7 @@ forecast:
 ## forecast/compare - scenario battery vs the statistical baselines, model x scenario x metric report
 ##   (HTML=path also writes a self-contained report)
 forecast/compare: build/release
-	$(BRAIN) forecast compare --seed $(SEED) $(if $(HTML),--html $(HTML),)
+	$(BRAIN) forecast compare $(SEED_FLAG) $(if $(HTML),--html $(HTML),)
 
 # `make forecast/serve` starts the unified JSONL server with the baselines
 # registered. Defaults to a Unix socket; override with LISTEN=host:port for TCP
@@ -1180,7 +1184,7 @@ BENCH_RUN_TARGETS := $(addprefix bench/run/,$(BENCH_NAMES))
 
 ## bench - default: run the whole architecture-evaluation benchmark suite
 bench: build/release
-	$(BRAIN) bench --seed $(SEED)
+	$(BRAIN) bench $(SEED_FLAG)
 
 ## bench/run - lists the single-benchmark targets; runs nothing (bench runs them all)
 bench/run:
@@ -1189,7 +1193,7 @@ bench/run:
 ## bench/run/<name> - run one registered benchmark, e.g. bench/run/mqar
 ##   Underscores in a benchmark's name are hyphens in the target (mad-recall).
 $(BENCH_RUN_TARGETS): bench/run/%: build/release
-	$(BRAIN) bench $(subst -,_,$*) --seed $(SEED)
+	$(BRAIN) bench $(subst -,_,$*) $(SEED_FLAG)
 
 # `make bench/scaling` runs the multi-scale scaling-law sweep (a separate entry
 # point, not a registry benchmark): it trains the MQAR task at several model
@@ -1198,7 +1202,7 @@ $(BENCH_RUN_TARGETS): bench/run/%: build/release
 # per-capability predictive-scaling / eval-harness work. ~5 min on the CPU backend.
 ## bench/scaling - scaling-law sweep: fit L(N)=E+A*N^-alpha across model sizes
 bench/scaling: build/release
-	$(BRAIN) bench scaling --seed $(SEED)
+	$(BRAIN) bench scaling $(SEED_FLAG)
 
 # `make bench/eval ARCH=<name>` runs the turn-key architecture-eval harness: the
 # WHOLE registered battery against one architecture, aggregated per capability
@@ -1207,7 +1211,7 @@ bench/scaling: build/release
 ## bench/eval - the WHOLE battery vs one architecture (ARCH=gpt2|gpt2-small|gpt2-wide), aggregated per axis
 ##   -> results/<arch>-<seed>.json
 bench/eval: build/release
-	$(BRAIN) bench eval --arch $(ARCH) --seed $(SEED)
+	$(BRAIN) bench eval --arch $(ARCH) $(SEED_FLAG)
 
 # `make bench/scale ARCH=<name>` runs the PREDICTIVE per-capability scaling sweep:
 # train+score one representative benchmark per capability axis across a small SIZE
@@ -1217,14 +1221,15 @@ bench/eval: build/release
 # for the bigger run. ~few min on the CPU backend (3 sizes x 6 axes, smoke budget).
 ## bench/scale - predictive per-capability scaling: score at 2x/4x per axis (ARCH=<name>)
 bench/scale: build/release
-	$(BRAIN) bench scale --arch $(ARCH) --seed $(SEED)
+	$(BRAIN) bench scale --arch $(ARCH) $(SEED_FLAG)
 
 # `make bench/advise` prints RANKED tuning recommendations (what to tune to improve
 # in the best capability direction): headroom x size-slope per axis, with a concrete
 # action (increase size | change mechanism | more data/reg | deprioritize). Consumes
 # the eval artifact and, if present, the scaling artifact for the same ARCH/SEED.
-## bench/advise - ranked tuning recommendations from the eval (+scale) artifacts (ARCH=<name>)
+## bench/advise - ranked tuning recommendations from the eval (+scale) artifacts (ARCH=<name> SEED=<n>)
 bench/advise: build/release
+	@test -n "$(SEED)" || (echo "set SEED=<n> to the seed of the eval run (bench/eval prints it, and names results/$(ARCH)-<seed>.json)"; exit 2)
 	@set -e; ev="results/$(ARCH)-$(SEED).json"; sc="results/scale-$(ARCH)-$(SEED).json"; \
 	if [ ! -f "$$ev" ]; then \
 		echo "no $$ev - run 'make bench/eval ARCH=$(ARCH)' first"; exit 2; \
@@ -1245,7 +1250,7 @@ bench/compare: build/release
 	find results -maxdepth 1 -name '*.json' ! -name 'scale-*' -print0 | xargs -0 $(BRAIN) bench compare
 
 # ---- shared GPT char-dataset benchmark (legacy) ---------------------------
-# Train + eval the GPT baseline on the same char datasets, fixed seed/splits,
+# Train + eval the GPT baseline on the same char datasets (pass SEED=<n> to pin the data),
 # so results are comparable. (MoE-on-char-data + federated rows are a documented
 # follow-up - the MoE engine currently trains on its own 64-symbol rule task.)
 ## bench/char - train + eval GPT on the shared char datasets (legacy)
@@ -1282,9 +1287,9 @@ PERF_SCENARIO_TARGETS := $(addprefix perf/scenario/,$(PERF_SCENARIOS))
 ##   (how fast + at what cost; docs/performance/benchmarking.md)
 perf: build/release
 	@set -e; for s in latency throughput serve; do \
-		$(BRAIN) perf run $$s --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --seed $(SEED); \
+		$(BRAIN) perf run $$s --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) $(SEED_FLAG); \
 	done; \
-	$(BRAIN) perf run sweep --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --ladder $(PERF_LADDER) --seed $(SEED)
+	$(BRAIN) perf run sweep --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --ladder $(PERF_LADDER) $(SEED_FLAG)
 
 ## perf/scenario - lists the perf scenarios; runs nothing (perf runs the core battery)
 perf/scenario:
@@ -1294,7 +1299,7 @@ perf/scenario:
 ## perf/scenario/<scenario> - run one perf scenario, e.g. perf/scenario/sweep
 ##   Scenarios are the names in crates/perf/src/scenarios/mod.rs.
 $(PERF_SCENARIO_TARGETS): perf/scenario/%: build/release
-	$(BRAIN) perf run $* --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --ladder $(PERF_LADDER) --seed $(SEED)
+	$(BRAIN) perf run $* --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --ladder $(PERF_LADDER) $(SEED_FLAG)
 
 # Leaderboard over every perf artifact. Refuses to rank across artifact units,
 # excludes runs whose correctness gate failed, and warns on differing axes.
@@ -1309,7 +1314,7 @@ perf/compare: build/release
 ## perf/smoke - CI-sized run of every perf scenario
 perf/smoke: build/release
 	@set -e; for s in latency throughput serve sweep mixed overload soak frontend; do \
-		$(BRAIN) perf run $$s --target $(PERF_TARGET) --workload interactive --smoke --seed $(SEED); \
+		$(BRAIN) perf run $$s --target $(PERF_TARGET) --workload interactive --smoke $(SEED_FLAG); \
 	done
 
 ## perf/model - lists the per-model perf benchmarks; runs nothing
@@ -1329,7 +1334,7 @@ perf/model/lfm: build/release
 	@test -n "$(LFM_TOKENIZER)" || (echo "set LFM_TOKENIZER=<path to LFM2.5-Encoder tokenizer.json>"; exit 2)
 	@set -e; for s in latency sweep; do \
 		$(BRAIN) perf run $$s --target lfm:$(LFM_WEIGHTS):$(LFM_TOKENIZER) \
-			--input $(LFM_INPUT) --output 1 --ladder $(PERF_LADDER) --seed $(SEED); \
+			--input $(LFM_INPUT) --output 1 --ladder $(PERF_LADDER) $(SEED_FLAG); \
 	done
 
 # FLUX.2 Klein denoise-step benchmark, standalone: the residency-executor
@@ -1346,7 +1351,7 @@ perf/model/flux2: build/release
 	@test -n "$(BRAIN_FLUX2_DIT)" || (echo "set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER"; exit 2)
 	$(BRAIN) perf run latency --target flux2:$(FLUX2_SIZE) \
 		--concurrency 1 --requests $(FLUX2_REQUESTS) --warmup $(FLUX2_WARMUP) \
-		--input 1 --output $(word 3,$(subst x, ,$(FLUX2_SIZE))) --seed $(SEED)
+		--input 1 --output $(word 3,$(subst x, ,$(FLUX2_SIZE))) $(SEED_FLAG)
 
 # Wan2.1 text-to-video denoise-step benchmark, standalone: the residency-executor
 # target (real scheduler + budgets + lanes) on t2v-1.3B; weights from the
@@ -1364,7 +1369,7 @@ perf/model/wan: build/release
 	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER"; exit 2)
 	$(BRAIN) perf run latency --target wan:$(WAN_SIZE) \
 		--concurrency 1 --requests $(WAN_REQUESTS) --warmup $(WAN_WARMUP) \
-		--input 1 --output $(word 4,$(subst x, ,$(WAN_SIZE))) --seed $(SEED)
+		--input 1 --output $(word 4,$(subst x, ,$(WAN_SIZE))) $(SEED_FLAG)
 
 ## perf/gate - lists the perf regression gates; runs nothing
 perf/gate:
