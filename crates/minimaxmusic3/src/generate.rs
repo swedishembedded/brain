@@ -140,6 +140,8 @@ pub const AR_FRAME_RATE_HZ: f32 = 25.0;
 pub struct GenOpts {
     pub duration_seconds: f32,
     pub num_inference_steps: usize,
+    /// RNG seed of the AR sampler and the denoise noise; [`GenOpts::default`]
+    /// draws a fresh one.
     pub seed: u64,
     /// A `--device`-shaped token (`cpu`, `gpu`, `gpu0`, `gpu1`, ...) for
     /// the denoise and vocoder stages, or `None` to inherit the ambient
@@ -150,7 +152,7 @@ pub struct GenOpts {
 
 impl Default for GenOpts {
     fn default() -> GenOpts {
-        GenOpts { duration_seconds: 10.0, num_inference_steps: denoise::DEFAULT_NUM_INFERENCE_STEPS, seed: 0, device: None }
+        GenOpts { duration_seconds: 10.0, num_inference_steps: denoise::DEFAULT_NUM_INFERENCE_STEPS, seed: data::rng::random_seed(), device: None }
     }
 }
 
@@ -374,6 +376,11 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_gen_opts_draw_a_fresh_seed_each_time() {
+        assert_ne!(GenOpts::default().seed, GenOpts::default().seed);
+    }
 
     #[test]
     fn max_frames_for_duration_matches_the_ar_frame_rate() {

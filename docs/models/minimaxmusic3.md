@@ -124,7 +124,7 @@ same thing and both are gated against the same full-sequence reference.
 | `--caption` | (required) | structured music description: genre, BPM, vocal timbre, instrumentation, arrangement |
 | `--duration_seconds` | `10` | target song length in seconds (the AR stage may stop earlier if it samples the end token) |
 | `--num_inference_steps` | `30` | Euler steps per denoise chunk |
-| `--seed` | `0` | RNG seed (reproducible run) |
+| `--seed` | random | RNG seed; omitted, one is drawn and reported as `seed` in the outcome, and passing it back reproduces the song |
 
 ## Hardware and limits
 

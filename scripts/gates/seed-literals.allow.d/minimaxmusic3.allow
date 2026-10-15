@@ -4,4 +4,3 @@ crates/minimaxmusic3/src/bin/mm3_bench.rs	dit_train_mode:Lcg::new(0xD17)	rng	ben
 crates/minimaxmusic3/src/bin/mm3_bench.rs	gemm_mode:Lcg::new(7)	rng	bench-input: synthetic input that defines the measured workload
 crates/minimaxmusic3/src/bin/mm3_bench.rs	oracle_bwd:Lcg::new(11)	rng	bench-input: synthetic input that defines the measured workload
 crates/minimaxmusic3/src/bin/mm3_bench.rs	vocoder_mode:Lcg::new(0xC0DE)	rng	bench-input: synthetic input that defines the measured workload
-crates/minimaxmusic3/src/generate.rs	GenOpts::default:seed=0	default	todo: default seed becomes random, printed and recorded

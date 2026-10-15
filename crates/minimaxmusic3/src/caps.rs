@@ -79,19 +79,21 @@ pub fn resident_manifest() -> Manifest {
     manifest()
 }
 
-/// Decode + validate `generate`'s params from an invocation.
-fn opts_from(inv: &Invocation) -> GenOpts {
+/// Decode + validate `generate`'s params from an invocation. A `seed` that is
+/// not a non-negative integer is refused; an absent one is drawn, so the opts
+/// always carry the seed the run uses and the outcome can echo it.
+fn opts_from(inv: &Invocation) -> Result<GenOpts, String> {
     let d = GenOpts::default();
-    GenOpts {
+    Ok(GenOpts {
         duration_seconds: inv.get_f64("duration_seconds").map(|v| v as f32).unwrap_or(d.duration_seconds).max(0.1),
         num_inference_steps: inv.get_i64("num_inference_steps").unwrap_or(d.num_inference_steps as i64).max(1) as usize,
-        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
+        seed: inv.seed()?.unwrap_or(d.seed),
         // Deliberately not a param: `--device` is a GLOBAL flag in this
         // workspace, not a per-action knob, so the served path inherits
         // the ambient selection. `GenOpts::device` exists for in-process
         // callers that place stages explicitly (a two-card split).
         device: None,
-    }
+    })
 }
 
 /// Run one `generate` call and wrap the result as an audio-output
@@ -106,7 +108,7 @@ pub fn generate_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut
     if caption.trim().is_empty() {
         return Err("minimaxmusic3 generate: 'caption' must be non-empty".to_string());
     }
-    let opts = opts_from(inv);
+    let opts = opts_from(inv)?;
     // The ONE place the library's stage-progress shape becomes the serving
     // surface's `Progress` (see `crate::ProgressSink`). Every stage keeps
     // its own `(done, total)` rather than being folded into a single
@@ -125,6 +127,7 @@ pub fn generate_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut
     // pre-encoded stream (qwen3tts's `synth` action does the same).
     let bytes = audio::wav::encode_multi(&[&song.left, &song.right], song.sample_rate);
     Ok(Outcome::new()
+        .set("seed", json!(opts.seed))
         .set("samples", json!(song.left.len()))
         .set("sample_rate", json!(song.sample_rate))
         .set("seconds", json!(song.left.len() as f32 / song.sample_rate as f32))
@@ -175,6 +178,16 @@ impl Action for GenerateAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_seed_that_is_not_a_non_negative_integer_is_refused_before_any_work() {
+        for bad in [json!(-1), json!(1.5), json!("7")] {
+            let inv = Invocation::new().set("lyrics", json!("la")).set("caption", json!("calm")).set("seed", bad.clone());
+            let err = opts_from(&inv).err().expect("a malformed seed is refused");
+            assert!(err.contains("seed"), "seed {bad} must be refused as a seed, got: {err}");
+        }
+        assert_eq!(opts_from(&Invocation::new().set("seed", json!(9))).unwrap().seed, 9);
+    }
 
     #[test]
     fn manifest_declares_the_full_surface() {
