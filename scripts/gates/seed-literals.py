@@ -26,7 +26,11 @@ trees without a .git, i.e. the gate fixtures):
                 `.seed(1)` / `.with_seed(1)`;
                 kind `const`: `const FOO_SEED: u64 = 1`;
                 kind `rng`: `Rng::new(1)`, `Lcg::new(1)`, `seed_from_u64(1)`.
-  Python (*.py) kind `python-default`: `add_argument("--...seed...", default=1)`.
+  Python (*.py) kind `python-default`: `add_argument("--...seed...", default=1)`;
+                kind `python-const`: a module-level `SEED = 1` / `NOISE_SEED = 1`;
+                kind `python-rng`: `torch.manual_seed(1)`,
+                `torch.Generator().manual_seed(1)`, `np.random.seed(1)`,
+                `random.seed(1)`.
   Makefile      kind `make-default`: `SEED ?= 1`; `make-flag`: a variable
                 assigned a value containing `--seed 1`.
 
@@ -54,7 +58,7 @@ from pathlib import Path
 
 INT = r"-?(?:0[xX][0-9a-fA-F_]+|\d[\d_]*)(?:_?[iu](?:8|16|32|64|128|size))?"
 SKIP_DIRS = {"target", ".git", "node_modules", "out", "build", "results"}
-SKIP_PREFIXES = ("scripts/gates/testdata/",)
+SKIP_PREFIXES = ("scripts/gates/testdata/", "scripts/gates/seed-literals.py")
 REASON = re.compile(r"(?://|#)\s*seed:")
 
 FIELD_INIT = re.compile(r"\b(\w*seed\w*)\s*:\s*(" + INT + r")(?![\w.])", re.I)
@@ -337,6 +341,33 @@ def python_hits(text: str):
             yield text.count("\n", 0, m.start()) + 1, flag.group(1), default.group(1)
 
 
+PY_SEED_CONST = re.compile(r"^(\w*SEED\w*)\s*(?::\s*[\w.\[\]]+\s*)?=\s*(" + INT + r")\s*(?:#.*)?$")
+PY_SEED_CALL = re.compile(r"\b(manual_seed|np\.random\.seed|numpy\.random\.seed|random\.seed)\(\s*(" + INT + r")\s*\)")
+PY_DEF = re.compile(r"^(\s*)(?:async\s+)?def\s+(\w+)")
+
+
+def python_seed_hits(text: str):
+    """(line_no, symbol, kind) for module-level seed constants and seeding calls
+    with an integer literal; the symbol is `<enclosing def>:<call>=<literal>`."""
+    defs = []  # (indent, name) of the open `def`s
+    for no, line in enumerate(text.splitlines(), 1):
+        code = line.split("#", 1)[0]
+        if not code.strip():
+            continue
+        indent = len(code) - len(code.lstrip())
+        while defs and defs[-1][0] >= indent:
+            defs.pop()
+        const = PY_SEED_CONST.match(line)
+        if const:
+            yield no, f"-:{const.group(1)}={const.group(2)}", "python-const"
+        for m in PY_SEED_CALL.finditer(code):
+            owner = defs[-1][1] if defs else "-"
+            yield no, f"{owner}:{m.group(1)}={m.group(2)}", "python-rng"
+        d = PY_DEF.match(code)
+        if d:
+            defs.append((len(d.group(1)), d.group(2)))
+
+
 MAKE_VAR = re.compile(r"^\s*(?:export\s+)?(\w*SEED\w*)\s*(?:\?=|:=|=)\s*(" + INT + r")\s*(?:#.*)?$", re.I)
 MAKE_FLAG = re.compile(r"^\s*(\w+)\s*(?:\?=|:=|=)\s*.*?(--[\w-]*seed[\w-]*)[ =](" + INT + r")(?![\w.])", re.I)
 
@@ -404,6 +435,8 @@ def scan(root: Path):
             raw = text.splitlines()
             for no, flag, lit in python_hits(text):
                 rows.append((rel, f"-:{flag}={lit}", "python-default", "test" if path_is_test(rel) else "prod", no, justified(raw, no)))
+            for no, symbol, kind in python_seed_hits(text):
+                rows.append((rel, symbol, kind, "test" if path_is_test(rel) else "prod", no, justified(raw, no)))
         elif Path(rel).name in ("Makefile", "makefile") or rel.endswith(".mk"):
             text = (root / rel).read_text(encoding="utf-8", errors="replace")
             raw = text.splitlines()

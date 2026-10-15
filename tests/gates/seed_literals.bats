@@ -117,3 +117,35 @@ RS
   [[ "$output" == *"Rng::new(7)"* ]]
   [[ "$output" == *"// seed:"* ]]
 }
+
+@test "python module seed constants and torch, numpy and random seeding calls are caught" {
+  cat >>"$TREE/tools/gen.py" <<'PY'
+SEED = 21
+NOISE_SEED: int = 22
+
+
+def dump():
+    torch.manual_seed(23)
+    g = torch.Generator().manual_seed(24)
+    np.random.seed(25)
+    random.seed(26)
+    torch.manual_seed(args.seed)
+PY
+  gate
+  [ "$status" -ne 0 ]
+  for lit in "SEED=21" "NOISE_SEED=22" "dump:manual_seed=23" "dump:manual_seed=24" "dump:np.random.seed=25" "dump:random.seed=26"; do
+    [[ "$output" == *"$lit"* ]] || { echo "missing $lit"; echo "$output"; return 1; }
+  done
+  [[ "$output" != *"args.seed"* ]]
+}
+
+@test "a python seed literal in a test needs a seed reason" {
+  mkdir -p "$TREE/tools/tests"
+  printf 'SEED = 5\n' >"$TREE/tools/tests/test_gen.py"
+  gate --tests
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"test_gen.py"*"SEED=5"* ]]
+  printf '# seed: the fixture is defined by this value\nSEED = 5\n' >"$TREE/tools/tests/test_gen.py"
+  gate --tests
+  [ "$status" -eq 0 ]
+}

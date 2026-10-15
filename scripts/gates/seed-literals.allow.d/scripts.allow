@@ -1,0 +1,3 @@
+scripts/parity-dump/genie_dynamics.py	-:FIXTURE_SEED=0	python-const	frozen: the dump takes no arguments and the Rust parity test replays the committed output, so this seed defines the fixture
+scripts/parity-dump/genie_maskgit.py	-:FIXTURE_SEED=0	python-const	frozen: the dump takes no arguments and the Rust parity test replays the committed output, so this seed defines the fixture
+scripts/parity-dump/genie_tokenizer.py	-:FIXTURE_SEED=0	python-const	frozen: the dump takes no arguments and the Rust parity test replays the committed output, so this seed defines the fixture

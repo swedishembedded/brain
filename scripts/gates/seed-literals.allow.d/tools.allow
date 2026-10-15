@@ -1,3 +1,8 @@
 tools/forecast/make_synthetic_ohlcv.py	-:--seed=18	python-default	todo: draw by default, print and record the seed
 tools/forecast/oos_skill_report.py	-:--seed=7	python-default	todo: draw by default, print and record the seed
 tools/forecast/prep_backtest_data.py	-:--seed=7	python-default	todo: draw by default, print and record the seed
+tools/goldens/cosyvoice3_dump_reference.py	-:LIBRARY_NOISE_SEED=0	python-const	frozen: the library draws its noise buffer under seed 0 at construction and the dump replays that exact seed to prove the buffer
+tools/goldens/cosyvoice_dump_reference.py	-:LIBRARY_NOISE_SEED=0	python-const	frozen: the library draws its noise buffer under seed 0 at construction and the dump replays that exact seed to prove the buffer
+tools/goldens/ltxv_maskcond_dump_reference.py	-:MASK_SEED=4321	python-const	world: the mask-building draw is a stream independent of the noise seed and part of what defines the committed fixture's masks
+tools/goldens/qwen3tts_dump_talker_reference.py	check_mrope_collapses:manual_seed=0	python-rng	world: the self-check draws a fixed probe tensor to show that the rotary variants collapse; it does not shape the golden
+tools/goldens/survival_likelihood_reference.py	-:LOG_HAZARD_SEED=20261006	python-const	frozen: the script has no command line and this seed defines the committed reference JSON

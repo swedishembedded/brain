@@ -11,7 +11,8 @@
 #
 # Rule: every default seed is random. A seed that is a literal in the source
 # (scripts/gates/seed-literals.py is the detector: Rust defaults, constants and
-# RNG constructors, Python `add_argument("--seed", default=N)`, Makefile
+# RNG constructors, Python `add_argument("--seed", default=N)`, module-level
+# `SEED = N` and `torch.manual_seed(N)`-style calls, Makefile
 # `SEED ?= N`) is legitimate only as one of
 #   salt:        mixed into a caller's seed to derive an independent stream
 #   world:       a constant of the problem (evaluation episodes, probe inputs)
