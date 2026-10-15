@@ -1420,6 +1420,7 @@ dependencies = [
 name = "brain-forecast"
 version = "2.0.0"
 dependencies = [
+ "brain-seed",
  "brain-testutil",
  "serde_json",
 ]
@@ -1956,6 +1957,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
+ "brain-seed",
  "brain-sfm",
  "brain-splat",
  "serde_json",
@@ -2572,6 +2574,7 @@ dependencies = [
  "brain-model",
  "brain-optim",
  "brain-paramstore",
+ "brain-seed",
  "bytemuck",
  "serde_json",
 ]
@@ -2587,6 +2590,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
+ "brain-seed",
  "bytemuck",
  "serde_json",
 ]
