@@ -147,9 +147,12 @@ struct Req {
     precision: flux1::Precision,
 }
 
-fn req_from(inv: &Invocation) -> Req {
+/// Decode the request. A `seed` that is not a non-negative integer is refused;
+/// an absent one is drawn, and rides in `opts.seed` into the outcome.
+fn req_from(inv: &Invocation) -> Result<Req, String> {
+    let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
     let true_cfg_scale = inv.get_f64("true_cfg").unwrap_or(0.0) as f32;
-    Req {
+    Ok(Req {
         prompt: inv.get_str("prompt").unwrap_or_default(),
         negative_prompt: inv.get_str("negative_prompt").filter(|s| !s.is_empty()),
         variant: inv.get_str("variant").unwrap_or_else(|| "dev".into()),
@@ -159,7 +162,7 @@ fn req_from(inv: &Invocation) -> Req {
                 (s > 0).then_some(s as usize)
             },
             guidance: inv.get_f64("guidance").unwrap_or(3.5) as f32,
-            seed: inv.get_i64("seed").map(|s| s as u64).unwrap_or_else(data::rng::random_seed),
+            seed,
             height: inv.get_i64("height").unwrap_or(1024).max(16) as u32,
             width: inv.get_i64("width").unwrap_or(1024).max(16) as u32,
             start_step: inv.get_i64("start_step").unwrap_or(0).max(0) as usize,
@@ -169,7 +172,7 @@ fn req_from(inv: &Invocation) -> Req {
         max_len: inv.get_i64("max_len").unwrap_or(DEFAULT_MAX_LEN as i64).max(1) as usize,
         id_weight: inv.get_f64("id_weight").unwrap_or(1.0) as f32,
         precision: flux1::Precision::from_name(&inv.get_str("precision").unwrap_or_else(|| "int8".into())).unwrap_or(flux1::Precision::Int8),
-    }
+    })
 }
 
 /// `PulidCa`'s device footprint - resident for the whole DiT lifetime (unlike
@@ -390,7 +393,7 @@ impl Session {
     }
 
     fn text2image(&self, inv: &Invocation) -> ActionResult {
-        let req = req_from(inv);
+        let req = req_from(inv)?;
         let (h, w) = (req.opts.height, req.opts.width);
         let mut faces = Vec::new();
         for name in std::iter::once("face_image").chain(EXTRA_FACE_REFS) {
@@ -422,7 +425,7 @@ impl Session {
         };
         let id = b.id_tokens(&faces)?;
         let hwc_out = b.generate(&req, &id)?;
-        Ok(Outcome::new().blob("image", capability::blob::image_blob(&hwc_out, w, h, 3)))
+        Ok(Outcome::new().set("seed", json!(req.opts.seed)).blob("image", capability::blob::image_blob(&hwc_out, w, h, 3)))
     }
 }
 
@@ -506,6 +509,17 @@ impl Action for PulidAction {
 #[cfg(test)]
 mod caps_tests {
     use super::*;
+
+    /// An unseeded request draws its own seed (a different one each time), a
+    /// given seed is kept, and a seed that is not a non-negative integer is
+    /// refused instead of being clamped or wrapped into another one.
+    #[test]
+    fn an_unseeded_request_draws_a_seed_and_a_malformed_one_is_refused() {
+        let seed_of = |inv: Invocation| req_from(&inv).map(|r| r.opts.seed);
+        assert_ne!(seed_of(Invocation::new()), seed_of(Invocation::new()), "two unseeded requests must not share a seed");
+        assert_eq!(seed_of(Invocation::new().set("seed", json!(42))), Ok(42));
+        assert!(seed_of(Invocation::new().set("seed", json!(-1))).is_err());
+    }
 
     #[test]
     fn manifest_declares_text2image() {

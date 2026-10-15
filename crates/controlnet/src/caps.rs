@@ -75,17 +75,19 @@ struct Req {
     width: u32,
 }
 
-fn req_from(inv: &Invocation) -> Req {
-    Req {
+/// Decode the request. A `seed` that is not a non-negative integer is refused;
+/// an absent one is drawn, and is echoed in the outcome.
+fn req_from(inv: &Invocation) -> Result<Req, String> {
+    Ok(Req {
         prompt: inv.get_str("prompt").unwrap_or_default(),
         negative: inv.get_str("negative").unwrap_or_default(),
         steps: inv.get_i64("steps").unwrap_or(30).max(1) as usize,
         guidance: inv.get_f64("guidance").unwrap_or(5.0) as f32,
         conditioning_scale: inv.get_f64("conditioning_scale").unwrap_or(1.0) as f32,
-        seed: inv.get_i64("seed").map(|s| s as u64).unwrap_or_else(data::rng::random_seed),
+        seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
         height: inv.get_i64("height").unwrap_or(1024).max(8) as u32,
         width: inv.get_i64("width").unwrap_or(1024).max(8) as u32,
-    }
+    })
 }
 
 // ===================== the pipeline =====================
@@ -196,7 +198,7 @@ impl Session {
     }
 
     fn text2image(&self, inv: &Invocation) -> ActionResult {
-        let req = req_from(inv);
+        let req = req_from(inv)?;
         let (h, w) = (req.height, req.width);
         let (hwc, cw, ch, c) = capability::blob::decode_hwc(inv, "control_image")?;
         if c != 3 {
@@ -233,7 +235,7 @@ impl Session {
         };
 
         let hwc_out = p.generate(&req, &cond_chw)?;
-        Ok(Outcome::new().blob("image", capability::blob::image_blob(&hwc_out, w, h, 3)))
+        Ok(Outcome::new().set("seed", json!(req.seed)).blob("image", capability::blob::image_blob(&hwc_out, w, h, 3)))
     }
 }
 
@@ -302,6 +304,17 @@ impl Action for ControlnetAction {
 #[cfg(test)]
 mod caps_tests {
     use super::*;
+
+    /// An unseeded request draws its own seed (a different one each time), a
+    /// given seed is kept, and a seed that is not a non-negative integer is
+    /// refused instead of being clamped or wrapped into another one.
+    #[test]
+    fn an_unseeded_request_draws_a_seed_and_a_malformed_one_is_refused() {
+        let seed_of = |inv: Invocation| req_from(&inv).map(|r| r.seed);
+        assert_ne!(seed_of(Invocation::new()), seed_of(Invocation::new()), "two unseeded requests must not share a seed");
+        assert_eq!(seed_of(Invocation::new().set("seed", json!(42))), Ok(42));
+        assert!(seed_of(Invocation::new().set("seed", json!(-1))).is_err());
+    }
 
     #[test]
     fn manifest_declares_text2image() {

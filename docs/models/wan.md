@@ -163,7 +163,9 @@ are still built and dropped per request, for the memory reason below.
   become 21 latent frames; asking for 80 is rejected rather than quietly
   rounded.
 - `--width` / `--height` - multiples of 16 (832x480 by default).
-- `--steps` (50), `--seed`, `--fps` (16).
+- `--steps` (50), `--seed`, `--fps` (16). Without a seed the served `t2v`
+  action draws a random one and reports it as `seed` in the outcome; passing
+  it back reproduces the clip.
 - `--guidance` (5.0) - classifier-free guidance. Above 1.0 a step is TWO
   transformer forwards; at or below 1.0 it is one.
 - `--shift` (5.0) - the flow-matching sigma shift. It is a task-and-size rule

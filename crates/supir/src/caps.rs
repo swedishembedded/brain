@@ -87,9 +87,11 @@ pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "SUPIR photo-realistic blind image restoration (SDXL + GLVControl + ZeroSFT/ZeroCrossAttn).", vec![restore_spec()])
 }
 
-fn opts_from(inv: &Invocation, caption: String) -> RestoreOptions {
+/// Decode the restore options. A `seed` that is not a non-negative integer is
+/// refused; an absent one is drawn, and is echoed in the outcome.
+fn opts_from(inv: &Invocation, caption: String) -> Result<RestoreOptions, String> {
     let d = RestoreOptions::default();
-    RestoreOptions {
+    Ok(RestoreOptions {
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
         cfg_scale: inv.get_f64("cfg_scale").unwrap_or(d.cfg_scale as f64) as f32,
         spt_linear_cfg: inv.get_f64("spt_linear_cfg").unwrap_or(d.spt_linear_cfg as f64) as f32,
@@ -97,11 +99,11 @@ fn opts_from(inv: &Invocation, caption: String) -> RestoreOptions {
         s_churn: inv.get_f64("s_churn").unwrap_or(d.s_churn as f64) as f32,
         s_noise: inv.get_f64("s_noise").unwrap_or(d.s_noise as f64) as f32,
         restore_cfg: inv.get_f64("restore_cfg").unwrap_or(d.restore_cfg as f64) as f32,
-        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
+        seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
         caption,
         positive_suffix: inv.get_str("positive_suffix").unwrap_or(d.positive_suffix),
         negative_prompt: inv.get_str("negative_prompt").unwrap_or(d.negative_prompt),
-    }
+    })
 }
 
 /// Resolve the `caption` param: if the caller supplied one, use it verbatim;
@@ -149,7 +151,7 @@ impl Session {
         let (px, lq_w, lq_h) = capability::blob::decode_image(inv, "image")?;
         let control_scale = inv.get_f64("control_scale").unwrap_or(RestoreOptions::default().control_scale as f64) as f32;
         let caption = resolve_caption(inv, inv.blobs.get("image").ok_or("supir restore: 'image' blob missing")?, registry)?;
-        let o = opts_from(inv, caption);
+        let o = opts_from(inv, caption)?;
 
         let (h, w) = target_size(lq_w, lq_h);
         let key = (h, w, control_scale.to_bits());
@@ -168,7 +170,7 @@ impl Session {
         let cancel = inv.cancel.clone();
         let total = o.steps as u32;
         let out_hwc = restorer.restore(&px, lq_w, lq_h, &o, &cancel, &mut |step, steps| progress(Progress::step(step, steps.max(total), "denoising")))?;
-        Ok(Outcome::new().set("width", json!(w)).set("height", json!(h)).blob("image", capability::blob::image_blob(&out_hwc, w, h, 3)))
+        Ok(Outcome::new().set("width", json!(w)).set("height", json!(h)).set("seed", json!(o.seed)).blob("image", capability::blob::image_blob(&out_hwc, w, h, 3)))
     }
 }
 
@@ -252,6 +254,17 @@ mod tests {
         assert_eq!(def("restore_cfg"), Some(json!(-1.0)));
         let j = m.to_json();
         assert_eq!(j["model"], MODEL);
+    }
+
+    /// An unseeded request draws its own seed (a different one each time), a
+    /// given seed is kept, and a seed that is not a non-negative integer is
+    /// refused instead of being clamped to another one.
+    #[test]
+    fn an_unseeded_restore_draws_a_seed_and_a_malformed_one_is_refused() {
+        let seed_of = |inv: Invocation| opts_from(&inv, String::new()).map(|o| o.seed);
+        assert_ne!(seed_of(Invocation::new()), seed_of(Invocation::new()), "two unseeded requests must not share a seed");
+        assert_eq!(seed_of(Invocation::new().set("seed", json!(42))), Ok(42));
+        assert!(seed_of(Invocation::new().set("seed", json!(-1))).is_err());
     }
 
     #[test]

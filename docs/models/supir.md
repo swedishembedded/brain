@@ -93,7 +93,9 @@ shape.
   `spt_linear_cfg` (default `1.0`), `control_scale` (`s_stage2`, default
   `1.0`), `s_churn` (default `5.0`), `s_noise` (default `1.01`), `restore_cfg`
   (`s_stage1`, default `-1.0` - **restoration guidance is OFF by default**,
-  matching upstream's own CLI despite its shipped YAML's `4.0`), `seed`.
+  matching upstream's own CLI despite its shipped YAML's `4.0`), `seed`
+  (random when omitted; the outcome reports the one used, and passing it back
+  reproduces the image).
 - `image` input - raw HWC f32 pixels in `[0,1]`.
 - No official GGUF release of SUPIR exists; `supir::import::GGUF_ARCHITECTURE`
   (`"sdxl"`, a borrowed spelling - see that constant's own doc) is registered

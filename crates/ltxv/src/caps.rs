@@ -147,13 +147,14 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     let d = GenOpts::default();
     let dit_config = inv.get_str("dit_config").unwrap_or_else(|| "tiny".into());
     dit_config_from_name(&dit_config)?; // validated here so a bad name is rejected before any weight load
+    let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
     let opts = GenOpts {
         frames: inv.get_i64("frames").unwrap_or(d.frames as i64).max(1) as usize,
         width: inv.get_i64("width").unwrap_or(d.width as i64).max(32) as usize,
         height: inv.get_i64("height").unwrap_or(d.height as i64).max(32) as usize,
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
         guidance: inv.get_f64("guidance").unwrap_or(d.guidance as f64) as f32,
-        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
+        seed,
         fps: inv.get_i64("fps").unwrap_or(d.fps as i64).max(1) as usize,
         base_shift: inv.get_f64("base_shift").unwrap_or(d.base_shift),
         max_shift: inv.get_f64("max_shift").unwrap_or(d.max_shift),
@@ -205,7 +206,7 @@ pub fn generate_on(paths: &Paths, inv: &Invocation, p: &GenParams, progress: &mu
     // simply works instead of failing at buffer creation.
     let o = crate::pipeline::LongOpts { max_window_tokens: crate::longform::max_window_tokens_from_env(), base: p.opts.clone(), ..Default::default() };
     let (video, timings) = crate::pipeline::generate_long(paths, &prompt, &o, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
-    Ok(video_outcome(&video, &timings))
+    Ok(video_outcome(&video, &timings, p.opts.seed))
 }
 
 /// A decoded `dfr` request - [`GenParams`]'s DFR analogue.
@@ -222,13 +223,14 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
     let d = GenOpts::default();
     let dit_config = inv.get_str("dit_config").unwrap_or_else(|| "tiny".into());
     dit_config_from_name(&dit_config)?; // validated here so a bad name is rejected before any weight load
+    let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
     let base = GenOpts {
         frames: inv.get_i64("frames").unwrap_or(d.frames as i64).max(1) as usize,
         width: inv.get_i64("width").unwrap_or(d.width as i64).max(64) as usize,
         height: inv.get_i64("height").unwrap_or(d.height as i64).max(64) as usize,
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
         guidance: inv.get_f64("guidance").unwrap_or(d.guidance as f64) as f32,
-        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
+        seed,
         fps: inv.get_i64("fps").unwrap_or(d.fps as i64).max(1) as usize,
         base_shift: inv.get_f64("base_shift").unwrap_or(d.base_shift),
         max_shift: inv.get_f64("max_shift").unwrap_or(d.max_shift),
@@ -272,12 +274,13 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
 pub fn dfr_on(paths: &DfrPaths, inv: &Invocation, p: &DfrParams, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
     let (video, timings) = crate::pipeline::generate_dfr(paths, &prompt, &p.opts, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
-    Ok(video_outcome(&video, &timings))
+    Ok(video_outcome(&video, &timings, p.opts.base.seed))
 }
 
 /// Wrap a generated clip as a video-output [`Outcome`] - the same wire
-/// format `wan::caps::video_outcome` produces.
-pub fn video_outcome(video: &crate::pipeline::Video, timings: &crate::pipeline::Timings) -> Outcome {
+/// format `wan::caps::video_outcome` produces. `seed` is the one the clip was
+/// drawn with, so the outcome alone reproduces it.
+pub fn video_outcome(video: &crate::pipeline::Video, timings: &crate::pipeline::Timings, seed: u64) -> Outcome {
     let frames: Vec<(Vec<f32>, u32, u32)> = video.frames.iter().map(|px| (px.iter().map(|&b| b as f32 / 255.0).collect::<Vec<f32>>(), video.width, video.height)).collect();
     let mut blob = match capability::blob::video_blob(&frames) {
         Ok(b) => b,
@@ -292,6 +295,7 @@ pub fn video_outcome(video: &crate::pipeline::Video, timings: &crate::pipeline::
         .set("height", json!(video.height))
         .set("fps", json!(video.fps))
         .set("seconds_per_forward", json!(timings.secs_per_forward()))
+        .set("seed", json!(seed))
         .blob("video", blob);
     // A complete WAV rather than raw samples, matching every other audio
     // output on this workspace's capability surface (`cosyvoice::caps`): the
@@ -523,11 +527,27 @@ mod tests {
         assert_eq!((p.opts.base.frames, p.opts.base.width, p.opts.base.height, p.opts.temporal_upsample_rounds), (17, 128, 128, 2));
     }
 
+    /// An unseeded request draws its own seed (a different one each time), a
+    /// given seed is kept, and a seed that is not a non-negative integer is
+    /// refused instead of being clamped to another one.
+    #[test]
+    fn t2v_and_dfr_draw_a_seed_when_none_is_given_and_refuse_a_malformed_one() {
+        let t2v = |inv: Invocation| gen_params_from(&inv).map(|p| p.opts.seed);
+        assert_ne!(t2v(Invocation::new()), t2v(Invocation::new()), "two unseeded requests must not share a seed");
+        assert_eq!(t2v(Invocation::new().set("seed", json!(42))), Ok(42));
+        assert!(t2v(Invocation::new().set("seed", json!(-1))).is_err());
+        let dfr = |inv: Invocation| dfr_params_from(&inv.set("width", json!(64)).set("height", json!(64))).map(|p| p.opts.base.seed);
+        assert_ne!(dfr(Invocation::new()), dfr(Invocation::new()));
+        assert_eq!(dfr(Invocation::new().set("seed", json!(7))), Ok(7));
+        assert!(dfr(Invocation::new().set("seed", json!("x"))).is_err());
+    }
+
     #[test]
     fn video_outcome_round_trips_through_the_shared_clip_codec() {
         let video = crate::pipeline::Video { width: 2, height: 1, fps: 24, frames: vec![vec![255, 0, 0, 255, 0, 0], vec![0, 255, 0, 0, 255, 0]], audio: None };
-        let out = video_outcome(&video, &crate::pipeline::Timings::default());
+        let out = video_outcome(&video, &crate::pipeline::Timings::default(), 99);
         assert_eq!(out.outputs["frames"], json!(2));
+        assert_eq!(out.outputs["seed"], json!(99), "the outcome reports the seed the clip was drawn with");
         assert_eq!(out.outputs["fps"], json!(24));
         let blob = &out.blobs["video"];
         assert_eq!(blob.media, Media::Video);

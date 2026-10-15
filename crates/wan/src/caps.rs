@@ -136,6 +136,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     let variant = inv.get_str("variant").unwrap_or_else(|| "t2v-1.3B".into());
     let cfg = config_from_name(&variant)?;
     let d = GenOpts::from_config(&cfg);
+    let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
     let opts = GenOpts {
         frames: inv.get_i64("frames").unwrap_or(d.frames as i64).max(1) as usize,
         width: inv.get_i64("width").unwrap_or(d.width as i64).max(16) as usize,
@@ -143,7 +144,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
         shift: inv.get_f64("shift").unwrap_or(d.shift as f64) as f32,
         guidance: inv.get_f64("guidance").unwrap_or(d.guidance as f64) as f32,
-        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
+        seed,
         // Absent = upstream's own negative prompt; an explicitly empty string
         // is a real request for none, so it must survive as `Some("")`.
         negative_prompt: inv.get_str("negative_prompt"),
@@ -177,7 +178,7 @@ pub fn generate_on(paths: &Paths, hot: &mut Option<HotDit>, inv: &Invocation, p:
     let (video, timings) = crate::pipeline::generate_hot(&p.cfg, paths, &prompt, &p.opts, &inv.cancel, hot, |done, total, phase| {
         progress(Progress::step(done, total, phase.to_string()))
     })?;
-    Ok(video_outcome(&video, &timings))
+    Ok(video_outcome(&video, &timings, p.opts.seed))
 }
 
 /// Wrap a generated clip as a video-output [`Outcome`] - ONE implementation,
@@ -188,7 +189,10 @@ pub fn generate_on(paths: &Paths, hot: &mut Option<HotDit>, inv: &Invocation, p:
 /// frame rate is not playable, and the alternative - a scalar output the
 /// blob writer would have to be taught to look for - splits one fact across
 /// two places.
-pub fn video_outcome(video: &crate::pipeline::Video, timings: &crate::pipeline::Timings) -> Outcome {
+///
+/// `seed` is the one the clip was drawn with - the caller's, or the one drawn
+/// for a request that named none - so the outcome alone reproduces it.
+pub fn video_outcome(video: &crate::pipeline::Video, timings: &crate::pipeline::Timings, seed: u64) -> Outcome {
     let frames: Vec<(Vec<f32>, u32, u32)> =
         video.frames.iter().map(|px| (px.iter().map(|&b| b as f32 / 255.0).collect::<Vec<f32>>(), video.width, video.height)).collect();
     let mut blob = match capability::blob::video_blob(&frames) {
@@ -207,6 +211,7 @@ pub fn video_outcome(video: &crate::pipeline::Video, timings: &crate::pipeline::
         .set("height", json!(video.height))
         .set("fps", json!(video.fps))
         .set("seconds_per_forward", json!(timings.secs_per_forward()))
+        .set("seed", json!(seed))
         .blob("video", blob)
 }
 
@@ -366,6 +371,18 @@ mod tests {
         assert_eq!(j["actions"][0]["params"][0]["required"], true);
     }
 
+    /// An unseeded request draws its own seed (a different one each time), a
+    /// given seed is kept, and a seed that is not a non-negative integer is
+    /// refused instead of being clamped to another one.
+    #[test]
+    fn t2v_draws_a_seed_when_none_is_given_and_refuses_a_malformed_one() {
+        let seed_of = |inv: &Invocation| gen_params_from(inv).map(|p| p.opts.seed);
+        assert_ne!(seed_of(&Invocation::new()), seed_of(&Invocation::new()), "two unseeded requests must not share a seed");
+        assert_eq!(seed_of(&Invocation::new().set("seed", json!(42))), Ok(42));
+        let err = seed_of(&Invocation::new().set("seed", json!(-1))).expect_err("a negative seed is refused");
+        assert!(err.contains("seed"), "{err}");
+    }
+
     #[test]
     fn lora_train_refuses_an_invocation_missing_seed() {
         let lt = manifest().actions.into_iter().find(|a| a.name == "lora_train").unwrap();
@@ -440,7 +457,8 @@ mod tests {
     #[test]
     fn video_outcome_round_trips_through_the_shared_clip_codec() {
         let video = crate::pipeline::Video { width: 2, height: 1, fps: 24, frames: vec![vec![255, 0, 0, 255, 0, 0], vec![0, 255, 0, 0, 255, 0]] };
-        let out = video_outcome(&video, &crate::pipeline::Timings::default());
+        let out = video_outcome(&video, &crate::pipeline::Timings::default(), 99);
+        assert_eq!(out.outputs["seed"], json!(99), "the outcome reports the seed the clip was drawn with");
         assert_eq!(out.outputs["frames"], json!(2));
         assert_eq!(out.outputs["fps"], json!(24));
         let blob = &out.blobs["video"];

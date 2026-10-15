@@ -171,6 +171,7 @@ impl Action for ZAction {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let paths = &self.paths;
         let prompt = inv.get_str("prompt").unwrap_or_default();
+        let seed = seed_of(inv)?;
         let mut on = |step, total, message: &str| progress(Progress::step(step, total, message.to_string()));
         match self.name.as_str() {
             "text2image" => {
@@ -183,7 +184,6 @@ impl Action for ZAction {
                 // to be refused here or it destroys ~20 GB of working weights
                 // for every caller after it.
                 let key = text2image_key(paths, inv)?;
-                let seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
                 let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
 
                 let mut guard = self.hot.lock().map_err(|_| "hot pipeline lock poisoned")?;
@@ -195,13 +195,13 @@ impl Action for ZAction {
                     crate::pipeline::HotPipeline::build_adapted(paths, width, height, cap_len, hifi, adapter.as_deref(), |m| on(0, 1, m))
                 })?;
                 let pipe = &guard.as_ref().expect("ensure_hot leaves the slot filled on success").1;
-                emit(pipe.generate(&prompt, seed, steps, &inv.cancel, &mut on)?)
+                emit(pipe.generate(&prompt, seed, steps, &inv.cancel, &mut on)?, seed)
             }
             "image2image" => {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
-                let opts = opts_from(inv, w, h); // output matches the input image
+                let opts = opts_from(inv, w, h, seed); // output matches the input image
                 let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.55) as f32, mask: None, feather: 0 };
-                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?)
+                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?, seed)
             }
             "inpaint" => {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
@@ -209,19 +209,19 @@ impl Action for ZAction {
                 if (mw, mh) != (w, h) {
                     return Err(format!("mask is {mw}×{mh} but image is {w}×{h}; they must match"));
                 }
-                let opts = opts_from(inv, w, h);
+                let opts = opts_from(inv, w, h, seed);
                 let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.85) as f32, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(2).max(0) as u32 };
-                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?)
+                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?, seed)
             }
             "outpaint" => {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
                 let g = |k: &str| inv.get_i64(k).unwrap_or(0).max(0) as usize;
                 let (canvas, mask, nw, nh) = build_outpaint_canvas(&image, w as usize, h as usize, g("left"), g("right"), g("top"), g("bottom"));
-                let opts = opts_from(inv, nw as u32, nh as u32);
+                let opts = opts_from(inv, nw as u32, nh as u32, seed);
                 // The new border regenerates from scratch (strength 1); the mask
                 // re-anchors the original region every step so it is preserved.
                 let init = crate::pipeline::Init { image: &canvas, strength: 1.0, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(3).max(0) as u32 };
-                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?)
+                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?, seed)
             }
             "lora_train" => {
                 let dir = inv.get_str("data").ok_or("lora_train: 'data' folder is required")?;
@@ -235,7 +235,7 @@ impl Action for ZAction {
                     // refuses an unbuildable one by name at its own entry.
                     size: u32_param(inv, "size", 512)?,
                     cap_len: u32_param(inv, "cap_len", crate::pipeline::DEFAULT_CAP_LEN)?,
-                    seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
+                    seed,
                     two_gpu: !inv.get_bool("one_gpu").unwrap_or(false),
                     save_path: save.clone(),
                     ckpt_every: 100,
@@ -250,6 +250,7 @@ impl Action for ZAction {
                     .set("adapter", json!(save))
                     .set("steps", json!(opts.steps))
                     .set("tensors", json!(tensors.len()))
+                    .set("seed", json!(seed))
                     .blob("adapter", Blob::new(Media::Bytes, bytes).with_meta(json!({"path": save}))))
             }
             other => Err(format!("z-image '{other}': unknown action")),
@@ -309,12 +310,20 @@ fn ensure_hot<K: PartialEq, P>(slot: &mut Option<(K, P)>, key: K, build: impl Fn
     Ok(())
 }
 
-/// Build [`crate::pipeline::Opts`] from an invocation, with an explicit output size.
-fn opts_from(inv: &Invocation, width: u32, height: u32) -> crate::pipeline::Opts {
+/// The request's seed, or a freshly drawn one when it names none. A `seed`
+/// that is not a non-negative integer is refused rather than clamped, so a
+/// request never runs with a seed other than the one it asked for.
+fn seed_of(inv: &Invocation) -> Result<u64, String> {
+    Ok(inv.seed()?.unwrap_or_else(data::rng::random_seed))
+}
+
+/// Build [`crate::pipeline::Opts`] from an invocation, with an explicit output
+/// size and the request's already-resolved `seed`.
+fn opts_from(inv: &Invocation, width: u32, height: u32, seed: u64) -> crate::pipeline::Opts {
     crate::pipeline::Opts {
         steps: inv.get_i64("steps").unwrap_or(8).max(1) as u32,
         guidance: inv.get_f64("guidance").unwrap_or(0.0) as f32,
-        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
+        seed,
         width,
         height,
         hifi: inv.get_str("precision").as_deref() == Some("fp32"),
@@ -322,11 +331,13 @@ fn opts_from(inv: &Invocation, width: u32, height: u32) -> crate::pipeline::Opts
 }
 
 /// Wrap a generated [`crate::pipeline::Image`] as an image-output [`Outcome`]
-/// (the shared `capability::blob` wire format).
-fn emit(img: crate::pipeline::Image) -> ActionResult {
+/// (the shared `capability::blob` wire format). `seed` is the one the image
+/// was drawn with, so the outcome alone reproduces it.
+fn emit(img: crate::pipeline::Image, seed: u64) -> ActionResult {
     Ok(Outcome::new()
         .set("width", json!(img.w))
         .set("height", json!(img.h))
+        .set("seed", json!(seed))
         .blob("image", capability::blob::image_blob(&img.hwc, img.w as u32, img.h as u32, 3)))
 }
 
@@ -404,6 +415,20 @@ mod tests {
             let a = m.actions.iter().find(|a| a.name == action).unwrap();
             assert!(!a.params.iter().any(|p| p.name == "cap_len"), "{action} builds per call and needs no cap_len");
         }
+    }
+
+    /// An unseeded request draws its own seed (a different one each time), a
+    /// given seed is kept, a seed that is not a non-negative integer is
+    /// refused, and the outcome reports the seed the image was drawn with.
+    #[test]
+    fn an_unseeded_request_draws_a_seed_and_the_outcome_reports_it() {
+        let draw = || seed_of(&Invocation::new());
+        assert_ne!(draw(), draw(), "two unseeded requests must not share a seed");
+        assert_eq!(seed_of(&Invocation::new().set("seed", json!(42))), Ok(42));
+        assert!(seed_of(&Invocation::new().set("seed", json!(-1))).is_err());
+        assert!(seed_of(&Invocation::new().set("seed", json!(1.5))).is_err());
+        let img = crate::pipeline::Image { w: 1, h: 1, hwc: vec![0.0; 3] };
+        assert_eq!(emit(img, 123).expect("outcome").outputs["seed"], json!(123));
     }
 
     fn unresolvable_paths() -> crate::pipeline::Paths {

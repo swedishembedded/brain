@@ -79,8 +79,9 @@ and HTTP neither list nor accept them.
 ## Options
 
 Shared generation parameters: `steps` (default 8), `guidance` (default 0.0),
-`seed`, `width` / `height` (default 1024), `precision` - `int8` (default) or
-`fp32`.
+`seed` (random when omitted; the outcome reports the one used, and passing it
+back reproduces the image), `width` / `height` (default 1024), `precision` -
+`int8` (default) or `fp32`.
 
 Actions: `text2image`, `image2image`, `inpaint`, `outpaint`, `lora_train`.
 
