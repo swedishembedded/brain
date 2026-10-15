@@ -60,6 +60,7 @@ use sha2::{Digest, Sha256};
 pub struct StreamConfig {
     /// Permutes the document order. The same seed over the same corpus is the
     /// same sequence; a different seed is the order-permutation control arm.
+    /// [`Default`] draws a random one; the cursor's fingerprint covers it.
     pub seed: u64,
     /// Upper bound on an episode in CHARACTERS, not bytes, so the same corpus
     /// cuts the same way regardless of how wide its code points are.
@@ -70,7 +71,7 @@ pub struct StreamConfig {
 
 impl Default for StreamConfig {
     fn default() -> Self {
-        StreamConfig { seed: 0, episode_chars: 4096, sniff_bytes: 8192 }
+        StreamConfig { seed: data::rng::random_seed(), episode_chars: 4096, sniff_bytes: 8192 }
     }
 }
 

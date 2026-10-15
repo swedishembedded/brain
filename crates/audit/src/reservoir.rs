@@ -50,13 +50,14 @@ pub struct ReservoirConfig {
     pub cap: usize,
     /// Off means the no-rehearsal control arm, and says so.
     pub enabled: bool,
-    /// Seeds the retention decisions, so a run reproduces.
+    /// Seeds the retention decisions, so a run reproduces. [`Default`] draws a
+    /// random one; the run manifest records it.
     pub seed: u64,
 }
 
 impl Default for ReservoirConfig {
     fn default() -> Self {
-        ReservoirConfig { cap: 256, enabled: true, seed: 0 }
+        ReservoirConfig { cap: 256, enabled: true, seed: data::rng::random_seed() }
     }
 }
 

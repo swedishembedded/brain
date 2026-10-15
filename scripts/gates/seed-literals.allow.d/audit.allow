@@ -1,3 +1,0 @@
-crates/audit/src/reader.rs	ReaderConfig::default:seed=0	default	todo: default seed becomes random, printed and recorded
-crates/audit/src/reservoir.rs	ReservoirConfig::default:seed=0	default	todo: default seed becomes random, printed and recorded
-crates/audit/src/stream.rs	StreamConfig::default:seed=0	default	todo: default seed becomes random, printed and recorded

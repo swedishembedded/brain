@@ -220,6 +220,7 @@ pub struct ReaderConfig {
     /// Rehearsal rows drawn per row of the episode itself. The measured
     /// regime mixes half and half, which is 1.0.
     pub rehearsal_ratio: f64,
+    /// [`Default`] draws a random one; the run manifest records it.
     pub seed: u64,
     /// Which control arm this run is. [`ControlArm::Real`] by default, so a
     /// caller that says nothing gets the reader rather than a control.
@@ -237,7 +238,7 @@ impl Default for ReaderConfig {
             growth: GrowthConfig::default(),
             pool: PoolConfig::default(),
             rehearsal_ratio: 1.0,
-            seed: 0,
+            seed: data::rng::random_seed(),
             arm: ControlArm::Real,
         }
     }
@@ -687,6 +688,10 @@ mod tests {
             audit: AuditConfig { budget: 64, probes_per_block: 8, canary_blocks: 1, canary_refresh: 8 },
             growth: GrowthConfig { window: 4, promote_rate_floor: 0.25, cooldown: 4, ..GrowthConfig::default() },
             pool: PoolConfig { resident: 4, margin: 0.1, dwell: 2, survival: 1000 },
+            // seed: cfg() is called more than once per test and a resumed
+            // reader must see the config its manifest was written with.
+            seed: 0,
+            reservoir: ReservoirConfig { seed: 0, ..ReservoirConfig::default() },
             ..ReaderConfig::default()
         }
     }
@@ -694,6 +699,17 @@ mod tests {
     fn reader(dir: &Dir, fake: Fake) -> Reader<Fake> {
         let pool = Pool::create(&dir.0, cfg().pool).expect("pool");
         Reader::new(cfg(), fake, pool)
+    }
+
+    /// Unset seeds are random: two default configurations differ in every
+    /// seed they carry, so a caller who says nothing never gets a run that
+    /// is byte-identical to a deliberate seed `0`.
+    #[test]
+    fn default_configs_draw_different_seeds() {
+        let (a, b) = (ReaderConfig::default(), ReaderConfig::default());
+        assert_ne!(a.seed, b.seed);
+        assert_ne!(a.reservoir.seed, b.reservoir.seed);
+        assert_ne!(crate::stream::StreamConfig::default().seed, crate::stream::StreamConfig::default().seed);
     }
 
     /// The whole point of putting the screen first: garbage must not cost a
