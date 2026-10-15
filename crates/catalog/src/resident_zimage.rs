@@ -236,10 +236,10 @@ impl Instance for ZImageInstance {
         if action == "text2image" {
             let pipe = self.pipe.as_ref().ok_or("z-image: text2image instance has no pipeline")?;
             let prompt = inv.get_str("prompt").unwrap_or_default();
-            let seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
+            let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
             let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
             let img = pipe.generate(&prompt, seed, steps, &inv.cancel, |s, t, m| progress(Progress::step(s, t, m.to_string())))?;
-            return Ok(emit_image(img));
+            return Ok(emit_image(img).set("seed", json!(seed)));
         }
         // Editing / training: delegate to the provider's action (fresh build).
         use capability::Provider;

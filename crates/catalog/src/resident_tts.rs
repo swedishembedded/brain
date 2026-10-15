@@ -137,24 +137,28 @@ impl TtsInstance {
     /// invocation is only the "explicit caller override" layer, and the
     /// checkpoint's `generation_config.json` (then the reference's defaults)
     /// answers for the rest - see `qwen3tts::genconfig`.
-    fn opts_from(inv: &Invocation) -> GenOpts {
+    ///
+    /// A `seed` that is not a non-negative integer is refused; an absent one is
+    /// drawn, so the opts carry the seed the run uses and the outcome echoes it.
+    fn opts_from(inv: &Invocation) -> Result<GenOpts, String> {
         let mut opts = GenOpts::default();
         opts.sampling.temperature = inv.get_f64("temp").map(|t| t as f32);
         opts.sampling.top_k = inv.get_i64("top_k").map(|k| k.max(0) as usize);
         opts.sampling.top_p = inv.get_f64("top_p").map(|p| p as f32);
         opts.sampling.repetition_penalty = inv.get_f64("repetition_penalty").map(|r| r as f32);
-        opts.seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
+        opts.seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
         if let Some(f) = inv.get_i64("max_frames") {
             opts.max_frames = f.max(1) as usize;
         }
-        opts
+        Ok(opts)
     }
 
     /// Emit raw little-endian f32 PCM (mono, 24 kHz) - the same wire shape the
     /// mid-run chunks below carry, so a client can append chunks and get
     /// exactly this. No external WAV encoder dependency.
-    fn pcm_outcome(wav: Vec<f32>) -> ActionResult {
+    fn pcm_outcome(wav: Vec<f32>, seed: u64) -> ActionResult {
         Ok(Outcome::new()
+            .set("seed", json!(seed))
             .set("samples", json!(wav.len()))
             .set("sample_rate", json!(SAMPLE_RATE))
             .blob("audio", pcm_blob(&wav)))
@@ -175,7 +179,7 @@ impl Instance for TtsInstance {
             return Err(format!("tts {action}: 'text' must be non-empty"));
         }
         let lang = inv.get_str("lang").unwrap_or_else(|| self.lang.clone());
-        let opts = Self::opts_from(inv);
+        let opts = Self::opts_from(inv)?;
 
         // Every action streams its audio the same way: each decoded codec
         // chunk becomes a `Progress::chunk` named "audio", which `Subscribe`
@@ -204,13 +208,25 @@ impl Instance for TtsInstance {
             }
             other => return Err(format!("tts: unsupported action '{other}' (this resident declares: speak, design)")),
         };
-        Self::pcm_outcome(wav)
+        Self::pcm_outcome(wav, opts.seed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_seed_that_is_not_a_non_negative_integer_is_refused_and_an_absent_one_is_drawn() {
+        for bad in [json!(-1), json!(1.5), json!("7")] {
+            let err = TtsInstance::opts_from(&Invocation::new().set("seed", bad.clone())).err().expect("a malformed seed is refused");
+            assert!(err.contains("seed"), "seed {bad} must be refused as a seed, got: {err}");
+        }
+        assert_eq!(TtsInstance::opts_from(&Invocation::new().set("seed", json!(5))).unwrap().seed, 5);
+        let draw = || TtsInstance::opts_from(&Invocation::new()).unwrap().seed;
+        assert_ne!(draw(), draw(), "an absent seed is drawn per request");
+        assert_eq!(TtsInstance::pcm_outcome(vec![0.0; 2], 5).unwrap().outputs["seed"], json!(5));
+    }
 
     /// Activation IS the load now, so a missing checkpoint must surface as a
     /// clean activation error rather than a panic inside a loader or a

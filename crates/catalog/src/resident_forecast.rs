@@ -638,18 +638,22 @@ fn kronos_stamps(inv: &Invocation, t: usize, horizon: usize) -> Result<(Vec<u32>
     Ok((ctx_stamp, fut_stamp))
 }
 
-fn kronos_opts(inv: &Invocation) -> kronos::generate::GenOpts {
-    kronos::generate::GenOpts {
+/// Decode the sampling knobs. A `seed` that is not a non-negative integer is
+/// refused; an absent one is drawn, so the opts carry the seed the run uses
+/// and the outcome echoes it.
+fn kronos_opts(inv: &Invocation) -> Result<kronos::generate::GenOpts, String> {
+    Ok(kronos::generate::GenOpts {
         temperature: inv.get_f64("temperature").unwrap_or(1.0) as f32,
         argmax: inv.get_bool("argmax").unwrap_or(true),
-        seed: inv.get_i64("seed").map(|s| s as u64).unwrap_or_else(data::rng::random_seed),
+        seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
         ..Default::default()
-    }
+    })
 }
 
-fn kronos_outcome(out: Vec<f32>, horizon: usize, feat: usize, device: &str) -> Outcome {
+fn kronos_outcome(out: Vec<f32>, horizon: usize, feat: usize, device: &str, seed: u64) -> Outcome {
     Outcome::new()
         .set("model", json!(KRONOS_MODEL))
+        .set("seed", json!(seed))
         .set("horizon", json!(horizon))
         .set("device", json!(device))
         .blob("forecast", encode_forecast(&out, vec![horizon, feat], "samples", &[]))
@@ -665,20 +669,21 @@ impl Instance for KronosInstance {
         // result to `forecast` (cosine >0.999, tests/kvcache_parity) but O(T²)
         // prefill + O(T)/step instead of O(T²)/step. `--samples N` shares one
         // prefill across N sampled paths (returned as [N, horizon, feat]).
-        let opts = kronos_opts(inv);
+        let opts = kronos_opts(inv)?;
         let samples = inv.get_i64("samples").unwrap_or(1).max(1) as usize;
         if samples > 1 {
             let outs = self.model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, horizon, samples, &opts);
             let flat: Vec<f32> = outs.into_iter().flatten().collect();
             return Ok(Outcome::new()
                 .set("model", json!(KRONOS_MODEL))
+                .set("seed", json!(opts.seed))
                 .set("horizon", json!(horizon))
                 .set("samples", json!(samples))
                 .set("device", json!("gpu_core"))
                 .blob("forecast", encode_forecast(&flat, vec![samples, horizon, feat], "samples", &[])));
         }
         let out = self.model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, horizon, &opts); // [horizon, feat]
-        Ok(kronos_outcome(out, horizon, feat, "gpu_core"))
+        Ok(kronos_outcome(out, horizon, feat, "gpu_core", opts.seed))
     }
 }
 
@@ -718,7 +723,7 @@ impl Instance for KronosNpuInstance {
         let (bars, t) = kronos_bars(inv, feat)?;
         let horizon = horizon_of(inv, 64);
         let (ctx_stamp, fut_stamp) = kronos_stamps(inv, t, horizon)?;
-        let opts = kronos_opts(inv);
+        let opts = kronos_opts(inv)?;
         let samples = inv.get_i64("samples").unwrap_or(1).max(1) as usize;
         let cap = t + horizon;
         self.ensure(t, cap)?; // compile errors propagate cleanly (no panic)
@@ -737,6 +742,7 @@ impl Instance for KronosNpuInstance {
             let flat: Vec<f32> = outs.into_iter().flatten().collect();
             return Ok(Outcome::new()
                 .set("model", json!(KRONOS_MODEL))
+                .set("seed", json!(opts.seed))
                 .set("horizon", json!(horizon))
                 .set("samples", json!(samples))
                 .set("device", json!(dev))
@@ -747,7 +753,7 @@ impl Instance for KronosNpuInstance {
             let core = map.get_mut(&(t, cap)).expect("kronos cached graphs");
             model.forecast_cached_with_cores(&bars, &ctx_stamp, &fut_stamp, horizon, &opts, core)
         })?;
-        Ok(kronos_outcome(out, horizon, feat, &dev))
+        Ok(kronos_outcome(out, horizon, feat, &dev, opts.seed))
     }
 }
 
@@ -1222,6 +1228,18 @@ impl Instance for Timesfm3Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kronos_refuses_a_malformed_seed_and_echoes_the_one_it_used() {
+        for bad in [json!(-1), json!(2.5), json!("7")] {
+            let err = kronos_opts(&Invocation::new().set("seed", bad.clone())).err().expect("a malformed seed is refused");
+            assert!(err.contains("seed"), "seed {bad} must be refused as a seed, got: {err}");
+        }
+        assert_eq!(kronos_opts(&Invocation::new().set("seed", json!(9))).unwrap().seed, 9);
+        let draw = || kronos_opts(&Invocation::new()).unwrap().seed;
+        assert_ne!(draw(), draw(), "an absent seed is drawn per request");
+        assert_eq!(kronos_outcome(vec![0.0; 4], 2, 2, "gpu_core", 9).outputs["seed"], json!(9));
+    }
 
     // Weight-free schema checks (the serving contract's cheap capability test).
     #[test]
