@@ -60,16 +60,17 @@ mod tests {
 
     #[test]
     fn deterministic_for_a_seed() {
-        let a: Vec<u64> = { let mut r = Rng::new(42); (0..5).map(|_| r.next_u64()).collect() };
-        let b: Vec<u64> = { let mut r = Rng::new(42); (0..5).map(|_| r.next_u64()).collect() };
+        let seed = seed::random_seed();
+        let a: Vec<u64> = { let mut r = Rng::new(seed); (0..5).map(|_| r.next_u64()).collect() };
+        let b: Vec<u64> = { let mut r = Rng::new(seed); (0..5).map(|_| r.next_u64()).collect() };
         assert_eq!(a, b);
-        let c: Vec<u64> = { let mut r = Rng::new(43); (0..5).map(|_| r.next_u64()).collect() };
+        let c: Vec<u64> = { let mut r = Rng::new(seed.wrapping_add(1)); (0..5).map(|_| r.next_u64()).collect() };
         assert_ne!(a, c);
     }
 
     #[test]
     fn normal_is_roughly_standard() {
-        let mut r = Rng::new(7);
+        let mut r = Rng::new(seed::random_seed());
         let n = 20000;
         let xs: Vec<f32> = (0..n).map(|_| r.normal()).collect();
         let mean = xs.iter().sum::<f32>() / n as f32;
@@ -80,7 +81,7 @@ mod tests {
 
     #[test]
     fn uniform_in_range() {
-        let mut r = Rng::new(1);
+        let mut r = Rng::new(seed::random_seed());
         for _ in 0..10000 {
             let u = r.uniform();
             assert!((0.0..1.0).contains(&u));

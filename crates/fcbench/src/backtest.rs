@@ -125,7 +125,7 @@ mod tests {
             stride: 3,
             metrics: score::default_metrics(),
             quantile_levels: vec![0.1, 0.5, 0.9],
-            seed: 0,
+            ..Default::default()
         };
         let rw = RandomWalk;
         let dr = Drift;
@@ -155,7 +155,7 @@ mod tests {
             stride: 2,
             metrics: vec!["mase".into()],
             quantile_levels: vec![0.1, 0.5, 0.9],
-            seed: 0,
+            ..Default::default()
         };
         let rw = RandomWalk;
         let dr = Drift;

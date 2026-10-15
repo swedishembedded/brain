@@ -11,3 +11,6 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-forecast.workspace = true
+
+[dev-dependencies]
+brain-seed.workspace = true
