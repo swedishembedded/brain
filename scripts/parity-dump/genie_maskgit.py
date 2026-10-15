@@ -21,6 +21,9 @@ if not os.path.isdir(REPO):
 TOK = "scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt"
 DYN = "scratchpad/wm-checkpoints/GenieRedux_Guided_CoinRun_80mln_v1.0.pt"
 OUT = "scratchpad/parity"
+# seed: the dump takes no arguments and the Rust parity test replays the
+# committed output, so the fixture is defined by this seed.
+FIXTURE_SEED = 0
 
 def main():
     sys.path.insert(0, REPO)
@@ -28,7 +31,7 @@ def main():
     from models.tokenizer import Tokenizer
     from models.dynamics import MaskGIT, Dynamics
 
-    torch.manual_seed(0)
+    torch.manual_seed(FIXTURE_SEED)
     tokenizer = Tokenizer(dim=512, codebook_size=1024, image_size=64, patch_size=4,
                           temporal_patch_size=1, num_blocks=8, codebook_dim=32,
                           dim_head=64, heads=8, channels=3, wandb_mode="disabled")
@@ -71,6 +74,7 @@ def main():
     with open(os.path.join(OUT, "genie_maskgit_meta.txt"), "w") as fh:
         fh.write(f"prime_frames={prime_frames} t_fwd={t_fwd} h={h} w={w} num_tokens={h*w}\n")
         fh.write(f"out_shape={tuple(out.shape)}\n")
+        fh.write(f"seed={FIXTURE_SEED}\n")
     print("wrote maskgit parity dump; out", tuple(out.shape), "sample tokens", out.view(-1)[:8].tolist())
 
 if __name__ == "__main__":

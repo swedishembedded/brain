@@ -13,7 +13,7 @@ path. Output is copied into
 crates/diamond/tests/fixtures/diamond/ and committed.
 
 Usage:
-  python3 scripts/parity-dump/diamond.py --out <scratch dir>/fixtures-diamond
+  python3 scripts/parity-dump/diamond.py --out <scratch dir>/fixtures-diamond --seed 7
 """
 import argparse
 import hashlib
@@ -57,7 +57,6 @@ _load("models.blocks", _SRC / "models" / "blocks.py")
 _inner = _load("models.diffusion.inner_model", _SRC / "models" / "diffusion" / "inner_model.py")
 InnerModel, InnerModelConfig = _inner.InnerModel, _inner.InnerModelConfig
 
-SEED = 7
 # Tiny but structurally complete: 2 levels (1 downsample), mid attention,
 # GroupNorm with 1 group (8 < GN_GROUP_SIZE=32 -> max(1, .)), AdaGroupNorm cond.
 import os
@@ -101,22 +100,24 @@ def tensor_blob(t: torch.Tensor) -> bytes:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(args.seed)
     torch.use_deterministic_algorithms(True)
     model = InnerModel(CFG).eval()
     # conv_out / attn out_proj are zero-init in the reference; give them small
     # deterministic values so the parity test exercises those paths too.
     with torch.no_grad():
-        g = torch.Generator().manual_seed(SEED + 1)
+        g = torch.Generator().manual_seed(args.seed + 1)
         for name, p in model.named_parameters():
             if p.abs().sum() == 0:
                 p.copy_(torch.randn(p.shape, generator=g) * 0.02)
 
-    torch.manual_seed(SEED + 2)
+    torch.manual_seed(args.seed + 2)
     noisy = torch.randn(1, CFG.img_channels, H, W)
     c_noise = torch.tensor([0.4])
     obs = torch.randn(1, CFG.num_steps_conditioning * CFG.img_channels, H, W)
@@ -160,7 +161,7 @@ def main() -> None:
                 ["git", "-C", str(DIAMOND_REPO), "rev-parse", "HEAD"],
                 capture_output=True, text=True, check=True).stdout.strip(),
             "torch": torch.__version__,
-            "seed": SEED,
+            "seed": args.seed,
             "cmd": " ".join(sys.argv),
         },
         "weights": {}, "inputs": {}, "activations": {}, "output": {},
