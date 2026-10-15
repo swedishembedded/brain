@@ -71,8 +71,8 @@ const STATE_FILE: &str = "train.state";
 const ADAPTER_FILE: &str = "adapter.safetensors";
 const RECORD_FILE: &str = "training.json";
 
-/// Training rows are at least this long, so a slightly longer next dataset
-/// does not change the row length.
+/// Training rows are at least this long, so a tiny dataset does not train on
+/// a degenerate row.
 const MIN_BLOCK: u32 = 64;
 
 /// A LoRA fine-tune of a Qwen3 chat model. See this module's doc.
@@ -902,19 +902,19 @@ pub(crate) fn tokenizer_and_template(model_dir: &Path) -> Result<(QwenBpe, ChatT
     Ok((tok, tmpl))
 }
 
-/// The smallest power-of-two row (at least [`MIN_BLOCK`]) that holds the
-/// longest record, capped at `max`: a record longer than the cap is refused,
-/// since training on a row that cannot hold it would supervise nothing of it.
+/// The training row for a dataset whose longest record is `longest` tokens:
+/// exactly that long (at least [`MIN_BLOCK`]), capped at `max`. A record
+/// longer than the cap is refused, since training on a row that cannot hold
+/// it would supervise nothing of it. The row is not rounded up: attention
+/// and every activation scale with it, so padding a 5646-token record to the
+/// next power of two trains 8192 rows' worth of work for 5646 tokens of data.
 pub(crate) fn block_for(longest: usize, max: Option<u32>) -> Result<u32> {
     if let Some(max) = max {
         if longest > max as usize {
             return Err(Error::Backend(format!("the longest record is {longest} tokens, past max_block {max}; raise max_block or shorten the record")));
         }
     }
-    let mut block = MIN_BLOCK;
-    while (block as usize) < longest {
-        block *= 2;
-    }
+    let block = u32::try_from(longest).map_err(|_| Error::Backend(format!("the longest record is {longest} tokens, past the largest supported row")))?.max(MIN_BLOCK);
     Ok(max.map_or(block, |m| block.min(m)))
 }
 
@@ -1086,15 +1086,20 @@ mod tests {
         assert_eq!(fit_opts(10, 256, 2e-4, 1).warmup, 1);
     }
 
-    /// A row holds the longest record, grows in powers of two from 64, and
-    /// never passes the caller's cap - a record past it is refused by size.
+    /// A row is exactly as long as the longest record (a short dataset gets
+    /// the minimum row), never longer than the caller's cap, and a record
+    /// past the cap is refused by size, never truncated. A power-of-two row
+    /// would pad a 5646-token record to 8192 rows.
     #[test]
-    fn the_training_row_fits_the_longest_record_within_the_cap() {
-        assert_eq!(block_for(10, None).unwrap(), 64);
-        assert_eq!(block_for(65, None).unwrap(), 128);
-        assert_eq!(block_for(100, Some(100)).unwrap(), 100);
-        assert_eq!(block_for(70, Some(512)).unwrap(), 128);
-        assert!(block_for(600, Some(512)).unwrap_err().to_string().contains("max_block"));
+    fn the_training_row_is_the_longest_record_within_the_cap() {
+        assert_eq!(block_for(10, None).unwrap(), MIN_BLOCK);
+        assert_eq!(block_for(65, None).unwrap(), 65);
+        assert_eq!(block_for(5646, None).unwrap(), 5646);
+        assert_eq!(block_for(5646, Some(5646)).unwrap(), 5646);
+        assert_eq!(block_for(70, Some(512)).unwrap(), 70);
+        assert_eq!(block_for(10, Some(32)).unwrap(), 32, "the cap wins over the minimum row");
+        let refused = block_for(5647, Some(5646)).unwrap_err().to_string();
+        assert!(refused.contains("max_block") && refused.contains("5647"), "{refused}");
     }
 
     /// The samples `Asked` reads from a dataset of `lines`, in the mode asked.

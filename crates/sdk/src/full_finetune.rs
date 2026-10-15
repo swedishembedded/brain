@@ -183,7 +183,7 @@ impl ChatFullFineTune {
     }
 
     /// The longest training row in tokens; a record past it is refused
-    /// (default: the smallest power of two that holds the longest record).
+    /// (default: exactly the longest record, at least a small minimum row).
     pub fn max_block(mut self, tokens: u32) -> Self {
         self.max_block = Some(tokens);
         self
