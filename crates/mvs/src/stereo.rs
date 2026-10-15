@@ -137,6 +137,9 @@ pub struct StereoCfg {
     pub perturb_range: f32,
     pub perturb_normal: f32,
     pub filter: FilterCfg,
+    /// Seeds the random initialisation and perturbation of the plane
+    /// hypotheses. [`Default`] draws a random one; [`Stereo::seed`] reports
+    /// the one in force, and passing it back reproduces the maps.
     pub seed: u32,
 }
 
@@ -161,7 +164,7 @@ impl Default for StereoCfg {
             perturb_range: 0.1,
             perturb_normal: 0.5,
             filter: FilterCfg::default(),
-            seed: 1,
+            seed: seed::random_seed() as u32,
         }
     }
 }
@@ -202,6 +205,8 @@ pub struct Stereo {
     pub rgb: Vec<Vec<f32>>,
     /// Each view's source views.
     pub sources: Vec<Vec<usize>>,
+    /// The [`StereoCfg::seed`] the maps were matched with.
+    pub seed: u32,
     pub timings: Timings,
 }
 
@@ -548,7 +553,7 @@ pub fn depth_maps(gpu: &Gpu, ks: &Kernels, views: &[View], tracks: &[Track], cfg
     }
     timings.push("filter + read back", t);
     let cams = cams.iter().zip(&lvls).map(|(c, l)| Camera::with_intrinsics(c.c2w, &l.k)).collect();
-    Ok(Stereo { cams, depth, rgb, sources, timings })
+    Ok(Stereo { cams, depth, rgb, sources, seed: cfg.seed, timings })
 }
 
 /// The plane size a level's per-view buffers were allocated with.

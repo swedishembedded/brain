@@ -40,6 +40,15 @@ fn check(name: &str, scene: &Scene, cams: &[Camera]) {
     println!("  worst view: {worst:?}");
 }
 
+/// An unset seed is random, so two matchings that said nothing search
+/// differently, and the result reports the seed it used.
+#[test]
+fn an_unset_seed_is_drawn_and_reported() {
+    assert_ne!(mvs::StereoCfg::default().seed, mvs::StereoCfg::default().seed);
+    let (scene, cams) = pinhole_capture();
+    assert_eq!(run(&scene, &cams).seed, common::cfg().seed);
+}
+
 /// Through a pinhole: most measured pixels within 0.5 % of the true range,
 /// normals within a few degrees, almost no outliers after filtering.
 #[test]

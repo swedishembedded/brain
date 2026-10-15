@@ -13,6 +13,8 @@ name = "mvs"
 path = "src/lib.rs"
 
 [dependencies]
+# `seed::random_seed` - the draw behind an unset fit/matching seed.
+brain-seed.workspace = true
 # `camera::Intrinsics` - the one lens model; every warp walks rays through it.
 brain-camera.workspace = true
 brain-gpu-core.workspace = true

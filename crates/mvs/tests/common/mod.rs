@@ -356,6 +356,8 @@ pub fn cfg() -> mvs::StereoCfg {
         halving: 0,
         levels: 2,
         select: mvs::SelectCfg { max_sources: 5, min_shared: 8, ..Default::default() },
+        // seed: the accuracy bars are measured on this search
+        seed: 1,
         ..Default::default()
     }
 }
