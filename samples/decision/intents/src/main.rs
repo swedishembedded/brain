@@ -69,7 +69,7 @@ has never seen, to measure whether it reads its options or memorises them.
 
   --data DIR          BANKING77 (categories.json, train.csv, test.csv)
   --unseen N          intents held back from training entirely   [12]
-  --split-seed N      which intents those are                    [7]
+  --split-seed N      which intents those are        [random, printed]
 
 hardware
 {}
@@ -90,7 +90,11 @@ fn parse() -> Result<Settings, String> {
         println!("{}", usage());
         std::process::exit(0);
     }
-    let mut args = Args::new(&argv);
+    parse_from(&argv)
+}
+
+fn parse_from(argv: &[String]) -> Result<Settings, String> {
+    let mut args = Args::new(argv);
     let hardware = Hardware::take(&mut args)?;
     let train = SupervisedOptions::new(ModelOptions::new("", "out/intents-head.safetensors"))
         .take_over(&mut args)?;
@@ -98,7 +102,7 @@ fn parse() -> Result<Settings, String> {
     let settings = Settings {
         data: PathBuf::from(args.str_or("--data", "testdata/decide/banking77")),
         unseen: args.usize_or("--unseen", 12),
-        split_seed: args.u64_or("--split-seed", 7),
+        split_seed: args.seed_flag("intents", "--split-seed"),
         hardware,
         train,
     };
@@ -351,4 +355,20 @@ fn verdict(seen: &Scored, unseen: &Scored, control: &Scored) {
         seen.accuracy * 100.0,
         unseen.accuracy * 100.0
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_split_seed_is_given_or_drawn_per_run() {
+        let split_of = |extra: &[&str]| {
+            let mut argv: Vec<String> = ["--encoder", "e"].iter().map(|a| a.to_string()).collect();
+            argv.extend(extra.iter().map(|a| a.to_string()));
+            parse_from(&argv).unwrap().split_seed
+        };
+        assert_eq!(split_of(&["--split-seed", "5"]), 5);
+        assert_ne!(split_of(&[]), split_of(&[]));
+    }
 }

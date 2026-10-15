@@ -45,7 +45,7 @@ usage: sample-text-embed-train --weights BASE [--tokenizer FILE]
   --steps N          training steps (default 200)
   --lr X             Adam learning rate (default 0.05)
   --temperature X    InfoNCE softmax temperature (default 0.05)
-  --seed S           projection head init seed (default 1)
+  --seed S           projection head init seed (default: drawn at random and printed)
 ";
 
 /// A tiny flag reader - see `samples/study/document/src/main.rs` for the
@@ -64,6 +64,18 @@ impl Args {
     }
     fn parse<T: std::str::FromStr>(&mut self, flag: &str) -> Option<T> {
         self.take(flag).and_then(|v| v.parse().ok())
+    }
+    /// `--seed N` as given, or a fresh random seed printed so the run can be
+    /// reproduced. A value that is not a seed is an error, never a default.
+    fn seed(&mut self) -> Result<u64, String> {
+        match self.take("--seed") {
+            Some(v) => v.parse().map_err(|_| format!("--seed {v:?}: not a seed (an unsigned integer)")),
+            None => {
+                let seed = brain::random_seed();
+                eprintln!("embed-train: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+                Ok(seed)
+            }
+        }
     }
     fn flag(&mut self, flag: &str) -> bool {
         match self.0.iter().position(|a| a == flag) {
@@ -122,7 +134,13 @@ fn main() -> ExitCode {
     let steps: u32 = a.parse("--steps").unwrap_or(200);
     let lr: f32 = a.parse("--lr").unwrap_or(0.05);
     let temperature: f32 = a.parse("--temperature").unwrap_or(0.05);
-    let seed: u64 = a.parse("--seed").unwrap_or(1);
+    let seed = match a.seed() {
+        Ok(seed) => seed,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
 
     let mut builder = EmbeddingPipeline::builder(&weights).capacity(capacity);
     if let Some(t) = &tokenizer {
@@ -177,4 +195,20 @@ fn main() -> ExitCode {
     println!("  after  training: {:.1}%  ({}/{})", after * 100.0, (after * TOPICS.len() as f64).round() as usize, TOPICS.len());
 
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Args {
+        Args(list.iter().map(|a| a.to_string()).collect())
+    }
+
+    #[test]
+    fn the_seed_is_given_or_drawn_per_run_and_a_malformed_one_is_refused() {
+        assert_eq!(args(&["--seed", "5"]).seed(), Ok(5));
+        assert_ne!(args(&[]).seed().unwrap(), args(&[]).seed().unwrap());
+        assert!(args(&["--seed", "abc"]).seed().unwrap_err().contains("--seed"));
+    }
 }

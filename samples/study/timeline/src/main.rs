@@ -44,7 +44,8 @@ usage: sample-study-timeline [--out DIR] [--subjects N] [--steps N] [--seed N]
   --subjects N     training subjects (default 20000; a fifth as many are held
                    out for early stopping and calibration, a quarter tested)
   --steps N        optimizer steps at most (default 3000)
-  --seed N         seed of the weights and batches (default 1)
+  --seed N         seed of the weights and batches (default: drawn at random
+                   and printed)
 ";
 
 /// The cause the sample reports on, and the horizon, in years.
@@ -72,6 +73,19 @@ impl Args {
             .map(|v| v.parse().map_err(|_| format!("{flag} {v:?}: not a valid value")))
             .unwrap_or(Ok(default))
     }
+
+    /// `--seed N` as given, or a fresh random seed printed so the run can be
+    /// reproduced. A value that is not a seed is an error, never a default.
+    fn seed(&mut self) -> Result<u64, String> {
+        match self.take("--seed") {
+            Some(v) => v.parse().map_err(|_| format!("--seed {v:?}: not a seed (an unsigned integer)")),
+            None => {
+                let seed = brain::random_seed();
+                eprintln!("timeline: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+                Ok(seed)
+            }
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -82,7 +96,7 @@ fn main() -> ExitCode {
     }
     let parsed = (|| -> Result<(PathBuf, usize, u32, u64), String> {
         let out = a.take("--out").map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("sample-study-timeline"));
-        let config = (out, a.parse("--subjects", 20_000)?, a.parse("--steps", 3000)?, a.parse("--seed", 1)?);
+        let config = (out, a.parse("--subjects", 20_000)?, a.parse("--steps", 3000)?, a.seed()?);
         match a.0.first() {
             Some(extra) => Err(format!("unexpected argument {extra:?}")),
             None => Ok(config),
@@ -224,4 +238,20 @@ fn visits_model(out: &Path, n: usize, steps: u32, seed: u64) -> brain::Result<bo
         eprintln!("the visit model did not beat the covariate-blind estimate");
     }
     Ok(better)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Args {
+        Args(list.iter().map(|a| a.to_string()).collect())
+    }
+
+    #[test]
+    fn the_seed_is_given_or_drawn_per_run_and_a_malformed_one_is_refused() {
+        assert_eq!(args(&["--seed", "5"]).seed(), Ok(5));
+        assert_ne!(args(&[]).seed().unwrap(), args(&[]).seed().unwrap());
+        assert!(args(&["--seed", "abc"]).seed().unwrap_err().contains("--seed"));
+    }
 }

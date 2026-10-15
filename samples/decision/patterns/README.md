@@ -46,7 +46,8 @@ make samples/decision/patterns/run ARGS="--demo rerank"
 ```
 
 Flags: `--model NAME|DIR` (`laya` by default, `minilm` for a
-`crates/decide`-shaped encoder), `--eval-n N`, `--seed N`,
+`crates/decide`-shaped encoder), `--eval-n N`, `--seed N` (drawn at random and
+printed when not given),
 `--finetune-steps N` (off by default - see "Does fine-tuning help?" below),
 plus the usual `--device`/`--backend`.
 

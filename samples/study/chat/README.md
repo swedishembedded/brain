@@ -47,6 +47,7 @@ make samples/study/chat/run ARGS="--base Qwen/Qwen3-0.6B"
 --steps N           optimizer steps per run (default 24)
 --cancel-after N    cancel the interrupted run after this step (default steps/2)
 --lr X              peak learning rate (default 5e-4)
+--seed N            seed shared by all three runs (default: drawn at random and printed)
 --device SPEC       cpu, gpu, gpu:1, ... (default: auto)
 --models-dir DIR    the model store a vendor/repo base resolves in
 ```

@@ -41,6 +41,8 @@ make samples/decision/intents/run ARGS="--encoder DIR --unseen 12 --steps 8000"
 Needs a sentence encoder (`brain pull sentence-transformers/all-MiniLM-L6-v2`)
 and nothing else. `--device`, `--encoder`, `--head`, `--save` and `--seed` come
 from `brain::options`, shared with the `brain` binary and every other sample.
+A seed that is not given (`--seed`, and `--split-seed` for the held-back intents)
+is drawn at random and printed; pass the printed value to repeat the run.
 
 ## The dataset
 

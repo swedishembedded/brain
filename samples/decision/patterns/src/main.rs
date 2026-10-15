@@ -95,7 +95,7 @@ against the same model.
   --demo report|bulk|realtime|gate|rerank\n\
                       which pattern to run (default: report, patterns 1-6)
   --eval-n N          held-out examples per task (default 100)
-  --seed N            RNG seed for data generation (default 7)
+  --seed N            RNG seed for data generation (default: drawn at random and printed)
   --finetune-steps N  generically fine-tune the five fixed-vocabulary tasks
                       (routing, guardrail, tool_gate, triage, control) via
                       DecisionPipeline::train_choices before reporting - the
@@ -127,7 +127,11 @@ fn parse() -> Result<Settings, String> {
         println!("{}", usage());
         std::process::exit(0);
     }
-    let mut args = Args::new(&argv);
+    parse_from(&argv)
+}
+
+fn parse_from(argv: &[String]) -> Result<Settings, String> {
+    let mut args = Args::new(argv);
     let hardware = Hardware::take(&mut args)?;
     let model = ModelChoice::new("laya").take_over(&mut args)?;
     let head = args.take_str("--head");
@@ -140,7 +144,7 @@ fn parse() -> Result<Settings, String> {
         Some(other) => return Err(format!("unknown --demo {other:?}, expected report|bulk|realtime|gate|rerank")),
     };
     let eval_n = args.usize_or("--eval-n", 100);
-    let seed = args.u64_or("--seed", 7);
+    let seed = args.seed("patterns");
     let finetune_steps = args.usize_or("--finetune-steps", 0);
     args.finish();
     Ok(Settings { model, head, demo, eval_n, seed, finetune_steps, hardware })
@@ -427,6 +431,13 @@ fn env_nonempty(key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_seed_is_given_or_drawn_per_run() {
+        let seed_of = |args: &[&str]| parse_from(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).unwrap().seed;
+        assert_eq!(seed_of(&["--seed", "5"]), 5);
+        assert_ne!(seed_of(&[]), seed_of(&[]));
+    }
 
     #[test]
     fn a_short_name_maps_to_what_brain_pull_calls_it() {

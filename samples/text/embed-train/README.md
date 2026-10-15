@@ -57,7 +57,7 @@ useful.
 --steps N          training steps (default 200)
 --lr X             Adam learning rate (default 0.05)
 --temperature X    InfoNCE softmax temperature (default 0.05)
---seed S           projection head init seed (default 1)
+--seed S           projection head init seed (default: drawn at random and printed)
 ```
 
 ## What it needs

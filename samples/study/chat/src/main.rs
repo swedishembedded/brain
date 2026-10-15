@@ -42,6 +42,9 @@ usage: sample-study-chat [--base BASE] [--out DIR] [--steps N] [--cancel-after N
   --steps N           optimizer steps per run (default 24)
   --cancel-after N    cancel the interrupted run after this step (default steps/2)
   --lr X              peak learning rate (default 5e-4)
+  --seed N            seed shared by all three runs, which must match for the
+                      resumed adapter to equal the uninterrupted one (default:
+                      drawn at random and printed)
   --device SPEC       cpu, gpu, gpu:1, ... (default: auto)
   --models-dir DIR    the model store a vendor/repo base resolves in
 ";
@@ -100,6 +103,7 @@ struct Config {
     steps: u32,
     cancel_after: u32,
     lr: f32,
+    seed: u64,
     device: brain::Device,
     models_dir: Option<String>,
 }
@@ -136,6 +140,14 @@ fn config(a: &mut Args) -> Result<Config, String> {
         return Err(format!("--cancel-after {cancel_after} must fall strictly inside the run's {steps} steps"));
     }
     let lr = a.parse("--lr")?.unwrap_or(5e-4);
+    let seed = match a.parse("--seed")? {
+        Some(seed) => seed,
+        None => {
+            let seed = brain::random_seed();
+            eprintln!("chat: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+            seed
+        }
+    };
     let device = match a.take("--device") {
         Some(spec) => brain::Device::parse(&spec).map_err(|e| format!("--device {spec}: {e}"))?,
         None => brain::Device::default(),
@@ -144,7 +156,7 @@ fn config(a: &mut Args) -> Result<Config, String> {
     if let Some(extra) = a.0.first() {
         return Err(format!("unknown argument {extra:?}"));
     }
-    Ok(Config { base, out, steps, cancel_after, lr, device, models_dir })
+    Ok(Config { base, out, steps, cancel_after, lr, seed, device, models_dir })
 }
 
 /// Run the three fine-tunes and the chat. `Ok(false)` when the resumed run
@@ -169,7 +181,7 @@ fn run(cfg: &Config) -> Result<bool, Box<dyn std::error::Error>> {
             .rank(8)
             .steps(cfg.steps)
             .lr(cfg.lr)
-            .seed(7)
+            .seed(cfg.seed)
             .device(cfg.device.clone());
         if let Some(dir) = &cfg.models_dir {
             ft = ft.models_dir(dir.clone());
@@ -289,4 +301,21 @@ fn score(s: Option<&HeldOutScore>) -> String {
 /// said to be, never shown as zero.
 fn measured<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map_or_else(|| "not measured".to_string(), |v| v.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_of(args: &[&str]) -> Result<Config, String> {
+        config(&mut Args(args.iter().map(|a| a.to_string()).collect()))
+    }
+
+    #[test]
+    fn the_seed_is_given_or_drawn_once_and_a_malformed_one_is_refused() {
+        assert_eq!(config_of(&["--seed", "5"]).unwrap().seed, 5);
+        assert_ne!(config_of(&[]).unwrap().seed, config_of(&[]).unwrap().seed);
+        let err = config_of(&["--seed", "abc"]).err().expect("refused");
+        assert!(err.contains("--seed"), "{err}");
+    }
 }

@@ -56,7 +56,8 @@ make samples/study/timeline/run ARGS="--out /tmp/timeline"
 --subjects N     training subjects (default 20000; a fifth as many held out
                  for early stopping and calibration, a quarter tested)
 --steps N        optimizer steps at most (default 3000)
---seed N         seed of the weights and batches (default 1)
+--seed N         seed of the weights and batches (default: drawn at random
+                 and printed)
 ```
 
 `BRAIN_BACKEND` chooses the device (`cpu` runs anywhere, slowly).
