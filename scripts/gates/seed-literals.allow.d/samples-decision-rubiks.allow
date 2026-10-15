@@ -1,4 +1,1 @@
-samples/decision/rubiks/src/main.rs	macro_main:--seed=1	default	todo: default seed becomes random, printed and recorded
-samples/decision/rubiks/src/main.rs	net_main:--seed=1	default	todo: default seed becomes random, printed and recorded
-samples/decision/rubiks/src/main.rs	net_main:seed=7	default	todo: default seed becomes random, printed and recorded
-samples/decision/rubiks/src/main.rs	parse:--seed=1	default	todo: default seed becomes random, printed and recorded
+samples/decision/rubiks/src/main.rs	net_main:seed=7	default	greedy: rollout at temperature 0, its generator is never consulted

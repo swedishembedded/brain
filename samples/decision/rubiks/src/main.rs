@@ -109,7 +109,7 @@ run
   --cubes N           cubes to solve                                  [3]
   --scramble N        moves in each scramble, 1..{}                    [6]
   --solve-scramble N  depth of the cubes actually solved      [--scramble]
-  --seed N            which cubes                                     [1]
+  --seed N            which cubes                    [random, printed]
   --encode WHICH      how the cube is written down: grid | compact | rows [grid]
   --head FILE         a trained decision head to answer with
   --search WIDTH      plan the whole solution with a model-guided beam search
@@ -150,13 +150,17 @@ fn parse() -> Result<(Settings, bool), String> {
         println!("{}", usage());
         std::process::exit(0);
     }
-    let mut args = Args::new(&argv);
+    parse_from(&argv)
+}
+
+fn parse_from(argv: &[String]) -> Result<(Settings, bool), String> {
+    let mut args = Args::new(argv);
     let hardware = Hardware::take(&mut args)?;
     let model = ModelChoice::new("laya").take_over(&mut args)?;
     let cubes = args.usize_or("--cubes", 3);
     let scramble = args.usize_or("--scramble", 6) as u8;
     let solve_scramble = args.usize_or("--solve-scramble", scramble as usize) as u8;
-    let seed = args.u64_or("--seed", 1);
+    let seed = args.seed("rubiks");
     let encoding = policy::Encoding::parse(&args.str_or("--encode", "grid"))?;
     let head = args.take_str("--head");
     let train = args.usize_or("--train", 0);
@@ -1019,6 +1023,16 @@ mod tests {
     use crate::search::Solver;
 
     #[test]
+    fn the_cube_seed_is_given_or_drawn_per_run() {
+        let seed_of = |extra: &[&str]| {
+            let argv: Vec<String> = extra.iter().map(|a| a.to_string()).collect();
+            parse_from(&argv).unwrap().0.seed
+        };
+        assert_eq!(seed_of(&["--seed", "5"]), 5);
+        assert_ne!(seed_of(&[]), seed_of(&[]));
+    }
+
+    #[test]
     fn a_short_name_maps_to_what_brain_pull_calls_it() {
         assert_eq!(ALIASES.iter().find(|(a, _)| *a == "laya").unwrap().1, "convaiinnovations/laya");
     }
@@ -1099,7 +1113,7 @@ fn net_main(argv: &[String]) -> Result<(), String> {
         d_ff: args.usize_or("--net-ff", 2048) as u32,
         blocks: args.usize_or("--net-blocks", 4) as u32,
         lr: args.usize_or("--net-lr-micro", 600) as f32 / 1e6,
-        seed: args.u64_or("--seed", 1),
+        seed: args.seed("cubenet"),
         eval_every: args.usize_or("--net-eval-every", 2000),
         eval_cubes: args.usize_or("--net-eval-cubes", 200),
         eval_scramble: args.usize_or("--net-eval-scramble", 40),
@@ -1158,6 +1172,7 @@ fn net_main(argv: &[String]) -> Result<(), String> {
                 max_steps: 64,
                 forbid_redundant: true,
                 temperature: 0.0,
+                // seed: greedy rollout (temperature 0), the generator is never consulted.
                 seed: 7,
                 attempts: 1,
             },
@@ -1171,6 +1186,7 @@ fn net_main(argv: &[String]) -> Result<(), String> {
                 max_steps: 64,
                 forbid_redundant: true,
                 temperature: 0.0,
+                // seed: greedy rollout (temperature 0), the generator is never consulted.
                 seed: 7,
                 attempts: 1,
             },
@@ -1301,7 +1317,7 @@ fn macro_main(argv: &[String]) -> Result<(), String> {
     hardware.apply()?;
     let cubes = args.usize_or("--cubes", 1);
     let scramble = args.usize_or("--scramble", 40);
-    let seed = args.u64_or("--seed", 1);
+    let seed = args.seed("macros");
     let view = ViewOptions::take(&mut args)?;
     let record = args.take_str("--record");
 
