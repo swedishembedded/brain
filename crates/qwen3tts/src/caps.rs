@@ -87,7 +87,10 @@ fn common_params(spec: ActionSpec) -> ActionSpec {
 /// A param the caller did not pass stays `None` and is answered later by
 /// [`crate::genconfig`]'s chain - the invocation IS the "explicit caller
 /// override" layer, so anything absent from it must stay absent here.
-fn gen_opts_from(inv: &Invocation) -> GenOpts {
+/// Decode the shared generation knobs. A `seed` that is not a non-negative
+/// integer is refused; an absent one is drawn here, so the opts always carry
+/// the seed the run uses and the outcome can echo it.
+fn gen_opts_from(inv: &Invocation) -> Result<GenOpts, String> {
     let mut opts = GenOpts::default();
     if let Some(f) = inv.get_i64("max_frames") {
         opts.max_frames = f.max(1) as usize;
@@ -96,13 +99,14 @@ fn gen_opts_from(inv: &Invocation) -> GenOpts {
     opts.sampling.top_k = inv.get_i64("top_k").map(|k| k.max(0) as usize);
     opts.sampling.top_p = inv.get_f64("top_p").map(|p| p as f32);
     opts.sampling.repetition_penalty = inv.get_f64("repetition_penalty").map(|r| r as f32);
-    opts.seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
-    opts
+    opts.seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
+    Ok(opts)
 }
 
-fn audio_outcome(wav: Vec<f32>) -> ActionResult {
+fn audio_outcome(wav: Vec<f32>, seed: u64) -> ActionResult {
     let bytes = audio::wav::encode(&wav, SAMPLE_RATE);
     Ok(Outcome::new()
+        .set("seed", json!(seed))
         .set("samples", json!(wav.len()))
         .set("sample_rate", json!(SAMPLE_RATE))
         .set("seconds", json!(wav.len() as f64 / SAMPLE_RATE as f64))
@@ -240,11 +244,12 @@ fn common_run(inv: &Invocation, action: &str, need_speaker: bool) -> Result<(Tts
         return Err(format!("tts {action}: 'text' must be non-empty"));
     }
     let lang = inv.get_str("lang").unwrap_or_else(|| "english".to_string());
+    let opts = gen_opts_from(inv).map_err(|e| format!("tts {action}: {e}"))?;
     let paths = TtsPaths::new(&weights_dir, ckpt);
     // Fail cleanly (not a panic in the loaders) when the checkpoints the
     // pipeline loads are absent.
     paths.require(need_speaker).map_err(|e| format!("tts {action}: {e}"))?;
-    Ok((paths, text, lang, gen_opts_from(inv)))
+    Ok((paths, text, lang, opts))
 }
 
 struct SynthAction;
@@ -257,7 +262,7 @@ impl Action for SynthAction {
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let (paths, text, lang, opts) = common_run(inv, "synth", false)?;
         let wav = crate::pipeline::synth(&paths, &opts, &text, &lang, &inv.cancel)?;
-        audio_outcome(wav)
+        audio_outcome(wav, opts.seed)
     }
 }
 
@@ -276,7 +281,7 @@ impl Action for CloneAction {
         }
         let ref_text = inv.get_str("ref_text").unwrap_or_default();
         let wav = crate::pipeline::clone(&paths, &opts, &text, &refw, &ref_text, &lang, None, &inv.cancel)?;
-        audio_outcome(wav)
+        audio_outcome(wav, opts.seed)
     }
 }
 
@@ -292,7 +297,7 @@ impl Action for DesignAction {
         let instruct = inv.get_str("instruct").unwrap_or_default();
         let speaker = inv.get_str("speaker").filter(|s| !s.is_empty());
         let wav = crate::pipeline::design(&paths, &opts, &text, &lang, &instruct, speaker.as_deref(), &inv.cancel)?;
-        audio_outcome(wav)
+        audio_outcome(wav, opts.seed)
     }
 }
 
@@ -313,8 +318,9 @@ impl Action for BatchAction {
         // Action-level knobs are the per-request defaults, so a caller that
         // wants one setting for the whole batch sets it once.
         let base_lang = inv.get_str("lang").unwrap_or_else(|| "english".to_string());
-        let base = gen_opts_from(inv);
+        let base = gen_opts_from(inv).map_err(|e| format!("tts batch: {e}"))?;
         let mut reqs = Vec::with_capacity(items.len());
+        let mut seeds = Vec::with_capacity(items.len());
         for (i, it) in items.iter().enumerate() {
             let text = it["text"].as_str().unwrap_or_default().to_string();
             if text.trim().is_empty() {
@@ -339,10 +345,12 @@ impl Action for BatchAction {
             if let Some(v) = it["repetition_penalty"].as_f64() {
                 opts.sampling.repetition_penalty = Some(v as f32);
             }
-            if let Some(v) = it["seed"].as_i64() {
-                opts.seed = v.max(0) as u64;
+            match &it["seed"] {
+                serde_json::Value::Null => {}
+                v => opts.seed = v.as_u64().ok_or_else(|| format!("tts batch: request {i}: seed {v} is not a seed (a non-negative integer)"))?,
             }
             let lang = it["lang"].as_str().unwrap_or(&base_lang).to_string();
+            seeds.push(opts.seed);
             reqs.push(crate::batch::BatchRequest { text, lang, opts });
         }
         let n = reqs.len() as u32;
@@ -352,6 +360,7 @@ impl Action for BatchAction {
 
         let mut outcome = Outcome::new()
             .set("count", json!(wavs.len()))
+            .set("seeds", json!(seeds))
             .set("sample_rate", json!(SAMPLE_RATE))
             .set("samples", json!(wavs.iter().map(|w| w.len()).collect::<Vec<_>>()))
             .set("seconds", json!(wavs.iter().map(|w| w.len() as f64 / SAMPLE_RATE as f64).collect::<Vec<_>>()));
@@ -370,6 +379,26 @@ impl Action for BatchAction {
 mod caps_tests {
     use super::*;
     use capability::Registry;
+
+    #[test]
+    fn a_seed_that_is_not_a_non_negative_integer_is_refused_before_any_work() {
+        for bad in [json!(-1), json!(1.5), json!("7")] {
+            let inv = Invocation::new().set("weights_dir", json!("/nonexistent")).set("ckpt", json!("x")).set("text", json!("hi")).set("seed", bad.clone());
+            let err = SynthAction.run(&inv, &mut |_| {}).unwrap_err();
+            assert!(err.contains("seed"), "seed {bad} must be refused as a seed, got: {err}");
+        }
+    }
+
+    #[test]
+    fn a_seedless_request_draws_a_seed_and_the_outcome_echoes_the_one_used() {
+        let inv = Invocation::new();
+        let (a, b) = (gen_opts_from(&inv).unwrap().seed, gen_opts_from(&inv).unwrap().seed);
+        assert_ne!(a, b, "an absent seed must be drawn per request");
+        let given = gen_opts_from(&Invocation::new().set("seed", json!(41))).unwrap();
+        assert_eq!(given.seed, 41);
+        let out = audio_outcome(vec![0.0; 4], 41).unwrap();
+        assert_eq!(out.outputs["seed"], json!(41));
+    }
 
     #[test]
     fn manifest_declares_synth_clone_design_and_batch() {

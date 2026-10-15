@@ -139,6 +139,7 @@ pub struct GenOpts {
     /// Not the same knob as the reference's `max_new_tokens` even though the
     /// units match; see [`GenerationPlan::max_new_tokens`] for the reasoning.
     pub max_frames: usize,
+    /// RNG seed for the sampled streams; [`GenOpts::default`] draws a fresh one.
     pub seed: u64,
     pub min_new: usize,
     /// The caller's explicit sampling choices for BOTH streams - codebook 0 and,
@@ -223,13 +224,13 @@ impl Default for GenOpts {
         // recipe (`do_sample=true, temperature=0.9, top_k=50, top_p=1.0,
         // repetition_penalty=1.05`) as the fallback when there is no checkpoint
         // to read. Pass an explicit `sampling.temperature = Some(0.0)` (the
-        // CLI's `--temp 0`) for the deterministic greedy parity path. The fixed
-        // `seed` keeps a single run reproducible.
+        // CLI's `--temp 0`) for the deterministic greedy parity path. `seed` is
+        // drawn per default; a caller reproduces a run by passing it back.
         //
         // `max_frames` is a caller knob, not a config-resolved one: it sizes the
         // Talker KV cache and the NPU graph bucket, so it does not inherit the
         // reference's 8192-token budget. See [`GenerationPlan::max_new_tokens`].
-        GenOpts { max_frames: 256, seed: 0, min_new: 2, sampling: SamplingRequest::default(), resolved: None }
+        GenOpts { max_frames: 256, seed: data::rng::random_seed(), min_new: 2, sampling: SamplingRequest::default(), resolved: None }
     }
 }
 
@@ -1213,6 +1214,11 @@ mod sampling_tests {
 #[cfg(test)]
 mod cancel_tests {
     use super::*;
+
+    #[test]
+    fn default_gen_opts_draw_a_fresh_seed_each_time() {
+        assert_ne!(GenOpts::default().seed, GenOpts::default().seed);
+    }
     use crate::gen_kv::CpuTalker;
     use crate::gen_kv_mtp::CpuMtp;
     use crate::testsupport::{synthetic_checkpoints, talker_test_cfg, tiny_prompt, tiny_specials, Scratch};

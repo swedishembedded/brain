@@ -37,7 +37,8 @@ fn synth_then_transcribe_recovers_the_text() {
     }
 
     let text = "The quick brown fox jumps over the lazy dog.";
-    let opts = GenOpts { max_frames: 200, ..GenOpts::default() };
+    // seed: the round trip asserts a specific transcript, so the sampled speech must be the same run to run
+    let opts = GenOpts { max_frames: 200, seed: 0, ..GenOpts::default() };
     let wav24 = qwen3tts::pipeline::synth(&paths, &opts, text, "english", &capability::CancelToken::default()).expect("synth");
     assert!(wav24.iter().all(|x| x.is_finite()), "synth produced a non-finite sample");
     let rms = (wav24.iter().map(|x| x * x).sum::<f32>() / wav24.len().max(1) as f32).sqrt();

@@ -156,6 +156,8 @@ pub struct FinetuneOpts {
     pub checkpoint_secs: u64,
     pub rank: u32,
     pub alpha: f32,
+    /// Seed of the adapter/weight init and the batch order; [`FinetuneOpts::default`]
+    /// draws a fresh one. A resumed run must pass the seed its state was saved with.
     pub seed: u64,
 }
 
@@ -176,7 +178,7 @@ impl Default for FinetuneOpts {
             checkpoint_secs: 600,
             rank: 8,
             alpha: 16.0,
-            seed: 1337,
+            seed: data::rng::random_seed(),
         }
     }
 }
