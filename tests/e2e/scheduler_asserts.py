@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 import threading
 import time
@@ -42,7 +43,7 @@ def fire_concurrent(model: str, action: str, params: dict, count: int) -> None:
     def one(i: int) -> None:
         with BrainDBus() as brain:
             try:
-                brain.run(model, action, {**params, "seed": params.get("seed", 0) + i})
+                brain.run(model, action, {**params, "seed": params["seed"] + i})
             except BrainError as e:
                 print(f"  request {i} failed: {e}", file=sys.stderr)
 
@@ -59,8 +60,11 @@ def main() -> int:
     ap.add_argument("--action", default="text2image")
     ap.add_argument("--size", type=int, default=256, help="base width/height")
     ap.add_argument("--steps", type=int, default=8)
+    ap.add_argument("--seed", type=int, default=None, help="base seed of the probe requests; request i uses seed + i, so no two are identical (default: drawn at random and printed)")
     ap.add_argument("--batch-n", type=int, default=4, help="concurrent requests fired for the batching probe")
     args = ap.parse_args()
+    seed = args.seed if args.seed is not None else random.SystemRandom().randrange(2**62)
+    print(f"[seed] probe requests use seeds {seed}..{seed + args.batch_n - 1} (pass --seed {seed} to repeat)")
 
     with BrainDBus() as brain:
         models = brain.models()
@@ -68,7 +72,7 @@ def main() -> int:
             print(f"FATAL: '{args.model}' not served (models: {models})", file=sys.stderr)
             return 2
 
-        base = {"prompt": "scheduler probe", "width": args.size, "height": args.size, "steps": args.steps, "seed": 0}
+        base = {"prompt": "scheduler probe", "width": args.size, "height": args.size, "steps": args.steps, "seed": seed}
 
         # Warm-up outside the timed/measured section, so the first request's cold
         # build (weight upload + graph build for this shape) never gets counted as

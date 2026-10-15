@@ -71,13 +71,13 @@ post() {
 }
 
 @test "an image generation draws a 384x384 PNG and refuses other sizes" {
-  jq -n --arg m "$MODEL" '{model: $m, prompt: "A red apple on a wooden table.", size: "512x512", seed: 7}' >"$CONF_DIR/wrong.body"
+  jq -n --arg m "$MODEL" '{model: $m, prompt: "A red apple on a wooden table.", size: "512x512"}' >"$CONF_DIR/wrong.body"
   local status
   status=$(post wrong /v1/images/generations)
   [ "$status" -eq 400 ] || { cat "$CONF_DIR/wrong.json" >&3; false; }
   jq -e '.error.message | test("384")' "$CONF_DIR/wrong.json"
 
-  jq -n --arg m "$MODEL" '{model: $m, prompt: "A red apple on a wooden table.", size: "384x384", seed: 7}' >"$CONF_DIR/image.body"
+  jq -n --arg m "$MODEL" '{model: $m, prompt: "A red apple on a wooden table.", size: "384x384"}' >"$CONF_DIR/image.body"
   status=$(post image /v1/images/generations)
   [ "$status" -eq 200 ] || { cat "$CONF_DIR/image.json" "$CONF_DIR/serve.log" >&3; false; }
   jq -r '.data[0].b64_json' "$CONF_DIR/image.json" | base64 -d >"$CONF_DIR/apple.png"
@@ -87,11 +87,11 @@ post() {
 }
 
 @test "an image request for several images draws them together, each with its own seed" {
-  jq -n --arg m "$MODEL" '{model: $m, prompt: "A red apple on a wooden table.", size: "384x384", n: 2, seed: 11}' >"$CONF_DIR/pair.body"
+  jq -n --arg m "$MODEL" '{model: $m, prompt: "A red apple on a wooden table.", size: "384x384", n: 2}' >"$CONF_DIR/pair.body"
   local status
   status=$(post pair /v1/images/generations)
   [ "$status" -eq 200 ] || { cat "$CONF_DIR/pair.json" "$CONF_DIR/serve.log" >&3; false; }
   jq -e '.data | length == 2' "$CONF_DIR/pair.json"
-  # Seeds 11 and 12 draw different pictures.
+  # Each image draws its own seed, so the two pictures differ.
   [ "$(jq -r '.data[0].b64_json' "$CONF_DIR/pair.json" | md5sum)" != "$(jq -r '.data[1].b64_json' "$CONF_DIR/pair.json" | md5sum)" ]
 }

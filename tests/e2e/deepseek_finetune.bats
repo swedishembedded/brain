@@ -39,7 +39,7 @@ teardown_file() {
 @test "an adapter trains on a bf16 base read from the checkpoint as downloaded" {
   run "$BRAIN" qwen3 finetune --lora 8 --weights "$REPO_ID" --base-dtype bf16 \
     --adapter acme/tiny:test --dataset "$CONF_DIR/data" --steps 4 --batch 1 \
-    --models-dir "$CONF_DIR/models" --seed 1
+    --models-dir "$CONF_DIR/models"
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
   [[ "$output" == *"trained: loss"* ]]
   [[ "$output" == *"saved:"* ]]
@@ -55,7 +55,7 @@ teardown_file() {
 @test "an adapter trains on an int8 base and is written like any other" {
   run "$BRAIN" qwen3 finetune --lora 8 --weights "$REPO_ID" --base-dtype int8 \
     --adapter acme/tiny:int8 --dataset "$CONF_DIR/data" --steps 4 --batch 1 \
-    --models-dir "$CONF_DIR/models" --seed 1
+    --models-dir "$CONF_DIR/models"
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
   [[ "$output" == *"trained: loss"* ]]
   find "$CONF_DIR/models/$REPO_ID/adapters/acme/tiny/int8" -name '*.safetensors' | grep -q .
@@ -78,7 +78,7 @@ teardown_file() {
   done >"$CONF_DIR/long/train.jsonl"
   run "$BRAIN" --device gpu0 qwen3 finetune --lora 8 --weights "$big" --base-dtype int8 \
     --adapter acme/long:int8 --dataset "$CONF_DIR/long" --steps 2 --batch 1 \
-    --models-dir "$CONF_DIR/models" --seed 1
+    --models-dir "$CONF_DIR/models"
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
   [[ "$output" == *"trained: loss"* ]]
 }
@@ -104,7 +104,7 @@ with open(sys.argv[1], "w") as f:
 PY
   run "$BRAIN" qwen3 finetune --lora 8 --weights "$big" --base-dtype bf16 \
     --adapter acme/tiny:long --dataset "$CONF_DIR/long" --steps 1 --batch 1 \
-    --models-dir "$CONF_DIR/models" --seed 1
+    --models-dir "$CONF_DIR/models"
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
   [[ "$output" == *"pipeline of 2 stages"* ]]
   [[ "$output" == *"trained: loss"* ]]
@@ -123,6 +123,7 @@ with open(sys.argv[1], "w") as f:
     for q in qs * 3:
         f.write(json.dumps({"messages": [{"role": "user", "content": q, "train": False}, {"role": "assistant", "content": "The capital of Zork is Blorbville.", "train": True}], "tools": []}) + "\n")
 PY
+  # seed: the served reply below asserts this 60-step run learned the fact, so the run is pinned
   run "$BRAIN" qwen3 finetune --lora 16 --weights "$REPO_ID" --base-dtype bf16 \
     --adapter acme/zork:v1 --dataset "$CONF_DIR/zork" --steps 60 --lr 3e-4 --batch 4 \
     --models-dir "$CONF_DIR/models" --seed 3
@@ -163,7 +164,7 @@ open(sys.argv[2] + "/val.u32.bin", "wb").write(pack(ids[:2000]))
 open(sys.argv[2] + "/meta.json", "w").write(json.dumps({"vocab_size": 151936, "token_width": 32}))
 PY
   run "$BRAIN" qwen3 finetune "$data" --weights "$REPO_ID" --out "$CONF_DIR/tuned.safetensors" \
-    --steps 3 --batch 2 --block 128 --lr 1e-5 --seed 1 --models-dir "$CONF_DIR/models"
+    --steps 3 --batch 2 --block 128 --lr 1e-5 --models-dir "$CONF_DIR/models"
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
   [[ "$output" == *"trained: loss"* ]]
   [ -s "$CONF_DIR/tuned.safetensors" ]

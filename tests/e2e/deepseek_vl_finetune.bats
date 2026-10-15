@@ -36,6 +36,7 @@ teardown_file() {
 }
 
 @test "the aligner and an adapter train on a bf16 decoder read from the checkpoint as downloaded" {
+  # seed: the loss comparison below is taken over four steps, so the run is pinned
   run "$BRAIN" deepseekvl finetune --weights "$STORE/$REPO_ID" --dataset "$WORK/data" \
     --out "$WORK/out" --steps 4 --lr 1e-4 --seed 1
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
@@ -57,7 +58,7 @@ teardown_file() {
     '{"images":["b.png","a.png"],"messages":[{"role":"user","content":"<image_placeholder><image_placeholder>\nWhich of the two is a photograph?"},{"role":"assistant","content":"The second one."}]}' \
     >"$WORK/two/train.jsonl"
   run "$BRAIN" deepseekvl finetune --weights "$STORE/$REPO_ID" --dataset "$WORK/two" \
-    --out "$WORK/out2" --steps 3 --batch 2 --lr 1e-4 --seed 1
+    --out "$WORK/out2" --steps 3 --batch 2 --lr 1e-4
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
   [[ "$output" == *"trained on 2 example(s)"* ]]
   [ -s "$WORK/out2/adapter.safetensors" ]
@@ -70,6 +71,7 @@ teardown_file() {
   for f in "$STORE/$REPO_ID"/*; do ln -s "$f" "$WORK/models/$REPO_ID/"; done
   cp "$WORK/data/dog.png" "$WORK/learn/dog.png"
   printf '%s\n' '{"image":"dog.png","messages":[{"role":"user","content":"<image_placeholder>\nWhat animal is this?"},{"role":"assistant","content":"That is a Blorbville puppy."}]}' >"$WORK/learn/train.jsonl"
+  # seed: the served reply below asserts this 14-step run learned the answer, so the run is pinned
   run "$BRAIN" deepseekvl finetune --weights "$REPO_ID" --models-dir "$WORK/models" --dataset "$WORK/learn" \
     --out "$WORK/tuned" --steps 14 --lr 3e-4 --seed 1
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
