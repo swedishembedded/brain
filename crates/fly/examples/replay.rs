@@ -32,9 +32,21 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
+/// The seed of the degree-matched shuffle control from `--shuffle-seed`: drawn and printed
+/// when the flag is absent, so a result can be reproduced by passing the printed value back.
+fn experiment_seed() -> u64 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let seed = fly::search::seed_from_args(&args, "--shuffle-seed").unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2)
+    });
+    println!("seed {seed:#x} (pass --shuffle-seed {seed} to reproduce this run)");
+    seed
+}
+
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: replay TUNING.txt   (ARENA=air for flight, CNS=brain for the joined network)");
+        eprintln!("usage: replay TUNING.txt [--shuffle-seed N]   (ARENA=air for flight, CNS=brain for the joined network)");
         std::process::exit(2)
     });
     let tuning = Tuning::load(&path).unwrap_or_else(|e| {
@@ -168,7 +180,7 @@ fn main() {
     // distribution, and their difference is mostly a statement about the
     // noise. Holding the parameters fixed and changing only the graph asks
     // the question directly.
-    let shuffled_wiring = Wiring { shuffle_seed: Some(0x5EED), ..wiring };
+    let shuffled_wiring = Wiring { shuffle_seed: Some(experiment_seed()), ..wiring };
     let model = Model::from_xml(&mj, &model_path).unwrap();
     let mut sf = Fly::new(
         gpu_core::testgpu::dev(&neuro::KERNELS),

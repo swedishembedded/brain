@@ -10,7 +10,7 @@ process with warm in-process weights; name-sharding across cores is what
 turns a ~45 h serial full-SP500 sweep into a few hours of wall clock.
 
 Usage:
-  oos_shard.py --data out/bt/bt --db stocks.db --out out/bt/eval.json
+  oos_shard.py --data out/bt/bt --db stocks.db --out out/bt/eval.json --seed 7
     [--shards 20] [--ctx 120] [--horizon 5] [--step 5] [--nsamples 3]
     [--start 2026-01-01] [--maxorig 0] [--kronos-ft out/bt/ft.weights]
     [--split-manifest out/bt/split_manifest.json]
@@ -45,6 +45,7 @@ ap.add_argument("--kronos-ft", default=None, help=".weights for the kronos_ft mo
 ap.add_argument("--split-manifest", default=None)
 ap.add_argument("--summary-out", default=None)
 ap.add_argument("--k-frac", type=float, default=0.10)
+ap.add_argument("--seed", type=int, required=True, help="seed of the report's negative control (recorded in the metrics json)")
 ap.add_argument("--report-out", default=None, help="metrics json (default <out>.metrics.json)")
 args = ap.parse_args()
 
@@ -130,7 +131,8 @@ subprocess.run([sys.executable, os.path.join(HERE, "merge_records.py"), "--conca
 
 report_out = args.report_out or f"{args.out}.metrics.json"
 cmd = [sys.executable, os.path.join(HERE, "oos_skill_report.py"),
-       args.out, gspc_csv, report_out, "--k-frac", str(args.k_frac)]
+       args.out, gspc_csv, report_out, "--k-frac", str(args.k_frac),
+       "--seed", str(args.seed)]
 if args.split_manifest:
     cmd += ["--split-manifest", args.split_manifest]
 if args.kronos_ft:

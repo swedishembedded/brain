@@ -21,6 +21,19 @@ use promote::stats::sign_test;
 /// and a walking fly covers one to three body lengths per SECOND.
 const BODY_LENGTH_CM: f64 = 0.25;
 
+/// The seed of this experiment from `--seed`: drawn and printed when the flag is absent, so a
+/// result can be reproduced by passing the printed value back. Every condition
+/// runs from the same seed, so the conditions face the same random draws.
+fn experiment_seed() -> u64 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let seed = fly::search::seed_from_args(&args, "--seed").unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2)
+    });
+    println!("seed {seed:#x} (pass --seed {seed} to reproduce this run)");
+    seed
+}
+
 fn main() {
     let mj = MuJoCo::load().unwrap();
     let (neurons, edges) = connectome::find(std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()), "manc").unwrap();
@@ -60,6 +73,7 @@ fn main() {
     }
     let episodes: usize = std::env::var("EPISODES").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
 
+    let seed = experiment_seed();
     let mut results: Vec<(Condition, Vec<f64>, Vec<f64>)> = Vec::new();
     for condition in [
         Condition::Learning,
@@ -82,7 +96,7 @@ fn main() {
         let bound = 1.5 * f.initial_weight_scale();
         f.enable_plasticity(PlasticityParams { eta: 0.02, w_min: -bound, w_max: bound, ..Default::default() }).unwrap();
         println!("{condition:?}: weight clamp +/-{bound:.3}");
-        let mut rng = Lcg::new(0xF1A);
+        let mut rng = Lcg::new(seed);
         let mut dist = Vec::new();
         // Distance per million spikes. The conditions do NOT end up equally
         // active - Learning finishes firing several times more than it

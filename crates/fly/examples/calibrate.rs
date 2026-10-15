@@ -48,12 +48,17 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-const BAND: (f64, f64) = (5.0, 20.0);
-const DT: f64 = 0.002;
-/// Spikes per motor neuron per tick that a cord could plausibly sustain: about
-/// 20 Hz at a 2 ms tick. Not fitted - it is what the target is measured
-/// against, and it comes from physiology rather than from this run.
-const TARGET_RATE: f64 = 0.04;
+/// The seed of this experiment from `--seed`: drawn and printed when the flag is absent, so a
+/// result can be reproduced by passing the printed value back.
+fn experiment_seed() -> u64 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let seed = fly::search::seed_from_args(&args, "--seed").unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2)
+    });
+    println!("seed {seed:#x} (pass --seed {seed} to reproduce this run)");
+    seed
+}
 
 fn main() {
     let which = match std::env::var("CNS").unwrap_or_else(|_| "cord".into()).as_str() {
@@ -176,7 +181,8 @@ fn main() {
     let (ss, sper, _, _) = evaluate(&mut shuffled, &unit);
     println!("  the same on a shuffled cord: score {ss:.4} (rhythm {sper:.3})");
 
-    let mut es = Es::new(knobs, &start, num("SIGMA", 0.35), num("RATE", 0.25), num("SEED", 7)).expect("knobs match");
+    let seed = experiment_seed();
+    let mut es = Es::new(knobs, &start, num("SIGMA", 0.35), num("RATE", 0.25), seed).expect("knobs match");
     let generations: u32 = num("GENERATIONS", 20);
     let pairs: usize = num("PAIRS", 6);
     println!("\n{:>5}  {:>10}  {:>10}  {:>9}  {:>9}  {:>10}", "gen", "best", "mean", "rhythm", "rate", "shuffled");
@@ -214,7 +220,8 @@ fn main() {
         for (k, v) in es.knobs().iter().zip(&best_ever.1) {
             t.set(k.name.clone(), *v);
         }
-        match t.save(&path) {
+        let record = format!("# seed {}\n{}", seed, t.to_text());
+        match std::fs::write(&path, record).map_err(|e| format!("{path}: {e}")) {
             Ok(()) => println!("wrote {path}"),
             Err(e) => eprintln!("{e}"),
         }

@@ -18,6 +18,7 @@ brain-neuro.workspace = true
 # The sign test: 'it learned' has to be a statistic over matched pairs, and
 # `promote` is a leaf crate carrying exactly that.
 brain-promote.workspace = true
+brain-seed.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

@@ -200,3 +200,33 @@ impl Es {
         Generation { index: self.generation, best, mean: mean_score, best_params, centre: self.centre() }
     }
 }
+
+/// The seed of one experiment: the `given` text parsed as a decimal or
+/// `0x`-hex `u64`, or a fresh random seed when nothing was given. `label`
+/// names where the text came from (a flag or a variable), so a refusal can
+/// point at it. A malformed value is an error and never falls back to a
+/// default, because that would run an experiment at a seed nobody asked for.
+pub fn resolve_seed(label: &str, given: Option<&str>) -> Result<u64, String> {
+    match given {
+        None => Ok(seed::random_seed()),
+        Some(text) => seed::parse_seed(text).map_err(|e| format!("{label}: {e}")),
+    }
+}
+
+/// The seed an example's command line asks for: the value of `flag` written
+/// as `--flag N` or `--flag=N` anywhere in `args`, or a fresh random seed when
+/// the flag is absent. A flag with no value, or a value that is not a seed, is
+/// an error.
+pub fn seed_from_args(args: &[String], flag: &str) -> Result<u64, String> {
+    let inline = format!("{flag}=");
+    let mut given = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == flag {
+            given = Some(rest.next().ok_or_else(|| format!("{flag} needs a value"))?.as_str());
+        } else if let Some(value) = arg.strip_prefix(&inline) {
+            given = Some(value);
+        }
+    }
+    resolve_seed(flag, given)
+}

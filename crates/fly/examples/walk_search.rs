@@ -41,6 +41,18 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
+/// The seed of this experiment from `--seed`: drawn and printed when the flag is absent, so a
+/// result can be reproduced by passing the printed value back.
+fn experiment_seed() -> u64 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let seed = fly::search::seed_from_args(&args, "--seed").unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2)
+    });
+    println!("seed {seed:#x} (pass --seed {seed} to reproduce this run)");
+    seed
+}
+
 fn main() {
     let mj = MuJoCo::load().unwrap();
     let which = match std::env::var("CNS").unwrap_or_default().as_str() {
@@ -51,7 +63,12 @@ fn main() {
     // The structural control. A degree-matched shuffle preserves every
     // neuron's in-degree and the weight multiset exactly and destroys the
     // wiring; a search that does as well on it was not using the connectome.
-    let shuffle: Option<u64> = std::env::var("SHUFFLE").ok().map(|v| v.parse().unwrap_or(0x5EED));
+    let shuffle: Option<u64> = std::env::var("SHUFFLE").ok().map(|v| {
+        fly::search::resolve_seed("$SHUFFLE", Some(&v)).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2)
+        })
+    });
     let wiring = Wiring { shuffle_seed: shuffle, ..Wiring::default() };
     if let Some(seed) = shuffle {
         println!("SHUFFLED CONNECTOME (seed {seed:#x}): this is the control, not the animal");
@@ -235,7 +252,8 @@ fn main() {
     println!("\nconnectome as imported: score {base:.5} (net {base_net:.4} cm, gait {base_gait:.3})");
     println!("\n{:>4}  {:>12}  {:>12}  {:>10}  {:>8}", "gen", "best", "mean", "net cm", if food.is_some() { "range" } else if air { "airborne" } else { "gait" });
 
-    let mut es = Es::new(knobs, &start, num("SIGMA", 0.6), num("RATE", 0.5), num("SEED", 0xF1E5u64)).unwrap();
+    let seed = experiment_seed();
+    let mut es = Es::new(knobs, &start, num("SIGMA", 0.6), num("RATE", 0.5), seed).unwrap();
     let (mut best_ever, mut best_params) = (base, start.clone());
     for _ in 0..generations {
         let g = es.step(pairs, |v, seed| evaluate(&mut f, v, seed).0);
@@ -278,7 +296,8 @@ fn main() {
     // wire: a person can watch what this found.
     if let Ok(path) = std::env::var("OUT") {
         let t = fly::tuning::from_knobs(es.knobs(), &best_params);
-        match t.save(&path) {
+        let record = format!("# seed {}\n{}", seed, t.to_text());
+        match std::fs::write(&path, record).map_err(|e| format!("{path}: {e}")) {
             Ok(()) => println!("\nwrote {path}; watch it with `sample-fly-interactive --tuning {path}`"),
             Err(e) => eprintln!("could not write {path}: {e}"),
         }

@@ -23,7 +23,7 @@ Leak-safety is the harness's job (post-cutoff origins, past-only normalization).
 This step only ranks and scores what it produced. Small samples are noise-dominated:
 the honest read is RankIC significance (t-stat), not a single cumulative-return line.
 
-Usage: oos_skill_report.py <eval.json> <gspc.csv> <out_metrics.json>
+Usage: oos_skill_report.py <eval.json> <gspc.csv> <out_metrics.json> --seed N
          [--k 6 | --k-frac 0.10] [--cost-bps 5] [--split-manifest m.json]
          [--ft-model kronos_ft --base-model kronos] [--summary-out backtest_summary.json]
 """
@@ -42,7 +42,7 @@ ap.add_argument("--k-frac", type=float, default=None,
                 help="names per side as a fraction of the week's cross-section (overrides --k)")
 ap.add_argument("--cost-bps", type=float, default=5.0, help="per side per rebalance")
 ap.add_argument("--stress-bps", type=float, default=10.0, help="stress cost, reported not gated")
-ap.add_argument("--seed", type=int, default=7)
+ap.add_argument("--seed", type=int, required=True, help="seed of the shuffled-prediction negative control")
 ap.add_argument("--split-manifest", default=None, help="split_manifest.json from prep_backtest_data")
 ap.add_argument("--ft-model", default=None, help="model name of the fine-tuned entry (e.g. kronos_ft)")
 ap.add_argument("--base-model", default=None, help="model name of the base entry (e.g. kronos)")
@@ -215,7 +215,7 @@ manifest = json.load(open(args.split_manifest)) if args.split_manifest else None
 ft_names = set(manifest["ft"]) if manifest else None
 hold_names = set(manifest["holdout"]) if manifest else None
 
-out = {"meta": META, "k": args.k, "k_frac": args.k_frac,
+out = {"meta": META, "seed": args.seed, "k": args.k, "k_frac": args.k_frac,
        "cost_bps": args.cost_bps, "stress_bps": args.stress_bps,
        "stderr": "newey-west" if STEP < H else "iid",
        "survivorship_note": ("universe = current constituents applied retroactively; "

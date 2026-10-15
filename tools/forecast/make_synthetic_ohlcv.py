@@ -45,8 +45,11 @@ the data. Bar ranges therefore inherit the volatility clustering too.
 Only numpy is needed (already in requirements.txt).
 
 Usage:
-  tools/forecast/make_synthetic_ohlcv.py --out crates/kronos/tests/data/synthetic_hourly.csv
-    [--bars 720] [--seed 18] [--horizon 6] [--start 2026-01-05T00:00:00]
+  tools/forecast/make_synthetic_ohlcv.py --out crates/kronos/tests/data/synthetic_hourly.csv --seed 18
+    [--bars 720] [--horizon 6] [--start 2026-01-05T00:00:00]
+
+`--seed` is required and echoed in the run's output; `--seed 18` regenerates
+the committed series.
 """
 import argparse
 import datetime as dt
@@ -231,11 +234,11 @@ def main() -> int:
     ap.add_argument("--out", required=True, help="CSV path to write")
     ap.add_argument("--bars", type=int, default=720, help="number of hourly bars (default 720 = 30 days)")
     # Each seed is ONE draw of a heavy-tailed GARCH process, and 720 bars is
-    # short enough that draws differ a lot: the default is the seed whose
-    # realized return sd lands closest to `--sigma`, so the shipped series is a
+    # short enough that draws differ a lot: the committed series is the seed
+    # (18) whose realized return sd lands closest to `--sigma`, so it is a
     # representative sample of the configured process rather than a quiet or a
     # violent outlier.
-    ap.add_argument("--seed", type=int, default=18)
+    ap.add_argument("--seed", type=int, required=True, help="seed of the draw (18 regenerates the committed series)")
     ap.add_argument("--horizon", type=int, default=6, help="tail length the report scores (default 6, the demo's horizon)")
     ap.add_argument("--start", default="2026-01-05T00:00:00", help="first bar timestamp, ISO 8601 (default a Monday)")
     ap.add_argument("--drift", type=float, default=8.0e-5, help="per-bar log drift")
@@ -274,7 +277,7 @@ def main() -> int:
                 f"{o[i]:.4f},{hi[i]:.4f},{lo[i]:.4f},{c[i]:.4f},{v[i]:.1f}\n"
             )
 
-    print(f"wrote {args.out}: {args.bars} hourly bars {stamps[0]:%Y-%m-%d %H:%M} .. {stamps[-1]:%Y-%m-%d %H:%M}")
+    print(f"wrote {args.out}: {args.bars} hourly bars {stamps[0]:%Y-%m-%d %H:%M} .. {stamps[-1]:%Y-%m-%d %H:%M} (seed {args.seed})")
     print(report(dev, hi, lo, c, v, args.drift, args.kappa, args.p0, args.horizon))
     return 0
 

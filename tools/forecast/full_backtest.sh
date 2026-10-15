@@ -12,7 +12,7 @@
 # Env (defaults follow a 52-weekly-origin pre-registered protocol):
 #   DB=stocks.db  OUT=out/bt  TOK=<tokenizer dir>  BASE_DEC=<decoder dir>
 #   NAMES=0 (full universe)  BT_BARS=400  FT_BARS=400  OOS_BARS=260  EMBARGO=10
-#   SEED=7  CTX=120  HOR=5  STEP=5  NSAMPLES=3  START=<auto: manifest first_origin>
+#   SEED=<drawn and printed when unset>  CTX=120  HOR=5  STEP=5  NSAMPLES=3  START=<auto: manifest first_origin>
 #   SHARDS=(cores-2)  EPOCHS=2  LR=5e-4  LORA=8  FT_DEVICE=vulkan
 #   SUMMARY=out/backtest_summary.json
 set -euo pipefail
@@ -29,7 +29,10 @@ BT_BARS="${BT_BARS:-400}"
 FT_BARS="${FT_BARS:-400}"
 OOS_BARS="${OOS_BARS:-260}"
 EMBARGO="${EMBARGO:-10}"
-SEED="${SEED:-7}"
+if [ -z "${SEED:-}" ]; then
+    SEED="$(python3 -c 'import random; print(random.SystemRandom().randrange(2**63))')"
+    echo "no SEED given, using seed $SEED (SEED=$SEED reproduces this run)"
+fi
 CTX="${CTX:-120}"
 HOR="${HOR:-5}"
 STEP="${STEP:-5}"
@@ -64,7 +67,7 @@ echo "== [3/4] sharded base+ft sweep ($SHARDS shards) =="
 BRAIN_KRONOS_TOKENIZER="$TOK" BRAIN_KRONOS_DECODER="$BASE_DEC" \
 python3 "$HERE/oos_shard.py" --data "$OUT/bt" --db "$DB" --out "$OUT/eval.json" \
     --shards "$SHARDS" --ctx "$CTX" --horizon "$HOR" --step "$STEP" \
-    --nsamples "$NSAMPLES" --start "$START" \
+    --nsamples "$NSAMPLES" --start "$START" --seed "$SEED" \
     --kronos-ft "$OUT/ft.weights" --split-manifest "$OUT/split_manifest.json" \
     --summary-out "$SUMMARY" --k-frac 0.10
 

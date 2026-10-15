@@ -27,7 +27,7 @@ horizon) separates T0 from the first origin so no fine-tune label overlaps
 any graded week. The manifest records the exact first-origin date.
 
 Usage: prep_backtest_data.py --db <stocks.db> --out <dir> [--names 0]
-         [--bt-bars 400] [--ft-bars 400] [--oos-bars 260] [--embargo 10] [--seed 7]
+         [--bt-bars 400] [--ft-bars 400] [--oos-bars 260] [--embargo 10] --seed 7
 """
 import argparse
 import glob
@@ -46,7 +46,7 @@ ap.add_argument("--bt-bars", type=int, default=400)
 ap.add_argument("--ft-bars", type=int, default=400)
 ap.add_argument("--oos-bars", type=int, default=260, help="graded OOS window (52 weekly origins * 5)")
 ap.add_argument("--embargo", type=int, default=10, help="bars between T0 and the first origin")
-ap.add_argument("--seed", type=int, default=7)
+ap.add_argument("--seed", type=int, required=True, help="seed of the liquidity-stratified ft/holdout split (recorded in split_manifest.json)")
 args = ap.parse_args()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
