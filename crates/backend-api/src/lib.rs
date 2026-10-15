@@ -294,15 +294,17 @@ pub enum DType {
     /// device packing).
     Q8K,
     /// bitsandbytes NF4: the identical physical layout as `Q4` (4-bit codes,
-    /// 8 per `u32`, one per-32-element-group `f32` scale, int8 activations -
-    /// W4A8, same reason `Q4` is) but a NON-UNIFORM 16-entry codebook instead
-    /// of `Q4`'s uniform `scale*code`: `scale * NF4_LUT[code]`, `code` read
+    /// 8 per `u32`, one per-32-element-group `f32` scale) but a NON-UNIFORM
+    /// 16-entry codebook instead of `Q4`'s uniform `scale*code`:
+    /// `scale * NF4_LUT[code]`, `code` read
     /// UNSIGNED (0..15, no sign-extension - the codebook itself is signed,
     /// the nibble is a plain index into it). See `model::lut4::NF4_LUT` for
     /// the actual quantile values and `model::lut4`'s module doc for why a
     /// non-uniform codebook reconstructs real weight distributions (which
     /// cluster near zero, roughly Gaussian) more accurately than `Q4`'s
-    /// evenly-spaced levels at the identical 4-bit budget.
+    /// evenly-spaced levels at the identical 4-bit budget. As a
+    /// `model::ops::Weight` it is a FLOAT-read frozen-weight tier (dequantised
+    /// per load against f32 activations, QLoRA), needing no device capability.
     NF4,
     /// OCP Microscaling FP4 (E2M1): same physical layout as `NF4` (4-bit
     /// codes, 8/`u32`, per-32-group `f32` scale, W4A8), a DIFFERENT fixed
@@ -613,17 +615,16 @@ impl DType {
                     DType::F32
                 }
             }
-            // Both new 4-bit codebook tiers are W4A8, exactly like `Q4` -
-            // only the codebook differs, and the codebook lookup happens in
-            // the GEMM kernel, not in anything `NumericSupport` gates
-            // separately. See `DType::NF4`'s own doc comment.
-            DType::NF4 => {
-                if numeric.int8_dot {
-                    DType::NF4
-                } else {
-                    DType::F32
-                }
-            }
+            // NF4 is the float-read frozen-weight tier (QLoRA): the kernel
+            // variants decode `NF4_LUT[code] * scale` in plain WGSL integer/
+            // select arithmetic and multiply it with f32 activations, so it
+            // needs no device capability at all (like the CPU JIT, it runs
+            // everywhere). The W4A8 `matmul_q4_gemv_nf4` kernel is a separate,
+            // int8-dot-gated path that no `Weight` reaches.
+            DType::NF4 => DType::NF4,
+            // `F4E2M1` is W4A8, exactly like `Q4` - only the codebook
+            // differs, and the lookup happens in the GEMM kernel, not in
+            // anything `NumericSupport` gates separately.
             DType::F4E2M1 => {
                 if numeric.int8_dot {
                     DType::F4E2M1
@@ -771,12 +772,10 @@ mod dtype_tests {
         ] {
             // Full support: promotes to itself.
             assert_eq!(dtype.promote(&full), dtype, "{dtype:?} with full support must promote to itself");
-            // Zero support: promotes to F32 (F32 is already F32).
-            assert_eq!(
-                dtype.promote(&NumericSupport::BASELINE),
-                DType::F32,
-                "{dtype:?} with no support must promote to F32"
-            );
+            // Zero support: promotes to F32 (F32 is already F32), except the
+            // capability-free NF4 storage tier (decoded in plain WGSL).
+            let want = if dtype == DType::NF4 { DType::NF4 } else { DType::F32 };
+            assert_eq!(dtype.promote(&NumericSupport::BASELINE), want, "{dtype:?} with no support must promote to {want:?}");
         }
     }
 

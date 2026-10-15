@@ -188,6 +188,65 @@ pub fn int8_weight_variant(name: &str, src: &'static str, binding: &str, scales:
     int8_scaled_variant(vname, src, binding, scales, |wi| format!("{wi} >> 5u"))
 }
 
+/// The 16-entry bitsandbytes NF4 codebook (`create_normal_map` quantile
+/// values), ascending: code `i` decodes to `NF4_CODEBOOK[i]` times its group
+/// scale. The single source of the table: `model::lut4::NF4_LUT` (the host
+/// quantizer) re-exports it, and [`nf4_weight_variant`] renders it into the
+/// WGSL decode helper, so host and device cannot disagree.
+pub const NF4_CODEBOOK: [f32; 16] = [
+    -1.0,
+    -0.696_192_8,
+    -0.525_073_05,
+    -0.394_917_5,
+    -0.284_441_38,
+    -0.184_773_43,
+    -0.091_050_036,
+    0.0,
+    0.079_580_3,
+    0.160_930_2,
+    0.246_112_3,
+    0.337_915_24,
+    0.440_709_83,
+    0.562_617,
+    0.722_956_84,
+    1.0,
+];
+
+/// WGSL source of `fn nf4_lut(c: u32) -> f32`: [`NF4_CODEBOOK`] as a 4-level
+/// binary `select` tree on the code bits. The CUDA/WGSL subset this tree
+/// compiles avoids indexed constant arrays, and a scalar `select` tree is what
+/// `matmul_q4_gemv_nf4` already uses.
+fn nf4_lut_fn() -> String {
+    fn tree(lo: usize, width: usize) -> String {
+        if width == 1 {
+            return format!("{:?}", NF4_CODEBOOK[lo]);
+        }
+        let half = width / 2;
+        format!("select({}, {}, (c & {}u) != 0u)", tree(lo, half), tree(lo + half, half), half)
+    }
+    format!("fn nf4_lut(c: u32) -> f32 {{ return {}; }}\n\n", tree(0, 16))
+}
+
+/// The weight-only NF4 sibling of [`int8_weight_variant`]: rewrites the f32
+/// weight binding `binding` of a matrix kernel into a packed 4-bit one - eight
+/// codes to a `u32` word, code `b` at bits `4b` (`model::lut4`'s layout) - and
+/// decodes each load as `NF4_CODEBOOK[code] * scales[group]`, the scale of a
+/// 32-weight group read from a new storage binding `scales` (an
+/// `array<f32>`, added after the kernel's last binding). The activations stay
+/// f32 and the accumulation stays f32: nothing is quantised but the stored
+/// weight (QLoRA's semantic, unlike the W4A8 `matmul_q4_gemv_nf4`).
+///
+/// The flat weight index `wi = row * k + col` names both the word (`wi >> 3`)
+/// and the group (`wi >> 5`), which holds for rows a multiple of 32 wide.
+/// Same bare-identifier index precondition as [`dtype_variant`]. Named
+/// `"{name}#{binding}=nf4"`.
+pub fn nf4_weight_variant(name: &str, src: &'static str, binding: &str, scales: &str) -> Result<Variant, String> {
+    let vname = format!("{name}#{binding}=nf4");
+    packed_scaled_variant(vname, src, binding, scales, &nf4_lut_fn(), |wi| {
+        format!("(nf4_lut(({binding}[{wi} >> 3u] >> (({wi} & 7u) * 4u)) & 15u) * {scales}[{wi} >> 5u])")
+    })
+}
+
 /// The KV-cache sibling of [`int8_weight_variant`]: rewrites the f32 pool
 /// binding `binding` (K or V of a paged cache) into packed int8 - four
 /// elements to a `u32` word, little-endian, the layout
@@ -211,8 +270,22 @@ pub fn int8_kv_variant(name: &str, src: &'static str, binding: &str, scales: &st
 
 /// What [`int8_weight_variant`] and [`int8_kv_variant`] share: pack `binding`
 /// as int8, append the `scales` binding, and decode each load as
-/// `scales[scale_index(wi)] * int8`. Interned by `(source, variant name)`.
+/// `scales[scale_index(wi)] * int8`.
 fn int8_scaled_variant(vname: String, src: &'static str, binding: &str, scales: &str, scale_index: impl Fn(&str) -> String) -> Result<Variant, String> {
+    packed_scaled_variant(vname, src, binding, scales, "", |wi| {
+        format!(
+            "(f32(bitcast<i32>(((({binding}[{wi} >> 2u]) >> (({wi} & 3u) * 8u)) & 255u) << 24u) >> 24u) * {scales}[{}])",
+            scale_index(wi)
+        )
+    })
+}
+
+/// What every scaled packed variant shares: re-declare `binding` as
+/// `array<u32>`, append the f32 `scales` binding after the kernel's last one,
+/// insert `helpers` (WGSL functions the decode expression calls) before the
+/// entry point, and replace each `binding[IDENT]` load with `decode(IDENT)`.
+/// Interned by `(source, variant name)`.
+fn packed_scaled_variant(vname: String, src: &'static str, binding: &str, scales: &str, helpers: &str, decode: impl Fn(&str) -> String) -> Result<Variant, String> {
     static CACHE: OnceLock<Mutex<HashMap<(usize, String), Variant>>> = OnceLock::new();
     let key = (src.as_ptr() as usize, vname.clone());
     let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
@@ -225,16 +298,12 @@ fn int8_scaled_variant(vname: String, src: &'static str, binding: &str, scales: 
     let code = blank_comments(&with_decl);
     let last = find_all_bindings(&code).into_iter().max().ok_or_else(|| format!("{vname}: the kernel declares no `@binding`"))?;
     let entry_at = code.find("@compute").ok_or_else(|| format!("{vname}: the kernel has no `@compute` entry point"))?;
-    let mut with_scales = String::with_capacity(with_decl.len() + 96);
+    let mut with_scales = String::with_capacity(with_decl.len() + 96 + helpers.len());
     with_scales.push_str(&with_decl[..entry_at]);
     with_scales.push_str(&format!("@group(0) @binding({}) var<storage, read> {scales}: array<f32>;\n\n", last + 1));
+    with_scales.push_str(helpers);
     with_scales.push_str(&with_decl[entry_at..]);
-    let rewritten = rewrite_loads_with(&with_scales, binding, |wi| {
-        format!(
-            "(f32(bitcast<i32>(((({binding}[{wi} >> 2u]) >> (({wi} & 3u) * 8u)) & 255u) << 24u) >> 24u) * {scales}[{}])",
-            scale_index(wi)
-        )
-    })?;
+    let rewritten = rewrite_loads_with(&with_scales, binding, decode)?;
 
     let entry: Variant = (Box::leak(vname.into_boxed_str()), Box::leak(rewritten.into_boxed_str()));
     cache.insert(key, entry);
@@ -1451,6 +1520,24 @@ mod tests {
         assert!(src.contains("* (f32(bitcast<i32>") && src.contains("* ws[wi >> 5u])"), "the weight load is decoded: {src}");
         // The same call is the same variant.
         assert_eq!(int8_weight_variant("matmul", crate::MATMUL, "w", "ws").unwrap().1.as_ptr(), src.as_ptr());
+    }
+
+    /// The NF4 weight variant packs eight codes to a word, scales per 32
+    /// weights, and renders the one codebook ([`NF4_CODEBOOK`]) into the decode
+    /// helper - for all four matrix kernels a frozen-base trainer reads.
+    #[test]
+    fn the_nf4_weight_variant_packs_codes_and_renders_the_codebook() {
+        for (name, kernel) in [("matmul", crate::MATMUL), ("matmul_reg3", crate::MATMUL_REG3), ("matmul_dx", crate::MATMUL_DX), ("matmul_dx_reg", crate::MATMUL_DX_REG)] {
+            let (vname, src) = nf4_weight_variant(name, kernel, "w", "ws").unwrap();
+            assert_eq!(vname, format!("{name}#w=nf4"));
+            assert!(src.contains("array<u32>;") && src.contains(" ws: array<f32>;"), "{name}: packed weight plus scale binding");
+            assert!(src.contains("nf4_lut((w[wi >> 3u] >> ((wi & 7u) * 4u)) & 15u) * ws[wi >> 5u]"), "{name}: the load is decoded: {src}");
+            assert_eq!(nf4_weight_variant(name, kernel, "w", "ws").unwrap().1.as_ptr(), src.as_ptr(), "{name}: interned");
+        }
+        let (_, src) = nf4_weight_variant("matmul", crate::MATMUL, "w", "ws").unwrap();
+        for v in NF4_CODEBOOK {
+            assert!(src.contains(&format!("{v:?}")), "codebook entry {v:?} is rendered into the helper");
+        }
     }
 
     /// The KV-cache sibling of the weight variant: one scale per `head_dim`

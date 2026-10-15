@@ -41,27 +41,11 @@
 use crate::int8::GROUP;
 
 /// The standard bitsandbytes NF4 codebook (`create_normal_map`'s quantile
-/// values), ascending - code `i` (`0..16`) maps to `NF4_LUT[i]`. A well-known
-/// public constant (reproduced identically across every open NF4
-/// implementation this format has); not derived here, just pinned.
-pub const NF4_LUT: [f32; 16] = [
-    -1.0,
-    -0.696_192_8,
-    -0.525_073_05,
-    -0.394_917_5,
-    -0.284_441_38,
-    -0.184_773_43,
-    -0.091_050_036,
-    0.0,
-    0.079_580_3,
-    0.160_930_2,
-    0.246_112_3,
-    0.337_915_24,
-    0.440_709_83,
-    0.562_617,
-    0.722_956_84,
-    1.0,
-];
+/// values), ascending - code `i` (`0..16`) maps to `NF4_LUT[i]`. The table
+/// itself lives in `kernels::template::NF4_CODEBOOK`, because the device decode
+/// helper of the float-read NF4 weight tier is generated from it: one source
+/// for host quantizer and kernels.
+pub const NF4_LUT: [f32; 16] = kernels::template::NF4_CODEBOOK;
 
 /// The OCP Microscaling FP4 (E2M1) codebook: 1 sign bit (nibble bit 3) + 2
 /// exponent bits + 1 mantissa bit (bias 1). Magnitudes `{0, 0.5, 1, 1.5, 2,
@@ -158,6 +142,17 @@ mod tests {
         }
         assert_eq!(NF4_LUT[0], -1.0);
         assert_eq!(NF4_LUT[15], 1.0);
+    }
+
+    /// The table is the published bitsandbytes constant, not just any sorted
+    /// set: pin entries against the reference values (single-precision
+    /// rounding of the `create_normal_map` quantiles).
+    #[test]
+    fn nf4_lut_matches_the_published_bitsandbytes_values() {
+        let published = [-0.6961928009986877f64, -0.5250730514526367, -0.39491748809814453, -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.0, 0.07958029955625534, 0.16093020141124725, 0.24611230194568634, 0.33791524171829224, 0.44070982933044434, 0.5626170039176941, 0.7229568362236023];
+        for (got, want) in NF4_LUT[1..15].iter().zip(published) {
+            assert!((*got as f64 - want).abs() < 1e-7, "{got} vs {want}");
+        }
     }
 
     #[test]

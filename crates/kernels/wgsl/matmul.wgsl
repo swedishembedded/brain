@@ -21,6 +21,13 @@
 // gate/up/down, and the (weight-tied) lm_head. One invocation per output
 // element; the K-loop is plain fp32 so it runs on any compute capability.
 
+// Frozen-base variants of the `w` binding, rewritten at registration time (this
+// file stays the single source): `kernels::template::int8_weight_variant`
+// (`#w=w8`) and `kernels::template::nf4_weight_variant` (`#w=nf4`) read
+// packed int8 / 4-bit codebook weights, decoded per load as value * group
+// scale against the f32 activations - nothing but the stored weight is
+// quantised. Every `w[wi]` load below therefore indexes through a bare `wi`.
+
 struct Params {
     m: u32,
     k: u32,

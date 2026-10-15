@@ -268,6 +268,26 @@ mod kname {
     /// dtype knob to get wrong.
     pub const MATMUL_DW: &str = "matmul_dw";
 
+    // --- frozen-base training tier: float-read NF4 and the tiled bf16 dx ---
+    //
+    // NOT in `ALL`: a model that never trains over a quantized/bf16 base does
+    // not have to register them (`Ops::new` would otherwise refuse every
+    // existing kernel list). They are looked up when first dispatched and a
+    // missing one is a named panic - register `training_kernel_list()`.
+
+    /// `matmul.wgsl` reading a NF4 weight (`kernels::template::nf4_weight_variant`):
+    /// the naive one-thread-per-output forward. Bindings `x, w, out, ws`.
+    pub const MATMUL_NF4: &str = "matmul#w=nf4";
+    /// `matmul_reg3.wgsl` reading a NF4 weight: the 128x128 register-tiled forward.
+    pub const MATMUL_REG3_NF4: &str = "matmul_reg3#w=nf4";
+    /// `matmul_dx.wgsl` reading a NF4 weight: the naive input gradient.
+    pub const MATMUL_DX_NF4: &str = "matmul_dx#w=nf4";
+    /// `matmul_dx_reg.wgsl` reading a NF4 weight: the tiled input gradient.
+    pub const MATMUL_DX_REG_NF4: &str = "matmul_dx_reg#w=nf4";
+    /// `matmul_dx_reg.wgsl` reading a bf16 weight: the tiled input gradient of
+    /// the bf16 tier (`MATMUL_DX_BF16` is its naive twin).
+    pub const MATMUL_DX_REG_BF16: &str = "matmul_dx_reg#w=bf16";
+
     pub const ALL: &[&str] = &[
         MATMUL,
         MATMUL_GEMV,
@@ -450,6 +470,38 @@ pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
     })
 }
 
+/// The kernels a frozen-base trainer needs beyond the [`REQUIRED_KERNELS`]
+/// facade set: the tiled bf16 input gradient and the float-read NF4 forward and
+/// input-gradient pairs (naive and tiled). A model that builds its own kernel
+/// list appends this slice; [`training_kernel_list`] is the ready-made union
+/// with [`kernel_list`]. Kept out of [`REQUIRED_KERNELS`] on purpose: an `Ops`
+/// that never trains over an NF4 or bf16 base must not have to register them.
+#[must_use]
+pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let nf4 = |name, src| {
+            kernels::template::nf4_weight_variant(name, src, "w", "ws").expect("brain-kernels ships every NF4 weight variant")
+        };
+        vec![
+            kernels::template::dtype_variant("matmul_dx_reg", kernels::MATMUL_DX_REG, "w", Dtype::BF16)
+                .expect("brain-kernels ships the bf16 tiled dx variant"),
+            nf4("matmul", kernels::MATMUL),
+            nf4("matmul_reg3", kernels::MATMUL_REG3),
+            nf4("matmul_dx", kernels::MATMUL_DX),
+            nf4("matmul_dx_reg", kernels::MATMUL_DX_REG),
+        ]
+    })
+}
+
+/// [`kernel_list`] plus [`frozen_base_kernels`]: the list an `Ops` that trains
+/// over an NF4 or bf16 frozen base feeds `Gpu::new`.
+#[must_use]
+pub fn training_kernel_list() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| kernel_list().iter().chain(frozen_base_kernels()).copied().collect())
+}
+
 /// Assert `list` (the `(name, wgsl_source)` pairs a caller is about to feed
 /// `Gpu::new`/`gpu_core::testgpu::dev`, or has already registered on some
 /// other `Gpu` it plans to build an [`Ops`] from) names every kernel in
@@ -514,6 +566,14 @@ pub enum Weight {
     /// Activations stay int8 - see
     /// this module's doc comment on the offset-arithmetic rule this implies.
     Q4 { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32 },
+    /// NF4 frozen-weight tier (QLoRA): `w` packed `[n, k/8]` u32, code `b` of a
+    /// word at bits `4b` (`model::lut4::quantize_weight_lut4`'s layout with
+    /// `NF4_LUT`), `s` the group-wise `[n, k/32]` f32 scale. Unlike [`Weight::Q4`]
+    /// this tier is FLOAT-read: the `#w=nf4` kernel variants decode
+    /// `NF4_LUT[code] * scale` per load and multiply it with the f32
+    /// activations, so nothing but the stored weight is quantised and one copy
+    /// serves both `x * W^T` and `dY * W`.
+    NF4 { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32 },
     /// The canonical brain K-quant device layout (M8-M11, byte-compressed in
     /// M14; see `crate::kquant`'s module doc for the full shape/correction-
     /// term derivation) - ONE variant for all three device instantiations,
@@ -573,6 +633,7 @@ impl Weight {
             Weight::F16 { .. } => Dtype::F16,
             Weight::I8 { .. } => Dtype::I8,
             Weight::Q4 { .. } => Dtype::Q4,
+            Weight::NF4 { .. } => Dtype::NF4,
             // `affine` picks Q4_K vs Q5_K by `bits` (both group=32); a
             // non-affine (Q6_K) weight reuses `Dtype::I8` - it is, from the
             // selector's perspective, exactly `I8` with a different
@@ -609,6 +670,7 @@ impl Weight {
             | Weight::F16 { n, .. }
             | Weight::I8 { n, .. }
             | Weight::Q4 { n, .. }
+            | Weight::NF4 { n, .. }
             | Weight::KQuant { n, .. } => *n,
         }
     }
@@ -620,6 +682,7 @@ impl Weight {
             | Weight::F16 { k, .. }
             | Weight::I8 { k, .. }
             | Weight::Q4 { k, .. }
+            | Weight::NF4 { k, .. }
             | Weight::KQuant { k, .. } => *k,
         }
     }
@@ -629,11 +692,11 @@ impl Weight {
     /// asked for, never wider than what the device can execute - then
     /// uploads. A caller never hand-picks a buffer layout itself.
     ///
-    /// `want` must be `F32`, `BF16`, `F16`, `I8`, or `Q4`.
+    /// `want` must be `F32`, `BF16`, `F16`, `I8`, `Q4`, or `NF4`.
     pub fn upload(ops: &Ops, raw: &[f32], n: usize, k: usize, want: Dtype) -> Weight {
         assert_eq!(raw.len(), n * k, "Weight::upload: raw len {} != n*k ({n}*{k})", raw.len());
         assert!(
-            matches!(want, Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::I8 | Dtype::Q4),
+            matches!(want, Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::I8 | Dtype::Q4 | Dtype::NF4),
             "Weight::upload: {want:?} weights are not implemented yet"
         );
         match want.promote(&ops.caps.numeric) {
@@ -690,19 +753,18 @@ impl Weight {
             Dtype::Q4K | Dtype::Q8K => {
                 unreachable!("Weight::upload: {want:?} is refused by the assert above -- build a Weight::KQuant directly from gguf::kquant's own packed output instead")
             }
-            // M8.5 added `NF4`/
-            // `F4E2M1` as `DType` tiers and their own `model::lut4` host
-            // quantize/dequantize pair plus a device kernel
-            // (`matmul_q4_gemv_nf4`/`matmul_q4_gemv_f4e2m1`), but deliberately
-            // did NOT wire a `Weight::NF4`/`Weight::F4E2M1` arm into this
-            // façade this session - that migration (mirroring what B7 did for
-            // Q4) is a clearly-scoped follow-up, not attempted half-done here.
-            // The `assert!` above already refuses both before this match
-            // runs, so this arm is unreachable in practice, same as `Q4K`/
-            // `Q8K` above and for the same reason: loud, not a silent
-            // fallthrough.
-            Dtype::NF4 | Dtype::F4E2M1 => {
-                unreachable!("Weight::upload: {want:?} is refused by the assert above -- model::lut4 provides the host quantize/dequantize pair and the device kernel exists, but no Weight::{want:?} façade arm has been built yet (M8.5 follow-up)")
+            Dtype::NF4 => {
+                let (packed, scales) = crate::lut4::quantize_weight_lut4(raw, n, k, &crate::lut4::NF4_LUT);
+                let w = ops.gpu.storage(packed.len() as u64);
+                ops.gpu.write(&w, &packed);
+                let s = ops.gpu.storage_init("weight_scale_nf4", &scales);
+                Weight::NF4 { w, s, n: n as u32, k: k as u32 }
+            }
+            // `F4E2M1` has its host quantize/dequantize pair and a W4A8 decode
+            // kernel (`matmul_q4_gemv_f4e2m1`) but no `Weight` arm: nothing
+            // trains over it. The `assert!` above refuses it before this match.
+            Dtype::F4E2M1 => {
+                unreachable!("Weight::upload: {want:?} is refused by the assert above -- no Weight::F4E2M1 facade arm has been built")
             }
             // M8.6 added `F8E4M3`/`F8E5M2` as `DType` tiers, `kernels::
             // template::f8e4m3_decode_expr`/`f8e5m2_decode_expr`, and a
@@ -1378,6 +1440,21 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
+            // NF4 is float-read (QLoRA): the kernel decodes each weight load
+            // and multiplies it with the raw f32 activation, so this arm never
+            // touches `act.quant` and bypasses the W4A8 selector arms. It binds
+            // the variant itself, like the int8 frozen-base GEMM of `qwen3`.
+            Weight::NF4 { w: wb, s: sw, .. } => {
+                assert_eq!(act.xr0 % 64, 0, "Ops::matmul: the NF4 kernels bind activation rows from a 256-byte aligned row {}", act.xr0);
+                let (name, grid) = if self.tiled_gemm(m, n) {
+                    (kname::MATMUL_REG3_NF4, gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128)))
+                } else {
+                    (kname::MATMUL_NF4, gpu_core::Dispatch::Threads(m * n))
+                };
+                let xo = (act.xr0 as u64 * k as u64, m as u64 * k as u64);
+                let step = self.gpu.dispatch_sliced(self.frozen_base_kernel(name), &[&act.x, wb, y, sw], &[xo, WHOLE, oo, WHOLE], &[m, k, n], grid);
+                s.push(step);
+            }
             // M12: affine K-quant (`Weight::KQuant { affine: true, .. }` -
             // Q4_K/Q5_K, `matmul_kq_dyn`/`matmul_kq_gemv`). The non-affine
             // (Q6_K, group=16) instantiation never constructs THIS variant's
@@ -1443,6 +1520,31 @@ impl Ops {
                 self.providers.dispatch(&mut ctx, &req);
             }
         }
+    }
+
+    /// Whether a `[m, n]` GEMM output fills enough 128x128 tiles for the
+    /// register-tiled kernel to beat the naive one: the selector's own shape
+    /// rule (`select::candidates`, skipping the GEMV arm no frozen-base kernel
+    /// has), and only on a device that executes workgroup barriers - the
+    /// tiled variants of the frozen-base kernels have no CPU fast path, so the
+    /// CPU JIT must keep the naive kernel.
+    fn tiled_gemm(&self, m: u32, n: u32) -> bool {
+        self.caps.workgroup_reductions
+            && select::candidates(Op::MatMul, OpShape { m, n, k: 0, dtype: Dtype::F32 }, &self.caps)
+                .into_iter()
+                .find(|v| *v != KernelVariant::WorkgroupPerOutput)
+                == Some(KernelVariant::RegisterTiled)
+    }
+
+    /// The registered index of a [`kname`] kernel outside [`kname::ALL`] (see
+    /// [`frozen_base_kernels`]), or a panic naming the missing registration.
+    fn frozen_base_kernel(&self, name: &str) -> usize {
+        self.gpu.kernel_index(name).unwrap_or_else(|| {
+            panic!(
+                "Ops: kernel '{name}' is not registered on this Gpu -- a frozen NF4/bf16-training \
+                 build must register model::ops::training_kernel_list()"
+            )
+        })
     }
 
     /// `(dtype) -> embed kernel name`. Unlike [`Self::bind`], there is no
@@ -1521,7 +1623,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } => {
+            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } => {
                 unreachable!("Ops::embed: bind_embed already panicked for this dtype above")
             }
         }
@@ -1606,7 +1708,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } => {
+            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } => {
                 unreachable!("Ops::moe_linear: bind_moe_linear already panicked for this dtype above")
             }
         }
@@ -1784,30 +1886,12 @@ impl Ops {
     // `Weight`/`Dtype` parameter at all, so there is no argument a caller
     // could pass to make it read a packed buffer even by mistake.
     //
-    // Deliberately narrow scope: only `matmul.wgsl`'s `Reference` variant and
-    // its `matmul_dx.wgsl` backward are extended this phase - NOT `matmul_
-    // gemv`/`matmul_reg3`'s dx siblings (`matmul_dx_reg.wgsl` was read but
-    // not templatized), and NOT wired into any model crate's actual training
-    // loop (`crates/qwen3`, `crates/gpt`, ... untouched - same "build the
-    // façade, prove it, migrate later" precedent B3/B4/B5/B8/B9 all followed).
-    // `crates/gradcheck::check_matmul_bf16_weight` is this phase's
-    // correctness gate.
-
-    /// `(dtype) -> matmul_dx kernel name`. Only `F32`/`BF16` are implemented -
-    /// B10's own deliberately scoped-down deliverable is ONE kernel family,
-    /// not full dtype parity with [`Self::bind`]. `F16`/`I8`/`Q4` backward-
-    /// through-the-weight is a real, reachable follow-up, not attempted here.
-    fn bind_matmul_dx(dt: Dtype) -> &'static str {
-        match dt {
-            Dtype::F32 => kname::MATMUL_DX,
-            Dtype::BF16 => kname::MATMUL_DX_BF16,
-            other => panic!(
-                "Ops::matmul_dx: no matmul_dx kernel for dtype {other:?} -- B10 deliberately scoped \
-                 this façade method to F32/BF16 only (one kernel family, forward + dx); F16/I8/Q4 \
-                 backward-through-the-weight is an unimplemented follow-up, not a normal runtime path"
-            ),
-        }
-    }
+    // B10 extended `matmul.wgsl`'s `Reference` variant and its `matmul_dx.wgsl`
+    // backward to bf16; the frozen-base trainer (NF4 tier, tiled bf16 dx) later
+    // added the register-tiled `matmul_reg3`/`matmul_dx_reg` siblings of both
+    // tiers - see `frozen_base_kernels`. `crates/gradcheck::
+    // check_matmul_bf16_weight` is the bf16 correctness gate, `crates/model/
+    // tests/ops_nf4_weight.rs` the NF4 one.
 
     /// [`Self::matmul`] for several weights that read the SAME activation, each
     /// into its own output buffer (whole, `yoff = 0`) - a decode layer's qkv/b/a/z,
@@ -1868,24 +1952,48 @@ impl Ops {
     /// `dX[m, k] = sum_n dY[m, n] * W[n, k]` (`accumulate` selects overwrite
     /// vs add, matching `matmul_dx.wgsl`'s own `Params.accumulate` field) -
     /// the gradient w.r.t. the ACTIVATION input of a linear whose weight is
-    /// `w`. `w` may be `Weight::F32` (today's existing training path,
-    /// unaffected) or `Weight::BF16` (B10, opt-in): a bf16 weight is read
-    /// through the SAME inline-bitcast-decode `dtype_variant` machinery
-    /// [`Self::matmul`]'s forward dispatch already uses for `(Reference,
-    /// BF16)`, applied to `matmul_dx.wgsl` this phase - `dX` therefore stays
-    /// numerically consistent with whichever weight value the forward pass
-    /// actually multiplied by. This is a READ-tier for the weight, exactly
-    /// like forward: `w` itself is never written here. No `KernelVariant`
-    /// selection (unlike [`Self::matmul`]) - only the `Reference`-shaped
-    /// kernel is templatized this phase, so this binds directly by dtype.
+    /// `w`: the frozen-base training path, which reads the SAME weight copy
+    /// the forward multiplied by, so `dX` stays consistent with it.
+    ///
+    /// `w` may be `Weight::F32`, `Weight::BF16` (B10: inline bitcast decode,
+    /// `dtype_variant`) or `Weight::NF4` (`nf4_weight_variant`: codebook value
+    /// times group scale, decoded per load; no transposed copy exists). A
+    /// result that fills 128x128 tiles runs the register-tiled `matmul_dx_reg`
+    /// kernel of the tier on a device that executes workgroup barriers, the
+    /// naive `matmul_dx` otherwise; the bf16 tiled kernel is optional (see
+    /// [`frozen_base_kernels`]) and a Gpu without it keeps the naive one. `w` is
+    /// never written. Other tiers panic: their backward-through-the-weight is
+    /// not implemented.
     pub fn matmul_dx(&self, s: &mut Vec<Step>, w: &Weight, dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, accumulate: bool) {
         let (n, k) = (w.n(), w.k());
         let dt = w.dtype();
-        // Eagerly resolved, for the reason `Ops::embed` states.
-        let kname = Self::bind_matmul_dx(dt);
-        let bind = |_: KernelVariant| -> (usize, &'static str) { (self.idx[kname], kname) };
+        let params = [m, k, n, accumulate as u32];
+        // Tiled when the `[m, k]` result fills tiles (see `Self::tiled_gemm`);
+        // the bf16 tiled kernel is optional so a model that registered only
+        // the naive one keeps working.
+        let tiled = self.tiled_gemm(m, k);
+        let grid = |tiled: bool| {
+            if tiled {
+                gpu_core::Dispatch::Workgroups(m.div_ceil(128) * k.div_ceil(128))
+            } else {
+                gpu_core::Dispatch::Threads(m * k)
+            }
+        };
         match w {
+            Weight::NF4 { w: wb, s: sw, .. } => {
+                let name = if tiled { kname::MATMUL_DX_REG_NF4 } else { kname::MATMUL_DX_NF4 };
+                s.push(self.gpu.dispatch(self.frozen_base_kernel(name), &[dy, wb, dx, sw], &params, grid(tiled)));
+            }
+            Weight::BF16 { w: wb, .. } if tiled && self.gpu.kernel_index(kname::MATMUL_DX_REG_BF16).is_some() => {
+                let kind = self.frozen_base_kernel(kname::MATMUL_DX_REG_BF16);
+                s.push(self.gpu.dispatch(kind, &[dy, wb, dx], &params, grid(true)));
+            }
             Weight::F32 { w: wb, .. } | Weight::BF16 { w: wb, .. } => {
+                let kname = match dt {
+                    Dtype::F32 => kname::MATMUL_DX,
+                    _ => kname::MATMUL_DX_BF16,
+                };
+                let bind = |_: KernelVariant| -> (usize, &'static str) { (self.idx[kname], kname) };
                 let operands = [
                     // `dY`, the incoming gradient: the per-sample operand of
                     // this dispatch, in the position the forward pass's
@@ -1895,22 +2003,22 @@ impl Ops {
                     Operand { role: Role::Weight, buf: wb, range: WHOLE, dtype: dt },
                     Operand { role: Role::Out, buf: dx, range: WHOLE, dtype: Dtype::F32 },
                 ];
-                let attrs = [m, k, n, accumulate as u32];
                 let req = OpRequest {
                     op: Op::MatMulDx,
                     shape: OpShape { m, n, k, dtype: dt },
                     pass: Pass::Backward,
                     operands: &operands,
-                    attrs: &attrs,
+                    attrs: &params,
                     group: 32,
                     bind: &bind,
                 };
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::F16 { .. } | Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } => {
-                unreachable!("Ops::matmul_dx: bind_matmul_dx already panicked for this dtype above")
-            }
+            Weight::F16 { .. } | Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } => panic!(
+                "Ops::matmul_dx: no input-gradient kernel reads a {dt:?} weight -- F32, BF16 and NF4 are the \
+                 frozen-base training tiers; F16/I8/Q4/K-quant backward-through-the-weight is not implemented"
+            ),
         }
     }
 
@@ -2165,6 +2273,18 @@ mod tests {
             kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::F16)
                 .unwrap();
         assert_eq!(n, kname::MOE_LINEAR_GATED_F16);
+    }
+
+    /// The frozen-base kname literals are exactly the names `frozen_base_kernels`
+    /// registers, so a dispatch by `kname` can never miss its kernel.
+    #[test]
+    fn frozen_base_kname_literals_match_the_registered_variants() {
+        let registered: Vec<&str> = frozen_base_kernels().iter().map(|(n, _)| *n).collect();
+        let want = [kname::MATMUL_NF4, kname::MATMUL_REG3_NF4, kname::MATMUL_DX_NF4, kname::MATMUL_DX_REG_NF4, kname::MATMUL_DX_REG_BF16];
+        assert_eq!(registered.len(), want.len());
+        for n in want {
+            assert!(registered.contains(&n), "{n} is not registered by frozen_base_kernels()");
+        }
     }
 
     /// The B9 kname literals (paged-KV append/scores/apply bf16 tiers), same

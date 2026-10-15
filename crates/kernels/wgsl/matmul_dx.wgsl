@@ -20,6 +20,13 @@
 // (m, k). `accumulate` selects overwrite (0) or add (1) so dX can collect
 // contributions from several matmuls (e.g. the shared MoE input).
 
+// Frozen-base variants of the `w` binding, rewritten at registration time (this
+// file stays the single source): `kernels::template::int8_weight_variant`
+// (`#w=w8`) and `kernels::template::nf4_weight_variant` (`#w=nf4`) read
+// packed int8 / 4-bit codebook weights, decoded per load as value * group
+// scale against the f32 activations - nothing but the stored weight is
+// quantised. Every `w[wi]` load below therefore indexes through a bare `wi`.
+
 struct Params {
     m: u32,
     k: u32,

@@ -41,6 +41,13 @@
 // Shared use: 2 * 8 * 129 * 4 = 8256 B (vs 8192 B) — occupancy unchanged.
 // fp32 only, one bind group, 3 storage buffers, no atomics/subgroups/f16.
 
+// Frozen-base variants of the `w` binding, rewritten at registration time (this
+// file stays the single source): `kernels::template::int8_weight_variant`
+// (`#w=w8`) and `kernels::template::nf4_weight_variant` (`#w=nf4`) read
+// packed int8 / 4-bit codebook weights, decoded per load as value * group
+// scale against the f32 activations - nothing but the stored weight is
+// quantised. Every `w[wi]` load below therefore indexes through a bare `wi`.
+
 struct Params { m: u32, k: u32, n: u32, };
 
 @group(0) @binding(0) var<uniform> p: Params;
