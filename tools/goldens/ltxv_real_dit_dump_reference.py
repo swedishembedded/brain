@@ -85,7 +85,7 @@ not the 48-layer/large-token-count shape a real generation run would need.
 Usage:
   python tools/goldens/ltxv_real_dit_dump_reference.py \\
       --gguf ~/.local/share/brain/models/Lightricks/LTX-2.5/ltx-2.5-22b-distilled-transformer-Q8_0.gguf \\
-      --out testdata/golden/ltxv/dit [--seed 1234] [--layers 2]
+      --out testdata/golden/ltxv/dit --seed 1234 [--layers 2]
 """
 
 import argparse
@@ -421,7 +421,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gguf", required=True, help="path to the real ltx-2.5-22b-distilled-transformer-Q8_0.gguf")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--layers", type=int, default=2, help="reduced depth - see this file's module doc for why 2, not 48")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)

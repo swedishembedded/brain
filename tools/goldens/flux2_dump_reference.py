@@ -16,7 +16,7 @@ Runs the diffusers Flux2KleinPipeline (CPU, fp32) and dumps stage goldens:
 
 Usage:
   python tools/goldens/flux2_dump_reference.py --weights <FLUX.2-klein-4B dir> \
-      --out testdata/flux2/klein-4b [--height 512 --width 512 --steps 4 --seed 42]
+      --out testdata/flux2/klein-4b --seed 42 [--height 512 --width 512 --steps 4]
 """
 
 import argparse, hashlib, json, os, sys
@@ -59,7 +59,7 @@ def main():
     ap.add_argument("--height", type=int, default=512)
     ap.add_argument("--width", type=int, default=512)
     ap.add_argument("--steps", type=int, default=4)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     manifest = {}

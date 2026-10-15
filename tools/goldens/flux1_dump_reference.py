@@ -42,7 +42,7 @@ Usage:
   python tools/goldens/flux1_dump_reference.py \
       --weights /path/to/FLUX.1-Kontext-dev \
       --out testdata/flux1/kontext-dev \
-      [--height 256 --width 256 --steps 4 --seed 42 --t5-len 256]
+      --seed 42 [--height 256 --width 256 --steps 4 --t5-len 256]
 """
 
 import argparse
@@ -123,7 +123,7 @@ def main():
     ap.add_argument("--height", type=int, default=256)
     ap.add_argument("--width", type=int, default=256)
     ap.add_argument("--steps", type=int, default=1)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--t5-len", type=int, default=256)
     ap.add_argument("--guidance", type=float, default=3.5)
     ap.add_argument("--small-double", type=int, default=2)

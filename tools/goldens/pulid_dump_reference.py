@@ -55,7 +55,7 @@ Usage:
       --code    /path/to/PuLID \
       --testdata testdata \
       [--transformer /path/to/FLUX.1-Kontext-dev/transformer] \
-      [--small-double 2 --small-single 2 --id-weight 1.0 --seed 42]
+      --seed 42 [--small-double 2 --small-single 2 --id-weight 1.0]
 
 `--transformer` is optional; without it the `flux_cond` golden is skipped.
 """
@@ -373,7 +373,7 @@ def main():
     ap.add_argument("--small-single", type=int, default=2)
     ap.add_argument("--id-weight", type=float, default=1.0)
     ap.add_argument("--n-img", type=int, default=256)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
 
     sys.path.insert(0, args.code)

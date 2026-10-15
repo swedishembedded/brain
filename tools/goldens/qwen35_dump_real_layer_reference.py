@@ -21,7 +21,7 @@ Outputs (under `--out`, default `testdata/golden/qwen35/real_layer_{L}/`):
 
 Usage:
   python tools/goldens/qwen35_dump_real_layer_reference.py \
-      --dir /path/to/Qwen3.8-27B-FP8 --layer 0 [--out DIR] [--seed N] [--tokens T]
+      --dir /path/to/Qwen3.8-27B-FP8 --layer 0 [--out DIR] --seed 20260819 [--tokens T]
 """
 
 import argparse
@@ -99,7 +99,7 @@ def main():
     ap.add_argument("--dir", required=True, help="real checkpoint directory (config.json + layers-N.safetensors)")
     ap.add_argument("--layer", type=int, required=True)
     ap.add_argument("--out", default=None)
-    ap.add_argument("--seed", type=int, default=20260819)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--tokens", type=int, default=12)
     args = ap.parse_args()
     out = args.out or os.path.join("testdata", "golden", "qwen35", f"real_layer_{args.layer}")

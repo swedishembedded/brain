@@ -38,7 +38,7 @@ trusting the manual replay).
 Usage:
   python3 tools/goldens/minimaxh3_audio_vae_dump_reference.py \\
       --audio-vae-dir "$BRAIN_MINIMAXH3_DIR/FL2VA/audio_vae" \\
-      --out testdata/golden/minimaxh3/audio_vae [--t 6 --seed 7]
+      --out testdata/golden/minimaxh3/audio_vae --seed 7 [--t 6]
 """
 
 import argparse
@@ -131,7 +131,7 @@ def main():
     ap.add_argument("--audio-vae-dir", required=True, help="the audio_vae/ component directory (model.safetensors + config.json + the shipped .py sources)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--t", type=int, default=6, help="latent frames to decode")
-    ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     torch.set_grad_enabled(False)

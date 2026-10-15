@@ -29,7 +29,7 @@ uint8 images are exactly representable. Fixed seed, CPU only.
 
 Usage:
   python tools/goldens/scrfd_dump_reference.py \
-      --weights /path/to/antelopev2 --out testdata/face/antelopev2 [--seed 1234]
+      --weights /path/to/antelopev2 --out testdata/face/antelopev2 --seed 1234
 """
 
 import argparse
@@ -272,7 +272,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights", required=True, help="directory holding scrfd_10g_bnkps.onnx")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--scratch", default=None,
                     help="where the tapped ONNX copy goes (default: a temp dir, "
                          "removed on exit; it is regenerated on every run)")

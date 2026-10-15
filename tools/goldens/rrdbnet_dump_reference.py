@@ -16,7 +16,7 @@ gate runs in CI without the 67 MB release checkpoint. Point `--ckpt` at
 file under different prefixes.
 
 Usage:
-  python3 tools/goldens/rrdbnet_dump_reference.py [--ckpt RealESRGAN_x4plus.pth]
+  python3 tools/goldens/rrdbnet_dump_reference.py --seed 7 [--ckpt RealESRGAN_x4plus.pth]
                                                   [--size 32] [--out <mirror>/esrgan]
 """
 
@@ -135,7 +135,8 @@ def main() -> None:
     ap.add_argument("--num-block", type=int, default=2, help="blocks for the tiny gate")
     ap.add_argument("--num-feat", type=int, default=16)
     ap.add_argument("--num-grow-ch", type=int, default=8)
-    ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the output")
     ap.add_argument("--out", default=f"{GOLDEN_MIRROR}/esrgan")
     a = ap.parse_args()
 
@@ -166,7 +167,7 @@ def main() -> None:
 
     out = pathlib.Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    save_file(tensors, str(out / "rrdbnet.safetensors"))
+    save_file(tensors, str(out / "rrdbnet.safetensors"), metadata={"seed": str(a.seed)})
     print(f"wrote {out / 'rrdbnet.safetensors'} ({len(tensors)} tensors)")
 
 

@@ -155,7 +155,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights", required=True, help="gemma4-12b-with-proj-ltx-2.5-bf16.safetensors")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, default=99)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     torch.set_grad_enabled(False)

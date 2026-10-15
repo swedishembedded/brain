@@ -15,7 +15,7 @@ f32, so the golden is baked from exactly the tensors brain consumes.
 
 Usage:
   python3 tools/goldens/sdxl_dump_vae_decode.py \
-      --sdxl /path/to/stable-diffusion-xl-base-1.0 [--out <golden-mirror>/vae]
+      --sdxl /path/to/stable-diffusion-xl-base-1.0 --seed 11 [--out <golden-mirror>/vae]
 """
 
 import argparse
@@ -41,7 +41,8 @@ def main() -> None:
         default=f"{GOLDEN_MIRROR}/vae",
         help="golden mirror dir that make testdata/fetch links from",
     )
-    ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the output")
     a = ap.parse_args()
 
     vdir = pathlib.Path(a.sdxl) / "vae"
@@ -69,6 +70,7 @@ def main() -> None:
     save_file(
         {"z": z.contiguous(), "decoded": decoded.contiguous()},
         str(out / "sdxl_vae_decode.safetensors"),
+        metadata={"seed": str(a.seed)},
     )
     print(f"z {tuple(z.shape)} -> decoded {tuple(decoded.shape)} "
           f"range [{decoded.min():.4f}, {decoded.max():.4f}]")

@@ -30,7 +30,7 @@ global_llm_layer_{L}/`):
 
 Usage:
   python tools/goldens/minimaxmusic3_global_llm_dump_reference.py \
-      --dir /path/to/language_model --layer 0 [--out DIR] [--seed N] [--tokens T]
+      --dir /path/to/language_model --layer 0 [--out DIR] --seed 20260821 [--tokens T]
 """
 
 import argparse
@@ -94,7 +94,7 @@ def main():
     ap.add_argument("--dir", required=True, help="the checkpoint's language_model/ directory (config.json + model-*-of-*.safetensors)")
     ap.add_argument("--layer", type=int, required=True)
     ap.add_argument("--out", default=None)
-    ap.add_argument("--seed", type=int, default=20260821)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--tokens", type=int, default=12)
     args = ap.parse_args()
     out = args.out or os.path.join("testdata", "golden", "minimaxmusic3", f"global_llm_layer_{args.layer}")

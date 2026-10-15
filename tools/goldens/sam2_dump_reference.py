@@ -59,7 +59,7 @@ Usage:
       --code   <sam2 repo root, the dir containing the `sam2` package> \
       --config <sam2/configs/sam2.1/sam2.1_hiera_l.yaml> \
       --ckpt   <sam2.1_hiera_large.pt> \
-      --out    testdata/sam2/hiera-large [--seed 42]
+      --out    testdata/sam2/hiera-large --seed 42
 
   python tools/goldens/sam2_dump_reference.py --reference hf \
       --ckpt <sam2.1_hiera_tiny.pt> --out testdata/sam2/hiera-tiny
@@ -997,7 +997,7 @@ def main():
     ap.add_argument("--config", help="sam2.1_hiera_*.yaml (--reference official only)")
     ap.add_argument("--ckpt", required=True, help="sam2.1_hiera_*.pt")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     backend = args.reference or ("official" if args.code else "hf")
     if backend == "official" and not (args.code and args.config):

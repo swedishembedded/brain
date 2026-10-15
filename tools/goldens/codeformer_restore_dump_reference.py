@@ -44,7 +44,8 @@ usage:
       --code    /path/to/CodeFormer \
       --weights /path/to/weights/codeformer \
       --out     testdata/restore/codeformer \
-      --face    /path/to/aligned_face_512.png
+      --face    /path/to/aligned_face_512.png \
+      --seed    1234
 """
 
 import argparse
@@ -254,7 +255,7 @@ def main():
     ap.add_argument("--weights", required=True, help="dir holding codeformer.pth")
     ap.add_argument("--out", required=True, help="golden output root")
     ap.add_argument("--face", default=None, help="512x512 aligned face png")
-    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--ws", default="0.0,0.25,0.5,0.75,1.0")
     args = ap.parse_args()
 

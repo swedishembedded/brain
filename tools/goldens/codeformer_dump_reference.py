@@ -43,7 +43,8 @@ usage:
   python3 tools/goldens/codeformer_dump_reference.py \
       --code   /path/to/CodeFormer \
       --weights /path/to/weights/codeformer \
-      --out    testdata/restore/vqgan
+      --out    testdata/restore/vqgan \
+      --seed   1234
 """
 
 import argparse
@@ -319,7 +320,7 @@ def main():
     ap.add_argument("--weights", required=True, help="dir holding the .pth files")
     ap.add_argument("--out", required=True, help="golden output root")
     ap.add_argument("--face", default=None, help="512x512 aligned face png")
-    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--variants", default="vqgan_code1024,codeformer")
     args = ap.parse_args()
 

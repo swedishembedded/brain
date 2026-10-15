@@ -94,7 +94,7 @@ ViT/PatchMerger/mRoPE code is reusable unmodified for this model family, so
 that golden's real work is straightforward when M9 actually needs it.
 
 Usage:
-  python tools/goldens/qwen35_dump_reference.py [--out DIR] [--seed N]
+  python tools/goldens/qwen35_dump_reference.py [--out DIR] --seed 1234
 """
 
 import argparse
@@ -345,7 +345,7 @@ def collect_weights(model, lm_head, cfg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join("testdata", "golden", "qwen35", "tiny_text"))
-    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 

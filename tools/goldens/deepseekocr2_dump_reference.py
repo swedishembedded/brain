@@ -69,7 +69,7 @@ image row (P <= i) plus every earlier query row. Row i, column j is masked
 with a large negative additive term whenever `allow` is false.
 
 Usage:
-  python3 tools/goldens/deepseekocr2_dump_reference.py --out testdata/deepseekocr2
+  python3 tools/goldens/deepseekocr2_dump_reference.py --out testdata/deepseekocr2 --seed 0
 """
 
 import argparse
@@ -83,7 +83,6 @@ from safetensors.torch import save_file
 
 from golden_source import source_block
 
-SEED = 0
 EPS_RMS = 1e-6
 NEG = -1.0e9
 
@@ -319,10 +318,11 @@ def build(cfg, seed):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="testdata/deepseekocr2")
-    ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the output")
     args = ap.parse_args()
 
-    manifest = {"files": {}, "tiny": TINY}
+    manifest = {"files": {}, "tiny": TINY, "seed": args.seed}
     ckpt, tap = build(TINY, args.seed)
 
     # The two design invariants the module docstring names, asserted rather

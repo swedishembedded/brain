@@ -44,7 +44,7 @@ Usage:
       --code   <sam2 repo root, the dir containing the `sam2` package> \
       --config <sam2/configs/sam2.1/sam2.1_hiera_t.yaml> \
       --ckpt   <sam2.1_hiera_tiny.pt> \
-      --out    testdata/sam2/hiera-tiny [--frames 6] [--seed 42]
+      --out    testdata/sam2/hiera-tiny [--frames 6] --seed 42
 """
 
 import argparse
@@ -411,7 +411,7 @@ def main():
     ap.add_argument("--frames", type=int, default=6)
     ap.add_argument("--prompt-frame", type=int, default=0)
     ap.add_argument("--occlude", default="", help="comma-separated frames on which the subject is hidden")
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, required=True)
     a = ap.parse_args()
 
     os.makedirs(a.out, exist_ok=True)

@@ -54,7 +54,7 @@ nothing here renames anything), plus:
 
 Usage:
   python3 tools/goldens/minimaxh3_video_vae_dump_reference.py \\
-      --out testdata/golden/minimaxh3/video_vae_tiny [--seed 5]
+      --out testdata/golden/minimaxh3/video_vae_tiny --seed 5
 """
 
 import argparse
@@ -141,7 +141,7 @@ def save(out, name, tensors, manifest):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, default=5)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     torch.set_grad_enabled(False)

@@ -42,7 +42,8 @@ usage:
   python tools/goldens/janus_vq16_dump_reference.py \
       --janus   /path/to/Janus \
       --weights /path/to/deepseek-ai/Janus-Pro-7B \
-      --out     "$BRAIN_TESTDATA/janus/vq16"
+      --out     "$BRAIN_TESTDATA/janus/vq16" \
+      --seed    1234
 """
 
 import argparse
@@ -166,7 +167,7 @@ def main():
     ap.add_argument("--janus", required=True, help="Janus repo root")
     ap.add_argument("--weights", required=True, help="Janus-Pro-7B checkpoint dir")
     ap.add_argument("--out", required=True, help="golden output dir")
-    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)

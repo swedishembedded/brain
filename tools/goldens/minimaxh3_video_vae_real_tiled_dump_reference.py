@@ -30,7 +30,7 @@ Usage:
   BRAIN_MINIMAXH3_DIR=/path/to/MiniMax-H3 \\
   python3 \\
       tools/goldens/minimaxh3_video_vae_real_tiled_dump_reference.py \\
-      --out testdata/golden/minimaxh3/video_vae_real_tiled
+      --out testdata/golden/minimaxh3/video_vae_real_tiled --seed 7
 """
 
 import argparse
@@ -61,7 +61,7 @@ LATENT_FRAMES = 1
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--root", default=os.environ.get("BRAIN_MINIMAXH3_DIR"))
     args = ap.parse_args()
     if not args.root:

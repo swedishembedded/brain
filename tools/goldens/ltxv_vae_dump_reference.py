@@ -51,7 +51,7 @@ dumper, so no manual remap was needed (unlike Wan's diffusers<->native rename).
 Usage:
   python tools/goldens/ltxv_vae_dump_reference.py \\
       --weights /path/to/ltx-2.5-video-vae-conv-bf16.safetensors \\
-      --out testdata/golden/ltxv/vae [--frames 9,17 --size 64 --seed 42]
+      --out testdata/golden/ltxv/vae --seed 42 [--frames 9,17 --size 64]
 """
 
 import argparse
@@ -219,7 +219,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--frames", default="9,17", help="comma-separated clip lengths (1+8k)")
     ap.add_argument("--size", type=int, default=64, help="H=W, divisible by 32")
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--taps", action="store_true",
                     help="also dump every per-block activation (self-validation always "
                          "compares the taps in memory either way)")

@@ -59,7 +59,7 @@ never match the `vocoder.vocoder.` prefix).
 Usage:
   python tools/goldens/ltxv_audio_dump_reference.py \\
       --weights /path/to/ltx-2.5-audio-vae-bf16.safetensors \\
-      --out testdata/golden/ltxv/audio [--duration 1.0 --seed 7]
+      --out testdata/golden/ltxv/audio --seed 7 [--duration 1.0]
 """
 
 import argparse
@@ -263,7 +263,7 @@ def main():
     ap.add_argument("--weights", required=True, help="ltx-2.5-audio-vae-bf16.safetensors")
     ap.add_argument("--out", required=True)
     ap.add_argument("--duration", type=float, default=1.0, help="seconds of synthetic audio")
-    ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--taps", action="store_true", help="also dump every per-block activation")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)

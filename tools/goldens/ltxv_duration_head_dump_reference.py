@@ -46,7 +46,7 @@ convention as every other `ltxv_*_dump_reference.py` in this repo.
 Usage:
   python tools/goldens/ltxv_duration_head_dump_reference.py \\
       --weights /path/to/ltx-2.5-duration-head-bf16.safetensors \\
-      --out testdata/golden/ltxv/duration_head [--seed 42]
+      --out testdata/golden/ltxv/duration_head --seed 42
 """
 
 import argparse
@@ -177,7 +177,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--video-tokens", type=int, default=4)
     ap.add_argument("--audio-tokens", type=int, default=3)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     torch.set_grad_enabled(False)

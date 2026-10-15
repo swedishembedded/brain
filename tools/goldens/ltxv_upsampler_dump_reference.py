@@ -57,7 +57,7 @@ Usage:
   python tools/goldens/ltxv_upsampler_dump_reference.py \\
       --spatial-weights /path/to/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors \\
       --temporal-weights /path/to/ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors \\
-      --out testdata/golden/ltxv/upsampler [--frames 2 --size 4 --seed 42]
+      --out testdata/golden/ltxv/upsampler --seed 42 [--frames 2 --size 4]
 """
 
 import argparse
@@ -236,7 +236,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--frames", type=int, default=2, help="synthetic latent frame count")
     ap.add_argument("--size", type=int, default=4, help="synthetic latent H=W")
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     torch.set_grad_enabled(False)

@@ -68,7 +68,7 @@ step - this checkpoint simply never exercises it.
 Usage:
   python tools/goldens/ltxv_na_decoder_dump_reference.py \\
       --weights /path/to/ltx-2.5-video-vae-bf16.safetensors \\
-      --out testdata/golden/ltxv/na_decoder [--seed 42]
+      --out testdata/golden/ltxv/na_decoder --seed 42
 """
 
 import argparse
@@ -244,7 +244,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights", required=True, help="ltx-2.5-video-vae-bf16.safetensors")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     torch.set_grad_enabled(False)

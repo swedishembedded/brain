@@ -86,7 +86,7 @@ Usage
 -----
     python3 tools/goldens/qwen3tts_dump_talker_reference.py \
         --ckpt testdata/tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base \
-        [--out testdata/tts/dumps] [--tokens 64] [--seed 20260904]
+        [--out testdata/tts/dumps] [--tokens 64] --seed 20260904
 """
 
 import argparse
@@ -165,7 +165,7 @@ def main():
     ap.add_argument("--out", default=os.path.join("testdata", "tts", "dumps"),
                     help="dump root; the golden lands in <out>/talker_ref")
     ap.add_argument("--tokens", type=int, default=64, help="sequence length T")
-    ap.add_argument("--seed", type=int, default=20260904, help="LCG seed for the ids")
+    ap.add_argument("--seed", type=int, required=True, help="LCG seed for the ids")
     args = ap.parse_args()
 
     if args.tokens < 2:

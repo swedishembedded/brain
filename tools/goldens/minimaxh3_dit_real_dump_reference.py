@@ -32,7 +32,7 @@ only showing up in the final output.
 Usage:
   python3 tools/goldens/minimaxh3_dit_real_dump_reference.py \\
       --checkpoint "$BRAIN_MINIMAXH3_DIR/transformer" \\
-      --out testdata/golden/minimaxh3/dit_real [--seed 3]
+      --out testdata/golden/minimaxh3/dit_real --seed 3
 """
 
 import argparse
@@ -112,7 +112,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True, help="path to the real MiniMax-H3 transformer/ directory")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, default=3)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     torch.set_grad_enabled(False)

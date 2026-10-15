@@ -45,7 +45,7 @@ strongest self-validation available here (two independent paths, one assert):
 Usage:
   python tools/goldens/wan_vae_dump_reference.py \
       --weights /path/to/Wan2.1_VAE.pth \
-      --out testdata/golden/wan [--frames 9,17 --size 64 --seed 42]
+      --out testdata/golden/wan --seed 42 [--frames 9,17 --size 64]
 """
 
 import argparse
@@ -264,7 +264,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--frames", default="9,17", help="comma-separated clip lengths (1+4k)")
     ap.add_argument("--size", type=int, default=64)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--taps", action="store_true",
                     help="also dump every per-block activation (large: hundreds of "
                          "MB at 64x64 - the parity tests only need the boundaries, "

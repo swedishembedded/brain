@@ -139,7 +139,7 @@ video.
    than assumed from prose.
 
 Usage:
-  python tools/goldens/gemma4_dump_reference.py --out testdata/golden/gemma4 [--seed 1234]
+  python tools/goldens/gemma4_dump_reference.py --out testdata/golden/gemma4 --seed 1234
 """
 
 import argparse
@@ -281,7 +281,7 @@ def run_with_taps(model, input_ids):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     torch.set_grad_enabled(False)

@@ -413,7 +413,7 @@ def main():
     ap.add_argument("--frames", type=int, default=3, help="latent frames for the 1.3B run")
     ap.add_argument("--height", type=int, default=60, help="latent height for the 1.3B run")
     ap.add_argument("--width", type=int, default=104, help="latent width for the 1.3B run")
-    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--timestep", type=float, default=750.0)
     ap.add_argument("--skip-tiny", action="store_true")
     args = ap.parse_args()

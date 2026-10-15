@@ -33,7 +33,7 @@ still use hooks, one per probed block (first and last, catching a
 systematic per-block error early and confirming it does not compound).
 
 Usage:
-  python tools/goldens/qwen35_vision_dump_reference.py [--out DIR] [--seed N]
+  python tools/goldens/qwen35_vision_dump_reference.py [--out DIR] --seed 1234
 """
 
 import argparse
@@ -114,7 +114,7 @@ def collect_weights(model, cfg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join("testdata", "golden", "qwen35", "vision"))
-    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 

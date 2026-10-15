@@ -319,7 +319,7 @@ golden_tree "timesfm3"     "golden/timesfm3"
 #   python3 tools/goldens/sam2_dump_reference.py --code <sam2 repo> \
 #       --config <sam2 repo>/sam2/configs/sam2.1/sam2.1_hiera_t.yaml \
 #       --ckpt   <models-dir>/facebook/sam2.1-hiera-tiny/sam2.1_hiera_tiny.pt \
-#       --out    testdata/sam2/hiera-tiny
+#       --out    testdata/sam2/hiera-tiny --seed 42
 # `crates/sam2/tests/parity.rs` skips itself while they are absent.
 
 # --- Face recognition (insightface antelopev2: SCRFD + ArcFace) --------------
@@ -328,9 +328,9 @@ golden_tree "timesfm3"     "golden/timesfm3"
 # path). The stage goldens (`{arcface,arcface_blocks,scrfd,align,e2e}.safetensors`
 # + `manifest*.json`) are NOT mirrored - regenerate them next to the weights with
 #   python3 tools/goldens/scrfd_dump_reference.py \
-#       --weights testdata/face/antelopev2 --out testdata/face/antelopev2
+#       --weights testdata/face/antelopev2 --out testdata/face/antelopev2 --seed 1234
 #   python3 tools/goldens/arcface_dump_reference.py \
-#       --weights testdata/face/antelopev2 --out testdata/face/antelopev2 \
+#       --weights testdata/face/antelopev2 --out testdata/face/antelopev2 --seed 1234 \
 #       [--photos a.jpg b.jpg c.jpg]
 # Both crates' `tests/parity.rs` skip themselves while they are absent.
 # These two graphs are a checkpoint, but the tests resolve them through

@@ -79,7 +79,7 @@ identically-zero parameter would either crash or make part of the op graph
 numerically inert, hiding bugs in a parity test).
 
 Usage:
-  python tools/goldens/ltxv_dit_dump_reference.py --out testdata/golden/ltxv/dit [--seed 1234]
+  python tools/goldens/ltxv_dit_dump_reference.py --out testdata/golden/ltxv/dit --seed 1234
 """
 
 import argparse
@@ -546,7 +546,7 @@ def dump_gated(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     torch.set_grad_enabled(False)

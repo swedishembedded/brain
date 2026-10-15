@@ -19,7 +19,8 @@ Usage (weights default to the released layout under resources/):
 
     python3 tools/goldens/instantid_dump_reference.py \
         --ckpt /path/to/instantid/ip-adapter.bin \
-        --out  testdata/instantid
+        --out  testdata/instantid \
+        --seed 1337
 """
 
 import argparse
@@ -55,7 +56,7 @@ def main():
     ap.add_argument("--ckpt", default=CKPT)
     ap.add_argument("--code", default=CODE)
     ap.add_argument("--out", default="testdata/instantid")
-    ap.add_argument("--seed", type=int, default=1337)
+    ap.add_argument("--seed", type=int, required=True)
     a = ap.parse_args()
 
     Resampler = load_reference(a.code)

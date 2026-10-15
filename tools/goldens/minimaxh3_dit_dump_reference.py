@@ -28,7 +28,7 @@ video/audio outputs, into one `minimaxh3_dit_tiny.safetensors` +
 
 Usage:
   python3 tools/goldens/minimaxh3_dit_dump_reference.py \\
-      --out testdata/golden/minimaxh3/dit_tiny [--seed 3]
+      --out testdata/golden/minimaxh3/dit_tiny --seed 3
 """
 
 import argparse
@@ -135,7 +135,7 @@ def save(out, name, tensors, manifest):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, default=3)
+    ap.add_argument("--seed", type=int, required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     torch.set_grad_enabled(False)
