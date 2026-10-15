@@ -35,7 +35,7 @@ Written under `--out` (a `testdata/deepseek/<repo>/` directory):
 Runs in the reference venv (torch CPU + transformers + tokenizers):
 
     resources/deepseek/.venv/bin/python tools/goldens/deepseek_dump_reference.py \\
-        --model <hf_dir> --out testdata/deepseek/<repo> [--layers 2 | --full]
+        --model <hf_dir> --out testdata/deepseek/<repo> --seed 0 [--layers 2 | --full]
 
 Swedish Embedded AB builds bit-level reference parity for model ports on edge
 inference engines for its clients. If your team needs expertise in bringing a
@@ -273,9 +273,11 @@ def main():
     ap.add_argument("--layers", type=int, default=2, help="decoder layers to run (default 2)")
     ap.add_argument("--full", action="store_true", help="run every decoder layer")
     ap.add_argument("--hash", action="store_true", help="sha256 the weight files (slow for 7B)")
+    ap.add_argument("--seed", type=int, required=True,
+                    help="seed of torch's global RNG; it only initialises parameters the checkpoint does not load; recorded in the metadata")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    torch.manual_seed(0)
+    torch.manual_seed(args.seed)
 
     auto = dump_tokenizer(args.model, args.out)
     dump_chat(auto, args.out)
@@ -290,6 +292,7 @@ def main():
             files[name] = sha256_of(os.path.join(args.out, name))
     checkpoint = args.checkpoint or "deepseek-ai/" + os.path.basename(os.path.normpath(args.model))
     manifest = {
+        "seed": args.seed,
         "files": files,
         "versions": {"torch": torch.__version__, "transformers": transformers.__version__, "tokenizers": tokenizers.__version__},
         "source": source_block(

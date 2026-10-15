@@ -9,8 +9,10 @@ Exercises the hard new DiT logic in isolation: adaLN modulation (scale=1+, gate
 interleaved RoPE, and SwiGLU. brain replicates with the same weights/inputs.
 Small dims keep it fast; dim<256 so the adaLN input == dim (folding logic is
 identical for the real dim=3840/cdim=256 case). Dev-time only.
+
+usage: s3dit_block_dump_reference.py --seed 0
 """
-import os, sys
+import argparse, os, sys
 from pathlib import Path
 import torch
 from safetensors.torch import save_file
@@ -26,7 +28,11 @@ AXES_DIMS, AXES_LENS = [8, 8, 8], [16, 8, 8]   # sum = 24 = head_dim
 THETA, EPS, T = 256.0, 1e-5, 8
 
 def main():
-    torch.manual_seed(0)
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="seed of the random weights and inputs; recorded in the output metadata")
+    args = ap.parse_args()
+    torch.manual_seed(args.seed)
     blk = ZImageTransformerBlock(
         layer_id=0, dim=DIM, n_heads=N_HEADS, n_kv_heads=N_HEADS,
         norm_eps=EPS, qk_norm=True, modulation=True,
@@ -61,7 +67,7 @@ def main():
     tensors["_sin"] = freqs_cis.imag.contiguous()      # [T, half]
     tensors["_out"] = out.squeeze(0).contiguous()      # [T, dim]
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    save_file(tensors, OUT, metadata={"dim": str(DIM), "n_heads": str(N_HEADS), "T": str(T)})
+    save_file(tensors, OUT, metadata={"dim": str(DIM), "n_heads": str(N_HEADS), "T": str(T), "seed": str(args.seed)})
     print(f"wrote {OUT}  out {tuple(out.shape)} [min,max]=[{out.min():.4f},{out.max():.4f}]")
 
 if __name__ == "__main__":

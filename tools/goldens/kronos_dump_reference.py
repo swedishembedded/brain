@@ -35,7 +35,7 @@ CSV path actually runs in.
 
 Usage:
   python3 tools/goldens/kronos_dump_reference.py --repo <Kronos repo> \
-      --tokenizer <tokenizer dir> --decoder <decoder dir> --out testdata/golden/kronos
+      --tokenizer <tokenizer dir> --decoder <decoder dir> --out testdata/golden/kronos --seed 0
 """
 import argparse
 import json
@@ -130,6 +130,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--context", type=int, default=520)
     ap.add_argument("--pred-len", type=int, default=12)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="seed of torch's global RNG; it only initialises parameters the checkpoint does not load; recorded in the metadata")
     args = ap.parse_args()
     if args.context <= 512:
         raise SystemExit("--context must exceed the 512-bar window so the rollout slides it")
@@ -139,7 +141,7 @@ def main():
 
     from model.kronos import Kronos, KronosTokenizer
 
-    torch.manual_seed(0)
+    torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
     tok = KronosTokenizer.from_pretrained(args.tokenizer).eval()
     model = Kronos.from_pretrained(args.decoder).eval()
@@ -208,6 +210,7 @@ def main():
     write_f32(os.path.join(args.out, "t6_pred.f32"), pred)
     meta = {
         "context_len": int(args.context),
+        "seed": int(args.seed),
         "pred_len": int(args.pred_len),
         "max_context": int(max_context),
         "feat": int(raw.shape[1]),

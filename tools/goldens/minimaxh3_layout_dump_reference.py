@@ -33,7 +33,7 @@ the pairwise-summed `"last"` anchor time are covered too.
 
 Usage:
   python3 tools/goldens/minimaxh3_layout_dump_reference.py \\
-      --out testdata/golden/minimaxh3/layout
+      --out testdata/golden/minimaxh3/layout --seed 7
 """
 
 import argparse
@@ -158,8 +158,12 @@ def layout_case(tensors, prefix, keyframe_anchors):
     tensors[f"{prefix}_row_timestep_indices"] = torch.stack(index_rows).contiguous()
 
 
-def schedule_case(tensors):
-    """Both shifted-sigma schedules, plus one Euler step and one `scale_noise`."""
+def schedule_case(tensors, seed):
+    """Both shifted-sigma schedules, plus one Euler step and one `scale_noise`.
+
+    Each draw has its own stream: `seed` plus a fixed offset (video 4, audio 5,
+    `scale_noise` 6), so no two draws share values.
+    """
     for name, shift in (("video", VIDEO_SHIFT), ("audio", AUDIO_SHIFT)):
         sched = MiniMaxH3Scheduler(shift=shift)
         sched.set_timesteps(NUM_INFERENCE_STEPS)
@@ -169,7 +173,7 @@ def schedule_case(tensors):
         # One real Euler step at a mid-schedule index, over a seeded sample and
         # velocity: this is what catches a swapped sigma source or a flipped
         # velocity sign, which the sigma grid alone cannot.
-        generator = torch.Generator().manual_seed(11 if name == "video" else 12)
+        generator = torch.Generator().manual_seed(seed + (4 if name == "video" else 5))
         sample = torch.randn(64, generator=generator, dtype=torch.float32)
         velocity = torch.randn(64, generator=generator, dtype=torch.float32)
         step_index = len(sched.timesteps) // 2
@@ -182,7 +186,7 @@ def schedule_case(tensors):
 
     # `scale_noise` at the keyframe noise-aug level, the one place the
     # forward process is used outside the loop.
-    generator = torch.Generator().manual_seed(13)
+    generator = torch.Generator().manual_seed(seed + 6)
     clean = torch.randn(48, generator=generator, dtype=torch.float32)
     noise = torch.randn(48, generator=generator, dtype=torch.float32)
     scaled = MiniMaxH3Scheduler(shift=VIDEO_SHIFT).scale_noise(clean, KEYFRAME_NOISE_AUG, noise)
@@ -191,9 +195,9 @@ def schedule_case(tensors):
     tensors["scale_noise_out"] = scaled.to(torch.float32).contiguous()
 
 
-def patchify_case(tensors):
+def patchify_case(tensors, seed):
     """The DiT-level patchify at the real latent shape, and its inverse."""
-    generator = torch.Generator().manual_seed(7)
+    generator = torch.Generator().manual_seed(seed)
     latents = torch.randn(
         (1, LATENT_CHANNELS, NUM_LATENT_FRAMES, LATENT_HEIGHT, LATENT_WIDTH),
         generator=generator,
@@ -244,16 +248,17 @@ def save(out, name, tensors, manifest):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", required=True, help="output directory for the golden")
+    parser.add_argument("--seed", type=int, required=True, help="seed of the sampled tensors; recorded in the manifest")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
     tensors = {}
     layout_case(tensors, "t2va", ())
     layout_case(tensors, "fl2va", ("first", "last"))
-    schedule_case(tensors)
-    patchify_case(tensors)
+    schedule_case(tensors, args.seed)
+    patchify_case(tensors, args.seed)
 
-    manifest = {}
+    manifest = {"seed": args.seed}
     manifest["source"] = source_block(
         checkpoint=None,
         identity={

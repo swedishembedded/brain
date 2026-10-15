@@ -27,13 +27,14 @@ Components dumped:
   talkcp   talker.code_predictor (5L)            -> omni_code_predictor.safetensors
   code2wav code2wav (RVQ decode -> waveform)      -> omni_code2wav.safetensors
 
-usage: qwen3omnimoe_dump_reference.py <hf_checkpoint_dir> [out_dir] [component ...]
+usage: qwen3omnimoe_dump_reference.py <hf_checkpoint_dir> [out_dir] [component ...] --seed 0
   (no component args => dump all of them)
 
 env:
   HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 are set unconditionally below —
   goldens must come from the checkpoint already on disk, never a live fetch.
 """
+import argparse
 import glob
 import json
 import os
@@ -46,15 +47,21 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-if len(sys.argv) < 2:
-    sys.exit(__doc__)
-HF_DIR = sys.argv[1]
-OUT_DIR = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else os.path.join(
-    os.path.dirname(__file__), "..", "..", "testdata", "golden", "omni")
+_ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+_ap.add_argument("hf_dir", metavar="hf_checkpoint_dir")
+_ap.add_argument("out_dir", nargs="?", default=os.path.join(
+    os.path.dirname(__file__), "..", "..", "testdata", "golden", "omni"))
+_ap.add_argument("components", nargs="*", metavar="component")
+_ap.add_argument("--seed", type=int, required=True,
+                 help="seed of torch's global RNG; it only initialises parameters the checkpoint does not "
+                      "load (there should be none); recorded in each golden's metadata")
+_ARGS = _ap.parse_args()
+HF_DIR = _ARGS.hf_dir
+OUT_DIR = _ARGS.out_dir
 os.makedirs(OUT_DIR, exist_ok=True)
-REQUESTED = [a for a in sys.argv[3:] if not a.startswith("--")] or None
+REQUESTED = _ARGS.components or None
 
-torch.manual_seed(0)  # only matters for module init of any *unloaded* params (should be none)
+torch.manual_seed(_ARGS.seed)
 
 
 def load_config():
@@ -114,7 +121,7 @@ def _layer_ok(key, layer_filter):
 
 def save(name, tensors, **meta):
     out = os.path.join(OUT_DIR, f"omni_{name}.safetensors")
-    save_file(tensors, out, metadata={k: str(v) for k, v in meta.items()})
+    save_file(tensors, out, metadata={"seed": str(_ARGS.seed), **{k: str(v) for k, v in meta.items()}})
     print(f"[{name}] -> {out} ({len(tensors)} tensors)")
 
 

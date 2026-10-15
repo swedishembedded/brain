@@ -11,7 +11,7 @@ covariate's future values flow into the future patches. We keep the target's
 quantile row and compare against brain's forecast_quantiles_mv_kf.
 
 Usage: python3 tools/goldens/chronos2_dump_kf_reference.py --repo <chronos-forecasting>
-       --ckpt <chronos-2 dir> --out testdata/golden/chronos2
+       --ckpt <chronos-2 dir> --out testdata/golden/chronos2 --seed 0
 """
 import argparse, os, struct, sys, json
 import numpy as np
@@ -34,11 +34,13 @@ def main():
     ap.add_argument("--repo", required=True); ap.add_argument("--ckpt", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--horizon", type=int, default=24); ap.add_argument("--context", type=int, default=200)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="seed of torch's global RNG; it only initialises parameters the checkpoint does not load; recorded in the metadata")
     args = ap.parse_args()
     sys.path.insert(0, os.path.join(args.repo, "src"))
     import torch
     from chronos.chronos2 import Chronos2Pipeline
-    torch.manual_seed(0)
+    torch.manual_seed(args.seed)
     model = Chronos2Pipeline.from_pretrained(args.ckpt, device_map="cpu").model
     model.eval()
 
@@ -69,7 +71,7 @@ def main():
     write_f32(os.path.join(args.out, "kf_cov_future.f32"), cov_fut)
     write_f32(os.path.join(args.out, "kf_quantiles.f32"), tq)
     with open(os.path.join(args.out, "kf_meta.json"), "w") as f:
-        json.dump({"context_len": C, "horizon": H, "n_quantiles": int(nq)}, f)
+        json.dump({"context_len": C, "horizon": H, "n_quantiles": int(nq), "seed": int(args.seed)}, f)
     print("wrote", args.out)
 
 

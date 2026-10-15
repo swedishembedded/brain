@@ -30,8 +30,9 @@ numerically proven parity against released checkpoints. If your team needs a
 model reproduced on its own runtime rather than trusted, you can procure our
 services by sending an email to info@swedishembedded.com.
 
-usage: minilm_dump_reference.py [<hf_checkpoint_dir>] [<out_dir>]
+usage: minilm_dump_reference.py --seed 0 [<hf_checkpoint_dir>] [<out_dir>]
 """
+import argparse
 import hashlib
 import json
 import os
@@ -64,11 +65,17 @@ TYPES = [[0] * 16, [1] * 16]
 
 
 def main():
-    ckpt = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CKPT
-    out = os.path.normpath(sys.argv[2] if len(sys.argv) > 2 else OUT_DEFAULT)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("checkpoint", nargs="?", default=DEFAULT_CKPT, help="HF checkpoint directory")
+    ap.add_argument("out_dir", nargs="?", default=OUT_DEFAULT)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="seed of torch's global RNG; it only initialises parameters the checkpoint does not load; recorded in the metadata")
+    args = ap.parse_args()
+    ckpt = args.checkpoint
+    out = os.path.normpath(args.out_dir)
     os.makedirs(out, exist_ok=True)
 
-    torch.manual_seed(0)
+    torch.manual_seed(args.seed)
     model = BertModel.from_pretrained(ckpt, attn_implementation="eager", dtype=torch.float32)
     model.eval()
 
@@ -118,6 +125,7 @@ def main():
         json.dump({
             "modules": "transformers.BertModel (real checkpoint, live run, eager attention)",
             "torch": torch.__version__,
+            "seed": args.seed,
             "source": source_block(
                 checkpoint="sentence-transformers/all-MiniLM-L6-v2",
                 files=[os.path.join(ckpt, "model.safetensors")],

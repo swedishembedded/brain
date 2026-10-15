@@ -9,22 +9,26 @@ reference decoder, decodes a fixed small latent on CPU, and writes the input
 latent + expected image to a committed safetensors fixture that the Rust test
 reads back. Small spatial size (8x8 latent -> 64x64 image) keeps the fixture
 tiny while exercising every decoder stage (conv_in, mid attention, 4 up-blocks).
+
+usage: vae_dump_reference.py <vae_dir> [out.safetensors] --seed 0
 """
-import json, os, sys
+import argparse, json, os, sys
 from pathlib import Path
 import torch
 from diffusers import AutoencoderKL
 from safetensors.torch import load_file, save_file
 
-if len(sys.argv) < 2:
-    sys.exit("usage: vae_dump_reference.py <vae_dir> [out.safetensors]\n"
-             "  <vae_dir>: diffusers vae/ dir (config.json + diffusion_pytorch_model.safetensors)")
-VAE_DIR = sys.argv[1]
+_ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+_ap.add_argument("vae_dir", help="diffusers vae/ dir (config.json + diffusion_pytorch_model.safetensors)")
+_ap.add_argument("out", nargs="?", help="output safetensors (default: testdata/golden/vae/zimage_vae_decode.safetensors)")
+_ap.add_argument("--seed", type=int, required=True, help="seed of the random input; recorded in the output metadata")
+_ARGS = _ap.parse_args()
+VAE_DIR = _ARGS.vae_dir
 # testdata/golden/vae/... by default -- where
 # crates/vae/tests/decode_parity.rs's testdata("golden/vae/zimage_vae_decode.safetensors")
 # actually looks.
 _TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[2] / "testdata")
-OUT = sys.argv[2] if len(sys.argv) > 2 else str(Path(_TESTDATA) / "golden" / "vae" / "zimage_vae_decode.safetensors")
+OUT = _ARGS.out or str(Path(_TESTDATA) / "golden" / "vae" / "zimage_vae_decode.safetensors")
 
 def main():
     cfg = json.load(open(os.path.join(VAE_DIR, "config.json")))
@@ -35,7 +39,7 @@ def main():
     assert not unexpected, f"unexpected VAE weights: {unexpected[:8]}"
     vae = vae.to(torch.float32).eval()
 
-    torch.manual_seed(0)
+    torch.manual_seed(_ARGS.seed)
     z = torch.randn(1, cfg["latent_channels"], 8, 8, dtype=torch.float32)
     with torch.no_grad():
         img = vae.decode(z).sample  # [1, 3, 64, 64]
@@ -44,7 +48,7 @@ def main():
     save_file(
         {"latent": z.contiguous(), "image": img.contiguous()},
         OUT,
-        metadata={"src": "AutoencoderKL flux-dev / Z-Image", "note": "vae.decode(z).sample, fp32 CPU"},
+        metadata={"src": "AutoencoderKL flux-dev / Z-Image", "note": "vae.decode(z).sample, fp32 CPU", "seed": str(_ARGS.seed)},
     )
     print(f"wrote {OUT}")
     print(f"latent {tuple(z.shape)}  image {tuple(img.shape)}  "

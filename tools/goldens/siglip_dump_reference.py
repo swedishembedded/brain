@@ -39,7 +39,7 @@ Outputs, little-endian f32, under `<testdata>/siglip/deepseek_vl_low/`:
 Usage (the venv needs torch, timm and safetensors; its torch cannot convert
 to numpy, so every tensor leaves through `.tolist()`):
   python tools/goldens/siglip_dump_reference.py \
-      --reference <DeepSeek-VL repo checkout> [--models-dir DIR] [--testdata DIR]
+      --reference <DeepSeek-VL repo checkout> --seed 0 [--models-dir DIR] [--testdata DIR]
 """
 
 import argparse
@@ -105,6 +105,8 @@ def main():
     ap.add_argument("--reference", required=True, help="DeepSeek-VL repository checkout (provides deepseek_vl.models.siglip_vit)")
     ap.add_argument("--models-dir", default=default_models_dir())
     ap.add_argument("--testdata", default=default_testdata())
+    ap.add_argument("--seed", type=int, required=True,
+                    help="seed of torch's global RNG; it only initialises parameters the checkpoint does not load; recorded in the metadata")
     args = ap.parse_args()
 
     import torch
@@ -125,7 +127,7 @@ def main():
                 if k.startswith(PREFIX):
                     state[k[len(PREFIX):]] = f.get_tensor(k).float()
 
-    torch.manual_seed(0)
+    torch.manual_seed(args.seed)
     model = create_siglip_vit(MODEL_NAME, IMAGE_SIZE, select_layer=-1).float().eval()
     # strict: every checkpoint tensor has a home in the module and vice versa.
     model.load_state_dict(state, strict=True)
@@ -159,6 +161,7 @@ def main():
     manifest = {
         "model": MODEL_NAME,
         "image_size": IMAGE_SIZE,
+        "seed": args.seed,
         "taps": list(TAPS),
         "files": files,
         "versions": {"torch": torch.__version__},

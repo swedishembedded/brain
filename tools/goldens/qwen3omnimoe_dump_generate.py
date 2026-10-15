@@ -29,8 +29,9 @@ could theoretically flip the argmax, but everything downstream has already
 been validated to cosine 1.000000, so this is a loop-control check, not a
 new numerics check).
 
-usage: qwen3omnimoe_dump_generate.py <hf_checkpoint_dir> [out_dir] [--max-new N]
+usage: qwen3omnimoe_dump_generate.py <hf_checkpoint_dir> [out_dir] [--max-new N] --seed 0
 """
+import argparse
 import os
 import sys
 
@@ -40,18 +41,21 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 import torch
 from safetensors.torch import save_file
 
-if len(sys.argv) < 2:
-    sys.exit(__doc__)
-HF_DIR = sys.argv[1]
-OUT_DIR = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else os.path.join(
-    os.path.dirname(__file__), "..", "..", "testdata", "golden", "omni")
+_ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+_ap.add_argument("hf_dir", metavar="hf_checkpoint_dir")
+_ap.add_argument("out_dir", nargs="?", default=os.path.join(
+    os.path.dirname(__file__), "..", "..", "testdata", "golden", "omni"))
+_ap.add_argument("--max-new", type=int, default=5, help="tokens to generate")
+_ap.add_argument("--seed", type=int, required=True,
+                 help="seed of torch's global RNG; generation is greedy, so it is never consulted for a "
+                      "draw; recorded in the metadata")
+_ARGS = _ap.parse_args()
+HF_DIR = _ARGS.hf_dir
+OUT_DIR = _ARGS.out_dir
 os.makedirs(OUT_DIR, exist_ok=True)
-MAX_NEW = 5
-for a in sys.argv[2:]:
-    if a.startswith("--max-new="):
-        MAX_NEW = int(a.split("=", 1)[1])
+MAX_NEW = _ARGS.max_new
 
-torch.manual_seed(0)
+torch.manual_seed(_ARGS.seed)
 
 
 def main():
@@ -92,7 +96,7 @@ def main():
         "generated_ids": torch.tensor(generated, dtype=torch.int32),
     }
     out_path = os.path.join(OUT_DIR, "omni_generate.safetensors")
-    save_file(tensors, out_path, metadata={"max_new_tokens": str(MAX_NEW), "src": "thinker (full, real weights)"})
+    save_file(tensors, out_path, metadata={"max_new_tokens": str(MAX_NEW), "seed": str(_ARGS.seed), "src": "thinker (full, real weights)"})
     print(f"-> {out_path}", flush=True)
 
 

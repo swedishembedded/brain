@@ -10,21 +10,26 @@ loads into the turbo-config ZImageTransformer2DModel, and runs a forward on a
 small real input. Validates brain's real-weight path end-to-end (import + bf16).
 Small latent (16x16 -> 64 patches, mult of 32; cap 32) keeps the 30-layer 6B
 forward tractable on CPU. Dev-time only.
+
+usage: s3dit_real_dump_reference.py <z_image_turbo_bf16.safetensors> [out.safetensors] --seed 0
 """
-import os, sys
+import argparse, os, sys
 from pathlib import Path
 import torch
 from safetensors.torch import load_file, save_file
 from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
 
-if len(sys.argv) < 2:
-    sys.exit("usage: s3dit_real_dump_reference.py <z_image_turbo_bf16.safetensors> [out.safetensors]")
-COMFY = sys.argv[1]
+_ap = argparse.ArgumentParser(description=__doc__)
+_ap.add_argument("comfy", metavar="z_image_turbo_bf16.safetensors")
+_ap.add_argument("out", nargs="?", metavar="out.safetensors")
+_ap.add_argument("--seed", type=int, required=True, help="seed of the random input; recorded in the output metadata")
+_ARGS = _ap.parse_args()
+COMFY = _ARGS.comfy
 # testdata/golden/zimage/... by default -- where
 # crates/s3dit/tests/real_parity.rs's testdata("golden/zimage/zimage_real.safetensors")
 # actually looks.
 _TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[2] / "testdata")
-OUT = sys.argv[2] if len(sys.argv) > 2 else str(Path(_TESTDATA) / "golden" / "zimage" / "zimage_real.safetensors")
+OUT = _ARGS.out or str(Path(_TESTDATA) / "golden" / "zimage" / "zimage_real.safetensors")
 DIM = 3840
 
 def remap(sd):
@@ -60,7 +65,7 @@ def main():
     assert not missing, f"missing: {missing[:6]}"
     model = model.float().eval()
 
-    torch.manual_seed(0)
+    torch.manual_seed(_ARGS.seed)
     latent = torch.randn(16, 1, 16, 16)
     cap = torch.randn(32, 2560)
     t = torch.tensor([0.5])
@@ -69,7 +74,7 @@ def main():
 
     save_file(
         {"_latent": latent.contiguous(), "_cap": cap.contiguous(), "_t": t.contiguous(), "_out": out.contiguous()},
-        OUT, metadata={"model": "Z-Image-Turbo 6B real"},
+        OUT, metadata={"model": "Z-Image-Turbo 6B real", "seed": str(_ARGS.seed)},
     )
     print(f"wrote {OUT}  out {tuple(out.shape)} [min,max,mean]=[{out.min():.4f},{out.max():.4f},{out.mean():.4f}]")
 

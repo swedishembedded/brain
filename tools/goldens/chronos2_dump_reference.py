@@ -12,7 +12,7 @@ Usage:
   python3 tools/goldens/chronos2_dump_reference.py \
       --repo   resources/.../chronos-forecasting \
       --ckpt   resources/.../chronos-2 \
-      --out    testdata/golden/chronos2
+      --out    testdata/golden/chronos2 --seed 0
 """
 import argparse
 import os
@@ -44,13 +44,15 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--horizon", type=int, default=24)
     ap.add_argument("--context", type=int, default=200)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="seed of torch's global RNG; it only initialises parameters the checkpoint does not load; recorded in the metadata")
     args = ap.parse_args()
 
     sys.path.insert(0, os.path.join(args.repo, "src"))
     import torch
     from chronos.chronos2 import Chronos2Pipeline
 
-    torch.manual_seed(0)
+    torch.manual_seed(args.seed)
     pipe = Chronos2Pipeline.from_pretrained(args.ckpt, device_map="cpu")
     pipe.model.eval()
 
@@ -77,6 +79,7 @@ def main():
         "context_len": int(args.context),
         "horizon": int(args.horizon),
         "n_quantiles": int(nq),
+        "seed": int(args.seed),
         "quantile_levels": [float(v) for v in pipe.quantiles],
     }
     with open(os.path.join(args.out, "t5_meta.json"), "w") as f:

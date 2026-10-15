@@ -8,8 +8,10 @@ Validates the whole assembly over the (already bit-exact) block: t/x/cap
 embedders, patchify, noise/context refiners, the [image, cap] unified sequence,
 main layers, FinalLayer, and unpatchify. Small dims + no padding (lengths
 multiple of SEQ_MULTI_OF=32) keep it fast. Dev-time only.
+
+usage: s3dit_model_dump_reference.py --seed 0
 """
-import os, sys
+import argparse, os, sys
 from pathlib import Path
 import torch
 from safetensors.torch import save_file
@@ -26,7 +28,11 @@ AXES_DIMS, AXES_LENS = [8, 8, 8], [64, 32, 32]
 H, W, CAP_LEN = 16, 8, 32                       # patches 8*4=32 (mult of 32)
 
 def main():
-    torch.manual_seed(0)
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="seed of the random weights and inputs; recorded in the output metadata")
+    args = ap.parse_args()
+    torch.manual_seed(args.seed)
     model = ZImageTransformer2DModel(
         all_patch_size=(2,), all_f_patch_size=(1,), in_channels=IN_CH, dim=DIM,
         n_layers=N_LAYERS, n_refiner_layers=N_REF, n_heads=N_HEADS, n_kv_heads=N_HEADS,
@@ -54,7 +60,7 @@ def main():
     tensors["_t"] = t.contiguous()                # [1]
     tensors["_out"] = out.contiguous()            # [C,1,H,W] -> squeeze F later
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    save_file(tensors, OUT, metadata={"dim": str(DIM), "n_layers": str(N_LAYERS)})
+    save_file(tensors, OUT, metadata={"dim": str(DIM), "n_layers": str(N_LAYERS), "seed": str(args.seed)})
     print(f"wrote {OUT}  out {tuple(out.shape)} [min,max]=[{out.min():.4f},{out.max():.4f}]")
 
 if __name__ == "__main__":

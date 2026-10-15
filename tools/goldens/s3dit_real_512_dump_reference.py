@@ -20,7 +20,10 @@ named - `all_x_embedder.*`, unfused `to_q`/`to_k`/`to_v` - so no Comfy
 remap is needed, unlike the fused-qkv Comfy checkpoint the sibling script
 targets). Dev-time only; the output is a small (~1.5 MB) fixture of just the
 inputs and final output - not the ~24 GB checkpoint.
+
+usage: s3dit_real_512_dump_reference.py <transformer/ dir> [out.safetensors] --seed 0
 """
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -29,18 +32,21 @@ import torch
 from safetensors.torch import save_file
 from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
 
-if len(sys.argv) < 2:
-    sys.exit("usage: s3dit_real_512_dump_reference.py <z_image_turbo transformer/ dir> [out.safetensors]")
-TRANSFORMER_DIR = sys.argv[1]
+_ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+_ap.add_argument("transformer_dir", metavar="transformer_dir", help="z_image_turbo transformer/ dir")
+_ap.add_argument("out", nargs="?", metavar="out.safetensors")
+_ap.add_argument("--seed", type=int, required=True, help="seed of the random input; recorded in the output metadata")
+_ARGS = _ap.parse_args()
+TRANSFORMER_DIR = _ARGS.transformer_dir
 _TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[2] / "testdata")
-OUT = sys.argv[2] if len(sys.argv) > 2 else str(Path(_TESTDATA) / "golden" / "zimage" / "zimage_real_512.safetensors")
+OUT = _ARGS.out or str(Path(_TESTDATA) / "golden" / "zimage" / "zimage_real_512.safetensors")
 
 
 def main():
     model = ZImageTransformer2DModel.from_pretrained(TRANSFORMER_DIR, torch_dtype=torch.float32)
     model = model.eval()
 
-    torch.manual_seed(0)
+    torch.manual_seed(_ARGS.seed)
     # 512x512 image -> VAE latent 64x64 -> patch_size=2 -> 32x32 = 1024 image
     # tokens; cap_len=64 (the CLI's fixed caption length, `s3dit::caps`'s
     # `text2image` hot-pipeline build). Joint sequence: 1024 + 64 = 1088,
@@ -53,7 +59,7 @@ def main():
 
     save_file(
         {"_latent": latent.contiguous(), "_cap": cap.contiguous(), "_t": t.contiguous(), "_out": out.contiguous()},
-        OUT, metadata={"model": "Z-Image-Turbo 6B real, 512x512 scale"},
+        OUT, metadata={"model": "Z-Image-Turbo 6B real, 512x512 scale", "seed": str(_ARGS.seed)},
     )
     print(f"wrote {OUT}  out {tuple(out.shape)} [min,max,mean]=[{out.min():.4f},{out.max():.4f},{out.mean():.4f}]")
 

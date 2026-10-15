@@ -44,7 +44,7 @@ own, unmodified - only an unused import is neutralised.
    keyframe-marked, and the base range is left untouched.
 
 Usage:
-  python tools/goldens/ltxv_refcond_dump_reference.py [--out testdata/golden/ltxv/refcond]
+  python tools/goldens/ltxv_refcond_dump_reference.py --seed 1234 --mask-seed 99 [--out testdata/golden/ltxv/refcond]
 """
 
 import argparse
@@ -217,14 +217,18 @@ def run_mask_case(spec, gen):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="testdata/golden/ltxv/refcond")
+    ap.add_argument("--seed", type=int, required=True,
+                    help="seed of the reference-conditioning cases; recorded in the manifest")
+    ap.add_argument("--mask-seed", type=int, required=True,
+                    help="seed of the attention-mask cases; recorded in the manifest")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     tensors, meta = {}, []
     for spec in CASES:
-        a, info = run_case(spec, torch.Generator().manual_seed(1234))
-        b, _ = run_case(spec, torch.Generator().manual_seed(1234))
+        a, info = run_case(spec, torch.Generator().manual_seed(args.seed))
+        b, _ = run_case(spec, torch.Generator().manual_seed(args.seed))
         for k in a:
             assert torch.equal(a[k], b[k]), f"{k} is not reproducible"
         tensors.update(a)
@@ -232,8 +236,8 @@ def main():
 
     mtensors, mmeta = {}, []
     for spec in MASK_CASES:
-        a, info = run_mask_case(spec, torch.Generator().manual_seed(99))
-        b, _ = run_mask_case(spec, torch.Generator().manual_seed(99))
+        a, info = run_mask_case(spec, torch.Generator().manual_seed(args.mask_seed))
+        b, _ = run_mask_case(spec, torch.Generator().manual_seed(args.mask_seed))
         for k in a:
             assert torch.equal(a[k], b[k]), f"{k} is not reproducible"
         mtensors.update(a)
@@ -253,6 +257,8 @@ def main():
         "torch": torch.__version__,
         "patch_size": PATCH,
         "channels": CHANNELS,
+        "seed": args.seed,
+        "mask_seed": args.mask_seed,
         "cases": meta,
         "mask_cases": mmeta,
         "source": source_block(

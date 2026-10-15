@@ -107,7 +107,10 @@ for i, s in enumerate(SUBJECTS):
         row.append(piece)
     event_piece.append(row)
 
-gen = torch.Generator().manual_seed(20261006)
+# seed: the script has no command line and the log-hazards it draws are inputs
+# recorded in the committed reference JSON, so this value defines the fixture.
+LOG_HAZARD_SEED = 20261006
+gen = torch.Generator().manual_seed(LOG_HAZARD_SEED)
 loglam = (math.log(0.05) + 0.7 * torch.randn(len(SUBJECTS), P, K, generator=gen)).requires_grad_(True)
 w = torch.tensor([s["weight"] for s in SUBJECTS])
 loss = ((w / w.sum())[:, None, None] * (loglam.exp() * expo - event * loglam)).sum()

@@ -13,7 +13,7 @@ full (post output_conv1+bilinear+pos), out (post output_conv2).
 Run from the repo root with the reference repo importable:
   python3 tools/goldens/worldmirror2_dump_dpt_tiny.py \
       --repo <clone of HY-World-2.0>/hyworld2/worldrecon \
-      --out crates/worldmirror2/tests/golden/dpt_tiny.json
+      --out crates/worldmirror2/tests/golden/dpt_tiny.json --seed 1234 --input-seed 42
 """
 import argparse
 import json
@@ -43,13 +43,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="seed of the random weights; recorded in the output")
+    ap.add_argument("--input-seed", type=int, required=True,
+                    help="seed of the random input and context; recorded in the output")
     args = ap.parse_args()
     sys.path.insert(0, args.repo)
     for name in ["flash_attn", "flash_attn.flash_attn_interface", "flash_attn_interface"]:
         m = types.ModuleType(name)
         m.flash_attn_func = None
         sys.modules[name] = m
-    torch.manual_seed(1234)
+    torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
 
     from hyworldmirror.models.heads.dense_head import DPTHead
@@ -57,7 +61,7 @@ def main():
     head = DPTHead(dim_in=2048, output_dim=3, patch_size=14, activation="exp+expp1+linear", enable_depth_mask=True)
     head.eval()
     # deterministic random weights
-    g = torch.Generator().manual_seed(42)
+    g = torch.Generator().manual_seed(args.input_seed)
     state = head.state_dict()
     for k in list(state.keys()):
         # scale by fan-in so magnitudes stay sane through the deep conv stack
@@ -120,6 +124,9 @@ def main():
     images.numpy().astype(np.float32).tofile(f"{args.out}/images.bin")
     with open(f"{args.out}/stages.json", "w") as f:
         json.dump(caps, f, indent=0)
+    # stages.json is read stage by stage, so the seeds go in a file of their own.
+    with open(f"{args.out}/seeds.json", "w") as f:
+        json.dump({"seed": args.seed, "input_seed": args.input_seed}, f)
     print("wrote", args.out, {k: round(v["rms"], 3) for k, v in caps.items()})
 
 

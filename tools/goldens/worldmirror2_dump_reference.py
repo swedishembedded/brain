@@ -9,7 +9,7 @@ Run manually (never in the build) against the reference repo + checkpoint:
   python3 tools/goldens/worldmirror2_dump_reference.py \
       --repo <clone of HY-World-2.0>/hyworld2/worldrecon \
       --ckpt <HY-WorldMirror-2.0 checkpoint>/model.safetensors \
-      --out crates/worldmirror2/tests/golden
+      --out crates/worldmirror2/tests/golden --seed 0
 
 Stages dumped (each as .npy + a small committed sample in golden_meta.json):
   t1: synthetic 600x400 image -> PIL bicubic resize + crop + ToTensor (u8 + normalized CHW)
@@ -87,10 +87,12 @@ def main():
     ap.add_argument("--repo", required=True)
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="seed of torch's global RNG; it only initialises parameters the checkpoint does not load; recorded in the metadata")
     args = ap.parse_args()
     sys.path.insert(0, args.repo)
     torch.set_grad_enabled(False)
-    torch.manual_seed(0)
+    torch.manual_seed(args.seed)
 
     # The reference imports flash_attn unconditionally but only calls it on
     # bf16/fp16 tensors; stub it so the fp32 CPU path imports cleanly.
@@ -107,7 +109,7 @@ def main():
     _stub("flash_attn.flash_attn_interface", ["flash_attn_func"])
     _stub("flash_attn_interface", ["flash_attn_func"])
 
-    meta = {}
+    meta = {"seed": args.seed}
 
     # ---- T1: preprocessing golden ----
     img = synth_image()
