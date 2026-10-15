@@ -1,0 +1,143 @@
+# Training the 27B on one card, generically - roadmap
+
+Ledger for training Qwen3.8-27B (crate `qwen35`) with LoRA on a frozen bf16 base
+("normal LoRA") and on a frozen 4-bit NF4 base ("QLoRA"), on ONE CUDA card (GH200,
+95 GiB HBM) at the longest sequence length the card allows, and for making every
+piece of that generic so another architecture gets the same training by
+implementing a small set of capability traits. Also holds the on-policy data and
+GRPO work that the 27B needs. Update this file in the same commit that finishes or
+changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 260).
+
+## Hardware and limits this plan is built for (measured 2026-10-16)
+
+- One GH200: 95.0 GiB HBM, 860 TFLOPS bf16 matmul, 399 GB/s device reading pinned host memory.
+- Host memory cap of the job is 102.6 GiB (not the machine's RAM). Two concurrent
+  builds are the safe maximum.
+- CUDA binds a single buffer of at most 4 GiB. Any n x V, n x ff or n x 2*qd buffer
+  that crosses it needs chunking: logits at T = 4,324; MLP/LoRA scratch at T about
+  61.7K; `q_full` at T about 87K.
+- The project drive is small and shared: build with CARGO_INCREMENTAL=0 in scratch
+  target dirs, never run a bare `cargo test -p <crate>` (each integration-test binary
+  is about 470 MB).
+
+## Landed
+
+- Streamed FP8 checkpoint source for qwen35 (`fp8_source`, `base_source`): host peak
+  about 1.1-1.5 GiB for the whole 27B (851 tensors, 107.6 GB of f32 streamed in
+  82-184 s). CLI flags `--base-dtype f32|bf16|nf4`, `--lora-rank`, `--lora-alpha`,
+  `--seq-len`, `--recompute on|off` on `brain qwen35 finetune` (training on a bf16/nf4
+  base returns an explicit unsupported error until the trainer tier below lands).
+- Flash attention trio trains at head_dim 256 (parameterised, qwen3 behaviour
+  unchanged); the GQA mixer saves LSE instead of T x T probabilities.
+  Generated-from-WGSL cost at real width: see knowledge 240.
+- Gated DeltaNet training over segments (`gdn_segment`): the per-layer peak is
+  bounded by the segment, not the sequence; four per-chunk buffers are recomputed in
+  backward. Measured at real width: about 1.3 MiB/token one-shot vs 113 KiB/token at
+  T = 131072 with 2048-token segments (knowledge 250-252).
+
+## In flight / next (dependency order)
+
+- Frozen-base tiers for the qwen35 trainer: `Weight::NF4` (dequantise-on-the-fly
+  forward and dx, fp32 accumulate, same weight copy for x*W^T and dY*W), BF16 and NF4
+  through `new_train_on` with LoRA applied on every float-read tier, `proj_bwd` through
+  `Ops::matmul_dx`. Model: qwen3's int8 frozen base (knowledge 197).
+- Per-layer activation recompute in the resident qwen35 trainer with one shared
+  per-layer scratch; no decode-only state (KV cache, GDN state) in training builds.
+- Shared fused chunked LM-head cross-entropy in `model` (never builds n x V; bf16 or
+  NF4 head; vocab tiling under the 4 GiB binding), qwen3 migrated onto it.
+- Wire flash attention (`FlashGqaIds::for_training`) and `gdn_mixer_seg_fwd/bwd` into
+  the qwen35 layers; choose `segment_tokens` by measurement; store layer-boundary
+  residuals in bf16 above 32K tokens; lift the `T % chunk == 0` assertion; chunk
+  `q_full` above 4 GiB.
+- Sequence-length sweep and the real-width qualification (gates Q3-Q6 below).
+- Hand-tuned CUDA flash kernel for head_dim 256 (the generated one runs near 4 TFLOPS;
+  a 32K-token layer costs 13-21 s forward+backward).
+
+## Generic training capabilities (any model that implements them gets SFT/DPO/GRPO)
+
+- `TokenObjectives` capability on `Model` replacing the `unimplemented!()` defaults
+  (`enable_weighted_loss`, `set_loss_weights`, `set_loss_denominator`,
+  `batch_token_logprobs`, plus `set_logit_scale(1/T)`); a typed `Unsupported` error
+  raised at configuration time; objectives query it.
+- `LoraSites` per model config and the generic adapter tensor naming/validation.
+- SDK fine-tune types dispatch through the `ARCHS` table (family from the entry);
+  `score_tokens` public per-token scoring with logit scale and adapter option.
+- Conformance suite (`make test/conformance`, must fail on zero models): logprobs equal
+  log-softmax of logits; weighted loss with weights 1 equals plain CE; finite-difference
+  gradcheck at distinct dims; LoRA B = 0 leaves logits bit-identical; save/reload;
+  one step of each objective lowers its own loss; chunked head equals unchunked; each
+  frozen-base tier within tolerance of f32. Run for qwen3, gpt2, qwen35, qwen35moe.
+- Move the serving `AdapterBank` behind `LoraSites` so qwen35 serves adapters
+  (today qwen3 only; qwen35 folds an adapter into the base).
+- Move qwen3's int8 frozen-base dx into the shared `Ops::matmul_dx` and delete the
+  local copy (one implementation).
+- In-process device high-water API (`Gpu::peak_bytes`) used by every memory gate.
+
+## Server and SDK: token ids and logprobs (the on-policy data contract)
+
+Today the HTTP server refuses `logprobs`/`top_logprobs` and token-id prompts and
+returns `logprobs: null`; the seed used is not echoed; `/v1/models` has the adapter
+digest only. Needed, with tests in the api-conformance e2e:
+- accept `logprobs`, return `choices[].logprobs.content[]` with `token_id` and
+  `logprob`; accept token-id prompts; echo the seed used; `system_fingerprint` as a
+  digest of {base, adapter, tokenizer, template}; `base_digest`, `tokenizer_digest`,
+  `template_digest` in `/v1/models`; the adapter that answered in every response.
+- SDK: `ChatRequest::logprobs`, `ChatResponse.{prompt_ids, tokens, logprobs, sampling,
+  identity}`, `ModelIdentity.{tokenizer, template}`.
+- A `generic-rollout-v1` dataset format and reader beside the preference reader; the
+  GRPO external-records path recomputes pi_old with the training forward at policy
+  version v, keeps behaviour logprobs for the mismatch metric and truncated importance
+  sampling, refuses rows whose policy version is older than the staleness bound,
+  and refuses a tokenizer/template mismatch.
+
+## GRPO fixes (found by reading; none is yet shown to explain the documented negative)
+
+1. Ratio bias at temperature != 1: stored sampling logprobs use the sampling
+   temperature and top-k/top-p, trained logprobs do not; at T = 1.5 (the 12-cycle study)
+   confident tokens start with ratio > 1 and positive-advantage rows are clipped to
+   weight 0. All tests use T = 1.0. Fix: logit-scale hook, recompute pi_old with the
+   training forward, untruncated sampling by default.
+2. Zero-variance groups are dropped, not replaced, and the optimizer still steps on an
+   empty batch (73.6% of groups in the 12-cycle run). Fix: dynamic sampling to a
+   bounded resample factor; never step on zero rows.
+3. Advantage options (mean-centred default, z-score kept for reproduction); token-level
+   loss aggregation; clip-higher 0.2/0.28; truncated completions masked and rewarded on
+   the trained span; EOS trained when sampled; non-finite guard (skip step, abort after
+   3 in a row) and log-space ratio cap; KL to the adapter-disabled reference always
+   logged (weight 0 by default); loss probe must not consume rollout rows; rollouts
+   through the KV-cached decode engine instead of re-prefilling per token.
+4. Repair `make test/rl` (it names the deleted `continuous_cycle`) and make it fail if a
+   named test target does not exist.
+Pre-registered tests (CPU, tiny models): on-policy identity at T in {0.7, 1.0, 1.5};
+advantage fixtures; no step on zero rows with 80% zero-variance groups; length
+invariance under token-sum; truncation; EOS; overflow/NaN; version refusal; analytic
+KL; the same identity test on tiny qwen35 once it implements `TokenObjectives`.
+Pre-registered experiment: replicate the 12-cycle continual GRPO study on 3 drawn
+seeds with arms legacy / ratio fix only / plus dynamic sampling / plus the rest; the
+ratio fix counts as a contributing cause only if it improves accuracy over legacy on
+all 3 seeds. Sequential SFT with rehearsal remains the validated continual-learning
+path; GRPO stays opt-in until it beats rejection-sampling SFT on a verifiable family.
+
+## Qualification gates for the 27B (each a pass condition and a command; all GPU gates
+run under the shared GPU lock, backend passed as a flag)
+
+| Gate | Pass condition |
+|---|---|
+| Q1 conformance | the suite above passes for qwen3, gpt2, qwen35, qwen35moe |
+| Q2 gradcheck | qwen35 weighted loss / logprob / logit scale at distinct dims, CPU and CUDA |
+| Q3 real-width probe | 4 real-width layers (1 GQA + 3 GDN), real vocab, rank 16: finite loss, peak within 15% of the memory budget scaled to 4 layers |
+| Q4 streamed load | 64-layer base from the FP8 source: host peak < 8 GiB, device 51 +/- 2 GiB (bf16) or about 17 GiB (NF4) |
+| Q5 one SFT step | T = 4096, rank 16, 12 targets: finite, peak < 70 GiB (bf16), time recorded; then the longest T that fits for bf16 and NF4 |
+| Q6 content gate | 50 steps on 8 examples teaching one fact; after save/reload and serving, the greedy answer contains the fact and the base without the adapter does not |
+| Q7 DPO | chosen-minus-rejected margin rises; reference = adapter disabled |
+| Q8 batched rollout | batch 32: aggregate >= 1,000 tok/s with per-token logprobs and the seed echoed |
+| Q9 on-policy identity | mean |ratio - 1| < 1e-3 at T in {0.7, 1.0} on the first micro-step |
+| Q10 GRPO step | 8 prompts x G = 8 completes; zero-variance fraction, KL, adapter version logged; no non-finite |
+| Q11 endurance and resume | a run crossing a forced stop resumes to the identical adapter; no device memory growth |
+
+## Deliberately not built
+
+Full-parameter 27B training (does not fit this allocation); tensor/pipeline parallelism
+and NCCL (one card); Vulkan/wgpu 27B training (2 GiB buffer clamp; CUDA is the lane);
+training the MTP head or the vision tower; a value model; asynchronous off-policy
+rollout/training overlap.
