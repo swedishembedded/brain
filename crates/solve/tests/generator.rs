@@ -346,3 +346,12 @@ fn a_harvested_walk_costs_one_move_application_per_example() {
     // The baseline walks to a uniform depth in 1..=26, so it averages ~13.5.
     assert!(endpoint_applies > 10.0, "the baseline did not behave as measured");
 }
+
+/// A rollout that names no seed gets a random one, so two unseeded sampling
+/// runs differ; the caller reads the seed back from the value it built.
+#[test]
+fn an_unset_rollout_seed_is_drawn_and_readable() {
+    let (a, b) = (solve::Rollout::default(), solve::Rollout::default());
+    assert_ne!(a.seed, b.seed);
+    assert_eq!(solve::Rollout { seed: 7, ..a }.seed, 7);
+}

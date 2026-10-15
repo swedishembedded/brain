@@ -60,7 +60,9 @@ pub struct Rollout {
     /// works when sampled has not learned the decision, it has learned a
     /// direction.
     pub temperature: f32,
-    /// Seed for that sampling. A run is reproducible or it is not evidence.
+    /// Seed for that sampling. A run is reproducible or it is not evidence:
+    /// [`Default`] draws a random one, so the caller that built the
+    /// `Rollout` holds the seed to report and to pass back.
     pub seed: u64,
     /// How many independent sampled rollouts to try before giving up.
     ///
@@ -80,7 +82,7 @@ pub struct Rollout {
 
 impl Default for Rollout {
     fn default() -> Rollout {
-        Rollout { max_steps: 64, forbid_redundant: true, temperature: 0.0, seed: 1, attempts: 1 }
+        Rollout { max_steps: 64, forbid_redundant: true, temperature: 0.0, seed: seed::random_seed(), attempts: 1 }
     }
 }
 

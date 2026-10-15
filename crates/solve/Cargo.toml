@@ -16,5 +16,7 @@ brain-optim.workspace = true
 brain-kernels.workspace = true
 brain-model.workspace = true
 brain-checkpoint.workspace = true
+# `seed::random_seed` - the draw behind an unset sampling seed.
+brain-seed.workspace = true
 bytemuck.workspace = true
 serde_json.workspace = true
