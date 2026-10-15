@@ -721,7 +721,7 @@ def _add_generate(sub) -> None:
     g.add_argument("--classes", default=",".join(A.DEFAULT_CLASSES), help="class names, in class-index order")
     g.add_argument("--limit", type=int, default=0, help="a seeded random subset of this many frames, taken before sharding")
     g.add_argument("--shard", default="0/1", help="i/n: every n-th selected frame from offset i")
-    g.add_argument("--seed", type=int, default=1, help="frame selection and prior wording (not the generation seed)")
+    g.add_argument("--seed", type=int, required=True, help="frame selection and prior wording (not the generation seed)")
     g.add_argument("--device", help="overrides the config's device")
     g.add_argument("--backend", help="overrides the config's backend")
     g.add_argument("--max-retries", type=int, default=Retry.max_retries, help="retries after memory pressure, per image")
@@ -757,7 +757,7 @@ def _add_ingest(sub) -> None:
     g.add_argument("--split", default="S", choices=("T", "S", "V", "Test"))
     g.add_argument("--datasets", default="", help="comma-separated dataset ids; default: all in splits.json")
     g.add_argument("--classes", default=",".join(A.DEFAULT_CLASSES), help="class names, in class-index order")
-    g.add_argument("--seed", type=int, default=1, help="seeds the sensor noise, per frame")
+    g.add_argument("--seed", type=int, required=True, help="seeds the sensor noise, per frame")
     g.add_argument("--only-existing", action="store_true",
                    help="ingest only the selected frames that have an output (default: the others count as missing)")
 
@@ -783,7 +783,7 @@ def _add_gate(sub) -> None:
     g.add_argument("--max-shift", type=parse_max_shift, default=None,
                    help="global shift limit: `auto` (default) calibrates it on the real pairs of split T, no more "
                         "misaligned than they are; a number is a fixed limit in pixels from no shift")
-    g.add_argument("--seed", type=int, default=1, help="which split-T frames form the reference")
+    g.add_argument("--seed", type=int, required=True, help="which split-T frames form the reference")
     g.add_argument("--sam2", action="store_true", help="also gate the mask IoU of SAM 2 on RGB and IR (resident D-Bus segmenter)")
     g.add_argument("--dbus-address", help="bus address of the resident `brain serve --dbus` (with --sam2)")
     g.add_argument("--brain-py", help="location of brain-py (with --sam2; default: the repository's)")

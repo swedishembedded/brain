@@ -75,7 +75,24 @@ class Driver(unittest.TestCase):
 
         expected = [f"d:{keys[i]}" for i in np.random.default_rng(5).permutation(len(keys))]
         self.assertEqual(order(["--seed", "5"]), expected)
-        self.assertEqual(order([], env={"SEED": "5"}), [f"d:{keys[i]}" for i in np.random.default_rng(1).permutation(len(keys))])
+        # Remove the recorded seed so this run has to draw its own.
+        seed_file = os.path.join(self.work, "seed")
+        os.remove(seed_file)
+        drawn_order = order([], env={"SEED": "5"})
+        with open(seed_file) as fh:
+            drawn = int(fh.read())
+        self.assertNotEqual(drawn, 5, "the environment must not supply the seed")
+        self.assertEqual(drawn_order, [f"d:{keys[i]}" for i in np.random.default_rng(drawn).permutation(len(keys))])
+
+    def test_a_later_stage_reads_the_recorded_seed_and_refuses_a_different_one(self):
+        os.makedirs(os.path.join(self.work, "arms", "b1"))
+        done = run_driver("--work", self.work, "--seed", "5", "pack", "b1")
+        self.assertIn("no rendered arm", done.stderr)  # the stage ran far enough to record the seed
+        with open(os.path.join(self.work, "seed")) as fh:
+            self.assertEqual(fh.read().strip(), "5")
+        done = run_driver("--work", self.work, "--seed", "6", "pack", "b1")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("differs from the seed 5", done.stderr)
 
     def test_the_brain_binary_and_the_device_are_flags_placed_before_the_verb(self):
         packed = os.path.join(self.work, "packed", "eval-Test")

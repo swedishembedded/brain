@@ -86,13 +86,16 @@ $R test                             # unit tests, no data needed
 
 `--work DIR` (required) holds every output; nothing is written into the
 repository. The driver's settings are flags placed before the stage and the
-environment configures nothing: `--seed N` (default 1) seeds splits, sensor fit,
-frame selection and packing order, `--brain PATH` (default `brain` on `PATH`)
+environment configures nothing: `--seed N` seeds splits, sensor fit,
+frame selection and packing order (the first stage drawn without one prints a random
+seed and records it in `DIR/seed`; every later stage reads it back and refuses a
+different one), `--brain PATH` (default `brain` on `PATH`)
 is the binary the stages that run brain use and `--device gpuN` names the card
 for them. Run `manifest` once per dataset (each with
 its own `--dataset` id); `splits` and `arms` use all manifests. Each stage is
 also a script with `--help`: `rir_readers.py`, `rir_manifest.py validate`,
-`rir_splits.py`, `rir_arms.py {fit-sensor,render}`, `rir_pack.py`.
+`rir_splits.py`, `rir_arms.py {fit-sensor,render}`, `rir_pack.py`; they all require `--seed N`
+(the driver passes the recorded one).
 
 ## The pairs manifest
 

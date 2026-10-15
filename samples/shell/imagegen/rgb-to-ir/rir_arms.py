@@ -317,7 +317,7 @@ def main(argv=None) -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--splits", required=True, help="splits.json from rir_splits.py")
     common.add_argument("--datasets", default="", help="comma-separated dataset ids; default: every dataset in splits.json")
-    common.add_argument("--seed", type=int, default=1)
+    common.add_argument("--seed", type=int, required=True)
 
     fit = sub.add_parser("fit-sensor", parents=[common], help="fit the sensor model on split T")
     fit.add_argument("--out", required=True, help="sensor-model.json to write")

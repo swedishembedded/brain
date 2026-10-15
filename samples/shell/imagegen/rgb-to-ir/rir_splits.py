@@ -275,7 +275,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Write splits.json: sequence-only T/S/V/Test splits of pairs manifests.")
     ap.add_argument("--manifest", required=True, nargs="+", help="pairs manifest(s) (see rir_manifest.py)")
     ap.add_argument("--out", required=True, help="splits.json to write")
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--default-s-cap", type=int, default=SplitParams().default_s_cap,
                     help="cap on detector-training (S) frames per dataset")
     ap.add_argument("--s-cap", action="append", default=[], metavar="DATASET=FRAMES", help="per-dataset cap")

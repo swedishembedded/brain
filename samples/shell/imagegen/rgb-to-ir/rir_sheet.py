@@ -83,7 +83,7 @@ def main(argv=None) -> int:
     ap.add_argument("tiles")
     ap.add_argument("--out", required=True)
     ap.add_argument("--count", type=int, default=12)
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--brain-py", default=None, help="directory of the brain-py package (default: the one in this repository)")
     ap.add_argument("--dbus-address", default="SESSION")
     a = ap.parse_args(argv)

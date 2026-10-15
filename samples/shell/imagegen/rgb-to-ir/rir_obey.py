@@ -52,7 +52,7 @@ carry a `stratum` (day or night, say) are also reported per stratum under `strat
 when counterfactuals exist, else the direction margin (accuracy less the 0.5 chance level over
 warmer / cooler instructions).
 
-    rir_obey.py PAIRS.jsonl --out obedience.json [--resamples 2000] [--seed 1]
+    rir_obey.py PAIRS.jsonl --out obedience.json [--resamples 2000] --seed N
 
 PAIRS.jsonl has one pair per line, paths relative to the file: sequence, region_type,
 instruction, source ("oracle" | "prior"), generated, mask (PNG, non-zero is the object), and
@@ -295,7 +295,7 @@ def main(argv=None) -> int:
     ap.add_argument("pairs", help="pairs jsonl, see the module docstring")
     ap.add_argument("--out", required=True, help="obedience.json to write (the file rir_decide reads for K5)")
     ap.add_argument("--resamples", type=int, default=B.DEFAULT_RESAMPLES)
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--seed", type=int, required=True)
     a = ap.parse_args(argv)
     report = evaluate(load_pairs(a.pairs), n_resamples=a.resamples, seed=a.seed)
     with open(a.out, "w") as fh:

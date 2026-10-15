@@ -327,7 +327,7 @@ def main(argv=None) -> int:
     ap.add_argument("--parts", default="", help="class=part,part;class=part ... part-level regions; needs --grounder")
     ap.add_argument("--grounder", choices=("florence2",), help="part grounder (Florence-2 weights through the brain CLI)")
     ap.add_argument("--limit", type=int, default=0, help="measure at most this many not yet measured tiles")
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--seed", type=int, required=True)
     a = ap.parse_args(argv)
     if a.backend == "dbus":
         segmenter = S.DbusSegmenter(a.dbus_address, a.variant, a.brain_py)

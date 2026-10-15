@@ -13,8 +13,11 @@
 #
 # Stages share the work directory DIR (required); nothing is written elsewhere.
 # The settings are these flags and nothing else: the environment configures
-# nothing. --seed (default 1) seeds splits, sensor fit, frame selection and
-# packing order; --brain (default `brain` on PATH) is the binary the stages
+# nothing. --seed seeds splits, sensor fit, frame selection and packing order.
+# The first stage run in DIR draws a random seed (printed) when none is given and
+# records it in DIR/seed; every later stage reads it back, and a --seed that
+# differs from the recorded one is refused, so no stage runs under a seed other
+# than the one its inputs were made with; --brain (default `brain` on PATH) is the binary the stages
 # that run brain use (evaluate, generate); --device names the card for them
 # (default: the binary's).
 #
@@ -51,7 +54,7 @@ set -euo pipefail
 
 HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 WORK=""
-SEED=1
+SEED=""
 BRAIN="brain"
 DEVICE=""
 
@@ -71,11 +74,32 @@ cmd="$1"; shift
 brain_global=()
 [ -z "$DEVICE" ] || brain_global=(--device "$DEVICE")
 
+# The work directory's seed: the one given, else the one recorded by an earlier
+# stage, else a fresh random draw. It is recorded in $WORK/seed either way.
+resolve_seed() {
+  local file="$WORK/seed" recorded=""
+  [ ! -f "$file" ] || recorded="$(cat "$file")"
+  if [ -n "$SEED" ]; then
+    case "$SEED" in *[!0-9]*) echo "$0: --seed $SEED is not a seed (an unsigned integer)" >&2; exit 2 ;; esac
+    if [ -n "$recorded" ] && [ "$recorded" != "$SEED" ]; then
+      echo "$0: --seed $SEED differs from the seed $recorded this work directory was made with ($file)" >&2
+      exit 2
+    fi
+  elif [ -n "$recorded" ]; then
+    SEED="$recorded"
+  else
+    SEED="$(python3 -c 'import random; print(random.SystemRandom().randrange(2**63))')"
+    echo "$0: no --seed given, using random seed $SEED (pass --seed $SEED to reproduce; recorded in $file)" >&2
+  fi
+  printf '%s\n' "$SEED" > "$file"
+}
+
 case "$cmd" in
   test|-h|--help) ;;
   *)
     [ -n "$WORK" ] || { echo "$0: --work DIR is required (the directory every stage reads and writes)" >&2; exit 2; }
     mkdir -p "$WORK/manifests"
+    resolve_seed
     ;;
 esac
 

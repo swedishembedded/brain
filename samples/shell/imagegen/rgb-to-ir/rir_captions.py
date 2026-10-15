@@ -235,7 +235,7 @@ def balance(per_tile_statements) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Write instruction captions for a measured tile folder.")
     ap.add_argument("tiles", help="tile folder with regions/ from rir_regions.py")
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--neutral-share", type=float, default=0.3)
     a = ap.parse_args(argv)
     report = build_captions(a.tiles, a.seed, a.neutral_share)

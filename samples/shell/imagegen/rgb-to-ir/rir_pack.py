@@ -140,7 +140,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True, help="output dataset directory")
     ap.add_argument("--size", type=int, default=512, help="square input resolution")
     ap.add_argument("--nc", type=int, default=3, help="number of classes (person, car, bicycle)")
-    ap.add_argument("--seed", type=int, default=1, help="shuffle seed")
+    ap.add_argument("--seed", type=int, required=True, help="shuffle seed")
     ap.add_argument("--limit", type=int, default=0, help="pack a seeded random subset of this many items")
     a = ap.parse_args(argv)
 

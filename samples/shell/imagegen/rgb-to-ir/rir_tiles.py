@@ -205,7 +205,7 @@ def main(argv=None) -> int:
     ap.add_argument("--size", type=int, default=512, help="tile side in pixels (default 512)")
     ap.add_argument("--datasets", default="", help="comma-separated dataset ids; default: all in splits.json")
     ap.add_argument("--limit", type=int, default=0, help="seeded random subset of this many frames")
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--min-edge-corr", type=float, default=TileChecks.min_edge_corr)
     ap.add_argument("--max-shift-gain", type=float, default=TileChecks.max_shift_gain)
