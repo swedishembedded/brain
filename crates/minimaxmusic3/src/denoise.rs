@@ -421,7 +421,7 @@ mod tests {
         let w = dit_train::random_weights(&cfg, 0xC0FFEE);
         let (length, cin) = (6usize, cfg.in_channels as usize);
         let cond_dim = cfg.condition_dim as usize;
-        let mut r = Lcg::new(0xBEEF);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(cin * length, 0.7);
         let condition = r.vec_scaled(length * cond_dim, 0.4);
         let zero = vec![0.0f32; condition.len()];
@@ -468,7 +468,7 @@ mod tests {
 
         let num_frames = 5usize;
         let per_frame = (cond_cfg.num_condition_layers * cond_cfg.condition_hidden_dim) as usize;
-        let mut r = Lcg::new(3);
+        let mut r = Lcg::new(data::rng::random_seed());
         let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
 
         let expected_length = condition_encoder::latent_length(&cond_cfg, num_frames);
@@ -499,7 +499,7 @@ mod tests {
 
         let num_frames = 5usize;
         let per_frame = (cond_cfg.num_condition_layers * cond_cfg.condition_hidden_dim) as usize;
-        let mut r = Lcg::new(13);
+        let mut r = Lcg::new(data::rng::random_seed());
         let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
 
         let steps = 4usize;
@@ -540,7 +540,7 @@ mod tests {
 
         let num_frames = 6usize;
         let per_frame = (cond_cfg.num_condition_layers * cond_cfg.condition_hidden_dim) as usize;
-        let mut r = Lcg::new(33);
+        let mut r = Lcg::new(data::rng::random_seed());
         let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
         let starts = [0usize, 2];
         let length_at = |start: usize| condition_encoder::latent_length(&cond_cfg, num_frames - start);
@@ -582,7 +582,7 @@ mod tests {
         // without needing a 250-frame fixture.
         let num_frames = 6usize;
         let per_frame = (cond_cfg.num_condition_layers * cond_cfg.condition_hidden_dim) as usize;
-        let mut r = Lcg::new(13);
+        let mut r = Lcg::new(data::rng::random_seed());
         let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
 
         let first_length = condition_encoder::latent_length(&cond_cfg, num_frames);

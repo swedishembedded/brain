@@ -1087,7 +1087,7 @@ mod tests {
         let cfg = DepthDecoderConfig::tiny();
         let w = random_weights(&cfg, 1);
         let s = cfg.num_codebooks as usize;
-        let mut r = Lcg::new(2);
+        let mut r = Lcg::new(data::rng::random_seed());
         let x = r.vec_scaled(s * cfg.hidden_size as usize, 0.5);
         let (out, _) = forward(&w, &cfg, &x, s);
         assert_eq!(out.len(), s * cfg.hidden_size as usize);
@@ -1106,7 +1106,7 @@ mod tests {
         // Every position `pos_embedding` can address, which covers the
         // `num_codebooks`-long depth sequence the AR loop actually walks.
         let steps = cfg.max_position_embeddings as usize;
-        let mut r = Lcg::new(22);
+        let mut r = Lcg::new(data::rng::random_seed());
         let rows: Vec<Vec<f32>> = (0..steps).map(|_| r.vec_scaled(d, 0.5)).collect();
 
         let mut cache = KvCache::new(&cfg);
@@ -1233,7 +1233,7 @@ mod tests {
         let cfg = DepthDecoderConfig::tiny();
         let w = random_weights(&cfg, 0x0DF0);
         let d = cfg.hidden_size as usize;
-        let mut r = Lcg::new(0x0DF1);
+        let mut r = Lcg::new(data::rng::random_seed());
         let rows: Vec<Vec<f32>> = (0..cfg.num_codebooks as usize).map(|_| r.vec_scaled(d, 0.5)).collect();
         let gpu = Gpu::new_cpu(PIPELINES);
         for mut dec in [Decoder::host(&cfg, 2), Decoder::device(&gpu, &cfg, &w, 2)] {
@@ -1252,7 +1252,7 @@ mod tests {
         let cfg = DepthDecoderConfig::tiny();
         let w = random_weights(&cfg, 11);
         let s = cfg.num_codebooks as usize;
-        let mut r = Lcg::new(12);
+        let mut r = Lcg::new(data::rng::random_seed());
         let x = r.vec_scaled(s * cfg.hidden_size as usize, 0.4);
         let dy = r.vec_scaled(s * cfg.hidden_size as usize, 1.0);
 

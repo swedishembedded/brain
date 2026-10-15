@@ -93,7 +93,7 @@ mod tests {
         let w = train::random_weights(&cfg, 1);
         let gpu = Gpu::new_cpu(vocoder::PIPELINES);
         let length = 5usize;
-        let mut r = Lcg::new(2);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(cfg.latent_channels as usize * length, 0.3);
 
         let direct = vocoder::forward(&gpu, &cfg, &w, &latents, 1, length);
@@ -116,7 +116,7 @@ mod tests {
         // A length generous enough that both crops fit inside one chunk's
         // own decoded span at `hop_length=4` (tiny's upsampling product).
         let length = 400usize;
-        let mut r = Lcg::new(4);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents_a = r.vec_scaled(cfg.latent_channels as usize * length, 0.3);
         let latents_b = r.vec_scaled(cfg.latent_channels as usize * length, 0.3);
 

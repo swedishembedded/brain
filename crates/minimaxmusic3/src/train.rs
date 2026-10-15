@@ -582,7 +582,7 @@ mod tests {
         let cfg = VocoderConfig::tiny();
         let w = random_weights(&cfg, 11);
         let (batch, length) = (1, 5);
-        let mut r = Lcg::new(12);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(batch * cfg.latent_channels as usize * length, 0.5);
 
         let gpu = Gpu::new_cpu(vocoder::PIPELINES);
@@ -603,7 +603,7 @@ mod tests {
         let cfg = VocoderConfig::tiny();
         let w = random_weights(&cfg, 21);
         let (batch, length) = (1, 4);
-        let mut r = Lcg::new(22);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(batch * cfg.latent_channels as usize * length, 0.5);
         let out_len = length * cfg.upsampling_ratios.iter().product::<u32>() as usize;
         let target = r.vec_scaled(batch * 2 * out_len, 0.5);
@@ -654,7 +654,7 @@ mod tests {
         let cfg = VocoderConfig::tiny();
         let w = random_weights(&cfg, 31);
         let (batch, length) = (1, 4);
-        let mut r = Lcg::new(32);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(batch * cfg.latent_channels as usize * length, 0.5);
         let out_len = length * cfg.upsampling_ratios.iter().product::<u32>() as usize;
         let target = r.vec_scaled(batch * 2 * out_len, 0.5);

@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn stft_backward_matches_finite_differences() {
         let cfg = tiny_stft();
-        let mut r = Lcg::new(1);
+        let mut r = Lcg::new(data::rng::random_seed());
         let x = r.vec_scaled(20, 0.5);
         let out = stft_mag_fwd(&x, &cfg);
         let (f_bins, frames) = (cfg.freq_bins(), cfg.num_frames(x.len()));
@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn feature_matching_loss_matches_finite_differences() {
-        let mut r = Lcg::new(2);
+        let mut r = Lcg::new(data::rng::random_seed());
         let real = r.vec_scaled(12, 1.0);
         let fake = r.vec_scaled(12, 1.0);
         let (_, grad) = feature_matching_loss(&real, &fake);
@@ -426,7 +426,7 @@ mod tests {
         let stft_cfg = tiny_stft();
         let disc_cfg = tiny_disc();
         let w = random_weights(&disc_cfg, 3);
-        let mut r = Lcg::new(4);
+        let mut r = Lcg::new(data::rng::random_seed());
         let fake = r.vec_scaled(20, 0.5);
         let (f_bins, frames) = (stft_cfg.freq_bins(), stft_cfg.num_frames(fake.len()));
 
@@ -460,7 +460,7 @@ mod tests {
         let stft_cfg = tiny_stft();
         let disc_cfg = tiny_disc();
         let w = random_weights(&disc_cfg, 5);
-        let mut r = Lcg::new(6);
+        let mut r = Lcg::new(data::rng::random_seed());
         let real = r.vec_scaled(20, 0.5);
         let fake = r.vec_scaled(20, 0.5);
 
@@ -529,7 +529,7 @@ mod tests {
         let stft_cfg = tiny_stft();
         let disc_cfg = tiny_disc();
         let mut w = random_weights(&disc_cfg, 7);
-        let mut r = Lcg::new(8);
+        let mut r = Lcg::new(data::rng::random_seed());
         // Two visibly different populations: a low-frequency-ish "real" and
         // a noisier "fake" - what matters for this test is only that they
         // differ, not that either resembles real audio.

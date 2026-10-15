@@ -75,6 +75,7 @@ const FRAMES: usize = denoise::CHUNK_FRAMES;
 /// gate that costs a full chunk is a gate nobody runs.
 const STEPS: usize = 5;
 
+// seed: both arms and every timing repeat denoise one fixed problem so recorded speedups compare across runs.
 const SEED: u64 = 20260824;
 
 fn random_condition_weights(cfg: &ConditionEncoderConfig, seed: u64) -> ConditionEncoderWeights {
@@ -150,6 +151,7 @@ fn concurrent_two_card_cfg_is_bit_identical_to_sequential_one_card() {
     let cond_cfg = ConditionEncoderConfig::real();
     let cond_w = random_condition_weights(&cond_cfg, 0xC0FFEE);
     let per_frame = (cond_cfg.num_condition_layers * cond_cfg.condition_hidden_dim) as usize;
+    // seed: same fixed problem as `SEED`, so timings compare across runs.
     let hiddens = data::rng::Lcg::new(0xBEEF).vec_scaled(FRAMES * per_frame, 0.3);
 
     let (seq, seq_steps) = run(Placement::single(), "sequential, one card", &dit_cfg, &dit_w, &cond_cfg, &cond_w, &hiddens);

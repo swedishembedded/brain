@@ -1023,7 +1023,7 @@ mod tests {
         }
         for (label, cfg, length) in [("below the tile crossover", DitConfig::tiny(), 3usize), ("above it", tiled_config().0, tiled_config().1)] {
             let w = random_weights(&cfg, 71);
-            let mut r = Lcg::new(72);
+            let mut r = Lcg::new(data::rng::random_seed());
             let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
             let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
             let target = r.vec_scaled(cfg.in_channels as usize * length, 0.3);

@@ -463,7 +463,7 @@ mod tests {
         logits[3] = 5.0;
         logits[7] = 4.0;
         logits[11] = -100.0; // legal (finite) but should never survive top_k=2
-        let mut rng = Lcg::new(1);
+        let mut rng = Lcg::new(data::rng::random_seed());
         let mut seen = std::collections::HashSet::new();
         for _ in 0..200 {
             let picked = sample_top_k(&logits, 2, &mut rng);
@@ -483,7 +483,7 @@ mod tests {
         let cfg = DepthDecoderConfig::tiny();
         let w = random_dd_weights(&cfg, 1);
         let d = cfg.hidden_size as usize;
-        let mut r = Lcg::new(2);
+        let mut r = Lcg::new(data::rng::random_seed());
         let hidden_cond = r.vec_scaled(d, 0.3);
         let hidden_uncond = r.vec_scaled(d, 0.3);
         let semantic_code = 1u32;
@@ -565,7 +565,7 @@ mod tests {
         let cfg = DepthDecoderConfig::tiny();
         let w = random_dd_weights(&cfg, 5);
         let d = cfg.hidden_size as usize;
-        let mut r = Lcg::new(6);
+        let mut r = Lcg::new(data::rng::random_seed());
         let hidden_cond = r.vec_scaled(d, 0.3);
         let hidden_uncond = r.vec_scaled(d, 0.3);
         let embed_code_row = |id: u32| {
@@ -573,9 +573,11 @@ mod tests {
             rr.vec_scaled(d, 0.1)
         };
 
+        // Both arms sample from the same stream so their draws are comparable.
+        let sampler_seed = data::rng::random_seed();
         for semantic_code in 0..cfg.audio_vocab_size {
-            let (codes_a, hidden_a) = generate_depth_codes(&mut depth_decoder::Decoder::host(&cfg, 2), &w, &cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut Lcg::new(77));
-            let (codes_b, hidden_b) = generate_depth_codes_uncached(&w, &cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut Lcg::new(77));
+            let (codes_a, hidden_a) = generate_depth_codes(&mut depth_decoder::Decoder::host(&cfg, 2), &w, &cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut Lcg::new(sampler_seed));
+            let (codes_b, hidden_b) = generate_depth_codes_uncached(&w, &cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut Lcg::new(sampler_seed));
             assert_eq!(codes_a, codes_b, "semantic_code {semantic_code}: sampled codes diverged");
             assert_eq!(hidden_a, hidden_b, "semantic_code {semantic_code}: depth_hidden diverged");
         }
@@ -605,7 +607,7 @@ mod tests {
         let w = random_dd_weights(&cfg, 0x5E1);
         let d = cfg.hidden_size as usize;
         let audio_vocab = cfg.audio_vocab_size as usize;
-        let mut r = Lcg::new(0x5E2);
+        let mut r = Lcg::new(data::rng::random_seed());
         let hidden_cond = r.vec_scaled(d, 0.3);
         let hidden_uncond = r.vec_scaled(d, 0.3);
         let gpu = gpu_core::Gpu::new_cpu(depth_decoder::PIPELINES);
@@ -674,7 +676,7 @@ mod tests {
         let dd_cfg = DepthDecoderConfig::tiny();
         let dd_w = random_dd_weights(&dd_cfg, 8);
 
-        let mut r = Lcg::new(3);
+        let mut r = Lcg::new(data::rng::random_seed());
         let conditional_ids: Vec<u32> = (0..prompt_len).map(|_| r.next_u32() % qcfg.vocab).collect();
         let unconditional_ids = conditional_ids.clone();
 
@@ -755,7 +757,7 @@ mod tests {
         let dd_cfg = DepthDecoderConfig::tiny();
         let dd_w = random_dd_weights(&dd_cfg, 0xA12);
 
-        let mut r = Lcg::new(0xA13);
+        let mut r = Lcg::new(data::rng::random_seed());
         let conditional_ids: Vec<u32> = (0..prompt_len).map(|_| r.next_u32() % qcfg.vocab).collect();
         let unconditional_ids: Vec<u32> = (0..prompt_len).map(|_| r.next_u32() % qcfg.vocab).collect();
         assert_ne!(conditional_ids, unconditional_ids, "the two prompts must differ or this gate proves nothing");

@@ -119,7 +119,7 @@ mod tests {
         }
         let scale = 0.7f32;
         let length = 3usize;
-        let mut r = Lcg::new(63);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
         let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
         let timestep = 0.4f32;
@@ -192,7 +192,7 @@ mod tests {
         let mut adapters = rank2_adapters(&cfg, &base, 72);
         let scale = 1.0f32;
         let length = 3usize;
-        let mut r = Lcg::new(73);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
         let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
         let timestep = 0.4f32;

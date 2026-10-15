@@ -898,7 +898,7 @@ mod tests {
         let gpu = Gpu::new_cpu(PIPELINES);
         let w = dit_train::random_weights(&cfg, 0xD17);
         let length = 3usize;
-        let mut r = Lcg::new(0xD17 ^ 0x5107);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
         let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
 
@@ -926,7 +926,7 @@ mod tests {
         let gpu = Gpu::new_cpu(PIPELINES);
         let w = dit_train::random_weights(&cfg, 0xD17);
         let length = 3usize;
-        let mut r = Lcg::new(0xD17 ^ 0xBEEF);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
         let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
         let zero_condition = vec![0.0f32; condition.len()];
@@ -974,7 +974,7 @@ mod tests {
     fn splitting_the_ff_in_weight_matches_the_fused_linear_bit_for_bit() {
         let gpu = gpu_core::testgpu::dev(PIPELINES);
         for (rows, inner, ff_inner) in [(640usize, 256usize, 256usize), (130, 100, 100)] {
-            let mut r = Lcg::new(0xF17 ^ rows as u64);
+            let mut r = Lcg::new(data::rng::random_seed());
             let x = r.vec_scaled(rows * inner, 0.7);
             let w = r.vec_scaled(2 * ff_inner * inner, 0.5);
             let b = r.vec_scaled(2 * ff_inner, 0.3);
@@ -1043,7 +1043,7 @@ mod tests {
         let gpu = Gpu::new_cpu(PIPELINES);
         let w = dit_train::random_weights(&cfg, 0xD19);
         let length = 3usize;
-        let mut r = Lcg::new(0xD19 ^ 0xBEEF);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
         let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
         let res = Resident::new(&gpu, &cfg, &w, length);
@@ -1069,7 +1069,7 @@ mod tests {
         let cfg = DitConfig::tiny();
         let gpu = Gpu::new_cpu(PIPELINES);
         let w = dit_train::random_weights(&cfg, 0xD19);
-        let mut r = Lcg::new(0xD19 ^ 0xBEEF);
+        let mut r = Lcg::new(data::rng::random_seed());
 
         let mut res = Resident::new(&gpu, &cfg, &w, 3);
         assert_eq!(res.rows(), 4);

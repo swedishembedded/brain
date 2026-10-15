@@ -123,7 +123,7 @@ mod tests {
         }
         let scale = 0.7f32;
         let s = cfg.num_codebooks as usize;
-        let mut r = Lcg::new(5);
+        let mut r = Lcg::new(data::rng::random_seed());
         let inputs_embeds = r.vec_scaled(s * cfg.hidden_size as usize, 0.4);
         let target = r.vec_scaled(s * cfg.hidden_size as usize, 0.4);
 
@@ -164,7 +164,7 @@ mod tests {
         let mut adapters = rank2_adapters(&cfg, &base, 7);
         let scale = 1.0f32;
         let s = cfg.num_codebooks as usize;
-        let mut r = Lcg::new(8);
+        let mut r = Lcg::new(data::rng::random_seed());
         let inputs_embeds = r.vec_scaled(s * cfg.hidden_size as usize, 0.4);
         let target = r.vec_scaled(s * cfg.hidden_size as usize, 0.4);
         let lr = 0.2f32;

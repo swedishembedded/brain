@@ -69,7 +69,11 @@ fn real_short_generation_produces_a_playable_wav() {
         }
     };
 
-    let opts = GenOpts { duration_seconds: 1.0, num_inference_steps: 8, seed: 1234, device: None };
+    // Every assertion below is structural (shape, finiteness, length), so the
+    // run draws its seed; it is echoed so a failure can be replayed.
+    let seed = data::rng::random_seed();
+    eprintln!("e2e: seed {seed}");
+    let opts = GenOpts { duration_seconds: 1.0, num_inference_steps: 8, seed, device: None };
     let song = generate(
         &paths,
         &opts,

@@ -644,7 +644,7 @@ mod tests {
     fn audio_code_ce_training_overfits_a_single_batch() {
         let cfg = QwenConfig::tiny();
         let init = qwen3::init_weights(&cfg, 41);
-        let mut r = Lcg::new(42);
+        let mut r = Lcg::new(data::rng::random_seed());
         let prompt: Vec<u32> = (0..6).map(|_| r.next_u32() % cfg.vocab).collect();
         let audio: Vec<u32> = (0..4).map(|_| r.next_u32() % cfg.vocab).collect();
         let (tokens, targets, weights) = audio_code_batch(&prompt, &audio);

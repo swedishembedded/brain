@@ -222,7 +222,7 @@ mod tests {
         }
         let scale = 0.7f32;
         let (batch, length) = (1, 4);
-        let mut r = Lcg::new(63);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(batch * cfg.latent_channels as usize * length, 0.5);
         let out_len = length * cfg.upsampling_ratios.iter().product::<u32>() as usize;
         let target = r.vec_scaled(batch * 2 * out_len, 0.5);
@@ -299,7 +299,7 @@ mod tests {
         let mut adapters = rank2_adapters(&cfg, &base, 72);
         let scale = 1.0f32;
         let (batch, length) = (1, 4);
-        let mut r = Lcg::new(73);
+        let mut r = Lcg::new(data::rng::random_seed());
         let latents = r.vec_scaled(batch * cfg.latent_channels as usize * length, 0.5);
         let out_len = length * cfg.upsampling_ratios.iter().product::<u32>() as usize;
         let target = r.vec_scaled(batch * 2 * out_len, 0.5);
