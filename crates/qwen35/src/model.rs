@@ -886,7 +886,8 @@ pub struct Qwen35 {
     /// simplification qwen35moe's own `dec_cap` doc explains).
     dec_cap: u32,
     /// Per-layer plain (non-paged) `f32` KV cache for GQA layers, `[dec_cap,
-    /// kv_dim]`; a size-1 placeholder at GDN layer indices.
+    /// kv_dim]`; a size-1 placeholder at GDN layer indices (and at every
+    /// index of a training build, which never decodes).
     gqa_kv: Vec<KvLayer>,
     /// Per-layer persistent Gated DeltaNet recurrent state, `[bh, dk, dv]`,
     /// for GDN layers; a size-1 dummy at GQA layer indices. Threaded across
@@ -1448,8 +1449,10 @@ impl Qwen35 {
         // (`run_decode_step` loops only `shard.start..shard.end`), so its
         // cache/state/history buffers are dead weight - a full-size GQA KV
         // cache or GDN state per un-owned layer, on every non-owning shard.
+        // A training build never decodes at all (`assert_has_decode_state`),
+        // so it owns none of them.
         for (l, ty) in cfg.layer_types().into_iter().enumerate() {
-            if !shard.owns(l) {
+            if train || !shard.owns(l) {
                 gqa_kv.push(KvLayer::placeholder(&gpu));
                 gdn_state.push(gpu.storage(1));
                 gdn_hist.push(gpu.storage(1));
@@ -2713,6 +2716,7 @@ impl Qwen35 {
     /// cache rows `0..=pos` (its `seq_lens` bound), so stale rows beyond the
     /// new sequence's own length are never read.
     pub fn reset_decode_cache(&self) {
+        self.assert_has_decode_state();
         self.dec_pos.set(0);
         let mut clears: Vec<&DeviceBuffer> = Vec::new();
         for (l, ty) in self.cfg.layer_types().iter().enumerate() {
@@ -2722,6 +2726,15 @@ impl Qwen35 {
             }
         }
         self.gpu.submit(&clears, &[]);
+    }
+
+    /// A training build keeps no decode cache or recurrent state (see
+    /// [`Self::new_impl_on`]): the per-GQA-layer f32 KV cache alone is
+    /// `2 * kv_dim * 4` bytes per token per layer, dead weight for a build
+    /// that only runs whole-sequence forwards and backwards. Decoding needs
+    /// an inference build.
+    fn assert_has_decode_state(&self) {
+        assert!(!self.is_train, "qwen35: a training build keeps no decode state (KV cache, GDN recurrent state); build an inference instance to decode");
     }
 
     /// The absolute position the next [`Self::step`] will decode.
@@ -2761,15 +2774,7 @@ impl Qwen35 {
         );
         let pos = self.dec_pos.get();
         assert!(pos < self.dec_cap, "qwen35::step: decode position {pos} exceeds capacity {}", self.dec_cap);
-        let caches = DecodeCaches {
-            gqa_kv: &self.gqa_kv,
-            gqa_cap: self.dec_cap,
-            // This instance's own caches are dedicated per-sequence buffers,
-            // not a pool window - see `DecodeCaches::gqa_base_row`.
-            gqa_base_row: 0,
-            gdn_state: &self.gdn_state,
-            gdn_hist: &self.gdn_hist,
-        };
+        let caches = self.own_caches();
         let hidden = self.run_decode_step(token_id, pos, &caches, input);
         self.dec_pos.set(pos + 1);
         self.gpu.read(&hidden, self.cfg.d_model as usize)
@@ -3584,15 +3589,7 @@ impl Qwen35 {
             pos + tokens.len() as u32,
             self.dec_cap
         );
-        let caches = DecodeCaches {
-            gqa_kv: &self.gqa_kv,
-            gqa_cap: self.dec_cap,
-            // This instance's own caches are dedicated per-sequence buffers,
-            // not a pool window - see `DecodeCaches::gqa_base_row`.
-            gqa_base_row: 0,
-            gdn_state: &self.gdn_state,
-            gdn_hist: &self.gdn_hist,
-        };
+        let caches = self.own_caches();
         let mut hidden = None;
         for round in tokens.chunks(max_chunk as usize) {
             hidden = Some(self.run_prefill_chunk(round, pos, &caches));
@@ -3610,6 +3607,7 @@ impl Qwen35 {
     /// buffer is a 1-word dummy and reading it would silently compare
     /// nothing.
     pub fn debug_gdn_state(&self, l: usize) -> Vec<f32> {
+        self.assert_has_decode_state();
         assert_eq!(self.cfg.layer_types()[l], LayerType::Linear, "layer {l} is GQA and has no recurrent state");
         self.gpu.read(&self.gdn_state[l], self.cfg.gdn_state_len() as usize)
     }
@@ -3711,6 +3709,9 @@ impl Qwen35 {
     /// the same literal `step`/`prefill_chunked` build, factored out because
     /// the speculative loop needs it in three places.
     fn own_caches(&self) -> DecodeCaches<'_> {
+        self.assert_has_decode_state();
+        // These are dedicated per-sequence buffers, not a pool window - see
+        // `DecodeCaches::gqa_base_row`.
         DecodeCaches {
             gqa_kv: &self.gqa_kv,
             gqa_cap: self.dec_cap,

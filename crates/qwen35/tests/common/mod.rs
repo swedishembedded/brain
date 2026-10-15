@@ -88,3 +88,38 @@ pub fn assert_same_training_signal(got: (f32, Vec<(String, Vec<f32>)>), want: (f
     }
     assert!(nonzero >= got.len() / 2, "the adapters received gradient ({nonzero} of {} tensors)", got.len());
 }
+
+/// Publish a 64 GiB ceiling on both memory classes for this process. A child
+/// helper calls it first, before any `Gpu` exists, so `Gpu::charged_bytes`
+/// is populated.
+pub fn publish_ceiling() {
+    memauth::publish_limits(Some(64 << 30), Some(64 << 30));
+}
+
+/// Run the `#[ignore]`d helper test `helper` of the calling test binary in a
+/// child process (which calls [`publish_ceiling`]) and return the `name=value` markers (`MARK name=value` lines) it
+/// printed. `Gpu::charged_bytes` is the device-bytes-requested accounting and
+/// reports 0 unless a ceiling exists; the ceiling is a process-wide
+/// `OnceLock`, so the measurement needs its own process.
+pub fn measure_in_child(helper: &str) -> HashMap<String, u64> {
+    static ONE_CHILD_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serialised = ONE_CHILD_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cmd = std::process::Command::new(std::env::current_exe().expect("current_exe"));
+    cmd.args(["--exact", helper, "--ignored", "--nocapture", "--test-threads=1"]);
+    let out = cmd.output().expect("spawn child");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "child {helper} exited {:?}\nstdout:\n{stdout}\nstderr:\n{}", out.status.code(), String::from_utf8_lossy(&out.stderr));
+    stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("MARK "))
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.trim().parse().expect("marker value is a byte count")))
+        .collect()
+}
+
+/// Print one marker for [`measure_in_child`] (on a line of its own: libtest
+/// leaves its `test name ... ` prefix on the line a `--nocapture` test starts
+/// printing on).
+pub fn mark(name: &str, bytes: u64) {
+    println!("\nMARK {name}={bytes}");
+}

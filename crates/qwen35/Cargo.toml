@@ -34,3 +34,5 @@ pollster = "0.4"
 brain-testutil.workspace = true
 # Live-resource counters and free-memory reads for the CUDA lifetime gates.
 brain-backend-cuda.workspace = true
+# A child-process memory measurement publishes its own ceiling.
+brain-memauth.workspace = true
