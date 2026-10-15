@@ -62,13 +62,15 @@ def main() -> int:
     ap.add_argument("--out", default="song.wav", help="output WAV path")
     ap.add_argument("--duration", type=float, default=-1.0, help="target song length in seconds (-1 = the model's own default, 10s)")
     ap.add_argument("--steps", type=int, default=-1, help="Euler steps per denoise chunk (-1 = the model's own default)")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: the server draws a random one and reports it)")
     args = ap.parse_args()
 
     # Only send what the caller actually chose - every other parameter's
     # default lives in the action's own schema, and re-stating it here is
     # how a client and a server drift apart.
-    params: dict = {"lyrics": args.lyrics, "caption": args.caption, "seed": args.seed}
+    params: dict = {"lyrics": args.lyrics, "caption": args.caption}
+    if args.seed is not None:
+        params["seed"] = args.seed
     if args.duration >= 0:
         params["duration_seconds"] = args.duration
     if args.steps >= 0:

@@ -65,7 +65,7 @@ def main() -> int:
     ap.add_argument("--model", default=MODEL, help="a streaming synth model")
     ap.add_argument("--out", default="cosyvoice_synth.wav", help="output WAV path")
     ap.add_argument("--n-timesteps", type=int, default=-1, help="Euler steps the flow decoder's CFM solver takes (-1 = the model's own default)")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: the server draws a random one and reports it)")
     args = ap.parse_args()
 
     ref_audio_bytes = Path(args.ref_audio).read_bytes()
@@ -73,7 +73,9 @@ def main() -> int:
     # Only send what the caller actually chose - every other parameter's
     # default lives in the action's own schema, and re-stating it here is how
     # a client and a server drift apart.
-    params: dict = {"text": args.text, "ref_text": args.ref_text, "variant": args.variant, "seed": args.seed}
+    params: dict = {"text": args.text, "ref_text": args.ref_text, "variant": args.variant}
+    if args.seed is not None:
+        params["seed"] = args.seed
     if args.n_timesteps >= 0:
         params["n_timesteps"] = args.n_timesteps
 

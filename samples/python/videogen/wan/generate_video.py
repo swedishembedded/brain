@@ -99,14 +99,16 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=240, help="output height (0 = the model's default, 480)")
     ap.add_argument("--steps", type=int, default=20, help="denoise steps (0 = the model's default, 50)")
     ap.add_argument("--guidance", type=float, default=-1.0, help="CFG scale; <= 1.0 halves the cost (-1 = the model's default, 5.0)")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: the server draws a random one and reports it)")
     ap.add_argument("--solver", default="", choices=["", "unipc", "dpm++"], help="multistep solver (blank = the model's default)")
     args = ap.parse_args()
 
     # Only send what the caller actually chose: every other parameter's default
     # lives in the action's own schema (upstream's generate.py values), and
     # re-stating it here is how a client and a server drift apart.
-    params: dict = {"prompt": args.prompt, "seed": args.seed}
+    params: dict = {"prompt": args.prompt}
+    if args.seed is not None:
+        params["seed"] = args.seed
     for name, value, unset in [
         ("frames", args.frames, 0),
         ("width", args.width, 0),

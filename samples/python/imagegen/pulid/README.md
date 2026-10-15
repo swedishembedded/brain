@@ -63,7 +63,7 @@ needs a card that can hold it.
 | `--guidance F` | `3.5` |
 | `--id-weight F` | `0.8` - identity conditioning strength |
 | `--max-len N` | `512` |
-| `--seed N` | `0` |
+| `--seed N` | random: drawn and printed, echoed in the result |
 
 Only `dev` is validated against a PuLID reference (the reference is built on
 FLUX.1-dev, not Kontext or schnell). Same scope/verification caveats as plain

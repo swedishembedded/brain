@@ -43,7 +43,7 @@ tools/dbus-session.sh --serve "--dbus" -- \
 | `--steps N` | `0` (variant default) |
 | `--guidance F` | `3.5` (`dev`/`kontext-dev` only) |
 | `--max-len N` | `512` (T5-XXL context length) |
-| `--seed N` | `0` |
+| `--seed N` | random: drawn and printed, echoed in the result |
 
 **Scope**: text-to-image only - no Kontext reference-image editing, img2img,
 or LoRA yet (`../flux2-klein/`'s pipeline is the fuller reference for what

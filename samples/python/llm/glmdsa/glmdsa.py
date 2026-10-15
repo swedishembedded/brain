@@ -59,7 +59,7 @@ def main() -> None:
     ap.add_argument("--max_new", type=int, default=128, help="number of new tokens to generate (default 128)")
     ap.add_argument("--temp", type=float, default=0.8, help="sampling temperature; <= 0 = greedy (default 0.8)")
     ap.add_argument("--top_k", type=int, default=40, help="top-k filter; 0 or negative disables it (default 40)")
-    ap.add_argument("--seed", type=int, default=0, help="RNG seed (default 0)")
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: the server draws a random one; it is printed to stderr)")
     ap.add_argument("--model", default="brain/glm", help="served model name (default brain/glm; brain/mock for a deps-free wire-contract check)")
     args = ap.parse_args()
 
@@ -81,15 +81,14 @@ def main() -> None:
         skip(f"model {args.model!r} is not served (served: {served}); for real GLM: "
              "BRAIN_GLMDSA_WEIGHTS=<checkpoint.safetensors> brain serve --dbus")
 
-    text = brain.generate(
-        prompt=args.prompt,
-        model=args.model,
-        max_new=args.max_new,
-        temp=args.temp,
-        top_k=args.top_k,
-        seed=args.seed,
-    )
-    print(text)
+    params = {"prompt": args.prompt, "max_new": args.max_new, "temp": args.temp, "top_k": args.top_k}
+    if args.seed is not None:
+        params["seed"] = args.seed
+    out = brain.run(args.model, "generate", params)
+    seed = out.outputs.get("seed")
+    if seed is not None:
+        print(f"seed: {seed} (pass --seed {seed} to reproduce)", file=sys.stderr)
+    print(out.text())
 
 
 if __name__ == "__main__":

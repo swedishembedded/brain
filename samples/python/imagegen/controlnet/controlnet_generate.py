@@ -48,7 +48,7 @@ def main() -> int:
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--guidance", type=float, default=5.0)
     ap.add_argument("--conditioning-scale", type=float, default=1.0, dest="conditioning_scale")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: the server draws a random one and reports it)")
     args = ap.parse_args()
 
     cond, cw, ch = load_ppm(args.control)
@@ -60,8 +60,9 @@ def main() -> int:
         "steps": args.steps,
         "guidance": args.guidance,
         "conditioning_scale": args.conditioning_scale,
-        "seed": args.seed,
     }
+    if args.seed is not None:
+        params["seed"] = args.seed
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():
@@ -78,6 +79,9 @@ def main() -> int:
             print(f"  ERROR: {e}", file=sys.stderr)
             return 1
         dt = time.monotonic() - t0
+        seed = out.outputs.get("seed")
+        if seed is not None:
+            print(f"  seed: {seed} (pass --seed {seed} to reproduce)")
 
         data = out.blobs.get("image")
         if data is None:

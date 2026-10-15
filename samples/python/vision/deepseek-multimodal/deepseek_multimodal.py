@@ -49,11 +49,15 @@ def chat(base_url: str, api_key: str, model: str, image: Path, question: str, ma
     print(f"answer: {choice['message']['content']!r}  (finish_reason={choice['finish_reason']}, usage={out['usage']})")
 
 
-def draw(base_url: str, api_key: str, model: str, prompt: str, seed: int, out: Path) -> None:
-    body = {"model": model, "prompt": prompt, "size": "384x384", "seed": seed}
+def draw(base_url: str, api_key: str, model: str, prompt: str, seed: int | None, out: Path) -> None:
+    body = {"model": model, "prompt": prompt, "size": "384x384"}
+    if seed is not None:
+        body["seed"] = seed
     res = request(base_url, api_key, "/v1/images/generations", body)
     out.write_bytes(base64.b64decode(res["data"][0]["b64_json"]))
     print(f"wrote {out} ({out.stat().st_size} bytes)")
+    if "seed" in res:
+        print(f"seed: {res['seed']} (pass --seed {res['seed']} to reproduce)")
 
 
 def main() -> None:
@@ -64,7 +68,7 @@ def main() -> None:
     p.add_argument("--question", default="What is in this image? Answer in one sentence.")
     p.add_argument("--max-tokens", type=int, default=128)
     p.add_argument("--prompt", default="A red apple on a wooden table.", help="draw: what the image shows")
-    p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--seed", type=int, default=None, help="draw: RNG seed (omit: the server draws a random one and reports it)")
     p.add_argument("--out", type=Path, default=Path("/tmp/janus.png"), help="draw: where the PNG goes")
     p.add_argument("--base-url", help="already-running server, e.g. http://127.0.0.1:8788 (skips self-launch)")
     p.add_argument("--api-key", help="Bearer key for --base-url")

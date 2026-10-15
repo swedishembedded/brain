@@ -18,6 +18,7 @@ Requires: jeepney - `pip install -e brain-py`.
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 from pathlib import Path
 
@@ -41,7 +42,7 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=512, help="output width (multiple of 16)")
     ap.add_argument("--height", type=int, default=512, help="output height (multiple of 16)")
     ap.add_argument("--steps", type=int, default=0, help="denoise steps (0 = variant default)")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: a random one is drawn here and printed; the action requires an explicit seed)")
     ap.add_argument("--variant", default="klein-4b", choices=["klein-4b", "klein-9b", "base-4b", "base-9b"])
     ap.add_argument("--ref", action="append", default=[], help="additional reference PPM(s) (up to 3)")
     args = ap.parse_args()
@@ -51,9 +52,10 @@ def main() -> int:
         "width": args.width,
         "height": args.height,
         "steps": args.steps,
-        "seed": args.seed,
         "variant": args.variant,
     }
+    params["seed"] = args.seed if args.seed is not None else random.SystemRandom().randrange(2**63)
+    print(f"seed: {params['seed']} (pass --seed {params['seed']} to reproduce)")
     blobs, meta = {}, {}
     for name, path in [("image", args.image)] + [(f"image{i}", p) for i, p in enumerate(args.ref)]:
         data, w, h = load_ppm(path)

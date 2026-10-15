@@ -20,6 +20,7 @@ Requires: jeepney - `pip install -e brain-py`.
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 import time
 from pathlib import Path
@@ -72,11 +73,13 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=512, help="output width (multiple of 16)")
     ap.add_argument("--height", type=int, default=512, help="output height (multiple of 16)")
     ap.add_argument("--steps", type=int, default=0, help="denoise steps (0 = variant default)")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: a random one is drawn here and printed; the action requires an explicit seed)")
     ap.add_argument("--variant", default="klein-4b", choices=["klein-4b", "klein-9b", "base-4b", "base-9b"])
     args = ap.parse_args()
 
-    params = {"prompt": args.prompt, "width": args.width, "height": args.height, "seed": args.seed}
+    params = {"prompt": args.prompt, "width": args.width, "height": args.height}
+    params["seed"] = args.seed if args.seed is not None else random.SystemRandom().randrange(2**63)
+    print(f"seed: {params['seed']} (pass --seed {params['seed']} to reproduce)")
     # `steps`/`variant` are FLUX.2-specific params the mock model
     # doesn't declare - ActionSpec.validate rejects unknown params, so only send
     # them to a model that actually advertises them.

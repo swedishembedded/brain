@@ -79,7 +79,7 @@ chunks mean earlier first audio and more frames on the wire.
 | `--action` | `speak` (`design` needs `--instruct`/`--speaker` and a CustomVoice/VoiceDesign checkpoint) |
 | `--lang` | server default |
 | `--max-frames N` | action default (codec frame cap) |
-| `--seed N` | action default |
+| `--seed N` | random: drawn and printed, echoed in the result |
 | `--out PATH` | `qwen3tts_speak.wav` |
 
 ## Batching, for comparison

@@ -52,5 +52,5 @@ tools/dbus-session.sh --serve "--dbus" -- \
 | `--steps N` | `50` (`edm_steps`) |
 | `--cfg-scale F` | `4.0` (`s_cfg`) |
 | `--control-scale F` | `1.0` (`s_stage2`) |
-| `--seed N` | `0` |
+| `--seed N` | random: drawn and printed, echoed in the result |
 | `--out PATH` | `/tmp/restored.ppm` |

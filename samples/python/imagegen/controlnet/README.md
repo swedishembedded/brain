@@ -45,4 +45,4 @@ diffusers ControlNet checkpoint directory (e.g. `controlnet-canny-sdxl-1.0`).
 | `--steps N` | `30` |
 | `--guidance F` | `5.0` |
 | `--conditioning-scale F` | `1.0` |
-| `--seed N` | `0` |
+| `--seed N` | random: drawn and printed, echoed in the result |

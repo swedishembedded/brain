@@ -58,5 +58,5 @@ brain-py`).
 | `--max_new N` | `128` |
 | `--temp X` | `0.8` - `<= 0` is greedy |
 | `--top_k N` | `40` - `0` or negative disables it |
-| `--seed N` | `0` |
+| `--seed N` | random: drawn and printed, echoed in the result |
 | `--model MODEL` | `brain/glm` (`brain/mock` for the wire-contract check) |

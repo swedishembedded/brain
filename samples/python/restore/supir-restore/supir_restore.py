@@ -47,7 +47,7 @@ def main() -> int:
     ap.add_argument("--steps", type=int, default=50, help="edm_steps")
     ap.add_argument("--cfg-scale", type=float, default=4.0, help="s_cfg")
     ap.add_argument("--control-scale", type=float, default=1.0, help="s_stage2")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: the server draws a random one and reports it)")
     ap.add_argument("--out", default="/tmp/restored.ppm", help="path for the restored image")
     args = ap.parse_args()
 
@@ -59,16 +59,22 @@ def main() -> int:
             print("FATAL: 'restore' not served (set BRAIN_SDXL_DIR and BRAIN_SUPIR_DIR)", file=sys.stderr)
             return 2
 
+        params = {"caption": args.caption, "steps": args.steps, "cfg_scale": args.cfg_scale, "control_scale": args.control_scale}
+        if args.seed is not None:
+            params["seed"] = args.seed
         print(f"{args.image}: {w}x{h} degraded -> restoring ({args.steps} steps)...")
         t = time.perf_counter()
         r = brain.run(
             "brain/supir", "restore",
-            {"caption": args.caption, "steps": args.steps, "cfg_scale": args.cfg_scale, "control_scale": args.control_scale, "seed": args.seed},
+            params,
             in_fds={"image": sealed_memfd(img)}, in_meta=meta,
         )
         dt = time.perf_counter() - t
         blob = read_fd(r.fds["image"])
         ow, oh = r.result["width"], r.result["height"]
+        seed = r.result.get("seed")
+        if seed is not None:
+            print(f"  seed: {seed} (pass --seed {seed} to reproduce)")
         save_ppm(args.out, blob, ow, oh, 3)
         print(f"  {ow}x{oh} restored in {dt:.1f}s -> {args.out}")
         print("scheduler:", brain.stats())

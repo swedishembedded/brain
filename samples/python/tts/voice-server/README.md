@@ -54,7 +54,7 @@ FILE.wav` works without `sounddevice` (no speakers needed).
 | `--socket` | both | OS temp dir's `brain-tts.sock` (`$BRAIN_TTS_SOCK`) |
 | `--out FILE.wav` | both | none - play to speakers |
 | `--lang` | both | `english` |
-| `--temp`, `--top-k`, `--seed`, `--max-frames` | both | `0.9`, `50`, `0`, `256` |
+| `--temp`, `--top-k`, `--seed`, `--max-frames` | both | `0.9`, `50`, random (drawn and printed), `256` |
 | `--instruct TEXT` | `voice-design.py` | none |
 | `--engine design\|customvoice` | `voice-design.py` | `design` |
 | `--speaker NAME` | `voice-design.py` | none (required for `customvoice`) |

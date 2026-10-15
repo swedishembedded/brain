@@ -38,4 +38,4 @@ module docs explain why grouping would not help).
 | `--height N` | `1024` (multiple of 8) |
 | `--steps N` | `30` |
 | `--guidance F` | `5.0` |
-| `--seed N` | `0` |
+| `--seed N` | random: drawn and printed, echoed in the result |

@@ -65,7 +65,7 @@ back, never a silent fallback to CosyVoice 2's weights.
 | `--ref-text TEXT` | *required* - the reference clip's own transcript |
 | `--variant` | `cosyvoice2` (`cosyvoice3` errors cleanly, not implemented yet) |
 | `--n-timesteps N` | model default (Euler steps the flow decoder's CFM solver takes) |
-| `--seed N` | `0` |
+| `--seed N` | random: drawn and printed, echoed in the result |
 | `--out PATH` | `cosyvoice_synth.wav` |
 
 ## The CLI, for comparison

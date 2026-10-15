@@ -19,6 +19,7 @@ Requires: jeepney - `pip install -e brain-py`.
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 import time
 from pathlib import Path
@@ -43,7 +44,7 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=1024, help="output height (multiple of 8)")
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--guidance", type=float, default=5.0)
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: a random one is drawn here and printed; the action requires an explicit seed)")
     args = ap.parse_args()
 
     params = {
@@ -53,8 +54,9 @@ def main() -> int:
         "height": args.height,
         "steps": args.steps,
         "guidance": args.guidance,
-        "seed": args.seed,
     }
+    params["seed"] = args.seed if args.seed is not None else random.SystemRandom().randrange(2**63)
+    print(f"seed: {params['seed']} (pass --seed {params['seed']} to reproduce)")
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():

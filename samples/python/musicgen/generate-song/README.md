@@ -74,7 +74,7 @@ completion.
 | `--out PATH` | `song.wav` |
 | `--duration N` | `-1` - target seconds (`-1` = the model's own default, 10s) |
 | `--steps N` | `-1` - Euler steps per denoise chunk (`-1` = model default) |
-| `--seed N` | `0` |
+| `--seed N` | random: drawn and printed, echoed in the result |
 
 ## The CLI, for comparison
 

@@ -12,7 +12,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from brain_tts_client import DEFAULT_SOCK, stream_request  # noqa: E402
+from brain_tts_client import DEFAULT_SOCK, resolve_seed, stream_request  # noqa: E402
 
 
 def main():
@@ -23,7 +23,7 @@ def main():
     p.add_argument("--lang", default="english")
     p.add_argument("--temp", type=float, default=0.9)
     p.add_argument("--top-k", type=int, default=50)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=None, help="RNG seed (omit: a random one is drawn and printed)")
     p.add_argument("--max-frames", type=int, default=256)
     a = p.parse_args()
     stream_request(
@@ -34,7 +34,7 @@ def main():
             "lang": a.lang,
             "temp": a.temp,
             "top_k": a.top_k,
-            "seed": a.seed,
+            "seed": resolve_seed(a.seed),
             "max_frames": a.max_frames,
         },
         out=a.out,

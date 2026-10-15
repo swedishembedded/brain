@@ -11,6 +11,7 @@ via sounddevice as they arrive (or saving to a WAV with --out).
 import base64
 import json
 import os
+import random
 import socket
 import sys
 import tempfile
@@ -23,6 +24,18 @@ import numpy as np
 # BRAIN_TTS_SOCK / --socket (on the two callers) both override it.
 DEFAULT_SOCK = os.environ.get("BRAIN_TTS_SOCK") or os.path.join(tempfile.gettempdir(), "brain-tts.sock")
 SR = 24000
+
+
+def resolve_seed(seed):
+    """The seed a request carries: `seed` when given, else a random one.
+
+    The server reports no seed back on this protocol, so the client draws and
+    prints it; passing it as `--seed` reproduces the take.
+    """
+    if seed is None:
+        seed = random.SystemRandom().randrange(2**63)
+    print(f"[client] seed {seed} (pass --seed {seed} to reproduce)", file=sys.stderr)
+    return seed
 
 
 def stream_request(sock_path, request, out=None, play=None):

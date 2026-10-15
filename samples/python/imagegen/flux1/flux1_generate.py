@@ -51,7 +51,7 @@ def main() -> int:
     ap.add_argument("--steps", type=int, default=0, help="denoise steps (0 = variant default)")
     ap.add_argument("--guidance", type=float, default=3.5, help="guidance_in scalar (dev/kontext-dev only)")
     ap.add_argument("--max-len", type=int, default=512, dest="max_len", help="T5-XXL context length")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: the server draws a random one and reports it)")
     args = ap.parse_args()
 
     params = {
@@ -62,8 +62,9 @@ def main() -> int:
         "steps": args.steps,
         "guidance": args.guidance,
         "max_len": args.max_len,
-        "seed": args.seed,
     }
+    if args.seed is not None:
+        params["seed"] = args.seed
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():
@@ -77,6 +78,9 @@ def main() -> int:
             print(f"  ERROR: {e}", file=sys.stderr)
             return 1
         dt = time.monotonic() - t0
+        seed = out.outputs.get("seed")
+        if seed is not None:
+            print(f"  seed: {seed} (pass --seed {seed} to reproduce)")
 
         data = out.blobs.get("image")
         if data is None:

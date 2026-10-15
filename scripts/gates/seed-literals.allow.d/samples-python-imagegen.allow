@@ -1,6 +1,0 @@
-samples/python/imagegen/controlnet/controlnet_generate.py	-:--seed=0	python-default	todo: draw by default, print and record the seed
-samples/python/imagegen/flux1/flux1_generate.py	-:--seed=0	python-default	todo: draw by default, print and record the seed
-samples/python/imagegen/flux2-klein/edit_image.py	-:--seed=0	python-default	todo: draw by default, print and record the seed
-samples/python/imagegen/flux2-klein/generate.py	-:--seed=0	python-default	todo: draw by default, print and record the seed
-samples/python/imagegen/pulid/pulid_generate.py	-:--seed=0	python-default	todo: draw by default, print and record the seed
-samples/python/imagegen/sdxl/sdxl_generate.py	-:--seed=0	python-default	todo: draw by default, print and record the seed

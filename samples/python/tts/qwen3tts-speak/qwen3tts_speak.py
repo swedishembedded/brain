@@ -86,7 +86,7 @@ def main() -> int:
     ap.add_argument("--speaker", default="", help="design only: CustomVoice preset speaker name")
     ap.add_argument("--lang", default="", help="synthesis language (default: the server's own)")
     ap.add_argument("--max-frames", type=int, default=0, help="codec frame cap (0 = the action's own default)")
-    ap.add_argument("--seed", type=int, default=-1, help="RNG seed (-1 = the action's own default)")
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: the server draws a random one and reports it)")
     ap.add_argument("--model", default=MODEL)
     ap.add_argument("--out", default="qwen3tts_speak.wav", help="output WAV path")
     args = ap.parse_args()
@@ -99,7 +99,7 @@ def main() -> int:
         params["lang"] = args.lang
     if args.max_frames > 0:
         params["max_frames"] = args.max_frames
-    if args.seed >= 0:
+    if args.seed is not None:
         params["seed"] = args.seed
     if args.action == "design":
         params["instruct"] = args.instruct
@@ -140,6 +140,9 @@ def main() -> int:
             print("  no audio blob arrived", file=sys.stderr)
             return 1
         rate = int(outcome.outputs.get("sample_rate", 24000))
+        seed = outcome.outputs.get("seed")
+        if seed is not None:
+            print(f"  seed: {seed} (pass --seed {seed} to reproduce)")
         n = write_wav(args.out, pcm, rate)
         total = time.monotonic() - t0
         if first_audio:

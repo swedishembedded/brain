@@ -1,4 +1,0 @@
-samples/python/tts/cosyvoice-synth/cosyvoice_synth.py	-:--seed=0	python-default	todo: draw by default, print and record the seed
-samples/python/tts/qwen3tts-speak/qwen3tts_speak.py	-:--seed=-1	python-default	todo: draw by default, print and record the seed
-samples/python/tts/voice-server/voice-clone.py	-:--seed=0	python-default	todo: draw by default, print and record the seed
-samples/python/tts/voice-server/voice-design.py	-:--seed=0	python-default	todo: draw by default, print and record the seed

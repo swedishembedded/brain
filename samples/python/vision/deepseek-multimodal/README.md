@@ -39,7 +39,7 @@ you already launched instead with `--base-url` and `--keys-file`.
 | `--question TEXT` | `What is in this image? Answer in one sentence.` |
 | `--max-tokens N` | `128` |
 | `--prompt TEXT` | `A red apple on a wooden table.` |
-| `--seed N` | `7` |
+| `--seed N` | random: drawn and printed, echoed in the result |
 | `--out PATH` | `/tmp/janus.png` |
 | `--base-url URL` | unset (self-launches a server instead) |
 | `--api-key KEY` / `--keys-file PATH` | required with `--base-url` |
