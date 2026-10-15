@@ -45,7 +45,17 @@ fn main() {
     let ref_wav = &a[2];
     let ref_text = &a[3];
     let out_wav = a.get(4).map(String::as_str).unwrap_or("cosyvoice_synth.wav");
-    let seed: u64 = a.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let seed: u64 = match a.get(5) {
+        Some(s) => s.parse().unwrap_or_else(|_| {
+            eprintln!("synth: {s:?} is not a seed (a non-negative integer)");
+            std::process::exit(2);
+        }),
+        None => {
+            let drawn = data::rng::random_seed();
+            eprintln!("synth: no seed given, using random seed {drawn} (pass {drawn} as the last argument to reproduce)");
+            drawn
+        }
+    };
 
     let paths = CosyVoicePaths::from_env().unwrap_or_else(|_| fallback_paths());
     let opts = GenOpts { seed, ..GenOpts::default() };

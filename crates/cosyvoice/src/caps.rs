@@ -192,6 +192,8 @@ pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, _progress: &mut dy
     let variant_str = inv.get_str("variant").unwrap_or_else(|| "cosyvoice2".to_string());
     let variant = check_variant(&variant_str)?;
 
+    let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
+
     let blob = inv.get_blob("ref_audio").ok_or("cosyvoice synth: missing required input 'ref_audio'")?;
     let (samples, sample_rate) = decode_ref_audio(blob)?;
 
@@ -199,7 +201,7 @@ pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, _progress: &mut dy
     // `n_timesteps` gets that generation's own value rather than CosyVoice 2's.
     let d = GenOpts::for_variant(variant);
     let opts = GenOpts {
-        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
+        seed,
         n_timesteps: inv.get_i64("n_timesteps").unwrap_or(d.n_timesteps as i64).max(1) as usize,
         ..d
     };
@@ -214,6 +216,7 @@ pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, _progress: &mut dy
         .set("sample_rate", json!(out.sample_rate))
         .set("seconds", json!(out.samples.len() as f32 / out.sample_rate as f32))
         .set("variant", json!(variant.as_str()))
+        .set("seed", json!(opts.seed))
         .blob("audio", Blob::new(Media::Audio, bytes).with_meta(json!({"format": "wav", "sample_rate": out.sample_rate, "channels": 1}))))
 }
 
@@ -260,6 +263,20 @@ impl Action for SynthAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unused_paths() -> CosyVoicePaths {
+        let none = || String::new();
+        CosyVoicePaths { llm: none(), flow: none(), hift: none(), s3tokenizer: none(), campplus: none(), tokenizer: none() }
+    }
+
+    #[test]
+    fn a_seed_that_is_not_a_non_negative_integer_is_refused_before_any_work() {
+        for bad in [json!(-1), json!(1.5), json!("7")] {
+            let inv = Invocation::new().set("text", json!("hi")).set("ref_text", json!("hi")).set("seed", bad.clone());
+            let err = synth_action(&unused_paths(), &inv, &mut |_| {}).unwrap_err();
+            assert!(err.contains("seed"), "seed {bad} must be refused as a seed, got: {err}");
+        }
+    }
 
     #[test]
     fn manifest_declares_the_full_surface() {

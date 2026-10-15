@@ -1,2 +1,0 @@
-crates/cosyvoice/examples/synth.rs	main:unwrap_or=0	default	todo: default seed becomes random, printed and recorded
-crates/cosyvoice/src/pipeline.rs	GenOpts::default:seed=0	default	todo: default seed becomes random, printed and recorded

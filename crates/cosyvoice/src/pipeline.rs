@@ -244,6 +244,8 @@ impl Variant {
 
 #[derive(Clone, Debug)]
 pub struct GenOpts {
+    /// RNG seed for the LM sampler and the vocoder noise. [`GenOpts::default`]
+    /// draws a fresh one; pass the value a previous run reported to reproduce it.
     pub seed: u64,
     pub max_token_text_ratio: f32,
     pub min_token_text_ratio: f32,
@@ -257,7 +259,7 @@ pub struct GenOpts {
 impl Default for GenOpts {
     fn default() -> GenOpts {
         GenOpts {
-            seed: 0,
+            seed: data::rng::random_seed(),
             max_token_text_ratio: 20.0,
             min_token_text_ratio: 2.0,
             n_timesteps: Variant::CosyVoice2.default_timesteps(),
@@ -563,6 +565,11 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_gen_opts_draw_a_fresh_seed_each_time() {
+        assert_ne!(GenOpts::default().seed, GenOpts::default().seed);
+    }
 
     #[test]
     fn path_vars_role_names_match_the_cosyvoice_archspecs_own_roles() {
