@@ -110,7 +110,7 @@ fn fixed_batch(cfg: &Cfg) -> Batch<f32> {
 /// gradients, so `B` is non-zero and the deltas have a trained adapter's
 /// magnitude rather than a hand-picked one.
 fn trained_adapter(cfg: &Cfg, base: &ModelWeights<f32>, rank: usize) -> LoraAdapter {
-    let mut ad = LoraAdapter::new(cfg, LoraCfg::new(rank));
+    let mut ad = LoraAdapter::new(cfg, LoraCfg::new(rank, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let b = fixed_batch(cfg);
     for _ in 0..5 {
         let (_l, g) = grads(cfg, &ad.apply(base), &b);

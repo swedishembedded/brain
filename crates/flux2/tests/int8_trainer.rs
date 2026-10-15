@@ -130,7 +130,7 @@ fn dequantised(c: &Cfg, base: &ModelWeights<f32>) -> ModelWeights<f32> {
 /// A fresh adapter with a NON-ZERO `B` - the shipped init sets `B = 0`, which
 /// makes the up-projection a no-op and hides every bug in it.
 fn adapter(c: &Cfg, seed: u64) -> LoraAdapter {
-    let mut ad = LoraAdapter::new(c, LoraCfg { seed, ..LoraCfg::new(RANK) });
+    let mut ad = LoraAdapter::new(c, LoraCfg::new(RANK, seed));
     let mut r = rng(seed ^ 0x1357);
     for p in ad.pairs_mut() {
         for v in p.b.iter_mut() {

@@ -129,10 +129,14 @@ pub struct LoraCfg {
     pub rank: usize,
     pub alpha: f32,
     pub targets: Vec<String>,
+    /// Seeds the adapters' initial `A` factors. Two trainers built from equal
+    /// seeds start from equal adapters, different seeds from different ones.
+    pub seed: u64,
 }
 
 impl LoraCfg {
-    /// Default surface: the self-attention projections in every transformer block.
+    /// Default surface: the self-attention projections in every transformer
+    /// block, with a freshly drawn init seed ([`Self::with_seed`] pins one).
     pub fn attn(rank: usize, alpha: f32) -> LoraCfg {
         LoraCfg {
             rank,
@@ -146,8 +150,16 @@ impl LoraCfg {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+            seed: data::rng::random_seed(),
         }
     }
+
+    /// This config with its adapter init seeded by `seed`.
+    pub fn with_seed(mut self, seed: u64) -> LoraCfg {
+        self.seed = seed;
+        self
+    }
+
     fn hits(&self, wname: &str) -> bool {
         self.targets.iter().any(|t| wname.ends_with(t))
     }
@@ -391,7 +403,7 @@ impl KronosTrain {
         init2.insert("embedding.fusion_r".into(), fr);
         let ps = if let Some(lc) = &lora {
             // seed adapters + build role list (base Frozen, adapters Trainable).
-            let mut lcg = data::rng::Lcg::new(0x51A7); // the unified LCG (audit F40) -- the sanctioned home for production deterministic init
+            let mut lcg = data::rng::Lcg::new(lc.seed); // the unified LCG (audit F40): the adapter init is a pure function of the run's seed
             let mut roles: Vec<(String, usize, paramstore::Role)> = Vec::new();
             for (name, numel) in param_list_c(&cfg) {
                 roles.push((name.clone(), numel, paramstore::Role::Frozen));

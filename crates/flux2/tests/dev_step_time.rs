@@ -196,7 +196,7 @@ fn measure(case: &StepCase) {
     // that timed the gate's configuration would report a step cost no
     // training run ever pays.
     tr.set_qk_grads(false);
-    let mut ad = LoraAdapter::new(&c, LoraCfg::new(rank));
+    let mut ad = LoraAdapter::new(&c, LoraCfg::new(rank, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let x0 = fill(c.n_gen() * c.in_channels, 0.3);
     let reference = fill(c.n_ref() * c.in_channels, 0.25);
     let ctx = fill(c.txt_len * c.context_in_dim, 0.1);

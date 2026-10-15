@@ -187,7 +187,7 @@ mod tests {
     fn lora_is_an_exact_no_op_at_init() {
         let d = LmDims::tiny();
         let base = init_weights::<f32>(&d, 7);
-        let lora = LmLora::new(&d, LoraCfg::new(4));
+        let lora = LmLora::new(&d, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
         assert!(shapes_match(&d, &lora, &base));
         let applied = lora.apply(&base);
         assert!(applied == base, "a fresh LoRA adapter (B=0) must not change a single weight");
@@ -197,7 +197,7 @@ mod tests {
     fn lora_training_descends_with_the_base_frozen() {
         let d = LmDims::tiny();
         let base = init_weights::<f32>(&d, 11);
-        let mut lora = LmLora::new(&d, LoraCfg::new(4));
+        let mut lora = LmLora::new(&d, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
         let ex = tiny_example(&d);
 
         let (l0, _) = grads(&d, &lora.apply(&base), &ex);

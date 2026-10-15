@@ -312,7 +312,7 @@ pub fn load_adapter(path: &str, cfg: &Cfg) -> Result<LoraAdapter, String> {
     let shaped = checkpoint::safetensors::read(path)?;
     let map: std::collections::HashMap<String, (Vec<usize>, Vec<f32>)> =
         shaped.into_iter().map(|t| (t.name, (t.shape, t.data))).collect();
-    LoraAdapter::from_tensors(cfg, LoraCfg { rank, alpha, seed: 0 }, &map)
+    LoraAdapter::from_tensors(cfg, LoraCfg::loaded(rank, alpha), &map)
 }
 
 #[cfg(test)]
@@ -329,6 +329,16 @@ mod tests {
             let key = format!("blocks.0.{leaf}.weight");
             assert!(names.contains(&key), "adapter targets {key}, which the manifest does not define");
         }
+    }
+
+    /// The seed a fine-tune hands `LoraCfg::new` decides the initial adapter:
+    /// equal seeds start equal, different seeds start different.
+    #[test]
+    fn the_init_seed_decides_the_initial_adapter() {
+        let cfg = Cfg::tiny();
+        let initial = |seed: u64| LoraAdapter::new(&cfg, LoraCfg::new(2, seed)).to_tensors();
+        assert_eq!(initial(1), initial(1), "equal seeds must start from equal adapters");
+        assert_ne!(initial(1), initial(2), "different seeds must start from different adapters");
     }
 
     /// `block_ab`/`project`/`step_projected` reshape between this crate's own
@@ -376,8 +386,8 @@ mod tests {
         let text_ctx: Vec<f32> = (0..rows * cfg.text_dim).map(|i| ((i % 7) as f32 / 7.0 - 0.5) * 1.4).collect();
         let batch = make_flow_batch(&cfg, &x0, &text_ctx, rows, 0.5, &noise);
 
-        let mut direct = LoraAdapter::new(&cfg, LoraCfg::new(2));
-        let mut via_projection = LoraAdapter::new(&cfg, LoraCfg::new(2));
+        let mut direct = LoraAdapter::new(&cfg, LoraCfg::new(2, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
+        let mut via_projection = LoraAdapter::new(&cfg, LoraCfg::new(2, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
 
         let (_l, g) = grads(&cfg, &direct.apply(&base), &batch);
         direct.step(&g, 0.01);

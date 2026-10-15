@@ -103,7 +103,7 @@ fn fixture_with(refs: Vec<(usize, usize)>, seed: u64) -> (Cfg, ModelWeights<f32>
 /// A fresh adapter with a NON-ZERO `B` - the shipped init sets `B = 0`, which
 /// makes the whole up-projection a no-op and hides every bug in it.
 fn adapter(c: &Cfg, seed: u64) -> LoraAdapter {
-    let mut ad = LoraAdapter::new(c, LoraCfg { seed, ..LoraCfg::new(RANK) });
+    let mut ad = LoraAdapter::new(c, LoraCfg::new(RANK, seed));
     let mut r = rng(seed ^ 0x1357);
     for p in ad.pairs_mut() {
         for v in p.b.iter_mut() {
@@ -196,7 +196,7 @@ fn a_fresh_adapter_is_a_device_no_op() {
     let (c, base, batch) = fixture(0x5eed_0002);
     // The SHIPPED init (B = 0), not the perturbed one: this is the invariant a
     // LoRA run depends on - step 0 must see exactly the base model.
-    let ad = LoraAdapter::new(&c, LoraCfg::new(RANK));
+    let ad = LoraAdapter::new(&c, LoraCfg::new(RANK, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let (hloss, _) = modelgrad::grads(&c, &base, &batch);
     let tr = DeviceTrainer::new(c, RANK, &base);
     let (dloss, _) = tr.grads(&ad, &batch);
@@ -206,7 +206,7 @@ fn a_fresh_adapter_is_a_device_no_op() {
 
 fn device_lora_only_training_drives_the_loss_down() {
     let (c, base, batch) = fixture(0x5eed_0003);
-    let mut ad = LoraAdapter::new(&c, LoraCfg::new(RANK));
+    let mut ad = LoraAdapter::new(&c, LoraCfg::new(RANK, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let tr = DeviceTrainer::new(c, RANK, &base);
     let l0 = tr.step(&mut ad, &batch, 0.02);
     let mut last = l0;

@@ -1,3 +1,2 @@
 crates/wan/src/bin/wan_bench.rs	bench_train:Rng::new(11)	rng	bench-input: synthetic input that defines the measured workload
-crates/wan/src/lora.rs	load_adapter:seed=0	default	todo: default seed becomes random, printed and recorded
 crates/wan/src/pipeline.rs	GenOpts::from_config:seed=0	default	todo: default seed becomes random, printed and recorded

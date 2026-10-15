@@ -36,7 +36,7 @@ fn klein_4b_host_step_time() {
     let noise = model::hostmath::randn(x0.len(), 4);
     let b = make_flow_batch(&cfg, &x0, &ctx, 0.5, &noise);
 
-    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(16));
+    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(16, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     brain_testutil::reset_peak_rss();
     let t0 = std::time::Instant::now();
     let w_eff = ad.apply(&base);

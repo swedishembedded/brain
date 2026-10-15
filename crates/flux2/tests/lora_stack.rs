@@ -73,7 +73,7 @@ fn tmp(name: &str) -> std::path::PathBuf {
 /// A trained-looking brain-native adapter: a fresh one is `B = 0` (a no-op
 /// fold, which would prove nothing), so `B` is filled from `seed` directly.
 fn brain_adapter(c: &Cfg, seed: u64, name: &str) -> String {
-    let mut ad = LoraAdapter::new(c, LoraCfg::new(2));
+    let mut ad = LoraAdapter::new(c, LoraCfg::new(2, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let mut r = rng(seed);
     for p in ad.pairs_mut() {
         for v in p.b.iter_mut() {

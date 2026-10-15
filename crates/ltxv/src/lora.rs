@@ -222,7 +222,7 @@ pub fn load_adapter(path: &str, cfg: &Cfg) -> Result<LoraAdapter, String> {
     let rank = c.header["config"]["rank"].as_u64().ok_or("adapter: missing rank in header")? as usize;
     let alpha = c.header["config"]["alpha"].as_f64().unwrap_or(rank as f64) as f32;
     let map: std::collections::HashMap<String, (Vec<usize>, Vec<f32>)> = c.tensors.into_iter().map(|t| (t.name, (Vec::new(), t.data))).collect();
-    LoraAdapter::from_tensors(cfg, LoraCfg { rank, alpha, seed: 0 }, &map)
+    LoraAdapter::from_tensors(cfg, LoraCfg::loaded(rank, alpha), &map)
 }
 
 #[cfg(test)]

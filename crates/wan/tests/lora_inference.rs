@@ -65,7 +65,7 @@ fn fixed_batch(cfg: &Cfg) -> Batch<f32> {
 /// synthetic base weights, so `B` is genuinely non-zero rather than a
 /// hand-constructed stand-in.
 fn trained_adapter(cfg: &Cfg, base: &ModelWeights<f32>, rank: usize) -> LoraAdapter {
-    let mut ad = LoraAdapter::new(cfg, LoraCfg::new(rank));
+    let mut ad = LoraAdapter::new(cfg, LoraCfg::new(rank, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let b = fixed_batch(cfg);
     for _ in 0..5 {
         let (_l, g) = grads(cfg, &ad.apply(base), &b);

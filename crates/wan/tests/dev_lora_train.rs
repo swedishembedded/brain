@@ -79,7 +79,7 @@ fn device_lora_is_a_no_op_at_init_then_descends_with_the_base_frozen() {
     let ts = synthetic_weights(&tiny_wan(&cfg));
     let base = ModelWeights::from_tensors(&cfg, &ts).expect("host weights");
     let tr = DeviceTrainer::on_device(&cfg, Some(device()));
-    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(4));
+    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
 
     // B = 0 at init, so the adapter is an exact no-op and the device loss is
     // the bare base's.
@@ -216,7 +216,7 @@ fn the_on_device_lora_fold_and_projection_match_the_f64_oracle() {
     let base = wan::modelgrad::init_model::<f32>(&cfg, 0x9911);
     let base64 = wan::modelgrad::init_model::<f64>(&cfg, 0x9911);
     let rank = 4;
-    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(rank));
+    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(rank, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let (b64, b) = batches(&cfg);
     let mut tr = DeviceTrainer::on_device(&cfg, Some(device()));
 
@@ -270,7 +270,7 @@ fn the_on_device_lora_route_tracks_the_host_route_over_a_run() {
 
     let host: Vec<f64> = {
         let tr = DeviceTrainer::on_device(&cfg, Some(device()));
-        let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(rank));
+        let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(rank, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
         (0..steps)
             .map(|_| {
                 let (l, g) = tr.grads(&ad.apply(&base), &b);
@@ -281,7 +281,7 @@ fn the_on_device_lora_route_tracks_the_host_route_over_a_run() {
     };
 
     let mut tr = DeviceTrainer::on_device(&cfg, Some(device()));
-    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(rank));
+    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(rank, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     assert!(tr.begin_lora(&base, rank), "the tiny stack must fit the resident-base budget");
     let dev: Vec<f64> = (0..steps)
         .map(|_| {
@@ -442,8 +442,8 @@ fn a_gpu_trained_concept_lora_lowers_held_out_concept_loss_more_than_distractor_
 
     let mut tr = DeviceTrainer::on_device(&tcfg, Some("gpu"));
     let rank = 8;
-    let mut adapter = LoraAdapter::new(&tcfg, LoraCfg::new(rank));
-    let fresh = LoraAdapter::new(&tcfg, LoraCfg::new(rank));
+    let mut adapter = LoraAdapter::new(&tcfg, LoraCfg::new(rank, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
+    let fresh = LoraAdapter::new(&tcfg, LoraCfg::new(rank, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
 
     // The starting losses through the route this replaces, then through the
     // resident-base one. A fresh adapter has `B = 0`, so the two folds are the

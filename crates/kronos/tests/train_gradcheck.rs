@@ -172,7 +172,7 @@ fn milestone_d_lora_gradcheck_and_learns() {
     // frozen full-precision base + trainable rank-4 adapters on the block attention.
     let cfg = KronosConfig::tiny();
     let t = 8u32;
-    let m = KronosTrain::with_lora(cfg.clone(), t, &init_weights(&cfg, 7), Some(LoraCfg::attn(4, 8.0)));
+    let m = KronosTrain::with_lora(cfg.clone(), t, &init_weights(&cfg, 7), Some(LoraCfg::attn(4, 8.0).with_seed(0))); // seed: the finite-difference check needs a reproducible adapter init
     let mut r = Rng(7 ^ 0xDEAD_BEEF);
     let s1: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
     let s2: Vec<u32> = (0..t).map(|_| r.below(cfg.s2_vocab() as u32)).collect();
@@ -267,13 +267,29 @@ fn milestone_e_promotion_gate() {
     // Weights still come back — the contract returns them unconditionally so a
     // caller can evaluate generalization on a rejected candidate; the GATE
     // decision is `promoted`, and the caller saves iff it is true.
-    let opts0 = FinetuneOpts { epochs: 0, lr: 5e-3, wd: 0.0, clip: 3.0, lora: Some(LoraCfg::attn(4, 8.0)), batch: 1, progress: false };
+    let opts0 = FinetuneOpts { epochs: 0, lr: 5e-3, wd: 0.0, clip: 3.0, lora: Some(LoraCfg::attn(4, 8.0).with_seed(0)), batch: 1, progress: false }; // seed: the finite-difference check needs a reproducible adapter init
     let (rep0, w0) = finetune(cfg, t, &init, &train, &val, &opts0);
     eprintln!("gate(noop): base_val {:.3} ft_val {:.3} promoted {}", rep0.base_val, rep0.ft_val, rep0.promoted);
     assert!(!rep0.promoted, "gate must reject a non-improvement");
     assert!(w0.is_some(), "weights are returned for generalization eval even when rejected");
     // A rejected no-op candidate must equal the base on held-out loss.
     assert!((rep0.ft_val - rep0.base_val).abs() < 1e-6, "LoRA B=0 must leave the model == base");
+}
+
+#[test]
+fn the_lora_seed_decides_the_initial_adapter() {
+    if skip() {
+        return;
+    }
+    let cfg = KronosConfig::tiny();
+    let init = init_weights(&cfg, 7);
+    let adapter_a = |seed: u64| {
+        let m = KronosTrain::with_lora(cfg.clone(), 8, &init, Some(LoraCfg::attn(4, 8.0).with_seed(seed)));
+        let name = m.param_names().into_iter().find(|n| n.ends_with(".lora_a")).expect("an adapter A factor");
+        m.read_weight(&name)
+    };
+    assert_eq!(adapter_a(1), adapter_a(1), "equal seeds must start from equal adapters");
+    assert_ne!(adapter_a(1), adapter_a(2), "different seeds must start from different adapters");
 }
 
 #[test]
@@ -285,7 +301,7 @@ fn milestone_d_lora_merge_matches_adapted_forward() {
     // adapted model's forward exactly — i.e. save() carries the fine-tune.
     let cfg = KronosConfig::tiny();
     let t = 8u32;
-    let m = KronosTrain::with_lora(cfg.clone(), t, &init_weights(&cfg, 5), Some(LoraCfg::attn(4, 8.0)));
+    let m = KronosTrain::with_lora(cfg.clone(), t, &init_weights(&cfg, 5), Some(LoraCfg::attn(4, 8.0).with_seed(0))); // seed: the finite-difference check needs a reproducible adapter init
     let mut r = Rng(5 ^ 0xDEAD_BEEF);
     let s1: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
     let s2: Vec<u32> = (0..t).map(|_| r.below(cfg.s2_vocab() as u32)).collect();

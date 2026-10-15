@@ -46,7 +46,7 @@ fn tmp(tag: &str) -> String {
 /// trained. The shipped init sets `B = 0`, which would make "the factors came
 /// back" true of the wrong thing.
 fn trained(c: &Cfg, steps: u64) -> LoraAdapter {
-    let mut ad = LoraAdapter::new(c, LoraCfg { seed: 7, ..LoraCfg::new(RANK) });
+    let mut ad = LoraAdapter::new(c, LoraCfg::new(RANK, 7));
     let mut s = 0x1234_5678u64;
     for p in ad.pairs_mut() {
         for v in p.b.iter_mut() {

@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn serialization_and_comfy_fold_use_different_namespaces() {
         assert_eq!(comfy_key(3, "wq"), "layers.3.attention.to_q.weight");
-        let ad = LoraAdapter::new(&cfg(), LoraCfg::new(2));
+        let ad = LoraAdapter::new(&cfg(), LoraCfg::new(2, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
         let tensors = ad.to_tensors();
         assert!(tensors.iter().any(|(name, _, _)| name == "blocks.0.wq.lora_a"));
         assert!(!tensors.iter().any(|(name, _, _)| name.starts_with("layers.")));
@@ -282,7 +282,7 @@ mod tests {
             flin_w: vec![],
             flin_b: vec![],
         };
-        let ad = LoraAdapter::new(&cfg, LoraCfg::new(2));
+        let ad = LoraAdapter::new(&cfg, LoraCfg::new(2, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
         let applied = ad.apply(&base);
         for (a, b) in base.main.iter().zip(applied.main.iter()) {
             for (x, y) in a.wq.iter().zip(b.wq.iter()) {

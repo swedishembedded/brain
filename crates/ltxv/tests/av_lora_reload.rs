@@ -94,7 +94,7 @@ fn av_lora_reload_survives_a_fresh_process() {
     // make the reload margin zero regardless of whether loading actually
     // works - lesson #23's own first requirement, and lesson #4's "a
     // degenerate setup hides a whole bug class" in this specific shape).
-    let mut adapter = LoraAdapter::new(&cfg, LoraCfg::new(4));
+    let mut adapter = LoraAdapter::new(&cfg, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let mut rng = data::rng::Rng::new(99);
     for _ in 0..15 {
         let v_x0: Vec<f32> = (0..cfg.tv * cfg.v_in_channels).map(|_| rng.next_gaussian() as f32).collect();

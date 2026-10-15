@@ -119,7 +119,7 @@ pub fn run(cfg: &AvCfg, base: &AvModelWeights<f32>, clips: &[SyntheticAvClip], o
     let mut rng = Rng::new(opts.seed);
     progress(0, total, format!("{} clip(s) at tv={} ta={}", clips.len(), cfg.tv, cfg.ta));
 
-    let mut adapter = LoraAdapter::new(cfg, LoraCfg::new(opts.rank));
+    let mut adapter = LoraAdapter::new(cfg, LoraCfg::new(opts.rank, opts.seed));
     for step in 0..opts.steps {
         if cancel.is_cancelled() {
             return Err("cancelled".into());
@@ -191,6 +191,29 @@ mod tests {
 
         let reloaded = crate::av_lora::load_adapter(path.to_str().expect("utf-8 path"), &cfg).expect("reload adapter");
         assert_eq!(reloaded.rank(), 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The run seed reaches the adapter's own init: with no steps taken the
+    /// returned tensors ARE the initial adapter, so two runs differing only
+    /// in seed must start from different adapters and equal seeds from
+    /// equal ones.
+    #[test]
+    fn the_run_seed_decides_the_initial_adapter() {
+        let cfg = AvCfg::tiny();
+        let base = init_model::<f32>(&cfg, 0xF17E_A007);
+        let dir = std::env::temp_dir().join(format!("ltxv-av-finetune-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let mut rng = Rng::new(0xC119);
+        let clips = vec![random_synthetic_av_clip(&cfg, &mut rng)];
+        let initial = |seed: u64| {
+            let save_path = dir.join(format!("adapter-{seed}.brain")).to_str().expect("utf-8 path").to_string();
+            let opts = TrainOpts { steps: 0, rank: 4, lr: 2e-3, seed, save_path, ckpt_every: 0 };
+            run(&cfg, &base, &clips, &opts, &capability::CancelToken::default(), |_, _, _| {}).expect("av finetune run")
+        };
+        let (a, a_again, b) = (initial(1), initial(1), initial(2));
+        assert_eq!(a, a_again, "equal seeds must start from equal adapters");
+        assert_ne!(a, b, "different seeds must start from different adapters");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

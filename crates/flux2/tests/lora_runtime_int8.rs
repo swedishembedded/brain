@@ -99,7 +99,7 @@ fn rms(v: &[f32]) -> f64 {
 /// A fresh adapter is `B = 0` (no delta at all), so `B` is filled directly.
 fn brain_adapter(fc: &Flux2Config, ts: &flux2::Tensors, frac: f64, seed: u64, name: &str) -> String {
     let c = Cfg::from_flux2(fc, 1, 1);
-    let mut ad = LoraAdapter::new(&c, LoraCfg::new(4));
+    let mut ad = LoraAdapter::new(&c, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let mut r = rng(seed);
     for p in ad.pairs_mut() {
         for v in p.b.iter_mut() {

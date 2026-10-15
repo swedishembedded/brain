@@ -160,7 +160,7 @@ fn check_shapes(name: &str, fc: &Flux2Config, c: &Cfg) -> Result<usize, String> 
     }
 
     // The adapter must be built to the variant's widths.
-    let ad = LoraAdapter::new(c, LoraCfg::new(RANK));
+    let ad = LoraAdapter::new(c, LoraCfg::new(RANK, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let pairs = ad.pairs();
     eq("adapter pair count", pairs.len(), 7 * (2 * c.depth_double + c.depth_single))?;
     let mut params = 0usize;
@@ -330,7 +330,7 @@ fn width_gate(variant: &str, cos_floor: f64) {
 
     // A NON-ZERO B: the shipped init sets B = 0, which makes the whole
     // up-projection a no-op and hides every bug in it.
-    let mut ad = LoraAdapter::new(&c, LoraCfg { seed: 0x77, ..LoraCfg::new(RANK) });
+    let mut ad = LoraAdapter::new(&c, LoraCfg::new(RANK, 0x77));
     let mut rb = rng(0x1357);
     for p in ad.pairs_mut() {
         for v in p.b.iter_mut() {

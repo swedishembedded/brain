@@ -208,7 +208,7 @@ fn device_and_host_step_wall_clock_at_the_real_topology() {
     // The LoRA bookkeeping a finetune step pays on top of the trainer: rebuild
     // the effective weights, then project every base-weight grad onto the
     // low-rank pairs and Adam-step them.
-    let mut ad = wan::lora::LoraAdapter::new(&cfg, wan::lora::LoraCfg::new(8));
+    let mut ad = wan::lora::LoraAdapter::new(&cfg, wan::lora::LoraCfg::new(8, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let t6 = std::time::Instant::now();
     let weff = ad.apply(&w);
     let apply = t6.elapsed().as_secs_f64();

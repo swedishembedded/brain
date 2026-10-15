@@ -90,7 +90,7 @@ fn q8_grid_weights(cfg: &WanConfig) -> Tensors {
 
 fn trained_adapter(cfg: &Cfg, ts: &Tensors, rank: usize, steps: usize) -> LoraAdapter {
     let base = ModelWeights::from_tensors(cfg, ts).expect("host weights");
-    let mut ad = LoraAdapter::new(cfg, LoraCfg::new(rank));
+    let mut ad = LoraAdapter::new(cfg, LoraCfg::new(rank, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let x0: Vec<f32> = (0..cfg.latent_len()).map(|i| ((i % 23) as f32 / 23.0 - 0.5) * 1.1).collect();
     let noise: Vec<f32> = (0..x0.len()).map(|i| ((i % 13) as f32 / 13.0 - 0.5) * 0.8).collect();
     let rows = cfg.text_len - 1;

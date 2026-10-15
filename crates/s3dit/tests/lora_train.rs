@@ -78,7 +78,7 @@ fn lora_only_overfits_with_base_frozen() {
     let base = init(&c, &mut r).to_f32(); // FROZEN — never mutated below
     let b = batch(&c, &mut r);
     let tr = DeviceTrainer::new(c);
-    let lc = LoraCfg::new(8);
+    let lc = LoraCfg::new(8, 0); // seed: fixed adapter init keeps the numeric checks reproducible
     let mut ad = LoraAdapter::new(&c, lc);
 
     // B=0 at init → adapter is a no-op → same loss as the bare base.

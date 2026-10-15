@@ -58,7 +58,7 @@ fn av_lora_is_a_no_op_at_init_then_descends_with_the_base_frozen() {
     let cfg = AvCfg::tiny();
     let ts = synthetic_weights(&tiny_av());
     let base = AvModelWeights::from_tensors(&cfg, &ts).expect("host weights");
-    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(4));
+    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
 
     // 1. exact no-op at init: B = 0, so W_eff is the base BIT for BIT.
     assert!(ad.apply(&base) == base, "a fresh AV adapter must not change a single weight");
@@ -91,7 +91,7 @@ fn folding_into_the_av_inference_tensors_equals_applying_to_the_training_weights
     let base = AvModelWeights::from_tensors(&cfg, &ts).expect("host weights");
 
     // Train a few steps so B is non-zero - folding zeros would prove nothing.
-    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(4));
+    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let b = fixed_batch(&cfg);
     for _ in 0..3 {
         let (_l, g) = grads(&cfg, &ad.apply(&base), &b);
@@ -120,7 +120,7 @@ fn an_av_adapter_round_trips_through_the_checkpoint_container() {
     let cfg = AvCfg::tiny();
     let ts = synthetic_weights(&tiny_av());
     let base = AvModelWeights::from_tensors(&cfg, &ts).expect("host weights");
-    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(4));
+    let mut ad = LoraAdapter::new(&cfg, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let b = fixed_batch(&cfg);
     for _ in 0..2 {
         let (_l, g) = grads(&cfg, &ad.apply(&base), &b);

@@ -362,7 +362,7 @@ pub fn run(
 
     // 4. adapter + flow-matching loop
     let mut trainer = Trainer::open(&tcfg, opts.device.as_deref());
-    let mut adapter = LoraAdapter::new(&tcfg, LoraCfg::new(opts.rank));
+    let mut adapter = LoraAdapter::new(&tcfg, LoraCfg::new(opts.rank, opts.seed));
     // With the base frozen and resident, a step's only weight traffic is the
     // rank-sized adapter itself: `W_eff` is folded and `dL/dW_eff` projected
     // on-device.

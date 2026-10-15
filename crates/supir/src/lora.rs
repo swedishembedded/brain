@@ -232,7 +232,7 @@ mod tests {
     fn fresh_adapter_is_a_bit_exact_no_op() {
         let cfg = cfg();
         let base = crate::init::init_weights(&cfg, 5);
-        let lora = SupirLora::new(&cfg, LoraCfg::new(4));
+        let lora = SupirLora::new(&cfg, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
         assert!(lora.names().count() > 0, "no linears targeted - test is vacuous");
         let applied = lora.apply(&base);
         for name in lora.names() {
@@ -250,7 +250,7 @@ mod tests {
     fn apply_and_fold_into_agree_bit_for_bit() {
         let cfg = cfg();
         let base = crate::init::init_weights(&cfg, 6);
-        let mut lora = SupirLora::new(&cfg, LoraCfg::new(4));
+        let mut lora = SupirLora::new(&cfg, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
         // Perturb A/B away from the no-op point so a real delta is exercised.
         let grads: HashMap<String, Vec<f32>> =
             lora.names().map(|n| (n.to_string(), vec![0.37f32; base.get(n).unwrap().1.len()])).collect();
@@ -284,7 +284,7 @@ mod tests {
         use data::rng::Rng;
 
         let (cfg, base) = crate::train::tiny_setup(77);
-        let mut lora = SupirLora::new(&cfg, LoraCfg::new(4));
+        let mut lora = SupirLora::new(&cfg, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
         let folded = lora.apply(&base); // no-op at B=0
 
         // Matches `crate::finetune`'s and `gradcheck::supir`'s own scale -
@@ -340,14 +340,14 @@ mod tests {
     fn save_load_round_trips() {
         let cfg = cfg();
         let base = crate::init::init_weights(&cfg, 9);
-        let mut lora = SupirLora::new(&cfg, LoraCfg::new(4));
+        let mut lora = SupirLora::new(&cfg, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
         let grads: HashMap<String, Vec<f32>> =
             lora.names().map(|n| (n.to_string(), vec![0.21f32; base.get(n).unwrap().1.len()])).collect();
         lora.step(&grads, 0.05);
 
         let tensors: HashMap<String, (Vec<usize>, Vec<f32>)> =
             lora.to_tensors().into_iter().map(|(n, s, d)| (n, (s, d))).collect();
-        let reloaded = SupirLora::from_tensors(&cfg, LoraCfg::new(4), &tensors).expect("reload");
+        let reloaded = SupirLora::from_tensors(&cfg, LoraCfg::new(4, 0), &tensors).expect("reload"); // seed: fixed adapter init keeps the numeric checks reproducible
 
         let (wa, wb) = (lora.apply(&base), reloaded.apply(&base));
         for name in lora.names() {

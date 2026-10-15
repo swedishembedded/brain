@@ -221,7 +221,7 @@ pub fn load_adapter_folded(path: &str, cfg: &Cfg, tensors: &mut crate::block::Te
     let alpha = c.header["config"]["alpha"].as_f64().unwrap_or(rank as f64) as f32;
     let map: std::collections::HashMap<String, (Vec<usize>, Vec<f32>)> =
         c.tensors.into_iter().map(|t| (t.name, (Vec::new(), t.data))).collect();
-    let ad = LoraAdapter::from_tensors(cfg, LoraCfg { rank, alpha, seed: 0 }, &map)?;
+    let ad = LoraAdapter::from_tensors(cfg, LoraCfg::loaded(rank, alpha), &map)?;
     ad.fold_into_comfy(tensors)
 }
 
@@ -291,7 +291,7 @@ pub fn run(
     // 4. trainer + adapter
     std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
     let trainer = TrainerKind::new(cfg, opts.two_gpu);
-    let mut adapter = LoraAdapter::new(&cfg, LoraCfg::new(opts.rank));
+    let mut adapter = LoraAdapter::new(&cfg, LoraCfg::new(opts.rank, opts.seed));
     let mut rng = (opts.seed ^ 0xf17e_7c7e_a5ad_a97e).wrapping_mul(2654435761).max(1);
 
     // 5. flow-matching loop

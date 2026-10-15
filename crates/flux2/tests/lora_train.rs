@@ -66,7 +66,7 @@ fn lora_only_descends_with_base_frozen_and_roundtrips() {
     let base = init_model::<f32>(&c, 0x51a7); // FROZEN — never mutated below
     let mut r = rng(0xfeed_0001);
     let batches = [batch(&c, 0.35, &mut r), batch(&c, 0.7, &mut r)]; // fixed 2-sample set
-    let lc = LoraCfg::new(4);
+    let lc = LoraCfg::new(4, 0); // seed: fixed adapter init keeps the numeric checks reproducible
     let mut ad = LoraAdapter::new(&c, lc);
 
     // B=0 at init → adapter is a no-op → same loss as the bare base.
@@ -148,7 +148,7 @@ fn lora_only_descends_with_base_frozen_and_roundtrips() {
 fn lora_strength_scales_a_brain_native_fold() {
     let c = Cfg::tiny();
     let fc = tiny_fc();
-    let mut ad = LoraAdapter::new(&c, LoraCfg::new(4));
+    let mut ad = LoraAdapter::new(&c, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     // A fresh adapter is B=0, i.e. a no-op fold; train one step so the deltas
     // are non-zero and a scale has something to act on.
     let mut r = rng(0xBEEF);

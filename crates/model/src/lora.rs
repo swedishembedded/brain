@@ -54,8 +54,17 @@ pub struct LoraCfg {
 }
 
 impl LoraCfg {
-    pub fn new(rank: usize) -> LoraCfg {
-        LoraCfg { rank, alpha: rank as f32, seed: 0 }
+    /// A fresh adapter's hyper-parameters. `seed` draws the `A` factors'
+    /// initial values: the run's own seed, so two runs that differ only in
+    /// seed start from different adapters and equal seeds from equal ones.
+    pub fn new(rank: usize, seed: u64) -> LoraCfg {
+        LoraCfg { rank, alpha: rank as f32, seed }
+    }
+
+    /// Hyper-parameters for an adapter whose factors are read from a file:
+    /// nothing is drawn, so the init seed is never consulted.
+    pub fn loaded(rank: usize, alpha: f32) -> LoraCfg {
+        LoraCfg { rank, alpha, seed: 0 }
     }
     pub fn scale(&self) -> f32 {
         crate::adapter::TargetHp::from(*self).scale()

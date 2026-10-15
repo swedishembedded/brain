@@ -474,7 +474,7 @@ fn the_requantization_error_acts_as_a_constant_bias_on_smooth_activations() {
 fn a_lora_fold_never_touches_the_patch_boundary_tensors() {
     let c = flux2::modelgrad::Cfg::tiny();
     let fc = tiny_fc();
-    let mut ad = flux2::lora::LoraAdapter::new(&c, flux2::lora::LoraCfg::new(4));
+    let mut ad = flux2::lora::LoraAdapter::new(&c, flux2::lora::LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     // A fresh adapter has B = 0 and folds nothing; one step gives it a delta.
     let base = flux2::modelgrad::init_model::<f32>(&c, 0x51a7);
     let mut s = 0x1234_5678u64;

@@ -75,7 +75,7 @@ pub fn run(cfg: &Cfg, base: &ModelWeights<f32>, opts: &TrainOpts, cancel: &capab
     let clips: Vec<SyntheticClip> = (0..opts.samples).map(|_| synthetic_clip(cfg, &mut rng)).collect();
     progress(0, total, format!("{} synthetic clip(s) at t={} context_len={}", clips.len(), cfg.t, cfg.context_len));
 
-    let mut adapter = LoraAdapter::new(cfg, LoraCfg::new(opts.rank));
+    let mut adapter = LoraAdapter::new(cfg, LoraCfg::new(opts.rank, opts.seed));
     for step in 0..opts.steps {
         if cancel.is_cancelled() {
             return Err("cancelled".into());
@@ -137,6 +137,27 @@ mod tests {
 
         let reloaded = crate::lora::load_adapter(path.to_str().expect("utf-8 path"), &cfg).expect("reload adapter");
         assert_eq!(reloaded.rank(), 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The run seed reaches the adapter's own init: with no steps taken the
+    /// returned tensors ARE the initial adapter, so two runs differing only
+    /// in seed must start from different adapters and equal seeds from
+    /// equal ones.
+    #[test]
+    fn the_run_seed_decides_the_initial_adapter() {
+        let cfg = Cfg::tiny();
+        let base = init_model::<f32>(&cfg, 0xF17E_7007);
+        let dir = std::env::temp_dir().join(format!("ltxv-finetune-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let initial = |seed: u64| {
+            let save_path = dir.join(format!("adapter-{seed}.brain")).to_str().expect("utf-8 path").to_string();
+            let opts = TrainOpts { steps: 0, rank: 4, lr: 3e-3, samples: 1, seed, save_path, ckpt_every: 0 };
+            run(&cfg, &base, &opts, &capability::CancelToken::default(), |_, _, _| {}).expect("finetune run")
+        };
+        let (a, a_again, b) = (initial(1), initial(1), initial(2));
+        assert_eq!(a, a_again, "equal seeds must start from equal adapters");
+        assert_ne!(a, b, "different seeds must start from different adapters");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -56,7 +56,7 @@ fn cfg() -> Cfg {
 fn streaming_the_block_grads_steps_the_adapter_identically() {
     let c = cfg();
     let w: ModelWeights<f32> = init_model(&c, 0x51a7);
-    let lc = LoraCfg::new(4);
+    let lc = LoraCfg::new(4, 0); // seed: fixed adapter init keeps the numeric checks reproducible
     let (mut collected, mut streamed) = (LoraAdapter::new(&c, lc), LoraAdapter::new(&c, lc));
     let init = adapter_bits(&streamed);
     assert_eq!(adapter_bits(&collected), adapter_bits(&streamed), "same seed, same init");
@@ -131,7 +131,7 @@ fn the_collecting_backward_still_yields_every_block_in_order() {
 fn apply_into_matches_apply_bit_for_bit() {
     let c = cfg();
     let base: ModelWeights<f32> = init_model(&c, 0x3344);
-    let mut ad = LoraAdapter::new(&c, LoraCfg::new(4));
+    let mut ad = LoraAdapter::new(&c, LoraCfg::new(4, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     // B starts at zero, so step it first or `apply` is a no-op and would agree
     // with anything.
     let b = batch(&c, 0.4, 5);
@@ -212,7 +212,7 @@ fn a_host_step_costs_two_copies_of_the_model_not_three() {
     let bytes = model_bytes(&base);
     assert_eq!(base.param_bytes() as u64, bytes, "param_bytes must count every weight, once");
     let b = batch(&c, 0.5, 13);
-    let mut ad = LoraAdapter::new(&c, LoraCfg::new(8));
+    let mut ad = LoraAdapter::new(&c, LoraCfg::new(8, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
 
     let before = brain_testutil::rss_bytes();
     brain_testutil::reset_peak_rss();

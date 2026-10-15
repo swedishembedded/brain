@@ -163,7 +163,7 @@ impl Eva {
 fn matched_random_adapter(cfg: &Cfg, like: &LoraAdapter, seed: u64) -> LoraAdapter {
     let rank = like.rank();
     let mut rng = data::rng::Rng::new(seed);
-    let mut raw = LoraAdapter::new(cfg, LoraCfg { seed, ..LoraCfg::new(rank) });
+    let mut raw = LoraAdapter::new(cfg, LoraCfg::new(rank, seed));
     // Force B non-zero too (LoraAdapter::new leaves B = 0) with the same
     // small-Gaussian distribution A already uses.
     let mut tensors = raw.to_tensors();
@@ -175,7 +175,7 @@ fn matched_random_adapter(cfg: &Cfg, like: &LoraAdapter, seed: u64) -> LoraAdapt
         }
     }
     let map: HashMap<String, (Vec<usize>, Vec<f32>)> = tensors.into_iter().map(|(n, s, d)| (n, (s, d))).collect();
-    raw = LoraAdapter::from_tensors(cfg, LoraCfg { seed, ..LoraCfg::new(rank) }, &map).expect("rebuild random adapter");
+    raw = LoraAdapter::from_tensors(cfg, LoraCfg::new(rank, seed), &map).expect("rebuild random adapter");
 
     let scale = raw.alpha() / rank as f32;
     let like_scale = like.alpha() / rank as f32;
@@ -235,7 +235,7 @@ fn matched_random_adapter(cfg: &Cfg, like: &LoraAdapter, seed: u64) -> LoraAdapt
         }
     }
     let map2: HashMap<String, (Vec<usize>, Vec<f32>)> = rescaled_tensors.into_iter().map(|(n, s, d)| (n, (s, d))).collect();
-    LoraAdapter::from_tensors(cfg, LoraCfg { seed, ..LoraCfg::new(rank) }, &map2).expect("rebuild matched-norm control adapter")
+    LoraAdapter::from_tensors(cfg, LoraCfg::new(rank, seed), &map2).expect("rebuild matched-norm control adapter")
 }
 
 /// A step-count sweep (15/80/250, rank 8) never clears the anti-degeneracy
@@ -328,7 +328,7 @@ fn a_concept_lora_moves_held_out_generation_toward_the_concept_more_than_a_match
     let base_tensors = wan::import::import_dit(raw, &cfg).expect("import DiT");
     let base_weights = ModelWeights::from_tensors(&tcfg, &base_tensors).expect("host weights");
     let rank = 8;
-    let mut adapter = LoraAdapter::new(&tcfg, LoraCfg::new(rank));
+    let mut adapter = LoraAdapter::new(&tcfg, LoraCfg::new(rank, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let mut trainer = Trainer::open(&tcfg, Some("gpu"));
     trainer.begin_lora(&base_weights, rank);
     let mut trng = data::rng::Rng::new(4242);
