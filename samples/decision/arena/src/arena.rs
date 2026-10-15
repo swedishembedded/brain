@@ -608,6 +608,7 @@ mod tests {
 
     fn play_policy(policy: Policy) -> usize {
         let mut wins = 0;
+        // seed: a fixed generator makes the measured win rates, compared with fixed thresholds, reproducible
         let mut rng = Rng::new(99);
         for seed in 0..120u64 {
             let mut a = Arena::new();

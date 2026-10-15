@@ -112,6 +112,7 @@ mod tests {
     /// own colour, so the comparison needs no tolerance for shape coverage.
     #[test]
     fn mean_crop_color_matches_what_was_drawn() {
+        // seed: the colour comparison is over a generated control; a fixed generator keeps its tolerance meaningful
         let mut rng = Rng::new(2);
         let square = SHAPES.iter().position(|s| *s == "square").expect("square exists");
         let mut checked = 0;
@@ -142,6 +143,7 @@ mod tests {
     /// instruction can refer to has to be visible, not just recorded.
     #[test]
     fn a_dimmed_control_is_closer_to_the_background_than_a_bright_one() {
+        // seed: the colour comparison is over a generated control; a fixed generator keeps its tolerance meaningful
         let mut rng = Rng::new(6);
         let square = SHAPES.iter().position(|s| *s == "square").expect("square exists");
         let mut pairs = 0;

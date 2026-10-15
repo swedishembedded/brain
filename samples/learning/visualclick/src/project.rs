@@ -554,6 +554,7 @@ mod tests {
         let (feat_dim, split, d, n) = (9usize, 5usize, 6usize, 4usize);
         let mut g = Grounder::new(feat_dim, split, d, 3, 0.1);
         let f = feats(n, feat_dim, 5);
+        // seed: the numerical-gradient comparison needs the same random weights and inputs on every run
         let mut rng = Rng::new(17);
         let cls: Vec<f32> = (0..d).map(|_| rng.f32() * 2.0 - 1.0).collect();
         let target: Vec<f32> = (0..2 * n * d).map(|_| rng.f32() * 2.0 - 1.0).collect();

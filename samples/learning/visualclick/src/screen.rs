@@ -422,6 +422,7 @@ mod tests {
     /// control, independently of the generator that produced it.
     #[test]
     fn every_instruction_identifies_exactly_one_control() {
+        // seed: the property is checked over generated screens; a fixed generator makes a failing screen reproducible
         let mut rng = Rng::new(4);
         for _ in 0..400 {
             let s = Screen::generate(&mut rng);
@@ -437,6 +438,7 @@ mod tests {
     /// another's - the assumption `vision::widget_features` rests on.
     #[test]
     fn controls_never_overlap() {
+        // seed: the property is checked over generated screens; a fixed generator makes a failing screen reproducible
         let mut rng = Rng::new(9);
         for _ in 0..200 {
             let s = Screen::generate(&mut rng);
@@ -454,6 +456,7 @@ mod tests {
     /// silently read background as part of the control.
     #[test]
     fn every_control_is_fully_on_screen() {
+        // seed: the property is checked over generated screens; a fixed generator makes a failing screen reproducible
         let mut rng = Rng::new(21);
         for _ in 0..200 {
             let s = Screen::generate(&mut rng);
@@ -468,6 +471,7 @@ mod tests {
     /// target must actually be in the region named.
     #[test]
     fn a_region_instruction_is_only_used_when_it_resolves_an_ambiguity() {
+        // seed: the property is checked over generated screens; a fixed generator makes a failing screen reproducible
         let mut rng = Rng::new(33);
         let mut seen = 0;
         for _ in 0..600 {
@@ -488,6 +492,7 @@ mod tests {
     /// appears and the reported breakdown covers less than it claims.
     #[test]
     fn every_region_is_used_by_some_instruction() {
+        // seed: the property is checked over generated screens; a fixed generator makes a failing screen reproducible
         let mut rng = Rng::new(51);
         let mut used = [false; REGIONS.len()];
         for _ in 0..4000 {
