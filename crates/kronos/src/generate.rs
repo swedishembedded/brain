@@ -29,13 +29,14 @@ pub struct GenOpts {
     pub top_p: f32,
     /// Deterministic argmax instead of sampling.
     pub argmax: bool,
-    /// RNG seed for sampling.
+    /// RNG seed for sampling; [`GenOpts::default`] draws a fresh one (unused
+    /// while `argmax` is set).
     pub seed: u64,
 }
 
 impl Default for GenOpts {
     fn default() -> Self {
-        GenOpts { temperature: 1.0, top_k: 0, top_p: 1.0, argmax: true, seed: 0 }
+        GenOpts { temperature: 1.0, top_k: 0, top_p: 1.0, argmax: true, seed: data::rng::random_seed() }
     }
 }
 
@@ -644,6 +645,11 @@ impl SplitMix64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_gen_opts_draw_a_fresh_seed_each_time() {
+        assert_ne!(GenOpts::default().seed, GenOpts::default().seed);
+    }
 
     fn skip() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
