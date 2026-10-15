@@ -17,6 +17,7 @@ use std::path::Path;
 use gpu_core::Gpu;
 use model::FitOpts;
 
+use crate::base_source::{lora_base, BaseDtype};
 use crate::config::{lora_targets, LoraCfg, Qwen35Config};
 use crate::model::{pipelines, Qwen35};
 
@@ -100,4 +101,31 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen35>(train, val, bcfg, itos);
     model::fit_with(m, obj, opts, Some(Path::new(out)))
+}
+
+/// LoRA fine-tune on a frozen base that is STREAMED from `base` (a
+/// HuggingFace checkpoint directory, FP8 release included, or a brain-native
+/// file) and held on the device at `dtype`, so the base never exists on the
+/// host as a whole. `out` is an ADAPTER file (`crate::lora::save_adapter`),
+/// never a copy of the base; with `resume` and an existing `out` the run
+/// continues that adapter's factors instead of starting from zero delta. The base-opening half is complete
+/// ([`crate::base_source::lora_base`]: streamed base tensors plus fresh
+/// zero-delta adapters, one `TensorSource`); the trainer that consumes it
+/// takes its tier and recompute switch from `crate::model`, which this entry
+/// point calls once that constructor exists. Until then it opens and
+/// validates the base, then reports what is missing instead of training the
+/// wrong thing.
+pub fn finetune_streamed(base: &Path, _dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, dtype: BaseDtype, _recompute: bool) -> std::io::Result<(f32, f32)> {
+    let unsupported = |why: String| std::io::Error::new(std::io::ErrorKind::Unsupported, why);
+    let Mode::Lora { rank, alpha } = mode else {
+        return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", dtype.name())));
+    };
+    let (cfg, _src) = lora_base(base, *rank, *alpha, opts.seed, resume.then(|| Path::new(out)).filter(|p| p.exists())).map_err(unsupported)?;
+    Err(unsupported(format!(
+        "the {} base opened ({} layers, d_model {}), but this build's trainer has no {} base tier yet",
+        base.display(),
+        cfg.n_layers,
+        cfg.d_model,
+        dtype.name()
+    )))
 }

@@ -6,7 +6,8 @@
 //!   brain qwen35 infer  [--weights F] [--tokenizer tokenizer.json | --gguf G] --prompt "..."
 //!                     [--adapter adapter.safetensors] [--max-new N --temp X --top-k K --chat]
 //!   brain qwen35 finetune <data_dir> --base F --out F [--mode lora|full]
-//!                     [--rank R --alpha A] [--steps N --lr X ...]
+//!                     [--lora-rank R --lora-alpha A] [--base-dtype f32|bf16|nf4]
+//!                     [--seq-len T] [--recompute on|off] [--steps N --lr X ...]
 //!
 //! `infer`'s `--weights`/`--tokenizer` are optional: naming both explicitly
 //! (or `--weights` plus `--gguf`) uses exactly those files, unchanged; naming
@@ -39,6 +40,7 @@ use std::path::Path;
 use crate::args::Args;
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
+use qwen35::base_source::BaseDtype;
 use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
 
@@ -199,8 +201,15 @@ fn infer(args: &[String]) {
 /// (`qwen_cli::finetune_lora`, `forecast_cli::train`).
 const DEFAULT_LORA_RANK: u32 = 8;
 
-const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F --out F [--mode lora|full] [--rank R --alpha A] \
-     [--steps N --lr X --batch B --block T --grad-accum G --warmup W --weight-decay X --grad-clip X --save-secs S --seed S --mask = --align]";
+const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|DIR --out F [--mode lora|full] [--lora-rank R --lora-alpha A] \
+     [--base-dtype f32|bf16|nf4] [--seq-len T] [--recompute on|off] \
+     [--steps N --lr X --batch B --grad-accum G --warmup W --weight-decay X --grad-clip X --save-secs S --seed S --mask = --align]
+  --base-dtype  how the frozen base is held on the device: f32 (default, whole model resident; full or LoRA),
+                bf16 (half the bytes; LoRA only) or nf4 (4-bit QLoRA; LoRA only). bf16/nf4 stream the base from
+                a HuggingFace checkpoint directory (FP8 release included) tensor by tensor.
+  --seq-len     training sequence length (alias of --block); --rank/--alpha are aliases of --lora-rank/--lora-alpha
+  --recompute   recompute layer activations in the backward pass instead of keeping them (default on for bf16/nf4)
+  --backend cuda|cpu|vulkan is the global backend flag and applies as for every other command";
 
 /// Everything [`qwen35::finetune::finetune`] needs, parsed off the argv.
 /// Separated from [`finetune`] so the flag grammar - which defaults are
@@ -213,6 +222,23 @@ struct FinetuneArgs {
     out: String,
     opts: model::FitOpts,
     mode: qwen35::finetune::Mode,
+    base_dtype: BaseDtype,
+    /// Recompute activations in backward. Only a frozen-base tier has a
+    /// recomputing trainer; the f32 resident one keeps every activation.
+    recompute: bool,
+}
+
+/// A flag that has a short alias: the value of whichever is given, an error
+/// when both are (two values for one setting is a mistake, not a precedence rule).
+fn aliased(a: &mut Args, flag: &str, alias: &str) -> Result<Option<String>, String> {
+    match (a.take_str(flag), a.take_str(alias)) {
+        (Some(_), Some(_)) => Err(format!("{flag} and {alias} name the same setting; give one")),
+        (v, w) => Ok(v.or(w)),
+    }
+}
+
+fn parse_num<T: std::str::FromStr>(flag: &str, v: Option<String>, default: T) -> Result<T, String> {
+    v.map_or(Ok(default), |s| s.parse().map_err(|_| format!("{flag} {s:?}: not a valid number")))
 }
 
 fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
@@ -221,8 +247,16 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     let base = a.str_or("--base", "");
     let out = a.str_or("--out", "");
     let mode_name = a.str_or("--mode", "full");
-    let rank = a.u32_or("--rank", DEFAULT_LORA_RANK);
-    let alpha = a.f32_or("--alpha", rank as f32 * 2.0);
+    let rank = parse_num("--lora-rank", aliased(&mut a, "--lora-rank", "--rank")?, DEFAULT_LORA_RANK)?;
+    let alpha = parse_num("--lora-alpha", aliased(&mut a, "--lora-alpha", "--alpha")?, rank as f32 * 2.0)?;
+    let base_dtype: BaseDtype = a.str_or("--base-dtype", "f32").parse()?;
+    let recompute_flag = match a.take_str("--recompute").as_deref() {
+        None => None,
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        Some(other) => return Err(format!("--recompute {other:?}: expected \"on\" or \"off\"")),
+    };
+    let block_size = parse_num("--seq-len", aliased(&mut a, "--seq-len", "--block")?, model::FitOpts::default().block_size)?;
 
     let d = model::FitOpts::default();
     let steps = a.u32_or("--steps", d.steps);
@@ -231,7 +265,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     let opts = model::FitOpts {
         steps,
         batch_size: a.u32_or("--batch", d.batch_size),
-        block_size: a.u32_or("--block", d.block_size),
+        block_size,
         lr,
         // Derived from THIS run's length and lr, exactly as `brain qwen3
         // train` / `brain glm train` derive them - not left at the struct
@@ -268,6 +302,16 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
         "lora" => qwen35::finetune::Mode::Lora { rank, alpha },
         other => return Err(format!("--mode {other:?}: expected \"lora\" or \"full\"")),
     };
+    if base_dtype.is_frozen_only() && !matches!(mode, qwen35::finetune::Mode::Lora { .. }) {
+        return Err(format!(
+            "--base-dtype {} holds the base frozen, so only --mode lora can train on it; full-parameter fine-tuning needs --base-dtype f32",
+            base_dtype.name()
+        ));
+    }
+    if recompute_flag == Some(true) && !base_dtype.is_frozen_only() {
+        return Err("--recompute on: the f32 resident trainer keeps every layer's activations; recompute is available with --base-dtype bf16 or nf4".into());
+    }
+    let recompute = recompute_flag.unwrap_or(base_dtype.is_frozen_only());
     if data_dir.is_empty() {
         return Err("the finetune corpus directory is required (a positional argument)".into());
     }
@@ -277,7 +321,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     if out.is_empty() {
         return Err("--out is required (where to write the finetuned checkpoint)".into());
     }
-    Ok(FinetuneArgs { base, data_dir, out, opts, mode })
+    Ok(FinetuneArgs { base, data_dir, out, opts, mode, base_dtype, recompute })
 }
 
 /// `brain qwen35 finetune <data_dir> --base F --out F [--mode lora|full] ...`:
@@ -294,7 +338,7 @@ fn finetune(args: &[String]) {
         Err(e) => {
             eprintln!("brain qwen35 finetune: {e}");
             eprintln!("{FINETUNE_USAGE}");
-            return;
+            std::process::exit(2);
         }
     };
     let mode_desc = match &ft.mode {
@@ -302,17 +346,42 @@ fn finetune(args: &[String]) {
         qwen35::finetune::Mode::Lora { rank, alpha } => format!("lora rank={rank} alpha={alpha}"),
     };
     eprintln!(
-        "qwen35 finetune: {} on {} [{mode_desc}] steps={} batch={} block={} lr={} grad-accum={} seed={} -> {}",
-        ft.base, ft.data_dir, ft.opts.steps, ft.opts.batch_size, ft.opts.block_size, ft.opts.lr, ft.opts.grad_accum, ft.opts.seed, ft.out
+        "qwen35 finetune: {} on {} [{mode_desc}, base {}{}] steps={} batch={} block={} lr={} grad-accum={} seed={} -> {}",
+        ft.base,
+        ft.data_dir,
+        ft.base_dtype.name(),
+        if ft.recompute { ", recompute" } else { "" },
+        ft.opts.steps,
+        ft.opts.batch_size,
+        ft.opts.block_size,
+        ft.opts.lr,
+        ft.opts.grad_accum,
+        ft.opts.seed,
+        ft.out
     );
     let t0 = std::time::Instant::now();
-    match qwen35::finetune::finetune(&ft.base, Path::new(&ft.data_dir), &ft.opts, &ft.mode, &ft.out) {
+    match run_finetune(&ft) {
         Ok((initial_loss, final_loss)) => eprintln!(
             "qwen35 finetune: loss {initial_loss:.4} -> {final_loss:.4} in {:.1}s; saved {}",
             t0.elapsed().as_secs_f64(),
             ft.out
         ),
-        Err(e) => eprintln!("qwen35 finetune failed: {e}"),
+        Err(e) => {
+            eprintln!("qwen35 finetune failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Train as `ft` says: the classic resident trainer for an f32 base file, the
+/// streamed-base trainer for a bf16/nf4 base or a HuggingFace directory.
+/// Returns `(initial_loss, final_loss)`.
+fn run_finetune(ft: &FinetuneArgs) -> std::io::Result<(f32, f32)> {
+    let (base, data) = (Path::new(&ft.base), Path::new(&ft.data_dir));
+    if ft.base_dtype == BaseDtype::F32 && !base.is_dir() {
+        qwen35::finetune::finetune(&ft.base, data, &ft.opts, &ft.mode, &ft.out)
+    } else {
+        qwen35::finetune::finetune_streamed(base, data, &ft.opts, &ft.mode, &ft.out, false, ft.base_dtype, ft.recompute)
     }
 }
 
@@ -440,5 +509,102 @@ mod finetune_cli_tests {
         assert!(parse_finetune(&argv(&["corpus", "--base", "b"])).unwrap_err().contains("--out"));
         let err = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o", "--mode", "qlora"])).unwrap_err();
         assert!(err.contains("lora") && err.contains("full"), "{err}");
+    }
+
+    #[test]
+    fn the_base_precision_flags_parse_with_their_aliases() {
+        let ft = parse_finetune(&argv(&[
+            "corpus", "--base", "b", "--out", "o", "--mode", "lora", "--base-dtype", "nf4", "--lora-rank", "16", "--lora-alpha", "8", "--seq-len", "512",
+        ]))
+        .unwrap();
+        assert_eq!(ft.base_dtype, BaseDtype::Nf4);
+        assert!(matches!(ft.mode, qwen35::finetune::Mode::Lora { rank: 16, alpha } if alpha == 8.0), "{:?}", ft.mode);
+        assert_eq!(ft.opts.block_size, 512, "--seq-len is the training sequence length");
+        assert!(ft.recompute, "a frozen-base tier recomputes by default");
+
+        let old = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o", "--mode", "lora", "--rank", "4", "--block", "64", "--base-dtype", "bf16", "--recompute", "off"])).unwrap();
+        assert_eq!((old.base_dtype, old.opts.block_size, old.recompute), (BaseDtype::Bf16, 64, false));
+
+        let plain = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o"])).unwrap();
+        assert_eq!((plain.base_dtype, plain.recompute), (BaseDtype::F32, false), "the default keeps the classic f32 trainer");
+    }
+
+    #[test]
+    fn unsupported_tier_combinations_are_refused_with_the_reason() {
+        let base = ["corpus", "--base", "b", "--out", "o"];
+        let with = |extra: &[&str]| parse_finetune(&argv(&[&base[..], extra].concat())).unwrap_err();
+        let err = with(&["--base-dtype", "nf4"]);
+        assert!(err.contains("frozen") && err.contains("--mode lora") && err.contains("f32"), "{err}");
+        assert!(with(&["--base-dtype", "bf16", "--mode", "full"]).contains("frozen"));
+        assert!(with(&["--base-dtype", "fp8", "--mode", "lora"]).contains("f32, bf16 or nf4"));
+        assert!(with(&["--recompute", "on"]).contains("--base-dtype bf16 or nf4"));
+        assert!(with(&["--recompute", "maybe"]).contains("\"on\" or \"off\""));
+        assert!(with(&["--mode", "lora", "--rank", "4", "--lora-rank", "4"]).contains("same setting"));
+        assert!(with(&["--seq-len", "64", "--block", "64"]).contains("same setting"));
+        assert!(with(&["--seq-len", "long"]).contains("not a valid number"));
+    }
+
+    /// End to end through the CLI's own entry (flags -> trainer), tiny
+    /// synthetic checkpoint and corpus: the f32 LoRA path trains, the loss is
+    /// finite and the adapter file is written.
+    #[test]
+    fn a_tiny_f32_lora_finetune_runs_through_the_cli_path() {
+        use data::binio::{self, Meta};
+        let dir = std::env::temp_dir().join(format!("brain-qwen35-cli-smoke-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = Qwen35Config::tiny();
+        // seed: any weights train; this checks the plumbing, not a loss value
+        let init = qwen35::init::init_weights(&cfg, 7);
+        let base = dir.join("base.safetensors");
+        Qwen35::new_on(gpu_core::Gpu::new(pipelines()), cfg.clone(), 1, cfg.block_size, &init).save(base.to_str().unwrap());
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let tokens: Vec<u32> = (0..400).map(|i| [2, 5, 8, 15][i % 4]).collect();
+        binio::write_u32_bin(&data.join("train.u32.bin"), &tokens).unwrap();
+        binio::write_u32_bin(&data.join("val.u32.bin"), &[]).unwrap();
+        std::fs::write(data.join("meta.json"), Meta::vocab_only(cfg.vocab as usize)).unwrap();
+        let out = dir.join("adapter.safetensors");
+
+        let ft = parse_finetune(&argv(&[
+            data.to_str().unwrap(), "--base", base.to_str().unwrap(), "--out", out.to_str().unwrap(), "--mode", "lora", "--lora-rank", "2",
+            "--steps", "3", "--batch", "1", "--seq-len", &cfg.block_size.to_string(), "--save-secs", "0", "--seed", "5",
+        ]))
+        .unwrap();
+        let (initial, last) = run_finetune(&ft).expect("tiny finetune");
+        assert!(initial.is_finite() && last.is_finite(), "{initial} -> {last}");
+        assert!(out.exists(), "the trained checkpoint must be written to --out");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same run on a bf16 base, through the same entry. Red until the
+    /// trainer's bf16 base tier is wired into `finetune_streamed`.
+    #[test]
+    #[ignore = "red until lane A2's bf16 base tier is wired into qwen35::finetune::finetune_streamed"]
+    fn a_tiny_bf16_lora_finetune_runs_through_the_cli_path() {
+        let dir = std::env::temp_dir().join(format!("brain-qwen35-cli-smoke-bf16-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = Qwen35Config::tiny();
+        // seed: any weights train; this checks the plumbing, not a loss value
+        let init = qwen35::init::init_weights(&cfg, 7);
+        let base = dir.join("base.safetensors");
+        Qwen35::new_on(gpu_core::Gpu::new(pipelines()), cfg.clone(), 1, cfg.block_size, &init).save(base.to_str().unwrap());
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let tokens: Vec<u32> = (0..400).map(|i| [2, 5, 8, 15][i % 4]).collect();
+        data::binio::write_u32_bin(&data.join("train.u32.bin"), &tokens).unwrap();
+        data::binio::write_u32_bin(&data.join("val.u32.bin"), &[]).unwrap();
+        std::fs::write(data.join("meta.json"), data::binio::Meta::vocab_only(cfg.vocab as usize)).unwrap();
+        let out = dir.join("adapter.safetensors");
+        let ft = parse_finetune(&argv(&[
+            data.to_str().unwrap(), "--base", base.to_str().unwrap(), "--out", out.to_str().unwrap(), "--mode", "lora", "--base-dtype", "bf16",
+            "--lora-rank", "2", "--steps", "3", "--seq-len", &cfg.block_size.to_string(), "--seed", "5",
+        ]))
+        .unwrap();
+        let (initial, last) = run_finetune(&ft).expect("tiny bf16 finetune");
+        assert!(initial.is_finite() && last.is_finite());
+        assert!(out.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

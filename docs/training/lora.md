@@ -4,8 +4,11 @@ brain can fine-tune a Qwen3 model on your own chat-style data using LoRA
 (Low-Rank Adaptation), producing a small adapter rather than a full copy of
 the model's weights.
 
-Only LoRA fine-tuning is supported today, not full-parameter retraining or
-preference-optimization methods like DPO.
+`brain qwen3 finetune` trains LoRA adapters. Full-parameter retraining
+(`brain::ChatFullFineTune`) and preference optimization with DPO
+(`brain::PreferenceFineTune`) are available through the SDK; see
+[`docs/using/sdk.md`](../using/sdk.md). Qwen3.8-27B has its own verb,
+described under [Qwen3.8-27B](#qwen38-27b-brain-qwen35-finetune).
 
 ## Running a fine-tune
 
@@ -30,6 +33,34 @@ brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dat
 
 This target is also wrapped by `make qwen/finetune DATASET=<dir>
 ADAPTER=<owner/name[:tag]>`, which builds the release binary first.
+
+## Qwen3.8-27B (`brain qwen35 finetune`)
+
+```
+brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-dtype f32|bf16|nf4]
+    [--lora-rank R] [--lora-alpha A] [--seq-len T] [--recompute on|off] [--steps N] [--lr X] ...
+```
+
+- `--base BASE` - a brain-native `.safetensors` checkpoint, or (with
+  `--base-dtype bf16` or `nf4`) a HuggingFace checkpoint directory such as
+  `Qwen/Qwen3.8-27B-FP8`, which is streamed from disk one tensor at a time
+  (about 1 GiB of host memory) and never held whole on the host.
+- `--base-dtype` - how the frozen base is held on the device. `f32` (the
+  default) keeps the whole model resident in fp32 and can train in `--mode full`
+  or `--mode lora`, but the 27B does not fit; `bf16` and `nf4` (4-bit, QLoRA)
+  shrink the base and train LoRA adapters only, so combining them with
+  `--mode full` is refused.
+- `--lora-rank`, `--lora-alpha` - adapter shape (aliases `--rank`, `--alpha`;
+  alpha defaults to twice the rank).
+- `--seq-len` - training sequence length (alias `--block`).
+- `--recompute` - recompute layer activations in the backward pass instead of
+  keeping them; the default for `bf16` and `nf4`. The `f32` resident trainer
+  keeps all activations, so `--recompute on` is refused there.
+- `--backend cuda|cpu|vulkan` is the global backend flag, as for every command.
+
+Status: the `f32` tier is the existing trainer. `bf16` and `nf4` are accepted
+by the command line and open the streamed base, but the training step on those
+tiers is not available yet, and the command exits with an error that says so.
 
 ## Adapter references
 

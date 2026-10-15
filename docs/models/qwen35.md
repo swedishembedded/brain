@@ -158,8 +158,14 @@ self-skipping loudly without either).
 
 ## LoRA training
 
-Two LoRA paths exist, at very different scales:
+Three LoRA paths exist, at very different scales:
 
+- **Frozen bf16 / NF4 base (the 27B on one GPU)** - `brain qwen35 finetune
+  --base-dtype bf16|nf4` streams the FP8 checkpoint directory tensor by tensor
+  (`crate::fp8_source`, bit-identical to the eager importers, about 1 GiB of host
+  memory for the whole 27B) into a frozen device base; the flags and tier limits
+  are in [`docs/training/lora.md`](../training/lora.md#qwen38-27b-brain-qwen35-finetune).
+  The training step on these tiers is not available yet.
 - **Resident (small/merged checkpoints)** - `crate::finetune::finetune`
   builds a fully resident `Qwen35` with every weight in one host `HashMap`,
   so the checkpoint must fit in RAM as fp32 - not the real 27B checkpoint on
