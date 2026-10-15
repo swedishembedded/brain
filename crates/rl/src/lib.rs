@@ -63,7 +63,7 @@ use std::path::Path;
 
 use data::binio;
 use data::loader::{BatchConfig, TokenDataset};
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 use model::{Batch, FitOpts, Model, Objective, IGNORE};
 
 /// i32 targets from the loader (`-1` = ignore) reinterpreted as the model's
@@ -200,7 +200,7 @@ mod tests {
 
         let opts = FitOpts { block_size: 8, batch_size: 4, ..Default::default() };
         let (train, _val, batch_cfg, _vocab, _itos) = load_weighted(&dir, &opts).expect("load_weighted");
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::new(random_seed());
         let (x, _y, w) = train.get_batch_weighted(&batch_cfg, &mut rng);
         // The weight at each gathered position must equal 0.5 * (token id at
         // that position's absolute offset + 1) per how the test data was
@@ -219,7 +219,7 @@ mod tests {
 
         let opts = FitOpts { block_size: 8, batch_size: 4, ..Default::default() };
         let (train, _val, batch_cfg, _vocab, _itos) = load_weighted(&dir, &opts).expect("load_weighted");
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::new(random_seed());
         let (_x, _y, w) = train.get_batch_weighted(&batch_cfg, &mut rng);
         assert!(w.iter().all(|&wi| wi == 1.0), "an ordinary model::train::fit dataset dir (no weight file) must train exactly as unweighted");
     }

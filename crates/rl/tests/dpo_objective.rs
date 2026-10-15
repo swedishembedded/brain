@@ -10,7 +10,7 @@
 //! pack -> forward -> pair_term -> weighted backward -> optimizer-step
 //! pipeline actually does what DPO promises against a real `Model`.
 
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 use model::Objective;
 use qwen3::{Qwen, QwenConfig};
 use rl::objective::dpo::{Dpo, DpoConfig, DpoPair};
@@ -87,7 +87,7 @@ fn dpo_training_raises_chosen_logprob_and_lowers_rejected_logprob() {
     let mut obj = Dpo::from_pairs(dpo_cfg, vec![pair], move |_pair: &DpoPair| (ref_chosen.clone(), ref_rejected.clone()));
 
     obj.prepare(&mut model);
-    let mut rng = Rng::new(7);
+    let mut rng = Rng::new(random_seed());
     for step in 1..=8u32 {
         model.zero_grads();
         let loss = obj.micro_step(&model, &mut rng);

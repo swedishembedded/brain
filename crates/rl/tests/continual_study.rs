@@ -112,6 +112,7 @@ const EXPLORE_TEMP: f32 = 1.5;
 /// are on the record. Replay (0.3 / 0.5, with and without rehearsal) was
 /// measured too and is reported in the roadmap, not asserted here.
 const REPLAY_FRAC: f64 = 0.0;
+// seed: the pre-registered study numbers (thresholds, PREREG_MEASUREMENT) were recorded at this one study seed and a rerun must reproduce them.
 const STUDY_SEED: u64 = 1;
 
 /// `min_entropy_ratio: 0.0` DISABLES the gate's entropy arm, and that is a
@@ -279,6 +280,7 @@ fn prepare_base() -> PathBuf {
             grad_accum: 1,
             eval_interval: 0,
             eval_batches: 0,
+            // seed: part of the frozen pretrained base's cache key (`seed=20` in `fixture_fingerprint`); changing it is a different base.
             seed: 20,
             checkpoint_secs: 0,
             // Load record-aligned windows. Without this the loader draws

@@ -14,7 +14,7 @@
 //! states explicitly.
 
 use data::loader::{BatchConfig, TokenDataset};
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 use model::Objective;
 use qwen3::{Qwen, QwenConfig};
 use rl::objective::mixture::{Anchor, Mixture};
@@ -64,19 +64,22 @@ fn mixing_in_the_anchor_keeps_held_out_anchor_loss_from_degrading_as_much_as_pri
 
     const STEPS: u32 = 120;
     const LR: f32 = 3e-2;
-    const TRAIN_SEED: u64 = 4242;
     const EVAL_BATCHES: u32 = 20;
+    // One draw per role: every branch trains and is evaluated on the same
+    // stream, so the comparison between them is like for like.
+    let train_seed = random_seed();
+    let eval_seed = random_seed();
 
     // Baseline: the shared initial weights' own anchor loss, before any
     // training - both branches start here.
     let baseline_model = Qwen::new(cfg.clone(), 1, 8, &init);
-    let baseline_anchor_loss = anchor_val().eval(&baseline_model, &mut Rng::new(999), EVAL_BATCHES).expect("anchor eval");
+    let baseline_anchor_loss = anchor_val().eval(&baseline_model, &mut Rng::new(eval_seed), EVAL_BATCHES).expect("anchor eval");
 
     // Branch A: primary objective alone, the same total step budget.
     let model_primary_only = Qwen::new(cfg.clone(), 1, 8, &init);
     let primary_obj = Anchor::new(TokenDataset::new(repeating_tokens(&primary_pattern, 200), &batch_cfg), batch_cfg.clone());
-    train_steps(&model_primary_only, primary_obj, STEPS, LR, TRAIN_SEED);
-    let primary_only_anchor_loss = anchor_val().eval(&model_primary_only, &mut Rng::new(999), EVAL_BATCHES).expect("anchor eval");
+    train_steps(&model_primary_only, primary_obj, STEPS, LR, train_seed);
+    let primary_only_anchor_loss = anchor_val().eval(&model_primary_only, &mut Rng::new(eval_seed), EVAL_BATCHES).expect("anchor eval");
 
     // Branch B: a Mixture of the SAME primary objective plus an anchor
     // arm (a disjoint anchor TRAIN split from `anchor_val`'s held-out
@@ -86,8 +89,8 @@ fn mixing_in_the_anchor_keeps_held_out_anchor_loss_from_degrading_as_much_as_pri
     let anchor_obj_b = Anchor::new(TokenDataset::new(repeating_tokens(&anchor_pattern, 200), &batch_cfg), batch_cfg.clone());
     let mixture: Mixture<Qwen> =
         Mixture::new(vec![(0.5, Box::new(primary_obj_b) as Box<dyn Objective<Qwen>>), (0.5, Box::new(anchor_obj_b) as Box<dyn Objective<Qwen>>)]);
-    train_steps(&model_mixture, mixture, STEPS, LR, TRAIN_SEED);
-    let mixture_anchor_loss = anchor_val().eval(&model_mixture, &mut Rng::new(999), EVAL_BATCHES).expect("anchor eval");
+    train_steps(&model_mixture, mixture, STEPS, LR, train_seed);
+    let mixture_anchor_loss = anchor_val().eval(&model_mixture, &mut Rng::new(eval_seed), EVAL_BATCHES).expect("anchor eval");
 
     assert!(
         primary_only_anchor_loss.is_finite() && mixture_anchor_loss.is_finite() && baseline_anchor_loss.is_finite(),

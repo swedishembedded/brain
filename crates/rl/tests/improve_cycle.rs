@@ -23,7 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 use model::rollout::RolloutParams;
 use model::serve::SampleParams;
 use model::{FitOpts, Model};
@@ -141,6 +141,7 @@ fn improve_cycle_end_to_end_promotes_a_genuinely_better_candidate() {
     if gpu_disabled() {
         return;
     }
+    let seed = random_seed();
     let dir = tmp("promote");
     let base_path = dir.join("base.safetensors");
     write_base_checkpoint(&base_path, 1);
@@ -161,7 +162,7 @@ fn improve_cycle_end_to_end_promotes_a_genuinely_better_candidate() {
         grad_clip: 1.0,
         eval_interval: 0,
         eval_batches: 0,
-        seed: 7,
+        seed,
         checkpoint_secs: 0,
         ..FitOpts::default()
     };
@@ -188,7 +189,7 @@ fn improve_cycle_end_to_end_promotes_a_genuinely_better_candidate() {
             train_out: &train_out,
             adapter_out_dir: &adapter_dir,
             adapter: AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "base", dataset_id: None },
-            provenance: ProvenanceInput { regime: "grpo".to_string(), seed: 7, hyperparams: serde_json::json!({"group_size": 2, "clip_eps": 0.2}), environment: "cpu/test".to_string(), cycle: 0 },
+            provenance: ProvenanceInput { regime: "grpo".to_string(), seed, hyperparams: serde_json::json!({"group_size": 2, "clip_eps": 0.2}), environment: "cpu/test".to_string(), cycle: 0 },
         },
     )
     .expect("cycle");
@@ -210,7 +211,7 @@ fn improve_cycle_end_to_end_promotes_a_genuinely_better_candidate() {
     let training = card.training.expect("Promote must stamp TrainingProvenance");
     assert_eq!(training.regime, "grpo");
     assert_eq!(training.cycle, 0);
-    assert_eq!(training.seed, 7);
+    assert_eq!(training.seed, seed);
     let gate_outcome = training.gate.expect("a gated cycle must record its GateOutcome");
     assert_eq!(gate_outcome.decision, "promote");
 
@@ -230,6 +231,7 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
     // Reuse the SAME good, already-promoted checkpoint a real training cycle
     // produces as this cycle's incumbent - a clean, already-trained baseline
     // the sabotaged candidate must be measured against, not an untrained one.
+    let seed = random_seed();
     let dir = tmp("reject");
     let base_path = dir.join("base.safetensors");
     write_base_checkpoint(&base_path, 1);
@@ -248,7 +250,7 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
         grad_clip: 1.0,
         eval_interval: 0,
         eval_batches: 0,
-        seed: 7,
+        seed,
         checkpoint_secs: 0,
         ..FitOpts::default()
     };
@@ -269,7 +271,7 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
             train_out: &dir.join("train.safetensors"),
             adapter_out_dir: &dir.join("adapters"),
             adapter: AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "base", dataset_id: None },
-            provenance: ProvenanceInput { regime: "grpo".to_string(), seed: 7, hyperparams: serde_json::json!({}), environment: "cpu/test".to_string(), cycle: 0 },
+            provenance: ProvenanceInput { regime: "grpo".to_string(), seed, hyperparams: serde_json::json!({}), environment: "cpu/test".to_string(), cycle: 0 },
         },
     )
     .expect("cycle");
@@ -287,17 +289,18 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
     checkpoint::save(incumbent_path.to_str().unwrap(), cfg.to_json(), &tensors);
 
     let adapter_dir_2 = dir.join("adapters2");
-    let sabotage = Sabotage { seed: 999 };
+    let sabotage_seed = random_seed();
+    let sabotage = Sabotage { seed: sabotage_seed };
     let outcome = improve::cycle::<Qwen, _>(
         &incumbent_path,
         sabotage,
         &Evaluation { held_out: &held_out, anchor: &[], verifier: &FracMatchVerifier, rollout: &greedy_rollout_params(), gate_cfg: &GateConfig::default(), anchor_block_len: 0 },
-        &FitOpts { steps: 2, grad_accum: 1, eval_interval: 0, eval_batches: 0, seed: 999, checkpoint_secs: 0, ..FitOpts::default() },
+        &FitOpts { steps: 2, grad_accum: 1, eval_interval: 0, eval_batches: 0, seed: sabotage_seed, checkpoint_secs: 0, ..FitOpts::default() },
         CycleArtifacts {
             train_out: &dir.join("train_sabotaged.safetensors"),
             adapter_out_dir: &adapter_dir_2,
             adapter: AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "incumbent", dataset_id: None },
-            provenance: ProvenanceInput { regime: "sabotage".to_string(), seed: 999, hyperparams: serde_json::json!({}), environment: "cpu/test".to_string(), cycle: 1 },
+            provenance: ProvenanceInput { regime: "sabotage".to_string(), seed: sabotage_seed, hyperparams: serde_json::json!({}), environment: "cpu/test".to_string(), cycle: 1 },
         },
     )
     .expect("cycle");

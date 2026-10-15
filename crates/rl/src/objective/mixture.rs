@@ -25,7 +25,7 @@
 //! info@swedishembedded.com.
 
 use data::loader::{BatchConfig, TokenDataset};
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 use model::{Batch, Model, Objective, IGNORE};
 
 /// i32 targets from the loader (`-1` = ignore) reinterpreted as the model's
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn draw_arm_matches_configured_probabilities_over_many_draws() {
         let weights = [0.7, 0.2, 0.1];
-        let mut rng = Rng::new(42);
+        let mut rng = Rng::new(random_seed());
         let n = 200_000;
         let mut counts = [0u32; 3];
         for _ in 0..n {
@@ -205,8 +205,9 @@ mod tests {
     #[test]
     fn draw_arm_is_deterministic_for_a_fixed_seed() {
         let weights = [0.5, 0.5];
-        let mut rng_a = Rng::new(7);
-        let mut rng_b = Rng::new(7);
+        let seed = random_seed();
+        let mut rng_a = Rng::new(seed);
+        let mut rng_b = Rng::new(seed);
         let seq_a: Vec<usize> = (0..1000).map(|_| draw_arm(&weights, &mut rng_a)).collect();
         let seq_b: Vec<usize> = (0..1000).map(|_| draw_arm(&weights, &mut rng_b)).collect();
         assert_eq!(seq_a, seq_b);
@@ -219,8 +220,9 @@ mod tests {
     fn draw_arm_normalizes_weights_that_do_not_already_sum_to_one() {
         let raw = [7.0, 2.0, 1.0];
         let norm = [0.7, 0.2, 0.1];
-        let mut rng_raw = Rng::new(99);
-        let mut rng_norm = Rng::new(99);
+        let seed = random_seed();
+        let mut rng_raw = Rng::new(seed);
+        let mut rng_norm = Rng::new(seed);
         for _ in 0..500 {
             assert_eq!(draw_arm(&raw, &mut rng_raw), draw_arm(&norm, &mut rng_norm));
         }

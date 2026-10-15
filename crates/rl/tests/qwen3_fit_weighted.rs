@@ -64,7 +64,7 @@ fn qwen3_learns_a_deterministic_bigram_through_fit_weighted() {
         weight_decay: 0.0,
         grad_clip: 1.0,
         eval_interval: 0,
-        seed: 11,
+        seed: data::rng::random_seed(),
         checkpoint_secs: 0,
         ..Default::default()
     };
@@ -116,7 +116,7 @@ fn fit_weighted_embeds_itos_in_its_output_checkpoint() {
         batch_size: 4,
         block_size: cfg.block_size,
         eval_interval: 0,
-        seed: 3,
+        seed: data::rng::random_seed(),
         checkpoint_secs: 0,
         ..Default::default()
     };

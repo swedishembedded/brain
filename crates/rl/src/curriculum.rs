@@ -50,7 +50,7 @@
 
 use std::path::Path;
 
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 
 use crate::env::{Environment, Reward, Step, Task, Verifier};
 
@@ -550,7 +550,7 @@ mod tests {
         let opts = model::FitOpts { block_size: SEQ_LEN as u32, batch_size: 16, align_to_lines: true, ..Default::default() };
         let (train, _val, batch_cfg, vocab, _itos) = model::load_dataset_with_itos(&dir, &opts).unwrap();
         assert_eq!(vocab, VOCAB);
-        let mut rng = Rng::new(9);
+        let mut rng = Rng::new(random_seed());
         for _ in 0..20 {
             let (x, _y) = train.get_batch(&batch_cfg, &mut rng);
             for row in x.chunks(SEQ_LEN) {

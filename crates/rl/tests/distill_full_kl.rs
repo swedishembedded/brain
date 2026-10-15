@@ -17,7 +17,7 @@
 //! calling back into `rl::objective::distill` itself - so this test cannot
 //! pass by the two computations sharing a bug.
 
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 use qwen3::{Qwen, QwenConfig};
 use rl::objective::distill::{neg_entropy, pass_arrays, TopK};
 
@@ -53,7 +53,7 @@ fn distill_topk_at_k_equals_vocab_reproduces_exact_kl() {
     // per position (`K = vocab`, `ids` the identity permutation) - the
     // `Σ_k q_k = 1` requirement the keystone identity leans on, satisfied by
     // construction here via normalization.
-    let mut rng = Rng::new(99);
+    let mut rng = Rng::new(random_seed());
     let mut teacher = Vec::with_capacity(SEQ_LEN);
     for _ in 0..SEQ_LEN {
         let raw: Vec<f32> = (0..vocab).map(|_| rng.next_f32() + 0.05).collect();

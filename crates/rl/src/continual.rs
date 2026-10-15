@@ -1478,6 +1478,7 @@ mod tests {
 
     #[test]
     fn coin_flip_is_deterministic_for_a_fixed_seed_and_not_constant() {
+        // seed: the 12-flip sequence is asserted non-constant and different from seed 12's; a random pair collides ~1 run in 1000.
         let p = GatePolicy::CoinFlip { seed: 11 };
         let first: Vec<bool> = (0..12).map(|k| p.applies(Decision::Promote, k)).collect();
         let again: Vec<bool> = (0..12).map(|k| p.applies(Decision::Promote, k)).collect();
@@ -1490,6 +1491,7 @@ mod tests {
         assert_eq!(first, rejected, "a coin-flip policy must not consult the real decision");
         assert!(first.iter().any(|&b| b) && first.iter().any(|&b| !b), "a coin that always lands the same way is not a coin: {first:?}");
         // A different seed gives a different sequence.
+        // seed: see above - the 12-flip sequences of seeds 11 and 12 are known to differ.
         let other: Vec<bool> = (0..12).map(|k| GatePolicy::CoinFlip { seed: 12 }.applies(Decision::Promote, k)).collect();
         assert_ne!(first, other);
     }
@@ -1579,7 +1581,7 @@ mod tests {
         let opts = model::FitOpts { block_size: crate::curriculum::SEQ_LEN as u32, batch_size: 8, align_to_lines: true, ..Default::default() };
         let (train_ds, _val, batch_cfg, vocab) = model::load_dataset(&dir, &opts).unwrap();
         assert_eq!(vocab, crate::curriculum::VOCAB);
-        let mut rng = data::rng::Rng::new(3);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         for _ in 0..10 {
             let (x, _y) = train_ds.get_batch(&batch_cfg, &mut rng);
             for row in x.chunks(crate::curriculum::SEQ_LEN) {
@@ -1677,7 +1679,7 @@ mod tests {
             min_lr: 5e-4,
             explore_temp: 1.5,
             replay_frac: 0.0,
-            seed: 1,
+            seed: data::rng::random_seed(),
             gate: crate::gate::GateConfig::default(),
             gate_policy: GatePolicy::Real,
             plasticity_control: false,

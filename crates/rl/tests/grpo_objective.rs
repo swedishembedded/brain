@@ -90,7 +90,7 @@ fn grpo_group_size_two_runs_end_to_end_through_fit_with() {
         grad_clip: 1.0,
         eval_interval: 0,
         eval_batches: 0,
-        seed: 123,
+        seed: data::rng::random_seed(),
         checkpoint_secs: 0,
         ..model::FitOpts::default()
     };
@@ -140,7 +140,7 @@ fn grpo_group_size_one_is_the_rft_star_path_and_runs_end_to_end() {
         grad_clip: 1.0,
         eval_interval: 0,
         eval_batches: 0,
-        seed: 321,
+        seed: data::rng::random_seed(),
         checkpoint_secs: 0,
         ..model::FitOpts::default()
     };
@@ -201,7 +201,7 @@ fn an_external_rollout_is_synced_on_schedule_and_its_logprobs_are_recomputed() {
     let mut obj = Grpo::new(env, FracMatchVerifier, grpo_cfg).with_rollout(Box::new(RecordingRollout { syncs: syncs.clone() }), 2);
     use model::Objective;
     obj.prepare(&mut model);
-    let mut rng = data::rng::Rng::new(5);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     // Each group yields two rows: eight micro-steps are four groups.
     let losses: Vec<f32> = (0..8).map(|_| obj.micro_step(&model, &mut rng)).collect();
 
