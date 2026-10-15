@@ -19,7 +19,7 @@ port that shares one sigma vector between them is wrong for one of them.
 
 Usage:
   python tools/goldens/wan_schedule_dump_reference.py \
-      [--wan <Wan2.1 checkout>] [--out testdata/golden/wan]
+      --seed 1234 [--wan <Wan2.1 checkout>] [--out testdata/golden/wan]
 """
 
 import argparse, hashlib, importlib.util, json, os, sys
@@ -36,7 +36,6 @@ CASES = [
     (5.0, 50), (3.0, 40), (5.0, 40), (3.0, 50),
     (7.5, 25), (16.0, 50), (1.0, 10), (5.0, 4),
 ]
-SEED = 1234
 # The solvers einsum over "b k c ..." internally, so the fixed trajectory has to
 # carry a real (batch, channel, rest) shape rather than a flat vector.
 SHAPE = (1, 4, 24)
@@ -93,6 +92,8 @@ def main():
         os.path.dirname(os.path.abspath(__file__)), "..", "..",
         "scratchpad", "reference", "wan", "Wan2.1"))
     ap.add_argument("--out", default=None)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
 
     out = args.out or os.path.join(
@@ -105,7 +106,7 @@ def main():
     U = load("fm_solvers_unipc", os.path.join(utils, "fm_solvers_unipc.py"))
     D = load("fm_solvers", os.path.join(utils, "fm_solvers.py"))
 
-    g = torch.Generator().manual_seed(SEED)
+    g = torch.Generator().manual_seed(args.seed)
     x0 = torch.randn(SHAPE, generator=g)
     store = {"traj.x0": x0}
     manifest = {}
@@ -164,7 +165,7 @@ def main():
     print(f"first-step vs hand-derived Euler: max abs {worst_euler:.3e}", flush=True)
     save(out, "schedule.safetensors", store, manifest)
     manifest["params"] = {
-        "cases": [list(c) for c in CASES], "seed": SEED, "shape": list(SHAPE),
+        "cases": [list(c) for c in CASES], "seed": args.seed, "shape": list(SHAPE),
         "num_train_timesteps": NUM_TRAIN,
         "solvers": {"unipc": "FlowUniPCMultistepScheduler(bh2, order 2, predict_x0)",
                     "dpmpp": "FlowDPMSolverMultistepScheduler(dpmsolver++, midpoint, order 2)"},

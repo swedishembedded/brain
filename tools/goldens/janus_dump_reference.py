@@ -32,7 +32,7 @@ leave through `safetensors.torch` only.
 Usage:
   python tools/goldens/janus_dump_reference.py \\
       --src <Janus checkout> --ckpt <deepseek-ai/Janus-Pro-7B snapshot dir> \\
-      --out "$BRAIN_TESTDATA/janus"
+      --out "$BRAIN_TESTDATA/janus" --seed 20260930
 """
 import argparse
 import hashlib
@@ -54,7 +54,6 @@ GREEDY = 16
 GEN_PROMPT = "A red apple on a wooden table."
 CFG_WEIGHT = 5.0
 STEPS = 8
-SEED = 20260930
 
 
 def source_commit(src):
@@ -155,7 +154,7 @@ def generation(processor, model, args):
     uncond[1:-1] = processor.pad_id
     tokens = torch.stack([cond, uncond])
     embeds = model.language_model.get_input_embeddings()(tokens)
-    gen = torch.Generator().manual_seed(SEED)
+    gen = torch.Generator().manual_seed(args.seed)
     rows = {"logits_cond": [], "logits_uncond": [], "logits_cfg": [], "token_embeds": []}
     sampled = []
     past = None
@@ -182,7 +181,7 @@ def generation(processor, model, args):
         "pad_id": processor.pad_id,
         "sampled": sampled,
         "cfg_weight": CFG_WEIGHT,
-        "seed": SEED,
+        "seed": args.seed,
     }
     write(os.path.join(args.out, "generation"), tensors, manifest, args, model)
 
@@ -192,6 +191,8 @@ def main():
     ap.add_argument("--src", default=os.environ.get("JANUS_SRC"), help="Janus checkout (the pinned reference source)")
     ap.add_argument("--ckpt", required=True, help="Janus-Pro-7B snapshot directory")
     ap.add_argument("--out", required=True, help="output directory")
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
     if not args.src:
         sys.exit("--src (or JANUS_SRC) must name a Janus checkout")

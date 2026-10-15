@@ -45,7 +45,7 @@ the re-drawn tensor is the one the noiser actually used (self-validation 4).
    the conditioning latent); `mask == 0` leaves both tensors untouched.
 
 Usage:
-  python tools/goldens/ltxv_maskcond_dump_reference.py [--out testdata/golden/ltxv/maskcond]
+  python tools/goldens/ltxv_maskcond_dump_reference.py --noise-seed 20260827 [--out testdata/golden/ltxv/maskcond]
 """
 
 import argparse
@@ -73,7 +73,9 @@ from ltx_core.types import VideoLatentShape  # noqa: E402
 PATCH = 1  # LTX-2.5 patchifies 1x1x1 in latent space.
 CHANNELS = 8
 FPS = 24.0
-NOISE_SEED = 20260827
+# seed: the mask-building draw is a stream independent of the noise seed and is
+# part of what defines the committed fixture's masks, so it stays fixed.
+MASK_SEED = 4321
 
 
 def make_tools(frames, height, width):
@@ -131,7 +133,7 @@ CASES = [
 ]
 
 
-def run_case(spec, gen):
+def run_case(spec, gen, noise_seed):
     name, (f, h, w), kind, strength, base, noise_scale = spec
     tools = make_tools(f, h, w)
 
@@ -187,10 +189,10 @@ def run_case(spec, gen):
             "mask=1 must set denoise_mask to 1 - strength"
 
     # --- the noiser, live, plus the same draw re-taken for the golden ---
-    noiser = GaussianNoiser(torch.Generator().manual_seed(NOISE_SEED))
+    noiser = GaussianNoiser(torch.Generator().manual_seed(noise_seed))
     noised = noiser(out, noise_scale)
     noise = torch.randn(*out.latent.shape, dtype=out.latent.dtype,
-                        generator=torch.Generator().manual_seed(NOISE_SEED))
+                        generator=torch.Generator().manual_seed(noise_seed))
     want = torch.lerp(out.clean_latent.float(), torch.lerp(out.latent.float(), noise.float(), noise_scale),
                       out.denoise_mask)
     assert torch.equal(noised.latent, want), "the re-drawn noise is not the draw the noiser used"
@@ -217,14 +219,16 @@ def run_case(spec, gen):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="testdata/golden/ltxv/maskcond")
+    ap.add_argument("--noise-seed", type=int, required=True,
+                    help="seed of the GaussianNoiser draw; recorded in the manifest")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     tensors, meta = {}, []
     for spec in CASES:
-        a, info = run_case(spec, torch.Generator().manual_seed(4321))
-        b, _ = run_case(spec, torch.Generator().manual_seed(4321))
+        a, info = run_case(spec, torch.Generator().manual_seed(MASK_SEED), args.noise_seed)
+        b, _ = run_case(spec, torch.Generator().manual_seed(MASK_SEED), args.noise_seed)
         for k in a:
             assert torch.equal(a[k], b[k]), f"{k} is not reproducible"
         tensors.update(a)
@@ -243,7 +247,8 @@ def main():
         "patch_size": PATCH,
         "channels": CHANNELS,
         "fps": FPS,
-        "noise_seed": NOISE_SEED,
+        "noise_seed": args.noise_seed,
+        "mask_seed": MASK_SEED,
         "cases": meta,
         "source": source_block(
             checkpoint="Lightricks/LTX-2.5",

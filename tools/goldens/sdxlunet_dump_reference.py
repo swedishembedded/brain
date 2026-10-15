@@ -32,7 +32,7 @@ generates at, and the test says so.
 Usage:
   python3 tools/goldens/sdxlunet_dump_reference.py \
       --sdxl /path/to/sdxl-base-1.0 \
-      --out  testdata/sdxl [--latent 32] [--skip-unet] [--skip-schedulers]
+      --out  testdata/sdxl --seed 20240731 [--latent 32] [--skip-unet] [--skip-schedulers]
 """
 
 import argparse
@@ -45,7 +45,6 @@ import numpy as np
 import torch
 from safetensors.torch import save_file
 
-SEED = 20240731
 # Micro-conditioning, in diffusers' own order:
 #   (original_h, original_w, crop_top, crop_left, target_h, target_w)
 # Deliberately six DISTINCT values — an off-by-one in the concat order is
@@ -89,7 +88,7 @@ def save(store, out, rel, manifest):
 # ---------------------------------------------------------------------------
 
 
-def dump_unet(sdxl, out, latent, manifest):
+def dump_unet(sdxl, out, latent, manifest, seed):
     from diffusers import UNet2DConditionModel
 
     print("loading unet (fp32, cpu) ...", flush=True)
@@ -166,7 +165,7 @@ def dump_unet(sdxl, out, latent, manifest):
             tap(u, f"up{i}.upsample{j}")
 
     # ---- inputs ----------------------------------------------------------
-    g = torch.Generator().manual_seed(SEED)
+    g = torch.Generator().manual_seed(seed)
     sample = torch.randn(1, cfg["in_channels"], latent, latent, generator=g)
     # A timestep inside the schedule, not 0 or 999 (both are degenerate for the
     # sinusoidal embedding's low frequencies).
@@ -252,7 +251,7 @@ def _restore_noise():
         _ORIG_RANDN = None
 
 
-def dump_schedulers(sdxl, out, manifest):
+def dump_schedulers(sdxl, out, manifest, seed):
     from diffusers import (
         DDIMScheduler,
         DPMSolverMultistepScheduler,
@@ -278,7 +277,7 @@ def dump_schedulers(sdxl, out, manifest):
         return torch.sin(x * (0.7 + 0.1 * i)) * 0.9 - 0.05 * i
 
     n_elem = 96
-    g = torch.Generator().manual_seed(SEED)
+    g = torch.Generator().manual_seed(seed)
     x0 = torch.randn(n_elem, generator=g)
     # Ancestral noise, one draw per step, supplied to brain as a golden so the
     # stochastic sampler is testable without reproducing torch's Philox.
@@ -350,10 +349,12 @@ def main():
     ap.add_argument("--latent", type=int, default=32, help="latent H=W (32 => a 256x256 image)")
     ap.add_argument("--skip-unet", action="store_true")
     ap.add_argument("--skip-schedulers", action="store_true")
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
 
-    torch.manual_seed(SEED)
-    np.random.seed(SEED)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
     # MERGE into an existing manifest rather than replacing it. The two golden
     # sets are independent and are routinely dumped in two runs (`--skip-unet`,
@@ -372,7 +373,7 @@ def main():
         manifest["params"].update(prev.get("params", {}))
     manifest["params"].update(
         {
-            "seed": SEED,
+            "seed": args.seed,
             "torch": torch.__version__,
             "diffusers": __import__("diffusers").__version__,
             "sdxl_weights": os.path.abspath(args.sdxl),
@@ -380,10 +381,10 @@ def main():
     )
     if not args.skip_schedulers:
         print("== schedulers ==", flush=True)
-        dump_schedulers(args.sdxl, args.out, manifest)
+        dump_schedulers(args.sdxl, args.out, manifest, args.seed)
     if not args.skip_unet:
         print("== unet ==", flush=True)
-        dump_unet(args.sdxl, args.out, args.latent, manifest)
+        dump_unet(args.sdxl, args.out, args.latent, manifest, args.seed)
 
     with open(mpath, "w") as f:
         json.dump(manifest, f, indent=1)

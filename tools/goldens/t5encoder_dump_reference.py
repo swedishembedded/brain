@@ -52,7 +52,7 @@ Usage:
   python3 tools/goldens/t5encoder_dump_reference.py \
       --model     /path/to/FLUX.1-Kontext-dev/text_encoder_2 \
       --tokenizer /path/to/FLUX.1-Kontext-dev/tokenizer_2 \
-      --out       testdata/t5 [--seq-len 128]
+      --out       testdata/t5 --seed 0 [--seq-len 128]
 """
 
 import argparse
@@ -81,7 +81,6 @@ TOKENIZER_STRINGS = [
     "café naïve 你好 \U0001f98a emoji",
     "a " * 300 + "truncated tail",
 ]
-SEED = 0
 
 
 def save(out_dir, rel, tensors, manifest, extra=None):
@@ -407,7 +406,7 @@ def dump_encoder(model_dir, tok_dir, out_dir, manifest, seq_len):
     return {"seq_len": T, "batch": B, "n_layers": n_layers}
 
 
-def dump_tiny(out_dir, manifest):
+def dump_tiny(out_dir, manifest, seed):
     """A random 2-layer T5 encoder whose dims break T5-XXL's coincidences.
 
     XXL has `num_heads == d_kv == 64` and `num_heads * d_kv == d_model`, so the
@@ -422,7 +421,7 @@ def dump_tiny(out_dir, manifest):
     from transformers import T5EncoderModel
     from transformers.models.t5.configuration_t5 import T5Config
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     cfg = T5Config(
         vocab_size=256, d_model=64, d_ff=128, d_kv=64, num_layers=2, num_heads=2,
         relative_attention_num_buckets=32, relative_attention_max_distance=128,
@@ -500,7 +499,7 @@ def dump_tiny(out_dir, manifest):
         "config": {"vocab_size": cfg.vocab_size, "d_model": cfg.d_model,
                    "d_ff": cfg.d_ff, "d_kv": cfg.d_kv, "num_layers": cfg.num_layers,
                    "num_heads": cfg.num_heads},
-        "run": {"batch": B, "seq_len": T, "seed": SEED},
+        "run": {"batch": B, "seq_len": T, "seed": seed},
     })
 
 
@@ -545,13 +544,15 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--seq-len", type=int, default=128,
                     help="padded sequence length (128 covers all 32 buckets)")
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(args.seed)
     torch.use_deterministic_algorithms(True)
     os.makedirs(args.out, exist_ok=True)
     manifest = {"files": {}, "params": {
-        "prompts": PROMPTS, "seed": SEED, "seq_len": args.seq_len,
+        "prompts": PROMPTS, "seed": args.seed, "seq_len": args.seq_len,
         "torch": torch.__version__,
         "transformers": __import__("transformers").__version__,
     }}
@@ -559,7 +560,7 @@ def main():
     # The tiny fixture is checkpoint-free, so it goes first and always runs:
     # a broken environment fails here in a second instead of after loading
     # 19 GB of weights.
-    dump_tiny(args.out, manifest)
+    dump_tiny(args.out, manifest, args.seed)
 
     name = "manifest.json"
     if args.model:

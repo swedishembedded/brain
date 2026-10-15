@@ -24,7 +24,7 @@ changes nothing except the causal flag, and teacher forcing removes the
 
 Usage:
   python3 tools/goldens/kronos_train_dump_reference.py --repo <Kronos repo> \
-      --out testdata/golden/kronos
+      --out testdata/golden/kronos --seed 20260816
 """
 import argparse
 import json
@@ -42,7 +42,6 @@ from golden_source import source_block  # noqa: E402
 DIMS = dict(d_model=32, n_layers=2, n_heads=4, ff_dim=64, s1_bits=5, s2_bits=5, learn_te=True)
 DEP_HEADS = 4  # the reference DependencyAwareLayer's fixed head count
 SEQ_LEN = 24
-SEED = 20260816
 # How wide the random weights are drawn. Deliberately not tiny: with near-zero
 # projections the dependency layer's attention is nearly uniform and dropping its
 # causal mask barely moves the logits (rel_l2 ~1e-2), which would make this rung
@@ -57,6 +56,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
 
     sys.path.insert(0, args.repo)
@@ -74,7 +75,7 @@ def main():
 
     # Deterministic weights, drawn here (not by torch's init) so the dump is
     # reproducible across torch versions. RMSNorm gains sit near 1.
-    rng = np.random.default_rng(SEED)
+    rng = np.random.default_rng(args.seed)
     sd = model.state_dict()
     params = []
     for name in sd:
@@ -136,14 +137,14 @@ def main():
 
     meta = dict(DIMS)
     meta.update({
-        "seq_len": t, "dep_n_heads": DEP_HEADS, "seed": SEED,
+        "seq_len": t, "dep_n_heads": DEP_HEADS, "seed": args.seed,
         "params": params, "ce_loss": float(ce), "ce_s1": float(ce1), "ce_s2": float(ce2),
         "source": source_block(
             checkpoint=args.repo,
             files=[],
             identity={
                 "d_model": DIMS["d_model"], "n_layers": DIMS["n_layers"],
-                "seq_len": t, "seed": SEED,
+                "seq_len": t, "seed": args.seed,
             },
         ),
     })

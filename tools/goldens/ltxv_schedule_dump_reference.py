@@ -32,7 +32,7 @@ ground truth comparison:
    scheduler and asserted bit-identical.
 
 Usage:
-  python tools/goldens/ltxv_schedule_dump_reference.py [--out testdata/golden/ltxv/schedule]
+  python tools/goldens/ltxv_schedule_dump_reference.py --seed 1234 [--out testdata/golden/ltxv/schedule]
 """
 
 import argparse
@@ -103,7 +103,6 @@ CASES = [
     (4096, 20, 0.95, 2.05, False, 0.1),
     (1024, 20, 0.5, 3.0, True, 0.05),
 ]
-SEED = 1234
 
 
 def save(out, name, tensors, manifest):
@@ -147,6 +146,8 @@ def main():
     ap.add_argument("--constants", default=_DEFAULT_CONSTANTS_PATH,
                     help="ltx_pipelines/utils/constants.py (source of DISTILLED_SIGMA_VALUES)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
 
     out = args.out or os.path.join(
@@ -154,7 +155,7 @@ def main():
             os.path.dirname(os.path.abspath(__file__)), "..", "..", "testdata"),
         "golden", "ltxv", "schedule")
     os.makedirs(out, exist_ok=True)
-    torch.manual_seed(SEED)
+    torch.manual_seed(args.seed)
 
     constants = _load_constants_by_path(args.constants)
     distilled_sigma_values = constants.DISTILLED_SIGMA_VALUES
@@ -204,7 +205,7 @@ def main():
 
     manifest = {
         "params": {
-            "cases": manifest_cases, "seed": SEED,
+            "cases": manifest_cases, "seed": args.seed,
             "base_shift_anchor": BASE_SHIFT_ANCHOR, "max_shift_anchor": MAX_SHIFT_ANCHOR,
             "distilled_sigma_values": distilled_sigma_values,
             "stage_2_distilled_sigma_values": stage_2_distilled_sigma_values,

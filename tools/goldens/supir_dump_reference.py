@@ -108,7 +108,7 @@ Usage:
       --supir     /path/to/SUPIR-v0Q_fp32.safetensors \\
       --clip-l    /path/to/clip-vit-large-patch14/dir \\
       --clip-bigg /path/to/open_clip_model.safetensors \\
-      --out testdata/supir [--latent 32] [--steps 4] [--s-churn 5.0]
+      --out testdata/supir --seed 20260827 [--latent 32] [--steps 4] [--s-churn 5.0]
 
 `--s-churn` defaults to `5.0`, matching the committed `testdata/supir/`
 golden bit-for-bit when omitted. Pass `--s-churn 0.0` (into a DIFFERENT
@@ -132,7 +132,6 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-SEED = 20260827
 PROMPT = "a professional, detailed, high-quality photo of a street market"
 LATENT_DEFAULT = 32
 STEPS_DEFAULT = 4
@@ -509,7 +508,7 @@ def run_pipeline(model, x, args, store, manifest):
         model.sampler_config.params.device = "cpu"
         model.sampler = instantiate_from_config(model.sampler_config)
 
-        seed_everything(SEED)
+        seed_everything(args.seed)
 
         record(store, "in.lq_image", x)
 
@@ -729,10 +728,12 @@ def main():
                           "forward replay needs to compare against exactly. See the module docstring's "
                           "'first task' note for why the DEFAULT golden cannot be replayed.")
     ap.add_argument("--name", default="stages.safetensors")
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
 
-    torch.manual_seed(SEED)
-    np.random.seed(SEED)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     torch.set_grad_enabled(False)
     os.makedirs(args.out, exist_ok=True)
 
@@ -742,7 +743,7 @@ def main():
     mpath = os.path.join(args.out, "manifest.json")
     manifest = {"files": {}, "params": {}}
 
-    g = torch.Generator().manual_seed(SEED)
+    g = torch.Generator().manual_seed(args.seed)
     px = 8 * args.latent  # VAE downsamples by exactly 8
     x = torch.rand(1, 3, px, px, generator=g) * 2.0 - 1.0  # [-1, 1], RGB, like a real preprocessed LQ image
 
@@ -773,7 +774,7 @@ def main():
         },
     )
     manifest["params"].update({
-        "seed": SEED,
+        "seed": args.seed,
         "prompt": PROMPT,
         "torch": torch.__version__,
         "cfg_scale": CFG_SCALE, "cfg_scale_start": CFG_SCALE_START,

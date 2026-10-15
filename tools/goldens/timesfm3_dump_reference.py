@@ -65,7 +65,7 @@ regenerated on demand, never committed: it is large numeric data, not source):
 Usage:
   BRAIN_TIMESFM3_REF=<google-research/timesfm checkout> \\
     python3 tools/goldens/timesfm3_dump_reference.py <checkpoint_dir> \\
-    testdata/golden/timesfm3
+    testdata/golden/timesfm3 --seed 1337
 
 <checkpoint_dir> is a local `google/timesfm-3.0-pytorch` checkout (what
 `brain pull google/timesfm-3.0-pytorch` fetches) - not committed, not baked in
@@ -94,7 +94,6 @@ import timesfm3  # noqa: E402
 from timesfm3 import cpm_revin_refine as cpm_revin_refine_lib  # noqa: E402
 from timesfm3 import transformer as transformer_lib  # noqa: E402
 
-SEED = 1337
 
 
 def force_deterministic_attention(model):
@@ -220,7 +219,7 @@ def run_case(model, prefix, store, taps_manifest, *, target, past_only, past_fut
     return horizon_logits
 
 
-def build_tiny_model():
+def build_tiny_model(seed):
     """Construct part A's checkpoint-free tiny model - shared by `dump_tiny`
     and `dump_masked` (part C/D), which reuse its exact weights rather than
     drawing a second random model. Every dimension pairwise distinct (and
@@ -232,7 +231,7 @@ def build_tiny_model():
     do, so a head-count/head-width swap or a sequence/variate axis swap
     cannot pass by shape coincidence. Fully deterministic (fixed seeds
     throughout), so every caller gets bit-identical weights."""
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     residual_cfg = timesfm3.ResidualBlockConfig(
         hidden_dims=12, output_dims=12, use_bias=False, activation="relu"
     )
@@ -269,21 +268,21 @@ def build_tiny_model():
     n_patched = force_deterministic_attention(model)
     assert n_patched == 2 * 3, f"expected 6 attention modules (seq+var x 3 layers), got {n_patched}"
 
-    gen = torch.Generator().manual_seed(SEED)
+    gen = torch.Generator().manual_seed(seed)
     for p in model.parameters():
         p.data = torch.randn(p.shape, generator=gen) * 0.05
     return model
 
 
-def dump_tiny(store, manifest):
+def dump_tiny(store, manifest, seed):
     """Part A: checkpoint-free, every dim pairwise distinct and pairwise
     coprime so a head-count/head-width or seq/variate-attention axis swap
     cannot pass by shape coincidence the way it could at the real 1280/16/80
     (all three share common factors there). Returns `(model, identity)` -
     `dump_masked` reuses the model."""
-    model = build_tiny_model()
+    model = build_tiny_model(seed)
 
-    gen = torch.Generator().manual_seed(SEED)
+    gen = torch.Generator().manual_seed(seed)
     batch, context, horizon = 2, 16, 8  # 4 context patches of 4, 1 forecast patch of 8 (no horizon padding)
     target = torch.randn(batch, 2, context, generator=gen)
     past_only = torch.randn(batch, 1, context, generator=gen)
@@ -315,7 +314,7 @@ def dump_tiny(store, manifest):
     return model, identity
 
 
-def dump_masked(model, tiny_identity, store, manifest):
+def dump_masked(model, tiny_identity, store, manifest, seed):
     """Part C/D: mask/left-padding cases over the SAME tiny model/weights as
     `dump_tiny` (no second random draw) - `padtiny` (a partial leading pad
     patch - the first context patch is NOT fully missing), `padtiny_full` (a
@@ -333,7 +332,7 @@ def dump_masked(model, tiny_identity, store, manifest):
     preprocessing/masking source before changing brain's side to match it.
     """
     batch, context, horizon = 1, 8, 8
-    gen = torch.Generator().manual_seed(SEED + 1)  # a stream distinct from dump_tiny's own inputs
+    gen = torch.Generator().manual_seed(seed + 1)  # a stream distinct from dump_tiny's own inputs
 
     def run(prefix, target_gaps=(), future_ctx_gaps=(), future_hor_gaps=()):
         target = torch.randn(batch, 1, context, generator=gen)
@@ -360,15 +359,15 @@ def dump_masked(model, tiny_identity, store, manifest):
     return identity
 
 
-def dump_real(checkpoint_dir, store, manifest):
+def dump_real(checkpoint_dir, store, manifest, seed):
     """Part B: the real 330M checkpoint, one multivariate decode covering all
     three `Role`s brain's `Panel` maps onto this model."""
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     model = timesfm3.TimesFM3Torch.from_pretrained(checkpoint_dir)
     model.eval()
     force_deterministic_attention(model)
 
-    gen = torch.Generator().manual_seed(SEED)
+    gen = torch.Generator().manual_seed(seed)
     batch, context, horizon = 1, 192, 64  # 6 context patches of 32, 1 forecast patch (extract_len=64)
     target = torch.randn(batch, 1, context, generator=gen)
     past_only = torch.randn(batch, 1, context, generator=gen)
@@ -395,16 +394,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("checkpoint_dir", help="local google/timesfm-3.0-pytorch checkout (config.json + model.safetensors)")
     ap.add_argument("out_dir")
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
     torch.set_num_threads(1)
     store = {}
-    manifest = {"versions": {"torch": torch.__version__, "numpy": np.__version__, "python": sys.version.split()[0]}}
+    manifest = {"seed": args.seed, "versions": {"torch": torch.__version__, "numpy": np.__version__, "python": sys.version.split()[0]}}
 
-    tiny_model, tiny_identity = dump_tiny(store, manifest)
-    masked_identity = dump_masked(tiny_model, tiny_identity, store, manifest)
-    real_identity = dump_real(args.checkpoint_dir, store, manifest)
+    tiny_model, tiny_identity = dump_tiny(store, manifest, args.seed)
+    masked_identity = dump_masked(tiny_model, tiny_identity, store, manifest, args.seed)
+    real_identity = dump_real(args.checkpoint_dir, store, manifest, args.seed)
 
     weights_file = os.path.join(args.checkpoint_dir, "model.safetensors")
     manifest["source"] = {

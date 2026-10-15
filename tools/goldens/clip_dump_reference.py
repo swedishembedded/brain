@@ -36,7 +36,8 @@ Usage:
       --sdxl   /path/to/sdxl-base-1.0 \
       --eva-ckpt /path/to/EVA02_CLIP_L_336_psz14_s6B.pt \
       --eva-code /path/to/PuLID          # dir containing the `eva_clip` package
-      --out    testdata/clip
+      --out    testdata/clip \
+      --seed   0
 Any of --sdxl / --eva-ckpt may be omitted to dump only the other family.
 """
 
@@ -67,7 +68,6 @@ TOKENIZER_STRINGS = [
     "café naïve 你好 \U0001f98a emoji",
     "a " * 120 + "truncated tail",
 ]
-SEED = 0
 
 
 # ---------------------------------------------------------------- io helpers
@@ -561,15 +561,17 @@ def main():
     ap.add_argument("--eva-ckpt", help="EVA02_CLIP_L_336_psz14_s6B.pt")
     ap.add_argument("--eva-code", help="dir containing the `eva_clip` package (PuLID)")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
     if not args.sdxl and not args.eva_ckpt:
         ap.error("nothing to do: pass --sdxl and/or --eva-ckpt")
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(args.seed)
     torch.use_deterministic_algorithms(True)
     os.makedirs(args.out, exist_ok=True)
     manifest = {"files": {}, "params": {
-        "prompts": PROMPTS, "seed": SEED,
+        "prompts": PROMPTS, "seed": args.seed,
         "torch": torch.__version__,
         "transformers": __import__("transformers").__version__,
     }}

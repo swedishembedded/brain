@@ -32,7 +32,7 @@ gate the 128x128 latent SDXL actually generates at, and the test says so.
 Usage:
   python3 tools/goldens/controlnet_dump_reference.py \
       --controlnet /path/to/ControlNetModel \
-      --out testdata/controlnet [--latent 32]
+      --out testdata/controlnet --seed 20260804 [--latent 32]
 """
 
 import argparse
@@ -45,7 +45,6 @@ import numpy as np
 import torch
 from safetensors.torch import save_file
 
-SEED = 20260804
 # Micro-conditioning in diffusers' order:
 #   (original_h, original_w, crop_top, crop_left, target_h, target_w)
 # Six DISTINCT values — an off-by-one in the concat order is invisible when
@@ -87,7 +86,7 @@ def save(store, out, rel, manifest):
     print(f"  wrote {rel}: {len(store)} tensors, {os.path.getsize(path) / 1e6:.1f} MB", flush=True)
 
 
-def dump(controlnet_dir, out, latent, latent_w, rel, manifest):
+def dump(controlnet_dir, out, latent, latent_w, rel, manifest, seed):
     from diffusers import ControlNetModel
 
     print("loading controlnet (fp32, cpu) ...", flush=True)
@@ -167,7 +166,7 @@ def dump(controlnet_dir, out, latent, latent_w, rel, manifest):
     tap(net.controlnet_mid_block, "zero_mid", want_input=True)
 
     # ---- inputs -----------------------------------------------------------
-    g = torch.Generator().manual_seed(SEED)
+    g = torch.Generator().manual_seed(seed)
     sample = torch.randn(1, cfg["in_channels"], latent, latent_w, generator=g)
     timestep = torch.tensor([601], dtype=torch.long)
     enc = torch.randn(1, 77, cfg["cross_attention_dim"], generator=g)
@@ -245,10 +244,12 @@ def main():
     ap.add_argument("--latent", type=int, default=32, help="latent H (32 => a 256px conditioning image)")
     ap.add_argument("--latent-w", type=int, default=None, help="latent W (defaults to --latent)")
     ap.add_argument("--name", default="stages.safetensors", help="output file, relative to --out")
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
 
-    torch.manual_seed(SEED)
-    np.random.seed(SEED)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
     mpath = os.path.join(args.out, "manifest.json")
     manifest = {"files": {}, "params": {}}
@@ -259,14 +260,14 @@ def main():
         manifest["params"].update(prev.get("params", {}))
     manifest["params"].update(
         {
-            "seed": SEED,
+            "seed": args.seed,
             "torch": torch.__version__,
             "diffusers": __import__("diffusers").__version__,
             "controlnet_weights": os.path.abspath(args.controlnet),
         }
     )
     print("== controlnet ==", flush=True)
-    dump(args.controlnet, args.out, args.latent, args.latent_w or args.latent, args.name, manifest)
+    dump(args.controlnet, args.out, args.latent, args.latent_w or args.latent, args.name, manifest, args.seed)
     with open(mpath, "w") as f:
         json.dump(manifest, f, indent=1)
     print("done.", flush=True)

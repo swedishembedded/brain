@@ -24,7 +24,8 @@ realistic picture) so the golden is regenerable from the checkpoint alone.
 Usage:
   python3 tools/goldens/florence2_dump_reference.py \
       --checkpoint /path/to/microsoft/Florence-2-base \
-      --out testdata/florence2
+      --out testdata/florence2 \
+      --seed 0
 """
 
 import argparse
@@ -37,7 +38,6 @@ import numpy as np
 import torch
 from safetensors.torch import save_file
 
-SEED = 0
 
 
 def save(out_dir, rel, tensors, manifest):
@@ -55,12 +55,12 @@ def save(out_dir, rel, tensors, manifest):
     }
 
 
-def fixed_image(batch=1):
+def fixed_image(seed, batch=1):
     """Deterministic synthetic 768x768 RGB image - a smooth gradient plus a
     few hard edges (checkerboard patches), so windowed AND channel attention
     both see real spatial structure rather than uniform input (which would
     make every window/channel-group identical and hide indexing bugs)."""
-    rng = np.random.default_rng(SEED)
+    rng = np.random.default_rng(seed)
     h = w = 768
     yy, xx = np.meshgrid(np.linspace(0, 1, h), np.linspace(0, 1, w), indexing="ij")
     base = np.stack([xx, yy, (xx + yy) / 2], axis=0).astype(np.float32)
@@ -181,9 +181,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(args.seed)
     from transformers import AutoModelForCausalLM
 
     model = AutoModelForCausalLM.from_pretrained(
@@ -206,7 +208,7 @@ def main():
     lm.lm_head.weight = lm.model.shared.weight
 
     cfg = model.config.to_dict()
-    manifest = {"config": cfg, "seed": SEED}
+    manifest = {"config": cfg, "seed": args.seed}
     # WHICH checkpoint this dump came from. Read out of the config dict just
     # stored rather than retyped, so a tier whose fields differ cannot be
     # described by base's numbers. Both halves are named: the text tower's
@@ -232,7 +234,7 @@ def main():
             "depths": vis["depths"],
         },
     )
-    pixel_values = fixed_image(batch=1)
+    pixel_values = fixed_image(args.seed, batch=1)
     image_features = dump_davit(model, pixel_values, args.out, manifest)
     dump_encdec(model, image_features, args.out, manifest)
 

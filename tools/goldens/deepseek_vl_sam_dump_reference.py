@@ -46,7 +46,8 @@ Usage:
   python tools/goldens/deepseek_vl_sam_dump_reference.py \\
       --src <DeepSeek-VL checkout> \\
       --ckpt <deepseek-ai/deepseek-vl-7b-chat snapshot dir> \\
-      --out "$BRAIN_TESTDATA/deepseek-vl/sam"
+      --out "$BRAIN_TESTDATA/deepseek-vl/sam" \\
+      --seed 20260930
 """
 import argparse
 import hashlib
@@ -65,7 +66,6 @@ from golden_source import source_block  # noqa: E402
 
 PREFIX = "vision_model.vision_tower_high.vision_tower."
 CHECKPOINT = "deepseek-ai/deepseek-vl-7b-chat"
-SEED = 20260930
 RESIZE = (96, 96)
 
 
@@ -106,6 +106,8 @@ def main():
     ap.add_argument("--src", default=os.environ.get("DEEPSEEK_VL_SRC"), help="DeepSeek-VL checkout (the pinned reference source)")
     ap.add_argument("--ckpt", required=True, help="deepseek-vl-7b-chat snapshot directory (sharded safetensors)")
     ap.add_argument("--out", required=True, help="output directory")
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
     if not args.src:
         sys.exit("--src (or DEEPSEEK_VL_SRC) must name a DeepSeek-VL checkout")
@@ -113,7 +115,7 @@ def main():
     sys.path.insert(0, args.src)
     from deepseek_vl.models.sam import create_sam_vit  # noqa: E402
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
 
     tower = create_sam_vit("sam_b_downsample", image_size=1024).float().eval()
@@ -125,7 +127,7 @@ def main():
 
     # A fixed synthetic input in the range a normalized image occupies. Seeded,
     # and stored in the golden, so the Rust side replays it byte for byte.
-    g = torch.Generator().manual_seed(SEED)
+    g = torch.Generator().manual_seed(args.seed)
     x = (torch.rand(1, 3, 1024, 1024, generator=g) * 4.0 - 2.0).float()
 
     # ---- the reference forward, and its intermediates from its own modules ----
@@ -176,7 +178,7 @@ def main():
     manifest = {
         "dumper": "tools/goldens/deepseek_vl_sam_dump_reference.py",
         "reference": {"module": "deepseek_vl.models.sam.create_sam_vit('sam_b_downsample')", "commit": source_commit(args.src)},
-        "seed": SEED,
+        "seed": args.seed,
         "dtype": "float32",
         "device": "cpu",
         "versions": {"torch": torch.__version__, "python": sys.version.split()[0]},

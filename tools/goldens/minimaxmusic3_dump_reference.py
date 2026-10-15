@@ -35,7 +35,7 @@ Two independent dim regimes, per component:
 
 Usage:
   python3 tools/goldens/minimaxmusic3_dump_reference.py --component vocoder \
-      --tiny --real --real-dir <checkpoint>/vocoder --out testdata/golden/minimaxmusic3
+      --tiny --real --real-dir <checkpoint>/vocoder --out testdata/golden/minimaxmusic3 --seed 0
 """
 import argparse
 import json
@@ -49,7 +49,6 @@ from safetensors.torch import load_file, save_file
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from golden_source import source_block  # noqa: E402
 
-SEED = 0
 COMPONENTS = ("condition_encoder", "vocoder", "depth_decoder", "dit")
 
 
@@ -69,7 +68,7 @@ def _weight_files(d):
 
 def save_tiny_state_dict(model, prefix):
     """`--tiny` has no source checkpoint - the model's weights are whatever
-    PyTorch's default init drew for this exact `torch.manual_seed(SEED)`
+    PyTorch's default init drew for this exact `torch.manual_seed(seed)`
     call, which nothing on the Rust side can reproduce bit-for-bit (a
     different RNG algorithm entirely). So the random weights themselves are
     part of the golden, not just the forward's input/output."""
@@ -91,10 +90,10 @@ REAL_CONDITION = dict(
 )
 
 
-def dump_condition_encoder(out_dir, cfg, weights_dir, tag):
+def dump_condition_encoder(out_dir, cfg, weights_dir, tag, seed):
     from diffusers import MiniMaxMusic3ConditionEncoder
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     model = MiniMaxMusic3ConditionEncoder(**cfg)
     prefix = os.path.join(out_dir, f"condition_encoder_{tag}")
     files = []
@@ -113,6 +112,7 @@ def dump_condition_encoder(out_dir, cfg, weights_dir, tag):
     write_f32(prefix + "_in.f32", hidden)
     write_f32(prefix + "_out.f32", out)
     meta = {
+        "seed": seed,
         "frames": frames, "batch": batch, **{k: int(v) if isinstance(v, int) else v for k, v in cfg.items()},
         "out_shape": list(out.shape),
         "source": source_block(checkpoint="MiniMaxAI/MiniMax-Music3", files=files, identity={
@@ -133,10 +133,10 @@ REAL_VOCODER = dict(latent_channels=128, decoder_input_dim=1024, decoder_hidden_
                      upsampling_ratios=(8, 8, 4, 2), sampling_rate=44100)
 
 
-def dump_vocoder(out_dir, cfg, weights_dir, tag):
+def dump_vocoder(out_dir, cfg, weights_dir, tag, seed):
     from diffusers import MiniMaxMusic3Vocoder
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     model = MiniMaxMusic3Vocoder(**cfg)
     prefix = os.path.join(out_dir, f"vocoder_{tag}")
     files = []
@@ -157,6 +157,7 @@ def dump_vocoder(out_dir, cfg, weights_dir, tag):
     ident = {k: int(v) for k, v in cfg.items() if isinstance(v, int)}
     ident["num_upsample_stages"] = len(cfg["upsampling_ratios"])
     meta = {
+        "seed": seed,
         "batch": batch, "length": length, "upsampling_ratios": list(cfg["upsampling_ratios"]),
         "out_shape": list(out.shape),
         "source": source_block(checkpoint="MiniMaxAI/MiniMax-Music3", files=files, identity=ident),
@@ -175,10 +176,10 @@ REAL_DEPTH = dict(hidden_size=4096, num_layers=4, num_attention_heads=16, interm
                    audio_vocab_size=1024, num_codebooks=8, max_position_embeddings=16)
 
 
-def dump_depth_decoder(out_dir, cfg, weights_dir, tag):
+def dump_depth_decoder(out_dir, cfg, weights_dir, tag, seed):
     from diffusers import MiniMaxMusic3RVQDepthDecoder
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     model = MiniMaxMusic3RVQDepthDecoder(**cfg)
     prefix = os.path.join(out_dir, f"depth_decoder_{tag}")
     files = []
@@ -212,6 +213,7 @@ def dump_depth_decoder(out_dir, cfg, weights_dir, tag):
     write_f32(prefix + "_head_outs.f32", torch.stack(head_outs, dim=0))
     ident = {k: int(v) for k, v in cfg.items()}
     meta = {
+        "seed": seed,
         "batch": batch, "steps": steps,
         "hidden_out_shape": list(hidden_out.shape),
         "proj_out_shape": list(proj_out.shape),
@@ -233,10 +235,10 @@ REAL_DIT = dict(in_channels=128, condition_dim=2048, num_layers=36, num_attentio
                  attention_head_dim=64, ff_inner_dim=8192, rotary_dim=32, fourier_embedding_dim=256)
 
 
-def dump_dit(out_dir, cfg, weights_dir, tag):
+def dump_dit(out_dir, cfg, weights_dir, tag, seed):
     from diffusers import MiniMaxMusic3Transformer1DModel
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     model = MiniMaxMusic3Transformer1DModel(**cfg)
     prefix = os.path.join(out_dir, f"dit_{tag}")
     files = []
@@ -269,6 +271,7 @@ def dump_dit(out_dir, cfg, weights_dir, tag):
     write_f32(prefix + "_out.f32", out)
     ident = {k: int(v) for k, v in cfg.items()}
     meta = {
+        "seed": seed,
         "batch": batch, "length": length, "out_shape": list(out.shape),
         "source": source_block(checkpoint="MiniMaxAI/MiniMax-Music3", files=files, identity=ident),
     }
@@ -293,6 +296,8 @@ def main():
     ap.add_argument("--real", action="store_true", help="dump real weights from --real-dir")
     ap.add_argument("--real-dir", help="the component's checkpoint subfolder (e.g. .../vocoder)")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the output")
     args = ap.parse_args()
     if not args.tiny and not args.real:
         raise SystemExit("pass --tiny and/or --real")
@@ -302,9 +307,9 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     fn, tiny_cfg, real_cfg = DUMPERS[args.component]
     if args.tiny:
-        fn(args.out, tiny_cfg, None, "tiny")
+        fn(args.out, tiny_cfg, None, "tiny", args.seed)
     if args.real:
-        fn(args.out, real_cfg, args.real_dir, "real")
+        fn(args.out, real_cfg, args.real_dir, "real", args.seed)
 
 
 if __name__ == "__main__":

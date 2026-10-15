@@ -53,7 +53,7 @@ rather than silently papering over:
     `torch.randn` from the GLOBAL RNG on every call when `causal=False`
     (the non-streaming path this dumper exercises) - i.e. real HiFT inference
     output is NOT reproducible run-to-run without the caller reseeding first.
-    This dumper calls `torch.manual_seed(SEED)` immediately before
+    This dumper calls `torch.manual_seed(seed)` immediately before
     `hift.inference(...)` to freeze it, and self-validates that choice by
     calling it a second time under the same reseed and asserting bit-exact
     agreement (documented in `hift_real_meta.json`).
@@ -62,7 +62,8 @@ Usage:
     tools/goldens/cosyvoice_dump_reference.py \\
         --weights resources/cosyvoice/weights \\
         --source resources/cosyvoice/source \\
-        --out testdata/golden/cosyvoice
+        --out testdata/golden/cosyvoice \\
+        --seed 0
 
 Swedish Embedded AB implements solutions for porting reference PyTorch TTS
 pipelines to from-scratch GPU kernels for its clients. If your team needs
@@ -83,7 +84,10 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from golden_source import sha256_of, source_block  # noqa: E402
 
-SEED = 0
+# seed: CosyVoice's CausalConditionalCFM draws its rand_noise buffer under
+# set_all_random_seed(0) at construction; replaying that exact seed is how
+# dump_flow proves the buffer, so it is fixed by the library, not by this run.
+LIBRARY_NOISE_SEED = 0
 CHECKPOINT = "FunAudioLLM/CosyVoice2-0.5B"
 TAG = "real"  # no --tiny tier yet: crates/cosyvoice::config doesn't exist to sync dims against (see report)
 
@@ -274,7 +278,7 @@ def dump_s3tokenizer(out_dir, frontend, wav_path, weights_dir):
 # component 4: LM (Qwen2LM.inference, real prompt, REAL ras_sampling reseeded)
 # ---------------------------------------------------------------------------
 
-def _run_llm_capped(llm, model_input, max_tokens, capture_hidden=None):
+def _run_llm_capped(llm, model_input, max_tokens, seed, capture_hidden=None):
     """One capped call to the real `Qwen2LM.inference()` generator - the real
     `ras_sampling` (nucleus + repetition-guard), not patched to greedy.
     Greedy was tried first and rejected: argmax decoding of CosyVoice's
@@ -285,7 +289,7 @@ def _run_llm_capped(llm, model_input, max_tokens, capture_hidden=None):
     Reproducibility instead comes from reseeding torch's global RNG right
     before the call (nucleus_sampling's only randomness is `.multinomial()`
     draws from it)."""
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     handle = None
     if capture_hidden is not None:
         def hook(module, args, kwargs, output):
@@ -310,10 +314,10 @@ def _run_llm_capped(llm, model_input, max_tokens, capture_hidden=None):
     return tokens
 
 
-def dump_llm(out_dir, model, model_input, weights_dir, max_tokens):
+def dump_llm(out_dir, model, model_input, weights_dir, max_tokens, seed):
     llm = model.llm
     captures = []
-    tokens = _run_llm_capped(llm, model_input, max_tokens, capture_hidden=captures)
+    tokens = _run_llm_capped(llm, model_input, max_tokens, seed, capture_hidden=captures)
     assert len(captures) >= 1, "no forward_one_step calls captured - LM inference produced 0 tokens"
     prefill_hidden = captures[0]
 
@@ -326,12 +330,12 @@ def dump_llm(out_dir, model, model_input, weights_dir, max_tokens):
     with torch.inference_mode():
         prefill_logits = llm.llm_decoder(prefill_hidden)
 
-    # self-validation: reseed to SEED and run a second, independent capped
+    # self-validation: reseed to the run seed and run a second, independent capped
     # generator call; assert the sampled token sequence matches exactly.
     # `ras_sampling`'s nucleus step draws from torch's global RNG, so this is
     # the "capture the exact RNG-consumed sequence" reproducibility path
     # porting.md names as the alternative to greedy patching.
-    tokens2 = _run_llm_capped(llm, model_input, max_tokens)
+    tokens2 = _run_llm_capped(llm, model_input, max_tokens, seed)
     exact = tokens == tokens2
 
     prefix = os.path.join(out_dir, f"llm_{TAG}")
@@ -343,8 +347,8 @@ def dump_llm(out_dir, model, model_input, weights_dir, max_tokens):
     meta = {
         "prefill_hidden_shape": list(prefill_hidden.shape), "prefill_logits_shape": list(prefill_logits.shape),
         "num_ar_tokens": len(tokens), "ar_tokens_capped_at": max_tokens,
-        "sampling": "real ras_sampling (top_p=0.8, top_k=25, win_size=10, tau_r=0.1), reseeded to SEED for reproducibility",
-        "self_validation": {"method": "reseed torch to SEED, run the real capped inference() generator twice "
+        "sampling": "real ras_sampling (top_p=0.8, top_k=25, win_size=10, tau_r=0.1), reseeded to the run seed for reproducibility",
+        "self_validation": {"method": "reseed torch to the run seed, run the real capped inference() generator twice "
                                        "independently, assert the sampled token sequences match exactly",
                              "tokens_run1": tokens, "tokens_run2": tokens2, "pass": bool(exact)},
         "source": source_block(
@@ -405,7 +409,7 @@ def dump_flow(out_dir, model, model_input, ar_tokens, weights_dir):
     # rand_noise self-validation: two independent recomputations of the fixed
     # seed(0) buffer CausalConditionalCFM.__init__ generated at construction.
     from cosyvoice.utils.common import set_all_random_seed
-    set_all_random_seed(SEED)
+    set_all_random_seed(LIBRARY_NOISE_SEED)
     rand_noise_replay = torch.randn([1, 80, 50 * 300])
     noise_exact = torch.equal(decoder.rand_noise, rand_noise_replay)
 
@@ -523,7 +527,7 @@ def dump_flow(out_dir, model, model_input, ar_tokens, weights_dir):
 # component 6: HiFT vocoder (HiFTGenerator.inference, ISTFT head)
 # ---------------------------------------------------------------------------
 
-def dump_hift(out_dir, model, mel_feat, weights_dir):
+def dump_hift(out_dir, model, mel_feat, weights_dir, seed):
     hift = model.hift
     capture = {}
     orig_istft = hift._istft
@@ -537,12 +541,12 @@ def dump_hift(out_dir, model, mel_feat, weights_dir):
 
     # HiFT's NSF source branch draws fresh global-RNG randomness every call
     # when causal=False (see module docstring) - reseed to freeze it.
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     with torch.no_grad():
         speech1, source1 = hift.inference(speech_feat=mel_feat, cache_source=torch.zeros(1, 1, 0))
     mag1, phase1 = capture["magnitude"], capture["phase"]
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     with torch.no_grad():
         speech2, _ = hift.inference(speech_feat=mel_feat, cache_source=torch.zeros(1, 1, 0))
     hift._istft = orig_istft
@@ -560,8 +564,8 @@ def dump_hift(out_dir, model, mel_feat, weights_dir):
         "gotcha": "SourceModuleHnNSF's SineGen2 (sinegen_type='2' for 24kHz CosyVoice2, causal=False) draws "
                   "fresh torch.rand/torch.randn from the GLOBAL RNG every inference() call - real HiFT output "
                   "is NOT reproducible run-to-run unless the caller reseeds first. This dumper calls "
-                  "torch.manual_seed(SEED) immediately before hift.inference().",
-        "self_validation": {"method": "reseed to SEED, run inference() twice, assert the two waveforms are "
+                  "torch.manual_seed(<seed>) immediately before hift.inference().",
+        "self_validation": {"method": "reseed to the run seed, run inference() twice, assert the two waveforms are "
                                        "bit-exact - proves the reseed-to-freeze approach actually reproduces",
                              "bit_exact": bool(reseed_exact), "pass": bool(reseed_exact)},
         "source": source_block(
@@ -590,6 +594,8 @@ def main():
     ap.add_argument("--prompt-text", default=DEFAULT_PROMPT_TEXT)
     ap.add_argument("--tts-text", default=DEFAULT_TTS_TEXT)
     ap.add_argument("--ar-tokens", type=int, default=DEFAULT_AR_TOKENS)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
 
     weights_dir = os.path.abspath(args.weights)
@@ -602,9 +608,9 @@ def main():
     sys.path.insert(0, os.path.join(source_dir, "third_party", "Matcha-TTS"))
 
     import random
-    random.seed(SEED)
-    np.random.seed(SEED)
-    torch.manual_seed(SEED)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     from hyperpyyaml import load_hyperpyyaml
     with open(os.path.join(weights_dir, "cosyvoice2.yaml")) as f:
@@ -638,13 +644,13 @@ def main():
     results["campplus"] = dump_campplus(out_dir, frontend, prompt_wav, weights_dir)[0]
     results["s3tokenizer"] = dump_s3tokenizer(out_dir, frontend, prompt_wav, weights_dir)[0]
 
-    llm_meta, ar_tokens = dump_llm(out_dir, model, model_input, weights_dir, args.ar_tokens)
+    llm_meta, ar_tokens = dump_llm(out_dir, model, model_input, weights_dir, args.ar_tokens, args.seed)
     results["llm"] = llm_meta
 
     flow_meta, flow_mel = dump_flow(out_dir, model, model_input, ar_tokens, weights_dir)
     results["flow"] = flow_meta
 
-    results["hift"] = dump_hift(out_dir, model, flow_mel, weights_dir)
+    results["hift"] = dump_hift(out_dir, model, flow_mel, weights_dir, args.seed)
 
     import transformers
     import onnxruntime
@@ -655,7 +661,7 @@ def main():
                 "(no cosyvoice3.yaml/speech_tokenizer_v3.onnx fetched, no CausalMaskedDiffWithDiT dump). "
                 "A gate that never runs is worse than no gate: this is a recorded gap, not silent coverage.",
         "tag": TAG,
-        "seed": SEED,
+        "seed": args.seed,
         "run_params": {
             "prompt_wav": os.path.relpath(prompt_wav, source_dir),
             "prompt_wav_sha256": sha256_of(prompt_wav),

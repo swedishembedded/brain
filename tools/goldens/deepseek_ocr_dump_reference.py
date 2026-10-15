@@ -155,7 +155,7 @@ Five semantic questions are SETTLED HERE by measurement rather than by argument
     changes every window's softmax denominator.
 
 Usage:
-  python3 tools/goldens/deepseek_ocr_dump_reference.py --out testdata/deepseek-ocr
+  python3 tools/goldens/deepseek_ocr_dump_reference.py --out testdata/deepseek-ocr --seed 0
 """
 
 import argparse
@@ -168,8 +168,6 @@ import sys
 import torch
 import torch.nn.functional as F
 from safetensors.torch import save_file
-
-SEED = 0
 
 # LayerNorm epsilons: the SAM tower and its channels-first LayerNorm2d use 1e-6
 # (the SAM repo's `partial(nn.LayerNorm, eps=1e-6)`), CLIP uses 1e-5, the
@@ -471,8 +469,8 @@ def rel_pos_bias_loops(q, rh, rw, q_size, k_size):
 # --------------------------------------------------------------------------
 
 
-def build_params(cfg):
-    p = Params(SEED)
+def build_params(cfg, seed):
+    p = Params(seed)
     c = cfg["sam_embed"]
     p.new("sam.patch_embed.proj.weight",
           (c, cfg["in_chans"], cfg["patch"], cfg["patch"]), scale=0.5)
@@ -899,13 +897,13 @@ def moe_forward(x, p, pre, cfg, taps, findings):
     return out.reshape(b, t, d)
 
 
-def dump_tiny(out_dir, manifest):
+def dump_tiny(out_dir, manifest, seed):
     """A random whole-pipeline DeepSeek-OCR at dims that break its coincidences.
 
     Needs no checkpoint at all: the weights are seeded random, so this fixture
     can be regenerated anywhere and gates the port before any weights exist.
     """
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     cfg = dict(TINY)
     # Derived dims, computed rather than asserted by hand: conv output extent is
     # floor((L + 2p - k) / s) + 1.
@@ -957,10 +955,10 @@ def dump_tiny(out_dir, manifest):
 
     taps = {}
     findings = {}
-    p = build_params(cfg)
+    p = build_params(cfg, seed)
 
     b = cfg["batch"]
-    g = torch.Generator().manual_seed(SEED + 1)
+    g = torch.Generator().manual_seed(seed + 1)
     image = torch.randn((b, cfg["in_chans"], cfg["image_h"], cfg["image_w"]),
                         generator=g)
     taps["image"] = image.clone()
@@ -1077,7 +1075,7 @@ def dump_tiny(out_dir, manifest):
     })
     save(out_dir, "tiny/golden.safetensors", taps, manifest, extra={
         "config": cfg,
-        "run": {"batch": b, "seed": SEED, "image": list(image.shape),
+        "run": {"batch": b, "seed": seed, "image": list(image.shape),
                 "seq_len": cfg["seq"], "image_token_id": IMAGE_TOKEN_ID,
                 "image_token_start": lo, "image_tokens": n_patch},
         "findings": findings,
@@ -1134,17 +1132,19 @@ def main():
                                    "NOT YET IMPLEMENTED.")
     ap.add_argument("--mmproj", help="the matching mmproj (vision) GGUF. "
                                      "NOT YET IMPLEMENTED.")
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(args.seed)
     torch.use_deterministic_algorithms(True)
     os.makedirs(args.out, exist_ok=True)
-    manifest = {"files": {}, "params": {"seed": SEED, "torch": torch.__version__}}
+    manifest = {"files": {}, "params": {"seed": args.seed, "torch": torch.__version__}}
 
     # The tiny fixture is checkpoint-free, so it goes first and always runs: a
     # broken environment fails here in a second instead of after dequantizing
     # gigabytes of weights.
-    manifest["params"]["tiny"] = dump_tiny(args.out, manifest)
+    manifest["params"]["tiny"] = dump_tiny(args.out, manifest, args.seed)
 
     name = "manifest.json"
     if args.gguf or args.mmproj:

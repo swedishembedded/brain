@@ -109,7 +109,8 @@ Usage:
     tools/goldens/cosyvoice3_dump_reference.py \\
         --weights resources/cosyvoice/weights3 \\
         --source resources/cosyvoice/source \\
-        --out testdata/golden/cosyvoice3
+        --out testdata/golden/cosyvoice3 \\
+        --seed 0
 
 Swedish Embedded AB implements solutions for porting reference PyTorch TTS
 pipelines to from-scratch GPU kernels for its clients. If your team needs
@@ -129,7 +130,10 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from golden_source import sha256_of, source_block  # noqa: E402
 
-SEED = 0
+# seed: CosyVoice's CausalConditionalCFM draws its rand_noise buffer under
+# set_all_random_seed(0) at construction; replaying that exact seed is how
+# dump_flow proves the buffer, so it is fixed by the library, not by this run.
+LIBRARY_NOISE_SEED = 0
 CHECKPOINT = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
 TAG = "real"  # no --tiny tier yet - mirrors the CosyVoice2 dumper's own note
 
@@ -343,13 +347,13 @@ def dump_s3tokenizer(out_dir, frontend, wav_path, weights_dir):
 # sos/task_id-from-speech_embedding and 151646-assertion findings.
 # ---------------------------------------------------------------------------
 
-def _run_llm_capped(llm, model_input, max_tokens, capture_hidden=None):
+def _run_llm_capped(llm, model_input, max_tokens, seed, capture_hidden=None):
     """One capped call to the real `Qwen2LM.inference()` generator (shared by
     `CosyVoice3LM` - not overridden), same rationale as the CosyVoice2
     dumper's twin function: greedy decoding degenerates (confirmed there),
     so this uses the real `ras_sampling`, reproducible via reseeding torch's
     global RNG right before the call."""
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     handle = None
     if capture_hidden is not None:
         def hook(module, args, kwargs, output):
@@ -374,10 +378,10 @@ def _run_llm_capped(llm, model_input, max_tokens, capture_hidden=None):
     return tokens
 
 
-def dump_llm(out_dir, model, model_input, weights_dir, max_tokens):
+def dump_llm(out_dir, model, model_input, weights_dir, max_tokens, seed):
     llm = model.llm
     captures = []
-    tokens = _run_llm_capped(llm, model_input, max_tokens, capture_hidden=captures)
+    tokens = _run_llm_capped(llm, model_input, max_tokens, seed, capture_hidden=captures)
     assert len(captures) >= 1, "no forward_one_step calls captured - LM inference produced 0 tokens"
     prefill_hidden = captures[0]
 
@@ -389,7 +393,7 @@ def dump_llm(out_dir, model, model_input, weights_dir, max_tokens):
     with torch.inference_mode():
         prefill_logits = llm.llm_decoder(prefill_hidden)
 
-    tokens2 = _run_llm_capped(llm, model_input, max_tokens)
+    tokens2 = _run_llm_capped(llm, model_input, max_tokens, seed)
     exact = tokens == tokens2
 
     prefix = os.path.join(out_dir, f"llm_{TAG}")
@@ -401,10 +405,10 @@ def dump_llm(out_dir, model, model_input, weights_dir, max_tokens):
     meta = {
         "prefill_hidden_shape": list(prefill_hidden.shape), "prefill_logits_shape": list(prefill_logits.shape),
         "num_ar_tokens": len(tokens), "ar_tokens_capped_at": max_tokens,
-        "sampling": "real ras_sampling (top_p=0.8, top_k=25, win_size=10, tau_r=0.1), reseeded to SEED for reproducibility",
+        "sampling": "real ras_sampling (top_p=0.8, top_k=25, win_size=10, tau_r=0.1), reseeded to the run seed for reproducibility",
         "endofprompt_token_id": 151646,
         "sos_task_id_source": "speech_embedding (NOT llm_embedding - CosyVoice3LM has no llm_embedding table)",
-        "self_validation": {"method": "reseed torch to SEED, run the real capped inference() generator twice "
+        "self_validation": {"method": "reseed torch to the run seed, run the real capped inference() generator twice "
                                        "independently, assert the sampled token sequences match exactly",
                              "tokens_run1": tokens, "tokens_run2": tokens2, "pass": bool(exact)},
         "source": source_block(
@@ -468,7 +472,7 @@ def dump_flow(out_dir, model, model_input, ar_tokens, weights_dir):
     # rand_noise self-validation: same fixed seed(0) buffer mechanism as
     # CosyVoice2 (CausalConditionalCFM.__init__ is the literal same class).
     from cosyvoice.utils.common import set_all_random_seed
-    set_all_random_seed(SEED)
+    set_all_random_seed(LIBRARY_NOISE_SEED)
     rand_noise_replay = torch.randn([1, 80, 50 * 300])
     noise_exact = torch.equal(decoder.rand_noise, rand_noise_replay)
 
@@ -724,6 +728,8 @@ def main():
     ap.add_argument("--prompt-text", default=DEFAULT_PROMPT_TEXT)
     ap.add_argument("--tts-text", default=DEFAULT_TTS_TEXT)
     ap.add_argument("--ar-tokens", type=int, default=DEFAULT_AR_TOKENS)
+    ap.add_argument("--seed", type=int, required=True,
+                    help="RNG seed of the fixture; recorded in the manifest")
     args = ap.parse_args()
 
     weights_dir = os.path.abspath(args.weights)
@@ -736,12 +742,12 @@ def main():
     sys.path.insert(0, os.path.join(source_dir, "third_party", "Matcha-TTS"))
 
     import random
-    random.seed(SEED)
-    np.random.seed(SEED)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
     # Seed BEFORE model construction, not just before hift.inference() - see
     # module docstring's RNG finding: CausalHiFTGenerator's NSF noise buffers
     # are drawn once, right here, when load_hyperpyyaml() builds `hift`.
-    torch.manual_seed(SEED)
+    torch.manual_seed(args.seed)
 
     from hyperpyyaml import load_hyperpyyaml
     with open(os.path.join(weights_dir, "cosyvoice3.yaml")) as f:
@@ -778,7 +784,7 @@ def main():
     results["campplus"] = dump_campplus(out_dir, frontend, prompt_wav, weights_dir)[0]
     results["s3tokenizer"] = dump_s3tokenizer(out_dir, frontend, prompt_wav, weights_dir)[0]
 
-    llm_meta, ar_tokens = dump_llm(out_dir, model, model_input, weights_dir, args.ar_tokens)
+    llm_meta, ar_tokens = dump_llm(out_dir, model, model_input, weights_dir, args.ar_tokens, args.seed)
     results["llm"] = llm_meta
 
     flow_meta, flow_mel = dump_flow(out_dir, model, model_input, ar_tokens, weights_dir)
@@ -796,7 +802,7 @@ def main():
                 "tokens, CosyVoice3LM prefill+AR tokens, CausalMaskedDiffWithDiT flow (incl. DiT-internal "
                 "InputEmbedding/TimestepEmbedding taps), CausalHiFTGenerator vocoder.",
         "tag": TAG,
-        "seed": SEED,
+        "seed": args.seed,
         "run_params": {
             "prompt_wav": os.path.relpath(prompt_wav, source_dir),
             "prompt_wav_sha256": sha256_of(prompt_wav),
