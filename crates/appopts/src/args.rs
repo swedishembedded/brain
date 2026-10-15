@@ -53,7 +53,18 @@ impl Args {
     /// `what` names the run in that line. A `--seed` that is not a seed
     /// (`abc`, `-1`) exits 2 naming the flag: it never falls back to a default.
     pub fn seed(&mut self, what: &str) -> u64 {
-        self.seed_or_draw(what, "--seed")
+        self.seed_flag(what, "--seed")
+    }
+
+    /// [`Args::seed`] for a differently named seed flag (`--order-seed`): the
+    /// value given, or a freshly drawn one printed with `flag` in the
+    /// reproduce hint; a value that is not a seed exits 2 naming the flag.
+    pub fn seed_flag(&mut self, what: &str, flag: &str) -> u64 {
+        self.seed_opt(flag).unwrap_or_else(|| {
+            let seed = seed::random_seed();
+            eprintln!("{}", drawn_seed_notice(what, flag, seed));
+            seed
+        })
     }
 
     /// A seed flag whose absence means "unseeded": `Some` when given, `None`
@@ -66,14 +77,6 @@ impl Args {
                 std::process::exit(2);
             }
         }
-    }
-
-    fn seed_or_draw(&mut self, what: &str, flag: &str) -> u64 {
-        self.seed_opt(flag).unwrap_or_else(|| {
-            let seed = seed::random_seed();
-            eprintln!("{}", drawn_seed_notice(what, flag, seed));
-            seed
-        })
     }
 
     fn try_seed_opt(&mut self, flag: &str) -> Result<Option<u64>, String> {
@@ -168,6 +171,14 @@ mod tests {
         let first = args(&[]).seed("train");
         let second = args(&[]).seed("train");
         assert_ne!(first, second, "an unseeded run must not repeat a default");
+    }
+
+    #[test]
+    fn a_differently_named_seed_flag_is_taken_or_drawn_like_seed() {
+        assert_eq!(args(&["--order-seed", "5"]).seed_flag("eval", "--order-seed"), 5);
+        let first = args(&[]).seed_flag("eval", "--order-seed");
+        let second = args(&[]).seed_flag("eval", "--order-seed");
+        assert_ne!(first, second, "an unseeded flag must not repeat a default");
     }
 
     #[test]
