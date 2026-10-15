@@ -36,11 +36,12 @@
 //! Run it:
 //! ```text
 //! cargo run --release -p brain-rl --features qwen3 --example continual_learning -- \
-//!     [--regime grpo|sft] [--cycles 12] [--steps N] [--eval-per-cycle N] [--seed 1] \
+//!     [--regime grpo|sft] [--cycles 12] [--steps N] [--eval-per-cycle N] [--seed S] \
 //!     [--replay 0.0] [--rehearsal N] [--null-gate] [--skip-oracle] [--out DIR] [--base FILE]
 //! ```
-//! With NO flags this is bit-identical to the recorded run above: `--regime
-//! grpo`, 240 steps, 16 probes per cycle, rehearsal 0.
+//! With `--seed 1` and no other flags this is bit-identical to the recorded run
+//! above: `--regime grpo`, 240 steps, 16 probes per cycle, rehearsal 0. Without
+//! `--seed` a random one is drawn and printed.
 //!
 //! `--regime sft` is a DIFFERENT and strictly WEAKER experiment, not a tuning
 //! of the default one. It trains each cycle with teacher-forced supervision on
@@ -275,7 +276,7 @@ impl Default for Args {
             cycles: 12,
             steps: None,
             eval_per_cycle: None,
-            seed: 1,
+            seed: data::rng::random_seed(),
             replay: 0.0,
             rehearsal: None,
             null_gate: false,

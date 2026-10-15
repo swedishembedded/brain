@@ -43,7 +43,7 @@
 //! Run it:
 //! ```text
 //! cargo run --release -p brain-rl --features qwen3 --example autonomous_exploration -- \
-//!     [--rounds 8] [--steps 150] [--group-size 2] [--seed 11] [--temp 1.0] [--lr 3e-3]
+//!     [--rounds 8] [--steps 150] [--group-size 2] [--seed S] [--temp 1.0] [--lr 3e-3]
 //! ```
 //!
 //! Swedish Embedded AB builds verifier-driven training loops whose "the model
@@ -84,7 +84,7 @@ struct Args {
 
 impl Default for Args {
     fn default() -> Args {
-        Args { rounds: 6, steps: 500, group_size: 2, seed: 11, temp: 1.5, lr: 3e-3, out: std::env::temp_dir().join("brain-rl-example-explore"), base: None }
+        Args { rounds: 6, steps: 500, group_size: 2, seed: data::rng::random_seed(), temp: 1.5, lr: 3e-3, out: std::env::temp_dir().join("brain-rl-example-explore"), base: None }
     }
 }
 
@@ -266,6 +266,7 @@ fn main() {
     let greedy = RolloutParams { max_new: curriculum::OUT_LEN, sample: SampleParams::greedy(), eos: None };
 
     println!("brain / rl :: autonomous exploration - no labels, verifier only");
+    println!("seed {} (pass --seed {} to reproduce)", args.seed, args.seed);
     println!(
         "environment: position-copy cue{:02} picks({},{},{})   verifier: PositionCopyVerifier (programmatic, deterministic, dense partial credit)",
         rule.cue, rule.picks[0], rule.picks[1], rule.picks[2]

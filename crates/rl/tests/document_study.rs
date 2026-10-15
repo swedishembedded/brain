@@ -343,5 +343,6 @@ fn a_document_curriculum_runs_a_full_study_and_emits_a_retention_matrix() {
     // and the report says so rather than presenting a smoke test as a result.
     assert!(report.eval_per_cycle < MIN_HELD_OUT_PROBES, "this fixture is deliberately below the floor - if it were not, the check below would be vacuous");
     assert!(!report.preregistered);
+    assert_eq!((report.seed, report.null_gate_seed), (study.seed, study.null_gate_seed), "the report records the seeds the run used");
     assert!(report.summary().contains("NOT a pre-registered result"), "{}", report.summary());
 }

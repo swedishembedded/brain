@@ -279,9 +279,12 @@ pub struct DocumentStudyConfig {
     /// Frozen probes SCORED per cycle - simultaneously the gate's held-out
     /// set and that cycle's permanent retention probe.
     pub eval_per_cycle: usize,
+    /// The training stream's seed. [`Default`] draws a random one; the
+    /// [`DocumentStudyReport`] records it.
     pub seed: u64,
     /// The coin the null-gate arm flips. Separate from `seed` so the two arms
-    /// differ in their GATE, not in their training stream.
+    /// differ in their GATE, not in their training stream. [`Default`] draws a
+    /// random one; the [`DocumentStudyReport`] records it.
     pub null_gate_seed: u64,
     pub sft: SftConfig,
     /// Arm 2, the per-cycle fresh-adapter control. Off by default: it doubles
@@ -298,8 +301,8 @@ impl Default for DocumentStudyConfig {
             cycles: 1,
             steps_per_cycle: 240,
             eval_per_cycle: MIN_HELD_OUT_PROBES,
-            seed: 1,
-            null_gate_seed: 2,
+            seed: data::rng::random_seed(),
+            null_gate_seed: data::rng::random_seed(),
             sft: SftConfig::default(),
             plasticity_control: false,
             // Repo-relative, and normally overridden: a study writes a
@@ -328,6 +331,11 @@ pub struct DocumentStudyReport {
     /// the study's number carries no information about it.
     pub null_gate: StudyReport,
     pub eval_per_cycle: usize,
+    /// [`DocumentStudyConfig::seed`] of the run: passing it back, with
+    /// [`Self::null_gate_seed`], reproduces both arms.
+    pub seed: u64,
+    /// [`DocumentStudyConfig::null_gate_seed`] of the run.
+    pub null_gate_seed: u64,
     /// Whether this run met the pre-registered held-out floor
     /// ([`MIN_HELD_OUT_PROBES`]). A run below it is a harness exercise, and
     /// [`Self::summary`] says so in words - reported rather than forbidden,
@@ -364,11 +372,13 @@ impl DocumentStudyReport {
             )
         };
         format!(
-            "document study - Arm 0 baseline (untrained base on probe T1) {:.3}\n\nArm 1 (gated):\n{}\nnull-gate control arm:\n{}\narm separation (gated ACC - null-gate ACC) {:+.3}\n{prereg}\n",
+            "document study - Arm 0 baseline (untrained base on probe T1) {:.3}\n\nArm 1 (gated):\n{}\nnull-gate control arm:\n{}\narm separation (gated ACC - null-gate ACC) {:+.3}\nseeds: training {}, null-gate coin {}\n{prereg}\n",
             self.gated.b_base,
             self.gated.summary(),
             self.null_gate.summary(),
-            self.arm_separation()
+            self.arm_separation(),
+            self.seed,
+            self.null_gate_seed
         )
     }
 }
@@ -422,6 +432,24 @@ pub fn run_document_study<M: Model>(spec: &StudySpec, curr: &DocumentCurriculum,
         gated,
         null_gate,
         eval_per_cycle: cfg.eval_per_cycle,
+        seed: cfg.seed,
+        null_gate_seed: cfg.null_gate_seed,
         preregistered: cfg.eval_per_cycle >= MIN_HELD_OUT_PROBES,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unset seed is random: two default configurations differ in both
+    /// seeds, so two unseeded studies are not byte-identical reruns, and the
+    /// two arms never share a stream.
+    #[test]
+    fn default_study_configs_draw_their_seeds() {
+        let (a, b) = (DocumentStudyConfig::default(), DocumentStudyConfig::default());
+        assert_ne!(a.seed, b.seed);
+        assert_ne!(a.null_gate_seed, b.null_gate_seed);
+        assert_ne!(a.seed, a.null_gate_seed);
+    }
 }
