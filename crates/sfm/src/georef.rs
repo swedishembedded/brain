@@ -155,11 +155,14 @@ pub struct GeorefCfg {
     /// spread: above it the fixes cannot tell the capture's scale.
     pub max_relative_error: f64,
     pub ransac_iters: usize,
+    /// Seed of the RANSAC sampling. [`Default`] draws a random one;
+    /// [`SfmReport::georef_seed`](crate::incremental::SfmReport) reports it.
+    pub seed: u64,
 }
 
 impl Default for GeorefCfg {
     fn default() -> Self {
-        GeorefCfg { inlier_m: 6.0, min_fixes: 3, max_relative_error: 0.1, ransac_iters: 2000 }
+        GeorefCfg { inlier_m: 6.0, min_fixes: 3, max_relative_error: 0.1, ransac_iters: 2000, seed: data::rng::random_seed() }
     }
 }
 
@@ -232,7 +235,7 @@ pub fn solve_enu(centres: &[Option<V3>], fixes: &[Option<Wgs84>], up: Option<V3>
         umeyama(&s, &d, dir)
     };
     let agree = |sim: &Sim3| -> Vec<usize> { (0..src.len()).filter(|&k| norm(sub(sim.apply(src[k]), dst[k])) <= cfg.inlier_m).collect() };
-    let mut rng = Lcg::new(0x5eed);
+    let mut rng = Lcg::new(cfg.seed);
     let m = src.len();
     let mut best: Vec<usize> = Vec::new();
     let mut need = cfg.ransac_iters;

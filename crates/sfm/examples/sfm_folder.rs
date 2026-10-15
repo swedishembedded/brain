@@ -218,7 +218,9 @@ fn dominant_plane(rec: &sfm::incremental::Reconstruction) -> Option<(sfm::linalg
     let mut r: Vec<f64> = p.iter().map(|x| norm(sub(*x, c))).collect();
     let mid = r.len() / 2;
     let thresh = 0.01 * *r.select_nth_unstable_by(mid, f64::total_cmp).1;
-    let mut rng = data::rng::Lcg::new(9);
+    let seed = data::rng::random_seed();
+    eprintln!("dominant plane: RANSAC seed {seed}");
+    let mut rng = data::rng::Lcg::new(seed);
     let mut best: Vec<usize> = Vec::new();
     for _ in 0..2000 {
         let [a, b, d] = [0; 3].map(|_| rng.next_u32() as usize % p.len());

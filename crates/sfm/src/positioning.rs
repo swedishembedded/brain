@@ -62,13 +62,14 @@ pub struct PositioningCfg {
     /// Huber threshold on the residual, which is about the sine of the
     /// angle by which a point misses its ray.
     pub huber: f64,
-    /// Seed of the random start.
+    /// Seed of the random start. [`Default`] draws a random one;
+    /// [`SfmReport::positioning_seed`](crate::incremental::SfmReport) reports it.
     pub seed: u64,
 }
 
 impl Default for PositioningCfg {
     fn default() -> Self {
-        PositioningCfg { iters: 400, huber: 0.01, seed: 1 }
+        PositioningCfg { iters: 400, huber: 0.01, seed: data::rng::random_seed() }
     }
 }
 

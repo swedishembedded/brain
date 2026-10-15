@@ -243,6 +243,10 @@ pub struct SfmReport {
     /// Why the photographs' satellite fixes were not applied, when they
     /// carried some.
     pub georef_refused: Option<GeorefError>,
+    /// The seeds the randomised stages ran with ([`PositioningCfg::seed`],
+    /// [`GeorefCfg::seed`]): passing them back reproduces the reconstruction.
+    pub positioning_seed: u64,
+    pub georef_seed: u64,
 }
 
 #[derive(Debug)]
@@ -626,7 +630,7 @@ pub fn reconstruct_with(photos: &[Photo], cfg: &SfmCfg, nn: &dyn NearestNeighbou
         }
     }
     let solve_s = clock.elapsed().as_secs_f64();
-    let report = SfmReport { pairs_matched: candidates.len(), pairs_verified: prep.pairs.len(), initializer, features_s, matching_s, focal_s, solve_s, georef_refused };
+    let report = SfmReport { pairs_matched: candidates.len(), pairs_verified: prep.pairs.len(), initializer, features_s, matching_s, focal_s, solve_s, georef_refused, positioning_seed: cfg.positioning.seed, georef_seed: cfg.georef.seed };
     Ok(Reconstruction {
         intrinsics: ks,
         sensor: prep.sensor,

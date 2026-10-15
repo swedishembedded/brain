@@ -88,6 +88,14 @@ fn a_robust_similarity_lands_the_cameras_in_metres() {
     assert!((fit.sim3.s * world_to_local.s - 1.0).abs() < 0.02, "scale off by {:.3}", fit.sim3.s * world_to_local.s);
 }
 
+/// A caller who gives no seed gets a random one in every randomised stage,
+/// and the one it got can be passed back.
+#[test]
+fn unset_seeds_are_drawn_per_configuration() {
+    assert_ne!(GeorefCfg::default().seed, GeorefCfg::default().seed);
+    assert_ne!(sfm::positioning::PositioningCfg::default().seed, sfm::positioning::PositioningCfg::default().seed);
+}
+
 /// A phone that fixes its position from the network reports the same fix,
 /// to the arc-second, for a whole walk round a table: the fixes' scatter is
 /// as large as the capture, so they say nothing about its scale and are
