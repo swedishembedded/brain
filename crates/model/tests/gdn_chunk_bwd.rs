@@ -390,11 +390,7 @@ fn gdn_chunk_bwd_gradcheck() {
     let decayed_k = g.storage((bh * cn * dk) as u64);
     let v_prime = g.storage((bh * cn * dv) as u64);
     let v_new = g.storage((bh * cn * dv) as u64);
-    let q_scaled_hist = g.storage((bhc * cn * dk) as u64);
     let decay_scale_hist = g.storage((bhc * cn) as u64);
-    let decayed_k_hist = g.storage((bhc * cn * dk) as u64);
-    let v_prime_hist = g.storage((bhc * cn * dv) as u64);
-    let v_new_hist = g.storage((bhc * cn * dv) as u64);
     let state_history = g.storage(((n_chunks + 1) * bh * dk * dv) as u64);
 
     let scratch_train = GdnScratchTrain {
@@ -416,11 +412,7 @@ fn gdn_chunk_bwd_gradcheck() {
         decayed_k: &decayed_k,
         v_prime: &v_prime,
         v_new: &v_new,
-        q_scaled_hist: &q_scaled_hist,
         decay_scale_hist: &decay_scale_hist,
-        decayed_k_hist: &decayed_k_hist,
-        v_prime_hist: &v_prime_hist,
-        v_new_hist: &v_new_hist,
         state_history: &state_history,
     };
 
@@ -428,7 +420,7 @@ fn gdn_chunk_bwd_gradcheck() {
     let final_state = g.storage((bh * dk * dv) as u64);
 
     let fwd_steps = gdn_chunk_fwd_train(&g, &ids_v, &bids, &shape, &query, &key, &value, &raw_g, &beta, &initial_state, &scratch_train, &out, &final_state);
-    g.submit(&[&t_mat, &q_scaled_hist, &decay_scale_hist, &decayed_k_hist, &v_prime_hist, &v_new_hist, &state_history], &fwd_steps);
+    g.submit(&[&t_mat, &decay_scale_hist, &state_history], &fwd_steps);
 
     // ---- cross-check: gdn_chunk_fwd_train's own out/final_state should
     // match the f64 host oracle (same tolerance as gdn_chunk_fwd.rs) before
@@ -548,9 +540,12 @@ fn gdn_chunk_bwd_gradcheck() {
     // (M5.11) item 15's UT-transform-backward closed form at TWO fused
     // `bmm` dispatches, independent of `c` (was `2*(c-1) = 6` sequential
     // per-row-index dispatches at this test's `cn=4` before M5.11's
-    // closed form: `77 - 6 + 2 = 73`). At Qwen3.8-27B's real `c=64` shape
+    // closed form: `77 - 6 + 2 = 73`), plus four recompute dispatches per chunk
+    // (`v_prime`, `v_new`, `decayed_k`, `q_scaled`: they are no longer saved by
+    // the forward, which dropped the same four commits) at this test's two
+    // chunks: `73 + 4*2 = 81`. At Qwen3.8-27B's real `c=64` shape
     // this same closed form collapses `2*(c-1) = 126` dispatches to `2`.
-    assert_eq!(bwd_steps.len(), 73, "gdn_chunk_bwd dispatch count regressed -- see item 15's UT-transform-backward closed form (M5.11) and item 19's reverse-cumsum fusion (M5.8)");
+    assert_eq!(bwd_steps.len(), 81, "gdn_chunk_bwd dispatch count regressed -- see item 15's UT-transform-backward closed form (M5.11) and item 19's reverse-cumsum fusion (M5.8)");
     g.submit(&[&d_g_cs, &d_exp_g_cs, &d_u, &d_decay_mask, &d_query, &d_key, &d_beta], &bwd_steps);
 
     let got_d_query = g.read(&d_query, bhc * cn * dk);

@@ -319,15 +319,15 @@ pub struct GdnScratch<'a> {
 
 /// Every buffer [`gdn_chunk_fwd_train`] needs - the training-mode sibling of
 /// [`GdnScratch`] that additionally SAVES what [`gdn_chunk_bwd`] needs: every
-/// chunk's own version of the five small per-chunk buffers [`GdnScratch`]
-/// overwrites in place each loop iteration, and the FULL recurrent-state
-/// history rather than just the latest chunk's state. See
+/// chunk's own `decay_scale` and the FULL recurrent-state history rather than
+/// just the latest chunk's state. The other four per-chunk working buffers
+/// are recomputed by backward, not saved. See
 /// [`gdn_chunk_fwd_train`]'s own doc for exactly which steps write which
 /// field. `bhc = shape.bhc()`, `bh = shape.bh()`, `c = shape.chunk`,
 /// `n_chunks = shape.n_chunks()`.
 ///
-/// **The caller MUST zero every `*_hist` field and `state_history`** (pass
-/// them all in [`Gpu::submit`]'s `clears` list, alongside `t_mat` - see
+/// **The caller MUST zero `decay_scale_hist` and `state_history`** (pass
+/// them in [`Gpu::submit`]'s `clears` list, alongside `t_mat` - see
 /// [`GdnScratch::t_mat`]'s own doc for why this engine has no clear
 /// primitive at the `Step` level) - every one of them is populated via
 /// `splice_add.wgsl`'s `dst[base+i] += src[i]`, so a non-zero starting value
@@ -359,22 +359,13 @@ pub struct GdnScratchTrain<'a> {
     pub decayed_k: &'a DeviceBuffer,
     pub v_prime: &'a DeviceBuffer,
     pub v_new: &'a DeviceBuffer,
-    // ---- SAVED per-chunk history: `[bhc, c, d]` (same total size as every
-    // other whole-tensor GDN scratch buffer), chunk `ci`'s slice holding the
-    // value the working buffer above had DURING chunk `ci`'s own iteration.
-    // This is what `gdn_chunk_bwd`'s reverse sweep reads back.
-    pub q_scaled_hist: &'a DeviceBuffer,
+    // ---- SAVED per-chunk history: `[bhc, c]`, chunk `ci`'s slice holding
+    // `decay_scale` as it was during chunk `ci`'s own iteration. It is the
+    // only per-chunk value kept (one float per token per head): backward
+    // recomputes `q_scaled`, `decayed_k`, `v_prime` and `v_new` from it and
+    // from `state_history`, because those four are `dk`/`dv` wide (about 25K
+    // floats per token at the real width) and cost one cheap kernel each.
     pub decay_scale_hist: &'a DeviceBuffer,
-    pub decayed_k_hist: &'a DeviceBuffer,
-    /// Saved for symmetry with its four siblings, but [`gdn_chunk_bwd`]'s own
-    /// derivation never reads `v_prime`'s forward VALUE back (only
-    /// `v_new = u - v_prime`'s gradient is needed, and that flows through
-    /// `d_v_new` alone - `v_prime` itself is subtracted out algebraically).
-    /// Kept anyway rather than dropped: it costs nothing extra (forward
-    /// already computes it every chunk) and a future consumer or debugging
-    /// pass may want it.
-    pub v_prime_hist: &'a DeviceBuffer,
-    pub v_new_hist: &'a DeviceBuffer,
     // ---- full recurrent-state history: `[n_chunks+1, bh, dk, dv]`.
     // `state_history[0]` = a saved copy of `initial_state`; `state_history[ci+1]`
     // = the state AFTER chunk `ci`'s decay+update (what `gdn_chunk_fwd`'s own
@@ -495,7 +486,7 @@ impl GdnScratchBufs {
 /// history [`gdn_chunk_bwd`] reads back (see [`GdnScratchTrain`]'s own doc for
 /// exactly which field is which). `clears()` lists every field
 /// [`gdn_chunk_fwd_train`]'s own doc says MUST be zeroed before submit
-/// (`t_mat`, every `_hist` field, `state_history`).
+/// (`t_mat`, `decay_scale_hist`, `state_history`).
 pub struct GdnScratchTrainBufs {
     g_cs: DeviceBuffer,
     exp_g_cs: DeviceBuffer,
@@ -515,11 +506,7 @@ pub struct GdnScratchTrainBufs {
     decayed_k: DeviceBuffer,
     v_prime: DeviceBuffer,
     v_new: DeviceBuffer,
-    q_scaled_hist: DeviceBuffer,
     decay_scale_hist: DeviceBuffer,
-    decayed_k_hist: DeviceBuffer,
-    v_prime_hist: DeviceBuffer,
-    v_new_hist: DeviceBuffer,
     state_history: DeviceBuffer,
 }
 
@@ -550,11 +537,7 @@ impl GdnScratchTrainBufs {
             decayed_k: g.storage(bh * c * dk),
             v_prime: g.storage(bh * c * dv),
             v_new: g.storage(bh * c * dv),
-            q_scaled_hist: g.storage(bhc * c * dk),
             decay_scale_hist: g.storage(bhc * c),
-            decayed_k_hist: g.storage(bhc * c * dk),
-            v_prime_hist: g.storage(bhc * c * dv),
-            v_new_hist: g.storage(bhc * c * dv),
             state_history: g.storage((n_chunks + 1) * bh * dk * dv),
         }
     }
@@ -579,11 +562,7 @@ impl GdnScratchTrainBufs {
             decayed_k: &self.decayed_k,
             v_prime: &self.v_prime,
             v_new: &self.v_new,
-            q_scaled_hist: &self.q_scaled_hist,
             decay_scale_hist: &self.decay_scale_hist,
-            decayed_k_hist: &self.decayed_k_hist,
-            v_prime_hist: &self.v_prime_hist,
-            v_new_hist: &self.v_new_hist,
             state_history: &self.state_history,
         }
     }
@@ -591,11 +570,7 @@ impl GdnScratchTrainBufs {
     pub fn clears(&self) -> Vec<&DeviceBuffer> {
         vec![
             &self.t_mat,
-            &self.q_scaled_hist,
             &self.decay_scale_hist,
-            &self.decayed_k_hist,
-            &self.v_prime_hist,
-            &self.v_new_hist,
             &self.state_history,
         ]
     }
@@ -1084,15 +1059,15 @@ pub struct GdnBwdIds {
 /// Every working buffer (`scratch.q_scaled` and its four siblings) is
 /// computed EXACTLY as [`gdn_chunk_fwd`] computes it (same kernel, same
 /// params) - the only addition is one extra `splice_add.wgsl` dispatch per
-/// buffer per chunk, committing that iteration's value into its own slice of
-/// the corresponding `_hist` buffer before moving to the next chunk. The
+/// chunk, committing `decay_scale` into its own slice of `decay_scale_hist`
+/// (the other four are recomputed by [`gdn_chunk_bwd`]). The
 /// recurrent state gets the same treatment: `final_state` evolves in place
 /// exactly as in `gdn_chunk_fwd`, and after each chunk's update a
 /// `splice_add` additionally snapshots it into `state_history[ci+1]`;
 /// `state_history[0]` is committed from `initial_state` before the loop
 /// starts.
 ///
-/// **Caller MUST zero every [`GdnScratchTrain`] `*_hist` field,
+/// **Caller MUST zero [`GdnScratchTrain`]'s `decay_scale_hist`,
 /// `state_history`, and `t_mat`** - see [`GdnScratchTrain`]'s own doc.
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_chunk_fwd_train(
@@ -1156,10 +1131,6 @@ pub fn gdn_chunk_fwd_train(
 
         // ---- save this chunk's working-buffer values into their history slice ----
         steps.push(splice(scratch.decay_scale, scratch.decay_scale_hist, off_g, bh * c));
-        steps.push(splice(scratch.decayed_k, scratch.decayed_k_hist, off_d(dk), bh * c * dk));
-        steps.push(splice(scratch.q_scaled, scratch.q_scaled_hist, off_d(dk), bh * c * dk));
-        steps.push(splice(scratch.v_prime, scratch.v_prime_hist, off_d(dv), bh * c * dv));
-        steps.push(splice(scratch.v_new, scratch.v_new_hist, off_d(dv), bh * c * dv));
 
         steps.push(g.step(ids.state_decay, &[scratch.g_cs, final_state], &[bh, dk, dv, c, off_g], bh * dk * dv));
         steps.push(bmm(ids.bmm_acc, bh, dk, c, dv, true, false, 1.0, scratch.decayed_k, 0, scratch.v_new, 0, final_state, 0));
@@ -1387,11 +1358,18 @@ pub fn gdn_chunk_bwd(
         let bh_c = bh * c;
         let state_in_off = ci * bh * dk * dv;
 
+        // ---- recompute this chunk's forward working values (not saved) ----
+        // Same kernels and params as `gdn_chunk_fwd_train`'s step 10.
+        steps.push(bmm(ids.bmm, bh, c, dk, dv, false, false, 1.0, saved.w, off_d(dk), saved.state_history, state_in_off, saved.v_prime, 0));
+        steps.push(g.step(ids.sub, &[saved.u, saved.v_prime, saved.v_new], &[bh * c * dv, off_d(dv), 0], bh * c * dv));
+        steps.push(row_scale_off(key, off_d(dk), saved.decay_scale_hist, off_g, 1.0, saved.decayed_k, bh * c * dk, dk));
+        steps.push(row_scale_off(query, off_d(dk), saved.exp_g_cs, off_g, scale, saved.q_scaled, bh * c * dk, dk));
+
         // ---- item 1: state_out += decayed_k^T @ v_new (bmm_acc) backward ----
         // d_decayed_k[c,p] = sum_q v_new[c,q]*d_state[p,q]
-        steps.push(bmm(ids.bmm, bh, c, dv, dk, false, true, 1.0, saved.v_new_hist, off_d(dv), cur, 0, bwd.d_decayed_k, 0));
+        steps.push(bmm(ids.bmm, bh, c, dv, dk, false, true, 1.0, saved.v_new, 0, cur, 0, bwd.d_decayed_k, 0));
         // d_v_new[c,q] = sum_p decayed_k[c,p]*d_state[p,q]  (FIRST of two -- plain overwrite)
-        steps.push(bmm(ids.bmm, bh, c, dk, dv, false, false, 1.0, saved.decayed_k_hist, off_d(dk), cur, 0, bwd.d_v_new, 0));
+        steps.push(bmm(ids.bmm, bh, c, dk, dv, false, false, 1.0, saved.decayed_k, 0, cur, 0, bwd.d_v_new, 0));
 
         // ---- item 2: state_out = state_in * decay_last (gdn_state_decay) backward ----
         // d_state_in += d_state * decay_last -- gdn_state_decay.wgsl is its own
@@ -1409,7 +1387,7 @@ pub fn gdn_chunk_bwd(
 
         // ---- item 3: out_c += intra_scores_c @ v_new (bmm_acc) backward ----
         // d_intra_scores[i,j] = sum_q d_out[i,q]*v_new[j,q]  (single producer, native chunk offset)
-        steps.push(bmm(ids.bmm, bh, c, dv, c, false, true, 1.0, d_out, off_d(dv), saved.v_new_hist, off_d(dv), bwd.d_intra_scores, off_cc));
+        steps.push(bmm(ids.bmm, bh, c, dv, c, false, true, 1.0, d_out, off_d(dv), saved.v_new, 0, bwd.d_intra_scores, off_cc));
         // d_v_new[j,q] += sum_i intra_scores[i,j]*d_out[i,q]  (SECOND, accumulate)
         steps.push(bmm(ids.bmm_acc, bh, c, c, dv, true, false, 1.0, saved.intra_scores, off_cc, d_out, off_d(dv), bwd.d_v_new, 0));
 
@@ -1417,7 +1395,7 @@ pub fn gdn_chunk_bwd(
         // d_q_scaled[i,p] = sum_q d_out[i,q]*state_in[p,q]
         steps.push(bmm(ids.bmm, bh, c, dv, dk, false, true, 1.0, d_out, off_d(dv), saved.state_history, state_in_off, bwd.d_q_scaled, 0));
         // d_state_in[p,q] += sum_i q_scaled[i,p]*d_out[i,q]  (SECOND of three)
-        steps.push(bmm(ids.bmm_acc, bh, dk, c, dv, true, false, 1.0, saved.q_scaled_hist, off_d(dk), d_out, off_d(dv), nxt, 0));
+        steps.push(bmm(ids.bmm_acc, bh, dk, c, dv, true, false, 1.0, saved.q_scaled, 0, d_out, off_d(dv), nxt, 0));
 
         // ---- item 5: q_scaled = query_c * exp(g_cs_c) * scale backward ----
         // d_query (splice into its own chunk slice; FIRST of two contributions)
