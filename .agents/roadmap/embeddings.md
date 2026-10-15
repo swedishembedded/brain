@@ -110,3 +110,21 @@ downstream project.
       at 32768 tokens for a 0.6B model; the existing int8 paged-KV serving
       path (`crates/qwen3/src/serve.rs`) was not wired into the `embed`
       action, which stays fp32 and decode-only (no paged batching).
+- [ ] Served `/v1/embeddings` vectors are not unit-norm. The LFM2 resident
+      `embed` arm (`crates/catalog/src/resident_lfm.rs`) never reads the
+      advertised `normalize` param, and the HTTP handler never sends it.
+      `dimensions` then truncates without renormalising. A caller doing
+      cosine search gets wrong scores.
+- [ ] Qwen3-Embedding has no serving path. Its `embed` action exists only for
+      the SDK and CLI, and emits an `embeddings` blob with no `mean`. No
+      resident adapter registers it, so `/v1/embeddings` cannot list it.
+- [ ] The query/document instruction convention cannot be expressed over
+      HTTP: no request field reaches the `instruction` param.
+- [ ] A base model carries no fingerprint in `/v1/models`, and
+      `system_fingerprint` is null. The fingerprint should cover the weights
+      digest, tokenizer digest, pooling, normalisation, instruction
+      convention and dimensions. Without it a caller cannot tell when it must
+      rebuild a vector index.
+- [ ] Decoding an `embed` outcome into a vector (pooled blob or `mean`) is
+      done in the HTTP handler only. The SDK needs one typed output, so that
+      no caller decodes it a second way.
