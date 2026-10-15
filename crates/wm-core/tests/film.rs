@@ -23,7 +23,7 @@
 //!
 //! All test fn names start with `film_` — the red-check filter is `film_`.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::{Gpu, Step};
 use wm_core::film::{Film, FilmChanDims, FilmRowDims};
 
@@ -290,7 +290,7 @@ fn film_gate_backward_matches_hand_reference() {
 #[test]
 fn film_identity_when_modulation_zero() {
     let (gpu, f) = film_gpu();
-    let mut st = Lcg::new(0xF11A_5EED_0001);
+    let mut st = Lcg::new(random_seed());
 
     // channel: N=2, C=3, H=W=2 (24 elems), sb = 0 with len 2*N*C = 12.
     let dc = FilmChanDims::new(2, 3, 2, 2).expect("valid dims");
@@ -323,7 +323,7 @@ fn film_fd_chan_backward_directional() {
     let (gpu, f) = film_gpu();
     let d = FilmChanDims::new(2, 3, 2, 2).expect("valid dims");
     let (ne, nsb) = (24usize, 12usize);
-    let mut st = Lcg::new(0x00C0_FFEE_D15C);
+    let mut st = Lcg::new(random_seed());
     let x = vec_seeded(ne, &mut st);
     let sb = vec_seeded(nsb, &mut st);
     let w = vec_seeded(ne, &mut st);
@@ -354,7 +354,7 @@ fn film_fd_row_backward_directional() {
     let (gpu, f) = film_gpu();
     let d = FilmRowDims::new(6, 4, 3).expect("valid dims");
     let (ne, nsb) = (24usize, 16usize); // R*D, 2*NC*D
-    let mut st = Lcg::new(0x0B0B_5EED_0002);
+    let mut st = Lcg::new(random_seed());
     let x = vec_seeded(ne, &mut st);
     let sb = vec_seeded(nsb, &mut st);
     let w = vec_seeded(ne, &mut st);
@@ -383,7 +383,7 @@ fn film_fd_gate_backward_directional() {
     let (gpu, f) = film_gpu();
     let d = FilmRowDims::new(4, 3, 2).expect("valid dims");
     let (ne, ng) = (12usize, 6usize); // R*D, NC*D
-    let mut st = Lcg::new(0x6A7E_5EED_0003);
+    let mut st = Lcg::new(random_seed());
     let x = vec_seeded(ne, &mut st);
     let g = vec_seeded(ng, &mut st);
     let h = vec_seeded(ne, &mut st);
@@ -426,7 +426,7 @@ fn film_fd_gate_backward_directional() {
 #[test]
 fn film_deterministic_bitwise() {
     let (gpu, f) = film_gpu();
-    let mut st = Lcg::new(0xDE7E_2814_0004);
+    let mut st = Lcg::new(random_seed());
 
     // chan fixture: N=2, C=3, H=W=2.
     let dc = FilmChanDims::new(2, 3, 2, 2).expect("valid dims");

@@ -18,7 +18,7 @@
 //! |analytic − numeric| ≤ 4e-3 + 8e-2 · max(|a|, |n|). NEVER loosened —
 //! failures follow the playbook §3 ladder instead.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use wm_core::gn::{Gn, GnDims};
 
@@ -80,7 +80,7 @@ fn gn_fd_backward_directional() {
     let n_el = d.elems() as usize;
     let n_gb = 2 * d.c as usize;
 
-    let mut seed = Lcg::new(0x5EED_1BAD);
+    let mut seed = Lcg::new(random_seed());
     let x: Vec<f32> = (0..n_el).map(|_| seed.signed()).collect();
     // gamma offset to ~[0.5, 1.5) keeps dyg = dy*gamma well-conditioned.
     let mut gb: Vec<f32> = (0..d.c).map(|_| 1.0 + 0.5 * seed.signed()).collect();
@@ -95,7 +95,7 @@ fn gn_fd_backward_directional() {
     let tol = |a: f64, n: f64| 4e-3 + 8e-2 * a.abs().max(n.abs());
 
     // dx: >= 2 random directions v over x; <dx, v> vs central difference.
-    let mut dir_seed = Lcg::new(0xD12E_C710_0000_0001);
+    let mut dir_seed = Lcg::new(random_seed());
     for dir in 0..2 {
         let v: Vec<f32> = (0..n_el).map(|_| dir_seed.signed()).collect();
         let xp: Vec<f32> = x.iter().zip(&v).map(|(&xi, &vi)| xi + (h as f32) * vi).collect();
