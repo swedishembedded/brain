@@ -26,3 +26,5 @@ brain-kernels.workspace = true
 # call `kernels::template::dtype_variant` - test-only, `brain-kernels` already
 # depends on this crate for its own non-test code (a leaf edge, not a cycle).
 brain-backend-api.workspace = true
+# Random operands for the JIT-versus-scalar comparisons.
+brain-seed.workspace = true

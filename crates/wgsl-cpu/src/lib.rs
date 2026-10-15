@@ -1801,10 +1801,11 @@ mod tests {
         let (n, cin, h, w, cout, k, stride, pad) = (1usize, 4, 7, 5, 6, 3usize, 1usize, 1usize);
         let ho = (h + 2 * pad - k) / stride + 1;
         let wo = (w + 2 * pad - k) / stride + 1;
-        let mut seed = 12345u32;
+        let mut state = seed::random_seed() as u32;
+        eprintln!("conv2d_tiled operand seed: {state}");
         let mut rnd = || {
-            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-            ((seed >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
         };
         let mut x: Vec<f32> = (0..n * cin * h * w).map(|_| rnd()).collect();
         let mut wt: Vec<f32> = (0..cout * cin * k * k).map(|_| rnd()).collect();
