@@ -106,7 +106,7 @@ scheduler turns - never blocks inside the decode loop, which for standard
 causal attention would mean streaming a sequence's entire cache across the
 bus once per token.
 
-Measured on this box (2x Tesla P40, `cargo test --release -p brain-qwen3
+Measured on 2x Tesla P40 (`cargo test --release -p brain-qwen3
 --test kv_offload_real -- --ignored`), at Qwen3-8B's exact KV geometry
 (36 layers, 8 KV heads, `head_dim` 128, int8 KV + scales):
 
@@ -118,7 +118,7 @@ Measured on this box (2x Tesla P40, `cargo test --release -p brain-qwen3
 | park a 4096-token session (297 MiB) | 452 ms, 0.69 GB/s |
 | revive it | 56.6 ms, 5.50 GB/s |
 
-Context for those rates: the raw host bus on this box measures 4.26 GB/s up
+Context for those rates: the raw host bus measures 4.26 GB/s up
 and 1.24 GB/s down (`gpu-core/tests/pcie_handoff.rs`, 216 MiB), against
 287 GB/s of device DRAM (`gpu_core::roof`). Swap-IN is at the bus; swap-OUT
 runs at roughly half of it, the gap being the `2 * n_layers` (int8:
@@ -132,17 +132,26 @@ memory the attention would otherwise read it from.
 
 The end-to-end arm of that test - the real 8B checkpoint, eight sessions
 against a pool sized for four, with and without offload - is written and
-committed but **has not run to completion**: `Engine`'s fp32 embedding table
-at Qwen3-8B's vocabulary is 2.49 GB, over this card's 2 GiB storage-binding
-limit, so the run dies in `create_bind_group` before it reaches the workload
-(a separate, unrelated defect being fixed elsewhere). Everything above comes
-from the geometry fixture in the same file, which needs no embedding table
-that size. Re-run it once that lands.
+committed but **has not run to completion**. It used to die in
+`create_bind_group`: `Engine`'s fp32 embedding table at Qwen3-8B's vocabulary
+is 2.49 GB, over a card's 2 GiB storage-binding limit. `Engine::embed_tiled`
+now gathers it in vocab sub-ranges, each under the device's binding limit, so
+that failure is gone; the arm itself still has to be re-run on a card with
+the 8B checkpoint resident. Everything above comes from the geometry fixture
+in the same file, which needs no embedding table that size.
+
+## Prefix caching across requests
+
+Wired: `Engine::prefill` adopts the longest cached chain of full prompt
+blocks (`model::paged::PrefixCache`, refcounted, keyed inside the
+sequence's adapter namespace) and computes only the tail. `prefix_stats`
+reports hit and lookup tokens. Gates: `random_shared_prefixes_stay_exact`,
+`sample_n_shares_the_prompts_kv_through_the_prefix_cache` (`serve.rs`),
+`tests/engine_prefill_mixed.rs` and `tests/engine_adapter_bank.rs` (no
+cross-adapter reuse).
 
 ## Not yet done
 
-- [ ] Prefix caching across requests (the underlying infrastructure exists
-      but is not wired into the serving engine)
 - [ ] Faster KV swap-out: the gather side runs at about half the measured
       host-bus rate (see above), dispatch-bound rather than bandwidth-bound
 - [ ] An FP8 / E4M3 weight path (INT8 is the only quantized weight format
