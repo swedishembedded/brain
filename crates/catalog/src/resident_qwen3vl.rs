@@ -208,7 +208,8 @@ impl Instance for Qwen3VlInstance {
         }
         let video_frames = qwen3vl::caps::decode_media(inv)?;
         let (tool_choice, tools) = qwen3vl::caps::parse_tool_request(inv)?;
-        self.resident.generate(inv, video_frames, tool_choice, &tools, progress)
+        let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
+        self.resident.generate(inv, video_frames, tool_choice, &tools, seed, progress)
     }
 }
 

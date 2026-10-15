@@ -280,7 +280,7 @@ struct GptInstance {
 
 impl Instance for GptInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let (max_new, temp, top_k, seed) = sampling_params(inv);
+        let (max_new, temp, top_k, seed) = sampling_params(inv)?;
         let prompt = inv.get_str("prompt").unwrap_or_default();
         let prompt_text = if prompt.is_empty() { "\n".to_string() } else { prompt };
         let ids = self.tok.encode(&prompt_text);
@@ -289,7 +289,7 @@ impl Instance for GptInstance {
         let gen = gpt2::sample::generate(&self.model, &ids, max_new, temp, top_k, &mut rng);
         let text = self.tok.decode(&gen);
         progress(Progress::step(max_new as u32, max_new as u32, "done"));
-        Ok(text_outcome(text))
+        Ok(text_outcome(text).set("seed", json!(seed)))
     }
 }
 
@@ -412,7 +412,7 @@ struct GlmInstance {
 
 impl Instance for GlmInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let (max_new, temp, top_k, seed) = sampling_params(inv);
+        let (max_new, temp, top_k, seed) = sampling_params(inv)?;
         let prompt = inv.get_str("prompt").unwrap_or_default();
         let prompt_text = if prompt.is_empty() { "\n".to_string() } else { prompt };
         let ids = self.tok.encode(&prompt_text);
@@ -421,7 +421,7 @@ impl Instance for GlmInstance {
         let gen = glmdsa::sample::generate_kv(&self.model, &ids, max_new, temp, top_k, None, &mut rng);
         let text = self.tok.decode(&gen);
         progress(Progress::step(max_new as u32, max_new as u32, "done"));
-        Ok(text_outcome(text))
+        Ok(text_outcome(text).set("seed", json!(seed)))
     }
     // `run_batch` is deliberately the residency-default serial loop - GLM has
     // no batch axis to exploit yet, see `GlmResident`'s module doc for why.
