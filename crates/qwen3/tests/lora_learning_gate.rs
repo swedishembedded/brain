@@ -144,7 +144,7 @@ fn train_adapter(base_path: &str, target: u32, out_dir: &Path, adapter_out: &Pat
         align_to_lines: false,
         patience: 0,
         cooldown_steps: 0,
-        seed: 1234,
+        seed: data::rng::random_seed(),
         adam: Default::default(),
     };
     // rank=3 is coprime with this config's head_dim=8 / d_model=16

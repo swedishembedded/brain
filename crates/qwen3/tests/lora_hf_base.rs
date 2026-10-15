@@ -80,7 +80,6 @@ fn an_adapter_trains_on_a_bf16_base_read_from_a_transformers_directory() {
         grad_clip: 1.0,
         eval_interval: 0,
         eval_batches: 0,
-        seed: 1234,
         ..Default::default()
     };
     let (report, trained) = finetune_lora_controlled(base.to_str().unwrap(), &scratch.join("data"), &opts, 3, 6.0, &LoraStart::Fresh, FitControl::default(), Dtype::BF16).unwrap();

@@ -75,7 +75,6 @@ fn every_evaluation_of_a_lora_run_leaves_a_loadable_adapter() {
         grad_clip: 1.0,
         eval_interval: 4,
         eval_batches: 0,
-        seed: 1234,
         ..Default::default()
     };
     let (train, val, bcfg, _, itos) = model::load_dataset_with_itos(&scratch, &opts).unwrap();

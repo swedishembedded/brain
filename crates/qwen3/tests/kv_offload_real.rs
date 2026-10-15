@@ -246,7 +246,7 @@ fn kv_geometry_of_qwen3_8b(vocab: u32) -> QwenConfig {
 }
 
 fn random_weights(cfg: &QwenConfig) -> HashMap<String, Vec<f32>> {
-    let mut rng = data::rng::Rng::new(5);
+    let mut rng = data::rng::Rng::random();
     cfg.param_list()
         .into_iter()
         .map(|(name, count)| {

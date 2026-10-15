@@ -416,7 +416,7 @@ mod kv_gen_tests {
     #[test]
     fn generate_kv_matches_recompute_greedy() {
         let cfg = QwenConfig::tiny();
-        let mut rng = data::rng::Rng::new(1);
+        let mut rng = data::rng::Rng::random();
         let mut map = HashMap::new();
         for (name, count) in cfg.param_list() {
             let v = if name.contains("norm") {
@@ -428,9 +428,9 @@ mod kv_gen_tests {
         }
         let model = Qwen::new(cfg.clone(), 1, 32, &map);
         let prompt = vec![1u32, 5, 3];
-        let mut r1 = data::rng::Rng::new(0);
+        let mut r1 = data::rng::Rng::random();
         let recompute = generate(&model, &prompt, 16, 0.0, 0, 1.0, &[], &mut r1);
-        let mut r2 = data::rng::Rng::new(0);
+        let mut r2 = data::rng::Rng::random();
         let kv = generate_kv(&model, &prompt, 16, 0.0, 0, 1.0, &[], &mut r2);
         assert_eq!(recompute, kv, "KV greedy generation must equal recompute generation");
     }
@@ -466,9 +466,11 @@ mod kv_gen_tests {
         }
         let model = tiny_model(3);
         let prompt = vec![1u32, 5, 3, 9, 2, 7];
+        let seed = data::rng::random_seed();
+        eprintln!("sampling seed: {seed}");
         let cancel = capability::CancelToken::default();
         let baseline = {
-            let mut rng = data::rng::Rng::new(4);
+            let mut rng = data::rng::Rng::new(seed);
             generate_kv_stream_with_head(
                 &model,
                 &prompt,
@@ -483,7 +485,7 @@ mod kv_gen_tests {
             )
         };
         for chunk in [1usize, 2, 4] {
-            let mut rng = data::rng::Rng::new(4);
+            let mut rng = data::rng::Rng::new(seed);
             let chunked = generate_kv_stream_cancellable(
                 &model,
                 &prompt,
@@ -515,17 +517,17 @@ mod kv_gen_tests {
         let prompt = vec![1u32, 5, 3, 9, 2, 7];
         let head = model.read_weight(model.cfg.head_weight());
         let cancel = capability::CancelToken::default();
-        let mut r = data::rng::Rng::new(4);
+        let mut r = data::rng::Rng::random();
         let host = generate_kv_stream_with_head(&model, &prompt, 12, 0.0, 0, 1.0, &[], &mut r, &head, &mut |_, _| true);
         assert!(!host.is_empty());
         for chunk in [1usize, 3, prompt.len()] {
-            let mut r = data::rng::Rng::new(4);
+            let mut r = data::rng::Rng::random();
             let device = generate_kv_stream_on_device(&model, &prompt, 12, 0.0, 0, 1.0, &[], &mut r, &cancel, chunk, &mut |_, _| true);
             assert_eq!(device, host, "chunk size {chunk}: the device head must pick the host head's tokens");
         }
         let armed = capability::CancelToken::armed();
         armed.cancel();
-        let mut r = data::rng::Rng::new(4);
+        let mut r = data::rng::Rng::random();
         let none = generate_kv_stream_on_device(&model, &prompt, 12, 0.0, 0, 1.0, &[], &mut r, &armed, 2, &mut |_, _| true);
         assert!(none.is_empty(), "an armed cancel stops before any token");
     }
@@ -543,7 +545,7 @@ mod kv_gen_tests {
         let prompt = vec![1u32, 5, 3];
         let cancel = capability::CancelToken::armed();
         cancel.cancel();
-        let mut rng = data::rng::Rng::new(4);
+        let mut rng = data::rng::Rng::random();
         let out = generate_kv_stream_cancellable(
             &model,
             &prompt,
@@ -571,14 +573,16 @@ mod kv_gen_tests {
         // tiny model's argmax collapses to a repeating fixed-point token under
         // greedy decoding (verified: every seed 0..16 did), which would make
         // "the first sampled token" and "a later token" coincide and defeat
-        // the point of this test. `temperature > 0` with a fixed rng seed is
+        // the point of this test. `temperature > 0` with one rng seed per run is
         // still fully reproducible (same draws, same prefix) for comparing
         // truncated vs. unconstrained generation below.
         let prompt = vec![1u32, 5, 3];
+        let sample_seed = data::rng::random_seed();
+        eprintln!("sampling seed: {sample_seed}");
         let mut found = None;
         for seed in 0..16u64 {
             let model = tiny_model(seed);
-            let mut r0 = data::rng::Rng::new(0);
+            let mut r0 = data::rng::Rng::new(sample_seed);
             let full = generate_kv(&model, &prompt, 16, 1.0, 0, 1.0, &[], &mut r0);
             if full.iter().any(|&t| t != full[0]) {
                 found = Some((model, full));
@@ -595,17 +599,17 @@ mod kv_gen_tests {
         assert!(first_idx > 0, "stop id must not be the very first sampled token");
         let never_occurs = 999_999u32;
 
-        let mut r1 = data::rng::Rng::new(0);
+        let mut r1 = data::rng::Rng::new(sample_seed);
         let truncated = generate_kv_stream(&model, &prompt, 16, 1.0, 0, 1.0, &[never_occurs, stop_at], &mut r1, &mut |_, _| true);
         assert_eq!(truncated, &full[..first_idx], "must stop as soon as ANY eos id in the slice is sampled");
 
         // Order in the slice must not matter.
-        let mut r2 = data::rng::Rng::new(0);
+        let mut r2 = data::rng::Rng::new(sample_seed);
         let truncated2 = generate_kv_stream(&model, &prompt, 16, 1.0, 0, 1.0, &[stop_at, never_occurs], &mut r2, &mut |_, _| true);
         assert_eq!(truncated2, &full[..first_idx]);
 
         // An empty eos slice never stops early.
-        let mut r3 = data::rng::Rng::new(0);
+        let mut r3 = data::rng::Rng::new(sample_seed);
         let no_stop = generate_kv_stream(&model, &prompt, 16, 1.0, 0, 1.0, &[], &mut r3, &mut |_, _| true);
         assert_eq!(no_stop, full, "empty eos slice must not stop generation");
     }
@@ -619,9 +623,9 @@ mod kv_gen_tests {
         let prompt = vec![2u32, 4, 6];
         let head = model.read_weight(model.cfg.head_weight());
 
-        let mut r1 = data::rng::Rng::new(7);
+        let mut r1 = data::rng::Rng::random();
         let a = generate_kv_stream(&model, &prompt, 10, 0.0, 0, 1.0, &[], &mut r1, &mut |_, _| true);
-        let mut r2 = data::rng::Rng::new(7);
+        let mut r2 = data::rng::Rng::random();
         let b = generate_kv_stream_with_head(&model, &prompt, 10, 0.0, 0, 1.0, &[], &mut r2, &head, &mut |_, _| true);
         assert_eq!(a, b, "generate_kv_stream_with_head must match generate_kv_stream given the same head");
     }
@@ -639,7 +643,7 @@ mod kv_gen_tests {
         }
         // Flat logits + tiny top_p keeps exactly one token (the first by rank).
         let flat = [1.0f32, 1.0, 1.0, 1.0];
-        let mut rng = data::rng::Rng::new(3);
+        let mut rng = data::rng::Rng::random();
         let only = sample_logits(&flat, 1.0, 0, 0.01, &mut rng);
         for seed in 0..8u64 {
             let mut rng = data::rng::Rng::new(seed);
@@ -669,7 +673,7 @@ mod kv_gen_tests {
     fn nan_logit_does_not_panic_and_is_never_preferred() {
         let logits = [1.0f32, f32::NAN, 3.0, 2.0];
         // Greedy (temperature <= 0): argmax must skip the NaN, not lock onto it.
-        let mut rng = data::rng::Rng::new(0);
+        let mut rng = data::rng::Rng::random();
         assert_eq!(sample_logits(&logits, 0.0, 0, 1.0, &mut rng), 2, "greedy argmax must pick the real max, not the NaN");
 
         // Every other sampling configuration must at least not panic, and must

@@ -3585,7 +3585,7 @@ mod tests {
     }
 
     pub(super) fn tiny_weights(cfg: &QwenConfig) -> HashMap<String, Vec<f32>> {
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::random();
         let mut map = HashMap::new();
         for (name, count) in cfg.param_list() {
             let v = if name.contains("norm") { vec![1.0f32; count] } else { (0..count).map(|_| rng.next_gaussian() as f32 * 0.05).collect() };
@@ -3933,8 +3933,8 @@ mod tests {
         let model = Qwen::new(cfg.clone(), 1, 64, &map);
         let p0 = vec![1u32, 5, 3, 9];
         let p1 = vec![7u32, 2, 4];
-        let mut r0 = Rng::new(0);
-        let mut r1 = Rng::new(0);
+        let mut r0 = Rng::random();
+        let mut r1 = Rng::random();
         let ref0 = crate::sample::generate_kv(&model, &p0, 12, 0.0, 0, 1.0, &[], &mut r0);
         let ref1 = crate::sample::generate_kv(&model, &p1, 12, 0.0, 0, 1.0, &[], &mut r1);
 
@@ -4094,7 +4094,7 @@ mod tests {
         let map = tiny_weights(&cfg);
         for kv_int8 in [false, true] {
             let mut cached_eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 128, 2, 12, 16, kv_int8, false);
-            let mut rng = Rng::new(42);
+            let mut rng = Rng::random();
             let vocab = cfg.vocab as u64;
             let base: Vec<u32> = (0..14).map(|_| (rng.next_u64() % vocab) as u32).collect();
             for trial in 0..6 {
@@ -4553,7 +4553,7 @@ mod tests {
         let g = &eng.gpu;
 
         let (m, k, n) = (3u32, 8u32, 40u32);
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::random();
         let x: Vec<f32> = (0..(m * k) as usize).map(|_| rng.next_gaussian() as f32 * 0.3).collect();
         let w: Vec<f32> = (0..(n * k) as usize).map(|_| rng.next_gaussian() as f32 * 0.3).collect();
         let xb = g.storage_init("t_mmtile_x", &x);
@@ -5428,7 +5428,7 @@ mod tests {
             .iter()
             .zip(maxn)
             .map(|(p, n)| {
-                let mut r = Rng::new(0);
+                let mut r = Rng::random();
                 crate::sample::generate_kv(&model, p, n, 0.0, 0, 1.0, &[], &mut r)
             })
             .collect();
@@ -5486,7 +5486,7 @@ mod tests {
         let model = Qwen::new(cfg.clone(), 1, 64, &map);
         let prompt = vec![1u32, 5, 3, 9, 2];
         let max_new = 13usize; // > DECODE_WINDOW (4), so k=4 fires for several rounds
-        let mut r = Rng::new(0);
+        let mut r = Rng::random();
         let reference = crate::sample::generate_kv(&model, &prompt, max_new, 0.0, 0, 1.0, &[], &mut r);
 
         // Plenty of batch/block headroom: a single request must never fall
@@ -5895,7 +5895,7 @@ mod tests {
         let map = tiny_weights(&cfg);
         let d = cfg.d_model as usize;
         let (n_streams, steps) = (3usize, 5usize);
-        let mut rng = Rng::new(42);
+        let mut rng = Rng::random();
         let embs: Vec<Vec<Vec<f32>>> = (0..n_streams)
             .map(|_| (0..steps).map(|_| (0..d).map(|_| rng.next_gaussian() as f32).collect()).collect())
             .collect();
@@ -6386,10 +6386,10 @@ mod rollout_tests {
         let params = RolloutParams { max_new: 4, sample: SampleParams::greedy(), eos: None };
 
         let mut model_roll = ModelRollout::new(&qwen);
-        let model_out = model_roll.sample_n(&prompt, 1, &params, &mut Rng::new(1)).pop().expect("sample_n(1)");
+        let model_out = model_roll.sample_n(&prompt, 1, &params, &mut Rng::random()).pop().expect("sample_n(1)");
 
         let mut paged_roll = PagedRollout::new(engine);
-        let paged_out = paged_roll.sample_n(&prompt, 1, &params, &mut Rng::new(1)).pop().expect("sample_n(1)");
+        let paged_out = paged_roll.sample_n(&prompt, 1, &params, &mut Rng::random()).pop().expect("sample_n(1)");
 
         assert_eq!(model_out.tokens, paged_out.tokens, "ModelRollout vs PagedRollout diverged on greedy decoding");
         assert_eq!(model_out.stop, StopReason::MaxNew);
@@ -6415,7 +6415,7 @@ mod rollout_tests {
 
         let mut roll = PagedRollout::new(engine);
         let n = 8usize;
-        let out = roll.sample_n(&prompt, n, &params, &mut Rng::new(7));
+        let out = roll.sample_n(&prompt, n, &params, &mut Rng::random());
         assert_eq!(out.len(), n);
 
         let engine = roll.into_decoder();
@@ -6447,14 +6447,14 @@ mod rollout_tests {
 
         let engine = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 32, 1, 8, 8, false, false);
         let mut roll = PagedRollout::new(engine);
-        let baseline = roll.sample_n(&prompt, 1, &no_eos, &mut Rng::new(3)).pop().expect("sample_n(1)");
+        let baseline = roll.sample_n(&prompt, 1, &no_eos, &mut Rng::random()).pop().expect("sample_n(1)");
         assert!(!baseline.tokens.is_empty(), "fixture needs a real first token to use as EOS");
         let eos_token = baseline.tokens[0];
 
         let engine = roll.into_decoder();
         let with_eos = RolloutParams { eos: Some(eos_token), ..no_eos };
         let mut roll = PagedRollout::new(engine);
-        let stopped = roll.sample_n(&prompt, 1, &with_eos, &mut Rng::new(3)).pop().expect("sample_n(1)");
+        let stopped = roll.sample_n(&prompt, 1, &with_eos, &mut Rng::random()).pop().expect("sample_n(1)");
 
         assert_eq!(stopped.stop, StopReason::Eos);
         assert!(stopped.tokens.is_empty(), "EOS must not be appended to the completion");

@@ -36,7 +36,7 @@ fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
     (diff / b.iter().map(|y| (*y as f64).powi(2)).sum::<f64>()).sqrt()
 }
 
-fn run(dt: Dtype, tokens: &[u32], targets: &[u32], dir: &str) -> Option<(f32, Vec<(String, Vec<f32>)>)> {
+fn run(dt: Dtype, tokens: &[u32], targets: &[u32], dir: &str, adapter_seed: u64) -> Option<(f32, Vec<(String, Vec<f32>)>)> {
     let (mut cfg, base) = qwen3::open_checkpoint(dir).expect("open the checkpoint");
     cfg.lora = Some(LoraCfg::attn(8, 16.0));
     cfg.block_size = tokens.len() as u32;
@@ -46,7 +46,7 @@ fn run(dt: Dtype, tokens: &[u32], targets: &[u32], dir: &str) -> Option<(f32, Ve
         return None;
     }
     // Non-zero adapters (the same ones for both bases), so every gradient flows.
-    let mut rng = Rng::new(7);
+    let mut rng = Rng::new(adapter_seed);
     let names = model::Model::param_names(&m);
     for name in names.iter().filter(|n| n.ends_with(".lora_b")) {
         let len = m.read_weight(name).len();
@@ -68,8 +68,10 @@ fn an_int8_base_trains_the_adapters_the_bf16_base_does() {
     let ids: Vec<u32> = data::tokenizer::Tokenizer::encode(&tok, &text).into_iter().take(257).collect();
     let (tokens, targets) = (ids[..256].to_vec(), ids[1..257].to_vec());
 
-    let Some((want_loss, want)) = run(Dtype::BF16, &tokens, &targets, &dir) else { return };
-    let Some((loss, got)) = run(Dtype::I8, &tokens, &targets, &dir) else { return };
+    let adapter_seed = data::rng::random_seed();
+    eprintln!("adapter seed: {adapter_seed}");
+    let Some((want_loss, want)) = run(Dtype::BF16, &tokens, &targets, &dir, adapter_seed) else { return };
+    let Some((loss, got)) = run(Dtype::I8, &tokens, &targets, &dir, adapter_seed) else { return };
     let (mut cosines, mut worst_rel) = (Vec::new(), 0.0f64);
     for ((_, g), (_, w)) in got.iter().zip(&want) {
         if w.iter().all(|x| *x == 0.0) {

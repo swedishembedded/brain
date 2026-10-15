@@ -39,7 +39,7 @@ const TARGETS: [u32; 12] = [5, 9, 2, 7, 3, 11, 4, 8, 6, 10, 2, 1];
 
 fn weights(cfg: &QwenConfig, adapter_b: f32) -> HashMap<String, Vec<f32>> {
     let mut w = qwen3::init_weights(cfg, 21);
-    let mut rng = Rng::new(5);
+    let mut rng = Rng::random();
     for (name, v) in w.iter_mut() {
         if name.ends_with(".lora_b") {
             v.iter_mut().for_each(|x| *x = (rng.next_f32() * 2.0 - 1.0) * adapter_b);

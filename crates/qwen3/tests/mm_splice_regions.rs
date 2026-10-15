@@ -42,7 +42,7 @@ fn every_image_of_an_example_is_spliced_and_gets_its_own_gradient() {
     let cfg = QwenConfig { block_size: 10, ..QwenConfig::tiny() };
     let d = cfg.d_model as usize;
     let m = model(&cfg);
-    let mut rng = Rng::new(3);
+    let mut rng = Rng::random();
     let rows: usize = REGIONS.iter().map(|r| r.1 as usize).sum();
     let embeds: Vec<f32> = (0..rows * d).map(|_| rng.next_gaussian() as f32 * 0.3).collect();
     let tokens = [3u32, 9, 9, 4, 6, 9, 9, 9, 7, 2];

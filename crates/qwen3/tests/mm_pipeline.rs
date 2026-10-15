@@ -75,7 +75,7 @@ fn two_stages_agree_with_one_through_the_image_and_head_seams() {
     }
     let cfg = config();
     let (d, init) = (cfg.d_model as usize, weights(&cfg));
-    let mut rng = Rng::new(5);
+    let mut rng = Rng::random();
     let rows: usize = REGIONS.iter().map(|r| r.1 as usize).sum();
     let embeds: Vec<f32> = (0..rows * d).map(|_| rng.next_gaussian() as f32 * 0.3).collect();
     let d_hidden: Vec<f32> = (0..10 * d).map(|_| rng.next_gaussian() as f32 * 0.1).collect();

@@ -78,7 +78,6 @@ fn a_full_fine_tune_of_a_transformers_directory_trains_every_weight_and_saves_on
         grad_clip: 1.0,
         eval_interval: 0,
         eval_batches: 0,
-        seed: 1234,
         ..Default::default()
     };
     let out = scratch.join("tuned.safetensors");

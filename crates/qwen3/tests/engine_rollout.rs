@@ -40,11 +40,16 @@ fn the_engine_samples_what_the_synced_model_does() {
     let base = qwen3::init_weights(&base_cfg, 11);
     let mut init = qwen3::init_weights(&cfg, 11);
     init.extend(base.iter().map(|(k, v)| (k.clone(), v.clone())));
-    // Non-zero adapters, large enough to change the greedy path.
+    // Non-zero adapters, large enough to change the greedy path. Filled in
+    // sorted tensor-name order: a hash map iterates in a different order on
+    // every run, which would hand each tensor a different draw.
+    // seed: adapters that change the greedy path, which the non-vacuity check at the end requires
     let mut rng = Rng::new(3);
-    for (name, v) in init.iter_mut().filter(|(n, _)| n.contains(".lora_")) {
+    let mut adapters: Vec<String> = init.keys().filter(|n| n.contains(".lora_")).cloned().collect();
+    adapters.sort();
+    for name in adapters {
         let s = if name.ends_with(".lora_b") { 0.5 } else { 0.3 };
-        v.iter_mut().for_each(|x| *x = (rng.next_f32() * 2.0 - 1.0) * s);
+        init.get_mut(&name).unwrap().iter_mut().for_each(|x| *x = (rng.next_f32() * 2.0 - 1.0) * s);
     }
     let model = Qwen::new(cfg, 1, 16, &init);
     let geometry = EngineGeometry { block_size: 4, num_blocks: 64, max_batch: 2, max_blocks_per_seq: 4, max_prefill: 8, tier: Dtype::F32, gpu: None };
@@ -52,8 +57,8 @@ fn the_engine_samples_what_the_synced_model_does() {
     let prompt = [1u32, 5, 9, 2];
 
     engine.sync(&trained(&model)).unwrap();
-    let want = ModelRollout::new(&model).sample_n(&prompt, 2, &greedy(), &mut Rng::new(1));
-    let got = engine.sample_n(&prompt, 2, &greedy(), &mut Rng::new(1));
+    let want = ModelRollout::new(&model).sample_n(&prompt, 2, &greedy(), &mut Rng::random());
+    let got = engine.sample_n(&prompt, 2, &greedy(), &mut Rng::random());
     for (g, w) in got.iter().zip(&want) {
         assert_eq!(g.tokens, w.tokens, "the folded adapters decode as the LoRA model does");
     }
@@ -61,7 +66,7 @@ fn the_engine_samples_what_the_synced_model_does() {
     let zeroed: HashMap<String, Vec<f32>> = trained(&model).into_iter().map(|(k, v)| (k.clone(), if k.ends_with(".lora_b") { vec![0.0; v.len()] } else { v })).collect();
     engine.sync(&zeroed).unwrap();
     let plain = Qwen::new(base_cfg, 1, 16, &base);
-    let want = ModelRollout::new(&plain).sample_n(&prompt, 1, &greedy(), &mut Rng::new(1));
-    assert_eq!(engine.sample_n(&prompt, 1, &greedy(), &mut Rng::new(1))[0].tokens, want[0].tokens, "zeroed adapters are the base model");
+    let want = ModelRollout::new(&plain).sample_n(&prompt, 1, &greedy(), &mut Rng::random());
+    assert_eq!(engine.sample_n(&prompt, 1, &greedy(), &mut Rng::random())[0].tokens, want[0].tokens, "zeroed adapters are the base model");
     assert_ne!(want[0].tokens, got[0].tokens, "the adapters changed the greedy path, so the first check was not vacuous");
 }

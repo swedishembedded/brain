@@ -47,6 +47,7 @@ fn config(block: u32, d_model: u32, d_ff: u32) -> QwenConfig {
 /// loses nothing further.
 fn weights(cfg: &QwenConfig, adapter_b: f32) -> HashMap<String, Vec<f32>> {
     let mut w = qwen3::init_weights(cfg, 31);
+    // seed: the int8-versus-fp32 agreement bounds were set against these adapter values; device-only kernels
     let mut rng = Rng::new(5);
     for (name, v) in w.iter_mut() {
         if name.ends_with(".lora_b") {

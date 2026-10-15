@@ -49,7 +49,7 @@ fn dataset(name: &str) -> PathBuf {
 }
 
 fn opts() -> model::FitOpts {
-    model::FitOpts { steps: 12, batch_size: 1, block_size: 16, grad_accum: 3, lr: 2e-2, min_lr: 2e-3, warmup: 2, decay_iters: 12, weight_decay: 0.0, grad_clip: 1.0, eval_interval: 0, eval_batches: 0, seed: 99, ..Default::default() }
+    model::FitOpts { steps: 12, batch_size: 1, block_size: 16, grad_accum: 3, lr: 2e-2, min_lr: 2e-3, warmup: 2, decay_iters: 12, weight_decay: 0.0, grad_clip: 1.0, eval_interval: 0, eval_batches: 0, ..Default::default() }
 }
 
 fn data<M: Model>(dir: &Path, opts: &model::FitOpts) -> impl model::Objective<M> {

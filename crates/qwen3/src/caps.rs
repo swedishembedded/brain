@@ -1699,7 +1699,7 @@ mod tests {
     /// saturated. The residual writers reach it directly.
     fn write_destructive_adapter(path: &Path, cfg: &QwenConfig, base: &Path) {
         let w = checkpoint::load(base.to_str().unwrap()).by_role("");
-        let mut lcg = data::rng::Lcg::new(9);
+        let mut lcg = data::rng::Lcg::random();
         let rank = 2usize;
         let (d, ff, hq) = (cfg.d_model as usize, cfg.d_ff as usize, (cfg.n_heads * cfg.head_dim) as usize);
         // `(leaf, out, inn)` exactly as `QwenConfig::param_list` lays each
@@ -1740,7 +1740,7 @@ mod tests {
         questions
             .iter()
             .map(|q| {
-                let mut rng = Rng::new(0);
+                let mut rng = Rng::random();
                 let ids = crate::sample::generate_kv(model, &tok.encode(q), GATE_MAX_NEW, 0.0, 0, 1.0, &[], &mut rng);
                 tok.decode(&ids).lines().next().unwrap_or("").to_string()
             })

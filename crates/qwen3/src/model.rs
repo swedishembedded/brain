@@ -4875,7 +4875,7 @@ mod kv_tests {
         let v = cfg.vocab as usize;
         let max_t = 8u32;
         let seq = 6usize;
-        let mut rng = Rng::new(1234);
+        let mut rng = Rng::random();
 
         // Random decoder weights; RMSNorm/QK-norm gains at 1 (as init_weights does),
         // other linears + the tied embedding table Normal(0, 0.08).
@@ -4952,7 +4952,7 @@ mod kv_tests {
         let theta = cfg.rope_theta;
         let max_t = 8u32;
         let seq = 6usize;
-        let mut rng = Rng::new(5678);
+        let mut rng = Rng::random();
 
         let mut map: HashMap<String, Vec<f32>> = HashMap::new();
         for (name, count) in cfg.param_list() {
@@ -5053,7 +5053,7 @@ mod kv_tests {
         let theta = cfg.rope_theta;
         let max_t = 8u32;
         let seq = 6usize;
-        let mut rng = Rng::new(9012);
+        let mut rng = Rng::random();
 
         let mut map: HashMap<String, Vec<f32>> = HashMap::new();
         for (name, count) in cfg.param_list() {
@@ -5158,7 +5158,7 @@ mod kv_tests {
         let cfg = QwenConfig::tiny();
         let d = cfg.d_model as usize;
         let max_t = 8u32;
-        let mut rng = Rng::new(3344);
+        let mut rng = Rng::random();
         let mut map: HashMap<String, Vec<f32>> = HashMap::new();
         for (name, count) in cfg.param_list() {
             let val = if name == "norm.weight" || name.ends_with("ln1.weight") || name.ends_with("ln2.weight") || name.ends_with("q_norm.weight") || name.ends_with("k_norm.weight") {
@@ -5342,7 +5342,7 @@ mod rollout_tests {
         }
         let model = tiny_model();
         let prompt = vec![1u32, 5, 3, 9, 2];
-        let mut rng = Rng::new(1234);
+        let mut rng = Rng::random();
         let out = model::train::generate(&model, &prompt, 6, 0.0, 0, &mut rng);
         assert_eq!(out, vec![2, 2, 2, 2, 2, 2]);
     }

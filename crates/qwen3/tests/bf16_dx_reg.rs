@@ -51,7 +51,7 @@ fn the_register_tiled_input_gradient_matches_the_naive_one() {
         return;
     }
     let gpu = Gpu::new(qwen3::model::pipelines());
-    let mut rng = Lcg::new(17);
+    let mut rng = Lcg::random();
     for (m, k, n) in [(200u32, 384u32, 320u32), (130, 130, 70), (1, 256, 256), (257, 64, 513)] {
         let w: Vec<f32> = (0..n * k).map(|_| rng.signed()).collect();
         let dy: Vec<f32> = (0..m * n).map(|_| rng.signed()).collect();

@@ -82,7 +82,6 @@ fn opts() -> model::FitOpts {
         grad_clip: 1.0,
         eval_interval: 0,
         eval_batches: 0,
-        seed: 1234,
         ..Default::default()
     }
 }

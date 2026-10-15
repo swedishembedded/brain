@@ -97,7 +97,7 @@ fn qwen3_inference_coherent() {
     // Factual, unambiguous: the base model must complete this correctly.
     let prompt = "The capital of France is the city of";
     let ids = t.encode(prompt);
-    let mut rng = data::rng::Rng::new(0);
+    let mut rng = data::rng::Rng::random();
     let out = qwen3::sample::generate(&m, &ids, 4, 0.0, 0, 1.0, &[], &mut rng); // greedy
     let text = t.decode(&out);
     println!("inference: {prompt:?} -> {text:?}");
@@ -265,10 +265,12 @@ fn qwen3_reasoning_finetune() {
     setup();
     let t = tok(&d);
 
+    // seed: the training problems the reported before/after accuracy was measured against (ignored real-model experiment)
     let mut rng = data::rng::Rng::new(7);
     let mk = |rng: &mut data::rng::Rng| (rng.gen_range_inclusive(2, 9), rng.gen_range_inclusive(2, 9), rng.gen_range_inclusive(2, 9));
     let n_train = env_usize("QWEN3_RS_TRAIN", 240);
     let train: Vec<_> = (0..n_train).map(|_| { let (a,b,c)=mk(&mut rng); arith_case(a,b,c) }).collect();
+    // seed: the held-out problems: one fixed set so the before and after accuracy compare on the same questions
     let held_nums: Vec<(i64,i64,i64)> = { let mut r = data::rng::Rng::new(4242); (0..24).map(|_| mk(&mut r)).collect() };
     let held: Vec<_> = held_nums.iter().map(|&(a,b,c)| arith_case(a,b,c)).collect();
 
