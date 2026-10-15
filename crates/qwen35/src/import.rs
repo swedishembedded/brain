@@ -104,6 +104,22 @@ pub fn dequantize_fp8_pairs(tensors: &mut Tensors, block: usize) -> Result<(), S
     Ok(())
 }
 
+/// Whether brain-canonical tensor `name` is a plain RMSNorm weight, i.e. one
+/// whose HF value is stored as `w` for an applied multiplier of `1+w` (see
+/// [`fold_plain_rmsnorm_weights`] for which names that covers and why the
+/// gated `linear_attn.norm.weight` is not among them). The one predicate both
+/// the eager fold and the lazy `crate::fp8_source` loader apply.
+pub(crate) fn is_plain_rmsnorm_weight(name: &str) -> bool {
+    name == "norm.weight"
+        || name == "mtp.norm.weight"
+        || name == "mtp.pre_fc_norm_embedding.weight"
+        || name == "mtp.pre_fc_norm_hidden.weight"
+        || name.ends_with(".ln1.weight")
+        || name.ends_with(".ln2.weight")
+        || name.ends_with(".self_attn.q_norm.weight")
+        || name.ends_with(".self_attn.k_norm.weight")
+}
+
 /// Add `1.0` to every plain-RMSNorm weight (`ln1`/`ln2`/`self_attn.{q,k}_norm`/
 /// the final `norm`, plus - see below - the MTP head's own plain norms) -
 /// see this module's doc, "The `(1+w)` RMSNorm fold". Takes brain-canonical
@@ -134,15 +150,7 @@ pub fn dequantize_fp8_pairs(tensors: &mut Tensors, block: usize) -> Result<(), S
 /// reading of the two available, not an arbitrary pick.
 pub fn fold_plain_rmsnorm_weights(tensors: &mut HashMap<String, Vec<f32>>) {
     for (name, data) in tensors.iter_mut() {
-        let is_plain_norm = name == "norm.weight"
-            || name == "mtp.norm.weight"
-            || name == "mtp.pre_fc_norm_embedding.weight"
-            || name == "mtp.pre_fc_norm_hidden.weight"
-            || name.ends_with(".ln1.weight")
-            || name.ends_with(".ln2.weight")
-            || name.ends_with(".self_attn.q_norm.weight")
-            || name.ends_with(".self_attn.k_norm.weight");
-        if is_plain_norm {
+        if is_plain_rmsnorm_weight(name) {
             for v in data.iter_mut() {
                 *v += 1.0;
             }
@@ -199,7 +207,7 @@ fn classify_layer_leaf(leaf: &str, ty: LayerType) -> Option<String> {
     }
 }
 
-fn classify(name: &str, cfg: &Qwen35Config) -> Result<Option<String>, String> {
+pub(crate) fn classify(name: &str, cfg: &Qwen35Config) -> Result<Option<String>, String> {
     if name.starts_with("mtp.") || name.starts_with("model.visual.") || name == "model.visual" {
         return Ok(None);
     }

@@ -1004,6 +1004,7 @@ crates/qwen35/tests/dflash2_real.rs	BRAIN_DFLASH2_DUMP
 crates/qwen35/tests/dflash2_real.rs	BRAIN_DFLASH2_GGUF
 crates/qwen35/tests/dflash2_real.rs	BRAIN_DFLASH2_TIER
 crates/qwen35/tests/dflash2_real.rs	BRAIN_QWEN35_GGUF
+crates/qwen35/tests/fp8_source.rs	BRAIN_QWEN35_DIR
 crates/qwen35/tests/gdn_intermediate_trace.rs	BRAIN_QWEN35_GGUF
 crates/qwen35/tests/gdn_layer_boundary_trace.rs	BRAIN_QWEN35_GGUF
 crates/qwen35/tests/generate_streaming.rs	BRAIN_QWEN35_DIR

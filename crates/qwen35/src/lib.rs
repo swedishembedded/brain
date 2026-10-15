@@ -15,9 +15,11 @@
 //! `tools/goldens/qwen35_dump_reference.py`.
 
 pub mod caps;
+pub mod base_source;
 pub mod config;
 pub mod dflash2;
 pub mod finetune;
+pub mod fp8_source;
 pub mod gguf_import;
 pub mod import;
 pub mod int8_gguf_resident;
