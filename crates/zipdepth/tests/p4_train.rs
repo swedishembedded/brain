@@ -19,6 +19,7 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu`.
 
+use data::rng::random_seed;
 use std::collections::HashMap;
 
 use zipdepth::train::{synth_pair, train_loop, TrainCfg};
@@ -40,6 +41,7 @@ fn tiny() -> ZipConfig {
 fn overfit_one_batch_loss_decreases() {
     let cfg = tiny();
     let gpu = Gpu::new_cpu(zipdepth::net::PIPELINES);
+    // seed: the 30-step 'loss at least halves' margin was measured at this init and batch.
     let t = TrainCfg { steps: 30, batch: 2, h: 32, w: 32, lr: 3e-3, wd: 0.0, seed: 7, fixed_batch: true };
     let init = zipdepth::init_weights(&cfg, t.seed);
     let mut losses: Vec<f32> = Vec::new();
@@ -88,10 +90,11 @@ fn synth_pairs_are_deterministic_and_shaped() {
 fn fixed_batch_repeats_and_rotating_batches_differ() {
     let cfg = tiny();
     let gpu = Gpu::new_cpu(zipdepth::net::PIPELINES);
-    let init: HashMap<String, Vec<f32>> = zipdepth::init_weights(&cfg, 3);
+    let init: HashMap<String, Vec<f32>> = zipdepth::init_weights(&cfg, seed);
+    let seed = random_seed();
     // 2 steps each; just proving the loop runs in both modes and stays finite.
     for fixed in [true, false] {
-        let t = TrainCfg { steps: 2, batch: 1, h: 32, w: 32, lr: 1e-3, wd: 0.0, seed: 3, fixed_batch: fixed };
+        let t = TrainCfg { steps: 2, batch: 1, h: 32, w: 32, lr: 1e-3, wd: 0.0, seed, fixed_batch: fixed };
         let (_ps, out) = train_loop(&gpu, cfg.clone(), &t, &init, |_, _| {});
         assert!(out.last_loss.is_finite());
     }

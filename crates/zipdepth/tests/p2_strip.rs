@@ -6,7 +6,7 @@
 //! The first block where the INPUT gradient is the interesting one: `x` reaches the
 //! output by three routes (both strips and the final multiply), so a dropped route
 //! is invisible in the weight grads and shows up only in `d_in`.
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use std::collections::HashMap;
 
 use zipdepth::blocks::StripPoolingAttention;
@@ -79,7 +79,7 @@ fn strip_weight_grads_match_finite_differences() {
     let ctx = Ctx::new(&gpu, zipdepth::net::ids());
     let m = StripPoolingAttention::new(&ctx, "s", shape, true);
     let tot = shape.numel() as usize;
-    let r = Lcg::new(43).vec(tot);
+    let r = Lcg::new(random_seed()).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);
@@ -98,7 +98,7 @@ fn strip_weight_grads_match_finite_differences() {
     for wname in ["s.gate_conv.0.weight", "s.gate_conv.1.weight"] {
         let g = gpu.read(ps.g(wname), ps.numel(wname));
         let n = g.len();
-        let dir: Vec<f32> = Lcg::new(3).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = gpu.read(ps.w(wname), n);
         let eps = 5e-4f32;
@@ -131,7 +131,7 @@ fn strip_input_grad_matches_finite_differences_elementwise() {
     let ctx = Ctx::new(&gpu, zipdepth::net::ids());
     let m = StripPoolingAttention::new(&ctx, "s", shape, true);
     let tot = shape.numel() as usize;
-    let r = Lcg::new(47).vec(tot);
+    let r = Lcg::new(random_seed()).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);

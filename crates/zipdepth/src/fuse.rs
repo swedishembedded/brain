@@ -78,7 +78,7 @@ pub fn fuse_qarep(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data::rng::Lcg;
+    use data::rng::{random_seed, Lcg};
 
     /// Host reference: `conv2d(x, k, b)` at stride 1, pad 1, NCHW, grouped.
     fn conv3x3(x: &[f32], k: &[f32], b: Option<&[f32]>, cin: usize, cout: usize, h: usize, w: usize, groups: usize) -> Vec<f32> {
@@ -127,8 +127,8 @@ mod tests {
     }
 
     /// run_var must be positive.
-    fn rvar(seed: u64, n: usize) -> Vec<f32> {
-        Lcg::new(seed).vec(n).iter().map(|v| v.abs() + 0.1).collect()
+    fn rvar(rng: &mut Lcg, n: usize) -> Vec<f32> {
+        rng.vec(n).iter().map(|v| v.abs() + 0.1).collect()
     }
 
     /// THE property: the fused conv computes exactly what the three branches did.
@@ -137,9 +137,10 @@ mod tests {
     fn assert_fuse_equivalent(cin: usize, cout: usize, groups: usize, has_identity: bool) {
         let (h, w) = (5usize, 4usize);
         let cin_g = cin / groups;
-        let x = Lcg::new(1).vec(cin * h * w);
-        let (w3, g3, b3, m3, v3) = (Lcg::new(2).vec(cout * cin_g * 9), Lcg::new(3).vec(cout), Lcg::new(4).vec(cout), Lcg::new(5).vec(cout), rvar(6, cout));
-        let (w1, g1, b1, m1, v1) = (Lcg::new(7).vec(cout * cin_g), Lcg::new(8).vec(cout), Lcg::new(9).vec(cout), Lcg::new(10).vec(cout), rvar(11, cout));
+        let mut rng = Lcg::new(random_seed());
+        let x = rng.vec(cin * h * w);
+        let (w3, g3, b3, m3, v3) = (rng.vec(cout * cin_g * 9), rng.vec(cout), rng.vec(cout), rng.vec(cout), rvar(&mut rng, cout));
+        let (w1, g1, b1, m1, v1) = (rng.vec(cout * cin_g), rng.vec(cout), rng.vec(cout), rng.vec(cout), rvar(&mut rng, cout));
         let br3 = Branch { weight: &w3, gamma: &g3, beta: &b3, run_mean: &m3, run_var: &v3 };
         let br1 = Branch { weight: &w1, gamma: &g1, beta: &b1, run_mean: &m1, run_var: &v1 };
 

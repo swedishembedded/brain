@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! P2: `ChannelAttention` (squeeze-and-excitation) — stage3's gate.
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use std::collections::HashMap;
 use zipdepth::blocks::ChannelAttention;
 use gpu_core::Gpu;
@@ -76,7 +76,7 @@ fn se_backward_matches_finite_differences() {
         let ctx = Ctx::new(&gpu, zipdepth::net::ids());
         let se = ChannelAttention::new(&ctx, "se", shape);
         let tot = shape.numel() as usize;
-        let r = Lcg::new(55).vec(tot);
+        let r = Lcg::new(random_seed()).vec(tot);
 
         let xb = gpu.storage_init("x", &x);
         se.forward(&ctx, &ps, &xb);
@@ -96,7 +96,7 @@ fn se_backward_matches_finite_differences() {
         for wname in ["se.fc.0.weight", "se.fc.2.weight"] {
             let g = gpu.read(ps.g(wname), ps.numel(wname));
             let n = g.len();
-            let dir: Vec<f32> = Lcg::new(7).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+            let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
             let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
             let w0 = gpu.read(ps.w(wname), n);
             let eps = 5e-4f32;
@@ -116,7 +116,7 @@ fn se_backward_matches_finite_differences() {
         // ...and d_in, which sums TWO paths (the pool and the multiply). A missing
         // path here is the classic SE bug and the weight grads would not catch it.
         let dg = gpu.read(&d_in, tot);
-        let dir: Vec<f32> = Lcg::new(8).vec(tot).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(random_seed()).vec(tot).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = dg.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let eps = 5e-4f32;
         let lp = {

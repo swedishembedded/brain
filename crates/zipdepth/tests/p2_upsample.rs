@@ -6,7 +6,7 @@
 //! The decoder's tail, and the only block whose two variants are DIFFERENT
 //! ARCHITECTURES rather than two implementations — the two released checkpoints
 //! differ by exactly this.
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use std::collections::HashMap;
 
 use zipdepth::blocks::{FastConvexUpsample, UpsampleKind};
@@ -133,7 +133,7 @@ fn convex_upsample_of_a_constant_depth_is_that_constant() {
     let ps = store(&gpu, probe.param_list(), 97);
     let m = FastConvexUpsample::new(&ctx, "u", UpsampleKind::Unfold, feat, d, 2, 1.0, true);
 
-    let fb = gpu.storage_init("f", &Lcg::new(0xE1).vec(feat.numel() as usize));
+    let fb = gpu.storage_init("f", &Lcg::new(random_seed()).vec(feat.numel() as usize));
     // A positive constant, so the final ReLU is the identity here.
     let db = gpu.storage_init("d", &vec![2.5f32; d.numel() as usize]);
     m.forward(&ctx, &ps, &fb, &db);
@@ -154,7 +154,7 @@ fn blend_upsample_of_a_constant_depth_is_that_constant() {
     let ps = store(&gpu, probe.param_list(), 101);
     let m = FastConvexUpsample::new(&ctx, "u", UpsampleKind::Blend, feat, d, 2, 1.0, true);
 
-    let fb = gpu.storage_init("f", &Lcg::new(0xE2).vec(feat.numel() as usize));
+    let fb = gpu.storage_init("f", &Lcg::new(random_seed()).vec(feat.numel() as usize));
     let db = gpu.storage_init("d", &vec![1.75f32; d.numel() as usize]);
     m.forward(&ctx, &ps, &fb, &db);
     let out = gpu.read(m.out(), m.out_shape.numel() as usize);
@@ -163,17 +163,18 @@ fn blend_upsample_of_a_constant_depth_is_that_constant() {
     }
 }
 
-fn fd_both(kind: UpsampleKind, seed: u64, weights: &[&str]) {
+fn fd_both(kind: UpsampleKind, weights: &[&str]) {
+    let mut rng = Lcg::new(random_seed());
     let (feat, d) = (Shape::new(2, 16, 4, 3), Shape::new(2, 1, 4, 3));
     let gpu = Gpu::new_cpu(zipdepth::net::PIPELINES);
     let ctx = Ctx::new(&gpu, zipdepth::net::ids());
     let probe = FastConvexUpsample::new(&ctx, "u", kind, feat, d, 2, 1.0, true);
-    let ps = store(&gpu, probe.param_list(), seed);
+    let ps = store(&gpu, probe.param_list(), random_seed());
     let m = FastConvexUpsample::new(&ctx, "u", kind, feat, d, 2, 1.0, true);
     let no = m.out_shape.numel() as usize;
-    let fv = Lcg::new(0xF1 ^ seed).vec(feat.numel() as usize);
+    let fv = rng.vec(feat.numel() as usize);
     // Strictly positive: keeps the output off the final ReLU's kink.
-    let dv: Vec<f32> = Lcg::new(0xF2 ^ seed).vec(d.numel() as usize).iter().map(|v| 2.0 + 0.3 * v).collect();
+    let dv: Vec<f32> = rng.vec(d.numel() as usize).iter().map(|v| 2.0 + 0.3 * v).collect();
     // The loss weights are CENTERED, and that is not cosmetic. `out` here is ~2.0
     // everywhere (a depth map, not a zero-mean feature map), so an uncentered `r`
     // makes the loss ~= 2.0 * sum(r) — measured at -87.74, whose f32 ULP is 7.6e-6.
@@ -182,7 +183,7 @@ fn fd_both(kind: UpsampleKind, seed: u64, weights: &[&str]) {
     // multiple of the ULP: pure quantization, converging to the analytic only once
     // eps reaches 1e-2. Centering `r` removes the constant that carries no gradient
     // and restores ~4 orders of FD headroom.
-    let raw = Lcg::new(0xF3 ^ seed).vec(no);
+    let raw = rng.vec(no);
     let mean = raw.iter().sum::<f32>() / raw.len() as f32;
     let r: Vec<f32> = raw.iter().map(|v| v - mean).collect();
 
@@ -205,7 +206,7 @@ fn fd_both(kind: UpsampleKind, seed: u64, weights: &[&str]) {
     for w in weights {
         let g = gpu.read(ps.g(w), ps.numel(w));
         let n = g.len();
-        let dir: Vec<f32> = Lcg::new(3).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = gpu.read(ps.w(w), n);
         let eps = 5e-4f32;
@@ -245,14 +246,13 @@ fn fd_both(kind: UpsampleKind, seed: u64, weights: &[&str]) {
 
 #[test]
 fn unfold_backward_matches_finite_differences() {
-    fd_both(UpsampleKind::Unfold, 103, &["u.mask_pred.0.weight", "u.mask_pred.3.weight", "u.mask_pred.3.bias"]);
+    fd_both(UpsampleKind::Unfold, &["u.mask_pred.0.weight", "u.mask_pred.3.weight", "u.mask_pred.3.bias"]);
 }
 
 #[test]
 fn blend_backward_matches_finite_differences() {
     fd_both(
         UpsampleKind::Blend,
-        107,
         &["u.where_conv.0.weight", "u.where_conv.3.weight", "u.where_conv.6.weight", "u.where_conv.1.weight"],
     );
 }

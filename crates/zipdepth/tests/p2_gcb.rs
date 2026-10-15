@@ -5,7 +5,7 @@
 //!
 //! The first block with BIASED convs, and the one that consumes `weighted_gap` /
 //! `add_chan_bcast` — the two kernels written specifically for its bmm and residual.
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use std::collections::HashMap;
 
 use zipdepth::blocks::GlobalContextBlock;
@@ -95,8 +95,9 @@ fn gcb_context_is_per_image() {
     let per = (shape.c * shape.h * shape.w) as usize;
 
     // Image 0 gets a distinctive input; image 1 gets zeros.
+    let image0 = Lcg::new(random_seed()).vec(per);
     let mut x = vec![0.0f32; shape.numel() as usize];
-    x[..per].copy_from_slice(&Lcg::new(5).vec(per));
+    x[..per].copy_from_slice(&image0);
     let xb = gpu.storage_init("x", &x);
     g.forward(&ctx, &ps, &xb);
     let out = gpu.read(g.out(), shape.numel() as usize);
@@ -106,10 +107,10 @@ fn gcb_context_is_per_image() {
     // show up here.
     let solo = {
         let mut x1 = vec![0.0f32; shape.numel() as usize];
-        x1[..per].copy_from_slice(&Lcg::new(5).vec(per));
+        x1[..per].copy_from_slice(&image0);
         // Same image 0, but now duplicated into slot 1 — if contexts were shared,
         // image 1's output would be unchanged from the run above.
-        x1[per..].copy_from_slice(&Lcg::new(5).vec(per));
+        x1[per..].copy_from_slice(&image0);
         let xb = gpu.storage_init("x1", &x1);
         g.forward(&ctx, &ps, &xb);
         gpu.read(g.out(), shape.numel() as usize)
@@ -125,7 +126,7 @@ fn gcb_weight_grads_match_finite_differences() {
     let ctx = Ctx::new(&gpu, zipdepth::net::ids());
     let m = GlobalContextBlock::new(&ctx, "g", shape, 4, true);
     let tot = shape.numel() as usize;
-    let r = Lcg::new(53).vec(tot);
+    let r = Lcg::new(random_seed()).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);
@@ -157,7 +158,7 @@ fn gcb_weight_grads_match_finite_differences() {
     ] {
         let g = gpu.read(ps.g(wname), ps.numel(wname));
         let n = g.len();
-        let dir: Vec<f32> = Lcg::new(3).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = gpu.read(ps.w(wname), n);
         let eps = 5e-4f32;
@@ -184,7 +185,7 @@ fn gcb_input_grad_matches_finite_differences_elementwise() {
     let ctx = Ctx::new(&gpu, zipdepth::net::ids());
     let m = GlobalContextBlock::new(&ctx, "g", shape, 4, true);
     let tot = shape.numel() as usize;
-    let r = Lcg::new(59).vec(tot);
+    let r = Lcg::new(random_seed()).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);
@@ -249,7 +250,7 @@ fn gcb_two_biases_are_provably_dead() {
     let ctx = Ctx::new(&gpu, zipdepth::net::ids());
     let m = GlobalContextBlock::new(&ctx, "g", shape, 4, true);
     let tot = shape.numel() as usize;
-    let r = Lcg::new(53).vec(tot);
+    let r = Lcg::new(random_seed()).vec(tot);
 
     let loss = |gpu: &Gpu, ps: &ParamStore| -> f32 {
         let ctx = Ctx::new(gpu, zipdepth::net::ids());

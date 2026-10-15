@@ -16,7 +16,7 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu`.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use std::collections::HashMap;
 
 use zipdepth::blocks::QARepBlock;
@@ -130,7 +130,7 @@ fn qarep_backward_matches_finite_differences() {
         let ctx = Ctx::new(&fix.gpu, zipdepth::net::ids());
         let b = QARepBlock::new(&ctx, "b", in_shape, cout, stride, true);
         let out_n = b.out_shape.numel() as usize;
-        let r = Lcg::new(77).vec(out_n);
+        let r = Lcg::new(random_seed()).vec(out_n);
 
         let xb = fix.gpu.storage_init("x", &fix.x);
         b.forward(&ctx, &fix.ps, &xb);
@@ -143,7 +143,7 @@ fn qarep_backward_matches_finite_differences() {
         let wname = "b.branch_3x3.0.weight";
         let g = fix.gpu.read(fix.ps.g(wname), fix.ps.numel(wname));
         let n = g.len();
-        let dir: Vec<f32> = Lcg::new(5).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, c)| a * c).sum();
 
         let w0 = fix.gpu.read(fix.ps.w(wname), n);

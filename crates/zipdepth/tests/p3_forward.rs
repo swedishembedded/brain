@@ -9,7 +9,7 @@
 //! compose into one graph that produces a depth map at the input resolution,
 //! finite and non-negative, on both backends.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use zipdepth::{ZipConfig, ZipDepth};
 use gpu_core::Gpu;
 use paramstore::ParamStore;
@@ -43,7 +43,7 @@ fn forward_produces_a_depth_map_at_input_resolution() {
     m.set_eval(true);
     let ps = init_store(&gpu, &m);
 
-    let x = gpu.storage_init("x", &Lcg::new(1).vec(m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
+    let x = gpu.storage_init("x", &Lcg::new(random_seed()).vec(m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
     m.forward(&ctx, &ps, &x);
     let out = gpu.read(m.out(), m.out_shape.numel() as usize);
 
@@ -69,7 +69,7 @@ fn both_upsampler_variants_run() {
         let m = ZipDepth::build(&ctx, cfg, 1, false);
         m.set_eval(true);
         let ps = init_store(&gpu, &m);
-        let x = gpu.storage_init("x", &Lcg::new(7).vec(m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
+        let x = gpu.storage_init("x", &Lcg::new(random_seed()).vec(m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
         m.forward(&ctx, &ps, &x);
         let out = gpu.read(m.out(), m.out_shape.numel() as usize);
         assert!(out.iter().all(|v| v.is_finite() && *v >= 0.0), "unfold={unfold}: contract violated");
@@ -89,11 +89,11 @@ fn backward_runs_and_reaches_every_parameter() {
     let m = ZipDepth::build(&ctx, tiny(), 2, true);
     let ps = init_store(&gpu, &m);
 
-    let x = gpu.storage_init("x", &Lcg::new(3).vec(m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
+    let x = gpu.storage_init("x", &Lcg::new(random_seed()).vec(m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
     m.forward(&ctx, &ps, &x);
     ps.zero_grads(&gpu);
     // A non-degenerate upstream grad.
-    let d = gpu.storage_init("d", &Lcg::new(5).vec(m.out_shape.numel() as usize));
+    let d = gpu.storage_init("d", &Lcg::new(random_seed()).vec(m.out_shape.numel() as usize));
     m.backward(&ctx, &ps, &x, &d);
 
     // Every conv WEIGHT must have a finite gradient, and at least most must be

@@ -23,7 +23,7 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu` (test 3 needs a real GPU and skips without one).
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use std::collections::HashMap;
 
 use gpu_core::Gpu;
@@ -154,8 +154,8 @@ fn fused_eval_matches_unfused_reference() {
     let plain_gpu = Gpu::new_cpu(&plain);
     let plain_ids = ConvKernelIds::resolve(&plain);
     let in_shape = Shape::new(2, 8, 12, 12); // n=2: catches a per-image indexing slip
-    for (i, spec) in dense_specs().into_iter().enumerate() {
-        let seed = 11 + i as u64;
+    for spec in dense_specs() {
+        let seed = random_seed();
         let f = eval_forward(&fused_gpu, zipdepth::net::ids(), in_shape, spec, seed);
         let u = eval_forward(&plain_gpu, &plain_ids, in_shape, spec, seed);
         assert_eq!(f.len(), u.len());
@@ -182,6 +182,7 @@ fn fused_eval_gpu_matches_cpu() {
     let cpu = Gpu::new_cpu(zipdepth::net::PIPELINES);
     let in_shape = Shape::new(1, 8, 12, 12);
     for (i, spec) in dense_specs().into_iter().enumerate() {
+        // seed: GPU-vs-CPU parity inputs; the tolerance was measured at these exact draws and the WGSL run is too heavy to re-sweep.
         let seed = 29 + i as u64;
         let g = eval_forward(&gpu, zipdepth::net::ids(), in_shape, spec, seed);
         let c = eval_forward(&cpu, zipdepth::net::ids(), in_shape, spec, seed);
@@ -239,15 +240,14 @@ fn qarep_fused_eval_matches_unfused() {
         gpu.read(blk.out(), blk.out_shape.numel() as usize)
     };
 
-    for (i, (in_shape, cout, stride)) in [
+    for (in_shape, cout, stride) in [
         (Shape::new(2, 12, 10, 14), 12, 1), // residual: identity branch live
         (Shape::new(2, 12, 10, 14), 20, 1), // channel change: no identity
         (Shape::new(2, 12, 10, 14), 24, 2), // downsample
     ]
     .into_iter()
-    .enumerate()
     {
-        let seed = 101 + i as u64;
+        let seed = random_seed();
         let f = block_forward(&fused_gpu, zipdepth::net::ids(), in_shape, cout, stride, seed, true);
         let u = block_forward(&plain_gpu, &plain_ids, in_shape, cout, stride, seed, false);
         assert_eq!(f.len(), u.len());
@@ -292,6 +292,7 @@ fn grouped_reg_conv_gpu_matches_cpu() {
         },
     ];
     for (i, spec) in specs.into_iter().enumerate() {
+        // seed: GPU-vs-CPU parity inputs; the tolerance was measured at these exact draws and the WGSL run is too heavy to re-sweep.
         let seed = 71 + i as u64;
         let g = eval_forward(&gpu, zipdepth::net::ids(), in_shape, spec, seed);
         let c = eval_forward(&cpu, zipdepth::net::ids(), in_shape, spec, seed);

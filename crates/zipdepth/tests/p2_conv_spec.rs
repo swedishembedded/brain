@@ -17,7 +17,7 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu`.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use std::collections::HashMap;
 
 use gpu_core::Gpu;
@@ -108,7 +108,7 @@ fn grouped_relu_conv_backward_matches_finite_differences() {
     for (tag, in_shape, spec) in cases {
         let (fix, spec) = Fix::new(in_shape, spec, 11);
         let out_n = spec.out_shape(in_shape).numel() as usize;
-        let r = Lcg::new(99).vec(out_n);
+        let r = Lcg::new(random_seed()).vec(out_n);
 
         // Analytic dW.
         let ctx = Ctx::new(&fix.gpu, zipdepth::net::ids());
@@ -125,7 +125,7 @@ fn grouped_relu_conv_backward_matches_finite_differences() {
         // uses: it averages per-element round-off into one well-conditioned
         // number instead of probing 1e3 elements individually).
         let n = g.len();
-        let dir: Vec<f32> = Lcg::new(123).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = fix.gpu.read(fix.ps.w("c.conv.weight"), n);
         let eps = 5e-4f32;

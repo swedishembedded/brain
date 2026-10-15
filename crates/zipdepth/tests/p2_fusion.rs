@@ -5,7 +5,7 @@
 //!
 //! The multi-scale family. Two of the three take TWO inputs, so the interesting
 //! failure is a gradient that reaches one input and not the other.
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use std::collections::HashMap;
 
 use zipdepth::blocks::{lightweight_sppf, MinimalCrossScale, UltraLightFusion};
@@ -37,7 +37,7 @@ fn store(gpu: &Gpu, params: Vec<(String, usize)>, seed: u64) -> ParamStore {
 fn fd_check(gpu: &Gpu, ps: &ParamStore, wname: &str, loss: &dyn Fn(&Gpu, &ParamStore) -> f32) {
     let g = gpu.read(ps.g(wname), ps.numel(wname));
     let n = g.len();
-    let dir: Vec<f32> = Lcg::new(3).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+    let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
     let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
     let w0 = gpu.read(ps.w(wname), n);
     let eps = 5e-4f32;
@@ -131,8 +131,8 @@ fn lightweight_sppf_backward_matches_finite_differences() {
     let ps = store(&gpu, probe.param_list(), 61);
     let m = lightweight_sppf(&ctx, "s", shape, 8, true);
     let tot = shape.numel() as usize;
-    let x = Lcg::new(0xAB).vec(tot);
-    let r = Lcg::new(67).vec(tot);
+    let x = Lcg::new(random_seed()).vec(tot);
+    let r = Lcg::new(random_seed()).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);
@@ -260,10 +260,10 @@ fn cross_scale_both_inputs_get_gradients_from_both_outputs() {
     let ps = store(&gpu, probe.param_list(), 71);
     let m = MinimalCrossScale::new(&ctx, "m", high, low, true);
     let (nh, nl) = (high.numel() as usize, low.numel() as usize);
-    let xh = Lcg::new(0xC1).vec(nh);
-    let xl = Lcg::new(0xC2).vec(nl);
-    let rh = Lcg::new(73).vec(nh);
-    let rl = Lcg::new(79).vec(nl);
+    let xh = Lcg::new(random_seed()).vec(nh);
+    let xl = Lcg::new(random_seed()).vec(nl);
+    let rh = Lcg::new(random_seed()).vec(nh);
+    let rl = Lcg::new(random_seed()).vec(nl);
 
     let xhb = gpu.storage_init("xh", &xh);
     let xlb = gpu.storage_init("xl", &xl);
@@ -374,9 +374,9 @@ fn fusion_backward_matches_finite_differences() {
     let m = UltraLightFusion::new(&ctx, "f", high, low, 4, true);
     let (nh, nl) = (high.numel() as usize, low.numel() as usize);
     let no = m.out_shape.numel() as usize;
-    let xh = Lcg::new(0xD1).vec(nh);
-    let xl = Lcg::new(0xD2).vec(nl);
-    let r = Lcg::new(89).vec(no);
+    let xh = Lcg::new(random_seed()).vec(nh);
+    let xl = Lcg::new(random_seed()).vec(nl);
+    let r = Lcg::new(random_seed()).vec(no);
 
     let xhb = gpu.storage_init("xh", &xh);
     let xlb = gpu.storage_init("xl", &xl);

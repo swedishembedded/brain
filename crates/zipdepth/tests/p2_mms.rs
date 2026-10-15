@@ -5,7 +5,7 @@
 //!
 //! The block that forced `vision::BatchNorm` to exist: its BN spans the SUM of two
 //! convs, which a unit whose BN is welded to one conv cannot express.
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use std::collections::HashMap;
 use zipdepth::blocks::MinimalMultiScale;
 use gpu_core::Gpu;
@@ -70,7 +70,7 @@ fn mms_backward_matches_finite_differences() {
     let ctx = Ctx::new(&gpu, zipdepth::net::ids());
     let m = MinimalMultiScale::new(&ctx, "m", shape, true);
     let tot = shape.numel() as usize;
-    let r = Lcg::new(41).vec(tot);
+    let r = Lcg::new(random_seed()).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);
@@ -91,7 +91,7 @@ fn mms_backward_matches_finite_differences() {
     for wname in ["m.branch1.weight", "m.branch2.weight", "m.bn.weight"] {
         let g = gpu.read(ps.g(wname), ps.numel(wname));
         let n = g.len();
-        let dir: Vec<f32> = Lcg::new(3).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = gpu.read(ps.w(wname), n);
         let eps = 5e-4f32;
