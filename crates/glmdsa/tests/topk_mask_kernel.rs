@@ -64,7 +64,7 @@ fn run(g: &Gpu, bsz: usize, t_len: usize, index_topk: u32, scores_h: &[f32]) -> 
 fn topk_mask_matches_host_oracle_at_a_nontrivial_row_length() {
     let g = gpu_core::testgpu::dev(glmdsa::model::PIPELINES);
     let (bsz, t_len) = (1usize, 100usize);
-    let mut rng = Lcg::new(20260902);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let scores_h: Vec<f32> = (0..bsz * t_len * t_len).map(|_| rng.scaled(2.0) - 1.0).collect();
 
     for &index_topk in &[3u32, 17, 64, 999] {

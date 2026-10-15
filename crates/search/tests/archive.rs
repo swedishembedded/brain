@@ -103,7 +103,7 @@ fn selection_favours_the_rarely_visited() {
     for i in 0..8 {
         a.offer(niche(&[i, 0]), Worth::new(0.5, 100), i as u32);
     }
-    let mut rng = Rng::new(11);
+    let mut rng = Rng::new(data::rng::random_seed());
     let mut drawn = [0u32; 8];
     for _ in 0..4_000 {
         let n = a.pick(&mut rng).expect("archive is not empty");
@@ -133,7 +133,7 @@ fn selection_strongly_prefers_what_has_achieved_most() {
     for i in 1..=200 {
         a.offer(niche(&[i, 1]), Worth::new(0.25, 100), i as u32);
     }
-    let mut rng = Rng::new(5);
+    let mut rng = Rng::new(data::rng::random_seed());
     let mut leader = 0u32;
     for _ in 0..4_000 {
         if a.pick(&mut rng).expect("not empty").niche.parts()[1] == 0 {
@@ -155,7 +155,7 @@ fn selection_strongly_prefers_what_has_achieved_most() {
     for i in 1..=200 {
         flat.offer(niche(&[i, 1]), Worth::new(0.25, 100), i as u32);
     }
-    let mut rng = Rng::new(5);
+    let mut rng = Rng::new(data::rng::random_seed());
     let mut flat_leader = 0u32;
     for _ in 0..4_000 {
         if flat.pick(&mut rng).expect("not empty").niche.parts()[1] == 0 {
@@ -175,7 +175,7 @@ fn a_far_worse_cell_is_still_drawn() {
     let mut a: Archive<u32> = Archive::new(16, TOL);
     a.offer(niche(&[0]), Worth::new(1.0, 100), 0);
     a.offer(niche(&[1]), Worth::new(0.01, 100), 1);
-    let mut rng = Rng::new(7);
+    let mut rng = Rng::new(data::rng::random_seed());
     let mut poor = 0;
     for _ in 0..4_000 {
         if a.pick(&mut rng).expect("not empty").niche.parts()[0] == 1 {
@@ -193,7 +193,7 @@ fn selection_prefers_worth_without_cutting_anything_off() {
     let mut a: Archive<u32> = Archive::new(64, TOL);
     a.offer(niche(&[0, 0]), Worth::new(1.0, 100), 0);
     a.offer(niche(&[1, 0]), Worth::new(0.0, 100), 1);
-    let mut rng = Rng::new(3);
+    let mut rng = Rng::new(data::rng::random_seed());
     let (mut rich, mut poor) = (0u32, 0u32);
     for _ in 0..2_000 {
         match a.pick(&mut rng).expect("not empty").niche.parts()[0] {
@@ -285,7 +285,7 @@ fn an_archive_round_trips_through_json() {
     let mut a: Archive<String> = Archive::new(16, TOL);
     a.offer(niche(&[1, 2, 3]), Worth::new(0.75, 640), "a trail".to_string());
     a.offer(niche(&[4, 5, 6]), Worth::new(0.25, 120), "another".to_string());
-    let mut rng = Rng::new(1);
+    let mut rng = Rng::new(data::rng::random_seed());
     a.pick(&mut rng);
     let text = a.to_json().expect("an archive serialises");
     let back: Archive<String> = Archive::from_json(&text).expect("and comes back");
@@ -334,7 +334,7 @@ fn the_edge_of_what_has_been_reached_is_preferred_to_the_middle_of_it() {
     assert_eq!(a.get(&hemmed_in).map(|e| e.visits), Some(0));
     assert_eq!(a.get(&alone).map(|e| e.visits), Some(0));
 
-    let mut rng = Rng::new(7);
+    let mut rng = Rng::new(data::rng::random_seed());
     let (mut edge, mut middle) = (0, 0);
     for _ in 0..4_000 {
         let drawn = a.pick(&mut rng).map(|e| e.niche.clone()).expect("the archive is not empty");
@@ -363,7 +363,7 @@ fn naming_no_axes_leaves_selection_alone() {
         a
     };
     let mut plain = build(&[]);
-    let mut rng = Rng::new(7);
+    let mut rng = Rng::new(data::rng::random_seed());
     let mut lone = 0;
     for _ in 0..4_000 {
         if plain.pick(&mut rng).map(|e| e.niche.clone()) == Some(Niche::new(&[40, 0])) {

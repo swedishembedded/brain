@@ -153,9 +153,9 @@ mod kv_gen_tests {
         let model = Glm::new_on(gpu_core::testgpu::dev(crate::model::PIPELINES), cfg.clone(), 1, 64, &init);
         let mut compared = 0usize;
         for prompt in [vec![1u32, 5, 3], vec![2u32, 6, 4, 1, 7, 3, 5]] {
-            let mut r1 = data::rng::Rng::new(0);
+            let mut r1 = data::rng::Rng::new(data::rng::random_seed());
             let recompute = generate(&model, &prompt, 32, 0.0, 0, None, &mut r1);
-            let mut r2 = data::rng::Rng::new(0);
+            let mut r2 = data::rng::Rng::new(data::rng::random_seed());
             let kv = generate_kv(&model, &prompt, 32, 0.0, 0, None, &mut r2);
             assert_eq!(recompute, kv, "KV greedy generation must equal recompute generation for prompt {prompt:?}");
             compared += recompute.len();
@@ -179,9 +179,10 @@ mod kv_gen_tests {
         let prompt = vec![2u32, 6, 4, 1, 7, 3, 5];
         let max_new = 32;
 
-        let mut r1 = data::rng::Rng::new(42);
+        let seed = data::rng::random_seed();
+        let mut r1 = data::rng::Rng::new(seed);
         let run1 = generate_kv(&model, &prompt, max_new, 0.8, 40, None, &mut r1);
-        let mut r2 = data::rng::Rng::new(42);
+        let mut r2 = data::rng::Rng::new(seed);
         let run2 = generate_kv(&model, &prompt, max_new, 0.8, 40, None, &mut r2);
 
         println!("generate_kv_sampled_path_is_well_formed_and_self_reproducible: {} tokens/run, vocab={vocab}", run1.len());
