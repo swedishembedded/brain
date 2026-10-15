@@ -76,6 +76,17 @@ impl WeightedCe {
         &self.d_logits_weighted
     }
 
+    /// The `[n]` per-position weight row, for a head that applies the weights
+    /// itself (`crate::head_ce::RowWeights`).
+    pub fn weights(&self) -> &DeviceBuffer {
+        &self.loss_weights
+    }
+
+    /// The `[rows, v]` scratch the weighted CE gradient is written to.
+    pub fn scratch(&self) -> &DeviceBuffer {
+        &self.d_logits_weighted
+    }
+
     /// Write the per-position CE-gradient weights (`[n]`) for the next
     /// backward.
     pub fn write(&self, gpu: &Gpu, weights: &[f32]) {

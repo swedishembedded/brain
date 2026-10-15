@@ -42,6 +42,7 @@ pub mod gdn_mixer;
 pub mod gdn_segment;
 pub mod gqa_mixer;
 pub mod grid;
+pub mod head_ce;
 /// bf16 pack/unpack (B4's storage tier) - see this module's own doc comment.
 pub mod half;
 pub mod hostmath;

@@ -178,7 +178,7 @@ fn head_bytes(cfg: &QwenConfig, shard: &Shard, n: u64, train: bool, decode_only:
         return 0;
     }
     let v = cfg.vocab as u64;
-    let one = crate::model::head_chunk_rows(n, v, model::block::tile_budget_words_upper_bound()) * v * 4;
+    let one = model::head_ce::rows_for_budget(n, v, model::block::tile_budget_words_upper_bound()) * v * 4;
     if train {
         one * 2
     } else {

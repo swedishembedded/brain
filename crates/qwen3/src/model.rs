@@ -27,6 +27,7 @@ use serde_json::Value;
 use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
+use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
 use model::ops::{Act, Ops, Weight};
 pub use model::Shard;
 use optim::Optim;
@@ -648,7 +649,9 @@ pub struct Qwen {
     /// paths are the fast CPU route anyway).
     coop: bool,
     xn_final: DeviceBuffer,
-    logits: DeviceBuffer,
+    /// The chunked LM-head cross-entropy (`model::head_ce`); `None` off the head
+    /// stage and on a decode-only build, which hold no logits.
+    head_ce: Option<HeadCe>,
     /// `[vocab]` output for the DEVICE decode head ([`Qwen::decode_logits`]),
     /// allocated on first use. Deliberately NOT the batched `logits` slab
     /// above: that one is `n · vocab` and is a size-1 dummy on a decode-only
@@ -660,14 +663,8 @@ pub struct Qwen {
 
     // backward temporaries
     dres: Vec<DeviceBuffer>,
-    d_logits: DeviceBuffer,
-    /// Dense scratch for one pass of a vocab-tiled head (`head_tile_passes`).
-    head_tile: DeviceBuffer,
-    /// Columns of a vocab tile one pass covers: `head_tile` holds `rows x head_tile_cols`.
-    head_tile_cols: u32,
     /// The vocab tiles of the embedding and head, decided at build.
     vocab_tiles: Vec<(u32, u32)>,
-    ce_stats: DeviceBuffer,
     d_xn: DeviceBuffer,
     d_tmp: DeviceBuffer,
     dxmid: DeviceBuffer,
@@ -697,7 +694,7 @@ pub struct Qwen {
     bwd_steps: Tape,
     /// `[1]`: `1/count` for the current batch, the CE gradient's scale.
     inv_count: DeviceBuffer,
-    /// Rows of logits the head holds at once ([`head_chunk_rows`]).
+    /// Rows of logits the head holds at once (`model::head_ce::rows_for_budget`).
     head_rows: u32,
     /// The flash-attention training kernels, where this is a training build
     /// on a device that runs them; `None` uses the materialised chain.
@@ -827,18 +824,6 @@ impl KvCache {
     }
 }
 
-/// Rows of logits the LM head materialises at once, for `n` rows over a
-/// `v`-wide vocab: all of them when `n·v` fits the binding budget, else the
-/// most that do, in whole [`HEAD_ROW_ALIGN`] groups so every chunk's row
-/// offset into `targets`/`ce_buf`/`ce_stats`/`xn_final` is a legal binding
-/// offset.
-pub(crate) fn head_chunk_rows(n: u64, v: u64, budget_words: u64) -> u64 {
-    if n * v <= budget_words {
-        return n;
-    }
-    (budget_words / v / HEAD_ROW_ALIGN * HEAD_ROW_ALIGN).max(HEAD_ROW_ALIGN).min(n)
-}
-
 /// The layer of `name` when it is one of a block's seven linears
 /// (`blocks.<l>.attn.{wq,wk,wv,wo}.weight`, `blocks.<l>.mlp.{gate,up,down}.weight`)
 /// in an `n_layers`-deep model - the tensors a LoRA adapter may correct.
@@ -848,10 +833,6 @@ fn linear_layer(name: &str, n_layers: u32) -> Option<usize> {
     let layer: u32 = layer.parse().ok()?;
     (layer < n_layers && LEAVES.contains(&leaf)).then_some(layer as usize)
 }
-
-/// Row granularity of a logits chunk: 64 rows of a `u32`/`f32` per-row buffer
-/// is 256 B, the storage-binding offset alignment.
-const HEAD_ROW_ALIGN: u64 = 64;
 
 /// A declared RoPE scaling, uploaded once: the per-channel `inv_freq` table,
 /// the attention factor every cos/sin is scaled by, and the one-element
@@ -1314,16 +1295,10 @@ impl Qwen {
         // The LM head's logits live one row chunk at a time (`head_chunks`):
         // `n·vocab` floats is 9.9 GB at 16k tokens and vocab 152k, past both
         // the storage-binding limit and any sensible share of the card.
-        let head_rows = head_chunk_rows(n, v, block::tile_budget_words_for(&gpu));
-        // A head whose vocab needs several storage bindings runs one pass per
-        // run of columns of each vocab tile, through a dense scratch of
-        // `rows x head_tile_cols` - a quarter of the tile budget - so the
-        // passes use the GEMM kernels an untiled head does.
-        let head_tile_cols = (((block::tile_budget_words_for(&gpu) / 4) / (head_rows as u64).max(1)).max(64) & !63) as u32;
+        let head_rows = model::head_ce::rows_for_budget(n, v, block::tile_budget_words_for(&gpu));
         // A packed table's rows are `d / 2` words, so it tiles (and, below
         // the binding limit, does not) by that width.
         let vocab_tiles = block::vocab_tiles_on(&gpu, v, if half_tables { d / 2 } else { d });
-        let head_tile = if vocab_tiles.len() > 1 { hd_or_dummy(head_rows as u64 * head_tile_cols as u64) } else { st(1) };
         // Backward scratch: read only by `build_backward_steps`/`backward`,
         // which never run unless `train`. The old gate here was
         // `decode_only` alone, so a batched forward-only build
@@ -1425,6 +1400,27 @@ impl Qwen {
         let chunk_blocks = st(n);
         gpu.write(&chunk_blocks, &vec![0u32; n as usize]);
         let attn_stat_len = if flash.is_some() { b as u64 * cfg.n_heads as u64 * t as u64 } else { 1 };
+        // The LM head over the (possibly bf16-packed) table, as a float-read
+        // `Weight` sharing the table's buffer.
+        let head_ce = (shard.head && !decode_only).then(|| {
+            let name = cfg.head_weight();
+            let table = tables.get(name).unwrap_or_else(|| ps.w(name)).clone();
+            let head = if half_tables { Weight::BF16 { w: table, n: v as u32, k: d as u32 } } else { Weight::F32 { w: table, n: v as u32, k: d as u32 } };
+            let kernels = HeadKernels {
+                ce_value: CE_VALUE,
+                ce_value_stats_rows: Some(CE_VALUE_STATS_ROWS),
+                ce_stats: CE_STATS,
+                ce_grad_stats: CE_GRAD_STATS,
+                grad_scale: GRAD_SCALE,
+                grad_scale_buf: GRAD_SCALE_BUF,
+                scale_row: SCALE_ROW,
+                copy_cols: COPY_COLS,
+                matmul_dw: MATMUL_DW,
+                matmul_dw_reg: Some(MATMUL_DW_REG),
+            };
+            HeadCe::new(&ops, d as u32, v as u32, &head, HeadCeConfig { rows_per_chunk: head_rows as u32, tile_budget_words: None }, kernels)
+                .unwrap_or_else(|e| panic!("qwen: LM head: {e}"))
+        });
         let mut m = Qwen {
             cfg,
             b,
@@ -1461,15 +1457,11 @@ impl Qwen {
             kmask_on: Cell::new(false),
             coop: gpu.caps().workgroup_reductions,
             xn_final: hd_v(n * d),
-            logits: hd_or_dummy(head_rows * v),
+            head_ce,
             dec_logits: std::cell::RefCell::new(None),
             ce_buf: hd_or_dummy(n),
             dres,
-            d_logits: hd_or_dummy(head_rows * v),
-            head_tile,
-            head_tile_cols,
             vocab_tiles,
-            ce_stats: hd_or_dummy(n * 2),
             d_xn: bwd(n * d),
             d_tmp: bwd(n * d),
             dxmid: bwd(n * d),
@@ -2097,11 +2089,7 @@ impl Qwen {
     fn forward_steps(&self, b_use: u32, t_use: u32) -> Tape {
         let mut tape = self.body_tape(b_use, t_use);
         if self.shard.head && !self.external_head.get() {
-            let v = self.cfg.vocab;
-            for (r0, rows) in self.head_chunks(b_use * t_use) {
-                tape.steps.extend(self.head_logits_steps(r0, rows));
-                tape.steps.push(self.ce_value_step(r0, rows, v));
-            }
+            self.head_ce().forward_steps(&self.ops, &mut tape.steps, &self.xn_final, b_use * t_use, &self.targets, &self.ce_buf, 1.0);
         }
         tape
     }
@@ -2276,75 +2264,9 @@ impl Qwen {
         }
     }
 
-    /// The per-row loss of logits chunk `r0..r0+rows` into `ce_buf`. Where the
-    /// device runs cooperative kernels, the same pass also leaves the rows'
-    /// softmax statistics in `ce_stats`, which the backward then reads
-    /// instead of walking the logits again ([`Self::ce_stats_in_forward`]).
-    fn ce_value_step(&self, r0: u32, rows: u32, v: u32) -> Step {
-        let rows_at = (r0 as u64, rows as u64);
-        if self.ce_stats_in_forward() {
-            let stats_at = (2 * r0 as u64, 2 * rows as u64);
-            return self.gpu.dispatch_sliced(CE_VALUE_STATS_ROWS, &[&self.logits, &self.targets, &self.ce_buf, &self.ce_stats], &[(0, 0), rows_at, rows_at, stats_at], &[rows, v, IGNORE], gpu_core::Dispatch::Workgroups(rows));
-        }
-        self.gpu.step_sliced(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[(0, 0), rows_at, rows_at], &[rows, v, IGNORE], rows)
-    }
-
-    /// Whether the forward's loss pass also writes `ce_stats`
-    /// (`ce_value_stats_rows`, a 256-thread cooperative kernel).
-    fn ce_stats_in_forward(&self) -> bool {
-        self.coop && self.gpu.caps().max_workgroup_size >= 256
-    }
-
-    /// The `(first row, rows)` logits chunks covering `n` head rows.
-    fn head_chunks(&self, n: u32) -> Vec<(u32, u32)> {
-        let rows = self.head_rows.max(1);
-        (0..n).step_by(rows as usize).map(|r0| (r0, rows.min(n - r0))).collect()
-    }
-
-    /// The LM head over rows `r0..r0+rows` of `xn_final`, into `logits` rows
-    /// `0..rows`. When the whole vocab fits one tile (`v0=0, cnt=v` - the
-    /// common case) it is a plain `[rows,d]·[v,d]ᵀ` matmul through the
-    /// size-adaptive fast kernel (`matmul_reg3`); only a weight that exceeds
-    /// a binding budget takes [`Self::head_logits_tiled_steps`].
-    /// The `(first column, columns)` passes that cover the vocab of a tiled
-    /// head: each vocab tile ([`Self::vocab_tiles`]) cut into runs of at most
-    /// `head_tile_cols` columns, so one pass's `rows x columns` block fits
-    /// `head_tile`. Every pass starts on a tile-row boundary: tiles do, and the
-    /// run length is a multiple of 64.
-    fn head_tile_passes(&self) -> Vec<(u32, u32)> {
-        let cols = self.head_tile_cols.max(1);
-        self.vocab_tiles().into_iter().flat_map(|(v0, cnt)| (0..cnt).step_by(cols as usize).map(move |c| (v0 + c, cols.min(cnt - c)))).collect()
-    }
-
-    /// The LM head of rows `r0..r0+rows` of `xn_final` when its vocab needs
-    /// several storage bindings: per pass, a GEMM of the rows against that
-    /// run of head rows into the dense `head_tile`, then the columns copied to
-    /// their place in `logits` rows `0..rows`.
-    fn head_logits_tiled_steps(&self, r0: u32, rows: u32) -> Vec<Step> {
-        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
-        let (dw, tw) = (d as u64, self.table_row_words());
-        let head = self.cfg.head_weight();
-        let x = (r0 as u64 * dw, rows as u64 * dw);
-        let mut s = Vec::new();
-        for (c0, c) in self.head_tile_passes() {
-            let (mk, mt) = linear_kernel(rows as usize, c as usize);
-            s.push(self.gpu.dispatch_sliced(self.table_gemm(mk), &[&self.xn_final, self.table(head), &self.head_tile], &[x, (c0 as u64 * tw, c as u64 * tw), (0, 0)], &[rows, d, c], mt));
-            s.push(self.gpu.step(COPY_COLS, &[&self.head_tile, &self.logits], &[rows, c, c, 0, v, c0], rows * c));
-        }
-        s
-    }
-
-    fn head_logits_steps(&self, r0: u32, rows: u32) -> Vec<Step> {
-        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
-        let dw = d as u64;
-        let head = self.cfg.head_weight();
-        let x = (r0 as u64 * dw, rows as u64 * dw);
-        let tiles = self.vocab_tiles();
-        if tiles.len() == 1 && tiles[0] == (0, v) {
-            let (mk, mt) = linear_kernel(rows as usize, v as usize);
-            return vec![self.gpu.dispatch_sliced(self.table_gemm(mk), &[&self.xn_final, self.table(head), &self.logits], &[x, (0, 0), (0, 0)], &[rows, d, v], mt)];
-        }
-        self.head_logits_tiled_steps(r0, rows)
+    /// The chunked LM head (head stage of a batched build).
+    fn head_ce(&self) -> &HeadCe {
+        self.head_ce.as_ref().expect("qwen: no LM head on this build (not the head stage, or decode-only)")
     }
 
     pub fn forward(&self) -> f32 {
@@ -2372,48 +2294,6 @@ impl Qwen {
         assert!(!self.decode_only, "Qwen::batch_token_logprobs: batched forward called on a decode-only-built model");
         let n = (self.b * self.t) as usize;
         self.gpu.read(&self.ce_buf, n).iter().map(|&nll| -nll).collect()
-    }
-
-    /// The LM head's backward over the `rows` rows of the logits gradient
-    /// `d_logits` (`[rows, vocab]`) that belong to rows `r0..` of `xn_final`
-    /// and `d_xn`: the input gradient `d_xn = d_logits · W` and, where the
-    /// head trains, `dW += d_logitsᵀ · xn_final`. A head that fits one
-    /// storage binding is two plain dispatches; a larger one (a 152k-token
-    /// vocabulary at d = 3584 is 2.18 GB of fp32 against a 2 GiB binding) is
-    /// applied a pass at a time, as the forward is: the pass's columns of
-    /// `d_logits` are copied into the dense `head_tile`, and the same GEMM
-    /// kernels an untiled head uses then bind only that run of rows of `W`
-    /// (and of `dW`).
-    fn head_bwd_steps(&self, d_logits: &DeviceBuffer, r0: u32, rows: u32) -> Vec<Step> {
-        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
-        let (dw, tw) = (d as u64, self.table_row_words());
-        let head = self.cfg.head_weight();
-        let x = (r0 as u64 * dw, rows as u64 * dw);
-        let tiles = self.vocab_tiles();
-        let mut s = Vec::new();
-        // The input gradient reads the table: through the bf16 kernel when it is packed.
-        let dx_kernel = |m: u32| if self.half_tables { self.bf16_dx(m, d) } else { dx_kernel_bw(m, d) };
-        if tiles.len() == 1 && tiles[0] == (0, v) {
-            if self.trainable(head) {
-                let (bk, bt) = dw_kernel_bw(v, d);
-                s.push(self.gpu.dispatch_sliced(bk, &[d_logits, &self.xn_final, self.g(head)], &[(0, 0), x, (0, 0)], &[rows, d, v], bt));
-            }
-            let (bk, bt) = dx_kernel(rows);
-            s.push(self.gpu.dispatch_sliced(bk, &[d_logits, self.table(head), &self.d_xn], &[(0, 0), (0, 0), x], &[rows, d, v, 0], bt));
-            return s;
-        }
-        for (i, (c0, c)) in self.head_tile_passes().into_iter().enumerate() {
-            let tile = (c0 as u64 * tw, c as u64 * tw);
-            let dwtile = (c0 as u64 * dw, c as u64 * dw);
-            s.push(self.gpu.step(COPY_COLS, &[d_logits, &self.head_tile], &[rows, c, v, c0, c, 0], rows * c));
-            if self.trainable(head) {
-                let (bk, bt) = dw_kernel_bw(c, d);
-                s.push(self.gpu.dispatch_sliced(bk, &[&self.head_tile, &self.xn_final, self.g(head)], &[(0, 0), x, dwtile], &[rows, d, c], bt));
-            }
-            let (bk, bt) = dx_kernel(rows);
-            s.push(self.gpu.dispatch_sliced(bk, &[&self.head_tile, self.table(head), &self.d_xn], &[(0, 0), tile, x], &[rows, d, c, (i > 0) as u32], bt));
-        }
-        s
     }
 
     pub fn backward(&self) {
@@ -2452,40 +2332,30 @@ impl Qwen {
         // ---- head + final norm ---- (head stage only; other stages receive
         // dres[end] from the next stage and start straight at the layer loop)
         if self.shard.head {
-            // One logits chunk at a time. A single chunk still holds what the
-            // forward wrote; with several, only the last does, so each is
-            // recomputed from `xn_final` first.
-            let chunks = if self.external_head.get() { Vec::new() } else { self.head_chunks(n) };
-            let recompute_logits = chunks.len() > 1;
-            for (r0, rows) in chunks {
-                if recompute_logits {
-                    s.extend(self.head_logits_steps(r0, rows));
-                }
-                let (tg, st2) = ((r0 as u64, rows as u64), (2 * r0 as u64, 2 * rows as u64));
-                // Two-pass CE gradient: per-row softmax stats ONCE (ce_stats),
-                // then the per-element gradient reads them - O(rows*vocab)
-                // instead of the naive per-element softmax recompute's
-                // O(rows*vocab^2). The stats come from the forward where it
-                // wrote them (`ce_value_step`) - the logits are the same. The
-                // kernel's own `1/count` is 1 here; the batch's count is
-                // applied by `grad_scale_buf` from `inv_count`, which
-                // `backward` writes, so the recorded steps never change with
-                // the batch.
-                if !self.ce_stats_in_forward() {
-                    s.push(self.gpu.step_sliced(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[(0, 0), tg, st2], &[rows, v, IGNORE], rows));
-                }
-                s.push(self.gpu.step_sliced(CE_GRAD_STATS, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], &[(0, 0), tg, st2, (0, 0)], &[rows, v, IGNORE, f(1.0)], rows * v));
-                s.push(self.gpu.step(GRAD_SCALE_BUF, &[&self.d_logits, &self.inv_count], &[rows * v], rows * v));
-                // `enable_weighted_loss()`-opt-in only: `WeightedCe::hook_rows`
-                // scales these rows of the CE gradient into its own scratch,
-                // and everything downstream reads THAT instead of the raw
-                // `d_logits`. An instance that never called
-                // `enable_weighted_loss` pays no extra dispatch.
-                let d_logits_bw: &DeviceBuffer = match &self.weighted_ce {
-                    Some(w) => w.hook_rows(&self.gpu, &mut s, SCALE_ROW, &self.d_logits, r0, rows),
-                    None => &self.d_logits,
-                };
-                s.extend(self.head_bwd_steps(d_logits_bw, r0, rows));
+            // One logits chunk at a time (`HeadCe`). A single chunk still holds
+            // what the forward wrote; with several, only the last does, so each
+            // is recomputed from `xn_final` first. The CE gradient's `1/count`
+            // is the per-batch `inv_count` the recorded steps read, so they
+            // never change with the batch. `enable_weighted_loss()` opts into
+            // scaling the rows' gradient by their weights.
+            if !self.external_head.get() {
+                let head = c.head_weight();
+                let row_weights = self.weighted_ce.as_ref().map(|w| RowWeights { weights: w.weights(), scratch: w.scratch() });
+                self.head_ce().backward_steps(
+                    &self.ops,
+                    &mut s,
+                    &HeadBackward {
+                        hidden: &self.xn_final,
+                        d_hidden: &self.d_xn,
+                        n,
+                        labels: &self.targets,
+                        grad_scale: GradScale::Buf(&self.inv_count),
+                        logit_scale: 1.0,
+                        row_weights,
+                        dw: self.trainable(head).then(|| self.g(head)),
+                        forward_state_held: true,
+                    },
+                );
             }
             let last = c.n_layers as usize;
             self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
@@ -2885,9 +2755,12 @@ impl Qwen {
         self.gpu.submit(&[], &self.body_steps(1, t_use));
         let v = self.cfg.vocab as usize;
         let mut out = Vec::with_capacity(t_use as usize * v);
-        for (r0, rows) in self.head_chunks(t_use) {
-            self.gpu.submit(&[], &self.head_logits_steps(r0, rows));
-            out.extend(self.gpu.read(&self.logits, rows as usize * v));
+        let head = self.head_ce();
+        for (r0, rows) in head.chunks(t_use) {
+            let mut steps = Vec::new();
+            head.logits_steps(&self.ops, &mut steps, &self.xn_final, r0, rows, 1.0);
+            self.gpu.submit(&[], &steps);
+            out.extend(self.gpu.read(head.logits(), rows as usize * v));
         }
         out
     }
@@ -4085,12 +3958,9 @@ mod tests {
         assert!(try_read(&dec.gpu, &dec.layers[0].probs, decode_shaped).is_some(), "probs must hold n_heads*ctx elements");
         assert!(try_read(&dec.gpu, &dec.layers[0].probs, prefill_shaped).is_none(), "probs must NOT be n_heads*ctx^2");
 
-        // No `logits`/`d_logits` buffers: dummy (size-1) even though this is a
-        // head-carrying (whole) shard, because the LM head is applied host-side.
-        assert!(try_read(&dec.gpu, &dec.logits, 1).is_some());
-        assert!(try_read(&dec.gpu, &dec.logits, cfg.vocab as usize).is_none(), "logits must be a size-1 dummy on a decode-only build");
-        assert!(try_read(&dec.gpu, &dec.d_logits, 1).is_some());
-        assert!(try_read(&dec.gpu, &dec.d_logits, cfg.vocab as usize).is_none(), "d_logits must be a size-1 dummy on a decode-only build");
+        // No LM-head scratch at all (no `logits`/`d_logits`): the head is
+        // applied host-side, even though this is a head-carrying (whole) shard.
+        assert!(dec.head_ce.is_none(), "a decode-only build must hold no chunked-head scratch");
 
         // The KV cache is the one allocation that DOES scale with ctx.
         let hkv = cfg.kv_dim() as usize;

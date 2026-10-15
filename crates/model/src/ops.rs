@@ -284,6 +284,9 @@ mod kname {
     pub const MATMUL_DX_NF4: &str = "matmul_dx#w=nf4";
     /// `matmul_dx_reg.wgsl` reading a NF4 weight: the tiled input gradient.
     pub const MATMUL_DX_REG_NF4: &str = "matmul_dx_reg#w=nf4";
+    /// The plain f32 `matmul_dx_reg.wgsl`: the tiled input gradient of the f32
+    /// tier (registered under this name by models that have it).
+    pub const MATMUL_DX_REG: &str = "matmul_dx_reg";
     /// `matmul_dx_reg.wgsl` reading a bf16 weight: the tiled input gradient of
     /// the bf16 tier (`MATMUL_DX_BF16` is its naive twin).
     pub const MATMUL_DX_REG_BF16: &str = "matmul_dx_reg#w=bf16";
@@ -539,6 +542,7 @@ pub fn assert_kernel_list_complete(list: &[(&str, &str)]) {
 
 /// One linear layer's resident weight, at whichever tier
 /// [`Weight::upload`]'s `want.promote(caps)` landed on.
+#[derive(Clone)]
 pub enum Weight {
     F32 { w: DeviceBuffer, n: u32, k: u32 },
     /// bf16 storage tier (B4): `w` packed two-per-`u32` over the FLAT `[n*k]`
@@ -1444,17 +1448,7 @@ impl Ops {
             // and multiplies it with the raw f32 activation, so this arm never
             // touches `act.quant` and bypasses the W4A8 selector arms. It binds
             // the variant itself, like the int8 frozen-base GEMM of `qwen3`.
-            Weight::NF4 { w: wb, s: sw, .. } => {
-                assert_eq!(act.xr0 % 64, 0, "Ops::matmul: the NF4 kernels bind activation rows from a 256-byte aligned row {}", act.xr0);
-                let (name, grid) = if self.tiled_gemm(m, n) {
-                    (kname::MATMUL_REG3_NF4, gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128)))
-                } else {
-                    (kname::MATMUL_NF4, gpu_core::Dispatch::Threads(m * n))
-                };
-                let xo = (act.xr0 as u64 * k as u64, m as u64 * k as u64);
-                let step = self.gpu.dispatch_sliced(self.frozen_base_kernel(name), &[&act.x, wb, y, sw], &[xo, WHOLE, oo, WHOLE], &[m, k, n], grid);
-                s.push(step);
-            }
+            Weight::NF4 { .. } => self.matmul_rows(s, w, (0, n), act, y, yoff),
             // M12: affine K-quant (`Weight::KQuant { affine: true, .. }` -
             // Q4_K/Q5_K, `matmul_kq_dyn`/`matmul_kq_gemv`). The non-affine
             // (Q6_K, group=16) instantiation never constructs THIS variant's
@@ -1972,21 +1966,10 @@ impl Ops {
         // the bf16 tiled kernel is optional so a model that registered only
         // the naive one keeps working.
         let tiled = self.tiled_gemm(m, k);
-        let grid = |tiled: bool| {
-            if tiled {
-                gpu_core::Dispatch::Workgroups(m.div_ceil(128) * k.div_ceil(128))
-            } else {
-                gpu_core::Dispatch::Threads(m * k)
-            }
-        };
         match w {
-            Weight::NF4 { w: wb, s: sw, .. } => {
-                let name = if tiled { kname::MATMUL_DX_REG_NF4 } else { kname::MATMUL_DX_NF4 };
-                s.push(self.gpu.dispatch(self.frozen_base_kernel(name), &[dy, wb, dx, sw], &params, grid(tiled)));
-            }
-            Weight::BF16 { w: wb, .. } if tiled && self.gpu.kernel_index(kname::MATMUL_DX_REG_BF16).is_some() => {
-                let kind = self.frozen_base_kernel(kname::MATMUL_DX_REG_BF16);
-                s.push(self.gpu.dispatch(kind, &[dy, wb, dx], &params, grid(true)));
+            Weight::NF4 { .. } => self.matmul_dx_rows(s, w, (0, n), dy, m, dx, 0, accumulate),
+            Weight::BF16 { .. } if tiled && self.gpu.kernel_index(kname::MATMUL_DX_REG_BF16).is_some() => {
+                self.matmul_dx_rows(s, w, (0, n), dy, m, dx, 0, accumulate)
             }
             Weight::F32 { w: wb, .. } | Weight::BF16 { w: wb, .. } => {
                 let kname = match dt {
@@ -2020,6 +2003,109 @@ impl Ops {
                  frozen-base training tiers; F16/I8/Q4/K-quant backward-through-the-weight is not implemented"
             ),
         }
+    }
+
+    /// Whether a `[m, n]` GEMM output fills enough 128x128 tiles for the
+    /// register-tiled kernels to be the right choice on this device (see
+    /// [`Self::matmul_rows`]); exposed so a caller dispatching a sibling kernel
+    /// of its own (the weight gradient) follows the same rule.
+    #[must_use]
+    pub fn fills_tile(&self, m: u32, n: u32) -> bool {
+        self.tiled_gemm(m, n)
+    }
+
+    /// [`Self::matmul`] against the row window `rows = (first, count)` of `w`
+    /// (`[n, k]`): `y[m, count] = act @ W[first..first+count, :]^T`. This is the
+    /// vocab-tile primitive of a head whose weight exceeds one storage binding.
+    /// Reads the f32 rows of `act` (never quantised), so only the float-read
+    /// tiers exist: `F32`, `BF16`, `NF4`. The window start must be a legal
+    /// 256-byte binding offset of every buffer it slices (rows of
+    /// `lcm(64, ...)` words: 2048 elements of the first row for NF4's scale
+    /// plane), which is asserted. Dispatches the register-tiled kernel where
+    /// [`Self::fills_tile`] says so, else the naive one.
+    pub fn matmul_rows(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) {
+        let (first, count) = rows;
+        let (n, k, m) = (w.n(), w.k(), act.m);
+        assert_eq!(act.k, k, "Ops::matmul_rows: activation width {} does not match weight K {k}", act.k);
+        assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_rows: rows {first}+{count} outside the {n} rows of the weight");
+        let tiled = self.tiled_gemm(m, count);
+        let grid = if tiled { gpu_core::Dispatch::Workgroups(m.div_ceil(128) * count.div_ceil(128)) } else { gpu_core::Dispatch::Threads(m * count) };
+        let xo = (act.xr0 as u64 * k as u64, m as u64 * k as u64);
+        let oo = (yoff, m as u64 * count as u64);
+        let params = [m, k, count];
+        let (name, bufs, ranges): (&str, Vec<&DeviceBuffer>, Vec<(u64, u64)>) = match w {
+            Weight::F32 { w: wb, .. } => {
+                (if tiled { kname::MATMUL_REG2 } else { kname::MATMUL }, vec![&act.x, wb, y], vec![xo, Self::row_window(first, count, n, k, 1), oo])
+            }
+            Weight::BF16 { w: wb, .. } => {
+                (if tiled { kname::MATMUL_REG3_BF16 } else { kname::MATMUL_BF16 }, vec![&act.x, wb, y], vec![xo, Self::row_window(first, count, n, k, 2), oo])
+            }
+            Weight::NF4 { w: wb, s: sw, .. } => {
+                assert_eq!(act.xr0 % 64, 0, "Ops::matmul_rows: the NF4 kernels bind activation rows from a 256-byte aligned row {}", act.xr0);
+                (
+                    if tiled { kname::MATMUL_REG3_NF4 } else { kname::MATMUL_NF4 },
+                    vec![&act.x, wb, y, sw],
+                    vec![xo, Self::row_window(first, count, n, k, 8), oo, Self::row_window(first, count, n, k, 32)],
+                )
+            }
+            other => panic!("Ops::matmul_rows: {:?} is not a float-read weight tier (F32, BF16, NF4)", other.dtype()),
+        };
+        let kind = if matches!(w, Weight::NF4 { .. }) { self.frozen_base_kernel(name) } else { self.idx[name] };
+        s.push(self.gpu.dispatch_sliced(kind, &bufs, &ranges, &params, grid));
+    }
+
+    /// [`Self::matmul_dx`] against the row window `rows = (first, count)` of
+    /// `w`: `dx[dx_row0 .. dx_row0 + m, :] (+)= dy[m, count] @ W[first.., :]`,
+    /// `dy` dense `[m, count]`. With `accumulate` set the window's contribution
+    /// is added, which is how the passes over the vocab tiles of a head sum into
+    /// one `dX`. Same tiers, window rules and kernel choice as
+    /// [`Self::matmul_rows`]; the tiled `matmul_dx_reg` kernels of the F32 and
+    /// bf16 tiers are optional registrations (see [`frozen_base_kernels`]) and
+    /// their absence keeps the naive kernel.
+    #[allow(clippy::too_many_arguments)]
+    pub fn matmul_dx_rows(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, dx_row0: u32, accumulate: bool) {
+        let (first, count) = rows;
+        let (n, k) = (w.n(), w.k());
+        assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_dx_rows: rows {first}+{count} outside the {n} rows of the weight");
+        let tiled_wanted = self.tiled_gemm(m, k);
+        let dxo = if dx_row0 == 0 { WHOLE } else { (dx_row0 as u64 * k as u64, m as u64 * k as u64) };
+        let params = [m, k, count, accumulate as u32];
+        let (naive, tiled, bufs, ranges): (&str, &str, Vec<&DeviceBuffer>, Vec<(u64, u64)>) = match w {
+            Weight::F32 { w: wb, .. } => {
+                (kname::MATMUL_DX, kname::MATMUL_DX_REG, vec![dy, wb, dx], vec![WHOLE, Self::row_window(first, count, n, k, 1), dxo])
+            }
+            Weight::BF16 { w: wb, .. } => {
+                (kname::MATMUL_DX_BF16, kname::MATMUL_DX_REG_BF16, vec![dy, wb, dx], vec![WHOLE, Self::row_window(first, count, n, k, 2), dxo])
+            }
+            Weight::NF4 { w: wb, s: sw, .. } => (
+                kname::MATMUL_DX_NF4,
+                kname::MATMUL_DX_REG_NF4,
+                vec![dy, wb, dx, sw],
+                vec![WHOLE, Self::row_window(first, count, n, k, 8), dxo, Self::row_window(first, count, n, k, 32)],
+            ),
+            other => panic!("Ops::matmul_dx_rows: {:?} is not a float-read weight tier (F32, BF16, NF4)", other.dtype()),
+        };
+        let registered = |name: &str| self.gpu.kernel_index(name);
+        let (kind, tile) = match (tiled_wanted, registered(tiled)) {
+            (true, Some(kind)) => (kind, true),
+            _ => (registered(naive).unwrap_or_else(|| self.frozen_base_kernel(naive)), false),
+        };
+        let grid = if tile { gpu_core::Dispatch::Workgroups(m.div_ceil(128) * k.div_ceil(128)) } else { gpu_core::Dispatch::Threads(m * k) };
+        s.push(self.gpu.dispatch_sliced(kind, &bufs, &ranges, &params, grid));
+    }
+
+    /// The binding range of rows `first..first+count` of an `[n, k]` weight
+    /// stored `per_word` elements to a 4-byte word (or, for NF4's scale plane,
+    /// one word per 32): the whole buffer for the full window, else a sub-range
+    /// that must start on a 256-byte (64-word) boundary.
+    fn row_window(first: u32, count: u32, n: u32, k: u32, per_word: u64) -> (u64, u64) {
+        if first == 0 && count == n {
+            return WHOLE;
+        }
+        let (start, len) = (first as u64 * k as u64, count as u64 * k as u64);
+        assert!(start % per_word == 0 && len % per_word == 0, "weight row window {first}+{count} of width {k} is not a whole number of words");
+        assert!(start / per_word % 64 == 0, "weight row window starting at row {first} (width {k}) is not a 256-byte binding offset");
+        (start / per_word, len / per_word)
     }
 
     /// `dW[n, k] += sum_m dY[m, n] * X[m, k]` - the gradient w.r.t. the
