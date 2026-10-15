@@ -324,7 +324,7 @@ in when one of its baselines turned out to be wrong.
 | **cloning + PPO, head seed 2** | **78.0%** | **+2.50** |
 
 Two initialisations, one point apart, 61,418 and 58,106 environment steps. Run
-it yourself with `--head-seed N`; the numbers below are from seed 1.
+it yourself with `--head-seed N`; the numbers below are from head seed 1.
 
 | # | criterion | threshold | result |
 |---|---|---|---|
@@ -375,7 +375,8 @@ arena [--encoder DIR] [--head FILE] [--save FILE]
 | `--warmup N` | 60 | episodes of scripted play to clone first; 0 skips |
 | `--play N` | 3 | episodes to play out, printed |
 | `--entropy F` | 0.02 | entropy bonus |
-| `--head-seed N` | 1 | policy head initialisation |
+| `--head-seed N` | random, printed | policy head initialisation |
+| `--seed N` | random, printed | rollouts and minibatch order; the seed used is printed so a run can be repeated |
 | `--train-encoder` | off | fine-tune the encoder too. Measured to collapse a working policy |
 | `--batch` | off | skip the interactive stage |
 

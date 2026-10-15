@@ -105,10 +105,29 @@ struct Args {
     train_encoder: bool,
     entropy: Option<f32>,
     warmup: Option<usize>,
-    head_seed: u64,
+    /// Seed of the training run (rollouts, minibatches); drawn when absent.
+    seed: Option<u64>,
+    /// Seed of the policy head initialisation; drawn when absent.
+    head_seed: Option<u64>,
 }
 
-fn parse_args() -> Args {
+/// The seed a run uses: the one given, else a fresh draw printed so the run can
+/// be reproduced with `flag`.
+fn resolve_seed(given: Option<u64>, flag: &str) -> u64 {
+    given.unwrap_or_else(|| {
+        let seed = brain::random_seed();
+        eprintln!("arena: no {flag} given, using random seed {seed} (pass {flag} {seed} to reproduce)");
+        seed
+    })
+}
+
+/// A seed flag's value; anything that is not an unsigned integer is an error,
+/// never a silent default.
+fn parse_seed(flag: &str, text: &str) -> Result<u64, String> {
+    text.parse().map_err(|_| format!("{flag}: {text:?} is not a seed (an unsigned integer)"))
+}
+
+fn parse_args_from(argv: &[String]) -> Result<Args, String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut a = Args {
         encoder: std::env::var("BRAIN_MINILM_DIR").unwrap_or_else(|_| {
@@ -124,9 +143,9 @@ fn parse_args() -> Args {
         train_encoder: false,
         entropy: None,
         warmup: None,
-        head_seed: 1,
+        seed: None,
+        head_seed: None,
     };
-    let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < argv.len() {
         let next = || argv.get(i + 1).cloned().unwrap_or_default();
@@ -140,7 +159,8 @@ fn parse_args() -> Args {
             "--play" => a.play = next().parse().unwrap_or(a.play),
             "--entropy" => a.entropy = next().parse().ok(),
             "--warmup" => a.warmup = next().parse().ok(),
-            "--head-seed" => a.head_seed = next().parse().unwrap_or(0),
+            "--seed" => a.seed = Some(parse_seed("--seed", &next())?),
+            "--head-seed" => a.head_seed = Some(parse_seed("--head-seed", &next())?),
             "--train-encoder" => {
                 a.train_encoder = true;
                 i -= 1;
@@ -153,10 +173,12 @@ fn parse_args() -> Args {
                 eprintln!(
                     "usage: arena [--encoder DIR] [--head FILE] [--save FILE]\n\
                      \x20            [--iterations N] [--episodes N] [--epochs N]\n\
-                     \x20            [--play N] [--warmup N] [--entropy F] [--train-encoder] [--batch]\n\n\
+                     \x20            [--play N] [--warmup N] [--entropy F] [--train-encoder] [--batch]\n\
+                     \x20            [--seed N] [--head-seed N]\n\n\
                      Without --head: trains by reinforcement, evaluates, saves, then plays.\n\
                      With --head:    skips training and plays with those weights.\n\
-                     --batch:        skip the interactive stage."
+                     --batch:        skip the interactive stage.\n\
+                     --seed, --head-seed: drawn at random and printed when not given."
                 );
                 std::process::exit(0);
             }
@@ -164,7 +186,7 @@ fn parse_args() -> Args {
         }
         i += 2;
     }
-    a
+    Ok(a)
 }
 
 /// Rule 5 of samples/README.md: say what is missing and leave cleanly.
@@ -177,7 +199,10 @@ fn require(path: &std::path::Path, what: &str, remedy: &str) {
 }
 
 fn main() {
-    let args = parse_args();
+    let args = parse_args_from(&std::env::args().skip(1).collect::<Vec<_>>()).unwrap_or_else(|e| {
+        eprintln!("arena: {e}");
+        std::process::exit(2);
+    });
     require(
         &std::path::Path::new(&args.encoder).join("config.json"),
         "encoder checkpoint",
@@ -212,7 +237,7 @@ fn main() {
         .episodes(args.episodes)
         .epochs(args.epochs)
         .train_encoder(args.train_encoder)
-        .seed(11);
+        .seed(resolve_seed(args.seed, "--seed"));
     if let Some(e) = args.entropy {
         spec.policy.entropy = e;
     }
@@ -221,7 +246,7 @@ fn main() {
     }
 
     // ---- the whole program ------------------------------------------------
-    let mut builder = ControlPipeline::builder(&args.encoder, env).seed(args.head_seed);
+    let mut builder = ControlPipeline::builder(&args.encoder, env).seed(resolve_seed(args.head_seed, "--head-seed"));
     if let Some(h) = &args.head_in {
         require(std::path::Path::new(h), "policy weights", "train first, or drop --head");
         builder = builder.head(h);
@@ -247,5 +272,32 @@ fn main() {
     if let Err(e) = chain.report().finish() {
         eprintln!("arena: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn a_malformed_seed_is_refused_not_replaced_by_a_default() {
+        for flag in ["--seed", "--head-seed"] {
+            let err = parse_args_from(&argv(&[flag, "abc"])).err().expect("refused");
+            assert!(err.contains(flag), "the error names the flag: {err}");
+        }
+    }
+
+    #[test]
+    fn a_given_seed_is_kept_and_an_absent_one_is_drawn_per_run() {
+        let a = parse_args_from(&argv(&["--seed", "5", "--head-seed", "0"])).unwrap();
+        assert_eq!((a.seed, a.head_seed), (Some(5), Some(0)));
+        let none = parse_args_from(&argv(&[])).unwrap();
+        assert_eq!((none.seed, none.head_seed), (None, None));
+        assert_ne!(resolve_seed(None, "--seed"), resolve_seed(None, "--seed"));
+        assert_eq!(resolve_seed(Some(9), "--seed"), 9);
     }
 }
