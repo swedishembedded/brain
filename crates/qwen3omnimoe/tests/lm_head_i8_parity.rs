@@ -38,6 +38,7 @@ fn lm_head_i8_matches_fp32_within_quant_tolerance() {
     // of them so a group-indexing slip shows. `vocab`, the output dim, has no
     // such constraint and is deliberately not round.
     let (n, d, vocab) = (5u32, 64u32, 37u32);
+    // seed: the int8 quantisation error bound was set against this operand draw; device-only kernels
     let mut rng = Lcg::new(0xC0FFEE);
     let h_host = rng.vec_scaled((n * d) as usize, 1.0);
     let w_host = rng.vec_scaled((vocab * d) as usize, 0.4);

@@ -107,7 +107,7 @@ fn decode_matches_hand_chained_layer_fwd_plus_final_norm() {
     let n = 5u32;
     let cfg = tiny_config(n_layers);
     let gpu = gpu_core::testgpu::dev(talker_pipelines());
-    let mut rng = Lcg::new(1337);
+    let mut rng = Lcg::random();
 
     let x_host = rng.vec_scaled((n * cfg.hidden) as usize, 1.0);
     let x = gpu.storage_init("x", &x_host);

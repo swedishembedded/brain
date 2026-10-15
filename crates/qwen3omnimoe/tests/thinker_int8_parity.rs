@@ -132,7 +132,7 @@ fn layer_fwd_int8_matches_fp32_within_quant_tolerance() {
     let cfg = tiny_config(1);
     let n = 6u32;
     let gpu = gpu_core::testgpu::dev(thinker_pipelines());
-    let mut rng = Lcg::new(9001);
+    let mut rng = Lcg::random();
 
     let x_host = rng.vec_scaled((n * cfg.hidden) as usize, 1.0);
     let x = gpu.storage_init("x", &x_host);
@@ -165,7 +165,7 @@ fn layer_decode_step_int8_matches_fp32_within_quant_tolerance() {
     let cfg = tiny_config(1);
     let cap = 4u32;
     let gpu = gpu_core::testgpu::dev(thinker_pipelines());
-    let mut rng = Lcg::new(7002);
+    let mut rng = Lcg::random();
 
     let lb = random_layer(&gpu, &mut rng, &cfg);
     let w = weights(&lb);

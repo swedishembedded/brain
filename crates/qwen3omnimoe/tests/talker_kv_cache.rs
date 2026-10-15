@@ -114,7 +114,7 @@ fn incremental_decode_matches_batched_layer_fwd_at_every_position() {
     let n = 5u32;
     let cfg = tiny_config(n_layers as u32);
     let gpu = gpu_core::testgpu::dev(talker_pipelines());
-    let mut rng = Lcg::new(4242);
+    let mut rng = Lcg::random();
 
     let x_host = rng.vec_scaled((n * cfg.hidden) as usize, 1.0);
     let x_full = gpu.storage_init("x", &x_host);

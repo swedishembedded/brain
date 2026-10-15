@@ -75,7 +75,7 @@ fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
     };
 
     let n = 3u32;
-    let mut rng = Lcg::new(99);
+    let mut rng = Lcg::random();
     let x_host = rng.vec_scaled((n * cfg.hidden) as usize, 1.0);
     let x_bytes: Vec<u8> = x_host.iter().flat_map(|f| f.to_le_bytes()).collect();
     let inv = capability::Invocation::new().blob("x", capability::Blob::new(capability::Media::Bytes, x_bytes).with_meta(serde_json::json!({"n": n})));

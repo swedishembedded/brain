@@ -153,6 +153,7 @@ fn layer_fwd_int8_matches_fp32_within_quant_tolerance() {
     let cfg = tiny_config(1);
     let n = 6u32;
     let gpu = gpu_core::testgpu::dev(talker_pipelines());
+    // seed: the int8 quantisation error bound was set against this layer draw; device-only kernels
     let mut rng = Lcg::new(9101);
 
     let x_host = rng.vec_scaled((n * cfg.hidden) as usize, 1.0);
@@ -183,6 +184,7 @@ fn layer_decode_step_int8_matches_fp32_within_quant_tolerance() {
     let cfg = tiny_config(1);
     let cap = 4u32;
     let gpu = gpu_core::testgpu::dev(talker_pipelines());
+    // seed: the int8 quantisation error bound was set against this layer draw; device-only kernels
     let mut rng = Lcg::new(7102);
 
     let lb = random_layer(&gpu, &mut rng, &cfg);

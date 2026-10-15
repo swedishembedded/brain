@@ -325,7 +325,7 @@ mod tests {
         logits[eos as usize] = 50.0; // EOS is the next-highest
         logits[10] = 1.0; // a normal, unsuppressed candidate
 
-        let mut rng = Rng::new(0);
+        let mut rng = Rng::random();
         // EOS not allowed yet: the whole suppressed range (incl. EOS) is
         // masked, so greedy must fall through to the unsuppressed candidate.
         let picked = sample_cb0(logits.clone(), eos, false, 0.0, 0, &mut rng);
@@ -351,7 +351,7 @@ mod tests {
         for x in logits[vocab - 1024..].iter_mut() {
             *x = 1000.0; // would dominate sampling if not masked
         }
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::random();
         for _ in 0..200 {
             let picked = sample_cb0(logits.clone(), eos, false, 0.9, 50, &mut rng);
             assert!((picked as usize) < vocab - 1024, "picked {picked} is in the suppressed range");

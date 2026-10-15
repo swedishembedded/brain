@@ -453,7 +453,7 @@ mod tests {
 
         let (m, d, ff, e) = (4u32, cfg.hidden, cfg.moe_intermediate, cfg.n_experts);
         let shape = MoeShape { rows: m, d_model: d, moe_ff: ff, n_experts: e, top_k: cfg.top_k };
-        let mut rng = Lcg::new(55);
+        let mut rng = Lcg::random();
         let logits = g.storage_init("logits", &rng.vec_scaled((m * e) as usize, 2.0));
         let x_host = rng.vec_scaled((m * d) as usize, 1.0);
         let x = g.storage_init("x", &x_host);
