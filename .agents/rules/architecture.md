@@ -109,6 +109,15 @@ Six layers. Each may depend only on layers above it.
                            the same reason: pure f64 host arithmetic that a
                            model crate, an application or a sample evaluates
                            time-to-event predictions with, without a model.
+   seed                    where a run's seed comes from: `random_seed()` for a
+                           run whose caller gave none and `parse_seed()` for
+                           one they did. std only, no dependencies: a LEAF so
+                           that `data` (which re-exports it as
+                           `data::rng::random_seed`), `capability`, `appopts`
+                           and `forecast` (which depends on no other brain
+                           crate) resolve an unset seed the same way. Every
+                           default seed in the workspace is random and is
+                           reported where it is drawn.
 
  ─── 4. models ─────────────────────────────────────────────────────────────
    decoder LMs    gpt2  qwen3  qwen35moe  toymoe  glmdsa  toypid  toyseq2seq  toyautoencoder  timeseries

@@ -620,6 +620,20 @@ impl Invocation {
     pub fn get_blob(&self, key: &str) -> Option<&Blob> {
         self.blobs.get(key)
     }
+    /// The request's `seed`: `None` when absent (the action draws its own with
+    /// `seed::random_seed` and echoes it in its outcome). A `seed` that is not a
+    /// non-negative integer is refused rather than clamped or defaulted, so a
+    /// request never runs with a seed other than the one it asked for.
+    pub fn seed(&self) -> Result<Option<u64>, String> {
+        match self.params.get("seed") {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(n)) => n
+                .as_u64()
+                .map(Some)
+                .ok_or_else(|| format!("seed: {n} is not a seed (a non-negative integer)")),
+            Some(other) => Err(format!("seed: {other} is not a seed (a non-negative integer)")),
+        }
+    }
 }
 
 /// Extract plain text from a `content` field shaped either as a bare string
@@ -1290,5 +1304,20 @@ mod tests {
         assert_eq!(assembly.variant.as_deref(), Some("klein-9b"));
         assert_eq!(assembly.roles, roles);
         assert_eq!(assembly.provenance.len(), 1);
+    }
+
+    #[test]
+    fn an_absent_seed_is_none_and_a_present_one_is_returned_whole() {
+        assert_eq!(Invocation::new().seed(), Ok(None));
+        assert_eq!(Invocation::new().set("seed", json!(0)).seed(), Ok(Some(0)));
+        assert_eq!(Invocation::new().set("seed", json!(u64::MAX)).seed(), Ok(Some(u64::MAX)));
+    }
+
+    #[test]
+    fn a_negative_or_non_integer_seed_is_refused_not_clamped() {
+        for bad in [json!(-1), json!(1.5), json!("7"), json!(true)] {
+            let err = Invocation::new().set("seed", bad.clone()).seed().expect_err(&bad.to_string());
+            assert!(err.starts_with("seed: "), "{err}");
+        }
     }
 }

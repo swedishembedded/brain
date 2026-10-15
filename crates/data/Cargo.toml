@@ -10,6 +10,9 @@ name = "data"
 path = "src/lib.rs"
 
 [dependencies]
+# `data::rng::random_seed` is re-exported from here; the leaf crate exists so
+# crates that cannot depend on `brain-data` can draw a seed the same way.
+brain-seed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # captions.yaml is parsed by a real YAML implementation into a typed schema

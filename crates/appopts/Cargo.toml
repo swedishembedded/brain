@@ -10,6 +10,8 @@ name = "appopts"
 path = "src/lib.rs"
 
 [dependencies]
+# `Args::seed` parses `--seed` and draws the seed of a run that gave none.
+brain-seed.workspace = true
 # For DeviceSpec/Backend and applying the resolved set process-wide. This is
 # what makes --device here mean exactly what --device means on the CLI: the
 # same parser and the same resolution, not a second grammar that agrees today.

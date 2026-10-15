@@ -1,0 +1,12 @@
+[package]
+name = "brain-seed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Where a run's seed comes from: one std-only source of entropy for an unseeded run and one parser for a seed a caller passes, so every layer (a CLI flag, a served request, a library default) resolves 'no seed given' the same way. A LEAF crate with no dependencies, reachable from the data crate and from crates that depend on no other brain crate."
+
+[lib]
+name = "seed"
+path = "src/lib.rs"
+
+[dependencies]

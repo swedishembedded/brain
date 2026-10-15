@@ -79,6 +79,10 @@
 /// the `brain` binary itself, so `--device` means one thing everywhere.
 pub mod options;
 
+/// The seed of a run whose caller gave none: random, and printed so the run
+/// can be reproduced. Every default seed in brain draws from here.
+pub use seed::random_seed;
+
 /// A window and a canvas for a sample application - see [`viewport`]. Not a
 /// model surface: it is how a run SHOWS what it is doing, on a desk or as a
 /// PNG from a machine with no display.

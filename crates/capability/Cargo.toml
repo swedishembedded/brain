@@ -10,4 +10,6 @@ name = "capability"
 path = "src/lib.rs"
 
 [dependencies]
+# `Invocation::seed` parses the request's `seed` with the shared seed rules.
+brain-seed.workspace = true
 serde_json.workspace = true

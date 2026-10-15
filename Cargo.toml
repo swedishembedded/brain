@@ -47,6 +47,7 @@ default-members = [
     "crates/optim",
     "crates/promote",
     "crates/rlcd",
+    "crates/seed",
     "crates/search",
     "crates/atif",
     "crates/rl",
@@ -210,6 +211,7 @@ brain-promote = { path = "crates/promote" }
 brain-search = { path = "crates/search" }
 brain-audit = { path = "crates/audit" }
 brain-rlcd = { path = "crates/rlcd" }
+brain-seed = { path = "crates/seed" }
 brain-atif = { path = "crates/atif" }
 brain-rl = { path = "crates/rl" }
 brain-data = { path = "crates/data" }

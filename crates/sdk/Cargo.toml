@@ -200,6 +200,9 @@ imagetype = ["dep:brain-imaging"]
 # changed shape with a feature would be exactly the behaviour-by-feature this
 # design forbids.
 brain-capability.workspace = true
+# `brain::random_seed`: an application resolves an unset seed the way the SDK
+# itself does. Std-only leaf, so unconditional like capability.
+brain-seed.workspace = true
 brain-arch.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
