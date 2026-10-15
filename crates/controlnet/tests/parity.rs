@@ -11,7 +11,7 @@
 //! ```text
 //! BRAIN_CONTROLNET=/path/to/a/diffusers/ControlNetModel
 //! python3 tools/goldens/controlnet_dump_reference.py --controlnet $BRAIN_CONTROLNET \
-//!     --out testdata/controlnet
+//!     --out testdata/controlnet --seed 20260804
 //! ```
 //!
 //! VRAM: the reference ControlNet is 1.251 G parameters, so **fp32 weights are
@@ -91,7 +91,7 @@ fn sdxl_controlnet_residuals_match_diffusers_at_a_non_square_latent() {
 fn run_parity(rel: &str) {
     let g = testdata(rel);
     if !g.exists() {
-        brain_testutil::skip(&format!("{} absent (run tools/goldens/controlnet_dump_reference.py)", g.display()));
+        brain_testutil::skip(&format!("{} absent (run tools/goldens/controlnet_dump_reference.py --seed 20260804)", g.display()));
         return;
     }
     let Ok(weights) = std::env::var("BRAIN_CONTROLNET") else {

@@ -5,7 +5,7 @@
 //! checkpoint-free DeepSeek-OCR-2 vision-tower reference dump.
 //!
 //! ```text
-//! python3 tools/goldens/deepseekocr2_dump_reference.py --out testdata/deepseekocr2
+//! python3 tools/goldens/deepseekocr2_dump_reference.py --out testdata/deepseekocr2 --seed 0
 //! ```
 //!
 //! writes `testdata/deepseekocr2/tiny/{ckpt/model.safetensors,golden.safetensors}`
@@ -257,7 +257,7 @@ fn check_view(report: &mut Report, name: &str, golden: &HashMap<String, StTensor
 /// be absent is expected to check first).
 fn maybe_load(path: &std::path::Path) -> Option<HashMap<String, StTensor>> {
     if !path.exists() {
-        brain_testutil::skip("run `python3 tools/goldens/deepseekocr2_dump_reference.py --out testdata/deepseekocr2` first (or set BRAIN_TESTDATA)");
+        brain_testutil::skip("run `python3 tools/goldens/deepseekocr2_dump_reference.py --out testdata/deepseekocr2 --seed 0` first (or set BRAIN_TESTDATA)");
         return None;
     }
     Some(load(path))

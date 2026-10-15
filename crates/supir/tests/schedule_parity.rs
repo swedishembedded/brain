@@ -54,7 +54,7 @@ fn restore_scalar_math_matches_the_real_sampler_trajectory() {
     let dir = testdata_dir();
     let manifest = dir.join("manifest.json");
     let Some(src) = Source::open_manifest(&manifest, "tools/goldens/supir_dump_reference.py") else {
-        brain_testutil::skip(&format!("{} absent (run tools/goldens/supir_dump_reference.py)", manifest.display()));
+        brain_testutil::skip(&format!("{} absent (run tools/goldens/supir_dump_reference.py --seed 20260827)", manifest.display()));
         return;
     };
 

@@ -26,7 +26,7 @@
 //!
 //! ```text
 //! python tools/goldens/qwen35_dump_real_layer_reference.py \
-//!     --dir "$BRAIN_QWEN35_DIR" --layer L
+//!     --dir "$BRAIN_QWEN35_DIR" --layer L --seed 20260819
 //! ```
 //!
 //! Run with (each layer is several hundred MB of real 27B weights):
@@ -232,7 +232,7 @@ fn run_layer_parity(l: usize) {
     let golden_path = golden_dir(l).join("layer.safetensors");
     if !golden_path.exists() {
         brain_testutil::skip(&format!(
-            "{} missing - run: python tools/goldens/qwen35_dump_real_layer_reference.py --dir {} --layer {l}",
+            "{} missing - run: python tools/goldens/qwen35_dump_real_layer_reference.py --dir {} --layer {l} --seed 20260819",
             golden_path.display(),
             dir.display()
         ));

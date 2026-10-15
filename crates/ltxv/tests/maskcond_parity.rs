@@ -76,7 +76,7 @@ impl Fixture {
     fn open() -> Option<Fixture> {
         let p = brain_testutil::testdata("golden/ltxv/maskcond/maskcond.safetensors");
         if !std::path::Path::new(&p).exists() {
-            brain_testutil::skip(&format!("fixture {p} absent - run tools/goldens/ltxv_maskcond_dump_reference.py"));
+            brain_testutil::skip(&format!("fixture {p} absent - run tools/goldens/ltxv_maskcond_dump_reference.py --noise-seed 20260827"));
             return None;
         }
         Some(Fixture { t: checkpoint::safetensors::read(&p).expect("read golden") })

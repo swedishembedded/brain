@@ -1137,7 +1137,7 @@ wm/play: build/release
 # BRAIN_DIAMOND_REPO). Needs python3 + torch; see docs/world-models/FIXTURES.md.
 ## wm/fixtures - regenerate the DIAMOND parity fixtures (needs torch)
 wm/fixtures:
-	python3 scripts/parity-dump/diamond.py --out crates/diamond/tests/fixtures/diamond
+	python3 scripts/parity-dump/diamond.py --out crates/diamond/tests/fixtures/diamond --seed 7
 
 ## federated - lists the federated-MoE targets; does nothing
 federated:

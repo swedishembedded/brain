@@ -10,7 +10,7 @@
 //! Regenerate with:
 //! ```text
 //! python3 tools/goldens/sdxlunet_dump_reference.py --sdxl <sdxl-base-1.0> \
-//!         --out testdata/sdxl --skip-unet
+//!         --out testdata/sdxl --seed 20240731 --skip-unet
 //! ```
 //!
 //! What is gated, per `(family, prediction_type, num_steps)`:
@@ -52,7 +52,7 @@ impl Golden {
     fn open() -> Option<Golden> {
         let p = testdata("sdxl/schedulers/steps.safetensors");
         if !p.exists() {
-            brain_testutil::skip(&format!("{} absent (run tools/goldens/sdxlunet_dump_reference.py)", p.display()));
+            brain_testutil::skip(&format!("{} absent (run tools/goldens/sdxlunet_dump_reference.py --seed 20240731)", p.display()));
             return None;
         }
         Some(Golden(checkpoint::safetensors::read(p.to_str().expect("utf-8 path")).expect("read golden")))

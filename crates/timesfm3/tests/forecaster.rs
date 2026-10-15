@@ -45,7 +45,7 @@ fn read_golden() -> Option<serde_json::Value> {
     let path = brain_testutil::testdata_path("golden/timesfm3/manifest.json");
     if !path.exists() {
         brain_testutil::skip(&format!(
-            "{} not found - regenerate with: BRAIN_TIMESFM3_REF=<google-research/timesfm checkout> python3 tools/goldens/timesfm3_dump_reference.py <fetched checkpoint dir> {}",
+            "{} not found - regenerate with: BRAIN_TIMESFM3_REF=<google-research/timesfm checkout> python3 tools/goldens/timesfm3_dump_reference.py <fetched checkpoint dir> {} --seed 1337",
             path.display(),
             path.parent().unwrap().display()
         ));

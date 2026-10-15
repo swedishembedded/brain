@@ -32,7 +32,7 @@ fn import_then_full_pipeline_matches_real_checkpoint_end_to_end() {
     let davit_golden_path = brain_testutil::testdata("florence2/davit/stages.safetensors");
     let encdec_golden_path = brain_testutil::testdata("florence2/encdec/step.safetensors");
     if !std::path::Path::new(&davit_golden_path).exists() || !std::path::Path::new(&encdec_golden_path).exists() {
-        brain_testutil::skip("florence2 golden fixtures absent - regenerate with tools/goldens/florence2_dump_reference.py");
+        brain_testutil::skip("florence2 golden fixtures absent - regenerate with tools/goldens/florence2_dump_reference.py --seed 0");
         return;
     }
 

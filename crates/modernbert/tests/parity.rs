@@ -16,7 +16,7 @@
 //! Fixtures are NOT in git (`crates/modernbert/tests/fixtures/` is
 //! gitignored, same `brain-never-commit-goldens` convention as
 //! `crates/diamond/tests/fixtures`). Regenerate with:
-//!   python3 scripts/parity-dump/modernbert.py --out <scratch>/fixtures-modernbert
+//!   python3 scripts/parity-dump/modernbert.py --out <scratch>/fixtures-modernbert --seed 0
 //!   cp <scratch>/fixtures-modernbert/* crates/modernbert/tests/fixtures/modernbert/
 //! The test SKIPS (with that message) when the fixture directory is absent.
 
@@ -50,7 +50,7 @@ impl Fixture {
         let m = dir.join("manifest.json");
         if !m.exists() {
             brain_testutil::skip(&format!(
-                "{} absent - run `python3 scripts/parity-dump/modernbert.py --out <scratch>` \
+                "{} absent - run `python3 scripts/parity-dump/modernbert.py --out <scratch> --seed 0` \
                  and copy the output into {}",
                 m.display(),
                 dir.display()

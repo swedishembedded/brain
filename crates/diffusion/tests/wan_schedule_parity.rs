@@ -11,7 +11,7 @@
 //!
 //! Regenerate with:
 //! ```text
-//! python3 tools/goldens/wan_schedule_dump_reference.py
+//! python3 tools/goldens/wan_schedule_dump_reference.py --seed 1234
 //! ```
 //!
 //! Two different bars, deliberately:
@@ -60,7 +60,7 @@ impl Golden {
     fn open() -> Option<Golden> {
         let p = testdata_path("golden/wan/schedule.safetensors");
         if !p.exists() {
-            brain_testutil::skip(&format!("{} absent - run `python3 tools/goldens/wan_schedule_dump_reference.py`",
+            brain_testutil::skip(&format!("{} absent - run `python3 tools/goldens/wan_schedule_dump_reference.py --seed 1234`",
                 p.display()));
             return None;
         }

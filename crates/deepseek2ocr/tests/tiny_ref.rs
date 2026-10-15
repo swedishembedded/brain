@@ -6,7 +6,7 @@
 //! coincidence the real model hides.
 //!
 //! ```text
-//! python3 tools/goldens/deepseek_ocr_dump_reference.py --out testdata/deepseek-ocr
+//! python3 tools/goldens/deepseek_ocr_dump_reference.py --out testdata/deepseek-ocr --seed 0
 //! ```
 //!
 //! writes `testdata/deepseek-ocr/tiny/{ckpt/model.safetensors, golden.safetensors}`
@@ -224,7 +224,7 @@ fn tiny_reference_stage_parity() {
     let ckpt = testdata("deepseek-ocr/tiny/ckpt/model.safetensors");
     let golden_path = testdata("deepseek-ocr/tiny/golden.safetensors");
     if !ckpt.exists() || !golden_path.exists() {
-        brain_testutil::skip(&format!("{} / {} absent -- run tools/goldens/deepseek_ocr_dump_reference.py", ckpt.display(), golden_path.display()));
+        brain_testutil::skip(&format!("{} / {} absent -- run tools/goldens/deepseek_ocr_dump_reference.py --seed 0", ckpt.display(), golden_path.display()));
         return;
     }
     let ck = load(&ckpt);

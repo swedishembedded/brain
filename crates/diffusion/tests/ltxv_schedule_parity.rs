@@ -11,7 +11,7 @@
 //!
 //! Regenerate with:
 //! ```text
-//! python3 tools/goldens/ltxv_schedule_dump_reference.py
+//! python3 tools/goldens/ltxv_schedule_dump_reference.py --seed 1234
 //! ```
 //!
 //! Bit-exactness is not the bar here (unlike Wan's schedule parity): the
@@ -35,7 +35,7 @@ impl Golden {
         let st = dir.join("schedule.safetensors");
         let mj = dir.join("manifest.json");
         if !st.exists() || !mj.exists() {
-            brain_testutil::skip(&format!("{} absent - run `python3 tools/goldens/ltxv_schedule_dump_reference.py`", dir.display()));
+            brain_testutil::skip(&format!("{} absent - run `python3 tools/goldens/ltxv_schedule_dump_reference.py --seed 1234`", dir.display()));
             return None;
         }
         let tensors = checkpoint::safetensors::read(st.to_str().expect("utf-8 path")).expect("read golden");

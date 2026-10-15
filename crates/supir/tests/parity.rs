@@ -9,7 +9,7 @@
 //! replay: it was dumped with `s_churn = 5.0`, so every one of its taps
 //! reflects a forward pass that consumed a random churn-noise draw the
 //! dumper never saved. This suite reads a SEPARATE golden, dumped with
-//! `tools/goldens/supir_dump_reference.py --s-churn 0.0` (see that script's
+//! `tools/goldens/supir_dump_reference.py --seed 20260827 --s-churn 0.0` (see that script's
 //! `--s-churn` flag), where `gamma` is identically zero at every step -
 //! `sigma_hat == sigma`, so the forward at each tapped step is a
 //! deterministic function of the fixed seed alone. `Golden::assert_gamma_
@@ -184,7 +184,7 @@ impl Golden {
 fn open_golden(cfg: &SupirConfig) -> Option<Golden> {
     let dir = testdata_dir();
     let manifest = dir.join("manifest.json");
-    let src = Source::open_manifest(&manifest, "tools/goldens/supir_dump_reference.py --s-churn 0.0 --out testdata/supir_forward_parity")?;
+    let src = Source::open_manifest(&manifest, "tools/goldens/supir_dump_reference.py --seed 20260827 --s-churn 0.0 --out testdata/supir_forward_parity")?;
 
     let bb = &cfg.backbone;
     let ok = src.require(&[

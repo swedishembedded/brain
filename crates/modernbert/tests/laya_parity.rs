@@ -55,7 +55,7 @@ impl Fixture {
         let m = dir.join("manifest.json");
         if !m.exists() {
             brain_testutil::skip(&format!(
-                "{} absent - run `python3 scripts/parity-dump/modernbert.py --out <scratch>` \
+                "{} absent - run `python3 scripts/parity-dump/modernbert.py --out <scratch> --seed 0` \
                  and copy the output into {}",
                 m.display(),
                 dir.display()

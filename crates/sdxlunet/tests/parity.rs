@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! BRAIN_SDXL=/path/to/stable-diffusion-xl-base-1.0
-//! python3 tools/goldens/sdxlunet_dump_reference.py --sdxl $BRAIN_SDXL --out testdata/sdxl
+//! python3 tools/goldens/sdxlunet_dump_reference.py --sdxl $BRAIN_SDXL --out testdata/sdxl --seed 20240731
 //! ```
 //!
 //! VRAM: the UNet is 2.567 G parameters, so **fp32 weights are ~10.3 GB** and
@@ -64,7 +64,7 @@ impl Golden {
 fn sdxl_unet_forward_matches_diffusers() {
     let g = testdata("sdxl/unet/stages.safetensors");
     if !g.exists() {
-        brain_testutil::skip(&format!("{} absent (run tools/goldens/sdxlunet_dump_reference.py)", g.display()));
+        brain_testutil::skip(&format!("{} absent (run tools/goldens/sdxlunet_dump_reference.py --seed 20240731)", g.display()));
         return;
     }
     let Ok(weights) = std::env::var("BRAIN_SDXL") else {

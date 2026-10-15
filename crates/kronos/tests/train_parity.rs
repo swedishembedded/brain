@@ -25,7 +25,7 @@
 //!   weights and identical inputs. Training is not bit-comparable to *inference*,
 //!   but it is exactly comparable to the reference's own training forward, which
 //!   is what this loads. Regenerate with
-//!   `tools/goldens/kronos_train_dump_reference.py`.
+//!   `tools/goldens/kronos_train_dump_reference.py --repo <Kronos repo> --out testdata/golden/kronos --seed 20260816`.
 //!
 //! Without the mask the reference's own s2 logits move by ~1.5e-1 relative on
 //! this dump and flip 4 of 24 argmaxes, so TR-fwd fails loudly on a non-causal
@@ -145,7 +145,7 @@ fn training_forward_matches_the_reference() {
     const DUMPER: &str = "tools/goldens/kronos_train_dump_reference.py";
     let meta_p = golden.join("tr_meta.json");
     if !meta_p.exists() {
-        return brain_testutil::skip(&format!("training golden missing; run {DUMPER}"));
+        return brain_testutil::skip(&format!("training golden missing; run {DUMPER} --seed 20260816"));
     }
     let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(&meta_p).unwrap()).unwrap();
     let u = |k: &str| meta[k].as_u64().unwrap() as usize;

@@ -69,7 +69,7 @@ fn florence2_lm_encoder_and_decoder_match_real_checkpoint() {
     };
     let golden_path = brain_testutil::testdata("florence2/encdec/step.safetensors");
     if !std::path::Path::new(&golden_path).exists() {
-        brain_testutil::skip("florence2 encdec golden fixture absent - regenerate with tools/goldens/florence2_dump_reference.py");
+        brain_testutil::skip("florence2 encdec golden fixture absent - regenerate with tools/goldens/florence2_dump_reference.py --seed 0");
         return;
     }
 
