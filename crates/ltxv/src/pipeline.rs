@@ -488,7 +488,7 @@ impl Default for GenOpts {
             height: 64,
             steps: 4,
             guidance: 1.0,
-            seed: 0,
+            seed: data::rng::random_seed(),
             fps: 8,
             base_shift: 0.95,
             max_shift: 2.05,

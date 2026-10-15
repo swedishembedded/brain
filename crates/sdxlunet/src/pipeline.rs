@@ -41,7 +41,7 @@ impl Default for GenerateOptions {
         GenerateOptions {
             steps: 30,
             guidance: 5.0,
-            seed: 0,
+            seed: data::rng::random_seed(),
             height: 1024,
             width: 1024,
             negative: String::new(),

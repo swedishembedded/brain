@@ -196,7 +196,8 @@ pub struct GenOpts {
 }
 
 impl GenOpts {
-    /// Upstream's defaults for this variant.
+    /// Upstream's defaults for this variant, with a freshly drawn seed (set
+    /// `seed` to reproduce a draw).
     pub fn from_config(cfg: &WanConfig) -> GenOpts {
         let (w, h) = cfg.sizes[0];
         GenOpts {
@@ -206,7 +207,7 @@ impl GenOpts {
             steps: cfg.sample_steps,
             shift: cfg.sample_shift,
             guidance: cfg.guide_scale,
-            seed: 0,
+            seed: data::rng::random_seed(),
             negative_prompt: None,
             solver: Solver::UniPc,
             fps: cfg.sample_fps,

@@ -1,2 +1,1 @@
-crates/minimaxh3/examples/decode_audio_sample.rs	main:Lcg::new(7)	rng	todo: example input generator
-crates/minimaxh3/examples/generate_t2va.rs	main:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/minimaxh3/examples/decode_audio_sample.rs	main:Lcg::new(7)	rng	bench-input: synthetic latent whose decode is what the example demonstrates

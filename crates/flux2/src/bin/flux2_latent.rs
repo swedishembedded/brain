@@ -41,6 +41,7 @@
 //!   noise  --in A --sigma F [--units std|global|raw] [--c N] [--seed N]
 //!                        [--smooth K]   give the noise a K-cell correlation
 //!                                       length at the same amplitude
+//!                        without --seed a random one is drawn and printed
 //! ```
 //!
 //! The VAE checkpoint comes from `BRAIN_FLUX2_VAE` (a diffusers `vae/`
@@ -445,7 +446,15 @@ fn op(a: &Args) -> Result<(), String> {
                 Some(v) => Some(v.parse::<usize>().map_err(|_| "--c: not a number")?),
                 None => None,
             };
-            add_noise(&load_in()?, a.num("sigma")?, units, a.num_or("seed", 0)?, only, a.num_or("smooth", 1)?)
+            let seed = match a.opt("seed") {
+                Some(_) => a.num::<u64>("seed")?,
+                None => {
+                    let seed = data::rng::random_seed();
+                    eprintln!("noise: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+                    seed
+                }
+            };
+            add_noise(&load_in()?, a.num("sigma")?, units, seed, only, a.num_or("smooth", 1)?)
         }
         other => return Err(format!("op {other}: unknown")),
     };

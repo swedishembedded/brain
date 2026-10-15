@@ -5,8 +5,11 @@
 //!
 //! Usage:
 //!   sdxl --root <sdxl-base-1.0> --prompt "..." [--out out.ppm]
-//!        [--steps 30] [--guidance 5.0] [--seed 0] [--size 1024]
+//!        [--steps 30] [--guidance 5.0] [--seed N] [--size 1024]
 //!        [--negative "..."]
+//!
+//! Without `--seed` a random seed is drawn and printed; pass it back with
+//! `--seed` to reproduce the image.
 
 use sdxlunet::pipeline::{GenerateOptions, Sdxl};
 
@@ -26,11 +29,22 @@ fn main() {
         eprintln!("sdxl: --prompt \"...\" is required");
         std::process::exit(2);
     });
+    let seed = match arg(&a, "--seed") {
+        Some(text) => text.parse::<u64>().unwrap_or_else(|_| {
+            eprintln!("sdxl: --seed: {text:?} is not a seed (a non-negative integer)");
+            std::process::exit(2);
+        }),
+        None => {
+            let seed = data::rng::random_seed();
+            eprintln!("sdxl: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+            seed
+        }
+    };
     let side: u32 = arg(&a, "--size").and_then(|s| s.parse().ok()).unwrap_or(1024);
     let o = GenerateOptions {
         steps: arg(&a, "--steps").and_then(|s| s.parse().ok()).unwrap_or(30),
         guidance: arg(&a, "--guidance").and_then(|s| s.parse().ok()).unwrap_or(5.0),
-        seed: arg(&a, "--seed").and_then(|s| s.parse().ok()).unwrap_or(0),
+        seed,
         height: side,
         width: side,
         negative: arg(&a, "--negative").unwrap_or_default(),

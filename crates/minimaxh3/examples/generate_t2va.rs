@@ -20,14 +20,17 @@
 //! `vae/`, `text_encoder/`, `audio_vae/`, `tokenizer/` all present.
 //!
 //! Usage: cargo run -p brain-minimaxh3 --release --example generate_t2va -- \
-//!     "<prompt>" <out.mp4> [num_frames] [canvas_px] [steps]
+//!     "<prompt>" <out.mp4> [num_frames] [canvas_px] [steps] [seed]
+//!
+//! Without a `seed` a random one is drawn and printed; pass it back to
+//! reproduce the clip.
 
 use std::process::Command;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() < 3 {
-        eprintln!("usage: generate_t2va \"<prompt>\" <out.mp4> [num_frames] [canvas_px] [steps]");
+        eprintln!("usage: generate_t2va \"<prompt>\" <out.mp4> [num_frames] [canvas_px] [steps] [seed]");
         std::process::exit(2);
     }
     let prompt = &a[1];
@@ -35,6 +38,14 @@ fn main() {
     let num_frames: u32 = a.get(3).map(|s| s.parse().expect("num_frames")).unwrap_or(124);
     let canvas_px: u32 = a.get(4).map(|s| s.parse().expect("canvas_px")).unwrap_or(128);
     let steps: usize = a.get(5).map(|s| s.parse().expect("steps")).unwrap_or(4);
+    let seed: u64 = match a.get(6) {
+        Some(s) => s.parse().unwrap_or_else(|_| panic!("seed: {s:?} is not a seed (a non-negative integer)")),
+        None => {
+            let seed = data::rng::random_seed();
+            eprintln!("no seed given, using random seed {seed} (pass {seed} as the last argument to reproduce)");
+            seed
+        }
+    };
 
     minimaxh3::caps::check_license().unwrap_or_else(|e| panic!("{e}"));
 
@@ -71,7 +82,7 @@ fn main() {
         canvas: Some((canvas_px, canvas_px)),
         num_frames,
         num_inference_steps: steps,
-        seed: 0,
+        seed,
         device: Some(dit_device),
     };
 

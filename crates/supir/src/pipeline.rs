@@ -181,7 +181,7 @@ impl Default for RestoreOptions {
             s_churn: d.s_churn,
             s_noise: d.s_noise,
             restore_cfg: d.s_stage1,
-            seed: 0,
+            seed: data::rng::random_seed(),
             caption: String::new(),
             positive_suffix: DEFAULT_POSITIVE_SUFFIX.to_string(),
             negative_prompt: DEFAULT_NEGATIVE_PROMPT.to_string(),

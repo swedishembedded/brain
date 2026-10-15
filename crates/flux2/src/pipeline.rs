@@ -291,7 +291,7 @@ impl Default for GenOpts {
             steps: None,
             experimental_steps: false,
             guidance: 4.0,
-            seed: 0,
+            seed: data::rng::random_seed(),
             mask: None,
             ref_resolution_scale: DEFAULT_REF_RESOLUTION_SCALE,
             tile: None,

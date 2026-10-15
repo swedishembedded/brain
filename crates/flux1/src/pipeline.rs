@@ -110,7 +110,7 @@ pub struct TrueCfg {
 
 impl Default for GenerateOptions {
     fn default() -> GenerateOptions {
-        GenerateOptions { steps: None, guidance: 3.5, seed: 0, height: 1024, width: 1024, start_step: 0, true_cfg: None }
+        GenerateOptions { steps: None, guidance: 3.5, seed: data::rng::random_seed(), height: 1024, width: 1024, start_step: 0, true_cfg: None }
     }
 }
 
