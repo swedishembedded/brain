@@ -409,6 +409,7 @@ impl Resident {
         video_frames: VideoFrames,
         tool_choice: ToolChoice,
         tools: &[String],
+        seed: u64,
         progress: &mut dyn FnMut(Progress),
     ) -> ActionResult {
         let prompt = last_user_text(inv);
@@ -420,7 +421,6 @@ impl Resident {
         let temperature = inv.get_f64("temp").unwrap_or(0.0).max(0.0) as f32;
         let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
         let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
-        let seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
         let sample = crate::model::SampleParams { temperature, top_k, top_p };
         let mut rng = data::rng::Rng::new(seed);
 
@@ -467,7 +467,7 @@ impl Resident {
                     seq.advance(&self.tok, &ids, progress);
                 },
             );
-            Ok(seq.finish(&self.tok, &out_ids, progress))
+            Ok(seq.finish(&self.tok, &out_ids, progress).set("seed", json!(seed)))
         } else {
             let images = decode_images(inv)?;
             let p = Prepared::build_multi(self, &images, &prompt, max_new, tools)?;
@@ -479,7 +479,7 @@ impl Resident {
                 ids.push(tok_id);
                 seq.advance(&self.tok, &ids, progress);
             });
-            Ok(seq.finish(&self.tok, &out_ids, progress))
+            Ok(seq.finish(&self.tok, &out_ids, progress).set("seed", json!(seed)))
         }
     }
 }
@@ -593,6 +593,7 @@ impl Action for GenerateAction {
         if last_user_text(inv).trim().is_empty() {
             return Err("qwenvl generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
         }
+        let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
         let video_frames = decode_media(inv)?;
         let (tool_choice, tools) = parse_tool_request(inv)?;
 
@@ -603,7 +604,7 @@ impl Action for GenerateAction {
             .ok_or("qwenvl generate: no checkpoint directory (pass 'weights', or configure one through the models directory)")?;
         let max_pixels = inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32;
         let precision = Precision::from_name(inv.get_str("precision").unwrap_or_default().as_str())?;
-        with_resident(&dir, max_pixels, precision, |hot| hot.generate(inv, video_frames, tool_choice, &tools, progress))
+        with_resident(&dir, max_pixels, precision, |hot| hot.generate(inv, video_frames, tool_choice, &tools, seed, progress))
     }
 }
 
@@ -631,7 +632,7 @@ impl Action for LoraTrainAction {
             lr: inv.get_f64("lr").unwrap_or(1e-4) as f32,
             size: inv.get_i64("size").unwrap_or(224).max(1) as u32,
             seq_len: inv.get_i64("seq_len").unwrap_or(256).max(1) as u32,
-            seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
+            seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
             ..crate::finetune::TrainOpts::default()
         };
         let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
@@ -644,6 +645,7 @@ impl Action for LoraTrainAction {
         Ok(Outcome::new()
             .set("adapter", json!(save))
             .set("steps", json!(opts.steps))
+            .set("seed", json!(opts.seed))
             .set("initial_loss", json!(initial_loss))
             .set("final_loss", json!(final_loss))
             .blob("adapter", Blob::new(Media::Bytes, bytes).with_meta(json!({"path": save}))))
@@ -1425,6 +1427,19 @@ mod tests {
         let imgs = decode_images(&inv).expect("decode_images");
         assert_eq!(imgs.len(), 1);
         assert_eq!(imgs[0].0, vec![0.25, 0.5, 0.75]);
+    }
+
+    /// A seed that is not a non-negative integer is refused by name, before any
+    /// checkpoint is touched, by both actions that take one.
+    #[test]
+    fn a_negative_seed_is_refused_before_touching_weights() {
+        let inv = Invocation::new().set("prompt", json!("describe this")).set("seed", json!(-1));
+        let err = GenerateAction { default_weights: None }.run(&inv, &mut |_| {}).unwrap_err();
+        assert!(err.contains("seed"), "{err}");
+
+        let train = Invocation::new().set("weights", json!("w")).set("data", json!("d")).set("save", json!("s")).set("seed", json!(-1));
+        let err = LoraTrainAction { default_weights: None }.run(&train, &mut |_| {}).unwrap_err();
+        assert!(err.contains("seed"), "{err}");
     }
 
     /// The run-time "exactly one of image/video" rule, checked without

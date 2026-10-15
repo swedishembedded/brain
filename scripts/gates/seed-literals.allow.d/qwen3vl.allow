@@ -1,2 +1,1 @@
 crates/qwen3vl/src/caps.rs	generate_profiled:Rng::new(0)	rng	greedy: argmax decode never consults the RNG
-crates/qwen3vl/src/finetune.rs	TrainOpts::default:seed=0	default	todo: default seed becomes random, printed and recorded

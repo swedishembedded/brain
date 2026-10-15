@@ -99,13 +99,16 @@ pub fn manifest_resident() -> Manifest {
 /// Sampling parameters, read once so the served and CLI paths agree on
 /// defaults. Kept next to the [`ParamSpec`] defaults above deliberately: a
 /// default that lives in only one of the two places is how they drift.
-pub fn sampling(inv: &Invocation) -> (usize, f32, usize, u64) {
-    (
+///
+/// The seed is the one given, or a fresh draw when none is; a seed that is not
+/// a non-negative integer is an error. The caller reports the seed it used.
+pub fn sampling(inv: &Invocation) -> Result<(usize, f32, usize, u64), String> {
+    Ok((
         inv.get_i64("max_new").unwrap_or(128).max(0) as usize,
         inv.get_f64("temp").unwrap_or(0.8) as f32,
         inv.get_i64("top_k").unwrap_or(40).max(0) as usize,
-        inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
-    )
+        inv.seed()?.unwrap_or_else(data::rng::random_seed),
+    ))
 }
 
 /// The resident (hot) model + its char vocabulary, and the checkpoint path that
@@ -156,7 +159,7 @@ impl Action for GenerateAction {
         if weights.is_empty() {
             return Err("glmdsa: 'weights' is required (path to a brain-format GLM checkpoint)".into());
         }
-        let (max_new, temp, top_k, seed) = sampling(inv);
+        let (max_new, temp, top_k, seed) = sampling(inv)?;
 
         let mut guard = self.hot.lock().map_err(|_| "glmdsa: model lock poisoned")?;
         if guard.as_ref().map(|h| h.weights != weights).unwrap_or(true) {
@@ -183,7 +186,7 @@ impl Action for GenerateAction {
         progress(Progress::step(max_new as u32, max_new as u32, "done"));
 
         let text = hot.tok.decode(&gen);
-        Ok(Outcome::new().blob("text", Blob::new(Media::Text, text.into_bytes())))
+        Ok(Outcome::new().set("seed", json!(seed)).blob("text", Blob::new(Media::Text, text.into_bytes())))
     }
 }
 
@@ -227,7 +230,7 @@ mod tests {
     /// the values agree perfectly at the precision the sampler uses.
     #[test]
     fn the_read_defaults_match_the_declared_defaults() {
-        let (max_new, temp, top_k, _seed) = sampling(&Invocation::default());
+        let (max_new, temp, top_k, _seed) = sampling(&Invocation::default()).unwrap();
         let spec = &manifest().actions[0];
         let declared = |name: &str| {
             spec.params.iter().find(|p| p.name == name).and_then(|p| p.default.clone()).unwrap_or_else(|| panic!("'{name}' declares no default"))
@@ -253,9 +256,36 @@ mod tests {
     /// flaky (a per-process counter is mixed in).
     #[test]
     fn random_seed_differs_across_consecutive_calls() {
-        let (_, _, _, a) = sampling(&Invocation::default());
-        let (_, _, _, b) = sampling(&Invocation::default());
+        let (_, _, _, a) = sampling(&Invocation::default()).unwrap();
+        let (_, _, _, b) = sampling(&Invocation::default()).unwrap();
         assert_ne!(a, b, "two consecutive unseeded reads must not collide");
+    }
+
+    /// An unseeded request draws a seed, reports it, and passing that seed back
+    /// reproduces the draw; a seed that is not a non-negative integer is refused
+    /// instead of clamped.
+    #[test]
+    fn an_unseeded_request_reports_the_seed_it_drew_and_that_seed_reproduces_it() {
+        let cfg = GlmConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 5); // seed: the checkpoint is fixed so only the sampling seed varies
+        let itos: Vec<char> = ('a'..='z').take(cfg.vocab as usize).collect();
+        let dir = std::env::temp_dir().join(format!("glmdsa-caps-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.safetensors");
+        Glm::new(cfg.clone(), 1, cfg.block_size, &init).save_with_itos(path.to_str().unwrap(), Some(&itos));
+
+        let provider = GlmProvider::new();
+        let action = provider.action("generate").unwrap();
+        let request = || Invocation::new().set("weights", json!(path.to_str().unwrap())).set("prompt", json!("abc")).set("max_new", json!(6)).set("temp", json!(1.5)).set("top_k", json!(0));
+        let first = action.run(&request(), &mut |_| {}).unwrap();
+        let drawn = first.outputs["seed"].as_u64().expect("the outcome carries the seed the draw used");
+        let replay = action.run(&request().set("seed", json!(drawn)), &mut |_| {}).unwrap();
+        assert_eq!(replay.outputs["seed"].as_u64(), Some(drawn));
+        assert_eq!(replay.blobs["text"].bytes, first.blobs["text"].bytes, "the reported seed reproduces the draw");
+
+        let err = action.run(&request().set("seed", json!(-1)), &mut |_| {}).unwrap_err();
+        assert!(err.contains("seed"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

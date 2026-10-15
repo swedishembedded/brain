@@ -198,7 +198,7 @@ impl Action for GenerateAction {
                 let temp = inv.get_f64("temp").unwrap_or(0.0) as f32;
                 let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
                 let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
-                let seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
+                let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
                 let ids: Vec<u32> = prompt
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
@@ -239,7 +239,8 @@ impl Action for GenerateAction {
         match plan {
             Plan::Chat { req, eos } => {
                 let tok = tok.expect("Plan::Chat is only built when a tokenizer was loaded");
-                let mut rng = Rng::new(req.seed);
+                let seed = req.seed;
+                let mut rng = Rng::new(seed);
                 let mut seq = SeqState::new(&req, inv.cancel.clone());
                 let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new);
                 let gen = crate::sample::generate_kv_stream_with_head(
@@ -257,7 +258,7 @@ impl Action for GenerateAction {
                         !seq.advance(&tok, &ids_out, progress)
                     },
                 );
-                Ok(seq.finish(&tok, &gen, progress))
+                Ok(seq.finish(&tok, &gen, progress).set("seed", json!(seed)))
             }
             Plan::Raw { ids, max_new, temp, top_k, top_p, seed, eos } => {
                 let mut rng = Rng::new(seed);
@@ -271,6 +272,7 @@ impl Action for GenerateAction {
                     .set("tokens", json!(gen.len()))
                     .set("ids", json!(gen))
                     .set("text", json!(text.clone()))
+                    .set("seed", json!(seed))
                     .blob("text", Blob::new(Media::Text, text.into_bytes())))
             }
         }
@@ -290,6 +292,33 @@ enum Plan {
 mod tests {
     use super::*;
     use capability::Registry;
+
+    /// An unseeded sampled request draws a seed, reports it, and passing that
+    /// seed back reproduces the draw; a seed that is not a non-negative integer
+    /// is refused instead of clamped.
+    #[test]
+    fn an_unseeded_request_reports_the_seed_it_drew_and_that_seed_reproduces_it() {
+        let cfg = Qwen35Config::tiny();
+        let init = crate::init::init_weights(&cfg, 5); // seed: the checkpoint is fixed so only the sampling seed varies
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg.param_list().into_iter().map(|(name, n)| (name.clone(), vec![n as u64], init.get(&name).unwrap().clone())).collect();
+        let dir = std::env::temp_dir().join(format!("qwen35moe-caps-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.safetensors");
+        checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
+
+        let mut reg = Registry::new();
+        reg.register(Arc::new(Qwen35Provider::new()));
+        let request = || Invocation::new().set("weights", json!(path.to_str().unwrap())).set("prompt", json!("1 2 3")).set("max_new", json!(8)).set("temp", json!(1.5)).set("top_k", json!(0));
+        let first = reg.run(MODEL, "generate", request(), &mut |_| {}).unwrap();
+        let drawn = first.outputs["seed"].as_u64().expect("the outcome carries the seed the draw used");
+        let replay = reg.run(MODEL, "generate", request().set("seed", json!(drawn)), &mut |_| {}).unwrap();
+        assert_eq!(replay.outputs["seed"].as_u64(), Some(drawn));
+        assert_eq!(replay.outputs["ids"], first.outputs["ids"], "the reported seed reproduces the draw");
+
+        let err = reg.run(MODEL, "generate", request().set("seed", json!(-1)), &mut |_| {}).unwrap_err();
+        assert!(err.contains("seed"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn manifest_declares_generate() {

@@ -75,6 +75,8 @@ pub struct TrainOpts {
     pub size: u32,
     /// Fixed per-sample token budget (prefix + caption + eos, padded).
     pub seq_len: u32,
+    /// Seed of the adapter init and the sample order; `Default` draws a fresh
+    /// one, and the run that used it reports it.
     pub seed: u64,
     /// Wall-clock checkpoint cadence, seconds; 0 disables periodic saves
     /// (only the final one runs). Same convention as `model::FitOpts`.
@@ -96,7 +98,7 @@ impl Default for TrainOpts {
             grad_clip: 1.0,
             size: 224,
             seq_len: 256,
-            seed: 0,
+            seed: data::rng::random_seed(),
             checkpoint_secs: 300,
             adam: model::Adam::default(),
         }
@@ -245,6 +247,13 @@ fn build_sample(prefix: &[u32], tok: &impl Tokenizer, caption: &str, seq_len: u3
 mod tests {
     use super::*;
     use crate::config::VisionConfig;
+
+    /// An unseeded training run draws its seed; a caller that needs a fixed
+    /// run passes one.
+    #[test]
+    fn default_opts_draw_a_fresh_seed() {
+        assert_ne!(TrainOpts::default().seed, TrainOpts::default().seed);
+    }
 
     fn tiny_vl_cfg() -> Qwen3VlConfig {
         Qwen3VlConfig {

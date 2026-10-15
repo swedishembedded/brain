@@ -96,6 +96,7 @@ struct DrawRequest {
 }
 
 fn draw_request(inv: &Invocation) -> Result<DrawRequest, String> {
+    let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
     let prompt = inv.get_str("prompt").filter(|p| !p.trim().is_empty()).ok_or("januspro text2image: 'prompt' is required")?;
     let (w, h) = (inv.get_i64("width").unwrap_or(IMAGE_SIZE as i64), inv.get_i64("height").unwrap_or(IMAGE_SIZE as i64));
     if (w, h) != (IMAGE_SIZE as i64, IMAGE_SIZE as i64) {
@@ -105,7 +106,7 @@ fn draw_request(inv: &Invocation) -> Result<DrawRequest, String> {
         prompt,
         cfg_weight: inv.get_f64("cfg_weight").unwrap_or(DEFAULT_CFG_WEIGHT) as f32,
         temperature: inv.get_f64("temperature").unwrap_or(DEFAULT_TEMPERATURE) as f32,
-        seed: inv.get_i64("seed").map(|s| s as u64).unwrap_or_else(rand_seed),
+        seed,
     })
 }
 
@@ -173,11 +174,6 @@ pub fn text2image_batch<D: DrawMany + ?Sized>(t2i: &mut D, invs: &[Invocation], 
         }
     }
     results
-}
-
-fn rand_seed() -> u64 {
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    (t as u64) ^ ((t >> 64) as u64) ^ (std::process::id() as u64).rotate_left(32)
 }
 
 /// The build a process keeps loaded: one of the two, never both.
@@ -278,6 +274,19 @@ mod tests {
         let mut inv = Invocation::new().set("prompt", json!("a lighthouse"));
         inv.cancel = cancel.clone();
         inv
+    }
+
+    /// An unseeded draw reports the seed it used and a seed that is not a
+    /// non-negative integer is refused rather than reinterpreted.
+    #[test]
+    fn an_unseeded_draw_reports_its_seed_and_a_negative_seed_is_refused() {
+        let token = CancelToken::armed();
+        let out = text2image(&mut Steps { total: 1, ran: 0 }, &request(&token), &mut |_| {}).unwrap();
+        let drawn = out.outputs["seed"].as_u64().expect("the outcome carries the seed the draw used");
+        let again = text2image(&mut Steps { total: 1, ran: 0 }, &request(&token).set("seed", json!(drawn)), &mut |_| {}).unwrap();
+        assert_eq!(again.outputs["seed"].as_u64(), Some(drawn));
+        let err = text2image(&mut Steps { total: 1, ran: 0 }, &request(&token).set("seed", json!(-1)), &mut |_| {}).unwrap_err();
+        assert!(err.contains("seed"), "got: {err}");
     }
 
     #[test]
