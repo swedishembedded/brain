@@ -122,7 +122,7 @@ fn direct_steps(g: &Gpu, k: &ConvGemmKernels, c: &Conv1d, o: &Operands, transpos
 fn sweep(label: &str, g: &Gpu, transposed: bool, shape: impl Fn(u32) -> Conv1d) {
     println!("\n{label}");
     println!("{:>6} {:>10} {:>10} {:>9} {:>12} {:>12}", "Cout", "direct ms", "lowered ms", "speedup", "max|d| ref", "max|d| A/B");
-    let mut rng = Lcg::new(0xBE0C);
+    let mut rng = Lcg::random();
     for cout in [4u32, 8, 12, 16, 24, 32, 48, 64, 128, 256] {
         let c = shape(cout);
         let o = operands(g, &c, transposed, &mut rng);

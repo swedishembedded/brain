@@ -122,7 +122,7 @@ fn lowered_conv1d_matches_the_host_oracle() {
         conv_case("k1 padded", 1, 64, 200, 64, 1, 1, 1, 1, 1, "im2col+reg3"),
     ];
 
-    let mut rng = Lcg::new(0x51D1);
+    let mut rng = Lcg::random();
     for case in cases {
         let c = case.c;
         let x = rng.vec_scaled((c.n * c.cin * c.l) as usize, 1.0);
@@ -175,7 +175,7 @@ fn lowered_convtr1d_matches_the_host_oracle() {
         tr("at the threshold", 1, 64, 100, 4, 4, 2, 1, 1, "matmul_dw_reg_splitk"),
     ];
 
-    let mut rng = Lcg::new(0x51D2);
+    let mut rng = Lcg::random();
     for case in cases {
         let c = case.c;
         let x = rng.vec_scaled((c.n * c.cin * c.l) as usize, 1.0);
@@ -216,7 +216,7 @@ fn the_chunked_conv1d_matches_the_host_oracle_across_chunk_boundaries() {
         brain_testutil::skip("no workgroup reductions: the lowering is not selected on this device");
         return;
     }
-    let mut rng = Lcg::new(0x51D4);
+    let mut rng = Lcg::random();
     // cink = 64*3 = 192 floats/row; a 1 MiB budget is 262144 floats = 1365
     // rows, snapped to 1280 - so L = 3000 is three chunks, the last ragged.
     let l = 3000u32;
@@ -277,7 +277,7 @@ fn a_shared_scratch_survives_a_chain_of_convs() {
         brain_testutil::skip("no workgroup reductions: the lowering is not selected on this device");
         return;
     }
-    let mut rng = Lcg::new(0x51D3);
+    let mut rng = Lcg::random();
     let mut scratch = ConvScratch::new();
     let mut steps = Vec::new();
     let mut checks = Vec::new();

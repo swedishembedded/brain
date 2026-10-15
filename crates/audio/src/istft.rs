@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn roundtrip_hift_shape() {
         let cfg = StftConfig { n_fft: 16, hop: 4, win: 16 };
-        let mut r = Lcg::new(0xC057_100E);
+        let mut r = Lcg::random();
         let n = 400;
         let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.13).sin() * 0.6 + r.signed() * 0.1).collect();
         let (re, im, n_frames) = stft(&x, &cfg);
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn roundtrip_second_shape() {
         let cfg = StftConfig { n_fft: 32, hop: 8, win: 24 };
-        let mut r = Lcg::new(0x0005_EED1);
+        let mut r = Lcg::random();
         let n = 600;
         let x: Vec<f32> = (0..n).map(|_| r.signed() * 0.5).collect();
         let (re, im, n_frames) = stft(&x, &cfg);

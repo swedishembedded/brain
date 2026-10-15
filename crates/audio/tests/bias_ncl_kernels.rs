@@ -37,7 +37,7 @@ fn bias_grad_ncl_matches_finite_differences() {
     let g = Gpu::new_cpu(PIPES);
     let (rows, c, inner) = (2usize, 3usize, 5usize);
     let n = rows * c * inner;
-    let mut r = Lcg::new(7);
+    let mut r = Lcg::random();
     let x = r.vec(n);
     let bias = r.vec(c);
     let dy = r.vec(n);

@@ -571,9 +571,9 @@ fn repo_path(rel: &str) -> String {
     /// extractor's valid frames bit-for-bit (pure math - no fixtures needed).
     #[test]
     fn nemotron_mel_stream_matches_offline() {
-        // deterministic pseudo-random signal, awkward length (not a hop multiple)
+        // pseudo-random signal, awkward length (not a hop multiple)
         let n = 16000 + 137;
-        let wav: Vec<f32> = Lcg::new(0x2545F4914F6CDD1D).vec(n);
+        let wav: Vec<f32> = Lcg::random().vec(n);
         let (mel, _t, mels) = nemotron_logmel(&wav);
         let valid = n / 160;
 
