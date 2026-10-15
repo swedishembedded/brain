@@ -1,3 +1,1 @@
-crates/toymoe/src/model.rs	parse_args:seed=1234	default	todo: default seed becomes random, printed and recorded
-crates/toymoe/src/model.rs	run_eval:seed=123	default	todo: default seed becomes random, printed and recorded
-crates/toymoe/src/model.rs	run_train:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/toymoe/src/train.rs	-:CORPUS_SEED=123	const	world: names the toy corpus and its substitution table, shared by the trainer and the evaluator

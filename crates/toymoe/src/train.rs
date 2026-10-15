@@ -739,6 +739,12 @@ fn randn(s: &mut u64) -> f32 {
     (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
 }
 
+/// Seed of the toy corpus every trainer and the evaluator share. It fixes the
+/// substitution table the model must learn, so it is part of the task, not a
+/// source of run-to-run variation: evaluating against another value measures
+/// a different rule.
+pub const CORPUS_SEED: u64 = 123;
+
 /// The toy corpus and its substitution table (the rule's ground truth).
 /// `data[i] = (data[i-2] + table[data[i-1]]) % vocab`, with a reset every 257th.
 pub fn corpus_and_table(n: usize, vocab: u32, seed: u64) -> (Vec<u32>, Vec<u32>) {
@@ -811,7 +817,7 @@ pub fn train(args: TrainArgs) {
     // loop (LR schedule, grad-accum, eval/checkpoint, resume) is shared with the
     // GPT/PID models; only the corpus generation stays MoE-specific. There is no
     // meta.json, so `fit` infers vocab from the data (= 64, matching `cfg.vocab`).
-    let corpus = make_corpus(20_000, cfg.vocab, 123);
+    let corpus = make_corpus(20_000, cfg.vocab, CORPUS_SEED);
     let dir = std::env::temp_dir().join(format!("brain_moe_train_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let n_val = corpus.len() / 10;
@@ -867,7 +873,7 @@ pub fn train_expert(args: ExpertTrainArgs) {
     let init = c.by_role("");
     let trainer = Trainer::new(cfg.clone(), args.b, args.t, &init);
 
-    let (corpus, _table) = corpus_and_table(20_000, cfg.vocab, 123);
+    let (corpus, _table) = corpus_and_table(20_000, cfg.vocab, CORPUS_SEED);
     let mut rng = args.seed.max(1) ^ 0x9E3779B97F4A7C15;
     let tt = args.t as usize;
     for step in 1..=args.steps {

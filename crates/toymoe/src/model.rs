@@ -383,7 +383,22 @@ struct Args {
     max_new: usize,
     temperature: f32,
     top_k: Option<usize>,
-    seed: u64,
+    /// The sampling seed; `None` when `--seed` was not given.
+    seed: Option<u64>,
+}
+
+/// The seed a run uses: the one given, else a freshly drawn one, announced on
+/// stderr (stdout carries the run's result) so the run can be repeated.
+fn resolve_seed(given: Option<u64>, what: &str) -> u64 {
+    given.unwrap_or_else(|| {
+        let seed = data::rng::random_seed();
+        announce_drawn_seed(what, seed);
+        seed
+    })
+}
+
+fn announce_drawn_seed(what: &str, seed: u64) {
+    eprintln!("{what}: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
 }
 
 fn parse_args() -> Args {
@@ -393,7 +408,7 @@ fn parse_args() -> Args {
         max_new: 64,
         temperature: 0.8,
         top_k: None,
-        seed: 1234,
+        seed: None,
     };
     let argv: Vec<String> = std::env::args().collect();
     let mut i = if argv.get(1).map(|s| s.as_str()) == Some("generate") { 2 } else { 1 };
@@ -411,7 +426,7 @@ fn parse_args() -> Args {
             "--max-new" => a.max_new = next().parse().expect("bad --max-new"),
             "--temperature" => a.temperature = next().parse().expect("bad --temperature"),
             "--top-k" => a.top_k = Some(next().parse().expect("bad --top-k")),
-            "--seed" => a.seed = next().parse().expect("bad --seed"),
+            "--seed" => a.seed = Some(next().parse().expect("bad --seed")),
             other => panic!("unknown flag: {other}"),
         }
         i += 2;
@@ -424,7 +439,9 @@ fn parse_args() -> Args {
 
 pub fn run_eval(flags: &[String]) {
     let mut weights_path = "moe_rs.safetensors".to_string();
-    let mut seed: u64 = 123;
+    // Not a sampling seed: it names the toy corpus and its substitution table,
+    // so the default must be the corpus the trainer fits.
+    let mut seed: u64 = train::CORPUS_SEED;
     let mut samples: usize = 400;
     let mut i = 0;
     while i < flags.len() {
@@ -491,9 +508,10 @@ pub fn run_train(flags: &[String]) {
         t: 64,
         lr: 3e-4,
         wd: 0.1,
-        seed: 0,
+        seed: data::rng::random_seed(),
         out: "moe_rs.safetensors".to_string(),
     };
+    let mut seed_given = false;
     let mut i = 0;
     while i < flags.len() {
         let next = || flags.get(i + 1).cloned().expect("missing value for flag");
@@ -503,11 +521,17 @@ pub fn run_train(flags: &[String]) {
             "--block-size" | "--seq-len" => a.t = next().parse().unwrap(),
             "--lr" => a.lr = next().parse().unwrap(),
             "--weight-decay" => a.wd = next().parse().unwrap(),
-            "--seed" => a.seed = next().parse().unwrap(),
+            "--seed" => {
+                a.seed = next().parse().unwrap();
+                seed_given = true;
+            }
             "--out" => a.out = next(),
             other => panic!("unknown train flag: {other}"),
         }
         i += 2;
+    }
+    if !seed_given {
+        announce_drawn_seed("toymoe train", a.seed);
     }
     train::train(a);
 }
@@ -533,7 +557,7 @@ pub fn run_generate() {
 
     let engine = Engine::new(weights);
     let mut tokens = args.prompt.clone();
-    let mut rng = args.seed.max(1);
+    let mut rng = resolve_seed(args.seed, "toymoe generate").max(1);
     for _ in 0..args.max_new {
         let start = tokens.len().saturating_sub(block_size);
         let logits = engine.forward(&tokens[start..]);
@@ -565,6 +589,13 @@ mod tests {
         assert_eq!((w.cfg.vocab_size, w.cfg.block_size, w.cfg.n_experts, w.cfg.d_ff), (5, 8, 2, 4));
         assert_eq!(w.tensors["token_emb.weight"], emb);
         assert_eq!(w.tensors["lm_head.weight"], emb);
+    }
+
+    /// An unset seed is drawn, so two unseeded runs differ; a given one is used as is.
+    #[test]
+    fn an_unset_seed_is_drawn_and_a_given_one_is_kept() {
+        assert_ne!(resolve_seed(None, "test"), resolve_seed(None, "test"));
+        assert_eq!(resolve_seed(Some(7), "test"), 7);
     }
 
     #[test]
