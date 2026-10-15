@@ -106,8 +106,10 @@ brain pull sentence-transformers/all-MiniLM-L6-v2
 make samples/learning/visualclick/run ARGS="--examples out/examples"
 ```
 
-The first run trains and saves its weights; every run after that loads them and
-answers immediately, unless you pass `--retrain`.
+The first run trains and saves its weights. The seed is drawn at random and
+printed, and names the checkpoint directory; a later run with the same
+`--seed N` (or `--checkpoint DIR`) loads those weights and answers
+immediately, unless you pass `--retrain`.
 
 ```bash
 # look at the world first, no model involved

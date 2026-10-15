@@ -85,6 +85,10 @@ fn checkpoint_dir(ablate: Ablate, seed: u64, train_n: usize) -> String {
 }
 
 fn parse_args() -> Args {
+    parse_args_from(&std::env::args().skip(1).collect::<Vec<String>>())
+}
+
+fn parse_args_from(argv: &[String]) -> Args {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut a = Args {
         encoder: std::env::var("BRAIN_MINILM_DIR")
@@ -92,7 +96,7 @@ fn parse_args() -> Args {
         ablate: Ablate::None,
         train_n: 20000,
         eval_n: 500,
-        seed: 11,
+        seed: brain::options::Args::new(argv).seed("visualclick"),
         shot: None,
         examples: None,
         examples_n: 8,
@@ -102,7 +106,6 @@ fn parse_args() -> Args {
         checkpoint: None,
         retrain: false,
     };
-    let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < argv.len() {
         let next = || argv.get(i + 1).cloned().unwrap_or_default();
@@ -122,7 +125,8 @@ fn parse_args() -> Args {
             }
             "--train-screens" => a.train_n = next().parse().unwrap_or(a.train_n),
             "--eval-screens" => a.eval_n = next().parse().unwrap_or(a.eval_n),
-            "--seed" => a.seed = next().parse().unwrap_or(a.seed),
+            // The value is read once, at construction, by the shared flag grammar.
+            "--seed" => {}
             "--shot" => a.shot = Some(next()),
             "--examples" => a.examples = Some(next()),
             "--examples-n" => a.examples_n = next().parse().unwrap_or(a.examples_n),
@@ -148,6 +152,7 @@ fn parse_args() -> Args {
                      --examples DIR  after evaluating, render held-out screens with the correct control outlined in black\n\
                      \x20             and, where it differs, the model's own answer in red.\n\
                      --ablate      break one input on purpose; both settings must collapse the score to chance.\n\
+                     --seed        drawn at random and printed when not given; the default checkpoint directory is named by it.\n\
                      --retrain     ignore an existing checkpoint and train anyway."
                 );
                 std::process::exit(0);
@@ -902,4 +907,15 @@ fn main() {
     println!("  calibration (ECE)   {:.3}", r.ece);
     println!("  latency             {:.1} ms/decision ({:.1} ms encoder + {:.1} ms rest) = {:.0} decisions/s", enc_ms + rest_ms, enc_ms, rest_ms, per_s);
     println!("  trained parameters  {} (grounder) + the decision head, on a frozen encoder", grounder.parameters());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_seed_is_given_or_drawn_per_run() {
+        assert_eq!(parse_args_from(&["--seed".to_string(), "5".to_string()]).seed, 5);
+        assert_ne!(parse_args_from(&[]).seed, parse_args_from(&[]).seed);
+    }
 }

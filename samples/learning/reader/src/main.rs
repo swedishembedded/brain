@@ -41,15 +41,15 @@ use corpus::{Expect, Tool};
 const USAGE: &str = "\
 usage: sample-learning-reader <verb> [options]
 
-  generate --corpus DIR [--seed N]
+  generate --corpus DIR [--seed N]   (drawn and printed when not given)
         invent two tools and write the corpus, its adversarial lanes and
         their labels. Nothing else needs preparing.
 
-  battery  --model REF --run-dir DIR [--seed N]
+  battery  --model REF --run-dir DIR --seed N
         score the held-out tasks against what is currently served. Run it
         before reading and again after: the difference is the result.
 
-  read     --corpus DIR --run-dir DIR --model REF [--until N] [--seed N]
+  read     --corpus DIR --run-dir DIR --model REF --seed N [--until N]
            [--null-gate N | --shuffled-labels N]
         read the corpus, deciding per episode what is worth learning.
         Resumes if the run directory has been read before.
@@ -65,7 +65,7 @@ usage: sample-learning-reader <verb> [options]
         Run a control into its OWN run directory: it is a different arm, not
         a continuation of the real one.
 
-  distil   --corpus DIR --out DIR --model REF [--seed N] [--per-passage N]
+  distil   --corpus DIR --out DIR --model REF --seed N [--per-passage N]
         turn the corpus into question/answer pairs the model can be TRAINED
         to answer, and keep only the ones whose answer actually runs.
 
@@ -75,13 +75,14 @@ usage: sample-learning-reader <verb> [options]
         candidates.jsonl (the pairs read out of those), checked.jsonl (what
         the tool said about each) and accepted.jsonl (what survived).
 
-  phrase   --corpus DIR --out DIR --model REF [--seed N] [--per-answer N]
+  phrase   --corpus DIR --out DIR --model REF --seed N [--per-answer N]
            [--passes N] [--temperature T]
         the distil stage done the other way round, and the one that yields
         a training set: the TOOL supplies the answers, which makes them
         correct by construction, and the model only phrases the questions.
 
   sft      --in DIR --out DIR [--held-out N] [--seed N] [--control]
+           (--seed picks the split; drawn and printed when not given)
         turn the verified pairs into a training set and the held-out
         questions that will judge it. Splits by PHRASING, so the probe asks
         for something the training half teaches, in words it never used.
@@ -91,12 +92,12 @@ usage: sample-learning-reader <verb> [options]
                    A probe that scores as well from this is not measuring the
                    mapping.
 
-  score    --probes DIR --model REF [--adapter PATH] [--max-new N]
+  score    --probes DIR --model REF --seed N [--adapter PATH] [--max-new N]
         ask the held-out questions and RUN each answer. A reply counts only
         when running it produces the same observable result as running the
         reference - the measurement the whole pipeline exists to make.
 
-  audit    --sft DIR [--seed N]
+  audit    --sft DIR --seed N
         prove the splits are what they claim before anything is trained on
         them: no question shared between halves, no answer the training half
         never teaches, every answer executable, and the probe genuinely
@@ -108,6 +109,10 @@ usage: sample-learning-reader <verb> [options]
   selftest --corpus DIR --run-dir DIR
         check each episode's verdict against its lane's label, and exit
         non-zero if the reader learned something it should have refused.
+
+The --seed of every verb but `generate` and `sft` is the one `generate` printed:
+it names which invented tools the corpus describes, so it is required, never
+guessed. `generate` and `sft` draw and print a seed when none is given.
 
 The model is named by --model and resolved by brain's own model handler, so
 a reference that is not on disk is fetched. Without one, `generate`,
@@ -130,6 +135,26 @@ impl Args {
     }
     fn path(&mut self, flag: &str, default: &str) -> PathBuf {
         PathBuf::from(self.take(flag).unwrap_or_else(|| default.to_string()))
+    }
+    /// The seed of a verb that creates something: the one given, else a fresh
+    /// random draw, printed so the result can be reproduced.
+    fn seed_or_draw(&mut self, verb: &str) -> Result<u64, String> {
+        match self.take("--seed") {
+            Some(v) => v.parse().map_err(|_| format!("--seed {v:?}: not a seed (an unsigned integer)")),
+            None => {
+                let seed = brain::random_seed();
+                eprintln!("{verb}: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+                Ok(seed)
+            }
+        }
+    }
+    /// The seed of an existing corpus, which every later verb needs to know
+    /// which tools it is talking about. It names an artifact that was already
+    /// generated, so it is never drawn: a fresh one would describe different
+    /// tools than the corpus holds.
+    fn corpus_seed(&mut self, verb: &str) -> Result<u64, String> {
+        let v = self.take("--seed").ok_or_else(|| format!("{verb} needs --seed: the seed `generate` printed for this corpus"))?;
+        v.parse().map_err(|_| format!("--seed {v:?}: not a seed (an unsigned integer)"))
     }
     fn number(&mut self, flag: &str, default: u64) -> Result<u64, String> {
         match self.take(flag) {
@@ -221,11 +246,11 @@ fn tools(seed: u64) -> (Tool, Tool) {
 
 fn generate(a: &mut Args) -> Result<ExitCode, String> {
     let dir = a.path("--corpus", "corpus");
-    let seed = a.number("--seed", 1)?;
+    let seed = a.seed_or_draw("generate")?;
     a.finish()?;
     let (ta, tb) = tools(seed);
     let labels = corpus::write(&dir, &ta, &tb).map_err(|e| format!("{}: {e}", dir.display()))?;
-    println!("invented {} and {}, {} subcommands between them", ta.name, tb.name, ta.commands.len() + tb.commands.len());
+    println!("invented {} and {}, {} subcommands between them (seed {seed})", ta.name, tb.name, ta.commands.len() + tb.commands.len());
     println!("wrote {} episodes across {} lanes to {}", labels.len(), 9, dir.display());
     println!("battery: {} held-out tasks, none of which appear in the corpus", ta.battery().len());
     Ok(ExitCode::SUCCESS)
@@ -239,7 +264,7 @@ fn battery_tasks(seed: u64) -> Vec<BatteryTask> {
 fn battery(a: &mut Args) -> Result<ExitCode, String> {
     let model = a.take("--model").ok_or("battery needs --model")?;
     let run_dir = a.path("--run-dir", "run");
-    let seed = a.number("--seed", 1)?;
+    let seed = a.corpus_seed("battery")?;
     a.finish()?;
     let tasks = battery_tasks(seed);
 
@@ -277,7 +302,7 @@ fn read(a: &mut Args) -> Result<ExitCode, String> {
     let model = a.take("--model").ok_or("read needs --model")?;
     let corpus_dir = a.path("--corpus", "corpus");
     let run_dir = a.path("--run-dir", "run");
-    let seed = a.number("--seed", 1)?;
+    let seed = a.corpus_seed("read")?;
     let until = a.take("--until").map(|v| v.parse::<usize>().map_err(|e| format!("--until: {e}"))).transpose()?;
     let null_gate = a.take("--null-gate").map(|v| v.parse::<u64>().map_err(|e| format!("--null-gate: {e}"))).transpose()?;
     let shuffled = a.take("--shuffled-labels").map(|v| v.parse::<u64>().map_err(|e| format!("--shuffled-labels: {e}"))).transpose()?;
@@ -373,7 +398,7 @@ fn distil(a: &mut Args) -> Result<ExitCode, String> {
     let corpus_dir = a.path("--corpus", "corpus");
     let out_dir = a.path("--out", "distil");
     let model = a.take("--model").ok_or("distil needs --model")?;
-    let seed = a.number("--seed", 1)?;
+    let seed = a.corpus_seed("distil")?;
     let per_passage = a.number("--per-passage", 4)? as usize;
     a.finish()?;
 
@@ -483,7 +508,7 @@ fn phrase(a: &mut Args) -> Result<ExitCode, String> {
     let corpus_dir = a.path("--corpus", "corpus");
     let out_dir = a.path("--out", "phrased");
     let model = a.take("--model").ok_or("phrase needs --model")?;
-    let seed = a.number("--seed", 1)?;
+    let seed = a.corpus_seed("phrase")?;
     let per_answer = a.number("--per-answer", 3)? as usize;
     // Greedy decoding returns one reply per prompt, so distinct phrasings
     // need sampling and more than one pass. Seeded per pass, so the whole
@@ -588,7 +613,7 @@ fn sft(a: &mut Args) -> Result<ExitCode, String> {
     let in_dir = a.path("--in", "phrased");
     let out_dir = a.path("--out", "sft");
     let held_out = a.number("--held-out", 1)? as usize;
-    let seed = a.number("--seed", 1)?;
+    let seed = a.seed_or_draw("sft")?;
     let control = a.0.iter().position(|x| x == "--control").map(|i| a.0.remove(i)).is_some();
     a.finish()?;
 
@@ -636,6 +661,7 @@ fn sft(a: &mut Args) -> Result<ExitCode, String> {
         m
     });
     println!("covering  {:>4}  distinct commands", answers.len());
+    println!("seed      {seed:>4}  of the split (pass --seed {seed} to reproduce)");
     println!("\nwrote {}", out_dir.display());
     Ok(ExitCode::SUCCESS)
 }
@@ -644,7 +670,7 @@ fn score(a: &mut Args) -> Result<ExitCode, String> {
     let probes_dir = a.path("--probes", "sft");
     let model = a.take("--model").ok_or("score needs --model")?;
     let adapter = a.take("--adapter");
-    let seed = a.number("--seed", 1)?;
+    let seed = a.corpus_seed("score")?;
     let max_new = a.number("--max-new", 96)? as u32;
     a.finish()?;
 
@@ -721,7 +747,7 @@ fn score(a: &mut Args) -> Result<ExitCode, String> {
 /// is silent - it shows up as a better result.
 fn audit(a: &mut Args) -> Result<ExitCode, String> {
     let dir = a.path("--sft", "sft");
-    let seed = a.number("--seed", 1)?;
+    let seed = a.corpus_seed("audit")?;
     a.finish()?;
     let (tool, _) = tools(seed);
 
@@ -932,6 +958,17 @@ mod tests {
     }
 
     /// The stay-silent half: the flags a verb documents are accepted.
+    #[test]
+    fn a_new_corpus_draws_its_seed_and_an_existing_one_is_never_guessed() {
+        let args = |list: &[&str]| Args(list.iter().map(|a| a.to_string()).collect());
+        assert_eq!(args(&["--seed", "7"]).seed_or_draw("generate"), Ok(7));
+        assert_ne!(args(&[]).seed_or_draw("generate").unwrap(), args(&[]).seed_or_draw("generate").unwrap());
+        assert!(args(&["--seed", "abc"]).seed_or_draw("generate").is_err());
+        assert_eq!(args(&["--seed", "7"]).corpus_seed("battery"), Ok(7));
+        let err = args(&[]).corpus_seed("battery").unwrap_err();
+        assert!(err.contains("battery") && err.contains("generate"), "{err}");
+    }
+
     #[test]
     fn the_documented_flags_of_a_verb_are_accepted() {
         let dir = std::env::temp_dir().join(format!("sample-reader-args-{}", std::process::id()));

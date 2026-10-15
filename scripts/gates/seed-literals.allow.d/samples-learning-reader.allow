@@ -1,9 +1,1 @@
-samples/learning/reader/src/corpus.rs	write:Rng::new(0xDEAD_BEEF)	rng	todo: default seed becomes random, printed and recorded
-samples/learning/reader/src/main.rs	audit:--seed=1	default	todo: default seed becomes random, printed and recorded
-samples/learning/reader/src/main.rs	battery:--seed=1	default	todo: default seed becomes random, printed and recorded
-samples/learning/reader/src/main.rs	distil:--seed=1	default	todo: default seed becomes random, printed and recorded
-samples/learning/reader/src/main.rs	generate:--seed=1	default	todo: default seed becomes random, printed and recorded
-samples/learning/reader/src/main.rs	phrase:--seed=1	default	todo: default seed becomes random, printed and recorded
-samples/learning/reader/src/main.rs	read:--seed=1	default	todo: default seed becomes random, printed and recorded
-samples/learning/reader/src/main.rs	score:--seed=1	default	todo: default seed becomes random, printed and recorded
-samples/learning/reader/src/main.rs	sft:--seed=1	default	todo: default seed becomes random, printed and recorded
+samples/learning/reader/src/corpus.rs	write:Rng::new(0xDEAD_BEEF)	rng	world: the noise lane payload is part of the corpus definition, fixed so a tool seed alone regenerates the same corpus
