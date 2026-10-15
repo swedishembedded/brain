@@ -12,7 +12,7 @@
 //! caller-supplied-head variant must be bit-for-bit identical to the
 //! self-reading wrapper.
 
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 use qwen35moe::config::Qwen35Config;
 use qwen35moe::model::Qwen35;
 use qwen35moe::sample::{generate_kv, generate_kv_stream, generate_kv_stream_with_head};
@@ -29,11 +29,12 @@ fn tiny_model() -> (Qwen35, Vec<u32>) {
 #[test]
 fn streaming_matches_non_streaming_and_calls_back_once_per_token() {
     let (model, prompt) = tiny_model();
-    let mut r1 = Rng::new(3);
+    let seed = random_seed();
+    let mut r1 = Rng::new(seed);
     let plain = generate_kv(&model, &prompt, 6, 0.0, 0, 1.0, &[], &mut r1);
 
     let mut calls = Vec::new();
-    let mut r2 = Rng::new(3);
+    let mut r2 = Rng::new(seed);
     let streamed = generate_kv_stream(&model, &prompt, 6, 0.0, 0, 1.0, &[], &mut r2, &mut |i, t| {
         calls.push((i, t));
         true
@@ -49,23 +50,24 @@ fn streaming_matches_non_streaming_and_calls_back_once_per_token() {
 #[test]
 fn eos_stops_on_any_id_in_the_slice() {
     let (model, prompt) = tiny_model();
-    let mut r0 = Rng::new(1);
+    let seed = random_seed();
+    let mut r0 = Rng::new(seed);
     let full = generate_kv(&model, &prompt, 8, 0.0, 0, 1.0, &[], &mut r0);
     assert!(!full.is_empty(), "greedy generation produced nothing to test against");
     let never_occurs = 999_999u32;
     let stop_at_id = full[0];
 
-    let mut r1 = Rng::new(1);
+    let mut r1 = Rng::new(seed);
     let truncated = generate_kv_stream(&model, &prompt, 8, 0.0, 0, 1.0, &[never_occurs, stop_at_id], &mut r1, &mut |_, _| true);
     assert!(truncated.is_empty(), "must stop before emitting the eos id (the very first sampled token here)");
 
     // Order in the slice must not matter.
-    let mut r2 = Rng::new(1);
+    let mut r2 = Rng::new(seed);
     let truncated2 = generate_kv_stream(&model, &prompt, 8, 0.0, 0, 1.0, &[stop_at_id, never_occurs], &mut r2, &mut |_, _| true);
     assert_eq!(truncated2, truncated);
 
     // An empty eos slice never stops early.
-    let mut r3 = Rng::new(1);
+    let mut r3 = Rng::new(seed);
     let no_stop = generate_kv_stream(&model, &prompt, 8, 0.0, 0, 1.0, &[], &mut r3, &mut |_, _| true);
     assert_eq!(no_stop, full, "empty eos slice must not stop generation");
 }
@@ -73,7 +75,8 @@ fn eos_stops_on_any_id_in_the_slice() {
 #[test]
 fn on_token_returning_false_stops_generation_early_but_keeps_the_token() {
     let (model, prompt) = tiny_model();
-    let mut rng = Rng::new(5);
+    let seed = random_seed();
+    let mut rng = Rng::new(seed);
     let mut seen = 0usize;
     let out = generate_kv_stream(&model, &prompt, 10, 0.0, 0, 1.0, &[], &mut rng, &mut |_, _| {
         seen += 1;
@@ -85,11 +88,12 @@ fn on_token_returning_false_stops_generation_early_but_keeps_the_token() {
 #[test]
 fn with_head_matches_the_self_reading_wrapper() {
     let (model, prompt) = tiny_model();
+    let seed = random_seed();
     let head = model.read_weight(model.cfg.head_weight());
 
-    let mut r1 = Rng::new(7);
+    let mut r1 = Rng::new(seed);
     let a = generate_kv_stream(&model, &prompt, 6, 0.0, 0, 1.0, &[], &mut r1, &mut |_, _| true);
-    let mut r2 = Rng::new(7);
+    let mut r2 = Rng::new(seed);
     let b = generate_kv_stream_with_head(&model, &prompt, 6, 0.0, 0, 1.0, &[], &mut r2, &head, &mut |_, _| true);
     assert_eq!(a, b, "generate_kv_stream_with_head must match generate_kv_stream given the same head");
 }

@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 use gpu_core::Gpu;
 use model::serve::{PagedDecoder, Request};
 use qwen35moe::config::Qwen35Config;
@@ -45,7 +45,7 @@ fn run(make_gpu: fn(&[(&str, &str)]) -> Gpu) {
     // positive (`gdn_chunk_size` always returns a divisor of its own input),
     // so the prompt+max_new length is as good a choice as any.
     let reference = Qwen35::new_on(make_gpu(pipelines()), cfg.clone(), 1, max_seq_len, &init);
-    let mut rng = Rng::new(1);
+    let mut rng = Rng::new(random_seed());
     let want = qwen35moe::sample::generate_kv(&reference, &prompt, max_new, 0.0, 0, 1.0, &[], &mut rng);
     assert_eq!(want.len(), max_new, "greedy decode with no eos must always produce exactly max_new tokens");
 

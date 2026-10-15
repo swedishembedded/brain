@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 use qwen35moe::config::Qwen35Config;
 use qwen35moe::init::init_weights;
 use qwen35moe::vl::Qwen35Vl;
@@ -121,7 +121,7 @@ fn build() -> (Qwen35Vl, Vec<u32>, Vec<u32>, Vec<f32>) {
     let model = Qwen35Vl::new(vcfg.clone(), dcfg, vweights, mweights, &dweights, tokens.len() as u32, IMG, 2, 4);
 
     let pv_total = (16 * vcfg.patch_vec_dim()) as usize; // 4x4 patch grid
-    let mut rng = Rng::new(4);
+    let mut rng = Rng::new(random_seed());
     let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
 
     (model, tokens, targets, pixels)
