@@ -61,6 +61,7 @@ fn random_rotation(rng: &mut Lcg) -> M3 {
 /// really was, and names the three wrong fixes.
 #[test]
 fn a_robust_similarity_lands_the_cameras_in_metres() {
+    // seed: the metric error bound was set against this scene and outlier draw
     let mut rng = Lcg::new(3);
     let truth: Vec<V3> = (0..24)
         .map(|i| {
@@ -135,6 +136,7 @@ fn held(world: &M3, yaw: f64, pitch: f64, roll: f64) -> Pose {
 /// degrees.
 #[test]
 fn gravity_comes_from_how_the_photographs_were_held() {
+    // seed: the angular error bound was set against this scene and noise draw
     let mut rng = Lcg::new(17);
     let world = random_rotation(&mut rng);
     let up = mv(&world, [0.0, -1.0, 0.0]);

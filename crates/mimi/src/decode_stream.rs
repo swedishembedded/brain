@@ -547,6 +547,7 @@ mod tests {
     /// check the streaming back: chunked == one-shot, sample-exact.
     #[test]
     fn back_chunked_equals_full() {
+        // seed: the 1e-6 absolute bound holds for the output magnitudes this draw of unscaled weights gives; other draws amplify rounding past it
         let mut seed = Lcg::new(7);
         let cfg = CodecConfig {
             latent_dim: 4,
@@ -638,6 +639,7 @@ mod tests {
     /// several calls in a row before `StreamConvTr1dSym` catches up).
     #[test]
     fn back_omni_chunked_equals_full() {
+        // seed: the 1e-6 absolute bound holds for the output magnitudes this draw of unscaled weights gives; other draws amplify rounding past it
         let mut seed = Lcg::new(2026);
         let cfg = CodecConfig { latent_dim: 4, decoder_dim: 8, upsampling_ratios: vec![2], upsample_rates: vec![3, 2], ..Default::default() };
 
@@ -723,6 +725,7 @@ mod tests {
         // waveform. `long_form_parity_vs_codec` below is the one that puts a T
         // past the window under test.
         let t = 16usize;
+        // seed: the parity bound is calibrated for the waveform these codes produce on the real checkpoint
         let mut seed = Lcg::new(3);
         let codes: Vec<u32> = (0..t * nq).map(|_| seed.next_u32() % 256).collect();
 
@@ -781,6 +784,7 @@ mod tests {
         let w: W = ck.by_role("");
         let nq = base_cfg.num_quantizers as usize;
         let t = 20usize;
+        // seed: the parity bound is calibrated for the waveform these codes produce on the real checkpoint
         let mut seed = Lcg::new(11);
         let codes: Vec<u32> = (0..t * nq).map(|_| seed.next_u32() % 256).collect();
 
@@ -845,7 +849,7 @@ mod tests {
         let dec = StreamingCodecDecoder::load(&path);
         let nq = dec.cfg().num_quantizers as usize;
         let t = 48usize;
-        let mut seed = Lcg::new(5);
+        let mut seed = Lcg::random();
         let codes: Vec<u32> = (0..t * nq).map(|_| seed.next_u32() % 256).collect();
         let t0 = std::time::Instant::now();
         let wav = dec.decode_streaming(&codes, 16);

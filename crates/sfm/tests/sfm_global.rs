@@ -40,7 +40,7 @@ fn perturbed(rng: &mut Lcg, d: &[f32], sigma: f32) -> Vec<f32> {
 /// every pair.
 #[test]
 fn retrieval_finds_the_overlapping_images_among_all_pairs() {
-    let mut rng = Lcg::new(5);
+    let mut rng = Lcg::random();
     let places: Vec<Vec<Vec<f32>>> = (0..40).map(|_| (0..60).map(|_| unit_descriptor(&mut rng)).collect()).collect();
     let n = 36;
     // shuffled: image slot k shows street position order[k]
@@ -101,7 +101,7 @@ fn random_rotation(rng: &mut Lcg) -> M3 {
 /// are the ones flagged.
 #[test]
 fn rotation_averaging_survives_a_fifth_of_the_view_graph_being_wrong() {
-    let mut rng = Lcg::new(11);
+    let mut rng = Lcg::random();
     let n = 30;
     let truth: Vec<M3> = (0..n).map(|_| random_rotation(&mut rng)).collect();
     let mut edges = Vec::new();
@@ -142,7 +142,7 @@ fn rotation_averaging_survives_a_fifth_of_the_view_graph_being_wrong() {
 /// of the rig's size of the truth after the best similarity.
 #[test]
 fn global_positioning_places_cameras_and_points_from_bearings() {
-    let mut rng = Lcg::new(23);
+    let mut rng = Lcg::random();
     let ncam = 12;
     let centres: Vec<V3> = (0..ncam)
         .map(|i| {

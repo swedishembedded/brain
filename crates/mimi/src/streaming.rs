@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn stream_conv1d_chunked_equals_full() {
-        let mut seed = Lcg::new(12345);
+        let mut seed = Lcg::random();
         let (cin, cout, k, dil) = (3usize, 4usize, 3usize, 2usize);
         let l = 20usize;
         let w: Vec<f32> = seed.vec(cout * cin * k);
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn stream_convtr1d_chunked_equals_full() {
-        let mut seed = Lcg::new(999);
+        let mut seed = Lcg::random();
         let (cin, cout, stride) = (3usize, 2usize, 4usize);
         let k = 2 * stride; // SEANet block.1: k = 2*rate
         let l = 16usize;
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn stream_convtr1d_sym_chunked_equals_full() {
-        let mut seed = Lcg::new(2026);
+        let mut seed = Lcg::random();
         let (cin, cout, stride) = (3usize, 2usize, 4usize);
         let k = 2 * stride; // causal_convtr_sym's real shape: k = 2*rate, pad = rate
         let pad = stride;
@@ -356,7 +356,7 @@ mod tests {
     /// the streaming primitive and its own oracle share a bug.
     #[test]
     fn stream_convtr1d_sym_one_shot_matches_the_real_kernel_dispatch() {
-        let mut seed = Lcg::new(4242);
+        let mut seed = Lcg::random();
         let (cin, cout, stride) = (3u32, 2u32, 4u32);
         let k = 2 * stride;
         let pad = stride;

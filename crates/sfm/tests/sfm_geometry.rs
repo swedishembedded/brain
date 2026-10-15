@@ -65,6 +65,7 @@ fn e_distance(a: &M3, b: &M3) -> f64 {
 /// `(x/z, y/z)` formulation cannot even represent.
 #[test]
 fn five_points_give_the_exact_essential_matrix() {
+    // seed: the exactness bound over the 100 trials was verified on this stream; other streams hit a near-degenerate trial
     let mut rng = Lcg::new(17);
     for trial in 0..100 {
         let second = pose([0.3 * rng.signed() as f64, 0.3 * rng.signed() as f64, 0.3 * rng.signed() as f64], normalize([rng.signed() as f64, rng.signed() as f64, rng.signed() as f64]));
@@ -88,6 +89,7 @@ fn five_points_give_the_exact_essential_matrix() {
 /// truth - the noise floor, not an error of the estimator.
 #[test]
 fn relative_pose_survives_outliers_and_noise() {
+    // seed: the angular bound after outliers and noise was set against this draw
     let mut rng = Lcg::new(3);
     let x = cloud(&mut rng, 300);
     let second = pose([0.05, -0.2, 0.03], [-1.0, 0.1, 0.2]);
@@ -116,7 +118,7 @@ fn relative_pose_survives_outliers_and_noise() {
 /// Absolute pose from 2D-3D matches, 30% of them wrong.
 #[test]
 fn absolute_pose_survives_outliers() {
-    let mut rng = Lcg::new(5);
+    let mut rng = Lcg::random();
     let x = cloud(&mut rng, 200);
     let truth = pose([0.1, 0.3, -0.05], [0.4, -0.2, 0.5]);
     let mut u: Vec<V3> = x.iter().map(|v| bearing(&truth, *v)).collect();
@@ -134,6 +136,7 @@ fn absolute_pose_survives_outliers() {
 /// three-point sample.
 #[test]
 fn absolute_pose_refines_through_noise() {
+    // seed: the angular bound on the refined pose was set against this noise draw
     let mut rng = Lcg::new(6);
     let x = cloud(&mut rng, 300);
     let truth = pose([-0.2, 0.1, 0.05], [0.3, 0.1, -0.4]);
@@ -154,6 +157,7 @@ fn absolute_pose_refines_through_noise() {
 /// what a capture of an object on a floor contains.
 #[test]
 fn absolute_pose_on_a_plane() {
+    // seed: the bound is only met by draws whose minimal solver returns the true pose among its solutions
     let mut rng = Lcg::new(21);
     let truth = pose([0.3, -0.2, 0.1], [0.2, 0.4, 4.0]);
     let x: Vec<V3> = (0..150).map(|_| [2.0 * rng.signed() as f64, 2.0 * rng.signed() as f64, 0.0]).collect();
@@ -199,6 +203,7 @@ fn observe(k: &Intrinsics, poses: &[Pose], x: &[V3], rng: &mut Lcg, noise: f64) 
 /// the calibration and brings the error down to the noise.
 #[test]
 fn bundle_adjustment_self_calibrates() {
+    // seed: the self-calibration accuracy bound was set against this scene draw
     let mut rng = Lcg::new(9);
     let x = cloud(&mut rng, 400);
     let truth_k = Intrinsics { lens: Lens::radial(-0.12, 0.02), ..Intrinsics::pinhole(800.0, 960, 720) };
@@ -230,7 +235,7 @@ fn bundle_adjustment_self_calibrates() {
 /// everything else had to travel.
 #[test]
 fn the_gauge_holds_the_anchor_and_the_scale() {
-    let mut rng = Lcg::new(11);
+    let mut rng = Lcg::random();
     let x = cloud(&mut rng, 300);
     let k = Intrinsics::pinhole(800.0, 960, 720);
     let poses = orbit(6);

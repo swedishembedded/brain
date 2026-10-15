@@ -65,7 +65,7 @@ fn tiny_cfg() -> CodecConfig {
 /// the attention mask did, which is exactly the vacuous pass this test must
 /// not be able to produce (`assert_not_saturated` enforces it).
 fn tiny_weights(cfg: &CodecConfig) -> HashMap<String, Vec<f32>> {
-    let mut r = Lcg::new(20260904);
+    let mut r = Lcg::random();
     let mut w: HashMap<String, Vec<f32>> = HashMap::new();
     let mut put = |w: &mut HashMap<String, Vec<f32>>, name: &str, n: usize, a: f32| {
         w.insert(name.to_string(), r.vec_scaled(n, a));
@@ -165,7 +165,7 @@ fn tiny_weights(cfg: &CodecConfig) -> HashMap<String, Vec<f32>> {
 
 fn codes_for(cfg: &CodecConfig, t: usize) -> Vec<u32> {
     let nq = cfg.num_quantizers as usize;
-    let mut r = Lcg::new(7);
+    let mut r = Lcg::random();
     (0..t * nq).map(|_| r.next_u64() as u32 % cfg.codebook_size).collect()
 }
 

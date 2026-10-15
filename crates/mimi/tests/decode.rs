@@ -108,8 +108,9 @@ fn decode_random_codes_is_finite_and_bounded() {
     let nq = cfg.num_quantizers as usize;
     let t = 24usize;
 
-    // deterministic LCG of in-range codes (all codebooks are size 2048).
-    let mut seed = 0x1234_5678u64;
+    // LCG of in-range codes (all codebooks are size 2048).
+    let mut seed = data::rng::random_seed();
+    eprintln!("codes seed: {seed}");
     let mut next = || {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         (seed >> 33) as u32
