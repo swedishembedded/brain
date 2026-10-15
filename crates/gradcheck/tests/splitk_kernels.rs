@@ -104,7 +104,7 @@ fn dw_reg_and_tn_accumulate_the_exact_weight_gradient() {
         return;
     }
     let (m, k, n) = (300usize, 48usize, 32usize); // tiles = 1, ragged m
-    let mut rng = Lcg::new(0xD00D);
+    let mut rng = Lcg::random();
     let dy = rng.vec_scaled(m * n, 0.5);
     let x = rng.vec_scaled(m * k, 0.5);
     let prior = rng.vec_scaled(n * k, 0.5);
@@ -140,7 +140,7 @@ fn dw_splitk_plus_reduce_matches_the_oracle_with_a_ragged_tail_slice() {
     }
     let (m, k, n) = (500usize, 48usize, 32usize);
     let slices = 4usize; // ceil(500/4)=125 -> snapped to 128; slice 3 covers 384..500
-    let mut rng = Lcg::new(0xF00D);
+    let mut rng = Lcg::random();
     let dy = rng.vec_scaled(m * n, 0.5);
     let x = rng.vec_scaled(m * k, 0.5);
     let prior = rng.vec_scaled(n * k, 0.5);
@@ -176,7 +176,7 @@ fn fwd_splitk_plus_reduce_matches_the_oracle_and_assigns() {
     }
     let (m, k, n) = (256usize, 200usize, 96usize);
     let slices = 3usize; // kper = ceil(200/3)=67 -> snapped to 72; slice 2 covers 144..200
-    let mut rng = Lcg::new(0xBEEF);
+    let mut rng = Lcg::random();
     let x = rng.vec_scaled(m * k, 0.5);
     let w = rng.vec_scaled(n * k, 0.5);
     let want = host_fwd(m, k, n, &x, &w);

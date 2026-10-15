@@ -241,8 +241,8 @@ fn forward_per_channel_matches_reference() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     for &(n, c, h, w) in &[(3usize, 5usize, 6usize, 7usize), (2, 3, 9, 15), (1, 7, 1, 1)] {
         let total = n * c * h * w;
-        let x = Lcg::new(0x5eed_0001).vec(total);
-        let a = Lcg::new(0x5eed_0002).vec(c);
+        let x = Lcg::random().vec(total);
+        let a = Lcg::random().vec(c);
         let got = prelu_fwd(&gpu, &x, &a, (n, c, h, w), c);
         let want = prelu_ref(&x, &a, n, c, h, w, c);
         let d = max_abs_diff(&got, &want);
@@ -261,7 +261,7 @@ fn forward_shared_slope_matches_reference() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 5usize, 4usize, 11usize);
     let total = n * c * h * w;
-    let x = Lcg::new(0x5eed_0011).vec(total);
+    let x = Lcg::random().vec(total);
     let a = vec![0.2437f32];
     let got = prelu_fwd(&gpu, &x, &a, (n, c, h, w), 1);
     let want = prelu_ref(&x, &a, n, c, h, w, 1);
@@ -270,7 +270,7 @@ fn forward_shared_slope_matches_reference() {
 
     // And it must NOT coincide with the per-channel path for a varying `a`,
     // which is what makes the assertion above meaningful.
-    let a_pc = Lcg::new(0x5eed_0012).vec(c);
+    let a_pc = Lcg::random().vec(c);
     let pc = prelu_fwd(&gpu, &x, &a_pc, (n, c, h, w), c);
     assert!(max_abs_diff(&pc, &got) > 1e-3, "shared and per-channel paths are indistinguishable");
 }
@@ -291,7 +291,7 @@ fn forward_equals_leaky_relu_at_constant_slope() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 4usize, 5usize, 5usize);
     let total = n * c * h * w;
-    let x = Lcg::new(0x5eed_0021).vec(total);
+    let x = Lcg::random().vec(total);
     let slope = 0.1f32;
 
     let mine = prelu_fwd(&gpu, &x, &vec![slope; c], (n, c, h, w), c);
@@ -320,7 +320,7 @@ fn channel_isolation() {
     let (n, c, h, w) = (3usize, 5usize, 6usize, 7usize);
     let hw = h * w;
     let total = n * c * hw;
-    let x = Lcg::new(0x5eed_0031).vec(total);
+    let x = Lcg::random().vec(total);
     let a = vec![0.25f32; c];
     let base = prelu_fwd(&gpu, &x, &a, (n, c, h, w), c);
 
@@ -382,9 +382,9 @@ fn backward_matches_reference() {
     for &(name, kind, tpc) in bwd_variants(&gpu).iter() {
         for &(n, c, h, w) in BWD_SHAPES {
             let total = n * c * h * w;
-            let x = Lcg::new(0x5eed_0041).vec(total);
-            let a = Lcg::new(0x5eed_0042).vec(c);
-            let dy = Lcg::new(0x5eed_0043).vec(total);
+            let x = Lcg::random().vec(total);
+            let a = Lcg::random().vec(c);
+            let dy = Lcg::random().vec(total);
             let (dx, da) = prelu_bwd_k(&gpu, kind, tpc, &x, &a, &dy, (n, c, h, w), c);
             let (wdx, wda) = prelu_bwd_ref(&x, &a, &dy, n, c, h, w, c);
 
@@ -431,9 +431,9 @@ fn backward_variants_agree() {
     }
     for &(n, c, h, w) in BWD_SHAPES {
         let total = n * c * h * w;
-        let x = Lcg::new(0x5eed_0091).vec(total);
-        let a = Lcg::new(0x5eed_0092).vec(c);
-        let dy = Lcg::new(0x5eed_0093).vec(total);
+        let x = Lcg::random().vec(total);
+        let a = Lcg::random().vec(c);
+        let dy = Lcg::random().vec(total);
         let (dx_r, da_r) = prelu_bwd_k(&gpu, K_PRELU_BWD, 1, &x, &a, &dy, (n, c, h, w), c);
         let (dx_w, da_w) = prelu_bwd_k(&gpu, K_PRELU_BWD_WG, 64, &x, &a, &dy, (n, c, h, w), c);
         // dx is a pure map — no reassociation, so this one IS exact.
@@ -464,9 +464,9 @@ fn backward_dx_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 3usize, 5usize, 6usize);
     let total = n * c * h * w;
-    let x = Lcg::new(0x5eed_0051).vec(total);
-    let a = Lcg::new(0x5eed_0052).vec(c);
-    let dy = Lcg::new(0x5eed_0053).vec(total);
+    let x = Lcg::random().vec(total);
+    let a = Lcg::random().vec(c);
+    let dy = Lcg::random().vec(total);
     for &(name, kind, tpc) in bwd_variants(&gpu).iter() {
         let (dx, _) = prelu_bwd_k(&gpu, kind, tpc, &x, &a, &dy, (n, c, h, w), c);
 
@@ -509,8 +509,11 @@ fn backward_da_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 5usize, 4usize, 11usize);
     let total = n * c * h * w;
+    // seed: central differences need pre-activations clear of the kink at zero, which this draw has
     let x = Lcg::new(0x5eed_0061).vec(total);
+    // seed: central differences need pre-activations clear of the kink at zero, which this draw has
     let a = Lcg::new(0x5eed_0062).vec(c);
+    // seed: central differences need pre-activations clear of the kink at zero, which this draw has
     let dy = Lcg::new(0x5eed_0063).vec(total);
     for &(name, kind, tpc) in bwd_variants(&gpu).iter() {
         let (_, da) = prelu_bwd_k(&gpu, kind, tpc, &x, &a, &dy, (n, c, h, w), c);
@@ -544,9 +547,9 @@ fn shared_slope_da_is_per_channel_partials() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 5usize, 4usize, 11usize);
     let total = n * c * h * w;
-    let x = Lcg::new(0x5eed_0071).vec(total);
+    let x = Lcg::random().vec(total);
     let a = vec![0.31f32];
-    let dy = Lcg::new(0x5eed_0073).vec(total);
+    let dy = Lcg::random().vec(total);
     for &(name, kind, tpc) in bwd_variants(&gpu).iter() {
         let (_, da) = prelu_bwd_k(&gpu, kind, tpc, &x, &a, &dy, (n, c, h, w), 1);
         let summed: f64 = da.iter().map(|&v| v as f64).sum();
@@ -579,9 +582,9 @@ fn da_accumulates_into_a_pre_zeroed_buffer() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 3usize, 5usize, 6usize);
     let total = n * c * h * w;
-    let x = Lcg::new(0x5eed_0081).vec(total);
-    let a = Lcg::new(0x5eed_0082).vec(c);
-    let dy = Lcg::new(0x5eed_0083).vec(total);
+    let x = Lcg::random().vec(total);
+    let a = Lcg::random().vec(c);
+    let dy = Lcg::random().vec(total);
     let params = [n as u32, c as u32, h as u32, w as u32, c as u32];
 
     for &(name, kind, tpc) in bwd_variants(&gpu).iter() {

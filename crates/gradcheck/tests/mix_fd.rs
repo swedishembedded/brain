@@ -52,7 +52,7 @@ fn a_one_b_zero_reproduces_x_bit_for_bit() {
     b.set_mix_ids(MixIds { fwd: K_EDM_MIX, bwd: K_SCALE_ROW });
 
     let n = 32u32;
-    let mut st = Lcg::new(99u64);
+    let mut st = Lcg::random();
     let x: Vec<f32> = (0..n).map(|_| st.scaled(4.0)).collect();
     let f: Vec<f32> = (0..n).map(|_| st.scaled(4.0)).collect();
     let xb = gpu.storage_init("x", &x);
@@ -79,7 +79,7 @@ fn op_mix_backward_matches_finite_differences_of_the_real_forward() {
     builder.set_mix_ids(MixIds { fwd: K_EDM_MIX, bwd: K_SCALE_ROW });
 
     let n = 24u32;
-    let mut st = Lcg::new(4242u64);
+    let mut st = Lcg::random();
     let x0: Vec<f32> = (0..n).map(|_| st.scaled(2.0)).collect();
     let f0: Vec<f32> = (0..n).map(|_| st.scaled(2.0)).collect();
     let (a, bc) = (0.63f32, -1.4f32);

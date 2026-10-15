@@ -596,7 +596,7 @@ fn conv3d_forward_never_reads_the_future() {
     };
     assert_eq!(s.to(), s.t);
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut r = Lcg::new(21);
+    let mut r = Lcg::random();
     let x = r.vec(s.xn());
     let w = r.vec(s.wn());
     let bias = r.vec(s.cout as usize);
@@ -672,7 +672,7 @@ fn conv3d_dx_never_reaches_the_future() {
         groups: 1,
     };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut r = Lcg::new(22);
+    let mut r = Lcg::random();
     let w = r.vec(s.wn());
     let frame = (s.h * s.w) as usize;
 
@@ -742,7 +742,7 @@ fn conv3d_group_isolation() {
         groups: 2,
     };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut r = Lcg::new(7);
+    let mut r = Lcg::random();
     let x = r.vec(s.xn());
     let w = r.vec(s.wn());
     let bias = vec![0f32; s.cout as usize];
@@ -805,7 +805,7 @@ fn conv3d_dw_accumulates() {
         groups: 2,
     };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut r = Lcg::new(13);
+    let mut r = Lcg::random();
     let x = r.vec(s.xn());
     let dy = r.vec(s.yn());
     let once = dw_gpu(&gpu, &s, &dy, &x);

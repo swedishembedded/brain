@@ -250,9 +250,11 @@ mod tests {
             return;
         }
         let cfg = ArcFaceTrainConfig::tiny();
+        // seed: eps = 4e-4 was chosen against this weight and batch draw, clean on all five direction seeds
         let rng = std::cell::RefCell::new(Rng::new(7));
         let trainer =
             ArcFaceTrainer::new(cfg.clone(), &|n, k| init_tensor(&mut rng.borrow_mut(), n, k));
+        // seed: the batch the same eps was chosen against
         let mut brng = Rng::new(7 ^ 0xA5A5_5A5A);
         let n = (cfg.batch * 3 * cfg.arc.image_size * cfg.arc.image_size) as usize;
         let img: Vec<f32> = (0..n).map(|_| 2.0 * brng.next_f32() - 1.0).collect();
@@ -281,10 +283,10 @@ mod tests {
             return;
         }
         let cfg = ArcFaceTrainConfig::tiny();
-        let rng = std::cell::RefCell::new(Rng::new(11));
+        let rng = std::cell::RefCell::new(Rng::random());
         let t = ArcFaceTrainer::new(cfg.clone(), &|n, k| init_tensor(&mut rng.borrow_mut(), n, k));
 
-        let mut brng = Rng::new(0x1234);
+        let mut brng = Rng::random();
         let n = (cfg.batch * 3 * cfg.arc.image_size * cfg.arc.image_size) as usize;
         let img: Vec<f32> = (0..n).map(|_| 2.0 * brng.next_f32() - 1.0).collect();
         let labels: Vec<u32> = (0..cfg.batch).map(|i| i % cfg.classes).collect();

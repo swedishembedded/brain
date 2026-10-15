@@ -61,7 +61,7 @@ fn mse_value_matches_reference() {
 #[test]
 fn mse_grad_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut st = Lcg::new(0x5EED_C0DE);
+    let mut st = Lcg::random();
     let n = 37usize; // not a multiple of 64 -> exercises the bounds check
     let pred: Vec<f32> = (0..n).map(|_| st.signed()).collect();
     let target: Vec<f32> = (0..n).map(|_| st.signed()).collect();

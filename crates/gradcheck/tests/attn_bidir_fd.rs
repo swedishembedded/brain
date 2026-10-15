@@ -115,7 +115,7 @@ fn loss(out: &[f32], g: &[f32]) -> f32 {
 fn bidir_forward_is_deterministic() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 2, h: 2, t: 5, hd: 4 };
-    let mut st = Lcg::new(0x1234_5678u64);
+    let mut st = Lcg::random();
     let qkv: Vec<f32> = (0..s.qkv_len()).map(|_| st.signed()).collect();
     let a = forward(&gpu, &s, &qkv);
     let b = forward(&gpu, &s, &qkv);
@@ -130,7 +130,7 @@ fn bidir_softmax_rows_sum_to_one() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 1, h: 1, t: 6, hd: 3 };
     let d = s.d();
-    let mut st = Lcg::new(0xABCDu64);
+    let mut st = Lcg::random();
     let qkv: Vec<f32> = (0..s.qkv_len()).map(|_| st.signed()).collect();
     let qkv_buf = gpu.storage_init("qkv", &qkv);
     let scores = gpu.storage(s.scores_len() as u64);
@@ -152,7 +152,7 @@ fn bidir_softmax_rows_sum_to_one() {
 fn bidir_backward_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 2, h: 2, t: 4, hd: 3 };
-    let mut st = Lcg::new(0xDEAD_BEEFu64);
+    let mut st = Lcg::random();
     let qkv: Vec<f32> = (0..s.qkv_len()).map(|_| st.signed()).collect();
     let g: Vec<f32> = (0..s.out_len()).map(|_| st.signed()).collect();
 

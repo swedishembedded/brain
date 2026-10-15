@@ -99,7 +99,7 @@ fn gelu_erf_forward_matches_reference_erf() {
 #[test]
 fn gelu_erf_bwd_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut st = Lcg::new(12345u64);
+    let mut st = Lcg::random();
     let x: Vec<f32> = (0..64).map(|_| st.scaled(3.0)).collect();
 
     let analytic = dgelu(&gpu, 1, &x);

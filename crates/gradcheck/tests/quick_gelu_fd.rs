@@ -90,7 +90,7 @@ fn quick_gelu_bwd_matches_the_analytic_derivative() {
 #[test]
 fn quick_gelu_bwd_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut st = Lcg::new(12345u64);
+    let mut st = Lcg::random();
     let x: Vec<f32> = (0..64).map(|_| st.scaled(3.0)).collect();
 
     let analytic = dact(&gpu, K_BWD, &x);

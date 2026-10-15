@@ -300,7 +300,7 @@ fn glue_edm_mix_identity_skip() {
     // (`==`, NOT bitwise: x = -0.0 yields +0.0).
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, m) = (2usize, 6usize);
-    let mut st = Lcg::new(0x1D_5EEDu64);
+    let mut st = Lcg::random();
     let x = st.vec(n * m);
     let fv = st.vec(n * m);
     let ab = [1.0f32, 0.0, 1.0, 0.0]; // a_vec = 1.0, b_vec = 0.0 packed
@@ -370,7 +370,7 @@ fn glue_fd_mse_grad_w() {
     let (n, m) = (3usize, 5usize);
     let total = n * m;
     let scale = 0.7f32;
-    let mut st = Lcg::new(0xF00D_5EEDu64);
+    let mut st = Lcg::random();
     let pred = st.vec(total);
     let tgt = st.vec(total);
     // w in [0.25, 2): positive, bounded away from 0.
@@ -450,7 +450,7 @@ fn glue_pad_crop_adjoint() {
     // dot in ascending index order on both sides.
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (nc, h, w) = (2usize, 3usize, 2usize);
-    let mut st = Lcg::new(0xADD_017);
+    let mut st = Lcg::random();
 
     for &(l, r, t, b) in &[(1usize, 2usize, 0usize, 1usize), (0, 0, 0, 0), (2, 0, 3, 0)] {
         let (hp, wp) = (h + t + b, w + l + r);
@@ -514,7 +514,7 @@ fn glue_nlc_roundtrip_and_adjoint() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, hw) = (2usize, 3usize, 4usize);
     let total = n * c * hw;
-    let mut st = Lcg::new(0x00DD_BA11_u64);
+    let mut st = Lcg::random();
     let x = st.vec(total); // NCHW
     let y = st.vec(total); // NLC
 
@@ -529,16 +529,17 @@ fn glue_nlc_roundtrip_and_adjoint() {
     assert!(gap <= 1e-5, "nchw/nlc adjoint gap {gap} > 1e-5");
 }
 
-// ---- §9.13 determinism: fixed seed, twice-run, bitwise -------------------------------------
+// ---- §9.13 determinism: one seed, twice-run, bitwise -------------------------------------
 
 #[test]
 fn glue_deterministic_bitwise() {
     // Spec §9.13 / §10: run every one of the nine kernels twice on identical
     // LCG-seeded inputs with FRESH output buffers; ALL outputs bitwise equal.
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    const SEED: u64 = 0xDE7E_121Eu64;
+    let seed = data::rng::random_seed();
+    eprintln!("inputs seed: {seed}");
 
-    // Regenerate identical inputs from the same fixed seed for each pass.
+    // Regenerate identical inputs from the same seed for each pass.
     let inputs = |st: &mut Lcg| {
         let mul_a = st.vec(7);
         let mul_b = st.vec(7);
@@ -557,7 +558,7 @@ fn glue_deterministic_bitwise() {
     };
 
     let pass = || {
-        let mut st = Lcg::new(SEED);
+        let mut st = Lcg::new(seed);
         let (mul_a, mul_b, sr_x, sr_s, em_x, em_f, em_ab, ms_pred, ms_tgt, ms_w, pad_x, crop_x, perm_x) =
             inputs(&mut st);
         vec![
@@ -592,7 +593,7 @@ fn glue_zero_weight_sample_contributes_zero() {
     // loss partial sum and the gradient (finite inputs by contract).
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (m, scale) = (3usize, 0.7f32);
-    let mut st = Lcg::new(0x00C0_FFEE); // fixed seed
+    let mut st = Lcg::random();
     let pred = st.vec(2 * m);
     let tgt = st.vec(2 * m);
     let w = [0.0f32, 1.5];
@@ -713,7 +714,7 @@ fn glue_fd_pinball_grad_w() {
     let (n, hh, q) = (3usize, 4usize, 5usize);
     let total = n * hh * q;
     let scale = 0.7f32;
-    let mut st = Lcg::new(0xF00D_5EEDu64);
+    let mut st = Lcg::random();
     let pred = st.vec(total);
     let tgt = st.vec(n * hh);
     let levels: Vec<f32> = (0..q).map(|i| (i as f32 + 1.0) / (q as f32 + 1.0)).collect(); // (0,1) exclusive, distinct

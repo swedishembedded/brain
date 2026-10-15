@@ -379,7 +379,7 @@ fn convtr2d_group_isolation() {
     }
     let s = Shape { n: 1, cin: 4, h: 4, w: 4, cout: 6, k: 3, stride: 2, pad: 1, dilation: 1, groups: 2, out_pad: 0 };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut r = Lcg::new(7);
+    let mut r = Lcg::random();
     let x = r.vec(s.xn());
     let w = r.vec(s.wn());
     let base = fwd_gpu(&gpu, &s, &x, &w);
@@ -420,7 +420,7 @@ fn convtr2d_dw_accumulates() {
     }
     let s = Shape { n: 1, cin: 4, h: 4, w: 5, cout: 6, k: 3, stride: 2, pad: 1, dilation: 1, groups: 2, out_pad: 0 };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut r = Lcg::new(13);
+    let mut r = Lcg::random();
     let x = r.vec(s.xn());
     let dy = r.vec(s.yn());
     let once = dw_gpu(&gpu, &s, &dy, &x);
@@ -470,7 +470,7 @@ fn convtr2d_out_pad_extends_without_moving() {
     assert_eq!((ph, pw), (bh + 1, bw + 1));
 
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut r = Lcg::new(11);
+    let mut r = Lcg::random();
     let x = r.vec(base.xn());
     let w = r.vec(base.wn());
     let yb = fwd_gpu(&gpu, &base, &x, &w);

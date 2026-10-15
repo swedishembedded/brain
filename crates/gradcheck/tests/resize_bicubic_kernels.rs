@@ -197,7 +197,7 @@ fn resize_bicubic_matches_the_cpu_reference() {
     let (n, c) = (2u32, 3u32);
     for &align in &[0u32, 1u32] {
         for &(h, w, ho, wo) in CASES {
-            let x = Lcg::new(101).vec((n * c * h * w) as usize);
+            let x = Lcg::random().vec((n * c * h * w) as usize);
             let yn = (n * c * ho * wo) as usize;
             let got = run2(&gpu, K_FWD, &x, yn, &[n, c, h, w, ho, wo, align]);
             let want = bicubic_ref(&x, n, c, h, w, ho, wo, align, false);
@@ -256,7 +256,7 @@ fn resize_bicubic_align_corners_same_size_is_a_bit_exact_identity() {
     }
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2u32, 3u32, 6u32, 5u32);
-    let x = Lcg::new(7).vec((n * c * h * w) as usize);
+    let x = Lcg::random().vec((n * c * h * w) as usize);
     let got = run2(&gpu, K_FWD, &x, x.len(), &[n, c, h, w, h, w, 1]);
     assert_eq!(got, x, "align_corners=1 identity resize is not the identity");
 }
@@ -318,7 +318,7 @@ fn resize_bicubic_half_pixel_source_coordinate_is_not_clamped_at_zero() {
     }
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (h, w, ho, wo) = (4u32, 4u32, 8u32, 8u32);
-    let x = Lcg::new(31).vec((h * w) as usize);
+    let x = Lcg::random().vec((h * w) as usize);
     let params = [1u32, 1, h, w, ho, wo, 0];
     let got = run2(&gpu, K_FWD, &x, (ho * wo) as usize, &params);
 
@@ -351,7 +351,7 @@ fn resize_bicubic_align_corners_changes_the_result() {
     }
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (h, w, ho, wo) = (4u32, 4u32, 7u32, 7u32);
-    let x = Lcg::new(41).vec((h * w) as usize);
+    let x = Lcg::random().vec((h * w) as usize);
     let a0 = run2(&gpu, K_FWD, &x, (ho * wo) as usize, &[1, 1, h, w, ho, wo, 0]);
     let a1 = run2(&gpu, K_FWD, &x, (ho * wo) as usize, &[1, 1, h, w, ho, wo, 1]);
     assert!(a0 != a1, "align_corners=0 and =1 produced identical output");
@@ -374,8 +374,8 @@ fn resize_bicubic_dx_is_the_exact_adjoint() {
             let (n, c) = (2u32, 3u32);
             let xn = (n * c * h * w) as usize;
             let yn = (n * c * ho * wo) as usize;
-            let x = Lcg::new(11).vec(xn);
-            let y = Lcg::new(12).vec(yn);
+            let x = Lcg::random().vec(xn);
+            let y = Lcg::random().vec(yn);
             let params = [n, c, h, w, ho, wo, align];
             let ax = run2(&gpu, K_FWD, &x, yn, &params);
             let aty = run2(&gpu, K_DX, &y, xn, &params);
@@ -405,8 +405,8 @@ fn resize_bicubic_dx_matches_finite_differences() {
             let (n, c) = (1u32, 2u32);
             let xn = (n * c * h * w) as usize;
             let yn = (n * c * ho * wo) as usize;
-            let x = Lcg::new(51).vec(xn);
-            let g = Lcg::new(52).vec(yn);
+            let x = Lcg::random().vec(xn);
+            let g = Lcg::random().vec(yn);
             let params = [n, c, h, w, ho, wo, align];
 
             let ana = run2(&gpu, K_DX, &g, xn, &params);
@@ -447,7 +447,7 @@ fn resize_bicubic_dx_does_not_leak_across_planes() {
     let plane_in = (h * w) as usize;
     let plane_out = (ho * wo) as usize;
     let params = [n, c, h, w, ho, wo, 0];
-    let g = Lcg::new(61).vec(yn);
+    let g = Lcg::random().vec(yn);
     let base = run2(&gpu, K_DX, &g, xn, &params);
     for j in 0..(n * c) as usize {
         let mut g2 = g.clone();

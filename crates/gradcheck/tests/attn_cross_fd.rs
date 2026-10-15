@@ -125,7 +125,7 @@ fn loss(out: &[f32], g: &[f32]) -> f32 {
 fn cross_forward_is_deterministic() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 2, h: 2, t_dec: 4, t_enc: 6, hd: 4 };
-    let mut st = Lcg::new(0x0CADu64);
+    let mut st = Lcg::random();
     let q_dec: Vec<f32> = (0..s.qdec_len()).map(|_| st.signed()).collect();
     let kv_enc: Vec<f32> = (0..s.kvenc_len()).map(|_| st.signed()).collect();
     let a = forward(&gpu, &s, &q_dec, &kv_enc);
@@ -140,7 +140,7 @@ fn cross_softmax_rows_sum_to_one_over_t_enc() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 1, h: 1, t_dec: 3, t_enc: 5, hd: 3 };
     let d = s.d();
-    let mut st = Lcg::new(0xF00Du64);
+    let mut st = Lcg::random();
     let q_dec: Vec<f32> = (0..s.qdec_len()).map(|_| st.signed()).collect();
     let kv_enc: Vec<f32> = (0..s.kvenc_len()).map(|_| st.signed()).collect();
     let qb = gpu.storage_init("q_dec", &q_dec);
@@ -164,7 +164,7 @@ fn cross_softmax_rows_sum_to_one_over_t_enc() {
 fn cross_backward_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 2, h: 2, t_dec: 3, t_enc: 5, hd: 3 };
-    let mut st = Lcg::new(0xC0FFEEu64);
+    let mut st = Lcg::random();
     let q_dec: Vec<f32> = (0..s.qdec_len()).map(|_| st.signed()).collect();
     let kv_enc: Vec<f32> = (0..s.kvenc_len()).map(|_| st.signed()).collect();
     let g: Vec<f32> = (0..s.out_len()).map(|_| st.signed()).collect();

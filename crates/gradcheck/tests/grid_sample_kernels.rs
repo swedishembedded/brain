@@ -163,7 +163,7 @@ fn fwd_matches_reference_half_pixel() {
     }
     let s = Shape { n: 2, c: 3, h: 5, w: 7, ho: 4, wo: 6, align: false };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let x = Lcg::new(1).vec(s.xn());
+    let x = Lcg::random().vec(s.xn());
     let grid = randgrid(2, s.gn());
     let y = run_fwd(&gpu, &s, &x, &grid);
     let r = gs_ref(&s, &x, &grid);
@@ -180,7 +180,7 @@ fn fwd_matches_reference_align_corners() {
     }
     let s = Shape { n: 2, c: 3, h: 5, w: 7, ho: 4, wo: 6, align: true };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let x = Lcg::new(3).vec(s.xn());
+    let x = Lcg::random().vec(s.xn());
     let grid = randgrid(4, s.gn());
     let y = run_fwd(&gpu, &s, &x, &grid);
     let r = gs_ref(&s, &x, &grid);
@@ -250,7 +250,7 @@ fn channels_are_independent() {
     let s = Shape { n: 2, c: 4, h: 5, w: 6, ho: 3, wo: 3, align: false };
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let grid = randgrid(5, s.gn());
-    let x = Lcg::new(6).vec(s.xn());
+    let x = Lcg::random().vec(s.xn());
     let base = run_fwd(&gpu, &s, &x, &grid);
 
     let zc = 2usize;
@@ -290,14 +290,14 @@ fn zeros_padding_drops_out_of_bounds_taps() {
     }
     let s = Shape { n: 1, c: 2, h: 4, w: 4, ho: 2, wo: 2, align: false };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let x = Lcg::new(7).vec(s.xn());
+    let x = Lcg::random().vec(s.xn());
     // Every sample is far outside [-1,1] in both axes.
     let grid: Vec<f32> = (0..s.gn()).map(|i| if i % 2 == 0 { -4.0 } else { 4.0 }).collect();
 
     let y = run_fwd(&gpu, &s, &x, &grid);
     assert!(y.iter().all(|v| v.abs() < 1e-6), "out-of-bounds samples must be 0 under padding_mode='zeros', got {y:?}");
 
-    let dy = Lcg::new(8).vec(s.yn());
+    let dy = Lcg::random().vec(s.yn());
     let dx = run_dx(&gpu, &s, &dy, &grid);
     assert!(dx.iter().all(|v| v.abs() < 1e-6), "out-of-bounds samples must not deposit any dx");
 
@@ -359,7 +359,7 @@ fn dx_matches_reference() {
     for align in [false, true] {
         let s = Shape { n: 2, c: 2, h: 5, w: 6, ho: 4, wo: 4, align };
         let grid = randgrid(31, s.gn());
-        let dy = Lcg::new(32).vec(s.yn());
+        let dy = Lcg::random().vec(s.yn());
         let got = run_dx(&gpu, &s, &dy, &grid);
         let want = gs_dx_ref(&s, &grid, &dy);
         let d = max_abs_diff(&got, &want);
@@ -454,9 +454,9 @@ fn dgrid_matches_reference() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     for align in [false, true] {
         let s = Shape { n: 2, c: 3, h: 5, w: 6, ho: 4, wo: 4, align };
-        let x = Lcg::new(61).vec(s.xn());
+        let x = Lcg::random().vec(s.xn());
         let grid = randgrid(62, s.gn());
-        let dy = Lcg::new(63).vec(s.yn());
+        let dy = Lcg::random().vec(s.yn());
         let got = run_dgrid(&gpu, &s, &dy, &x, &grid);
         let want = gs_dgrid_ref(&s, &x, &grid, &dy);
         let d = max_abs_diff(&got, &want);
