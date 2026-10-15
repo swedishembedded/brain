@@ -136,10 +136,11 @@ pub fn generate(n_examples: usize, rng: &mut Rng) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::random_seed;
 
     #[test]
     fn lines_are_well_formed() {
-        let mut rng = Rng::new(123);
+        let mut rng = Rng::new(random_seed());
         let data = generate(5000, &mut rng);
 
         let mut count = 0;
@@ -183,7 +184,7 @@ mod tests {
 
     #[test]
     fn correct_line_count() {
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::new(random_seed());
         for &n in &[0usize, 1, 10, 100] {
             let data = generate(n, &mut rng);
             assert_eq!(data.matches('\n').count(), n);
@@ -192,8 +193,9 @@ mod tests {
 
     #[test]
     fn deterministic_for_fixed_seed() {
-        let mut a = Rng::new(2024);
-        let mut b = Rng::new(2024);
+        let seed = random_seed();
+        let mut a = Rng::new(seed);
+        let mut b = Rng::new(seed);
         assert_eq!(generate(1000, &mut a), generate(1000, &mut b));
     }
 

@@ -95,6 +95,7 @@ pub fn get_mlm_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::random_seed;
 
     fn cfg() -> MlmConfig {
         MlmConfig { special_ids: vec![0, 1], ..MlmConfig::new(16, 1000) }
@@ -103,8 +104,9 @@ mod tests {
     #[test]
     fn corruption_is_deterministic_and_unshifted() {
         let window: Vec<u32> = (2..514).collect();
-        let (x1, y1) = corrupt(&window, &cfg(), &mut Rng::new(7));
-        let (x2, y2) = corrupt(&window, &cfg(), &mut Rng::new(7));
+        let seed = random_seed();
+        let (x1, y1) = corrupt(&window, &cfg(), &mut Rng::new(seed));
+        let (x2, y2) = corrupt(&window, &cfg(), &mut Rng::new(seed));
         assert_eq!(x1, x2);
         assert_eq!(y1, y2);
         // Unshifted: every supervised target is the window's ORIGINAL token.
@@ -119,7 +121,7 @@ mod tests {
     fn corruption_rates_match_config() {
         let window: Vec<u32> = (2..8194).map(|i| i % 900 + 2).collect();
         let c = cfg();
-        let (x, y) = corrupt(&window, &c, &mut Rng::new(42));
+        let (x, y) = corrupt(&window, &c, &mut Rng::new(random_seed()));
         let n = window.len() as f64;
         let selected = y.iter().filter(|&&t| t != IGNORE).count() as f64;
         assert!((selected / n - 0.30).abs() < 0.03, "selection rate {}", selected / n);
@@ -140,7 +142,7 @@ mod tests {
         let mut window = vec![5u32; 256];
         window[0] = 1; // BOS
         window[100] = 0; // pad
-        let (x, y) = corrupt(&window, &cfg(), &mut Rng::new(3));
+        let (x, y) = corrupt(&window, &cfg(), &mut Rng::new(random_seed()));
         assert_eq!(x[0], 1);
         assert_eq!(y[0], IGNORE);
         assert_eq!(x[100], 0);
@@ -150,7 +152,7 @@ mod tests {
     #[test]
     fn batch_shape_and_range() {
         let data: Vec<u32> = (0..4096).map(|i| i % 997).collect();
-        let (x, y) = get_mlm_batch(&data, 4, 128, &cfg(), &mut Rng::new(9));
+        let (x, y) = get_mlm_batch(&data, 4, 128, &cfg(), &mut Rng::new(random_seed()));
         assert_eq!(x.len(), 4 * 128);
         assert_eq!(y.len(), 4 * 128);
         assert!(x.iter().all(|&t| t < 1000));

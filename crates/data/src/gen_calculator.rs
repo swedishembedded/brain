@@ -274,6 +274,7 @@ fn is_num_char(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::random_seed;
 
     /// Evaluate the left-hand side of a `lhs=rhs` line for spot-checking.
     fn eval_lhs(line: &str) -> f64 {
@@ -283,7 +284,7 @@ mod tests {
 
     #[test]
     fn lines_respect_char_limit_and_have_one_equals() {
-        let mut rng = Rng::new(123);
+        let mut rng = Rng::new(random_seed());
         let text = generate(5000, &mut rng);
         for line in text.lines() {
             // `lines()` strips the '\n', so add it back for the limit check.
@@ -301,7 +302,7 @@ mod tests {
 
     #[test]
     fn produces_exactly_n_lines() {
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::new(random_seed());
         let n = 1234;
         let text = generate(n, &mut rng);
         assert!(text.ends_with('\n'));
@@ -312,14 +313,15 @@ mod tests {
 
     #[test]
     fn deterministic_for_fixed_seed() {
-        let mut a = Rng::new(2024);
-        let mut b = Rng::new(2024);
+        let seed = random_seed();
+        let mut a = Rng::new(seed);
+        let mut b = Rng::new(seed);
         assert_eq!(generate(2000, &mut a), generate(2000, &mut b));
     }
 
     #[test]
     fn lhs_evaluates_to_rhs() {
-        let mut rng = Rng::new(99);
+        let mut rng = Rng::new(random_seed());
         let text = generate(2000, &mut rng);
         for line in text.lines() {
             let mut parts = line.split('=');
@@ -354,7 +356,7 @@ mod tests {
         assert_eq!(format_number(2.5), "2.5");
         assert_eq!(format_number(2.50), "2.5");
         // Spot check a generated line evaluates sanely.
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(random_seed());
         let text = generate(10, &mut rng);
         let first = text.lines().next().unwrap();
         let _ = eval_lhs(first); // does not panic

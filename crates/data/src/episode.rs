@@ -452,6 +452,7 @@ impl EpisodeDataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::random_seed;
 
     fn tmp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("brain_episode_{name}_{}", std::process::id()))
@@ -508,7 +509,7 @@ mod tests {
         let ds = EpisodeDataset::open(&dir).unwrap();
         assert!(ds.rewards().is_none());
         assert!(!dir.join("rewards.f32").exists());
-        let w = ds.sample_window(&mut Rng::new(1), 2).unwrap();
+        let w = ds.sample_window(&mut Rng::new(random_seed()), 2).unwrap();
         assert!(w.rewards.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -600,7 +601,7 @@ mod tests {
         write_ds(&dir, &[8, 3, 6], true, 1, 2, 2);
         let ds = EpisodeDataset::open(&dir).unwrap();
         let t_len = 4;
-        let mut rng = Rng::new(42);
+        let mut rng = Rng::new(random_seed());
         let mut seen = std::collections::HashSet::new();
         for _ in 0..500 {
             let w = ds.sample_window(&mut rng, t_len).unwrap();
@@ -636,7 +637,7 @@ mod tests {
         };
         assert_eq!(draw(7), draw(7), "same seed must draw the same windows");
         assert_ne!(draw(7), draw(8), "different seeds should differ");
-        assert!(ds.sample_window(&mut Rng::new(1), 7).is_err(), "no episode has 7 frames");
+        assert!(ds.sample_window(&mut Rng::new(random_seed()), 7).is_err(), "no episode has 7 frames");
         let _ = fs::remove_dir_all(&dir);
     }
 

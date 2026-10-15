@@ -304,6 +304,7 @@ pub fn generate(n_examples: usize, rng: &mut crate::rng::Rng) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::random_seed;
 
     #[test]
     fn number_to_words_known_cases() {
@@ -332,7 +333,7 @@ mod tests {
 
     #[test]
     fn lines_are_well_formed() {
-        let mut rng = crate::rng::Rng::new(12345);
+        let mut rng = crate::rng::Rng::new(random_seed());
         let text = generate(5000, &mut rng);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 5000);
@@ -352,15 +353,16 @@ mod tests {
 
     #[test]
     fn correct_line_count() {
-        let mut rng = crate::rng::Rng::new(1);
+        let mut rng = crate::rng::Rng::new(random_seed());
         let text = generate(123, &mut rng);
         assert_eq!(text.matches('\n').count(), 123);
     }
 
     #[test]
     fn deterministic_for_fixed_seed() {
-        let mut a = crate::rng::Rng::new(99);
-        let mut b = crate::rng::Rng::new(99);
+        let seed = random_seed();
+        let mut a = crate::rng::Rng::new(seed);
+        let mut b = crate::rng::Rng::new(seed);
         assert_eq!(generate(1000, &mut a), generate(1000, &mut b));
     }
 }

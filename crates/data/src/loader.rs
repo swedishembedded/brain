@@ -477,6 +477,7 @@ impl TokenDataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::random_seed;
 
     // "ab=cd\nef=gh\n" with ids: a0 b1 =2 c3 d4 \n5 ... build a tiny vocab.
     fn toks(s: &str, stoi: &dyn Fn(char) -> u32) -> Vec<u32> {
@@ -505,7 +506,7 @@ mod tests {
             newline_token: Some(5),
         };
         let ds = TokenDataset::new(data, &cfg);
-        let mut rng = Rng::new(0);
+        let mut rng = Rng::new(random_seed());
         let (_x, y) = ds.get_batch(&cfg, &mut rng);
         // Wherever a '=' (2) appears in y, it and everything before it on the
         // line is IGNORE; tokens after '=' are kept.
@@ -536,7 +537,7 @@ mod tests {
             newline_token: Some(5),
         };
         let ds = TokenDataset::new(data, &cfg);
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::new(random_seed());
         let (x, _y) = ds.get_batch(&cfg, &mut rng);
         // Each row should begin with 'a' (id 0) since starts are line-aligned.
         for b in 0..cfg.batch_size {
@@ -549,7 +550,7 @@ mod tests {
         let data: Vec<u32> = (0..40).collect();
         let cfg = BatchConfig { batch_size: 3, block_size: 5, ..Default::default() };
         let ds = TokenDataset::new(data, &cfg);
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(random_seed());
         let (x, y, w) = ds.get_batch_weighted(&cfg, &mut rng);
         assert_eq!(w, vec![1.0f32; x.len()]);
         assert_eq!(x.len(), y.len());
@@ -567,7 +568,7 @@ mod tests {
         let weights: Vec<f32> = (0..40).map(|i| i as f32).collect();
         let cfg = BatchConfig { batch_size: 2, block_size: 5, ..Default::default() };
         let ds = TokenDataset::new_with_weights(data, weights, &cfg);
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::new(random_seed());
         let (x, _y, w) = ds.get_batch_weighted(&cfg, &mut rng);
         for b in 0..cfg.batch_size {
             for t in 0..cfg.block_size {
@@ -584,7 +585,7 @@ mod tests {
         let weights: Vec<f32> = vec![2.0; 40];
         let cfg = BatchConfig { batch_size: 2, block_size: 5, ..Default::default() };
         let ds = TokenDataset::new(data, &cfg).with_mask(mask).with_weights(weights);
-        let mut rng = Rng::new(2);
+        let mut rng = Rng::new(random_seed());
         let (_x, y, w) = ds.get_batch_weighted(&cfg, &mut rng);
         assert!(w.iter().all(|&wi| wi == 2.0), "weights must come through regardless of mask");
         assert!(y.contains(&IGNORE), "the mask attached via with_mask must still apply");
@@ -608,7 +609,7 @@ mod tests {
         let (data, mask) = three_examples();
         let cfg = BatchConfig { batch_size: 6, block_size: 8, ..Default::default() };
         let ds = TokenDataset::new_examples(data, mask, &STARTS, PAD, &cfg).expect("each example fits");
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(random_seed());
         let whole = [vec![0, 1, 2, 3], vec![10, 11, 12, 13], vec![20, 21, 22, 23]];
 
         for _ in 0..40 {
@@ -636,7 +637,7 @@ mod tests {
         let ds = TokenDataset::new_examples(data, mask, &STARTS, PAD, &cfg).expect("each example fits");
         assert_eq!(ds.example_count(), Some(3));
         assert_eq!(ds.longest_example(), Some(4));
-        let mut rng = Rng::new(5);
+        let mut rng = Rng::new(random_seed());
         let mut seen = std::collections::BTreeSet::new();
         for _ in 0..40 {
             let (x, _) = ds.get_batch(&cfg, &mut rng);

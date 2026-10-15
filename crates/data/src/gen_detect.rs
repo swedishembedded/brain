@@ -415,6 +415,7 @@ pub fn load_dataset(dir: &Path) -> io::Result<DetectData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::random_seed;
 
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("brain_gen_detect_{name}_{}", std::process::id()))
@@ -422,8 +423,9 @@ mod tests {
 
     #[test]
     fn deterministic_same_seed_byte_equal() {
-        let mut a = Rng::new(99);
-        let mut b = Rng::new(99);
+        let seed = random_seed();
+        let mut a = Rng::new(seed);
+        let mut b = Rng::new(seed);
         let (ia, ba) = generate(Preset::MultiObject, 8, 64, 64, 4, &mut a);
         let (ib, bb) = generate(Preset::MultiObject, 8, 64, 64, 4, &mut b);
         assert_eq!(ia, ib, "images differ for same seed");
@@ -432,8 +434,9 @@ mod tests {
 
     #[test]
     fn different_seed_differs() {
-        let mut a = Rng::new(1);
-        let mut b = Rng::new(2);
+        let seed = random_seed();
+        let mut a = Rng::new(seed);
+        let mut b = Rng::new(seed ^ 1);
         let (ia, _) = generate(Preset::MultiObject, 8, 64, 64, 4, &mut a);
         let (ib, _) = generate(Preset::MultiObject, 8, 64, 64, 4, &mut b);
         assert_ne!(ia, ib, "different seeds produced identical images");
@@ -484,7 +487,7 @@ mod tests {
 
     #[test]
     fn presets_produce_expected_shape_counts() {
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::new(random_seed());
         // localization/classification/scale: exactly 1 box.
         for p in [Preset::Localization, Preset::Classification, Preset::Scale] {
             for _ in 0..20 {
@@ -507,7 +510,7 @@ mod tests {
     fn classification_recovers_class_from_color() {
         // Fixed geometry, varied class: the box class must equal the palette
         // color drawn at the image center.
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::new(random_seed());
         for _ in 0..10 {
             let s = gen_scene(Preset::Classification, 96, 96, 6, &mut rng);
             assert_eq!(s.boxes.len(), 1);
@@ -521,14 +524,15 @@ mod tests {
     fn write_load_roundtrip() {
         let dir = tmp("io");
         let _ = fs::remove_dir_all(&dir);
-        write_dataset(&dir, Preset::MultiObject, 5, 64, 64, 4, 123).unwrap();
+        let seed = random_seed();
+        write_dataset(&dir, Preset::MultiObject, 5, 64, 64, 4, seed).unwrap();
         let d = load_dataset(&dir).unwrap();
         assert_eq!(d.n, 5);
         assert_eq!((d.h, d.w, d.nc), (64, 64, 4));
         assert_eq!(d.images.len(), 5 * d.image_stride());
         assert_eq!(d.boxes.len(), 5);
         // re-generate in memory and compare (determinism through disk).
-        let mut rng = Rng::new(123);
+        let mut rng = Rng::new(seed);
         let (img2, box2) = generate(Preset::MultiObject, 5, 64, 64, 4, &mut rng);
         assert_eq!(d.images, img2);
         assert_eq!(d.boxes, box2);

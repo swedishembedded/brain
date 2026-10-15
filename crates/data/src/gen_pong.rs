@@ -279,6 +279,7 @@ pub fn generate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::random_seed;
     use crate::episode::EpisodeDataset;
 
     fn tmp(name: &str) -> std::path::PathBuf {
@@ -287,9 +288,10 @@ mod tests {
 
     #[test]
     fn pong_deterministic_same_seed_and_actions() {
+        let seed = random_seed();
         let run = || -> Vec<(Vec<u8>, i32)> {
-            let mut env = PongEnv::new(1234);
-            let mut arng = Rng::new(99);
+            let mut env = PongEnv::new(seed);
+            let mut arng = Rng::new(seed);
             (0..200)
                 .map(|_| env.step(arng.gen_range_inclusive(0, 2) as u32))
                 .collect()
@@ -297,8 +299,8 @@ mod tests {
         let (a, b) = (run(), run());
         assert_eq!(a, b, "same seed + actions must be byte-identical");
         // And a different seed diverges (different serve).
-        let mut env = PongEnv::new(4321);
-        let mut arng = Rng::new(99);
+        let mut env = PongEnv::new(seed ^ 1);
+        let mut arng = Rng::new(seed);
         let c: Vec<(Vec<u8>, i32)> =
             (0..200).map(|_| env.step(arng.gen_range_inclusive(0, 2) as u32)).collect();
         assert_ne!(a, c, "different seeds should produce different trajectories");
@@ -324,7 +326,7 @@ mod tests {
     #[test]
     fn pong_ball_stays_in_bounds_over_2000_random_steps() {
         let mut env = PongEnv::new(2024);
-        let mut arng = Rng::new(5);
+        let mut arng = Rng::new(random_seed());
         let mut rewards = [0usize; 3]; // counts of -1, 0, +1
         for i in 0..2000 {
             let (_, r) = env.step(arng.gen_range_inclusive(0, 2) as u32);
@@ -382,7 +384,7 @@ mod tests {
         let rewards = ds.rewards().expect("generate records rewards");
         assert!(rewards.iter().all(|&r| r == -1.0 || r == 0.0 || r == 1.0));
         // Window sampling respects episode boundaries.
-        let mut rng = Rng::new(0);
+        let mut rng = Rng::new(random_seed());
         for _ in 0..100 {
             let w = ds.sample_window(&mut rng, 8).unwrap();
             let ep = w.start_index / 40;
