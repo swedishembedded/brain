@@ -26,7 +26,7 @@ pub struct BacktestSpec {
     pub metrics: Vec<String>,
     /// Quantile levels used when a metric needs them.
     pub quantile_levels: Vec<f32>,
-    /// Seed for any stochastic model.
+    /// Seed for any stochastic model. [`Default`] draws a random one.
     pub seed: u64,
 }
 
@@ -39,7 +39,7 @@ impl Default for BacktestSpec {
             stride: 1,
             metrics: vec!["mase".into(), "crps".into()],
             quantile_levels: vec![0.1, 0.5, 0.9],
-            seed: 0,
+            seed: seed::random_seed(),
         }
     }
 }

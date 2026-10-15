@@ -11,6 +11,9 @@ path = "src/lib.rs"
 
 [dependencies]
 serde_json.workspace = true
+# `seed::random_seed` - the draw behind an unset request seed; a std-only leaf, so
+# this crate still depends on no model or data crate.
+brain-seed.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

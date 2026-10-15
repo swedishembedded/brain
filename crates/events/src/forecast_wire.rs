@@ -95,18 +95,30 @@ pub fn spec_to_value(s: &ForecastSpec) -> Value {
     })
 }
 
-pub fn spec_from_value(v: &Value) -> ForecastSpec {
+/// The request's `seed`. A request that names none is given a random one, so
+/// the spec that comes out of decoding always carries the seed the run will
+/// use and re-encoding it ([`spec_to_value`]) hands that seed back to the
+/// client. A `seed` that is present but not a non-negative integer is refused
+/// rather than replaced.
+fn seed_from_value(v: &Value) -> Result<u64, String> {
+    match &v["seed"] {
+        Value::Null => Ok(data::rng::random_seed()),
+        s => s.as_u64().ok_or_else(|| format!("seed: {s} is not a seed (a non-negative integer)")),
+    }
+}
+
+pub fn spec_from_value(v: &Value) -> Result<ForecastSpec, String> {
     let reps: Vec<Representation> = arr(&v["representations"])
         .iter()
         .filter_map(|r| r.as_str().and_then(Representation::parse))
         .collect();
-    ForecastSpec {
+    Ok(ForecastSpec {
         horizon: v["horizon"].as_u64().unwrap_or(1) as usize,
         representations: if reps.is_empty() { vec![Representation::Quantiles] } else { reps },
         quantile_levels: f32s(&v["quantile_levels"]),
         num_samples: v["num_samples"].as_u64().unwrap_or(0) as usize,
-        seed: v["seed"].as_u64().unwrap_or(0),
-    }
+        seed: seed_from_value(v)?,
+    })
 }
 
 // ---- Forecast (output) -----------------------------------------------------
@@ -247,16 +259,16 @@ pub fn backtest_spec_to_value(s: &BacktestSpec) -> Value {
     })
 }
 
-pub fn backtest_spec_from_value(v: &Value) -> BacktestSpec {
-    BacktestSpec {
+pub fn backtest_spec_from_value(v: &Value) -> Result<BacktestSpec, String> {
+    Ok(BacktestSpec {
         models: strs(&v["models"]),
         horizon: v["horizon"].as_u64().unwrap_or(1) as usize,
         origins: v["origins"].as_u64().unwrap_or(30) as usize,
         stride: v["stride"].as_u64().unwrap_or(1) as usize,
         metrics: strs(&v["metrics"]),
         quantile_levels: f32s(&v["quantile_levels"]),
-        seed: v["seed"].as_u64().unwrap_or(0),
-    }
+        seed: seed_from_value(v)?,
+    })
 }
 
 pub fn backtest_report_to_value(r: &BacktestReport) -> Value {

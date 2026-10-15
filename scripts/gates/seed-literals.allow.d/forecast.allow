@@ -1,2 +1,0 @@
-crates/forecast/src/backtest.rs	BacktestSpec::default:seed=0	default	todo: default seed becomes random, printed and recorded
-crates/forecast/src/lib.rs	ForecastSpec::default:seed=0	default	todo: default seed becomes random, printed and recorded

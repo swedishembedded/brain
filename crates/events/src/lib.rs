@@ -359,7 +359,7 @@ fn decode_event_value(v: &Value) -> Result<Event, String> {
         "forecast_request" => Ok(Event::ForecastRequest {
             model: s("model"),
             panel: forecast_wire::panel_from_value(&v["panel"]),
-            spec: forecast_wire::spec_from_value(&v["output"]),
+            spec: forecast_wire::spec_from_value(&v["output"])?,
         }),
         "forecast_result" => {
             Ok(Event::ForecastResult { forecast: forecast_wire::forecast_from_value(v) })
@@ -378,7 +378,7 @@ fn decode_event_value(v: &Value) -> Result<Event, String> {
         }),
         "backtest_request" => Ok(Event::BacktestRequest {
             panel: forecast_wire::panel_from_value(&v["panel"]),
-            spec: forecast_wire::backtest_spec_from_value(&v["spec"]),
+            spec: forecast_wire::backtest_spec_from_value(&v["spec"])?,
         }),
         "backtest_chunk" => Ok(Event::BacktestChunk {
             report: forecast_wire::backtest_report_from_value(&v["report"]),
@@ -798,6 +798,33 @@ mod tests {
             encode_envelope(&env),
             r#"{"done":true,"event":"brain_text_chunk","req_id":"r1","seq":0,"text":"a"}"#
         );
+    }
+
+    /// A request that names no seed is answered with the one drawn for it:
+    /// two such requests get different seeds, and the decoded spec encodes
+    /// with the seed it will run under. A seed that is present but not a
+    /// non-negative integer is refused instead of replaced.
+    #[test]
+    fn a_forecast_spec_without_a_seed_is_answered_with_the_drawn_seed() {
+        let line = r#"{"event":"forecast_request","model":"m","panel":{"freq":"D","items":[]},"output":{"horizon":3}}"#;
+        let seed_of = |ev: Event| match ev {
+            Event::ForecastRequest { spec, .. } => spec.seed,
+            other => panic!("not a forecast request: {other:?}"),
+        };
+        let (a, b) = (decode_line(line).unwrap(), decode_line(line).unwrap());
+        let (sa, sb) = (seed_of(a.clone()), seed_of(b));
+        assert_ne!(sa, sb);
+        assert!(encode_line(&a).contains(&format!("\"seed\":{sa}")), "the reply must carry the drawn seed");
+
+        let bad = line.replace(r#""horizon":3"#, r#""horizon":3,"seed":-1"#);
+        assert!(decode_line(&bad).unwrap_err().contains("not a seed"));
+
+        let backtest = r#"{"event":"backtest_request","panel":{"freq":"D","items":[]},"spec":{"models":["naive"]}}"#;
+        let drawn = |l: &str| match decode_line(l).unwrap() {
+            Event::BacktestRequest { spec, .. } => spec.seed,
+            other => panic!("not a backtest request: {other:?}"),
+        };
+        assert_ne!(drawn(backtest), drawn(backtest));
     }
 
     // base64 roundtrip/error-path tests moved to crate::base64 (now

@@ -157,6 +157,7 @@ pub struct ForecastSpec {
     /// Number of trajectories for sample output.
     pub num_samples: usize,
     /// Seed for any stochastic path — makes a request reproducible.
+    /// [`Default`] draws a random one; whoever answers the request reports it.
     pub seed: u64,
 }
 
@@ -167,7 +168,7 @@ impl Default for ForecastSpec {
             representations: vec![Representation::Quantiles],
             quantile_levels: vec![0.1, 0.5, 0.9],
             num_samples: 0,
-            seed: 0,
+            seed: seed::random_seed(),
         }
     }
 }
