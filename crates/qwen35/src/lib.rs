@@ -34,6 +34,7 @@ pub mod shard;
 pub mod spec;
 pub mod stream;
 pub mod stream_train;
+pub mod train_base;
 pub mod vl;
 
 pub use config::{LayerType, Qwen35Config};

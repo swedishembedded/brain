@@ -64,6 +64,8 @@ use model::Shard;
 use optim::Optim;
 
 use crate::config::{LayerType, Qwen35Config};
+pub use crate::train_base::TrainOpts;
+use crate::train_base::{read_weight_host, reads_float_acts, write_weight_host};
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
 // Forward + backward subset of qwen35moe::model::STATIC_PIPELINES (no MoE -
@@ -1166,8 +1168,16 @@ impl Qwen35 {
     /// full-parameter, or - when `cfg.lora` is `Some` - frozen base +
     /// trainable LoRA adapters). See the struct's own `is_train` doc.
     pub fn new_train_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
+        Qwen35::new_train_opts_on(gpu, cfg, b, t, init, &TrainOpts::default())
+    }
+
+    /// [`Self::new_train_on`] with explicit [`TrainOpts`]: the storage tier of
+    /// the frozen base (a LoRA build may hold it in bf16, see
+    /// [`TrainOpts::base`]). `src` is any [`checkpoint::TensorSource`], so a
+    /// narrow base streams tensor by tensor with no whole-model fp32 copy.
+    pub fn new_train_opts_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, opts: &TrainOpts) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), true, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, src, &opts.base, true, shard)
     }
 
     /// Build a single pipeline **stage**: only the layers (and endpoint
@@ -1264,8 +1274,9 @@ impl Qwen35 {
         shard: Shard,
     ) -> Qwen35 {
         assert!(
-            !(tier.quantizes_anything() && train),
-            "qwen35: a quantized tier is inference-only (Qwen35::new_train_on is fp32-only)"
+            !(tier.quantizes_anything() && train && cfg.lora.is_none()),
+            "qwen35: a narrow tier needs LoRA when training: without adapters there is no frozen base \
+             to hold at it (full-parameter training is fp32-only)"
         );
         let chunk = gdn_chunk_size(t);
         assert_eq!(
@@ -1295,9 +1306,9 @@ impl Qwen35 {
         //    Role::Trainable (full-parameter backward).
         // A leaf `tier.want`s at any non-F32 dtype lives in `weights`
         // (below), NOT the fp32 store - filter it out here so no redundant
-        // fp32 copy is ever uploaded. A quantized tier and LoRA/training are
-        // mutually exclusive (the `assert!` above), so this filter and
-        // `cfg.lora.is_some()` never both fire here.
+        // fp32 copy is ever uploaded. A narrow tier with training implies LoRA
+        // (the `assert!` above), whose frozen base lives in `weights`; the
+        // adapters are never quantizable leaves, so they stay in the store.
         let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
             .filter(|(n, _)| !(is_quantizable_linear(n) && tier.want(n) != Dtype::F32))
@@ -1631,14 +1642,14 @@ impl Qwen35 {
     }
 
     /// Dispatch one of the 12 per-layer mixer/MLP linears via `self.ops`/
-    /// `self.weights`. Returns whether the dispatch was `F32` (LoRA only
-    /// ever targets an unquantized base weight, so a caller only runs
-    /// `lora_fwd` when this is `true`). Mirrors `qwen35moe::model::Qwen35::
-    /// ops_linear` exactly.
+    /// `self.weights`. Returns whether the weight's tier reads fp32
+    /// activations ([`reads_float_acts`]): LoRA applies to every such tier
+    /// (its correction is computed from the same fp32 activation), so a
+    /// caller only runs `lora_fwd` when this is `true`.
     fn ops_linear(&self, s: &mut Vec<Step>, act: &Act, wname: &str, out: &DeviceBuffer) -> bool {
         let w = self.weights.get(wname).unwrap_or_else(|| panic!("qwen35: no Ops weight for {wname}"));
         self.ops.matmul(s, w, act, out, 0);
-        matches!(w, Weight::F32 { .. })
+        reads_float_acts(w)
     }
 
     /// [`Self::ops_linear`] for several linears that read the SAME activation,
@@ -1646,8 +1657,8 @@ impl Qwen35 {
     /// the SwiGLU's gate/up. [`Ops::matmul_group`] makes the group one launch
     /// where the device offers it and an int8 GEMV serves every member, and a
     /// matmul per member otherwise (`set_decode_fusion(false)` always). Returns,
-    /// per member, whether it was an fp32 dispatch - the one case LoRA applies
-    /// to, exactly as [`Self::ops_linear`] reports it.
+    /// per member, whether LoRA applies to it, exactly as [`Self::ops_linear`]
+    /// reports it.
     fn ops_linear_group(&self, s: &mut Vec<Step>, act: &Act, group: &[(&str, &DeviceBuffer)]) -> Vec<bool> {
         let members: Vec<(&Weight, &DeviceBuffer)> =
             group.iter().map(|(name, out)| (self.weights.get(*name).unwrap_or_else(|| panic!("qwen35: no Ops weight for {name}")), *out)).collect();
@@ -1658,7 +1669,7 @@ impl Qwen35 {
                 self.ops.matmul(s, w, act, out, 0);
             }
         }
-        members.iter().map(|(w, _)| matches!(w, Weight::F32 { .. })).collect()
+        members.iter().map(|(w, _)| reads_float_acts(w)).collect()
     }
 
     /// The dtype leaf `name` actually landed at after
@@ -1683,7 +1694,7 @@ impl Qwen35 {
     /// fp32 on a device without the DP4A path, and such a build should get
     /// the cheap activation.
     fn ops_act(&self, s: &mut Vec<Step>, x: &DeviceBuffer, rows: u32, k: u32) -> Act {
-        if self.weights.values().all(|w| matches!(w, Weight::F32 { .. })) {
+        if self.weights.values().all(reads_float_acts) {
             return self.ops.act_f32(x, 0, rows, k);
         }
         self.ops.act(s, x, 0, rows, k)
@@ -1745,7 +1756,7 @@ impl Qwen35 {
         match self.lora_for(leaf) {
             Some((r, scale)) => {
                 // base: dx += d_out*W (frozen weight - no dW).
-                steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+                self.base_dx(steps, d_out, wname, dx, m, k, nout, acc);
                 let a = format!("{wname}.lora_a");
                 let bnm = format!("{wname}.lora_b");
                 // a = (alpha/r)*(x*A^t)  -> gB += d_out^t*a
@@ -1762,8 +1773,21 @@ impl Qwen35 {
                 if self.trainable(wname) {
                     steps.push(g.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
                 }
-                steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+                self.base_dx(steps, d_out, wname, dx, m, k, nout, acc);
             }
+        }
+    }
+
+    /// `dx (+)= d_out * W` through the tier weight `wname` is held at: the 12
+    /// per-layer linears live in `self.weights` (any float-read tier, decoded
+    /// on the fly - the same value the forward multiplied by); the few other
+    /// projections (`lm_head`, MTP's `fc_e`/`fc_h`) are plain fp32 store
+    /// tensors.
+    #[allow(clippy::too_many_arguments)]
+    fn base_dx(&self, steps: &mut Vec<Step>, d_out: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
+        match self.weights.get(wname) {
+            Some(w) => self.ops.matmul_dx(steps, w, d_out, m, dx, acc != 0),
+            None => steps.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k)),
         }
     }
 
@@ -4021,11 +4045,17 @@ impl Qwen35 {
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match self.weights.get(name).filter(|_| !self.ps.weight.contains_key(name)) {
+            Some(w) => read_weight_host(&self.gpu, w),
+            None => self.ps.read_weight(&self.gpu, name),
+        }
     }
 
     pub fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+        match self.weights.get(name).filter(|_| !self.ps.weight.contains_key(name)) {
+            Some(w) => write_weight_host(&self.gpu, w, data),
+            None => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
+        }
     }
 
     pub fn read_grad(&self, name: &str) -> Vec<f32> {

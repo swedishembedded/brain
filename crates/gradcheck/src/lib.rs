@@ -1746,8 +1746,16 @@ pub fn check_qwen35moe_lora(seed: u64) -> Report {
 /// `conv1d.weight` init dodges the same GDN numerical-conditioning gap
 /// [`qwen35_gradcheck_harness`]'s own doc explains, LoRA or not.
 pub fn check_qwen35_lora(seed: u64) -> Report {
+    check_qwen35_lora_on(seed, gpu_core::select::Dtype::F32)
+}
+
+/// [`check_qwen35_lora`] with the frozen base held at `base`: the finite
+/// differences are taken through the narrow-tier forward (the function the
+/// backward differentiates), so this gates `Ops::matmul_dx` on that tier and
+/// the LoRA branches applying to it.
+pub fn check_qwen35_lora_on(seed: u64, base: gpu_core::select::Dtype) -> Report {
     use qwen35::config::{lora_cfg, Qwen35Config};
-    use qwen35::model::Qwen35;
+    use qwen35::model::{Qwen35, TrainOpts};
     let cfg = Qwen35Config { lora: Some(lora_cfg(2, 4.0)), ..Qwen35Config::tiny() };
     let mut init = <Qwen35 as model::Model>::init_weights(&cfg, seed);
     let mut conv_rng = data::rng::Lcg::new(seed ^ 0x9e3779b9);
@@ -1760,7 +1768,8 @@ pub fn check_qwen35_lora(seed: u64) -> Report {
             }
         }
     }
-    let model = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg, 1, 12, &init);
+    let opts = TrainOpts { base: model::ops::TierPolicy::uniform(base), ..TrainOpts::default() };
+    let model = Qwen35::new_train_opts_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg, 1, 12, &init, &opts);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 29).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 29).collect();
     model.set_batch(&x, &y);
@@ -2558,6 +2567,19 @@ mod tests {
         assert!(
             fails.is_empty(),
             "qwen35 LoRA gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn qwen35_lora_on_a_bf16_base_analytic_grads_match_finite_differences() {
+        let report = check_qwen35_lora_on(7, gpu_core::select::Dtype::BF16);
+        report.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "qwen35 bf16-base LoRA gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }
