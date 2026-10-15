@@ -23,25 +23,23 @@
 // and every `dK`/`dV` element is written exactly once.
 //
 // Work split mirrors the forward with the roles of queries and keys swapped:
-// BR = 64 KEY rows per workgroup, LANES = 4 threads per row, CH = 32 channels
-// per lane, so a thread's k, v, dK and dV slices live in registers. Query and
+// `lanes` threads per KEY row (4 up to head_dim 128 with 64 key rows per
+// workgroup, 8 up to head_dim 256 with 32 rows), CH = 32 channels per lane, so a thread's k, v, dK and dV slices live in registers. Query and
 // dO tiles of BC = 8 rows (plus their lse and D) are staged in shared memory;
 // the causal mask makes every query tile that ends before this key tile starts
 // all-zero, so the walk starts at the first tile that can see it. Shared use
-// is 24 KiB; callers gate on the device's workgroup memory.
+// is 32 KiB (qsh 8 + dosh 8 + two partial buffers 8 each); callers gate on the device's workgroup memory.
 
-const BR: u32 = 64u;     // key rows per workgroup
+const WG: u32 = 256u;    // threads per workgroup == BR * lanes in both modes
 const BC: u32 = 8u;      // query rows per shared tile
-const LANES: u32 = 4u;   // threads cooperating on one key row
-const CH: u32 = 32u;     // channels per lane (LANES*CH == HD)
-const HD: u32 = 128u;    // max head_dim; tiles are always this wide
+const CH: u32 = 32u;     // channels per lane (lanes*CH >= head_dim)
 
 struct Params {
     bsz: u32,
     n_heads: u32,
     n_kv_heads: u32,
     tcols: u32,        // T
-    head_dim: u32,     // <= 128
+    head_dim: u32,     // <= 256
     group: u32,        // n_heads / n_kv_heads
 };
 
@@ -55,10 +53,10 @@ struct Params {
 @group(0) @binding(7) var<storage, read_write> dk:   array<f32>;
 @group(0) @binding(8) var<storage, read_write> dv:   array<f32>;
 
-var<workgroup> qsh:    array<f32, 1024>;  // BC*HD
-var<workgroup> dosh:   array<f32, 1024>;  // BC*HD
-var<workgroup> part_s: array<f32, 2048>;  // BC*BR*LANES
-var<workgroup> part_p: array<f32, 2048>;  // BC*BR*LANES
+var<workgroup> qsh:    array<f32, 2048>;  // BC*256
+var<workgroup> dosh:   array<f32, 2048>;  // BC*256
+var<workgroup> part_s: array<f32, 2048>;  // BC*WG
+var<workgroup> part_p: array<f32, 2048>;  // BC*WG
 var<workgroup> lse_sh: array<f32, 8>;     // BC
 var<workgroup> d_sh:   array<f32, 8>;     // BC
 
@@ -69,6 +67,9 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let T = p.tcols;
     let hd = p.head_dim;
     let scale = inverseSqrt(f32(hd));
+    let lanes = select(4u, 8u, hd > 128u);   // threads per key row
+    let BR = WG / lanes;                     // key rows per workgroup
+    let hdt = lanes * CH;                    // Q/dO tile row width
 
     // Flat workgroup id -> (b, kv head, key-tile); uniform per workgroup.
     let wg = wgid.y * nwg.x + wgid.x;
@@ -83,8 +84,8 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let kv_row = p.n_kv_heads * hd;
 
     let lt = lid.x;
-    let row = lt / LANES;
-    let lane = lt % LANES;
+    let row = lt / lanes;
+    let lane = lt % lanes;
     let j = kt * BR + row;           // this thread's key row
     let live = j < T;
 
@@ -94,7 +95,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     var dv_acc: array<f32, 32>;
     let kv_base = (b * T + j) * kv_row + hkv * hd;
     for (var c = 0u; c < CH; c = c + 1u) {
-        let d = c * LANES + lane;
+        let d = c * lanes + lane;
         if (live && d < hd) {
             kv[c] = k[kv_base + d];
             vv[c] = v[kv_base + d];
@@ -114,9 +115,9 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     for (var g = 0u; g < p.group; g = g + 1u) {
         let h = hkv * p.group + g;
         for (var qt = first_qt; qt < ntiles_q; qt = qt + 1u) {
-            for (var e = lt; e < BC * HD; e = e + 256u) {
-                let ir = e / HD;
-                let d = e % HD;
+            for (var e = lt; e < BC * hdt; e = e + WG) {
+                let ir = e / hdt;
+                let d = e % hdt;
                 let i = qt * BC + ir;
                 if (i < T && d < hd) {
                     let qo = (b * T + i) * q_row + h * hd + d;
@@ -143,12 +144,12 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             for (var ir = 0u; ir < BC; ir = ir + 1u) {
                 var s = 0.0;
                 var dp = 0.0;
-                let qo = ir * HD + lane;
+                let qo = ir * hdt + lane;
                 for (var c = 0u; c < CH; c = c + 1u) {
-                    s = s + kv[c] * qsh[qo + c * LANES];
-                    dp = dp + vv[c] * dosh[qo + c * LANES];
+                    s = s + kv[c] * qsh[qo + c * lanes];
+                    dp = dp + vv[c] * dosh[qo + c * lanes];
                 }
-                let slot = ir * (BR * LANES) + row * LANES + lane;
+                let slot = ir * WG + row * lanes + lane;
                 part_s[slot] = s;
                 part_p[slot] = dp;
             }
@@ -157,15 +158,19 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             for (var ir = 0u; ir < BC; ir = ir + 1u) {
                 let i = qt * BC + ir;
                 if (live && i < T && i >= j) {
-                    let so = ir * (BR * LANES) + row * LANES;
-                    let s = (part_s[so] + part_s[so + 1u] + part_s[so + 2u] + part_s[so + 3u]) * scale;
-                    let dp = part_p[so] + part_p[so + 1u] + part_p[so + 2u] + part_p[so + 3u];
-                    let pw = exp(s - lse_sh[ir]);
+                    let so = ir * WG + row * lanes;
+                    var s_sum = 0.0;
+                    var dp = 0.0;
+                    for (var l = 0u; l < lanes; l = l + 1u) {
+                        s_sum = s_sum + part_s[so + l];
+                        dp = dp + part_p[so + l];
+                    }
+                    let pw = exp(s_sum * scale - lse_sh[ir]);
                     let ds = pw * (dp - d_sh[ir]);
-                    let qo = ir * HD + lane;
+                    let qo = ir * hdt + lane;
                     for (var c = 0u; c < CH; c = c + 1u) {
-                        dv_acc[c] = dv_acc[c] + pw * dosh[qo + c * LANES];
-                        dk_acc[c] = dk_acc[c] + ds * qsh[qo + c * LANES];
+                        dv_acc[c] = dv_acc[c] + pw * dosh[qo + c * lanes];
+                        dk_acc[c] = dk_acc[c] + ds * qsh[qo + c * lanes];
                     }
                 }
             }
@@ -175,7 +180,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
 
     if (live) {
         for (var c = 0u; c < CH; c = c + 1u) {
-            let d = c * LANES + lane;
+            let d = c * lanes + lane;
             if (d < hd) {
                 dk[kv_base + d] = dk_acc[c] * scale;
                 dv[kv_base + d] = dv_acc[c];

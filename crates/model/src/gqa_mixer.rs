@@ -25,7 +25,7 @@
 use gpu_core::{DeviceBuffer, Gpu};
 
 use crate::kv_tier::{KvKernels, KvLayer};
-use crate::block::{gqa_bwd, gqa_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_fwd, Gqa, KernelIds};
+use crate::block::{flash_gqa_causal_bwd, flash_gqa_causal_fwd, gqa_bwd, gqa_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_fwd, FlashGqaIds, Gqa, KernelIds};
 
 /// Kernel-pipeline indices [`gqa_mixer_fwd`]/[`gqa_mixer_bwd`] dispatch,
 /// beyond `kernels`. Resolved by the calling model against its own
@@ -85,6 +85,14 @@ pub struct GqaMixerGrads<'a> {
     pub k_norm: Option<&'a DeviceBuffer>,
 }
 
+/// What the attention half of the forward saves for [`gqa_mixer_bwd`]: either
+/// the materialised `[B,H,T,T]` softmax probabilities, or, on the flash path,
+/// only the `[B,H,T]` row log-sum-exp the backward rebuilds each weight from.
+pub enum AttnSaved {
+    Probs(DeviceBuffer),
+    Flash { lse: DeviceBuffer, ids: FlashGqaIds },
+}
+
 /// Everything [`gqa_mixer_bwd`] needs beyond what it recomputes fresh. The
 /// caller's own `ctx_gated` (this function's forward return value) is NOT
 /// included here - the caller already owns it.
@@ -95,7 +103,7 @@ pub struct GqaMixerActs {
     pub q_value: DeviceBuffer,  // pre q_norm (q_norm's rmsnorm_bwd `x`)
     pub k: DeviceBuffer,        // pre k_norm (k_norm's rmsnorm_bwd `x`)
     pub q_gate: DeviceBuffer,   // pre-sigmoid
-    pub probs: DeviceBuffer,
+    pub attn: AttnSaved,
     pub ctx: DeviceBuffer,
     pub gate: DeviceBuffer, // post-sigmoid (mul_bwd's other operand)
 }
@@ -105,16 +113,50 @@ pub struct GqaMixerActs {
 /// `o_proj`. `n` is the row count (`b*t`); `is_train` gates whether the
 /// activations [`gqa_mixer_bwd`] needs are saved.
 pub fn gqa_mixer_fwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWeights, q_full: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, n: u32, is_train: bool) -> (DeviceBuffer, Option<GqaMixerActs>) {
+    gqa_mixer_fwd_with(g, ids, None, shape, w, q_full, k, v, n, is_train)
+}
+
+/// [`gqa_mixer_fwd`] with the attention run by the causal GQA flash trio when
+/// `flash` is `Some`: `O(T*head_dim)` memory instead of the `[B,H,T,T]` scores
+/// and probabilities, which is what lets a sequence of tens of thousands of
+/// tokens train. The caller decides (see [`FlashGqaIds::for_training`]); a
+/// `Some` on a device that cannot run the trio is a caller bug and panics
+/// rather than dispatching a kernel the device cannot execute. [`gqa_mixer_bwd`]
+/// follows whichever path the forward took, through [`GqaMixerActs::attn`].
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_mixer_fwd_with(
+    g: &Gpu,
+    ids: &GqaMixerIds,
+    flash: Option<FlashGqaIds>,
+    shape: &GqaMixerShape,
+    w: &GqaMixerWeights,
+    q_full: &DeviceBuffer,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    n: u32,
+    is_train: bool,
+) -> (DeviceBuffer, Option<GqaMixerActs>) {
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let qd = shape.qd();
 
     let prep = qkv_prepare(g, ids, shape, w, q_full, k, n);
 
-    let scores = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
-    let probs = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
     let ctx = g.storage((n * qd) as u64);
     let ga = Gqa { b: shape.b, t: shape.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
-    g.submit(&[], &gqa_fwd(g, &ids.kernels, &ga, &prep.q_normed, &prep.k_normed, v, &scores, &probs, &ctx));
+    let attn = match flash {
+        Some(fids) => {
+            assert!(FlashGqaIds::supported(g, hd), "flash attention requested on a device that cannot run it at head_dim {hd}");
+            let lse = g.storage(shape.b as u64 * nh as u64 * shape.t as u64);
+            g.submit(&[], &[flash_gqa_causal_fwd(g, fids.fwd, &ga, &prep.q_normed, &prep.k_normed, v, &ctx, &lse)]);
+            AttnSaved::Flash { lse, ids: fids }
+        }
+        None => {
+            let scores = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
+            let probs = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
+            g.submit(&[], &gqa_fwd(g, &ids.kernels, &ga, &prep.q_normed, &prep.k_normed, v, &scores, &probs, &ctx));
+            AttnSaved::Probs(probs)
+        }
+    };
 
     let (gate, ctx_gated) = gate_ctx(g, ids, &ctx, &prep.q_gate, n, qd);
 
@@ -125,7 +167,7 @@ pub fn gqa_mixer_fwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaM
         q_value: prep.q_value,
         k: k.clone(),
         q_gate: prep.q_gate,
-        probs,
+        attn,
         ctx,
         gate,
     });
@@ -567,11 +609,19 @@ pub fn gqa_mixer_bwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaM
 
     // ---- gqa_bwd ----
     let ga = Gqa { b: shape.b, t: shape.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
-    let d_scores = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
     let d_q_normed = g.storage((n * qd) as u64);
     let d_k_normed = g.storage((n * kvd) as u64);
     let d_v = g.storage((n * kvd) as u64);
-    g.submit(&[], &gqa_bwd(g, &ids.kernels, &ga, &la.q_normed, &la.k_normed, &la.v, &la.probs, &d_ctx, &d_scores, &d_q_normed, &d_k_normed, &d_v));
+    match &la.attn {
+        AttnSaved::Probs(probs) => {
+            let d_scores = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
+            g.submit(&[], &gqa_bwd(g, &ids.kernels, &ga, &la.q_normed, &la.k_normed, &la.v, probs, &d_ctx, &d_scores, &d_q_normed, &d_k_normed, &d_v));
+        }
+        AttnSaved::Flash { lse, ids: fids } => {
+            let dsum = g.storage(shape.b as u64 * nh as u64 * shape.t as u64);
+            g.submit(&[], &flash_gqa_causal_bwd(g, fids, &ga, &la.q_normed, &la.k_normed, &la.v, &la.ctx, lse, &d_ctx, &dsum, &d_q_normed, &d_k_normed, &d_v));
+        }
+    }
 
     // ---- RoPE backward (in place, sign=-1) ----
     let half = shape.rotary_half;

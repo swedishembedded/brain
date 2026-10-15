@@ -63,23 +63,28 @@
 // faster variant for capable hardware is an additional registered kernel + a
 // widened selector, not a rewrite of this one.
 //
-// @workgroup_size(256) = BR(64 query rows) x LANES(4), matching
-// `flash_attn_bidir_split`'s own choice (already checked against
-// `DeviceCaps::max_workgroup_size` by callers, never assumed). Shared use is
-// 16 KiB (ksh 4 + vsh 4 + part 8) -- 3 workgroups resident per SM on Pascal.
+// HEAD WIDTHS UP TO 256 (the Qwen3.5 / Qwen3.8 full-attention layers): CH
+// stays 32 -- the compile-time trip count the register argument above needs --
+// and the lane count follows the head instead: LANES = 4 for head_dim <= 128
+// (BR = 64 query rows, the original tiling, unchanged) and LANES = 8 for
+// head_dim in (128, 256] (BR = 32 query rows). The workgroup is 256 threads
+// either way (BR * LANES = WG), so the dispatch only changes its workgroup
+// count (`model::block::flash_gqa_rows_per_workgroup`). Per-thread registers
+// are identical in both modes (qv[32] + o[32]); the K/V tile rows are
+// `LANES * CH` wide (128 or 256), so narrow heads do not stage padding they
+// never read. Shared use is 24 KiB at the widest (ksh 8 + vsh 8 + part 8),
+// under the 48 KiB every target grants without an opt-in.
 
-const BR: u32 = 64u;     // query rows per workgroup
+const WG: u32 = 256u;    // threads per workgroup == BR * LANES in both modes
 const BC: u32 = 8u;      // key/value rows per shared tile
-const LANES: u32 = 4u;   // threads cooperating on one query row
-const CH: u32 = 32u;     // channels per lane (LANES*CH == HD)
-const HD: u32 = 128u;    // max head_dim; tiles are always this wide
+const CH: u32 = 32u;     // channels per lane (LANES*CH >= head_dim)
 
 struct Params {
     bsz: u32,
     n_heads: u32,
     n_kv_heads: u32,
     tcols: u32,        // T
-    head_dim: u32,     // <= 128
+    head_dim: u32,     // <= 256
     group: u32,        // n_heads / n_kv_heads
 };
 
@@ -93,9 +98,9 @@ struct Params {
 // softmax weight as `exp(s - lse)` without the `[H,T,T]` probabilities.
 @group(0) @binding(5) var<storage, read_write> lse: array<f32>;
 
-var<workgroup> ksh:  array<f32, 1024>;  // BC*HD  -> 4 KiB
-var<workgroup> vsh:  array<f32, 1024>;  // BC*HD  -> 4 KiB
-var<workgroup> part: array<f32, 2048>;  // BC*BR*LANES -> 8 KiB
+var<workgroup> ksh:  array<f32, 2048>;  // BC*256   -> 8 KiB
+var<workgroup> vsh:  array<f32, 2048>;  // BC*256   -> 8 KiB
+var<workgroup> part: array<f32, 2048>;  // BC*WG     -> 8 KiB
 
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wgid: vec3<u32>,
@@ -104,6 +109,9 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let T = p.tcols;
     let hd = p.head_dim;
     let scale = inverseSqrt(f32(hd));
+    let lanes = select(4u, 8u, hd > 128u);   // threads per query row
+    let BR = WG / lanes;                     // query rows per workgroup
+    let hdt = lanes * CH;                    // K/V tile row width
 
     // Flat workgroup id -> (b, h, query-tile).
     let wg = wgid.y * nwg.x + wgid.x;
@@ -119,18 +127,18 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let kv_row = p.n_kv_heads * hd;
 
     let lt = lid.x;                 // 0..255
-    let row = lt / LANES;           // 0..63  -> query row within the tile
-    let lane = lt % LANES;          // 0..3   -> channel phase
+    let row = lt / lanes;           // query row within the tile
+    let lane = lt % lanes;          // channel phase
     let i = qt * BR + row;          // this thread's query row
     let live = i < T;
 
     // This thread's slice of q, and its slice of the output accumulator.
-    // Channels are interleaved: slot c holds channel c*LANES + lane.
+    // Channels are interleaved: slot c holds channel c*lanes + lane.
     var qv: array<f32, 32>;
     var o: array<f32, 32>;
     let q_base = (b * T + i) * q_row + h * hd;
     for (var c = 0u; c < CH; c = c + 1u) {
-        let d = c * LANES + lane;
+        let d = c * lanes + lane;
         if (live && d < hd) { qv[c] = q[q_base + d]; } else { qv[c] = 0.0; }
         o[c] = 0.0;
     }
@@ -153,9 +161,9 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         // 256 threads, HD-contiguous so consecutive threads read consecutive
         // addresses. Channels past head_dim are zeroed, which is what makes
         // the fixed CH loop correct.
-        for (var e = lt; e < BC * HD; e = e + 256u) {
-            let jr = e / HD;
-            let d = e % HD;
+        for (var e = lt; e < BC * hdt; e = e + WG) {
+            let jr = e / hdt;
+            let d = e % hdt;
             let j = kt * BC + jr;
             if (j < T && d < hd) {
                 let kv_base = (b * T + j) * kv_row + hkv * hd + d;
@@ -171,15 +179,15 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         // Partial dot products: this lane's 32 channels of every key in the tile.
         for (var j = 0u; j < BC; j = j + 1u) {
             var s = 0.0;
-            let ko = j * HD + lane;
+            let ko = j * hdt + lane;
             for (var c = 0u; c < CH; c = c + 1u) {
-                s = s + qv[c] * ksh[ko + c * LANES];
+                s = s + qv[c] * ksh[ko + c * lanes];
             }
-            part[j * (BR * LANES) + row * LANES + lane] = s;
+            part[j * WG + row * lanes + lane] = s;
         }
         workgroupBarrier();
 
-        // Every lane re-sums the LANES partials (redundant but register-cheap,
+        // Every lane re-sums the `lanes` partials (redundant but register-cheap,
         // and it leaves each lane with the p_j it needs for its own
         // channels). The causal mask lands here too: a key strictly past this
         // thread's own row `i` is excluded before the tile-wide max/exp, same
@@ -191,8 +199,10 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         for (var j = 0u; j < BC; j = j + 1u) {
             var s = -3.4e38;
             if (j < krows && (kt * BC + j) <= i) {
-                let po = j * (BR * LANES) + row * LANES;
-                s = (part[po] + part[po + 1u] + part[po + 2u] + part[po + 3u]) * scale;
+                let po = j * WG + row * lanes;
+                var sum = 0.0;
+                for (var l = 0u; l < lanes; l = l + 1u) { sum = sum + part[po + l]; }
+                s = sum * scale;
             }
             pj[j] = s;
             tmax = max(tmax, s);
@@ -210,10 +220,10 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
 
         // One rescale of o per TILE, not per key.
         for (var c = 0u; c < CH; c = c + 1u) {
-            let vo = c * LANES + lane;
+            let vo = c * lanes + lane;
             var acc = 0.0;
             for (var j = 0u; j < BC; j = j + 1u) {
-                acc = acc + pj[j] * vsh[j * HD + vo];
+                acc = acc + pj[j] * vsh[j * hdt + vo];
             }
             o[c] = o[c] * corr + acc;
         }
@@ -224,7 +234,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         let inv = 1.0 / l;
         let o_base = (b * T + i) * q_row + h * hd;
         for (var c = 0u; c < CH; c = c + 1u) {
-            let d = c * LANES + lane;
+            let d = c * lanes + lane;
             if (d < hd) { out[o_base + d] = o[c] * inv; }
         }
         if (lane == 0u) { lse[(b * p.n_heads + h) * T + i] = m + log(l); }
