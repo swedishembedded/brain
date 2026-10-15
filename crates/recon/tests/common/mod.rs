@@ -12,6 +12,7 @@ use splat::types::Splats;
 /// it, tiled with small opaque gaussians of random colour: texture
 /// everywhere for stereo to match and for a view to be judged by.
 pub fn floor_and_ball() -> Splats {
+    // seed: the scene's texture is the fixture the reconstruction-quality thresholds in validate.rs and dense.rs were measured on
     let mut r = Lcg::new(0xde75e);
     let mut f = mvs::Fused::default();
     let mut add = |p: [f32; 3], n: [f32; 3], r: &mut Lcg| {

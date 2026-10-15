@@ -129,6 +129,7 @@ fn cfg(n_layers: u32) -> SamViTConfig {
     }
 }
 
+// seed: one weight draw shared by every block-count build compared; the failure rate documented above was measured at this draw
 const SEED: u64 = 7;
 
 /// `(patch_tokens, block0_out, block1_out)`, read back to the host. An

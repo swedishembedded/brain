@@ -227,6 +227,7 @@ fn device() -> Option<exec::Context> {
 }
 
 fn elementwise_case(name: &'static str, wgsl: &'static str, n: usize, inputs: usize) -> Case {
+    // seed: fixed input stream so a kernel/CPU disagreement is reproduced on the same operands
     let mut seed = 0x1234_5678u32;
     let mut bufs: Vec<Buf> = (0..inputs).map(|_| Buf::F32((0..n).map(|_| rnd(&mut seed)).collect())).collect();
     bufs.push(Buf::F32(vec![0.0; n]));
@@ -288,6 +289,7 @@ fn generated_cuda_agrees_with_the_cpu_reference_per_kernel_and_shape() {
     // A cooperative reduction: workgroup memory, one barrier, and a
     // workgroup-uniform early return before that barrier.
     for (numel, n_wg) in [(512usize, 2u32), (700, 3)] {
+        // seed: fixed input stream so a kernel/CPU disagreement is reproduced on the same operands
         let mut seed = 0xfeed_beefu32;
         let grad: Vec<f32> = (0..numel).map(|_| rnd(&mut seed)).collect();
         agree(
@@ -346,6 +348,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 "#;
     let Some(ctx) = device() else { return };
     let n = 200usize;
+    // seed: fixed input stream so a kernel/CPU disagreement is reproduced on the same operands
     let mut seed = 0x9e37_79b9u32;
     let y: Vec<f32> = (0..n).map(|i| if i % 11 == 0 { 0.0 } else { rnd(&mut seed) }).collect();
     let x: Vec<f32> = (0..n).map(|i| if i % 7 == 0 { 0.0 } else { rnd(&mut seed) }).collect();
@@ -370,6 +373,7 @@ fn an_early_return_before_a_barrier_does_not_strand_the_barrier() {
     let numel = 400usize;
     let n_wg = 2u32;
     let dispatched = 5u32; // 3 workgroups return before the barrier
+    // seed: fixed input stream so a kernel/CPU disagreement is reproduced on the same operands
     let mut seed = 0x0bad_c0deu32;
     let grad: Vec<f32> = (0..numel).map(|_| rnd(&mut seed)).collect();
     let case = Case {
@@ -447,6 +451,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     let Some(ctx) = device() else { return };
     let n = 70usize;
+    // seed: fixed input stream so a kernel/CPU disagreement is reproduced on the same operands
     let mut seed = 0x5eed_0001u32;
     let x: Vec<f32> = (0..n).map(|_| rnd(&mut seed)).collect();
     // n at 0, vec3<u32> at 16 (align 16, size 12), f32 `scale` at 28.
@@ -558,6 +563,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     // Search a deterministic stream for triples where the two roundings
     // actually differ, and assert we found some - otherwise the test is vacuous.
+    // seed: fixed input stream so a kernel/CPU disagreement is reproduced on the same operands
     let mut seed = 0x00c0_ffeeu32;
     let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
     let mut discriminating = 0usize;
@@ -609,6 +615,7 @@ fn generated_kernels_never_promise_their_pointers_do_not_alias() {
 
     let Some(ctx) = device() else { return };
     let n = 96usize;
+    // seed: fixed input stream so a kernel/CPU disagreement is reproduced on the same operands
     let mut seed = 0xa11a_5000u32;
     let a: Vec<f32> = (0..n).map(|_| rnd(&mut seed)).collect();
     // `out` and `a` are the same allocation: out[i] = out[i] + out[i].
@@ -717,6 +724,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     let Buf::F32(seen) = &dirty[0] else { panic!("o is f32") };
     assert!(seen.iter().all(|v| *v == 12345.5), "the dirtying pass did not run: {seen:?}");
 
+    // seed: fixed input stream so a kernel/CPU disagreement is reproduced on the same operands
     let mut seed = 0x2222_3333u32;
     let x: Vec<f32> = (0..(n_wg as usize) * 64).map(|_| rnd(&mut seed)).collect();
     let case = Case {

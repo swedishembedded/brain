@@ -609,6 +609,7 @@ mod tests {
     // well-mixed seeds: a small seed's first xorshift output is < 2^40, so
     // rand_f32 yields exactly 0.0 (and `sample` then returns index 0). These
     // large seeds exercise the intended cumulative-sampling path.
+    // seed: xorshift fixtures chosen well-mixed: a small seed's first output is below 2^40 and rand_f32 would be exactly 0.0
     const SEEDS: [u64; 3] = [0x9E37_79B9_7F4A_7C15, 0xD1B5_4A32_D192_ED03, 0xCAFE_F00D_DEAD_BEEF];
 
     #[test]
