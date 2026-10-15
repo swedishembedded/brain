@@ -166,7 +166,7 @@ fn generate_spec_declares_every_param_the_http_handlers_set() {
 fn speak_spec_declares_the_documented_shape() {
     let spec = qwen3omnimoe::caps::speak_spec();
     assert!(spec.streaming, "speak now streams real audio chunks mid-run via Progress::chunk");
-    for name in ["messages", "prompt", "max_new", "speaker"] {
+    for name in ["messages", "prompt", "max_new", "speaker", "seed"] {
         assert!(spec.params.iter().any(|p| p.name == name), "speak_spec is missing param '{name}'");
     }
     assert!(spec.outputs.iter().any(|o| o.media == Media::Text), "speak_spec must output a Media::Text blob");

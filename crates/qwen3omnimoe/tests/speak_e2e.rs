@@ -21,7 +21,7 @@
 //! Talker layer's weights are streamed fresh per decode step, same
 //! validation-tier tradeoff as the Thinker path) — `#[ignore]`d.
 //!
-//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=[path/to/Qwen3-Omni-30B-A3B-Instruct] \
 //!         cargo test --release -p brain-omni --test speak_e2e -- --ignored --nocapture`
 
 use qwen3omnimoe::caps::OmniProvider;
@@ -40,8 +40,9 @@ fn speak_runs_end_to_end_and_produces_a_real_waveform() {
     println!("running real Thinker(text) -> Talker -> MTP -> Code2Wav chain -- expect this to take a while (every layer's weights streamed fresh per step)...");
     let mut streamed = Vec::new();
     let mut n_chunks = 0u32;
+    // seed: the end-to-end assertions below must see the same sampled codec frames every run
     let (text, wav, sample_rate) = inner
-        .speak("Say hello.", "Say hello.", 8, "chelsie", |chunk| {
+        .speak("Say hello.", "Say hello.", 8, "chelsie", 1, |chunk| {
             n_chunks += 1;
             streamed.extend_from_slice(chunk);
         })

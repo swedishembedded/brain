@@ -159,13 +159,14 @@ pub struct GenOpts {
     pub max_frames: u32,
     pub temperature: f32,
     pub top_k: usize,
+    /// RNG seed of the sampled codec frames; [`GenOpts::default`] draws a fresh one.
     pub seed: u64,
     pub min_new: u32,
 }
 
 impl Default for GenOpts {
     fn default() -> GenOpts {
-        GenOpts { max_frames: 256, temperature: 0.9, top_k: 50, seed: 0, min_new: 2 }
+        GenOpts { max_frames: 256, temperature: 0.9, top_k: 50, seed: data::rng::random_seed(), min_new: 2 }
     }
 }
 
@@ -304,6 +305,11 @@ pub fn generate_codes_streaming(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_gen_opts_draw_a_fresh_seed_each_time() {
+        assert_ne!(GenOpts::default().seed, GenOpts::default().seed);
+    }
 
     /// The suppressed-token-set (top-1024 ids masked except EOS) and the
     /// EOS-gate (`allow_eos`) are the two easy-to-get-subtly-wrong pieces of

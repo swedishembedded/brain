@@ -142,6 +142,7 @@ pub fn speak_spec() -> ActionSpec {
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "max TEXT tokens to generate").default(json!(32)))
         .param(ParamSpec::new("speaker", ParamType::Str, "voice name from TalkerConfig::speaker_id (chelsie/ethan/aiden); falls back to the first configured voice").default(json!("chelsie")))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed of the Talker's sampled codec frames (reproducible run; omit for random; the seed used is echoed in the outcome)"))
         .output(BlobSpec::new("text", Media::Text, "the generated response text"))
         .output(BlobSpec::new("audio", Media::Audio, "the spoken response: raw mono f32 little-endian PCM at Code2WavConfig::output_sample_rate (24 kHz)"))
 }
@@ -159,6 +160,7 @@ pub fn converse_spec() -> ActionSpec {
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "max TEXT tokens to generate").default(json!(32)))
         .param(ParamSpec::new("speaker", ParamType::Str, "voice name from TalkerConfig::speaker_id (chelsie/ethan/aiden); falls back to the first configured voice").default(json!("chelsie")))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed of the Talker's sampled codec frames (reproducible run; omit for random; the seed used is echoed in the outcome)"))
         .input(BlobSpec::new("audio", Media::Audio, "optional speech input: raw mono f32 little-endian PCM at 16 kHz (see audio::asr_caps's wire convention)"))
         .input(BlobSpec::new("image", Media::Image, "optional image input: interleaved HWC f32 in [0,1] (capability::blob's wire convention)"))
         .input(BlobSpec::new("video", Media::Video, "optional video input: N concatenated interleaved-HWC f32 RGB frames in [0,1], meta {frames,w,h,c=3} (capability::blob::decode_video's wire convention)"))
@@ -544,7 +546,7 @@ impl OmniInner {
     /// behavior change to `build_talker_prompt`'s tested contract, not a fix
     /// to the Thinker's own text-completion bug this parameter split exists
     /// to isolate.
-    pub fn speak(&self, prompt: &str, user_text: &str, max_new: u32, speaker: &str, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
+    pub fn speak(&self, prompt: &str, user_text: &str, max_new: u32, speaker: &str, seed: u64, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
         let (text, new_ids) = self.generate(prompt, max_new);
         let user_ids = self.tok.encode(user_text);
 
@@ -575,7 +577,7 @@ impl OmniInner {
         // 16`, i.e. the thinker-sized table): a fresh Gpu handle on the same
         // device, with Talker's own pipeline table, is required here.
         let talker_gpu = self.gpus[0].new_like(crate::talker::talker_pipelines());
-        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts::default())?;
+        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts { seed, ..GenOpts::default() })?;
 
         let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav)?;
         let mut wav = Vec::new();
@@ -605,7 +607,7 @@ impl OmniInner {
     /// identical to `speak`: Talker -> MTP -> Code2Wav, chunked/streamed the
     /// same way (see [`Self::speak`]'s doc on `on_chunk`).
     #[allow(clippy::too_many_arguments)]
-    pub fn converse(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, video: Option<&[(Vec<f32>, u32, u32)]>, max_new: u32, speaker: &str, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
+    pub fn converse(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, video: Option<&[(Vec<f32>, u32, u32)]>, max_new: u32, speaker: &str, seed: u64, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
         // Strip the chat template's own inline media-placeholder literals
         // before tokenizing -- see `crate::mm::strip_media_placeholder_text`'s
         // doc for the real-hardware tokenization-boundary bug this avoids
@@ -651,7 +653,7 @@ impl OmniInner {
         let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor)?;
         let codec_head_w = self.reader.tensor("talker.codec_head.weight").ok_or("omni: missing tensor talker.codec_head.weight")?;
         let talker_gpu = self.gpus[0].new_like(crate::talker::talker_pipelines());
-        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &tprompt, &GenOpts::default())?;
+        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &tprompt, &GenOpts { seed, ..GenOpts::default() })?;
 
         let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav)?;
         let mut wav = Vec::new();
@@ -722,10 +724,11 @@ impl Action for SpeakAction {
         let prompt = chat_prompt(self.inner.chat_template.as_ref(), inv)?;
         let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
         let speaker = inv.get_str("speaker").unwrap_or_else(|| "chelsie".to_string());
+        let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
 
         progress(Progress::step(0, 2, "generating text"));
         let mut n_chunks = 0u32;
-        let (text, wav, sample_rate) = self.inner.speak(&prompt, &user_text, max_new, &speaker, |chunk| {
+        let (text, wav, sample_rate) = self.inner.speak(&prompt, &user_text, max_new, &speaker, seed, |chunk| {
             n_chunks += 1;
             let bytes: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
             let blob = Blob::new(Media::Audio, bytes).with_meta(json!({"index": n_chunks}));
@@ -735,6 +738,7 @@ impl Action for SpeakAction {
         progress(Progress::step(2, 2, "done"));
         Ok(Outcome::new()
             .set("text", json!(text))
+            .set("seed", json!(seed))
             .blob("text", Blob::new(Media::Text, text.into_bytes()))
             .blob("audio", Blob::new(Media::Audio, audio_bytes).with_meta(json!({"sample_rate": sample_rate}))))
     }
@@ -755,6 +759,7 @@ impl Action for ConverseAction {
         }
         let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
         let speaker = inv.get_str("speaker").unwrap_or_else(|| "chelsie".to_string());
+        let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
 
         let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
         let image = inv.get_blob("image").map(|_| decode_image(inv, "image")).transpose()?;
@@ -763,7 +768,7 @@ impl Action for ConverseAction {
 
         progress(Progress::step(0, 2, "generating text"));
         let mut n_chunks = 0u32;
-        let (text, wav, sample_rate) = self.inner.converse(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new, &speaker, |chunk| {
+        let (text, wav, sample_rate) = self.inner.converse(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new, &speaker, seed, |chunk| {
             n_chunks += 1;
             let bytes: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
             let blob = Blob::new(Media::Audio, bytes).with_meta(json!({"index": n_chunks}));
@@ -773,6 +778,7 @@ impl Action for ConverseAction {
         progress(Progress::step(2, 2, "done"));
         Ok(Outcome::new()
             .set("text", json!(text))
+            .set("seed", json!(seed))
             .blob("text", Blob::new(Media::Text, text.into_bytes()))
             .blob("audio", Blob::new(Media::Audio, audio_bytes).with_meta(json!({"sample_rate": sample_rate}))))
     }

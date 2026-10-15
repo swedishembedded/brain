@@ -186,8 +186,11 @@ speech, image and video input over both the D-Bus and HTTP transports.
 
 ## Hardware and limits
 
-- Generation is greedy (argmax) only - `temp`/`top_p`/`top_k`/`seed` are
-  accepted for API compatibility but have no effect.
+- Text generation is greedy (argmax) only - `temp`/`top_p`/`top_k` are
+  accepted for API compatibility but have no effect, and `seed` has none on
+  `generate`. The Talker's codec frames in `speak`/`converse` are sampled:
+  `seed` fixes them, and an omitted one is drawn and returned as `seed` in the
+  outcome.
 - `speak` is text-only on the input side today: a `speak` call does not also
   take audio/image input, and it's single-turn (no multi-turn spoken
   context).
