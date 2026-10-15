@@ -36,6 +36,16 @@ impl Rng {
         }
     }
 
+    /// A generator on a freshly drawn seed, for a caller that needs no
+    /// particular stream (a test whose assertions hold for any input). The
+    /// seed is printed to stderr, which libtest shows for a failing test, so
+    /// the failure reproduces with [`Rng::new`] of that value.
+    pub fn random() -> Self {
+        let seed = random_seed();
+        eprintln!("Rng seed: {seed}");
+        Rng::new(seed)
+    }
+
     /// The generator's whole state: [`Rng::from_state`] of it continues the
     /// stream exactly where this one is, which is what an interrupted
     /// training run needs to draw the same batches after it resumes.
@@ -133,6 +143,16 @@ impl Lcg {
         Lcg { state: seed }
     }
 
+    /// A generator on a freshly drawn seed, for a caller that needs no
+    /// particular stream (a test whose assertions hold for any input). The
+    /// seed is printed to stderr, which libtest shows for a failing test, so
+    /// the failure reproduces with [`Lcg::new`] of that value.
+    pub fn random() -> Self {
+        let seed = random_seed();
+        eprintln!("Lcg seed: {seed}");
+        Lcg::new(seed)
+    }
+
     /// Next raw 64-bit state.
     pub fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -180,11 +200,18 @@ impl Lcg {
 mod tests {
     use super::*;
 
+    /// A test that needs no particular stream draws a fresh one per call.
+    #[test]
+    fn random_generators_do_not_repeat() {
+        assert_ne!(Rng::random().next_u64(), Rng::random().next_u64());
+        assert_ne!(Lcg::random().next_u64(), Lcg::random().next_u64());
+    }
+
     /// A generator rebuilt from a saved state draws exactly what the
     /// original would have drawn next.
     #[test]
     fn a_saved_state_continues_the_stream() {
-        let mut original = Rng::new(42);
+        let mut original = Rng::new(random_seed());
         original.next_u64();
         let mut resumed = Rng::from_state(original.state());
         for _ in 0..8 {
@@ -195,7 +222,7 @@ mod tests {
     /// The defect this type exists to fix: the stream must straddle zero.
     #[test]
     fn signed_covers_both_halves_of_minus_one_to_one() {
-        let mut r = Lcg::new(1);
+        let mut r = Lcg::new(random_seed());
         let (mut lo, mut hi) = (0usize, 0usize);
         for _ in 0..10_000 {
             let v = r.signed();
@@ -213,7 +240,7 @@ mod tests {
 
     #[test]
     fn unit_stays_in_zero_to_one() {
-        let mut r = Lcg::new(9);
+        let mut r = Lcg::new(random_seed());
         for _ in 0..10_000 {
             let v = r.unit();
             assert!((0.0..1.0).contains(&v), "out of range: {v}");
@@ -222,7 +249,8 @@ mod tests {
 
     #[test]
     fn lcg_is_deterministic_for_fixed_seed() {
-        let (mut a, mut b) = (Lcg::new(3), Lcg::new(3));
+        let seed = random_seed();
+        let (mut a, mut b) = (Lcg::new(seed), Lcg::new(seed));
         for _ in 0..1000 {
             assert_eq!(a.next_u64(), b.next_u64());
         }
@@ -230,8 +258,9 @@ mod tests {
 
     #[test]
     fn deterministic_for_fixed_seed() {
-        let mut a = Rng::new(42);
-        let mut b = Rng::new(42);
+        let seed = random_seed();
+        let mut a = Rng::new(seed);
+        let mut b = Rng::new(seed);
         for _ in 0..1000 {
             assert_eq!(a.next_u64(), b.next_u64());
         }
@@ -239,7 +268,7 @@ mod tests {
 
     #[test]
     fn range_is_inclusive_and_in_bounds() {
-        let mut r = Rng::new(7);
+        let mut r = Rng::new(random_seed());
         for _ in 0..10_000 {
             let v = r.gen_range_inclusive(3, 9);
             assert!((3..=9).contains(&v));
@@ -248,7 +277,7 @@ mod tests {
 
     #[test]
     fn floats_in_unit_interval() {
-        let mut r = Rng::new(1);
+        let mut r = Rng::new(random_seed());
         for _ in 0..10_000 {
             let f = r.next_f64();
             assert!((0.0..1.0).contains(&f));
