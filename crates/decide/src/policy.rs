@@ -494,6 +494,7 @@ mod tests {
         // and both of those deliberately move the optimum (see below).
         let cfg = PolicyConfig { clip: 1e9, entropy: 0.0, gamma: 1.0, anchor: 0.0, target_kl: 0.02 };
         let mut z = [0.0f32; 2];
+        // seed: the convergence tolerance on the stochastic fixed point was measured on this draw sequence
         let mut rng = data::rng::Rng::new(4);
         let n = 60000;
         for t in 0..n {
@@ -589,7 +590,7 @@ mod tests {
         let settle = |beta: f32| -> f32 {
             let cfg = PolicyConfig { clip: 1e9, entropy: beta, gamma: 1.0, anchor: 0.0, target_kl: 0.02 };
             let mut z = [0.0f32];
-            let mut rng = data::rng::Rng::new(6);
+            let mut rng = data::rng::Rng::random();
             for t in 0..40000 {
                 let outcome = rng.next_f32() < 0.9;
                 let old = sigmoid(z[0]);
@@ -652,7 +653,7 @@ mod tests {
         let payouts = [0.1f32, 0.9, 0.3];
         let cfg = PolicyConfig { clip: 0.2, entropy: 0.001, gamma: 1.0, anchor: 0.0, target_kl: 0.02 };
         let mut z = vec![0.0f32; 3];
-        let mut rng = data::rng::Rng::new(8);
+        let mut rng = data::rng::Rng::random();
         for t in 0..8000 {
             let p = crate::loss::softmax(&z);
             // Sample an arm from the policy.

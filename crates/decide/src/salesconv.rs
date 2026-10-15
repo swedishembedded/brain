@@ -306,7 +306,7 @@ mod tests {
         let convs: Vec<Conversation> =
             (0..40).map(|i| conv(i < 35, 4 + i % 7)).collect(); // 35 positive, 5 negative
         let mut cur = Curriculum::new(&convs);
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::random();
         let drawn: Vec<bool> = (0..20).map(|_| convs[cur.draw(1.0, &mut rng)].outcome).collect();
         let pos = drawn.iter().filter(|&&o| o).count();
         assert_eq!(pos, 10, "expected an even split, got {pos}/20 positive from a 7:1 pool");
@@ -317,7 +317,7 @@ mod tests {
     fn the_curriculum_starts_short_and_widens() {
         let convs: Vec<Conversation> = (0..40).map(|i| conv(i % 2 == 0, 2 + i)).collect();
         let mut cur = Curriculum::new(&convs);
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::random();
         let early: usize =
             (0..40).map(|_| convs[cur.draw(0.1, &mut rng)].len()).max().unwrap();
         let late: usize = (0..40).map(|_| convs[cur.draw(1.0, &mut rng)].len()).max().unwrap();
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn uniform_turn_sampling_is_uniform_and_in_range() {
         let c = conv(true, 8);
-        let mut rng = Rng::new(2);
+        let mut rng = Rng::random();
         let mut seen = [0usize; 8];
         for _ in 0..8000 {
             let t = c.sample_turn(1.0, &mut rng);
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn biased_turn_sampling_favours_the_close() {
         let c = conv(true, 12);
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::random();
         let (mut early, mut late) = (0usize, 0usize);
         for _ in 0..8000 {
             let t = c.sample_turn(0.85, &mut rng);
@@ -370,7 +370,7 @@ mod tests {
     fn a_single_outcome_pool_still_draws() {
         let convs: Vec<Conversation> = (0..4).map(|i| conv(true, 3 + i)).collect();
         let mut cur = Curriculum::new(&convs);
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::random();
         for _ in 0..8 {
             assert!(cur.draw(1.0, &mut rng) < convs.len());
         }

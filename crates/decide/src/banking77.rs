@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn a_drawn_option_set_holds_the_gold_once_and_no_duplicates() {
         let pool: Vec<usize> = (0..77).collect();
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::random();
         let s = OptionSampler::default();
         let mut positions = BTreeSet::new();
         for _ in 0..200 {
@@ -277,7 +277,7 @@ mod tests {
     /// asking for distractors that do not exist.
     #[test]
     fn a_tiny_pool_is_handled() {
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::random();
         let (opts, at) = OptionSampler::default().draw(4, &[4, 9], &mut rng);
         assert_eq!(opts.len(), 2);
         assert_eq!(opts[at], 4);

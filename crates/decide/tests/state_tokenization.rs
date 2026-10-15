@@ -40,9 +40,9 @@ fn tokenizer() -> Option<data::wordpiece::WordPiece> {
 /// written in - here a cube's face letters.
 const ALPHABET: [char; 6] = ['U', 'R', 'F', 'D', 'L', 'B'];
 
-/// Deterministic states, so a failure names one rather than "sometimes".
+/// Random states; a failing run names the seed that reproduces it.
 fn states(n: usize, symbols: usize) -> Vec<Vec<char>> {
-    let mut rng = data::rng::Lcg::new(0xc0be);
+    let mut rng = data::rng::Lcg::random();
     (0..n)
         .map(|_| (0..symbols).map(|_| ALPHABET[rng.next_u32() as usize % ALPHABET.len()]).collect())
         .collect()

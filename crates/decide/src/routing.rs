@@ -463,7 +463,7 @@ mod tests {
     /// comparing against noise.
     #[test]
     fn the_projection_recovers_a_linear_map() {
-        let mut rng = Rng::new(5);
+        let mut rng = Rng::random();
         let (d_in, d_out, n) = (6usize, 4usize, 300usize);
         let truth: Vec<f32> = (0..d_out * d_in).map(|_| rng.next_gaussian() as f32).collect();
         let x: Vec<Vec<f32>> =
@@ -502,7 +502,7 @@ mod tests {
     /// `phi` has to learn something separable, or (3) contributes noise.
     #[test]
     fn the_confidence_net_learns_a_separable_target() {
-        let mut rng = Rng::new(11);
+        let mut rng = Rng::random();
         let d = 8;
         let (mut x, mut y) = (Vec::new(), Vec::new());
         for i in 0..200 {
@@ -531,7 +531,7 @@ mod tests {
     /// the published thresholds no longer mean what they meant.
     #[test]
     fn fitted_weights_stay_a_mixture() {
-        let mut rng = Rng::new(13);
+        let mut rng = Rng::random();
         let (mut sig, mut correct) = (Vec::new(), Vec::new());
         for _ in 0..200 {
             let good = rng.next_f32() > 0.5;

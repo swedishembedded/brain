@@ -172,7 +172,7 @@ mod tests {
     /// or it is adding noise where it claims to remove it.
     #[test]
     fn the_critic_learns_a_state_dependent_return() {
-        let mut rng = Rng::new(4);
+        let mut rng = Rng::random();
         let d = 6;
         let (mut x, mut y) = (Vec::new(), Vec::new());
         for _ in 0..300 {

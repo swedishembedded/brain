@@ -142,6 +142,7 @@ fn the_model_learns_a_banking_intent_decision() {
 
     let before = accuracy(&mut model, &fx.data, &test, &intents);
 
+    // seed: the accuracy and loss-improvement margins asserted below were measured on this training draw sequence
     let mut rng = Rng::new(11);
     let sampler = OptionSampler { min: 2, max: N_INTENTS };
     let loss_cfg = LossConfig::cross_entropy();
