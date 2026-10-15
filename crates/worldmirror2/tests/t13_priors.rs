@@ -59,13 +59,16 @@ fn look(px: f32, py: f32, pz: f32) -> CameraPrior {
     CameraPrior { c2w, fx: 200.0, fy: 200.0, cx: 28.0, cy: 28.0 }
 }
 
-fn run(priors: Option<&[CameraPrior]>) -> Vec<f32> {
+/// One forward on frames drawn from `frames_seed`; calls that are compared
+/// must pass the same seed.
+fn run(priors: Option<&[CameraPrior]>, frames_seed: u64) -> Vec<f32> {
     let cfg = tiny();
     let init = weights(&cfg, 0xC0FFEE);
     let s = 3usize;
     let (hp, wp) = (4usize, 4usize);
     let (h, w) = (hp * cfg.patch, wp * cfg.patch);
-    let mut r = Lcg::new(0x1234);
+    eprintln!("frames seed: {frames_seed}");
+    let mut r = Lcg::new(frames_seed);
     let frames: Vec<f32> = (0..s * 3 * h * w).map(|_| 0.5 + 0.4 * r.scaled(0.5)).collect();
     let gpu = gpu_core::Gpu::new_cpu(worldmirror2::model::PIPELINES);
     let mut m = Mirror::new(gpu, cfg, &init, 0);
@@ -83,8 +86,9 @@ fn run(priors: Option<&[CameraPrior]>) -> Vec<f32> {
 /// No priors must be exactly what it always was.
 #[test]
 fn the_no_prior_path_is_unchanged() {
-    let a = run(None);
-    let b = run(None);
+    let seed = data::rng::random_seed();
+    let a = run(None, seed);
+    let b = run(None, seed);
     assert_eq!(a, b, "the no-prior forward is not deterministic");
     assert!(a.iter().all(|v| v.is_finite()), "no-prior forward produced non-finite output");
 }
@@ -92,9 +96,10 @@ fn the_no_prior_path_is_unchanged() {
 /// And priors have to actually move the prediction.
 #[test]
 fn supplying_cameras_changes_the_prediction() {
-    let none = run(None);
+    let seed = data::rng::random_seed();
+    let none = run(None, seed);
     let cams = [look(0.0, 0.0, 0.0), look(1.0, 0.0, 0.3), look(-1.0, 0.2, 0.1)];
-    let with = run(Some(&cams));
+    let with = run(Some(&cams), seed);
     assert!(with.iter().all(|v| v.is_finite()), "prior-conditioned forward produced non-finite output");
     let moved = none.iter().zip(&with).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     assert!(
@@ -108,8 +113,9 @@ fn supplying_cameras_changes_the_prediction() {
 /// being written, but not the thing that was asked for.
 #[test]
 fn different_cameras_give_different_predictions() {
-    let a = run(Some(&[look(0.0, 0.0, 0.0), look(1.0, 0.0, 0.0), look(-1.0, 0.0, 0.0)]));
-    let b = run(Some(&[look(0.0, 0.0, 0.0), look(0.0, 1.0, 0.0), look(0.0, -1.0, 0.0)]));
+    let seed = data::rng::random_seed();
+    let a = run(Some(&[look(0.0, 0.0, 0.0), look(1.0, 0.0, 0.0), look(-1.0, 0.0, 0.0)]), seed);
+    let b = run(Some(&[look(0.0, 0.0, 0.0), look(0.0, 1.0, 0.0), look(0.0, -1.0, 0.0)]), seed);
     let moved = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
     assert!(moved > 1e-6, "two different camera rigs produced the same prediction (max delta {moved:.3e})");
 }

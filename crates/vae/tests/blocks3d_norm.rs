@@ -69,12 +69,12 @@ fn input() -> Vec<f32> {
     // Signed, and deliberately not tiny: a per-position sum of squares whose
     // terms all have the same magnitude would round the same way in any order,
     // which is precisely the property this file must NOT accidentally rely on.
-    let mut r = Lcg::new(0x3D_00_11_22);
+    let mut r = Lcg::random();
     r.vec_scaled(n, 3.0)
 }
 
 fn gamma() -> Vec<f32> {
-    let mut r = Lcg::new(0xA1_1E_5C_7E);
+    let mut r = Lcg::random();
     (0..SHAPE.0 as usize).map(|_| 0.5 + r.unit()).collect()
 }
 

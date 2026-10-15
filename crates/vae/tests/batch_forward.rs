@@ -163,7 +163,7 @@ fn batch_n4_matches_four_independent_n1_runs() {
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let n = 4u32;
     let t = tensors(0xBA7C_0001, false);
-    let mut rng = Lcg::new(0xBA7C_1000);
+    let mut rng = Lcg::random();
     let x_all = rng.vec_scaled((CIN * H * W * n) as usize, 1.0);
 
     let batched = run(&gpu, &t, false, n, &x_all);
@@ -178,7 +178,7 @@ fn batch_outlier_does_not_leak_across_groupnorm_statistics() {
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let n = 4u32;
     let t = tensors(0xBA7C_0002, false);
-    let mut rng = Lcg::new(0xBA7C_2000);
+    let mut rng = Lcg::random();
     let mut x_all = rng.vec_scaled((CIN * H * W * n) as usize, 1.0);
     // Image 2 is a large-magnitude outlier. If GroupNorm's per-image
     // statistics leaked across the batch axis, images 0/1/3 would come out
@@ -204,7 +204,7 @@ fn batch_n4_with_attention_matches_four_independent_n1_runs() {
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let n = 4u32;
     let t = tensors(0xBA7C_0003, true);
-    let mut rng = Lcg::new(0xBA7C_3000);
+    let mut rng = Lcg::random();
     let x_all = rng.vec_scaled((CIN * H * W * n) as usize, 1.0);
 
     let batched = run(&gpu, &t, true, n, &x_all);

@@ -94,7 +94,7 @@ fn a_single_tile_cover_decodes_bit_identically_to_the_untiled_path() {
     let cfg = tiny(true);
     let ts = randomize(zeros::decoder(&cfg), 7);
     let (lh, lw) = (8u32, 8u32);
-    let z = Lcg::new(11).vec(cfg.latent_channels as usize * (lh * lw) as usize);
+    let z = Lcg::random().vec(cfg.latent_channels as usize * (lh * lw) as usize);
 
     let gpu = cpu();
     let whole = VaeDecoder::from_diffusers_on(&gpu, cfg.clone(), &ts, lh, lw).decode(&z);
@@ -110,7 +110,7 @@ fn a_single_tile_cover_encodes_bit_identically_to_the_untiled_path() {
     let cfg = tiny(true);
     let ts = randomize(zeros::encoder(&cfg), 5);
     let (h, w) = (16u32, 16u32);
-    let img = Lcg::new(3).vec(cfg.in_channels as usize * (h * w) as usize);
+    let img = Lcg::random().vec(cfg.in_channels as usize * (h * w) as usize);
 
     let gpu = cpu();
     let whole = VaeEncoder::from_diffusers_on(&gpu, cfg.clone(), &ts, h, w).encode(&img);
@@ -138,7 +138,7 @@ fn a_tiled_decode_reproduces_the_untiled_decode() {
         let cfg = tiny(attn);
         let ts = randomize(zeros::decoder(&cfg), 7);
         let (lh, lw) = (32u32, 32u32);
-        let z = Lcg::new(11).vec(cfg.latent_channels as usize * (lh * lw) as usize);
+        let z = Lcg::random().vec(cfg.latent_channels as usize * (lh * lw) as usize);
 
         let gpu = cpu();
         let whole = VaeDecoder::from_diffusers_on(&gpu, cfg.clone(), &ts, lh, lw).decode(&z);
@@ -164,7 +164,7 @@ fn a_tiled_encode_reproduces_the_untiled_encode() {
         let cfg = tiny(attn);
         let ts = randomize(zeros::encoder(&cfg), 5);
         let (h, w) = (64u32, 64u32);
-        let img = Lcg::new(3).vec(cfg.in_channels as usize * (h * w) as usize);
+        let img = Lcg::random().vec(cfg.in_channels as usize * (h * w) as usize);
 
         let gpu = cpu();
         let whole = VaeEncoder::from_diffusers_on(&gpu, cfg.clone(), &ts, h, w).encode(&img);
@@ -208,6 +208,7 @@ fn the_pooled_statistics_are_the_whole_images_statistics() {
     let cfg = tiny(true);
     let ts = randomize(zeros::decoder(&cfg), 7);
     let (lh, lw) = (32u32, 32u32);
+    // seed: the pooled-versus-per-tile recovery ratio asserted below was set against this latent
     let z = Lcg::new(11).vec(cfg.latent_channels as usize * (lh * lw) as usize);
 
     let gpu = cpu();

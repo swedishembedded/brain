@@ -56,7 +56,7 @@ fn tiny() -> MirrorConfig {
 #[test]
 fn an_assembled_gaussians_opacity_is_the_learned_merge_weight() {
     let cfg = tiny();
-    let mut r = Lcg::new(0xB1A50AC1);
+    let mut r = Lcg::random();
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
     for (name, shape) in cfg.param_list() {
         let n: usize = shape.iter().product();

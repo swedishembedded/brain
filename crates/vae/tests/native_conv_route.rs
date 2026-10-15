@@ -36,7 +36,7 @@ use vae::{VaeConfig, VaeDecoder, VaeEncoder};
 fn seeded(mut t: vae::blocks::Tensors) -> vae::blocks::Tensors {
     let mut names: Vec<String> = t.keys().cloned().collect();
     names.sort();
-    let mut r = data::rng::Lcg::new(0x7a3e_11d0);
+    let mut r = data::rng::Lcg::random();
     for name in names {
         let (shape, data) = t.get_mut(&name).expect("listed");
         let fan_in: usize = shape.iter().skip(1).product::<usize>().max(1);
@@ -92,7 +92,7 @@ fn a_decoder_takes_the_native_conv_and_matches_the_reference() {
     // Every FLUX.2 decoder conv is a stride-1 square conv the native kernel
     // serves, so the lowering must not appear at all.
     assert_eq!(count(dec.gpu(), dec.steps(), "im2col_at"), 0, "a served conv was lowered to im2col + GEMM");
-    let mut r = data::rng::Lcg::new(17);
+    let mut r = data::rng::Lcg::random();
     let z: Vec<f32> = (0..cfg.latent_channels * lh * lw).map(|_| (r.next_u32() % 2001) as f32 / 1000.0 - 1.0).collect();
     let got = dec.decode(&z);
     let want = VaeDecoder::from_diffusers(cfg, &ts, lh, lw, Some("cpu")).decode(&z);
@@ -115,7 +115,7 @@ fn an_encoder_lowers_only_the_convs_the_native_kernel_does_not_serve() {
     // those three stay lowered.
     let downsamples = cfg.block_out_channels.len() - 1;
     assert_eq!(count(enc.gpu(), enc.steps(), "im2col_at"), downsamples, "only the downsamples are lowered");
-    let mut r = data::rng::Lcg::new(23);
+    let mut r = data::rng::Lcg::random();
     let img: Vec<f32> = (0..cfg.in_channels * h * w).map(|_| (r.next_u32() % 2001) as f32 / 1000.0 - 1.0).collect();
     let got = enc.encode(&img);
     let want = VaeEncoder::from_diffusers(cfg, &ts, h, w, Some("cpu")).encode(&img);

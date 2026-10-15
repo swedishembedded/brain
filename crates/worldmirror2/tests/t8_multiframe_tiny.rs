@@ -33,6 +33,7 @@ fn s3_forward_is_finite() {
         cam_blocks: 2,
         cam_params: 9,
     };
+    // seed: the weights must leave at least one gaussian past the opacity filter, which a random draw does not guarantee
     let mut r = Lcg::new(0x5EED);
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
     for (name, shape) in cfg.param_list() {
