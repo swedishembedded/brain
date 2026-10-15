@@ -47,7 +47,7 @@ usage: sample-text-retrieve-json --embed-weights BASE --gen-weights BASE
                                   --corpus FILE --query TEXT
                                   [--embed-tokenizer FILE] [--embed-capacity N]
                                   [--gen-tokenizer FILE] [--gen-capacity N]
-                                  [--top-k N] [--max-attempts N] [--instruction TEXT]
+                                  [--top-k N] [--max-attempts N] [--seed N] [--instruction TEXT]
 
   --embed-weights BASE   embedding checkpoint path, directory, or vendor/repo ref
   --embed-tokenizer FILE tokenizer.json for the embedding checkpoint
@@ -59,6 +59,8 @@ usage: sample-text-retrieve-json --embed-weights BASE --gen-weights BASE
   --query TEXT           the question to answer
   --top-k N              how many passages to retrieve into the prompt (default 4)
   --max-attempts N       generation attempts before giving up (default 3)
+  --seed N               seed of the first attempt, attempt k uses seed + k - 1
+                         (default: drawn at random and printed)
   --instruction TEXT     the Qwen3-Embedding query instruction (default
                           \"Given a query, retrieve relevant passages\")
 ";
@@ -69,6 +71,19 @@ usage: sample-text-retrieve-json --embed-weights BASE --gen-weights BASE
 struct Args(Vec<String>);
 
 impl Args {
+    /// `--seed N` as given, or a fresh random seed printed so the run can be
+    /// reproduced. A value that is not a seed is an error, never a default.
+    fn seed(&mut self) -> Result<u64, String> {
+        match self.take("--seed") {
+            Some(v) => v.parse().map_err(|_| format!("--seed {v:?}: not a seed (an unsigned integer)")),
+            None => {
+                let seed = brain::random_seed();
+                eprintln!("retrieve-json: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
+                Ok(seed)
+            }
+        }
+    }
+
     fn take(&mut self, flag: &str) -> Option<String> {
         let i = self.0.iter().position(|a| a == flag)?;
         if i + 1 >= self.0.len() {
@@ -154,6 +169,13 @@ fn main() -> ExitCode {
     let gen_capacity: u32 = a.parse("--gen-capacity").unwrap_or(4096);
     let top_k: usize = a.parse("--top-k").unwrap_or(4).max(1);
     let max_attempts: u32 = a.parse("--max-attempts").unwrap_or(3).max(1);
+    let seed = match a.seed() {
+        Ok(seed) => seed,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
     let instruction = a.take("--instruction").unwrap_or_else(|| DEFAULT_INSTRUCTION.to_string());
 
     let corpus_text = match std::fs::read_to_string(&corpus_path) {
@@ -225,9 +247,10 @@ fn main() -> ExitCode {
     );
 
     for attempt in 1..=max_attempts {
-        // A fresh seed per attempt: a decoder that produced malformed JSON
+        // A different seed per attempt: a decoder that produced malformed JSON
         // once is not more likely to self-correct at the SAME sampled path.
-        let opts = TextGenerationOptions::new().max_new_tokens(300).temperature(0.2).seed(attempt as u64);
+        let attempt_seed = seed.wrapping_add(u64::from(attempt) - 1);
+        let opts = TextGenerationOptions::new().max_new_tokens(300).temperature(0.2).seed(attempt_seed);
         let completion = match gen_pipe.generate_with(&prompt, opts) {
             Ok(g) => g.text,
             Err(e) => {
@@ -246,6 +269,7 @@ fn main() -> ExitCode {
                 println!("retrieved: {top:?}");
                 println!("answer: {answer}");
                 println!("sources: {sources:?}");
+                println!("seed: {attempt_seed}");
                 return ExitCode::SUCCESS;
             }
             Err(e) => {
@@ -257,4 +281,20 @@ fn main() -> ExitCode {
     eprintln!("gave up after {max_attempts} attempt(s): no valid {{\"answer\", \"sources\"}} JSON was produced");
     eprintln!("(brain has no token-level JSON-constrained decoding - see this sample's own module doc)");
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Args {
+        Args(list.iter().map(|a| a.to_string()).collect())
+    }
+
+    #[test]
+    fn the_seed_is_given_or_drawn_per_run_and_a_malformed_one_is_refused() {
+        assert_eq!(args(&["--seed", "5"]).seed(), Ok(5));
+        assert_ne!(args(&[]).seed().unwrap(), args(&[]).seed().unwrap());
+        assert!(args(&["--seed", "abc"]).seed().unwrap_err().contains("--seed"));
+    }
 }

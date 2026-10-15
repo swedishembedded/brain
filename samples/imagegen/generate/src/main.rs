@@ -43,7 +43,7 @@ OPTIONS:
     --prompt TEXT  the text prompt (default: a whale submarine surfacing at dawn)
     --out PATH     where to write the PNG (default: out/sample-imagegen.png)
     --steps N      denoising steps (model default if omitted)
-    --seed N       RNG seed (model default if omitted)
+    --seed N       RNG seed (drawn at random and printed if omitted)
 ";
 
 fn parse() -> Result<Args, String> {
@@ -76,18 +76,23 @@ fn parse() -> Result<Args, String> {
     Ok(a)
 }
 
+/// The seed of this run: the one given, else a fresh random draw. Printed
+/// either way so the image can be reproduced with `--seed`.
+fn resolve_seed(given: Option<u64>) -> u64 {
+    let seed = given.unwrap_or_else(brain::random_seed);
+    println!("seed   {seed}{}", if given.is_none() { " (drawn at random; pass --seed to reproduce)" } else { "" });
+    seed
+}
+
 fn run(a: &Args) -> brain::Result<()> {
     println!("model  {}", a.model);
     println!("prompt {}", a.prompt);
 
     let pipeline = brain::ImagePipeline::from_pretrained(&a.model)?;
 
-    let mut opts = brain::ImageGenerationOptions::new();
+    let mut opts = brain::ImageGenerationOptions::new().seed(resolve_seed(a.seed));
     if let Some(steps) = a.steps {
         opts = opts.steps(steps);
-    }
-    if let Some(seed) = a.seed {
-        opts = opts.seed(seed);
     }
 
     let image = pipeline.generate_with(&a.prompt, opts)?;
@@ -117,5 +122,16 @@ fn main() -> ExitCode {
             eprintln!("\nif the model is not in the local store yet:  brain pull {}", args.model);
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_given_seed_is_kept_and_an_absent_one_is_drawn_per_run() {
+        assert_eq!(resolve_seed(Some(5)), 5);
+        assert_ne!(resolve_seed(None), resolve_seed(None));
     }
 }

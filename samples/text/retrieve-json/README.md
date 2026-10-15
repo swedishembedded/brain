@@ -51,6 +51,8 @@ make samples/text/retrieve-json/run ARGS="--embed-weights /models/qwen3-embeddin
 --query TEXT           the question to answer
 --top-k N              how many passages to retrieve into the prompt (default 4)
 --max-attempts N       generation attempts before giving up (default 3)
+--seed N               seed of the first attempt, attempt k uses seed + k - 1
+                       (default: drawn at random and printed)
 --instruction TEXT     the Qwen3-Embedding query instruction (default
                         "Given a query, retrieve relevant passages")
 ```

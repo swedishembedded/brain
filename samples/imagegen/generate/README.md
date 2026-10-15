@@ -35,4 +35,4 @@ brain pull black-forest-labs/FLUX.2-klein-4B
 | `--prompt TEXT` | `a whale submarine surfacing at dawn` |
 | `--out PATH` | `out/sample-imagegen.png` |
 | `--steps N` | model default |
-| `--seed N` | model default |
+| `--seed N` | random, printed |

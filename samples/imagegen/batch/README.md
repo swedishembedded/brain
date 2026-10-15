@@ -33,4 +33,4 @@ brain pull black-forest-labs/FLUX.2-klein-4B
 | `--prompts FILE` | *required* |
 | `--model ID` | `black-forest-labs/FLUX.2-klein-4B` |
 | `--out-dir DIR` | `out/sample-imagegen-batch` |
-| `--seed N` | model default |
+| `--seed N` | random, printed |

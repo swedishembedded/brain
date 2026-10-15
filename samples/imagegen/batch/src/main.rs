@@ -36,7 +36,7 @@ OPTIONS:
     --prompts FILE  one prompt per line; blank lines and '#' comments skipped
     --model ID      model to resolve (default: black-forest-labs/FLUX.2-klein-4B)
     --out-dir DIR   where the PNGs go (default: out/sample-imagegen-batch)
-    --seed N        base seed; image i uses seed + i, so a run is reproducible
+    --seed N        base seed; image i uses seed + i (drawn at random and printed if omitted)
 ";
 
 struct Args {
@@ -88,6 +88,14 @@ fn read_prompts(path: &str) -> Result<Vec<String>, String> {
     Ok(prompts)
 }
 
+/// The seed of this run: the one given, else a fresh random draw. Printed
+/// either way so the run can be reproduced with `--seed`.
+fn resolve_seed(given: Option<u64>) -> u64 {
+    let seed = given.unwrap_or_else(brain::random_seed);
+    println!("seed   {seed}{}", if given.is_none() { " (drawn at random; pass --seed to reproduce)" } else { "" });
+    seed
+}
+
 fn run(a: &Args, prompts: &[String]) -> brain::Result<()> {
     std::fs::create_dir_all(&a.out_dir).map_err(brain::Error::from)?;
 
@@ -95,13 +103,11 @@ fn run(a: &Args, prompts: &[String]) -> brain::Result<()> {
     let pipeline = brain::ImagePipeline::from_pretrained(&a.model)?;
     println!("loaded {} in {:.1?}", a.model, load.elapsed());
 
+    let seed = resolve_seed(a.seed);
     for (i, prompt) in prompts.iter().enumerate() {
-        let mut opts = brain::ImageGenerationOptions::new();
-        if let Some(seed) = a.seed {
-            // Per-image seed derived from one base, so the whole run is
-            // reproducible and no two images are accidentally identical.
-            opts = opts.seed(seed + i as u64);
-        }
+        // Per-image seed derived from one base, so the whole run is
+        // reproducible and no two images are accidentally identical.
+        let opts = brain::ImageGenerationOptions::new().seed(seed.wrapping_add(i as u64));
         let started = Instant::now();
         let image = pipeline.generate_with(prompt, opts)?;
         let path = format!("{}/{:03}.png", a.out_dir, i);
@@ -139,5 +145,16 @@ fn main() -> ExitCode {
             eprintln!("\nif the model is not in the local store yet:  brain pull {}", args.model);
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_given_seed_is_kept_and_an_absent_one_is_drawn_per_run() {
+        assert_eq!(resolve_seed(Some(5)), 5);
+        assert_ne!(resolve_seed(None), resolve_seed(None));
     }
 }
