@@ -201,6 +201,8 @@ fn credit_assigned_density_beats_the_heuristic_at_an_equal_budget() {
         densify_every: 20,
         densify_after: 10,
         densify_until: 160,
+        // seed: the asserted quality margins were measured on this draw sequence
+        seed: 1,
         densify_frac: 0.3,
         max_gaussians: 256,
         ..Default::default()
@@ -278,6 +280,8 @@ fn an_object_nothing_was_seeded_near_is_grown_where_the_photographs_show_it() {
         densify_every: 20,
         densify_after: 20,
         densify_until: 180,
+        // seed: the asserted quality margins were measured on this draw sequence
+        seed: 1,
         max_gaussians: 160,
         depth_weight: 0.1,
         ..Default::default()

@@ -10,6 +10,8 @@ name = "splat"
 path = "src/lib.rs"
 
 [dependencies]
+# `seed::random_seed` - the draw behind an unset fit/matching seed.
+brain-seed.workspace = true
 # `camera::{Intrinsics, Lens}` - the one lens model; the ray renderer images
 # through it.
 brain-camera.workspace = true

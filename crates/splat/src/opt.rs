@@ -261,6 +261,11 @@ pub struct FitCfg {
     /// ([`crate::loss::transient_mask`]). Off for a static capture, where it
     /// can only withhold supervision from regions that are merely hard.
     pub transients: bool,
+    /// Seeds the random choices of the densification rounds (which gaussians
+    /// are cloned, relocated or spawned). [`Default`] draws a random one;
+    /// [`FitResult::seed`] reports the one in force, and passing it back
+    /// reproduces the fit.
+    pub seed: u64,
 }
 
 impl Default for FitCfg {
@@ -310,6 +315,7 @@ impl Default for FitCfg {
             environment: None,
             transients: false,
             carve: false,
+            seed: seed::random_seed(),
         }
     }
 }
@@ -599,6 +605,8 @@ pub struct FitResult {
     pub filter3d: Vec<f32>,
     /// The fitted environment, when [`FitCfg::environment`] asked for one.
     pub env: Option<EnvMap>,
+    /// The [`FitCfg::seed`] the fit ran with.
+    pub seed: u64,
 }
 
 impl FitResult {
@@ -646,6 +654,9 @@ pub fn fit_full(
     on_step: &mut dyn FnMut(usize, f32) -> bool,
 ) -> FitResult {
     assert!(!targets.is_empty(), "a fit needs at least one target view");
+    if cfg.log_every > 0 {
+        println!("fit: seed {} (pass it back to reproduce the fit)", cfg.seed);
+    }
     let mut isp = cfg.isp.map(|c| {
         let views: Vec<(usize, f32, Encoding)> = targets.iter().map(|t| (t.sensor, t.exposure, t.encoding)).collect();
         Isp::new(c, &views)
@@ -684,6 +695,7 @@ pub fn fit_full(
         isp,
         filter3d: filter3d.iter().map(|v| v / (k * k)).collect(),
         env,
+        seed: cfg.seed,
     }
 }
 
@@ -1486,7 +1498,7 @@ impl<'a> Fit<'a> {
                     dead_opacity: cfg.prune_opacity,
                     ..Default::default()
                 };
-                let seed = 0x6879_6272_6964_u64 ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                let seed = cfg.seed ^ 0x6879_6272_6964_u64 ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
                 let r = density::round(&mut next, &ev, &size_px, starved, target, &policy, seed);
                 if cfg.log_every > 0 {
                     println!(

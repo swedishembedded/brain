@@ -228,7 +228,7 @@ pub fn grow(scene: &mut Splats, target: usize, seed: u64) -> usize {
 /// Without a budget there is nothing to aim at, and the literal 5% per round
 /// is all that is left.
 pub fn step(scene: &mut Splats, cfg: &FitCfg, round: usize, rounds: usize) -> (usize, usize, Vec<Option<usize>>) {
-    let seed = 0x3d47_535f_4d43_4d43_u64 ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let seed = cfg.seed ^ 0x3d47_535f_4d43_4d43_u64 ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     let n = scene.len();
     let mut origin: Vec<Option<usize>> = (0..n).map(Some).collect();
     let moved = relocate(scene, cfg.prune_opacity, seed);

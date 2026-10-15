@@ -109,6 +109,8 @@ fn a_fit_that_carves_leaves_no_floater() {
         densify_every: 30,
         densify_after: 30,
         densify_until: 100,
+        // seed: the asserted quality margins were measured on this draw sequence
+        seed: 1,
         max_gaussians: init.len(),
         depth_weight: 0.0,
         ..Default::default()

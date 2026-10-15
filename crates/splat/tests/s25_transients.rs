@@ -86,6 +86,8 @@ fn a_transient_in_some_photographs_is_not_baked_into_the_scene() {
         densify_every: 25,
         densify_after: 25,
         densify_until: 300,
+        // seed: the asserted quality margins were measured on this draw sequence
+        seed: 1,
         max_gaussians: 400,
         ..Default::default()
     };

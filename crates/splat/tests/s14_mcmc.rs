@@ -353,6 +353,8 @@ fn mcmc_reconstructs_better_than_the_heuristic_at_the_same_budget() {
         densify_every: 25,
         densify_after: 25,
         densify_until: 105,
+        // seed: the asserted quality margins were measured on this draw sequence
+        seed: 1,
         // wound up until the heuristic saturates its budget: 0.6 gets it to
         // 297 gaussians and anything from 1.0 up gives the same 400 and the
         // same loss, so this is the best the split rule has to offer here
@@ -473,4 +475,19 @@ fn density_control_carries_view_dependent_colour() {
 #[test]
 fn the_heuristic_is_still_the_default() {
     assert!(matches!(FitCfg::default().strategy, Densify::Heuristic));
+}
+
+/// An unset seed is random, so two fits that said nothing differ in how they
+/// densify, and the fit reports the seed it ran with: passing it back
+/// reproduces the result.
+#[test]
+fn a_fit_without_a_seed_draws_one_and_reports_it() {
+    assert_ne!(FitCfg::default().seed, FitCfg::default().seed);
+
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let t = targets(&g, ks, &board(4, false), 32, 32);
+    let cfg = FitCfg { iters: 2, log_every: 0, ..Default::default() };
+    let first = splat::opt::fit_full(&g, ks, &board(4, true), &t, &cfg, &mut |_, _| true);
+    assert_eq!(first.seed, cfg.seed);
 }
