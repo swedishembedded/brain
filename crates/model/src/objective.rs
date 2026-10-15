@@ -22,6 +22,7 @@
 
 use data::rng::Rng;
 
+use crate::training::Unsupported;
 use crate::Model;
 
 /// One training objective: the batch-drawing, forward/backward, and
@@ -40,8 +41,12 @@ pub trait Objective<M: Model> {
 
     /// One-time setup after the model is constructed, before the first
     /// [`Objective::micro_step`] - e.g. opting the model into weighted-loss
-    /// support via [`Model::enable_weighted_loss`].
-    fn prepare(&mut self, _model: &mut M) {}
+    /// support via [`crate::training::TokenObjectives::enable_weighted_loss`]. An objective that
+    /// needs a capability the model lacks refuses here with [`Unsupported`], so
+    /// the run fails at configuration time and not inside the step loop.
+    fn prepare(&mut self, _model: &mut M) -> Result<(), Unsupported> {
+        Ok(())
+    }
 
     /// The run is about to take its first step, `draws_done` micro-steps
     /// into its data (more than 0 on a resume), seeded by `seed`: an
@@ -135,7 +140,7 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for Box<O> {
     fn regime(&self) -> &'static str {
         (**self).regime()
     }
-    fn prepare(&mut self, model: &mut M) {
+    fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
         (**self).prepare(model)
     }
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
@@ -244,8 +249,9 @@ mod tests {
         fn regime(&self) -> &'static str {
             "borrowing"
         }
-        fn prepare(&mut self, _model: &mut M) {
+        fn prepare(&mut self, _model: &mut M) -> Result<(), Unsupported> {
             self.calls.set(self.calls.get() + 100);
+            Ok(())
         }
         fn micro_step(&mut self, _model: &M, _rng: &mut Rng) -> f32 {
             self.calls.set(self.calls.get() + 1);
@@ -291,7 +297,7 @@ mod tests {
     /// `Objective<M>`, a runtime choice between two objectives cannot reach
     /// this function at all.
     fn drive<M: Model, O: Objective<M>>(model: &mut M, mut obj: O) -> Driven {
-        obj.prepare(model);
+        obj.prepare(model).unwrap();
         let mut rng = Rng::new(0);
         let loss = obj.micro_step(model, &mut rng);
         let eval = obj.eval(model, &mut rng, 1);

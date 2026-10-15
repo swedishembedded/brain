@@ -172,21 +172,21 @@ fn a_weighted_loss_step_on_a_pipeline_is_the_single_cards() {
     let weights: Vec<f32> = (0..12).map(|i| if i % 3 == 0 { 0.0 } else { 0.5 + i as f32 * 0.1 }).collect();
 
     let mut single = Qwen::new(cfg.clone(), 1, 12, &init);
-    Model::enable_weighted_loss(&mut single);
+    single.token_objectives_mut().unwrap().enable_weighted_loss();
     Model::set_batch(&single, model::Batch::Lm { tokens: &tokens, targets: &targets });
     Model::zero_grads(&single);
     let want_loss = Model::forward(&single);
-    let want_lp = Model::batch_token_logprobs(&single).unwrap();
-    Model::set_loss_weights(&single, &weights);
+    let want_lp = single.token_objectives().unwrap().batch_token_logprobs();
+    single.token_objectives().unwrap().set_loss_weights(&weights);
     Model::backward(&single);
 
     let mut pipe = PipelineModel::new(Pipeline::<Qwen>::new_dt(cfg.clone(), 1, 12, &init, &stage_gpus(), Dtype::F32), cfg.clone());
-    Model::enable_weighted_loss(&mut pipe);
+    pipe.token_objectives_mut().expect("the head stage provides token objectives").enable_weighted_loss();
     Model::set_batch(&pipe, model::Batch::Lm { tokens: &tokens, targets: &targets });
     Model::zero_grads(&pipe);
     let loss = Model::forward(&pipe);
-    let lp = Model::batch_token_logprobs(&pipe).expect("the head stage's log-probabilities");
-    Model::set_loss_weights(&pipe, &weights);
+    let lp = pipe.token_objectives().expect("the head stage provides token objectives").batch_token_logprobs();
+    pipe.token_objectives().unwrap().set_loss_weights(&weights);
     Model::backward(&pipe);
 
     assert!((loss - want_loss).abs() < 1e-4 * want_loss.abs().max(1.0), "loss {loss} vs {want_loss}");

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Generic continuous/reward-driven training over any [`model::Model`] that
-//! opts into [`model::Model::enable_weighted_loss`].
+//! opts into [`model::training::TokenObjectives::enable_weighted_loss`].
 //!
 //! [`fit_weighted`] is `model::train::fit` lifted to weighted batches: same
 //! control flow (cosine-with-warmup LR, grad accumulation, periodic eval,
@@ -63,8 +63,9 @@ use std::path::Path;
 
 use data::binio;
 use data::loader::{BatchConfig, TokenDataset};
-use data::rng::{random_seed, Rng};
+use data::rng::Rng;
 use model::{Batch, FitOpts, Model, Objective, IGNORE};
+use model::training::Unsupported;
 
 /// i32 targets from the loader (`-1` = ignore) reinterpreted as the model's
 /// `u32` IGNORE sentinel. Mirrors the one-line private helper of the same
@@ -120,8 +121,9 @@ impl<M: Model> Objective<M> for WeightedLm {
         "weighted_lm"
     }
 
-    fn prepare(&mut self, model: &mut M) {
-        model.enable_weighted_loss();
+    fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
+        model::training::require_token_objectives(model)?.enable_weighted_loss();
+        Ok(())
     }
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
@@ -155,7 +157,7 @@ impl<M: Model> Objective<M> for WeightedLm {
 /// [`model::fit_with`], not duplicated) - the only difference is every batch
 /// is [`Batch::LmWeighted`] instead of [`Batch::Lm`], via the [`WeightedLm`]
 /// objective, which also opts the model into weighted-loss mode via
-/// [`Model::enable_weighted_loss`] right after construction. Returns
+/// [`model::training::TokenObjectives::enable_weighted_loss`] right after construction. Returns
 /// `(initial_loss, final_loss)` - both are the WEIGHTED loss (see
 /// [`Model::forward`]'s contract on a weighted-loss-enabled model).
 ///
@@ -164,9 +166,9 @@ impl<M: Model> Objective<M> for WeightedLm {
 /// `save` where `model::train::fit` calls `save_with_itos`, so every
 /// weighted checkpoint silently lost its char vocab.
 ///
-/// Panics (via [`Model::enable_weighted_loss`]'s default) if `M` has not
-/// implemented weighted-loss support - a clear, immediate failure rather
-/// than silently training unweighted.
+/// Fails with [`model::training::Unsupported`] (as an `io::Error` of kind
+/// `Unsupported`) if `M` does not provide token objectives - a clear,
+/// immediate failure rather than silently training unweighted.
 pub fn fit_weighted<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
     let (train, val, batch_cfg, vocab, itos) = load_weighted(dir, opts)?;
     let model = model::build_or_resume::<M>(cfg, opts, out, vocab);
@@ -177,6 +179,7 @@ pub fn fit_weighted<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data::rng::random_seed;
     use data::binio::Meta;
 
     fn tmp(name: &str) -> std::path::PathBuf {

@@ -18,11 +18,11 @@
 //! A model's ordinary cross-entropy backward already writes, per token
 //! position, `d_logits = (softmax(z) - onehot(target)) / count` (`count`
 //! being that forward's own non-IGNORE target count), and
-//! [`model::Model::set_loss_weights`] scales that row-wise before the head's
+//! [`model::training::TokenObjectives::set_loss_weights`] scales that row-wise before the head's
 //! backward reads it. GRPO's clipped surrogate for one token is
 //! `min(r*A, clip(r, 1-eps, 1+eps)*A)` where `r = exp(new_lp - old_lp)` is
 //! the importance ratio between the CURRENT policy's logprob (`new_lp`,
-//! read back from [`model::Model::batch_token_logprobs`] immediately after
+//! read back from [`model::training::TokenObjectives::batch_token_logprobs`] immediately after
 //! an ordinary forward) and the SAMPLING policy's logprob captured at
 //! rollout time (`old_lp`, [`model::rollout::Completion::logprobs`]) and `A`
 //! is the token's (group-broadcast) advantage. Differentiating that
@@ -39,8 +39,7 @@
 //!
 //! [`Grpo::micro_step`] therefore differs from a plain weighted-CE step only
 //! in WHERE the weight comes from: one ordinary forward (to read `new_lp`),
-//! a host-side computation of `weight` per token, [`model::Model::
-//! set_loss_weights`], then one ordinary backward. This is also why the
+//! a host-side computation of `weight` per token, [`model::training::TokenObjectives::set_loss_weights`], then one ordinary backward. This is also why the
 //! blanket `gradcheck::CheckModel for M: Model` cannot gate this file:
 //! `Model::forward()`'s own return value is the model's plain (default- or
 //! stale-weighted) loss, computed BEFORE the true per-token weight is even
@@ -70,6 +69,7 @@
 use data::rng::Rng;
 use model::rollout::{Completion, ModelRollout, Rollout};
 use model::{Batch, Model, Objective, IGNORE};
+use model::training::Unsupported;
 
 use crate::env::{Environment, Verifier};
 
@@ -317,8 +317,7 @@ pub struct GrpoConfig {
 /// One GRPO (or, with `cfg.group_size == 1`, RFT/STaR) training objective
 /// over environment `E`'s tasks, scored by verifier `V`. Generic over any
 /// `M: model::Model` that has adopted weighted-loss support
-/// ([`model::Model::enable_weighted_loss`]/[`model::Model::
-/// set_loss_weights`]/[`model::Model::batch_token_logprobs`]) - today
+/// ([`model::training::TokenObjectives`]) - today
 /// `qwen3::Qwen` and `gpt2::Gpt`.
 ///
 /// **Why `micro_step` trains exactly one row, not a whole packed batch of
@@ -515,7 +514,7 @@ struct External {
 fn recompute_old_logprobs<M: Model>(model: &M, row: &mut PackedRow) {
     model.set_batch(Batch::Lm { tokens: &row.tokens, targets: &row.targets });
     let _ = model.forward();
-    let lp = model.batch_token_logprobs().expect("Grpo: model must implement Model::batch_token_logprobs");
+    let lp = model::training::objectives(model).batch_token_logprobs();
     for (i, old) in row.old_lp.iter_mut().enumerate() {
         if row.targets[i] != IGNORE {
             *old = lp[i];
@@ -528,8 +527,9 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
         "grpo"
     }
 
-    fn prepare(&mut self, model: &mut M) {
-        model.enable_weighted_loss();
+    fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
+        model::training::require_token_objectives(model)?.enable_weighted_loss();
+        Ok(())
     }
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
@@ -552,7 +552,8 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
         // logprobs) ...
         model.set_batch(Batch::Lm { tokens: &row.tokens, targets: &row.targets });
         let _ = model.forward();
-        let new_lp = model.batch_token_logprobs().expect("Grpo: model must implement Model::batch_token_logprobs");
+        let objectives = model::training::objectives(model);
+        let new_lp = objectives.batch_token_logprobs();
 
         // ... a host-side weight/loss computation from THIS module's own
         // token_term (the exact function the gate's CheckModel harness also
@@ -573,7 +574,7 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
         }
 
         // ... then one ordinary backward, weighted by that computation.
-        model.set_loss_weights(&weights);
+        objectives.set_loss_weights(&weights);
         model.backward();
 
         if count > 0 {

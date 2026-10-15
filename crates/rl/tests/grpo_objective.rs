@@ -62,7 +62,7 @@ fn grpo_group_size_two_runs_end_to_end_through_fit_with() {
     let cfg = QwenConfig::tiny();
     let init = qwen3::init_weights(&cfg, 7);
     let mut model = Qwen::new(cfg, 1, 8, &init);
-    model::Model::enable_weighted_loss(&mut model);
+    model::Model::token_objectives_mut(&mut model).unwrap().enable_weighted_loss();
 
     let env = FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4, 5, 6] };
     let grpo_cfg = GrpoConfig {
@@ -112,7 +112,7 @@ fn grpo_group_size_one_is_the_rft_star_path_and_runs_end_to_end() {
     let cfg = QwenConfig::tiny();
     let init = qwen3::init_weights(&cfg, 7);
     let mut model = Qwen::new(cfg, 1, 8, &init);
-    model::Model::enable_weighted_loss(&mut model);
+    model::Model::token_objectives_mut(&mut model).unwrap().enable_weighted_loss();
 
     let env = FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4, 5, 6] };
     let grpo_cfg = GrpoConfig {

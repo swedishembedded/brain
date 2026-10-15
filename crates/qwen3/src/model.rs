@@ -612,6 +612,9 @@ pub struct Qwen {
     // raw `d_logits`. See `model::Batch::LmWeighted`'s doc comment for the
     // contract this realizes.
     weighted_ce: Option<model::lossw::WeightedCe>,
+    /// `Some` once `set_logit_scale` was first given a scale other than 1: the
+    /// head's logits are then scaled in place right after the LM head GEMM.
+    logit_scale: Option<model::logitscale::LogitScale>,
 
     // Decode-path M-RoPE: a single-row `[1, head_dim/2]` cos/sin table, reused
     // (overwritten) every `step_mrope`/`step_embed_mrope` call rather than
@@ -1442,6 +1445,7 @@ impl Qwen {
             mrope_cos: st(1),
             mrope_sin: st(1),
             weighted_ce: None,
+            logit_scale: None,
             decode_mrope_cos,
             decode_mrope_sin,
             rope_table,
@@ -2287,7 +2291,7 @@ impl Qwen {
     /// recently ran: the negation of `ce_buf`, which [`Self::forward`]
     /// already read back to host to sum into its scalar return. `0.0` at
     /// IGNORE positions, since `ce_value_masked.wgsl` writes exactly `0.0`
-    /// there. See `model::Model::batch_token_logprobs`'s doc comment for the
+    /// there. See `model::training::TokenObjectives::batch_token_logprobs`'s doc comment for the
     /// validity window (immediately after `forward`, until the next
     /// `set_batch`/`forward`).
     pub fn batch_token_logprobs(&self) -> Vec<f32> {
@@ -2307,7 +2311,11 @@ impl Qwen {
     /// The CE gradient's `1/count` for the current batch, which the recorded
     /// backward reads from `inv_count`.
     fn write_inv_count(&self) {
-        self.gpu.write_f32(&self.inv_count, &[1.0 / self.count.get()]);
+        let factor = match &self.logit_scale {
+            Some(scale) => scale.grad_factor(self.count.get()),
+            None => 1.0 / self.count.get(),
+        };
+        self.gpu.write_f32(&self.inv_count, &[factor]);
     }
 
     fn build_backward_steps(&self) -> Tape {
@@ -2675,6 +2683,32 @@ impl Qwen {
         if !self.bwd_steps.steps.is_empty() {
             self.bwd_steps = self.build_backward_steps();
         }
+    }
+
+    /// Multiply the head's logits by `scale` before the softmax of the loss,
+    /// its gradient and [`Self::batch_token_logprobs`] (see
+    /// `model::training::TokenObjectives::set_logit_scale`). The first scale
+    /// other than 1 rebuilds the forward and backward graphs once to add the
+    /// scaling step; later values are written to the device scalar.
+    pub fn set_logit_scale(&mut self, scale: f32) {
+        assert!(scale.is_finite() && scale > 0.0, "the logit scale must be finite and positive, got {scale}");
+        if self.logit_scale.is_none() {
+            if scale == 1.0 {
+                return;
+            }
+            self.logit_scale = Some(model::logitscale::LogitScale::new(&self.gpu));
+            let scale_buf = self.logit_scale.as_ref().map(|l| l.buffer().clone());
+            if let Some(head) = self.head_ce.as_mut() {
+                head.set_scale_buffer(scale_buf);
+            }
+            if !self.decode_only {
+                self.fwd_steps = self.forward_steps(self.b, self.t);
+                if !self.bwd_steps.steps.is_empty() {
+                    self.bwd_steps = self.build_backward_steps();
+                }
+            }
+        }
+        self.logit_scale.as_ref().expect("created above").set(&self.gpu, scale);
     }
 
     /// Write the per-position CE gradient weights (`[b·t]`) for the next
@@ -3691,6 +3725,24 @@ impl model::ModelConfig for QwenConfig {
     }
 }
 
+impl model::training::TokenObjectives for Qwen {
+    fn enable_weighted_loss(&mut self) {
+        Qwen::enable_weighted_loss(self)
+    }
+    fn batch_token_logprobs(&self) -> Vec<f32> {
+        Qwen::batch_token_logprobs(self)
+    }
+    fn set_loss_weights(&self, weights: &[f32]) {
+        Qwen::write_weights(self, weights)
+    }
+    fn set_loss_denominator(&self, tokens: f32) {
+        Qwen::set_loss_denominator(self, tokens)
+    }
+    fn set_logit_scale(&mut self, scale: f32) {
+        Qwen::set_logit_scale(self, scale)
+    }
+}
+
 impl model::Model for Qwen {
     type Config = QwenConfig;
 
@@ -3737,18 +3789,11 @@ impl model::Model for Qwen {
             _ => panic!("qwen3::Qwen only supports Batch::Lm / Batch::LmWeighted"),
         }
     }
-    fn set_loss_denominator(&self, tokens: f32) -> bool {
-        Qwen::set_loss_denominator(self, tokens);
-        true
+    fn token_objectives(&self) -> Option<&dyn model::training::TokenObjectives> {
+        Some(self)
     }
-    fn enable_weighted_loss(&mut self) {
-        Qwen::enable_weighted_loss(self)
-    }
-    fn batch_token_logprobs(&self) -> Option<Vec<f32>> {
-        Some(Qwen::batch_token_logprobs(self))
-    }
-    fn set_loss_weights(&self, weights: &[f32]) {
-        Qwen::write_weights(self, weights)
+    fn token_objectives_mut(&mut self) -> Option<&mut dyn model::training::TokenObjectives> {
+        Some(self)
     }
     fn forward(&self) -> f32 {
         Qwen::forward(self)
@@ -4679,7 +4724,7 @@ mod tests {
         y[5] = model::IGNORE;
         model.set_batch(&x, &y);
         model.forward();
-        let fast = model::Model::batch_token_logprobs(&model).expect("qwen3 exposes batch_token_logprobs");
+        let fast = model::Model::token_objectives(&model).expect("qwen3 exposes token objectives").batch_token_logprobs();
         // `logits_all` resets the batch as a side effect (its own doc
         // comment says so), so call the oracle AFTER capturing `fast`.
         let oracle = model::logprobs::token_logprobs(&model, &x, &y).expect("qwen3 has a token head");

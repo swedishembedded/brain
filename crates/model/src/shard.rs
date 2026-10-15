@@ -66,6 +66,7 @@ use gpu_core::select::Dtype;
 
 use backend_cpu::par;
 
+use crate::training::TokenObjectives;
 use crate::Model;
 
 /// One pipeline stage: a contiguous layer range `[start, end)` plus whether it
@@ -973,23 +974,9 @@ impl<M: Shardable> Pipeline<M> {
         &self.stages[self.stages.len() - 1]
     }
 
-    /// Opt the head stage into per-position weighted-loss training
-    /// ([`Model::enable_weighted_loss`]); the other stages never see the loss.
-    pub fn enable_weighted_loss(&mut self) {
+    fn head_stage_mut(&mut self) -> &mut M {
         let last = self.stages.len() - 1;
-        self.stages[last].enable_weighted_loss();
-    }
-
-    /// The head stage's per-position `log p(target)` for the batch last run
-    /// ([`Model::batch_token_logprobs`]).
-    pub fn batch_token_logprobs(&self) -> Option<Vec<f32>> {
-        self.head_stage().batch_token_logprobs()
-    }
-
-    /// Set the per-position loss weights on the head stage
-    /// ([`Model::set_loss_weights`]).
-    pub fn set_loss_weights(&self, weights: &[f32]) {
-        self.head_stage().set_loss_weights(weights);
+        &mut self.stages[last]
     }
 
     /// Block until every stage's submitted device work completes.
@@ -1052,6 +1039,36 @@ impl<M: Shardable> PipelineModel<M> {
     }
 }
 
+/// The per-token objectives act on the head stage, which owns the loss; the
+/// other stages never see it. Offered only when the head stage offers them
+/// ([`Model::token_objectives`]).
+impl<M: Shardable> TokenObjectives for PipelineModel<M> {
+    fn enable_weighted_loss(&mut self) {
+        self.head_objectives_mut().enable_weighted_loss();
+    }
+    fn batch_token_logprobs(&self) -> Vec<f32> {
+        self.pipe.borrow().head_stage().token_objectives().expect(HEAD_HAS_OBJECTIVES).batch_token_logprobs()
+    }
+    fn set_loss_weights(&self, weights: &[f32]) {
+        self.pipe.borrow().head_stage().token_objectives().expect(HEAD_HAS_OBJECTIVES).set_loss_weights(weights);
+    }
+    fn set_loss_denominator(&self, tokens: f32) {
+        self.pipe.borrow().head_stage().token_objectives().expect(HEAD_HAS_OBJECTIVES).set_loss_denominator(tokens);
+    }
+    fn set_logit_scale(&mut self, scale: f32) {
+        self.head_objectives_mut().set_logit_scale(scale);
+    }
+}
+
+/// `PipelineModel::token_objectives*` return `Some` only when this holds.
+const HEAD_HAS_OBJECTIVES: &str = "PipelineModel offers TokenObjectives only when its head stage does";
+
+impl<M: Shardable> PipelineModel<M> {
+    fn head_objectives_mut(&mut self) -> &mut dyn TokenObjectives {
+        self.pipe.get_mut().head_stage_mut().token_objectives_mut().expect(HEAD_HAS_OBJECTIVES)
+    }
+}
+
 impl<M: Shardable> Model for PipelineModel<M> {
     type Config = M::Config;
 
@@ -1081,14 +1098,15 @@ impl<M: Shardable> Model for PipelineModel<M> {
         self.overlapped.set(self.overlapped.get() + 1);
         Some(pipe.pipelined_fwd_bwd(batches))
     }
-    fn enable_weighted_loss(&mut self) {
-        self.pipe.get_mut().enable_weighted_loss();
+    fn token_objectives(&self) -> Option<&dyn TokenObjectives> {
+        self.pipe.borrow().head_stage().token_objectives().is_some().then_some(self)
     }
-    fn batch_token_logprobs(&self) -> Option<Vec<f32>> {
-        self.pipe.borrow().batch_token_logprobs()
-    }
-    fn set_loss_weights(&self, weights: &[f32]) {
-        self.pipe.borrow().set_loss_weights(weights);
+    fn token_objectives_mut(&mut self) -> Option<&mut dyn TokenObjectives> {
+        if self.pipe.get_mut().head_stage_mut().token_objectives_mut().is_some() {
+            Some(self)
+        } else {
+            None
+        }
     }
     fn forward(&self) -> f32 {
         self.pipe.borrow().forward_loaded()

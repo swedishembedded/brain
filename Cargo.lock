@@ -1299,7 +1299,6 @@ name = "brain-fcbench"
 version = "2.0.0"
 dependencies = [
  "brain-forecast",
- "brain-seed",
 ]
 
 [[package]]
@@ -2333,6 +2332,7 @@ dependencies = [
  "brain-bench",
  "brain-checkpoint",
  "brain-data",
+ "brain-gpt2",
  "brain-gradcheck",
  "brain-model",
  "brain-promote",
@@ -2723,7 +2723,6 @@ dependencies = [
  "brain-model",
  "brain-optim",
  "brain-paramstore",
- "brain-seed",
  "bytemuck",
  "pollster",
  "serde_json",

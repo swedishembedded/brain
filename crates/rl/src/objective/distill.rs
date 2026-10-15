@@ -72,6 +72,7 @@ use std::collections::VecDeque;
 
 use data::rng::Rng;
 use model::{Batch, Model, Objective, IGNORE};
+use model::training::Unsupported;
 
 /// One position's top-K teacher distribution: `ids[k]`/`probs[k]` pairs,
 /// `probs` already renormalized so they sum to 1.0 (the keystone identity's
@@ -206,8 +207,7 @@ type ExampleSource = Box<dyn FnMut(&mut Rng) -> Option<DistillExample>>;
 /// [`DistillExample`] into one row and runs `K` weighted-CE forward/backward
 /// passes per micro-step (`K` = that row's own largest per-position teacher
 /// list). Generic over any `M: model::Model` that has adopted weighted-loss
-/// support ([`model::Model::enable_weighted_loss`]/
-/// [`model::Model::batch_token_logprobs`] is NOT required - see the module
+/// support ([`model::training::TokenObjectives`]; its log-probability readout is NOT used - see the module
 /// doc comment on why this weight formula needs no current-policy readback)
 /// - today `qwen3::Qwen` and `gpt2::Gpt`.
 pub struct DistillTopK {
@@ -247,8 +247,9 @@ impl<M: Model> Objective<M> for DistillTopK {
         "distill_topk"
     }
 
-    fn prepare(&mut self, model: &mut M) {
-        model.enable_weighted_loss();
+    fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
+        model::training::require_token_objectives(model)?.enable_weighted_loss();
+        Ok(())
     }
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {

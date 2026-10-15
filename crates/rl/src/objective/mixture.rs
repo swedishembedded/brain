@@ -25,8 +25,9 @@
 //! info@swedishembedded.com.
 
 use data::loader::{BatchConfig, TokenDataset};
-use data::rng::{random_seed, Rng};
+use data::rng::Rng;
 use model::{Batch, Model, Objective, IGNORE};
+use model::training::Unsupported;
 
 /// i32 targets from the loader (`-1` = ignore) reinterpreted as the model's
 /// `u32` IGNORE sentinel. Mirrors the same one-line helper already
@@ -119,7 +120,7 @@ pub fn draw_arm(weights: &[f32], rng: &mut Rng) -> usize {
 /// zero new gradient math, [`Mixture::micro_step`] delegates entirely to
 /// whichever arm [`draw_arm`] selects that step. [`Mixture::prepare`] runs
 /// on every arm (so e.g. a weighted-loss primary arm still calls
-/// `Model::enable_weighted_loss`); `eval`/`itos` delegate to the FIRST arm
+/// `TokenObjectives::enable_weighted_loss`); `eval`/`itos` delegate to the FIRST arm
 /// (the primary objective, by convention) since averaging heterogeneous
 /// regimes' losses is not a meaningful number.
 pub struct Mixture<M: Model> {
@@ -144,10 +145,11 @@ impl<M: Model> Objective<M> for Mixture<M> {
         "mixture"
     }
 
-    fn prepare(&mut self, model: &mut M) {
+    fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
         for arm in &mut self.arms {
-            arm.prepare(model);
+            arm.prepare(model)?;
         }
+        Ok(())
     }
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
@@ -177,6 +179,7 @@ impl<M: Model> Objective<M> for Mixture<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data::rng::random_seed;
 
     /// Seeded draw counts over many draws must match the configured
     /// probabilities within a fixed tolerance - the gate criterion this

@@ -3,7 +3,7 @@
 
 //! Per-token log-probability access over [`crate::Model`] - the primitive
 //! DPO, GRPO, and distillation are all built from (see
-//! `Model::batch_token_logprobs`).
+//! `crate::training::TokenObjectives::batch_token_logprobs`).
 //!
 //! Swedish Embedded AB builds training engines where a new objective composes
 //! from existing primitives instead of duplicating them. If your team needs
@@ -27,10 +27,10 @@ pub fn row_logprob(row: &[f32], idx: usize) -> f32 {
 /// [`Model::logits_all`] plus a host log-softmax. Correct for any
 /// token-classification model, at the cost of a full `[len * vocab]`
 /// re-prefill and O(len·vocab) host work - the always-correct oracle, not
-/// the fast path (see [`Model::batch_token_logprobs`] for that).
+/// the fast path (see [`crate::training::TokenObjectives::batch_token_logprobs`] for that).
 ///
 /// `targets[i] == crate::IGNORE` produces `0.0`, matching
-/// [`Model::batch_token_logprobs`]'s documented convention exactly, so the
+/// [`crate::training::TokenObjectives::batch_token_logprobs`]'s documented convention exactly, so the
 /// two are directly comparable on a batch that mixes real and masked
 /// positions. `tokens` and `targets` must be the same length; returns `None`
 /// if the model has no token-classification head (`logits_all` returns
@@ -38,7 +38,7 @@ pub fn row_logprob(row: &[f32], idx: usize) -> f32 {
 ///
 /// WARNING: on a model whose `logits_all` re-sets its current batch as a
 /// side effect (e.g. `qwen3::Qwen`), calling this mid-training-step destroys
-/// whatever batch the caller had set. Use [`Model::batch_token_logprobs`]
+/// whatever batch the caller had set. Use [`crate::training::TokenObjectives::batch_token_logprobs`]
 /// instead inside a training step; this function is for scoring outside one.
 pub fn token_logprobs<M: Model>(m: &M, tokens: &[u32], targets: &[u32]) -> Option<Vec<f32>> {
     assert_eq!(tokens.len(), targets.len(), "logprobs::token_logprobs: tokens/targets length mismatch");

@@ -541,7 +541,9 @@ impl<M: Model> Objective<M> for CausalLm {
         for batch in batches {
             model.set_batch(batch);
             if mean_supervised > 0.0 {
-                model.set_loss_denominator(mean_supervised);
+                if let Some(objectives) = model.token_objectives() {
+                    objectives.set_loss_denominator(mean_supervised);
+                }
             }
             total += model.forward();
             model.backward();
@@ -1116,7 +1118,7 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
 /// improvement instead, as this always did; without an `out` to write it to
 /// the run is refused. The selection is part of the exact-resume state.
 pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitOpts, out: Option<&Path>, mut control: FitControl<'_>) -> std::io::Result<(FitReport, M)> {
-    obj.prepare(&mut model);
+    obj.prepare(&mut model)?;
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
     let mut first_step = 0u32;
     let mut resumed_at = None;
@@ -1440,6 +1442,7 @@ pub fn generate<M: Model>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::training::TokenObjectives;
 
     /// The shape this exists to catch: training loss falling all the way
     /// while held-out loss bottoms out and turns back up.
@@ -1637,9 +1640,8 @@ mod tests {
                 *self.targets.borrow_mut() = targets.to_vec();
             }
         }
-        fn set_loss_denominator(&self, tokens: f32) -> bool {
-            self.denominators.borrow_mut().push(tokens);
-            true
+        fn token_objectives(&self) -> Option<&dyn TokenObjectives> {
+            Some(self)
         }
         fn forward(&self) -> f32 {
             let targets = self.targets.borrow();
@@ -1693,6 +1695,20 @@ mod tests {
         fn config_json(&self) -> serde_json::Value {
             serde_json::json!({})
         }
+    }
+
+    /// Only the loss denominator is observable on [`Recorder`]; the rest of
+    /// the capability has nothing to configure on a model with no logits.
+    impl TokenObjectives for Recorder {
+        fn enable_weighted_loss(&mut self) {}
+        fn batch_token_logprobs(&self) -> Vec<f32> {
+            Vec::new()
+        }
+        fn set_loss_weights(&self, _weights: &[f32]) {}
+        fn set_loss_denominator(&self, tokens: f32) {
+            self.denominators.borrow_mut().push(tokens);
+        }
+        fn set_logit_scale(&mut self, _scale: f32) {}
     }
 
     /// An objective that replays a held-out curve: down to its bottom, then up.

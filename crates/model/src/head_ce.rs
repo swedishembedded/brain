@@ -179,6 +179,10 @@ pub struct HeadCe {
     stats: DeviceBuffer,
     k: HeadKernels,
     coop: bool,
+    /// A device scalar the logits are multiplied by after the head GEMM, read at
+    /// run time so a recorded tape follows a scale set later (see
+    /// [`Self::set_scale_buffer`]).
+    scale_buf: Option<DeviceBuffer>,
 }
 
 /// Elements of a `[V, d]` weight per 4-byte word of its densest binding, and the
@@ -273,6 +277,7 @@ impl HeadCe {
             stats: gpu.storage(2 * rows as u64),
             k,
             coop,
+            scale_buf: None,
         })
     }
 
@@ -303,6 +308,17 @@ impl HeadCe {
         &self.logits
     }
 
+    /// Multiply every chunk of logits by the first word of `buf` (read from the
+    /// device when the step runs) right after the head GEMM, or stop doing so
+    /// with `None`. This is how a model follows a logit scale that changes
+    /// between steps without re-recording its tapes; record the tapes again
+    /// after changing whether a buffer is set, because the scaling step is part
+    /// of them. It composes with the constant `logit_scale` argument of the
+    /// recording methods (both are applied).
+    pub fn set_scale_buffer(&mut self, buf: Option<DeviceBuffer>) {
+        self.scale_buf = buf;
+    }
+
     /// The `(first token, tokens)` chunks covering `n` tokens.
     #[must_use]
     pub fn chunks(&self, n: u32) -> Vec<(u32, u32)> {
@@ -330,6 +346,9 @@ impl HeadCe {
         }
         if logit_scale != 1.0 {
             s.push(gpu.step(self.k.grad_scale, &[&self.logits], &[rows * v, logit_scale.to_bits()], rows * v));
+        }
+        if let Some(buf) = &self.scale_buf {
+            s.push(gpu.step(self.k.grad_scale_buf, &[&self.logits, buf], &[rows * v], rows * v));
         }
     }
 

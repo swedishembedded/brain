@@ -397,6 +397,8 @@ pub struct Gpt {
     // `enable_weighted_loss` was the first adopter). See
     // `model::Batch::LmWeighted`'s doc comment for the contract this realizes.
     weighted_ce: Option<model::lossw::WeightedCe>,
+    /// `Some` once a logit scale other than 1 was set: see `set_logit_scale`.
+    logit_scale: Option<model::logitscale::LogitScale>,
 
     // backward temporaries
     dres: Vec<gpu_core::DeviceBuffer>,
@@ -584,6 +586,7 @@ impl Gpt {
             logits: hd_v(n * v),
             ce_buf: hd_v(n),
             weighted_ce: None,
+            logit_scale: None,
             dres,
             d_logits: hd_v(n * v),
             ce_stats: hd_v(n * 2),
@@ -713,6 +716,9 @@ impl Gpt {
         s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final, d, n, 1e-5));
         let (mk, mt) = linear_kernel(n as usize, v as usize);
         s.push(self.gpu.dispatch(mk, &[&self.xn_final, self.w("lm_head.weight"), &self.logits], &[n, d, v], mt));
+        if let Some(scale) = &self.logit_scale {
+            scale.hook(&self.gpu, &mut s, GRAD_SCALE_BUF, &self.logits, n * v);
+        }
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
         s
     }
@@ -748,7 +754,13 @@ impl Gpt {
     pub fn backward(&self) {
         let n = self.b * self.t;
         let v = self.cfg.vocab;
-        self.gpu.write(&self.ce_grad_uni, &[n, v, IGNORE, f(self.count.get())]);
+        // The kernel divides by this; a logit scale s turns the `1/count` of
+        // the CE gradient into `s/count`.
+        let divisor = match &self.logit_scale {
+            Some(scale) => 1.0 / scale.grad_factor(self.count.get()),
+            None => self.count.get(),
+        };
+        self.gpu.write(&self.ce_grad_uni, &[n, v, IGNORE, f(divisor)]);
         self.gpu.submit(&[], &self.bwd_steps);
     }
 
@@ -889,6 +901,27 @@ impl Gpt {
         if !self.bwd_steps.is_empty() {
             self.bwd_steps = self.build_backward_steps();
         }
+    }
+
+    /// Multiply the head's logits by `scale` before the softmax of the loss,
+    /// its gradient and [`Self::batch_token_logprobs`] (see
+    /// `model::training::TokenObjectives::set_logit_scale`). The first scale
+    /// other than 1 rebuilds the forward graph once to add the scaling step.
+    pub fn set_logit_scale(&mut self, scale: f32) {
+        assert!(scale.is_finite() && scale > 0.0, "the logit scale must be finite and positive, got {scale}");
+        if self.logit_scale.is_none() {
+            if scale == 1.0 {
+                return;
+            }
+            self.logit_scale = Some(model::logitscale::LogitScale::new(&self.gpu));
+            self.fwd_steps = self.forward_steps(self.b, self.t);
+        }
+        self.logit_scale.as_ref().expect("created above").set(&self.gpu, scale);
+    }
+
+    pub fn set_loss_denominator(&self, tokens: f32) {
+        assert!(tokens > 0.0, "the loss denominator must be positive, got {tokens}");
+        self.count.set(tokens);
     }
 
     /// Write the per-position CE gradient weights (`[b·t]`) for the next
@@ -1174,6 +1207,24 @@ impl model::ModelConfig for GptConfig {
     }
 }
 
+impl model::training::TokenObjectives for Gpt {
+    fn enable_weighted_loss(&mut self) {
+        Gpt::enable_weighted_loss(self)
+    }
+    fn batch_token_logprobs(&self) -> Vec<f32> {
+        Gpt::batch_token_logprobs(self)
+    }
+    fn set_loss_weights(&self, weights: &[f32]) {
+        Gpt::write_weights(self, weights)
+    }
+    fn set_loss_denominator(&self, tokens: f32) {
+        Gpt::set_loss_denominator(self, tokens)
+    }
+    fn set_logit_scale(&mut self, scale: f32) {
+        Gpt::set_logit_scale(self, scale)
+    }
+}
+
 impl model::Model for Gpt {
     type Config = GptConfig;
 
@@ -1213,14 +1264,11 @@ impl model::Model for Gpt {
         }
     }
 
-    fn enable_weighted_loss(&mut self) {
-        Gpt::enable_weighted_loss(self)
+    fn token_objectives(&self) -> Option<&dyn model::training::TokenObjectives> {
+        Some(self)
     }
-    fn batch_token_logprobs(&self) -> Option<Vec<f32>> {
-        Some(Gpt::batch_token_logprobs(self))
-    }
-    fn set_loss_weights(&self, weights: &[f32]) {
-        Gpt::write_weights(self, weights)
+    fn token_objectives_mut(&mut self) -> Option<&mut dyn model::training::TokenObjectives> {
+        Some(self)
     }
 
     fn forward(&self) -> f32 {

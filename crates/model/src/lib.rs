@@ -31,6 +31,7 @@ pub mod attninject;
 pub mod block;
 pub mod dispatch;
 pub mod collective;
+pub mod conformance;
 pub mod paged;
 pub mod rowemit;
 pub mod serve;
@@ -49,6 +50,7 @@ pub mod hostmath;
 pub mod int4;
 pub mod int8;
 pub mod kquant;
+pub mod logitscale;
 pub mod logprobs;
 pub mod lora;
 pub mod lossw;
@@ -72,6 +74,7 @@ pub mod rollout;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shard;
 pub mod train;
+pub mod training;
 pub mod vit;
 pub mod vlm;
 pub mod rope_scaling;
@@ -140,8 +143,8 @@ pub enum Batch<'a> {
     /// gradient bit-for-bit - both are asserted by each adopting model's
     /// gradcheck (e.g. `qwen3`'s `check_qwen3_weighted`).
     ///
-    /// A model opts into this variant by constructing itself with weighted-
-    /// loss support enabled (each model's own opt-in method, e.g.
+    /// A model opts into this variant through
+    /// [`training::TokenObjectives::enable_weighted_loss`] (e.g.
     /// `qwen3::Qwen::enable_weighted_loss` / `gpt2::Gpt::enable_weighted_loss`,
     /// both thin wrappers over the shared [`lossw::WeightedCe`] primitive,
     /// following the same allocate-buffer/rebuild-steps pattern as
@@ -240,68 +243,20 @@ pub trait Model {
         None
     }
 
-    /// Opt into per-position weighted-loss training ([`Batch::LmWeighted`]) -
-    /// call once after construction, before the first [`Model::backward`].
-    /// Default panics: a model must explicitly override this to support
-    /// `crates/rl`'s generic weighted-training driver - the same opt-in,
-    /// thin-per-model-wiring shape [`Batch::LmWeighted`]'s own doc comment
-    /// documents. [`lossw::WeightedCe`] is the shared primitive
-    /// `qwen3::Qwen::enable_weighted_loss` / `gpt2::Gpt::enable_weighted_loss`
-    /// both delegate to.
-    fn enable_weighted_loss(&mut self) {
-        unimplemented!("{}: does not implement Model::enable_weighted_loss (no weighted-loss/Batch::LmWeighted support yet)", std::any::type_name::<Self>());
-    }
-
-    /// Per-position `log p_θ(target_i)` for the batch most recently
-    /// [`Model::forward`]-ed, length `b·t`, `0.0` at IGNORE positions (they
-    /// contribute nothing to any objective built on this). This is the
-    /// negation of the per-position cross-entropy loss the model's own loss
-    /// kernel already wrote for that forward - most models read that buffer
-    /// back to host every step already (to sum it into the scalar
-    /// [`Model::forward`] returns) and simply discard it; this is a second,
-    /// cheap read of the same buffer, not new computation.
-    ///
-    /// Valid only immediately after a completed [`Model::forward`], for the
-    /// batch that forward ran on, until the next `set_batch`/`forward`.
-    ///
-    /// `None` (the default) means "not exposed by this model"; callers that
-    /// need it unconditionally should fall back to
-    /// [`logprobs::token_logprobs`], which is always correct (via
-    /// [`Model::logits_all`]) but far more expensive. Deliberately **not**
-    /// defaulted over `logits_all`: on models where `logits_all` re-sets the
-    /// current batch as a side effect (`qwen3::Qwen`), a default here would
-    /// silently clobber whatever batch the caller is mid-step on.
-    fn batch_token_logprobs(&self) -> Option<Vec<f32>> {
+    /// The per-token objective capability ([`training::TokenObjectives`]):
+    /// weighted loss, per-token log-probabilities, loss denominator and logit
+    /// scale. `None` (the default) means the model does not provide it; an
+    /// objective that needs it refuses with [`training::Unsupported`] when it
+    /// is configured. Read-only view, for the calls a forward/backward pair
+    /// makes through `&self`.
+    fn token_objectives(&self) -> Option<&dyn training::TokenObjectives> {
         None
     }
 
-    /// Replace only the per-position CE-gradient weights for the batch
-    /// already set via [`Model::set_batch`], without disturbing the
-    /// activations a completed [`Model::forward`] left behind. This is what
-    /// lets a pairwise/grouped objective (DPO, GRPO) run on ONE forward and
-    /// ONE backward per micro-step: forward, read
-    /// [`Model::batch_token_logprobs`], compute the objective's per-token
-    /// coefficients on the host, call this, then backward.
-    ///
-    /// Default panics, for the same reason [`Model::enable_weighted_loss`]'s
-    /// does: a model must explicitly opt in (typically a one-line delegate to
-    /// whatever setter backs its `Batch::LmWeighted` support, e.g.
-    /// `qwen3::Qwen::write_weights` / `gpt2::Gpt::write_weights`, both thin
-    /// wrappers over [`lossw::WeightedCe::write`]) and must have called
-    /// [`Model::enable_weighted_loss`] first.
-    fn set_loss_weights(&self, _weights: &[f32]) {
-        unimplemented!("{}: does not implement Model::set_loss_weights", std::any::type_name::<Self>());
-    }
-
-    /// Divide the loss and gradient of the batch just set by `tokens` instead
-    /// of by its own count of supervised positions, so that batches
-    /// accumulated into one optimiser step share one denominator and the
-    /// step is a mean over its supervised tokens rather than a mean of
-    /// per-batch means. Call after [`Model::set_batch`]. Returns whether the
-    /// model honoured it; a model that cannot (the default) keeps its
-    /// per-batch normalisation.
-    fn set_loss_denominator(&self, _tokens: f32) -> bool {
-        false
+    /// [`Model::token_objectives`] for the calls that reconfigure the model
+    /// (`enable_weighted_loss`, `set_logit_scale`).
+    fn token_objectives_mut(&mut self) -> Option<&mut dyn training::TokenObjectives> {
+        None
     }
 
     /// Run forward; return the scalar objective loss that `backward` differentiates.

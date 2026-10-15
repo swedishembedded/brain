@@ -21,7 +21,7 @@
 //! `logref_r` are the same sums under a FROZEN reference policy, precomputed
 //! once per pair. A model's per-token `log p_theta(target)` is exactly the
 //! negation of the per-position CE loss its own loss kernel already writes
-//! ([`model::Model::batch_token_logprobs`]), so `logpi_c = -sum(CE_t for t
+//! ([`model::training::TokenObjectives::batch_token_logprobs`]), so `logpi_c = -sum(CE_t for t
 //! in chosen row)` and likewise for the rejected row.
 //!
 //! `dL/d(logpi_c)` equals `-sigma(-u) * beta` and `dL/d(logpi_r)` equals
@@ -44,7 +44,7 @@
 //! from one ordinary forward's freshly read-back per-token logprobs - so
 //! [`Dpo::micro_step`] differs from a plain weighted-CE step only in WHERE
 //! the weight comes from: one forward (to read `new_lp` for both rows), a
-//! host-side `pair_term` call, [`model::Model::set_loss_weights`], one
+//! host-side `pair_term` call, [`model::training::TokenObjectives::set_loss_weights`], one
 //! backward. No second (four-pass) implementation is needed.
 //!
 //! ## Why pairs are supplied, not sampled in-line
@@ -86,6 +86,7 @@ use std::collections::VecDeque;
 use data::rng::Rng;
 use model::rollout::Completion;
 use model::{Batch, Model, Objective, IGNORE};
+use model::training::Unsupported;
 
 /// One verifier-derived preference pair for a single prompt: `chosen` is a
 /// verified-correct completion, `rejected` a verified-incorrect one from
@@ -288,7 +289,7 @@ impl PackedPair {
     pub fn score_reference<M: Model>(&mut self, reference: &M) {
         reference.set_batch(Batch::Lm { tokens: &self.tokens, targets: &self.targets });
         let _ = reference.forward();
-        let lp = reference.batch_token_logprobs().expect("Dpo: model must implement Model::batch_token_logprobs");
+        let lp = model::training::objectives(reference).batch_token_logprobs();
         for (i, &y) in self.targets.iter().enumerate() {
             self.ref_lp[i] = if y == IGNORE { 0.0 } else { lp[i] };
         }
@@ -330,7 +331,8 @@ pub fn weigh_pair<M: Model>(beta: f32, nll_weight: f32, model: &M, packed: &Pack
     let seq_len = packed.seq_len();
     model.set_batch(Batch::Lm { tokens: &packed.tokens, targets: &packed.targets });
     let _ = model.forward();
-    let new_lp = model.batch_token_logprobs().expect("Dpo: model must implement Model::batch_token_logprobs");
+    let objectives = model::training::objectives(model);
+    let new_lp = objectives.batch_token_logprobs();
 
     let (sum_new_chosen, sum_ref_chosen, count_chosen) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 0, seq_len);
     let (sum_new_rejected, sum_ref_rejected, count_rejected) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 1, seq_len);
@@ -347,7 +349,7 @@ pub fn weigh_pair<M: Model>(beta: f32, nll_weight: f32, model: &M, packed: &Pack
             weights[seq_len + i] = term.weight_rejected;
         }
     }
-    model.set_loss_weights(&weights);
+    objectives.set_loss_weights(&weights);
     (term, margin)
 }
 
@@ -368,8 +370,7 @@ type RefLogprobFn = Box<dyn Fn(&DpoPair) -> (Vec<f32>, Vec<f32>)>;
 /// DPO training objective: packs each verifier-derived [`DpoPair`] as the
 /// two rows of one `b = 2` batch and runs exactly one forward and one
 /// backward per pair. Generic over any `M: model::Model` that has adopted
-/// weighted-loss support ([`model::Model::enable_weighted_loss`]/
-/// [`model::Model::set_loss_weights`]/[`model::Model::batch_token_logprobs`])
+/// weighted-loss support ([`model::training::TokenObjectives`])
 /// - today `qwen3::Qwen` and `gpt2::Gpt`.
 pub struct Dpo {
     cfg: DpoConfig,
@@ -437,8 +438,8 @@ impl<M: Model> Objective<M> for Dpo {
         "dpo"
     }
 
-    fn prepare(&mut self, model: &mut M) {
-        model.enable_weighted_loss();
+    fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
+        model::training::require_token_objectives(model)?.enable_weighted_loss();
         if let Source::Dataset { pairs, referenced } = &mut self.source {
             if !*referenced {
                 for pair in pairs.iter_mut() {
@@ -447,6 +448,7 @@ impl<M: Model> Objective<M> for Dpo {
                 *referenced = true;
             }
         }
+        Ok(())
     }
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {

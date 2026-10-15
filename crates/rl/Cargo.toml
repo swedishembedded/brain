@@ -56,6 +56,8 @@ brain-testutil.workspace = true
 # `tests/grpo_gradcheck.rs` - GRPO's local `CheckModel` harness (self-improve
 # roadmap P12's gate).
 brain-gradcheck.workspace = true
+# `tests/conformance.rs` registers `gpt2::Gpt` next to `qwen3::Qwen`.
+brain-gpt2.workspace = true
 
 # Every integration test below trains a real (tiny) `qwen3::Qwen` - the only
 # `model::Model` in this repo with a full weighted-loss + `logits_all` +
@@ -65,6 +67,11 @@ brain-gradcheck.workspace = true
 # makes `cargo test -p brain-rl` (no `--features`) skip building these
 # targets entirely, rather than fail to compile against the now-optional
 # `brain-qwen3` dependency - run with `--features qwen3` to build and run them.
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"
+required-features = ["qwen3"]
+
 [[test]]
 name = "grpo_gradcheck"
 path = "tests/grpo_gradcheck.rs"

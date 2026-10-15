@@ -50,7 +50,7 @@
 
 use std::path::Path;
 
-use data::rng::{random_seed, Rng};
+use data::rng::Rng;
 
 use crate::env::{Environment, Reward, Step, Task, Verifier};
 
@@ -367,6 +367,7 @@ fn line_aligned_meta() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data::rng::random_seed;
 
     #[test]
     fn all_picks_enumerates_the_sixty_ordered_three_of_five_selections() {
