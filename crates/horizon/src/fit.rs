@@ -83,7 +83,7 @@ impl TrainSpec {
             patience: DEFAULT_PATIENCE,
             eval_interval: DEFAULT_EVAL_INTERVAL,
             mask_rate: DEFAULT_MASK_RATE,
-            seed: 1,
+            seed: data::rng::random_seed(),
             vocab: FitOptions::default(),
             forecasts: None,
             visits: None,
@@ -142,7 +142,9 @@ impl TrainSpec {
         self.mask_rate = r;
         self
     }
-    /// Seed of the initial weights, the batches and the masks.
+    /// Seed of the initial weights, the batches and the masks. A spec that is
+    /// never given one draws a random seed at construction; [`TrainSpec::run_seed`]
+    /// reports the one in force.
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
@@ -436,5 +438,15 @@ mod tests {
         );
         assert!(!cfg.additive);
         assert!(s.clone().additive(true).config(&vocab).additive);
+    }
+
+    /// An unset seed is random, so two runs that said nothing differ and the
+    /// seed they used can be read back to reproduce either.
+    #[test]
+    fn unset_seeds_are_drawn_and_readable() {
+        let (a, b) = (TrainSpec::new(["a"], ["a"]), TrainSpec::new(["a"], ["a"]));
+        assert_ne!(a.run_seed(), b.run_seed());
+        assert_eq!(a.clone().seed(7).run_seed(), 7);
+        assert_ne!(crate::evaluation::Bootstrap::default().seed, crate::evaluation::Bootstrap::default().seed);
     }
 }

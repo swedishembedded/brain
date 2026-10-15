@@ -73,7 +73,7 @@ pub fn train_spec() -> ActionSpec {
     .param(ParamSpec::new("knots", ParamType::Str, "comma-separated hazard piece boundaries after entry, starting at 0 and ascending, in the data's unit; default: the model's own (0 to 22 years)").default(json!("")))
     .param(ParamSpec::new("steps", ParamType::Int, "optimiser steps at most (early stopping usually ends sooner)").default(json!(DEFAULT_STEPS)).min(1.0).max(1_000_000.0))
     .param(ParamSpec::new("batch", ParamType::Int, "subjects per batch").default(json!(DEFAULT_BATCH)).min(1.0).max(4096.0))
-    .param(ParamSpec::new("seed", ParamType::Int, "seed of the initial weights, the batches and the masks (member i of an ensemble uses seed + i)").default(json!(1)).min(0.0))
+    .param(ParamSpec::new("seed", ParamType::Int, "seed of the initial weights, the batches and the masks (member i of an ensemble uses seed + i); drawn at random when omitted and reported per member").min(0.0))
     .param(ParamSpec::new("eval_interval", ParamType::Int, "steps between held-out evaluations (and progress reports)").default(json!(DEFAULT_EVAL_INTERVAL)).min(1.0))
     .param(ParamSpec::new("patience", ParamType::Int, "held-out evaluations without improvement before training stops").default(json!(DEFAULT_PATIENCE)).min(1.0))
     .param(ParamSpec::new("next_events", ParamType::Str, "comma-separated event codes to also model as 'which happens first, and when' (a self-supervised signal); default none").default(json!("")))
@@ -227,9 +227,11 @@ fn train_settings(inv: &Invocation, train: &[Subject]) -> Result<TrainSpec, Stri
     let mut spec = TrainSpec::new(codes, list(inv.get_str("absorbing")))
         .steps(count(inv, "steps", i64::from(DEFAULT_STEPS))?)
         .batch(count(inv, "batch", i64::from(DEFAULT_BATCH))?)
-        .seed(u64::try_from(int_param(inv, "seed", 1)).map_err(|_| "horizon: seed is out of range".to_string())?)
         .eval_interval(count(inv, "eval_interval", i64::from(DEFAULT_EVAL_INTERVAL))?)
         .patience(count(inv, "patience", i64::from(DEFAULT_PATIENCE))?);
+    if let Some(seed) = inv.seed().map_err(|e| format!("horizon: {e}"))? {
+        spec = spec.seed(seed);
+    }
     let knots = numbers("knots", &inv.get_str("knots").unwrap_or_default())?;
     if !knots.is_empty() {
         spec = spec.knots(knots.iter().map(|&k| k as f32).collect());

@@ -65,12 +65,13 @@ pub struct Bootstrap {
     /// Coverage of the percentile interval (0.95).
     pub level: f64,
     /// Seed of the resampling: the same seed gives the same intervals.
+    /// [`Default`] draws a random one; [`Evaluation::bootstrap_seed`] reports it.
     pub seed: u64,
 }
 
 impl Default for Bootstrap {
     fn default() -> Self {
-        Bootstrap { reps: 200, level: 0.95, seed: 0 }
+        Bootstrap { reps: 200, level: 0.95, seed: data::rng::random_seed() }
     }
 }
 
@@ -208,6 +209,10 @@ pub struct Evaluation {
     pub results: Vec<HorizonMetrics>,
     /// The pairs left out.
     pub absent: Vec<Absent>,
+    /// The seed of the group bootstrap behind the intervals; passing it as
+    /// [`Bootstrap::seed`] reproduces them. `None` when no bootstrap ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootstrap_seed: Option<u64>,
 }
 
 impl Evaluation {
@@ -336,7 +341,8 @@ pub fn evaluate(saved: &Saved, subjects: &[Subject], spec: &EvaluationSpec) -> R
             });
         }
     }
-    Ok(Evaluation { subjects: subjects.len(), event_nll: nll, results, absent })
+    let bootstrap_seed = spec.bootstrap.filter(|_| clusters.is_some()).map(|b| b.seed);
+    Ok(Evaluation { subjects: subjects.len(), event_nll: nll, results, absent, bootstrap_seed })
 }
 
 /// One cluster id per subject when any subject has a group (a subject without
