@@ -31,6 +31,7 @@ brain-yolov8.workspace = true
 brain-checkpoint.workspace = true
 brain-forecast.workspace = true
 brain-fcbench.workspace = true
+brain-seed.workspace = true
 serde_json.workspace = true
 # Opt-in only (feature `qwen3tts`) - see the [features] note above.
 brain-qwen3tts = { workspace = true, optional = true }

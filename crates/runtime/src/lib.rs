@@ -465,12 +465,16 @@ pub struct GenConfig {
     pub temperature: f32,
     pub top_k: usize,
     pub eos: Option<u32>,
+    /// Seeds the sampler. Only a `temperature` above zero consults it (greedy
+    /// decoding is an argmax), but a caller who raises the temperature of
+    /// [`GenConfig::default`] must not inherit a fixed stream, so the default
+    /// draws a fresh seed.
     pub seed: u64,
 }
 
 impl Default for GenConfig {
     fn default() -> GenConfig {
-        GenConfig { max_new: 256, temperature: 0.0, top_k: 0, eos: None, seed: 0 }
+        GenConfig { max_new: 256, temperature: 0.0, top_k: 0, eos: None, seed: seed::random_seed() }
     }
 }
 
@@ -1210,6 +1214,13 @@ mod tests {
             req.map(|s| s.to_string()),
             Event::ForecastRequest { model: model.to_string(), panel, spec },
         )
+    }
+
+    /// An unset seed is random: two default configs differ, so raising the
+    /// temperature of a default config never replays a fixed stream.
+    #[test]
+    fn default_gen_configs_draw_different_seeds() {
+        assert_ne!(GenConfig::default().seed, GenConfig::default().seed);
     }
 
     #[test]
