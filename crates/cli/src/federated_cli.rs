@@ -27,6 +27,8 @@ pub fn run_federated(args: &[String]) {
 ///   brain federated train-expert --base B --expert E --out DIR
 ///                                [--steps N --batch B --block T --lr X --seed S]
 fn train_expert(args: &[String]) {
+    let (seed, rest) = crate::args::split_seed(args, "federated train-expert");
+    let args = &rest[..];
     let mut base = String::new();
     let mut out = String::new();
     let mut expert = 0u32;
@@ -34,7 +36,6 @@ fn train_expert(args: &[String]) {
     let mut b = 16u32;
     let mut t = 64u32;
     let mut lr = 6e-4f32;
-    let mut seed = 1337u64;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -45,7 +46,6 @@ fn train_expert(args: &[String]) {
             "--batch" => b = next(args, &mut i).parse().unwrap_or(b),
             "--block" => t = next(args, &mut i).parse().unwrap_or(t),
             "--lr" => lr = next(args, &mut i).parse().unwrap_or(lr),
-            "--seed" => seed = next(args, &mut i).parse().unwrap_or(seed),
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
@@ -53,10 +53,6 @@ fn train_expert(args: &[String]) {
     if base.is_empty() || out.is_empty() {
         eprintln!("usage: brain federated train-expert --base <base.safetensors> --expert E --out <dir> [--steps N --batch B --block T --lr X --seed S]");
         return;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        seed = data::rng::random_seed();
-        eprintln!("federated train-expert: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
 
     let out_dir = Path::new(&out);

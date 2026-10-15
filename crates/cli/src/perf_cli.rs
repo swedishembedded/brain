@@ -107,7 +107,9 @@ OPTIONS
                         rejections are counted; SLO attainment covers admitted
                         work only.
   --smoke               shrink everything to seconds, for CI
-  --seed <S>            default 1234
+  --seed <S>            workload seed (default: drawn at random and printed to stderr;
+                        the artifact records it, and `perf gate` refuses a candidate
+                        whose seed differs from the baseline's)
   --out <file>          artifact path (default results/perf-<...>.json)
   --device cpu|gpu|vulkan  (global flag, handled by the main dispatcher)
 
@@ -342,11 +344,16 @@ fn compare(args: &[String]) {
 }
 
 fn run(args: &[String]) {
+    // The workload seed: given, or drawn and printed so the run reproduces.
+    let mut seed_args = appopts::Args::new(args);
+    let seed = seed_args.seed("perf run");
+    let rest = seed_args.leftovers();
+    let args = &rest[..];
     let Some(scenario) = args.first().cloned() else {
         eprintln!("perf run: name a scenario (latency|throughput|serve|sweep)");
         std::process::exit(2);
     };
-    let mut opt = Options { device: device_label(), ..Default::default() };
+    let mut opt = Options { device: device_label(), seed, ..Default::default() };
     let mut target_spec: Option<String> = None;
     let mut workload = "chat".to_string();
     let mut concurrency = 8usize;
@@ -374,7 +381,6 @@ fn run(args: &[String]) {
             "--output" => opt.output_override = val(args, &mut i, "--output").parse().ok(),
             "--warmup" => opt.warmup_requests = val(args, &mut i, "--warmup").parse().unwrap_or(opt.warmup_requests),
             "--best-of" => opt.best_of = val(args, &mut i, "--best-of").parse().unwrap_or(opt.best_of),
-            "--seed" => opt.seed = val(args, &mut i, "--seed").parse().unwrap_or(opt.seed),
             "--out" => out = Some(val(args, &mut i, "--out")),
             "--policy" => policy = val(args, &mut i, "--policy"),
             "--admission" => opt.admission = Some(val(args, &mut i, "--admission")),

@@ -96,7 +96,7 @@ BRAIN_KRONOS_TOKENIZER=<tok-dir> BRAIN_KRONOS_DECODER=<dec-dir> \
   prices and the OHLC invariants - and every rejection names the file line.
   `--gnuplot` needs the `gnuplot` CLI on `PATH`; the command says so and exits
   before loading any weights if it is missing.
-- `compare`: `--windows <n>` (default 24), `--seed <n>` (default 1337).
+- `compare`: `--windows <n>` (default 24), `--seed <n>` (default: drawn at random and printed).
 - `serve`: `--socket <path>` or `--listen <addr>`.
 - D-Bus `forecast` action: `horizon` (default 64), `temperature` (default
   1.0), `argmax` (default true), `seed`, `samples` (default 1), `checkpoint`

@@ -53,7 +53,7 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
   --steps <N>                denoise steps (default 4)
   --guidance <G>             classifier-free guidance (default 1.0; <= 1.0
                              runs ONE forward per step instead of two)
-  --seed <S>                 initial-noise/weight/context seed (default 0)
+  --seed <S>                 initial-noise/weight/context seed (default: drawn at random and printed)
   --fps <N>                  frame rate written into the container (default 8)
   --base-shift <F>           LTX2Scheduler shift anchor at 1024 tokens (0.95)
   --max-shift <F>            LTX2Scheduler shift anchor at 4096 tokens (2.05)
@@ -325,7 +325,7 @@ Refinement:
                              sigma values are baked in by distillation and
                              are not interpolable.
   --guidance <G>             classifier-free guidance (default 1.0)
-  --seed <S>                 refinement noise seed (default 0)
+  --seed <S>                 refinement noise seed (default: drawn at random and printed)
   --context-frames <N>       how much of the previous refinement pass the
                              next one carries, in pixel frames, must be
                              1 + 8k (default 57 = 8 latent frames, the
@@ -405,7 +405,7 @@ resolution - stage 1 halves it, so both must be a multiple of 64):
   --width <W> --height <H>    pixels, multiples of 64 (default 64x64)
   --steps <N>                  denoise steps per stage/tile (default 4)
   --guidance <G>               classifier-free guidance (default 1.0)
-  --seed <S>                   initial-noise/weight/context seed (default 0)
+  --seed <S>                   initial-noise/weight/context seed (default: drawn at random and printed)
   --fps <N>                    stage-1 frame rate; the written fps is this
                                times 2^rounds (default 8)
   --base-shift <F>             LTX2Scheduler shift anchor at 1024 tokens (0.95)
@@ -512,7 +512,7 @@ Sampling:
                             has a fixed shape)
   --guidance <G>            classifier-free guidance (default 1.0; <= 1.0
                             skips the unconditional forward entirely)
-  --seed <S>                noise seed (default 0)
+  --seed <S>                noise seed (default: drawn at random and printed)
   --fps <N>                 frame rate for the output. Default: whatever
                             ffprobe reports for --input
   --dit-config <name>       "tiny" (default, fresh random weights - a wiring
@@ -555,8 +555,9 @@ fn resolve_ltxv(overrides: &std::collections::BTreeMap<String, String>, spatial_
 
 fn t2v(args: &[String]) -> Result<(), String> {
     let (overrides, args) = crate::resolver_cli::extract_role_overrides(&LtxvSpec, args);
+    let (seed, args) = crate::args::split_seed(&args, "ltxv t2v");
     let args = &args[..];
-    let mut o = GenOpts::default();
+    let mut o = GenOpts { seed, ..GenOpts::default() };
     let mut context_frames = ltxv::longform::CONTEXT_FRAMES;
     let mut prompt: Option<String> = None;
     let mut scene_specs: Vec<String> = Vec::new();
@@ -587,7 +588,6 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--steps" => o.steps = num(i, "--steps")?,
             "--fps" => o.fps = num(i, "--fps")?,
             "--guidance" => o.guidance = flt(i, "--guidance")?,
-            "--seed" => o.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--base-shift" => o.base_shift = dbl(i, "--base-shift")?,
             "--max-shift" => o.max_shift = dbl(i, "--max-shift")?,
             "--terminal" => o.terminal = dbl(i, "--terminal")?,
@@ -629,9 +629,6 @@ fn t2v(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown flag {other}\n\n{HELP}")),
         }
         i += 2;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        o.seed = data::rng::random_seed();
     }
     // One scene is what a `--prompt`/`--frames` run always was, so the whole
     // command below has exactly one shape to handle.
@@ -805,8 +802,10 @@ fn t2v(args: &[String]) -> Result<(), String> {
 
 fn upscale(args: &[String]) -> Result<(), String> {
     let (overrides, args) = crate::resolver_cli::extract_role_overrides(&LtxvSpec, args);
+    let (seed, args) = crate::args::split_seed(&args, "ltxv upscale");
     let args = &args[..];
     let mut o = UpscaleOpts::default();
+    o.base.seed = seed;
     let mut prompt: Option<String> = None;
     let mut input: Option<String> = None;
     let mut out: Option<String> = None;
@@ -832,7 +831,6 @@ fn upscale(args: &[String]) -> Result<(), String> {
             "--refine-steps" => o.refine_steps = num(i, "--refine-steps")?,
             "--context-frames" => context_frames = num(i, "--context-frames")?,
             "--guidance" => o.base.guidance = flt(i, "--guidance")?,
-            "--seed" => o.base.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--fps" => fps = Some(num(i, "--fps")?),
             "--dit-config" => o.base.dit_config = need(i)?.clone(),
             "--device" => {
@@ -848,9 +846,6 @@ fn upscale(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown flag {other}\n\n{UPSCALE_HELP}")),
         }
         i += 2;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        o.base.seed = data::rng::random_seed();
     }
     let input = input.ok_or("--input is required")?;
     let out = out.ok_or("--output-path is required")?;
@@ -943,8 +938,10 @@ fn upscale(args: &[String]) -> Result<(), String> {
 /// handling.
 fn v2v(args: &[String]) -> Result<(), String> {
     let (overrides, args) = crate::resolver_cli::extract_role_overrides(&LtxvSpec, args);
+    let (seed, args) = crate::args::split_seed(&args, "ltxv v2v");
     let args = &args[..];
     let mut o = MaskedOpts::default();
+    o.base.seed = seed;
     let mut prompt: Option<String> = None;
     let mut input: Option<String> = None;
     let mut out: Option<String> = None;
@@ -962,7 +959,6 @@ fn v2v(args: &[String]) -> Result<(), String> {
             "--strength" => o.strength = flt(i, "--strength")?,
             "--steps" => o.base.steps = num(i, "--steps")?,
             "--guidance" => o.base.guidance = flt(i, "--guidance")?,
-            "--seed" => o.base.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--fps" => fps = Some(num(i, "--fps")?),
             "--dit-config" => o.base.dit_config = need(i)?.clone(),
             "--device" => o.base.device = Some(need(i)?.clone()),
@@ -973,9 +969,6 @@ fn v2v(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown flag {other}\n\n{V2V_HELP}")),
         }
         i += 2;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        o.base.seed = data::rng::random_seed();
     }
     let input = input.ok_or("--input is required")?;
     let out = out.ok_or("--output-path is required")?;
@@ -1041,7 +1034,10 @@ fn v2v(args: &[String]) -> Result<(), String> {
 }
 
 fn dfr(args: &[String]) -> Result<(), String> {
+    let (seed, rest) = crate::args::split_seed(args, "ltxv dfr");
+    let args = &rest[..];
     let mut o = DfrOpts::default();
+    o.base.seed = seed;
     let mut prompt: Option<String> = None;
     let mut out: Option<String> = None;
     let mut vae: Option<String> = None;
@@ -1066,7 +1062,6 @@ fn dfr(args: &[String]) -> Result<(), String> {
             "--steps" => o.base.steps = num(i, "--steps")?,
             "--fps" => o.base.fps = num(i, "--fps")?,
             "--guidance" => o.base.guidance = flt(i, "--guidance")?,
-            "--seed" => o.base.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--base-shift" => o.base.base_shift = dbl(i, "--base-shift")?,
             "--max-shift" => o.base.max_shift = dbl(i, "--max-shift")?,
             "--terminal" => o.base.terminal = dbl(i, "--terminal")?,
@@ -1100,9 +1095,6 @@ fn dfr(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown flag {other}\n\n{DFR_HELP}")),
         }
         i += 2;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        o.base.seed = data::rng::random_seed();
     }
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;

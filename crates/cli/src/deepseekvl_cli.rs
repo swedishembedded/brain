@@ -56,6 +56,8 @@ pub struct Args {
 
 impl Args {
     pub fn parse(args: &[String]) -> Result<Args, String> {
+        let (seed, rest) = crate::args::split_seed(args, "deepseekvl finetune");
+        let args = &rest[..];
         let (mut weights, mut dataset, mut out, mut models_dir) = (None, None, None, None);
         let mut o = Options {
             rank: 16,
@@ -64,14 +66,13 @@ impl Args {
             steps: 200,
             lr: 1e-4,
             aligner_lr: None,
-            seed: 0,
+            seed,
             block: None,
             batch: 1,
             dtype: qwen3::Dtype::BF16,
             hyper: qwen3::finetune::LoraHyper::default(),
         };
         let mut alpha = None;
-        let mut seed = None;
         let mut i = 0;
         while i < args.len() {
             let flag = args[i].as_str();
@@ -93,7 +94,6 @@ impl Args {
                 "--aligner-lr" => o.aligner_lr = Some(number(value()?)?),
                 "--batch" => o.batch = value()?.parse().ok().filter(|&b| b > 0).ok_or_else(|| "--batch is not a positive whole number".to_string())?,
                 "--block" => o.block = Some(value()?.parse().map_err(|_| "--block is not a whole number".to_string())?),
-                "--seed" => seed = Some(value()?.parse::<u64>().map_err(|_| "--seed is not a whole number".to_string())?),
                 "--base-dtype" => {
                     o.dtype = match value()?.as_str() {
                         "f32" => qwen3::Dtype::F32,
@@ -115,11 +115,6 @@ impl Args {
             return Err("--rank must be > 0".to_string());
         }
         o.alpha = alpha.unwrap_or(o.rank as f32 * 2.0);
-        o.seed = seed.unwrap_or_else(|| {
-            let s = data::rng::random_seed();
-            println!("no --seed given, using random seed {s} (pass --seed {s} to reproduce)");
-            s
-        });
         Ok(Args { weights: need(weights, "--weights")?, dataset: need(dataset, "--dataset")?, out: need(out, "--out")?, models_dir, options: o })
     }
 }

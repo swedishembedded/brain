@@ -73,6 +73,8 @@ fn plan_batch(cfg: &PidConfig, t: u32, eff_batch: u32, budget: u64) -> (u32, u32
 }
 
 fn parse_train(args: &[String]) -> TrainCfg {
+    let (seed, rest) = crate::args::split_seed(args, "pid train");
+    let args = &rest[..];
     let mut c = TrainCfg {
         steps: 2000,
         eff_batch: 32,
@@ -83,7 +85,7 @@ fn parse_train(args: &[String]) -> TrainCfg {
         heads: 4,
         lr: 1e-3,
         wd: 0.01,
-        seed: 7,
+        seed,
         n_traj: 180,
         traj_len: 80,
         mem_budget: 4u64 << 30,
@@ -103,7 +105,6 @@ fn parse_train(args: &[String]) -> TrainCfg {
             "--heads" => c.heads = next().parse().unwrap(),
             "--lr" => c.lr = next().parse().unwrap(),
             "--weight-decay" => c.wd = next().parse().unwrap(),
-            "--seed" => c.seed = next().parse().unwrap(),
             "--n-traj" => c.n_traj = next().parse().unwrap(),
             "--traj-len" => c.traj_len = next().parse().unwrap(),
             "--mem-budget" => c.mem_budget = next().parse().unwrap(),
@@ -112,10 +113,6 @@ fn parse_train(args: &[String]) -> TrainCfg {
             other => panic!("unknown pid train flag: {other}"),
         }
         i += 2;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        c.seed = data::rng::random_seed();
-        println!("pid train: no --seed given, using random seed {} (pass --seed {} to reproduce)", c.seed, c.seed);
     }
     c
 }

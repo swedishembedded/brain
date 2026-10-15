@@ -122,6 +122,12 @@ or whose correctness gate failed. `brain perf gate` compares one candidate
 artifact against a saved baseline and fails if throughput drops, or latency
 rises, past a floor — useful for catching a regression before it ships.
 
+Without `--seed`, a run draws a random workload seed, prints it to stderr and
+records it in the artifact (`workload.seed`). `gate` refuses a candidate whose
+seed differs from the baseline's, naming both, because two different request
+streams are two different workloads: re-run the candidate with the baseline's
+seed (the `scripts/gates/*-perf-gate.sh` scripts do this themselves).
+
 Because results are just JSON files, you can diff them, graph them, or keep
 a history of them in your own tooling — `perf` doesn't lock you into a
 particular report format.

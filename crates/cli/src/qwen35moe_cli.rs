@@ -75,6 +75,8 @@ fn import(args: &[String]) {
 /// the same "simple, direct, one request" tier `qwen3::sample::generate_kv`
 /// occupies alongside `qwen3::serve::Engine`.
 fn infer(args: &[String]) {
+    let (seed, rest) = crate::args::split_seed(args, "qwen35moe infer");
+    let args = &rest[..];
     let mut weights = String::new();
     let mut tokenizer = String::new();
     let mut gguf_for_tok = String::new();
@@ -83,7 +85,6 @@ fn infer(args: &[String]) {
     let mut temp = 0.0f32;
     let mut top_k = 0usize;
     let mut top_p = 1.0f32;
-    let mut seed = 0u64;
     let mut chat = false;
     let mut i8 = false;
     let mut i = 0;
@@ -97,16 +98,11 @@ fn infer(args: &[String]) {
             "--temp" => temp = val(args, &mut i, "--temp").parse().unwrap_or(temp),
             "--top-k" => top_k = val(args, &mut i, "--top-k").parse().unwrap_or(top_k),
             "--top-p" => top_p = val(args, &mut i, "--top-p").parse().unwrap_or(top_p),
-            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
             "--chat" => chat = true,
             "--i8" => i8 = true,
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        seed = data::rng::random_seed();
-        eprintln!("qwen35moe infer: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
     if weights.is_empty() || (tokenizer.is_empty() && gguf_for_tok.is_empty()) {
         eprintln!(

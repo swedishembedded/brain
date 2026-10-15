@@ -63,7 +63,7 @@ Sampling (defaults from WanConfig, i.e. upstream's own generate.py defaults):
   --guidance <G>           classifier-free guidance (default 5.0; <= 1.0 runs
                            ONE forward per step instead of two)
   --negative-prompt <text> default is upstream's sample_neg_prompt
-  --seed <S>               initial-noise seed (default 0)
+  --seed <S>               initial-noise seed (default: drawn at random and printed)
   --solver <unipc|dpm++>   multistep solver (default unipc)
   --fps <N>                frame rate written into the container (default 16)
   --variant <name>         t2v-1.3B (default) | t2v-14B
@@ -127,7 +127,7 @@ Training:
   --frames <N>             window length in frames, must be 1 + 4k (default 9)
   --samples <N>            windows drawn and encoded up front (default 8)
   --lr <F>                 learning rate (default 1e-4)
-  --seed <S>               RNG seed (default 0)
+  --seed <S>               RNG seed (default: drawn at random and printed)
   --ckpt-every <N>         write a checkpoint every N steps (default 50; 0 = final only)
   --variant <name>         t2v-1.3B (default) | t2v-14B
   --device <cpu|gpu>       VAE encode + DiT trainer (default: the ambient
@@ -169,6 +169,8 @@ pub fn run_wan(args: &[String]) {
 }
 
 fn t2v(args: &[String]) -> Result<(), String> {
+    let (seed, rest) = crate::args::split_seed(args, "wan t2v");
+    let args = &rest[..];
     let mut variant = "t2v-1.3B".to_string();
     // The variant decides the defaults, and it can appear anywhere on the
     // line, so it is read in a first pass before `GenOpts` is built.
@@ -184,6 +186,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     };
 
     let mut o = GenOpts::from_config(&cfg);
+    o.seed = seed;
     let mut prompt: Option<String> = None;
     let mut out: Option<String> = None;
     let (mut dit, mut vae, mut t5, mut tokenizer) = (None, None, None, None);
@@ -207,7 +210,6 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--fps" => o.fps = num(i, "--fps")?,
             "--shift" => o.shift = flt(i, "--shift")?,
             "--guidance" => o.guidance = flt(i, "--guidance")?,
-            "--seed" => o.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--solver" => o.solver = Solver::from_name(need(i)?)?,
             "--device" => o.device = Some(need(i)?.clone()),
             "--t5-device" => o.te_device = Some(need(i)?.clone()),
@@ -232,9 +234,6 @@ fn t2v(args: &[String]) -> Result<(), String> {
     }
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;
-    if !args.iter().any(|a| a == "--seed") {
-        o.seed = data::rng::random_seed();
-    }
     let paths = resolve_wan(dit.as_deref(), vae.as_deref(), t5.as_deref(), tokenizer.as_deref())?;
     // Flag wins over the environment variable, same precedence as every other
     // wan CLI option that has both (see `Paths::resolve`'s own doc).
@@ -301,6 +300,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
 }
 
 fn finetune(args: &[String]) -> Result<(), String> {
+    let (seed, rest) = crate::args::split_seed(args, "wan finetune");
+    let args = &rest[..];
     let (mut data, mut save, mut report) = (None, None, None);
     let mut variant = "t2v-1.3B".to_string();
     let mut opts = wan::finetune::TrainOpts {
@@ -309,7 +310,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
         lr: 1e-4,
         frames: 9,
         samples: 8,
-        seed: 0,
+        seed,
         save_path: String::new(),
         ckpt_every: 50,
         device: None,
@@ -327,7 +328,6 @@ fn finetune(args: &[String]) -> Result<(), String> {
             "--frames" => opts.frames = need(i)?.parse().map_err(|e| format!("--frames: {e}"))?,
             "--samples" => opts.samples = need(i)?.parse().map_err(|e| format!("--samples: {e}"))?,
             "--lr" => opts.lr = need(i)?.parse().map_err(|e| format!("--lr: {e}"))?,
-            "--seed" => opts.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--ckpt-every" => opts.ckpt_every = need(i)?.parse().map_err(|e| format!("--ckpt-every: {e}"))?,
             "--variant" => variant.clone_from(need(i)?),
             "--device" => opts.device = Some(need(i)?.clone()),
@@ -343,9 +343,6 @@ fn finetune(args: &[String]) -> Result<(), String> {
     let data = data.ok_or("--data is required")?;
     let save = save.ok_or("--save is required")?;
     opts.save_path = save.clone();
-    if !args.iter().any(|a| a == "--seed") {
-        opts.seed = data::rng::random_seed();
-    }
     let cfg = match variant.as_str() {
         "t2v-1.3B" | "1.3b" | "1.3B" => WanConfig::t2v_1_3b(),
         "t2v-14B" | "14b" | "14B" => WanConfig::t2v_14b(),

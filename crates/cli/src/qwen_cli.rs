@@ -495,13 +495,14 @@ fn serve(args: &[String]) {
 }
 
 fn infer(args: &[String]) {
+    let (seed, rest) = crate::args::split_seed(args, "qwen3 infer");
+    let args = &rest[..];
     let mut weights = String::new();
     let mut tokenizer = String::new();
     let mut prompt = String::new();
     let mut max_new = 32usize;
     let mut temp = 0.0f32; // greedy by default
     let mut top_k = 0usize;
-    let mut seed = 0u64;
     let mut chat = false;
     let mut npu_cache = "out/npu-cache".to_string();
     let mut seq: Option<usize> = None;
@@ -515,7 +516,6 @@ fn infer(args: &[String]) {
             "--max-new" => max_new = val(args, &mut i, "--max-new").parse().unwrap_or(max_new),
             "--temp" => temp = val(args, &mut i, "--temp").parse().unwrap_or(temp),
             "--top-k" => top_k = val(args, &mut i, "--top-k").parse().unwrap_or(top_k),
-            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
             "--chat" => chat = true,
             // NPU: cache the exported ONNX + compiled blob here; "" disables.
             "--npu-cache" => npu_cache = val(args, &mut i, "--npu-cache"),
@@ -530,10 +530,6 @@ fn infer(args: &[String]) {
     if weights.is_empty() || tokenizer.is_empty() {
         eprintln!("usage: brain qwen3 infer --weights F --tokenizer tokenizer.json --prompt \"...\" [--max-new N --temp X --top-k K --chat]");
         return;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        seed = data::rng::random_seed();
-        eprintln!("qwen3 infer: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
     let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
         Ok(t) => t,
@@ -622,13 +618,14 @@ fn infer(args: &[String]) {
 
 /// Shared core for `train` (fresh) and `finetune` (seeded from `--weights`).
 fn train(args: &[String], base: Option<&str>) {
+    let (seed, rest) = crate::args::split_seed(args, "qwen3 train");
+    let args = &rest[..];
     let mut data_dir = String::new();
     let mut out = "out/qwen.safetensors".to_string();
     let mut steps = 2000u32;
     let mut batch = 8u32;
     let mut block = 256u32;
     let mut lr = if base.is_some() { 1e-5 } else { 3e-4 };
-    let mut seed = 1234u64;
     let mut mask: Option<char> = None;
     let mut align = false;
     let mut save_secs = 600u64;
@@ -640,7 +637,6 @@ fn train(args: &[String], base: Option<&str>) {
             "--batch" => batch = val(args, &mut i, "--batch").parse().unwrap_or(batch),
             "--block" => block = val(args, &mut i, "--block").parse().unwrap_or(block),
             "--lr" => lr = val(args, &mut i, "--lr").parse().unwrap_or(lr),
-            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
             "--mask" => mask = val(args, &mut i, "--mask").chars().next(),
             "--align" => align = true,
             "--save-secs" => save_secs = val(args, &mut i, "--save-secs").parse().unwrap_or(save_secs),
@@ -652,10 +648,6 @@ fn train(args: &[String], base: Option<&str>) {
     if data_dir.is_empty() {
         eprintln!("usage: brain qwen3 {{train|finetune}} <data_dir> --out F [--steps N --batch B --block T --lr X --mask = --align]");
         return;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        seed = data::rng::random_seed();
-        println!("qwen3 train: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
     let opts = model::FitOpts {
         steps,
@@ -805,6 +797,8 @@ impl Drop for ScratchDir {
 /// `tokenizer_config.json` -- already on disk for any model fetched through
 /// the normal store/plan path, no extra step).
 fn finetune_lora(args: &[String]) {
+    let (seed, rest) = crate::args::split_seed(args, "qwen3 finetune (lora)");
+    let args = &rest[..];
     let mut base = String::new();
     let mut adapter_spec = String::new();
     let mut fresh = false;
@@ -824,7 +818,6 @@ fn finetune_lora(args: &[String]) {
     // 42-token example spends 96% of every row, and every attention score in
     // it, on padding.
     let mut block: Option<u32> = None;
-    let mut seed = 1234u64;
     let mut models_dir: Option<String> = None;
     let mut dataset_id: Option<String> = None;
     let mut hyper = qwen3::finetune::LoraHyper::default();
@@ -886,7 +879,6 @@ fn finetune_lora(args: &[String]) {
             }),
             "--batch" => batch = val(args, &mut i, "--batch").parse().unwrap_or(batch),
             "--block" => block = val(args, &mut i, "--block").parse().ok().or(block),
-            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
             "--dataset-id" => dataset_id = Some(val(args, &mut i, "--dataset-id")),
             other => eprintln!("ignoring unknown flag {other:?}"),
@@ -907,10 +899,6 @@ fn finetune_lora(args: &[String]) {
         return;
     }
     let alpha = alpha.unwrap_or(rank as f32 * 2.0);
-    if !args.iter().any(|a| a == "--seed") {
-        seed = data::rng::random_seed();
-        println!("qwen3 finetune (lora): no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
-    }
 
     let store_root = loader::model_dir::resolve(models_dir.as_deref());
     let (base_weights_path, base_dir, base_id) = match loader::model_dir::resolve_base(&base, store_root.as_deref()) {
@@ -1086,9 +1074,11 @@ fn toolcall(args: &[String]) {
 }
 
 fn toolcall_gen(args: &[String]) {
+    let (seed, rest) = crate::args::split_seed(args, "qwen3 toolcall gen");
+    let args = &rest[..];
     let mut out = "data/toolcall".to_string();
     let mut tokenizer = String::new();
-    let (mut n, mut held, mut tools, mut vocab, mut seed) = (400usize, 40usize, 3usize, 151936usize, 1u64);
+    let (mut n, mut held, mut tools, mut vocab) = (400usize, 40usize, 3usize, 151936usize);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1098,7 +1088,6 @@ fn toolcall_gen(args: &[String]) {
             "--held" => held = val(args, &mut i, "--held").parse().unwrap_or(held),
             "--tools" => tools = val(args, &mut i, "--tools").parse().unwrap_or(tools),
             "--vocab" => vocab = val(args, &mut i, "--vocab").parse().unwrap_or(vocab),
-            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
@@ -1127,9 +1116,11 @@ fn toolcall_gen(args: &[String]) {
 }
 
 fn toolcall_eval(args: &[String]) {
+    let (seed, rest) = crate::args::split_seed(args, "qwen3 toolcall eval");
+    let args = &rest[..];
     let mut weights = String::new();
     let mut tokenizer = String::new();
-    let (mut n, mut tools, mut seq, mut seed) = (40usize, 3usize, 512usize, 999u64);
+    let (mut n, mut tools, mut seq) = (40usize, 3usize, 512usize);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1138,7 +1129,6 @@ fn toolcall_eval(args: &[String]) {
             "--n" => n = val(args, &mut i, "--n").parse().unwrap_or(n),
             "--tools" => tools = val(args, &mut i, "--tools").parse().unwrap_or(tools),
             "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
-            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;

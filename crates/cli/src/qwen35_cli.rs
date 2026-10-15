@@ -92,6 +92,7 @@ fn infer(args: &[String]) {
     // the loop below never sees them, matching `flux2_cli.rs`'s own shape.
     let spec = qwen35::spec::Qwen35Spec;
     let (mut overrides, args) = crate::resolver_cli::extract_role_overrides(&spec, args);
+    let (seed, args) = crate::args::split_seed(&args, "qwen35 infer");
     let mut gguf_for_tok = String::new();
     let mut prompt = String::new();
     let mut adapter = String::new();
@@ -99,7 +100,6 @@ fn infer(args: &[String]) {
     let mut temp = 0.0f32;
     let mut top_k = 0usize;
     let mut top_p = 1.0f32;
-    let mut seed = 0u64;
     let mut chat = false;
     let mut i = 0;
     while i < args.len() {
@@ -111,15 +111,10 @@ fn infer(args: &[String]) {
             "--temp" => temp = val(&args, &mut i, "--temp").parse().unwrap_or(temp),
             "--top-k" => top_k = val(&args, &mut i, "--top-k").parse().unwrap_or(top_k),
             "--top-p" => top_p = val(&args, &mut i, "--top-p").parse().unwrap_or(top_p),
-            "--seed" => seed = val(&args, &mut i, "--seed").parse().unwrap_or(seed),
             "--chat" => chat = true,
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        seed = data::rng::random_seed();
-        eprintln!("qwen35 infer: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
 
     // `--weights`/(`--tokenizer` or `--gguf`) named explicitly is the
@@ -222,6 +217,7 @@ struct FinetuneArgs {
 
 fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     let mut a = Args::new(args);
+    let seed = a.seed("qwen35 finetune");
     let base = a.str_or("--base", "");
     let out = a.str_or("--out", "");
     let mode_name = a.str_or("--mode", "full");
@@ -249,7 +245,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
         grad_clip: a.f32_or("--grad-clip", d.grad_clip),
         grad_accum: a.u32_or("--grad-accum", d.grad_accum),
         checkpoint_secs: a.u64_or("--save-secs", d.checkpoint_secs),
-        seed: if args.iter().any(|s| s == "--seed") { a.u64_or("--seed", d.seed) } else { data::rng::random_seed() },
+        seed,
         mask_before: mask,
         mask_per_line: mask.is_some(),
         align_to_lines: a.take_flag("--align"),
@@ -326,6 +322,16 @@ mod finetune_cli_tests {
 
     fn argv(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Without `--seed` every finetune draws its own seed: two parses of the
+    /// same argv are two independent runs, not one repeated default.
+    #[test]
+    fn an_unseeded_finetune_draws_a_fresh_seed_each_time() {
+        let argv = argv(&["corpus", "--base", "b.safetensors", "--out", "t.safetensors"]);
+        let first = parse_finetune(&argv).unwrap().opts.seed;
+        let second = parse_finetune(&argv).unwrap().opts.seed;
+        assert_ne!(first, second);
     }
 
     /// The three required arguments, and nothing else: a plain finetune is a

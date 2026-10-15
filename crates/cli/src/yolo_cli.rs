@@ -126,7 +126,7 @@ impl Default for TrainCfg {
             batch: 4,
             lr: 1e-3,
             wd: 1e-2,
-            seed: 1337,
+            seed: data::rng::random_seed(),
             nc: 0,
             input: 0,
             out: String::new(),
@@ -141,7 +141,9 @@ impl Default for TrainCfg {
 }
 
 fn parse_train_flags(args: &[String], start: usize) -> TrainCfg {
-    let mut cfg = TrainCfg::default();
+    let (seed, rest) = crate::args::split_seed(args, "yolov8 train");
+    let args = &rest[..];
+    let mut cfg = TrainCfg { seed, ..TrainCfg::default() };
     let mut i = start;
     while i < args.len() {
         match args[i].as_str() {
@@ -151,7 +153,6 @@ fn parse_train_flags(args: &[String], start: usize) -> TrainCfg {
             "--batch" => cfg.batch = val(args, &mut i, "--batch").parse().unwrap_or(cfg.batch),
             "--lr" => cfg.lr = val(args, &mut i, "--lr").parse().unwrap_or(cfg.lr),
             "--wd" => cfg.wd = val(args, &mut i, "--wd").parse().unwrap_or(cfg.wd),
-            "--seed" => cfg.seed = val(args, &mut i, "--seed").parse().unwrap_or(cfg.seed),
             "--nc" => cfg.nc = val(args, &mut i, "--nc").parse().unwrap_or(cfg.nc),
             "--input" => cfg.input = val(args, &mut i, "--input").parse().unwrap_or(cfg.input),
             "--arch" => cfg.arch = val(args, &mut i, "--arch"),
@@ -173,10 +174,6 @@ fn parse_train_flags(args: &[String], start: usize) -> TrainCfg {
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        cfg.seed = data::rng::random_seed();
-        println!("yolov8 train: no --seed given, using random seed {} (pass --seed {} to reproduce)", cfg.seed, cfg.seed);
     }
     cfg
 }

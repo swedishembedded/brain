@@ -671,12 +671,13 @@ fn run_camera(_args: &[String]) {
 /// Placeholder-grade data, real loop; `--weights <ckpt.pth>` seeds from a
 /// released checkpoint (fine-tune), otherwise fresh `init_weights`.
 fn run_train(args: &[String]) {
+    let (seed, rest) = crate::args::split_seed(args, "zipdepth train");
+    let args = &rest[..];
     let mut steps = 50u32;
     let mut batch = 2u32;
     let (mut w, mut h) = (64u32, 64u32);
     let mut lr = 1e-3f32;
     let mut wd = 0.0f32;
-    let mut seed = 7u64;
     let mut out = String::new();
     let mut weights = String::new();
     let mut i = 0;
@@ -691,7 +692,6 @@ fn run_train(args: &[String]) {
             "--batch" => batch = val().parse().unwrap_or(2),
             "--lr" => lr = val().parse().unwrap_or(1e-3),
             "--wd" => wd = val().parse().unwrap_or(0.0),
-            "--seed" => seed = val().parse().unwrap_or(7),
             "--out" => out = val(),
             "--weights" => weights = val(),
             "--size" => {
@@ -715,10 +715,6 @@ fn run_train(args: &[String]) {
     if w % 32 != 0 || h % 32 != 0 {
         eprintln!("brain zipdepth train: --size must be multiples of 32 (got {w}x{h})");
         std::process::exit(2);
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        seed = data::rng::random_seed();
-        println!("zipdepth train: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
 
     // Fine-tuning a released checkpoint must build the MATCHING variant; fresh

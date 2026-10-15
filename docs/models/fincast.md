@@ -65,7 +65,7 @@ BRAIN_FINCAST=/path/to/fincast.safetensors dbus-run-session -- bash -c '
 
 ## Options
 
-- `compare`: `--windows <n>` (default 24), `--seed <n>` (default 1337).
+- `compare`: `--windows <n>` (default 24), `--seed <n>` (default: drawn at random and printed).
 - `serve`: `--socket <path>` or `--listen <addr>`.
 - D-Bus `forecast` action: `horizon` (default 64), `freq` (default 0).
 

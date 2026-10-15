@@ -86,7 +86,7 @@ fn train(args: &[String], base: Option<&str>) {
     let batch = a.u32_or("--batch", 8);
     let block = a.u32_or("--block", 128);
     let lr = a.f32_or("--lr", if base.is_some() { 1e-4 } else { 3e-4 });
-    let mut seed = a.u64_or("--seed", 1234);
+    let seed = a.seed("glm train");
     let size = a.str_or("--size", "small");
     let layers = a.opt_u32("--layers");
     let d_model = a.opt_u32("--d-model");
@@ -98,10 +98,6 @@ fn train(args: &[String], base: Option<&str>) {
     if data_dir.is_empty() {
         eprintln!("usage: brain glm {{train|finetune}} <data_dir> --out F [--size tiny|small|base --steps N --batch B --block T --lr X --layers L --d-model D --heads H --experts E --mask = --align]");
         return;
-    }
-    if !args.iter().any(|s| s == "--seed") {
-        seed = data::rng::random_seed();
-        println!("glm train: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
     let mut cfg = match base {
         Some(p) => GlmConfig::from_json(&checkpoint::read_config(p)),
@@ -195,15 +191,11 @@ fn infer(args: &[String]) {
     let max_new = a.usize_or("--max-new", 200);
     let temp = a.f32_or("--temp", 0.8);
     let top_k = a.usize_or("--top-k", 40);
-    let mut seed = a.u64_or("--seed", 1234);
+    let seed = a.seed("glm infer");
     a.finish();
     if weights.is_empty() {
         eprintln!("usage: brain glm infer --weights F [--data <dir>] [--prompt ... --max-new N --temp X --top-k K]");
         return;
-    }
-    if !args.iter().any(|s| s == "--seed") {
-        seed = data::rng::random_seed();
-        eprintln!("glm infer: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
     let itos = match Glm::load_itos(&weights) {
         Some(itos) => itos,
@@ -253,7 +245,7 @@ fn eval(args: &[String]) {
     let data_dir = a.str_or("--data", "");
     let batches = a.usize_or("--batches", 20);
     let block = a.u32_or("--block", 0);
-    let seed = a.u64_or("--seed", 99);
+    let seed = a.seed("glm eval");
     a.finish();
     if weights.is_empty() || data_dir.is_empty() {
         eprintln!("usage: brain glm eval --weights F --data <dir> [--batches N --block T]");

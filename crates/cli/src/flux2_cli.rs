@@ -444,9 +444,11 @@ fn resolve_flux2(dit: Option<&str>, vae: Option<&str>, text_encoder: Option<&str
 }
 
 fn generate(args: &[String]) -> Result<(), String> {
+    let (seed, rest) = crate::args::split_seed(args, "flux2");
+    let args = &rest[..];
     let mut prompt = None;
     let mut out = None;
-    let mut o = GenOpts { width: 512, height: 512, ..GenOpts::default() };
+    let mut o = GenOpts { width: 512, height: 512, seed, ..GenOpts::default() };
     let (mut want_w, mut want_h): (Option<u32>, Option<u32>) = (None, None);
     let mut variant_name = "klein-4b".to_string();
     let mut variant_explicit = false;
@@ -483,7 +485,6 @@ fn generate(args: &[String]) -> Result<(), String> {
                 i += 1;
                 continue;
             }
-            "--seed" => o.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--strength" => o.strength = Some(need(i)?.parse().map_err(|e| format!("--strength: {e}"))?),
             "--ref-resolution-scale" => {
                 o.ref_resolution_scale = need(i)?.parse().map_err(|e| format!("--ref-resolution-scale: {e}"))?;
@@ -540,10 +541,6 @@ fn generate(args: &[String]) -> Result<(), String> {
     }
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--out is required")?;
-    if !args.iter().any(|a| a == "--seed") {
-        o.seed = data::rng::random_seed();
-        eprintln!("flux2: no --seed given, using random seed {} (pass --seed {} to reproduce)", o.seed, o.seed);
-    }
 
     // Read every reference's pixels BEFORE any of them is bounded: the canvas
     // has to be settled first. A windowed run's first reference is the anchor
@@ -769,6 +766,8 @@ fn check_adapter_out(path: &str) -> Result<(), String> {
 /// `flux2::finetune::run`, which is the same code the `lora_train` capability
 /// action drives, so the CLI and the served path cannot drift on defaults.
 fn finetune(args: &[String]) -> Result<(), String> {
+    let (seed, rest) = crate::args::split_seed(args, "flux2 finetune");
+    let args = &rest[..];
     let mut data_dir: Option<String> = None;
     let mut variant_name = "klein-4b".to_string();
     // Only a caller-typed `--variant` is passed into `resolve_flux2` as an
@@ -794,7 +793,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
         train_base: None,
         cache_dir: None,
         size: 512,
-        seed: 0,
+        seed,
         save_path: String::new(),
         ckpt_every: 100,
         resume: false,
@@ -851,7 +850,6 @@ fn finetune(args: &[String]) -> Result<(), String> {
             "--ref-dropout" => opts.ref_dropout = need(i)?.parse().map_err(|e| format!("--ref-dropout: {e}"))?,
             "--min-lr" => opts.min_lr = Some(need(i)?.parse().map_err(|e| format!("--min-lr: {e}"))?),
             "--size" => opts.size = need(i)?.parse().map_err(|e| format!("--size: {e}"))?,
-            "--seed" => opts.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--ckpt-every" => opts.ckpt_every = need(i)?.parse().map_err(|e| format!("--ckpt-every: {e}"))?,
             // A boolean flag, so it consumes no value - `continue` past the
             // `i += 2` the value-taking arms use.
@@ -914,9 +912,6 @@ fn finetune(args: &[String]) -> Result<(), String> {
     let data_dir = data_dir.ok_or("the dataset directory is required (a positional argument)")?;
     if opts.save_path.is_empty() {
         return Err("--out is required".into());
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        opts.seed = data::rng::random_seed();
     }
     check_adapter_out(&opts.save_path)?;
     // `encode_samples` enforces this too, but only after the whole dataset has

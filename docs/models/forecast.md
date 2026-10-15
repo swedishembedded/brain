@@ -99,7 +99,7 @@ full runnable invocations per model.
 
 ## Options
 
-- `compare`: `--windows <n>` (default 24), `--seed <n>` (default 1337),
+- `compare`: `--windows <n>` (default 24), `--seed <n>` (default: drawn at random and printed),
   `--html <path>`.
 - `serve`: `--socket <path>` or `--listen <addr>`, `--max-connections <n>`
   (default 64).

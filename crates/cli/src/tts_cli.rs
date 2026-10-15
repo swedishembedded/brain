@@ -79,11 +79,13 @@ pub fn run_tts(args: &[String]) {
 ///   brain qwen3tts finetune --base out/tts/talker.safetensors --data data/tts --out out/tts/talker_lora.safetensors
 ///                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
 fn finetune(args: &[String]) {
+    let (seed, rest) = crate::args::split_seed(args, "qwen3tts finetune");
+    let args = &rest[..];
     let mut base = "out/tts/talker.safetensors".to_string();
     let mut data_dir = "data/tts".to_string();
     let mut out = String::new();
     let mut full = false;
-    let mut o = qwen3tts::FinetuneOpts::default();
+    let mut o = qwen3tts::FinetuneOpts { seed, ..qwen3tts::FinetuneOpts::default() };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -100,16 +102,12 @@ fn finetune(args: &[String]) {
             "--alpha" => o.alpha = val(args, &mut i, "--alpha").parse().unwrap_or(o.alpha),
             "--batch" => o.batch = val(args, &mut i, "--batch").parse().unwrap_or(o.batch),
             "--block" => o.block = val(args, &mut i, "--block").parse().unwrap_or(o.block),
-            "--seed" => o.seed = val(args, &mut i, "--seed").parse().unwrap_or(o.seed),
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
     }
     if out.is_empty() {
         out = if full { "out/tts/talker_full.safetensors".to_string() } else { "out/tts/talker_lora.safetensors".to_string() };
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        o.seed = data::rng::random_seed();
     }
     let mode = if full { "full".to_string() } else { format!("LoRA r={} α={}", o.rank, o.alpha) };
     eprintln!("tts finetune [{mode}]: base={base} data={data_dir} steps={} lr={} seed={} -> {out}", o.steps, o.lr, o.seed);
@@ -240,11 +238,13 @@ struct CommonArgs {
 /// ambiguous or missing outcome prints every real candidate and exits
 /// rather than falling back to a hardcoded default directory.
 fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<String, String>) {
+    let (seed, rest) = crate::args::split_seed(args, "tts");
+    let args = &rest[..];
     let mut weights_dir: Option<String> = None;
     let mut ckpt: Option<String> = None;
     let mut out = "out.wav".to_string();
     let mut lang = "english".to_string();
-    let mut opts = GenOpts::default();
+    let mut opts = GenOpts { seed, ..GenOpts::default() };
     let mut extra = std::collections::HashMap::new();
     let mut i = 0;
     while i < args.len() {
@@ -263,7 +263,6 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
             "--top-k" => opts.sampling.top_k = val(args, &mut i, "--top-k").parse().ok().or(opts.sampling.top_k),
             "--top-p" => opts.sampling.top_p = val(args, &mut i, "--top-p").parse().ok().or(opts.sampling.top_p),
             "--repetition-penalty" => opts.sampling.repetition_penalty = val(args, &mut i, "--repetition-penalty").parse().ok().or(opts.sampling.repetition_penalty),
-            "--seed" => opts.seed = val(args, &mut i, "--seed").parse().unwrap_or(opts.seed),
             // The MTP residual codebooks (1..15) are SAMPLED by default, like
             // every other knob resolving from the checkpoint's own
             // `subtalker_*` keys - these flags are the explicit-override layer
@@ -302,10 +301,6 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
-    }
-    if !args.iter().any(|a| a == "--seed") {
-        opts.seed = data::rng::random_seed();
-        eprintln!("tts: no --seed given, using random seed {} (pass --seed {} to reproduce)", opts.seed, opts.seed);
     }
     let mut overrides = std::collections::BTreeMap::new();
     if let Some(w) = weights_dir {

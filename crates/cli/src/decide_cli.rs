@@ -128,7 +128,7 @@ fn eval_verb(args: &mut crate::args::Args) -> i32 {
     };
     let mut run = EvalRun::new(model, data, split);
     run.costs = args.take_str("--costs").map(PathBuf::from);
-    run.order_seed = args.u64_or("--order-seed", 0);
+    run.order_seed = args.seed_flag("brain decide eval", "--order-seed");
     let as_json = args.take_flag("--json");
     let out = args.take_str("--out").map(PathBuf::from);
     args.finish();
@@ -225,7 +225,7 @@ fn train_verb(args: &mut crate::args::Args) -> i32 {
     run.freeze_encoder = !finetune;
     run.steps = args.usize_or("--steps", DEFAULT_STEPS);
     run.batch = args.usize_or("--batch", brain::decision::DEFAULT_BATCH);
-    run.seed = args.u64_or("--seed", 0);
+    run.seed = args.seed("brain decide train");
     args.finish();
     run.brain_commit = code_revision();
 

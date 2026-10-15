@@ -89,16 +89,12 @@ fn finetune(argv: &[String]) {
     let batch = a.u32_or("--batch", 4);
     let seq = a.u32_or("--seq", 1024);
     let lr = a.f32_or("--lr", 3e-5);
-    let mut seed = a.u32_or("--seed", 0) as u64;
+    let seed = a.seed("lfm2 finetune");
     a.finish();
     let (Some(weights), Some(tokenizer)) = (weights, tokenizer) else {
         eprintln!("usage: brain lfm2 finetune --weights F --tokenizer T [--data D --out F --steps N --batch B --seq T --lr X --seed K]");
         std::process::exit(2);
     };
-    if !argv.iter().any(|s| s == "--seed") {
-        seed = data::rng::random_seed();
-        eprintln!("lfm2 finetune: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
-    }
     let tok = load_tokenizer(&tokenizer);
     let mlm = mlm_config(&tok);
     let dir = std::path::Path::new(&data_dir);
@@ -133,7 +129,7 @@ fn eval(argv: &[String]) {
     let batches = a.u32_or("--batches", 8);
     let batch = a.u32_or("--batch", 4);
     let seq = a.u32_or("--seq", 1024);
-    let seed = a.u32_or("--seed", 0) as u64;
+    let seed = a.seed("lfm2 eval");
     a.finish();
     let (Some(weights), Some(tokenizer)) = (weights, tokenizer) else {
         eprintln!("usage: brain lfm2 eval --weights F --tokenizer T [--data D --batches N --batch B --seq T --seed K]");

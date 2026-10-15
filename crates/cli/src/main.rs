@@ -724,15 +724,12 @@ fn run_bench(args: &[String]) {
         _ => {}
     }
 
+    let (seed, rest) = crate::args::split_seed(args, "brain bench");
+    let args = &rest[..];
     let mut name: Option<&str> = None;
-    let mut seed = 1337u64;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--seed" => {
-                i += 1;
-                seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(seed);
-            }
             other if !other.starts_with("--") => name = Some(other),
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
@@ -792,8 +789,9 @@ fn run_scaling(seed: u64) {
 /// named architecture, aggregate per capability axis, write a results artifact
 /// under `results/<arch>-<seed>.json` (or `--out`), and print the table + axes.
 fn run_bench_eval(args: &[String]) {
+    let (seed, rest) = crate::args::split_seed(args, "brain bench eval");
+    let args = &rest[..];
     let mut arch = "gpt2".to_string();
-    let mut seed = 1337u64;
     let mut out: Option<String> = None;
     let mut smoke = false;
     let mut i = 0;
@@ -802,10 +800,6 @@ fn run_bench_eval(args: &[String]) {
             "--arch" => {
                 i += 1;
                 arch = args.get(i).cloned().unwrap_or(arch);
-            }
-            "--seed" => {
-                i += 1;
-                seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(seed);
             }
             "--out" => {
                 i += 1;
@@ -862,8 +856,9 @@ fn run_bench_eval(args: &[String]) {
 /// four times the largest N, print the per-axis curves, and write
 /// `results/scale-<arch>-<seed>.json`.
 fn run_bench_scale(args: &[String]) {
+    let (seed, rest) = crate::args::split_seed(args, "brain bench scale");
+    let args = &rest[..];
     let mut arch = "gpt2".to_string();
-    let mut seed = 1337u64;
     let mut out: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -871,10 +866,6 @@ fn run_bench_scale(args: &[String]) {
             "--arch" => {
                 i += 1;
                 arch = args.get(i).cloned().unwrap_or(arch);
-            }
-            "--seed" => {
-                i += 1;
-                seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(seed);
             }
             "--out" => {
                 i += 1;

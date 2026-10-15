@@ -13,6 +13,21 @@
 
 pub use appopts::Args;
 
+/// Resolve `--seed` for a verb that walks its own flag loop: the value given,
+/// or a freshly drawn random one printed to stderr (see [`Args::seed`]), plus
+/// the tokens the seed did not claim for the verb's own loop. A `--seed` that
+/// is not a seed exits 2 before any other flag is looked at. A help request
+/// draws silently: nobody is running anything, so there is nothing to
+/// reproduce.
+pub fn split_seed(args: &[String], what: &str) -> (u64, Vec<String>) {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        return (data::rng::random_seed(), args.to_vec());
+    }
+    let mut parsed = Args::new(args);
+    let seed = parsed.seed(what);
+    (seed, parsed.leftovers())
+}
+
 /// `--out`'s value, accepting either a dedicated command's own bare-path
 /// spelling (`--out out.png`) or the generic capability-manifest convention
 /// `brain caps <arch>` documents (`--out <blob_name>=<path>`, what `brain

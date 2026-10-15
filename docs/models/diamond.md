@@ -78,7 +78,7 @@ brain diamond finetune --weights <base.safetensors> --data <episode-dir> --out <
 - `bench`: `--frames <n>`, `--seed <n>`; add `--profile` with `--weights`
   and `--device` for a per-stage timing breakdown.
 - `finetune`: `--steps` (default 300), `--lr` (default 1e-4), `--wd`
-  (default 1e-2), `--clip` (default 1.0), `--seed` (default 7), `--device`.
+  (default 1e-2), `--clip` (default 1.0), `--seed` (default: drawn at random and printed), `--device`.
   Trains an episode dataset produced by `brain data gen` or `brain diamond play
   --record`; refuses to save a run that diverged (NaN/inf loss).
 

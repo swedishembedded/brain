@@ -421,9 +421,11 @@ fn register_synth(registry: &mut Registry) {
 fn register_synth(_registry: &mut Registry) {}
 
 pub fn run_serve(args: &[String]) {
+    let (seed, rest) = crate::args::split_seed(args, "brain serve");
+    let args = &rest[..];
     let mut gpt_path = std::env::var("BRAIN_GPT2").ok();
     let mut yolo_path = std::env::var("BRAIN_YOLOV8").ok();
-    let mut cfg = GenConfig { max_new: 256, temperature: 0.0, top_k: 0, eos: None, seed: 0 };
+    let mut cfg = GenConfig { max_new: 256, temperature: 0.0, top_k: 0, eos: None, seed };
     // Optional detection confidence threshold for the YOLO detector. A tiny model
     // trained for only a few hundred steps emits low-confidence boxes that the
     // default 0.25 filter would drop, so the demo can lower it (also `BRAIN_CONF`).
@@ -499,7 +501,6 @@ pub fn run_serve(args: &[String]) {
                 cfg.temperature = parsed(args, &mut i, &flag);
             }
             "--top-k" => cfg.top_k = parsed(args, &mut i, "--top-k"),
-            "--seed" => cfg.seed = parsed(args, &mut i, "--seed"),
             "--conf" => conf = Some(parsed(args, &mut i, "--conf")),
             // The stdio JSONL controller is what runs when no surface flag
             // is given below; `--stdio` names that path explicitly rather
@@ -621,11 +622,6 @@ pub fn run_serve(args: &[String]) {
             std::process::exit(2);
         }
         qwen_cfg.adapter_bank = Some(adapter_bank);
-    }
-
-    if !args.iter().any(|a| a == "--seed") {
-        cfg.seed = data::rng::random_seed();
-        eprintln!("brain serve: no --seed given, using random seed {} (pass --seed {} to reproduce)", cfg.seed, cfg.seed);
     }
 
     // Each bound ADDRESS reports its own `Gate::bound` call (`apiserve::serve_all`
