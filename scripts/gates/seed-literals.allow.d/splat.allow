@@ -1,0 +1,2 @@
+crates/splat/src/mcmc.rs	step:seed=0x3d47_535f_4d43_4d43_u64	default	todo: default seed becomes random, printed and recorded
+crates/splat/src/opt.rs	Fit::densify:seed=0x6879_6272_6964_u64	default	todo: default seed becomes random, printed and recorded

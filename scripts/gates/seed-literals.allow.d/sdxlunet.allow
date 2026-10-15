@@ -1,0 +1,3 @@
+crates/sdxlunet/src/bin/sdxl.rs	main:unwrap_or=0	default	todo: default seed becomes random, printed and recorded
+crates/sdxlunet/src/bin/unet_bench.rs	gemm_ab:Rng::new(11)	rng	bench-input: synthetic input that defines the measured workload
+crates/sdxlunet/src/pipeline.rs	GenerateOptions::default:seed=0	default	todo: default seed becomes random, printed and recorded

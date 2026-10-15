@@ -1,0 +1,5 @@
+samples/decision/arena/src/arena.rs	Arena::new:Rng::new(0)	rng	todo: default seed becomes random, printed and recorded
+samples/decision/arena/src/arena.rs	policy_ladder:Rng::new(99)	rng	todo: default seed becomes random, printed and recorded
+samples/decision/arena/src/main.rs	main:.seed(11)	default	todo: default seed becomes random, printed and recorded
+samples/decision/arena/src/main.rs	parse_args:head_seed=1	default	todo: default seed becomes random, printed and recorded
+samples/decision/arena/src/main.rs	parse_args:unwrap_or=0	default	todo: default seed becomes random, printed and recorded

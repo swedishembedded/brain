@@ -1,0 +1,2 @@
+crates/kronos/src/generate.rs	GenOpts::default:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/kronos/src/train.rs	KronosTrain::with_lora_batch_on:Lcg::new(0x51A7)	rng	todo: default seed becomes random, printed and recorded

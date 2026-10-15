@@ -1,0 +1,13 @@
+crates/ltxv/src/av_lora.rs	load_adapter:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/ltxv/src/longform.rs	-:SCENE_SEED_SALT=0x9E37_79B9_7F4A_7C15	const	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/lora.rs	load_adapter:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/ltxv/src/pipeline.rs	-:AUDIO_SEED_SALT=0x41_55_44_49_4f	const	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/pipeline.rs	-:REFINE_SEED_SALT=0x5245_4649_4e45_0001	const	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/pipeline.rs	-:VAE_DECODE_SEED_SALT=0x5641_455f_4445_4300	const	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/pipeline.rs	GenOpts::default:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/ltxv/src/pipeline.rs	generate:seed_salt=0	default	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/pipeline.rs	generate_long:seed_salt=0x57_49_4e_44_00_00_00_00u64	default	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/pipeline.rs	generate_masked:seed_salt=0	default	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/pipeline.rs	run_stage_major:seed_salt=0x57_49_4e_44_00_00_00_00u64	default	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/pipeline.rs	upscale:seed_salt=REFINE_SEED_SALT	default	salt: mixed into the caller seed to derive an independent stream
+crates/ltxv/src/pipeline.rs	upscale_and_refine:seed_salt=0x5332	default	salt: mixed into the caller seed to derive an independent stream

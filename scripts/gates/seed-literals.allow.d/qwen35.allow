@@ -1,0 +1,3 @@
+crates/qwen35/src/bin/qwen35_bench.rs	bench_gdn:Lcg::new(7)	rng	bench-input: synthetic input that defines the measured workload
+crates/qwen35/src/bin/qwen35_bench.rs	bench_gqa:Lcg::new(11)	rng	bench-input: synthetic input that defines the measured workload
+crates/qwen35/src/bin/qwen35_bench.rs	bench_mlp:Lcg::new(13)	rng	bench-input: synthetic input that defines the measured workload

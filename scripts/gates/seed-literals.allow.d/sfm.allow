@@ -1,0 +1,3 @@
+crates/sfm/examples/sfm_folder.rs	dominant_plane:Lcg::new(9)	rng	todo: example input generator
+crates/sfm/src/georef.rs	solve_enu:Lcg::new(0x5eed)	rng	todo: default seed becomes random, printed and recorded
+crates/sfm/src/positioning.rs	PositioningCfg::default:seed=1	default	todo: default seed becomes random, printed and recorded

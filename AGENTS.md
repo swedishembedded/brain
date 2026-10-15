@@ -2181,6 +2181,20 @@ a metric that isn't there was simply forgotten.
   from a `#[test]` in a lib unit-test binary (which has no command line of its
   own) is the one case that still needs documenting in
   `.agents/rules/testing.md` (`make check/scripts`, check-env-docs).
+- **Every default seed is random.** A literal seed in production code (a
+  `seed: 1337` default, `Rng::new(7)`, a Python `--seed` default, a Makefile
+  `SEED ?=`) is a bug unless it is a salt, a world constant, a frozen-artifact
+  seed read back, a RNG that is never consulted, a test double or a benchmark
+  input. `make check/seed-literals` (`scripts/gates/check-seed-literals.sh`,
+  also a pre-commit hook) fails on a literal that is not on
+  `scripts/gates/seed-literals.allow.d/<crate-or-dir>.allow` (one file per
+  crate or sample directory; each line is `path`, `symbol`, `kind` and a reason
+  starting `salt:`, `world:`, `frozen:`, `greedy:`, `test-double:`,
+  `bench-input:` or the temporary `todo:`) and on an entry whose literal is
+  gone, so the list only shrinks: delete the line when you fix the site, never
+  add a `todo:`. A test may fix a seed only with `// seed: <reason>` on the
+  line or the line above; `make check/seed-literals/tests` enforces that.
+  Spec: `make test/gates/seed-literals`.
 - **Validate everything crossing into brain from outside, at the point of
   entry - structurally AND semantically.** Anything brain did not itself
   produce is untrusted: a bench-exported training JSONL, an imported HF

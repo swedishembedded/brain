@@ -1,0 +1,1 @@
+crates/a/src/lib.rs	-:STREAM_SEED_SALT=0x5eed	const	salt: mixed into the caller's seed

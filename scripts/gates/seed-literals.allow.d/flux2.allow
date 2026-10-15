@@ -1,0 +1,2 @@
+crates/flux2/src/bin/flux2_latent.rs	op:--seed=0	default	todo: default seed becomes random, printed and recorded
+crates/flux2/src/pipeline.rs	GenOpts::default:seed=0	default	todo: default seed becomes random, printed and recorded

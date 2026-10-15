@@ -1,0 +1,9 @@
+samples/shell/imagegen/rgb-to-ir/rir_arms.py	-:--seed=1	python-default	todo: draw by default, print and record the seed
+samples/shell/imagegen/rgb-to-ir/rir_captions.py	-:--seed=1	python-default	todo: draw by default, print and record the seed
+samples/shell/imagegen/rgb-to-ir/rir_obey.py	-:--seed=1	python-default	todo: draw by default, print and record the seed
+samples/shell/imagegen/rgb-to-ir/rir_pack.py	-:--seed=1	python-default	todo: draw by default, print and record the seed
+samples/shell/imagegen/rgb-to-ir/rir_regions.py	-:--seed=1	python-default	todo: draw by default, print and record the seed
+samples/shell/imagegen/rgb-to-ir/rir_sheet.py	-:--seed=1	python-default	todo: draw by default, print and record the seed
+samples/shell/imagegen/rgb-to-ir/rir_splits.py	-:--seed=1	python-default	todo: draw by default, print and record the seed
+samples/shell/imagegen/rgb-to-ir/rir_synth.py	-:--seed=1	python-default	todo: draw by default, print and record the seed
+samples/shell/imagegen/rgb-to-ir/rir_tiles.py	-:--seed=1	python-default	todo: draw by default, print and record the seed

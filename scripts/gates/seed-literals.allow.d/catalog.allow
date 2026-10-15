@@ -1,0 +1,3 @@
+crates/catalog/src/resident_mock.rs	MockResident::generate_spec:default=0	default	test-double: deterministic stand-in or fixture value
+crates/catalog/src/resident_mock.rs	MockResident::text2image_spec:default=0	default	test-double: deterministic stand-in or fixture value
+crates/catalog/src/resident_mock.rs	text2image:unwrap_or=0	default	test-double: deterministic stand-in or fixture value

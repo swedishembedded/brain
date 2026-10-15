@@ -1,0 +1,5 @@
+crates/capability-mock/src/expect.rs	MockBlob::audio:seed=0	default	test-double: deterministic stand-in or fixture value
+crates/capability-mock/src/expect.rs	MockBlob::image:seed=0	default	test-double: deterministic stand-in or fixture value
+crates/capability-mock/src/expect.rs	MockBlob::mask:seed=0	default	test-double: deterministic stand-in or fixture value
+crates/capability-mock/src/expect.rs	MockBlob::video:seed=0	default	test-double: deterministic stand-in or fixture value
+crates/capability-mock/src/synth.rs	seed_param:unwrap_or=0	default	test-double: deterministic stand-in or fixture value

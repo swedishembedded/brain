@@ -388,7 +388,7 @@ test/slow:
 # "green because skipped" risk.
 ## test/full - release gate: test + test/doc + test/slow + test/e2e + every check/* gate
 ##   + test/parity + test/parity/strict (needs make testdata/fetch)
-test/full: test test/doc test/slow test/e2e check/scripts check/env-reads test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
+test/full: test test/doc test/slow test/e2e check/scripts check/env-reads check/seed-literals test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -645,13 +645,33 @@ check:
 check/env-reads:
 	bash scripts/gates/check-env-reads.sh
 
+# Every default seed is random. A literal seed in production code (Rust, Python
+# `--seed` defaults, Makefile `SEED ?=`) must be on
+# scripts/gates/seed-literals.allow.d/<crate-or-dir>.allow with a reason (salt,
+# world constant, frozen artifact, greedy path, test double, bench input) or a
+# `todo:` that a later change removes. See scripts/gates/check-seed-literals.sh.
+## check/seed-literals - no new literal seeds in production code (draw a random one); allowlist entries must still exist
+check/seed-literals:
+	bash scripts/gates/check-seed-literals.sh
+
+# Test code may fix a seed only where determinism is necessary, with a
+# `// seed: <reason>` on the line or the line above. Not part of `check` yet:
+# it lists the test literals that still lack their reason.
+## check/seed-literals/tests - OPT-IN: every literal seed in a test carries a `// seed:` reason
+check/seed-literals/tests:
+	bash scripts/gates/check-seed-literals.sh --tests
+
 # Spec for the gate above, run against throwaway trees (needs only bats).
-## test/gates - default: every gate self-test (env-reads)
-test/gates: test/gates/env-reads
+## test/gates - default: every gate self-test (env-reads, seed-literals)
+test/gates: test/gates/env-reads test/gates/seed-literals
 
 ## test/gates/env-reads - the env-read ratchet fails on a new read and on a stale entry, passes on a match
 test/gates/env-reads:
 	bats tests/gates/env_reads.bats
+
+## test/gates/seed-literals - the seed-literal ratchet fails on a new literal, a stale entry and (in test mode) a bare test seed
+test/gates/seed-literals:
+	bats tests/gates/seed_literals.bats
 
 # Runs BEFORE the clippy gate: if a manifest is broken, cargo fails at
 # manifest-parse time with an error naming an innocent crate, and every other
@@ -1778,7 +1798,7 @@ help:
         test/e2e test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
-        check check/workspace check/clippy check/scripts check/env-reads test/gates test/gates/env-reads check/spdx check/paths check/scope \
+        check check/workspace check/clippy check/scripts check/env-reads check/seed-literals check/seed-literals/tests test/gates test/gates/env-reads test/gates/seed-literals check/spdx check/paths check/scope \
         check/files check/samples check/sdk-features check/make-targets \
         check/generated check/generated/kernels-wgsl-table check/generated/kernels-cuda-table \
         check/generated/samples-manifest \

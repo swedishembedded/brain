@@ -1,0 +1,8 @@
+crates/qwen3/src/bin/qwen_bench.rs	flash_decode_bench:Rng::new(17)	rng	bench-input: synthetic input that defines the measured workload
+crates/qwen3/src/bin/qwen_bench.rs	flash_decode_i8_bench:Rng::new(17)	rng	bench-input: synthetic input that defines the measured workload
+crates/qwen3/src/bin/qwen_bench.rs	flash_prefill_bench:Rng::new(29)	rng	bench-input: synthetic input that defines the measured workload
+crates/qwen3/src/bin/qwen_bench.rs	flash_prefill_i8_bench:Rng::new(29)	rng	bench-input: synthetic input that defines the measured workload
+crates/qwen3/src/bin/qwen_bench.rs	gemm8_ab:Rng::new(11)	rng	bench-input: synthetic input that defines the measured workload
+crates/qwen3/src/caps.rs	manifest:default=1234	default	todo: default seed becomes random, printed and recorded
+crates/qwen3/src/caps.rs	score_arm:Rng::new(0)	rng	greedy: argmax decode never consults the RNG
+crates/qwen3/src/caps.rs	train_in:unwrap_or=1234	default	todo: default seed becomes random, printed and recorded

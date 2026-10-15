@@ -1,0 +1,3 @@
+crates/vqgan/src/bin/vqgan_bench.rs	dwtn_ab:Rng::new(7)	rng	bench-input: synthetic input that defines the measured workload
+crates/vqgan/src/bin/vqgan_bench.rs	gn_ab:Rng::new(3)	rng	bench-input: synthetic input that defines the measured workload
+crates/vqgan/src/bin/vqgan_bench.rs	gn_ab:Rng::new(9)	rng	bench-input: synthetic input that defines the measured workload

@@ -1,0 +1,3 @@
+crates/toymoe/src/model.rs	parse_args:seed=1234	default	todo: default seed becomes random, printed and recorded
+crates/toymoe/src/model.rs	run_eval:seed=123	default	todo: default seed becomes random, printed and recorded
+crates/toymoe/src/model.rs	run_train:seed=0	default	todo: default seed becomes random, printed and recorded

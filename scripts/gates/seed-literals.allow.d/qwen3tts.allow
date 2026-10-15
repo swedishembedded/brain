@@ -1,0 +1,10 @@
+crates/qwen3tts/examples/fused_parity.rs	main:Lcg::new(1)	rng	world: fixed inputs of a parity check
+crates/qwen3tts/examples/fused_parity.rs	main:Lcg::new(2)	rng	world: fixed inputs of a parity check
+crates/qwen3tts/examples/fused_parity.rs	main:Rng::new(0)	rng	world: fixed inputs of a parity check
+crates/qwen3tts/examples/mtp_bench.rs	main:Lcg::new(1)	rng	bench-input: synthetic input that defines the measured workload
+crates/qwen3tts/examples/mtp_bench.rs	main:Lcg::new(2)	rng	bench-input: synthetic input that defines the measured workload
+crates/qwen3tts/examples/mtp_bench.rs	main:Lcg::new(3)	rng	bench-input: synthetic input that defines the measured workload
+crates/qwen3tts/src/gen_kv_mtp.rs	CpuMtp::generate_residuals:Rng::new(0)	rng	greedy: argmax decode never consults the RNG
+crates/qwen3tts/src/mtp.rs	MtpModel::generate_residuals:Rng::new(0)	rng	greedy: argmax decode never consults the RNG
+crates/qwen3tts/src/pipeline.rs	GenOpts::default:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/qwen3tts/src/sft.rs	FinetuneOpts::default:seed=1337	default	todo: default seed becomes random, printed and recorded

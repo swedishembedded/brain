@@ -1,0 +1,4 @@
+crates/bench/src/capscale.rs	CapScaleConfig::default:seed=1337	default	todo: default seed becomes random, printed and recorded
+crates/bench/src/eval.rs	load_artifact:unwrap_or=0	default	todo: default seed becomes random, printed and recorded
+crates/bench/src/model.rs	TrainConfig::default:seed=1337	default	todo: default seed becomes random, printed and recorded
+crates/bench/src/scaling.rs	Sweep::default:seed=1337	default	todo: default seed becomes random, printed and recorded

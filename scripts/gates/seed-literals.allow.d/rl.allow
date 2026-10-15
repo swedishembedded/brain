@@ -1,0 +1,13 @@
+crates/rl/examples/autonomous_exploration.rs	-:PROBE_SEED_BASE=700_000_000	const	todo: default seed becomes random, printed and recorded
+crates/rl/examples/autonomous_exploration.rs	Args::default:seed=11	default	todo: default seed becomes random, printed and recorded
+crates/rl/examples/continual_learning.rs	-:PRETRAIN_SEED=20	const	todo: default seed becomes random, printed and recorded
+crates/rl/examples/continual_learning.rs	Args::default:seed=1	default	todo: default seed becomes random, printed and recorded
+crates/rl/examples/continual_learning.rs	prepare_base:seed=PRETRAIN_SEED	default	todo: default seed becomes random, printed and recorded
+crates/rl/examples/oracle_capacity_check.rs	-:PRETRAIN_SEED=20	const	todo: default seed becomes random, printed and recorded
+crates/rl/examples/oracle_capacity_check.rs	-:SFT_SEED=1	const	todo: default seed becomes random, printed and recorded
+crates/rl/examples/oracle_capacity_check.rs	main:seed=SFT_SEED	default	todo: default seed becomes random, printed and recorded
+crates/rl/examples/oracle_capacity_check.rs	prepare_base:seed=PRETRAIN_SEED	default	todo: default seed becomes random, printed and recorded
+crates/rl/src/continual.rs	-:PROBE_SEED_BASE=900_000_000	const	world: held-out probe episodes of the continual-learning study
+crates/rl/src/document.rs	DocumentStudyConfig::default:null_gate_seed=2	default	todo: default seed becomes random, printed and recorded
+crates/rl/src/document.rs	DocumentStudyConfig::default:seed=1	default	todo: default seed becomes random, printed and recorded
+crates/rl/src/improve.rs	decode_checkpoint:Rng::new(0)	rng	greedy: argmax decode never consults the RNG

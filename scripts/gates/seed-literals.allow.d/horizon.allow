@@ -1,0 +1,5 @@
+crates/horizon/examples/step_profile.rs	main:Rng::new(7)	rng	todo: example input generator
+crates/horizon/src/evaluation.rs	Bootstrap::default:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/horizon/src/fit.rs	TrainSpec::new:seed=1	default	todo: default seed becomes random, printed and recorded
+crates/horizon/src/lifecycle.rs	train_spec:default=1	default	todo: default seed becomes random, printed and recorded
+crates/horizon/src/train.rs	for_each_batch:Rng::new(0)	rng	greedy: argmax decode never consults the RNG

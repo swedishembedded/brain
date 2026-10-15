@@ -1,0 +1,1 @@
+crates/testutil/src/adapters.rs	write_adapter:seed=1	default	test-double: deterministic stand-in or fixture value

@@ -1,0 +1,23 @@
+crates/sdk/src/control.rs	-:EVAL_SEEDS=1_000_000	const	world: the frozen evaluation episodes
+crates/sdk/src/control.rs	ControlPipeline::builder:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/control.rs	ControlPipeline::gauge:Rng::new(0x6a11_6e00)	rng	world: gauging stream set aside from training by design
+crates/sdk/src/control.rs	ControlPipeline::gauge:episode_seed=0x4000_0000	default	salt: block of episode seeds no rollout draws
+crates/sdk/src/control.rs	ControlPipelineBuilder::load:episode_seed=0	default	world: placeholder overwritten for every episode
+crates/sdk/src/control.rs	ControlSpec::default:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/conversion.rs	ConversionPipeline::builder:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/conversion.rs	ConversionSpec::default:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/decision.rs	DecisionPipeline::builder:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/decision.rs	TrainSpec::default:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/decision_run.rs	EvalRun::new:order_seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/decision_run.rs	TrainRun::new:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/finetune.rs	ChatFineTune::from_pretrained:seed=1337	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/full_finetune.rs	ChatFullFineTune::from_pretrained:seed=1337	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/pipeline.rs	-:S3DIT_DEFAULT_SEED=42	const	todo: default seed becomes random, printed and recorded
+crates/sdk/src/preference.rs	PreferenceFineTune::from_pretrained:seed=1337	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/qa.rs	Distil::with:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/qa.rs	Phrase::with:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/reader.rs	ContinualReader::from_pretrained:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/rlcd.rs	RlcdPipeline::builder:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/rlcd.rs	RlcdSpec::default:seed=0	default	todo: default seed becomes random, printed and recorded
+crates/sdk/src/text.rs	Engine::generate_rows:Rng::new(0)	rng	greedy: argmax decode never consults the RNG
+crates/sdk/src/tts/policy.rs	PolicyOptions::default:seed=1	default	todo: default seed becomes random, printed and recorded

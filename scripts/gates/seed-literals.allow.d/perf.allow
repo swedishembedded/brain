@@ -1,0 +1,2 @@
+crates/perf/src/scenarios/mod.rs	Options::default:seed=1234	default	todo: default seed becomes random, printed and recorded
+crates/perf/src/targets.rs	fidelity_requests:seed=0x5EED	default	todo: default seed becomes random, printed and recorded
