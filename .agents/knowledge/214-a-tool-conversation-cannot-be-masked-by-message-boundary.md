@@ -31,3 +31,14 @@ The rule: a mask that depends on cutting one rendering of a whole conversation
 is only as sound as the template's prefix stability. When a template is
 context-sensitive, render each supervised turn after its own prefix instead,
 and prove it against the serving renderer, not against the training renderer.
+
+The remaining shape was a record that supervises only its final answer after
+unsupervised tool turns: no supervised turn calls a tool, so it still took the
+refused whole-record path. `ChatTemplate::render_with_supervised_suffix` is the
+one boundary that needs: the context rendered with the generation prompt (same
+reasoning flags) must be a byte prefix of the full render, the supervised span
+is what follows, and a no-think block the prompt pre-fills is context.
+`answers_as_asked` is that call once per supervised turn;
+`ChatSample::final_turn_as_asked` is it for a record that supervises its last
+message alone. A record that supervises two or more turns without a tool call
+among them is still masked as a whole and still refused.

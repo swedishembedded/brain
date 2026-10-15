@@ -359,6 +359,44 @@ impl ChatTemplate {
         Some(tail[at..].to_string())
     }
 
+    /// Render a conversation whose LAST message is the one supervised, and
+    /// find the single byte boundary between what a model is asked from and
+    /// what it is trained to generate.
+    ///
+    /// The context is `messages[..len-1]` rendered with the generation
+    /// prompt, under the same reasoning flags inference uses (`thinking`
+    /// false is [`Self::render_no_think`], whose pre-filled reasoning block is
+    /// therefore context). The full render must start with exactly those
+    /// bytes; the supervised span is what follows, i.e. the final message as
+    /// the template renders it as the last turn plus its end-of-turn token.
+    ///
+    /// Unlike [`Self::render_with_message_boundaries`] this needs no boundary
+    /// for any earlier message, so a template that renders a turn differently
+    /// as the last message than in the middle of a conversation (Qwen3's
+    /// reasoning block) does not make a tool-call turn in the context
+    /// unmaskable. Returns the full text and the supervised byte range.
+    ///
+    /// # Errors
+    /// `messages` is empty, or the full render does not start with the
+    /// context's prompt (the template renders the context differently with
+    /// and without the final message): no boundary is guessed.
+    pub fn render_with_supervised_suffix(&self, messages: &[Value], tools: Option<Value>, thinking: bool) -> Result<(String, Range<usize>), TemplateError> {
+        let Some((_, context)) = messages.split_last() else {
+            return Err(TemplateError("a supervised suffix needs at least one message".to_string()));
+        };
+        let context = Value::from(context.to_vec());
+        let prompt = if thinking { self.render(context, tools.clone(), true, &BTreeMap::new())? } else { self.render_no_think(context, tools.clone(), &BTreeMap::new())? };
+        let full = self.render(Value::from(messages.to_vec()), tools, false, &BTreeMap::new())?;
+        if !full.as_bytes().starts_with(prompt.as_bytes()) {
+            return Err(TemplateError(format!(
+                "the final message does not follow the prompt the model is asked from: the template renders the conversation so far ({} bytes with the generation prompt) differently with and without it",
+                prompt.len()
+            )));
+        }
+        let supervised = prompt.len()..full.len();
+        Ok((full, supervised))
+    }
+
     /// Render the full conversation once, AND determine each message's byte
     /// range within it — for SFT loss masking, which needs to know exactly
     /// which tokens came from which message.

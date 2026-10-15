@@ -241,22 +241,60 @@ impl ChatSample {
         if self.messages.iter().any(|m| m.train && m.role != "assistant") {
             return Ok(None);
         }
-        let values: Vec<minijinja::Value> = self.messages.iter().map(ChatMessage::to_template_value).collect();
-        let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
-        let none = std::collections::BTreeMap::new();
         let mut out = Vec::new();
         for at in (0..self.messages.len()).filter(|&at| self.messages[at].train) {
-            let asked = minijinja::Value::from(values[..at].to_vec());
-            let prompt = if thinking { tmpl.render(asked, tools.clone(), true, &none)? } else { tmpl.render_no_think(asked, tools.clone(), &none)? };
-            let full = tmpl.render(minijinja::Value::from(values[..=at].to_vec()), tools.clone(), false, &none)?;
-            let Some(completion) = full.strip_prefix(prompt.as_str()) else {
-                return Err(TemplateError(format!(
-                    "the answer at message {at} does not follow the prompt the model is asked from: the template renders the conversation so far differently with and without it"
-                )));
-            };
-            out.push(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { prompt, completion: completion.to_string() }) });
+            out.push(self.until(at + 1).rendered_final_turn(tmpl, thinking)?);
         }
         Ok(Some(out))
+    }
+
+    /// The first `len` messages as a sample of their own.
+    fn until(&self, len: usize) -> ChatSample {
+        ChatSample { messages: self.messages[..len].to_vec(), tools: self.tools.clone(), rendered: None }
+    }
+
+    /// This sample's last message as one example the way the model is asked
+    /// for it ([`ChatTemplate::render_with_supervised_suffix`]): the prompt is
+    /// context and only what the template renders for that message is
+    /// supervised.
+    fn rendered_final_turn(&self, tmpl: &ChatTemplate, thinking: bool) -> Result<ChatSample, TemplateError> {
+        let values: Vec<minijinja::Value> = self.messages.iter().map(ChatMessage::to_template_value).collect();
+        let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
+        let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
+        let (prompt, completion) = full.split_at(answer.start);
+        Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { prompt: prompt.to_string(), completion: completion.to_string() }) })
+    }
+
+    /// Whether the last message is the only supervised one and it is an
+    /// assistant turn: the shape [`ChatSample::final_turn_as_asked`] masks
+    /// exactly whatever the context holds.
+    #[must_use]
+    pub fn supervises_only_final_turn(&self) -> bool {
+        self.messages.last().is_some_and(|m| m.train && m.role == "assistant") && self.messages.iter().filter(|m| m.train).count() == 1
+    }
+
+    /// Whether the context before the last message holds a tool call or a tool
+    /// result, which a template may render differently there than when it is
+    /// the whole conversation.
+    #[must_use]
+    pub fn context_holds_tool_turns(&self) -> bool {
+        self.messages.split_last().is_some_and(|(_, context)| context.iter().any(|m| m.role == "tool" || !m.tool_calls.is_empty()))
+    }
+
+    /// This sample as a single example when only its last message is
+    /// supervised (see [`ChatSample::supervises_only_final_turn`]), masked at
+    /// the one boundary between the prompt its context renders and the answer
+    /// ([`ChatTemplate::render_with_supervised_suffix`]); `None` for any other
+    /// record, which keeps the whole-conversation mask (and its refusals) or
+    /// [`ChatSample::answers_as_asked`].
+    ///
+    /// # Errors
+    /// The template renders the answer so that it does not follow its prompt.
+    pub fn final_turn_as_asked(&self, tmpl: &ChatTemplate, thinking: bool) -> Result<Option<ChatSample>, TemplateError> {
+        if !self.supervises_only_final_turn() {
+            return Ok(None);
+        }
+        self.rendered_final_turn(tmpl, thinking).map(Some)
     }
 
     /// [`ChatSample::encode_with`] at the default [`RenderOpts`].

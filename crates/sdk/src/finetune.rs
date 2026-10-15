@@ -857,8 +857,9 @@ impl Asked<'_> {
     /// example per answer, each as the model is asked for it
     /// ([`ChatSample::answers_as_asked`]), for a model trained for no-think
     /// mode and, in thinking mode, for a record whose supervised turns call
-    /// tools (whole-record masking refuses those); any other record keeps its
-    /// shape, its answers following the no-think block when there is one.
+    /// tools or that supervises only its last message after tool turns
+    /// (whole-record masking refuses those); any other record keeps its shape,
+    /// its answers following the no-think block when there is one.
     pub(crate) fn read(&self, path: &Path) -> Result<Vec<ChatSample>> {
         let summary = crate::validate_chat_dataset(path).map_err(Error::Backend)?;
         if summary.trained_messages == 0 {
@@ -869,8 +870,15 @@ impl Asked<'_> {
         for (at, record) in records.iter().enumerate() {
             let invalid = |e: &dyn std::fmt::Display| Error::Backend(format!("{}: record {} cannot be encoded for training: {e}", path.display(), at + 1));
             // Whole-record masking is exact for plain answers in thinking mode
-            // and refuses tool calls; everywhere else each answer is asked for.
-            let per_answer = if self.no_think.is_some() || record.supervises_tool_calls() { record.answers_as_asked(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))? } else { None };
+            // and refuses tool turns; everywhere else each answer is asked for,
+            // and a record supervising only its last message has one boundary.
+            let per_answer = if self.no_think.is_some() || record.supervises_tool_calls() {
+                record.answers_as_asked(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))?
+            } else if record.supervises_only_final_turn() && record.context_holds_tool_turns() {
+                record.final_turn_as_asked(self.tmpl, true).map_err(|e| invalid(&e))?.map(|asked| vec![asked])
+            } else {
+                None
+            };
             match (per_answer, self.no_think) {
                 (Some(asked), _) => samples.extend(asked),
                 (None, None) => samples.push(record.clone()),
@@ -1094,7 +1102,10 @@ mod tests {
         let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
         let chars: String = (32u8..127).map(char::from).chain(['\n']).collect();
         let tok = data::tokenizer::CharTokenizer::from_corpus(&chars);
-        let path = std::env::temp_dir().join(format!("brain-asked-{}-{no_think}-{}.jsonl", std::process::id(), lines.len()));
+        // One file per call: tests run in parallel and each removes its own.
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("brain-asked-{}-{call}.jsonl", std::process::id()));
         std::fs::write(&path, lines.join("\n")).unwrap();
         let no_think_block = no_think.then(|| tmpl.no_think_block().unwrap());
         let render = data::chat::RenderOpts { keep_reasoning: no_think };
@@ -1105,6 +1116,7 @@ mod tests {
 
     const ANSWER: &str = r#"{"messages":[{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true}]}"#;
     const DIALOGUE: &str = r#"{"messages":[{"role":"user","content":"q1","train":false},{"role":"assistant","content":"a1","train":true},{"role":"user","content":"q2","train":false},{"role":"assistant","content":"a2","train":true}]}"#;
+    const TOOL_CONTEXT_FINAL_ANSWER: &str = r#"{"messages":[{"role":"user","content":"w","train":false},{"role":"assistant","content":"","train":false,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","content":"r","tool_call_id":"c1","train":false},{"role":"assistant","content":"done","train":true}]}"#;
     const TOOL_CONVERSATION: &str = r#"{"messages":[{"role":"user","content":"w","train":false},{"role":"assistant","content":"","train":true,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","content":"r","tool_call_id":"c1","train":false},{"role":"assistant","content":"done","train":true}]}"#;
 
     /// A conversation with a supervised tool call trains turn by turn in both
@@ -1121,6 +1133,17 @@ mod tests {
         assert_eq!(plain.len(), 1);
         assert!(plain[0].rendered.is_none(), "thinking-mode plain answers are encoded as the record");
         assert_eq!(read_lines(&[DIALOGUE], true).unwrap().len(), 2);
+    }
+
+    /// A record that supervises only its final answer after a tool call and
+    /// its result is one example in either thinking mode, not a refusal.
+    #[test]
+    fn a_final_answer_after_unsupervised_tool_turns_is_one_example() {
+        for no_think in [false, true] {
+            let samples = read_lines(&[TOOL_CONTEXT_FINAL_ANSWER], no_think).unwrap();
+            assert_eq!(samples.len(), 1, "no_think={no_think}");
+            assert!(samples[0].rendered.is_some());
+        }
     }
 
     /// The share each group's rows make of the mix `repeats` lists.
