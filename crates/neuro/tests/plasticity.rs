@@ -192,7 +192,7 @@ fn cpu_and_gpu_agree_on_the_learning_path() {
     let csc = random_csc(256, 12, 0x66);
     let p = LifParams { dt_over_tau: 0.5, v_th: 0.3, refrac_ticks: 1, ..LifParams::default() };
     let pp = PlasticityParams { eta: 0.3, ..Default::default() };
-    let mut rng = data::rng::Lcg::new(0x77);
+    let mut rng = data::rng::Lcg::random();
     let drive = rng.vec_scaled(csc.n as usize, 0.9);
 
     let run = |gpu: gpu_core::Gpu| {

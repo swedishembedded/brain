@@ -31,7 +31,7 @@ use deepseekocr2::rows::TileGrid;
 #[test]
 fn gather_and_scatter_are_exact_inverses() {
     let (n_tiles, nl, ng, d) = (5usize, 3u32, 7u32, 4u32);
-    let mut rng = Rng::new(11);
+    let mut rng = Rng::random();
     let mut rnd = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.next_f32() - 0.5).collect() };
 
     let tiles: Vec<Vec<f32>> = (0..n_tiles).map(|_| rnd((nl * d) as usize)).collect();
@@ -167,6 +167,7 @@ fn projector_rows_land_at_the_row_plans_positions() {
 fn the_composite_backward_matches_a_finite_difference_through_the_whole_splice() {
     let f = Fixture::new(505);
     let (tiles0, global) = f.sam_inputs(606);
+    // seed: the finite-difference tolerance through the splice was measured along this probe direction
     let mut rng = Rng::new(707);
     let dir: Vec<f32> = (0..tiles0[0].len()).map(|_| rng.next_f32() - 0.5).collect();
 
@@ -205,7 +206,7 @@ fn the_composite_backward_matches_a_finite_difference_through_the_whole_splice()
 #[test]
 fn swapping_tile_order_in_gather_rows_changes_the_assembled_block() {
     let (n_tiles, nl, ng, d) = (3usize, 2u32, 3u32, 4u32);
-    let mut rng = Rng::new(909);
+    let mut rng = Rng::random();
     let mut rnd = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.next_f32() - 0.5).collect() };
     let tiles: Vec<Vec<f32>> = (0..n_tiles).map(|_| rnd((nl * d) as usize)).collect();
     let global = rnd((ng * d) as usize);

@@ -110,7 +110,7 @@ fn the_gather_matches_a_host_sparse_matvec() {
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let mut net = SpikingNet::new(gpu, &csc, p).unwrap();
 
-    let mut rng = data::rng::Lcg::new(3);
+    let mut rng = data::rng::Lcg::random();
     let drive = rng.vec_scaled(n, 1.0);
     net.drive(Port::Drive, &drive).unwrap();
     net.step();
@@ -144,7 +144,7 @@ fn the_gather_matches_a_host_sparse_matvec() {
 fn cpu_and_gpu_agree_on_an_irregular_connectome() {
     let csc = random_csc(512, 24, 0xC0FFEE);
     let p = LifParams { dt_over_tau: 0.25, v_th: 0.4, refrac_ticks: 2, ..LifParams::default() };
-    let mut rng = data::rng::Lcg::new(7);
+    let mut rng = data::rng::Lcg::random();
     let drive = rng.vec_scaled(csc.n as usize, 0.6);
 
     let run = |gpu: gpu_core::Gpu| {
@@ -188,7 +188,7 @@ fn cpu_and_gpu_agree_on_an_irregular_connectome() {
 fn a_restored_snapshot_replays_bit_for_bit() {
     let csc = random_csc(256, 16, 0x5EED);
     let p = LifParams { dt_over_tau: 0.3, v_th: 0.35, refrac_ticks: 1, ..LifParams::default() };
-    let mut rng = data::rng::Lcg::new(11);
+    let mut rng = data::rng::Lcg::random();
     let drive = rng.vec_scaled(csc.n as usize, 0.7);
 
     let gpu = gpu_core::testgpu::dev(&KERNELS);

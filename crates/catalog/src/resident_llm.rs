@@ -1888,7 +1888,7 @@ mod tests {
 
         let tok = data::qwen_tokenizer::QwenBpe::from_file(dir.join("tokenizer.json").to_str().unwrap()).unwrap();
         let model = qwen3::model::Qwen::from_tensors_decode(cfg, &init, 64);
-        let ids = qwen3::sample::generate_kv(&model, &tok.encode("hello"), 6, 0.0, 0, 1.0, &[], &mut Rng::new(0));
+        let ids = qwen3::sample::generate_kv(&model, &tok.encode("hello"), 6, 0.0, 0, 1.0, &[], &mut Rng::random());
         assert_eq!(got.outputs.get("text"), Some(&json!(tok.decode(&ids))));
         let after: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(after, before, "serving writes nothing beside the checkpoint");

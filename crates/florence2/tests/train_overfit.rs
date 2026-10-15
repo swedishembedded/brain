@@ -193,7 +193,8 @@ fn a_fresh_adapter_is_a_no_op() {
     let cfg = BartConfig::tiny();
     let (t_prompt, max_t) = (4u32, 4u32);
     let ex = example(&cfg, t_prompt, max_t, 7);
-    let seed = 55u64;
+    let seed = data::rng::random_seed();
+    eprintln!("init seed: {seed}");
 
     let base_names = train::param_list(&cfg, t_prompt, max_t, None);
     let base_init = train::init_weights(&base_names, 0.15, seed);

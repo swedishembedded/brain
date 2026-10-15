@@ -92,8 +92,8 @@ fn a_gradient_step_reduces_the_proxy_objective() {
             &init,
         );
         m.set_tokens(&ids);
-        let r_h = Lcg::new(0xC0FFEE | 1).vec(n * h);
-        let r_o = Lcg::new(0xBEEF | 1).vec(b as usize * out_w);
+        let r_h = Lcg::random().vec(n * h);
+        let r_o = Lcg::random().vec(b as usize * out_w);
 
         let loss = || -> f32 {
             m.forward();
