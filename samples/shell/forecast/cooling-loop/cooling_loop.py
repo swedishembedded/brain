@@ -16,7 +16,7 @@ directly and needs no server.
 
 Run under a private session bus (needs no system config):
 
-    python3 tools/forecast/make_cooling_loop.py --out cooling_loop.csv
+    python3 tools/forecast/make_cooling_loop.py --out cooling_loop.csv --seed 7
     BRAIN_TIMESFM3=timesfm3.safetensors tools/dbus-session.sh \
       --serve "--dbus --device cpu" \
       -- python3 samples/shell/forecast/cooling-loop/cooling_loop.py cooling_loop.csv

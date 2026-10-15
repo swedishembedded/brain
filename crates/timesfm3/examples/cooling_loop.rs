@@ -27,7 +27,7 @@
 //!   own production plan) all attend to each other through one decode() call.
 //!
 //! Usage:
-//!   python3 tools/forecast/make_cooling_loop.py --out cooling_loop.csv
+//!   python3 tools/forecast/make_cooling_loop.py --out cooling_loop.csv --seed 7
 //!   cargo run --release -p brain-timesfm3 --example cooling_loop -- \
 //!     cooling_loop.csv <timesfm3.safetensors> [chart.png]
 

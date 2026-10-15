@@ -1,4 +1,3 @@
-tools/forecast/make_cooling_loop.py	-:--seed=7	python-default	todo: draw by default, print and record the seed
 tools/forecast/make_synthetic_ohlcv.py	-:--seed=18	python-default	todo: draw by default, print and record the seed
 tools/forecast/oos_skill_report.py	-:--seed=7	python-default	todo: draw by default, print and record the seed
 tools/forecast/prep_backtest_data.py	-:--seed=7	python-default	todo: draw by default, print and record the seed

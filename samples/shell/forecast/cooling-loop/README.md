@@ -35,7 +35,7 @@ computed locally. The gap between this run's error and the Rust run's is the
 covariates' own contribution, not noise.
 
 ```bash
-python3 tools/forecast/make_cooling_loop.py --out cooling_loop.csv
+python3 tools/forecast/make_cooling_loop.py --out cooling_loop.csv --seed 7
 BRAIN_TIMESFM3=timesfm3.safetensors tools/dbus-session.sh \
   --serve "--dbus --device cpu" \
   -- python3 samples/shell/forecast/cooling-loop/cooling_loop.py cooling_loop.csv
