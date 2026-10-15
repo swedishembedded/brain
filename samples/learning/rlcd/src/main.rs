@@ -78,9 +78,15 @@ struct Args {
     voi_steps: usize,
     query_cost: f32,
     ask: Option<String>,
+    /// Seed of the training run: the one given with `--seed`, else drawn and printed.
+    seed: u64,
 }
 
 fn parse_args() -> Args {
+    parse_args_from(&std::env::args().skip(1).collect::<Vec<String>>())
+}
+
+fn parse_args_from(argv: &[String]) -> Args {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut a = Args {
         encoder: std::env::var("BRAIN_MINILM_DIR").unwrap_or_else(|_| {
@@ -92,8 +98,8 @@ fn parse_args() -> Args {
         voi_steps: 600,
         query_cost: 0.05,
         ask: None,
+        seed: brain::options::Args::new(argv).seed("rlcd"),
     };
-    let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < argv.len() {
         let next = || argv.get(i + 1).cloned().unwrap_or_default();
@@ -105,9 +111,12 @@ fn parse_args() -> Args {
             "--voi-steps" => a.voi_steps = next().parse().unwrap_or(a.voi_steps),
             "--query-cost" => a.query_cost = next().parse().unwrap_or(a.query_cost),
             "--ask" => a.ask = Some(next()),
+            // The value is read once, at construction, by the shared flag grammar.
+            "--seed" => {}
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: rlcd [--encoder DIR] [--head FILE] [--save FILE] [--steps N] [--voi-steps N] [--query-cost F] [--ask STATE]\n\n\
+                    "usage: rlcd [--encoder DIR] [--head FILE] [--save FILE] [--steps N] [--voi-steps N] [--query-cost F] [--ask STATE] [--seed N]\n\n\
+                     --seed:         drawn at random and printed when not given.\n\n\
                      Without --head: trains on the device-diagnosis world, evaluates, saves, audits.\n\
                      With --head:    skips training and audits those weights directly.\n\
                      Without --ask:  reads states from stdin until end of input, after the audit."
@@ -238,7 +247,7 @@ fn main() {
         .eval(eval)
         .loss(LossConfig::cross_entropy().with_brier(0.5))
         .steps(args.steps)
-        .seed(11)
+        .seed(args.seed)
         // Dozens of examples, not BANKING77's thousands - a full encoder
         // fine-tune would memorize rather than generalize, and Decide::
         // save_head refuses to write a head-only checkpoint over a moved
@@ -366,5 +375,17 @@ fn main() {
     if let Err(e) = chain.report().finish() {
         eprintln!("rlcd: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_given_seed_is_used_and_an_absent_one_is_drawn_per_run() {
+        let given = parse_args_from(&["--seed".to_string(), "5".to_string()]);
+        assert_eq!(given.seed, 5);
+        assert_ne!(parse_args_from(&[]).seed, parse_args_from(&[]).seed);
     }
 }

@@ -36,7 +36,9 @@ make samples/decision/triage/build
 make samples/decision/triage/run ARGS="--steps 600 --intents 8"
 ```
 
-That trains, evaluates, saves the head, and drops into a prompt. Then reuse it
+That trains, evaluates, saves the head, and drops into a prompt. The training
+seed is drawn at random and printed; pass it as `--seed N` to repeat the run.
+Then reuse it
 without retraining:
 
 ```bash

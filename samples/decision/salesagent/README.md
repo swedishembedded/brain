@@ -640,6 +640,7 @@ salesagent [--encoder DIR] [--data DIR] [--head FILE] [--save FILE]
 | `--policy N` | 1000 | policy-gradient steps (phase 2) |
 | `--replay N` | 2 | conversations to replay turn by turn |
 | `--batch` | off | skip the interactive stage, for scripted runs |
+| `--seed N` | random, printed | seed of the training run; pass the printed value to repeat a run |
 
 ```bash
 ./fetch-dataset.sh [--rows N] [--force]

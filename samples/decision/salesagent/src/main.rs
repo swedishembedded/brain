@@ -52,9 +52,15 @@ struct Args {
     policy: usize,
     replay: usize,
     interactive: bool,
+    /// Seed of the training run: the one given with `--seed`, else drawn and printed.
+    seed: u64,
 }
 
 fn parse_args() -> Args {
+    parse_args_from(&std::env::args().skip(1).collect::<Vec<String>>())
+}
+
+fn parse_args_from(argv: &[String]) -> Args {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut a = Args {
         encoder: std::env::var("BRAIN_MINILM_DIR").unwrap_or_else(|_| {
@@ -71,8 +77,8 @@ fn parse_args() -> Args {
         policy: 1000,
         replay: 2,
         interactive: true,
+        seed: brain::options::Args::new(argv).seed("salesagent"),
     };
-    let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < argv.len() {
         let next = || argv.get(i + 1).cloned().unwrap_or_default();
@@ -90,11 +96,14 @@ fn parse_args() -> Args {
                 a.interactive = false;
                 i -= 1;
             }
+            // The value is read once, at construction, by the shared flag grammar.
+            "--seed" => {}
             "--help" | "-h" => {
                 eprintln!(
                     "usage: salesagent [--encoder DIR] [--data DIR] [--head FILE] [--save FILE]\n\
                      \x20                 [--train N] [--eval N] [--warmup N] [--policy N]\n\
-                     \x20                 [--replay N] [--batch]\n\n\
+                     \x20                 [--replay N] [--batch] [--seed N]\n\n\
+                     --seed:         drawn at random and printed when not given.\n\n\
                      Without --head: trains, evaluates, saves, replays, then chats.\n\
                      With --head:    skips training and scores with those weights.\n\
                      --batch:        skip the interactive stage (for scripted runs).\n\n\
@@ -179,7 +188,7 @@ fn main() {
         .warmup_steps(args.warmup)
         .policy_steps(args.policy)
         .calibration(200)
-        .seed(11);
+        .seed(args.seed);
 
     // ---- the whole program ------------------------------------------------
     let mut builder = ConversionPipeline::builder(&args.encoder);
@@ -288,4 +297,16 @@ fn run_laya_route(pipe: &mut DecisionPipeline, eval: &[SalesConversation]) {
         acts[0],
         acts[1],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_given_seed_is_used_and_an_absent_one_is_drawn_per_run() {
+        let given = parse_args_from(&["--seed".to_string(), "5".to_string()]);
+        assert_eq!(given.seed, 5);
+        assert_ne!(parse_args_from(&[]).seed, parse_args_from(&[]).seed);
+    }
 }

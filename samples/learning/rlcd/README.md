@@ -77,7 +77,8 @@ make samples/learning/rlcd/build
 make samples/learning/rlcd/run ARGS="--steps 400"
 ```
 
-That checks the world, trains, evaluates, audits for witnesses, trains the
+The training seed is drawn at random and printed; pass it as `--seed N` to
+repeat a run. That checks the world, trains, evaluates, audits for witnesses, trains the
 evidence-acquisition policy, then re-evaluates and re-audits the weights that
 stage changed, saves those, and drops into a prompt. Saving is last on
 purpose - see "One head answers both questions" below.
