@@ -130,6 +130,11 @@ pub struct GdnMixerGrads<'a> {
 /// forward return value) is NOT included here - the caller already owns it.
 pub struct GdnMixerActs {
     pub shape: GdnShape,
+    /// Rows of conv history prepended to this call's own input (`K-1` for a
+    /// continued [`GdnStream`] forward, `0` for a fresh sequence). `ncl_in`
+    /// holds `conv_ctx + t` rows per channel; [`gdn_mixer_stream_bwd`] reads it
+    /// to size the conv backward and to hand the history's gradient back.
+    pub conv_ctx: u32,
     // conv1d: `x` (dw needs it) and pre-SiLU output (silu_bwd needs it).
     pub ncl_in: DeviceBuffer,
     pub ncl_out: DeviceBuffer,
@@ -233,8 +238,10 @@ pub fn gdn_mixer_fwd(
 ///    buffer to the first and copies the result back into it, instead of
 ///    letting both default to a fresh (zeroed) allocation.
 ///
-/// Requires `shape.gdn.b == 1` (the stream state is per sequence) and
-/// `!is_train` (a chunked forward saves no whole-sequence backward history).
+/// Requires `shape.gdn.b == 1` (the stream state is per sequence). With
+/// `is_train` the returned acts cover THIS round only and carry
+/// [`GdnMixerActs::conv_ctx`]; [`gdn_mixer_stream_bwd`] is their reverse, and
+/// [`crate::gdn_segment`] chains rounds into a segmented training layer.
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_mixer_stream_fwd(
     g: &Gpu,
@@ -256,7 +263,6 @@ pub fn gdn_mixer_stream_fwd(
     let n_chunks = t / chunk;
     if cont.is_some() {
         assert_eq!(b, 1, "gdn_mixer_stream_fwd: a persistent GdnStream is per SEQUENCE, so b must be 1 (got {b})");
-        assert!(!is_train, "gdn_mixer_stream_fwd: a streaming (chunked) forward saves no backward history");
     }
 
     // Depthwise causal conv1d + SiLU (activation AFTER the conv).
@@ -435,8 +441,10 @@ pub fn gdn_mixer_stream_fwd(
         ],
     );
 
+    let conv_ctx = if cont.is_some() { kw - 1 } else { 0 };
     let acts = scratch_train.map(|scratch_train| GdnMixerActs {
         shape: gdn,
+        conv_ctx,
         ncl_in,
         ncl_out,
         query,
@@ -817,7 +825,7 @@ pub fn gdn_mixer_decode_pooled_fused(
     pool: &GdnPoolRows,
 ) -> Option<DeviceBuffer> {
     let gdn = shape.gdn;
-    if gdn.t != 1 || gdn.dk != 128 || gdn.dv != 128 || shape.conv_kernel != 4 || shape.nkh == 0 || gdn.h % shape.nkh != 0 {
+    if gdn.t != 1 || gdn.dk != 128 || gdn.dv != 128 || shape.conv_kernel != 4 || shape.nkh == 0 || !gdn.h.is_multiple_of(shape.nkh) {
         return None;
     }
     let gated = g.storage(gdn.b as u64 * shape.value_dim() as u64);
@@ -835,6 +843,39 @@ pub fn gdn_mixer_decode_pooled_fused(
 /// backward output) -> `(d_mixed_qkv, d_bproj, d_aproj, d_z)`, for the
 /// caller's own `in_proj_*` backward. `n` must match the forward call's own.
 pub fn gdn_mixer_bwd(g: &Gpu, ids: &GdnMixerIds, shape: &GdnMixerShape, w: &GdnMixerWeights, gw: &GdnMixerGrads, la: &GdnMixerActs, d_gated: &DeviceBuffer, n: u32) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+    gdn_mixer_stream_bwd(g, ids, shape, w, gw, la, d_gated, n, None).0
+}
+
+/// What a continued round's backward sends to the round BEFORE it.
+pub struct GdnStreamGrad {
+    /// `[bh, dk, dv]` gradient w.r.t. the round's `initial_state`: the
+    /// previous round's `d_final_state`.
+    pub d_state: DeviceBuffer,
+    /// `[conv_kernel-1, conv_dim]` token-major gradient w.r.t. the conv
+    /// history rows, i.e. w.r.t. the previous round's last `K-1` `mixed_qkv`
+    /// rows (to be ADDED to that round's own `d_mixed_qkv`).
+    pub d_hist: DeviceBuffer,
+}
+
+/// [`gdn_mixer_bwd`] for one round of a [`gdn_mixer_stream_fwd`] training
+/// forward. `d_next_state` is the gradient the FOLLOWING round sent into this
+/// round's final recurrent state (`None` for the last round, which has no
+/// follower). The second result is `Some` exactly when the forward was
+/// continued (`la.conv_ctx > 0`): the gradients this round owes the previous
+/// one. Weight gradients accumulate into `gw`, so calling this once per round
+/// sums them over the whole sequence.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_mixer_stream_bwd(
+    g: &Gpu,
+    ids: &GdnMixerIds,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    gw: &GdnMixerGrads,
+    la: &GdnMixerActs,
+    d_gated: &DeviceBuffer,
+    n: u32,
+    d_next_state: Option<&DeviceBuffer>,
+) -> ((DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer), Option<GdnStreamGrad>) {
     let gdn = shape.gdn;
     let (conv_dim, key_dim, value_dim, group) = (shape.conv_dim(), shape.key_dim(), shape.value_dim(), shape.group());
     let (nkh, nvh, khd, vhd, kw) = (shape.nkh, gdn.h, gdn.dk, gdn.dv, shape.conv_kernel);
@@ -867,8 +908,9 @@ pub fn gdn_mixer_bwd(g: &Gpu, ids: &GdnMixerIds, shape: &GdnMixerShape, w: &GdnM
     let cw = gdn.chunk as u64;
     let dk = gdn.dk as u64;
     let dv = gdn.dv as u64;
-    let d_final_state = g.storage(bh * dk * dv); // no incremental decode continuation -> zero
-    let d_initial_state = g.storage(bh * dk * dv); // discarded (no earlier chunk upstream)
+    let zero_final = d_next_state.is_none().then(|| g.storage(bh * dk * dv)); // last round: nothing flows in
+    let d_final_state = d_next_state.or(zero_final.as_ref()).expect("one of the two is Some");
+    let d_initial_state = g.storage(bh * dk * dv);
     let d_query_cm = g.storage(bhc * cw * dk);
     let d_key_cm = g.storage(bhc * cw * dk);
     let d_value_cm = g.storage(bhc * cw * dv);
@@ -887,7 +929,7 @@ pub fn gdn_mixer_bwd(g: &Gpu, ids: &GdnMixerIds, shape: &GdnMixerShape, w: &GdnM
             &la.beta_cm,
             &la.scratch_train.as_ref(),
             &d_out_cm,
-            &d_final_state,
+            d_final_state,
             &bwd_scratch.as_ref(),
             &d_query_cm,
             &d_key_cm,
@@ -898,9 +940,9 @@ pub fn gdn_mixer_bwd(g: &Gpu, ids: &GdnMixerIds, shape: &GdnMixerShape, w: &GdnM
         );
         // Every output with more than one contributing forward use is
         // explicitly zeroed by the caller (see gdn_chunk_bwd's own doc):
-        // `d_final_state` (external gradient, none), plus d_query/d_key/d_beta.
+        // d_query/d_key/d_beta. `d_final_state` is an INPUT (the next round's
+        // gradient, or a zero-fresh buffer) and must not be cleared.
         let mut clears = bwd_scratch.clears();
-        clears.push(&d_final_state);
         clears.push(&d_query_cm);
         clears.push(&d_key_cm);
         clears.push(&d_beta_cm);
@@ -976,20 +1018,39 @@ pub fn gdn_mixer_bwd(g: &Gpu, ids: &GdnMixerIds, shape: &GdnMixerShape, w: &GdnM
     );
 
     // ---- conv1d + SiLU backward ----
+    // A continued forward convolved `[history | this round]` with pad 0, so the
+    // input gradient has `conv_ctx` extra leading rows: the history's gradient.
+    let ctx = la.conv_ctx;
+    let ext_rows = ctx + t;
     let d_ncl_act = g.storage((n * conv_dim) as u64);
     let d_ncl_out = g.storage((n * conv_dim) as u64);
-    let d_ncl_in = g.storage((n * conv_dim) as u64);
+    let d_ncl_in = g.storage((ext_rows * conv_dim) as u64);
     let d_mixed_qkv = g.storage((n * conv_dim) as u64);
-    let conv_shape = Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t };
+    let conv_shape = if ctx == 0 {
+        Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t }
+    } else {
+        Conv1d { n: 1, cin: conv_dim, l: ext_rows, cout: conv_dim, k: kw, stride: 1, pad: 0, dilation: 1, groups: conv_dim, lo: t }
+    };
+    let mut d_hist = None;
     {
         let mut s = vec![
             g.step(ids.nlc_nchw, &[&d_mixed_act, &d_ncl_act], &[n * conv_dim, conv_dim, t], n * conv_dim),
             g.step(ids.silu_bwd, &[&la.ncl_out, &d_ncl_act, &d_ncl_out], &[n * conv_dim], n * conv_dim),
         ];
         s.extend(conv1d_bwd(g, &ids.conv, &conv_shape, &d_ncl_out, &la.ncl_in, w.conv1d_weight, Some(&d_ncl_in), gw.conv1d_weight));
-        s.push(g.step(ids.nchw_nlc, &[&d_ncl_in, &d_mixed_qkv], &[n * conv_dim, conv_dim, t], n * conv_dim));
+        if ctx == 0 {
+            s.push(g.step(ids.nchw_nlc, &[&d_ncl_in, &d_mixed_qkv], &[n * conv_dim, conv_dim, t], n * conv_dim));
+        } else {
+            let d_ext_tok = g.storage((ext_rows * conv_dim) as u64);
+            let hist = g.storage((ctx * conv_dim) as u64);
+            s.push(g.step(ids.nchw_nlc, &[&d_ncl_in, &d_ext_tok], &[ext_rows * conv_dim, conv_dim, ext_rows], ext_rows * conv_dim));
+            s.push(g.step(ids.concat_split, &[&d_ext_tok, &hist], &[1, ext_rows * conv_dim, ctx * conv_dim, 0, 1, 1], ctx * conv_dim));
+            s.push(g.step(ids.concat_split, &[&d_ext_tok, &d_mixed_qkv], &[1, ext_rows * conv_dim, t * conv_dim, ctx * conv_dim, 1, 1], t * conv_dim));
+            d_hist = Some(hist);
+        }
         g.submit(&[], &s);
     }
 
-    (d_mixed_qkv, d_bproj, d_aproj, d_z)
+    let carry = d_hist.map(|d_hist| GdnStreamGrad { d_state: d_initial_state, d_hist });
+    ((d_mixed_qkv, d_bproj, d_aproj, d_z), carry)
 }

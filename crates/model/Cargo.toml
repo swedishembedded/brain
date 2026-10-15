@@ -63,3 +63,6 @@ brain-gradcheck.workspace = true
 # dev-dependency, not the "test crate depends on the crate under test" cycle
 # shape `brain-gradcheck` above is.
 brain-audio.workspace = true
+# Test-only: `crates/model/tests/gdn_mixer_train_cost.rs` reads the CUDA
+# backend's exact live-allocation counter to report a layer's peak device bytes.
+brain-backend-cuda.workspace = true
