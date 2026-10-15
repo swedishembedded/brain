@@ -32,7 +32,7 @@
 //! construction path a training run uses) and compares the result against a
 //! from-first-principles scalar reference, with real numeric tolerance.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 
 const TOL: f32 = 1e-4;
@@ -156,7 +156,7 @@ fn forward_matmul_family_native_fastpath_matches_scalar_reference() {
         ("matmul_reg4", kernels::MATMUL_REG4),
     ];
     let gpu = Gpu::new_cpu(ks);
-    let mut seed = Lcg::new(0x5EED);
+    let mut seed = Lcg::new(random_seed());
 
     // Shapes deliberately NOT multiples of the 128x128 tile (so the guarded
     // boundary loads/stores are exercised, not just a perfectly-filled tile),
@@ -213,7 +213,7 @@ fn backward_matmul_family_native_fastpath_matches_scalar_reference() {
         ("matmul_dw_reg", kernels::MATMUL_DW_REG),
     ];
     let gpu = Gpu::new_cpu(ks);
-    let mut seed = Lcg::new(0xBEEF);
+    let mut seed = Lcg::new(random_seed());
 
     for (m, k, n) in [(3usize, 5usize, 2usize), (37, 20, 41), (200, 33, 260)] {
         let dy: Vec<f32> = (0..m * n).map(|_| seed.scaled(0.5)).collect();
@@ -315,7 +315,7 @@ fn grouped_matmul_native_fastpath_matches_per_expert_reference() {
 
     let ks: &[(&str, &str)] = &[("matmul_reg3_grouped", kernels::MATMUL_REG3_GROUPED)];
     let gpu = Gpu::new_cpu(ks);
-    let mut seed = Lcg::new(0x6C0DE);
+    let mut seed = Lcg::new(random_seed());
 
     // (k, n, per-expert row counts). The counts deliberately include a ZERO
     // (an expert nothing routed to - the common case at decode), counts under

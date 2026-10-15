@@ -5,7 +5,7 @@
 //! bug: the WorldMirror S=3 patch conv (N=3, Cin=3, 56x56, Cout=64, K=14 s14)
 //! produced garbage for every frame after the first on the CPU backend.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 
 // Conv dims + the two input tensors: the reference this test exists to
@@ -50,7 +50,7 @@ fn scalar_conv(
 #[test]
 fn batched_conv_matches_scalar() {
     let gpu = Gpu::new_cpu(&[("conv2d", kernels::CONV2D)]);
-    let mut seed = Lcg::new(0xABCD);
+    let mut seed = Lcg::new(random_seed());
     for (n, cin, h, w, cout, k, stride, pad) in [
         (3usize, 3usize, 56usize, 56usize, 64usize, 14usize, 14usize, 0usize),
         (2, 4, 9, 9, 8, 3, 1, 1),

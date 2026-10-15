@@ -2334,7 +2334,7 @@ mod tests {
     /// that only ever runs in release.
     #[test]
     fn transpose_rows_tiled_matches_the_naive_definition() {
-        let mut seed = 3u32;
+        let mut seed = data::rng::random_seed() as u32;
         for &(tk, hd, stride, off) in &[
             (4096usize, 64usize, 768usize, 128usize),
             (17, 5, 5, 0),
