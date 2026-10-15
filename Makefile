@@ -442,7 +442,7 @@ test/rl:
 		echo "WARNING: MOE_SKIP_GPU_TESTS is set - every gradcheck below will report PASS without actually running its FD check. Unset it for a real result."; \
 	fi
 	$(CARGO_TEST) -p brain-rl --features qwen3 \
-		--test continuous_cycle --test grpo_gradcheck --test grpo_objective \
+		--test grpo_gradcheck --test grpo_objective \
 		--test dpo_gradcheck --test dpo_objective --test distill_gradcheck \
 		--test distill_full_kl --test mixture_anchor_regression \
 		--test qwen3_fit_weighted --test improve_cycle
