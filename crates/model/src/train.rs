@@ -50,6 +50,8 @@ pub struct FitOpts {
     /// loss for the same parameters, which a drawn sample is not (a token
     /// stream without example boundaries draws one batch).
     pub eval_batches: u32,
+    /// Seed of the initial weights and the batch order. [`Default`] draws a
+    /// random one; the run's record carries the value it used.
     pub seed: u64,
     /// Wall-clock checkpoint cadence: once this many seconds have elapsed since
     /// the last save, the NEXT completed step writes a checkpoint (then the timer
@@ -104,7 +106,7 @@ impl Default for FitOpts {
             grad_accum: 1,
             eval_interval: 250,
             eval_batches: 20,
-            seed: 1337,
+            seed: data::rng::random_seed(),
             checkpoint_secs: 600,
             mask_before: None,
             mask_per_line: false,
@@ -1038,6 +1040,20 @@ fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, rng: &Rng, opts
     let tmp_str = tmp.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", tmp.display())))?;
     checkpoint::st::save_safetensors(tmp_str, &tensors, &header, None)?;
     std::fs::rename(&tmp, path)
+}
+
+/// The seed the run that wrote the exact-resume state at `path` trained with,
+/// `None` when no state is there. A run resumed without a seed of its own
+/// takes this one, because the state only resumes under the options it was
+/// saved with.
+pub fn saved_seed(path: &Path) -> std::io::Result<Option<u64>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let invalid = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {why}", path.display()));
+    let path_str = path.to_str().ok_or_else(|| invalid("not a UTF-8 path"))?;
+    let st = checkpoint::st::load_safetensors(path_str)?;
+    st.config().get("opts").and_then(|o| o.get("seed")).and_then(|s| s.as_u64()).map(Some).ok_or_else(|| invalid("no training seed in the saved options"))
 }
 
 /// Restore the state [`save_train_state`] wrote into `model`, returning the

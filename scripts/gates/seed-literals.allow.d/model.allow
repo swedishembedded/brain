@@ -1,2 +1,1 @@
-crates/model/src/train.rs	FitOpts::default:seed=1337	default	todo: default seed becomes random, printed and recorded
 crates/model/src/lora.rs	LoraCfg::loaded:seed=0	default	frozen: the factors are read from the adapter file, so the init seed is never consulted

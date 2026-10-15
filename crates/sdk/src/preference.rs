@@ -48,7 +48,7 @@ use data::chat_template::ChatTemplate;
 use data::preference::EncodedTurn;
 use data::qwen_tokenizer::QwenBpe;
 
-use crate::finetune::{block_for, digest, fit_opts, lora_shape, tokenizer_and_template, utf8};
+use crate::finetune::{block_for, digest, fit_opts, lora_shape, resolve_seed, tokenizer_and_template, utf8};
 use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result};
 
 const STATE_FILE: &str = "train.state";
@@ -77,7 +77,7 @@ pub struct PreferenceFineTune {
     keep_reasoning: bool,
     steps: u32,
     lr: f32,
-    seed: u64,
+    seed: Option<u64>,
     max_block: Option<u32>,
     checkpoint_every: u32,
     cycle: u64,
@@ -105,7 +105,7 @@ impl PreferenceFineTune {
             keep_reasoning: false,
             steps: 100,
             lr: 3e-4,
-            seed: 1337,
+            seed: None,
             max_block: None,
             checkpoint_every: 0,
             cycle: 0,
@@ -214,9 +214,12 @@ impl PreferenceFineTune {
         self
     }
 
-    /// Seeds the fresh adapter's initialisation and the pair order (default 1337).
+    /// Seeds the fresh adapter's initialisation and the pair order. Unset, a
+    /// run continuing a saved state takes that state's seed and any other
+    /// draws a random one; [`PreferenceFineTuneOutcome::seed`] and the
+    /// training record carry the seed used, and passing it reproduces the run.
     pub fn seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
+        self.seed = Some(seed);
         self
     }
 
@@ -289,8 +292,10 @@ impl PreferenceFineTune {
 
         crate::device::resolve(&self.device)?;
 
+        let state_path = out_dir.join(STATE_FILE);
+        let seed = resolve_seed(self.seed, Some(&state_path))?;
         // Both rows of a pair share one forward.
-        let opts = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, ..fit_opts(self.steps, block, self.lr, self.seed) };
+        let opts = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, ..fit_opts(self.steps, block, self.lr, seed) };
         let base_digest = digest(&weights)?;
         let dataset_id = digest(dataset)?;
         let identity = serde_json::json!({
@@ -305,7 +310,6 @@ impl PreferenceFineTune {
             "grad_accum": self.grad_accum,
             "keep_reasoning": self.keep_reasoning,
         });
-        let state_path = out_dir.join(STATE_FILE);
         std::fs::create_dir_all(out_dir).map_err(|e| Error::Backend(format!("{}: {e}", out_dir.display())))?;
         let mut on_step = |s: &model::StepReport| {
             on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
@@ -336,6 +340,7 @@ impl PreferenceFineTune {
             adapter_digest: None,
             record: None,
             resume_state: None,
+            seed,
             steps: self.steps,
             steps_completed: report.steps_completed,
             resumed_at: report.resumed_at,
@@ -363,7 +368,7 @@ impl PreferenceFineTune {
         let provenance = checkpoint::st::TrainingProvenance {
             code_revision: format!("brain {}", env!("CARGO_PKG_VERSION")),
             regime: "dpo".to_string(),
-            seed: self.seed,
+            seed,
             hyperparams: serde_json::json!({
                 "rank": rank,
                 "alpha": alpha,
@@ -417,6 +422,10 @@ pub struct PreferenceFineTuneOutcome {
     pub record: Option<PathBuf>,
     /// The resume state a cancelled run left; running again continues it.
     pub resume_state: Option<PathBuf>,
+    /// The seed of the fresh adapter's initialisation and the pair order:
+    /// the one asked for, the one a continued state was saved with, or the
+    /// one drawn. Passing it to [`PreferenceFineTune::seed`] reproduces the run.
+    pub seed: u64,
     pub steps: u32,
     /// Steps completed in the whole run, including any before a resume.
     pub steps_completed: u32,
@@ -458,6 +467,7 @@ impl PreferenceFineTuneOutcome {
             "base": base_id,
             "dataset": dataset_id,
             "adapter_digest": self.adapter_digest,
+            "seed": self.seed,
             "trained_from": self.trained_from,
             "reference": { "base_digest": self.base_digest, "adapter_digest": self.trained_from },
             "steps": self.steps,

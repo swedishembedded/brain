@@ -35,9 +35,9 @@ fn write_pairs(dir: &Path, name: &str, pairs: &[(&str, &str, &str)]) -> PathBuf 
 
 const TRAIN: &[(&str, &str, &str)] = &[("cab", "bad", "wig"), ("fed", "deaf", "vow"), ("ace", "face", "jug"), ("bag", "gab", "mop")];
 
-/// A preference fine-tune of the fixture model on a small pair set and a
-/// held-out set, on the CPU.
-fn fine_tune(model: &Path, out: &Path) -> PreferenceFineTune {
+/// A preference fine-tune of the fixture model, with no seed of its own, on a
+/// small pair set and a held-out set, on the CPU.
+fn unseeded_fine_tune(model: &Path, out: &Path) -> PreferenceFineTune {
     let train = write_pairs(model, "train.jsonl", TRAIN);
     let held_out = write_pairs(model, "held_out.jsonl", &[("cad", "bead", "kiwi")]);
     PreferenceFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
@@ -47,8 +47,13 @@ fn fine_tune(model: &Path, out: &Path) -> PreferenceFineTune {
         .rank(2)
         .steps(8)
         .lr(1e-1)
-        .seed(7)
         .device(cpu())
+}
+
+/// [`unseeded_fine_tune`] at a fixed seed.
+// seed: runs that must be compared with each other need the same stream.
+fn fine_tune(model: &Path, out: &Path) -> PreferenceFineTune {
+    unseeded_fine_tune(model, out).seed(7)
 }
 
 /// The dataset is checked against the base's own tokenizer and template,
@@ -173,6 +178,35 @@ fn a_cancelled_preference_run_resumes_to_the_uninterrupted_result() {
     assert_eq!(resumed.steps_completed, 8);
     assert!(!stopped.resume_state.unwrap().exists(), "an exported run leaves no state behind");
     assert_eq!(resumed.adapter_digest, straight.adapter_digest, "the same adapter file, byte for byte");
+}
+
+/// A run given no seed draws one and records it - on the outcome, in the
+/// training record and on the card - and the recorded seed reproduces the
+/// adapter. A cancelled unseeded run resumes when run again unseeded.
+#[test]
+fn an_unseeded_preference_run_records_the_seed_it_drew() {
+    let model = chat_model_dir("pref-drawn-seed");
+    let first = unseeded_fine_tune(&model, &model.join("first")).run().unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(first.record.as_ref().unwrap()).unwrap()).unwrap();
+    assert_eq!(record["seed"].as_u64(), Some(first.seed));
+    let card = checkpoint::st::read_card(first.adapter.as_ref().unwrap().to_str().unwrap()).unwrap().unwrap();
+    assert_eq!(card.training.unwrap().seed, first.seed);
+
+    let again = unseeded_fine_tune(&model, &model.join("again")).seed(first.seed).run().unwrap();
+    assert_eq!(again.adapter_digest, first.adapter_digest, "the recorded seed reproduces the adapter");
+
+    let out = model.join("interrupted");
+    let cancel = brain::CancelToken::armed();
+    let stopped = unseeded_fine_tune(&model, &out)
+        .run_with(&cancel, |p| {
+            if p.step == 3 {
+                cancel.cancel();
+            }
+        })
+        .unwrap();
+    assert_eq!(stopped.status, FineTuneStatus::Cancelled);
+    let resumed = unseeded_fine_tune(&model, &out).run().unwrap();
+    assert_eq!((resumed.status, resumed.resumed_at, resumed.seed), (FineTuneStatus::Completed, Some(3), stopped.seed));
 }
 
 /// The chosen-answer anchor is part of the run: it is refused when negative,

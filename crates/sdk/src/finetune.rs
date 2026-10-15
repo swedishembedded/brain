@@ -97,7 +97,7 @@ pub struct ChatFineTune {
     cooldown_steps: Option<u32>,
     steps: u32,
     lr: f32,
-    seed: u64,
+    seed: Option<u64>,
     max_block: Option<u32>,
     checkpoint_every: u32,
     eval_every: u32,
@@ -148,7 +148,7 @@ impl ChatFineTune {
             cooldown_steps: None,
             steps: 100,
             lr: 3e-4,
-            seed: 1337,
+            seed: None,
             max_block: None,
             checkpoint_every: 0,
             eval_every: 0,
@@ -342,10 +342,12 @@ impl ChatFineTune {
         self
     }
 
-    /// Seeds the fresh adapter's initialisation and the batch order
-    /// (default 1337).
+    /// Seeds the fresh adapter's initialisation and the batch order. Unset, a
+    /// run continuing a saved state takes that state's seed and any other
+    /// draws a random one; [`ChatFineTuneOutcome::seed`] and the training
+    /// record carry the seed used, and passing it reproduces the run.
     pub fn seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
+        self.seed = Some(seed);
         self
     }
 
@@ -474,6 +476,8 @@ impl ChatFineTune {
         if self.grad_accum == 0 {
             return Err(Error::Backend("ChatFineTune: grad_accum must be at least 1".to_string()));
         }
+        let state_path = out_dir.join(STATE_FILE);
+        let seed = resolve_seed(self.seed, Some(&state_path))?;
         let opts = model::FitOpts {
             grad_accum: self.grad_accum,
             eval_interval: self.eval_every,
@@ -484,7 +488,7 @@ impl ChatFineTune {
             patience: if self.keep_best && self.patience == 0 { u32::MAX } else { self.patience },
             weight_decay: self.weight_decay,
             cooldown_steps: self.cooldown_steps.unwrap_or(self.steps / COOLDOWN_DIVISOR),
-            ..fit_opts(self.steps, block, self.lr, self.seed)
+            ..fit_opts(self.steps, block, self.lr, seed)
         };
         let base_digest = base_digest(&open)?;
         let identity = serde_json::json!({
@@ -500,7 +504,6 @@ impl ChatFineTune {
             "repeats": repeats,
             "grad_accum": self.grad_accum,
         });
-        let state_path = out_dir.join(STATE_FILE);
         let mut on_step = |s: &model::StepReport| {
             on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
             !cancel.is_cancelled()
@@ -530,6 +533,7 @@ impl ChatFineTune {
             adapter_digest: None,
             record: None,
             resume_state: None,
+            seed,
             steps: self.steps,
             steps_completed: report.steps_completed,
             resumed_at: report.resumed_at,
@@ -567,7 +571,7 @@ impl ChatFineTune {
         let provenance = checkpoint::st::TrainingProvenance {
             code_revision: format!("brain {}", env!("CARGO_PKG_VERSION")),
             regime: "sft_lora".to_string(),
-            seed: self.seed,
+            seed,
             hyperparams: serde_json::json!({
                 "rank": rank,
                 "alpha": alpha,
@@ -644,6 +648,10 @@ pub struct ChatFineTuneOutcome {
     pub record: Option<PathBuf>,
     /// The resume state a cancelled run left; running again continues it.
     pub resume_state: Option<PathBuf>,
+    /// The seed of the fresh adapter's initialisation and the batch order:
+    /// the one asked for, the one a continued state was saved with, or the
+    /// one drawn. Passing it to [`ChatFineTune::seed`] reproduces the run.
+    pub seed: u64,
     pub steps: u32,
     /// Steps completed in the whole run, including any before a resume.
     pub steps_completed: u32,
@@ -708,6 +716,7 @@ impl ChatFineTuneOutcome {
             "base_digest": self.base_digest,
             "dataset": dataset_id,
             "adapter_digest": self.adapter_digest,
+            "seed": self.seed,
             "trained_from": self.trained_from,
             "steps": self.steps,
             "steps_completed": self.steps_completed,
@@ -999,6 +1008,20 @@ const WARMUP_DIVISOR: u32 = 20;
 /// A run's cooldown after its patience runs out, unless named, is this
 /// share of its steps, as the divisor: a tenth.
 const COOLDOWN_DIVISOR: u32 = 10;
+
+/// The seed a run trains with: the one asked for, else the one the saved
+/// state at `state` was written with (the state only resumes under the
+/// options it was saved with, the seed among them), else a random draw.
+pub(crate) fn resolve_seed(requested: Option<u64>, state: Option<&Path>) -> Result<u64> {
+    if let Some(seed) = requested {
+        return Ok(seed);
+    }
+    let saved = match state {
+        Some(path) => model::train::saved_seed(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?,
+        None => None,
+    };
+    Ok(saved.unwrap_or_else(crate::random_seed))
+}
 
 pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::FitOpts {
     model::FitOpts {

@@ -45,7 +45,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::finetune::{base_digest, block_for, digest, fit_opts, mix_rows, tokenizer_and_template, utf8, Asked, Mix};
+use crate::finetune::{base_digest, block_for, digest, fit_opts, mix_rows, resolve_seed, tokenizer_and_template, utf8, Asked, Mix};
 use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result};
 
 /// The training format the run writes before it is exported, and removes.
@@ -56,6 +56,8 @@ const PREPARED_DIR: &str = "prepared";
 const CHECKPOINT_DIR: &str = "checkpoint";
 /// The weights file of a checkpoint directory.
 const WEIGHTS_FILE: &str = "model.safetensors";
+/// The training record, inside the out directory beside the checkpoint.
+const RECORD_FILE: &str = "training.json";
 
 /// AdamW weight decay of a full fine-tune unless named: none, so the trained
 /// weights are pulled towards the data and nowhere else.
@@ -75,7 +77,7 @@ pub struct ChatFullFineTune {
     weight_decay: f32,
     steps: u32,
     lr: f32,
-    seed: u64,
+    seed: Option<u64>,
     max_block: Option<u32>,
     device: Device,
     thinking: bool,
@@ -99,7 +101,7 @@ impl ChatFullFineTune {
             weight_decay: FULL_WEIGHT_DECAY,
             steps: 100,
             lr: 1e-5,
-            seed: 1337,
+            seed: None,
             max_block: None,
             device: Device::default(),
             thinking: true,
@@ -172,9 +174,11 @@ impl ChatFullFineTune {
         self
     }
 
-    /// The seed of the batch order (default 1337).
+    /// The seed of the batch order (default: a random draw).
+    /// [`ChatFullFineTuneOutcome::seed`] and the training record carry the
+    /// seed used, and passing it reproduces the run.
     pub fn seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
+        self.seed = Some(seed);
         self
     }
 
@@ -214,7 +218,7 @@ impl ChatFullFineTune {
             return Err(Error::Backend("ChatFullFineTune: grad_accum must be at least 1".to_string()));
         }
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
-        let (weights, model_dir, _base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         let open = qwen3::store_checkpoint_path(&weights, &model_dir);
         let weights_str = utf8(&open)?;
 
@@ -242,7 +246,8 @@ impl ChatFullFineTune {
         let block = block_for(prepared.longest_example, self.max_block)?;
         crate::device::resolve(&self.device)?;
 
-        let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, ..fit_opts(self.steps, block, self.lr, self.seed) };
+        let seed = resolve_seed(self.seed, None)?;
+        let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, ..fit_opts(self.steps, block, self.lr, seed) };
         let base_digest = base_digest(&open)?;
         let mut on_step = |s: &model::StepReport| {
             on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
@@ -258,6 +263,8 @@ impl ChatFullFineTune {
             weights: None,
             weights_digest: None,
             base_digest: Some(base_digest),
+            seed,
+            record: None,
             steps: self.steps,
             steps_completed: report.steps_completed,
             initial_loss: Some(report.initial_loss),
@@ -280,6 +287,11 @@ impl ChatFullFineTune {
         outcome.weights_digest = Some(digest(&weights)?);
         outcome.weights = Some(weights);
         outcome.checkpoint = Some(checkpoint);
+
+        let record_path = out_dir.join(RECORD_FILE);
+        std::fs::write(&record_path, serde_json::to_vec_pretty(&outcome.record_json(&base_id)).map_err(|e| Error::Backend(e.to_string()))?)
+            .map_err(|e| Error::Backend(format!("{}: {e}", record_path.display())))?;
+        outcome.record = Some(record_path);
         Ok(outcome)
     }
 }
@@ -297,6 +309,12 @@ pub struct ChatFullFineTuneOutcome {
     pub weights_digest: Option<String>,
     /// `sha256:<hex>` naming the base the run started from.
     pub base_digest: Option<String>,
+    /// The JSON training record written beside the checkpoint; `None` unless
+    /// completed.
+    pub record: Option<PathBuf>,
+    /// The seed of the batch order: the one asked for or the one drawn.
+    /// Passing it to [`ChatFullFineTune::seed`] reproduces the run.
+    pub seed: u64,
     /// Optimizer steps asked for.
     pub steps: u32,
     /// Steps completed.
@@ -313,6 +331,25 @@ pub struct ChatFullFineTuneOutcome {
     pub block: u32,
     /// The peak learning rate of the run.
     pub lr: f32,
+}
+
+impl ChatFullFineTuneOutcome {
+    fn record_json(&self, base_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "base": base_id,
+            "base_digest": self.base_digest,
+            "weights_digest": self.weights_digest,
+            "seed": self.seed,
+            "steps": self.steps,
+            "steps_completed": self.steps_completed,
+            "initial_loss": self.initial_loss,
+            "final_loss": self.final_loss,
+            "train_records": self.train_records,
+            "replay_records": self.replay_records,
+            "block": self.block,
+            "lr": self.lr,
+        })
+    }
 }
 
 /// Writes the brain checkpoint `trained` to `checkpoint` as a checkpoint

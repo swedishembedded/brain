@@ -87,6 +87,29 @@ fn a_full_fine_tune_writes_a_checkpoint_directory_that_is_a_base_like_any_other(
     assert_eq!(on_it.status, FineTuneStatus::Completed);
 }
 
+/// A full fine-tune given no seed draws one and records it, on the outcome
+/// and in a training record beside the checkpoint; the same seed reproduces
+/// the weights.
+#[test]
+fn a_full_fine_tune_records_the_seed_it_drew() {
+    let model = chat_model_dir("full-seed");
+    let train = write_dataset(&model, "train.jsonl", &TRAIN);
+    let run = |name: &str, seed: Option<u64>| {
+        let tune = ChatFullFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).dataset(&train).out_dir(model.join(name)).steps(3).lr(5e-2).device(cpu());
+        match seed {
+            Some(seed) => tune.seed(seed),
+            None => tune,
+        }
+        .run()
+        .expect("the full fine-tune runs")
+    };
+    let first = run("first", None);
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(first.record.as_ref().expect("a training record")).unwrap()).unwrap();
+    assert_eq!(record["seed"].as_u64(), Some(first.seed));
+    assert_eq!(record["weights_digest"].as_str(), first.weights_digest.as_deref());
+    assert_eq!(run("again", Some(first.seed)).weights_digest, first.weights_digest, "the recorded seed reproduces the weights");
+}
+
 #[test]
 fn merging_an_adapter_gives_the_weights_the_adapter_computes() {
     let model = chat_model_dir("merge");
