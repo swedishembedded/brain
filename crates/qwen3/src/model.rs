@@ -146,8 +146,8 @@ const ROPE_TABLE_AT: usize = 58;
 /// table. Registered for the `Ops` façade; the LoRA `x·Aᵀ` projection also
 /// dispatches it directly in the decode regime ([`block::gemv_tier`]).
 const MATMUL_GEMV: usize = STATIC_PIPELINES.len();
-// Causal GQA flash attention for training: the forward that also writes the
-// row log-sum-exp, and its two backward halves (`block::FlashGqaIds`).
+// Causal GQA flash attention: the forward that also writes the row
+// log-sum-exp, and its two backward halves (`block::FlashGqaIds`).
 const FLASH_GQA_FWD: usize = 59;
 const FLASH_GQA_BWD_DQ: usize = 60;
 const FLASH_GQA_BWD_DKV: usize = 61;
@@ -699,15 +699,15 @@ pub struct Qwen {
     inv_count: DeviceBuffer,
     /// Rows of logits the head holds at once (`model::head_ce::rows_for_budget`).
     head_rows: u32,
-    /// The flash-attention training kernels, where this is a training build
-    /// on a device that runs them; `None` uses the materialised chain.
+    /// The flash-attention kernels, where this is a batched build on a device
+    /// that runs them; `None` uses the materialised chain.
     flash: Option<block::FlashGqaIds>,
     /// `[b, n_heads, t]` row log-sum-exp the flash forward leaves for the
     /// backward, and the `D = dO·O` scratch the backward pair shares.
     attn_lse: DeviceBuffer,
     attn_dsum: DeviceBuffer,
     /// `[b, n_heads, t, t]` scores/probs for the padded-key-mask forward on a
-    /// flash training build, which otherwise keeps no such slab.
+    /// flash build, which otherwise keeps no such slab.
     kmask_scratch: std::cell::OnceCell<(DeviceBuffer, DeviceBuffer)>,
 
     // Persistent per-layer KV cache for incremental decode ([max_t, kv_dim] each),
@@ -1201,11 +1201,14 @@ impl Qwen {
         let v = cfg.vocab as u64;
         let hq = cfg.q_dim() as u64;
         let hkv = cfg.kv_dim() as u64;
-        // Training attention runs the flash trio wherever the device can, so
-        // no `[H,T,T]` slab is ever allocated: `scores`/`probs` then keep only
-        // the decode extent (`n_heads·t`, for decoding on a training build).
-        // A device without it (the CPU JIT) trains on the materialised chain.
-        let flash = (train && block::FlashGqaIds::supported(&gpu, cfg.head_dim)).then_some(block::FlashGqaIds { fwd: FLASH_GQA_FWD, bwd_dq: FLASH_GQA_BWD_DQ, bwd_dkv: FLASH_GQA_BWD_DKV });
+        // Batched attention runs the flash kernels wherever the device can -
+        // training (forward and backward) and inference alike - so no
+        // `[H,T,T]` slab is ever allocated: `scores`/`probs` then keep only
+        // the decode extent (`n_heads·t`, for decoding on a batched build).
+        // A device without them (the CPU JIT) runs the materialised chain.
+        // A decode-only build has no batched forward to route. The estimator
+        // (`footprint::runs_flash`) states this same condition.
+        let flash = (!decode_only && block::FlashGqaIds::supported(&gpu, cfg.head_dim)).then_some(block::FlashGqaIds { fwd: FLASH_GQA_FWD, bwd_dq: FLASH_GQA_BWD_DQ, bwd_dkv: FLASH_GQA_BWD_DKV });
         let bht2 = attn_score_elems(decode_only || flash.is_some(), b, cfg.n_heads, t);
         let st = |x: u64| gpu.storage(x);
 
@@ -2087,7 +2090,7 @@ impl Qwen {
         self.decode_logits_tiled(&self.head_tiles())
     }
 
-    /// The whole batched forward: [`Self::body_steps`], then on the head
+    /// The whole batched forward: [`Self::body_tape`], then on the head
     /// stage the LM head and per-row cross-entropy, one logits chunk at a
     /// time ([`Self::head_chunks`]).
     fn forward_steps(&self, b_use: u32, t_use: u32) -> Tape {
@@ -2100,12 +2103,9 @@ impl Qwen {
 
     /// The forward up to the LM head: the token embedding (embed stage),
     /// every layer this shard owns, and the final norm into `xn_final` (head
-    /// stage).
-    fn body_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
-        self.body_tape(b_use, t_use).steps
-    }
-
-    /// [`Self::body_steps`], segmented after every layer.
+    /// stage), segmented after every layer: a long sequence's layer is
+    /// seconds of device work, so the pass is handed over one layer at a
+    /// time rather than as one submission the backend waits on as a unit.
     fn body_tape(&self, b_use: u32, t_use: u32) -> Tape {
         assert!(
             !self.decode_only,
@@ -2786,7 +2786,7 @@ impl Qwen {
         assert!(t_use <= self.t && self.b == 1, "qwen decoder sized too small");
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        self.gpu.submit(&[], &self.body_steps(1, t_use));
+        self.body_tape(1, t_use).submit(&self.gpu);
         let v = self.cfg.vocab as usize;
         let mut out = Vec::with_capacity(t_use as usize * v);
         let head = self.head_ce();
@@ -2825,7 +2825,7 @@ impl Qwen {
         }
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        self.gpu.submit(&[], &self.body_steps(1, t_use));
+        self.body_tape(1, t_use).submit(&self.gpu);
         self.gpu.read(&self.res[layer], (t_use * self.cfg.d_model) as usize)
     }
 
@@ -2934,9 +2934,9 @@ impl Qwen {
         }
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        let steps = self.body_steps(1, t_use);
-        gpu_core::profile::program_table(&self.gpu, "qwen3 encode", &steps);
-        self.gpu.submit(&[], &steps);
+        let tape = self.body_tape(1, t_use);
+        gpu_core::profile::program_table(&self.gpu, "qwen3 encode", &tape.steps);
+        tape.submit(&self.gpu);
         layers
             .iter()
             .map(|&l| self.gpu.read(&self.res[l], (t_use * self.cfg.d_model) as usize))
@@ -4774,6 +4774,44 @@ mod kv_tests {
 
     fn maxabs(a: &[f32], b: &[f32]) -> f32 {
         a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// An inference build routes its batched attention to the flash kernels
+    /// wherever the device runs them (no `[H,T,T]` slab), and the result equals
+    /// the materialised chain's: the padded-key-mask forward with every key live
+    /// is the same causal attention on the chain. On a device without the flash
+    /// kernels (the CPU JIT) both runs take the chain and the test only pins
+    /// the routing decision.
+    #[test]
+    fn inference_flash_forward_matches_the_materialised_chain() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let n_layers = cfg.n_layers as usize;
+        let head_dim = cfg.head_dim;
+        let v = cfg.vocab as u64;
+        let mut rng = Rng::new(99);
+        let map: HashMap<String, Vec<f32>> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(name, count)| {
+                let gain = name == "norm.weight" || name.ends_with("ln1.weight") || name.ends_with("ln2.weight") || name.ends_with("q_norm.weight") || name.ends_with("k_norm.weight");
+                let val = if gain { vec![1.0f32; count] } else { (0..count).map(|_| rng.next_gaussian() as f32 * 0.08).collect() };
+                (name, val)
+            })
+            .collect();
+        let tokens: Vec<u32> = (0..8).map(|_| (rng.next_u64() % v) as u32).collect();
+        let model = Qwen::new_shard_dt(cfg, 1, 8, &map, Shard::whole(n_layers), Dtype::F32);
+        assert_eq!(model.flash.is_some(), block::FlashGqaIds::supported(&model.gpu, head_dim), "an inference build takes the flash path exactly where the device supports it");
+
+        let flash = model.encode_hiddens(&tokens, &[n_layers]).swap_remove(0);
+        model.arm_pad_kmask(&tokens, tokens.len());
+        let chain = model.encode_hiddens(&tokens, &[n_layers]).swap_remove(0);
+        model.disarm_kmask();
+        let scale = chain.iter().fold(0.0f32, |m, x| m.max(x.abs())).max(1e-6);
+        let worst = flash.iter().zip(&chain).map(|(a, b)| (a - b).abs() / scale).fold(0.0f32, f32::max);
+        assert!(worst < 1e-4, "flash forward differs from the chain by {worst} of the largest activation");
     }
 
     /// The incremental KV-cache `step` must reproduce the `O(T²)` full-recompute

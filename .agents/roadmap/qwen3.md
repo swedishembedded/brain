@@ -150,6 +150,21 @@ reports hit and lookup tokens. Gates: `random_shared_prefixes_stay_exact`,
 `tests/engine_prefill_mixed.rs` and `tests/engine_adapter_bank.rs` (no
 cross-adapter reuse).
 
+## Forward-only batched builds run flash attention
+
+A batched build that is not decode-only (training or inference, including
+the held-out scorer and the encoders) routes causal attention to the flash
+kernels wherever the device runs them, so no `[H,T,T]` score pair exists, and
+`logits_all`/`encode_hidden(s)` submit the forward one layer at a time (the
+tape training uses) instead of as one submission against the GPU wait bound.
+`footprint::runs_flash` states the same condition for the estimator.
+The CPU JIT keeps the materialised chain. Gates run without a device:
+`footprint::tests::inference_memory_is_linear_in_the_context_on_the_flash_path`.
+Still to run on a card: `model::kv_tests::inference_flash_forward_matches_the_materialised_chain`
+(flash against the chain on the device) and
+`crates/sdk/tests/score_long_record_real.rs` (a multi-thousand-token record on
+Qwen3-0.6B completes).
+
 ## Not yet done
 
 - [ ] Faster KV swap-out: the gather side runs at about half the measured

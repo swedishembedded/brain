@@ -37,9 +37,9 @@
 //! - The per-layer activation scratch (`Layer`): allocated ONCE and shared by
 //!   every layer, training included (the backward recomputes each layer from
 //!   its saved `res[l]`), plus the attention scores: `n_heads·T²` for a
-//!   batched inference forward, the decode extent where no `[H,T,T]` slab
-//!   exists (a decode build, and a training build on the flash-attention
-//!   path).
+//!   batched forward that materialises them, the decode extent where no
+//!   `[H,T,T]` slab exists (a decode build, and a batched build - training or
+//!   inference - on the flash-attention path).
 //! - The backward scratch (`d_*`, the LoRA correction scratch) under `train`.
 //! - The head-only logits/`d_logits` buffer (`shard.head`, skipped entirely
 //!   on a `decode_only` build - the LM head runs host-side there), one row
@@ -124,12 +124,15 @@ fn residual_bytes(cfg: &QwenConfig, shard: &Shard, n: u64, train: bool) -> u64 {
     live_boundaries * row + if train { 2 * row } else { 0 }
 }
 
-/// Whether a training build of `cfg` runs the flash-attention trio, which
-/// keeps no `[H,T,T]` slab: every GPU a placement targets runs its
-/// workgroup-cooperative kernels, and they tile a head of up to 128 channels
-/// (`model::block::FlashGqaIds::supported`).
-fn trains_on_flash(cfg: &QwenConfig) -> bool {
-    cfg.head_dim <= 128
+/// Whether a batched build of `cfg` runs the flash-attention kernels, which
+/// keep no `[H,T,T]` slab, training or inference: every GPU a placement
+/// targets runs its workgroup-cooperative kernels, and they tile a head of up
+/// to 128 channels (`model::block::FlashGqaIds::supported`). A decode-only
+/// build has no batched forward to route. `Qwen::new_impl` takes the same
+/// decision from the device itself; the CPU JIT, which no placement targets,
+/// stays on the materialised chain.
+fn runs_flash(cfg: &QwenConfig, decode_only: bool) -> bool {
+    !decode_only && cfg.head_dim <= 128
 }
 
 /// The per-layer activation scratch (`Layer`): ONE copy shared by every layer
@@ -137,13 +140,13 @@ fn trains_on_flash(cfg: &QwenConfig) -> bool {
 /// and the backward recomputes a layer from `res[l]` before differentiating
 /// it), plus the attention `scores`/`probs` pair: `b·n_heads·T²` each for a
 /// batched forward that materialises them, the decode extent otherwise, and
-/// the per-row log-sum-exp pair the flash backward reads.
-fn activation_scratch_bytes(cfg: &QwenConfig, n: u64, t: u32, b: u32, train: bool, decode_only: bool) -> u64 {
+/// the per-row log-sum-exp pair a flash build keeps.
+fn activation_scratch_bytes(cfg: &QwenConfig, n: u64, t: u32, b: u32, decode_only: bool) -> u64 {
     let d = cfg.d_model as u64;
     let hq = cfg.q_dim() as u64;
     let hkv = cfg.kv_dim() as u64;
     let ff = cfg.d_ff as u64;
-    let flash = train && trains_on_flash(cfg);
+    let flash = runs_flash(cfg, decode_only);
     let bht2 = crate::model::attn_score_elems(decode_only || flash, b, cfg.n_heads, t);
     let lse = if flash { 2 * b as u64 * cfg.n_heads as u64 * t as u64 } else { 0 };
     // xn1, q_pre, q, k_pre, k, v, ctx, xmid, xn2, gate_pre, up, h
@@ -162,7 +165,7 @@ fn backward_scratch_bytes(cfg: &QwenConfig, n: u64, t: u32, b: u32, train: bool)
     let hq = cfg.q_dim() as u64;
     let hkv = cfg.kv_dim() as u64;
     let ff = cfg.d_ff as u64;
-    let d_scores = if trains_on_flash(cfg) { 0 } else { crate::model::attn_score_elems(false, b, cfg.n_heads, t) };
+    let d_scores = if runs_flash(cfg, false) { 0 } else { crate::model::attn_score_elems(false, b, cfg.n_heads, t) };
     // d_xn, d_tmp, dxmid | d_ctx, d_q, dq_pre | d_k, dk_pre, d_v | d_h, d_gate_pre, d_up | lora_out
     let grads = n * (3 * d + 3 * hq + 3 * hkv + 3 * ff) + n * hq.max(ff).max(d).max(hkv);
     (grads + d_scores) * 4
@@ -196,7 +199,7 @@ pub fn estimate_vram_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype, b: u32, t
     weight_bytes(cfg, shard, dt, train)
         + kv_cache_bytes(cfg, t, train)
         + residual_bytes(cfg, shard, n, train)
-        + activation_scratch_bytes(cfg, n, t, b, train, decode_only)
+        + activation_scratch_bytes(cfg, n, t, b, decode_only)
         + backward_scratch_bytes(cfg, n, t, b, train)
         + head_bytes(cfg, shard, n, train, decode_only)
 }
@@ -343,11 +346,9 @@ mod tests {
     fn activation_scratch_does_not_scale_with_layer_count() {
         let cfg8 = tiny_cfg(8, 2048, 5632);
         let cfg16 = tiny_cfg(16, 2048, 5632);
-        for train in [false, true] {
-            let a = activation_scratch_bytes(&cfg8, 512, 512, 1, train, false);
-            let b = activation_scratch_bytes(&cfg16, 512, 512, 1, train, false);
-            assert_eq!(a, b, "train={train}: scratch must be pooled to one copy regardless of layer count: 8L={a} 16L={b}");
-        }
+        let a = activation_scratch_bytes(&cfg8, 512, 512, 1, false);
+        let b = activation_scratch_bytes(&cfg16, 512, 512, 1, false);
+        assert_eq!(a, b, "scratch must be pooled to one copy regardless of layer count: 8L={a} 16L={b}");
     }
 
     /// A training build on the flash path keeps nothing `T²`-sized: past the
@@ -362,6 +363,24 @@ mod tests {
         for t in [4096u32, 8192] {
             assert!(at(2 * t) <= 2 * at(t) + (1 << 20), "T={t}: {} -> {} bytes past the weights", at(t), at(2 * t));
         }
+    }
+
+    /// An inference build on the flash path keeps no `[H,T,T]` slab either:
+    /// past the weights, doubling the context at most doubles the estimate (the
+    /// KV cache, residual stream and activations are all linear in it), where
+    /// the materialised chain's score pair would quadruple it. A head wider
+    /// than the kernel tiles still materialises the slab.
+    #[test]
+    fn inference_memory_is_linear_in_the_context_on_the_flash_path() {
+        let cfg = QwenConfig::qwen3_0_6b();
+        let shard = Shard::whole(cfg.n_layers as usize);
+        let weights = weight_bytes(&cfg, &shard, Dtype::F32, false);
+        let at = |cfg: &QwenConfig, t: u32| estimate_vram_bytes(cfg, &shard, Dtype::F32, 1, t, false, false) - weight_bytes(cfg, &shard, Dtype::F32, false);
+        for t in [4096u32, 8192] {
+            assert!(at(&cfg, 2 * t) <= 2 * at(&cfg, t) + (1 << 20), "T={t}: {} -> {} bytes past the weights {weights}", at(&cfg, t), at(&cfg, 2 * t));
+        }
+        let wide = QwenConfig { head_dim: 256, ..cfg };
+        assert!(at(&wide, 8192) > 2 * at(&wide, 4096) + (1 << 30), "a head past the flash tile keeps the materialised score pair");
     }
 
     /// A LoRA build over a bf16 base holds the embedding and the head in bf16:
