@@ -119,7 +119,8 @@ fn real_ar_generation_is_seed_deterministic_and_valid() {
     // stops at 32 tokens without ever needing the eos-ignore boundary - this
     // test isn't exercising that gate, so 0 keeps it out of the way.
     let min_len = 0;
-    let seed = 20240727;
+    let seed = data::rng::random_seed();
+    eprintln!("llm seed: {seed}");
 
     // `generate()` advances the SAME `qwen` KV cache it reads its starting
     // hidden state from (`step_embed` per decoded token), so two calls in a

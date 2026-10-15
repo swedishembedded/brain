@@ -161,7 +161,7 @@ mod tests {
         let mut scores = vec![-10.0f32; 10];
         scores[3] = 0.0; // one dominant logit
         let logp = log_softmax(&scores);
-        let mut rng = Rng::new(42);
+        let mut rng = Rng::random();
         let a = nucleus_sampling(&mut rng, &logp, 0.8, 25);
         assert_eq!(a, 3, "the single dominant logit must be selected");
     }
@@ -172,7 +172,7 @@ mod tests {
         scores[3] = 0.0;
         let logp = log_softmax(&scores);
         let decoded = vec![3u32; 10]; // token 3 already repeated win_size times
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::random();
         let mut ws = logp.clone();
         let tok = ras_sampling(&mut rng, &mut ws, &decoded, &RasParams::default());
         assert_ne!(tok, 3, "repetition guard must avoid re-picking the saturated token");
@@ -182,12 +182,13 @@ mod tests {
     fn same_seed_is_deterministic() {
         let scores = vec![0.1f32, 0.2, 0.3, 0.15, 0.05, 0.1, 0.05, 0.02, 0.02, 0.01];
         let logp = log_softmax(&scores);
-        let mut rng1 = Rng::new(123);
-        let mut rng2 = Rng::new(123);
+        let seed = data::rng::random_seed();
+        let mut rng1 = Rng::new(seed);
+        let mut rng2 = Rng::new(seed);
         let mut ws1 = logp.clone();
         let mut ws2 = logp.clone();
         let a = ras_sampling(&mut rng1, &mut ws1, &[], &RasParams::default());
         let b = ras_sampling(&mut rng2, &mut ws2, &[], &RasParams::default());
-        assert_eq!(a, b);
+        assert_eq!(a, b, "seed {seed}");
     }
 }

@@ -209,7 +209,9 @@ fn full_pipeline_produces_a_real_playable_wav_from_real_weights() {
 
     let ref_text = "\u{5e0c}\u{671b}\u{4f60}\u{4ee5}\u{540e}\u{80fd}\u{591f}\u{505a}\u{7684}\u{6bd4}\u{6211}\u{8fd8}\u{597d}\u{5466}\u{3002}";
     let text = "\u{4f60}\u{597d}\u{ff0c}\u{5f88}\u{9ad8}\u{5174}\u{8ba4}\u{8bc6}\u{4f60}\u{3002}";
-    let opts = GenOpts { seed: 42, ..GenOpts::default() };
+    let seed = data::rng::random_seed();
+    eprintln!("pipeline seed: {seed}");
+    let opts = GenOpts { seed, ..GenOpts::default() };
 
     let out_a = pipeline::generate(&paths, &opts, text, ref_wav.to_str().unwrap(), ref_text).unwrap_or_else(|e| panic!("pipeline::generate: {e}"));
 

@@ -111,7 +111,8 @@ fn real_ar_generation_is_seed_deterministic_and_valid() {
     let d = lm.cfg.llm_input_size as usize;
 
     let min_len = 0;
-    let seed = 20240727;
+    let seed = data::rng::random_seed();
+    eprintln!("llm seed: {seed}");
 
     let h1 = lm.prefill(&text_ids, &prompt_speech_tokens);
     let a = lm.generate(&h1[h1.len() - d..], want_tokens.len(), min_len, seed);

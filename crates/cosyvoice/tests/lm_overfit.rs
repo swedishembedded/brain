@@ -64,7 +64,7 @@ fn nparams(w: &mut cosyvoice::lmgrad::LmWeights<f32>) -> usize {
 #[test]
 fn single_example_overfits_to_near_zero_loss() {
     let dims = LmDims::tiny();
-    let mut rng = Lcg::new(0xC05E_0001u64);
+    let mut rng = Lcg::random();
     let mut w = init_weights::<f32>(&dims, 1234);
     let ex = synthetic_example(&dims, &mut rng, 4, 5);
 
@@ -92,7 +92,7 @@ fn single_example_overfits_to_near_zero_loss() {
 #[test]
 fn a_small_batch_overfits_to_near_zero_loss() {
     let dims = LmDims::tiny_cv3();
-    let mut rng = Lcg::new(0x8A7C_0002u64);
+    let mut rng = Lcg::random();
     let mut w = init_weights::<f32>(&dims, 4321);
     let batch: Vec<Example> = (0..4).map(|i| synthetic_example(&dims, &mut rng, 3 + i, 4 + i)).collect();
 
