@@ -92,6 +92,7 @@ pub struct CapScaleConfig {
     pub n_sequences: usize,
     /// Eval-set size per benchmark (kept small for speed).
     pub eval_sequences: usize,
+    /// Run seed; `Default` draws a fresh random one.
     pub seed: u64,
 }
 
@@ -107,7 +108,7 @@ impl Default for CapScaleConfig {
             steps: 60,
             n_sequences: 800,
             eval_sequences: 60,
-            seed: 1337,
+            seed: data::rng::random_seed(),
         }
     }
 }

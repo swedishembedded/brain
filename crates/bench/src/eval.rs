@@ -306,7 +306,8 @@ pub fn print_report(report: &EvalReport) {
 /// A loaded results artifact, the subset `compare` needs.
 pub struct LoadedReport {
     pub arch: String,
-    pub seed: u64,
+    /// `None` for an artifact that recorded no seed.
+    pub seed: Option<u64>,
     pub param_count: u64,
     pub commit: String,
     pub gating_pass_rate: f64,
@@ -323,7 +324,7 @@ pub fn load_artifact(path: &Path) -> io::Result<LoadedReport> {
     let v: Value = serde_json::from_str(&text)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let arch = v["arch"].as_str().unwrap_or("?").to_string();
-    let seed = v["seed"].as_u64().unwrap_or(0);
+    let seed = v["seed"].as_u64();
     let param_count = v["param_count"].as_u64().unwrap_or(0);
     let commit = v["commit"].as_str().unwrap_or("unknown").to_string();
     let gating_pass_rate = v["gating"]["pass_rate"].as_f64().unwrap_or(0.0);
@@ -384,7 +385,7 @@ pub fn compare(paths: &[PathBuf]) -> io::Result<()> {
     println!("{}", "-".repeat(header.len()));
 
     // seed / params / commit context rows.
-    print_str_row("seed", &reports.iter().map(|r| r.seed.to_string()).collect::<Vec<_>>(), row_w, col_w);
+    print_str_row("seed", &reports.iter().map(|r| r.seed.map_or_else(|| "?".to_string(), |s| s.to_string())).collect::<Vec<_>>(), row_w, col_w);
     print_str_row(
         "params",
         &reports.iter().map(|r| r.param_count.to_string()).collect::<Vec<_>>(),

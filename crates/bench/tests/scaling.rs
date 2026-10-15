@@ -24,7 +24,8 @@ fn loss_is_monotonic_in_model_size() {
     }
     // A slightly trimmed sweep keeps this test under the 3-4 min CPU budget while
     // still spanning a real range of sizes (params increase strictly across them).
-    let sweep = Sweep { steps: 250, ..Default::default() };
+    // seed: the loss-vs-size ordering has a fixed noise tolerance tuned on this seed.
+    let sweep = Sweep { steps: 250, seed: 1337, ..Default::default() };
     let dir = std::env::temp_dir().join(format!("brain_scaling_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let result = run(&sweep, &dir).expect("run scaling sweep");

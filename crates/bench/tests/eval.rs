@@ -53,7 +53,7 @@ fn eval_gpt_smoke_writes_valid_artifact() {
     std::fs::remove_file(&out).ok();
 
     assert_eq!(loaded.arch, "gpt2");
-    assert_eq!(loaded.seed, seed);
+    assert_eq!(loaded.seed, Some(seed));
     assert!(loaded.param_count > 0, "param_count not recorded");
     assert!(loaded.gating_pass_rate.is_finite());
     // Round-trip preserved every axis.

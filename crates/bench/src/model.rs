@@ -47,6 +47,7 @@ pub struct TrainConfig {
     pub mask_before: Option<char>,
     pub mask_per_line: bool,
     pub align_to_lines: bool,
+    /// Run seed; `Default` draws a fresh random one.
     pub seed: u64,
 }
 
@@ -62,7 +63,7 @@ impl Default for TrainConfig {
             mask_before: None,
             mask_per_line: false,
             align_to_lines: false,
-            seed: 1337,
+            seed: data::rng::random_seed(),
         }
     }
 }

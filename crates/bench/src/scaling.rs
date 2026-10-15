@@ -95,6 +95,7 @@ pub struct Sweep {
     pub steps: u32,
     pub batch_size: u32,
     pub lr: f32,
+    /// Run seed; `Default` draws a fresh random one.
     pub seed: u64,
 }
 
@@ -109,7 +110,7 @@ impl Default for Sweep {
             steps: 400,
             batch_size: 32,
             lr: 3e-3,
-            seed: 1337,
+            seed: data::rng::random_seed(),
         }
     }
 }
