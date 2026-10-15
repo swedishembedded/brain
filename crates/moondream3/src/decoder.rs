@@ -1469,7 +1469,7 @@ mod tests {
     fn parallel_block_runs() {
         let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot) = (6u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32);
-        let mut rng = Rng::new(6);
+        let mut rng = Rng::random();
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
         let mut w = HashMap::new();
         w.insert("ln.weight".into(), vec![1.0; d as usize]);
@@ -1494,7 +1494,7 @@ mod tests {
         // must differ from the same weights without tau.
         let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot) = (6u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32);
-        let mut rng = Rng::new(11);
+        let mut rng = Rng::random();
         let base = block_weights(d, ff, &mut rng);
         let x: Vec<f32> = (0..(t * d) as usize).map(|_| rng.next_f32() - 0.5).collect();
 
@@ -1524,7 +1524,7 @@ mod tests {
         // (before tau/RoPE) and its grad = Σ_rows d_qkv_raw. Gradcheck the bias grad.
         let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
-        let mut rng = Rng::new(23);
+        let mut rng = Rng::random();
         let mut w = block_weights(d, ff, &mut rng);
         w.insert("attn.qkv.bias".into(), (0..(3 * d) as usize).map(|_| (rng.next_f32() - 0.5) * 0.3).collect());
         let n = (t * d) as usize;
@@ -1561,7 +1561,7 @@ mod tests {
         // shared-LN accumulation → LN dx); a weight grad covers the accumulating path.
         let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::random();
         let w = block_weights(d, ff, &mut rng);
         let n = (t * d) as usize;
         let x_host: Vec<f32> = (0..n).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
@@ -1610,7 +1610,7 @@ mod tests {
         // in-grad + tok_feat/wq/wv/alpha); the alpha and wq grads cover the tau head.
         let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
-        let mut rng = Rng::new(21);
+        let mut rng = Rng::random();
         let mut w = block_weights(d, ff, &mut rng);
         {
             let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
@@ -1673,7 +1673,7 @@ mod tests {
         let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
         let (inner, e, top_k) = (6u32, 3u32, 2u32);
-        let mut rng = Rng::new(31);
+        let mut rng = Rng::random();
         let bw = block_weights(d, ff, &mut rng);
         let mut mw = HashMap::new();
         {
@@ -1742,7 +1742,7 @@ mod tests {
         // lm_head.bias and tok.weight grads cover the head + embedding-scatter paths.
         let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, vocab, n_img, prefix, rot, theta, nl) = (7u32, 16u32, 2u32, 8u32, 32u32, 19u32, 3u32, 4u32, 4u32, 1.5e6f32, 2u32);
-        let mut rng = Rng::new(15);
+        let mut rng = Rng::random();
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.3).collect::<Vec<f32>>();
         let mut w = HashMap::new();
         w.insert("tok.weight".to_string(), r((vocab * d) as usize));
@@ -1820,7 +1820,7 @@ mod tests {
         let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, vocab, n_img, prefix, rot, theta) = (7u32, 16u32, 2u32, 8u32, 32u32, 19u32, 3u32, 4u32, 4u32, 1.5e6f32);
         let (inner, e, top_k) = (6u32, 3u32, 2u32);
-        let mut rng = Rng::new(41);
+        let mut rng = Rng::random();
         let mut w = HashMap::new();
         {
             let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.3).collect::<Vec<f32>>();
@@ -1932,7 +1932,7 @@ mod tests {
         // t=8 stream: bos + 4 image + 3 text (prefix=5). 2 dense layers.
         let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, vocab, n_img, prefix, rot) = (8u32, 16u32, 2u32, 8u32, 32u32, 23u32, 4u32, 5u32, 4u32);
-        let mut rng = Rng::new(9);
+        let mut rng = Rng::random();
         let bw0 = block_weights(d, ff, &mut rng);
         let bw1 = block_weights(d, ff, &mut rng);
         let blocks = vec![
@@ -1963,7 +1963,7 @@ mod tests {
         let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot) = (6u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32);
         let (inner, e, top_k) = (4u32, 3u32, 2u32);
-        let mut rng = Rng::new(8);
+        let mut rng = Rng::random();
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
         let mut bw = HashMap::new();
         bw.insert("ln.weight".into(), vec![1.0; d as usize]);
@@ -1995,7 +1995,7 @@ mod tests {
     fn moe_ffn_geglu_runs() {
         let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, inner, e, top_k) = (4u32, 64u32, 32u32, 3u32, 2u32);
-        let mut rng = Rng::new(5);
+        let mut rng = Rng::random();
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
         let mut w = HashMap::new();
         w.insert("router.weight".into(), r((e * d) as usize));

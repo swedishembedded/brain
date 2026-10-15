@@ -58,7 +58,7 @@ mod tests {
             g.submit(&[], &[g.step(if bwd { 1 } else { 0 }, &[&b], &par, disp)]);
             g.read(&b, n)
         };
-        let mut rng = Rng::new(41);
+        let mut rng = Rng::random();
         let x: Vec<f32> = (0..n).map(|_| rng.next_f32() - 0.5).collect();
 
         // Inverse: bwd(fwd(x)) == x (rotated pairs round-trip; tail untouched).
@@ -120,7 +120,7 @@ mod tests {
             g.submit(&[], &[g.step(1, &[&a, &o], &par, nx as u32)]);
             g.read(&o, nx)
         };
-        let mut rng = Rng::new(31);
+        let mut rng = Rng::random();
         let x: Vec<f32> = (0..nx).map(|_| rng.next_f32() - 0.5).collect();
         let dy: Vec<f32> = (0..ny).map(|_| rng.next_f32() - 0.5).collect();
         let v: Vec<f32> = (0..nx).map(|_| if rng.next_f32() < 0.5 { -1.0 } else { 1.0 }).collect();
@@ -153,7 +153,7 @@ mod tests {
             g.submit(&[], &[g.step(1, &[&a, &b, &o], &[rows, heads, hd], ns as u32)]);
             g.read(&o, ns)
         };
-        let mut rng = Rng::new(21);
+        let mut rng = Rng::random();
         let inp: Vec<f32> = (0..n).map(|_| rng.next_f32() - 0.5).collect();
         let s: Vec<f32> = (0..ns).map(|_| rng.next_f32() - 0.5).collect();
         let dy: Vec<f32> = (0..n).map(|_| rng.next_f32() - 0.5).collect();
@@ -181,7 +181,7 @@ mod tests {
     fn geglu_shift_grads_match_finite_differences() {
         let g = gpu();
         let n = 32usize;
-        let mut rng = Rng::new(11);
+        let mut rng = Rng::random();
         let r = |rng: &mut Rng| (0..n).map(|_| rng.next_f32() - 0.5).collect::<Vec<f32>>();
         let (h, gg, dy) = (r(&mut rng), r(&mut rng), r(&mut rng));
         let (vh, vg): (Vec<f32>, Vec<f32>) = (

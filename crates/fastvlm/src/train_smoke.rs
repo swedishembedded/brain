@@ -24,7 +24,7 @@ mod tests {
         qwen.enable_mm_splice(1, n_img); // image tokens occupy rows [1, 1+n_img)
 
         // A single fixed "image" (random projected embeds) + caption to memorize.
-        let mut rng = Rng::new(2);
+        let mut rng = Rng::random();
         let img: Vec<f32> = (0..(n_img * d) as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
         // tokens: bos + 3 image placeholders + 4 caption tokens.
         let tokens = vec![0u32, 5, 5, 5, 7, 11, 17, 3];

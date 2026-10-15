@@ -106,7 +106,7 @@ mod tests {
         let egpu = Gpu::new_cpu(PIPELINES);
         let c = ctx(&egpu);
         let enc = Encoder::new(&c, layers, dims, mlp_ratio, cls_ratio, input);
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::random();
         let enc_weights: HashMap<String, Vec<f32>> = enc
             .param_list()
             .iter()

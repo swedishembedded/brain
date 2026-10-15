@@ -1003,7 +1003,7 @@ mod tests {
         let unit = ConvUnit::new(&ctx, "cu", in_shape, 6, 3, 1, 1, 1, false, true, true);
         let plist = unit.param_list();
         let out_n = unit.out_shape().numel() as usize;
-        let mut rng = Rng::new(2);
+        let mut rng = Rng::random();
         let init = rand_init(&plist, &mut rng);
         let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
 
@@ -1062,7 +1062,7 @@ mod tests {
         let plist = enc.param_list();
         let out_n = (enc.tokens() * enc.feature_dim()) as usize;
         let img_n = (3 * 64 * 64) as usize;
-        let mut rng = Rng::new(19);
+        let mut rng = Rng::random();
         let init = rand_init(&plist, &mut rng);
         let x_host: Vec<f32> = (0..img_n).map(|_| (rng.next_f32() - 0.5) * 0.4).collect();
 
@@ -1112,7 +1112,7 @@ mod tests {
         let blk = AttentionBlock::new(&ctx, "at", in_shape, 32, 2);
         let plist = blk.param_list();
         let out_n = blk.out_shape().numel() as usize;
-        let mut rng = Rng::new(14);
+        let mut rng = Rng::random();
         let init = rand_init(&plist, &mut rng);
         let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
 
@@ -1162,7 +1162,7 @@ mod tests {
         let pe = PatchEmbed::new(&ctx, "pe", in_shape, 6);
         let plist = pe.param_list();
         let out_n = pe.out_shape().numel() as usize;
-        let mut rng = Rng::new(12);
+        let mut rng = Rng::random();
         let init = rand_init(&plist, &mut rng);
         let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
 
@@ -1213,7 +1213,7 @@ mod tests {
         let blk = RepMixerBlock::new(&ctx, "rm", in_shape, 6, 2);
         let plist = blk.param_list();
         let out_n = blk.out_shape().numel() as usize;
-        let mut rng = Rng::new(9);
+        let mut rng = Rng::random();
         let init = rand_init(&plist, &mut rng);
         let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
 
@@ -1264,7 +1264,7 @@ mod tests {
         let ffn = ConvFFN::new(&ctx, "ffn", in_shape, 6, 2);
         let plist = ffn.param_list();
         let out_n = ffn.out_shape().numel() as usize;
-        let mut rng = Rng::new(6);
+        let mut rng = Rng::random();
         let init = rand_init(&plist, &mut rng);
         let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
 
@@ -1316,7 +1316,7 @@ mod tests {
         let unit = ConvUnit::new(&ctx, "cu", in_shape, 6, 3, 1, 1, 1, true, true, true);
         let plist = unit.param_list();
         let out_n = unit.out_shape().numel() as usize;
-        let mut rng = Rng::new(4);
+        let mut rng = Rng::random();
         let init = rand_init(&plist, &mut rng);
         let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
 
@@ -1386,7 +1386,7 @@ mod tests {
         assert!(plist.iter().any(|(n, _)| n.starts_with("network.3.")), "attention stage present");
         assert!(plist.iter().any(|(n, _)| n == "conv_exp.conv.weight"));
 
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::random();
         let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
         let img: Vec<f32> = (0..(3 * 128 * 128) as usize).map(|_| rng.next_f32() - 0.5).collect();
         let out = enc.forward(&ctx, &ps, &gpu.storage_init("img", &img));
@@ -1404,7 +1404,7 @@ mod tests {
         for want in ["a.norm.weight", "a.token_mixer.qkv.weight", "a.token_mixer.proj.bias", "a.layer_scale_1_sb", "a.convffn.fc2.conv.weight"] {
             assert!(plist.iter().any(|(n, _)| n == want), "missing {want}");
         }
-        let mut rng = Rng::new(6);
+        let mut rng = Rng::random();
         let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
         let x: Vec<f32> = (0..in_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
         let out = gpu.read(blk.forward(&ctx, &ps, &gpu.storage_init("x", &x)), in_shape.numel() as usize);
@@ -1420,7 +1420,7 @@ mod tests {
         let pe = PatchEmbed::new(&ctx, "pe", in_shape, 192); // /2, 96→192
         assert_eq!(pe.out_shape(), Shape::new(1, 192, 8, 8));
         let plist = pe.param_list();
-        let mut rng = Rng::new(4);
+        let mut rng = Rng::random();
         let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
         let x: Vec<f32> = (0..in_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
         let out = gpu.read(pe.forward(&ctx, &ps, &gpu.storage_init("x", &x)), pe.out_shape().numel() as usize);
@@ -1436,7 +1436,7 @@ mod tests {
         let pe = repcpe(&ctx, "cpe", in_shape, 32);
         assert_eq!(pe.out_shape(), in_shape); // dw 7×7 pad 3 preserves shape
         let plist = pe.param_list();
-        let mut rng = Rng::new(5);
+        let mut rng = Rng::random();
         let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
         let x: Vec<f32> = (0..in_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
         let out = gpu.read(pe.forward(&ctx, &ps, &gpu.storage_init("x", &x)), in_shape.numel() as usize);
@@ -1453,7 +1453,7 @@ mod tests {
         for want in ["b.token_mixer.conv.weight", "b.convffn.dw.conv.weight", "b.convffn.fc1.conv.weight", "b.convffn.fc2.conv.weight", "b.layer_scale_sb"] {
             assert!(plist.iter().any(|(n, _)| n == want), "missing param {want}");
         }
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::random();
         let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
         let x: Vec<f32> = (0..in_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
         let xb = gpu.storage_init("x", &x);
@@ -1474,7 +1474,7 @@ mod tests {
         assert!(plist.iter().any(|(n, _)| n == "u.conv.weight"), "depthwise conv weight present");
         assert!(plist.iter().any(|(n, _)| n == "u.bias"), "per-channel bias present");
 
-        let mut rng = Rng::new(2);
+        let mut rng = Rng::random();
         let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
         let x: Vec<f32> = (0..in_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
         let xb = gpu.storage_init("x", &x);
@@ -1496,7 +1496,7 @@ mod tests {
         let conv = Conv::new(&ctx, "c0", in_shape, 16, 3, 2, 1, true);
 
         let plist = conv.param_list();
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::random();
         let init: HashMap<String, Vec<f32>> = plist
             .iter()
             .map(|(n, sz)| {

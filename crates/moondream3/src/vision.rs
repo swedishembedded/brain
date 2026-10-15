@@ -110,7 +110,7 @@ mod tests {
         let w = clip::init::init_vision_weights(&cfg.tower(), 3);
         let enc = encoder(gpu, &cfg, &w);
         let n_crops = 3u32;
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::random();
         let crops: Vec<f32> = (0..(n_crops * 3 * cfg.crop_size * cfg.crop_size) as usize).map(|_| rng.next_f32() - 0.5).collect();
         let out = enc.encode(n_crops, &crops);
         assert_eq!(out.len(), (n_crops * cfg.patches_per_crop() * cfg.dim) as usize);
@@ -121,7 +121,7 @@ mod tests {
     fn connector_projects() {
         let gpu = gpu_core::testgpu::dev(vision_pipelines());
         let (in_dim, inner, out_dim, rows) = (48u32, 96u32, 32u32, 9u32);
-        let mut rng = Rng::new(4);
+        let mut rng = Rng::random();
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
         let mut w = HashMap::new();
         w.insert("fc1.weight".into(), r((inner * in_dim) as usize));

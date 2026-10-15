@@ -573,7 +573,7 @@ mod tests {
         let vision = cfg.vision.clone();
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 3;
-        let mut rng = Rng::new(21);
+        let mut rng = Rng::random();
         let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
 
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
@@ -590,7 +590,7 @@ mod tests {
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 3;
         let (ht, wt) = (2u32, 2u32);
-        let mut rng = Rng::new(41);
+        let mut rng = Rng::random();
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
         let global = r((3 * vision.crop_size * vision.crop_size) as usize);
         let locals = r((ht * wt * 3 * vision.crop_size * vision.crop_size) as usize);
@@ -614,7 +614,7 @@ mod tests {
         let vocab = cfg.vocab;
         // Room for the bos + image block + a few prompt tokens + generation.
         let seq_len = 1 + ppc + 8;
-        let mut rng = Rng::new(130);
+        let mut rng = Rng::random();
         let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
 
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
@@ -638,7 +638,7 @@ mod tests {
         let vision = cfg.vision.clone();
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 8;
-        let mut rng = Rng::new(170);
+        let mut rng = Rng::random();
         let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
 
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
@@ -670,7 +670,7 @@ mod tests {
         let vision = cfg.vision.clone();
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 10;
-        let mut rng = Rng::new(410);
+        let mut rng = Rng::random();
         let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
 
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
@@ -693,7 +693,7 @@ mod tests {
         let vision = cfg.vision.clone();
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 8;
-        let mut rng = Rng::new(430);
+        let mut rng = Rng::random();
         let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
         let embeds = model.image_embeds(&crop);
@@ -722,7 +722,7 @@ mod tests {
         let seq_len = 1 + ppc + 3;
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, 2 * vision.dim, seq_len);
 
-        let mut rng = Rng::new(470);
+        let mut rng = Rng::random();
         let mut img = |w: u32, h: u32| -> Vec<f32> { (0..(w * h * 3) as usize).map(|_| rng.next_f32()).collect() };
         // Different aspect ratios -> different tile counts -> different crop
         // counts, which is exactly what a uniform-stride slice gets wrong.
@@ -755,7 +755,7 @@ mod tests {
         let vision = cfg.vision.clone();
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 3;
-        let mut rng = Rng::new(530);
+        let mut rng = Rng::random();
         let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
         let (tokens, _) = seq(ppc);
 
@@ -810,7 +810,7 @@ mod tests {
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 3;
         let vocab = cfg.vocab as usize;
-        let mut rng = Rng::new(230);
+        let mut rng = Rng::random();
         let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
         let (tokens, _) = seq(ppc);
 
@@ -842,7 +842,7 @@ mod tests {
         use crate::decoder::{pipelines, MoondreamBlock};
         let gpu = gpu_core::Gpu::new_cpu(pipelines());
         let (t, d, nh, hd, ff) = (4u32, 8u32, 2u32, 4u32, 16u32);
-        let mut rng = Rng::new(31);
+        let mut rng = Rng::random();
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
         let mut w = HashMap::new();
         for (leaf, sz) in [
@@ -872,7 +872,7 @@ mod tests {
         let vision = cfg.vision.clone();
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 3;
-        let mut rng = Rng::new(70);
+        let mut rng = Rng::random();
         let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
 
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
