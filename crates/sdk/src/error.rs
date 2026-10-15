@@ -78,6 +78,10 @@ pub enum Error {
     /// The resolved (or requested) checkpoint's declared architecture is not
     /// one `brain` can load.
     UnsupportedArchitecture(String),
+    /// The architecture exists but does not provide a capability the request
+    /// needs (token objectives for DPO/GRPO, a chat fine-tuner). Refused when
+    /// the request is configured, before any weights are read or device claimed.
+    Unsupported(model::training::Unsupported),
     /// Fetching a model from the hub failed.
     Download(String),
     /// The resolved checkpoint is gated behind a license the caller has not
@@ -128,6 +132,7 @@ impl std::fmt::Display for Error {
             Error::Ambiguous(a) => write!(f, "{}", describe_ambiguity(a)),
             Error::Missing(m) => write!(f, "{}", describe_missing(m)),
             Error::UnsupportedArchitecture(a) => write!(f, "unsupported architecture: {a}"),
+            Error::Unsupported(u) => write!(f, "{u}"),
             Error::Download(m) => write!(f, "download failed: {m}"),
             Error::LicenseRequired(m) => write!(f, "license required: {m}"),
             Error::MissingArgument(m) => write!(f, "{m}"),
@@ -143,6 +148,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Io(e) => Some(e),
+            Error::Unsupported(u) => Some(u),
             _ => None,
         }
     }

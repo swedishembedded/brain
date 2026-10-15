@@ -68,6 +68,7 @@ use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
 use model::rollout::RolloutParams;
 use model::serve::SampleParams;
+use model::training::{Capability, Unsupported};
 use model::{Model, ModelConfig};
 use qwen3::config::LoraCfg;
 pub use rl::env::{Environment, Reward, Step, StepOutcome, Task, Verifier};
@@ -93,6 +94,24 @@ use rl::objective::grpo::{Grpo, GrpoConfig};
 pub(crate) trait StudyArch {
     type M: Model;
 
+    /// The `brain_arch` registry id (`--arch qwen3`).
+    const ID: &'static str;
+
+    /// The `ModelCard.family` tag the architecture's own adapters are saved
+    /// under (`model::lora::device_adapter::save_adapter`'s `family`).
+    const FAMILY: &'static str;
+
+    /// Whether `Self::M` provides [`model::training::TokenObjectives`], the
+    /// capability DPO, GRPO and distillation need. A claim, checked against
+    /// the model itself by `declared_capabilities_match_the_models`.
+    const TOKEN_OBJECTIVES: bool;
+
+    /// Whether the chat fine-tuners (`ChatFineTune`, `PreferenceFineTune`,
+    /// `ChatFullFineTune`) have an implementation for this architecture.
+    /// They sit on the architecture's own checkpoint reader and trainer
+    /// (`qwen3::finetune`), so a row opts in only when that exists.
+    const CHAT_FINE_TUNE: bool = false;
+
     /// This architecture's own LoRA overlay at `rank`/`alpha` - the four
     /// attention projections for `qwen3`, the fused/expert projections its
     /// successors adapt instead.
@@ -111,6 +130,10 @@ pub(crate) trait StudyArch {
 pub(crate) struct Qwen3;
 impl StudyArch for Qwen3 {
     type M = qwen3::model::Qwen;
+    const ID: &'static str = "qwen3";
+    const FAMILY: &'static str = "qwen";
+    const TOKEN_OBJECTIVES: bool = true;
+    const CHAT_FINE_TUNE: bool = true;
     fn lora(rank: u32, alpha: f32) -> LoraCfg {
         LoraCfg::attn(rank, alpha)
     }
@@ -122,6 +145,9 @@ impl StudyArch for Qwen3 {
 pub(crate) struct Qwen35;
 impl StudyArch for Qwen35 {
     type M = qwen35::model::Qwen35;
+    const ID: &'static str = "qwen35";
+    const FAMILY: &'static str = "qwen35";
+    const TOKEN_OBJECTIVES: bool = false;
     fn lora(rank: u32, alpha: f32) -> LoraCfg {
         qwen35::config::lora_cfg(rank, alpha)
     }
@@ -133,6 +159,9 @@ impl StudyArch for Qwen35 {
 pub(crate) struct Qwen35Moe;
 impl StudyArch for Qwen35Moe {
     type M = qwen35moe::model::Qwen35;
+    const ID: &'static str = "qwen35moe";
+    const FAMILY: &'static str = "qwen35moe";
+    const TOKEN_OBJECTIVES: bool = false;
     fn lora(rank: u32, alpha: f32) -> LoraCfg {
         qwen35moe::config::lora_cfg(rank, alpha)
     }
@@ -141,22 +170,125 @@ impl StudyArch for Qwen35Moe {
     }
 }
 
-/// The registry: architecture id (a `brain_arch` id, so `--arch qwen3` is the
-/// same word every other brain command uses) -> the monomorphised study.
+/// One architecture's row in [`ARCHS`]: its identity, what it provides, and
+/// the monomorphised entry points the generic machinery runs through.
 ///
-/// Adding an architecture is one row, exactly as `bench::arch` documents for
-/// the benchmark battery. See this module's doc comment for the one property
-/// a candidate must have that `M: Model` does not imply: an HF
-/// `tokenizer.json` BPE, because `DocumentCurriculum` names `QwenBpe`.
-const ARCHS: &[(&str, StudyFn)] = &[("qwen3", run_for::<Qwen3>), ("qwen35", run_for::<Qwen35>), ("qwen35moe", run_for::<Qwen35Moe>)];
+/// **Adding an architecture** is one `StudyArch` impl (its LoRA overlay, its
+/// id and family, the capabilities it claims) plus one `ArchEntry::of` line in
+/// [`ARCHS`]. The model itself implements `model::Model` and, when it offers
+/// them, `model::training::TokenObjectives`; nothing in the SDK dispatch or in
+/// `rl` names it. `a_new_architecture_is_one_row` shows this with a fake row.
+pub(crate) struct ArchEntry {
+    /// A `brain_arch` registry id.
+    pub id: &'static str,
+    /// The `ModelCard.family` tag its adapters carry.
+    pub family: &'static str,
+    /// Claims `model::training::TokenObjectives`.
+    pub token_objectives: bool,
+    /// Has an implementation of the chat fine-tuners.
+    pub chat_fine_tune: bool,
+    study: StudyFn,
+    improve: ImproveFn,
+}
+
+impl ArchEntry {
+    pub(crate) const fn of<A: StudyArch>() -> ArchEntry {
+        ArchEntry { id: A::ID, family: A::FAMILY, token_objectives: A::TOKEN_OBJECTIVES, chat_fine_tune: A::CHAT_FINE_TUNE, study: run_for::<A>, improve: run_improve_dyn::<A> }
+    }
+
+    /// Refuse, at configuration time, a run that needs a capability this
+    /// architecture does not provide.
+    pub(crate) fn require(&self, capability: Capability) -> Result<()> {
+        let provided = match capability {
+            Capability::TokenObjectives => self.token_objectives,
+            Capability::ChatFineTune => self.chat_fine_tune,
+            Capability::LoraSites => true,
+        };
+        if provided {
+            Ok(())
+        } else {
+            Err(Error::Unsupported(Unsupported::new(self.id, capability)))
+        }
+    }
+}
+
+/// The registry: architecture id (a `brain_arch` id, so `--arch qwen3` is the
+/// same word every other brain command uses) -> its [`ArchEntry`]. The one
+/// per-architecture table the document study, the improve cycle and the chat
+/// fine-tuners all dispatch through.
+///
+/// See this module's doc comment for the one property a candidate must have
+/// that `M: Model` does not imply: an HF `tokenizer.json` BPE, because
+/// `DocumentCurriculum` names `QwenBpe`.
+const ARCHS: &[ArchEntry] = &[ArchEntry::of::<Qwen3>(), ArchEntry::of::<Qwen35>(), ArchEntry::of::<Qwen35Moe>()];
+
+/// The row for architecture `id`, or the refusal listing the known ids.
+pub(crate) fn arch(id: &str) -> Result<&'static ArchEntry> {
+    arch_in(ARCHS, id)
+}
+
+fn arch_in<'t>(table: &'t [ArchEntry], id: &str) -> Result<&'t ArchEntry> {
+    table.iter().find(|a| a.id == id).ok_or_else(|| Error::UnsupportedArchitecture(format!("{id}: not a registered architecture (known: {})", arch_names_in(table))))
+}
 
 /// One [`ARCHS`] row's study, already monomorphised for its `Model` impl -
 /// the erasure that lets a table hold architectures whose `Model` types have
 /// nothing in common but the trait.
 type StudyFn = fn(&Inputs) -> std::io::Result<DocumentStudyReport>;
 
+/// One row's improve cycle. The environment and verifier are erased
+/// ([`DynEnv`], [`DynVerifier`]) because a function pointer cannot be generic
+/// over them; `for<'e>` lets them borrow.
+type ImproveFn = for<'e> fn(&Improve, DynEnv<'e>, DynVerifier<'e>, &ImproveOptions, &Path, &str, &Path) -> std::io::Result<rl::improve::CycleOutcome>;
+
 fn arch_names() -> String {
-    ARCHS.iter().map(|(n, _)| *n).collect::<Vec<&str>>().join(", ")
+    arch_names_in(ARCHS)
+}
+
+fn arch_names_in(table: &[ArchEntry]) -> String {
+    table.iter().map(|a| a.id).collect::<Vec<&str>>().join(", ")
+}
+
+/// A failed improve cycle as the SDK reports it: a refusal for a missing
+/// capability stays typed, anything else is the backend's message.
+fn improve_error(e: std::io::Error) -> Error {
+    match e.get_ref().and_then(|source| source.downcast_ref::<Unsupported>()) {
+        Some(unsupported) => Error::Unsupported(unsupported.clone()),
+        None => Error::Backend(e.to_string()),
+    }
+}
+
+/// An [`Environment`] behind a box, so one [`ImproveFn`] signature serves any.
+pub(crate) struct DynEnv<'e>(Box<dyn Environment + 'e>);
+
+impl Environment for DynEnv<'_> {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn tasks(&self, seed: u64) -> Vec<Task> {
+        self.0.tasks(seed)
+    }
+    fn step(&self, task: &Task, transcript: &[Step], action: &[u32]) -> StepOutcome {
+        self.0.step(task, transcript, action)
+    }
+    fn legal_actions(&self, task: &Task, step: usize) -> Option<&[u32]> {
+        self.0.legal_actions(task, step)
+    }
+}
+
+/// A [`Verifier`] behind a shared pointer: clonable, since the cycle scores
+/// the training and the held-out draw with the same one.
+#[derive(Clone)]
+pub(crate) struct DynVerifier<'e>(std::rc::Rc<dyn Verifier + 'e>);
+
+impl Verifier for DynVerifier<'_> {
+    fn verify(&self, task: &Task, transcript: &[Step], completion: &[u32]) -> Reward {
+        self.0.verify(task, transcript, completion)
+    }
+}
+
+fn run_improve_dyn<A: StudyArch>(imp: &Improve, env: DynEnv<'_>, verifier: DynVerifier<'_>, opts: &ImproveOptions, base_weights: &Path, base_id: &str, work_dir: &Path) -> std::io::Result<rl::improve::CycleOutcome> {
+    run_improve_for::<A, _, _>(imp, env, verifier, opts, base_weights, base_id, work_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +498,7 @@ fn run_for<A: StudyArch>(i: &Inputs) -> std::io::Result<DocumentStudyReport> {
 
     let spec = StudySpec {
         base_checkpoint: &study_base,
-        adapter: AdapterMeta { rank: i.rank, alpha: i.alpha, targets: &targets, family: "qwen", base_id: i.base_id, dataset_id: Some(i.dataset) },
+        adapter: AdapterMeta { rank: i.rank, alpha: i.alpha, targets: &targets, family: A::FAMILY, base_id: i.base_id, dataset_id: Some(i.dataset) },
     };
     let cfg = DocumentStudyConfig {
         cycles: i.cycles.len(),
@@ -672,6 +804,78 @@ mod tests {
         assert!(e.to_string().contains("expected_answer"), "the failure must name the field, got {e}");
     }
 
+    /// A row whose model has nothing but `Model` to offer: stands in for a
+    /// future architecture. It reuses `Qwen3`'s model type only so the trait's
+    /// associated `M` has something to name; its id, family and claims are its own.
+    struct Fake;
+    impl StudyArch for Fake {
+        type M = qwen3::model::Qwen;
+        const ID: &'static str = "fake";
+        const FAMILY: &'static str = "fake-family";
+        const TOKEN_OBJECTIVES: bool = false;
+        fn lora(rank: u32, alpha: f32) -> LoraCfg {
+            LoraCfg::attn(rank, alpha)
+        }
+        fn study_config(base: &qwen3::config::QwenConfig, lora: LoraCfg, block: u32) -> qwen3::config::QwenConfig {
+            qwen3::config::QwenConfig { block_size: block, lora: Some(lora), ..base.clone() }
+        }
+    }
+
+    /// Adding an architecture is one table entry plus trait impls: the lookup,
+    /// the family and the capability refusal all come from the row.
+    #[test]
+    fn a_new_architecture_is_one_row() {
+        let table = [ArchEntry::of::<Qwen3>(), ArchEntry::of::<Fake>()];
+        let fake = arch_in(&table, "fake").expect("the row is found by its id");
+        assert_eq!(fake.family, "fake-family");
+        match fake.require(Capability::TokenObjectives) {
+            Err(Error::Unsupported(u)) => assert_eq!(u.to_string(), "fake does not provide token objectives yet"),
+            other => panic!("expected the typed refusal, got {other:?}"),
+        }
+        assert!(arch_in(&table, "qwen3").unwrap().require(Capability::TokenObjectives).is_ok());
+        let unknown = arch_in(&table, "nope").err().expect("an unknown id is refused").to_string();
+        assert!(unknown.contains("nope") && unknown.contains("qwen3, fake"), "{unknown}");
+    }
+
+    /// The chat fine-tuners dispatch through the registry: an architecture
+    /// that lacks what a run needs is refused, naming it and the capability,
+    /// before any file is read.
+    #[test]
+    fn fine_tuners_refuse_an_architecture_that_lacks_their_capability() {
+        let refused = |r: Result<()>| match r {
+            Err(Error::Unsupported(u)) => u.to_string(),
+            other => panic!("expected the typed refusal, got {other:?}"),
+        };
+        let dir = std::env::temp_dir();
+        assert_eq!(refused(crate::ChatFineTune::from_pretrained("none").arch("qwen35").dataset("d.jsonl").out_dir(&dir).run().map(|_| ())), "qwen35 does not provide chat fine-tuning yet");
+        assert_eq!(refused(crate::ChatFullFineTune::from_pretrained("none").arch("qwen35moe").dataset("d.jsonl").out_dir(&dir).run().map(|_| ())), "qwen35moe does not provide chat fine-tuning yet");
+        assert_eq!(refused(crate::PreferenceFineTune::from_pretrained("none").arch("qwen35").dataset("d.jsonl").out_dir(&dir).run().map(|_| ())), "qwen35 does not provide chat fine-tuning yet");
+        match crate::ChatFineTune::from_pretrained("none").arch("nonesuch").dataset("d.jsonl").out_dir(&dir).run() {
+            Err(Error::UnsupportedArchitecture(m)) => assert!(m.contains("nonesuch") && m.contains("qwen3"), "{m}"),
+            other => panic!("expected an unknown-architecture refusal, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    /// The registry's claims are the models' own. A claim cannot be derived
+    /// without a model to ask, so it is checked here against a tiny build
+    /// of each registered architecture.
+    #[test]
+    fn declared_capabilities_match_the_models() {
+        fn offered<A: StudyArch>(cfg: <A::M as Model>::Config) -> bool {
+            let init = <A::M as Model>::init_weights(&cfg, 7); // seed: any weights serve, only the capability is read
+            <A::M as Model>::new(cfg, 1, 4, &init).token_objectives().is_some()
+        }
+        let claims = [
+            (Qwen3::ID, Qwen3::TOKEN_OBJECTIVES, offered::<Qwen3>(qwen3::config::QwenConfig::tiny())),
+            (Qwen35::ID, Qwen35::TOKEN_OBJECTIVES, offered::<Qwen35>(qwen35::config::Qwen35Config::tiny())),
+            (Qwen35Moe::ID, Qwen35Moe::TOKEN_OBJECTIVES, offered::<Qwen35Moe>(qwen35moe::config::Qwen35Config::tiny())),
+        ];
+        for (id, claimed, actual) in claims {
+            assert_eq!(claimed, actual, "{id}: the registry claims token_objectives={claimed} but the model offers {actual}");
+        }
+        assert_eq!(claims.len(), ARCHS.len(), "every registered architecture is checked");
+    }
+
     /// The registry is what makes this command architecture-agnostic rather
     /// than a qwen3 verb wearing a general name: every id is a real
     /// `brain_arch` registry id (so `--arch qwen3` is the same word every
@@ -680,8 +884,8 @@ mod tests {
     #[test]
     fn every_registered_architecture_is_a_real_brain_arch_id() {
         assert!(ARCHS.len() > 1, "a registry with one row is not a seam");
-        for (id, _) in ARCHS {
-            assert!(brain_arch::by_id(id).is_some(), "{id:?} is not a brain_arch registry id - --arch would not agree with the rest of the CLI");
+        for a in ARCHS {
+            assert!(brain_arch::by_id(a.id).is_some(), "{:?} is not a brain_arch registry id - --arch would not agree with the rest of the CLI", a.id);
         }
     }
 }
@@ -830,7 +1034,7 @@ impl DocumentStudy {
 
     /// Every registered architecture id.
     pub fn architectures() -> Vec<&'static str> {
-        ARCHS.iter().map(|(n, _)| *n).collect()
+        ARCHS.iter().map(|a| a.id).collect()
     }
 
     /// Validate the dataset exactly as [`DocumentStudy::run`] would, and do
@@ -855,10 +1059,7 @@ impl DocumentStudy {
         if self.rank == 0 {
             return Err(Error::MissingArgument("lora rank must be > 0: a document study trains a LoRA adapter".into()));
         }
-        let (_, study) = ARCHS
-            .iter()
-            .find(|(name, _)| *name == self.arch)
-            .ok_or_else(|| Error::UnsupportedArchitecture(format!("{}: no document study is registered for it (known: {})", self.arch, arch_names())))?;
+        let study = arch(&self.arch).map_err(|_| Error::UnsupportedArchitecture(format!("{}: no document study is registered for it (known: {})", self.arch, arch_names())))?.study;
 
         // The dataset is validated BEFORE anything touches the base: it is
         // the one input brain did not produce, it is fully checkable on its
@@ -1149,7 +1350,7 @@ impl Improve {
     }
     /// Every registered architecture id.
     pub fn architectures() -> Vec<&'static str> {
-        ARCHS.iter().map(|(n, _)| *n).collect()
+        ARCHS.iter().map(|a| a.id).collect()
     }
 
     /// Run one improve cycle: train `opts.group_size`-way GRPO over `env`'s
@@ -1164,6 +1365,11 @@ impl Improve {
         if self.rank == 0 {
             return Err(Error::MissingArgument("lora rank must be > 0: an improve cycle trains a LoRA adapter".into()));
         }
+        // GRPO needs the architecture's token objectives: refused here, with
+        // the architecture named, before weights are resolved or a device claimed.
+        let entry = arch(&self.arch).map_err(|_| Error::UnsupportedArchitecture(format!("{}: no improve cycle is registered for it (known: {})", self.arch, arch_names())))?;
+        entry.require(Capability::TokenObjectives)?;
+        let improve = entry.improve;
 
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
         let (base_weights, _base_dir, base_id) = loader::model_dir::resolve_base(&self.weights, store_root.as_deref()).map_err(Error::ModelNotFound)?;
@@ -1171,13 +1377,7 @@ impl Improve {
         let work_dir = self.work_dir.clone().unwrap_or_else(|| std::env::temp_dir().join("brain-improve"));
         std::fs::create_dir_all(&work_dir).map_err(|e| Error::Backend(format!("{}: {e}", work_dir.display())))?;
 
-        let outcome = match self.arch.as_str() {
-            "qwen3" => run_improve_for::<Qwen3, E, V>(self, env, verifier, opts, &base_weights, &base_id, &work_dir),
-            "qwen35" => run_improve_for::<Qwen35, E, V>(self, env, verifier, opts, &base_weights, &base_id, &work_dir),
-            "qwen35moe" => run_improve_for::<Qwen35Moe, E, V>(self, env, verifier, opts, &base_weights, &base_id, &work_dir),
-            other => return Err(Error::UnsupportedArchitecture(format!("{other}: no improve cycle is registered for it (known: {})", arch_names()))),
-        }
-        .map_err(|e| Error::Backend(e.to_string()))?;
+        let outcome = improve(self, DynEnv(Box::new(env)), DynVerifier(std::rc::Rc::new(verifier)), opts, &base_weights, &base_id, &work_dir).map_err(improve_error)?;
 
         std::fs::create_dir_all(adapter_dir).map_err(|e| Error::Backend(format!("{}: {e}", adapter_dir.display())))?;
         let published = match (outcome.decision, &outcome.adapter_path) {
@@ -1295,7 +1495,7 @@ fn run_improve_for<A: StudyArch, E: Environment, V: Verifier + Clone>(
         rl::improve::CycleArtifacts {
             train_out: &train_out,
             adapter_out_dir: &adapter_out_dir,
-            adapter: AdapterMeta { rank: imp.rank, alpha, targets: &targets, family: "qwen", base_id, dataset_id: Some(&env_name) },
+            adapter: AdapterMeta { rank: imp.rank, alpha, targets: &targets, family: A::FAMILY, base_id, dataset_id: Some(&env_name) },
             provenance: rl::improve::ProvenanceInput {
                 regime: "grpo".to_string(),
                 seed: opts.seed,

@@ -49,6 +49,8 @@ use data::preference::EncodedTurn;
 use data::qwen_tokenizer::QwenBpe;
 
 use crate::finetune::{block_for, digest, fit_opts, lora_shape, resolve_seed, tokenizer_and_template, utf8};
+use model::training::Capability;
+
 use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result};
 
 const STATE_FILE: &str = "train.state";
@@ -63,6 +65,7 @@ pub const DEFAULT_DPO_BETA: f32 = 0.1;
 #[derive(Clone, Debug)]
 pub struct PreferenceFineTune {
     base: String,
+    arch: String,
     models_dir: Option<String>,
     dataset: Option<PathBuf>,
     held_out: Option<PathBuf>,
@@ -91,6 +94,7 @@ impl PreferenceFineTune {
     pub fn from_pretrained(base: impl Into<String>) -> PreferenceFineTune {
         PreferenceFineTune {
             base: base.into(),
+            arch: "qwen3".to_string(),
             models_dir: None,
             dataset: None,
             held_out: None,
@@ -111,6 +115,14 @@ impl PreferenceFineTune {
             cycle: 0,
             device: Device::default(),
         }
+    }
+
+    /// The architecture of the base (a `brain_arch` id; default `qwen3`).
+    /// Looked up in the same registry as [`crate::study::DocumentStudy`]; an
+    /// architecture without a chat fine-tuner or without token objectives (DPO needs them) is refused before anything is read.
+    pub fn arch(mut self, id: impl Into<String>) -> Self {
+        self.arch = id.into();
+        self
     }
 
     /// The models directory a `vendor/repo` base resolves in.
@@ -260,6 +272,9 @@ impl PreferenceFineTune {
     /// `cancel` fires. A cancelled run exports no adapter; it leaves its
     /// resume state, and running the same fine-tune again continues it.
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<PreferenceFineTuneOutcome> {
+        let arch = crate::study::arch(&self.arch)?;
+        arch.require(Capability::ChatFineTune)?;
+        arch.require(Capability::TokenObjectives)?;
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("PreferenceFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("PreferenceFineTune: no out directory; call .out_dir(path)".to_string()))?;
         if !(self.nll_weight.is_finite() && self.nll_weight >= 0.0) {

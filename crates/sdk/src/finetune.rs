@@ -63,6 +63,8 @@ use data::chat::ChatSample;
 use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
 
+use model::training::Capability;
+
 use crate::{CancelToken, Device, Error, Result};
 
 /// Where one run keeps its files, inside [`ChatFineTune::out_dir`].
@@ -79,6 +81,7 @@ const MIN_BLOCK: u32 = 64;
 #[derive(Clone, Debug)]
 pub struct ChatFineTune {
     base: String,
+    arch: String,
     models_dir: Option<String>,
     dataset: Option<PathBuf>,
     held_out: Option<PathBuf>,
@@ -130,6 +133,7 @@ impl ChatFineTune {
     pub fn from_pretrained(base: impl Into<String>) -> ChatFineTune {
         ChatFineTune {
             base: base.into(),
+            arch: "qwen3".to_string(),
             models_dir: None,
             dataset: None,
             held_out: None,
@@ -161,6 +165,14 @@ impl ChatFineTune {
             int8_base: false,
             thinking: true,
         }
+    }
+
+    /// The architecture of the base (a `brain_arch` id; default `qwen3`).
+    /// Looked up in the same registry as [`crate::study::DocumentStudy`]; an
+    /// architecture without a chat fine-tuner is refused before anything is read.
+    pub fn arch(mut self, id: impl Into<String>) -> Self {
+        self.arch = id.into();
+        self
     }
 
     /// The models directory a `vendor/repo` base resolves in (default:
@@ -423,6 +435,8 @@ impl ChatFineTune {
     /// ([`ChatFineTuneOutcome::resume_state`]) and running the same fine-tune
     /// again continues it.
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFineTuneOutcome> {
+        let arch = crate::study::arch(&self.arch)?;
+        arch.require(Capability::ChatFineTune)?;
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no out directory; call .out_dir(path)".to_string()))?;
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
@@ -512,7 +526,7 @@ impl ChatFineTune {
         let snapshots = match &self.evaluations_dir {
             Some(dir) => {
                 std::fs::create_dir_all(dir).map_err(|e| Error::Backend(format!("{}: {e}", dir.display())))?;
-                Some(model::AdapterSnapshots { dir, card_id: &snapshot_card, base_id: &base_id, family: "qwen", rank, alpha, targets: Vec::new() })
+                Some(model::AdapterSnapshots { dir, card_id: &snapshot_card, base_id: &base_id, family: arch.family, rank, alpha, targets: Vec::new() })
             }
             None => None,
         };

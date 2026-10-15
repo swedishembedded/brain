@@ -46,6 +46,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::finetune::{base_digest, block_for, digest, fit_opts, mix_rows, resolve_seed, tokenizer_and_template, utf8, Asked, Mix};
+use model::training::Capability;
+
 use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result};
 
 /// The training format the run writes before it is exported, and removes.
@@ -67,6 +69,7 @@ const FULL_WEIGHT_DECAY: f32 = 0.0;
 #[derive(Clone, Debug)]
 pub struct ChatFullFineTune {
     base: String,
+    arch: String,
     models_dir: Option<String>,
     dataset: Option<PathBuf>,
     replay: Vec<PathBuf>,
@@ -91,6 +94,7 @@ impl ChatFullFineTune {
     pub fn from_pretrained(base: impl Into<String>) -> ChatFullFineTune {
         ChatFullFineTune {
             base: base.into(),
+            arch: "qwen3".to_string(),
             models_dir: None,
             dataset: None,
             replay: Vec::new(),
@@ -106,6 +110,14 @@ impl ChatFullFineTune {
             device: Device::default(),
             thinking: true,
         }
+    }
+
+    /// The architecture of the base (a `brain_arch` id; default `qwen3`).
+    /// Looked up in the same registry as [`crate::study::DocumentStudy`]; an
+    /// architecture without a chat fine-tuner is refused before anything is read.
+    pub fn arch(mut self, id: impl Into<String>) -> Self {
+        self.arch = id.into();
+        self
     }
 
     /// The models directory a `vendor/repo` base resolves in.
@@ -212,6 +224,7 @@ impl ChatFullFineTune {
     /// the next step boundary once `cancel` fires; a stopped run writes no
     /// checkpoint.
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFullFineTuneOutcome> {
+        crate::study::arch(&self.arch)?.require(Capability::ChatFineTune)?;
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no out directory; call .out_dir(path)".to_string()))?;
         if self.grad_accum == 0 {
