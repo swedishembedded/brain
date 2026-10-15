@@ -116,8 +116,9 @@ downstream project.
       `dimensions` then truncates without renormalising. A caller doing
       cosine search gets wrong scores.
 - [ ] Qwen3-Embedding has no serving path. Its `embed` action exists only for
-      the SDK and CLI, and emits an `embeddings` blob with no `mean`. No
-      resident adapter registers it, so `/v1/embeddings` cannot list it.
+      the SDK and CLI (it emits both a `mean` vector and an `embeddings`
+      blob). No resident adapter registers it, so `/v1/embeddings` cannot
+      list it.
 - [ ] The query/document instruction convention cannot be expressed over
       HTTP: no request field reaches the `instruction` param.
 - [ ] A base model carries no fingerprint in `/v1/models`, and

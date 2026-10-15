@@ -166,3 +166,14 @@ that size. Re-run it once that lands.
       `max_tokens` the only bound. Enforcing it would mean closing the think
       block (forcing the `</think>` tokens) once the reasoning reaches the
       budget, a decode-side token-forcing step the engine does not have.
+- [ ] Chat fine-tuning refuses every record whose context holds an assistant
+      tool-call turn followed by a tool result. The loss-mask probe
+      (`data::chat_template::render_with_message_boundaries`) requires every
+      message to be prefix-stable, unsupervised context turns included, and
+      Qwen3's template renders an assistant turn differently when it is the
+      last message. A record that supervises only its final message needs one
+      boundary: the render of its context with the generation prompt (same
+      thinking flags) must be a byte prefix of the full render, and the target
+      is what follows. Build that mode, keep refusing a record that supervises
+      more than one turn, and test both under the real Qwen3 template with a
+      tool call, a tool result and a final answer.
