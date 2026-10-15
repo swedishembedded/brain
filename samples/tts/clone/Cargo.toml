@@ -44,4 +44,5 @@ rodio = { version = "0.22", default-features = false, features = ["playback"] }
 # `sfm <- recon <- worldmirror2 <- npu <- qwen3tts`, so adding structure from
 # motion to recon added it to every consumer of the audio surface. Measured
 # via scripts/gates/check-samples.sh against the actual current closure.
-max-brain-crates = 70
+# 70 -> 75: the SDK links brain-seed (the shared draw and parser for an unset seed) and the crates its surfaces gained since the last budget (5 in all).
+max-brain-crates = 75

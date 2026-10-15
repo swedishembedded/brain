@@ -18,4 +18,5 @@ brain = { workspace = true, features = ["three-d"] }
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
-max-brain-crates = 34
+# 34 -> 35: the SDK links brain-seed, the shared draw and parser for an unset seed.
+max-brain-crates = 35

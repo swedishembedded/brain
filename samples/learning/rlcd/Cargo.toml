@@ -22,4 +22,5 @@ brain = { workspace = true, features = ["decision"] }
 # 30 -> 31: the "decision" surface gained brain-decisions, the one engine
 # over both decision architectures that the SDK and the served `decide`
 # capability now share (it used to be private to the SDK).
-max-brain-crates = 31
+# 31 -> 32: the SDK links brain-seed, the shared draw and parser for an unset seed.
+max-brain-crates = 32

@@ -20,4 +20,5 @@ serde_json.workspace = true
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # Measured at 26.
-max-brain-crates = 26
+# 26 -> 27: the SDK links brain-seed, the shared draw and parser for an unset seed.
+max-brain-crates = 27

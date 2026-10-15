@@ -22,4 +22,5 @@ serde_json.workspace = true
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # Measured at 52: the `study` closure (the same one samples/study/document
 # carries) already holds everything `text` adds.
-max-brain-crates = 52
+# 52 -> 55: the SDK links brain-seed (the shared draw and parser for an unset seed) and the crates its surfaces gained since the last budget (3 in all).
+max-brain-crates = 55

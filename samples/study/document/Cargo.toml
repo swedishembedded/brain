@@ -20,4 +20,5 @@ brain = { workspace = true, features = ["study"] }
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # Measured at 50: a study monomorphises over three decoder architectures, so
 # it carries more than an inference-only surface does.
-max-brain-crates = 52
+# 52 -> 55: the SDK links brain-seed (the shared draw and parser for an unset seed) and the crates its surfaces gained since the last budget (3 in all).
+max-brain-crates = 55

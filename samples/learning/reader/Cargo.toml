@@ -19,4 +19,5 @@ brain = { workspace = true, features = ["reader", "text"] }
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # The reader builds on the study's architecture registry, so it carries that
 # closure plus the model-free reader policy.
-max-brain-crates = 52
+# 52 -> 55: the SDK links brain-seed (the shared draw and parser for an unset seed) and the crates its surfaces gained since the last budget (3 in all).
+max-brain-crates = 55

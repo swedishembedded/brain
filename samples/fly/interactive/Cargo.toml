@@ -16,4 +16,5 @@ brain = { workspace = true, features = ["creature"] }
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # A budget that has to be raised in the same commit as a new dependency is the
 # point: closure growth becomes a decision instead of a drift.
-max-brain-crates = 36
+# 36 -> 37: the SDK links brain-seed, the shared draw and parser for an unset seed.
+max-brain-crates = 37
