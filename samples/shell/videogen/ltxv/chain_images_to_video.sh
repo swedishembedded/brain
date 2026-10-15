@@ -127,7 +127,7 @@ while [ $(( i + STEP )) -lt "$N" ]; do
   "$BRAIN" --trace-ltxv "${LTX_TRACE:-4}" ltxv t2v \
     --prompt "$PROMPT" \
     --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
-    --steps "${STEPS:-8}" --seed "${SEED:-7}" --fps "$FPS" \
+    --steps "${STEPS:-8}" ${SEED:+--seed "$SEED"} --fps "$FPS" \
     --dit-config "$DIT_CONFIG" "${AUDIO_FLAG[@]}" \
     "${ANCHORS[@]}" \
     --output-path "$SEG"

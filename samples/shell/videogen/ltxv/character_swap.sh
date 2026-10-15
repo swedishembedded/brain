@@ -83,7 +83,7 @@ REAL=(--dit-config ltx25_22b)
 [ -n "${BRAIN_LTXV_DIT:-}" ] || { REAL=(--dit-config tiny); echo "character_swap: no BRAIN_LTXV_DIT - running the tiny random-weight DiT. The" >&2; echo "  preservation check below is still real; the replaced region will be noise." >&2; }
 
 "$BRAIN" ltxv v2v --input "$CLIP" --mask "$MASKS" --prompt "$PROMPT" \
-  --strength "${STRENGTH:-1.0}" --seed "${SEED:-7}" --steps "${STEPS:-8}" \
+  --strength "${STRENGTH:-1.0}" ${SEED:+--seed "$SEED"} --steps "${STEPS:-8}" \
   --guidance "${GUIDANCE:-1.0}" --fps "$FPS" "${REAL[@]}" --output-path "$OUT"
 
 # ---- the test: the conditioned region must be preserved, the rest must move.

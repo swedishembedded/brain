@@ -140,11 +140,15 @@ if [ -n "${ADAPTER:-}" ]; then
 fi
 [ -n "${TEXT_ENCODER:-}" ] && ARGS+=(--text-encoder "$TEXT_ENCODER")
 
+# One seed per run: unset, a random one is drawn; each result adds 1 to it.
+SEED="${SEED:-$(( (RANDOM << 15) ^ RANDOM ))}"
+echo "portrait_from_refs: seeds $SEED.. (SEED=$SEED reproduces this run)" >&2
+
 for i in $(seq 1 "$N"); do
   "$BRAIN" flux2 generate \
     --variant "${VARIANT:-klein-4b}" --precision "${PRECISION:-int8}" \
     --prompt "A photorealistic portrait photograph of the person in the reference images, keeping their exact facial identity, head shape, eye colour and skin texture. ${POSE:-Soft key light from the left, dark plain background, plain dark crew-neck top, head level and facing camera, calm closed-mouth expression, sharp focus on the eyes, 85mm lens, shallow depth of field.}" \
     "${ARGS[@]}" \
-    --steps "${STEPS:-12}" --seed "$(( ${SEED:-101} + i - 1 ))" \
+    --steps "${STEPS:-12}" --seed "$(( SEED + i - 1 ))" \
     --out "$D/result-$(printf '%02d' "$i").jpg"
 done

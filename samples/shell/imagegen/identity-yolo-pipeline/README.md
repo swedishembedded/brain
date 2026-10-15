@@ -111,7 +111,7 @@ already present.
 |---|---|---|
 | `GEN_SIZE` / `GEN_STEPS` | `512` / `8` | generation resolution / denoise steps |
 | `TRAIN_SIZE` | `256` | fine-tune input resolution |
-| `TRAIN_STEPS` / `TRAIN_BATCH` / `TRAIN_LR` / `TRAIN_SEED` | `1500` / `4` / `3e-3` / `1337` | fine-tune hyperparameters |
+| `TRAIN_STEPS` / `TRAIN_BATCH` / `TRAIN_LR` / `TRAIN_SEED` | `1500` / `4` / `3e-3` / random, printed | fine-tune hyperparameters |
 | `N_TARGET` / `N_NEGATIVE` / `N_BACKGROUND` / `N_HOLDOUT` | `50` / `40` / `10` / `5` | dataset sizes per split |
 | `TARGET_CLASS` | `80` | appended class index (COCO keeps 0..79) |
 | `TARGET_NAME` | `einstein` | label for the added class |

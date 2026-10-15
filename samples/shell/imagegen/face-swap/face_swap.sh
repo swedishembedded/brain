@@ -158,11 +158,15 @@ if [ -n "${ADAPTER:-}" ]; then
 fi
 [ -n "${TEXT_ENCODER:-}" ] && ARGS+=(--text-encoder "$TEXT_ENCODER")
 
+# One seed per run: unset, a random one is drawn; each result adds 1 to it.
+SEED="${SEED:-$(( (RANDOM << 15) ^ RANDOM ))}"
+echo "face_swap: seeds $SEED.. (SEED=$SEED reproduces this run)" >&2
+
 for i in $(seq 1 "$N"); do
   "$BRAIN" flux2 generate \
     --variant "${VARIANT:-klein-4b}" --precision "${PRECISION:-int8}" \
     --prompt "${PROMPT:-A photograph of the person in the face reference images, keeping their exact facial identity, head shape, eye colour and skin texture, in the pose, framing, clothing, background and lighting of the first reference photograph.}" \
     "${ARGS[@]}" \
-    --steps "${STEPS:-12}" --seed "$(( ${SEED:-101} + i - 1 ))" \
+    --steps "${STEPS:-12}" --seed "$(( SEED + i - 1 ))" \
     --out "$D/result-$(printf '%02d' "$i").jpg"
 done

@@ -134,7 +134,7 @@ takes `BRAIN_LTXV_{DIT,TEXT_ENCODER,VAE,AUDIO_VAE}` directly.
 | env var | scripts | meaning |
 |---|---|---|
 | `WIDTH`, `HEIGHT` | all | output resolution (default 1280x704) |
-| `STEPS`, `SEED`, `FPS` | all | denoise steps / RNG seed / output frame rate |
+| `STEPS`, `SEED`, `FPS` | all | denoise steps / RNG seed (a random one is drawn and printed when unset) / output frame rate |
 | `LTX_TINY=1` | all but `text_to_video.sh` | run the tiny random-weight DiT instead of resolving real weights |
 | `LTX_AUDIO=0` | `images_to_video.sh`, `chain_images_to_video.sh` | disable the audio half (cheaper, no `BRAIN_LTXV_AUDIO_VAE` needed) |
 | `LTX_TRACE=<0-5>` | `images_to_video.sh`, `chain_images_to_video.sh` | `brain --trace-ltxv` verbosity (default 4; 5 adds per-block GPU timings) |

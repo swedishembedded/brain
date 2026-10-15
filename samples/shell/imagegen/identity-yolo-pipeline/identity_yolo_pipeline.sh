@@ -67,7 +67,7 @@ rand_seed() { echo $(( (RANDOM << 15) ^ RANDOM )); }
 # ============================================================= config (env-overridable)
 
 GEN_SIZE="${GEN_SIZE:-512}" GEN_STEPS="${GEN_STEPS:-8}" TRAIN_SIZE="${TRAIN_SIZE:-256}"
-TRAIN_STEPS="${TRAIN_STEPS:-1500}" TRAIN_BATCH="${TRAIN_BATCH:-4}" TRAIN_LR="${TRAIN_LR:-3e-3}" TRAIN_SEED="${TRAIN_SEED:-1337}"
+TRAIN_STEPS="${TRAIN_STEPS:-1500}" TRAIN_BATCH="${TRAIN_BATCH:-4}" TRAIN_LR="${TRAIN_LR:-3e-3}" TRAIN_SEED="${TRAIN_SEED:-$(rand_seed)}"
 N_TARGET="${N_TARGET:-50}" N_NEGATIVE="${N_NEGATIVE:-40}" N_BACKGROUND="${N_BACKGROUND:-10}" N_HOLDOUT="${N_HOLDOUT:-5}"
 
 # Class layout. This trains an ADDITIONAL class onto a COCO-pretrained
@@ -616,6 +616,7 @@ CLS_HIDDEN_FLAG=""; [ "$FREEZE_CLS_HIDDEN" = 1 ] && CLS_HIDDEN_FLAG="--freeze-cl
 TRAIN_CLASSES="${TRAIN_CLASSES:-$TARGET_CLASS}"
 
 WEIGHTS="$OUT_DIR/$TARGET_NAME-detector.safetensors"
+echo "fine-tune seed $TRAIN_SEED (TRAIN_SEED=$TRAIN_SEED reproduces it)" >&2
 "$BRAIN" yolov8 fine-tune "$POOL_DIR" --weights "$YOLO_COCO_WEIGHTS" --out "$WEIGHTS" --device gpu \
   --steps "$TRAIN_STEPS" --batch "$TRAIN_BATCH" --lr "$TRAIN_LR" --wd 0 \
   --nc "$NUM_CLASSES" --input "$TRAIN_SIZE" --seed "$TRAIN_SEED" \

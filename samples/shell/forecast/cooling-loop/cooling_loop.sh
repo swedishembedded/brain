@@ -22,7 +22,9 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../../../.." && pwd)"
 csv="$(mktemp -d)/cooling_loop.csv"
 
-python3 "$repo_root/tools/forecast/make_cooling_loop.py" --out "$csv" --hours 720 --seed 7
+seed="${SEED:-$(( (RANDOM << 15) ^ RANDOM ))}"
+echo "cooling_loop: scenario seed $seed (SEED=$seed reproduces this run)" >&2
+python3 "$repo_root/tools/forecast/make_cooling_loop.py" --out "$csv" --hours 720 --seed "$seed"
 
 cd "$repo_root"
 cargo run --release -p brain-timesfm3 --example cooling_loop -- "$csv" "$weights" "$chart"

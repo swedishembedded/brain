@@ -58,7 +58,7 @@ script resizes it for you.
 REF=room.jpg STRENGTH=0.96 samples/shell/imagegen/lora/run_lora.sh ~/photos/boho "..."
 ```
 
-Options (env only): `REF`, `STRENGTH`, `SEED` (first; each result adds 1),
+Options (env only): `REF`, `STRENGTH`, `SEED` (first; each result adds 1; a random one is drawn and printed when unset),
 `STEPS`, `SIZE` (`WxH`), `SCALE` (adapter strength, `0` reproduces the base
 model - the way to see what the adapter is actually contributing), `VARIANT`,
 `PRECISION`, `BRAIN`.

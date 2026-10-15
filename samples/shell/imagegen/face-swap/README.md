@@ -71,7 +71,7 @@ face_swap.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--text-enco
 | `MASK` | `1` | `0` disables mask-based inpainting |
 | `MASK_GROW` | `2.0` | derived-mask size dial |
 | `STRENGTH` | `0.99` masked / `0.9` unmasked | denoise strength |
-| `SEED` | `101` | first seed; each result adds 1 |
+| `SEED` | random, printed | first seed; each result adds 1 |
 | `STEPS` | `12` | denoise steps |
 | `PROMPT` | (built-in) | override the generation prompt |
 | `VARIANT` | `klein-4b` | FLUX.2 variant |

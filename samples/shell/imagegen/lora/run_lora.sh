@@ -49,11 +49,15 @@ if [ -n "${REF:-}" ]; then
   [ "${STRENGTH:-1.0}" = "1.0" ] && ARGS+=(--ref-size 768)
 fi
 
+# One seed per run: unset, a random one is drawn; each result adds 1 to it.
+SEED="${SEED:-$(( (RANDOM << 15) ^ RANDOM ))}"
+echo "run_lora: seeds $SEED.. (SEED=$SEED reproduces this run)" >&2
+
 for i in $(seq 1 "$N"); do
   "${BRAIN:-./target/release/brain}" flux2 generate \
     --variant "${VARIANT:-klein-4b}" --precision "${PRECISION:-int8}" \
     --prompt "$PROMPT" --adapter "$A" --lora-scale "${SCALE:-1.0}" \
     --width "${SIZE%x*}" --height "${SIZE#*x}" "${ARGS[@]}" \
-    --steps "${STEPS:-12}" --seed "$(( ${SEED:-11} + i - 1 ))" \
+    --steps "${STEPS:-12}" --seed "$(( SEED + i - 1 ))" \
     --out "$OUT-$(printf '%02d' "$i").jpg"
 done

@@ -60,7 +60,7 @@ portrait_from_refs.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--
 | `--text-encoder` / `TEXT_ENCODER` | none | HF dir or single `.safetensors`/`.gguf` |
 | `MASK` | `0` | `1` = inpaint mode (needs `target.*`) |
 | `TARGET_REF` | `1` | `0` = drop target as a reference, use `POSE` text only |
-| `SEED` | `101` | first seed; each result adds 1 |
+| `SEED` | random, printed | first seed; each result adds 1 |
 | `STRENGTH` | `0.99` | mask mode only |
 | `STEPS` | `12` | denoise steps |
 | `REF_PX` | `512` | bound on each reference's encoded long edge; `0` = native |

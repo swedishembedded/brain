@@ -35,7 +35,7 @@ FRAMES=$(( ${3:-5} * FPS / 8 * 8 + 1 ))   # must be 1 + 8k
 exec "${BRAIN:-./target/release/brain}" ltxv t2v \
   --prompt "$PROMPT" \
   --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
-  --steps "${STEPS:-8}" --seed "${SEED:-7}" --fps "$FPS" \
+  --steps "${STEPS:-8}" ${SEED:+--seed "$SEED"} --fps "$FPS" \
   --dit-config ltx25_22b --audio \
   ${START_FRAME:+--start-frame "$START_FRAME"} \
   --output-path "$OUT"
