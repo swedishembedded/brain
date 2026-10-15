@@ -273,13 +273,13 @@ pub fn visible_delta(printed: &str, full: &str, stops: &[String]) -> (String, St
 /// omits it gets a real random seed ([`data::rng::random_seed`]), not a
 /// hardcoded `0` - two back-to-back unseeded requests must not decode the
 /// same sequence. A caller that wants a reproducible decode passes `seed`
-/// explicitly, same as today.
-pub fn sampling_params(inv: &Invocation) -> (usize, f32, usize, u64) {
+/// explicitly; a `seed` that is not a non-negative integer is refused.
+pub fn sampling_params(inv: &Invocation) -> Result<(usize, f32, usize, u64), String> {
     let max_new = inv.get_i64("max_new").unwrap_or(128).max(0) as usize;
     let temp = inv.get_f64("temp").unwrap_or(0.8) as f32;
     let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
-    let seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
-    (max_new, temp, top_k, seed)
+    let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
+    Ok((max_new, temp, top_k, seed))
 }
 
 /// Wrap generated text as a text-output [`Outcome`] (`text` value + `text` blob).
@@ -515,7 +515,7 @@ pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<Rendere
 
 /// [`parse_request`] in `format` (see [`render_prompt_as`]).
 pub fn parse_request_as(tok: &QwenBpe, format: &ChatFormat, inv: &Invocation) -> Result<ParsedRequest, String> {
-    let (max_new, temp, top_k, seed) = sampling_params(inv);
+    let (max_new, temp, top_k, seed) = sampling_params(inv)?;
     let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
     let RenderedPrompt { mut text, tool_choice, flavor, thinking_open, raw } = render_prompt_as(format, inv)?;
     if let Some(suffix) = inv.get_str("suffix") {
@@ -567,6 +567,7 @@ pub fn parse_reply(inv: &Invocation, text: &str) -> Result<Outcome, String> {
         max_new: 0,
         prompt_tokens: None,
         tool_choice: prompt.tool_choice,
+        seed: None,
     };
     Ok(seq.finish_text(text, None, &mut |_| {}))
 }
@@ -585,6 +586,10 @@ pub struct SeqState {
     /// `None` only for [`parse_reply`], whose prompt was never tokenized.
     prompt_tokens: Option<usize>,
     tool_choice: ToolChoice,
+    /// The sampling seed the request ran with, echoed in the outcome so a
+    /// caller can reproduce a decode it did not seed; `None` for
+    /// [`parse_reply`], which samples nothing.
+    seed: Option<u64>,
 }
 
 impl SeqState {
@@ -604,6 +609,7 @@ impl SeqState {
             max_new: req.max_new,
             prompt_tokens: Some(req.ids.len()),
             tool_choice: req.tool_choice.clone(),
+            seed: Some(req.seed),
         }
     }
 
@@ -712,6 +718,9 @@ impl SeqState {
         }
         if let Some(n) = generated {
             out = out.set("completion_tokens", json!(n as i64));
+        }
+        if let Some(seed) = self.seed {
+            out = out.set("seed", json!(seed));
         }
         out = out.set("finish_reason", json!(finish)).set("reasoning_content", json!(self.scan.reasoning()));
         if !self.scan.tool_calls().is_empty() {

@@ -164,7 +164,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)).min(0.0).max(2.0).step(0.01))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(1000.0).step(1.0))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)).min(0.0).max(1.0).step(0.01))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random; the outcome echoes the one used)"))
         .param(
             ParamSpec::new("precision", ParamType::Str, "model precision: fp32, or int8 (group-wise 32-element weight scales + dynamic activation quant)")
                 .default(json!("fp32")),
@@ -215,7 +215,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("lr", ParamType::Float, "peak learning rate (cosine schedule down to min_lr)").default(json!(5e-5)).min(0.0))
         .param(ParamSpec::new("batch", ParamType::Int, "sequences per step").default(json!(4)).min(1.0).max(256.0).step(1.0))
         .param(ParamSpec::new("block", ParamType::Int, "training context length, tokens; bounded only by the memory training at it needs").default(json!(1024)).min(1.0).step(1.0))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(1234)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random; the outcome echoes the one used)"))
         .param(ParamSpec::new("targets", ParamType::Str, "comma-separated projections to adapt, of wq,wk,wv,wo,gate,up,down").default(json!(crate::finetune::LORA_TARGETS.join(","))))
         .param(ParamSpec::new(
             "keep_reasoning",
@@ -447,7 +447,7 @@ impl Action for GenerateAction {
                 let temp = inv.get_f64("temp").unwrap_or(0.0) as f32;
                 let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
                 let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
-                let seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
+                let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
                 let ids: Vec<u32> = prompt
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
@@ -555,6 +555,7 @@ impl Action for GenerateAction {
                 });
                 let text = gen.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" ");
                 Ok(Outcome::new()
+                    .set("seed", json!(seed))
                     .set("tokens", json!(gen.len()))
                     .set("ids", json!(gen))
                     .set("text", json!(text.clone()))
@@ -658,7 +659,7 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
     let lr = inv.get_f64("lr").unwrap_or(5e-5) as f32;
     let batch = inv.get_i64("batch").unwrap_or(4).max(1) as u32;
     let block = inv.get_i64("block").unwrap_or(1024).max(1) as u32;
-    let seed = inv.get_i64("seed").unwrap_or(1234).max(0) as u64;
+    let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
     let dataset_id = inv.get_str("dataset_id").filter(|s| !s.is_empty());
     let (hyper, targets) = lora_schedule(inv)?;
 
@@ -729,6 +730,7 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
 
     progress(Progress::step(4, 4, "done"));
     Ok(Outcome::new()
+        .set("seed", json!(seed))
         .set("rank", json!(rank))
         .set("alpha", json!(alpha))
         .set("steps", json!(steps))
@@ -1585,6 +1587,43 @@ mod tests {
         assert!(e.contains("beta2"), "β2 = 1 never forgets a gradient: {e}");
     }
 
+    /// An unseeded `lora_train` draws a seed and echoes it; passing the echoed
+    /// seed back trains the same adapter.
+    #[test]
+    fn an_unseeded_lora_train_echoes_the_seed_that_reproduces_it() {
+        let cfg = QwenConfig { vocab: 151936, ..QwenConfig::tiny() };
+        let dir = std::env::temp_dir().join(format!("qwen-caps-lora-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("tiny.safetensors");
+        write_tiny_checkpoint(&base, &cfg, 3);
+        write_byte_tokenizer(&dir);
+        let mut reg = Registry::new();
+        reg.register(Arc::new(QwenProvider::new()));
+        let train = |seed: Option<serde_json::Value>| {
+            let inv = Invocation::new()
+                .set("weights", json!(base.to_str().unwrap()))
+                .set("tokenizer", json!(dir.join("tokenizer.json").to_str().unwrap()))
+                .set("rank", json!(2))
+                .set("steps", json!(2))
+                .set("lr", json!(1e-2))
+                .set("batch", json!(1))
+                .set("block", json!(12))
+                .blob("dataset", Blob::new(Media::Bytes, dataset_jsonl()));
+            let inv = match seed {
+                Some(seed) => inv.set("seed", seed),
+                None => inv,
+            };
+            reg.run(MODEL, "lora_train", inv, &mut |_p| {})
+        };
+        let first = train(None).unwrap();
+        let drawn = first.outputs["seed"].as_u64().expect("the drawn seed is echoed");
+        let again = train(Some(json!(drawn))).unwrap();
+        assert_eq!(again.outputs["seed"].as_u64(), Some(drawn));
+        assert_eq!(again.blobs["adapter"].bytes, first.blobs["adapter"].bytes, "the echoed seed reproduces the adapter");
+        assert!(train(Some(json!(-1))).unwrap_err().to_string().contains("seed"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The real round-trip: drive `lora_train` through the Registry on the
     /// tiny synthetic checkpoint, then fold the returned adapter blob into a
     /// fresh copy of that same base and assert it measurably moved a targeted
@@ -1946,6 +1985,12 @@ mod tests {
         }
         let text = String::from_utf8(out.blobs["text"].bytes.clone()).unwrap();
         assert_eq!(text.split_whitespace().count() as u64, n);
+
+        // No seed was given: the one drawn is echoed, and a negative one is
+        // refused rather than clamped to 0.
+        assert!(out.outputs["seed"].as_u64().is_some(), "an unseeded request reports the seed it drew");
+        let negative = Invocation::new().set("weights", json!(path.to_str().unwrap())).set("prompt", json!("1 5 3")).set("seed", json!(-1));
+        assert!(reg.run(MODEL, "generate", negative, &mut |_p| {}).unwrap_err().to_string().contains("seed"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
