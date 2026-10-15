@@ -45,6 +45,8 @@ fi
 update=0; [ "${1:-}" = "--update" ] && update=1
 name="qwen-synth-${SHAPE}-${BRAIN_DEVICE}"
 cand="$(mktemp)"
+source scripts/gates/perf-gate-seed.sh
+seed_args=(); [ "$update" -eq 1 ] || baseline_seed_args seed_args "$BASE/$name.json"
 
 # NOT --smoke: `brain perf gate` REFUSES a smoke-run candidate outright
 # ("not a measurement") — `--requests`/`--warmup` set explicitly instead, to
@@ -52,7 +54,7 @@ cand="$(mktemp)"
 # shape the concurrent-request-batching investigation cared about (does a
 # second concurrent request cost far less than a second solo run).
 if ! "$BIN" perf run serve --target "http:qwen-synth:${SHAPE}:${QWEN_TOKENIZER}" \
-    --workload chat --input 24 --output 12 --requests 2 --warmup 1 --concurrency 2 --out "$cand" >/dev/null 2>&1; then
+    --workload chat --input 24 --output 12 --requests 2 --warmup 1 --concurrency 2 "${seed_args[@]}" --out "$cand" >/dev/null 2>&1; then
   echo "FAIL $name (perf run itself failed)"; rm -f "$cand"; exit 1
 fi
 

@@ -66,13 +66,15 @@ fi
 update=0; [ "${1:-}" = "--update" ] && update=1
 name="ltxv-tiny-${SHAPE}-cpu"
 cand="$(mktemp)"
+source scripts/gates/perf-gate-seed.sh
+seed_args=(); [ "$update" -eq 1 ] || baseline_seed_args seed_args "$BASE/$name.json"
 
 # NOT --smoke: `brain perf gate` REFUSES a smoke-run candidate outright
 # ("not a measurement") - `--requests`/`--warmup` set explicitly instead, to
 # stay fast without tripping that refusal. concurrency 1: sequential-only
 # per this crate's own `LtxvInstance::run_batch` doc.
 if ! "$BIN" perf run latency --target "ltxv:${SHAPE}" \
-    --requests 1 --warmup 0 --concurrency 1 --out "$cand" >/dev/null 2>&1; then
+    --requests 1 --warmup 0 --concurrency 1 "${seed_args[@]}" --out "$cand" >/dev/null 2>&1; then
   echo "FAIL $name (perf run itself failed)"; rm -f "$cand"; exit 1
 fi
 

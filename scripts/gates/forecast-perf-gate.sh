@@ -28,6 +28,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
+source scripts/gates/perf-gate-seed.sh
 BIN=./target/release/brain
 BASE=scripts/gates/forecast-perf-baselines
 FLOOR="${FORECAST_PERF_FLOOR:-0.33}"
@@ -42,7 +43,8 @@ fail=0
 gate_one() { # name target
   local name="$1" target="$2" cand
   cand="$(mktemp)"
-  if ! "$BIN" perf run latency --target "$target" --best-of 3 --warmup 1 --input "$INPUT" --out "$cand" >/dev/null 2>&1; then
+  seed_args=(); [ "$update" -eq 1 ] || baseline_seed_args seed_args "$BASE/$name.json"
+  if ! "$BIN" perf run latency --target "$target" --best-of 3 --warmup 1 --input "$INPUT" "${seed_args[@]}" --out "$cand" >/dev/null 2>&1; then
     echo "  SKIP $name (perf run failed — weights missing or unreadable)"; rm -f "$cand"; return
   fi
   if [ "$update" -eq 1 ]; then

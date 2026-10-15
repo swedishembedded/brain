@@ -43,6 +43,8 @@ use crate::workload::{Arrival, Workload};
 #[derive(Clone, Debug)]
 pub struct Options {
     pub device: String,
+    /// Seed of the request stream; `Default` draws a fresh random one, and the
+    /// artifact records it (`workload.seed`).
     pub seed: u64,
     pub best_of: usize,
     pub smoke: bool,
@@ -80,7 +82,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             device: "cpu".into(),
-            seed: 1234,
+            seed: data::rng::random_seed(),
             best_of: 1,
             smoke: false,
             concurrency: vec![1, 2, 4, 8, 16, 32],

@@ -37,6 +37,9 @@ pub struct Row {
     /// "verified", and one the reader has to be told.
     pub fidelity_checked: bool,
     pub software_gpu: bool,
+    /// The seed the workload's request stream was drawn from (`workload.seed`);
+    /// `None` for an artifact whose scenario records no workload.
+    pub seed: Option<u64>,
     pub output_per_s: Option<f64>,
     pub goodput_per_s: Option<f64>,
     pub ttfa_p99: Option<f64>,
@@ -89,6 +92,7 @@ pub fn load(path: &str) -> Result<Row, String> {
         smoke: v["smoke"].as_bool().unwrap_or(false),
         fidelity_checked: !v["correctness"]["passed"].is_null(),
         software_gpu,
+        seed: v["workload"]["seed"].as_u64(),
         output_per_s: f(&perf["output_artifacts_per_s"]),
         goodput_per_s: f(&perf["goodput_per_s"]),
         ttfa_p99: f(&perf["ttfa_ms"]["p99"]),

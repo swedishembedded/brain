@@ -11,6 +11,8 @@
 //! * Two runs gate only if they are comparable: same scenario, same artifact
 //!   unit, same environment axes (device, backend, adapter, build, cores). A
 //!   baseline from different hardware is not a floor, it is a coincidence.
+//! * Both runs must have drawn their request stream from the same workload
+//!   seed: a different stream is a different workload.
 //! * `valid: false` (failed correctness gate) refuses to gate in either
 //!   direction — a fast-but-broken run must not become a floor, nor pass one.
 //! * a run whose correctness gate NEVER RAN still gates (refusing would
@@ -77,6 +79,17 @@ pub fn gate(candidate: &Row, baseline: &Row, floor_frac: f64) -> Outcome {
     if candidate.unit != baseline.unit {
         out.refused =
             Some(format!("artifact unit mismatch: {} vs {}", candidate.unit, baseline.unit));
+        return out;
+    }
+    if candidate.seed != baseline.seed {
+        let show = |s: Option<u64>| s.map_or_else(|| "none recorded".to_string(), |s| s.to_string());
+        out.refused = Some(format!(
+            "workload seed differs (candidate {}, baseline {}): different request streams are \
+             not comparable; rerun the candidate with --seed {}",
+            show(candidate.seed),
+            show(baseline.seed),
+            baseline.seed.map_or_else(|| "<baseline seed>".to_string(), |s| s.to_string()),
+        ));
         return out;
     }
     for (r, which) in [(candidate, "candidate"), (baseline, "baseline")] {
@@ -182,12 +195,28 @@ mod tests {
             smoke: false,
             fidelity_checked: true,
             software_gpu: false,
+            seed: Some(1234),
             output_per_s: Some(out),
             goodput_per_s: None,
             ttfa_p99: Some(ttfa),
             ial_p99: None,
             axes: vec![("adapter".into(), "P40".into())],
         }
+    }
+
+    #[test]
+    fn a_candidate_from_a_different_workload_seed_is_refused_naming_both() {
+        let base = row(100.0, 200.0);
+        let other = Row { seed: Some(99), ..row(100.0, 200.0) };
+        let o = gate(&other, &base, 0.85);
+        let why = o.refused.as_deref().expect("seed mismatch must refuse");
+        assert!(why.contains("99") && why.contains("1234"), "{why}");
+        assert!(!o.passed());
+        // A candidate that recorded no seed cannot be shown to match either.
+        let unseeded = Row { seed: None, ..row(100.0, 200.0) };
+        assert!(gate(&unseeded, &base, 0.85).refused.is_some());
+        // The same seed gates as before.
+        assert!(gate(&row(100.0, 200.0), &base, 0.85).passed());
     }
 
     #[test]
