@@ -1054,6 +1054,9 @@ pub struct ControlPipeline<E: Env> {
     next_slot: usize,
     model: Decide,
     env: E,
+    /// The seed the head was initialized from: the builder's, or the one
+    /// drawn when it named none.
+    seed: u64,
     rng: data::rng::Rng,
     /// Advances across every rollout so a run never replays one episode.
     episode_seed: u64,
@@ -1119,6 +1122,9 @@ const HEAD_LR: f32 = 3e-4;
 /// all. `--gamma` is there for a caller whose task genuinely prefers sooner
 /// to later.
 const GAMMA: f32 = 1.0;
+/// Keeps the sampling stream apart from the head-initialization stream when
+/// both come from one seed.
+const RNG_SALT: u64 = 0xc0ffee;
 /// The bias/variance dial on the advantage estimator: 0 is the one-step TD
 /// error and 1 is the full return minus the baseline. The usual middle.
 const GAE_LAMBDA: f32 = 0.95;
@@ -1154,6 +1160,12 @@ impl<E: Env> ControlPipeline<E> {
         Flow::new(ControlPipeline::builder(dir, env).load())
     }
 
+    /// The seed this pipeline's head was initialized from. Passing it to
+    /// [`ControlPipelineBuilder::seed`] rebuilds the same untrained head.
+    pub fn seed_used(&self) -> u64 {
+        self.seed
+    }
+
     pub fn builder(dir: impl AsRef<str>, env: E) -> ControlPipelineBuilder<E> {
         ControlPipelineBuilder {
             dir: dir.as_ref().to_string(),
@@ -1169,7 +1181,7 @@ impl<E: Env> ControlPipeline<E> {
             // with everything it had learned thrown away, which is the cost
             // of sizing this to the typical request instead of the long one.
             limits: Limits { cap_rows: 4096, cap_slots: 64, max_span: 256, overlap: 32 },
-            seed: 0,
+            seed: None,
             max_steps: ControlSpec::default().max_steps,
         }
     }
@@ -3711,6 +3723,10 @@ pub struct ControlSpec {
     pub epochs: usize,
     pub max_steps: usize,
     pub policy: PolicyConfig,
+    /// Seeds the run's sampling: which actions a rollout draws and which
+    /// episodes the search revisits. [`ControlSpec::default`] draws a fresh
+    /// one; [`TrainReport::seed`] reports the one a run used, and passing it
+    /// back reproduces the run.
     pub seed: u64,
     /// Episodes of scripted play to clone before the policy gradient starts.
     /// Zero, or an environment with no [`Env::demo`], skips the phase.
@@ -3870,7 +3886,7 @@ impl Default for ControlSpec {
             // Entropy higher than a supervised run would want: a control policy
             // that commits early stops seeing the states it has not solved.
             policy: PolicyConfig { clip: 0.2, entropy: 0.02, gamma: GAMMA, anchor: 0.0, target_kl: 0.02 },
-            seed: 0,
+            seed: crate::random_seed(),
             warmup_episodes: 60,
             warmup_epochs: 12,
             warmup_keep: 1.0,
@@ -4037,6 +4053,9 @@ impl<E: Env> Stages for ControlPipeline<E> {
         let mut last_loss = 0.0f32;
         self.model.set_encoder_frozen(spec.freeze_encoder);
         self.max_steps = spec.max_steps;
+        // The run samples from the spec's seed, so the seed a report names is
+        // the seed that reproduces it.
+        self.rng = data::rng::Rng::new(spec.seed ^ RNG_SALT);
         println!(
             "  {} iterations x {} episodes, {} PPO passes each, encoder {}",
             spec.iterations,
@@ -4283,7 +4302,7 @@ impl<E: Env> Stages for ControlPipeline<E> {
                 );
                 if m > b {
                     self.model.set_head_weights(mean);
-                    return Ok(TrainReport { steps: step, final_loss: last_loss, seconds: 0.0 });
+                    return Ok(TrainReport { steps: step, final_loss: last_loss, seconds: 0.0, seed: Some(spec.seed) });
                 }
             }
         }
@@ -4305,7 +4324,7 @@ impl<E: Env> Stages for ControlPipeline<E> {
             let w = w.to_vec();
             self.model.set_head_weights(&w);
         }
-        Ok(TrainReport { steps: step, final_loss: last_loss, seconds: 0.0 })
+        Ok(TrainReport { steps: step, final_loss: last_loss, seconds: 0.0, seed: Some(spec.seed) })
     }
 
     fn run_eval(&mut self) -> Result<EvalReport> {
@@ -4365,7 +4384,7 @@ pub struct ControlPipelineBuilder<E: Env> {
     head: Option<String>,
     device: Device,
     limits: Limits,
-    seed: u64,
+    seed: Option<u64>,
     max_steps: usize,
 }
 
@@ -4386,8 +4405,12 @@ impl<E: Env> ControlPipelineBuilder<E> {
         self
     }
 
+    /// Seed for the head's initialization and the pipeline's first sampling
+    /// stream. Left unset, [`load`](Self::load) draws one;
+    /// [`ControlPipeline::seed_used`] reports it. A training run samples from
+    /// its [`ControlSpec::seed`] instead.
     pub fn seed(mut self, seed: u64) -> ControlPipelineBuilder<E> {
-        self.seed = seed;
+        self.seed = Some(seed);
         self
     }
 
@@ -4399,8 +4422,8 @@ impl<E: Env> ControlPipelineBuilder<E> {
     }
 
     pub fn load(self) -> Result<ControlPipeline<E>> {
-        let model =
-            crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
+        let seed = self.seed.unwrap_or_else(crate::random_seed);
+        let model = crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, seed)?;
         let cfg_width = model.cfg.d_model as usize;
         Ok(ControlPipeline {
             explored: std::collections::HashMap::new(),
@@ -4408,13 +4431,14 @@ impl<E: Env> ControlPipelineBuilder<E> {
             started_from_head: self.head.is_some(),
             model,
             env: self.env,
-            rng: data::rng::Rng::new(self.seed ^ 0xc0ffee),
+            seed,
+            rng: data::rng::Rng::new(seed ^ RNG_SALT),
             episode_seed: 0,
             reference: None,
             gae_lambda: GAE_LAMBDA,
             gamma: GAMMA,
             last: Rollout::default(),
-            critic: Critic::new(cfg_width, CRITIC_HIDDEN, self.seed ^ 0x1c1),
+            critic: Critic::new(cfg_width, CRITIC_HIDDEN, seed ^ 0x1c1),
             critic_mse: 0.0,
             max_steps: self.max_steps,
             measurements: 0,

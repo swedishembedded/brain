@@ -290,6 +290,9 @@ pub struct DecisionPipeline {
     /// tokenizer does not retain its source, so a full save reads it back
     /// from here - see [`DecisionPipeline::save_model`].
     source: PathBuf,
+    /// The seed the head was initialized from: the builder's, or the one
+    /// drawn when it named none.
+    seed: u64,
     /// The option set and question the last training stage used, so the
     /// interactive stages need no second copy of them.
     last_options: Vec<String>,
@@ -417,13 +420,19 @@ impl DecisionPipeline {
         Flow::new(DecisionPipeline::builder(dir).load())
     }
 
+    /// The seed this pipeline's head was initialized from. Passing it to
+    /// [`DecisionPipelineBuilder::seed`] rebuilds the same untrained head.
+    pub fn seed_used(&self) -> u64 {
+        self.seed
+    }
+
     pub fn builder(dir: impl AsRef<str>) -> DecisionPipelineBuilder {
         DecisionPipelineBuilder {
             dir: dir.as_ref().to_string(),
             head: None,
             device: Device::default(),
             limits: Limits::default(),
-            seed: 0,
+            seed: None,
         }
     }
 
@@ -1017,6 +1026,9 @@ pub struct TrainSpec {
     /// Examples accumulated into each update. See
     /// [`DecisionPipeline::train_choices`] for why the default is not one.
     pub batch: usize,
+    /// Seeds batch order and the head's training noise. [`TrainSpec::default`]
+    /// draws a fresh one, so a spec that names none is not the same run twice;
+    /// [`TrainReport::seed`] reports the one a run used.
     pub seed: u64,
     /// Hold the encoder fixed and train the head alone. `false` fine-tunes it,
     /// which is what this arm's published accuracies were measured with and
@@ -1041,7 +1053,7 @@ impl Default for TrainSpec {
             options: Vec::new(),
             instructions: String::new(),
             steps: 0,
-            seed: 0,
+            seed: crate::random_seed(),
             batch: DEFAULT_BATCH,
             freeze_encoder: false,
             eval: Vec::new(),
@@ -1132,7 +1144,7 @@ impl Stages for DecisionPipeline {
         self.last_options = spec.options.clone();
         self.last_instructions = spec.instructions.clone();
         self.last_eval = spec.eval.clone();
-        Ok(TrainReport { steps: spec.steps, final_loss, seconds: 0.0 })
+        Ok(TrainReport { steps: spec.steps, final_loss, seconds: 0.0, seed: Some(spec.seed) })
     }
 
     fn run_eval(&mut self) -> Result<EvalReport> {
@@ -1220,7 +1232,7 @@ pub struct DecisionPipelineBuilder {
     head: Option<String>,
     device: Device,
     limits: Limits,
-    seed: u64,
+    seed: Option<u64>,
 }
 
 impl DecisionPipelineBuilder {
@@ -1254,8 +1266,10 @@ impl DecisionPipelineBuilder {
     }
 
     /// Seed for the head's initialization, when no trained head is supplied.
+    /// Left unset, [`DecisionPipelineBuilder::load`] draws one;
+    /// [`DecisionPipeline::seed_used`] reports it.
     pub fn seed(mut self, seed: u64) -> DecisionPipelineBuilder {
-        self.seed = seed;
+        self.seed = Some(seed);
         self
     }
 
@@ -1263,9 +1277,11 @@ impl DecisionPipelineBuilder {
     /// same object a caller loads is the one it can train (see this module's
     /// doc for what each arm trains, and with what objective).
     pub fn load(self) -> Result<DecisionPipeline> {
-        let backend = resolve_decision_backend(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
+        let seed = self.seed.unwrap_or_else(crate::random_seed);
+        let backend = resolve_decision_backend(&self.dir, self.head.as_deref(), &self.device, self.limits, seed)?;
         Ok(DecisionPipeline {
             backend,
+            seed,
             source: PathBuf::from(&self.dir),
             last_options: Vec::new(),
             last_instructions: String::new(),

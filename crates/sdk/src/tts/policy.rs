@@ -47,13 +47,14 @@ pub struct PolicyOptions {
     pub alpha: f32,
     /// The most rows (prompt plus frames) of one take that can be trained on.
     pub block: u32,
-    /// Seed of the adapter's initial values.
+    /// Seed of the adapter's initial values. [`PolicyOptions::default`] draws
+    /// a fresh one; a policy trained from the same seed starts identical.
     pub seed: u64,
 }
 
 impl Default for PolicyOptions {
     fn default() -> Self {
-        Self { rank: 8, alpha: 16.0, block: 320, seed: 1 }
+        Self { rank: 8, alpha: 16.0, block: 320, seed: crate::random_seed() }
     }
 }
 
@@ -203,5 +204,17 @@ impl TtsPolicy {
     /// Write the trained adapter to `path`.
     pub fn save(&self, path: impl Into<PathBuf>) -> Result<()> {
         self.trainer.save_adapter(&path.into()).map_err(backend)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PolicyOptions;
+
+    /// A policy built from default options starts from a fresh adapter
+    /// initialization, not the same one every time.
+    #[test]
+    fn default_policy_options_draw_different_seeds() {
+        assert_ne!(PolicyOptions::default().seed, PolicyOptions::default().seed);
     }
 }

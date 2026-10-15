@@ -42,8 +42,9 @@ use crate::{DType, Device};
 /// -- a caller who asks for a different size than the pipeline was built for
 /// gets a clear [`Error::Backend`] naming both sizes and how to fix it
 /// ([`check_s3dit_size`]), never a silent resize or a silent ignore. `steps`
-/// and `seed` still apply, at s3dit's own defaults (8 steps, seed 42 --
-/// [`s3dit::caps`]'s own `text2image` defaults) when unset; `guidance` has
+/// and `seed` still apply: unset steps are s3dit's own default (8,
+/// [`s3dit::caps`]'s `text2image` default) and an unset seed is drawn per call
+/// on either backend ([`ImagePipeline::generate_seeded`] reports it); `guidance` has
 /// no s3dit counterpart at all (Z-Image-Turbo is a 0-guidance distilled
 /// model, like flux2's klein variants) and is silently unused on that
 /// backend.
@@ -87,6 +88,14 @@ impl ImageGenerationOptions {
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = Some(seed);
         self
+    }
+
+    /// These options with the seed made explicit, and that seed: the one set,
+    /// else a fresh draw. Both backends then render from the same value, and
+    /// the caller can be told which.
+    fn with_resolved_seed(self) -> (ImageGenerationOptions, u64) {
+        let seed = self.seed.unwrap_or_else(crate::random_seed);
+        (self.seed(seed), seed)
     }
 
     fn into_gen_opts(self) -> flux2::GenOpts {
@@ -165,13 +174,12 @@ fn forward_tokens_for(width: u32, height: u32) -> u32 {
 /// size you get if you never ask" even though WHEN that size is fixed
 /// differs between them.
 const S3DIT_DEFAULT_SIZE: (u32, u32) = (1024, 1024);
-/// s3dit's own `text2image` defaults (`s3dit::caps::gen_params`) --
+/// s3dit's own `text2image` step default (`s3dit::caps::gen_params`) --
 /// mirrored here rather than re-derived, so an unset
-/// [`ImageGenerationOptions::steps`]/`seed` on an s3dit-backed pipeline
-/// produces the SAME image a `brain do z-image text2image` call with no
-/// `steps`/`seed` argument would.
+/// [`ImageGenerationOptions::steps`] on an s3dit-backed pipeline takes the
+/// same step count a `brain do z-image text2image` call with no `steps`
+/// argument would.
 const S3DIT_DEFAULT_STEPS: u32 = 8;
-const S3DIT_DEFAULT_SEED: u64 = 42;
 
 /// [`ImagePipeline::generate_with`]'s size gate on an s3dit-backed pipeline,
 /// factored out so it is testable with no real pipeline in hand: `requested`
@@ -404,26 +412,40 @@ impl ImagePipeline {
         cancel: &capability::CancelToken,
         on_progress: &mut dyn FnMut(u32, u32, &str),
     ) -> Result<Image> {
-        match &self.backend {
+        self.generate_seeded(prompt, opts, cancel, on_progress).map(|(image, _seed)| image)
+    }
+
+    /// [`ImagePipeline::generate_with_progress`] that also returns the seed
+    /// the image was drawn from: the one in `opts`, else a fresh one. Passing
+    /// it back through [`ImageGenerationOptions::seed`] reproduces the image.
+    pub fn generate_seeded(
+        &self,
+        prompt: &str,
+        opts: ImageGenerationOptions,
+        cancel: &capability::CancelToken,
+        on_progress: &mut dyn FnMut(u32, u32, &str),
+    ) -> Result<(Image, u64)> {
+        let (opts, seed) = opts.with_resolved_seed();
+        let image = match &self.backend {
             Backend::Flux2(b) => {
                 let o = opts.into_gen_opts();
                 let (rgb, w, h) = b
                     .pipe
                     .generate(prompt, &[], &o, cancel, on_progress)
                     .map_err(backend_err_or_cancelled)?;
-                Image::from_rgb8(w, h, rgb)
+                Image::from_rgb8(w, h, rgb)?
             }
             Backend::S3dit(b) => {
                 check_s3dit_size((b.width, b.height), (opts.width, opts.height))?;
                 let steps = opts.steps.unwrap_or(S3DIT_DEFAULT_STEPS);
-                let seed = opts.seed.unwrap_or(S3DIT_DEFAULT_SEED);
                 let img = b
                     .pipe
                     .generate(prompt, seed, steps, cancel, on_progress)
                     .map_err(backend_err_or_cancelled)?;
-                Image::from_hwc_unit(img.w as u32, img.h as u32, &img.hwc)
+                Image::from_hwc_unit(img.w as u32, img.h as u32, &img.hwc)?
             }
-        }
+        };
+        Ok((image, seed))
     }
 }
 
@@ -763,7 +785,21 @@ mod tests {
         assert_eq!(o.width, want.width);
         assert_eq!(o.height, want.height);
         assert_eq!(o.steps, want.steps);
-        assert_eq!(o.seed, want.seed);
+        // The one default that is not a fixed value: an unset seed is drawn
+        // for every call.
+        assert_ne!(o.seed, ImageGenerationOptions::new().into_gen_opts().seed);
+    }
+
+    /// An unset seed is drawn per call and a set one is kept, so a render
+    /// that names no seed is not the same image twice and can still be
+    /// reproduced from the seed it reports.
+    #[test]
+    fn an_unset_image_seed_is_drawn_and_a_set_one_is_kept() {
+        let (_, a) = ImageGenerationOptions::new().with_resolved_seed();
+        let (_, b) = ImageGenerationOptions::new().with_resolved_seed();
+        assert_ne!(a, b);
+        let (resolved, kept) = ImageGenerationOptions::new().seed(7).with_resolved_seed();
+        assert_eq!((kept, resolved.into_gen_opts().seed), (7, 7));
     }
 
     /// Every field that IS set overrides its `GenOpts` counterpart, and

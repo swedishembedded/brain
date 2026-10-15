@@ -75,6 +75,9 @@ pub struct TrainRun {
     pub steps: usize,
     /// Examples per optimizer update.
     pub batch: usize,
+    /// Seeds the head's initialization and batch order. [`TrainRun::new`]
+    /// draws a fresh one; the checkpoint's lineage records the one used, and
+    /// passing it back reproduces the weights.
     pub seed: u64,
     /// The commit of the code doing the training, recorded in the lineage.
     pub brain_commit: String,
@@ -89,7 +92,7 @@ impl TrainRun {
             freeze_encoder: true,
             steps: DEFAULT_STEPS,
             batch: DEFAULT_BATCH,
-            seed: 0,
+            seed: crate::random_seed(),
             brain_commit: "unknown".to_string(),
         }
     }
@@ -308,12 +311,13 @@ pub struct EvalRun {
     /// A cost file, for cost-weighted regret.
     pub costs: Option<PathBuf>,
     /// Seeds the option permutation of the order-stability pass.
+    /// [`EvalRun::new`] draws a fresh one; the report records the one used.
     pub order_seed: u64,
 }
 
 impl EvalRun {
     pub fn new(model: impl Into<String>, data: impl Into<PathBuf>, split: Split) -> EvalRun {
-        EvalRun { model: model.into(), data: data.into(), split, costs: None, order_seed: 0 }
+        EvalRun { model: model.into(), data: data.into(), split, costs: None, order_seed: crate::random_seed() }
     }
 }
 

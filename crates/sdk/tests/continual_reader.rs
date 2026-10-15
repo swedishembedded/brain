@@ -136,3 +136,32 @@ fn a_reopened_run_reports_every_episode_it_ever_read() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A reader that is not told a seed runs under a fresh one, and says which: two
+/// readers differ, and the one given is the one used.
+#[test]
+fn a_reader_without_a_seed_draws_one_and_a_given_seed_is_kept() {
+    let dir = tmp("seed-drawn");
+    let a = ContinualReader::from_pretrained("fixture").run_dir(&dir).seed_used().expect("seed");
+    let b = ContinualReader::from_pretrained("fixture").run_dir(&dir).seed_used().expect("seed");
+    assert_ne!(a, b);
+    assert_eq!(ContinualReader::from_pretrained("fixture").run_dir(&dir).seed(7).seed_used().expect("seed"), 7);
+}
+
+/// Resuming a run keeps the randomness it was created with: an unseeded reader
+/// pointed at an existing run directory adopts the seed its manifest records,
+/// where a drawn one would make the resumed run a different experiment.
+#[test]
+fn a_reader_reopening_a_run_without_a_seed_adopts_the_recorded_one() {
+    let dir = tmp("seed-resumed");
+    // seed: the manifest is written with a known seed so the adoption is checkable.
+    let cfg = audit::reader::ReaderConfig { seed: 1234, ..audit::reader::ReaderConfig::default() };
+    let manifest = audit::run::Manifest { schema: audit::run::SCHEMA, model: "fixture".to_string(), cfg };
+    audit::run::Run::create(&dir, &manifest).expect("run");
+
+    let reader = ContinualReader::from_pretrained("fixture").run_dir(&dir);
+    assert_eq!(reader.seed_used().expect("seed"), 1234);
+    assert_eq!(reader.seed(99).seed_used().expect("seed"), 99, "a seed given wins over the recorded one");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -113,6 +113,10 @@ pub struct ReadOutcome {
     /// magnitude. A healthy mean can hide one episode that collapsed, and
     /// the per-block bar is about exactly that.
     pub worst_block_drop: Option<f64>,
+    /// The seed the run read under: the one the reader was given, else the one
+    /// its run directory was created with, else a fresh draw. Passing it
+    /// reproduces the reading.
+    pub seed: u64,
 }
 
 /// A model reading continually.
@@ -130,7 +134,9 @@ pub struct ContinualReader {
     /// Tokens an answer may take. See [`ContinualReader::max_new_tokens`].
     max_new: usize,
     until: Option<usize>,
-    seed: u64,
+    /// `None` until [`ContinualReader::seed`] is called; see
+    /// [`ContinualReader::seed_used`] for what an unset seed becomes.
+    seed: Option<u64>,
     cfg: ReaderConfig,
 }
 
@@ -219,7 +225,7 @@ impl ContinualReader {
             train_block: DEFAULT_TRAIN_BLOCK,
             max_new: DEFAULT_MAX_NEW,
             until: None,
-            seed: 0,
+            seed: None,
             cfg: ReaderConfig::default(),
         }
     }
@@ -253,10 +259,38 @@ impl ContinualReader {
         self
     }
 
+    /// Reproducible reading. Left unset, a new run directory draws a seed
+    /// (which its manifest records) and a reopened one keeps the seed it was
+    /// created with, so resuming never changes the run's randomness.
     pub fn seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
-        self.cfg.seed = seed;
+        self.seed = Some(seed);
         self
+    }
+
+    /// The seed [`ContinualReader::read`] and [`ContinualReader::battery`]
+    /// will run under now: the one given, else the one recorded in an
+    /// existing run directory, else the one drawn when this reader was made.
+    pub fn seed_used(&self) -> Result<u64> {
+        Ok(self.resolved_cfg()?.seed)
+    }
+
+    /// The configuration the run uses, with its seeds resolved. The reservoir
+    /// shares the run's seed so that one number reproduces the whole run.
+    fn resolved_cfg(&self) -> Result<ReaderConfig> {
+        let mut cfg = self.cfg;
+        match self.seed {
+            Some(seed) => {
+                cfg.seed = seed;
+                cfg.reservoir.seed = seed;
+            }
+            None if self.run_dir.join("manifest.json").exists() => {
+                let recorded = Run::open(&self.run_dir).and_then(|run| run.manifest()).map_err(|e| Error::Backend(e.to_string()))?.cfg;
+                cfg.seed = recorded.seed;
+                cfg.reservoir.seed = recorded.reservoir.seed;
+            }
+            None => {}
+        }
+        Ok(cfg)
     }
 
     pub fn rank(mut self, rank: u32) -> Self {
@@ -367,7 +401,8 @@ impl ContinualReader {
         let tok_path = base_dir.join("tokenizer.json");
         let tok = QwenBpe::from_file(tok_path.to_str().unwrap_or_default()).map_err(|e| Error::Backend(format!("{}: {e}", tok_path.display())))?;
 
-        let manifest = Manifest { schema: SCHEMA, model: self.model.clone(), cfg: self.cfg };
+        let cfg = self.resolved_cfg()?;
+        let manifest = Manifest { schema: SCHEMA, model: self.model.clone(), cfg };
         // Reopened under the model the run was created with, never another:
         // what a run has promoted is folded into THAT checkpoint, so serving
         // it from a different base would report one model's learning as
@@ -389,8 +424,8 @@ impl ContinualReader {
             train_block: self.train_block,
             max_new: self.max_new,
             until: self.until,
-            seed: self.seed,
-            cfg: self.cfg,
+            seed: cfg.seed,
+            cfg,
         })
     }
 }
@@ -467,6 +502,7 @@ fn read_for<A: StudyArch>(i: &Inputs) -> Result<ReadOutcome> {
         bwt: retention.bwt(),
         retention_coverage: retention.coverage(),
         worst_block_drop: retention.worst_drop(),
+        seed: i.seed,
     })
 }
 

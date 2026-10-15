@@ -218,6 +218,8 @@ pub struct RlcdSpec {
     pub options: Vec<String>,
     pub loss: LossConfig,
     pub steps: usize,
+    /// Seeds example order. [`RlcdSpec::default`] draws a fresh one;
+    /// [`TrainReport::seed`] reports the one a run used.
     pub seed: u64,
     /// Names for the ACTION index space of [`RlcdSpec::eval_costs`], in
     /// `CostMatrix` row order - e.g. `["block", "release"]`.
@@ -256,7 +258,7 @@ impl Default for RlcdSpec {
             options: Vec::new(),
             loss: LossConfig::cross_entropy(),
             steps: 1000,
-            seed: 0,
+            seed: crate::random_seed(),
             actions: Vec::new(),
             eval_costs: Vec::new(),
             freeze_encoder: false,
@@ -309,6 +311,9 @@ impl RlcdSpec {
 
 pub struct RlcdPipeline {
     model: Decide,
+    /// The seed the head was initialized from: the builder's, or the one
+    /// drawn when it named none.
+    seed: u64,
     question: Option<Question>,
     eval: Vec<RlcdExample>,
     /// Names for the cost matrices' ACTION index space - see
@@ -339,13 +344,19 @@ impl RlcdPipeline {
         Flow::new(RlcdPipeline::builder(dir).load())
     }
 
+    /// The seed this pipeline's head was initialized from. Passing it to
+    /// [`RlcdPipelineBuilder::seed`] rebuilds the same untrained head.
+    pub fn seed_used(&self) -> u64 {
+        self.seed
+    }
+
     pub fn builder(dir: impl AsRef<str>) -> RlcdPipelineBuilder {
         RlcdPipelineBuilder {
             dir: dir.as_ref().to_string(),
             head: None,
             device: Device::default(),
             limits: Limits::default(),
-            seed: 0,
+            seed: None,
         }
     }
 
@@ -491,7 +502,7 @@ impl RlcdPipeline {
             }
         }
         self.voi_question = Some(q);
-        Ok(TrainReport { steps, final_loss: tail, seconds: 0.0 })
+        Ok(TrainReport { steps, final_loss: tail, seconds: 0.0, seed: Some(seed) })
     }
 
     /// The learned policy's own action at `state` - `(action, probabilities)`
@@ -603,7 +614,7 @@ impl Stages for RlcdPipeline {
         let mut p = self.model.provenance().clone();
         p.task = TaskContract::from_spec(spec).to_json();
         self.model.set_provenance(p);
-        Ok(TrainReport { steps: spec.steps, final_loss: tail, seconds: 0.0 })
+        Ok(TrainReport { steps: spec.steps, final_loss: tail, seconds: 0.0, seed: Some(spec.seed) })
     }
 
     fn run_eval(&mut self) -> Result<EvalReport> {
@@ -715,7 +726,7 @@ pub struct RlcdPipelineBuilder {
     head: Option<String>,
     device: Device,
     limits: Limits,
-    seed: u64,
+    seed: Option<u64>,
 }
 
 impl RlcdPipeline {
@@ -752,14 +763,17 @@ impl RlcdPipelineBuilder {
         self
     }
 
+    /// Seed for the head's initialization. Left unset, [`load`](Self::load)
+    /// draws one; [`RlcdPipeline::seed_used`] reports it.
     pub fn seed(mut self, seed: u64) -> RlcdPipelineBuilder {
-        self.seed = seed;
+        self.seed = Some(seed);
         self
     }
 
     pub fn load(self) -> Result<RlcdPipeline> {
-        let model = crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
-        let mut pipeline = RlcdPipeline { model, question: None, eval: Vec::new(), actions: Vec::new(), eval_costs: Vec::new(), voi_question: None };
+        let seed = self.seed.unwrap_or_else(crate::random_seed);
+        let model = crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, seed)?;
+        let mut pipeline = RlcdPipeline { model, seed, question: None, eval: Vec::new(), actions: Vec::new(), eval_costs: Vec::new(), voi_question: None };
         if let Some(head) = &self.head {
             let (contract, base) = read_head_contract(head)?;
             // The head names the encoder it is an adapter TO. Attaching it to

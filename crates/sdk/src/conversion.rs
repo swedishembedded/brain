@@ -87,6 +87,9 @@ const POLICY_HEAD_LR: f32 = 2e-4;
 
 pub struct ConversionPipeline {
     model: Decide,
+    /// The seed the head was initialized from: the builder's, or the one
+    /// drawn when it named none.
+    seed: u64,
     router: Router,
     projection: Option<Projection>,
     phi: Option<ConfidenceNet>,
@@ -113,13 +116,19 @@ impl ConversionPipeline {
         Flow::new(ConversionPipeline::builder(dir).load())
     }
 
+    /// The seed this pipeline's head was initialized from. Passing it to
+    /// [`ConversionPipelineBuilder::seed`] rebuilds the same untrained head.
+    pub fn seed_used(&self) -> u64 {
+        self.seed
+    }
+
     pub fn builder(dir: impl AsRef<str>) -> ConversionPipelineBuilder {
         ConversionPipelineBuilder {
             dir: dir.as_ref().to_string(),
             head: None,
             device: Device::default(),
             limits: Limits { cap_rows: 8192, cap_slots: 8, max_span: 256, overlap: 32 },
-            seed: 0,
+            seed: None,
         }
     }
 
@@ -350,6 +359,8 @@ pub struct ConversionSpec {
     pub policy_steps: usize,
     /// How many held-out conversations the router is fitted on.
     pub calibration: usize,
+    /// Seeds both training phases. [`ConversionSpec::default`] draws a fresh
+    /// one; [`TrainReport::seed`] reports the one a run used.
     pub seed: u64,
     pub policy: PolicyConfig,
 }
@@ -362,7 +373,7 @@ impl Default for ConversionSpec {
             warmup_steps: 3000,
             policy_steps: 1000,
             calibration: 200,
-            seed: 0,
+            seed: crate::random_seed(),
             policy: PolicyConfig::default(),
         }
     }
@@ -447,7 +458,12 @@ impl Stages for ConversionPipeline {
         // Everything after the calibration slice, so evaluation never scores a
         // conversation the router was fitted on.
         self.eval = spec.eval[cal..].to_vec();
-        Ok(TrainReport { steps: spec.warmup_steps + spec.policy_steps, final_loss: tail, seconds: 0.0 })
+        Ok(TrainReport {
+            steps: spec.warmup_steps + spec.policy_steps,
+            final_loss: tail,
+            seconds: 0.0,
+            seed: Some(spec.seed),
+        })
     }
 
     fn run_eval(&mut self) -> Result<EvalReport> {
@@ -614,7 +630,7 @@ pub struct ConversionPipelineBuilder {
     head: Option<String>,
     device: Device,
     limits: Limits,
-    seed: u64,
+    seed: Option<u64>,
 }
 
 impl ConversionPipelineBuilder {
@@ -635,15 +651,19 @@ impl ConversionPipelineBuilder {
         self
     }
 
+    /// Seed for the head's initialization. Left unset, [`load`](Self::load)
+    /// draws one; [`ConversionPipeline::seed_used`] reports it.
     pub fn seed(mut self, seed: u64) -> ConversionPipelineBuilder {
-        self.seed = seed;
+        self.seed = Some(seed);
         self
     }
 
     pub fn load(self) -> Result<ConversionPipeline> {
-        let model = crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
+        let seed = self.seed.unwrap_or_else(crate::random_seed);
+        let model = crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, seed)?;
         Ok(ConversionPipeline {
             model,
+            seed,
             router: Router::default(),
             projection: None,
             phi: None,

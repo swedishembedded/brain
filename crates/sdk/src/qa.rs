@@ -152,6 +152,7 @@ pub struct Phrase {
     instruction: String,
     per_known: usize,
     max_new: u32,
+    /// Drawn by [`Phrase::with`]; see [`Phrase::seed`].
     seed: u64,
     temperature: f32,
     passes: usize,
@@ -164,7 +165,7 @@ impl Phrase {
             instruction: DEFAULT_PHRASING.to_string(),
             per_known: 3,
             max_new: 200,
-            seed: 0,
+            seed: crate::random_seed(),
             temperature: 0.0,
             passes: 1,
         }
@@ -185,9 +186,16 @@ impl Phrase {
         self
     }
 
+    /// Seeds the sampled passes. [`Phrase::with`] draws one when the caller
+    /// names none; [`Phrase::seed_used`] reports it.
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
+    }
+
+    /// The seed this stage samples from: the one given, else the one drawn.
+    pub fn seed_used(&self) -> u64 {
+        self.seed
     }
 
     /// How many times to ask about each answer, pooling what comes back.
@@ -653,6 +661,7 @@ pub struct Distil {
     instruction: String,
     per_passage: usize,
     max_new: u32,
+    /// Drawn by [`Distil::with`]; see [`Distil::seed`].
     seed: u64,
 }
 
@@ -661,7 +670,7 @@ impl Distil {
     /// sampling all come from the text pipeline, so a model that requires a
     /// template gets one without this stage knowing it happened.
     pub fn with(model: TextGenerationPipeline) -> Distil {
-        Distil { model, instruction: DEFAULT_INSTRUCTION.to_string(), per_passage: 4, max_new: 320, seed: 0 }
+        Distil { model, instruction: DEFAULT_INSTRUCTION.to_string(), per_passage: 4, max_new: 320, seed: crate::random_seed() }
     }
 
     /// How to ask. Replace it with something that names the domain: a
@@ -686,10 +695,16 @@ impl Distil {
 
     /// Seeds generation, so the same passages give the same candidates.
     /// Everything downstream is reproducible from a seed and this stage must
-    /// not be the one that is not.
+    /// not be the one that is not. [`Distil::with`] draws one when the caller
+    /// names none; [`Distil::seed_used`] reports it.
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
+    }
+
+    /// The seed this stage generates from: the one given, else the one drawn.
+    pub fn seed_used(&self) -> u64 {
+        self.seed
     }
 
     /// The prompt a passage is turned into. Exposed so a caller can see

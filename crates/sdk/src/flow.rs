@@ -40,6 +40,10 @@ pub struct TrainReport {
     /// Mean loss over the last tenth of the run.
     pub final_loss: f32,
     pub seconds: f32,
+    /// The seed the run trained from: the one the spec carried, which is a
+    /// fresh draw when the caller named none. Passing it back reproduces the
+    /// run. `None` for a stage that draws nothing.
+    pub seed: Option<u64>,
 }
 
 /// What one evaluation stage produced.
@@ -205,13 +209,16 @@ impl<P: Stages> Flow<P> {
                 }
             })?;
             r.seconds = t0.elapsed().as_secs_f32();
-            let line = format!(
+            let mut line = format!(
                 "{} steps, final loss {:.4}, {:.1}s ({:.0} ms/step)",
                 r.steps,
                 r.final_loss,
                 r.seconds,
                 r.seconds * 1000.0 / r.steps.max(1) as f32
             );
+            if let Some(seed) = r.seed {
+                line.push_str(&format!(", seed {seed}"));
+            }
             report = Some(r);
             Ok(Some(line))
         });

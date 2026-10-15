@@ -58,7 +58,7 @@ impl ModelOptions {
             encoder: encoder.to_string(),
             head: None,
             save: save.to_string(),
-            seed: crate::ControlSpec::default().seed,
+            seed: crate::random_seed(),
         }
     }
 
@@ -68,7 +68,7 @@ impl ModelOptions {
         self.encoder = args.str_or("--encoder", &self.encoder.clone());
         self.head = args.take_str("--head").or(self.head);
         self.save = args.str_or("--save", &self.save.clone());
-        self.seed = args.u64_or("--seed", self.seed);
+        self.seed = args.seed_opt("--seed").unwrap_or(self.seed);
         Ok(self)
     }
 
@@ -342,7 +342,7 @@ impl ControlOptions {
             self.target_kl =
                 Some(k.parse().map_err(|_| format!("--target-kl: {k:?} is not a number"))?);
         }
-        self.seed = args.u64_or("--seed", self.seed);
+        self.seed = args.seed_opt("--seed").unwrap_or(self.seed);
         self.train_encoder |= args.take_flag("--train-encoder");
         Ok(self)
     }
@@ -513,6 +513,18 @@ mod tests {
         assert_eq!(o.iterations, d.iterations);
         assert_eq!(o.spec().max_steps, d.max_steps);
         assert_eq!(o.spec().warmup_episodes, d.warmup_episodes);
+    }
+
+    /// A run that names no `--seed` gets a fresh one, the same for the model
+    /// and the control groups, and a malformed one is refused by `Args` rather
+    /// than replaced by a default; a given one is kept.
+    #[test]
+    fn the_seed_flag_is_kept_and_an_absent_one_is_drawn_per_run() {
+        assert_ne!(ControlOptions::new("e", "s").seed, ControlOptions::new("e", "s").seed);
+        assert_ne!(ModelOptions::new("e", "s").seed, ModelOptions::new("e", "s").seed);
+        let argv: Vec<String> = ["--seed", "5"].iter().map(|s| s.to_string()).collect();
+        let o = ControlOptions::new("e", "s").take_over(&mut Args::new(&argv)).expect("parses");
+        assert_eq!((o.seed, o.spec().seed), (5, 5));
     }
 
     #[test]

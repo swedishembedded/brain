@@ -239,7 +239,9 @@ mod tests {
         let want = minimaxmusic3::generate::GenOpts::default();
         assert_eq!(o.duration_seconds, want.duration_seconds);
         assert_eq!(o.num_inference_steps, want.num_inference_steps);
-        assert_eq!(o.seed, want.seed);
+        // The one default that is not a fixed value: an unset seed is drawn
+        // for every call.
+        assert_ne!(o.seed, MusicOptions::new().to_gen_opts().seed);
     }
 
     /// Every field that IS set overrides its `GenOpts` counterpart, and
