@@ -488,12 +488,13 @@ mod tests {
 
     #[test]
     fn rng_is_deterministic() {
-        let mut a = Rng::new(42);
-        let mut b = Rng::new(42);
+        let seed = seed::random_seed();
+        let mut a = Rng::new(seed);
+        let mut b = Rng::new(seed);
         for _ in 0..100 {
             assert_eq!(a.next(), b.next());
         }
-        let mut c = Rng::new(7);
+        let mut c = Rng::new(seed::random_seed());
         for _ in 0..1000 {
             let u = c.uniform();
             assert!((0.0..1.0).contains(&u));
@@ -502,7 +503,7 @@ mod tests {
 
     #[test]
     fn window_masks_cold_start_only_when_midstream() {
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(seed::random_seed());
         let traj = generate_trajectory(&training_plants()[0], 30, &mut rng);
         // start==0 window: the first DECIDE IS supervised
         let (tok0, lab0) = build_window(&traj, 0, 3, 256);
@@ -522,7 +523,7 @@ mod tests {
     fn dataset_batch_shape() {
         let plants = training_plants();
         let ds = PidDataset::new(&plants, 9, 40, 6, 128, 5);
-        let mut rng = Rng::new(9);
+        let mut rng = Rng::new(seed::random_seed());
         let (xs, ys) = ds.batch(4, &mut rng);
         assert_eq!(xs.len(), 4 * 128);
         assert_eq!(ys.len(), 4 * 128);
