@@ -208,8 +208,12 @@ mod tests {
 
     #[test]
     fn play_normal_rng_is_deterministic_and_roughly_standard() {
-        let mut a = NormalRng::new(7);
-        let mut b = NormalRng::new(7);
+        // The variance tolerance sits 3.5 sigma from a fair stream's, so a drawn
+        // seed would fail about once in 2000 runs.
+        // seed: the tolerances were measured at this stream, which must also reproduce
+        let seed = 7;
+        let mut a = NormalRng::new(seed);
+        let mut b = NormalRng::new(seed);
         let xs: Vec<f32> = (0..10_000).map(|_| a.normal()).collect();
         let ys: Vec<f32> = (0..10_000).map(|_| b.normal()).collect();
         assert_eq!(xs, ys);
