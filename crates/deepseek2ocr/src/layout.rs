@@ -262,7 +262,7 @@ fn index_buffer(g: &Gpu, label: &str, idx: &[u32]) -> DeviceBuffer {
 mod tests {
     use super::*;
     use crate::rows::{row_plan, ViewGrid};
-    use data::rng::Lcg;
+    use data::rng::{random_seed, Lcg};
 
     /// A deliberately small layout that still has every row kind: `g = 3` over
     /// the global view is 3 token rows of 3, each followed by a newline, then
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn the_backward_matches_a_finite_difference_of_the_forward() {
         let f = Fixture::new();
-        let mut rng = Lcg::new(7);
+        let mut rng = Lcg::new(random_seed());
         let mut rand = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.signed()).collect() };
         let (pl, bl, dl) = (f.rg.proj_len(), f.rg.block_len(), D as usize);
         let x0 = [rand(pl), rand(dl), rand(dl)];

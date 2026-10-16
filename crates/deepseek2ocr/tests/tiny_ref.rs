@@ -433,7 +433,7 @@ fn composite_backward_reaches_the_image_and_descends() {
     }
 
     // ---- directional finite differences on the NEW parameters ----
-    let mut rng = data::rng::Rng::new(0x51CE);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     let eps = 5e-4f32;
     for name in m.encoder().glue_param_names().into_iter().filter(|n| n != IMAGE_NEWLINE && n != VIEW_SEPARATOR) {
         let w0 = m.encoder().read_glue_weight(&name);
@@ -730,7 +730,7 @@ fn the_real_layout_splices_the_learned_rows_verbatim_and_trains_them() {
     // i.e. the check was reading fp32 quantization, not curvature. A step big
     // enough to clear that quantum is the fix; the second-order error it buys
     // back is what the 5e-2 gate absorbs.
-    let mut rng = data::rng::Rng::new(0xDEC0);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     let eps = 5e-2f32;
     for (name, grad) in [(IMAGE_NEWLINE, &d_nl), (VIEW_SEPARATOR, &d_sep)] {
         let w0 = m.encoder().read_glue_weight(name);
