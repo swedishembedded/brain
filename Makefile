@@ -1397,6 +1397,21 @@ perf/model/wan: build/release
 		--concurrency 1 --requests $(WAN_REQUESTS) --warmup $(WAN_WARMUP) \
 		--input 1 --output $(word 4,$(subst x, ,$(WAN_SIZE))) $(SEED_FLAG)
 
+# Qwen3.8-27B batch-size sweep: aggregate decode tokens/s and per-sequence
+# latency of the released GGUF at 1..64 sequences decoding together, through
+# the same engine the continuous-batching scheduler drives. QWEN35_GGUF has NO
+# default (the checkpoint lives outside the repo). Run it on an idle card:
+# `lease/gpu --lock <file> --exclusive -- make perf/model/qwen35-batch ...`.
+QWEN35_CTX ?= 4096
+QWEN35_KV ?= bf16
+QWEN35_PROMPT_TOKENS ?= 512
+QWEN35_BATCHES ?= 1,4,8,16,32,64
+## perf/model/qwen35-batch - Qwen3.8-27B batch sweep (QWEN35_GGUF=<Q8_0.gguf>, QWEN35_CTX, QWEN35_KV=f32|bf16|int8, QWEN35_BATCHES=1,4,..)
+perf/model/qwen35-batch:
+	@test -n "$(QWEN35_GGUF)" || (echo "set QWEN35_GGUF=<path to Qwen3.8-27B Q8_0 .gguf>"; exit 2)
+	cargo run --release -p brain-qwen35 --bin qwen35_batch_sweep -- $(QWEN35_GGUF) \
+		--ctx $(QWEN35_CTX) --kv $(QWEN35_KV) --prompt-tokens $(QWEN35_PROMPT_TOKENS) --batches $(QWEN35_BATCHES)
+
 ## perf/gate - lists the perf regression gates; runs nothing
 perf/gate:
 	$(LIST_CHILDREN)

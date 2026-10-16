@@ -255,7 +255,9 @@ QWEN3.8 SERVING TUNABLES  (released-GGUF multi-card resident; the brain-
                          `i8` or e.g. `i8,blk.0.attn_q=f32` (default: uniform
                          int8 - what the checkpoints are released as).
   --qwen35-kv TIER       GQA cache storage: f32|bf16|int8 (default f32).
-  --qwen35-max-batch N   concurrent decode slots (default 1).
+  --qwen35-max-batch N   decode slots: sequences decoded together in one batched
+                         step (default 8). A configuration whose slots x ctx
+                         do not fit the GPUs is refused at startup.
   --qwen35-fp32-ctx N    context for the fp32 resident from a brain checkpoint
                          (default 4096).
   --qwen35-fp32-max-batch N

@@ -112,6 +112,11 @@ application", "an orchestrator"). Enforced by `make check/scope`
    or per-row `int8` (`--qwen35-kv`, `model::kv_tier`: 4 / 8 / 15 sequences
    of 128k on one GH200) and decode through a fused split-key attention
    (`paged_flash_decode_gqa_hd256`) in every tier; see M30 in the same ledger.
+   It is a `model::serve::PagedDecoder` (`int8_gguf_resident::Qwen35GgufEngine`,
+   one KV slot per sequence) driven by the generic continuous-batching
+   scheduler like every other LLM resident: `--qwen35-max-batch N` sequences
+   decode in ONE batched step per iteration (`make perf/model/qwen35-batch`
+   prints the aggregate-throughput table).
 3. **Sparse MoE Transformer** (`crates/toymoe`) - RMSNorm/RoPE, top-k experts; with
    **federated/sharded** expert training (`crates/federated`).
 4. **GLM-5.2 decoder** (`crates/glmdsa`) - `glm_moe_dsa`: **MLA** (low-rank q/kv with
@@ -924,6 +929,7 @@ The recent workstream (P7.x) is concurrent LLM serving. Key pieces:
 | Paged KV foundation | `crates/model/src/paged.rs` | block allocator, `BlockTable` (+`truncate`) |
 | Serving engine | `crates/qwen3/src/serve.rs` | shared block pools, batched **ragged paged decode**, batched + **chunked prefill**, **int8 paged KV - the serving DEFAULT** (3.88× smaller pool at Qwen3's `head_dim=128`; opt out with `--kv-fp32` / `BRAIN_QWEN_KV_INT8=0`), calibration opt-in (`--kv-calib` / `BRAIN_QWEN_KV_CALIB=1`), **speculative decoding**, **an adapter bank (many LoRA adapters, or none, per row of one batch on one copy of the weights)**, on-device greedy/top-K sampling head, `Engine::load` from checkpoint; implements the generic `model::serve::PagedDecoder` seam. Served context length defaults to `BRAIN_QWEN_CTX=24576` (sized to what int8 KV buys; the fp32 opt-out is guarded and refuses over the iGPU's 8 GiB policy budget rather than OOMing - `crates/catalog/src/resident_llm.rs`). |
 | Scheduler | `crates/model/src/serve.rs` | `PagedDecoder`-generic continuous batching (multi-sequence concurrent admission/decode) + real (non-greedy) sampling; `qwen3::serve::Scheduler` is a type alias over `Engine` - the seam a future decoder LM adopts by implementing `PagedDecoder`, not by duplicating the scheduler |
+| LLM resident glue | `crates/llmserve` | the ONE `Instance` glue every text LLM resident (Qwen3, Qwen3.8 fp32 and the released GGUF, Qwen3.5-MoE) serves through: requests of a `run_batch` group go into `model::serve::Scheduler<D: PagedDecoder>`, one batched decode step per iteration, per-request seeds, stop strings, cancellation and adapter routing via the `Frontend` seam. A model declares how many queued jobs one call may take with `ResidentModel::batch_limit` (`--qwen35-max-batch` for the GGUF 27B) |
 | Shared Qwen chat serving | `crates/qwen3/src/chat.rs` | chat-template rendering, tool-call/stop-string streaming, cancellation - one implementation shared by `resident_llm.rs` (HTTP/D-Bus) and `qwen3::caps.rs` (`brain qwen3 infer`), so they cannot diverge |
 | Residency | `crates/residency` | tiers model weights GPU/RAM/disk by a size/reload-cost-aware policy within a memory budget; schedules jobs (batch-by-model, queue-age-aware, parallel lanes); `crates/residency/src/admission.rs` is the shared edge-concurrency-ceiling/admit-deadline policy both HTTP and D-Bus read from |
 | Capability interface | `crates/capability` | models advertise a `Manifest` of typed `ActionSpec`s; CLI (`brain caps` / `brain <arch> <verb>`) and the event API dispatch generically - adding a capability = implementing `Action`, no new subcommand or event variant |

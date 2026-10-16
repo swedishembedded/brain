@@ -964,7 +964,8 @@ impl ResidencyManager {
         let cost = m.estimate_multi(&key);
         let wanted: Vec<Device> = cost.devices().collect();
         if wanted.is_empty() {
-            return Err(ClaimError::Activate(format!("{key}: estimate_multi named zero devices")));
+            let why = m.unavailable_reason(&key).unwrap_or_else(|| "estimate_multi named zero devices".to_string());
+            return Err(ClaimError::Activate(format!("{key}: {why}")));
         }
         let devices = match pick_devices(&cost, &self.budgets, exclude) {
             Some(d) => d,
@@ -1864,6 +1865,42 @@ mod tests {
             },
         };
         Ok((handle, key))
+    }
+
+    /// A multi-device model that cannot be placed says WHY in the error every
+    /// queued job gets, not only in a server log nobody reads.
+    #[test]
+    fn an_unavailable_multi_device_model_reports_its_reason_to_the_job() {
+        struct Refused;
+        impl ResidentModel for Refused {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("refused", "never fits", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("refused", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(0, 0)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+                Err("unused".to_string())
+            }
+        }
+        impl crate::multi::MultiDeviceResidentModel for Refused {
+            fn estimate_multi(&self, _k: &InstanceKey) -> crate::multi::MultiDeviceCost {
+                crate::multi::MultiDeviceCost::default()
+            }
+            fn unavailable_reason(&self, _k: &InstanceKey) -> Option<String> {
+                Some("max_batch 256 needs 120 GiB but 95 GiB is budgeted; lower --max-batch".to_string())
+            }
+            fn activate_multi(&self, _k: &InstanceKey, _d: &[Device]) -> Result<Box<dyn crate::Instance>, String> {
+                Err("unused".to_string())
+            }
+        }
+        let mut mgr = ResidencyManager::new(Budgets::new());
+        mgr.register_multi(Arc::new(Refused));
+        let err = claim_multi_built(&mut mgr, "refused").err().expect("an unplaceable model must fail its claim");
+        assert!(err.contains("lower --max-batch"), "the reason must reach the caller: {err}");
     }
 
     #[test]

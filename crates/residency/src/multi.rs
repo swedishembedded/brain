@@ -149,6 +149,14 @@ pub trait MultiDeviceResidentModel: ResidentModel {
     /// into a clean, per-job [`crate::manager::ClaimError::Activate`] instead.
     fn estimate_multi(&self, key: &InstanceKey) -> MultiDeviceCost;
 
+    /// Why `estimate_multi` named zero devices, in words the caller can act
+    /// on (which setting to lower). Carried in the error every queued job of
+    /// an unplaceable model receives; `None` (the default) gets the generic
+    /// "named zero devices" text.
+    fn unavailable_reason(&self, _key: &InstanceKey) -> Option<String> {
+        None
+    }
+
     /// Build the instance across EXACTLY the devices `estimate_multi`
     /// named (same set, any order) — parallel to
     /// [`ResidentModel::activate`]'s single-device contract.

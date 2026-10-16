@@ -292,8 +292,9 @@ pub struct Qwen35GgufServeConfig {
     /// GQA KV-cache storage tier. `None` keeps the historical default
     /// (f32).
     pub kv: Option<model::kv_tier::KvTier>,
-    /// How many sequences one dispatch may decode together. `None` keeps
-    /// the historical default (1).
+    /// How many sequences one batched decode step carries (the resident's
+    /// decode slots, charged into the placement). `None` takes
+    /// [`DEFAULT_MAX_BATCH`].
     pub max_batch: Option<u32>,
 }
 
@@ -313,11 +314,18 @@ impl Qwen35GgufServeConfig {
         self.kv.unwrap_or(model::kv_tier::KvTier::F32)
     }
 
-    /// The batch knob with its historical default filled in.
+    /// The batch knob with its default filled in.
     pub fn max_batch_or_default(&self) -> u32 {
-        self.max_batch.unwrap_or(1).max(1)
+        self.max_batch.unwrap_or(DEFAULT_MAX_BATCH).max(1)
     }
 }
+
+/// Decode slots a GGUF resident is built with when `--qwen35-max-batch` is not
+/// given: concurrent requests share every weight read, so a single slot would
+/// serve them one at a time. Small enough that the decode state (about 0.4 GiB
+/// a sequence at the default 2048 context with an f32 cache) leaves the
+/// two-24-GiB-card placement unchanged.
+pub const DEFAULT_MAX_BATCH: u32 = 8;
 
 /// Build the multi-GPU GGUF resident from a [`Qwen35GgufServeConfig`]:
 /// resolve the configured (or store-implied) `.gguf`, then hand its path,
@@ -905,9 +913,9 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// Historical defaults survive an all-`None` config: ctx 2048, uniform
-    /// INT8 weights, f32 KV, batch 1 - byte for byte what the removed env
-    /// readers defaulted to.
+    /// Defaults of an all-`None` config: ctx 2048, uniform INT8 weights, f32
+    /// KV (the removed env readers' defaults), and [`DEFAULT_MAX_BATCH`] decode
+    /// slots so concurrent requests share every weight read.
     #[test]
     fn config_defaults_match_the_historical_env_defaults() {
         let root = gguf_store("defaults");
@@ -916,7 +924,7 @@ mod tests {
         let (r, _) = multi_gpu_gguf(Some(&root), &gpu_budget(), 2 << 30, &cfg).expect("resolve");
         assert_eq!(r.cap(), 2048);
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::F32);
-        assert_eq!(r.max_batch(), 1);
+        assert_eq!(r.max_batch(), DEFAULT_MAX_BATCH);
         std::fs::remove_dir_all(&root).ok();
     }
 
