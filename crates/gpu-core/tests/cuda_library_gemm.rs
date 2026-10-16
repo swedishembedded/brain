@@ -14,7 +14,7 @@
 //! The device tests open a CUDA card when there is one and report that they
 //! found none otherwise, like the other hardware gates of this crate.
 
-use gpu_core::provider::library::{GemmPath, GemmPrecision, LibraryGemmProvider, Operand};
+use gpu_core::provider::library::{F32Product, GemmPath, GemmPrecision, LibraryGemmProvider, Operand};
 use gpu_core::Gpu;
 
 static NO_KERNELS: &[(&str, &str)] = &[];
@@ -75,7 +75,6 @@ fn rms(v: &[f64]) -> f64 {
 
 fn assert_close(got: &[f32], want: &[f64], what: &str) {
     let bar = 1e-2 * rms(want);
-    eprintln!("{what}: oracle rms {:.4}, got[0..3] {:?}, want[0..3] {:?}", rms(want), &got[..3], &want[..3]);
     let worst = got.iter().zip(want).map(|(g, w)| (*g as f64 - w).abs()).fold(0.0, f64::max);
     assert!(worst <= bar, "{what}: worst error {worst} exceeds 1e-2 of the output RMS ({bar})");
 }
@@ -194,4 +193,66 @@ fn an_unaligned_shape_is_declined() {
     let mut steps = Vec::new();
     assert!(!provider.forward(&gpu, &mut steps, &op, &op, &op, 8, 8, 12), "k = 12 is not a multiple of 8");
     assert!(steps.is_empty());
+}
+
+/// The NF4 decode kernel produces, bit for bit, the bf16 rounding of
+/// `codebook[code] * scale` that the host formula gives, over a window that
+/// does not start at the first row.
+#[test]
+fn nf4_dequant_matches_the_codebook_bit_for_bit() {
+    let Some(gpu) = open() else { return };
+    let provider = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
+    if !provider.is_active() {
+        return;
+    }
+    let (rows, k, first, count) = (128usize, 256usize, 64usize, 32usize);
+    let codes = values(rows * k, 8.0, 6).iter().map(|v| ((v + 8.0) as u32).min(15)).collect::<Vec<_>>();
+    let scales: Vec<f32> = values(rows * k / 32, 1.0, 7).iter().map(|v| v.abs() + 0.01).collect();
+    let words: Vec<u32> = codes.chunks(8).map(|c| c.iter().enumerate().fold(0u32, |w, (b, code)| w | (code << (4 * b)))).collect();
+    let (pb, sb) = (gpu.storage(words.len() as u64), gpu.storage_init("scales", &scales));
+    gpu.write(&pb, &words);
+    let mut steps = Vec::new();
+    let (po, so) = ((first * k / 8) as u64, (first * k / 32) as u64);
+    let out = provider
+        .dequant_nf4(&gpu, &mut steps, &Operand { buf: &pb, range: (po, (count * k / 8) as u64) }, &Operand { buf: &sb, range: (so, (count * k / 32) as u64) }, (count * k) as u64)
+        .expect("the decode kernel was declined");
+    gpu.submit(&[], &steps);
+    let got = gpu.read(&out, count * k / 2);
+    for i in 0..count * k {
+        let wi = first * k + i;
+        let want = bf16_bits(kernels::template::NF4_CODEBOOK[codes[wi] as usize] * scales[wi / 32]);
+        let word = got[i / 2].to_bits();
+        let have = if i % 2 == 0 { word & 0xffff } else { word >> 16 };
+        assert_eq!(have, want, "weight {i} (code {}, scale {})", codes[wi], scales[wi / 32]);
+    }
+}
+
+/// The row-major fp32 product, in every transpose combination and accumulating,
+/// against an f64 oracle at the 1e-5 level (no operand is rounded).
+#[test]
+fn the_f32_product_covers_every_transpose_and_accumulates() {
+    let Some(gpu) = open() else { return };
+    let provider = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
+    if !provider.is_active() {
+        return;
+    }
+    let (m, n, k) = (24usize, 16usize, 40usize);
+    let a = values(m * k, 1.0, 8);
+    let b = values(k * n, 1.0, 9);
+    let c0 = values(m * n, 1.0, 10);
+    for (trans_a, trans_b) in [(false, false), (false, true), (true, false), (true, true)] {
+        // Physical storage of each operand under its flag.
+        let at = |i: usize, t: usize| if trans_a { a[t * m + i] } else { a[i * k + t] };
+        let bt = |t: usize, j: usize| if trans_b { b[j * k + t] } else { b[t * n + j] };
+        let want: Vec<f64> = (0..m * n).map(|x| 0.5 * (0..k).map(|t| at(x / n, t) as f64 * bt(t, x % n) as f64).sum::<f64>() + c0[x] as f64).collect();
+        let (ab, bb, cb) = (gpu.storage_init("a", &a), gpu.storage_init("b", &b), gpu.storage_init("c", &c0));
+        let whole = |buf| Operand { buf, range: (0, 0) };
+        let mut steps = Vec::new();
+        let p = F32Product { m: m as u32, n: n as u32, k: k as u32, trans_a, trans_b, alpha: 0.5, beta: 1.0 };
+        assert!(provider.gemm_f32(&gpu, &mut steps, &whole(&ab), &whole(&bb), &whole(&cb), p));
+        gpu.submit(&[], &steps);
+        let got = gpu.read(&cb, m * n);
+        let worst = got.iter().zip(&want).map(|(g, w)| (*g as f64 - w).abs()).fold(0.0, f64::max);
+        assert!(worst < 1e-4, "trans_a={trans_a} trans_b={trans_b}: worst error {worst}");
+    }
 }

@@ -99,6 +99,7 @@ const ALIGN_ELEMS: u32 = 8;
 const MAX_SCRATCH_BYTES: u64 = 2 << 30;
 
 const CAST_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
+const NF4_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
 /// Serves the bf16-weight GEMMs of one device through the vendor library when
 /// [`decide`] chose it; otherwise answers `false` to every request.
@@ -136,6 +137,37 @@ impl LibraryGemmProvider {
     /// The path this provider was assigned.
     pub fn path(&self) -> &GemmPath {
         &self.path
+    }
+
+    /// Whether this provider will take requests at all (the device runs the
+    /// tensor-core path); a caller preparing an operand for it checks first.
+    pub fn is_active(&self) -> bool {
+        self.path == GemmPath::Bf16TensorCore
+    }
+
+    /// Decode `elems` weights of an NF4 window (`packed`: eight codes a word;
+    /// `scales`: one fp32 per 32 weights, both bound at their ranges) into a new
+    /// bf16 buffer and push the step. The result is a whole-buffer bf16 weight
+    /// for [`Self::forward`] / [`Self::dx`], valid until the step has run.
+    /// `None` when the device declines the decode kernel or the window is not a
+    /// whole number of 32-weight groups.
+    pub fn dequant_nf4(&self, gpu: &Gpu, steps: &mut Vec<Step>, packed: &Operand, scales: &Operand, elems: u64) -> Option<DeviceBuffer> {
+        if !self.is_active() || elems == 0 || !elems.is_multiple_of(32) || elems > MAX_SCRATCH_BYTES / 2 {
+            return None;
+        }
+        let words = elems / 8;
+        let kernel = kernels_cuda::get("nf4_dequant_bf16")?;
+        let id = gpu.native_kernel(kernel, NF4_BINDINGS)?;
+        let out = gpu.storage(elems / 2);
+        let step = gpu.step_native_sliced(
+            id,
+            &[packed.buf, scales.buf, &out],
+            &[(packed.range.0, words), (scales.range.0, elems / 32), (0, 0)],
+            &[words as u32],
+            kernel.blocks_for(1, words as u32),
+        )?;
+        steps.push(step);
+        Some(out)
     }
 
     /// `y[m, n] = x[m, k] @ W[n, k]^T` for a bf16 `w`, with the activation
@@ -222,6 +254,65 @@ impl LibraryGemmProvider {
         steps.push(cast_step);
         steps.push(gemm_step);
         true
+    }
+}
+
+/// A row-major fp32 product `C[m, n] = alpha * op(A) * op(B) + beta * C` for
+/// [`LibraryGemmProvider::gemm_f32`]: `op(A)` is `m x k` (stored `[m, k]`, or
+/// `[k, m]` when `trans_a`), `op(B)` is `k x n` (stored `[k, n]`, or `[n, k]`
+/// when `trans_b`).
+#[derive(Clone, Copy, Debug)]
+pub struct F32Product {
+    /// Rows of `C`.
+    pub m: u32,
+    /// Columns of `C`.
+    pub n: u32,
+    /// The reduction length.
+    pub k: u32,
+    /// `A` is stored transposed.
+    pub trans_a: bool,
+    /// `B` is stored transposed.
+    pub trans_b: bool,
+    /// Scale of the product.
+    pub alpha: f32,
+    /// Scale of the existing `C`: 0 overwrites, 1 accumulates.
+    pub beta: f32,
+}
+
+impl LibraryGemmProvider {
+    /// A row-major fp32 product with fp32 accumulation, no rounding of any
+    /// operand: the small low-rank products of a LoRA adapter, whose serial
+    /// kernels were the training step's second-largest cost. `false` (nothing
+    /// pushed) when this device runs the fp32 kernels.
+    pub fn gemm_f32(&self, gpu: &Gpu, steps: &mut Vec<Step>, a: &Operand, b: &Operand, c: &Operand, p: F32Product) -> bool {
+        if !self.is_active() || p.m == 0 || p.n == 0 || p.k == 0 {
+            return false;
+        }
+        // Row-major `C = op(A) op(B)` is column-major `C^T = op(B)^T op(A)^T`: the
+        // library's first operand is `B`, its second `A`, and a row-major
+        // matrix is its column-major transpose with the row length as stride.
+        let gemm = LibraryGemm {
+            trans_a: p.trans_b,
+            trans_b: p.trans_a,
+            m: p.n,
+            n: p.m,
+            k: p.k,
+            lda: if p.trans_b { p.k } else { p.n },
+            ldb: if p.trans_a { p.m } else { p.k },
+            ldc: p.n,
+            a: LibraryDtype::F32,
+            b: LibraryDtype::F32,
+            c: LibraryDtype::F32,
+            alpha: p.alpha,
+            beta: p.beta,
+        };
+        match gpu.step_library_gemm(&gemm, &[b.buf, a.buf, c.buf], &[b.range, a.range, c.range]) {
+            Some(step) => {
+                steps.push(step);
+                true
+            }
+            None => false,
+        }
     }
 }
 

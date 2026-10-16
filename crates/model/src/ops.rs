@@ -1141,49 +1141,98 @@ impl Ops {
         self.gemm = LibraryGemmProvider::for_gpu(&self.gpu, precision);
     }
 
+    /// The vendor-library GEMM provider (inactive on a device without the
+    /// library, or when the fp32 reference tier is pinned): what a model asks
+    /// for the products that are not a frozen weight times an activation, such
+    /// as a LoRA adapter's, before falling back to its own kernels.
+    pub fn tensor_gemm(&self) -> &LibraryGemmProvider {
+        &self.gemm
+    }
+
     /// Which arithmetic path the bf16-weight GEMMs of this `Ops` take.
     pub fn gemm_path(&self) -> &library::GemmPath {
         self.gemm.path()
     }
 
-    /// `y[yoff ..] = act @ W[first.., :]^T` on the library path, for a bf16 `w`;
+    /// `y[yoff ..] = act @ W[first.., :]^T` on the library path, for a bf16 or NF4 `w`;
     /// `false` (nothing pushed) when the fp32 kernels must run instead.
     fn library_forward(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
-        let Weight::BF16 { w: wb, n, k } = w else { return false };
-        let (first, count) = rows;
+        let Some((wb, window, mut prep)) = self.library_weight(w, rows) else { return false };
+        let k = w.k();
         let m = act.m;
-        let window = if first == 0 && count == *n { WHOLE } else { (first as u64 * *k as u64 / 2, count as u64 * *k as u64 / 2) };
-        self.gemm.forward(
+        let ok = self.gemm.forward(
             &self.gpu,
-            s,
-            &library::Operand { buf: &act.x, range: (act.xr0 as u64 * *k as u64, m as u64 * *k as u64) },
-            &library::Operand { buf: wb, range: window },
-            &library::Operand { buf: y, range: (yoff, m as u64 * count as u64) },
+            &mut prep,
+            &library::Operand { buf: &act.x, range: (act.xr0 as u64 * k as u64, m as u64 * k as u64) },
+            &library::Operand { buf: &wb, range: window },
+            &library::Operand { buf: y, range: (yoff, m as u64 * rows.1 as u64) },
             m,
-            count,
-            *k,
-        )
+            rows.1,
+            k,
+        );
+        if ok {
+            s.append(&mut prep);
+        }
+        ok
+    }
+
+    /// The bf16 weight rows `rows` of `w` as the library path reads them: the
+    /// buffer, the range to bind and any steps that must run first (the
+    /// decode of an NF4 window into a bf16 scratch). `None` for a tier or a
+    /// device the library path does not serve.
+    fn library_weight(&self, w: &Weight, rows: (u32, u32)) -> Option<(DeviceBuffer, (u64, u64), Vec<Step>)> {
+        if !self.gemm.is_active() {
+            return None;
+        }
+        let (first, count) = rows;
+        let (n, k) = (w.n(), w.k());
+        let mut prep = Vec::new();
+        match w {
+            Weight::BF16 { w: wb, .. } => {
+                let window = if first == 0 && count == n { WHOLE } else { (first as u64 * k as u64 / 2, count as u64 * k as u64 / 2) };
+                Some((wb.clone(), window, prep))
+            }
+            Weight::NF4 { w: wb, s: sw, .. } => {
+                let (packed, scales) = if first == 0 && count == n {
+                    (WHOLE, WHOLE)
+                } else {
+                    (Self::row_window(first, count, n, k, 8), Self::row_window(first, count, n, k, 32))
+                };
+                let decoded = self.gemm.dequant_nf4(
+                    &self.gpu,
+                    &mut prep,
+                    &library::Operand { buf: wb, range: packed },
+                    &library::Operand { buf: sw, range: scales },
+                    count as u64 * k as u64,
+                )?;
+                Some((decoded, WHOLE, prep))
+            }
+            _ => None,
+        }
     }
 
     /// `dx[dx_row0.., :] (+)= dy[m, count] @ W[first.., :]` on the library path
     /// for a bf16 `w`; `false` when the fp32 kernels must run instead.
     #[allow(clippy::too_many_arguments)]
     fn library_dx(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, dx_row0: u32, accumulate: bool) -> bool {
-        let Weight::BF16 { w: wb, n, k } = w else { return false };
-        let (first, count) = rows;
-        let window = if first == 0 && count == *n { WHOLE } else { (first as u64 * *k as u64 / 2, count as u64 * *k as u64 / 2) };
-        let dx_range = if dx_row0 == 0 { WHOLE } else { (dx_row0 as u64 * *k as u64, m as u64 * *k as u64) };
-        self.gemm.dx(
+        let Some((wb, window, mut prep)) = self.library_weight(w, rows) else { return false };
+        let k = w.k();
+        let dx_range = if dx_row0 == 0 { WHOLE } else { (dx_row0 as u64 * k as u64, m as u64 * k as u64) };
+        let ok = self.gemm.dx(
             &self.gpu,
-            s,
+            &mut prep,
             &library::Operand { buf: dy, range: WHOLE },
-            &library::Operand { buf: wb, range: window },
+            &library::Operand { buf: &wb, range: window },
             &library::Operand { buf: dx, range: dx_range },
             m,
-            count,
-            *k,
+            rows.1,
+            k,
             accumulate,
-        )
+        );
+        if ok {
+            s.append(&mut prep);
+        }
+        ok
     }
 
     pub fn caps(&self) -> &DeviceCaps {

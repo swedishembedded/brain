@@ -50,8 +50,14 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 
+use gpu_core::provider::library::{self, F32Product};
 use gpu_core::select::{Dtype, DECODE_REGIME_MAX_ROWS, I8_GEMV_MAX_ROWS};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+
+/// A library operand bound whole.
+fn whole(buf: &DeviceBuffer) -> library::Operand<'_> {
+    library::Operand { buf, range: (0, 0) }
+}
 use paramstore::{ParamStore, Role};
 
 use audio::conv::ConvKernels;
@@ -1782,6 +1788,15 @@ impl Qwen35 {
         let g = &self.gpu;
         let a = format!("{wname}.lora_a");
         let bnm = format!("{wname}.lora_b");
+        // mid = x A^t, then y += (alpha/r) mid B^t accumulated by the GEMM itself.
+        let tg = self.ops.tensor_gemm();
+        let mut lib = Vec::new();
+        let ok = tg.gemm_f32(g, &mut lib, &whole(x), &whole(self.w(&a)), &whole(&self.lora_a), F32Product { m, n: r, k, trans_a: false, trans_b: true, alpha: 1.0, beta: 0.0 })
+            && tg.gemm_f32(g, &mut lib, &whole(&self.lora_a), &whole(self.w(&bnm)), &whole(y), F32Product { m, n: nout, k: r, trans_a: false, trans_b: true, alpha: scale, beta: 1.0 });
+        if ok {
+            s.append(&mut lib);
+            return;
+        }
         s.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
         s.push(g.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
         s.push(g.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
@@ -1816,6 +1831,13 @@ impl Qwen35 {
             }
         }
         members.iter().map(|(w, _)| reads_float_acts(w)).collect()
+    }
+
+    /// Which arithmetic the bf16/NF4-weight GEMMs and the LoRA products of this
+    /// build run: the vendor library's tensor cores, or the fp32 kernels (and
+    /// why). Decided once from the device and [`TrainOpts::gemm_precision`].
+    pub fn gemm_path(&self) -> &library::GemmPath {
+        self.ops.gemm_path()
     }
 
     /// The dtype leaf `name` actually landed at after
@@ -1917,6 +1939,9 @@ impl Qwen35 {
                 self.base_dx(steps, d_out, wname, dx, m, k, nout, acc);
                 let a = format!("{wname}.lora_a");
                 let bnm = format!("{wname}.lora_b");
+                if self.lora_bwd_gemm(steps, d_out, x, &a, &bnm, dx, (m, k, nout, r), scale) {
+                    return;
+                }
                 // a = (alpha/r)*(x*A^t)  -> gB += d_out^t*a
                 steps.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
                 steps.push(g.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
@@ -1934,6 +1959,33 @@ impl Qwen35 {
                 self.base_dx(steps, d_out, wname, dx, m, k, nout, acc);
             }
         }
+    }
+
+    /// The LoRA backward of one linear as library GEMMs (see [`Self::proj_bwd`]
+    /// for the maths): `lora_a = (alpha/r) x A^t`, `gB += d_out^t lora_a`,
+    /// `lora_da = (alpha/r) d_out B`, `gA += lora_da^t x` and
+    /// `dx += lora_da A`, each one product with the scale folded into its
+    /// alpha and the accumulations into beta. `false` (nothing pushed) when the
+    /// device runs the fp32 kernels, which `proj_bwd` then dispatches instead.
+    #[allow(clippy::too_many_arguments)]
+    fn lora_bwd_gemm(&self, steps: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, a: &str, bnm: &str, dx: &DeviceBuffer, dims: (u32, u32, u32, u32), scale: f32) -> bool {
+        let (m, k, nout, r) = dims;
+        let tg = self.ops.tensor_gemm();
+        if !tg.is_active() {
+            return false;
+        }
+        let g = &self.gpu;
+        let p = |m, n, k, trans_a, trans_b, alpha, beta| F32Product { m, n, k, trans_a, trans_b, alpha, beta };
+        let mut lib = Vec::new();
+        let ok = tg.gemm_f32(g, &mut lib, &whole(x), &whole(self.w(a)), &whole(&self.lora_a), p(m, r, k, false, true, scale, 0.0))
+            && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(&self.lora_a), &whole(self.g(bnm)), p(nout, r, m, true, false, 1.0, 1.0))
+            && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(self.w(bnm)), &whole(&self.lora_da), p(m, r, nout, false, false, scale, 0.0))
+            && tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(x), &whole(self.g(a)), p(r, k, m, true, false, 1.0, 1.0))
+            && tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(self.w(a)), &whole(dx), p(m, k, r, false, false, 1.0, 1.0));
+        if ok {
+            steps.append(&mut lib);
+        }
+        ok
     }
 
     /// `dx (+)= d_out * W` through the tier weight `wname` is held at: the 12
