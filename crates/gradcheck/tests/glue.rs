@@ -706,17 +706,31 @@ fn glue_fd_pinball_grad_w() {
     // N=3, H=4, Q=5 (tiny()'s own quantile count), LCG pred/tgt in [-1,1],
     // w in [0.25, 2], scale = 0.7. Global gradcheck tolerances (playbook
     // §3): h = 5e-3, atol = 4e-3, rtol = 8e-2 - NEVER loosened. Pinball's
-    // derivative is piecewise-constant with a kink exactly at pred==tgt;
-    // LCG-drawn pred/tgt land off that kink with probability 1, so the FD
-    // approximation is not degraded by it (unlike a naive grid sweep would
-    // risk).
+    // derivative is piecewise-constant with a kink exactly at pred==tgt, and
+    // a central difference whose step crosses the kink measures a slope the
+    // analytic gradient is right not to have. A random draw lands within
+    // h*|v| of a kink in a few percent of runs (60 elements), so the draw is
+    // rejected until every element stays on one side of its kink for both
+    // probe directions: the check is then exact for any seed.
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, hh, q) = (3usize, 4usize, 5usize);
     let total = n * hh * q;
     let scale = 0.7f32;
+    let h = 5e-3f32;
     let mut st = Lcg::random();
-    let pred = st.vec(total);
-    let tgt = st.vec(n * hh);
+    let dirs = [st.vec(total), st.vec(total)];
+    let (pred, tgt) = loop {
+        let pred = st.vec(total);
+        let tgt = st.vec(n * hh);
+        // pred[i] is compared with tgt[i / q] (the kernel's [n, h, q] layout).
+        let clear_of_kink = (0..total).all(|i| {
+            let reach = h * dirs[0][i].abs().max(dirs[1][i].abs());
+            (pred[i] - tgt[i / q]).abs() > 1.5 * reach
+        });
+        if clear_of_kink {
+            break (pred, tgt);
+        }
+    };
     let levels: Vec<f32> = (0..q).map(|i| (i as f32 + 1.0) / (q as f32 + 1.0)).collect(); // (0,1) exclusive, distinct
     // w in [0.25, 2): positive, bounded away from 0.
     let w: Vec<f32> = (0..n).map(|_| 1.125 + 0.875 * st.signed()).collect();
@@ -731,11 +745,9 @@ fn glue_fd_pinball_grad_w() {
     let analytic = k_pinball_grad_w(&gpu, &pred, &tgt, &levels, &w, hh, scale);
     assert_eq!(analytic.len(), total);
 
-    let h = 5e-3f32;
     let (atol, rtol) = (4e-3f32, 8e-2f32);
-    for dir in 0..2 {
-        let v = st.vec(total);
-        let a = dot(&analytic, &v);
+    for (dir, v) in dirs.iter().enumerate() {
+        let a = dot(&analytic, v);
 
         let plus: Vec<f32> = pred.iter().zip(v.iter()).map(|(&p, &vi)| p + h * vi).collect();
         let minus: Vec<f32> = pred.iter().zip(v.iter()).map(|(&p, &vi)| p - h * vi).collect();
