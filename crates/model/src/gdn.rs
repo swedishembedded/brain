@@ -689,6 +689,20 @@ fn native_chunk_loop(_g: &Gpu, _bufs: &[&DeviceBuffer; 10], _bh: u32, _c: u32, _
     None
 }
 
+/// [`gpu_core::provider::cuda::gdn_chunk_loop_train_step`] where a native
+/// backend exists at all; `None` (the portable chunk loop) on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn native_chunk_loop_train(g: &Gpu, bufs: &[&DeviceBuffer; 12], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_loop_train_step(g, bufs, bh, c, dk, dv, n_chunks, scale)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn native_chunk_loop_train(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32) -> Option<Step> {
+    None
+}
+
 /// Largest chunk `gdn_ut_fwd.wgsl` serves: one thread per column and a packed
 /// triangle sized for 64 rows (its header derives both).
 const GDN_UT_FWD_MAX_CHUNK: u32 = 64;
@@ -1111,6 +1125,31 @@ pub fn gdn_chunk_fwd_train(
         intra_scores: scratch.intra_scores,
     };
     let mut steps = gdn_chunk_fwd_prefix(g, ids, shape, query, key, value, raw_g, beta, &whole);
+
+    // ---- step 10 in one launch, where the device has a kernel for it ----
+    // It reads `initial_state`, writes `final_state` and records both histories
+    // itself: the state copy, the snapshots and the eleven dispatches per chunk
+    // below are what it replaces.
+    if ids.fast.is_some() && use_fast_kernels(g) {
+        let bufs = [
+            key,
+            query,
+            scratch.w,
+            scratch.u,
+            scratch.g_cs,
+            scratch.exp_g_cs,
+            scratch.intra_scores,
+            initial_state,
+            out,
+            final_state,
+            scratch.state_history,
+            scratch.decay_scale_hist,
+        ];
+        if let Some(step) = native_chunk_loop_train(g, &bufs, bh, c, dk, dv, n_chunks, scale) {
+            steps.push(step);
+            return steps;
+        }
+    }
 
     // ---- step 10: sequential across-chunk loop, saving every chunk's version ----
     steps.push(g.step(ids.region_copy, &[initial_state, final_state], &[1, bh * dk * dv, bh * dk * dv, 0], bh * dk * dv));

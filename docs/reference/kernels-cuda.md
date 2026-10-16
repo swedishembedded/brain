@@ -74,6 +74,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `bn_dbeta_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dbeta` | BatchNorm beta gradient (dbeta += sum dy) of an NCHW channel: one 512-thread block per channel |
 | `cast_f32_bf16` | Elementwise | F32 | tuned | 5.0 | `brain_cast_f32_bf16` | fp32 to packed bf16, round-to-nearest-even, four elements a thread with 16-byte loads: the activation operand of a tensor-core GEMM |
 | `nf4_dequant_bf16` | Elementwise | NF4 | tuned | 5.0 | `brain_nf4_dequant_bf16` | an NF4 weight window (eight codes a word, one scale per 32 weights) decoded to a bf16 scratch for a tensor-core GEMM, a thread per packed word |
+| `gdn_chunk_loop_train_f32` | GatedDeltaChunkLoop | F32 | tuned | 5.0 | `brain_gdn_chunk_loop_train_f32` | gdn_chunk_loop_f32 plus the training histories (the state entering every chunk and each row's decay scale) the backward sweep reads, in the same single launch |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 

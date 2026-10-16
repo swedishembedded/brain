@@ -1041,6 +1041,23 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         src: include_str!("../cu/nf4_dequant_bf16.cu"),
     },
+    CudaKernel {
+        name: "gdn_chunk_loop_train_f32",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        // Asked for by name: the training forward is the same operator and tier as
+        // the inference loop, which `find` keeps resolving.
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_chunk_loop_train_f32",
+        what: "gdn_chunk_loop_f32 plus the training histories (the state entering every chunk and each row's decay scale) the backward sweep reads, in the same single launch",
+        reported: "native:gdn_chunk_loop_train_f32",
+        block_dim: 128,
+        tile: (64, 32),
+        shared_bytes: (128 * 32 + 64 * 32 + 32 * 129) * 4,
+        src: include_str!("../cu/gdn_chunk_loop_f32.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of

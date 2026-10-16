@@ -104,6 +104,24 @@ const GDN_CHUNK_LOOP_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// [`GDN_CHUNK_LOOP_BINDINGS`] followed by the two history buffers the training
+/// entry writes.
+const GDN_CHUNK_LOOP_TRAIN_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
 /// Elements of K per weight scale the int8 tensor-core kernel folds at (one
 /// `k32` MMA). A layout with a different group is declined, not approximated.
 const I8_MMA_GROUP: u32 = 32;
@@ -240,6 +258,31 @@ pub fn gdn_chunk_loop_step(
     let kernel = kernels_cuda::find(select::Op::GatedDeltaChunkLoop, Dtype::F32, cc)?;
     let id = gpu.native_kernel(kernel, GDN_CHUNK_LOOP_BINDINGS)?;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 10], &[bh, c_len, dk, dv, n_chunks, scale.to_bits()], bh * GDN_CHUNK_LOOP_SPLITS)
+}
+
+/// [`gdn_chunk_loop_step`] for the training forward: the same single-launch
+/// recurrence that also writes `state_hist` (`[n_chunks + 1, bh, dk, dv]`, the
+/// state entering each chunk and the final one) and `decay_hist`
+/// (`[n_chunks, bh, c_len]`, each row's decay scale), which the backward sweep
+/// reads. `bufs` is the inference order followed by those two.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_loop_train_step(
+    gpu: &crate::Gpu,
+    bufs: &[&backend_api::DeviceBuffer; 12],
+    bh: u32,
+    c_len: u32,
+    dk: u32,
+    dv: u32,
+    n_chunks: u32,
+    scale: f32,
+) -> Option<crate::Step> {
+    if dk != 128 || dv != 128 || c_len == 0 || c_len > 64 || super::disabled_providers().iter().any(|d| d == "cuda") {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_loop_train_f32").filter(|k| k.min_cc <= cc)?;
+    let id = gpu.native_kernel(kernel, GDN_CHUNK_LOOP_TRAIN_BINDINGS)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks, scale.to_bits()], bh * GDN_CHUNK_LOOP_SPLITS)
 }
 
 /// The native tensor-core paged flash-prefill step for `head_dim = 256`, or

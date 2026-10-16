@@ -50,17 +50,26 @@
 #define APAD (MAXC + 1)       // staged A tile row stride (rows of the 64-row GEMMs)
 #define APAD4 (DK + 1)        // ... and of the 128-row state update
 
-extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_loop_f32(const unsigned int* params,
-                                                                               const float* key,
-                                                                               const float* query,
-                                                                               const float* w,
-                                                                               const float* u,
-                                                                               const float* g_cs,
-                                                                               const float* exp_g_cs,
-                                                                               const float* intra,
-                                                                               const float* initial_state,
-                                                                               float* out,
-                                                                               float* final_state) {
+// The loop body, shared by the inference entry and the training entry. With
+// TRAIN the kernel also records what the backward sweep reads and the host walk
+// used to snapshot with one dispatch per chunk: `state_hist[ci]` is the state
+// ENTERING chunk ci (`state_hist[n_chunks]` the final state), `decay_hist` the
+// per-row decay scale exp(g_last - g_cs) of every chunk. The recorded values
+// are the ones the walk's `gdn_decay_scale` and `splice_add` produce.
+template <bool TRAIN>
+__device__ __forceinline__ void brain_gdn_chunk_loop_body(const unsigned int* params,
+                                                          const float* key,
+                                                          const float* query,
+                                                          const float* w,
+                                                          const float* u,
+                                                          const float* g_cs,
+                                                          const float* exp_g_cs,
+                                                          const float* intra,
+                                                          const float* initial_state,
+                                                          float* out,
+                                                          float* final_state,
+                                                          float* state_hist,
+                                                          float* decay_hist) {
     const unsigned int bh = params[0];
     const unsigned int C = params[1];
     const unsigned int n_chunks = params[4];
@@ -94,6 +103,19 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_loop_f32(c
         const unsigned long long off_cc = row_base * C;
 
         float acc[4][4];
+
+        if (TRAIN) {
+            // The state entering this chunk, this block's slice; and, once per head,
+            // the chunk's decay scales.
+            for (unsigned int i = tid; i < DK * SLICE; i += THREADS) {
+                const unsigned int k = i / SLICE, j = i % SLICE;
+                state_hist[(((unsigned long long)ci * bh + bhi) * DK + k) * DV + j0 + j] = st[i];
+            }
+            if (j0 == 0) {
+                const float gl = g_cs[off_g + C - 1];
+                for (unsigned int r = tid; r < C; r += THREADS) { decay_hist[off_g + r] = expf(gl - g_cs[off_g + r]); }
+            }
+        }
 
         // ---- v_new = u - w @ state   (rows 4*ty .. +3 of this block's 64 x 32 tile)
 #pragma unroll
@@ -238,5 +260,21 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_loop_f32(c
     for (unsigned int i = tid; i < DK * SLICE; i += THREADS) {
         const unsigned int k = i / SLICE, j = i % SLICE;
         final_state[((unsigned long long)bhi * DK + k) * DV + j0 + j] = st[i];
+        if (TRAIN) { state_hist[(((unsigned long long)n_chunks * bh + bhi) * DK + k) * DV + j0 + j] = st[i]; }
     }
+}
+
+extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_loop_f32(const unsigned int* params, const float* key, const float* query,
+                                                                               const float* w, const float* u, const float* g_cs, const float* exp_g_cs,
+                                                                               const float* intra, const float* initial_state, float* out, float* final_state) {
+    brain_gdn_chunk_loop_body<false>(params, key, query, w, u, g_cs, exp_g_cs, intra, initial_state, out, final_state, nullptr, nullptr);
+}
+
+// Training form: the same loop plus the state and decay-scale histories
+// (`state_hist` [n_chunks + 1, bh, dk, dv], `decay_hist` [n_chunks, bh, c_len]).
+extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_loop_train_f32(const unsigned int* params, const float* key, const float* query,
+                                                                                     const float* w, const float* u, const float* g_cs, const float* exp_g_cs,
+                                                                                     const float* intra, const float* initial_state, float* out, float* final_state,
+                                                                                     float* state_hist, float* decay_hist) {
+    brain_gdn_chunk_loop_body<true>(params, key, query, w, u, g_cs, exp_g_cs, intra, initial_state, out, final_state, state_hist, decay_hist);
 }
