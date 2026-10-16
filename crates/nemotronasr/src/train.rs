@@ -276,7 +276,7 @@ impl Transducer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data::rng::Rng;
+    use data::rng::{random_seed, Rng};
     use model::{Batch, Model};
 
     #[test]
@@ -288,7 +288,7 @@ mod tests {
         let init = Transducer::init(&tcfg, 7);
         let m = Transducer::new_from(tcfg.clone(), &init);
         let (t, dh) = (tcfg.t_frames as usize, tcfg.cfg.decoder_hidden as usize);
-        let mut rng = Rng::new(9);
+        let mut rng = Rng::new(random_seed());
         let enc: Vec<f32> = (0..t * dh).map(|_| (rng.next_f32() - 0.5) * 1.0).collect();
         let labels = vec![1u32, 3u32]; // valid labels (< vocab, != blank)
         m.set_batch(Batch::Tensor { tokens: Some(&labels), inputs: &enc, targets: &[] });
@@ -307,7 +307,7 @@ mod tests {
         let init = AcousticModel::init(&acfg, 5);
         let m = AcousticModel::new(acfg.clone(), 1, acfg.t_frames, &init);
         let (t, c) = (acfg.t_frames as usize, acfg.cfg.hidden as usize);
-        let mut rng = Rng::new(8);
+        let mut rng = Rng::new(random_seed());
         let feats: Vec<f32> = (0..t * c).map(|_| (rng.next_f32() - 0.5) * 0.8).collect();
         let labels = vec![1u32, 3u32];
         m.set_batch(Batch::Tensor { tokens: Some(&labels), inputs: &feats, targets: &[] });

@@ -92,7 +92,7 @@ pub fn lstm_gates_bwd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data::rng::Rng;
+    use data::rng::{random_seed, Rng};
     use gpu_core::f;
 
     /// Pipeline for the on-device FF fwd/bwd gradcheck (proves the device training
@@ -114,7 +114,7 @@ mod tests {
     fn device_ff_backward_matches_finite_diff() {
         let g = gpu_core::testgpu::dev(ff_bwd_pipelines());
         let (t, c, ffn) = (4u32, 6u32, 10u32);
-        let mut rng = Rng::new(13);
+        let mut rng = Rng::new(random_seed());
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.6).collect::<Vec<f32>>();
         let (xh, w1h, w2h) = (r((t * c) as usize), r((ffn * c) as usize), r((c * ffn) as usize));
         let w1 = g.storage_init("w1", &w1h);
@@ -179,7 +179,7 @@ mod tests {
         let (outer, d, inner) = (2u32, 3u32, 4u32);
         let nx = (outer * 2 * d * inner) as usize;
         let ny = (outer * d * inner) as usize;
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::new(random_seed());
         let xh: Vec<f32> = (0..nx).map(|_| (rng.next_f32() - 0.5) * 2.0).collect();
 
         let fwd = |xin: &[f32]| -> Vec<f32> {
@@ -214,7 +214,7 @@ mod tests {
         let g = gpu_core::testgpu::dev(nemotron_pipelines());
         let (rows, q, p) = (2u32, 4u32, 7u32); // p = 2*L-1 style
         let n = (rows * q * p) as usize;
-        let mut rng = Rng::new(5);
+        let mut rng = Rng::new(random_seed());
         let xh: Vec<f32> = (0..n).map(|_| rng.next_f32() - 0.5).collect();
 
         // forward vs oracle
@@ -229,7 +229,7 @@ mod tests {
         assert!(d < 1e-6, "rel_shift forward vs oracle maxdiff {d}");
 
         // backward = transpose: dx from dy (loss = sum(w·out)) must match FD
-        let mut rng2 = Rng::new(9);
+        let mut rng2 = Rng::new(random_seed());
         let dyh: Vec<f32> = (0..n).map(|_| rng2.next_f32() - 0.5).collect();
         let dy = g.storage_init("dy", &dyh);
         let dx = g.storage_init("dx", &vec![0.0f32; n]);
@@ -256,7 +256,7 @@ mod tests {
         let (rows, h) = (2u32, 3u32);
         let npre = (rows * 4 * h) as usize;
         let nc = (rows * h) as usize;
-        let mut rng = Rng::new(11);
+        let mut rng = Rng::new(random_seed());
         let pre_h: Vec<f32> = (0..npre).map(|_| (rng.next_f32() - 0.5) * 2.0).collect();
         let cprev_h: Vec<f32> = (0..nc).map(|_| (rng.next_f32() - 0.5) * 2.0).collect();
 

@@ -597,7 +597,7 @@ impl Encoder {
 mod tests {
     use std::collections::HashMap;
 
-    use data::rng::Lcg;
+    use data::rng::{random_seed, Lcg};
 
     use crate::config::NemotronConfig;
     use crate::encoder::{encoder_pipelines, Encoder};
@@ -633,7 +633,7 @@ mod tests {
     }
 
     fn tiny_weights(cfg: &NemotronConfig) -> HashMap<String, Vec<f32>> {
-        let mut r = Lcg::new(0xB5AD_4ECE_DA1C_E2A9);
+        let mut r = Lcg::new(random_seed());
         let (c, ch, ffn) = (cfg.hidden as usize, cfg.subsampling_channels as usize, cfg.intermediate as usize);
         let (dh, np, pi, v) = (cfg.decoder_hidden as usize, cfg.num_prompts as usize, cfg.prompt_intermediate as usize, cfg.vocab as usize);
         let k = cfg.conv_kernel as usize;
@@ -708,7 +708,7 @@ mod tests {
         // 521 mel frames -> 66 subsampled rows: an odd length that exercises the
         // partial-chunk flush, the full [-3,59] band-offset range AND K/V trimming
         let t = 521usize;
-        let mut r = Lcg::new(0x5EED);
+        let mut r = Lcg::new(random_seed());
         let mel = r.vec_scaled(t * nm, 1.0);
 
         let (pooler, valid) = enc.encode(&mel, t as u32, t as u32, 0);
@@ -756,7 +756,7 @@ mod tests {
         let enc = Encoder::new(g, cfg, &w);
         let nm = cfg.num_mel_bins as usize;
 
-        let mut r = Lcg::new(0xABCD);
+        let mut r = Lcg::new(random_seed());
         let mel_a = r.vec_scaled(96 * nm, 1.0);
         let mel_b = r.vec_scaled(57 * nm, 1.0);
 

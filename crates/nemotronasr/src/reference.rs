@@ -1471,7 +1471,7 @@ mod tests {
 
     #[test]
     fn full_encoder_backward_matches_finite_diff() {
-        use data::rng::Rng;
+        use data::rng::{random_seed, Rng};
         // tiny 2-layer encoder + projectors; gradcheck d_sub end-to-end.
         let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
         cfg.hidden = 8;
@@ -1483,7 +1483,7 @@ mod tests {
         cfg.prompt_intermediate = 12;
         cfg.decoder_hidden = 6;
         let (c, ffn, k, np, pi, dh, t, valid) = (8usize, 16usize, 3usize, 4usize, 12usize, 6usize, 6usize, 6usize);
-        let mut rng = Rng::new(51);
+        let mut rng = Rng::new(random_seed());
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.5).collect::<Vec<f32>>();
         let mut w: W = W::new();
         for b in 0..2u32 {
@@ -1547,7 +1547,7 @@ mod tests {
 
     #[test]
     fn conformer_block_backward_matches_finite_diff() {
-        use data::rng::Rng;
+        use data::rng::{random_seed, Rng};
         // full tiny Conformer block: c=8, heads=2, ffn=16, k=3, T=6.
         let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
         cfg.hidden = 8;
@@ -1555,7 +1555,7 @@ mod tests {
         cfg.intermediate = 16;
         cfg.conv_kernel = 3;
         let (c, ffn, t, valid) = (8usize, 16usize, 6usize, 6usize);
-        let mut rng = Rng::new(41);
+        let mut rng = Rng::new(random_seed());
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.5).collect::<Vec<f32>>();
         let mut w: W = W::new();
         let pre = "encoder.layers.0";
@@ -1613,12 +1613,12 @@ mod tests {
 
     #[test]
     fn conv_module_backward_matches_finite_diff() {
-        use data::rng::Rng;
+        use data::rng::{random_seed, Rng};
         let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
         cfg.hidden = 8;
         cfg.conv_kernel = 3;
         let (c, k, t, valid) = (8usize, 3usize, 6usize, 6usize);
-        let mut rng = Rng::new(31);
+        let mut rng = Rng::new(random_seed());
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.6).collect::<Vec<f32>>();
         let mut w: W = W::new();
         w.insert("conv.pointwise_conv1.weight".into(), r(2 * c * c));
@@ -1661,13 +1661,13 @@ mod tests {
 
     #[test]
     fn rel_pos_attention_backward_matches_finite_diff() {
-        use data::rng::Rng;
+        use data::rng::{random_seed, Rng};
         // tiny synthetic conformer attention: c=8, heads=2, hd=4, T=6 (band covers all)
         let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
         cfg.hidden = 8;
         cfg.n_heads = 2;
         let (c, t, valid) = (8usize, 6usize, 6usize);
-        let mut rng = Rng::new(21);
+        let mut rng = Rng::new(random_seed());
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.6).collect::<Vec<f32>>();
         let mut w: W = W::new();
         for leaf in ["q_proj.weight", "k_proj.weight", "v_proj.weight", "relative_k_proj.weight", "o_proj.weight"] {
@@ -1716,7 +1716,7 @@ mod tests {
 
     #[test]
     fn predictor_bptt_matches_finite_diff() {
-        use data::rng::Rng;
+        use data::rng::{random_seed, Rng};
         // tiny 2-layer LSTM predictor: dh=4, 3 tokens, vocab=6
         let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
         cfg.decoder_hidden = 4;
@@ -1724,7 +1724,7 @@ mod tests {
         cfg.vocab = 6;
         let (dh, vocab) = (4usize, 6usize);
         let tokens = vec![1u32, 3u32, 5u32];
-        let mut rng = Rng::new(71);
+        let mut rng = Rng::new(random_seed());
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.5).collect::<Vec<f32>>();
         let mut w: W = W::new();
         w.insert("decoder.embedding.weight".into(), r(vocab * dh));
@@ -1757,12 +1757,12 @@ mod tests {
 
     #[test]
     fn rnnt_loss_gradient_matches_finite_diff() {
-        use data::rng::Rng;
+        use data::rng::{random_seed, Rng};
         // tiny lattice: T=4 frames, U=2 labels, V=5 (blank=4)
         let (t_frames, targets, vocab, blank) = (4usize, vec![1u32, 3u32], 5usize, 4usize);
         let up1 = targets.len() + 1;
         let n = t_frames * up1 * vocab;
-        let mut rng = Rng::new(61);
+        let mut rng = Rng::new(random_seed());
         let logits: Vec<f32> = (0..n).map(|_| (rng.next_f32() - 0.5) * 2.0).collect();
 
         let (loss, d) = rnnt_loss(&logits, t_frames, &targets, blank, vocab);
@@ -1781,12 +1781,12 @@ mod tests {
     fn joint_backward_matches_finite_diff() {
         // Tiny synthetic joint network (no checkpoint needed): gradcheck the
         // transducer joint backward (relu + head matmul) vs central differences.
-        use data::rng::Rng;
+        use data::rng::{random_seed, Rng};
         let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
         cfg.decoder_hidden = 6;
         cfg.vocab = 5;
         let (dh, vocab) = (cfg.decoder_hidden as usize, cfg.vocab as usize);
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::new(random_seed());
         let mut r = |n: usize| (0..n).map(|_| rng.next_f32() - 0.5).collect::<Vec<f32>>();
         let (enc, dec, head, bias) = (r(dh), r(dh), r(vocab * dh), r(vocab));
         let dlog: Vec<f32> = r(vocab); // arbitrary upstream grad (loss = Σ dlog·logits)
