@@ -156,3 +156,41 @@ Full-parameter 27B training (does not fit this allocation); tensor/pipeline para
 and NCCL (one card); Vulkan/wgpu 27B training (2 GiB buffer clamp; CUDA is the lane);
 training the MTP head or the vision tower; a value model; asynchronous off-policy
 rollout/training overlap.
+
+## Retirement candidates (remove once the replacement is proven by ablation)
+
+Each item is removed in its own commit, after a grep of its consumers and an
+ablation or parity run showing the replacement is no worse. Nothing here is
+deleted yet.
+
+- fp32 resident qwen35 trainer path (108 GB base, all activations kept, TxT scores,
+  n x V logits): superseded by the tiered recompute trainer. Keep only while a
+  parity test needs it as a reference.
+- Full-logits cross-entropy in qwen35: superseded by chunked head CE.
+- Pre-fix GRPO behaviour: z-score advantages, length-biased loss, dropped
+  zero-variance groups, O(T^2) rollouts, the loss probe that consumes rows.
+- `MOE_SKIP_GPU_TESTS` silent early return in the `bf16_train` tests.
+- qwen3-only adapter bank: fold into the generic LoRA layer.
+
+## Throughput plan (measured 19-20 tok/s, untuned)
+
+Budget: about 216 GFLOP per trained token (6 x 27e9, plus recompute). At 30-40 %
+of GH200 bf16 peak that is on the order of 1-2K tok/s, so the current number is
+far below the hardware. Profile first (`BRAIN_PROFILE=1`, per-kernel device time per
+step), then in expected order of payoff:
+
+1. Tensor-core GEMMs for the bf16 tier and for NF4 dequant-in-registers GEMMs
+   (check what the generated kernels use today).
+2. Tensor-core flash attention at head_dim 256 (forward and backward).
+3. Parallel-scan or chunked GDN forward/backward instead of a sequential
+   per-token recurrence.
+4. Fewer launches: fused RMSNorm+residual, fused SwiGLU, fused LoRA A/B GEMM,
+   CUDA graphs per layer.
+5. Remove host syncs and overlap the FP8 stream, dequantise and compute on separate
+   streams; keep the adapter and optimizer state resident.
+6. Pack several short rows into one segment (token-budget batching) so GEMMs are
+   large; raise recompute granularity only where memory allows.
+7. Cheaper recompute: save the cheap activations, recompute only attention/GDN;
+   FP8 activations for layer-boundary residuals.
+
+Each step needs a recorded before/after tok/s on the same workload.
