@@ -1,1 +1,2 @@
+crates/perf/src/lib.rs	list:standard#3=0	positional	world: lists the workload shapes, which the seed does not change
 crates/perf/src/targets.rs	fidelity_requests:seed=0x5EED	default	world: fixed correctness-probe requests; every phase of a two-way self-check must submit byte-identical invocations

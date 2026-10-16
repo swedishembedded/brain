@@ -1,5 +1,5 @@
 crates/sdk/src/control.rs	-:EVAL_SEEDS=1_000_000	const	world: the frozen evaluation episodes
 crates/sdk/src/control.rs	ControlPipeline::gauge:Rng::new(0x6a11_6e00)	rng	world: gauging stream set aside from training by design
-crates/sdk/src/control.rs	ControlPipeline::gauge:episode_seed=0x4000_0000	default	salt: block of episode seeds no rollout draws
-crates/sdk/src/control.rs	ControlPipelineBuilder::load:episode_seed=0	default	world: placeholder overwritten for every episode
+crates/sdk/src/control.rs	ControlPipeline::gauge:episode_seed=0x4000_0000	default	world: a block of gauge worlds disjoint from the rollout worlds and EVAL_SEEDS, so gauges compare
+crates/sdk/src/control.rs	ControlPipelineBuilder::load:episode_seed=0	default	todo: B-1 the rollout world counter starts at 0 whatever the run seed
 crates/sdk/src/text.rs	Engine::generate_rows:Rng::new(0)	rng	greedy: argmax decode never consults the RNG

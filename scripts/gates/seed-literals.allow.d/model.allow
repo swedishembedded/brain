@@ -1,1 +1,2 @@
 crates/model/src/lora.rs	LoraCfg::loaded:seed=0	default	frozen: the factors are read from the adapter file, so the init seed is never consulted
+crates/model/src/serve.rs	Scheduler::submit:submit_sampled#2=0	positional	greedy: SampleParams::greedy never consults the RNG

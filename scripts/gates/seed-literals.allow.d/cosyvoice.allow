@@ -1,0 +1,1 @@
+crates/cosyvoice/src/torch_rng.rs	randn_seed0:Mt19937::new(0)	rng	world: the reference model draws its CFM noise buffer under seed 0 at construction and parity requires the same buffer

@@ -1,0 +1,3 @@
+brain-py/brain_py/client.py	backtest:seed=0	python-default	todo: B-7 an unseeded call samples at seed 0 instead of letting the server draw
+brain-py/brain_py/client.py	forecast:seed=0	python-default	todo: B-7 an unseeded call samples at seed 0 instead of letting the server draw
+brain-py/brain_py/examples/porcupine_trucks.py	main:seed=100	python-default	todo: B-19 the example pins one seed per image

@@ -1,1 +1,3 @@
+samples/decision/rubiks/src/main.rs	net_main:measure_how#3=0x5014ED	positional	world: the evaluation scrambles are one fixed cube set so nets compare
+samples/decision/rubiks/src/main.rs	net_main:measure_with#3=0x5014ED	positional	world: the evaluation scrambles are one fixed cube set so nets compare
 samples/decision/rubiks/src/main.rs	net_main:seed=7	default	greedy: rollout at temperature 0, its generator is never consulted

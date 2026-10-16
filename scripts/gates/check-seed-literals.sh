@@ -10,10 +10,12 @@
 # Seed-literal ratchet (`make check/seed-literals`).
 #
 # Rule: every default seed is random. A seed that is a literal in the source
-# (scripts/gates/seed-literals.py is the detector: Rust defaults, constants and
-# RNG constructors, Python `add_argument("--seed", default=N)`, module-level
-# `SEED = N` and `torch.manual_seed(N)`-style calls, Makefile
-# `SEED ?= N`) is legitimate only as one of
+# (scripts/gates/seed-literals.py is the detector: Rust defaults, constants,
+# RNG constructors, functions that return a literal seed, literals passed where
+# a callee takes a seed and loops over literal seeds; Python flag defaults,
+# parameters, keywords, dict entries and RNG calls; shell and Makefile flags and
+# defaults; fenced `--seed N` examples in Markdown that are not framed as the
+# way to reproduce something) is legitimate only as one of
 #   salt:        mixed into a caller's seed to derive an independent stream
 #   world:       a constant of the problem (evaluation episodes, probe inputs)
 #   frozen:      the seed of an artifact that is read back, not drawn
@@ -29,7 +31,7 @@
 # sample directory so parallel changes never edit the same file, one
 # `path<TAB>symbol<TAB>kind<TAB>reason` per line. The group is
 # `crates/<c>/...` -> <c>, `samples/<a>/<b>/...` -> samples-<a>-<b>, any other
-# `<dir>/...` -> <dir>, and a top-level file -> root. The gate fails on
+# `<dir>/...` -> <dir> (a leading dot is dropped), and a top-level file -> root. The gate fails on
 #   (a) a literal that is not listed - draw a random seed, print it, record it;
 #   (b) a listed literal that no longer exists - delete the entry (the list
 #       only shrinks);
@@ -37,30 +39,40 @@
 #
 # Test code is held to a lighter rule: a literal seed in a test needs a
 # `// seed: <reason>` (`# seed:` in Python) on its line or the line above,
-# because a fixed seed in a test must be there for a reason. That is reported
+# because a fixed seed in a test must be there for a reason. A reason that
+# starts with "any" says the opposite and does not count. That is reported
 # always and enforced with --tests (`make check/seed-literals/tests`).
 #
 # Usage: scripts/gates/check-seed-literals.sh [--root DIR] [--allow-dir DIR]
 #                                             [--tests] [--no-todo]
+#                                             [--positional-tests]
+#
+# --positional-tests also reports, without failing, the literals that tests
+# pass where a callee takes a seed.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 allow_dir="$here/seed-literals.allow.d"
 enforce_tests=0
 no_todo=0
+positional_tests=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
   --root) root="$2"; shift 2 ;;
   --allow-dir) allow_dir="$2"; shift 2 ;;
   --tests) enforce_tests=1; shift ;;
   --no-todo) no_todo=1; shift ;;
+  --positional-tests) positional_tests=1; shift ;;
   *) echo "check-seed-literals: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 
-hits="$(LC_ALL=C python3 "$here/seed-literals.py" --root "$root")" || exit 2
+detector_args=(--root "$root")
+[ "$positional_tests" -eq 1 ] && detector_args+=(--positional-tests)
+hits="$(LC_ALL=C python3 "$here/seed-literals.py" "${detector_args[@]}")" || exit 2
 actual="$(printf '%s\n' "$hits" | awk -F'\t' '$4 == "prod" { print $1 "\t" $2 "\t" $3 }' | LC_ALL=C sort)"
-bare_tests="$(printf '%s\n' "$hits" | awk -F'\t' '$4 == "test" && $5 == "bare" { print $1 "\t" $2 }' | LC_ALL=C sort)"
+bare_tests="$(printf '%s\n' "$hits" | awk -F'\t' '$4 == "test" && $5 == "bare" && $3 != "positional" { print $1 "\t" $2 }' | LC_ALL=C sort)"
+positional_rows="$(printf '%s\n' "$hits" | awk -F'\t' '$4 == "test" && $3 == "positional" { print $1 "\t" $2 }' | LC_ALL=C sort)"
 
 # file<TAB>path<TAB>symbol<TAB>kind<TAB>reason for every allowlist line.
 entries="$(for f in "$allow_dir"/*.allow; do
@@ -75,6 +87,7 @@ bad="$(printf '%s\n' "$entries" | awk -F'\t' '
     if (n == 1) return "root"
     if (a[1] == "crates") return a[2]
     if (a[1] == "samples" && n > 3) return "samples-" a[2] "-" a[3]
+    gsub(/^\./, "", a[1])
     return a[1]
   }
   NF == 0 { next }
@@ -121,6 +134,11 @@ if [ "$enforce_tests" -eq 1 ] && [ "$tests_bare" -gt 0 ]; then
   printf '%s\n' "$bare_tests" | awk -F'\t' '{ printf "  BARE: %s has %s\n", $1, $2 }'
   echo "  Use a random seed, or add \`// seed: <why this stream is needed>\` on the"
   echo "  line or the line above."
+fi
+
+if [ "$positional_tests" -eq 1 ]; then
+  echo "check-seed-literals: $(printf '%s\n' "$positional_rows" | grep -c .) literals passed as a seed in tests (report only):"
+  printf '%s\n' "$positional_rows" | awk -F'\t' '{ printf "  POSITIONAL: %s has %s\n", $1, $2 }'
 fi
 
 if [ "$fail" -eq 0 ]; then

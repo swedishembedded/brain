@@ -1,1 +1,2 @@
+samples/learning/reader/README.md	-:--seed=1	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one
 samples/learning/reader/src/corpus.rs	write:Rng::new(0xDEAD_BEEF)	rng	world: the noise lane payload is part of the corpus definition, fixed so a tool seed alone regenerates the same corpus

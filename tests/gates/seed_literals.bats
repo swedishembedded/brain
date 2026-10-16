@@ -149,3 +149,193 @@ PY
   gate --tests
   [ "$status" -eq 0 ]
 }
+
+@test "constructors of every RNG family are caught" {
+  cat >>"$TREE/crates/a/src/lib.rs" <<'RS'
+pub fn families() {
+    let _ = Mt19937::new(31);
+    let _ = StdRng::seed_from_u64(32);
+    let _ = ChaCha8Rng::seed_from_u64(33);
+    let _ = Philox4x32::new(34);
+}
+RS
+  gate
+  [ "$status" -ne 0 ]
+  for lit in "Mt19937::new(31)" "StdRng::seed_from_u64(32)" "ChaCha8Rng::seed_from_u64(33)" "Philox4x32::new(34)"; do
+    [[ "$output" == *"$lit"* ]] || { echo "missing $lit"; echo "$output"; return 1; }
+  done
+}
+
+@test "a seed hidden behind a zero-argument function or a serde default is caught" {
+  cat >>"$TREE/crates/a/src/lib.rs" <<'RS'
+fn unrecorded_seed() -> Seed {
+    Seed::new(41)
+}
+fn legacy() -> u64 {
+    42
+}
+fn draw() -> u64 {
+    random_seed()
+}
+pub struct Cfg {
+    #[serde(default = "legacy")]
+    pub seed: u64,
+}
+RS
+  gate
+  [ "$status" -ne 0 ]
+  for lit in "fn unrecorded_seed=41" "fn legacy=42"; do
+    [[ "$output" == *"$lit"* ]] || { echo "missing $lit"; echo "$output"; return 1; }
+  done
+  [[ "$output" != *"fn draw"* ]]
+}
+
+@test "a literal or a seedless constant passed where a callee takes a seed is caught" {
+  cat >>"$TREE/crates/a/src/lib.rs" <<'RS'
+fn init(n: usize, seed: u64) -> usize { n + seed as usize }
+fn caller(s: u64) {
+    let _ = init(3, 51);
+    let _ = init(3, s);
+    let _ = init(3, SFT_BASE);
+    let _ = init(3, STREAM_SEED_SALT);
+}
+pub struct M;
+impl M {
+    pub fn fit(&self, steps: usize, seed: u64) {}
+    pub fn run(&self) {
+        self.fit(2, 52);
+    }
+}
+RS
+  gate
+  [ "$status" -ne 0 ]
+  for lit in "caller:init#1=51" "caller:init#1=SFT_BASE" "M::run:fit#1=52"; do
+    [[ "$output" == *"$lit"* ]] || { echo "missing $lit"; echo "$output"; return 1; }
+  done
+  [[ "$output" != *"init#1=s"* ]]
+  [[ "$output" != *"init#1=STREAM_SEED_SALT"* ]]
+}
+
+@test "a positional literal in a test needs no entry and is reported only on request" {
+  cat >>"$TREE/crates/a/src/lib.rs" <<'RS'
+fn init(n: usize, seed: u64) -> usize { n + seed as usize }
+#[cfg(test)]
+mod more {
+    #[test]
+    fn t() { let _ = super::init(3, 53); }
+}
+RS
+  gate --tests
+  [ "$status" -eq 0 ]
+}
+
+@test "a loop or a range that enumerates literal seeds is caught" {
+  cat >>"$TREE/crates/a/src/lib.rs" <<'RS'
+pub fn sweep(members: u64, data: &Data) {
+    for seed in 1..=members {
+        train(seed);
+    }
+    let _ = (1..=3).map(|seed| cv_runs(data, seed)).count();
+    for member_seed in 0..4 {
+        train(member_seed);
+    }
+    for i in 0..4 {
+        train(i);
+    }
+}
+RS
+  gate
+  [ "$status" -ne 0 ]
+  for lit in "sweep:for seed in 1.." "sweep:|seed| in (1..)" "sweep:for member_seed in 0.."; do
+    [[ "$output" == *"$lit"* ]] || { echo "missing $lit"; echo "$output"; return 1; }
+  done
+  [[ "$output" != *"for i in"* ]]
+}
+
+@test "python defaults, keywords, dicts, environment fallbacks and RNG constructors are caught" {
+  cat >>"$TREE/tools/gen.py" <<'PY'
+
+
+def forecast(series, seed: int = 61):
+    return post({"seed": 62, "series": series})
+
+
+@dataclass
+class Spec:
+    seed: int = 63
+
+
+def run(args):
+    rng = np.random.default_rng(64)
+    gen = random.Random(65)
+    state = np.random.RandomState(66)
+    call(seed=67)
+    s = os.environ.get("BRAIN_SEED", "68")
+    chosen = args.seed if args.seed is not None else 69
+    other = args.seed or 70
+    ok = args.seed if args.seed is not None else draw()
+    call(seed=args.seed)
+PY
+  gate
+  [ "$status" -ne 0 ]
+  for lit in "forecast:seed=61" "forecast:\"seed\"=62" "Spec:seed=63" "run:default_rng=64" "run:random.Random=65" "run:RandomState=66" "run:seed=67" "run:environ.BRAIN_SEED=68" "run:seed-fallback=69" "run:seed-fallback=70"; do
+    [[ "$output" == *"$lit"* ]] || { echo "missing $lit"; echo "$output"; return 1; }
+  done
+  [[ "$output" != *"=args"* ]]
+}
+
+@test "shell, bats and Makefile recipe seeds are caught" {
+  mkdir -p "$TREE/scripts"
+  cat >"$TREE/scripts/run.sh" <<'SH'
+#!/usr/bin/env bash
+SEED=${SEED:-71}
+tool --seed 72
+tool --noise-seed=73
+for s in $(seq 1 3); do tool --seed "$s"; done
+tool --seed "$SEED"
+SH
+  printf 'demo:\n\ttool --seed 74\n' >>"$TREE/Makefile"
+  gate
+  [ "$status" -ne 0 ]
+  for lit in "scripts/run.sh"*"SEED:-71" "--seed=72" "--noise-seed=73" "seq 1 3" "Makefile"*"demo:--seed=74"; do
+    [[ "$output" == *$lit* ]] || { echo "missing $lit"; echo "$output"; return 1; }
+  done
+  [[ "$output" != *'--seed "$'* ]]
+}
+
+@test "a documented command line with a seed needs the word reproduce beside it" {
+  mkdir -p "$TREE/docs"
+  cat >"$TREE/docs/run.md" <<'MD'
+# Run
+
+```sh
+tool --seed 81
+```
+
+To reproduce the figures:
+
+```sh
+tool --seed 82
+```
+MD
+  gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"docs/run.md"*"--seed=81"* ]]
+  [[ "$output" != *"--seed=82"* ]]
+}
+
+@test "a test reason that says any value is no reason" {
+  cat >>"$TREE/crates/a/src/lib.rs" <<'RS'
+#[cfg(test)]
+mod anyvalue {
+    #[test]
+    fn t() {
+        // seed: any value works here
+        let _ = Rng::new(91);
+    }
+}
+RS
+  gate --tests
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Rng::new(91)"* ]]
+}

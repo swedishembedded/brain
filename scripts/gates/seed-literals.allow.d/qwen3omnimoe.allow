@@ -1,0 +1,6 @@
+crates/qwen3omnimoe/src/bin/omni_bench.rs	encode_audio_mode:fill#0=0xBEEF	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/qwen3omnimoe/src/bin/omni_bench.rs	encode_vision_mode:fill#0=0xC0FFEE	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/qwen3omnimoe/src/bin/omni_bench.rs	talker_layer_mode:fill#0=1	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/qwen3omnimoe/src/bin/omni_bench.rs	talker_layer_mode:talker_weights#2=7	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/qwen3omnimoe/src/bin/omni_bench.rs	thinker_layer_mode:fill#0=1	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/qwen3omnimoe/src/bin/omni_bench.rs	thinker_layer_mode:thinker_weights#2=7	positional	bench-input: synthetic weights and inputs that define the measured workload

@@ -1,0 +1,1 @@
+crates/fcbench/src/harness.rs	score_window:score_split#8=0	positional	bench-input: every model is scored under one sampling seed so the comparison is paired

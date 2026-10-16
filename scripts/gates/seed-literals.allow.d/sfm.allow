@@ -1,0 +1,2 @@
+crates/sfm/src/incremental.rs	Solver::seed:ransac_essential#4=7	positional	todo: B-14 the seed-pair RANSAC and the pair selection ignore the reconstruction seed
+crates/sfm/src/incremental.rs	reconstruct_with:select_pairs#2=0x7e7a	positional	todo: B-14 the seed-pair RANSAC and the pair selection ignore the reconstruction seed

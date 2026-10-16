@@ -1,1 +1,2 @@
 crates/sdxlunet/src/bin/unet_bench.rs	gemm_ab:Rng::new(11)	rng	bench-input: synthetic input that defines the measured workload
+crates/sdxlunet/src/bin/unet_bench.rs	main:init_weights#1=7	positional	bench-input: synthetic weights and inputs that define the measured workload

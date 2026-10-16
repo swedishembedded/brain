@@ -1,0 +1,5 @@
+crates/supir/src/bin/supir_bench.rs	run_full:init_weights#1=11	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/supir/src/bin/supir_bench.rs	run_full:init_weights#1=13	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/supir/src/bin/supir_bench.rs	run_fused:init_weights#1=17	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/supir/src/bin/supir_bench.rs	run_fused:init_weights_for#1=19	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/supir/src/bin/supir_bench.rs	run_trunk:init_weights_for#1=11	positional	bench-input: synthetic weights and inputs that define the measured workload

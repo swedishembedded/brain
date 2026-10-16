@@ -1,1 +1,3 @@
+crates/qwen3vl/src/bin/qwen3vl_bench.rs	bench_vision:random_merger_weights#1=11	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/qwen3vl/src/bin/qwen3vl_bench.rs	bench_vision:random_vision_weights#1=7	positional	bench-input: synthetic weights and inputs that define the measured workload
 crates/qwen3vl/src/caps.rs	generate_profiled:Rng::new(0)	rng	greedy: argmax decode never consults the RNG

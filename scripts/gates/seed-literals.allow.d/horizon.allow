@@ -1,2 +1,3 @@
 crates/horizon/examples/step_profile.rs	main:Rng::new(7)	rng	bench-input: synthetic batch order that defines the profiled workload
+crates/horizon/examples/step_profile.rs	main:init_weights#1=1	positional	bench-input: synthetic weights and inputs that define the measured workload
 crates/horizon/src/train.rs	for_each_batch:Rng::new(0)	rng	greedy: argmax decode never consults the RNG

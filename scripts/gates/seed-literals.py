@@ -25,14 +25,39 @@ trees without a .git, i.e. the gate fixtures):
                 `seed` field, `.default(json!(1))` of a `"seed"` param,
                 `.seed(1)` / `.with_seed(1)`;
                 kind `const`: `const FOO_SEED: u64 = 1`;
-                kind `rng`: `Rng::new(1)`, `Lcg::new(1)`, `seed_from_u64(1)`.
-  Python (*.py) kind `python-default`: `add_argument("--...seed...", default=1)`;
+                kind `rng`: `Rng::new(1)`, `Lcg::new(1)`, `seed_from_u64(1)`,
+                `Mt19937::new(1)`, `ChaCha8Rng::..`, `Philox..::new(1)`;
+                kind `default` also for `fn name() -> Seed { Seed::new(1) }`
+                (a zero-argument function that returns a literal and mentions
+                seed in its name or return type, or is the target of a
+                `#[serde(default = "..")]` on a seed field), for
+                `for seed in 1..n` and `(1..=n).map(|seed| ..)`;
+                kind `positional`: a literal, or a constant that is not a seed
+                constant itself, passed at the index of a parameter named
+                `*seed*` (type u64, i64, u128 or Seed). The callee is resolved
+                within its crate; a name defined twice with different
+                parameter lists is skipped, and so is a call whose argument
+                count differs from the definition. Test code is reported only
+                with --positional-tests.
+  Python (*.py) kind `python-default`: `add_argument("--...seed...", default=1)`,
+                `seed[: int] = 1` as a parameter, field, keyword or local,
+                `"seed": 1` dict entries, `x if x is not None else 1` and
+                `x or 1` on a seed name, and `environ.get("..SEED..", "1")`;
                 kind `python-const`: a module-level `SEED = 1` / `NOISE_SEED = 1`;
                 kind `python-rng`: `torch.manual_seed(1)`,
                 `torch.Generator().manual_seed(1)`, `np.random.seed(1)`,
-                `random.seed(1)`.
+                `random.seed(1)`, `default_rng(1)`, `RandomState(1)`,
+                `random.Random(1)`.
   Makefile      kind `make-default`: `SEED ?= 1`; `make-flag`: a variable
-                assigned a value containing `--seed 1`.
+                assigned a value containing `--seed 1`, or a recipe line with
+                `--seed 1` (symbol `<target>:--seed=1`).
+  Shell (*.sh, *.bats)
+                kind `shell-seed`: `--seed 1`, `--noise-seed=1`,
+                `${SEED:-1}`, `SEED=1`, and `seq 1 3` feeding a seed.
+  Markdown (*.md)
+                kind `doc-seed`: `--seed 1` inside a fenced block unless the
+                word "reproduce" is on the line, a neighbouring line or the
+                prose line above the fence.
 
 Context is `prod` or `test`. Test context is: a `tests/` or `benches/`
 directory, a `#[cfg(test)]` module (including the file pulled in by
@@ -46,7 +71,10 @@ Output: path, symbol, kind, context (prod|test), and `reasoned`/`bare`: whether
 every occurrence carries a `// seed:` (or `# seed:`) comment on its line or the
 line above.
 
-usage: seed-literals.py [--root DIR] [--lines]
+A `// seed:` reason that starts with "any" does not count: it says the value
+does not matter, which is a reason to draw it.
+
+usage: seed-literals.py [--root DIR] [--lines] [--positional-tests]
 """
 import argparse
 import bisect
@@ -58,8 +86,13 @@ from pathlib import Path
 
 INT = r"-?(?:0[xX][0-9a-fA-F_]+|\d[\d_]*)(?:_?[iu](?:8|16|32|64|128|size))?"
 SKIP_DIRS = {"target", ".git", "node_modules", "out", "build", "results"}
-SKIP_PREFIXES = ("scripts/gates/testdata/", "scripts/gates/seed-literals.py")
-REASON = re.compile(r"(?://|#)\s*seed:")
+SKIP_PREFIXES = (
+    "scripts/gates/testdata/",
+    "scripts/gates/seed-literals.py",
+    "tests/gates/seed_literals.bats",
+)
+# A reason must say why this stream is needed; "any value" says the opposite.
+REASON = re.compile(r"(?://|#)\s*seed:[ \t]*(?![ \t]|any\b)", re.I)
 
 FIELD_INIT = re.compile(r"\b(\w*seed\w*)\s*:\s*(" + INT + r")(?![\w.])", re.I)
 FIELD_SOME = re.compile(r"\b(\w*seed\w*)\s*:\s*Some\(\s*(" + INT + r")\s*\)", re.I)
@@ -78,14 +111,33 @@ CONST_SEED = re.compile(
     r"\b(?:const|static)\s+(\w*SEED\w*)\s*:[^=]*=\s*[\[(]?\s*(" + INT + r")", re.I
 )
 RNG_CTOR = re.compile(
-    r"\b(\w*(?:Rng|Lcg|SplitMix\d*|Xorshift\w*|Pcg\w*))::(new|seed_from_u64|with_seed|seeded)"
+    r"\b(\w*(?:Rng|Lcg|SplitMix\d*|Xorshift\w*|Pcg\w*)|Mt19937\w*|ChaCha\w*|Philox\w*)"
+    r"::(new|seed_from_u64|with_seed|seeded)"
     r"\(\s*(" + INT + r")"
 )
+FOR_SEED = re.compile(r"\bfor\s+(\w*seed\w*)\s+in\s+\(?\s*(" + INT + r")\s*\.\.", re.I)
+RANGE_MAP_SEED = re.compile(
+    r"\(\s*(" + INT + r")\s*\.\.=?[^()]*\)\s*\.\s*(?:map|for_each|flat_map|filter_map)\s*\(\s*(?:move\s*)?\|\s*(\w*seed\w*)\s*\|",
+    re.I,
+)
+FN_ZERO_ARG = re.compile(
+    r"\bfn\s+(\w+)\s*\(\s*\)\s*->\s*([^{;]+?)\s*\{\s*(?:[\w:]*\(\s*(" + INT + r")\s*\)|(" + INT + r"))\s*\}"
+)
+SERDE_SEED_DEFAULT = re.compile(
+    r'#\[\s*serde\s*\([^\]]*?\bdefault\s*=\s*"(\w+)"[^\]]*\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?\w*seed\w*\s*:',
+    re.I,
+)
+FN_DEF = re.compile(r"\bfn\s+(\w+)\s*(?:<[^()]*?>)?\s*\(")
+SEED_PARAM_TYPE = re.compile(r"^(?:u64|i64|u128|Seed)$")
+POSITIONAL_CONST = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
 SEED_WORD = re.compile(r"\bseed", re.I)
 SEED_NAME_ON_LINE = re.compile(r"(\w*seed\w*)\s*:", re.I)
 
 BLOCK_CHARS = re.compile(r"[{};]")
-CANDIDATE_NEEDLES = ("seed", "rng::", "lcg::", "splitmix", "xorshift", "pcg", "default_value_t", ".default(json!")
+CANDIDATE_NEEDLES = (
+    "seed", "rng::", "lcg::", "splitmix", "xorshift", "pcg", "mt19937", "chacha", "philox",
+    "default_value_t", ".default(json!",
+)
 CFG_TEST_ATTR = re.compile(
     r"#\[\s*(?:cfg\s*\(\s*(?:test|all\s*\(\s*test\b)|test\b|bench\b|[\w:]*::test\b|rstest\b)"
 )
@@ -101,22 +153,20 @@ BLOCK_COMMENT_EDGE = re.compile(r"/\*|\*/")
 STRING_END = re.compile(r'(?:\\.|[^"\\])*"', re.S)
 
 
-class _Blanker(dict):
-    """str.translate table: every character becomes a space except those kept."""
-
-    def __init__(self, keep: str):
-        super().__init__({ord(c): ord(c) for c in keep})
-
-    def __missing__(self, key):
-        return 32
-
-
-BLANK = _Blanker("\n")
-BLANK_STRING = _Blanker('\n"')
+NOT_NEWLINE = re.compile(r"[^\n]")
+NOT_NEWLINE_OR_QUOTE = re.compile(r'[^\n"]')
 
 
 def blank(text: str) -> str:
-    return text.translate(BLANK)
+    """Every character but a newline becomes a space, so offsets and lines survive."""
+    return NOT_NEWLINE.sub(" ", text) if "\n" in text else " " * len(text)
+
+
+def blank_string(text: str) -> str:
+    """Like `blank`, but double quotes survive."""
+    if len(text) >= 2 and text[0] == text[-1] == '"' and '"' not in text[1:-1] and "\n" not in text:
+        return '"' + " " * (len(text) - 2) + '"'
+    return NOT_NEWLINE_OR_QUOTE.sub(" ", text)
 
 
 def strip_rust(text: str):
@@ -161,7 +211,7 @@ def strip_rust(text: str):
                 sm = STRING_END.match(text, m.end())
                 end = sm.end() if sm else n
             body = text[m.start() : end]
-            code.append(body.translate(BLANK_STRING))
+            code.append(blank_string(body))
             intact.append(body)
         else:  # char literal
             end = m.end()
@@ -169,6 +219,51 @@ def strip_rust(text: str):
             intact.append(tok)
         pos = end
     return "".join(code).split("\n"), "".join(intact).split("\n")
+
+
+RNG_TYPE_BEFORE = re.compile(r"(?:Rng|Lcg|SplitMix\d*|Xorshift\w*|Pcg\w*|Mt19937\w*|ChaCha\w*|Philox\w*)$")
+FN_KEYWORD_BEFORE = re.compile(r"\bfn\s+$")
+SELF_PARAM = re.compile(r"^\s*(?:&\s*(?:'\w+\s+)?)?(?:mut\s+)?self\b")
+
+
+_CALL_PATTERNS = {}
+
+
+def seeded_call_pattern(seeded: dict):
+    """One alternation over the callee names of a crate, so a file is scanned once."""
+    key = id(seeded)
+    if key not in _CALL_PATTERNS:
+        names = "|".join(sorted(map(re.escape, seeded), key=len, reverse=True))
+        _CALL_PATTERNS[key] = re.compile(r"\b(" + names + r")\s*\(")
+    return _CALL_PATTERNS[key]
+
+
+def split_args(text: str, start: int, generics: bool = False):
+    """The top-level comma-separated pieces between the `(` before `start` and
+    its `)`, or None when the parenthesis never closes. Angle brackets nest
+    only in a parameter list (`generics`), where they are types; in a call they
+    are comparisons. `->` never nests."""
+    depth, piece, out = 1, start, []
+    pos = start
+    while pos < len(text):
+        ch = text[pos]
+        if ch == "-" and text[pos : pos + 2] == "->":
+            pos += 2
+            continue
+        if ch in "([{" or (generics and ch == "<"):
+            depth += 1
+        elif ch in ")]}" or (generics and ch == ">"):
+            depth -= 1
+            if depth == 0:
+                tail = text[piece:pos]
+                if tail.strip():
+                    out.append(tail)
+                return out
+        elif ch == "," and depth == 1:
+            out.append(text[piece:pos])
+            piece = pos + 1
+        pos += 1
+    return None
 
 
 def header_item(header: str):
@@ -212,10 +307,74 @@ class RustFile:
         self.rel = rel
         self.raw = text.splitlines()
         self.code, self.intact = strip_rust(text)
-        self.file_is_test = file_is_test or bool(CFG_TEST_FILE.search("\n".join(self.code)))
+        self.joined = "\n".join(self.code)
+        self.file_is_test = file_is_test or bool(CFG_TEST_FILE.search(self.joined))
+        self.extra = {}  # line index -> [(field, kind)] found by whole-file scans
+        self._starts = [0]
+        for m in re.finditer("\n", self.joined):
+            self._starts.append(m.end())
+
+    def line_of(self, offset: int) -> int:
+        return bisect.bisect_right(self._starts, offset) - 1
+
+    def add_extra(self, offset: int, field: str, kind: str):
+        self.extra.setdefault(self.line_of(offset), []).append((field, kind))
+
+    def hidden_defaults(self):
+        """Zero-argument functions that return a literal seed: the default is
+        hidden behind a call, so no `seed: 1` is ever written."""
+        serde = set(SERDE_SEED_DEFAULT.findall("\n".join(self.intact)))
+        for m in FN_ZERO_ARG.finditer(self.joined):
+            name, ret = m.group(1), m.group(2)
+            if name in serde or SEED_WORD.search(name) or SEED_WORD.search(ret):
+                self.add_extra(m.start(), f"fn {name}={m.group(3) or m.group(4)}", "default")
+
+    def signatures(self):
+        """(name, seed parameter index or None, parameter count, has self) per `fn`;
+        the index and count exclude a `self` receiver."""
+        for m in FN_DEF.finditer(self.joined):
+            params = split_args(self.joined, m.end(), generics=True)
+            if params is None:
+                continue
+            has_self = bool(params) and bool(SELF_PARAM.match(params[0]))
+            plain = params[1:] if has_self else params
+            seed_idx = None
+            for i, param in enumerate(plain):
+                name, _, ty = param.partition(":")
+                if SEED_WORD.search(name) and SEED_PARAM_TYPE.match(ty.strip()):
+                    seed_idx = i
+                    break
+            yield m.group(1), seed_idx, len(plain), has_self
+
+    def positional_calls(self, seeded):
+        """Flag calls that pass a literal (or a constant that is not a seed
+        constant of its own) where the callee takes a seed. `seeded` maps a
+        callee name to its (seed index, parameter count, has self); a name
+        whose definitions disagree is not in it."""
+        if not seeded:
+            return
+        for m in seeded_call_pattern(seeded).finditer(self.joined):
+            before = self.joined[max(0, m.start() - 8) : m.start()]
+            if FN_KEYWORD_BEFORE.search(before):
+                continue
+            seed_idx, count, has_self = seeded[m.group(1)]
+            qualifier = "." if before.endswith(".") else "::" if before.endswith("::") else ""
+            args = split_args(self.joined, m.end())
+            if args is None:
+                continue
+            if qualifier == "." and not has_self:
+                continue
+            if qualifier == "::" and RNG_TYPE_BEFORE.search(self.joined[max(0, m.start() - 40) : m.start() - 2]):
+                continue  # a generator constructor: reported as kind `rng`
+            shift = 1 if (has_self and qualifier == "::") else 0
+            if len(args) != count + shift:
+                continue
+            arg = args[seed_idx + shift].strip()
+            if re.fullmatch(INT, arg) or (POSITIONAL_CONST.match(arg) and "SEED" not in arg):
+                self.add_extra(m.start(1), f"{m.group(1)}#{seed_idx + shift}={arg}", "positional")
 
     def hits(self):
-        candidates = self.candidate_lines()
+        candidates = self.candidate_lines() | set(self.extra)
         stack = []  # (kind, name, is_test)
         header = ""
         pending_test = False
@@ -317,6 +476,11 @@ class RustFile:
             out.append((f".{m.group(1)}({m.group(2)})", "default"))
         for m in RNG_CTOR.finditer(code):
             out.append((f"{m.group(1)}::{m.group(2)}({m.group(3)})", "rng"))
+        for m in FOR_SEED.finditer(code):
+            out.append((f"for {m.group(1)} in {m.group(2)}..", "default"))
+        for m in RANGE_MAP_SEED.finditer(code):
+            out.append((f"|{m.group(2)}| in ({m.group(1)}..)", "default"))
+        out.extend(self.extra.get(idx, ()))
         return list(dict.fromkeys(out))
 
 
@@ -342,40 +506,146 @@ def python_hits(text: str):
 
 
 PY_SEED_CONST = re.compile(r"^(\w*SEED\w*)\s*(?::\s*[\w.\[\]]+\s*)?=\s*(" + INT + r")\s*(?:#.*)?$")
-PY_SEED_CALL = re.compile(r"\b(manual_seed|np\.random\.seed|numpy\.random\.seed|random\.seed)\(\s*(" + INT + r")\s*\)")
-PY_DEF = re.compile(r"^(\s*)(?:async\s+)?def\s+(\w+)")
+PY_SEED_CALL = re.compile(
+    r"\b(manual_seed|np\.random\.seed|numpy\.random\.seed|random\.seed|default_rng|RandomState|random\.Random)"
+    r"\(\s*(" + INT + r")\s*\)"
+)
+PY_SEED_ASSIGN = re.compile(
+    r"(?<![\w.])(\w*seed\w*)\s*(?::\s*[\w.\[\], ]+?)?\s*(?<![=!<>])=(?!=)\s*(" + INT + r")(?![\w.])", re.I
+)
+PY_SEED_KEY = re.compile(r"""["'](\w*seed\w*)["']\s*:\s*(""" + INT + r")(?![\w.])", re.I)
+PY_SEED_FALLBACK = re.compile(
+    r"(?<![\w.])([\w.]*seed\w*)\s+(?:if\b[^\n]*?\bis\s+not\s+None\s+else|or)\s+(" + INT + r")(?![\w.])", re.I
+)
+PY_SEED_LOOKUP = re.compile(
+    r"""(?:environ\.get|getenv|\.get)\(\s*["'](\w*seed\w*)["']\s*,\s*["']?(""" + INT + r""")["']?\s*\)""", re.I
+)
+PY_DEF = re.compile(r"^(\s*)(?:async\s+def|def|class)\s+(\w+)")
+
+
+def python_views(text: str):
+    """Per line: (code view with comments and strings blanked, view with only
+    comments blanked). Triple-quoted strings span lines; escapes are skipped."""
+    code, keep = [], []
+    pos, n = 0, len(text)
+    out_code, out_keep = [], []
+    while pos < n:
+        ch = text[pos]
+        if ch == "#":
+            end = text.find("\n", pos)
+            end = n if end < 0 else end
+            out_code.append(" " * (end - pos))
+            out_keep.append(" " * (end - pos))
+            pos = end
+        elif ch in "'\"":
+            quote = text[pos : pos + 3] if text[pos : pos + 3] in ("'\'\'", '"""') else ch
+            end = pos + len(quote)
+            while end < n and not text.startswith(quote, end):
+                end += 2 if text[end] == "\\" else 1
+                if len(quote) == 1 and end < n and text[end] == "\n":
+                    break
+            end = min(n, end + len(quote))
+            body = text[pos:end]
+            out_code.append(blank(body))
+            out_keep.append(body)
+            pos = end
+        else:
+            out_code.append(ch)
+            out_keep.append(ch)
+            pos += 1
+    return "".join(out_code).split("\n"), "".join(out_keep).split("\n")
 
 
 def python_seed_hits(text: str):
-    """(line_no, symbol, kind) for module-level seed constants and seeding calls
-    with an integer literal; the symbol is `<enclosing def>:<call>=<literal>`."""
-    defs = []  # (indent, name) of the open `def`s
-    for no, line in enumerate(text.splitlines(), 1):
-        code = line.split("#", 1)[0]
-        if not code.strip():
+    """(line_no, symbol, kind) for module-level seed constants, seeding calls,
+    seed parameters, fields, keywords and dict entries with an integer literal,
+    and fallbacks that substitute a literal for a missing seed; the symbol is
+    `<enclosing def or class>:<call>=<literal>`."""
+    code_lines, keep_lines = python_views(text)
+    scopes = []  # (indent, name) of the open `def`s and `class`es
+    for no, (line, kept) in enumerate(zip(code_lines, keep_lines), 1):
+        if not line.strip():
             continue
-        indent = len(code) - len(code.lstrip())
-        while defs and defs[-1][0] >= indent:
-            defs.pop()
+        indent = len(line) - len(line.lstrip())
+        while scopes and scopes[-1][0] >= indent:
+            scopes.pop()
+        d = PY_DEF.match(line)
+        if d:
+            scopes.append((len(d.group(1)), d.group(2)))
+        owner = scopes[-1][1] if scopes else "-"
         const = PY_SEED_CONST.match(line)
         if const:
             yield no, f"-:{const.group(1)}={const.group(2)}", "python-const"
-        for m in PY_SEED_CALL.finditer(code):
-            owner = defs[-1][1] if defs else "-"
+        else:
+            for m in PY_SEED_ASSIGN.finditer(line):
+                yield no, f"{owner}:{m.group(1)}={m.group(2)}", "python-default"
+        for m in PY_SEED_CALL.finditer(line):
             yield no, f"{owner}:{m.group(1)}={m.group(2)}", "python-rng"
-        d = PY_DEF.match(code)
-        if d:
-            defs.append((len(d.group(1)), d.group(2)))
+        for m in PY_SEED_KEY.finditer(kept):
+            yield no, f'{owner}:"{m.group(1)}"={m.group(2)}', "python-default"
+        for m in PY_SEED_FALLBACK.finditer(line):
+            yield no, f"{owner}:seed-fallback={m.group(2)}", "python-default"
+        for m in PY_SEED_LOOKUP.finditer(kept):
+            source = "environ" if "environ" in kept or "getenv" in kept else "get"
+            yield no, f"{owner}:{source}.{m.group(1)}={m.group(2)}", "python-default"
 
 
 MAKE_VAR = re.compile(r"^\s*(?:export\s+)?(\w*SEED\w*)\s*(?:\?=|:=|=)\s*(" + INT + r")\s*(?:#.*)?$", re.I)
 MAKE_FLAG = re.compile(r"^\s*(\w+)\s*(?:\?=|:=|=)\s*.*?(--[\w-]*seed[\w-]*)[ =](" + INT + r")(?![\w.])", re.I)
 
 
+SHELL_FLAG = re.compile(r"(?<![\w-])(--[\w-]*seed[\w-]*)[ =]\s*(" + INT + r")(?![\w.])", re.I)
+SHELL_DEFAULT = re.compile(r"\$\{(\w*SEED\w*):-\s*(" + INT + r")\s*\}")
+SHELL_ASSIGN = re.compile(r"(?<![\w-])(\w*SEED\w*)=(" + INT + r")(?![\w.])")
+SHELL_SEQ = re.compile(r"\bseq\s+(" + INT + r"(?:\s+" + INT + r")*)")
+SHELL_FUNC = re.compile(r"^\s*(?:function\s+)?(\w+)\s*\(\)\s*\{")
+MAKE_TARGET = re.compile(r"^([\w./$()%-]+)\s*:(?!=)")
+FENCE = re.compile(r"^\s*(```|~~~)")
+
+
+def command_line_hits(line: str):
+    """(field, kind-free) for each way one shell command line pins a seed."""
+    for m in SHELL_FLAG.finditer(line):
+        yield f"{m.group(1)}={m.group(2)}"
+    for m in SHELL_DEFAULT.finditer(line):
+        yield f"{m.group(1)}:-{m.group(2)}"
+    for m in SHELL_ASSIGN.finditer(line):
+        yield f"{m.group(1)}={m.group(2)}"
+
+
+def strip_shell_comment(line: str) -> str:
+    return "" if line.lstrip().startswith("#") else re.split(r"\s#\s", line, maxsplit=1)[0]
+
+
+def shell_hits(text: str):
+    """(line_no, symbol, kind) for flags, defaults and assignments that pin a
+    seed in a shell script, and a `seq` that enumerates seeds."""
+    lines = text.splitlines()
+    func = "-"
+    for no, raw in enumerate(lines, 1):
+        fn = SHELL_FUNC.match(raw)
+        if fn:
+            func = fn.group(1)
+        elif raw.startswith("}"):
+            func = "-"
+        line = strip_shell_comment(raw)
+        for field in command_line_hits(line):
+            yield no, f"{func}:{field}", "shell-seed"
+        seq = SHELL_SEQ.search(line)
+        if seq and any(re.search("seed", near, re.I) for near in lines[no - 1 : no + 3]):
+            yield no, f"{func}:seq {seq.group(1)}", "shell-seed"
+
+
 def makefile_hits(text: str):
+    target = "-"
     for no, line in enumerate(text.splitlines(), 1):
         if line.startswith("\t"):
+            for field in command_line_hits(strip_shell_comment(line.lstrip("\t"))):
+                yield no, f"{target}:{field}", "make-flag"
             continue
+        tm = MAKE_TARGET.match(line)
+        if tm:
+            target = tm.group(1)
         m = MAKE_VAR.match(line)
         if m:
             yield no, f"{m.group(1)}={m.group(2)}", "make-default"
@@ -383,6 +653,30 @@ def makefile_hits(text: str):
         m = MAKE_FLAG.match(line)
         if m:
             yield no, f"{m.group(1)}:{m.group(2)}={m.group(3)}", "make-flag"
+
+
+def markdown_hits(text: str):
+    """(line_no, symbol, kind) for a `--seed N` inside a fenced block that is
+    not explained as the way to reproduce something: the word `reproduce` on
+    the line, a neighbouring line or the prose line above the fence."""
+    lines = text.splitlines()
+    fence_prose = ""
+    in_fence = False
+    last_prose = ""
+    for no, raw in enumerate(lines, 1):
+        if FENCE.match(raw):
+            in_fence = not in_fence
+            fence_prose = last_prose if in_fence else ""
+            continue
+        if not in_fence:
+            if raw.strip():
+                last_prose = raw
+            continue
+        near = " ".join([fence_prose] + lines[max(0, no - 2) : no + 1])
+        if re.search("reproduc", near, re.I):
+            continue
+        for m in SHELL_FLAG.finditer(strip_shell_comment(raw)):
+            yield no, f"-:{m.group(1)}={m.group(2)}", "doc-seed"
 
 
 def tracked_files(root: Path):
@@ -407,7 +701,34 @@ def path_is_test(rel: str) -> bool:
     return "tests" in parts[:-1] or "benches" in parts[:-1] or bool(re.match(r"test_.*\.py$|.*_test\.py$", parts[-1]))
 
 
-def scan(root: Path):
+def crate_of(rel: str) -> str:
+    """The unit whose function names are resolved together: a crate, a sample
+    directory (`samples/<area>/<name>`) or a top-level directory."""
+    parts = rel.split("/")
+    if parts[0] == "crates" and len(parts) > 2:
+        return "/".join(parts[:2])
+    if parts[0] == "samples" and len(parts) > 3:
+        return "/".join(parts[:3])
+    return parts[0]
+
+
+def seeded_callees(files: dict) -> dict:
+    """crate -> {callee name: (seed index, parameter count, has self)} for every
+    function that takes a seed and whose definitions in the crate agree."""
+    by_name = {}
+    for rel, f in files.items():
+        for name, seed_idx, count, has_self in f.signatures():
+            by_name.setdefault((crate_of(rel), name), set()).add((seed_idx, count, has_self))
+    seeded = {}
+    for (crate, name), sigs in by_name.items():
+        if len(sigs) == 1:
+            (sig,) = sigs
+            if sig[0] is not None:
+                seeded.setdefault(crate, {})[name] = sig
+    return seeded
+
+
+def scan(root: Path, positional_tests: bool = False):
     """All hits as (rel, symbol, kind, context, line_no, justified)."""
     files = tracked_files(root)
     rust = {n: (root / n).read_text(encoding="utf-8", errors="replace") for n in files if n.endswith(".rs")}
@@ -419,29 +740,44 @@ def scan(root: Path):
             for d in dirs:
                 for cand in (d / f"{mod}.rs", d / mod / "mod.rs"):
                     test_files.add(cand.as_posix())
+    parsed = {rel: RustFile(rel, text, path_is_test(rel) or rel in test_files) for rel, text in rust.items()}
+    seeded = seeded_callees(parsed)
     rows = []
-    for rel, text in rust.items():
-        lowered = text.lower()
-        if not any(needle in lowered for needle in CANDIDATE_NEEDLES):
+    for rel, f in parsed.items():
+        f.hidden_defaults()
+        f.positional_calls(seeded.get(crate_of(rel), {}))
+        lowered = rust[rel].lower()
+        if not f.extra and not any(needle in lowered for needle in CANDIDATE_NEEDLES):
             continue
-        file_test = path_is_test(rel) or rel in test_files
-        f = RustFile(rel, text, file_test)
         for line_no, enclosing, (field, kind), in_test in f.hits():
+            if kind == "positional" and in_test and not positional_tests:
+                continue
             rows.append((rel, f"{enclosing}:{field}", kind, "test" if in_test else "prod", line_no, justified(f.raw, line_no)))
     for rel in files:
-        text = None
+        name = Path(rel).name
+        context = "test" if path_is_test(rel) else "prod"
         if rel.endswith(".py"):
             text = (root / rel).read_text(encoding="utf-8", errors="replace")
             raw = text.splitlines()
             for no, flag, lit in python_hits(text):
-                rows.append((rel, f"-:{flag}={lit}", "python-default", "test" if path_is_test(rel) else "prod", no, justified(raw, no)))
+                rows.append((rel, f"-:{flag}={lit}", "python-default", context, no, justified(raw, no)))
             for no, symbol, kind in python_seed_hits(text):
-                rows.append((rel, symbol, kind, "test" if path_is_test(rel) else "prod", no, justified(raw, no)))
-        elif Path(rel).name in ("Makefile", "makefile") or rel.endswith(".mk"):
+                rows.append((rel, symbol, kind, context, no, justified(raw, no)))
+        elif name in ("Makefile", "makefile") or rel.endswith(".mk"):
             text = (root / rel).read_text(encoding="utf-8", errors="replace")
             raw = text.splitlines()
             for no, symbol, kind in makefile_hits(text):
                 rows.append((rel, f"-:{symbol}", kind, "prod", no, justified(raw, no)))
+        elif rel.endswith((".sh", ".bats")):
+            text = (root / rel).read_text(encoding="utf-8", errors="replace")
+            raw = text.splitlines()
+            for no, symbol, kind in shell_hits(text):
+                rows.append((rel, symbol, kind, "test" if rel.endswith(".bats") else context, no, justified(raw, no)))
+        elif rel.endswith(".md"):
+            text = (root / rel).read_text(encoding="utf-8", errors="replace")
+            raw = text.splitlines()
+            for no, symbol, kind in markdown_hits(text):
+                rows.append((rel, symbol, kind, "prod", no, justified(raw, no)))
     return rows
 
 
@@ -449,9 +785,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=str(Path(__file__).resolve().parents[2]))
     ap.add_argument("--lines", action="store_true", help="append line numbers (diagnostics)")
+    ap.add_argument(
+        "--positional-tests",
+        action="store_true",
+        help="also list literals passed positionally as a seed in test code (kind `positional`, context test)",
+    )
     args = ap.parse_args()
     seen = {}
-    for rel, symbol, kind, context, line_no, ok in scan(Path(args.root)):
+    for rel, symbol, kind, context, line_no, ok in scan(Path(args.root), args.positional_tests):
         entry = seen.setdefault((rel, symbol, kind, context), [True, []])
         entry[0] &= ok
         entry[1].append(line_no)

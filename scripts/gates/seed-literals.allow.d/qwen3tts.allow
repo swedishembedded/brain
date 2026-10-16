@@ -4,5 +4,5 @@ crates/qwen3tts/examples/fused_parity.rs	main:Rng::new(0)	rng	world: fixed input
 crates/qwen3tts/examples/mtp_bench.rs	main:Lcg::new(1)	rng	bench-input: synthetic input that defines the measured workload
 crates/qwen3tts/examples/mtp_bench.rs	main:Lcg::new(2)	rng	bench-input: synthetic input that defines the measured workload
 crates/qwen3tts/examples/mtp_bench.rs	main:Lcg::new(3)	rng	bench-input: synthetic input that defines the measured workload
-crates/qwen3tts/src/gen_kv_mtp.rs	CpuMtp::generate_residuals:Rng::new(0)	rng	greedy: argmax decode never consults the RNG
-crates/qwen3tts/src/mtp.rs	MtpModel::generate_residuals:Rng::new(0)	rng	greedy: argmax decode never consults the RNG
+crates/qwen3tts/src/gen_kv_mtp.rs	CpuMtp::generate_residuals:Rng::new(0)	rng	todo: B-17 the convenience wrapper is greedy but a real decode must sample
+crates/qwen3tts/src/mtp.rs	MtpModel::generate_residuals:Rng::new(0)	rng	todo: B-17 the convenience wrapper is greedy but a real decode must sample

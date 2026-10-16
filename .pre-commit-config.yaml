@@ -116,15 +116,15 @@ repos:
       - id: seed-literals
         name: "No new literal seeds in production code (every default seed is random)"
         description: >-
-          A literal seed in production code (Rust, a Python `--seed` default, a
-          Makefile `SEED ?=`) must be on a per-crate file under
+          A literal seed in production code (Rust, Python, shell, a Makefile
+          recipe or default, a command line in a Markdown code block) must be on a per-crate file under
           scripts/gates/seed-literals.allow.d/ with a reason, and the list only
           shrinks: a new literal, or an entry whose literal is gone, fails. See
           scripts/gates/check-seed-literals.sh. Also run by
           `make check/seed-literals`.
         entry: bash scripts/gates/check-seed-literals.sh
         language: system
-        files: '(\.(rs|py)$|(^|/)Makefile$|^scripts/gates/(seed-literals\.|check-seed-literals\.sh))'
+        files: '(\.(rs|py|sh|bats|md|mk)$|(^|/)Makefile$|^scripts/gates/(seed-literals\.|check-seed-literals\.sh)|^scripts/gates/seed-literals\.allow\.d/)'
         pass_filenames: false
         stages: [pre-commit]
       - id: no-em-dash

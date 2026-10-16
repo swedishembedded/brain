@@ -1,0 +1,4 @@
+crates/sam1/src/bin/sam1_bench.rs	bench_backend:init_dense#1=7	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/sam1/src/bin/sam1_bench.rs	bench_backend:new_on#3=7	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/sam1/src/bin/sam1_bench.rs	profile_mode:init_dense#1=7	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/sam1/src/bin/sam1_bench.rs	profile_mode:new_on#3=7	positional	bench-input: synthetic weights and inputs that define the measured workload
