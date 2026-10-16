@@ -597,6 +597,22 @@ pub enum Fused {
     /// [`Fused::GdnDecode`] (`mixed`, `bproj`, `aproj`, `z`, `gated` carry a row
     /// per sequence; `hist` and `state` are the pools) plus `rows` read, last.
     GdnDecodePool,
+    /// `gdn_verify_pool`: [`Fused::GdnDecodePool`] for a speculative verify - each
+    /// sequence of the batch takes `counts[bi]` (1..=8) consecutive steps, its
+    /// inputs and outputs the rows `offs[bi] ..` of packed token arrays, and the
+    /// state and conv window after every row but the last are written to
+    /// `snap_state` / `snap_hist` row `offs[bi] + r`. Params as
+    /// [`Fused::GdnDecodePool`] (index 6 is the number of sequences); bindings
+    /// those of [`Fused::GdnDecodePool`] (through `rows`) plus `counts`, `offs`
+    /// read and `snap_state`, `snap_hist` written. The caller guarantees every
+    /// count is in 1..=8.
+    GdnVerifyPool,
+    /// `gdn_commit_pool`: for each sequence with a selected snapshot row, copy
+    /// that row of `snap_state` / `snap_hist` over its pool row. Params
+    /// `[b, state_len, hist_len, 0]`; bindings `pool_state`, `pool_hist` (RW),
+    /// `snap_state`, `snap_hist`, `rows`, `sel` read; `sel` of `u32::MAX` skips
+    /// a sequence.
+    GdnCommitPool,
     /// `gqa_decode_prep`: for each of `rows` tokens of a gated-attention layer,
     /// the `[value|gate]` split, the per-head QK RMSNorm, the partial rotary
     /// rotation and the K/V append into the paged pools. Params `[nh, nkv,
@@ -699,6 +715,10 @@ pub fn conv2d_dw_split(params: &[u32], compute_units: u32) -> Option<(u32, u32)>
 /// [`Fused::Conv2dDwPartial`] covers: `BRAIN_CV_DW_BN` in `cu/conv2d_f32.cu`.
 const CONV_DW_COLS: u32 = 64;
 
+/// State elements one block of [`Fused::GdnCommitPool`] copies:
+/// `BRAIN_GDN_COMMIT_TILE` in `cu/gdn_decode.cu`.
+const GDN_COMMIT_TILE: u32 = 4096;
+
 /// Threads per block of [`Fused::Conv2dDwReduce`], one weight element each.
 const CONV_DW_REDUCE_BLOCK: u32 = 256;
 
@@ -798,6 +818,40 @@ const I8_GEMV_MULTI_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// `gdn_verify_pool`'s bindings: `gdn_decode_pool`'s, then `counts`, `offs`,
+/// `snap_state`, `snap_hist`.
+const GDN_VERIFY_POOL_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
+/// `gdn_commit_pool`'s bindings: params, `pool_state`, `pool_hist`,
+/// `snap_state`, `snap_hist`, `rows`, `sel`.
+const GDN_COMMIT_POOL_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+];
+
 /// `matmul_i8w_dx`'s bindings: params, `dy`, `wq`, `sw`, `out`.
 const I8W_DX_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
@@ -819,6 +873,8 @@ impl Fused {
             Fused::QuantEpilogue => "quant_epilogue",
             Fused::GdnDecode => "gdn_decode",
             Fused::GdnDecodePool => "gdn_decode_pool",
+            Fused::GdnVerifyPool => "gdn_verify_pool",
+            Fused::GdnCommitPool => "gdn_commit_pool",
             Fused::GqaDecodePrep => "gqa_decode_prep",
             Fused::I8GemvMulti => "matmul_i8_gemv_multi",
             Fused::Conv2dDwPartial => "conv2d_dw_partial_f32",
@@ -838,6 +894,8 @@ impl Fused {
             Fused::QuantEpilogue => QUANT_EPILOGUE_BINDINGS,
             Fused::GdnDecode => GDN_DECODE_BINDINGS,
             Fused::GdnDecodePool => GDN_DECODE_POOL_BINDINGS,
+            Fused::GdnVerifyPool => GDN_VERIFY_POOL_BINDINGS,
+            Fused::GdnCommitPool => GDN_COMMIT_POOL_BINDINGS,
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
             Fused::I8GemvMulti => I8_GEMV_MULTI_BINDINGS,
             Fused::Conv2dDwPartial => CONV2D_DW_PARTIAL_BINDINGS,
@@ -864,7 +922,10 @@ impl Fused {
             Fused::GdnDecode => {
                 matches!(params, [nkh, nvh, group, _, _, _, rows, _] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group && (1..=8).contains(rows))
             }
-            Fused::GdnDecodePool => matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group && *b >= 1),
+            Fused::GdnDecodePool | Fused::GdnVerifyPool => {
+                matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group && *b >= 1)
+            }
+            Fused::GdnCommitPool => matches!(params, [b, state_len, hist_len, _] if *b >= 1 && *state_len >= 1 && hist_len <= state_len),
             // A head is one 256-thread block holding up to 512 values; the
             // rotated span `2 * half` has to fit inside it.
             Fused::GqaDecodePrep => {
@@ -905,7 +966,8 @@ impl Fused {
         match self {
             Fused::AddRmsQuant | Fused::QuantEpilogue => params[1],
             Fused::GdnDecode => params[0],
-            Fused::GdnDecodePool => params[0] * params[6],
+            Fused::GdnDecodePool | Fused::GdnVerifyPool => params[0] * params[6],
+            Fused::GdnCommitPool => params[0] * params[1].div_ceil(GDN_COMMIT_TILE),
             Fused::GqaDecodePrep => (params[0] + params[1]) * params[6],
             Fused::I8GemvMulti => {
                 let (rows, cols) = kernels_cuda::get("matmul_i8_gemv").map_or((1, 1), |k| k.tile);

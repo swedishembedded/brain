@@ -98,6 +98,32 @@
 //   hist   : [pool, conv_dim, 3]    state : [pool, nvh, 128, 128]  (pools, RW)
 //   rows   : [b] u32                the pool row of each batch row
 //
+// The verify entry (`brain_gdn_verify_pool`)
+// ------------------------------------------
+// A speculative verify step scores SEVERAL consecutive tokens of each sequence
+// of a batch at once, and some of them will be rejected - after which the
+// recurrent state must be the state after the last ACCEPTED token, which the
+// in-place update has already moved past. `brain_gdn_verify_pool` is the pooled
+// kernel with a row count per sequence (`counts[bi]`, 1..=8) and a snapshot of
+// the state and conv window after every row but the last: the block already
+// holds the state in registers between rows, so writing it out costs one
+// coalesced store of the column per row and nothing is recomputed. The last
+// row's state is the one left in the pool, exactly as a plain decode step
+// leaves it, so a verify that accepts everything needs no repair.
+// `brain_gdn_commit_pool` then copies the snapshot of the last accepted row
+// back over the pool row of each sequence that rejected something.
+//
+//   params : u32 [nkh, nvh, group, l2_eps, rms_eps, q_scale, b, 0]
+//   mixed  : [n, conv_dim]    bproj, aproj : [n, nvh]    z, gated : [n, nvh * 128]
+//            where n = sum(counts) and sequence bi owns rows offs[bi] .. +counts[bi]
+//   rows   : [b] u32   pool row of each sequence
+//   counts : [b] u32   rows of each sequence (1..=8)       offs : [b] u32   first row
+//   snap_state : [n, nvh, 128, 128]   snap_hist : [n, conv_dim, 3]
+//            row offs[bi] + r holds the state / window AFTER row r (r < counts[bi] - 1)
+//
+//   commit params : u32 [b, state_len, hist_len, 0]
+//   sel    : [b] u32   snapshot row to restore for each sequence, or 0xffffffff for none
+//
 // No `__restrict__` anywhere, deliberately: brain's device buffers alias by
 // design (a sliced step binds ranges of one allocation).
 
@@ -149,7 +175,8 @@ __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params
                                                       const float* mixed, const float* conv_w, float* hist,
                                                       const float* bproj, const float* aproj, const float* a_log,
                                                       const float* dt_bias, float* state, const float* z,
-                                                      const float* norm_w, float* gated) {
+                                                      const float* norm_w, float* gated, float* snap_state,
+                                                      float* snap_hist) {
     const unsigned int nkh = params[0];
     const unsigned int group = params[2];
     const float l2_eps = __uint_as_float(params[3]);
@@ -219,6 +246,21 @@ __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params
             if (do_q) { qk[0][r][j] = brain_conv_silu(h0, w0, mixed_r[q_ch]); }
             if (do_k) { qk[1][r][j] = brain_conv_silu(h1, w1, mixed_r[k_ch]); }
             if (live) { vo[r][slot][j] = brain_conv_silu(h2, w2, mixed_r[v_ch]); }
+            if (snap_hist != nullptr && static_cast<unsigned int>(r) + 1u < rows) {
+                float* sh = snap_hist + static_cast<unsigned long long>(r) * conv_dim * (BRAIN_GDN_KW - 1);
+                if (do_q) {
+#pragma unroll
+                    for (int i = 0; i < 3; ++i) { sh[(unsigned long long)q_ch * 3 + i] = h0[i]; }
+                }
+                if (do_k) {
+#pragma unroll
+                    for (int i = 0; i < 3; ++i) { sh[(unsigned long long)k_ch * 3 + i] = h1[i]; }
+                }
+                if (live) {
+#pragma unroll
+                    for (int i = 0; i < 3; ++i) { sh[(unsigned long long)v_ch * 3 + i] = h2[i]; }
+                }
+            }
         }
     }
     // The windows are final: write them back now so the registers are free.
@@ -306,6 +348,12 @@ __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params
                 o = __fadd_rn(o, __fmul_rn(q4.w, s[4 * i + 3]));
             }
             vo[r][slot][j] = __fmul_rn(q_scale, o);
+            if (snap_state != nullptr && r + 1u < rows) {
+                float* snap_col = snap_state + static_cast<unsigned long long>(r) * nvh_total * BRAIN_GDN_HD * BRAIN_GDN_HD +
+                                  ((unsigned long long)vh * BRAIN_GDN_HD) * BRAIN_GDN_HD + j;
+#pragma unroll
+                for (int i = 0; i < BRAIN_GDN_HD; ++i) { snap_col[(unsigned long long)i * BRAIN_GDN_HD] = s[i]; }
+            }
         }
 #pragma unroll
         for (int i = 0; i < BRAIN_GDN_HD; ++i) { state_col[(unsigned long long)i * BRAIN_GDN_HD] = s[i]; }
@@ -342,7 +390,7 @@ brain_gdn_decode(const unsigned int* params, const float* mixed, const float* co
     const unsigned int kh = blockIdx.y * gridDim.x + blockIdx.x;  // key head
     if (kh >= params[0]) { return; }                               // block-uniform
     brain_gdn_decode_body(params, kh, params[6], mixed, conv_w, hist, bproj, aproj, a_log, dt_bias, state, z, norm_w,
-                          gated);
+                          gated, nullptr, nullptr);
 }
 
 // Each batch row is a different sequence with one token: the body runs a single
@@ -364,5 +412,61 @@ brain_gdn_decode_pool(const unsigned int* params, const float* mixed, const floa
                           bproj + static_cast<unsigned long long>(bi) * nvh, aproj + static_cast<unsigned long long>(bi) * nvh,
                           a_log, dt_bias, state + row * nvh * BRAIN_GDN_HD * BRAIN_GDN_HD,
                           z + static_cast<unsigned long long>(bi) * nvh * BRAIN_GDN_HD, norm_w,
-                          gated + static_cast<unsigned long long>(bi) * nvh * BRAIN_GDN_HD);
+                          gated + static_cast<unsigned long long>(bi) * nvh * BRAIN_GDN_HD, nullptr, nullptr);
+}
+
+// The verify entry: sequence `bi` runs `counts[bi]` consecutive steps from pool
+// row `rows[bi]`, its inputs and outputs the rows `offs[bi] ..` of the packed
+// token arrays, snapshotting the state and window after every row but the last.
+extern "C" __global__ void __launch_bounds__(BRAIN_GDN_MAX_GROUP * BRAIN_GDN_HD, 1)
+brain_gdn_verify_pool(const unsigned int* params, const float* mixed, const float* conv_w, float* hist,
+                      const float* bproj, const float* aproj, const float* a_log, const float* dt_bias,
+                      float* state, const float* z, const float* norm_w, float* gated, const unsigned int* rows,
+                      const unsigned int* counts, const unsigned int* offs, float* snap_state, float* snap_hist) {
+    const unsigned int nkh = params[0];
+    const unsigned int nvh = params[1];
+    const unsigned int b = params[6];
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int bi = blk / nkh;                // sequence
+    const unsigned int kh = blk - bi * nkh;           // key head
+    if (bi >= b) { return; }                          // block-uniform
+    const unsigned long long conv_dim = 2ull * nkh * BRAIN_GDN_HD + static_cast<unsigned long long>(nvh) * BRAIN_GDN_HD;
+    const unsigned long long state_len = static_cast<unsigned long long>(nvh) * BRAIN_GDN_HD * BRAIN_GDN_HD;
+    const unsigned long long hist_len = conv_dim * (BRAIN_GDN_KW - 1);
+    const unsigned long long row = rows[bi];
+    const unsigned long long off = offs[bi];
+    const unsigned int n = counts[bi];
+    brain_gdn_decode_body(params, kh, n, mixed + off * conv_dim, conv_w, hist + row * hist_len,
+                          bproj + off * nvh, aproj + off * nvh, a_log, dt_bias, state + row * state_len,
+                          z + off * nvh * BRAIN_GDN_HD, norm_w, gated + off * nvh * BRAIN_GDN_HD,
+                          snap_state + off * state_len, snap_hist + off * hist_len);
+}
+
+// Put the snapshot row `sel[bi]` back over pool row `rows[bi]` for every
+// sequence that has one. Block (bi, c) copies the c-th 4096-element tile of the
+// state, and of the window for the first tiles that cover it.
+#define BRAIN_GDN_COMMIT_TILE 4096
+extern "C" __global__ void __launch_bounds__(256)
+brain_gdn_commit_pool(const unsigned int* params, float* pool_state, float* pool_hist, const float* snap_state,
+                      const float* snap_hist, const unsigned int* rows, const unsigned int* sel) {
+    const unsigned int b = params[0];
+    const unsigned long long state_len = params[1];
+    const unsigned long long hist_len = params[2];
+    const unsigned int tiles = static_cast<unsigned int>((state_len + BRAIN_GDN_COMMIT_TILE - 1) / BRAIN_GDN_COMMIT_TILE);
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int bi = blk / tiles;
+    const unsigned int tile = blk - bi * tiles;
+    if (bi >= b) { return; }                          // block-uniform
+    const unsigned int pick = sel[bi];
+    if (pick == 0xffffffffu) { return; }              // block-uniform
+    const unsigned long long row = rows[bi];
+    const unsigned long long lo = static_cast<unsigned long long>(tile) * BRAIN_GDN_COMMIT_TILE;
+    for (unsigned long long i = lo + threadIdx.x; i < lo + BRAIN_GDN_COMMIT_TILE && i < state_len; i += blockDim.x) {
+        pool_state[row * state_len + i] = snap_state[static_cast<unsigned long long>(pick) * state_len + i];
+    }
+    if (lo < hist_len) {
+        for (unsigned long long i = lo + threadIdx.x; i < lo + BRAIN_GDN_COMMIT_TILE && i < hist_len; i += blockDim.x) {
+            pool_hist[row * hist_len + i] = snap_hist[static_cast<unsigned long long>(pick) * hist_len + i];
+        }
+    }
 }

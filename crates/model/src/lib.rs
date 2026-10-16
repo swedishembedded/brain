@@ -43,6 +43,7 @@ pub mod fp8;
 pub mod gdn;
 pub mod gdn_mixer;
 pub mod gdn_segment;
+pub mod gdn_verify;
 pub mod gqa_mixer;
 pub mod grid;
 pub mod head_ce;

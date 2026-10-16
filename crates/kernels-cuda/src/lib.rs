@@ -768,6 +768,41 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
+        name: "gdn_verify_pool",
+        // The speculative verify form of `gdn_decode_pool`: a third entry point
+        // of that kernel's file. A fused kernel asked for by name (see
+        // `add_rms_quant`).
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_verify_pool",
+        what: "up to 8 consecutive Gated DeltaNet decode steps for every sequence of a batch in one launch, each sequence from its pool row, snapshotting the state and conv window after every row but the last so a rejected tail can be undone; the same body as gdn_decode_pool, bit-identical to repeated single steps",
+        reported: "native:gdn_verify_pool",
+        block_dim: 384,
+        // One block per (key head, sequence).
+        tile: (1, 1),
+        shared_bytes: 8 * (2 * 128 * 4 + 3 * 128 * 4 + 3 * 3 * 4),
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
+        name: "gdn_commit_pool",
+        // Restores the snapshot `gdn_verify_pool` took of the last accepted row.
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_commit_pool",
+        what: "copies, for each sequence that rejected speculated rows, the snapshot of its last accepted row's recurrent state and conv window back over its pool row; a block per 4096-element tile per sequence",
+        reported: "native:gdn_commit_pool",
+        block_dim: 256,
+        tile: (1, 1),
+        shared_bytes: 0,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
         name: "gqa_decode_prep",
         // A fused kernel asked for by name (see `add_rms_quant`); the operator
         // and tier are unique in this table.
