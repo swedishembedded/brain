@@ -48,15 +48,17 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
 
 ## Next (dependency order)
 
-- Adapter on the real 27B: serve or generate with a trained qwen35 adapter on the
-  resident INT8/NF4 engine (a LoRA bank or an on-device fold). Without it a trained 27B
-  adapter cannot be shown to change behaviour (Q6 is open).
-- A real-checkpoint run at long sequence length through the CLI (the probe measured
-  random weights); a throughput pass (19-20 tokens/s today: the segmented recurrence and
-  the on-the-fly NF4 decode dominate); a hand-tuned CUDA flash kernel for head_dim 256.
-- CLI: per-step loss output, an evaluation interval, a load-time print, and explicit flags
-  for the long-sequence settings (they are chosen automatically for rows of 2048 tokens
-  or more at batch 1); `qwen35_train_probe --help` runs a probe instead of printing help.
+- Adapter on the real 27B in serving: `brain qwen35 sample-adapter` shows a trained adapter changing
+  the greedy answer on the NF4 base (knowledge 280, Q6 passes for the facts, the control question shows the
+  adapter overfits); serving it still needs a LoRA bank or an on-device fold on the resident engine, and the
+  decode is repeated full forwards (no KV cache).
+- Long rows: the real-checkpoint NF4 step at 8192 tokens ran through the CLI (knowledge 281); 16384 on the
+  real checkpoint and a throughput pass are open. Throughput could not be tuned on this shared card: the same
+  probe step varied 4x with a neighbour job (knowledge 281). Start from the launch counts there (segment-128
+  GDN issues thousands of tiny `concat_split`/`bmm_tiled` launches per layer-step) and measure on a quiet
+  card or with `program_table` replays. A hand-tuned CUDA flash kernel for head_dim 256 is also open.
+- `cargo test` on the CPU backend: `a_tiny_bf16_lora_finetune_runs_through_the_cli_path` aborts with
+  heap corruption (it passes on CUDA); it is `#[ignore]`d with that reason until the CPU bf16 path is fixed.
 - Embedding table and head are always bf16, never NF4; MTP builds keep the old fp32 head
   and cannot use the bf16 residual stream; host offload of residuals for 64K and beyond.
 - Implement `TokenObjectives` and `LoraSites` for qwen35 and qwen35moe (flip the capability
