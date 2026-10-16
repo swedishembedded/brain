@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn sequence_shape_and_answers() {
         let m = Mqar { vocab_content: 8, n_pairs: 3, n_queries: 2, ..Mqar::default() };
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(data::rng::random_seed());
         let (seq, answers) = m.gen_sequence(&mut rng);
         assert_eq!(seq.len(), m.seq_len());
         // SEP sits right after the bindings.
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn distinct_indices_are_distinct_and_in_range() {
-        let mut rng = Rng::new(5);
+        let mut rng = Rng::new(data::rng::random_seed());
         let idx = sample_distinct_indices(4, 6, &mut rng);
         assert_eq!(idx.len(), 4);
         let mut sorted = idx.clone();

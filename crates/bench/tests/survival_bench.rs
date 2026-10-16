@@ -22,6 +22,7 @@
 use bench::survival_bench::{SurvivalCompeting, SurvivalIrregular, SurvivalLongitudinal, SurvivalSingle};
 use bench::{Benchmark, Metrics};
 
+// seed: the survival bounds were measured from seeded CUDA runs (seeds 1 to 4) and the margins hold at this seed
 const SEED: u64 = 1;
 
 fn skip_gpu() -> bool {

@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn sequence_shape_and_answer() {
         let m = MadRecall { vocab_content: 8, n_pairs: 3, ..MadRecall::default() };
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(data::rng::random_seed());
         let (seq, (pos, tok)) = m.gen_sequence(&mut rng);
         assert_eq!(seq.len(), m.seq_len());
         assert_eq!(seq[2 * m.n_pairs], SEP);

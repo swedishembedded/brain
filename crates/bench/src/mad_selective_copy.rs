@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn copy_out_matches_marked_tokens() {
         let m = MadSelectiveCopy::default();
-        let mut rng = Rng::new(4);
+        let mut rng = Rng::new(data::rng::random_seed());
         for _ in 0..50 {
             let (seq, (start, selected)) = m.gen_sequence(&mut rng);
             assert_eq!(seq.len(), m.seq_len());

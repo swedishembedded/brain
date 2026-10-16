@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn sequence_has_fixed_length_and_valid_answer() {
         let m = MadNoisyRecall::default();
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::new(data::rng::random_seed());
         for _ in 0..50 {
             let (seq, (pos, tok)) = m.gen_sequence(&mut rng);
             assert_eq!(seq.len(), m.seq_len());

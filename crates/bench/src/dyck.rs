@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn word_is_balanced_and_within_depth() {
         let m = Dyck { k: 3, max_depth: 4, length: 16, ..Dyck::default() };
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(data::rng::random_seed());
         for _ in 0..200 {
             let (seq, answers) = m.gen_sequence(&mut rng);
             assert_eq!(seq.len(), m.seq_len());

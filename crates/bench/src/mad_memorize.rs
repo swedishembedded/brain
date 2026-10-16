@@ -255,9 +255,10 @@ mod tests {
     #[test]
     fn map_is_fixed_across_sequences() {
         let m = MadMemorize::default();
-        let map = m.build_map(42);
+        let seed = data::rng::random_seed();
+        let map = m.build_map(seed);
         // The same key always yields the same answer, regardless of rng state.
-        let mut rng = Rng::new(42);
+        let mut rng = Rng::new(seed);
         let mut seen: std::collections::HashMap<u16, u16> = std::collections::HashMap::new();
         for _ in 0..500 {
             let (seq, (pos, tok)) = m.gen_sequence(&mut rng, &map);

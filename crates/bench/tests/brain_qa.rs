@@ -84,6 +84,7 @@ fn qwen_recalls_brain_codebase_facts() {
         mask_before: Some('='),
         mask_per_line: true,
         align_to_lines: true,
+        // seed: the >= 0.9 memorisation threshold was measured at this training seed
         seed: 7,
     };
     let block = 80u32; // longest "question=answer" line is ~55 chars

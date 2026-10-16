@@ -26,6 +26,7 @@ fn eval_gpt_smoke_writes_valid_artifact() {
         return;
     }
 
+    // seed: the smoke battery was only validated (every axis finite) at this seed; not re-measured for other draws
     let seed = 4242u64;
     // Run the WHOLE battery against `gpt2` in smoke mode.
     let report = bench::eval::run("gpt2", seed, true).expect("eval run");

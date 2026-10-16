@@ -30,6 +30,7 @@ fn capscale_gpt_smoke_writes_valid_artifact() {
     }
 
     // A trimmed budget keeps the 3×6 grid under a few minutes on CPU.
+    // seed: the smoke grid was only validated (finite fits on every axis) at this seed; not re-measured for other draws
     let cfg = CapScaleConfig { steps: 40, n_sequences: 500, eval_sequences: 40, seed: 4242, ..Default::default() };
     let report = capscale::run("gpt2", &cfg).expect("capscale run");
 

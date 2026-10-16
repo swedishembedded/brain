@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn sequence_shape_and_running_parity() {
         let m = Parity { n_bits: 6, ..Parity::default() };
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(data::rng::random_seed());
         let (seq, answers) = m.gen_sequence(&mut rng);
         assert_eq!(seq.len(), m.seq_len());
         assert_eq!(seq[m.n_bits], SEP);

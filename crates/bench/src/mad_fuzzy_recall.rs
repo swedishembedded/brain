@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn sequence_fixed_length_and_answer_in_value_band() {
         let m = MadFuzzyRecall::default();
-        let mut rng = Rng::new(2);
+        let mut rng = Rng::new(data::rng::random_seed());
         for _ in 0..50 {
             let (seq, (start, answer)) = m.gen_sequence(&mut rng);
             assert_eq!(seq.len(), m.seq_len());

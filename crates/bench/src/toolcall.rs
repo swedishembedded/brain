@@ -440,7 +440,7 @@ mod tests {
             arg_values: 8,
             ..Toolcall::default()
         };
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(data::rng::random_seed());
         let (seq, call) = m.gen_sequence(&mut rng);
         assert_eq!(seq.len(), m.seq_len());
         assert_eq!(*seq.last().unwrap(), NL);
@@ -518,7 +518,7 @@ mod tests {
             n_distractor_names: 5,
             ..Toolcall::default()
         };
-        let mut rng = Rng::new(9);
+        let mut rng = Rng::new(data::rng::random_seed());
         let l = m.layout();
         let arg_field_lo = l.argfield0;
         let arg_field_hi = l.argfield0 + (m.n_tools * m.args_per_tool) as u16;
