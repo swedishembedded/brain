@@ -58,7 +58,7 @@ pub mod sample;
 #[cfg(feature = "qwen3tts")]
 pub mod tts;
 
-pub use pump::{AudioStreamPump, StreamPump};
+pub use pump::{turn_seed, AudioStreamPump, StreamPump};
 #[cfg(feature = "qwen3tts")]
 pub use tts::Qwen3TtsSynthModel;
 
@@ -468,7 +468,9 @@ pub struct GenConfig {
     /// Seeds the sampler. Only a `temperature` above zero consults it (greedy
     /// decoding is an argmax), but a caller who raises the temperature of
     /// [`GenConfig::default`] must not inherit a fixed stream, so the default
-    /// draws a fresh seed.
+    /// draws a fresh seed. In a [`Controller`] this is the session seed: each
+    /// chat turn samples under [`turn_seed`] of it, and reports that seed on
+    /// its final chunk.
     pub seed: u64,
 }
 
@@ -512,7 +514,11 @@ struct Brain {
     /// Generic capability providers (Z-Image, …), driving `ActionRequest` /
     /// `ManifestRequest` through the model-agnostic [`capability`] interface.
     caps: capability::Registry,
+    /// The session's generation config; a chat turn samples under
+    /// [`turn_seed`] of `cfg.seed` and the turn's number.
     cfg: GenConfig,
+    /// Chat turns started so far in this session.
+    turns: u64,
     pump: Option<StreamPump>,
     /// Active audio pump while in `Synthesizing` (parallel to `pump`).
     audio_pump: Option<AudioStreamPump>,
@@ -745,7 +751,9 @@ impl Brain {
     fn start_chat(&mut self) {
         let prompt = self.pending_prompt.take().unwrap_or_default();
         if let Some(infer) = self.registry.infer.as_deref() {
-            self.pump = Some(StreamPump::new(infer, &prompt, self.cfg.clone()));
+            let cfg = GenConfig { seed: turn_seed(self.cfg.seed, self.turns), ..self.cfg.clone() };
+            self.turns += 1;
+            self.pump = Some(StreamPump::new(infer, &prompt, cfg));
         }
         self.seq = 0;
         // Reminder: drive the first token next RTC step.
@@ -757,7 +765,7 @@ impl Brain {
         let infer = match self.registry.infer.as_deref() {
             Some(i) => i,
             None => {
-                self.emit(Event::BrainTextChunk { text: String::new(), seq: self.seq, done: true });
+                self.emit(Event::BrainTextChunk { text: String::new(), seq: self.seq, done: true, seed: None });
                 self.want_idle = true;
                 return;
             }
@@ -765,13 +773,14 @@ impl Brain {
         let step = self.pump.as_mut().map(|p| p.step(infer)).unwrap_or(None);
         match step {
             Some(delta) => {
-                self.emit(Event::BrainTextChunk { text: delta, seq: self.seq, done: false });
+                self.emit(Event::BrainTextChunk { text: delta, seq: self.seq, done: false, seed: None });
                 self.seq += 1;
                 self.pending_tick = true; // re-post: keep streaming
             }
             None => {
                 // EOS / max_new: terminal chunk then back to Idle.
-                self.emit(Event::BrainTextChunk { text: String::new(), seq: self.seq, done: true });
+                let seed = self.pump.as_ref().map(StreamPump::seed);
+                self.emit(Event::BrainTextChunk { text: String::new(), seq: self.seq, done: true, seed });
                 self.want_idle = true;
             }
         }
@@ -953,6 +962,7 @@ impl Controller {
             registry,
             caps: capability::Registry::new(),
             cfg,
+            turns: 0,
             pump: None,
             audio_pump: None,
             backtest_pump: None,

@@ -36,7 +36,9 @@
 //!    "max_frames":256}
 //! Response (server -> client, JSONL):
 //!   {"event":"audio_chunk","pcm_b64":"<f32le base64>","sample_rate":24000,"seq":N,"done":false}
-//!   ... terminated by {"event":"audio_chunk","pcm_b64":"","seq":M,"done":true}
+//!   ... terminated by {"event":"audio_chunk","pcm_b64":"","seq":M,"done":true,"seed":S}
+//!       where S is the seed the request generated under: the one it named, else
+//!       one drawn for it. Sending it back as "seed" reproduces the audio.
 //!   or {"event":"error","message":"..."}
 
 use std::collections::HashMap;
@@ -55,7 +57,7 @@ const SAMPLE_RATE: u32 = 24000;
 /// Messages streamed from the executor back to a connection handler.
 enum Msg {
     Audio { pcm_b64: String, seq: u32 },
-    Done { samples: usize, ms: f64 },
+    Done { samples: usize, ms: f64, seed: u64 },
     Error(String),
 }
 
@@ -271,7 +273,7 @@ fn executor(cfgs: HashMap<String, EngineCfg>, jobs: Receiver<Job>) {
         }));
         match res {
             Ok(Ok(samples)) => {
-                let _ = job.reply.send(Msg::Done { samples, ms: t.elapsed().as_secs_f64() * 1e3 });
+                let _ = job.reply.send(Msg::Done { samples, ms: t.elapsed().as_secs_f64() * 1e3, seed: req.opts.seed });
             }
             Ok(Err(e)) => {
                 let _ = job.reply.send(Msg::Error(e));
@@ -342,10 +344,10 @@ fn handle_conn(stream: UnixStream, jobs: Sender<Job>) {
         }
         for msg in rx {
             let out = match msg {
-                Msg::Audio { pcm_b64, seq } => audio_line(&pcm_b64, seq, false),
-                Msg::Done { samples, ms } => {
-                    eprintln!("tts serve: served {samples} samples in {ms:.0}ms");
-                    audio_line("", u32::MAX, true)
+                Msg::Audio { pcm_b64, seq } => audio_line(&pcm_b64, seq, None),
+                Msg::Done { samples, ms, seed } => {
+                    eprintln!("tts serve: served {samples} samples in {ms:.0}ms (seed {seed})");
+                    audio_line("", u32::MAX, Some(seed))
                 }
                 Msg::Error(e) => err_line(&e),
             };
@@ -385,14 +387,46 @@ fn parse_request(line: &str) -> Result<(String, Req), String> {
     Ok((engine, req))
 }
 
-fn audio_line(pcm_b64: &str, seq: u32, done: bool) -> String {
-    serde_json::json!({
+/// One `audio_chunk` line. The final chunk is the one that carries the seed the
+/// request generated under (`done_seed`); the others carry none.
+fn audio_line(pcm_b64: &str, seq: u32, done_seed: Option<u64>) -> String {
+    let mut line = serde_json::json!({
         "event": "audio_chunk", "pcm_b64": pcm_b64,
-        "sample_rate": SAMPLE_RATE, "seq": seq, "done": done,
-    })
-    .to_string()
+        "sample_rate": SAMPLE_RATE, "seq": seq, "done": done_seed.is_some(),
+    });
+    if let Some(seed) = done_seed {
+        line["seed"] = serde_json::json!(seed);
+    }
+    line.to_string()
 }
 
 fn err_line(msg: &str) -> String {
     serde_json::json!({"event": "error", "message": msg}).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_of(request: &str) -> u64 {
+        parse_request(request).expect("valid request").1.opts.seed
+    }
+
+    /// A request that names no seed gets a drawn one, and the final chunk
+    /// reports it, so naming it in a second request reproduces the first.
+    #[test]
+    fn a_drawn_seed_is_reported_on_the_final_chunk_and_replays() {
+        let unseeded = r#"{"text":"hello"}"#;
+        let drawn = seed_of(unseeded);
+        assert_ne!(drawn, seed_of(unseeded), "an unseeded request draws a fresh seed each time");
+
+        let done: serde_json::Value = serde_json::from_str(&audio_line("", u32::MAX, Some(drawn))).expect("json");
+        assert_eq!(done["done"], true);
+        let reported = done["seed"].as_u64().expect("the final chunk carries the seed");
+        assert_eq!(seed_of(&format!(r#"{{"text":"hello","seed":{reported}}}"#)), drawn);
+
+        let mid: serde_json::Value = serde_json::from_str(&audio_line("AAAA", 3, None)).expect("json");
+        assert_eq!(mid["done"], false);
+        assert!(mid.get("seed").is_none());
+    }
 }

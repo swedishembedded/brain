@@ -6,7 +6,7 @@
 
 use events::{base64, ppm, Envelope, Event};
 use runtime::{
-    Controller, FakeDetectModel, FakeInferModel, FakeSynthModel, GenConfig, Registry,
+    Controller, FakeDetectModel, FakeInferModel, FakeSynthModel, GenConfig, InferModel, Registry, StreamPump,
 };
 
 /// Project the inner [`Event`]s out of a returned envelope stream (dropping
@@ -34,7 +34,7 @@ fn user_text_streams_one_chunk_per_token_then_done() {
     let chunks: Vec<(&str, u32, bool)> = out
         .iter()
         .filter_map(|e| match e {
-            Event::BrainTextChunk { text, seq, done } => Some((text.as_str(), *seq, *done)),
+            Event::BrainTextChunk { text, seq, done, .. } => Some((text.as_str(), *seq, *done)),
             _ => None,
         })
         .collect();
@@ -426,4 +426,71 @@ fn request_without_req_id_carries_none() {
     let out = ctrl.feed_line(r#"{"event":"user_text","text":"q"}"#);
     assert!(!out.is_empty());
     assert!(out.iter().all(|e| e.req_id.is_none()), "untagged request must carry None: {out:?}");
+}
+
+/// Every token equally likely, so what a turn says is decided by its seed alone.
+struct Uniform;
+
+impl InferModel for Uniform {
+    fn logits_all(&self, tokens: &[u32]) -> Vec<f32> {
+        vec![0.0; tokens.len() * 4]
+    }
+    fn block_size(&self) -> u32 {
+        64
+    }
+    fn vocab(&self) -> u32 {
+        4
+    }
+    fn itos(&self) -> Option<&[char]> {
+        Some(&['a', 'b', 'c', 'd'])
+    }
+}
+
+const TURN_LEN: usize = 24;
+
+fn sampling_controller(session_seed: u64) -> Controller {
+    let reg = Registry::with_models(Box::new(Uniform), Box::new(FakeDetectModel::default()));
+    let cfg = GenConfig { max_new: TURN_LEN, temperature: 1.0, top_k: 0, eos: None, seed: session_seed };
+    Controller::with_config(reg, cfg)
+}
+
+/// One chat turn: the text it streamed and the seed its last chunk reports.
+fn turn(ctrl: &mut Controller, prompt: &str) -> (String, Option<u64>) {
+    let out = events_of(&ctrl.feed_line(&format!(r#"{{"event":"user_text","text":"{prompt}"}}"#)));
+    let text: String = out
+        .iter()
+        .filter_map(|e| match e {
+            Event::BrainTextChunk { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let seed = out.iter().find_map(|e| match e {
+        Event::BrainTextChunk { done: true, seed, .. } => Some(*seed),
+        _ => None,
+    });
+    (text, seed.expect("a turn ends with a done chunk"))
+}
+
+#[test]
+fn each_chat_turn_samples_under_its_own_reported_seed() {
+    let mut ctrl = sampling_controller(7);
+    let (first, first_seed) = turn(&mut ctrl, "ab");
+    let (second, second_seed) = turn(&mut ctrl, "ab");
+    let (first_seed, second_seed) = (first_seed.expect("the turn reports its seed"), second_seed.expect("the turn reports its seed"));
+    assert_ne!(first, second, "two identical prompts must not repeat one stream");
+    assert_ne!(first_seed, second_seed);
+
+    // The reported seed replays the turn it names.
+    let replay = |seed: u64| -> String {
+        let cfg = GenConfig { max_new: TURN_LEN, temperature: 1.0, top_k: 0, eos: None, seed };
+        let mut pump = StreamPump::new(&Uniform, "ab", cfg);
+        std::iter::from_fn(|| pump.step(&Uniform)).collect()
+    };
+    assert_eq!(replay(first_seed), first);
+    assert_eq!(replay(second_seed), second);
+
+    // The session seed replays the whole conversation.
+    let mut again = sampling_controller(7);
+    assert_eq!(turn(&mut again, "ab"), (first, Some(first_seed)));
+    assert_eq!(turn(&mut again, "ab"), (second, Some(second_seed)));
 }

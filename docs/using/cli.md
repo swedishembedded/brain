@@ -269,6 +269,9 @@ like, rather than silently fetching something adjacent.
   JSONL events on stdin (e.g. `user_text`, `camera_frame`) and streams JSONL
   events back on stdout (e.g. `brain_text_chunk`, `object_detected`), driven
   by a `--gpt`/`--yolo` checkpoint if you give one.
+  Each chat turn samples under its own seed, derived from the session seed
+  (`--seed`, else drawn and printed at startup); the final `brain_text_chunk`
+  of a turn carries it as `seed`.
 
 ## See also
 

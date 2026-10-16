@@ -13,6 +13,17 @@
 use crate::sample::{sample_logits, Rng};
 use crate::{GenConfig, InferModel};
 
+/// Keeps the per-turn seeds apart from the session seed itself.
+const TURN_SALT: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// The seed of chat turn number `turn` in a session seeded `session`. Each turn
+/// of one conversation draws from its own stream, so repeating a prompt does not
+/// repeat the answer, and the session seed still reproduces the whole
+/// conversation.
+pub fn turn_seed(session: u64, turn: u64) -> u64 {
+    Rng::new(session ^ turn.wrapping_mul(TURN_SALT)).next_u64()
+}
+
 /// One synchronous streaming generation. Owns the prompt+generated context and a
 /// seeded RNG; each [`step`](StreamPump::step) pumps one token.
 pub struct StreamPump {
@@ -60,6 +71,11 @@ impl StreamPump {
         self.ctx.push(next);
         self.generated += 1;
         Some(decode_token(model, next))
+    }
+
+    /// The seed this generation samples under.
+    pub fn seed(&self) -> u64 {
+        self.cfg.seed
     }
 
     /// Number of tokens generated so far.

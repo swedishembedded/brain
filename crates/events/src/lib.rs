@@ -32,8 +32,10 @@ pub enum Event {
     /// User-typed text fed into the brain.
     UserText { text: String },
     /// A streamed chunk of the brain's text response. `seq` orders chunks;
-    /// `done` marks the final chunk of a response.
-    BrainTextChunk { text: String, seq: u32, done: bool },
+    /// `done` marks the final chunk of a response. The final chunk carries the
+    /// `seed` the response was sampled under: generating again from the same
+    /// prompt with that seed reproduces it. Other chunks carry none.
+    BrainTextChunk { text: String, seq: u32, done: bool, seed: Option<u64> },
     /// A camera frame, either inlined (`data`, base64) or referenced (`path`).
     CameraFrame {
         format: String,
@@ -197,8 +199,12 @@ pub fn encode_line(ev: &Event) -> String {
 fn event_to_value(ev: &Event) -> Value {
     match ev {
         Event::UserText { text } => json!({ "event": "user_text", "text": text }),
-        Event::BrainTextChunk { text, seq, done } => {
-            json!({ "event": "brain_text_chunk", "text": text, "seq": seq, "done": done })
+        Event::BrainTextChunk { text, seq, done, seed } => {
+            let mut v = json!({ "event": "brain_text_chunk", "text": text, "seq": seq, "done": done });
+            if let Some(seed) = seed {
+                v["seed"] = json!(seed);
+            }
+            v
         }
         Event::CameraFrame { format, w, h, data, path } => json!({
             "event": "camera_frame", "format": format, "w": w, "h": h,
@@ -298,6 +304,7 @@ fn decode_event_value(v: &Value) -> Result<Event, String> {
             text: s("text"),
             seq: u("seq"),
             done: v["done"].as_bool().unwrap_or(false),
+            seed: v["seed"].as_u64(),
         }),
         "camera_frame" => Ok(Event::CameraFrame {
             format: {
@@ -579,8 +586,9 @@ mod tests {
     fn all_variants() -> Vec<Event> {
         vec![
             Event::UserText { text: "hi there".into() },
-            Event::BrainTextChunk { text: "tok".into(), seq: 7, done: false },
-            Event::BrainTextChunk { text: "".into(), seq: 8, done: true },
+            Event::BrainTextChunk { text: "tok".into(), seq: 7, done: false, seed: None },
+            // seed: the terminal chunk of a turn carries its seed on the wire
+            Event::BrainTextChunk { text: "".into(), seq: 8, done: true, seed: Some(42) },
             Event::CameraFrame {
                 format: "rgb8".into(),
                 w: 2,
@@ -743,7 +751,7 @@ mod tests {
             r#"{"event":"user_text","text":"hi"}"#
         );
         assert_eq!(
-            encode_line(&Event::BrainTextChunk { text: "a".into(), seq: 0, done: true }),
+            encode_line(&Event::BrainTextChunk { text: "a".into(), seq: 0, done: true, seed: None }),
             r#"{"done":true,"event":"brain_text_chunk","seq":0,"text":"a"}"#
         );
     }
@@ -792,7 +800,7 @@ mod tests {
     fn golden_envelope_bytes_with_req_id() {
         let env = Envelope::with_id(
             Some("r1".into()),
-            Event::BrainTextChunk { text: "a".into(), seq: 0, done: true },
+            Event::BrainTextChunk { text: "a".into(), seq: 0, done: true, seed: None },
         );
         assert_eq!(
             encode_envelope(&env),
