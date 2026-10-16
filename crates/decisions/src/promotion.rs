@@ -500,7 +500,7 @@ mod tests {
             ada_ece: 0.05,
             reliability: vec![],
             coverage_accuracy: vec![],
-            order_seed: 0,
+            order_seed: data::rng::random_seed(),
             order_instability: 0.0,
             regret: Some(Regret { costs: CostSpec { false_exclusion: 5.0, wasted_tokens: 1.0 }, model: 0.4, always_trust: 0.9, always_defer: 0.8, trusted_share: 0.9 }),
             families: BTreeMap::from([("alpha".to_string(), FamilyReport { examples: 30, accuracy: 0.9, baseline_accuracy: 0.3, nll: 0.3 })]),

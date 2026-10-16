@@ -502,7 +502,7 @@ mod tests {
     }
 
     fn request(split: Split) -> EvalRequest {
-        EvalRequest { split, order_seed: 7, costs: None }
+        EvalRequest { split, order_seed: data::rng::random_seed(), costs: None }
     }
 
     #[test]
@@ -596,7 +596,7 @@ mod tests {
         let mut lines = synthetic_jsonl(&SyntheticTask::new(4, 0, 6));
         let mut other = SyntheticTask::new(0, 0, 6);
         other.family = "other";
-        other.seed = 99;
+        other.seed = data::rng::random_seed();
         // Unique tasks, seeds and states for the second family.
         let other_lines = synthetic_jsonl(&other).replace("task-", "o-task-").replace("\"seed\":", "\"seed\":1000").replace("ticket ", "other ticket ");
         lines.push_str(&other_lines);
