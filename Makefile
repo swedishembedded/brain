@@ -389,9 +389,9 @@ test/slow:
 # registration - see `.agents/rules/.agents/knowledge/`). Needs no external
 # fixtures, so unlike `test/parity/strict` it carries no narrowing knob and no
 # "green because skipped" risk.
-## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + every check/* gate
+## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + test/rl + test/gradcheck + every check/* gate
 ##   + test/parity + test/parity/strict (needs make testdata/fetch)
-test/full: test test/doc test/slow test/e2e test/conformance check/scripts check/env-reads check/test-skips check/seed-literals test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
+test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck check/scripts check/env-reads check/test-skips check/seed-literals test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -424,18 +424,18 @@ test/gradcheck:
 # reported skip, an absence. Without this target, "the objectives are
 # gradient-checked" is true only of whatever tree a human last ran manually.
 #
-# Excludes `continual_study`/`document_study`: both are documented in
-# crates/rl/Cargo.toml as multi-minute, one-GPU, "run it alone" - batching
-# them into a parallel lane would either serialise the whole target behind
-# them or risk exactly the GPU-contention hangs `test/nextest`'s own doc
-# comment above describes. Run those two individually when touching that
-# code, not as part of routine verification.
+# Runs `continual_study`'s fast tests; its multi-seed experiment is
+# `#[ignore]`d (minutes on one GPU, run it alone with `--ignored --nocapture`).
+# Excludes `document_study`: documented in crates/rl/Cargo.toml as multi-minute,
+# one-GPU, "run it alone" - batching it into a parallel lane would either
+# serialise the whole target behind it or risk exactly the GPU-contention hangs
+# `test/nextest`'s own doc comment above describes. Run it individually when
+# touching that code, not as part of routine verification.
 #
-# MOE_SKIP_GPU_TESTS's early-return-as-pass inside each test file cannot be
-# made to print anything a normal `cargo test` run would show (libtest
-# captures stdout/stderr from a PASSING test and discards it unless
-# `--nocapture` is given) - so the loud warning belongs here, at the one
-# place a human actually looks.
+# A test that skips through `brain_testutil::gpu_tests_skipped` prints its
+# `SKIP:` line, but libtest captures stdout/stderr from a PASSING test and
+# discards it unless `--nocapture` is given - so the loud warning belongs here,
+# at the one place a human actually looks.
 ## test/rl - crates/rl's qwen3-gated DPO/GRPO/distill gradchecks, GRPO correctness and continual-study integration tests
 test/rl:
 	@if [ -n "$$MOE_SKIP_GPU_TESTS" ]; then \
