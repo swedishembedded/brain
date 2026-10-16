@@ -136,13 +136,15 @@ const LONG_STEP_TOKENS: u32 = 8192;
 /// 29,888 to 11,078, knowledge 233/234). What the card allows depends on how
 /// much of it the frozen base takes: the 4-bit base (about 16 GB for the 27B)
 /// leaves room for 2048-token segments and 2048-row MLP chunks at 8K tokens
-/// (about 4 GiB more than the 128/512 settings); the bf16 base (about 54 GB)
-/// stays at 512-token segments and 1024-row chunks. Both are whole multiples
+/// (about 4 GiB more than the 128/512 settings). The bf16 base (about 54 GB)
+/// takes the same 2048/2048: the 64-layer 8K step peaked at 67.1 GiB with 2048/2048
+/// and at 65.8 GiB with 512/1024, while the larger settings cut the launches of a
+/// step from 214,927 to 74,191 (knowledge 311). Both are whole multiples
 /// of the 64-token chunk and of the convolution history the segments carry.
 fn long_settings(dtype: BaseDtype) -> (u32, u32) {
     match dtype {
         BaseDtype::Nf4 => (2048, 2048),
-        BaseDtype::Bf16 => (512, 1024),
+        BaseDtype::Bf16 => (2048, 2048),
         BaseDtype::F32 => (128, 512),
     }
 }
@@ -263,6 +265,9 @@ mod tests {
     fn long_rows_at_batch_one_default_to_the_long_sequence_settings() {
         let o = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2048, false).unwrap();
         assert_eq!((o.gdn_segment_tokens, o.mlp_rows, o.bf16_residuals), (Some(2048), Some(2048), true));
+        let bf16 = StreamedRun { dtype: BaseDtype::Bf16, recompute: true, long: LongSeqOverrides::default() };
+        let o = streamed_train_opts(&bf16, 1, 8192, false).unwrap();
+        assert_eq!((o.gdn_segment_tokens, o.mlp_rows), (Some(2048), Some(2048)), "the bf16 base fits the same settings (67.1 GiB peak at 64 layers, 8K)");
         let short = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2047, false).unwrap();
         assert_eq!((short.gdn_segment_tokens, short.mlp_rows, short.bf16_residuals), (None, None, false));
         let mtp = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 4096, true).unwrap();

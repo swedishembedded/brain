@@ -337,7 +337,7 @@ const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|D
   --seq-len     training sequence length (alias of --block); --rank/--alpha are aliases of --lora-rank/--lora-alpha
   --recompute   recompute layer activations in the backward pass instead of keeping them (default on for bf16/nf4)
   --gdn-segment, --bf16-residuals, --mlp-rows  the long-sequence settings (segmented Gated-DeltaNet layers, bf16 residual
-                stream, MLP in token chunks) of a bf16/nf4 base. Rows of 2048 tokens or more at batch 1 get 128 / on / 512
+                stream, MLP in token chunks) of a bf16/nf4 base. Rows of 2048 tokens or more at batch 1 get 2048 / on / 2048
                 by themselves; naming one replaces that choice (0 turns --gdn-segment and --mlp-rows off)
   --eval-interval  evaluate on the held-out split every N steps (default 250, 0: never); --eval-batches batches per evaluation
   Every step prints its loss to stderr. --backend cuda|cpu|vulkan is the global backend flag and applies as for every other command";
