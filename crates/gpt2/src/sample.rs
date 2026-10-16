@@ -126,10 +126,11 @@ fn argmax(v: &[f32]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data::rng::random_seed;
 
     #[test]
     fn greedy_picks_argmax() {
-        let mut rng = Rng::new(0);
+        let mut rng = Rng::new(random_seed());
         let logits = [0.1, 5.0, 0.2, -1.0];
         // temperature <= 0 => greedy
         assert_eq!(sample_logits(&logits, 0.0, 0, &mut rng), 1);
@@ -137,7 +138,7 @@ mod tests {
 
     #[test]
     fn top_k_one_is_greedy() {
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(random_seed());
         let logits = [0.1, 5.0, 0.2, -1.0];
         for _ in 0..20 {
             assert_eq!(sample_logits(&logits, 1.0, 1, &mut rng), 1);
@@ -148,6 +149,7 @@ mod tests {
 #[cfg(test)]
 mod kv_gen_tests {
     use super::*;
+    use data::rng::random_seed;
     use crate::model::{Gpt, GptConfig};
     use std::collections::HashMap;
 
@@ -165,6 +167,8 @@ mod kv_gen_tests {
         // d_model=32 keeps the fused-qkv weight-slice offsets 256B-aligned (see
         // model::kv_step_matches_full_recompute).
         let cfg = GptConfig::tiny();
+        // Greedy equality holds only up to ~1e-3 logit drift between the paths.
+        // seed: this weight draw has no near-tie argmax
         let mut rng = Rng::new(1);
         let mut map: HashMap<String, Vec<f32>> = HashMap::new();
         for (name, count) in cfg.param_list() {
@@ -178,9 +182,9 @@ mod kv_gen_tests {
         // t sized to block_size so full-window recompute never exceeds the model.
         let model = Gpt::new_on(gpu_core::testgpu::dev(crate::model::PIPELINES), cfg.clone(), 1, cfg.block_size, &map);
         let prompt = vec![1u32, 5, 3];
-        let mut r1 = Rng::new(0);
+        let mut r1 = Rng::new(random_seed());
         let recompute = generate(&model, &prompt, 16, 0.0, 0, &mut r1);
-        let mut r2 = Rng::new(0);
+        let mut r2 = Rng::new(random_seed());
         let kv = generate_kv(&model, &prompt, 16, 0.0, 0, &mut r2);
         assert_eq!(recompute, kv, "KV greedy generation must equal recompute generation");
     }
