@@ -38,7 +38,8 @@ ADAPTER=<owner/name[:tag]>`, which builds the release binary first.
 
 ```
 brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-dtype f32|bf16|nf4]
-    [--lora-rank R] [--lora-alpha A] [--seq-len T] [--recompute on|off] [--steps N] [--lr X] ...
+    [--lora-rank R] [--lora-alpha A] [--seq-len T] [--recompute on|off] [--steps N] [--lr X]
+    [--gdn-segment N] [--bf16-residuals on|off] [--mlp-rows N] [--eval-interval N] ...
 ```
 
 - `--base BASE` - a brain-native `.safetensors` checkpoint, or (with
@@ -58,9 +59,36 @@ brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-dtype f
   keeps all activations, so `--recompute on` is refused there.
 - `--backend cuda|cpu|vulkan` is the global backend flag, as for every command.
 
-Status: the `f32` tier is the existing trainer. `bf16` and `nf4` are accepted
-by the command line and open the streamed base, but the training step on those
-tiers is not available yet, and the command exits with an error that says so.
+- `--gdn-segment`, `--bf16-residuals`, `--mlp-rows` - the long-sequence
+  settings of a `bf16`/`nf4` base: segmented Gated-DeltaNet layers (tokens per
+  segment), a bf16 residual stream, the MLP run in token chunks. Rows of 2048
+  tokens or more at batch 1 get 128 / on / 512 by themselves; naming a flag
+  replaces that choice, and `0` turns `--gdn-segment` and `--mlp-rows` off.
+  A segment needs a batch of one.
+- `--eval-interval`, `--eval-batches` - evaluate on the held-out split every N
+  steps (`0` never) on that many batches.
+- Every optimizer step prints its loss, learning rate and wall time to stderr,
+  and the base load prints its duration and the settings in force.
+
+A batch wider than one with more than 8192 tokens per micro-step is refused
+with the equivalent `--batch 1 --grad-accum G`.
+
+### Using the adapter on the quantised base: `brain qwen35 sample`
+
+```
+brain qwen35 sample --base DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE]
+    [--base-dtype nf4|bf16|f32] [--max-new N] [--chat] [--no-adapter | --compare]
+```
+
+Streams the base onto the device at `--base-dtype` with the adapter overlaid
+(no fold into a host copy, which the 27B does not fit) and decodes greedily by
+repeated full forwards at a fixed length, without a KV cache: slow, but exactly
+the forward the adapter was trained through. `--no-adapter` decodes the base
+alone and `--compare` prints the adapter's and the base's answer for each
+prompt. The tokenizer is `tokenizer.json` in the base directory unless
+`--tokenizer` names one.
+
+The `f32` tier is the existing trainer for small and merged checkpoints.
 
 ## Adapter references
 

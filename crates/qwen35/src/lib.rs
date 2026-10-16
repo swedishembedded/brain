@@ -14,6 +14,7 @@
 //! gated by real per-stage parity against goldens dumped by
 //! `tools/goldens/qwen35_dump_reference.py`.
 
+pub mod adapter_sample;
 pub mod caps;
 pub mod base_source;
 pub mod config;

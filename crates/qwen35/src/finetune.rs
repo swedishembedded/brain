@@ -102,7 +102,24 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
     }
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen35>(train, val, bcfg, itos);
-    model::fit_with(m, obj, opts, Some(Path::new(out)))
+    let (report, _) = model::fit_controlled(m, obj, opts, Some(Path::new(out)), step_progress_control(&mut step_progress()))?;
+    Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
+}
+
+/// An `on_step` callback printing one line per optimizer step to stderr: the
+/// step, the loss, the learning rate and the seconds the step took.
+fn step_progress() -> impl FnMut(&model::StepReport) -> bool {
+    let mut last = std::time::Instant::now();
+    move |r| {
+        let now = std::time::Instant::now();
+        eprintln!("qwen35 finetune: step {}/{} loss {:.4} lr {:.2e} {:.1}s", r.step, r.steps, r.loss, r.lr, now.duration_since(last).as_secs_f64());
+        last = now;
+        true
+    }
+}
+
+fn step_progress_control<'a>(cb: &'a mut dyn FnMut(&model::StepReport) -> bool) -> model::FitControl<'a> {
+    model::FitControl { on_step: Some(cb), ..model::FitControl::default() }
 }
 
 /// Micro-step size, in tokens, above which a streamed-base run switches to the
@@ -115,21 +132,72 @@ const LONG_GDN_SEGMENT: u32 = 128;
 /// MLP token-chunk size of the long-sequence settings.
 const LONG_MLP_ROWS: u32 = 512;
 
+/// Explicit values for the long-sequence settings, each replacing what a
+/// streamed run would choose by itself (the long-sequence defaults for rows of
+/// [`LONG_SEQ_TOKENS`] or more at batch 1, nothing otherwise). `None` keeps the
+/// automatic choice.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LongSeqOverrides {
+    /// Gated-DeltaNet segment length in tokens; `Some(0)` keeps whole-sequence layers.
+    pub gdn_segment: Option<u32>,
+    /// Hold the layer-boundary residual stream in bf16.
+    pub bf16_residuals: Option<bool>,
+    /// MLP token-chunk size; `Some(0)` runs the MLP whole.
+    pub mlp_rows: Option<u32>,
+}
+
+/// How a streamed-base run holds and trains its frozen base.
+#[derive(Clone, Copy, Debug)]
+pub struct StreamedRun {
+    /// Device storage tier of the frozen base.
+    pub dtype: BaseDtype,
+    /// Rebuild each layer's activations in the backward instead of keeping them.
+    pub recompute: bool,
+    /// Explicit long-sequence settings.
+    pub long: LongSeqOverrides,
+}
+
+/// The trainer settings a streamed run builds with: the automatic
+/// long-sequence ones unless `run.long` names a value. Refuses settings the
+/// trainer cannot honour instead of building something else.
+fn streamed_train_opts(run: &StreamedRun, batch: u32, block: u32, mtp: bool) -> Result<TrainOpts, String> {
+    let auto = run.recompute && batch == 1 && block >= LONG_SEQ_TOKENS;
+    let nonzero = |v: u32| (v > 0).then_some(v);
+    let gdn_segment_tokens = run.long.gdn_segment.map_or(auto.then_some(LONG_GDN_SEGMENT), nonzero);
+    let mlp_rows = run.long.mlp_rows.map_or(auto.then_some(LONG_MLP_ROWS), nonzero);
+    let bf16_residuals = run.long.bf16_residuals.unwrap_or(auto && !mtp);
+    if gdn_segment_tokens.is_some() && batch != 1 {
+        return Err(format!("a Gated-DeltaNet segment needs a batch of one (batch is {batch}); use --batch 1 with --grad-accum"));
+    }
+    if bf16_residuals && mtp {
+        return Err("a bf16 residual stream is not available on an MTP build".into());
+    }
+    if (bf16_residuals || mlp_rows.is_some()) && !run.recompute {
+        return Err("a bf16 residual stream and chunked MLP rows need --recompute on".into());
+    }
+    let tier = match run.dtype {
+        BaseDtype::F32 => Dtype::F32,
+        BaseDtype::Bf16 => Dtype::BF16,
+        BaseDtype::Nf4 => Dtype::NF4,
+    };
+    Ok(TrainOpts { base: TierPolicy::uniform(tier), recompute: run.recompute, gdn_segment_tokens, bf16_residuals, mlp_rows, ..TrainOpts::default() })
+}
+
 /// LoRA fine-tune on a frozen base that is STREAMED from `base` (a
 /// HuggingFace checkpoint directory, FP8 release included, or a brain-native
-/// file) and held on the device at `dtype`, so the base never exists on the
+/// file) and held on the device at `run.dtype`, so the base never exists on the
 /// host as a whole. `out` is an ADAPTER file (`crate::lora::save_adapter`),
 /// never a copy of the base; with `resume` and an existing `out` the run
 /// continues that adapter's factors instead of starting from zero delta.
-/// `recompute` rebuilds each layer's activations in the backward instead of
-/// keeping them ([`TrainOpts::recompute`]).
+/// `run.recompute` rebuilds each layer's activations in the backward instead
+/// of keeping them ([`TrainOpts::recompute`]).
 ///
 /// Only LoRA trains on a streamed base: a full-parameter run needs the base
 /// as fp32 optimiser state on the device, which is what the resident
 /// [`finetune`] path is for.
-#[allow(clippy::too_many_arguments)]
-pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, dtype: BaseDtype, recompute: bool) -> std::io::Result<(f32, f32)> {
+pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, run: &StreamedRun) -> std::io::Result<(f32, f32)> {
     let unsupported = |why: String| std::io::Error::new(std::io::ErrorKind::Unsupported, why);
+    let (dtype, recompute) = (run.dtype, run.recompute);
     let Mode::Lora { rank, alpha } = mode else {
         return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", dtype.name())));
     };
@@ -149,25 +217,62 @@ pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, o
         )));
     }
     let (cfg, src) = lora_base(base, *rank, *alpha, opts.seed, resume.then(|| Path::new(out)).filter(|p| p.exists())).map_err(unsupported)?;
-    let tier = match dtype {
-        BaseDtype::F32 => Dtype::F32,
-        BaseDtype::Bf16 => Dtype::BF16,
-        BaseDtype::Nf4 => Dtype::NF4,
-    };
-    let long = recompute && opts.batch_size == 1 && opts.block_size >= LONG_SEQ_TOKENS;
-    let train = TrainOpts {
-        base: TierPolicy::uniform(tier),
-        recompute,
-        gdn_segment_tokens: long.then_some(LONG_GDN_SEGMENT),
-        bf16_residuals: long && !cfg.mtp,
-        mlp_rows: long.then_some(LONG_MLP_ROWS),
-        ..TrainOpts::default()
-    };
+    let train = streamed_train_opts(run, opts.batch_size, opts.block_size, cfg.mtp).map_err(unsupported)?;
+    let t_load = std::time::Instant::now();
     let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &src, &train);
+    eprintln!(
+        "qwen35 finetune: base loaded as {} in {:.1}s (gdn segment {:?}, mlp rows {:?}, bf16 residuals {})",
+        dtype.name(),
+        t_load.elapsed().as_secs_f64(),
+        train.gdn_segment_tokens,
+        train.mlp_rows,
+        train.bf16_residuals
+    );
     let (train_set, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen35>(train_set, val, bcfg, itos);
-    let (report, m) = model::fit_controlled(m, obj, opts, None, model::FitControl::default())?;
+    let (report, m) = model::fit_controlled(m, obj, opts, None, step_progress_control(&mut step_progress()))?;
     let base_id = base.file_name().map_or_else(|| "base".to_string(), |n| n.to_string_lossy().into_owned());
     crate::lora::save_adapter(out, &m, "brain/qwen35-lora", &base_id, None)?;
     Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(recompute: bool, long: LongSeqOverrides) -> StreamedRun {
+        StreamedRun { dtype: BaseDtype::Nf4, recompute, long }
+    }
+
+    #[test]
+    fn long_rows_at_batch_one_default_to_the_long_sequence_settings() {
+        let o = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2048, false).unwrap();
+        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, o.bf16_residuals), (Some(128), Some(512), true));
+        let short = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2047, false).unwrap();
+        assert_eq!((short.gdn_segment_tokens, short.mlp_rows, short.bf16_residuals), (None, None, false));
+        let mtp = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 4096, true).unwrap();
+        assert!(!mtp.bf16_residuals, "an MTP build keeps the fp32 stream");
+    }
+
+    #[test]
+    fn explicit_settings_override_the_defaults_in_both_directions() {
+        let big = LongSeqOverrides { gdn_segment: Some(256), bf16_residuals: Some(false), mlp_rows: Some(1024) };
+        let o = streamed_train_opts(&run(true, big), 1, 8192, false).unwrap();
+        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, o.bf16_residuals), (Some(256), Some(1024), false));
+        let off = LongSeqOverrides { gdn_segment: Some(0), bf16_residuals: Some(false), mlp_rows: Some(0) };
+        let o = streamed_train_opts(&run(true, off), 1, 8192, false).unwrap();
+        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, o.bf16_residuals), (None, None, false));
+        let on = LongSeqOverrides { gdn_segment: Some(64), bf16_residuals: Some(true), mlp_rows: Some(128) };
+        let o = streamed_train_opts(&run(true, on), 1, 256, false).unwrap();
+        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, o.bf16_residuals), (Some(64), Some(128), true));
+    }
+
+    #[test]
+    fn settings_the_trainer_cannot_honour_are_refused() {
+        let seg = LongSeqOverrides { gdn_segment: Some(64), ..Default::default() };
+        assert!(streamed_train_opts(&run(true, seg), 2, 128, false).unwrap_err().contains("batch of one"));
+        let res = LongSeqOverrides { bf16_residuals: Some(true), ..Default::default() };
+        assert!(streamed_train_opts(&run(true, res), 1, 128, true).unwrap_err().contains("MTP"));
+        assert!(streamed_train_opts(&run(false, res), 1, 128, false).unwrap_err().contains("--recompute on"));
+    }
 }

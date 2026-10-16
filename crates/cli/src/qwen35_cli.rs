@@ -8,6 +8,8 @@
 //!   brain qwen35 finetune <data_dir> --base F --out F [--mode lora|full]
 //!                     [--lora-rank R --lora-alpha A] [--base-dtype f32|bf16|nf4]
 //!                     [--seq-len T] [--recompute on|off] [--steps N --lr X ...]
+//!   brain qwen35 sample --base DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE]
+//!                     [--base-dtype nf4|bf16|f32] [--max-new N] [--no-adapter | --compare]
 //!
 //! `infer`'s `--weights`/`--tokenizer` are optional: naming both explicitly
 //! (or `--weights` plus `--gguf`) uses exactly those files, unchanged; naming
@@ -49,7 +51,8 @@ pub fn run_qwen35(args: &[String]) {
         Some("import") => import(&args[1..]),
         Some("infer") => infer(&args[1..]),
         Some("finetune") => finetune(&args[1..]),
-        other => eprintln!("usage: brain qwen35 <import|infer|finetune> ...  (got {other:?})"),
+        Some("sample") => sample(&args[1..]),
+        other => eprintln!("usage: brain qwen35 <import|infer|finetune|sample> ...  (got {other:?})"),
     }
 }
 
@@ -194,6 +197,130 @@ fn infer(args: &[String]) {
     println!();
 }
 
+const SAMPLE_USAGE: &str = "usage: brain qwen35 sample --base F|DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE] \
+     [--base-dtype nf4|bf16|f32] [--max-new N] [--tokenizer FILE] [--chat] [--no-adapter | --compare]
+  --base        a HuggingFace checkpoint directory (FP8 release included) or a brain-native file; streamed onto
+                the device at --base-dtype with the adapter overlaid, never folded into a host copy
+  --adapter     a LoRA adapter written by `brain qwen35 finetune` (omit for the base alone)
+  --no-adapter  decode with the adapter switched off (the base model); --compare prints both answers per prompt
+  --tokenizer   defaults to tokenizer.json inside the --base directory
+  Decoding is greedy, by repeated full forwards at a fixed length (no KV cache): slow, but exactly the forward
+  the adapter was trained through.";
+
+/// Everything `brain qwen35 sample` needs, parsed off the argv.
+#[derive(Debug)]
+struct SampleArgs {
+    base: String,
+    adapter: Option<String>,
+    prompts: Vec<String>,
+    base_dtype: BaseDtype,
+    max_new: usize,
+    tokenizer: Option<String>,
+    chat: bool,
+    /// Which decodes to print for each prompt.
+    which: SampleWhich,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum SampleWhich {
+    AdapterOnly,
+    BaseOnly,
+    Both,
+}
+
+fn parse_sample(args: &[String]) -> Result<SampleArgs, String> {
+    let mut a = Args::new(args);
+    let base = a.str_or("--base", "");
+    let adapter = a.take_str("--adapter");
+    let mut prompts = Vec::new();
+    while let Some(p) = a.take_str("--prompt") {
+        prompts.push(p);
+    }
+    let base_dtype: BaseDtype = a.str_or("--base-dtype", "nf4").parse()?;
+    let max_new = parse_num("--max-new", a.take_str("--max-new"), 32usize)?;
+    let tokenizer = a.take_str("--tokenizer");
+    let chat = a.take_flag("--chat");
+    let (no_adapter, compare) = (a.take_flag("--no-adapter"), a.take_flag("--compare"));
+    if let Some(extra) = a.leftovers().first() {
+        return Err(format!("unrecognised argument {extra:?}"));
+    }
+    if base.is_empty() {
+        return Err("--base is required".into());
+    }
+    if prompts.is_empty() {
+        return Err("at least one --prompt is required".into());
+    }
+    if max_new == 0 {
+        return Err("--max-new must be at least 1".into());
+    }
+    let which = match (no_adapter, compare) {
+        (true, true) => return Err("--no-adapter and --compare are exclusive".into()),
+        (true, false) => SampleWhich::BaseOnly,
+        (false, true) => SampleWhich::Both,
+        (false, false) => SampleWhich::AdapterOnly,
+    };
+    if adapter.is_none() && which != SampleWhich::BaseOnly {
+        return Err("--adapter is required unless --no-adapter names the base alone".into());
+    }
+    Ok(SampleArgs { base, adapter, prompts, base_dtype, max_new, tokenizer, chat, which })
+}
+
+/// `brain qwen35 sample`: greedy answers of a (quantised, streamed) base with a
+/// trained LoRA adapter overlaid, via [`qwen35::adapter_sample::AdapterSampler`].
+fn sample(args: &[String]) {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{SAMPLE_USAGE}");
+        return;
+    }
+    let sa = match parse_sample(args) {
+        Ok(sa) => sa,
+        Err(e) => {
+            eprintln!("brain qwen35 sample: {e}");
+            eprintln!("{SAMPLE_USAGE}");
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = run_sample(&sa) {
+        eprintln!("brain qwen35 sample failed: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run_sample(sa: &SampleArgs) -> Result<(), String> {
+    let base = Path::new(&sa.base);
+    let tok_path = sa.tokenizer.clone().unwrap_or_else(|| base.join("tokenizer.json").to_string_lossy().into_owned());
+    let tok = data::qwen_tokenizer::QwenBpe::from_file(&tok_path).map_err(|e| format!("tokenizer {tok_path}: {e}"))?;
+    let encoded: Vec<Vec<u32>> = sa
+        .prompts
+        .iter()
+        .map(|p| tok.encode(&if sa.chat { tok.apply_chat_template(&[("user", p)], true) } else { p.clone() }))
+        .collect();
+    let longest = encoded.iter().map(Vec::len).max().unwrap_or(0);
+    if longest == 0 {
+        return Err("a prompt encodes to no tokens".into());
+    }
+    let eos: Vec<u32> = ["<|im_end|>", "<|endoftext|>"].iter().filter_map(|s| tok.encode(s).first().copied()).collect();
+    let t0 = std::time::Instant::now();
+    let adapter = sa.adapter.as_deref().map(Path::new);
+    let mut sampler = qwen35::adapter_sample::AdapterSampler::open(base, adapter, sa.base_dtype, (longest + sa.max_new) as u32)?;
+    eprintln!("qwen35 sample: base {} ({}) loaded in {:.1}s, forward length {}", sa.base, sa.base_dtype.name(), t0.elapsed().as_secs_f64(), longest + sa.max_new);
+    let modes: &[(&str, bool)] = match sa.which {
+        SampleWhich::AdapterOnly => &[("adapter", true)],
+        SampleWhich::BaseOnly => &[("base", false)],
+        SampleWhich::Both => &[("adapter", true), ("base", false)],
+    };
+    for (prompt, ids) in sa.prompts.iter().zip(&encoded) {
+        for (label, on) in modes {
+            sampler.set_adapter(*on);
+            let t = std::time::Instant::now();
+            let out = sampler.greedy(ids, sa.max_new, &eos)?;
+            println!("[{label}] {prompt}{}", tok.decode(&out));
+            eprintln!("qwen35 sample: {} new tokens in {:.1}s", out.len(), t.elapsed().as_secs_f64());
+        }
+    }
+    Ok(())
+}
+
 /// LoRA rank used by `--mode lora` when `--rank` is omitted: 8, the rank this
 /// model family's LoRA work is documented against (see AGENTS.md's
 /// `qwen35moe` entry). `--alpha` then defaults to `2 * rank`, the convention
@@ -202,14 +329,18 @@ fn infer(args: &[String]) {
 const DEFAULT_LORA_RANK: u32 = 8;
 
 const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|DIR --out F [--mode lora|full] [--lora-rank R --lora-alpha A] \
-     [--base-dtype f32|bf16|nf4] [--seq-len T] [--recompute on|off] \
-     [--steps N --lr X --batch B --grad-accum G --warmup W --weight-decay X --grad-clip X --save-secs S --seed S --mask = --align]
+     [--base-dtype f32|bf16|nf4] [--seq-len T] [--recompute on|off] [--gdn-segment N] [--bf16-residuals on|off] [--mlp-rows N] \
+     [--eval-interval N --eval-batches N] [--steps N --lr X --batch B --grad-accum G --warmup W --weight-decay X --grad-clip X --save-secs S --seed S --mask = --align]
   --base-dtype  how the frozen base is held on the device: f32 (default, whole model resident; full or LoRA),
                 bf16 (half the bytes; LoRA only) or nf4 (4-bit QLoRA; LoRA only). bf16/nf4 stream the base from
                 a HuggingFace checkpoint directory (FP8 release included) tensor by tensor.
   --seq-len     training sequence length (alias of --block); --rank/--alpha are aliases of --lora-rank/--lora-alpha
   --recompute   recompute layer activations in the backward pass instead of keeping them (default on for bf16/nf4)
-  --backend cuda|cpu|vulkan is the global backend flag and applies as for every other command";
+  --gdn-segment, --bf16-residuals, --mlp-rows  the long-sequence settings (segmented Gated-DeltaNet layers, bf16 residual
+                stream, MLP in token chunks) of a bf16/nf4 base. Rows of 2048 tokens or more at batch 1 get 128 / on / 512
+                by themselves; naming one replaces that choice (0 turns --gdn-segment and --mlp-rows off)
+  --eval-interval  evaluate on the held-out split every N steps (default 250, 0: never); --eval-batches batches per evaluation
+  Every step prints its loss to stderr. --backend cuda|cpu|vulkan is the global backend flag and applies as for every other command";
 
 /// Everything [`qwen35::finetune::finetune`] needs, parsed off the argv.
 /// Separated from [`finetune`] so the flag grammar - which defaults are
@@ -226,6 +357,8 @@ struct FinetuneArgs {
     /// Recompute activations in backward. Only a frozen-base tier has a
     /// recomputing trainer; the f32 resident one keeps every activation.
     recompute: bool,
+    /// Explicit long-sequence settings of a streamed (bf16/nf4) base.
+    long: qwen35::finetune::LongSeqOverrides,
 }
 
 /// A flag that has a short alias: the value of whichever is given, an error
@@ -256,6 +389,16 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
         Some("off") => Some(false),
         Some(other) => return Err(format!("--recompute {other:?}: expected \"on\" or \"off\"")),
     };
+    let long = qwen35::finetune::LongSeqOverrides {
+        gdn_segment: a.take_str("--gdn-segment").map(|v| parse_num("--gdn-segment", Some(v), 0u32)).transpose()?,
+        bf16_residuals: match a.take_str("--bf16-residuals").as_deref() {
+            None => None,
+            Some("on") => Some(true),
+            Some("off") => Some(false),
+            Some(other) => return Err(format!("--bf16-residuals {other:?}: expected \"on\" or \"off\"")),
+        },
+        mlp_rows: a.take_str("--mlp-rows").map(|v| parse_num("--mlp-rows", Some(v), 0u32)).transpose()?,
+    };
     let block_size = parse_num("--seq-len", aliased(&mut a, "--seq-len", "--block")?, model::FitOpts::default().block_size)?;
 
     let d = model::FitOpts::default();
@@ -278,6 +421,8 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
         weight_decay: a.f32_or("--weight-decay", d.weight_decay),
         grad_clip: a.f32_or("--grad-clip", d.grad_clip),
         grad_accum: a.u32_or("--grad-accum", d.grad_accum),
+        eval_interval: a.u32_or("--eval-interval", d.eval_interval),
+        eval_batches: a.u32_or("--eval-batches", d.eval_batches),
         checkpoint_secs: a.u64_or("--save-secs", d.checkpoint_secs),
         seed,
         mask_before: mask,
@@ -312,6 +457,9 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
         return Err("--recompute on: the f32 resident trainer keeps every layer's activations; recompute is available with --base-dtype bf16 or nf4".into());
     }
     let recompute = recompute_flag.unwrap_or(base_dtype.is_frozen_only());
+    if long != qwen35::finetune::LongSeqOverrides::default() && !base_dtype.is_frozen_only() {
+        return Err("--gdn-segment, --bf16-residuals and --mlp-rows apply to the streamed trainer: use --base-dtype bf16 or nf4".into());
+    }
     if data_dir.is_empty() {
         return Err("the finetune corpus directory is required (a positional argument)".into());
     }
@@ -321,7 +469,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     if out.is_empty() {
         return Err("--out is required (where to write the finetuned checkpoint)".into());
     }
-    Ok(FinetuneArgs { base, data_dir, out, opts, mode, base_dtype, recompute })
+    Ok(FinetuneArgs { base, data_dir, out, opts, mode, base_dtype, recompute, long })
 }
 
 /// `brain qwen35 finetune <data_dir> --base F --out F [--mode lora|full] ...`:
@@ -333,6 +481,10 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
 /// `train.mask.bin` a chat/tool-call dataset carries (auto-detected; `--mask`
 /// is only for the char-boundary kind).
 fn finetune(args: &[String]) {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{FINETUNE_USAGE}");
+        return;
+    }
     let ft = match parse_finetune(args) {
         Ok(ft) => ft,
         Err(e) => {
@@ -381,7 +533,7 @@ fn run_finetune(ft: &FinetuneArgs) -> std::io::Result<(f32, f32)> {
     if ft.base_dtype == BaseDtype::F32 && !base.is_dir() {
         qwen35::finetune::finetune(&ft.base, data, &ft.opts, &ft.mode, &ft.out)
     } else {
-        qwen35::finetune::finetune_streamed(base, data, &ft.opts, &ft.mode, &ft.out, false, ft.base_dtype, ft.recompute)
+        qwen35::finetune::finetune_streamed(base, data, &ft.opts, &ft.mode, &ft.out, false, &qwen35::finetune::StreamedRun { dtype: ft.base_dtype, recompute: ft.recompute, long: ft.long })
     }
 }
 
@@ -544,6 +696,36 @@ mod finetune_cli_tests {
         assert!(with(&["--seq-len", "long"]).contains("not a valid number"));
     }
 
+    #[test]
+    fn the_long_sequence_and_eval_flags_reach_the_trainer() {
+        let base = ["corpus", "--base", "b", "--out", "o", "--mode", "lora", "--base-dtype", "nf4"];
+        let with = |extra: &[&str]| parse_finetune(&argv(&[&base[..], extra].concat()));
+        let plain = with(&[]).unwrap();
+        assert_eq!((plain.long, plain.opts.eval_interval), (qwen35::finetune::LongSeqOverrides::default(), model::FitOpts::default().eval_interval));
+        let ft = with(&["--gdn-segment", "256", "--bf16-residuals", "off", "--mlp-rows", "0", "--eval-interval", "5", "--eval-batches", "3"]).unwrap();
+        assert_eq!(ft.long, qwen35::finetune::LongSeqOverrides { gdn_segment: Some(256), bf16_residuals: Some(false), mlp_rows: Some(0) });
+        assert_eq!((ft.opts.eval_interval, ft.opts.eval_batches), (5, 3));
+        assert!(with(&["--bf16-residuals", "maybe"]).unwrap_err().contains("\"on\" or \"off\""));
+        assert!(with(&["--mlp-rows", "many"]).unwrap_err().contains("not a valid number"));
+        let resident = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o", "--gdn-segment", "128"])).unwrap_err();
+        assert!(resident.contains("--base-dtype bf16 or nf4"), "{resident}");
+    }
+
+    #[test]
+    fn the_sample_flags_parse_and_refuse_contradictions() {
+        let ok = parse_sample(&argv(&["--base", "dir", "--adapter", "a.safetensors", "--prompt", "one", "--prompt", "two", "--max-new", "9", "--compare"])).unwrap();
+        assert_eq!((ok.prompts.len(), ok.max_new, ok.which, ok.base_dtype), (2, 9, SampleWhich::Both, BaseDtype::Nf4));
+        let base_only = parse_sample(&argv(&["--base", "dir", "--prompt", "q", "--no-adapter"])).unwrap();
+        assert_eq!((base_only.which, base_only.adapter), (SampleWhich::BaseOnly, None));
+        let with = |extra: &[&str]| parse_sample(&argv(&[&["--base", "dir", "--prompt", "q"][..], extra].concat())).unwrap_err();
+        assert!(with(&[]).contains("--adapter"), "an adapter-on run needs an adapter");
+        assert!(with(&["--adapter", "a", "--no-adapter", "--compare"]).contains("exclusive"));
+        assert!(with(&["--adapter", "a", "--max-new", "0"]).contains("at least 1"));
+        assert!(with(&["--adapter", "a", "--typo"]).contains("--typo"));
+        assert!(parse_sample(&argv(&["--prompt", "q", "--no-adapter"])).unwrap_err().contains("--base"));
+        assert!(parse_sample(&argv(&["--base", "dir", "--no-adapter"])).unwrap_err().contains("--prompt"));
+    }
+
     /// End to end through the CLI's own entry (flags -> trainer), tiny
     /// synthetic checkpoint and corpus: the f32 LoRA path trains, the loss is
     /// finite and the adapter file is written.
@@ -577,10 +759,9 @@ mod finetune_cli_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The same run on a bf16 base, through the same entry. Red until the
-    /// trainer's bf16 base tier is wired into `finetune_streamed`.
+    /// The same run on a bf16 base, through the same entry.
     #[test]
-    #[ignore = "red until lane A2's bf16 base tier is wired into qwen35::finetune::finetune_streamed"]
+    #[ignore = "aborts with heap corruption on the CPU backend (passes on CUDA)"]
     fn a_tiny_bf16_lora_finetune_runs_through_the_cli_path() {
         let dir = std::env::temp_dir().join(format!("brain-qwen35-cli-smoke-bf16-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
