@@ -241,7 +241,7 @@ mod tests {
             representations: vec![Representation::Quantiles, Representation::Point],
             quantile_levels: vec![0.1, 0.5, 0.9],
             num_samples: 0,
-            seed: 0,
+            ..Default::default()
         };
         let out = f.forecast(&panel, &spec).unwrap();
         assert_eq!(out.model, "chronos2");
