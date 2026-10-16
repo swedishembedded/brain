@@ -17,7 +17,7 @@
 //! faithful reconstruction losses, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use splat::loss::{DeviceLoss, PixelLoss};
 
@@ -102,7 +102,7 @@ fn image(rng: &mut Lcg, px: usize) -> Vec<f32> {
 fn gradient_matches_an_independent_oracle() {
     let (w, h) = (13usize, 9usize);
     let px = w * h;
-    let mut rng = Lcg::new(7);
+    let mut rng = Lcg::new(random_seed());
     let pred = image(&mut rng, px);
     let tgt = image(&mut rng, px);
     let mask: Vec<f32> = (0..px).map(|i| if i % 7 == 3 { 0.0 } else { 0.25 + 0.75 * ((i * 37 % 11) as f32 / 10.0) }).collect();

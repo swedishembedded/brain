@@ -16,7 +16,7 @@
 //! the capture path, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use splat::geometry::axis;
 use splat::opt::{fit, FitCfg, TargetView};
@@ -124,7 +124,7 @@ fn normal_terms_turn_discs_onto_the_surface() {
     let truth = slab(10, 3.0, 0.95);
     let t = views(&g, &truth, w, h);
     let mut init = truth.clone();
-    let mut rng = Lcg::new(11);
+    let mut rng = Lcg::new(random_seed());
     for q in init.quats.chunks_exact_mut(4) {
         for v in q.iter_mut() {
             *v = rng.signed();

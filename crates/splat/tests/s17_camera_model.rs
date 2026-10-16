@@ -22,7 +22,7 @@
 //! balance or HDR brackets turned into consistent scenes, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use splat::isp::{srgb_encode, ColorSpace, DeviceIsp, Encoding, GridCfg, Isp, IspCfg, NovelShot, Shot};
 use splat::opt::{fit_full, FitCfg, TargetView};
@@ -408,7 +408,7 @@ fn the_device_camera_is_the_host_camera() {
     for space in [ColorSpace::Display, ColorSpace::SceneLinear] {
         let cfg = IspCfg { color_space: space, grid: Some(GridCfg { cells: [5, 4, 3], ..GridCfg::default() }), ..IspCfg::default() };
         let mut isp = Isp::new(cfg, &[(0, 0.3, Encoding::Srgb), (1, -0.2, Encoding::Srgb)]);
-        let mut rng = Lcg::new(17);
+        let mut rng = Lcg::new(random_seed());
         let params: Vec<f32> = isp.params().iter().map(|_| rng.scaled(0.08)).collect();
         isp.set_params(&params);
         let rgba: Vec<f32> = (0..px * 4).map(|i| if i % 4 == 3 { 0.7 } else { 0.02 + 1.1 * rng.unit() }).collect();

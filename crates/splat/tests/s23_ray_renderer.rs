@@ -29,7 +29,7 @@
 //! sending an email to info@swedishembedded.com.
 
 use camera::Lens;
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use splat::renderer::{BwdScratch, CameraGrad, GpuSplats, Renderer, SplatGrads};
 use splat::types::{Camera, RenderOpts, Splats};
@@ -125,7 +125,7 @@ fn the_forward_is_the_oracle_through_every_lens() {
         assert!(dv < 2e-3, "crossing scene at {deg} deg: aux differs by {dv} at pixel {} channel {}", at / 5, at % 5);
     }
     let s = scene(40, 0x1a2b, 3.0, 0.25);
-    let mut r = Lcg::new(7);
+    let mut r = Lcg::new(random_seed());
     let filt: Vec<f32> = (0..s.len()).map(|_| 1e-4 * r.unit()).collect();
     for (name, cam) in cameras(48, 36) {
         for aa in [false, true] {
@@ -313,7 +313,7 @@ fn every_gaussian_gradient_matches_a_central_difference() {
     let g = gpu_core::testgpu::dev(splat::PIPELINES);
     for (name, cam) in cameras(28, 22) {
         let s = scene(7, 0x9e3 ^ name.len() as u64, 3.0, 0.22);
-        let mut r = Lcg::new(3);
+        let mut r = Lcg::new(random_seed());
         let filt: Vec<f32> = (0..s.len()).map(|_| 2e-4 * r.unit()).collect();
         let o = RenderOpts { antialiased: true, eps2d: 0.3, bg: [0.2, 0.1, 0.4], ..Default::default() };
         let probe = probe_for(&g, &s, &filt, &cam, &o, 0xabc);
