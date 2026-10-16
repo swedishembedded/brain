@@ -232,7 +232,7 @@ mod tests {
         let truth = [0.5f32, 0.3, 0.15, 0.05];
         for ordinal in [false, true] {
             let best = proper_reward(&truth, &truth, ordinal, &cfg);
-            let mut rng = data::rng::Lcg::new(0x1AA_2026);
+            let mut rng = data::rng::Lcg::new(data::rng::random_seed());
             for _ in 0..200 {
                 let report = softmax(
                     &truth

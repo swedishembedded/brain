@@ -223,7 +223,7 @@ pub fn decision_loss(scores: &[f32], gold: usize, cfg: &LossConfig) -> (f32, Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data::rng::Lcg;
+    use data::rng::{random_seed, Lcg};
 
     fn ce_reference(scores: &[f32], gold: usize) -> (f32, Vec<f32>) {
         let p = softmax(scores);
@@ -292,7 +292,7 @@ mod tests {
     /// the handful of fixed vectors the other tests below use.
     #[test]
     fn soft_path_matches_the_pre_lift_hard_label_formula() {
-        let mut rng = Lcg::new(20_260_922);
+        let mut rng = Lcg::new(random_seed());
         let settings = [
             LossConfig::cross_entropy(),
             LossConfig::focal(3.0),

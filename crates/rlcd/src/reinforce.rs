@@ -347,7 +347,7 @@ mod tests {
         let sum_ce: f32 = d_ce.iter().sum();
         assert!(sum_ce.abs() <= 1e-5, "the cross-entropy gradient sums to {sum_ce}, not 0");
 
-        let mut rng = data::rng::Rng::new(0x51F7);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         let group = explore(&scores, &t, false, &RlcdObjective::default(), &mut rng);
         let (_, d_rl) = policy_loss(&scores, &t, &group, 0.0);
         let sum_rl: f32 = d_rl.iter().sum();
@@ -362,7 +362,7 @@ mod tests {
         let scores = [0.4f32, -1.2, 2.0, 0.1, 0.9];
         let t = hard_target(5, 1);
         let cfg = RlcdObjective::default();
-        let mut rng = data::rng::Rng::new(0xD1CE_2026);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         let group = explore(&scores, &t, false, &cfg, &mut rng);
         assert_eq!(group.samples.len(), cfg.group);
         for z in &group.samples {
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn the_group_advantage_is_centred() {
         let cfg = RlcdObjective::default();
-        let mut rng = data::rng::Rng::new(7);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         let t = hard_target(3, 0);
         let group = explore(&[0.2f32, 1.0, -0.4], &t, false, &cfg, &mut rng);
         let sum: f32 = group.advantage.iter().sum();
@@ -396,7 +396,7 @@ mod tests {
             ..RlcdObjective::default()
         };
         let target = [0.55f32, 0.25, 0.15, 0.05];
-        let mut rng = data::rng::Rng::new(0x5EED_2026);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         let mut z = vec![0.0f32; 4];
         let before = proper_reward(&softmax(&z), &target, false, &cfg.score);
         for _ in 0..4000 {
