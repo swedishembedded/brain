@@ -22,7 +22,7 @@
 //!   `quant_pack`.
 //! * `moe_slot_combine` - the weighted sum of a row's slots.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::{Dispatch, Gpu};
 
 const KERNELS: &[(&str, &str)] = &[
@@ -180,7 +180,7 @@ fn the_router_selects_and_weights_like_router_gate_and_adds_the_shared_slot() {
         return brain_testutil::skip_unavailable("needs workgroup reductions");
     }
     for &(rows, experts, top_k) in &[(1usize, 256usize, 8usize), (7, 256, 8), (3, 64, 4), (2, 17, 5)] {
-        let mut rng = Lcg::new(77 + rows as u64);
+        let mut rng = Lcg::new(random_seed());
         let width = experts + 1;
         let logits: Vec<f32> = (0..rows * width).map(|_| (rng.next_u32() % 20000) as f32 * 1e-3 - 10.0).collect();
         // The dense kernels see only the routed columns.
@@ -246,7 +246,7 @@ fn swiglu_quant_is_bit_identical_to_silu_mul_then_row_quantisation() {
         return brain_testutil::skip_unavailable("needs workgroup reductions");
     }
     for &(rows, k) in &[(9usize, 512usize), (1, 512), (3, 64), (5, 1024)] {
-        let mut rng = Lcg::new(5 + k as u64);
+        let mut rng = Lcg::new(random_seed());
         // Spread over magnitudes, with an occasional large value so the row scale is set by an outlier.
         let g: Vec<f32> = (0..rows * k).map(|i| ((rng.next_u32() % 4000) as f32 - 2000.0) * 1e-3 * if i % 97 == 0 { 8.0 } else { 1.0 }).collect();
         let u: Vec<f32> = (0..rows * k).map(|_| ((rng.next_u32() % 4000) as f32 - 2000.0) * 1e-3).collect();
@@ -272,7 +272,7 @@ fn swiglu_quant_is_bit_identical_to_silu_mul_then_row_quantisation() {
 fn the_combine_is_the_weighted_sum_of_a_rows_slots_in_slot_order() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     for &(rows, d, s) in &[(1usize, 2048usize, 9usize), (4, 33, 9), (3, 7, 1)] {
-        let mut rng = Lcg::new(11 + d as u64);
+        let mut rng = Lcg::new(random_seed());
         let y: Vec<f32> = (0..rows * s * d).map(|_| (rng.next_u32() % 2000) as f32 * 1e-3 - 1.0).collect();
         let w: Vec<f32> = (0..rows * s).map(|_| (rng.next_u32() % 1000) as f32 * 1e-3).collect();
         let (yb, wb, out) = (upload_f32(&gpu, &y), upload_f32(&gpu, &w), gpu.storage((rows * d) as u64));

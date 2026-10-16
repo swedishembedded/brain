@@ -234,7 +234,7 @@ fn the_native_kernel_is_bit_identical_to_the_wgsl_tier() {
 /// the tile edges and the scalar-load path have been looked at.
 fn random_shapes_and_windows_are_bit_identical() {
     let Some(gpu) = device() else { return };
-    let mut r = data::rng::Lcg::new(0x1d8d_ea7a);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for _ in 0..40 {
         let m = 1 + r.next_u32() % 400;
         let kg = 8 * (1 + r.next_u32() % 48);

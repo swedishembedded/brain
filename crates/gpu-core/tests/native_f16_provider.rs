@@ -87,11 +87,13 @@ fn numeric_cases() -> Vec<ParityCase> {
     // measured bound, not a guess.
     let tol = Tolerance::Numeric { atol: 1e-2, rtol: 3e-2, cosine_min: 0.999 };
     vec![
+        // seed: the atol below was measured at this shape's seed (worst near-zero element ~3.1e-3); not re-measured for other draws
         ParityCase { op: Op::MatMul, shape: OpShape { m: 1, n: 64, k: 64, dtype: Dtype::F32 }, pass: Pass::Forward, seed: 1, tol },
         ParityCase {
             op: Op::MatMul,
             shape: OpShape { m: 128, n: 128, k: 128, dtype: Dtype::F32 },
             pass: Pass::Forward,
+            // seed: the atol below was measured at this shape's seed (worst near-zero element ~3.1e-3); not re-measured for other draws
             seed: 2,
             tol,
         },
@@ -99,9 +101,11 @@ fn numeric_cases() -> Vec<ParityCase> {
             op: Op::MatMul,
             shape: OpShape { m: 300, n: 260, k: 128, dtype: Dtype::F32 },
             pass: Pass::Forward,
+            // seed: the atol below was measured at this shape's seed (worst near-zero element ~3.1e-3); not re-measured for other draws
             seed: 3,
             tol,
         },
+        // seed: the atol below was measured at this shape's seed (worst near-zero element ~3.1e-3); not re-measured for other draws
         ParityCase { op: Op::MatMul, shape: OpShape { m: 37, n: 53, k: 17, dtype: Dtype::F32 }, pass: Pass::Forward, seed: 4, tol },
     ]
 }

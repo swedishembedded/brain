@@ -69,7 +69,7 @@ fn cpu_isa_f32_matmul_is_bit_identical_to_the_hidden_fastpath() {
         return;
     }
     let (m, n, k) = (37u32, 53u32, 71u32);
-    let mut seed = 99u32;
+    let mut seed = data::rng::random_seed() as u32;
     let mut lcg = move || {
         seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
         ((seed >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0

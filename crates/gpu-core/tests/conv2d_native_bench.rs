@@ -102,7 +102,7 @@ fn yolov8n_conv_device_time() {
     }
     let roof = gpu_core::roof::ensure(&gpu).map(|r| f64::from(r.gflops));
     assert!(gpu.set_kernel_timing(true), "kernel timing must be available on this backend");
-    let mut r = data::rng::Lcg::new(1);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     let (mut t_fwd, mut t_dx, mut t_dw, mut flop_total) = (0.0, 0.0, 0.0, 0.0);
     eprintln!("{:<28} {:>5} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8}", "unit (cin,cout,k,s,side)", "units", "fwd ms", "dx ms", "dw ms", "fwd GF/s", "dx GF/s", "dw GF/s");
     for &(cin, cout, k, s, pad, side, units) in UNITS {

@@ -18,7 +18,7 @@
 //! table does not know, so both sides run on the same device from the same
 //! inputs, differing in which kernel ran.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::{Dispatch, Gpu};
 
 const KERNELS: &[(&str, &str)] = &[
@@ -183,7 +183,7 @@ fn random_shapes_are_byte_identical() {
     if gpu.native_kernel_for(K_GROUPED, &[1, 64, 8, 1, 1]).is_none() {
         return brain_testutil::skip_unavailable("this device has no int8 tensor cores (or native kernels are off)");
     }
-    let mut r = Lcg::new(0x600d_5eed);
+    let mut r = Lcg::new(random_seed());
     for i in 0..40 {
         let c = Case {
             slots: 1 + r.next_u32() % 300,

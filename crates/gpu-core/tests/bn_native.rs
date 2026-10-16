@@ -348,7 +348,7 @@ fn the_native_bn_elementwise_passes_are_bit_identical_to_the_reference() {
     for (i, b) in shapes().iter().enumerate() {
         let inp = inputs(b, 600 + i as u64);
         let c = b.c as usize;
-        let mut r = data::rng::Lcg::new(700 + i as u64);
+        let mut r = data::rng::Lcg::new(data::rng::random_seed());
         let gb: Vec<f32> = (0..c).flat_map(|_| [r.signed(), r.signed()]).collect();
         let bp: Vec<f32> =
             (0..c).flat_map(|ch| [inp.mvg[3 * ch], inp.mvg[3 * ch + 1], inp.mvg[3 * ch + 2], r.scaled(50.0), r.scaled(50.0)]).collect();

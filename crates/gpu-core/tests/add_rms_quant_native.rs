@@ -189,7 +189,7 @@ fn random_shapes_are_byte_identical() {
         brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
         return;
     }
-    let mut r = data::rng::Lcg::new(0x00a1_1ce5);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for _ in 0..40 {
         let rows = 1 + r.next_u32() % 8;
         let d = 4 * (1 + r.next_u32() % 1280);

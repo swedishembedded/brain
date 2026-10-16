@@ -10,7 +10,7 @@
 //! per request then you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 
 const KERNELS: &[(&str, &str)] = &[("pool_rows_gather2", kernels::POOL_ROWS_GATHER2), ("pool_rows_scatter2", kernels::POOL_ROWS_SCATTER2)];
@@ -35,7 +35,7 @@ fn upload_ids(gpu: &Gpu, ids: &[u32]) -> gpu_core::DeviceBuffer {
 #[test]
 fn gather_stages_the_picked_rows_in_batch_order() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut rng = Lcg::new(7);
+    let mut rng = Lcg::new(random_seed());
     for &(rows, len_a, len_b, ids) in &[(6usize, 40usize, 12usize, &[4u32, 0, 5][..]), (3, 7, 1, &[2]), (8, 64, 0, &[7, 6, 5, 4, 3, 2, 1, 0])] {
         let (pa, pb) = (floats(&mut rng, rows * len_a), floats(&mut rng, rows * len_b));
         let b = ids.len();
@@ -58,7 +58,7 @@ fn gather_stages_the_picked_rows_in_batch_order() {
 #[test]
 fn scatter_writes_only_the_picked_rows() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut rng = Lcg::new(9);
+    let mut rng = Lcg::new(random_seed());
     let (rows, len_a, len_b) = (6usize, 40usize, 12usize);
     let ids = [5u32, 1, 3];
     let (pa, pb) = (floats(&mut rng, rows * len_a), floats(&mut rng, rows * len_b));

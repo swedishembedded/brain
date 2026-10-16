@@ -326,7 +326,7 @@ fn run(gpu: &Gpu, c: &Conv, b: &Bufs, fwd: usize, dx: usize, dw: Option<usize>) 
 /// stride 3, an even kernel, and a 1x1 stride-2 conv whose odd stride classes
 /// receive no tap at all.
 fn oracle_shapes() -> Vec<Conv> {
-    let mut r = data::rng::Lcg::new(0x5eed_c0f2);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     let mut v = Vec::new();
     for (i, &(cin, cout, k, s, pad, _)) in YOLOV8N.iter().enumerate() {
         // Batch 8 for the narrow units, 1 for the wide ones: the f64 oracle's
@@ -469,7 +469,7 @@ fn the_biased_forward_is_within_the_bound_and_exact_on_integer_data() {
     }
     for (i, c) in oracle_shapes().iter().enumerate() {
         let b = inputs(c, 2000 + i as u64);
-        let bias = data::rng::Lcg::new(3000 + i as u64).vec(c.cout as usize);
+        let bias = data::rng::Lcg::new(data::rng::random_seed()).vec(c.cout as usize);
         let p = c.params();
         let want = if direct_3x3(c) { "conv2d_bias_fwd3x3_f32" } else { "conv2d_bias_fwd_f32" };
         assert_eq!(gpu.native_kernel_for(CONV_BIAS, &p), Some(want), "{c:?}");
@@ -557,7 +557,7 @@ fn the_vae_3x3_convs_take_the_direct_kernel_bit_identical_to_the_implicit_gemm()
         assert_eq!(gpu.native_kernel_for(CONV_BIAS_REG, &p), Some("conv2d_bias_fwd3x3_f32"), "{c:?}");
         assert_eq!(gpu.native_kernel_for(CONV, &p), Some("conv2d_fwd3x3_f32"), "{c:?}");
         let b = inputs(c, 7000 + i as u64);
-        let bias = data::rng::Lcg::new(8000 + i as u64).vec(c.cout as usize);
+        let bias = data::rng::Lcg::new(data::rng::random_seed()).vec(c.cout as usize);
         let direct = run_bias(&gpu, c, &b.x, &b.w, &bias, CONV_BIAS);
         let gemm = run_bias_implicit_gemm(&gpu, c, &b.x, &b.w, &bias);
         let first = bits(&direct).iter().zip(bits(&gemm).iter()).position(|(a, g)| a != g);

@@ -93,7 +93,7 @@ fn build(g: &Gpu, sh: &Shape, tiles_per_split: u32) -> (Fixture, Vec<gpu_core::D
     let cap = mbs * bs;
     let scale = 1.0f32 / (head_dim as f32).sqrt();
 
-    let mut rng = data::rng::Rng::new(17);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     let q: Vec<f32> = (0..batch * n_heads * head_dim).map(|_| rng.next_gaussian() as f32).collect();
     let pool_len = (mbs * bs * kv_stride) as usize;
     let pk: Vec<f32> = (0..pool_len).map(|_| rng.next_gaussian() as f32).collect();

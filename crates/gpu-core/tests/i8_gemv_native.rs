@@ -228,7 +228,7 @@ fn random_shapes_and_windows_are_byte_identical() {
         brain_testutil::skip_unavailable("native int8 GEMV needs a CUDA device");
         return;
     }
-    let mut r = data::rng::Lcg::new(0x5eed_1234);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for _ in 0..60 {
         let m = 1 + r.next_u32() % NATIVE_ROWS;
         let kg = 8 * (1 + r.next_u32() % 200);

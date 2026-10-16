@@ -202,7 +202,7 @@ fn matches_the_f64_oracle_and_the_generated_tier() {
 /// Seeded random shapes, every length residue a tile can leave.
 fn random_shapes_match() {
     let Some(gpu) = device() else { return };
-    let mut r = data::rng::Lcg::new(0xf1a5_4b1d);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for _ in 0..12 {
         let (bsz, heads, t) = (1 + r.next_u32() % 2, 1 + r.next_u32() % 4, 1 + r.next_u32() % 700);
         check(&gpu, bsz, heads, t, 2.0, 8, u64::from(r.next_u32()));

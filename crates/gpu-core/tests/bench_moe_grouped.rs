@@ -22,7 +22,7 @@
 //! approximates. `GB/s` counts the weight bytes of the experts that actually got
 //! a slot, once; `TMAC/s` counts every slot's multiply-accumulates.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::{Dispatch, Gpu};
 
 const KERNELS: &[(&str, &str)] = &[
@@ -58,7 +58,7 @@ fn run(gpu: &Gpu, tokens: u32, k: u32, n: u32, xdiv_per_row: bool) {
     let slots_per_row = TOP_K + 1;
     let slots = tokens * slots_per_row;
     let kg = k / 4;
-    let mut rng = Lcg::new(7);
+    let mut rng = Lcg::new(random_seed());
     let mut ids = Vec::with_capacity(slots as usize);
     for _ in 0..tokens {
         let mut chosen: Vec<u32> = Vec::new();

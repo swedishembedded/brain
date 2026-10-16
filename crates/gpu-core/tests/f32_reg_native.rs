@@ -152,7 +152,7 @@ fn the_native_kernel_is_bit_identical_to_matmul_reg3() {
 
 fn random_shapes_and_windows_are_bit_identical() {
     let Some(gpu) = device() else { return };
-    let mut r = data::rng::Lcg::new(0x0f32_5eed);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for _ in 0..40 {
         let (m, k, n) = (1 + r.next_u32() % 400, 1 + r.next_u32() % 300, 1 + r.next_u32() % 400);
         let lead = [0, 1, 2].map(|_| u64::from(r.next_u32() % 8));
@@ -212,7 +212,7 @@ fn the_input_gradient_is_redirected_and_bit_identical() {
             }
         }
     }
-    let mut r = data::rng::Lcg::new(0xd0_0dad);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for _ in 0..30 {
         let (m, k, n) = (1 + r.next_u32() % 400, 1 + r.next_u32() % 400, 1 + r.next_u32() % 300);
         let lead = [0, 1, 2].map(|_| u64::from(r.next_u32() % 8));
@@ -262,7 +262,7 @@ fn the_weight_gradient_is_redirected_and_bit_identical() {
             }
         }
     }
-    let mut r = data::rng::Lcg::new(0xd_e1a7);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for _ in 0..30 {
         let (m, k, n) = (1 + r.next_u32() % 400, 1 + r.next_u32() % 400, 1 + r.next_u32() % 300);
         let lead = [0, 1, 2].map(|_| u64::from(r.next_u32() % 8));

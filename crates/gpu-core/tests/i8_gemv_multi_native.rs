@@ -165,7 +165,7 @@ fn random_groups_are_byte_identical() {
         brain_testutil::skip_unavailable("needs a CUDA device with a packed int8 dot");
         return;
     }
-    let mut r = data::rng::Lcg::new(0x0bad_cafe);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for _ in 0..30 {
         let m = 1 + r.next_u32() % 8;
         let kg = 8 * (1 + r.next_u32() % 60);

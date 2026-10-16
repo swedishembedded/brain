@@ -16,7 +16,7 @@
 //!   never a slot's arithmetic, so a token's expert output does not depend on
 //!   whether it was prefilled with thousands of others or decoded with a few.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::{Dispatch, Gpu};
 
 const KERNELS: &[(&str, &str)] = &[
@@ -117,7 +117,7 @@ fn the_routing_tables_are_a_stable_counting_sort_of_the_ids() {
     if !gpu.caps().workgroup_reductions {
         return brain_testutil::skip_unavailable("needs workgroup barriers");
     }
-    let mut rng = Lcg::new(77);
+    let mut rng = Lcg::new(random_seed());
     // (slots, experts, skew): the real 257 experts at decode and prefill sizes,
     // few experts with many slots each, one expert taking everything, and slot
     // counts that do not divide into the 256 runs.
