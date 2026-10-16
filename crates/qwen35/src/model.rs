@@ -47,7 +47,7 @@
 //! `rmsnorm_fwd` calls assume the stored weight already IS the final
 //! multiplier, exactly like every other model in this engine.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 
 use gpu_core::select::{Dtype, DECODE_REGIME_MAX_ROWS, I8_GEMV_MAX_ROWS};
@@ -55,9 +55,10 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use paramstore::{ParamStore, Role};
 
 use audio::conv::ConvKernels;
+use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels};
 use model::block::{self, rmsnorm_bwd, rmsnorm_fwd, swiglu_bwd, KernelIds};
 use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
-use model::kv_tier::{KvKernels, KvLayer, KvTier};
+use model::kv_tier::{KvKernels, KvLayer};
 pub use model::gdn::gdn_chunk_size;
 use model::ops::{Act, Ops, TierPolicy, Weight};
 use model::Shard;
@@ -65,7 +66,8 @@ use optim::Optim;
 
 use crate::config::{LayerType, Qwen35Config};
 pub use crate::train_base::TrainOpts;
-use crate::train_base::{read_weight_host, reads_float_acts, write_weight_host};
+use crate::decode_state::DecodeState;
+use crate::train_base::{read_weight_host, reads_float_acts, table_tier, write_weight_host};
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
 // Forward + backward subset of qwen35moe::model::STATIC_PIPELINES (no MoE -
@@ -278,6 +280,14 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
+        // A frozen bf16/NF4 base trains through the tiled bf16 dX and the
+        // float-read NF4 kernels, and the chunked LM head resolves its
+        // elementwise passes by name. Appended unless already registered above.
+        for &(name, src) in model::ops::frozen_base_kernels().iter().chain(model::head_ce::kernels()) {
+            if !v.iter().any(|(have, _)| *have == name) {
+                v.push((name, src));
+            }
+        }
         // The compact KV tiers (`model::kv_tier`) are resolved BY NAME when a
         // cache of that tier is used, so their kernels ride along here.
         let kv = model::kv_tier::kernel_list(&v);
@@ -455,6 +465,10 @@ const DECODE_CAP_BUCKET: u32 = 128;
 /// keeps MORE rounds on the pool, and the pool is what bounds allocation churn
 /// (M6.10's actual purpose, whose stability claim is not re-measured here).
 const CHUNK_ARENA_MIN_ROWS: u32 = 16;
+
+/// Words of logits the chunked LM head keeps alive at once unless
+/// [`TrainOpts::head_budget_words`] says otherwise: 1 GiB of fp32.
+const HEAD_BUDGET_WORDS: u64 = 1 << 28;
 
 /// This model's RMSNorm epsilon. Exactly what `rmsnorm.wgsl` hardcodes, but it
 /// has to be passed explicitly here - see [`rms_step`].
@@ -804,6 +818,10 @@ pub struct Qwen35 {
     sin: DeviceBuffer,
 
     logits: DeviceBuffer,
+    /// The chunked LM head + cross-entropy of a training build without MTP;
+    /// `None` elsewhere (inference reads `logits`; MTP shares the head with
+    /// its own fp32 path).
+    head_ce: Option<HeadCe>,
     ce_buf: DeviceBuffer,
     /// CE-gradient uniform (`[n, vocab, IGNORE, count]`), written once per
     /// `backward()` call (`count` is only known after `set_batch`).
@@ -891,17 +909,13 @@ pub struct Qwen35 {
     /// independent "max decode length" constructor parameter, same
     /// simplification qwen35moe's own `dec_cap` doc explains).
     dec_cap: u32,
-    /// Per-layer plain (non-paged) `f32` KV cache for GQA layers, `[dec_cap,
-    /// kv_dim]`; a size-1 placeholder at GDN layer indices (and at every
-    /// index of a training build, which never decodes).
-    gqa_kv: Vec<KvLayer>,
-    /// Per-layer persistent Gated DeltaNet recurrent state, `[bh, dk, dv]`,
-    /// for GDN layers; a size-1 dummy at GQA layer indices. Threaded across
-    /// `step` calls; zeroed by [`Self::reset_decode_cache`].
-    gdn_state: Vec<DeviceBuffer>,
-    /// Per-layer persistent causal-conv history ring buffer, `[1, conv_dim,
-    /// K-1]`, for GDN layers; a size-1 dummy at GQA layer indices.
-    gdn_hist: Vec<DeviceBuffer>,
+    /// The single-sequence caches [`Self::step`] and the chunked prefill
+    /// read and update - see [`DecodeState`]. Built with the instance for an
+    /// inference build; a TRAINING build allocates it on its first decode
+    /// (generating from the model being trained), because the f32 KV cache
+    /// alone is `2 * kv_dim * 4` bytes per token per GQA layer, dead weight
+    /// for a build that only runs whole-sequence forwards and backwards.
+    decode: OnceCell<DecodeState>,
 
     // ---- pipeline-parallel cross-stage seam (`model::Shardable`) ----------
     /// This stage's upstream gradient at `res[shard.end]`, written externally
@@ -1138,7 +1152,7 @@ pub(crate) fn is_quantizable_linear(name: &str) -> bool {
 impl Qwen35 {
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), None, shard)
     }
 
     /// [`Self::new_on`] with the int8 (DP4A) inference tier: the 12
@@ -1168,7 +1182,7 @@ impl Qwen35 {
     /// property; a bare `Dtype`-parameterised tier deserves the same one).
     pub fn new_on_dt(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, tier: &TierPolicy) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, tier, false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, tier, None, shard)
     }
 
     /// Build a fully trainable instance (every weight `Role::Trainable`,
@@ -1184,7 +1198,7 @@ impl Qwen35 {
     /// narrow base streams tensor by tensor with no whole-model fp32 copy.
     pub fn new_train_opts_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, opts: &TrainOpts) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        let m = Qwen35::new_impl_on(gpu, cfg, b, t, src, &opts.base, true, shard);
+        let m = Qwen35::new_impl_on(gpu, cfg, b, t, src, &opts.base, Some(opts), shard);
         m.set_recompute(opts.recompute);
         m
     }
@@ -1213,7 +1227,7 @@ impl Qwen35 {
     /// meant for outside tests). `cfg.mtp` requires a whole shard - see this
     /// function's own assert.
     pub fn new_shard(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Qwen35 {
-        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), true, shard)
+        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), Some(&TrainOpts::default()), shard)
     }
 
     /// Build a single pipeline **stage** at a per-leaf [`TierPolicy`] rather
@@ -1231,7 +1245,7 @@ impl Qwen35 {
         shard: Shard,
         tier: &TierPolicy,
     ) -> Qwen35 {
-        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, src, tier, false, shard)
+        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, src, tier, None, shard)
     }
 
     /// [`Self::new_shard`]'s int8-INFERENCE sibling (`i8 = true`, `train =
@@ -1283,7 +1297,7 @@ impl Qwen35 {
     /// same "expose it for parity debugging" reason [`Self::debug_res`]
     /// exists for the residual stream.
     pub fn new_fp32_shard_src_train(cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard) -> Qwen35 {
-        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, src, &TierPolicy::uniform(Dtype::F32), true, shard)
+        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, src, &TierPolicy::uniform(Dtype::F32), Some(&TrainOpts::default()), shard)
     }
 
     fn new_impl_on(
@@ -1293,9 +1307,11 @@ impl Qwen35 {
         t: u32,
         src: &dyn checkpoint::TensorSource,
         tier: &TierPolicy,
-        train: bool,
+        train_opts: Option<&TrainOpts>,
         shard: Shard,
     ) -> Qwen35 {
+        let train = train_opts.is_some();
+        let head_budget = train_opts.and_then(|o| o.head_budget_words);
         assert!(
             !(tier.quantizes_anything() && train && cfg.lora.is_none()),
             "qwen35: a narrow tier needs LoRA when training: without adapters there is no frozen base \
@@ -1334,7 +1350,7 @@ impl Qwen35 {
         // adapters are never quantizable leaves, so they stay in the store.
         let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
-            .filter(|(n, _)| !(is_quantizable_linear(n) && tier.want(n) != Dtype::F32))
+            .filter(|(n, _)| !(is_quantizable_linear(n) && tier.want(n) != Dtype::F32) && table_tier(tier, &cfg, train, n).is_none())
             .map(|(n, c)| {
                 let role = if !train {
                     Role::Frozen
@@ -1365,8 +1381,7 @@ impl Qwen35 {
         // yet - a separate milestone, see `TierPolicy`'s own doc).
         let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen35: Ops::new: {e}"));
         let mut weights: HashMap<String, Weight> = HashMap::new();
-        let mut upload = |name: String, wn: u32, wk: u32| {
-            let want = tier.want(&name);
+        let mut upload = |name: String, wn: u32, wk: u32, want: Dtype| {
             let w = if want == Dtype::F32 {
                 Weight::F32 { w: ps.w(&name).clone(), n: wn, k: wk }
             } else {
@@ -1386,7 +1401,9 @@ impl Qwen35 {
                 continue;
             }
             for (suffix, n, k) in cfg.layer_leaves(*ty) {
-                upload(format!("blocks.{l}.{suffix}"), n, k);
+                let name = format!("blocks.{l}.{suffix}");
+                let want = tier.want(&name);
+                upload(name, n, k, want);
             }
         }
         if cfg.mtp && shard.head {
@@ -1396,7 +1413,22 @@ impl Qwen35 {
             // same 7 leaves, just under `mtp.layers.0.` instead of
             // `blocks.{l}.`.
             for (suffix, n, k) in cfg.layer_leaves(LayerType::Full) {
-                upload(format!("mtp.layers.0.{suffix}"), n, k);
+                let name = format!("mtp.layers.0.{suffix}");
+                let want = tier.want(&name);
+                upload(name, n, k, want);
+            }
+        }
+        // The frozen embedding table and LM head of a narrow-base LoRA build:
+        // streamed into a `Weight` like the linears (see `table_tier`).
+        let head_name = cfg.head_weight();
+        let tied = head_name == "tok.weight";
+        let mut tables = vec![("tok.weight", shard.embed || (tied && shard.head))];
+        if !tied {
+            tables.push((head_name, shard.head));
+        }
+        for (name, owned) in tables {
+            if let (true, Some(want)) = (owned, table_tier(tier, &cfg, train, name)) {
+                upload(name.to_string(), cfg.vocab, cfg.d_model, want);
             }
         }
 
@@ -1444,7 +1476,29 @@ impl Qwen35 {
         // A non-head shard never reads `logits` (`run_forward` only writes it
         // `if self.shard.head`) - on an inference build this is `n * vocab`
         // (248320) of dead VRAM per non-head card.
-        let logits = gpu.storage(if shard.head { n * cfg.vocab as u64 } else { 1 });
+        //
+        // A training build without MTP never materialises `n * vocab` logits
+        // (a 32K-token sequence of this vocabulary is 32 GB in fp32): its loss
+        // and logit gradient come from the chunked LM head, which keeps a few
+        // hundred rows of logits and recomputes them in the backward. The head
+        // table is whatever tier `weights` holds (bf16 for a narrow base), or
+        // the fp32 store tensor shared as a `Weight`.
+        let head_ce = (train && shard.head && !cfg.mtp).then(|| {
+            let name = cfg.head_weight();
+            let fp32_head;
+            let head = match weights.get(name) {
+                Some(w) => w,
+                None => {
+                    fp32_head = Weight::F32 { w: ps.w(name).clone(), n: cfg.vocab, k: cfg.d_model };
+                    &fp32_head
+                }
+            };
+            let rows = model::head_ce::rows_for_budget(n, cfg.vocab as u64, head_budget.unwrap_or(HEAD_BUDGET_WORDS)) as u32;
+            let kernels = HeadKernels::from_gpu(&gpu).unwrap_or_else(|e| panic!("qwen35: LM head: {e}"));
+            HeadCe::new(&ops, cfg.d_model, cfg.vocab, head, HeadCeConfig { rows_per_chunk: rows, tile_budget_words: None }, kernels)
+                .unwrap_or_else(|e| panic!("qwen35: LM head: {e}"))
+        });
+        let logits = gpu.storage(if shard.head && head_ce.is_none() { n * cfg.vocab as u64 } else { 1 });
         let ce_buf = gpu.storage(n);
         let ce_grad_uni = gpu.uniform_dynamic(4);
         let d = cfg.d_model as u64;
@@ -1458,40 +1512,12 @@ impl Qwen35 {
         let img_embeds = gpu.storage(1);
         let d_img_embeds = gpu.storage(1);
 
-        // Single-sequence incremental decode state - see `Qwen35::step`'s doc
-        // and the struct fields' own docs for what each buffer holds.
+        // Single-sequence incremental decode state - see `Qwen35::decode`.
         // `dec_cap = t`: this pass's decode capacity is this instance's own
         // fixed prefill length (see `dec_cap`'s own doc).
-        let kv_dim = cfg.kv_dim() as u64;
-        let mut gqa_kv = Vec::with_capacity(cfg.n_layers as usize);
-        let mut gdn_state = Vec::with_capacity(cfg.n_layers as usize);
-        let mut gdn_hist = Vec::with_capacity(cfg.n_layers as usize);
-        let (gdn_state_len, gdn_hist_len) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
-        // A layer this shard does not own never runs its decode step
-        // (`run_decode_step` loops only `shard.start..shard.end`), so its
-        // cache/state/history buffers are dead weight - a full-size GQA KV
-        // cache or GDN state per un-owned layer, on every non-owning shard.
-        // A training build never decodes at all (`assert_has_decode_state`),
-        // so it owns none of them.
-        for (l, ty) in cfg.layer_types().into_iter().enumerate() {
-            if train || !shard.owns(l) {
-                gqa_kv.push(KvLayer::placeholder(&gpu));
-                gdn_state.push(gpu.storage(1));
-                gdn_hist.push(gpu.storage(1));
-                continue;
-            }
-            match ty {
-                LayerType::Full => {
-                    gqa_kv.push(KvLayer::new(&gpu, KvTier::F32, t as u64, kv_dim, cfg.head_dim as u64));
-                    gdn_state.push(gpu.storage(1));
-                    gdn_hist.push(gpu.storage(1));
-                }
-                LayerType::Linear => {
-                    gqa_kv.push(KvLayer::placeholder(&gpu));
-                    gdn_state.push(gpu.storage(gdn_state_len));
-                    gdn_hist.push(gpu.storage(gdn_hist_len));
-                }
-            }
+        let decode = OnceCell::new();
+        if !train {
+            let _ = decode.set(DecodeState::new(&gpu, &cfg, &shard, t));
         }
 
         // Backward-pass boundary scratch for gradient checkpointing across
@@ -1515,6 +1541,7 @@ impl Qwen35 {
             cos,
             sin,
             logits,
+            head_ce,
             ce_buf,
             ce_grad_uni,
             res,
@@ -1535,9 +1562,7 @@ impl Qwen35 {
             d_img_embeds,
             dec_pos: Cell::new(0),
             dec_cap: t,
-            gqa_kv,
-            gdn_state,
-            gdn_hist,
+            decode,
             dres_boundary_in,
             dres_boundary_out,
             shard,
@@ -2428,7 +2453,15 @@ impl Qwen35 {
         let mut layer_acts: Vec<LayerTrainActs> = Vec::new();
 
         if self.shard.embed {
-            g.submit(&[], &[g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &res[0]], &[d, n], n * d)]);
+            match self.weights.get("tok.weight") {
+                // A narrow-base build holds the frozen table as a `Weight`.
+                Some(table) => {
+                    let mut s = Vec::new();
+                    self.ops.embed(&mut s, table, &self.tokens, n, &res[0]);
+                    g.submit(&[], &s);
+                }
+                None => g.submit(&[], &[g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &res[0]], &[d, n], n * d)]),
+            }
 
             // Vision-language splice: overwrite the image-placeholder rows of
             // the freshly-gathered residual stream with the projected image
@@ -2458,7 +2491,9 @@ impl Qwen35 {
             let xn_final = g.storage((n * d) as u64);
             g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res[self.cfg.n_layers as usize], self.w("norm.weight"), &xn_final, d, n, self.cfg.rms_eps)]);
             let v = self.cfg.vocab;
-            g.submit(&[], &[g.step(MATMUL, &[&xn_final, self.w(self.cfg.head_weight()), &self.logits], &[n, d, v], n * v)]);
+            if self.head_ce.is_none() {
+                g.submit(&[], &[g.step(MATMUL, &[&xn_final, self.w(self.cfg.head_weight()), &self.logits], &[n, d, v], n * v)]);
+            }
 
             if self.cfg.mtp {
                 let mtp_acts = self.run_mtp_forward(&res[self.cfg.n_layers as usize], n);
@@ -2633,12 +2668,33 @@ impl Qwen35 {
         // final norm -- a non-head stage starts instead from the externally
         // supplied gradient at `res[shard.end]` (`Self::write_out_dres`).
         let mut d_res_next = if self.shard.head {
-            g.write(&self.ce_grad_uni, &[n, v, model::IGNORE, f(self.count.get())]);
-            let d_logits = g.storage((n * v) as u64);
-            g.submit(&[], &[g.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &d_logits], n * v)]);
-
             let d_xn_final = g.storage((n * d) as u64);
-            {
+            if let Some(head) = &self.head_ce {
+                // Chunked: recompute each chunk's logits, turn them into the
+                // logit gradient and apply the head, never holding n * vocab.
+                let name = self.cfg.head_weight();
+                let dw = self.trainable(name).then(|| self.g(name));
+                let mut s = Vec::new();
+                head.backward_steps(
+                    &self.ops,
+                    &mut s,
+                    &HeadBackward {
+                        hidden: &ta.xn_final,
+                        d_hidden: &d_xn_final,
+                        n,
+                        labels: &self.targets,
+                        grad_scale: GradScale::Const(1.0 / self.count.get()),
+                        logit_scale: 1.0,
+                        row_weights: None,
+                        dw,
+                        forward_state_held: false,
+                    },
+                );
+                g.submit(&[], &s);
+            } else {
+                g.write(&self.ce_grad_uni, &[n, v, model::IGNORE, f(self.count.get())]);
+                let d_logits = g.storage((n * v) as u64);
+                g.submit(&[], &[g.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &d_logits], n * v)]);
                 let mut s = Vec::new();
                 self.proj_bwd(&mut s, "lm_head", &d_logits, &ta.xn_final, self.cfg.head_weight(), &d_xn_final, n, d, v, 0);
                 g.submit(&[], &s);
@@ -2763,25 +2819,21 @@ impl Qwen35 {
     /// cache rows `0..=pos` (its `seq_lens` bound), so stale rows beyond the
     /// new sequence's own length are never read.
     pub fn reset_decode_cache(&self) {
-        self.assert_has_decode_state();
         self.dec_pos.set(0);
+        let dec = self.decode_state();
         let mut clears: Vec<&DeviceBuffer> = Vec::new();
         for (l, ty) in self.cfg.layer_types().iter().enumerate() {
             if *ty == LayerType::Linear {
-                clears.push(&self.gdn_state[l]);
-                clears.push(&self.gdn_hist[l]);
+                clears.push(&dec.gdn_state[l]);
+                clears.push(&dec.gdn_hist[l]);
             }
         }
         self.gpu.submit(&clears, &[]);
     }
 
-    /// A training build keeps no decode cache or recurrent state (see
-    /// [`Self::new_impl_on`]): the per-GQA-layer f32 KV cache alone is
-    /// `2 * kv_dim * 4` bytes per token per layer, dead weight for a build
-    /// that only runs whole-sequence forwards and backwards. Decoding needs
-    /// an inference build.
-    fn assert_has_decode_state(&self) {
-        assert!(!self.is_train, "qwen35: a training build keeps no decode state (KV cache, GDN recurrent state); build an inference instance to decode");
+    /// The decode caches, built now if this is a training build's first decode.
+    fn decode_state(&self) -> &DecodeState {
+        self.decode.get_or_init(|| DecodeState::new(&self.gpu, &self.cfg, &self.shard, self.dec_cap))
     }
 
     /// The absolute position the next [`Self::step`] will decode.
@@ -3654,9 +3706,8 @@ impl Qwen35 {
     /// buffer is a 1-word dummy and reading it would silently compare
     /// nothing.
     pub fn debug_gdn_state(&self, l: usize) -> Vec<f32> {
-        self.assert_has_decode_state();
         assert_eq!(self.cfg.layer_types()[l], LayerType::Linear, "layer {l} is GQA and has no recurrent state");
-        self.gpu.read(&self.gdn_state[l], self.cfg.gdn_state_len() as usize)
+        self.gpu.read(&self.decode_state().gdn_state[l], self.cfg.gdn_state_len() as usize)
     }
 
     // =========================================================================
@@ -3756,15 +3807,15 @@ impl Qwen35 {
     /// the same literal `step`/`prefill_chunked` build, factored out because
     /// the speculative loop needs it in three places.
     fn own_caches(&self) -> DecodeCaches<'_> {
-        self.assert_has_decode_state();
         // These are dedicated per-sequence buffers, not a pool window - see
         // `DecodeCaches::gqa_base_row`.
+        let dec = self.decode_state();
         DecodeCaches {
-            gqa_kv: &self.gqa_kv,
+            gqa_kv: &dec.gqa_kv,
             gqa_cap: self.dec_cap,
             gqa_base_row: 0,
-            gdn_state: &self.gdn_state,
-            gdn_hist: &self.gdn_hist,
+            gdn_state: &dec.gdn_state,
+            gdn_hist: &dec.gdn_hist,
         }
     }
 
@@ -4114,6 +4165,17 @@ impl Qwen35 {
     pub fn forward(&self) -> f32 {
         self.run_forward();
         let n = self.b * self.t;
+        if let Some(head) = &self.head_ce {
+            // Recorded on `self.gpu`, not through `HeadCe::forward`: that
+            // submits on the `Ops` handle, a separate command stream that is
+            // not ordered after this handle's pending layer work.
+            let ta = self.train_acts.borrow();
+            let xn_final = &ta.as_ref().expect("qwen35: a head_ce build is a training build").xn_final;
+            let mut s = Vec::new();
+            head.forward_steps(&self.ops, &mut s, xn_final, n, &self.targets, &self.ce_buf, 1.0);
+            self.gpu.submit(&[], &s);
+            return self.gpu.read(&self.ce_buf, n as usize).iter().sum::<f32>() / self.count.get();
+        }
         self.gpu.submit(&[], &[self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, self.cfg.vocab, model::IGNORE], n)]);
         let vals = self.gpu.read(&self.ce_buf, n as usize);
         let mut total = vals.iter().sum::<f32>();
@@ -4205,7 +4267,21 @@ impl Qwen35 {
         );
         self.gpu.write(&self.tokens, tokens);
         self.run_forward();
-        self.gpu.read(&self.logits, (self.t * self.cfg.vocab) as usize)
+        let Some(head) = &self.head_ce else {
+            return self.gpu.read(&self.logits, (self.t * self.cfg.vocab) as usize);
+        };
+        // A chunked-head build has no logits buffer: read them chunk by chunk.
+        let ta = self.train_acts.borrow();
+        let xn_final = &ta.as_ref().expect("qwen35: a head_ce build is a training build").xn_final;
+        let vocab = self.cfg.vocab as usize;
+        let mut out = Vec::with_capacity(self.t as usize * vocab);
+        for (r0, rows) in head.chunks(self.t) {
+            let mut s = Vec::new();
+            head.logits_steps(&self.ops, &mut s, xn_final, r0, rows, 1.0);
+            self.gpu.submit(&[], &s);
+            out.extend(self.gpu.read(head.logits(), rows as usize * vocab));
+        }
+        out
     }
 
     pub fn save(&self, path: &str) {
@@ -4308,11 +4384,11 @@ mod tests {
     /// convenience wrapper and always passes `None`).
     fn decode_stage(m: &Qwen35, token_id: u32, pos: u32, input: Option<&[f32]>) -> Vec<f32> {
         let caches = DecodeCaches {
-            gqa_kv: &m.gqa_kv,
+            gqa_kv: &m.decode_state().gqa_kv,
             gqa_cap: m.dec_cap,
             gqa_base_row: 0,
-            gdn_state: &m.gdn_state,
-            gdn_hist: &m.gdn_hist,
+            gdn_state: &m.decode_state().gdn_state,
+            gdn_hist: &m.decode_state().gdn_hist,
         };
         let out = m.run_decode_step(token_id, pos, &caches, input);
         m.gpu.read(&out, m.cfg.d_model as usize)
@@ -4422,11 +4498,11 @@ mod tests {
     /// exposed. Returns the whole `[n, d_model]` boundary block.
     fn prefill_stage(m: &Qwen35, tokens: &[u32], pos: u32, input: Option<&[f32]>) -> Vec<f32> {
         let caches = DecodeCaches {
-            gqa_kv: &m.gqa_kv,
+            gqa_kv: &m.decode_state().gqa_kv,
             gqa_cap: m.dec_cap,
             gqa_base_row: 0,
-            gdn_state: &m.gdn_state,
-            gdn_hist: &m.gdn_hist,
+            gdn_state: &m.decode_state().gdn_state,
+            gdn_hist: &m.decode_state().gdn_hist,
         };
         m.prefill_chunk_stage(tokens, pos, &caches, input)
     }

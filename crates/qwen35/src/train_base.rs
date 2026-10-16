@@ -18,6 +18,8 @@ use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::ops::{TierPolicy, Weight};
 
+use crate::config::Qwen35Config;
+
 /// How to build a trainer. The default is the classic one: an fp32 base and
 /// every layer's activations kept for the backward pass.
 #[derive(Clone, Debug)]
@@ -30,12 +32,28 @@ pub struct TrainOpts {
     /// each layer's activations inside the backward (one layer's activations
     /// alive at a time instead of all of them, for one extra forward).
     pub recompute: bool,
+    /// Words of logits the chunked LM head keeps alive at once (it computes
+    /// `rows x vocab` at a time instead of `tokens x vocab`); `None` takes
+    /// the default of 2^28 words (1 GiB).
+    pub head_budget_words: Option<u64>,
 }
 
 impl Default for TrainOpts {
     fn default() -> Self {
-        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false }
+        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false, head_budget_words: None }
     }
+}
+
+/// The tier a narrow-base LoRA build holds its frozen embedding table and LM
+/// head at, or `None` when `name` stays an fp32 store tensor. Both are plain
+/// `[vocab, d_model]` matrices the adapters never touch, and at the real
+/// shape each is 5 GB in fp32 - more than one storage binding. bf16 halves
+/// that and is the floor: unlike the layer linears they are not held at 4
+/// bits, so a narrower request for the base gives them bf16. MTP shares the
+/// tables with its own fp32 path and keeps them fp32.
+pub(crate) fn table_tier(tier: &TierPolicy, cfg: &Qwen35Config, train: bool, name: &str) -> Option<Dtype> {
+    let is_table = name == "tok.weight" || name == cfg.head_weight();
+    (train && cfg.lora.is_some() && !cfg.mtp && tier.quantizes_anything() && is_table).then_some(Dtype::BF16)
 }
 
 /// `true` when `w` is read with fp32 (unquantized) activations: the tiers

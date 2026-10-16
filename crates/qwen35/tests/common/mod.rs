@@ -123,3 +123,18 @@ pub fn measure_in_child(helper: &str) -> HashMap<String, u64> {
 pub fn mark(name: &str, bytes: u64) {
     println!("\nMARK {name}={bytes}");
 }
+
+/// A deterministic batch of `t` tokens over the tiny vocabulary.
+pub fn batch_of(t: usize) -> (Vec<u32>, Vec<u32>) {
+    ((0..t as u32).map(|i| (i * 7 + 1) % 29).collect(), (0..t as u32).map(|i| (i * 7 + 8) % 29).collect())
+}
+
+/// [`loss_and_grads`] on an arbitrary batch.
+pub fn loss_and_grads_on(m: &qwen35::model::Qwen35, tokens: &[u32], targets: &[u32]) -> (f32, Vec<(String, Vec<f32>)>) {
+    m.set_batch(tokens, targets);
+    m.zero_grads();
+    let loss = m.forward();
+    m.backward();
+    let grads = m.param_names().into_iter().map(|n| (n.clone(), m.read_grad(&n))).collect();
+    (loss, grads)
+}
