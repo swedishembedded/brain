@@ -315,7 +315,7 @@ impl<M: Model, T: Tokenizer> Learner for ModelLearner<'_, M, T> {
     fn joint_oracle(&mut self, rows: &[&str], probes: &[&Probe]) -> f64 {
         let dir = self.work.join("oracle");
         let out = self.work.join("oracle.safetensors");
-        if self.fit_into(rows, &dir, &out, 0).is_err() {
+        if self.fit_into(rows, &dir, &out, self.fit.seed).is_err() {
             return 0.0;
         }
         let tasks: Vec<Task> = probes

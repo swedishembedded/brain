@@ -302,6 +302,17 @@ fn softmax_entropy(logits: &[f32]) -> f32 {
     -exps.iter().map(|&e| e / sum).filter(|&p| p > 0.0).map(|p| p * p.ln()).sum::<f32>()
 }
 
+/// Scoring is one deterministic decode per arm, so a rollout that samples is a
+/// caller's mistake that would turn the comparison into noise, and it is
+/// refused instead of being decoded under a generator nobody seeded.
+fn require_greedy(rollout: &RolloutParams) {
+    assert!(
+        rollout.sample.is_greedy(),
+        "rl::improve: scoring decodes greedily, but the rollout samples (temperature {}); pass SampleParams::greedy()",
+        rollout.sample.temp
+    );
+}
+
 /// Load `path` as an `M`, greedily decode every task's prompt, score each
 /// completion with `verifier`, and return `(per-task scores, mean completion
 /// entropy)`. Both arms of [`cycle`]'s gate call this on disk-reloaded
@@ -322,6 +333,7 @@ pub fn score_checkpoint<M: Model>(path: &Path, tasks: &[Task], verifier: &dyn Ve
 /// distinct-completion collapse check ([`ArmScores::distinct_completions`])
 /// is computed from, without a second decode pass.
 pub fn decode_checkpoint<M: Model>(path: &Path, tasks: &[Task], verifier: &dyn Verifier, rollout: &RolloutParams) -> (Vec<f64>, f64, Vec<Vec<u32>>) {
+    require_greedy(rollout);
     let c = checkpoint::load(path.to_str().expect("utf-8 path"));
     let cfg = M::Config::from_json(&c.header["config"]);
     let init = c.by_role("");
@@ -331,7 +343,7 @@ pub fn decode_checkpoint<M: Model>(path: &Path, tasks: &[Task], verifier: &dyn V
     // real model is most of the device memory the scoring pass asks for.
     let model = M::new_inference(cfg.clone(), 1, cfg.block_size(), &init);
     let mut roll = ModelRollout::new(&model);
-    let mut rng = Rng::new(0); // greedy: rollout::RolloutParams::sample must be SampleParams::greedy()
+    let mut rng = Rng::new(0); // never consulted: `require_greedy` refused every rollout that would draw
     let mut scores = Vec::with_capacity(tasks.len());
     let mut entropies = Vec::with_capacity(tasks.len());
     let mut completions = Vec::with_capacity(tasks.len());
@@ -524,6 +536,19 @@ mod tests {
     /// (or a filesystem handing entries back in inode order) must not make
     /// an older adapter look like the current one to the serving-side
     /// watcher. Non-adapter files in the same directory are ignored.
+    /// A sampling rollout is refused before any checkpoint is read; the greedy
+    /// one passes.
+    #[test]
+    #[should_panic(expected = "scoring decodes greedily")]
+    fn a_sampling_rollout_is_refused() {
+        require_greedy(&RolloutParams { max_new: 4, sample: model::serve::SampleParams { temp: 0.7, top_k: 0, top_p: 1.0 }, eos: None });
+    }
+
+    #[test]
+    fn a_greedy_rollout_is_accepted() {
+        require_greedy(&RolloutParams { max_new: 4, sample: model::serve::SampleParams::greedy(), eos: None });
+    }
+
     #[test]
     fn latest_adapter_is_the_highest_version_never_the_newest_file() {
         let dir = tempfile::tempdir().unwrap();

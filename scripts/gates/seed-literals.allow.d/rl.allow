@@ -2,9 +2,7 @@ crates/rl/examples/autonomous_exploration.rs	-:PROBE_SEED_BASE=700_000_000	const
 crates/rl/examples/continual_learning.rs	-:PRETRAIN_SEED=20	const	world: the pretraining dataset seed; it defines the frozen base the study starts from and is part of that base's cache key
 crates/rl/examples/continual_learning.rs	prepare_base:seed=PRETRAIN_SEED	default	world: the pretraining dataset seed; it defines the frozen base the study starts from and is part of that base's cache key
 crates/rl/examples/oracle_capacity_check.rs	-:PRETRAIN_SEED=20	const	world: the pretraining dataset seed; it defines the frozen base the study starts from and is part of that base's cache key
-crates/rl/examples/oracle_capacity_check.rs	-:SFT_SEED=1	const	todo: B-18 the dataset seed doubles as the training seed
-crates/rl/examples/oracle_capacity_check.rs	main:seed=SFT_SEED	default	todo: B-18 the dataset seed doubles as the training seed
+crates/rl/examples/oracle_capacity_check.rs	-:SFT_DATA_SEED=1	const	world: dataset seed of the capacity check, fixed so the check measures the same SFT data every run
 crates/rl/examples/oracle_capacity_check.rs	prepare_base:seed=PRETRAIN_SEED	default	world: the pretraining dataset seed; it defines the frozen base the study starts from and is part of that base's cache key
 crates/rl/src/continual.rs	-:PROBE_SEED_BASE=900_000_000	const	world: held-out probe episodes of the continual-learning study
-crates/rl/src/improve.rs	decode_checkpoint:Rng::new(0)	rng	todo: B-18 nothing enforces that the rollout is greedy
-crates/rl/src/reader.rs	ModelLearner::joint_oracle:fit_into#3=0	positional	todo: B-18 the joint oracle trains under seed 0 instead of the learner seed
+crates/rl/src/improve.rs	decode_checkpoint:Rng::new(0)	rng	greedy: require_greedy refuses every rollout that would consult the generator

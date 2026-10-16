@@ -3,7 +3,7 @@
 
 //! Talker generation: the codec-id sampling loop chaining Talker's own
 //! KV-cache decode (`crate::talker`) with the MTP code predictor
-//! (`qwen3tts::mtp::MtpModel::generate_residuals`, already built and validated
+//! (`qwen3tts::mtp::MtpModel::generate_residuals_with`, already built and validated
 //! against real Omni weights, reused unchanged). Mirrors
 //! `qwen3tts::pipeline::generate_codes`'s already-working loop shape exactly
 //! (same `sample_cb0` suppressed-token-set logic, same feedback-sum-then-
@@ -18,6 +18,7 @@ use data::rng::Rng;
 use gpu_core::{DeviceBuffer, Gpu};
 use qwen3vl::mrope::{get_rope_index, mrope_tables};
 use qwen3tts::mtp::MtpModel;
+use qwen3tts::sampling::SamplerCfg;
 
 use crate::config::MoeTextConfig;
 use crate::talker::{layer_decode_step, layer_fwd, TalkerLayerCache, TalkerLayerWeights};
@@ -170,6 +171,14 @@ impl Default for GenOpts {
     }
 }
 
+/// How the residual codebooks (1..15) are drawn: with the same temperature and
+/// top-k the caller chose for codebook 0, from the same generator, so one seed
+/// reproduces one clip. `temperature <= 0` pins them to the argmax too, which
+/// is what a parity check against a greedy reference needs.
+fn residual_sampler(opts: &GenOpts) -> SamplerCfg {
+    SamplerCfg { do_sample: opts.temperature > 0.0, temperature: opts.temperature, top_k: opts.top_k, top_p: 1.0, repetition_penalty: 1.0 }
+}
+
 /// Sample codebook-0 from `logits` with the reference's `suppress_tokens`:
 /// the top-1024 vocab entries are masked except the codec EOS, itself masked
 /// unless `allow_eos` - identical logic to `qwen3tts::pipeline::sample_cb0`
@@ -275,7 +284,7 @@ pub fn generate_codes_streaming(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextC
             break;
         }
         let cb0_embed = codec_embed(cb0);
-        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
+        let (residuals, res_sum) = mtp.generate_residuals_with(&past_hidden, &cb0_embed, &residual_sampler(opts), &mut rng);
         let mut frame = Vec::with_capacity(1 + residuals.len());
         frame.push(cb0);
         frame.extend_from_slice(&residuals);
@@ -305,6 +314,16 @@ pub fn generate_codes_streaming(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The residual codebooks are drawn under the caller's sampling controls:
+    /// a positive temperature samples them, zero pins them to the argmax.
+    #[test]
+    fn residual_codebooks_follow_the_callers_temperature() {
+        let sampled = residual_sampler(&GenOpts { temperature: 0.9, top_k: 50, ..GenOpts::default() });
+        assert!(!sampled.is_greedy());
+        assert_eq!((sampled.temperature, sampled.top_k), (0.9, 50));
+        assert!(residual_sampler(&GenOpts { temperature: 0.0, ..GenOpts::default() }).is_greedy());
+    }
 
     #[test]
     fn default_gen_opts_draw_a_fresh_seed_each_time() {

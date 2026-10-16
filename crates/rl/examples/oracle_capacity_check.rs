@@ -76,7 +76,9 @@ const SFT_SEQS: usize = 30_000;
 const SFT_STEPS: u32 = 6_000;
 const SFT_BATCH: u32 = 128;
 const SFT_LR: f32 = 3e-3;
-const SFT_SEED: u64 = 1;
+/// Fixes the pooled SFT dataset, so every run measures the same data; the
+/// training seed is a separate draw (`--seed`).
+const SFT_DATA_SEED: u64 = 1;
 
 fn lora_cfg() -> LoraCfg {
     LoraCfg { rank: LORA_RANK, alpha: LORA_ALPHA, targets: LORA_TARGETS.iter().map(|s| s.to_string()).collect() }
@@ -200,7 +202,22 @@ fn probes() -> Vec<rl::env::Task> {
         .collect()
 }
 
+/// `--seed N` if given, else a fresh draw, printed either way so the run can be
+/// repeated.
+fn training_seed() -> u64 {
+    let mut args = std::env::args().skip(1);
+    let given = match (args.next().as_deref(), args.next()) {
+        (Some("--seed"), Some(v)) => Some(v.parse::<u64>().expect("--seed takes an integer")),
+        (None, _) => None,
+        (Some(other), _) => panic!("unknown argument {other}; the only flag is --seed N"),
+    };
+    let seed = given.unwrap_or_else(data::rng::random_seed);
+    println!("training seed {seed}{}", if given.is_none() { " (drawn; pass --seed to reproduce)" } else { "" });
+    seed
+}
+
 fn main() {
+    let train_seed = training_seed();
     let out = std::env::temp_dir().join("brain-rl-oracle-capacity-check");
     std::fs::create_dir_all(&out).expect("create out dir");
 
@@ -209,7 +226,7 @@ fn main() {
     let rules: Vec<Rule> = (0..STUDY_RULES).map(Rule::for_cycle).collect();
     println!("E1: pooling all {STUDY_RULES} study rules into one teacher-forced SFT dataset ({SFT_SEQS} seqs, {SFT_STEPS} steps, batch {SFT_BATCH}) - no RL, no sequential interference, per-rule budget matched to the base's own pretraining density");
     let data_dir = out.join("sft-data");
-    curriculum::write_pretrain_dataset(&rules, SFT_SEQS, SFT_SEED, &data_dir).expect("write sft dataset");
+    curriculum::write_pretrain_dataset(&rules, SFT_SEQS, SFT_DATA_SEED, &data_dir).expect("write sft dataset");
 
     let opts = model::FitOpts {
         steps: SFT_STEPS,
@@ -224,7 +241,7 @@ fn main() {
         grad_accum: 1,
         eval_interval: 0,
         eval_batches: 0,
-        seed: SFT_SEED,
+        seed: train_seed,
         checkpoint_secs: 0,
         align_to_lines: true,
         patience: 0,
