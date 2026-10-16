@@ -10,7 +10,7 @@ use splat::geometry::axis;
 
 #[test]
 fn every_gaussian_is_thin_along_its_normal_and_as_wide_as_its_footprint() {
-    let mut g = Lcg::new(5);
+    let mut g = Lcg::new(data::rng::random_seed());
     let n = 500;
     let normal: Vec<f32> = (0..n)
         .flat_map(|_| {

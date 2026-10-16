@@ -31,7 +31,7 @@ fn step_map(k: &Intrinsics, g: &mut Lcg) -> mvs::DepthMap {
 
 #[test]
 fn halving_picks_one_sample_per_block_and_stays_exact_on_planes() {
-    let mut g = Lcg::new(9);
+    let mut g = Lcg::new(data::rng::random_seed());
     for k in [
         Intrinsics::pinhole(120.0, 96, 64),
         Intrinsics { fx: 40.0, fy: 40.0, cx: 48.5, cy: 31.0, lens: Lens::Fisheye { k: [0.04, -0.01, 0.0, 0.0] }, width: 96, height: 64 },
