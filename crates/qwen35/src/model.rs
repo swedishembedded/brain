@@ -1454,7 +1454,10 @@ impl Qwen35 {
         // `false` arm. Mirrors `qwen35moe::model::Qwen35::new_impl_on`'s own
         // `weights` construction exactly (that crate has no per-leaf policy
         // yet - a separate milestone, see `TierPolicy`'s own doc).
-        let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen35: Ops::new: {e}"));
+        let mut ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen35: Ops::new: {e}"));
+        if let Some(o) = train_opts {
+            ops.set_gemm_precision(o.gemm_precision);
+        }
         let mut weights: HashMap<String, Weight> = HashMap::new();
         let mut upload = |name: String, wn: u32, wk: u32, want: Dtype| {
             let w = if want == Dtype::F32 {

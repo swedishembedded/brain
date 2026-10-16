@@ -106,6 +106,9 @@ impl Drop for PrimaryRef {
     }
 }
 
+/// The compute capability that introduced bf16 tensor-core products.
+const LIBRARY_GEMM_MIN_CC: (u32, u32) = (8, 0);
+
 pub struct Context {
     d: &'static Driver,
     fns: &'static ExecFns,
@@ -156,6 +159,9 @@ pub struct Context {
     /// started by another handle takes it before waiting on the stream; see
     /// [`Context::drain_other_handles`].
     capture_gate: Arc<Mutex<()>>,
+    /// The vendor GEMM library's handle for this stream, created on first use
+    /// and kept (or its failure) for the life of the context.
+    blas: std::sync::OnceLock<Result<crate::cublas::Blas, String>>,
 }
 
 // The context handle is used under `cuCtxSetCurrent` before every call, so it
@@ -208,6 +214,7 @@ impl Context {
             pool_wanted: std::sync::atomic::AtomicBool::new(std::env::var("BRAIN_CUDA_MEMPOOL").map(|v| v != "0").unwrap_or(true)),
             cache: Arc::new(BlockCache::new(d, fns, ctx, primary, 0)),
             capture_gate: Arc::new(Mutex::new(())),
+            blas: std::sync::OnceLock::new(),
         };
         c.make_current()?;
         c.cache.set_cap(cache_cap_for(c.mem_info().map(|m| m.1).unwrap_or(0)));
@@ -320,6 +327,33 @@ impl Context {
     /// The device's product name, for error messages.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Why this context cannot run library GEMMs, or `None` when it can:
+    /// bf16 tensor-core products need compute capability 8.0, a loadable
+    /// `libcublas` and a handle that binds to this context's stream.
+    pub fn library_gemm_unavailable(&self) -> Option<String> {
+        if self.cc < LIBRARY_GEMM_MIN_CC {
+            return Some(format!("compute capability {}.{} is below the {}.{} bf16 tensor-core floor", self.cc.0, self.cc.1, LIBRARY_GEMM_MIN_CC.0, LIBRARY_GEMM_MIN_CC.1));
+        }
+        self.blas().err()
+    }
+
+    fn blas(&self) -> Result<&crate::cublas::Blas, String> {
+        self.blas
+            .get_or_init(|| {
+                self.make_current()?;
+                crate::cublas::Blas::new(self.stream)
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    /// Enqueue a library GEMM on this context's stream over device addresses.
+    pub fn library_gemm(&self, gemm: &backend_api::LibraryGemm, a: CuDevicePtr, b: CuDevicePtr, c: CuDevicePtr) -> Result<(), String> {
+        let blas = self.blas()?;
+        self.make_current()?;
+        blas.gemm(gemm, a, b, c)
     }
 
     fn make_current(&self) -> Result<(), String> {

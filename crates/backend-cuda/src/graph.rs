@@ -236,6 +236,10 @@ pub(crate) struct Resolved {
     /// Bound range length in words per binding; already appended to `args`
     /// for a kernel that takes them, kept for the submission signature.
     pub lens: Vec<u64>,
+    /// Set when this dispatch is a vendor-library product rather than a
+    /// kernel launch: `args[..3]` are its `A`, `B` and `C` addresses and the
+    /// kernel behind `compiled` is only a placeholder that names the bindings.
+    pub library: Option<backend_api::LibraryGemm>,
 }
 
 // `func` is an opaque driver handle, valid for as long as `compiled`'s module

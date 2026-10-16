@@ -474,6 +474,50 @@ impl CudaLaunch {
     }
 }
 
+/// Element type of one operand of a [`LibraryGemm`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LibraryDtype {
+    /// IEEE binary32.
+    F32,
+    /// bfloat16, two to a 32-bit word, low half first.
+    Bf16,
+}
+
+/// One dense matrix product for a vendor GEMM library, in the library's own
+/// column-major convention: `C[m, n] = alpha * op(A) * op(B) + beta * C`,
+/// where `op(A)` is `m x k` and `op(B)` is `k x n`, and `lda`/`ldb`/`ldc` are
+/// the column strides in elements. Products over row-major data are stated by
+/// swapping the operands, so no operand is ever copied or transposed.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LibraryGemm {
+    /// Transpose `A`.
+    pub trans_a: bool,
+    /// Transpose `B`.
+    pub trans_b: bool,
+    /// Rows of `op(A)` and `C`.
+    pub m: u32,
+    /// Columns of `op(B)` and `C`.
+    pub n: u32,
+    /// Columns of `op(A)`, rows of `op(B)`.
+    pub k: u32,
+    /// Column stride of `A` in elements.
+    pub lda: u32,
+    /// Column stride of `B` in elements.
+    pub ldb: u32,
+    /// Column stride of `C` in elements.
+    pub ldc: u32,
+    /// Element type of `A`.
+    pub a: LibraryDtype,
+    /// Element type of `B`.
+    pub b: LibraryDtype,
+    /// Element type of `C` (accumulation is always binary32).
+    pub c: LibraryDtype,
+    /// Scale of the product.
+    pub alpha: f32,
+    /// Scale of the existing `C`: 0 overwrites, 1 accumulates.
+    pub beta: f32,
+}
+
 /// A provider's own compiled kernel, handed to [`Backend::register_native`] -
 /// the wave-2 (native f16, cooperative-matrix, CPU ISA pack) counterpart of
 /// the `(name, wgsl_source)` pair every WGSL kernel registers with today.
@@ -1613,6 +1657,28 @@ pub trait Backend: Send + Sync {
             return None;
         }
         self.step_native(id, bufs, params, threads)
+    }
+
+    /// Record one dense matrix product served by a vendor GEMM library
+    /// (`C = alpha * op(A) * op(B) + beta * C`, column-major, as such libraries
+    /// state it), ordered with the kernel steps on the same stream. `bufs` is
+    /// `[A, B, C]`, `offsets` the `(word offset, word length)` of each, as in
+    /// [`Backend::step_native_sliced`].
+    ///
+    /// `None` is a decline, never a failure: the backend has no such library,
+    /// the library did not load, the device cannot run the operand types, or
+    /// the shape is out of the library's range. The caller then runs the
+    /// kernels it would have run without the library.
+    fn step_library_gemm(&self, _gemm: &LibraryGemm, _bufs: &[&DeviceBuffer], _offsets: &[(u64, u64)]) -> Option<Step> {
+        None
+    }
+
+    /// Why [`Backend::step_library_gemm`] would decline every request on this
+    /// device (library absent, compute capability too low, ...), or `None`
+    /// when it can serve them. Answered once per device by the caller, who
+    /// reports the chosen path.
+    fn library_gemm_unavailable(&self) -> Option<String> {
+        Some("this backend has no vendor GEMM library".to_string())
     }
 
     /// How many blocks of a registered native kernel one multiprocessor can

@@ -128,6 +128,7 @@ pub fn concat_rows_parallel(parts: &[&[f32]]) -> Vec<f32> {
     out
 }
 
+use gpu_core::provider::library::{self, GemmPrecision, LibraryGemmProvider};
 use gpu_core::provider::{LowerCtx, Operand, OpRequest, Pass, ProviderRegistry, Role};
 use gpu_core::select::{self, Dtype, KernelSelector, KernelVariant, Op, OpShape};
 use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
@@ -1034,6 +1035,11 @@ pub struct Ops {
     /// `gpu_core::provider`'s module doc for this seam's scope, and for
     /// which of this façade's other methods are deliberately outside it.
     providers: ProviderRegistry,
+    /// bf16-weight GEMMs on the vendor library's tensor cores, or the decline
+    /// that sends them to the fp32 kernels. Starts pinned to the fp32
+    /// reference tier: only a trainer that states a [`GemmPrecision`] (see
+    /// [`Ops::set_gemm_precision`]) trades fp32 activations for bf16 ones.
+    gemm: LibraryGemmProvider,
 }
 
 impl Ops {
@@ -1122,7 +1128,62 @@ impl Ops {
             })?;
             idx.insert(name, i);
         }
-        Ok(Ops { gpu, caps, idx, selector, providers })
+        let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Fp32Reference);
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm })
+    }
+
+    /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
+    /// the vendor library's bf16 tensor cores where the device has them and
+    /// falls back to the fp32 kernels everywhere else, without a flag or an
+    /// error; `Fp32Reference` pins the fp32 kernels (what gradient checks and
+    /// cross-backend parity use). See [`gpu_core::provider::library`].
+    pub fn set_gemm_precision(&mut self, precision: GemmPrecision) {
+        self.gemm = LibraryGemmProvider::for_gpu(&self.gpu, precision);
+    }
+
+    /// Which arithmetic path the bf16-weight GEMMs of this `Ops` take.
+    pub fn gemm_path(&self) -> &library::GemmPath {
+        self.gemm.path()
+    }
+
+    /// `y[yoff ..] = act @ W[first.., :]^T` on the library path, for a bf16 `w`;
+    /// `false` (nothing pushed) when the fp32 kernels must run instead.
+    fn library_forward(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
+        let Weight::BF16 { w: wb, n, k } = w else { return false };
+        let (first, count) = rows;
+        let m = act.m;
+        let window = if first == 0 && count == *n { WHOLE } else { (first as u64 * *k as u64 / 2, count as u64 * *k as u64 / 2) };
+        self.gemm.forward(
+            &self.gpu,
+            s,
+            &library::Operand { buf: &act.x, range: (act.xr0 as u64 * *k as u64, m as u64 * *k as u64) },
+            &library::Operand { buf: wb, range: window },
+            &library::Operand { buf: y, range: (yoff, m as u64 * count as u64) },
+            m,
+            count,
+            *k,
+        )
+    }
+
+    /// `dx[dx_row0.., :] (+)= dy[m, count] @ W[first.., :]` on the library path
+    /// for a bf16 `w`; `false` when the fp32 kernels must run instead.
+    #[allow(clippy::too_many_arguments)]
+    fn library_dx(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, dx_row0: u32, accumulate: bool) -> bool {
+        let Weight::BF16 { w: wb, n, k } = w else { return false };
+        let (first, count) = rows;
+        let window = if first == 0 && count == *n { WHOLE } else { (first as u64 * *k as u64 / 2, count as u64 * *k as u64 / 2) };
+        let dx_range = if dx_row0 == 0 { WHOLE } else { (dx_row0 as u64 * *k as u64, m as u64 * *k as u64) };
+        self.gemm.dx(
+            &self.gpu,
+            s,
+            &library::Operand { buf: dy, range: WHOLE },
+            &library::Operand { buf: wb, range: window },
+            &library::Operand { buf: dx, range: dx_range },
+            m,
+            count,
+            *k,
+            accumulate,
+        )
     }
 
     pub fn caps(&self) -> &DeviceCaps {
@@ -1354,6 +1415,9 @@ impl Ops {
         let (n, k) = (w.n(), w.k());
         assert_eq!(act.k, k, "Ops::matmul: activation width {} does not match weight K {k}", act.k);
         let m = act.m;
+        if self.library_forward(s, w, (0, n), act, y, yoff) {
+            return;
+        }
         let shape = OpShape { m, n, k, dtype: w.dtype() };
         let group = w.group();
         let dt = w.dtype();
@@ -1960,6 +2024,9 @@ impl Ops {
     /// not implemented.
     pub fn matmul_dx(&self, s: &mut Vec<Step>, w: &Weight, dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, accumulate: bool) {
         let (n, k) = (w.n(), w.k());
+        if self.library_dx(s, w, (0, n), dy, m, dx, 0, accumulate) {
+            return;
+        }
         let dt = w.dtype();
         let params = [m, k, n, accumulate as u32];
         // Tiled when the `[m, k]` result fills tiles (see `Self::tiled_gemm`);
@@ -2028,6 +2095,9 @@ impl Ops {
         let (n, k, m) = (w.n(), w.k(), act.m);
         assert_eq!(act.k, k, "Ops::matmul_rows: activation width {} does not match weight K {k}", act.k);
         assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_rows: rows {first}+{count} outside the {n} rows of the weight");
+        if self.library_forward(s, w, rows, act, y, yoff) {
+            return;
+        }
         let tiled = self.tiled_gemm(m, count);
         let grid = if tiled { gpu_core::Dispatch::Workgroups(m.div_ceil(128) * count.div_ceil(128)) } else { gpu_core::Dispatch::Threads(m * count) };
         let xo = (act.xr0 as u64 * k as u64, m as u64 * k as u64);
@@ -2067,6 +2137,9 @@ impl Ops {
         let (first, count) = rows;
         let (n, k) = (w.n(), w.k());
         assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_dx_rows: rows {first}+{count} outside the {n} rows of the weight");
+        if self.library_dx(s, w, rows, dy, m, dx, dx_row0, accumulate) {
+            return;
+        }
         let tiled_wanted = self.tiled_gemm(m, k);
         let dxo = if dx_row0 == 0 { WHOLE } else { (dx_row0 as u64 * k as u64, m as u64 * k as u64) };
         let params = [m, k, count, accumulate as u32];

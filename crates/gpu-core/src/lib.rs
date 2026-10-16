@@ -2014,6 +2014,17 @@ mod native_facade {
             self.inner.step_native(id, bufs, params, threads)
         }
 
+        /// [`backend_api::Backend::step_library_gemm`]: one product served by the
+        /// device's vendor GEMM library, or `None` when it declines.
+        pub fn step_library_gemm(&self, gemm: &backend_api::LibraryGemm, bufs: &[&DeviceBuffer; 3], offsets: &[(u64, u64); 3]) -> Option<Step> {
+            self.inner.step_library_gemm(gemm, bufs, offsets)
+        }
+
+        /// [`backend_api::Backend::library_gemm_unavailable`].
+        pub fn library_gemm_unavailable(&self) -> Option<String> {
+            self.inner.library_gemm_unavailable()
+        }
+
         /// [`backend_api::Backend::step_native_sliced`] - [`Self::step_native`]
         /// binding a sub-range of each buffer, with the same
         /// `(offset_words, len_words)` convention [`Self::step_sliced`] uses.

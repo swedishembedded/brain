@@ -72,6 +72,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `silu_f32` | Elementwise | F32 | tuned | 5.0 | `brain_silu_fwd` | SiLU over a flat array, four elements a thread with 16-byte accesses; bit-identical to silu |
 | `silu_bwd_f32` | Elementwise | F32 | tuned | 5.0 | `brain_silu_bwd` | SiLU's input gradient over a flat array, four elements a thread with 16-byte accesses; bit-identical to silu_bwd |
 | `bn_dbeta_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dbeta` | BatchNorm beta gradient (dbeta += sum dy) of an NCHW channel: one 512-thread block per channel |
+| `cast_f32_bf16` | Elementwise | F32 | tuned | 5.0 | `brain_cast_f32_bf16` | fp32 to packed bf16, round-to-nearest-even, four elements a thread with 16-byte loads: the activation operand of a tensor-core GEMM |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 

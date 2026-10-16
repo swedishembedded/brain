@@ -14,6 +14,7 @@
 //! fp32, bf16 (half the bytes) or - once `model::ops` provides the tier - NF4.
 //! Adapters, norms, `A_log`, `dt_bias` and the causal-conv taps stay fp32.
 
+use gpu_core::provider::library::GemmPrecision;
 use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::ops::{TierPolicy, Weight};
@@ -55,11 +56,17 @@ pub struct TrainOpts {
     /// gradients) are most of a layer's working set once the Gated-DeltaNet
     /// part is segmented. `None` runs it whole.
     pub mlp_rows: Option<u32>,
+    /// Arithmetic of the GEMMs against bf16 weights: `Auto` (the default) runs
+    /// them on bf16 tensor cores where the device has them and on the fp32
+    /// kernels everywhere else; `Fp32Reference` pins the fp32 kernels, which is
+    /// what gradient checks and cross-backend parity are stated against. The
+    /// CPU and Vulkan backends have no tensor-core path and always run fp32.
+    pub gemm_precision: GemmPrecision,
 }
 
 impl Default for TrainOpts {
     fn default() -> Self {
-        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None, bf16_residuals: false, mlp_rows: None }
+        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None, bf16_residuals: false, mlp_rows: None, gemm_precision: GemmPrecision::Auto }
     }
 }
 

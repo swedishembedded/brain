@@ -61,6 +61,10 @@ pub mod cuda;
 /// `kernel-performance.md` M8.10/M8.11, this ABI's first non-reference
 /// provider.
 pub mod cpu_isa;
+/// Dense bf16 GEMMs on the vendor library's tensor cores, chosen by queried
+/// capability with the fp32 kernels as the transparent fallback.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod library;
 pub mod native_f16;
 pub mod parity;
 pub mod wgsl;

@@ -85,6 +85,10 @@ impl CudaBuf {
 
 /// A recorded dispatch. Holds strong references to every allocation it names,
 /// so the dispatch is still launchable after the caller drops its handles.
+/// The kernel a library product is recorded under: it is never launched, it
+/// gives the step its three storage bindings.
+const LIBRARY_GEMM_PLACEHOLDER: &str = r#"extern "C" __global__ void brain_library_gemm_placeholder(const float*, const float*, float*) {}"#;
+
 pub struct CudaStep {
     kind: usize,
     threads: u32,
@@ -110,6 +114,9 @@ pub struct CudaStep {
     /// passed these after its pointers and clamps every array access to
     /// them, as WGSL requires; a native kernel is not passed them.
     lens: Vec<u64>,
+    /// A vendor-library product this step stands for, if any - see
+    /// `Resolved::library`.
+    library: Option<backend_api::LibraryGemm>,
 }
 
 /// Words of `mem` that a binding at `off_bytes` exposes: `len_words` of them,
@@ -827,6 +834,19 @@ impl CudaBackend {
         params: &[u32],
         threads: u32,
     ) -> Step {
+        self.record_as(kind, bufs, offsets, params, threads, None)
+    }
+
+    /// [`Self::record`], optionally standing for a vendor-library product.
+    fn record_as(
+        &self,
+        kind: usize,
+        bufs: &[&DeviceBuffer],
+        offsets: Option<&[(u64, u64)]>,
+        params: &[u32],
+        threads: u32,
+        library: Option<backend_api::LibraryGemm>,
+    ) -> Step {
         let mut lens = Vec::with_capacity(bufs.len());
         let bufs: Vec<_> = bufs
             .iter()
@@ -839,7 +859,7 @@ impl CudaBackend {
             })
             .collect();
         let uniform = Some(self.uniform_for(kind, &bufs, params.len()));
-        Step::new(CudaStep { kind, threads, uniform, params: params.to_vec(), bufs, lens })
+        Step::new(CudaStep { kind, threads, uniform, params: params.to_vec(), bufs, lens, library })
     }
 
     /// Everything a dispatch needs, resolved before anything is issued.
@@ -897,6 +917,7 @@ impl CudaBackend {
             uniform,
             bufs: st.bufs.clone(),
             lens: st.lens.clone(),
+            library: st.library,
             compiled: c,
         }
     }
@@ -945,6 +966,10 @@ impl CudaBackend {
     /// Issue one resolved dispatch on its own - the unbatched path, and the
     /// answer whenever a submission's shape is new.
     fn issue(&self, r: &Resolved) {
+        if let Some(gemm) = &r.library {
+            self.issue_library_gemm(gemm, r);
+            return;
+        }
         let timed = self.timing.load(Ordering::Acquire);
         if let (Some(u), false) = (r.uniform.as_ref(), r.params.is_empty()) {
             // Enqueued on the dispatch stream, NOT performed synchronously.
@@ -975,6 +1000,24 @@ impl CudaBackend {
         if let Some(start) = start {
             if let Some(end) = self.stamp() {
                 self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).pending.push((r.compiled.name.clone(), start, end));
+            }
+        }
+    }
+
+    /// Enqueue a vendor-library product on this handle's stream. A failure
+    /// here is a bug in the request the provider vetted, not a missing
+    /// library (that was declined when the step was recorded).
+    fn issue_library_gemm(&self, gemm: &backend_api::LibraryGemm, r: &Resolved) {
+        let timed = self.timing.load(Ordering::Acquire);
+        let start = timed.then(|| self.stamp()).flatten();
+        self.ctx
+            .library_gemm(gemm, r.args[0], r.args[1], r.args[2])
+            .unwrap_or_else(|e| panic!("backend-cuda: the library GEMM {}x{}x{} failed: {e}", gemm.m, gemm.n, gemm.k));
+        self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
+        crate::live::host_launched(1);
+        if let Some(start) = start {
+            if let Some(end) = self.stamp() {
+                self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).pending.push(("library_gemm".to_string(), start, end));
             }
         }
     }
@@ -1132,7 +1175,10 @@ impl CudaBackend {
         let mut handled = false;
         let mut give_up = false;
         let timing = self.timing.load(Ordering::Acquire);
-        if let (Some(cache), false) = (&self.graph, timing) {
+        // A library product is several kernels the graph's per-node bookkeeping
+        // cannot track, so a submission holding one is issued step by step.
+        let has_library = resolved.iter().any(|r| r.library.is_some());
+        if let (Some(cache), false, false) = (&self.graph, timing, has_library) {
             let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
             let sig = self.signature(&clears, &resolved);
             // Read AFTER the signature is built: every allocation the
@@ -1436,7 +1482,7 @@ impl backend_api::Backend for CudaBackend {
         let uniform = Some(CudaBuf::of(ubuf).mem.clone());
         let bufs: Vec<_> = bufs.iter().map(|b| (CudaBuf::of(b).mem.clone(), 0)).collect();
         let lens = bufs.iter().map(|(m, _)| bound_words(m, 0, 0)).collect();
-        Step::new(CudaStep { kind, threads, uniform, params: Vec::new(), bufs, lens })
+        Step::new(CudaStep { kind, threads, uniform, params: Vec::new(), bufs, lens, library: None })
     }
 
     /// Capture `segments` as one graph with every parameter frozen at its current
@@ -1727,6 +1773,31 @@ impl backend_api::Backend for CudaBackend {
             }
         }
         Some(self.record(kind, bufs, Some(offsets), params, threads))
+    }
+
+    fn library_gemm_unavailable(&self) -> Option<String> {
+        self.ctx.library_gemm_unavailable()
+    }
+
+    fn step_library_gemm(&self, gemm: &backend_api::LibraryGemm, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)]) -> Option<Step> {
+        if bufs.len() != 3 || offsets.len() != 3 {
+            return None;
+        }
+        if let Some(why) = self.ctx.library_gemm_unavailable() {
+            tracing::info!(reason = %why, "backend-cuda: declining a library GEMM");
+            return None;
+        }
+        // The placeholder only carries the three bindings through the same
+        // fencing, signature and lifetime machinery as every other step.
+        let id = self.register_native(&backend_api::NativeSpec::Cuda {
+            src: LIBRARY_GEMM_PLACEHOLDER,
+            entry: "brain_library_gemm_placeholder",
+            block_dim: 32,
+            bindings: &[backend_api::BindKind::StorageRead, backend_api::BindKind::StorageRead, backend_api::BindKind::StorageReadWrite],
+            shared_bytes: 0,
+            launch: backend_api::CudaLaunch::NONE,
+        })?;
+        Some(self.record_as(id.0 as usize, bufs, Some(offsets), &[], 1, Some(*gemm)))
     }
 
     fn native_max_active_blocks(&self, id: backend_api::NativeId) -> Option<u32> {

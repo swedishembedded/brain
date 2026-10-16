@@ -1009,6 +1009,22 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: (512 / 32 + 1) * 8,
         src: include_str!("../cu/bn_f32.cu"),
     },
+    CudaKernel {
+        name: "cast_f32_bf16",
+        op: Op::Elementwise,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_cast_f32_bf16",
+        what: "fp32 to packed bf16, round-to-nearest-even, four elements a thread with 16-byte loads: the activation operand of a tensor-core GEMM",
+        reported: "native:cast_f32_bf16",
+        block_dim: 256,
+        // 1024 elements per block.
+        tile: (1, 1024),
+        shared_bytes: 0,
+        src: include_str!("../cu/cast_f32_bf16.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of

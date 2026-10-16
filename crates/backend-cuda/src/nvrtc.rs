@@ -70,6 +70,22 @@ fn candidate_libraries(explicit: Option<&str>, cuda_path: Option<&str>) -> Vec<S
     out
 }
 
+/// Every path or SONAME to try for a toolkit library whose SONAMEs are
+/// `sonames`, in the order NVRTC's own search uses (an explicit `BRAIN_NVRTC`
+/// pin is NVRTC-specific and not applied): the toolkit root's `lib64` then
+/// `lib`, then the bare SONAMEs for the system loader.
+pub(crate) fn toolkit_library_candidates(sonames: &[&str]) -> Vec<String> {
+    let cuda_path = std::env::var(ENV_CUDA_PATH).ok();
+    let mut out = Vec::new();
+    if let Some(root) = cuda_path.as_deref().filter(|r| !r.is_empty()) {
+        for dir in ["lib64", "lib"] {
+            out.extend(sonames.iter().map(|s| format!("{root}/{dir}/{s}")));
+        }
+    }
+    out.extend(sonames.iter().map(|s| s.to_string()));
+    out
+}
+
 struct Nvrtc {
     _lib: libloading::Library,
     version: unsafe extern "C" fn(*mut c_int, *mut c_int) -> NvrtcResult,

@@ -42,6 +42,7 @@
 
 pub mod aot;
 pub mod backend;
+pub mod cublas;
 pub mod driver;
 pub mod exec;
 mod graph;

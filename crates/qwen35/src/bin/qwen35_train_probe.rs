@@ -19,8 +19,12 @@
 //! ```text
 //! BRAIN_BACKEND=cuda gpu qwen35_train_probe --tokens 4096 --base nf4 \
 //!     [--layers 4] [--rank 16] [--recompute on|off] [--gdn-segment N] \
-//!     [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N] [--steps 2] [--seed N]
+//!     [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N] [--steps 2] [--seed N] [--gemm-precision auto|fp32|bf16]
 //! ```
+//!
+//! `--gemm-precision` picks the arithmetic of the bf16-weight GEMMs: `auto`
+//! (default) uses bf16 tensor cores where the device has them and the fp32
+//! kernels otherwise, `fp32` pins the reference kernels.
 //!
 //! `--seed` fixes the random weights and tokens so two runs are the same
 //! workload; without it a seed is drawn and printed. Each step line carries
@@ -39,6 +43,7 @@ use std::time::{Duration, Instant};
 
 use checkpoint::TensorSource;
 use data::rng::{Lcg, Rng};
+use gpu_core::provider::library::GemmPrecision;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
@@ -195,6 +200,12 @@ fn main() {
         gdn_segment_tokens: (gdn_segment > 0).then_some(gdn_segment),
         bf16_residuals: arg(&args, "--bf16-residuals").is_some_and(|v| v == "on"),
         mlp_rows: arg(&args, "--mlp-rows").map(|v| v.parse().expect("--mlp-rows N")),
+        gemm_precision: match arg(&args, "--gemm-precision").as_deref() {
+            None | Some("auto") => GemmPrecision::Auto,
+            Some("fp32") => GemmPrecision::Fp32Reference,
+            Some("bf16") => GemmPrecision::Bf16TensorCore,
+            Some(other) => panic!("--gemm-precision {other:?}: expected auto, fp32 or bf16"),
+        },
     };
 
     let peak = Arc::new(AtomicU64::new(0));
