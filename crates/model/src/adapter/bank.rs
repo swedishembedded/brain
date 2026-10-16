@@ -282,6 +282,7 @@ impl AdapterBankConfig {
 
 /// An adapter the caller has verified against the served base, in host
 /// memory, ready for registration.
+#[derive(Clone)]
 pub struct VerifiedAdapter {
     /// The adapter's own name (its card id); reported, never interpreted.
     pub label: String,
@@ -353,6 +354,19 @@ pub struct AdapterInfo {
     pub draining: bool,
 }
 
+/// What a bank does with one site of the model.
+#[derive(Clone, Copy)]
+enum SiteState {
+    /// Corrected here: index into the bank's sites.
+    Banked(usize),
+    /// A site of the model that this bank's targets leave alone: an adapter
+    /// that corrects it is refused.
+    Untargeted,
+    /// A site of a layer another bank owns (a pipeline stage): an adapter's
+    /// pair for it is that bank's to hold, so this one skips it.
+    Elsewhere,
+}
+
 /// One banked linear: its adapters on the device and its shape.
 struct BankSite {
     bank: LoraBank,
@@ -396,7 +410,7 @@ pub struct AdapterBank {
     sites: Vec<BankSite>,
     /// Base weight name of every site of the model, banked or not: tells "not
     /// a linear of this model" from "not a site this bank targets".
-    model_sites: HashMap<String, Option<usize>>,
+    model_sites: HashMap<String, SiteState>,
     /// Per layer, the bank index of each banked site by leaf.
     by_layer: Vec<HashMap<&'static str, usize>>,
     slot_buf: DeviceBuffer,
@@ -422,6 +436,15 @@ impl AdapterBank {
     /// Allocate a bank over `sites` (the model's [`LoraSites::lora_sites`]),
     /// for batches of at most `rows` rows.
     pub fn new(gpu: &Gpu, sites: &[LinearSite], cfg: AdapterBankConfig, rows: u32) -> Result<AdapterBank, AdapterError> {
+        AdapterBank::new_for_layers(gpu, sites, cfg, rows, 0..usize::MAX)
+    }
+
+    /// [`AdapterBank::new`] for one pipeline stage: only the sites of `layers`
+    /// are allocated (on `gpu`, the stage's device); an adapter's pairs for
+    /// other layers are skipped at registration, to be held by the bank of the
+    /// stage that owns them. Every stage's bank sees the same registrations,
+    /// uploads and pins, so their slots and ids agree.
+    pub fn new_for_layers(gpu: &Gpu, sites: &[LinearSite], cfg: AdapterBankConfig, rows: u32, layers: std::ops::Range<usize>) -> Result<AdapterBank, AdapterError> {
         if cfg.slots == 0 || cfg.r_max == 0 || cfg.targets.is_empty() || cfg.max_registered < cfg.slots {
             return Err(AdapterError::BadConfig("needs slots > 0, r_max > 0, at least one target and max_registered >= slots".into()));
         }
@@ -441,8 +464,12 @@ impl AdapterBank {
         let mut by_layer: Vec<HashMap<&'static str, usize>> = Vec::new();
         let mut bytes = 0u64;
         for site in sites {
+            if site.layer.is_some_and(|l| !layers.contains(&l)) {
+                model_sites.insert(site.name.clone(), SiteState::Elsewhere);
+                continue;
+            }
             if !cfg.targets_site(site) {
-                model_sites.insert(site.name.clone(), None);
+                model_sites.insert(site.name.clone(), SiteState::Untargeted);
                 continue;
             }
             let (k, n) = (site.spec.inn as u32, site.spec.out as u32);
@@ -454,7 +481,7 @@ impl AdapterBank {
             gpu.write(&rank, &vec![0u32; cfg.slots as usize]);
             let bank = LoraBank { a: gpu.storage(s * r * k as u64), bt: gpu.storage(s * r * n as u64), rank, slots: cfg.slots, r_max: cfg.r_max };
             bytes += s * r * (k + n) as u64 * 4 + s * 4;
-            model_sites.insert(site.name.clone(), Some(banked.len()));
+            model_sites.insert(site.name.clone(), SiteState::Banked(banked.len()));
             if let Some(layer) = site.layer {
                 if by_layer.len() <= layer {
                     by_layer.resize_with(layer + 1, HashMap::new);
@@ -498,6 +525,23 @@ impl AdapterBank {
         steps.extend(lora_bank_rows(gpu, &rq));
     }
 
+    /// [`AdapterBank::correct`] for the linear whose base weight is named
+    /// `base` (`blocks.3.mlp.down.weight`): the hook for a forward that knows
+    /// its linears by weight name.
+    #[allow(clippy::too_many_arguments)]
+    pub fn correct_named(&self, gpu: &Gpu, steps: &mut Vec<Step>, base: &str, x: &DeviceBuffer, out: &DeviceBuffer, rows: u32, out_stride: u32, out_col0: u32) {
+        let Some(&SiteState::Banked(ix)) = self.model_sites.get(base) else { return };
+        let bs = &self.sites[ix];
+        let rq = LoraBankRows { kernels: self.kernels, bank: &bs.bank, slot: &self.slot_buf, tscr: &self.tscr, x, out, row0: 0, rows, k: bs.k, n: bs.n, out_stride, out_col0 };
+        steps.extend(lora_bank_rows(gpu, &rq));
+    }
+
+    /// Write each row's slot ([`AdapterBank::slot_of`]) for the batch about to
+    /// run; at most the `rows` the bank was built for.
+    pub fn write_slots(&self, gpu: &Gpu, slots: &[u32]) {
+        gpu.write(&self.slot_buf, slots);
+    }
+
     /// The slot a sequence in `ns` runs under. Panics for an adapter that is
     /// not resident: answering such a row with the base would be a silent
     /// wrong answer, and the scheduler never admits one.
@@ -528,8 +572,12 @@ impl AdapterBank {
         let r = rank as usize;
         let mut sites = Vec::with_capacity(a.adapter.sites.len());
         for site in &a.adapter.sites {
-            let slot = self.model_sites.get(&site.base).ok_or_else(|| bad(format!("{} is not a linear of this model", site.base)))?;
-            let bank_ix = (*slot).ok_or_else(|| bad(format!("{} is not a site this bank targets", site.base)))?;
+            let bank_ix = match self.model_sites.get(&site.base) {
+                None => return Err(bad(format!("{} is not a linear of this model", site.base))),
+                Some(SiteState::Untargeted) => return Err(bad(format!("{} is not a site this bank targets", site.base))),
+                Some(SiteState::Elsewhere) => continue,
+                Some(&SiteState::Banked(ix)) => ix,
+            };
             let (k, n) = (self.sites[bank_ix].k as usize, self.sites[bank_ix].n as usize);
             if site.a.len() != r * k || site.b.len() != n * r {
                 return Err(bad(format!("{} is [{n}, {k}] but the rank-{rank} pair holds A {} / B {} values", site.base, site.a.len(), site.b.len())));

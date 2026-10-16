@@ -32,8 +32,12 @@
 //! block, restores the snapshot and prefills only the rest. Entries are
 //! exact-token prefixes (no hashing, no false sharing between prompts that
 //! merely look alike), at most `capacity` of them, evicted least recently used.
+//!
+//! An entry belongs to the KV namespace of the sequence that prefilled it (its
+//! `table`'s): K/V computed under one adapter are not the base's or another
+//! adapter's, so a prompt only ever resumes from an entry of its own namespace.
 
-use model::paged::BlockTable;
+use model::paged::{BlockTable, KvNamespace};
 
 /// Prompts shorter than this are not worth a snapshot row and a retained block.
 pub(super) const MIN_CACHED_TOKENS: usize = 64;
@@ -78,13 +82,13 @@ impl PrefixCache {
     /// The entry holding the longest cached prefix of `prompt` (an entry equal
     /// to the whole prompt qualifies), refreshed as most recently used.
     /// Counts the lookup for [`Self::stats`].
-    pub fn lookup(&mut self, prompt: &[u32]) -> Option<usize> {
+    pub fn lookup(&mut self, namespace: KvNamespace, prompt: &[u32]) -> Option<usize> {
         self.lookup_tokens += prompt.len() as u64;
         let best = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.tokens.len() <= prompt.len() && prompt[..e.tokens.len()] == e.tokens[..])
+            .filter(|(_, e)| e.table.kv_namespace() == namespace && e.tokens.len() <= prompt.len() && prompt[..e.tokens.len()] == e.tokens[..])
             .max_by_key(|(_, e)| e.tokens.len())
             .map(|(i, _)| i)?;
         self.tick += 1;
@@ -123,7 +127,7 @@ impl PrefixCache {
         let mut i = 0;
         while i < self.entries.len() {
             let e = &self.entries[i];
-            if e.tokens.len() <= entry.tokens.len() && entry.tokens[..e.tokens.len()] == e.tokens[..] {
+            if e.table.kv_namespace() == entry.table.kv_namespace() && e.tokens.len() <= entry.tokens.len() && entry.tokens[..e.tokens.len()] == e.tokens[..] {
                 let e = self.entries.remove(i);
                 self.free_rows.push(e.snap_row);
                 retired.push(e.table);
@@ -135,6 +139,15 @@ impl PrefixCache {
         entry.stamp = self.tick;
         self.entries.push(entry);
         retired
+    }
+
+    /// Drop every entry of `namespace` (its adapter was unloaded), returning
+    /// their tables for the caller to release.
+    pub fn evict_namespace(&mut self, namespace: KvNamespace) -> Vec<BlockTable> {
+        let (gone, kept): (Vec<Entry>, Vec<Entry>) = std::mem::take(&mut self.entries).into_iter().partition(|e| e.table.kv_namespace() == namespace);
+        self.entries = kept;
+        self.free_rows.extend(gone.iter().map(|e| e.snap_row));
+        gone.into_iter().map(|e| e.table).collect()
     }
 
     /// Evict the least recently used entry, returning its table (to free a
@@ -156,6 +169,7 @@ impl PrefixCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use model::paged::BASE_KV_NAMESPACE;
 
     fn entry(tokens: &[u32], row: u32) -> Entry {
         Entry::new(tokens.to_vec(), BlockTable::new(), row, vec![0.0])
@@ -171,10 +185,10 @@ mod tests {
         let r2 = c.take_row().0.unwrap();
         // Not a prefix of the first: a different conversation.
         c.insert(entry(&[1, 2, 9, 9], r2));
-        assert_eq!(c.lookup(&[1, 2, 3, 4, 5]).map(|i| c.entry(i).tokens.len()), Some(3));
-        assert_eq!(c.lookup(&[1, 2, 3]).map(|i| c.entry(i).tokens.len()), Some(3), "an identical prompt hits");
-        assert!(c.lookup(&[1, 2]).is_none(), "a prompt shorter than the entry cannot reuse it");
-        assert!(c.lookup(&[7, 7, 7]).is_none());
+        assert_eq!(c.lookup(BASE_KV_NAMESPACE, &[1, 2, 3, 4, 5]).map(|i| c.entry(i).tokens.len()), Some(3));
+        assert_eq!(c.lookup(BASE_KV_NAMESPACE, &[1, 2, 3]).map(|i| c.entry(i).tokens.len()), Some(3), "an identical prompt hits");
+        assert!(c.lookup(BASE_KV_NAMESPACE, &[1, 2]).is_none(), "a prompt shorter than the entry cannot reuse it");
+        assert!(c.lookup(BASE_KV_NAMESPACE, &[7, 7, 7]).is_none());
     }
 
     /// A conversation that grows replaces its own earlier entry, freeing the
@@ -200,11 +214,33 @@ mod tests {
             let r = c.take_row().0.unwrap();
             c.insert(entry(&tokens, r));
         }
-        c.lookup(&[1, 1, 5]); // [1,1] is now the most recently used
+        c.lookup(BASE_KV_NAMESPACE, &[1, 1, 5]); // [1,1] is now the most recently used
         let (row, evicted) = c.take_row();
         assert!(row.is_some() && evicted.is_some());
-        assert!(c.lookup(&[2, 2, 5]).is_none(), "[2,2] was the least recently used and is gone");
-        assert!(c.lookup(&[1, 1, 5]).is_some());
+        assert!(c.lookup(BASE_KV_NAMESPACE, &[2, 2, 5]).is_none(), "[2,2] was the least recently used and is gone");
+        assert!(c.lookup(BASE_KV_NAMESPACE, &[1, 1, 5]).is_some());
+    }
+
+    /// K/V computed under an adapter are not the base's: a prompt resumes only
+    /// from an entry of its own namespace, and unloading an adapter drops
+    /// exactly its entries and frees their rows.
+    #[test]
+    fn entries_belong_to_their_adapters_namespace() {
+        let mut c = PrefixCache::new(3);
+        let prompt = [1u32, 2, 3];
+        for ns in [BASE_KV_NAMESPACE, 1, 2] {
+            let r = c.take_row().0.unwrap();
+            c.insert(Entry::new(prompt.to_vec(), BlockTable::with_namespace(ns), r, vec![0.0]));
+        }
+        assert_eq!(c.stats().2, 3, "the same prompt in three namespaces is three entries, none superseding another");
+        for ns in [BASE_KV_NAMESPACE, 1, 2] {
+            let hit = c.lookup(ns, &[1, 2, 3, 4]).expect("own namespace hits");
+            assert_eq!(c.entry(hit).table.kv_namespace(), ns);
+        }
+        assert!(c.lookup(7, &[1, 2, 3, 4]).is_none(), "a namespace with no entry misses");
+        assert_eq!(c.evict_namespace(1).len(), 1);
+        assert!(c.lookup(1, &[1, 2, 3]).is_none() && c.lookup(2, &[1, 2, 3]).is_some());
+        assert!(c.take_row().0.is_some(), "the dropped entry's snapshot row is free again");
     }
 
     #[test]
@@ -220,8 +256,8 @@ mod tests {
         let mut c = PrefixCache::new(1);
         let r = c.take_row().0.unwrap();
         c.insert(entry(&[1, 2, 3], r));
-        c.lookup(&[1, 2, 3, 4]);
-        c.lookup(&[9, 9]);
+        c.lookup(BASE_KV_NAMESPACE, &[1, 2, 3, 4]);
+        c.lookup(BASE_KV_NAMESPACE, &[9, 9]);
         assert_eq!(c.stats(), (3, 6, 1));
     }
 }

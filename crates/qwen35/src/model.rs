@@ -61,6 +61,8 @@ fn whole(buf: &DeviceBuffer) -> library::Operand<'_> {
 use paramstore::{ParamStore, Role};
 
 use audio::conv::ConvKernels;
+use model::adapter::bank::{AdapterBank, AdapterBankConfig, AdapterError};
+use model::adapter::sites::LoraSites;
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels};
 use model::block::{self, rmsnorm_bwd, rmsnorm_fwd, swiglu_bwd, KernelIds};
 use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
@@ -221,6 +223,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // devices whose policy allows (the CPU JIT keeps the serial walk). The reference
         // `gradnorm_sq` gives each tensor ONE thread to sum its elements, which for 118 M
         // adapter parameters is seconds of a single thread's time per step.
+        v.extend(model::dispatch::LORA_BANK_PIPELINES);
         v.push(("gradnorm_part", kernels::GRADNORM_PART));
         v.push(("clip_coef_wg", kernels::CLIP_COEF_WG));
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
@@ -1006,6 +1009,16 @@ pub struct Qwen35 {
     /// `[n*max_out]` : `delta = a @ Bᵀ`.
     lora_out: DeviceBuffer,
 
+    // ---- served adapter bank (see `Self::enable_adapter_bank`) ----
+    /// Many adapters on this one copy of the weights, each row of a batch
+    /// choosing its own. `None` until enabled; a LoRA TRAINING build
+    /// (`cfg.lora`) never has one.
+    adapter_bank: RefCell<Option<AdapterBank>>,
+    /// Rows of the forward about to run that [`Self::set_adapter_rows`]
+    /// assigned slots to; `0` when no row of it has an adapter, in which case
+    /// the forward records exactly the base's dispatches.
+    adapter_rows: Cell<u32>,
+
     // ---- vision-language embedding splice seam (see `crate::vl::Qwen35Vl`) ------
     /// `Some((row0, n_rows))` once [`Self::enable_mm_splice`] has run: the
     /// image-placeholder rows `run_forward` overwrites and `backward` routes
@@ -1749,6 +1762,8 @@ impl Qwen35 {
             lora_a,
             lora_da,
             lora_out,
+            adapter_bank: RefCell::new(None),
+            adapter_rows: Cell::new(0),
             mm_splice: Cell::new(None),
             img_embeds,
             d_img_embeds,
@@ -1891,6 +1906,73 @@ impl Qwen35 {
         s.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
         s.push(g.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
         s.push(g.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
+    }
+
+    /// The adapter corrections of one targeted linear whose base output `y`
+    /// is already recorded in `s`: the training LoRA (`float_tier` only: its
+    /// fp32 path needs a float-read base weight) and the served bank.
+    #[allow(clippy::too_many_arguments)]
+    fn adapt(&self, float_tier: bool, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+        if float_tier {
+            self.lora_fwd(s, leaf, x, wname, y, m, k, nout);
+        }
+        self.bank_fwd(s, wname, x, y, m, nout);
+    }
+
+    /// The served bank's correction of the linear `wname`, per row, from the
+    /// same fp32 activation `x` the base linear read (whatever its weight
+    /// tier): `y[i] += scale * B_slot(i) (A_slot(i) x[i])`. Two dispatches for
+    /// the whole batch. Nothing when no row of this forward has an adapter,
+    /// and a row without one is untouched bit for bit.
+    fn bank_fwd(&self, s: &mut Vec<Step>, wname: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: u32, nout: u32) {
+        let rows = self.adapter_rows.get();
+        if rows == 0 {
+            return;
+        }
+        assert_eq!(m, rows, "qwen35: this forward has {m} rows but {rows} adapter slots were set for it");
+        if let Some(bank) = self.adapter_bank.borrow().as_ref() {
+            bank.correct_named(&self.gpu, s, wname, x, y, m, nout, 0);
+        }
+    }
+
+    /// Give this model an adapter bank over the sites of its own layers
+    /// ([`LoraSites`]), for forwards of at most `rows` rows (the larger of the
+    /// decode batch and the prefill round). Once, before serving.
+    ///
+    /// # Errors
+    ///
+    /// A bank already present, a LoRA training build, or a config the bank
+    /// refuses ([`AdapterBank::new_for_layers`]).
+    pub fn enable_adapter_bank(&self, cfg: AdapterBankConfig, rows: u32) -> Result<(), AdapterError> {
+        if self.cfg.lora.is_some() {
+            return Err(AdapterError::BadConfig("a LoRA training build corrects its linears with its own adapter; serve adapters from a base build".into()));
+        }
+        let mut slot = self.adapter_bank.borrow_mut();
+        if slot.is_some() {
+            return Err(AdapterError::BadConfig("the adapter bank is already enabled".into()));
+        }
+        *slot = Some(AdapterBank::new_for_layers(&self.gpu, &self.cfg.lora_sites(), cfg, rows, self.shard.start..self.shard.end)?);
+        Ok(())
+    }
+
+    /// Run `f` on this model's adapter bank and its device; `None` without one.
+    pub fn with_adapter_bank<R>(&self, f: impl FnOnce(&mut AdapterBank, &Gpu) -> R) -> Option<R> {
+        self.adapter_bank.borrow_mut().as_mut().map(|bank| f(bank, &self.gpu))
+    }
+
+    /// Choose the adapter slot of each row of the forward about to run
+    /// ([`model::dispatch::LORA_SLOT_NONE`] for a base row); an empty slice,
+    /// or no bank, makes the forward the base's. Must come before the forward
+    /// starts (a host write inside a replayed pass would split it) and be
+    /// cleared with an empty slice when it is done.
+    pub fn set_adapter_rows(&self, slots: &[u32]) {
+        let bank = self.adapter_bank.borrow();
+        let Some(bank) = bank.as_ref().filter(|_| !slots.is_empty()) else {
+            self.adapter_rows.set(0);
+            return;
+        };
+        bank.write_slots(&self.gpu, slots);
+        self.adapter_rows.set(slots.len() as u32);
     }
 
     /// Dispatch one of the 12 per-layer mixer/MLP linears via `self.ops`/
@@ -2186,18 +2268,10 @@ impl Qwen35 {
         // group, which is one launch where the device allows it.
         let (qkv_w, b_w, a_w, z_w) = (p("in_proj_qkv.weight"), p("in_proj_b.weight"), p("in_proj_a.weight"), p("in_proj_z.weight"));
         let f32s = self.ops_linear_group(&mut s1, &act1, &[(&qkv_w, &mixed_qkv), (&b_w, &bproj), (&a_w, &aproj), (&z_w, &z)]);
-        if f32s[0] {
-            self.lora_fwd(&mut s1, "in_proj_qkv", xn1, &qkv_w, &mixed_qkv, n, d, conv_dim);
-        }
-        if f32s[1] {
-            self.lora_fwd(&mut s1, "in_proj_b", xn1, &b_w, &bproj, n, d, nvh);
-        }
-        if f32s[2] {
-            self.lora_fwd(&mut s1, "in_proj_a", xn1, &a_w, &aproj, n, d, nvh);
-        }
-        if f32s[3] {
-            self.lora_fwd(&mut s1, "in_proj_z", xn1, &z_w, &z, n, d, value_dim);
-        }
+        self.adapt(f32s[0], &mut s1, "in_proj_qkv", xn1, &qkv_w, &mixed_qkv, n, d, conv_dim);
+        self.adapt(f32s[1], &mut s1, "in_proj_b", xn1, &b_w, &bproj, n, d, nvh);
+        self.adapt(f32s[2], &mut s1, "in_proj_a", xn1, &a_w, &aproj, n, d, nvh);
+        self.adapt(f32s[3], &mut s1, "in_proj_z", xn1, &z_w, &z, n, d, value_dim);
         g.submit(&[], &s1);
 
         // conv+split+l2norm+decay-gate+recurrence+gated-norm - LoRA/dtype-
@@ -2278,9 +2352,8 @@ impl Qwen35 {
         {
             let mut s = Vec::new();
             let act3 = if epilogue { self.quant_epilogue(0, &gated, None, n, value_dim).1 } else { self.ops_act(&mut s, &gated, n, value_dim) };
-            if self.ops_linear(&mut s, &act3, &p("out_proj.weight"), &out) {
-                self.lora_fwd(&mut s, "out_proj", &gated, &p("out_proj.weight"), &out, n, value_dim, d);
-            }
+            let float_tier = self.ops_linear(&mut s, &act3, &p("out_proj.weight"), &out);
+            self.adapt(float_tier, &mut s, "out_proj", &gated, &p("out_proj.weight"), &out, n, value_dim, d);
             g.submit(&[], &s);
         }
 
@@ -2327,15 +2400,9 @@ impl Qwen35 {
         };
         let (q_w, k_w, v_w) = (p("q_proj.weight"), p("k_proj.weight"), p("v_proj.weight"));
         let f32s = self.ops_linear_group(&mut s1, &act1, &[(&q_w, &q_full), (&k_w, &k), (&v_w, &v)]);
-        if f32s[0] {
-            self.lora_fwd(&mut s1, "q_proj", xn1, &q_w, &q_full, n, d, qpd);
-        }
-        if f32s[1] {
-            self.lora_fwd(&mut s1, "k_proj", xn1, &k_w, &k, n, d, kvd);
-        }
-        if f32s[2] {
-            self.lora_fwd(&mut s1, "v_proj", xn1, &v_w, &v, n, d, kvd);
-        }
+        self.adapt(f32s[0], &mut s1, "q_proj", xn1, &q_w, &q_full, n, d, qpd);
+        self.adapt(f32s[1], &mut s1, "k_proj", xn1, &k_w, &k, n, d, kvd);
+        self.adapt(f32s[2], &mut s1, "v_proj", xn1, &v_w, &v, n, d, kvd);
         g.submit(&[], &s1);
 
         // split+qknorm+rope+attention+gating - LoRA/dtype-agnostic, shared
@@ -2438,9 +2505,8 @@ impl Qwen35 {
                 Some(a) => a,
                 None => self.ops_act(&mut s, &ctx_gated, n, shape.qd()),
             };
-            if self.ops_linear(&mut s, &act2, &p("o_proj.weight"), &out) {
-                self.lora_fwd(&mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, shape.qd(), d);
-            }
+            let float_tier = self.ops_linear(&mut s, &act2, &p("o_proj.weight"), &out);
+            self.adapt(float_tier, &mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, shape.qd(), d);
             g.submit(&[], &s);
         }
 
@@ -2492,12 +2558,8 @@ impl Qwen35 {
             };
             let (gate_w, up_w) = (p("gate.weight"), p("up.weight"));
             let f32s = self.ops_linear_group(&mut s, &act1, &[(&gate_w, &gate_pre), (&up_w, &up)]);
-            if f32s[0] {
-                self.lora_fwd(&mut s, "gate", xn2, &gate_w, &gate_pre, n, d, ff);
-            }
-            if f32s[1] {
-                self.lora_fwd(&mut s, "up", xn2, &up_w, &up, n, d, ff);
-            }
+            self.adapt(f32s[0], &mut s, "gate", xn2, &gate_w, &gate_pre, n, d, ff);
+            self.adapt(f32s[1], &mut s, "up", xn2, &up_w, &up, n, d, ff);
             g.submit(&[], &s);
         }
         let (h, down_act) = if epilogue {
@@ -2516,9 +2578,8 @@ impl Qwen35 {
                 Some(a) => a,
                 None => self.ops_act(&mut s, &h, n, ff),
             };
-            if self.ops_linear(&mut s, &act2, &p("down.weight"), &down) {
-                self.lora_fwd(&mut s, "down", &h, &p("down.weight"), &down, n, ff, d);
-            }
+            let float_tier = self.ops_linear(&mut s, &act2, &p("down.weight"), &down);
+            self.adapt(float_tier, &mut s, "down", &h, &p("down.weight"), &down, n, ff, d);
             g.submit(&[], &s);
             down
         });
@@ -3980,7 +4041,9 @@ impl Qwen35 {
     /// [`Self::set_exact_rounds`] has not withdrawn it. Not under LoRA (its
     /// adapter scratch is sized for the chunk shape) and not while a hidden tap
     /// is armed (the tap reads the residual between layers, which a replayed
-    /// pass cannot do). Everything else keeps the chunk tape, which is also
+    /// pass cannot do) and not for rows that have served-adapter slots (the
+    /// bank corrects a forward of exactly the rows its slots were set for, and
+    /// this path splits the round into groups). Everything else keeps the chunk tape, which is also
     /// what a device without the native kernels runs, at the tolerance
     /// `tests/decode_step.rs` gates.
     fn exact_round_ok(&self, n: u32) -> bool {
@@ -3996,6 +4059,7 @@ impl Qwen35 {
             && self.exact_rounds.get()
             && self.decode_fusion.get()
             && c.lora.is_none()
+            && self.adapter_rows.get() == 0
             && self.taps.borrow().is_empty()
             && model::gdn_mixer::rows_fused_offered(&self.gpu, &shape)
     }

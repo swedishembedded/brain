@@ -149,6 +149,7 @@ use data::rng::Rng;
 use gguf::import::Mapped;
 use gguf::GdnFixSource;
 use gpu_core::{DeviceBuffer, Gpu};
+use model::dispatch::LORA_SLOT_NONE;
 use model::kv_tier::{KvLayer, KvTier};
 use model::ops::TierPolicy;
 use model::shard::{LayerBytes, Shard};
@@ -156,6 +157,7 @@ use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
+use crate::adapter_serving as adapters;
 use crate::config::{LayerType, Qwen35Config};
 use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, Qwen35, SpecDecodeStats};
 
@@ -843,9 +845,29 @@ pub struct Qwen35GgufInstance {
     /// The per-layer residual tap a cross-attending drafter needs - `None`
     /// (and free) until [`Self::enable_hidden_taps`] turns it on.
     taps: RefCell<Option<HiddenTaps>>,
+    /// The adapter bank slot every row of the prefill now running belongs to
+    /// ([`LORA_SLOT_NONE`]: the base). Set by the engine around
+    /// [`Self::prefill_hidden`]; a prefill is one sequence, so one slot.
+    prefill_adapter_slot: Cell<u32>,
 }
 
 impl Qwen35GgufInstance {
+    /// The model config the resident was built from.
+    pub fn config(&self) -> &Qwen35Config {
+        &self.cfg
+    }
+
+    /// Every stage's model, in layer order.
+    fn stage_models(&self) -> impl Iterator<Item = &Qwen35> + Clone {
+        self.shards.iter().map(|s| &s.qwen35)
+    }
+
+    /// Run the rows of the forward about to start under the adapter slots
+    /// `slots` (empty: the base's dispatches, unchanged).
+    fn set_adapter_rows(&self, slots: &[u32]) {
+        adapters::set_rows(self.stage_models(), slots);
+    }
+
     /// Token `t`'s embedding row, `[d_model]`, read from the mapping.
     fn embed_row(&self, t: u32) -> Result<Vec<f32>, String> {
         self.mg
@@ -945,6 +967,8 @@ impl Qwen35GgufInstance {
         let debug = std::env::var_os("BRAIN_QWEN35_GGUF_DEBUG").is_some();
         let mut per_stage_rms = Vec::new();
         let mut taps: Vec<(usize, Vec<f32>)> = Vec::new();
+        let adapter_slot = self.prefill_adapter_slot.get();
+        self.set_adapter_rows(&vec![adapter_slot; if adapter_slot == LORA_SLOT_NONE { 0 } else { n }]);
         for s in &self.shards {
             let caches = s.caches.view(slot);
             carry = s.qwen35.prefill_chunk_stage(tokens, pos_start, &caches, Some(&carry));
@@ -956,6 +980,7 @@ impl Qwen35GgufInstance {
                 per_stage_rms.push((last.iter().map(|v| v * v).sum::<f32>() / last.len() as f32).sqrt());
             }
         }
+        self.set_adapter_rows(&[]);
         self.record_taps(pos_start, n, &taps)?;
         Ok((carry, per_stage_rms))
     }
@@ -1331,11 +1356,14 @@ impl Qwen35GgufInstance {
                 pos += round.len() as u32;
             }
         } else {
+            let adapter_slot = self.prefill_adapter_slot.get();
             for (i, &t) in rest.iter().enumerate() {
                 let mut carry = self.embed_row(t)?;
+                self.set_adapter_rows(&[adapter_slot]);
                 for s in &self.shards {
                     carry = s.qwen35.decode_step_stage(t, (start + i) as u32, &s.caches.view(slot), Some(&carry));
                 }
+                self.set_adapter_rows(&[]);
                 last = carry;
             }
         }
@@ -2659,7 +2687,7 @@ impl Qwen35GgufResident {
         };
         let embed = EmbedTable { name: embed_name, d };
 
-        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, prefix_slots: self.prefix_slots, kv_tier: self.kv_tier, taps: RefCell::new(None) })
+        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, prefix_slots: self.prefix_slots, kv_tier: self.kv_tier, taps: RefCell::new(None), prefill_adapter_slot: Cell::new(LORA_SLOT_NONE) })
     }
 }
 

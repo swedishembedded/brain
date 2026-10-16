@@ -179,6 +179,13 @@ pub struct LoraBank {
     pub r_max: u32,
 }
 
+/// The three kernels [`lora_bank_rows`] dispatches, as `(name, source)` pairs
+/// for a model's pipeline list (they are resolved by name,
+/// [`LoraBankKernels::resolve`], so their position carries no meaning). A
+/// model that serves an adapter bank registers these.
+pub const LORA_BANK_PIPELINES: [(&str, &str); 3] =
+    [("lora_xa_rows", kernels::LORA_XA_ROWS), ("lora_xa_rows_serial", kernels::LORA_XA_ROWS_SERIAL), ("lora_delta_rows", kernels::LORA_DELTA_ROWS)];
+
 /// The three pipeline indices [`lora_bank_rows`] chooses among, as the caller
 /// registered them.
 #[derive(Clone, Copy, Debug)]

@@ -25,8 +25,12 @@
 use std::collections::HashMap;
 
 use gpu_core::DeviceStats;
-use model::paged::{BlockAllocator, BlockTable};
-use model::serve::PagedDecoder;
+use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, UnloadStatus, VerifiedAdapter};
+use model::dispatch::LORA_SLOT_NONE;
+use model::paged::{BlockAllocator, BlockTable, KvNamespace};
+use model::serve::{AdapterAvailability, AdapterId, PagedDecoder};
+
+use crate::adapter_serving as adapters;
 
 use super::prefix::{Entry, PrefixCache, MIN_CACHED_TOKENS};
 use super::{Qwen35GgufInstance, MODEL};
@@ -77,6 +81,49 @@ impl Qwen35GgufEngine {
         }
     }
 
+    /// Give every stage an adapter bank, so sequences can run under LoRA
+    /// adapters registered with [`Self::load_adapter`] beside base sequences,
+    /// in the same batched step, on this one resident copy of the weights.
+    /// Call once, before serving. Device cost is [`Self::adapter_bank_bytes`],
+    /// which the placement did not charge: size `cfg` for the headroom left.
+    pub fn enable_adapters(&mut self, cfg: AdapterBankConfig) -> Result<(), AdapterError> {
+        let rows = self.inst.max_batch.max(self.inst.prefill_round_rows());
+        adapters::enable(self.inst.stage_models(), &cfg, rows)
+    }
+
+    /// Device bytes the adapter banks occupy across all stages; 0 without one.
+    pub fn adapter_bank_bytes(&self) -> u64 {
+        adapters::bytes(self.inst.stage_models())
+    }
+
+    /// Register a verified adapter (host memory only) and return the id the
+    /// scheduler addresses it by. It reaches a slot on every stage when the
+    /// scheduler first asks about it.
+    pub fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
+        adapters::register(self.inst.stage_models(), &self.inst.cfg, adapter)
+    }
+
+    /// Unload an adapter and drop its cached prompts. While sequences still
+    /// run under it, it only stops admitting new ones.
+    pub fn unload_adapter(&mut self, id: AdapterId) -> Result<UnloadStatus, AdapterError> {
+        let (status, purged) = adapters::unload(self.inst.stage_models(), id)?;
+        self.purge_namespace(purged);
+        Ok(status)
+    }
+
+    /// Every registered adapter, oldest first.
+    pub fn adapters(&self) -> Vec<AdapterInfo> {
+        adapters::infos(self.inst.stage_models())
+    }
+
+    /// Drop the cached prompts of an adapter that is gone.
+    fn purge_namespace(&mut self, ns: impl IntoIterator<Item = KvNamespace>) {
+        for ns in ns {
+            let tables = self.cache.evict_namespace(ns);
+            self.release_retired(tables);
+        }
+    }
+
     /// The wrapped instance (tokenizer, config, profiling).
     pub fn instance(&self) -> &Qwen35GgufInstance {
         &self.inst
@@ -99,8 +146,12 @@ impl Qwen35GgufEngine {
     /// hidden block.
     fn decode_hidden(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<f32> {
         assert_eq!(tables.len(), inputs.len(), "{MODEL}: tables/inputs length mismatch");
+        let adapter_slots: Vec<u32> = tables.iter().map(|t| adapters::slot_of(self.inst.stage_models(), t.kv_namespace())).collect();
         let (slots, positions) = self.next_positions(tables);
-        self.inst.stack_decode_hidden(inputs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"))
+        self.inst.set_adapter_rows(&adapter_slots);
+        let hidden = self.inst.stack_decode_hidden(inputs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
+        self.inst.set_adapter_rows(&[]);
+        hidden
     }
 }
 
@@ -163,7 +214,7 @@ impl PagedDecoder for Qwen35GgufEngine {
         let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
         let mut start = 0;
         if cacheable {
-            if let Some(i) = self.cache.lookup(prompt) {
+            if let Some(i) = self.cache.lookup(table.kv_namespace(), prompt) {
                 let e = self.cache.entry(i);
                 let (from, rows, snap) = (e.table.blocks()[0], e.tokens.len(), e.snap_row);
                 self.inst.seed_from_prefix(from, slot, rows as u32, snap);
@@ -176,7 +227,9 @@ impl PagedDecoder for Qwen35GgufEngine {
                 start = rows;
             }
         }
+        self.inst.prefill_adapter_slot.set(adapters::slot_of(self.inst.stage_models(), table.kv_namespace()));
         let hidden = self.inst.prefill_hidden(prompt, start, slot).unwrap_or_else(|e| panic!("{e}"));
+        self.inst.prefill_adapter_slot.set(LORA_SLOT_NONE);
         if cacheable {
             let (row, evicted) = self.cache.take_row();
             self.release_retired(evicted);
@@ -247,5 +300,17 @@ impl PagedDecoder for Qwen35GgufEngine {
     }
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY
+    }
+    fn adapter_availability(&mut self, adapter: AdapterId) -> AdapterAvailability {
+        let (answer, purged) = adapters::availability(self.inst.stage_models(), adapter);
+        self.purge_namespace(purged);
+        answer
+    }
+    fn pin_adapter(&mut self, adapter: AdapterId) {
+        adapters::pin(self.inst.stage_models(), adapter);
+    }
+    fn unpin_adapter(&mut self, adapter: AdapterId) {
+        let purged = adapters::unpin(self.inst.stage_models(), adapter);
+        self.purge_namespace(purged);
     }
 }

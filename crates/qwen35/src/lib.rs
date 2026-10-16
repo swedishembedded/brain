@@ -15,6 +15,7 @@
 //! `tools/goldens/qwen35_dump_reference.py`.
 
 pub mod adapter_sample;
+mod adapter_serving;
 pub mod caps;
 pub mod base_source;
 pub mod config;

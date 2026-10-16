@@ -156,11 +156,13 @@
 use std::collections::HashMap;
 
 use gpu_core::{DeviceBuffer, Gpu};
+use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, UnloadStatus, VerifiedAdapter};
 use model::gdn::{RecurrentSlot, RecurrentSlotShape};
 use model::kv_tier::{KvLayer, KvTier};
 use model::paged::{BlockAllocator, BlockTable};
-use model::serve::PagedDecoder;
+use model::serve::{AdapterAvailability, AdapterId, PagedDecoder};
 
+use crate::adapter_serving as adapters;
 use crate::config::{LayerType, Qwen35Config};
 use crate::model::{pipelines, BatchDecodeCaches, BatchSeq, DecodeCaches, Qwen35};
 
@@ -290,6 +292,43 @@ impl Engine {
         Engine { model, alloc: BlockAllocator::new(max_concurrent, max_seq_len), block_size: max_seq_len, kv_tier: kv, gqa_kv, gdn_slots: HashMap::new() }
     }
 
+    /// Give this engine an adapter bank, so sequences can run under LoRA
+    /// adapters registered with [`Engine::load_adapter`] beside base
+    /// sequences, in the same batches, on this one copy of the weights. Call
+    /// once, before serving. Device cost is [`Engine::adapter_bank_bytes`].
+    pub fn enable_adapters(&mut self, cfg: AdapterBankConfig) -> Result<(), AdapterError> {
+        let rows = self.alloc.num_blocks().max(MAX_PREFILL_TOKENS);
+        adapters::enable(std::iter::once(&self.model), &cfg, rows)
+    }
+
+    /// Device bytes the adapter bank occupies; 0 without one.
+    pub fn adapter_bank_bytes(&self) -> u64 {
+        adapters::bytes(std::iter::once(&self.model))
+    }
+
+    /// Register a verified adapter (host memory only) and return the id the
+    /// scheduler addresses it by; see [`model::adapter::bank::AdapterBank::register`].
+    /// The adapter reaches a slot when the scheduler first asks about it.
+    pub fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
+        adapters::register(std::iter::once(&self.model), &self.model.cfg, adapter)
+    }
+
+    /// Unload an adapter. While sequences still run under it, it only stops
+    /// admitting new ones ([`UnloadStatus::Draining`]).
+    pub fn unload_adapter(&mut self, id: AdapterId) -> Result<UnloadStatus, AdapterError> {
+        adapters::unload(std::iter::once(&self.model), id).map(|(status, _purged)| status)
+    }
+
+    /// Every registered adapter, oldest first.
+    pub fn adapters(&self) -> Vec<AdapterInfo> {
+        adapters::infos(std::iter::once(&self.model))
+    }
+
+    /// The adapter slot of each table's sequence (`LORA_SLOT_NONE` for base).
+    fn row_slots(&self, tables: &[&mut BlockTable]) -> Vec<u32> {
+        tables.iter().map(|t| adapters::slot_of(std::iter::once(&self.model), t.kv_namespace())).collect()
+    }
+
     /// This sequence's `DecodeCaches` view: the whole per-layer GQA pool, with
     /// the base row that selects its own physical block's window, plus its
     /// `GdnSlot`. Panics if no slot exists - every live `BlockTable` this
@@ -327,6 +366,7 @@ impl Engine {
     fn decode_batch(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> DeviceBuffer {
         assert_eq!(tables.len(), inputs.len(), "qwen35::serve::Engine::decode_batch: tables/inputs length mismatch");
         assert!(!tables.is_empty(), "qwen35::serve::Engine::decode_batch: empty batch");
+        let row_slots = self.row_slots(tables);
         let mut coords: Vec<(u32, u32)> = Vec::with_capacity(tables.len());
         for t in tables.iter_mut() {
             let (_block, offset) = t.append(&mut self.alloc).expect("qwen35::serve::Engine: KV pool exhausted mid-decode");
@@ -339,7 +379,10 @@ impl Engine {
             .map(|(&(phys, offset), slot)| BatchSeq { phys, pos: offset, gdn_state: &slot.state, gdn_hist: &slot.hist })
             .collect();
         let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs, one_sequence: false, gdn_pool: None };
-        self.model.run_decode_batch(inputs, &caches, None)
+        adapters::set_rows(std::iter::once(&self.model), &row_slots);
+        let hidden = self.model.run_decode_batch(inputs, &caches, None);
+        adapters::set_rows(std::iter::once(&self.model), &[]);
+        hidden
     }
 
     /// `logits = hidden @ head^T`, projected on the DEVICE via
@@ -504,6 +547,7 @@ impl Engine {
         // reuses it.
         table.reserve(prompt.len() as u32, &mut self.alloc).expect("qwen35::serve::Engine: KV pool exhausted");
         let phys = table.blocks()[0];
+        let adapter_slot = adapters::slot_of(std::iter::once(&self.model), table.kv_namespace());
         self.gdn_slots.entry(phys).or_insert_with(|| GdnSlot::new(&self.model.gpu, &gdn_slot_shape(&self.model.cfg)));
 
         let d = self.model.cfg.d_model as usize;
@@ -511,7 +555,9 @@ impl Engine {
         let mut pos = 0u32;
         for round in prompt.chunks(MAX_PREFILL_TOKENS as usize) {
             let caches = self.caches_for(phys);
+            adapters::set_rows(std::iter::once(&self.model), &vec![adapter_slot; round.len()]);
             h = Some(self.model.run_prefill_chunk(round, pos, &caches));
+            adapters::set_rows(std::iter::once(&self.model), &[]);
             pos += round.len() as u32;
         }
         let h = h.expect("prefill: prompt is non-empty (asserted above), so the loop ran at least once");
@@ -626,6 +672,15 @@ impl PagedDecoder for Engine {
     }
     fn topk_capacity(&self) -> usize {
         Engine::topk_capacity(self)
+    }
+    fn adapter_availability(&mut self, adapter: AdapterId) -> AdapterAvailability {
+        adapters::availability(std::iter::once(&self.model), adapter).0
+    }
+    fn pin_adapter(&mut self, adapter: AdapterId) {
+        adapters::pin(std::iter::once(&self.model), adapter);
+    }
+    fn unpin_adapter(&mut self, adapter: AdapterId) {
+        adapters::unpin(std::iter::once(&self.model), adapter);
     }
 }
 
