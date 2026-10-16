@@ -105,6 +105,16 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
     model::fit_with(m, obj, opts, Some(Path::new(out)))
 }
 
+/// Micro-step size, in tokens, above which a streamed-base run switches to the
+/// long-sequence settings (measured to fit a 27B step: knowledge 233).
+const LONG_SEQ_TOKENS: u32 = 2048;
+/// Tokens per micro-step a batch wider than one may hold.
+const LONG_STEP_TOKENS: u32 = 8192;
+/// Gated-DeltaNet segment length of the long-sequence settings.
+const LONG_GDN_SEGMENT: u32 = 128;
+/// MLP token-chunk size of the long-sequence settings.
+const LONG_MLP_ROWS: u32 = 512;
+
 /// LoRA fine-tune on a frozen base that is STREAMED from `base` (a
 /// HuggingFace checkpoint directory, FP8 release included, or a brain-native
 /// file) and held on the device at `dtype`, so the base never exists on the
@@ -123,13 +133,36 @@ pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, o
     let Mode::Lora { rank, alpha } = mode else {
         return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", dtype.name())));
     };
+    // One micro-step of more than a few thousand tokens only fits the card with
+    // the long-sequence settings (segmented Gated-DeltaNet layers, a bf16
+    // residual stream, an MLP run in token chunks), which need a batch of one:
+    // refuse a wide batch up front and name the way to get the same effective
+    // batch (`--batch 1 --grad-accum G`) instead of failing deep in the run.
+    let tokens = opts.batch_size as u64 * opts.block_size as u64;
+    if recompute && opts.batch_size > 1 && tokens > LONG_STEP_TOKENS as u64 {
+        return Err(unsupported(format!(
+            "batch {} x seq-len {} is {tokens} tokens per micro-step; a {} base trains up to {LONG_STEP_TOKENS} tokens per micro-step in a batch wider than one. Use --batch 1 with --grad-accum {} for the same effective batch",
+            opts.batch_size,
+            opts.block_size,
+            dtype.name(),
+            opts.batch_size * opts.grad_accum.max(1),
+        )));
+    }
     let (cfg, src) = lora_base(base, *rank, *alpha, opts.seed, resume.then(|| Path::new(out)).filter(|p| p.exists())).map_err(unsupported)?;
     let tier = match dtype {
         BaseDtype::F32 => Dtype::F32,
         BaseDtype::Bf16 => Dtype::BF16,
         BaseDtype::Nf4 => Dtype::NF4,
     };
-    let train = TrainOpts { base: TierPolicy::uniform(tier), recompute, ..TrainOpts::default() };
+    let long = recompute && opts.batch_size == 1 && opts.block_size >= LONG_SEQ_TOKENS;
+    let train = TrainOpts {
+        base: TierPolicy::uniform(tier),
+        recompute,
+        gdn_segment_tokens: long.then_some(LONG_GDN_SEGMENT),
+        bf16_residuals: long && !cfg.mtp,
+        mlp_rows: long.then_some(LONG_MLP_ROWS),
+        ..TrainOpts::default()
+    };
     let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &src, &train);
     let (train_set, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen35>(train_set, val, bcfg, itos);
