@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn top_p_excludes_the_long_tail_once_the_top_candidates_cover_it() {
         let (v, a, b, eos) = (2048usize, 10usize, 11usize, 1500u32);
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::new(data::rng::random_seed());
         for _ in 0..64 {
             let got = sample_cb0(logits_two_hot(v, a, b), eos, false, &sampled(1.0, 0, 0.9, 1.0), &[], &mut rng);
             assert!(got.token == a as u32 || got.token == b as u32, "top_p let a tail token through: {}", got.token);
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn top_p_disabled_can_sample_outside_the_top_two() {
         let (v, a, b, eos) = (2048usize, 10usize, 11usize, 1500u32);
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::new(data::rng::random_seed());
         let mut outside = 0;
         for _ in 0..2000 {
             let got = sample_cb0(logits_two_hot(v, a, b), eos, false, &sampled(4.0, 0, 0.0, 1.0), &[], &mut rng);
@@ -409,7 +409,7 @@ mod tests {
     fn repetition_penalty_demotes_a_token_dominating_greedy_history() {
         let (v, a, b, eos) = (2048usize, 10usize, 11usize, 1500u32);
         let history: Vec<u32> = vec![a as u32; 8];
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(data::rng::random_seed());
         // Greedy (temperature 0) isolates the penalty's effect from the draw.
         let got = sample_cb0(logits_two_hot(v, a, b), eos, false, &sampled(0.0, 0, 0.0, 3.0), &history, &mut rng);
         assert_eq!(got.token, b as u32, "repetition penalty did not demote the repeated token");
@@ -424,7 +424,7 @@ mod tests {
     fn repetition_penalty_counts_each_token_once_not_once_per_occurrence() {
         let (v, a, b, eos) = (2048usize, 10usize, 11usize, 1500u32);
         let fifty: Vec<u32> = vec![a as u32; 50];
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(data::rng::random_seed());
         // Correct (once): 5.0/1.05 = 4.76 > 4.0, so `a` still wins.
         // Per-occurrence: 5.0/1.05^50 = 0.44 < 4.0, so `b` would win.
         let got = sample_cb0(logits_two_hot(v, a, b), eos, false, &sampled(0.0, 0, 0.0, 1.05), &fifty, &mut rng);
@@ -480,7 +480,7 @@ mod tests {
         let (v, a, b, eos) = (2048usize, 10usize, 11usize, 1500u32);
         let cfg = SamplerCfg { do_sample: false, temperature: 0.9, top_k: 50, top_p: 1.0, repetition_penalty: 1.0 };
         assert!(cfg.is_greedy());
-        let mut rng = Rng::new(5);
+        let mut rng = Rng::new(data::rng::random_seed());
         for _ in 0..32 {
             let got = sample_cb0(logits_two_hot(v, a, b), eos, false, &cfg, &[], &mut rng);
             assert_eq!(got.token, a as u32, "do_sample=false drew something other than the argmax");
@@ -495,7 +495,7 @@ mod tests {
         let v = 2048usize;
         let mut l = vec![-30.0f32; v];
         l[10] = 20.0;
-        let got = sample_cb0(l, 1500, false, &sampled(0.9, 50, 1.0, 1.0), &[], &mut Rng::new(2));
+        let got = sample_cb0(l, 1500, false, &sampled(0.9, 50, 1.0, 1.0), &[], &mut Rng::new(data::rng::random_seed()));
         assert_eq!(got.token, 10);
         assert!(got.prob > 0.99, "post-filter probability of a one-hot draw was {}", got.prob);
     }
@@ -530,7 +530,7 @@ mod tests {
 
         let mut got_res = HashSet::new();
         let mut got_cb0 = HashSet::new();
-        let mut rng = Rng::new(11);
+        let mut rng = Rng::new(data::rng::random_seed());
         for _ in 0..4000 {
             got_res.insert(sample_residual(&l, &cfg, &mut rng).token);
             // Codebook 0's extra stages are inert on this fixture: every live
@@ -553,7 +553,7 @@ mod tests {
         // Deliberately inside the band codebook 0 suppresses: the residual
         // codebooks have no specials there, so it must remain reachable.
         l[v - 3] = 9.0;
-        let got = sample_residual(&l, &SamplerCfg::greedy(), &mut Rng::new(1));
+        let got = sample_residual(&l, &SamplerCfg::greedy(), &mut Rng::new(data::rng::random_seed()));
         assert_eq!(got.token, (v - 3) as u32, "greedy residual decode must search the whole vocabulary");
         assert_eq!(got.prob, 1.0);
     }

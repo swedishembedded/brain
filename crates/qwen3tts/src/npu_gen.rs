@@ -1407,7 +1407,7 @@ mod stream_codec_tests {
         let nq = 16usize;
         let t = 24usize;
         // The unified deterministic LCG (audit F39/F40).
-        let mut lcg = data::rng::Lcg::new(11);
+        let mut lcg = data::rng::Lcg::new(11); // seed: the NPU-versus-CPU waveform tolerance was measured on this code stream (needs the NPU; not run)
         let codes: Vec<u32> = (0..t * nq).map(|_| lcg.next_u32() % 64).collect();
 
         let mut npu_wav = Vec::new();

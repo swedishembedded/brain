@@ -316,8 +316,8 @@ mod tests {
             repetition_penalty: Some(1.0),
             ..Default::default()
         };
-        let opts_a = GenOpts { max_frames: 5, min_new: 1, seed: 11, sampling, ..GenOpts::default() };
-        let opts_b = GenOpts { max_frames: 8, min_new: 1, seed: 22, sampling, ..GenOpts::default() };
+        let opts_a = GenOpts { max_frames: 5, min_new: 1, sampling, ..GenOpts::default() };
+        let opts_b = GenOpts { max_frames: 8, min_new: 1, sampling, ..GenOpts::default() };
         let prompt_a = tiny_prompt(d, 3, 2, 101);
         let prompt_b = tiny_prompt(d, 4, 1, 202);
 
@@ -424,8 +424,8 @@ mod tests {
         // reliably produces exactly 1 frame instead of occasionally 0 (a
         // legitimate immediate-EOS sample IS possible when min_new is 0 -
         // that's the option's whole purpose, not a bug this test should chase).
-        let short = GenOpts { max_frames: 1, min_new: 1, seed: 1, ..GenOpts::default() };
-        let long = GenOpts { max_frames: 6, min_new: 6, seed: 2, ..GenOpts::default() };
+        let short = GenOpts { max_frames: 1, min_new: 1, ..GenOpts::default() };
+        let long = GenOpts { max_frames: 6, min_new: 6, ..GenOpts::default() };
         let out = run_batch(
             &talker_path,
             &mtp_path,
@@ -464,8 +464,8 @@ mod tests {
         // deterministic, no timing involved. Member 1 is untouched.
         let cancelled = CancelToken::armed();
         cancelled.cancel();
-        let a = GenOpts { max_frames: 6, min_new: 6, seed: 1, ..GenOpts::default() };
-        let b = GenOpts { max_frames: 6, min_new: 6, seed: 2, ..GenOpts::default() };
+        let a = GenOpts { max_frames: 6, min_new: 6, ..GenOpts::default() };
+        let b = GenOpts { max_frames: 6, min_new: 6, ..GenOpts::default() };
         let out = run_batch(
             &talker_path,
             &mtp_path,

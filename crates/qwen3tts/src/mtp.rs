@@ -1714,7 +1714,7 @@ mod tests {
         assert_ne!(&embeds[0..d], &th[0..d]);
 
         let (codes, res_sum) =
-            m.generate_residuals_with(&th, &cb0, &crate::sampling::SamplerCfg::greedy(), &mut data::rng::Rng::new(1));
+            m.generate_residuals_with(&th, &cb0, &crate::sampling::SamplerCfg::greedy(), &mut data::rng::Rng::new(data::rng::random_seed()));
         assert_eq!(codes.len(), 3); // num_code_groups(4) - 1
         assert_eq!(res_sum.len(), e, "feedback embedding must stay Talker-width (e), not d_model");
         assert!(res_sum.iter().all(|x| x.is_finite()));
@@ -1740,13 +1740,13 @@ mod tests {
             let e = cfg.embedding_dim as usize;
             let nres = cfg.num_code_groups as usize - 1;
             let m = MtpModel::new_synthetic_on(gpu_core::testgpu::dev(PIPELINES), cfg, 11);
-            let mut rng = data::rng::Rng::new(3);
+            let mut rng = data::rng::Rng::new(data::rng::random_seed());
             let th: Vec<f32> = (0..e).map(|_| rng.next_gaussian() as f32 * 0.5).collect();
             let cb0: Vec<f32> = (0..e).map(|_| rng.next_gaussian() as f32 * 0.5).collect();
 
             let (c_cached, r_cached) = m.generate_residuals(&th, &cb0);
             let (c_full, r_full) =
-                m.generate_residuals_recompute(&th, &cb0, &crate::sampling::SamplerCfg::greedy(), &mut data::rng::Rng::new(0));
+                m.generate_residuals_recompute(&th, &cb0, &crate::sampling::SamplerCfg::greedy(), &mut data::rng::Rng::new(data::rng::random_seed()));
             assert_eq!(c_cached.len(), nres);
             assert_eq!(c_cached, c_full, "KV cache changed the residual codes");
             let err = r_cached

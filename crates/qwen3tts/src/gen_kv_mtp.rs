@@ -287,7 +287,7 @@ impl CpuMtp {
         for k in 1..=nres {
             let logits = self.logits_full(&emb);
             let row = &logits[(k - 1) * v..k * v];
-            let best = crate::sampling::sample_residual(row, &crate::sampling::SamplerCfg::greedy(), &mut data::rng::Rng::new(0)).token as usize;
+            let best = crate::sampling::sample_residual(row, &crate::sampling::SamplerCfg::greedy(), &mut data::rng::Rng::new(data::rng::random_seed())).token as usize;
             codes[k - 1] = best as u32;
             let r = self.codec_embedding[k - 1][best * d..(best + 1) * d].to_vec();
             for j in 0..d {
@@ -372,7 +372,7 @@ mod tests {
             lm_head.clone(),
         );
 
-        let mut rng = Rng::new(99);
+        let mut rng = Rng::new(data::rng::random_seed());
         let talker_hidden: Vec<f32> = (0..d).map(|_| rng.next_gaussian() as f32 * 0.5).collect();
         let cb0_embed: Vec<f32> = (0..d).map(|_| rng.next_gaussian() as f32 * 0.5).collect();
 

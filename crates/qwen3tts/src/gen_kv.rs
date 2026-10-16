@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn dot_simd_matches_scalar() {
         use data::rng::Rng;
-        let mut rng = Rng::new(1234);
+        let mut rng = Rng::new(data::rng::random_seed());
         for &n in &[0usize, 1, 7, 8, 31, 32, 33, 127, 128, 129, 1024, 3072] {
             let a: Vec<f32> = (0..n).map(|_| rng.next_gaussian() as f32).collect();
             let b: Vec<f32> = (0..n).map(|_| rng.next_gaussian() as f32).collect();
@@ -715,7 +715,7 @@ mod tests {
 
         // deterministic pseudo-random weights.
         use data::rng::Rng;
-        let mut rng = Rng::new(42);
+        let mut rng = Rng::new(data::rng::random_seed());
         let mut map: HashMap<String, Vec<f32>> = HashMap::new();
         for n in decoder_names(&cfg) {
             let numel = {

@@ -695,7 +695,7 @@ mod tests {
         // Long enough that the clip is past the model's leading silence, so
         // the audio assertion below is about real synthesized content rather
         // than a 0.6 s lead-in that is legitimately near-DC.
-        let opts = GenOpts { max_frames: 40, seed: 7, ..GenOpts::default() };
+        let opts = GenOpts { max_frames: 40, seed: 7, ..GenOpts::default() }; // seed: the chunk-count and audio-energy assertions were measured on the real weights at this seed (needs real weights; not run)
 
         let mut chunks: Vec<usize> = Vec::new();
         let mut seqs: Vec<u32> = Vec::new();

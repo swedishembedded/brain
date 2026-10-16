@@ -95,7 +95,7 @@ fn cached_matches_cachefree() {
 
     // Greedy, pinned explicitly: a parity run must not inherit the checkpoint's
     // own `generation_config.json` sampling knobs.
-    let opts = GenOpts { max_frames: 16, seed: 0, min_new: 2, sampling: SamplingRequest::greedy(), ..GenOpts::default() };
+    let opts = GenOpts { max_frames: 16, min_new: 2, sampling: SamplingRequest::greedy(), ..GenOpts::default() };
 
     let gen = TalkerGen::load_on(gpu_core::testgpu::dev(qwen3tts::gen::PIPELINES), &TALKER, 16 + 32);
     let mtp = MtpModel::load_inference_on(gpu_core::testgpu::dev(qwen3tts::mtp::PIPELINES), &MTP);
@@ -215,7 +215,7 @@ fn cached_clone_audio_quality() {
         speaker: SPEAKER.to_string(),
         ckpt_dir: CKPT.to_string(),
     };
-    let opts = GenOpts { max_frames: 24, seed: 0, min_new: 2, sampling: SamplingRequest::greedy(), ..GenOpts::default() };
+    let opts = GenOpts { max_frames: 24, min_new: 2, sampling: SamplingRequest::greedy(), ..GenOpts::default() };
     // --- codec sanity: decode the PyTorch golden codes with our codec.safetensors ---
     if std::path::Path::new(&GOLD).exists() {
         let b = std::fs::read(&GOLD).unwrap();
@@ -276,7 +276,6 @@ fn cached_clone_audio_quality() {
     //     no-voice is a greedy-collapse artifact rather than a pipeline bug ---
     let opts_s = GenOpts {
         max_frames: 24,
-        seed: 0,
         min_new: 2,
         sampling: SamplingRequest {
             do_sample: Some(true),

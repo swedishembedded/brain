@@ -32,7 +32,7 @@ fn paths() -> Option<TtsPaths> {
 }
 
 fn greedy(max_frames: usize) -> GenOpts {
-    GenOpts { max_frames, seed: 1, sampling: SamplingRequest::greedy(), ..GenOpts::default() }
+    GenOpts { max_frames, sampling: SamplingRequest::greedy(), ..GenOpts::default() }
 }
 
 #[test]

@@ -473,7 +473,7 @@ mod tests {
         let (dir, base_path) = setup("full-vs-lora");
         let init = qwen3::init_weights(&qwen3::QwenConfig::tiny(), 7);
 
-        let opts = FinetuneOpts { steps: 2, batch: 2, block: 4, lr: 1e-2, rank: 2, alpha: 4.0, seed: 11, ..Default::default() };
+        let opts = FinetuneOpts { steps: 2, batch: 2, block: 4, lr: 1e-2, rank: 2, alpha: 4.0, ..Default::default() };
         let key = "blocks.0.attn.wq.weight";
         let original = init[key].clone();
 
@@ -516,7 +516,6 @@ mod tests {
             decay_iters: 1,
             rank: 2,
             alpha: 4.0,
-            seed: 11,
             ..Default::default()
         };
         let out_a = dir.join("no_warmup.safetensors").to_str().unwrap().to_string();
@@ -566,7 +565,6 @@ mod tests {
             grad_accum: 1,
             rank: 2,
             alpha: 4.0,
-            seed: 23,
             ..Default::default()
         };
         let out_1 = dir.join("accum1.safetensors").to_str().unwrap().to_string();
@@ -632,7 +630,6 @@ mod tests {
             checkpoint_secs: 1,
             rank: 2,
             alpha: 4.0,
-            seed: 41,
             ..Default::default()
         };
         finetune_lora(&base_path, &dir, out.to_str().unwrap(), &opts).expect("finetune");

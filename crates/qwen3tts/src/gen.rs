@@ -704,7 +704,7 @@ mod kv_tests {
         let d = cfg.d_model as usize;
         let max_t = 8u32;
         let seq = 6usize;
-        let mut rng = Rng::new(1234);
+        let mut rng = Rng::new(data::rng::random_seed());
 
         // Random decoder weights; norm/qk-norm/ln weights initialised to 1.
         let mut map: HashMap<String, Vec<f32>> = HashMap::new();
@@ -744,7 +744,7 @@ mod kv_tests {
         let map = random_decoder(&cfg, 20240727);
         let tg = TalkerGen::from_decoder_map(cfg.clone(), &map, 8);
         let mut cpu = CpuTalker::from_decoder_map(cfg.clone(), &map);
-        let mut rng = Rng::new(5);
+        let mut rng = Rng::new(data::rng::random_seed());
         tg.reset_cache();
         cpu.reset();
         let mut worst = 0f32;
@@ -791,7 +791,7 @@ mod kv_tests {
         let d = cfg.d_model as usize;
         let max_t = 1200u32;
         let tg = TalkerGen::from_decoder_map(cfg.clone(), &random_decoder(&cfg, 7), max_t);
-        let mut rng = Rng::new(99);
+        let mut rng = Rng::new(data::rng::random_seed());
         let embed: Vec<f32> = (0..d).map(|_| rng.next_gaussian() as f32).collect();
         println!("Talker medium: d={} L={} heads={}/{} hd={} ff={}", cfg.d_model, cfg.n_layers, cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cfg.d_ff);
         for &ctx in &[128usize, 512, 1024] {
@@ -855,7 +855,7 @@ mod qk_norm_rope_base_fused_tests {
         let map = random_decoder(&cfg, 987);
         let tg = TalkerGen::from_decoder_map(cfg.clone(), &map, max_t);
 
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(data::rng::random_seed());
         let embeds: Vec<f32> = (0..n_rows as usize * d).map(|_| rng.next_gaussian() as f32).collect();
         let _ = tg.forward(&embeds);
 
@@ -929,7 +929,7 @@ mod qk_norm_rope_at_fused_tests {
         let tg = TalkerGen::from_decoder_map(cfg.clone(), &map, max_t);
 
         tg.reset_cache();
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::new(data::rng::random_seed());
         for _ in 0..3 {
             let e: Vec<f32> = (0..d).map(|_| rng.next_gaussian() as f32).collect();
             tg.step(&e);

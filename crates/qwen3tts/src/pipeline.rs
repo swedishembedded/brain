@@ -1267,8 +1267,11 @@ mod cancel_tests {
         // first run is discarded - a cold-cache measurement would OVER-estimate
         // the per-frame cost, which would size the run below too small and let
         // it finish before the cancel ever lands.
+        // One draw shared by every run below: the partial codes are compared
+        // against a replay of the same request.
+        let seed = data::rng::random_seed();
         const CAL: usize = 32;
-        let cal_opts = GenOpts { max_frames: CAL, min_new: CAL, seed: 5, ..GenOpts::default() };
+        let cal_opts = GenOpts { max_frames: CAL, min_new: CAL, seed, ..GenOpts::default() };
         let never = CancelToken::default();
         let warm = generate_codes_cached(&mut cpu, &mut mtp, &sp, &prompt, &cal_opts, &never)
             .expect("an unarmed token never cancels");
@@ -1284,7 +1287,7 @@ mod cancel_tests {
         // cancel lands after a couple hundred frames' worth of work, so
         // "stopped early" is a wide ratio, not a photo finish.
         let max_frames = ((3.0 / per_frame.as_secs_f64()) as usize).clamp(2_000, 20_000);
-        let opts = GenOpts { max_frames, min_new: max_frames, seed: 5, ..GenOpts::default() };
+        let opts = GenOpts { max_frames, min_new: max_frames, seed, ..GenOpts::default() };
         let wait = (per_frame * 200).clamp(Duration::from_millis(20), Duration::from_millis(500));
 
         let cancel = CancelToken::armed();
@@ -1318,7 +1321,7 @@ mod cancel_tests {
         // same request uncancelled but capped at `n` frames yields them exactly.
         let mut cpu2 = CpuTalker::load(&talker_path);
         let mut mtp2 = CpuMtp::load(&mtp_path);
-        let prefix_opts = GenOpts { max_frames: n, min_new: max_frames, seed: 5, ..GenOpts::default() };
+        let prefix_opts = GenOpts { max_frames: n, min_new: max_frames, seed, ..GenOpts::default() };
         let prefix = generate_codes_cached(&mut cpu2, &mut mtp2, &sp, &prompt, &prefix_opts, &CancelToken::default())
             .expect("an unarmed token never cancels");
         assert_eq!(stopped.partial, prefix, "partial codes must be the genuine prefix of the full generation");
@@ -1346,7 +1349,7 @@ mod cancel_tests {
         let mut mtp = CpuMtp::load(&mtp_path);
         let cancel = CancelToken::armed();
         cancel.cancel();
-        let opts = GenOpts { max_frames: 64, min_new: 64, seed: 3, ..GenOpts::default() };
+        let opts = GenOpts { max_frames: 64, min_new: 64, ..GenOpts::default() };
         let stopped = generate_codes_cached(&mut cpu, &mut mtp, &sp, &prompt, &opts, &cancel)
             .expect_err("a pre-cancelled token must abort immediately");
         assert!(stopped.partial.is_empty(), "nothing should have been generated");
