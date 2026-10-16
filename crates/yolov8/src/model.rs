@@ -1194,7 +1194,7 @@ mod tests {
         let init = crate::init_weights(&cfg, 0xF1A7);
         let model = Yolo::new_on(Gpu::new_cpu(PIPELINES), cfg.clone(), b, 0, &init);
         let side = cfg.input as usize;
-        let img: Vec<f32> = data::rng::Lcg::new(5).vec(b as usize * 3 * side * side);
+        let img: Vec<f32> = data::rng::Lcg::new(data::rng::random_seed()).vec(b as usize * 3 * side * side);
         model.set_image(&img);
         model.forward_net();
         let (cls, boxl) = model.raw_logits();

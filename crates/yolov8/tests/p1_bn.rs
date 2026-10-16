@@ -213,7 +213,7 @@ fn gpu_train_forward(
 fn bn_train_forward_matches_reference() {
     let (n, c, h, w) = (4usize, 3usize, 2usize, 2usize);
     let total = n * c * h * w;
-    let mut rng = Lcg::new(0xDEAD_BEEF);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let x: Vec<f32> = (0..total).map(|_| rng.next_f32() * 2.0).collect();
     let gamma: Vec<f32> = (0..c).map(|_| 0.5 + rng.next_f32()).collect();
     let beta: Vec<f32> = (0..c).map(|_| rng.next_f32()).collect();
@@ -244,7 +244,7 @@ fn bn_eval_matches_running_stat_forward() {
     // bn_eval uses provided (running) stats directly — no recompute.
     let (n, c, h, w) = (2usize, 3usize, 2usize, 2usize);
     let total = n * c * h * w;
-    let mut rng = Lcg::new(0x1234_5678);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let x: Vec<f32> = (0..total).map(|_| rng.next_f32() * 2.0).collect();
     let run_mean: Vec<f32> = (0..c).map(|_| rng.next_f32()).collect();
     let run_var: Vec<f32> = (0..c).map(|_| 0.5 + rng.next_f32().abs()).collect();
@@ -276,7 +276,7 @@ fn bn_eval_matches_running_stat_forward() {
 fn bn_running_momentum_update() {
     let c = 4usize;
     let m = 0.1f32;
-    let mut rng = Lcg::new(0xABCD);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let mean: Vec<f32> = (0..c).map(|_| rng.next_f32()).collect();
     let var: Vec<f32> = (0..c).map(|_| 0.5 + rng.next_f32().abs()).collect();
     let run_mean0: Vec<f32> = (0..c).map(|_| rng.next_f32()).collect();
@@ -309,7 +309,7 @@ fn bn_backward_finite_difference() {
     let (n, c, h, w) = (4usize, 3usize, 2usize, 2usize);
     let (nu, cu, hu, wu) = (n as u32, c as u32, h as u32, w as u32);
     let total = n * c * h * w;
-    let mut rng = Lcg::new(0xF00D_CAFE);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let x: Vec<f32> = (0..total).map(|_| rng.next_f32() * 2.0).collect();
     let gamma: Vec<f32> = (0..c).map(|_| 0.5 + rng.next_f32()).collect();
     let beta: Vec<f32> = (0..c).map(|_| rng.next_f32()).collect();

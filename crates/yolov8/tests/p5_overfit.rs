@@ -244,7 +244,7 @@ fn tiny_dataset_overfit_high_recall() {
     ];
     let mut images: Vec<f32> = Vec::new();
     let mut gts: Vec<GtBox> = Vec::new();
-    let mut rng = Rng::new(2025);
+    let mut rng = Rng::new(2025); // seed: the high-recall bound was measured on this dataset draw at this training budget
     let mut n_empty = 0;
     for (img, &p) in presets.iter().enumerate() {
         let scene = gen_detect::gen_scene(p, side, side, nc, &mut rng);

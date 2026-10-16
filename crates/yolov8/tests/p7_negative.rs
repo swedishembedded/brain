@@ -119,7 +119,7 @@ fn random_image_control_near_chance() {
     let ident = |c: u32| c;
 
     // Replace every train image with deterministic RNG noise in [0,1]; KEEP boxes.
-    let mut rng = Rng::new(0x0015Eu64);
+    let mut rng = Rng::new(data::rng::random_seed());
     for s in train.iter_mut() {
         for v in s.chw.iter_mut() {
             *v = rng.next_f64() as f32;
@@ -129,7 +129,7 @@ fn random_image_control_near_chance() {
     // labels point at objects that aren't in the (noise) pixels, so any correct
     // box is pure luck.
     let mut val = val;
-    let mut rng2 = Rng::new(0xBADF00D);
+    let mut rng2 = Rng::new(data::rng::random_seed());
     for s in val.iter_mut() {
         for v in s.chw.iter_mut() {
             *v = rng2.next_f64() as f32;

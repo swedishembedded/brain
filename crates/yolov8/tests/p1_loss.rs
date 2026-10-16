@@ -135,7 +135,7 @@ fn dfl_grad_finite_difference() {
     let a = 3u32;
     let reg_max = 8u32;
     let n = (a * 4 * reg_max) as usize;
-    let mut rng = Lcg::new(0x1111_2222);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let logits: Vec<f32> = (0..n).map(|_| rng.next_f32()).collect();
     let de: Vec<f32> = (0..(a * 4) as usize).map(|_| rng.next_f32()).collect();
 
@@ -188,7 +188,7 @@ fn dfl_loss_grad_finite_difference() {
     let a = 3u32;
     let reg_max = 8u32;
     let n = (a * 4 * reg_max) as usize;
-    let mut rng = Lcg::new(0x3333_4444);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let logits: Vec<f32> = (0..n).map(|_| rng.next_f32()).collect();
     // targets in (0, reg_max-1) so two-hot stays interior.
     let tdist: Vec<f32> = (0..(a * 4) as usize)
@@ -247,7 +247,7 @@ fn bce_logits_value_golden() {
 #[test]
 fn bce_logits_grad_finite_difference() {
     let total = 24usize;
-    let mut rng = Lcg::new(0x5555_6666);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let logits: Vec<f32> = (0..total).map(|_| rng.next_f32() * 3.0).collect();
     let tgt: Vec<f32> = (0..total).map(|_| rng.unit()).collect();
 
@@ -377,7 +377,7 @@ fn ciou_grad_finite_difference() {
     // Random well-separated, positive-area boxes with PARTIAL overlap so the
     // gradient is smooth (avoid IoU=1 and disjoint-box degeneracies).
     let a = 16usize;
-    let mut rng = Lcg::new(0x7777_8888);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let mut pred = vec![0.0f32; a * 4];
     let mut tgt = vec![0.0f32; a * 4];
     for k in 0..a {
