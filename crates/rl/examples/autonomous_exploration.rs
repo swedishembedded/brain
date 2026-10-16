@@ -199,6 +199,7 @@ fn train_round(base: &Path, out: &Path, env: PositionCopyEnv, args: &Args, round
         seq_len: curriculum::SEQ_LEN,
         rollout: RolloutParams { max_new: curriculum::OUT_LEN, sample: SampleParams { temp: args.temp, top_k: 0, top_p: 1.0 }, eos: None },
         max_attempts: 1,
+        options: Default::default(),
     };
     let objective = Grpo::new(env, PositionCopyVerifier, grpo).with_log(log.clone());
     let opts = FitOpts {

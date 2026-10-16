@@ -25,6 +25,21 @@ use data::rng::Rng;
 use crate::training::Unsupported;
 use crate::Model;
 
+/// What an objective decides about the optimiser step that follows its
+/// [`Objective::micro_steps`]: the loop applies the accumulated gradients only
+/// on [`StepVerdict::Apply`].
+#[derive(Debug)]
+pub enum StepVerdict {
+    /// Take the AdamW step.
+    Apply,
+    /// Leave the weights and the optimiser state as they are: the step holds
+    /// nothing to learn from (no training rows) or something that must not
+    /// reach the weights (a non-finite loss or gradient). The run goes on.
+    Skip(String),
+    /// Stop the run with this error: skipping again would not help.
+    Abort(std::io::Error),
+}
+
 /// One training objective: the batch-drawing, forward/backward, and
 /// (optional) eval/logging behavior that varies per training regime.
 ///
@@ -66,6 +81,14 @@ pub trait Objective<M: Model> {
     /// overlapped ([`Model::accumulate_overlapped`]) overrides this.
     fn micro_steps(&mut self, model: &M, rng: &mut Rng, k: u32) -> f32 {
         (0..k).map(|_| self.micro_step(model, rng)).sum()
+    }
+
+    /// Whether the optimiser step after the [`Self::micro_steps`] just run
+    /// may be taken. Asked once per step, after the gradients are accumulated
+    /// and before they are applied. The default always applies, which is what
+    /// every objective whose micro-steps always yield a gradient wants.
+    fn step_verdict(&mut self) -> StepVerdict {
+        StepVerdict::Apply
     }
 
     /// A loss on a training batch without differentiating it: what the
@@ -148,6 +171,9 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for Box<O> {
     }
     fn micro_steps(&mut self, model: &M, rng: &mut Rng, k: u32) -> f32 {
         (**self).micro_steps(model, rng, k)
+    }
+    fn step_verdict(&mut self) -> StepVerdict {
+        (**self).step_verdict()
     }
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         (**self).loss_probe(model, rng)

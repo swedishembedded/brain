@@ -884,6 +884,7 @@ fn grpo_cfg(cfg: &StudyConfig, block: usize, completion_len: usize) -> GrpoConfi
         seq_len: block,
         rollout: RolloutParams { max_new: completion_len, sample: SampleParams { temp: cfg.explore_temp, top_k: 0, top_p: 1.0 }, eos: None },
         max_attempts: 1,
+        options: Default::default(),
     }
 }
 

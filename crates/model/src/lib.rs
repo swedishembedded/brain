@@ -95,7 +95,7 @@ pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 #[cfg(not(target_arch = "wasm32"))]
 pub use shard::{plan_balanced, Pipeline, PipelineModel, Shard, ShardCost, Shardable, StreamPlan};
 
-pub use objective::Objective;
+pub use objective::{Objective, StepVerdict};
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
 pub use train::{build_or_resume, causal_lm, fit, fit_controlled, fit_from, fit_with, load_dataset, load_dataset_with_itos, AdapterSnapshots, FitControl, FitReport, StepReport};

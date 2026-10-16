@@ -168,6 +168,7 @@ fn refuses_every_objective<M: Model>(subject: &Subject<M>, seed: u64) -> Result<
         seq_len: SEQ as usize,
         rollout: model::rollout::RolloutParams { max_new: 2, sample: model::serve::SampleParams::greedy(), eos: None },
         max_attempts: 1,
+        options: Default::default(),
     };
     let mut grpo = Grpo::new(OneTask, NoReward, grpo_cfg);
     refused("grpo", Objective::<M>::prepare(&mut grpo, &mut m))?;

@@ -5,7 +5,10 @@
 //! P11's [`crate::env`] seam - GRPO, DPO and top-K distillation as siblings
 //! of this module, all reducing to [`model::Batch::LmWeighted`].
 
+pub mod advantage;
 pub mod distill;
 pub mod dpo;
 pub mod grpo;
+pub mod grpo_stats;
+pub mod grpo_term;
 pub mod mixture;

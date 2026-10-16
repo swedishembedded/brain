@@ -15,7 +15,7 @@
 
 use qwen3::{Qwen, QwenConfig};
 use rl::env::{Environment, Reward, Step, Task, Verifier};
-use rl::objective::grpo::{Grpo, GrpoConfig};
+use rl::objective::grpo::{AdvantageNorm, Grpo, GrpoConfig, GrpoOptions};
 
 /// A single fixed prompt whose target continuation is a fixed token
 /// sequence - `Task::answer` carries the target (what a verifier needs to
@@ -76,6 +76,7 @@ fn grpo_group_size_two_runs_end_to_end_through_fit_with() {
             eos: None,
         },
         max_attempts: 1,
+        options: Default::default(),
     };
     let obj = Grpo::new(env, FracMatchVerifier, grpo_cfg);
 
@@ -126,6 +127,7 @@ fn grpo_group_size_one_is_the_rft_star_path_and_runs_end_to_end() {
             eos: None,
         },
         max_attempts: 4,
+        options: Default::default(),
     };
     let obj = Grpo::new(env, FracMatchVerifier, grpo_cfg);
 
@@ -161,7 +163,7 @@ impl model::rollout::Rollout for RecordingRollout {
     fn sample_n(&mut self, _prompt: &[u32], n: usize, params: &model::rollout::RolloutParams, _rng: &mut data::rng::Rng) -> Vec<model::rollout::Completion> {
         let fixed = [vec![4u32, 5, 6], vec![7, 7, 7]];
         (0..n)
-            .map(|i| model::rollout::Completion { tokens: fixed[i % 2][..params.max_new].to_vec(), logprobs: vec![100.0; params.max_new], stop: model::rollout::StopReason::MaxNew })
+            .map(|i| model::rollout::Completion { tokens: fixed[i % 2][..params.max_new].to_vec(), logprobs: vec![100.0; params.max_new], stop: model::rollout::StopReason::MaxNew, eos_logprob: None })
             .collect()
     }
 }
@@ -196,11 +198,12 @@ fn an_external_rollout_is_synced_on_schedule_and_its_logprobs_are_recomputed() {
         seq_len: 8,
         rollout: model::rollout::RolloutParams { max_new: 3, sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0 }, eos: None },
         max_attempts: 1,
+        options: GrpoOptions { advantage: AdvantageNorm::ZScore, ..GrpoOptions::default() },
     };
     let env = FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4, 5, 6] };
     let mut obj = Grpo::new(env, FracMatchVerifier, grpo_cfg).with_rollout(Box::new(RecordingRollout { syncs: syncs.clone() }), 2);
     use model::Objective;
-    obj.prepare(&mut model);
+    obj.prepare(&mut model).unwrap();
     let mut rng = data::rng::Rng::new(data::rng::random_seed());
     // Each group yields two rows: eight micro-steps are four groups.
     let losses: Vec<f32> = (0..8).map(|_| obj.micro_step(&model, &mut rng)).collect();

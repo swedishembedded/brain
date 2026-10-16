@@ -9,356 +9,179 @@
 //! Swedish Embedded AB builds the training-regime machinery that turns a
 //! verifiable-reward environment into a trained model - GRPO, rejection
 //! sampling, and everything in between reduce to one gradient-checked
-//! weighted cross-entropy kernel here. If your team needs RL-from-
-//! verifiable-rewards on top of a from-scratch training stack, you can
-//! procure our services by sending an email to info@swedishembedded.com.
+//! weighted cross-entropy kernel here. If your team needs RL-from-verifiable-
+//! rewards on top of a from-scratch training stack, you can procure our
+//! services by sending an email to info@swedishembedded.com.
 //!
-//! ## The reduction to a per-token `Batch::LmWeighted` weight
+//! ## The reduction to a per-token weight
 //!
-//! A model's ordinary cross-entropy backward already writes, per token
-//! position, `d_logits = (softmax(z) - onehot(target)) / count` (`count`
-//! being that forward's own non-IGNORE target count), and
-//! [`model::training::TokenObjectives::set_loss_weights`] scales that row-wise before the head's
-//! backward reads it. GRPO's clipped surrogate for one token is
-//! `min(r*A, clip(r, 1-eps, 1+eps)*A)` where `r = exp(new_lp - old_lp)` is
-//! the importance ratio between the CURRENT policy's logprob (`new_lp`,
-//! read back from [`model::training::TokenObjectives::batch_token_logprobs`] immediately after
-//! an ordinary forward) and the SAMPLING policy's logprob captured at
-//! rollout time (`old_lp`, [`model::rollout::Completion::logprobs`]) and `A`
-//! is the token's (group-broadcast) advantage. Differentiating that
-//! surrogate w.r.t. the logits and dividing by `count` gives EXACTLY
-//! `weight * d_logits` for `weight = A*r` on an unclipped token and `0` on a
-//! clipped one - `r` is not stopped-gradient here, its own derivative
-//! `dr/dz = r * dlogp/dz` is what produces the `A*r` factor, so ordinary
-//! cross-entropy backward differentiates the real clipped objective exactly
-//! by using this `weight`, no new kernel required. The optional k3
-//! KL-to-reference term (`e^u - u - 1`, `u = ref_lp - new_lp`) adds
-//! `kl_beta*(e^u - 1)` to that same weight by an identical derivation (see
-//! [`token_term`]'s own doc comment for both derivations spelled out
-//! term-by-term).
+//! See [`super::grpo_term`]: one ordinary forward reads the current policy's
+//! per-token log-probabilities, the host computes each token's clipped
+//! surrogate weight, [`model::training::TokenObjectives::set_loss_weights`]
+//! installs them, and one ordinary backward differentiates the objective.
 //!
-//! [`Grpo::micro_step`] therefore differs from a plain weighted-CE step only
-//! in WHERE the weight comes from: one ordinary forward (to read `new_lp`),
-//! a host-side computation of `weight` per token, [`model::training::TokenObjectives::set_loss_weights`], then one ordinary backward. This is also why the
-//! blanket `gradcheck::CheckModel for M: Model` cannot gate this file:
-//! `Model::forward()`'s own return value is the model's plain (default- or
-//! stale-weighted) loss, computed BEFORE the true per-token weight is even
-//! known - not the scalar `backward()` ends up differentiating. The gate
-//! (`crates/rl/tests/grpo_gradcheck.rs`) supplies its own local `CheckModel`
-//! whose `loss()` recomputes the true clipped surrogate host-side, using
-//! this exact [`token_term`] function, so finite differences test the real
-//! objective.
+//! ## One optimiser step
 //!
-//! ## RFT/STaR as the degenerate case
+//! [`Objective::micro_steps`] is one optimiser step's worth of rows. It gathers
+//! `k` rows with a non-zero advantage, drawing further groups while it is short
+//! (dynamic sampling, bounded by [`GrpoOptions::resample_factor`]), trains them
+//! with one shared loss denominator ([`LossAgg`]), and rules through
+//! [`Objective::step_verdict`] whether the step may be taken: never on zero
+//! rows, never on a non-finite loss or gradient.
 //!
-//! [`group_advantages`] special-cases a group of size <= 1: GRPO's own
-//! z-score advantage would divide a single reward by a zero (or near-zero)
-//! group standard deviation and collapse to `0` (or blow up), which is
-//! nonsensical for a group that was never a comparison in the first place.
-//! Plain rejection-sampling/STaR training - draw completions, keep only a
-//! verified-correct one, deduplicate to one kept completion per prompt, and
-//! train on it with uniform weight - is realized by [`Grpo::micro_step`]
-//! itself running the SAME `group_size == 1` path through the SAME
-//! [`token_term`] weight formula with `advantage = 1.0`: since STaR trains
-//! on the completion immediately after sampling it (no intervening
-//! optimizer step), `new_lp == old_lp` at that point, so `r = 1` and
-//! `weight = 1.0 * 1 = 1.0` - ordinary uniform-weight SFT on the kept
-//! completion, falling out of the identical code path rather than a second
-//! implementation next to it.
+//! ## The distribution that is trained is the one that sampled
+//!
+//! A sampler at temperature `T` draws from `softmax(logits / T)`.
+//! [`Objective::prepare`] sets the model's logit scale to `1/T`, so the
+//! trainer's log-probabilities are under that same distribution; the model's
+//! own rollout then samples at temperature 1 over the already scaled logits.
+//! The behaviour log-probability of every row is recomputed by the training
+//! forward when the row is packed, so a different kernel or device in the
+//! sampler never enters the ratio; the sampler's own value is kept only to log
+//! how far it was from the trainer's ([`GrpoStats::max_sampler_gap`]).
 
 use data::rng::Rng;
-use model::rollout::{Completion, ModelRollout, Rollout};
-use model::{Batch, Model, Objective, IGNORE};
-use model::training::Unsupported;
+use model::rollout::{Completion, ModelRollout, Rollout, RolloutParams, StopReason};
+use model::training::{self, Unsupported};
+use model::{Batch, Model, Objective, StepVerdict, IGNORE};
 
-use crate::env::{Environment, Verifier};
+pub use super::advantage::{group_advantages, group_advantages_with, AdvantageNorm};
+pub use super::grpo_stats::{CycleLog, GrpoStats, NonFiniteSteps, RowRefusal, MAX_CONSECUTIVE_NONFINITE};
+pub use super::grpo_term::{k3_kl, near_clip_boundary, token_term, token_term_banded, ClipBand, TokenTerm, MAX_LOG_RATIO};
+use crate::env::{Environment, Task, Verifier};
 
-/// Per-group advantage `A_i = (r_i - mean_r) / (std_r + 1e-4)`.
-///
-/// A group of size `<= 1` cannot be z-scored meaningfully (there is nothing
-/// to compare the one reward against) - this is the RFT/STaR degenerate
-/// case (see the module doc comment), realized as uniform advantage `1.0`
-/// rather than GRPO's z-score. A group of size `>= 2` with (near-)zero
-/// reward variance (an all-right or all-wrong group) is dropped - `0.0` for
-/// every member - because it carries no useful comparison either; this is
-/// what makes GRPO cheap: a group that teaches nothing costs nothing.
-pub fn group_advantages(rewards: &[f32]) -> Vec<f32> {
-    if rewards.len() <= 1 {
-        return vec![1.0; rewards.len()];
-    }
-    let g = rewards.len() as f32;
-    let mean = rewards.iter().sum::<f32>() / g;
-    let var = rewards.iter().map(|&r| (r - mean) * (r - mean)).sum::<f32>() / g;
-    let std = var.sqrt();
-    if std < 1e-6 {
-        return vec![0.0; rewards.len()];
-    }
-    rewards.iter().map(|&r| (r - mean) / (std + 1e-4)).collect()
+/// How a row's per-token loss terms are normalised.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LossAgg {
+    /// Each row's terms are divided by that row's own supervised-token count
+    /// (the legacy behaviour): a token in a long completion weighs less than
+    /// one in a short completion, so length is rewarded or punished by the
+    /// normalisation alone.
+    SeqMean,
+    /// Every token of the optimiser step is divided by the step's mean
+    /// supervised-token count per micro-step: all tokens weigh the same
+    /// whatever the length of the row they sit in.
+    #[default]
+    TokenSum,
 }
 
-/// One token's [`model::Batch::LmWeighted`] weight, plus the host-computed
-/// loss term it is the analytic gradient of (`d(loss)/dz = weight *
-/// (softmax(z) - onehot(target))` - see the module doc comment for the full
-/// derivation) - the pair the gradcheck gate's `loss()`/`backward()` must
-/// agree on.
+/// The knobs beyond the classic GRPO set. [`Default`] is the recommended
+/// configuration; the legacy behaviour is `advantage: ZScore`, `loss_agg:
+/// SeqMean` and `clip_eps_high` equal to `clip_eps`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TokenTerm {
-    pub weight: f32,
-    pub loss: f32,
+pub struct GrpoOptions {
+    /// How group rewards become advantages.
+    pub advantage: AdvantageNorm,
+    /// How token terms are normalised across the rows of a step.
+    pub loss_agg: LossAgg,
+    /// Upper edge of the clip band (`[1 - clip_eps, 1 + clip_eps_high]`).
+    pub clip_eps_high: f32,
+    /// Dynamic sampling: a step may draw up to this many times the groups it
+    /// nominally needs (`ceil(grad_accum / group_size)`) while it holds fewer
+    /// than `grad_accum` non-zero-advantage rows.
+    pub resample_factor: usize,
+    /// A queued row whose behaviour policy is more than this many optimiser
+    /// steps older than the current policy is refused instead of trained.
+    pub staleness_bound: u32,
+    /// Compute and log the KL to the adapter-disabled reference even when
+    /// `kl_beta` is zero (needs a model with LoRA tensors or `with_reference`).
+    pub log_kl: bool,
 }
 
-/// `advantage == 0.0` means this token contributes nothing to the policy
-/// term (a dropped zero-variance group, or a completion whose reward
-/// happened to land exactly on its group's mean) - the KL term (when
-/// `kl_beta > 0.0`) still applies independently, since it regularizes
-/// EVERY token toward the reference regardless of that token's own reward.
-///
-/// Clip rule, derived (not looked up) from `min(r*A, clip(r,1-eps,1+eps)*A)`
-/// (see the module doc comment): the raw (differentiable) term wins
-/// whenever `r*A <= clip(r,1-eps,1+eps)*A`; the derivative is then exactly
-/// `A*r`. When the clipped term is strictly smaller, the surrogate is
-/// locally CONSTANT in `r` (the clamp has saturated), so the weight is
-/// exactly `0.0`, not "clamped to a small value" but genuinely zero
-/// gradient contribution.
-pub fn token_term(old_lp: f32, new_lp: f32, advantage: f32, clip_eps: f32, ref_lp: Option<f32>, kl_beta: f32) -> TokenTerm {
-    let ratio = (new_lp - old_lp).exp();
-    let mut weight = 0.0f32;
-    let mut loss = 0.0f32;
-
-    if advantage != 0.0 {
-        let unclipped = ratio * advantage;
-        let clipped = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps) * advantage;
-        let surrogate = unclipped.min(clipped);
-        loss += -surrogate;
-        if unclipped <= clipped {
-            weight += advantage * ratio;
-        }
-    }
-
-    if kl_beta > 0.0 {
-        let ref_lp = ref_lp.expect("token_term: kl_beta > 0.0 requires a reference logprob");
-        // k3 estimator: KL = e^u - u - 1, u = ref_lp - new_lp(theta).
-        // d(KL)/d(new_lp) = -(e^u - 1); d(new_lp)/dz = onehot - softmax, so
-        // d(KL)/dz = (e^u - 1) * (softmax - onehot) - exactly `(e^u - 1)`
-        // more weight on the ordinary CE gradient direction.
-        let u = ref_lp - new_lp;
-        let eu = u.exp();
-        weight += kl_beta * (eu - 1.0);
-        loss += kl_beta * (eu - u - 1.0);
-    }
-
-    TokenTerm { weight, loss }
-}
-
-/// True if `ratio` sits within `margin` of either clip boundary (`1 -
-/// clip_eps` or `1 + clip_eps`) - [`token_term`]'s clip indicator is
-/// piecewise-constant there, so an arbitrarily small parameter perturbation
-/// can flip which term the `min` picks. A finite-difference gate must keep
-/// its sampled base-point ratios clear of this margin (see
-/// `crates/rl/tests/grpo_gradcheck.rs`'s own doc comment) rather than
-/// loosen tolerance to paper over the resulting mismatch.
-pub fn near_clip_boundary(ratio: f32, clip_eps: f32, margin: f32) -> bool {
-    (ratio - (1.0 - clip_eps)).abs() < margin || (ratio - (1.0 + clip_eps)).abs() < margin
-}
-
-/// Pack one sampled `completion` (of `prompt`) into row `row` of the
-/// `rows x seq_len` batch tensors, at the alignment [`Completion::logprobs`]
-/// already uses: position `prompt.len() - 1 + i` predicts `completion.
-/// tokens[i]` - the same "targets[t] predicts position t+1" convention
-/// every other [`model::Batch::Lm`] user follows, restricted to the
-/// completion's own span (the prompt itself is never scored). A completion
-/// that overruns `seq_len` is silently truncated at the tail - the
-/// un-fitting tokens are dropped, not scored, rather than panicking on an
-/// over-long rollout.
-#[allow(clippy::too_many_arguments)]
-fn pack_row(
-    tokens: &mut [u32],
-    targets: &mut [u32],
-    old_lp: &mut [f32],
-    ref_lp: &mut [f32],
-    advantage: &mut [f32],
-    row: usize,
-    seq_len: usize,
-    prompt: &[u32],
-    completion: &Completion,
-    adv: f32,
-    ref_logprobs: Option<&[f32]>,
-) {
-    let base = row * seq_len;
-    let plen = prompt.len();
-    if plen == 0 {
-        // Nothing to condition the first completion token on in this packed
-        // representation - not a real scenario (every task prompt is
-        // non-empty), but the underflow below would otherwise be silent.
-        return;
-    }
-    for (i, &t) in prompt.iter().chain(completion.tokens.iter()).take(seq_len).enumerate() {
-        tokens[base + i] = t;
-    }
-    for i in 0..completion.tokens.len() {
-        let tok_idx = plen + i;
-        if tok_idx >= seq_len {
-            break;
-        }
-        let t_pos = tok_idx - 1;
-        targets[base + t_pos] = completion.tokens[i];
-        old_lp[base + t_pos] = completion.logprobs[i];
-        advantage[base + t_pos] = adv;
-        if let Some(rl) = ref_logprobs {
-            ref_lp[base + t_pos] = rl[i];
-        }
-    }
-}
-
-/// One already-sampled, already-scored training row, queued for a future
-/// [`Grpo::micro_step`] call - see that struct's own doc comment on why
-/// sampling and training happen on different calls rather than in one.
-struct PackedRow {
-    tokens: Vec<u32>,
-    targets: Vec<u32>,
-    old_lp: Vec<f32>,
-    ref_lp: Vec<f32>,
-    advantage: Vec<f32>,
-    /// The raw completion span this row was packed from - kept alongside
-    /// the packed arrays purely for [`CycleLog`]'s bookkeeping (self-improve
-    /// roadmap P18's "no label ever enters training" structural assertion),
-    /// not read by [`Grpo::micro_step`]'s own training math.
-    completion: Vec<u32>,
-}
-
-/// Observability hook for self-improve roadmap P18's structural "every
-/// completion span written into a training set is a member of the multiset
-/// the policy actually sampled that cycle" assertion: every completion
-/// [`Grpo::refill`] draws (kept or dropped) and every completion span
-/// [`Grpo::micro_step`] actually pops off the training queue, recorded in
-/// order. A plain `Rc<RefCell<..>>` handle rather than a getter on `Grpo`
-/// itself, because `Grpo` is typically consumed by value (`model::fit_with`
-/// takes its [`model::Objective`] by value and drops it at the end) - attach
-/// a log via [`Grpo::with_log`] before handing the objective off, keep your
-/// own clone, and read it back afterward.
-#[derive(Clone, Default)]
-pub struct CycleLog(std::rc::Rc<std::cell::RefCell<CycleLogInner>>);
-
-#[derive(Default)]
-struct CycleLogInner {
-    sampled: Vec<Vec<u32>>,
-    rewards: Vec<f32>,
-    trained: Vec<Vec<u32>>,
-}
-
-impl CycleLog {
-    pub fn new() -> CycleLog {
-        CycleLog::default()
-    }
-
-    /// Every completion [`Grpo::refill`] sampled (kept or dropped) since
-    /// construction, in sample order.
-    pub fn sampled(&self) -> Vec<Vec<u32>> {
-        self.0.borrow().sampled.clone()
-    }
-
-    /// The verified reward of every completion in [`CycleLog::sampled`],
-    /// parallel to it and in the same order. This is the honest cycle-wide
-    /// mean-reward series: [`Objective::metrics`] can only report the LAST
-    /// group's mean, and by the time a caller can read it the objective has
-    /// already been consumed by `model::fit_with`.
-    pub fn rewards(&self) -> Vec<f32> {
-        self.0.borrow().rewards.clone()
-    }
-
-    /// Every completion span [`Grpo::micro_step`] actually popped off the
-    /// training queue and trained on, in training order.
-    pub fn trained(&self) -> Vec<Vec<u32>> {
-        self.0.borrow().trained.clone()
-    }
-
-    fn push_sampled(&self, tokens: Vec<u32>) {
-        self.0.borrow_mut().sampled.push(tokens);
-    }
-
-    fn push_reward(&self, reward: f32) {
-        self.0.borrow_mut().rewards.push(reward);
-    }
-
-    fn push_trained(&self, tokens: Vec<u32>) {
-        self.0.borrow_mut().trained.push(tokens);
+impl Default for GrpoOptions {
+    fn default() -> GrpoOptions {
+        GrpoOptions { advantage: AdvantageNorm::default(), loss_agg: LossAgg::default(), clip_eps_high: 0.28, resample_factor: 3, staleness_bound: 1, log_kl: true }
     }
 }
 
 /// GRPO's (and RFT/STaR's) hyperparameters. `seq_len` is the packed row's
-/// length - MUST match the `t` the model was constructed with; `b` is
-/// implicitly `1` (see [`Grpo`]'s own doc comment on why one micro-step
-/// trains exactly one row, and why that is not a shortcut but a real
-/// constraint of every current [`model::Model::logits_all`] impl this
-/// crate's `Rollout` sits on). Drive a whole group's worth of rows through
-/// ONE optimizer step by setting [`model::FitOpts::grad_accum`] to a
-/// multiple of `group_size`.
+/// length - MUST match the `t` the model was constructed with; `b` is `1`
+/// (rollouts go through [`Model::logits_all`], a single-sequence oracle).
+/// Drive a whole group's worth of rows through ONE optimiser step by setting
+/// [`model::FitOpts::grad_accum`] to the number of rows a step should hold.
 #[derive(Clone, Copy, Debug)]
 pub struct GrpoConfig {
     /// Completions sampled per prompt. `1` selects the RFT/STaR degenerate
-    /// path (see the module doc comment); `>= 2` is ordinary GRPO.
+    /// path; `>= 2` is ordinary GRPO.
     pub group_size: usize,
-    /// PPO-style clip band half-width (`eps` in `clip(r, 1-eps, 1+eps)`).
+    /// Lower clip-band half-width (`eps` in `clip(r, 1-eps, 1+eps_high)`).
     pub clip_eps: f32,
-    /// k3 KL-to-reference coefficient. `0.0` disables the KL term entirely
-    /// (no reference logprobs are read or required).
+    /// k3 KL-to-reference coefficient. `0.0` puts no KL term in the loss.
     pub kl_beta: f32,
-    /// Packed row length (`t`) - prompt length + `rollout.max_new`, at
-    /// least.
+    /// Packed row length (`t`): prompt length + completion, at least.
     pub seq_len: usize,
-    /// Sampling policy + stopping conditions for every rollout.
-    pub rollout: model::rollout::RolloutParams,
-    /// `group_size == 1` (RFT/STaR) only: how many completions to sample
-    /// per prompt before giving up on finding a verified-correct one. Not
-    /// read when `group_size != 1`.
+    /// Sampling policy + stopping conditions for every rollout. Truncating
+    /// the sampler (top-k, top-p) makes the behaviour policy differ from the
+    /// trained one; such rows are flagged and counted
+    /// ([`GrpoStats::truncated_sampling_rows`]).
+    pub rollout: RolloutParams,
+    /// `group_size == 1` (RFT/STaR) only: how many completions to sample per
+    /// prompt before giving up on a verified-correct one.
     pub max_attempts: usize,
+    /// See [`GrpoOptions`].
+    pub options: GrpoOptions,
 }
 
-/// One GRPO (or, with `cfg.group_size == 1`, RFT/STaR) training objective
-/// over environment `E`'s tasks, scored by verifier `V`. Generic over any
-/// `M: model::Model` that has adopted weighted-loss support
-/// ([`model::training::TokenObjectives`]) - today
-/// `qwen3::Qwen` and `gpt2::Gpt`.
-///
-/// **Why `micro_step` trains exactly one row, not a whole packed batch of
-/// `group_size` (or more) rows at once.** [`model::rollout::Rollout`]
-/// samples through [`model::Model::logits_all`], and every current impl of
-/// it (`qwen3::Qwen::logits_all`, `gpt2::Gpt::logits_all`) asserts `self.b
-/// == 1` - a single-sequence-at-a-time, re-prefill-per-sample oracle by
-/// design (see `model::rollout`'s own doc comment). A `Model` is
-/// constructed once, at a fixed `(b, t)`, so the SAME instance this
-/// objective trains cannot also be the one a group's `group_size`
-/// completions are rolled out from unless `b == 1` throughout - meaning one
-/// micro-step's forward/backward is naturally one row, not a `group_size`-
-/// row packed batch. [`Grpo`] embraces that: [`Objective::micro_step`]
-/// pops one already-sampled, already-scored [`PackedRow`] off an internal
-/// queue and trains it; when the queue is empty it samples and scores a
-/// FRESH group (or, for RFT/STaR, rejection-samples one completion) and
-/// refills. The training loop's own grad-accumulation
-/// (`model::train::fit_with`'s existing `opts.grad_accum` loop) is what
-/// turns a run of `group_size` such micro-steps back into one optimizer
-/// step over the whole group - no second accumulation mechanism is
-/// invented here.
-/// The frozen-reference logprob source the k3 KL term reads: `(prompt's
-/// task, sampled completion) -> per-completion-token reference logprob`.
-type RefLogprobFn = Box<dyn Fn(&crate::env::Task, &Completion) -> Vec<f32>>;
+/// The frozen-reference logprob source the k3 KL term reads: `(task, sampled
+/// completion) -> per-completion-token reference logprob`.
+type RefLogprobFn = Box<dyn Fn(&Task, &Completion) -> Vec<f32>>;
 
+/// One already-sampled, scored and packed training row.
+struct PackedRow {
+    tokens: Vec<u32>,
+    targets: Vec<u32>,
+    /// Behaviour log-probabilities, recomputed by the training forward.
+    old_lp: Vec<f32>,
+    /// Reference log-probabilities; meaningful only when `has_ref`.
+    ref_lp: Vec<f32>,
+    has_ref: bool,
+    advantage: Vec<f32>,
+    /// The completion span as verified and trained (no stop token).
+    completion: Vec<u32>,
+    /// Optimiser steps taken when this row's behaviour policy was current.
+    version: u64,
+    supervised: usize,
+}
+
+/// The sampling policy copy [`Grpo::with_rollout`] installs.
+struct External {
+    rollout: Box<dyn model::rollout::SyncRollout>,
+    sync_every: usize,
+    groups: usize,
+}
+
+/// One drawn group, before it is queued.
+struct Drawn {
+    rows: Vec<PackedRow>,
+    /// The verified spans, in sample order, and their rewards.
+    spans: Vec<Vec<u32>>,
+    rewards: Vec<f32>,
+    attempts: usize,
+    zero_variance: bool,
+    truncated: usize,
+    eos_targets: usize,
+    truncated_sampling_rows: usize,
+    sampler_gap: f32,
+}
+
+/// One GRPO (or, with `cfg.group_size == 1`, RFT/STaR) training objective over
+/// environment `E`'s tasks, scored by verifier `V`, for any `M: Model` that
+/// provides [`training::TokenObjectives`].
 pub struct Grpo<E: Environment, V: Verifier> {
     env: E,
     verifier: V,
     cfg: GrpoConfig,
-    /// Precomputed, frozen reference logprobs for one (prompt, completion)
-    /// pair, called ONCE per sampled completion (at rollout time, not at
-    /// every training step) - the module doc comment's "no co-resident
-    /// reference model needed, only its constant logprobs". `None` is only
-    /// valid when `cfg.kl_beta <= 0.0`.
     ref_logprobs: Option<RefLogprobFn>,
     pending: std::collections::VecDeque<PackedRow>,
-    /// Sampling from a policy copy other than the trained model, when set.
     external: Option<External>,
     last_mean_reward: f32,
     last_kept_frac: f32,
     log: CycleLog,
+    stats: GrpoStats,
+    /// Optimiser steps taken so far (counted when [`Objective::step_verdict`] applies one).
+    version: u64,
+    verdict: Option<StepVerdict>,
+    consecutive_nonfinite: u32,
 }
 
 impl<E: Environment, V: Verifier> Grpo<E, V> {
@@ -374,16 +197,19 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             last_mean_reward: 0.0,
             last_kept_frac: 0.0,
             log: CycleLog::default(),
+            stats: GrpoStats::default(),
+            version: 0,
+            verdict: None,
+            consecutive_nonfinite: 0,
         }
     }
 
-    /// Attach the frozen-reference logprob source the k3 KL term reads
-    /// (`cfg.kl_beta > 0.0` requires this). Called once per sampled
-    /// completion, immediately after it is drawn - see this struct's own
-    /// field doc comment.
+    /// Attach the frozen-reference logprob source the k3 KL term reads. Called
+    /// once per sampled completion, immediately after it is drawn. Without it
+    /// the reference is the model with its adapters disabled.
     pub fn with_reference<F>(mut self, f: F) -> Grpo<E, V>
     where
-        F: Fn(&crate::env::Task, &Completion) -> Vec<f32> + 'static,
+        F: Fn(&Task, &Completion) -> Vec<f32> + 'static,
     {
         self.ref_logprobs = Some(Box::new(f));
         self
@@ -392,10 +218,9 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     /// Sample through `rollout` (a serving engine holding its own copy of the
     /// policy, possibly on another device) instead of the trained model. The
     /// rollout is synced with the model's trainable tensors before the first
-    /// group and then every `sync_every` groups, so it samples from a policy
-    /// at most `sync_every - 1` groups stale. The trainer recomputes every
-    /// sampled token's old logprob on its own model when the group is packed:
-    /// a different device or kernel never enters the probability ratio.
+    /// group and then every `sync_every` groups. The trainer recomputes every
+    /// sampled token's behaviour logprob on its own model when the group is
+    /// packed: a different device or kernel never enters the probability ratio.
     pub fn with_rollout(mut self, rollout: Box<dyn model::rollout::SyncRollout>, sync_every: usize) -> Grpo<E, V> {
         assert!(sync_every >= 1, "Grpo: sync_every must be >= 1");
         self.external = Some(External { rollout, sync_every, groups: 0 });
@@ -403,123 +228,390 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     }
 
     /// Attach an external [`CycleLog`] so a caller can observe what this
-    /// objective actually sampled/trained on after it has been consumed
-    /// (typically by `model::fit_with`) - see [`CycleLog`]'s own doc
-    /// comment.
+    /// objective sampled and trained on after it has been consumed.
     pub fn with_log(mut self, log: CycleLog) -> Grpo<E, V> {
         self.log = log;
         self
     }
 
-    fn pack(&self, prompt: &[u32], completion: &Completion, adv: f32, ref_logprobs: Option<&[f32]>) -> PackedRow {
-        let mut row = PackedRow {
-            tokens: vec![0u32; self.cfg.seq_len],
-            targets: vec![IGNORE; self.cfg.seq_len],
-            old_lp: vec![0f32; self.cfg.seq_len],
-            ref_lp: vec![0f32; self.cfg.seq_len],
-            advantage: vec![0f32; self.cfg.seq_len],
-            completion: completion.tokens.clone(),
-        };
-        pack_row(&mut row.tokens, &mut row.targets, &mut row.old_lp, &mut row.ref_lp, &mut row.advantage, 0, self.cfg.seq_len, prompt, completion, adv, ref_logprobs);
-        row
+    /// What the objective has done so far.
+    pub fn stats(&self) -> &GrpoStats {
+        &self.stats
     }
 
-    /// Sample (and score) one fresh group, queuing every KEPT row (nonzero
-    /// advantage) for future [`Objective::micro_step`] calls to train. A
-    /// group that drops entirely (all-right/all-wrong GRPO group, or a
-    /// STaR prompt with no verified-correct completion within
-    /// `max_attempts`) queues nothing - the caller's next `micro_step` call
-    /// then either refills again or (if `pending` stays empty) reports a
-    /// no-op loss, matching [`model::Batch::LmWeighted`]'s own "a weight of
-    /// 0.0 ... masked-out and reward=0 collapse to the same thing".
-    fn refill<M: Model>(&mut self, model: &M, rng: &mut Rng) {
-        let task = self.env.tasks(rng.next_u64()).into_iter().next().expect("Grpo: Environment::tasks produced no task");
-        let queued = self.pending.len();
-        let mut own = ModelRollout::new(model);
-        let roll: &mut dyn Rollout = match &mut self.external {
-            Some(ext) => {
-                if ext.groups % ext.sync_every == 0 {
-                    let names = model.optimized_params().unwrap_or_else(|| model.param_names());
-                    let trained: std::collections::HashMap<String, Vec<f32>> = names.into_iter().map(|n| {
-                        let w = model.read_weight(&n);
-                        (n, w)
-                    }).collect();
-                    ext.rollout.sync(&trained).unwrap_or_else(|e| panic!("Grpo: syncing the rollout failed: {e}"));
-                }
-                ext.groups += 1;
-                &mut *ext.rollout
-            }
-            None => &mut own,
-        };
+    /// The logit scale the trained distribution uses: `1/T` for a sampler at
+    /// temperature `T`, `1` for greedy.
+    fn logit_scale(&self) -> f32 {
+        let sample = self.cfg.rollout.sample;
+        if sample.is_greedy() {
+            1.0
+        } else {
+            1.0 / sample.temp
+        }
+    }
 
-        if self.cfg.group_size == 1 {
-            // RFT/STaR: bounded rejection sampling for one verified correct,
-            // deduplicated completion - see module doc comment.
-            let mut rewards = Vec::with_capacity(self.cfg.max_attempts.max(1));
-            let mut kept = None;
+    fn truncating_sampler(&self) -> bool {
+        let s = self.cfg.rollout.sample;
+        !s.is_greedy() && (s.top_k > 0 || (s.top_p > 0.0 && s.top_p < 1.0))
+    }
+
+    fn band(&self) -> ClipBand {
+        ClipBand { low: self.cfg.clip_eps, high: self.cfg.options.clip_eps_high }
+    }
+
+    /// Rollout parameters for the model's own rollout: its logits already
+    /// carry the `1/T` scale, so it samples at temperature 1; a completion
+    /// never exceeds the span the packed row can hold.
+    fn own_params(&self, fit: usize) -> RolloutParams {
+        let mut p = self.cfg.rollout;
+        if !p.sample.is_greedy() {
+            p.sample.temp = 1.0;
+        }
+        p.max_new = p.max_new.min(fit);
+        p
+    }
+
+    /// Draw and score one group (or one RFT attempt series) of `task`, and
+    /// pack its informative rows. Reads `self` only: the loss probe uses it
+    /// without touching the queue, the log or the counters.
+    fn draw_group<M: Model>(&self, model: &M, task: &Task, roll: &mut dyn Rollout, own: bool, rng: &mut Rng) -> Drawn {
+        let plen = task.prompt.len();
+        assert!(plen > 0 && plen < self.cfg.seq_len, "Grpo: a prompt of {plen} tokens leaves no room in rows of {}", self.cfg.seq_len);
+        let fit = self.cfg.seq_len - plen;
+        let params = if own { self.own_params(fit) } else { self.cfg.rollout };
+        let eos = self.cfg.rollout.eos;
+
+        // Sample, cut every completion to the span the row can hold, and score that span.
+        let mut kept: Vec<Completion> = Vec::new();
+        let mut spans: Vec<Vec<u32>> = Vec::new();
+        let mut rewards: Vec<f32> = Vec::new();
+        let mut truncated = 0usize;
+        let mut attempts = 0usize;
+        let mut score = |c: Completion| {
+            let cut = c.tokens.len() > fit;
+            let c = if cut { Completion { tokens: c.tokens[..fit].to_vec(), logprobs: c.logprobs[..fit].to_vec(), stop: StopReason::MaxNew, eos_logprob: None } } else { c };
+            let reward = self.verifier.verify(task, &[], &c.tokens).value;
+            spans.push(c.tokens.clone());
+            rewards.push(reward);
+            kept.push(c);
+            truncated += cut as usize;
+            reward
+        };
+        let star = self.cfg.group_size == 1;
+        if star {
+            // RFT/STaR: bounded rejection sampling for one verified-correct completion.
             for _ in 0..self.cfg.max_attempts.max(1) {
-                let c = roll.sample_n(&task.prompt, 1, &self.cfg.rollout, rng).pop().expect("sample_n(1) returns exactly one completion");
-                self.log.push_sampled(c.tokens.clone());
-                let reward = self.verifier.verify(&task, &[], &c.tokens).value;
-                self.log.push_reward(reward);
-                rewards.push(reward);
-                if reward > 0.0 {
-                    kept = Some(c);
+                attempts += 1;
+                let c = roll.sample_n(&task.prompt, 1, &params, rng).pop().expect("sample_n(1) returns exactly one completion");
+                if score(c) > 0.0 {
                     break;
                 }
             }
-            self.last_mean_reward = rewards.iter().sum::<f32>() / rewards.len() as f32;
-            self.last_kept_frac = if kept.is_some() { 1.0 } else { 0.0 };
-            if let Some(c) = kept {
-                let rl = self.ref_logprobs.as_ref().map(|f| f(&task, &c));
-                self.pending.push_back(self.pack(&task.prompt, &c, 1.0, rl.as_deref()));
-            }
         } else {
-            let group = roll.sample_n(&task.prompt, self.cfg.group_size, &self.cfg.rollout, rng);
-            for c in &group {
-                self.log.push_sampled(c.tokens.clone());
+            attempts = 1;
+            for c in roll.sample_n(&task.prompt, self.cfg.group_size, &params, rng) {
+                score(c);
             }
-            let rewards: Vec<f32> = group.iter().map(|c| self.verifier.verify(&task, &[], &c.tokens).value).collect();
-            for &r in &rewards {
-                self.log.push_reward(r);
+        }
+        let advs: Vec<f32> = if star {
+            let mut advs = vec![0.0; kept.len()];
+            if rewards.last().is_some_and(|&r| r > 0.0) {
+                *advs.last_mut().expect("one attempt was made") = 1.0;
             }
-            self.last_mean_reward = rewards.iter().sum::<f32>() / rewards.len().max(1) as f32;
-            let advs = group_advantages(&rewards);
-            self.last_kept_frac = if advs.iter().any(|&a| a != 0.0) { 1.0 } else { 0.0 };
-            for (c, &a) in group.iter().zip(&advs) {
-                if a != 0.0 {
-                    let rl = self.ref_logprobs.as_ref().map(|f| f(&task, c));
-                    self.pending.push_back(self.pack(&task.prompt, c, a, rl.as_deref()));
+            advs
+        } else {
+            group_advantages_with(self.cfg.options.advantage, &rewards)
+        };
+        let zero_variance = advs.iter().all(|&a| a == 0.0);
+
+        // Pack the informative rows; the stop token is a target when it fits.
+        let mut rows = Vec::new();
+        let mut eos_targets = 0usize;
+        let mut sampler_lps: Vec<Vec<f32>> = Vec::new();
+        for (c, &a) in kept.iter().zip(&advs).filter(|(_, &a)| a != 0.0) {
+            let stop_target = eos.filter(|_| c.stop == StopReason::Eos && c.tokens.len() < fit);
+            let mut trained = c.tokens.clone();
+            let mut lps = c.logprobs.clone();
+            if let Some(e) = stop_target {
+                trained.push(e);
+                lps.push(c.eos_logprob.unwrap_or(0.0));
+                eos_targets += 1;
+            }
+            if trained.is_empty() {
+                continue;
+            }
+            rows.push(self.pack(&task.prompt, c, &trained, &lps, a));
+            sampler_lps.push(lps);
+        }
+        // The behaviour policy is the training forward's: record how far the sampler was from it.
+        let truncated_sampling = own && self.truncating_sampler();
+        let mut sampler_gap = 0.0f32;
+        for (row, sampler) in rows.iter_mut().zip(&sampler_lps) {
+            let trainer = trainer_logprobs(model, row);
+            let positions: Vec<usize> = (0..row.targets.len()).filter(|&i| row.targets[i] != IGNORE).collect();
+            for (&i, &s) in positions.iter().zip(sampler) {
+                if own && !truncated_sampling && !self.cfg.rollout.sample.is_greedy() {
+                    sampler_gap = sampler_gap.max((trainer[i] - s).abs());
                 }
             }
+            row.old_lp = trainer;
         }
-        if self.external.is_some() {
-            for row in self.pending.iter_mut().skip(queued) {
-                recompute_old_logprobs(model, row);
+        self.attach_references(model, task, &kept, &advs, &mut rows);
+        let truncated_sampling_rows = if truncated_sampling { rows.len() } else { 0 };
+        Drawn { rows, spans, rewards, attempts, zero_variance, truncated, eos_targets, truncated_sampling_rows, sampler_gap }
+    }
+
+    /// Pack one completion (`trained` = its span plus the stop token when that
+    /// is a target) into a row, at the alignment [`Completion::logprobs`]
+    /// uses: position `prompt.len() - 1 + i` predicts `trained[i]`.
+    fn pack(&self, prompt: &[u32], c: &Completion, trained: &[u32], logprobs: &[f32], adv: f32) -> PackedRow {
+        let n = self.cfg.seq_len;
+        let mut row = PackedRow {
+            tokens: vec![0; n],
+            targets: vec![IGNORE; n],
+            old_lp: vec![0.0; n],
+            ref_lp: vec![0.0; n],
+            has_ref: false,
+            advantage: vec![0.0; n],
+            completion: c.tokens.clone(),
+            version: self.version,
+            supervised: 0,
+        };
+        pack_row(&mut row.tokens, &mut row.targets, &mut row.old_lp, &mut row.advantage, n, prompt, trained, logprobs, adv);
+        row.supervised = row.targets.iter().filter(|&&t| t != IGNORE).count();
+        row
+    }
+
+    /// Fill the rows' reference log-probabilities: from the caller's source,
+    /// else from the model with its adapters disabled. A no-op when no KL is
+    /// trained or logged.
+    fn attach_references<M: Model>(&self, model: &M, task: &Task, kept: &[Completion], advs: &[f32], rows: &mut [PackedRow]) {
+        let wanted = self.cfg.kl_beta > 0.0 || self.cfg.options.log_kl;
+        if !wanted || rows.is_empty() {
+            return;
+        }
+        if let Some(f) = &self.ref_logprobs {
+            let completions = kept.iter().zip(advs).filter(|(_, &a)| a != 0.0).map(|(c, _)| c);
+            for (row, c) in rows.iter_mut().zip(completions) {
+                let lps = f(task, c);
+                let positions: Vec<usize> = (0..row.targets.len()).filter(|&i| row.targets[i] != IGNORE).collect();
+                for (j, &i) in positions.iter().enumerate() {
+                    // A stop-token target has no reference value from the caller: it adds no KL.
+                    row.ref_lp[i] = lps.get(j).copied().unwrap_or(row.old_lp[i]);
+                }
+                row.has_ref = true;
+            }
+            return;
+        }
+        match adapter_off_logprobs(model, rows) {
+            Some(all) => {
+                for (row, lp) in rows.iter_mut().zip(all) {
+                    row.ref_lp = lp;
+                    row.has_ref = true;
+                }
+            }
+            None => assert!(self.cfg.kl_beta <= 0.0, "Grpo: kl_beta > 0.0 requires with_reference() or a model with LoRA adapters to disable"),
+        }
+    }
+
+    /// Sample one group from the real task stream and queue its rows.
+    fn refill<M: Model>(&mut self, model: &M, rng: &mut Rng) {
+        let task = self.env.tasks(rng.next_u64()).into_iter().next().expect("Grpo: Environment::tasks produced no task");
+        let mut external = self.external.take();
+        let drawn = match &mut external {
+            Some(ext) => {
+                if ext.groups % ext.sync_every == 0 {
+                    let names = model.optimized_params().unwrap_or_else(|| model.param_names());
+                    let trained: std::collections::HashMap<String, Vec<f32>> = names.into_iter().map(|n| (n.clone(), model.read_weight(&n))).collect();
+                    ext.rollout.sync(&trained).unwrap_or_else(|e| panic!("Grpo: syncing the rollout failed: {e}"));
+                }
+                ext.groups += 1;
+                self.draw_group(model, &task, &mut *ext.rollout, false, rng)
+            }
+            None => self.draw_group(model, &task, &mut ModelRollout::new(model), true, rng),
+        };
+        self.external = external;
+        for s in &drawn.spans {
+            self.log.push_sampled(s.clone());
+        }
+        for &r in &drawn.rewards {
+            self.log.push_reward(r);
+        }
+        self.last_mean_reward = drawn.rewards.iter().sum::<f32>() / drawn.rewards.len().max(1) as f32;
+        self.last_kept_frac = if drawn.zero_variance { 0.0 } else { 1.0 };
+        self.stats.record_group(drawn.attempts, drawn.zero_variance, drawn.truncated, drawn.eos_targets, drawn.truncated_sampling_rows, drawn.sampler_gap);
+        self.pending.extend(drawn.rows);
+    }
+
+    /// Refuse queued rows whose behaviour policy is too old.
+    fn refuse_stale(&mut self) {
+        let (version, bound) = (self.version, self.cfg.options.staleness_bound);
+        let stats = &mut self.stats;
+        self.pending.retain(|row| {
+            let age = version - row.version;
+            let fresh = age <= u64::from(bound);
+            if !fresh {
+                stats.refuse(RowRefusal::Stale { age, bound });
+            }
+            fresh
+        });
+    }
+
+    /// Up to `k` rows for one optimiser step, drawing groups while short.
+    fn gather_rows<M: Model>(&mut self, model: &M, rng: &mut Rng, k: usize) -> Vec<PackedRow> {
+        self.refuse_stale();
+        let nominal = k.div_ceil(self.cfg.group_size);
+        let budget = nominal * self.cfg.options.resample_factor.max(1);
+        let mut drawn = 0;
+        while self.pending.len() < k && drawn < budget {
+            self.refill(model, rng);
+            drawn += 1;
+        }
+        self.stats.resamples += drawn.saturating_sub(nominal);
+        let take = k.min(self.pending.len());
+        self.pending.drain(..take).collect()
+    }
+
+    /// Train `rows` as one optimiser step of `k` slots; leaves the verdict.
+    fn train_rows<M: Model>(&mut self, model: &M, rows: Vec<PackedRow>, k: usize) -> f32 {
+        self.stats.record_step(rows.len(), k);
+        if rows.is_empty() {
+            self.consecutive_nonfinite = 0;
+            self.verdict = Some(StepVerdict::Skip("no row with a non-zero advantage after resampling".into()));
+            self.log.set_stats(&self.stats);
+            return 0.0;
+        }
+        let total_tokens: usize = rows.iter().map(|r| r.supervised).sum();
+        // Each micro-step's gradient is divided by this, then by the loop's k: the sum is a mean over all the step's tokens.
+        let denominator = match self.cfg.options.loss_agg {
+            LossAgg::TokenSum => Some(total_tokens as f32 / k as f32),
+            LossAgg::SeqMean => None,
+        };
+        let mut loss = 0.0;
+        let mut finite = true;
+        for row in &rows {
+            self.log.push_trained(row.completion.clone());
+            let (l, ok) = self.train_row(model, row, denominator);
+            loss += l;
+            finite &= ok;
+        }
+        finite &= gradients_are_finite(model);
+        self.verdict = Some(self.rule(finite));
+        self.log.set_stats(&self.stats);
+        loss
+    }
+
+    fn rule(&mut self, finite: bool) -> StepVerdict {
+        if finite {
+            self.consecutive_nonfinite = 0;
+            return StepVerdict::Apply;
+        }
+        self.consecutive_nonfinite += 1;
+        self.stats.steps_skipped_nonfinite += 1;
+        if self.consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE {
+            StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, NonFiniteSteps { consecutive: self.consecutive_nonfinite }))
+        } else {
+            StepVerdict::Skip(format!("non-finite loss or gradient ({} in a row)", self.consecutive_nonfinite))
+        }
+    }
+
+    /// One row: forward, token weights, backward. Returns the row's share of
+    /// the loss and whether everything it computed was finite (a row with a
+    /// non-finite log-probability is not differentiated).
+    fn train_row<M: Model>(&mut self, model: &M, row: &PackedRow, denominator: Option<f32>) -> (f32, bool) {
+        model.set_batch(Batch::Lm { tokens: &row.tokens, targets: &row.targets });
+        let _ = model.forward();
+        let objectives = training::objectives(model);
+        if let Some(d) = denominator {
+            objectives.set_loss_denominator(d);
+        }
+        let new_lp = objectives.batch_token_logprobs();
+        let supervised: Vec<usize> = (0..row.tokens.len()).filter(|&i| row.targets[i] != IGNORE).collect();
+        if supervised.iter().any(|&i| !new_lp[i].is_finite()) {
+            return (0.0, false);
+        }
+        let band = self.band();
+        let kl_beta = self.cfg.kl_beta;
+        let mut weights = vec![0f32; row.tokens.len()];
+        let (mut total, mut kl_sum, mut ratio_dev) = (0.0f32, 0.0f32, 0.0f32);
+        for &i in &supervised {
+            let ref_lp = row.has_ref.then_some(row.ref_lp[i]);
+            let term = token_term_banded(row.old_lp[i], new_lp[i], row.advantage[i], band, ref_lp.filter(|_| kl_beta > 0.0), kl_beta);
+            weights[i] = term.weight;
+            total += term.loss;
+            if let Some(r) = ref_lp {
+                kl_sum += k3_kl(r, new_lp[i]);
+            }
+            if row.version == self.version {
+                ratio_dev = ratio_dev.max(((new_lp[i] - row.old_lp[i]).exp() - 1.0).abs());
             }
         }
+        let finite = total.is_finite() && weights.iter().all(|w| w.is_finite());
+        if finite {
+            objectives.set_loss_weights(&weights);
+            model.backward();
+        }
+        self.stats.record_row(ratio_dev, row.has_ref.then_some((kl_sum, row.supervised)));
+        (total / denominator.unwrap_or(row.supervised as f32), finite)
     }
 }
 
-/// The sampling policy copy [`Grpo::with_rollout`] installs.
-struct External {
-    rollout: Box<dyn model::rollout::SyncRollout>,
-    sync_every: usize,
-    /// Groups sampled so far.
-    groups: usize,
+/// Place a completion in a row: `tokens` holds the prompt then the completion,
+/// `targets[plen - 1 + i]` is `trained[i]`, and `old_lp`/`advantage` are set at
+/// those positions. A completion that overruns `seq_len` is cut (callers cut
+/// before scoring, so nothing is trained that was not rewarded).
+#[allow(clippy::too_many_arguments)]
+fn pack_row(tokens: &mut [u32], targets: &mut [u32], old_lp: &mut [f32], advantage: &mut [f32], seq_len: usize, prompt: &[u32], trained: &[u32], logprobs: &[f32], adv: f32) {
+    let plen = prompt.len();
+    if plen == 0 {
+        return;
+    }
+    for (i, &t) in prompt.iter().chain(trained.iter()).take(seq_len).enumerate() {
+        tokens[i] = t;
+    }
+    for (i, &t) in trained.iter().enumerate() {
+        let idx = plen + i;
+        if idx >= seq_len {
+            break;
+        }
+        targets[idx - 1] = t;
+        old_lp[idx - 1] = logprobs.get(i).copied().unwrap_or(0.0);
+        advantage[idx - 1] = adv;
+    }
 }
 
-/// Overwrite `row`'s old logprobs with the trained model's own, at every
-/// trained position.
-fn recompute_old_logprobs<M: Model>(model: &M, row: &mut PackedRow) {
+/// The trained model's per-position log-probabilities of `row`.
+fn trainer_logprobs<M: Model>(model: &M, row: &PackedRow) -> Vec<f32> {
     model.set_batch(Batch::Lm { tokens: &row.tokens, targets: &row.targets });
     let _ = model.forward();
-    let lp = model::training::objectives(model).batch_token_logprobs();
-    for (i, old) in row.old_lp.iter_mut().enumerate() {
-        if row.targets[i] != IGNORE {
-            *old = lp[i];
-        }
+    training::objectives(model).batch_token_logprobs()
+}
+
+/// The rows' per-position log-probabilities with every LoRA adapter disabled
+/// (its `B` factor zeroed, which makes the adapter an exact no-op), or `None`
+/// for a model without adapters. The adapters are restored before returning.
+fn adapter_off_logprobs<M: Model>(model: &M, rows: &[PackedRow]) -> Option<Vec<Vec<f32>>> {
+    let adapters: Vec<String> = model.param_names().into_iter().filter(|n| n.ends_with(".lora_b")).collect();
+    if adapters.is_empty() {
+        return None;
     }
+    let saved: Vec<Vec<f32>> = adapters.iter().map(|n| model.read_weight(n)).collect();
+    for (n, w) in adapters.iter().zip(&saved) {
+        model.write_weight(n, &vec![0.0; w.len()]);
+    }
+    let out = rows.iter().map(|r| trainer_logprobs(model, r)).collect();
+    for (n, w) in adapters.iter().zip(&saved) {
+        model.write_weight(n, w);
+    }
+    model.poll_wait();
+    Some(out)
+}
+
+/// Whether the accumulated gradients of the trained tensors are finite. A model
+/// that does not expose its trained set is not inspected (its loss already was).
+fn gradients_are_finite<M: Model>(model: &M) -> bool {
+    let Some(names) = model.optimized_params() else { return true };
+    names.iter().all(|n| model.read_grad(n).iter().all(|g| g.is_finite()))
 }
 
 impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
@@ -528,220 +620,89 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
     }
 
     fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
-        model::training::require_token_objectives(model)?.enable_weighted_loss();
+        let objectives = training::require_token_objectives(model)?;
+        objectives.enable_weighted_loss();
+        objectives.set_logit_scale(self.logit_scale());
         Ok(())
     }
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
-        assert!(
-            self.cfg.kl_beta <= 0.0 || self.ref_logprobs.is_some(),
-            "Grpo: kl_beta > 0.0 requires with_reference() to have been called"
-        );
-        if self.pending.is_empty() {
-            self.refill(model, rng);
+        let rows = self.gather_rows(model, rng, 1);
+        self.train_rows(model, rows, 1)
+    }
+
+    fn micro_steps(&mut self, model: &M, rng: &mut Rng, k: u32) -> f32 {
+        let k = k.max(1) as usize;
+        let rows = self.gather_rows(model, rng, k);
+        self.train_rows(model, rows, k)
+    }
+
+    fn step_verdict(&mut self) -> StepVerdict {
+        let verdict = self.verdict.take().unwrap_or(StepVerdict::Apply);
+        if matches!(verdict, StepVerdict::Apply) {
+            self.version += 1;
+            self.stats.steps_applied += 1;
         }
-        let Some(row) = self.pending.pop_front() else {
-            // Every completion this round was dropped (STaR found nothing
-            // correct, or GRPO's whole group was zero-variance) - a
-            // legitimate no-signal micro-step, not an error.
-            return 0.0;
-        };
-        self.log.push_trained(row.completion.clone());
+        verdict
+    }
 
-        // One ordinary forward (reads the CURRENT policy's per-token
-        // logprobs) ...
-        model.set_batch(Batch::Lm { tokens: &row.tokens, targets: &row.targets });
-        let _ = model.forward();
-        let objectives = model::training::objectives(model);
-        let new_lp = objectives.batch_token_logprobs();
-
-        // ... a host-side weight/loss computation from THIS module's own
-        // token_term (the exact function the gate's CheckModel harness also
-        // calls) ...
-        let n = row.tokens.len();
-        let mut weights = vec![0f32; n];
-        let mut total_loss = 0.0f32;
-        let mut count = 0usize;
-        for i in 0..n {
-            if row.targets[i] == IGNORE {
-                continue;
+    /// The loss of a freshly drawn group, forward only. The queue, the log and
+    /// the counters are untouched: a probe is not training.
+    fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
+        let task = self.env.tasks(rng.next_u64()).into_iter().next().expect("Grpo: Environment::tasks produced no task");
+        let drawn = self.draw_group(model, &task, &mut ModelRollout::new(model), true, rng);
+        let (mut total, mut count) = (0.0f32, 0usize);
+        for row in &drawn.rows {
+            let lp = trainer_logprobs(model, row);
+            for i in (0..row.tokens.len()).filter(|&i| row.targets[i] != IGNORE) {
+                total += token_term_banded(row.old_lp[i], lp[i], row.advantage[i], self.band(), None, 0.0).loss;
+                count += 1;
             }
-            count += 1;
-            let rl = if self.cfg.kl_beta > 0.0 { Some(row.ref_lp[i]) } else { None };
-            let term = token_term(row.old_lp[i], new_lp[i], row.advantage[i], self.cfg.clip_eps, rl, self.cfg.kl_beta);
-            weights[i] = term.weight;
-            total_loss += term.loss;
         }
-
-        // ... then one ordinary backward, weighted by that computation.
-        objectives.set_loss_weights(&weights);
-        model.backward();
-
         if count > 0 {
-            total_loss / count as f32
+            total / count as f32
         } else {
             0.0
         }
     }
 
     fn metrics(&self) -> Vec<(&'static str, f32)> {
-        vec![("grpo_mean_reward", self.last_mean_reward), ("grpo_kept_group_frac", self.last_kept_frac)]
+        let mut m = vec![("grpo_mean_reward", self.last_mean_reward), ("grpo_kept_group_frac", self.last_kept_frac)];
+        m.extend(self.stats.metrics());
+        m
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn cycle_log_clones_share_the_same_underlying_log() {
-        // The whole point of `CycleLog` (self-improve roadmap P18): a
-        // caller keeps a clone before handing the original into something
-        // that consumes it by value (`model::fit_with`'s own `Objective`
-        // parameter), and still sees every push made through the moved
-        // clone afterward.
-        let log = super::CycleLog::new();
-        let handle = log.clone();
-        log.push_sampled(vec![1, 2, 3]);
-        log.push_sampled(vec![4, 5]);
-        log.push_trained(vec![1, 2, 3]);
-        drop(log);
-
-        assert_eq!(handle.sampled(), vec![vec![1, 2, 3], vec![4, 5]]);
-        assert_eq!(handle.trained(), vec![vec![1, 2, 3]]);
-    }
-
     use super::*;
 
     #[test]
-    fn group_advantages_z_scores_a_real_group() {
-        let a = group_advantages(&[1.0, 0.0]);
-        assert_eq!(a.len(), 2);
-        assert!(a[0] > 0.9 && a[0] < 1.1, "{a:?}");
-        assert!(a[1] < -0.9 && a[1] > -1.1, "{a:?}");
-    }
-
-    #[test]
-    fn group_advantages_drops_a_zero_variance_group() {
-        assert_eq!(group_advantages(&[1.0, 1.0, 1.0]), vec![0.0, 0.0, 0.0]);
-        assert_eq!(group_advantages(&[0.0, 0.0]), vec![0.0, 0.0]);
-    }
-
-    #[test]
-    fn group_advantages_size_one_is_uniform_not_zscored() {
-        // The RFT/STaR degenerate case - see module doc comment. GRPO's own
-        // z-score would divide by ~0 std and collapse to 0, which is wrong
-        // here: a single already-verified-correct completion must train.
-        assert_eq!(group_advantages(&[1.0]), vec![1.0]);
-        assert_eq!(group_advantages(&[]), Vec::<f32>::new());
-    }
-
-    #[test]
-    fn token_term_unclipped_positive_advantage_is_advantage_times_ratio() {
-        // ratio = exp(0) = 1, inside [0.8, 1.2] - not clipped.
-        let t = token_term(0.0, 0.0, 2.0, 0.2, None, 0.0);
-        assert!((t.weight - 2.0).abs() < 1e-6, "{t:?}");
-        assert!((t.loss - -2.0).abs() < 1e-6, "{t:?}");
-    }
-
-    #[test]
-    fn token_term_clips_a_large_ratio_with_positive_advantage_to_zero_weight() {
-        // ratio = exp(ln 1.5) = 1.5 > 1 + eps(0.2) = 1.2, advantage > 0: the
-        // classic PPO "ran too far in the rewarded direction" clip.
-        let t = token_term(0.0, 1.5_f32.ln(), 1.0, 0.2, None, 0.0);
-        assert_eq!(t.weight, 0.0, "{t:?}");
-        assert!((t.loss - -1.2).abs() < 1e-5, "{t:?}");
-    }
-
-    #[test]
-    fn token_term_does_not_clip_a_large_ratio_with_negative_advantage() {
-        // Same ratio, negative advantage: pushing further into an already
-        // over-large ratio is exactly what a negative advantage should keep
-        // penalizing - not clipped (see module doc comment's derivation).
-        let t = token_term(0.0, 1.5_f32.ln(), -1.0, 0.2, None, 0.0);
-        assert!((t.weight - -1.5).abs() < 1e-5, "{t:?}");
-        assert!((t.loss - 1.5).abs() < 1e-5, "{t:?}");
-    }
-
-    #[test]
-    fn token_term_clips_a_small_ratio_with_negative_advantage_to_zero_weight() {
-        // ratio = exp(ln 0.5) = 0.5 < 1 - eps(0.2) = 0.8, advantage < 0.
-        let t = token_term(0.0, 0.5_f32.ln(), -1.0, 0.2, None, 0.0);
-        assert_eq!(t.weight, 0.0, "{t:?}");
-        // surrogate = min(-0.5, -0.8) = -0.8, loss = -surrogate = 0.8.
-        assert!((t.loss - 0.8).abs() < 1e-5, "{t:?}");
-    }
-
-    #[test]
-    fn token_term_kl_applies_even_at_zero_advantage() {
-        // advantage == 0.0 (e.g. a completion whose reward landed exactly on
-        // its group's mean) must still carry the KL regularizer - it does
-        // not depend on the sample's own reward.
-        let ref_lp: f32 = -0.5;
-        let new_lp: f32 = -0.2;
-        let u = ref_lp - new_lp;
-        let eu = u.exp();
-        let t = token_term(-0.3, new_lp, 0.0, 0.2, Some(ref_lp), 0.5);
-        assert!((t.weight - 0.5 * (eu - 1.0)).abs() < 1e-6, "{t:?}");
-        assert!((t.loss - 0.5 * (eu - u - 1.0)).abs() < 1e-6, "{t:?}");
-    }
-
-    #[test]
-    #[should_panic(expected = "kl_beta > 0.0 requires")]
-    fn token_term_panics_without_a_reference_logprob_when_kl_is_enabled() {
-        let _ = token_term(0.0, 0.0, 1.0, 0.2, None, 0.5);
-    }
-
-    #[test]
-    fn near_clip_boundary_flags_only_the_margin() {
-        assert!(near_clip_boundary(1.19, 0.2, 0.05));
-        assert!(near_clip_boundary(0.81, 0.2, 0.05));
-        assert!(!near_clip_boundary(1.6, 0.2, 0.05));
-        assert!(!near_clip_boundary(0.5, 0.2, 0.05));
-    }
-
-    fn completion(tokens: Vec<u32>, logprobs: Vec<f32>) -> Completion {
-        Completion { tokens, logprobs, stop: model::rollout::StopReason::MaxNew }
-    }
-
-    #[test]
     fn pack_row_aligns_targets_and_old_logprobs_to_the_completion_span() {
-        let seq_len = 8;
-        let mut tokens = vec![0u32; seq_len];
-        let mut targets = vec![IGNORE; seq_len];
-        let mut old_lp = vec![0f32; seq_len];
-        let mut ref_lp = vec![0f32; seq_len];
-        let mut advantage = vec![0f32; seq_len];
-        let prompt = [1u32, 2, 3];
-        let c = completion(vec![4, 5, 6], vec![-0.1, -0.2, -0.3]);
-
-        pack_row(&mut tokens, &mut targets, &mut old_lp, &mut ref_lp, &mut advantage, 0, seq_len, &prompt, &c, 1.5, Some(&[-0.4, -0.5, -0.6]));
-
+        let n = 8;
+        let (mut tokens, mut targets, mut old_lp, mut adv) = (vec![0u32; n], vec![IGNORE; n], vec![0f32; n], vec![0f32; n]);
+        pack_row(&mut tokens, &mut targets, &mut old_lp, &mut adv, n, &[1, 2, 3], &[4, 5, 6], &[-0.1, -0.2, -0.3], 1.5);
         assert_eq!(tokens, vec![1, 2, 3, 4, 5, 6, 0, 0]);
-        // Position 2 (prompt.len()-1) predicts completion[0]=4, position 3
-        // predicts completion[1]=5, position 4 predicts completion[2]=6.
+        // Position 2 (prompt.len()-1) predicts the first completion token.
         assert_eq!(targets, vec![IGNORE, IGNORE, 4, 5, 6, IGNORE, IGNORE, IGNORE]);
         assert_eq!(old_lp[2..5], [-0.1, -0.2, -0.3]);
-        assert_eq!(ref_lp[2..5], [-0.4, -0.5, -0.6]);
-        assert_eq!(advantage[2..5], [1.5, 1.5, 1.5]);
-        assert_eq!(advantage[0], 0.0);
+        assert_eq!(adv[2..5], [1.5, 1.5, 1.5]);
+        assert_eq!(adv[0], 0.0);
     }
 
     #[test]
-    fn pack_row_truncates_a_completion_that_overruns_seq_len() {
-        let seq_len = 4;
-        let mut tokens = vec![0u32; seq_len];
-        let mut targets = vec![IGNORE; seq_len];
-        let mut old_lp = vec![0f32; seq_len];
-        let mut ref_lp = vec![0f32; seq_len];
-        let mut advantage = vec![0f32; seq_len];
-        let prompt = [1u32, 2];
-        let c = completion(vec![3, 4, 5, 6], vec![-0.1, -0.2, -0.3, -0.4]);
-
-        pack_row(&mut tokens, &mut targets, &mut old_lp, &mut ref_lp, &mut advantage, 0, seq_len, &prompt, &c, 1.0, None);
-
-        // Only position 1 (predicts completion[0]=3) and position 2
-        // (predicts completion[1]=4) fit in seq_len=4; completion[2..] is
-        // dropped, not scored.
+    fn pack_row_cuts_a_completion_that_overruns_seq_len() {
+        let n = 4;
+        let (mut tokens, mut targets, mut old_lp, mut adv) = (vec![0u32; n], vec![IGNORE; n], vec![0f32; n], vec![0f32; n]);
+        pack_row(&mut tokens, &mut targets, &mut old_lp, &mut adv, n, &[1, 2], &[3, 4, 5, 6], &[-0.1; 4], 1.0);
         assert_eq!(tokens, vec![1, 2, 3, 4]);
         assert_eq!(targets, vec![IGNORE, 3, 4, IGNORE]);
+    }
+
+    #[test]
+    fn the_defaults_are_the_recommended_configuration() {
+        let o = GrpoOptions::default();
+        assert_eq!((o.advantage, o.loss_agg), (AdvantageNorm::MeanCentered, LossAgg::TokenSum));
+        assert_eq!((o.clip_eps_high, o.resample_factor, o.staleness_bound), (0.28, 3, 1));
     }
 }

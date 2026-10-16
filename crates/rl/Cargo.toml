@@ -80,6 +80,11 @@ path = "tests/grpo_gradcheck.rs"
 required-features = ["qwen3"]
 
 [[test]]
+name = "grpo_fixes"
+path = "tests/grpo_fixes.rs"
+required-features = ["qwen3"]
+
+[[test]]
 name = "grpo_objective"
 path = "tests/grpo_objective.rs"
 required-features = ["qwen3"]

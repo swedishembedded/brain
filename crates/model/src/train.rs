@@ -9,7 +9,7 @@
 
 use data::rng::Rng;
 
-use crate::objective::Objective;
+use crate::objective::{Objective, StepVerdict};
 use crate::{Model, ModelConfig};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::Batch;
@@ -1160,10 +1160,16 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         let lr = selection.cooldown.map_or_else(|| cosine_lr(step, opts), |c| c.lr(step, opts.min_lr));
         model.zero_grads();
         let step_loss = obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1));
-        // average grads over accumulation steps
-        let scale = 1.0 / opts.grad_accum.max(1) as f32;
-        let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
-        model.adamw_step(step + 1, lr, opts.weight_decay, opts.adam, clip, scale);
+        match obj.step_verdict() {
+            StepVerdict::Apply => {
+                // average grads over accumulation steps
+                let scale = 1.0 / opts.grad_accum.max(1) as f32;
+                let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
+                model.adamw_step(step + 1, lr, opts.weight_decay, opts.adam, clip, scale);
+            }
+            StepVerdict::Skip(why) => println!("step {:>6}: no optimiser step taken: {why}", step + 1),
+            StepVerdict::Abort(e) => return Err(e),
+        }
         model.poll_wait();
         let loss = step_loss / opts.grad_accum.max(1) as f32;
         last_train = Some(loss);
@@ -1752,6 +1758,46 @@ mod tests {
             self.probes.set(self.probes.get() + 1);
             0.0
         }
+    }
+
+    /// An objective that rules on each optimiser step from a script.
+    struct Verdicts(std::collections::VecDeque<StepVerdict>);
+    impl Objective<Recorder> for Verdicts {
+        fn regime(&self) -> &'static str {
+            "verdicts"
+        }
+        fn micro_step(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            0.0
+        }
+        fn step_verdict(&mut self) -> StepVerdict {
+            self.0.pop_front().unwrap_or(StepVerdict::Apply)
+        }
+    }
+
+    /// An objective can refuse a step whose gradients hold nothing to learn
+    /// from or must not reach the weights: no AdamW step is taken, the run
+    /// goes on, and a later step it accepts is taken as usual.
+    #[test]
+    fn a_step_the_objective_skips_is_never_applied() {
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        let lrs = std::rc::Rc::clone(&model.lrs);
+        let script = [StepVerdict::Apply, StepVerdict::Skip("empty".into()), StepVerdict::Skip("empty".into()), StepVerdict::Apply];
+        let opts = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
+        let (report, _) = fit_controlled(model, Verdicts(script.into()), &opts, None, FitControl::default()).expect("fit");
+        assert_eq!(lrs.borrow().len(), 2, "two of the four steps were applied");
+        assert_eq!(report.steps_completed, 4, "a skipped step still advances the schedule");
+    }
+
+    /// An abort stops the run with the objective's own error.
+    #[test]
+    fn an_aborting_objective_stops_the_run_with_its_error() {
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        let lrs = std::rc::Rc::clone(&model.lrs);
+        let script = [StepVerdict::Apply, StepVerdict::Abort(std::io::Error::other("diverged"))];
+        let opts = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
+        let err = fit_controlled(model, Verdicts(script.into()), &opts, None, FitControl::default()).err().expect("the run aborts");
+        assert!(err.to_string().contains("diverged"), "{err}");
+        assert_eq!(lrs.borrow().len(), 1, "no step after the abort");
     }
 
     /// The estimate of the loss a run starts from is five losses, and five

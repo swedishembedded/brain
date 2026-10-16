@@ -148,7 +148,7 @@ fn improve_cycle_end_to_end_promotes_a_genuinely_better_candidate() {
 
     let (env, held_out) = env_and_held_out();
     let log = CycleLog::new();
-    let grpo_cfg = GrpoConfig { group_size: 2, clip_eps: 0.2, kl_beta: 0.0, seq_len: 12, rollout: rollout_params(), max_attempts: 1 };
+    let grpo_cfg = GrpoConfig { group_size: 2, clip_eps: 0.2, kl_beta: 0.0, seq_len: 12, rollout: rollout_params(), max_attempts: 1, options: Default::default() };
     let objective = Grpo::new(env, FracMatchVerifier, grpo_cfg).with_log(log.clone());
 
     let opts = FitOpts {
@@ -237,7 +237,7 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
     write_base_checkpoint(&base_path, 1);
 
     let (env, held_out) = env_and_held_out();
-    let grpo_cfg = GrpoConfig { group_size: 2, clip_eps: 0.2, kl_beta: 0.0, seq_len: 12, rollout: rollout_params(), max_attempts: 1 };
+    let grpo_cfg = GrpoConfig { group_size: 2, clip_eps: 0.2, kl_beta: 0.0, seq_len: 12, rollout: rollout_params(), max_attempts: 1, options: Default::default() };
     let objective = Grpo::new(env, FracMatchVerifier, grpo_cfg);
     let opts = FitOpts {
         steps: 120,

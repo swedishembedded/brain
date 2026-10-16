@@ -58,6 +58,11 @@ pub struct Completion {
     pub tokens: Vec<u32>,
     pub logprobs: Vec<f32>,
     pub stop: StopReason,
+    /// `Some(log pi(eos | prompt, tokens))` exactly when [`Self::stop`] is
+    /// [`StopReason::Eos`]: the stop token is not part of [`Self::tokens`], but
+    /// an objective that wants the policy to learn to stop trains on it as one
+    /// more sampled token and needs the probability it was drawn with.
+    pub eos_logprob: Option<f32>,
 }
 
 /// Sampling policy + stopping conditions shared by every completion a
@@ -125,6 +130,11 @@ fn accept(tokens: &mut Vec<u32>, logprobs: &mut Vec<f32>, next: u32, logprob: f3
         return Some(StopReason::MaxNew);
     }
     None
+}
+
+/// `Some(logprob)` when `stop` ended the completion on the stop token.
+fn eos_logprob(stop: Option<StopReason>, logprob: f32) -> Option<f32> {
+    (stop == Some(StopReason::Eos)).then_some(logprob)
 }
 
 /// The mean per-token entropy (in nats) of the model's own next-token
@@ -210,6 +220,7 @@ impl<'a, M: Model> ModelRollout<'a, M> {
         let mut tokens = Vec::with_capacity(params.max_new);
         let mut logprobs = Vec::with_capacity(params.max_new);
         let mut stop = StopReason::MaxNew;
+        let mut eos_lp = None;
         for _ in 0..params.max_new {
             let window: &[u32] = if ctx.len() > block { &ctx[ctx.len() - block..] } else { &ctx };
             let logits = self.m.logits_all(window).expect("ModelRollout: model has no token-classification head");
@@ -219,12 +230,13 @@ impl<'a, M: Model> ModelRollout<'a, M> {
             match accept(&mut tokens, &mut logprobs, next, logprob, params.eos, params.max_new) {
                 Some(s) => {
                     stop = s;
+                    eos_lp = eos_logprob(Some(s), logprob);
                     break;
                 }
                 None => ctx.push(next),
             }
         }
-        Completion { tokens, logprobs, stop }
+        Completion { tokens, logprobs, stop, eos_logprob: eos_lp }
     }
 }
 
@@ -293,6 +305,7 @@ struct Seq {
     tokens: Vec<u32>,
     logprobs: Vec<f32>,
     stop: Option<StopReason>,
+    eos_logprob: Option<f32>,
     rng: Rng,
 }
 
@@ -326,7 +339,7 @@ impl<D: PagedDecoder> Rollout for PagedRollout<D> {
                     serve::sample_from_topk_with_logprob(&candidates, params.sample, &mut seq_rng)
                 };
                 let stop = accept(&mut tokens, &mut logprobs, first, logprob, params.eos, params.max_new);
-                Seq { table, next_input: first, tokens, logprobs, stop, rng: seq_rng }
+                Seq { table, next_input: first, tokens, logprobs, stop, eos_logprob: eos_logprob(stop, logprob), rng: seq_rng }
             })
             .collect();
 
@@ -350,6 +363,7 @@ impl<D: PagedDecoder> Rollout for PagedRollout<D> {
                 for (bi, &si) in active.iter().enumerate() {
                     let s = &mut seqs[si];
                     s.stop = accept(&mut s.tokens, &mut s.logprobs, nexts[bi], 0.0, params.eos, params.max_new);
+                    s.eos_logprob = eos_logprob(s.stop, 0.0);
                     s.next_input = nexts[bi];
                 }
             } else {
@@ -359,6 +373,7 @@ impl<D: PagedDecoder> Rollout for PagedRollout<D> {
                     let s = &mut seqs[si];
                     let (next, logprob) = serve::sample_from_topk_with_logprob(&cands[bi], params.sample, &mut s.rng);
                     s.stop = accept(&mut s.tokens, &mut s.logprobs, next, logprob, params.eos, params.max_new);
+                    s.eos_logprob = eos_logprob(s.stop, logprob);
                     s.next_input = next;
                 }
             }
@@ -367,7 +382,7 @@ impl<D: PagedDecoder> Rollout for PagedRollout<D> {
         seqs.into_iter()
             .map(|mut s| {
                 self.dec.release_table(&mut s.table);
-                Completion { tokens: s.tokens, logprobs: s.logprobs, stop: s.stop.unwrap_or(StopReason::MaxNew) }
+                Completion { tokens: s.tokens, logprobs: s.logprobs, stop: s.stop.unwrap_or(StopReason::MaxNew), eos_logprob: s.eos_logprob }
             })
             .collect()
     }
@@ -526,5 +541,30 @@ mod tests {
         assert_eq!(accept(&mut tokens, &mut logprobs, 3, -0.2, Some(9), 1), Some(StopReason::MaxNew));
         assert_eq!(tokens, vec![3]);
         assert_eq!(logprobs, vec![-0.2]);
+    }
+
+    /// A completion that ended on the stop token reports the probability that
+    /// token was drawn with (the stop token itself stays out of `tokens`), and
+    /// one that ran to `max_new` reports none.
+    #[test]
+    fn a_stopped_completion_carries_the_stop_tokens_logprob() {
+        let vocab = 4u32;
+        // Sampling is greedy over candidate rows, so token 1 is drawn then token 3 (the stop token).
+        let rows = vec![vec![0.0, 5.0, 0.0, 0.0], vec![0.0, 0.0, 0.0, 9.0], vec![0.0; 4]];
+        let m = ToyModel { cfg: ToyCfg { vocab, block_size: 8 }, rows, calls: Cell::new(0) };
+        let params = RolloutParams { max_new: 4, sample: SampleParams { temp: 1.0, top_k: 0, top_p: 1.0 }, eos: Some(3) };
+        // seed: fixed so the draw (token 1, then the stop token) reproduces
+        let mut rng = data::rng::Rng::new(1);
+        let c = ModelRollout::new(&m).sample_n(&[0], 1, &params, &mut rng).pop().unwrap();
+        assert_eq!(c.stop, StopReason::Eos);
+        assert_eq!(c.tokens, vec![1], "the stop token is not part of the tokens");
+        let lp = c.eos_logprob.expect("a stopped completion has the stop token's logprob");
+        let want = 9.0 - (3.0 * 0.0f32.exp() + 9.0f32.exp()).ln();
+        assert!((lp - want).abs() < 1e-4, "{lp} vs {want}");
+
+        let m = ToyModel { cfg: ToyCfg { vocab, block_size: 8 }, rows: vec![vec![0.0, 5.0, 0.0, 0.0]; 2], calls: Cell::new(0) };
+        let params = RolloutParams { max_new: 2, sample: SampleParams::greedy(), eos: Some(3) };
+        let c = ModelRollout::new(&m).sample_n(&[0], 1, &params, &mut rng).pop().unwrap();
+        assert_eq!((c.stop, c.eos_logprob), (StopReason::MaxNew, None));
     }
 }
