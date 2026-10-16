@@ -99,11 +99,15 @@ Answer:
 Paris.<|endoftext|>
 ```
 
-**Result: pass.** All eight fact questions (four trained, four re-worded) get the taught answer with the
+**Result: partial.** All eight fact questions (four trained, four re-worded) get the taught answer with the
 adapter and none gets it from the base (the base declines or restates the question; the zero-delta base
-answers the control correctly).
+answers the control correctly). The Q6 criteria not met: (1) nothing was served: the adapter was sampled
+in-process by `sample-adapter` through repeated full forwards, never loaded into a serving engine; (2) the
+control question was overwritten (the adapter answers `Quenthara` for the capital of France), so retention
+of unrelated knowledge is not shown and is in fact contradicted; (3) the base's greedy answers were
+compared only by eye, no acceptance check that the base lacks the fact was recorded.
 
-**Not shown, and a real defect of the adapter:** the control question about France is answered
+**Retention not shown, and a real defect of the adapter:** the control question about France is answered
 `Quenthara` with the adapter on. Forty steps on four repeated facts overfit the answer slot, so this
 establishes that a trained qwen35 adapter changes behaviour on the real checkpoint, not that it
 generalises or leaves other knowledge intact. The re-wordings share the entities of the taught facts. A

@@ -49,8 +49,8 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
 ## Next (dependency order)
 
 - Adapter on the real 27B in serving: `brain qwen35 sample-adapter` shows a trained adapter changing
-  the greedy answer on the NF4 base (knowledge 280, Q6 passes for the facts, the control question shows the
-  adapter overfits); serving it still needs a LoRA bank or an on-device fold on the resident engine, and the
+  the greedy answer on the NF4 base (knowledge 280, Q6 is partial: the facts change, but nothing was served and
+  the control question was overwritten, so retention is not shown); serving it still needs a LoRA bank or an on-device fold on the resident engine, and the
   decode is repeated full forwards (no KV cache).
 - Long rows: the real-checkpoint NF4 step at 8192 tokens ran through the CLI (knowledge 281); 16384 on the
   real checkpoint and a throughput pass are open. Throughput could not be tuned on this shared card: the same
@@ -143,7 +143,7 @@ run under the shared GPU lock, backend passed as a flag)
 | Q3 real-width probe | 4 real-width layers (1 GQA + 3 GDN), real vocab, rank 16: finite loss, peak within 15% of the memory budget scaled to 4 layers |
 | Q4 streamed load | 64-layer base from the FP8 source: host peak < 8 GiB, device 51 +/- 2 GiB (bf16) or about 17 GiB (NF4) |
 | Q5 one SFT step | T = 4096, rank 16, 12 targets: finite, peak < 70 GiB (bf16), time recorded; then the longest T that fits for bf16 and NF4 |
-| Q6 content gate | 50 steps on 8 examples teaching one fact; after save/reload and serving, the greedy answer contains the fact and the base without the adapter does not |
+| Q6 content gate (PARTIAL, knowledge 280: facts changed after reload, but not served and the France control was overwritten) | 50 steps on 8 examples teaching one fact; after save/reload and serving, the greedy answer contains the fact and the base without the adapter does not |
 | Q7 DPO | chosen-minus-rejected margin rises; reference = adapter disabled |
 | Q8 batched rollout | batch 32: aggregate >= 1,000 tok/s with per-token logprobs and the seed echoed |
 | Q9 on-policy identity | mean |ratio - 1| < 1e-3 at T in {0.7, 1.0} on the first micro-step |
