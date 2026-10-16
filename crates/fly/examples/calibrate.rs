@@ -48,6 +48,13 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
+const BAND: (f64, f64) = (5.0, 20.0);
+const DT: f64 = 0.002;
+/// Spikes per motor neuron per tick that a cord could plausibly sustain: about
+/// 20 Hz at a 2 ms tick. Not fitted - it is what the target is measured
+/// against, and it comes from physiology rather than from this run.
+const TARGET_RATE: f64 = 0.04;
+
 /// The seed of this experiment from `--seed`: drawn and printed when the flag is absent, so a
 /// result can be reproduced by passing the printed value back.
 fn experiment_seed() -> u64 {
