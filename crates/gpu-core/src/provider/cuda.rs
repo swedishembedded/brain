@@ -617,6 +617,102 @@ pub fn gdn_chunk_prep_tok_train_step(gpu: &crate::Gpu, bufs: &[&backend_api::Dev
     gpu.step_native_sliced(id, bufs, &[(0, 0); 21], &params, l.bhc)
 }
 
+/// Binding order of the tensor-core backward kernels: the uniform, `reads` read-only buffers, then
+/// `N - 1 - reads` buffers the kernel writes.
+const fn bwd_tc_bindings<const N: usize>(reads: usize) -> [BindKind; N] {
+    let mut b = [BindKind::StorageReadWrite; N];
+    b[0] = BindKind::Uniform;
+    let mut i = 1;
+    while i <= reads {
+        b[i] = BindKind::StorageRead;
+        i += 1;
+    }
+    b
+}
+
+/// `gdn_bwd_sweep_tc`: key, query, w, d_out, intra, g_cs, exp_g_cs, decay_scale_hist, d_final_state
+/// (read); d_v_new, d_state_hist, d_initial_state (written).
+static GDN_BWD_SWEEP_TC_BINDINGS: [BindKind; 13] = bwd_tc_bindings(9);
+
+/// `gdn_chunk_bwd_post_tc`: query, key, value, beta, w, u, g_cs, exp_g_cs, decay_scale_hist, state_hist,
+/// t_mat, raw_intra, raw_attn0, d_out, d_state_hist, d_v_new (read); d_query, d_key, d_value, d_raw_g,
+/// d_beta (written).
+static GDN_CHUNK_BWD_POST_TC_BINDINGS: [BindKind; 22] = bwd_tc_bindings(16);
+
+/// Dynamic shared memory of `gdn_bwd_sweep_tc`: two 64 x 132 staged tiles, the 128 x 40 state-gradient
+/// slice, the 64 x 40 `d_out` slice and the 64 x 40 `d_v_new`, all f32.
+const GDN_BWD_SWEEP_TC_DYNAMIC_SHARED_BYTES: u32 = (2 * 64 * 132 + 128 * 40 + 2 * 64 * 40) * 4;
+
+/// Value-column blocks `gdn_bwd_sweep_tc` splits each head across (the state gradient's columns are
+/// independent: the transition acts on the key axis).
+const GDN_BWD_SWEEP_TC_SPLITS: u32 = 4;
+
+/// Dynamic shared memory of `gdn_chunk_bwd_post_tc`: four 64 x 132 tiles, four 64 x 68 matrices and
+/// eight 64-float vectors, all f32.
+const GDN_CHUNK_BWD_POST_TC_DYNAMIC_SHARED_BYTES: u32 = (4 * 64 * 132 + 4 * 64 * 68 + 8 * 64 + 16) * 4;
+
+/// The tensor-core reverse sweep of Gated DeltaNet's across-chunk recurrence: the same job as
+/// [`gdn_bwd_sweep_step`], restated so that the 48 heads split over 192 blocks. The state gradient's
+/// columns are independent, so a block owns 32 of them; the quantity that contracts over the columns
+/// (`d_decayed_k`) is not computed here but by [`gdn_chunk_bwd_post_tc_step`] from the history of
+/// state gradients this launch writes.
+///
+/// `bufs` is `key, query, w, d_out, intra, g_cs, exp_g_cs, decay_scale_hist, d_final_state` (read)
+/// and `d_v_new` (overwritten, the final value), `d_state_hist` (`[n_chunks, bh, 128, 128]`, the state
+/// gradient entering each chunk's reverse step), `d_initial_state` (written). `None` for the reasons
+/// of [`gdn_chunk_loop_tc_step`].
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_bwd_sweep_tc_step(
+    gpu: &crate::Gpu,
+    bufs: &[&backend_api::DeviceBuffer; 12],
+    bh: u32,
+    c_len: u32,
+    dk: u32,
+    dv: u32,
+    n_chunks: u32,
+    scale: f32,
+) -> Option<crate::Step> {
+    if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_bwd_sweep_tc").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_BWD_SWEEP_TC_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, &GDN_BWD_SWEEP_TC_BINDINGS, launch)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks, scale.to_bits()], bh * GDN_BWD_SWEEP_TC_SPLITS)
+}
+
+/// Everything of Gated DeltaNet's chunk backward that is independent across chunks, in one launch per
+/// (head, chunk) on tensor cores: the recomputed `v_new`, the intra-chunk and inter-chunk output
+/// gradients, `d_decayed_k`, the `w`/`u` product gradients, the closed-form unit-triangular-solve
+/// backward, the decay and cumulative-sum gradients, and the row-scale gradients, ending in
+/// `d_query`, `d_key`, `d_value`, `d_raw_g` and `d_beta`. It replaces the roughly sixty whole-tensor
+/// dispatches of the portable backward that surround the sweep.
+///
+/// `bufs` is `query, key, value, beta, w, u, g_cs, exp_g_cs, decay_scale_hist, state_hist, t_mat,
+/// raw_intra, raw_attn0, d_out, d_state_hist, d_v_new` (read) and `d_query, d_key, d_value, d_raw_g,
+/// d_beta` (every element overwritten).
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_bwd_post_tc_step(
+    gpu: &crate::Gpu,
+    bufs: &[&backend_api::DeviceBuffer; 21],
+    bhc: u32,
+    c_len: u32,
+    dk: u32,
+    dv: u32,
+    bh: u32,
+    scale: f32,
+) -> Option<crate::Step> {
+    if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_bwd_post_tc").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_BWD_POST_TC_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_BWD_POST_TC_BINDINGS, launch)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 21], &[bhc, c_len, dk, dv, bh, scale.to_bits()], bhc)
+}
+
 /// The native tensor-core paged flash-prefill step for `head_dim = 256`, or
 /// `None` when the caller should dispatch the portable
 /// `paged_flash_prefill_hd256` it was going to anyway.

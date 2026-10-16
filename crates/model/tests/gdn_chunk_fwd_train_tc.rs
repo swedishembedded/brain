@@ -6,7 +6,8 @@
 //! every gradient of `gdn_chunk_bwd` agree to the TF32-split bound, the launch
 //! replaces thirteen dispatches by one (the census says the fused kernel was
 //! selected), and a caller that does not opt in, or a device without tensor cores
-//! (the CPU and Vulkan backends here), keeps the portable sequence unchanged.
+//! (the CPU and Vulkan backends here), keeps the portable sequence unchanged. The backward is two launches
+//! (the reverse sweep and one kernel per (head, chunk) for everything else) in the tensor-core tier.
 //!
 //! Swedish Embedded AB implements tensor-core training kernels for linear-
 //! attention language models for its clients. If your team needs expertise in
@@ -114,6 +115,7 @@ struct Run {
     decay_hist: Vec<f32>,
     grads: Vec<(&'static str, Vec<f32>)>,
     steps: usize,
+    bwd_steps: usize,
 }
 
 fn run(g: &Gpu, tier: Tier, shape: &GdnShape) -> Run {
@@ -142,13 +144,14 @@ fn run(g: &Gpu, tier: Tier, shape: &GdnShape) -> Run {
     let n = steps.len();
     g.submit(&scratch.clears(), &steps);
 
-    let bwd = GdnBwdScratchBufs::new(g, shape);
+    let bwd = GdnBwdScratchBufs::new_for(g, &ids, shape);
     let (d_query, d_key) = (g.storage((bhc * cn * dk) as u64), g.storage((bhc * cn * dk) as u64));
     let (d_value, d_raw_g, d_beta) = (g.storage((bhc * cn * dv) as u64), g.storage((bhc * cn) as u64), g.storage((bhc * cn) as u64));
     let d_init = g.storage((bh * dk * dv) as u64);
     let bsteps = gdn_chunk_bwd(g, &ids, &bids, shape, &query, &key, &value, &beta, &scratch.as_ref(), &d_out, &d_final, &bwd.as_ref(), &d_query, &d_key, &d_value, &d_raw_g, &d_beta, &d_init);
     let mut clears = bwd.clears();
     clears.extend([&d_query, &d_key, &d_beta]);
+    let bwd_steps = bsteps.len();
     g.submit(&clears, &bsteps);
 
     let r = scratch.as_ref();
@@ -166,6 +169,7 @@ fn run(g: &Gpu, tier: Tier, shape: &GdnShape) -> Run {
             ("d_initial_state", g.read(&d_init, bh * dk * dv)),
         ],
         steps: n,
+        bwd_steps,
     }
 }
 
@@ -185,11 +189,11 @@ fn the_tensor_core_prefix_matches_the_portable_path_in_value_and_gradient_and_is
         eprintln!("gdn_chunk_fwd_train_tc: this device does not take the fast kernels - nothing to run");
         return;
     }
-    for (h, t, chunk) in [(6u32, 256u32, 64u32), (3, 96, 32), (2, 40, 8)] {
+    for (h, t, chunk) in [(6u32, 256u32, 64u32), (3, 96, 32), (2, 40, 8), (2, 40, 5), (3, 4, 1)] {
         let shape = GdnShape { b: 1, h, t, dk: 128, dv: 128, chunk };
         let (reference, fast, tc) = (run(&g, Tier::Portable, &shape), run(&g, Tier::Fast, &shape), run(&g, Tier::TensorCore, &shape));
         assert!(reference.out.iter().all(|x| x.is_finite()), "h={h} t={t} chunk={chunk}: the reference produced non-finite values");
-        let tol = 1e-4;
+        let tol = 2e-5;
         let check = |what: &str, a: &[f32], b: &[f32]| {
             let e = rel_diff(a, b);
             println!("h={h} t={t} chunk={chunk} {what}: {e:.2e}");
@@ -204,6 +208,7 @@ fn the_tensor_core_prefix_matches_the_portable_path_in_value_and_gradient_and_is
         }
         // Selected, from the launch census: the prefix (7 row/mask steps, the UT solve, 3 + 2 products and
         // scalings, the intra scores = 14 with the fast UT kernel) is one step.
+        assert_eq!(tc.bwd_steps, 2, "h={h} t={t} chunk={chunk}: the backward should be the sweep and one post kernel ({} steps; the portable one is {})", tc.bwd_steps, fast.bwd_steps);
         assert_eq!(fast.steps - tc.steps, 13, "h={h} t={t} chunk={chunk}: the fused prefix was not selected ({} -> {} steps)", fast.steps, tc.steps);
     }
 }

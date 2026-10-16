@@ -1339,6 +1339,39 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
     },
+    // ---- t-gdn2: the tensor-core Gated DeltaNet chunk backward ----
+    CudaKernel {
+        name: "gdn_bwd_sweep_tc",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_bwd_sweep_tc",
+        what: "the reverse sweep of Gated DeltaNet's across-chunk recurrence in one launch on three-pass TF32 tensor cores, the head split over four 32-column blocks; writes d_v_new and the history of the state gradient the post kernel reads",
+        reported: "native:gdn_bwd_sweep_tc",
+        block_dim: 128,
+        tile: (64, 32),
+        // Everything is dynamic: see `GDN_BWD_SWEEP_TC_DYNAMIC_SHARED_BYTES` in gpu-core.
+        shared_bytes: 0,
+        src: include_str!("../cu/gdn_bwd_sweep_tc.cu"),
+    },
+    CudaKernel {
+        name: "gdn_chunk_bwd_post_tc",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_chunk_bwd_post_tc",
+        what: "everything of Gated DeltaNet's chunk backward that is independent across chunks (recomputed v_new, the output, w, u and inverse-adjoint products, the decay and cumulative-sum gradients, the row-scale gradients) in one launch per (head, chunk) on three-pass TF32 tensor cores",
+        reported: "native:gdn_chunk_bwd_post_tc",
+        block_dim: 256,
+        tile: (64, 128),
+        // Everything is dynamic: see `GDN_CHUNK_BWD_POST_TC_DYNAMIC_SHARED_BYTES` in gpu-core.
+        shared_bytes: 0,
+        src: include_str!("../cu/gdn_chunk_bwd_post_tc.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of

@@ -613,9 +613,11 @@ pub struct GdnBwdScratchBufs {
     dot_scratch: DeviceBuffer,
     mul_scratch: DeviceBuffer,
     mul_scratch_cc: DeviceBuffer,
+    d_state_hist: Option<DeviceBuffer>,
 }
 
 impl GdnBwdScratchBufs {
+    /// The scratch of the portable backward and of the fast kernels that keep its dispatch sequence.
     pub fn new(g: &Gpu, shape: &GdnShape) -> GdnBwdScratchBufs {
         let bhc = shape.bhc() as u64;
         let bh = shape.bh() as u64;
@@ -648,7 +650,20 @@ impl GdnBwdScratchBufs {
             dot_scratch: g.storage(bhc * c),
             mul_scratch: g.storage(bhc * c),
             mul_scratch_cc: g.storage(bhc * c * c),
+            d_state_hist: None,
         }
+    }
+
+    /// [`Self::new`] plus the state-gradient history the tensor-core backward needs, allocated only
+    /// when `ids` opts in to the tensor-core kernels on a device that takes them and the shape is
+    /// one they serve ([`tensor_core_backward_offered`]). A call that is later declined by the
+    /// backend simply leaves the buffer unused.
+    pub fn new_for(g: &Gpu, ids: &GdnIds, shape: &GdnShape) -> GdnBwdScratchBufs {
+        let mut bufs = Self::new(g, shape);
+        if tensor_core_backward_offered(g, ids, shape) {
+            bufs.d_state_hist = Some(g.storage(shape.bhc() as u64 * shape.dk as u64 * shape.dv as u64));
+        }
+        bufs
     }
 
     pub fn as_ref(&self) -> GdnBwdScratch<'_> {
@@ -678,6 +693,7 @@ impl GdnBwdScratchBufs {
             dot_scratch: &self.dot_scratch,
             mul_scratch: &self.mul_scratch,
             mul_scratch_cc: &self.mul_scratch_cc,
+            d_state_hist: self.d_state_hist.as_ref(),
         }
     }
 
@@ -723,6 +739,32 @@ fn native_bwd_sweep(g: &Gpu, bufs: &[&DeviceBuffer; 12], bh: u32, c: u32, dk: u3
 
 #[cfg(target_arch = "wasm32")]
 fn native_bwd_sweep(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32) -> Option<Step> {
+    None
+}
+
+/// [`gpu_core::provider::cuda::gdn_bwd_sweep_tc_step`] where a native backend exists at all; `None` on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn native_bwd_sweep_tc(g: &Gpu, bufs: &[&DeviceBuffer; 12], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_bwd_sweep_tc_step(g, bufs, bh, c, dk, dv, n_chunks, scale)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn native_bwd_sweep_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32) -> Option<Step> {
+    None
+}
+
+/// [`gpu_core::provider::cuda::gdn_chunk_bwd_post_tc_step`] where a native backend exists at all; `None` on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn native_bwd_post_tc(g: &Gpu, bufs: &[&DeviceBuffer; 21], bhc: u32, c: u32, dk: u32, dv: u32, bh: u32, scale: f32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_bwd_post_tc_step(g, bufs, bhc, c, dk, dv, bh, scale)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn native_bwd_post_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 21], _bhc: u32, _c: u32, _dk: u32, _dv: u32, _bh: u32, _scale: f32) -> Option<Step> {
     None
 }
 
@@ -782,6 +824,13 @@ fn native_chunk_loop_train_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _
 /// recurrence) and this device takes the fast kernels at all.
 fn tensor_core_enabled(g: &Gpu, ids: &GdnIds) -> bool {
     ids.fast.is_some_and(|f| f.tensor_core) && use_fast_kernels(g)
+}
+
+/// Whether [`gdn_chunk_bwd`] can be expected to run as the tensor-core sweep and post kernels for this
+/// `shape` (a `true` is not a promise: the backend may still decline the launch, and the portable
+/// backward then runs).
+pub fn tensor_core_backward_offered(g: &Gpu, ids: &GdnIds, shape: &GdnShape) -> bool {
+    tensor_core_enabled(g, ids) && shape.dk == 128 && shape.dv == 128 && shape.chunk != 0 && shape.chunk <= 64
 }
 
 /// Largest chunk `gdn_ut_fwd.wgsl` serves: one thread per column and a packed
@@ -1594,6 +1643,12 @@ pub struct GdnBwdScratch<'a> {
     /// `d_decay_mask` by the time item 15 starts) as item 15's `T_mat^T @
     /// d_t_mat` intermediate (M5.11's closed-form UT-transform backward).
     pub mul_scratch_cc: &'a DeviceBuffer,
+
+    // ---- tensor-core backward only ----
+    /// `[bhc, dk, dv]` - the state gradient entering each chunk's reverse step, written by
+    /// the tensor-core sweep and read by the tensor-core post kernel. `None` selects the portable
+    /// backward (the tensor-core one needs this buffer; see [`GdnBwdScratchBufs::new_for`]).
+    pub d_state_hist: Option<&'a DeviceBuffer>,
 }
 
 /// The full Gated DeltaNet chunked-parallel BACKWARD - reverse-mode gradients
@@ -1687,6 +1742,51 @@ pub fn gdn_chunk_bwd(
     let bh = shape.bh();
     let bhc = shape.bhc();
     let scale = 1.0f32 / (dk as f32).sqrt();
+
+    // Tensor cores: the reverse sweep as one launch and everything else as a second, one block per
+    // (head, chunk). Declined (no scratch, no device support, shape) means the sequence below.
+    if let Some(d_state_hist) = bwd.d_state_hist.filter(|_| tensor_core_backward_offered(g, ids, shape)) {
+        let sweep_bufs = [
+            key,
+            query,
+            saved.w,
+            d_out,
+            saved.intra_scores,
+            saved.g_cs,
+            saved.exp_g_cs,
+            saved.decay_scale_hist,
+            d_final_state,
+            bwd.d_v_new,
+            d_state_hist,
+            d_initial_state,
+        ];
+        let post_bufs = [
+            query,
+            key,
+            value,
+            beta,
+            saved.w,
+            saved.u,
+            saved.g_cs,
+            saved.exp_g_cs,
+            saved.decay_scale_hist,
+            saved.state_history,
+            saved.t_mat,
+            saved.raw_intra,
+            saved.raw_attn0,
+            d_out,
+            d_state_hist,
+            bwd.d_v_new,
+            d_query,
+            d_key,
+            d_value,
+            d_raw_g,
+            d_beta,
+        ];
+        if let (Some(sweep), Some(post)) = (native_bwd_sweep_tc(g, &sweep_bufs, bh, c, dk, dv, n_chunks, scale), native_bwd_post_tc(g, &post_bufs, bhc, c, dk, dv, bh, scale)) {
+            return vec![sweep, post];
+        }
+    }
 
     let bmm = |kernel: usize, batch: u32, m: u32, k: u32, n: u32, ta: bool, tb: bool, alpha: f32, a: &DeviceBuffer, a_off: u32, b: &DeviceBuffer, b_off: u32, o: &DeviceBuffer, o_off: u32| {
         bmm_auto(g, ids, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)

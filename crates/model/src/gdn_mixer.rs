@@ -959,7 +959,7 @@ pub fn gdn_mixer_stream_bwd(
     let d_value_cm = g.storage(bhc * cw * dv);
     let d_g_cm = g.storage(bhc * cw);
     let d_beta_cm = g.storage(bhc * cw);
-    let bwd_scratch = GdnBwdScratchBufs::new(g, &gdn);
+    let bwd_scratch = GdnBwdScratchBufs::new_for(g, &ids.chunk, &gdn);
     {
         let steps = gdn_chunk_bwd(
             g,

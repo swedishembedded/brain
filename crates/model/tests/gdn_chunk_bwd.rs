@@ -502,6 +502,7 @@ fn gdn_chunk_bwd_gradcheck() {
         dot_scratch: &dot_scratch,
         mul_scratch: &mul_scratch,
         mul_scratch_cc: &mul_scratch_cc,
+        d_state_hist: None,
     };
 
     let d_out = g.storage_init("d_out", &vec![1f32; bhc * cn * dv]);
