@@ -113,6 +113,8 @@ fn compose(a: &[u8; 54], b: &[u8; 54]) -> [u8; 54] {
 fn face_turn(face: usize) -> [u8; 54] {
     let mut p: [u8; 54] = std::array::from_fn(|i| i as u8);
     let mut pool: Vec<u8> = (0..54).collect();
+    // Every test shares these permutations.
+    // seed: the face turns are the fixture's world
     let mut rng = Rng::new(0xFACE0 + face as u64);
     for i in (1..pool.len()).rev() {
         pool.swap(i, rng.below(i + 1));
@@ -231,10 +233,10 @@ fn the_test_spaces_have_real_inverses() {
 #[test]
 fn every_walk_depth_gets_an_equal_share_of_the_batch() {
     let space = Perm54::new();
-    let walk = Walk { depth: 26, seed: 0 };
+    let walk = Walk { depth: 26, seed: seed::random_seed() };
     // Divisible, remainder, and exactly one example per depth.
     for rows in [2048usize, 2000, 130, 26] {
-        let b = batch(&space, &walk, rows, &mut Rng::new(0x5A1AD));
+        let b = batch(&space, &walk, rows, &mut Rng::new(seed::random_seed()));
         assert_eq!(b.rows, rows);
         assert_eq!(b.labels.len(), rows);
         assert_eq!(b.depths.len(), rows);
@@ -261,9 +263,9 @@ fn every_walk_depth_gets_an_equal_share_of_the_batch() {
 #[test]
 fn every_label_steps_back_onto_the_walk_it_came_from() {
     let space = Word::new(3, 10);
-    let walk = Walk { depth: 10, seed: 0 };
+    let walk = Walk { depth: 10, seed: seed::random_seed() };
     let width = space.feature_len();
-    let b = batch(&space, &walk, 250, &mut Rng::new(0xABCD));
+    let b = batch(&space, &walk, 250, &mut Rng::new(seed::random_seed()));
 
     let mut at_the_goal = 0usize;
     for r in 0..b.rows {
@@ -285,16 +287,17 @@ fn every_label_steps_back_onto_the_walk_it_came_from() {
 #[test]
 fn the_same_seed_generates_the_same_batch() {
     let space = Perm54::new();
-    let walk = Walk { depth: 26, seed: 0 };
-    let a = batch(&space, &walk, 512, &mut Rng::new(0xD00D));
-    let b = batch(&space, &walk, 512, &mut Rng::new(0xD00D));
+    let walk = Walk { depth: 26, seed: seed::random_seed() };
+    let seed = seed::random_seed();
+    let a = batch(&space, &walk, 512, &mut Rng::new(seed));
+    let b = batch(&space, &walk, 512, &mut Rng::new(seed));
     assert_eq!(a.features, b.features);
     assert_eq!(a.labels, b.labels);
     assert_eq!(a.depths, b.depths);
 
     // And a different seed really does move: an identical batch from two
     // seeds would pass the check above for the wrong reason.
-    let c = batch(&space, &walk, 512, &mut Rng::new(0xD00E));
+    let c = batch(&space, &walk, 512, &mut Rng::new(seed ^ 1));
     assert_ne!(a.features, c.features);
 }
 
@@ -307,10 +310,10 @@ fn the_same_seed_generates_the_same_batch() {
 #[test]
 fn a_harvested_walk_costs_one_move_application_per_example() {
     let space = Perm54::new();
-    let walk = Walk { depth: 26, seed: 0 };
+    let walk = Walk { depth: 26, seed: seed::random_seed() };
     let rows = 2048usize;
     let reps = 20usize;
-    let mut rng = Rng::new(1);
+    let mut rng = Rng::new(seed::random_seed());
 
     // Warm the allocator so the first pass does not pay for both.
     endpoint_per_walk(&space, &walk, rows, &mut rng);
@@ -353,5 +356,6 @@ fn a_harvested_walk_costs_one_move_application_per_example() {
 fn an_unset_rollout_seed_is_drawn_and_readable() {
     let (a, b) = (solve::Rollout::default(), solve::Rollout::default());
     assert_ne!(a.seed, b.seed);
-    assert_eq!(solve::Rollout { seed: 7, ..a }.seed, 7);
+    let given = seed::random_seed();
+    assert_eq!(solve::Rollout { seed: given, ..a }.seed, given);
 }
