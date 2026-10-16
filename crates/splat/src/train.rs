@@ -63,6 +63,9 @@ pub(crate) struct Rates {
     pub relative: bool,
     /// SGLD amplitude (3DGS-MCMC's lambda_noise); 0 = plain descent.
     pub noise: f32,
+    /// Fixes the SGLD noise stream: with the same seed a fit draws the same
+    /// noise at every step.
+    pub noise_seed: u64,
     /// L1 weights on opacity and on scale (3DGS-MCMC's lambda_o, lambda_S).
     pub opacity_reg: f32,
     pub scale_reg: f32,
@@ -397,7 +400,7 @@ impl DeviceScene {
             f(1e-15),
             f(bc1),
             f(bc2),
-            0,
+            r.noise_seed as u32,
             f(r.noise),
             f(b.min_scale.max(1e-30).ln()),
             f(ln(b.max_needle)),
@@ -405,6 +408,7 @@ impl DeviceScene {
             f(logit(0.0)),
             f(logit(1.0)),
             f(r.scale_reg),
+            (r.noise_seed >> 32) as u32,
         ];
         let geo = gpu.step(
             ks.splat_adam,
@@ -425,5 +429,56 @@ impl DeviceScene {
         if self.ksh > 0 {
             adam(r.sh, [&self.sh, &self.d_sh, &self.m_sh, &self.v_sh], &self.desc_sh, 3 * self.n * self.ksh);
         }
+    }
+}
+
+#[cfg(test)]
+mod noise_tests {
+    use super::*;
+    use crate::{Kernels, PIPELINES};
+
+    /// Where six transparent gaussians stand after one optimizer step with SGLD
+    /// noise under `noise_seed`. Gradients are zero, so only the noise moves them.
+    fn means_after_step(noise_seed: u64) -> Vec<f32> {
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ks = Kernels::at(0);
+        let n = 6;
+        let scene = Splats {
+            means: (0..n * 3).map(|i| i as f32 * 0.1).collect(),
+            quats: (0..n).flat_map(|_| [1.0, 0.0, 0.0, 0.0]).collect(),
+            scales: vec![0.1; n * 3],
+            opacities: vec![0.001; n],
+            colors: vec![0.5; n * 3],
+            sh_rest: None,
+        };
+        let device = DeviceScene::new(&gpu, &scene, 0);
+        device.zero_grads(&gpu);
+        let rates = Rates {
+            position: 0.01,
+            scale: 0.0,
+            rotation: 0.0,
+            opacity: 0.0,
+            color: 0.0,
+            sh: 0.0,
+            relative: false,
+            noise: 1.0,
+            noise_seed,
+            opacity_reg: 0.0,
+            scale_reg: 0.0,
+        };
+        let bounds = Bounds { min_scale: 1e-6, max_needle: 0.0, max_flat: 0.0 };
+        device.step(&gpu, &ks, 1, &rates, &bounds);
+        device.download(&gpu).means
+    }
+
+    /// The noise is part of what a fit's seed reproduces: one seed draws the
+    /// same noise twice, and a seed that differs in only its high word draws
+    /// other noise.
+    #[test]
+    fn the_sgld_noise_follows_the_fit_seed() {
+        let a = means_after_step(7);
+        assert_eq!(a, means_after_step(7));
+        assert_ne!(a, means_after_step(8), "the low word of the seed reaches the noise");
+        assert_ne!(a, means_after_step(7 | 1 << 40), "the high word of the seed reaches the noise");
     }
 }

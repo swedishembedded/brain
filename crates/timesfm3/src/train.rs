@@ -174,7 +174,14 @@ pub struct LoraCfg {
     pub rank: usize,
     pub alpha: f32,
     pub targets: Vec<String>,
+    /// Seeds the `A` factors' initial draw, so two fine-tunes start from
+    /// different adapters unless they name one seed. A fresh draw by default.
+    pub seed: u64,
 }
+
+/// Keeps the adapter initialisation apart from the other streams drawn from a
+/// training seed.
+const ADAPTER_SALT: u64 = 0x51a7_7143;
 
 /// Every projection [`LoraCfg::attn`] adapts: the four square `[D, D]`
 /// projections of BOTH mixing sublayers, plus the two feedforward matrices.
@@ -205,7 +212,13 @@ impl LoraCfg {
     /// `per_dim_scale` a product of two live tensors rather than a linear
     /// map, which is not the object LoRA is defined over.
     pub fn attn(rank: usize, alpha: f32) -> LoraCfg {
-        LoraCfg { rank, alpha, targets: LORA_TARGETS.iter().map(|s| s.to_string()).collect() }
+        LoraCfg { rank, alpha, targets: LORA_TARGETS.iter().map(|s| s.to_string()).collect(), seed: seed::random_seed() }
+    }
+
+    /// The adapter initialisation seed to use instead of the drawn one.
+    pub fn with_seed(mut self, seed: u64) -> LoraCfg {
+        self.seed = seed;
+        self
     }
 
     /// [`LoraCfg::attn`] plus the quantile output head. Optional because the
@@ -277,11 +290,11 @@ fn adapter_roles(cfg: &Timesfm3Config, lc: &LoraCfg) -> Vec<(String, usize, Role
 
 /// Fill in any adapter tensor `init` does not already carry. `B` is exactly
 /// zero, so `W + (alpha/r)·B·A == W` and a freshly built adapter is a
-/// bit-exact no-op; `A` is a small deterministic draw, because a zero `A`
+/// bit-exact no-op; `A` is a small draw fixed by [`LoraCfg::seed`], because a zero `A`
 /// alongside a zero `B` would leave `dB` identically zero and the adapter
 /// would never leave the origin.
 fn seed_adapters(cfg: &Timesfm3Config, lc: &LoraCfg, init: &mut HashMap<String, Vec<f32>>) {
-    let mut state = 0x51a7_7143_0000_0001u64;
+    let mut state = lc.seed ^ ADAPTER_SALT;
     for (name, shape) in cfg.param_list() {
         if !lc.hits(&name) {
             continue;
@@ -1644,3 +1657,29 @@ mod tests {
 }
 
 
+
+#[cfg(test)]
+mod adapter_seed_tests {
+    use super::*;
+
+    fn adapters(lc: &LoraCfg) -> HashMap<String, Vec<f32>> {
+        let mut init = HashMap::new();
+        seed_adapters(&Timesfm3Config::tiny(), lc, &mut init);
+        init
+    }
+
+    /// Two fine-tunes must not start from one adapter unless they name one
+    /// seed; `B` is zero whatever the seed, so a fresh adapter is a no-op.
+    #[test]
+    fn the_adapter_initialisation_follows_the_lora_seed() {
+        let lc = LoraCfg::attn(2, 4.0);
+        assert_ne!(lc.seed, LoraCfg::attn(2, 4.0).seed, "an unset seed is drawn");
+        // seed: two named seeds, to see the same one repeat and another differ
+        let (a, again, other) = (adapters(&lc.clone().with_seed(3)), adapters(&lc.clone().with_seed(3)), adapters(&lc.clone().with_seed(4)));
+        assert_eq!(a, again);
+        assert_ne!(a, other);
+        let b_names: Vec<&String> = a.keys().filter(|k| k.ends_with("lora_b")).collect();
+        assert!(!b_names.is_empty());
+        assert!(b_names.iter().all(|k| a[*k].iter().all(|&x| x == 0.0)));
+    }
+}

@@ -1004,6 +1004,9 @@ fn finetune_timesfm3(args: &[String]) {
     let embargo = a.usize_or("--embargo", horizon);
     let batch = a.usize_or("--batch", 1).max(1) as u32;
     let skip_invalid = a.take_flag("--skip-invalid");
+    // Only a LoRA run draws (its adapters' initial factors); a full fine-tune
+    // has no seed to name.
+    let lora_seed = (lora_rank > 0).then(|| a.seed("forecast finetune"));
     a.finish();
 
     // Printed before anything else, and before any work: an operator who is
@@ -1014,7 +1017,7 @@ fn finetune_timesfm3(args: &[String]) {
     if weights.is_empty() || data.is_empty() {
         eprintln!("usage: brain forecast finetune --timesfm3 <weights> --data <csv-dir> \\");
         eprintln!("         [--out <ckpt>] [--context 180] [--horizon 5] [--epochs 8] [--lr 4e-5] [--lora RANK] [--embargo N] [--batch B]");
-        eprintln!("         [--holdout-data <csv-dir>] [--skip-invalid]");
+        eprintln!("         [--holdout-data <csv-dir>] [--skip-invalid] [--seed N]");
         eprintln!();
         eprintln!("Each <TICKER>.csv is Date,open,high,low,close,volume, and the close is what is");
         eprintln!("forecast and scored. Every file is validated before anything is loaded.");
@@ -1053,7 +1056,7 @@ fn finetune_timesfm3(args: &[String]) {
         if lora_rank > 0 { format!(" · LoRA r{lora_rank}") } else { " · full".into() }
     );
     let split = forecast::train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo };
-    let lora = (lora_rank > 0).then(|| timesfm3::train::LoraCfg::attn(lora_rank, (lora_rank * 2) as f32));
+    let lora = lora_seed.map(|seed| timesfm3::train::LoraCfg::attn(lora_rank, (lora_rank * 2) as f32).with_seed(seed));
     let opts = timesfm3::finetune::FinetuneOpts { epochs, lr, wd: 0.1, clip: 3.0, lora, batch, progress: true };
     let (rep, weights_out) = timesfm3::finetune::finetune_universe(&cfg, &base, &series, context, horizon, split, &opts);
 
@@ -1082,6 +1085,9 @@ fn finetune_timesfm3(args: &[String]) {
         rep.steps,
         if rep.promoted { "PROMOTE (fine-tune beats base out-of-sample)" } else { "KEEP BASE (no held-out improvement)" }
     );
+    if let Some(seed) = rep.lora_seed {
+        println!("LoRA adapters initialised from seed {seed} (pass --seed {seed} to reproduce)");
+    }
     let w = weights_out.expect("weights always returned");
     if rep.promoted {
         let path = out.unwrap_or_else(|| "timesfm3-ft.safetensors".into());

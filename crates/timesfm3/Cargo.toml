@@ -10,6 +10,8 @@ name = "timesfm3"
 path = "src/lib.rs"
 
 [dependencies]
+# `seed::random_seed` - the draw behind an unset adapter-initialisation seed.
+brain-seed.workspace = true
 brain-gpu-core.workspace = true
 brain-model.workspace = true
 brain-paramstore.workspace = true

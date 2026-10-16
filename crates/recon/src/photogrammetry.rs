@@ -142,7 +142,7 @@ impl TrainingSet {
 
 /// Multi-view stereo, fusion and the dense starting scene, as [`dense`]
 /// runs them.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct DenseCfg {
     pub stereo: mvs::StereoCfg,
     pub fuse: mvs::FuseCfg,
@@ -151,7 +151,27 @@ pub struct DenseCfg {
     /// thinned uniformly, its kept discs widened to cover the same surface
     /// (`mvs::Fused::thinned`).
     pub max_points: Option<usize>,
+    /// Chooses which points a thinned cloud keeps. A fresh draw by default;
+    /// [`DenseReport::seed`] reports it and passing it back reproduces the
+    /// start.
+    pub seed: u64,
 }
+
+impl Default for DenseCfg {
+    fn default() -> Self {
+        DenseCfg {
+            stereo: mvs::StereoCfg::default(),
+            fuse: mvs::FuseCfg::default(),
+            init: mvs::SplatInit::default(),
+            max_points: None,
+            seed: seed::random_seed(),
+        }
+    }
+}
+
+/// Keeps the thinning stream apart from the other streams drawn from the run
+/// seed.
+const THIN_SALT: u64 = 0x7417;
 
 /// What [`dense`] measured.
 #[derive(Clone, Debug)]
@@ -163,6 +183,8 @@ pub struct DenseReport {
     /// Of those, the ones the start was made of, one gaussian each.
     pub points: usize,
     pub timings: mvs::Timings,
+    /// The [`DenseCfg::seed`] the start was made under.
+    pub seed: u64,
 }
 
 /// Measure every view by multi-view stereo, attach the measurements to
@@ -210,11 +232,11 @@ pub fn dense(
     }
     let all = fused.len();
     let fused = match cfg.max_points {
-        Some(m) => fused.thinned(m, 0x5eed_7417),
+        Some(m) => fused.thinned(m, cfg.seed ^ THIN_SALT),
         None => fused,
     };
     let init = mvs::to_splats(&fused, &cfg.init);
-    Ok((init, DenseReport { coverage, fused: all, points: fused.len(), timings: st.timings }))
+    Ok((init, DenseReport { coverage, fused: all, points: fused.len(), timings: st.timings, seed: cfg.seed }))
 }
 
 /// A photograph as a target: its own pixels in [0,1], through its camera,
@@ -719,5 +741,15 @@ mod tests {
         assert_eq!(ph.color_space, ColorSpace::SceneLinear);
         let t = photo_target(&lin, cam, 0, &ph);
         assert_eq!((t.encoding, &t.rgb), (Encoding::Linear, &lin.linear()));
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    #[test]
+    fn an_unseeded_dense_start_draws_its_seed() {
+        assert_ne!(DenseCfg::default().seed, DenseCfg::default().seed);
     }
 }

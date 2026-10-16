@@ -89,6 +89,9 @@ pub struct FinetuneReport {
     pub base_val: f32,
     pub ft_val: f32,
     pub steps: u32,
+    /// The seed the LoRA adapters were initialised from; `None` for a full
+    /// fine-tune, which draws nothing. Passing it back reproduces the run.
+    pub lora_seed: Option<u64>,
 }
 
 /// One training example: everything `core_forward` consumes for one window,
@@ -357,7 +360,7 @@ pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>,
     // `kronos::train::finetune`'s rule, so one CLI gate line means the same
     // thing whichever model produced it.
     let promoted = ft_val.is_finite() && base_val.is_finite() && ft_val < base_val;
-    (FinetuneReport { promoted, base_val, ft_val, steps }, Some(weights))
+    (FinetuneReport { promoted, base_val, ft_val, steps, lora_seed: opts.lora.as_ref().map(|lc| lc.seed) }, Some(weights))
 }
 
 /// The licence the TimesFM-3 3.0 pretrained weights carry. Non-commercial

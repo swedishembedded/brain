@@ -38,8 +38,8 @@
 // position is perturbed by `noise * step * sigma(-100 (o - 0.005)) * S ε / r`,
 // `step` its position step and `r` its largest axis,
 // S the gaussian's own covariance square root - transparent gaussians explore,
-// opaque ones hold still. ε is a counter-based hash of (gaussian, step), so
-// a fit is the same twice.
+// opaque ones hold still. ε is a counter-based hash of (gaussian, step, seed),
+// so a fit is the same twice under one seed and a different draw under another.
 //
 // Regularizers (3DGS-MCMC, Eq. 7): `opacity_reg * sum o` and
 // `scale_reg * sum s`, added to the gradient - they are what manufactures the
@@ -64,7 +64,7 @@ struct Params {
     eps: f32,
     bc1: f32,
     bc2: f32,
-    pad1: f32,
+    seed_lo: u32,    // low word of the noise seed
     noise: f32,
     log_min: f32,
     log_needle: f32, // log max_needle, <= 0 = unbounded
@@ -72,6 +72,7 @@ struct Params {
     logit_min: f32,
     logit_max: f32,
     scale_reg: f32,
+    seed_hi: u32,    // high word of the noise seed
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -143,10 +144,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
             // the displacement is S e, already in units of the gaussian's
             // own size, times the position step measured in those units
             let amp = p.noise * p.lr_pos * own / max(max(s0, max(s1, s2)), 1e-30) * gate;
-            let seed = i * 6u + p.step * 2654435761u;
-            let e0 = gauss(seed, seed ^ 0x68e31da4u);
-            let e1 = gauss(seed + 1u, (seed + 1u) ^ 0x68e31da4u);
-            let e2 = gauss(seed + 2u, (seed + 2u) ^ 0x68e31da4u);
+            let seed = (i * 6u + p.step * 2654435761u) ^ p.seed_lo;
+            let salt = 0x68e31da4u ^ p.seed_hi;
+            let e0 = gauss(seed, seed ^ salt);
+            let e1 = gauss(seed + 1u, (seed + 1u) ^ salt);
+            let e2 = gauss(seed + 2u, (seed + 2u) ^ salt);
             // S e = sum_k axis_k * s_k * e_k, from the updated rotation
             let qn = sqrt(geo[o + 6u] * geo[o + 6u] + geo[o + 7u] * geo[o + 7u]
                 + geo[o + 8u] * geo[o + 8u] + geo[o + 9u] * geo[o + 9u]) + 1e-8;

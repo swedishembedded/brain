@@ -143,8 +143,23 @@ pub struct SfmCfg {
     pub positioning: PositioningCfg,
     /// When satellite fixes are trusted.
     pub georef: GeorefCfg,
+    /// Seeds the randomised matching stages: which pairs are matched, and the
+    /// RANSAC that verifies each pair and chooses the initial one. A fresh draw
+    /// by default; [`SfmReport::seed`] reports it and passing it back
+    /// reproduces the pairing and the verification.
+    pub seed: u64,
     /// Print progress.
     pub verbose: bool,
+}
+
+/// Keeps the candidate-pair selection apart from the RANSAC streams.
+const PAIR_SALT: u64 = 0x7e7a;
+/// Keeps the initial-pair RANSAC apart from the per-pair verification streams.
+const INITIAL_PAIR_SALT: u64 = 0x1217;
+
+/// The RANSAC seed that verifies the pair `(a, b)` of `n` photographs.
+fn verification_seed(run: u64, a: usize, b: usize, n: usize) -> u64 {
+    run ^ ((a * n + b) as u64 + 1)
 }
 
 impl Default for SfmCfg {
@@ -171,6 +186,7 @@ impl Default for SfmCfg {
             rotation: RotationCfg::default(),
             positioning: PositioningCfg::default(),
             georef: GeorefCfg::default(),
+            seed: data::rng::random_seed(),
             verbose: false,
         }
     }
@@ -247,6 +263,8 @@ pub struct SfmReport {
     /// [`GeorefCfg::seed`]): passing them back reproduces the reconstruction.
     pub positioning_seed: u64,
     pub georef_seed: u64,
+    /// The [`SfmCfg::seed`] the matching stages ran with.
+    pub seed: u64,
 }
 
 #[derive(Debug)]
@@ -383,7 +401,7 @@ pub fn reconstruct_with(photos: &[Photo], cfg: &SfmCfg, nn: &dyn NearestNeighbou
     let clock = Instant::now();
     let rays = bearings(&feats, &sensor, &guess);
     let descs: Vec<&[f32]> = feats.iter().map(|f| f.1.as_slice()).collect();
-    let candidates = select_pairs(&descs, &cfg.pairs, 0x7e7a);
+    let candidates = select_pairs(&descs, &cfg.pairs, cfg.seed ^ PAIR_SALT);
     log(format!("{} of {} pairs selected for matching", candidates.len(), n * (n - 1) / 2));
     let mut pairs: Vec<Pair> = Vec::new();
     for &(a, b) in &candidates {
@@ -394,7 +412,7 @@ pub fn reconstruct_with(photos: &[Photo], cfg: &SfmCfg, nn: &dyn NearestNeighbou
         }
         let xa: Vec<V3> = m.iter().map(|&(i, _)| rays[a][i].unwrap()).collect();
         let xb: Vec<V3> = m.iter().map(|&(_, j)| rays[b][j].unwrap()).collect();
-        let seed = (a * n + b) as u64 + 1;
+        let seed = verification_seed(cfg.seed, a, b, n);
         let thresh = pair_threshold(cfg.thresh_px, &guess[sensor[a]], &guess[sensor[b]]);
         let Some((_, mask)) = ransac_essential(&xa, &xb, thresh, cfg.ransac_iters, seed) else { continue };
         let inl: Vec<(usize, usize)> = m.iter().zip(&mask).filter(|(_, &ok)| ok).map(|(p, _)| *p).collect();
@@ -630,7 +648,7 @@ pub fn reconstruct_with(photos: &[Photo], cfg: &SfmCfg, nn: &dyn NearestNeighbou
         }
     }
     let solve_s = clock.elapsed().as_secs_f64();
-    let report = SfmReport { pairs_matched: candidates.len(), pairs_verified: prep.pairs.len(), initializer, features_s, matching_s, focal_s, solve_s, georef_refused, positioning_seed: cfg.positioning.seed, georef_seed: cfg.georef.seed };
+    let report = SfmReport { pairs_matched: candidates.len(), pairs_verified: prep.pairs.len(), initializer, features_s, matching_s, focal_s, solve_s, georef_refused, positioning_seed: cfg.positioning.seed, georef_seed: cfg.georef.seed, seed: cfg.seed };
     Ok(Reconstruction {
         intrinsics: ks,
         sensor: prep.sensor,
@@ -714,7 +732,7 @@ impl<'a> Solver<'a> {
             let xa: Vec<V3> = m.iter().map(|&(i, _)| rays[*a][i].unwrap()).collect();
             let xb: Vec<V3> = m.iter().map(|&(_, j)| rays[*b][j].unwrap()).collect();
             let thresh = pair_threshold(cfg.thresh_px, &ks[prep.sensor[*a]], &ks[prep.sensor[*b]]);
-            let Some((e, mask)) = ransac_essential(&xa, &xb, thresh, cfg.ransac_iters, 7) else { continue };
+            let Some((e, mask)) = ransac_essential(&xa, &xb, thresh, cfg.ransac_iters, cfg.seed ^ INITIAL_PAIR_SALT) else { continue };
             let (pose, pts) = relative_pose(&e, &xa, &xb, &mask);
             let ang = median_angle(&pose, &pts).to_degrees();
             let good = pts.iter().flatten().count();
@@ -1085,5 +1103,19 @@ impl<'a> Solver<'a> {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    /// Every stage that draws takes its stream from the reconstruction's seed:
+    /// an unset seed is drawn fresh, and the seed changes the per-pair streams.
+    #[test]
+    fn the_matching_streams_follow_the_reconstruction_seed() {
+        assert_ne!(SfmCfg::default().seed, SfmCfg::default().seed);
+        assert_ne!(verification_seed(1, 0, 1, 5), verification_seed(2, 0, 1, 5));
+        assert_ne!(verification_seed(1, 0, 1, 5), verification_seed(1, 1, 0, 5));
     }
 }

@@ -18,6 +18,8 @@ brain-imaging.workspace = true
 # Cameras and a sparse point cloud from photographs, for a training set that
 # needs no learned model (`photogrammetry.rs`).
 brain-sfm.workspace = true
+# `seed::random_seed` - the draw behind an unset dense-start seed.
+brain-seed.workspace = true
 # `camera::Intrinsics` - the calibration structure from motion returns, and
 # the lens every target is imaged through.
 brain-camera.workspace = true

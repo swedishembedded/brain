@@ -984,7 +984,7 @@ impl<'a> Fit<'a> {
             let geometry_now = progress >= cfg.geometry_after;
             let skip = sh_skip(cfg, scene.ksh, it);
             let mut loss_sum = 0.0f64;
-            let batch = batch_views(n_views, views_per, it);
+            let batch = batch_views(n_views, views_per, it, cfg.seed);
             let mut cam_grads: Vec<(usize, CameraGrad)> = Vec::new();
             for &vi in &batch {
                 if level.wsum[vi] <= 0.0 {
@@ -1052,6 +1052,7 @@ impl<'a> Fit<'a> {
                 sh: cfg.lr_color / 20.0 * lr_scale,
                 relative: cfg.relative_position,
                 noise: cfg.noise,
+                noise_seed: cfg.seed ^ NOISE_SALT,
                 opacity_reg: cfg.opacity_reg,
                 scale_reg: cfg.scale_reg,
             };
@@ -1605,10 +1606,17 @@ fn residual_sites(t: &TargetView, pred: &[f32], rgba: &[f32], aux: &[f32], weigh
     (sites, unexplained, total)
 }
 
-/// The views iteration `it` optimizes: `per` of them, walking a fresh
-/// deterministic permutation of all `n` each epoch; all of them when `per`
+/// Keeps the view order apart from the other streams drawn from the fit seed.
+const VIEW_SALT: u64 = 0xba7c;
+
+/// Keeps the optimizer's SGLD noise apart from the other streams drawn from the
+/// fit seed.
+const NOISE_SALT: u64 = 0x5d1d_6e01;
+
+/// The views iteration `it` optimizes: `per` of them, walking a permutation of
+/// all `n` that is fresh each epoch and fixed by `seed`; all of them when `per`
 /// covers `n`.
-fn batch_views(n: usize, per: usize, it: usize) -> Vec<usize> {
+fn batch_views(n: usize, per: usize, it: usize, seed: u64) -> Vec<usize> {
     if per >= n {
         return (0..n).collect();
     }
@@ -1617,7 +1625,8 @@ fn batch_views(n: usize, per: usize, it: usize) -> Vec<usize> {
             let pos = it * per + j;
             let (epoch, at) = (pos / n, pos % n);
             let mut order: Vec<usize> = (0..n).collect();
-            order.sort_by(|&a, &b| jitter(a, epoch as u64 ^ 0xba7c).total_cmp(&jitter(b, epoch as u64 ^ 0xba7c)));
+            let salt = seed ^ epoch as u64 ^ VIEW_SALT;
+            order.sort_by(|&a, &b| jitter(a, salt).total_cmp(&jitter(b, salt)));
             order[at]
         })
         .collect()
@@ -1804,4 +1813,32 @@ fn rescale_cam(c: &Camera, k: f32) -> Camera {
         out.shutter[3 + i] *= k;
     }
     out
+}
+
+#[cfg(test)]
+mod batch_view_tests {
+    use super::batch_views;
+
+    fn walk(n: usize, per: usize, iters: usize, seed: u64) -> Vec<usize> {
+        (0..iters).flat_map(|it| batch_views(n, per, it, seed)).collect()
+    }
+
+    /// A fit's view order is part of what its seed reproduces: the same seed
+    /// walks the same order, another seed walks another, and every epoch still
+    /// visits each view exactly once.
+    #[test]
+    fn the_view_order_follows_the_fit_seed() {
+        let (n, per) = (12, 3);
+        assert_eq!(walk(n, per, 8, 5), walk(n, per, 8, 5));
+        assert_ne!(walk(n, per, 8, 5), walk(n, per, 8, 6));
+        let mut epoch = walk(n, per, n / per, 5);
+        epoch.sort_unstable();
+        assert_eq!(epoch, (0..n).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_batch_that_covers_every_view_ignores_the_seed() {
+        assert_eq!(batch_views(4, 4, 7, 1), vec![0, 1, 2, 3]);
+        assert_eq!(batch_views(4, 9, 0, 2), vec![0, 1, 2, 3]);
+    }
 }
