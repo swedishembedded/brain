@@ -19,7 +19,7 @@
 //! ```text
 //! BRAIN_BACKEND=cuda gpu qwen35_train_probe --tokens 4096 --base nf4 \
 //!     [--layers 4] [--rank 16] [--recompute on|off] [--gdn-segment N] \
-//!     [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--steps 2]
+//!     [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N] [--steps 2]
 //! ```
 //!
 //! `--base` is bf16, nf4 or f32. `--gdn-segment 0` (the default) keeps a GDN
@@ -128,6 +128,7 @@ fn main() {
         flash_min_t: arg(&args, "--flash-min-t").map(|v| v.parse().expect("--flash-min-t N")),
         gdn_segment_tokens: (gdn_segment > 0).then_some(gdn_segment),
         bf16_residuals: arg(&args, "--bf16-residuals").is_some_and(|v| v == "on"),
+        mlp_rows: arg(&args, "--mlp-rows").map(|v| v.parse().expect("--mlp-rows N")),
     };
 
     let peak = Arc::new(AtomicU64::new(0));

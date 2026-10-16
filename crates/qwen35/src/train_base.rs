@@ -49,11 +49,17 @@ pub struct TrainOpts {
     /// Hold the layer-boundary residual stream in bf16 (half the bytes; see
     /// `PackedResidual`). Whole-model, non-MTP builds only.
     pub bf16_residuals: bool,
+    /// Run each layer's dense MLP in chunks of this many tokens on a
+    /// recomputing build, rebuilding a chunk's activations when its gradient
+    /// is taken: the MLP's gate, up and hidden activations (and their three
+    /// gradients) are most of a layer's working set once the Gated-DeltaNet
+    /// part is segmented. `None` runs it whole.
+    pub mlp_rows: Option<u32>,
 }
 
 impl Default for TrainOpts {
     fn default() -> Self {
-        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None, bf16_residuals: false }
+        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None, bf16_residuals: false, mlp_rows: None }
     }
 }
 

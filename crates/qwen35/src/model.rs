@@ -741,6 +741,14 @@ struct GqaLayerActs {
 /// Everything [`Qwen35::mlp_fwd`]'s training branch saves - universal, every
 /// layer, both mixer types. The dense-MLP analogue of `qwen35moe::model::
 /// MoeLayerActs` (this model has no MoE at all, so no router/expert acts).
+/// What a layer's MLP backward starts from: its activations, or - when the
+/// MLP runs in row chunks (`TrainOpts::mlp_rows`) - only its input, the
+/// activations being rebuilt chunk by chunk.
+enum MlpSaved {
+    Full(MlpLayerActs),
+    Rows { xn2: DeviceBuffer },
+}
+
 struct MlpLayerActs {
     xn2: DeviceBuffer,
     gate_pre: DeviceBuffer,
@@ -761,7 +769,7 @@ struct LayerTrainActs {
     xn1: DeviceBuffer,
     mixer: MixerActs,
     xmid: DeviceBuffer,
-    mlp: MlpLayerActs,
+    mlp: MlpSaved,
 }
 
 /// The full backward activation cache for one `forward()` call on a
@@ -873,6 +881,9 @@ pub struct Qwen35 {
     /// Rows per Gated-DeltaNet segment of a training layer, or `None` to keep
     /// the whole sequence's intermediates (see [`TrainOpts::gdn_segment_tokens`]).
     gdn_segment_tokens: Cell<Option<u32>>,
+    /// Rows per chunk the MLP runs in on a recomputing training build, or
+    /// `None` for the whole pass (see [`TrainOpts::mlp_rows`]).
+    mlp_rows: Cell<Option<u32>>,
     /// Shortest sequence the training forward hands to [`Self::flash`].
     flash_min_t: Cell<u32>,
     /// Whether `forward()` drops each layer's activations after use and
@@ -1240,6 +1251,7 @@ impl Qwen35 {
         let m = Qwen35::new_impl_on(gpu, cfg, b, t, src, &opts.base, Some(opts), shard);
         m.set_recompute(opts.recompute);
         m.gdn_segment_tokens.set(opts.gdn_segment_tokens);
+        m.mlp_rows.set(opts.mlp_rows);
         if let Some(min_t) = opts.flash_min_t {
             m.flash_min_t.set(min_t);
         }
@@ -1621,6 +1633,7 @@ impl Qwen35 {
             flash,
             flash_min_t: Cell::new(model::block::FlashGqaIds::MIN_TRAIN_T),
             gdn_segment_tokens: Cell::new(None),
+            mlp_rows: Cell::new(None),
             mtp_input,
             mtp_target,
             mtp_logits,
@@ -2406,7 +2419,7 @@ impl Qwen35 {
                 xn1,
                 mixer: MixerActs::Gqa(mixer_acts.expect("qwen35: is_train but layer_gqa_fwd returned no acts for the MTP layer")),
                 xmid,
-                mlp: mlp_acts.expect("qwen35: is_train but mlp_fwd returned no acts for the MTP layer"),
+                mlp: MlpSaved::Full(mlp_acts.expect("qwen35: is_train but mlp_fwd returned no acts for the MTP layer")),
             },
             block_out,
             final_h,
@@ -2446,7 +2459,7 @@ impl Qwen35 {
         }
 
         // ---- reverse of the one decoder layer (mirrors `backward`'s own per-layer body) ----
-        let d_xn2 = self.mlp_bwd("mtp.layers.0.mlp", &ma.layer.mlp, &d_block_out, n);
+        let d_xn2 = self.mlp_bwd_saved("mtp.layers.0.mlp", &ma.layer.mlp, &d_block_out, n);
         let d_ln2_dx = g.storage((n * d) as u64);
         let d_xmid = g.storage((n * d) as u64);
         {
@@ -2529,7 +2542,17 @@ impl Qwen35 {
         let xn2 = g.storage((n * d) as u64);
         g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, n, self.cfg.rms_eps)]);
 
-        let (mlp_out, mlp_acts) = self.mlp_fwd(&format!("blocks.{l}.mlp"), &xn2, n);
+        let prefix = format!("blocks.{l}.mlp");
+        let chunk_rows = self.mlp_chunk_rows(n);
+        let (mlp_out, mlp_saved) = match chunk_rows {
+            // Rows are independent: run the MLP a chunk at a time and keep
+            // none of its activations (rebuilt by the backward).
+            Some(rows) => (self.mlp_fwd_rows(&prefix, &xn2, n, rows), Some(MlpSaved::Rows { xn2: xn2.clone() })),
+            None => {
+                let (out, acts) = self.mlp_fwd(&prefix, &xn2, n);
+                (out, acts.map(MlpSaved::Full))
+            }
+        };
         g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, out], &[n * d], n * d)]);
 
         if !self.is_train {
@@ -2539,7 +2562,7 @@ impl Qwen35 {
             xn1,
             mixer: mixer_acts.expect("qwen35: is_train but layer_gdn_fwd/layer_gqa_fwd returned no acts"),
             xmid,
-            mlp: mlp_acts.expect("qwen35: is_train but mlp_fwd returned no acts"),
+            mlp: mlp_saved.expect("qwen35: is_train but the MLP returned no acts"),
         })
     }
 
@@ -2738,6 +2761,62 @@ impl Qwen35 {
     /// this is just `qwen3::model.rs`'s own dense-MLP backward pattern:
     /// `down`'s proj_bwd, `swiglu_bwd`, then `up`/`gate`'s proj_bwd
     /// accumulating into one `d_xn2`).
+    /// Rows per MLP chunk for an `n`-row pass, or `None` to run it whole: only
+    /// when asked for ([`TrainOpts::mlp_rows`]), on a recomputing training
+    /// build (the chunks' activations are dropped, so the backward must be
+    /// able to rebuild them), and only when there is more than one chunk.
+    fn mlp_chunk_rows(&self, n: u32) -> Option<u32> {
+        self.mlp_rows.get().filter(|&rows| self.is_train && self.recompute.get() && rows > 0 && rows < n)
+    }
+
+    /// Rows `[row0, row0 + rows)` of a `[total_rows, width]` buffer as their own buffer.
+    fn take_rows(&self, src: &DeviceBuffer, width: u32, total_rows: u32, row0: u32, rows: u32) -> DeviceBuffer {
+        let dst = self.gpu.storage(rows as u64 * width as u64);
+        let (total, count, off) = (total_rows * width, rows * width, row0 * width);
+        self.gpu.submit(&[], &[self.gpu.step(CONCAT_SPLIT, &[src, &dst], &[1, total, count, off, 1, 1], count)]);
+        dst
+    }
+
+    /// `dst[row0 ..] = src` for a `[rows, width]` source and a zero-fresh `dst`.
+    fn put_rows(&self, src: &DeviceBuffer, dst: &DeviceBuffer, width: u32, row0: u32, rows: u32) {
+        let count = rows * width;
+        self.gpu.submit(&[], &[self.gpu.step(SPLICE_ADD, &[src, dst], &[count, row0 * width], count)]);
+    }
+
+    /// [`Self::mlp_fwd`] over `rows`-row chunks of `xn2`, keeping nothing but the output.
+    fn mlp_fwd_rows(&self, prefix: &str, xn2: &DeviceBuffer, n: u32, rows: u32) -> DeviceBuffer {
+        let d = self.cfg.d_model;
+        let out = self.gpu.storage((n * d) as u64);
+        for row0 in (0..n).step_by(rows as usize) {
+            let rc = rows.min(n - row0);
+            let (chunk_out, _) = self.mlp_fwd(prefix, &self.take_rows(xn2, d, n, row0, rc), rc);
+            self.put_rows(&chunk_out, &out, d, row0, rc);
+            self.gpu.poll_wait();
+        }
+        out
+    }
+
+    /// [`Self::mlp_bwd`] from whatever the forward kept: the activations, or
+    /// the input alone, from which each `rows`-row chunk's activations are
+    /// rebuilt just before its gradient is taken.
+    fn mlp_bwd_saved(&self, prefix: &str, saved: &MlpSaved, d_mlp_out: &DeviceBuffer, n: u32) -> DeviceBuffer {
+        let MlpSaved::Rows { xn2 } = saved else {
+            let MlpSaved::Full(la) = saved else { unreachable!() };
+            return self.mlp_bwd(prefix, la, d_mlp_out, n);
+        };
+        let d = self.cfg.d_model;
+        let rows = self.mlp_rows.get().expect("qwen35: an MLP saved as rows needs mlp_rows");
+        let d_xn2 = self.gpu.storage((n * d) as u64);
+        for row0 in (0..n).step_by(rows as usize) {
+            let rc = rows.min(n - row0);
+            let (_, acts) = self.mlp_fwd(prefix, &self.take_rows(xn2, d, n, row0, rc), rc);
+            let d_chunk = self.mlp_bwd(prefix, &acts.expect("qwen35: backward() requires a training build"), &self.take_rows(d_mlp_out, d, n, row0, rc), rc);
+            self.put_rows(&d_chunk, &d_xn2, d, row0, rc);
+            self.gpu.poll_wait();
+        }
+        d_xn2
+    }
+
     fn mlp_bwd(&self, prefix: &str, la: &MlpLayerActs, d_mlp_out: &DeviceBuffer, n: u32) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
@@ -2870,7 +2949,7 @@ impl Qwen35 {
 
             // ---- second residual add backward: res[l+1] = xmid + mlp_out ----
             let d_mlp_out = &d_res_next;
-            let d_xn2 = self.mlp_bwd(&format!("blocks.{l}.mlp"), &la.mlp, d_mlp_out, n);
+            let d_xn2 = self.mlp_bwd_saved(&format!("blocks.{l}.mlp"), &la.mlp, d_mlp_out, n);
 
             let d_ln2_dx = g.storage((n * d) as u64);
             let d_xmid = g.storage((n * d) as u64);

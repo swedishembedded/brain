@@ -67,3 +67,19 @@ fn recompute_can_be_switched_between_steps() {
     assert_eq!(got.0, want.0);
     assert_eq!(got.1, want.1);
 }
+
+/// The MLP is row-wise, so it can run in token chunks whose activations are
+/// rebuilt when their gradient is taken: loss and gradients are those of the
+/// whole-sequence MLP (the adapter gradients are summed chunk by chunk, so to
+/// rounding rather than bitwise). 5 rows does not divide the 12 tokens.
+#[test]
+fn a_chunked_mlp_gives_the_loss_and_gradients_of_the_whole_one() {
+    let cfg = lora_config();
+    let init = weights(&cfg, 0.3);
+    for base in [Dtype::F32, Dtype::BF16] {
+        let whole = loss_and_grads(&build(&cfg, &init, base, true));
+        let opts = TrainOpts { base: TierPolicy::uniform(base), recompute: true, mlp_rows: Some(5), ..TrainOpts::default() };
+        let chunked = Qwen35::new_train_opts_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, T as u32, &init, &opts);
+        assert_same_training_signal(loss_and_grads(&chunked), whole, 1e-6, 0.999999);
+    }
+}
