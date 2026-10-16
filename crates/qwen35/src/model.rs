@@ -197,6 +197,9 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     // for the same reason as the head kernels above.
     ("gdn_ut_fwd", kernels::GDN_UT_FWD), // 93
     ("bmm_tiled", kernels::BMM_TILED), // 94
+    // The coalesced RMSNorm backward-x twin: the training backward's norms select it
+    // through `block::rms_variant` where the device can run a workgroup reduction.
+    ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS), // 95
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -398,6 +401,7 @@ const SPLICE: usize = 74;
 const SPLICE_BWD: usize = 75;
 const CAUSAL_CONV1D_STEP: usize = 76;
 const RMSNORM_ROWS: usize = 84;
+const RMSNORM_DX_ROWS: usize = 95;
 const ARGMAX_PART: usize = 85;
 const ARGMAX_FINAL: usize = 86;
 const TOPK_EXTRACT_STEP: usize = 87;
@@ -538,7 +542,7 @@ pub(crate) fn kernel_ids() -> KernelIds {
         rmsnorm: RMSNORM,
         rms_inv: RMS_INV,
         rmsnorm_dx: RMSNORM_DX,
-        rmsnorm_dx_rows: block::UNREGISTERED,
+        rmsnorm_dx_rows: RMSNORM_DX_ROWS,
         rmsnorm_dw: RMSNORM_DW,
         // Rotation here is table-driven M-RoPE (`rope2d`, via the mixer id
         // sets), never `block::rope_fwd`/`rope_bwd` - so these two slots are
@@ -556,7 +560,7 @@ pub(crate) fn kernel_ids() -> KernelIds {
         silu_mul: SILU_MUL,
         silu_da: SILU_BWD_DA,
         silu_db: SILU_BWD_DB,
-        rmsnorm_rows: block::UNREGISTERED,
+        rmsnorm_rows: RMSNORM_ROWS,
     }
 }
 
