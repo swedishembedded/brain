@@ -698,7 +698,15 @@ impl TextGenerationPipelineBuilder {
         // What was loaded, by content: hashed after the build, so a file that
         // could not be loaded is never reported, and before the pipeline is
         // handed out, so the digest describes the bytes this load read.
-        let identity = crate::chat::ModelIdentity { base: crate::chat::WeightsIdentity::of_path(&weights, base_id)?, adapter: None };
+        let tokenizer_digest = match (&tok_file, &embedded) {
+            (Some(file), _) => brain_modelstore::fetch::file_digest(Path::new(file)).map_err(|e| Error::Backend(format!("{file}: hashing the tokenizer: {e}")))?,
+            (None, Some(gt)) => {
+                let canonical = serde_json::json!({"model": gt.model, "pre": gt.pre, "tokens": gt.tokens, "merges": gt.merges}).to_string();
+                format!("sha256:{}", brain_modelstore::fetch::bytes_digest(canonical.as_bytes()))
+            }
+            (None, None) => unreachable!("a tokenizer was built from one of the two sources"),
+        };
+        let identity = crate::chat::ModelIdentity { base: crate::chat::WeightsIdentity::of_path(&weights, base_id)?, adapter: None, tokenizer: Some(tokenizer_digest) };
         let mut engine = Engine { model, tok, eos, format, precision, capacity, identity, weights: weights.clone(), folded: Vec::new() };
         match &adapter {
             // An fp32 base takes the adapter's delta exactly, so it is folded

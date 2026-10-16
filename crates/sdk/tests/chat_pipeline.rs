@@ -332,10 +332,12 @@ fn moving_adapter_for(tag: &str, cfg: &qwen3::QwenConfig) -> Scratch {
 /// and digest.
 #[test]
 fn the_identity_names_the_loaded_base_and_adapter_by_digest() {
-    let (pipe, ckpt, _tok) = tiny_chat("identity", None);
+    let (pipe, ckpt, tok) = tiny_chat("identity", None);
     let identity = pipe.identity();
     assert_eq!(identity.base.path, ckpt.to_path_buf());
     assert_eq!(identity.base.digest, file_digest(&ckpt));
+    // The same weights with another vocabulary are another model.
+    assert_eq!(identity.tokenizer.as_deref(), Some(file_digest(&tok.join("tokenizer.json")).as_str()));
     assert!(identity.adapter.is_none(), "{identity:?}");
 
     let ckpt = tiny_qwen3_checkpoint("chat-identity-adapter");

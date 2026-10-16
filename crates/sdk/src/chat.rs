@@ -420,6 +420,12 @@ pub struct ModelIdentity {
     pub base: WeightsIdentity,
     /// Present exactly when an adapter is applied to the base.
     pub adapter: Option<WeightsIdentity>,
+    /// `sha256:<hex>` of the tokenizer that encodes prompts for this model:
+    /// the tokenizer file's bytes, or for a GGUF's embedded tokenizer the
+    /// digest of its scheme, vocabulary and merges. The same weights under
+    /// another vocabulary decode to different text, so it is part of what
+    /// identifies a deployment. `None` only when no tokenizer is bound.
+    pub tokenizer: Option<String>,
 }
 
 /// One loaded weights file.
