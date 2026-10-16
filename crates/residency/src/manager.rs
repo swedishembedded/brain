@@ -1055,7 +1055,7 @@ impl ResidencyManager {
         // The host bytes are a real charge and must FIT before anything is
         // reserved - checked here rather than inside `charge_multi_host` so a
         // refusal happens before the per-device budgets are touched.
-        if cost.ram() > 0 && !devices.contains(&Device::Cpu) && self.budgets.get(Device::Cpu).is_some() && !self.budgets.fits_on(Device::Cpu, cost.ram()) {
+        if self.charges_multi_host(&cost, &devices) && !self.budgets.fits_on(Device::Cpu, cost.ram()) {
             return Err(ClaimError::NoCapacity(format!("{key}: {} MiB of host RAM does not fit right now", cost.ram() >> 20)));
         }
         for &d in &devices {
@@ -1341,19 +1341,27 @@ impl ResidencyManager {
     /// entry is charged by the per-device loop, and charging both would
     /// double-count one model's own host bytes.
     fn charge_multi_host(&mut self, cost: &crate::multi::MultiDeviceCost, devices: &[Device]) {
-        let ram = cost.ram();
-        if ram > 0 && !devices.contains(&Device::Cpu) && self.budgets.get(Device::Cpu).is_some() {
-            self.budgets.alloc(Device::Cpu, ram);
+        if self.charges_multi_host(cost, devices) {
+            self.budgets.alloc(Device::Cpu, cost.ram());
         }
     }
 
     /// The exact inverse of [`Self::charge_multi_host`] - same condition, so
     /// the two cannot drift and leave the host budget permanently short.
     fn refund_multi_host(&mut self, cost: &crate::multi::MultiDeviceCost, devices: &[Device]) {
-        let ram = cost.ram();
-        if ram > 0 && !devices.contains(&Device::Cpu) && self.budgets.get(Device::Cpu).is_some() {
-            self.budgets.release(Device::Cpu, ram);
+        if self.charges_multi_host(cost, devices) {
+            self.budgets.release(Device::Cpu, cost.ram());
         }
+    }
+
+    /// Whether a multi-device model's host bytes are accounted against
+    /// `Device::Cpu` at all: only when it declares some and the host has a
+    /// budget (`total > 0`) to account them in. A CPU excluded from compute
+    /// (`--device gpu0,gpu1`) is budgeted at zero, which means "not a
+    /// placement target", not "no RAM": staging bytes are not a CPU placement,
+    /// so checking them there would leave the model permanently unplaceable.
+    fn charges_multi_host(&self, cost: &crate::multi::MultiDeviceCost, devices: &[Device]) -> bool {
+        cost.ram() > 0 && !devices.contains(&Device::Cpu) && self.budgets.get(Device::Cpu).is_some_and(|b| b.total > 0)
     }
 
     fn evict_entry(&mut self, key: &InstanceKey) {
@@ -2160,6 +2168,28 @@ mod tests {
         mgr.release_multi(&key);
         assert!(mgr.evict_multi(&key));
         assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 0, "and released again, exactly");
+    }
+
+    /// **A CPU excluded from compute does not strand a multi-device model.**
+    /// `--device gpu0,gpu1` gives `Device::Cpu` a zero budget (it is not a
+    /// placement target), and the model's host staging bytes were checked
+    /// against that budget: the claim answered "does not fit right now" for
+    /// ever, so the model was listed, never loaded, and every request timed out
+    /// waiting for admission. Staging bytes are not a CPU placement; with no
+    /// host budget declared for compute they are neither checked nor charged.
+    #[test]
+    fn a_multi_device_model_loads_when_the_cpu_is_excluded_from_compute() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        budgets.set(Device::Cpu, 0, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register_multi(Arc::new(MultiFakeHost { live: live.clone() }));
+        let (_, key) = claim_multi_built(&mut mgr, "hosty").expect("the GPUs hold it; the excluded CPU is not asked");
+        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 0, "nothing is charged to a budget that is not there");
+        mgr.release_multi(&key);
+        assert!(mgr.evict_multi(&key));
+        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 0);
     }
 
     /// gpu0's share needs an eviction to fit; gpu1's can never fit at all.
