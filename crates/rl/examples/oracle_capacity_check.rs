@@ -228,6 +228,7 @@ fn main() {
         checkpoint_secs: 0,
         align_to_lines: true,
         patience: 0,
+        cooldown_steps: 0,
         // Supervise only the completion (t0,t1,t2), not the prompt, which the
         // loss would otherwise spend most of its gradient trivially
         // predicting. The char is derived by the dataset writer's own module
