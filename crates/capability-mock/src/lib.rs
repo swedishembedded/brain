@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn different_seeds_produce_different_output() {
-        let spec = spec_for(MockOutput::Image { w: 4, h: 4 }).param(ParamSpec::new("seed", ParamType::Int, "seed").default(json!(0)));
+        let spec = spec_for(MockOutput::Image { w: 4, h: 4 }).param(ParamSpec::new("seed", ParamType::Int, "seed").default(json!(0))); // seed: the mock's declared default is never taken: the test passes seeds 1 and 2 explicitly
         let p = MockProvider::new("mock/vision", "test").action(spec, MockOutput::Image { w: 4, h: 4 });
         let a = Provider::action(&p, "go").unwrap().run(&Invocation::new().set("seed", json!(1)), &mut |_| {}).unwrap();
         let b = Provider::action(&p, "go").unwrap().run(&Invocation::new().set("seed", json!(2)), &mut |_| {}).unwrap();
