@@ -105,6 +105,10 @@ name = "plumb_native"
 harness = false
 
 [[test]]
+name = "ce_stats_native"
+harness = false
+
+[[test]]
 name = "bn_native"
 harness = false
 

@@ -78,6 +78,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `attn_softmax_fwd` | Softmax | F32 | tuned | 5.0 | `brain_attn_softmax_fwd` | causal softmax of one query block's fp32 scores into bf16 probabilities and the row log-sum-exp, a block per (head, row) |
 | `attn_dscore` | Softmax | F32 | tuned | 5.0 | `brain_attn_dscore` | attention score gradient p * (dp - D) * scale and the rebuilt probabilities as bf16, from fp32 scores and the saved log-sum-exp |
 | `attn_rowdot` | Softmax | F32 | tuned | 5.0 | `brain_attn_rowdot` | per-row dot product of two fp32 matrices (D = rowsum(dO * O) of attention's backward), a block per row |
+| `ce_stats_f32` | Softmax | F32 | tuned | 5.0 | `brain_ce_stats` | per-row max and sum of exp(logit - max) for the cross-entropy backward, a 256-thread block per row instead of a thread per row; the sum is reassociated |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 

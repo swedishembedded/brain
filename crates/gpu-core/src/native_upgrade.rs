@@ -360,6 +360,9 @@ pub(crate) const ROWS: &[Row] = &[
     // kernel's partition and fold order, bit-identical
     // (`tests/softmax_rows_native.rs`). One row per register bucket, the
     // smallest first - `apply` takes the first that serves the row length.
+    // The cross-entropy backward's per-row statistics: a block per row. The sum is
+    // reassociated, so it is held to the fp32 summation bound (`tests/ce_stats_native.rs`).
+    Row { slow: "ce_stats", target: Target::Named("ce_stats_f32"), bindings: CE_STATS_BINDINGS, serves: serves_ce_stats, blocks: ce_stats_blocks, requires_wgsl_upgrade: false },
     Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k8"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k8, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false },
     Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k16"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k16, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false },
     Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k32"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k32, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false },
@@ -413,6 +416,19 @@ const COPY_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, B
 
 /// Two read operands, one written output (`concat2`, `silu_bwd`).
 const CONCAT2_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// `ce_stats.wgsl`'s bindings: params, logits, targets, the written statistics.
+const CE_STATS_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// `[n_rows, u_bins, ignore]`, both extents non-zero.
+fn serves_ce_stats(p: &[u32]) -> bool {
+    matches!(p, [rows, bins, _] if *rows >= 1 && *bins >= 1 && u64::from(*rows) * u64::from(*bins) <= u64::from(u32::MAX))
+}
+
+/// A block per row.
+fn ce_stats_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[0]
+}
 
 /// `[N, Ctot, Csrc, c_off, H, W]` with the window inside the wider map.
 fn serves_chan_window(p: &[u32]) -> bool {
