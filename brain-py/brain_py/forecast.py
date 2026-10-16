@@ -262,6 +262,8 @@ class Forecast:
         self.horizon = int(wire.get("horizon", 0))
         self.freq = wire.get("freq", "")
         self.targets = [TargetForecast(t) for t in wire.get("targets", [])]
+        # The seed the forecast ran under; passing it back reproduces it.
+        self.seed = wire.get("seed")
 
     def target(self, name: Optional[str] = None) -> TargetForecast:
         if name is None:

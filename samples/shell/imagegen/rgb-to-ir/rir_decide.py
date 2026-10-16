@@ -20,7 +20,7 @@ The decision config (JSON, paths relative to it):
     roles             {role: arm directory name}; roles A1 A2 B3 C2 REAL_K REAL_K_PLUS_SYNTHETIC. The names are
                       those the arm was ingested, gated, packed and evaluated under (rir_synth.py), e.g. "c2";
                       arms without a role (C1, C3, V0) are reported by directory name beside the others
-    resamples, seed   bootstrap size (2000) and seed (1)
+    resamples, seed   bootstrap size (2000) and seed (drawn, and recorded in the decision, when absent)
     alpha             0.05
     nc                number of classes of the detector head (default: from the data)
     instruction_model true when the translator is the instruction-conditioned one (enables K5)
@@ -72,6 +72,7 @@ import numpy as np
 
 import rir_bootstrap as B
 import rir_eval as E
+import rir_seed
 
 ROLES = ("A1", "A2", "B3", "C2", "REAL_K", "REAL_K_PLUS_SYNTHETIC")
 PRIMARY = 1  # index of mAP@0.5:0.95 in a (mAP@0.5, mAP@0.5:0.95) pair
@@ -92,7 +93,7 @@ class Config:
     sequences: str
     roles: dict
     resamples: int = B.DEFAULT_RESAMPLES
-    seed: int = 1
+    seed: int | None = None
     alpha: float = 0.05
     nc: int | None = None
     instruction_model: bool = False
@@ -283,13 +284,14 @@ def decide(results_dir: str, config: Config) -> Decision:
     scores, arm_reports, method = {}, {}, {}
     if arms_images:
         sequences = E.sequence_ids(reference, E.load_sequences(config.sequences))
-        weights = B.resample_weights(sequences, config.resamples, config.seed)
+        seed = rir_seed.resolve(config.seed, "decide")
+        weights = B.resample_weights(sequences, config.resamples, seed)
         for arm, runs in arms_images.items():
             scores[arm] = B.score_arm(arm, [E.prepare(images) for images in runs.values()], weights, config.nc)
             arm_reports[arm] = ArmReport(len(runs), _estimate(scores[arm], 0, config.alpha),
                                          _estimate(scores[arm], PRIMARY, config.alpha))
         method = {"unit": "sequence", "n_sequences": len(set(sequences)), "n_images": len(reference),
-                  "resamples": config.resamples, "seed": config.seed, "alpha": config.alpha,
+                  "resamples": config.resamples, "seed": seed, "alpha": config.alpha,
                   "seeds_per_arm": {a: r.seeds for a, r in arm_reports.items()}}
 
     def need(*roles):

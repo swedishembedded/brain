@@ -26,6 +26,7 @@ import numpy as np
 
 import rir_regions as R
 import rir_tiles as T
+import rir_seed
 
 COLOURS = {"warmer": (60, 60, 255), "cooler": (255, 140, 40), "same": (170, 170, 170), None: (255, 255, 255)}  # BGR
 
@@ -56,8 +57,9 @@ def render_cell(tiles_dir: str, entry: dict, caption: str, segmenter, panel: int
 
 
 def contact_sheet(tiles_dir: str, out_path: str, segmenter, count: int = 12, columns: int = 3, panel: int = 256,
-                  seed: int = 1) -> list[str]:
+                  seed: int | None = None) -> list[str]:
     """Write the sheet; returns the names of the tiles on it."""
+    seed = rir_seed.resolve(seed, "contact_sheet")
     captions = {}
     with open(os.path.join(tiles_dir, "captions.yaml")) as fh:
         for line in fh:

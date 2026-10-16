@@ -1,6 +1,2 @@
-scripts/demo/quickstart.sh	need:--seed=1337	shell-seed	todo: B-19 the script pins its seed instead of drawing and printing one
-scripts/demo/quickstart.sh	need:--seed=7	shell-seed	todo: B-19 the script pins its seed instead of drawing and printing one
-scripts/parity-dump/genie_dynamics.py	-:FIXTURE_SEED=0	python-const	todo: B-9 the dump takes no seed and its output is not a committed fixture
-scripts/parity-dump/genie_maskgit.py	-:FIXTURE_SEED=0	python-const	todo: B-9 the dump takes no seed and its output is not a committed fixture
-scripts/parity-dump/genie_tokenizer.py	-:FIXTURE_SEED=0	python-const	todo: B-9 the dump takes no seed and its output is not a committed fixture
-scripts/run_s3dit_int8_e2e.sh	-:--seed=42	shell-seed	todo: B-19 the script pins its seed instead of drawing and printing one
+scripts/demo/quickstart.sh	need:--seed=1337	shell-seed	frozen: reproduces the published docs/quickstart output the README embeds or quotes, run with the seed the README command names
+scripts/demo/quickstart.sh	need:--seed=7	shell-seed	frozen: reproduces the published docs/quickstart output the README embeds or quotes, run with the seed the README command names

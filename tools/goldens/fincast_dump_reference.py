@@ -5,7 +5,7 @@
 """Dump a FinCast reference forward for the brain parity ladder.
 
 Runs the *actual* reference model (`PatchedTimeSeriesDecoder_MOE` from
-`resources/time-series/repos/FinCast`) on a fixed, seeded context and writes the
+`resources/time-series/repos/FinCast`) on a seeded context and writes the
 denormalized head output for the last patch (= brain's first AR-decode step).
 
 Parity trap: the reference MoE gate is **stochastic even at eval** (it draws
@@ -22,7 +22,7 @@ Outputs (into <out_dir>):
   - ref_context.npy   (gitignored): the raw context fed to the model.
 
 Usage:
-  python3 tools/goldens/fincast_dump_reference.py <v1.pth> <out_dir> [--ctx 512]
+  python3 tools/goldens/fincast_dump_reference.py <v1.pth> <out_dir> [--ctx 512] [--seed N]
 
 Not part of the build. Needs the repo venv (torch, einx, colt5_attention,
 st_moe_pytorch).
@@ -30,6 +30,7 @@ st_moe_pytorch).
 import argparse
 import importlib.util
 import json
+import secrets
 import os
 import sys
 
@@ -56,20 +57,16 @@ def strip_prefix(k):
     return k
 
 
-def sample(arr, k=64, seed=0):
-    flat = arr.reshape(-1)
-    rng = np.random.default_rng(seed)
-    idx = rng.choice(flat.size, size=min(k, flat.size), replace=False)
-    idx.sort()
-    return [[int(i), float(flat[i])] for i in idx]
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ckpt")
     ap.add_argument("out_dir")
     ap.add_argument("--ctx", type=int, default=512)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="seed of the synthetic context; drawn and printed when omitted, recorded in golden_meta.json")
     args = ap.parse_args()
+    seed = args.seed if args.seed is not None else secrets.randbits(31)
+    print(f"seed {seed}" + ("" if args.seed is not None else " (drawn; pass --seed to reproduce)"))
     os.makedirs(args.out_dir, exist_ok=True)
 
     ppd = load_ppd()
@@ -92,7 +89,7 @@ def main():
     # fixed seeded context: trend + seasonal + noise
     ctx_len = args.ctx
     t = np.arange(ctx_len, dtype=np.float64)
-    rng = np.random.default_rng(1234)
+    rng = np.random.default_rng(seed)
     context = (100.0 + 0.05 * t + 5.0 * np.sin(2 * np.pi * t / 64.0)
                + rng.normal(0, 0.5, ctx_len)).astype(np.float32)
 
@@ -113,6 +110,7 @@ def main():
         "model": "Vincent05R/FinCast v1.pth",
         "note": "reference forward, stochastic MoE neutralized -> deterministic top-2",
         "ctx_len": ctx_len,
+        "seed": seed,
         "freq": 0,
         "horizon_len": 128,
         "num_outputs": 10,

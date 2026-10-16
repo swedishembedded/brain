@@ -1,3 +1,2 @@
-Makefile	-:wm/fixtures:--seed=7	make-flag	todo: B-8 the fixtures recipe pins the seed
 README.md	-:--seed=20260827	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one
 README.md	-:--seed=7	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one

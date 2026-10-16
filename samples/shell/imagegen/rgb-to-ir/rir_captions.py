@@ -57,6 +57,7 @@ from typing import Callable
 import numpy as np
 
 import rir_tiles as T
+import rir_seed
 
 NEUTRAL_CAPTION = T.NEUTRAL_CAPTION
 POLARITIES = ("warmer", "cooler", "same")
@@ -171,9 +172,10 @@ def _rank_key(seed: int, name: str) -> int:
     return zlib.crc32(f"{seed}/neutral/{name}".encode())
 
 
-def build_captions(tiles_dir: str, seed: int = 1, neutral_share: float = 0.3,
+def build_captions(tiles_dir: str, seed: int | None = None, neutral_share: float = 0.3,
                    paraphrase: Callable[[str], str] | None = None) -> dict:
     """Write captions.yaml (training), heldout-captions.jsonl (evaluation only) and captions-report.json."""
+    seed = rir_seed.resolve(seed, "build_captions")
     tiles = [e for e in T.read_index(tiles_dir) if e["accepted"]]
     per_tile, conflicts = {}, 0
     for e in tiles:

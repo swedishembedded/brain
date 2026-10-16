@@ -12,13 +12,15 @@ Stage 1 (this pass): the log-mel FRONT ENDS.
       Hann periodic=True, reflect pad, log10 + dynamic-range compression)
 
 Everything is written as little-endian f32 raw blobs plus a JSON manifest of shapes
-under resources/asr/golden/<group>/. Deterministic input (fixed seed) so the Rust
+under resources/asr/golden/<group>/. The input is fixed by --seed (drawn and recorded in the manifest when omitted) so the Rust
 side feeds byte-identical samples.
 
 Usage:  python tools/goldens/asr_dump_reference.py frontend
 """
+import argparse
 import json
 import os
+import secrets
 import sys
 
 import numpy as np
@@ -35,8 +37,8 @@ def save(group: str, name: str, arr, manifest: dict):
     manifest[name] = list(arr.shape)
 
 
-def make_waveform(seconds=2.0, sr=16000, seed=1234):
-    """Deterministic pseudo-speech: sum of a few swept sinusoids + mild noise, in [-1, 1]."""
+def make_waveform(seed, seconds=2.0, sr=16000):
+    """Pseudo-speech fixed by `seed`: a few swept sinusoids + mild noise, in [-1, 1]."""
     rng = np.random.default_rng(seed)
     n = int(seconds * sr)
     t = np.arange(n) / sr
@@ -53,12 +55,12 @@ def make_waveform(seconds=2.0, sr=16000, seed=1234):
     return sig.astype(np.float32)
 
 
-def dump_frontend():
+def dump_frontend(seed):
     import torch
     from transformers import AutoProcessor
 
-    wav = make_waveform()
-    man = {"sampling_rate": 16000}
+    wav = make_waveform(seed)
+    man = {"sampling_rate": 16000, "seed": seed}
     save("frontend", "waveform", wav, man)
 
     # ---- Nemotron ----
@@ -95,14 +97,14 @@ def dump_frontend():
     print(json.dumps(man, indent=2))
 
 
-def dump_qwen_encoder():
+def dump_qwen_encoder(seed):
     """Run the Qwen3-ASR audio tower + projector in fp32 on the test waveform and
     dump the encoder output (post ln_post) and the projected audio embeddings."""
     import torch
     from transformers import AutoProcessor, Qwen3ASRForConditionalGeneration
 
-    wav = make_waveform()
-    man = {}
+    wav = make_waveform(seed)
+    man = {"seed": seed}
     proc = AutoProcessor.from_pretrained("Qwen/Qwen3-ASR-1.7B-hf")
     feat = proc.feature_extractor(
         wav, sampling_rate=16000, return_tensors="pt", return_attention_mask=True
@@ -244,14 +246,18 @@ def dump_nemotron():
 
 
 if __name__ == "__main__":
-    stage = sys.argv[1] if len(sys.argv) > 1 else "frontend"
-    if stage == "frontend":
-        dump_frontend()
-    elif stage == "qwen_encoder":
-        dump_qwen_encoder()
-    elif stage == "qwen_decode":
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("stage", nargs="?", default="frontend", choices=["frontend", "qwen_encoder", "qwen_decode", "nemotron"])
+    ap.add_argument("--seed", type=int, default=None,
+                    help="seed of the synthetic waveform; drawn and printed when omitted, recorded in the manifest")
+    args = ap.parse_args()
+    seed = args.seed if args.seed is not None else secrets.randbits(31)
+    print(f"seed {seed}" + ("" if args.seed is not None else " (drawn; pass --seed to reproduce)"))
+    if args.stage == "frontend":
+        dump_frontend(seed)
+    elif args.stage == "qwen_encoder":
+        dump_qwen_encoder(seed)
+    elif args.stage == "qwen_decode":
         dump_qwen_decode()
-    elif stage == "nemotron":
-        dump_nemotron()
     else:
-        raise SystemExit(f"unknown stage {stage!r}")
+        dump_nemotron()

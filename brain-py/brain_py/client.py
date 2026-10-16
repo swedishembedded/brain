@@ -119,6 +119,14 @@ def _find_brain_binary(explicit: Optional[str]) -> str:
     )
 
 
+class BacktestResult(dict):
+    """``{model: {metric: value}}`` plus the ``seed`` the backtest ran under."""
+
+    def __init__(self, seed: Optional[int] = None) -> None:
+        super().__init__()
+        self.seed = seed
+
+
 class _Pending:
     """Accumulated state for one in-flight request, keyed by req_id."""
 
@@ -487,7 +495,7 @@ class BrainStdio(BrainBase):
     def forecast(self, panel: Panel, horizon: int,
                  quantiles: Optional[list] = None, num_samples: int = 0,
                  representations: Optional[list] = None, model: str = "naive",
-                 seed: int = 0, timeout: float = 120.0,
+                 seed: Optional[int] = None, timeout: float = 120.0,
                  req_id: Optional[str] = None) -> Forecast:
         """Forecast ``panel`` over ``horizon`` steps with the named ``model``.
 
@@ -495,6 +503,9 @@ class BrainStdio(BrainBase):
         ``num_samples > 0`` to also draw sample trajectories. Returns a
         :class:`Forecast` whose ``.median()`` / ``.interval()`` / ``.samples()``
         and ``.derived`` expose the result honestly (derived fields flagged).
+
+        Without ``seed`` the server draws one; the seed the forecast ran under
+        is :attr:`Forecast.seed`, and passing it back reproduces the forecast.
         """
         levels = quantiles or [0.1, 0.5, 0.9]
         reps = representations or (["quantiles", "point"] + (["samples"] if num_samples else []))
@@ -511,7 +522,7 @@ class BrainStdio(BrainBase):
                 "representations": reps,
                 "quantile_levels": levels,
                 "num_samples": num_samples,
-                "seed": seed,
+                **({} if seed is None else {"seed": seed}),
             },
         })
         p = self._wait_for(rid, timeout)
@@ -523,12 +534,14 @@ class BrainStdio(BrainBase):
 
     def backtest(self, panel: Panel, horizon: int, models: list,
                  origins: int = 30, stride: int = 1,
-                 metrics: Optional[list] = None, seed: int = 0,
-                 timeout: float = 600.0, req_id: Optional[str] = None) -> dict:
+                 metrics: Optional[list] = None, seed: Optional[int] = None,
+                 timeout: float = 600.0, req_id: Optional[str] = None) -> "BacktestResult":
         """Run a server-side rolling-origin backtest of ``models`` over ``panel``.
 
         Returns ``{model: {metric: value}}`` aggregated over origins. Always
         include ``"naive"`` so results are read relative to the baseline.
+        Without ``seed`` the server draws one, reported as the result's
+        ``.seed``; passing it back reproduces the backtest.
         """
         rid = req_id or self._next_id()
         self._send({
@@ -541,13 +554,13 @@ class BrainStdio(BrainBase):
                 "origins": origins,
                 "stride": stride,
                 "metrics": metrics or ["mase", "wql", "coverage", "directional"],
-                "seed": seed,
+                **({} if seed is None else {"seed": seed}),
             },
         })
         p = self._wait_for(rid, timeout)
         evt = next((e for e in p.events if e.get("event") == "backtest_result"), None)
         rows = ((evt or {}).get("report") or {}).get("rows", [])
-        out: dict[str, dict[str, float]] = {}
+        out = BacktestResult(seed=(evt or {}).get("seed"))
         for r in rows:
             out.setdefault(r["model"], {})[r["metric"]] = r["value"]
         return out

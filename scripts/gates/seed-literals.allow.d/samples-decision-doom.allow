@@ -1,7 +1,2 @@
-samples/decision/doom/improve.sh	-:SEEDS:-3	shell-seed	todo: B-19 the script pins its seed instead of drawing and printing one
-samples/decision/doom/improve.sh	-:seq 1	shell-seed	todo: B-19 the script pins its seed instead of drawing and printing one
-samples/decision/doom/ladder.sh	-:SEARCH_SEED:-1	shell-seed	todo: B-19 the script pins its seed instead of drawing and printing one
-samples/decision/doom/ladder.sh	-:SEEDS:-3	shell-seed	todo: B-19 the script pins its seed instead of drawing and printing one
-samples/decision/doom/ladder.sh	record:--seed=1	shell-seed	todo: B-19 the script pins its seed instead of drawing and printing one
-samples/decision/doom/scoreboard.sh	-:SEED:-11	shell-seed	todo: B-19 the script pins its seed instead of drawing and printing one
+samples/decision/doom/improve.sh	-:seq 1	shell-seed	salt: the campaign index, added to the recorded base seed to give each campaign its own seed
 samples/decision/doom/src/view.rs	score_policy:Rng::new(0x5eed_d00d)	rng	salt: mixed into the caller seed

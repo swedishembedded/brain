@@ -43,14 +43,16 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import rir_eval as E
+import rir_seed
 
 DEFAULT_RESAMPLES = 2000
 SEED_NOISE_FACTOR = 2.0
 MAX_NONPOSITIVE_GAP_SHARE = 0.05  # share of resamples whose denominator may be non-positive
 
 
-def resample_weights(sequences: list[str], n_resamples: int = DEFAULT_RESAMPLES, seed: int = 1) -> np.ndarray:
+def resample_weights(sequences: list[str], n_resamples: int = DEFAULT_RESAMPLES, seed: int | None = None) -> np.ndarray:
     """(n_resamples, n_images): how often each image is counted in each resample of whole sequences."""
+    seed = rir_seed.resolve(seed, "resample_weights")
     ids, cluster = np.unique(np.asarray(sequences), return_inverse=True)
     rng = np.random.default_rng(seed)
     draws = rng.integers(0, len(ids), size=(n_resamples, len(ids)))

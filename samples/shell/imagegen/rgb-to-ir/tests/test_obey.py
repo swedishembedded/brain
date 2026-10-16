@@ -310,7 +310,8 @@ class Plumbing(unittest.TestCase):
         big[10:110, 10:110] = True
         ir = paint(np.full((120, 120), 110.0), big, STEP)
         pair = O.ObeyPair("s0", "person", "warmer", "oracle", ir, big, key="t")
-        p = person(O.evaluate([pair], n_resamples=50))
+        # seed: the resamples of the single pair's interval are read off this stream
+        p = person(O.evaluate([pair], n_resamples=50, seed=1))
         self.assertIsNone(p["direction_accuracy"])
         self.assertIsNone(p["effect"])
         self.assertEqual(p["n"], 1)

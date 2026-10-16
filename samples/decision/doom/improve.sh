@@ -53,10 +53,10 @@ SKILL=${SKILL:-3}
 # Worth doing because the spread between seeds is wide: measured on E1M1 at
 # one budget, the same binary scored 0.221 on one seed and 1.039 on another.
 # A single seed makes a generation's result hostage to that draw. Several
-# seeds buy independent draws at a rare event - a secret - at the cost of
+# campaigns buy independent draws at a rare event - a secret - at the cost of
 # each one searching less deeply, which is the right trade early and the
 # wrong one once a level is nearly solved.
-SEEDS=${SEEDS:-3}
+CAMPAIGNS=${CAMPAIGNS:-3}
 OUT=${OUT:-out}
 # Long enough for the category to be the thing being measured: E1M6 holds 177
 # monsters, and a short horizon scores whatever pays fastest instead.
@@ -67,6 +67,10 @@ STEPS=${STEPS:-3000}
 EPISODES=${EPISODES:-12}
 
 mkdir -p "$OUT"
+. "$(dirname "$0")/seed.sh"
+# Campaign c searches under BASE_SEED + c. The base is drawn once and recorded
+# in $OUT, so a resumed run keeps the seeds its per-campaign archives belong to.
+BASE_SEED=$(run_seed "$OUT/base-seed" improve "${BASE_SEED:-}")
 SERVING="$OUT/doom-serving.safetensors"
 
 for gen in $(seq 1 "$GENS"); do
@@ -78,9 +82,10 @@ for gen in $(seq 1 "$GENS"); do
   #     once there is one, which is the half that makes this a loop.
   PROPOSE=()
   [ -f "$SERVING" ] && PROPOSE=(--head "$SERVING" --encoder "$ENC")
-  for seed in $(seq 1 "$SEEDS"); do
+  for campaign in $(seq 1 "$CAMPAIGNS"); do
+    seed=$((BASE_SEED + campaign))
     echo
-    echo "--- generation $gen, seed $seed of $SEEDS ---"
+    echo "--- generation $gen, campaign $campaign of $CAMPAIGNS (seed $seed) ---"
     # One archive per seed, carried across generations under its own name.
     # Solutions are written per seed too and pooled below, because the best
     # run of a level may come from any of them.

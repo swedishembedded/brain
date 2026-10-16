@@ -18,14 +18,17 @@
 # Needs pyarrow and nothing else; reads only the columns it wants over HTTP
 # range requests (~116 MB for 4000 rows rather than the 7.2 GB published CSV).
 #
-#   python3 tools/salesconv_embedding_baseline.py
+#   python3 tools/salesconv_embedding_baseline.py [SEED]
+#
+# SEED orders the training examples of each epoch; it is drawn and printed when
+# omitted.
 #
 # Swedish Embedded AB verifies published machine learning results against their
 # own artifacts for its clients. If your team needs a claim checked before you
 # build on it, you can procure our services by sending an email to
 # info@swedishembedded.com.
 
-import io, json, math, random, time, urllib.request
+import io, json, math, random, secrets, sys, time, urllib.request
 import pyarrow.parquet as pq
 
 class HttpFile(io.RawIOBase):
@@ -46,6 +49,8 @@ class HttpFile(io.RawIOBase):
         with urllib.request.urlopen(req) as r: d = r.read()
         self.pos += len(d); self.downloaded += len(d); return d
 
+SEED = int(sys.argv[1]) if len(sys.argv) > 1 else secrets.randbits(31)
+print(f"seed {SEED}" + ("" if len(sys.argv) > 1 else " (drawn; pass it as the first argument to reproduce)"))
 url = "https://huggingface.co/api/datasets/DeepMostInnovations/saas-sales-conversations/parquet/default/train/0.parquet"
 h = HttpFile(url); f = pq.ParquetFile(url and h)
 EMB = [f"embedding_{i}" for i in range(3072)]
@@ -62,7 +67,7 @@ print(f"train {len(tr)} / test {len(te)}, positive rate {sum(y)/n:.2f}")
 
 w = [0.0] * 3072; b = 0.0
 for ep in range(25):
-    random.seed(ep); order = tr[:]; random.shuffle(order)
+    order = tr[:]; random.Random(SEED + ep).shuffle(order)
     lr = 0.5 / (1 + ep)
     for i in order:
         z = b + sum(w[k] * X[i][k] for k in range(3072))

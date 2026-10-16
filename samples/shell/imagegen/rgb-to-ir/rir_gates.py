@@ -52,6 +52,7 @@ import cv2
 import numpy as np
 
 import rir_data as D
+import rir_seed
 
 REASONS = ("global_shift", "box_edge_correlation", "box_mask_iou", "hallucination")
 SHIFT_FLOOR_PX = 0.5  # added to the real pairs' own spread: phase correlation resolves about half a pixel
@@ -174,11 +175,11 @@ def real_reference(pairs: Iterable, percentile: float = 10.0, min_box_px: int = 
                          ShiftReference((float(median[0]), float(median[1])), p95, len(shifts), floor))
 
 
-def manifest_pairs(records: list[dict], classes: tuple[str, ...], limit: int = 0, seed: int = 1):
+def manifest_pairs(records: list[dict], classes: tuple[str, ...], limit: int = 0, seed: int | None = None):
     """Real pairs `(rgb, ir, boxes)` of manifest records (seeded subset of `limit` when given), boxes of `classes` only."""
     rows = sorted(records, key=lambda r: (r["dataset"], r["id"]))
     if limit and limit < len(rows):
-        rows = random.Random(seed).sample(rows, limit)
+        rows = random.Random(rir_seed.resolve(seed, "manifest_pairs")).sample(rows, limit)
     for row in rows:
         boxes = [(c, *xyxy) for c, *xyxy in D.class_boxes(row, classes)]
         if boxes:

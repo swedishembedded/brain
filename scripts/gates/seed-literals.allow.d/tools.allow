@@ -1,8 +1,5 @@
-tools/goldens/asr_dump_reference.py	make_waveform:seed=1234	python-default	todo: B-21 the dump draws its input under a fixed seed and its output is not a committed fixture
 tools/goldens/cosyvoice3_dump_reference.py	-:LIBRARY_NOISE_SEED=0	python-const	frozen: the library draws its noise buffer under seed 0 at construction and the dump replays that exact seed to prove the buffer
 tools/goldens/cosyvoice_dump_reference.py	-:LIBRARY_NOISE_SEED=0	python-const	frozen: the library draws its noise buffer under seed 0 at construction and the dump replays that exact seed to prove the buffer
-tools/goldens/fincast_dump_reference.py	main:default_rng=1234	python-rng	todo: B-21 the dump draws its input under a fixed seed and its output is not a committed fixture
-tools/goldens/fincast_dump_reference.py	sample:seed=0	python-default	todo: B-21 the dump draws its input under a fixed seed and its output is not a committed fixture
 tools/goldens/ltxv_maskcond_dump_reference.py	-:MASK_SEED=4321	python-const	world: the mask-building draw is a stream independent of the noise seed and part of what defines the committed fixture masks; the manifest records mask_seed
 tools/goldens/qwen3tts_dump_talker_reference.py	check_mrope_collapses:manual_seed=0	python-rng	world: the self-check draws a fixed probe tensor to show that the rotary variants collapse; it does not shape the golden
 tools/goldens/survival_likelihood_reference.py	-:LOG_HAZARD_SEED=20261006	python-const	frozen: the script has no command line and this seed defines the committed reference JSON

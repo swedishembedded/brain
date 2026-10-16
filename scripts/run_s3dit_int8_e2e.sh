@@ -10,16 +10,22 @@ export BRAIN_S3DIT_QWEN="$PWD/out/models/Tongyi-MAI/Z-Image-Turbo/text_encoder"
 export BRAIN_S3DIT_TOKENIZER="$PWD/out/models/Tongyi-MAI/Z-Image-Turbo/tokenizer/tokenizer.json"
 export BRAIN_LOG_WEIGHTS=1
 
+# The memory profile does not depend on the seed, but the run records the one it
+# used: drawn here (56 bits) and printed, or SEED from the caller.
+SEED=${SEED:-$(od -An -N7 -tu8 /dev/urandom | tr -d ' ')}
+echo "seed $SEED (set SEED to reproduce)"
+
 mkdir -p results
 : > results/zimage-int8-256.memlog.csv
 echo "epoch_s,rss_kb,avail_kb,cgroup_current_b" > results/zimage-int8-256.memlog.csv
 
 START=$(date +%s)
 echo "START:$START" > results/zimage-int8-256.timing.log
+echo "SEED:$SEED" >> results/zimage-int8-256.timing.log
 
 ./target/release/brain --device gpu s3dit text2image \
     --prompt "a red fox in snow, photograph" --width 256 --height 256 \
-    --steps 8 --seed 42 --precision int8 \
+    --steps 8 --seed "$SEED" --precision int8 \
     --out image=results/zimage-int8-256.ppm \
     > results/zimage-int8-256.stdout.log 2> results/zimage-int8-256.stderr.log &
 MAINPID=$!

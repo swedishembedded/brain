@@ -76,8 +76,10 @@ pub enum Event {
     // ---- forecasting -------------------------------------------------------
     /// A forecast request: run `model` on `panel` per `spec`.
     ForecastRequest { model: String, panel: Panel, spec: ForecastSpec },
-    /// A one-shot forecast result.
-    ForecastResult { forecast: Forecast },
+    /// A one-shot forecast result. `seed` is the seed the request ran under:
+    /// the one it named, else the one drawn for it. Sending it back
+    /// reproduces the forecast.
+    ForecastResult { forecast: Forecast, seed: Option<u64> },
     /// A streamed partial forecast (per item / per origin). `seq` orders chunks,
     /// `done` marks the last.
     ForecastChunk { forecast: Forecast, seq: u32, done: bool },
@@ -90,8 +92,9 @@ pub enum Event {
     /// A streamed partial backtest result (aggregates so far). `done` marks the
     /// last.
     BacktestChunk { report: BacktestReport, seq: u32, done: bool },
-    /// The final aggregated backtest report.
-    BacktestResult { report: BacktestReport },
+    /// The final aggregated backtest report, with the `seed` the backtest ran
+    /// under (see [`Event::ForecastResult`]).
+    BacktestResult { report: BacktestReport, seed: Option<u64> },
     /// A structured forecasting error — machine-readable `code` + `retryable`,
     /// distinct from the free-form [`Event::Error`]. Shares the `"error"` wire
     /// tag, disambiguated by the presence of a `code` field.
@@ -233,9 +236,13 @@ fn event_to_value(ev: &Event) -> Value {
             "panel": forecast_wire::panel_to_value(panel),
             "output": forecast_wire::spec_to_value(spec),
         }),
-        Event::ForecastResult { forecast } => {
+        Event::ForecastResult { forecast, seed } => {
             let mut v = forecast_wire::forecast_to_value(forecast);
-            v.as_object_mut().unwrap().insert("event".into(), json!("forecast_result"));
+            let m = v.as_object_mut().unwrap();
+            m.insert("event".into(), json!("forecast_result"));
+            if let Some(seed) = seed {
+                m.insert("seed".into(), json!(seed));
+            }
             v
         }
         Event::ForecastChunk { forecast, seq, done } => {
@@ -262,10 +269,16 @@ fn event_to_value(ev: &Event) -> Value {
             "seq": seq,
             "done": done,
         }),
-        Event::BacktestResult { report } => json!({
-            "event": "backtest_result",
-            "report": forecast_wire::backtest_report_to_value(report),
-        }),
+        Event::BacktestResult { report, seed } => {
+            let mut v = json!({
+                "event": "backtest_result",
+                "report": forecast_wire::backtest_report_to_value(report),
+            });
+            if let Some(seed) = seed {
+                v["seed"] = json!(seed);
+            }
+            v
+        }
         Event::ForecastError { error } => {
             let mut v = error.to_json();
             v.as_object_mut().unwrap().insert("event".into(), json!("error"));
@@ -369,7 +382,7 @@ fn decode_event_value(v: &Value) -> Result<Event, String> {
             spec: forecast_wire::spec_from_value(&v["output"])?,
         }),
         "forecast_result" => {
-            Ok(Event::ForecastResult { forecast: forecast_wire::forecast_from_value(v) })
+            Ok(Event::ForecastResult { forecast: forecast_wire::forecast_from_value(v), seed: v["seed"].as_u64() })
         }
         "forecast_chunk" => Ok(Event::ForecastChunk {
             forecast: forecast_wire::forecast_from_value(v),
@@ -394,6 +407,7 @@ fn decode_event_value(v: &Value) -> Result<Event, String> {
         }),
         "backtest_result" => Ok(Event::BacktestResult {
             report: forecast_wire::backtest_report_from_value(&v["report"]),
+            seed: v["seed"].as_u64(),
         }),
         "manifest_request" => Ok(Event::ManifestRequest),
         "manifest_result" => Ok(Event::ManifestResult { manifests: v.get("manifests").cloned().unwrap_or(Value::Null) }),
@@ -633,7 +647,7 @@ mod tests {
             Event::CapabilitiesResult { models: vec![sample_caps()] },
             Event::BacktestRequest { panel: sample_panel(), spec: sample_backtest_spec() },
             Event::BacktestChunk { report: sample_report(), seq: 0, done: false },
-            Event::BacktestResult { report: sample_report() },
+            Event::BacktestResult { report: sample_report(), seed: None },
             Event::ForecastError {
                 error: forecast::ForecastError::context_too_long(512, 900),
             },
@@ -731,7 +745,7 @@ mod tests {
     }
 
     fn forecast_result_sample() -> Event {
-        Event::ForecastResult { forecast: sample_forecast() }
+        Event::ForecastResult { forecast: sample_forecast(), seed: None }
     }
 
     #[test]

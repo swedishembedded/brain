@@ -60,6 +60,7 @@ import cv2
 import numpy as np
 
 import rir_tiles as T
+import rir_seed
 
 
 class Segmenter(Protocol):
@@ -267,7 +268,7 @@ def tile_seed(seed: int, name: str) -> int:
     return zlib.crc32(f"{seed}/{name}".encode())
 
 
-def measure_set(tiles_dir: str, segmenter: Segmenter, seed: int = 1, params: RegionParams = RegionParams(),
+def measure_set(tiles_dir: str, segmenter: Segmenter, seed: int | None = None, params: RegionParams = RegionParams(),
                 limit: int = 0, grounder: Grounder | None = None, parts_by_class: dict[str, list[str]] | None = None,
                 log=lambda msg: None) -> dict:
     """Measure the accepted tiles of a tile folder that have no `regions/<name>.json` yet.
@@ -277,6 +278,7 @@ def measure_set(tiles_dir: str, segmenter: Segmenter, seed: int = 1, params: Reg
     box counts and the seconds spent, i.e. the segmentation throughput. Returns
     this run's numbers.
     """
+    seed = rir_seed.resolve(seed, "measure_set")
     out_dir = os.path.join(tiles_dir, "regions")
     os.makedirs(out_dir, exist_ok=True)
     todo = [e for e in T.read_index(tiles_dir) if e["accepted"] and e["boxes"]

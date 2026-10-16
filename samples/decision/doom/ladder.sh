@@ -43,7 +43,7 @@ BIN=${BIN:-$BRAIN/target/release/sample-decision-doom}
 VIDEOS=${VIDEOS:-$HOME/Downloads/doom-record}
 
 MAPS=${MAPS:-"1 2 3 4 5 6 7 8 9"}
-SEEDS=${SEEDS:-3}            # episodes per level that must ALL reach the exit
+PROVE_EPISODES=${PROVE_EPISODES:-3}  # episodes per level that must ALL reach the exit
 BUDGET=${BUDGET:-600}        # seconds of search per level per attempt
 ATTEMPTS=${ATTEMPTS:-6}      # turns of find/clone/prove before a rung is judged
 STEPS=${STEPS:-1500}         # decisions a proving episode is allowed
@@ -52,8 +52,8 @@ STEPS=${STEPS:-1500}         # decisions a proving episode is allowed
 # the archive is a list of actions replayed from the level's own start, and
 # the seed reaches the engine's reset - so an archive carried into a run with
 # a different seed holds trails that no longer lead where they say. Attempts
-# compound only while the seed is held still.
-SEARCH_SEED=${SEARCH_SEED:-1}
+# compound only while the seed is held still. It is drawn once, recorded in the
+# log directory, and reused by every later attempt and by a resumed run.
 
 # skill:mission, easiest first. Difficulty moves along two axes and they are
 # not interchangeable: skill changes how much of the level fights back,
@@ -71,6 +71,8 @@ FIRST=${1:-1}
 LAST=${2:-${#RUNGS[@]}}
 LOGS=${LOGS:-/tmp/ladder}
 mkdir -p "$LOGS" "$VIDEOS"
+. "$(dirname "$0")/seed.sh"
+SEARCH_SEED=$(run_seed "$LOGS/search-seed" ladder "${SEARCH_SEED:-}")
 LEDGER=$LOGS/ladder.csv
 [ -f "$LEDGER" ] || echo "rung,skill,mission,attempt,phase,map,value" > "$LEDGER"
 
@@ -180,8 +182,8 @@ prove() {  # rung skill mission attempt work
   for m in $MAPS; do
     "$BIN" play --doom-bin "$DOOM" --wad "$WAD" --encoder "$ENC" \
       --map "$m" --skill "$skill" --mission "$mission" --reward gauge \
-      --head "$work/policy.safetensors" --play "$SEEDS" --max-steps "$STEPS" \
-      --seed "$attempt" --device "${GPU:-gpu0}" \
+      --head "$work/policy.safetensors" --play "$PROVE_EPISODES" --max-steps "$STEPS" \
+      --seed "$((SEARCH_SEED + attempt))" --device "${GPU:-gpu0}" \
       > "$LOGS/r$r-a$attempt-prove-m$m.log" 2>&1 &
     pids+=($!)
   done
@@ -190,11 +192,11 @@ prove() {  # rung skill mission attempt work
     local exits
     exits=$(grep -oE "[0-9]+ exits" "$LOGS/r$r-a$attempt-prove-m$m.log" | tail -1 | cut -d' ' -f1)
     exits=${exits:-0}
-    say "$r" "$skill" "$mission" "$attempt" prove "$m" "$exits/$SEEDS"
+    say "$r" "$skill" "$mission" "$attempt" prove "$m" "$exits/$PROVE_EPISODES"
     total=$((total + exits))
-    [ "$exits" -ge "$SEEDS" ] && passed=$((passed + 1))
+    [ "$exits" -ge "$PROVE_EPISODES" ] && passed=$((passed + 1))
   done
-  note "rung $r attempt $attempt: the policy alone finished $total/$(( $(echo $MAPS | wc -w) * SEEDS )) episodes, clean on $passed levels"
+  note "rung $r attempt $attempt: the policy alone finished $total/$(( $(echo $MAPS | wc -w) * PROVE_EPISODES )) episodes, clean on $passed levels"
   [ "$passed" -eq "$(echo $MAPS | wc -w)" ]
 }
 
@@ -205,7 +207,7 @@ record() {  # rung skill mission work
     "$BIN" play --doom-bin "$DOOM" --wad "$WAD" --encoder "$ENC" \
       --map "$m" --skill "$skill" --mission "$mission" --reward gauge \
       --head "$work/policy.safetensors" --play 1 --max-steps "$STEPS" \
-      --seed 1 --device "${GPU:-gpu0}" --record "$out" \
+      --seed "$SEARCH_SEED" --device "${GPU:-gpu0}" --record "$out" \
       > "$LOGS/r$r-record-m$m.log" 2>&1
     say "$r" "$skill" "$mission" - record "$m" "$(grep -oE '[0-9]+ exits' "$LOGS/r$r-record-m$m.log" | tail -1)"
     note "recorded $out"

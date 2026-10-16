@@ -14,7 +14,10 @@ residency Executor.
 """
 from __future__ import annotations
 
+import argparse
+import json
 import os
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -33,9 +36,9 @@ STEPS = int(os.environ.get("STEPS", "8"))
 PROMPT = os.environ.get("PROMPT", "two dogs sitting side by side on grass, full body, realistic wildlife photograph")
 
 
-def generate(brain: BrainDBus) -> bytes:
-    """Stream a z-image text2image generation; return the HWC-f32 image bytes."""
-    params = {"prompt": PROMPT, "width": SIZE, "height": SIZE, "steps": STEPS, "seed": 7}
+def generate(brain: BrainDBus, seed: int) -> bytes:
+    """Stream a z-image text2image generation under `seed`; return the HWC-f32 image bytes."""
+    params = {"prompt": PROMPT, "width": SIZE, "height": SIZE, "steps": STEPS, "seed": seed}
 
     def on_progress(step: int, total: int, message: str) -> None:
         print(f"  [{step}/{total}] {message}")
@@ -68,6 +71,11 @@ def annotate(image: bytes, detections: list[dict]):
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--seed", type=int, default=None, help="generation seed (drawn and printed when omitted)")
+    args = ap.parse_args()
+    seed = args.seed if args.seed is not None else secrets.randbits(63)
+    print(f"seed {seed}{'' if args.seed is not None else ' (drawn; pass --seed to reproduce)'}")
     OUT.mkdir(parents=True, exist_ok=True)
     with BrainDBus() as brain:
         models = brain.models()
@@ -79,10 +87,12 @@ def main() -> int:
         # Step 1 - generate. Save the raw z-image output.
         print(f"[1/3 generate] z-image {SIZE}x{SIZE}: {PROMPT!r}")
         t = time.perf_counter()
-        image = generate(brain)
+        image = generate(brain, seed)
         gen_s = time.perf_counter() - t
         gen_path = OUT / "step1_generated.png"
         to_pil(image, SIZE, SIZE).save(gen_path)
+        gen_path.with_suffix(".json").write_text(
+            json.dumps({"prompt": PROMPT, "width": SIZE, "height": SIZE, "steps": STEPS, "seed": seed}) + "\n")
         print(f"[1/3 generate] {gen_s:.1f}s -> {gen_path}")
 
         # Step 2 - detect (over D-Bus, image passed as an fd).

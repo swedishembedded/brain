@@ -51,6 +51,7 @@ import numpy as np
 
 import rir_data as D
 import rir_manifest as M
+import rir_seed
 
 HELD_OUT = ("V", "Test")
 TRAINING = ("T", "S")
@@ -185,9 +186,10 @@ def _assign(rows: list[dict], dataset: str, seed: int, params: SplitParams) -> N
         r["split"] = plan[r["sequence_id"]]
 
 
-def build_splits(records: list[dict], seed: int = 1, params: SplitParams = SplitParams(), workers: int = 1):
+def build_splits(records: list[dict], seed: int | None = None, params: SplitParams = SplitParams(), workers: int = 1):
     """Returns (splits document, probes keyed by (dataset, id)). `records` are
     manifest records as loaded by rir_manifest.load_manifests."""
+    seed = rir_seed.resolve(seed, "build_splits")
     probes_list = _probe_all(records, params.probe_reduce, workers)
     rows, probes = [], {}
     for rec, p in zip(records, probes_list):

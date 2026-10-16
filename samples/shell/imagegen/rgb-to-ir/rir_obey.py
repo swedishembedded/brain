@@ -74,6 +74,7 @@ import rir_bootstrap as B
 import rir_captions as C
 import rir_data as D
 import rir_regions as R
+import rir_seed
 
 INSTRUCTIONS = C.POLARITIES
 SOURCES = ("oracle", "prior", "forced", "forced_heldout")
@@ -240,8 +241,9 @@ def _typed_report(rows: list, n_resamples: int, seed: int) -> dict:
 
 
 def evaluate(pairs: list[ObeyPair], params: R.RegionParams = R.RegionParams(), n_resamples: int = B.DEFAULT_RESAMPLES,
-             seed: int = 1) -> dict:
+             seed: int | None = None) -> dict:
     """The obedience report (plain JSON types), see the module docstring."""
+    seed = rir_seed.resolve(seed, "evaluate")
     rows: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
     skipped: dict[str, Counter] = defaultdict(Counter)
     for pair in pairs:

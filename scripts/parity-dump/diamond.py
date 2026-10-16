@@ -13,13 +13,14 @@ path. Output is copied into
 crates/diamond/tests/fixtures/diamond/ and committed.
 
 Usage:
-  python3 scripts/parity-dump/diamond.py --out <scratch dir>/fixtures-diamond --seed 7
+  python3 scripts/parity-dump/diamond.py --out <scratch dir>/fixtures-diamond [--seed N]
 """
 import argparse
 import hashlib
 import json
 import os
 import pathlib
+import secrets
 import subprocess
 import sys
 
@@ -100,9 +101,12 @@ def tensor_blob(t: torch.Tensor) -> bytes:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--seed", type=int, required=True,
-                    help="RNG seed of the fixture; recorded in the manifest")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="RNG seed of the fixture; drawn and printed when omitted, recorded in the manifest")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = secrets.randbits(31)
+        print(f"seed {args.seed} (drawn; pass --seed to reproduce)")
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 

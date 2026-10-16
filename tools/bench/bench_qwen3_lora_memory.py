@@ -84,6 +84,7 @@ def run_once(args, label, tokens, steps):
     cmd = [args.brain] + ([] if args.device == "both" else ["--device", args.device]) + [
         "qwen3", "finetune", "--lora", str(args.rank), "--base-dtype", args.base_dtype,
         "--weights", f"Qwen/{args.model}", "--adapter", f"bench/{label}:t", "--dataset", data_dir,
+        # seed: every measured step trains the same synthetic example, so the memory curves compare
         "--models-dir", args.models_dir, "--steps", str(steps), "--batch", "1", "--block", str(tokens), "--seed", "1"]
     env = dict(os.environ, RUST_BACKTRACE="1")
     t0 = time.time()

@@ -108,6 +108,7 @@ import rir_captions as C
 import rir_data as D
 import rir_gates as G
 import rir_sam2 as SAM2
+import rir_seed
 
 OUT_MULTIPLE = 16
 OOM_PATTERN = re.compile(r"no GPU placement fits|out of memory|\bOOM\b|OUT_OF_MEMORY", re.IGNORECASE)
@@ -370,7 +371,10 @@ class Selection:
     datasets: tuple = ()
     limit: int = 0
     shard: tuple = (0, 1)
-    seed: int = 1
+    seed: int | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "seed", rir_seed.resolve(self.seed, "Selection"))
 
 
 @dataclass(frozen=True)
@@ -514,8 +518,11 @@ class IngestRequest:
     models: dict | None  # dataset -> SensorModel, or None for no sensor model
     selection: Selection
     classes: tuple
-    seed: int = 1  # the per-frame sensor noise
+    seed: int | None = None  # the per-frame sensor noise
     only_existing: bool = False  # restrict to the selected frames that have an output (else the rest count as missing)
+
+    def __post_init__(self):
+        object.__setattr__(self, "seed", rir_seed.resolve(self.seed, "IngestRequest"))
 
 
 def _find_output(generated_dir: str, name: str) -> tuple[str, Crop | None] | None:
@@ -605,7 +612,10 @@ class GateRequest:
     keep_rejected: bool = False
     reference_limit: int = 300  # real split-T frames the edge threshold is read off
     max_shift_px: float | None = None  # None: calibrated on the real pairs of split T; a number: fixed, from zero
-    seed: int = 1
+    seed: int | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "seed", rir_seed.resolve(self.seed, "GateRequest"))
 
 
 def _read_jsonl(path: str) -> list[dict]:

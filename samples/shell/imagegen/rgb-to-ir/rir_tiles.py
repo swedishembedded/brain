@@ -53,6 +53,7 @@ import numpy as np
 
 import rir_arms as A
 import rir_data as D
+import rir_seed
 
 NEUTRAL_CAPTION = "Convert to thermal infrared, white-hot."
 
@@ -167,7 +168,7 @@ def read_index(out_dir: str) -> list[dict]:
         return [json.loads(line) for line in fh if line.strip()]
 
 
-def cut_tiles(doc: dict, out_dir: str, size: int = 512, seed: int = 1, limit: int = 0, datasets=None,
+def cut_tiles(doc: dict, out_dir: str, size: int = 512, seed: int | None = None, limit: int = 0, datasets=None,
               checks: TileChecks = TileChecks(), workers: int = 1) -> dict:
     """Tile the usable split-T pairs of `doc` (a splits.json document) into `out_dir`.
 
@@ -176,6 +177,7 @@ def cut_tiles(doc: dict, out_dir: str, size: int = 512, seed: int = 1, limit: in
     every target (rir_captions rewrites it with instruction captions) and
     `tiles.jsonl`. Returns the counts: frames, tiles, accepted, rejected by reason.
     """
+    seed = rir_seed.resolve(seed, "cut_tiles")
     datasets = tuple(datasets) if datasets else tuple(sorted({r["dataset"] for r in doc["frames"]}))
     rows = A.select_rows(doc, "T", datasets, limit, seed)
     os.makedirs(out_dir, exist_ok=True)

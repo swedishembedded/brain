@@ -66,6 +66,7 @@ fi
 
 step "2. text-to-image (s3dit, auto-fetches Tongyi-MAI/Z-Image-Turbo - ~33 GB, the slow step)"
 if ! need "$IMG_DIR/seed.png"; then
+  # seed: reproduces the image the README embeds (docs/quickstart/img/seed.png)
   "$BRAIN" --device gpu s3dit text2image \
     --prompt "a golden retriever dog and a red apple on a wooden table, photorealistic, natural lighting" \
     --width 512 --height 512 --seed 7 --steps 8 --precision int8 \
@@ -215,6 +216,7 @@ elif ! need "$IMG_DIR/wan-strip.png"; then
   # moving across the frame. Most of its wall clock is the umT5-XXL text
   # encode, which runs on the CPU (22.72 GB in fp32 does not fit the card) and
   # costs the same at every size, so shrinking further buys very little.
+  # seed: reproduces the clip whose strip the README embeds
   "$BRAIN" --device gpu wan t2v \
     --prompt "a golden retriever running along a sandy beach at sunset, waves in the background, cinematic" \
     --frames 9 --width 416 --height 240 --steps 20 --seed 7 \
@@ -303,6 +305,7 @@ fi
 
 step "8. audio LoRA (qwen3tts finetune, synthetic text->codes data)"
 if ! need "$IMG_DIR/qwen3tts-lora.txt"; then
+  # seed: reproduces the training data behind the loss line the README quotes
   "$BRAIN" data gen tts --out "$BRAIN_MODELS_DIR/.quickstart-tts-data" --n 4000 --seed 1337
   "$BRAIN" qwen3tts finetune \
     --base "$BRAIN_MODELS_DIR/Qwen/Qwen3-TTS-12Hz-0.6B-Base/brain_tts/talker.safetensors" \

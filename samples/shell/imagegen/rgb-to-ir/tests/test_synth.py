@@ -130,8 +130,13 @@ class World(unittest.TestCase):
     def config(self):
         return S.load_config(self.path("synth.json"))
 
+    @staticmethod
+    def selection(**fields):
+        # seed: the frames the expectations below name are the ones this seed selects
+        return S.Selection(**{"seed": 1, **fields})
+
     def generate(self, modes=("neutral",), config=None, brain=None, retry=None, sleep=lambda s: None, **selection):
-        job = S.Job(self.doc, S.Selection(**selection), modes, ("person", "car", "bicycle"),
+        job = S.Job(self.doc, self.selection(**selection), modes, ("person", "car", "bicycle"),
                     S.prior_polarities(self.report), self.out)
         runner = S.BrainRunner(brain or self.brain, config or self.config(), retry or S.Retry(4, 0.0, 60.0), sleep)
         return S.generate(job, runner)
@@ -327,7 +332,7 @@ class ExplicitInstructions(World):
                       "cooler": {f"d/f{k}": f"{C.NEUTRAL_CAPTION} The car is cooler than its surroundings. #{k}" for k in range(3)}}
 
     def generate_explicit(self, modes, texts=None, **selection):
-        job = S.Job(self.doc, S.Selection(**selection), modes, ("person", "car", "bicycle"), None, self.out,
+        job = S.Job(self.doc, self.selection(**selection), modes, ("person", "car", "bicycle"), None, self.out,
                     self.texts if texts is None else texts)
         return S.generate(job, S.BrainRunner(self.brain, self.config(), S.Retry(4, 0.0, 60.0), lambda s: None))
 
@@ -397,7 +402,7 @@ class VaeRoundTrip(World):
     def test_an_ingested_round_trip_is_the_real_ir_exactly_when_no_sensor_model_is_applied(self):
         self.generate(modes=("vae-roundtrip",))
         arm_dir = self.path("arms/v0")
-        S.ingest(S.IngestRequest(self.doc, os.path.join(self.out, "vae-roundtrip"), arm_dir, "v0", None, S.Selection(),
+        S.ingest(S.IngestRequest(self.doc, os.path.join(self.out, "vae-roundtrip"), arm_dir, "v0", None, self.selection(),
                                  ("person", "car", "bicycle")))
         np.testing.assert_array_equal(cv2.imread(os.path.join(arm_dir, "d_f1.png"), cv2.IMREAD_UNCHANGED), self.ir[1][1:49, 3:67])
 
@@ -478,7 +483,7 @@ class Ingest(World):
 
     def ingest(self, models=None, arm_dir=None, generated=None, only_existing=False, **selection):
         request = S.IngestRequest(self.doc, generated or os.path.join(self.out, "neutral"), arm_dir or self.arm_dir, "c2",
-                                  models, S.Selection(**selection), ("person", "car", "bicycle"), seed=5,
+                                  models, self.selection(**selection), ("person", "car", "bicycle"), seed=5,
                                   only_existing=only_existing)
         return S.ingest(request)
 
@@ -643,6 +648,8 @@ class GateWorld(unittest.TestCase):
                 "sequence_id": f"s{fid}", "split": split, "usable": True, "day_night": "day", "width": TG.W, "height": TG.H}
 
     def gate(self, mask_iou=None, keep_rejected=False, **kw):
+        # seed: the reference frames the expectations below name are the ones this seed selects
+        kw = {"seed": 1, **kw}
         return S.gate(S.GateRequest(self.doc, self.arm_dir, "c2", ("person", "car", "bicycle"), mask_iou=mask_iou,
                                     keep_rejected=keep_rejected, **kw))
 

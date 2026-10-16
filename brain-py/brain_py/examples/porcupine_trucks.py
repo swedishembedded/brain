@@ -17,7 +17,9 @@ Run:
 Needs the Z-Image weight paths in the environment (BRAIN_S3DIT_DIT/_VAE/_QWEN/
 _TOKENIZER); this script fills in the on-box defaults if they are unset.
 """
+import argparse
 import os
+import secrets
 import sys
 import time
 
@@ -53,6 +55,12 @@ PROMPT = (
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="base seed; image i uses seed + i (drawn and printed when omitted)")
+    args = ap.parse_args()
+    seed = args.seed if args.seed is not None else secrets.randbits(63)
+    print(f"seed {seed}{'' if args.seed is not None else ' (drawn; pass --seed to reproduce)'}", flush=True)
     out = os.environ.get("OUT", "/tmp/braincaps")
     size = int(os.environ.get("SIZE", "512"))
     steps = int(os.environ.get("STEPS", "8"))
@@ -68,7 +76,7 @@ def main() -> int:
             prompt = PROMPT.format(angle=angle)
             t = time.time()
             img = client.text2image(prompt, width=size, height=size, steps=steps,
-                                    seed=100 + i, precision=precision)
+                                    seed=seed + i, precision=precision)
             dt = time.time() - t
             path = os.path.join(out, f"porcupine_{i}.png")
             img.save(path)

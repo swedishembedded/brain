@@ -875,7 +875,7 @@ impl Brain {
                 error: forecast::ForecastError::unknown_model(&model_name),
             }),
             Some(model) => match model.forecast(&panel, &spec) {
-                Ok(forecast) => self.emit(Event::ForecastResult { forecast }),
+                Ok(forecast) => self.emit(Event::ForecastResult { forecast, seed: Some(spec.seed) }),
                 Err(error) => self.emit(Event::ForecastError { error }),
             },
         }
@@ -925,6 +925,7 @@ impl Brain {
     /// emits the terminal `backtest_result` and returns to Idle. A single-model
     /// backtest emits just the result (no chunks) — behavior identical to before.
     fn pump_one_backtest(&mut self) {
+        let seed = self.backtest_pump.as_ref().map(|p| p.spec.seed);
         match self.backtest_pump.as_mut().and_then(|p| p.step()) {
             Some((report, false)) => {
                 self.emit(Event::BacktestChunk { report, seq: self.seq, done: false });
@@ -932,12 +933,12 @@ impl Brain {
                 self.pending_tick = true; // keep evaluating
             }
             Some((report, true)) => {
-                self.emit(Event::BacktestResult { report });
+                self.emit(Event::BacktestResult { report, seed });
                 self.want_idle = true;
             }
             None => {
                 // no models (shouldn't happen — start_backtest guards) — complete.
-                self.emit(Event::BacktestResult { report: BacktestReport::default() });
+                self.emit(Event::BacktestResult { report: BacktestReport::default(), seed });
                 self.want_idle = true;
             }
         }
@@ -1233,6 +1234,20 @@ mod tests {
         assert_ne!(GenConfig::default().seed, GenConfig::default().seed);
     }
 
+    /// The result names the seed it ran under, so a request that named none
+    /// (and was given a drawn one) can be repeated.
+    #[test]
+    fn a_forecast_result_reports_the_seed_the_request_ran_under() {
+        let mut ctrl = Controller::with_config(registry_with_naive(), GenConfig::default());
+        let env = forecast_request("naive", Some("r1"));
+        let Event::ForecastRequest { spec, .. } = env.event.clone() else { panic!("not a forecast request") };
+        let out = ctrl.feed_event_with_id(env.req_id, env.event);
+        match &out[0].event {
+            Event::ForecastResult { seed, .. } => assert_eq!(*seed, Some(spec.seed)),
+            other => panic!("expected forecast_result, got {other:?}"),
+        }
+    }
+
     #[test]
     fn forecast_request_yields_a_result_and_returns_to_idle() {
         let mut ctrl = Controller::with_config(registry_with_naive(), GenConfig::default());
@@ -1241,7 +1256,7 @@ mod tests {
         // exactly one forecast_result, carrying the req_id
         assert_eq!(out.len(), 1, "{out:?}");
         match &out[0] {
-            Envelope { req_id, event: Event::ForecastResult { forecast } } => {
+            Envelope { req_id, event: Event::ForecastResult { forecast, .. } } => {
                 assert_eq!(req_id.as_deref(), Some("r1"));
                 assert_eq!(forecast.model, "naive");
                 assert_eq!(forecast.targets[0].name, "close");
@@ -1311,7 +1326,7 @@ mod tests {
         assert_eq!(chunks.len(), 1, "expected one interim chunk for the first model: {out:?}");
         assert!(matches!(chunks[0], Event::BacktestChunk { done: false, .. }));
         match out.last().map(|e| &e.event) {
-            Some(Event::BacktestResult { report }) => {
+            Some(Event::BacktestResult { report, .. }) => {
                 assert!(report.get("naive", "mase").is_some());
                 assert!(report.get("drift", "mase").is_some());
             }

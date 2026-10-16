@@ -6,32 +6,29 @@
 brain parity. inference_steps=1 -> temperature collapses to 0 -> deterministic
 argmax, so the sampled tokens are reproducible.
 
-  python scripts/parity-dump/genie_maskgit.py
+  python scripts/parity-dump/genie_maskgit.py [--seed N]
 
 Outputs (gitignored): scratchpad/parity/genie_maskgit_{prime.u32,actions.f32,out.u32,meta.txt}
 """
-import os, sys
+import argparse, os, secrets, sys
 
 REPO = os.environ.get("BRAIN_GENIEREDUX_REPO") or "resources/world-models/repos/GenieRedux"
-if not os.path.isdir(REPO):
-    sys.exit(
-        f"GenieRedux checkout not found at {REPO!r} - set BRAIN_GENIEREDUX_REPO "
-        "to the repo (the dump imports its models/ package)"
-    )
 TOK = "scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt"
 DYN = "scratchpad/wm-checkpoints/GenieRedux_Guided_CoinRun_80mln_v1.0.pt"
 OUT = "scratchpad/parity"
-# seed: the dump takes no arguments and the Rust parity test replays the
-# committed output, so the fixture is defined by this seed.
-FIXTURE_SEED = 0
 
-def main():
+def main(seed):
+    if not os.path.isdir(REPO):
+        sys.exit(
+            f"GenieRedux checkout not found at {REPO!r} - set BRAIN_GENIEREDUX_REPO "
+            "to the repo (the dump imports its models/ package)"
+        )
     sys.path.insert(0, REPO)
     import torch
     from models.tokenizer import Tokenizer
     from models.dynamics import MaskGIT, Dynamics
 
-    torch.manual_seed(FIXTURE_SEED)
+    torch.manual_seed(seed)
     tokenizer = Tokenizer(dim=512, codebook_size=1024, image_size=64, patch_size=4,
                           temporal_patch_size=1, num_blocks=8, codebook_dim=32,
                           dim_head=64, heads=8, channels=3, wandb_mode="disabled")
@@ -74,8 +71,13 @@ def main():
     with open(os.path.join(OUT, "genie_maskgit_meta.txt"), "w") as fh:
         fh.write(f"prime_frames={prime_frames} t_fwd={t_fwd} h={h} w={w} num_tokens={h*w}\n")
         fh.write(f"out_shape={tuple(out.shape)}\n")
-        fh.write(f"seed={FIXTURE_SEED}\n")
+        fh.write(f"seed={seed}\n")
     print("wrote maskgit parity dump; out", tuple(out.shape), "sample tokens", out.view(-1)[:8].tolist())
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--seed", type=int, default=None, help="seed of the synthetic input; drawn and printed when omitted, recorded in the meta file")
+    args = ap.parse_args()
+    seed = args.seed if args.seed is not None else secrets.randbits(31)
+    print(f"seed {seed}" + ("" if args.seed is not None else " (drawn; pass --seed to reproduce)"))
+    main(seed)

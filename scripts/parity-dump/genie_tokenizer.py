@@ -9,31 +9,28 @@ through it (encode -> cosine VQ -> decode), and writes the input, reconstruction
 and codebook indices as raw little-endian binary that the Rust parity test reads.
 
 Run from the brain repo root (needs torch + the GenieRedux repo on PYTHONPATH):
-  python scripts/parity-dump/genie_tokenizer.py
+  python scripts/parity-dump/genie_tokenizer.py [--seed N]
 
 Outputs (gitignored scratch): scratchpad/parity/genie_tokenizer_{in,recon}.f32,
 genie_tokenizer_idx.u32, genie_tokenizer_meta.txt
 """
-import os, sys, struct
+import argparse, os, secrets, sys, struct
 
 REPO = os.environ.get("BRAIN_GENIEREDUX_REPO") or "resources/world-models/repos/GenieRedux"
-if not os.path.isdir(REPO):
-    sys.exit(
-        f"GenieRedux checkout not found at {REPO!r} - set BRAIN_GENIEREDUX_REPO "
-        "to the repo (the dump imports its models/ package)"
-    )
 CKPT = "scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt"
 OUT = "scratchpad/parity"
-# seed: the dump takes no arguments and the Rust parity test replays the
-# committed output, so the fixture is defined by this seed.
-FIXTURE_SEED = 0
 
-def main():
+def main(seed):
+    if not os.path.isdir(REPO):
+        sys.exit(
+            f"GenieRedux checkout not found at {REPO!r} - set BRAIN_GENIEREDUX_REPO "
+            "to the repo (the dump imports its models/ package)"
+        )
     sys.path.insert(0, REPO)
     import torch
     from models.tokenizer import Tokenizer
 
-    torch.manual_seed(FIXTURE_SEED)
+    torch.manual_seed(seed)
     model = Tokenizer(dim=512, codebook_size=1024, image_size=64, patch_size=4,
                       temporal_patch_size=1, num_blocks=8, codebook_dim=32,
                       dim_head=64, heads=8, channels=3, wandb_mode="disabled")
@@ -67,10 +64,15 @@ def main():
         fh.write(f"b={b} c={c} f={f} hw={hw}\n")
         fh.write(f"in_numel={n_in} recon_numel={n_re} idx_numel={idx_flat.shape[0]}\n")
         fh.write(f"recon_shape={tuple(recon.shape)} idx_shape={tuple(idx.shape)}\n")
-        fh.write(f"seed={FIXTURE_SEED}\n")
+        fh.write(f"seed={seed}\n")
     print("wrote parity dump to", OUT)
     print("  video", tuple(video.shape), "recon", tuple(recon.shape), "idx", tuple(idx.shape))
     print("  recon range", float(recon.min()), float(recon.max()))
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--seed", type=int, default=None, help="seed of the synthetic input; drawn and printed when omitted, recorded in the meta file")
+    args = ap.parse_args()
+    seed = args.seed if args.seed is not None else secrets.randbits(31)
+    print(f"seed {seed}" + ("" if args.seed is not None else " (drawn; pass --seed to reproduce)"))
+    main(seed)
