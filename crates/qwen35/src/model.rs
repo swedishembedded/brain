@@ -2667,6 +2667,26 @@ impl Qwen35 {
         })
     }
 
+    /// Gather the embedding rows of `n` token ids into `out` (`[n, d_model]`).
+    /// A narrow-base LoRA build holds the frozen table as an `Ops` weight
+    /// ([`table_tier`]) rather than as an fp32 store tensor; every path that
+    /// embeds (training forward, decode step, chunked prefill) goes through
+    /// here so none of them can assume the fp32 one.
+    fn embed_rows(&self, tokens: &DeviceBuffer, n: u32, out: &DeviceBuffer) {
+        let g = &self.gpu;
+        match self.weights.get("tok.weight") {
+            Some(table) => {
+                let mut s = Vec::new();
+                self.ops.embed(&mut s, table, tokens, n, out);
+                g.submit(&[], &s);
+            }
+            None => {
+                let d = self.cfg.d_model;
+                g.submit(&[], &[g.step(EMBED, &[tokens, self.w("tok.weight"), out], &[d, n], n * d)]);
+            }
+        }
+    }
+
     pub(crate) fn run_forward(&self) {
         let g = &self.gpu;
         let n = self.b * self.t;
@@ -2675,15 +2695,7 @@ impl Qwen35 {
         let mut layer_acts: Vec<LayerTrainActs> = Vec::new();
 
         if self.shard.embed {
-            match self.weights.get("tok.weight") {
-                // A narrow-base build holds the frozen table as a `Weight`.
-                Some(table) => {
-                    let mut s = Vec::new();
-                    self.ops.embed(&mut s, table, &self.tokens, n, &res[0]);
-                    g.submit(&[], &s);
-                }
-                None => g.submit(&[], &[g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &res[0]], &[d, n], n * d)]),
-            }
+            self.embed_rows(&self.tokens, n, &res[0]);
 
             // Vision-language splice: overwrite the image-placeholder rows of
             // the freshly-gathered residual stream with the projected image
@@ -3450,7 +3462,7 @@ impl Qwen35 {
         };
 
         if let Some(tok_buf) = &tok_buf {
-            g.submit(&[], &[g.step(EMBED, &[tok_buf, self.w("tok.weight"), &res], &[d, bsz], bsz * d)]);
+            self.embed_rows(tok_buf, bsz, &res);
         }
 
         let types = c.layer_types();
@@ -3659,7 +3671,7 @@ impl Qwen35 {
             let tok_buf = g.storage(n as u64);
             g.write(&tok_buf, tokens);
             let res = g.storage((n * d) as u64);
-            g.submit(&[], &[g.step(EMBED, &[&tok_buf, self.w("tok.weight"), &res], &[d, n], n * d)]);
+            self.embed_rows(&tok_buf, n, &res);
             res
         } else {
             let x = input_override
