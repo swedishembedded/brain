@@ -1986,6 +1986,19 @@ mod native_facade {
         /// by the caller against `caps().arch.compute_capability` and the
         /// kernel's own floor before it gets here.
         pub fn native_kernel(&self, kernel: &'static kernels_cuda::CudaKernel, bindings: &'static [backend_api::BindKind]) -> Option<backend_api::NativeId> {
+            self.native_kernel_launched(kernel, bindings, backend_api::CudaLaunch::NONE)
+        }
+
+        /// [`Self::native_kernel`] for a kernel that is launched with more than
+        /// static shared memory (dynamic shared memory above the default limit).
+        /// The answer is remembered per kernel name, so one kernel is always
+        /// asked for with one `launch`.
+        pub fn native_kernel_launched(
+            &self,
+            kernel: &'static kernels_cuda::CudaKernel,
+            bindings: &'static [backend_api::BindKind],
+            launch: backend_api::CudaLaunch,
+        ) -> Option<backend_api::NativeId> {
             let mut offered = self.natives.lock().unwrap_or_else(|e| e.into_inner());
             *offered.entry(kernel.name).or_insert_with(|| {
                 self.register_native(&backend_api::NativeSpec::Cuda {
@@ -1994,7 +2007,7 @@ mod native_facade {
                     block_dim: kernel.block_dim,
                     bindings,
                     shared_bytes: kernel.shared_bytes,
-                    launch: backend_api::CudaLaunch::NONE,
+                    launch,
                 })
             })
         }

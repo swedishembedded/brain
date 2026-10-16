@@ -1059,6 +1059,25 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/gdn_chunk_loop_f32.cu"),
     },
     CudaKernel {
+        name: "gdn_bwd_sweep_f32",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        // Asked for by name: the backward of the recurrence is a different operator
+        // from the loop `find` resolves.
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_bwd_sweep_f32",
+        what: "the reverse sweep of Gated DeltaNet's across-chunk recurrence in one launch: one block per head keeps the running state gradient in shared memory across all chunks (dynamic shared memory, opted in)",
+        reported: "native:gdn_bwd_sweep_f32",
+        block_dim: 256,
+        // One block per head; the whole 128 x 128 state gradient lives in it.
+        tile: (64, 128),
+        // Everything is dynamic: see `GDN_BWD_SWEEP_DYNAMIC_SHARED_BYTES`.
+        shared_bytes: 0,
+        src: include_str!("../cu/gdn_bwd_sweep_f32.cu"),
+    },
+    CudaKernel {
         name: "attn_softmax_fwd",
         op: Op::Softmax,
         weight: Dtype::F32,

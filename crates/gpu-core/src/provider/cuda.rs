@@ -285,6 +285,60 @@ pub fn gdn_chunk_loop_train_step(
     gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks, scale.to_bits()], bh * GDN_CHUNK_LOOP_SPLITS)
 }
 
+/// `gdn_bwd_sweep_f32`'s binding order: uniform, then the eight read buffers
+/// (`v_new`, `decayed_k`, `q_scaled`, `w`, `d_out`, the state history, `g_cs`,
+/// `d_final_state`), then the four written ones (`d_decayed_k`, `d_v_new`,
+/// `d_g_cs`, `d_initial_state`).
+const GDN_BWD_SWEEP_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
+/// Dynamic shared memory of `gdn_bwd_sweep_f32`: the 128 x 129 state gradient,
+/// two 16 x 129 operand tiles and one reduction float per warp, all f32.
+const GDN_BWD_SWEEP_DYNAMIC_SHARED_BYTES: u32 = (128 * 129 + 2 * 16 * 129 + 8) * 4;
+
+/// The native single-launch form of the reverse sweep of Gated DeltaNet's
+/// across-chunk recurrence (`model::gdn::gdn_chunk_bwd`), or `None` when the
+/// caller should issue its six dispatches per chunk. Declines on the head
+/// widths, a chunk over 64 rows, `cuda` named in `BRAIN_NO_PROVIDER`, a device
+/// with no reported capability, or a device that cannot give a block the shared
+/// memory the state gradient needs.
+///
+/// `bufs` is, in order, `v_new, decayed_k, q_scaled, w, d_out, state_history,
+/// g_cs, d_final_state` (read) and `d_decayed_k, d_v_new, d_g_cs,
+/// d_initial_state` (written; `d_v_new` and `d_g_cs` are accumulated into).
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_bwd_sweep_step(
+    gpu: &crate::Gpu,
+    bufs: &[&backend_api::DeviceBuffer; 12],
+    bh: u32,
+    c_len: u32,
+    dk: u32,
+    dv: u32,
+    n_chunks: u32,
+) -> Option<crate::Step> {
+    if dk != 128 || dv != 128 || c_len == 0 || c_len > 64 || super::disabled_providers().iter().any(|d| d == "cuda") {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_bwd_sweep_f32").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_BWD_SWEEP_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, GDN_BWD_SWEEP_BINDINGS, launch)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks], bh)
+}
+
 /// The native tensor-core paged flash-prefill step for `head_dim = 256`, or
 /// `None` when the caller should dispatch the portable
 /// `paged_flash_prefill_hd256` it was going to anyway.

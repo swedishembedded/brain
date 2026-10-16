@@ -109,6 +109,10 @@ name = "ce_stats_native"
 harness = false
 
 [[test]]
+name = "gdn_bwd_sweep_native"
+harness = false
+
+[[test]]
 name = "gdn_dscale_native"
 harness = false
 
