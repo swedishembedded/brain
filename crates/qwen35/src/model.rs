@@ -735,7 +735,10 @@ struct LayerTrainActs {
 /// buffers every call" convention, so `backward()` MUST run against the
 /// same `forward()` call whose gradient it computes.
 struct TrainActs {
+    /// One entry per owned layer, or empty when the forward ran with
+    /// recompute and the backward rebuilds each layer's from `res`.
     layers: Vec<LayerTrainActs>,
+    recomputed: bool,
     xn_final: DeviceBuffer,
 }
 
@@ -815,6 +818,9 @@ pub struct Qwen35 {
 
     /// Backward's activation cache - see [`TrainActs`]'s own doc.
     train_acts: RefCell<Option<TrainActs>>,
+    /// Whether `forward()` drops each layer's activations after use and
+    /// `backward()` recomputes them from the layer-boundary residuals.
+    recompute: Cell<bool>,
 
     // ---- multi-token prediction head (`cfg.mtp`) ---------------------------
     // Size-1 dummies when `cfg.mtp` is false, matching this file's own
@@ -1178,7 +1184,23 @@ impl Qwen35 {
     /// narrow base streams tensor by tensor with no whole-model fp32 copy.
     pub fn new_train_opts_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, opts: &TrainOpts) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, src, &opts.base, true, shard)
+        let m = Qwen35::new_impl_on(gpu, cfg, b, t, src, &opts.base, true, shard);
+        m.set_recompute(opts.recompute);
+        m
+    }
+
+    /// Switch activation recompute (see [`TrainOpts::recompute`]) for the
+    /// next `forward()`. A forward and its backward must run under the same
+    /// setting: the backward follows what the forward kept.
+    pub fn set_recompute(&self, on: bool) {
+        self.recompute.set(on);
+    }
+
+    /// How many layers' saved activations the last `forward()` left for
+    /// `backward()`: every layer without recompute, none with it. The
+    /// quantity that decides whether training memory scales with depth.
+    pub fn retained_layer_activations(&self) -> usize {
+        self.train_acts.borrow().as_ref().map_or(0, |ta| ta.layers.len())
     }
 
     /// Build a single pipeline **stage**: only the layers (and endpoint
@@ -1497,6 +1519,7 @@ impl Qwen35 {
             ce_grad_uni,
             res,
             train_acts: RefCell::new(None),
+            recompute: Cell::new(false),
             mtp_input,
             mtp_target,
             mtp_logits,
@@ -2354,6 +2377,49 @@ impl Qwen35 {
         d_res_next2
     }
 
+    /// One decoder layer's forward: `out = layer_l(xres)`. On a training
+    /// build it returns the activations the backward needs; the caller keeps
+    /// them (no recompute) or drops them at once (recompute, which calls this
+    /// again from `res[l]` inside the backward - the same kernels over the
+    /// same inputs, so the rebuilt activations are the ones that were dropped).
+    fn layer_forward(&self, l: usize, xres: &DeviceBuffer, out: &DeviceBuffer) -> Option<LayerTrainActs> {
+        let g = &self.gpu;
+        let n = self.b * self.t;
+        let d = self.cfg.d_model;
+        let xn1 = g.storage((n * d) as u64);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), xres, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n, self.cfg.rms_eps)]);
+
+        let (mixer_out, mixer_acts) = match self.cfg.layer_types()[l] {
+            LayerType::Linear => {
+                let (o, a) = self.layer_gdn_fwd(l, &xn1, n, GdnCall::Whole);
+                (o, a.map(|a| MixerActs::Gdn(Box::new(a))))
+            }
+            LayerType::Full => {
+                let (o, a) = self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), &xn1, n, None);
+                (o, a.map(MixerActs::Gqa))
+            }
+        };
+
+        let xmid = g.storage((n * d) as u64);
+        g.submit(&[], &[g.step(ADD2, &[xres, &mixer_out, &xmid], &[n * d], n * d)]);
+
+        let xn2 = g.storage((n * d) as u64);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, n, self.cfg.rms_eps)]);
+
+        let (mlp_out, mlp_acts) = self.mlp_fwd(&format!("blocks.{l}.mlp"), &xn2, n);
+        g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, out], &[n * d], n * d)]);
+
+        if !self.is_train {
+            return None;
+        }
+        Some(LayerTrainActs {
+            xn1,
+            mixer: mixer_acts.expect("qwen35: is_train but layer_gdn_fwd/layer_gqa_fwd returned no acts"),
+            xmid,
+            mlp: mlp_acts.expect("qwen35: is_train but mlp_fwd returned no acts"),
+        })
+    }
+
     pub(crate) fn run_forward(&self) {
         let g = &self.gpu;
         let n = self.b * self.t;
@@ -2374,43 +2440,11 @@ impl Qwen35 {
             }
         }
 
-        let types = self.cfg.layer_types();
-        // `l` is the ABSOLUTE layer index (into `types`/`res`/the
-        // `blocks.{l}.*` weight names below), not just a loop counter.
-        #[allow(clippy::needless_range_loop)]
+        let keep = self.is_train && !self.recompute.get();
         for l in self.shard.start..self.shard.end {
-            let ty = types[l];
-            let xres = &res[l];
-            let xn1 = g.storage((n * d) as u64);
-            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), xres, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n, self.cfg.rms_eps)]);
-
-            let (mixer_out, mixer_acts) = match ty {
-                LayerType::Linear => {
-                    let (o, a) = self.layer_gdn_fwd(l, &xn1, n, GdnCall::Whole);
-                    (o, a.map(|a| MixerActs::Gdn(Box::new(a))))
-                }
-                LayerType::Full => {
-                    let (o, a) = self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), &xn1, n, None);
-                    (o, a.map(MixerActs::Gqa))
-                }
-            };
-
-            let xmid = g.storage((n * d) as u64);
-            g.submit(&[], &[g.step(ADD2, &[xres, &mixer_out, &xmid], &[n * d], n * d)]);
-
-            let xn2 = g.storage((n * d) as u64);
-            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, n, self.cfg.rms_eps)]);
-
-            let (mlp_out, mlp_acts) = self.mlp_fwd(&format!("blocks.{l}.mlp"), &xn2, n);
-            g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res[l + 1]], &[n * d], n * d)]);
-
-            if self.is_train {
-                layer_acts.push(LayerTrainActs {
-                    xn1,
-                    mixer: mixer_acts.expect("qwen35: is_train but layer_gdn_fwd/layer_gqa_fwd returned no acts"),
-                    xmid,
-                    mlp: mlp_acts.expect("qwen35: is_train but mlp_fwd returned no acts"),
-                });
+            let acts = self.layer_forward(l, &res[l], &res[l + 1]);
+            if keep {
+                layer_acts.push(acts.expect("qwen35: is_train but layer_forward returned no acts"));
             }
         }
 
@@ -2436,7 +2470,7 @@ impl Qwen35 {
         };
 
         if self.is_train {
-            *self.train_acts.borrow_mut() = Some(TrainActs { layers: layer_acts, xn_final });
+            *self.train_acts.borrow_mut() = Some(TrainActs { layers: layer_acts, recomputed: !keep, xn_final });
         }
     }
 
@@ -2634,8 +2668,15 @@ impl Qwen35 {
         }
 
         let res = self.res.borrow();
+        // Where a recomputed layer writes its (unused) output residual.
+        let recompute_out = ta.recomputed.then(|| g.storage((n * d) as u64));
         for l in (self.shard.start..self.shard.end).rev() {
-            let la = &ta.layers[l - self.shard.start];
+            let rebuilt: Option<LayerTrainActs> =
+                recompute_out.as_ref().map(|out| self.layer_forward(l, &res[l], out).expect("qwen35: backward() requires a training build"));
+            let la = match &rebuilt {
+                Some(rebuilt) => rebuilt,
+                None => &ta.layers[l - self.shard.start],
+            };
 
             // ---- second residual add backward: res[l+1] = xmid + mlp_out ----
             let d_mlp_out = &d_res_next;
@@ -2667,6 +2708,12 @@ impl Qwen35 {
                 g.submit(&[], &s);
             }
             d_res_next = d_res_l;
+            if rebuilt.is_some() {
+                // Return this layer's rebuilt activations before the next
+                // layer allocates its own.
+                drop(rebuilt);
+                g.poll_wait();
+            }
         }
         drop(res);
 

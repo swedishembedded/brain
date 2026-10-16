@@ -26,11 +26,15 @@ pub struct TrainOpts {
     /// all-fp32 requires `cfg.lora` (a full-parameter build trains the base,
     /// which only fp32 can hold).
     pub base: TierPolicy,
+    /// Keep only the layer-boundary residuals through the forward and rebuild
+    /// each layer's activations inside the backward (one layer's activations
+    /// alive at a time instead of all of them, for one extra forward).
+    pub recompute: bool,
 }
 
 impl Default for TrainOpts {
     fn default() -> Self {
-        TrainOpts { base: TierPolicy::uniform(Dtype::F32) }
+        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false }
     }
 }
 
