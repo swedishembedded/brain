@@ -46,11 +46,14 @@ pub struct TrainOpts {
     /// activation memory follows the segment instead of the sequence. `None`
     /// keeps the whole sequence's intermediates; needs a batch of one.
     pub gdn_segment_tokens: Option<u32>,
+    /// Hold the layer-boundary residual stream in bf16 (half the bytes; see
+    /// `PackedResidual`). Whole-model, non-MTP builds only.
+    pub bf16_residuals: bool,
 }
 
 impl Default for TrainOpts {
     fn default() -> Self {
-        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None }
+        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None, bf16_residuals: false }
     }
 }
 
@@ -172,5 +175,43 @@ mod tests {
     #[test]
     fn a_pass_inside_the_binding_is_accepted() {
         check_batch_fits(&Qwen35Config::qwen38_27b(), 1, 32_768, 4 << 30);
+    }
+}
+
+/// The layer-boundary residual stream of a training pass, held as bf16: one
+/// packed buffer per boundary (`n_layers + 1` of them, `rows * d_model / 2`
+/// words each) instead of the same count of fp32 `rows * d_model` buffers -
+/// half the bytes of what dominates training memory once a layer's activations
+/// are recomputed. A layer reads its input after the round trip through bf16
+/// (forward and backward alike), so the recompute sees the very values the
+/// forward did and the rounding is part of the model rather than a mismatch
+/// between the two passes.
+pub(crate) struct PackedResidual {
+    packed: Vec<DeviceBuffer>,
+    pack: usize,
+    unpack: usize,
+    total: u32,
+}
+
+impl PackedResidual {
+    pub(crate) fn new(gpu: &Gpu, boundaries: usize, rows: u32, d_model: u32) -> PackedResidual {
+        let total = rows.checked_mul(d_model).unwrap_or_else(|| panic!("qwen35: {rows} x {d_model} residual elements overflow a u32 index"));
+        let kernel = |name: &str| gpu.kernel_index(name).unwrap_or_else(|| panic!("qwen35: kernel {name} is not registered"));
+        PackedResidual {
+            packed: (0..boundaries).map(|_| gpu.storage(total.div_ceil(2) as u64)).collect(),
+            pack: kernel("pack_bf16"),
+            unpack: kernel("unpack_bf16"),
+            total,
+        }
+    }
+
+    /// Store `src` (fp32 `[rows, d_model]`) as boundary `l`.
+    pub(crate) fn store(&self, gpu: &Gpu, l: usize, src: &DeviceBuffer) {
+        gpu.submit(&[], &[gpu.step(self.pack, &[src, &self.packed[l]], &[self.total], self.total.div_ceil(2))]);
+    }
+
+    /// Decode boundary `l` into `dst` (fp32 `[rows, d_model]`).
+    pub(crate) fn load(&self, gpu: &Gpu, l: usize, dst: &DeviceBuffer) {
+        gpu.submit(&[], &[gpu.step(self.unpack, &[&self.packed[l], dst], &[self.total], self.total)]);
     }
 }
