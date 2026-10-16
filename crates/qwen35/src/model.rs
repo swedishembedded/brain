@@ -67,6 +67,8 @@ use optim::Optim;
 use crate::config::{LayerType, Qwen35Config};
 pub use crate::train_base::TrainOpts;
 use crate::decode_state::DecodeState;
+#[path = "objectives.rs"]
+mod objectives;
 use crate::train_base::{read_weight_host, PackedResidual, reads_float_acts, table_tier, write_weight_host};
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
@@ -860,6 +862,8 @@ pub struct Qwen35 {
     /// CE-gradient uniform (`[n, vocab, IGNORE, count]`), written once per
     /// `backward()` call (`count` is only known after `set_batch`).
     ce_grad_uni: DeviceBuffer,
+    /// Per-token objectives (weighted loss, logit scale) when opted into.
+    objectives: objectives::State,
 
     /// Residual stream, one entry per layer boundary (`res[0]` = embeddings,
     /// `res[n_layers]` = input to the final norm) - the SSA activation-cache
@@ -1626,6 +1630,7 @@ impl Qwen35 {
             head_ce,
             ce_buf,
             ce_grad_uni,
+            objectives: Default::default(),
             res,
             train_acts: RefCell::new(None),
             res_bf16,
@@ -2880,9 +2885,9 @@ impl Qwen35 {
                         d_hidden: &d_xn_final,
                         n,
                         labels: &self.targets,
-                        grad_scale: GradScale::Const(1.0 / self.count.get()),
+                        grad_scale: GradScale::Const(self.objectives.grad_factor(self.count.get())),
                         logit_scale: 1.0,
-                        row_weights: None,
+                        row_weights: self.objectives.row_weights(),
                         dw,
                         forward_state_held: false,
                     },
@@ -4405,7 +4410,7 @@ impl Qwen35 {
             let mut s = Vec::new();
             head.forward_steps(&self.ops, &mut s, xn_final, n, &self.targets, &self.ce_buf, 1.0);
             self.gpu.submit(&[], &s);
-            return self.gpu.read(&self.ce_buf, n as usize).iter().sum::<f32>() / self.count.get();
+            return self.objectives.loss(&self.gpu, &self.gpu.read(&self.ce_buf, n as usize), self.count.get());
         }
         self.gpu.submit(&[], &[self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, self.cfg.vocab, model::IGNORE], n)]);
         let vals = self.gpu.read(&self.ce_buf, n as usize);
@@ -4492,16 +4497,20 @@ impl Qwen35 {
 
     pub fn logits_all(&self, tokens: &[u32]) -> Vec<f32> {
         assert_eq!(self.b, 1, "qwen35::logits_all requires b==1 (single sequence)");
-        assert_eq!(
-            tokens.len() as u32,
+        // A prefix is enough: the model is causal, so the padded positions
+        // cannot reach the logits of the real ones (a rollout asks one prefix
+        // after another).
+        assert!(
+            !tokens.is_empty() && tokens.len() as u32 <= self.t_user,
+            "qwen35::logits_all requires 1..={} tokens, got {}",
             self.t_user,
-            "qwen35::logits_all requires tokens.len() == the configured t (no partial-length prefill in this pass)"
+            tokens.len()
         );
         let mut padded = tokens.to_vec();
         padded.resize(self.t as usize, 0);
         self.gpu.write(&self.tokens, &padded);
         self.run_forward();
-        let real = self.t_user as usize * self.cfg.vocab as usize;
+        let real = tokens.len() * self.cfg.vocab as usize;
         let Some(head) = &self.head_ce else {
             return self.gpu.read(&self.logits, (self.t * self.cfg.vocab) as usize)[..real].to_vec();
         };
@@ -4518,6 +4527,14 @@ impl Qwen35 {
         }
         out.truncate(real);
         out
+    }
+
+    /// Rebuild a training model from a file [`Self::save`] wrote (adapters
+    /// included), sized for `b` sequences of `t` tokens.
+    pub fn load(path: &str, b: u32, t: u32) -> Qwen35 {
+        let container = checkpoint::load(path);
+        let cfg = Qwen35Config::from_json(&container.header["config"]);
+        Qwen35::new_train_on(Gpu::new(pipelines()), cfg, b, t, &container.into_by_role(""))
     }
 
     pub fn save(&self, path: &str) {
@@ -4556,7 +4573,12 @@ impl model::ModelConfig for Qwen35Config {
 impl model::Model for Qwen35 {
     type Config = Qwen35Config;
 
+    /// The training build (weights trainable, or a frozen base with trainable
+    /// adapters when `cfg.lora` is set).
     fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
+        Qwen35::new_train_on(Gpu::new(pipelines()), cfg, b, t, init)
+    }
+    fn new_inference(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Qwen35::new_on(Gpu::new(pipelines()), cfg, b, t, init)
     }
     fn init_weights(cfg: &Qwen35Config, seed: u64) -> HashMap<String, Vec<f32>> {
@@ -4567,8 +4589,25 @@ impl model::Model for Qwen35 {
     }
     fn set_batch(&self, batch: model::Batch) {
         match batch {
-            model::Batch::Lm { tokens, targets } => Qwen35::set_batch(self, tokens, targets),
-            _ => panic!("qwen35::Qwen35 only supports Batch::Lm"),
+            model::Batch::Lm { tokens, targets } => {
+                Qwen35::set_batch(self, tokens, targets);
+                self.reset_loss_weights();
+            }
+            model::Batch::LmWeighted { tokens, targets, weights } => {
+                Qwen35::set_batch(self, tokens, targets);
+                self.write_loss_weights(weights);
+            }
+            _ => panic!("qwen35::Qwen35 only supports Batch::Lm / Batch::LmWeighted"),
+        }
+    }
+    fn token_objectives(&self) -> Option<&dyn model::training::TokenObjectives> {
+        self.offers_token_objectives().then_some(self)
+    }
+    fn token_objectives_mut(&mut self) -> Option<&mut dyn model::training::TokenObjectives> {
+        if self.offers_token_objectives() {
+            Some(self)
+        } else {
+            None
         }
     }
     fn forward(&self) -> f32 {

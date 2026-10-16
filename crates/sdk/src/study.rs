@@ -147,7 +147,7 @@ impl StudyArch for Qwen35 {
     type M = qwen35::model::Qwen35;
     const ID: &'static str = "qwen35";
     const FAMILY: &'static str = "qwen35";
-    const TOKEN_OBJECTIVES: bool = false;
+    const TOKEN_OBJECTIVES: bool = true;
     fn lora(rank: u32, alpha: f32) -> LoraCfg {
         qwen35::config::lora_cfg(rank, alpha)
     }
@@ -161,7 +161,7 @@ impl StudyArch for Qwen35Moe {
     type M = qwen35moe::model::Qwen35;
     const ID: &'static str = "qwen35moe";
     const FAMILY: &'static str = "qwen35moe";
-    const TOKEN_OBJECTIVES: bool = false;
+    const TOKEN_OBJECTIVES: bool = true;
     fn lora(rank: u32, alpha: f32) -> LoraCfg {
         qwen35moe::config::lora_cfg(rank, alpha)
     }

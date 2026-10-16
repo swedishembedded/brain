@@ -27,6 +27,7 @@ pub mod import;
 pub mod int8_gguf_resident;
 pub mod init;
 pub mod lora;
+mod lora_sites;
 pub mod model;
 pub mod sample;
 pub mod serve;

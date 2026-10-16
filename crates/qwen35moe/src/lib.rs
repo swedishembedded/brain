@@ -14,6 +14,7 @@ pub mod gguf_load;
 pub mod import;
 pub mod init;
 pub mod lora;
+mod lora_sites;
 pub mod model;
 pub mod q8;
 pub mod sample;

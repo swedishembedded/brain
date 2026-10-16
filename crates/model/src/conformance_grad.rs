@@ -27,6 +27,9 @@ const EPS: f32 = 5e-3;
 const ATOL: f32 = 4e-3;
 const RTOL: f32 = 8e-2;
 const DIRECTIONS: usize = 3;
+/// A gradient tensor smaller than this fraction of the largest one has no
+/// signal for the tier comparison (see [`tiers_track_the_f32_gradients`]).
+const SIGNAL_FLOOR: f32 = 1e-3;
 
 /// Give every adapter tensor small random values, so a zero-initialised `B`
 /// does not make every `A` gradient vanish. A model without adapters is left alone.
@@ -146,9 +149,13 @@ pub fn tiers_track_the_f32_gradients<M: Model>(subject: &Subject<M>, seed: u64) 
         randomize_adapters(&m, seed);
         m.set_batch(Batch::Lm { tokens: &tokens, targets: &targets });
         let got = gradients(&m);
+        // A tensor whose gradient is a rounding-level fraction of the largest
+        // one (a gated path that is nearly closed at a random initialisation)
+        // carries no signal to compare: its relative error is noise.
+        let floor = SIGNAL_FLOOR * want.iter().map(|(_, w)| norm(w)).fold(0.0, f32::max);
         for ((name, g), (_, w)) in got.iter().zip(&want) {
             let diff: Vec<f32> = g.iter().zip(w).map(|(a, b)| a - b).collect();
-            let rel = norm(&diff) / norm(w).max(1e-12);
+            let rel = norm(&diff) / norm(w).max(floor).max(1e-12);
             if rel > tier.grad_rel_tol {
                 return Err(format!("{}: tier {}: {name}: gradient is {rel} from the f32 base's, over the allowed {}", subject.name, tier.name, tier.grad_rel_tol));
             }

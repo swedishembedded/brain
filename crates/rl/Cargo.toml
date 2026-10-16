@@ -58,8 +58,11 @@ brain-testutil.workspace = true
 brain-gradcheck.workspace = true
 # `tests/conformance.rs` registers `gpt2::Gpt` next to `qwen3::Qwen`.
 brain-gpt2.workspace = true
-# A model that declares no token objectives yet, for the refusal check.
+# `tests/conformance.rs` registers `qwen35::Qwen35` (its frozen-base tiers need the device handle and dtype).
 brain-qwen35.workspace = true
+brain-gpu-core.workspace = true
+# `tests/conformance.rs` registers `qwen35moe::Qwen35` too.
+brain-qwen35moe.workspace = true
 
 # Every integration test below trains a real (tiny) `qwen3::Qwen` - the only
 # `model::Model` in this repo with a full weighted-loss + `logits_all` +
@@ -82,6 +85,11 @@ required-features = ["qwen3"]
 [[test]]
 name = "grpo_fixes"
 path = "tests/grpo_fixes.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "grpo_qwen35"
+path = "tests/grpo_qwen35.rs"
 required-features = ["qwen3"]
 
 [[test]]

@@ -18,19 +18,16 @@
 //!
 //! Seeds are drawn at run time and printed.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use data::rng::Rng;
 use model::rollout::{Completion, Rollout, RolloutParams, StopReason, SyncRollout};
-use model::serve::SampleParams;
 use model::{Model, Objective, StepVerdict, IGNORE};
 use qwen3::{LoraCfg, Qwen, QwenConfig};
-use rl::env::{Environment, Reward, Step, Task, Verifier};
+mod grpo_common;
+
+use grpo_common::{always_variable, config, parity_reward, Env, Judge, T};
+use rl::env::{Environment, Verifier};
 use rl::objective::grpo::{CycleLog, Grpo, GrpoConfig, GrpoOptions, LossAgg, NonFiniteSteps, RowRefusal};
 
-const T: usize = 8;
-const PROMPT: [u32; 3] = [1, 2, 3];
 const EOS: u32 = 7;
 
 fn seed() -> u64 {
@@ -47,63 +44,6 @@ fn lora_model(seed: u64) -> (Qwen, QwenConfig, std::collections::HashMap<String,
     let m = Qwen::new(cfg.clone(), 1, T as u32, &init);
     model::conformance_grad::randomize_adapters(&m, seed);
     (m, cfg, init)
-}
-
-/// One fixed prompt; `variable(seed)` decides whether the task's reward varies
-/// across completions or is the same for all of them.
-struct Env {
-    variable: fn(u64) -> bool,
-}
-
-impl Environment for Env {
-    fn name(&self) -> &str {
-        "fixes"
-    }
-    fn tasks(&self, seed: u64) -> Vec<Task> {
-        vec![Task { id: format!("t{seed}"), prompt: PROMPT.to_vec(), answer: serde_json::json!((self.variable)(seed)) }]
-    }
-}
-
-/// Reward by a closure over the completion the verifier is shown, and a record of what it saw.
-struct Judge {
-    reward: fn(&[u32], bool) -> f32,
-    seen: Rc<RefCell<Vec<Vec<u32>>>>,
-}
-
-impl Judge {
-    fn new(reward: fn(&[u32], bool) -> f32) -> (Judge, Rc<RefCell<Vec<Vec<u32>>>>) {
-        let seen = Rc::new(RefCell::new(Vec::new()));
-        (Judge { reward, seen: seen.clone() }, seen)
-    }
-}
-
-impl Verifier for Judge {
-    fn verify(&self, task: &Task, _t: &[Step], completion: &[u32]) -> Reward {
-        self.seen.borrow_mut().push(completion.to_vec());
-        let variable: bool = serde_json::from_value(task.answer.clone()).unwrap();
-        Reward { value: (self.reward)(completion, variable), parts: Default::default() }
-    }
-}
-
-/// Informative on variable tasks (parity of the first token), constant otherwise.
-fn parity_reward(c: &[u32], variable: bool) -> f32 {
-    if variable {
-        (c[0] % 2) as f32
-    } else {
-        1.0
-    }
-}
-
-fn config(group: usize, temp: f32, options: GrpoOptions) -> GrpoConfig {
-    GrpoConfig {
-        group_size: group,
-        clip_eps: 0.2,
-        kl_beta: 0.0,
-        seq_len: T,
-        rollout: RolloutParams { max_new: 4, sample: SampleParams { temp, top_k: 0, top_p: 1.0 }, eos: None },
-        max_attempts: 1,
-        options,
-    }
 }
 
 /// A rollout that is not the model: it returns the scripted completions, in order, for every group.
@@ -140,10 +80,6 @@ fn verdict<E: Environment, V: Verifier>(obj: &mut Grpo<E, V>) -> StepVerdict {
     Objective::<Qwen>::step_verdict(obj)
 }
 
-fn always_variable(_: u64) -> bool {
-    true
-}
-
 fn scripted<E: Environment, V: Verifier>(env: E, judge: V, cfg: GrpoConfig, group: Vec<Completion>) -> Grpo<E, V> {
     Grpo::new(env, judge, cfg).with_rollout(Box::new(Scripted { group }), 1)
 }
@@ -157,15 +93,7 @@ fn the_trained_distribution_is_the_sampled_one_at_every_temperature() {
     let s = seed();
     for temp in [0.7f32, 1.0, 1.5] {
         let (mut m, _, _) = lora_model(s);
-        let (judge, _) = Judge::new(parity_reward);
-        let mut obj = Grpo::new(Env { variable: always_variable }, judge, config(4, temp, GrpoOptions::default()));
-        obj.prepare(&mut m).unwrap();
-        let mut rng = Rng::new(s);
-        obj.micro_steps(&m, &mut rng, 4);
-        let st = obj.stats();
-        assert!(st.rows_trained > 0, "T={temp}: nothing was trained");
-        assert!(st.max_onpolicy_ratio_dev < 1e-4, "T={temp}: first-update |ratio - 1| = {}", st.max_onpolicy_ratio_dev);
-        assert!(st.max_sampler_gap < 1e-3, "T={temp}: the sampler's logprob differs from the trainer's by {}", st.max_sampler_gap);
+        grpo_common::assert_trained_distribution_is_sampled(&mut m, temp, s);
     }
 }
 
@@ -176,25 +104,7 @@ fn the_trained_distribution_is_the_sampled_one_at_every_temperature() {
 fn no_optimiser_step_runs_on_an_empty_batch() {
     let s = seed();
     let (mut m, _, _) = lora_model(s);
-    let (judge, _) = Judge::new(parity_reward);
-    // About 80% of tasks give every completion the same reward.
-    let mut obj = Grpo::new(Env { variable: |seed| seed % 10 >= 8 }, judge, config(4, 1.0, GrpoOptions::default()));
-    obj.prepare(&mut m).unwrap();
-    let mut rng = Rng::new(s);
-    let k = 4;
-    for step in 0..6 {
-        let before = obj.stats().clone();
-        obj.micro_steps(&m, &mut rng, k);
-        let trained = obj.stats().rows_trained - before.rows_trained;
-        let short = obj.stats().steps_short - before.steps_short;
-        assert!(trained == k as usize || short == 1, "step {step}: {trained} rows and no shortfall logged");
-        match verdict(&mut obj) {
-            StepVerdict::Apply => assert!(trained > 0, "step {step}: an optimiser step was allowed on zero rows"),
-            StepVerdict::Skip(_) => assert_eq!(trained, 0, "step {step}: skipped with {trained} rows"),
-            StepVerdict::Abort(e) => panic!("{e}"),
-        }
-    }
-    assert!(obj.stats().groups_zero_variance > 0, "the environment was meant to give zero-variance groups");
+    grpo_common::assert_no_step_on_an_empty_batch(&mut m, s);
 }
 
 /// A run over an environment that never separates its completions takes no
@@ -338,9 +248,12 @@ fn rows_older_than_the_staleness_bound_are_refused() {
     }
 }
 
+/// Reference log-probabilities of a padded row for its targets.
+type Reference<'a> = &'a dyn Fn(&[u32], &[u32]) -> Vec<f32>;
+
 /// The mean k3 KL of the two trained rows' supervised tokens ([4, 5] and
 /// [6, 6, 6] after the prompt) between `m` and `reference`, from independent forwards.
-fn analytic_kl(m: &Qwen, reference: &dyn Fn(&[u32], &[u32]) -> Vec<f32>) -> f32 {
+fn analytic_kl(m: &Qwen, reference: Reference) -> f32 {
     let (mut sum, mut n) = (0.0f32, 0usize);
     for toks in [&[1u32, 2, 3, 4, 5][..], &[1, 2, 3, 6, 6, 6][..]] {
         let mut padded = toks.to_vec();
