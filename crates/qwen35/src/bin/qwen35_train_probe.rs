@@ -19,8 +19,15 @@
 //! ```text
 //! BRAIN_BACKEND=cuda gpu qwen35_train_probe --tokens 4096 --base nf4 \
 //!     [--layers 4] [--rank 16] [--recompute on|off] [--gdn-segment N] \
-//!     [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N] [--steps 2]
+//!     [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N] [--steps 2] [--seed N]
 //! ```
+//!
+//! `--seed` fixes the random weights and tokens so two runs are the same
+//! workload; without it a seed is drawn and printed. Each step line carries
+//! the number of dispatches the step issued, and the summary line the rate
+//! over steps 2.. (step 1 pays the one-off kernel compilation) together with
+//! the number of other compute processes `nvidia-smi` saw on the card at the
+//! start and end: a rate measured next to another context is not the card's.
 //!
 //! `--base` is bf16, nf4 or f32. `--gdn-segment 0` (the default) keeps a GDN
 //! layer's whole-sequence intermediates; a positive value segments it.
@@ -39,19 +46,39 @@ use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
 const USAGE: &str = "usage: qwen35_train_probe [--tokens N] [--layers N] [--base bf16|nf4|f32] [--rank R] [--steps N] \\
-     [--recompute on|off] [--gdn-segment N] [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N]
+     [--recompute on|off] [--gdn-segment N] [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N] \\
+     [--seed N] [--gemm-precision auto|fp32|bf16] [--profile]
   Builds the first --layers layers of the real Qwen3.8-27B shape with random weights and times --steps LoRA steps at --tokens
   tokens. Every result is a `PROBE key=value` line on stdout. With BRAIN_PROFILE set, each step also prints the device
   time per kernel kind.";
 
 /// Every flag that takes a value; anything else starting with `--` is refused.
-const VALUE_FLAGS: [&str; 11] =
-    ["--tokens", "--layers", "--base", "--rank", "--steps", "--recompute", "--gdn-segment", "--head-budget", "--flash-min-t", "--bf16-residuals", "--mlp-rows"];
+const VALUE_FLAGS: [&str; 13] = [
+    "--tokens",
+    "--layers",
+    "--base",
+    "--rank",
+    "--steps",
+    "--recompute",
+    "--gdn-segment",
+    "--head-budget",
+    "--flash-min-t",
+    "--bf16-residuals",
+    "--mlp-rows",
+    "--seed",
+    "--gemm-precision",
+];
+
+/// Flags that stand alone.
+const SWITCHES: [&str; 1] = ["--profile"];
 
 /// Refuse a flag nothing here reads: a typo would otherwise measure a different configuration than the one asked for.
 fn check_flags(args: &[String]) -> Result<(), String> {
     let mut it = args.iter().skip(1);
     while let Some(a) = it.next() {
+        if SWITCHES.contains(&a.as_str()) {
+            continue;
+        }
         if !VALUE_FLAGS.contains(&a.as_str()) {
             return Err(format!("unknown argument {a:?}"));
         }
@@ -112,6 +139,13 @@ impl TensorSource for SyntheticSource {
     }
 }
 
+/// Compute processes on the card other than this one, as `nvidia-smi` lists them.
+fn other_compute_contexts() -> Option<usize> {
+    let out = std::process::Command::new("nvidia-smi").args(["--query-compute-apps=pid", "--format=csv,noheader"]).output().ok()?;
+    let pid = std::process::id().to_string();
+    Some(String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| !l.is_empty() && *l != pid).count())
+}
+
 /// This process's GPU memory in MiB as `nvidia-smi` reports it.
 fn own_gpu_mib() -> Option<u64> {
     let out = std::process::Command::new("nvidia-smi").args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).output().ok()?;
@@ -150,7 +184,7 @@ fn main() {
     cfg.n_layers = layers;
     cfg.block_size = tokens;
     cfg.lora = Some(lora_cfg(rank, 2.0 * rank as f32));
-    let seed = Rng::random().next_u64();
+    let seed = arg(&args, "--seed").map_or_else(|| Rng::random().next_u64(), |v| v.parse().expect("--seed N"));
     println!("PROBE seed={seed} layers={layers} tokens={tokens} base={base} rank={rank} recompute={recompute} gdn_segment={gdn_segment}");
     let src = SyntheticSource { sizes: cfg.param_list().into_iter().collect(), seed };
     let opts = TrainOpts {
@@ -177,6 +211,7 @@ fn main() {
         })
     };
 
+    let others_start = other_compute_contexts();
     let t0 = Instant::now();
     let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg.clone(), 1, tokens, &src, &opts);
     println!("PROBE build_s={:.1}", t0.elapsed().as_secs_f64());
@@ -187,7 +222,9 @@ fn main() {
     let x: Vec<u32> = (0..tokens).map(|_| rng.next_u32() % cfg.vocab).collect();
     let y: Vec<u32> = (0..tokens).map(|_| rng.next_u32() % cfg.vocab).collect();
     m.set_batch(&x, &y);
+    let mut warm_secs = 0.0;
     for step in 1..=steps {
+        m.gpu.reset_ops_counters();
         let t = Instant::now();
         let (loss, fwd) = gpu_core::profile::device_table(&m.gpu, &format!("step {step}"), || {
             m.zero_grads();
@@ -199,7 +236,16 @@ fn main() {
             (loss, fwd)
         });
         let total = t.elapsed().as_secs_f64();
-        println!("PROBE step={step} loss={loss:.4} forward_s={fwd:.2} step_s={total:.2} tokens_per_s={:.0}", tokens as f64 / total);
+        let dispatches = m.gpu.ops_counters().steps;
+        println!("PROBE step={step} loss={loss:.4} forward_s={fwd:.2} step_s={total:.2} tokens_per_s={:.0} dispatches={dispatches}", tokens as f64 / total);
+        if step > 1 {
+            warm_secs += total;
+        }
+    }
+    if steps > 1 {
+        let rate = (steps - 1) as f64 * tokens as f64 / warm_secs;
+        let n = |c: Option<usize>| c.map_or("n/a".to_string(), |c| c.to_string());
+        println!("PROBE warm_tokens_per_s={rate:.0} other_contexts_start={} other_contexts_end={}", n(others_start), n(other_compute_contexts()));
     }
     stop.store(true, Ordering::Relaxed);
     sampler.join().expect("sampler");
@@ -221,6 +267,7 @@ mod tests {
     #[test]
     fn known_flags_pass_and_typos_and_missing_values_are_refused() {
         assert!(check_flags(&argv(&["--tokens", "4096", "--base", "nf4", "--mlp-rows", "256"])).is_ok());
+        assert!(check_flags(&argv(&["--seed", "7", "--gemm-precision", "fp32", "--profile", "--steps", "3"])).is_ok());
         assert!(check_flags(&argv(&["--token", "4096"])).unwrap_err().contains("--token"));
         assert!(check_flags(&argv(&["--tokens"])).unwrap_err().contains("requires a value"));
     }
