@@ -94,13 +94,15 @@ fn shared_prefill_parity_and_speed() {
     let (t, h, nsamp) = (96usize, 5usize, 4usize);
     let bars = synth_bars(t, feat);
     let (ctx_stamp, fut_stamp) = (vec![0u32; t * 5], vec![0u32; h * 5]);
-    let opts = kronos::generate::GenOpts { argmax: false, temperature: 1.0, top_k: 0, top_p: 1.0, seed: 42 };
+    // One draw shared by the batched and the independent rollouts it is compared against.
+    let seed = data::rng::random_seed();
+    let opts = kronos::generate::GenOpts { argmax: false, temperature: 1.0, top_k: 0, top_p: 1.0, seed };
 
-    // Parity: shared[i] == independent rollout with seed 42+i, bit-for-bit.
+    // Parity: shared[i] == independent rollout with seed + i, bit-for-bit.
     let shared = model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, h, nsamp, &opts);
     assert_eq!(shared.len(), nsamp);
     for (i, s) in shared.iter().enumerate() {
-        let oi = kronos::generate::GenOpts { seed: 42 + i as u64, ..opts.clone() };
+        let oi = kronos::generate::GenOpts { seed: seed.wrapping_add(i as u64), ..opts.clone() };
         let indep = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, h, &oi);
         assert_eq!(*s, indep, "shared-prefill sample {i} != independent rollout");
     }
@@ -120,7 +122,7 @@ fn shared_prefill_parity_and_speed() {
         for _ in 0..3 {
             let t0 = Instant::now();
             for i in 0..nsamp {
-                let oi = kronos::generate::GenOpts { seed: 42 + i as u64, ..opts.clone() };
+                let oi = kronos::generate::GenOpts { seed: seed.wrapping_add(i as u64), ..opts.clone() };
                 let _ = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, h, &oi);
             }
             b = b.min(t0.elapsed().as_secs_f64() * 1e3);
@@ -223,7 +225,7 @@ fn finetune_step_batch_scaling() {
 
     // Deterministic small random weights (reference names: fusion is the fused
     // [d,2d] `fusion_proj.weight`, split inside the constructor).
-    let mut lcg = data::rng::Lcg::new(0x1234_5678); // the unified LCG (audit F39/F40)
+    let mut lcg = data::rng::Lcg::new(data::rng::random_seed()); // the unified LCG (audit F39/F40)
     let mut rnd = |n: usize| -> Vec<f32> { (0..n).map(|_| lcg.scaled(0.03)).collect() };
     let mut init: HashMap<String, Vec<f32>> = param_list_c(&cfg)
         .into_iter()

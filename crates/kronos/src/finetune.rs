@@ -128,7 +128,7 @@ mod tests {
         let tc = KronosTokenizerConfig::tiny();
         let dc = KronosConfig::tiny();
         // The unified deterministic LCG (audit F39/F40).
-        let mut lcg = data::rng::Lcg::new(1);
+        let mut lcg = data::rng::Lcg::new(data::rng::random_seed());
         let mut rnd = |n: usize| -> Vec<f32> { (0..n).map(|_| lcg.scaled(0.05)).collect() };
         let tw: HashMap<String, Vec<f32>> = tc.param_list().into_iter().map(|(k, s)| (k, rnd(s.iter().product()))).collect();
         let dw: HashMap<String, Vec<f32>> = dc.param_list().into_iter().map(|(k, s)| (k, rnd(s.iter().product()))).collect();

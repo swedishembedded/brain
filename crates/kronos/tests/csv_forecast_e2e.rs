@@ -161,7 +161,7 @@ fn forecasting_the_example_csv_yields_a_calibrated_widening_band() {
         representations: vec![forecast::Representation::Quantiles, forecast::Representation::Point],
         quantile_levels: vec![0.1, 0.5, 0.9],
         num_samples: SAMPLES,
-        seed: 7,
+        seed: 7, // seed: the calibration and CRPS margins were measured on the real weights at this seed (needs real weights; not run)
     };
 
     let (mut maes, mut crpss, mut naive_crps) = (Vec::new(), Vec::new(), Vec::new());
@@ -264,7 +264,7 @@ fn the_chart_renders_from_a_real_forecast() {
     let model = kronos::KronosForecaster::load(&tok, &dec).expect("load kronos");
     let s = series();
     let split = s.split(CONTEXT, HORIZON).expect("split");
-    let spec = forecast::ForecastSpec { horizon: HORIZON, representations: vec![forecast::Representation::Point], num_samples: 4, seed: 7, ..Default::default() };
+    let spec = forecast::ForecastSpec { horizon: HORIZON, representations: vec![forecast::Representation::Point], num_samples: 4, seed: data::rng::random_seed(), ..Default::default() };
     let out = model.forecast(&forecast::csv::panel(&split, "SYN", "1h"), &spec).expect("forecast");
     let tf = out.targets.iter().find(|t| t.name == "close").expect("a close target");
     let pred = tf.mean.as_ref().expect("a point path").data.clone();

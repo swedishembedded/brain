@@ -209,7 +209,7 @@ fn tokenizer_and_decoder_match_the_reference() {
     // separately gated against each other, but only this pins either to the
     // reference.
     let ref_pred = read_f32(&golden.join("t6_pred.f32"));
-    let opts = GenOpts { temperature: 1.0, top_k: 0, top_p: 1.0, argmax: true, seed: 0 };
+    let opts = GenOpts { temperature: 1.0, top_k: 0, top_p: 1.0, argmax: true, seed: data::rng::random_seed() };
     let out = model.forecast(&raw, &stamp[..t * 5], &stamp[t * 5..], pred_len, &opts);
     assert_eq!(out.len(), pred_len * feat, "T6 forecast: shape");
     let r6 = rel_l2(&out, &ref_pred);

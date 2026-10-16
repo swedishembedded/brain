@@ -708,8 +708,8 @@ mod tests {
     fn top_k_short_circuits_top_p() {
         // with top_k set AND top_p set, only top_k is applied (reference quirk).
         let mut lg = vec![1.0, 2.0, 3.0, 4.0];
-        let mut rng = SplitMix64::new(0);
-        let opts = GenOpts { argmax: false, top_k: 1, top_p: 0.1, temperature: 1.0, seed: 0 };
+        let mut rng = SplitMix64::new(data::rng::random_seed());
+        let opts = GenOpts { argmax: false, top_k: 1, top_p: 0.1, temperature: 1.0, seed: data::rng::random_seed() };
         // top_k=1 keeps only index 3 -> always sampled
         for _ in 0..8 {
             let l = lg.clone();

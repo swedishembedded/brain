@@ -119,7 +119,7 @@ fn calendar_shifts_the_forecast_toward_the_official() {
         representations: vec![Representation::Samples],
         quantile_levels: vec![0.5],
         num_samples: 8,
-        seed: 0,
+        seed: data::rng::random_seed(),
     };
     let with = model.forecast(&Panel { freq: "1d".into(), start: None, items: vec![forecast::Item::new("AAPL", variates(cal))] }, &spec).unwrap();
     let without = model.forecast(&Panel { freq: "1d".into(), start: None, items: vec![forecast::Item::new("AAPL", variates(vec![]))] }, &spec).unwrap();

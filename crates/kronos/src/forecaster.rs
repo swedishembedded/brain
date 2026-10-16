@@ -379,7 +379,7 @@ mod tests {
             representations: vec![Representation::Samples, Representation::Quantiles, Representation::Point],
             quantile_levels: vec![0.1, 0.5, 0.9],
             num_samples: 8,
-            seed: 42,
+            seed: data::rng::random_seed(),
         };
         let out = f.forecast(&panel, &spec).unwrap();
         assert_eq!(out.model, "kronos");
