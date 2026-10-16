@@ -78,7 +78,9 @@ FIELD = {
     "min_cc": re.compile(r"min_cc:\s*(?:\((\d+)\s*,\s*(\d+)\)|(\w+))"),
     "entry": re.compile(r'entry:\s*"([^"]*)"'),
     "what": re.compile(r'what:\s*"((?:[^"\\]|\\.)*)"'),
-    "src": re.compile(r'src:\s*include_str!\("([^"]*)"\)'),
+    # `include_str!("...")` alone, or inside a `concat!(...)` that prefixes
+    # `#define`s to the same file (a tile variant of one kernel).
+    "src": re.compile(r'src:[^}]*?include_str!\("([^"]*)"\)', re.S),
 }
 
 

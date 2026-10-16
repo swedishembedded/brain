@@ -2663,6 +2663,23 @@ mod tests {
         assert!(why.contains("u32 element index"), "{why}");
     }
 
+    /// The sizing a batch-serving deployment plans with: at the default
+    /// 4096-token context one 97 GiB GH200 holds 64 sequences in any KV tier
+    /// (the sweep's largest batch), and the compact tiers buy proportionally
+    /// more slots. Pure arithmetic over the planner, printed so a deployment
+    /// can read its ceiling off the test log.
+    #[test]
+    fn one_gh200_holds_64_sequences_of_4096_tokens_in_every_kv_tier() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let usable = (97_871u64 << 20) - (2 << 30);
+        let i8 = TierPolicy::uniform(Dtype::I8);
+        let ceiling = |kv: KvTier| (1..=1024u32).take_while(|&b| sizing_refusal(&cfg, 4096, &i8, kv, b, &[usable]).is_none()).last().unwrap_or(0);
+        let [f32b, bf16b, int8b] = KvTier::ALL.map(ceiling);
+        println!("4096 tokens on one GH200: planner admits f32 {f32b}, bf16 {bf16b}, int8 {int8b} sequences");
+        assert!(f32b >= 64, "64 f32 sequences of 4096 tokens must fit: {f32b}");
+        assert!(bf16b > f32b && int8b > bf16b, "a more compact tier admits more sequences: f32 {f32b}, bf16 {bf16b}, int8 {int8b}");
+    }
+
     /// A plane is addressed by `u32` element offsets, so past 4.29G elements
     /// a pool would alias itself whatever the cards could hold: at 128k tokens
     /// x 1024 elements that is 33 sequences, and the planner must refuse there.

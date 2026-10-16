@@ -172,6 +172,22 @@ impl CudaProvider {
         kernels_cuda::find(op, dtype, self.cc)
     }
 
+    /// The int8 tensor-core GEMM for `rows` activation rows: the 64x64-tile
+    /// `matmul_i8_mma` for prefill-sized row counts, and the smaller-tile
+    /// siblings (`_m16`, `_m32`, `_m128`) for the row counts of a batched
+    /// decode step, where a big tile leaves most of the device without a block
+    /// and the weights stream at a fraction of the memory bandwidth. All are
+    /// the same source at a different tile, so the result is bit-identical.
+    pub fn i8_mma_kernel(&self, rows: u32) -> Option<&'static CudaKernel> {
+        let name = match rows {
+            0..=16 => "matmul_i8_mma_m16",
+            17..=32 => "matmul_i8_mma_m32",
+            33..=128 => "matmul_i8_mma_m128",
+            _ => "matmul_i8_mma",
+        };
+        kernels_cuda::get(name).filter(|k| k.min_cc <= self.cc)
+    }
+
     /// [`Self::kernel`]'s registry name - what a test or a diagnostic reports
     /// without having to reach into the registry itself.
     pub fn kernel_name(&self, op: select::Op, dtype: Dtype) -> Option<&'static str> {
@@ -425,7 +441,8 @@ impl OperatorProvider for CudaProvider {
                 ))
             }
         };
-        let k = self.kernel(select::Op::MatMul, dt).ok_or_else(|| {
+        let k = if dt == Dtype::I8 { self.i8_mma_kernel(req.shape.m) } else { self.kernel(select::Op::MatMul, dt) };
+        let k = k.ok_or_else(|| {
             format!("cuda::CudaProvider::lower: no native {dt:?} MatMul kernel at compute capability {}.{}", self.cc.0, self.cc.1)
         })?;
         let bindings = if dt == Dtype::I8 { MATMUL_I8_BINDINGS } else { MATMUL_BINDINGS };

@@ -254,9 +254,14 @@ fn the_int8_tensor_core_gemm_is_routed_to_and_agrees_with_the_portable_kernel_on
         (256, 6144, 6144),
         (300, 5136, 5120),
         (9, 6144, 5120),
+        (16, 5120, 5120),
+        (17, 17408, 5120),
         (32, 6144, 5120),
         (33, 6144, 5120),
+        (64, 5120, 17408),
         (100, 129, 128),
+        (128, 10240, 5120),
+        (129, 5120, 5120),
     ];
     let mut worst = 0f32;
     for (i, &(m, n, k)) in shapes.iter().enumerate() {
@@ -265,7 +270,13 @@ fn the_int8_tensor_core_gemm_is_routed_to_and_agrees_with_the_portable_kernel_on
         let (want, ref_kernels) = d.run(&reference, &p);
         assert_eq!(ref_kernels, vec!["matmul_i8_dyn"], "the reference registry must run the portable kernel");
         let (got, kernels_used) = d.run(&production, &p);
-        assert_eq!(kernels_used, vec!["native:matmul_i8_mma"], "{m}x{n}x{k}: the production chain must route to the tensor-core kernel");
+        assert!(
+            kernels_used.len() == 1 && kernels_used[0].starts_with("native:matmul_i8_mma"),
+            "{m}x{n}x{k}: the production chain must route to a tensor-core kernel, got {kernels_used:?}"
+        );
+        if (9..=128).contains(&m) {
+            assert_ne!(kernels_used[0], "native:matmul_i8_mma", "{m} rows is a decode batch: it takes a smaller tile than the prefill kernel");
+        }
 
         let scale = rms(&want);
         let maxdiff = want.iter().zip(&got).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);

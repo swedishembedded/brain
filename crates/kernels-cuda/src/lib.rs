@@ -211,6 +211,90 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_i8_mma.cu"),
     },
     CudaKernel {
+        name: "matmul_i8_mma_m16",
+        // The decode-batch siblings of `matmul_i8_mma`: the same source and
+        // arithmetic (every output element folds the same groups in the same
+        // order, so the result is bit-identical), compiled at a smaller tile.
+        // A 64x64 tile gives the up to 16-row GEMMs of a batched decode step
+        // 80-272 blocks on a 132-SM part that has to stream every weight, and
+        // measured 0.75-1.4 TB/s of the weights; smaller tiles put more blocks
+        // and more bytes in flight (swept by `cuda_provider_matmul_i8
+        // sweep_skinny`). Asked for by name by `CudaProvider` for the row
+        // counts they were tuned for.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_matmul_i8_mma_m16",
+        what: "int8 tensor-core GEMM at a 16x16 tile for the up to 16-row GEMMs of a batched decode step; bit-identical to matmul_i8_mma",
+        reported: "native:matmul_i8_mma_m16",
+        block_dim: 32,
+        tile: (16, 16),
+        shared_bytes: 8 * (16 * 64 + 16 * 64 + 16 * 2 * 4),
+        src: concat!(
+            "#define BRAIN_I8_BM 16\n#define BRAIN_I8_BN 16\n#define BRAIN_I8_WARPS_M 1\n#define BRAIN_I8_WARPS_N 1\n#define BRAIN_I8_STAGES 8\n",
+            "#define brain_matmul_i8_mma brain_matmul_i8_mma_m16\n",
+            include_str!("../cu/matmul_i8_mma.cu")
+        ),
+    },
+    CudaKernel {
+        name: "matmul_i8_mma_m32",
+        // The decode-batch siblings of `matmul_i8_mma`: the same source and
+        // arithmetic (every output element folds the same groups in the same
+        // order, so the result is bit-identical), compiled at a smaller tile.
+        // A 64x64 tile gives the 17 to 32-row GEMMs of a batched decode step
+        // 80-272 blocks on a 132-SM part that has to stream every weight, and
+        // measured 0.75-1.4 TB/s of the weights; smaller tiles put more blocks
+        // and more bytes in flight (swept by `cuda_provider_matmul_i8
+        // sweep_skinny`). Asked for by name by `CudaProvider` for the row
+        // counts they were tuned for.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_matmul_i8_mma_m32",
+        what: "int8 tensor-core GEMM at a 32x32 tile for the 17 to 32-row GEMMs of a batched decode step; bit-identical to matmul_i8_mma",
+        reported: "native:matmul_i8_mma_m32",
+        block_dim: 64,
+        tile: (32, 32),
+        shared_bytes: 6 * (32 * 64 + 32 * 64 + 32 * 2 * 4),
+        src: concat!(
+            "#define BRAIN_I8_BM 32\n#define BRAIN_I8_BN 32\n#define BRAIN_I8_WARPS_M 2\n#define BRAIN_I8_WARPS_N 1\n#define BRAIN_I8_STAGES 6\n",
+            "#define brain_matmul_i8_mma brain_matmul_i8_mma_m32\n",
+            include_str!("../cu/matmul_i8_mma.cu")
+        ),
+    },
+    CudaKernel {
+        name: "matmul_i8_mma_m128",
+        // The decode-batch siblings of `matmul_i8_mma`: the same source and
+        // arithmetic (every output element folds the same groups in the same
+        // order, so the result is bit-identical), compiled at a smaller tile.
+        // A 64x64 tile gives the 33 to 128-row GEMMs of a batched decode step
+        // 80-272 blocks on a 132-SM part that has to stream every weight, and
+        // measured 0.75-1.4 TB/s of the weights; smaller tiles put more blocks
+        // and more bytes in flight (swept by `cuda_provider_matmul_i8
+        // sweep_skinny`). Asked for by name by `CudaProvider` for the row
+        // counts they were tuned for.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_matmul_i8_mma_m128",
+        what: "int8 tensor-core GEMM at a 64x32 tile for the 33 to 128-row GEMMs of a batched decode step; bit-identical to matmul_i8_mma",
+        reported: "native:matmul_i8_mma_m128",
+        block_dim: 64,
+        tile: (64, 32),
+        shared_bytes: 4 * (64 * 64 + 32 * 64 + 32 * 2 * 4),
+        src: concat!(
+            "#define BRAIN_I8_BM 64\n#define BRAIN_I8_BN 32\n#define BRAIN_I8_WARPS_M 2\n#define BRAIN_I8_WARPS_N 1\n#define BRAIN_I8_STAGES 4\n",
+            "#define brain_matmul_i8_mma brain_matmul_i8_mma_m128\n",
+            include_str!("../cu/matmul_i8_mma.cu")
+        ),
+    },
+    CudaKernel {
         name: "flash_prefill_f16_hd256",
         // Looked up by `gpu_core::provider::cuda::paged_flash_prefill_step`
         // through `find`: the only (PagedAttentionFused, F32) entry.

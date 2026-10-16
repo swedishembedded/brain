@@ -27,6 +27,9 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 |---|---|---|---|---|---|---|
 | `matmul_f32_tiled` | MatMul | F32 | tuned | 5.0 | `brain_matmul_f32_tiled` | fp32 out = x @ W^T; 64x64 shared tile, 4x4 register block, reference reduction order |
 | `matmul_i8_mma` | MatMul | I8 | tuned | 8.0 | `brain_matmul_i8_mma` | int8 tensor-core GEMM (mma.sync m16n8k32), dynamic per-token activation scale, group-32 weight scale folded per MMA |
+| `matmul_i8_mma_m16` | MatMul | I8 | tuned | 8.0 | `brain_matmul_i8_mma_m16` | int8 tensor-core GEMM at a 16x16 tile for the up to 16-row GEMMs of a batched decode step; bit-identical to matmul_i8_mma |
+| `matmul_i8_mma_m32` | MatMul | I8 | tuned | 8.0 | `brain_matmul_i8_mma_m32` | int8 tensor-core GEMM at a 32x32 tile for the 17 to 32-row GEMMs of a batched decode step; bit-identical to matmul_i8_mma |
+| `matmul_i8_mma_m128` | MatMul | I8 | tuned | 8.0 | `brain_matmul_i8_mma_m128` | int8 tensor-core GEMM at a 64x32 tile for the 33 to 128-row GEMMs of a batched decode step; bit-identical to matmul_i8_mma |
 | `flash_prefill_f16_hd256` | PagedAttentionFused | F32 | tuned | 8.0 | `brain_flash_prefill_f16_hd256` | fused causal paged-attention prefill at head_dim 256 on fp16 tensor cores (fp32 pool and accumulators), 64 query rows per block |
 | `gdn_chunk_loop_f32` | GatedDeltaChunkLoop | F32 | tuned | 5.0 | `brain_gdn_chunk_loop_f32` | Gated DeltaNet's whole across-chunk recurrence in one launch (fp32, bit-identical to the nine-dispatch-per-chunk sequence), head split over four 32-column blocks |
 | `matmul_i8_gemv` | MatMul | I8 | tuned | 6.1 | `brain_matmul_i8_gemv` | packed-int8 skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads, dp4a, bit-identical to matmul_i8_gemv_reg |

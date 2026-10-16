@@ -150,8 +150,24 @@ What it does differently:
   strong and points every head at another head's state - it was found by the
   real end-to-end gate, not by any structural check. See `.agents/knowledge/`
   #70.
-- **Text only, one sequence per dispatch, per-token prefill** - same shape as
-  `crate::serve::Engine` and for the same reasons.
+- **Continuous batching.** The resident is a `model::serve::PagedDecoder`
+  (`Qwen35GgufEngine`, one KV slot per sequence) driven by the generic
+  `model::serve::Scheduler` through `llmserve`, like every brain LLM:
+  `--qwen35-max-batch N` (default 8) requests decode in ONE batched step per
+  iteration - the weight reads are paid once for all of them - and requests
+  join and leave between steps, including ones that arrive while the group is
+  running (`Instance::run_open`). Each sequence has its own sampling
+  parameters, seed, stop strings and cancellation. The recurrent state of the
+  48 GDN layers is a per-layer pool addressed by slot (the native
+  `gdn_decode_pool` launch), prefill of a joining sequence works on a private
+  copy and is scattered into its row. `--qwen35-ctx` and `--qwen35-kv` size the
+  slots; a configuration whose slots do not fit the cards is refused with the
+  arithmetic and the flags to change. Measured numbers: `.agents/knowledge/`
+  #313 and `make perf/model/qwen35-batch`. One KV block per sequence (block =
+  context length) wastes the unused tail of a short sequence's window;
+  sequences are not paged below context granularity.
+- **Text only, per-token prefill when chunking is not profitable** - same
+  shape as `crate::serve::Engine` and for the same reasons.
 
 Gated by `crates/qwen35/tests/gguf_resident_real.rs` (real file + real cards,
 self-skipping loudly without either).
