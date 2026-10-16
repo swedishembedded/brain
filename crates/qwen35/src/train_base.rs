@@ -110,3 +110,67 @@ pub(crate) fn write_weight_host(gpu: &Gpu, w: &Weight, data: &[f32]) {
         other => panic!("qwen35: writing a {:?} base weight is not supported", other.dtype()),
     }
 }
+
+/// The widest per-token activation a training pass binds as ONE buffer of
+/// `b * t` rows: `(name, floats per token)`. Every kernel binds a whole
+/// buffer, so its size is capped by the device's storage binding and by the
+/// u32 element index the kernels compute with.
+fn widest_row_buffers(cfg: &Qwen35Config) -> [(&'static str, u64); 5] {
+    [
+        ("the MLP gate/up/hidden activations", cfg.intermediate_size as u64),
+        ("the GDN mixed q/k/v projection", cfg.linear_conv_dim() as u64),
+        ("the GQA doubled query projection", cfg.q_proj_dim() as u64),
+        ("the GDN gated value", cfg.linear_value_dim() as u64),
+        ("the residual stream", cfg.d_model as u64),
+    ]
+}
+
+/// The most tokens (`b * t`) a training pass over `cfg` can run before one of
+/// its per-token activation buffers no longer fits a single storage binding of
+/// `binding_bytes` or a u32 element index, and the buffer that sets it.
+pub(crate) fn longest_batch_tokens(cfg: &Qwen35Config, binding_bytes: u64) -> (u64, &'static str) {
+    widest_row_buffers(cfg)
+        .into_iter()
+        .map(|(name, width)| ((binding_bytes / (width * 4)).min(u32::MAX as u64 / width), name))
+        .min_by_key(|(tokens, _)| *tokens)
+        .expect("a non-empty list")
+}
+
+/// Refuse, at construction, a `b * t` whose widest activation overflows the
+/// device's storage binding or the u32 element index - the alternative is a
+/// buffer that wraps silently or fails deep in a kernel launch.
+pub(crate) fn check_batch_fits(cfg: &Qwen35Config, b: u32, t: u32, binding_bytes: u64) {
+    let (limit, buffer) = longest_batch_tokens(cfg, binding_bytes);
+    let n = b as u64 * t as u64;
+    assert!(
+        n <= limit,
+        "qwen35: {b} x {t} = {n} tokens do not fit this device: {buffer} would not fit one storage binding of {binding_bytes} bytes \
+         (or a u32 element index); at most {limit} tokens per pass"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_mlp_activation_sets_the_longest_pass_at_the_real_width() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let (tokens, buffer) = longest_batch_tokens(&cfg, 4 << 30);
+        assert_eq!(tokens, (4u64 << 30) / (17408 * 4));
+        assert!(buffer.contains("MLP"));
+        // A 2 GiB binding (Vulkan) halves it.
+        assert_eq!(longest_batch_tokens(&cfg, 2 << 30).0, (2u64 << 30) / (17408 * 4));
+    }
+
+    #[test]
+    #[should_panic(expected = "do not fit this device")]
+    fn a_pass_past_the_binding_is_refused_naming_the_buffer() {
+        check_batch_fits(&Qwen35Config::qwen38_27b(), 1, 70_000, 4 << 30);
+    }
+
+    #[test]
+    fn a_pass_inside_the_binding_is_accepted() {
+        check_batch_fits(&Qwen35Config::qwen38_27b(), 1, 32_768, 4 << 30);
+    }
+}

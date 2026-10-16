@@ -477,6 +477,9 @@ const CHUNK_ARENA_MIN_ROWS: u32 = 16;
 /// [`TrainOpts::head_budget_words`] says otherwise: 1 GiB of fp32.
 const HEAD_BUDGET_WORDS: u64 = 1 << 28;
 
+/// The Gated-DeltaNet chunk a long training sequence is padded to a multiple of.
+const GDN_PAD_QUANTUM: u32 = 64;
+
 /// This model's RMSNorm epsilon. Exactly what `rmsnorm.wgsl` hardcodes, but it
 /// has to be passed explicitly here - see [`rms_step`].
 const RMS_EPS: f32 = 1e-6;
@@ -806,7 +809,11 @@ pub struct Qwen35 {
     pub cfg: Qwen35Config,
     ps: ParamStore,
     b: u32,
+    /// Tokens per sequence the buffers are sized for: `t_user` rounded up to
+    /// whole GDN chunks for a long training sequence (see `new_impl_on`).
     t: u32,
+    /// Tokens per sequence callers pass and read back.
+    t_user: u32,
     /// The GDN chunk size this instance was built for - see [`gdn_chunk_size`].
     chunk: u32,
     /// `true` for a [`Self::new_train_on`] build: every weight is
@@ -1345,6 +1352,22 @@ impl Qwen35 {
             "qwen35: a narrow tier needs LoRA when training: without adapters there is no frozen base \
              to hold at it (full-parameter training is fp32-only)"
         );
+        // A training sequence of an awkward length (4097 tokens would otherwise
+        // run the Gated-DeltaNet recurrence in chunks of ONE token) is padded
+        // at its end to a whole chunk of 64: everything is causal, so the
+        // padding changes no real token's activation, and its targets are
+        // IGNOREd so it adds no loss and no gradient. `t_user` is the length
+        // callers see.
+        let t_user = t;
+        let t = if train && t > GDN_PAD_QUANTUM && t % GDN_PAD_QUANTUM != 0 {
+            assert!(!cfg.mtp, "qwen35: MTP needs t={t} to be a multiple of {GDN_PAD_QUANTUM} (the multi-token head has no padding support)");
+            t.next_multiple_of(GDN_PAD_QUANTUM)
+        } else {
+            t
+        };
+        if train {
+            crate::train_base::check_batch_fits(&cfg, b, t, gpu.max_storage_binding_bytes());
+        }
         let chunk = gdn_chunk_size(t);
         assert_eq!(
             t % chunk,
@@ -1563,6 +1586,7 @@ impl Qwen35 {
             ps,
             b,
             t,
+            t_user,
             chunk,
             is_train: train,
             opt,
@@ -1801,9 +1825,21 @@ impl Qwen35 {
     }
 
     pub fn set_batch(&self, tokens: &[u32], targets: &[u32]) {
-        self.gpu.write(&self.tokens, tokens);
-        self.gpu.write(&self.targets, targets);
         let c = targets.iter().filter(|&&v| v != model::IGNORE).count();
+        if self.t_user == self.t {
+            self.gpu.write(&self.tokens, tokens);
+            self.gpu.write(&self.targets, targets);
+        } else {
+            let (tu, tp, b) = (self.t_user as usize, self.t as usize, self.b as usize);
+            assert!(tokens.len() == b * tu && targets.len() == b * tu, "qwen35::set_batch: {} tokens / {} targets for {b} sequences of {tu}", tokens.len(), targets.len());
+            let (mut padded_tokens, mut padded_targets) = (vec![0u32; b * tp], vec![model::IGNORE; b * tp]);
+            for s in 0..b {
+                padded_tokens[s * tp..s * tp + tu].copy_from_slice(&tokens[s * tu..(s + 1) * tu]);
+                padded_targets[s * tp..s * tp + tu].copy_from_slice(&targets[s * tu..(s + 1) * tu]);
+            }
+            self.gpu.write(&self.tokens, &padded_tokens);
+            self.gpu.write(&self.targets, &padded_targets);
+        }
         self.count.set(c.max(1) as f32);
 
         if self.cfg.mtp {
@@ -4331,13 +4367,16 @@ impl Qwen35 {
         assert_eq!(self.b, 1, "qwen35::logits_all requires b==1 (single sequence)");
         assert_eq!(
             tokens.len() as u32,
-            self.t,
+            self.t_user,
             "qwen35::logits_all requires tokens.len() == the configured t (no partial-length prefill in this pass)"
         );
-        self.gpu.write(&self.tokens, tokens);
+        let mut padded = tokens.to_vec();
+        padded.resize(self.t as usize, 0);
+        self.gpu.write(&self.tokens, &padded);
         self.run_forward();
+        let real = self.t_user as usize * self.cfg.vocab as usize;
         let Some(head) = &self.head_ce else {
-            return self.gpu.read(&self.logits, (self.t * self.cfg.vocab) as usize);
+            return self.gpu.read(&self.logits, (self.t * self.cfg.vocab) as usize)[..real].to_vec();
         };
         // A chunked-head build has no logits buffer: read them chunk by chunk.
         let ta = self.train_acts.borrow();
@@ -4350,6 +4389,7 @@ impl Qwen35 {
             self.gpu.submit(&[], &s);
             out.extend(self.gpu.read(head.logits(), rows as usize * vocab));
         }
+        out.truncate(real);
         out
     }
 
