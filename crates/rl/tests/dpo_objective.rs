@@ -86,7 +86,7 @@ fn dpo_training_raises_chosen_logprob_and_lowers_rejected_logprob() {
     let dpo_cfg = DpoConfig { beta: 0.5, seq_len, nll_weight: 0.0 };
     let mut obj = Dpo::from_pairs(dpo_cfg, vec![pair], move |_pair: &DpoPair| (ref_chosen.clone(), ref_rejected.clone()));
 
-    obj.prepare(&mut model);
+    obj.prepare(&mut model).unwrap();
     let mut rng = Rng::new(random_seed());
     for step in 1..=8u32 {
         model.zero_grads();
