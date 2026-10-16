@@ -299,7 +299,7 @@ mod tests {
     /// small enough to build in a fraction of a second, and to run through
     /// OpenVINO CPU in the numerical parity test.
     fn tiny_weights(cfg: &HiftConfig) -> HW {
-        let mut seed = 42u64;
+        let mut seed = 42u64; // seed: parity fixture: the OpenVINO-versus-reference tolerance was measured on this weight draw (needs OpenVINO; not run)
         let base = cfg.base_channels as usize;
         HW {
             f0_predictor: F0PredictorW {

@@ -62,7 +62,7 @@ fn synth_weights(cfg: &CodecConfig) -> HashMap<String, Vec<f32>> {
     let dec = cfg.decoder_dim as usize;
 
     let mut m: HashMap<String, Vec<f32>> = HashMap::new();
-    let mut seed = Lcg::new(1);
+    let mut seed = Lcg::new(1); // seed: parity fixture: the exported-graph tolerance was measured on this weight draw (needs a runtime; not run)
     let mut put = |m: &mut HashMap<String, Vec<f32>>, name: &str, numel: usize| {
         m.insert(name.to_string(), seed.vec_scaled(numel, 0.05));
     };

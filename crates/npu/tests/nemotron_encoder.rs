@@ -77,7 +77,7 @@ fn weights(cfg: &NemotronConfig) -> HashMap<String, Vec<f32>> {
         cfg.conv_kernel as usize,
     );
     let mut w: HashMap<String, Vec<f32>> = HashMap::new();
-    let mut seed = 1u64;
+    let mut seed = 1u64; // seed: parity fixture: the cosine and max-diff bounds were measured on this weight draw (needs OpenVINO; not run)
     let mut put = |w: &mut HashMap<String, Vec<f32>>, name: String, n: usize, scale: f32| {
         seed += 1;
         w.insert(name, fill(seed, n, scale));
@@ -187,9 +187,9 @@ fn full_encoder_graph_is_well_formed() {
     let mut w = weights(&cfg);
     // stage-1 (subsampling) weights
     let (ch, k, hidden) = (topo.subsampling_channels as usize, topo.subsampling_kernel as usize, topo.hidden as usize);
-    let mut seed = 9000u64;
+    let mut seed = data::rng::random_seed();
     let mut put = |w: &mut HashMap<String, Vec<f32>>, name: String, n: usize| {
-        seed += 1;
+        seed = seed.wrapping_add(1);
         w.insert(name, fill(seed, n, 0.05));
     };
     put(&mut w, "encoder.subsampling.conv_in.weight".into(), ch * k * k);

@@ -109,7 +109,7 @@ mod tests {
         let t = 8usize;
         let (vs1, vs2) = (cfg.s1_vocab(), cfg.s2_vocab());
         // The unified deterministic LCG (audit F39/F40).
-        let mut lcg = data::rng::Lcg::new(0x0DE);
+        let mut lcg = data::rng::Lcg::new(0x0DE); // seed: parity fixture: the session-versus-core tolerance was measured on this weight draw (needs a runtime; not run)
         let mut rnd = |n: usize| -> Vec<f32> { (0..n).map(|_| lcg.scaled(0.05)).collect() };
         let weights: HashMap<String, Vec<f32>> =
             cfg.param_list().into_iter().map(|(k, s)| (k, rnd(s.iter().product()))).collect();

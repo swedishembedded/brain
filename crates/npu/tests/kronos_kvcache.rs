@@ -27,7 +27,7 @@ fn cpu() -> NpuConfig {
 
 fn rand_weights(cfg: &KronosConfig) -> W {
     // The unified deterministic LCG (audit F39/F40).
-    let mut lcg = data::rng::Lcg::new(0x1234_5678);
+    let mut lcg = data::rng::Lcg::new(0x1234_5678); // seed: parity fixture: the KV-cache graph tolerance was measured on this weight draw (needs OpenVINO; not run)
     cfg.param_list()
         .into_iter()
         .map(|(k, s)| {

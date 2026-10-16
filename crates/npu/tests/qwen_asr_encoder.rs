@@ -47,7 +47,7 @@ fn tiny() -> (AudioEncoderConfig, QwenAsrTopo) {
 fn weights(cfg: &AudioEncoderConfig) -> HashMap<String, Vec<f32>> {
     let (c, ffn, out) = (cfg.d_model as usize, cfg.ffn_dim as usize, cfg.output_dim as usize);
     let mut w: HashMap<String, Vec<f32>> = HashMap::new();
-    let mut seed = 1u64;
+    let mut seed = 1u64; // seed: parity fixture: the encoder parity bounds were measured on this weight draw (needs OpenVINO; not run)
     let mut put = |w: &mut HashMap<String, Vec<f32>>, name: String, n: usize, scale: f32| {
         seed += 1;
         w.insert(name, fill(seed, n, scale));

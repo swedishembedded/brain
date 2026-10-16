@@ -78,7 +78,7 @@ const G: usize = 4;
 
 fn fixture() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     // The unified deterministic LCG (audit F39/F40).
-    let mut l = data::rng::Lcg::new(12345);
+    let mut l = data::rng::Lcg::new(12345); // seed: parity fixture: the onnxruntime tolerance was measured on this input draw (needs onnxruntime; not run)
     let mut next = || l.signed();
     let x: Vec<f32> = (0..N * C * H * W).map(|_| next()).collect();
     let gamma: Vec<f32> = (0..C).map(|_| 1.0 + 0.3 * next()).collect();
