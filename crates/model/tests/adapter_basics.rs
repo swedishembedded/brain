@@ -7,7 +7,7 @@
 //! `delta_strided` already do, and the dependency-free glob matcher must
 //! match its own specification exactly.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use model::adapter::select::{glob_match, LayerRange, TargetSelector};
 use model::adapter::{AdapterKind, LinearSite, TargetHp, TargetSpec};
 use model::lora::{LoraPair, Pair};
@@ -81,19 +81,22 @@ fn pair_and_lora_pair_are_bit_identical_over_many_shapes_and_steps() {
 
 #[test]
 fn lora_plus_ratio_one_is_bit_identical_to_plain_lora_step() {
-    let mut init = Lcg::new(1);
+    // Both pairs must start from the same weights: the property is that the
+    // ratio-1 step is the plain step, not that two random inits agree.
+    let init_seed = random_seed();
+    let mut init = Lcg::new(init_seed);
     let mut init_fn = || init.signed() * 0.02;
     let spec = TargetSpec::whole(6, 5);
     let hp_plain = TargetHp::new(2, 2.0);
     let mut plain = LoraPair::new(spec, hp_plain, &mut init_fn);
 
-    let mut init2 = Lcg::new(1);
+    let mut init2 = Lcg::new(init_seed);
     let mut init2_fn = || init2.signed() * 0.02;
     let mut hp_ratio = TargetHp::new(2, 2.0);
     hp_ratio.lr_ratio = 1.0;
     let mut ratioed = LoraPair::new(spec, hp_ratio, &mut init2_fn);
 
-    let mut rng = Lcg::new(2);
+    let mut rng = Lcg::new(random_seed());
     for t in 1..=10u64 {
         let dw: Vec<f32> = (0..30).map(|_| rng.signed()).collect();
         let g1 = plain.project(&dw);
