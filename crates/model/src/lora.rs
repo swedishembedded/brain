@@ -1310,7 +1310,36 @@ pub mod device_adapter {
         if sites.is_empty() {
             return Err(invalid(adapter_path, "contains no .lora_a/.lora_b pairs".into()));
         }
+        if let Some(declared) = a.targets.as_deref() {
+            check_declared_targets(declared, &sites).map_err(|why| invalid(adapter_path, why))?;
+        }
         Ok((DeviceAdapter { rank, alpha, sites }, card))
+    }
+
+    /// The leaf a site corrects: its base weight's last name component, the
+    /// unit a card's `targets` are written in (`blocks.0.attn.wq.weight` is
+    /// `wq`).
+    fn leaf_of(base: &str) -> &str {
+        let name = base.strip_suffix(".weight").unwrap_or(base);
+        name.rsplit('.').next().unwrap_or(name)
+    }
+
+    /// The card's declared `targets` must be exactly the leaves its tensors
+    /// correct. A card claiming attention over MLP tensors (or the reverse)
+    /// would be bound and served as something it is not; the message names
+    /// both sets so the mismatch is visible without opening the file.
+    fn check_declared_targets(declared: &[String], sites: &[AdapterSite]) -> Result<(), String> {
+        let declared: std::collections::BTreeSet<&str> = declared.iter().map(String::as_str).collect();
+        let found: std::collections::BTreeSet<&str> = sites.iter().map(|s| leaf_of(&s.base)).collect();
+        if declared == found {
+            return Ok(());
+        }
+        let list = |set: &std::collections::BTreeSet<&str>| set.iter().copied().collect::<Vec<_>>().join(", ");
+        Err(format!(
+            "its card declares targets [{}] but its tensors correct [{}]; the card and the tensors must name the same linears",
+            list(&declared),
+            list(&found)
+        ))
     }
 
     /// Fold an adapter saved by [`save_adapter`] into a base model's host
