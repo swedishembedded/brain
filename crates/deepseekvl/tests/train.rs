@@ -34,7 +34,7 @@ fn decoder(lora: bool) -> QwenConfig {
 /// The hybrid split aligner over two 8-wide streams into the decoder's 16.
 fn aligner() -> (ProjectorConfig, HashMap<String, Vec<f32>>) {
     let cfg = ProjectorConfig::from_type("low_high_hybrid_split_mlp_gelu", 2, 8, 16).unwrap();
-    let mut rng = Rng::new(9);
+    let mut rng = Rng::new(data::rng::random_seed());
     let w = cfg.param_list().into_iter().map(|(n, len)| (n, (0..len).map(|_| (rng.next_f32() - 0.5) * 0.6).collect())).collect();
     (cfg, w)
 }
@@ -42,7 +42,7 @@ fn aligner() -> (ProjectorConfig, HashMap<String, Vec<f32>>) {
 /// One image (`ROWS` rows, at residual rows 1..4) and a reply the image
 /// implies: BOS, the image, four reply tokens.
 fn example() -> Prepared {
-    let mut rng = Rng::new(4);
+    let mut rng = Rng::new(data::rng::random_seed());
     let mut image = || -> Vec<Vec<f32>> { (0..2).map(|_| (0..ROWS * 8).map(|_| rng.next_f32() - 0.5).collect()).collect() };
     Prepared { images: vec![image()], tokens: vec![0, 5, 5, 5, 7, 11, 17, 3], targets: vec![IGNORE, IGNORE, IGNORE, 7, 11, 17, 3, 9], row0s: vec![1] }
 }
@@ -50,7 +50,7 @@ fn example() -> Prepared {
 /// Two images (`ROWS` rows each, at residual rows 1..4 and 6..9) and a reply
 /// that depends on both.
 fn two_images() -> Prepared {
-    let mut rng = Rng::new(6);
+    let mut rng = Rng::new(data::rng::random_seed());
     let mut image = || -> Vec<Vec<f32>> { (0..2).map(|_| (0..ROWS * 8).map(|_| rng.next_f32() - 0.5).collect()).collect() };
     let images = vec![image(), image()];
     Prepared { images, tokens: vec![0, 5, 5, 5, 7, 8, 5, 5, 5, 11, 17, 3], targets: vec![IGNORE, IGNORE, IGNORE, IGNORE, IGNORE, IGNORE, IGNORE, IGNORE, 11, 17, 3, 9], row0s: vec![1, 6] }
