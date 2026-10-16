@@ -417,6 +417,54 @@ const BMM_TILED: usize = 94;
 /// is safe even though this crate carries no `KernelSelector` of its own.
 const HEAD_ARGMAX_CHUNKS: u32 = 256;
 
+/// The greedy pick of every row of a `[rows, vocab]` logits block, reduced on
+/// the device (`argmax_part` + `argmax_final`, a split reduction): only the
+/// `rows` winning indices are read back, never the logits. Shared by the
+/// resident-weight head ([`Qwen35::head_argmax_rows_dev`]) and the quantized
+/// out-of-shard head `crate::int8_gguf_resident` owns.
+pub(crate) fn argmax_rows_of(g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32) -> Vec<u32> {
+    let chunk = vocab.div_ceil(HEAD_ARGMAX_CHUNKS);
+    let part = g.storage(rows as u64 * HEAD_ARGMAX_CHUNKS as u64 * 2);
+    let out = g.storage(rows as u64);
+    g.submit(
+        &[],
+        &[
+            g.step(ARGMAX_PART, &[logits, &part], &[rows, vocab, HEAD_ARGMAX_CHUNKS, chunk], rows * HEAD_ARGMAX_CHUNKS),
+            g.step(ARGMAX_FINAL, &[&part, &out], &[rows, HEAD_ARGMAX_CHUNKS], rows),
+        ],
+    );
+    g.read(&out, rows as usize).into_iter().map(|x| x as u32).collect()
+}
+
+/// Every row's top-`cap` `(token id, logit)` candidates, best first, from a
+/// `[rows, vocab]` logits block, extracted on the device: `cap` rounds of
+/// (argmax, mask the winner out) over all rows together, so a batch costs
+/// `cap` dispatch triples rather than `rows * cap`, and only `rows * cap`
+/// pairs are read back. Destroys `logits` (the winners are masked in place).
+pub(crate) fn topk_rows_of(g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
+    assert!(cap > 0, "topk_rows_of: cap must be > 0");
+    let chunk = vocab.div_ceil(HEAD_ARGMAX_CHUNKS);
+    let part = g.storage(rows as u64 * HEAD_ARGMAX_CHUNKS as u64 * 2);
+    let arg = g.storage(rows as u64);
+    let vals = g.storage((rows * cap) as u64);
+    let idx = g.storage((rows * cap) as u64);
+    let mut steps: Vec<Step> = Vec::new();
+    for col in 0..cap {
+        steps.push(g.step(ARGMAX_PART, &[logits, &part], &[rows, vocab, HEAD_ARGMAX_CHUNKS, chunk], rows * HEAD_ARGMAX_CHUNKS));
+        steps.push(g.step(ARGMAX_FINAL, &[&part, &arg], &[rows, HEAD_ARGMAX_CHUNKS], rows));
+        steps.push(g.step(TOPK_EXTRACT_STEP, &[&arg, logits, &vals, &idx], &[rows, vocab, cap, col], rows));
+    }
+    g.submit(&[], &steps);
+    let vals = g.read(&vals, (rows * cap) as usize);
+    let idx = g.read(&idx, (rows * cap) as usize);
+    (0..rows as usize)
+        .map(|r| {
+            let s = r * cap as usize;
+            idx[s..s + cap as usize].iter().map(|&x| x as u32).zip(vals[s..s + cap as usize].iter().copied()).collect()
+        })
+        .collect()
+}
+
 // M6.10 (kernel-performance ledger) replaced the fixed-schedule constant
 // that used to live here (`DRAIN_EVERY_N_LAYERS`, a periodic BLOCKING drain
 // every 4 layers regardless of actual buffer liveness) with real liveness
@@ -4369,20 +4417,8 @@ impl Qwen35 {
     /// picks, one dispatch per stage for the whole block, and only the `rows`
     /// winning indices read back.
     pub(crate) fn head_argmax_rows_dev(&self, hidden: &DeviceBuffer, rows: u32) -> Vec<u32> {
-        let g = &self.gpu;
-        let v = self.cfg.vocab;
         let logits = self.head_logits_rows_dev(hidden, rows);
-        let chunk = v.div_ceil(HEAD_ARGMAX_CHUNKS);
-        let part = g.storage(rows as u64 * HEAD_ARGMAX_CHUNKS as u64 * 2);
-        let out = g.storage(rows as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(ARGMAX_PART, &[&logits, &part], &[rows, v, HEAD_ARGMAX_CHUNKS, chunk], rows * HEAD_ARGMAX_CHUNKS),
-                g.step(ARGMAX_FINAL, &[&part, &out], &[rows, HEAD_ARGMAX_CHUNKS], rows),
-            ],
-        );
-        g.read(&out, rows as usize).into_iter().map(|x| x as u32).collect()
+        argmax_rows_of(&self.gpu, &logits, rows, self.cfg.vocab)
     }
 
     /// [`Self::head_logits_dev`] reduced to the top-`cap` (token id, logit)
@@ -4405,30 +4441,8 @@ impl Qwen35 {
     /// iteration, so the whole batch costs `cap` dispatch triples rather than
     /// `rows * cap`.
     pub(crate) fn head_topk_rows_dev(&self, hidden: &DeviceBuffer, rows: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
-        assert!(cap > 0, "head_topk_rows_dev: cap must be > 0");
-        let g = &self.gpu;
-        let v = self.cfg.vocab;
         let logits = self.head_logits_rows_dev(hidden, rows);
-        let chunk = v.div_ceil(HEAD_ARGMAX_CHUNKS);
-        let part = g.storage(rows as u64 * HEAD_ARGMAX_CHUNKS as u64 * 2);
-        let arg = g.storage(rows as u64);
-        let vals = g.storage((rows * cap) as u64);
-        let idx = g.storage((rows * cap) as u64);
-        let mut steps: Vec<Step> = Vec::new();
-        for col in 0..cap {
-            steps.push(g.step(ARGMAX_PART, &[&logits, &part], &[rows, v, HEAD_ARGMAX_CHUNKS, chunk], rows * HEAD_ARGMAX_CHUNKS));
-            steps.push(g.step(ARGMAX_FINAL, &[&part, &arg], &[rows, HEAD_ARGMAX_CHUNKS], rows));
-            steps.push(g.step(TOPK_EXTRACT_STEP, &[&arg, &logits, &vals, &idx], &[rows, v, cap, col], rows));
-        }
-        g.submit(&[], &steps);
-        let vals = g.read(&vals, (rows * cap) as usize);
-        let idx = g.read(&idx, (rows * cap) as usize);
-        (0..rows as usize)
-            .map(|r| {
-                let s = r * cap as usize;
-                idx[s..s + cap as usize].iter().map(|&x| x as u32).zip(vals[s..s + cap as usize].iter().copied()).collect()
-            })
-            .collect()
+        topk_rows_of(&self.gpu, &logits, rows, self.cfg.vocab, cap)
     }
 
     // ---- pipeline-parallel cross-stage seam (`model::Shardable`) ----------

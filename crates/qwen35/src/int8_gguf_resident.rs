@@ -132,11 +132,14 @@
 //!   is `crate::serve::Scheduler`'s job.
 //! * **Text only.** `crate::vl`'s vision front-end is not spliced in here.
 
+mod engine;
+pub use engine::Qwen35GgufEngine;
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress};
+use capability::{ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType};
 use checkpoint::gguf::MmapGguf;
 use checkpoint::remap::{Fetch, RemapSource};
 use data::qwen_tokenizer::QwenBpe;
@@ -322,6 +325,39 @@ pub fn kv_pool_addressable(cfg: &Qwen35Config, cap: u32, max_batch: u32) -> bool
     KvTier::fits_addressing(max_batch as u64 * cap as u64, cfg.kv_dim() as u64)
 }
 
+/// Why a serving configuration cannot be placed, in the operator's terms - or
+/// `None` when it fits. `usable` is each budgeted device's usable bytes.
+///
+/// Weights are shared by the whole batch and counted once; the decode state
+/// (KV windows and recurrent state) is per sequence, so `max_batch` and `cap`
+/// are what a refusal tells the operator to lower, and a more compact KV tier
+/// what it suggests instead.
+pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, usable: &[u64]) -> Option<String> {
+    let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    if !kv_pool_addressable(cfg, cap, max_batch) {
+        return Some(format!(
+            "{max_batch} sequences of {cap} tokens is {} KV rows of {} elements per layer, past the kernels' u32 element index; lower --qwen35-max-batch or --qwen35-ctx",
+            max_batch as u64 * cap as u64,
+            cfg.kv_dim()
+        ));
+    }
+    let cost = layer_cost(cfg, cap, tier, kv, max_batch);
+    let caps: Vec<(usize, u64)> = usable.iter().copied().enumerate().collect();
+    if model::shard::plan_fewest_devices(&cost, &caps).is_some() {
+        return None;
+    }
+    let state: u64 = cfg.layer_types().into_iter().map(|ty| max_batch.max(1) as u64 * cfg.layer_decode_state_bytes(ty, cap, kv)).sum();
+    Some(format!(
+        "--qwen35-max-batch {max_batch} x --qwen35-ctx {cap} with a {} KV cache needs {:.1} GiB ({:.1} GiB weights + {:.1} GiB decode state for {max_batch} sequences) but the {} budgeted GPU(s) offer {:.1} GiB; lower --qwen35-max-batch or --qwen35-ctx, or choose a more compact --qwen35-kv",
+        kv.as_str(),
+        gib(cost.total()),
+        gib(cost.total().saturating_sub(state)),
+        gib(state),
+        usable.len(),
+        gib(usable.iter().sum())
+    ))
+}
+
 // ------------------------------------------------------------ the fetch plan
 
 /// Every brain-canonical name this GGUF offers for the MAIN decoder stack,
@@ -504,6 +540,13 @@ impl ShardCaches {
         gpu.submit(&clears, &[]);
     }
 
+    /// [`Self::reset`] for ONE slot: a sequence joining a batch that other
+    /// sequences are still decoding in must not disturb their state.
+    fn reset_slot(&self, gpu: &Gpu, slot: u32) {
+        let clears: Vec<&DeviceBuffer> = self.gdn_state[slot as usize].iter().chain(self.gdn_hist[slot as usize].iter()).collect();
+        gpu.submit(&clears, &[]);
+    }
+
     /// One slot's single-sequence view (prefill, and any single-token step).
     fn view(&self, slot: u32) -> DecodeCaches<'_> {
         DecodeCaches {
@@ -515,12 +558,15 @@ impl ShardCaches {
         }
     }
 
-    /// The batch's view: `positions[i]` is slot `i`'s absolute decode position.
-    fn batch(&self, positions: &[u32]) -> Vec<BatchSeq<'_>> {
-        positions
+    /// The batch's view: row `i` decodes slot `slots[i]` at absolute position
+    /// `positions[i]`. Rows name their slots, so a batch is any subset of the
+    /// resident sequences in any order - what lets sequences join and leave
+    /// between steps without renumbering the ones that stay.
+    fn batch(&self, slots: &[u32], positions: &[u32]) -> Vec<BatchSeq<'_>> {
+        slots
             .iter()
-            .enumerate()
-            .map(|(i, &pos)| BatchSeq { phys: i as u32, pos, gdn_state: &self.gdn_state[i], gdn_hist: &self.gdn_hist[i] })
+            .zip(positions)
+            .map(|(&slot, &pos)| BatchSeq { phys: slot, pos, gdn_state: &self.gdn_state[slot as usize], gdn_hist: &self.gdn_hist[slot as usize] })
             .collect()
     }
 }
@@ -583,19 +629,6 @@ struct Head {
 
 // ------------------------------------------------------------ the instance
 
-/// One sequence of a [`Qwen35GgufInstance::generate_batch`] call: its own
-/// prompt, length limit and sampling settings. The rows of a batch are
-/// unrelated requests, so every one of these is per sequence - nothing here is
-/// shared across the batch except the model.
-pub struct BatchRequest {
-    pub prompt: Vec<u32>,
-    pub max_new: u32,
-    pub temp: f32,
-    pub top_k: usize,
-    pub top_p: f32,
-    pub seed: u64,
-}
-
 /// **The target's own internals, kept for a cross-attending drafter.**
 ///
 /// A DFlash2-style draft model does not read the target's OUTPUT; it reads
@@ -652,34 +685,9 @@ pub struct Qwen35GgufInstance {
     max_batch: u32,
     /// How every stage stores its GQA layers' K/V ([`KvTier`]).
     kv_tier: KvTier,
-    /// The last [`Self::generate`] call's real timings, surfaced through
-    /// [`Instance::metrics`]. Prefill and decode are now genuinely different
-    /// primitives (a bounded ROUND of tokens per pipeline pass versus one
-    /// token per pass), and timing them separately is the only way to see
-    /// either: a single tok/s figure over a whole request averages two rates
-    /// that differ by more than an order of magnitude, and it was exactly this
-    /// split that made the per-token prompt replay's real cost visible.
-    /// `Cell`, because `metrics` takes `&self`; an `Instance` is owned by one
-    /// worker thread at a time.
-    last: Cell<Timings>,
-    /// Why the last [`Self::generate`] loop ended - `"eos"`, `"length"` or
-    /// `"caller"` (a stop string / cancellation seen by the streamer). Also
-    /// reported through [`Instance::metrics`]: "it produced 4 tokens" is
-    /// ambiguous between a model that chose to stop and a loop that gave up,
-    /// and those need different investigations.
-    stop: Cell<&'static str>,
     /// The per-layer residual tap a cross-attending drafter needs - `None`
     /// (and free) until [`Self::enable_hidden_taps`] turns it on.
     taps: RefCell<Option<HiddenTaps>>,
-}
-
-/// One `generate` call's measured cost, reported by [`Instance::metrics`].
-#[derive(Clone, Copy, Debug, Default)]
-struct Timings {
-    prefill_s: f64,
-    prefill_tokens: u32,
-    decode_s: f64,
-    decode_tokens: u32,
 }
 
 impl Qwen35GgufInstance {
@@ -1000,26 +1008,59 @@ impl Qwen35GgufInstance {
     ///
     /// Returns one `[vocab]` logits row per sequence, in batch order.
     fn stack_step_batch(&self, tokens: &[u32], positions: &[u32]) -> Result<Vec<Vec<f32>>, String> {
+        let slots: Vec<u32> = (0..tokens.len() as u32).collect();
+        let carry = self.stack_decode_hidden(tokens, &slots, positions)?;
+        let flat = self.head_logits_rows(&carry, tokens.len() as u32);
+        Ok(flat.chunks(self.cfg.vocab as usize).map(|r| r.to_vec()).collect())
+    }
+
+    /// The layer half of a batched decode step: row `i` is `tokens[i]` at
+    /// `positions[i]` of slot `slots[i]`, and the result is the `[bsz,
+    /// d_model]` pre-norm hidden block the head projects. Slots must be
+    /// distinct (two rows of one sequence would race on its state).
+    fn stack_decode_hidden(&self, tokens: &[u32], slots: &[u32], positions: &[u32]) -> Result<Vec<f32>, String> {
         let bsz = tokens.len();
-        assert_eq!(bsz, positions.len(), "{MODEL}: stack_step_batch got {bsz} tokens for {} positions", positions.len());
-        assert!(bsz > 0, "{MODEL}: stack_step_batch on an empty batch");
+        assert!(bsz == positions.len() && bsz == slots.len(), "{MODEL}: a decode step needs one slot and position per token ({bsz} tokens, {} slots, {} positions)", slots.len(), positions.len());
+        assert!(bsz > 0, "{MODEL}: stack_decode_hidden on an empty batch");
         for s in &self.shards {
-            assert!(
-                bsz <= s.caches.gdn_state.len(),
-                "{MODEL}: stack_step_batch got {bsz} sequences but a stage holds only {} slots",
-                s.caches.gdn_state.len()
-            );
+            assert!(bsz <= s.caches.gdn_state.len(), "{MODEL}: a decode step got {bsz} sequences but a stage holds only {} slots", s.caches.gdn_state.len());
+            if let Some(&bad) = slots.iter().find(|&&sl| sl as usize >= s.caches.gdn_state.len()) {
+                panic!("{MODEL}: slot {bad} is outside this instance's {} slots", s.caches.gdn_state.len());
+            }
         }
+        debug_assert!(slots.iter().collect::<std::collections::HashSet<_>>().len() == bsz, "{MODEL}: a decode step names a slot twice");
         let mut carry = self.embed_rows(tokens)?;
         for s in &self.shards {
-            let seqs = s.caches.batch(positions);
+            let seqs = s.caches.batch(slots, positions);
             let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.cap, seqs: &seqs, one_sequence: false };
             carry = s.qwen35.decode_batch_stage(tokens, &caches, Some(&carry));
         }
+        Ok(carry)
+    }
+
+    /// The last stage's card and the head epilogue it runs - the one place a
+    /// hidden block becomes logits, greedy picks or top-k candidates.
+    fn head_parts(&self) -> (&Gpu, &model::ops::Ops, &DeviceBuffer, &model::ops::Weight) {
         let last = self.shards.last().expect("a plan always has at least one stage");
-        let v = self.cfg.vocab as usize;
-        let flat = crate::stream::head_logits_rows_on(&last.qwen35.gpu, &self.head.ops, &self.cfg, &self.head.norm, &self.head.w, &carry, bsz as u32);
-        Ok(flat.chunks(v).map(|r| r.to_vec()).collect())
+        (&last.qwen35.gpu, &self.head.ops, &self.head.norm, &self.head.w)
+    }
+
+    /// `[rows, vocab]` logits of a `[rows, d_model]` hidden block, on the host.
+    fn head_logits_rows(&self, hidden: &[f32], rows: u32) -> Vec<f32> {
+        let (g, ops, norm, w) = self.head_parts();
+        crate::stream::head_logits_rows_on(g, ops, &self.cfg, norm, w, hidden, rows)
+    }
+
+    /// Each row's greedy token, picked on the device.
+    fn head_argmax_rows(&self, hidden: &[f32], rows: u32) -> Vec<u32> {
+        let (g, ops, norm, w) = self.head_parts();
+        crate::stream::head_argmax_rows_on(g, ops, &self.cfg, norm, w, hidden, rows)
+    }
+
+    /// Each row's top-`cap` candidates, extracted on the device.
+    fn head_topk_rows(&self, hidden: &[f32], rows: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
+        let (g, ops, norm, w) = self.head_parts();
+        crate::stream::head_topk_rows_on(g, ops, &self.cfg, norm, w, hidden, rows, cap)
     }
 
     /// Prefill `prompt` into slot 0 through the same path a request takes
@@ -1104,6 +1145,38 @@ impl Qwen35GgufInstance {
         Ok((logits, pos))
     }
 
+    /// [`Self::replay_prompt`] for a sequence JOINING a running batch: slot
+    /// `slot`'s recurrent state is cleared (no other slot is touched), the
+    /// prompt is replayed into it, and the last prompt token's `[d_model]`
+    /// pre-norm hidden row comes back for the caller's head - a scheduler
+    /// picks the first token from it (greedy or sampled) without a
+    /// `[vocab]` readback. Leaves the state a following batched decode step
+    /// continues from, exactly as [`Self::replay_prompt`] does.
+    fn replay_prompt_hidden(&self, prompt: &[u32], slot: u32) -> Result<Vec<f32>, String> {
+        let d = self.cfg.d_model as usize;
+        for s in &self.shards {
+            s.caches.reset_slot(&s.qwen35.gpu, slot);
+        }
+        let mut last = Vec::new();
+        if self.shards.iter().all(|s| s.qwen35.chunked_prefill_is_profitable()) {
+            let mut pos = 0u32;
+            for round in prompt.chunks(self.prefill_round_rows() as usize) {
+                let (carry, _) = self.stack_chunk_carry(round, pos, slot)?;
+                last = carry[(round.len() - 1) * d..].to_vec();
+                pos += round.len() as u32;
+            }
+        } else {
+            for (pos, &t) in prompt.iter().enumerate() {
+                let mut carry = self.embed_row(t)?;
+                for s in &self.shards {
+                    carry = s.qwen35.decode_step_stage(t, pos as u32, &s.caches.view(slot), Some(&carry));
+                }
+                last = carry;
+            }
+        }
+        Ok(last)
+    }
+
     /// Rows per prefill round on this stack: [`TENSOR_CORE_PREFILL_TOKENS`] when
     /// every stage runs the round on tensor cores, [`MAX_PREFILL_TOKENS`]
     /// otherwise.
@@ -1186,16 +1259,11 @@ impl Qwen35GgufInstance {
         }
         self.reset();
         let mut rng = Rng::new(seed);
-        let t0 = std::time::Instant::now();
         let (mut logits, mut pos) = self.replay_prompt(prompt, 0)?;
-        let prefill_s = t0.elapsed().as_secs_f64();
-        let t1 = std::time::Instant::now();
         let mut out = Vec::with_capacity(max_new as usize);
-        let mut stop = "length";
         for _ in 0..max_new {
             let next = crate::sample::sample_logits(&logits, temp, top_k, top_p, &mut rng);
             if self.eos.contains(&next) {
-                stop = "eos";
                 break;
             }
             out.push(next);
@@ -1203,19 +1271,11 @@ impl Qwen35GgufInstance {
                 break;
             }
             if on_token(&out) {
-                stop = "caller";
                 break;
             }
             logits = self.stack_step(next, pos, 0)?;
             pos += 1;
         }
-        self.last.set(Timings {
-            prefill_s,
-            prefill_tokens: prompt.len() as u32,
-            decode_s: t1.elapsed().as_secs_f64(),
-            decode_tokens: out.len() as u32,
-        });
-        self.stop.set(stop);
         Ok(out)
     }
 
@@ -1363,7 +1423,6 @@ impl Qwen35GgufInstance {
         }
         self.reset();
         let snaps: Vec<_> = self.shards.iter().map(|s| s.qwen35.new_gdn_snapshot()).collect();
-        let t0 = std::time::Instant::now();
 
         // All but the last prompt token; the last is the first verify row,
         // exactly as it is the first `pending` of the textbook loop.
@@ -1372,14 +1431,11 @@ impl Qwen35GgufInstance {
             let (_, p) = self.replay_prompt(&prompt[..prompt.len() - 1], 0)?;
             pos = p;
         }
-        let prefill_s = t0.elapsed().as_secs_f64();
-        let t1 = std::time::Instant::now();
 
         let mut pending = *prompt.last().expect("non-empty (checked above)");
         let mut ctx: Vec<u32> = prompt.to_vec();
         let mut out: Vec<u32> = Vec::with_capacity(max_new as usize);
         let mut stats = SpecDecodeStats::default();
-        let mut stop = "length";
 
         'outer: while (out.len() as u32) < max_new {
             let want = (max_new - out.len() as u32).min(k);
@@ -1439,7 +1495,6 @@ impl Qwen35GgufInstance {
             // round was never really generated.
             for tok in props.iter().take(accepted).copied().chain(std::iter::once(correction)) {
                 if self.eos.contains(&tok) {
-                    stop = "eos";
                     break 'outer;
                 }
                 out.push(tok);
@@ -1448,139 +1503,13 @@ impl Qwen35GgufInstance {
                     break 'outer;
                 }
                 if on_token(&out) {
-                    stop = "caller";
                     break 'outer;
                 }
             }
             pending = correction;
         }
 
-        self.last.set(Timings { prefill_s, prefill_tokens: prompt.len() as u32, decode_s: t1.elapsed().as_secs_f64(), decode_tokens: out.len() as u32 });
-        self.stop.set(stop);
         Ok((out, stats))
-    }
-
-    /// **Real BATCHED generation**: `reqs.len()` independent sequences, each
-    /// with its own prompt and sampling settings, decoded TOGETHER - one row
-    /// of one dispatch set per step ([`Self::stack_step_batch`]).
-    ///
-    /// Prefill stays per sequence (one chunked replay into that sequence's own
-    /// slot): a prefill round's rows already fill the machine, so there is
-    /// nothing for a batch to amortize there. Decode is where the batch pays,
-    /// because a decode step's cost is dominated by reading every weight in
-    /// the model and those reads are what the batch shares.
-    ///
-    /// Sequences finish at different times. A finished row is not removed from
-    /// the batch mid-flight (that would renumber every other row's slot, and
-    /// with it its KV window); it is FROZEN instead - its position stops
-    /// advancing and its output is ignored - and the whole call returns when
-    /// every row is done. So the step count is the longest sequence's, and a
-    /// caller mixing very different `max_new` values pays for the longest one.
-    /// The alternative, a continuous-batching scheduler that admits a new
-    /// request into a freed slot, is `crate::serve::Scheduler`'s job, not this
-    /// entry point's.
-    ///
-    /// Returns the GENERATED ids per sequence (prompts excluded), in `reqs`
-    /// order - the same contract [`Self::generate`] has per sequence. Timings
-    /// reported through [`Instance::metrics`] are the BATCH's: prefill tokens
-    /// summed over the group, decode tokens summed over the group, against the
-    /// group's own wall clock - so `decode_tok_per_s` is the aggregate rate,
-    /// which is the number batching actually moves.
-    pub fn generate_batch(&self, reqs: &[BatchRequest], on_token: &mut dyn FnMut(usize, &[u32]) -> bool) -> Result<Vec<Vec<u32>>, String> {
-        let bsz = reqs.len();
-        if bsz == 0 {
-            return Ok(Vec::new());
-        }
-        if bsz > self.max_batch as usize {
-            return Err(format!("{MODEL}: batch of {bsz} exceeds this instance's max_batch {} (set it before activating)", self.max_batch));
-        }
-        for (i, r) in reqs.iter().enumerate() {
-            if r.prompt.is_empty() {
-                return Err(format!("{MODEL}: request {i}: empty prompt"));
-            }
-            let need = r.prompt.len() as u64 + r.max_new as u64;
-            if need > self.cap as u64 {
-                return Err(format!("{MODEL}: request {i}: prompt ({}) + max_new ({}) = {need} exceeds context capacity {}", r.prompt.len(), r.max_new, self.cap));
-            }
-            if let Some(bad) = r.prompt.iter().find(|&&t| t >= self.cfg.vocab) {
-                return Err(format!("{MODEL}: request {i}: prompt token id {bad} is outside vocab {}", self.cfg.vocab));
-            }
-        }
-        self.reset();
-
-        // Prefill, one sequence at a time into its own slot.
-        let t0 = std::time::Instant::now();
-        let mut logits: Vec<Vec<f32>> = Vec::with_capacity(bsz);
-        let mut pos: Vec<u32> = Vec::with_capacity(bsz);
-        for (i, r) in reqs.iter().enumerate() {
-            let (lg, p) = self.replay_prompt(&r.prompt, i as u32)?;
-            logits.push(lg);
-            pos.push(p);
-        }
-        let prefill_s = t0.elapsed().as_secs_f64();
-
-        // Decode, every live row together.
-        let t1 = std::time::Instant::now();
-        let mut rngs: Vec<Rng> = reqs.iter().map(|r| Rng::new(r.seed)).collect();
-        let mut out: Vec<Vec<u32>> = reqs.iter().map(|r| Vec::with_capacity(r.max_new as usize)).collect();
-        let mut live: Vec<bool> = vec![true; bsz];
-        let mut stop = "length";
-        let max_steps = reqs.iter().map(|r| r.max_new).max().unwrap_or(0);
-        for _ in 0..max_steps {
-            for i in 0..bsz {
-                if !live[i] {
-                    continue;
-                }
-                let r = &reqs[i];
-                let next = crate::sample::sample_logits(&logits[i], r.temp, r.top_k, r.top_p, &mut rngs[i]);
-                if self.eos.contains(&next) {
-                    live[i] = false;
-                    continue;
-                }
-                out[i].push(next);
-                if out[i].len() as u32 >= r.max_new {
-                    live[i] = false;
-                    continue;
-                }
-                if on_token(i, &out[i]) {
-                    live[i] = false;
-                    stop = "caller";
-                }
-            }
-            if !live.iter().any(|&l| l) {
-                break;
-            }
-            // A frozen row still occupies its batch column - see this
-            // function's own doc. It re-feeds its LAST token at its LAST
-            // position, so the only state it disturbs is its OWN: one KV row
-            // it already owned is rewritten, and its recurrent state advances
-            // by a step. Nothing reads either again (its output is discarded
-            // from here on), and no other row can see them - every kernel in a
-            // batched decode step is strictly per row, addressing its own
-            // physical block and its own slice of the recurrent state slab.
-            // What freezing buys is that every other row's slot, and with it
-            // its whole KV window, stays exactly where it was.
-            let tokens: Vec<u32> = (0..bsz).map(|i| *out[i].last().unwrap_or(&reqs[i].prompt[reqs[i].prompt.len() - 1])).collect();
-            let steps: Vec<u32> = (0..bsz).map(|i| if live[i] { pos[i] } else { pos[i] - 1 }).collect();
-            logits = self.stack_step_batch(&tokens, &steps)?;
-            for i in 0..bsz {
-                if live[i] {
-                    pos[i] += 1;
-                }
-            }
-        }
-        let decoded: u32 = out.iter().map(|o| o.len() as u32).sum();
-        if stop == "length" && out.iter().enumerate().any(|(i, o)| (o.len() as u32) < reqs[i].max_new) {
-            stop = "eos";
-        }
-        self.last.set(Timings {
-            prefill_s,
-            prefill_tokens: reqs.iter().map(|r| r.prompt.len() as u32).sum(),
-            decode_s: t1.elapsed().as_secs_f64(),
-            decode_tokens: decoded,
-        });
-        self.stop.set(stop);
-        Ok(out)
     }
 
     /// Encode text with the checkpoint's OWN embedded tokenizer, raw (no chat
@@ -2100,145 +2029,6 @@ impl DecodeProfile {
 /// [`Qwen35GgufInstance::profile_decode`] so it measures steady state.
 const PROFILE_WARM_STEPS: u32 = 3;
 
-impl Qwen35GgufInstance {
-    /// ONE batch group's worth of `generate` requests, decoded together.
-    ///
-    /// The per-request front and back ends are exactly [`Instance::run`]'s -
-    /// the same `qwen3::chat` request parser, the same `SeqState` streamer,
-    /// the same finish - so a batched request and a solitary one are parsed,
-    /// streamed and finished identically; only the decode loop between them
-    /// is shared. `base` is the group's offset into the whole `run_batch`
-    /// call, so `progress` indices name the caller's own request.
-    ///
-    /// A request that fails to PARSE fails alone: it is dropped from the group
-    /// and its error returned in its own slot, rather than failing every
-    /// request that happened to be scheduled alongside it. A failure of the
-    /// batched decode itself is a property of the group and is returned for
-    /// every surviving member.
-    fn run_group(&mut self, invs: &[Invocation], base: usize, progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-        let mut out: Vec<Option<ActionResult>> = (0..invs.len()).map(|_| None).collect();
-        let mut rows: Vec<usize> = Vec::with_capacity(invs.len());
-        let mut reqs: Vec<BatchRequest> = Vec::with_capacity(invs.len());
-        let mut seqs: Vec<qwen3::chat::SeqState> = Vec::with_capacity(invs.len());
-        for (i, inv) in invs.iter().enumerate() {
-            let inv = crate::caps::with_template_flavor_default(inv);
-            match qwen3::chat::parse_request(&self.tok, &inv) {
-                Err(e) => out[i] = Some(Err(e)),
-                Ok(req) => {
-                    seqs.push(qwen3::chat::SeqState::new(&req, inv.cancel.clone()));
-                    progress(base + i, Progress::step(0, req.max_new as u32, "generating"));
-                    reqs.push(BatchRequest {
-                        prompt: req.ids.clone(),
-                        max_new: req.max_new as u32,
-                        temp: req.temp,
-                        top_k: req.top_k,
-                        top_p: req.top_p,
-                        seed: req.seed,
-                    });
-                    rows.push(i);
-                }
-            }
-        }
-        if !rows.is_empty() {
-            let tok = &self.tok;
-            let generated = {
-                let seqs = &mut seqs;
-                let rows = &rows;
-                self.generate_batch(&reqs, &mut |r, so_far| seqs[r].advance(tok, so_far, &mut |p| progress(base + rows[r], p)))
-            };
-            match generated {
-                Err(e) => {
-                    for &i in &rows {
-                        out[i] = Some(Err(e.clone()));
-                    }
-                }
-                Ok(ids) => {
-                    for ((r, &i), seq) in rows.iter().enumerate().zip(seqs) {
-                        out[i] = Some(Ok(seq.finish(&self.tok, &ids[r], &mut |p| progress(base + i, p))));
-                    }
-                }
-            }
-        }
-        out.into_iter().map(|o| o.expect("every row is filled by either the parse error or the batched run")).collect()
-    }
-}
-
-impl Instance for Qwen35GgufInstance {
-    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        if action != "generate" {
-            return Err(format!("{MODEL}: unknown action '{action}' (only 'generate' exists)"));
-        }
-        // The SAME request parser/streamer every other Qwen-family served
-        // model uses (`messages`/`prompt`/`system`/`tools`/`stop`, chat
-        // markup rendering, stop-string scanning, tool-call extraction) -
-        // not a second copy of that param handling. The flavor defaults to
-        // this model's own template (see `crate::caps::with_template_flavor_default`).
-        let inv = crate::caps::with_template_flavor_default(inv);
-        let req = qwen3::chat::parse_request(&self.tok, &inv)?;
-        let mut seq = qwen3::chat::SeqState::new(&req, inv.cancel.clone());
-        progress(Progress::step(0, req.max_new as u32, "generating"));
-        let mut stop = false;
-        let ids = self.generate(
-            &req.ids,
-            req.max_new as u32,
-            req.temp,
-            req.top_k,
-            req.top_p,
-            req.seed,
-            &mut |so_far| {
-                stop = seq.advance(&self.tok, so_far, progress);
-                stop
-            },
-        )?;
-        Ok(seq.finish(&self.tok, &ids, progress))
-    }
-
-    /// Genuinely batched: every request in `invs` decodes together, one row of
-    /// one dispatch set per step ([`Self::generate_batch`]), so the weight
-    /// reads that dominate a decode step are paid once for the whole group
-    /// instead of once per request.
-    ///
-    /// Requests are taken `max_batch` at a time
-    /// ([`Qwen35GgufResident::with_max_batch`], default `1` - which makes this
-    /// exactly the serial loop it used to be, since a group of one IS a serial
-    /// call). Every request in a group is parsed and streamed the same way
-    /// [`Instance::run`] parses and streams one, and a request that fails to
-    /// parse fails on its own without taking its group down.
-    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-        if action != "generate" {
-            return invs.iter().map(|_| Err(format!("{MODEL}: unknown action '{action}' (only 'generate' exists)"))).collect();
-        }
-        let mut out: Vec<ActionResult> = Vec::with_capacity(invs.len());
-        for group in invs.chunks(self.max_batch.max(1) as usize) {
-            let base = out.len();
-            out.extend(self.run_group(group, base, progress));
-        }
-        out
-    }
-
-    /// The last request's real split between prompt replay and new tokens
-    /// (see [`Qwen35GgufInstance::last`]), plus why the loop ended. Both are
-    /// polled by the dispatcher and surface in `Executor::stats().metrics`.
-    ///
-    /// After a [`Instance::run_batch`] call these are the BATCH's numbers
-    /// (tokens summed over the group, against the group's own wall clock), so
-    /// `decode_tok_per_s` reads as the aggregate rate - which is the rate
-    /// batching moves, and the only one that means anything for a group.
-    fn metrics(&self) -> Vec<(String, serde_json::Value)> {
-        let t = self.last.get();
-        let rate = |tokens: u32, secs: f64| if secs > 0.0 { tokens as f64 / secs } else { 0.0 };
-        vec![
-            ("prefill_seconds".to_string(), json!(t.prefill_s)),
-            ("prefill_tokens".to_string(), json!(t.prefill_tokens)),
-            ("prefill_tok_per_s".to_string(), json!(rate(t.prefill_tokens, t.prefill_s))),
-            ("decode_seconds".to_string(), json!(t.decode_s)),
-            ("decode_tokens".to_string(), json!(t.decode_tokens)),
-            ("decode_tok_per_s".to_string(), json!(rate(t.decode_tokens, t.decode_s))),
-            ("stop_reason".to_string(), json!(self.stop.get())),
-        ]
-    }
-}
-
 // ------------------------------------------------------------ the resident
 
 /// The placement this resident committed to, computed once from the GGUF
@@ -2399,17 +2189,6 @@ impl Qwen35GgufResident {
                 return Plan::default();
             }
         };
-        if !kv_pool_addressable(&cfg, self.cap, self.max_batch) {
-            eprintln!(
-                "{MODEL}: {} sequences of {} tokens is {} KV rows of {} elements per layer, past the kernels' u32 element index -- reporting zero devices",
-                self.max_batch,
-                self.cap,
-                self.max_batch as u64 * self.cap as u64,
-                cfg.kv_dim()
-            );
-            return Plan::default();
-        }
-        let cost = layer_cost(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch);
         // `plan_fewest_devices` wants `(index into self.devices, capacity)`;
         // mapping back afterwards is what makes a non-GPU device in the list
         // (which this model cannot use) rejected rather than mis-indexed.
@@ -2420,16 +2199,12 @@ impl Qwen35GgufResident {
                 other => eprintln!("{MODEL}: ignoring non-GPU device {other:?} (this model is GPU-only)"),
             }
         }
-        let Some(placements) = model::shard::plan_fewest_devices(&cost, &caps) else {
-            eprintln!(
-                "{MODEL}: {} does not fit across the {} budgeted device(s) ({} bytes needed, {} available) -- reporting zero devices",
-                self.gguf_path,
-                caps.len(),
-                cost.total(),
-                caps.iter().map(|&(_, c)| c).sum::<u64>()
-            );
+        if let Some(why) = sizing_refusal(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, &caps.iter().map(|&(_, c)| c).collect::<Vec<_>>()) {
+            eprintln!("{MODEL}: '{}' is not served: {why} -- reporting zero devices", self.gguf_path);
             return Plan::default();
-        };
+        }
+        let cost = layer_cost(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch);
+        let placements = model::shard::plan_fewest_devices(&cost, &caps).expect("sizing_refusal found the configuration placeable");
         let stages = placements
             .iter()
             .map(|p| {
@@ -2478,11 +2253,17 @@ fn stop_ids(tok: &QwenBpe, declared: Option<u32>) -> Vec<u32> {
     ids
 }
 
+/// This model renders the 3.8 chat template by default; `parse_request`
+/// alone defaults to the Qwen3-era flavor and would mis-render its prompt.
+fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<qwen3::chat::ParsedRequest, String> {
+    qwen3::chat::parse_request(tok, &crate::caps::with_template_flavor_default(inv))
+}
+
 impl ResidentModel for Qwen35GgufResident {
     fn manifest(&self) -> Manifest {
         let generate = ActionSpec::new(
             "generate",
-            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from the released Q8_0 GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16 or int8 (`--qwen35-kv`); one sequence per dispatch)",
+            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from the released Q8_0 GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16 or int8 (`--qwen35-kv`); up to --qwen35-max-batch sequences per batched dispatch)",
         )
         .streaming()
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
@@ -2504,7 +2285,7 @@ impl ResidentModel for Qwen35GgufResident {
         .output(BlobSpec::new("text", Media::Text, "the generated text"));
         Manifest::new(
             &self.model_id,
-            "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, served INT8 and GPU-resident directly from the released Q8_0 GGUF (no fp32 intermediate on disk), layer-sharded across as many cards as its real per-layer bytes need. Text only; no MTP self-speculative decode; one sequence per dispatch.",
+            "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, served INT8 and GPU-resident directly from the released Q8_0 GGUF (no fp32 intermediate on disk), layer-sharded across as many cards as its real per-layer bytes need. Text only; no MTP self-speculative decode; continuous batching of up to max_batch sequences per dispatch.",
             vec![generate],
         )
         .with_max_context_tokens(self.cap as u64)
@@ -2522,6 +2303,12 @@ impl ResidentModel for Qwen35GgufResident {
     /// would let it spend VRAM the scheduler never budgeted.
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         MemCost::new(0, 0)
+    }
+
+    /// The decode slots this resident was built with: the dispatcher may hand
+    /// it that many queued requests per call.
+    fn batch_limit(&self) -> Option<usize> {
+        Some(self.max_batch as usize)
     }
 
     fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
@@ -2544,12 +2331,30 @@ impl MultiDeviceResidentModel for Qwen35GgufResident {
         MultiDeviceCost::new(plan.stages.iter().map(|&(d, _, bytes)| (d, bytes)).collect(), ram)
     }
 
+    /// The served instance: the checkpoint as a [`Qwen35GgufEngine`] under
+    /// the generic continuous-batching `model::serve::Scheduler`, so up to
+    /// `max_batch` requests decode in ONE batched step per iteration and join
+    /// and leave between steps - the same loop every brain LLM is served by.
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
-        Ok(Box::new(self.activate_owned(devices)?))
+        let (engine, tok, stop) = self.activate_engine(devices)?;
+        let sched = model::serve::Scheduler::new(engine, self.max_batch as usize);
+        Ok(Box::new(llmserve::ScheduledInstance::new(llmserve::TextFrontend { tok, stop, label: "qwen35", parse: parse_request }, sched)))
     }
 }
 
 impl Qwen35GgufResident {
+    /// The serving surface: the activated checkpoint as a
+    /// `model::serve::PagedDecoder` for the generic continuous-batching
+    /// scheduler, with the tokenizer and stop ids its requests need.
+    /// `max_batch` is the number of sequences the scheduler may run at once.
+    pub fn activate_engine(&self, devices: &[Device]) -> Result<(Qwen35GgufEngine, QwenBpe, Vec<u32>), String> {
+        let inst = self.activate_owned(devices)?;
+        let gtok = inst.mg.tokenizer().ok_or_else(|| format!("{MODEL}: '{}' carries no embedded tokenizer", self.gguf_path))?;
+        let tok = QwenBpe::from_gguf(&gtok).map_err(|e| format!("{MODEL}: embedded tokenizer: {e}"))?;
+        let stop = inst.eos.clone();
+        Ok((Qwen35GgufEngine::new(inst), tok, stop))
+    }
+
     /// [`MultiDeviceResidentModel::activate_multi`] returning the CONCRETE
     /// instance rather than a `Box<dyn Instance>`.
     ///
@@ -2631,7 +2436,7 @@ impl Qwen35GgufResident {
         };
         let embed = EmbedTable { name: embed_name, d };
 
-        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, kv_tier: self.kv_tier, last: Cell::default(), stop: Cell::new("length"), taps: RefCell::new(None) })
+        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, kv_tier: self.kv_tier, taps: RefCell::new(None) })
     }
 }
 
@@ -2798,6 +2603,23 @@ mod tests {
         assert!(bf16b >= 2 * f32b, "bf16 halves the cache, so it must at least double the batch: f32 {f32b}, bf16 {bf16b}");
         assert!(int8b >= 3 * f32b, "int8 is ~3.9x smaller, so it must at least triple the batch: f32 {f32b}, int8 {int8b}");
         assert!(int8b > bf16b);
+    }
+
+    /// A batch that cannot fit is refused with the operator's levers named
+    /// and the arithmetic shown, and the same batch is accepted once the KV
+    /// cache is stored compactly - on one GH200-sized card.
+    #[test]
+    fn a_batch_that_cannot_fit_is_refused_naming_the_flags_to_change() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let i8 = TierPolicy::uniform(Dtype::I8);
+        let usable = [(97_871u64 << 20) - (2 << 30)];
+        assert_eq!(sizing_refusal(&cfg, 4096, &i8, KvTier::Bf16, 64, &usable), None, "64 x 4096 with a bf16 cache fits one GH200");
+        let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 256, &usable).expect("256 f32 sequences of 4096 tokens cannot fit");
+        for needle in ["--qwen35-max-batch 256", "--qwen35-ctx 4096", "GiB weights", "more compact --qwen35-kv"] {
+            assert!(why.contains(needle), "refusal must mention {needle:?}: {why}");
+        }
+        let why = sizing_refusal(&cfg, 131_072, &i8, KvTier::Bf16, 40, &usable).expect("past the u32 plane index");
+        assert!(why.contains("u32 element index"), "{why}");
     }
 
     /// A plane is addressed by `u32` element offsets, so past 4.29G elements

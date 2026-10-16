@@ -27,6 +27,7 @@
 use std::time::Instant;
 
 use checkpoint::TensorSource;
+use data::tokenizer::Tokenizer;
 use checkpoint::gguf::MmapGguf;
 use gpu_core::select::Dtype;
 use model::kv_tier::KvTier;
@@ -456,7 +457,7 @@ fn batched_decode_answers_each_prompt_and_beats_serial_throughput() {
     let answers = |text: &str, want: &str| text.to_lowercase().contains(&want.to_lowercase());
     let decode_rate = |inst: &dyn Instance| -> (f64, f64) {
         let m: std::collections::HashMap<String, serde_json::Value> = inst.metrics().into_iter().collect();
-        (m["decode_tokens"].as_f64().unwrap_or(0.0), m["decode_seconds"].as_f64().unwrap_or(0.0))
+        (m["last_batch_generated_tokens"].as_f64().unwrap_or(0.0), m["last_batch_seconds"].as_f64().unwrap_or(0.0))
     };
 
     // --- serial baseline: one `run` per prompt, same instance -------------
@@ -813,9 +814,65 @@ fn decode_tok_per_s_across_context_depth() {
         let prompt_tokens = out.outputs["prompt_tokens"].as_i64().unwrap_or(0);
         let text = out.outputs["text"].as_str().unwrap_or_default().to_string();
         let metrics: std::collections::HashMap<String, serde_json::Value> = inst.metrics().into_iter().collect();
-        let prefill_tok_s = metrics.get("prefill_tok_per_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let decode_tok_s = metrics.get("decode_tok_per_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        // The scheduler path reports one wall time per call (prefill and
+        // decode together), so the rate is end-to-end generated tokens/s.
+        let tok_s = metrics.get("last_batch_tok_per_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let ok = text.contains("Paris");
-        println!("prompt_tokens={prompt_tokens:5} prefill_tok_s={prefill_tok_s:7.2} decode_tok_s={decode_tok_s:6.3} ok={ok:5}");
+        println!("prompt_tokens={prompt_tokens:5} generated_tok_s_incl_prefill={tok_s:6.3} ok={ok:5}");
     }
+}
+
+/// The released checkpoint under the generic continuous-batching scheduler:
+/// every prompt's greedy continuation, decoded with its neighbours in ONE
+/// batched step per iteration (slots joining and leaving as requests finish:
+/// four requests through two running slots), is token-for-token what the
+/// single-sequence reference loop (`Qwen35GgufInstance::generate`) produces
+/// for it alone, and a request sampled under a seed reproduces that seed's
+/// tokens when its neighbours change.
+#[test]
+fn scheduled_batches_reproduce_the_single_sequence_reference_on_the_real_checkpoint() {
+    use model::serve::{Request, SampleParams, Scheduler};
+
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.is_empty() {
+        brain_testutil::skip_unavailable("this gate wants at least one usable GPU");
+        return;
+    }
+    let r = Qwen35GgufResident::new(path, devices, CAP, TierPolicy::uniform(Dtype::I8)).with_max_batch(4);
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    let (engine, tok, _stop) = r.activate_engine(&placed).expect("activate the real checkpoint");
+
+    let prompts = ["The capital city of France is", "The chemical symbol for gold is", "Water freezes at a temperature of zero degrees", "The tallest mountain above sea level on Earth is Mount"];
+    let new = [10usize, 6, 10, 8];
+    let ids: Vec<Vec<u32>> = prompts.iter().map(|p| tok.encode(p)).collect();
+    // Reference first: `generate` resets every slot, so it cannot run once
+    // the scheduler owns live sequences.
+    let want: Vec<Vec<u32>> = ids.iter().zip(new).map(|(p, n)| engine.instance().generate(p, n as u32, 0.0, 0, 1.0, 0, &mut |_| false).expect("reference generate")).collect();
+
+    let mut sched = Scheduler::new(engine, 2);
+    let submitted: Vec<u64> = ids.iter().zip(new).map(|(p, n)| sched.submit(Request { prompt: p.clone(), max_new: n, stop: Vec::new() })).collect();
+    let done = sched.run();
+    for (i, id) in submitted.iter().enumerate() {
+        let got = &done[id];
+        println!("  {:?} -> {:?}", prompts[i], tok.decode(got));
+        assert_eq!(got, &want[i], "request {i} ({:?}): the batched continuation must be the single-sequence one", prompts[i]);
+    }
+
+    // Seeded sampling is per sequence: the same seed gives the same tokens
+    // whether the sequence runs alone or beside others.
+    let sample = SampleParams { temp: 0.8, top_k: 40, top_p: 0.95 };
+    let solo = {
+        let id = sched.submit_sampled(Request { prompt: ids[0].clone(), max_new: 8, stop: Vec::new() }, sample, 7);
+        sched.run().remove(&id).unwrap()
+    };
+    let beside = {
+        let id = sched.submit_sampled(Request { prompt: ids[0].clone(), max_new: 8, stop: Vec::new() }, sample, 7);
+        for p in &ids[1..] {
+            sched.submit_sampled(Request { prompt: p.clone(), max_new: 8, stop: Vec::new() }, sample, 99);
+        }
+        sched.run().remove(&id).unwrap()
+    };
+    assert_eq!(solo, beside, "a seeded sampled sequence must not depend on its batch neighbours");
 }

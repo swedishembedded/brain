@@ -1046,9 +1046,54 @@ pub(crate) fn head_logits_rows_on(
     hidden: &[f32],
     rows: u32,
 ) -> Vec<f32> {
+    head_rows_on(g, ops, cfg, final_norm_buf, head, hidden, rows, |g, logits| g.read(logits, rows as usize * cfg.vocab as usize))
+}
+
+/// [`head_logits_rows_on`] reduced to each row's greedy token on the device:
+/// only `rows` indices come back, never the `[rows, vocab]` logits block (at
+/// a batch of 64 over a 248k vocabulary that block is 63 MB per step).
+pub(crate) fn head_argmax_rows_on(
+    g: &Gpu,
+    ops: &model::ops::Ops,
+    cfg: &Qwen35Config,
+    final_norm_buf: &DeviceBuffer,
+    head: &Weight,
+    hidden: &[f32],
+    rows: u32,
+) -> Vec<u32> {
+    head_rows_on(g, ops, cfg, final_norm_buf, head, hidden, rows, |g, logits| crate::model::argmax_rows_of(g, logits, rows, cfg.vocab))
+}
+
+/// [`head_logits_rows_on`] reduced to each row's top-`cap` `(token, logit)`
+/// candidates on the device (see [`crate::model::topk_rows_of`]).
+pub(crate) fn head_topk_rows_on(
+    g: &Gpu,
+    ops: &model::ops::Ops,
+    cfg: &Qwen35Config,
+    final_norm_buf: &DeviceBuffer,
+    head: &Weight,
+    hidden: &[f32],
+    rows: u32,
+    cap: u32,
+) -> Vec<Vec<(u32, f32)>> {
+    head_rows_on(g, ops, cfg, final_norm_buf, head, hidden, rows, |g, logits| crate::model::topk_rows_of(g, logits, rows, cfg.vocab, cap))
+}
+
+/// The shared final-norm + head-matmul epilogue; `reduce` consumes the
+/// `[rows, vocab]` device logits inside the scratch scope that owns them.
+fn head_rows_on<R>(
+    g: &Gpu,
+    ops: &model::ops::Ops,
+    cfg: &Qwen35Config,
+    final_norm_buf: &DeviceBuffer,
+    head: &Weight,
+    hidden: &[f32],
+    rows: u32,
+    reduce: impl FnOnce(&Gpu, &DeviceBuffer) -> R,
+) -> R {
     let d = cfg.d_model as usize;
-    assert!(rows > 0, "head_logits_rows_on: rows must be > 0");
-    assert_eq!(hidden.len(), rows as usize * d, "head_logits_rows_on: hidden must be exactly {rows} [d_model] rows");
+    assert!(rows > 0, "head_rows_on: rows must be > 0");
+    assert_eq!(hidden.len(), rows as usize * d, "head_rows_on: hidden must be exactly {rows} [d_model] rows");
     // Same recipe as a decode step's layer stack (`Qwen35::run_decode_batch`):
     // recycled scratch at stable addresses plus one held submission, so the
     // head of a steady-state token is replayed rather than rebuilt - its
@@ -1067,8 +1112,8 @@ pub(crate) fn head_logits_rows_on(
     let logits_buf = g.storage(rows as u64 * cfg.vocab as u64);
     ops.matmul(&mut s, head, &act, &logits_buf, 0);
     g.submit(&[], &s);
-    // `read` issues the held pass before it waits.
-    g.read(&logits_buf, rows as usize * cfg.vocab as usize)
+    // The reduction's `read` issues the held pass before it waits.
+    reduce(g, &logits_buf)
 }
 
 /// Real end-to-end generation: tokenize `prompt` (`tokenizer_path`, `data::
