@@ -655,7 +655,7 @@ fn gdn_mixer_decode_ids() -> model::gdn_mixer::GdnMixerDecodeIds {
 /// projections and a recurrent-state snapshot per segment, the intermediates
 /// being rebuilt one segment at a time (`model::gdn_segment`).
 enum GdnSaved {
-    Full(model::gdn_mixer::GdnMixerActs),
+    Full(Box<model::gdn_mixer::GdnMixerActs>),
     Segmented { bounds: model::gdn_segment::GdnSegmentBounds, mixed_qkv: DeviceBuffer, bproj: DeviceBuffer, aproj: DeviceBuffer, z: DeviceBuffer },
 }
 
@@ -1367,7 +1367,7 @@ impl Qwen35 {
         // IGNOREd so it adds no loss and no gradient. `t_user` is the length
         // callers see.
         let t_user = t;
-        let t = if train && t > GDN_PAD_QUANTUM && t % GDN_PAD_QUANTUM != 0 {
+        let t = if train && t > GDN_PAD_QUANTUM && !t.is_multiple_of(GDN_PAD_QUANTUM) {
             assert!(!cfg.mtp, "qwen35: MTP needs t={t} to be a multiple of {GDN_PAD_QUANTUM} (the multi-token head has no padding support)");
             t.next_multiple_of(GDN_PAD_QUANTUM)
         } else {
@@ -2084,12 +2084,12 @@ impl Qwen35 {
                 }
                 None => {
                     let (gated, acts) = model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, None);
-                    (gated, acts.map(GdnSaved::Full))
+                    (gated, acts.map(|a| GdnSaved::Full(Box::new(a))))
                 }
             },
             GdnCall::Chunk(cont) => {
                 let (gated, acts) = model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, Some(cont));
-                (gated, acts.map(GdnSaved::Full))
+                (gated, acts.map(|a| GdnSaved::Full(Box::new(a))))
             }
         };
 

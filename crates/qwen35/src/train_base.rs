@@ -152,32 +152,6 @@ pub(crate) fn check_batch_fits(cfg: &Qwen35Config, b: u32, t: u32, binding_bytes
     );
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_mlp_activation_sets_the_longest_pass_at_the_real_width() {
-        let cfg = Qwen35Config::qwen38_27b();
-        let (tokens, buffer) = longest_batch_tokens(&cfg, 4 << 30);
-        assert_eq!(tokens, (4u64 << 30) / (17408 * 4));
-        assert!(buffer.contains("MLP"));
-        // A 2 GiB binding (Vulkan) halves it.
-        assert_eq!(longest_batch_tokens(&cfg, 2 << 30).0, (2u64 << 30) / (17408 * 4));
-    }
-
-    #[test]
-    #[should_panic(expected = "do not fit this device")]
-    fn a_pass_past_the_binding_is_refused_naming_the_buffer() {
-        check_batch_fits(&Qwen35Config::qwen38_27b(), 1, 70_000, 4 << 30);
-    }
-
-    #[test]
-    fn a_pass_inside_the_binding_is_accepted() {
-        check_batch_fits(&Qwen35Config::qwen38_27b(), 1, 32_768, 4 << 30);
-    }
-}
-
 /// The layer-boundary residual stream of a training pass, held as bf16: one
 /// packed buffer per boundary (`n_layers + 1` of them, `rows * d_model / 2`
 /// words each) instead of the same count of fp32 `rows * d_model` buffers -
@@ -213,5 +187,31 @@ impl PackedResidual {
     /// Decode boundary `l` into `dst` (fp32 `[rows, d_model]`).
     pub(crate) fn load(&self, gpu: &Gpu, l: usize, dst: &DeviceBuffer) {
         gpu.submit(&[], &[gpu.step(self.unpack, &[&self.packed[l], dst], &[self.total], self.total)]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_mlp_activation_sets_the_longest_pass_at_the_real_width() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let (tokens, buffer) = longest_batch_tokens(&cfg, 4 << 30);
+        assert_eq!(tokens, (4u64 << 30) / (17408 * 4));
+        assert!(buffer.contains("MLP"));
+        // A 2 GiB binding (Vulkan) halves it.
+        assert_eq!(longest_batch_tokens(&cfg, 2 << 30).0, (2u64 << 30) / (17408 * 4));
+    }
+
+    #[test]
+    #[should_panic(expected = "do not fit this device")]
+    fn a_pass_past_the_binding_is_refused_naming_the_buffer() {
+        check_batch_fits(&Qwen35Config::qwen38_27b(), 1, 70_000, 4 << 30);
+    }
+
+    #[test]
+    fn a_pass_inside_the_binding_is_accepted() {
+        check_batch_fits(&Qwen35Config::qwen38_27b(), 1, 32_768, 4 << 30);
     }
 }

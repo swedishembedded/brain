@@ -105,7 +105,7 @@ fn main() {
     let rank: u32 = parsed(&args, "--rank", 16);
     let steps: u32 = parsed(&args, "--steps", 2);
     let base = arg(&args, "--base").unwrap_or_else(|| "bf16".into());
-    let recompute = arg(&args, "--recompute").map_or(true, |v| v != "off");
+    let recompute = arg(&args, "--recompute").is_none_or(|v| v != "off");
     let gdn_segment: u32 = parsed(&args, "--gdn-segment", 0);
     let tier = match base.as_str() {
         "f32" => Dtype::F32,

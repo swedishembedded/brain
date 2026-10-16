@@ -84,7 +84,7 @@ fn child_charged_bytes_wide_gdn() {
     let params: u64 = cfg.param_list().iter().map(|(_, n)| *n as u64 * 4).sum();
     mark("params", params);
     let gdn_layers = cfg.layer_types().iter().filter(|t| **t == qwen35::config::LayerType::Linear).count() as u64;
-    mark("state", cfg.gdn_state_len() as u64 * 4 * gdn_layers);
+    mark("state", cfg.gdn_state_len() * 4 * gdn_layers);
 }
 
 /// The GDN recurrent state and conv history are decode-only too.
