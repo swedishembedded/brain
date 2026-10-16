@@ -17,7 +17,7 @@
 //! ```text
 //! image (BGR u8, HWC)
 //!   -> scrfd detect            the primary face's 5 landmarks (crates/scrfd)
-//!   -> align::norm_crop_chw    Umeyama solve (host) + `grid_sample` (device)
+//!   -> align::norm_crop_chw    least-squares similarity solve (host) + `grid_sample` (device)
 //!   -> preprocess              (112x112, this model's normalisation - std 127.5)
 //!   -> ArcFace::embed_blob     raw 512-d
 //!   -> hostmath::l2_normalize  for cosine

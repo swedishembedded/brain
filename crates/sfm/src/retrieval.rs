@@ -11,10 +11,10 @@
 //! pairs of a large capture share nothing, and a global descriptor says so
 //! for the price of one dot product.
 //!
-//! The descriptor is VLAD (Jégou et al., "Aggregating local descriptors into
+//! The descriptor is VLAD ("Aggregating local descriptors into
 //! a compact image representation", CVPR 2010) over the RootSIFT descriptors
-//! already computed, with intra-normalization (Arandjelović & Zisserman,
-//! "All about VLAD", CVPR 2013) and signed square-root power normalization.
+//! already computed, with intra-normalization
+//! ("All about VLAD", CVPR 2013) and signed square-root power normalization.
 //! Its vocabulary is learned by k-means on the capture's own descriptors, so
 //! nothing is downloaded and no trained weights are involved: VLAD's
 //! residuals carry the fine distinctions a coarse vocabulary leaves out,

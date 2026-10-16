@@ -252,7 +252,7 @@ impl Benchmark for MadRecall {
     }
 }
 
-/// `k` distinct indices in `[0, n)` via partial Fisher–Yates (requires `k <= n`).
+/// `k` distinct indices in `[0, n)` via partial unbiased in-place (requires `k <= n`).
 fn sample_distinct_indices(k: usize, n: usize, rng: &mut Rng) -> Vec<usize> {
     assert!(k <= n, "cannot draw {k} distinct of {n}");
     let mut pool: Vec<usize> = (0..n).collect();

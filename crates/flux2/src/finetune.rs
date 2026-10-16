@@ -155,7 +155,7 @@ pub fn sample_index(n: usize, step: u64, seed: u64) -> usize {
     assert!(n > 0, "a dataset with no samples cannot be trained on");
     let epoch = step / n as u64;
     let k = (step % n as u64) as usize;
-    // Fisher-Yates over 0..n, seeded by (run seed, epoch). Only the k-th
+    // unbiased in-place over 0..n, seeded by (run seed, epoch). Only the k-th
     // element is needed, but the shuffle is O(n) on a dataset of a few dozen
     // images and stating it plainly is worth more than the saving.
     let mut rng = data::rng::Rng::new(seed ^ 0x5a4f_1e00 ^ epoch.wrapping_mul(0x9e37_79b9_7f4a_7c15));
@@ -787,7 +787,7 @@ pub struct TrainOpts {
 /// Default cooldown, as a fraction of the run's step budget: the rate is held
 /// at the peak until the last fifth, then cosine-decays to the floor.
 ///
-/// A fifth is Hägele et al.'s measured saturation point (arXiv:2405.18392):
+/// A fifth is the measured saturation point of the constant-then-cooldown schedule (arXiv:2405.18392):
 /// constant-then-cooldown tracks a full cosine, and lengthening the cooldown
 /// past ~20% of the run stops buying anything. The shape matters more than the
 /// number here - every step before the cooldown runs at the rate the caller

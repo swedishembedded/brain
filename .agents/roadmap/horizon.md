@@ -232,7 +232,7 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    the gaps. Gradient-checked on the CPU JIT, wgpu and CUDA (directional over every tensor,
    element-wise over the rates and population state). The extrapolation test
    (`tests/continuous.rs`, `synthetic::drifting`: an Ornstein-Uhlenbeck risk
-   factor at irregular visits, the best prediction exact by Kalman filtering)
+   factor at irregular visits, the best prediction exact by recursive state-estimation filter)
    trains with last gaps of at most two years and scores six to ten: the
    state is closer to the best prediction than the single set, there and in
    distribution. **Backbone B** done (`Backbone::Attention`, kernel
@@ -250,8 +250,8 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    mixer ships is a measurement: `MixerAblation` in `brain-bench`
    (`tests/survival_mixers.rs`).
 4. **Evaluation arithmetic.** Done in the leaf crate `crates/survival`:
-   weighted Kaplan-Meier, censoring distribution and Aalen-Johansen; Harrell
-   and Uno concordance with competing causes; IPCW Brier score and its
+   weighted product-limit estimator, censoring distribution and competing-risks cumulative-incidence estimator; concordance
+   and Uno concordance with competing causes; IPCW squared-error probability score and its
    integral; D-calibration; calibration at a horizon (observed over expected,
    IPCW logistic recalibration intercept and slope, risk groups). Held to
    scikit-survival and scikit-learn on reference data
@@ -303,7 +303,7 @@ next is recording the step as one replayed tape.
 ## 7. What decides between the alternatives
 
 Backbone A vs B, soft bins vs FiLM, quantile vs Gaussian measurement head:
-decided on a held-out split by integrated Brier score and calibration at the
+decided on a held-out split by integrated squared-error probability score and calibration at the
 declared horizons, with concordance reported but never alone (it is not a
 proper scoring rule). Ties go to the cheaper incremental update (A).
 
@@ -325,6 +325,6 @@ time-and-value loss (2602.00541); numeric-value encoding studies
 (2607.01391, 2604.16775); joint longitudinal, recurrent and terminal event
 modelling (2404.03804); monotone survival networks (2103.14755); variable-step
 state spaces S5 (2208.04933) and physical-time input-dependent SSMs
-(2605.09742); continuous-discrete Kalman filtering (2111.11344); D-calibration
+(2605.09742); continuous-discrete recursive state-estimation filter (2111.11344); D-calibration
 (1811.11347) and its differentiable form (2101.05346); conformalised survival
 distributions (2405.07374).

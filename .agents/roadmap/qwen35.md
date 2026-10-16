@@ -2308,7 +2308,7 @@ was re-derived from the checkpoint, and two were wrong or incomplete:
 * Confirmed as claimed: 5 blocks, non-causal sliding-window(2048) GQA 32/8 x
   128, `fc` `[5120, 25600]` consuming five concatenated 5120-wide target
   residuals with `enc.output_norm` applied AFTER `fc`, the rank-256 top-16
-  three-way-Hadamard selector with a greedy (not Viterbi) left-to-right walk,
+  three-way-elementwise product selector with a greedy (not max-product dynamic programming) left-to-right walk,
   `mask_token_id = 248070`, and no embedding or head of its own.
 * Newly pinned: the norms are PLAIN `x * w`, not the target GGUF's
   pre-folded `(1 + w)`; `*_conv_base` is `[2, taps, 5120]` with index 0 the

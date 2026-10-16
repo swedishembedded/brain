@@ -66,7 +66,7 @@ fn opts(steps: u32, lr: f32) -> TrainOpts {
 // ---- 1. the learning-rate curve -------------------------------------------
 
 /// **The shipped default holds the peak rate and then cools down over the last
-/// fifth**, the shape Hägele et al. (arXiv:2405.18392) measure as tracking a
+/// fifth**, the constant-then-cooldown shape (arXiv:2405.18392), measured as tracking a
 /// full cosine with the benefit saturating around 20%.
 ///
 /// Two properties, both load-bearing:

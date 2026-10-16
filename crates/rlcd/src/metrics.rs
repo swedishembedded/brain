@@ -3,7 +3,7 @@
 
 //! Calibration metrics.
 //!
-//! ECE, AdaECE, classwise-ECE, Brier, NLL, reliability bins,
+//! ECE, AdaECE, classwise-ECE, squared-error probability score, NLL, reliability bins,
 //! coverage-vs-accuracy and failure-AUROC were specified as a decision
 //! model's evaluation deliverable and never built - `crates/eval` has
 //! detection, MLM and TTS metrics only. The functions here fill that gap,
@@ -14,7 +14,7 @@
 //! models. `eval` may re-export these later.
 //!
 //! **AUGRC is deliberately not implemented here.** The published metric
-//! (Traub et al., "Overcoming Common Flaws in the Evaluation of Selective
+//! ("Overcoming Common Flaws in the Evaluation of Selective
 //! Classification Systems") is a pairwise generalization of the naive
 //! risk-coverage AUC specifically built to fix that naive version's
 //! sensitivity to confidence-tie ordering - getting the pairwise formulation
@@ -178,7 +178,7 @@ pub fn nll(probs: &[Vec<f32>], labels: &[usize]) -> f32 {
     (sum / probs.len() as f64) as f32
 }
 
-/// Mean multiclass Brier score: `mean_i sum_k (p_i[k] - 1{k=label_i})^2` - a
+/// Mean multiclass squared-error probability score: `mean_i sum_k (p_i[k] - 1{k=label_i})^2` - a
 /// METRIC over a held-out set, distinct from [`crate::scoring::decision_loss`]
 /// (a training objective over one example's raw scores).
 pub fn brier_score(probs: &[Vec<f32>], labels: &[usize]) -> f32 {
@@ -380,7 +380,7 @@ pub fn coverage_accuracy(confidences: &[f32], correct: &[bool]) -> Vec<(f32, f32
 /// the standard selective-prediction "does confidence separate the mistakes"
 /// statistic. `0.5` is chance separation; `1.0` is perfect (every failure has
 /// lower confidence than every success). Computed via the rank-sum
-/// (Mann-Whitney U) identity, which handles tied confidences by average rank
+/// (rank-sum U) identity, which handles tied confidences by average rank
 /// exactly the way the pairwise AUROC definition requires.
 pub fn failure_auroc(confidences: &[f32], correct: &[bool]) -> f32 {
     assert_eq!(

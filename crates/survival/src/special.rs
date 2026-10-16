@@ -4,7 +4,7 @@
 //! The special functions the tests of fit need: log-gamma and the regularized
 //! upper incomplete gamma function, for chi-square tail probabilities.
 
-/// `ln Gamma(x)` for `x > 0` (Lanczos, g = 7, nine coefficients; relative
+/// `ln Gamma(x)` for `x > 0` (rational-series approximation, g = 7, nine coefficients; relative
 /// error below 1e-14 over the range a chi-square test reaches).
 pub fn ln_gamma(x: f64) -> f64 {
     const G: [f64; 9] = [

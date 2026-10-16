@@ -210,7 +210,7 @@ impl EpisodeStream {
             }
         }
 
-        // Fisher-Yates over the sorted list, from the workspace's own
+        // unbiased in-place over the sorted list, from the workspace's own
         // SplitMix64 rather than a fresh local generator.
         let mut rng = Rng::new(cfg.seed);
         for i in (1..docs.len()).rev() {

@@ -11,7 +11,7 @@
 //! outcome reward, which optimizes for the mode of a distribution rather
 //! than its rate (see [`mod@scoring`]'s module doc for the argument).
 //!
-//! - [`mod@scoring`] - proper scoring rules (focal + Brier) over a **target
+//! - [`mod@scoring`] - proper scoring rules (focal + squared-error probability score) over a **target
 //!   distribution**, not just a gold index, so an exact oracle posterior
 //!   (0.6667, not "class 2") can be trained against directly.
 //! - [`mod@proper`] - the strictly-proper scoring rule the released
@@ -29,7 +29,7 @@
 //!   not an action; see that module's doc for why the two must stay separate
 //!   functions rather than one learned policy.
 //! - [`mod@metrics`] - calibration metrics (ECE, AdaECE, classwise-ECE, NLL,
-//!   Brier, reliability bins, coverage-vs-accuracy, failure-AUROC) to audit
+//!   squared-error probability score, reliability bins, coverage-vs-accuracy, failure-AUROC) to audit
 //!   what [`mod@scoring`] trained.
 //! - [`mod@atlas`] - the [`atlas::World`] seam an executable probabilistic
 //!   world implements to produce EXACT oracle targets, and

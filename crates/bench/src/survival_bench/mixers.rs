@@ -23,7 +23,7 @@
 //!
 //! Run it with `cargo test --release -p brain-bench --test survival_mixers
 //! -- --nocapture --test-threads=1` (on the device `BRAIN_BACKEND` selects);
-//! it prints one row per variant: held-out event NLL, integrated Brier score,
+//! it prints one row per variant: held-out event NLL, integrated squared-error probability score,
 //! time-dependent AUC at the horizon, and training time.
 
 use std::io;
@@ -69,7 +69,7 @@ pub struct MixerRow {
     pub steps: u32,
     /// Weighted mean event NLL on the test subjects.
     pub nll: f32,
-    /// Integrated Brier score (IPCW, over the grid up to the horizon).
+    /// Integrated squared-error probability score (IPCW, over the grid up to the horizon).
     pub ibs: f64,
     /// Time-dependent AUC at the horizon.
     pub auc: f64,

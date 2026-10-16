@@ -23,7 +23,7 @@
 //! smoothed by local linear regression with tricube weights on the weighted
 //! rank of the predicted risk: a window holding a `span` share of the weight,
 //! evaluated on a grid of weighted quantiles and interpolated in the predicted
-//! risk. Austin et al. (2020) smooth with a hazard regression instead; this
+//! risk. A 2020 method smooths with a hazard regression instead; this
 //! needs no model of the hazard, only the censoring distribution the other
 //! calibration summaries use.
 

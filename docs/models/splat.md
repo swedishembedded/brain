@@ -314,7 +314,7 @@ the scene has a shape.
 ### `--densify-strategy mcmc`: relocate instead of split and prune
 
 The heuristic above decides where detail may appear by thresholding a
-gradient statistic. 3DGS-MCMC (Kheradmand et al., NeurIPS 2024,
+gradient statistic. 3DGS-MCMC (NeurIPS 2024,
 arXiv:2404.09591) removes the decision: the gaussians are samples from a
 distribution, and the moves are to RELOCATE a sample that has gone
 transparent onto one that has not, and to perturb positions with noise

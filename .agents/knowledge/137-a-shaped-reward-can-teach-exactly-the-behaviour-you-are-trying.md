@@ -6,7 +6,7 @@
 Reaching the exit of a DOOM level pays once, hundreds of decisions after the
 choices that earned it, so the reward was shaped with progress toward it:
 `r += w * (previous_distance - current_distance)`. That is textbook
-potential-based shaping (Ng, Harada & Russell 1999) and it provably leaves the
+potential-based shaping (1999) and it provably leaves the
 OPTIMAL policy unchanged, which is why it looked safe.
 
 It is not safe, because the guarantee is about the optimum and not about what

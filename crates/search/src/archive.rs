@@ -460,7 +460,7 @@ pub const FOCUS: f32 = 4.0;
 ///
 /// Go-Explore's own frontier term, adapted. Theirs adds `(2 - h)/10` to a
 /// cell's weight, where `h` counts how many horizontally-adjacent cells the
-/// archive already holds (Ecoffet et al., *First return, then explore*,
+/// archive already holds (*First return, then explore*,
 /// Extended Data Table 1); a cell with neighbours on both sides is in the
 /// middle of ground already covered, and one with none is on the edge of it.
 ///
@@ -474,7 +474,7 @@ pub const EDGE: f32 = 0.6;
 /// How likely a cell is to be drawn, and to survive an eviction.
 ///
 /// Two measures at once, and both are needed. `1/sqrt(visits + 1)` is
-/// Go-Explore's own weight (Ecoffet et al., *First return, then explore*,
+/// the weight of the archive-based exploration method (*First return, then explore*,
 /// Extended Data Table 1) and favours what has rarely been set off from, which
 /// is what stops the search settling into one corner. On its own it is blind
 /// to how much a cell has to offer: a spot at the level's front door with

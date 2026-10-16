@@ -5,9 +5,9 @@
 //! on the device.
 //!
 //! [`PixelLoss::L1Ssim`] is the objective 3D Gaussian Splatting is defined
-//! with (Kerbl et al., SIGGRAPH 2023, Eq. 7): `(1-λ)·L1 + λ·(1-SSIM)`, SSIM
+//! with (SIGGRAPH 2023, Eq. 7): `(1-λ)·L1 + λ·(1-SSIM)`, SSIM
 //! over an 11x11 gaussian window of sigma 1.5 with `C1 = 0.01²`, `C2 = 0.03²`
-//! (Wang et al., IEEE TIP 2004) and zero padding at the frame border.
+//! (structural similarity, IEEE TIP 2004) and zero padding at the frame border.
 //! [`PixelLoss::Mse`] is what `fit` minimised before it.
 //!
 //! Every term is a weighted MEAN over the supervised pixels and channels, so a
@@ -126,7 +126,7 @@ impl DeviceLoss {
 /// Which pixels of a view to go on supervising when the photograph may hold
 /// transient content (`crate::opt::FitCfg::transients`): 1 = supervise, 0 =
 /// ignore, from each pixel's photometric residual `r` (`[W*H]`) against the
-/// current scene (after RobustNeRF, Sabour et al. 2023).
+/// current scene (after robust NeRF, 2023).
 ///
 /// A pixel is an outlier when its residual is above the view's 80th
 /// percentile; a 3x3 majority vote removes isolated outliers - fine texture

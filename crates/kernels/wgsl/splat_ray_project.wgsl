@@ -18,11 +18,11 @@
 // marginalized onto the plane across that ray - so a lens only has to say
 // where each pixel looks (`lens_unproject`) and the image is right for a
 // fisheye as for a pinhole. Projection here only has to decide WHICH tiles a
-// gaussian can touch, and does it with the Unscented Transform (Wu et al.,
-// 3DGUT, CVPR 2025): the six sigma points of the gaussian pushed through the
+// gaussian can touch, and does it with the Unscented Transform (3DGUT,
+// CVPR 2025): the six sigma points of the gaussian pushed through the
 // real lens give its image-space spread without a Jacobian.
 //
-// Filters (Mip-Splatting, Yu et al., CVPR 2024), both in 3D:
+// Filters (Mip-Splatting, CVPR 2024), both in 3D:
 // * the 3D smoothing filter: `filt[i]` is a variance added to every axis -
 //   the finest detail the training views could resolve for this gaussian -
 //   with opacity scaled by sqrt(|S| / |S + filt I|);

@@ -4,7 +4,7 @@
 //! Structure from motion, from photographs to calibrated cameras and a
 //! sparse point cloud, in the shape Schönberger & Frahm describe
 //! ("Structure-from-Motion Revisited", CVPR 2016) with a global initializer
-//! in the shape of GLOMAP (Pan et al., "Global Structure-from-Motion
+//! in the shape of GLOMAP ("Global Structure-from-Motion
 //! Revisited", ECCV 2024), both implemented from the papers:
 //!
 //! 1. features in every image; the pairs worth matching chosen by a global

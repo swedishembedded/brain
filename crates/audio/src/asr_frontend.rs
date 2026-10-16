@@ -20,7 +20,7 @@ use std::f64::consts::PI;
 
 // ─────────────────────────────── FFT ───────────────────────────────
 
-/// In-place iterative radix-2 Cooley–Tukey FFT (f64). `n` must be a power of two.
+/// In-place iterative radix-2 FFT (f64). `n` must be a power of two.
 fn fft_radix2(re: &mut [f64], im: &mut [f64]) {
     let n = re.len();
     debug_assert!(n.is_power_of_two());

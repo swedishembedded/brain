@@ -79,7 +79,7 @@ fn tie_groups(
     out
 }
 
-/// Area under the ROC curve (Mann-Whitney; a tie counts one half).
+/// Area under the ROC curve (rank-sum; a tie counts one half).
 pub fn auroc(score: &[f64], label: &[bool], weight: &[f64]) -> f64 {
     check(score, label, weight);
     let (pos, neg) = totals(label, weight);

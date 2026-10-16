@@ -3,7 +3,7 @@
 
 //! The small dense f64 linear algebra structure-from-motion needs: 3-vectors
 //! and 3x3 matrices, the symmetric eigendecomposition (cyclic Jacobi) every
-//! null-space and SVD question here reduces to, a Cholesky solve for the
+//! null-space and SVD question here reduces to, a triangular factorization solve for the
 //! bundle adjustment's reduced camera system, and the SO(3) exponential and
 //! logarithm.
 //!
@@ -188,7 +188,7 @@ pub fn svd3(a: &M3) -> (M3, V3, M3) {
     (u, s, v)
 }
 
-/// The rotation nearest `a` in Frobenius norm.
+/// The rotation nearest `a` in matrix L2 norm.
 pub fn nearest_rotation(a: &M3) -> M3 {
     let (u, _, v) = svd3(a);
     let mut r = mm(&u, &transpose(&v));

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! 5-point similarity alignment to the standard FFHQ-512 template - the SAME
-//! shape as `arcface::align` (Umeyama solve on the host + `grid_sample` on
+//! shape as `arcface::align` (least-squares similarity solve on the host + `grid_sample` on
 //! the device), a different destination template and target size.
 //!
 //! `arcface::align::grid_sample` cannot be called directly from here: its

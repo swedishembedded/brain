@@ -586,7 +586,7 @@ mod tests {
 
     // -- KV-step parity ------------------------------------------------------
 
-    /// Tiny SplitMix64 -> Box-Muller gaussians, so the test needs no dev-dep.
+    /// Tiny SplitMix64 -> paired uniform-to-normal transform gaussians, so the test needs no dev-dep.
     struct Rng(u64);
     impl Rng {
         fn u64(&mut self) -> u64 {

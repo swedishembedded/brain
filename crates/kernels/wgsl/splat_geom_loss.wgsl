@@ -24,10 +24,10 @@
 // against RGB whatever the image size and mask.
 //
 // * Depth, against a prior `target.depth` (RANGE along the pixel's ray; 0 =
-//   none) with per-pixel confidence: the pseudo-Huber of the LOG ratio,
+//   none) with per-pixel confidence: the pseudo-quadratic-then-linear loss of the LOG ratio,
 //   delta^2 (sqrt(1 + (r / delta)^2) - 1), r = log D - log D*. A log is what
 //   makes the error scale-free along a ray - a centimetre at arm's length and
-//   a metre across a valley are the same mistake - and the pseudo-Huber keeps
+//   a metre across a valley are the same mistake - and the pseudo-quadratic-then-linear loss keeps
 //   a prior's heavy tail (a wrong match, a reflection, a sky pixel) from
 //   dominating: past delta it pulls with bounded force.
 // * Normals, against a prior `target.n` (camera frame, facing the camera;
@@ -45,7 +45,7 @@ struct Weights {
     normal: f32,
     normal_self: f32,
     distortion: f32,
-    delta: f32,      // pseudo-Huber knee, in log range
+    delta: f32,      // pseudo-quadratic-then-linear loss knee, in log range
     inv_wsum: f32,   // 1 / (sum of supervision weights)
     min_alpha: f32,  // below this a pixel's range is not a surface
     has_weights: u32,

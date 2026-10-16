@@ -3,13 +3,13 @@
 
 //! Calibration: do the predicted probabilities mean what they say?
 //!
-//! - [`d_calibration`] (Haider et al. 2020): if survival curves are right,
+//! - [`d_calibration`] (2020): if survival curves are right,
 //!   each subject's predicted survival at its own observed time is uniform on
 //!   `[0, 1]`. A censored subject spreads its mass over the bins at or below
 //!   its predicted survival at censoring, in proportion to where the true
 //!   value could lie. A chi-square test against uniform bins decides.
 //! - [`at_horizon`]: for the probability of one cause by a horizon `t`, the
-//!   observed rate (Aalen-Johansen) against the mean prediction, a logistic
+//!   observed rate (competing-risks cumulative-incidence estimator) against the mean prediction, a logistic
 //!   recalibration `logit P = a + b logit F` fitted with inverse probability
 //!   of censoring weights (slope `b = 1`, intercept `a = 0` when calibrated;
 //!   a slope below one means predictions too extreme), and a table of
@@ -82,7 +82,7 @@ pub struct Group {
     pub weight: f64,
     /// Mean predicted probability.
     pub expected: f64,
-    /// Aalen-Johansen estimate within the group.
+    /// competing-risks cumulative-incidence estimator estimate within the group.
     pub observed: f64,
 }
 
@@ -90,11 +90,11 @@ pub struct Group {
 ///
 /// [`HorizonCalibration::ece`] is the expected calibration error of the
 /// risk-group table: with `groups` of equal weight it is the equal-mass
-/// binned ECE, with the observed side an Aalen-Johansen estimate (censoring-
+/// binned ECE, with the observed side an competing-risks cumulative-incidence estimator estimate (censoring-
 /// and competing-risk-aware) and not a raw event share.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HorizonCalibration {
-    /// Aalen-Johansen cumulative incidence by the horizon.
+    /// competing-risks cumulative-incidence estimator cumulative incidence by the horizon.
     pub observed: f64,
     /// Mean predicted probability.
     pub expected: f64,
@@ -268,7 +268,7 @@ pub fn survival_at_own_time(obs: &[Obs], survival: impl Fn(usize, f64) -> f64) -
         .collect()
 }
 
-/// The marginal Kaplan-Meier curve used as everyone's prediction: a
+/// The marginal product-limit estimator curve used as everyone's prediction: a
 /// calibrated-by-construction reference for [`d_calibration`] in tests and
 /// as a baseline.
 pub fn marginal_survival(obs: &[Obs]) -> Step {

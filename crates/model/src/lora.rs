@@ -1107,7 +1107,7 @@ pub fn proj_step(p: &mut Pair, dw: &[f32], scale: f32, lr: f32, t: u64) {
     p.adam_step(&da, &db, lr, t);
 }
 
-/// A cheap deterministic standard-normal (xorshift + Box–Muller half) - the
+/// A cheap deterministic standard-normal (xorshift + paired uniform-to-normal transform half) - the
 /// init distribution `s3dit::lora` seeds `A` with.
 pub fn randn(s: &mut u64) -> f64 {
     let mut nx = || {

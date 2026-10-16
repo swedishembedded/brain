@@ -914,7 +914,7 @@ mod tests {
     }
 }
 
-/// Seeded standard-normal samples (xorshift64* + Box-Muller) — the shared
+/// Seeded standard-normal samples (xorshift64* + paired uniform-to-normal transform) - the shared
 /// diffusion latent-noise source (Z-Image, FLUX.2). Deterministic per seed;
 /// NOT the torch Philox stream, so cross-framework runs are statistically
 /// equivalent rather than bit-identical.
@@ -939,7 +939,7 @@ pub fn randn(n: usize, seed: u64) -> Vec<f32> {
     out
 }
 
-/// Seeded standard-normal samples (SplitMix64 + Box-Muller) - the shared
+/// Seeded standard-normal samples (SplitMix64 + paired uniform-to-normal transform) - the shared
 /// diffusion latent-noise source for the SDXL family (`sdxlunet`, `controlnet`,
 /// `flux1`), so a `--seed` reproduces a picture.
 ///
@@ -967,7 +967,7 @@ pub fn gaussian(n: usize, seed: u64) -> Vec<f32> {
     out
 }
 
-/// Least-squares 2-D **similarity** transform (Umeyama) mapping `src` onto `dst`.
+/// Least-squares 2-D **similarity** transform mapping `src` onto `dst`.
 ///
 /// `src`/`dst` are `n` point pairs, flat row-major `[n, 2]` as `(x, y)`. Returns
 /// the affine matrix `M` as `[a, b, tx, c, d, ty]` (row-major `[2, 3]`), i.e.
@@ -992,7 +992,7 @@ pub fn gaussian(n: usize, seed: u64) -> Vec<f32> {
 ///
 /// # Reflections are rejected, not silently dropped
 ///
-/// Umeyama's general form allows a reflection when the cross-covariance has a
+/// The general form of the least-squares similarity allows a reflection when the cross-covariance has a
 /// negative determinant, and returns `R = U·diag(1, −1)·Vᵀ` there. A *proper*
 /// similarity (`M[0][0] == M[1][1]`, `M[0][1] == −M[1][0]`) cannot express that,
 /// so this returns `Err` rather than quietly fitting the nearest non-reflected
@@ -1052,13 +1052,13 @@ pub fn similarity_transform_2d(src: &[f32], dst: &[f32], n: usize) -> Result<[f3
         return Err("similarity_transform_2d: the best fit is a REFLECTION, which is not a proper similarity".into());
     }
 
-    // For d = 2 with no reflection, Umeyama's `s·R` has the closed form of the
+    // For d = 2 with no reflection, the least-squares similarity `s·R` has the closed form of the
     // least-squares fit over the two free parameters of a scaled rotation
     // (`M = [[a, -b], [b, a]]`): differentiating `Σ‖M·s + t − d‖²` gives
     //   a = Σ(s·d)/Σ‖s‖²,  b = Σ(s_x·d_y − s_y·d_x)/Σ‖s‖².
     // In cross-covariance terms that is `a = (c00 + c11)/var_src` and
     // `b = (c10 − c01)/var_src`, and `√(a² + b²) = trace(D)/var_src` is exactly
-    // Umeyama's scale — so this is the same transform, not an approximation.
+    // the least-squares similarity scale - so this is the same transform, not an approximation.
     let a = (c00 + c11) / var_src;
     let b = (c10 - c01) / var_src;
     let tx = mdx - (a * msx - b * msy);

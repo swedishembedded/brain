@@ -107,7 +107,7 @@ fn order_invariance_cpu() {
     let g = Gpu::new_cpu(splat::PIPELINES);
     let ks = Kernels::at(0);
     let s = random_scene(300, 0xfeed);
-    // Fisher–Yates shuffle into a second scene.
+    // unbiased in-place shuffle into a second scene.
     let mut order: Vec<usize> = (0..s.len()).collect();
     let mut r = Lcg(0xd1ce);
     for i in (1..order.len()).rev() {

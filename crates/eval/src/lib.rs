@@ -13,7 +13,7 @@
 //!   "did it actually learn the rule" number, not perplexity.
 
 /// Calibration metrics for a decision model's probability output (ECE,
-/// AdaECE, classwise-ECE, NLL, Brier, reliability bins, coverage-vs-accuracy,
+/// AdaECE, classwise-ECE, NLL, squared-error probability score, reliability bins, coverage-vs-accuracy,
 /// failure-AUROC) - re-exported from the leaf layer (`crates/rlcd`) rather
 /// than owned here, so a sample can use them without this crate's own
 /// heavier dependency closure.

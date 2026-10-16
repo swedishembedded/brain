@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Scale-invariant keypoints and descriptors, implemented from Lowe,
+//! Scale-invariant keypoints and descriptors, implemented from
 //! "Distinctive Image Features from Scale-Invariant Keypoints" (IJCV 2004):
 //!
 //! 1. a gaussian scale space, `S = 3` intervals per octave from `σ0 = 1.6`,
@@ -17,7 +17,7 @@
 //!    orientation, trilinearly binned under a gaussian window, normalized,
 //!    clamped at 0.2 and renormalized (§6).
 //!
-//! Descriptors are returned as RootSIFT (Arandjelović & Zisserman, CVPR
+//! Descriptors are returned as RootSIFT (CVPR
 //! 2012): L1-normalized then square-rooted, so the Euclidean distance between
 //! two of them is the Hellinger kernel of the originals - a better matching
 //! metric at no cost, and each descriptor has unit L2 norm, which lets a
@@ -48,13 +48,13 @@ pub struct SiftCfg {
     /// Keep at most this many keypoints, strongest first.
     pub max_features: usize,
     /// Contrast threshold on the refined DoG value, for images in [0,1],
-    /// before division by the interval count. COLMAP's 0.02, half of Lowe's
-    /// 0.04: Lowe's keeps a third of the keypoints of a faintly textured
+    /// before division by the interval count. COLMAP's 0.02, half of the original
+    /// 0.04: that value keeps a third of the keypoints of a faintly textured
     /// capture, and loses views with them.
     pub contrast: f32,
     /// Principal-curvature ratio above which an extremum is an edge.
     pub edge_ratio: f32,
-    /// Build the first octave from the input doubled in size (Lowe §3.3), so
+    /// Build the first octave from the input doubled in size (paper §3.3), so
     /// features finer than `σ0` on the input are found.
     pub upsample: bool,
 }
@@ -259,7 +259,7 @@ fn extrema(dog: &[Plane], cfg: &SiftCfg) -> Vec<(f32, f32, f32, f32)> {
     out
 }
 
-/// Quadratic sub-sample refinement (Lowe §4) and the contrast and edge tests.
+/// Quadratic sub-sample refinement (paper §4) and the contrast and edge tests.
 fn refine(dog: &[Plane], mut x: usize, mut y: usize, mut s: usize, cfg: &SiftCfg) -> Option<(f32, f32, f32, f32)> {
     let (w, h) = (dog[0].w, dog[0].h);
     for _ in 0..5 {
@@ -327,7 +327,7 @@ fn gradient(p: &Plane, x: usize, y: usize) -> (f32, f32) {
     ((dx * dx + dy * dy).sqrt(), dy.atan2(dx))
 }
 
-/// Dominant orientations (Lowe §5).
+/// Dominant orientations (paper §5).
 fn orientations(g: &Plane, x: f32, y: f32, sigma: f32) -> Vec<f32> {
     const BINS: usize = 36;
     let sw = 1.5 * sigma;
@@ -365,7 +365,7 @@ fn orientations(g: &Plane, x: f32, y: f32, sigma: f32) -> Vec<f32> {
     out
 }
 
-/// The 4x4x8 descriptor (Lowe §6), returned as RootSIFT.
+/// The 4x4x8 descriptor (paper §6), returned as RootSIFT.
 fn descriptor(g: &Plane, x: f32, y: f32, sigma: f32, angle: f32) -> Vec<f32> {
     const NB: usize = 4;
     const NO: usize = 8;

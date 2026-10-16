@@ -15,7 +15,7 @@
 //! room for run-to-run variation; the measured values of the seed used here
 //! are printed with `--nocapture`. The generators' own statistical checks
 //! (closed-form CIF against the simulation; the competing generator's
-//! analytic CIF against Aalen-Johansen) are unit tests in `horizon`.
+//! analytic CIF against competing-risks cumulative-incidence estimator) are unit tests in `horizon`.
 //!
 //! GPU tests: run with `--test-threads=1`; `MOE_SKIP_GPU_TESTS` skips them.
 

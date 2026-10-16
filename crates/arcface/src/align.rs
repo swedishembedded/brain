@@ -6,7 +6,7 @@
 //! Two halves, deliberately split by where each belongs:
 //!
 //! * **the solve** is host math over 20 numbers and lives in
-//!   `model::hostmath::similarity_transform_2d` (Umeyama), with
+//!   `model::hostmath::similarity_transform_2d` (least-squares similarity), with
 //!   `invert_affine_2x3` for the sampling direction. Nothing face-specific about
 //!   either, so neither is duplicated here;
 //! * **the warp** is per-pixel work over a whole image and therefore a KERNEL -

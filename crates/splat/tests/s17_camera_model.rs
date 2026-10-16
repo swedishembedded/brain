@@ -10,7 +10,7 @@
 //! A view shot a stop brighter is explained by brighter gaussians, a darker
 //! corner by a floater in front of it. The camera model decomposes the
 //! difference into physically meaningful per-view and per-sensor factors
-//! (after PPISP, Deutsch et al. 2026: exposure, white balance, chromatic
+//! (after PPISP, 2026: exposure, white balance, chromatic
 //! vignetting, response curve) so that the scene only has to explain what is
 //! actually the same in every view.
 //!

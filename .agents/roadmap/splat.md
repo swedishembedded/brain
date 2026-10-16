@@ -25,15 +25,15 @@ the specification it is built from - see **Provenance** for what that means.
 | capability | where | state |
 |---|---|---|
 | EWA/Jacobian projection, tiled sort, per-tile compositing, atomic-free fwd+bwd | `renderer.rs`, `splat_*.wgsl` | done |
-| Mip-Splatting 2D Mip filter + 3D smoothing floor (Yu et al., CVPR 2024) | `mip.rs`, `FitCfg::{antialiased,mip_scale}` | done |
+| Mip-Splatting 2D Mip filter + 3D smoothing floor (CVPR 2024) | `mip.rs`, `FitCfg::{antialiased,mip_scale}` | done |
 | SH degree 0-3 view-dependent colour | `splat_sh.wgsl`, `FitCfg::sh_degree` | done |
 | Progressive SH bands (SH0 -> SH3 over training) | `splat_sh.wgsl` held-out coefficient count, `FitCfg::sh_ramp` | done |
 | Auxiliary render passes (per-gaussian features composited by the same weights: normals, depth moments, credit assignment) | `opt.rs::geometry_passes`, `density::credit_upstream` | done |
 | SH in `render`/`view` (host shading per frame via `sh::shade`) | `cli/splat_cli.rs` | done |
-| Ray-evaluated renderer (3DGUT-style, Wu et al., CVPR 2025): every pixel evaluates each gaussian at its maximum along the pixel's own ray through the real lens (pinhole, OpenCV Brown, Kannala-Brandt fisheye, equirectangular), rolling shutter, unscented tile bounds, 3D and 2D Mip filters with ray-marginal compensation; gradients of every gaussian parameter and of pose, shutter and calibration | `crates/camera`, `renderer.rs`, `splat_ray_*.wgsl`, `lib/splat_ray_pair.wgsl` | done |
+| Ray-evaluated renderer (3DGUT-style, CVPR 2025): every pixel evaluates each gaussian at its maximum along the pixel's own ray through the real lens (pinhole, OpenCV Brown, Kannala-Brandt fisheye, equirectangular), rolling shutter, unscented tile bounds, 3D and 2D Mip filters with ray-marginal compensation; gradients of every gaussian parameter and of pose, shutter and calibration | `crates/camera`, `renderer.rs`, `splat_ray_*.wgsl`, `lib/splat_ray_pair.wgsl` | done |
 | Tile-cooperative ray backward with records at their emission slots (no record sort): in list order it measured 45.6 ms per view at 500k gaussians and 816x612 against ~480 ms for the slot grid (which stays as the per-pixel reference and CPU path); per-pixel ordering below splits it into a walk that logs pair gradients and a per-tile reduction, at parity | `splat_ray_bwd_walk.wgsl`, `splat_ray_bwd_tile.wgsl`, `splat_gather_ids.wgsl` | done |
 | Environment at infinity: real SH radiance by direction up to degree 8, composited behind the gaussians along each pixel's ray, fitted with the scene, baked into a distant shell for export | `env.rs`, `splat_env*.wgsl`, `FitCfg::environment` | done |
-| Per-pixel compositing order for the ray renderer (StopThePop-style, Radl et al., SIGGRAPH 2024): tile lists sorted by t* along each tile's ray nearest the gaussian, refined per pixel by a window of its 6 nearest pending hits; the backward replays the same window and logs each pair's gradient for a per-tile reduction | `splat_ray_emit.wgsl`, `lib/splat_ray_window.wgsl`, `splat_ray_bwd_walk.wgsl`, `splat_ray_bwd_tile.wgsl` | done (see below) |
+| Per-pixel compositing order for the ray renderer (sorted-splatting-style, SIGGRAPH 2024): tile lists sorted by t* along each tile's ray nearest the gaussian, refined per pixel by a window of its 6 nearest pending hits; the backward replays the same window and logs each pair's gradient for a per-tile reduction | `splat_ray_emit.wgsl`, `lib/splat_ray_window.wgsl`, `splat_ray_bwd_walk.wgsl`, `splat_ray_bwd_tile.wgsl` | done (see below) |
 | Faster per-pixel window: the rasterizer runs ~1.5x its list-order time, the whole fit step ~1.25x | `lib/splat_ray_window.wgsl` | planned |
 | `.splat` / `.spz` IO | `ply.rs` siblings | planned |
 | Render-time optimization: per-stage profiling, radix chunk tuning, pipelined present | renderer | planned |
@@ -58,10 +58,10 @@ host sync per backward.
 | capability | where | state |
 |---|---|---|
 | MSE (legacy default) | `loss.rs` | done |
-| L1 + D-SSIM (λ=0.2, the 3DGS objective, Kerbl et al. 2023) | `loss.rs`, `FitCfg::loss` | done |
+| L1 + D-SSIM (λ=0.2, the 3D Gaussian Splatting objective, 2023) | `loss.rs`, `FitCfg::loss` | done |
 | Per-view exposure + white balance, per-sensor chromatic vignetting, colour correction matrix (rows sum to 1, centred across sensors) and monotone piecewise-linear response curve (one-stop knots, log slopes, second-difference prior), gauge-fixed and identity-regularized, staged enable (PPISP-style decomposition, Deutsch et al. 2026) | `isp.rs`, `FitCfg::isp` | done (recovery gated in `tests/s17_camera_model.rs`: relative CCM within 0.03 per entry, response within 0.007 of the truth up to the per-channel scale gauge) |
 | Scene-linear training: sRGB targets decoded, sRGB OETF inside the camera model, exposure brackets as separate measurements of one radiance, clipped-pixel down-weighting | `isp.rs` (`ColorSpace::SceneLinear`) | done |
-| Per-view bilateral grid of 3x4 affine transforms, sliced by position and luma, TV-regularized, centred across views (Wang et al., SIGGRAPH Asia 2024) | `isp.rs` `GridCfg`, `isp_grid_grad.wgsl` | done (synthetic local tone ramp: training views 41.3 vs 35.4 dB with the global camera alone) |
+| Per-view bilateral grid of 3x4 affine transforms, sliced by position and luma, TV-regularized, centred across views (SIGGRAPH Asia 2024) | `isp.rs` `GridCfg`, `isp_grid_grad.wgsl` | done (synthetic local tone ramp: training views 41.3 vs 35.4 dB with the global camera alone) |
 | Novel-view ISP controller (predict exposure/WB for unseen views) | `isp.rs` | planned (novel views render through `Shot::Novel`: the sensor's lens, matrix and response at the mean camera and the view's EXIF exposure) |
 | EXIF exposure and decoded transfer into targets; scene-linear for linear, deep or bracketed captures | `recon::photogrammetry::{Photometry, photo_target, training_set_photos}` | done |
 | Held-out appearance-fitted protocol (exposure + WB fitted on the left half, scored on the right) beside the raw score | `recon::eval::score_held_out`, `Isp::fit_novel` | done |
@@ -73,13 +73,13 @@ host sync per backward.
 
 | capability | where | state |
 |---|---|---|
-| Range supervision along each pixel's ray: pseudo-Huber on log range, per-pixel confidence | `splat_geom_loss.wgsl`, `FitCfg::depth_weight` | done |
-| Depth distortion (2DGS, Huang et al., SIGGRAPH 2024), the exact pairwise form composited in the rasterizer | `splat_ray_pair.wgsl`, `FitCfg::distortion_weight` | done |
+| Range supervision along each pixel's ray: pseudo-quadratic-then-linear loss on log range, per-pixel confidence | `splat_geom_loss.wgsl`, `FitCfg::depth_weight` | done |
+| Depth distortion (2D Gaussian Splatting, SIGGRAPH 2024), the exact pairwise form composited in the rasterizer | `splat_ray_pair.wgsl`, `FitCfg::distortion_weight` | done |
 | Normal consistency against the rendered range's own normals (2DGS), only where no normal prior exists | `splat_geom_loss.wgsl`, `FitCfg::normal_consistency_weight` | done |
 | Normal prior supervision (`TargetView::with_normals`) | `geometry.rs`, `FitCfg::normal_prior_weight` | done |
 | Monocular priors (MoGe-2 / Metric3D v2) with robust scale/shift alignment to SfM | model crates + `align.rs` | planned |
 | Sky / background environment model at infinity | `env.rs` | done (see Renderer) |
-| Transient masking by residual coherence (RobustNeRF, Sabour et al. 2023): large coherent unexplained regions per view stop being supervised; 4.6 dB better where a transient was in a synthetic test | `loss::transient_mask`, `FitCfg::transients` | done (opt-in) |
+| Transient masking by residual coherence (robust NeRF, 2023): large coherent unexplained regions per view stop being supervised; 4.6 dB better where a transient was in a synthetic test | `loss::transient_mask`, `FitCfg::transients` | done (opt-in) |
 | Semantic dynamic-object masks from SAM 2 (`crates/sam2` exists) wired into `TargetView::mask` | `recon` | planned |
 | Mesh extraction: GOF opacity-field + marching tetrahedra, SuGaR-style Poisson, visibility Delaunay; texture baking | new crate | planned |
 
@@ -87,8 +87,8 @@ host sync per backward.
 
 | capability | where | state |
 |---|---|---|
-| Heuristic clone/split/prune (3DGS) with AbsGS homodirectional gradient (Ye et al., 2024) | `opt.rs::densify`, `splat_grad_reduce.wgsl` | done |
-| 3DGS-MCMC relocation + SGLD noise + budget (Kheradmand et al., NeurIPS 2024) | `mcmc.rs` | done |
+| Heuristic clone/split/prune (3DGS) with absolute-gradient accumulation (2024) | `opt.rs::densify`, `splat_grad_reduce.wgsl` | done |
+| 3DGS-MCMC relocation + SGLD noise + budget (NeurIPS 2024) | `mcmc.rs` | done |
 | **Hybrid credit-assigned controller**: per-gaussian contribution `U=Σ Tα`, residual responsibility `R=Σ Tα r / U`, edge-weighted responsibility, visibility count, AbsGS gradient; percentile-normalized scores; moment-preserving long-axis split (ImprovedGS-style, Deng et al. 2026); recovery-aware pruning on a starvation record (exponential average, reclaimed at 0.6); budgeted growth schedule `N_target(t)` (Taming 3DGS, Mallick et al. 2024); relocation of reclaimed slots | `density.rs`, `Densify::Hybrid` | done |
 | Geometric evidence: the credited residual includes `|ln(rendered / prior range)|` where a view has a range prior | `density::range_residual` | done |
 | Spawn into residual pixels where the scene is empty or at the wrong depth, placed by the range prior (or the rendered range), budgeted by the residual share they carry | `density::Site`, `opt::residual_sites` | done |
@@ -103,7 +103,7 @@ host sync per backward.
 | Incremental SfM from photographs alone: SIFT (Lowe 2004) + RootSIFT, mutual ratio-test matching, 8-point essential in adaptive RANSAC, P3P registration, DLT triangulation, Schur-complement LM bundle adjustment with shared f/k1/k2, re-triangulation; focal length chosen by solving under candidates | `crates/sfm` | done |
 | Pair selection by retrieval: VLAD (intra-normalized, power-normalized) over the RootSIFT already computed, vocabulary by k-means on the capture itself (no weights), top-k per image plus capture-order neighbours; exhaustive up to 24 photographs | `sfm::retrieval`, `SfmCfg::pairs` | done |
 | Global initializer (GLOMAP-style): relative rotations re-estimated through the swept focal length, robust rotation averaging (max spanning tree, then L1 and Geman-McClure IRLS on the Lie algebra, CG solve), global positioning of cameras and points from bearings (BATA objective, random start, exact alternation), triangulation and bundle adjustment under a tightening error bound; incremental kept as fallback, chosen by registered views then RMS | `sfm::{rotation, positioning}`, `incremental::Solver::global` | done |
-| Metric scale + gravity: WGS84 -> local ENU, Umeyama Sim(3) in LO-RANSAC from camera centres to fixes (refused when the fixes' misfit exceeds 10% of their spread), gravity from the cameras' horizontal axes (robust), held exactly in the Sim(3) when known; `Reconstruction::{gauge, up}`; `splat::orient::upright_along` / `TrainingSet::upright` land the known up | `sfm::georef`, `recon::photogrammetry` | done |
+| Metric scale + gravity: WGS84 -> local ENU, least-squares similarity Sim(3) in LO-RANSAC from camera centres to fixes (refused when the fixes' misfit exceeds 10% of their spread), gravity from the cameras' horizontal axes (robust), held exactly in the Sim(3) when known; `Reconstruction::{gauge, up}`; `splat::orient::upright_along` / `TrainingSet::upright` land the known up | `sfm::georef`, `recon::photogrammetry` | done |
 | Photographs -> targets exactly as recorded through their own lens (masked where it has no ray), exact halvings, landed upright, dense stereo priors and start; one pipeline for `brain splat train`, the SDK and the sample, with automatic steps and budget | `recon::photogrammetry::reconstruct` | done |
 | Frame selection (sharpness + near-duplicate) | `crates/recon/src/select.rs` | done (baseline; not yet wired into `train`) |
 | Pose, rolling-shutter and calibration (focal, principal point, distortion) refinement inside the fit, gauge fixed | `opt.rs`, `FitCfg::camera` | done (off in the presets until measured to help) |

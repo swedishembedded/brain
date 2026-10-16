@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Time-dependent AUROC at a horizon: cumulative cases against dynamic
-//! controls (Uno et al. 2007; scikit-survival's `cumulative_dynamic_auc`).
+//! controls (2007; scikit-survival's `cumulative_dynamic_auc`).
 //!
 //! At horizon `t` a CASE is a subject with the cause of interest at `T_i <= t`,
 //! weighted by `1 / G(T_i)` with `g` the censoring distribution estimated on
@@ -12,11 +12,11 @@
 //! half. A subject censored by `t` is neither (its weight is carried by the
 //! cases), and so is a subject whose COMPETING event came by `t`: its outcome
 //! by `t` is known to be a non-case but it was not at risk afterwards, so it
-//! is left out of the controls (Blanche et al.'s "type 1" controls) rather
+//! is left out of the controls ("type 1" controls) rather
 //! than counted on a side the model was never asked to rank. Sampling
 //! weights multiply both sides of a pair.
 //!
-//! Like concordance this is a rank statistic: report it beside a Brier score
+//! Like concordance this is a rank statistic: report it beside a squared-error probability score
 //! and calibration. `O(n log n)`: controls are sorted once by prediction and
 //! each case reads the weight below it from a prefix sum.
 

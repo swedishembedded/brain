@@ -194,7 +194,7 @@ pub fn assemble(
         };
         let mut chosen = numeric;
         for j in 0..hide {
-            // Partial Fisher-Yates: the first `hide` entries become the sample.
+            // Partial unbiased in-place: the first `hide` entries become the sample.
             let r = j + (rng.next_u64() as usize) % (chosen.len() - j);
             chosen.swap(j, r);
         }

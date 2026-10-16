@@ -12,8 +12,8 @@
 //!
 //! | benchmark | what it isolates | baselines the score is taken over |
 //! |---|---|---|
-//! | `survival_single` | covariates -> one absorbing event under censoring | the covariate-blind Kaplan-Meier |
-//! | `survival_competing` | two causes with different covariates and time shapes | the covariate-blind Aalen-Johansen |
+//! | `survival_single` | covariates -> one absorbing event under censoring | the covariate-blind product-limit estimator |
+//! | `survival_competing` | two causes with different covariates and time shapes | the covariate-blind competing-risks cumulative-incidence estimator |
 //! | `survival_irregular` | the visit TIMES carry the information, the values are noise | the covariate-blind estimate and a visit-blind model |
 //! | `survival_longitudinal` | a hidden state inferred from noisy partial measurements, an action, forecasts | the covariate-blind estimate and a baseline-covariates-only model |
 //!
@@ -30,21 +30,21 @@
 //! architecture suite. The pass/fail checks are `tests/survival_bench.rs`.
 //!
 //! ## Headline score
-//! A 0..1 **skill**: the share of the achievable integrated Brier improvement
+//! A 0..1 **skill**: the share of the achievable integrated squared-error probability score improvement
 //! the trained model captures, over the strongest ablation baseline,
 //!
 //! ```text
 //! skill = clamp((IBS_base - IBS_model) / (IBS_base - IBS_oracle), 0, 1)
 //! ```
 //!
-//! with `IBS_base` the lowest integrated Brier score among the benchmark's
+//! with `IBS_base` the lowest integrated squared-error probability score among the benchmark's
 //! baselines (table above), `IBS_oracle` that of the generator's true (or, for
 //! the benchmarks whose inputs are noisy, best-possible) cumulative incidence,
 //! all on the same held-out subjects, with the censoring distribution
 //! estimated on the training subjects. 0 means no better than the strongest
 //! baseline, 1 means as good as the oracle.
 //!
-//! Extra fields: `ibs`, `ibs_base`, `ibs_oracle`; Harrell's and Uno's
+//! Extra fields: `ibs`, `ibs_base`, `ibs_oracle`; concordance and Uno's
 //! concordance and the time-dependent AUC at the horizon (`harrell`, `uno`,
 //! `auc`, with the oracle's concordance as `harrell_oracle`); calibration
 //! observed-over-expected at the horizon (`oe`); the rank correlation of the
@@ -278,7 +278,7 @@ fn observations(subjects: &[Subject], codes: &[&str]) -> Vec<Obs> {
 }
 
 /// Where and how a benchmark scores: the horizon `tau` (the grid's last point)
-/// and the grid the Brier score is integrated over.
+/// and the grid the squared-error probability score is integrated over.
 #[derive(Clone)]
 struct Grid {
     tau: f64,
@@ -319,7 +319,7 @@ fn score(table: &Table, obs: &[Obs], g: &Step, grid: &Grid) -> Scores {
     Scores { ibs: total.ibs / k, harrell: total.harrell / k, uno: total.uno / k, auc: total.auc / k, oe: total.oe / k }
 }
 
-/// Spearman rank correlation (average ranks for ties).
+/// rank correlation (average ranks for ties).
 fn spearman(x: &[f64], y: &[f64]) -> f64 {
     fn ranks(v: &[f64]) -> Vec<f64> {
         let mut order: Vec<usize> = (0..v.len()).collect();
@@ -393,7 +393,7 @@ impl<'a> Evaluation<'a> {
         self.tabulate(|i, c, t| curves[i].cif(c, t))
     }
 
-    /// Score `model` against `oracle`; `extra` are baselines' integrated Brier
+    /// Score `model` against `oracle`; `extra` are baselines' integrated squared-error probability score
     /// scores (the covariate-blind one is always included).
     fn compare(&self, model: &Table, oracle: &Table, extra: &[(&'static str, f64)]) -> Metrics {
         let obs = observations(self.test, self.codes);
@@ -434,7 +434,7 @@ impl<'a> Evaluation<'a> {
         metrics
     }
 
-    /// The integrated Brier score of a tabulated predictor on the test set.
+    /// The integrated squared-error probability score of a tabulated predictor on the test set.
     fn ibs(&self, table: &Table) -> f64 {
         let obs = observations(self.test, self.codes);
         let g = censoring(&observations(self.train, self.codes));
@@ -455,7 +455,7 @@ const REPORT: [&str; 6] = ["ibs", "ibs_oracle", "harrell", "harrell_oracle", "sp
 
 /// `survival_single`: covariates -> one absorbing event under uniform censoring.
 ///
-/// Headline: skill over the covariate-blind Kaplan-Meier (see the module
+/// Headline: skill over the covariate-blind product-limit estimator (see the module
 /// docs); the oracle is the true closed-form cumulative incidence.
 pub struct SurvivalSingle {
     /// Training / early-stopping / scoring subjects.
@@ -533,7 +533,7 @@ impl Benchmark for SurvivalSingle {
 /// `survival_competing`: two absorbing causes with different covariates and
 /// time shapes.
 ///
-/// Headline: skill over the covariate-blind Aalen-Johansen estimate; the
+/// Headline: skill over the covariate-blind competing-risks cumulative-incidence estimator estimate; the
 /// oracle is the analytic cumulative incidence `int h_k S`. `cif_mae` and
 /// `cif_bias` are the model's distance to it at the horizon.
 pub struct SurvivalCompeting {

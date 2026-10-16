@@ -55,7 +55,7 @@
 //! `crate::flow_import`'s module doc) and must be reconstructed. Because the
 //! buffer is a pure function of the seed, [`torch_rng::randn_seed0`] computes
 //! it at runtime with a bit-exact Rust port of torch's CPU RNG (`at::mt19937`
-//! seeding/tempering plus the AVX2 `normal_fill_16` Box-Muller kernel, see
+//! seeding/tempering plus the AVX2 `normal_fill_16` paired uniform-to-normal transform kernel, see
 //! that module's doc for exactly what was ported and how it was verified)
 //! rather than shipping a checked-in data asset - a 4.8 MB precomputed blob
 //! cannot be committed at all under this repo's `no-large-or-binary-files`

@@ -132,7 +132,7 @@ fn absolute_pose_survives_outliers() {
 }
 
 /// The same with noise on every bearing: local optimization and the final
-/// Gauss-Newton on the inliers average it down well below the noise of any
+/// linearized least-squares on the inliers average it down well below the noise of any
 /// three-point sample.
 #[test]
 fn absolute_pose_refines_through_noise() {

@@ -12,11 +12,11 @@
 // @import camera
 // @import mvs
 //
-// Coarse-to-fine hand-over of the multi-scale scheme (Xu & Tao, CVPR 2019,
+// Coarse-to-fine hand-over of the multi-scale scheme (multi-scale consistency paper, CVPR 2019,
 // §3.3). A fine pixel takes the plane of one of the four coarse pixels whose
 // centres surround its own - the one whose gray value is closest to its own
 // fine gray value (a joint, colour-guided choice in the spirit of joint
-// bilateral upsampling, Kopf et al., SIGGRAPH 2007), so a hypothesis never
+// bilateral upsampling, SIGGRAPH 2007), so a hypothesis never
 // leaks across an intensity edge, and planes are never averaged. The plane is
 // re-intersected with the fine pixel's OWN ray, which is exact for any lens:
 // a coarse pixel centre (i + 0.5, j + 0.5) is the fine continuous coordinate

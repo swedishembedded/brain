@@ -14,7 +14,7 @@
 //! record the predicted vs realized `H`-bar return, accumulate point MASE (vs the
 //! naive last-value baseline), and time the forecast. A separate Python step
 //! (`tools/forecast/oos_skill_report.py`) ranks each origin's cross-section and computes
-//! RankIC (Spearman) ± stderr + t, directional accuracy, a cost-aware long/short
+//! RankIC (rank correlation) ± stderr + t, directional accuracy, a cost-aware long/short
 //! basket vs `^gspc`, and the shuffled negative control + naive baseline.
 //!
 //! In-process (weights loaded once, warm across the sweep). Env-gated; skips

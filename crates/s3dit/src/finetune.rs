@@ -356,7 +356,7 @@ fn uniform01(s: &mut u64) -> f32 {
     (next_u64(s) >> 40) as f32 / (1u64 << 24) as f32
 }
 fn gauss(s: &mut u64) -> f64 {
-    // Box–Muller
+    // paired uniform-to-normal transform
     let (u1, u2) = (uniform01(s).max(1e-7) as f64, uniform01(s) as f64);
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }

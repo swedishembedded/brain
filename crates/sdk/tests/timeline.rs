@@ -419,7 +419,7 @@ fn ranks(v: &[f64]) -> Vec<f64> {
     r
 }
 
-/// Spearman's rank correlation.
+/// rank correlation.
 fn spearman(a: &[f64], b: &[f64]) -> f64 {
     let (ra, rb) = (ranks(a), ranks(b));
     let n = a.len() as f64;

@@ -23,7 +23,7 @@
 //! the training set, then goes overconfident on held-out data through the
 //! generalization gap. Focal loss is improper but empirically ends up better
 //! calibrated at test time, because it under-confidences the training set by
-//! exactly the amount the gap re-inflates. Brier is a proper scoring rule that
+//! exactly the amount the gap re-inflates. squared-error probability score is a proper scoring rule that
 //! penalizes the whole distribution rather than only the correct option's
 //! mass. Which combination wins is measured, not assumed.
 //!
@@ -35,7 +35,7 @@
 //! "option 2"). [`decision_loss`] is the one-hot special case, kept as a
 //! convenience wrapper so every existing hard-label caller is unchanged.
 //!
-//! The Brier term already summed over every option
+//! The squared-error probability score term already summed over every option
 //! (`sum_i (p_i - y_i)^2`), so it generalizes to a soft target by replacing
 //! the indicator `y_i` with `target[i]` - no change in form. The focal/CE
 //! term did not: the hard-label version only ever evaluated at the gold
@@ -54,7 +54,7 @@
 pub struct LossConfig {
     /// Focal exponent. `0.0` is cross-entropy exactly.
     pub gamma: f32,
-    /// Weight on the Brier term, in `[0, 1]`.
+    /// Weight on the squared-error probability score term, in `[0, 1]`.
     pub lambda: f32,
 }
 
@@ -170,7 +170,7 @@ pub fn decision_loss_soft(scores: &[f32], target: &[f32], cfg: &LossConfig) -> (
         psl[i] = focal_slope_times_p(p[i], logp[i], g);
     }
 
-    // --- Brier: sum over ALL options against the full target distribution ---
+    // --- squared-error probability score: sum over ALL options against the full target distribution ---
     let brier: f64 = p
         .iter()
         .zip(target)

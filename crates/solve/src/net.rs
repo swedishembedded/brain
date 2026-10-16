@@ -398,7 +398,7 @@ impl Net {
 pub fn init_weights(cfg: &Config, seed: u64) -> HashMap<String, Vec<f32>> {
     let mut rng = crate::data::Rng::new(seed);
     let mut normal = move || {
-        // Box-Muller, from two uniforms.
+        // paired uniform-to-normal transform, from two uniforms.
         let u1 = ((rng.next() >> 11) as f64 / (1u64 << 53) as f64).max(1e-12);
         let u2 = (rng.next() >> 11) as f64 / (1u64 << 53) as f64;
         (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Density control as Markov Chain Monte Carlo: "3D Gaussian Splatting as
-//! Markov Chain Monte Carlo", Kheradmand et al., NeurIPS 2024
+//! Markov Chain Monte Carlo", NeurIPS 2024
 //! (arXiv:2404.09591).
 //!
 //! The classic heuristic ([`crate::opt::densify`]) decides where detail may

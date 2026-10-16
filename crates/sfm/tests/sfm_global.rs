@@ -176,7 +176,7 @@ fn global_positioning_places_cameras_and_points_from_bearings() {
 }
 
 /// The worst distance between `est` and `truth` after the best similarity
-/// taking one onto the other (Umeyama), as a fraction of the truth's RMS
+/// taking one onto the other (least-squares similarity), as a fraction of the truth's RMS
 /// spread about its centroid.
 fn similarity_error(est: &[V3], truth: &[V3]) -> f64 {
     let fit = sfm::georef::umeyama(est, truth, None).expect("a similarity");

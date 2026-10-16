@@ -16,7 +16,7 @@
 //! Under censoring the outcome by `t` is unknown for a subject censored
 //! before it. Those subjects drop out and the others are reweighted by the
 //! inverse probability of having stayed uncensored that long, as the IPCW
-//! Brier score does (a case at `T_i <= t` by `1 / G(T_i)`, a subject free at
+//! squared-error probability score does (a case at `T_i <= t` by `1 / G(T_i)`, a subject free at
 //! `t` by `1 / G(t)`, a competing event first by `1 / G(T_i)`), times its
 //! sampling weight. The validity guarantee is then asymptotic, through `G`.
 //! The new subject enters with the weight its caller gives it and no

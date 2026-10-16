@@ -83,7 +83,7 @@ fn slab(bsz: u32, heads: u32, t: u32, hd: u32, sigma: f32, seed: u64) -> Vec<f32
     for row in 0..rows {
         for c in 0..3 * d {
             out[row * 3 * d + c] = if c < 2 * d {
-                // Box-Muller from two uniforms.
+                // paired uniform-to-normal transform from two uniforms.
                 let (u1, u2) = (uni().max(1e-7), uni());
                 sigma * (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
             } else {

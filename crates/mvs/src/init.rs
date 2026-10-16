@@ -10,7 +10,7 @@
 //! ([`SplatInit::footprint_scale`] times the fused radius, so neighbours
 //! overlap into a closed sheet) and its third axis, the normal, is a small
 //! fraction of that ([`SplatInit::thickness`]) - the flattened, surface-aligned
-//! shape 2D/planar gaussian methods converge to (Huang et al., "2D Gaussian
+//! shape 2D/planar gaussian methods converge to ("2D Gaussian
 //! Splatting for Geometrically Accurate Radiance Fields", SIGGRAPH 2024).
 //!
 //! Axis convention: `scales[k]` belongs to column `k` of the rotation of the

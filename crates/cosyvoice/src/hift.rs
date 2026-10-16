@@ -491,7 +491,7 @@ mod tests {
         (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect()
     }
 
-    /// Fan-in-scaled random fill (Xavier-ish) so a chain of ~30 conv/resblock
+    /// Fan-in-scaled random fill (fan-average-scaled-ish) so a chain of ~30 conv/resblock
     /// layers with real-sized (up to 512) channel counts stays numerically
     /// bounded through `exp()` in the ISTFT head - a flat `filled(..., 0.2)`
     /// scale blows up across that much depth even though it is only a

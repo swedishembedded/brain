@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The Brier score at a horizon under censoring, and its integral over a
+//! The squared-error probability score at a horizon under censoring, and its integral over a
 //! window: the mean squared distance between a predicted probability of the
 //! event by `t` and what happened, each observed subject reweighted by the
 //! inverse probability of having stayed uncensored that long.
@@ -14,13 +14,13 @@
 //! - a subject censored by `t` contributes nothing; the weights stand in.
 //!
 //! The mean is over ALL subjects (weighted), which is what makes the
-//! estimator consistent (Graf et al.; Schoop et al. for competing risks). With
+//! estimator consistent (inverse-probability-of-censoring weighting, also for competing risks). With
 //! one cause it equals scikit-survival's `brier_score` on `1 - F`.
 
 use crate::estimate::Step;
 use crate::Obs;
 
-/// Each subject's own term of the IPCW Brier score at `t` (before its
+/// Each subject's own term of the IPCW squared-error probability score at `t` (before its
 /// sampling weight): what [`brier`] averages, and what a paired comparison of
 /// two models differences subject by subject. `None` when `G` is zero where
 /// it is needed.
@@ -46,7 +46,7 @@ pub fn brier_terms(cif: &[f64], obs: &[Obs], cause: usize, t: f64, g: &Step) -> 
         .collect()
 }
 
-/// The IPCW Brier score of `cif` (one prediction per subject: the
+/// The IPCW squared-error probability score of `cif` (one prediction per subject: the
 /// probability of `cause` by `t`). `g` is the censoring distribution,
 /// estimated on the training data. `None` when `G` is zero where it is needed.
 pub fn brier(cif: &[f64], obs: &[Obs], cause: usize, t: f64, g: &Step) -> Option<f64> {
@@ -62,7 +62,7 @@ pub fn brier(cif: &[f64], obs: &[Obs], cause: usize, t: f64, g: &Step) -> Option
     })
 }
 
-/// The Brier score integrated over `times` by the trapezoid rule and divided
+/// The squared-error probability score integrated over `times` by the trapezoid rule and divided
 /// by the window's length (scikit-survival's `integrated_brier_score`).
 /// `cif_at(k)` gives every subject's prediction at `times[k]`.
 pub fn integrated_brier(

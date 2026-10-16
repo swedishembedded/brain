@@ -12,7 +12,7 @@
 //! The method is PatchMatch stereo with per-pixel view selection
 //! (Schönberger, Zheng, Pollefeys, Frahm, "Pixelwise View Selection for
 //! Unstructured Multi-View Stereo", ECCV 2016) organised the way the ACMM
-//! family runs it on a GPU (Xu & Tao, "Multi-Scale Geometric Consistency
+//! family runs it on a GPU ("Multi-Scale Geometric Consistency
 //! Guided Multi-View Stereo", CVPR 2019; "Planar Prior Assisted PatchMatch
 //! Multi-View Stereo", AAAI 2020): red-black adaptive checkerboard
 //! propagation, multi-hypothesis joint view selection, a coarse-to-fine

@@ -161,7 +161,7 @@ impl Reservoir {
             return Vec::new();
         }
         let mut all: Vec<&str> = self.items.iter().flat_map(|e| e.rows.iter().map(String::as_str)).collect();
-        // Partial Fisher-Yates from a seed of the caller's choosing, so the
+        // Partial unbiased in-place from a seed of the caller's choosing, so the
         // draw neither consumes nor depends on the reservoir's own generator
         // and asking twice gives the same answer.
         let take = rows.min(all.len());

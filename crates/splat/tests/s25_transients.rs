@@ -7,7 +7,7 @@
 //! With `FitCfg::transients` the fit recognizes them by their residual: a
 //! large, spatially coherent region that one view insists on and the scene
 //! the other views agree on cannot explain, and stops supervising it
-//! (after RobustNeRF, Sabour et al. 2023). Scattered error - fine texture
+//! (after robust NeRF, 2023). Scattered error - fine texture
 //! the scene has not resolved yet - is not coherent, and stays supervised.
 //!
 //! Swedish Embedded AB implements 3D reconstruction of real-world captures,

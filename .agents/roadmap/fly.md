@@ -1214,11 +1214,11 @@ from a connectome, then learning.
 
 * MANC v1.0 - Janelia FlyEM, CC-BY 4.0, public bucket `flyem-manc-exports`
 * FlyWire FAFB v783 connectivity - Zenodo 10676866, CC-BY 4.0
-* flybody - Vaxenburg et al., *Whole-body physics simulation of fruit fly
+* flybody - *Whole-body physics simulation of fruit fly
   locomotion*, Nature 643:1312-1320 (2025); code Apache-2.0, datasets GPL-3.0+
-* NeuroMechFly v2 - Wang-Chen et al., Nature Methods (2024); Apache-2.0
-* Shiu et al., whole-brain LIF from the FlyWire connectome, Nature (2024)
-* Lappalainen et al., connectome-constrained model of the fly visual system,
+* NeuroMechFly v2 - Nature Methods (2024); Apache-2.0
+* Whole-brain LIF from the FlyWire connectome, Nature (2024)
+* Connectome-constrained model of the fly visual system,
   Nature (2024)
-* Bellec et al., *A solution to the learning dilemma for recurrent networks of
+* *A solution to the learning dilemma for recurrent networks of
   spiking neurons*, Nat Commun 11:3625 (2020) - e-prop

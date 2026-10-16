@@ -7,7 +7,7 @@
 //!
 //! * SATELLITE FIXES (EXIF GPS). The camera centres are matched to their
 //!   fixes, expressed as local east-north-up metres (WGS84, the ellipsoid
-//!   GPS reports on), by a similarity - Umeyama, "Least-squares estimation
+//!   GPS reports on), by a similarity - "Least-squares estimation
 //!   of transformation parameters between two point patterns" (TPAMI 1991) -
 //!   inside RANSAC, because a phone's fix can be tens of metres out. The
 //!   result is refused when the fixes' own scatter is comparable to the
@@ -93,7 +93,7 @@ impl Sim3 {
     }
 }
 
-/// The least-squares similarity taking `src` onto `dst` (Umeyama 1991),
+/// The least-squares similarity taking `src` onto `dst` (TPAMI 1991),
 /// optionally also turning the direction `dir.0` onto `dir.1` with weight
 /// `dir.2` relative to the points' own (a large weight holds it exactly and
 /// leaves the points only the rotation about it). `None` for fewer than two

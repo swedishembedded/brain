@@ -4,7 +4,7 @@
 //! Correctness gate for `audio::resample::rational`, the Kaiser-windowed-sinc
 //! polyphase resampler:
 //!   1. a below-cutoff tone survives resampling near-unchanged (passband);
-//!   2. an above-new-Nyquist tone is suppressed, not aliased down into the
+//!   2. an above-new-half-sampling-rate tone is suppressed, not aliased down into the
 //!      output band (`resample_linear` cannot do this - it has no filter at
 //!      all, so this is exactly the case it fails);
 //!   3. up-then-down round-trips back to the original away from the edges.
@@ -19,7 +19,7 @@ fn tone(f: f32, sr: u32, n: usize) -> Vec<f32> {
     (0..n).map(|i| (2.0 * std::f32::consts::PI * f * i as f32 / sr as f32).sin()).collect()
 }
 
-/// A 3 kHz tone at 24 kHz is well inside 16 kHz's Nyquist (8 kHz) - resampling
+/// A 3 kHz tone at 24 kHz is well inside 16 kHz's half-sampling-rate (8 kHz) - resampling
 /// 24k -> 16k should preserve it at close to unit amplitude.
 #[test]
 fn passband_tone_survives_downsample() {
@@ -34,7 +34,7 @@ fn passband_tone_survives_downsample() {
     assert!(r > 0.6, "passband tone attenuated too much: rms={r}");
 }
 
-/// A 10 kHz tone at 24 kHz sits ABOVE 16 kHz's new Nyquist (8 kHz). A correct
+/// A 10 kHz tone at 24 kHz sits ABOVE 16 kHz's new half-sampling-rate (8 kHz). A correct
 /// resampler's anti-alias filter must suppress it, not fold it down into the
 /// audible band the way naive decimation (or `resample_linear`) would.
 #[test]

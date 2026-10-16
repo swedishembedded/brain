@@ -101,7 +101,7 @@ pub fn psnr_masked(a: &[f32], b: &[f32], mask: Option<&[f32]>) -> f64 {
     -10.0 * (se / n).log10()
 }
 
-/// Structural similarity (Wang et al., IEEE TIP 2004): the mean SSIM map of
+/// Structural similarity (IEEE TIP 2004): the mean SSIM map of
 /// two interleaved-RGB images in `[0,1]`, per channel, over an 11x11 gaussian
 /// window of sigma 1.5 with `C1 = 0.01²`, `C2 = 0.03²` - the constants every
 /// splatting paper reports SSIM with - averaged over the pixels `mask`

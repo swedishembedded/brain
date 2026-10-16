@@ -8,7 +8,7 @@
 //!
 //! This trains the **embedding backbone only**. SCRFD detection and the 5-point
 //! similarity alignment are *preprocessing*: the detector selects a crop and the
-//! Umeyama warp resamples it, and neither is differentiated here. That is not an
+//! least-squares similarity warp resamples it, and neither is differentiated here. That is not an
 //! omission to be filled in later - the reference ArcFace recipe trains on
 //! pre-aligned 112×112 crops exactly this way, so the detector carries no
 //! recognition gradient at all. [`ArcFaceTrainer`]'s input is the aligned blob.

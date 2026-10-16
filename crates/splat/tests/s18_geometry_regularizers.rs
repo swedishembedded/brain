@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Geometry regularizers (2D Gaussian Splatting, Huang et al. 2024): the
+//! Geometry regularizers (2D Gaussian Splatting, 2024): the
 //! terms that make a fit represent a surface AS a surface.
 //!
 //! Both defects they target are invisible to an RGB loss from the training

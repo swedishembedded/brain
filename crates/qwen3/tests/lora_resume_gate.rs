@@ -141,7 +141,7 @@ fn avg_loss(ckpt_path: &str, dir: &Path, seed: u64, n: usize) -> f32 {
     total / n as f32
 }
 
-/// The Frobenius norm of the tracked leaf's LoRA delta `B @ A`, computed from
+/// The matrix L2 norm of the tracked leaf's LoRA delta `B @ A`, computed from
 /// the checkpoint reloaded off disk (not the live in-process model) -- the
 /// same reload discipline `lora_learning_gate.rs` uses, since a checkpoint
 /// that only "looks right" in the process that just wrote it is not the bug

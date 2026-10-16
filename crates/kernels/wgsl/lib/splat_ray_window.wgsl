@@ -15,8 +15,8 @@
 // own per pixel wherever gaussians overlap or intersect. A tile's list is
 // sorted once for all of its pixels (`splat_ray_emit.wgsl`), and each pixel
 // refines that order through a window of the RAY_WINDOW nearest pairs it has
-// met but not composited, in the manner of StopThePop's hierarchical
-// resorting (Radl et al., SIGGRAPH 2024):
+// met but not composited, in the manner of hierarchical
+// per-pixel resorting (SIGGRAPH 2024):
 //
 //   walking the list, a pair that hits (alpha >= 1/255) joins the window;
 //   when that makes RAY_WINDOW + 1, the nearest of them (the lowest t*) is

@@ -8,7 +8,7 @@
 //! as happily as by one opaque surface, and by gaussians whose flat axis
 //! points anywhere. Both render correctly from the training views and fall
 //! apart from any other: layers become fog, misoriented discs become fur. The
-//! two terms here are from 2D Gaussian Splatting (Huang et al., SIGGRAPH
+//! two terms here are from 2D Gaussian Splatting (SIGGRAPH
 //! 2024), implemented from the paper:
 //!
 //! * **Depth distortion** `Σ_ij w_i w_j (z_i - z_j)²` over each ray's

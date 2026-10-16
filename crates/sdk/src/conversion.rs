@@ -609,7 +609,7 @@ fn auc_roc(scored: &[(f32, bool)]) -> f32 {
     if pos == 0 || neg == 0 {
         return 0.5;
     }
-    // Mann-Whitney U over average ranks, so ties score 0.5 rather than
+    // rank-sum U over average ranks, so ties score 0.5 rather than
     // whichever way the sort happened to break them.
     let mut rank_sum = 0.0f64;
     let mut i = 0usize;

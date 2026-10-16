@@ -1524,7 +1524,7 @@ partials per (sequence, head) with the textbook two-term online-softmax
 merge identity (the same reassociation `paged_flash_decode`'s own per-tile
 rescale already is, one level up - no barrier, no shared memory, so unlike
 its `@cpu no` split-phase sibling this one is `@cpu yes`). This is the same
-two-pass split/reduce shape `flash-decoding` (Dao et al.) and vLLM's
+two-pass split/reduce shape `flash-decoding` and vLLM's
 `paged_attention_v2` use for the identical low-batch-occupancy reason; no
 code from either is transcribed (both headers say so explicitly), only the
 same well-known merge identity, independently re-derived from this repo's
@@ -6668,7 +6668,7 @@ zero.
   scalar 32-bit accesses ... using 64-bit data types did not make a
   significant difference"
   (https://old.chipsandcheese.com/2024/01/01/a-new-year-and-new-tests-gpu-l1-cache-bandwidth/);
-  Tesla P4 (GP104) 90.7% on the same 32-bit benchmark, Jia et al. Table 3.1
+  Tesla P4 (GP104) 90.7% on the same 32-bit benchmark, arXiv:1903.07486 Table 3.1
   (https://arxiv.org/pdf/1903.07486). On Fermi, 128-bit shared loads were
   outright *slower* than 32-bit (gpumembench: 1482.81 / 1483.35 / 982.38
   GB/s for 32/64/128-bit).
@@ -6719,10 +6719,10 @@ at that shape 1/2/4/8 gave 4455 / 4184 / 4529 / 5088.
   & van de Geijn §6.2 (https://www.cs.utexas.edu/~flame/pubs/GotoTOMS.pdf),
   with the explicit flops-per-load ratio in FLAWN #74 §4.2.3.
 - *Toolchain, not algorithm, sets the rest.* cuBLAS SGEMM reaches ~85% of
-  peak on Pascal GP100 (Tillet & Cox, https://arxiv.org/pdf/1802.05371) and
-  ~88.6% on GP104 (Jia et al. Table 4.3); maxas reaches 96-98% on Maxwell
+  peak on Pascal GP100 (https://arxiv.org/pdf/1802.05371) and
+  ~88.6% on GP104 (arXiv:1903.07486 Table 4.3); maxas reaches 96-98% on Maxwell
   but **only in hand-written SASS** - its author is explicit that it is "not
-  possible with ptxas", and Lavin states flatly that it is "not possible to
+  possible with ptxas", and a 2015 study states flatly that it is "not possible to
   create a GPU kernel with greater than 80% computational efficiency using
   the CUDA Toolkit" (https://arxiv.org/pdf/1501.06633). WGSL/naga sits a
   further step below CUDA C: no instruction placement, no dual-issue control

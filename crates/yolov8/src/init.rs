@@ -49,7 +49,7 @@ pub fn init_params(params: &[(String, usize)], seed: u64, std: f32) -> HashMap<S
 
 /// Initialize the whole model's parameters (backbone + neck + head) from the
 /// config's full `param_list`, deterministic for `seed`. Conv weights get a
-/// small-std Kaiming-ish normal; BN affine `gamma`≈1 / `beta`=0; running stats
+/// small-std fan-in-scaled initialization-ish normal; BN affine `gamma`≈1 / `beta`=0; running stats
 /// `run_mean`=0 / `run_var`=1 (see [`init_params`]).
 pub fn init_model(cfg: &crate::YoloConfig, seed: u64) -> HashMap<String, Vec<f32>> {
     let params = <crate::YoloConfig as model::ModelConfig>::param_list(cfg);

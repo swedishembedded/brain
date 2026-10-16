@@ -10,7 +10,7 @@
 //!   of the mean difference from `s^2 / J` to `(1/J + n_test/n_train) s^2`.
 //! - [`cluster_bootstrap`] and [`cluster_bootstrap_by`]: a percentile
 //!   interval for a weighted mean (or any statistic) of
-//!   per-unit values (for example per-subject differences in Brier terms on a
+//!   per-unit values (for example per-subject differences in squared-error probability score terms on a
 //!   locked test), resampling whole clusters (survey primary sampling units,
 //!   households) with replacement so within-cluster correlation is respected.
 //!

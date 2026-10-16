@@ -6,9 +6,8 @@
 //! no pairwise translations, no incremental chain for error to accumulate
 //! along.
 //!
-//! The formulation is GLOMAP's (Pan et al., "Global Structure-from-Motion
-//! Revisited", ECCV 2024), itself the BATA objective (Zhuang et al.,
-//! "Baseline Desensitizing In Translation Averaging", CVPR 2018) applied to
+//! The formulation is that of global SfM ("Global Structure-from-Motion
+//! Revisited", ECCV 2024), itself the BATA objective ("Baseline Desensitizing In Translation Averaging", CVPR 2018) applied to
 //! camera-to-point constraints:
 //!
 //! ```text
@@ -26,7 +25,7 @@
 //! is benign enough that no initialization from pairwise geometry is needed),
 //! and alternates exactly-solved blocks, each of which can only lower the
 //! cost: every `d_ij` in closed form (`max(0, v.w / |w|^2)`), then every
-//! position by reweighted linear least squares under a Huber loss. With the
+//! position by reweighted linear least squares under a quadratic-then-linear loss. With the
 //! scales fixed the position problem is `X_j - c_i ~ v_ij / d_ij` with
 //! weights `d_ij^2`, whose normal equations are a multiple of the identity
 //! per coordinate; the points are eliminated in closed form and the camera
@@ -59,7 +58,7 @@ pub struct RayObservation {
 pub struct PositioningCfg {
     /// Most alternation rounds.
     pub iters: usize,
-    /// Huber threshold on the residual, which is about the sine of the
+    /// quadratic-then-linear loss threshold on the residual, which is about the sine of the
     /// angle by which a point misses its ray.
     pub huber: f64,
     /// Seed of the random start. [`Default`] draws a random one;
@@ -80,7 +79,7 @@ pub struct Positions {
     /// Per point, `None` likewise.
     pub points: Vec<Option<V3>>,
     /// Per observation, whether the result puts its point along its ray
-    /// (ahead of the camera, within the Huber threshold).
+    /// (ahead of the camera, within the quadratic-then-linear loss threshold).
     pub inlier: Vec<bool>,
 }
 

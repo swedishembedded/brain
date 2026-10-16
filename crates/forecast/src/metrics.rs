@@ -18,7 +18,7 @@
 //!   probabilistic headline. The factor of 2 is the gluonts convention (median
 //!   wQL then equals the magnitude-normalised MAE).
 //! - **CRPS** — Continuous Ranked Probability Score. `crps_gaussian` is the
-//!   closed form (Gneiting et al. 2004 eq. 5, matching `properscoring`);
+//!   closed form (strictly proper scoring rules, 2004, eq. 5, matching `properscoring`);
 //!   `crps_ensemble` is the sample-based energy form `E|X-x| - 0.5*E|X-X'|`.
 //! - **MASE** — Mean Absolute Scaled Error: forecast MAE over the in-sample
 //!   seasonal-naive MAE. `1.0` = as good as seasonal naive.
@@ -27,7 +27,7 @@
 //!   against `origin`).
 //! - **coverage** — fraction of actuals inside a predicted interval; compare
 //!   against the nominal level to read calibration.
-//! - **rank IC** — Spearman rank correlation between predicted and realised
+//! - **rank IC** - rank correlation between predicted and realised
 //!   values; the finance-native cross-sectional signal metric.
 //! - **skill score** — `clamp(1 - error/baseline_error, 0, 1)`; converts a
 //!   lower-is-better error into a 0..1 higher-is-better headline.
@@ -245,7 +245,7 @@ pub fn coverage(lo: &[f32], hi: &[f32], actual: &[f32]) -> f32 {
     hits as f32 / actual.len() as f32
 }
 
-/// Rank information coefficient: Spearman rank correlation (ties averaged).
+/// Rank information coefficient: rank correlation (ties averaged).
 pub fn rank_ic(pred: &[f32], actual: &[f32]) -> f32 {
     assert_eq!(pred.len(), actual.len(), "rank_ic: length mismatch");
     let n = pred.len();

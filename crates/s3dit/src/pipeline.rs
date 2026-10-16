@@ -1071,7 +1071,7 @@ pub struct Init<'a> {
     pub feather: u32,
 }
 
-/// Deterministic standard-normal samples via xorshift64* + Box–Muller — a fixed
+/// Deterministic standard-normal samples via xorshift64* + paired uniform-to-normal transform - a fixed
 /// seed always yields the same latent (so generation is reproducible).
 fn randn(n: usize, seed: u64) -> Vec<f32> {
     model::hostmath::randn(n, seed)

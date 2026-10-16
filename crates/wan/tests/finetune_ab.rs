@@ -155,7 +155,7 @@ impl Eva {
     }
 }
 
-/// Random A/B of the same rank as `like`, per-tensor Frobenius-rescaled so
+/// Random A/B of the same rank as `like`, per-tensor matrix L2 norm-rescaled so
 /// `||scale * B*A||_F` matches `like`'s own delta on every targeted tensor -
 /// the control that stops G2 from just measuring "any perturbation helps".
 /// `||BA||_F^2 = trace((B^T B)(A A^T))`, both r x r, so the match is computed
@@ -182,7 +182,7 @@ fn matched_random_adapter(cfg: &Cfg, like: &LoraAdapter, seed: u64) -> LoraAdapt
     let like_t: HashMap<String, (Vec<usize>, Vec<f32>)> = like.to_tensors().into_iter().map(|(n, s, d)| (n, (s, d))).collect();
     let raw_t: HashMap<String, (Vec<usize>, Vec<f32>)> = raw.to_tensors().into_iter().map(|(n, s, d)| (n, (s, d))).collect();
 
-    // Frobenius norm of B*A via trace((B^T B)(A A^T)), r x r - see doc above.
+    // matrix L2 norm of B*A via trace((B^T B)(A A^T)), r x r - see doc above.
     let bta_fro = |a: &[f32], b: &[f32], out: usize, inn: usize, r: usize| -> f64 {
         let mut bt_b = vec![0f64; r * r];
         for i in 0..r {

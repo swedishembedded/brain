@@ -9,7 +9,7 @@
 //! `BIC = n ln(C / n) + k ln n`,
 //!
 //! with `n` the number of residuals (two per observation), `C` their robust
-//! (Huber) cost and `k` the number of calibration parameters - the poses and
+//! (quadratic-then-linear loss) cost and `k` the number of calibration parameters - the poses and
 //! points are common to every candidate and cancel. A coefficient has to
 //! lower the cost by a factor `n^(1/n)` per parameter to be worth having, so
 //! one that only fits noise loses and a model that cannot follow the lens
@@ -20,7 +20,7 @@
 //! * [`LensChoice::Pinhole`] - `fx`, `cx`, `cy`;
 //! * [`LensChoice::Radial`] - Brown-Conrady with `k1, k2`;
 //! * [`LensChoice::Brown`] - Brown-Conrady with `k1, k2, k3, p1, p2`
-//!   (Brown 1966, as OpenCV parameterizes it);
+//!   (1966, as OpenCV parameterizes it);
 //! * [`LensChoice::Fisheye`] - Kannala-Brandt `k1..k4` (TPAMI 2006).
 //!
 //! A candidate starts from the reconstruction's own calibration CONVERTED to
@@ -242,7 +242,7 @@ pub struct LensFit {
     /// The refined calibration, one per sensor.
     pub intrinsics: Vec<Intrinsics>,
     pub rms_px: f64,
-    /// Huber cost of the reprojections, pixels².
+    /// quadratic-then-linear loss cost of the reprojections, pixels².
     pub cost: f64,
     /// Calibration parameters refined.
     pub params: usize,

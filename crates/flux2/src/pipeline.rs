@@ -647,7 +647,7 @@ pub enum Anchor {
 /// ([`img2img_sigmas`]), so the number is a budget shared between two
 /// requirements that pull opposite ways: the draft's layout has to survive the
 /// refine (which wants a low value), and each window has to be able to paint
-/// detail an upscale cannot invent - a 2x Lanczos/bilinear enlargement is
+/// detail an upscale cannot invent - a 2x windowed-sinc/bilinear enlargement is
 /// structurally complete and locally soft - which wants a high one. 0.4 is
 /// what a hand-verified 1024x576 → 2048x1152 klein-9b run reconciled the two
 /// at: the landmark stayed singular and in place while the windows resolved

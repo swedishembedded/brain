@@ -353,7 +353,7 @@ fn requantization_error_after_a_fold_carries_no_periodic_structure() {
     let peak = *sorted.last().unwrap();
 
     let p4 = mag(k / 4); // period 4
-    let p2 = mag(k / 2); // period 2 (Nyquist-adjacent)
+    let p2 = mag(k / 2); // period 2 (half-sampling-rate-adjacent)
     let p32 = mag(k / GROUP); // period 32 - the INT8 group itself
 
     // Per-residue means, the other way the same claim can be read: if the

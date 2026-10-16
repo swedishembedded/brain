@@ -30,7 +30,7 @@
 //! uncalibrated - which is the one thing this architecture exists not to be.
 //!
 //! Read it instead as a **proper scoring rule on the committed probability** -
-//! `r = 1 - (p - y)^2`, the negative Brier score - and the expected reward is
+//! `r = 1 - (p - y)^2`, the negative squared-error probability score - and the expected reward is
 //! maximized exactly at `p = q`. That is the reading implemented here, and it
 //! is also the more literal one: the paper's action is the probability
 //! estimate itself, not a bet placed with it.
@@ -134,7 +134,7 @@ pub struct Turn {
     pub turns_to_end: u32,
 }
 
-/// The negative Brier score of committing `p` when the outcome was `y`.
+/// The negative squared-error probability score of committing `p` when the outcome was `y`.
 ///
 /// Proper: its expectation over `y ~ Bernoulli(q)` is maximized at `p = q`,
 /// which is the entire reason it and not a hit rate is the reward here.

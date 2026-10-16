@@ -228,7 +228,7 @@ impl ArcFaceSession {
     /// samples the full-resolution image rather than any intermediate crop.
     pub fn embed_face_chw(&self, chw: &[f32], w: u32, h: u32, face: &Face) -> Result<Vec<f32>, String> {
         let lmk: Vec<f32> = face.kps.iter().flat_map(|p| [p[0], p[1]]).collect();
-        // Umeyama solve on the host + the `grid_sample` kernel - the crate's
+        // least-squares similarity solve on the host + the `grid_sample` kernel - the crate's
         // one alignment implementation.
         let (crop, _m) = crate::align::norm_crop_chw(&self.gpu, chw, 3, h, w, &lmk, self.cfg.image_size)?;
         Ok(self.embed_aligned_chw(&crop))

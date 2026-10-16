@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Density control as MCMC: "3D Gaussian Splatting as Markov Chain Monte
-//! Carlo" (Kheradmand et al., NeurIPS 2024, arXiv:2404.09591).
+//! Carlo" (NeurIPS 2024, arXiv:2404.09591).
 //!
 //! The classic heuristic decides where detail may appear by thresholding a
 //! positional-gradient statistic and then splitting or cloning. Every part of

@@ -896,7 +896,7 @@ mod tests {
         fn weightish(&mut self) -> f32 {
             let u1 = (self.next() as f64 + 1.0) / (u32::MAX as f64 + 2.0);
             let u2 = (self.next() as f64) / (u32::MAX as f64 + 1.0);
-            // Box-Muller: a standard normal sample.
+            // paired uniform-to-normal transform: a standard normal sample.
             let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
             (z * 0.05) as f32
         }

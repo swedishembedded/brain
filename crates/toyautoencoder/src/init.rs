@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Autoencoder weight initialization:
-//! - linear weights: Normal(0, `std`) with a fan-in-scaled `std` (Kaiming-ish),
+//! - linear weights: Normal(0, `std`) with a fan-in-scaled `std` (fan-in-scaled initialization-ish),
 //!   so the four matmuls keep activations in range across the bottleneck.
 //! - all biases = 0.
 //!

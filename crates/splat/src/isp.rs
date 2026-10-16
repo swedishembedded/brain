@@ -13,10 +13,10 @@
 //! does - brighter gaussians on one side, floaters in front of a vignetted
 //! corner.
 //!
-//! The global decomposition follows PPISP (Deutsch et al., 2026), implemented
+//! The global decomposition follows PPISP (2026), implemented
 //! here from its description rather than its code, into factors that are each
 //! physically meaningful and each owned by the thing that varies; the local
-//! residual is the bilateral grid of Wang et al., "Bilateral Guided Radiance
+//! residual is the bilateral grid of "Bilateral Guided Radiance
 //! Field Processing" (SIGGRAPH Asia 2024), from the paper:
 //!
 //! ```text
@@ -126,7 +126,7 @@ pub enum Encoding {
     Linear,
 }
 
-/// The per-view bilateral grid (Wang et al. 2024).
+/// The per-view bilateral grid (2024).
 #[derive(Clone, Copy, Debug)]
 pub struct GridCfg {
     /// Cells across the frame's width, its height, and the luma axis; each at
@@ -912,7 +912,7 @@ impl Isp {
     /// held. The standard appearance-fitted protocol for judging held-out
     /// views fits on one part of an image and scores on another.
     ///
-    /// Levenberg-Marquardt on the three log gains, minimizing the weighted
+    /// damped least-squares on the three log gains, minimizing the weighted
     /// squared error; the result's white balance is zero-mean, its exposure
     /// carrying the common gain.
     pub fn fit_novel(&self, start: NovelShot, cam: &Camera, radiance: &[f32], target: &[f32], weights: &[f32]) -> NovelShot {

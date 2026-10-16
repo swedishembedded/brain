@@ -411,7 +411,7 @@ impl TimelineModel {
 
     /// Judge the model on held-out `subjects` (never ones it was trained,
     /// early-stopped or calibrated on): per outcome code and horizon of
-    /// `spec`, Uno's concordance, the time-dependent AUC, the IPCW Brier score
+    /// `spec`, Uno's concordance, the time-dependent AUC, the IPCW squared-error probability score
     /// and its integral, the calibration slope, intercept, observed over
     /// expected and error, and, when the subjects carry groups, cluster-
     /// bootstrap intervals; plus the held-out event NLL. A (code, horizon)

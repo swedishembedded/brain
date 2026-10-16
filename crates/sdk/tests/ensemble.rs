@@ -139,7 +139,7 @@ fn calibration_of(predictions: &[Prediction], subjects: &[Subject], code: &str) 
 
 /// Single model against a seeded and a bootstrap ensemble of five, on the
 /// synthetic populations: calibration of the mean risk on the training
-/// population, the Spearman correlation between the member spread and the
+/// population, the rank correlation between the member spread and the
 /// error to the true risk per shift level, and what training cost. The single
 /// model is the first member of the seeded ensemble (the same seed).
 #[test]

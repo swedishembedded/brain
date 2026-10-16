@@ -38,7 +38,7 @@
 //!
 //! * [`crate::scoring::decision_loss_soft`] is this workspace's own
 //!   differentiable calibration objective, a `(gamma, lambda)` sweep between
-//!   cross-entropy, focal loss and Brier. `crates/decide` trains against it.
+//!   cross-entropy, focal loss and squared-error probability score. `crates/decide` trains against it.
 //! * This module is the reward the *released Laya checkpoint's own* training
 //!   code scores with - including the per-(qtype, cardinality) temperatures
 //!   `rl_agent_config.json` ships, which were fitted post-hoc against

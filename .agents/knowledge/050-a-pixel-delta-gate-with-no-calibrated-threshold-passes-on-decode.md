@@ -88,7 +88,7 @@ symptom:**
   `DEFAULT_IMAGE_CRF = 33` - before the resize, "to match the compression
   the model was trained on", and raises rather than defaulting when `crf` is
   unresolved. The port feeds the VAE a pristine PNG. It also resizes with
-  `resize_exact` (aspect-distorting, Lanczos) where the reference does
+  `resize_exact` (aspect-distorting, windowed-sinc) where the reference does
   aspect-preserving `resize_and_center_crop` (bilinear).
 
 **Consequences worth keeping:**

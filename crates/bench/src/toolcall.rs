@@ -406,7 +406,7 @@ impl Benchmark for Toolcall {
     }
 }
 
-/// `k` distinct indices in `[0, n)` via partial Fisher–Yates (requires `k <= n`).
+/// `k` distinct indices in `[0, n)` via partial unbiased in-place (requires `k <= n`).
 fn sample_distinct_indices(k: usize, n: usize, rng: &mut Rng) -> Vec<usize> {
     assert!(k <= n, "cannot draw {k} distinct of {n}");
     let mut pool: Vec<usize> = (0..n).collect();
@@ -417,7 +417,7 @@ fn sample_distinct_indices(k: usize, n: usize, rng: &mut Rng) -> Vec<usize> {
     pool[..k].to_vec()
 }
 
-/// In-place Fisher–Yates shuffle driven by the shared deterministic [`Rng`].
+/// In-place unbiased in-place shuffle driven by the shared deterministic [`Rng`].
 fn shuffle<T>(items: &mut [T], rng: &mut Rng) {
     let n = items.len();
     for i in (1..n).rev() {

@@ -14,15 +14,15 @@
 //! an application or a sample can evaluate predictions without pulling in a
 //! model.
 //!
-//! - [`estimate`]: weighted Kaplan-Meier, the censoring distribution, and
-//!   Aalen-Johansen cumulative incidence for one cause among several.
-//! - [`concordance`]: Harrell's C and Uno's truncated, IPCW-weighted C, with
+//! - [`estimate`]: weighted product-limit estimator, the censoring distribution, and
+//!   competing-risks cumulative-incidence estimator cumulative incidence for one cause among several.
+//! - [`concordance`]: concordance and Uno's truncated, IPCW-weighted C, with
 //!   competing causes, in `O(n log n)`.
 //! - [`auc`]: the time-dependent AUROC at a horizon (cumulative cases
 //!   against dynamic controls, IPCW-weighted), with competing causes.
 //! - [`binary`]: a probability for an outcome observed in full: weighted
 //!   AUROC and average precision, calibration, and screening operating points.
-//! - [`brier`]: the IPCW Brier score at a horizon and its integral.
+//! - [`brier`]: the IPCW squared-error probability score at a horizon and its integral.
 //! - [`compare`]: two models on the same data - the corrected resampled
 //!   t-test across folds and a cluster bootstrap over units.
 //! - [`calibration`]: D-calibration over predicted survival, and calibration
@@ -35,7 +35,7 @@
 //!   adjusted by a model's prognostic score (PROCOVA), with HC3 errors.
 //! - [`recalibration`]: a predicted risk by a horizon mapped through a fitted
 //!   logistic recalibration (intercept, or intercept and slope), under IPCW.
-//! - [`rmst`]: restricted mean survival time (Kaplan-Meier or from a predicted
+//! - [`rmst`]: restricted mean survival time (product-limit estimator or from a predicted
 //!   curve), its calibration by risk group, and a Gompertz reference table with
 //!   delayed entry that maps an RMST to an equivalent age.
 //! - [`venn_abers`]: a predicted risk by a horizon as a Venn-Abers interval,
@@ -43,7 +43,7 @@
 //!
 //! Weights are sampling weights: a subject of integer weight `w` contributes
 //! exactly as `w` copies of it would (the tests hold every metric to that).
-//! Concordance is not a proper scoring rule; report it beside a Brier score
+//! Concordance is not a proper scoring rule; report it beside a squared-error probability score
 //! and calibration, never alone.
 
 pub mod auc;

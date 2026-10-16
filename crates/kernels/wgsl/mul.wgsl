@@ -10,7 +10,7 @@
 // @quant none
 // @dtype f32
 //
-// Elementwise Hadamard product.
+// Elementwise product.
 //   y[i] = a[i] * b[i]         one invocation per element, i in [0, n)
 // Backward COMPOSES from this same kernel (no new kernel):
 //   da = mul(dy, b);  db = mul(dy, a)

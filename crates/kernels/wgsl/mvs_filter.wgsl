@@ -12,7 +12,7 @@
 // @import camera
 // @import mvs
 //
-// The last word on a reference view's range map (Schönberger et al., ECCV
+// The last word on a reference view's range map (pixelwise view selection, ECCV
 // 2016, §4.4 / §5 - the consistency test also used for fusion). Source view
 // k agrees with pixel p's hypothesis X = r d_p when k's own range map, read at
 // the pixel X images to, puts the surface where p does: that range is taken

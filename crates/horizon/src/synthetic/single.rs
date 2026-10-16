@@ -95,7 +95,7 @@ mod tests {
         for s in &a[..200] {
             s.validate().unwrap();
         }
-        // Kaplan-Meier handles the censoring: its failure probability by 4
+        // product-limit estimator handles the censoring: its failure probability by 4
         // years against the mean closed-form CIF.
         let obs: Vec<survival::Obs> = outcomes(&a, &[CODE])
             .into_iter()

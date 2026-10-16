@@ -18,13 +18,13 @@
 //! subjects' sampling weights:
 //!
 //! - Uno's concordance truncated at the horizon, the time-dependent AUC and
-//!   the IPCW Brier score at the horizon;
-//! - the Brier score integrated over `(0, horizon]` on an even grid;
+//!   the IPCW squared-error probability score at the horizon;
+//! - the squared-error probability score integrated over `(0, horizon]` on an even grid;
 //! - the recalibration slope and intercept, the intercept with the slope fixed
 //!   at one (calibration in the large), observed over expected and the
-//!   expected calibration error, the observed side an Aalen-Johansen estimate;
+//!   expected calibration error, the observed side an competing-risks cumulative-incidence estimator estimate;
 //! - when subjects carry a `group_id`, percentile intervals of the
-//!   concordance, AUC and Brier score from a bootstrap that resamples whole
+//!   concordance, AUC and squared-error probability score from a bootstrap that resamples whole
 //!   groups ([`survival::compare::cluster_bootstrap_by`]), so members of a
 //!   household or a site are never treated as independent.
 //!
@@ -54,7 +54,7 @@ use crate::train::event_nll;
 
 /// Risk groups in the calibration table behind the expected calibration error.
 pub const CALIBRATION_GROUPS: usize = 10;
-/// Grid points of the integrated Brier score.
+/// Grid points of the integrated squared-error probability score.
 pub const INTEGRATION_POINTS: usize = 20;
 
 /// A cluster bootstrap of the metrics.
@@ -135,7 +135,7 @@ pub struct Intervals {
     pub uno_c: Option<Interval>,
     /// The time-dependent AUC.
     pub auc: Option<Interval>,
-    /// The IPCW Brier score.
+    /// The IPCW squared-error probability score.
     pub brier: Option<Interval>,
 }
 
@@ -153,7 +153,7 @@ pub struct CalibrationMetrics {
     /// (0 is ideal), the shift in log-odds that makes the average predicted
     /// risk the observed one.
     pub intercept_in_the_large: Option<f64>,
-    /// Observed (Aalen-Johansen) over expected (mean predicted) risk.
+    /// Observed (competing-risks cumulative-incidence estimator) over expected (mean predicted) risk.
     pub observed_over_expected: Option<f64>,
     /// Weighted mean absolute gap between observed and expected over
     /// [`CALIBRATION_GROUPS`] risk groups.
@@ -173,9 +173,9 @@ pub struct HorizonMetrics {
     pub uno_c: Option<f64>,
     /// The time-dependent AUC at the horizon.
     pub auc: Option<f64>,
-    /// The IPCW Brier score at the horizon.
+    /// The IPCW squared-error probability score at the horizon.
     pub brier: Option<f64>,
-    /// The Brier score integrated over `(0, horizon]`.
+    /// The squared-error probability score integrated over `(0, horizon]`.
     pub integrated_brier: Option<f64>,
     /// Calibration at the horizon.
     pub calibration: CalibrationMetrics,

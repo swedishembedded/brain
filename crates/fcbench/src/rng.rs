@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! A tiny deterministic PRNG for scenario generation — seeded, reproducible,
-//! dependency-free. SplitMix64 for the stream, Box–Muller for Gaussians.
+//! dependency-free. SplitMix64 for the stream, paired uniform-to-normal transform for Gaussians.
 //!
 //! Reproducibility matters here: a scenario sample must be identical on every
 //! machine and run so "data the model has never seen" is *guaranteed unseen* yet
@@ -34,7 +34,7 @@ impl Rng {
         ((self.next_u64() >> 40) as f32) / (1u64 << 24) as f32
     }
 
-    /// Standard normal via Box–Muller (caches the spare deviate).
+    /// Standard normal via paired uniform-to-normal transform (caches the spare deviate).
     pub fn normal(&mut self) -> f32 {
         if let Some(s) = self.spare.take() {
             return s;

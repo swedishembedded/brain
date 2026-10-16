@@ -124,7 +124,7 @@ Laya is zero-shot throughout - at M7 no training loop existed for it yet
 | intents seen (65 intents, 300 steps) | 16.0% acc | 78.0% acc | 9.5% |
 | intents unseen (12 held-back intents) | 6.0% acc | 71.0% acc | 9.5% |
 | intents shuffled-state control | 6.0% acc | 2.0% acc | 9.5% |
-| salesagent (final turn, held-out convs) | 0.580 acc / 0.592 AUC-ROC / 0.276 Brier (700 steps) | 0.520 acc / 0.254 Brier (act head: 100% one class) | - |
+| salesagent (final turn, held-out convs) | 0.580 acc / 0.592 AUC-ROC / 0.276 squared-error probability score (700 steps) | 0.520 acc / 0.254 squared-error probability score (act head: 100% one class) | - |
 
 Read these honestly: the decide arm's `intents` run is undertrained (300 of
 the sample's own 2000-step default) and does not itself clear the "reads

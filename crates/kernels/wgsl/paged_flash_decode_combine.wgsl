@@ -34,7 +34,7 @@
 // `m_new`, so it folds in as a true no-op with no special case needed here
 // either.
 //
-// This same two-pass split/merge shape is `flash-decoding`'s (Dao et al.)
+// This same two-pass split/merge shape is `flash-decoding`'s
 // and vLLM's `paged_attention_v2` partition-then-reduce design; no code from
 // either is transcribed, only the same well-known merge identity re-derived
 // from this repo's own `paged_flash_decode.wgsl` (its per-tile update is

@@ -38,7 +38,7 @@
 //! ## Reproducibility
 //!
 //! `--seed` selects the initial noise through [`data::rng::Rng`] (SplitMix64 +
-//! Box-Muller), so the same seed gives the same video on the same build. It is
+//! paired uniform-to-normal transform), so the same seed gives the same video on the same build. It is
 //! deliberately **not** torch's Philox: reproducing that bit-for-bit is not
 //! something brain's goldens ask for anywhere, and pretending otherwise would
 //! be a claim no test backs.

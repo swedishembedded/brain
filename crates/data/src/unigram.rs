@@ -14,7 +14,7 @@
 //! ```
 //!
 //! which is a shortest-path problem over the lattice of pieces that match at
-//! each byte offset, solved by Viterbi in one left-to-right sweep. There is no
+//! each byte offset, solved by max-product dynamic programming in one left-to-right sweep. There is no
 //! merge table at all - the file ships `(piece, log-probability)` pairs and
 //! nothing else.
 //!
@@ -30,7 +30,7 @@
 //! piece-type semantics and then hoping the result agrees with the JSON;
 //! reading the JSON reproduces the real pipeline directly, needs no protobuf
 //! decoder, and every rule it applies is written down in the file itself. The
-//! goldens are dumped from both the library and an independent Viterbi over
+//! goldens are dumped from both the library and an independent max-product dynamic programming over
 //! this same JSON, so "the file" is checked, not trusted.
 //!
 //! ## The pipeline, in order
@@ -53,7 +53,7 @@
 //! 3. **Metaspace pre-tokenizer** - every space becomes `U+2581`, one is
 //!    prepended, and the segment splits so that each pre-token *starts* with
 //!    `U+2581` (`SplitDelimiterBehavior::MergedWithNext`).
-//! 4. **Viterbi** per pre-token, over BYTES with char-boundary starts. A
+//! 4. **max-product dynamic programming** per pre-token, over BYTES with char-boundary starts. A
 //!    character no piece covers becomes `unk`, scored `min_score - 10`, and
 //!    consecutive unknown characters **fuse** into one `unk` token.
 //! 5. **Post-processor** - `TemplateProcessing`'s single-sequence prefix and
@@ -553,7 +553,7 @@ impl UnigramTokenizer {
             .map(|(c, id)| (c.len(), *id))
     }
 
-    /// Metaspace + Viterbi over one added-token-free segment.
+    /// Metaspace + max-product dynamic programming over one added-token-free segment.
     fn encode_segment(&self, seg: &str, out: &mut Vec<u32>) {
         if seg.is_empty() {
             return;
@@ -578,7 +578,7 @@ impl UnigramTokenizer {
         }
     }
 
-    /// One Viterbi sweep over `text`, appending the best segmentation's ids.
+    /// One max-product dynamic programming sweep over `text`, appending the best segmentation's ids.
     fn viterbi(&self, text: &str, out: &mut Vec<u32>) {
         let n = text.len();
         if n == 0 {

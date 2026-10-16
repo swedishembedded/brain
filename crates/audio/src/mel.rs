@@ -6,7 +6,7 @@
 //!
 //! The exact windowing / mel constants are matched to the Qwen3-TTS reference
 //! front-end in Phase 3; the parameters here are configurable so that match is a
-//! config change, not a rewrite. FFT is an iterative radix-2 Cooley–Tukey when
+//! config change, not a rewrite. FFT is an iterative radix-2 when
 //! `n_fft` is a power of two, else Bluestein's algorithm (arbitrary `n_fft`,
 //! e.g. CosyVoice's 1920 = 2^7*3*5) - see this module's `fft` function.
 
@@ -50,7 +50,7 @@ fn hann(win: usize) -> Vec<f32> {
     (0..win).map(|n| 0.5 - 0.5 * (2.0 * PI * n as f32 / win as f32).cos()).collect()
 }
 
-/// In-place FFT, `re`/`im` length n: radix-2 Cooley–Tukey when `n` is a power
+/// In-place FFT, `re`/`im` length n: radix-2 when `n` is a power
 /// of two, else Bluestein's algorithm (chirp-z), which reduces an arbitrary-
 /// length DFT to a power-of-two convolution - the technique
 /// `asr_frontend::fft_any` already uses in f64 for the ASR front ends,

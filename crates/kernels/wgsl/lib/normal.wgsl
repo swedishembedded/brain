@@ -7,7 +7,7 @@
 // is `model::hostmath::{log_ndtr, mills}` and the kernel tests hold the two to
 // each other.
 //
-// erfc uses the Chebyshev-fitted exponential form of Press et al. (Numerical
+// erfc uses the Chebyshev-fitted exponential form (Numerical
 // Recipes, `erfcc`): erfc(z) = t * exp(-z^2 + poly(t)), t = 1 / (1 + z/2), for
 // z >= 0, fractional error below 1.2e-7 everywhere. Written in log space,
 // log erfc(z) = log t - z^2 + poly(t) is finite for any z >= 0, which is what

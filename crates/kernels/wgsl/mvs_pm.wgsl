@@ -13,9 +13,9 @@
 // @import mvs
 //
 // One colour of one red-black PatchMatch iteration over a reference view
-// (Schönberger et al., "Pixelwise View Selection for Unstructured Multi-View
+// ("Pixelwise View Selection for Unstructured Multi-View
 // Stereo", ECCV 2016, for the per-pixel plane hypotheses and the bilaterally
-// weighted NCC; Xu & Tao, "Multi-Scale Geometric Consistency Guided Multi-View
+// weighted NCC; "Multi-Scale Geometric Consistency Guided Multi-View
 // Stereo", CVPR 2019, for the adaptive checkerboard propagation and the
 // multi-hypothesis joint view selection).
 //
@@ -24,7 +24,7 @@
 // pixel only ever reads pixels of the OTHER colour, which this dispatch does
 // not write, so updating `state` in place is race-free.
 //
-// Photometric cost (Schönberger §4.1). The patch is sampled every `step`
+// Photometric cost (pixelwise view selection §4.1). The patch is sampled every `step`
 // pixels within `radius` of p; sample q's ray meets the plane at
 // (n.(r d_p) / n.d_q) d_q, which is carried into source view k by its rigid
 // transform and imaged through its OWN lens (`lens_project`) - the exact
@@ -34,13 +34,13 @@
 // from the reference alone; cost = 1 - NCC in [0, 2]. A patch whose weighted
 // variance is below `min_var` in either view carries no evidence and costs 2.
 //
-// Adaptive propagation (Xu & Tao §3.1). Around p, eight regions of the other
+// Adaptive propagation (multi-scale consistency paper §3.1). Around p, eight regions of the other
 // colour: along each image axis a near V-shaped region (the pixel one step
 // out, then pairs fanning out to either side, 7 pixels) and a far strip
 // (every second pixel from 3 to 23 out, 11 pixels). Each region contributes
 // the plane of its lowest-cost pixel, re-intersected with p's own ray.
 //
-// Joint view selection (Xu & Tao §3.2). The current hypothesis and the eight
+// Joint view selection (multi-scale consistency paper §3.2). The current hypothesis and the eight
 // candidates are scored against every source view: a view is trusted when at
 // least two hypotheses match it well (cost < tau_good) and at most three
 // badly (cost > tau_bad) - one lucky match is not evidence of visibility, an
@@ -48,8 +48,8 @@
 // its best good cost. With no view trusted, every view is weighted by its
 // best cost alone. A hypothesis's cost is the weighted mean over views.
 //
-// Geometric consistency (flag bit 0; Xu & Tao §3.3, after Schönberger
-// §4.3). Each view's term adds geo_weight * min(e, geo_max): the hypothesis's
+// Geometric consistency (flag bit 0; multi-scale consistency paper §3.3, after the pixelwise view selection
+// paper §4.3). Each view's term adds geo_weight * min(e, geo_max): the hypothesis's
 // point is imaged into source k, k's current range at that pixel is taken
 // along k's ray to it, and that point is imaged back into the reference - e
 // is its distance, in pixels, from p's centre. Zero exactly when the two

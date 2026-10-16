@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! LPIPS, the learned perceptual image patch similarity of Zhang et al. 2018
-//! ("The Unreasonable Effectiveness of Deep Features as a Perceptual
+//! LPIPS, the learned perceptual image patch similarity (2018,
+//! "The Unreasonable Effectiveness of Deep Features as a Perceptual
 //! Metric"), version 0.1 with the AlexNet trunk: the perceptual distance
 //! novel-view synthesis is conventionally reported in next to PSNR and SSIM.
 //! Lower is closer; identical images are exactly 0.

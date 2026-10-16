@@ -7,7 +7,7 @@
 //! visits; death after entry depends on its value at entry. Both encoders are
 //! trained on subjects whose last visit was at most two years before entry,
 //! then asked about subjects whose last visit was six to ten years before.
-//! The best possible prediction is known exactly (a Kalman filter over the
+//! The best possible prediction is known exactly (a recursive state-estimation filter over the
 //! visits): the further back the last visit, the closer it is to the
 //! population's. The set encoder only knows gaps through time-ago embeddings
 //! it never saw at that length; the state across visits forgets over the

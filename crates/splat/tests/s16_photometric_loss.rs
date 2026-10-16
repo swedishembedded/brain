@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The photometric objective: L1 + D-SSIM, the loss 3D Gaussian Splatting is
-//! defined with (Kerbl et al., SIGGRAPH 2023, Eq. 7: `(1-λ)L1 + λ(1-SSIM)`,
+//! defined with (SIGGRAPH 2023, Eq. 7: `(1-λ)L1 + λ(1-SSIM)`,
 //! λ = 0.2), where `fit` had only ever minimised MSE.
 //!
 //! MSE and L1+SSIM do not differ by a constant factor. MSE is indifferent to

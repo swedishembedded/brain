@@ -505,9 +505,9 @@ pub fn add_noise(
 /// * `cosine` - `⟨a, b⟩ / (‖a‖·‖b‖)`, **uncentred**. On non-negative pixel data
 ///   this saturates near 1 for anything remotely similar, which is exactly why
 ///   it is never reported alone.
-/// * `edge_corr` - Pearson correlation between the two images' Sobel gradient
+/// * `edge_corr` - Pearson correlation between the two images' 3x3 gradient
 ///   magnitudes, computed on Rec.601 luma (`0.299R + 0.587G + 0.114B`) over the
-///   interior (the 1-pixel border, where the 3x3 Sobel window would hang off
+///   interior (the 1-pixel border, where the 3x3 3x3 gradient window would hang off
 ///   the image, is excluded). This is the structural metric: it ignores a
 ///   global brightness or contrast shift and reports whether the *edges* still
 ///   land in the same places with the same relative strength.
@@ -543,7 +543,7 @@ pub fn compare(a: &[u8], b: &[u8], h: usize, w: usize) -> Result<ImageMetrics, S
     })
 }
 
-/// Rec.601 luma Sobel gradient magnitude over the interior pixels.
+/// Rec.601 luma 3x3 gradient magnitude over the interior pixels.
 fn sobel_mag(px: &[u8], h: usize, w: usize) -> Vec<f64> {
     let luma: Vec<f64> = (0..h * w)
         .map(|i| 0.299 * px[3 * i] as f64 + 0.587 * px[3 * i + 1] as f64 + 0.114 * px[3 * i + 2] as f64)

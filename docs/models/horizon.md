@@ -214,7 +214,7 @@ irregular, longitudinal}`) return the truth a score needs, and
 (`survival_single`, `survival_competing`, `survival_irregular`,
 `survival_longitudinal`). Each trains a small horizon model on the device
 `BRAIN_BACKEND` selects and scores it against the generator's truth with
-`brain-survival` (integrated Brier, Harrell/Uno C, time-dependent AUC,
+`brain-survival` (integrated squared-error probability score, concordance/Uno C, time-dependent AUC,
 calibration at a horizon); the tests in `crates/bench/tests/survival_bench.rs`
 hold them to:
 
@@ -222,7 +222,7 @@ hold them to:
   predicted risk ranks like the true risk and is calibrated.
 - `survival_competing`: two causes with different covariates and time shapes;
   the model's cumulative incidence matches the analytic one (the generator's
-  own test holds that to Aalen-Johansen on the simulated data).
+  own test holds that to competing-risks cumulative-incidence estimator on the simulated data).
 - `survival_irregular`: the visit times carry the information and the values
   are noise; the model beats the same model trained with every subject's
   visits replaced by another's (`irregular::swap_visits`) on held-out event
@@ -243,7 +243,7 @@ split, seed and optimisation steps (early stopping is off so every variant
 takes every step; the best held-out evaluation's weights are kept), on two of
 the generators above: `irregular` (visit times carry the information) and
 `longitudinal` (a hidden state seen through noisy partial measurements). It
-prints one row per variant: held-out event NLL, integrated Brier score,
+prints one row per variant: held-out event NLL, integrated squared-error probability score,
 time-dependent AUC at the horizon and training time.
 
 ```bash
@@ -267,7 +267,7 @@ model.save("model")?;
 ```
 
 Training early-stops on the held-out event likelihood and keeps the best
-model. Evaluate with `brain::survival`: Uno's concordance, the IPCW Brier
+model. Evaluate with `brain::survival`: Uno's concordance, the IPCW squared-error probability score
 score and its integral, D-calibration and calibration at a horizon, all
 accepting sampling weights. `brain::survival::recalibration` maps a risk by a
 horizon through a logistic recalibration fitted on subjects the model was not
@@ -354,7 +354,7 @@ percentile, detection limits counted at their limit), per categorical
 variable the levels seen, the event codes seen in histories, the ranges of
 entry clock, calendar time and history length (observations plus events, and
 distinct visits), and the mean and covariance of the learned state for a
-Mahalanobis distance (kept only when the training set has at least four
+covariance-scaled distance (kept only when the training set has at least four
 subjects per state dimension). Units are the
 vocabulary's, not the support's: a unit mix-up is rejected by name before a
 range could show it.
@@ -368,7 +368,7 @@ continuous `ood_score` and typed warnings:
 | `value_out_of_range` | a measurement is beyond the variable's range plus a margin (a quarter of the range's width by default) |
 | `entry_out_of_range`, `calendar_out_of_range` | the entry clock or calendar time is beyond the trained range plus the margin |
 | `history_length` | observations plus events, or visits, are far below or above any in training |
-| `state_out_of_support` | the Mahalanobis distance of the learned state is beyond the training set's 99.5th percentile plus half again |
+| `state_out_of_support` | the covariance-scaled distance of the learned state is beyond the training set's 99.5th percentile plus half again |
 
 A unit stated for a variable the model records as unitless is listed under
 `advisories` (`unit_not_recorded`) beside the warnings: it never changes
@@ -467,12 +467,12 @@ the model on held-out subjects (never trained, early-stopped or calibrated on).
 Per outcome code and horizon, under the subjects' sampling weights and with a
 code competing with the absorbing codes as its cumulative incidence does:
 Uno's concordance truncated at the horizon, the time-dependent AUC and the
-IPCW Brier score at the horizon, the Brier score integrated over `(0, horizon]`
+IPCW squared-error probability score at the horizon, the squared-error probability score integrated over `(0, horizon]`
 (20 grid points), and calibration (recalibration slope and intercept,
-observed over expected with an Aalen-Johansen observed side, and the expected
+observed over expected with an competing-risks cumulative-incidence estimator observed side, and the expected
 calibration error over ten risk groups). Subjects with a `group_id` get
 percentile intervals (95%, 200 resamples, seeded) of the concordance, AUC and
-Brier score from a bootstrap that resamples whole groups
+squared-error probability score from a bootstrap that resamples whole groups
 (`survival::compare::cluster_bootstrap_by`). The held-out event NLL is one
 number per subject set.
 
@@ -486,7 +486,7 @@ number per subject set.
 - Measured (`forecast_history_and_evaluate_a_trained_model`, SDK; 6000 trained
   subjects, 6000 evaluated in households of two): for `death:a` by 10 years,
   953 events, Uno C 0.729, AUC 0.771 against 0.781 for the generator's true
-  risks, Brier 0.1276, integrated Brier 0.0764, calibration slope 1.07,
+  risks, squared-error probability score 0.1276, integrated squared-error probability score 0.0764, calibration slope 1.07,
   observed over expected 1.10, expected calibration error 0.019.
 
 ## Training, evaluation and calibration from the command line
@@ -519,8 +519,8 @@ brain horizon predict --weights model/ --history patient.json --json
   nothing is left behind. It prints a report (`--json`): per member the seed,
   steps, losses, held-out event NLL, parameter count and weights digest.
 - **`eval`** is `TimelineModel::evaluate` (see Evaluation) printed as JSON: per
-  outcome code and horizon, Uno's C, the time-dependent AUC, the IPCW Brier
-  score, the integrated Brier score and calibration, and the event NLL.
+  outcome code and horizon, Uno's C, the time-dependent AUC, the IPCW squared-error probability score
+  score, the integrated squared-error probability score and calibration, and the event NLL.
   Horizons with fewer than `--min-events` events are absent from `results` and
   listed under `absent`. It takes a single model; evaluate an ensemble's member
   (`members/<n>`).

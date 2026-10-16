@@ -82,7 +82,7 @@ pub struct ChunkState {
 /// `n` samples of standard-normal noise via [`Rng::next_gaussian`] - the
 /// canonical Gaussian source (`data::rng::Lcg` has no Gaussian sampler and
 /// this crate's own convention, per `data::rng`'s doc, is to reach for
-/// `Rng` rather than hand-roll a fresh Box-Muller copy on top of `Lcg`).
+/// `Rng` rather than hand-roll a fresh paired uniform-to-normal transform copy on top of `Lcg`).
 fn gaussian_vec(seed: u64, n: usize) -> Vec<f32> {
     let mut r = Rng::new(seed);
     (0..n).map(|_| r.next_gaussian() as f32).collect()

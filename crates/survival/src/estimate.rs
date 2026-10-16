@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Non-parametric estimates, weighted: Kaplan-Meier survival, the censoring
+//! Non-parametric estimates, weighted: product-limit estimator survival, the censoring
 //! distribution `G` that inverse-probability-of-censoring weights divide by,
-//! and Aalen-Johansen cumulative incidence for one cause among competing ones.
+//! and competing-risks cumulative-incidence estimator cumulative incidence for one cause among competing ones.
 //!
 //! Ties follow the usual convention: at a shared time, events happen before
 //! censorings, so a subject censored at `t` is still at risk of an event at
@@ -94,7 +94,7 @@ fn n_causes(obs: &[Obs]) -> usize {
         .map_or(1, |c| c + 1)
 }
 
-/// Kaplan-Meier probability of no event of ANY cause.
+/// product-limit estimator probability of no event of ANY cause.
 pub fn kaplan_meier(obs: &[Obs]) -> Step {
     let t = table(obs, n_causes(obs));
     let mut s = 1.0;
@@ -113,7 +113,7 @@ pub fn kaplan_meier(obs: &[Obs]) -> Step {
     }
 }
 
-/// The censoring distribution `G(t) = P(C > t)`: Kaplan-Meier with censoring
+/// The censoring distribution `G(t) = P(C > t)`: product-limit estimator with censoring
 /// as the event and the subjects with an event at `t` removed from the risk
 /// set at `t` (events precede censorings at a tie).
 pub fn censoring(obs: &[Obs]) -> Step {
@@ -135,7 +135,7 @@ pub fn censoring(obs: &[Obs]) -> Step {
     }
 }
 
-/// Aalen-Johansen cumulative incidence of `cause`, every other cause competing:
+/// competing-risks cumulative-incidence estimator cumulative incidence of `cause`, every other cause competing:
 /// `F(t) = sum_{s <= t} S(s-) d_cause(s) / n(s)`.
 pub fn aalen_johansen(obs: &[Obs], cause: usize) -> Step {
     let t = table(obs, n_causes(obs).max(cause + 1));

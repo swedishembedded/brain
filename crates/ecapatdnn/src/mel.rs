@@ -28,7 +28,7 @@ fn hann(win: usize) -> Vec<f32> {
     (0..win).map(|n| 0.5 - 0.5 * (2.0 * PI * n as f32 / win as f32).cos()).collect()
 }
 
-/// In-place iterative radix-2 Cooley–Tukey FFT (n a power of two).
+/// In-place iterative radix-2 FFT (n a power of two).
 fn fft(re: &mut [f32], im: &mut [f32]) {
     let n = re.len();
     let mut j = 0usize;

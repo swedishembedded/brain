@@ -14,7 +14,7 @@
 //!
 //! Predicting `c` requires the model to internalize the **group structure** of
 //! `(ℤ/pℤ, +)` — there is no per-token shortcut, every `(a,b)` pair maps to its
-//! own residue. This is the task from Power et al.'s *Grokking* paper: trained on
+//! own residue. This is the task from the *Grokking* paper: trained on
 //! a fraction of the `p²` possible facts, a transformer first **memorizes** the
 //! training set (train-acc → 1 while test-acc stays at chance) and only much
 //! later, with enough optimization / weight decay, **generalizes** (test-acc
@@ -155,7 +155,7 @@ impl ModAdd {
     fn split_facts(&self, seed: u64) -> (Vec<Fact>, Vec<Fact>) {
         let mut facts: Vec<Fact> =
             (0..self.p).flat_map(|a| (0..self.p).map(move |b| (a, b))).collect();
-        // Fisher–Yates shuffle so train/test are a random partition of the table.
+        // unbiased in-place shuffle so train/test are a random partition of the table.
         let mut rng = Rng::new(seed);
         let n = facts.len();
         for i in 0..n {

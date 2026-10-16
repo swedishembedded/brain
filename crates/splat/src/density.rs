@@ -6,7 +6,7 @@
 //! The heuristic asks one question of each gaussian - did its centre receive a
 //! large gradient? - and that question has two known blind spots. A gaussian
 //! big enough to straddle an edge is pulled both ways and its summed gradient
-//! cancels (the "gradient collision" AbsGS, Ye et al. 2024, fixes by summing
+//! cancels (the "gradient collision" absolute-gradient accumulation (2024) fixes by summing
 //! magnitudes per pixel - which [`crate::renderer::SplatGrads::d_absgrad`]
 //! already does). And the gradient says nothing about how much of the
 //! remaining IMAGE ERROR a gaussian is responsible for, which is the question
@@ -31,7 +31,7 @@
 //!    percentile does not.
 //! 2. **Budget** the round from a growth schedule `N_target(round)` that
 //!    reaches `max_gaussians` about two thirds of the way through density
-//!    control and then holds (Taming 3DGS, Mallick et al. 2024: population
+//!    control and then holds (population budgeting for 3DGS, 2024: population
 //!    is a resource to schedule, not a side effect of thresholds).
 //! 3. **Reclaim** what contributes nothing - judged on its record, not one
 //!    round. Each gaussian carries a running average of whether it starved
@@ -41,7 +41,7 @@
 //!    rounds of recovering. A gaussian only temporarily starved recovers and
 //!    its record fades; one that is genuinely redundant is removed, even if
 //!    it flickers back to life every other round (recovery-aware pruning,
-//!    after ImprovedGS, Deng et al. 2026). Reclaimed slots pay for new
+//!    after improved-GS, 2026). Reclaimed slots pay for new
 //!    samples, the way 3DGS-MCMC relocation recycles dead ones.
 //! 4. **Refine** the top-scored gaussians within the budget, by SHAPE: one
 //!    larger than a pixel and elongated is split along its long axis into
@@ -173,7 +173,7 @@ pub fn range_residual(rendered: &[f32], alpha: &[f32], prior: &[f32]) -> Vec<f32
         .collect()
 }
 
-/// Edge strength of an interleaved RGB image in [0,1]: the Sobel magnitude of
+/// Edge strength of an interleaved RGB image in [0,1]: the 3x3 gradient magnitude of
 /// its luminance, normalized by its own 99th percentile so the measure is
 /// independent of the photograph's contrast.
 pub fn edge_map(rgb: &[f32], w: usize, h: usize) -> Vec<f32> {
@@ -596,7 +596,7 @@ fn unit(q: &[f32]) -> [f32; 4] {
     [q[0] / n, q[1] / n, q[2] / n, q[3] / n]
 }
 
-/// Standard normal from the scene's own indices (Box-Muller).
+/// Standard normal from the scene's own indices (paired uniform-to-normal transform).
 fn normal(i: usize, seed: u64) -> f32 {
     let u = jitter(i, seed).max(1e-7);
     let v = jitter(i, seed ^ 0x1234_5678_9abc_def0);

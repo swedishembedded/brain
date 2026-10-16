@@ -1013,7 +1013,7 @@ eval, not back up near a fresh adapter's initial loss - and a `resume=false`
 control run (same base/seed/data as cycle 1) is asserted to reproduce cycle
 1's own initial loss almost exactly first, so that comparison has a
 trustworthy yardstick. `‖B·A‖` (the tracked target leaf's LoRA delta
-Frobenius norm, reloaded from disk each time) is asserted to grow strictly
+matrix L2 norm, reloaded from disk each time) is asserted to grow strictly
 across the resume boundary; each cycle is kept deliberately short (8 steps)
 so cycle 1 alone does not already reach this tiny task's loss floor, which
 is where the norm stops moving monotonically.

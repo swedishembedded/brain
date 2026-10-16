@@ -37,7 +37,7 @@
 // each key's head_dim dot product, online-softmax rescale once per tile) -
 // this kernel is NOT a different attention formulation, only a bounded tile
 // RANGE and a partial-state output. The two-pass split-then-combine shape
-// itself is the same one `flash-decoding` (Dao et al.) and vLLM's
+// itself is the same one `flash-decoding` and vLLM's
 // `paged_attention_v2` partition/reduce design use for the identical
 // occupancy reason at small batch - no code from either is transcribed here
 // (both are independent implementations of the same well-known online-

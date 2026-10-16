@@ -3721,7 +3721,7 @@ land. Known traps already identified from reading (not yet test-pinned):
 ## Scope that collapsed once the reference was read
 
 - The HF filenames imply an "int8-convrot" quantization scheme; grepping the
-  full source tarball found zero references to convolution-rotation/Hadamard
+  full source tarball found zero references to convolution-rotation/elementwise product
   quantization actually wired into any load path - see the INT8 note above.
 - `modality_tiling.py` looked like it might be the audio/video mixing mechanism
   from its name; it is spatial/temporal tiling of a video-only token sequence
@@ -5291,7 +5291,7 @@ inconsistencies between scenes" (as characterised by arXiv 2412.17254,
 "Enhancing Long Video Generation Consistency without Tuning") - which is a
 defect when the cut is unintended and is the intended output here. Everything
 else in that survey keeps the visual history and varies how the TEXT binds:
-Gen-L-Video (Wang et al. 2023) interpolates between prompts over transitional
+Gen-L-Video (2023) interpolates between prompts over transitional
 frames, FreeNoise (2310.15169) does the same through its Motion Injection, MinT
 (2412.05263) binds each event to a time span with ReRoPE, Mask2DiT (2503.19881)
 masks text-to-segment attention while keeping cross-segment vision, MEVG

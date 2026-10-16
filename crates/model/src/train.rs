@@ -133,8 +133,8 @@ impl Default for FitOpts {
 /// signature is a fast initial descent and then a flat line at a loss ABOVE
 /// what the same trajectory reaches once the rate comes down.
 ///
-/// **Why `hold` exists, rather than cosine from step 0.** Hägele et al.
-/// (arXiv:2405.18392) measure constant-rate training followed by a short
+/// **Why `hold` exists, rather than cosine from step 0.** The constant-then-cooldown study
+/// (arXiv:2405.18392) measures constant-rate training followed by a short
 /// COOLDOWN against a full cosine and find the two scale "predictably and
 /// reliably" alike, with the cooldown's benefit saturating at roughly 20% of
 /// the run. That shape has a property a full cosine does not: the rate for
@@ -458,7 +458,7 @@ impl EpochOrder {
         EpochOrder { seed, examples, drawn, epoch, permutation: Self::shuffled(seed, examples, epoch) }
     }
 
-    /// Fisher-Yates over the examples, seeded by the run's seed and the epoch.
+    /// unbiased in-place over the examples, seeded by the run's seed and the epoch.
     fn shuffled(seed: u64, examples: usize, epoch: u64) -> Vec<usize> {
         let mut rng = Rng::new(seed ^ epoch.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mut order: Vec<usize> = (0..examples).collect();
@@ -1564,8 +1564,7 @@ mod tests {
         assert!((0..500).all(|it| c.at(it) == 1e-4));
     }
 
-    /// `hold` is the constant-then-cooldown shape (Hägele et al.
-    /// arXiv:2405.18392): the rate for every step before the cooldown is the
+    /// `hold` is the constant-then-cooldown shape (arXiv:2405.18392): the rate for every step before the cooldown is the
     /// peak and does NOT depend on the step budget, which is the property that
     /// makes a run safe to extend. Only the tail is a function of the total.
     #[test]

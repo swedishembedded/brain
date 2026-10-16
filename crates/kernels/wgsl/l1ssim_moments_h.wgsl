@@ -10,7 +10,7 @@
 // @quant none
 // @dtype f32
 //
-// The first of four separable passes of the SSIM term (Wang et al., IEEE TIP
+// The first of four separable passes of the SSIM term (structural similarity, IEEE TIP
 // 2004; the window 3D Gaussian Splatting trains with: 11 taps, sigma 1.5,
 // zero padding). One thread per pixel reads the prediction (RGBA, stride 4)
 // and the truth (RGB, stride 3) along its row and writes the five window

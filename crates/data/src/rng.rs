@@ -8,7 +8,7 @@
 //! distributions) rather than bit-identical. What matters for the benchmark is
 //! that a fixed `seed` always yields the same corpus — that holds here.
 //!
-//! Algorithm: SplitMix64 (Steele et al.) — tiny, fast, and well-distributed.
+//! Algorithm: SplitMix64 (fast splittable generator) - tiny, fast, and well-distributed.
 //!
 //! [`Rng::new`] is deterministic: the seed it is given is the whole stream. A
 //! caller that has no seed to give does not pass a constant, it draws one with
@@ -96,7 +96,7 @@ impl Rng {
         &items[self.gen_range_inclusive(0, items.len() as i64 - 1) as usize]
     }
 
-    /// Standard-normal `f64` via Box–Muller (used by the time-series generator).
+    /// Standard-normal `f64` via paired uniform-to-normal transform (used by the time-series generator).
     pub fn next_gaussian(&mut self) -> f64 {
         // Avoid log(0).
         let u1 = (self.next_f64()).max(1e-12);

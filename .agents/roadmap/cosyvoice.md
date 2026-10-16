@@ -134,7 +134,7 @@ from the class name.
 The fixed CFM noise buffer (`torch.manual_seed(0); torch.randn([1,80,15000])`,
 a plain attribute never stored in the checkpoint) is reproduced by a
 bit-exact Rust port of PyTorch's CPU RNG (`flow::torch_rng`: MT19937 seeding/
-tempering plus the AVX2 `normal_fill_16` Box-Muller kernel, including
+tempering plus the AVX2 `normal_fill_16` paired uniform-to-normal transform kernel, including
 replicating the compiler's own FMA instruction-fusion effects - found by
 comparing GIMPLE dumps of a standalone-compiled `avx_mathfun.h` against a
 first naive port that was off by 1 ULP on ~1% of values) - not a checked-in

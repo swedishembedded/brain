@@ -112,7 +112,7 @@ mod tests {
     use super::*;
 
     /// The analytic cumulative incidence, averaged over the population, equals
-    /// the Aalen-Johansen estimate from the censored simulated data within
+    /// the competing-risks cumulative-incidence estimator estimate from the censored simulated data within
     /// sampling error (a few binomial standard errors).
     #[test]
     fn the_analytic_cif_matches_aalen_johansen_from_the_simulation() {

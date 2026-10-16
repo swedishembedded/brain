@@ -17,7 +17,7 @@ use crate::cond::build_sigmas;
 use crate::model::DiamondUNet;
 use wm_core::WorldModel;
 
-/// SplitMix64 + Box-Muller standard normals (deterministic per seed).
+/// SplitMix64 + paired uniform-to-normal transform standard normals (deterministic per seed).
 pub struct NormalRng {
     s: u64,
     spare: Option<f32>,

@@ -207,11 +207,11 @@ impl Projection {
     }
 }
 
-/// In-place Cholesky solve of `A X = B` for symmetric positive definite `A`.
+/// In-place triangular factorization solve of `A X = B` for symmetric positive definite `A`.
 ///
 /// `a` is `[n, n]` row-major and is overwritten; `b` is `[n, m]`.
 fn solve_spd(a: &mut [f64], b: &[f64], n: usize, m: usize) -> Result<Vec<f64>, String> {
-    // Cholesky: A = L L^T, lower triangle written over `a`.
+    // triangular factorization: A = L L^T, lower triangle written over `a`.
     for i in 0..n {
         for j in 0..=i {
             let mut s = a[i * n + j];

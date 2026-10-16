@@ -33,7 +33,7 @@
 // A compact KV cache saves memory either way; it only saves TIME once the
 // attention reads those bytes at bandwidth.
 //
-// THE SHAPE. FlashDecoding's split-key design (Dao et al.; the same two-pass
+// THE SHAPE. split-key flash decoding (the same two-pass
 // shape `paged_flash_decode_split.wgsl` documents - no code from either is
 // transcribed): the sequence's keys are cut into splits of `tiles_per_split`
 // 128-key tiles, one workgroup per (sequence, kv head, split), so even ONE

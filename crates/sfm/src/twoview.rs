@@ -15,15 +15,15 @@
 //!   polynomial matrix whose determinant is the tenth-degree polynomial in
 //!   `z` (Nistér §3.2, the `⟨k⟩ ⟨l⟩ ⟨m⟩` rows) - its real roots are the
 //!   solutions.
-//! * LO-RANSAC (Chum, Matas & Kittler, "Locally Optimized RANSAC", DAGM
-//!   2003) with MSAC truncated-quadratic scoring (Torr & Zisserman,
-//!   "MLESAC", CVIU 2000): every new best model is locally optimized by
+//! * LO-RANSAC ("Locally Optimized RANSAC", DAGM
+//!   2003) with MSAC truncated-quadratic scoring ("MLESAC",
+//!   CVIU 2000): every new best model is locally optimized by
 //!   iterated least squares over a shrinking threshold and by an inner
 //!   RANSAC of non-minimal eight-point fits on its inliers; the iteration
 //!   bound adapts to the best inlier ratio. The eight-point algorithm
-//!   (Hartley & Zisserman, "Multiple View Geometry", §11.2) is the
+//!   ("Multiple View Geometry", §11.2) is the
 //!   least-squares fit on many inliers.
-//! * A final Levenberg-Marquardt refinement of `E = [t]ₓ R` on its inliers,
+//! * A final damped least-squares refinement of `E = [t]ₓ R` on its inliers,
 //!   on the five-dimensional essential manifold (rotation, unit
 //!   translation).
 //! * The four-fold decomposition of `E` and the cheirality test that picks
@@ -283,7 +283,7 @@ fn null_basis(rows: &[[f64; 9]; 5]) -> Option<[[f64; 9]; 4]> {
 }
 
 /// Every essential matrix consistent with five correspondences of unit
-/// bearings `a ↔ b` (`bᵀ E a = 0`): at most ten, each of unit Frobenius
+/// bearings `a ↔ b` (`bᵀ E a = 0`): at most ten, each of unit matrix L2 norm
 /// norm. Empty for a degenerate sample.
 pub fn essential_5pt(a: &[V3], b: &[V3]) -> Vec<M3> {
     assert!(a.len() == 5 && b.len() == 5, "the five-point solver takes exactly five correspondences");
@@ -398,7 +398,7 @@ fn eval_grad(p: &Poly, v: V3) -> (f64, V3) {
     (val, g)
 }
 
-/// Gauss-Newton on the ten ORIGINAL cubic constraints from a root of the
+/// linearized least-squares on the ten ORIGINAL cubic constraints from a root of the
 /// eliminated system. The elimination and the hidden-variable determinant
 /// lose digits on ill-conditioned samples (a root came back 2.5e-7 from
 /// the exact essential matrix on one exact five-point sample in twenty);
@@ -463,7 +463,7 @@ fn inliers(e: &M3, a: &[V3], b: &[V3], t2: f64) -> Vec<usize> {
 }
 
 /// Least-squares refits over a threshold shrinking from `LO_WIDEN` times the
-/// inlier threshold down to it (Lebeda, Matas & Chum, "Fixing the Locally
+/// inlier threshold down to it ("Fixing the Locally
 /// Optimized RANSAC", BMVC 2012, §3).
 const LO_WIDEN: f64 = 3.0;
 const LO_STEPS: usize = 4;
@@ -473,7 +473,7 @@ const LO_STEPS: usize = 4;
 const LO_INNER: usize = 10;
 const LO_SAMPLE: usize = 14;
 
-/// Chum's local optimization of a new best model.
+/// Local optimization of a new best model (LO-RANSAC).
 fn local_opt(e0: M3, a: &[V3], b: &[V3], t2: f64, rng: &mut Lcg) -> (M3, f64, usize) {
     let iterate = |mut e: M3| -> M3 {
         for step in 0..LO_STEPS {
@@ -554,7 +554,7 @@ pub fn ransac_essential(a: &[V3], b: &[V3], thresh: f64, iters: usize, seed: u64
     Some((e, mask))
 }
 
-/// Levenberg-Marquardt on the signed Sampson distances of `a ↔ b` over the
+/// damped least-squares on the signed Sampson distances of `a ↔ b` over the
 /// essential manifold: `E = [t]ₓ R` with a left rotation increment and a
 /// unit translation moved in its tangent plane - five parameters, so the
 /// result is an exact essential matrix at every step. Returns `e` unchanged

@@ -262,8 +262,8 @@ const TWO_PI_F32: f32 = 6.283_185_5;
 /// `NormalFill16<float>::operator()` (`DistributionTemplates.h`): pairs
 /// buffer index `j` with `j + 8` (NOT `2j`/`2j+1`) because the buffer already
 /// holds two independent halves of raw uniforms - `buf[0..8]` seeds `u1` for
-/// all 8 Box-Muller draws, `buf[8..16]` seeds `u2` - so the pairing is a
-/// zip of the two halves, not adjacent-pair Box-Muller.
+/// all 8 paired uniform-to-normal transform draws, `buf[8..16]` seeds `u2` - so the pairing is a
+/// zip of the two halves, not adjacent-pair paired uniform-to-normal transform.
 fn normal_fill_16(buf: &mut [f32; 16]) {
     for j in 0..8 {
         let u1 = 1.0 - buf[j];

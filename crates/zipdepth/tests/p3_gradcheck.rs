@@ -26,7 +26,7 @@
 //! majority within tolerance plus a tight MEDIAN — the same kink-tolerant criterion
 //! the block tests (`p2_strip`, `p2_fusion`'s SPPF) already use, for the same reason.
 //!
-//! Uses the model's own `init_weights` (Kaiming fan-out, head bias 0.5), which keeps
+//! Uses the model's own `init_weights` (fan-out-scaled initialization, head bias 0.5), which keeps
 //! every ReLU alive — a dead ReLU gives a legitimately-zero gradient that proves
 //! nothing. N=4 so the BN batch statistics stay stable across the FD step.
 //!

@@ -22,7 +22,7 @@ pub mod twoview;
 
 /// How many RANSAC samples of `sample` points give 99.9% confidence of
 /// drawing at least one all-inlier sample when a fraction `inliers` of the
-/// data are inliers (Fischler & Bolles 1981), capped at `cap`.
+/// data are inliers (RANSAC, 1981), capped at `cap`.
 ///
 /// A fixed count is either wasted on clean data or too small on dirty data:
 /// at 30% inliers a six-point sample is all-inlier once in 1,372 draws, so a

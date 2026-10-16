@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Bundle adjustment: Levenberg-Marquardt on the pixel reprojection error of
+//! Bundle adjustment: damped least-squares on the pixel reprojection error of
 //! every observation, over every camera pose, every point and, per physical
-//! camera (sensor), a chosen subset of its calibration - Triggs et al.,
+//! camera (sensor), a chosen subset of its calibration -
 //! "Bundle Adjustment - A Modern Synthesis" (1999), §4 and §6.
 //!
 //! Projection and its Jacobians in the direction and in the calibration come
@@ -15,7 +15,7 @@
 //! The points are eliminated with the Schur complement, so the system solved
 //! is the dense reduced CAMERA system (pose and calibration columns); each
 //! point is then recovered from its own 3x3 block. Residuals pass through a
-//! Huber loss (IRLS weights) so a mismatch that survived verification pulls
+//! quadratic-then-linear loss (IRLS weights) so a mismatch that survived verification pulls
 //! with bounded force. Soft Gaussian priors hold a focal length near a
 //! metadata value and the principal point near the image centre, weak enough
 //! that only evidence moves them and strong enough that no evidence leaves
@@ -93,7 +93,7 @@ impl Param {
 #[derive(Clone, Debug)]
 pub struct BaCfg {
     pub iters: usize,
-    /// Huber threshold in pixels.
+    /// quadratic-then-linear loss threshold in pixels.
     pub huber: f64,
     /// Per sensor, the calibration parameters refined; a sensor with no
     /// entry (or an empty one) keeps its calibration.
@@ -122,7 +122,7 @@ impl Default for BaCfg {
 pub struct BaReport {
     pub rms_before: f64,
     pub rms_after: f64,
-    /// Huber cost of the reprojections after, priors excluded.
+    /// quadratic-then-linear loss cost of the reprojections after, priors excluded.
     pub cost_after: f64,
     pub iterations: usize,
 }
@@ -161,13 +161,13 @@ fn huber(r: &[f64; 2], delta: f64) -> f64 {
 }
 
 /// What an observation the lens cannot image costs: that of a residual of
-/// ten Huber thresholds, so a step that pushes points out of the field is
+/// ten quadratic-then-linear loss thresholds, so a step that pushes points out of the field is
 /// refused rather than rewarded for dropping their error.
 fn lost(delta: f64) -> f64 {
     huber(&[10.0 * delta, 0.0], delta)
 }
 
-/// Huber cost of every observation's reprojection, pixels².
+/// quadratic-then-linear loss cost of every observation's reprojection, pixels².
 pub fn huber_cost(ks: &[Intrinsics], sensor: &[usize], poses: &[Pose], pts: &[V3], obs: &[Observation], delta: f64) -> f64 {
     obs.iter()
         .map(|o| match crate::camera::project(&ks[sensor[o.cam]], &poses[o.cam], pts[o.point]) {

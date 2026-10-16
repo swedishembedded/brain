@@ -10,7 +10,7 @@
 // @quant none
 // @dtype f32
 //
-// One Adam step (Kingma & Ba 2015) of a splat scene's geometry and opacity,
+// One Adam step (2015) of a splat scene's geometry and opacity,
 // one invocation per gaussian, entirely on the device.
 //
 // Parameters, packed 11 per gaussian in `geo`: {mean (3), log scale (3),
@@ -34,7 +34,7 @@
 // activation chain, the rate, the SGLD noise and the shape bounds into the
 // same per-gaussian pass is what keeps a fit's inner loop off the host.
 //
-// SGLD (3DGS-MCMC, Kheradmand et al. 2024, Eq. 8): with `noise > 0` each
+// SGLD (3DGS-MCMC, 2024, Eq. 8): with `noise > 0` each
 // position is perturbed by `noise * step * sigma(-100 (o - 0.005)) * S ε / r`,
 // `step` its position step and `r` its largest axis,
 // S the gaussian's own covariance square root - transparent gaussians explore,

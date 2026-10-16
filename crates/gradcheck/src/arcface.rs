@@ -121,7 +121,7 @@ fn init_tensor(rng: &mut Rng, name: &str, numel: usize) -> Vec<f32> {
         return (0..numel).map(|_| 0.05 * (2.0 * rng.next_f32() - 1.0)).collect();
     }
     // Conv / fc / head weights: a fan-in-free small uniform. The tensors here
-    // are tiny (≤ 320 elements), so the usual Kaiming scaling would only make
+    // are tiny (≤ 320 elements), so the usual fan-in-scaled initialization would only make
     // the directional step harder to condition.
     (0..numel).map(|_| 0.3 * (2.0 * rng.next_f32() - 1.0)).collect()
 }

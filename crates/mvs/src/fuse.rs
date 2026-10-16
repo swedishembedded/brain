@@ -7,7 +7,7 @@
 //! A measurement joins another when the two agree - carried into each
 //! other's view they land within [`FuseCfg::max_reproj_px`] pixels and
 //! [`FuseCfg::max_rel_range`] in range, with normals within
-//! [`FuseCfg::max_normal_deg`] (Schönberger et al., ECCV 2016, §5). The point
+//! [`FuseCfg::max_normal_deg`] (pixelwise view selection, ECCV 2016, §5). The point
 //! is emitted ONCE, by the view that samples it most finely, averaging every
 //! agreeing measurement: range along that view's ray (so the point never
 //! moves sideways off it), normal, colour and confidence, with the number of

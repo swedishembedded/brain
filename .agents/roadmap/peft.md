@@ -498,7 +498,7 @@ rather than returning an additive delta.
 **Done numbers:**
 1. Fold a real LyCORIS LoKr file and a real LoHa file; compare the folded
    `[out,in]` against a straight-line host reference implementing the
-   Kronecker/Hadamard formula directly: max_abs < 1e-6, rel_l2 < 1e-7.
+   Kronecker/elementwise product formula directly: max_abs < 1e-6, rel_l2 < 1e-7.
 2. An unrecognized key in a synthetic file still `Err`s naming that key.
 3. A `lokr_w1` whose shapes don't multiply to `[out,in]` errors naming the
    tensor and both shapes.
@@ -715,7 +715,7 @@ expensive product, and the cost asymmetry between the two methods should
 drive the decision:
 
 - **LoHa's `dW = P1 (x) P2` does not factor through the activation** - the
-  Hadamard product destroys the low-rank structure, so `x*(P1(x)P2)^T`
+  elementwise product destroys the low-rank structure, so `x*(P1(x)P2)^T`
   cannot decompose into rank-r GEMMs. Training LoHa means materializing a
   full `[out,in]` scratch per targeted linear per step and running a second
   full-width GEMM: **~+100% forward FLOPs and +100% backward** on every
@@ -729,7 +729,7 @@ drive the decision:
   `elementwise_check` mandatory alongside `directional_check` on every
   factor.
 - **"Exactly zero at init" is where LoHa bites hardest.** LyCORIS zeros the
-  second Hadamard factor (and LoKr's decomposed second factor) at init, so
+  second elementwise product factor (and LoKr's decomposed second factor) at init, so
   `dW=0` - but then the gradient of *both* halves of the first factor is
   exactly zero too, because they're multiplied by the zeroed second factor.
   This is a **two-sided** dead gradient, strictly worse than plain LoRA's

@@ -87,7 +87,7 @@ The workspace's **third tokenizer family**, after byte-level BPE (`bpe`,
 |---|---|
 | D1 | **Random option-subset sampling per example**: k ~ U[2, 77], gold always included, optional "none of the above". This is what makes the model score options rather than learn a disguised 77-way head, and it is what makes the held-out-intent eval mean anything. |
 | D2 | Held-out-intent split: **20 of 77 intents** held out by fixed documented seed; train on 57. Both numbers from one code path. |
-| D3 | Loss `(1-lambda)*L_focal(gamma) + lambda*L_Brier`, one implementation where `gamma=0, lambda=0` collapses **exactly** to CE. Sweep {CE; focal g=3; CE+Brier l=0.5; focal+Brier}. Winner pinned by ECE at equal accuracy. |
+| D3 | Loss `(1-lambda)*L_focal(gamma) + lambda*L_Brier`, one implementation where `gamma=0, lambda=0` collapses **exactly** to CE. Sweep {CE; focal g=3; CE+squared-error probability score l=0.5; focal+squared-error probability score}. Winner pinned by ECE at equal accuracy. |
 | D4 | Post-hoc **temperature scaling** on a val split, reported before/after. |
 | D5 | AdamW, wd 0.01, clip 1.0, `model::train::LrSchedule` warmup->cosine, deterministic for a fixed seed. |
 | D6 | Options encoded **once per batch** when the batch shares an option set (always true for Banking77): ~66 s/epoch, ~11 min for 10 epochs on one P40. Per-example option sets are the known slow path - group by option-set there. |
@@ -107,7 +107,7 @@ New `eval::calibration` (none of this exists in the workspace today - `crates/ev
 has detection, MLM and TTS metrics only):
 
 - Accuracy, macro-F1.
-- **ECE (15 bins), AdaECE, classwise-ECE, Brier, NLL**, reliability bins.
+- **ECE (15 bins), AdaECE, classwise-ECE, squared-error probability score, NLL**, reliability bins.
 - Coverage-vs-accuracy, **failure-AUROC**, **AUGRC**.
 
 **Confidence = `1 - H/ln k`.** k-invariant, uses the whole distribution, exactly 1
@@ -229,7 +229,7 @@ attribution in `/NOTICE.md`.
 
 ## 7. Data
 
-Banking77 (Casanueva et al. 2020), **CC-BY-4.0**, from the upstream
+Banking77 (2020), **CC-BY-4.0**, from the upstream
 `PolyAI-LDN/task-specific-datasets` CSVs: 10,003 train / 3,080 test / 77 categories,
 mean 11.9 words, p95 29.
 
@@ -263,7 +263,7 @@ verified **red** before the implementation lands.
 | 5 | `decide::head` - candidate-to-state cross-attention + scorer | gradcheck fwd+bwd on both backends; option-permutation invariance |
 | 6 | `decide::primitives` - Choice/Score/Noul + confidence | limits (255 / 2-10), 0-based score expectation, `1 - H/ln k` on hand-computed cases |
 | 7 | `data::banking77` + fetch path + splits + option sampler | 10,003/3,080/77 asserted; held-out split disjoint; sampler always includes gold |
-| 8 | `decide::loss` - focal + Brier mix | `gamma=0, lambda=0` bit-identical to CE; loss gradcheck |
+| 8 | `decide::loss` - focal + squared-error probability score mix | `gamma=0, lambda=0` bit-identical to CE; loss gradcheck |
 | 9 | `decide::train` - self-contained loop, discriminative LR | deterministic for a fixed seed; loss decreases on a fixed micro-run |
 | 10 | `eval::calibration` | perfectly-calibrated synthetic -> ECE 0; maximally-overconfident -> ECE -> 1-acc |
 | 11 | **Run #1** + the two experiments (4-way loss sweep, 4-way confidence statistic) | measured numbers asserted as floors in the tests that produce them |

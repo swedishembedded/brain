@@ -3,8 +3,8 @@
 
 //! Single-Image Random-Dot Stereogram (SIRDS) — the "Magic Eye" autostereogram.
 //!
-//! Depth-only: no glasses, no color image. The algorithm is Thimbleby, Witkin &
-//! Inglis ("Displaying 3D Images", IEEE Computer 1994). Each scanline is
+//! Depth-only: no glasses, no color image. The algorithm is the single-image
+//! random-dot stereogram method ("Displaying 3D Images", IEEE Computer 1994). Each scanline is
 //! independent. For every pixel, its depth sets a horizontal SEPARATION `s`: the
 //! two screen points `x-s/2` and `x+s/2` are constrained to be the same colour, so
 //! when the eyes diverge (or cross) by that separation the point fuses at the depth

@@ -4,7 +4,7 @@
 # 133. A softmax over near-identical options cancels the signal as common mode
 
 A decision model scoring a yes/no proposition evaluated at chance - accuracy
-0.502 against 0.500, Brier 0.251 against the 0.250 a constant 0.5 scores. It
+0.502 against 0.500, squared-error probability score 0.251 against the 0.250 a constant 0.5 scores. It
 had trained for 14000 steps without complaint.
 
 The head uses each option's slot representation as its attention QUERY. The two

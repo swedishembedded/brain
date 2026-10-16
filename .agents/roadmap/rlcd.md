@@ -8,7 +8,7 @@ new layer-3 leaf crate (added to `LEAF_CRATES` in
 `scripts/gates/check-crate-layers.sh`), moved down out of `crates/decide` so
 any decision-capable model can reach it without a model-to-model dependency:
 
-- `rlcd::scoring` - proper scoring rules (focal + Brier) over a soft target
+- `rlcd::scoring` - proper scoring rules (focal + squared-error probability score) over a soft target
   distribution, not just a gold index. `decide::loss` re-exports it unchanged,
   so every pre-existing caller is untouched (verified against the exact
   formula it replaced, on a one-hot target, over 200 randomized cases).
@@ -17,7 +17,7 @@ any decision-capable model can reach it without a model-to-model dependency:
   example by hand: posteriors 0.2/2/3/1/19, Bayes risk 0.8 -> 0.48, VOI 0.27,
   and the 1/11 -> 4/14 boundary flip that changes the optimal action without
   moving the probability.
-- `rlcd::metrics` - ECE, AdaECE, classwise-ECE, NLL, Brier, reliability bins,
+- `rlcd::metrics` - ECE, AdaECE, classwise-ECE, NLL, squared-error probability score, reliability bins,
   coverage-vs-accuracy, failure-AUROC (AUGRC named but not implemented - see
   that module's own doc for why).
 - `rlcd::atlas` - the `World` trait an executable probabilistic world

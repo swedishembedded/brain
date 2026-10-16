@@ -7,7 +7,7 @@
 //! At each rolling origin, for every stock in the universe we forecast the K-bar
 //! -ahead close from `CTX` bars of real OHLCV(+real calendar), form the predicted
 //! K-bar return, and record it beside the realized return. A separate step
-//! (`tools`/python) ranks the cross-section per origin and computes RankIC (Spearman),
+//! (`tools`/python) ranks the cross-section per origin and computes RankIC (rank correlation),
 //! IC (Pearson), a cost-aware long/short portfolio, and a shuffled negative control.
 //!
 //! In-process (loads weights once, warm across the whole sweep) so it is immune to

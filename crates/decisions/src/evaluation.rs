@@ -17,7 +17,7 @@
 //!   `1/k` over the examples' option counts. The baseline accuracy is the
 //!   larger of the two, and **lift** is accuracy minus baseline.
 //! * **NLL** - mean `-ln p(label)`, probabilities floored at `1e-12`.
-//! * **Brier** - mean over examples of the sum over options of
+//! * **squared-error probability score** - mean over examples of the sum over options of
 //!   `(p - 1{label})^2`.
 //! * **ECE / AdaECE** - calibration of the top probability: examples binned by
 //!   `p_max` into 15 equal-width bins (ECE) or 15 equal-count bins (AdaECE),
@@ -532,7 +532,7 @@ mod tests {
         // NLL: 3/4 of answers put 0.8 on the label, 1/4 put the even remainder 0.2/3.
         let expected = 0.75 * -(0.8f64).ln() + 0.25 * -((0.2f64 / 3.0).ln());
         assert!((r.nll - expected).abs() < 1e-3, "{} vs {expected}", r.nll);
-        // Brier: right answers (0.2)^2 + 3 (0.2/3)^2, wrong ones (0.8)^2 + (1 - 0.2/3)^2 + 2 (0.2/3)^2.
+        // squared-error probability score: right answers (0.2)^2 + 3 (0.2/3)^2, wrong ones (0.8)^2 + (1 - 0.2/3)^2 + 2 (0.2/3)^2.
         let rest = 0.2f64 / 3.0;
         let right = 0.2f64.powi(2) + 3.0 * rest.powi(2);
         let wrong = 0.8f64.powi(2) + (1.0 - rest).powi(2) + 2.0 * rest.powi(2);

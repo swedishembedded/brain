@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! A starting scene from a sparse, coloured point cloud - the initialization
-//! 3D Gaussian Splatting defines (Kerbl et al. 2023, §5): one isotropic
+//! 3D Gaussian Splatting defines (2023, §5): one isotropic
 //! gaussian per point, sized by the mean distance to its three nearest
 //! neighbours, at low opacity so the optimizer decides what is solid.
 //!

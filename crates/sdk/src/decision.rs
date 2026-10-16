@@ -81,7 +81,7 @@
 //!
 //! | | `Decide` (MiniLM) | Laya (ModernBERT-large) |
 //! | --- | --- | --- |
-//! | objective | [`rlcd::scoring`] cross-entropy/focal/Brier, minimized directly | [`rlcd::reinforce`] REINFORCE with a group-mean baseline over [`rlcd::proper`]'s strictly proper reward |
+//! | objective | [`rlcd::scoring`] cross-entropy/focal/squared-error probability score, minimized directly | [`rlcd::reinforce`] REINFORCE with a group-mean baseline over [`rlcd::proper`]'s strictly proper reward |
 //! | what learns | encoder (2e-5) + head (1e-3), or the head alone - the caller's choice, see [`DecisionPipeline::set_encoder_frozen`] | the decision head only; the trunk is always fixed |
 //! | a minibatch | ONE encoder pass over the whole batch (`decide::Decide::accumulate_batch`) | accumulation - the frozen trunk is re-encoded per example either way |
 //! | act/escalate head | none exists | NOT trained - no public source defines its objective |
@@ -591,7 +591,7 @@ impl DecisionPipeline {
     /// differs is the objective, because the two checkpoints were fitted
     /// under different ones and a model should be trained against the rule
     /// its own weights came from. The `Decide` arm minimizes
-    /// [`rlcd::scoring`]'s cross-entropy/focal/Brier objective directly. The
+    /// [`rlcd::scoring`]'s cross-entropy/focal/squared-error probability score objective directly. The
     /// Laya arm runs [`rlcd::reinforce`]'s REINFORCE-with-a-group-baseline
     /// over [`rlcd::proper`]'s strictly proper scoring reward, with the
     /// published loop's own annealed exploration and cosine learning rate.

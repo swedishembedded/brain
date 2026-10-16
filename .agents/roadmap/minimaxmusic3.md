@@ -471,7 +471,7 @@ already landed in Phases 2-9):
   overlap blended into every Euler step via `ChunkState`, not just spliced
   once at the end. Initial noise draws through `data::rng::Rng::
   next_gaussian` (`Lcg` has no Gaussian sampler; `data::rng`'s own doc
-  says never hand-roll a fresh Box-Muller copy) - the first use of `Rng`
+  says never hand-roll a fresh paired uniform-to-normal transform copy) - the first use of `Rng`
   in this crate, alongside `Lcg` everywhere else.
 - `stitch::Stitcher` - `decoders.py`'s crop-and-stitch: decode each
   chunk's full latent span through the vocoder, crop

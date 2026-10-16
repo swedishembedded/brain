@@ -3,7 +3,7 @@
 
 //! The PatchMatch pyramid: every view's range and normal map, coarse to fine.
 //!
-//! Schedule (Xu & Tao, CVPR 2019, §3.3, simplified to one geometric sweep per
+//! Schedule (multi-scale consistency paper, CVPR 2019, §3.3, simplified to one geometric sweep per
 //! level):
 //!
 //! 1. every photograph becomes an exact box-halved gray + colour pyramid on

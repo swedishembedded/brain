@@ -8,7 +8,7 @@
 //! documented default: `frame_length=25ms`, `frame_shift=10ms`, `povey`
 //! window, `preemphasis_coefficient=0.97`, `remove_dc_offset=true`,
 //! `round_to_power_of_two=true`, `low_freq=20`, `high_freq=0` (meaning
-//! Nyquist), `use_power=true`, `use_log_fbank=true`, `use_energy=false`,
+//! half-sampling-rate), `use_power=true`, `use_log_fbank=true`, `use_energy=false`,
 //! `snip_edges=true`.
 //!
 //! Ported directly from `torchaudio/compliance/kaldi.py`'s `fbank`/
@@ -57,8 +57,8 @@ pub struct KaldiFbankConfig {
     pub frame_shift_ms: f32,
     /// Low cutoff frequency for mel bins (Kaldi default `20.0`).
     pub low_freq: f32,
-    /// High cutoff; `<= 0.0` means "Nyquist plus this" (Kaldi default `0.0`,
-    /// i.e. exactly Nyquist).
+    /// High cutoff; `<= 0.0` means "half-sampling-rate plus this" (Kaldi default `0.0`,
+    /// i.e. exactly half-sampling-rate).
     pub high_freq: f32,
     pub preemphasis_coefficient: f32,
 }
@@ -112,7 +112,7 @@ fn mel_banks(num_bins: usize, padded_window_size: usize, sample_freq: f32, low_f
             let down = (right - mel) / (right - center);
             out[i * bins_out + j] = up.min(down).max(0.0);
         }
-        // out[i * bins_out + num_fft_bins] stays 0.0 - the padded Nyquist column.
+        // out[i * bins_out + num_fft_bins] stays 0.0 - the padded half-sampling-rate column.
     }
     out
 }

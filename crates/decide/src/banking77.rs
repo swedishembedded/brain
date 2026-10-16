@@ -202,7 +202,7 @@ impl OptionSampler {
         let k = if hi > lo { lo + (rng.next_u64() % (hi - lo + 1) as u64) as usize } else { lo };
         let n_distract = k.saturating_sub(1).min(available.len());
 
-        // Partial Fisher-Yates over a copy: sampling WITHOUT replacement, so a
+        // Partial unbiased in-place over a copy: sampling WITHOUT replacement, so a
         // set never scores the same intent twice.
         let mut shuffled = available;
         for i in 0..n_distract {

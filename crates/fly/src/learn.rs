@@ -718,7 +718,7 @@ impl Lcg {
         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         self.0
     }
-    /// A standard normal, by Box-Muller. The search needs a symmetric
+    /// A standard normal, by paired uniform-to-normal transform. The search needs a symmetric
     /// perturbation; a uniform one biases every step toward the corners of the
     /// box it samples.
     pub fn normal(&mut self) -> f32 {

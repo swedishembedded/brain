@@ -12,7 +12,7 @@
 // @import camera
 // @import mvs
 //
-// Depth-map fusion by consistency (Schönberger et al., ECCV 2016, §5), as a
+// Depth-map fusion by consistency (pixelwise view selection, ECCV 2016, §5), as a
 // gather so it needs no atomics: dispatched once per (reference, other view)
 // pair, every reference pixel looks up the other view's filtered range at the
 // pixel its point images to and, when the two agree - the other view's point

@@ -13,7 +13,7 @@
 //! - After entry, death has hazard `BASE * exp(AGEING (age - 55) + BETA x(entry))`.
 //!
 //! Because the process is linear and Gaussian, the best possible prediction
-//! from the visits is exact: a Kalman filter gives `x(entry)`'s posterior,
+//! from the visits is exact: a recursive state-estimation filter gives `x(entry)`'s posterior,
 //! and [`Posterior::cif`] integrates the hazard over it.
 
 use data::rng::Rng;

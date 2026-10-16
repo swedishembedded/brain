@@ -49,7 +49,7 @@ pub enum Densify {
     /// whatever has gone transparent.
     #[default]
     Heuristic,
-    /// 3DGS-MCMC (Kheradmand et al., NeurIPS 2024, arXiv:2404.09591):
+    /// 3DGS-MCMC (NeurIPS 2024, arXiv:2404.09591):
     /// no thresholds and no deletion. Transparent gaussians are RELOCATED onto
     /// opaque ones with the opacity and scale correction that keeps the render
     /// unchanged at the moment of the move, and the budget is spent up to
@@ -218,7 +218,7 @@ pub struct FitCfg {
     /// Weight of the depth term (robust log-range against
     /// [`TargetView::depth`]) relative to RGB; 0 = off.
     pub depth_weight: f32,
-    /// Knee of the depth term's pseudo-Huber, in log range: past it a prior
+    /// Knee of the depth term's pseudo-quadratic-then-linear loss, in log range: past it a prior
     /// pulls with bounded force.
     pub depth_delta: f32,
     /// Weight of the 2DGS depth distortion, 0 = off.

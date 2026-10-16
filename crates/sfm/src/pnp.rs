@@ -2,11 +2,11 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Absolute pose from 2D-3D correspondences: the minimal three-point problem
-//! (P3P, Grunert 1841; see Haralick et al., IJCV 1994) inside LO-RANSAC
-//! (Chum, Matas & Kittler, DAGM 2003) with MSAC truncated-quadratic scoring,
-//! then Gauss-Newton on the reprojection error of the inliers.
+//! (P3P, 1841; see the IJCV 1994 survey) inside LO-RANSAC
+//! (DAGM 2003) with MSAC truncated-quadratic scoring,
+//! then linearized least-squares on the reprojection error of the inliers.
 //!
-//! P3P rather than the six-point DLT (Hartley & Zisserman §7.1): the DLT
+//! P3P rather than the six-point DLT (multiple-view geometry §7.1): the DLT
 //! estimates a full 3x4 projection and is DEGENERATE when the points are
 //! coplanar - which is what most of a capture of an object on a floor, a
 //! table or a deck is. It also needs six clean points per sample against
@@ -123,7 +123,7 @@ pub fn residual2(p: &Pose, x: V3, f: V3) -> f64 {
     ((c2 - d * d) / (d * d)).max(0.0)
 }
 
-/// Gauss-Newton on the tangent-plane reprojection error of `x`/`f`, left
+/// linearized least-squares on the tangent-plane reprojection error of `x`/`f`, left
 /// perturbation on the rotation. Stops when a step stops helping.
 pub fn refine(mut p: Pose, x: &[V3], f: &[V3], iters: usize) -> Pose {
     let basis: Vec<(V3, V3)> = f.iter().map(|b| tangent_basis(normalize(*b))).collect();
@@ -203,9 +203,9 @@ fn inliers(p: &Pose, x: &[V3], f: &[V3], t2: f64) -> (Vec<V3>, Vec<V3>) {
     x.iter().zip(f).filter(|(a, b)| residual2(p, **a, **b) < t2).map(|(a, b)| (*a, *b)).unzip()
 }
 
-/// Local optimization of a new best pose: Gauss-Newton on its inliers,
-/// repeated while the inlier set grows (Chum et al.'s iterative least
-/// squares, with the pose's own nonlinear refinement as the fit).
+/// Local optimization of a new best pose: linearized least-squares on its inliers,
+/// repeated while the inlier set grows (the iterative least
+/// squares of local optimization, with the pose's own nonlinear refinement as the fit).
 fn local_opt(p0: Pose, x: &[V3], f: &[V3], t2: f64) -> (Pose, f64, usize) {
     let (s0, c0) = msac(&p0, x, f, t2);
     let mut best = (p0, s0, c0);
@@ -224,7 +224,7 @@ fn local_opt(p0: Pose, x: &[V3], f: &[V3], t2: f64) -> (Pose, f64, usize) {
     best
 }
 
-/// LO-RANSAC over P3P samples with MSAC scoring, then Gauss-Newton on the
+/// LO-RANSAC over P3P samples with MSAC scoring, then linearized least-squares on the
 /// consensus. `thresh` is the angular inlier threshold in radians (a pixel
 /// threshold divided by the focal length). Returns the pose and the inlier
 /// mask.

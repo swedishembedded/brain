@@ -112,7 +112,7 @@ fn avg_loss(ckpt_path: &str, dir: &Path, seed: u64, n: usize, t: u32) -> f32 {
     total / n as f32
 }
 
-/// The Frobenius norm of the tracked leaf's LoRA delta `B @ A`, computed from
+/// The matrix L2 norm of the tracked leaf's LoRA delta `B @ A`, computed from
 /// the checkpoint reloaded off disk (not the live in-process model) via the
 /// same `checkpoint::load` + `Qwen35::new_on` path `lora_roundtrip.rs` uses
 /// (this crate has no streaming `load_inference` helper).

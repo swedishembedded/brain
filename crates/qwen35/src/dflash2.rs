@@ -51,7 +51,7 @@
 //!   tree had a data-dependent conv weight.
 //! * **A selector**, not an argmax. The head's top-16 candidates at every
 //!   position are scored against the token actually chosen at the previous
-//!   position through a rank-256 three-way Hadamard product, and the walk is
+//!   position through a rank-256 three-way elementwise product, and the walk is
 //!   greedy left to right. Picking each position's argmax independently, which
 //!   is what a non-diffusion drafter does, produces a block whose tokens are
 //!   individually likely and jointly incoherent.
@@ -658,7 +658,7 @@ impl Dflash2 {
     /// **The candidate selector**, at temperature 0.
     ///
     /// Per position: the head's top-`selector_top_k` candidates, then a
-    /// rank-`selector_rank` three-way Hadamard score against the token
+    /// rank-`selector_rank` three-way elementwise product score against the token
     /// actually chosen at the PREVIOUS position,
     ///
     /// ```text
@@ -668,7 +668,7 @@ impl Dflash2 {
     /// and the argmax of that. The walk is GREEDY left to right - the chosen
     /// token becomes the next position's predecessor and an earlier position
     /// is never revisited. That is the reference's own search, not a
-    /// simplification of it: a Viterbi pass over the same lattice would be a
+    /// simplification of it: a max-product dynamic programming pass over the same lattice would be a
     /// DIFFERENT (and unvalidated) drafter, so the cheap one is also the
     /// correct one here.
     ///

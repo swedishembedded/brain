@@ -1512,7 +1512,7 @@ impl<E: Env> ControlPipeline<E> {
     /// the errors compound, and the classic bound on them is quadratic in the
     /// episode's length rather than linear. Training on the distribution the
     /// student itself induces is what makes them linear again - it is the
-    /// dataset-aggregation loop of Ross, Gordon and Bagnell (2011), and here
+    /// dataset-aggregation loop (2011), and here
     /// it costs nothing but game steps, because this environment's teacher
     /// answers for free at any state.
     ///

@@ -8,11 +8,11 @@
 //! and `j` was still free of it after `T_i` (`T_j > T_i`, or censored at
 //! exactly `T_i`). A subject whose event was a DIFFERENT cause never has the
 //! event of interest: it stays comparable at every later time (the
-//! competing-risks concordance of Wolbers et al.). Ties in the prediction
+//! competing-risks concordance). Ties in the prediction
 //! (within [`TIED_TOL`]) count one half.
 //!
 //! Uno's C restricts cases to `T_i < tau` and weights each by `1 / G(T_i)^2`,
-//! which removes the dependence on the censoring distribution that Harrell's
+//! which removes the dependence on the censoring distribution that concordance
 //! C has. Sampling weights multiply both sides of a pair.
 //!
 //! `O(n log n)`: subjects in descending time feed a Fenwick tree over the
@@ -117,7 +117,7 @@ fn counts(
     (conc, comp)
 }
 
-/// Harrell's C for `cause`: higher `risk` should mean an earlier event.
+/// concordance for `cause`: higher `risk` should mean an earlier event.
 /// `None` when no pair is comparable or a risk is not a finite number (a NaN
 /// has no rank: it would be counted somewhere, silently).
 pub fn harrell(risk: &[f64], obs: &[Obs], cause: usize) -> Option<f64> {

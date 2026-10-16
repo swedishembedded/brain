@@ -22,7 +22,7 @@ it only fits klein. ControlNet and that LoRA are mutually exclusive.
 Measured on **2x Tesla P40**, `klein-9b` int8 DiT on gpu1 + truncated int8
 Qwen3-8B text encoder on gpu0, 1024x768, 12 steps, seed 7, LoRA scale 1.0,
 the model card's verbatim prompt tier wording. `edge corr` = Pearson
-correlation of full-resolution Sobel gradient magnitudes against the source;
+correlation of full-resolution 3x3 gradient magnitudes against the source;
 `MAD` = mean |RGB difference| in 0..255. `@keep` / `@gen` restrict the same
 statistics to the mask's hard-preserve / hard-regenerate pixels. **The
 absolute scale of an earlier hand-recorded edge-correlation ladder could not
@@ -471,7 +471,7 @@ per 8x8 pixel block (the DiT sees `[128, 48, 64]`, one token per 16x16 block,
 via a 2x2 unshuffle and a frozen BatchNorm - a reshape composed with a
 per-channel affine, so every linear edit below is the same edit in either
 space). Metric definitions live in `flux2::latentops::ImageMetrics`; MAD is in
-8-bit levels, `edge_corr` is the Pearson correlation of Sobel magnitudes on
+8-bit levels, `edge_corr` is the Pearson correlation of 3x3 gradient magnitudes on
 Rec.601 luma.
 
 Cost: 5.5 s to read the checkpoint and encode three images; about 2 s per
@@ -541,7 +541,7 @@ MAD 1.2 / edge_corr 0.998; 0.2 -> 4.6 / 0.966; 0.5 -> 11.5 / 0.838; 1.0 ->
 24.0 / 0.618; 2.0 -> 46.7 / 0.321. Photorealism dies between 0.5 and 1.0, the
 scene stays readable to about 2.0, and gross layout survives 3.0. The failure
 mode is coloured confetti at one-latent-cell granularity, not blur.
-Per-channel noise sensitivity tracks the zeroing ranking at Spearman 0.95
+Per-channel noise sensitivity tracks the zeroing ranking at rank correlation 0.95
 (ch11, the chroma channel, is the one real outlier - coherent removal shows,
 random jitter averages out).
 
@@ -638,7 +638,7 @@ of that phase in the before run is the defect showing up directly in the
 CLI's own per-phase timing: nothing was encoded as a reference at all.
 
 **The dial now varies smoothly.** Edge correlation (Pearson of
-full-resolution Sobel gradient magnitudes vs the source photograph) and MAD
+full-resolution 3x3 gradient magnitudes vs the source photograph) and MAD
 (mean |RGB| in 0..255), same definitions as the masked-editing table above:
 
 | setting | edge corr | MAD |
@@ -714,7 +714,7 @@ silently collapse. Scaling keeps every step the caller asked for.
 ### The response curve, measured
 
 Same 2x Tesla P40 placement and the same metric definitions as the tables
-above (`edge corr` = Pearson correlation of full-resolution Sobel gradient
+above (`edge corr` = Pearson correlation of full-resolution 3x3 gradient
 magnitudes against the source; `MAD` = mean |RGB difference| in 0..255).
 `image-02`, seed 7, 12 steps, `klein-9b` int8, the rank-32 staging LoRA at
 1.0, the model card's verbatim tier wording. `1.00` is driven by a 768x576

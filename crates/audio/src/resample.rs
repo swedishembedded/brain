@@ -72,7 +72,7 @@ fn kaiser_beta(atten_db: f64) -> f64 {
     }
 }
 
-/// Kaiser-windowed sinc lowpass at cutoff `fc` (cycles/sample, Nyquist =
+/// Kaiser-windowed sinc lowpass at cutoff `fc` (cycles/sample, half-sampling-rate =
 /// 0.5), `half_taps` zero crossings on each side of the interpolation factor
 /// `up`, scaled by `gain` (the `up`-factor amplitude compensation a
 /// zero-stuffed interpolation filter needs). Length `2*half_taps*up + 1`.

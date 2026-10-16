@@ -15,7 +15,7 @@
 //! records, per numeric variable, the robust range of its values; per
 //! categorical variable, the levels seen; the event codes seen in histories;
 //! the ranges of entry clock, calendar time and history length; and the mean
-//! and covariance of the learned state, for a Mahalanobis distance.
+//! and covariance of the learned state, for a covariance-scaled distance.
 //!
 //! [`Support::assess`] turns a subject into an [`Assessment`]: typed
 //! [`Warning`]s and one continuous `ood_score` that is the largest of the
@@ -25,7 +25,7 @@
 //! - a range component is `|x - mid| / (half * (1 + 2 margin))` over the
 //!   robust range `[q0.5%, q99.5%]`, with the margin a share of its width
 //!   ([`AssessOptions::margin`]);
-//! - the state component is the Mahalanobis distance of the subject's state
+//! - the state component is the covariance-scaled distance of the subject's state
 //!   over the training set's 99th percentile of it, times `1 + state_margin`;
 //! - an unknown variable, category or event code scores [`UNKNOWN_SCORE`].
 //!
@@ -166,7 +166,7 @@ pub enum Warning {
     },
     /// A learned state far from every training state.
     StateOutOfSupport {
-        /// The subject's Mahalanobis distance.
+        /// The subject's covariance-scaled distance.
         distance: f64,
         /// The largest supported distance.
         limit: f64,
@@ -275,7 +275,7 @@ impl Range {
 }
 
 /// Mean and covariance of the learned state over the training subjects, and
-/// the distribution of their Mahalanobis distances.
+/// the distribution of their covariance-scaled distances.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StateSupport {
     /// State dimension.
@@ -289,7 +289,7 @@ pub struct StateSupport {
     cholesky: Vec<f64>,
 }
 
-/// The Cholesky factor `L` (row-major, lower) of `cov + ridge * I`, with the
+/// The triangular factorization `L` (row-major, lower) of `cov + ridge * I`, with the
 /// ridge a fixed share of the mean variance so a state dimension the
 /// training set never moved does not turn rounding noise into distance.
 fn cholesky(cov: &[f64], dim: usize) -> Result<Vec<f64>, String> {
@@ -341,7 +341,7 @@ impl StateSupport {
         Ok(self)
     }
 
-    /// The Mahalanobis distance of `z` from the training states.
+    /// The covariance-scaled distance of `z` from the training states.
     pub fn mahalanobis(&self, z: &[f32]) -> f64 {
         let d = self.dim;
         // Solve L y = z - mean by forward substitution; the distance is |y|.
