@@ -373,6 +373,15 @@ impl ResidencyManager {
         self.multi_models.contains_key(model)
     }
 
+    /// The batch size `model` asks for ([`ResidentModel::batch_limit`]), under
+    /// either registry; `None` when it declares none or is unknown.
+    pub fn batch_limit(&self, model: &str) -> Option<usize> {
+        match self.models.get(model) {
+            Some(m) => m.batch_limit(),
+            None => self.multi_models.get(model).and_then(|m| m.batch_limit()),
+        }
+    }
+
     /// Number of resident multi-device instances (parallel to
     /// [`Self::resident_count`], which only counts single-device ones).
     pub fn resident_multi_count(&self) -> usize {

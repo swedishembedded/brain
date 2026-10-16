@@ -29,6 +29,17 @@ pub trait ResidentModel: Send + Sync {
     /// what the manager budgets against (reuse `model::plan` where a shape is known).
     fn estimate(&self, key: &InstanceKey) -> MemCost;
 
+    /// The most queued jobs one [`Instance::run_batch`] call of this model
+    /// should receive, when that differs from the scheduler policy's
+    /// `max_batch`. A model that decodes many requests per step (a
+    /// continuous-batching LLM with a wide slot pool) declares its slot count
+    /// here, so the dispatcher hands it everything queued up to its capacity
+    /// rather than the policy's small default. `None` (the default) defers to
+    /// the policy.
+    fn batch_limit(&self) -> Option<usize> {
+        None
+    }
+
     /// Build the instance on `device` (blocking: weight load + upload). The manager
     /// has already reserved room for `estimate(key)` on `device`.
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String>;

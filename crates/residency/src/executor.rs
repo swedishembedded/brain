@@ -935,6 +935,12 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         // out as unplaceable, killing scheduling for the whole server.)
         let chosen = gid; // == the row index in `rows`
         let (key, model, action) = (rows[chosen].key.clone(), rows[chosen].model.clone(), rows[chosen].action.clone());
+        // A model that batches wider than the policy's default says so; give
+        // it everything queued up to its own limit.
+        let batch = match mgr.batch_limit(&model) {
+            Some(limit) => rows[chosen].summary.size.min(limit.max(1)),
+            None => batch,
+        };
 
         // Claim (promote/evict, pin) on non-busy device(s). Multi-device models
         // (registered via `register_multi`, never also via `register` - see
@@ -1503,6 +1509,51 @@ mod tests {
         let s = exec.stats();
         assert!(s.evictions >= 1, "expected an eviction, stats={s:?}");
         assert_eq!(s.resident, 1);
+    }
+
+    /// A model that can decode more requests per call than the scheduler
+    /// policy's default cap (a continuous-batching LLM with 64 slots) says so,
+    /// and the dispatcher hands it that many queued jobs in ONE call instead
+    /// of the policy's `max_batch`.
+    #[test]
+    fn a_model_declaring_a_wider_batch_than_the_policy_receives_it() {
+        struct Wide;
+        struct WideInst;
+        static WIDEST: AtomicU32 = AtomicU32::new(0);
+        impl ResidentModel for Wide {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("wide", "wide", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("wide", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(GB, 0)
+            }
+            fn batch_limit(&self) -> Option<usize> {
+                Some(32)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(WideInst))
+            }
+        }
+        impl Instance for WideInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
+            }
+            fn run_batch(&mut self, a: &str, invs: &[Invocation], p: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+                WIDEST.fetch_max(invs.len() as u32, Ordering::SeqCst);
+                invs.iter().enumerate().map(|(i, inv)| self.run(a, inv, &mut |pr| p(i, pr))).collect()
+            }
+        }
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Wide)];
+        let exec = Executor::start(models, budgets, Policy::default());
+        // The first job occupies the instance while the other 19 queue up.
+        submit_wait(&exec, &["wide"; 20]);
+        assert!(WIDEST.load(Ordering::SeqCst) > Policy::default().max_batch as u32, "the model's own batch limit must override the policy cap, widest group was {}", WIDEST.load(Ordering::SeqCst));
     }
 
     #[test]
