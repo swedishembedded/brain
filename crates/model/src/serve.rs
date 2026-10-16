@@ -22,6 +22,9 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::paged::{BlockAllocator, BlockTable, KvNamespace};
 
+mod speculate;
+pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
+
 /// The seam a model's paged serving engine implements. Every method mirrors
 /// one qwen `Engine` method the [`Scheduler`] used to call directly (see
 /// `crates/qwen3/src/serve.rs`'s `impl PagedDecoder for Engine`) — this trait
@@ -134,6 +137,69 @@ pub trait PagedDecoder {
     /// The largest `k` [`forward_batched_topk`](Self::forward_batched_topk) will
     /// honor — the decoder's on-device top-K extraction scratch capacity.
     fn topk_capacity(&self) -> usize;
+
+    // ---- speculative decoding (optional; see [`speculate`]) ----
+    //
+    // Every method below defaults to "this decoder does not speculate", so an
+    // existing `PagedDecoder` keeps compiling and being scheduled exactly as
+    // before. A decoder that CAN verify several positions per sequence in one
+    // batched step overrides `spec_max_draft` and `forward_batched_verify`
+    // (and `commit_verified`, if it holds per-sequence state a rejected
+    // position must not leave behind); a decoder with a drafter of its own
+    // also overrides `draft`, otherwise the scheduler's installed
+    // [`Drafter`] supplies proposals.
+
+    /// The most proposals per sequence one [`Self::forward_batched_verify`]
+    /// may be asked to score. `0` (the default) means the decoder does not
+    /// speculate and the scheduler never calls the other speculation methods.
+    fn spec_max_draft(&self) -> usize {
+        0
+    }
+
+    /// The largest number of sequences for which verifying beats plain
+    /// batched decode on this decoder - the measured crossover. Past it the
+    /// scheduler decodes plainly for that step.
+    fn spec_max_batch(&self) -> usize {
+        usize::MAX
+    }
+
+    /// The most rows - the sum over sequences of one input plus its proposals -
+    /// one [`Self::forward_batched_verify`] may carry (the decoder's scratch
+    /// for undoing a rejection is sized for it). The scheduler shrinks windows
+    /// to fit and does not speculate when even one row per sequence will not.
+    fn spec_row_budget(&self) -> usize {
+        usize::MAX
+    }
+
+    /// The decoder's own proposals: `ks[i]` is how many to propose after
+    /// `queries[i]`'s context. Fewer (or none) is always allowed. Called only
+    /// when no external [`Drafter`] is installed; the default proposes nothing.
+    fn draft(&mut self, queries: &[DraftQuery], ks: &[usize]) -> Vec<Vec<u32>> {
+        let _ = ks;
+        vec![Vec::new(); queries.len()]
+    }
+
+    /// Score `rows[i]` (the sequence's next input followed by its proposals)
+    /// at consecutive new positions of `tables[i]`, appending `rows[i].len()`
+    /// positions to each table. Returns, per sequence and row, the top
+    /// `cands` `(token id, logit)` candidates of the distribution AFTER that
+    /// row, best first (`cands == 1` is the greedy pick). The decoder must be
+    /// able to undo the verify: until [`Self::commit_verified`] it keeps
+    /// whatever it needs to restore each sequence to any row boundary.
+    fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
+        let _ = (tables, rows, cands);
+        unreachable!("forward_batched_verify on a decoder whose spec_max_draft is 0")
+    }
+
+    /// Settle the verify just run: sequence `i` keeps the first `keep[i]`
+    /// rows (the input row plus its accepted proposals) and every later row
+    /// is rolled back - recurrent state restored to the state after row
+    /// `keep[i] - 1`. The tables still hold every verified position; the
+    /// scheduler truncates them afterwards. A decoder with a drafter also
+    /// advances it here.
+    fn commit_verified(&mut self, tables: &mut [&mut BlockTable], keep: &[usize]) {
+        let _ = (tables, keep);
+    }
 
     // ---- host-RAM KV offload (optional; see `crate::kv_offload`) ----
     //
@@ -319,6 +385,26 @@ fn sample_from_topk_impl(candidates: &[(u32, f32)], params: SampleParams, rng: &
     if params.is_greedy() {
         return (candidates[0].0, 0.0);
     }
+    let (probs, kept_sum) = truncated_weights(candidates, params);
+    let r = rng.next_f32() * kept_sum;
+    let mut acc = 0.0f32;
+    for (i, &p) in probs.iter().enumerate() {
+        acc += p;
+        if acc >= r {
+            return (candidates[i].0, p.ln() - kept_sum.ln());
+        }
+    }
+    let last = probs.len() - 1;
+    (candidates[last].0, probs[last].ln() - kept_sum.ln())
+}
+
+/// The unnormalised weights (and their sum) of the distribution a non-greedy
+/// pick draws from: temperature scale, truncate to `top_k`, softmax, then
+/// nucleus-truncate to `top_p`. Weight `i` belongs to `candidates[i]`, and
+/// only the surviving prefix is returned. The one definition of "the target
+/// distribution" shared by plain sampling and speculative verification, so
+/// the two can never disagree about it.
+fn truncated_weights(candidates: &[(u32, f32)], params: SampleParams) -> (Vec<f32>, f32) {
     let temp = params.temp.max(1e-6);
     let n = if params.top_k > 0 { params.top_k.min(candidates.len()) } else { candidates.len() };
     let mut probs: Vec<f32> = candidates[..n].iter().map(|&(_, v)| v / temp).collect();
@@ -341,17 +427,9 @@ fn sample_from_topk_impl(candidates: &[(u32, f32)], params: SampleParams, rng: &
             }
         }
     }
-    let kept_sum: f32 = probs[..cut].iter().sum();
-    let r = rng.next_f32() * kept_sum;
-    let mut acc = 0.0f32;
-    for (i, &p) in probs[..cut].iter().enumerate() {
-        acc += p;
-        if acc >= r {
-            return (candidates[i].0, p.ln() - kept_sum.ln());
-        }
-    }
-    let last = cut - 1;
-    (candidates[last].0, probs[last].ln() - kept_sum.ln())
+    probs.truncate(cut);
+    let kept_sum: f32 = probs.iter().sum();
+    (probs, kept_sum)
 }
 
 /// Ports vLLM's `NoRepeatNGramLogitsProcessor` verbatim
@@ -572,6 +650,10 @@ struct Running {
     max_new: usize,
     stop: Vec<u32>,
     next_input: u32,
+    /// The prompt followed by `generated`: what a drafter reads.
+    context: Vec<u32>,
+    /// This sequence's adaptive speculation window.
+    spec: speculate::SeqSpec,
     done: bool,
     /// This sequence's sampling params + its own RNG stream. Kept per-sequence
     /// (not per-batch) so a `seed` reproduces exactly regardless of what else
@@ -596,6 +678,7 @@ fn accept_token(r: &mut Running, next: u32) {
         return;
     }
     r.generated.push(next);
+    r.context.push(next);
     r.next_input = next;
     if r.generated.len() >= r.max_new {
         r.done = true;
@@ -643,6 +726,11 @@ pub struct Scheduler<D: PagedDecoder> {
     /// outstanding: preferring new work over work already in flight would let
     /// a busy queue starve a preempted sequence for as long as it stays busy.
     swapped: VecDeque<Running>,
+    /// Proposal source installed with [`Scheduler::set_drafter`]; `None` uses
+    /// the decoder's own [`PagedDecoder::draft`].
+    drafter: Option<Box<dyn Drafter>>,
+    spec_policy: SpecPolicy,
+    spec_stats: SpecStats,
 }
 
 impl<D: PagedDecoder> Scheduler<D> {
@@ -663,6 +751,9 @@ impl<D: PagedDecoder> Scheduler<D> {
             pending_rejects: Vec::new(),
             prefill_budget,
             swapped: VecDeque::new(),
+            drafter: None,
+            spec_policy: SpecPolicy::default(),
+            spec_stats: SpecStats::default(),
         }
     }
 
@@ -1121,7 +1212,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 let candidates = self.dec.admit_topk(&hidden, k);
                 sample_from_topk(&candidates, sample, &mut rng)
             };
-            let mut r = Running { id, table, adapter, generated: Vec::new(), max_new: req.max_new, stop: req.stop, next_input: first, done: false, sample, rng };
+            let mut r = Running { id, table, adapter, generated: Vec::new(), max_new: req.max_new, stop: req.stop, next_input: first, context: req.prompt, spec: speculate::SeqSpec::new(), done: false, sample, rng };
             accept_token(&mut r, first);
             report.admitted.push(id);
             self.running.push(r);
@@ -1145,7 +1236,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         //    back below). With work waiting, the window stays 1 so admission
         //    latency is never traded away silently.
         let active: Vec<usize> = (0..self.running.len()).filter(|&i| !self.running[i].done).collect();
-        if !active.is_empty() {
+        if !active.is_empty() && !self.speculative_step(&active) {
             let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
             let remaining_min = active
                 .iter()
@@ -1368,6 +1459,8 @@ mod tests {
             max_new,
             stop: stop.to_vec(),
             next_input: 0,
+            context: Vec::new(),
+            spec: speculate::SeqSpec::new(),
             done: false,
             sample: SampleParams { temp: 0.0, top_k: 0, top_p: 1.0 },
             rng: data::rng::Rng::new(0),

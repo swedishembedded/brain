@@ -1,0 +1,385 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+//
+// Swedish Embedded AB implements speculative decoding - drafters, verifiers
+// and the state rollback a recurrent stack needs - for clients serving large
+// models on modest hardware. If your team needs expertise in LLM serving
+// throughput then you can procure our services by sending an email to
+// info@swedishembedded.com.
+
+//! Speculative decoding inside the one continuous-batching [`Scheduler`].
+//!
+//! A decoder opts in through the speculation hooks on [`PagedDecoder`]
+//! (`spec_max_draft`, `forward_batched_verify`, `commit_verified`, and
+//! optionally its own `draft`); every default says "no speculation", so a
+//! decoder that has not adopted them is scheduled exactly as before. The
+//! scheduler owns everything model-independent:
+//!
+//! * **Proposals** come from the decoder's own drafter, or from an external
+//!   [`Drafter`] installed with [`Scheduler::set_drafter`] (the model-free
+//!   [`NgramDrafter`] is one).
+//! * **One batched verify** scores `1 + k` rows per sequence in a single
+//!   decoder step; the scheduler accepts the longest prefix the target agrees
+//!   with ([`verify_proposals`]: greedy match, or rejection sampling so a
+//!   sampled sequence keeps the target distribution), emits the accepted
+//!   tokens plus the target's own next token, and rolls the block table back
+//!   to the accepted length. The decoder rolls back whatever else it holds
+//!   per sequence (a recurrent state) in [`PagedDecoder::commit_verified`].
+//! * **The window is adaptive.** Each sequence keeps a moving average of how
+//!   many proposals the target accepted and asks for one or two more than
+//!   that; a drafter that keeps missing is switched off for the sequence and
+//!   re-probed now and then. Past the decoder's crossover batch size
+//!   ([`PagedDecoder::spec_max_batch`]) speculation is off for the whole
+//!   step and decode is the plain batched step.
+//!
+//! Greedy output is identical to plain decode whatever the drafter proposes;
+//! the only difference a decoder can introduce is the floating-point
+//! ordering of its own verify kernels, which it documents.
+
+use super::*;
+
+/// What a drafter may look at for one sequence.
+pub struct DraftQuery<'a> {
+    /// The prompt followed by every token generated so far. The last element
+    /// is the token the next decode step consumes.
+    pub context: &'a [u32],
+    /// The sequence's block table: how many positions the decoder has
+    /// consumed (`table.len()`, one less than `context.len()`) and which
+    /// physical slot it owns, for a drafter that keeps state per sequence.
+    pub table: &'a BlockTable,
+}
+
+/// A source of proposals that needs nothing from the decoder. A wrong
+/// proposal costs a verify row, never correctness.
+pub trait Drafter: Send {
+    /// Up to `ks[i]` continuations of `queries[i]`, possibly fewer or none.
+    fn draft(&mut self, queries: &[DraftQuery], ks: &[usize]) -> Vec<Vec<u32>>;
+}
+
+/// Prompt-lookup drafting: find the latest earlier occurrence of the
+/// context's trailing `n` tokens and propose what followed it. Free to run,
+/// and strong exactly where generations copy their context (code edits, tool
+/// call arguments, quoted text).
+pub struct NgramDrafter {
+    n: usize,
+}
+
+impl NgramDrafter {
+    /// Match on the trailing `n` tokens (`n >= 1`).
+    pub fn new(n: usize) -> NgramDrafter {
+        NgramDrafter { n: n.max(1) }
+    }
+}
+
+impl Drafter for NgramDrafter {
+    fn draft(&mut self, queries: &[DraftQuery], ks: &[usize]) -> Vec<Vec<u32>> {
+        queries
+            .iter()
+            .zip(ks)
+            .map(|(q, &k)| {
+                let c = q.context;
+                if k == 0 || c.len() <= self.n {
+                    return Vec::new();
+                }
+                let suffix = &c[c.len() - self.n..];
+                let hit = (0..c.len() - self.n).rev().find(|&i| &c[i..i + self.n] == suffix);
+                match hit {
+                    Some(i) => c[i + self.n..].iter().take(k).copied().collect(),
+                    None => Vec::new(),
+                }
+            })
+            .collect()
+    }
+}
+
+/// How the scheduler uses a decoder's speculation hooks.
+#[derive(Clone, Copy, Debug)]
+pub struct SpecPolicy {
+    /// Master switch. Off, the scheduler never drafts or verifies.
+    pub enabled: bool,
+    /// Upper bound on proposals per sequence per step (further bounded by the
+    /// decoder's [`PagedDecoder::spec_max_draft`]).
+    pub max_draft: usize,
+    /// Largest number of running sequences for which a step may speculate
+    /// (further bounded by the decoder's [`PagedDecoder::spec_max_batch`]).
+    pub max_batch: usize,
+}
+
+impl Default for SpecPolicy {
+    fn default() -> SpecPolicy {
+        SpecPolicy { enabled: true, max_draft: usize::MAX, max_batch: usize::MAX }
+    }
+}
+
+/// What speculation has done so far, for a server or benchmark to report.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SpecStats {
+    /// Sequence-rounds that verified at least one proposal.
+    pub rounds: u64,
+    /// Proposals submitted for verification.
+    pub proposed: u64,
+    /// Proposals the target accepted.
+    pub accepted: u64,
+    /// Decoder steps that were verify steps.
+    pub verify_steps: u64,
+    /// Steps where speculation was on but the drafter proposed nothing, so the
+    /// step was plain decode.
+    pub plain_steps: u64,
+}
+
+impl SpecStats {
+    /// Mean tokens one verified sequence-round produced: the accepted
+    /// proposals plus the target's own token.
+    pub fn tokens_per_round(&self) -> f64 {
+        if self.rounds == 0 {
+            1.0
+        } else {
+            (self.accepted + self.rounds) as f64 / self.rounds as f64
+        }
+    }
+}
+
+/// One sequence's adaptive window: a moving average of accepted proposals per
+/// round, and a countdown to the next probe while the drafter is switched off.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SeqSpec {
+    mean_accepted: f32,
+    idle_steps: u32,
+}
+
+/// Weight of the newest round in the moving average.
+const ACCEPT_EWMA: f32 = 0.5;
+/// Below this average a sequence stops proposing and only probes.
+const SWITCH_OFF_BELOW: f32 = 0.2;
+/// Plain steps between probes of a switched-off drafter.
+const PROBE_EVERY: u32 = 8;
+
+impl SeqSpec {
+    pub(super) fn new() -> SeqSpec {
+        SeqSpec { mean_accepted: 1.0, idle_steps: 0 }
+    }
+
+    /// Proposals to ask for this step, at most `cap`.
+    fn window(&mut self, cap: usize) -> usize {
+        if self.mean_accepted < SWITCH_OFF_BELOW {
+            self.idle_steps += 1;
+            return if self.idle_steps >= PROBE_EVERY { 1.min(cap) } else { 0 };
+        }
+        (self.mean_accepted.floor() as usize + 2).min(cap)
+    }
+
+    fn record(&mut self, proposed: usize, accepted: usize) {
+        if proposed == 0 {
+            return;
+        }
+        self.idle_steps = 0;
+        self.mean_accepted = (1.0 - ACCEPT_EWMA) * self.mean_accepted + ACCEPT_EWMA * accepted as f32;
+    }
+}
+
+/// The outcome of checking one sequence's proposals against the target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Verdict {
+    /// The leading proposals the target accepted.
+    pub accepted: usize,
+    /// The target's own next token: the correction at the first rejected
+    /// position, or the bonus token after the last accepted one.
+    pub next: u32,
+}
+
+/// Decide how many of `proposals` stand. `rows[j]` is the target's candidate
+/// list (best first) for the position `proposals[j]` was proposed at, and
+/// `rows[proposals.len()]` the one after the last proposal.
+///
+/// Greedy: accept while the proposal is the target's top candidate. Sampled:
+/// the proposals come from a deterministic drafter (a point mass), so the
+/// standard speculative-sampling test reduces to accepting a proposal `d`
+/// with probability `p(d)` under the temperature / top-k / top-p
+/// distribution the target would have sampled from, and on rejection drawing
+/// from that distribution with `d` removed and renormalised. The emitted
+/// tokens are then distributed exactly as plain sampling would produce them.
+pub fn verify_proposals(proposals: &[u32], rows: &[Vec<(u32, f32)>], params: SampleParams, rng: &mut data::rng::Rng) -> Verdict {
+    assert_eq!(rows.len(), proposals.len() + 1, "verify_proposals: {} candidate rows for {} proposals", rows.len(), proposals.len());
+    if params.is_greedy() {
+        let accepted = proposals.iter().zip(rows).take_while(|(d, row)| row[0].0 == **d).count();
+        return Verdict { accepted, next: rows[accepted][0].0 };
+    }
+    for (j, &d) in proposals.iter().enumerate() {
+        let (weights, kept_sum) = truncated_weights(&rows[j], params);
+        let at = rows[j][..weights.len()].iter().position(|&(t, _)| t == d);
+        let p_d = at.map_or(0.0, |i| weights[i]);
+        if rng.next_f32() * kept_sum < p_d {
+            continue;
+        }
+        // Rejected: draw from the target distribution without `d`.
+        let rest = kept_sum - p_d;
+        let r = rng.next_f32() * rest;
+        let mut acc = 0.0f32;
+        let mut last = None;
+        for (i, &w) in weights.iter().enumerate() {
+            if Some(i) == at {
+                continue;
+            }
+            last = Some(rows[j][i].0);
+            acc += w;
+            if acc >= r {
+                return Verdict { accepted: j, next: rows[j][i].0 };
+            }
+        }
+        // Rounding left `r` past the last weight; the last candidate is the tail of the CDF.
+        return Verdict { accepted: j, next: last.expect("a rejected proposal had probability < 1, so another candidate exists") };
+    }
+    let k = proposals.len();
+    let (weights, kept_sum) = truncated_weights(&rows[k], params);
+    let r = rng.next_f32() * kept_sum;
+    let mut acc = 0.0f32;
+    for (i, &w) in weights.iter().enumerate() {
+        acc += w;
+        if acc >= r {
+            return Verdict { accepted: k, next: rows[k][i].0 };
+        }
+    }
+    Verdict { accepted: k, next: rows[k][weights.len() - 1].0 }
+}
+
+/// The block tables of the `active` sequences, in `active` order.
+fn active_tables<'a>(running: &'a mut [Running], active: &[usize]) -> Vec<&'a mut BlockTable> {
+    running.iter_mut().enumerate().filter(|(i, _)| active.contains(i)).map(|(_, r)| &mut r.table).collect()
+}
+
+impl<D: PagedDecoder> Scheduler<D> {
+    /// Install an external drafter. It is used in place of the decoder's own
+    /// [`PagedDecoder::draft`]; a decoder that cannot verify
+    /// ([`PagedDecoder::spec_max_draft`] of 0) ignores it.
+    pub fn set_drafter(&mut self, drafter: Box<dyn Drafter>) {
+        self.drafter = Some(drafter);
+    }
+
+    /// Configure speculation (default: on whenever the decoder supports it).
+    pub fn set_speculation(&mut self, policy: SpecPolicy) {
+        self.spec_policy = policy;
+    }
+
+    /// What speculation has done so far.
+    pub fn spec_stats(&self) -> SpecStats {
+        self.spec_stats
+    }
+
+    /// A still-running sequence's block table (`None` once reaped, queued, or
+    /// preempted to host RAM). Read-only: the scheduler owns its lifecycle.
+    pub fn table_of(&self, id: u64) -> Option<&BlockTable> {
+        self.running.iter().find(|r| r.id == id).map(|r| &r.table)
+    }
+
+    /// Run one speculative decode step over `active` (indices into
+    /// `self.running`) if speculation is on, the batch is small enough, and
+    /// the drafter proposed anything. Returns whether it did; `false` leaves
+    /// every sequence untouched for the plain step.
+    pub(super) fn speculative_step(&mut self, active: &[usize]) -> bool {
+        let kmax = self.spec_policy.max_draft.min(self.dec.spec_max_draft());
+        if !self.spec_policy.enabled || kmax == 0 || active.len() > self.spec_policy.max_batch.min(self.dec.spec_max_batch()) {
+            return false;
+        }
+        let budget = self.dec.spec_row_budget();
+        if active.len() > budget {
+            return false;
+        }
+        let mut ks = self.draft_windows(active, kmax);
+        // Shrink the widest windows until the step fits the decoder's scratch.
+        let mut rows = active.len() + ks.iter().sum::<usize>();
+        while rows > budget {
+            let widest = (0..ks.len()).max_by_key(|&i| ks[i]).expect("a non-empty batch");
+            ks[widest] -= 1;
+            rows -= 1;
+        }
+        let queries: Vec<DraftQuery> = active.iter().map(|&i| DraftQuery { context: &self.running[i].context, table: &self.running[i].table }).collect();
+        let mut props = match self.drafter.as_mut() {
+            Some(d) => d.draft(&queries, &ks),
+            None => self.dec.draft(&queries, &ks),
+        };
+        drop(queries);
+        assert_eq!(props.len(), active.len(), "a drafter must answer every query");
+        let vocab = self.dec.vocab() as u32;
+        for (p, &k) in props.iter_mut().zip(&ks) {
+            p.truncate(k);
+            // A drafter is untrusted input: cut at the first out-of-vocabulary
+            // proposal rather than splicing the continuations around it.
+            if let Some(bad) = p.iter().position(|&t| t >= vocab) {
+                p.truncate(bad);
+            }
+        }
+        if props.iter().all(|p| p.is_empty()) {
+            // Nothing proposed is nothing rejected: the windows stay as they were.
+            self.spec_stats.plain_steps += 1;
+            return false;
+        }
+        for (k, p) in ks.iter_mut().zip(&props) {
+            *k = p.len();
+        }
+
+        let rows: Vec<Vec<u32>> = active.iter().zip(&props).map(|(&i, p)| std::iter::once(self.running[i].next_input).chain(p.iter().copied()).collect()).collect();
+        let all_greedy = active.iter().all(|&i| self.running[i].sample.is_greedy());
+        let cands = if all_greedy { 1 } else { self.dec.topk_capacity().max(1) };
+        let before: Vec<u32> = active.iter().map(|&i| self.running[i].table.len()).collect();
+
+        let scored = self.dec.forward_batched_verify(&mut active_tables(&mut self.running, active), &rows, cands);
+        assert_eq!(scored.len(), active.len(), "forward_batched_verify must answer every sequence");
+
+        let mut keep = Vec::with_capacity(active.len());
+        let mut verdicts = Vec::with_capacity(active.len());
+        for (bi, &si) in active.iter().enumerate() {
+            let r = &mut self.running[si];
+            let v = verify_proposals(&props[bi], &scored[bi], r.sample, &mut r.rng);
+            // The input row and every accepted proposal keep their state; the
+            // rest of the verified block is rolled back.
+            keep.push(v.accepted + 1);
+            verdicts.push(v);
+        }
+        self.dec.commit_verified(&mut active_tables(&mut self.running, active), &keep);
+
+        self.spec_stats.verify_steps += 1;
+        for (bi, &si) in active.iter().enumerate() {
+            let v = verdicts[bi];
+            let r = &mut self.running[si];
+            let new_len = before[bi] + keep[bi] as u32;
+            r.table.truncate(new_len, self.dec.alloc_mut());
+            r.spec.record(ks[bi], v.accepted);
+            if ks[bi] > 0 {
+                self.spec_stats.rounds += 1;
+                self.spec_stats.proposed += ks[bi] as u64;
+                self.spec_stats.accepted += v.accepted as u64;
+            }
+            for &tok in props[bi][..v.accepted].iter().chain(std::iter::once(&v.next)) {
+                accept_token(r, tok);
+                if r.done {
+                    break;
+                }
+            }
+        }
+        true
+    }
+
+    /// Per-sequence proposal budget for this step: the adaptive window,
+    /// bounded by what the sequence can still emit and by free KV blocks.
+    fn draft_windows(&mut self, active: &[usize], kmax: usize) -> Vec<usize> {
+        let mut spare = self.dec.free_blocks().saturating_sub(self.blocks_for_next_token());
+        let mut ks = Vec::with_capacity(active.len());
+        for &i in active {
+            let r = &mut self.running[i];
+            // A round emits at most accepted + 1 tokens, so more than
+            // `remaining - 1` proposals could never all be used.
+            let remaining = r.max_new.saturating_sub(r.generated.len());
+            let mut k = r.spec.window(kmax).min(remaining.saturating_sub(1));
+            let held = r.table.blocks().len() as u32;
+            // The decode step's own token is covered by `ensure_decode_room`;
+            // proposals each need a position beyond it.
+            let extra = |k: usize| self.dec.blocks_for(r.table.len() + 1 + k as u32).saturating_sub(held.max(self.dec.blocks_for(r.table.len() + 1)));
+            while k > 0 && extra(k) > spare {
+                k -= 1;
+            }
+            spare -= extra(k);
+            ks.push(k);
+        }
+        ks
+    }
+}
