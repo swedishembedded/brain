@@ -83,3 +83,27 @@ fn a_chunked_mlp_gives_the_loss_and_gradients_of_the_whole_one() {
         assert_same_training_signal(loss_and_grads(&chunked), whole, 1e-6, 0.999999);
     }
 }
+
+/// The backward rebuilds each MLP chunk's activations itself, so the layer
+/// rebuild in front of it must not run the MLP forward as well, and a chunk's
+/// rebuild needs no `down` product (nothing reads it). The chunked backward
+/// therefore does no more GEMM work than the whole-sequence MLP's, whose
+/// replay runs the MLP forward once.
+#[test]
+fn a_chunked_mlp_backward_does_no_more_gemm_work_than_the_whole_one() {
+    let cfg = lora_config();
+    let init = weights(&cfg, 0.3);
+    let backward_flops = |mlp_rows: Option<u32>| {
+        let opts = TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: true, mlp_rows, ..TrainOpts::default() };
+        let m = Qwen35::new_train_opts_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, T as u32, &init, &opts);
+        m.set_batch(&TOKENS, &TARGETS);
+        m.zero_grads();
+        m.forward();
+        m.gpu.reset_ops_counters();
+        m.backward();
+        m.gpu.ops_counters().total.flops
+    };
+    let (whole, chunked) = (backward_flops(None), backward_flops(Some(5)));
+    assert!(whole > 0, "the counters must see the backward's GEMMs");
+    assert!(chunked <= whole, "chunked backward {chunked} FLOP exceeds the whole-MLP backward {whole} FLOP");
+}

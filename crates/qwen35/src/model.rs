@@ -2302,6 +2302,19 @@ impl Qwen35 {
     /// [`Self::mlp_fwd`] given `xn2`'s activation already quantised - see
     /// [`Self::layer_gdn_fwd_pre`].
     fn mlp_fwd_pre(&self, prefix: &str, xn2: &DeviceBuffer, pre: Option<Act>, epilogue: bool, n: u32) -> (DeviceBuffer, Option<MlpLayerActs>) {
+        let (out, acts) = self.mlp_fwd_core(prefix, xn2, pre, epilogue, true, n);
+        (out.expect("qwen35: mlp_fwd_core was asked for the output"), acts)
+    }
+
+    /// The MLP's activations alone (`gate_pre`, `up`, `h`), without the `down`
+    /// product: what the backward needs to rebuild for a chunk whose output
+    /// the forward already produced and nothing reads again.
+    fn mlp_acts_only(&self, prefix: &str, xn2: &DeviceBuffer, n: u32) -> MlpLayerActs {
+        self.mlp_fwd_core(prefix, xn2, None, false, false, n).1.expect("qwen35: backward() requires a training build")
+    }
+
+    /// [`Self::mlp_fwd_pre`] with the `down` projection optional (`want_out`).
+    fn mlp_fwd_core(&self, prefix: &str, xn2: &DeviceBuffer, pre: Option<Act>, epilogue: bool, want_out: bool, n: u32) -> (Option<DeviceBuffer>, Option<MlpLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -2335,8 +2348,8 @@ impl Qwen35 {
             g.submit(&[], &[g.step(SILU_MUL, &[&gate_pre, &up, &h], &[n * ff], n * ff)]);
             (h, None)
         };
-        let down = g.storage((n * d) as u64);
-        {
+        let down = want_out.then(|| {
+            let down = g.storage((n * d) as u64);
             let mut s = Vec::new();
             let act2 = match down_act {
                 Some(a) => a,
@@ -2346,7 +2359,8 @@ impl Qwen35 {
                 self.lora_fwd(&mut s, "down", &h, &p("down.weight"), &down, n, ff, d);
             }
             g.submit(&[], &s);
-        }
+            down
+        });
 
         let acts = self.is_train.then(|| MlpLayerActs { xn2: xn2.clone(), gate_pre, up, h });
         (down, acts)
@@ -2523,7 +2537,11 @@ impl Qwen35 {
     /// them (no recompute) or drops them at once (recompute, which calls this
     /// again from `res[l]` inside the backward - the same kernels over the
     /// same inputs, so the rebuilt activations are the ones that were dropped).
-    fn layer_forward(&self, l: usize, xres: &DeviceBuffer, out: &DeviceBuffer) -> Option<LayerTrainActs> {
+    ///
+    /// `rebuild` is the backward's replay: when the MLP is saved as rows, the
+    /// backward rebuilds each chunk itself ([`Self::mlp_bwd_saved`]), so the
+    /// replay stops after `xn2` and leaves `out` unwritten.
+    fn layer_forward(&self, l: usize, xres: &DeviceBuffer, out: &DeviceBuffer, rebuild: bool) -> Option<LayerTrainActs> {
         let g = &self.gpu;
         let n = self.b * self.t;
         let d = self.cfg.d_model;
@@ -2552,13 +2570,16 @@ impl Qwen35 {
         let (mlp_out, mlp_saved) = match chunk_rows {
             // Rows are independent: run the MLP a chunk at a time and keep
             // none of its activations (rebuilt by the backward).
-            Some(rows) => (self.mlp_fwd_rows(&prefix, &xn2, n, rows), Some(MlpSaved::Rows { xn2: xn2.clone() })),
+            Some(_) if rebuild => (None, Some(MlpSaved::Rows { xn2: xn2.clone() })),
+            Some(rows) => (Some(self.mlp_fwd_rows(&prefix, &xn2, n, rows)), Some(MlpSaved::Rows { xn2: xn2.clone() })),
             None => {
                 let (out, acts) = self.mlp_fwd(&prefix, &xn2, n);
-                (out, acts.map(MlpSaved::Full))
+                (Some(out), acts.map(MlpSaved::Full))
             }
         };
-        g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, out], &[n * d], n * d)]);
+        if let Some(mlp_out) = &mlp_out {
+            g.submit(&[], &[g.step(ADD2, &[&xmid, mlp_out, out], &[n * d], n * d)]);
+        }
 
         if !self.is_train {
             return None;
@@ -2608,7 +2629,7 @@ impl Qwen35 {
         }
         for l in self.shard.start..self.shard.end {
             let (x, y) = if self.res_bf16.is_some() { (&res[0], &res[1]) } else { (&res[l], &res[l + 1]) };
-            let acts = self.layer_forward(l, x, y);
+            let acts = self.layer_forward(l, x, y, false);
             if let Some(packed) = &self.res_bf16 {
                 packed.store(g, l + 1, y);
                 packed.load(g, l + 1, &res[0]);
@@ -2814,8 +2835,8 @@ impl Qwen35 {
         let d_xn2 = self.gpu.storage((n * d) as u64);
         for row0 in (0..n).step_by(rows as usize) {
             let rc = rows.min(n - row0);
-            let (_, acts) = self.mlp_fwd(prefix, &self.take_rows(xn2, d, n, row0, rc), rc);
-            let d_chunk = self.mlp_bwd(prefix, &acts.expect("qwen35: backward() requires a training build"), &self.take_rows(d_mlp_out, d, n, row0, rc), rc);
+            let acts = self.mlp_acts_only(prefix, &self.take_rows(xn2, d, n, row0, rc), rc);
+            let d_chunk = self.mlp_bwd(prefix, &acts, &self.take_rows(d_mlp_out, d, n, row0, rc), rc);
             self.put_rows(&d_chunk, &d_xn2, d, row0, rc);
             self.gpu.poll_wait();
         }
@@ -2946,7 +2967,7 @@ impl Qwen35 {
                 None => &res[l],
             };
             let rebuilt: Option<LayerTrainActs> =
-                recompute_out.as_ref().map(|out| self.layer_forward(l, x, out).expect("qwen35: backward() requires a training build"));
+                recompute_out.as_ref().map(|out| self.layer_forward(l, x, out, true).expect("qwen35: backward() requires a training build"));
             let la = match &rebuilt {
                 Some(rebuilt) => rebuilt,
                 None => &ta.layers[l - self.shard.start],
