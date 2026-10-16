@@ -238,7 +238,7 @@ mod tests {
         let w = tone(220.0, n);
         // A different pitch + additive noise must read as a larger distortion.
         let mut other = tone(330.0, n);
-        let mut seed: u32 = 12345;
+        let mut seed = data::rng::random_seed() as u32;
         for s in other.iter_mut() {
             // cheap LCG noise in [-0.1, 0.1]
             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
