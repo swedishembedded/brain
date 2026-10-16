@@ -8,7 +8,7 @@
 //!   brain qwen35 finetune <data_dir> --base F --out F [--mode lora|full]
 //!                     [--lora-rank R --lora-alpha A] [--base-dtype f32|bf16|nf4]
 //!                     [--seq-len T] [--recompute on|off] [--steps N --lr X ...]
-//!   brain qwen35 sample --base DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE]
+//!   brain qwen35 sample-adapter --base DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE]
 //!                     [--base-dtype nf4|bf16|f32] [--max-new N] [--no-adapter | --compare]
 //!
 //! `infer`'s `--weights`/`--tokenizer` are optional: naming both explicitly
@@ -51,8 +51,8 @@ pub fn run_qwen35(args: &[String]) {
         Some("import") => import(&args[1..]),
         Some("infer") => infer(&args[1..]),
         Some("finetune") => finetune(&args[1..]),
-        Some("sample") => sample(&args[1..]),
-        other => eprintln!("usage: brain qwen35 <import|infer|finetune|sample> ...  (got {other:?})"),
+        Some("sample-adapter") => sample(&args[1..]),
+        other => eprintln!("usage: brain qwen35 <import|infer|finetune|sample-adapter> ...  (got {other:?})"),
     }
 }
 
@@ -197,7 +197,7 @@ fn infer(args: &[String]) {
     println!();
 }
 
-const SAMPLE_USAGE: &str = "usage: brain qwen35 sample --base F|DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE] \
+const SAMPLE_USAGE: &str = "usage: brain qwen35 sample-adapter --base F|DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE] \
      [--base-dtype nf4|bf16|f32] [--max-new N] [--tokenizer FILE] [--chat] [--no-adapter | --compare]
   --base        a HuggingFace checkpoint directory (FP8 release included) or a brain-native file; streamed onto
                 the device at --base-dtype with the adapter overlaid, never folded into a host copy
@@ -207,7 +207,7 @@ const SAMPLE_USAGE: &str = "usage: brain qwen35 sample --base F|DIR --prompt TEX
   Decoding is greedy, by repeated full forwards at a fixed length (no KV cache): slow, but exactly the forward
   the adapter was trained through.";
 
-/// Everything `brain qwen35 sample` needs, parsed off the argv.
+/// Everything `brain qwen35 sample-adapter` needs, parsed off the argv.
 #[derive(Debug)]
 struct SampleArgs {
     base: String,
@@ -265,7 +265,7 @@ fn parse_sample(args: &[String]) -> Result<SampleArgs, String> {
     Ok(SampleArgs { base, adapter, prompts, base_dtype, max_new, tokenizer, chat, which })
 }
 
-/// `brain qwen35 sample`: greedy answers of a (quantised, streamed) base with a
+/// `brain qwen35 sample-adapter`: greedy answers of a (quantised, streamed) base with a
 /// trained LoRA adapter overlaid, via [`qwen35::adapter_sample::AdapterSampler`].
 fn sample(args: &[String]) {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -275,13 +275,13 @@ fn sample(args: &[String]) {
     let sa = match parse_sample(args) {
         Ok(sa) => sa,
         Err(e) => {
-            eprintln!("brain qwen35 sample: {e}");
+            eprintln!("brain qwen35 sample-adapter: {e}");
             eprintln!("{SAMPLE_USAGE}");
             std::process::exit(2);
         }
     };
     if let Err(e) = run_sample(&sa) {
-        eprintln!("brain qwen35 sample failed: {e}");
+        eprintln!("brain qwen35 sample-adapter failed: {e}");
         std::process::exit(1);
     }
 }
@@ -303,7 +303,7 @@ fn run_sample(sa: &SampleArgs) -> Result<(), String> {
     let t0 = std::time::Instant::now();
     let adapter = sa.adapter.as_deref().map(Path::new);
     let mut sampler = qwen35::adapter_sample::AdapterSampler::open(base, adapter, sa.base_dtype, (longest + sa.max_new) as u32)?;
-    eprintln!("qwen35 sample: base {} ({}) loaded in {:.1}s, forward length {}", sa.base, sa.base_dtype.name(), t0.elapsed().as_secs_f64(), longest + sa.max_new);
+    eprintln!("qwen35 sample-adapter: base {} ({}) loaded in {:.1}s, forward length {}", sa.base, sa.base_dtype.name(), t0.elapsed().as_secs_f64(), longest + sa.max_new);
     let modes: &[(&str, bool)] = match sa.which {
         SampleWhich::AdapterOnly => &[("adapter", true)],
         SampleWhich::BaseOnly => &[("base", false)],
@@ -315,7 +315,7 @@ fn run_sample(sa: &SampleArgs) -> Result<(), String> {
             let t = std::time::Instant::now();
             let out = sampler.greedy(ids, sa.max_new, &eos)?;
             println!("[{label}] {prompt}{}", tok.decode(&out));
-            eprintln!("qwen35 sample: {} new tokens in {:.1}s", out.len(), t.elapsed().as_secs_f64());
+            eprintln!("qwen35 sample-adapter: {} new tokens in {:.1}s", out.len(), t.elapsed().as_secs_f64());
         }
     }
     Ok(())

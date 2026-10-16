@@ -73,10 +73,10 @@ brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-dtype f
 A batch wider than one with more than 8192 tokens per micro-step is refused
 with the equivalent `--batch 1 --grad-accum G`.
 
-### Using the adapter on the quantised base: `brain qwen35 sample`
+### Using the adapter on the quantised base: `brain qwen35 sample-adapter`
 
 ```
-brain qwen35 sample --base DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE]
+brain qwen35 sample-adapter --base DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE]
     [--base-dtype nf4|bf16|f32] [--max-new N] [--chat] [--no-adapter | --compare]
 ```
 
