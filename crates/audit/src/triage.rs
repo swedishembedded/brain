@@ -300,7 +300,7 @@ mod tests {
     fn varied_manual(n: usize) -> String {
         const VERBS: [&str; 8] = ["set", "limit", "select", "restrict", "report", "override", "resolve", "expand"];
         const NOUNS: [&str; 8] = ["window", "cutoff", "depth", "origin", "stride", "weight", "anchor", "budget"];
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::new(data::rng::random_seed());
         (0..n)
             .map(|i| {
                 let v = VERBS[(rng.next_u64() % 8) as usize];

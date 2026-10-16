@@ -688,10 +688,8 @@ mod tests {
             audit: AuditConfig { budget: 64, probes_per_block: 8, canary_blocks: 1, canary_refresh: 8 },
             growth: GrowthConfig { window: 4, promote_rate_floor: 0.25, cooldown: 4, ..GrowthConfig::default() },
             pool: PoolConfig { resident: 4, margin: 0.1, dwell: 2, survival: 1000 },
-            // seed: cfg() is called more than once per test and a resumed
-            // reader must see the config its manifest was written with.
-            seed: 0,
-            reservoir: ReservoirConfig { seed: 0, ..ReservoirConfig::default() },
+            seed: 0, // seed: cfg() is called more than once per test and a resumed reader must see the config its manifest was written with
+            reservoir: ReservoirConfig { seed: 0, ..ReservoirConfig::default() }, // seed: same config as above, shared by the resumed reader
             ..ReaderConfig::default()
         }
     }
@@ -931,8 +929,9 @@ mod tests {
             (0..12).map(|i| r.step(&episode(&format!("e{i}"), 50))).collect::<Vec<Row>>()
         };
 
+        let coin_seed = data::rng::random_seed();
         let real = run(ControlArm::Real);
-        let null = run(ControlArm::NullGate { seed: 11 });
+        let null = run(ControlArm::NullGate { seed: coin_seed });
 
         assert_eq!(
             real.iter().map(|w| w.outcome.stage()).collect::<Vec<_>>(),
@@ -947,7 +946,7 @@ mod tests {
         assert_ne!(gated, coined, "a coin that agreed with the gate on all twelve would not be a control");
         for (i, w) in null.iter().enumerate() {
             let reached_gate = w.outcome.stage() == "gate";
-            let expect = reached_gate && promote::gate::coin(11, i + 1);
+            let expect = reached_gate && promote::gate::coin(coin_seed, i + 1);
             assert_eq!(w.carried, expect, "episode {i}: the coin decides what carries, and only past the gate");
         }
     }
@@ -961,7 +960,7 @@ mod tests {
         let d = Dir::new();
         let pool = Pool::create(&d.0, cfg().pool).expect("pool");
         let mut r = Reader::new(
-            ReaderConfig { arm: ControlArm::ShuffledLabels { seed: 5 }, ..cfg() },
+            ReaderConfig { arm: ControlArm::ShuffledLabels { seed: data::rng::random_seed() }, ..cfg() },
             Fake { loss: 1.5, wins: 30, oracle: 0.9, ..Default::default() },
             pool,
         );

@@ -345,7 +345,7 @@ mod tests {
     /// such, not a cap that silently happened to be zero.
     #[test]
     fn a_disabled_reservoir_keeps_nothing_and_reports_itself_as_the_control_arm() {
-        let mut r = Reservoir::new(ReservoirConfig { cap: 256, enabled: false, seed: 5 });
+        let mut r = Reservoir::new(ReservoirConfig { cap: 256, enabled: false, seed: data::rng::random_seed() });
         assert_eq!(r.offer(&ep(1), &rows(1), &promoted()), Offered::Disabled);
         assert!(r.is_empty());
         assert!(!r.enabled(), "the arm must be visible in the reservoir's own state");

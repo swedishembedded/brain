@@ -329,8 +329,8 @@ mod tests {
     // seed: the test builds the manifest twice and compares them.
     fn manifest() -> Manifest {
         let cfg = ReaderConfig {
-            seed: 0,
-            reservoir: ReservoirConfig { seed: 0, ..ReservoirConfig::default() },
+            seed: 0, // seed: the test builds the manifest twice and compares the two
+            reservoir: ReservoirConfig { seed: 0, ..ReservoirConfig::default() }, // seed: the test builds the manifest twice and compares the two
             ..ReaderConfig::default()
         };
         Manifest { schema: SCHEMA, model: "qwen3:0.6b".to_string(), cfg }
