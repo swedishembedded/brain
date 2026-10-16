@@ -1122,6 +1122,22 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 8 * 4,
         src: include_str!("../cu/ce_stats_f32.cu"),
     },
+    CudaKernel {
+        name: "gdn_state_decay_bwd_dscale_f32",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_state_decay_bwd_dscale",
+        what: "the decay-scale gradient of Gated DeltaNet's state update (a dot product over a head's [dk, dv] state), a 256-thread block per head instead of one thread; the sum is reassociated",
+        reported: "native:gdn_state_decay_bwd_dscale_f32",
+        block_dim: 256,
+        // One block per head.
+        tile: (1, 1),
+        shared_bytes: 8 * 4,
+        src: include_str!("../cu/gdn_state_decay_bwd_dscale_f32.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of

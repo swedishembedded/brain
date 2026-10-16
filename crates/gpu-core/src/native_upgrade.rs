@@ -362,6 +362,8 @@ pub(crate) const ROWS: &[Row] = &[
     // smallest first - `apply` takes the first that serves the row length.
     // The cross-entropy backward's per-row statistics: a block per row. The sum is
     // reassociated, so it is held to the fp32 summation bound (`tests/ce_stats_native.rs`).
+    // Gated DeltaNet's decay-scale gradient: a block per head (`tests/gdn_dscale_native.rs`).
+    Row { slow: "gdn_state_decay_bwd_dscale", target: Target::Named("gdn_state_decay_bwd_dscale_f32"), bindings: DSCALE_BINDINGS, serves: serves_dscale, blocks: dscale_blocks, requires_wgsl_upgrade: false },
     Row { slow: "ce_stats", target: Target::Named("ce_stats_f32"), bindings: CE_STATS_BINDINGS, serves: serves_ce_stats, blocks: ce_stats_blocks, requires_wgsl_upgrade: false },
     Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k8"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k8, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false },
     Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k16"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k16, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false },
@@ -419,6 +421,19 @@ const CONCAT2_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead
 
 /// `ce_stats.wgsl`'s bindings: params, logits, targets, the written statistics.
 const CE_STATS_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// `gdn_state_decay_bwd_dscale.wgsl`'s bindings: params, `d_state`, `state_in`, `g_cs`, the accumulated `d_g_cs`.
+const DSCALE_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// `[bh, dk, dv, c_len, g_cs_off, state_off]`, every extent non-zero.
+fn serves_dscale(p: &[u32]) -> bool {
+    matches!(p, [bh, dk, dv, c, _, _] if *bh >= 1 && *dk >= 1 && *dv >= 1 && *c >= 1)
+}
+
+/// A block per head.
+fn dscale_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[0]
+}
 
 /// `[n_rows, u_bins, ignore]`, both extents non-zero.
 fn serves_ce_stats(p: &[u32]) -> bool {
