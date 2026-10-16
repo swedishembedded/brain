@@ -32,7 +32,7 @@ section 8; the entry that records the runs is knowledge #310.
 | K3 LoRA on library GEMMs | partly | the five products per linear are single fp32 library GEMMs with the scale in alpha and the accumulation in beta; the shared-input A concatenation is not done |
 | K4 fused head CE gradient | not done | the head GEMMs themselves run on the library (windows are whole 64-row groups) |
 | K5 tensor-core flash | landed in a different form | blockwise attention around library GEMMs plus three small element-wise kernels (softmax with causal block skipping, score gradient, row dot) instead of a fused `mma.sync` kernel: memory bounded by `SCORE_BLOCK_BYTES`, no hand-tuned MMA code |
-| K6 native GDN training kernels | forward landed, backward restructured | the forward recurrence and both histories are one native launch (bit-identical to the walk); the backward keeps the host sweep but everything that does not depend on the running state gradient is computed for all chunks at once, so a chunk costs 7 dispatches instead of 29. A persistent backward kernel is not written |
+| K6 native GDN training kernels | forward and the backward sweep landed | the forward recurrence and both histories are one native launch (bit-identical to the walk); the backward computes everything that does not depend on the running state gradient for all chunks at once, and its sequential state-gradient sweep is one native launch per layer (`gdn_bwd_sweep_f32`, one block per head, state in dynamic shared memory; the host walk of six dispatches per chunk remains the fallback; knowledge 311). The whole-tensor backward phases are not fused |
 | K7, K8, Q6 | not done | |
 | plumbing | landed | the native `concat_split`/`chan_place`/`concat2` launched one block per element for the channel windows of a row-major matrix (`H = W = 1`): 2.6 M blocks for one MLP chunk window, 8 ms a call; planes under 32 floats are now copied flat |
 
@@ -672,4 +672,9 @@ milestone table here.
 | 2026-10-16 | t1 series | W8K NF4, + freed blocks kept | 53 | VERIFIED-BY-RUN, shared card, 149-158 s/step, peak 51.8 GiB |
 | 2026-10-16 | t1 series | W8K NF4, + cooperative grad-norm, CE and decay-gradient kernels | 469 | VERIFIED-BY-RUN, idle at start, gpu lock, 17.5 s/step, 114,207 dispatches |
 | 2026-10-16 | t1 series | W8K NF4, + cooperative RMSNorm | 550-560 | VERIFIED-BY-RUN, idle at start (a context arrived in step 3), 14.7-14.9 s/step |
+| 2026-10-16 | 6edaafde | W8K NF4 probe, + native GDN backward sweep | 611 | VERIFIED-BY-RUN, idle, 13.42 s/step, 77,151 dispatches, peak 49,973 MiB (knowledge 311) |
+| 2026-10-16 | 6edaafde | Real NF4 CLI, 8192 x 1, Qwen3.8-27B-FP8, defaults | 621 | VERIFIED-BY-RUN, idle, 13.2 s/step (steps 2-3), peak 44.4 GiB sampled (knowledge 311) |
+| 2026-10-16 | 6edaafde | Real bf16 CLI, 8192 x 1, freed blocks off | 422 | VERIFIED-BY-RUN, idle, 19.4 s/step, peak 65.8 GiB sampled |
+| 2026-10-16 | 38141fe5 | Real bf16 CLI, 8192 x 1, freed blocks kept, segment/rows 2048 | 640 | VERIFIED-BY-RUN, idle, 12.8 s/step, peak 79.8 GiB sampled |
+| 2026-10-16 | 38141fe5 | W8K bf16 probe, 2048/2048, freed blocks kept | 627 | VERIFIED-BY-RUN, idle, 13.07 s/step, 74,191 dispatches, peak 81.4 GiB |
 | 2026-10-16 | t1 series | library GEMM / blockwise attention component rates | 343-819 TFLOP/s; attention 6.7 + 33 ms/layer at 8K | VERIFIED-BY-RUN, `cuda_library_bench.rs`, minimum over runs |
