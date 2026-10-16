@@ -13,7 +13,6 @@ use qwen35::finetune::{finetune_streamed, Mode};
 use qwen35::model::{pipelines, Qwen35};
 
 #[test]
-#[ignore = "red until lane A2's bf16 base tier is wired into qwen35::finetune::finetune_streamed"]
 fn a_resumed_bf16_base_lora_run_starts_from_the_saved_adapter() {
     let dir = std::env::temp_dir().join(format!("brain-qwen35-resume-bf16-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

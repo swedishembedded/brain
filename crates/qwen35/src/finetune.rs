@@ -14,12 +14,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use gpu_core::select::Dtype;
 use gpu_core::Gpu;
+use model::ops::TierPolicy;
 use model::FitOpts;
 
 use crate::base_source::{lora_base, BaseDtype};
 use crate::config::{lora_targets, LoraCfg, Qwen35Config};
-use crate::model::{pipelines, Qwen35};
+use crate::model::{pipelines, Qwen35, TrainOpts};
 
 /// Which fine-tuning scheme.
 #[derive(Clone, Debug)]
@@ -108,24 +110,31 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
 /// file) and held on the device at `dtype`, so the base never exists on the
 /// host as a whole. `out` is an ADAPTER file (`crate::lora::save_adapter`),
 /// never a copy of the base; with `resume` and an existing `out` the run
-/// continues that adapter's factors instead of starting from zero delta. The base-opening half is complete
-/// ([`crate::base_source::lora_base`]: streamed base tensors plus fresh
-/// zero-delta adapters, one `TensorSource`); the trainer that consumes it
-/// takes its tier and recompute switch from `crate::model`, which this entry
-/// point calls once that constructor exists. Until then it opens and
-/// validates the base, then reports what is missing instead of training the
-/// wrong thing.
-pub fn finetune_streamed(base: &Path, _dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, dtype: BaseDtype, _recompute: bool) -> std::io::Result<(f32, f32)> {
+/// continues that adapter's factors instead of starting from zero delta.
+/// `recompute` rebuilds each layer's activations in the backward instead of
+/// keeping them ([`TrainOpts::recompute`]).
+///
+/// Only LoRA trains on a streamed base: a full-parameter run needs the base
+/// as fp32 optimiser state on the device, which is what the resident
+/// [`finetune`] path is for.
+#[allow(clippy::too_many_arguments)]
+pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, dtype: BaseDtype, recompute: bool) -> std::io::Result<(f32, f32)> {
     let unsupported = |why: String| std::io::Error::new(std::io::ErrorKind::Unsupported, why);
     let Mode::Lora { rank, alpha } = mode else {
         return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", dtype.name())));
     };
-    let (cfg, _src) = lora_base(base, *rank, *alpha, opts.seed, resume.then(|| Path::new(out)).filter(|p| p.exists())).map_err(unsupported)?;
-    Err(unsupported(format!(
-        "the {} base opened ({} layers, d_model {}), but this build's trainer has no {} base tier yet",
-        base.display(),
-        cfg.n_layers,
-        cfg.d_model,
-        dtype.name()
-    )))
+    let (cfg, src) = lora_base(base, *rank, *alpha, opts.seed, resume.then(|| Path::new(out)).filter(|p| p.exists())).map_err(unsupported)?;
+    let tier = match dtype {
+        BaseDtype::F32 => Dtype::F32,
+        BaseDtype::Bf16 => Dtype::BF16,
+        BaseDtype::Nf4 => Dtype::NF4,
+    };
+    let train = TrainOpts { base: TierPolicy::uniform(tier), recompute, ..TrainOpts::default() };
+    let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &src, &train);
+    let (train_set, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
+    let obj = model::causal_lm::<Qwen35>(train_set, val, bcfg, itos);
+    let (report, m) = model::fit_controlled(m, obj, opts, None, model::FitControl::default())?;
+    let base_id = base.file_name().map_or_else(|| "base".to_string(), |n| n.to_string_lossy().into_owned());
+    crate::lora::save_adapter(out, &m, "brain/qwen35-lora", &base_id, None)?;
+    Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
 }

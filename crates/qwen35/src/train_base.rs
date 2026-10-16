@@ -73,6 +73,10 @@ pub(crate) fn read_weight_host(gpu: &Gpu, w: &Weight) -> Vec<f32> {
     match w {
         Weight::F32 { w, .. } => gpu.read(w, n * k),
         Weight::BF16 { w, .. } => unpack_bf16(gpu, w, n * k),
+        Weight::NF4 { w, s, .. } => {
+            let packed: Vec<u32> = gpu.read(w, n * k / 8).into_iter().map(f32::to_bits).collect();
+            model::lut4::dequantize_weight_lut4(&packed, &gpu.read(s, n * k / 32), n, k, &model::lut4::NF4_LUT)
+        }
         other => panic!("qwen35: reading back a {:?} base weight is not supported", other.dtype()),
     }
 }
