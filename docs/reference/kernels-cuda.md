@@ -84,6 +84,8 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `attn_rowdot` | Softmax | F32 | tuned | 5.0 | `brain_attn_rowdot` | per-row dot product of two fp32 matrices (D = rowsum(dO * O) of attention's backward), a block per row |
 | `ce_stats_f32` | Softmax | F32 | tuned | 5.0 | `brain_ce_stats` | per-row max and sum of exp(logit - max) for the cross-entropy backward, a 256-thread block per row instead of a thread per row; the sum is reassociated |
 | `gdn_state_decay_bwd_dscale_f32` | GatedDeltaChunkLoop | F32 | tuned | 5.0 | `brain_gdn_state_decay_bwd_dscale` | the decay-scale gradient of Gated DeltaNet's state update (a dot product over a head's [dk, dv] state), a 256-thread block per head instead of one thread; the sum is reassociated |
+| `gdn_chunk_prep_tc` | GatedDeltaChunkLoop | F32 | tuned | 8.0 | `brain_gdn_chunk_prep_tc` | Gated DeltaNet's state-independent chunk forward (cumulative decay, decay mask, Gram product, unit-triangular solve, w, u and the intra-chunk scores) in one launch per (head, chunk): three-pass TF32 tensor-core products with fp32 accumulation, the solve in fp32 shared memory |
+| `gdn_chunk_prep_train_tc` | GatedDeltaChunkLoop | F32 | tuned | 8.0 | `brain_gdn_chunk_prep_train_tc` | gdn_chunk_prep_tc plus the tensors the backward reads (k_beta, v_beta, k_beta_decay, the decay mask, raw_attn0, t_mat, raw_intra), in the same single launch |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 

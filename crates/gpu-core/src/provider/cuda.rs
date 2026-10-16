@@ -355,6 +355,99 @@ pub fn gdn_bwd_sweep_step(
     gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks], bh)
 }
 
+/// `gdn_chunk_prep_tc`'s binding order: uniform, then query, key, value, raw_g
+/// and beta (read), then g_cs, exp_g_cs, u, w and the intra-chunk scores
+/// (written).
+const GDN_CHUNK_PREP_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
+/// [`GDN_CHUNK_PREP_BINDINGS`] followed by the seven tensors the training entry
+/// also writes: k_beta, v_beta, k_beta_decay, decay_mask, raw_attn0, t_mat and
+/// raw_intra.
+const GDN_CHUNK_PREP_TRAIN_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
+/// Dynamic shared memory of `gdn_chunk_prep_tc`: the 64 x 132 key tile, the
+/// 64 x 136 query / value tile, two 64 x 68 matrices (attn0 and the solved T)
+/// and three 64-float vectors (cumulative decay, its exponential, beta), all f32.
+const GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES: u32 = (64 * 132 + 64 * 136 + 2 * 64 * 68 + 3 * 64) * 4;
+
+/// What the tensor-core chunk forward needs of the call: the head widths it is
+/// written for, a chunk of at most 64 rows, no `cuda` in `BRAIN_NO_PROVIDER`.
+fn gdn_chunk_prep_shape_ok(dk: u32, dv: u32, c_len: u32) -> bool {
+    dk == 128 && dv == 128 && c_len != 0 && c_len <= 64 && !super::disabled_providers().iter().any(|d| d == "cuda")
+}
+
+/// The native tensor-core form of the state-independent half of Gated
+/// DeltaNet's chunked forward (`model::gdn`'s steps 1-9 and the intra-chunk
+/// score precompute), or `None` when the caller should issue the portable
+/// whole-tensor dispatch sequence it was going to use anyway.
+///
+/// Like [`gdn_chunk_loop_step`] this is a drop-in at one call site, not a
+/// provider request. `None` means: the head widths are not `128`, the chunk is
+/// longer than `64` rows, `cuda` is named in `BRAIN_NO_PROVIDER`, the device
+/// reports no capability or one below the tensor-core floor
+/// ([`kernels_cuda::MMA_S8_MIN_CC`]), or the backend declined the kernel (for
+/// instance a device that cannot give a block the shared memory it needs).
+///
+/// `bufs` is, in order, `query, key, value, raw_g, beta` (read) and `g_cs,
+/// exp_g_cs, u, w, intra_scores` (written), each in the chunk-major layout
+/// `model::gdn` documents; `bhc` is the number of (head, chunk) pairs.
+pub fn gdn_chunk_prep_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 10], bhc: u32, c_len: u32, dk: u32, dv: u32, scale: f32) -> Option<crate::Step> {
+    if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_prep_tc").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_PREP_BINDINGS, launch)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 10], &[bhc, c_len, dk, dv, 0, scale.to_bits()], bhc)
+}
+
+/// [`gdn_chunk_prep_step`] for the training forward: the same launch that also
+/// writes `k_beta, v_beta, k_beta_decay, decay_mask, raw_attn0, t_mat,
+/// raw_intra`, which the backward reads. `bufs` is the inference order followed
+/// by those seven.
+pub fn gdn_chunk_prep_train_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 17], bhc: u32, c_len: u32, dk: u32, dv: u32, scale: f32) -> Option<crate::Step> {
+    if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_prep_train_tc").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_PREP_TRAIN_BINDINGS, launch)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 17], &[bhc, c_len, dk, dv, 0, scale.to_bits()], bhc)
+}
+
 /// The native tensor-core paged flash-prefill step for `head_dim = 256`, or
 /// `None` when the caller should dispatch the portable
 /// `paged_flash_prefill_hd256` it was going to anyway.

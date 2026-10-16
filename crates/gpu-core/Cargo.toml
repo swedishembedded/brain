@@ -113,6 +113,10 @@ name = "gdn_bwd_sweep_native"
 harness = false
 
 [[test]]
+name = "gdn_chunk_fwd_tc"
+harness = false
+
+[[test]]
 name = "gdn_dscale_native"
 harness = false
 

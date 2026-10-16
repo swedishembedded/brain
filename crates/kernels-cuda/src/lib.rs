@@ -1241,6 +1241,42 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 8 * 4,
         src: include_str!("../cu/gdn_state_decay_bwd_dscale_f32.cu"),
     },
+    // ---- t-gdn: the tensor-core Gated DeltaNet chunk forward ----
+    CudaKernel {
+        name: "gdn_chunk_prep_tc",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        // Asked for by name: it replaces the model's whole-tensor prefix of the chunked forward,
+        // not the recurrence `find` resolves for this operator.
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `mma.sync.m16n8k8` on TF32 operands.
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_chunk_prep_tc",
+        what: "Gated DeltaNet's state-independent chunk forward (cumulative decay, decay mask, Gram product, unit-triangular solve, w, u and the intra-chunk scores) in one launch per (head, chunk): three-pass TF32 tensor-core products with fp32 accumulation, the solve in fp32 shared memory",
+        reported: "native:gdn_chunk_prep_tc",
+        block_dim: 256,
+        // One block per (head, chunk) of up to 64 rows.
+        tile: (64, 128),
+        // Everything is dynamic: see `GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES` in gpu-core.
+        shared_bytes: 0,
+        src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
+    },
+    CudaKernel {
+        name: "gdn_chunk_prep_train_tc",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_chunk_prep_train_tc",
+        what: "gdn_chunk_prep_tc plus the tensors the backward reads (k_beta, v_beta, k_beta_decay, the decay mask, raw_attn0, t_mat, raw_intra), in the same single launch",
+        reported: "native:gdn_chunk_prep_train_tc",
+        block_dim: 256,
+        tile: (64, 128),
+        shared_bytes: 0,
+        src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of
