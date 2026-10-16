@@ -42,12 +42,14 @@ With NF4 base, bf16 residuals, 128-token GDN segments and a 512-token MLP chunk
 |-------:|-------:|----------:|---------:|---------------:|----------:|
 | 8      | 4096   | 10 977    | 13 225   | 0.55           | 22 s      |
 | 64     | 16 384 | 37 851    | 46 815   | 0.55           | 692 s     |
+| 64     | 32 768 | 50 625    | 68 565   | 0.55           | 1724 s    |
 | 16     | 49 152 | 27 457    | 54 363   | 0.55           | 712 s     |
 
 The step term is the same 0.55 MiB/token at 16K and 49K tokens, so nothing
 grows faster than linearly in the sequence (flash attention for the GQA
 layers, segmented recurrence for the GDN layers). The full 64-layer model runs
-at about 24 tokens/s on this card in this configuration; the segmented
+at about 24 tokens/s at 16K tokens and 19 at 32K on this card in this
+configuration; the segmented
 recurrence and the on-the-fly NF4 decode are the slow parts, not the memory
 plan.
 
@@ -63,5 +65,6 @@ cap of the widest buffer (the MLP activation) on a 4 GiB storage binding
 measurement plus 48 layers of boundaries (23 000 MiB) and NF4 weights (10 900
 MiB): about 88 000 MiB, which fits with little to spare. A bf16 base is
 48.6 GB and leaves about 39 GB for the per-token terms: 25 000 to 30 000
-tokens. These are arithmetic on measured terms; the 64-layer run at 49 152
-tokens was not made.
+tokens. The 64-layer run at 32 768 tokens measured 68 565 MiB, the 68 600 these terms
+predict; the 49 152-token figure is arithmetic on the 16-layer run, not a
+64-layer run.
