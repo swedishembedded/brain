@@ -968,3 +968,16 @@ pushes it, though: the ledger above records that this checkpoint needed ~44 GB
 of peak VRAM through unpatched wgpu and so could not be attempted on a 24 GB
 card at all. Reaching 20.9 GiB before running out is the halved staging cost
 doing its job; what is left is a residency window, not a 2x.
+
+## Concurrent use of one shared Vulkan device returns wrong results
+
+Tests that share the pooled device (`gpu_core::testgpu::dev`) and run on several
+threads fail on the native Vulkan backend: `ERROR_DEVICE_LOST`, fence timeouts and,
+worse, wrong numbers (`convtr2d_group_isolation`: cross-group leak). About 40% of
+`convtr2d_kernels` runs at 2 or more test threads, 0 of 30 serial, identical at
+87c777c1 (knowledge #300). The queue itself is under `queue_lock`; suspects are the
+per-handle pending-step list and asynchronous ring shared by threads (one thread's
+flush retiring or recycling another thread's descriptor sets, uniforms or buffers).
+Next: a two-thread reproducer on a single kernel, then check the recycler and
+`retire_batch` ownership across threads. Until fixed, the parity gate runs the
+Vulkan gradcheck serially.
