@@ -38,6 +38,30 @@ use model::ops::TierPolicy;
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
+const USAGE: &str = "usage: qwen35_train_probe [--tokens N] [--layers N] [--base bf16|nf4|f32] [--rank R] [--steps N] \\
+     [--recompute on|off] [--gdn-segment N] [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N]
+  Builds the first --layers layers of the real Qwen3.8-27B shape with random weights and times --steps LoRA steps at --tokens
+  tokens. Every result is a `PROBE key=value` line on stdout. With BRAIN_PROFILE set, each step also prints the device
+  time per kernel kind.";
+
+/// Every flag that takes a value; anything else starting with `--` is refused.
+const VALUE_FLAGS: [&str; 11] =
+    ["--tokens", "--layers", "--base", "--rank", "--steps", "--recompute", "--gdn-segment", "--head-budget", "--flash-min-t", "--bf16-residuals", "--mlp-rows"];
+
+/// Refuse a flag nothing here reads: a typo would otherwise measure a different configuration than the one asked for.
+fn check_flags(args: &[String]) -> Result<(), String> {
+    let mut it = args.iter().skip(1);
+    while let Some(a) = it.next() {
+        if !VALUE_FLAGS.contains(&a.as_str()) {
+            return Err(format!("unknown argument {a:?}"));
+        }
+        if it.next().is_none() {
+            return Err(format!("{a} requires a value"));
+        }
+    }
+    Ok(())
+}
+
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
@@ -100,6 +124,14 @@ fn own_gpu_mib() -> Option<u64> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return;
+    }
+    if let Err(e) = check_flags(&args) {
+        eprintln!("qwen35_train_probe: {e}\n{USAGE}");
+        std::process::exit(2);
+    }
     let tokens: u32 = parsed(&args, "--tokens", 1024);
     let layers: u32 = parsed(&args, "--layers", 4);
     let rank: u32 = parsed(&args, "--rank", 16);
@@ -157,12 +189,15 @@ fn main() {
     m.set_batch(&x, &y);
     for step in 1..=steps {
         let t = Instant::now();
-        m.zero_grads();
-        let loss = m.forward();
-        let fwd = t.elapsed().as_secs_f64();
-        m.backward();
-        m.adamw_step(step, 1e-4, 0.0, Default::default(), Some(1.0), 1.0);
-        m.poll_wait();
+        let (loss, fwd) = gpu_core::profile::device_table(&m.gpu, &format!("step {step}"), || {
+            m.zero_grads();
+            let loss = m.forward();
+            let fwd = t.elapsed().as_secs_f64();
+            m.backward();
+            m.adamw_step(step, 1e-4, 0.0, Default::default(), Some(1.0), 1.0);
+            m.poll_wait();
+            (loss, fwd)
+        });
         let total = t.elapsed().as_secs_f64();
         println!("PROBE step={step} loss={loss:.4} forward_s={fwd:.2} step_s={total:.2} tokens_per_s={:.0}", tokens as f64 / total);
     }
@@ -172,5 +207,21 @@ fn main() {
     println!("PROBE peak_mib={peak}");
     if let Some(steady) = steady.filter(|_| peak > 0) {
         println!("PROBE step_mib_per_token={:.3}", peak.saturating_sub(steady) as f64 / tokens as f64);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_flags;
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        std::iter::once("probe").chain(a.iter().copied()).map(String::from).collect()
+    }
+
+    #[test]
+    fn known_flags_pass_and_typos_and_missing_values_are_refused() {
+        assert!(check_flags(&argv(&["--tokens", "4096", "--base", "nf4", "--mlp-rows", "256"])).is_ok());
+        assert!(check_flags(&argv(&["--token", "4096"])).unwrap_err().contains("--token"));
+        assert!(check_flags(&argv(&["--tokens"])).unwrap_err().contains("requires a value"));
     }
 }
