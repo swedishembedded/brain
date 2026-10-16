@@ -173,18 +173,10 @@ pub fn run(tests: &[CardTest]) -> ExitCode {
 /// Returns how the card is named in the run's header: its model and PCI bus,
 /// so a log shows which physical card the tests ran on.
 fn select(device: &str, backend: Option<&str>) -> Result<String, String> {
-    let spec = crate::DeviceSpec::parse(device).map_err(|e| format!("--device {device:?}: {e}"))?;
-    let mut set = spec.resolve(&crate::Inventory::probe()).map_err(|e| format!("--device {device:?}: {e}"))?;
-    if let Some(b) = backend {
-        let b = crate::devices::Backend::parse(b).map_err(|e| format!("--backend {b:?}: {e}"))?;
-        set.set_backend(b)?;
-    }
-    set.apply_backend()?;
-    let card = set.single_gpu().and_then(|i| crate::devices::device(i).ok()).map_or(String::new(), |d| {
+    let set = crate::select_compute(device, backend)?;
+    Ok(set.single_gpu().and_then(|i| crate::devices::device(i).ok()).map_or(String::new(), |d| {
         format!(" ({}, pci {})", d.identity.name, d.identity.pci_bus.as_deref().unwrap_or("unknown"))
-    });
-    crate::publish_compute_set(set);
-    Ok(card)
+    }))
 }
 
 /// Declare a test binary's `main` from its test functions - the ones that

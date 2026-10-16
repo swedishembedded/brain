@@ -20,6 +20,7 @@
 //!
 //! Usage:
 //!   qwen35_gguf_prefill_profile <path to Qwen3.8-27B*.gguf> [depth] [rows] [rounds]
+//!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda]
 //!
 //! `depth` (default 256) prompt tokens establish the KV depth first, `rows`
 //! (default 256) is the round width, `rounds` (default 4) the rounds per
@@ -39,6 +40,8 @@ fn main() {
     let rows: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(256);
     let rounds: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(4);
     let cap = depth + 2 * rows * rounds;
+    let flag = |name: &str| a.iter().position(|arg| arg == name).and_then(|i| a.get(i + 1)).cloned();
+    gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
 
     let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
         eprintln!("usage: qwen35_gguf_prefill_profile <path to Qwen3.8-27B*.gguf> [depth] [rows] [rounds]");

@@ -294,7 +294,7 @@ pub mod devices;
 pub mod capacity;
 #[cfg(not(target_arch = "wasm32"))]
 pub use devices::{
-    ambient_compute_set, publish_compute_set, published_compute_set, ComputeSet, DeviceSpec,
+    ambient_compute_set, publish_compute_set, published_compute_set, select_compute, ComputeSet, DeviceSpec,
     Inventory,
 };
 

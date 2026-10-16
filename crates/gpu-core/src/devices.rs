@@ -1236,6 +1236,25 @@ pub fn resolve_ambient_compute_set() -> ComputeSet {
     set
 }
 
+/// Resolve a `--device` text and an optional `--backend` override against this
+/// machine, make the result the process's compute set and return it: the CLI's
+/// start-up for a program that is not the CLI (a test binary, a profiling
+/// binary), taking the same grammar. Like [`ComputeSet::apply_backend`] it never
+/// resizes the rayon pool or pins CPU affinity. Call it once, before building
+/// anything on a device.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn select_compute(device: &str, backend: Option<&str>) -> Result<ComputeSet, String> {
+    let spec = DeviceSpec::parse(device).map_err(|e| format!("--device {device:?}: {e}"))?;
+    let mut set = spec.resolve(&Inventory::probe()).map_err(|e| format!("--device {device:?}: {e}"))?;
+    if let Some(b) = backend {
+        let b = Backend::parse(b).map_err(|e| format!("--backend {b:?}: {e}"))?;
+        set.set_backend(b)?;
+    }
+    set.apply_backend()?;
+    publish_compute_set(set.clone());
+    Ok(set)
+}
+
 /// The backend a library caller asked for with [`request_backend`], if any.
 #[cfg(not(target_arch = "wasm32"))]
 static REQUESTED_BACKEND: std::sync::Mutex<Option<Backend>> = std::sync::Mutex::new(None);

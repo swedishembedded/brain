@@ -58,19 +58,6 @@ fn real_devices() -> Vec<(Device, u64)> {
         .collect()
 }
 
-/// Publish the compute set `--device`/`--backend` name, the way `brain serve`
-/// does, so the resident's cards are driven by the backend asked for.
-fn select_compute(device: &str, backend: Option<&str>) {
-    let spec = gpu_core::DeviceSpec::parse(device).unwrap_or_else(|e| panic!("--device {device:?}: {e}"));
-    let mut set = spec.resolve(&gpu_core::Inventory::probe()).unwrap_or_else(|e| panic!("--device {device:?}: {e}"));
-    if let Some(b) = backend {
-        let b = gpu_core::devices::Backend::parse(b).unwrap_or_else(|e| panic!("--backend {b:?}: {e}"));
-        set.set_backend(b).unwrap_or_else(|e| panic!("{e}"));
-    }
-    set.apply().unwrap_or_else(|e| panic!("--device {device:?}: {e}"));
-    gpu_core::publish_compute_set(set);
-}
-
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let steps: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
@@ -82,7 +69,7 @@ fn main() {
     }
     let batch: Option<u32> = flag("--batch").map(|v| v.parse().unwrap_or_else(|_| panic!("--batch takes a count, got {v:?}")));
     let context: Option<u32> = flag("--context").map(|v| v.parse().unwrap_or_else(|_| panic!("--context takes a token count, got {v:?}")));
-    select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref());
+    gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
 
     let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
         eprintln!("usage: qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out] [--kv f32|bf16|int8]");
