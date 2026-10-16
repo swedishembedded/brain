@@ -59,14 +59,16 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
   card or with `program_table` replays. A hand-tuned CUDA flash kernel for head_dim 256 is also open.
 - Embedding table and head are always bf16, never NF4; MTP builds keep the old fp32 head
   and cannot use the bf16 residual stream; host offload of residuals for 64K and beyond.
-- Implement `TokenObjectives` and `LoraSites` for qwen35 and qwen35moe (flip the capability
-  declarations in the architecture table, add the conformance subjects), then DPO/GRPO on
-  the 27B (gates Q7-Q10).
+- `TokenObjectives` and `LoraSites` are implemented for qwen35 and qwen35moe
+  (`objectives.rs`, `lora_sites.rs`) and both are conformance subjects. Still open: DPO/GRPO
+  on the 27B (gates Q7-Q10).
 - Move qwen3's int8 frozen-base input gradient into the shared `Ops::matmul_dx`, delete the
   local copy; double quantisation of the NF4 scale plane (skipped).
-- `make test/parity` is not green and its cause is unconfirmed against a baseline; four qwen3
-  fused-attention dispatch-count tests fail on the CPU backend only (they pass on CUDA);
-  `random_shared_prefixes_stay_exact` failed once in a full CUDA run and passes alone.
+- `make test/parity` is diagnosed (knowledge 300): the Vulkan failures are a concurrency race
+  on the shared pooled device (open; reproducer `crates/vulkan/tests/shared_device_two_threads.rs`),
+  so the gate runs Vulkan serially and `bf16_train` stays CPU-only; the four qwen3 fused-attention
+  dispatch-count tests were fixed for the CPU backend; the `random_shared_prefixes_stay_exact`
+  flake is knowledge 301.
 
 ## Generic training capabilities (any model that implements them gets SFT/DPO/GRPO)
 
@@ -121,8 +123,8 @@ digest only. Needed, with tests in the api-conformance e2e:
    3 in a row) and log-space ratio cap; KL to the adapter-disabled reference always
    logged (weight 0 by default); loss probe must not consume rollout rows; rollouts
    through the KV-cached decode engine instead of re-prefilling per token.
-4. Repair `make test/rl` (it names the deleted `continuous_cycle`) and make it fail if a
-   named test target does not exist.
+4. Done: `make test/rl` no longer names the deleted `continuous_cycle`, and naming a test
+   target that does not exist fails the build.
 Pre-registered tests (CPU, tiny models): on-policy identity at T in {0.7, 1.0, 1.5};
 advantage fixtures; no step on zero rows with 80% zero-variance groups; length
 invariance under token-sum; truncation; EOS; overflow/NaN; version refusal; analytic
@@ -169,10 +171,13 @@ deleted yet.
 - Full-logits cross-entropy in qwen35: superseded by chunked head CE.
 - Pre-fix GRPO behaviour: z-score advantages, length-biased loss, dropped
   zero-variance groups, O(T^2) rollouts, the loss probe that consumes rows.
-- `MOE_SKIP_GPU_TESTS` silent early return in the `bf16_train` tests.
 - qwen3-only adapter bank: fold into the generic LoRA layer.
 
-## Throughput plan (measured 19-20 tok/s, untuned)
+## Throughput plan (originally 19-20 tok/s untuned; 635 tokens/s NF4 on the real checkpoint, knowledge 312)
+
+`throughput-27b.md` is the current plan and its landed table; the list below is the original
+order of payoff.
+
 
 Budget: about 216 GFLOP per trained token (6 x 27e9, plus recompute). At 30-40 %
 of GH200 bf16 peak that is on the order of 1-2K tok/s, so the current number is

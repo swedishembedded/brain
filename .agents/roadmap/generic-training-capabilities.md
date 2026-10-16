@@ -11,10 +11,11 @@ qwen3, qwen35, qwen35moe and gpt2 are registered in the conformance suite.
 
 - [ ] The qwen35/qwen35moe conformance run takes minutes, nearly all in the
       finite-difference check; give `Subject` a tensor or direction budget.
-- [ ] Conformance C8 (`chunked_head_ce_equals_unchunked`) is an ignored test
-      that fails when run; give `Subject` a chunk-size hook once the shared
-      chunked head cross-entropy lands and make it check loss, log-probabilities
-      and gradients against the unchunked head.
+- [ ] Conformance C8 (`chunked_head_ce_equals_unchunked`) is still an ignored test
+      that fails when run (`rl/tests/conformance.rs`), although the shared chunked
+      head cross-entropy has landed (`model/src/head_ce.rs`); give `Subject` a
+      chunk-size hook and make it check loss, log-probabilities and gradients
+      against the unchunked head.
 - [ ] Conformance tiers: qwen35 registers bf16 and NF4, qwen3 bf16 and int8.
 - [ ] Move the serving `AdapterBank` (`qwen3/src/serve/adapters.rs`, built from
       `QwenConfig` and its own seven-site `LoraSite` enum) behind `LoraSites`, so
