@@ -195,7 +195,7 @@ mod tests {
             smoke: false,
             fidelity_checked: true,
             software_gpu: false,
-            seed: Some(1234),
+            seed: Some(1234), // seed: row fixture: the refusal must name both recorded workload seeds, so the two values are the assertion's subject
             output_per_s: Some(out),
             goodput_per_s: None,
             ttfa_p99: Some(ttfa),
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn a_candidate_from_a_different_workload_seed_is_refused_naming_both() {
         let base = row(100.0, 200.0);
-        let other = Row { seed: Some(99), ..row(100.0, 200.0) };
+        let other = Row { seed: Some(99), ..row(100.0, 200.0) }; // seed: row fixture: the refusal must name both recorded workload seeds, so the two values are the assertion's subject
         let o = gate(&other, &base, 0.85);
         let why = o.refused.as_deref().expect("seed mismatch must refuse");
         assert!(why.contains("99") && why.contains("1234"), "{why}");

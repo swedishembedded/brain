@@ -167,7 +167,7 @@ mod tests {
             num_requests: n,
             warmup_requests: warmup,
             ignore_stop: true,
-            seed: 1,
+            seed: data::rng::random_seed(),
         }
     }
 

@@ -742,7 +742,7 @@ mod tests {
     }
 
     fn req(out: usize) -> PerfRequest {
-        PerfRequest { input_artifacts: 8, output_artifacts: out, class: 0, seed: 1 }
+        PerfRequest { input_artifacts: 8, output_artifacts: out, class: 0, seed: data::rng::random_seed() }
     }
 
     #[test]
@@ -947,7 +947,7 @@ mod tests {
     impl residency::Instance for DeterministicInst {
         fn run(&mut self, _a: &str, inv: &Invocation, p: &mut dyn FnMut(Progress)) -> ActionResult {
             work();
-            let seed = inv.get_i64("seed").unwrap_or(0);
+            let seed = inv.get_i64("seed").unwrap_or(0); // seed: test double: echoes the invocation's seed, 0 when the request carries none
             p(Progress::token(0, 1, format!("t{seed}")));
             Ok(Outcome::new().set("text", format!("out{seed}").into()))
         }

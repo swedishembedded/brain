@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn one_shot_request_collapses_to_a_single_artifact() {
         let mut t = FakeTarget::new(4, 1);
-        t.submit(PerfRequest { input_artifacts: 8, output_artifacts: 1, class: 0, seed: 0 });
+        t.submit(PerfRequest { input_artifacts: 8, output_artifacts: 1, class: 0, seed: data::rng::random_seed() });
         let mut out = Vec::new();
         while t.step(&mut out) {}
         let arts = out.iter().filter(|e| e.kind == EmissionKind::Artifact).count();
@@ -269,8 +269,8 @@ mod tests {
     #[test]
     fn artifact_count_matches_the_request() {
         let mut t = FakeTarget::new(2, 2);
-        t.submit(PerfRequest { input_artifacts: 4, output_artifacts: 5, class: 0, seed: 0 });
-        t.submit(PerfRequest { input_artifacts: 4, output_artifacts: 3, class: 0, seed: 1 });
+        t.submit(PerfRequest { input_artifacts: 4, output_artifacts: 5, class: 0, seed: data::rng::random_seed() });
+        t.submit(PerfRequest { input_artifacts: 4, output_artifacts: 3, class: 0, seed: data::rng::random_seed() });
         let mut out = Vec::new();
         while t.step(&mut out) {}
         for (id, want) in [(0u64, 5usize), (1, 3)] {

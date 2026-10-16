@@ -264,7 +264,7 @@ mod tests {
     fn zipf_popularity_favours_the_head() {
         let c = catalogue(10, 1_000_000, 4.0, 1.0);
         assert!(c[0].weight > c[9].weight * 5.0, "alpha=1 should make model0 far hotter");
-        let mut rng = data::rng::Rng::new(1);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         let draws = draw(&c, 2000, &mut rng);
         let head = draws.iter().filter(|&&i| i == 0).count();
         let tail = draws.iter().filter(|&&i| i == 9).count();
