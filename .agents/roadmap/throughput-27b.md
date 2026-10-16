@@ -23,7 +23,7 @@ section 8; the entry that records the runs is knowledge #310.
 | item | state | deviation from the plan |
 |---|---|---|
 | Q1 no MLP replay in the backward | landed | also skips the `down` product of each chunk rebuild (nothing reads it): the chunked backward does no more GEMM work than the whole-sequence MLP's |
-| Q2 poll_wait per MLP chunk | not done | the sizing of Q3 (2048-row chunks for the 4-bit base) cuts the waits 4x instead |
+| Q2 poll_wait per MLP chunk | landed | one wait per MLP pass instead of one per row chunk (knowledge 312: real NF4 621 to 635 tokens/s) |
 | Q3 sizing of segment and MLP chunk | landed as a footprint rule | by base tier (4-bit 2048/2048, bf16 512/1024, fp32 128/512) rather than by free device memory: no backend reports free memory through `Gpu` yet |
 | Q4 tiled rmsnorm rows | landed | both twins registered for training; also the cooperative grad-norm, a block-per-row `ce_stats` and a block-per-head GDN decay gradient (single-thread reductions the profile found on the default path) |
 | Q5 probe as an instrument | landed | `--seed`, dispatches per step, warm tokens/s, other compute contexts, `--gemm-precision`, `--profile` (device time per kernel plus a launch census) |
