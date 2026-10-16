@@ -28,7 +28,7 @@ fn request_line() -> String {
         representations: vec![Representation::Quantiles, Representation::Point],
         quantile_levels: vec![0.1, 0.5, 0.9],
         num_samples: 0,
-        seed: 7,
+        ..Default::default()
     };
     let env = events::Envelope::with_id(
         Some("r1".into()),
