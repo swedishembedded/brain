@@ -1013,7 +1013,7 @@ fn schedule_fingerprint(opts: &FitOpts) -> serde_json::Value {
 /// atomically: a crash mid-write leaves the previous state, never half of
 /// this one. A run selecting on held-out loss saves its selection with it:
 /// the watch, the curve and the best parameters so far.
-fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, rng: &Rng, opts: &FitOpts, identity: &serde_json::Value, selection: Option<&Selection>) -> std::io::Result<()> {
+fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, applied: u32, rng: &Rng, opts: &FitOpts, identity: &serde_json::Value, selection: Option<&Selection>) -> std::io::Result<()> {
     let names = model.optimized_params().ok_or_else(|| std::io::Error::other("exact resume: this model does not expose its optimizer state"))?;
     let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::with_capacity(names.len() * 4);
     for name in &names {
@@ -1031,6 +1031,8 @@ fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, rng: &Rng, opts
     let header = serde_json::json!({
         "format": TRAIN_STATE_FORMAT,
         "step": step,
+        // Steps that reached AdamW; differs from `step` once any was skipped.
+        "applied": applied,
         // A string: the generator's state is a full u64, and a JSON reader
         // that goes through f64 would round it.
         "rng": rng.state().to_string(),
@@ -1059,9 +1061,9 @@ pub fn saved_seed(path: &Path) -> std::io::Result<Option<u64>> {
 }
 
 /// Restore the state [`save_train_state`] wrote into `model`, returning the
-/// completed step count, the batch generator to continue with, and the
+/// completed step count, the AdamW applied-step count, the batch generator to continue with, and the
 /// selection the run had made so far when it was selecting.
-fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: &serde_json::Value) -> std::io::Result<(u32, Rng, Option<Selection>)> {
+fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: &serde_json::Value) -> std::io::Result<(u32, u32, Rng, Option<Selection>)> {
     let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {why}", path.display()));
     let path_str = path.to_str().ok_or_else(|| invalid("not a UTF-8 path".to_string()))?;
     let st = checkpoint::st::load_safetensors(path_str)?;
@@ -1079,6 +1081,11 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
     if step > opts.steps {
         return Err(invalid(format!("{step} steps completed, past this run's {}", opts.steps)));
     }
+    // A state written before skipped steps were counted applied every step.
+    let applied = match header.get("applied") {
+        None => step,
+        Some(a) => a.as_u64().and_then(|a| u32::try_from(a).ok()).filter(|&a| a <= step).ok_or_else(|| invalid("applied-step count is not within the completed steps".to_string()))?,
+    };
     let rng = header.get("rng").and_then(|r| r.as_str()).and_then(|r| r.parse::<u64>().ok()).map(Rng::from_state).ok_or_else(|| invalid("no batch generator state".to_string()))?;
     let names = model.optimized_params().ok_or_else(|| std::io::Error::other("exact resume: this model does not expose its optimizer state"))?;
     let saved = st.tensors.keys().filter(|k| k.starts_with("w:")).count();
@@ -1100,7 +1107,7 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
         (serde_json::Value::Null, true) => return Err(invalid("saved by a run that did not select on held-out loss".to_string())),
         (saved, _) => Some(Selection::from_json(opts, saved, &st.tensors).ok_or_else(|| invalid("its selection record cannot be read".to_string()))?),
     };
-    Ok((step, rng, selection))
+    Ok((step, applied, rng, selection))
 }
 
 /// [`fit_with`], with the caller in the loop: a per-step report that can
@@ -1121,12 +1128,17 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
     obj.prepare(&mut model)?;
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
     let mut first_step = 0u32;
+    // AdamW's step index `t` is the number of updates its moments have
+    // absorbed; a step the objective skipped absorbed none, so it must not
+    // advance the bias corrections.
+    let mut applied = 0u32;
     let mut resumed_at = None;
     let mut selection = Selection::new(opts);
     if let Some(state) = control.state.filter(|p| p.exists()) {
-        let (step, saved_rng, saved) = load_train_state(&model, state, opts, &control.identity)?;
+        let (step, saved_applied, saved_rng, saved) = load_train_state(&model, state, opts, &control.identity)?;
         println!("resuming at step {step} from {}", state.display());
         first_step = step;
+        applied = saved_applied;
         rng = saved_rng;
         resumed_at = Some(step);
         if let Some(saved) = saved {
@@ -1165,7 +1177,8 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
                 // average grads over accumulation steps
                 let scale = 1.0 / opts.grad_accum.max(1) as f32;
                 let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
-                model.adamw_step(step + 1, lr, opts.weight_decay, opts.adam, clip, scale);
+                applied += 1;
+                model.adamw_step(applied, lr, opts.weight_decay, opts.adam, clip, scale);
             }
             StepVerdict::Skip(why) => println!("step {:>6}: no optimiser step taken: {why}", step + 1),
             StepVerdict::Abort(e) => return Err(e),
@@ -1287,7 +1300,7 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         if let Some(state) = control.state {
             let periodic = control.state_every > 0 && completed.is_multiple_of(control.state_every);
             if !keep_going || periodic {
-                save_train_state(&model, state, completed, &rng, opts, &control.identity, selection.selecting().then_some(&selection))?;
+                save_train_state(&model, state, completed, applied, &rng, opts, &control.identity, selection.selecting().then_some(&selection))?;
             }
         }
         if !keep_going {
@@ -1599,6 +1612,8 @@ mod tests {
         adams: std::rc::Rc<std::cell::RefCell<Vec<optim::Adam>>>,
         /// The learning rate of every step, in order.
         lrs: std::rc::Rc<std::cell::RefCell<Vec<f32>>>,
+        /// The AdamW step index `t` of every applied step, in order.
+        indices: std::rc::Rc<std::cell::RefCell<Vec<u32>>>,
         /// The loss denominator named for each batch, in order.
         denominators: std::rc::Rc<std::cell::RefCell<Vec<f32>>>,
         /// The first supervised target of each batch run forward, in order:
@@ -1632,7 +1647,7 @@ mod tests {
     impl Model for Recorder {
         type Config = RecorderCfg;
         fn new(_cfg: RecorderCfg, _b: u32, _t: u32, _init: &HashMap<String, Vec<f32>>) -> Self {
-            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default(), denominators: Default::default(), drawn: Default::default(), lrs: Default::default() }
+            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default(), denominators: Default::default(), drawn: Default::default(), lrs: Default::default(), indices: Default::default() }
         }
         fn init_weights(_cfg: &RecorderCfg, _seed: u64) -> HashMap<String, Vec<f32>> {
             HashMap::new()
@@ -1664,6 +1679,7 @@ mod tests {
         /// step it came from.
         fn adamw_step(&self, t: u32, lr: f32, _wd: f32, adam: optim::Adam, _clip: Option<f32>, _extra: f32) {
             self.lrs.borrow_mut().push(lr);
+            self.indices.borrow_mut().push(t);
             *self.w.borrow_mut() = vec![t as f32];
             *self.moments.borrow_mut() = (vec![t as f32], vec![t as f32]);
             self.adams.borrow_mut().push(adam);
@@ -1785,6 +1801,39 @@ mod tests {
         let (report, _) = fit_controlled(model, Verdicts(script.into()), &opts, None, FitControl::default()).expect("fit");
         assert_eq!(lrs.borrow().len(), 2, "two of the four steps were applied");
         assert_eq!(report.steps_completed, 4, "a skipped step still advances the schedule");
+    }
+
+    /// AdamW's bias correction depends on how many updates the moments have
+    /// absorbed, not on how many steps were attempted: a skipped step must not
+    /// advance the index, and a resume must continue the applied count.
+    #[test]
+    fn adamw_index_counts_applied_steps_only() {
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        let indices = std::rc::Rc::clone(&model.indices);
+        let script = [StepVerdict::Apply, StepVerdict::Skip("empty".into()), StepVerdict::Apply, StepVerdict::Apply];
+        let opts = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
+        fit_controlled(model, Verdicts(script.into()), &opts, None, FitControl::default()).expect("fit");
+        assert_eq!(*indices.borrow(), vec![1, 2, 3]);
+    }
+
+    /// The applied count is part of the exact-resume state: a run stopped
+    /// after a skipped step continues the index where it left off.
+    #[test]
+    fn a_resume_continues_the_applied_step_index() {
+        let dir = tmp("applied-index");
+        let state = dir.join("train.state");
+        let identity = serde_json::json!({"run": 1});
+        let opts = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
+        let mut stop_at_two = |s: &StepReport| s.step < 2;
+        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None };
+        let script = [StepVerdict::Skip("empty".into()), StepVerdict::Apply];
+        fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(script.into()), &opts, None, control).expect("fit");
+
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        let indices = std::rc::Rc::clone(&model.indices);
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None };
+        fit_controlled(model, Verdicts(Default::default()), &opts, None, control).expect("fit");
+        assert_eq!(*indices.borrow(), vec![2, 3]);
     }
 
     /// An abort stops the run with the objective's own error.
