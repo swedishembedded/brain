@@ -37,7 +37,8 @@ use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 use qwen35::stream_train::StreamTrainer;
 
-const SEED: u64 = 20260819;
+// seed: the loss decrease over a few steps was measured at this init
+const CONVERGENCE_SEED: u64 = 20260819 ^ 0xA5A5;
 const N: u32 = 6;
 const RANK: u32 = 2;
 const ALPHA: f32 = 4.0;
@@ -68,7 +69,7 @@ fn lora_names(cfg: &Qwen35Config) -> Vec<String> {
 #[test]
 fn streaming_lora_trainer_matches_the_resident_trainer_exactly() {
     let cfg = tiny_lora_cfg();
-    let init: HashMap<String, Vec<f32>> = qwen35::init::init_weights(&cfg, SEED);
+    let init: HashMap<String, Vec<f32>> = qwen35::init::init_weights(&cfg, data::rng::random_seed());
     let (tokens, targets) = batch(&cfg);
     let names = lora_names(&cfg);
     assert!(!names.is_empty(), "test setup bug: no .lora_a/.lora_b tensors found");
@@ -133,7 +134,7 @@ fn streaming_lora_trainer_matches_the_resident_trainer_exactly() {
 #[test]
 fn streaming_lora_trainer_reduces_loss_on_a_fixed_batch() {
     let cfg = tiny_lora_cfg();
-    let init: HashMap<String, Vec<f32>> = qwen35::init::init_weights(&cfg, SEED ^ 0xA5A5);
+    let init: HashMap<String, Vec<f32>> = qwen35::init::init_weights(&cfg, CONVERGENCE_SEED);
     let (tokens, targets) = batch(&cfg);
 
     let streaming = StreamTrainer::new_synthetic(Gpu::new_cpu(pipelines()), &cfg, N, WINDOW_BUDGET, &init);

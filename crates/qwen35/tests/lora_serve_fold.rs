@@ -80,13 +80,13 @@ fn folded_serve_matches_live_training_and_diverges_from_the_unadapted_base() {
     qwen35::lora::fold_adapter_into(&mut base_tensors, adapter_path.to_str().unwrap()).expect("fold_adapter_into");
 
     let prompt = &x[..6];
-    let live_greedy = qwen35::sample::generate_kv(&trained, prompt, 6, 0.0, 0, 1.0, &[], &mut Rng::new(1));
+    let live_greedy = qwen35::sample::generate_kv(&trained, prompt, 6, 0.0, 0, 1.0, &[], &mut Rng::new(data::rng::random_seed()));
 
     // The folded-serve path -- `Qwen35::new_on` over the folded tensor map,
     // same constructor `brain qwen35 infer` uses for a plain checkpoint.
     let served_cfg = Qwen35Config::tiny(); // lora: None -- a plain, folded inference model
     let served = Qwen35::new_on(Gpu::new(pipelines()), served_cfg, 1, t, &base_tensors);
-    let served_greedy = qwen35::sample::generate_kv(&served, prompt, 6, 0.0, 0, 1.0, &[], &mut Rng::new(1));
+    let served_greedy = qwen35::sample::generate_kv(&served, prompt, 6, 0.0, 0, 1.0, &[], &mut Rng::new(data::rng::random_seed()));
     assert_eq!(
         served_greedy, live_greedy,
         "greedy generation from the folded-adapter tensors diverged from the live trained model's greedy generation"
@@ -97,7 +97,7 @@ fn folded_serve_matches_live_training_and_diverges_from_the_unadapted_base() {
     // the fold above could have silently been a no-op and this test would
     // never have caught it.
     let unadapted = Qwen35::new_on(Gpu::new(pipelines()), Qwen35Config::tiny(), 1, t, &unadapted_tensors);
-    let unadapted_greedy = qwen35::sample::generate_kv(&unadapted, prompt, 6, 0.0, 0, 1.0, &[], &mut Rng::new(1));
+    let unadapted_greedy = qwen35::sample::generate_kv(&unadapted, prompt, 6, 0.0, 0, 1.0, &[], &mut Rng::new(data::rng::random_seed()));
     assert_ne!(
         served_greedy, unadapted_greedy,
         "folded-adapter serving produced the SAME output as the unadapted base -- the adapter is not doing anything"

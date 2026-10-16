@@ -82,7 +82,7 @@ fn mtp_accelerated_greedy_decode_matches_the_plain_path_byte_for_byte_and_report
     let prompt = "The capital of France is";
     let max_new = 4usize;
     let window_budget = 4u32;
-    let seed = 20260819;
+    let seed = data::rng::random_seed();
 
     brain_testutil::mem("generate_with_stats: before plain (use_mtp=false)");
     let t0 = Instant::now();

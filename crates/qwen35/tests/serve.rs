@@ -40,7 +40,7 @@ fn run(make_gpu: fn(&[(&str, &str)]) -> Gpu) {
     // `crate::sample::generate_kv` (greedy) - already proven correct against
     // `logits_all` by `decode_step.rs`.
     let reference = Qwen35::new_on(make_gpu(pipelines()), cfg.clone(), 1, max_seq_len, &init);
-    let mut rng = Rng::new(1);
+    let mut rng = Rng::new(data::rng::random_seed());
     let want = qwen35::sample::generate_kv(&reference, &prompt, max_new, 0.0, 0, 1.0, &[], &mut rng);
     assert_eq!(want.len(), max_new, "greedy decode with no eos must always produce exactly max_new tokens");
 

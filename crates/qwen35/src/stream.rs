@@ -1406,10 +1406,10 @@ mod tests {
         // Two residual streams that agree on the first t_real rows but
         // differ arbitrarily after - two different choices for "what fills
         // the padding".
-        let mut rng_shared = data::rng::Lcg::new(1);
+        let mut rng_shared = data::rng::Lcg::new(data::rng::random_seed());
         let real_rows = rng_shared.vec_scaled((t_real * d) as usize, 0.5);
-        let mut rng_a = data::rng::Lcg::new(2);
-        let mut rng_b = data::rng::Lcg::new(3);
+        let mut rng_a = data::rng::Lcg::new(data::rng::random_seed());
+        let mut rng_b = data::rng::Lcg::new(data::rng::random_seed());
         let mut xa = real_rows.clone();
         xa.extend(rng_a.vec_scaled(((t_pad - t_real) * d) as usize, 0.5));
         let mut xb = real_rows.clone();

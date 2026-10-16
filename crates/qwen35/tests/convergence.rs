@@ -99,7 +99,7 @@ fn qwen35_memorizes_cyclic_sequence() {
     let prefix: Vec<u32> = (0..3u32).collect();
     let n_new = 4usize;
     let want: Vec<u32> = (prefix.len() as u32..prefix.len() as u32 + n_new as u32).map(|i| i % vocab).collect();
-    let mut rng = Rng::new(0);
+    let mut rng = Rng::new(data::rng::random_seed());
     // temperature 0 => greedy argmax; no eos ids, so it always runs to length.
     let got = qwen35::sample::generate_kv(&g, &prefix, n_new, 0.0, 0, 1.0, &[], &mut rng);
     assert_eq!(got, want, "greedy continuation of the memorised cycle is wrong (prefix {prefix:?}, loss {loss})");

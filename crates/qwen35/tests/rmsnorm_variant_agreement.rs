@@ -78,7 +78,7 @@ fn the_decode_rmsnorm_seam_matches_the_reference_at_every_real_shape() {
         (cfg.linear_num_value_heads, cfg.linear_value_head_dim, "GDN gated norm"),
     ];
 
-    let mut rng = Lcg::new(20260829);
+    let mut rng = Lcg::new(data::rng::random_seed());
     for (rows, d, what) in shapes {
         let (rows_u, d_u) = (rows as usize, d as usize);
         // Scaled well away from 1.0 so a dropped `eps` or a wrong element count

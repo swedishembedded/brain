@@ -119,7 +119,7 @@ fn build() -> (Qwen35Vl, Vec<u32>, Vec<u32>, Vec<f32>) {
     let model = Qwen35Vl::new(vcfg.clone(), dcfg, vweights, mweights, &dweights, tokens.len() as u32, IMG, 2, 4);
 
     let pv_total = (16 * vcfg.patch_vec_dim()) as usize; // 4x4 patch grid
-    let mut rng = Rng::new(4);
+    let mut rng = Rng::new(data::rng::random_seed());
     let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
 
     (model, tokens, targets, pixels)
@@ -148,7 +148,7 @@ fn splice_is_load_bearing() {
     // different pixel draw (a fresh random realization, not a shift of the
     // same one) changes each token's RELATIVE values, which LayerNorm cannot
     // cancel - that is what actually exercises "is the splice load-bearing".
-    let mut rng_b = Rng::new(9);
+    let mut rng_b = Rng::new(data::rng::random_seed());
     let pixels_b: Vec<f32> = (0..pixels.len()).map(|_| rng_b.next_f32() - 0.5).collect();
     let loss_b = model.forward(&tokens, &targets, (4, 4), &pixels_b);
     assert!(loss_a.is_finite() && loss_b.is_finite());

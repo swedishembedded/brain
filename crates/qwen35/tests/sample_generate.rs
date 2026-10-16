@@ -35,8 +35,8 @@ fn argmax(s: &[f32]) -> u32 {
 #[test]
 fn greedy_generation_is_deterministic() {
     let (model, prompt) = tiny_model();
-    let mut rng1 = Rng::new(1);
-    let mut rng2 = Rng::new(2); // greedy ignores the seed entirely
+    let mut rng1 = Rng::new(data::rng::random_seed());
+    let mut rng2 = Rng::new(data::rng::random_seed()); // greedy ignores the seed entirely
     let out1 = generate_kv(&model, &prompt, 6, 0.0, 0, 1.0, &[], &mut rng1);
     let out2 = generate_kv(&model, &prompt, 6, 0.0, 0, 1.0, &[], &mut rng2);
     assert_eq!(out1, out2, "greedy decoding must not depend on the rng seed");
@@ -46,14 +46,14 @@ fn greedy_generation_is_deterministic() {
 #[test]
 fn generation_stops_at_eos() {
     let (model, prompt) = tiny_model();
-    let mut rng = Rng::new(1);
+    let mut rng = Rng::new(data::rng::random_seed());
     // Run once, unrestricted, to find a real token this model actually
     // produces at some position -- using it as the "eos" id proves the stop
     // check is load-bearing (not just "eos never fires in this tiny model").
     let free = generate_kv(&model, &prompt, 6, 0.0, 0, 1.0, &[], &mut rng);
     assert!(!free.is_empty(), "greedy generation produced nothing to test against");
     let eos = free[0];
-    let mut rng = Rng::new(1);
+    let mut rng = Rng::new(data::rng::random_seed());
     let stopped = generate_kv(&model, &prompt, 6, 0.0, 0, 1.0, &[eos], &mut rng);
     assert!(stopped.is_empty(), "generation should stop before emitting the eos id, got {stopped:?}");
 }
@@ -78,7 +78,7 @@ fn greedy_generation_matches_hand_rolled_step_argmax() {
         hidden = model.step(next);
     }
 
-    let mut rng = Rng::new(42);
+    let mut rng = Rng::new(data::rng::random_seed());
     let got = generate_kv(&model, &prompt, 5, 0.0, 0, 1.0, &[], &mut rng);
     assert_eq!(got, want);
 }
