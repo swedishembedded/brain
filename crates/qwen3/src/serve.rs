@@ -4090,36 +4090,55 @@ mod tests {
     /// rather than tightening it to `assert_eq!`.
     #[test]
     fn random_shared_prefixes_stay_exact() {
+        for kv_int8 in [false, true] {
+            shared_prefix_trials(kv_int8, &mut Rng::random());
+        }
+    }
+
+    /// The draw that once gave every trial a prefix shorter than one KV block
+    /// (so no trial could reuse a cached block and `random_shared_prefixes_
+    /// stay_exact` failed its "a prefix was reused" check, 0/48, with the
+    /// cache working correctly). Every trial now keeps at least one whole
+    /// block of the shared base, whatever the draw.
+    #[test]
+    fn shared_prefix_trials_reuse_a_block_for_the_draw_that_once_kept_none() {
+        // seed: the failing draw of random_shared_prefixes_stay_exact at kv_int8=true
+        shared_prefix_trials(true, &mut Rng::new(12198852813623603017));
+    }
+
+    /// Prefill random prompts that each share a random-length prefix of one
+    /// base prompt through an engine whose prefix cache persists across the
+    /// trials, and compare every result with a fresh (cold) engine's.
+    fn shared_prefix_trials(kv_int8: bool, rng: &mut Rng) {
+        const BLOCK: usize = 4;
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        for kv_int8 in [false, true] {
-            let mut cached_eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 128, 2, 12, 16, kv_int8, false);
-            let mut rng = Rng::random();
-            let vocab = cfg.vocab as u64;
-            let base: Vec<u32> = (0..14).map(|_| (rng.next_u64() % vocab) as u32).collect();
-            for trial in 0..6 {
-                let keep = (rng.next_u64() as usize) % base.len();
-                let mut prompt = base[..keep].to_vec();
-                let extra = 3 + (rng.next_u64() as usize) % 6;
-                prompt.extend((0..extra).map(|_| (rng.next_u64() % vocab) as u32));
-                // Reference: a fresh engine has an empty cache by construction.
-                let mut fresh = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 128, 2, 12, 16, kv_int8, false);
-                let mut tf = BlockTable::new();
-                let cold = fresh.prefill(&mut tf, &prompt);
-                let mut tc = BlockTable::new();
-                let warm = cached_eng.prefill(&mut tc, &prompt);
-                let err: f32 = warm.iter().zip(&cold).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
-                let norm: f32 = cold.iter().map(|v| v * v).sum::<f32>().sqrt();
-                let rel = err / norm.max(1e-12);
-                assert!(
-                    rel < 1e-3,
-                    "kv_int8={kv_int8} trial {trial}: warm prefill diverged structurally (rel L2 {rel:.6}) on prompt {prompt:?}"
-                );
-                cached_eng.release_table(&mut tc);
-            }
-            let (hit, looked, _) = cached_eng.prefix_stats();
-            assert!(hit > 0, "kv_int8={kv_int8}: at least one trial must have actually reused a prefix ({hit}/{looked})");
+        let mut cached_eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, BLOCK as u32, 128, 2, 12, 16, kv_int8, false);
+        let vocab = cfg.vocab as u64;
+        let base: Vec<u32> = (0..14).map(|_| (rng.next_u64() % vocab) as u32).collect();
+        for trial in 0..6 {
+            // At least one whole block, so a later trial can adopt it.
+            let keep = BLOCK + (rng.next_u64() as usize) % (base.len() - BLOCK);
+            let mut prompt = base[..keep].to_vec();
+            let extra = 3 + (rng.next_u64() as usize) % 6;
+            prompt.extend((0..extra).map(|_| (rng.next_u64() % vocab) as u32));
+            // Reference: a fresh engine has an empty cache by construction.
+            let mut fresh = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, BLOCK as u32, 128, 2, 12, 16, kv_int8, false);
+            let mut tf = BlockTable::new();
+            let cold = fresh.prefill(&mut tf, &prompt);
+            let mut tc = BlockTable::new();
+            let warm = cached_eng.prefill(&mut tc, &prompt);
+            let err: f32 = warm.iter().zip(&cold).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
+            let norm: f32 = cold.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let rel = err / norm.max(1e-12);
+            assert!(
+                rel < 1e-3,
+                "kv_int8={kv_int8} trial {trial}: warm prefill diverged structurally (rel L2 {rel:.6}) on prompt {prompt:?}"
+            );
+            cached_eng.release_table(&mut tc);
         }
+        let (hit, looked, _) = cached_eng.prefix_stats();
+        assert!(hit > 0, "kv_int8={kv_int8}: at least one trial must have actually reused a prefix ({hit}/{looked})");
     }
 
     /// Int8 weights (A0) must stay numerically faithful to the fp32 engine:
