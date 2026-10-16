@@ -436,7 +436,7 @@ test/gradcheck:
 # captures stdout/stderr from a PASSING test and discards it unless
 # `--nocapture` is given) - so the loud warning belongs here, at the one
 # place a human actually looks.
-## test/rl - crates/rl's qwen3-gated DPO/GRPO/distill gradchecks and integration tests
+## test/rl - crates/rl's qwen3-gated DPO/GRPO/distill gradchecks, GRPO correctness and continual-study integration tests
 test/rl:
 	@if [ -n "$$MOE_SKIP_GPU_TESTS" ]; then \
 		echo "WARNING: MOE_SKIP_GPU_TESTS is set - every gradcheck below will report PASS without actually running its FD check. Unset it for a real result."; \
@@ -445,7 +445,9 @@ test/rl:
 		--test grpo_gradcheck --test grpo_objective \
 		--test dpo_gradcheck --test dpo_objective --test distill_gradcheck \
 		--test distill_full_kl --test mixture_anchor_regression \
-		--test qwen3_fit_weighted --test improve_cycle
+		--test qwen3_fit_weighted --test improve_cycle \
+		--test grpo_fixes --test grpo_qwen35 --test improve_cycle_qwen35 \
+		--test continual_study
 
 # The training-capability conformance suite (model::conformance for the
 # capability contracts, rl::conformance for the objectives) over every model
