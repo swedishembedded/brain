@@ -2894,8 +2894,8 @@ impl Qwen35 {
             let rc = rows.min(n - row0);
             let (chunk_out, _) = self.mlp_fwd(prefix, &self.take_rows(xn2, d, n, row0, rc), rc);
             self.put_rows(&chunk_out, &out, d, row0, rc);
-            self.gpu.poll_wait();
         }
+        self.gpu.poll_wait();
         out
     }
 
@@ -2915,8 +2915,8 @@ impl Qwen35 {
             let acts = self.mlp_acts_only(prefix, &self.take_rows(xn2, d, n, row0, rc), rc);
             let d_chunk = self.mlp_bwd(prefix, &acts, &self.take_rows(d_mlp_out, d, n, row0, rc), rc);
             self.put_rows(&d_chunk, &d_xn2, d, row0, rc);
-            self.gpu.poll_wait();
         }
+        self.gpu.poll_wait();
         d_xn2
     }
 
