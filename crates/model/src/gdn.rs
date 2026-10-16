@@ -208,6 +208,13 @@ pub struct GdnFastIds {
     /// `bmm_tiled.wgsl` - the 64x64-tile, register-blocked batched matmul that
     /// serves both `bmm` and `bmm_acc` (bit-identical to them).
     pub bmm_tiled: usize,
+    /// Whether the fused tensor-core prefix (`gdn_chunk_prep_tc`, see
+    /// [`native_chunk_prep`]) may replace the whole-tensor steps 1-9 on a device
+    /// that offers it. Unlike the other fast kernels it is NOT bit-identical to
+    /// the portable path (three-pass TF32 products, agreement about 1e-6
+    /// relative), so a caller that needs the portable numbers - or a parity
+    /// test that wants the reference - leaves it `false`.
+    pub tensor_core: bool,
 }
 
 /// Whether `g` takes [`GdnIds::fast`] kernels.
@@ -718,6 +725,36 @@ fn native_bwd_sweep(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _c: u32, _d
     None
 }
 
+/// [`gpu_core::provider::cuda::gdn_chunk_prep_step`] where a native backend
+/// exists at all; `None` (the portable whole-tensor prefix) on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_chunk_prep(g: &Gpu, bufs: &[&DeviceBuffer; 10], bhc: u32, c: u32, dk: u32, dv: u32, scale: f32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_prep_step(g, bufs, bhc, c, dk, dv, scale)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_chunk_prep(_g: &Gpu, _bufs: &[&DeviceBuffer; 10], _bhc: u32, _c: u32, _dk: u32, _dv: u32, _scale: f32) -> Option<Step> {
+    None
+}
+
+/// [`gpu_core::provider::cuda::gdn_chunk_prep_train_step`] where a native
+/// backend exists at all; `None` on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_chunk_prep_train(g: &Gpu, bufs: &[&DeviceBuffer; 17], bhc: u32, c: u32, dk: u32, dv: u32, scale: f32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_prep_train_step(g, bufs, bhc, c, dk, dv, scale)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_chunk_prep_train(_g: &Gpu, _bufs: &[&DeviceBuffer; 17], _bhc: u32, _c: u32, _dk: u32, _dv: u32, _scale: f32) -> Option<Step> {
+    None
+}
+
+/// Whether the caller opted in to the fused tensor-core prefix and this device
+/// takes the fast kernels at all.
+fn tensor_core_prefix_enabled(g: &Gpu, ids: &GdnIds) -> bool {
+    ids.fast.is_some_and(|f| f.tensor_core) && use_fast_kernels(g)
+}
+
 /// Largest chunk `gdn_ut_fwd.wgsl` serves: one thread per column and a packed
 /// triangle sized for 64 rows (its header derives both).
 const GDN_UT_FWD_MAX_CHUNK: u32 = 64;
@@ -974,7 +1011,18 @@ pub fn gdn_chunk_fwd(
         raw_intra: scratch.raw_intra,
         intra_scores: scratch.intra_scores,
     };
-    let mut steps = gdn_chunk_fwd_prefix(g, ids, shape, query, key, value, raw_g, beta, &whole);
+    // Steps 1-9 and the intra-chunk scores as one tensor-core launch where the caller and the
+    // device offer it; the portable whole-tensor sequence otherwise.
+    let fused = if tensor_core_prefix_enabled(g, ids) {
+        let bufs = [query, key, value, raw_g, beta, scratch.g_cs, scratch.exp_g_cs, scratch.u, scratch.w, scratch.intra_scores];
+        native_chunk_prep(g, &bufs, shape.bhc(), c, dk, dv, scale)
+    } else {
+        None
+    };
+    let mut steps = match fused {
+        Some(step) => vec![step],
+        None => gdn_chunk_fwd_prefix(g, ids, shape, query, key, value, raw_g, beta, &whole),
+    };
 
     // ---- step 10 in one launch, where the device has a kernel for it ----
     // The kernel reads `initial_state` and writes `final_state` itself, so the
@@ -1139,7 +1187,37 @@ pub fn gdn_chunk_fwd_train(
         raw_intra: scratch.raw_intra,
         intra_scores: scratch.intra_scores,
     };
-    let mut steps = gdn_chunk_fwd_prefix(g, ids, shape, query, key, value, raw_g, beta, &whole);
+    // Steps 1-9 and the intra-chunk scores as one tensor-core launch (it also writes everything
+    // the backward reads) where the caller and the device offer it; the portable sequence
+    // otherwise. The fused path leaves `attn0` unwritten: nothing downstream reads it.
+    let fused = if tensor_core_prefix_enabled(g, ids) {
+        let bufs = [
+            query,
+            key,
+            value,
+            raw_g,
+            beta,
+            scratch.g_cs,
+            scratch.exp_g_cs,
+            scratch.u,
+            scratch.w,
+            scratch.intra_scores,
+            scratch.k_beta,
+            scratch.v_beta,
+            scratch.k_beta_decay,
+            scratch.decay_mask,
+            scratch.raw_attn0,
+            scratch.t_mat,
+            scratch.raw_intra,
+        ];
+        native_chunk_prep_train(g, &bufs, shape.bhc(), c, dk, dv, scale)
+    } else {
+        None
+    };
+    let mut steps = match fused {
+        Some(step) => vec![step],
+        None => gdn_chunk_fwd_prefix(g, ids, shape, query, key, value, raw_g, beta, &whole),
+    };
 
     // ---- step 10 in one launch, where the device has a kernel for it ----
     // It reads `initial_state`, writes `final_state` and records both histories

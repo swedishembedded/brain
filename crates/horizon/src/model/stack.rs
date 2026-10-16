@@ -374,6 +374,7 @@ fn gdn_ids() -> (GdnIds, GdnBwdIds) {
             fast: Some(GdnFastIds {
                 ut_fwd: GDN_UT_FWD,
                 bmm_tiled: BMM_TILED,
+                tensor_core: false,
             }),
         },
         GdnBwdIds {

@@ -60,7 +60,7 @@ fn ids(g: &Gpu, fast: bool) -> GdnIds {
         sub: idx(g, "sub"),
         mul: idx(g, "mul"),
         region_copy: idx(g, "region_copy"),
-        fast: fast.then(|| GdnFastIds { ut_fwd: idx(g, "gdn_ut_fwd"), bmm_tiled: idx(g, "bmm_tiled") }),
+        fast: fast.then(|| GdnFastIds { ut_fwd: idx(g, "gdn_ut_fwd"), bmm_tiled: idx(g, "bmm_tiled"), tensor_core: false }),
     }
 }
 

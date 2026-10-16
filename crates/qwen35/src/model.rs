@@ -653,7 +653,7 @@ fn gdn_ids() -> GdnIds {
         sub: SUB,
         mul: MUL,
         region_copy: REGION_COPY,
-        fast: Some(model::gdn::GdnFastIds { ut_fwd: GDN_UT_FWD, bmm_tiled: BMM_TILED }),
+        fast: Some(model::gdn::GdnFastIds { ut_fwd: GDN_UT_FWD, bmm_tiled: BMM_TILED, tensor_core: true }),
     }
 }
 
