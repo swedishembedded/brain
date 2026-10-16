@@ -749,9 +749,37 @@ fn native_chunk_prep_train(_g: &Gpu, _bufs: &[&DeviceBuffer; 17], _bhc: u32, _c:
     None
 }
 
-/// Whether the caller opted in to the fused tensor-core prefix and this device
-/// takes the fast kernels at all.
-fn tensor_core_prefix_enabled(g: &Gpu, ids: &GdnIds) -> bool {
+/// [`gpu_core::provider::cuda::gdn_chunk_loop_tc_step`] where a native backend
+/// exists at all; `None` on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn native_chunk_loop_tc(g: &Gpu, bufs: &[&DeviceBuffer; 10], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_loop_tc_step(g, bufs, bh, c, dk, dv, n_chunks, scale)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn native_chunk_loop_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 10], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32) -> Option<Step> {
+    None
+}
+
+/// [`gpu_core::provider::cuda::gdn_chunk_loop_train_tc_step`] where a native
+/// backend exists at all; `None` on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn native_chunk_loop_train_tc(g: &Gpu, bufs: &[&DeviceBuffer; 12], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_loop_train_tc_step(g, bufs, bh, c, dk, dv, n_chunks, scale)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn native_chunk_loop_train_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32) -> Option<Step> {
+    None
+}
+
+/// Whether the caller opted in to the tensor-core kernels (the fused prefix and the
+/// recurrence) and this device takes the fast kernels at all.
+fn tensor_core_enabled(g: &Gpu, ids: &GdnIds) -> bool {
     ids.fast.is_some_and(|f| f.tensor_core) && use_fast_kernels(g)
 }
 
@@ -1013,7 +1041,7 @@ pub fn gdn_chunk_fwd(
     };
     // Steps 1-9 and the intra-chunk scores as one tensor-core launch where the caller and the
     // device offer it; the portable whole-tensor sequence otherwise.
-    let fused = if tensor_core_prefix_enabled(g, ids) {
+    let fused = if tensor_core_enabled(g, ids) {
         let bufs = [query, key, value, raw_g, beta, scratch.g_cs, scratch.exp_g_cs, scratch.u, scratch.w, scratch.intra_scores];
         native_chunk_prep(g, &bufs, shape.bhc(), c, dk, dv, scale)
     } else {
@@ -1029,7 +1057,8 @@ pub fn gdn_chunk_fwd(
     // state copy and the whole chunk loop below are what it replaces.
     if ids.fast.is_some() && use_fast_kernels(g) {
         let bufs = [key, query, scratch.w, scratch.u, scratch.g_cs, scratch.exp_g_cs, scratch.intra_scores, initial_state, out, final_state];
-        if let Some(step) = native_chunk_loop(g, &bufs, bh, c, dk, dv, n_chunks, scale) {
+        let tc = if tensor_core_enabled(g, ids) { native_chunk_loop_tc(g, &bufs, bh, c, dk, dv, n_chunks, scale) } else { None };
+        if let Some(step) = tc.or_else(|| native_chunk_loop(g, &bufs, bh, c, dk, dv, n_chunks, scale)) {
             steps.push(step);
             return steps;
         }
@@ -1190,7 +1219,7 @@ pub fn gdn_chunk_fwd_train(
     // Steps 1-9 and the intra-chunk scores as one tensor-core launch (it also writes everything
     // the backward reads) where the caller and the device offer it; the portable sequence
     // otherwise. The fused path leaves `attn0` unwritten: nothing downstream reads it.
-    let fused = if tensor_core_prefix_enabled(g, ids) {
+    let fused = if tensor_core_enabled(g, ids) {
         let bufs = [
             query,
             key,
@@ -1238,7 +1267,8 @@ pub fn gdn_chunk_fwd_train(
             scratch.state_history,
             scratch.decay_scale_hist,
         ];
-        if let Some(step) = native_chunk_loop_train(g, &bufs, bh, c, dk, dv, n_chunks, scale) {
+        let tc = if tensor_core_enabled(g, ids) { native_chunk_loop_train_tc(g, &bufs, bh, c, dk, dv, n_chunks, scale) } else { None };
+        if let Some(step) = tc.or_else(|| native_chunk_loop_train(g, &bufs, bh, c, dk, dv, n_chunks, scale)) {
             steps.push(step);
             return steps;
         }

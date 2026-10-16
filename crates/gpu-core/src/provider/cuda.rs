@@ -448,6 +448,62 @@ pub fn gdn_chunk_prep_train_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceB
     gpu.step_native_sliced(id, bufs, &[(0, 0); 17], &[bhc, c_len, dk, dv, 0, scale.to_bits()], bhc)
 }
 
+/// Dynamic shared memory of `gdn_chunk_loop_tc`: two 64 x 132 staged tiles, the
+/// 128 x 40 state slice, the 64 x 40 `v_new` and one 64-float decay vector, all f32.
+const GDN_CHUNK_LOOP_TC_DYNAMIC_SHARED_BYTES: u32 = (2 * 64 * 132 + 128 * 40 + 64 * 40 + 64) * 4;
+
+/// Value-column blocks `gdn_chunk_loop_tc` splits each head across.
+const GDN_CHUNK_LOOP_TC_SPLITS: u32 = 4;
+
+/// [`gdn_chunk_loop_step`] on tensor cores (`gdn_chunk_loop_tc`): same buffers and
+/// contract, three-pass TF32 products instead of fp32 CUDA-core ones, so it
+/// agrees with the fp32 kernel to about 1e-6 relative rather than bit for bit.
+/// `None` for the same reasons as [`gdn_chunk_loop_step`] and on a device below
+/// the tensor-core floor; the caller then asks for the fp32 kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_loop_tc_step(
+    gpu: &crate::Gpu,
+    bufs: &[&backend_api::DeviceBuffer; 10],
+    bh: u32,
+    c_len: u32,
+    dk: u32,
+    dv: u32,
+    n_chunks: u32,
+    scale: f32,
+) -> Option<crate::Step> {
+    if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_loop_tc").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_TC_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_LOOP_BINDINGS, launch)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 10], &[bh, c_len, dk, dv, n_chunks, scale.to_bits()], bh * GDN_CHUNK_LOOP_TC_SPLITS)
+}
+
+/// [`gdn_chunk_loop_tc_step`] for the training forward: also writes the state and
+/// decay-scale histories (the buffers and layout of [`gdn_chunk_loop_train_step`]).
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_loop_train_tc_step(
+    gpu: &crate::Gpu,
+    bufs: &[&backend_api::DeviceBuffer; 12],
+    bh: u32,
+    c_len: u32,
+    dk: u32,
+    dv: u32,
+    n_chunks: u32,
+    scale: f32,
+) -> Option<crate::Step> {
+    if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_loop_train_tc").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_TC_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_LOOP_TRAIN_BINDINGS, launch)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks, scale.to_bits()], bh * GDN_CHUNK_LOOP_TC_SPLITS)
+}
+
 /// The native tensor-core paged flash-prefill step for `head_dim = 256`, or
 /// `None` when the caller should dispatch the portable
 /// `paged_flash_prefill_hd256` it was going to anyway.

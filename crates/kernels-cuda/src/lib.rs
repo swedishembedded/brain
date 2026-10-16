@@ -1277,6 +1277,38 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
     },
+    CudaKernel {
+        name: "gdn_chunk_loop_tc",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        // Asked for by name, so `find` keeps resolving the fp32 recurrence for this operator.
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_chunk_loop_tc",
+        what: "Gated DeltaNet's whole across-chunk recurrence in one launch on three-pass TF32 tensor cores (fp32 state and accumulation), head split over four 32-column blocks",
+        reported: "native:gdn_chunk_loop_tc",
+        block_dim: 128,
+        tile: (64, 32),
+        // Everything is dynamic: see `GDN_CHUNK_LOOP_TC_DYNAMIC_SHARED_BYTES` in gpu-core.
+        shared_bytes: 0,
+        src: include_str!("../cu/gdn_chunk_loop_tc.cu"),
+    },
+    CudaKernel {
+        name: "gdn_chunk_loop_train_tc",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_chunk_loop_train_tc",
+        what: "gdn_chunk_loop_tc plus the training histories (the state entering every chunk and each row's decay scale) the backward sweep reads, in the same single launch",
+        reported: "native:gdn_chunk_loop_train_tc",
+        block_dim: 128,
+        tile: (64, 32),
+        shared_bytes: 0,
+        src: include_str!("../cu/gdn_chunk_loop_tc.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of
