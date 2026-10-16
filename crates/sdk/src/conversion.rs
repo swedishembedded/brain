@@ -463,6 +463,7 @@ impl Stages for ConversionPipeline {
             final_loss: tail,
             seconds: 0.0,
             seed: Some(spec.seed),
+            episode_base: None,
         })
     }
 

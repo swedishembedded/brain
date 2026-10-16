@@ -18,9 +18,11 @@
 //! procure our services by sending an email to info@swedishembedded.com.
 
 use brain::decision_run::{EvalRun, TrainRun};
-use brain::{ControlPipeline, ControlSpec, ConversionPipeline, ConversionSpec, DecisionPipeline, Env, RlcdPipeline, RlcdSpec, TrainSpec};
+use brain::control::EVAL_SEEDS;
+use brain::{ControlPipeline, ControlSpec, ConversionPipeline, ConversionSpec, DecisionPipeline, Device, Env, Flow, RlcdPipeline, RlcdSpec, TrainSpec};
 use decisions::examples::Split;
 use decisions::fixtures::{write_decide, Scratch};
+use std::sync::{Arc, Mutex};
 
 fn encoder(tag: &str) -> Scratch {
     let dir = Scratch::new(tag);
@@ -103,4 +105,55 @@ fn a_decide_run_draws_the_seeds_it_was_not_given() {
     assert_ne!(a.seed, b.seed);
     let (a, b) = (EvalRun::new("m", "d", Split::Test), EvalRun::new("m", "d", Split::Test));
     assert_ne!(a.order_seed, b.order_seed);
+}
+
+/// An environment that records every world a rollout asks for. Each episode is
+/// one step long, so a run is a handful of resets.
+struct Recorder {
+    worlds: Arc<Mutex<Vec<u64>>>,
+}
+
+impl Env for Recorder {
+    fn reset(&mut self, seed: u64) -> String {
+        self.worlds.lock().expect("worlds").push(seed);
+        "two doors".to_string()
+    }
+    fn actions(&mut self) -> Vec<String> {
+        vec!["open the left door".to_string(), "open the right door".to_string()]
+    }
+    fn step(&mut self, action: usize) -> (String, f32, bool) {
+        (String::new(), action as f32, true)
+    }
+}
+
+/// The worlds a training rollout visited, and the base the report names for
+/// them. The pipeline's own seed is drawn fresh each time, so only the spec's
+/// seed can be what makes two runs agree.
+fn rollout_worlds(dir: &Scratch, run_seed: u64) -> (Vec<u64>, u64) {
+    let worlds = Arc::new(Mutex::new(Vec::new()));
+    let cpu = Device::parse("cpu").expect("cpu device");
+    let pipeline = ControlPipeline::builder(path(dir), Recorder { worlds: worlds.clone() }).device(cpu).load();
+    let spec = ControlSpec::default().seed(run_seed).iterations(1).episodes(3).max_steps(2).warmup_episodes(0);
+    let flow = Flow::new(pipeline).train(spec);
+    let base = flow.train_report().and_then(|r| r.episode_base).expect("a control run reports its world base");
+    let seen = worlds.lock().expect("worlds").clone();
+    (seen, base)
+}
+
+#[test]
+fn control_training_worlds_follow_the_run_seed_and_stay_off_the_fixed_blocks() {
+    let dir = encoder("seed-control-worlds");
+    let (a, base_a) = rollout_worlds(&dir, 11);
+    let (again, _) = rollout_worlds(&dir, 11);
+    let (b, base_b) = rollout_worlds(&dir, 12);
+    assert_eq!(a, again, "the run seed reproduces the worlds");
+    assert_ne!(a, b, "another run seed trains on other worlds");
+    assert_ne!(base_a, base_b);
+    assert_eq!(a.first().copied(), Some(base_a + 1), "the report names the counter the rollout counted up from");
+    // The evaluation block, the gauge block and the held-out block are fixed
+    // sets every run compares on; no run may train on them.
+    for world in a.iter().chain(&b) {
+        assert!(!EVAL_SEEDS.contains(world), "world {world} is an evaluation world");
+        assert!(*world >= 1 << 32, "world {world} is inside a fixed block");
+    }
 }

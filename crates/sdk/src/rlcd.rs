@@ -502,7 +502,7 @@ impl RlcdPipeline {
             }
         }
         self.voi_question = Some(q);
-        Ok(TrainReport { steps, final_loss: tail, seconds: 0.0, seed: Some(seed) })
+        Ok(TrainReport { steps, final_loss: tail, seconds: 0.0, seed: Some(seed), episode_base: None })
     }
 
     /// The learned policy's own action at `state` - `(action, probabilities)`
@@ -614,7 +614,7 @@ impl Stages for RlcdPipeline {
         let mut p = self.model.provenance().clone();
         p.task = TaskContract::from_spec(spec).to_json();
         self.model.set_provenance(p);
-        Ok(TrainReport { steps: spec.steps, final_loss: tail, seconds: 0.0, seed: Some(spec.seed) })
+        Ok(TrainReport { steps: spec.steps, final_loss: tail, seconds: 0.0, seed: Some(spec.seed), episode_base: None })
     }
 
     fn run_eval(&mut self) -> Result<EvalReport> {

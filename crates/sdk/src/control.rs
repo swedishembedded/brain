@@ -289,7 +289,8 @@ pub trait Env {
 
 /// The seeds [`Stages::run_eval`] scores on.
 ///
-/// Fixed, disjoint from the rollout seeds (which count up from 0), and PUBLIC
+/// Fixed, disjoint from the rollout seeds (which count up from a base the run
+/// seed picks, far above this block), and PUBLIC
 /// so a caller can measure its own reference policies on exactly the same
 /// episodes. A learned win rate compared against a baseline measured on
 /// different seeds is not a comparison.
@@ -1058,7 +1059,10 @@ pub struct ControlPipeline<E: Env> {
     /// drawn when it named none.
     seed: u64,
     rng: data::rng::Rng,
-    /// Advances across every rollout so a run never replays one episode.
+    /// Advances across every rollout so a run never replays one episode. It
+    /// starts at [`episode_base`] of the pipeline seed and is restarted from
+    /// the run seed by [`Stages::run_train`], so the worlds a run trains on
+    /// follow the seed its report names.
     episode_seed: u64,
     /// See [`ControlSpec::gae_lambda`]. Held here because the estimator runs
     /// inside an episode, which does not see the spec.
@@ -1125,6 +1129,19 @@ const GAMMA: f32 = 1.0;
 /// Keeps the sampling stream apart from the head-initialization stream when
 /// both come from one seed.
 const RNG_SALT: u64 = 0xc0ffee;
+/// Keeps the rollout worlds apart from the sampling and head-initialization
+/// streams when all of them come from one seed.
+const EPISODE_SALT: u64 = 0x3b15_0de5;
+/// Rollout worlds live in `[2^40, 2^41)`, far above [`EVAL_SEEDS`] and the
+/// fixed gauge (`0x4000_0000`) and held-out (`0x5000_0000`) blocks, so no run
+/// trains on a world that something else compares policies on.
+const EPISODE_BAND: u64 = 1 << 40;
+
+/// The world counter a run with `seed` counts up from: the first world it
+/// trains on is the value plus one.
+fn episode_base(seed: u64) -> u64 {
+    EPISODE_BAND | (data::rng::Rng::new(seed ^ EPISODE_SALT).next_u64() & (EPISODE_BAND - 1))
+}
 /// The bias/variance dial on the advantage estimator: 0 is the one-step TD
 /// error and 1 is the full return minus the baseline. The usual middle.
 const GAE_LAMBDA: f32 = 0.95;
@@ -4056,6 +4073,8 @@ impl<E: Env> Stages for ControlPipeline<E> {
         // The run samples from the spec's seed, so the seed a report names is
         // the seed that reproduces it.
         self.rng = data::rng::Rng::new(spec.seed ^ RNG_SALT);
+        let world_base = episode_base(spec.seed);
+        self.episode_seed = world_base;
         println!(
             "  {} iterations x {} episodes, {} PPO passes each, encoder {}",
             spec.iterations,
@@ -4302,7 +4321,7 @@ impl<E: Env> Stages for ControlPipeline<E> {
                 );
                 if m > b {
                     self.model.set_head_weights(mean);
-                    return Ok(TrainReport { steps: step, final_loss: last_loss, seconds: 0.0, seed: Some(spec.seed) });
+                    return Ok(TrainReport { steps: step, final_loss: last_loss, seconds: 0.0, seed: Some(spec.seed), episode_base: Some(world_base) });
                 }
             }
         }
@@ -4324,7 +4343,7 @@ impl<E: Env> Stages for ControlPipeline<E> {
             let w = w.to_vec();
             self.model.set_head_weights(&w);
         }
-        Ok(TrainReport { steps: step, final_loss: last_loss, seconds: 0.0, seed: Some(spec.seed) })
+        Ok(TrainReport { steps: step, final_loss: last_loss, seconds: 0.0, seed: Some(spec.seed), episode_base: Some(world_base) })
     }
 
     fn run_eval(&mut self) -> Result<EvalReport> {
@@ -4433,7 +4452,7 @@ impl<E: Env> ControlPipelineBuilder<E> {
             env: self.env,
             seed,
             rng: data::rng::Rng::new(seed ^ RNG_SALT),
-            episode_seed: 0,
+            episode_seed: episode_base(seed),
             reference: None,
             gae_lambda: GAE_LAMBDA,
             gamma: GAMMA,

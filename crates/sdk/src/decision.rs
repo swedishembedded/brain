@@ -1144,7 +1144,7 @@ impl Stages for DecisionPipeline {
         self.last_options = spec.options.clone();
         self.last_instructions = spec.instructions.clone();
         self.last_eval = spec.eval.clone();
-        Ok(TrainReport { steps: spec.steps, final_loss, seconds: 0.0, seed: Some(spec.seed) })
+        Ok(TrainReport { steps: spec.steps, final_loss, seconds: 0.0, seed: Some(spec.seed), episode_base: None })
     }
 
     fn run_eval(&mut self) -> Result<EvalReport> {

@@ -40,7 +40,7 @@ pub use appopts::{help_of, Args, Hardware, ModelChoice, Options};
 /// everything else, and agree exactly here. Spelling `--encoder` twice in two
 /// groups is how the two come to accept slightly different things.
 #[cfg(feature = "decision")]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ModelOptions {
     /// Directory holding the pretrained sentence encoder.
     pub encoder: String,
@@ -48,6 +48,8 @@ pub struct ModelOptions {
     pub head: Option<String>,
     /// Where a trained head is written.
     pub save: String,
+    /// Drawn fresh by [`ModelOptions::new`]; there is no `Default`, because a
+    /// default value would have to pick a seed.
     pub seed: u64,
 }
 

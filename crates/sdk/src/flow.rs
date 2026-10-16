@@ -44,6 +44,10 @@ pub struct TrainReport {
     /// fresh draw when the caller named none. Passing it back reproduces the
     /// run. `None` for a stage that draws nothing.
     pub seed: Option<u64>,
+    /// For a pipeline that trains by acting in an environment: the world index
+    /// the rollouts counted up from, which the run seed fixes. The first world
+    /// a run trained on is `episode_base + 1`. `None` for every other stage.
+    pub episode_base: Option<u64>,
 }
 
 /// What one evaluation stage produced.
