@@ -269,7 +269,7 @@ impl Qwen3VlMoe {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data::rng::Lcg;
+    use data::rng::{random_seed, Lcg};
     use qwen3vl::config::VisionConfig;
 
     const IMG: u32 = 9;
@@ -388,7 +388,7 @@ mod tests {
         let tcfg = tiny_text_config();
         let cfg = Qwen3VlMoeConfig { vision: vcfg.clone(), text: tcfg.clone(), image_token_id: IMG, video_token_id: IMG + 1, vision_start_token_id: 100, vision_end_token_id: 101 };
 
-        let mut rng = Lcg::new(7);
+        let mut rng = Lcg::new(random_seed());
         let vweights = tiny_vision_weights(&mut rng, &vcfg);
         let mweights = tiny_merger_weights(&mut rng, &vcfg, tcfg.hidden, false);
         let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..vcfg.deepstack_indexes.len()).map(|_| tiny_merger_weights(&mut rng, &vcfg, tcfg.hidden, true)).collect();
@@ -418,7 +418,7 @@ mod tests {
         let tcfg = tiny_text_config();
         let cfg = Qwen3VlMoeConfig { vision: vcfg.clone(), text: tcfg.clone(), image_token_id: IMG, video_token_id: IMG + 1, vision_start_token_id: 100, vision_end_token_id: 101 };
 
-        let mut rng = Lcg::new(11);
+        let mut rng = Lcg::new(random_seed());
         let vweights = tiny_vision_weights(&mut rng, &vcfg);
         let mweights = tiny_merger_weights(&mut rng, &vcfg, tcfg.hidden, false);
         let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..vcfg.deepstack_indexes.len()).map(|_| tiny_merger_weights(&mut rng, &vcfg, tcfg.hidden, true)).collect();
