@@ -68,6 +68,7 @@ use rl::curriculum::{self, ContentSplit, PositionCopyEnv, PositionCopyVerifier, 
 use rl::env::Environment;
 use rl::gate::{Decision, GateConfig};
 use rl::improve::{self, AdapterMeta};
+use rl::objective::grpo::{AdvantageNorm, GrpoOptions, LossAgg, RatioBasis};
 
 // ---------------------------------------------------------------------------
 // PRE-REGISTERED CONSTANTS
@@ -352,6 +353,7 @@ fn study_config_for(seed: u64, cycles: usize, work_dir: PathBuf, plasticity_cont
         // file's pre-registered constants describe a GRPO run and nothing
         // else.
         regime: Regime::Grpo,
+        grpo: GrpoOptions::default(),
     }
 }
 
@@ -645,4 +647,62 @@ fn joint_training_oracle_shows_capacity_is_the_binding_constraint_not_forgetting
          Capacity is no longer the binding constraint, so the roadmap's P19 reading of T2's BWT as a capacity result is \
          STALE and must be re-derived from a fresh run."
     );
+}
+
+// ---------------------------------------------------------------------------
+// E1 (reduced) - is the sampler/trainer ratio mismatch a contributing cause?
+//
+// PRE-REGISTERED before the first run. At the documented sampling temperature
+// (1.5) the legacy objective scored the untempered softmax, so every fresh
+// row's first update started off-policy and confident rewarded tokens were
+// clipped. The question is whether that, alone, changes what the sequential
+// loop accumulates. Three arms, the same drawn study seeds, everything else
+// the legacy settings (z-scored advantages, per-row mean, symmetric clip 0.2,
+// KL not measured):
+//   A  RatioBasis::Sampler                      (the legacy ratio)
+//   B  RatioBasis::Trainer                      (ratio fix only)
+//   C  RatioBasis::Trainer + dynamic sampling   (resample_factor 3)
+// Metric: the study's final ACC, the mean score over every frozen probe after
+// the last cycle. Decision rule: the ratio fix is a contributing cause iff
+// ACC(B) > ACC(A) on EVERY seed. Reduced from the recorded study: 4 cycles
+// instead of 12, no plasticity control, three seeds. Every arm skips an
+// optimiser step that has no rows (the legacy objective took it), so A is the
+// legacy ratio with the other corrections off, not the legacy objective.
+// ---------------------------------------------------------------------------
+
+const ABLATION_CYCLES: usize = 4;
+const ABLATION_SEEDS: usize = 3;
+
+#[test]
+#[ignore = "experiment: 3 seeds x 3 arms of a 4-cycle study, minutes on one GPU; run alone with --ignored --nocapture"]
+fn reduced_ablation_of_the_ratio_basis_and_dynamic_sampling() {
+    let dir = tmp("ablation");
+    let base = prepare_base();
+    let targets = lora_targets();
+    let seeds: Vec<u64> = (0..ABLATION_SEEDS).map(|_| data::rng::random_seed()).collect();
+    println!("E1 seeds {seeds:?}");
+    let legacy = GrpoOptions { advantage: AdvantageNorm::ZScore, loss_agg: LossAgg::SeqMean, clip_eps_high: 0.2, resample_factor: 1, log_kl: false, ..GrpoOptions::default() };
+    let arms = [
+        ("A sampler ratio", GrpoOptions { ratio_basis: RatioBasis::Sampler, ..legacy }),
+        ("B trainer ratio", GrpoOptions { ratio_basis: RatioBasis::Trainer, ..legacy }),
+        ("C trainer + dynamic sampling", GrpoOptions { ratio_basis: RatioBasis::Trainer, resample_factor: 3, ..legacy }),
+    ];
+    let mut acc = vec![vec![0.0f64; seeds.len()]; arms.len()];
+    for (s, &seed) in seeds.iter().enumerate() {
+        for (a, (name, options)) in arms.iter().enumerate() {
+            let work = dir.join(format!("seed{s}-arm{a}"));
+            let cfg = StudyConfig { grpo: *options, ..study_config_for(seed, ABLATION_CYCLES, work, false, GatePolicy::Real) };
+            let report = continual::run_study::<Qwen, _>(&spec(&base, &targets), &PositionCopy::new(0), &cfg).expect("run_study");
+            acc[a][s] = report.acc;
+            println!("seed {seed}  {name:<30}  ACC {:.3}  promotions {}  diagonal {:?}", report.acc, report.promotions, report.r_matrix.iter().enumerate().map(|(k, row)| (row[k] * 1000.0).round() / 1000.0).collect::<Vec<_>>());
+        }
+    }
+    println!("\nE1 final ACC (rows = arms, columns = seeds):");
+    for (a, (name, _)) in arms.iter().enumerate() {
+        println!("  {name:<30} {:?}", acc[a].iter().map(|v| (v * 1000.0).round() / 1000.0).collect::<Vec<_>>());
+    }
+    let b_beats_a = (0..seeds.len()).all(|s| acc[1][s] > acc[0][s]);
+    let c_beats_b = (0..seeds.len()).all(|s| acc[2][s] > acc[1][s]);
+    println!("decision rule (B > A on every seed): {}   (C > B on every seed: {})", if b_beats_a { "MET" } else { "NOT MET" }, c_beats_b);
+    assert!(acc.iter().flatten().all(|v| v.is_finite()), "a study produced a non-finite ACC: {acc:?}");
 }

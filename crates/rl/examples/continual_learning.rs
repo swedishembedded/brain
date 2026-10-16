@@ -769,6 +769,7 @@ fn main() {
         work_dir: args.out.join(if args.null_gate { "arm4" } else { "arm1" }),
         verbose: true,
         regime: regime.clone(),
+        grpo: rl::objective::grpo::GrpoOptions::default(),
     };
     let curr = PositionCopy::new(args.rehearsal());
 

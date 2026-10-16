@@ -65,7 +65,7 @@ use crate::curriculum::{ContentSplit, PositionCopyEnv, PositionCopyVerifier, Rul
 use crate::env::{Environment, Task, Verifier};
 use crate::gate::{Decision, GateConfig, GateReport};
 use crate::improve::{self, AdapterMeta, ArmScores, CycleArtifacts, Evaluation, ProvenanceInput};
-use crate::objective::grpo::{CycleLog, Grpo, GrpoConfig};
+use crate::objective::grpo::{CycleLog, Grpo, GrpoConfig, GrpoOptions};
 use crate::objective::mixture::{Anchor, Mixture};
 
 /// Base seed for the frozen evaluation probes. Probe seeds are a pure
@@ -429,6 +429,9 @@ pub struct StudyConfig {
     /// config is a record of what it did, and a knob that did nothing makes
     /// that record false.
     pub regime: Regime,
+    /// The GRPO objective's options ([`Regime::Grpo`] only; [`Regime::Sft`] has
+    /// no use for them). [`GrpoOptions::default`] is the recommended setting.
+    pub grpo: GrpoOptions,
 }
 
 /// Architecture-specific facts [`run_study`] cannot derive.
@@ -884,7 +887,7 @@ fn grpo_cfg(cfg: &StudyConfig, block: usize, completion_len: usize) -> GrpoConfi
         seq_len: block,
         rollout: RolloutParams { max_new: completion_len, sample: SampleParams { temp: cfg.explore_temp, top_k: 0, top_p: 1.0 }, eos: None },
         max_attempts: 1,
-        options: Default::default(),
+        options: cfg.grpo,
     }
 }
 
@@ -1687,6 +1690,7 @@ mod tests {
             work_dir: PathBuf::from("/nonexistent"),
             verbose: false,
             regime: Regime::default(),
+            grpo: GrpoOptions::default(),
         }
     }
 

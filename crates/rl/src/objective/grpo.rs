@@ -65,6 +65,22 @@ pub enum LossAgg {
     TokenSum,
 }
 
+/// Which distribution the importance ratio is taken in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RatioBasis {
+    /// The trained distribution is the sampled one: the model's logit scale is
+    /// `1/T` and the behaviour log-probabilities are recomputed by the
+    /// training forward.
+    #[default]
+    Trainer,
+    /// The legacy basis, for ablations only: the trainer scores the untempered
+    /// softmax while the sampler drew at temperature `T`, and the behaviour
+    /// log-probability is the sampler's own. At `T != 1` every on-policy ratio
+    /// starts off 1 (see [`GrpoStats::max_onpolicy_ratio_dev`]), and a confident
+    /// token with a positive advantage starts clipped.
+    Sampler,
+}
+
 /// The knobs beyond the classic GRPO set. [`Default`] is the recommended
 /// configuration; the legacy behaviour is `advantage: ZScore`, `loss_agg:
 /// SeqMean` and `clip_eps_high` equal to `clip_eps`.
@@ -83,6 +99,8 @@ pub struct GrpoOptions {
     /// A queued row whose behaviour policy is more than this many optimiser
     /// steps older than the current policy is refused instead of trained.
     pub staleness_bound: u32,
+    /// The distribution of the importance ratio; leave at [`RatioBasis::Trainer`].
+    pub ratio_basis: RatioBasis,
     /// Compute and log the KL to the adapter-disabled reference even when
     /// `kl_beta` is zero (needs a model with LoRA tensors or `with_reference`).
     pub log_kl: bool,
@@ -90,7 +108,7 @@ pub struct GrpoOptions {
 
 impl Default for GrpoOptions {
     fn default() -> GrpoOptions {
-        GrpoOptions { advantage: AdvantageNorm::default(), loss_agg: LossAgg::default(), clip_eps_high: 0.28, resample_factor: 3, staleness_bound: 1, log_kl: true }
+        GrpoOptions { advantage: AdvantageNorm::default(), loss_agg: LossAgg::default(), clip_eps_high: 0.28, resample_factor: 3, staleness_bound: 1, ratio_basis: RatioBasis::Trainer, log_kl: true }
     }
 }
 
@@ -243,7 +261,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     /// temperature `T`, `1` for greedy.
     fn logit_scale(&self) -> f32 {
         let sample = self.cfg.rollout.sample;
-        if sample.is_greedy() {
+        if sample.is_greedy() || self.cfg.options.ratio_basis == RatioBasis::Sampler {
             1.0
         } else {
             1.0 / sample.temp
@@ -264,7 +282,8 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     /// never exceeds the span the packed row can hold.
     fn own_params(&self, fit: usize) -> RolloutParams {
         let mut p = self.cfg.rollout;
-        if !p.sample.is_greedy() {
+        // The logits already carry the 1/T scale on the trainer basis.
+        if !p.sample.is_greedy() && self.cfg.options.ratio_basis == RatioBasis::Trainer {
             p.sample.temp = 1.0;
         }
         p.max_new = p.max_new.min(fit);
@@ -354,7 +373,9 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
                     sampler_gap = sampler_gap.max((trainer[i] - s).abs());
                 }
             }
-            row.old_lp = trainer;
+            if self.cfg.options.ratio_basis == RatioBasis::Trainer {
+                row.old_lp = trainer;
+            }
         }
         self.attach_references(model, task, &kept, &advs, &mut rows);
         let truncated_sampling_rows = if truncated_sampling { rows.len() } else { 0 };

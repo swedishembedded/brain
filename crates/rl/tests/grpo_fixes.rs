@@ -26,7 +26,7 @@ mod grpo_common;
 
 use grpo_common::{always_variable, config, parity_reward, Env, Judge, T};
 use rl::env::{Environment, Verifier};
-use rl::objective::grpo::{CycleLog, Grpo, GrpoConfig, GrpoOptions, LossAgg, NonFiniteSteps, RowRefusal};
+use rl::objective::grpo::{CycleLog, Grpo, GrpoConfig, GrpoOptions, LossAgg, NonFiniteSteps, RatioBasis, RowRefusal};
 
 const EOS: u32 = 7;
 
@@ -95,6 +95,22 @@ fn the_trained_distribution_is_the_sampled_one_at_every_temperature() {
         let (mut m, _, _) = lora_model(s);
         grpo_common::assert_trained_distribution_is_sampled(&mut m, temp, s);
     }
+}
+
+/// The legacy basis exists to be measured against: at T = 1.5 the trainer scored
+/// the untempered softmax, so a fresh row's first update starts off-policy.
+#[test]
+fn the_legacy_ratio_basis_starts_off_policy_at_a_non_unit_temperature() {
+    let s = seed();
+    let (mut m, _, _) = lora_model(s);
+    let (judge, _) = Judge::new(parity_reward);
+    let options = GrpoOptions { ratio_basis: RatioBasis::Sampler, ..GrpoOptions::default() };
+    let mut obj = Grpo::new(Env { variable: always_variable }, judge, config(4, 1.5, options));
+    obj.prepare(&mut m).unwrap();
+    obj.micro_steps(&m, &mut Rng::new(s), 4);
+    let st = obj.stats();
+    assert!(st.rows_trained > 0);
+    assert!(st.max_onpolicy_ratio_dev > 1e-2, "the legacy basis should start off policy, ratio deviation {}", st.max_onpolicy_ratio_dev);
 }
 
 /// R3: with most groups carrying no signal, a step holds exactly `grad_accum`

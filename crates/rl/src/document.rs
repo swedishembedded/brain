@@ -35,6 +35,7 @@ use data::tokenizer::Tokenizer;
 pub use promote::document::*;
 
 use crate::continual::{self, Curriculum, GatePolicy, Regime, SftConfig, SftSource, StudyConfig, StudyReport, StudySpec};
+use crate::objective::grpo::GrpoOptions;
 
 /// Why [`DocumentCurriculum::new`] refused a study's inputs: its own three
 /// checks, plus each cycle's [`promote::document::DocumentError`] passed
@@ -423,6 +424,7 @@ pub fn run_document_study<M: Model>(spec: &StudySpec, curr: &DocumentCurriculum,
         work_dir,
         verbose: cfg.verbose,
         regime: Regime::Sft(cfg.sft.clone()),
+        grpo: GrpoOptions::default(),
     };
 
     let gated = continual::run_study::<M, _>(spec, curr, &arm(GatePolicy::Real, cfg.work_dir.join("gated")))?;
