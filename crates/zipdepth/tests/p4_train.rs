@@ -90,8 +90,8 @@ fn synth_pairs_are_deterministic_and_shaped() {
 fn fixed_batch_repeats_and_rotating_batches_differ() {
     let cfg = tiny();
     let gpu = Gpu::new_cpu(zipdepth::net::PIPELINES);
-    let init: HashMap<String, Vec<f32>> = zipdepth::init_weights(&cfg, seed);
     let seed = random_seed();
+    let init: HashMap<String, Vec<f32>> = zipdepth::init_weights(&cfg, seed);
     // 2 steps each; just proving the loop runs in both modes and stays finite.
     for fixed in [true, false] {
         let t = TrainCfg { steps: 2, batch: 1, h: 32, w: 32, lr: 1e-3, wd: 0.0, seed, fixed_batch: fixed };
