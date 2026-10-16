@@ -1477,9 +1477,9 @@ impl Qwen35 {
             // driver call that waits for the whole device. Keeping the freed blocks makes
             // a free a bookkeeping entry, at the price of the garbage between two drains
             // staying reserved (about 14 GiB at 8K tokens through the 64 layers): taken
-            // when the base leaves that room - the 4-bit base, or a model of at most 32
-            // layers - and not for a bf16 27B, whose base alone takes 54 GB of the card.
-            if o.base.want("blocks.0.mlp.gate.weight") == Dtype::NF4 || cfg.n_layers <= 32 {
+            // when the base leaves that room. A bf16 27B base takes 54 GB, and with the
+            // freed blocks held its 8K step peaks at about 81 GiB of the 95 (knowledge 311).
+            if o.base.want("blocks.0.mlp.gate.weight") != Dtype::F32 || cfg.n_layers <= 32 {
                 gpu.hold_freed_blocks(true);
                 ops.gpu().hold_freed_blocks(true);
             }
