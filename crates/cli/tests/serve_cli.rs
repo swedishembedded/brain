@@ -179,7 +179,7 @@ fn write_base_and_adapter(dir: &std::path::Path, fill: f32, trained_on: Option<&
     card.training = Some(checkpoint::st::TrainingProvenance {
         code_revision: "test".to_string(),
         regime: "sft_lora".to_string(),
-        seed: 1,
+        seed: data::rng::random_seed(),
         hyperparams: serde_json::Value::Null,
         environment: "cpu".to_string(),
         gate: None,

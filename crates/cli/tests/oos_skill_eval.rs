@@ -312,6 +312,7 @@ fn oos_skill_eval() {
         representations: vec![Representation::Point, Representation::Quantiles],
         quantile_levels: vec![0.1, 0.5, 0.9],
         num_samples: nsamples,
+        // seed: the sampling seed of a recorded OOS report, so a rerun reproduces its RankIC dump
         seed: 12345,
     };
 
