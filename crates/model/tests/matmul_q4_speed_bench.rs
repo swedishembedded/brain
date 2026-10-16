@@ -75,7 +75,7 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
     kernels_with_buckets.extend(variants.iter().copied());
     let g = gpu_core::Gpu::new(&kernels_with_buckets);
     if !g.caps().numeric.int8_dot {
-        eprintln!("skipping: no packed int8 dot on this device");
+        brain_testutil::skip_unavailable("no packed int8 dot on this device");
         return;
     }
     let (k_maxr, k_qp, k_gemv) = (idx(&g, "max_abs_row"), idx(&g, "quant_pack"), idx(&g, "matmul_q4_gemv"));
@@ -138,7 +138,7 @@ fn gemv_vs_gemv_reg_at_qwen35_decode_shapes() {
     kernels_with_bucket.push(variant);
     let g = gpu_core::Gpu::new(&kernels_with_bucket);
     if !g.caps().numeric.int8_dot {
-        eprintln!("skipping: no packed int8 dot on this device");
+        brain_testutil::skip_unavailable("no packed int8 dot on this device");
         return;
     }
     let (k_maxr, k_qp, k_gemv) = (idx(&g, "max_abs_row"), idx(&g, "quant_pack"), idx(&g, "matmul_q4_gemv"));
@@ -199,7 +199,7 @@ fn gemv_vs_gemv_reg_at_qwen35_decode_shapes() {
 fn dyn_vs_dyn_reg_across_prefill_rows() {
     let g = gpu_core::testgpu::dev(KERNELS);
     if !g.caps().numeric.int8_dot {
-        eprintln!("skipping: no packed int8 dot on this device");
+        brain_testutil::skip_unavailable("no packed int8 dot on this device");
         return;
     }
     let (k_maxr, k_qp, k_dyn, k_reg) =
@@ -253,7 +253,7 @@ fn dyn_vs_dyn_reg_across_prefill_rows() {
 fn ops_facade_confirms_the_dyn_reg_speedup_at_qwen35_prefill_shapes() {
     let g = gpu_core::testgpu::dev(model::ops::kernel_list());
     if !g.caps().numeric.int8_dot {
-        eprintln!("skipping: no packed int8 dot on this device");
+        brain_testutil::skip_unavailable("no packed int8 dot on this device");
         return;
     }
     let ops = Ops::new(g).expect("Ops::new: canonical kernel_list() must satisfy REQUIRED_KERNELS");

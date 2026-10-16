@@ -10,7 +10,7 @@ const ATOL: f32 = 4e-3;
 const RTOL: f32 = 8e-2;
 
 fn skip_gpu() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn gate(report: Report, what: &str) {
@@ -31,7 +31,6 @@ fn gate(report: Report, what: &str) {
 #[test]
 fn sam_hd_analytic_grads_match_finite_differences() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("check_sam_hd: MOE_SKIP_GPU_TESTS set");
         return;
     }
     gate(gradcheck::check_sam_hd(7), "SAM HD tower");
@@ -42,7 +41,6 @@ fn sam_hd_analytic_grads_match_finite_differences() {
 #[test]
 fn sam_hd_shared_compressor_and_alpha_per_entry() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("check_sam_hd_shared: MOE_SKIP_GPU_TESTS set");
         return;
     }
     gate(gradcheck::check_sam_hd_shared(7), "SAM HD shared compressor + hd_alpha (per entry)");

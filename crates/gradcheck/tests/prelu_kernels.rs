@@ -91,7 +91,7 @@ fn bwd_variants(gpu: &Gpu) -> Vec<(&'static str, usize, usize)> {
 
 /// Expensive/physical-GPU work is skipped when the variable is merely PRESENT.
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// Inputs come from [`Lcg::signed`], which is **[-1, 1)** — both signs. That is

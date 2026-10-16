@@ -36,7 +36,7 @@ fn gate(report: Report, what: &str) {
 
 #[test]
 fn horizon_analytic_grads_match_finite_differences() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     for seed in [3u64, 11] {
@@ -46,7 +46,7 @@ fn horizon_analytic_grads_match_finite_differences() {
 
 #[test]
 fn horizon_next_event_group_analytic_grads_match_finite_differences() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     for seed in [3u64, 11] {
@@ -59,7 +59,7 @@ fn horizon_next_event_group_analytic_grads_match_finite_differences() {
 
 #[test]
 fn horizon_additive_analytic_grads_match_finite_differences() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     for seed in [3u64, 11] {
@@ -72,7 +72,7 @@ fn horizon_additive_analytic_grads_match_finite_differences() {
 
 #[test]
 fn horizon_visits_analytic_grads_match_finite_differences() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     for seed in [3u64, 11] {
@@ -85,7 +85,7 @@ fn horizon_visits_analytic_grads_match_finite_differences() {
 
 #[test]
 fn horizon_attention_analytic_grads_match_finite_differences() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     for seed in [3u64, 11] {
@@ -98,7 +98,7 @@ fn horizon_attention_analytic_grads_match_finite_differences() {
 
 #[test]
 fn horizon_gated_deltanet_analytic_grads_match_finite_differences() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     for seed in [3u64, 11] {
@@ -111,7 +111,7 @@ fn horizon_gated_deltanet_analytic_grads_match_finite_differences() {
 
 #[test]
 fn horizon_hybrid_analytic_grads_match_finite_differences() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     for seed in [3u64, 11] {

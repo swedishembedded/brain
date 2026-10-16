@@ -15,9 +15,10 @@
 //!
 //! See `AGENTS.md`'s "No absolute paths in source" section and
 //! `scripts/data/fetch-testdata.sh` for how the tree gets populated. A test whose
-//! fixture is absent is expected to skip itself (`eprintln!` + early `return`
-//! or a `let-else`), never `panic!` - this helper only builds the path, it
-//! never checks existence, so the caller stays in control of the skip.
+//! fixture is absent is expected to skip itself through [`skip`] (never a bare
+//! `eprintln!` + `return`, which `make check/test-skips` forbids) - this helper
+//! only builds the path, it never checks existence, so the caller stays in
+//! control of the skip.
 //!
 //! [`parity`] is the same "one implementation" move applied to the *other*
 //! thing every goldens test copy-pastes: the cosine/max_abs stage report.
@@ -51,6 +52,31 @@ pub fn skip(reason: &str) {
         panic!("BRAIN_REQUIRE_FIXTURES is set, so this test may not skip: {reason}");
     }
     eprintln!("SKIP: {reason}");
+}
+
+/// Whether the caller opted out of device-dependent tests with
+/// `MOE_SKIP_GPU_TESTS`; the one place that variable is read.
+///
+/// A test that returns early on that variable is reported by cargo as a PASS
+/// and certifies nothing, which is why `scripts/gates/check-test-skips.sh`
+/// forbids a raw read. Going through here prints `SKIP: ...` naming the test
+/// (the caller's location), and, like [`skip`], turns the opt-out into a hard
+/// failure under `BRAIN_REQUIRE_FIXTURES`, so a run that means to prove
+/// something cannot also have skipped it.
+///
+/// ```no_run
+/// if brain_testutil::gpu_tests_skipped() {
+///     return;
+/// }
+/// ```
+#[track_caller]
+pub fn gpu_tests_skipped() -> bool {
+    if std::env::var_os("MOE_SKIP_GPU_TESTS").is_none() {
+        return false;
+    }
+    let loc = std::panic::Location::caller();
+    skip(&format!("MOE_SKIP_GPU_TESTS is set ({loc})"));
+    true
 }
 
 /// Serialize the tests of one test binary that mutate the process

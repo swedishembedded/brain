@@ -213,8 +213,7 @@ mod tests {
     /// gradcheck test does.
     #[test]
     fn sam2_mask_decoder_gradients_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-            brain_testutil::skip_unavailable("check_sam2 (MOE_SKIP_GPU_TESTS)");
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let r = check_sam2(7);

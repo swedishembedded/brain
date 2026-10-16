@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn relpos_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_deepseekocr_relpos(7), "SAM decomposed rel-pos bias");
@@ -444,7 +444,7 @@ mod tests {
     /// is not enough.
     #[test]
     fn relpos_table_grads_are_the_sum_over_windows() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_deepseekocr_relpos_elementwise(7), "SAM rel-pos tables (per entry)");
@@ -454,7 +454,7 @@ mod tests {
     /// sitting on a knee, and prints the table if a future change moves it.
     #[test]
     fn relpos_eps_plateau() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let table = check_deepseekocr_relpos_eps_sweep(7);

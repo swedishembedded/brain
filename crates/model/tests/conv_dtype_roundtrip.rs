@@ -34,7 +34,7 @@ use gpu_core::Gpu;
 static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn skip_gpu() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn bits_of(dt: Dtype) -> i32 {
@@ -279,7 +279,6 @@ fn conv2d_bf16_and_f16_match_f32_reference_on_cpu() {
 fn conv2d_bf16_and_f16_match_f32_reference_on_gpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
-        brain_testutil::skip_unavailable("conv2d_bf16_and_f16_match_f32_reference_on_gpu: MOE_SKIP_GPU_TESTS set");
         return;
     }
     eprintln!("conv2d_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");
@@ -299,7 +298,6 @@ fn conv1d_bf16_and_f16_match_f32_reference_on_cpu() {
 fn conv1d_bf16_and_f16_match_f32_reference_on_gpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
-        brain_testutil::skip_unavailable("conv1d_bf16_and_f16_match_f32_reference_on_gpu: MOE_SKIP_GPU_TESTS set");
         return;
     }
     eprintln!("conv1d_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");
@@ -319,7 +317,6 @@ fn conv_bias_bf16_and_f16_match_f32_reference_on_cpu() {
 fn conv_bias_bf16_and_f16_match_f32_reference_on_gpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
-        brain_testutil::skip_unavailable("conv_bias_bf16_and_f16_match_f32_reference_on_gpu: MOE_SKIP_GPU_TESTS set");
         return;
     }
     eprintln!("conv_bias_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");

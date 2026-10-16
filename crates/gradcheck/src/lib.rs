@@ -1987,7 +1987,7 @@ mod tests {
 
     #[test]
     fn gpt_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_gpt(7);
@@ -1997,7 +1997,7 @@ mod tests {
 
     #[test]
     fn deepseekocr2_resampler_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_deepseekocr2(11);
@@ -2007,7 +2007,7 @@ mod tests {
 
     #[test]
     fn lfm_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_lfm(7);
@@ -2022,7 +2022,7 @@ mod tests {
     /// rather than assumed to follow from it.
     #[test]
     fn lfm_seeded_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_lfm_seeded(7);
@@ -2032,7 +2032,7 @@ mod tests {
 
     #[test]
     fn qwen_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_qwen(7);
@@ -2042,7 +2042,7 @@ mod tests {
 
     #[test]
     fn qwen3_weighted_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_qwen3_weighted(7);
@@ -2052,7 +2052,7 @@ mod tests {
 
     #[test]
     fn gpt2_weighted_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_gpt2_weighted(7);
@@ -2062,7 +2062,7 @@ mod tests {
 
     #[test]
     fn qwen_lora_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_qwen_lora(7);
@@ -2072,7 +2072,7 @@ mod tests {
 
     #[test]
     fn qwen2_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_qwen2(7);
@@ -2082,7 +2082,7 @@ mod tests {
 
     #[test]
     fn qwen_scaled_rope_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         use model::rope_scaling::RopeScaling;
@@ -2098,7 +2098,7 @@ mod tests {
 
     #[test]
     fn qwen_mrope_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_qwen_mrope(7);
@@ -2108,7 +2108,7 @@ mod tests {
 
     #[test]
     fn vlm_splice_grad_matches_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_vlm_splice(7);
@@ -2118,7 +2118,7 @@ mod tests {
 
     #[test]
     fn moe_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_moe(7);
@@ -2128,7 +2128,7 @@ mod tests {
 
     #[test]
     fn glm_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_glm(7);
@@ -2138,7 +2138,7 @@ mod tests {
 
     #[test]
     fn glm_mtp_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_glm_mtp(7);
@@ -2148,7 +2148,7 @@ mod tests {
 
     #[test]
     fn pid_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_pid(7);
@@ -2158,7 +2158,7 @@ mod tests {
 
     #[test]
     fn seq2seq_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_seq2seq(7);
@@ -2440,7 +2440,7 @@ mod tests {
 
     #[test]
     fn qwen35moe_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_qwen35moe(7);
@@ -2457,7 +2457,7 @@ mod tests {
 
     #[test]
     fn qwen35moe_a_log_elementwise_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_qwen35moe_a_log_elementwise(7);
@@ -2473,7 +2473,7 @@ mod tests {
 
     #[test]
     fn qwen35_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         // Seed chosen after probing several: at this tiny config the
@@ -2506,7 +2506,7 @@ mod tests {
 
     #[test]
     fn qwen35_a_log_elementwise_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_qwen35_a_log_elementwise(8);
@@ -2532,7 +2532,7 @@ mod tests {
 
     #[test]
     fn qwen35_mtp_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         // Seed 8 again (probed 7/8/9/10/11/42, same as `qwen35_gradcheck_
@@ -2553,7 +2553,7 @@ mod tests {
 
     #[test]
     fn qwen35_lora_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         // Probed seeds 7/8/9/10/11/42: zero tolerance failures at every one -
@@ -2586,7 +2586,7 @@ mod tests {
 
     #[test]
     fn qwen35moe_lora_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_qwen35moe_lora(7);
@@ -2602,7 +2602,7 @@ mod tests {
 
     #[test]
     fn autoencoder_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let report = check_autoencoder(7);

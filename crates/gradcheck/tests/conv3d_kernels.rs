@@ -61,7 +61,7 @@ const K_DW: usize = 2;
 
 /// Presence of the variable is the signal, never its value.
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 // ---- shape ------------------------------------------------------------------

@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn matmul_bf16_weight_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_matmul_bf16_weight(7), "bf16-weight matmul forward/backward (B10)");
@@ -404,7 +404,7 @@ mod tests {
     /// is visible rather than silently re-tuned.
     #[test]
     fn matmul_bf16_weight_eps_plateau() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let table = check_matmul_bf16_weight_eps_sweep(7);
@@ -419,7 +419,7 @@ mod tests {
     /// comment for exactly what this does and does not validate.
     #[test]
     fn bf16_training_sanity_loss_decreases_comparably_to_f32_baseline() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (bf16_losses, f32_losses) = bf16_training_sanity(7, 60, 0.6);

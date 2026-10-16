@@ -21,7 +21,7 @@ const ATOL: f32 = 4e-3;
 const RTOL: f32 = 8e-2;
 
 fn skip_gpu() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn gate(report: Report, what: &str) {
@@ -44,7 +44,6 @@ fn gate(report: Report, what: &str) {
 #[test]
 fn timesfm3_analytic_grads_match_finite_differences() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("check_timesfm3: MOE_SKIP_GPU_TESTS set");
         return;
     }
     gate(tfm::check_timesfm3(7), "TimesFM-3 core");
@@ -53,7 +52,6 @@ fn timesfm3_analytic_grads_match_finite_differences() {
 #[test]
 fn timesfm3_one_layer_analytic_grads_match_finite_differences() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("check_timesfm3_one_layer: MOE_SKIP_GPU_TESTS set");
         return;
     }
     gate(tfm::check_timesfm3_one_layer(7), "TimesFM-3 core (single layer)");
@@ -67,7 +65,6 @@ fn timesfm3_one_layer_analytic_grads_match_finite_differences() {
 #[test]
 fn timesfm3_per_dim_scale_fold_splits_correctly_per_entry() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("check_timesfm3_per_dim_scale_elementwise: MOE_SKIP_GPU_TESTS set");
         return;
     }
     gate(tfm::check_timesfm3_per_dim_scale_elementwise(7), "TimesFM-3 per_dim_scale (per entry)");
@@ -81,7 +78,6 @@ fn timesfm3_per_dim_scale_fold_splits_correctly_per_entry() {
 #[test]
 fn timesfm3_lora_analytic_grads_match_finite_differences() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("check_timesfm3_lora: MOE_SKIP_GPU_TESTS set");
         return;
     }
     let report = tfm::check_timesfm3_lora(7);
@@ -102,7 +98,6 @@ fn timesfm3_lora_analytic_grads_match_finite_differences() {
 #[test]
 fn timesfm3_eps_plateau() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("check_timesfm3_eps_sweep: MOE_SKIP_GPU_TESTS set");
         return;
     }
     let table = tfm::check_timesfm3_eps_sweep(7);
@@ -118,7 +113,6 @@ fn timesfm3_eps_plateau() {
 #[test]
 fn timesfm3_per_dim_scale_eps_plateau() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("check_timesfm3_per_dim_scale_eps_sweep: MOE_SKIP_GPU_TESTS set");
         return;
     }
     let table = tfm::check_timesfm3_per_dim_scale_eps_sweep(7);

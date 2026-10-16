@@ -44,7 +44,7 @@ const RANK: u32 = 4;
 const ALPHA: f32 = 8.0;
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn byte_tokenizer() -> QwenBpe {

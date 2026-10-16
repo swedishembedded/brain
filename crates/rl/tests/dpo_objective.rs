@@ -16,7 +16,7 @@ use qwen3::{Qwen, QwenConfig};
 use rl::objective::dpo::{Dpo, DpoConfig, DpoPair};
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// Per-token `log pi(token)` for one `(prompt, completion)` span, on a

@@ -19,7 +19,7 @@ use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> PathBuf {

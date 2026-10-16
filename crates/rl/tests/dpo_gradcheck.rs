@@ -100,7 +100,7 @@ impl CheckModel for DpoHarness {
 
 #[test]
 fn check_dpo_qwen3() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let h = DpoHarness::new(13);

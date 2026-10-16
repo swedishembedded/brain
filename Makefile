@@ -391,7 +391,7 @@ test/slow:
 # "green because skipped" risk.
 ## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + every check/* gate
 ##   + test/parity + test/parity/strict (needs make testdata/fetch)
-test/full: test test/doc test/slow test/e2e test/conformance check/scripts check/env-reads check/seed-literals test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
+test/full: test test/doc test/slow test/e2e test/conformance check/scripts check/env-reads check/test-skips check/seed-literals test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -659,6 +659,13 @@ check:
 check/env-reads:
 	bash scripts/gates/check-env-reads.sh
 
+# A test that returns green without running its check certifies nothing:
+# every skip goes through brain_testutil (or #[ignore]), and the legacy ones on
+# scripts/gates/test-skips.allow only shrink. See scripts/gates/check-test-skips.sh.
+## check/test-skips - no new silent test skips under crates/ (MOE_SKIP_GPU_TESTS early return, bare "skipping" + return); allowlist entries must still exist
+check/test-skips:
+	bash scripts/gates/check-test-skips.sh
+
 # Every default seed is random. A literal seed in production code (Rust, Python
 # `--seed` defaults, Makefile `SEED ?=`) must be on
 # scripts/gates/seed-literals.allow.d/<crate-or-dir>.allow with a reason (salt,
@@ -676,8 +683,12 @@ check/seed-literals/tests:
 	bash scripts/gates/check-seed-literals.sh --tests
 
 # Spec for the gate above, run against throwaway trees (needs only bats).
-## test/gates - default: every gate self-test (env-reads, seed-literals, group-kernels)
-test/gates: test/gates/env-reads test/gates/seed-literals test/gates/group-kernels
+## test/gates - default: every gate self-test (env-reads, test-skips, seed-literals, group-kernels)
+test/gates: test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels
+
+## test/gates/test-skips - the silent-skip ratchet fails on a new bare skip and on a stale entry, passes on a match
+test/gates/test-skips:
+	bash scripts/gates/test-skips-spec.sh
 
 ## test/gates/env-reads - the env-read ratchet fails on a new read and on a stale entry, passes on a match
 test/gates/env-reads:
@@ -1861,7 +1872,7 @@ help:
         test/e2e test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
-        check check/workspace check/clippy check/scripts check/env-reads check/seed-literals check/seed-literals/tests test/gates test/gates/env-reads test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/paths check/scope \
+        check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/paths check/scope \
         check/files check/samples check/sdk-features check/make-targets \
         check/generated check/generated/kernels-wgsl-table check/generated/kernels-cuda-table \
         check/generated/samples-manifest \

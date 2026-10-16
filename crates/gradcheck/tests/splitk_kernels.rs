@@ -34,7 +34,7 @@ fn idx(g: &Gpu, name: &str) -> usize {
 }
 
 fn skip(g: &Gpu) -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     if !g.caps().workgroup_reductions {

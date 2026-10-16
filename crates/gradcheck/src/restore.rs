@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn codeformer_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_codeformer(7), "CodeFormer code-prediction Transformer");
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn codeformer_one_layer_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_codeformer_one_layer(7), "CodeFormer transformer (single layer)");
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn codeformer_eps_plateau() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let table = check_codeformer_eps_sweep(7);

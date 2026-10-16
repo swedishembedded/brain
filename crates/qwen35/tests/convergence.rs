@@ -14,7 +14,7 @@ use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn train_batch(m: &Qwen35, x: &[u32], y: &[u32], steps: u32, lr: f32) {

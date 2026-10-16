@@ -258,7 +258,7 @@ mod tests {
     /// the entry point it gates and cannot become an orphan.
     #[test]
     fn vqgan_gradients_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let r = super::check_vqgan(7);
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn vqgan_llamagen_gradients_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let r = super::check_vqgan_llamagen(7);
@@ -297,7 +297,7 @@ mod tests {
     /// the naive path would be a vacuous green.
     #[test]
     fn vqgan_lowered_conv_backward_matches_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(vqgan::TRAIN_PIPELINES);

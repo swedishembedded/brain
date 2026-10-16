@@ -11,7 +11,7 @@ const ATOL: f32 = 4e-3;
 const RTOL: f32 = 8e-2;
 
 fn skip_gpu() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn gate(report: Report, what: &str) {
@@ -32,7 +32,6 @@ fn gate(report: Report, what: &str) {
 #[test]
 fn florence2_full_finetune_analytic_grads_match_finite_differences() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("check_florence2: MOE_SKIP_GPU_TESTS set");
         return;
     }
     gate(gradcheck::check_florence2(7), "florence2 full fine-tune");
@@ -44,7 +43,6 @@ fn florence2_full_finetune_analytic_grads_match_finite_differences() {
 #[test]
 fn florence2_lora_analytic_grads_match_finite_differences() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("check_florence2_lora: MOE_SKIP_GPU_TESTS set");
         return;
     }
     gate(gradcheck::check_florence2_lora(11), "florence2 LoRA");

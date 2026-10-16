@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn t5_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_t5(7), "T5 encoder");
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn t5_one_block_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_t5_one_block(7), "T5 encoder (single block)");
@@ -308,7 +308,7 @@ mod tests {
     /// widened bound.
     #[test]
     fn t5_eps_plateau() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let table = check_t5_eps_sweep(7);
@@ -327,7 +327,7 @@ mod tests {
     /// [`check_t5_rel_bias_elementwise`] for why [`check_t5`] is not enough.
     #[test]
     fn t5_rel_bias_grad_is_the_sum_over_blocks() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_t5_rel_bias_elementwise(7), "T5 rel_bias (per entry)");
@@ -337,7 +337,7 @@ mod tests {
     /// [`t5_eps_plateau`].
     #[test]
     fn t5_rel_bias_elementwise_eps_plateau() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let table = check_t5_rel_bias_eps_sweep(7);
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn t5_tiled_gemm_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_t5_tiled(7), "T5 encoder (register-tiled backward GEMMs)");

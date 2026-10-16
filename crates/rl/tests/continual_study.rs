@@ -190,7 +190,7 @@ const PRETRAIN_LR: f32 = 3e-3;
 const PRETRAIN_RULES: usize = 16;
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> PathBuf {

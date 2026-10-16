@@ -35,7 +35,7 @@ use rl::improve::{self, AdapterMeta, CycleArtifacts, Evaluation, ProvenanceInput
 use rl::objective::grpo::{CycleLog, Grpo, GrpoConfig};
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> PathBuf {

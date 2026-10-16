@@ -37,8 +37,15 @@ order exactly and must be kept in step with `Lcg`.
 | `gradcheck` | the correctness gate (below) |
 | `eval` | perplexity definition sanity |
 
-Run with `make test` (or `cargo test`); set `MOE_SKIP_GPU_TESTS=1` on a machine
-with no GPU to skip the device-dependent tests.
+Run with `make test` (or `cargo test`). On a machine with no GPU, set
+`MOE_SKIP_GPU_TESTS=1`; a device-dependent test then calls
+`brain_testutil::gpu_tests_skipped()`, which prints `SKIP: ...` naming the test
+and is a hard failure under `BRAIN_REQUIRE_FIXTURES`. A test never reads that
+variable itself, and never returns early on a bare `eprintln!("skipping")`: a
+skip that cargo reports as a pass certifies nothing. Use `brain_testutil::skip`
+(absent fixture), `skip_unavailable` (absent hardware) or
+`#[ignore = "needs a GPU"]`. `make check/test-skips` fails on a new silent skip
+and the legacy ones in `scripts/gates/test-skips.allow` only shrink.
 
 ### `testdata/` - fixture inputs and goldens, not a model store
 
@@ -205,7 +212,8 @@ tuned from the environment instead of a recompile.
   rather than a flag because the readers are `#[test]` functions inside the
   library's own unit-test binary, whose harness owns the command line and has
   nowhere to take a repo-defined flag; it is read by no shipped code.
-- `MOE_SKIP_GPU_TESTS` - skips device-dependent tests on a machine with no GPU.
+- `MOE_SKIP_GPU_TESTS` - skips device-dependent tests on a machine with no GPU; read only by
+  `brain_testutil::gpu_tests_skipped` (fatal under `BRAIN_REQUIRE_FIXTURES`).
 - `SHARD_TEST_GPUS` - how many GPUs a pipeline/tensor-parallel sharding test should assume.
 - `BRAIN_GPU_RECLAIM_CEILING` - overrides `backend_api::hardware::reclaim_ceiling`'s
   dropped-but-not-yet-reclaimed-memory threshold (bytes) so a test can cross it

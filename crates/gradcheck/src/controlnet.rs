@@ -209,7 +209,7 @@ mod tests {
     /// own convention.
     #[test]
     fn controlnet_gradients_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let r = super::check_controlnet(7);
@@ -239,7 +239,7 @@ mod tests {
     /// doc for why a directional check alone cannot replace it.
     #[test]
     fn controlnet_conditioning_gradients_match_per_entry_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let r = super::check_controlnet_elementwise(11);

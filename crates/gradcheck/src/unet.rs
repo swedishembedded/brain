@@ -178,7 +178,7 @@ mod tests {
     /// orphan (an entry point not wired into a test is not a gate).
     #[test]
     fn unet_gradients_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let r = super::check_unet(7);
@@ -195,7 +195,7 @@ mod tests {
     /// directional check cannot replace it.
     #[test]
     fn unet_conditioning_gradients_match_per_entry_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let r = super::check_unet_conditioning_elementwise(11);

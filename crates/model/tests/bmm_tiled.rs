@@ -67,7 +67,7 @@ fn run(g: &Gpu, c: &Case, accumulate: bool) -> (Vec<f32>, Vec<f32>) {
 #[test]
 fn the_tiled_bmm_reproduces_the_reference_bmm_exactly() {
     let Ok(g) = Gpu::try_new_cuda(PIPES) else {
-        eprintln!("bmm_tiled: no CUDA device on this box - skipping");
+        brain_testutil::skip_unavailable("bmm_tiled: no CUDA device on this box");
         return;
     };
     // The real GDN shapes (chunk 64, dk = dv = 128, whole-tensor and per-chunk,

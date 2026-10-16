@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn adamw_with_clip_matches_hand_computation() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(KERNELS);
@@ -375,7 +375,7 @@ mod tests {
     /// what this asserts as much as the arithmetic.
     #[test]
     fn cooperative_gradnorm_matches_the_serial_path() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         static BASE: &[(&str, &str)] = &[
@@ -435,7 +435,7 @@ mod tests {
     /// exactly the role the clip coefficient played there.
     #[test]
     fn unclipped_scale_matches_hand_computation() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(KERNELS);
@@ -463,7 +463,7 @@ mod tests {
     /// dispatch regardless of how many tensors there are.
     #[test]
     fn clipped_step_dispatches_2p_plus_1_and_writes_are_flat_in_tensor_count() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let run = |n_tensors: usize| -> (u64, u64, u64) {
@@ -510,7 +510,7 @@ mod tests {
     /// `lr_mult` ratio, not something Adam's own nonlinearity could blur.
     #[test]
     fn lr_mult_scales_exactly_that_tensors_step() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(KERNELS);
@@ -546,7 +546,7 @@ mod tests {
     /// "barely moved" is not frozen.
     #[test]
     fn a_frozen_tensor_is_bit_for_bit_unchanged_by_a_step() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(KERNELS);
@@ -587,7 +587,7 @@ mod tests {
     /// regression guard for this whole change.
     #[test]
     fn lr_mult_unset_is_bit_identical_to_no_lr_mult_field() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(KERNELS);
@@ -609,7 +609,7 @@ mod tests {
     /// build time regardless of its word count.
     #[test]
     fn lr_mult_does_not_change_the_dispatch_contract() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(KERNELS);

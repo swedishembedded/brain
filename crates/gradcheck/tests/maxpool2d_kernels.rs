@@ -49,7 +49,7 @@ const K_FWD: usize = 0;
 const K_DX: usize = 1;
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f64 {

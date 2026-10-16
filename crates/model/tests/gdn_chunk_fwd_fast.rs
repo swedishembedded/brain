@@ -103,11 +103,11 @@ fn run(g: &Gpu, ids: &GdnIds, shape: &GdnShape) -> (Vec<f32>, Vec<f32>, usize) {
 #[test]
 fn the_fast_kernels_change_the_step_count_and_nothing_else() {
     let Ok(g) = Gpu::try_new_cuda(PIPES) else {
-        eprintln!("gdn_chunk_fwd_fast: no CUDA device on this box - skipping");
+        brain_testutil::skip_unavailable("gdn_chunk_fwd_fast: no CUDA device on this box");
         return;
     };
     if !model::gdn::use_fast_kernels(&g) {
-        eprintln!("gdn_chunk_fwd_fast: this device does not take the fast kernels - skipping");
+        brain_testutil::skip_unavailable("gdn_chunk_fwd_fast: this device does not take the fast kernels");
         return;
     }
     // dk = dv = 128 throughout. The real chunk of 64 over four chunks (several

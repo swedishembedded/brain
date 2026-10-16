@@ -199,7 +199,7 @@ mod tests {
     /// placement) so it cannot become an orphan.
     #[test]
     fn rrdbnet_gradients_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let r = super::check_rrdbnet(7);
@@ -225,7 +225,7 @@ mod tests {
     /// cannot replace it.
     #[test]
     fn rrdbnet_far_residual_gradient_matches_per_entry_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let r = super::check_rrdbnet_elementwise(11);

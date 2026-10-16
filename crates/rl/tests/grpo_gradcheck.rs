@@ -180,7 +180,7 @@ impl CheckModel for GrpoHarness {
 
 #[test]
 fn grpo_analytic_grads_match_finite_differences_on_the_true_clipped_surrogate() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let h = GrpoHarness::new(11);

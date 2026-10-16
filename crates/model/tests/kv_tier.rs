@@ -331,8 +331,7 @@ fn on_gpu_with_f32(f: impl Fn(&Gpu, KvTier, &str)) {
 
 fn on_gpu_in(tiers: &[KvTier], f: impl Fn(&Gpu, KvTier, &str)) {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let g = Gpu::new_gpu(kernels());

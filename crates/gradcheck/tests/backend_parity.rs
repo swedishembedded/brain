@@ -27,7 +27,7 @@ fn logits_on(backend: Backend, cfg: &QwenConfig, init: &HashMap<String, Vec<f32>
 
 #[test]
 fn cpu_gpu_forward_parity() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let backends = gpu_core::available_gpu_backends();

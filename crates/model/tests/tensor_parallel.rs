@@ -117,7 +117,7 @@ fn attn_ctx(gpu: &Gpu, x: &[f32], w_qkv: &[f32], b: usize, t: usize, d: usize, n
 }
 
 fn gpu_disabled() -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     // Skip rather than fault when this box lacks the cards the test pins to.

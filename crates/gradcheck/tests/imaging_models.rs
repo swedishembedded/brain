@@ -11,7 +11,7 @@
 //! reports through `Report::print` so a failure names the offending tensor.
 
 fn skip_gpu() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 macro_rules! check {
@@ -19,7 +19,6 @@ macro_rules! check {
         #[test]
         fn $name() {
             if skip_gpu() {
-                brain_testutil::skip_unavailable(&format!("{}: MOE_SKIP_GPU_TESTS set", $label));
                 return;
             }
             println!("--- {} ---", $label);

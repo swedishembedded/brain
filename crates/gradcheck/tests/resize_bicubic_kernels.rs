@@ -51,8 +51,7 @@ const K_DX: usize = 1;
 /// Expensive/physical-GPU work is skipped by presence of the variable, never by
 /// its value — the repo-wide idiom.
 fn skip() -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("resize_bicubic kernels (MOE_SKIP_GPU_TESTS)");
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     false

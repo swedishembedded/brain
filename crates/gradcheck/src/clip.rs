@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn clip_text_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_clip(7), "CLIP-L text tower");
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn clip_bigg_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_clip_bigg(7), "OpenCLIP-bigG text tower (gelu_erf + projection)");
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn clip_tiled_gemm_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         gate(check_clip_tiled(7), "CLIP text tower (register-tiled backward GEMMs)");

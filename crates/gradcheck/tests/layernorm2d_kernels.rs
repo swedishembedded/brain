@@ -68,7 +68,7 @@ fn best_of(gpu: &Gpu, steps: &[gpu_core::Step], reps: usize) -> f64 {
 
 #[test]
 fn fused_layernorm2d_matches_the_composition_and_is_faster() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let gpu = gpu_core::testgpu::dev(&KERNELS);

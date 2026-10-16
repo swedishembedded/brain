@@ -212,7 +212,7 @@ mod tests {
     /// GPU-only run of this test cannot see that.
     #[test]
     fn arcface_analytic_grads_match_finite_differences() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let t0 = std::time::Instant::now();
@@ -246,7 +246,7 @@ mod tests {
     /// the truncation/round-off U-curve, in either direction.
     #[test]
     fn arcface_gradients_are_robust_to_the_probe_direction() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = ArcFaceTrainConfig::tiny();
@@ -279,7 +279,7 @@ mod tests {
     /// while `dx` stays correct, which trains to a plausible loss.
     #[test]
     fn every_prelu_slope_gradient_is_nonzero() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = ArcFaceTrainConfig::tiny();

@@ -49,7 +49,7 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
 }
 
 fn skip_gpu() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 // ---------------------------------------------------------------- embed ---
@@ -127,7 +127,6 @@ fn embed_bf16_and_f16_match_f32_reference_on_cpu() {
 fn embed_bf16_and_f16_match_f32_reference_on_gpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
-        brain_testutil::skip_unavailable("embed_bf16_and_f16_match_f32_reference_on_gpu: MOE_SKIP_GPU_TESTS set");
         return;
     }
     eprintln!("embed_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");
@@ -205,7 +204,6 @@ fn embed_tile_bf16_and_f16_match_f32_reference_on_cpu() {
 fn embed_tile_bf16_and_f16_match_f32_reference_on_gpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
-        brain_testutil::skip_unavailable("embed_tile_bf16_and_f16_match_f32_reference_on_gpu: MOE_SKIP_GPU_TESTS set");
         return;
     }
     eprintln!("embed_tile_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");
@@ -322,7 +320,6 @@ fn moe_linear_bf16_and_f16_match_f32_reference_on_cpu() {
 fn moe_linear_bf16_and_f16_match_f32_reference_on_gpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
-        brain_testutil::skip_unavailable("moe_linear_bf16_and_f16_match_f32_reference_on_gpu: MOE_SKIP_GPU_TESTS set");
         return;
     }
     eprintln!("moe_linear_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");

@@ -129,7 +129,7 @@ impl CheckModel for DistillHarness {
 
 #[test]
 fn check_distill_topk_qwen3() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let h = DistillHarness::new(17);

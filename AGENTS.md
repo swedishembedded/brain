@@ -1227,7 +1227,8 @@ per-invocation.
 
 ```bash
 make build/debug                     # debug build
-make build/release && make test      # optimized build + full suite (MOE_SKIP_GPU_TESTS=1 to skip GPU;
+make build/release && make test      # optimized build + full suite (MOE_SKIP_GPU_TESTS=1 to skip GPU via
+                                     # brain_testutil::gpu_tests_skipped - never a raw early return, see make check/test-skips;
                                      # tests run at TEST_THREADS=8 on the pooled test device - every
                                      # test binary shares one device via gpu_core::testgpu)
 make test/gradcheck                       # backprop correctness gate

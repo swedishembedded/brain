@@ -65,7 +65,7 @@ fn fused(g: &Gpu, a: &[f32], bhc: u32, c: u32) -> Vec<f32> {
 #[test]
 fn the_fused_ut_transform_is_bit_identical_to_the_row_loop() {
     let Ok(g) = Gpu::try_new_cuda(PIPES) else {
-        eprintln!("gdn_ut_fwd: no CUDA device on this box - skipping");
+        brain_testutil::skip_unavailable("gdn_ut_fwd: no CUDA device on this box");
         return;
     };
     // c = 1 (identity only), small odd sizes, and the real chunk of 64; bhc

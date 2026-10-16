@@ -25,7 +25,7 @@ const SEQ_LEN: usize = 5;
 
 #[test]
 fn distill_topk_at_k_equals_vocab_reproduces_exact_kl() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = QwenConfig::tiny();
