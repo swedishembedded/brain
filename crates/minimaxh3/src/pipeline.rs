@@ -1241,7 +1241,7 @@ mod tests {
         let text = tiny_text(3, dit_cfg.text_dim as usize, 14);
         let opts = tiny_gen_opts(15);
 
-        let mut rng = data::rng::Lcg::new(16);
+        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
         let keyframe_pixels = rng.vec_scaled((3 * 32 * 32) as usize, 128.0); // ~[0,255]-ish range
         let keyframe_pixels: Vec<f32> = keyframe_pixels.iter().map(|&v| (v + 128.0).clamp(0.0, 255.0)).collect();
         let kf = encode_keyframe_condition(&video_vae_cfg, &video_vae_tensors, Some("cpu"), &keyframe_pixels, 32, 32, &ckpt.video_latents_mean, &ckpt.video_latents_std, dit_cfg.patch_size, Anchor::First, 17);

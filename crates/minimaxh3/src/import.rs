@@ -215,7 +215,7 @@ mod tests {
         // this test is about the DECODER graph running correctly at real
         // scale, not about what a real encoded reference would sound like.
         let t = 4u32;
-        let mut rng = data::rng::Lcg::new(11);
+        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
         let z = rng.vec_scaled((cfg.vae_latent_channels * t) as usize, 0.3);
 
         let wave = crate::vocoder::decode(&cfg, &tensors, &z, t, Some("cpu"));
@@ -362,7 +362,7 @@ mod tests {
         let tensors = import_video_vae(&dir, &cfg).unwrap_or_else(|e| panic!("import_video_vae: {e}"));
 
         let (t, h, w) = (cfg.clip_length, 256u32, 256u32);
-        let mut rng = data::rng::Lcg::new(21);
+        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
         let pixels = rng.vec_scaled((cfg.in_channels * t * h * w) as usize, 0.3);
         let (moments, mt, mh, mw) = crate::video_vae::encode_clip(&cfg, &tensors, Some("cpu"), &pixels, t, h, w);
         assert!(moments.iter().all(|v| v.is_finite()), "real-weight encode output must be finite");

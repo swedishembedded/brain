@@ -1592,7 +1592,7 @@ mod tests {
         let (h, w) = (32u32, 32u32);
         let t = cfg.clip_length;
 
-        let mut rng = data::rng::Lcg::new(5);
+        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
         let pixels = rng.vec_scaled((cfg.in_channels * t * h * w) as usize, 0.3);
 
         let (moments, mt, mh, mw) = encode_clip(&cfg, &tensors, Some("cpu"), &pixels, t, h, w);
@@ -1626,7 +1626,7 @@ mod tests {
         let (h, w) = (32u32, 32u32);
         let num_frames = 2 * cfg.clip_length;
 
-        let mut rng = data::rng::Lcg::new(6);
+        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
         let pixels = rng.vec_scaled((cfg.in_channels * num_frames * h * w) as usize, 0.3);
 
         let (moments, mt, mh, mw) = encode(&cfg, &tensors, Some("cpu"), &pixels, num_frames, h, w);

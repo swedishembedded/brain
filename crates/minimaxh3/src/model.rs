@@ -897,7 +897,7 @@ mod tests {
         let num_text = 3u32;
         let seq_len = num_text + num_audio + num_video;
 
-        let mut rng = data::rng::Lcg::new(9);
+        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
         let hidden_states = rng.vec_scaled((num_video * cfg.video_patch_dim()) as usize, 0.3);
         let audio_hidden_states = rng.vec_scaled((num_audio * cfg.audio_in_channels) as usize, 0.3);
         let encoder_hidden_states = rng.vec_scaled((num_text * cfg.text_dim) as usize, 0.3);
@@ -977,7 +977,7 @@ mod tests {
         let num_text = 3u32;
         let seq_len = num_text + num_audio + num_video;
 
-        let mut rng = data::rng::Lcg::new(23);
+        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
         let hidden_states = rng.vec_scaled((num_video * cfg.video_patch_dim()) as usize, 0.3);
         let audio_hidden_states = rng.vec_scaled((num_audio * cfg.audio_in_channels) as usize, 0.3);
         let encoder_hidden_states = rng.vec_scaled((num_text * cfg.text_dim) as usize, 0.3);
