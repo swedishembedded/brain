@@ -43,12 +43,17 @@
 // sweep, decay_scale, exp_g_cs and the decay mask).
 //
 // Contract (u32 params, then pointers; chunk-major, `bhc = chunk * bh + head`):
-//   params : [bhc, c_len, dk, dv, bh, scale (f32 bits)]
+//   params : [bhc, c_len, dk, dv, bh, scale (f32 bits), heads_tok, n_chunks]
 //   read   : query, key, value, w, u, d_out, d_v_new [bhc, c_len, 128]; beta, g_cs, exp_g_cs,
 //            decay_scale_hist [bhc, c_len]; state_hist (the state ENTERING each chunk) and
 //            d_state_hist [bhc, 128, 128]; t_mat, raw_intra, raw_attn0 [bhc, c_len, c_len]
 //   write  : d_query, d_key, d_value [bhc, c_len, 128]; d_raw_g, d_beta [bhc, c_len]
 //            (every element is overwritten; no clearing is needed)
+//   TOKEN-MAJOR form (heads_tok != 0, the mixer's layout; n_chunks chunks per sequence): d_out is read as
+//            [tokens, heads_tok, 128] and d_value, d_raw_g, d_beta are written as [tokens, heads_tok, 128]
+//            and [tokens, heads_tok]; d_query and d_key stay chunk-major (the per-key-head gather and the
+//            normalisation adjoint, `gdn_qk_bwd_tok`, follow). The chunk-major permutes of the portable
+//            path are folded into these loads and stores.
 // dk = dv = 128 and 1 <= c_len <= 64 (the provider checks; the entry does not).
 // Dynamic shared memory: POST_SMEM_FLOATS floats.
 //
@@ -113,12 +118,12 @@ __device__ __forceinline__ void warp_mma_acc(float (&acc)[NT][4], unsigned int K
     }
 }
 
-// Rows of a [rows, 128] source into a zero-padded [64, stride] shared tile.
-__device__ __forceinline__ void load_rows(float* dst, unsigned int stride, const float* src, unsigned int C) {
+// Rows of a [rows, 128] source (consecutive rows `row_stride` floats apart) into a zero-padded [64, stride] shared tile.
+__device__ __forceinline__ void load_rows(float* dst, unsigned int stride, const float* src, unsigned long long row_stride, unsigned int C) {
     for (unsigned int e = threadIdx.x; e < MAXC * (D / 4); e += THREADS) {
         const unsigned int r = e / (D / 4), c4 = e % (D / 4);
         float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        if (r < C) { v = *reinterpret_cast<const float4*>(src + (unsigned long long)r * D + c4 * 4); }
+        if (r < C) { v = *reinterpret_cast<const float4*>(src + (unsigned long long)r * row_stride + c4 * 4); }
         *reinterpret_cast<float4*>(dst + r * stride + c4 * 4) = v;
     }
 }
@@ -171,6 +176,22 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
     const float* S = state_hist + (unsigned long long)blk * D * D;
     const float* Dh = d_state_hist + (unsigned long long)blk * D * D;
 
+    // Where d_out is read and d_value, d_raw_g, d_beta are written: chunk-major by default, the mixer's token-major
+    // layout when `heads_tok` is given (this block's first token row, head, and the row strides of each tensor).
+    const unsigned int heads_tok = params[6];
+    unsigned long long vec_base = row_base * D, vec_stride = D, scal_base = row_base, scal_stride = 1;
+    if (heads_tok != 0) {
+        const unsigned int n_chunks = params[7];
+        const unsigned int bh = bhc / n_chunks, ci = blk / bh, rem = blk % bh;
+        const unsigned long long tok0 = ((unsigned long long)(rem / heads_tok) * n_chunks + ci) * C;
+        vec_base = (tok0 * heads_tok + rem % heads_tok) * D;
+        vec_stride = (unsigned long long)heads_tok * D;
+        scal_base = tok0 * heads_tok + rem % heads_tok;
+        scal_stride = heads_tok;
+    }
+    const float* d_out_src = d_out + vec_base;
+    const unsigned long long d_out_stride = vec_stride;
+
     for (unsigned int i = tid; i < MAXC * SC; i += THREADS) {
         sT[i] = 0.0f;
         sDI[i] = 0.0f;
@@ -189,8 +210,8 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
         sdb[tid] = 0.0f;
     }
     __syncthreads();
-    load_rows(sK, SK, key + row_base * D, C);
-    load_rows(sO, SK, d_out + row_base * D, C);
+    load_rows(sK, SK, key + row_base * D, D, C);
+    load_rows(sO, SK, d_out_src, d_out_stride, C);
     for (unsigned int e = tid; e < C * C; e += THREADS) { sT[(e / C) * SC + e % C] = t_mat[cc_base + e]; }
     __syncthreads();
 
@@ -303,7 +324,7 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
         if (lane == 0) { sred[warp] = part; }
     }
     __syncthreads();
-    load_rows(sO, SK, d_v_new + row_base * D, C);   // d_out is dead: the final d_v_new (= d_u) takes its place
+    load_rows(sO, SK, d_v_new + row_base * D, D, C);   // d_out is dead: the final d_v_new (= d_u) takes its place
     __syncthreads();
 
     // ---- d_w = -d_v_new @ S^T ----
@@ -388,7 +409,7 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
                 if (r < C) {
                     const float a0 = acc[t][2 * h2], a1 = acc[t][2 * h2 + 1];
                     const float2 v = *reinterpret_cast<const float2*>(value + (row_base + r) * D + col);
-                    *reinterpret_cast<float2*>(d_value + (row_base + r) * D + col) = make_float2(a0 * sbeta[r], a1 * sbeta[r]);
+                    *reinterpret_cast<float2*>(d_value + vec_base + r * vec_stride + col) = make_float2(a0 * sbeta[r], a1 * sbeta[r]);
                     dots[h2] += a0 * v.x + a1 * v.y;
                 }
             }
@@ -401,7 +422,7 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
         }
     }
     __syncthreads();
-    load_rows(sV, SK, query + row_base * D, C);   // d_w is dead: the query takes its place
+    load_rows(sV, SK, query + row_base * D, D, C);   // d_w is dead: the query takes its place
 
     // ---- d_raw_intra = d_intra * decay_mask, d_decay_mask = d_intra * raw_intra ----
     for (unsigned int e = tid; e < C * C; e += THREADS) {
@@ -575,7 +596,7 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
     // ---- d_g_cs from its remaining sources, then the suffix sum that is the cumulative sum's adjoint ----
     if (tid < C) {
         sdg[tid] += sdexp[tid] * sexp[tid] - sdds[tid] * sds[tid];
-        d_beta[row_base + tid] = sdb[tid];
+        d_beta[scal_base + tid * scal_stride] = sdb[tid];
     }
     __syncthreads();
     if (tid == 0) {
@@ -587,7 +608,7 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
         float running = 0.0f;
         for (int i = (int)C - 1; i >= 0; --i) {
             running += sdg[i];
-            d_raw_g[row_base + i] = running;
+            d_raw_g[scal_base + (unsigned long long)i * scal_stride] = running;
         }
     }
 }

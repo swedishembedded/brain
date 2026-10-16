@@ -745,26 +745,47 @@ fn native_bwd_sweep(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _c: u32, _d
 /// [`gpu_core::provider::cuda::gdn_bwd_sweep_tc_step`] where a native backend exists at all; `None` on wasm.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
-fn native_bwd_sweep_tc(g: &Gpu, bufs: &[&DeviceBuffer; 12], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32) -> Option<Step> {
-    gpu_core::provider::cuda::gdn_bwd_sweep_tc_step(g, bufs, bh, c, dk, dv, n_chunks, scale)
+fn native_bwd_sweep_tc(g: &Gpu, bufs: &[&DeviceBuffer; 12], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32, heads_tok: u32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_bwd_sweep_tc_step(g, bufs, bh, c, dk, dv, n_chunks, scale, heads_tok)
 }
 
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
-fn native_bwd_sweep_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32) -> Option<Step> {
+fn native_bwd_sweep_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32, _heads_tok: u32) -> Option<Step> {
     None
 }
 
 /// [`gpu_core::provider::cuda::gdn_chunk_bwd_post_tc_step`] where a native backend exists at all; `None` on wasm.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
-fn native_bwd_post_tc(g: &Gpu, bufs: &[&DeviceBuffer; 21], bhc: u32, c: u32, dk: u32, dv: u32, bh: u32, scale: f32) -> Option<Step> {
-    gpu_core::provider::cuda::gdn_chunk_bwd_post_tc_step(g, bufs, bhc, c, dk, dv, bh, scale)
+fn native_bwd_post_tc(g: &Gpu, bufs: &[&DeviceBuffer; 21], bhc: u32, c: u32, dk: u32, dv: u32, bh: u32, scale: f32, heads_tok: u32, n_chunks: u32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_bwd_post_tc_step(g, bufs, bhc, c, dk, dv, bh, scale, heads_tok, n_chunks)
+}
+
+/// [`gpu_core::provider::cuda::gdn_qk_bwd_tok_step`] where a native backend exists at all; `None` on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_qk_bwd_tok(g: &Gpu, bufs: &[&DeviceBuffer; 6], shape: &GdnShape, group: u32, l2_eps: f32) -> Option<Step> {
+    let layout = gpu_core::provider::cuda::GdnQkBwdLayout {
+        tokens: shape.b * shape.t,
+        kv_heads: shape.h / group,
+        group,
+        heads: shape.h,
+        c_len: shape.chunk,
+        seq_len: shape.t,
+        batch: shape.b,
+        eps: l2_eps,
+    };
+    gpu_core::provider::cuda::gdn_qk_bwd_tok_step(g, bufs, layout)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_qk_bwd_tok(_g: &Gpu, _bufs: &[&DeviceBuffer; 6], _shape: &GdnShape, _group: u32, _l2_eps: f32) -> Option<Step> {
+    None
 }
 
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
-fn native_bwd_post_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 21], _bhc: u32, _c: u32, _dk: u32, _dv: u32, _bh: u32, _scale: f32) -> Option<Step> {
+fn native_bwd_post_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 21], _bhc: u32, _c: u32, _dk: u32, _dv: u32, _bh: u32, _scale: f32, _heads_tok: u32, _n_chunks: u32) -> Option<Step> {
     None
 }
 
@@ -1651,6 +1672,146 @@ pub struct GdnBwdScratch<'a> {
     pub d_state_hist: Option<&'a DeviceBuffer>,
 }
 
+/// The tensor-core backward as its two launches (the sweep, then the per-(head, chunk) kernel), or `None`
+/// when the call is not served: no state-gradient history in `bwd`, the caller did not opt in, the device has
+/// no tensor cores, the head widths or the chunk are outside what the kernels take, or the backend declined
+/// a launch. Nothing is written until the returned steps are submitted.
+///
+/// `chunk_major` is `[query, key, value, beta]`, `grads` is `[d_query, d_key, d_value, d_raw_g, d_beta]`.
+/// With `heads_tok == 0` every tensor is chunk-major, as for [`gdn_chunk_bwd`]. With `heads_tok` set to the
+/// number of value heads, `d_out` is read token-major and `d_value`, `d_raw_g`, `d_beta` are written
+/// token-major (`[tokens, heads, dv]`, `[tokens, heads]`) - the chunk-major permutes folded into the kernels'
+/// loads and stores; `d_query` and `d_key` stay chunk-major.
+#[allow(clippy::too_many_arguments)]
+fn bwd_tensor_core(
+    g: &Gpu,
+    ids: &GdnIds,
+    shape: &GdnShape,
+    chunk_major: [&DeviceBuffer; 4],
+    saved: &GdnScratchTrain,
+    d_out: &DeviceBuffer,
+    d_final_state: &DeviceBuffer,
+    bwd: &GdnBwdScratch,
+    grads: [&DeviceBuffer; 5],
+    d_initial_state: &DeviceBuffer,
+    heads_tok: u32,
+) -> Option<Vec<Step>> {
+    let d_state_hist = bwd.d_state_hist.filter(|_| tensor_core_backward_offered(g, ids, shape))?;
+    let [query, key, value, beta] = chunk_major;
+    let [d_query, d_key, d_value, d_raw_g, d_beta] = grads;
+    let (dk, dv, c) = (shape.dk, shape.dv, shape.chunk);
+    let (bh, bhc, n_chunks) = (shape.bh(), shape.bhc(), shape.n_chunks());
+    let scale = 1.0f32 / (dk as f32).sqrt();
+    let sweep_bufs = [
+        key,
+        query,
+        saved.w,
+        d_out,
+        saved.intra_scores,
+        saved.g_cs,
+        saved.exp_g_cs,
+        saved.decay_scale_hist,
+        d_final_state,
+        bwd.d_v_new,
+        d_state_hist,
+        d_initial_state,
+    ];
+    let post_bufs = [
+        query,
+        key,
+        value,
+        beta,
+        saved.w,
+        saved.u,
+        saved.g_cs,
+        saved.exp_g_cs,
+        saved.decay_scale_hist,
+        saved.state_history,
+        saved.t_mat,
+        saved.raw_intra,
+        saved.raw_attn0,
+        d_out,
+        d_state_hist,
+        bwd.d_v_new,
+        d_query,
+        d_key,
+        d_value,
+        d_raw_g,
+        d_beta,
+    ];
+    let sweep = native_bwd_sweep_tc(g, &sweep_bufs, bh, c, dk, dv, n_chunks, scale, heads_tok)?;
+    let post = native_bwd_post_tc(g, &post_bufs, bhc, c, dk, dv, bh, scale, heads_tok, n_chunks)?;
+    Some(vec![sweep, post])
+}
+
+/// [`gdn_chunk_bwd`] fed with, and producing, the mixer's TOKEN-MAJOR tensors where it can: `d_out_tok`
+/// (`[tokens, heads, dv]`) is read in place of the chunk-major `d_out`, and `d_value_tok` (`[tokens, heads,
+/// dv]`), `d_raw_g_tok` and `d_beta_tok` (`[tokens, heads]`) are written token-major, so the mixer drops four
+/// of the layout permutes of the portable backward. `d_query_cm` and `d_key_cm` are chunk-major
+/// (`[bhc, chunk, dk]`); [`gdn_qk_bwd_tokens`] finishes them. Every output element is overwritten.
+///
+/// Returns `None` when the call is not served - the caller did not opt in ([`GdnFastIds::tensor_core`]), the
+/// device has no tensor cores, `bwd` has no state-gradient history ([`GdnBwdScratchBufs::new_for`]), the head
+/// widths are not 128, the chunk is longer than 64 rows, or the backend declined a launch - and the caller
+/// then runs the permutes and [`gdn_chunk_bwd`] it always ran. Nothing is written in that case.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_bwd_tokens(
+    g: &Gpu,
+    ids: &GdnIds,
+    shape: &GdnShape,
+    chunk_major: &GdnChunkMajorOut,
+    saved: &GdnScratchTrain,
+    d_out_tok: &DeviceBuffer,
+    d_final_state: &DeviceBuffer,
+    bwd: &GdnBwdScratch,
+    d_query_cm: &DeviceBuffer,
+    d_key_cm: &DeviceBuffer,
+    d_value_tok: &DeviceBuffer,
+    d_raw_g_tok: &DeviceBuffer,
+    d_beta_tok: &DeviceBuffer,
+    d_initial_state: &DeviceBuffer,
+) -> Option<Vec<Step>> {
+    bwd_tensor_core(
+        g,
+        ids,
+        shape,
+        [chunk_major.query_cm, chunk_major.key_cm, chunk_major.value_cm, chunk_major.beta_cm],
+        saved,
+        d_out_tok,
+        d_final_state,
+        bwd,
+        [d_query_cm, d_key_cm, d_value_tok, d_raw_g_tok, d_beta_tok],
+        d_initial_state,
+        shape.h,
+    )
+}
+
+/// The last leg of the mixer backward for query and key as one launch: `d_query_cm` / `d_key_cm`
+/// (chunk-major, per value head, from [`gdn_chunk_bwd_tokens`]) are summed over the `group` value heads
+/// that share a key head and taken back through the L2 normalisation of the forward, landing in
+/// `d_query` / `d_key` token-major (`[tokens, heads / group, dk]`) against the raw projections `query`
+/// and `key`. Replaces two permutes, two group sums and two normalisation backwards. `None` when the
+/// device or shape is not served, as for [`gdn_chunk_bwd_tokens`].
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_qk_bwd_tokens(
+    g: &Gpu,
+    ids: &GdnIds,
+    shape: &GdnShape,
+    group: u32,
+    l2_eps: f32,
+    d_query_cm: &DeviceBuffer,
+    d_key_cm: &DeviceBuffer,
+    query: &DeviceBuffer,
+    key: &DeviceBuffer,
+    d_query: &DeviceBuffer,
+    d_key: &DeviceBuffer,
+) -> Option<Step> {
+    if !tokens_prefix_offered(g, ids, shape, group) {
+        return None;
+    }
+    native_qk_bwd_tok(g, &[d_query_cm, d_key_cm, query, key, d_query, d_key], shape, group, l2_eps)
+}
+
 /// The full Gated DeltaNet chunked-parallel BACKWARD - reverse-mode gradients
 /// through all 11 forward steps, including the UT-transform's own reverse
 /// sequential sweep and the across-chunk recurrent-state gradient thread.
@@ -1745,47 +1906,8 @@ pub fn gdn_chunk_bwd(
 
     // Tensor cores: the reverse sweep as one launch and everything else as a second, one block per
     // (head, chunk). Declined (no scratch, no device support, shape) means the sequence below.
-    if let Some(d_state_hist) = bwd.d_state_hist.filter(|_| tensor_core_backward_offered(g, ids, shape)) {
-        let sweep_bufs = [
-            key,
-            query,
-            saved.w,
-            d_out,
-            saved.intra_scores,
-            saved.g_cs,
-            saved.exp_g_cs,
-            saved.decay_scale_hist,
-            d_final_state,
-            bwd.d_v_new,
-            d_state_hist,
-            d_initial_state,
-        ];
-        let post_bufs = [
-            query,
-            key,
-            value,
-            beta,
-            saved.w,
-            saved.u,
-            saved.g_cs,
-            saved.exp_g_cs,
-            saved.decay_scale_hist,
-            saved.state_history,
-            saved.t_mat,
-            saved.raw_intra,
-            saved.raw_attn0,
-            d_out,
-            d_state_hist,
-            bwd.d_v_new,
-            d_query,
-            d_key,
-            d_value,
-            d_raw_g,
-            d_beta,
-        ];
-        if let (Some(sweep), Some(post)) = (native_bwd_sweep_tc(g, &sweep_bufs, bh, c, dk, dv, n_chunks, scale), native_bwd_post_tc(g, &post_bufs, bhc, c, dk, dv, bh, scale)) {
-            return vec![sweep, post];
-        }
+    if let Some(steps) = bwd_tensor_core(g, ids, shape, [query, key, value, beta], saved, d_out, d_final_state, bwd, [d_query, d_key, d_value, d_raw_g, d_beta], d_initial_state, 0) {
+        return steps;
     }
 
     let bmm = |kernel: usize, batch: u32, m: u32, k: u32, n: u32, ta: bool, tb: bool, alpha: f32, a: &DeviceBuffer, a_off: u32, b: &DeviceBuffer, b_off: u32, o: &DeviceBuffer, o_off: u32| {

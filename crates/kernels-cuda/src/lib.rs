@@ -1372,6 +1372,21 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         src: include_str!("../cu/gdn_chunk_bwd_post_tc.cu"),
     },
+    CudaKernel {
+        name: "gdn_qk_bwd_tok",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_qk_bwd_tok",
+        what: "the last leg of Gated DeltaNet's mixer backward for query and key in one launch: the chunk-major per-value-head gradients are summed over each key head's value heads, taken back through the L2 normalisation and stored token-major",
+        reported: "native:gdn_qk_bwd_tok",
+        block_dim: 256,
+        tile: (8, 128),
+        shared_bytes: 0,
+        src: include_str!("../cu/gdn_qk_bwd_tok.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of

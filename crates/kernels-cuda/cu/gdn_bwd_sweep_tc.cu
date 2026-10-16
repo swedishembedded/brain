@@ -30,13 +30,15 @@
 // `gdn_bwd_sweep_f32`, but within a few units in 1e-6 relative.
 //
 // Contract (u32 params, then pointers; chunk-major, `bhc = chunk * bh + head`):
-//   params : [bh, c_len, dk, dv, n_chunks, scale (f32 bits)]
+//   params : [bh, c_len, dk, dv, n_chunks, scale (f32 bits), heads_tok]
 //   read   : key, query, w, d_out [n_chunks, bh, c_len, 128];
 //            intra [n_chunks, bh, c_len, c_len]; g_cs, exp_g_cs, decay_scale_hist
 //            [n_chunks, bh, c_len]; d_final_state [bh, 128, 128]
 //   write  : d_v_new [n_chunks, bh, c_len, 128]      (the final value)
 //            d_state_hist [n_chunks, bh, 128, 128]   (D entering chunk ci's step)
 //            d_initial_state [bh, 128, 128]
+// With heads_tok != 0 (the mixer's layout) d_out is read token-major, [tokens, heads_tok, 128] with
+// bh = batch * heads_tok, which folds the chunk-major permute of the portable path into the staging loads.
 // dk = dv = 128 and c_len <= 64 (the provider checks; the entry does not).
 // Dynamic shared memory: SWEEP_SMEM_FLOATS floats.
 //
@@ -118,6 +120,7 @@ brain_gdn_bwd_sweep_tc(const unsigned int* params, const float* key, const float
     const unsigned int tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5;
     const unsigned int g = lane >> 2, t4 = lane & 3u;
     const unsigned int m0 = warp * 16u;                  // this warp's chunk rows
+    const unsigned int heads_tok = params[6];
     const unsigned int c8 = (C + 7u) & ~7u;              // contraction length over chunk rows
 
     for (unsigned int i = tid; i < D * CS; i += THREADS) {
@@ -132,6 +135,14 @@ brain_gdn_bwd_sweep_tc(const unsigned int* params, const float* key, const float
         const unsigned long long off_dk = row_base * D;
         const unsigned long long off_cc = row_base * C;
         const unsigned long long hist_base = ((unsigned long long)ci * bh + bhi) * D * D;
+        // d_out of this (head, chunk): chunk-major rows are 128 floats apart, token-major rows heads_tok * 128.
+        const float* d_out_chunk = d_out + off_dk;
+        unsigned long long d_out_stride = D;
+        if (heads_tok != 0) {
+            const unsigned long long tok0 = ((unsigned long long)(bhi / heads_tok) * n_chunks + ci) * C;
+            d_out_chunk = d_out + (tok0 * heads_tok + bhi % heads_tok) * D;
+            d_out_stride = (unsigned long long)heads_tok * D;
+        }
 
         // The state gradient entering this step, for the post kernel.
         for (unsigned int i = tid; i < D * CS; i += THREADS) {
@@ -155,7 +166,7 @@ brain_gdn_bwd_sweep_tc(const unsigned int* params, const float* key, const float
         }
         for (unsigned int e = tid; e < MAXC * CS; e += THREADS) {
             const unsigned int r = e / CS, j = e % CS;
-            sO[r * SS + j] = r < C ? d_out[off_dk + (unsigned long long)r * D + j0 + j] : 0.0f;
+            sO[r * SS + j] = r < C ? d_out_chunk[r * d_out_stride + j0 + j] : 0.0f;
         }
         __syncthreads();
 

@@ -660,7 +660,8 @@ const GDN_CHUNK_BWD_POST_TC_DYNAMIC_SHARED_BYTES: u32 = (4 * 64 * 132 + 4 * 64 *
 /// `bufs` is `key, query, w, d_out, intra, g_cs, exp_g_cs, decay_scale_hist, d_final_state` (read)
 /// and `d_v_new` (overwritten, the final value), `d_state_hist` (`[n_chunks, bh, 128, 128]`, the state
 /// gradient entering each chunk's reverse step), `d_initial_state` (written). `None` for the reasons
-/// of [`gdn_chunk_loop_tc_step`].
+/// of [`gdn_chunk_loop_tc_step`]. `heads_tok` is 0 for chunk-major `d_out`, or the number of value heads
+/// when `d_out` is the mixer's token-major `[tokens, heads, 128]` (then `bh = batch * heads_tok`).
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_bwd_sweep_tc_step(
     gpu: &crate::Gpu,
@@ -671,6 +672,7 @@ pub fn gdn_bwd_sweep_tc_step(
     dv: u32,
     n_chunks: u32,
     scale: f32,
+    heads_tok: u32,
 ) -> Option<crate::Step> {
     if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
         return None;
@@ -679,7 +681,7 @@ pub fn gdn_bwd_sweep_tc_step(
     let kernel = kernels_cuda::get("gdn_bwd_sweep_tc").filter(|k| k.min_cc <= cc)?;
     let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_BWD_SWEEP_TC_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
     let id = gpu.native_kernel_launched(kernel, &GDN_BWD_SWEEP_TC_BINDINGS, launch)?;
-    gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks, scale.to_bits()], bh * GDN_BWD_SWEEP_TC_SPLITS)
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks, scale.to_bits(), heads_tok], bh * GDN_BWD_SWEEP_TC_SPLITS)
 }
 
 /// Everything of Gated DeltaNet's chunk backward that is independent across chunks, in one launch per
@@ -691,7 +693,9 @@ pub fn gdn_bwd_sweep_tc_step(
 ///
 /// `bufs` is `query, key, value, beta, w, u, g_cs, exp_g_cs, decay_scale_hist, state_hist, t_mat,
 /// raw_intra, raw_attn0, d_out, d_state_hist, d_v_new` (read) and `d_query, d_key, d_value, d_raw_g,
-/// d_beta` (every element overwritten).
+/// d_beta` (every element overwritten). With `heads_tok` (the number of value heads) the kernel reads
+/// `d_out` and writes `d_value`, `d_raw_g` and `d_beta` in the mixer's token-major layout, `n_chunks`
+/// chunks per sequence; with 0 every tensor is chunk-major.
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_chunk_bwd_post_tc_step(
     gpu: &crate::Gpu,
@@ -702,6 +706,8 @@ pub fn gdn_chunk_bwd_post_tc_step(
     dv: u32,
     bh: u32,
     scale: f32,
+    heads_tok: u32,
+    n_chunks: u32,
 ) -> Option<crate::Step> {
     if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
         return None;
@@ -710,7 +716,54 @@ pub fn gdn_chunk_bwd_post_tc_step(
     let kernel = kernels_cuda::get("gdn_chunk_bwd_post_tc").filter(|k| k.min_cc <= cc)?;
     let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_BWD_POST_TC_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
     let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_BWD_POST_TC_BINDINGS, launch)?;
-    gpu.step_native_sliced(id, bufs, &[(0, 0); 21], &[bhc, c_len, dk, dv, bh, scale.to_bits()], bhc)
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 21], &[bhc, c_len, dk, dv, bh, scale.to_bits(), heads_tok, n_chunks], bhc)
+}
+
+/// `gdn_qk_bwd_tok`: d_query_cm, d_key_cm, query, key (read); d_query, d_key (written).
+static GDN_QK_BWD_TOK_BINDINGS: [BindKind; 7] = bwd_tc_bindings(4);
+
+/// Rows (one per token and key head, for query and for key) each block of `gdn_qk_bwd_tok` serves:
+/// its eight warps take one row each.
+const GDN_QK_BWD_ROWS_PER_BLOCK: u32 = 8;
+
+/// The mixer's layout for [`gdn_qk_bwd_tok_step`].
+#[derive(Clone, Copy)]
+pub struct GdnQkBwdLayout {
+    /// Rows of the token-major tensors, `batch * seq_len`.
+    pub tokens: u32,
+    /// Key heads.
+    pub kv_heads: u32,
+    /// Value heads per key head.
+    pub group: u32,
+    /// Value heads.
+    pub heads: u32,
+    /// Rows per chunk.
+    pub c_len: u32,
+    /// Tokens per sequence, a multiple of `c_len`.
+    pub seq_len: u32,
+    pub batch: u32,
+    /// The epsilon of the query/key L2 normalisation the forward applied.
+    pub eps: f32,
+}
+
+/// The last leg of the mixer backward for query and key as one launch (`gdn_qk_bwd_tok`): the
+/// chunk-major, per-value-head `d_query` / `d_key` of the chunk backward are summed over the value
+/// heads that share a key head and taken back through the L2 normalisation, landing token-major in
+/// the layout of the narrow projections. Replaces two layout permutes, two group sums and two
+/// normalisation backwards. `None` for the reasons of [`gdn_chunk_prep_tok_step`] (head width 128).
+///
+/// `bufs` is `d_query_cm, d_key_cm, query, key` (read; `query` / `key` the raw projections) and
+/// `d_query, d_key` (every element overwritten).
+pub fn gdn_qk_bwd_tok_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 6], l: GdnQkBwdLayout) -> Option<crate::Step> {
+    if !gdn_chunk_prep_tok_shape_ok(128, 128, l.c_len, l.heads, l.group) || l.kv_heads * l.group != l.heads || l.seq_len % l.c_len != 0 {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_qk_bwd_tok").filter(|k| k.min_cc <= cc)?;
+    let id = gpu.native_kernel(kernel, &GDN_QK_BWD_TOK_BINDINGS)?;
+    let params = [l.tokens, l.kv_heads, l.group, l.heads, l.c_len, l.seq_len, l.batch, l.eps.to_bits()];
+    let blocks = (2 * l.tokens * l.kv_heads).div_ceil(GDN_QK_BWD_ROWS_PER_BLOCK);
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 6], &params, blocks)
 }
 
 /// The native tensor-core paged flash-prefill step for `head_dim = 256`, or

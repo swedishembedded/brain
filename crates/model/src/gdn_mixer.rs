@@ -26,7 +26,7 @@ use audio::conv::{conv1d_bwd, conv1d_fwd, Conv1d, ConvKernels};
 
 use crate::block::{kv_expand_bwd, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, KernelIds};
 use crate::gdn::{
-    gdn_chunk_bwd, gdn_chunk_fwd, gdn_chunk_fwd_tokens, gdn_chunk_fwd_train, gdn_chunk_fwd_train_tokens, gdn_recurrent_step, tokens_prefix_offered, GdnBwdIds, GdnBwdScratchBufs, GdnChunkMajorOut, GdnIds, GdnRecurrentScratch, GdnScratchBufs, GdnTokenInputs,
+    gdn_chunk_bwd, gdn_chunk_bwd_tokens, gdn_chunk_fwd, gdn_chunk_fwd_tokens, gdn_chunk_fwd_train, gdn_chunk_fwd_train_tokens, gdn_qk_bwd_tokens, gdn_recurrent_step, tokens_prefix_offered, GdnBwdIds, GdnBwdScratchBufs, GdnChunkMajorOut, GdnIds, GdnRecurrentScratch, GdnScratchBufs, GdnTokenInputs,
     GdnScratchTrainBufs, GdnShape,
 };
 
@@ -941,11 +941,6 @@ pub fn gdn_mixer_stream_bwd(
         g.submit(&[], &s);
     }
 
-    // ---- permute back to chunk-major (forward used to_chunk_major=0; backward flips it) ----
-    let d_out_cm = g.storage(gdn.bhc() as u64 * gdn.chunk as u64 * vhd as u64);
-    g.submit(&[], &[g.step(ids.gdn_layout_permute, &[&d_out_tok, &d_out_cm], &[b, nvh, n_chunks, chunk, vhd, 1], b * nvh * n_chunks * chunk * vhd)]);
-
-    // ---- gdn_chunk_bwd - the chunked-recurrence backward itself ----
     let bh = gdn.bh() as u64;
     let bhc = gdn.bhc() as u64;
     let cw = gdn.chunk as u64;
@@ -954,66 +949,120 @@ pub fn gdn_mixer_stream_bwd(
     let zero_final = d_next_state.is_none().then(|| g.storage(bh * dk * dv)); // last round: nothing flows in
     let d_final_state = d_next_state.or(zero_final.as_ref()).expect("one of the two is Some");
     let d_initial_state = g.storage(bh * dk * dv);
-    let d_query_cm = g.storage(bhc * cw * dk);
-    let d_key_cm = g.storage(bhc * cw * dk);
-    let d_value_cm = g.storage(bhc * cw * dv);
-    let d_g_cm = g.storage(bhc * cw);
-    let d_beta_cm = g.storage(bhc * cw);
     let bwd_scratch = GdnBwdScratchBufs::new_for(g, &ids.chunk, &gdn);
-    {
-        let steps = gdn_chunk_bwd(
+
+    // ---- the chunked-recurrence backward ----
+    // On a device with the tensor-core kernels it reads `d_out_tok` and writes `d_value`, `d_g_decay` and
+    // `d_beta` token-major itself, and one more kernel sums `d_query` / `d_key` over each key head's value
+    // heads and takes them back through the L2 normalisation: none of the permutes, the group sum or the
+    // normalisation backward below runs. Declined (no opt-in, no tensor cores, another head width) leaves
+    // every buffer untouched and the dispatch sequence it has always run follows.
+    let fused = (bwd_scratch.as_ref().d_state_hist.is_some() && tokens_prefix_offered(g, &ids.chunk, &gdn, group)).then(|| {
+        let (d_query_cm, d_key_cm) = (g.storage(bhc * cw * dk), g.storage(bhc * cw * dk));
+        let d_value = g.storage((n * value_dim) as u64);
+        let (d_g_decay, d_beta) = (g.storage((n * nvh) as u64), g.storage((n * nvh) as u64));
+        let (d_query, d_key) = (g.storage((n * key_dim) as u64), g.storage((n * key_dim) as u64));
+        let cm = GdnChunkMajorOut { query_cm: &la.query_cm, key_cm: &la.key_cm, value_cm: &la.value_cm, beta_cm: &la.beta_cm };
+        let steps = gdn_chunk_bwd_tokens(
             g,
             &ids.chunk,
-            &ids.chunk_bwd,
             &gdn,
-            &la.query_cm,
-            &la.key_cm,
-            &la.value_cm,
-            &la.beta_cm,
+            &cm,
             &la.scratch_train.as_ref(),
-            &d_out_cm,
+            &d_out_tok,
             d_final_state,
             &bwd_scratch.as_ref(),
             &d_query_cm,
             &d_key_cm,
-            &d_value_cm,
-            &d_g_cm,
-            &d_beta_cm,
+            &d_value,
+            &d_g_decay,
+            &d_beta,
             &d_initial_state,
-        );
-        // Every output with more than one contributing forward use is
-        // explicitly zeroed by the caller (see gdn_chunk_bwd's own doc):
-        // d_query/d_key/d_beta. `d_final_state` is an INPUT (the next round's
-        // gradient, or a zero-fresh buffer) and must not be cleared.
-        let mut clears = bwd_scratch.clears();
-        clears.push(&d_query_cm);
-        clears.push(&d_key_cm);
-        clears.push(&d_beta_cm);
-        g.submit(&clears, &steps);
-    }
+        )?;
+        let qk = gdn_qk_bwd_tokens(g, &ids.chunk, &gdn, group, 1e-6, &d_query_cm, &d_key_cm, &la.query, &la.key, &d_query, &d_key)?;
+        g.submit(&[], &steps);
+        g.submit(&[], &[qk]);
+        Some((d_query, d_key, d_value, d_g_decay, d_beta))
+    });
+    let (d_query, d_key, d_value, d_g_decay, d_beta) = match fused.flatten() {
+        Some(grads) => grads,
+        None => {
+            // ---- permute back to chunk-major (forward used to_chunk_major=0; backward flips it) ----
+            let d_out_cm = g.storage(bhc * cw * vhd as u64);
+            g.submit(&[], &[g.step(ids.gdn_layout_permute, &[&d_out_tok, &d_out_cm], &[b, nvh, n_chunks, chunk, vhd, 1], b * nvh * n_chunks * chunk * vhd)]);
 
-    // ---- permute back to token-major (forward used to_chunk_major=1; backward flips it) ----
-    let permute_bwd = |src_cm: &DeviceBuffer, dim: u32| -> DeviceBuffer {
-        let dst = g.storage(n as u64 * nvh as u64 * dim as u64);
-        g.submit(&[], &[g.step(ids.gdn_layout_permute, &[src_cm, &dst], &[b, nvh, n_chunks, chunk, dim, 0], b * nvh * n_chunks * chunk * dim)]);
-        dst
+            // ---- gdn_chunk_bwd - the chunked-recurrence backward itself ----
+            let d_query_cm = g.storage(bhc * cw * dk);
+            let d_key_cm = g.storage(bhc * cw * dk);
+            let d_value_cm = g.storage(bhc * cw * dv);
+            let d_g_cm = g.storage(bhc * cw);
+            let d_beta_cm = g.storage(bhc * cw);
+            let steps = gdn_chunk_bwd(
+                g,
+                &ids.chunk,
+                &ids.chunk_bwd,
+                &gdn,
+                &la.query_cm,
+                &la.key_cm,
+                &la.value_cm,
+                &la.beta_cm,
+                &la.scratch_train.as_ref(),
+                &d_out_cm,
+                d_final_state,
+                &bwd_scratch.as_ref(),
+                &d_query_cm,
+                &d_key_cm,
+                &d_value_cm,
+                &d_g_cm,
+                &d_beta_cm,
+                &d_initial_state,
+            );
+            // Every output with more than one contributing forward use is
+            // explicitly zeroed by the caller (see gdn_chunk_bwd's own doc):
+            // d_query/d_key/d_beta. `d_final_state` is an INPUT (the next round's
+            // gradient, or a zero-fresh buffer) and must not be cleared.
+            let mut clears = bwd_scratch.clears();
+            clears.push(&d_query_cm);
+            clears.push(&d_key_cm);
+            clears.push(&d_beta_cm);
+            g.submit(&clears, &steps);
+
+            // ---- permute back to token-major (forward used to_chunk_major=1; backward flips it) ----
+            let permute_bwd = |src_cm: &DeviceBuffer, dim: u32| -> DeviceBuffer {
+                let dst = g.storage(n as u64 * nvh as u64 * dim as u64);
+                g.submit(&[], &[g.step(ids.gdn_layout_permute, &[src_cm, &dst], &[b, nvh, n_chunks, chunk, dim, 0], b * nvh * n_chunks * chunk * dim)]);
+                dst
+            };
+            let d_query_w = permute_bwd(&d_query_cm, khd);
+            let d_key_w = permute_bwd(&d_key_cm, khd);
+            let d_value = permute_bwd(&d_value_cm, vhd);
+            let d_g_decay = permute_bwd(&d_g_cm, 1);
+            let d_beta = permute_bwd(&d_beta_cm, 1);
+
+            // ---- kv_expand backward (group-sum, overwrite - no accumulate needed) ----
+            let d_query_n = g.storage((n * key_dim) as u64);
+            let d_key_n = g.storage((n * key_dim) as u64);
+            g.submit(
+                &[],
+                &[
+                    kv_expand_bwd(g, ids.kv_expand_bwd, &d_query_w, &d_query_n, n, nvh, group, khd, nvh * khd, 0),
+                    kv_expand_bwd(g, ids.kv_expand_bwd, &d_key_w, &d_key_n, n, nvh, group, khd, nvh * khd, 0),
+                ],
+            );
+
+            // ---- L2-norm backward ----
+            let d_query = g.storage((n * key_dim) as u64);
+            let d_key = g.storage((n * key_dim) as u64);
+            g.submit(
+                &[],
+                &[
+                    g.step(ids.l2norm_scale_dx, &[&la.query, w.ones_khd, &d_query_n, &d_query], &[n * nkh, khd, f(1e-6)], n * key_dim),
+                    g.step(ids.l2norm_scale_dx, &[&la.key, w.ones_khd, &d_key_n, &d_key], &[n * nkh, khd, f(1e-6)], n * key_dim),
+                ],
+            );
+            (d_query, d_key, d_value, d_g_decay, d_beta)
+        }
     };
-    let d_query_w = permute_bwd(&d_query_cm, khd);
-    let d_key_w = permute_bwd(&d_key_cm, khd);
-    let d_value = permute_bwd(&d_value_cm, vhd);
-    let d_g_decay = permute_bwd(&d_g_cm, 1);
-    let d_beta = permute_bwd(&d_beta_cm, 1);
-
-    // ---- kv_expand backward (group-sum, overwrite - no accumulate needed) ----
-    let d_query_n = g.storage((n * key_dim) as u64);
-    let d_key_n = g.storage((n * key_dim) as u64);
-    g.submit(
-        &[],
-        &[
-            kv_expand_bwd(g, ids.kv_expand_bwd, &d_query_w, &d_query_n, n, nvh, group, khd, nvh * khd, 0),
-            kv_expand_bwd(g, ids.kv_expand_bwd, &d_key_w, &d_key_n, n, nvh, group, khd, nvh * khd, 0),
-        ],
-    );
 
     // ---- beta/g_decay backward into bproj/aproj, A_log/dt_bias reductions ----
     let d_bproj = g.storage((n * nvh) as u64);
@@ -1037,17 +1086,6 @@ pub fn gdn_mixer_stream_bwd(
         }
         g.submit(&[], &s);
     }
-
-    // ---- L2-norm backward ----
-    let d_query = g.storage((n * key_dim) as u64);
-    let d_key = g.storage((n * key_dim) as u64);
-    g.submit(
-        &[],
-        &[
-            g.step(ids.l2norm_scale_dx, &[&la.query, w.ones_khd, &d_query_n, &d_query], &[n * nkh, khd, f(1e-6)], n * key_dim),
-            g.step(ids.l2norm_scale_dx, &[&la.key, w.ones_khd, &d_key_n, &d_key], &[n * nkh, khd, f(1e-6)], n * key_dim),
-        ],
-    );
 
     // ---- qkv split backward (concat2 x2: the 3-way split's adjoint) ----
     let d_qk = g.storage((n * 2 * key_dim) as u64);
