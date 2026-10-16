@@ -32,6 +32,8 @@ pub mod block;
 pub mod dispatch;
 pub mod collective;
 pub mod conformance;
+pub mod conformance_adapter;
+pub mod conformance_grad;
 pub mod paged;
 pub mod rowemit;
 pub mod serve;

@@ -389,9 +389,9 @@ test/slow:
 # registration - see `.agents/rules/.agents/knowledge/`). Needs no external
 # fixtures, so unlike `test/parity/strict` it carries no narrowing knob and no
 # "green because skipped" risk.
-## test/full - release gate: test + test/doc + test/slow + test/e2e + every check/* gate
+## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + every check/* gate
 ##   + test/parity + test/parity/strict (needs make testdata/fetch)
-test/full: test test/doc test/slow test/e2e check/scripts check/env-reads check/seed-literals test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
+test/full: test test/doc test/slow test/e2e test/conformance check/scripts check/env-reads check/seed-literals test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -446,6 +446,15 @@ test/rl:
 		--test dpo_gradcheck --test dpo_objective --test distill_gradcheck \
 		--test distill_full_kl --test mixture_anchor_regression \
 		--test qwen3_fit_weighted --test improve_cycle
+
+# The training-capability conformance suite (model::conformance for the
+# capability contracts, rl::conformance for the objectives) over every model
+# registered in crates/rl/tests/conformance.rs. The binary asserts its registry
+# is not empty, and naming a deleted test target fails the build, so the target
+# cannot pass over zero models. A new model joins by one line in that file.
+## test/conformance - the training-capability conformance suite over every registered model
+test/conformance:
+	$(CARGO_TEST) -p brain-rl --features qwen3 --test conformance
 
 # Every workspace crate's tests on the CUDA backend (BRAIN_BACKEND=cuda), one
 # crate at a time, as a per-crate JSON report. Slow: a build and a run of the
@@ -1798,7 +1807,7 @@ help:
         environment environment/requirements environment/full environment/openvino \
         npu npu/diagnose \
         test test/nextest test/doc test/slow test/full test/times test/capability-report \
-        test/gradcheck test/rl test/cuda-matrix \
+        test/gradcheck test/rl test/conformance test/cuda-matrix \
         test/parity test/parity/strict test/parity/forecast test/parity/wan \
         test/e2e test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \

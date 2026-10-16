@@ -31,6 +31,8 @@
 //! your team needs expertise in conformance testing for ML training code you
 //! can procure our services by sending an email to info@swedishembedded.com.
 
+use std::collections::HashMap;
+
 use crate::logprobs::row_logprob;
 use crate::training::{require_token_objectives, Capability, Unsupported};
 use crate::{Batch, Model, IGNORE};
@@ -58,6 +60,23 @@ pub struct Subject<M: Model> {
     /// Called with `Some` only when [`Declares::adapters`].
     pub config: fn(adapter_rank: Option<u32>) -> M::Config,
     pub declares: Declares,
+    /// Rebuild a model from a file written by [`Model::save`], sized for
+    /// `(rows, seq)`.
+    pub load: fn(path: &str, rows: u32, seq: u32) -> M,
+    /// The frozen-base tiers (besides the f32 reference) the model offers
+    /// for training; each is checked by C9.
+    pub tiers: Vec<Tier<M>>,
+}
+
+/// A frozen-base storage tier: how to build the model with its base held at
+/// that tier, and how far its gradients may stray from the f32 base's.
+pub struct Tier<M: Model> {
+    pub name: &'static str,
+    /// Build from the same config and weights as the f32 reference, for
+    /// `(rows, seq)`, with the adapter rank the suite uses.
+    pub build: fn(M::Config, rows: u32, seq: u32, init: &HashMap<String, Vec<f32>>) -> M,
+    /// Largest allowed `||g_tier - g_f32|| / ||g_f32||` over each trainable tensor.
+    pub grad_rel_tol: f32,
 }
 
 /// The LoRA rank the suite builds adapter models with.
@@ -77,10 +96,16 @@ pub fn batch(vocab: u32) -> (Vec<u32>, Vec<u32>) {
     (tokens, targets)
 }
 
-fn build<M: Model>(subject: &Subject<M>, rank: Option<u32>, rows: u32, seed: u64) -> (M, std::collections::HashMap<String, Vec<f32>>) {
+pub fn build<M: Model>(subject: &Subject<M>, rank: Option<u32>, rows: u32, seed: u64) -> (M, std::collections::HashMap<String, Vec<f32>>) {
     let cfg = (subject.config)(rank);
     let init = M::init_weights(&cfg, seed);
     (M::new(cfg, rows, SEQ, &init), init)
+}
+
+/// The rank the suite trains with: the adapter rank when the model declares
+/// adapters, else the plain model.
+pub(crate) fn trained_rank<M: Model>(subject: &Subject<M>) -> Option<u32> {
+    subject.declares.adapters.then_some(RANK)
 }
 
 /// Run every check that needs only [`Model`]. `seed` draws the initial weights;
@@ -89,12 +114,19 @@ pub fn run<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), String> {
     check_declaration(subject, seed)?;
     if subject.declares.token_objectives {
         logprobs_follow_logit_scale(subject, seed)?;
+        crate::conformance_grad::unit_weights_reproduce_plain_training(subject, seed)?;
+        crate::conformance_grad::weighted_loss_gradient_matches_finite_differences(subject, seed)?;
     }
+    if subject.declares.adapters {
+        crate::conformance_adapter::zero_b_leaves_logits_unchanged(subject, seed)?;
+    }
+    crate::conformance_adapter::save_reload_keeps_logprobs(subject, seed)?;
+    crate::conformance_grad::tiers_track_the_f32_gradients(subject, seed)?;
     Ok(())
 }
 
 /// The declared capabilities are exactly the offered ones.
-fn check_declaration<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), String> {
+pub fn check_declaration<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), String> {
     let (mut m, _) = build(subject, None, BATCH, seed);
     let offered = m.token_objectives().is_some();
     if offered != subject.declares.token_objectives {

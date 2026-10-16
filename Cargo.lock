@@ -2337,6 +2337,7 @@ dependencies = [
  "brain-model",
  "brain-promote",
  "brain-qwen3",
+ "brain-qwen35",
  "brain-testutil",
  "libc",
  "minijinja",

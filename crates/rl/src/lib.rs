@@ -32,6 +32,7 @@
 //! - see the [`atif`] module.
 
 pub mod atif;
+pub mod conformance;
 pub mod continual;
 pub mod curriculum;
 pub mod document;
