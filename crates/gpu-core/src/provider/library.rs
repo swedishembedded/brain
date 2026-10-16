@@ -103,6 +103,7 @@ const NF4_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, Bi
 
 /// Serves the bf16-weight GEMMs of one device through the vendor library when
 /// [`decide`] chose it; otherwise answers `false` to every request.
+#[derive(Clone)]
 pub struct LibraryGemmProvider {
     path: GemmPath,
 }
@@ -190,6 +191,10 @@ impl LibraryGemmProvider {
             c: LibraryDtype::F32,
             alpha: 1.0,
             beta: 0.0,
+            batch: 1,
+            stride_a: 0,
+            stride_b: 0,
+            stride_c: 0,
         };
         self.product(gpu, steps, x, (m, k), w, y, gemm)
     }
@@ -214,6 +219,10 @@ impl LibraryGemmProvider {
             c: LibraryDtype::F32,
             alpha: 1.0,
             beta: if accumulate { 1.0 } else { 0.0 },
+            batch: 1,
+            stride_a: 0,
+            stride_b: 0,
+            stride_c: 0,
         };
         self.product(gpu, steps, dy, (m, n), w, dx, gemm)
     }
@@ -305,6 +314,10 @@ impl LibraryGemmProvider {
             c: LibraryDtype::F32,
             alpha: p.alpha,
             beta: p.beta,
+            batch: 1,
+            stride_a: 0,
+            stride_b: 0,
+            stride_c: 0,
         };
         match gpu.step_library_gemm(&gemm, &[b.buf, a.buf, c.buf], &[b.range, a.range, c.range]) {
             Some(step) => {

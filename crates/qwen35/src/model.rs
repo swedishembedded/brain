@@ -2247,7 +2247,7 @@ impl Qwen35 {
         // Set by the decode arm that fuses the sigmoid gate into the quantiser.
         let mut o_proj_act: Option<Act> = None;
         let (ctx_gated, internals) = match cached {
-            None => model::gqa_mixer::gqa_mixer_fwd_with(g, &gqa_mixer_ids(), self.training_flash(), &shape, &weights, &q_full, &k, &v, n, self.is_train),
+            None => model::gqa_mixer::gqa_mixer_fwd_tc(g, &gqa_mixer_ids(), self.training_flash(), Some(self.ops.tensor_gemm()), &shape, &weights, &q_full, &k, &v, n, self.is_train),
             Some(GqaCached::Chunk(ch)) => (
                 model::gqa_mixer::gqa_mixer_chunk_kv_fwd(
                     g,

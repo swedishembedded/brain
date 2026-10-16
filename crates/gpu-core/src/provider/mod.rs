@@ -65,6 +65,9 @@ pub mod cpu_isa;
 /// capability with the fp32 kernels as the transparent fallback.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod library;
+/// Causal grouped-query attention for training on the library's tensor cores.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod attention;
 pub mod native_f16;
 pub mod parity;
 pub mod wgsl;

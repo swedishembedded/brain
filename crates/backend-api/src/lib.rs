@@ -516,6 +516,15 @@ pub struct LibraryGemm {
     pub alpha: f32,
     /// Scale of the existing `C`: 0 overwrites, 1 accumulates.
     pub beta: f32,
+    /// Products in the batch: 1 for a plain product, more for a strided batch
+    /// whose entry `i` starts `i * stride_*` elements after the first.
+    pub batch: u32,
+    /// Elements between consecutive `A` matrices of a batch (0 shares one `A`).
+    pub stride_a: i64,
+    /// Elements between consecutive `B` matrices of a batch (0 shares one `B`).
+    pub stride_b: i64,
+    /// Elements between consecutive `C` matrices of a batch.
+    pub stride_c: i64,
 }
 
 /// A provider's own compiled kernel, handed to [`Backend::register_native`] -

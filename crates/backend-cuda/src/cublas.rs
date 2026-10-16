@@ -45,6 +45,31 @@ struct Lib {
     create: unsafe extern "C" fn(*mut Handle) -> Status,
     destroy: unsafe extern "C" fn(Handle) -> Status,
     set_stream: unsafe extern "C" fn(Handle, CuStream) -> Status,
+    gemm_strided_batched_ex: unsafe extern "C" fn(
+        Handle,
+        c_int,
+        c_int,
+        c_int,
+        c_int,
+        c_int,
+        *const c_void,
+        *const c_void,
+        c_int,
+        c_int,
+        i64,
+        *const c_void,
+        c_int,
+        c_int,
+        i64,
+        *const c_void,
+        *mut c_void,
+        c_int,
+        c_int,
+        i64,
+        c_int,
+        c_int,
+        c_int,
+    ) -> Status,
     gemm_ex: unsafe extern "C" fn(
         Handle,
         c_int,
@@ -100,6 +125,7 @@ fn load() -> Result<Lib, String> {
                     destroy: sym(&lib, b"cublasDestroy_v2\0")?,
                     set_stream: sym(&lib, b"cublasSetStream_v2\0")?,
                     gemm_ex: sym(&lib, b"cublasGemmEx\0")?,
+                    gemm_strided_batched_ex: sym(&lib, b"cublasGemmStridedBatchedEx\0")?,
                     _lib: lib,
                 })
             })()
@@ -157,31 +183,64 @@ impl Blas {
         let op = |t: bool| if t { OP_T } else { OP_N };
         let dim = |v: u32, what: &str| c_int::try_from(v).map_err(|_| format!("cublasGemmEx: {what} {v} exceeds the library's 32-bit range"));
         let _turn = self.busy.lock().unwrap_or_else(|e| e.into_inner());
+        let (m, n, k) = (dim(gemm.m, "m")?, dim(gemm.n, "n")?, dim(gemm.k, "k")?);
+        let (lda, ldb, ldc) = (dim(gemm.lda, "lda")?, dim(gemm.ldb, "ldb")?, dim(gemm.ldc, "ldc")?);
+        let alpha = &gemm.alpha as *const f32 as *const c_void;
+        let beta = &gemm.beta as *const f32 as *const c_void;
         // SAFETY: the pointers are device addresses the caller bound for this
-        // product with the leading dimensions and extents stated in `gemm`;
-        // alpha/beta are host scalars read during the call (host pointer mode).
+        // product with the leading dimensions, strides and extents stated in
+        // `gemm`; alpha/beta are host scalars read during the call (host
+        // pointer mode).
         let rc = unsafe {
-            (self.lib.gemm_ex)(
-                self.handle,
-                op(gemm.trans_a),
-                op(gemm.trans_b),
-                dim(gemm.m, "m")?,
-                dim(gemm.n, "n")?,
-                dim(gemm.k, "k")?,
-                &gemm.alpha as *const f32 as *const c_void,
-                a as *const c_void,
-                ty(gemm.a),
-                dim(gemm.lda, "lda")?,
-                b as *const c_void,
-                ty(gemm.b),
-                dim(gemm.ldb, "ldb")?,
-                &gemm.beta as *const f32 as *const c_void,
-                c as *mut c_void,
-                ty(gemm.c),
-                dim(gemm.ldc, "ldc")?,
-                COMPUTE_32F,
-                GEMM_DEFAULT,
-            )
+            if gemm.batch <= 1 {
+                (self.lib.gemm_ex)(
+                    self.handle,
+                    op(gemm.trans_a),
+                    op(gemm.trans_b),
+                    m,
+                    n,
+                    k,
+                    alpha,
+                    a as *const c_void,
+                    ty(gemm.a),
+                    lda,
+                    b as *const c_void,
+                    ty(gemm.b),
+                    ldb,
+                    beta,
+                    c as *mut c_void,
+                    ty(gemm.c),
+                    ldc,
+                    COMPUTE_32F,
+                    GEMM_DEFAULT,
+                )
+            } else {
+                (self.lib.gemm_strided_batched_ex)(
+                    self.handle,
+                    op(gemm.trans_a),
+                    op(gemm.trans_b),
+                    m,
+                    n,
+                    k,
+                    alpha,
+                    a as *const c_void,
+                    ty(gemm.a),
+                    lda,
+                    gemm.stride_a,
+                    b as *const c_void,
+                    ty(gemm.b),
+                    ldb,
+                    gemm.stride_b,
+                    beta,
+                    c as *mut c_void,
+                    ty(gemm.c),
+                    ldc,
+                    gemm.stride_c,
+                    dim(gemm.batch, "batch")?,
+                    COMPUTE_32F,
+                    GEMM_DEFAULT,
+                )
+            }
         };
         check(rc, "cublasGemmEx")
     }

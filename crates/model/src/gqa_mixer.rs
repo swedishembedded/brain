@@ -22,6 +22,8 @@
 //! and returns `(d_q_full, d_k, d_v)` for the caller's own `q_proj`/`k_proj`/
 //! `v_proj` backward.
 
+use gpu_core::provider::attention::AttnShape;
+use gpu_core::provider::library::LibraryGemmProvider;
 use gpu_core::{DeviceBuffer, Gpu};
 
 use crate::kv_tier::{KvKernels, KvLayer};
@@ -91,6 +93,9 @@ pub struct GqaMixerGrads<'a> {
 pub enum AttnSaved {
     Probs(DeviceBuffer),
     Flash { lse: DeviceBuffer, ids: FlashGqaIds },
+    /// The blockwise tensor-core path ([`gpu_core::provider::attention`]): the
+    /// same row log-sum-exp, and the provider that ran the forward.
+    Library { lse: DeviceBuffer, gemm: LibraryGemmProvider },
 }
 
 /// Everything [`gqa_mixer_bwd`] needs beyond what it recomputes fresh. The
@@ -136,6 +141,28 @@ pub fn gqa_mixer_fwd_with(
     n: u32,
     is_train: bool,
 ) -> (DeviceBuffer, Option<GqaMixerActs>) {
+    gqa_mixer_fwd_tc(g, ids, flash, None, shape, w, q_full, k, v, n, is_train)
+}
+
+/// [`gqa_mixer_fwd_with`] that, where `flash` selects the long-sequence path and
+/// `tensor` is an active tensor-core provider that takes the problem, runs the
+/// attention as blockwise bf16 library GEMMs instead of the scalar flash trio.
+/// Anything the provider declines runs the trio (or the materialised chain)
+/// exactly as before.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_mixer_fwd_tc(
+    g: &Gpu,
+    ids: &GqaMixerIds,
+    flash: Option<FlashGqaIds>,
+    tensor: Option<&LibraryGemmProvider>,
+    shape: &GqaMixerShape,
+    w: &GqaMixerWeights,
+    q_full: &DeviceBuffer,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    n: u32,
+    is_train: bool,
+) -> (DeviceBuffer, Option<GqaMixerActs>) {
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let qd = shape.qd();
 
@@ -143,7 +170,16 @@ pub fn gqa_mixer_fwd_with(
 
     let ctx = g.storage((n * qd) as u64);
     let ga = Gqa { b: shape.b, t: shape.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+    let attn_shape = AttnShape { b: shape.b, t: shape.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, block_rows: None };
+    let library = flash.and(tensor).filter(|tc| tc.attention_supported(&attn_shape)).and_then(|tc| {
+        let lse = g.storage(shape.b as u64 * nh as u64 * shape.t as u64);
+        tc.attention_fwd(g, &attn_shape, &prep.q_normed, &prep.k_normed, v, &ctx, &lse).map(|steps| {
+            g.submit(&[], &steps);
+            AttnSaved::Library { lse, gemm: tc.clone() }
+        })
+    });
     let attn = match flash {
+        _ if library.is_some() => library.expect("checked"),
         Some(fids) => {
             assert!(FlashGqaIds::supported(g, hd), "flash attention requested on a device that cannot run it at head_dim {hd}");
             let lse = g.storage(shape.b as u64 * nh as u64 * shape.t as u64);
@@ -616,6 +652,13 @@ pub fn gqa_mixer_bwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaM
         AttnSaved::Probs(probs) => {
             let d_scores = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
             g.submit(&[], &gqa_bwd(g, &ids.kernels, &ga, &la.q_normed, &la.k_normed, &la.v, probs, &d_ctx, &d_scores, &d_q_normed, &d_k_normed, &d_v));
+        }
+        AttnSaved::Library { lse, gemm } => {
+            let attn_shape = AttnShape { b: shape.b, t: shape.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, block_rows: None };
+            let steps = gemm
+                .attention_bwd(g, &attn_shape, &la.q_normed, &la.k_normed, &la.v, &la.ctx, lse, &d_ctx, &d_q_normed, &d_k_normed, &d_v)
+                .expect("the library attention accepted the forward, so it accepts the backward");
+            g.submit(&[], &steps);
         }
         AttnSaved::Flash { lse, ids: fids } => {
             let dsum = g.storage(shape.b as u64 * nh as u64 * shape.t as u64);
