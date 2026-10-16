@@ -306,8 +306,8 @@ const GDN_BWD_SWEEP_BINDINGS: &[BindKind] = &[
 ];
 
 /// Dynamic shared memory of `gdn_bwd_sweep_f32`: the 128 x 129 state gradient,
-/// two 16 x 129 operand tiles and one reduction float per warp, all f32.
-const GDN_BWD_SWEEP_DYNAMIC_SHARED_BYTES: u32 = (128 * 129 + 2 * 16 * 129 + 8) * 4;
+/// two 16 x 129 operand tiles and one reduction float per warp (16), all f32.
+const GDN_BWD_SWEEP_DYNAMIC_SHARED_BYTES: u32 = (128 * 129 + 2 * 16 * 129 + 16) * 4;
 
 /// The native single-launch form of the reverse sweep of Gated DeltaNet's
 /// across-chunk recurrence (`model::gdn::gdn_chunk_bwd`), or `None` when the

@@ -51,17 +51,17 @@
 #define DK 128
 #define DV 128
 #define MAXC 64
-#define THREADS 256
+#define THREADS 512
 #define SD (DK + 1)          // padded row stride of the state and of the staged tiles
 #define KC 16                // k-depth staged per step
 
-// out[r][col] (RM*16 rows x 128 cols, thread (ty, tx) owns rows ty + 16 i and
+// out[r][col] (RM*32 rows x 128 cols, thread (ty, tx) owns rows ty + 32 i and
 // columns tx + 16 j) += sum over k < K of fa(k, r) * fb(k, col). AK / BK say
 // whether the A / B operand is contiguous along k in memory, which picks the
 // coalesced staging order.
 template <int RM, bool AK, bool BK, class FA, class FB>
 __device__ __forceinline__ void tile_gemm(float (&acc)[RM][8], float* ta, float* tb, unsigned int K, FA fa, FB fb) {
-    constexpr unsigned int ROWS = RM * 16;
+    constexpr unsigned int ROWS = RM * 32;
     const unsigned int tid = threadIdx.x, ty = tid >> 4, tx = tid & 15u;
     for (unsigned int k0 = 0; k0 < K; k0 += KC) {
         for (unsigned int e = tid; e < KC * ROWS; e += THREADS) {
@@ -77,7 +77,7 @@ __device__ __forceinline__ void tile_gemm(float (&acc)[RM][8], float* ta, float*
         for (unsigned int kk = 0; kk < KC; ++kk) {
             float a[RM], b[8];
 #pragma unroll
-            for (int i = 0; i < RM; ++i) { a[i] = ta[kk * SD + ty + 16 * i]; }
+            for (int i = 0; i < RM; ++i) { a[i] = ta[kk * SD + ty + 32 * i]; }
 #pragma unroll
             for (int j = 0; j < 8; ++j) { b[j] = tb[kk * SD + tx + 16 * j]; }
 #pragma unroll
@@ -120,18 +120,18 @@ brain_gdn_bwd_sweep_f32(const unsigned int* params, const float* v_new, const fl
 
         // d_decayed_k[c, p] = sum_q v_new[c, q] * d_state[p, q]
         {
-            float acc[4][8];
+            float acc[2][8];
 #pragma unroll
-            for (int i = 0; i < 4; ++i) {
+            for (int i = 0; i < 2; ++i) {
 #pragma unroll
                 for (int j = 0; j < 8; ++j) { acc[i][j] = 0.0f; }
             }
-            tile_gemm<4, true, true>(
+            tile_gemm<2, true, true>(
                 acc, ta, tb, DV, [&](unsigned int q, unsigned int r) { return r < C ? v_new[off_dv + (unsigned long long)r * DV + q] : 0.0f; },
                 [&](unsigned int q, unsigned int p) { return ds[p * SD + q]; });
 #pragma unroll
-            for (int i = 0; i < 4; ++i) {
-                const unsigned int r = ty + 16 * i;
+            for (int i = 0; i < 2; ++i) {
+                const unsigned int r = ty + 32 * i;
                 if (r < C) {
 #pragma unroll
                     for (int j = 0; j < 8; ++j) { d_decayed_k[off_dk + (unsigned long long)r * DK + tx + 16 * j] = acc[i][j]; }
@@ -140,18 +140,18 @@ brain_gdn_bwd_sweep_f32(const unsigned int* params, const float* v_new, const fl
         }
         // d_v_new[c, q] += sum_p decayed_k[c, p] * d_state[p, q]
         {
-            float acc[4][8];
+            float acc[2][8];
 #pragma unroll
-            for (int i = 0; i < 4; ++i) {
+            for (int i = 0; i < 2; ++i) {
 #pragma unroll
                 for (int j = 0; j < 8; ++j) { acc[i][j] = 0.0f; }
             }
-            tile_gemm<4, true, false>(
+            tile_gemm<2, true, false>(
                 acc, ta, tb, DK, [&](unsigned int p, unsigned int r) { return r < C ? decayed_k[off_dk + (unsigned long long)r * DK + p] : 0.0f; },
                 [&](unsigned int p, unsigned int q) { return ds[p * SD + q]; });
 #pragma unroll
-            for (int i = 0; i < 4; ++i) {
-                const unsigned int r = ty + 16 * i;
+            for (int i = 0; i < 2; ++i) {
+                const unsigned int r = ty + 32 * i;
                 if (r < C) {
 #pragma unroll
                     for (int j = 0; j < 8; ++j) {
@@ -177,22 +177,22 @@ brain_gdn_bwd_sweep_f32(const unsigned int* params, const float* v_new, const fl
         }
 
         // d_state = d_state * decay_last + q_scaled^T @ d_out - w^T @ d_v_new (d_v_new completed above)
-        float acc[8][8];
+        float acc[4][8];
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < 4; ++i) {
 #pragma unroll
-            for (int j = 0; j < 8; ++j) { acc[i][j] = ds[(ty + 16 * i) * SD + tx + 16 * j] * decay_last; }
+            for (int j = 0; j < 8; ++j) { acc[i][j] = ds[(ty + 32 * i) * SD + tx + 16 * j] * decay_last; }
         }
-        tile_gemm<8, false, false>(
+        tile_gemm<4, false, false>(
             acc, ta, tb, C, [&](unsigned int i, unsigned int p) { return q_scaled[off_dk + (unsigned long long)i * DK + p]; },
             [&](unsigned int i, unsigned int q) { return d_out[off_dv + (unsigned long long)i * DV + q]; });
-        tile_gemm<8, false, false>(
+        tile_gemm<4, false, false>(
             acc, ta, tb, C, [&](unsigned int c, unsigned int p) { return -w[off_dk + (unsigned long long)c * DK + p]; },
             [&](unsigned int c, unsigned int q) { return d_v_new[off_dv + (unsigned long long)c * DV + q]; });
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < 4; ++i) {
 #pragma unroll
-            for (int j = 0; j < 8; ++j) { ds[(ty + 16 * i) * SD + tx + 16 * j] = acc[i][j]; }
+            for (int j = 0; j < 8; ++j) { ds[(ty + 32 * i) * SD + tx + 16 * j] = acc[i][j]; }
         }
         __syncthreads();
     }

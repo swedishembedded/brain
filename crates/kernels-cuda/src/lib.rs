@@ -1070,7 +1070,7 @@ pub const ALL: &[CudaKernel] = &[
         entry: "brain_gdn_bwd_sweep_f32",
         what: "the reverse sweep of Gated DeltaNet's across-chunk recurrence in one launch: one block per head keeps the running state gradient in shared memory across all chunks (dynamic shared memory, opted in)",
         reported: "native:gdn_bwd_sweep_f32",
-        block_dim: 256,
+        block_dim: 512,
         // One block per head; the whole 128 x 128 state gradient lives in it.
         tile: (64, 128),
         // Everything is dynamic: see `GDN_BWD_SWEEP_DYNAMIC_SHARED_BYTES`.
