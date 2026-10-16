@@ -6021,20 +6021,39 @@ mod tests {
         (positions, seqlens, blocks, offsets, bt)
     }
 
-    #[test]
-    fn causal_chunk_fp32_kv_dispatches_the_fused_kernel_not_the_triad() {
+    /// The kernel ids `run_batched_steps` dispatches for `cc` rows of the tiny
+    /// config, and whether the device can run the cooperative (barrier-shaped)
+    /// fused attention kernels at all. `Op::PagedAttentionFused` offers its
+    /// fused candidates only where `caps.workgroup_reductions` holds (the CPU
+    /// JIT has none), so the dispatch tests assert the fused kernel where it
+    /// is reachable and the triad fallback where it is not - the same
+    /// observable choice, expected from the device capability rather than from
+    /// the selector under test.
+    fn dispatched_kinds(kv_int8: bool, cc: u32, causal_chunk: bool) -> (Vec<usize>, bool) {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, false, false);
-        let cc = 6u32;
+        let gpu = gpu_core::testgpu::dev(PIPELINES);
+        let cooperative = gpu.caps().workgroup_reductions;
+        let eng = Engine::from_map_with_gpu(gpu, cfg.clone(), &map, 4, 64, 4, 8, 32, kv_int8, false);
         let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
         let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
-        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, true);
-        let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, causal_chunk);
+        (steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect(), cooperative)
+    }
+
+    #[test]
+    fn causal_chunk_fp32_kv_dispatches_the_fused_kernel_not_the_triad() {
+        let n_layers = QwenConfig::tiny().n_layers as usize;
+        let (kinds, cooperative) = dispatched_kinds(false, 6, true);
         let fused = kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count();
         let triad = kinds.iter().filter(|&&k| k == SCORES_B || k == SCORES_B_WG || k == SOFTMAX_B || k == APPLY_B).count();
-        assert_eq!(fused, cfg.n_layers as usize, "one fused dispatch per layer, causal-chunk fp32 KV");
-        assert_eq!(triad, 0, "the triad must not run when the fused kernel does");
+        if cooperative {
+            assert_eq!(fused, n_layers, "one fused dispatch per layer, causal-chunk fp32 KV");
+            assert_eq!(triad, 0, "the triad must not run when the fused kernel does");
+        } else {
+            assert_eq!(fused, 0, "a device without workgroup reductions cannot run the fused kernel");
+            assert!(triad > 0, "the triad is the fallback without workgroup reductions");
+        }
     }
 
     /// M2.1's own finding (the unsplit fused decode kernel never wins) still
@@ -6078,20 +6097,19 @@ mod tests {
     /// actually PICKS the split-key pair at this one batch size.
     #[test]
     fn decode_bsz_one_dispatches_the_split_key_fused_kernel_not_the_triad() {
-        let cfg = QwenConfig::tiny();
-        let map = tiny_weights(&cfg);
-        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, false, false);
-        let cc = 1u32;
-        let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
-        let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
-        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, false);
-        let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+        let n_layers = QwenConfig::tiny().n_layers as usize;
+        let (kinds, cooperative) = dispatched_kinds(false, 1, false);
         let split = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_SPLIT).count();
         let combine = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_COMBINE).count();
-        assert_eq!(split, cfg.n_layers as usize, "one split dispatch per layer, bsz=1 decode");
-        assert_eq!(combine, cfg.n_layers as usize, "one combine dispatch per layer, bsz=1 decode");
         let triad = kinds.iter().filter(|&&k| k == SCORES_B || k == SCORES_B_WG || k == SOFTMAX_B || k == APPLY_B).count();
-        assert_eq!(triad, 0, "the triad must not run when the split-key fused kernel does");
+        if cooperative {
+            assert_eq!(split, n_layers, "one split dispatch per layer, bsz=1 decode");
+            assert_eq!(combine, n_layers, "one combine dispatch per layer, bsz=1 decode");
+            assert_eq!(triad, 0, "the triad must not run when the split-key fused kernel does");
+        } else {
+            assert_eq!(split + combine, 0, "a device without workgroup reductions cannot run the split-key kernel");
+            assert!(triad > 0, "the triad is the fallback without workgroup reductions");
+        }
     }
 
     /// The int8-KV twin of `causal_chunk_fp32_kv_dispatches_the_fused_kernel_
@@ -6105,19 +6123,18 @@ mod tests {
     /// `batched_tape` actually PICKS it.
     #[test]
     fn causal_chunk_int8_kv_dispatches_the_fused_kernel_not_the_triad() {
-        let cfg = QwenConfig::tiny();
-        let map = tiny_weights(&cfg);
-        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, true, false);
-        let cc = 6u32;
-        let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
-        let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
-        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, true);
-        let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+        let n_layers = QwenConfig::tiny().n_layers as usize;
+        let (kinds, cooperative) = dispatched_kinds(true, 6, true);
         let fused = kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL_I8).count();
-        assert_eq!(fused, cfg.n_layers as usize, "one fused int8 dispatch per layer, causal-chunk int8 KV");
-        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count(), 0, "the fp32 kernel would read the packed pool as f32");
         let triad = kinds.iter().filter(|&&k| k == SCORES_I8 || k == SOFTMAX_B || k == APPLY_I8).count();
-        assert_eq!(triad, 0, "the int8 triad must not run when the fused int8 kernel does");
+        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count(), 0, "the fp32 kernel would read the packed pool as f32");
+        if cooperative {
+            assert_eq!(fused, n_layers, "one fused int8 dispatch per layer, causal-chunk int8 KV");
+            assert_eq!(triad, 0, "the int8 triad must not run when the fused int8 kernel does");
+        } else {
+            assert_eq!(fused, 0, "a device without workgroup reductions cannot run the fused int8 kernel");
+            assert!(triad > 0, "the int8 triad is the fallback without workgroup reductions");
+        }
     }
 
     /// Decode under int8 KV at `bsz >= 2` keeps the triad, same as fp32
@@ -6156,20 +6173,19 @@ mod tests {
     /// actually PICKS the pair at this one batch size.
     #[test]
     fn decode_int8_kv_bsz_one_dispatches_the_split_key_fused_kernel_not_the_triad() {
-        let cfg = QwenConfig::tiny();
-        let map = tiny_weights(&cfg);
-        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, true, false);
-        let cc = 1u32;
-        let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
-        let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
-        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, false);
-        let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+        let n_layers = QwenConfig::tiny().n_layers as usize;
+        let (kinds, cooperative) = dispatched_kinds(true, 1, false);
         let split = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_SPLIT_I8).count();
         let combine = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_COMBINE_I8).count();
-        assert_eq!(split, cfg.n_layers as usize, "one int8 split dispatch per layer, bsz=1 decode");
-        assert_eq!(combine, cfg.n_layers as usize, "one int8 combine dispatch per layer, bsz=1 decode");
         let triad = kinds.iter().filter(|&&k| k == SCORES_I8 || k == SOFTMAX_B || k == APPLY_I8).count();
-        assert_eq!(triad, 0, "the int8 triad must not run when the int8 split-key fused kernel does");
+        if cooperative {
+            assert_eq!(split, n_layers, "one int8 split dispatch per layer, bsz=1 decode");
+            assert_eq!(combine, n_layers, "one int8 combine dispatch per layer, bsz=1 decode");
+            assert_eq!(triad, 0, "the int8 triad must not run when the int8 split-key fused kernel does");
+        } else {
+            assert_eq!(split + combine, 0, "a device without workgroup reductions cannot run the int8 split-key kernel");
+            assert!(triad > 0, "the int8 triad is the fallback without workgroup reductions");
+        }
     }
 
     /// A config whose `tok.weight` is deliberately sized past `wgpu`'s
