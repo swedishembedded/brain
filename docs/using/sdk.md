@@ -214,6 +214,24 @@ per message marking what is supervised - and exports the adapter plus a
 training record. `brain::score_chat` is the held-out measurement: mean
 per-token cross-entropy over the supervised positions of held-out records,
 for the base alone or with an adapter folded in exactly as serving folds it.
+`brain::score_tokens` is the per-token form: the log-probability of each
+target token under the base, optionally with an adapter applied, with every
+logit first multiplied by a scale (`1/T` scores under the distribution a
+sampler at temperature `T` drew from; `1.0` is the plain model). With no
+adapter it is the frozen reference of a preference or policy-gradient
+objective (the same base, adapter disabled); `brain::IGNORE_TARGET` masks a
+position, which scores `0.0`.
+
+```rust
+let logprobs = brain::score_tokens(base, Some(adapter.as_path()), &tokens, &targets, 1.0 / 0.7, &device)?;
+```
+
+The three fine-tuners (`ChatFineTune`, `ChatFullFineTune`,
+`PreferenceFineTune`) take `.arch("qwen3")`, the architecture's `brain_arch`
+id. An architecture that lacks what the run needs (a chat fine-tuner, or the
+token objectives DPO and GRPO are built on) is refused before any file is
+read, with `brain::Error::Unsupported` naming the architecture and the
+missing capability.
 
 ```rust
 let outcome = brain::ChatFineTune::from_pretrained("/models/qwen3-0.6b/model.brain.safetensors")
@@ -518,7 +536,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `creature` | `Creature`, `View` - a connectome running a body, and a window onto it |
 | `forecast` | `ForecastPipeline` - time-series forecasting |
 | `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path or a hub id; `ChatPipeline` - multi-turn chat with tool calling, streaming and cancellation; also the Qwen3/LFM2.5-Encoder backbones of `EmbeddingPipeline` (32768-token context), `EmbeddingTrainer` (contrastive fine-tuning over frozen embeddings), and `EncoderFineTuner` (full-encoder contrastive fine-tuning, LFM2 only) |
-| `study` | `ChatFineTune`, `score_chat` - LoRA fine-tuning of a Qwen3 chat model and its held-out score; `ChatFullFineTune`, `merge_adapter` - full-parameter fine-tuning into a checkpoint directory, and folding an adapter into the weights; `PreferenceFineTune`, `score_preference` - its DPO counterpart; `DocumentStudy` - teaching a model documents behind a gate; `promote` - the promotion gate and its paired sign test (`promote::stats::sign_test`) for deciding whether a trained model replaces the one before |
+| `study` | `ChatFineTune`, `score_chat`, `score_tokens` - LoRA fine-tuning of a Qwen3 chat model and its held-out score; `ChatFullFineTune`, `merge_adapter` - full-parameter fine-tuning into a checkpoint directory, and folding an adapter into the weights; `PreferenceFineTune`, `score_preference` - its DPO counterpart; `DocumentStudy` - teaching a model documents behind a gate; `promote` - the promotion gate and its paired sign test (`promote::stats::sign_test`) for deciding whether a trained model replaces the one before |
 | `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
 | `audio` | `ResidentTts` - Qwen3-TTS loaded once for many short pieces, on the device when there is one (the host otherwise), with chunks handed out as the utterance grows (the first after 8 frames, 0.64 s of speech) and cancellation; `TranscribePipeline` - speech-to-text (qwen3-asr, offline; or nemotron-asr, one-shot): the checkpoint asked for selects the model; `TranscribePipeline::features` - Qwen3-ASR's encoder features of a clip of any length; with `study`, `SpeechIngress` (teach a language model to listen by training a projector alone, the model and its adapter frozen), `SpeechProjector` (the trained projector on the host) and `ChatPipeline::generate_with_rows` (answer a prompt in which a run of positions is embedding rows) |
 | `full` | every surface; this is the default |

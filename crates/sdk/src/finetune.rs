@@ -826,6 +826,42 @@ pub fn score_chat(base: &str, adapter: Option<&Path>, held_out: &Path) -> Result
     Ok(score_records(weights_str, adapter, &tok, &tmpl, &records, block_for(longest, None)?, qwen3::Dtype::F32, data::chat::RenderOpts::default()))
 }
 
+/// Per-token log-probabilities of `targets` given `tokens` under `base`
+/// (optionally with `adapter` applied at run time, exactly as serving it
+/// would), with every logit multiplied by `logit_scale` first: `1/T` scores
+/// under the distribution a sampler at temperature `T` drew from, `1.0` the
+/// plain model. `targets[i]` is the token that follows `tokens[i]`; an
+/// [`crate::IGNORE_TARGET`] target scores `0.0`. Pass no `adapter` to score under the
+/// frozen reference of a preference or policy-gradient objective: the same
+/// base, adapter disabled.
+///
+/// `base` is resolved like [`ChatFineTune::from_pretrained`]'s. The scores are
+/// the ones a trainer's `batch_token_logprobs` reads off its own forward, from
+/// the full `logits_all` pass, so this is the always-correct oracle to compare
+/// a training run against, not the fast path inside one.
+pub fn score_tokens(base: &str, adapter: Option<&Path>, tokens: &[u32], targets: &[u32], logit_scale: f32, device: &Device) -> Result<Vec<f32>> {
+    if tokens.is_empty() || tokens.len() != targets.len() {
+        return Err(Error::MissingArgument(format!("score_tokens: need as many targets as tokens (got {} tokens, {} targets) and at least one", tokens.len(), targets.len())));
+    }
+    if !(logit_scale.is_finite() && logit_scale > 0.0) {
+        return Err(Error::MissingArgument(format!("score_tokens: the logit scale must be finite and positive, got {logit_scale}")));
+    }
+    let store_root = loader::model_dir::resolve(None);
+    let (weights, model_dir, _) = loader::model_dir::resolve_base(base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+    let open = qwen3::store_checkpoint_path(&weights, &model_dir);
+    let weights_str = utf8(&open)?;
+    let cfg = qwen3::checkpoint_config(weights_str).map_err(Error::Backend)?;
+    if let Some(&bad) = tokens.iter().chain(targets.iter().filter(|&&t| t != model::IGNORE)).find(|&&t| t >= cfg.vocab) {
+        return Err(Error::Backend(format!("score_tokens: token {bad} is outside the model's vocabulary of {}", cfg.vocab)));
+    }
+    crate::device::resolve(device)?;
+    let mut scored = qwen3::Qwen::load_inference(weights_str, 1, tokens.len() as u32);
+    if let Some(path) = adapter {
+        scored.attach_adapter(utf8(path)?).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
+    }
+    Ok(model::logprobs::token_logprobs_scaled(&scored, tokens, targets, logit_scale).expect("a language model has logits"))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn score_records(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, records: &[ChatSample], block: u32, tier: qwen3::Dtype, render: data::chat::RenderOpts) -> HeldOutScore {
     let s = qwen3::eval::score_chat_rendered(weights, adapter, tok, tmpl, records, block, tier, render);

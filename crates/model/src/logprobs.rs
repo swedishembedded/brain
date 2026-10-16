@@ -41,17 +41,30 @@ pub fn row_logprob(row: &[f32], idx: usize) -> f32 {
 /// whatever batch the caller had set. Use [`crate::training::TokenObjectives::batch_token_logprobs`]
 /// instead inside a training step; this function is for scoring outside one.
 pub fn token_logprobs<M: Model>(m: &M, tokens: &[u32], targets: &[u32]) -> Option<Vec<f32>> {
+    token_logprobs_scaled(m, tokens, targets, 1.0)
+}
+
+/// [`token_logprobs`] under logits multiplied by `logit_scale` (`1/T` for a
+/// sampler that drew at temperature `T`), the distribution
+/// `TokenObjectives::set_logit_scale` makes a model train against. The scale
+/// is applied here on the host to the model's unscaled logits: a model whose
+/// own scale is set would be scaled twice, so score with it at `1.0`.
+pub fn token_logprobs_scaled<M: Model>(m: &M, tokens: &[u32], targets: &[u32], logit_scale: f32) -> Option<Vec<f32>> {
     assert_eq!(tokens.len(), targets.len(), "logprobs::token_logprobs: tokens/targets length mismatch");
+    assert!(logit_scale.is_finite() && logit_scale > 0.0, "the logit scale must be finite and positive, got {logit_scale}");
     let logits = m.logits_all(tokens)?;
     let vocab = logits.len() / tokens.len();
+    let mut scaled = vec![0.0f32; vocab];
     Some(
         (0..tokens.len())
             .map(|i| {
                 if targets[i] == crate::IGNORE {
-                    0.0
-                } else {
-                    row_logprob(&logits[i * vocab..(i + 1) * vocab], targets[i] as usize)
+                    return 0.0;
                 }
+                for (s, z) in scaled.iter_mut().zip(&logits[i * vocab..(i + 1) * vocab]) {
+                    *s = z * logit_scale;
+                }
+                row_logprob(&scaled, targets[i] as usize)
             })
             .collect(),
     )

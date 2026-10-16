@@ -163,7 +163,11 @@ pub mod study;
 #[cfg(feature = "study")]
 mod finetune;
 #[cfg(feature = "study")]
-pub use finetune::{score_chat, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, FineTuneStatus, HeldOutScore, MonitorPoint, Selection};
+#[cfg(feature = "study")]
+/// The target that masks a position out of [`score_tokens`] (it scores `0.0`).
+pub use model::IGNORE as IGNORE_TARGET;
+#[cfg(feature = "study")]
+pub use finetune::{score_chat, score_tokens, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, FineTuneStatus, HeldOutScore, MonitorPoint, Selection};
 #[cfg(feature = "study")]
 mod full_finetune;
 #[cfg(feature = "study")]

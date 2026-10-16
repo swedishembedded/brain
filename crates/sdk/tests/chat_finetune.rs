@@ -284,3 +284,42 @@ fn a_transformers_directory_base_fine_tunes_and_scores() {
     assert!(digest.starts_with("sha256:"), "{digest}");
     assert!(outcome.adapter.is_some_and(|a| a.is_file()));
 }
+
+/// `score_tokens` is the always-correct oracle of the trainer's per-token
+/// log-probabilities: it equals `batch_token_logprobs` of a forward on the
+/// same checkpoint, at the unit logit scale and at a halved one (a sampler at
+/// temperature 2), masked positions score zero, and an adapter changes the
+/// scores while no adapter is the frozen base.
+#[test]
+fn score_tokens_matches_the_trainers_logprobs_and_applies_the_logit_scale() {
+    let model = chat_model_dir("score-tokens");
+    let weights = model.join("model.safetensors");
+    let weights_str = weights.to_str().unwrap();
+    let tokens: Vec<u32> = vec![3, 7, 1, 12, 5, 9];
+    let targets: Vec<u32> = vec![7, 1, brain::IGNORE_TARGET, 5, 9, 2];
+
+    for scale in [1.0f32, 0.5] {
+        let got = brain::score_tokens(weights_str, None, &tokens, &targets, scale, &cpu()).expect("scored");
+        assert_eq!(got[2], 0.0, "a masked position scores zero");
+
+        let mut trainer = qwen3::Qwen::load(weights_str, 1, tokens.len() as u32);
+        trainer.set_logit_scale(scale);
+        <qwen3::Qwen as model::Model>::set_batch(&trainer, model::Batch::Lm { tokens: &tokens, targets: &targets });
+        <qwen3::Qwen as model::Model>::forward(&trainer);
+        let want = trainer.batch_token_logprobs();
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!((g - w).abs() < 1e-3, "position {i} at scale {scale}: score_tokens {g} vs trainer {w}");
+        }
+    }
+
+    let out = model.join("run");
+    let outcome = fine_tune(&model, &out).run().expect("the fine-tune runs");
+    let adapter = outcome.adapter.expect("an exported adapter");
+    let base = brain::score_tokens(weights_str, None, &tokens, &targets, 1.0, &cpu()).unwrap();
+    let tuned = brain::score_tokens(weights_str, Some(&adapter), &tokens, &targets, 1.0, &cpu()).unwrap();
+    let moved = base.iter().zip(&tuned).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+    assert!(moved > 1e-4, "the adapter must change the scores, moved only {moved}");
+
+    let refused = brain::score_tokens(weights_str, None, &tokens, &targets[..3], 1.0, &cpu()).unwrap_err().to_string();
+    assert!(refused.contains("as many targets as tokens"), "{refused}");
+}
