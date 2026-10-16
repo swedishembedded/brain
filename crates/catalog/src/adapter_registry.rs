@@ -247,14 +247,25 @@ impl AdapterRegistry {
         if loaded.adapter.rank > settings.rank_cap {
             return Err(format!("adapter {id} has rank {}, above this server's --adapter-rank-cap {}", loaded.adapter.rank, settings.rank_cap));
         }
+        let mut missing: Vec<&str> = Vec::new();
         for site in &loaded.adapter.sites {
             let leaf = site.base.rsplit('.').nth(1).unwrap_or_default();
             if !self.family.all.contains(&leaf) {
                 return Err(format!("adapter {id} holds a pair for {}, which is not a linear of a {} block (it has {})", site.base, self.family.tag, self.family.all.join(", ")));
             }
-            if !settings.targets.admits(leaf, &self.family.attention) {
-                return Err(format!("adapter {id} corrects {leaf}, which this server's --adapter-targets ({}) does not; widen the flag to serve it", settings.targets));
+            if !settings.targets.admits(leaf, &self.family.attention) && !missing.contains(&leaf) {
+                missing.push(leaf);
             }
+        }
+        if !missing.is_empty() {
+            // Name every linear the bank lacks and the flag value that would
+            // serve this adapter, so one restart fixes it.
+            let widened = AdapterTargets::parse(&missing.join(",")).map(|m| settings.targets.clone().union(m))?;
+            return Err(format!(
+                "adapter {id} corrects {}, which this server's --adapter-targets ({}) does not; restart with --adapter-targets {widened} (or all) to serve it",
+                missing.join(","),
+                settings.targets
+            ));
         }
         Ok(())
     }
@@ -790,7 +801,8 @@ mod tests {
 
         let ok = registry(Some(AdapterBankSettings::default()));
         let wrong_sites = registry(Some(AdapterBankSettings { targets: AdapterTargets::parse("down").unwrap(), ..Default::default() }));
-        assert!(wrong_sites.attach(adapter.clone()).err().unwrap().contains("--adapter-targets"), "the fixture corrects wq");
+        let refusal = wrong_sites.attach(adapter.clone()).err().unwrap();
+        assert!(refusal.contains("corrects wq") && refusal.contains("--adapter-targets down,wq"), "the refusal names the missing linear and the flag value that serves it: {refusal}");
 
         for bad in ["pinned", "Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B:lab:../x:v1", "../etc:lab:x:v1"] {
             let mut a = adapter.clone();
