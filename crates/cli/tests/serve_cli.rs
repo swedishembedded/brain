@@ -183,14 +183,22 @@ impl Drop for Scratch {
     }
 }
 
+/// The card id a trainer records: `<vendor>/<repo>:<owner>:<name>:<tag>`.
+const ADAPTER_ID: &str = "brain/qwen3:acme:support:v3";
+
 /// A stand-in base file (startup verification reads only its bytes) and a
 /// LoRA adapter whose card records the digest of `trained_on` (default: that
 /// base) as the base it was trained against.
 fn write_base_and_adapter(dir: &std::path::Path, fill: f32, trained_on: Option<&std::path::Path>) -> (std::path::PathBuf, std::path::PathBuf) {
+    write_named_adapter(dir, fill, trained_on, ADAPTER_ID)
+}
+
+/// [`write_base_and_adapter`] with the adapter card's id chosen by the test.
+fn write_named_adapter(dir: &std::path::Path, fill: f32, trained_on: Option<&std::path::Path>, id: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let base = dir.join(format!("base-{fill}.safetensors"));
     checkpoint::st::save_safetensors(base.to_str().unwrap(), &[("embed.weight".to_string(), vec![4], vec![fill; 4])], &serde_json::json!({}), None).unwrap();
     let adapter = dir.join("adapter.safetensors");
-    let mut card = checkpoint::st::ModelCard::new("support:v3", "qwen");
+    let mut card = checkpoint::st::ModelCard::new(id, "qwen");
     card.adapter = Some(checkpoint::st::Adapter { kind: "lora".to_string(), rank: Some(2), base: Some("local/base".to_string()), alpha: Some(4.0), ..Default::default() });
     card.training = Some(checkpoint::st::TrainingProvenance {
         code_revision: "test".to_string(),
@@ -203,7 +211,7 @@ fn write_base_and_adapter(dir: &std::path::Path, fill: f32, trained_on: Option<&
         base_digest: Some(brain_modelstore::fetch::file_digest(trained_on.unwrap_or(&base)).unwrap()),
         cycle: 0,
     });
-    let tensors = vec![("blocks.0.attn.wq.lora_a".to_string(), vec![2, 4], vec![0.5; 8]), ("blocks.0.attn.wq.lora_b".to_string(), vec![4, 2], vec![0.5; 8])];
+    let tensors = vec![("blocks.0.attn.wq.weight.lora_a".to_string(), vec![2, 4], vec![0.5; 8]), ("blocks.0.attn.wq.weight.lora_b".to_string(), vec![4, 2], vec![0.5; 8])];
     checkpoint::st::save_safetensors(adapter.to_str().unwrap(), &tensors, &serde_json::json!({"rank": 2}), Some(&card)).unwrap();
     (base, adapter)
 }
@@ -231,7 +239,7 @@ fn a_pinned_adapter_is_reported_by_digest_at_startup() {
     let digest = brain_modelstore::fetch::file_digest(&adapter).unwrap();
     let mut child = serve_command(&dir.0, &base, &["--adapter", adapter.to_str().unwrap()]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().expect("spawn brain serve");
 
-    let expected = format!("brain serve: brain/qwen3 adapter=support:v3 digest={digest}");
+    let expected = format!("brain serve: {ADAPTER_ID} adapter={ADAPTER_ID} digest={digest}");
     let (tx, rx) = std::sync::mpsc::channel();
     let stderr = child.stderr.take().unwrap();
     std::thread::spawn(move || {
@@ -251,9 +259,23 @@ fn a_pinned_adapter_is_reported_by_digest_at_startup() {
             Err(_) => break false,
         }
     };
+    // Exit status before the kill: a server that died on its own says how.
+    let exited = child.try_wait().ok().flatten();
     child.kill().ok();
     child.wait().ok();
-    assert!(found, "expected {expected:?} on stderr; saw:\n{}", seen.join("\n"));
+    assert!(found, "expected {expected:?} on stderr; server exit status {exited:?}; saw:\n{}", seen.join("\n"));
+}
+
+/// An adapter whose card id is not an adapter model reference is refused
+/// at startup with that reason on stderr and a non-zero exit, never silently.
+#[test]
+fn a_pinned_adapter_with_an_unusable_id_is_refused_with_its_reason() {
+    let dir = Scratch::new("pin-bad-id");
+    let (base, adapter) = write_named_adapter(&dir.0, 1.0, None, "support:v3");
+    let out = serve_command(&dir.0, &base, &["--adapter", adapter.to_str().unwrap()]).output().expect("run brain serve");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "an unusable adapter id must not serve; stderr:\n{stderr}");
+    assert!(stderr.contains("support:v3") && stderr.contains("not a model reference"), "stderr must say why; got:\n{stderr}");
 }
 
 /// An adapter trained against another base is refused before anything
