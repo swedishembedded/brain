@@ -9,7 +9,7 @@
 use data::binio::{self, Meta};
 use qwen35::base_source::BaseDtype;
 use qwen35::config::Qwen35Config;
-use qwen35::finetune::{finetune_streamed, Mode};
+use qwen35::finetune::{finetune_streamed, LongSeqOverrides, Mode, StreamedRun};
 use qwen35::model::{pipelines, Qwen35};
 
 #[test]
@@ -34,9 +34,9 @@ fn a_resumed_bf16_base_lora_run_starts_from_the_saved_adapter() {
     let mode = Mode::Lora { rank: 5, alpha: 8.0 };
     let opts = |seed| model::FitOpts { steps: 8, batch_size: 1, block_size: t, lr: 5e-2, min_lr: 5e-3, warmup: 2, decay_iters: 8, checkpoint_secs: 0, eval_interval: 0, eval_batches: 0, seed, ..Default::default() };
 
-    let (first_start, _) = finetune_streamed(&base, &data, &opts(1), &mode, out_s, false, BaseDtype::Bf16, true).expect("cycle 1");
+    let (first_start, _) = finetune_streamed(&base, &data, &opts(1), &mode, out_s, false, &StreamedRun { dtype: BaseDtype::Bf16, recompute: true, long: LongSeqOverrides::default() }).expect("cycle 1");
     let adapter = checkpoint::st::load_safetensors(out_s).unwrap();
     assert!(adapter.tensors.keys().all(|k| k.ends_with(".lora_a") || k.ends_with(".lora_b")), "the output must be adapter-only");
-    let (second_start, _) = finetune_streamed(&base, &data, &opts(2), &mode, out_s, true, BaseDtype::Bf16, true).expect("cycle 2");
+    let (second_start, _) = finetune_streamed(&base, &data, &opts(2), &mode, out_s, true, &StreamedRun { dtype: BaseDtype::Bf16, recompute: true, long: LongSeqOverrides::default() }).expect("cycle 2");
     assert!(second_start < first_start, "resume restarted from zero delta: {first_start} then {second_start}");
 }
