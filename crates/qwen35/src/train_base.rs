@@ -36,11 +36,21 @@ pub struct TrainOpts {
     /// `rows x vocab` at a time instead of `tokens x vocab`); `None` takes
     /// the default of 2^28 words (1 GiB).
     pub head_budget_words: Option<u64>,
+    /// Shortest sequence whose attention runs the flash-attention kernels
+    /// (memory linear in the sequence instead of `heads * T * T`), on a device
+    /// that can run them; `None` takes the shared default. `Some(u32::MAX)`
+    /// keeps the materialised chain.
+    pub flash_min_t: Option<u32>,
+    /// Run each Gated-DeltaNet layer of a training pass in segments of about
+    /// this many tokens (rounded down to whole chunks), so a layer's
+    /// activation memory follows the segment instead of the sequence. `None`
+    /// keeps the whole sequence's intermediates; needs a batch of one.
+    pub gdn_segment_tokens: Option<u32>,
 }
 
 impl Default for TrainOpts {
     fn default() -> Self {
-        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false, head_budget_words: None }
+        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None }
     }
 }
 

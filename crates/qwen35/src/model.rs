@@ -283,7 +283,14 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // A frozen bf16/NF4 base trains through the tiled bf16 dX and the
         // float-read NF4 kernels, and the chunked LM head resolves its
         // elementwise passes by name. Appended unless already registered above.
-        for &(name, src) in model::ops::frozen_base_kernels().iter().chain(model::head_ce::kernels()) {
+        // Training attention also runs the flash trio at long sequences, so
+        // its three kernels are registered too.
+        let flash = [
+            ("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA),
+            ("flash_attn_causal_gqa_bwd_dq", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ),
+            ("flash_attn_causal_gqa_bwd_dkv", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DKV),
+        ];
+        for &(name, src) in model::ops::frozen_base_kernels().iter().chain(model::head_ce::kernels()).chain(&flash) {
             if !v.iter().any(|(have, _)| *have == name) {
                 v.push((name, src));
             }
@@ -637,8 +644,17 @@ fn gdn_mixer_decode_ids() -> model::gdn_mixer::GdnMixerDecodeIds {
 /// `crates/qwen35moe`); `gated` is this crate's own `out_proj` input (the
 /// hoisted forward's return value), kept here since only the LOCAL
 /// `out_proj` backward reads it - see `model::gdn_mixer`'s own module doc.
+/// What a GDN layer's backward starts from: every intermediate of the whole
+/// sequence, or - with `TrainOpts::gdn_segment_tokens` - only the four
+/// projections and a recurrent-state snapshot per segment, the intermediates
+/// being rebuilt one segment at a time (`model::gdn_segment`).
+enum GdnSaved {
+    Full(model::gdn_mixer::GdnMixerActs),
+    Segmented { bounds: model::gdn_segment::GdnSegmentBounds, mixed_qkv: DeviceBuffer, bproj: DeviceBuffer, aproj: DeviceBuffer, z: DeviceBuffer },
+}
+
 struct GdnLayerActs {
-    internals: model::gdn_mixer::GdnMixerActs,
+    saved: GdnSaved,
     gated: DeviceBuffer,
 }
 
@@ -836,6 +852,14 @@ pub struct Qwen35 {
 
     /// Backward's activation cache - see [`TrainActs`]'s own doc.
     train_acts: RefCell<Option<TrainActs>>,
+    /// The flash-attention training kernels' pipeline indices, when they are
+    /// registered on this device's kernel list.
+    flash: Option<model::block::FlashGqaIds>,
+    /// Rows per Gated-DeltaNet segment of a training layer, or `None` to keep
+    /// the whole sequence's intermediates (see [`TrainOpts::gdn_segment_tokens`]).
+    gdn_segment_tokens: Cell<Option<u32>>,
+    /// Shortest sequence the training forward hands to [`Self::flash`].
+    flash_min_t: Cell<u32>,
     /// Whether `forward()` drops each layer's activations after use and
     /// `backward()` recomputes them from the layer-boundary residuals.
     recompute: Cell<bool>,
@@ -1200,6 +1224,10 @@ impl Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
         let m = Qwen35::new_impl_on(gpu, cfg, b, t, src, &opts.base, Some(opts), shard);
         m.set_recompute(opts.recompute);
+        m.gdn_segment_tokens.set(opts.gdn_segment_tokens);
+        if let Some(min_t) = opts.flash_min_t {
+            m.flash_min_t.set(min_t);
+        }
         m
     }
 
@@ -1483,6 +1511,10 @@ impl Qwen35 {
         // hundred rows of logits and recomputes them in the backward. The head
         // table is whatever tier `weights` holds (bf16 for a narrow base), or
         // the fp32 store tensor shared as a `Weight`.
+        let flash = match (gpu.kernel_index("flash_attn_causal_gqa"), gpu.kernel_index("flash_attn_causal_gqa_bwd_dq"), gpu.kernel_index("flash_attn_causal_gqa_bwd_dkv")) {
+            (Some(fwd), Some(bwd_dq), Some(bwd_dkv)) => Some(model::block::FlashGqaIds { fwd, bwd_dq, bwd_dkv }),
+            _ => None,
+        };
         let head_ce = (train && shard.head && !cfg.mtp).then(|| {
             let name = cfg.head_weight();
             let fp32_head;
@@ -1547,6 +1579,9 @@ impl Qwen35 {
             res,
             train_acts: RefCell::new(None),
             recompute: Cell::new(false),
+            flash,
+            flash_min_t: Cell::new(model::block::FlashGqaIds::MIN_TRAIN_T),
+            gdn_segment_tokens: Cell::new(None),
             mtp_input,
             mtp_target,
             mtp_logits,
@@ -1989,9 +2024,21 @@ impl Qwen35 {
                     .expect("exact_round_ok said the device serves the multi-row recurrent kernel at this shape");
                 (gated, None)
             }
-            GdnCall::Whole => model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, None),
+            GdnCall::Whole => match self.gdn_segment_tokens.get().filter(|_| self.is_train) {
+                Some(seg) => {
+                    let inp = model::gdn_segment::GdnMixerInputs { mixed_qkv: &mixed_qkv, bproj: &bproj, aproj: &aproj, z: &z };
+                    let (gated, bounds) = model::gdn_segment::gdn_mixer_seg_fwd(g, &gdn_mixer_ids(), &shape, &weights, &inp, seg);
+                    let saved = GdnSaved::Segmented { bounds, mixed_qkv: mixed_qkv.clone(), bproj: bproj.clone(), aproj: aproj.clone(), z: z.clone() };
+                    (gated, Some(saved))
+                }
+                None => {
+                    let (gated, acts) = model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, None);
+                    (gated, acts.map(GdnSaved::Full))
+                }
+            },
             GdnCall::Chunk(cont) => {
-                model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, Some(cont))
+                let (gated, acts) = model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, Some(cont));
+                (gated, acts.map(GdnSaved::Full))
             }
         };
 
@@ -2007,7 +2054,7 @@ impl Qwen35 {
             g.submit(&[], &s);
         }
 
-        let acts = internals.map(|internals| GdnLayerActs { internals, gated });
+        let acts = internals.map(|saved| GdnLayerActs { saved, gated });
         (out, acts)
     }
 
@@ -2076,7 +2123,7 @@ impl Qwen35 {
         // Set by the decode arm that fuses the sigmoid gate into the quantiser.
         let mut o_proj_act: Option<Act> = None;
         let (ctx_gated, internals) = match cached {
-            None => model::gqa_mixer::gqa_mixer_fwd(g, &gqa_mixer_ids(), &shape, &weights, &q_full, &k, &v, n, self.is_train),
+            None => model::gqa_mixer::gqa_mixer_fwd_with(g, &gqa_mixer_ids(), self.training_flash(), &shape, &weights, &q_full, &k, &v, n, self.is_train),
             Some(GqaCached::Chunk(ch)) => (
                 model::gqa_mixer::gqa_mixer_chunk_kv_fwd(
                     g,
@@ -2535,7 +2582,7 @@ impl Qwen35 {
 
         // Reverse of the hoisted `model::gdn_mixer::gdn_mixer_fwd` internals.
         let shape = model::gdn_mixer::GdnMixerShape {
-            gdn: la.internals.shape,
+            gdn: GdnShape { b: self.b, h: nvh, t: self.t, dk: c.linear_key_head_dim, dv: c.linear_value_head_dim, chunk: self.chunk },
             nkh: c.linear_num_key_heads,
             conv_kernel: c.linear_conv_kernel_dim,
             rms_eps: c.rms_eps,
@@ -2553,7 +2600,13 @@ impl Qwen35 {
             dt_bias: self.trainable(&p("dt_bias")).then(|| self.g(&p("dt_bias"))),
             norm_weight: self.trainable(&p("norm.weight")).then(|| self.g(&p("norm.weight"))),
         };
-        let (d_mixed_qkv, d_bproj, d_aproj, d_z) = model::gdn_mixer::gdn_mixer_bwd(g, &gdn_mixer_ids(), &shape, &weights, &grads, &la.internals, &d_gated, n);
+        let (d_mixed_qkv, d_bproj, d_aproj, d_z) = match &la.saved {
+            GdnSaved::Full(acts) => model::gdn_mixer::gdn_mixer_bwd(g, &gdn_mixer_ids(), &shape, &weights, &grads, acts, &d_gated, n),
+            GdnSaved::Segmented { bounds, mixed_qkv, bproj, aproj, z } => {
+                let inp = model::gdn_segment::GdnMixerInputs { mixed_qkv, bproj, aproj, z };
+                model::gdn_segment::gdn_mixer_seg_bwd(g, &gdn_mixer_ids(), &shape, &weights, &grads, &inp, bounds, &d_gated)
+            }
+        };
 
         // in_proj_b/a/z backward (LoRA dispatch stays local). FIRST touch to
         // d_xn1 in this function (acc=0) -- in_proj_qkv (below) accumulates
@@ -2829,6 +2882,22 @@ impl Qwen35 {
             }
         }
         self.gpu.submit(&clears, &[]);
+    }
+
+    /// The flash-attention trio a TRAINING forward over this instance's `t`
+    /// tokens runs instead of materialising the `[B,H,T,T]` scores and
+    /// probabilities: only on a device that can run it, from
+    /// `TrainOpts::flash_min_t` tokens up (below that the chain is cheaper and
+    /// is the reference the trio is tested against). Inference keeps the chain.
+    fn training_flash(&self) -> Option<model::block::FlashGqaIds> {
+        let ids = self.flash?;
+        (self.is_train && self.t >= self.flash_min_t.get() && model::block::FlashGqaIds::supported(&self.gpu, self.cfg.head_dim)).then_some(ids)
+    }
+
+    /// Whether this instance's training attention runs the flash kernels
+    /// (see [`TrainOpts::flash_min_t`]) rather than the materialised chain.
+    pub fn attention_is_flash(&self) -> bool {
+        self.training_flash().is_some()
     }
 
     /// The decode caches, built now if this is a training build's first decode.
@@ -4237,7 +4306,7 @@ impl Qwen35 {
         let ta = ta.as_ref().expect("qwen35: debug_gdn_trace requires an is_train instance (Self::new_fp32_shard_src_train)");
         let la = &ta.layers[l - self.shard.start];
         let MixerActs::Gdn(gdn) = &la.mixer else { panic!("qwen35: debug_gdn_trace: layer {l} is not a GDN (Linear) layer") };
-        let ia = &gdn.internals;
+        let GdnSaved::Full(ia) = &gdn.saved else { panic!("qwen35: debug_gdn_trace needs the whole-sequence GDN activations (no gdn_segment_tokens)") };
         vec![
             ("xn1", g.read(&la.xn1, n * d)),
             ("ncl_in", g.read(&ia.ncl_in, n * conv_dim)),
