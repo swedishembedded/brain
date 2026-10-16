@@ -47,7 +47,7 @@ fn opts(steps: u32, lr: f32) -> TrainOpts {
         train_base: None,
         cache_dir: None,
         size: 512,
-        seed: 0,
+        seed: data::rng::random_seed(),
         save_path: String::new(),
         ckpt_every: 0,
         resume: false,

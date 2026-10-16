@@ -21,6 +21,7 @@ use flux2::modelgrad::{grad_views, grads, init_model, make_flow_batch, Cfg};
 fn fixture() -> (Cfg, flux2::modelgrad::ModelWeights<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let cfg = Cfg::tiny();
     let w = init_model::<f32>(&cfg, 7);
+    // seed: the pinned loss and gradient digest below were recorded from this exact fixture
     let mut rng = data::rng::Rng::new(0xF1);
     let mut rf = || (rng.next_f64() - 0.5) as f32;
     let x0: Vec<f32> = (0..cfg.n_img() * cfg.in_channels).map(|_| rf()).collect();

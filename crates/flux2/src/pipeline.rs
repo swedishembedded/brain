@@ -2760,6 +2760,7 @@ pub fn ref_from_hwc_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data::rng::random_seed;
 
     fn img(h: u32, w: u32) -> (Vec<f32>, u32, u32) {
         (Vec::new(), h, w)
@@ -2985,7 +2986,7 @@ mod tests {
         (chw, h, w)
     }
 
-    fn run(mask: Option<crate::mask::Mask>, w: u32, h: u32) -> Vec<u8> {
+    fn run(seed: u64, mask: Option<crate::mask::Mask>, w: u32, h: u32) -> Vec<u8> {
         let d = Stub::new();
         let opts = GenOpts {
             width: w,
@@ -2994,7 +2995,7 @@ mod tests {
             steps: Some(4),
             experimental_steps: false,
             guidance: 4.0,
-            seed: 11,
+            seed,
             mask,
             ref_resolution_scale: DEFAULT_REF_RESOLUTION_SCALE,
             tile: None,
@@ -3023,8 +3024,9 @@ mod tests {
     /// never asked for it.
     #[test]
     fn an_all_white_mask_is_bit_identical_to_no_mask() {
+        let seed = random_seed();
         let (w, h) = (128u32, 96u32); // 4:3, the aspect this was built for
-        assert_eq!(run(None, w, h), run(Some(solid(1.0, w, h)), w, h));
+        assert_eq!(run(seed, None, w, h), run(seed, Some(solid(1.0, w, h)), w, h));
     }
 
     /// **Gate 2 - an all-black mask reproduces the source.** Exactly, against
@@ -3034,13 +3036,14 @@ mod tests {
     /// uniformly brightened image.
     #[test]
     fn an_all_black_mask_reproduces_the_source() {
+        let seed = random_seed();
         let (w, h) = (128u32, 96u32);
         let d = Stub::new();
         let (chw, sh, sw) = source(h, w);
         let round_trip = d
             .decode_tokens(&d.encode_image(&chw, sh, sw).unwrap(), (h / 16) as usize, (w / 16) as usize)
             .unwrap();
-        let got = run(Some(solid(0.0, w, h)), w, h);
+        let got = run(seed, Some(solid(0.0, w, h)), w, h);
         assert_eq!(got, round_trip, "black must land on the source latent exactly");
 
         // ... and that round trip is genuinely the source, not a grey field.
@@ -3057,7 +3060,7 @@ mod tests {
 
         // A generation with no preservation at all must NOT pass that bar -
         // otherwise the gate above proves nothing about the mask.
-        let (cos_free, rel_free) = agreement(&run(Some(solid(1.0, w, h)), w, h), &src8);
+        let (cos_free, rel_free) = agreement(&run(seed, Some(solid(1.0, w, h)), w, h), &src8);
         assert!(cos_free < 0.99 || rel_free > 0.15, "free run: cosine {cos_free}, rel_l2 {rel_free}");
     }
 
@@ -3075,6 +3078,7 @@ mod tests {
     /// flips the baselines in lockstep with the result.
     #[test]
     fn a_split_mask_regenerates_one_half_and_preserves_the_other() {
+        let seed = random_seed();
         let (w, h) = (128u32, 96u32);
         let mut v = vec![0.0f32; (w * h) as usize];
         for y in 0..h as usize {
@@ -3082,13 +3086,13 @@ mod tests {
                 v[y * w as usize + x] = 1.0;
             }
         }
-        let split = run(Some(crate::mask::Mask::new(v, w, h).unwrap()), w, h);
+        let split = run(seed, Some(crate::mask::Mask::new(v, w, h).unwrap()), w, h);
         let d = Stub::new();
         let (chw, sh, sw) = source(h, w);
         let kept = d
             .decode_tokens(&d.encode_image(&chw, sh, sw).unwrap(), (h / 16) as usize, (w / 16) as usize)
             .unwrap();
-        let freed = run(None, w, h);
+        let freed = run(seed, None, w, h);
 
         let half = |img: &[u8], left: bool| -> Vec<u8> {
             let mut o = Vec::new();
@@ -3177,6 +3181,7 @@ mod tests {
     /// was actually handed, on both sides of the sizing decision.
     #[test]
     fn the_joint_sequence_is_exactly_what_the_pipeline_was_sized_for() {
+        let seed = random_seed();
         let (w, h) = (128u32, 96u32);
         let refs = [source(h, w), source(h, w)];
         let base = GenOpts {
@@ -3184,7 +3189,7 @@ mod tests {
             height: h,
             steps: Some(2),
             experimental_steps: true, // this gate is about sizing, at 2 steps
-            seed: 5,
+            seed,
             ..GenOpts::default()
         };
         let cases = [
@@ -3231,6 +3236,7 @@ mod tests {
     /// generation.
     #[test]
     fn the_denoiser_attends_to_the_conditioning_copy_of_the_init_reference() {
+        let seed = random_seed();
         let (w, h) = (128u32, 96u32);
         // The default is the reference's own size: a full-strength run and a
         // strength edit hand the model the same photograph, at the same
@@ -3245,7 +3251,7 @@ mod tests {
                 strength: Some(0.95),
                 steps: Some(2),
                 experimental_steps: true, // 2 steps suffice to see the tail
-                seed: 3,
+                seed,
                 ref_resolution_scale: scale,
                 ..GenOpts::default()
             };
@@ -3296,6 +3302,7 @@ mod tests {
     /// the same answer out of it rather than trusting that they do.
     #[test]
     fn training_and_generation_build_the_same_reference_conditioned_sequence() {
+        let seed = random_seed();
         let (w, h) = (128u32, 96u32);
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
         let d = Stub::new();
@@ -3309,7 +3316,7 @@ mod tests {
             strength: Some(1.0),
             steps: Some(1),
             experimental_steps: true,
-            seed: 5,
+            seed,
             ..GenOpts::default()
         };
         let req = BatchRequest {
@@ -3389,6 +3396,7 @@ mod tests {
             height: h,
             strength: Some(1.0),
             steps: Some(4),
+            // seed: the fnv1a digest below was recorded from this render
             seed: 11,
             ..GenOpts::default()
         };
@@ -3420,6 +3428,7 @@ mod tests {
     /// setting it is supposed to reach.
     #[test]
     fn both_spellings_of_full_strength_integrate_the_klein_schedule() {
+        let seed = random_seed();
         let (w, h) = (128u32, 96u32);
         let (steps, n_gen) = (12usize, ((h / 16) * (w / 16)) as usize);
         let want = diffusion::scheduler::klein_sigmas(steps, n_gen);
@@ -3434,7 +3443,7 @@ mod tests {
                     strength,
                     steps: Some(steps as u32),
                     experimental_steps: true, // the schedule is the subject
-                    seed: 7,
+                    seed,
                     ..GenOpts::default()
                 },
                 cancel: Default::default(),
@@ -3504,7 +3513,7 @@ mod tests {
     /// fixed. `ref_resolution_scale` is 1.0 so the conditioning copy is the
     /// reference at its own size on **both** sides of the `strength < 1`
     /// branch: the only thing the gates below vary is the dial.
-    fn run_flow(strength: f32, w: u32, h: u32) -> Vec<u8> {
+    fn run_flow(seed: u64, strength: f32, w: u32, h: u32) -> Vec<u8> {
         let req = BatchRequest {
             prompt: "a staged bedroom".into(),
             refs: vec![source(h, w)],
@@ -3514,7 +3523,7 @@ mod tests {
                 strength: Some(strength),
                 steps: Some(12),
                 experimental_steps: true, // the 12-step dial walk is the subject
-                seed: 7,
+                seed,
                 ref_resolution_scale: 1.0,
                 ..GenOpts::default()
             },
@@ -3593,6 +3602,7 @@ mod tests {
     /// call.
     #[test]
     fn the_img2img_branch_integrates_the_img2img_schedule() {
+        let seed = random_seed();
         let (w, h) = (128u32, 96u32);
         let (steps, n_gen) = (12usize, ((h / 16) * (w / 16)) as usize);
         for s in [0.9f32, 0.4] {
@@ -3606,7 +3616,7 @@ mod tests {
                     strength: Some(s),
                     steps: Some(steps as u32),
                     experimental_steps: true, // the schedule is the subject
-                    seed: 7,
+                    seed,
                     ..GenOpts::default()
                 },
                 cancel: Default::default(),
@@ -3636,10 +3646,11 @@ mod tests {
     /// however small `δ` is - which is what this bound separates.
     #[test]
     fn a_hair_below_full_strength_renders_what_full_strength_renders() {
+        let seed = random_seed();
         let (w, h) = (128u32, 96u32);
-        let full = run_flow(1.0, w, h);
+        let full = run_flow(seed, 1.0, w, h);
         for &s in &[0.995f32, 0.99] {
-            let (cos, rel) = agreement(&run_flow(s, w, h), &full);
+            let (cos, rel) = agreement(&run_flow(seed, s, w, h), &full);
             assert!(cos > 0.999, "strength {s} vs 1.0: cosine {cos}, rel_l2 {rel}");
             assert!(rel < 0.02, "strength {s} vs 1.0: cosine {cos}, rel_l2 {rel}");
         }
@@ -3651,13 +3662,14 @@ mod tests {
     /// "returned the photograph" and larger is "redrew more of it".
     #[test]
     fn anchoring_increases_monotonically_as_strength_falls() {
+        let seed = random_seed();
         let (w, h) = (128u32, 96u32);
         let d = Stub::new();
         let (chw, sh, sw) = source(h, w);
         let rt = d
             .decode_tokens(&d.encode_image(&chw, sh, sw).unwrap(), (h / 16) as usize, (w / 16) as usize)
             .unwrap();
-        let dist: Vec<f32> = LADDER.iter().map(|&s| agreement(&run_flow(s, w, h), &rt).1).collect();
+        let dist: Vec<f32> = LADDER.iter().map(|&s| agreement(&run_flow(seed, s, w, h), &rt).1).collect();
         for (pair, ss) in dist.windows(2).zip(LADDER.windows(2)) {
             assert!(
                 pair[1] < pair[0],
@@ -3683,6 +3695,7 @@ mod tests {
     /// anything would clear.
     #[test]
     fn a_vanishing_strength_returns_the_source() {
+        let seed = random_seed();
         let (w, h) = (128u32, 96u32);
         let d = Stub::new();
         let (chw, sh, sw) = source(h, w);
@@ -3697,7 +3710,7 @@ mod tests {
                 height: h,
                 strength: Some(0.0),
                 steps: Some(12),
-                seed: 7,
+                seed,
                 ref_resolution_scale: 1.0,
                 ..GenOpts::default()
             },
@@ -3712,7 +3725,7 @@ mod tests {
         assert!(d.seen.borrow().is_empty(), "no denoiser evaluation may run at strength 0");
         assert!(d.sigmas.borrow().is_empty(), "no schedule may be integrated at strength 0");
 
-        let (cf, rf) = agreement(&run_flow(1.0, w, h), &rt);
+        let (cf, rf) = agreement(&run_flow(seed, 1.0, w, h), &rt);
         assert!(cf < 0.9995 || rf > 0.02, "a free run cleared the bar: cosine {cf}, rel_l2 {rf}");
     }
 
@@ -3725,6 +3738,7 @@ mod tests {
     /// id and mask cell built from the output grid. Asserted per axis.
     #[test]
     fn an_init_reference_must_match_the_output_geometry() {
+        let seed = random_seed();
         // 96 high x 128 wide output, 128 high x 96 wide reference: the same
         // token count (48), a transposed latent grid.
         let d = Stub::new();
@@ -3736,7 +3750,7 @@ mod tests {
                 height: 96,
                 strength: Some(0.5),
                 steps: Some(2),
-                seed: 5,
+                seed,
                 ..GenOpts::default()
             },
             cancel: Default::default(),
@@ -3925,6 +3939,7 @@ mod tests {
     /// run must keep is not only the picture but the *shape* of the forwards it
     /// took to get there, and neither gate below can see that from the pixels.
     fn tiled_run(
+        seed: u64,
         tile: Option<Tiling>,
         w: u32,
         h: u32,
@@ -3937,7 +3952,7 @@ mod tests {
             height: h,
             steps: Some(steps),
             experimental_steps: true,
-            seed: 11,
+            seed,
             tile,
             ..GenOpts::default()
         };
@@ -3963,12 +3978,13 @@ mod tests {
     /// run that never asked for tiles.
     #[test]
     fn a_single_tile_canvas_is_bit_for_bit_the_untiled_run() {
+        let seed = random_seed();
         let (w, h) = (256u32, 192u32);
         let refs = vec![source(h, w)];
-        let plain = tiled_run(None, w, h, refs.clone(), 4);
+        let plain = tiled_run(seed, None, w, h, refs.clone(), 4);
         // 512 px of tile budget over a 256x192 canvas: tiling engages and
         // produces exactly one tile.
-        let tiled = tiled_run(Some(Tiling { size: 512, overlap: 128 }), w, h, refs, 4);
+        let tiled = tiled_run(seed, Some(Tiling { size: 512, overlap: 128 }), w, h, refs, 4);
         assert_eq!(
             plan_tiles((h / 16) as usize, (w / 16) as usize, Some(Tiling { size: 512, overlap: 128 })).len(),
             1,
@@ -4031,6 +4047,7 @@ mod tests {
     /// reference's tail, exactly its ids and exactly its token values.
     #[test]
     fn a_tiled_unregistered_reference_is_carried_whole_by_every_window() {
+        let seed = random_seed();
         let (w, h) = (512u32, 384u32);
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
         let tiling = Tiling { size: 256, overlap: 64 };
@@ -4043,7 +4060,7 @@ mod tests {
             strength: Some(1.0),
             steps: Some(1),
             experimental_steps: true,
-            seed: 7,
+            seed,
             ..GenOpts::default()
         };
         // The anchor at the canvas grid, then a guidance photograph at 160x96 -
@@ -4150,6 +4167,7 @@ mod tests {
     /// where the duplication came from.
     #[test]
     fn a_tiled_window_carries_only_its_own_crop_of_a_registered_reference() {
+        let seed = random_seed();
         let (w, h) = (512u32, 384u32);
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
         let tiling = Tiling { size: 256, overlap: 64 };
@@ -4162,7 +4180,7 @@ mod tests {
             strength: Some(1.0),
             steps: Some(1),
             experimental_steps: true,
-            seed: 7,
+            seed,
             ..GenOpts::default()
         };
         let req = |tile: Option<Tiling>| BatchRequest {
@@ -4280,6 +4298,7 @@ mod tests {
     /// canvas: a token no tile owns would be left at its init noise.
     #[test]
     fn tiles_bound_the_tokens_per_forward_at_any_canvas_size() {
+        let seed = random_seed();
         let t = Tiling { size: 1024, overlap: 128 };
         let budget = 64 * 64; // 1024x1024 in latent tokens
         let (lh, lw) = (256usize, 256usize); // 4096x4096
@@ -4319,7 +4338,7 @@ mod tests {
         let real = GenOpts { width: 2048, height: 1536, tile: Some(t), ..GenOpts::default() };
         let joint = (gen_tokens_per_forward(&real) + ref_tokens_per_forward(&[], &real)) as usize;
         assert_eq!(joint, 2 * budget, "a window carries its own crop of the anchor and nothing more");
-        let (_, seen) = tiled_run(Some(t), 2048, 1536, Vec::new(), 1);
+        let (_, seen) = tiled_run(seed, Some(t), 2048, 1536, Vec::new(), 1);
         assert!(seen.len() > 1, "a 2048x1536 canvas must take several forwards");
         assert!(
             seen.iter().all(|(j, _)| j.len() <= joint * ch),
@@ -4384,14 +4403,14 @@ mod tests {
         }
     }
 
-    fn canvas_run(tile: Option<Tiling>, w: u32, h: u32) -> Vec<f32> {
+    fn canvas_run(seed: u64, tile: Option<Tiling>, w: u32, h: u32) -> Vec<f32> {
         let d = Canvas { stub: Stub::new(), out: Default::default() };
         let opts = GenOpts {
             width: w,
             height: h,
             steps: Some(4),
             experimental_steps: true,
-            seed: 7,
+            seed,
             tile,
             ..GenOpts::default()
         };
@@ -4423,14 +4442,15 @@ mod tests {
     /// is scattered to the wrong offset, or if the ids are window-local.
     #[test]
     fn a_tiled_canvas_integrates_the_same_velocity_field_as_one_forward() {
+        let seed = random_seed();
         let (w, h) = (1024u32, 768u32);
         let t = Tiling { size: 512, overlap: 128 };
         assert!(
             plan_tiles((h / 16) as usize, (w / 16) as usize, Some(t)).len() >= 4,
             "the gate needs a real tiling"
         );
-        let one = canvas_run(None, w, h);
-        let many = canvas_run(Some(t), w, h);
+        let one = canvas_run(seed, None, w, h);
+        let many = canvas_run(seed, Some(t), w, h);
         assert_eq!(one.len(), many.len());
         let worst = one.iter().zip(&many).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         let (cos, rel) = brain_testutil::parity::compare(&one, &many);
@@ -4655,13 +4675,14 @@ mod tests {
     /// window, each carrying its own window-sized crop of the anchor.
     #[test]
     fn a_windowed_prompt_only_run_is_anchored_on_a_drafted_canvas() {
+        let seed = random_seed();
         let (w, h) = (1024u32, 768u32);
         let t = Tiling { size: 256, overlap: 64 };
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
         let tiles = plan_tiles(lh, lw, Some(t));
         assert!(tiles.len() > 1, "the gate needs a canvas that actually tiles");
         let cin = Stub::new().cfg.in_channels;
-        let (_, seen) = tiled_run(Some(t), w, h, Vec::new(), 1);
+        let (_, seen) = tiled_run(seed, Some(t), w, h, Vec::new(), 1);
 
         // One draft forward over the WHOLE composition, then one forward per
         // window. Anything else is a window painting from nothing.
@@ -4707,13 +4728,14 @@ mod tests {
     /// reference that matches its own canvas region.
     #[test]
     fn a_windowed_run_resamples_an_off_size_reference_to_the_canvas() {
+        let seed = random_seed();
         let (w, h) = (512u32, 384u32);
         let t = Tiling { size: 256, overlap: 64 };
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
         let tiles = plan_tiles(lh, lw, Some(t));
         assert!(tiles.len() > 1, "the gate needs a canvas that actually tiles");
         let small = source(h / 2, w / 2);
-        let (_, seen) = tiled_run(Some(t), w, h, vec![small.clone()], 1);
+        let (_, seen) = tiled_run(seed, Some(t), w, h, vec![small.clone()], 1);
         assert_eq!(seen.len(), tiles.len(), "a supplied reference needs no draft forward");
 
         // What the anchor must BE: the caller's reference, resized to the
@@ -4754,13 +4776,14 @@ mod tests {
     /// guarantee on it must be zero.
     #[test]
     fn a_canvas_sized_reference_is_neither_redrawn_nor_resampled() {
+        let seed = random_seed();
         let (w, h) = (512u32, 384u32);
         let t = Tiling { size: 256, overlap: 64 };
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
         let tiles = plan_tiles(lh, lw, Some(t));
         assert!(tiles.len() > 1, "the gate needs a canvas that actually tiles");
         let given = source(h, w);
-        let (_, seen) = tiled_run(Some(t), w, h, vec![given.clone()], 1);
+        let (_, seen) = tiled_run(seed, Some(t), w, h, vec![given.clone()], 1);
         assert_eq!(seen.len(), tiles.len(), "a canvas-sized reference needs no draft forward");
         let d = Stub::new();
         let cin = d.cfg.in_channels;
@@ -4790,10 +4813,11 @@ mod tests {
     /// thing it buys.
     #[test]
     fn an_untiled_run_gains_no_anchor() {
+        let seed = random_seed();
         let (w, h) = (256u32, 192u32);
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
         let cin = Stub::new().cfg.in_channels;
-        let (_, seen) = tiled_run(None, w, h, Vec::new(), 3);
+        let (_, seen) = tiled_run(seed, None, w, h, Vec::new(), 3);
         assert_eq!(seen.len(), 3, "one forward per step over the whole canvas");
         assert!(
             seen.iter().all(|(j, _)| j.len() == lh * lw * cin),

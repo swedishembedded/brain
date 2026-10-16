@@ -44,6 +44,7 @@ fn both_kernels_match_an_f64_layernorm() {
     }
     let d = 3072u32;
     let total_rows = 1792u32;
+    // seed: the 1e-5 row-kernel accuracy bound below was measured on this exact input
     let mut r = data::rng::Lcg::new(0x1a7e_4011);
     let mut uni = |s: f32, o: f32| ((r.next_u32() >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * s + o;
     // Activations with a DC offset per row, as a residual stream carries.
