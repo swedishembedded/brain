@@ -62,7 +62,7 @@ brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-dtype f
 - `--gdn-segment`, `--bf16-residuals`, `--mlp-rows` - the long-sequence
   settings of a `bf16`/`nf4` base: segmented Gated-DeltaNet layers (tokens per
   segment), a bf16 residual stream, the MLP run in token chunks. Rows of 2048
-  tokens or more at batch 1 get 128 / on / 512 by themselves; naming a flag
+  tokens or more at batch 1 get 2048 / on / 2048 by themselves; naming a flag
   replaces that choice, and `0` turns `--gdn-segment` and `--mlp-rows` off.
   A segment needs a batch of one.
 - `--eval-interval`, `--eval-batches` - evaluate on the held-out split every N
