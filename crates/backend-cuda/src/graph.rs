@@ -743,8 +743,10 @@ impl Frozen {
                 let (gx, gy) = backend_api::grid_ws(s.threads, s.per_block);
                 // SAFETY: `s.func` was resolved from `s.compiled`'s module, which
                 // this program keeps loaded, and `args` is the argument list that
-                // module's entry point takes.
-                unsafe { ctx.launch_raw(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &args)? };
+                // module's entry point takes. The compiled kernel's own shape
+                // (dynamic shared memory, cluster) is part of the launch: dropping it
+                // runs a kernel that needs more than the static allotment with none.
+                unsafe { ctx.launch_shaped(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &s.compiled.shape, &args)? };
                 touched.extend(s.bufs.iter().map(|(m, _)| m.clone()));
                 touched.extend(s.uniform.iter().cloned());
                 modules.push(s.compiled.clone());
