@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+//
+// Swedish Embedded AB implements solutions for serving many fine-tuned
+// variants of one large model from a single resident copy of its weights for
+// its clients. If your team needs expertise in multi-tenant inference of
+// hybrid-attention models then you can procure our services by sending an
+// email to info@swedishembedded.com.
+
+//! The released Q8_0 GGUF of Qwen3.8-27B served with an adapter bank, on the
+//! real GPU: a check, not a unit test, because it needs the checkpoint and an
+//! adapter trained by `brain qwen35 finetune`.
+//!
+//! * a sequence under an adapter trained by `brain qwen35 finetune` answers
+//!   differently from the same prompt on the base, in the same engine;
+//! * base and adapter sequences share ONE batched decode step (batch 8), and
+//!   the throughput of all-base, mixed and all-adapter batches is printed.
+//!
+//! Usage: `qwen35_adapter_serve_check <Q8_0.gguf> <adapter.safetensors>`; exits
+//! non-zero when the adapter does not change the answer.
+
+use std::time::Instant;
+
+use data::tokenizer::Tokenizer;
+use gpu_core::select::Dtype;
+use model::adapter::bank::{AdapterBankConfig, AdapterTargets, VerifiedAdapter};
+use model::ops::TierPolicy;
+use model::serve::{AdapterId, Request, SampleParams, Scheduler};
+use qwen35::int8_gguf_resident::{Qwen35GgufEngine, Qwen35GgufResident};
+use residency::multi::MultiDeviceResidentModel;
+use residency::{Device, ResidentModel};
+
+const CAP: u32 = 256;
+const BATCH: usize = 8;
+const RESERVE: u64 = 2 << 30;
+
+fn devices() -> Vec<(Device, u64)> {
+    gpu_core::devices::gpus().iter().map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE))).filter(|&(_, usable)| usable > 0).collect()
+}
+
+/// Greedy tokens per second of `adapters.len()` requests (`None`: base) run as
+/// one batch of `BATCH`, prompts of a few tokens so decode dominates.
+fn batch_rate(sched: &mut Scheduler<Qwen35GgufEngine>, prompt: &[u32], adapters: &[Option<AdapterId>], max_new: usize) -> f64 {
+    let ids: Vec<u64> = adapters
+        .iter()
+        .map(|a| {
+            let req = Request { prompt: prompt.to_vec(), max_new, stop: Vec::new() };
+            match a {
+                Some(id) => sched.submit_for_adapter(req, *id, SampleParams::greedy(), 0),
+                None => sched.submit(req),
+            }
+        })
+        .collect();
+    let t = Instant::now();
+    let out = sched.run();
+    let secs = t.elapsed().as_secs_f64();
+    let tokens: usize = ids.iter().map(|id| out[id].len()).sum();
+    tokens as f64 / secs
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let (Some(gguf), Some(adapter_path)) = (args.get(1).cloned(), args.get(2).cloned()) else {
+        eprintln!("usage: qwen35_adapter_serve_check <Q8_0.gguf> <adapter.safetensors>");
+        std::process::exit(2);
+    };
+    let devices = devices();
+    if devices.is_empty() {
+        eprintln!("qwen35_adapter_serve_check: no usable GPU");
+        std::process::exit(2);
+    }
+    let r = Qwen35GgufResident::new(gguf, devices, CAP, TierPolicy::uniform(Dtype::I8)).with_max_batch(BATCH as u32);
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    let (mut engine, tok, _stop) = r.activate_engine(&placed).expect("activate the real checkpoint");
+
+    let bytes = std::fs::read(&adapter_path).expect("read the adapter");
+    let (adapter, card) = model::lora::device_adapter::parse_adapter(&bytes, &adapter_path).expect("the trainer's adapter parses and its card agrees with its tensors");
+    let targets = AdapterTargets::parse(&card.adapter.as_ref().unwrap().targets.clone().unwrap().join(",")).unwrap();
+    let leaves = targets.resolve(engine.instance().config()).expect("the card's targets are sites of the served model");
+    engine.enable_adapters(AdapterBankConfig::new(2, adapter.rank, &leaves)).expect("enable the bank");
+    println!("  adapter bank: {} MiB over {} leaves, rank {}", engine.adapter_bank_bytes() >> 20, leaves.len(), adapter.rank);
+    let id = engine.load_adapter(VerifiedAdapter { label: card.id.clone(), digest: "sha256:real".into(), adapter }).expect("register the adapter");
+
+    let prompt = tok.encode("Question: What is the capital of Velmora?\nAnswer:");
+    let mut sched = Scheduler::new(engine, BATCH);
+    let ask = |sched: &mut Scheduler<Qwen35GgufEngine>, adapter: Option<AdapterId>| {
+        let req = Request { prompt: prompt.clone(), max_new: 8, stop: Vec::new() };
+        let rid = match adapter {
+            Some(id) => sched.submit_for_adapter(req, id, SampleParams::greedy(), 0),
+            None => sched.submit(req),
+        };
+        tok.decode(&sched.run().remove(&rid).unwrap())
+    };
+    let base = ask(&mut sched, None);
+    let adapted = ask(&mut sched, Some(id));
+    println!("  base:    {base:?}\n  adapter: {adapted:?}");
+    assert_ne!(base, adapted, "the served adapter must change the answer");
+    assert_eq!(ask(&mut sched, None), base, "a base request after an adapter one is unchanged");
+    println!("  the adapter changes the answer, and a base request after it is the base's");
+
+    // Throughput of batch 8: base only, half adapter, all adapter.
+    let short = tok.encode("Question: What is the capital of Velmora?");
+    let mix = |n_adapter: usize| -> Vec<Option<AdapterId>> { (0..BATCH).map(|i| (i < n_adapter).then_some(id)).collect() };
+    let _warm = batch_rate(&mut sched, &short, &mix(BATCH), 4);
+    for n_adapter in [0, BATCH / 2, BATCH] {
+        let rate = batch_rate(&mut sched, &short, &mix(n_adapter), 48);
+        println!("  batch {BATCH}: {n_adapter} adapter + {} base rows: {rate:.1} generated tok/s (prefill included)", BATCH - n_adapter);
+    }
+}
