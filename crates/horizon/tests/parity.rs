@@ -48,7 +48,7 @@ fn models(visits: u32, backbone: Backbone) -> (Horizon, Horizon) {
         .map(|s| encode(s, &vocab, &cfg))
         .collect();
     let refs: Vec<&Encoded> = enc.iter().collect();
-    let hb = assemble(&cfg, &refs, 32, 0.4, &mut Rng::new(9));
+    let hb = assemble(&cfg, &refs, 32, 0.4, &mut Rng::new(data::rng::random_seed()));
     let init = horizon::init_weights(&cfg, 3);
     let cpu = Horizon::new_on(Gpu::new_cpu(PIPELINES), cfg.clone(), 32, &init);
     let dev = Horizon::new(cfg, 32, &init);

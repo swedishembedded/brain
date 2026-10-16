@@ -158,7 +158,7 @@ fn pair(stack: StackConfig, visits: u32) -> (Horizon, Horizon) {
     let cfg = config(&vocab, visits, stack);
     let enc = encoded(&subjects[..30], &vocab, &cfg);
     let refs: Vec<&Encoded> = enc.iter().collect();
-    let hb = assemble(&cfg, &refs, 32, 0.4, &mut Rng::new(9));
+    let hb = assemble(&cfg, &refs, 32, 0.4, &mut Rng::new(data::rng::random_seed()));
     let init = horizon::init_weights(&cfg, 3);
     let cpu = Horizon::new_on(Gpu::new_cpu(PIPELINES), cfg.clone(), 32, &init);
     let dev = Horizon::new(cfg, 32, &init);
@@ -205,7 +205,7 @@ fn the_selected_device_matches_the_cpu() {
 /// Log-hazards of each subject in `enc`, predicted with `slots` batch slots.
 fn log_hazards(cfg: &HorizonConfig, init: &std::collections::HashMap<String, Vec<f32>>, enc: &[&Encoded], slots: u32) -> Vec<f32> {
     let model = Horizon::new(cfg.clone(), slots, init);
-    model.set_batch(&assemble(cfg, enc, slots as usize, 0.0, &mut Rng::new(1)));
+    model.set_batch(&assemble(cfg, enc, slots as usize, 0.0, &mut Rng::new(data::rng::random_seed())));
     model.forward();
     let all = model.read_log_hazards();
     let per = (cfg.pieces() * cfg.n_codes) as usize;

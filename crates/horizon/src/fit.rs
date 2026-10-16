@@ -446,7 +446,8 @@ mod tests {
     fn unset_seeds_are_drawn_and_readable() {
         let (a, b) = (TrainSpec::new(["a"], ["a"]), TrainSpec::new(["a"], ["a"]));
         assert_ne!(a.run_seed(), b.run_seed());
-        assert_eq!(a.clone().seed(7).run_seed(), 7);
+        let given = data::rng::random_seed();
+        assert_eq!(a.clone().seed(given).run_seed(), given);
         assert_ne!(crate::evaluation::Bootstrap::default().seed, crate::evaluation::Bootstrap::default().seed);
     }
 }

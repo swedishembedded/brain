@@ -272,6 +272,7 @@ pub fn assemble(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data::rng::random_seed;
     use crate::encode::encode;
     use crate::timeline::Subject;
     use crate::vocab::{FitOptions, Vocab};
@@ -307,7 +308,7 @@ mod tests {
     fn layout_padding_and_weights() {
         let (enc, cfg) = fixture();
         let refs: Vec<&Encoded> = enc.iter().collect();
-        let hb = assemble(&cfg, &refs, 3, 0.0, &mut Rng::new(1));
+        let hb = assemble(&cfg, &refs, 3, 0.0, &mut Rng::new(random_seed()));
         let n = cfg.max_tokens as usize;
         assert_eq!(hb.summary_rows, vec![0, n as u32, 2 * n as u32]);
         assert_eq!(hb.keep[..5], [1, 1, 1, 1, 0]);
@@ -334,7 +335,8 @@ mod tests {
     fn masking_hides_values_and_normalises_their_weight() {
         let (enc, cfg) = fixture();
         let refs: Vec<&Encoded> = enc.iter().collect();
-        let hb = assemble(&cfg, &refs, 2, 0.34, &mut Rng::new(7));
+        let seed = random_seed();
+        let hb = assemble(&cfg, &refs, 2, 0.34, &mut Rng::new(seed));
         let vt = cfg.value_table() as usize;
         let mask_bin = (cfg.value_bins + BIN_MASK) as usize;
         let hidden: Vec<usize> = (0..hb.value_state.len())
@@ -351,7 +353,7 @@ mod tests {
         }
         let total: f32 = hb.value_weight.iter().sum();
         assert!((total - cfg.value_weight).abs() < 1e-6);
-        let again = assemble(&cfg, &refs, 2, 0.34, &mut Rng::new(7));
+        let again = assemble(&cfg, &refs, 2, 0.34, &mut Rng::new(seed));
         assert_eq!(
             again.value_state, hb.value_state,
             "the seed reproduces the mask"
@@ -379,7 +381,7 @@ mod tests {
         .unwrap();
         cfg.vocab = v.len();
         let e = encode(&subject, &v, &cfg);
-        let hb = assemble(&cfg, &[&e], 2, 0.0, &mut Rng::new(1));
+        let hb = assemble(&cfg, &[&e], 2, 0.0, &mut Rng::new(random_seed()));
         let n = cfg.max_tokens as usize;
         // Slot 0 unused; visit at 41 then at 44 (3 later); entry 6 after.
         assert_eq!(
@@ -397,7 +399,7 @@ mod tests {
         let (enc, mut cfg) = fixture();
         cfg.additive = true;
         let refs: Vec<&Encoded> = enc.iter().collect();
-        let hb = assemble(&cfg, &refs, 2, 0.5, &mut Rng::new(7));
+        let hb = assemble(&cfg, &refs, 2, 0.5, &mut Rng::new(random_seed()));
         assert!(hb.value_state.iter().all(|&s| s == 0), "no value is scored");
         let mask_bin = (cfg.value_bins + BIN_MASK) as usize;
         let vt = cfg.value_table() as usize;
