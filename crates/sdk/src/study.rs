@@ -202,7 +202,6 @@ impl ArchEntry {
         let provided = match capability {
             Capability::TokenObjectives => self.token_objectives,
             Capability::ChatFineTune => self.chat_fine_tune,
-            Capability::LoraSites => true,
         };
         if provided {
             Ok(())

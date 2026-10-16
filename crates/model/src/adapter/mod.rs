@@ -16,6 +16,7 @@
 pub mod device;
 pub mod plan;
 pub mod select;
+pub mod sites;
 
 use std::collections::HashMap;
 

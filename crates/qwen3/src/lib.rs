@@ -23,6 +23,7 @@ pub mod sample;
 pub mod serve;
 pub mod finetune;
 pub mod lora;
+mod lora_sites;
 pub mod shard;
 pub mod spec;
 pub mod toolcall_eval;
