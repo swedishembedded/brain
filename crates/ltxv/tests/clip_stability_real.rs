@@ -78,7 +78,7 @@ const FRAMES: usize = 25;
 const WIDTH: usize = 1920;
 const HEIGHT: usize = 1088;
 const FPS: usize = 24;
-const SEED: u64 = 42;
+const SEED: u64 = 42; // seed: the disintegration thresholds were measured on the real 1080p clip at this seed (ignored, needs weights; not run)
 
 /// A prompt with real motion in it: a static answer would be wrong, and a
 /// clip that never moves would score a meaningless 1.0 here (see
@@ -128,7 +128,7 @@ fn a_real_1080p_clip_does_not_disintegrate_before_it_ends() {
         width: WIDTH,
         height: HEIGHT,
         fps: FPS,
-        seed: SEED,
+        seed: SEED, // seed: the disintegration thresholds were measured on the real 1080p clip at this seed (ignored, needs weights; not run)
         guidance: 3.0,
         dit_config: "ltx25_22b".into(),
         ..GenOpts::default()

@@ -87,7 +87,7 @@ fn av_lora_reload_survives_a_fresh_process() {
     }
 
     let cfg = AvCfg::tiny();
-    let seed = 0xF00D_1234_5678_9ABCu64;
+    let seed = data::rng::random_seed();
     let base = init_model::<f32>(&cfg, seed);
 
     // Real optimiser steps, so B != 0 (a fresh LoRA init is B=0, which would

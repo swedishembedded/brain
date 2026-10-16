@@ -247,7 +247,7 @@ fn ltxv_maskcond_streaming_downsample_is_bit_identical_to_the_whole_buffer_form(
         (9, 50, 30, 2, 4, 4),
         (17, 45, 45, 3, 8, 8),
     ];
-    let mut rng = data::rng::Rng::new(0x9e37_79b9);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     for &(fp, hp, wp, lf, lh, lw) in cases {
         let mask: Vec<f32> = (0..fp * hp * wp).map(|_| rng.next_f32()).collect();
         let want = downsample_mask_to_latent(&mask, fp, hp, wp, lf, lh, lw);
@@ -290,7 +290,7 @@ fn ltxv_maskcond_temporal_reduction_is_a_mean_not_any_all_or_max() {
 #[test]
 fn ltxv_maskcond_polarity_flip_commutes_with_the_reduction() {
     let (fp, hp, wp, lf, lh, lw) = (9usize, 64usize, 64usize, 2usize, 2usize, 2usize);
-    let mut rng = data::rng::Rng::new(0x5f3a_1c2d);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     let object: Vec<f32> = (0..fp * hp * wp).map(|_| rng.next_f32()).collect();
     let flipped: Vec<f32> = object.iter().map(|&v| MaskSeqPolarity::ObjectWhite.to_conditioning(v)).collect();
     let first = downsample_mask_to_latent(&flipped, fp, hp, wp, lf, lh, lw);

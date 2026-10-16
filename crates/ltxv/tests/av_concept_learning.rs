@@ -160,7 +160,7 @@ fn an_av_lora_trained_only_on_concept_clips_moves_generated_output_toward_the_co
     let base = init_model::<f32>(&cfg, 0xBA5E_0000);
     let dir = std::env::temp_dir().join(format!("ltxv-av-concept-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("tmp dir");
-    let opts = TrainOpts { steps: 80, rank: 4, lr: 4e-3, seed: 4242, save_path: dir.join("adapter.brain").to_str().expect("utf-8 path").into(), ckpt_every: 0 };
+    let opts = TrainOpts { steps: 80, rank: 4, lr: 4e-3, seed: data::rng::random_seed(), save_path: dir.join("adapter.brain").to_str().expect("utf-8 path").into(), ckpt_every: 0 };
     let cancel = capability::CancelToken::default();
     let mut last_loss = 0.0;
     let tensors = run(&cfg, &base, &train_clips, &opts, &cancel, |step, total, msg| {

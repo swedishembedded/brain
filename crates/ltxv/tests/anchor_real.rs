@@ -58,7 +58,7 @@ use ltxv::pipeline::{generate, GenOpts, Paths};
 const FRAMES: usize = 9;
 const WIDTH: usize = 384;
 const HEIGHT: usize = 192;
-const SEED: u64 = 42;
+const SEED: u64 = 42; // seed: anchor-versus-source margins were measured on the real 22B checkpoint at this shape and seed (ignored, needs weights; not run)
 const FPS: usize = 8;
 
 const PROMPT: &str = "a belgian malinois dog running at full speed along a mountain road, a small winged P40 graphics card flying beside it, camera tracking";
@@ -114,7 +114,7 @@ fn base_opts() -> GenOpts {
         frames: FRAMES,
         width: WIDTH,
         height: HEIGHT,
-        seed: SEED,
+        seed: SEED, // seed: anchor-versus-source margins were measured on the real 22B checkpoint at this shape and seed (ignored, needs weights; not run)
         fps: FPS,
         // **The ancestral sampler, and it has to be.** `motion_real.rs` picks
         // the deterministic one (`eta = 0`) for reproducibility; copying that

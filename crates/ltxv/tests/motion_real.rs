@@ -65,7 +65,7 @@ use ltxv::pipeline::{generate, GenOpts, Paths};
 const FRAMES: usize = 9;
 const WIDTH: usize = 384;
 const HEIGHT: usize = 192;
-const SEED: u64 = 42;
+const SEED: u64 = 42; // seed: the motion-excursion table was measured at this shape and seed on the real 22B checkpoint (ignored, needs weights; not run)
 const FPS: usize = 8;
 
 /// A motion-heavy prompt. The subject matters less than the fact that a
@@ -113,7 +113,7 @@ fn base_opts() -> GenOpts {
         frames: FRAMES,
         width: WIDTH,
         height: HEIGHT,
-        seed: SEED,
+        seed: SEED, // seed: the motion-excursion table was measured at this shape and seed on the real 22B checkpoint (ignored, needs weights; not run)
         fps: FPS,
         // The distilled checkpoint's own fixed schedule ignores `steps`.
         // `eta = 0` is the deterministic sampler; it is used here (rather

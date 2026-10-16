@@ -67,7 +67,7 @@ use ltxv::pipeline::{generate, GenOpts, Paths};
 /// right one.
 const FRAMES: usize = 9;
 const SIDE: usize = 64;
-const SEED: u64 = 20260821;
+const SEED: u64 = 20260821; // seed: the bit-identity gate replays one noise draw across both device plans (needs the real checkpoint; not run)
 
 /// Above 1.0, so both branches run. Any value would do; a large one makes
 /// the fold's contribution of each branch unmistakable in the output.
@@ -78,7 +78,7 @@ fn base_opts() -> GenOpts {
         frames: FRAMES,
         width: SIDE,
         height: SIDE,
-        seed: SEED,
+        seed: SEED, // seed: the bit-identity gate replays one noise draw across both device plans (needs the real checkpoint; not run)
         // Deterministic sampler: an ancestral one would still be reproducible
         // (the noise draw is seeded), but a gate on bit-identity should not
         // depend on that being true.
@@ -175,7 +175,7 @@ fn the_two_cfg_branches_produce_different_velocities() {
         return;
     };
     let paths = Paths::resolve(Some(&vae), None, None, None).expect("a VAE path resolves");
-    let one = GenOpts { guidance: 1.0, seed: SEED, ..GenOpts::default() };
+    let one = GenOpts { guidance: 1.0, ..GenOpts::default() };
     let five = GenOpts { guidance: GUIDANCE, ..one.clone() };
     let a = generate(&paths, "harbour", &one, &Default::default(), |_, _, _| {}).expect("tiny generation runs").0;
     let b = generate(&paths, "harbour", &five, &Default::default(), |_, _, _| {}).expect("tiny generation runs").0;

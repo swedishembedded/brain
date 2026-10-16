@@ -114,6 +114,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ltxv-finetune-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmp dir");
         let path = dir.join("adapter.brain");
+        // seed: the single-endpoint loss descent over 20 steps was measured at this seed; other draws can end above the start
         let opts = TrainOpts { steps: 20, rank: 4, lr: 3e-3, samples: 1, seed: 11, save_path: path.to_str().expect("utf-8 path").into(), ckpt_every: 0 };
 
         let mut losses = Vec::new();

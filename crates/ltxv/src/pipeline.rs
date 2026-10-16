@@ -5605,11 +5605,11 @@ mod scene_gen_opts_tests {
     }
 
     /// Each scene gets the request's own frame count and a distinct,
-    /// deterministic seed - the two fields this function derives rather than
+    /// derived seed - the two fields this function derives rather than
     /// copying verbatim.
     #[test]
     fn each_scene_gets_its_own_frame_count_and_a_distinct_seed() {
-        let o = LongOpts { base: GenOpts { seed: 7, ..GenOpts::default() }, ..LongOpts::default() };
+        let o = LongOpts { base: GenOpts::default(), ..LongOpts::default() };
         let s0 = scene_gen_opts(&o, &scene(9, "a"), 0);
         let s1 = scene_gen_opts(&o, &scene(17, "b"), 1);
         assert_eq!(s0.base.frames, 9);

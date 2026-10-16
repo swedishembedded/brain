@@ -55,7 +55,7 @@ mod real_weights {
     }
 
     fn base_opts() -> GenOpts {
-        GenOpts { frames: FRAMES, width: SIDE, height: SIDE, steps: 2, fps: 8, device: Some("cpu".into()), seed: 5, ..GenOpts::default() }
+        GenOpts { frames: FRAMES, width: SIDE, height: SIDE, steps: 2, fps: 8, device: Some("cpu".into()), seed: 5, ..GenOpts::default() } // seed: the anchor-content assertions compare runs pixel for pixel, so every run must share one noise draw (needs the real VAE; not run)
     }
 
     fn run(paths: &Paths, o: &GenOpts) -> Vec<Vec<u8>> {

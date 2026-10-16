@@ -912,13 +912,13 @@ mod tests {
 
         let cfg = LtxAvDitConfig::tiny();
         let manifest = av_dit_tensor_manifest(&cfg);
-        let mut seed = 0u64;
+        let mut ordinal = 0u64;
         let tensors: Vec<TensorOut> = manifest
             .iter()
             .map(|(name, shape)| {
-                seed += 1;
+                ordinal += 1;
                 let n: usize = shape.iter().product();
-                let data: Vec<u8> = (0..n).flat_map(|i| (((i as u64 + seed) % 997) as f32 * 0.01 - 5.0).to_le_bytes()).collect();
+                let data: Vec<u8> = (0..n).flat_map(|i| (((i as u64 + ordinal) % 997) as f32 * 0.01 - 5.0).to_le_bytes()).collect();
                 TensorOut { name: name.clone(), shape: shape.clone(), ty: 0u32, data }
             })
             .collect();

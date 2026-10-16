@@ -36,7 +36,7 @@ use ltxv::pipeline::{generate, GenOpts, Paths};
 const FRAMES: usize = 9;
 const WIDTH: usize = 384;
 const HEIGHT: usize = 192;
-const SEED: u64 = 42;
+const SEED: u64 = 42; // seed: anchor-versus-source margins were measured on the real 22B checkpoint at this shape and seed (ignored, needs weights; not run)
 const FPS: usize = 8;
 
 const PROMPT: &str = "a belgian malinois dog running at full speed along a mountain road, a small winged P40 graphics card flying beside it, camera tracking";
@@ -74,7 +74,7 @@ fn write_still(dir: &std::path::Path, frame: &[u8]) -> String {
 }
 
 fn base_opts() -> GenOpts {
-    GenOpts { frames: FRAMES, width: WIDTH, height: HEIGHT, seed: SEED, fps: FPS, eta: 1.0, guidance: 1.0, dit_config: "ltx25_22b".into(), device: Some("gpu".into()), ..GenOpts::default() }
+    GenOpts { frames: FRAMES, width: WIDTH, height: HEIGHT, seed: SEED, fps: FPS, eta: 1.0, guidance: 1.0, dit_config: "ltx25_22b".into(), device: Some("gpu".into()), ..GenOpts::default() } // seed: anchor-versus-source margins were measured on the real 22B checkpoint at this shape and seed (ignored, needs weights; not run)
 }
 
 /// Same bounds `anchor_real.rs` calibrated for the single-stage path. Not

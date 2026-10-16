@@ -231,7 +231,7 @@ fn the_upscaler_is_un_normalized_around_exactly_as_the_reference_does_it() {
     assert!(std.iter().all(|&v| v.abs() > 0.0), "a zero per-channel std would make `normalize` a division by zero");
 
     let (c, t, h, w) = (mean.len(), 2usize, 4usize, 4usize);
-    let mut rng = data::rng::Rng::new(7);
+    let mut rng = data::rng::Rng::new(7); // seed: parity fixture: the GPU tolerance against the reference un-normalization was measured on this draw (needs real weights; not run)
     let latent: Vec<f32> = (0..c * t * h * w).map(|_| rng.next_gaussian() as f32).collect();
     let ups = LatentUpsampler::build(&cfg, &uw, t as u32, h as u32, w as u32, Some("gpu"));
 

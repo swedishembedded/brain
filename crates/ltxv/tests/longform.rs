@@ -271,7 +271,7 @@ mod real_weights {
             context_latent_frames: context,
             max_window_tokens: max_tokens,
             max_refine_tokens: REFINE_MAX_TOKENS,
-            base: GenOpts { frames, width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), seed: 5, ..GenOpts::default() },
+            base: GenOpts { frames, width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), ..GenOpts::default() },
         };
         let plan = window_plan(frames, 2, 2, context, max_tokens).expect("the plan is legal");
         assert!(plan.len() > 1, "this shape has to need several windows for the test to mean anything: {plan:?}");
@@ -312,7 +312,7 @@ mod real_weights {
         let (context, max_tokens) = (2usize, 20usize);
         let scenes = [Scene { frames: 41, prompt: "a moving bar".into() }, Scene { frames: 25, prompt: "a spinning square".into() }];
         let total: usize = scenes.iter().map(|s| s.frames).sum();
-        let base = GenOpts { width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), seed: 5, ..GenOpts::default() };
+        let base = GenOpts { width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), ..GenOpts::default() };
         let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, max_refine_tokens: REFINE_MAX_TOKENS, base: base.clone() };
 
         let plan = scene_plan(&scenes, 2, 2, context, max_tokens).expect("the plan is legal");
@@ -422,7 +422,6 @@ mod real_weights {
             steps: 2,
             fps: 8,
             device: Some("cpu".into()),
-            seed: 5,
             start_frame: Some(still("start.png", [220, 30, 30])),
             mid_frame: Some(still("mid.png", [30, 220, 30])),
             end_frame: Some(still("end.png", [230, 230, 30])),
@@ -484,7 +483,6 @@ mod real_weights {
             steps: 2,
             fps: 8,
             device: Some("cpu".into()),
-            seed: 5,
             start_frame: Some(still("start.png", [220, 30, 30])),
             mid_frame: Some(still("mid.png", [30, 220, 30])),
             end_frame: Some(still("end.png", [230, 230, 30])),
@@ -571,7 +569,7 @@ mod seam_real {
     const WIDTH: usize = 384;
     const HEIGHT: usize = 192;
     const FPS: usize = 24;
-    const SEED: u64 = 42;
+    const SEED: u64 = 42; // seed: the seam metrics were measured on the real 22B checkpoint at this seed (ignored, needs weights; not run)
     const MAX_WINDOW_TOKENS: usize = 14 * (HEIGHT / 32) * (WIDTH / 32);
     const PROMPT: &str = "a Belgian Malinois running left to right across an open field at constant speed, camera tracking alongside it, motion-blurred background";
 
@@ -614,7 +612,7 @@ mod seam_real {
     }
 
     fn base_opts(frames: usize) -> GenOpts {
-        GenOpts { frames, width: WIDTH, height: HEIGHT, fps: FPS, seed: SEED, guidance: 1.0, dit_config: "ltx25_22b".into(), ..GenOpts::default() }
+        GenOpts { frames, width: WIDTH, height: HEIGHT, fps: FPS, seed: SEED, guidance: 1.0, dit_config: "ltx25_22b".into(), ..GenOpts::default() } // seed: the seam metrics were measured on the real 22B checkpoint at this seed (ignored, needs weights; not run)
     }
 
     #[test]

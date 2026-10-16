@@ -160,9 +160,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ltxv-av-finetune-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmp dir");
         let path = dir.join("adapter.brain");
-        let mut rng = Rng::new(0xC119);
+        let mut rng = Rng::new(data::rng::random_seed());
         let clips: Vec<SyntheticAvClip> = (0..1).map(|_| random_synthetic_av_clip(&cfg, &mut rng)).collect();
-        let opts = TrainOpts { steps: 60, rank: 4, lr: 2e-3, seed: 11, save_path: path.to_str().expect("utf-8 path").into(), ckpt_every: 0 };
+        let opts = TrainOpts { steps: 60, rank: 4, lr: 2e-3, seed: data::rng::random_seed(), save_path: path.to_str().expect("utf-8 path").into(), ckpt_every: 0 };
 
         let mut losses = Vec::new();
         let cancel = capability::CancelToken::default();
@@ -204,7 +204,7 @@ mod tests {
         let base = init_model::<f32>(&cfg, 0xF17E_A007);
         let dir = std::env::temp_dir().join(format!("ltxv-av-finetune-seed-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmp dir");
-        let mut rng = Rng::new(0xC119);
+        let mut rng = Rng::new(data::rng::random_seed());
         let clips = vec![random_synthetic_av_clip(&cfg, &mut rng)];
         let initial = |seed: u64| {
             let save_path = dir.join(format!("adapter-{seed}.brain")).to_str().expect("utf-8 path").to_string();

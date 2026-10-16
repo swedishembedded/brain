@@ -58,7 +58,7 @@ use ltxv::pipeline::{generate, GenOpts, Paths};
 const FRAMES: usize = 9;
 const WIDTH: usize = 384;
 const HEIGHT: usize = 192;
-const SEED: u64 = 7;
+const SEED: u64 = 7; // seed: the documented adherence ratios (6.67 vs 100.57) were measured at this seed on the real checkpoint (ignored, needs weights; not run)
 const FPS: usize = 8;
 
 /// Two prompts with no subject, no setting, no palette and no motion in
@@ -94,7 +94,7 @@ fn base_opts() -> GenOpts {
         frames: FRAMES,
         width: WIDTH,
         height: HEIGHT,
-        seed: SEED,
+        seed: SEED, // seed: the documented adherence ratios (6.67 vs 100.57) were measured at this seed on the real checkpoint (ignored, needs weights; not run)
         fps: FPS,
         // The distilled checkpoint's own sampler, same as `anchor_real.rs`:
         // `ANCESTRAL_SAMPLER_SINCE_VERSION = (2, 5)`, and reproducible from

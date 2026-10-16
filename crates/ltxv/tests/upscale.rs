@@ -199,7 +199,7 @@ mod real_weights {
         // the ceiling has to come down for a smoke-sized clip to need splitting.
         let (frames, max_tokens) = (25usize, 48usize);
         let clip = synthetic_clip(frames, 64, 64);
-        let o = UpscaleOpts { max_refine_tokens: max_tokens, base: GenOpts { device: Some("cpu".into()), seed: 3, ..GenOpts::default() }, ..UpscaleOpts::default() };
+        let o = UpscaleOpts { max_refine_tokens: max_tokens, base: GenOpts { device: Some("cpu".into()), ..GenOpts::default() }, ..UpscaleOpts::default() };
         let plan = refine_plan(frames, 4, 4, o.context_latent_frames, max_tokens).expect("the plan is legal");
         assert!(plan.len() > 1, "this shape has to need several passes for the test to mean anything: {plan:?}");
         assert!(plan[1].context >= 1, "the seam this test exists to exercise carries nothing: {plan:?}");

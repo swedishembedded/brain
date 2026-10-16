@@ -3595,7 +3595,7 @@ mod tests {
         assert!(!flash_self_attn(&gpu, false, 128), "cross-attention must never take the flash path");
         assert!(!flash_self_attn(&gpu, true, 129), "head_dim > 128 must never take the flash path");
 
-        let mut rng = data::rng::Lcg::new(0x17ac_2f01);
+        let mut rng = data::rng::Lcg::new(0x17ac_2f01); // seed: GPU kernel parity: the 1e-5 absolute tolerance against the host oracle was measured on this draw (needs a GPU; not run)
         let mut randn = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.unit() * 2.0 - 1.0).collect() };
 
         for &(heads, head_dim, n) in &[(3u32, 64u32, 200u32), (2, 128, 300), (4, 16, 8), (3, 8, 37), (1, 128, 129)] {
@@ -3656,7 +3656,7 @@ mod tests {
         // fused path ever silently falls back - both arms would be the trio.
         assert!(flash_self_attn(&gpu, true, head_dim), "flash path not selected - the comparison below would be the trio against itself");
         let inner = (heads * head_dim) as usize;
-        let mut rng = data::rng::Lcg::new(0x51e7_11d3);
+        let mut rng = data::rng::Lcg::new(0x51e7_11d3); // seed: the long-sequence accuracy ordering (fused no worse than the trio) was measured on this draw (needs a GPU; not run)
         let row: Vec<f32> = (0..inner).map(|_| rng.unit() * 2.0 - 1.0).collect();
         let rep: Vec<f32> = row.iter().cycle().take(n as usize * inner).copied().collect();
 
@@ -3707,7 +3707,7 @@ mod tests {
         assert!(!flash_cross_attn(&gpu, true, 128), "self-attention must never take the CROSS path");
         assert!(!flash_cross_attn(&gpu, false, 129), "head_dim > 128 must never take the flash path");
 
-        let mut rng = data::rng::Lcg::new(0x3b91_c40d);
+        let mut rng = data::rng::Lcg::new(0x3b91_c40d); // seed: GPU kernel parity: the 1e-5 absolute tolerance against the host oracle was measured on this draw (needs a GPU; not run)
         let mut randn = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.unit() * 2.0 - 1.0).collect() };
 
         for &(heads, head_dim, nq, nk) in
