@@ -20,16 +20,20 @@
 //!
 //! Usage:
 //!   qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out]
+//!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda]
 //!
 //! `steps` defaults to 8 profiled decode passes per region. `json-out`, when
 //! given, writes a `brain perf`-shaped baseline artifact to that path.
+//! `--device` and `--backend` take `brain serve`'s grammar and default to every
+//! GPU on the backend the machine prefers.
 //!
-//! **Long-context batches** - `BRAIN_PROFILE_CONTEXT=<tokens>` switches to a
-//! SYNTHETIC context (fresh caches, decode work at a real position, as `brain
-//! perf run longctx` does) and `BRAIN_PROFILE_BATCH=<n>` (default 1) sets the
-//! batch; the KV cache storage comes from `--kv <f32|bf16|int8>` (default
-//! f32). The report is the per-kernel DEVICE time per decode step, which a
-//! loaded host cannot distort the way it stretches the wall clock.
+//! **Batches and long contexts** - `--batch <n>` and/or `--context <tokens>`
+//! switch to a SYNTHETIC context (fresh caches, decode work at a real position,
+//! as `brain perf run longctx` does) with `n` rows (default 1) at that context
+//! (default 512); the KV cache storage comes from `--kv <f32|bf16|int8>`
+//! (default f32). The report is the per-kernel DEVICE time per decode step,
+//! which a loaded host cannot distort the way it stretches the wall clock, and
+//! the weight bandwidth that step achieved.
 
 use std::time::Instant;
 
@@ -54,16 +58,31 @@ fn real_devices() -> Vec<(Device, u64)> {
         .collect()
 }
 
+/// Publish the compute set `--device`/`--backend` name, the way `brain serve`
+/// does, so the resident's cards are driven by the backend asked for.
+fn select_compute(device: &str, backend: Option<&str>) {
+    let spec = gpu_core::DeviceSpec::parse(device).unwrap_or_else(|e| panic!("--device {device:?}: {e}"));
+    let mut set = spec.resolve(&gpu_core::Inventory::probe()).unwrap_or_else(|e| panic!("--device {device:?}: {e}"));
+    if let Some(b) = backend {
+        let b = gpu_core::devices::Backend::parse(b).unwrap_or_else(|e| panic!("--backend {b:?}: {e}"));
+        set.set_backend(b).unwrap_or_else(|e| panic!("{e}"));
+    }
+    set.apply().unwrap_or_else(|e| panic!("--device {device:?}: {e}"));
+    gpu_core::publish_compute_set(set);
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let steps: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
-    let json_out = a.get(3).cloned();
+    let json_out = a.get(3).filter(|s| !s.starts_with("--")).cloned();
     let mut kv: Option<model::kv_tier::KvTier> = None;
-    for (i, arg) in a.iter().enumerate() {
-        if arg == "--kv" {
-            kv = a.get(i + 1).map(|s| model::kv_tier::KvTier::parse(s).unwrap_or_else(|e| panic!("{e}")));
-        }
+    let flag = |name: &str| a.iter().position(|arg| arg == name).and_then(|i| a.get(i + 1)).cloned();
+    if let Some(v) = flag("--kv") {
+        kv = Some(model::kv_tier::KvTier::parse(&v).unwrap_or_else(|e| panic!("{e}")));
     }
+    let batch: Option<u32> = flag("--batch").map(|v| v.parse().unwrap_or_else(|_| panic!("--batch takes a count, got {v:?}")));
+    let context: Option<u32> = flag("--context").map(|v| v.parse().unwrap_or_else(|_| panic!("--context takes a token count, got {v:?}")));
+    select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref());
 
     let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
         eprintln!("usage: qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out] [--kv f32|bf16|int8]");
@@ -77,9 +96,8 @@ fn main() {
 
     let tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
     println!("weight tier: {}", tier.describe());
-    if let Some(context) = std::env::var("BRAIN_PROFILE_CONTEXT").ok().and_then(|s| s.parse::<u32>().ok()) {
-        let batch = std::env::var("BRAIN_PROFILE_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
-        return synthetic_context(&path, devices, &tier, kv, context, batch, steps);
+    if batch.is_some() || context.is_some() {
+        return synthetic_context(&path, devices, &tier, kv, context.unwrap_or(CAP), batch.unwrap_or(1), steps);
     }
 
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
@@ -150,6 +168,15 @@ fn main() {
     }
 }
 
+/// Bytes one decode step streams from the weights: every layer's weights plus
+/// the head, read once for the whole batch. The per-sequence decode state is
+/// excluded - it scales with the batch and is not what batching amortises.
+fn weights_streamed_per_step(path: &str, context: u32, tier: &model::ops::TierPolicy) -> u64 {
+    let cfg = resident_config(&MmapGguf::open(path).expect("open the checkpoint"), context).expect("resident_config");
+    let head = layer_cost(&cfg, context, tier, model::kv_tier::KvTier::F32, 1).head;
+    head + cfg.layer_types().into_iter().map(|ty| cfg.layer_weight_bytes(ty, tier)).sum::<u64>()
+}
+
 /// `batch` rows decoding at a synthetic `context`: the per-kernel device time
 /// per step, and what share the attention kernels (the ones the KV tier changes)
 /// take.
@@ -166,7 +193,14 @@ fn synthetic_context(path: &str, devices: Vec<(Device, u64)>, tier: &model::ops:
     println!("synthetic context {context}, batch {batch}, kv {kv}: cold load {:.1} s over {:?}", t0.elapsed().as_secs_f64(), placed);
     let position = context - 2 * steps - 2;
     let p = inst.profile_decode_batch_at(batch, position, steps).unwrap_or_else(|e| panic!("{e}"));
-    println!("  wall (production flush path) {:.2} ms/step", 1e3 * p.wall_s / p.steps as f64);
+    let step_ms = 1e3 * p.wall_s / p.steps as f64;
+    let weight_bytes = weights_streamed_per_step(path, context, tier);
+    println!(
+        "  backend {}: wall (production flush path) {step_ms:.2} ms/step, {:.2} tok/s aggregate, {:.1} GB/s weights over both stages in series",
+        gpu_core::backend_name(),
+        batch as f64 * 1e3 / step_ms,
+        weight_bytes as f64 / 1e6 / step_ms
+    );
     if p.rows.is_empty() {
         println!("  (per-kernel device timing unavailable on this backend)");
         return;

@@ -459,8 +459,7 @@ stream-ordered pool the held blocks come from), `BRAIN_NO_GDN_FAST` (`1` pins
 Gated DeltaNet prefill to the portable kernels for A/B), `BRAIN_PREFILL_ARENA`
 (`0` runs the `qwen35_gguf_prefill_profile` rounds without the scratch arena),
 `BRAIN_PREFILL_PROFILE_SKIP_TABLE` (stop that profile after the production
-rounds), and `BRAIN_PROFILE_CONTEXT=<tokens>` / `BRAIN_PROFILE_BATCH=<n>`
-(long-context batch shape for `qwen35_decode_profile`). The
+rounds). The
 `qwen35moe_decode_profile` binary reads `BRAIN_PROFILE_PREFILL=<tokens>`
 (profile a cold prefill of that many tokens instead of decode),
 `BRAIN_PROFILE_CHUNK=<tokens>` (its prefill round size) and

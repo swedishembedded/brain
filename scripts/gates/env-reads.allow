@@ -949,8 +949,6 @@ crates/qwen3/tests/step_timing.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/tests/step_timing.rs	LORA
 crates/qwen3/tests/step_timing.rs	QWEN3_DIR
 crates/qwen35/src/bin/import_profile.rs	BRAIN_QWEN35_DIR
-crates/qwen35/src/bin/qwen35_decode_profile.rs	BRAIN_PROFILE_BATCH
-crates/qwen35/src/bin/qwen35_decode_profile.rs	BRAIN_PROFILE_CONTEXT
 crates/qwen35/src/bin/qwen35_gguf_prefill_profile.rs	BRAIN_PREFILL_ARENA
 crates/qwen35/src/caps.rs	QWEN_TOKENIZER
 crates/qwen35/src/finetune.rs	BRAIN_OFFLOAD_ADAM
