@@ -676,8 +676,8 @@ check/seed-literals/tests:
 	bash scripts/gates/check-seed-literals.sh --tests
 
 # Spec for the gate above, run against throwaway trees (needs only bats).
-## test/gates - default: every gate self-test (env-reads, seed-literals)
-test/gates: test/gates/env-reads test/gates/seed-literals
+## test/gates - default: every gate self-test (env-reads, seed-literals, group-kernels)
+test/gates: test/gates/env-reads test/gates/seed-literals test/gates/group-kernels
 
 ## test/gates/env-reads - the env-read ratchet fails on a new read and on a stale entry, passes on a match
 test/gates/env-reads:
@@ -686,6 +686,10 @@ test/gates/env-reads:
 ## test/gates/seed-literals - the seed-literal ratchet fails on a new literal, a stale entry and (in test mode) a bare test seed
 test/gates/seed-literals:
 	bats tests/gates/seed_literals.bats
+
+## test/gates/group-kernels - the kernel-table grouping sums to the table total and bills unknown kernels to misc
+test/gates/group-kernels:
+	bats tests/gates/group_kernels.bats
 
 # Runs BEFORE the clippy gate: if a manifest is broken, cargo fails at
 # manifest-parse time with an error naming an innocent crate, and every other
@@ -1412,6 +1416,49 @@ perf/gate/wm: build/release
 perf/gate/qwen-serving: build/release
 	scripts/gates/qwen-serving-perf-gate.sh
 
+# ---- qwen35 training-step instrument (device time by component) ------------
+# The probe (random weights, real 27B shape) or the finetune CLI, run under an
+# exclusive-GPU wrapper that refuses to start when another compute context is on
+# the card. The wrapper is the caller's: GPU_WRAPPER names its executable and is
+# invoked as `$(GPU_WRAPPER) --exclusive <command>`; nothing here knows what it
+# is. BRAIN_PROFILE=1 makes the trainer print the per-kernel device table, which
+# group-kernels.py folds into the components a step is budgeted by. The raw
+# output and the component table are kept under TRAIN_RUN_DIR.
+GPU_WRAPPER ?=
+TRAIN_BACKEND ?= cuda
+TRAIN_RUN_DIR ?= results/qwen35-train
+ARGS ?=
+
+# Fails before any build starts when no wrapper was given.
+_train/need-wrapper:
+	@test -n "$(GPU_WRAPPER)" || { echo "set GPU_WRAPPER=<exclusive-GPU wrapper executable>"; exit 2; }
+
+# Usage: $(call train_run,<command>,<log name>)
+define train_run
+@mkdir -p $(TRAIN_RUN_DIR)
+@set -o pipefail; \
+	BRAIN_BACKEND=$(TRAIN_BACKEND) BRAIN_PROFILE=1 $(GPU_WRAPPER) --exclusive $(1) 2>&1 | tee $(TRAIN_RUN_DIR)/$(2).log
+@python3 scripts/perf/group-kernels.py $(TRAIN_RUN_DIR)/$(2).log | tee $(TRAIN_RUN_DIR)/$(2)-components.txt
+endef
+
+## qwen35 - lists the qwen35 targets; runs nothing
+qwen35:
+	$(LIST_CHILDREN)
+
+## qwen35/train - lists the qwen35 training-step instruments; runs nothing
+qwen35/train:
+	$(LIST_CHILDREN)
+
+## qwen35/train/probe - PROBE lines + device time by component from the sizing probe (GPU_WRAPPER=..., ARGS='--tokens 8192 --base nf4 ...')
+##   Use --steps 3 or more: the last step of a profiled run is the one tabulated.
+qwen35/train/probe: _train/need-wrapper
+	cargo build --release -p brain-qwen35 --bin qwen35_train_probe
+	$(call train_run,target/release/qwen35_train_probe --profile $(ARGS),probe)
+
+## qwen35/train/step - the same through `brain qwen35 finetune` (GPU_WRAPPER=..., ARGS='<data_dir> --base DIR --out F ...')
+qwen35/train/step: _train/need-wrapper build/release
+	$(call train_run,$(BRAIN) qwen35 finetune $(ARGS),step)
+
 # ---------------------------------------------------------------------------
 ##@ Samples and crate examples
 ## Standalone applications and cargo examples, generated from the tree: a new
@@ -1814,7 +1861,7 @@ help:
         test/e2e test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
-        check check/workspace check/clippy check/scripts check/env-reads check/seed-literals check/seed-literals/tests test/gates test/gates/env-reads test/gates/seed-literals check/spdx check/paths check/scope \
+        check check/workspace check/clippy check/scripts check/env-reads check/seed-literals check/seed-literals/tests test/gates test/gates/env-reads test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/paths check/scope \
         check/files check/samples check/sdk-features check/make-targets \
         check/generated check/generated/kernels-wgsl-table check/generated/kernels-cuda-table \
         check/generated/samples-manifest \
