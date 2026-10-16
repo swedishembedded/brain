@@ -144,12 +144,9 @@ def request(base_url: str, api_key: str, path: str, body: Optional[dict] = None,
     try:
         # A real model's FIRST request pays for its cold activation (WGSL pipeline
         # compile + weight upload) on top of the actual generation -- measured over
-        # a minute on modest hardware for a small model. This must stay comfortably
-        # above the server's own cold-build admission deadline
-        # (`brain serve --cold-build-admit-deadline-ms`, default 180s -- see
-        # crates/residency/src/admission.rs) or this demo would time out here
-        # instead of getting the server's real (occasionally slower, still
-        # honest) answer.
+        # a minute on modest hardware for a small model. This is the demo's own
+        # bound, not the server's: the server waits much longer for a busy model
+        # (`brain serve --admit-deadline-ms`, `--cold-build-admit-deadline-ms`).
         resp = urllib.request.urlopen(req, timeout=240)
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")

@@ -138,11 +138,24 @@ binds, so a client can never race the server up.
 
 A request that can't be admitted to run promptly gets an HTTP 429 rather than
 queuing indefinitely. The deadline is `--admit-deadline-ms N` (default
-10000), with one exception: a model's first-ever activation ("cold start" -
-building the model on device for the first time) gets a longer grace window,
-`--cold-build-admit-deadline-ms N` (default 180000), because that one
-activation is inherently slower than every request after it. Both must be
-positive; a value that is not is refused at startup.
+900000, fifteen minutes), with one exception: a model's first-ever activation
+("cold start" - building the model on device for the first time) gets a longer
+grace window, `--cold-build-admit-deadline-ms N` (default 1800000), because
+that one activation is inherently slower than every request after it. Both
+must be positive; a value that is not is refused at startup.
+
+The default is long on purpose. A request waiting behind sequences that are
+already running will start when they finish, and an agent turn runs for many
+minutes, so that wait is queueing, not overload: with a seconds-long limit the
+third and fourth concurrent long request were refused with 429 while the first
+two were still making progress. Lower `--admit-deadline-ms` if you would
+rather shed fast and let the client retry elsewhere (a front end with many
+short requests, or a load balancer in front of several servers).
+
+Every refusal is also logged on stderr, at any verbosity, as one `[warn]`
+line naming the model, the queue depth, the deadline that applied and the
+time waited. The 429 body repeats the wait and the limit and names the flag
+that raises it.
 
 Genuine overload - the server has more concurrent work than it can ever get
 to, not just a momentary queue - sheds requests as HTTP 503.

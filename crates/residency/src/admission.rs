@@ -23,7 +23,15 @@ pub const EDGE_CONCURRENCY: usize = 256;
 /// Default bounded wait for a request to be ADMITTED (work started on a lane)
 /// before it is shed. A running job may then take much longer — only the
 /// wait-to-start is bounded.
-pub const DEFAULT_ADMIT_DEADLINE: Duration = Duration::from_secs(10);
+///
+/// A request queued behind work that is running will start when that work
+/// ends, and an agent turn runs for many minutes, so waiting is not overload
+/// and a seconds-long limit turned ordinary queueing into HTTP 429 for the
+/// third and fourth concurrent long request. The default is therefore long;
+/// it still bounds a wait that never ends (a wedged lane). Real overload is
+/// shed separately, at the edge, by [`EDGE_CONCURRENCY`]. Operators who want
+/// fast shedding set `--admit-deadline-ms`.
+pub const DEFAULT_ADMIT_DEADLINE: Duration = Duration::from_secs(15 * 60);
 
 /// The bounded wait applied INSTEAD of [`DEFAULT_ADMIT_DEADLINE`] when a
 /// request is queued behind a job for its OWN model that is already running
@@ -34,7 +42,7 @@ pub const DEFAULT_ADMIT_DEADLINE: Duration = Duration::from_secs(10);
 /// unchanged, to every other reason a request isn't yet admitted (all lanes
 /// genuinely busy with unrelated models, nothing evictable) — that case keeps
 /// shedding fast, on purpose.
-pub const DEFAULT_COLD_BUILD_ADMIT_DEADLINE: Duration = Duration::from_secs(180);
+pub const DEFAULT_COLD_BUILD_ADMIT_DEADLINE: Duration = Duration::from_secs(30 * 60);
 
 /// The two admission deadlines a transport applies, passed down from the
 /// serving command line (`--admit-deadline-ms`, `--cold-build-admit-deadline-ms`)
@@ -150,6 +158,14 @@ mod tests {
         assert!(hint.contains("--admit-deadline-ms") && hint.contains("10000"), "the client is told what to change: {hint:?}");
         let cold = Refusal { flag: COLD_BUILD_FLAG, ..r };
         assert!(cold.client_message().contains("--cold-build-admit-deadline-ms"));
+    }
+
+    /// A request that waits behind sequences already running will start when
+    /// they finish; an agent turn runs for many minutes. Shedding it after
+    /// seconds turns ordinary queueing into an error.
+    #[test]
+    fn the_default_wait_outlasts_a_long_agent_request() {
+        assert!(DEFAULT_ADMIT_DEADLINE >= Duration::from_secs(15 * 60), "{DEFAULT_ADMIT_DEADLINE:?}");
     }
 
     #[test]

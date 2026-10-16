@@ -149,10 +149,10 @@ SERVING OPTIONS
   --api-keys-out FILE    write {\"openai\":\"sk-brain-…\", …} as JSON, mode 0600
   --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2)
   --admit-deadline-ms N  how long a request may wait to START (be claimed onto a
-                         lane) before it is shed with HTTP 429 (default 10000)
+                         lane) before it is shed with HTTP 429 (default 900000)
   --cold-build-admit-deadline-ms N
                          the longer wait that applies instead while the request's
-                         own model is still cold-building (default 180000)
+                         own model is still cold-building (default 1800000)
   --watch-adapters DIR   watch DIR for promoted LoRA adapters and offer the
                          newest as a model of its own, with no restart. OFF
                          unless given. The newest is the highest-versioned
