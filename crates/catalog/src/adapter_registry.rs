@@ -465,7 +465,10 @@ impl LiveAdapters {
 
 /// Where a request's adapter name leads in one instance.
 enum Route {
-    Ready(AdapterId),
+    /// The engine's id for the adapter and the identity of the release it was
+    /// loaded from, kept together so a reply names the weights that decoded it
+    /// even if the registry has swapped the id since.
+    Ready(AdapterId, AdapterIdentity),
     /// The engine refused the adapter; the reason was logged when it did.
     Refused,
 }
@@ -498,13 +501,13 @@ impl AdapterSync {
         for (id, adapter) in &offered {
             let digest = &adapter.release.digest;
             if let Some(&engine_id) = self.loaded.get(digest) {
-                self.routes.insert(id.clone(), Route::Ready(engine_id));
+                self.routes.insert(id.clone(), Route::Ready(engine_id, adapter.release.identity()));
                 continue;
             }
             match engine.load_adapter(adapter.as_ref().clone().into_engine()) {
                 Ok(engine_id) => {
                     self.loaded.insert(digest.clone(), engine_id);
-                    self.routes.insert(id.clone(), Route::Ready(engine_id));
+                    self.routes.insert(id.clone(), Route::Ready(engine_id, adapter.release.identity()));
                 }
                 Err(why) => {
                     eprintln!("serve: adapter {id} ({digest}) cannot be loaded into the bank, so requests for it fail: {why}");
@@ -526,15 +529,16 @@ impl AdapterSync {
         self.seen = Some(generation);
     }
 
-    /// The engine adapter a request for serving id `id` runs under.
+    /// The engine adapter a request for serving id `id` runs under, with the
+    /// identity of the release behind it.
     ///
     /// The error is what the caller is told: the same "no model" an unknown
     /// id gets, because an adapter that was withdrawn, or that the engine
     /// refused, is not something the caller can act on and its reason (logged
     /// where it happened) is the operator's.
-    pub(crate) fn route(&self, id: &str) -> Result<AdapterId, String> {
+    pub(crate) fn route(&self, id: &str) -> Result<(AdapterId, AdapterIdentity), String> {
         match self.routes.get(id) {
-            Some(Route::Ready(engine_id)) => Ok(*engine_id),
+            Some(Route::Ready(engine_id, identity)) => Ok((*engine_id, identity.clone())),
             Some(Route::Refused) | None => Err(format!("no model '{id}'")),
         }
     }

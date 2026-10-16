@@ -772,7 +772,17 @@ fn non_stream_body(model: &str, co: &bridge::ChatOutcome, native: bool) -> Value
         // OpenRouter's ChatResult requires system_fingerprint (nullable).
         body["system_fingerprint"] = Value::Null;
     }
+    attach_served(&mut body, co);
     body
+}
+
+/// Add the non-standard `brain` object (seed used, adapter that answered) to a
+/// reply or to a stream's terminal chunk. Clients that validate against the
+/// standard schema ignore unknown properties; a reproducing caller reads it.
+fn attach_served(frame: &mut Value, co: &bridge::ChatOutcome) {
+    if let Some(served) = co.served() {
+        frame["brain"] = served;
+    }
 }
 
 /// One `text_completion` object: the whole response, or one streamed frame
@@ -797,6 +807,7 @@ fn usage(prompt: i64, completion: i64) -> Value {
 fn completion_body(model: &str, co: &bridge::ChatOutcome) -> Value {
     let mut body = completion_object(&format!("cmpl-{}", Uuid::new_v4().simple()), model, &co.text, Some(&co.finish));
     body["usage"] = usage(co.prompt_tokens, co.completion_tokens);
+    attach_served(&mut body, co);
     body
 }
 
@@ -811,6 +822,7 @@ fn render_completion_stream(mut src: bridge::EventStream, model: String, want_us
         let (mut prompt, mut completion) = (0i64, 0i64);
         let mut finish = String::from("stop");
         let mut saw_delta = false;
+        let mut served = None;
         while let Some(msg) = src.next().await {
             match msg {
                 StreamMsg::Delta(piece) => {
@@ -821,11 +833,12 @@ fn render_completion_stream(mut src: bridge::EventStream, model: String, want_us
                 StreamMsg::Fetching(p) => yield Ok(Event::default().comment(p.comment_text())),
                 StreamMsg::Done(outcome) => {
                     let co = bridge::read_chat_outcome(&outcome);
-                    (prompt, completion, finish) = (co.prompt_tokens, co.completion_tokens, co.finish);
+                    (prompt, completion, finish) = (co.prompt_tokens, co.completion_tokens, co.finish.clone());
                     // A resident that reports no token deltas still answers.
                     if !saw_delta && !co.text.is_empty() {
                         yield Ok(Event::default().data(completion_object(&id, &model, &co.text, None).to_string()));
                     }
+                    served = co.served();
                 }
                 StreamMsg::Err(e) => {
                     yield Ok(Event::default().event("error").data(e.body().to_string()));
@@ -834,7 +847,11 @@ fn render_completion_stream(mut src: bridge::EventStream, model: String, want_us
                 }
             }
         }
-        yield Ok(Event::default().data(completion_object(&id, &model, "", Some(&finish)).to_string()));
+        let mut last = completion_object(&id, &model, "", Some(&finish));
+        if let Some(served) = served {
+            last["brain"] = served;
+        }
+        yield Ok(Event::default().data(last.to_string()));
         if want_usage {
             let mut frame = completion_object(&id, &model, "", None);
             frame["choices"] = json!([]);
@@ -1270,6 +1287,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
         // The terminal outcome's full text, emitted as a single content chunk
         // only when nothing was streamed incrementally.
         let mut final_text = String::new();
+        let mut served = None;
         while let Some(msg) = src.next().await {
             match msg {
                 StreamMsg::Delta(piece) => {
@@ -1292,6 +1310,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                 StreamMsg::Done(outcome) => {
                     announce!();
                     let co = bridge::read_chat_outcome(&outcome);
+                    served = co.served();
                     prompt = co.prompt_tokens;
                     completion = co.completion_tokens;
                     finish = co.finish;
@@ -1331,7 +1350,11 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
             yield Ok(Event::default().data(chunk(&id, &model, json!({ "role": "assistant", "content": "" }), None, native).to_string()));
         }
         // Terminal chunk: empty delta + finish_reason.
-        yield Ok(Event::default().data(chunk(&id, &model, json!({}), Some(&finish), native).to_string()));
+        let mut last = chunk(&id, &model, json!({}), Some(&finish), native);
+        if let Some(served) = served {
+            last["brain"] = served;
+        }
+        yield Ok(Event::default().data(last.to_string()));
 
         if want_usage {
             let usage_chunk = json!({

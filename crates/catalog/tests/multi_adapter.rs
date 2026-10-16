@@ -176,6 +176,26 @@ fn every_id_answers_as_its_standalone_server_does_when_asked_at_once() {
     }
 }
 
+/// A reply names the adapter that decoded it by the identity its card carries
+/// (id and content digest), the seed it used, and the base names no adapter.
+#[test]
+fn a_reply_names_the_adapter_that_answered_and_the_seed_it_used() {
+    let f = fixture("multi-adapter-served");
+    let served = resident(&f, BASE, &f.base, Some(bank()));
+    let exec = executor(vec![served.clone()]);
+    let live = LiveAdapters::new(served.clone(), exec.clone());
+    offer(&live, &served, &f.adapters[0]);
+
+    let answered = exec.run_blocking(ONE, "generate", greedy(4), |_| {}).expect("the adapter answers");
+    let identity = exec.served_adapter(ONE).expect("the adapter is offered");
+    assert_eq!(answered.outputs["adapter"], json!({"id": identity.id, "digest": identity.digest}));
+    assert_eq!(answered.outputs["seed"], json!(1));
+
+    let base = exec.run_blocking(BASE, "generate", greedy(4), |_| {}).expect("the base answers");
+    assert!(base.outputs.get("adapter").is_none(), "the base names no adapter: {:?}", base.outputs);
+    exec.shutdown();
+}
+
 /// The views and the base are one instance: one activation, one key, and a
 /// group that mixes them runs as one batch.
 #[test]

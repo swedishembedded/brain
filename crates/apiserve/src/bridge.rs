@@ -130,6 +130,26 @@ pub struct ChatOutcome {
     pub finish: String,
     pub reasoning: String,
     pub tool_calls: Vec<serde_json::Value>,
+    /// The sampling seed the model decoded with, when it reports one.
+    pub seed: Option<i64>,
+    /// The `(id, digest)` of the adapter that answered, when one did.
+    pub adapter: Option<(String, String)>,
+}
+
+impl ChatOutcome {
+    /// The reply's `brain` extension object: the seed that reproduces the
+    /// decode and the adapter that answered, each present only when the model
+    /// reported it. `None` when it reported neither, so no empty object is sent.
+    pub fn served(&self) -> Option<serde_json::Value> {
+        let mut served = serde_json::Map::new();
+        if let Some(seed) = self.seed {
+            served.insert("seed".into(), serde_json::json!(seed));
+        }
+        if let Some((id, digest)) = &self.adapter {
+            served.insert("adapter".into(), serde_json::json!({ "id": id, "digest": digest }));
+        }
+        (!served.is_empty()).then_some(serde_json::Value::Object(served))
+    }
 }
 
 /// Read a [`ChatOutcome`] from the contract `Outcome`. See [`read_outcome`] for the
@@ -144,7 +164,9 @@ pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
-    ChatOutcome { text, prompt_tokens, completion_tokens, finish, reasoning, tool_calls }
+    let seed = o.outputs.get("seed").and_then(|v| v.as_i64());
+    let adapter = o.outputs.get("adapter").and_then(|a| Some((a.get("id")?.as_str()?.to_string(), a.get("digest")?.as_str()?.to_string())));
+    ChatOutcome { text, prompt_tokens, completion_tokens, finish, reasoning, tool_calls, seed, adapter }
 }
 
 /// Detect an admission-time `model::serve::RejectReason::ExceedsCapacity` reply -

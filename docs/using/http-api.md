@@ -86,6 +86,14 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   `frequency_penalty`, a non-empty `logit_bias`, `logprobs: true`, a non-zero
   `top_logprobs`, and a `response_format` other than `text`. Their neutral values
   are accepted.
+- **Seed and served identity.** An OpenAI or OpenRouter chat or completions
+  reply (and the terminal chunk of a stream) carries a non-standard
+  `brain: {"seed": <int>, "adapter": {"id", "digest"}}` object. `seed` is the
+  seed the decode used, drawn fresh for an unseeded request, so any reply can
+  be reproduced by sending it back; `adapter` appears only when an adapter
+  answered and names the release that did, the same pair its model card carries.
+  Each key is absent when the model does not report it. Over D-Bus the same two
+  values are keys of the `result` JSON of `Run`.
 - **Admission / backpressure:** a request that can't start on a lane within
   `BRAIN_ADMIT_DEADLINE_MS` gets **429** (`Retry-After`) - unless the request's own
   model is still cold-building (its first-ever activation, which can take well over a

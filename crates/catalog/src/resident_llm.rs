@@ -1208,13 +1208,19 @@ fn run_batch_scheduled(
     let mut results: Vec<Option<ActionResult>> = vec![None; invs.len()];
     let mut seq_for_bi: Vec<Option<SeqState>> = Vec::with_capacity(invs.len());
     let mut id_for_bi: Vec<Option<u64>> = Vec::with_capacity(invs.len());
+    // The release each request's adapter was routed to; a reply names it.
+    let mut identity_for_bi: Vec<Option<residency::AdapterIdentity>> = vec![None; invs.len()];
+    let named = |outcome: capability::Outcome, identity: &Option<residency::AdapterIdentity>| match identity {
+        Some(identity) => outcome.set("adapter", serde_json::json!({ "id": identity.id, "digest": identity.digest })),
+        None => outcome,
+    };
 
     for (bi, inv) in invs.iter().enumerate() {
         // The adapter this request's model id stands for. A name the bank no
         // longer holds is the caller's "no model", never the base's answer
         // under another name.
         let adapter = match inv.get_str(ADAPTER_PARAM).map(|name| adapters.route(&name)).transpose() {
-            Ok(adapter) => adapter,
+            Ok(routed) => routed,
             Err(e) => {
                 results[bi] = Some(Err(e));
                 seq_for_bi.push(None);
@@ -1222,6 +1228,11 @@ fn run_batch_scheduled(
                 continue;
             }
         };
+        let (adapter, identity) = match adapter {
+            Some((adapter, identity)) => (Some(adapter), Some(identity)),
+            None => (None, None),
+        };
+        identity_for_bi[bi] = identity;
         match parse_request_as(tok, format, inv) {
             Ok(req) => {
                 let sample = model::serve::SampleParams { temp: req.temp, top_k: req.top_k, top_p: req.top_p };
@@ -1260,7 +1271,7 @@ fn run_batch_scheduled(
             if seq.advance(tok, all_tokens, &mut |p| progress(bi, p)) {
                 let toks = sched.cancel(id).unwrap_or_default();
                 let seq = seq_for_bi[bi].take().unwrap();
-                results[bi] = Some(Ok(seq.finish(tok, &toks, &mut |p| progress(bi, p))));
+                results[bi] = Some(Ok(named(seq.finish(tok, &toks, &mut |p| progress(bi, p)), &identity_for_bi[bi])));
                 just_finished.push(bi);
             }
         }
@@ -1309,7 +1320,7 @@ fn run_batch_scheduled(
         for (id, toks) in report.completed {
             let bi = id_for_bi.iter().position(|x| *x == Some(id)).expect("completed id must belong to this batch");
             if let Some(seq) = seq_for_bi[bi].take() {
-                results[bi] = Some(Ok(seq.finish(tok, &toks, &mut |p| progress(bi, p))));
+                results[bi] = Some(Ok(named(seq.finish(tok, &toks, &mut |p| progress(bi, p)), &identity_for_bi[bi])));
             }
             remaining.remove(&bi);
         }

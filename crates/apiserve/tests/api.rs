@@ -7,7 +7,7 @@
 //! no GPU. `Executor::start(...).manifests()` works CPU-only.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,7 @@ fn chat_manifest() -> Manifest {
         vec![ActionSpec::new("generate", "generate text")
             .streaming()
             .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
+            .param(ParamSpec::new("seed", ParamType::Int, "sampling seed"))
             .output(BlobSpec::new("text", Media::Text, "generated text"))],
     )
 }
@@ -3486,12 +3487,24 @@ impl ResidentModel for SiblingChat {
 }
 
 impl Instance for SiblingChatInst {
+    /// The answer names who answered; a seeded decode is a pure function of the
+    /// seed, and an unseeded request draws a fresh one, as the real models do.
+    /// The seed used and the adapter that answered are reported in the outcome.
     fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
-        let answer = match inv.get_str(ADAPTER_PARAM) {
-            Some(adapter) => format!("answered by {adapter}"),
-            None => "answered by the base".to_string(),
+        static DRAWN: AtomicI64 = AtomicI64::new(1_000);
+        let requested = inv.get_i64("seed");
+        let seed = requested.unwrap_or_else(|| DRAWN.fetch_add(1, Ordering::SeqCst));
+        let adapter = inv.get_str(ADAPTER_PARAM);
+        let who = adapter.clone().unwrap_or_else(|| "the base".to_string());
+        let mut out = Outcome::new().set("prompt_tokens", json!(5)).set("completion_tokens", json!(2)).set("finish_reason", json!("stop")).set("seed", json!(seed));
+        if let Some(id) = adapter {
+            out = out.set("adapter", json!({"id": id, "digest": adapter_identity().digest}));
+        }
+        let answer = match requested {
+            Some(seed) => format!("answered by {who} with seed {seed}"),
+            None => format!("answered by {who}"),
         };
-        Ok(Outcome::new().set("prompt_tokens", json!(5)).set("completion_tokens", json!(2)).set("finish_reason", json!("stop")).blob("text", Blob::new(Media::Text, answer.into_bytes())))
+        Ok(out.blob("text", Blob::new(Media::Text, answer.into_bytes())))
     }
 }
 
@@ -3684,4 +3697,53 @@ async fn the_reserved_adapter_param_cannot_be_set_by_a_caller() {
     let (st, caps) = send(&app, auth(Request::builder().uri("/v1/capabilities"), Provider::OpenAI, &key).body(Body::empty()).unwrap()).await;
     assert_eq!(st, StatusCode::OK);
     assert!(!caps.to_string().contains(ADAPTER_PARAM), "{caps}");
+}
+
+// ------------------------------------------------- seed echo and served identity
+
+/// A reply names the seed it decoded with, so a caller that did not choose one
+/// can reproduce the decode; the seed it chose comes back unchanged and repeats
+/// the same text. Both chat and the legacy completions endpoint say so, in the
+/// `brain` extension object - never in a field a standard client validates.
+#[tokio::test]
+async fn a_reply_names_the_seed_it_used_and_a_seeded_request_repeats() {
+    let (app, _exec, key) = adapter_app(Provider::OpenAI);
+    for (path, body) in [("/v1/chat/completions", chat_body(ADAPTER_BASE)), ("/v1/completions", json!({"model": ADAPTER_BASE, "prompt": "hi"}))] {
+        let mut seeded = body.clone();
+        seeded["seed"] = json!(77);
+        let (st, first) = post_json(&app, Provider::OpenAI, &key, path, &seeded).await;
+        assert_eq!(st, StatusCode::OK, "{path}: {first}");
+        let (_, second) = post_json(&app, Provider::OpenAI, &key, path, &seeded).await;
+        assert_eq!(first["brain"]["seed"], json!(77), "{path}: {first}");
+        assert_eq!(first["choices"][0], second["choices"][0], "{path}: the same seed gives the same text");
+
+        let (_, a) = post_json(&app, Provider::OpenAI, &key, path, &body).await;
+        let (_, b) = post_json(&app, Provider::OpenAI, &key, path, &body).await;
+        let (drawn_a, drawn_b) = (a["brain"]["seed"].as_i64(), b["brain"]["seed"].as_i64());
+        assert!(drawn_a.is_some() && drawn_b.is_some() && drawn_a != drawn_b, "{path}: an unseeded reply names the seed it drew: {a} {b}");
+    }
+}
+
+/// The base names no adapter; an adapter model names itself by identity (id and
+/// content digest) in every reply - the same pair its card carries - so a run
+/// can be tied to the exact weights that answered. Streamed replies say so too,
+/// on the terminal chunk.
+#[tokio::test]
+async fn a_reply_names_the_adapter_that_answered_by_digest() {
+    let (app, _exec, key) = adapter_app(Provider::OpenAI);
+    let (_, base) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &chat_body(ADAPTER_BASE)).await;
+    assert!(base["brain"].get("adapter").is_none(), "the base names no adapter: {base}");
+    let (_, tuned) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &chat_body(ADAPTER_ID)).await;
+    assert_eq!(tuned["brain"]["adapter"], json!({"id": ADAPTER_ID, "digest": adapter_identity().digest}), "{tuned}");
+    assert_eq!(tuned["model"], json!(ADAPTER_ID));
+
+    let mut streamed = chat_body(ADAPTER_ID);
+    streamed["stream"] = json!(true);
+    streamed["seed"] = json!(5);
+    let (_, sse) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &streamed).await;
+    let frames: Vec<Value> = sse_data(&sse).iter().filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
+    let with_brain: Vec<&Value> = frames.iter().filter(|f| f.get("brain").is_some()).collect();
+    assert_eq!(with_brain.len(), 1, "exactly the terminal chunk carries the extension: {sse}");
+    assert_eq!(with_brain[0]["brain"], json!({"seed": 5, "adapter": {"id": ADAPTER_ID, "digest": adapter_identity().digest}}));
+    assert_eq!(with_brain[0]["choices"][0]["finish_reason"], json!("stop"));
 }
