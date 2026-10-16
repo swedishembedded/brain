@@ -106,7 +106,8 @@ mod tests {
             rank: Some(rank),
             base: Some("test-base".to_string()),
             alpha: Some(alpha),
-            targets: Some(vec![leaf.to_string()]),
+            // A card names linears by leaf (`gate`), the tensors by base weight name.
+            targets: Some(vec![leaf.trim_end_matches(".weight").rsplit('.').next().unwrap().to_string()]),
             dataset_id: None,
             per_target: None,
         });
