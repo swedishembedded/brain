@@ -884,7 +884,7 @@ fn scheduled_batches_reproduce_the_single_sequence_reference_on_the_real_checkpo
 /// cold prefill of the whole prompt. An identical prompt needs no prefill.
 #[test]
 fn a_prompt_extending_a_cached_one_prefills_only_its_new_tokens_and_continues_identically() {
-    use model::serve::{PagedDecoder, Request, Scheduler};
+    use model::serve::{Request, Scheduler};
 
     let Some(path) = gguf_path() else { return };
     let devices = real_devices();
@@ -913,7 +913,7 @@ fn a_prompt_extending_a_cached_one_prefills_only_its_new_tokens_and_continues_id
     let want_second = engine.instance().generate(&second, 8, 0.0, 0, 1.0, 0, &mut |_| false).expect("cold second");
 
     let mut sched = Scheduler::new(engine, 2);
-    let mut run = |sched: &mut Scheduler<_>, prompt: &[u32]| {
+    let run = |sched: &mut Scheduler<_>, prompt: &[u32]| {
         let t = std::time::Instant::now();
         let id = sched.submit(Request { prompt: prompt.to_vec(), max_new: 8, stop: Vec::new() });
         let out = sched.run().remove(&id).unwrap();
