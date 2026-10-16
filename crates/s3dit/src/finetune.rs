@@ -400,7 +400,7 @@ mod tests {
     }
 
     fn opts_with(size: u32, cap_len: u32) -> TrainOpts {
-        TrainOpts { steps: 1, rank: 4, lr: 1e-4, size, cap_len, seed: 0, two_gpu: false, save_path: "unused.brain".into(), ckpt_every: 0 }
+        TrainOpts { steps: 1, rank: 4, lr: 1e-4, size, cap_len, seed: data::rng::random_seed(), two_gpu: false, save_path: "unused.brain".into(), ckpt_every: 0 }
     }
 
     /// `lora_train` had no ceiling on `cap_len` anywhere: the capability

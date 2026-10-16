@@ -887,7 +887,7 @@ mod tests {
     }
 
     /// Every tensor `tiny_cfg`'s DiT needs, filled with distinct deterministic
-    /// data (a different seed per tensor, derived from insertion order) —
+    /// data (a different seed per tensor, counted up from one drawn base) -
     /// shared by the windowed-vs-resident bit-identical test below.
     fn full_tiny_tensors(cfg: &ZImageConfig) -> Tensors {
         let dim = cfg.dim as usize;
@@ -895,9 +895,9 @@ mod tests {
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
         let patch_dim = (pf * ps * ps * cfg.in_channels) as usize;
         let mut t: Tensors = Tensors::new();
-        let mut seed = 0u64;
+        let mut seed = data::rng::random_seed();
         let mut insert = |t: &mut Tensors, name: String, n: usize| {
-            seed += 1;
+            seed = seed.wrapping_add(1);
             t.insert(name, (vec![n], filled(seed, n)));
         };
 
