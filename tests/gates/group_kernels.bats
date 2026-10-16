@@ -29,6 +29,13 @@ setup() {
   [[ "$output" == *"NF4 dequant"*"306.0"* ]]
 }
 
+@test "a native GDN kernel is billed to the GDN chain, not to misc" {
+  sed 's/^  gdn_chunk_loop_f32 /  native:brain_gdn_chunk_loop_tc/' "$FIXTURE" > "$BATS_TEST_TMPDIR/t.log"
+  run python3 "$GROUP" "$BATS_TEST_TMPDIR/t.log"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GDN chain"*"4944.0"* ]]
+}
+
 @test "the last table is grouped unless --label picks another" {
   run python3 "$GROUP" --label "step 1" "$FIXTURE"
   [ "$status" -eq 0 ]

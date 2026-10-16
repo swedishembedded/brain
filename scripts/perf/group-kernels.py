@@ -27,7 +27,7 @@ ROW = re.compile(r"^\s+(?P<name>\S+)\s+(?P<ms>[\d.]+) ms\s+(?P<calls>\d+) calls\
 # (group, exact names, name prefixes, name substrings).
 RULES = [
     ("GDN chain", {"bmm_tiled", "kv_expand", "nchw_nlc", "nlc_nchw"},
-     ("gdn_", "l2norm_scale", "conv1d"), ("cumsum", "mask", "decay")),
+     ("gdn_", "native:brain_gdn_", "l2norm_scale", "conv1d"), ("cumsum", "mask", "decay")),
     ("library GEMM", {"library_gemm"}, ("matmul_",), ()),
     ("NF4 dequant", set(), ("nf4_dequant",), ()),
     ("RMSNorm", set(), ("rmsnorm", "rms_norm", "add_rms"), ()),
