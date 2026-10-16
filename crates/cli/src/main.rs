@@ -364,6 +364,7 @@ BENCHMARK SUITE (architecture evaluation)
 HTTP INFERENCE APIS (brain as an OpenAI / Anthropic / OpenRouter backend)
   brain serve [--openai [PORT]] [--anthropic [PORT]] [--openrouter [PORT]] [--dbus]
               [--models-dir DIR] [--api-keys-out FILE] [--ready-file PATH]
+              [--admit-deadline-ms N] [--cold-build-admit-deadline-ms N]
       Serves the shared executor over localhost HTTP: one port + one freshly
       generated key per dialect (defaults: openai 8788, anthropic 8787,
       openrouter 8789). OpenAI/OpenRouter base URL: http://127.0.0.1:PORT

@@ -137,12 +137,12 @@ binds, so a client can never race the server up.
 ## Admission and backpressure
 
 A request that can't be admitted to run promptly gets an HTTP 429 rather than
-queuing indefinitely. The deadline is `BRAIN_ADMIT_DEADLINE_MS`, with one
-exception: a model's first-ever activation ("cold start" - building the
-model on device for the first time) gets a longer grace window,
-`BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS`, because that one activation is
-inherently slower than every request after it. Both are documented with
-their defaults in [`docs/using/configuration.md`](configuration.md#serving--admission).
+queuing indefinitely. The deadline is `--admit-deadline-ms N` (default
+10000), with one exception: a model's first-ever activation ("cold start" -
+building the model on device for the first time) gets a longer grace window,
+`--cold-build-admit-deadline-ms N` (default 180000), because that one
+activation is inherently slower than every request after it. Both must be
+positive; a value that is not is refused at startup.
 
 Genuine overload - the server has more concurrent work than it can ever get
 to, not just a momentary queue - sheds requests as HTTP 503.
@@ -192,7 +192,7 @@ the client connection over HTTP). What that guarantees, precisely:
   model's FIRST activation: reading the checkpoint and building it on the
   device happens before any step loop exists to poll a cancel from, and takes
   minutes for a real model. That is what
-  `BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS` exists for.
+  `--cold-build-admit-deadline-ms` exists for.
 - **One model serves one request at a time** unless it is on the paged-KV
   batching engine, which explicitly batches concurrent sequences. Concurrent
   requests for the same non-batched model are serialized by that model, so

@@ -800,8 +800,8 @@ get_url() {
 
   # A SECOND server: one CPU lane, a 3s mock delay (pins the lane), a 500ms admit
   # deadline (fast shed). OpenAI surface only. Record its PID for teardown.
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu BRAIN_MOCK_DELAY_MS=3000 BRAIN_ADMIT_DEADLINE_MS=500 \
-    "$BRAIN" serve --models-dir "$MODELS_DIR" --openai "$port" --api-keys-out "$keys2" >"$log2" 2>&1 &
+  BRAIN_MOCK=1 BRAIN_DEVICE=cpu BRAIN_MOCK_DELAY_MS=3000 \
+    "$BRAIN" serve --admit-deadline-ms 500 --models-dir "$MODELS_DIR" --openai "$port" --api-keys-out "$keys2" >"$log2" 2>&1 &
   local pid2=$!
   echo "$pid2" > "$CONF_DIR/pid2"
 

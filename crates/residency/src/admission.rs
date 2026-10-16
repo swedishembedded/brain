@@ -36,33 +36,23 @@ pub const DEFAULT_ADMIT_DEADLINE: Duration = Duration::from_secs(10);
 /// shedding fast, on purpose.
 pub const DEFAULT_COLD_BUILD_ADMIT_DEADLINE: Duration = Duration::from_secs(180);
 
-/// The admission deadline for live servers: `BRAIN_ADMIT_DEADLINE_MS` if set
-/// to a positive integer, else [`DEFAULT_ADMIT_DEADLINE`]. An empty/invalid/
-/// zero value falls back to the default (never an unbounded or zero-length
-/// wait). Shared by every transport so an operator sets it once.
-pub fn admit_deadline_from_env() -> Duration {
-    parse_deadline_ms(std::env::var("BRAIN_ADMIT_DEADLINE_MS").ok().as_deref(), DEFAULT_ADMIT_DEADLINE)
+/// The two admission deadlines a transport applies, passed down from the
+/// serving command line (`--admit-deadline-ms`, `--cold-build-admit-deadline-ms`)
+/// to every transport so an operator sets each once. Both are always positive:
+/// the command line rejects zero, so there is no unbounded or zero-length wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Deadlines {
+    /// Bounded wait for a request to be admitted; see [`DEFAULT_ADMIT_DEADLINE`].
+    pub admit: Duration,
+    /// The wait that applies instead while the request's own model is cold-building;
+    /// see [`DEFAULT_COLD_BUILD_ADMIT_DEADLINE`].
+    pub cold_build: Duration,
 }
 
-/// The cold-build admission deadline for live servers: `BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS`
-/// if set to a positive integer, else [`DEFAULT_COLD_BUILD_ADMIT_DEADLINE`].
-pub fn cold_build_admit_deadline_from_env() -> Duration {
-    parse_deadline_ms(std::env::var("BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS").ok().as_deref(), DEFAULT_COLD_BUILD_ADMIT_DEADLINE)
-}
-
-/// Pure parse of a `*_MS` deadline override: a positive integer of
-/// milliseconds, or `default` for any missing/empty/invalid/zero value.
-pub fn parse_deadline_ms(raw: Option<&str>, default: Duration) -> Duration {
-    match raw.and_then(|v| v.trim().parse::<u64>().ok()).filter(|&ms| ms > 0) {
-        Some(ms) => Duration::from_millis(ms),
-        None => default,
+impl Default for Deadlines {
+    fn default() -> Deadlines {
+        Deadlines { admit: DEFAULT_ADMIT_DEADLINE, cold_build: DEFAULT_COLD_BUILD_ADMIT_DEADLINE }
     }
-}
-
-/// Pure parse of the admit-deadline override — kept for callers/tests already
-/// naming it; equivalent to `parse_deadline_ms(raw, DEFAULT_ADMIT_DEADLINE)`.
-pub fn parse_admit_deadline(raw: Option<&str>) -> Duration {
-    parse_deadline_ms(raw, DEFAULT_ADMIT_DEADLINE)
 }
 
 /// Is `model`'s currently-running group still inside its deferred
@@ -90,21 +80,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admit_deadline_override_parses_positive_ms_else_default() {
-        assert_eq!(parse_admit_deadline(Some("500")), Duration::from_millis(500));
-        assert_eq!(parse_admit_deadline(Some("  250 ")), Duration::from_millis(250));
-        assert_eq!(parse_admit_deadline(None), DEFAULT_ADMIT_DEADLINE);
-        assert_eq!(parse_admit_deadline(Some("")), DEFAULT_ADMIT_DEADLINE);
-        assert_eq!(parse_admit_deadline(Some("0")), DEFAULT_ADMIT_DEADLINE);
-        assert_eq!(parse_admit_deadline(Some("nope")), DEFAULT_ADMIT_DEADLINE);
-    }
-
-    #[test]
-    fn cold_build_deadline_override_parses_positive_ms_else_its_own_default() {
-        assert_eq!(parse_deadline_ms(Some("90000"), DEFAULT_COLD_BUILD_ADMIT_DEADLINE), Duration::from_millis(90000));
-        assert_eq!(parse_deadline_ms(None, DEFAULT_COLD_BUILD_ADMIT_DEADLINE), DEFAULT_COLD_BUILD_ADMIT_DEADLINE);
-        assert_eq!(parse_deadline_ms(Some("0"), DEFAULT_COLD_BUILD_ADMIT_DEADLINE), DEFAULT_COLD_BUILD_ADMIT_DEADLINE);
-        assert!(DEFAULT_COLD_BUILD_ADMIT_DEADLINE > DEFAULT_ADMIT_DEADLINE, "a cold build must get strictly more time than the fast-shed default");
+    fn default_deadlines_give_a_cold_build_strictly_more_time_than_a_plain_wait() {
+        let d = Deadlines::default();
+        assert_eq!(d.admit, DEFAULT_ADMIT_DEADLINE);
+        assert_eq!(d.cold_build, DEFAULT_COLD_BUILD_ADMIT_DEADLINE);
+        assert!(d.cold_build > d.admit, "a cold build must get strictly more time than the plain wait");
     }
 
     /// A [`ResidentModel`] whose `activate()` blocks on a barrier (simulating a

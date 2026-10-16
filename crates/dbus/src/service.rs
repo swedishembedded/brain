@@ -57,8 +57,8 @@ pub struct Manager {
     /// that can't acquire a permit immediately is shed, not queued.
     edge_permits: Arc<tokio::sync::Semaphore>,
     /// Bounded wait for a request to be ADMITTED (claimed onto a lane) before
-    /// it is shed -- `residency::admission::admit_deadline_from_env()`,
-    /// mirroring `apiserve::AppState::admit_deadline`.
+    /// it is shed -- `residency::admission::DEFAULT_ADMIT_DEADLINE`
+    /// unless overridden, mirroring `apiserve::AppState::admit_deadline`.
     admit_deadline: std::time::Duration,
     /// Bounded wait applied instead of `admit_deadline` once a request is
     /// queued behind its OWN model's already-running job (its first cold
@@ -76,8 +76,8 @@ impl Manager {
             next_job: AtomicU64::new(0),
             supplier: None,
             edge_permits: Arc::new(tokio::sync::Semaphore::new(residency::admission::EDGE_CONCURRENCY)),
-            admit_deadline: residency::admission::admit_deadline_from_env(),
-            cold_build_admit_deadline: residency::admission::cold_build_admit_deadline_from_env(),
+            admit_deadline: residency::admission::DEFAULT_ADMIT_DEADLINE,
+            cold_build_admit_deadline: residency::admission::DEFAULT_COLD_BUILD_ADMIT_DEADLINE,
         }
     }
 
@@ -90,7 +90,7 @@ impl Manager {
     }
 
     /// Override the admission deadline (builder-style) -- tests use this for a
-    /// short, deterministic deadline instead of the env-derived default.
+    /// short, deterministic deadline instead of the default.
     pub fn with_admit_deadline(mut self, deadline: std::time::Duration) -> Manager {
         self.admit_deadline = deadline;
         self

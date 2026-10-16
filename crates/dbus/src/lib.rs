@@ -90,6 +90,9 @@ pub struct ServeOpts {
     /// Notified once, after the well-known bus name is acquired. Default is
     /// [`brain_shutdown::ready::Gate::disabled`] (a no-op).
     pub ready: brain_shutdown::ready::Gate,
+    /// How long a `Run`/`Subscribe` may wait to be admitted before it is shed.
+    /// Defaults to [`residency::admission::Deadlines::default`].
+    pub deadlines: residency::admission::Deadlines,
 }
 
 impl ServeOpts {
@@ -108,6 +111,10 @@ impl ServeOpts {
         self.ready = ready;
         self
     }
+    pub fn with_deadlines(mut self, deadlines: residency::admission::Deadlines) -> ServeOpts {
+        self.deadlines = deadlines;
+        self
+    }
 }
 
 /// Serve the [`Executor`] over D-Bus until `opts.shutdown` fires (or, with
@@ -118,13 +125,13 @@ impl ServeOpts {
 /// off the bus threads). Blocks the calling thread for the lifetime of the service.
 pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyhow::Result<()> {
     let shutdown = serve_opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
-    let ServeOpts { supplier, ready, .. } = serve_opts;
+    let ServeOpts { supplier, ready, deadlines, .. } = serve_opts;
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         // A cheap executor clone drives the background stats stream, so the
         // snapshot source is independent of the served `Manager` instance.
         let stats_executor = executor.clone();
-        let manager = service::Manager::new(executor).with_supplier(supplier);
+        let manager = service::Manager::new(executor).with_supplier(supplier).with_admit_deadline(deadlines.admit).with_cold_build_admit_deadline(deadlines.cold_build);
         let builder = match &opts.bus {
             BusKind::Session => zbus::connection::Builder::session()?,
             BusKind::System => zbus::connection::Builder::system()?,

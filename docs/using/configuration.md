@@ -142,14 +142,16 @@ served, with no error.
 
 ## Serving & admission
 
+The two admission deadlines are `brain serve` flags, not variables: `--admit-deadline-ms` and
+`--cold-build-admit-deadline-ms` (defaults and meaning in
+[`serving.md`](serving.md#admission-and-backpressure)).
+
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup (also `--models-dir`) | `$XDG_DATA_HOME/brain/models` |
 | `BRAIN_API_KEY` | a fixed API key, shared by every OpenAI/Anthropic/OpenRouter surface `brain serve` binds, instead of a fresh random key per dialect per launch | unset (each dialect gets its own random `sk-brain-...` key) |
 | `BRAIN_AUTO_FETCH` | `1`/`true`/`on` enables on-demand fetching of missing model files (`--autofetch` publishes the same thing and wins over an exported `0`); a pulled model still resolves with the gate off | disabled |
 | `BRAIN_CONF` | stdio-loop YOLO confidence threshold (also `--conf`) | 0.25 |
-| `BRAIN_ADMIT_DEADLINE_MS` | how long a request waits for a free lane before it's shed with 429 | 10000 |
-| `BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS` | longer deadline applied instead, but only while the request's own model is still cold-building (its first-ever activation) | 180000 |
 | `BRAIN_SCHED_MAX_BATCH` | maximum jobs the scheduler groups into one batch | 8 |
 | `BRAIN_SCHED_AGE_WEIGHT` | scheduler priority weight per millisecond a job has waited | 1.0 |
 | `BRAIN_SCHED_BATCH_WEIGHT` | scheduler priority weight favoring larger batches | 200.0 |

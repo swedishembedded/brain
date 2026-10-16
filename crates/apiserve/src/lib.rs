@@ -129,16 +129,6 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// The admission deadline for live servers — see `residency::admission`'s doc.
-fn admit_deadline_from_env() -> std::time::Duration {
-    residency::admission::admit_deadline_from_env()
-}
-
-/// The cold-build admission deadline for live servers — see `residency::admission`'s doc.
-fn cold_build_admit_deadline_from_env() -> std::time::Duration {
-    residency::admission::cold_build_admit_deadline_from_env()
-}
-
 /// The shared 404 for any unrouted path, in the surface's dialect.
 async fn fallback(State(state): State<AppState>) -> ApiError {
     ApiError::not_found(state.provider, "no such route")
@@ -179,6 +169,10 @@ pub struct ServeOpts {
     /// (a no-op) — see that type's docs for why a marker file, not an HTTP route,
     /// is how `brain serve` reports "every requested surface is up".
     pub ready: brain_shutdown::ready::Gate,
+    /// How long a request may wait to be admitted before it is shed with a 429.
+    /// Defaults to [`residency::admission::Deadlines::default`]; `brain serve`
+    /// passes the operator's `--admit-deadline-ms` values.
+    pub deadlines: residency::admission::Deadlines,
 }
 
 impl ServeOpts {
@@ -197,6 +191,10 @@ impl ServeOpts {
         self.ready = ready;
         self
     }
+    pub fn with_deadlines(mut self, deadlines: residency::admission::Deadlines) -> ServeOpts {
+        self.deadlines = deadlines;
+        self
+    }
 }
 
 /// Serve every [`Surface`] over the ONE shared [`Executor`] until `opts.shutdown`
@@ -206,21 +204,14 @@ impl ServeOpts {
 /// concurrently on a [`tokio::task::JoinSet`]. Blocks the calling thread.
 pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> anyhow::Result<()> {
     let shutdown = opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
-    let ServeOpts { supplier, ready, .. } = opts;
-    // The admission deadline is operator-overridable via `BRAIN_ADMIT_DEADLINE_MS`
-    // (default `DEFAULT_ADMIT_DEADLINE`, 10s). Keeping it here (rather than in the
-    // pure `router`) leaves the unit-test `oneshot` path on the fixed default while
-    // letting a live server be driven with a short deadline (e.g. the conformance
-    // harness sets 500ms to force fast 429 shedding).
-    let admit_deadline = admit_deadline_from_env();
-    let cold_build_admit_deadline = cold_build_admit_deadline_from_env();
+    let ServeOpts { supplier, ready, deadlines, .. } = opts;
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         let mut set = tokio::task::JoinSet::new();
         for s in surfaces {
             let state = AppState::new(exec.clone(), s.api_key.clone(), s.provider)
-                .with_admit_deadline(admit_deadline)
-                .with_cold_build_admit_deadline(cold_build_admit_deadline)
+                .with_admit_deadline(deadlines.admit)
+                .with_cold_build_admit_deadline(deadlines.cold_build)
                 .with_supplier(supplier.clone());
             let app = router(state);
             let (addr, provider) = (s.addr, s.provider);

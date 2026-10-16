@@ -148,6 +148,11 @@ SERVING OPTIONS
                          (else $BRAIN_MODELS_DIR, else $XDG_DATA_HOME/brain/models)
   --api-keys-out FILE    write {\"openai\":\"sk-brain-…\", …} as JSON, mode 0600
   --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2)
+  --admit-deadline-ms N  how long a request may wait to START (be claimed onto a
+                         lane) before it is shed with HTTP 429 (default 10000)
+  --cold-build-admit-deadline-ms N
+                         the longer wait that applies instead while the request's
+                         own model is still cold-building (default 180000)
   --watch-adapters DIR   watch DIR for promoted LoRA adapters and offer the
                          newest as a model of its own, with no restart. OFF
                          unless given. The newest is the highest-versioned
@@ -344,6 +349,21 @@ fn parsed<T: std::str::FromStr>(args: &[String], i: &mut usize, flag: &str) -> T
     })
 }
 
+/// The value that must follow a milliseconds flag, as a [`Duration`]. Zero is
+/// rejected along with the unparseable: a zero wait would shed every request
+/// that is not admitted instantly, and "no limit" is not offered.
+fn positive_ms(args: &[String], i: &mut usize, flag: &str) -> std::time::Duration {
+    let v = val(args, i, flag);
+    match v.parse::<u64>() {
+        Ok(ms) if ms > 0 => std::time::Duration::from_millis(ms),
+        _ => {
+            eprintln!("brain serve: {flag} {v:?} is not a positive number of milliseconds\n");
+            eprint!("{HELP}");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// Parse the optional ADDR value that may follow `--anthropic` / `--openai`
 /// / `--openrouter` (see HELP's ADDR paragraph): a comma-separated list where
 /// each item is a `HOST:PORT`, a bare `HOST` (bound on `default_port`), or a
@@ -476,6 +496,9 @@ pub fn run_serve(args: &[String]) {
     let mut openrouter: Option<Vec<SocketAddr>> = None;
     let mut api_keys_out: Option<String> = None;
     let mut ready_file: Option<String> = None;
+    // `--admit-deadline-ms` / `--cold-build-admit-deadline-ms`: how long a
+    // request may wait to start before it is shed with a 429.
+    let mut deadlines = residency::admission::Deadlines::default();
     // Detached serving (`-d`), imperative replacement (`--reload`) and the two
     // lifecycle queries -- see `crate::serve_daemon`.
     let mut detach = false;
@@ -582,6 +605,8 @@ pub fn run_serve(args: &[String]) {
             "--openrouter" => openrouter = Some(take_addrs(args, &mut i, 8789)),
             "--api-keys-out" => api_keys_out = Some(val(args, &mut i, "--api-keys-out")),
             "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
+            "--admit-deadline-ms" => deadlines.admit = positive_ms(args, &mut i, "--admit-deadline-ms"),
+            "--cold-build-admit-deadline-ms" => deadlines.cold_build = positive_ms(args, &mut i, "--cold-build-admit-deadline-ms"),
             "--help" | "-h" => {
                 print!("{HELP}");
                 return;
@@ -659,6 +684,7 @@ pub fn run_serve(args: &[String]) {
             openrouter,
             api_keys_out,
             ready,
+            deadlines,
             adapter_mode,
             knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, decision: decision_cfg },
         });
@@ -813,6 +839,9 @@ struct RunApis {
     /// Notified once per bound surface (HTTP + D-Bus); disabled unless
     /// `--ready-file` was given. See `brain_shutdown::ready::Gate`.
     ready: brain_shutdown::ready::Gate,
+    /// `--admit-deadline-ms` and `--cold-build-admit-deadline-ms`, handed to
+    /// every transport.
+    deadlines: residency::admission::Deadlines,
     /// Where the served Qwen3's adapter comes from: `--adapter`,
     /// `--adapter-manifest`, `--watch-adapters`, or none of them.
     adapter_mode: crate::continuous_train::AdapterMode,
@@ -963,7 +992,7 @@ fn run_apis(a: RunApis) {
             let ready = a.ready.clone();
             let ready_state = a.ready.clone();
             Some(std::thread::spawn(move || {
-                let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(sd).with_supplier(sup).with_ready(ready);
+                let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(sd).with_supplier(sup).with_ready(ready).with_deadlines(a.deadlines);
                 let Err(err) = brain_dbus::serve(e, opts, serve_opts) else { return };
                 eprintln!("{}", dbus_connect_hint(&err, dbus_system));
                 // Before ready, this is a FAILED start and has to end the
@@ -985,7 +1014,7 @@ fn run_apis(a: RunApis) {
                 std::process::exit(1);
             }))
         } else {
-            let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(shutdown).with_supplier(sup).with_ready(a.ready.clone());
+            let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(shutdown).with_supplier(sup).with_ready(a.ready.clone()).with_deadlines(a.deadlines);
             if let Err(err) = brain_dbus::serve(e, opts, serve_opts) {
                 eprintln!("{}", dbus_connect_hint(&err, a.dbus_system));
                 eprintln!("brain serve: the D-Bus surface was the only one requested -- exiting");
@@ -1067,7 +1096,7 @@ fn run_apis(a: RunApis) {
                 gpu_core::set_process_exiting();
             });
         }
-        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready);
+        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines);
         if let Err(e) = apiserve::serve_all(executor, surfaces, opts) {
             eprintln!("brain serve: {e}");
             std::process::exit(1);
@@ -1178,6 +1207,7 @@ mod tests {
         for f in [
             "--gpt", "--yolo", "--max-new", "--temp", "--top-k", "--seed", "--conf", "--dbus", "--dbus-system", "--dbus-name",
             "--reserve-gb", "--models-dir", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
+            "--admit-deadline-ms", "--cold-build-admit-deadline-ms",
         ] {
             assert!(HELP.contains(f), "{f} is parsed by run_serve but not documented in HELP");
         }

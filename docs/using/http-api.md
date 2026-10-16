@@ -95,14 +95,13 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   Each key is absent when the model does not report it. Over D-Bus the same two
   values are keys of the `result` JSON of `Run`.
 - **Admission / backpressure:** a request that can't start on a lane within
-  `BRAIN_ADMIT_DEADLINE_MS` gets **429** (`Retry-After`) - unless the request's own
+  `--admit-deadline-ms` gets **429** (`Retry-After`) - unless the request's own
   model is still cold-building (its first-ever activation, which can take well over a
   minute for a real model), in which case it gets the longer
-  `BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS` grace window instead - a legitimate cold start is
+  `--cold-build-admit-deadline-ms` grace window instead - a legitimate cold start is
   not overload. Genuine overload still sheds as **503**. See
   [`docs/using/serving.md`](serving.md#admission-and-backpressure) for the general
-  admission story and [`docs/using/configuration.md`](configuration.md#serving--admission)
-  for both variables and their defaults.
+  admission story and both flags' defaults.
 - **OpenRouter** reuses the OpenAI handlers, strips a `provider/` model prefix
   (`anything/qwen3-4b` → `qwen3-4b`), honors a `models[]` fallback list, tolerates its
   extra fields, and adds `native_finish_reason`.

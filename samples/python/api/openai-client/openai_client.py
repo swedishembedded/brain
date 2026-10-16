@@ -146,7 +146,7 @@ def request(base_url: str, api_key: str, path: str, body: Optional[dict] = None,
         # compile + weight upload) on top of the actual generation -- measured over
         # a minute on modest hardware for a small model. This must stay comfortably
         # above the server's own cold-build admission deadline
-        # (BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS, default 180s -- see
+        # (`brain serve --cold-build-admit-deadline-ms`, default 180s -- see
         # crates/residency/src/admission.rs) or this demo would time out here
         # instead of getting the server's real (occasionally slower, still
         # honest) answer.

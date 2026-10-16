@@ -98,6 +98,22 @@ fn value_taking_flag_with_no_value_errors() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("--models-dir needs a value"));
 }
 
+/// The admission deadlines are flags (the environment variables they replaced
+/// are no longer read). A value that is not a positive number of milliseconds
+/// is a typo, not a request for the default and never an unbounded wait.
+#[test]
+fn admission_deadline_flags_reject_values_that_are_not_positive_milliseconds() {
+    for flag in ["--admit-deadline-ms", "--cold-build-admit-deadline-ms"] {
+        for bad in ["0", "soon", "-5"] {
+            let out = run(&["serve", flag, bad]);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{flag} {bad}: stderr: {stderr}");
+            assert!(!stderr.contains("unknown flag"), "{flag} must be a known flag: {stderr}");
+            assert!(stderr.contains(flag) && stderr.contains("positive"), "{flag} {bad}: the error names the flag and the rule: {stderr}");
+        }
+    }
+}
+
 #[test]
 fn serve_help_exits_zero_with_usage_on_stdout() {
     for flag in ["--help", "-h"] {

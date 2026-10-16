@@ -1105,8 +1105,6 @@ crates/qwen3vl/tests/gguf_parity.rs	BRAIN_QWEN3VL_GGUF
 crates/qwen3vl/tests/int8_tier.rs	BRAIN_QWEN3VL_WEIGHTS
 crates/qwen3vl/tests/int8_tier.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3vl/tests/vision_tower_parity.rs	MOE_SKIP_GPU_TESTS
-crates/residency/src/admission.rs	BRAIN_ADMIT_DEADLINE_MS
-crates/residency/src/admission.rs	BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS
 crates/residency/src/scheduler.rs	<k>
 crates/residency/src/scheduler.rs	<key>
 crates/residency/src/scheduler.rs	BRAIN_SCHED_AGE_WEIGHT
