@@ -32,7 +32,7 @@ const LAYER_BYTES: usize = 380_000_000;
 #[test]
 #[ignore]
 fn parallel_e4m3_decode_beats_sequential_on_an_in_memory_buffer() {
-    let mut rng = data::rng::Lcg::new(42);
+    let mut rng = data::rng::Lcg::new(data::rng::random_seed());
     let raw: Vec<u8> = (0..LAYER_BYTES).map(|_| (rng.next_u64() % 256) as u8).collect();
 
     // The exact pre-fix sequential expression (still what `decode_e4m3_bytes`

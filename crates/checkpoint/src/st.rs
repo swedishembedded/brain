@@ -665,7 +665,7 @@ mod tests {
         card.training = Some(TrainingProvenance {
             code_revision: "abc1234-dirty".into(),
             regime: "grpo".into(),
-            seed: 1234,
+            seed: data::rng::random_seed(),
             hyperparams: serde_json::json!({"lr": 1e-4, "kl_coeff": 0.1}),
             environment: "gpu/wgpu".into(),
             gate: Some(GateOutcome {
