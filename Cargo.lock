@@ -2339,6 +2339,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-gradcheck",
  "brain-model",
+ "brain-modelstore",
  "brain-promote",
  "brain-qwen3",
  "brain-qwen35",

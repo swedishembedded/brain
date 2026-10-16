@@ -52,6 +52,24 @@ pub fn save_adapter(path: &str, model: &Qwen35, card_id: &str, base_id: &str, da
     model::lora::device_adapter::save_adapter(path, model, lora.rank, lora.alpha, &lora.targets, card_id, base_id, "qwen35", dataset_id)
 }
 
+/// [`save_adapter`], recording the training run that produced the adapter on
+/// its card. See `model::lora::device_adapter::save_adapter_with_lineage`.
+pub fn save_adapter_with_lineage(
+    path: &str,
+    model: &Qwen35,
+    card_id: &str,
+    base_id: &str,
+    dataset_id: Option<&str>,
+    training: Option<checkpoint::st::TrainingProvenance>,
+) -> std::io::Result<()> {
+    let lora = model
+        .cfg
+        .lora
+        .as_ref()
+        .unwrap_or_else(|| panic!("save_adapter: model was not built with a LoraCfg"));
+    model::lora::device_adapter::save_adapter_with_lineage(path, model, lora.rank, lora.alpha, &lora.targets, card_id, base_id, "qwen35", dataset_id, training)
+}
+
 /// Fold an adapter saved by [`save_adapter`] into a base model's host tensor
 /// map (name -> row-major `[out, in]` data), in place. `base` must already
 /// contain every targeted linear's weight under its plain name (e.g.

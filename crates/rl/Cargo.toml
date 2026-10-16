@@ -29,6 +29,9 @@ brain-promote.workspace = true
 brain-audit.workspace = true
 brain-data.workspace = true
 brain-checkpoint.workspace = true
+# `modelstore::fetch::base_digest` - the one spelling of a base's identity an
+# adapter card records and a server recomputes to bind the adapter to its base.
+brain-modelstore.workspace = true
 brain-atif.workspace = true
 brain-qwen3 = { workspace = true, optional = true }
 # `bench::metrics::ols_slope_ci` - the plasticity trend `continual`'s study

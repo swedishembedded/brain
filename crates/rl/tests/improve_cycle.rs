@@ -212,6 +212,7 @@ fn improve_cycle_end_to_end_promotes_a_genuinely_better_candidate() {
     assert_eq!(training.regime, "grpo");
     assert_eq!(training.cycle, 0);
     assert_eq!(training.seed, seed);
+    assert_eq!(training.base_digest, Some(brain_modelstore::fetch::base_digest(&base_path).unwrap()), "the cycle records the digest of the base it trained on");
     let gate_outcome = training.gate.expect("a gated cycle must record its GateOutcome");
     assert_eq!(gate_outcome.decision, "promote");
 

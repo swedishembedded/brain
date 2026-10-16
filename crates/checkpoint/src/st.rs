@@ -200,6 +200,27 @@ pub struct TrainingProvenance {
     pub cycle: u64,
 }
 
+impl TrainingProvenance {
+    /// The provenance of a run that has no gate and no parent: which regime
+    /// trained these weights with which seed on which environment, bound to
+    /// the base it trained on by `base_digest` (see [`Self::base_digest`]).
+    /// Every adapter trainer records at least this, so a server can refuse
+    /// the adapter on any other base.
+    pub fn on_base(regime: &str, seed: u64, environment: &str, base_digest: String) -> Self {
+        TrainingProvenance {
+            code_revision: format!("brain {}", env!("CARGO_PKG_VERSION")),
+            regime: regime.to_string(),
+            seed,
+            hyperparams: Value::Null,
+            environment: environment.to_string(),
+            gate: None,
+            trained_from: None,
+            base_digest: Some(base_digest),
+            cycle: 0,
+        }
+    }
+}
+
 /// The single metadata key holding the whole card as a JSON string.
 pub const CARD_KEY: &str = "brain.card";
 /// The metadata key holding the model config as a JSON string.

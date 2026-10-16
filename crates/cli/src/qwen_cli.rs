@@ -1053,7 +1053,15 @@ fn finetune_lora(args: &[String]) {
         }
     };
     println!("trained: loss {:.4} -> {}", report.initial_loss, report.final_loss.map_or("n/a".to_string(), |l| format!("{l:.4}")));
-    if let Err(e) = trained.save_adapter(adapter_out_path.to_str().unwrap_or_default(), &full_ref_str, &base_id, dataset_id.as_deref()) {
+    let base_digest = match brain_modelstore::fetch::base_digest(Path::new(&base_open)) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("hashing the base {base_open}: {e}");
+            return;
+        }
+    };
+    let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", seed, gpu_core::backend_name(), base_digest);
+    if let Err(e) = trained.save_adapter_with_lineage(adapter_out_path.to_str().unwrap_or_default(), &full_ref_str, &base_id, dataset_id.as_deref(), Some(provenance)) {
         eprintln!("save_adapter: {e}");
         return;
     }

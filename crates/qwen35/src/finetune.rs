@@ -249,7 +249,8 @@ pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, o
     let obj = model::causal_lm::<Qwen35>(train_set, val, bcfg, itos);
     let (report, m) = model::fit_controlled(m, obj, opts, None, step_progress_control(&mut step_progress()))?;
     let base_id = base.file_name().map_or_else(|| "base".to_string(), |n| n.to_string_lossy().into_owned());
-    crate::lora::save_adapter(out, &m, "brain/qwen35-lora", &base_id, None)?;
+    let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", opts.seed, gpu_core::backend_name(), brain_modelstore::fetch::base_digest(base)?);
+    crate::lora::save_adapter_with_lineage(out, &m, "brain/qwen35-lora", &base_id, None, Some(provenance))?;
     Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
 }
 
