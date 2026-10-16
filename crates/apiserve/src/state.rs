@@ -120,6 +120,11 @@ impl AppState {
         self
     }
 
+    /// Both admission deadlines as the value the admission race takes.
+    pub fn deadlines(&self) -> residency::admission::Deadlines {
+        residency::admission::Deadlines { admit: self.admit_deadline, cold_build: self.cold_build_admit_deadline }
+    }
+
     /// Attach a model supplier (builder-style) so an unresolved model auto-fetches
     /// instead of 404ing. `None` restores today's no-auto-fetch behavior.
     pub fn with_supplier(mut self, supplier: Option<Arc<dyn ModelSupplier>>) -> AppState {

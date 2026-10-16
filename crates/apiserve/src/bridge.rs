@@ -252,35 +252,40 @@ pub fn map_reply_err(provider: Provider, model: &str, e: &str) -> ApiError {
 /// instead of shedding — a legitimate cold start is not overload. Any OTHER
 /// reason admission is still pending (every lane genuinely busy with unrelated
 /// models, nothing evictable) keeps shedding at the short deadline, unchanged.
-/// Returns `true` if admitted before whichever deadline applies, `false` if shed.
+/// Returns `Ok` if admitted before whichever deadline applies; a shed request is
+/// logged (see `Refusal::record`) and returned as the `Err`.
 /// Takes the executor/deadlines by value/reference rather than `&AppState` so
 /// [`stream_with_autofetch`]'s `'static` background task can call it too.
 async fn wait_for_admission(
     exec: &residency::Executor,
-    admit_deadline: std::time::Duration,
-    cold_build_admit_deadline: std::time::Duration,
+    deadlines: residency::admission::Deadlines,
     model: &str,
     admit_rx: &mut oneshot::Receiver<()>,
-) -> bool {
+) -> Result<(), residency::admission::Refusal> {
     let start = std::time::Instant::now();
-    let tick = std::time::Duration::from_millis(250).min(admit_deadline).max(std::time::Duration::from_millis(1));
+    let tick = std::time::Duration::from_millis(250).min(deadlines.admit).max(std::time::Duration::from_millis(1));
     loop {
         tokio::select! {
-            _ = &mut *admit_rx => return true,
+            _ = &mut *admit_rx => return Ok(()),
             _ = tokio::time::sleep(tick) => {}
         }
         let elapsed = start.elapsed();
-        if elapsed < admit_deadline {
+        if elapsed < deadlines.admit {
             continue;
         }
         let exec_owned = exec.clone();
         let model_owned = model.to_string();
         let building = tokio::task::spawn_blocking(move || residency::admission::model_is_cold_building(&exec_owned, &model_owned)).await.unwrap_or(false);
-        let limit = if building { cold_build_admit_deadline } else { admit_deadline };
+        let limit = if building { deadlines.cold_build } else { deadlines.admit };
         if elapsed >= limit {
-            return false;
+            return Err(residency::admission::Refusal::new(exec, model, deadlines, building, elapsed).record());
         }
     }
+}
+
+/// The 429 for a request that was not admitted in time.
+fn refused(provider: Provider, refusal: &residency::admission::Refusal) -> ApiError {
+    ApiError::overloaded(provider, refusal.client_message())
 }
 
 /// Submit one `generate` job and block (async) for its single reply. Arms a fresh
@@ -309,11 +314,11 @@ pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invoca
         });
     state.exec.submit(job);
 
-    if !wait_for_admission(&state.exec, state.admit_deadline, state.cold_build_admit_deadline, model, &mut admit_rx).await {
+    if let Err(refusal) = wait_for_admission(&state.exec, state.deadlines(), model, &mut admit_rx).await {
         token.cancel();
         state.finish(&id);
         let _ = pending.settle(CallResult::Refused);
-        return Err(ApiError::overloaded(provider, "request could not be admitted within the deadline"));
+        return Err(refused(provider, &refusal));
     }
 
     // Admitted — await the reply (unbounded; a running job may take long).
@@ -519,10 +524,10 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
 
     // Admission race BEFORE returning the SSE body: a shed request yields a plain
     // 429, never an event-stream that immediately errors.
-    if !wait_for_admission(&state.exec, state.admit_deadline, state.cold_build_admit_deadline, model, &mut admit_rx).await {
+    if let Err(refusal) = wait_for_admission(&state.exec, state.deadlines(), model, &mut admit_rx).await {
         token.cancel();
         state.finish(&id);
-        return Err(ApiError::overloaded(provider, "request could not be admitted within the deadline"));
+        return Err(refused(provider, &refusal));
     }
 
     Ok(EventStream { rx, _guard: CancelGuard { token, jobs: state.jobs.clone(), id } })
@@ -554,8 +559,7 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
     let (tx, rx) = mpsc::unbounded_channel::<StreamMsg>();
     let exec = state.exec.clone();
     let jobs = state.jobs.clone();
-    let admit_deadline = state.admit_deadline;
-    let cold_build_admit_deadline = state.cold_build_admit_deadline;
+    let deadlines = state.deadlines();
     let model_owned = model.to_string();
     let action_owned = action.to_string();
     let mut inv = inv;
@@ -635,10 +639,10 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
             });
         exec.submit(job);
 
-        if !wait_for_admission(&exec, admit_deadline, cold_build_admit_deadline, &model_for_admit, &mut admit_rx).await {
+        if let Err(refusal) = wait_for_admission(&exec, deadlines, &model_for_admit, &mut admit_rx).await {
             token.cancel();
             jobs.remove(&id);
-            let _ = tx_timeout.send(StreamMsg::Err(ApiError::overloaded(provider, "request could not be admitted within the deadline")));
+            let _ = tx_timeout.send(StreamMsg::Err(refused(provider, &refusal)));
         }
     });
 

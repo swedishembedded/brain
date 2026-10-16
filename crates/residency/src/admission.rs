@@ -55,6 +55,66 @@ impl Default for Deadlines {
     }
 }
 
+/// The flag that sets [`Deadlines::admit`].
+pub const ADMIT_FLAG: &str = "--admit-deadline-ms";
+/// The flag that sets [`Deadlines::cold_build`].
+pub const COLD_BUILD_FLAG: &str = "--cold-build-admit-deadline-ms";
+
+/// A request that was not admitted before its deadline. Built by the
+/// transport that gave up waiting; [`Refusal::record`] logs it for the
+/// operator and [`Refusal::client_message`] is what the caller is told.
+#[derive(Clone, Debug)]
+pub struct Refusal {
+    pub model: String,
+    /// Requests still queued (not yet on a lane) when the wait ended.
+    pub queue_depth: usize,
+    /// The deadline that applied: the plain one, or the cold-build one.
+    pub deadline: Duration,
+    pub waited: Duration,
+    /// The serve flag that sets `deadline`.
+    pub flag: &'static str,
+}
+
+impl Refusal {
+    /// Snapshot the executor's queue and describe the refusal. `cold_building`
+    /// selects which deadline (and flag) was in force.
+    pub fn new(exec: &Executor, model: &str, deadlines: Deadlines, cold_building: bool, waited: Duration) -> Refusal {
+        let (deadline, flag) = if cold_building { (deadlines.cold_build, COLD_BUILD_FLAG) } else { (deadlines.admit, ADMIT_FLAG) };
+        Refusal { model: model.to_string(), queue_depth: exec.stats().queue_depth, deadline, waited, flag }
+    }
+
+    /// The operator-facing line. Printed at every verbosity level: a shed
+    /// request is a failed request, and by default nothing else says why.
+    pub fn log_line(&self) -> String {
+        format!(
+            "[warn] request for model '{}' refused: not admitted within the deadline (queue depth {}, deadline {} ms, waited {} ms); raise {} if these requests should wait for running work",
+            self.model,
+            self.queue_depth,
+            self.deadline.as_millis(),
+            self.waited.as_millis(),
+            self.flag
+        )
+    }
+
+    /// Log the refusal and return it for the transport to report.
+    pub fn record(self) -> Refusal {
+        eprintln!("{}", self.log_line());
+        self
+    }
+
+    /// What the caller is told: the fact, the deadline that applied, and the
+    /// setting that changes it.
+    pub fn client_message(&self) -> String {
+        format!(
+            "request could not be admitted within the deadline: it waited {} ms for model '{}' to have capacity, and this server's limit is {} ms. Retry later, or ask the operator to start the server with a larger {}.",
+            self.waited.as_millis(),
+            self.model,
+            self.deadline.as_millis(),
+            self.flag
+        )
+    }
+}
+
 /// Is `model`'s currently-running group still inside its deferred
 /// activate()/promote() — i.e. genuinely cold-building, not just busy? A
 /// caller stuck waiting for admission uses this to tell "my own model's
@@ -78,6 +138,19 @@ pub fn model_is_cold_building(exec: &Executor, model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_names_the_model_the_queue_depth_the_deadline_and_the_wait() {
+        let r = Refusal { model: "qwen3-27b".into(), queue_depth: 3, deadline: Duration::from_millis(10_000), waited: Duration::from_millis(10_250), flag: ADMIT_FLAG };
+        let line = r.log_line();
+        for needle in ["[warn]", "qwen3-27b", "queue depth 3", "deadline 10000 ms", "waited 10250 ms"] {
+            assert!(line.contains(needle), "{needle:?} missing from {line:?}");
+        }
+        let hint = r.client_message();
+        assert!(hint.contains("--admit-deadline-ms") && hint.contains("10000"), "the client is told what to change: {hint:?}");
+        let cold = Refusal { flag: COLD_BUILD_FLAG, ..r };
+        assert!(cold.client_message().contains("--cold-build-admit-deadline-ms"));
+    }
 
     #[test]
     fn default_deadlines_give_a_cold_build_strictly_more_time_than_a_plain_wait() {

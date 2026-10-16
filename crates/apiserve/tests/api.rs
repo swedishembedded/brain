@@ -1612,6 +1612,8 @@ async fn admit_deadline_sheds_saturated_lane_with_429_and_cancels() {
     assert!(elapsed < Duration::from_secs(2), "429 must return near the deadline, not hang: {elapsed:?}");
     assert!(headers.contains_key(header::RETRY_AFTER), "429 must carry Retry-After: {headers:?}");
     assert_valid("openai.json", "ErrorResponse", &v);
+    let message = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("--admit-deadline-ms") && message.contains("200"), "the 429 tells the client what to change: {message:?}");
 
     // Job 3 (stream): the SSE admit race must ALSO shed BEFORE any event-stream body —
     // a plain 429 JSON, not text/event-stream.

@@ -81,6 +81,10 @@ impl Manager {
         }
     }
 
+    fn deadlines(&self) -> residency::admission::Deadlines {
+        residency::admission::Deadlines { admit: self.admit_deadline, cold_build: self.cold_build_admit_deadline }
+    }
+
     /// Attach a model supplier (builder-style) so an unresolved model
     /// auto-fetches instead of every dispatch entry point replying `"no model
     /// '…'"`. `None` restores today's no-auto-fetch behavior.
@@ -302,32 +306,31 @@ fn outcome_to_fds(outcome: &Outcome, want_dmabuf: bool) -> Result<(HashMap<Strin
 /// round-trip to the dispatcher, off the async runtime via `spawn_blocking`)
 /// to tell "my own model's first cold activation is still in flight" (extend
 /// to `cold_build_admit_deadline`) apart from genuine cross-model contention
-/// (keep shedding at `admit_deadline`). Returns `true` if admitted before
-/// whichever deadline applies, `false` if shed.
+/// (keep shedding at `admit_deadline`). Returns `Ok` if admitted before
+/// whichever deadline applies; a shed request is logged and returned as `Err`.
 async fn wait_for_admission(
     exec: &Executor,
-    admit_deadline: std::time::Duration,
-    cold_build_admit_deadline: std::time::Duration,
+    deadlines: residency::admission::Deadlines,
     model: &str,
     admit_rx: &mut tokio::sync::oneshot::Receiver<()>,
-) -> bool {
+) -> Result<(), residency::admission::Refusal> {
     let start = std::time::Instant::now();
-    let tick = std::time::Duration::from_millis(250).min(admit_deadline).max(std::time::Duration::from_millis(1));
+    let tick = std::time::Duration::from_millis(250).min(deadlines.admit).max(std::time::Duration::from_millis(1));
     loop {
         tokio::select! {
-            _ = &mut *admit_rx => return true,
+            _ = &mut *admit_rx => return Ok(()),
             _ = tokio::time::sleep(tick) => {}
         }
         let elapsed = start.elapsed();
-        if elapsed < admit_deadline {
+        if elapsed < deadlines.admit {
             continue;
         }
         let exec_owned = exec.clone();
         let model_owned = model.to_string();
         let building = tokio::task::spawn_blocking(move || residency::admission::model_is_cold_building(&exec_owned, &model_owned)).await.unwrap_or(false);
-        let limit = if building { cold_build_admit_deadline } else { admit_deadline };
+        let limit = if building { deadlines.cold_build } else { deadlines.admit };
         if elapsed >= limit {
-            return false;
+            return Err(residency::admission::Refusal::new(exec, model, deadlines, building, elapsed).record());
         }
     }
 }
@@ -427,11 +430,12 @@ fn submit_subscribed_job(
     // `run`'s does -- it cancels the (already-submitted) job and reports the
     // timeout as an `error` frame on the SAME stream instead. If admission
     // wins the race first, this task is a no-op and exits immediately.
+    let deadlines = residency::admission::Deadlines { admit: admit_deadline, cold_build: cold_build_admit_deadline };
     tokio::spawn(async move {
-        if !wait_for_admission(&exec_for_admit, admit_deadline, cold_build_admit_deadline, &model_for_admit, &mut admit_rx).await {
+        if let Err(refusal) = wait_for_admission(&exec_for_admit, deadlines, &model_for_admit, &mut admit_rx).await {
             token.cancel();
             if let Ok(mut s) = stream.lock() {
-                s.error("request could not be admitted within the deadline");
+                s.error(&refusal.client_message());
             }
         }
     });
@@ -497,10 +501,10 @@ impl Manager {
         // mirrors `apiserve::bridge::submit` exactly (via `wait_for_admission`),
         // so both transports shed a request that couldn't start in time
         // identically.
-        if !wait_for_admission(&self.executor, self.admit_deadline, self.cold_build_admit_deadline, &model_for_admit, &mut admit_rx).await {
+        if let Err(refusal) = wait_for_admission(&self.executor, self.deadlines(), &model_for_admit, &mut admit_rx).await {
             token.cancel();
             finish_job(&self.jobs, job);
-            return Err(fdo::Error::Failed("request could not be admitted within the deadline".into()));
+            return Err(fdo::Error::Failed(refusal.client_message()));
         }
 
         let outcome = rx.await.map_err(|_| fdo::Error::Failed("executor dropped the reply".into()))?.map_err(fdo::Error::Failed)?;
