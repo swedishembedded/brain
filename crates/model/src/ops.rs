@@ -238,8 +238,8 @@ mod kname {
     // convention as every other tier in this table).
     pub const PAGED_KV_APPEND_BATCHED: &str = "paged_kv_append_batched";
     /// The BF16 append tier binds to a DIFFERENT physical kernel
-    /// (`paged_kv_append_batched_word.wgsl`, one thread per TOKEN with a
-    /// serial inner loop), not a `dtype_variant_store` rewrite of the plain
+    /// (`paged_kv_append_batched_word.wgsl`, one thread per even-sized chunk
+    /// of a token with a serial inner loop), not a `dtype_variant_store` rewrite of the plain
     /// per-element `paged_kv_append_batched.wgsl` above - see that word-
     /// granularity kernel's own doc comment for the real race a per-element
     /// bf16 pack dispatch has (caught by this crate's own dual-backend test:
@@ -1860,12 +1860,13 @@ impl Ops {
     /// (a per-element bf16 pack dispatch races; the word-granularity sibling
     /// kernel does not). `F32` stays one thread per (token, element)
     /// (`batch * kv_stride`, this kernel's own established parallelism);
-    /// `BF16` is one thread per TOKEN (`batch`), each thread looping over its
-    /// own `kv_stride` elements serially.
+    /// `BF16` is one thread per even-sized chunk of a token
+    /// ([`crate::kv_tier::append_word_threads`]), each looping over its chunk
+    /// serially so a packed word is private to one thread.
     fn bind_kv_append(dt: Dtype, batch: u32, kv_stride: u32) -> (&'static str, u32) {
         match dt {
             Dtype::F32 => (kname::PAGED_KV_APPEND_BATCHED, batch * kv_stride),
-            Dtype::BF16 => (kname::PAGED_KV_APPEND_BATCHED_WORD_BF16, batch),
+            Dtype::BF16 => (kname::PAGED_KV_APPEND_BATCHED_WORD_BF16, crate::kv_tier::append_word_threads(batch, kv_stride)),
             other => panic!(
                 "Ops::kv_append_batched: no paged-KV append kernel for dtype {other:?} -- only F32/BF16 \
                  KV-cache pages are implemented (see KvPage's own doc comment)"

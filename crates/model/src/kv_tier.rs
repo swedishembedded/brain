@@ -418,6 +418,16 @@ fn flash_splits(cap: u32, batch: u32, n_kv_heads: u32) -> (u32, u32) {
     (tiles.div_ceil(per_split), per_split)
 }
 
+/// Elements one thread of `paged_kv_append_batched_word` stores (mirrors the
+/// kernel's `CHUNK`; even, so a packed bf16 word never straddles two threads).
+const APPEND_WORD_CHUNK: u32 = 16;
+
+/// Threads a `paged_kv_append_batched_word` dispatch must launch for `batch`
+/// tokens of `kv_stride` elements.
+pub fn append_word_threads(batch: u32, kv_stride: u32) -> u32 {
+    batch * kv_stride.div_ceil(APPEND_WORD_CHUNK)
+}
+
 impl KvKernels {
     /// Look `tier`'s kernels up on `gpu` by name. An error names the first
     /// missing kernel: the model did not register [`kernel_list`].
@@ -459,8 +469,8 @@ impl KvKernels {
         let KvAppend { batch, kv_stride, block_size, head_dim } = a;
         match self.tier {
             KvTier::F32 => g.step(self.append, &[src, blocks, offsets, &plane.data], &[batch, kv_stride, block_size], batch * kv_stride),
-            // One thread per token: a packed word is then private to one thread.
-            KvTier::Bf16 => g.step(self.append, &[src, blocks, offsets, &plane.data], &[batch, kv_stride, block_size], batch),
+            // One thread per even-sized chunk of a token: a packed word is then private to one thread.
+            KvTier::Bf16 => g.step(self.append, &[src, blocks, offsets, &plane.data], &[batch, kv_stride, block_size], append_word_threads(batch, kv_stride)),
             KvTier::Int8 => {
                 let (clip, scales) = (plane.clip.as_ref().expect("int8 plane has a clip"), plane.scales.as_ref().expect("int8 plane has scales"));
                 g.step(self.append, &[src, blocks, offsets, clip, &plane.data, scales], &[batch, kv_stride, block_size, head_dim], batch * (kv_stride / head_dim))

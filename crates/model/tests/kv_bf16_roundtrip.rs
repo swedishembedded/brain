@@ -362,6 +362,71 @@ fn run_rmw_stress(gpu: Gpu, label: &str) {
     eprintln!("{label} RMW stress: both adjacent-slot tokens (sharing one packed word) survived intact");
 }
 
+/// A batched append whose rows span several threads each (kv_stride 40 is
+/// two full 16-element chunks and one of 8): every element of every row, at the
+/// chunk seams and at the row end, lands in its own slot intact.
+fn run_chunked_batch_append(gpu: Gpu, label: &str) {
+    let ops = Ops::new(gpu).expect("Ops::new");
+    let g = ops.gpu();
+
+    let (n_heads, group, head_dim) = (1u32, 1u32, 40u32); // n_kv=1, kv_stride=40
+    let kv_stride = head_dim;
+    let (block_size, num_blocks, batch) = (3u32, 4u32, 7u32);
+    let pool = KvPage::zeros(&ops, num_blocks, block_size, kv_stride, Dtype::BF16);
+
+    let mut rng = Lcg::new(random_seed());
+    let toks: Vec<Vec<f32>> = (0..batch).map(|_| rng.vec_scaled(kv_stride as usize, 1.0)).collect();
+    // Seven tokens into seven distinct (block, offset) slots across the pool.
+    let slots: Vec<(u32, u32)> = (0..batch).map(|i| (i % num_blocks, (i / num_blocks + i) % block_size)).collect();
+    let src = g.storage_init("src", &toks.concat());
+    let blocks = g.storage(batch as u64);
+    g.write(&blocks, &slots.iter().map(|s| s.0).collect::<Vec<_>>());
+    let offsets = g.storage(batch as u64);
+    g.write(&offsets, &slots.iter().map(|s| s.1).collect::<Vec<_>>());
+    let mut steps = Vec::new();
+    ops.kv_append_batched(&mut steps, &pool, &src, &blocks, &offsets, batch, kv_stride, block_size);
+    g.submit(&[], &steps);
+
+    for (i, tok) in toks.iter().enumerate() {
+        let (blk, off) = slots[i];
+        let (block_table, seq_lens) = (g.storage(1), g.storage(1));
+        g.write(&block_table, &[blk]);
+        g.write(&seq_lens, &[off + 1]);
+        let mut probs_h = vec![0.0f32; (off + 1) as usize];
+        probs_h[off as usize] = 1.0;
+        let probs = g.storage_init("probs", &probs_h);
+        let ctx = g.storage(head_dim as u64);
+        let shape = PagedDecodeShape { batch: 1, n_heads, group, head_dim, block_size, kv_stride, cap: off + 1, max_bt: 1, scale: 1.0 };
+        let mut apply = Vec::new();
+        ops.decode_apply_batched(&mut apply, &probs, &pool, &block_table, &seq_lens, &ctx, shape);
+        g.submit(&[], &apply);
+        let got = g.read(&ctx, head_dim as usize);
+        for d in 0..head_dim as usize {
+            let tol = tok[d].abs() * 2f32.powi(-8) + 1e-4;
+            assert!(
+                (got[d] - tok[d]).abs() <= tol,
+                "{label} chunked append row {i} (block {blk}, offset {off}) element {d}: got {} want {} - a chunk written to the wrong place or twice",
+                got[d],
+                tok[d]
+            );
+        }
+    }
+}
+
+#[test]
+fn kv_bf16_chunked_batch_append_lands_every_element_on_cpu() {
+    run_chunked_batch_append(Gpu::new_cpu(kernel_list()), "cpu");
+}
+
+#[test]
+fn kv_bf16_chunked_batch_append_lands_every_element_on_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    if brain_testutil::gpu_tests_skipped() {
+        return;
+    }
+    run_chunked_batch_append(Gpu::new_gpu(kernel_list()), "gpu");
+}
+
 #[test]
 fn kv_bf16_long_context_parity_on_cpu() {
     run_long_context_parity(Gpu::new_cpu(kernel_list()), "cpu");
