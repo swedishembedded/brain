@@ -614,7 +614,7 @@ impl PatchMerger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data::rng::Rng;
+    use data::rng::{random_seed, Rng};
 
     fn tiny_cfg() -> VisionConfig {
         VisionConfig {
@@ -678,7 +678,7 @@ mod tests {
         let (gh, gw) = (2u32, 2u32);
         let (c, pv) = (cfg.hidden as usize, cfg.patch_vec_dim() as usize);
         let n = (gh * gw) as usize;
-        let mut rng = Rng::new(3);
+        let mut rng = Rng::new(random_seed());
         let pixels: Vec<f32> = (0..n * pv).map(|_| (rng.next_f32() - 0.5) * 0.4).collect();
         let nn = n * c;
 
@@ -729,7 +729,7 @@ mod tests {
         let (gh, gw) = (4u32, 4u32);
         let n = (gh * gw) as usize;
         let pv = cfg.patch_vec_dim() as usize;
-        let mut rng = Rng::new(99);
+        let mut rng = Rng::new(random_seed());
         let pixels: Vec<f32> = (0..n * pv).map(|_| rng.next_f32() - 0.5).collect();
 
         // Tap block 0 (its output must differ from the final post-norm features).
@@ -752,7 +752,7 @@ mod tests {
     fn patch_merger_shapes_and_norm_variants() {
         let gpu = Gpu::new_cpu(vision_pipelines());
         let (in_dim, merge, out_dim, n) = (8u32, 2u32, 10u32, 8u32);
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(random_seed());
         let x: Vec<f32> = (0..(n * in_dim) as usize).map(|_| rng.next_f32() - 0.5).collect();
         for postshuffle in [false, true] {
             let w = merger_weights(in_dim, merge, out_dim, postshuffle, 5);
@@ -773,7 +773,7 @@ mod tests {
         let (gh, gw) = (4u32, 4u32); // 16 patches, one 2×2-merge grid
         let n = (gh * gw) as usize;
         let pv = cfg.patch_vec_dim() as usize;
-        let mut rng = Rng::new(99);
+        let mut rng = Rng::new(random_seed());
         let pixels: Vec<f32> = (0..n * pv).map(|_| rng.next_f32() - 0.5).collect();
         let out = enc.encode(&gpu, gh, gw, &pixels);
         assert_eq!(out.len(), n * cfg.hidden as usize);

@@ -1095,6 +1095,7 @@ impl Qwen3Vl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data::rng::random_seed;
 
     const IMG: u32 = 7;
 
@@ -1172,12 +1173,12 @@ mod tests {
         for (n, s, o) in &block_leaf_dims {
             vspecs.push((n.as_str(), *s, *o));
         }
-        let vweights = rand_map(Rng::new(1), &vspecs);
+        let vweights = rand_map(Rng::new(random_seed()), &vspecs);
 
         let merged = c * 4; // in_dim·merge²
         // Main merger: LayerNorm over in_dim (postshuffle_norm=false).
         let mweights = rand_map(
-            Rng::new(2),
+            Rng::new(random_seed()),
             &[
                 ("ln.weight", c, true),
                 ("ln.bias", c, false),
@@ -1189,9 +1190,9 @@ mod tests {
         );
         // DeepStack mergers (one per tap): LayerNorm over merged (postshuffle_norm=true).
         let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..2u64)
-            .map(|i| {
+            .map(|_| {
                 rand_map(
-                    Rng::new(20 + i),
+                    Rng::new(random_seed()),
                     &[
                         ("ln.weight", merged, true),
                         ("ln.bias", merged, false),
@@ -1217,7 +1218,7 @@ mod tests {
             Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, ds_mweights, &dweights, tokens.len() as u32, IMG, 2, 4, [2, 1, 1], DecoderBuild::Batched);
 
         let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
-        let mut rng = Rng::new(4);
+        let mut rng = Rng::new(random_seed());
         let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
 
         let loss = model.forward(&tokens, &targets, (4, 4), &pixels);
@@ -1296,11 +1297,11 @@ mod tests {
         for (n, s, o) in &block_leaf_dims {
             vspecs.push((n.as_str(), *s, *o));
         }
-        let vweights = rand_map(Rng::new(31), &vspecs);
+        let vweights = rand_map(Rng::new(random_seed()), &vspecs);
 
         let merged = c * 4;
         let mweights = rand_map(
-            Rng::new(32),
+            Rng::new(random_seed()),
             &[
                 ("ln.weight", c, true),
                 ("ln.bias", c, false),
@@ -1311,9 +1312,9 @@ mod tests {
             ],
         );
         let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..2u64)
-            .map(|i| {
+            .map(|_| {
                 rand_map(
-                    Rng::new(40 + i),
+                    Rng::new(random_seed()),
                     &[
                         ("ln.weight", merged, true),
                         ("ln.bias", merged, false),
@@ -1369,7 +1370,7 @@ mod tests {
             Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, ds_mweights, &dweights, 7, IMG, 2, 4, [2, 1, 1], DecoderBuild::Batched);
         let tokens: Vec<u32> = vec![1, 2, IMG, IMG, IMG, IMG, 3];
         let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
-        let mut rng = Rng::new(34);
+        let mut rng = Rng::new(random_seed());
         let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
         let image = ImageInput { grid: (4, 4), pixels: &pixels };
 
@@ -1450,10 +1451,10 @@ mod tests {
             ]);
         }
         let vspecs: Vec<(&str, usize, bool)> = vspecs.iter().map(|(n, s, o)| (n.as_str(), *s, *o)).collect();
-        let vweights = rand_map(Rng::new(31), &vspecs);
+        let vweights = rand_map(Rng::new(random_seed()), &vspecs);
         let merged = c * 4;
         let mweights = rand_map(
-            Rng::new(32),
+            Rng::new(random_seed()),
             &[
                 ("ln.weight", c, true),
                 ("ln.bias", c, false),
@@ -1584,10 +1585,10 @@ mod tests {
             ]);
         }
         let vspecs: Vec<(&str, usize, bool)> = vspecs.iter().map(|(n, s, o)| (n.as_str(), *s, *o)).collect();
-        let vweights = rand_map(Rng::new(51), &vspecs);
+        let vweights = rand_map(Rng::new(random_seed()), &vspecs);
         let merged = c * 4;
         let mweights = rand_map(
-            Rng::new(52),
+            Rng::new(random_seed()),
             &[
                 ("ln.weight", c, true),
                 ("ln.bias", c, false),
@@ -1685,11 +1686,13 @@ mod tests {
         for (n, s, o) in &block_leaf_dims {
             vspecs.push((n.as_str(), *s, *o));
         }
-        let vweights = rand_map(Rng::new(11), &vspecs);
+        // seed: the [3, 3, 3, 3, 3] output asserted below was recorded from these weights and pixels
+        let (vision_seed, merger_seed, deepstack_seed, pixel_seed, decoder_seed) = (11, 12, 30, 14, 13);
+        let vweights = rand_map(Rng::new(vision_seed), &vspecs);
 
         let merged = c * 4;
         let mweights = rand_map(
-            Rng::new(12),
+            Rng::new(merger_seed),
             &[
                 ("ln.weight", c, true),
                 ("ln.bias", c, false),
@@ -1704,7 +1707,7 @@ mod tests {
         let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..vcfg.deepstack_indexes.len() as u64)
             .map(|i| {
                 rand_map(
-                    Rng::new(30 + i),
+                    Rng::new(deepstack_seed + i),
                     &[
                         ("ln.weight", merged, true),
                         ("ln.bias", merged, false),
@@ -1717,7 +1720,7 @@ mod tests {
             })
             .collect();
 
-        let dweights = qwen3::init_weights(&dcfg, 13);
+        let dweights = qwen3::init_weights(&dcfg, decoder_seed);
 
         // Prompt: 2 text, 4 image (2×2 grid merged), 1 text -- room left in
         // block_size (16) for generated tokens beyond the 7-token prompt.
@@ -1727,12 +1730,12 @@ mod tests {
         let model = Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, ds_mweights, &dweights, seq_len, IMG, 2, 4, [2, 1, 1], DecoderBuild::Decode(Dtype::F32));
 
         let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
-        let mut rng = Rng::new(14);
+        let mut rng = Rng::new(pixel_seed);
         let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
 
         let max_new = 5u32;
         let images = [ImageInput { grid: (4, 4), pixels: &pixels }];
-        let mut gen_rng = Rng::new(99);
+        let mut gen_rng = Rng::new(random_seed());
         let out1 = model.generate(&tokens, &images, max_new, &[], SampleParams::greedy(), &mut gen_rng);
         assert!(!out1.is_empty(), "generate produced no tokens");
         assert!(out1.len() as u32 <= max_new, "generate exceeded max_new");
@@ -1762,9 +1765,9 @@ mod tests {
                 lora: None,
                 rope_scaling: None,
             },
-            rand_map(Rng::new(11), &vspecs),
+            rand_map(Rng::new(vision_seed), &vspecs),
             rand_map(
-                Rng::new(12),
+                Rng::new(merger_seed),
                 &[
                     ("ln.weight", c, true),
                     ("ln.bias", c, false),
@@ -1777,7 +1780,7 @@ mod tests {
             (0..vcfg.deepstack_indexes.len() as u64)
                 .map(|i| {
                     rand_map(
-                        Rng::new(30 + i),
+                        Rng::new(deepstack_seed + i),
                         &[
                             ("ln.weight", merged, true),
                             ("ln.bias", merged, false),
@@ -1808,7 +1811,7 @@ mod tests {
                     lora: None,
                     rope_scaling: None,
                 },
-                13,
+                decoder_seed,
             ),
             seq_len,
             IMG,
@@ -1817,13 +1820,13 @@ mod tests {
             [2, 1, 1],
             DecoderBuild::Decode(Dtype::F32),
         );
-        let mut gen_rng2 = Rng::new(1);
+        let mut gen_rng2 = Rng::new(random_seed());
         let out2 = model2.generate(&tokens, &images, max_new, &[], SampleParams::greedy(), &mut gen_rng2);
         assert_eq!(out1, out2, "greedy generation must be deterministic across independently-constructed identical models, regardless of the RNG state");
 
         // eos_ids actually stops generation early: the first token out1[0]
         // treated as an immediate stop id must yield an empty sequence.
-        let mut gen_rng3 = Rng::new(2);
+        let mut gen_rng3 = Rng::new(random_seed());
         let out3 = model.generate(&tokens, &images, max_new, &[out1[0]], SampleParams::greedy(), &mut gen_rng3);
         assert!(out3.is_empty(), "an eos id matching the very first generated token must stop before emitting it, got {out3:?}");
 
@@ -1922,11 +1925,11 @@ mod tests {
         for (n, s, o) in &block_leaf_dims {
             vspecs.push((n.as_str(), *s, *o));
         }
-        let vweights = rand_map(Rng::new(21), &vspecs);
+        let vweights = rand_map(Rng::new(random_seed()), &vspecs);
 
         let merged = c * 4;
         let mweights = rand_map(
-            Rng::new(22),
+            Rng::new(random_seed()),
             &[
                 ("ln.weight", c, true),
                 ("ln.bias", c, false),
@@ -1937,9 +1940,9 @@ mod tests {
             ],
         );
         let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..vcfg.deepstack_indexes.len() as u64)
-            .map(|i| {
+            .map(|_| {
                 rand_map(
-                    Rng::new(40 + i),
+                    Rng::new(random_seed()),
                     &[
                         ("ln.weight", merged, true),
                         ("ln.bias", merged, false),
@@ -1986,13 +1989,13 @@ mod tests {
         };
 
         let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
-        let image0: Vec<f32> = { let mut r = Rng::new(24); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
-        let image1_a: Vec<f32> = { let mut r = Rng::new(25); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
-        let image1_b: Vec<f32> = { let mut r = Rng::new(26); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
+        let image0: Vec<f32> = { let mut r = Rng::new(random_seed()); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
+        let image1_a: Vec<f32> = { let mut r = Rng::new(random_seed()); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
+        let image1_b: Vec<f32> = { let mut r = Rng::new(random_seed()); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
 
         let model = build_model();
         let images_a = [ImageInput { grid: (4, 4), pixels: &image0 }, ImageInput { grid: (4, 4), pixels: &image1_a }];
-        let mut rng_a = Rng::new(50);
+        let mut rng_a = Rng::new(random_seed());
         let out_a = model.generate(&tokens, &images_a, max_new, &[], SampleParams::greedy(), &mut rng_a);
         assert!(!out_a.is_empty(), "two-image generate produced no tokens");
         assert!(out_a.len() as u32 <= max_new);
@@ -2006,7 +2009,7 @@ mod tests {
         // first image's rows ever read).
         let model2 = build_model();
         let images_b = [ImageInput { grid: (4, 4), pixels: &image0 }, ImageInput { grid: (4, 4), pixels: &image1_b }];
-        let mut rng_b = Rng::new(51);
+        let mut rng_b = Rng::new(random_seed());
         let out_b = model2.generate(&tokens, &images_b, max_new, &[], SampleParams::greedy(), &mut rng_b);
         assert_ne!(out_a, out_b, "changing only the SECOND image did not change the generated sequence -- it is not actually influencing output");
     }
@@ -2077,11 +2080,11 @@ mod tests {
         for (n, s, o) in &block_leaf_dims {
             vspecs.push((n.as_str(), *s, *o));
         }
-        let vweights = rand_map(Rng::new(41), &vspecs);
+        let vweights = rand_map(Rng::new(random_seed()), &vspecs);
 
         let merged = c * 4;
         let mweights = rand_map(
-            Rng::new(42),
+            Rng::new(random_seed()),
             &[
                 ("ln.weight", c, true),
                 ("ln.bias", c, false),
@@ -2092,9 +2095,9 @@ mod tests {
             ],
         );
         let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..vcfg.deepstack_indexes.len() as u64)
-            .map(|i| {
+            .map(|_| {
                 rand_map(
-                    Rng::new(60 + i),
+                    Rng::new(random_seed()),
                     &[
                         ("ln.weight", merged, true),
                         ("ln.bias", merged, false),
@@ -2116,14 +2119,14 @@ mod tests {
 
         let n_frames = 2u32;
         let pv_total = (n_frames * 4 * vcfg.patch_vec_dim()) as usize; // n_frames * (gh*gw) * patch_vec
-        let mut rng = Rng::new(44);
+        let mut rng = Rng::new(random_seed());
         let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
         // Two real, NON-uniformly-spaced timestamps -- exactly the case a
         // constant-fps assumption cannot reproduce.
         let frame_timestamps_s = [0.0f32, 2.0];
 
         let max_new = 5u32;
-        let mut gen_rng1 = Rng::new(99);
+        let mut gen_rng1 = Rng::new(random_seed());
         let out1 = model.generate_video_cb(&tokens, (2, 2), n_frames, &pixels, VIDEO, &frame_timestamps_s, 1.0, max_new, &[], SampleParams::greedy(), &mut gen_rng1, |_| {});
         assert!(!out1.is_empty(), "generate_video_cb produced no tokens");
         assert!(out1.len() as u32 <= max_new, "generate_video_cb exceeded max_new");
@@ -2132,7 +2135,7 @@ mod tests {
         }
 
         // Greedy + no RNG: a second call must reproduce the same sequence.
-        let mut gen_rng2 = Rng::new(100);
+        let mut gen_rng2 = Rng::new(random_seed());
         let out2 = model.generate_video_cb(&tokens, (2, 2), n_frames, &pixels, VIDEO, &frame_timestamps_s, 1.0, max_new, &[], SampleParams::greedy(), &mut gen_rng2, |_| {});
         assert_eq!(out1, out2, "greedy video generation must be deterministic");
 
@@ -2231,11 +2234,11 @@ mod tests {
         for (n, s, o) in &block_leaf_dims {
             vspecs.push((n.as_str(), *s, *o));
         }
-        let vweights = rand_map(Rng::new(41), &vspecs);
+        let vweights = rand_map(Rng::new(random_seed()), &vspecs);
 
         let merged = c * 4;
         let mweights = rand_map(
-            Rng::new(42),
+            Rng::new(random_seed()),
             &[
                 ("ln.weight", c, true),
                 ("ln.bias", c, false),
@@ -2258,7 +2261,7 @@ mod tests {
             Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, vec![], &dweights, tokens.len() as u32, IMG, 2, 4, [2, 1, 1], DecoderBuild::Batched);
 
         let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
-        let mut rng = Rng::new(44);
+        let mut rng = Rng::new(random_seed());
         let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
 
         // Move B off its zero init first - an FD check at B=0 can't tell a

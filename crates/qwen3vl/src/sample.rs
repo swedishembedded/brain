@@ -101,10 +101,11 @@ pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data::rng::random_seed;
 
     #[test]
     fn greedy_at_zero_temperature_picks_the_max() {
-        let mut rng = Rng::new(0);
+        let mut rng = Rng::new(random_seed());
         assert_eq!(sample_logits(&[0.1, 5.0, 0.2, -1.0], 0.0, 0, 1.0, &mut rng), 1);
     }
 
@@ -115,7 +116,7 @@ mod tests {
 
     #[test]
     fn top_k_one_is_deterministic_like_greedy() {
-        let mut rng = Rng::new(42);
+        let mut rng = Rng::new(random_seed());
         for _ in 0..8 {
             assert_eq!(sample_logits(&[0.1, 5.0, 0.2, -1.0], 1.0, 1, 1.0, &mut rng), 1);
         }
@@ -123,7 +124,7 @@ mod tests {
 
     #[test]
     fn nucleus_top_p_can_collapse_to_a_single_token() {
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::new(random_seed());
         let flat = [0.0f32; 6];
         let only = sample_logits(&flat, 1.0, 0, 0.01, &mut rng);
         for _ in 0..10 {
@@ -134,7 +135,7 @@ mod tests {
     #[test]
     fn a_nan_logit_never_wins_over_a_real_value() {
         let logits = [1.0f32, f32::NAN, 2.0, 0.5];
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(random_seed());
         assert_eq!(sample_logits(&logits, 0.0, 0, 1.0, &mut rng), 2, "greedy argmax must pick the real max, not the NaN");
     }
 

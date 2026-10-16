@@ -13,7 +13,7 @@
 
 #[cfg(test)]
 mod tests {
-    use data::rng::Rng;
+    use data::rng::{random_seed, Rng};
     use qwen3::{IGNORE, LoraCfg, QwenConfig};
 
     use crate::config::VisionConfig;
@@ -74,7 +74,7 @@ mod tests {
 
         // --- vision + merger weights (frozen; a fixed random tower) ---
         let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(random_seed());
         let rand_vec = |n: usize, rng: &mut Rng| -> Vec<f32> { (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect() };
         let mut vweights = std::collections::HashMap::new();
         vweights.insert("patch_embed.weight".to_string(), rand_vec(c * pv, &mut rng));
@@ -133,9 +133,8 @@ mod tests {
         let captions: [[u32; 3]; 3] = [[8, 9, 10], [11, 12, 13], [14, 15, 16]];
         let samples: Vec<Sample> = captions
             .iter()
-            .enumerate()
-            .map(|(i, cap)| {
-                let mut prng = Rng::new(100 + i as u64);
+            .map(|cap| {
+                let mut prng = Rng::new(random_seed());
                 let pixels: Vec<f32> = (0..pv_total).map(|_| prng.next_f32() - 0.5).collect();
                 let mut tokens = tokens_prefix.clone();
                 tokens.extend_from_slice(cap);
