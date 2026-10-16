@@ -31,3 +31,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+brain-gpu-core.workspace = true

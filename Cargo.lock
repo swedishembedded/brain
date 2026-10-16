@@ -2817,6 +2817,7 @@ version = "2.0.0"
 dependencies = [
  "ash",
  "brain-backend-api",
+ "brain-gpu-core",
  "brain-kernels",
  "brain-testutil",
  "bytemuck",
