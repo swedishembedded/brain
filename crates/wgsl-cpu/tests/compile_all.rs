@@ -48,20 +48,20 @@ fn dtype_tiers_compile_or_fail_only_for_the_documented_barrier_reason() {
         if tiers.is_empty() {
             continue;
         }
-        let tpl = tpl_binding(src).unwrap_or_else(|| {
+        let bindings = tpl_bindings(src);
+        if bindings.is_empty() {
             panic!(
                 "{name}: @dtype declares a storage tier ({tiers:?}) but has no \
-                 `@tpl <binding> -> ...` header line naming which binding to templatize"
-            )
-        });
-        // A comma-separated `@tpl` (only `paged_flash_decode` today: `pool_k,
-        // pool_v`) names MULTIPLE independent bindings, each needing its own
-        // `dtype_variant` call chained over the previous call's own output -
-        // exactly what that kernel's header documents ("chained twice...
-        // dtype_variant(.., "pool_k", BF16) then dtype_variant again over ITS
-        // OWN output with "pool_v""). Splitting unconditionally on `,` is a
-        // no-op for every other kernel's own single-binding `@tpl`.
-        let bindings: Vec<&str> = tpl.split(',').collect();
+                 `@tpl <binding>[, <binding>] -> ...` header line naming which bindings to templatize"
+            );
+        }
+        // A comma-separated `@tpl` (`paged_flash_decode`: `pool_k,pool_v`;
+        // `paged_flash_prefill_hd256`: `pool_k, pool_v`) names MULTIPLE
+        // independent bindings, each needing its own `dtype_variant` call
+        // chained over the previous call's own output - exactly what those
+        // kernels' headers document ("chained twice... dtype_variant(..,
+        // "pool_k", BF16) then dtype_variant again over ITS OWN output with
+        // "pool_v""). `tpl_bindings` already split the list.
         // `dtype_variant` only rewrites a binding's declaration/loads, never
         // control flow (see its own doc comment), so a variant's barrier
         // count is always identical to its base kernel's - the ONE
@@ -163,11 +163,17 @@ fn declared_dtype_tiers(src: &str) -> Vec<DType> {
         .collect()
 }
 
-/// The binding name a kernel's `// @tpl <binding> -> ... storage variant`
-/// header line names - the field B4 added and explicitly deferred parsing of
-/// to "B6" in its own comment (see `matmul.wgsl`'s header: "header field,
-/// parsing deferred to B6"); this is that parse.
-fn tpl_binding(src: &str) -> Option<&str> {
-    let line = src.lines().find(|l| l.trim_start().starts_with("// @tpl"))?;
-    line.trim_start().trim_start_matches("// @tpl").split_whitespace().next()
+/// The binding names a kernel's `// @tpl <binding>[, <binding>] -> ... storage
+/// variant` header line names - the field B4 added and explicitly deferred
+/// parsing of to "B6" in its own comment (see `matmul.wgsl`'s header: "header
+/// field, parsing deferred to B6"); this is that parse. The list is the text
+/// before `->`, split on commas with the optional space after each trimmed;
+/// empty when the kernel has no `@tpl` line.
+fn tpl_bindings(src: &str) -> Vec<&str> {
+    let Some(line) = src.lines().find(|l| l.trim_start().starts_with("// @tpl")) else {
+        return Vec::new();
+    };
+    let names = line.trim_start().trim_start_matches("// @tpl");
+    let names = names.split("->").next().unwrap_or(names);
+    names.split(',').map(str::trim).filter(|b| !b.is_empty()).collect()
 }
