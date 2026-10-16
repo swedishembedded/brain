@@ -117,7 +117,7 @@ fn default_sampled_decode_does_not_collapse_to_silence() {
     // pins NO sampling knob, so this also gates the resolution chain: whatever
     // the checkpoint's `generation_config.json` says is what runs.
     let text = "The quick brown fox jumps over the lazy dog.";
-    let opts = GenOpts { max_frames: MAX_FRAMES, seed: 0, ..GenOpts::default() }; // seed: the 2.6x natural-EOS margin was measured on the weights at the seed that reproduced the collapse (needs real weights; not run)
+    let opts = GenOpts { max_frames: MAX_FRAMES, seed: 0, ..GenOpts::default() }; // seed: the natural-EOS margin was measured on the weights at the seed that reproduced the collapse (needs real weights; not run)
     let cancel = capability::CancelToken::default();
 
     // Stop one stage short of the waveform first: the codes carry the evidence
