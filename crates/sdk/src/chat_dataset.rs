@@ -75,7 +75,7 @@ pub fn validate_chat_dataset_for(
     let model_dir = model_dir.as_ref();
     let (tok, tmpl) = crate::finetune::tokenizer_and_template(model_dir).map_err(|e| e.to_string())?;
     let render = data::chat::RenderOpts::default();
-    crate::finetune::Asked { tok: &tok, tmpl: &tmpl, no_think: None, render }.read(path).map_err(|e| e.to_string())?;
+    crate::finetune::Asked { tok: &tok, tmpl: &tmpl, no_think: None, render, pack: false }.read(path).map_err(|e| e.to_string())?;
     Ok(summary)
 }
 

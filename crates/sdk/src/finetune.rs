@@ -112,6 +112,7 @@ pub struct ChatFineTune {
     bf16_base: bool,
     int8_base: bool,
     thinking: bool,
+    pack_answers: bool,
 }
 
 /// The tier the frozen base is held at: int8 over bf16 over fp32.
@@ -164,6 +165,7 @@ impl ChatFineTune {
             bf16_base: false,
             int8_base: false,
             thinking: true,
+            pack_answers: false,
         }
     }
 
@@ -405,6 +407,19 @@ impl ChatFineTune {
         self
     }
 
+    /// Train a record that supervises several assistant turns as ONE sequence
+    /// ([`ChatSample::answers_packed`]) instead of one example per turn
+    /// ([`ChatSample::answers_as_asked`]). Each turn's target is the same
+    /// either way; packing renders the conversation once, so a long
+    /// tool-using trajectory costs its length once instead of once per turn.
+    /// The loss then weighs every supervised token equally across the batch
+    /// (a longer trajectory counts for more), where per-turn examples weigh
+    /// every turn equally. A record with one supervised turn is unaffected.
+    pub fn pack_answers(mut self, on: bool) -> Self {
+        self.pack_answers = on;
+        self
+    }
+
     /// Hold the frozen base at bf16, half the bytes of fp32 (a 7B decoder
     /// then trains on one 24 GB card); the adapters and optimiser stay fp32.
     /// Scoring before and after runs at the same tier.
@@ -450,7 +465,7 @@ impl ChatFineTune {
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
         let no_think = if self.thinking { None } else { tmpl.no_think_block() };
         let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
-        let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render };
+        let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: self.pack_answers };
         let train_samples = asked.read(dataset)?;
         let dataset_records = train_samples.len();
         let mut replay_samples = Vec::new();
@@ -810,7 +825,7 @@ pub fn score_chat(base: &str, adapter: Option<&Path>, held_out: &Path) -> Result
     let weights_str = utf8(&open)?;
     qwen3::checkpoint_config(weights_str).map_err(Error::Backend)?;
     let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
-    let records = Asked { tok: &tok, tmpl: &tmpl, no_think: None, render: data::chat::RenderOpts::default() }.read(held_out)?;
+    let records = Asked { tok: &tok, tmpl: &tmpl, no_think: None, render: data::chat::RenderOpts::default(), pack: false }.read(held_out)?;
     let mut longest = 0usize;
     for (i, r) in records.iter().enumerate() {
         let (ids, _) = r.encode(&tok, &tmpl).map_err(|e| Error::Backend(format!("{}: record {}: {e}", held_out.display(), i + 1)))?;
@@ -899,6 +914,8 @@ pub(crate) struct Asked<'a> {
     pub tmpl: &'a ChatTemplate,
     pub no_think: Option<&'a str>,
     pub render: data::chat::RenderOpts,
+    /// A record of several supervised answers is one packed example.
+    pub pack: bool,
 }
 
 impl Asked<'_> {
@@ -922,6 +939,12 @@ impl Asked<'_> {
             // Whole-record masking is exact for plain answers in thinking mode
             // and refuses tool turns; everywhere else each answer is asked for,
             // and a record supervising only its last message has one boundary.
+            if self.pack && record.messages.iter().filter(|m| m.train).count() > 1 {
+                if let Some(packed) = record.answers_packed(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))? {
+                    samples.push(packed);
+                    continue;
+                }
+            }
             let per_answer = if self.no_think.is_some() || record.supervises_tool_calls() {
                 record.answers_as_asked(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))?
             } else if record.supervises_only_final_turn() && record.context_holds_tool_turns() {
@@ -1154,6 +1177,10 @@ mod tests {
 
     /// The samples `Asked` reads from a dataset of `lines`, in the mode asked.
     fn read_lines(lines: &[&str], no_think: bool) -> Result<Vec<ChatSample>> {
+        read_lines_packing(lines, no_think, false)
+    }
+
+    fn read_lines_packing(lines: &[&str], no_think: bool, pack: bool) -> Result<Vec<ChatSample>> {
         let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
         let chars: String = (32u8..127).map(char::from).chain(['\n']).collect();
         let tok = data::tokenizer::CharTokenizer::from_corpus(&chars);
@@ -1164,7 +1191,7 @@ mod tests {
         std::fs::write(&path, lines.join("\n")).unwrap();
         let no_think_block = no_think.then(|| tmpl.no_think_block().unwrap());
         let render = data::chat::RenderOpts { keep_reasoning: no_think };
-        let read = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think_block.as_deref(), render }.read(&path);
+        let read = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think_block.as_deref(), render, pack }.read(&path);
         std::fs::remove_file(&path).unwrap();
         read
     }
@@ -1188,6 +1215,18 @@ mod tests {
         assert_eq!(plain.len(), 1);
         assert!(plain[0].rendered.is_none(), "thinking-mode plain answers are encoded as the record");
         assert_eq!(read_lines(&[DIALOGUE], true).unwrap().len(), 2);
+    }
+
+    /// Packing turns a record of several supervised answers into one example
+    /// in either thinking mode, and leaves one-answer records as they are.
+    #[test]
+    fn packing_makes_one_example_of_a_conversation_of_answers() {
+        for no_think in [false, true] {
+            assert_eq!(read_lines_packing(&[TOOL_CONVERSATION], no_think, true).unwrap().len(), 1, "no_think={no_think}");
+            assert_eq!(read_lines_packing(&[DIALOGUE], no_think, true).unwrap().len(), 1, "no_think={no_think}");
+            assert_eq!(read_lines_packing(&[TOOL_CONTEXT_FINAL_ANSWER], no_think, true).unwrap().len(), 1);
+        }
+        assert!(read_lines_packing(&[ANSWER], false, true).unwrap()[0].rendered.is_none());
     }
 
     /// A record that supervises only its final answer after a tool call and

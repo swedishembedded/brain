@@ -238,7 +238,7 @@ impl ChatFullFineTune {
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
         let no_think = if self.thinking { None } else { tmpl.no_think_block() };
         let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
-        let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render };
+        let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: false };
         let train_samples = asked.read(dataset)?;
         let dataset_records = train_samples.len();
         let mut replay_samples = Vec::new();

@@ -359,6 +359,22 @@ impl ChatTemplate {
         Some(tail[at..].to_string())
     }
 
+    /// The text this template writes after an assistant turn's content to end
+    /// the turn (Qwen3's `<|im_end|>\n`), read off a probe conversation.
+    ///
+    /// # Errors
+    /// The template does not render a plain assistant turn followed by anything.
+    pub fn assistant_turn_end(&self) -> Result<String, TemplateError> {
+        const CONTENT: &str = "probe-answer";
+        let probe = parse_json_ordered(&format!(r#"[{{"role":"user","content":"probe-question"}},{{"role":"assistant","content":"{CONTENT}"}}]"#))
+            .map_err(|e| TemplateError(format!("end-of-turn probe: {e}")))?;
+        let text = self.render(probe, None, false, &BTreeMap::new())?;
+        match text.rfind(CONTENT).map(|at| &text[at + CONTENT.len()..]) {
+            Some(end) if !end.is_empty() => Ok(end.to_string()),
+            _ => Err(TemplateError("the template writes nothing after an assistant turn, so turns cannot be told apart".to_string())),
+        }
+    }
+
     /// Render a conversation whose LAST message is the one supervised, and
     /// find the single byte boundary between what a model is asked from and
     /// what it is trained to generate.

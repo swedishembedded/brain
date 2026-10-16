@@ -177,13 +177,27 @@ pub struct ChatSample {
     pub rendered: Option<Rendered>,
 }
 
-/// One answer as a model is asked for it: the prompt its template renders
-/// for the conversation so far, and what the template renders for the
-/// answer after it. Only the completion is supervised.
+/// Text already rendered through a chat template, in order, each stretch
+/// either context or supervised. A sample made by
+/// [`ChatSample::answers_as_asked`] holds one answer as a model is asked for
+/// it (the prompt its template renders for the conversation so far, then the
+/// answer after it); one made by [`ChatSample::answers_packed`] holds several.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rendered {
-    pub prompt: String,
-    pub completion: String,
+    pub segments: Vec<RenderedSegment>,
+}
+
+/// One stretch of a [`Rendered`] text and whether it is supervised.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderedSegment {
+    pub text: String,
+    pub supervised: bool,
+}
+
+impl Rendered {
+    fn answer(prompt: &str, completion: &str) -> Self {
+        Self { segments: vec![RenderedSegment { text: prompt.to_string(), supervised: false }, RenderedSegment { text: completion.to_string(), supervised: true }] }
+    }
 }
 
 impl ChatSample {
@@ -262,7 +276,66 @@ impl ChatSample {
         let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
         let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
         let (prompt, completion) = full.split_at(answer.start);
-        Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { prompt: prompt.to_string(), completion: completion.to_string() }) })
+        Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered::answer(prompt, completion)) })
+    }
+
+    /// This sample as ONE example in which every supervised answer is
+    /// trained the way [`ChatSample::answers_as_asked`] trains it alone, and
+    /// everything else is context: the conversation is rendered once instead
+    /// of once per answer, so a dialogue of `n` answers costs one sequence
+    /// where `answers_as_asked` costs `n` growing prefixes.
+    ///
+    /// The supervised text of each answer is byte-for-byte what its
+    /// `answers_as_asked` example supervises (the template's rendering of the
+    /// answer as the last turn, end-of-turn token included). The context
+    /// before the first answer is its prompt; the context between two answers
+    /// is the next answer's prompt from the point where the template's
+    /// rendering of the earlier answer as a middle turn ends. An earlier
+    /// answer is therefore shown to the later ones in the form it was
+    /// trained in, which a template that renders a last turn differently
+    /// (Qwen3's reasoning block) shows a model asked at a later turn without
+    /// that block; the targets are exact, the history is the one difference.
+    ///
+    /// `None` when nothing is supervised or a supervised message is not an
+    /// assistant turn.
+    ///
+    /// # Errors
+    /// The template has no recognisable end-of-turn marker, an answer holds
+    /// that marker anywhere but at its end, or an earlier answer is not
+    /// rendered with an end-of-turn marker in the next answer's prompt: no
+    /// boundary is guessed.
+    pub fn answers_packed(&self, tmpl: &ChatTemplate, thinking: bool) -> Result<Option<ChatSample>, TemplateError> {
+        if !self.messages.iter().any(|m| m.train) || self.messages.iter().any(|m| m.train && m.role != "assistant") {
+            return Ok(None);
+        }
+        let end = tmpl.assistant_turn_end()?;
+        let mut segments: Vec<RenderedSegment> = Vec::new();
+        let mut previous_prompt = String::new();
+        for at in (0..self.messages.len()).filter(|&at| self.messages[at].train) {
+            let values: Vec<minijinja::Value> = self.messages[..=at].iter().map(ChatMessage::to_template_value).collect();
+            let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
+            let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
+            let (prompt, completion) = full.split_at(answer.start);
+            if completion.matches(end.as_str()).count() != 1 || !completion.ends_with(end.as_str()) {
+                return Err(TemplateError(format!("message {at} is not a single answer closed by the template's end-of-turn marker {end:?}")));
+            }
+            let context = if segments.is_empty() {
+                prompt
+            } else {
+                // The earlier answer starts where the two prompts part and,
+                // rendered as a middle turn, ends at its first end-of-turn marker.
+                let shared = previous_prompt.bytes().zip(prompt.bytes()).take_while(|(a, b)| a == b).count();
+                let shared = (0..=shared).rev().find(|&n| prompt.is_char_boundary(n)).unwrap_or(0);
+                let after = prompt[shared..]
+                    .find(end.as_str())
+                    .ok_or_else(|| TemplateError(format!("the prompt of message {at} does not render the earlier answer closed by the end-of-turn marker {end:?}")))?;
+                &prompt[shared + after + end.len()..]
+            };
+            segments.push(RenderedSegment { text: context.to_string(), supervised: false });
+            segments.push(RenderedSegment { text: completion.to_string(), supervised: true });
+            previous_prompt = prompt.to_string();
+        }
+        Ok(Some(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { segments }) }))
     }
 
     /// Whether the last message is the only supervised one and it is an
@@ -315,11 +388,13 @@ impl ChatSample {
     /// message is not prefix-stable -- see `render_with_message_boundaries`'s
     /// doc for exactly when that happens.
     pub fn encode_with(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
-        if let Some(Rendered { prompt, completion }) = &self.rendered {
-            let (mut ids, answer) = (tok.encode(prompt), tok.encode(completion));
-            let mut mask = vec![false; ids.len()];
-            mask.extend(std::iter::repeat_n(true, answer.len()));
-            ids.extend(answer);
+        if let Some(Rendered { segments }) = &self.rendered {
+            let (mut ids, mut mask) = (Vec::new(), Vec::new());
+            for RenderedSegment { text, supervised } in segments {
+                let encoded = tok.encode(text);
+                mask.extend(std::iter::repeat_n(*supervised, encoded.len()));
+                ids.extend(encoded);
+            }
             return Ok((ids, mask));
         }
         let messages: Vec<ChatMessage> = if opts.keep_reasoning {
@@ -747,10 +822,10 @@ mod tests {
                 let prompt = qwen_chat::render_for_generation(&served[..at], &[schema.to_string()], opts.clone()).unwrap();
                 let full = qwen_chat::render(&served[..=at], &[schema.to_string()], TemplateOpts { add_generation_prompt: false, ..opts.clone() }).unwrap();
                 let rendered = sample.rendered.as_ref().expect("a rendered example");
-                assert_eq!(rendered.prompt, prompt, "thinking={thinking}, turn {at}");
-                assert_eq!(rendered.completion, full.strip_prefix(prompt.as_str()).unwrap(), "thinking={thinking}, turn {at}");
+                assert_eq!(rendered.segments[0].text, prompt, "thinking={thinking}, turn {at}");
+                assert_eq!(rendered.segments[1].text, full.strip_prefix(prompt.as_str()).unwrap(), "thinking={thinking}, turn {at}");
             }
-            assert!(samples[0].rendered.as_ref().unwrap().completion.contains("<tool_call>"));
+            assert!(samples[0].rendered.as_ref().unwrap().segments[1].text.contains("<tool_call>"));
         }
     }
 
