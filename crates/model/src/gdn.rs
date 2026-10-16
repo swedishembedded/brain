@@ -589,7 +589,6 @@ pub struct GdnBwdScratchBufs {
     decayed_k_all: DeviceBuffer,
     q_scaled_all: DeviceBuffer,
     state_a: DeviceBuffer,
-    state_b: DeviceBuffer,
     d_raw_intra: DeviceBuffer,
     d_k_beta_decay: DeviceBuffer,
     d_v_beta: DeviceBuffer,
@@ -625,7 +624,6 @@ impl GdnBwdScratchBufs {
             decayed_k_all: g.storage(bhc * c * dk),
             q_scaled_all: g.storage(bhc * c * dk),
             state_a: g.storage(bh * dk * dv),
-            state_b: g.storage(bh * dk * dv),
             d_raw_intra: g.storage(bhc * c * c),
             d_k_beta_decay: g.storage(bhc * c * dk),
             d_v_beta: g.storage(bhc * c * dv),
@@ -656,7 +654,6 @@ impl GdnBwdScratchBufs {
             decayed_k_all: &self.decayed_k_all,
             q_scaled_all: &self.q_scaled_all,
             state_a: &self.state_a,
-            state_b: &self.state_b,
             d_raw_intra: &self.d_raw_intra,
             d_k_beta_decay: &self.d_k_beta_decay,
             d_v_beta: &self.d_v_beta,
@@ -1219,14 +1216,9 @@ pub struct GdnBwdScratch<'a> {
     pub decayed_k_all: &'a DeviceBuffer,
     /// `[bhc,c,dk]` - the recomputed `q_scaled = query * exp_g_cs * scale`.
     pub q_scaled_all: &'a DeviceBuffer,
-    /// Ping-pong `[bh,dk,dv]` pair for the running `d_state` gradient thread
-    /// through the reverse chunk sweep - `state_a`/`state_b` swap roles
-    /// (`cur`/`nxt`) every chunk, chosen at STEP-LIST-BUILD time (the loop
-    /// bound `n_chunks` is known to the Rust code emitting `Step`s, so the
-    /// alternation costs nothing at dispatch time, unlike a real runtime
-    /// ping-pong).
+    /// `[bh,dk,dv]` - the running `d_state` gradient the reverse chunk sweep threads
+    /// backward, updated in place chunk by chunk.
     pub state_a: &'a DeviceBuffer,
-    pub state_b: &'a DeviceBuffer,
 
     // ---- whole-tensor dedicated single-producer buffers, `[bhc,...]`-shaped ----
     pub d_raw_intra: &'a DeviceBuffer,
@@ -1427,10 +1419,9 @@ pub fn gdn_chunk_bwd(
     steps.push(splice(bwd.dot_scratch, bwd.d_exp_g_cs, 0, bhc * c));
 
     // ---- the sequential part: the running d_state, newest chunk first ----
-    // Seed the running d_state from the caller's d_final_state.
-    steps.push(g.step(ids.region_copy, &[d_final_state, bwd.state_a], &[1, bh * dk * dv, bh * dk * dv, 0], bh * dk * dv));
-    let mut cur = bwd.state_a;
-    let mut nxt = bwd.state_b;
+    // Seed the running d_state from the caller's d_final_state; the sweep updates it in place.
+    let cur = bwd.state_a;
+    steps.push(g.step(ids.region_copy, &[d_final_state, cur], &[1, bh * dk * dv, bh * dk * dv, 0], bh * dk * dv));
 
     for step_idx in 0..n_chunks {
         let ci = n_chunks - 1 - step_idx;
@@ -1445,29 +1436,27 @@ pub fn gdn_chunk_bwd(
         steps.push(bmm(ids.bmm_acc, bh, c, dk, dv, false, false, 1.0, bwd.decayed_k_all, off_d(dk), cur, 0, bwd.d_v_new, off_d(dv)));
 
         // ---- item 2: state_out = state_in * decay_last (gdn_state_decay) backward ----
-        // d_state_in += d_state * decay_last -- gdn_state_decay.wgsl is its own
-        // backward here (a scalar scale is self-adjoint): copy d_state into
-        // `nxt`, then scale it in place with the SAME g_cs_off.
-        steps.push(g.step(ids.region_copy, &[cur, nxt], &[1, bh * dk * dv, bh * dk * dv, 0], bh * dk * dv));
-        steps.push(g.step(ids.state_decay, &[saved.g_cs, nxt], &[bh, dk, dv, c, off_g], bh * dk * dv));
         // d_decay_last = sum_{p,q} d_state[p,q]*state_in[p,q] -> d_g_cs[last] += ... * decay_last
+        // (reads the d_state of the chunk after this one, so it runs before the scaling below)
         steps.push(g.step(
             bwd_ids.state_decay_bwd_dscale,
             &[cur, saved.state_history, saved.g_cs, bwd.d_g_cs],
             &[bh, dk, dv, c, off_g, state_in_off],
             bh,
         ));
+        // d_state_in += d_state * decay_last -- gdn_state_decay.wgsl is its own
+        // backward here (a scalar scale is self-adjoint), applied in place with the
+        // SAME g_cs_off; the other two terms then accumulate onto the scaled state.
+        steps.push(g.step(ids.state_decay, &[saved.g_cs, cur], &[bh, dk, dv, c, off_g], bh * dk * dv));
 
         // ---- item 4: d_state_in[p,q] += sum_i q_scaled[i,p]*d_out[i,q]  (SECOND of three) ----
-        steps.push(bmm(ids.bmm_acc, bh, dk, c, dv, true, false, 1.0, bwd.q_scaled_all, off_d(dk), d_out, off_d(dv), nxt, 0));
+        steps.push(bmm(ids.bmm_acc, bh, dk, c, dv, true, false, 1.0, bwd.q_scaled_all, off_d(dk), d_out, off_d(dv), cur, 0));
 
         // ---- item 9: v_prime = w_c @ state_in (bmm) backward ----
         // d_state_in[p,q] += -sum_c w[c,p]*d_v_new[c,q]  (THIRD and final)
-        steps.push(bmm(ids.bmm_acc, bh, dk, c, dv, true, false, -1.0, saved.w, off_d(dk), bwd.d_v_new, off_d(dv), nxt, 0));
-
-        std::mem::swap(&mut cur, &mut nxt);
+        steps.push(bmm(ids.bmm_acc, bh, dk, c, dv, true, false, -1.0, saved.w, off_d(dk), bwd.d_v_new, off_d(dv), cur, 0));
     }
-    // After processing ci=0, `cur` (post-swap) holds the completed d_initial_state.
+    // After processing ci=0, `cur` holds the completed d_initial_state.
     steps.push(g.step(ids.region_copy, &[cur, d_initial_state], &[1, bh * dk * dv, bh * dk * dv, 0], bh * dk * dv));
 
     // ---- item 6: decayed_k = key_c * decay_scale_c backward, all chunks ----

@@ -15,6 +15,29 @@ the protocol in section 7.
 
 ---
 
+## 0. Status (lane T1, 2026-10-16)
+
+What has landed since the plan was written, with the deviations from it. Numbers are in
+section 8; the entry that records the runs is knowledge #310.
+
+| item | state | deviation from the plan |
+|---|---|---|
+| Q1 no MLP replay in the backward | landed | also skips the `down` product of each chunk rebuild (nothing reads it): the chunked backward does no more GEMM work than the whole-sequence MLP's |
+| Q2 poll_wait per MLP chunk | not done | the sizing of Q3 (2048-row chunks for the 4-bit base) cuts the waits 4x instead |
+| Q3 sizing of segment and MLP chunk | landed as a footprint rule | by base tier (4-bit 2048/2048, bf16 512/1024, fp32 128/512) rather than by free device memory: no backend reports free memory through `Gpu` yet |
+| Q4 tiled rmsnorm rows | not done | |
+| Q5 probe as an instrument | landed | `--seed`, dispatches per step, warm tokens/s, other compute contexts, `--gemm-precision`, `--profile` (device time per kernel plus a launch census) |
+| K1 bf16 GEMMs on the vendor library | landed | `libcublas` `cublasGemmEx` / `cublasGemmStridedBatchedEx` rather than `cublasLt`: the heuristic is the same library path with no descriptor plumbing; the step records through a placeholder native kernel so fencing and lifetimes are unchanged, and a submission holding one is issued step by step (no graph capture). The tier is `GemmPrecision::{Auto, Fp32Reference, Bf16TensorCore}`; `Auto` is the default and falls back to the fp32 kernels, with the reason logged once, on any device that cannot run the library (no CUDA, compute capability below 8.0, library absent, handle failure, a shape outside the 16-byte-row rule) |
+| K2 NF4 through the same GEMM | landed | decode into a bf16 scratch per call; no weight-reuse cache |
+| K3 LoRA on library GEMMs | partly | the five products per linear are single fp32 library GEMMs with the scale in alpha and the accumulation in beta; the shared-input A concatenation is not done |
+| K4 fused head CE gradient | not done | the head GEMMs themselves run on the library (windows are whole 64-row groups) |
+| K5 tensor-core flash | landed in a different form | blockwise attention around library GEMMs plus three small element-wise kernels (softmax with causal block skipping, score gradient, row dot) instead of a fused `mma.sync` kernel: memory bounded by `SCORE_BLOCK_BYTES`, no hand-tuned MMA code |
+| K6 native GDN training kernels | forward landed, backward restructured | the forward recurrence and both histories are one native launch (bit-identical to the walk); the backward keeps the host sweep but everything that does not depend on the running state gradient is computed for all chunks at once, so a chunk costs 7 dispatches instead of 29. A persistent backward kernel is not written |
+| K7, K8, Q6 | not done | |
+| plumbing | landed | the native `concat_split`/`chan_place`/`concat2` launched one block per element for the channel windows of a row-major matrix (`H = W = 1`): 2.6 M blocks for one MLP chunk window, 8 ms a call; planes under 32 floats are now copied flat |
+
+---
+
 ## 1. Where a step's time goes today
 
 ### 1.1 What the code does (verified by reading the tree at c8a33d4e)

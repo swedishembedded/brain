@@ -1013,6 +1013,13 @@ pub struct Act {
     /// pay for a third dispatch (`quant_group_sum`) no matmul call reads,
     /// same reasoning as `quant`'s own `None` case in [`Ops::act_f32`].
     xgs: Option<DeviceBuffer>,
+    /// These rows rounded to bf16, made by the first product on the vendor
+    /// library that reads them and shared by the rest: the linears of a group
+    /// that read one activation (a GDN layer's four projections, attention's
+    /// three, the MLP's two) pay for one cast instead of one each. The cast
+    /// step precedes the first such product in the step order, which is the
+    /// order every later product is submitted in.
+    bf16: std::cell::RefCell<Option<DeviceBuffer>>,
 }
 
 /// A model-facing façade over `backend_api::select`'s kernel selector,
@@ -1160,18 +1167,25 @@ impl Ops {
         let Some((wb, window, mut prep)) = self.library_weight(w, rows) else { return false };
         let k = w.k();
         let m = act.m;
-        let ok = self.gemm.forward(
-            &self.gpu,
-            &mut prep,
-            &library::Operand { buf: &act.x, range: (act.xr0 as u64 * k as u64, m as u64 * k as u64) },
-            &library::Operand { buf: &wb, range: window },
-            &library::Operand { buf: y, range: (yoff, m as u64 * rows.1 as u64) },
-            m,
-            rows.1,
-            k,
-        );
+        let (w_op, y_op) = (library::Operand { buf: &wb, range: window }, library::Operand { buf: y, range: (yoff, m as u64 * rows.1 as u64) });
+        // The activation rounded to bf16, from an earlier product on these rows or made now.
+        let shared = act.bf16.borrow().clone();
+        let (xb, fresh) = match shared {
+            Some(xb) => (xb, false),
+            None => {
+                let x_op = library::Operand { buf: &act.x, range: (act.xr0 as u64 * k as u64, m as u64 * k as u64) };
+                match self.gemm.cast_bf16(&self.gpu, &mut prep, &x_op, m as u64 * k as u64) {
+                    Some(xb) => (xb, true),
+                    None => return false,
+                }
+            }
+        };
+        let ok = self.gemm.forward_bf16(&self.gpu, &mut prep, &xb, &w_op, &y_op, m, rows.1, k);
         if ok {
             s.append(&mut prep);
+            if fresh {
+                *act.bf16.borrow_mut() = Some(xb);
+            }
         }
         ok
     }
@@ -1255,7 +1269,7 @@ impl Ops {
         let total = (xr0 + rows) as u64;
         let quant = I8Scratch::new(&self.gpu, total, total, &[k]);
         quant.quant_rows(&self.gpu, [self.idx[kname::MAX_ABS_ROW], self.idx[kname::QUANT_PACK]], s, x, xr0, xr0 + rows, k);
-        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: None }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: None, bf16: Default::default() }
     }
 
     /// The [`Act`] for rows `[0, rows)` of `x` (`[rows, k]`) that something
@@ -1267,7 +1281,7 @@ impl Ops {
     pub fn act_prequantized(&self, x: &DeviceBuffer, sx: &DeviceBuffer, xq: &DeviceBuffer, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_prequantized: rows must be > 0 (got 0)");
         assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Some(I8Scratch::from_parts(sx.clone(), k, xq.clone())), xgs: None }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Some(I8Scratch::from_parts(sx.clone(), k, xq.clone())), xgs: None, bf16: Default::default() }
     }
 
     /// [`Ops::act`], plus the affine K-quant group-sum prepass
@@ -1303,7 +1317,7 @@ impl Ops {
             xr0 + rows,
             k,
         ));
-        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: Some(xgs) }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: Some(xgs), bf16: Default::default() }
     }
 
     /// [`Ops::act`] for a caller whose weights are ALL fp32-family, so the
@@ -1322,7 +1336,7 @@ impl Ops {
     /// whatever a missing buffer would have held.
     pub fn act_f32(&self, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_f32: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0, m: rows, k, quant: None, xgs: None }
+        Act { x: x.clone(), xr0, m: rows, k, quant: None, xgs: None, bf16: Default::default() }
     }
 
     /// The f32 rows of an activation built by [`Self::act_f32`]: the buffer, its

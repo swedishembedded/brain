@@ -120,7 +120,11 @@ impl LibraryGemmProvider {
     /// The provider for `gpu` under `precision`, reading the backend's own
     /// availability answer. Logs the decision once per process.
     pub fn for_gpu(gpu: &Gpu, precision: GemmPrecision) -> LibraryGemmProvider {
-        Self::with_probe(gpu, precision, gpu.library_gemm_unavailable())
+        // The pinned reference tier never asks the backend: probing loads the
+        // library and binds a handle, which a model that will not use it (every
+        // inference build) should not pay for.
+        let unavailable = if precision == GemmPrecision::Fp32Reference { None } else { gpu.library_gemm_unavailable() };
+        Self::with_probe(gpu, precision, unavailable)
     }
 
     /// [`Self::for_gpu`] with the backend's availability answer supplied: how a
@@ -176,6 +180,18 @@ impl LibraryGemmProvider {
     /// kernels or the shape is outside what the library path takes.
     #[allow(clippy::too_many_arguments)]
     pub fn forward(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, w: &Operand, y: &Operand, m: u32, n: u32, k: u32) -> bool {
+        self.forward_with(gpu, steps, ActSource::Fp32(x), w, y, m, n, k)
+    }
+
+    /// [`Self::forward`] over an activation already rounded to bf16 by
+    /// [`Self::cast_bf16`] (several linears reading one activation share the cast).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_bf16(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: &DeviceBuffer, w: &Operand, y: &Operand, m: u32, n: u32, k: u32) -> bool {
+        self.forward_with(gpu, steps, ActSource::Bf16(x), w, y, m, n, k)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_with(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: ActSource, w: &Operand, y: &Operand, m: u32, n: u32, k: u32) -> bool {
         // Row-major `y = x W^T` is column-major `y^T[n, m] = W[k, n]^T x^T[k, m]`.
         let gemm = LibraryGemm {
             trans_a: true,
@@ -197,6 +213,20 @@ impl LibraryGemmProvider {
             stride_c: 0,
         };
         self.product(gpu, steps, x, (m, k), w, y, gemm)
+    }
+
+    /// Round `count` fp32 values of `x` to a new bf16 buffer (the cast step is
+    /// pushed), for [`Self::forward_bf16`]. `None` when the device declines.
+    pub fn cast_bf16(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, count: u64) -> Option<DeviceBuffer> {
+        if !self.is_active() || count == 0 || !count.is_multiple_of(ALIGN_ELEMS as u64) || count * 2 > MAX_SCRATCH_BYTES || !x.range.0.is_multiple_of(4) {
+            return None;
+        }
+        let kernel = kernels_cuda::get("cast_f32_bf16")?;
+        let id = gpu.native_kernel(kernel, CAST_BINDINGS)?;
+        let scratch = gpu.storage(count.div_ceil(2));
+        let step = gpu.step_native_sliced(id, &[x.buf, &scratch], &[(x.range.0, count), (0, 0)], &[count as u32], kernel.blocks_for(1, count as u32))?;
+        steps.push(step);
+        Some(scratch)
     }
 
     /// `dx[m, k] (+)= dy[m, n] @ W[n, k]` for a bf16 `w`, with `dy` rounded to
@@ -224,14 +254,14 @@ impl LibraryGemmProvider {
             stride_b: 0,
             stride_c: 0,
         };
-        self.product(gpu, steps, dy, (m, n), w, dx, gemm)
+        self.product(gpu, steps, ActSource::Fp32(dy), (m, n), w, dx, gemm)
     }
 
-    /// Round `act` (`rows x cols`, fp32) to a bf16 scratch and run `gemm` over
-    /// the weight (its `A`), the scratch (its `B`) and `out`.
+    /// Run `gemm` over the weight (its `A`), the activation rounded to bf16 (its
+    /// `B`) and `out`.
     #[allow(clippy::too_many_arguments)]
-    fn product(&self, gpu: &Gpu, steps: &mut Vec<Step>, act: &Operand, act_dims: (u32, u32), w: &Operand, out: &Operand, gemm: LibraryGemm) -> bool {
-        if self.path != GemmPath::Bf16TensorCore {
+    fn product(&self, gpu: &Gpu, steps: &mut Vec<Step>, act: ActSource, act_dims: (u32, u32), w: &Operand, out: &Operand, gemm: LibraryGemm) -> bool {
+        if !self.is_active() {
             return false;
         }
         let (rows, cols) = act_dims;
@@ -243,29 +273,33 @@ impl LibraryGemmProvider {
             && cols.is_multiple_of(ALIGN_ELEMS)
             && count * 2 <= MAX_SCRATCH_BYTES
             // Bound sub-ranges must keep every operand 16-byte aligned (4 words).
-            && [act.range.0, w.range.0, out.range.0].iter().all(|o| o.is_multiple_of(4));
+            && [w.range.0, out.range.0].iter().all(|o| o.is_multiple_of(4));
         if !eligible {
             return false;
         }
-        let Some(kernel) = kernels_cuda::get("cast_f32_bf16") else { return false };
-        let Some(cast) = gpu.native_kernel(kernel, CAST_BINDINGS) else { return false };
-        let scratch = gpu.storage(count.div_ceil(2));
-        let Some(cast_step) = gpu.step_native_sliced(
-            cast,
-            &[act.buf, &scratch],
-            &[(act.range.0, count), (0, 0)],
-            &[count as u32],
-            kernel.blocks_for(1, count as u32),
-        ) else {
-            return false;
+        let mut prep = Vec::new();
+        let scratch = match act {
+            ActSource::Fp32(x) => match self.cast_bf16(gpu, &mut prep, x, count) {
+                Some(b) => b,
+                None => return false,
+            },
+            ActSource::Bf16(b) => b.clone(),
         };
         let Some(gemm_step) = gpu.step_library_gemm(&gemm, &[w.buf, &scratch, out.buf], &[w.range, (0, 0), out.range]) else {
             return false;
         };
-        steps.push(cast_step);
+        steps.append(&mut prep);
         steps.push(gemm_step);
         true
     }
+}
+
+/// Where a product's activation operand comes from.
+enum ActSource<'a> {
+    /// fp32 values to round to a bf16 scratch.
+    Fp32(&'a Operand<'a>),
+    /// A bf16 buffer an earlier [`LibraryGemmProvider::cast_bf16`] produced.
+    Bf16(&'a DeviceBuffer),
 }
 
 /// A row-major fp32 product `C[m, n] = alpha * op(A) * op(B) + beta * C` for

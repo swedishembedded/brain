@@ -459,7 +459,6 @@ fn gdn_chunk_bwd_gradcheck() {
     let decayed_k_all = g.storage((bhc * cn * dk) as u64);
     let q_scaled_all = g.storage((bhc * cn * dk) as u64);
     let state_a = g.storage((bh * dk * dv) as u64);
-    let state_b = g.storage((bh * dk * dv) as u64);
     let d_raw_intra = g.storage((bhc * cn * cn) as u64);
     let d_k_beta_decay = g.storage((bhc * cn * dk) as u64);
     let d_v_beta = g.storage((bhc * cn * dv) as u64);
@@ -487,7 +486,6 @@ fn gdn_chunk_bwd_gradcheck() {
         decayed_k_all: &decayed_k_all,
         q_scaled_all: &q_scaled_all,
         state_a: &state_a,
-        state_b: &state_b,
         d_raw_intra: &d_raw_intra,
         d_k_beta_decay: &d_k_beta_decay,
         d_v_beta: &d_v_beta,
@@ -551,8 +549,8 @@ fn gdn_chunk_bwd_gradcheck() {
     // this same closed form collapses `2*(c-1) = 126` dispatches to `2`.
     // 47 whole-tensor dispatches (the `d_state`-free recomputation and gradients of Phase 1, and
 // all of Phase 2: item 15's closed-form UT backward, M5.11, and item 19's fused reverse
-// cumsum, M5.8) plus the seven the reverse sweep spends on each chunk.
-assert_eq!(bwd_steps.len(), 47 + 7 * n_chunks, "gdn_chunk_bwd dispatch count regressed");
+// cumsum, M5.8) plus the six the reverse sweep spends on each chunk.
+assert_eq!(bwd_steps.len(), 47 + 6 * n_chunks, "gdn_chunk_bwd dispatch count regressed");
     g.submit(&[&d_g_cs, &d_exp_g_cs, &d_u, &d_decay_mask, &d_query, &d_key, &d_beta], &bwd_steps);
 
     let got_d_query = g.read(&d_query, bhc * cn * dk);

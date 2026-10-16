@@ -255,12 +255,19 @@ fn main() {
             (loss, fwd)
         });
         let total = t.elapsed().as_secs_f64();
-        let dispatches = m.gpu.ops_counters().steps;
+        let counters = m.gpu.ops_counters();
+        let dispatches = counters.steps;
         println!("PROBE step={step} loss={loss:.4} forward_s={fwd:.2} step_s={total:.2} tokens_per_s={:.0} dispatches={dispatches}", tokens as f64 / total);
         if step > 1 {
             warm_secs += total;
         }
         if timed {
+            // Dispatches by kernel (the launch census): what a step issues, not what it costs.
+            let mut census: Vec<(String, u64)> = counters.by_kernel.iter().map(|(k, v)| (k.clone(), v.calls)).chain(counters.uncovered.iter().map(|(k, c)| (k.clone(), *c))).collect();
+            census.sort_by(|a, b| b.1.cmp(&a.1));
+            for (name, calls) in census.iter().take(12) {
+                println!("CENSUS {calls:7} {name}");
+            }
             let mut rows = m.gpu.kernel_times().unwrap_or_default();
             rows.sort_by(|a, b| b.1.total_cmp(&a.1));
             let sum: f64 = rows.iter().map(|r| r.1).sum();
