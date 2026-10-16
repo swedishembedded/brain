@@ -194,10 +194,11 @@ ADAPTERS  (one resident copy of the Qwen3 weights serves the base and every
                          bank costs nothing.
   --adapter-rank-cap R   highest LoRA rank a slot holds (default 16). An
                          adapter of a higher rank is refused.
-  --adapter-targets LIST linears the bank corrects: attention (wq,wk,wv,wo,
-                         the default), all, or a comma-separated list of wq,
-                         wk, wv, wo, gate, up, down. An adapter that corrects
-                         any other linear is refused. The bank takes
+  --adapter-targets LIST linears the bank corrects: attention (wq,wk,wv,wo
+                         on Qwen3, the default), all (every adapter site of
+                         the model), or a comma-separated list of the model's
+                         site names (Qwen3: wq, wk, wv, wo, gate, up, down).
+                         An adapter that corrects any other linear is refused. The bank takes
                          slots x rank-cap x (k + n) x 4 bytes per targeted
                          linear per layer, counted in the model's footprint.
   --ready-file PATH      create PATH (empty) once EVERY surface requested above

@@ -200,16 +200,16 @@ struct Scan {
 
 impl Scan {
     fn new(settings: &ScanSettings, adapters: &[&brain_modelstore::LocalModel]) -> Scan {
-        let qwen_cfg = settings.qwen;
+        let qwen_cfg = settings.qwen.clone();
         let mut banks: BTreeMap<String, AdapterBankSettings> = BTreeMap::new();
         for local in adapters {
             let Some((base, card)) = local.card.as_ref().and_then(|c| Some((base_id_of(&c.id)?, c))) else { continue };
             // The bank an operator sized with flags is theirs; otherwise it
             // is sized to hold every adapter the store has for the base, so
             // an adapter on disk is never refused for a limit nobody chose.
-            let bank = banks.entry(base).or_insert_with(|| qwen_cfg.adapter_bank.unwrap_or_default());
+            let bank = banks.entry(base).or_insert_with(|| qwen_cfg.adapter_bank.clone().unwrap_or_default());
             if qwen_cfg.adapter_bank.is_none() {
-                *bank = widen_to_hold(*bank, card);
+                *bank = widen_to_hold(bank.clone(), card);
             }
         }
         Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), multi: Vec::new(), settings: settings.clone(), banks }
@@ -218,7 +218,7 @@ impl Scan {
     /// The serving config for the Qwen3 base `id`: the operator's, plus a
     /// bank when the store holds adapters for it.
     fn qwen_cfg_for(&self, id: &str) -> catalog::resident_llm::QwenServeConfig {
-        catalog::resident_llm::QwenServeConfig { adapter_bank: self.banks.get(id).copied().or(self.settings.qwen.adapter_bank), ..self.settings.qwen }
+        catalog::resident_llm::QwenServeConfig { adapter_bank: self.banks.get(id).cloned().or_else(|| self.settings.qwen.adapter_bank.clone()), ..self.settings.qwen.clone() }
     }
 
     /// Serve the adapter `local` as a model of its own over the Qwen3 base it
@@ -331,7 +331,7 @@ fn widen_to_hold(bank: AdapterBankSettings, card: &ModelCard) -> AdapterBankSett
     let Some(adapter) = card.adapter.as_ref() else { return bank };
     let rank_cap = bank.rank_cap.max(adapter.rank.unwrap_or(0));
     let named = adapter.targets.as_ref().and_then(|t| AdapterTargets::parse(&t.join(",")).ok());
-    let targets = named.map_or(bank.targets, |named| AdapterTargets::union(bank.targets, named));
+    let targets = named.map_or(bank.targets.clone(), |named| AdapterTargets::union(bank.targets.clone(), named));
     AdapterBankSettings { rank_cap, targets, ..bank }
 }
 
@@ -1144,7 +1144,7 @@ mod tests {
         .unwrap();
 
         let defaults = catalog::resident_llm::QwenServeConfig::default();
-        let residents = discover(&dir, &ScanSettings { qwen: defaults, ..Default::default() }).residents;
+        let residents = discover(&dir, &ScanSettings { qwen: defaults.clone(), ..Default::default() }).residents;
         assert!(ids(&residents).contains(&"Qwen/Qwen3-Toy:lab:wide:v1".to_string()), "rank 32 on down is above the defaults, so the bank grew: {:?}", ids(&residents));
 
         let sized = catalog::resident_llm::QwenServeConfig { adapter_bank: Some(AdapterBankSettings::default()), ..defaults };

@@ -70,8 +70,10 @@ above, or by one of these flags - and costs nothing otherwise:
   is swapped out of its slot when another is needed.
 - `--adapter-rank-cap R` - the highest LoRA rank a slot holds (default 16).
 - `--adapter-targets LIST` - the linears the bank corrects: `attention`
-  (`wq,wk,wv,wo`, the default, what the default LoRA training targets), `all`,
-  or a comma-separated list of `wq wk wv wo gate up down`.
+  (the default; `wq,wk,wv,wo` on Qwen3, what the default LoRA training targets),
+  `all` (every adapter site the model has), or a comma-separated list of the
+  model's site names (`wq wk wv wo gate up down` on Qwen3). A name the model
+  has no site for is refused when the bank is built, listing the ones it has.
 
 An adapter above the rank cap, or correcting a linear outside the targets, is
 refused when it is loaded, with the flag that would admit it. For adapters in a

@@ -49,15 +49,15 @@
 //! resident's footprint estimate, so placement budgets it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use capability::{Invocation, Manifest};
 use brain_modelref::ModelRef;
 use model::serve::AdapterId;
-use qwen3::config::QwenConfig;
-use qwen3::serve::{AdapterBankConfig, Engine, LoraSite};
+use model::adapter::bank::{AdapterBankConfig, AdapterServing, DEFAULT_ATTENTION_LEAVES};
+pub use model::adapter::bank::AdapterTargets;
+use qwen3::serve::{Engine, LoraSite};
 use residency::{AdapterIdentity, Device, Executor, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::adapter_release::{LoadedAdapter, ServedBase};
@@ -89,69 +89,9 @@ pub const DEFAULT_ADAPTER_TARGETS: AdapterTargets = AdapterTargets::ATTENTION;
 /// not). The engine's registration table is this size.
 pub const MAX_SERVED_ADAPTERS: u32 = 64;
 
-/// A set of [`LoraSite`]s, small enough to be `Copy` so it can ride in
-/// [`QwenServeConfig`](crate::resident_llm::QwenServeConfig).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct AdapterTargets(u8);
-
-impl AdapterTargets {
-    /// The query, key, value and output projections.
-    pub const ATTENTION: AdapterTargets = AdapterTargets(0b000_1111);
-    /// All seven linears of a block.
-    pub const ALL: AdapterTargets = AdapterTargets(0b111_1111);
-
-    /// The set a `--adapter-targets` value names: `attention`, `all`, or a
-    /// comma-separated list of linears (`wq,wk,wv,wo,gate,up,down`).
-    pub fn parse(list: &str) -> Result<AdapterTargets, String> {
-        match list.trim() {
-            "attention" => return Ok(AdapterTargets::ATTENTION),
-            "all" => return Ok(AdapterTargets::ALL),
-            _ => {}
-        }
-        let mut bits = 0u8;
-        for leaf in list.split(',').map(str::trim) {
-            let site = LoraSite::from_leaf(leaf).ok_or_else(|| format!("{leaf:?} is not an adapter target; give attention, all, or a list of wq, wk, wv, wo, gate, up, down"))?;
-            bits |= Self::bit(site);
-        }
-        Ok(AdapterTargets(bits))
-    }
-
-    /// Every site in either set.
-    pub fn union(self, other: AdapterTargets) -> AdapterTargets {
-        AdapterTargets(self.0 | other.0)
-    }
-
-    fn bit(site: LoraSite) -> u8 {
-        1 << LoraSite::ALL.iter().position(|s| *s == site).expect("every site is in ALL")
-    }
-
-    /// Does the set contain `site`?
-    pub fn contains(self, site: LoraSite) -> bool {
-        self.0 & Self::bit(site) != 0
-    }
-
-    /// The sites, in block order.
-    pub fn sites(self) -> Vec<LoraSite> {
-        LoraSite::ALL.into_iter().filter(|s| self.contains(*s)).collect()
-    }
-}
-
-impl fmt::Display for AdapterTargets {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let leaves: Vec<&str> = self.sites().into_iter().map(LoraSite::leaf).collect();
-        write!(f, "{}", leaves.join(","))
-    }
-}
-
-impl fmt::Debug for AdapterTargets {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "AdapterTargets({self})")
-    }
-}
-
 /// How big the adapter bank of one served Qwen3 is. Fixed when the engine is
 /// built: the bank's buffers are bound into the recorded decode tapes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdapterBankSettings {
     /// Adapters resident in device slots at once.
     pub slots: u32,
@@ -176,23 +116,26 @@ impl AdapterBankSettings {
         if self.rank_cap == 0 {
             return Err("--adapter-rank-cap must be at least 1".to_string());
         }
-        if self.targets.0 == 0 {
-            return Err("--adapter-targets names no linear".to_string());
-        }
         Ok(())
     }
 
-    /// The engine's bank configuration for these settings.
-    pub fn bank_config(&self) -> AdapterBankConfig {
-        let mut cfg = AdapterBankConfig::new(self.slots, self.rank_cap, &self.targets.sites());
+    /// The engine's bank configuration for these settings on `model`.
+    ///
+    /// # Errors
+    ///
+    /// A target the model has no linear for ([`AdapterTargets::resolve`]).
+    pub fn bank_config<M: AdapterServing + ?Sized>(&self, model: &M) -> Result<AdapterBankConfig, String> {
+        let mut cfg = AdapterBankConfig::new(self.slots, self.rank_cap, &self.targets.resolve(model)?);
         cfg.max_registered = MAX_SERVED_ADAPTERS;
-        cfg
+        Ok(cfg)
     }
 
     /// Device bytes the bank takes in an engine for `model` whose batches hold
     /// at most `rows` rows: the term a placement budgets on top of the base's.
-    pub fn device_bytes(&self, model: &QwenConfig, rows: u32) -> u64 {
-        self.bank_config().device_bytes(model, rows)
+    /// Targets the model cannot resolve budget nothing; building the engine
+    /// refuses them with the reason.
+    pub fn device_bytes<M: AdapterServing + ?Sized>(&self, model: &M, rows: u32) -> u64 {
+        self.bank_config(model).map_or(0, |cfg| cfg.device_bytes(model, rows))
     }
 }
 
@@ -228,7 +171,7 @@ impl AdapterRegistry {
 
     /// The bank this registry's adapters run on; `None` when there is none.
     pub fn settings(&self) -> Option<AdapterBankSettings> {
-        self.settings
+        self.settings.clone()
     }
 
     /// The base adapters are bound to.
@@ -254,7 +197,7 @@ impl AdapterRegistry {
     /// shapes against the model are the engine's to check, but the rank and
     /// the set of linears are settings an operator can read in a message.
     fn fits(&self, loaded: &LoadedAdapter) -> Result<(), String> {
-        let settings = self.settings.ok_or_else(|| "this server serves no adapters: start it with --adapter-slots (or --adapter, --adapter-manifest, --watch-adapters) to give the model an adapter bank".to_string())?;
+        let settings = self.settings.as_ref().ok_or_else(|| "this server serves no adapters: start it with --adapter-slots (or --adapter, --adapter-manifest, --watch-adapters) to give the model an adapter bank".to_string())?;
         let id = &loaded.release.id;
         if loaded.adapter.rank > settings.rank_cap {
             return Err(format!("adapter {id} has rank {}, above this server's --adapter-rank-cap {}", loaded.adapter.rank, settings.rank_cap));
@@ -262,7 +205,7 @@ impl AdapterRegistry {
         for site in &loaded.adapter.sites {
             let leaf = site.base.rsplit('.').nth(1).unwrap_or_default();
             match LoraSite::from_leaf(leaf) {
-                Some(s) if settings.targets.contains(s) => {}
+                Some(_) if settings.targets.admits(leaf, &DEFAULT_ATTENTION_LEAVES) => {}
                 Some(_) => return Err(format!("adapter {id} corrects {leaf}, which this server's --adapter-targets ({}) does not; widen the flag to serve it", settings.targets)),
                 None => return Err(format!("adapter {id} holds a pair for {}, which is not a linear of a Qwen3 block", site.base)),
             }
@@ -563,13 +506,7 @@ mod tests {
     const ID: &str = "Qwen/Qwen3-0.6B:lab:canary:v1";
 
     #[test]
-    fn targets_parse_the_two_names_and_a_list_and_refuse_anything_else() {
-        assert_eq!(AdapterTargets::parse("attention"), Ok(AdapterTargets::ATTENTION));
-        assert_eq!(AdapterTargets::parse("all"), Ok(AdapterTargets::ALL));
-        assert_eq!(AdapterTargets::parse("wq, down").unwrap().sites(), vec![LoraSite::Wq, LoraSite::Down]);
-        assert_eq!(AdapterTargets::ATTENTION.to_string(), "wq,wk,wv,wo");
-        assert!(AdapterTargets::parse("wq,lm_head").unwrap_err().contains("lm_head"));
-        assert!(AdapterTargets::parse("").is_err(), "an empty list names no linear");
+    fn the_default_targets_are_the_attention_group() {
         assert_eq!(DEFAULT_ADAPTER_TARGETS, AdapterTargets::ATTENTION);
     }
 
@@ -580,12 +517,16 @@ mod tests {
             (AdapterBankSettings { slots: 0, ..Default::default() }, "--adapter-slots"),
             (AdapterBankSettings { slots: MAX_SERVED_ADAPTERS + 1, ..Default::default() }, "--adapter-slots"),
             (AdapterBankSettings { rank_cap: 0, ..Default::default() }, "--adapter-rank-cap"),
-            (AdapterBankSettings { targets: AdapterTargets(0), ..Default::default() }, "--adapter-targets"),
         ] {
             assert!(bad.validate().unwrap_err().contains(flag), "{bad:?}");
         }
-        let cfg = AdapterBankSettings { slots: 3, rank_cap: 8, targets: AdapterTargets::ALL }.bank_config();
-        assert_eq!((cfg.slots, cfg.r_max, cfg.targets.len(), cfg.max_registered), (3, 8, 7, MAX_SERVED_ADAPTERS));
+        let model = qwen3::config::QwenConfig::tiny();
+        let cfg = AdapterBankSettings { slots: 3, rank_cap: 8, targets: AdapterTargets::ALL }.bank_config(&model).unwrap();
+        assert_eq!((cfg.slots, cfg.r_max, cfg.targets.len(), cfg.max_registered), (3, 8, 7, MAX_SERVED_ADAPTERS), "`all` is every site the model has");
+        let attention = AdapterBankSettings::default().bank_config(&model).unwrap();
+        assert_eq!(attention.targets, ["wq", "wk", "wv", "wo"]);
+        let refused = AdapterBankSettings { targets: AdapterTargets::parse("wq,lm_head").unwrap(), ..Default::default() };
+        assert!(refused.bank_config(&model).unwrap_err().contains("lm_head"), "a leaf the model lacks is refused when the bank is sized");
     }
 
     /// An adapter is offered only on a server that has a bank, only when the

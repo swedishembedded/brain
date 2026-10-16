@@ -169,7 +169,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // explicit value first, so filling this in unconditionally is harmless
     // when it is, and is what makes auto-sizing real when it is not.
     let qwen_cfg = catalog::resident_llm::QwenServeConfig { auto_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(), ..qwen_cfg };
-    let qwen = register_qwen(&mut models, QwenResident::from_env(qwen_cfg));
+    let qwen = register_qwen(&mut models, QwenResident::from_env(qwen_cfg.clone()));
     // Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder
     // (BRAIN_QWEN35MOE_WEIGHTS + BRAIN_QWEN35MOE_TOKENIZER) -- single-GPU,
     // fp32 weights + KV only (see resident_qwen35moe.rs's own module doc for

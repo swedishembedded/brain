@@ -12,6 +12,7 @@
 //! infrastructure you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
+use model::adapter::bank::AdapterServing;
 use model::adapter::sites::LoraSites;
 use model::adapter::{LinearSite, TargetSpec};
 
@@ -42,6 +43,9 @@ impl LoraSites for QwenConfig {
             .collect()
     }
 }
+
+/// The defaults: `attention` is `wq wk wv wo`, 4 slots, rank cap 16.
+impl AdapterServing for QwenConfig {}
 
 #[cfg(test)]
 mod tests {

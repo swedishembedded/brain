@@ -438,7 +438,7 @@ impl Instance for GlmInstance {
 /// default byte for byte, so a caller that builds `QwenServeConfig::
 /// default()` (every test, `perf_cli.rs`, `model_dir.rs`'s catalog scan,
 /// `continuous_train.rs`) is unaffected by this existing at all.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct QwenServeConfig {
     /// `--qwen-ctx N`. `None` means "size it automatically" - see
     /// [`QwenResident::resolve_ctx`]. Historical default when NEITHER this
@@ -1101,7 +1101,7 @@ impl ResidentModel for QwenResident {
             // asked for adapters that cannot give them must say so, not serve
             // the base under their names.
             if let Some(bank) = self.adapters.settings() {
-                eng.enable_adapters(bank.bank_config()).map_err(|e| format!("qwen: adapter bank: {e}"))?;
+                eng.enable_adapters(bank.bank_config(&checkpoint_cfg)?).map_err(|e| format!("qwen: adapter bank: {e}"))?;
             }
             // --qwen-kv-calib: opt IN to a kv_calib.json beside the
             // BASE checkpoint (measured on the base's K/V distribution, which

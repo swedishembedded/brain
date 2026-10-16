@@ -31,7 +31,7 @@ use crate::model::PrefillInput;
 
 mod adapters;
 pub use adapters::{AdapterBankConfig, AdapterError, AdapterInfo, LoraSite, UnloadStatus, VerifiedAdapter};
-use adapters::AdapterBank;
+use model::adapter::bank::AdapterBank;
 
 // The untiled whole-table gather `Self::embed_tiled`/`EMBED_TILE` replaced in
 // `Self::batched_tape` - kept registered (and named) only as the oracle
@@ -2228,7 +2228,7 @@ impl Engine {
             // The slot vector is read only by the adapter variant of the tape,
             // so a base-only batch uploads nothing for it.
             if let (Some(bank), true) = (&self.bank, meta.has_adapter_rows()) {
-                g.write(&bank.slot_buf, &meta.slots);
+                g.write(bank.slot_buf(), &meta.slots);
             }
         }
     }
