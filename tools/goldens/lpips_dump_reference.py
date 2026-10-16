@@ -5,8 +5,8 @@
 """Put LPIPS v0.1 (AlexNet) into brain's model store and dump the reference
 distances `crates/lpips`'s tests compare against.
 
-LPIPS (Zhang et al. 2018, "The Unreasonable Effectiveness of Deep Features as
-a Perceptual Metric") is two upstream releases, neither on a model hub brain's
+LPIPS ("The Unreasonable Effectiveness of Deep Features as a Perceptual
+Metric", 2018, arXiv:1801.03924) is two upstream releases, neither on a model hub brain's
 `brain pull` speaks to, so this tool fetches them the way the other non-hub
 releases in the store arrived (`pulid_face_parsing_dump_reference.py` for
 facexlib's BiSeNet): download, verify the pinned sha256, and re-serialize only

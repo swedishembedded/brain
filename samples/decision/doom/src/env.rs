@@ -348,7 +348,8 @@ const CURRICULUM_STEP: i32 = 400;
 /// and across five training runs it never happened - so the exit reward
 /// contributed exactly nothing to any gradient the policy ever took. A reward
 /// that never fires is not a hard reward, it is an absent one. This is
-/// Florensa et al.'s reverse curriculum, the standard answer.
+/// The reverse curriculum of "Reverse Curriculum Generation for Reinforcement
+/// Learning" (2017, arXiv:1707.05300), the standard answer.
 ///
 /// The start is a DISTANCE ALONG THE ROUTE, not a random walk from the goal.
 /// A random walk was tried first and is worse in every way that matters: it
