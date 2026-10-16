@@ -25,7 +25,7 @@
 //! procure our services by sending an email to info@swedishembedded.com.
 
 use audio::conv::ConvKernels;
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::{KernelIds, UNREGISTERED};
 use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
@@ -168,7 +168,7 @@ fn batched_decode_matches_per_sequence_decode() {
     let state_len = (nvh * dk * dv) as usize;
     let hist_len = (conv_dim * (kw - 1)) as usize;
 
-    let mut r = Lcg::new(0x5eed_1234);
+    let mut r = Lcg::new(random_seed());
     // Shared (non-projection) weights - identical for both runs.
     let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
     let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
@@ -237,7 +237,7 @@ fn pooled_decode_matches_per_sequence_decode_and_spares_the_other_rows() {
     let picked = [3u32, 0, 4];
     let batch = picked.len() as u32;
 
-    let mut r = Lcg::new(0x600d_f00d);
+    let mut r = Lcg::new(random_seed());
     let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
     let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
     let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));

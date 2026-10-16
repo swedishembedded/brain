@@ -25,7 +25,7 @@
 //!   cargo test -p brain-model --test gdn_chunk_bwd
 //!   BRAIN_DEVICE=cpu cargo test -p brain-model --test gdn_chunk_bwd
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::gdn::{gdn_chunk_bwd, gdn_chunk_fwd_train, GdnBwdIds, GdnBwdScratch, GdnIds, GdnScratchTrain, GdnShape};
 
@@ -312,7 +312,7 @@ fn gdn_chunk_bwd_gradcheck() {
     let bh = bn * hn;
     let bhc = bh * n_chunks;
 
-    let mut rng = Lcg::new(20260810);
+    let mut rng = Lcg::new(random_seed());
     let q_h: Vec<f32> = rng.vec_scaled(bn * hn * tn * dk, 1.0);
     let k_h: Vec<f32> = rng.vec_scaled(bn * hn * tn * dk, 1.0);
     let v_h: Vec<f32> = rng.vec_scaled(bn * hn * tn * dv, 1.0);

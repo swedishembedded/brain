@@ -22,7 +22,7 @@
 //!   cargo test -p brain-model --test gdn_recurrent_step
 //!   BRAIN_DEVICE=cpu cargo test -p brain-model --test gdn_recurrent_step
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::gdn::{gdn_chunk_fwd, gdn_recurrent_step, GdnIds, GdnRecurrentScratch, GdnScratch, GdnShape};
 
@@ -87,7 +87,7 @@ fn gdn_recurrent_step_matches_chunk_fwd_at_chunk_1() {
     // index IS the token index): flat row = t*bh + (b*hn+h).
     let row = |t: usize, b: usize, h: usize| t * bh + (b * hn + h);
 
-    let mut rng = Lcg::new(20260810);
+    let mut rng = Lcg::new(random_seed());
     let mut q_cm = vec![0f32; bhc * dk];
     let mut k_cm = vec![0f32; bhc * dk];
     let mut v_cm = vec![0f32; bhc * dv];

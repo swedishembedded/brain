@@ -488,7 +488,7 @@ fn case1_dmin_zero_vs_nonzero_are_genuinely_different() {
     let bits = 4u32;
     let (m, k, n, group) = (40usize, 256usize, 48usize, 32usize);
     let ng = k / group;
-    let seed = 0xC1_0000u64;
+    let seed = data::rng::random_seed();
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
     let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
     // Upper half of the nibble range (8..15): `ds*code` alone is already
@@ -556,7 +556,7 @@ fn case2_sub_block_scale_variation_across_groups() {
     let bits = 8u32;
     let (m, k, n, group) = (40usize, 256usize, 48usize, 32usize);
     let ng = k / group; // 8 groups
-    let seed = 0xC2_0000u64;
+    let seed = data::rng::random_seed();
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
     let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
     let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
@@ -603,7 +603,7 @@ fn case3_mixed_sign_activation_full_range_codes() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let bits = 4u32;
     let (m, k, n, group) = (36usize, 256usize, 44usize, 32usize);
-    let seed = 0xC3_0000u64;
+    let seed = data::rng::random_seed();
     // Full [-127, 127] range - guarantees both signs are well represented.
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -127, 127);
     let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
@@ -630,7 +630,7 @@ fn case4_all_zero_subblock_no_nan() {
     let bits = 8u32;
     let (m, k, n, group) = (20usize, 256usize, 24usize, 32usize);
     let ng = k / group;
-    let seed = 0xC4_0000u64;
+    let seed = data::rng::random_seed();
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
     let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
     let mut codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
@@ -667,7 +667,7 @@ fn case5_subrectangle_nonzero_origin_two_superblocks() {
     let bits = 4u32;
     let (m, k, n, group) = (300usize, 512usize, 260usize, 32usize);
     let ng = k / group; // 16
-    let seed = 0xC5_0000u64;
+    let seed = data::rng::random_seed();
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
     let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
     let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);

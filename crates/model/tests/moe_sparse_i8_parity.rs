@@ -12,7 +12,7 @@
 //! for a whole tensor rather than picking an absolute epsilon that only holds
 //! at one magnitude.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::{DeviceBuffer, Gpu};
 use model::int8::{quant_rows_steps, quantize_weight, QuantRows};
 use model::moe::{expert_fwd, expert_fwd_i8, router_fwd, ExpertScratch, ExpertScratch8, Lin8, MoeIds, MoeIds8, MoeShape};
@@ -53,7 +53,7 @@ fn int8_matches_fp32_sparse_within_quant_tolerance() {
     let shape = MoeShape { rows: 6, d_model: 64, moe_ff: 32, n_experts: 8, top_k: 2 };
     let (m, d, ff, e) = (shape.rows, shape.d_model, shape.moe_ff, shape.n_experts);
 
-    let mut rng = Lcg::new(4242);
+    let mut rng = Lcg::new(random_seed());
     let logits = g.storage_init("logits", &rng.vec_scaled((m * e) as usize, 2.0));
     let x_host = rng.vec_scaled((m * d) as usize, 1.0);
     let x = g.storage_init("x", &x_host);

@@ -15,7 +15,7 @@
 //! this also catches a real numerical regression in the rewrite, not just
 //! an out-of-bounds write.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 
 const PIPES: &[(&str, &str)] = &[("router_gate_sigmoid", kernels::ROUTER_GATE_SIGMOID)];
@@ -107,7 +107,7 @@ fn run_case(n_experts: u32, n_group: u32, topk_group: u32) {
 
     let n_rows: u32 = 5;
     let top_k = (n_experts / 8).max(1);
-    let mut rng = Lcg::new(0xC0FFEE ^ (n_experts as u64) << 8 ^ n_group as u64);
+    let mut rng = Lcg::new(random_seed());
 
     let logits = rng.vec_scaled((n_rows * n_experts) as usize, 3.0);
     let bias = rng.vec_scaled(n_experts as usize, 1.0);

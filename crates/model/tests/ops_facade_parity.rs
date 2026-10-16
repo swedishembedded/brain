@@ -27,7 +27,7 @@
 //! raw kernel, not a `Weight`/`Ops`-shaped call) - a real milestone: Q4
 //! weight dispatch driven through a model-facing call for the first time.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::GemmVariants;
@@ -93,7 +93,7 @@ fn check_f32(m: usize, n: usize, k: usize) {
     let ops = reference_ops(gpu);
     let g = ops.gpu();
 
-    let mut rng = Lcg::new(0xF32_0000 ^ m as u64);
+    let mut rng = Lcg::new(random_seed());
     let x_h = rng.vec_scaled(m * k, 1.0);
     let w_h = rng.vec_scaled(n * k, 1.0);
     let x = g.storage_init("x", &x_h);
@@ -129,7 +129,7 @@ fn check_i8(m: usize, n: usize, k: usize) {
     let ops = reference_ops(gpu);
     let g = ops.gpu();
 
-    let mut rng = Lcg::new(0x18_0000 ^ m as u64);
+    let mut rng = Lcg::new(random_seed());
     let x_h = rng.vec_scaled(m * k, 1.0);
     let w_h = rng.vec_scaled(n * k, 1.0);
     let x = g.storage_init("x", &x_h);
@@ -182,7 +182,7 @@ fn check_q4(m: usize, n: usize, k: usize) {
     let ops = reference_ops(gpu);
     let g = ops.gpu();
 
-    let mut rng = Lcg::new(0x04_0000 ^ m as u64);
+    let mut rng = Lcg::new(random_seed());
     let x_h = rng.vec_scaled(m * k, 1.0);
     let w_h = rng.vec_scaled(n * k, 1.0);
     let x = g.storage_init("x", &x_h);
@@ -255,8 +255,7 @@ fn matmul_row_offset_is_correct_for_i8_and_q4() {
         let ops = reference_ops(gpu);
         let g = ops.gpu();
 
-        let seed = 0xA11_0000u64 ^ (if tier == Dtype::I8 { 8 } else { 4 });
-        let mut rng = Lcg::new(seed);
+        let mut rng = Lcg::new(random_seed());
         let x_h = rng.vec_scaled(total_rows * k, 1.0);
         let w_h = rng.vec_scaled(n * k, 1.0);
         let x_full: DeviceBuffer = g.storage_init("x_full", &x_h);

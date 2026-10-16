@@ -23,7 +23,7 @@
 //! you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::block::{gqa_chunk_step, GqaChunkIds};
 
@@ -54,7 +54,7 @@ fn fused_prefill_hd256_matches_the_triad_through_gqa_chunk_step() {
     let n = 130u32; // this chunk's own rows - spans 3 BR=64 query tiles
     let cap = start + n;
 
-    let mut rng = Lcg::new(2560);
+    let mut rng = Lcg::new(random_seed());
     let q: Vec<f32> = rng.vec_scaled((n * hq) as usize, 1.0);
     let k_new: Vec<f32> = rng.vec_scaled((n * kv_stride) as usize, 1.0);
     let v_new: Vec<f32> = rng.vec_scaled((n * kv_stride) as usize, 1.0);
@@ -131,7 +131,7 @@ fn fused_prefill_hd256_matches_the_triad_at_a_real_long_context_depth() {
     let n = 195u32; // the real 1731-token prompt's own ragged last round
     let cap = start + n;
 
-    let mut rng = Lcg::new(1731);
+    let mut rng = Lcg::new(random_seed());
     let q: Vec<f32> = rng.vec_scaled((n * hq) as usize, 1.0);
     let k_new: Vec<f32> = rng.vec_scaled((n * kv_stride) as usize, 1.0);
     let v_new: Vec<f32> = rng.vec_scaled((n * kv_stride) as usize, 1.0);
@@ -196,7 +196,7 @@ fn the_fused_branch_really_dispatches_one_kernel_not_the_triad() {
     let (start, n) = (17u32, 130u32);
     let cap = start + n;
 
-    let mut rng = Lcg::new(7);
+    let mut rng = Lcg::new(random_seed());
     let qb = g.storage_init("q", &rng.vec_scaled((n * hq) as usize, 1.0));
     let kb = g.storage_init("k_new", &rng.vec_scaled((n * kv_stride) as usize, 1.0));
     let vb = g.storage_init("v_new", &rng.vec_scaled((n * kv_stride) as usize, 1.0));

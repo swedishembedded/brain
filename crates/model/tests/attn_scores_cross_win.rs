@@ -13,7 +13,7 @@
 //! exactness check against the UNWINDOWED kernels, and a mutation check that
 //! the window is load-bearing rather than silently masked-then-ignored.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 
 const PIPES: &[(&str, &str)] = &[
@@ -75,7 +75,7 @@ fn window_covering_the_whole_span_matches_the_unwindowed_kernel_exactly() {
     let g = dev();
     let (heads, hd, t) = (3u32, 8u32, 7u32);
     let dm = heads * hd;
-    let mut r = Lcg::new(0x1A7A);
+    let mut r = Lcg::new(random_seed());
     let qh = r.vec_scaled((t * dm) as usize, 0.5);
     let kh = r.vec_scaled((t * dm) as usize, 0.5);
     let q = g.storage_init("q", &qh);
@@ -132,7 +132,7 @@ fn window_narrower_than_the_span_matches_host_oracle_and_masks_out_of_window_ent
     let g = dev();
     let (heads, hd, t, window) = (2u32, 4u32, 9u32, 2u32);
     let dm = heads * hd;
-    let mut r = Lcg::new(0x0DEC1DE);
+    let mut r = Lcg::new(random_seed());
     let qh = r.vec_scaled((t * dm) as usize, 0.5);
     let kh = r.vec_scaled((t * dm) as usize, 0.5);
     let q = g.storage_init("q", &qh);

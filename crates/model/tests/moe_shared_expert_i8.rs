@@ -16,7 +16,7 @@
 //! for a whole tensor rather than picking an absolute epsilon that only
 //! holds at one magnitude.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::{DeviceBuffer, Gpu};
 use model::int8::{quant_rows_steps, quantize_weight, QuantRows};
 use model::moe::{shared_expert_fwd, shared_expert_fwd_i8, Lin8, SharedExpertIds, SharedExpertIds8, SharedExpertScratch, SharedExpertScratch8};
@@ -76,7 +76,7 @@ fn shared_expert_i8_matches_fp32_within_quant_tolerance() {
     // `d` and `ff` are each some linear's contraction width, so both must be
     // whole multiples of `model::int8::GROUP` (32).
     let (rows, d, ff) = (6usize, 64usize, 32usize);
-    let mut rng = Lcg::new(0x5EED);
+    let mut rng = Lcg::new(random_seed());
     let x_h = rng.vec_scaled(rows * d, 1.0);
     let gw_h = rng.vec_scaled(ff * d, 0.5);
     let uw_h = rng.vec_scaled(ff * d, 0.5);
@@ -163,7 +163,7 @@ fn shared_expert_i8_unweighted_matches_fp32_within_quant_tolerance() {
     // `d` and `ff` are each some linear's contraction width, so both must be
     // whole multiples of `model::int8::GROUP` (32).
     let (rows, d, ff) = (6usize, 64usize, 32usize);
-    let mut rng = Lcg::new(0x1234);
+    let mut rng = Lcg::new(random_seed());
     let x_h = rng.vec_scaled(rows * d, 1.0);
     let gw_h = rng.vec_scaled(ff * d, 0.5);
     let uw_h = rng.vec_scaled(ff * d, 0.5);

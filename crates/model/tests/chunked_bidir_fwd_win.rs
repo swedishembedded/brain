@@ -15,7 +15,7 @@
 //! `cross_scores_kt.rs::chunked_attn_matches_with_and_without_key_minor`'s
 //! own reasoning for the unwindowed path.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::block::{self, CrossIds, CrossWinIds, KeyMinor, KeyMinorWin};
 
@@ -123,7 +123,7 @@ fn window_covering_every_span_matches_the_unwindowed_dispatch_exactly() {
     for Case { label, d, heads, spans, chunk } in cases {
         let rows: u32 = spans.iter().map(|s| s.1).sum();
         let head_dim = d / heads;
-        let mut r = Lcg::new(0x1A7A0002);
+        let mut r = Lcg::new(random_seed());
         let (qh, kh, vh) = (r.vec_scaled((rows * d) as usize, 0.5), r.vec_scaled((rows * d) as usize, 0.5), r.vec_scaled((rows * d) as usize, 0.5));
         let qkv_h = fuse_qkv(&qh, &kh, &vh, rows, d);
         let max_span = spans.iter().map(|s| s.1).max().unwrap();
@@ -177,7 +177,7 @@ fn window_narrower_than_the_span_matches_host_oracle_and_diverges_from_unwindowe
     let (heads, head_dim, window) = (2u32, 4u32, 2u32);
     let d = heads * head_dim;
     let t = 10u32;
-    let mut r = Lcg::new(0x1A7A0003);
+    let mut r = Lcg::new(random_seed());
     let (qh, kh, vh) = (r.vec_scaled((t * d) as usize, 0.5), r.vec_scaled((t * d) as usize, 0.5), r.vec_scaled((t * d) as usize, 0.5));
     let qkv_h = fuse_qkv(&qh, &kh, &vh, t, d);
     let spans = [(0u32, t)];

@@ -12,7 +12,7 @@
 //! expert), and assert `model::moe`'s sparse path (`moe_linear_gated`,
 //! skipping non-routed rows) produces the identical accumulator.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::{DeviceBuffer, Gpu};
 use model::moe::{expert_fwd, router_fwd, ExpertScratch, MoeIds, MoeShape};
 
@@ -81,7 +81,7 @@ fn sparse_matches_dense_oracle() {
     let shape = MoeShape { rows: 6, d_model: 8, moe_ff: 12, n_experts: 8, top_k: 2 };
     let (m, d, ff, e) = (shape.rows, shape.d_model, shape.moe_ff, shape.n_experts);
 
-    let mut rng = Lcg::new(1337);
+    let mut rng = Lcg::new(random_seed());
     let logits = g.storage_init("logits", &rng.vec_scaled((m * e) as usize, 2.0));
     let x = g.storage_init("x", &rng.vec_scaled((m * d) as usize, 1.0));
     let gate_w: Vec<DeviceBuffer> =

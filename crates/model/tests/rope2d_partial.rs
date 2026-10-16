@@ -10,7 +10,7 @@
 //! of each head is bit-identical to the input (never addressed by the
 //! kernel).
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::block::{rope2d_partial_bwd, rope2d_partial_fwd};
 
@@ -49,7 +49,7 @@ fn rotated_prefix_matches_host_oracle_and_tail_is_untouched() {
     let row_stride = heads * head_dim;
     let off = 0usize;
 
-    let mut rng = Lcg::new(4242);
+    let mut rng = Lcg::new(random_seed());
     let buf_h = rng.vec_scaled(rows * row_stride, 1.0);
     let cos_h = rng.vec_scaled(rows * half, 1.0).iter().map(|x| x.cos()).collect::<Vec<_>>();
     let sin_h = rng.vec_scaled(rows * half, 1.0).iter().map(|x| x.sin()).collect::<Vec<_>>();
@@ -90,7 +90,7 @@ fn backward_is_the_exact_inverse_of_forward() {
     let row_stride = heads * head_dim;
     let off = 0usize;
 
-    let mut rng = Lcg::new(777);
+    let mut rng = Lcg::new(random_seed());
     let buf_h = rng.vec_scaled(rows * row_stride, 1.0);
     let angle = rng.vec_scaled(rows * half, 1.0);
     let cos_h: Vec<f32> = angle.iter().map(|x| x.cos()).collect();

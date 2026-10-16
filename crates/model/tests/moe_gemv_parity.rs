@@ -35,7 +35,7 @@
 //! placement this seam ever selects but is a free extra check that the WGSL
 //! itself is right.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 
 const PIPES: &[(&str, &str)] = &[
@@ -71,7 +71,7 @@ fn gate_rows(rng: &mut Lcg, m: u32, e: u32, top_k: u32) -> Vec<f32> {
 fn the_gemv_tier_matches_the_element_per_thread_kernel() {
     let g = gpu_core::testgpu::dev(PIPES);
     let (slow, fast) = (idx(&g, "moe_linear_gated"), idx(&g, "moe_linear_gated_gemv"));
-    let mut rng = Lcg::new(20260908);
+    let mut rng = Lcg::new(random_seed());
 
     // k deliberately NOT a multiple of the 64-wide k-stride (the GEMV's inner
     // loop is `k = t; k += 64`, so a k that divides evenly would hide a

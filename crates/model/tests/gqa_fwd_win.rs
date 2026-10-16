@@ -16,7 +16,7 @@
 //! real T>72 golden against the released checkpoint is real, separate
 //! follow-up work once the checkpoint is staged.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::block::{Gqa, KernelIds};
 
@@ -106,7 +106,7 @@ fn window_covering_the_whole_sequence_matches_plain_causal() {
     let (t, n_heads, head_dim) = (6u32, 2u32, 4u32);
     let ga = Gqa { b: 1, t, n_heads, n_kv_heads: n_heads, head_dim };
 
-    let mut r = Lcg::new(0x9E17);
+    let mut r = Lcg::new(random_seed());
     let qh = r.vec_scaled((t * n_heads * head_dim) as usize, 0.5);
     let kh = r.vec_scaled((t * n_heads * head_dim) as usize, 0.5);
     let vh = r.vec_scaled((t * n_heads * head_dim) as usize, 0.5);
@@ -147,7 +147,7 @@ fn window_narrower_than_the_sequence_matches_host_oracle_and_diverges_from_plain
     let (t, n_heads, head_dim, window) = (8u32, 2u32, 4u32, 3u32);
     let ga = Gqa { b: 1, t, n_heads, n_kv_heads: n_heads, head_dim };
 
-    let mut r = Lcg::new(0x51A5);
+    let mut r = Lcg::new(random_seed());
     let qh = r.vec_scaled((t * n_heads * head_dim) as usize, 0.5);
     let kh = r.vec_scaled((t * n_heads * head_dim) as usize, 0.5);
     let vh = r.vec_scaled((t * n_heads * head_dim) as usize, 0.5);

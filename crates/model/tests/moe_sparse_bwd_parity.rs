@@ -17,7 +17,7 @@
 //! Mirrors `moe_sparse_parity.rs`'s shape (forward gated-vs-dense parity) for
 //! the backward half.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::moe::{expert_fwd, router_fwd, ExpertBwdScratch, ExpertGrads, ExpertScratch, MoeIds, MoeIdsBwd, MoeShape};
 
@@ -102,7 +102,7 @@ fn gated_backward_matches_dense_bit_for_bit() {
 
     let fwd_ids = MoeIds { router_gate: idx(&g, "router_gate"), linear_gated: idx(&g, "moe_linear_gated"), silu_mul: idx(&g, "silu_mul"), scale_add: idx(&g, "scale_add") };
 
-    let mut rng = Lcg::new(2024);
+    let mut rng = Lcg::new(random_seed());
     let x = g.storage_init("x", &rng.vec_scaled((m * d) as usize, 1.0));
     let logits = g.storage_init("logits", &rng.vec_scaled((m * e) as usize, 2.0));
     let gate = g.storage((m * e) as u64);

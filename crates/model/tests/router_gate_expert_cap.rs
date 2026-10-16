@@ -14,7 +14,7 @@
 //! index-for-index against the GPU kernel's selected set, plus the exact
 //! gate values.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 
 const PIPES: &[(&str, &str)] = &[("router_gate", kernels::ROUTER_GATE), ("router_gate_train", kernels::ROUTER_GATE_TRAIN)];
@@ -90,7 +90,7 @@ fn run_gate_case(n_experts: u32) {
 
     let n_rows: u32 = 5;
     let top_k = (n_experts / 4).clamp(1, 32);
-    let mut rng = Lcg::new(0xBEEF ^ n_experts as u64);
+    let mut rng = Lcg::new(random_seed());
     let logits = rng.vec_scaled((n_rows * n_experts) as usize, 3.0);
 
     let logits_buf = g.storage_init("logits", &logits);
@@ -110,7 +110,7 @@ fn run_train_case(n_experts: u32) {
 
     let n_rows: u32 = 4;
     let top_k = (n_experts / 4).clamp(1, 32);
-    let mut rng = Lcg::new(0xCAFE ^ n_experts as u64);
+    let mut rng = Lcg::new(random_seed());
     let logits = rng.vec_scaled((n_rows * n_experts) as usize, 3.0);
 
     let logits_buf = g.storage_init("logits", &logits);
@@ -153,7 +153,7 @@ fn router_gate_matches_host_oracle_at_256_experts() {
     let g = gpu_core::testgpu::dev(PIPES);
     let kernel = idx(&g, "router_gate");
     let (n_rows, n_experts, top_k) = (3u32, 256u32, 8u32);
-    let mut rng = Lcg::new(0x51DE_1234);
+    let mut rng = Lcg::new(random_seed());
     let logits = rng.vec_scaled((n_rows * n_experts) as usize, 3.0);
 
     let logits_buf = g.storage_init("logits", &logits);

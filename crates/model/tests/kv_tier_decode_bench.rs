@@ -30,7 +30,7 @@
 
 use std::time::Instant;
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::block::paged_attention_fused;
 use model::kv_tier::{kernel_list, FlashDecodeShape, KvAppend, KvKernels, KvPlane, KvTier};
@@ -105,7 +105,7 @@ fn fused_decode_against_the_triad_per_layer_at_a_long_context() {
         let lens = vec![context; batch as usize];
         let block_tables = u32s(&g, &(0..batch).collect::<Vec<_>>());
         let seq_lens = u32s(&g, &lens);
-        let q = g.storage_init("q", &Lcg::new(7).vec_scaled((batch * N_HEADS * HEAD_DIM) as usize, 0.5));
+        let q = g.storage_init("q", &Lcg::new(random_seed()).vec_scaled((batch * N_HEADS * HEAD_DIM) as usize, 0.5));
         let ctx = g.storage((batch * N_HEADS * HEAD_DIM) as u64);
 
         // Arms: the f32 triad, then the fused kernel on each tier.

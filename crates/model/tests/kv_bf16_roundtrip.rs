@@ -59,7 +59,7 @@
 //! BOTH back via a one-hot `probs` vector through `Ops::decode_apply_batched`
 //! and checks each survived within bf16 tolerance.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::{KvPage, Ops, PagedDecodeShape};
@@ -137,7 +137,7 @@ fn run_long_context_parity(gpu: Gpu, label: &str) {
     }
     assert!(bt.blocks().len() > 1, "{label}: sequence must span more than one physical block");
 
-    let mut rng = Lcg::new(0xB9_1000 ^ label.len() as u64);
+    let mut rng = Lcg::new(random_seed());
     let k_h: Vec<f32> = rng.vec_scaled((t * kv_stride) as usize, 1.0);
     let v_h: Vec<f32> = rng.vec_scaled((t * kv_stride) as usize, 1.0);
     let q_h: Vec<f32> = rng.vec_scaled((n_heads * head_dim) as usize, 1.0);
@@ -303,7 +303,7 @@ fn run_rmw_stress(gpu: Gpu, label: &str) {
 
     let pool_bf16 = KvPage::zeros(&ops, num_blocks, block_size, kv_stride, Dtype::BF16);
 
-    let mut rng = Lcg::new(0xB9_5EED ^ label.len() as u64);
+    let mut rng = Lcg::new(random_seed());
     let tok_a: Vec<f32> = rng.vec_scaled(kv_stride as usize, 1.0);
     let tok_b: Vec<f32> = rng.vec_scaled(kv_stride as usize, 1.0);
 

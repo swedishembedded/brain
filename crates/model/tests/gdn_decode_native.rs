@@ -22,7 +22,7 @@
 //! head count and group size the block shape serves.
 
 use audio::conv::ConvKernels;
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::block::{KernelIds, UNREGISTERED};
 use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
@@ -256,7 +256,7 @@ fn a_run_of_steps_stays_byte_identical() {
     let (value_dim, conv_dim) = (shape.value_dim(), shape.conv_dim());
     let state_len = (nvh * dk * dv) as usize;
     let hist_len = (conv_dim * (kw - 1)) as usize;
-    let mut r = Lcg::new(0xfeed_f00d);
+    let mut r = Lcg::new(random_seed());
     let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
     let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
     let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));
@@ -299,7 +299,7 @@ fn a_pooled_batch_is_byte_identical_to_the_staged_chain() {
         let (value_dim, conv_dim) = (shape.value_dim(), shape.conv_dim());
         let state_len = (nvh * dk * dv) as usize;
         let hist_len = (conv_dim * (kw - 1)) as usize;
-        let mut r = Lcg::new(0x900d_0000 + case as u64);
+        let mut r = Lcg::new(random_seed());
         let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
         let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
         let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));
@@ -351,7 +351,7 @@ fn a_multi_row_launch_is_byte_identical_to_the_same_rows_one_step_at_a_time() {
         let hist_len = (conv_dim * (kw - 1)) as usize;
         let ctx = format!("nkh={nkh} group={group} rows={rows}");
 
-        let mut r = Lcg::new(0x5eed ^ u64::from(nkh * 31 + group * 7 + rows));
+        let mut r = Lcg::new(random_seed());
         let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
         let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
         let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));

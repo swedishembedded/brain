@@ -13,7 +13,7 @@
 //! and the right one for isolating a bug in the kernel's own codebook lookup
 //! from ordinary quantization noise.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::lut4::{dequantize_weight_lut4, quantize_weight_lut4, F4E2M1_LUT, NF4_LUT};
 
@@ -133,7 +133,7 @@ fn nf4_and_f4e2m1_diverge_on_the_same_weight_bits_different_codebooks_different_
     let (k_nf4, k_f4) = (idx(&g, "matmul_q4_gemv_nf4"), idx(&g, "matmul_q4_gemv_f4e2m1"));
 
     let (m, k, n) = (2usize, 64usize, 3usize);
-    let mut rng = Lcg::new(9003);
+    let mut rng = Lcg::new(random_seed());
     let x_h = rng.vec_scaled(m * k, 1.0);
     let w_h = rng.vec_scaled(n * k, 1.0);
 

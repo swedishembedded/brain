@@ -22,7 +22,7 @@
 //! continuous batching and paged KV caches then you can procure our services
 //! by sending an email to info@swedishembedded.com.
 
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 use gpu_core::Gpu;
 use model::block::{gqa_decode_batched_step, gqa_decode_step, GqaDecodeBatchedIds, GqaDecodeIds};
 
@@ -69,7 +69,7 @@ fn batched_decode_matches_per_sequence_decode() {
     // mistook the scratch stride for a compute bound would be caught.
     let cap = block_size;
 
-    let mut rng = Rng::new(7);
+    let mut rng = Rng::new(random_seed());
     let qs: Vec<Vec<f32>> = (0..batch).map(|_| (0..hq).map(|_| rng.next_gaussian() as f32).collect()).collect();
     let knew: Vec<Vec<f32>> = (0..batch).map(|_| (0..hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
     let vnew: Vec<Vec<f32>> = (0..batch).map(|_| (0..hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();

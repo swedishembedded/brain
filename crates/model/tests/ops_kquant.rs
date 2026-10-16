@@ -26,7 +26,7 @@
 //! builder, restated locally per this test tree's convention of
 //! self-contained fixtures.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
 use kernels::template::interned;
@@ -156,7 +156,7 @@ fn check_kquant(dtype: Dtype, bits: u32, dyn_kname: &'static str, gemv_kname: &'
     let ops = Ops::new(g).expect("Ops::new");
     let g = ops.gpu();
 
-    let mut rng = Lcg::new(0xA0000000_u64 ^ (dtype_seed(dtype) << 32) ^ m as u64 ^ ((n as u64) << 16) ^ ((k as u64) << 32));
+    let mut rng = Lcg::new(random_seed());
     let x_h = rand_pos_f32(&mut rng, m * k, -8.0, 8.0);
     let codes_w = rand_unsigned_codes(&mut rng, n * k, bits);
     let sc = build_kq_scale(&mut rng, n, ng, dmin_nonzero);
@@ -205,14 +205,6 @@ fn check_kquant(dtype: Dtype, bits: u32, dyn_kname: &'static str, gemv_kname: &'
     let want = g.read(&out_want, m * n);
 
     assert_eq!(got, want, "{dtype:?} tier m={m} n={n} k={k} dmin_nonzero={dmin_nonzero}: facade output != hand-dispatched M11 kernel output (bit-for-bit)");
-}
-
-fn dtype_seed(dtype: Dtype) -> u64 {
-    match dtype {
-        Dtype::Q4K => 4,
-        Dtype::Q8K => 8,
-        _ => 0,
-    }
 }
 
 /// `m ∈ {8, 192}` covers the GEMV decode regime (`m <= 32`) and the tiled

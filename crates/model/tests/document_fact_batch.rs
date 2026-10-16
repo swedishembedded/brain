@@ -150,7 +150,7 @@ fn a_document_fact_batch_writes_a_masked_chat_dataset_load_dataset_accepts() {
     assert_eq!(loaded_vocab as usize, vocab, "load_dataset must carry the dataset's own model vocab through, not the tokenizer's");
     assert_eq!(train.example_count(), Some(TRIPLES.len()));
 
-    let mut rng = data::rng::Rng::new(1337);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     let mut runs_by_example: Vec<Option<Vec<String>>> = vec![None; bounds.len()];
     for _ in 0..50 {
         let (x, y) = train.get_batch(&batch_cfg, &mut rng);

@@ -19,7 +19,7 @@
 //! oracle uses the IDENTICAL decoded+dequantized weight the kernel computes
 //! from, so the tolerance here is tight (float summation order only).
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 
 const KERNELS: &[(&str, &str)] = &[
@@ -202,7 +202,7 @@ fn f8e4m3_and_f8e5m2_kernels_diverge_on_the_same_bytes() {
     let (k_e4, k_e5) = (idx(&g, "matmul_gemv_f8e4m3"), idx(&g, "matmul_gemv_f8e5m2"));
 
     let (m, n, k) = (2usize, 4usize, 128usize);
-    let mut rng = Lcg::new(8105);
+    let mut rng = Lcg::new(random_seed());
     // Strictly POSITIVE activations - every weight element decodes to the
     // SAME sign (see below), so a mixed-sign activation would sum `+inf` and
     // `-inf` terms together (NaN, undefined), which is not what this test

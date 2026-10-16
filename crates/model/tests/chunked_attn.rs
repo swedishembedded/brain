@@ -5,7 +5,7 @@
 //! chunks must not change the attention output (the S=3 WorldMirror global
 //! attention is the first real multi-chunk user).
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::vit::{chunked_attn_fwd, VitKernelIds, VitShape};
 
@@ -44,11 +44,11 @@ fn ids() -> VitKernelIds {
         matmul_rows: 11,
     }
 }
-fn run(chunk: u32, spans: &[(u32, u32)], rows: u32) -> Vec<f32> {
+fn run(seed: u64, chunk: u32, spans: &[(u32, u32)], rows: u32) -> Vec<f32> {
     let sh = VitShape { dim: 32, heads: 2, mlp: 64, eps: 1e-5 };
     let g = Gpu::new_cpu(PIPES);
     let k = ids();
-    let mut r = Lcg::new(0xBEEF);
+    let mut r = Lcg::new(seed);
     let qkv_host: Vec<f32> = (0..rows as usize * 96).map(|_| r.scaled(0.5)).collect();
     let qkv = g.storage_init("qkv", &qkv_host);
     let ctx = g.storage(rows as u64 * 32);
@@ -67,10 +67,12 @@ fn run(chunk: u32, spans: &[(u32, u32)], rows: u32) -> Vec<f32> {
 fn global_span_chunk_invariant() {
     let rows = 69u32; // 3 x 23, like a tiny multi-frame trunk
     let spans = [(0u32, rows)];
-    let full = run(rows, &spans, rows);
+    // Every run compares against the same qkv, so they share one drawn seed.
+    let seed = random_seed();
+    let full = run(seed, rows, &spans, rows);
     assert!(full.iter().all(|v| v.is_finite()), "single-chunk output has NaN");
     for chunk in [5u32, 23, 64, 68] {
-        let split = run(chunk, &spans, rows);
+        let split = run(seed, chunk, &spans, rows);
         let max = full
             .iter()
             .zip(&split)
@@ -86,11 +88,12 @@ fn frame_spans_match_reference() {
     let td = 23u32;
     let rows = 3 * td;
     let spans: Vec<(u32, u32)> = (0..3).map(|f| (f * td, td)).collect();
-    let multi = run(td, &spans, rows);
+    let seed = random_seed();
+    let multi = run(seed, td, &spans, rows);
     assert!(multi.iter().all(|v| v.is_finite()), "multi-span output has NaN");
     for f in 0..3u32 {
-        // frame f alone: same qkv content (deterministic LCG), span at 0
-        let solo = run(td, &[(f * td, td)], rows);
+        // frame f alone: same qkv content (same seed), span at 0
+        let solo = run(seed, td, &[(f * td, td)], rows);
         let a = &multi[(f * td * 32) as usize..((f + 1) * td * 32) as usize];
         let b = &solo[(f * td * 32) as usize..((f + 1) * td * 32) as usize];
         let max = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);

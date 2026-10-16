@@ -20,7 +20,7 @@
 //! deliberately does not persist them (it trains, saves and folds once), so
 //! a pool needs its own round trip and this is the test of it.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use model::lora::{resumable, Pair, Placement, RuntimeDelta, RuntimeLora};
 
 const OUT: usize = 12;
@@ -92,7 +92,7 @@ fn an_adapter_resumes_training_from_its_own_moments_after_a_round_trip() {
     let path = dir.join("adapter.safetensors");
 
     let mut kept = pair(3, 7);
-    let mut rng = Lcg::new(99);
+    let mut rng = Lcg::new(random_seed());
     // A few real steps, so the moments carry history worth losing.
     for t in 2..6 {
         let da: Vec<f32> = (0..3 * INN).map(|_| rng.signed() * 0.1).collect();

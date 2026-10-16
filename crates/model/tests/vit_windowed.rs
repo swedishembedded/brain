@@ -14,7 +14,7 @@
 //! proposes a dedicated `window_partition`/`window_reverse` kernel: it prints
 //! the permutation cost next to the windowed-attention cost it enables.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::CrossIds;
 use model::vit::{
@@ -257,7 +257,7 @@ fn partition_then_reverse_is_bit_exact() {
     let (gh, gw, c) = (8u32, 8u32, 16u32);
     let plan = WindowPlan::shifted(gh, gw, 4, 4, 2, 2);
     let wi = WindowIndex::new(&g, &plan);
-    let mut r = Lcg::new(0x51DE);
+    let mut r = Lcg::new(random_seed());
     let host = r.vec_scaled((gh * gw * c) as usize, 0.5);
     let x = g.storage_init("x", &host);
     let win = g.storage((gh * gw * c) as u64);
@@ -288,7 +288,7 @@ fn padded_partition_gathers_the_sentinel_row_and_reverse_drops_it() {
     let plan = WindowPlan::padded(gh, gw, 4, 4);
     let wi = WindowIndex::new(&g, &plan);
     let rows = plan.rows() as usize;
-    let mut r = Lcg::new(0x5A11);
+    let mut r = Lcg::new(random_seed());
     // `rows + 1` rows: the caller's one extra scratch row, zeroed once. Every
     // real row is deliberately nonzero so a pad row that leaked real data (or
     // vice versa) shows up.
@@ -384,7 +384,7 @@ fn windowed_block_equals_per_window_block() {
     let plan = WindowPlan::new(gh, gw, wh, ww);
     let wi = WindowIndex::new(&g, &plan);
 
-    let mut r = Lcg::new(0xC0FFEE);
+    let mut r = Lcg::new(random_seed());
     let blk = Blk::new(&g, &sh, &mut r);
     let host = r.vec_scaled((rows * sh.dim) as usize, 0.5);
 
@@ -460,7 +460,7 @@ fn shifted_window_cached_block_matches_unchunked() {
     assert!(plan.ctx_bindable(sh.dim), "test shape must satisfy the ctx binding rule");
     let (rows, c, ms) = (plan.rows(), sh.dim, plan.max_span());
 
-    let mut r = Lcg::new(0x5417);
+    let mut r = Lcg::new(random_seed());
     let blk = Blk::new(&g, &sh, &mut r);
     let host = r.vec_scaled((rows * c) as usize, 0.5);
 
@@ -518,7 +518,7 @@ fn q_pool_matches_host_maxpool() {
     assert_eq!((pool.n, pool.ho(), pool.wo()), (2, 2, 2));
     let rows = plan.rows();
 
-    let mut r = Lcg::new(0xBEEF);
+    let mut r = Lcg::new(random_seed());
     let qkv_host = r.vec_scaled((rows * 3 * c) as usize, 0.5);
     let qkv = g.storage_init("qkv", &qkv_host);
     let q_idx = row_index_buffer(&g, "q_idx", &region_index(rows, 3, 0));
@@ -571,7 +571,7 @@ fn pooled_attention_gradcheck() {
     let rows_q = pool.rows_out();
     assert_eq!(spans.len(), 2);
 
-    let mut r = Lcg::new(0x1234_5678);
+    let mut r = Lcg::new(random_seed());
     let qkv_host = r.vec_scaled((rows * 3 * c) as usize, 0.5);
     let wloss = r.vec_scaled((rows_q * c) as usize, 0.5);
 
@@ -711,7 +711,7 @@ fn measure_gather_vs_windowed_attention() {
         let plan = WindowPlan::new(gh, gw, win, win);
         let wi = WindowIndex::new(&g, &plan);
 
-        let mut r = Lcg::new(0xA5A5);
+        let mut r = Lcg::new(random_seed());
         let x = g.storage_init("x", &r.vec_scaled((rows * c) as usize, 0.5));
         let winbuf = g.storage((rows * c) as u64);
         let out = g.storage((rows * c) as u64);
@@ -770,7 +770,7 @@ fn gather_and_scatter_are_inverse() {
     let (n, d) = (64u32, 16u32);
     let plan = WindowPlan::new(8, 8, 4, 4);
     let fwd = row_index_buffer(&g, "p", plan.perm());
-    let mut r = Lcg::new(7);
+    let mut r = Lcg::new(random_seed());
     let host = r.vec_scaled((n * d) as usize, 0.5);
     let src = g.storage_init("src", &host);
     let mid = g.storage((n * d) as u64);

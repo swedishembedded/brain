@@ -6,7 +6,7 @@
 //! finite differences of the forward kernels — all smooth ops, so plain
 //! finite differences are exact here. CPU backend (no GPU needed).
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::{f, DeviceBuffer, Gpu};
 
 const PIPES: &[(&str, &str)] = &[
@@ -51,7 +51,7 @@ fn rope2d_bwd_is_exact_inverse_transpose() {
     let g = Gpu::new_cpu(PIPES);
     let (rows, heads, half, stride, off, tmod) = (6u32, 2u32, 4u32, 24u32, 8u32, 3u32);
     let n = (rows * stride) as usize;
-    let mut r = Lcg::new(7);
+    let mut r = Lcg::new(random_seed());
     let x = r.vec(n);
     let cos = r.vec((tmod * half) as usize).iter().map(|v| v.cos()).collect::<Vec<_>>();
     let sin: Vec<f32> = cos.iter().map(|c| (1.0 - c * c).max(0.0).sqrt()).collect();
@@ -79,7 +79,7 @@ fn ln_head_dx_dgb() {
     let (rows, heads, hd, stride, off) = (5u32, 2u32, 8u32, 24u32, 4u32);
     let eps = 1e-5f32;
     let n = (rows * stride) as usize;
-    let mut r = Lcg::new(11);
+    let mut r = Lcg::new(random_seed());
     let x = r.vec(n);
     let gamma = r.vec(hd as usize);
     let beta = r.vec(hd as usize);
@@ -131,7 +131,7 @@ fn scale_chan_dg_matches() {
     let g = Gpu::new_cpu(PIPES);
     let (rows, c, inner) = (7usize, 5usize, 3usize);
     let total = rows * c * inner;
-    let mut r = Lcg::new(13);
+    let mut r = Lcg::new(random_seed());
     let x = r.vec(total);
     let scale = r.vec(c);
     let w = r.vec(total);

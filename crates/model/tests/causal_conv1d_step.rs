@@ -12,7 +12,7 @@
 //!   BRAIN_DEVICE=cpu cargo test -p brain-model --test causal_conv1d_step
 
 use audio::conv::{conv1d_fwd, Conv1d, ConvKernels};
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use model::gdn::{gdn_causal_conv1d_step, GdnConvIds, GdnConvShape};
 
 const PIPES: &[(&str, &str)] = &[("conv1d", kernels::CONV1D), ("causal_conv1d_step", kernels::CAUSAL_CONV1D_STEP)];
@@ -27,7 +27,7 @@ fn causal_conv1d_step_matches_conv1d_fwd() {
     // (Qwen3.5's actual linear_conv_kernel_dim), L=7 tokens.
     let (nn, cc, kk, ll) = (2usize, 5usize, 4usize, 7usize);
 
-    let mut rng = Lcg::new(20260810);
+    let mut rng = Lcg::new(random_seed());
     let w_h: Vec<f32> = rng.vec_scaled(cc * kk, 1.0); // [C, K] depthwise weight
     let x_h: Vec<f32> = rng.vec_scaled(nn * cc * ll, 1.0); // [N, C, L] (conv1d.wgsl's NCL layout)
 

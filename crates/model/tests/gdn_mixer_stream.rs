@@ -19,7 +19,7 @@
 //! chunk for it.
 
 use audio::conv::ConvKernels;
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::block::{KernelIds, UNREGISTERED};
 use model::gdn::{GdnBwdIds, GdnIds, GdnShape};
@@ -158,7 +158,7 @@ fn threading_the_stream_state_across_rounds_matches_the_whole_sequence_forward()
     let (conv_dim, value_dim, nvh, khd, vhd) = (whole.conv_dim(), whole.value_dim(), whole.gdn.h, whole.gdn.dk, whole.gdn.dv);
     let t = whole.gdn.t;
 
-    let mut rng = Lcg::new(20260902);
+    let mut rng = Lcg::new(random_seed());
     let mixed_qkv_h = rng.vec_scaled((t * conv_dim) as usize, 1.0);
     let bproj_h = rng.vec_scaled((t * nvh) as usize, 1.0);
     let aproj_h = rng.vec_scaled((t * nvh) as usize, 1.0);

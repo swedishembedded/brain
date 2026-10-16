@@ -16,7 +16,7 @@
 //! function - the same "isolate before composing" discipline
 //! `crates/gradcheck/src/decide.rs`'s own module doc argues for.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::block::{self, CrossBwdIds, CrossIds, CrossWinIds};
 
@@ -123,7 +123,7 @@ fn window_covering_every_span_matches_the_unwindowed_backward_exactly() {
         let max_span = spans.iter().map(|s| s.1).max().unwrap();
         let chunk_cap = chunk.min(max_span).max(1);
         let slab = (heads * chunk_cap * max_span) as u64;
-        let mut r = Lcg::new(0x1B7A0001);
+        let mut r = Lcg::new(random_seed());
         let (qh, kh, vh) = (r.vec_scaled((rows * d) as usize, 0.5), r.vec_scaled((rows * d) as usize, 0.5), r.vec_scaled((rows * d) as usize, 0.5));
         let qkv_h = fuse_qkv(&qh, &kh, &vh, rows, d);
         let w = r.vec_scaled((rows * d) as usize, 0.5);
@@ -174,7 +174,7 @@ fn window_narrower_than_the_span_matches_finite_differences() {
     let d = heads * head_dim;
     let spans: &[(u32, u32)] = &[(0, 10)];
     let rows: u32 = 10;
-    let mut r = Lcg::new(0x1B7A0002);
+    let mut r = Lcg::new(random_seed());
     let (qh, kh, vh) = (r.vec_scaled((rows * d) as usize, 0.5), r.vec_scaled((rows * d) as usize, 0.5), r.vec_scaled((rows * d) as usize, 0.5));
     let qkv_h = fuse_qkv(&qh, &kh, &vh, rows, d);
     let w = r.vec_scaled((rows * d) as usize, 0.5);
@@ -193,7 +193,7 @@ fn window_narrower_than_the_span_matches_finite_differences() {
     let n = qkv_h.len();
     let mut worst_rel = 0.0f32;
     for seed in 0..4u64 {
-        let mut r2 = Lcg::new(0x1B7A1000 + seed);
+        let mut r2 = Lcg::new(random_seed());
         let v: Vec<f32> = (0..n).map(|_| if r2.unit() < 0.5 { -1.0 } else { 1.0 }).collect();
         let analytic: f64 = dqkv.iter().zip(&v).map(|(&g, &vi)| g as f64 * vi as f64).sum();
         let plus: Vec<f32> = qkv_h.iter().zip(&v).map(|(&x, &vi)| x + eps * vi).collect();

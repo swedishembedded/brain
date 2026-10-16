@@ -8,7 +8,7 @@
 //! the second assertion below documents that blindness rather than relying
 //! on it.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use model::adapter::{AdapterKind, TargetHp, TargetSpec};
 use model::lora::LoraPair;
 
@@ -38,7 +38,7 @@ fn rslora_scales_the_delta_by_exactly_sqrt_r_at_rank_4() {
     let inn = 5;
     let spec = TargetSpec::whole(out, inn);
 
-    let mut fill_rng = Lcg::new(7);
+    let mut fill_rng = Lcg::new(random_seed());
     let a_fixed: Vec<f32> = fill_rng.vec_scaled(rank * inn, 0.02);
     let b_fixed: Vec<f32> = fill_rng.vec_scaled(out * rank, 0.02);
     let tensors: Vec<(&str, Vec<usize>, Vec<f32>)> =

@@ -7,7 +7,7 @@
 //! round-trip a heterogeneous adapter - not just resolve hyperparameters on
 //! paper.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use model::adapter::plan::{parse_map, AdapterPlan, TargetHpPatch};
 use model::adapter::select::TargetSelector;
 use model::adapter::{AdapterKind, KeyStyle, LinearSite, TargetHp, TargetSpec};
@@ -76,7 +76,7 @@ fn a_three_distinct_rank_adapter_round_trips_with_every_targets_scale_exact() {
     let planned = plan.resolve(&sites).expect("resolve");
     assert_eq!(planned.iter().map(|(_, hp)| hp.rank).collect::<Vec<_>>(), vec![2, 3, 4]);
 
-    let mut rng = Lcg::new(1);
+    let mut rng = Lcg::new(random_seed());
     let mut init = || rng.signed() * 0.02;
     let built = model::adapter::AdapterSet::<LoraPair>::build_planned(planned.clone(), KeyStyle::Brain, &mut init);
 

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use data::rng::Rng;
+use data::rng::{random_seed, Rng};
 use model::projector::{forward_host, MlpProjector, ProjectorConfig, PROJECTOR_PIPELINES};
 
 const ROWS: usize = 3;
@@ -33,7 +33,7 @@ fn random(n: usize, rng: &mut Rng) -> Vec<f32> {
 fn the_device_projector_matches_the_host_function_and_its_gradient() {
     let g = gpu_core::testgpu::dev(PROJECTOR_PIPELINES);
     for cfg in configs() {
-        let mut rng = Rng::new(11);
+        let mut rng = Rng::new(random_seed());
         let weights: HashMap<String, Vec<f32>> = cfg.param_list().into_iter().map(|(n, len)| (n, random(len, &mut rng))).collect();
         let inputs: Vec<Vec<f32>> = (0..cfg.inputs()).map(|_| random(ROWS * cfg.input_dim as usize, &mut rng)).collect();
         // The loss is the output against a fixed random direction.
@@ -103,7 +103,7 @@ fn an_unknown_projector_or_an_odd_hybrid_width_is_refused() {
 fn a_frozen_projector_forwards_the_same_and_refuses_backward() {
     let g = gpu_core::testgpu::dev(PROJECTOR_PIPELINES);
     let cfg = ProjectorConfig::from_type("low_high_hybrid_split_mlp_gelu", 2, 6, 8).unwrap();
-    let mut rng = Rng::new(3);
+    let mut rng = Rng::new(random_seed());
     let weights: HashMap<String, Vec<f32>> = cfg.param_list().into_iter().map(|(n, len)| (n, random(len, &mut rng))).collect();
     let x: Vec<_> = (0..2).map(|_| g.storage_init("x", &random(ROWS * 6, &mut rng))).collect();
     let refs: Vec<&_> = x.iter().collect();

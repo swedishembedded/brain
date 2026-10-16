@@ -6,7 +6,7 @@
 //! sigmoid-gated combine `Qwen3OmniMoeTalkerTextSparseMoeBlock.forward` uses
 //! for its shared expert: `acc + sigmoid(x @ shared_gate_w^T) * swiglu(x)`.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::moe::{shared_expert_fwd, SharedExpertIds, SharedExpertScratch};
 
@@ -40,7 +40,7 @@ fn shared_expert_matches_host_oracle() {
     let ids = SharedExpertIds { matmul: idx(&g, "matmul"), silu_mul: idx(&g, "silu_mul"), sigmoid: idx(&g, "sigmoid"), scale_row: idx(&g, "scale_row"), add2: idx(&g, "add2") };
 
     let (rows, d, ff) = (5usize, 6usize, 4usize);
-    let mut rng = Lcg::new(9001);
+    let mut rng = Lcg::new(random_seed());
     let x_h = rng.vec_scaled(rows * d, 1.0);
     let gw_h = rng.vec_scaled(ff * d, 0.5);
     let uw_h = rng.vec_scaled(ff * d, 0.5);
@@ -97,7 +97,7 @@ fn shared_expert_unweighted_matches_host_oracle() {
     let ids = SharedExpertIds { matmul: idx(&g, "matmul"), silu_mul: idx(&g, "silu_mul"), sigmoid: idx(&g, "sigmoid"), scale_row: idx(&g, "scale_row"), add2: idx(&g, "add2") };
 
     let (rows, d, ff) = (5usize, 6usize, 4usize);
-    let mut rng = Lcg::new(4242);
+    let mut rng = Lcg::new(random_seed());
     let x_h = rng.vec_scaled(rows * d, 1.0);
     let gw_h = rng.vec_scaled(ff * d, 0.5);
     let uw_h = rng.vec_scaled(ff * d, 0.5);

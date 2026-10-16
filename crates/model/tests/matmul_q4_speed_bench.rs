@@ -9,7 +9,7 @@
 //! campaign's kernel-performance roadmap. Bracketed with `poll_wait()` via
 //! `gpu_core::profile::best_of` so this times the device, not the host.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::int4::quantize_weight_q4;
@@ -86,7 +86,7 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
         let reg_name = kernels::template::interned("matmul_q4_gemv_reg", kernels::MATMUL_Q4_GEMV_REG, &[("MREG", bucket)]).unwrap().0;
         let k_reg = idx(&g, reg_name);
 
-        let mut rng = Lcg::new(9000 + u64::from(m));
+        let mut rng = Lcg::new(random_seed());
         let x_h = rng.vec_scaled((m * k) as usize, 1.0);
         let w_h = rng.vec_scaled((n * k) as usize, 1.0);
         let x = g.storage_init("x", &x_h);
@@ -146,7 +146,7 @@ fn gemv_vs_gemv_reg_at_qwen35_decode_shapes() {
     println!("\nmatmul_q4_gemv vs matmul_q4_gemv_reg#MREG={bucket} at qwen35 decode shapes, m=1:\n");
     let mut any_reg_loses = false;
     for &(label, k, n) in SHAPES {
-        let mut rng = Lcg::new(9200 + u64::from(k) + u64::from(n));
+        let mut rng = Lcg::new(random_seed());
         let x_h = rng.vec_scaled((m * k) as usize, 1.0);
         let w_h = rng.vec_scaled((n * k) as usize, 1.0);
         let x = g.storage_init("x", &x_h);
@@ -207,7 +207,7 @@ fn dyn_vs_dyn_reg_across_prefill_rows() {
     let (k, n) = (2048u32, 2048u32);
     println!("\nmatmul_q4_dyn vs matmul_q4_dyn_reg, k={k} n={n}, m swept:\n");
     for &m in &[32u32, 64, 128, 256, 512, 1024, 2048] {
-        let mut rng = Lcg::new(9100 + u64::from(m));
+        let mut rng = Lcg::new(random_seed());
         let x_h = rng.vec_scaled((m * k) as usize, 1.0);
         let w_h = rng.vec_scaled((n * k) as usize, 1.0);
         let x = g.storage_init("x", &x_h);
@@ -270,7 +270,7 @@ fn ops_facade_confirms_the_dyn_reg_speedup_at_qwen35_prefill_shapes() {
     let m: u32 = 128; // M26's MAX_PREFILL_TOKENS chunk size on the real resident.
     println!("\nOps::matmul (Q4) at qwen35 prefill shapes, m={m}, chunk-sized like M26's real resident:\n");
     for &(label, k, n) in SHAPES {
-        let mut rng = Lcg::new(9300 + u64::from(k) + u64::from(n));
+        let mut rng = Lcg::new(random_seed());
         let x_h = rng.vec_scaled((m * k) as usize, 1.0);
         let w_h = rng.vec_scaled((n * k) as usize, 1.0);
         let x = gpu.storage_init("x", &x_h);

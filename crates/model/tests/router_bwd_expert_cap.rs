@@ -14,7 +14,7 @@
 //! wiring yet (#36), so this dispatches `router_bwd` directly rather than
 //! going through a higher-level API.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use std::collections::HashSet;
 
@@ -98,7 +98,7 @@ fn run_case(n_experts: u32) {
     // A real subset, not "select everything" -- exercises the gate>0.0 branch
     // as a genuine mask rather than a no-op.
     let top_k = (n_experts / 4).max(1);
-    let mut rng = Lcg::new(0xC0FFEE ^ n_experts as u64);
+    let mut rng = Lcg::new(random_seed());
 
     let logits = rng.vec_scaled((n_rows * n_experts) as usize, 3.0);
     let d_gate = rng.vec_scaled((n_rows * n_experts) as usize, 1.0);

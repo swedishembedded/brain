@@ -7,7 +7,7 @@
 //! moments entirely, so a step that (incorrectly) touched `A` would panic
 //! rather than silently train it.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use model::adapter::{AdapterKind, TargetHp, TargetSpec};
 use model::lora::{LoraPair, Pair};
 
@@ -18,14 +18,14 @@ fn lora_fa_leaves_a_bit_identical_while_b_moves() {
     let mut hp = TargetHp::new(r, 4.0);
     hp.freeze_a = true;
 
-    let mut init = Lcg::new(3);
+    let mut init = Lcg::new(random_seed());
     let mut init_fn = || init.signed() * 0.02;
     let mut lp = LoraPair::new(spec, hp, &mut init_fn);
 
     // Read A back before training - LoraPair exposes it via `pair()`.
     let a_before = lp.pair().a.clone();
 
-    let mut rng = Lcg::new(7);
+    let mut rng = Lcg::new(random_seed());
     for t in 1..=20u64 {
         let dw: Vec<f32> = (0..out * inn).map(|_| rng.signed()).collect();
         let g = lp.project(&dw);

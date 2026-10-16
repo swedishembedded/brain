@@ -23,7 +23,7 @@
 //!   cargo test -p brain-model --test gdn_chunk_fwd
 //!   BRAIN_DEVICE=cpu cargo test -p brain-model --test gdn_chunk_fwd
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::gdn::{gdn_chunk_fwd, GdnIds, GdnScratch, GdnShape};
 
@@ -408,7 +408,7 @@ fn gdn_chunk_fwd_matches_host_oracle() {
     let bh = bn * hn;
     let bhc = bh * n_chunks;
 
-    let mut rng = Lcg::new(20260809);
+    let mut rng = Lcg::new(random_seed());
     let q_h: Vec<f32> = rng.vec_scaled(bn * hn * tn * dk, 1.0);
     let k_h: Vec<f32> = rng.vec_scaled(bn * hn * tn * dk, 1.0);
     let v_h: Vec<f32> = rng.vec_scaled(bn * hn * tn * dv, 1.0);
@@ -483,7 +483,7 @@ fn gdn_chunk_fwd_matches_host_oracle_with_near_parallel_keys() {
     let (bn, hn, tn, dk, dv, cn) = (1usize, 2usize, 128usize, 16usize, 8usize, 64usize);
     let bh = bn * hn;
 
-    let mut rng = Lcg::new(20260915);
+    let mut rng = Lcg::new(random_seed());
     let q_h: Vec<f32> = rng.vec_scaled(bn * hn * tn * dk, 1.0);
     let v_h: Vec<f32> = rng.vec_scaled(bn * hn * tn * dv, 1.0);
     // Keys: one direction per (b,h), every token a small perturbation of it,

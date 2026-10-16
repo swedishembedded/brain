@@ -27,7 +27,7 @@
 //! TWO 32-element weight-scale groups, not one, so a kernel that indexed the
 //! group wrongly (or ignored the group axis) would not pass either.
 
-use data::rng::Lcg;
+use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::int4::quantize_weight_q4;
 
@@ -98,7 +98,7 @@ fn matmul_q4_dyn_matches_fp32_oracle() {
     // hideable here -- and TWO 32-element weight-scale groups per row, so a
     // group-indexing slip is not hideable either.
     let (m, k, n) = (4usize, 64usize, 5usize);
-    let mut rng = Lcg::new(7001);
+    let mut rng = Lcg::new(random_seed());
     let x_h = rng.vec_scaled(m * k, 1.0);
     let w_h = rng.vec_scaled(n * k, 1.0);
 
@@ -131,7 +131,7 @@ fn matmul_q4_gemv_matches_fp32_oracle_and_matches_dyn() {
     // Decode-regime shape: small M (<= 32, the gemv kernel's REQUIRES), same
     // k=64 stride-mismatch / two-scale-group shape as the dyn test above.
     let (m, k, n) = (3usize, 64usize, 7usize);
-    let mut rng = Lcg::new(7002);
+    let mut rng = Lcg::new(random_seed());
     let x_h = rng.vec_scaled(m * k, 1.0);
     let w_h = rng.vec_scaled(n * k, 1.0);
 
@@ -189,7 +189,7 @@ fn matmul_q4_gemv_reg_is_byte_identical_to_gemv_across_the_mreg_ladder() {
     // multiple of the 64-thread tile).
     let (k, n) = (64usize, 7usize);
     for m in [1usize, 2, 3, 4, 5, 8, 9, 16, 17, 32] {
-        let mut rng = Lcg::new(7100 + m as u64);
+        let mut rng = Lcg::new(random_seed());
         let x_h = rng.vec_scaled(m * k, 1.0);
         let w_h = rng.vec_scaled(n * k, 1.0);
 
@@ -234,7 +234,7 @@ fn matmul_q4_dyn_reg_matches_fp32_oracle_and_is_bit_identical_to_dyn() {
     // both dimensions. k=192 is six 32-element scale groups, so the chunk
     // loop actually loops.
     for (m, k, n) in [(4usize, 64usize, 5usize), (192, 192, 200), (137, 192, 259)] {
-        let mut rng = Lcg::new(7200 + (m * 7 + n) as u64);
+        let mut rng = Lcg::new(random_seed());
         let x_h = rng.vec_scaled(m * k, 1.0);
         let w_h = rng.vec_scaled(n * k, 1.0);
 
@@ -278,7 +278,7 @@ fn moe_linear_gated_q4_matches_fp32_oracle_and_zeroes_ungated_rows() {
     let (k_maxr, k_qp, k_moe) = (idx(&g, "max_abs_row"), idx(&g, "quant_pack"), idx(&g, "moe_linear_gated_q4"));
 
     let (m, k, n, n_experts, e_idx) = (6usize, 64usize, 5usize, 3u32, 1u32);
-    let mut rng = Lcg::new(7003);
+    let mut rng = Lcg::new(random_seed());
     let x_h = rng.vec_scaled(m * k, 1.0);
     let w_h = rng.vec_scaled(n * k, 1.0);
     // Alternate gate on/off per row for expert `e_idx`; other experts' columns
