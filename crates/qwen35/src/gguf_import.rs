@@ -378,6 +378,17 @@ pub mod testing {
     /// which drops its MTP block, this model imports it, so the fixture must
     /// exercise that path rather than merely prove it is skipped.
     pub fn write_synthetic_gguf(path: &str) {
+        write_synthetic(path, false);
+    }
+
+    /// [`write_synthetic_gguf`] plus a gpt2-scheme `tokenizer.ggml.*` block,
+    /// so the file is a complete release as far as a server's pre-flight is
+    /// concerned (weights it can place AND a vocabulary to tokenize with).
+    pub fn write_synthetic_servable_gguf(path: &str) {
+        write_synthetic(path, true);
+    }
+
+    fn write_synthetic(path: &str, with_tokenizer: bool) {
         let d = 4u64; // hidden
         let n_heads = 2u64;
         let head_dim = 4u64; // -> q_proj width doubled = 16
@@ -468,7 +479,7 @@ pub mod testing {
             .collect();
         tensors.push(TensorOut { name: "blk.2.nextn.eh_proj.weight".to_string(), shape: vec![d as usize, 2 * d as usize], ty: 0, data: eh_data });
 
-        let kvs = vec![
+        let mut kvs = vec![
             kv("general.architecture", GgufValue::String(GGUF_ARCHITECTURE.to_string())),
             kv("qwen35.block_count", GgufValue::U32(3)), // 2 real layers + 1 MTP
             kv("qwen35.nextn_predict_layers", GgufValue::U32(1)),
@@ -491,6 +502,14 @@ pub mod testing {
             kv("qwen35.ssm.group_count", GgufValue::U32(lin_kh as u32)),
             kv("qwen35.ssm.state_size", GgufValue::U32(lin_kd as u32)),
         ];
+        if with_tokenizer {
+            let tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "h", "i", "hi"];
+            kvs.push(kv("tokenizer.ggml.model", GgufValue::String("gpt2".to_string())));
+            kvs.push(kv("tokenizer.ggml.tokens", GgufValue::Array(tokens.iter().map(|t| GgufValue::String(t.to_string())).collect())));
+            kvs.push(kv("tokenizer.ggml.merges", GgufValue::Array(vec![GgufValue::String("h i".to_string())])));
+            kvs.push(kv("tokenizer.ggml.token_type", GgufValue::Array([3, 3, 3, 1, 1, 1].into_iter().map(GgufValue::I32).collect())));
+            kvs.push(kv("tokenizer.ggml.eos_token_id", GgufValue::U32(2)));
+        }
 
         write(path, &kvs, &tensors, 32).unwrap();
     }

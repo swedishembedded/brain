@@ -98,8 +98,8 @@ fn prompt_text() -> String {
 #[test]
 fn compact_kv_tiers_agree_with_the_f32_cache_on_a_real_prompt() {
     // Test-gating convention only - selects the real-checkpoint gate, it is
-    // not a serving knob. The serving path names its GGUF with a parameter
-    // (`--qwen35-gguf`).
+    // not a serving knob. The serving path finds its GGUFs in the model
+    // store.
     const REAL_GGUF_ENV: &str = "BRAIN_QWEN35_GGUF";
     let Ok(path) = std::env::var(REAL_GGUF_ENV) else {
         brain_testutil::skip(&format!("{REAL_GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));

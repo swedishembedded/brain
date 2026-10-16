@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Qwen3.8-27B served INT8 and GPU-RESIDENT across as many cards as its real
-//! per-layer bytes need, loaded **directly from the released Q8_0 GGUF** -
-//! no fp32 intermediate file anywhere on the path.
+//! per-layer bytes need, loaded **directly from a released GGUF** (Q8_0,
+//! Q4_K_M, ...) - no fp32 intermediate file anywhere on the path.
 //!
 //! That last clause is the whole reason this module exists next to
 //! [`crate::serve`]'s single-GPU `Engine`. `Engine` loads a brain-native
@@ -166,10 +166,6 @@ use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, Qwen
 /// provenance (which is what `crate::caps::MODEL`, the fp32 brain-checkpoint
 /// path, is).
 pub const MODEL: &str = "unsloth/Qwen3.8-27B-Q8_0";
-
-/// Default per-sequence `prompt + max_new` cap (also this resident's KV/GDN
-/// cache capacity, since every sequence gets the whole cache).
-pub const DEFAULT_CTX: u32 = 2048;
 
 /// How many prompt tokens [`Qwen35GgufInstance::generate`] pushes through the
 /// whole pipeline per round.
@@ -370,6 +366,60 @@ pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTie
         usable.len(),
         gib(usable.iter().sum())
     ))
+}
+
+/// `(index into devices, capacity)` for every GPU in `devices`, each less
+/// `headroom` - the shape `model::shard::plan_fewest_devices` plans over. A
+/// non-GPU device is skipped: this model has no CPU or NPU path.
+fn gpu_capacities(devices: &[(Device, u64)], headroom: u64) -> Vec<(usize, u64)> {
+    devices.iter().enumerate().filter(|(_, (d, _))| matches!(d, Device::Gpu(_))).map(|(i, &(_, cap))| (i, cap.saturating_sub(headroom))).collect()
+}
+
+/// Device memory per card [`auto_cap`] leaves untouched: the chunked-prefill
+/// scratch a stage allocates on top of its [`layer_cost`] (about a gigabyte at
+/// [`TENSOR_CORE_PREFILL_TOKENS`] rows), which the placement does not charge.
+/// Without it a context sized to the last byte would load and then fail its
+/// first long prompt.
+const AUTO_CAP_HEADROOM_PER_DEVICE: u64 = 1 << 30;
+
+/// Granularity of [`auto_cap`]'s answer, so the advertised context is a round
+/// number an operator can read in a log line rather than a byte-exact sweep
+/// result.
+const AUTO_CAP_GRANULE: u32 = 1024;
+
+/// The longest per-sequence context `max_batch` slots and `prefix_slots`
+/// cached prompts can have on `devices`:
+/// the largest cap whose [`layer_cost`] the planner still places, with
+/// [`AUTO_CAP_HEADROOM_PER_DEVICE`] kept free on every card, rounded down to
+/// [`AUTO_CAP_GRANULE`]. Nothing but memory (and the kernels' `u32` KV index,
+/// [`kv_pool_addressable`]) bounds it - not the checkpoint's trained context,
+/// which a longer cap extends with YaRN.
+///
+/// `None` when even a one-token context does not fit, i.e. the weights alone
+/// exceed the cards.
+pub fn auto_cap(cfg: &Qwen35Config, devices: &[(Device, u64)], tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32) -> Option<u32> {
+    let caps = gpu_capacities(devices, AUTO_CAP_HEADROOM_PER_DEVICE);
+    let fits = |cap: u32| kv_pool_addressable(cfg, cap, max_batch + prefix_slots) && model::shard::plan_fewest_devices(&layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, prefix_slots), &caps).is_some();
+    if caps.is_empty() || !fits(1) {
+        return None;
+    }
+    // Feasibility is monotone in cap (cost only grows), so bracket the
+    // boundary by doubling and bisect it. The KV index bound makes `fits`
+    // fail before `u32` overflows, so the doubling ends.
+    let (mut fit, mut over) = (1u32, 2u32);
+    while fits(over) {
+        fit = over;
+        over = over.checked_mul(2)?;
+    }
+    while over - fit > 1 {
+        let mid = fit + (over - fit) / 2;
+        if fits(mid) {
+            fit = mid;
+        } else {
+            over = mid;
+        }
+    }
+    Some(if fit >= AUTO_CAP_GRANULE { fit / AUTO_CAP_GRANULE * AUTO_CAP_GRANULE } else { fit })
 }
 
 // ------------------------------------------------------------ the fetch plan
@@ -2220,7 +2270,7 @@ pub struct Qwen35GgufResident {
     /// The id this resident is SERVED under (`Manifest::model`,
     /// `InstanceKey::model`) - set by the caller that resolved the
     /// checkpoint ([`Self::with_model_id`], what
-    /// `catalog::resident_qwen35::multi_gpu_gguf` does with the artifact's
+    /// `catalog::resident_qwen35::gguf_resident` does with the artifact's
     /// own store-relative `<vendor>/<repo>`). Defaults to [`MODEL`], the
     /// well-known release id, for a caller that resolved nothing to derive
     /// from.
@@ -2325,48 +2375,51 @@ impl Qwen35GgufResident {
     /// given. That is [`MultiDeviceResidentModel::estimate_multi`]'s
     /// documented "unavailable" signal, which `ResidencyManager::claim_multi`
     /// turns into a clean per-job error instead of a dispatcher crash.
-    fn plan(&self) -> Plan {
-        if let Some(p) = self.plan.get() {
-            return p.clone();
+    /// [`Self::unservable_reason`] says which of those it was.
+    fn plan(&self) -> &Plan {
+        // `plan_uncached` is a pure function of `self`, so which racer's value
+        // is kept cannot matter.
+        self.plan.get_or_init(|| self.plan_uncached())
+    }
+
+    /// Why this resident can never be loaded as configured, or `None` when it
+    /// can: no card to place on, a GGUF that cannot be read or is not a
+    /// Qwen3.8, weights that do not fit the cards, or no embedded vocabulary
+    /// to tokenize with. A caller that lists models checks this first, so a
+    /// listed model is one whose first request can actually load.
+    pub fn unservable_reason(&self) -> Option<String> {
+        if let Some(reason) = &self.plan().refusal {
+            return Some(reason.clone());
         }
-        let computed = self.plan_uncached();
-        // A losing racer's value is dropped; `plan_uncached` is a pure
-        // function of `self`, so which racer wins cannot matter.
-        let _ = self.plan.set(computed.clone());
-        computed
+        match MmapGguf::open(&self.gguf_path) {
+            Ok(mg) if mg.tokenizer().is_none() => Some(format!("'{}' carries no embedded tokenizer (tokenizer.ggml.* KV)", self.gguf_path)),
+            Ok(_) => None,
+            Err(e) => Some(format!("cannot open '{}': {e}", self.gguf_path)),
+        }
     }
 
     fn plan_uncached(&self) -> Plan {
+        let refused = |why: String| Plan { refusal: Some(format!("{MODEL}: {why}")), ..Plan::default() };
         if self.devices.is_empty() {
-            return Plan::default();
+            return refused("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
         }
         let mg = match MmapGguf::open(&self.gguf_path) {
             Ok(mg) => mg,
-            Err(e) => {
-                eprintln!("{MODEL}: cannot open '{}': {e} -- reporting zero devices so the claim fails placement instead of panicking", self.gguf_path);
-                return Plan::default();
-            }
+            Err(e) => return refused(format!("cannot open '{}': {e}", self.gguf_path)),
         };
         let cfg = match resident_config(&mg, self.cap) {
             Ok(c) => c,
-            Err(e) => {
-                eprintln!("{MODEL}: '{}' is not a servable Qwen3.8 GGUF: {e} -- reporting zero devices", self.gguf_path);
-                return Plan::default();
-            }
+            Err(e) => return refused(format!("'{}' is not a servable Qwen3.8 GGUF: {e}", self.gguf_path)),
         };
         // `plan_fewest_devices` wants `(index into self.devices, capacity)`;
         // mapping back afterwards is what makes a non-GPU device in the list
         // (which this model cannot use) rejected rather than mis-indexed.
-        let mut caps: Vec<(usize, u64)> = Vec::with_capacity(self.devices.len());
-        for (i, &(d, cap)) in self.devices.iter().enumerate() {
-            match d {
-                Device::Gpu(_) => caps.push((i, cap)),
-                other => eprintln!("{MODEL}: ignoring non-GPU device {other:?} (this model is GPU-only)"),
-            }
+        let caps = gpu_capacities(&self.devices, 0);
+        if caps.is_empty() {
+            return refused("no GPU is budgeted for it (this model is GPU-only)".to_string());
         }
         if let Some(why) = sizing_refusal(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots, &caps.iter().map(|&(_, c)| c).collect::<Vec<_>>()) {
-            eprintln!("{MODEL}: '{}' is not served: {why} -- reporting zero devices", self.gguf_path);
-            return Plan { refusal: Some(format!("{MODEL}: {why}")), ..Plan::default() };
+            return refused(why);
         }
         let cost = layer_cost_with_prefix_slots(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots);
         let placements = model::shard::plan_fewest_devices(&cost, &caps).expect("sizing_refusal found the configuration placeable");
@@ -2428,7 +2481,7 @@ impl ResidentModel for Qwen35GgufResident {
     fn manifest(&self) -> Manifest {
         let generate = ActionSpec::new(
             "generate",
-            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from the released Q8_0 GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16 or int8 (`--qwen35-kv`); up to --qwen35-max-batch sequences per batched dispatch)",
+            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from a released GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16 or int8 (`--qwen35-kv`); up to --qwen35-max-batch sequences per batched dispatch)",
         )
         .streaming()
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
@@ -2450,7 +2503,7 @@ impl ResidentModel for Qwen35GgufResident {
         .output(BlobSpec::new("text", Media::Text, "the generated text"));
         Manifest::new(
             &self.model_id,
-            "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, served INT8 and GPU-resident directly from the released Q8_0 GGUF (no fp32 intermediate on disk), layer-sharded across as many cards as its real per-layer bytes need. Text only; no MTP self-speculative decode; continuous batching of up to max_batch sequences per dispatch.",
+            "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, served INT8 and GPU-resident directly from a released GGUF (no fp32 intermediate on disk), layer-sharded across as many cards as its real per-layer bytes need. Text only; no MTP self-speculative decode; continuous batching of up to max_batch sequences per dispatch.",
             vec![generate],
         )
         .with_max_context_tokens(self.cap as u64)
@@ -2483,7 +2536,7 @@ impl ResidentModel for Qwen35GgufResident {
 
 impl MultiDeviceResidentModel for Qwen35GgufResident {
     fn unavailable_reason(&self, _key: &InstanceKey) -> Option<String> {
-        self.plan().refusal
+        self.plan().refusal.clone()
     }
 
     fn estimate_multi(&self, _key: &InstanceKey) -> MultiDeviceCost {
@@ -2536,11 +2589,12 @@ impl Qwen35GgufResident {
     /// that could drift from the one being measured.
     pub fn activate_owned(&self, devices: &[Device]) -> Result<Qwen35GgufInstance, String> {
         let plan = self.plan();
-        let Some(cfg) = plan.cfg.clone() else {
-            return Err(format!("{MODEL}: no placement (GGUF unreadable, or it does not fit the budgeted devices)"));
-        };
+        if let Some(reason) = &plan.refusal {
+            return Err(format!("{}: no placement: {reason}", self.model_id));
+        }
+        let cfg = plan.cfg.clone().ok_or_else(|| format!("{}: no placement", self.model_id))?;
         if plan.stages.is_empty() {
-            return Err(format!("{MODEL}: no placement (GGUF unreadable, or it does not fit the budgeted devices)"));
+            return Err(format!("{}: no placement", self.model_id));
         }
         // `claim_multi` reserves against exactly the devices `estimate_multi`
         // named, so it hands back the same set. Insisting on that (rather
@@ -2639,8 +2693,8 @@ mod tests {
     #[test]
     fn token_by_token_replay_on_the_real_checkpoint_past_where_chunked_replay_diverges() {
         // Test-gating convention only - selects the real-checkpoint gate, it
-        // is not a serving knob. The serving path names its GGUF with a
-        // parameter (`--qwen35-gguf`).
+        // is not a serving knob. The serving path finds its GGUFs in the
+        // model store.
         const REAL_GGUF_ENV: &str = "BRAIN_QWEN35_GGUF";
         let Ok(path) = std::env::var(REAL_GGUF_ENV) else {
             brain_testutil::skip(&format!("{REAL_GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
@@ -2960,5 +3014,95 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("multi-device only"), "{err}");
+    }
+
+    // ---- context sized from the memory the placement leaves
+
+    fn p40_pair() -> Vec<(Device, u64)> {
+        vec![(Device::Gpu(0), 24 * GB), (Device::Gpu(1), 24 * GB)]
+    }
+
+    /// The same feasibility test `auto_cap` applies, spelled out from the
+    /// planner so the assertions below do not copy its search.
+    fn fits_at(cfg: &Qwen35Config, devices: &[(Device, u64)], cap: u32, kv: KvTier) -> bool {
+        let caps: Vec<(usize, u64)> = devices.iter().enumerate().map(|(i, &(_, c))| (i, c.saturating_sub(AUTO_CAP_HEADROOM_PER_DEVICE))).collect();
+        kv_pool_addressable(cfg, cap, 1) && model::shard::plan_fewest_devices(&layer_cost(cfg, cap, &TierPolicy::uniform(Dtype::I8), kv, 1), &caps).is_some()
+    }
+
+    /// The context is whatever the cards have room for after the weights, not a
+    /// development constant: it is the largest cap the planner still accepts,
+    /// and the very next step up is refused.
+    #[test]
+    fn auto_cap_is_the_largest_context_the_cards_hold() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let devices = p40_pair();
+        let cap = auto_cap(&cfg, &devices, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1, 0).expect("27B INT8 fits two 24 GiB cards");
+        assert!(cap > 8192, "the leftover memory must buy far more than the old default context: {cap}");
+        assert!(fits_at(&cfg, &devices, cap, KvTier::F32), "the chosen context must be placeable");
+        assert!(!fits_at(&cfg, &devices, cap + AUTO_CAP_GRANULE, KvTier::F32), "one granule more must not be: the context is the memory bound, not below it");
+    }
+
+    /// More room buys more context; a KV tier that stores fewer bytes per
+    /// token buys more still.
+    #[test]
+    fn auto_cap_follows_the_memory_and_the_kv_tier() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let i8 = TierPolicy::uniform(Dtype::I8);
+        let pair = p40_pair();
+        let roomier = vec![(Device::Gpu(0), 40 * GB), (Device::Gpu(1), 40 * GB)];
+        let f32_cap = auto_cap(&cfg, &pair, &i8, KvTier::F32, 1, 0).unwrap();
+        assert!(auto_cap(&cfg, &roomier, &i8, KvTier::F32, 1, 0).unwrap() > f32_cap);
+        assert!(auto_cap(&cfg, &pair, &i8, KvTier::Int8, 1, 0).unwrap() > f32_cap);
+        assert!(auto_cap(&cfg, &pair, &i8, KvTier::F32, 4, 0).unwrap() < f32_cap, "more concurrent slots share the same leftover");
+    }
+
+    /// Weights that do not fit the cards at all leave no context to offer.
+    #[test]
+    fn auto_cap_is_none_when_the_weights_alone_do_not_fit() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let one_card = [(Device::Gpu(0), 24 * GB)];
+        assert_eq!(auto_cap(&cfg, &one_card, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1, 0), None);
+        assert_eq!(auto_cap(&cfg, &[], &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1, 0), None);
+    }
+
+    // ---- a model is only worth listing if it can load
+
+    fn write_fixture(tag: &str, servable: bool) -> String {
+        let path = std::env::temp_dir().join(format!("brain-qwen35-resident-{tag}-{}.gguf", std::process::id()));
+        let path = path.to_string_lossy().into_owned();
+        if servable {
+            crate::gguf_import::testing::write_synthetic_servable_gguf(&path);
+        } else {
+            crate::gguf_import::testing::write_synthetic_gguf(&path);
+        }
+        path
+    }
+
+    #[test]
+    fn a_complete_gguf_on_a_budgeted_card_has_no_reason_to_be_unlisted() {
+        let path = write_fixture("ok", true);
+        let r = Qwen35GgufResident::new(path.clone(), vec![(Device::Gpu(1), 24 * GB)], 64, TierPolicy::uniform(Dtype::I8));
+        assert_eq!(r.unservable_reason(), None);
+        assert_eq!(r.placement().iter().map(|p| p.0).collect::<Vec<_>>(), vec![Device::Gpu(1)], "placed only on the card it was offered");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn every_way_to_never_load_is_named_before_the_model_is_listed() {
+        let complete = write_fixture("reasons-ok", true);
+        let tokenizerless = write_fixture("reasons-no-tok", false);
+        let on_gpu = |path: &str, bytes: u64| Qwen35GgufResident::new(path.to_string(), vec![(Device::Gpu(0), bytes)], 64, TierPolicy::uniform(Dtype::I8));
+
+        let no_card = Qwen35GgufResident::new(complete.clone(), vec![], 64, TierPolicy::uniform(Dtype::I8));
+        assert!(no_card.unservable_reason().unwrap().contains("no GPU"), "{:?}", no_card.unservable_reason());
+        let missing = on_gpu("/nonexistent/model.gguf", 24 * GB);
+        assert!(missing.unservable_reason().unwrap().contains("/nonexistent/model.gguf"));
+        let no_room = on_gpu(&complete, 64);
+        assert!(no_room.unservable_reason().unwrap().contains("budgeted GPU(s) offer"), "{:?}", no_room.unservable_reason());
+        let no_vocab = on_gpu(&tokenizerless, 24 * GB);
+        assert!(no_vocab.unservable_reason().unwrap().contains("tokenizer"), "{:?}", no_vocab.unservable_reason());
+
+        std::fs::remove_file(complete).ok();
+        std::fs::remove_file(tokenizerless).ok();
     }
 }

@@ -16,7 +16,7 @@
 //! `general.architecture == "qwen35"` GGUF - the shipped-release-vs-
 //! locally-trained-checkpoint duality those variables used to express as two
 //! separate env entries a caller had to know to pick between (the serving
-//! path names the GGUF with the `--qwen35-gguf` flag now, not an env var).
+//! path serves every GGUF the model store holds, not one named by an env var).
 //!
 //! `tokenizer` is classified through the shared
 //! [`brain_modelstore::resolve::classify_tokenizer_role`] - real vendor
@@ -151,6 +151,41 @@ impl ArchSpec for Qwen35Spec {
             ));
         }
         Ok(())
+    }
+}
+
+/// [`Qwen35Spec`] restricted to brain-format checkpoints: what the fp32
+/// resident (`Qwen35Resident`) can open.
+///
+/// A released GGUF is its own served model (one per file, under its store id,
+/// through the int8 multi-card resident), so it is not a candidate here. Left
+/// in, two released quants in one store would be an ambiguity that disabled the
+/// fp32 resident for no reason. The GGUF records are removed BEFORE
+/// classification, so their tokenizers cannot compete for the tokenizer role
+/// of a checkpoint they have nothing to do with.
+pub struct Qwen35Fp32Spec;
+
+impl ArchSpec for Qwen35Fp32Spec {
+    fn arch(&self) -> &'static str {
+        Qwen35Spec.arch()
+    }
+
+    fn roles(&self) -> &'static [&'static str] {
+        Qwen35Spec.roles()
+    }
+
+    fn classify(&self, records: &[ArtifactRecord], inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
+        let kept: Vec<usize> = (0..records.len()).filter(|&i| records[i].kind != ArtifactKind::Gguf).collect();
+        let without_gguf: Vec<ArtifactRecord> = kept.iter().map(|&i| records[i].clone()).collect();
+        Qwen35Spec.classify(&without_gguf, inventory_root).into_iter().map(|(idx, role, confidence)| (kept[idx], role, confidence)).collect()
+    }
+
+    fn assemble(&self, chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+        Qwen35Spec.assemble(chosen, records, overrides)
+    }
+
+    fn validate(&self, assembly: &Assembly) -> Result<(), String> {
+        Qwen35Spec.validate(assembly)
     }
 }
 
@@ -362,5 +397,39 @@ mod tests {
             }
             other => panic!("expected Resolved with an explicit tokenizer override, got {other:?}"),
         }
+    }
+
+    /// The fp32 resident serves brain-format checkpoints only. A store holding
+    /// several released GGUFs (each its own served model, see the model-dir
+    /// scan) must neither make that resolution ambiguous nor surface as one of
+    /// its candidates.
+    #[test]
+    fn the_fp32_spec_ignores_every_gguf_so_released_quants_never_make_it_ambiguous() {
+        let dir = tmp("fp32-ignores-gguf");
+        let q8 = dir.join("unsloth").join("Qwen3.8-27B-GGUF").join("Q8_0.gguf");
+        let q4 = dir.join("Abiray").join("Qwen3.8-27B-Q4_K_M-GGUF").join("Q4_K_M.gguf");
+        write_gguf(&q8, GGUF_ARCHITECTURE, TOY_VOCAB);
+        write_gguf(&q4, GGUF_ARCHITECTURE, TOY_VOCAB);
+        let records = brain_modelstore::inventory::scan(&dir);
+        let specs: Vec<&dyn ArchSpec> = vec![&Qwen35Spec];
+        assert!(matches!(resolve("qwen35", &records, &specs, &BTreeMap::new()), Resolution::Ambiguous(_)), "the full spec still sees two candidates");
+
+        let fp32: Vec<&dyn ArchSpec> = vec![&Qwen35Fp32Spec];
+        assert!(matches!(resolve("qwen35", &records, &fp32, &BTreeMap::new()), Resolution::Missing(_)), "no brain-format checkpoint, so nothing for the fp32 resident");
+    }
+
+    #[test]
+    fn the_fp32_spec_still_finds_the_brain_format_checkpoint_beside_released_quants() {
+        let dir = tmp("fp32-finds-safetensors");
+        write_gguf(&dir.join("unsloth").join("Qwen3.8-27B-GGUF").join("Q8_0.gguf"), GGUF_ARCHITECTURE, TOY_VOCAB);
+        write_gguf(&dir.join("Abiray").join("Qwen3.8-27B-Q4_K_M-GGUF").join("Q4_K_M.gguf"), GGUF_ARCHITECTURE, TOY_VOCAB);
+        let own = dir.join("local").join("run7").join("model.safetensors");
+        write_safetensors(&own, CARD_FAMILY);
+
+        let records = brain_modelstore::inventory::scan(&dir);
+        let out = Qwen35Fp32Spec.classify(&records, &dir);
+        let weights: Vec<_> = out.iter().filter(|(_, role, _)| role == "weights").map(|(idx, ..)| records[*idx].path.clone()).collect();
+        assert_eq!(weights, vec![own]);
+        assert!(out.iter().all(|(idx, ..)| records[*idx].kind != ArtifactKind::Gguf), "{out:?}");
     }
 }
