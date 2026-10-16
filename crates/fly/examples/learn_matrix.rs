@@ -21,19 +21,6 @@ use promote::stats::sign_test;
 /// and a walking fly covers one to three body lengths per SECOND.
 const BODY_LENGTH_CM: f64 = 0.25;
 
-/// The seed of this experiment from `--seed`: drawn and printed when the flag is absent, so a
-/// result can be reproduced by passing the printed value back. Every condition
-/// runs from the same seed, so the conditions face the same random draws.
-fn experiment_seed() -> u64 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let seed = fly::search::seed_from_args(&args, "--seed").unwrap_or_else(|e| {
-        eprintln!("{e}");
-        std::process::exit(2)
-    });
-    println!("seed {seed:#x} (pass --seed {seed} to reproduce this run)");
-    seed
-}
-
 fn main() {
     let mj = MuJoCo::load().unwrap();
     let (neurons, edges) = connectome::find(std::path::PathBuf::from(std::env::var("BRAIN_CONNECTOME_DIR").unwrap()), "manc").unwrap();
@@ -73,7 +60,10 @@ fn main() {
     }
     let episodes: usize = std::env::var("EPISODES").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
 
-    let seed = experiment_seed();
+    // One seed for the whole matrix: every condition runs from it, so the
+    // conditions face the same random draws, and the shuffled-connectome
+    // control is wired by a stream derived from it.
+    let seed = fly::search::experiment_seed("--seed");
     let mut results: Vec<(Condition, Vec<f64>, Vec<f64>)> = Vec::new();
     for condition in [
         Condition::Learning,
@@ -85,7 +75,7 @@ fn main() {
         let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
         // The structural control differs in its WIRING, which is fixed at
         // construction; every other condition runs the real connectome.
-        let shuffle = (condition == Condition::ShuffledConnectome).then_some(0x5EEDu64);
+        let shuffle = (condition == Condition::ShuffledConnectome).then_some(fly::search::shuffle_seed(seed));
         let mut f =
             Fly::new(gpu, &c, model, lif, Wiring { shuffle_seed: shuffle, ..Wiring::default() }, Timing::default(), Coupling::default()).unwrap();
         // Clamp sized from the connectome's OWN weight range, not picked. The

@@ -44,7 +44,7 @@ fn main() {
     let model = Model::from_xml(&mj, &xml).unwrap();
     let gpu = gpu_core::testgpu::dev(&neuro::KERNELS);
     let mut f = Fly::new(gpu, &c, model, lif, Wiring { shuffle_seed: None, ..Wiring::default() }, Timing::default(), Coupling::default()).unwrap();
-    let mut rng = Lcg::new(0xCE111);
+    let mut rng = Lcg::new(fly::search::experiment_seed("--seed"));
 
     // Plasticity OFF throughout: this measures what the WEIGHTS can do, not
     // what a rule can find. Mixing the two would make the result unreadable.

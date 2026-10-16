@@ -24,6 +24,7 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
 }
 
 fn main() {
+    let shuffle = fly::search::shuffle_seed(fly::search::experiment_seed("--seed"));
     let which = match std::env::var("CNS").unwrap_or_else(|_| "brain".into()).as_str() {
         "cord" => Cns::Cord,
         _ => Cns::BrainAndCord,
@@ -134,7 +135,7 @@ fn main() {
     // exactly what starting a fresh condition means, and rebuilding instead
     // re-derived a multi-million-edge network six times over without changing
     // anything that was being measured.
-    let mut shuffled_app = build(Some(0x5EED)).unwrap_or_else(|e| {
+    let mut shuffled_app = build(Some(shuffle)).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1)
     });

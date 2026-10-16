@@ -41,6 +41,7 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
 const BAND: (f64, f64) = (5.0, 20.0);
 
 fn main() {
+    let shuffle = fly::search::shuffle_seed(fly::search::experiment_seed("--seed"));
     let which = match std::env::var("CNS").unwrap_or_else(|_| "cord".into()).as_str() {
         "brain" | "banc" => Cns::BrainAndCord,
         _ => Cns::Cord,
@@ -219,7 +220,7 @@ fn main() {
         let series = run(&mut net, &others, strongest, &watch);
         row("other descending", &analyse(&series[0], dt, BAND));
     }
-    let mut shuffled = build(Some(0x5EED));
+    let mut shuffled = build(Some(shuffle));
     for &i in &currents {
         if i == 0.0 {
             continue;
@@ -292,7 +293,7 @@ fn main() {
     // IN16B036 must not slow the rhythm down or weaken it - it must abolish
     // it, and leave the excitatory cells firing steadily instead.
     println!("\ncontrols on the circuit alone, at {command_type} = {best_iso:.0}:");
-    let shuffled_graph = graph.shuffled_sources(0x5EED);
+    let shuffled_graph = graph.shuffled_sources(shuffle);
     let mut iso_shuf =
         SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &shuffled_graph, lif()).expect("it runs");
     let series = run(&mut iso_shuf, &s_command, best_iso, &s_watch);

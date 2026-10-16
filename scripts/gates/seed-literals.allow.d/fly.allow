@@ -1,5 +1,4 @@
 crates/fly/examples/adhesion_check.rs	main:Lcg::new(1)	rng	greedy: the generator is never consulted (Frozen condition with a fixed start or a non-imitation objective)
-crates/fly/examples/ceiling.rs	main:Lcg::new(0xCE111)	rng	todo: B-2 the gain search consults this generator
 crates/fly/examples/replay.rs	main:Lcg::new(1)	rng	greedy: the generator is never consulted (Frozen condition with a fixed start or a non-imitation objective)
 crates/fly/examples/reward_sensitivity.rs	main:Lcg::new(1)	rng	greedy: the generator is never consulted (Frozen condition with a fixed start or a non-imitation objective)
 crates/fly/examples/walk_search.rs	main:Lcg::new(1)	rng	greedy: the generator is never consulted (Frozen condition with a fixed start or a non-imitation objective)

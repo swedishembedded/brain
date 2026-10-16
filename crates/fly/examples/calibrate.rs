@@ -55,19 +55,8 @@ const DT: f64 = 0.002;
 /// against, and it comes from physiology rather than from this run.
 const TARGET_RATE: f64 = 0.04;
 
-/// The seed of this experiment from `--seed`: drawn and printed when the flag is absent, so a
-/// result can be reproduced by passing the printed value back.
-fn experiment_seed() -> u64 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let seed = fly::search::seed_from_args(&args, "--seed").unwrap_or_else(|e| {
-        eprintln!("{e}");
-        std::process::exit(2)
-    });
-    println!("seed {seed:#x} (pass --seed {seed} to reproduce this run)");
-    seed
-}
-
 fn main() {
+    let seed = fly::search::experiment_seed("--seed");
     let which = match std::env::var("CNS").unwrap_or_else(|_| "cord".into()).as_str() {
         "brain" | "banc" => Cns::BrainAndCord,
         _ => Cns::Cord,
@@ -104,7 +93,7 @@ fn main() {
         SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &g, fly::cord_lif()).expect("the cord runs")
     };
     let mut shuffled = {
-        let g = c.network(wiring.weight_scale, wiring.size_limit, wiring.min_synapses).shuffled_sources(0x5EED);
+        let g = c.network(wiring.weight_scale, wiring.size_limit, wiring.min_synapses).shuffled_sources(fly::search::shuffle_seed(seed));
         SpikingNet::new(gpu_core::testgpu::dev(&neuro::KERNELS), &g, fly::cord_lif()).expect("the shuffle runs")
     };
     let n = net.port_len(Port::Spike);
@@ -188,7 +177,6 @@ fn main() {
     let (ss, sper, _, _) = evaluate(&mut shuffled, &unit);
     println!("  the same on a shuffled cord: score {ss:.4} (rhythm {sper:.3})");
 
-    let seed = experiment_seed();
     let mut es = Es::new(knobs, &start, num("SIGMA", 0.35), num("RATE", 0.25), seed).expect("knobs match");
     let generations: u32 = num("GENERATIONS", 20);
     let pairs: usize = num("PAIRS", 6);

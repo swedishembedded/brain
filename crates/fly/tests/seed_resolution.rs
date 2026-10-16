@@ -39,3 +39,19 @@ fn a_malformed_or_valueless_seed_is_refused_naming_the_flag() {
     }
     assert!(resolve_seed("$SHUFFLE", Some("yes")).unwrap_err().contains("$SHUFFLE"));
 }
+
+#[test]
+fn the_shuffle_control_follows_the_experiment_seed() {
+    use fly::search::shuffle_seed;
+    assert_eq!(shuffle_seed(5), shuffle_seed(5));
+    assert_ne!(shuffle_seed(5), shuffle_seed(6), "another experiment shuffles the wiring another way");
+    assert_ne!(shuffle_seed(5), 5, "the shuffle is its own stream, apart from the experiment's draws");
+}
+
+#[test]
+fn the_banner_names_the_flag_that_reproduces_the_run() {
+    // seed: the banner's text for one known value is what is asserted
+    let banner = fly::search::seed_banner("--shuffle-seed", 255);
+    assert!(banner.contains("0xff"), "{banner}");
+    assert!(banner.contains("--shuffle-seed 255"), "{banner}");
+}

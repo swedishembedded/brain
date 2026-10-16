@@ -213,6 +213,39 @@ pub fn resolve_seed(label: &str, given: Option<&str>) -> Result<u64, String> {
     }
 }
 
+/// Keeps a degree-matched shuffle control apart from the experiment's own
+/// random draws when both derive from one seed.
+const SHUFFLE_SALT: u64 = 0x5eed;
+
+/// The seed of the structural shuffle control of an experiment seeded
+/// `experiment_seed`: a pure function of it, so the control is rewired the same
+/// way when the run is repeated with the printed seed, and differently when it
+/// is not.
+pub fn shuffle_seed(experiment_seed: u64) -> u64 {
+    experiment_seed ^ SHUFFLE_SALT
+}
+
+/// The line an example prints so a run can be repeated: the seed, and the flag
+/// that passes it back.
+pub fn seed_banner(flag: &str, seed: u64) -> String {
+    format!("seed {seed:#x} (pass {flag} {seed} to reproduce this run)")
+}
+
+/// The seed of an example's experiment, from `flag` on the process command
+/// line: drawn when the flag is absent, printed either way
+/// ([`seed_banner`]). A flag that is not a seed prints the refusal and exits
+/// with status 2, because this is for programs whose command line is their
+/// only input.
+pub fn experiment_seed(flag: &str) -> u64 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let seed = seed_from_args(&args, flag).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2)
+    });
+    println!("{}", seed_banner(flag, seed));
+    seed
+}
+
 /// The seed an example's command line asks for: the value of `flag` written
 /// as `--flag N` or `--flag=N` anywhere in `args`, or a fresh random seed when
 /// the flag is absent. A flag with no value, or a value that is not a seed, is

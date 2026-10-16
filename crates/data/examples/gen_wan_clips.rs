@@ -14,7 +14,7 @@
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut out, mut frames, mut size, mut concept_n, mut distractor_n, mut seed, mut fps) =
-        (None, 9usize, 256u32, 30usize, 30usize, 0u64, 8u32);
+        (None, 9usize, 256u32, 30usize, 30usize, None::<u64>, 8u32);
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> &String { args.get(i + 1).unwrap_or_else(|| panic!("{} needs a value", args[i])) };
@@ -24,7 +24,7 @@ fn main() {
             "--size" => size = need(i).parse().expect("--size"),
             "--concept-n" => concept_n = need(i).parse().expect("--concept-n"),
             "--distractor-n" => distractor_n = need(i).parse().expect("--distractor-n"),
-            "--seed" => seed = need(i).parse().expect("--seed"),
+            "--seed" => seed = Some(need(i).parse().expect("--seed")),
             "--fps" => fps = need(i).parse().expect("--fps"),
             other => {
                 eprintln!("unknown flag {other} (expected --out --frames --size --concept-n --distractor-n --seed --fps)");
@@ -34,6 +34,10 @@ fn main() {
         i += 2;
     }
     let out = out.expect("--out <dir> is required");
+    // Fixes every clip's motion and phase; printed and recorded beside the
+    // clips so the set can be regenerated.
+    let seed = seed.unwrap_or_else(data::rng::random_seed);
+    println!("seed {seed} (pass --seed {seed} to reproduce this set)");
     let out_dir = std::path::PathBuf::from(&out);
     let concept_dir = out_dir.join("concept");
     let distractor_dir = out_dir.join("distractor");
@@ -49,6 +53,10 @@ fn main() {
     }
     let n1 = data::videoset::write_clipset(&concept_dir, &concept, size, size, fps).expect("write concept set");
     let n2 = data::videoset::write_clipset(&distractor_dir, &distractor, size, size, fps).expect("write distractor set");
+    let record = format!(
+        "{{\"seed\": {seed}, \"frames\": {frames}, \"size\": {size}, \"concept_n\": {concept_n}, \"distractor_n\": {distractor_n}, \"fps\": {fps}}}\n"
+    );
+    std::fs::write(out_dir.join("clips.json"), record).expect("write clips.json");
     println!("wrote {n1} concept clips ({frames} frames, {size}x{size}) -> {}", concept_dir.display());
     println!("wrote {n2} distractor clips ({frames} frames, {size}x{size}) -> {}", distractor_dir.display());
 }

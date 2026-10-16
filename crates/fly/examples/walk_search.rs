@@ -41,18 +41,6 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// The seed of this experiment from `--seed`: drawn and printed when the flag is absent, so a
-/// result can be reproduced by passing the printed value back.
-fn experiment_seed() -> u64 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let seed = fly::search::seed_from_args(&args, "--seed").unwrap_or_else(|e| {
-        eprintln!("{e}");
-        std::process::exit(2)
-    });
-    println!("seed {seed:#x} (pass --seed {seed} to reproduce this run)");
-    seed
-}
-
 fn main() {
     let mj = MuJoCo::load().unwrap();
     let which = match std::env::var("CNS").unwrap_or_default().as_str() {
@@ -252,7 +240,7 @@ fn main() {
     println!("\nconnectome as imported: score {base:.5} (net {base_net:.4} cm, gait {base_gait:.3})");
     println!("\n{:>4}  {:>12}  {:>12}  {:>10}  {:>8}", "gen", "best", "mean", "net cm", if food.is_some() { "range" } else if air { "airborne" } else { "gait" });
 
-    let seed = experiment_seed();
+    let seed = fly::search::experiment_seed("--seed");
     let mut es = Es::new(knobs, &start, num("SIGMA", 0.6), num("RATE", 0.5), seed).unwrap();
     let (mut best_ever, mut best_params) = (base, start.clone());
     for _ in 0..generations {
