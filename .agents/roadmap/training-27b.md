@@ -35,23 +35,38 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
   backward. Measured at real width: about 1.3 MiB/token one-shot vs 113 KiB/token at
   T = 131072 with 2048-token segments (knowledge 250-252).
 
-## In flight / next (dependency order)
+## Landed since (measured; see knowledge 233 and 234)
 
-- Frozen-base tiers for the qwen35 trainer: `Weight::NF4` (dequantise-on-the-fly
-  forward and dx, fp32 accumulate, same weight copy for x*W^T and dY*W), BF16 and NF4
-  through `new_train_on` with LoRA applied on every float-read tier, `proj_bwd` through
-  `Ops::matmul_dx`. Model: qwen3's int8 frozen base (knowledge 197).
-- Per-layer activation recompute in the resident qwen35 trainer with one shared
-  per-layer scratch; no decode-only state (KV cache, GDN state) in training builds.
-- Shared fused chunked LM-head cross-entropy in `model` (never builds n x V; bf16 or
-  NF4 head; vocab tiling under the 4 GiB binding), qwen3 migrated onto it.
-- Wire flash attention (`FlashGqaIds::for_training`) and `gdn_mixer_seg_fwd/bwd` into
-  the qwen35 layers; choose `segment_tokens` by measurement; store layer-boundary
-  residuals in bf16 above 32K tokens; lift the `T % chunk == 0` assertion; chunk
-  `q_full` above 4 GiB.
-- Sequence-length sweep and the real-width qualification (gates Q3-Q6 below).
-- Hand-tuned CUDA flash kernel for head_dim 256 (the generated one runs near 4 TFLOPS;
-  a 32K-token layer costs 13-21 s forward+backward).
+- Frozen-base tiers for the qwen35 trainer: bf16 and NF4 bases train LoRA with
+  per-layer recompute, the chunked LM head, a bf16 embedding table and head,
+  flash attention, segmented Gated-DeltaNet layers, a bf16 residual stream and an MLP in
+  token chunks (`TrainOpts`); `brain qwen35 finetune --base-dtype bf16|nf4` streams the
+  FP8 checkpoint (host peak below 7 GiB). Real 27B steps ran on one card for both tiers.
+- The shared NF4 weight type and the shared chunked head loss; the generic training
+  capability layer (`TokenObjectives`, `LoraSites`, architecture-table dispatch,
+  `score_tokens`, `make test/conformance`).
+
+## Next (dependency order)
+
+- Adapter on the real 27B: serve or generate with a trained qwen35 adapter on the
+  resident INT8/NF4 engine (a LoRA bank or an on-device fold). Without it a trained 27B
+  adapter cannot be shown to change behaviour (Q6 is open).
+- A real-checkpoint run at long sequence length through the CLI (the probe measured
+  random weights); a throughput pass (19-20 tokens/s today: the segmented recurrence and
+  the on-the-fly NF4 decode dominate); a hand-tuned CUDA flash kernel for head_dim 256.
+- CLI: per-step loss output, an evaluation interval, a load-time print, and explicit flags
+  for the long-sequence settings (they are chosen automatically for rows of 2048 tokens
+  or more at batch 1); `qwen35_train_probe --help` runs a probe instead of printing help.
+- Embedding table and head are always bf16, never NF4; MTP builds keep the old fp32 head
+  and cannot use the bf16 residual stream; host offload of residuals for 64K and beyond.
+- Implement `TokenObjectives` and `LoraSites` for qwen35 and qwen35moe (flip the capability
+  declarations in the architecture table, add the conformance subjects), then DPO/GRPO on
+  the 27B (gates Q7-Q10).
+- Move qwen3's int8 frozen-base input gradient into the shared `Ops::matmul_dx`, delete the
+  local copy; double quantisation of the NF4 scale plane (skipped).
+- `make test/parity` is not green and its cause is unconfirmed against a baseline; four qwen3
+  fused-attention dispatch-count tests fail on the CPU backend only (they pass on CUDA);
+  `random_shared_prefixes_stay_exact` failed once in a full CUDA run and passes alone.
 
 ## Generic training capabilities (any model that implements them gets SFT/DPO/GRPO)
 
