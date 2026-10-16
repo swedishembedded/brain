@@ -157,7 +157,7 @@ fn a_tiny_laya_model_trains_from_chance_to_fitted() {
 
     let cfg = RlcdObjective::default();
     let q = question();
-    let mut rng = data::rng::Rng::new(0xD1CE);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     let steps = 200usize;
     let (mut first_ten, mut last_ten) = (0.0f32, 0.0f32);
 
@@ -212,7 +212,7 @@ fn a_saved_head_reloads_and_reproduces_the_same_logits() {
     let mut m = small_model(&tok_path, TRUNK, 0xA10A_0001, Training::HeadOnly);
     let q = question();
     let cfg = RlcdObjective::default();
-    let mut rng = data::rng::Rng::new(11);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     for _ in 0..12 {
         let (text, gold) = TRAIN[(rng.next_u64() % TRAIN.len() as u64) as usize];
         let target = rlcd::proper::hard_target(OPTIONS.len(), gold);
