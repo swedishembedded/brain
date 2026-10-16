@@ -61,6 +61,10 @@ impl Job {
     }
 }
 
+/// A job's streaming sink and its one-shot reply.
+type ProgressSink = Box<dyn FnMut(Progress) + Send>;
+type ReplyFn = Box<dyn FnOnce(ActionResult) + Send>;
+
 struct Pending {
     /// Monotonic id assigned at submit, stable for the job's whole life (queued →
     /// running). Surfaced by [`Executor::in_flight`] so a live view can track a job.
@@ -1414,8 +1418,8 @@ fn run_group(handle: &InstanceHandle, action: &str, jobs: Vec<Pending>, inbox: &
     let invs: Vec<Invocation> = jobs.iter().map(|p| p.inv.clone()).collect();
     // Shared between the progress route and the feed: both address a job by its
     // index in the group, and late jobs append.
-    let sinks: Arc<Mutex<Vec<Box<dyn FnMut(Progress) + Send>>>> = Arc::new(Mutex::new(Vec::with_capacity(jobs.len())));
-    let mut replies: Vec<Option<Box<dyn FnOnce(ActionResult) + Send>>> = Vec::with_capacity(jobs.len());
+    let sinks: Arc<Mutex<Vec<ProgressSink>>> = Arc::new(Mutex::new(Vec::with_capacity(jobs.len())));
+    let mut replies: Vec<Option<ReplyFn>> = Vec::with_capacity(jobs.len());
     for p in jobs {
         sinks.lock().unwrap_or_else(|e| e.into_inner()).push(p.on_progress);
         replies.push(Some(p.reply));
@@ -1472,9 +1476,9 @@ fn run_group(handle: &InstanceHandle, action: &str, jobs: Vec<Pending>, inbox: &
 /// [`JobFeed`] over a group's [`Inbox`]: the lane's side of late admission.
 struct GroupFeed {
     inbox: Arc<Inbox>,
-    sinks: Arc<Mutex<Vec<Box<dyn FnMut(Progress) + Send>>>>,
+    sinks: Arc<Mutex<Vec<ProgressSink>>>,
     /// One reply per job in group order; taken when the job finishes.
-    replies: Vec<Option<Box<dyn FnOnce(ActionResult) + Send>>>,
+    replies: Vec<Option<ReplyFn>>,
 }
 
 impl crate::model::JobFeed for GroupFeed {
