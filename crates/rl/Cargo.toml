@@ -93,6 +93,11 @@ path = "tests/grpo_qwen35.rs"
 required-features = ["qwen3"]
 
 [[test]]
+name = "improve_cycle_qwen35"
+path = "tests/improve_cycle_qwen35.rs"
+required-features = ["qwen3"]
+
+[[test]]
 name = "grpo_objective"
 path = "tests/grpo_objective.rs"
 required-features = ["qwen3"]
