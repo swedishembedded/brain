@@ -121,7 +121,7 @@ impl Llava {
 mod tests {
     use super::*;
     use clip::model::CLIP_VISION_PIPELINES;
-    use data::rng::Rng;
+    use data::rng::{random_seed, Rng};
 
     fn rvec(n: usize, rng: &mut Rng) -> Vec<f32> {
         (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect()
@@ -154,7 +154,7 @@ mod tests {
         let hidden = 24usize;
         let n_visual = vision_cfg.native_patches(); // 4
 
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(random_seed());
         let vision_weights: HashMap<String, Vec<f32>> = vision_cfg
             .tensor_manifest()
             .iter()
