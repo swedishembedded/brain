@@ -127,10 +127,25 @@ fn step_progress_control<'a>(cb: &'a mut dyn FnMut(&model::StepReport) -> bool) 
 const LONG_SEQ_TOKENS: u32 = 2048;
 /// Tokens per micro-step a batch wider than one may hold.
 const LONG_STEP_TOKENS: u32 = 8192;
-/// Gated-DeltaNet segment length of the long-sequence settings.
-const LONG_GDN_SEGMENT: u32 = 128;
-/// MLP token-chunk size of the long-sequence settings.
-const LONG_MLP_ROWS: u32 = 512;
+/// Gated-DeltaNet segment length and MLP token-chunk size of the long-sequence
+/// settings for a base held at `dtype`.
+///
+/// Each segment and each MLP chunk is a fixed number of kernel launches per
+/// layer, so the largest that the card's memory allows is the cheapest
+/// (measured: segment 2048 instead of 128 took the launches of a step from
+/// 29,888 to 11,078, knowledge 233/234). What the card allows depends on how
+/// much of it the frozen base takes: the 4-bit base (about 16 GB for the 27B)
+/// leaves room for 2048-token segments and 2048-row MLP chunks at 8K tokens
+/// (about 4 GiB more than the 128/512 settings); the bf16 base (about 54 GB)
+/// stays at 512-token segments and 1024-row chunks. Both are whole multiples
+/// of the 64-token chunk and of the convolution history the segments carry.
+fn long_settings(dtype: BaseDtype) -> (u32, u32) {
+    match dtype {
+        BaseDtype::Nf4 => (2048, 2048),
+        BaseDtype::Bf16 => (512, 1024),
+        BaseDtype::F32 => (128, 512),
+    }
+}
 
 /// Explicit values for the long-sequence settings, each replacing what a
 /// streamed run would choose by itself (the long-sequence defaults for rows of
@@ -163,8 +178,8 @@ pub struct StreamedRun {
 fn streamed_train_opts(run: &StreamedRun, batch: u32, block: u32, mtp: bool) -> Result<TrainOpts, String> {
     let auto = run.recompute && batch == 1 && block >= LONG_SEQ_TOKENS;
     let nonzero = |v: u32| (v > 0).then_some(v);
-    let gdn_segment_tokens = run.long.gdn_segment.map_or(auto.then_some(LONG_GDN_SEGMENT), nonzero);
-    let mlp_rows = run.long.mlp_rows.map_or(auto.then_some(LONG_MLP_ROWS), nonzero);
+    let gdn_segment_tokens = run.long.gdn_segment.map_or(auto.then_some(long_settings(run.dtype).0), nonzero);
+    let mlp_rows = run.long.mlp_rows.map_or(auto.then_some(long_settings(run.dtype).1), nonzero);
     let bf16_residuals = run.long.bf16_residuals.unwrap_or(auto && !mtp);
     if gdn_segment_tokens.is_some() && batch != 1 {
         return Err(format!("a Gated-DeltaNet segment needs a batch of one (batch is {batch}); use --batch 1 with --grad-accum"));
@@ -247,7 +262,7 @@ mod tests {
     #[test]
     fn long_rows_at_batch_one_default_to_the_long_sequence_settings() {
         let o = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2048, false).unwrap();
-        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, o.bf16_residuals), (Some(128), Some(512), true));
+        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, o.bf16_residuals), (Some(2048), Some(2048), true));
         let short = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2047, false).unwrap();
         assert_eq!((short.gdn_segment_tokens, short.mlp_rows, short.bf16_residuals), (None, None, false));
         let mtp = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 4096, true).unwrap();
@@ -274,5 +289,18 @@ mod tests {
         let res = LongSeqOverrides { bf16_residuals: Some(true), ..Default::default() };
         assert!(streamed_train_opts(&run(true, res), 1, 128, true).unwrap_err().contains("MTP"));
         assert!(streamed_train_opts(&run(false, res), 1, 128, false).unwrap_err().contains("--recompute on"));
+    }
+
+    /// The long-sequence settings shrink as the base takes more of the card and
+    /// stay whole multiples of the 64-token GDN chunk.
+    #[test]
+    fn long_settings_follow_the_base_footprint() {
+        let (nf4, bf16, f32) = (long_settings(BaseDtype::Nf4), long_settings(BaseDtype::Bf16), long_settings(BaseDtype::F32));
+        assert!(nf4.0 >= bf16.0 && bf16.0 >= f32.0, "segments: {nf4:?} {bf16:?} {f32:?}");
+        assert!(nf4.1 >= bf16.1 && bf16.1 >= f32.1, "MLP rows: {nf4:?} {bf16:?} {f32:?}");
+        for (seg, rows) in [nf4, bf16, f32] {
+            assert_eq!(seg % 64, 0);
+            assert!(rows > 0);
+        }
     }
 }
