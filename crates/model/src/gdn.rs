@@ -220,13 +220,14 @@ pub struct GdnFastIds {
 /// Whether `g` takes [`GdnIds::fast`] kernels.
 ///
 /// They are workgroup-cooperative WGSL kernels, bit-identical to the loops
-/// they replace, but only measured on CUDA devices with int8 tensor-core
-/// generation hardware; every other device keeps the portable dispatch
-/// sequence it has always run. The gate is the queried compute capability
-/// (never a device name), and `BRAIN_NO_GDN_FAST=1` switches it off for A/B
-/// measurement.
+/// they replace (`tests/gdn_chunk_fwd_fast.rs`, `tests/gdn_ut_fwd.rs`), and
+/// faster on every CUDA generation with `dp4a` (compute capability 6.1, where
+/// the portable sequence's batched matmuls were a third of a prefill round)
+/// and newer; every other device keeps the portable dispatch sequence it has
+/// always run. The gate is the queried compute capability (never a device
+/// name), and `BRAIN_NO_GDN_FAST=1` switches it off for A/B measurement.
 pub fn use_fast_kernels(g: &Gpu) -> bool {
-    std::env::var_os("BRAIN_NO_GDN_FAST").is_none() && g.caps().arch.compute_capability.is_some_and(|cc| cc >= (8, 0))
+    std::env::var_os("BRAIN_NO_GDN_FAST").is_none() && g.caps().arch.compute_capability.is_some_and(|cc| cc >= (6, 1))
 }
 
 /// The shape one call to [`gdn_chunk_fwd`] operates over. `b`/`h` are the
