@@ -200,6 +200,10 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     // The coalesced RMSNorm backward-x twin: the training backward's norms select it
     // through `block::rms_variant` where the device can run a workgroup reduction.
     ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS), // 95
+    // Row-indexed staging of a serving engine's pooled Gated-DeltaNet state,
+    // see `GdnPoolStore`. Registered LAST so every const above keeps its place.
+    ("pool_rows_gather2", kernels::POOL_ROWS_GATHER2), // 96
+    ("pool_rows_scatter2", kernels::POOL_ROWS_SCATTER2), // 97
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -408,6 +412,8 @@ const TOPK_EXTRACT_STEP: usize = 87;
 const DECODE_SOFTMAX_BATCHED: usize = 88;
 const GDN_UT_FWD: usize = 93;
 const BMM_TILED: usize = 94;
+const POOL_ROWS_GATHER2: usize = 96;
+const POOL_ROWS_SCATTER2: usize = 97;
 
 /// Two-stage argmax reduction width for [`Qwen35::head_argmax_dev`]/
 /// [`Qwen35::head_topk_dev`] - matches `qwen3::serve::Engine`'s own
@@ -781,6 +787,8 @@ enum GdnCall<'a> {
     Whole,
     Chunk(model::gdn_mixer::GdnStream<'a>),
     Decode(&'a [model::gdn_mixer::GdnStream<'a>]),
+    /// [`Self::Decode`] with every sequence's state a row of a pool.
+    DecodePool(model::gdn_mixer::GdnPoolRows<'a>),
     /// `n` consecutive decode steps of one sequence, in order - a short verify
     /// round, which must reproduce plain decode's arithmetic row by row.
     Rows(model::gdn_mixer::GdnStream<'a>),
@@ -1124,6 +1132,18 @@ pub(crate) struct BatchSeq<'a> {
     pub gdn_hist: &'a [DeviceBuffer],
 }
 
+/// A serving engine's recurrent state for its whole resident set: per layer one
+/// pool of rows of state and one of conv history (a size-1 placeholder at GQA
+/// layers), row `p` belonging to the sequence on physical block `p`. A batched
+/// decode step finds each sequence's row by [`BatchSeq::phys`], so the whole
+/// batch is staged by one dispatch in and one out per layer however many
+/// sequences it has - and, where the device offers it, runs as ONE native
+/// launch on those rows in place (`model::gdn_mixer::gdn_mixer_decode_pooled_fused`).
+pub(crate) struct GdnPoolStore<'a> {
+    pub state: &'a [DeviceBuffer],
+    pub hist: &'a [DeviceBuffer],
+}
+
 /// What one [`Qwen35::run_decode_batch`] call reads and updates: the shared
 /// per-layer paged KV pool plus one [`BatchSeq`] per sequence.
 pub(crate) struct BatchDecodeCaches<'a> {
@@ -1145,6 +1165,9 @@ pub(crate) struct BatchDecodeCaches<'a> {
     /// which is what makes this a verify round and not a batch - see
     /// [`Qwen35::run_exact_round`].
     pub one_sequence: bool,
+    /// Where the sequences' Gated-DeltaNet state lives when it is pooled by
+    /// physical block. `None`: each [`BatchSeq`] carries its own buffers.
+    pub gdn_pool: Option<GdnPoolStore<'a>>,
 }
 
 /// Cold copies of every Gated-DeltaNet layer's recurrent state and conv
@@ -2186,7 +2209,7 @@ impl Qwen35 {
         let gdn_shape = match &call {
             GdnCall::Whole => GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
             GdnCall::Chunk(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) },
-            GdnCall::Decode(_) => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
+            GdnCall::Decode(_) | GdnCall::DecodePool(_) => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
             GdnCall::Rows(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: 1 },
         };
         let shape = model::gdn_mixer::GdnMixerShape { gdn: gdn_shape, nkh: c.linear_num_key_heads, conv_kernel: c.linear_conv_kernel_dim, rms_eps: c.rms_eps };
@@ -2209,6 +2232,21 @@ impl Qwen35 {
                 let gated = fused.unwrap_or_else(|| {
                     model::gdn_mixer::gdn_mixer_decode_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, streams)
                 });
+                (gated, None)
+            }
+            GdnCall::DecodePool(pool) => {
+                let gated = model::gdn_mixer::gdn_mixer_decode_state_fwd(
+                    g,
+                    &gdn_mixer_ids(),
+                    &gdn_mixer_decode_ids(),
+                    &shape,
+                    &weights,
+                    &mixed_qkv,
+                    &bproj,
+                    &aproj,
+                    &z,
+                    &model::gdn_mixer::GdnDecodeState::Pool(pool),
+                );
                 (gated, None)
             }
             GdnCall::Rows(stream) => {
@@ -3386,7 +3424,7 @@ impl Qwen35 {
             gdn_state: caches.gdn_state,
             gdn_hist: caches.gdn_hist,
         }];
-        let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: false };
+        let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: false, gdn_pool: None };
         self.run_decode_batch(&[token_id], &batch, input_override)
     }
 
@@ -3547,9 +3585,21 @@ impl Qwen35 {
 
             let mixer_out = match ty {
                 LayerType::Linear => {
-                    let streams: Vec<model::gdn_mixer::GdnStream> =
-                        caches.seqs.iter().map(|s| model::gdn_mixer::GdnStream { state: &s.gdn_state[l], hist: &s.gdn_hist[l] }).collect();
-                    let call = if caches.one_sequence {
+                    let streams: Vec<model::gdn_mixer::GdnStream> = if caches.gdn_pool.is_some() {
+                        Vec::new()
+                    } else {
+                        caches.seqs.iter().map(|s| model::gdn_mixer::GdnStream { state: &s.gdn_state[l], hist: &s.gdn_hist[l] }).collect()
+                    };
+                    let call = if let Some(pool) = &caches.gdn_pool {
+                        GdnCall::DecodePool(model::gdn_mixer::GdnPoolRows {
+                            state: &pool.state[l],
+                            hist: &pool.hist[l],
+                            rows: &blocks,
+                            gather: POOL_ROWS_GATHER2,
+                            scatter: POOL_ROWS_SCATTER2,
+                            fuse: self.decode_fusion.get(),
+                        })
+                    } else if caches.one_sequence {
                         GdnCall::Rows(model::gdn_mixer::GdnStream { state: &caches.seqs[0].gdn_state[l], hist: &caches.seqs[0].gdn_hist[l] })
                     } else {
                         GdnCall::Decode(&streams)
@@ -3990,7 +4040,7 @@ impl Qwen35 {
             let seqs: Vec<BatchSeq> = (0..len)
                 .map(|i| BatchSeq { phys, pos: pos_start + (start + i) as u32, gdn_state: caches.gdn_state, gdn_hist: caches.gdn_hist })
                 .collect();
-            let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: true };
+            let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: true, gdn_pool: None };
             let x = input_override.map(|x| &x[start * d..(start + len) * d]);
             self.run_decode_batch(&tokens[start..start + len], &batch, x)
         };

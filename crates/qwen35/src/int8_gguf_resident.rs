@@ -156,7 +156,7 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
 use crate::config::{LayerType, Qwen35Config};
-use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, Qwen35, SpecDecodeStats};
+use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, Qwen35, SpecDecodeStats};
 
 /// Catalog id. Names the real upstream release this resident loads, exactly
 /// (`https://huggingface.co/unsloth/Qwen3.8-27B-GGUF`, the `Q8_0` file) -
@@ -478,26 +478,44 @@ pub fn resident_config(mg: &MmapGguf, cap: u32) -> Result<Qwen35Config, String> 
 /// does not apply - `crate::model::DecodeCaches`' own documented convention,
 /// and the same shapes `crate::serve::Engine` allocates.
 ///
-/// The two kinds of per-sequence state are held differently, because the
-/// kernels that read them address them differently:
+/// Both kinds of per-sequence state are POOLS addressed by slot, so a batched
+/// decode dispatch carries every sequence's row and the slot table is the only
+/// thing that says whose state is whose:
 ///
 /// * **GQA**: ONE `[slots*cap, kv_dim]` pool per layer. Sequence `i` owns rows
-///   `i*cap .. +cap`, and a batched decode dispatch reaches whichever rows it
-///   wants through the paged kernels' block table (`slot` IS the physical
-///   block id) rather than through which buffer it bound. That indirection is
-///   what lets one dispatch carry every sequence's query row.
-/// * **GDN**: one `[state]`/`[hist]` buffer pair per (sequence, layer). These
-///   are gathered into and scattered out of a contiguous batch slab by
-///   `model::gdn_mixer::gdn_mixer_decode_fwd`, so they need no pool layout of
-///   their own.
+///   `i*cap .. +cap`, reached through the paged kernels' block table (`slot` IS
+///   the physical block id).
+/// * **GDN**: per layer a `[slots, state_len]` pool and a `[slots, hist_len]`
+///   pool, row `i` belonging to slot `i`. The batched step runs on those rows
+///   IN PLACE (one native launch per layer where the device offers it, one
+///   gather and one scatter otherwise) instead of staging a per-sequence
+///   buffer through a copy per sequence, which at 64 sequences cost half the
+///   step.
+///
+/// The single-sequence kernels (prefill rounds, a lone decode token,
+/// speculative rounds) bind whole buffers, not pool rows, so one sequence at a
+/// time works on a private `work` copy of the GDN state: a prefill runs there
+/// and [`Self::store_work`] writes the finished state into the sequence's pool
+/// row. The single-sequence APIs that never touch the pool (`generate`, the
+/// speculative loop) simply live on `work`.
 struct ShardCaches {
     /// `[layer]` -> K and V planes of `[slots*cap, kv_dim]` in the cache's
-    /// KV tier (placeholder at non-owned / GDN layers).
+    /// KV tier (placeholder at non-owned / GQA layers).
     gqa_kv: Vec<KvLayer>,
-    /// `[slot][layer]` (dummy at non-owned / GQA layers).
-    gdn_state: Vec<Vec<DeviceBuffer>>,
-    gdn_hist: Vec<Vec<DeviceBuffer>>,
+    /// `[layer]`: `[slots, state_len]` / `[slots, hist_len]` pools (dummy at
+    /// non-owned / GQA layers).
+    pool_state: Vec<DeviceBuffer>,
+    pool_hist: Vec<DeviceBuffer>,
+    /// `[layer]`: the one working copy a single sequence is prefilled or
+    /// stepped alone on.
+    work_state: Vec<DeviceBuffer>,
+    work_hist: Vec<DeviceBuffer>,
+    /// `[layer]`: whether this stage owns the layer and it is a Gated-DeltaNet one.
+    recurrent: Vec<bool>,
+    slots: u32,
     cap: u32,
+    /// Kernel index of `pool_rows_scatter2` on this stage's device.
+    scatter: usize,
 }
 
 impl ShardCaches {
@@ -505,69 +523,81 @@ impl ShardCaches {
         assert!(slots > 0, "{MODEL}: ShardCaches needs at least one slot");
         let kv = cfg.kv_dim() as u64;
         let (state, hist) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
+        // The row kernels address a pool through u32 element offsets.
+        assert!(slots as u64 * state.max(hist) <= u32::MAX as u64, "{MODEL}: {slots} recurrent-state rows of {state} elements are past a u32 element offset");
         let n = cfg.n_layers as usize;
         let types = cfg.layer_types();
         let mut gqa_kv = Vec::with_capacity(n);
+        let (mut pool_state, mut pool_hist, mut work_state, mut work_hist, mut recurrent) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (l, ty) in types.iter().enumerate() {
             let full = shard.owns(l) && *ty == LayerType::Full;
             gqa_kv.push(if full { KvLayer::new(gpu, kv_tier, slots as u64 * cap as u64, kv, cfg.head_dim as u64) } else { KvLayer::placeholder(gpu) });
+            let lin = shard.owns(l) && *ty == LayerType::Linear;
+            recurrent.push(lin);
+            let (ps, ph, ws, wh) = if lin { (slots as u64 * state, slots as u64 * hist, state, hist) } else { (1, 1, 1, 1) };
+            pool_state.push(gpu.storage(ps));
+            pool_hist.push(gpu.storage(ph));
+            work_state.push(gpu.storage(ws));
+            work_hist.push(gpu.storage(wh));
         }
-        let (mut gdn_state, mut gdn_hist) = (Vec::with_capacity(slots as usize), Vec::with_capacity(slots as usize));
-        for _ in 0..slots {
-            let (mut st, mut hi) = (Vec::with_capacity(n), Vec::with_capacity(n));
-            for (l, ty) in types.iter().enumerate() {
-                let lin = shard.owns(l) && *ty == LayerType::Linear;
-                let (sw, hw) = if lin { (state, hist) } else { (1, 1) };
-                st.push(gpu.storage(sw));
-                hi.push(gpu.storage(hw));
-            }
-            gdn_state.push(st);
-            gdn_hist.push(hi);
-        }
-        let caches = ShardCaches { gqa_kv, gdn_state, gdn_hist, cap };
+        let scatter = gpu.kernel_index("pool_rows_scatter2").expect("pool_rows_scatter2 is in the qwen35 kernel set");
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, recurrent, slots, cap, scatter };
         caches.reset(gpu);
         caches
     }
 
-    /// Zero every GDN recurrent state / conv history for a fresh sequence.
-    /// `Gpu::storage` does not guarantee zeroed memory and a fresh sequence's
-    /// recurrent state MUST start at zero. The GQA pool is deliberately left
-    /// alone - a decode step's attention only ever reads rows `0..=pos` of a
-    /// slot's own window, so a stale row past the new sequence's length is
-    /// never read (the same argument `Qwen35::reset_decode_cache` makes).
+    /// Zero every GDN recurrent state / conv history (pool and work) for fresh
+    /// sequences. `Gpu::storage` does not guarantee zeroed memory and a fresh
+    /// sequence's recurrent state MUST start at zero. The GQA pool is
+    /// deliberately left alone - a decode step's attention only ever reads rows
+    /// `0..=pos` of a slot's own window, so a stale row past the new sequence's
+    /// length is never read (the same argument `Qwen35::reset_decode_cache`
+    /// makes).
     fn reset(&self, gpu: &Gpu) {
-        let clears: Vec<&DeviceBuffer> = self.gdn_state.iter().chain(self.gdn_hist.iter()).flatten().collect();
+        let clears: Vec<&DeviceBuffer> = self.pool_state.iter().chain(&self.pool_hist).chain(&self.work_state).chain(&self.work_hist).collect();
         gpu.submit(&clears, &[]);
     }
 
-    /// [`Self::reset`] for ONE slot: a sequence joining a batch that other
-    /// sequences are still decoding in must not disturb their state.
-    fn reset_slot(&self, gpu: &Gpu, slot: u32) {
-        let clears: Vec<&DeviceBuffer> = self.gdn_state[slot as usize].iter().chain(self.gdn_hist[slot as usize].iter()).collect();
+    /// Zero the working copy: a sequence about to be prefilled starts from zero
+    /// state without touching any pool row another sequence is decoding on.
+    fn reset_work(&self, gpu: &Gpu) {
+        let clears: Vec<&DeviceBuffer> = self.work_state.iter().chain(&self.work_hist).collect();
         gpu.submit(&clears, &[]);
     }
 
-    /// One slot's single-sequence view (prefill, and any single-token step).
+    /// Make the working copy the GDN state of `slot`: one row scatter per
+    /// owned recurrent layer, overwriting the whole row.
+    fn store_work(&self, gpu: &Gpu, cfg: &Qwen35Config, slot: u32) {
+        assert!(slot < self.slots, "{MODEL}: slot {slot} is outside this stage's {} slots", self.slots);
+        let ids = gpu.storage(1);
+        gpu.write(&ids, &[slot]);
+        let (sl, hl) = (cfg.gdn_state_len() as u32, cfg.gdn_hist_len() as u32);
+        let steps: Vec<_> = (0..self.pool_state.len())
+            .filter(|&l| self.recurrent[l])
+            .map(|l| gpu.step(self.scatter, &[&self.work_state[l], &self.work_hist[l], &ids, &self.pool_state[l], &self.pool_hist[l]], &[1, sl, hl], sl + hl))
+            .collect();
+        gpu.submit(&[], &steps);
+        // The scatters must have read the working copy before it is reused.
+        gpu.poll_wait();
+    }
+
+    /// The single-sequence view (prefill, and any single-token step): GQA
+    /// window of `slot`, GDN state on the working copy.
     fn view(&self, slot: u32) -> DecodeCaches<'_> {
-        DecodeCaches {
-            gqa_kv: &self.gqa_kv,
-            gqa_cap: self.cap,
-            gqa_base_row: slot * self.cap,
-            gdn_state: &self.gdn_state[slot as usize],
-            gdn_hist: &self.gdn_hist[slot as usize],
-        }
+        DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.cap, gqa_base_row: slot * self.cap, gdn_state: &self.work_state, gdn_hist: &self.work_hist }
     }
 
-    /// The batch's view: row `i` decodes slot `slots[i]` at absolute position
+    /// The batch's rows: row `i` decodes slot `slots[i]` at absolute position
     /// `positions[i]`. Rows name their slots, so a batch is any subset of the
     /// resident sequences in any order - what lets sequences join and leave
-    /// between steps without renumbering the ones that stay.
+    /// between steps without renumbering the ones that stay. The GDN state is
+    /// the pool ([`Self::gdn_pool`]), found by slot.
     fn batch(&self, slots: &[u32], positions: &[u32]) -> Vec<BatchSeq<'_>> {
-        slots
-            .iter()
-            .zip(positions)
-            .map(|(&slot, &pos)| BatchSeq { phys: slot, pos, gdn_state: &self.gdn_state[slot as usize], gdn_hist: &self.gdn_hist[slot as usize] })
-            .collect()
+        slots.iter().zip(positions).map(|(&slot, &pos)| BatchSeq { phys: slot, pos, gdn_state: &[], gdn_hist: &[] }).collect()
+    }
+
+    fn gdn_pool(&self) -> GdnPoolStore<'_> {
+        GdnPoolStore { state: &self.pool_state, hist: &self.pool_hist }
     }
 }
 
@@ -1023,16 +1053,16 @@ impl Qwen35GgufInstance {
         assert!(bsz == positions.len() && bsz == slots.len(), "{MODEL}: a decode step needs one slot and position per token ({bsz} tokens, {} slots, {} positions)", slots.len(), positions.len());
         assert!(bsz > 0, "{MODEL}: stack_decode_hidden on an empty batch");
         for s in &self.shards {
-            assert!(bsz <= s.caches.gdn_state.len(), "{MODEL}: a decode step got {bsz} sequences but a stage holds only {} slots", s.caches.gdn_state.len());
-            if let Some(&bad) = slots.iter().find(|&&sl| sl as usize >= s.caches.gdn_state.len()) {
-                panic!("{MODEL}: slot {bad} is outside this instance's {} slots", s.caches.gdn_state.len());
+            assert!(bsz <= s.caches.slots as usize, "{MODEL}: a decode step got {bsz} sequences but a stage holds only {} slots", s.caches.slots);
+            if let Some(&bad) = slots.iter().find(|&&sl| sl >= s.caches.slots) {
+                panic!("{MODEL}: slot {bad} is outside this instance's {} slots", s.caches.slots);
             }
         }
         debug_assert!(slots.iter().collect::<std::collections::HashSet<_>>().len() == bsz, "{MODEL}: a decode step names a slot twice");
         let mut carry = self.embed_rows(tokens)?;
         for s in &self.shards {
             let seqs = s.caches.batch(slots, positions);
-            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.cap, seqs: &seqs, one_sequence: false };
+            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.cap, seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()) };
             carry = s.qwen35.decode_batch_stage(tokens, &caches, Some(&carry));
         }
         Ok(carry)
@@ -1155,7 +1185,7 @@ impl Qwen35GgufInstance {
     fn replay_prompt_hidden(&self, prompt: &[u32], slot: u32) -> Result<Vec<f32>, String> {
         let d = self.cfg.d_model as usize;
         for s in &self.shards {
-            s.caches.reset_slot(&s.qwen35.gpu, slot);
+            s.caches.reset_work(&s.qwen35.gpu);
         }
         let mut last = Vec::new();
         if self.shards.iter().all(|s| s.qwen35.chunked_prefill_is_profitable()) {
@@ -1173,6 +1203,9 @@ impl Qwen35GgufInstance {
                 }
                 last = carry;
             }
+        }
+        for s in &self.shards {
+            s.caches.store_work(&s.qwen35.gpu, &self.cfg, slot);
         }
         Ok(last)
     }
@@ -2037,6 +2070,10 @@ const PROFILE_WARM_STEPS: u32 = 3;
 /// the loader places can never describe different cards.
 #[derive(Clone, Debug, Default)]
 struct Plan {
+    /// Why nothing was placed, when the configuration is the reason
+    /// ([`sizing_refusal`]); reported to every request through
+    /// [`MultiDeviceResidentModel::unavailable_reason`].
+    refusal: Option<String>,
     cfg: Option<Qwen35Config>,
     /// `(device, that stage's shard, that stage's bytes)`.
     stages: Vec<(Device, Shard, u64)>,
@@ -2201,7 +2238,7 @@ impl Qwen35GgufResident {
         }
         if let Some(why) = sizing_refusal(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, &caps.iter().map(|&(_, c)| c).collect::<Vec<_>>()) {
             eprintln!("{MODEL}: '{}' is not served: {why} -- reporting zero devices", self.gguf_path);
-            return Plan::default();
+            return Plan { refusal: Some(format!("{MODEL}: {why}")), ..Plan::default() };
         }
         let cost = layer_cost(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch);
         let placements = model::shard::plan_fewest_devices(&cost, &caps).expect("sizing_refusal found the configuration placeable");
@@ -2219,7 +2256,7 @@ impl Qwen35GgufResident {
                 (device, Shard { gpu_index: physical, ..p.shard.clone() }, p.bytes)
             })
             .collect();
-        Plan { cfg: Some(cfg), stages }
+        Plan { refusal: None, cfg: Some(cfg), stages }
     }
 
     /// The total device bytes this checkpoint needs whatever the split, and
@@ -2317,6 +2354,10 @@ impl ResidentModel for Qwen35GgufResident {
 }
 
 impl MultiDeviceResidentModel for Qwen35GgufResident {
+    fn unavailable_reason(&self, _key: &InstanceKey) -> Option<String> {
+        self.plan().refusal
+    }
+
     fn estimate_multi(&self, _key: &InstanceKey) -> MultiDeviceCost {
         let plan = self.plan();
         // Host RAM: the mapping is header-only plus whatever one streamed
