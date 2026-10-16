@@ -1464,10 +1464,15 @@ impl Qwen35 {
         if let Some(o) = train_opts {
             ops.set_gemm_precision(o.gemm_precision);
             // A step allocates and frees thousands of activations; on CUDA each free is a
-            // driver call that waits for the whole device. Keep the freed blocks (the
-            // backend bounds what it holds) so a free is a bookkeeping entry.
-            gpu.hold_freed_blocks(true);
-            ops.gpu().hold_freed_blocks(true);
+            // driver call that waits for the whole device. Keeping the freed blocks makes
+            // a free a bookkeeping entry, at the price of the garbage between two drains
+            // staying reserved (about 14 GiB at 8K tokens through the 64 layers): taken
+            // when the base leaves that room - the 4-bit base, or a model of at most 32
+            // layers - and not for a bf16 27B, whose base alone takes 54 GB of the card.
+            if o.base.want("blocks.0.mlp.gate.weight") == Dtype::NF4 || cfg.n_layers <= 32 {
+                gpu.hold_freed_blocks(true);
+                ops.gpu().hold_freed_blocks(true);
+            }
         }
         let mut weights: HashMap<String, Weight> = HashMap::new();
         let mut upload = |name: String, wn: u32, wk: u32, want: Dtype| {
