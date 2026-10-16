@@ -9,10 +9,6 @@ qwen3, qwen35, qwen35moe and gpt2 are registered in the conformance suite.
 
 ## Not yet done
 
-- [ ] qwen35 and qwen35moe batched Gated-DeltaNet training on the CPU backend:
-      a batch of more than one row aborts with heap corruption in the backward
-      (knowledge 291). Find the CPU kernel that mishandles `b > 1`, then drop
-      `require_accelerator` from `crates/rl/tests/conformance.rs`.
 - [ ] The qwen35/qwen35moe conformance run takes minutes, nearly all in the
       finite-difference check; give `Subject` a tensor or direction budget.
 - [ ] Conformance C8 (`chunked_head_ce_equals_unchunked`) is an ignored test

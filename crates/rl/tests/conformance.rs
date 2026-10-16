@@ -102,25 +102,12 @@ fn qwen35moe_subject() -> Subject<qwen35moe::model::Qwen35> {
 
 /// Every registered model, by name. The suite refuses to pass over none.
 const REGISTERED: &[&str] = &["qwen3", "gpt2", "qwen35", "qwen35moe"];
-/// Qwen3.5 trains a batch of more than one row through its Gated-DeltaNet
-/// layers correctly on the accelerator backends (the suite's finite-difference
-/// check passes), but its backward corrupts the heap on the CPU backend. The
-/// suite fails with that reason instead of aborting the process.
-fn require_accelerator(model: &str) {
-    assert!(
-        gpu_core::backend_name() != "cpu",
-        "{model}: batched Gated-DeltaNet training corrupts memory on the CPU backend; run the suite on a GPU backend"
-    );
-}
 
 macro_rules! subject {
     ($test:ident, $subject:expr) => {
         #[test]
         fn $test() {
             let subject = $subject;
-            if subject.name == "qwen35" || subject.name == "qwen35moe" {
-                require_accelerator(subject.name);
-            }
             assert!(REGISTERED.contains(&subject.name), "{} is not in REGISTERED", subject.name);
             // seed: fixed so a conformance failure reproduces
             let seed = 41;

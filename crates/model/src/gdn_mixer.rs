@@ -1024,7 +1024,9 @@ pub fn gdn_mixer_stream_bwd(
     let ext_rows = ctx + t;
     let d_ncl_act = g.storage((n * conv_dim) as u64);
     let d_ncl_out = g.storage((n * conv_dim) as u64);
-    let d_ncl_in = g.storage((ext_rows * conv_dim) as u64);
+    // `ctx == 0` convolves `b` sequences of `t` rows (`n = b * t` rows in all);
+    // a continued round is a single sequence of `ext_rows` (`n == t` there).
+    let d_ncl_in = g.storage((n.max(ext_rows) * conv_dim) as u64);
     let d_mixed_qkv = g.storage((n * conv_dim) as u64);
     let conv_shape = if ctx == 0 {
         Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t }

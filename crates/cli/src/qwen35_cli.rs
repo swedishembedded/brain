@@ -761,7 +761,6 @@ mod finetune_cli_tests {
 
     /// The same run on a bf16 base, through the same entry.
     #[test]
-    #[ignore = "aborts with heap corruption on the CPU backend (passes on CUDA)"]
     fn a_tiny_bf16_lora_finetune_runs_through_the_cli_path() {
         let dir = std::env::temp_dir().join(format!("brain-qwen35-cli-smoke-bf16-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

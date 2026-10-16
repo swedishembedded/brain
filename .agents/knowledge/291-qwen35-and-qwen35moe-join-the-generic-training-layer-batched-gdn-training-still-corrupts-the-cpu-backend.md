@@ -38,6 +38,14 @@ build on CUDA gives the finite-difference-correct gradients the suite checks, an
 fails with that reason on the CPU backend instead of aborting. No model test
 covered `b > 1` through `gdn_mixer` before this.
 
+Resolved, VERIFIED-BY-RUN: the conv1d input-gradient buffer in
+`gdn_mixer_bwd` was sized for one sequence (`t` rows per channel) while the
+`conv1d_dx` kernel writes `b * t`. A canary after each CPU dispatch named
+`conv1d_dx`. The buffer is now sized for the whole batch;
+`crates/qwen35/tests/lora_batch.rs` checks a two-sequence batch against the mean
+of its two sequences' gradients, the bf16 CLI fine-tune test is enabled again,
+and the qwen35 and qwen35moe conformance subjects pass on the CPU backend.
+
 The suite is slow on these models: about 6 minutes for `qwen35` and `qwen35moe`
 together on CUDA with other jobs on the card, almost all of it the
 finite-difference check (every trainable tensor, three directions, two scales).

@@ -57,8 +57,6 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
   probe step varied 4x with a neighbour job (knowledge 281). Start from the launch counts there (segment-128
   GDN issues thousands of tiny `concat_split`/`bmm_tiled` launches per layer-step) and measure on a quiet
   card or with `program_table` replays. A hand-tuned CUDA flash kernel for head_dim 256 is also open.
-- `cargo test` on the CPU backend: `a_tiny_bf16_lora_finetune_runs_through_the_cli_path` aborts with
-  heap corruption (it passes on CUDA); it is `#[ignore]`d with that reason until the CPU bf16 path is fixed.
 - Embedding table and head are always bf16, never NF4; MTP builds keep the old fp32 head
   and cannot use the bf16 residual stream; host offload of residuals for 64K and beyond.
 - Implement `TokenObjectives` and `LoraSites` for qwen35 and qwen35moe (flip the capability
