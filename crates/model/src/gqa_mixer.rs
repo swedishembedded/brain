@@ -581,8 +581,10 @@ fn qkv_prepare(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWe
     g.submit(
         &[],
         &[
-            g.step(ids.concat_split, &[q_full, &q_value], &[n * nh, 2 * hd, hd, 0, 1, 1], n * nh * hd),
-            g.step(ids.concat_split, &[q_full, &q_gate], &[n * nh, 2 * hd, hd, hd, 1, 1], n * nh * hd),
+            // Each (row, head) is a batch entry of two channels (value, gate) of `hd`
+            // contiguous elements: a plane is a whole half, not one element.
+            g.step(ids.concat_split, &[q_full, &q_value], &[n * nh, 2, 1, 0, 1, hd], n * nh * hd),
+            g.step(ids.concat_split, &[q_full, &q_gate], &[n * nh, 2, 1, 1, 1, hd], n * nh * hd),
         ],
     );
 
@@ -691,7 +693,7 @@ pub fn gqa_mixer_bwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaM
     // ---- q_full [value|gate] split backward (concat2, per-head interleaved) ----
     let qpd = shape.n_heads * shape.head_dim * 2;
     let d_q_full = g.storage((n * qpd) as u64);
-    g.submit(&[], &[g.step(ids.concat2, &[&d_q_value, &d_q_gate, &d_q_full], &[n * nh, hd, hd, 1, 1], n * nh * 2 * hd)]);
+    g.submit(&[], &[g.step(ids.concat2, &[&d_q_value, &d_q_gate, &d_q_full], &[n * nh, 1, 1, 1, hd], n * nh * 2 * hd)]);
 
     (d_q_full, d_k, d_v)
 }

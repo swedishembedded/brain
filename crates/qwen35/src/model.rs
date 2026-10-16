@@ -2853,8 +2853,10 @@ impl Qwen35 {
     /// Rows `[row0, row0 + rows)` of a `[total_rows, width]` buffer as their own buffer.
     fn take_rows(&self, src: &DeviceBuffer, width: u32, total_rows: u32, row0: u32, rows: u32) -> DeviceBuffer {
         let dst = self.gpu.storage(rows as u64 * width as u64);
-        let (total, count, off) = (total_rows * width, rows * width, row0 * width);
-        self.gpu.submit(&[], &[self.gpu.step(CONCAT_SPLIT, &[src, &dst], &[1, total, count, off, 1, 1], count)]);
+        // Rows are the channels of one batch entry and a plane is a whole row, so a
+        // block copies a contiguous run instead of one element.
+        let count = rows * width;
+        self.gpu.submit(&[], &[self.gpu.step(CONCAT_SPLIT, &[src, &dst], &[1, total_rows, rows, row0, 1, width], count)]);
         dst
     }
 
@@ -3572,7 +3574,7 @@ impl Qwen35 {
         // Only the LAST row is ever wanted (this round's next-token
         // prediction, or the seam into the next round).
         let last = g.storage(d as u64);
-        g.submit(&[], &[g.step(CONCAT_SPLIT, &[&xn_final, &last], &[1, n * d, d, (n - 1) * d, 1, 1], d)]);
+        g.submit(&[], &[g.step(CONCAT_SPLIT, &[&xn_final, &last], &[1, n, 1, n - 1, 1, d], d)]);
         last
     }
 

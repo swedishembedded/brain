@@ -421,10 +421,20 @@ fn serves_chan_window(p: &[u32]) -> bool {
         && u64::from(*n) * u64::from(*ctot) * u64::from(*h) * u64::from(*w) <= u64::from(u32::MAX))
 }
 
-/// A block per run of `tile.1` floats of one window plane, plane-major.
+/// A block per run of `tile.1` floats of one window plane, plane-major (or per
+/// run of that many consecutive elements when the planes are tiny).
 fn chan_window_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
-    p[0] * p[2] * (p[4] * p[5]).div_ceil(tile.1)
+    let hw = p[4] * p[5];
+    if hw < SMALL_PLANE {
+        return (p[0] * p[2] * hw).div_ceil(tile.1);
+    }
+    p[0] * p[2] * hw.div_ceil(tile.1)
 }
+
+/// Planes of fewer floats than this are copied flat, a block per run of
+/// `tile.1` consecutive elements across planes (the kernels do the same
+/// split on the same bound).
+const SMALL_PLANE: u32 = 32;
 
 /// `[N, Ca, Cb, H, W]`, both inputs non-empty.
 fn serves_concat2(p: &[u32]) -> bool {
@@ -434,7 +444,11 @@ fn serves_concat2(p: &[u32]) -> bool {
 
 /// A block per run of `tile.1` floats of one output plane, plane-major.
 fn concat2_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
-    p[0] * (p[1] + p[2]) * (p[3] * p[4]).div_ceil(tile.1)
+    let hw = p[3] * p[4];
+    if hw < SMALL_PLANE {
+        return (p[0] * (p[1] + p[2]) * hw).div_ceil(tile.1);
+    }
+    p[0] * (p[1] + p[2]) * hw.div_ceil(tile.1)
 }
 
 /// `[total]`, non-empty.
@@ -1052,5 +1066,19 @@ mod tests {
         assert!(!serves_i8_gemv(&[33, 1280, 64]), "past the decode regime");
         assert!(!serves_i8_gemv(&[1, 1284, 64]), "K not a whole number of scale groups");
         assert!(!serves_i8_gemv(&[1, 1280]), "short params");
+    }
+
+    /// A window of single-element planes (the channel-window ops over a row-major
+    /// matrix, `H = W = 1`) shares blocks across planes instead of launching one
+    /// block per element.
+    #[test]
+    fn single_element_planes_share_blocks() {
+        let tile = (1, 1024);
+        // 4096 rows of a 20-channel matrix, a 7-channel window.
+        assert!(chan_window_blocks(&[4096, 20, 7, 5, 1, 1], tile) <= (4096 * 7u32).div_ceil(1024));
+        assert!(concat2_blocks(&[4096, 7, 9, 1, 1], tile) <= (4096 * 16u32).div_ceil(1024));
+        // Large planes keep a block per run of one plane.
+        assert_eq!(chan_window_blocks(&[8, 64, 32, 0, 64, 64], tile), 8 * 32 * 4);
+        assert_eq!(concat2_blocks(&[8, 64, 128, 16, 16], tile), 8 * 192);
     }
 }

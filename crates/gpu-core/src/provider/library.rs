@@ -237,7 +237,9 @@ impl LibraryGemmProvider {
         let (rows, cols) = act_dims;
         let count = rows as u64 * cols as u64;
         let eligible = [gemm.m, gemm.n, gemm.k].iter().all(|&d| d > 0)
-            && [gemm.lda, gemm.ldb, gemm.ldc].iter().all(|&d| d.is_multiple_of(ALIGN_ELEMS))
+            // Only the bf16 operands need 16-byte rows; the fp32 output may have any
+            // row length (the ragged last window of a vocabulary-tiled head does).
+            && [gemm.lda, gemm.ldb].iter().all(|&d| d.is_multiple_of(ALIGN_ELEMS))
             && cols.is_multiple_of(ALIGN_ELEMS)
             && count * 2 <= MAX_SCRATCH_BYTES
             // Bound sub-ranges must keep every operand 16-byte aligned (4 words).

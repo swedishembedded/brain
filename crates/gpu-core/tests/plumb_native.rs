@@ -88,7 +88,7 @@ fn the_native_plumbing_is_bit_identical_to_the_reference() {
     // (N, Ctot, Csrc, c_off, H, W): the C2f splits and placements of YOLOv8n,
     // then odd planes and offsets.
     for (i, &(n, ctot, csrc, off, h, w)) in
-        [(8u32, 32u32, 16u32, 16u32, 128u32, 128u32), (8, 64, 32, 0, 64, 64), (8, 96, 32, 64, 64, 64), (8, 384, 128, 256, 16, 16), (3, 7, 3, 2, 5, 7), (1, 5, 1, 4, 1, 1)]
+        [(8u32, 32u32, 16u32, 16u32, 128u32, 128u32), (8, 64, 32, 0, 64, 64), (8, 96, 32, 64, 64, 64), (8, 384, 128, 256, 16, 16), (3, 7, 3, 2, 5, 7), (1, 5, 1, 4, 1, 1), (4096, 20, 7, 5, 1, 1), (300, 12, 12, 0, 1, 1), (50, 6, 2, 3, 3, 5), (9, 9, 4, 5, 31, 1)]
             .iter()
             .enumerate()
     {
@@ -101,7 +101,7 @@ fn the_native_plumbing_is_bit_identical_to_the_reference() {
         // on both sides, which the comparison covers too.
         same_bits(&gpu, PLACE, &[&narrow], &p, (n * ctot * h * w) as usize, threads, &format!("chan_place {p:?}"));
     }
-    for (i, &(n, ca, cb, h, w)) in [(8u32, 128u32, 64u32, 32u32, 32u32), (8, 64, 128, 16, 16), (8, 256, 128, 16, 16), (2, 3, 5, 7, 9)].iter().enumerate() {
+    for (i, &(n, ca, cb, h, w)) in [(8u32, 128u32, 64u32, 32u32, 32u32), (8, 64, 128, 16, 16), (8, 256, 128, 16, 16), (2, 3, 5, 7, 9), (4096, 7, 9, 1, 1), (333, 1, 1, 1, 3), (50, 4, 2, 5, 5)].iter().enumerate() {
         let a = values((n * ca * h * w) as usize, 30 + i as u64);
         let b = values((n * cb * h * w) as usize, 40 + i as u64);
         let total = n * (ca + cb) * h * w;

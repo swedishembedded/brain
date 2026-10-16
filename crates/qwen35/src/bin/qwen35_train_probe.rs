@@ -19,12 +19,16 @@
 //! ```text
 //! BRAIN_BACKEND=cuda gpu qwen35_train_probe --tokens 4096 --base nf4 \
 //!     [--layers 4] [--rank 16] [--recompute on|off] [--gdn-segment N] \
-//!     [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N] [--steps 2] [--seed N] [--gemm-precision auto|fp32|bf16]
+//!     [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N] [--steps 2] [--seed N] [--gemm-precision auto|fp32|bf16] [--profile]
 //! ```
 //!
 //! `--gemm-precision` picks the arithmetic of the bf16-weight GEMMs: `auto`
 //! (default) uses bf16 tensor cores where the device has them and the fp32
 //! kernels otherwise, `fp32` pins the reference kernels.
+//!
+//! `--profile` times the last step kernel by kernel on the device and prints
+//! the 30 most expensive (a time-sliced card inflates small kernels; read the
+//! table next to the `other_contexts` count).
 //!
 //! `--seed` fixes the random weights and tokens so two runs are the same
 //! workload; without it a seed is drawn and printed. Each step line carries
@@ -234,7 +238,11 @@ fn main() {
     let y: Vec<u32> = (0..tokens).map(|_| rng.next_u32() % cfg.vocab).collect();
     m.set_batch(&x, &y);
     let mut warm_secs = 0.0;
+    let profile = args.iter().any(|a| a == "--profile");
     for step in 1..=steps {
+        // The last step of a profiled run is timed kernel by kernel on the device
+        // (events around each launch, so launches are issued one at a time).
+        let timed = profile && step == steps && steps > 1 && m.gpu.set_kernel_timing(true);
         m.gpu.reset_ops_counters();
         let t = Instant::now();
         let (loss, fwd) = gpu_core::profile::device_table(&m.gpu, &format!("step {step}"), || {
@@ -251,6 +259,16 @@ fn main() {
         println!("PROBE step={step} loss={loss:.4} forward_s={fwd:.2} step_s={total:.2} tokens_per_s={:.0} dispatches={dispatches}", tokens as f64 / total);
         if step > 1 {
             warm_secs += total;
+        }
+        if timed {
+            let mut rows = m.gpu.kernel_times().unwrap_or_default();
+            rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let sum: f64 = rows.iter().map(|r| r.1).sum();
+            println!("PROFILE device_ms_total={sum:.0} kernels={}", rows.len());
+            for (name, ms, calls) in rows.iter().take(30) {
+                println!("PROFILE {:6.1}% {ms:9.1} ms {calls:7} calls {:8.3} ms/call {name}", 100.0 * ms / sum, ms / *calls as f64);
+            }
+            m.gpu.set_kernel_timing(false);
         }
     }
     if steps > 1 {

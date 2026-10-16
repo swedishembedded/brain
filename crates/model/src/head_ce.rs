@@ -217,7 +217,10 @@ fn plan_tiles(vocab: u32, d: u32, per_word: u64, align_elems: u64, budget_words:
         return vec![(0, vocab)];
     }
     let granule = align_elems / gcd(align_elems, d as u64);
-    let rows = (fit / granule * granule).max(granule);
+    // Whole groups of 64 rows too, when the budget allows one: a window that is
+    // not a multiple of 8 rows leaves a tensor-core GEMM with misaligned rows.
+    let step = granule / gcd(granule, 64) * 64;
+    let rows = if fit >= step { fit / step * step } else { (fit / granule * granule).max(granule) };
     (0..vocab as u64).step_by(rows as usize).map(|v0| (v0 as u32, rows.min(vocab as u64 - v0) as u32)).collect()
 }
 
@@ -524,6 +527,18 @@ mod tests {
                 next = v0 + cnt;
             }
             assert_eq!(next, vocab);
+        }
+    }
+
+    /// Every window of a vocabulary that is a whole number of 64-row groups is itself
+    /// a whole number of them, so a tensor-core GEMM over it sees 16-byte rows
+    /// (the 27B's 248,320 rows, at the bf16 and NF4 granules, small and large budgets).
+    #[test]
+    fn windows_of_a_tileable_vocab_are_whole_groups_of_64_rows() {
+        for (per_word, align, budget) in [(2u64, 128u64, 1u64 << 26), (2, 128, 1 << 28), (8, 2048, 1 << 26), (8, 2048, 1 << 28)] {
+            for &(v0, cnt) in &plan_tiles(248_320, 5120, per_word, align, budget) {
+                assert_eq!((v0 % 64, cnt % 64), (0, 0), "window ({v0}, {cnt}) at per_word {per_word}, budget {budget}");
+            }
         }
     }
 

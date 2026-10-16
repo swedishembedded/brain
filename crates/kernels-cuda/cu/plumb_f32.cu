@@ -62,9 +62,25 @@ __device__ __forceinline__ BrainPlRun brain_pl_run(unsigned planes, unsigned hw)
     return r;
 }
 
+// Planes of fewer floats than this are copied flat: a block takes a run of
+// consecutive ELEMENTS across planes (one thread an element, an integer
+// division per element) instead of a block per plane, which for the channel
+// windows of a row-major matrix (H = W = 1) would be one block per float.
+// `gpu-core`'s block count (`SMALL_PLANE`) makes the same split on the same bound.
+#define BRAIN_PL_SMALL_PLANE 32u
+
 // da[n, c] = dy[n, c_off + c] over the da planes. params [N, Ctot, Csrc, c_off, H, W].
 extern "C" __global__ void __launch_bounds__(BRAIN_PL_THREADS) brain_concat_split(const unsigned int* params, const float* dy, float* da) {
     const unsigned N = params[0], Ctot = params[1], Csrc = params[2], c_off = params[3], hw = params[4] * params[5];
+    if (hw < BRAIN_PL_SMALL_PLANE) {
+        const unsigned total = N * Csrc * hw;
+        const unsigned start = brain_pl_block() * BRAIN_PL_PER_BLOCK;
+        for (unsigned e = start + threadIdx.x; e < min(total, start + BRAIN_PL_PER_BLOCK); e += BRAIN_PL_THREADS) {
+            const unsigned plane = e / hw, w = e - plane * hw, n = plane / Csrc, c = plane - n * Csrc;
+            da[e] = dy[((unsigned long long)n * Ctot + c_off + c) * hw + w];
+        }
+        return;
+    }
     const BrainPlRun r = brain_pl_run(N * Csrc, hw);
     if (!r.ok) { return; }
     const unsigned n = r.plane / Csrc, c = r.plane - (r.plane / Csrc) * Csrc;
@@ -76,6 +92,15 @@ extern "C" __global__ void __launch_bounds__(BRAIN_PL_THREADS) brain_concat_spli
 // dst[n, c_off + c] = src[n, c] over the src planes. params [N, Ctot, Csrc, c_off, H, W].
 extern "C" __global__ void __launch_bounds__(BRAIN_PL_THREADS) brain_chan_place(const unsigned int* params, const float* src, float* dst) {
     const unsigned N = params[0], Ctot = params[1], Csrc = params[2], c_off = params[3], hw = params[4] * params[5];
+    if (hw < BRAIN_PL_SMALL_PLANE) {
+        const unsigned total = N * Csrc * hw;
+        const unsigned start = brain_pl_block() * BRAIN_PL_PER_BLOCK;
+        for (unsigned e = start + threadIdx.x; e < min(total, start + BRAIN_PL_PER_BLOCK); e += BRAIN_PL_THREADS) {
+            const unsigned plane = e / hw, w = e - plane * hw, n = plane / Csrc, c = plane - n * Csrc;
+            dst[((unsigned long long)n * Ctot + c_off + c) * hw + w] = src[e];
+        }
+        return;
+    }
     const BrainPlRun r = brain_pl_run(N * Csrc, hw);
     if (!r.ok) { return; }
     const unsigned n = r.plane / Csrc, c = r.plane - (r.plane / Csrc) * Csrc;
@@ -88,6 +113,15 @@ extern "C" __global__ void __launch_bounds__(BRAIN_PL_THREADS) brain_chan_place(
 extern "C" __global__ void __launch_bounds__(BRAIN_PL_THREADS) brain_concat2(const unsigned int* params, const float* a, const float* b, float* y) {
     const unsigned N = params[0], Ca = params[1], Cb = params[2], hw = params[3] * params[4];
     const unsigned Ctot = Ca + Cb;
+    if (hw < BRAIN_PL_SMALL_PLANE) {
+        const unsigned total = N * Ctot * hw;
+        const unsigned start = brain_pl_block() * BRAIN_PL_PER_BLOCK;
+        for (unsigned e = start + threadIdx.x; e < min(total, start + BRAIN_PL_PER_BLOCK); e += BRAIN_PL_THREADS) {
+            const unsigned plane = e / hw, w = e - plane * hw, n = plane / Ctot, c = plane - n * Ctot;
+            y[e] = c < Ca ? a[((unsigned long long)n * Ca + c) * hw + w] : b[((unsigned long long)n * Cb + (c - Ca)) * hw + w];
+        }
+        return;
+    }
     const BrainPlRun r = brain_pl_run(N * Ctot, hw);
     if (!r.ok) { return; }
     const unsigned n = r.plane / Ctot, c = r.plane - (r.plane / Ctot) * Ctot;
