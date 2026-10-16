@@ -155,6 +155,16 @@ fn other_compute_contexts() -> Option<usize> {
     Some(String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| !l.is_empty() && *l != pid).count())
 }
 
+/// CPU seconds (user + system, all threads) this process has used, from `/proc`.
+fn cpu_seconds() -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // Fields after the parenthesised command name; utime and stime are the 12th and 13th.
+    let rest = stat.rsplit_once(')')?.1;
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let ticks = f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?;
+    Some(ticks / 100.0)
+}
+
 /// This process's GPU memory in MiB as `nvidia-smi` reports it.
 fn own_gpu_mib() -> Option<u64> {
     let out = std::process::Command::new("nvidia-smi").args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).output().ok()?;
@@ -244,6 +254,7 @@ fn main() {
         // (events around each launch, so launches are issued one at a time).
         let timed = profile && step == steps && steps > 1 && m.gpu.set_kernel_timing(true);
         m.gpu.reset_ops_counters();
+        let cpu0 = cpu_seconds();
         let t = Instant::now();
         let (loss, fwd) = gpu_core::profile::device_table(&m.gpu, &format!("step {step}"), || {
             m.zero_grads();
@@ -257,7 +268,8 @@ fn main() {
         let total = t.elapsed().as_secs_f64();
         let counters = m.gpu.ops_counters();
         let dispatches = counters.steps;
-        println!("PROBE step={step} loss={loss:.4} forward_s={fwd:.2} step_s={total:.2} tokens_per_s={:.0} dispatches={dispatches}", tokens as f64 / total);
+        let cpu = cpu0.zip(cpu_seconds()).map_or("n/a".to_string(), |(a, b)| format!("{:.2}", b - a));
+        println!("PROBE step={step} loss={loss:.4} forward_s={fwd:.2} step_s={total:.2} tokens_per_s={:.0} dispatches={dispatches} cpu_s={cpu}", tokens as f64 / total);
         if step > 1 {
             warm_secs += total;
         }

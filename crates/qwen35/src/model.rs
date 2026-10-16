@@ -1463,6 +1463,11 @@ impl Qwen35 {
         let mut ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen35: Ops::new: {e}"));
         if let Some(o) = train_opts {
             ops.set_gemm_precision(o.gemm_precision);
+            // A step allocates and frees thousands of activations; on CUDA each free is a
+            // driver call that waits for the whole device. Keep the freed blocks (the
+            // backend bounds what it holds) so a free is a bookkeeping entry.
+            gpu.hold_freed_blocks(true);
+            ops.gpu().hold_freed_blocks(true);
         }
         let mut weights: HashMap<String, Weight> = HashMap::new();
         let mut upload = |name: String, wn: u32, wk: u32, want: Dtype| {
