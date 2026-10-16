@@ -25,7 +25,7 @@ section 8; the entry that records the runs is knowledge #310.
 | Q1 no MLP replay in the backward | landed | also skips the `down` product of each chunk rebuild (nothing reads it): the chunked backward does no more GEMM work than the whole-sequence MLP's |
 | Q2 poll_wait per MLP chunk | not done | the sizing of Q3 (2048-row chunks for the 4-bit base) cuts the waits 4x instead |
 | Q3 sizing of segment and MLP chunk | landed as a footprint rule | by base tier (4-bit 2048/2048, bf16 512/1024, fp32 128/512) rather than by free device memory: no backend reports free memory through `Gpu` yet |
-| Q4 tiled rmsnorm rows | not done | |
+| Q4 tiled rmsnorm rows | landed | both twins registered for training; also the cooperative grad-norm, a block-per-row `ce_stats` and a block-per-head GDN decay gradient (single-thread reductions the profile found on the default path) |
 | Q5 probe as an instrument | landed | `--seed`, dispatches per step, warm tokens/s, other compute contexts, `--gemm-precision`, `--profile` (device time per kernel plus a launch census) |
 | K1 bf16 GEMMs on the vendor library | landed | `libcublas` `cublasGemmEx` / `cublasGemmStridedBatchedEx` rather than `cublasLt`: the heuristic is the same library path with no descriptor plumbing; the step records through a placeholder native kernel so fencing and lifetimes are unchanged, and a submission holding one is issued step by step (no graph capture). The tier is `GemmPrecision::{Auto, Fp32Reference, Bf16TensorCore}`; `Auto` is the default and falls back to the fp32 kernels, with the reason logged once, on any device that cannot run the library (no CUDA, compute capability below 8.0, library absent, handle failure, a shape outside the 16-byte-row rule) |
 | K2 NF4 through the same GEMM | landed | decode into a bf16 scratch per call; no weight-reuse cache |
@@ -543,6 +543,12 @@ Each one replaces 2-5 launches and 2-4 tensor passes.
 | **M4 >= 1,000** | K4, Q4, Q6, K8 (arena and parameter ABI; graphs if needed) | 1,100-1,500 | 1,000 tokens/s on W8K AND on the real checkpoint through the CLI (bf16 and NF4); trajectory gate green |
 | M5 1,500-2,000 (stretch) | K7, GEMM shape tuning (cuBLASLt heuristic sweep, MLP chunk 4096, gate+up as one [2ff, d] GEMM, q/k/v as one), K8 graphs | 1,500-2,000 | recorded, not promised |
 
+Status after lane T1: M1 (>= 100) is met on W8K for the 4-bit base (550-560 tokens/s idle),
+M2 (>= 300) on the same workload; M3's pass condition (flash at or below 0.6 s per step at 8K) is met
+by the blockwise attention (about 0.75 s DERIVED from 6.7 + 33 ms per layer, 16 layers: not met
+strictly); M4 (1,000 tokens/s on W8K and through the CLI) is **not reached**. The bf16 base and the
+real-checkpoint CLI were not measured at W8K.
+
 At 32K (W32K) each milestone is expected at about 85% of its W8K figure once K5 lands; before
 K5 the attention T² term dominates at 32K.
 
@@ -661,3 +667,9 @@ milestone table here.
 | 2026-10-16 | c8a33d4e | W4 NF4 seg2048 mlp512 | 97 | VERIFIED-BY-RUN, shared card, 11,078 launches, 1.04 MiB/token |
 | 2026-10-16 | c8a33d4e | Real NF4 CLI, 8192 x 1 | below 3 | VERIFIED-BY-RUN (other lane's run, first step still running after about 60 min, shared card) |
 | 2026-10-16 | 258eaba9 | 64 layers, 8192, NF4 / bf16 (knowledge 234) | 20 / 19 | earlier record |
+| 2026-10-16 | t1 series | W4 bf16, old binary vs new, back to back, shared card | 82-186 vs 897-3168 | VERIFIED-BY-RUN, `other_contexts` 1-2; ratio 10-30x; the absolute rate varies 3x with the neighbours |
+| 2026-10-16 | t1 series | W8K NF4 (64 layers, 8192), library GEMMs + attention + batched GDN backward | 34 | VERIFIED-BY-RUN, shared card, 121,247 dispatches, 238-243 s/step |
+| 2026-10-16 | t1 series | W8K NF4, + freed blocks kept | 53 | VERIFIED-BY-RUN, shared card, 149-158 s/step, peak 51.8 GiB |
+| 2026-10-16 | t1 series | W8K NF4, + cooperative grad-norm, CE and decay-gradient kernels | 469 | VERIFIED-BY-RUN, idle at start, gpu lock, 17.5 s/step, 114,207 dispatches |
+| 2026-10-16 | t1 series | W8K NF4, + cooperative RMSNorm | 550-560 | VERIFIED-BY-RUN, idle at start (a context arrived in step 3), 14.7-14.9 s/step |
+| 2026-10-16 | t1 series | library GEMM / blockwise attention component rates | 343-819 TFLOP/s; attention 6.7 + 33 ms/layer at 8K | VERIFIED-BY-RUN, `cuda_library_bench.rs`, minimum over runs |
