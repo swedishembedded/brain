@@ -7,7 +7,10 @@
 //! cumulative decay, decay mask, the Gram product, the unit-triangular solve,
 //! `u`, `w` and the intra-chunk scores, for a full 64-row chunk, a ragged
 //! 5-row chunk, a chunk whose keys are nearly parallel (where a Neumann-series
-//! solve would cancel to garbage), and the training entry's extra tensors.
+//! solve would cancel to garbage), and the training entry's extra tensors. The
+//! token-major entry is checked against the same reference fed with the query/key
+//! normalisation, head repeat and chunk-major permute done on the host, including
+//! the chunk-major tensors it hands to the recurrence and the backward.
 //!
 //! Swedish Embedded AB implements tensor-core training kernels for linear-
 //! attention language models for its clients. If your team needs expertise in
@@ -204,6 +207,89 @@ fn the_tensor_core_chunk_forward_matches_the_f64_reference() {
     }
 }
 
+/// Token-major raw operands and the chunk-major tensors the portable pipeline would build from them.
+fn token_case(gpu: &Gpu, case: &str, b: usize, h: usize, group: usize, n_chunks: usize, c: usize, tol: f64) {
+    let (nkh, tokens) = (h / group, b * n_chunks * c);
+    let q_raw = values(tokens * nkh * D, 31);
+    let k_raw = values(tokens * nkh * D, 32);
+    let v_raw = values(tokens * h * D, 33);
+    let g_raw: Vec<f32> = values(tokens * h, 34).iter().map(|v| -0.4 * v.abs()).collect();
+    let beta_raw: Vec<f32> = values(tokens * h, 35).iter().map(|v| 0.5 + 0.45 * v).collect();
+    let eps = 1e-6f64;
+    let normalised = |raw: &[f32], tok: usize, head: usize| -> Vec<f32> {
+        let row = &raw[(tok * nkh + head / group) * D..][..D];
+        let inv = 1.0 / (row.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() + eps).sqrt();
+        row.iter().map(|x| (*x as f64 * inv) as f32).collect()
+    };
+    let bhc = n_chunks * b * h;
+    let mut x = Inputs { query: vec![], key: vec![], value: vec![], raw_g: vec![], beta: vec![] };
+    for blk in 0..bhc {
+        let (ci, rem) = (blk / (b * h), blk % (b * h));
+        let (bb, head) = (rem / h, rem % h);
+        for r in 0..c {
+            let tok = (bb * n_chunks + ci) * c + r;
+            x.query.extend(normalised(&q_raw, tok, head));
+            x.key.extend(normalised(&k_raw, tok, head));
+            x.value.extend_from_slice(&v_raw[(tok * h + head) * D..][..D]);
+            x.raw_g.push(g_raw[tok * h + head]);
+            x.beta.push(beta_raw[tok * h + head]);
+        }
+    }
+    let want = reference(bhc, c, &x);
+
+    let up = |name: &str, v: &[f32]| gpu.storage_init(name, v);
+    let (q, k, v, g, beta) = (up("q", &q_raw), up("k", &k_raw), up("v", &v_raw), up("g", &g_raw), up("beta", &beta_raw));
+    let out = |n: usize| gpu.storage_init("out", &vec![f32::NAN; n]);
+    let sizes = [bhc * c, bhc * c, bhc * c * D, bhc * c * D, bhc * c * c, bhc * c * D, bhc * c * D, bhc * c * D, bhc * c * c, bhc * c * c, bhc * c * c, bhc * c * c, bhc * c * D, bhc * c * D, bhc * c * D, bhc * c];
+    let outs: Vec<_> = sizes.iter().map(|&n| out(n)).collect();
+    let mut bufs: Vec<&_> = vec![&q, &k, &v, &g, &beta];
+    bufs.extend(outs.iter());
+    let bufs: [&_; 21] = bufs.try_into().ok().expect("21 buffers");
+    let layout = gpu_core::provider::cuda::GdnTokenLayout { bhc: bhc as u32, c_len: c as u32, n_chunks: n_chunks as u32, heads: h as u32, group: group as u32, head_dim: D as u32, scale: 1.0 / (D as f32).sqrt(), eps: eps as f32 };
+    let step = gpu_core::provider::cuda::gdn_chunk_prep_tok_train_step(gpu, &bufs, layout).expect("the token-major chunk forward must be offered on a CUDA device with tensor cores");
+    gpu.submit(&[], &[step]);
+    gpu.poll_wait();
+    let f64s = |v: &[f32]| v.iter().map(|x| *x as f64).collect::<Vec<_>>();
+    let expect: Vec<(&str, &Vec<f64>)> = vec![
+        ("g_cs", &want.g_cs),
+        ("exp_g_cs", &want.exp_g_cs),
+        ("u", &want.u),
+        ("w", &want.w),
+        ("intra_scores", &want.intra),
+        ("k_beta", &want.k_beta),
+        ("v_beta", &want.v_beta),
+        ("k_beta_decay", &want.k_beta_decay),
+        ("decay_mask", &want.decay_mask),
+        ("raw_attn0", &want.raw_attn0),
+        ("t_mat", &want.t_mat),
+        ("raw_intra", &want.raw_intra),
+    ];
+    for (i, (name, w)) in expect.iter().enumerate() {
+        let e = rel_err(&gpu.read(&outs[i], sizes[i]), w);
+        println!("  {case} tok {name}: max error {e:.2e} (bound {tol:.0e})");
+        assert!(e <= tol, "{case} {name}: error {e:.3e} over {tol:.0e}");
+    }
+    for (i, (name, w)) in [("query_cm", f64s(&x.query)), ("key_cm", f64s(&x.key)), ("value_cm", f64s(&x.value)), ("beta_cm", f64s(&x.beta))].iter().enumerate() {
+        let e = rel_err(&gpu.read(&outs[12 + i], sizes[12 + i]), w);
+        println!("  {case} tok {name}: max error {e:.2e} (bound {tol:.0e})");
+        assert!(e <= tol, "{case} {name}: error {e:.3e} over {tol:.0e}");
+    }
+}
+
+fn the_token_major_chunk_forward_matches_the_host_pipeline() {
+    let gpu = gpu_core::testgpu::dev(&[]);
+    if !is_tensor_core_cuda(&gpu) {
+        brain_testutil::skip_unavailable("not a CUDA device with tensor cores");
+        return;
+    }
+    // (batch, value heads, heads per key head, chunks, rows per chunk): the real 3:1 repeat over two
+    // sequences at the full chunk, a ragged chunk, and no repeat at all.
+    for (case, b, h, group, n_chunks, c) in [("c64 group3", 2usize, 6usize, 3usize, 3usize, 64usize), ("c5 group3", 1, 6, 3, 4, 5), ("c32 group1", 2, 4, 1, 2, 32)] {
+        token_case(&gpu, case, b, h, group, n_chunks, c, 2e-5);
+    }
+}
+
 gpu_core::card_tests!(
     the_tensor_core_chunk_forward_matches_the_f64_reference,
+    the_token_major_chunk_forward_matches_the_host_pipeline,
 );

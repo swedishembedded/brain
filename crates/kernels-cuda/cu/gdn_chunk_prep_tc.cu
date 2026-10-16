@@ -41,6 +41,17 @@
 // `model::gdn`'s note at its step 7). The cumulative decay is the same serial
 // fp32 sum as `gdn_chunk_cumsum_step`, so g_cs is bit-identical.
 //
+// TOKEN-MAJOR form (`TOK`, the `_tok_` entries). The mixer feeds the chunk forward
+// through five more dispatches per layer pass: an L2 normalisation of query and
+// key, the repeat of their heads from `nkh` to `nvh` and a token-major to
+// chunk-major permute of the five operands. The `_tok_` entries fold all of it
+// into the block's loads: query and key are read in their narrow token-major
+// layout (head `h / group`), normalised row by row in shared memory
+// (`x * rsqrt(sum x^2 + eps)`, the `l2norm_scale` formula), and value, beta and
+// the raw decay are read strided; the normalised chunk-major query and key and
+// the chunk-major value and beta (which the loop kernel and the backward read) are
+// written from the same tiles.
+//
 // Contract (u32 params, then pointers; every buffer is the chunk-major layout
 // `model::gdn` documents, `bhc = chunk * (B*H) + b*H + h`):
 //   params : [bhc, c_len, dk, dv, unused, scale (f32 bits)]
@@ -50,6 +61,11 @@
 //            intra_scores [bhc, c_len, c_len]
 //   TRAIN  : k_beta, v_beta, k_beta_decay [bhc, c_len, 128];
 //            decay_mask, raw_attn0, t_mat, raw_intra [bhc, c_len, c_len]
+//   TOK    : params gain [H, n_chunks, group, eps (f32 bits)] at 6..9;
+//            query, key [B*T, (H/group)*128] (pre-normalisation), value [B*T, H*128],
+//            raw_g, beta [B*T, H] token-major (T = n_chunks * c_len); the entry also
+//            writes query_cm, key_cm [bhc, c_len, 128] and, in the training form, value_cm
+//            [bhc, c_len, 128] and beta_cm [bhc, c_len].
 // dk = dv = 128 and 1 <= c_len <= 64 (the provider checks; the entry does not).
 // Dynamic shared memory: PREP_SMEM_BYTES.
 //
@@ -117,21 +133,40 @@ __device__ __forceinline__ void warp_gemm_3xtf32(float (&acc)[NT][4], unsigned i
     }
 }
 
-// Rows of `src` ([C, 128] floats) into a zero-padded [64, stride] shared tile.
-__device__ __forceinline__ void brain_load_rows(float* dst, unsigned int stride, const float* src, unsigned int C) {
+// Rows of a [rows, 128] source into a zero-padded [64, stride] shared tile. `src` points at chunk
+// row 0; consecutive chunk rows are `row_stride` floats apart (128 for chunk-major buffers).
+__device__ __forceinline__ void brain_load_rows(float* dst, unsigned int stride, const float* src, unsigned long long row_stride, unsigned int C) {
     for (unsigned int e = threadIdx.x; e < MAXC * (D / 4); e += THREADS) {
         const unsigned int r = e / (D / 4), c4 = e % (D / 4);
         float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        if (r < C) { v = *reinterpret_cast<const float4*>(src + (unsigned long long)r * D + c4 * 4); }
+        if (r < C) { v = *reinterpret_cast<const float4*>(src + (unsigned long long)r * row_stride + c4 * 4); }
         *reinterpret_cast<float4*>(dst + r * stride + c4 * 4) = v;
     }
 }
 
-template <bool TRAIN>
+// L2-normalise the C rows of a shared tile in place (one warp per row, `x * rsqrt(sum x^2 + eps)`) and
+// write them to the chunk-major buffer `cm`. Rows are private to their warp, so no barrier is needed
+// between the read and the write-back; the caller barriers before anyone else reads the tile.
+__device__ __forceinline__ void brain_normalize_rows(float* tile, unsigned int stride, float* cm, unsigned int C, float eps) {
+    const unsigned int lane = threadIdx.x & 31u, warp = threadIdx.x >> 5;
+    for (unsigned int r = warp; r < C; r += THREADS / 32) {
+        float4 v = *reinterpret_cast<const float4*>(tile + r * stride + lane * 4);
+        float s = v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) { s += __shfl_xor_sync(0xffffffffu, s, o); }
+        const float inv = rsqrtf(s + eps);
+        v = make_float4(v.x * inv, v.y * inv, v.z * inv, v.w * inv);
+        *reinterpret_cast<float4*>(tile + r * stride + lane * 4) = v;
+        *reinterpret_cast<float4*>(cm + r * (unsigned long long)D + lane * 4) = v;
+    }
+}
+
+template <bool TRAIN, bool TOK>
 __device__ __forceinline__ void brain_gdn_chunk_prep_body(const unsigned int* params, const float* query, const float* key, const float* value,
                                                           const float* raw_g, const float* beta, float* g_cs_out, float* exp_g_cs_out, float* u_out,
                                                           float* w_out, float* intra_out, float* k_beta_out, float* v_beta_out, float* k_beta_decay_out,
-                                                          float* decay_mask_out, float* raw_attn0_out, float* t_mat_out, float* raw_intra_out) {
+                                                          float* decay_mask_out, float* raw_attn0_out, float* t_mat_out, float* raw_intra_out, float* query_cm_out,
+                                                          float* key_cm_out, float* value_cm_out, float* beta_cm_out) {
     const unsigned int bhc = params[0];
     const unsigned int C = params[1];
     const float scale = __uint_as_float(params[5]);
@@ -153,13 +188,35 @@ __device__ __forceinline__ void brain_gdn_chunk_prep_body(const unsigned int* pa
     const unsigned long long row_base = (unsigned long long)blk * C;   // first row of this (chunk, head)
     const unsigned long long cc_base = row_base * C;                    // first element of its c x c matrices
 
+    // Token-major sources: this block's first token row, head, and the row/column geometry of each tensor.
+    unsigned long long tok0 = 0, beta_stride = 1, qk_stride = D, v_stride = D;
+    unsigned int head = 0, src_head = 0;
+    float eps = 0.0f;
+    if (TOK) {
+        const unsigned int H = params[6], n_chunks = params[7], group = params[8];
+        const unsigned int bh = bhc / n_chunks, ci = blk / bh, rem = blk % bh;
+        head = rem % H;
+        src_head = head / group;
+        tok0 = ((unsigned long long)(rem / H) * n_chunks + ci) * C;
+        beta_stride = H;
+        qk_stride = (unsigned long long)(H / group) * D;
+        v_stride = (unsigned long long)H * D;
+        eps = __uint_as_float(params[9]);
+    }
+    const float* beta_src = TOK ? beta + tok0 * beta_stride + head : beta + row_base;
+    const float* g_src = TOK ? raw_g + tok0 * beta_stride + head : raw_g + row_base;
+    const float* key_src = TOK ? key + tok0 * qk_stride + (unsigned long long)src_head * D : key + row_base * D;
+    const float* query_src = TOK ? query + tok0 * qk_stride + (unsigned long long)src_head * D : query + row_base * D;
+    const float* value_src = TOK ? value + tok0 * v_stride + (unsigned long long)head * D : value + row_base * D;
+
     for (unsigned int i = tid; i < MAXC * SC; i += THREADS) {
         sA[i] = 0.0f;
         sT[i] = 0.0f;
     }
     if (tid < MAXC) {
-        sbeta[tid] = tid < C ? beta[row_base + tid] : 0.0f;
-        sg[tid] = tid < C ? raw_g[row_base + tid] : 0.0f;
+        sbeta[tid] = tid < C ? beta_src[tid * beta_stride] : 0.0f;
+        sg[tid] = tid < C ? g_src[tid * beta_stride] : 0.0f;
+        if (TOK && TRAIN && tid < C) { beta_cm_out[row_base + tid] = sbeta[tid]; }
     }
     __syncthreads();
     // The serial sum `gdn_chunk_cumsum_step` performs, so g_cs is bit-identical.
@@ -177,7 +234,11 @@ __device__ __forceinline__ void brain_gdn_chunk_prep_body(const unsigned int* pa
     }
     __syncthreads();
 
-    brain_load_rows(sK, SK, key + row_base * D, C);
+    brain_load_rows(sK, SK, key_src, qk_stride, C);
+    if (TOK) {
+        __syncthreads();
+        brain_normalize_rows(sK, SK, key_cm_out + row_base * D, C, eps);
+    }
     __syncthreads();
     if (TRAIN) {
         // k_beta = key * beta and k_beta_decay = k_beta * exp(g_cs), as the portable row scales form them.
@@ -221,7 +282,11 @@ __device__ __forceinline__ void brain_gdn_chunk_prep_body(const unsigned int* pa
             }
         }
     }
-    brain_load_rows(sX, SX, query + row_base * D, C);
+    brain_load_rows(sX, SX, query_src, qk_stride, C);
+    if (TOK) {
+        __syncthreads();
+        brain_normalize_rows(sX, SX, query_cm_out + row_base * D, C, eps);
+    }
     __syncthreads();
 
     // ---- T = (I - attn0)^-1 by forward substitution: row i needs the finished rows below it ----
@@ -264,16 +329,20 @@ __device__ __forceinline__ void brain_gdn_chunk_prep_body(const unsigned int* pa
     }
     __syncthreads();  // the query tile is dead: the value rows take its place
 
-    brain_load_rows(sX, SX, value + row_base * D, C);
+    brain_load_rows(sX, SX, value_src, v_stride, C);
+    __syncthreads();
     if (TRAIN) {
         for (unsigned int e = tid; e < C * (D / 4); e += THREADS) {
             const unsigned int r = e / (D / 4), c4 = e % (D / 4);
-            const float b = sbeta[r];
-            const float4 v4 = *reinterpret_cast<const float4*>(value + (row_base + r) * D + c4 * 4);
-            *reinterpret_cast<float4*>(v_beta_out + (row_base + r) * D + c4 * 4) = make_float4(v4.x * b, v4.y * b, v4.z * b, v4.w * b);
+            const float4 v4 = *reinterpret_cast<const float4*>(sX + r * SX + c4 * 4);
+            if (TOK) { *reinterpret_cast<float4*>(value_cm_out + (row_base + r) * D + c4 * 4) = v4; }
+            if (TRAIN) {
+                const float b = sbeta[r];
+                *reinterpret_cast<float4*>(v_beta_out + (row_base + r) * D + c4 * 4) = make_float4(v4.x * b, v4.y * b, v4.z * b, v4.w * b);
+            }
         }
+        __syncthreads();
     }
-    __syncthreads();
 
     // ---- u = T @ (value * beta) and w = T @ (key * beta * exp_g_cs): 64 x 128 outputs, K = chunk rows ----
     if (m0 < C) {
@@ -308,8 +377,8 @@ __device__ __forceinline__ void brain_gdn_chunk_prep_body(const unsigned int* pa
 extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tc(const unsigned int* params, const float* query, const float* key,
                                                                                const float* value, const float* raw_g, const float* beta, float* g_cs,
                                                                                float* exp_g_cs, float* u, float* w, float* intra_scores) {
-    brain_gdn_chunk_prep_body<false>(params, query, key, value, raw_g, beta, g_cs, exp_g_cs, u, w, intra_scores, nullptr, nullptr, nullptr, nullptr, nullptr,
-                                     nullptr, nullptr);
+    brain_gdn_chunk_prep_body<false, false>(params, query, key, value, raw_g, beta, g_cs, exp_g_cs, u, w, intra_scores, nullptr, nullptr, nullptr, nullptr,
+                                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 // Training form: the same launch plus the tensors the backward reads.
@@ -318,6 +387,25 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_train
                                                                                      float* exp_g_cs, float* u, float* w, float* intra_scores, float* k_beta,
                                                                                      float* v_beta, float* k_beta_decay, float* decay_mask,
                                                                                      float* raw_attn0, float* t_mat, float* raw_intra) {
-    brain_gdn_chunk_prep_body<true>(params, query, key, value, raw_g, beta, g_cs, exp_g_cs, u, w, intra_scores, k_beta, v_beta, k_beta_decay, decay_mask,
-                                    raw_attn0, t_mat, raw_intra);
+    brain_gdn_chunk_prep_body<true, false>(params, query, key, value, raw_g, beta, g_cs, exp_g_cs, u, w, intra_scores, k_beta, v_beta, k_beta_decay,
+                                           decay_mask, raw_attn0, t_mat, raw_intra, nullptr, nullptr, nullptr, nullptr);
+}
+
+// Token-major inference form: query_cm and key_cm are what the recurrence reads.
+extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_tc(const unsigned int* params, const float* query, const float* key,
+                                                                                    const float* value, const float* raw_g, const float* beta, float* g_cs,
+                                                                                    float* exp_g_cs, float* u, float* w, float* intra_scores,
+                                                                                    float* query_cm, float* key_cm) {
+    brain_gdn_chunk_prep_body<false, true>(params, query, key, value, raw_g, beta, g_cs, exp_g_cs, u, w, intra_scores, nullptr, nullptr, nullptr, nullptr,
+                                           nullptr, nullptr, nullptr, query_cm, key_cm, nullptr, nullptr);
+}
+
+// Token-major training form: the inputs are the mixer's own token-major tensors and the chunk-major
+// query, key, value and beta the loop and the backward read are written alongside.
+extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_train_tc(
+    const unsigned int* params, const float* query, const float* key, const float* value, const float* raw_g, const float* beta, float* g_cs, float* exp_g_cs,
+    float* u, float* w, float* intra_scores, float* k_beta, float* v_beta, float* k_beta_decay, float* decay_mask, float* raw_attn0, float* t_mat,
+    float* raw_intra, float* query_cm, float* key_cm, float* value_cm, float* beta_cm) {
+    brain_gdn_chunk_prep_body<true, true>(params, query, key, value, raw_g, beta, g_cs, exp_g_cs, u, w, intra_scores, k_beta, v_beta, k_beta_decay, decay_mask,
+                                          raw_attn0, t_mat, raw_intra, query_cm, key_cm, value_cm, beta_cm);
 }

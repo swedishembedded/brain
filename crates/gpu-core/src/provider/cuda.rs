@@ -372,6 +372,24 @@ const GDN_CHUNK_PREP_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// [`GDN_CHUNK_PREP_BINDINGS`] followed by the chunk-major query and key the
+/// token-major inference entry writes.
+const GDN_CHUNK_PREP_TOK_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
 /// [`GDN_CHUNK_PREP_BINDINGS`] followed by the seven tensors the training entry
 /// also writes: k_beta, v_beta, k_beta_decay, decay_mask, raw_attn0, t_mat and
 /// raw_intra.
@@ -382,6 +400,33 @@ const GDN_CHUNK_PREP_TRAIN_BINDINGS: &[BindKind] = &[
     BindKind::StorageRead,
     BindKind::StorageRead,
     BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
+/// [`GDN_CHUNK_PREP_TRAIN_BINDINGS`] followed by the chunk-major query, key,
+/// value and beta the token-major entry writes.
+const GDN_CHUNK_PREP_TOK_TRAIN_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
     BindKind::StorageReadWrite,
     BindKind::StorageReadWrite,
     BindKind::StorageReadWrite,
@@ -502,6 +547,74 @@ pub fn gdn_chunk_loop_train_tc_step(
     let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_TC_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
     let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_LOOP_TRAIN_BINDINGS, launch)?;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks, scale.to_bits()], bh * GDN_CHUNK_LOOP_TC_SPLITS)
+}
+
+/// Whether the token-major tensor-core prefix can serve this call: the chunk
+/// forward's own constraints plus a value-head count that is a multiple of the
+/// key-head count.
+fn gdn_chunk_prep_tok_shape_ok(dk: u32, dv: u32, c_len: u32, heads: u32, group: u32) -> bool {
+    gdn_chunk_prep_shape_ok(dk, dv, c_len) && group != 0 && heads.is_multiple_of(group)
+}
+
+/// What the token-major tensor-core prefix is told about the mixer's layout.
+#[derive(Clone, Copy)]
+pub struct GdnTokenLayout {
+    /// Number of (head, chunk) pairs, `batch * heads * n_chunks`.
+    pub bhc: u32,
+    /// Rows per chunk (at most 64).
+    pub c_len: u32,
+    /// Chunks per sequence.
+    pub n_chunks: u32,
+    /// Value heads.
+    pub heads: u32,
+    /// Value heads per key head.
+    pub group: u32,
+    /// Head width of query, key and value (128 is the only width served).
+    pub head_dim: u32,
+    pub scale: f32,
+    /// The epsilon of the query/key L2 normalisation.
+    pub eps: f32,
+}
+
+/// [`gdn_chunk_prep_step`] reading the mixer's TOKEN-MAJOR tensors
+/// (`gdn_chunk_prep_tok_tc`), for the forward that saves nothing for a backward:
+/// `bufs` is `query, key, value, raw_g, beta` (token-major, as for
+/// [`gdn_chunk_prep_tok_train_step`]), `g_cs, exp_g_cs, u, w, intra_scores`, then
+/// `query_cm, key_cm` for the recurrence. `l.bhc` etc. as there.
+pub fn gdn_chunk_prep_tok_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 12], l: GdnTokenLayout) -> Option<crate::Step> {
+    if !gdn_chunk_prep_tok_shape_ok(l.head_dim, l.head_dim, l.c_len, l.heads, l.group) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_prep_tok_tc").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_PREP_TOK_BINDINGS, launch)?;
+    let params = [l.bhc, l.c_len, l.head_dim, l.head_dim, 0, l.scale.to_bits(), l.heads, l.n_chunks, l.group, l.eps.to_bits()];
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &params, l.bhc)
+}
+
+/// [`gdn_chunk_prep_train_step`] reading the mixer's TOKEN-MAJOR tensors
+/// (`gdn_chunk_prep_tok_train_tc`): the L2 normalisation of query and key, the
+/// repeat of their heads from `heads / group` to `heads` and the token-major to
+/// chunk-major permutes all happen inside the block's loads. `None` for the
+/// reasons of [`gdn_chunk_prep_step`], or when `heads` is not a multiple of `group`.
+///
+/// `bufs` is, in order, `query` and `key` (`[tokens, heads / group * 128]`,
+/// pre-normalisation), `value` (`[tokens, heads * 128]`), `raw_g` and `beta`
+/// (`[tokens, heads]`) read; `g_cs, exp_g_cs, u, w, intra_scores, k_beta, v_beta,
+/// k_beta_decay, decay_mask, raw_attn0, t_mat, raw_intra` as in
+/// [`gdn_chunk_prep_train_step`]; then `query_cm, key_cm, value_cm, beta_cm`, the
+/// chunk-major tensors the recurrence and the backward read.
+pub fn gdn_chunk_prep_tok_train_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 21], l: GdnTokenLayout) -> Option<crate::Step> {
+    if !gdn_chunk_prep_tok_shape_ok(l.head_dim, l.head_dim, l.c_len, l.heads, l.group) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_prep_tok_train_tc").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_PREP_TOK_TRAIN_BINDINGS, launch)?;
+    let params = [l.bhc, l.c_len, l.head_dim, l.head_dim, 0, l.scale.to_bits(), l.heads, l.n_chunks, l.group, l.eps.to_bits()];
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 21], &params, l.bhc)
 }
 
 /// The native tensor-core paged flash-prefill step for `head_dim = 256`, or

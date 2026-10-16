@@ -1192,14 +1192,7 @@ pub fn gdn_chunk_fwd_train(
     final_state: &DeviceBuffer,
 ) -> Vec<Step> {
     let (dk, dv, c) = (shape.dk, shape.dv, shape.chunk);
-    let n_chunks = shape.n_chunks();
-    let bh = shape.bh();
     let scale = 1.0f32 / (dk as f32).sqrt();
-
-    let bmm = |kernel: usize, batch: u32, m: u32, k: u32, n: u32, ta: bool, tb: bool, alpha: f32, a: &DeviceBuffer, a_off: u32, b: &DeviceBuffer, b_off: u32, o: &DeviceBuffer, o_off: u32| {
-        bmm_auto(g, ids, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)
-    };
-    let splice = |src: &DeviceBuffer, dst: &DeviceBuffer, base: u32, n: u32| g.step(bwd_ids.splice_add, &[src, dst], &[n, base], n);
 
     let whole = GdnWholeScratch {
         g_cs: scratch.g_cs,
@@ -1243,12 +1236,43 @@ pub fn gdn_chunk_fwd_train(
     } else {
         None
     };
-    let mut steps = match fused {
+    let steps = match fused {
         Some(step) => vec![step],
         None => gdn_chunk_fwd_prefix(g, ids, shape, query, key, value, raw_g, beta, &whole),
     };
 
-    // ---- step 10 in one launch, where the device has a kernel for it ----
+    gdn_chunk_loop_train(g, ids, bwd_ids, shape, query, key, initial_state, scratch, out, final_state, steps)
+}
+
+/// Step 10 of [`gdn_chunk_fwd_train`]: the across-chunk recurrence with the state and decay-scale
+/// histories saved, as one native launch where the device offers it (the tensor-core kernel when the
+/// caller opted in, else the fp32 one) and as the per-chunk dispatch walk otherwise. `steps` holds the
+/// prefix already built; the finished list is returned. Shared with [`gdn_chunk_fwd_train_tokens`].
+#[allow(clippy::too_many_arguments)]
+fn gdn_chunk_loop_train(
+    g: &Gpu,
+    ids: &GdnIds,
+    bwd_ids: &GdnBwdIds,
+    shape: &GdnShape,
+    query: &DeviceBuffer,
+    key: &DeviceBuffer,
+    initial_state: &DeviceBuffer,
+    scratch: &GdnScratchTrain,
+    out: &DeviceBuffer,
+    final_state: &DeviceBuffer,
+    mut steps: Vec<Step>,
+) -> Vec<Step> {
+    let (dk, dv, c) = (shape.dk, shape.dv, shape.chunk);
+    let n_chunks = shape.n_chunks();
+    let bh = shape.bh();
+    let scale = 1.0f32 / (dk as f32).sqrt();
+
+    let bmm = |kernel: usize, batch: u32, m: u32, k: u32, n: u32, ta: bool, tb: bool, alpha: f32, a: &DeviceBuffer, a_off: u32, b: &DeviceBuffer, b_off: u32, o: &DeviceBuffer, o_off: u32| {
+        bmm_auto(g, ids, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)
+    };
+    let splice = |src: &DeviceBuffer, dst: &DeviceBuffer, base: u32, n: u32| g.step(bwd_ids.splice_add, &[src, dst], &[n, base], n);
+
+    // ---- the whole recurrence in one launch, where the device has a kernel for it ----
     // It reads `initial_state`, writes `final_state` and records both histories
     // itself: the state copy, the snapshots and the eleven dispatches per chunk
     // below are what it replaces.
@@ -1302,6 +1326,180 @@ pub fn gdn_chunk_fwd_train(
     }
 
     steps
+}
+
+/// The mixer's token-major operands of one chunked training forward, for
+/// [`gdn_chunk_fwd_train_tokens`]. `query` and `key` are the raw (pre-normalisation) narrow
+/// `[tokens, heads / group, dk]` projections; `value` is `[tokens, heads, dv]`; `raw_g` and `beta`
+/// are `[tokens, heads]`.
+pub struct GdnTokenInputs<'a> {
+    pub query: &'a DeviceBuffer,
+    pub key: &'a DeviceBuffer,
+    pub value: &'a DeviceBuffer,
+    pub raw_g: &'a DeviceBuffer,
+    pub beta: &'a DeviceBuffer,
+    /// Value heads per key head (the repeat factor the mixer would otherwise apply).
+    pub group: u32,
+    /// Epsilon of the query/key L2 normalisation the mixer would otherwise apply.
+    pub l2_eps: f32,
+}
+
+/// The chunk-major tensors [`gdn_chunk_fwd_train_tokens`] produces for the backward (and the recurrence):
+/// the normalised, head-repeated query and key, the value and beta.
+pub struct GdnChunkMajorOut<'a> {
+    pub query_cm: &'a DeviceBuffer,
+    pub key_cm: &'a DeviceBuffer,
+    pub value_cm: &'a DeviceBuffer,
+    pub beta_cm: &'a DeviceBuffer,
+}
+
+/// Whether [`gdn_chunk_fwd_train_tokens`] can be expected to serve a call of this `shape` and `group`,
+/// so a caller can skip allocating its chunk-major outputs when it cannot. A `true` is not a promise
+/// (the backend may still decline the kernel); the function's own `None` is the authority.
+pub fn tokens_prefix_offered(g: &Gpu, ids: &GdnIds, shape: &GdnShape, group: u32) -> bool {
+    tensor_core_enabled(g, ids) && shape.dk == 128 && shape.dv == 128 && shape.chunk <= 64 && group != 0 && shape.h.is_multiple_of(group)
+}
+
+/// [`gdn_chunk_fwd_train`] fed with the mixer's TOKEN-MAJOR tensors: the query/key L2 normalisation, the
+/// head repeat and the token-major to chunk-major permutes of all five operands happen inside the
+/// tensor-core prefix kernel's loads (see `gdn_chunk_prep_tc.cu`), and `out_chunk_major.*` receive the
+/// chunk-major tensors [`gdn_chunk_bwd`] reads. Everything after the prefix is [`gdn_chunk_fwd_train`]'s.
+///
+/// Returns `None` when this device or this call is not served - the caller did not opt in
+/// ([`GdnFastIds::tensor_core`]), the device has no tensor cores, the head widths are not 128, the
+/// chunk is longer than 64 rows, or the backend declined the kernel - and the caller then runs the
+/// normalisation, repeat, permutes and [`gdn_chunk_fwd_train`] it always ran. Callers must not have
+/// touched any output buffer in that case: nothing is written until the returned steps are submitted.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_fwd_train_tokens(
+    g: &Gpu,
+    ids: &GdnIds,
+    bwd_ids: &GdnBwdIds,
+    shape: &GdnShape,
+    tok: &GdnTokenInputs,
+    cm: &GdnChunkMajorOut,
+    initial_state: &DeviceBuffer,
+    scratch: &GdnScratchTrain,
+    out: &DeviceBuffer,
+    final_state: &DeviceBuffer,
+) -> Option<Vec<Step>> {
+    if !tensor_core_enabled(g, ids) || shape.dk != shape.dv {
+        return None;
+    }
+    let layout = tok_layout(shape, tok);
+    let bufs = [
+        tok.query,
+        tok.key,
+        tok.value,
+        tok.raw_g,
+        tok.beta,
+        scratch.g_cs,
+        scratch.exp_g_cs,
+        scratch.u,
+        scratch.w,
+        scratch.intra_scores,
+        scratch.k_beta,
+        scratch.v_beta,
+        scratch.k_beta_decay,
+        scratch.decay_mask,
+        scratch.raw_attn0,
+        scratch.t_mat,
+        scratch.raw_intra,
+        cm.query_cm,
+        cm.key_cm,
+        cm.value_cm,
+        cm.beta_cm,
+    ];
+    let prep = native_chunk_prep_tok_train(g, &bufs, layout)?;
+    Some(gdn_chunk_loop_train(g, ids, bwd_ids, shape, cm.query_cm, cm.key_cm, initial_state, scratch, out, final_state, vec![prep]))
+}
+
+/// [`gdn_chunk_fwd`] fed with the mixer's token-major tensors, the inference sibling of
+/// [`gdn_chunk_fwd_train_tokens`]: the same folded loads, and only `query_cm` and `key_cm` (what the
+/// recurrence reads) are written. `None` under the same conditions, with the same meaning.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_fwd_tokens(
+    g: &Gpu,
+    ids: &GdnIds,
+    shape: &GdnShape,
+    tok: &GdnTokenInputs,
+    query_cm: &DeviceBuffer,
+    key_cm: &DeviceBuffer,
+    initial_state: &DeviceBuffer,
+    scratch: &GdnScratch,
+    out: &DeviceBuffer,
+    final_state: &DeviceBuffer,
+) -> Option<Vec<Step>> {
+    if !tensor_core_enabled(g, ids) || shape.dk != shape.dv {
+        return None;
+    }
+    let bufs = [
+        tok.query,
+        tok.key,
+        tok.value,
+        tok.raw_g,
+        tok.beta,
+        scratch.g_cs,
+        scratch.exp_g_cs,
+        scratch.u,
+        scratch.w,
+        scratch.intra_scores,
+        query_cm,
+        key_cm,
+    ];
+    let prep = native_chunk_prep_tok(g, &bufs, tok_layout(shape, tok))?;
+    let (dk, dv, c) = (shape.dk, shape.dv, shape.chunk);
+    let (bh, n_chunks) = (shape.bh(), shape.n_chunks());
+    let scale = 1.0f32 / (dk as f32).sqrt();
+    let loop_bufs = [key_cm, query_cm, scratch.w, scratch.u, scratch.g_cs, scratch.exp_g_cs, scratch.intra_scores, initial_state, out, final_state];
+    // The recurrence: one tensor-core launch, else the fp32 one. A device that took the prefix above
+    // takes at least the fp32 loop (same compute-capability floor family); if neither is offered the
+    // whole call declines so the caller runs its portable sequence from the start.
+    let recurrence = native_chunk_loop_tc(g, &loop_bufs, bh, c, dk, dv, n_chunks, scale).or_else(|| native_chunk_loop(g, &loop_bufs, bh, c, dk, dv, n_chunks, scale))?;
+    Some(vec![prep, recurrence])
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type TokLayout = gpu_core::provider::cuda::GdnTokenLayout;
+
+#[cfg(target_arch = "wasm32")]
+type TokLayout = ();
+
+#[cfg(not(target_arch = "wasm32"))]
+fn tok_layout(shape: &GdnShape, tok: &GdnTokenInputs) -> TokLayout {
+    gpu_core::provider::cuda::GdnTokenLayout {
+        bhc: shape.bhc(),
+        c_len: shape.chunk,
+        n_chunks: shape.n_chunks(),
+        heads: shape.h,
+        group: tok.group,
+        head_dim: shape.dk,
+        scale: 1.0f32 / (shape.dk as f32).sqrt(),
+        eps: tok.l2_eps,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn tok_layout(_shape: &GdnShape, _tok: &GdnTokenInputs) -> TokLayout {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_chunk_prep_tok_train(g: &Gpu, bufs: &[&DeviceBuffer; 21], layout: TokLayout) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_prep_tok_train_step(g, bufs, layout)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_chunk_prep_tok(g: &Gpu, bufs: &[&DeviceBuffer; 12], layout: TokLayout) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_prep_tok_step(g, bufs, layout)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_chunk_prep_tok(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _layout: TokLayout) -> Option<Step> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_chunk_prep_tok_train(_g: &Gpu, _bufs: &[&DeviceBuffer; 21], _layout: TokLayout) -> Option<Step> {
+    None
 }
 
 /// Every scratch buffer [`gdn_chunk_bwd`] needs, beyond the forward-saved

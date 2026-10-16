@@ -26,7 +26,7 @@ use audio::conv::{conv1d_bwd, conv1d_fwd, Conv1d, ConvKernels};
 
 use crate::block::{kv_expand_bwd, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, KernelIds};
 use crate::gdn::{
-    gdn_chunk_bwd, gdn_chunk_fwd, gdn_chunk_fwd_train, gdn_recurrent_step, GdnBwdIds, GdnBwdScratchBufs, GdnIds, GdnRecurrentScratch, GdnScratchBufs,
+    gdn_chunk_bwd, gdn_chunk_fwd, gdn_chunk_fwd_tokens, gdn_chunk_fwd_train, gdn_chunk_fwd_train_tokens, gdn_recurrent_step, tokens_prefix_offered, GdnBwdIds, GdnBwdScratchBufs, GdnChunkMajorOut, GdnIds, GdnRecurrentScratch, GdnScratchBufs, GdnTokenInputs,
     GdnScratchTrainBufs, GdnShape,
 };
 
@@ -325,17 +325,6 @@ pub fn gdn_mixer_stream_fwd(
         ],
     );
 
-    // L2-normalize query/key - bare l2norm (no learnable scale).
-    let query_n = g.storage((n * key_dim) as u64);
-    let key_n = g.storage((n * key_dim) as u64);
-    g.submit(
-        &[],
-        &[
-            g.step(ids.l2norm_scale, &[&query, w.ones_khd, &query_n], &[n * nkh, khd, f(1e-6)], n * key_dim),
-            g.step(ids.l2norm_scale, &[&key, w.ones_khd, &key_n], &[n * nkh, khd, f(1e-6)], n * key_dim),
-        ],
-    );
-
     // beta = sigmoid(bproj); g = -exp(A_log)*softplus(aproj+dt_bias).
     let beta = g.storage((n * nvh) as u64);
     let g_decay = g.storage((n * nvh) as u64);
@@ -347,35 +336,6 @@ pub fn gdn_mixer_stream_fwd(
         ],
     );
 
-    // Repeat query/key from linear_num_key_heads to linear_num_value_heads.
-    let query_w = g.storage((n * nvh * khd) as u64);
-    let key_w = g.storage((n * nvh * khd) as u64);
-    g.submit(
-        &[],
-        &[
-            kv_expand_fwd(g, ids.kv_expand, &query_n, &query_w, n, nvh, group, khd, nvh * khd, 0),
-            kv_expand_fwd(g, ids.kv_expand, &key_n, &key_w, n, nvh, group, khd, nvh * khd, 0),
-        ],
-    );
-
-    // Chunk-major permute (token-major -> chunk-major) for gdn_chunk_fwd.
-    let permute_fwd = |src: &DeviceBuffer, dim: u32| -> DeviceBuffer {
-        let dst = g.storage(b as u64 * nvh as u64 * n_chunks as u64 * chunk as u64 * dim as u64);
-        g.submit(
-            &[],
-            &[g.step(ids.gdn_layout_permute, &[src, &dst], &[b, nvh, n_chunks, chunk, dim, 1], b * nvh * n_chunks * chunk * dim)],
-        );
-        dst
-    };
-    let query_cm = permute_fwd(&query_w, khd);
-    let key_cm = permute_fwd(&key_w, khd);
-    let value_cm = permute_fwd(&value, vhd);
-    let g_cm = permute_fwd(&g_decay, 1);
-    let beta_cm = permute_fwd(&beta, 1);
-
-    // gdn_chunk_fwd - the chunked-recurrence forward itself. Training builds
-    // use gdn_chunk_fwd_train instead: bit-identical out/final_state but
-    // additionally saves the per-chunk history gdn_chunk_bwd needs.
     let bh = gdn.bh() as u64;
     let state_len = bh * khd as u64 * vhd as u64;
     // Fresh sequence -> a zero `initial_state` (every `Gpu::storage` here is
@@ -392,28 +352,108 @@ pub fn gdn_mixer_stream_fwd(
     let final_state = g.storage(state_len);
     let out_cm = g.storage(gdn.bhc() as u64 * chunk as u64 * vhd as u64);
     let scratch_train = if is_train { Some(GdnScratchTrainBufs::new(g, &gdn)) } else { None };
-    if let Some(strain) = &scratch_train {
-        let steps = gdn_chunk_fwd_train(
-            g,
-            &ids.chunk,
-            &ids.chunk_bwd,
-            &gdn,
-            &query_cm,
-            &key_cm,
-            &value_cm,
-            &g_cm,
-            &beta_cm,
-            initial_state,
-            &strain.as_ref(),
-            &out_cm,
-            &final_state,
-        );
+    let cm_len = |dim: u32| b as u64 * nvh as u64 * n_chunks as u64 * chunk as u64 * dim as u64;
+
+    // The training forward on a device with the tensor-core prefix reads query, key, value, beta and
+    // the decay in the layout the projections left them in: the normalisation, the head repeat and
+    // the chunk-major permutes below happen inside that one kernel, which also writes the
+    // chunk-major tensors the backward reads. `None` (no opt-in, no tensor cores, another head
+    // width) leaves everything unwritten and the dispatch sequence it has always run follows.
+    let fused = scratch_train.as_ref().filter(|_| tokens_prefix_offered(g, &ids.chunk, &gdn, group)).and_then(|strain| {
+        let cm = (g.storage(cm_len(khd)), g.storage(cm_len(khd)), g.storage(cm_len(vhd)), g.storage(cm_len(1)));
+        let tok = GdnTokenInputs { query: &query, key: &key, value: &value, raw_g: &g_decay, beta: &beta, group, l2_eps: 1e-6 };
+        let out = GdnChunkMajorOut { query_cm: &cm.0, key_cm: &cm.1, value_cm: &cm.2, beta_cm: &cm.3 };
+        let steps = gdn_chunk_fwd_train_tokens(g, &ids.chunk, &ids.chunk_bwd, &gdn, &tok, &out, initial_state, &strain.as_ref(), &out_cm, &final_state)?;
         g.submit(&strain.clears(), &steps);
-    } else {
-        let scratch = GdnScratchBufs::new(g, &gdn);
-        let steps = gdn_chunk_fwd(g, &ids.chunk, &gdn, &query_cm, &key_cm, &value_cm, &g_cm, &beta_cm, initial_state, &scratch.as_ref(), &out_cm, &final_state);
-        g.submit(&scratch.clears(), &steps);
-    }
+        Some(cm)
+    });
+
+    // The same fold for a forward that saves nothing for a backward (the first pass of a recompute
+    // step, serving prefill): only the chunk-major query and key the recurrence reads are written.
+    let fused_infer = scratch_train.is_none()
+        && tokens_prefix_offered(g, &ids.chunk, &gdn, group)
+        && {
+            let (query_cm, key_cm) = (g.storage(cm_len(khd)), g.storage(cm_len(khd)));
+            let scratch = GdnScratchBufs::new(g, &gdn);
+            let tok = GdnTokenInputs { query: &query, key: &key, value: &value, raw_g: &g_decay, beta: &beta, group, l2_eps: 1e-6 };
+            match gdn_chunk_fwd_tokens(g, &ids.chunk, &gdn, &tok, &query_cm, &key_cm, initial_state, &scratch.as_ref(), &out_cm, &final_state) {
+                Some(steps) => {
+                    g.submit(&scratch.clears(), &steps);
+                    true
+                }
+                None => false,
+            }
+        };
+
+    let cm = match fused {
+        Some(cm) => Some(cm),
+        None if fused_infer => None,
+        None => {
+            // L2-normalize query/key - bare l2norm (no learnable scale).
+            let query_n = g.storage((n * key_dim) as u64);
+            let key_n = g.storage((n * key_dim) as u64);
+            g.submit(
+                &[],
+                &[
+                    g.step(ids.l2norm_scale, &[&query, w.ones_khd, &query_n], &[n * nkh, khd, f(1e-6)], n * key_dim),
+                    g.step(ids.l2norm_scale, &[&key, w.ones_khd, &key_n], &[n * nkh, khd, f(1e-6)], n * key_dim),
+                ],
+            );
+
+            // Repeat query/key from linear_num_key_heads to linear_num_value_heads.
+            let query_w = g.storage((n * nvh * khd) as u64);
+            let key_w = g.storage((n * nvh * khd) as u64);
+            g.submit(
+                &[],
+                &[
+                    kv_expand_fwd(g, ids.kv_expand, &query_n, &query_w, n, nvh, group, khd, nvh * khd, 0),
+                    kv_expand_fwd(g, ids.kv_expand, &key_n, &key_w, n, nvh, group, khd, nvh * khd, 0),
+                ],
+            );
+
+            // Chunk-major permute (token-major -> chunk-major) for gdn_chunk_fwd.
+            let permute_fwd = |src: &DeviceBuffer, dim: u32| -> DeviceBuffer {
+                let dst = g.storage(cm_len(dim));
+                g.submit(
+                    &[],
+                    &[g.step(ids.gdn_layout_permute, &[src, &dst], &[b, nvh, n_chunks, chunk, dim, 1], b * nvh * n_chunks * chunk * dim)],
+                );
+                dst
+            };
+            let query_cm = permute_fwd(&query_w, khd);
+            let key_cm = permute_fwd(&key_w, khd);
+            let value_cm = permute_fwd(&value, vhd);
+            let g_cm = permute_fwd(&g_decay, 1);
+            let beta_cm = permute_fwd(&beta, 1);
+
+            // gdn_chunk_fwd - the chunked-recurrence forward itself. Training builds
+            // use gdn_chunk_fwd_train instead: bit-identical out/final_state but
+            // additionally saves the per-chunk history gdn_chunk_bwd needs.
+            if let Some(strain) = &scratch_train {
+                let steps = gdn_chunk_fwd_train(
+                    g,
+                    &ids.chunk,
+                    &ids.chunk_bwd,
+                    &gdn,
+                    &query_cm,
+                    &key_cm,
+                    &value_cm,
+                    &g_cm,
+                    &beta_cm,
+                    initial_state,
+                    &strain.as_ref(),
+                    &out_cm,
+                    &final_state,
+                );
+                g.submit(&strain.clears(), &steps);
+            } else {
+                let scratch = GdnScratchBufs::new(g, &gdn);
+                let steps = gdn_chunk_fwd(g, &ids.chunk, &gdn, &query_cm, &key_cm, &value_cm, &g_cm, &beta_cm, initial_state, &scratch.as_ref(), &out_cm, &final_state);
+                g.submit(&scratch.clears(), &steps);
+            }
+            Some((query_cm, key_cm, value_cm, beta_cm))
+        }
+    };
     // Persist this round's end state for the next one. Done after the loop
     // rather than by aliasing `final_state` to the caller's buffer, so
     // `gdn_chunk_fwd`'s own seeding copy never has the same buffer on both
@@ -442,26 +482,29 @@ pub fn gdn_mixer_stream_fwd(
     );
 
     let conv_ctx = if cont.is_some() { kw - 1 } else { 0 };
-    let acts = scratch_train.map(|scratch_train| GdnMixerActs {
-        shape: gdn,
-        conv_ctx,
-        ncl_in,
-        ncl_out,
-        query,
-        key,
-        value: value.clone(),
-        bproj: bproj.clone(),
-        aproj: aproj.clone(),
-        g_decay,
-        query_cm,
-        key_cm,
-        value_cm,
-        beta_cm,
-        scratch_train,
-        out_tok,
-        normed,
-        z: z.clone(),
-        z_silu,
+    let acts = scratch_train.map(|scratch_train| {
+        let (query_cm, key_cm, value_cm, beta_cm) = cm.expect("a training forward always has its chunk-major tensors");
+        GdnMixerActs {
+            shape: gdn,
+            conv_ctx,
+            ncl_in,
+            ncl_out,
+            query,
+            key,
+            value: value.clone(),
+            bproj: bproj.clone(),
+            aproj: aproj.clone(),
+            g_decay,
+            query_cm,
+            key_cm,
+            value_cm,
+            beta_cm,
+            scratch_train,
+            out_tok,
+            normed,
+            z: z.clone(),
+            z_silu,
+        }
     });
     (gated, acts)
 }
