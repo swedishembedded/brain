@@ -15,6 +15,8 @@ publish = false
 # NAME the surfaces it uses - see samples/README.md rules 1 and 2. This sample
 # uses `image` and nothing else, so it links 42 brain crates instead of 69.
 brain = { workspace = true, features = ["image"] }
+# The run record written beside every image.
+serde_json.workspace = true
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.

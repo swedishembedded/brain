@@ -296,6 +296,16 @@ fn t2v(args: &[String]) -> Result<(), String> {
             eprintln!("wan: finish the job with:\n  {command}");
         }
     }
+    crate::run_record::write_run_record(
+        &out,
+        "wan t2v",
+        o.seed,
+        serde_json::json!({
+            "prompt": prompt, "negative_prompt": o.negative_prompt, "variant": cfg.name, "frames": o.frames,
+            "width": o.width, "height": o.height, "steps": o.steps, "fps": o.fps, "shift": o.shift,
+            "guidance": o.guidance, "solver": format!("{:?}", o.solver), "adapter": o.adapter,
+        }),
+    )?;
     Ok(())
 }
 

@@ -553,6 +553,14 @@ fn resolve_ltxv(overrides: &std::collections::BTreeMap<String, String>, spatial_
     Paths::from_assembly(&assembly, spatial_upsampler)
 }
 
+/// What a [`GenOpts`] decides about a clip, for the run record beside it.
+fn base_params(o: &GenOpts) -> serde_json::Value {
+    serde_json::json!({
+        "frames": o.frames, "width": o.width, "height": o.height, "steps": o.steps,
+        "guidance": o.guidance, "fps": o.fps,
+    })
+}
+
 fn t2v(args: &[String]) -> Result<(), String> {
     let (overrides, args) = crate::resolver_cli::extract_role_overrides(&LtxvSpec, args);
     let (seed, args) = crate::args::split_seed(&args, "ltxv t2v");
@@ -797,6 +805,15 @@ fn t2v(args: &[String]) -> Result<(), String> {
             eprintln!("ltxv: finish the job with:\n  {command}");
         }
     }
+    crate::run_record::write_run_record(
+        &out,
+        "ltxv t2v",
+        o.seed,
+        serde_json::json!({
+            "scenes": scenes.iter().map(|s| serde_json::json!({ "frames": s.frames, "prompt": s.prompt })).collect::<Vec<_>>(),
+            "settings": base_params(&o),
+        }),
+    )?;
     Ok(())
 }
 
@@ -926,6 +943,15 @@ fn upscale(args: &[String]) -> Result<(), String> {
             eprintln!("ltxv upscale: finish the job with:\n  {command}");
         }
     }
+    crate::run_record::write_run_record(
+        &out,
+        "ltxv upscale",
+        o.base.seed,
+        serde_json::json!({
+            "prompt": prompt, "input": input, "factor": o.factor, "refine_steps": o.refine_steps,
+            "settings": base_params(&o.base),
+        }),
+    )?;
     Ok(())
 }
 
@@ -1030,6 +1056,15 @@ fn v2v(args: &[String]) -> Result<(), String> {
             eprintln!("ltxv v2v: finish the job with:\n  {command}");
         }
     }
+    crate::run_record::write_run_record(
+        &out,
+        "ltxv v2v",
+        o.base.seed,
+        serde_json::json!({
+            "prompt": prompt, "input": input, "mask": o.mask_dir, "strength": o.strength,
+            "settings": base_params(&o.base),
+        }),
+    )?;
     Ok(())
 }
 
@@ -1132,6 +1167,15 @@ fn dfr(args: &[String]) -> Result<(), String> {
             eprintln!("ltxv dfr: finish the job with:\n  {command}");
         }
     }
+    crate::run_record::write_run_record(
+        &out,
+        "ltxv dfr",
+        o.base.seed,
+        serde_json::json!({
+            "prompt": prompt, "temporal_upsample_rounds": o.temporal_upsample_rounds,
+            "settings": base_params(&o.base),
+        }),
+    )?;
     Ok(())
 }
 

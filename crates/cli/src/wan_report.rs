@@ -27,17 +27,27 @@ use wan::WanConfig;
 /// Paraphrases of the concept, deliberately NOT the exact training captions
 /// (`data::gen_clips::CONCEPT_CAPTIONS`) - a held-out prompt has to exercise
 /// generalisation, not recite a memorised string.
-// ONE held-out prompt / seed: each `generate_one` call reloads BOTH the
+// ONE held-out prompt and probe seed: each `generate_one` call reloads BOTH the
 // umT5-XXL encoder and the DiT from disk (no cross-call cache here - see the
 // module doc), and a umT5-XXL CPU forward alone measures in minutes
 // (`tests/lora_train.rs`'s G1 gate covers 4 short captions, and takes minutes).
-// This report's own wall-clock is `2 * len(HELD_OUT_PROMPTS) * len(SEEDS)`
+// This report's own wall-clock is `2 * len(HELD_OUT_PROMPTS)`
 // full generations, so it stays at the minimum that still shows a real base
 // vs. adapted pair; the statistically powered comparison across many
 // (prompt, seed) pairs is `crates/wan/tests/finetune_ab.rs`'s job, which
 // amortises the umT5 reload to ONE session for everything it needs.
 const HELD_OUT_PROMPTS: [&str; 1] = ["a magenta triangle circling a white dot on a black background"];
-const SEEDS: [u64; 1] = [1000];
+
+/// Keeps the held-out probe stream apart from the training stream when both
+/// derive from the run seed.
+const PROBE_SALT: u64 = 0x70be_c11b_0f1a;
+
+/// The seed the base and adapted probe clips are both generated under: a pure
+/// function of the run seed, so the pair stays paired and the report names the
+/// seed that reproduces it.
+fn probe_seed(run_seed: u64) -> u64 {
+    run_seed ^ PROBE_SALT
+}
 
 struct ClipOut {
     frames_hwc: Vec<(Vec<f32>, u32, u32)>,
@@ -225,7 +235,7 @@ pub fn write_report(
     });
 
     for (pi, prompt) in HELD_OUT_PROMPTS.iter().enumerate() {
-        for &seed in &SEEDS {
+        for seed in [probe_seed(opts.seed)] {
             let base = generate_one(cfg, paths, prompt, seed, opts.frames, None)?;
             let adapted = generate_one(cfg, paths, prompt, seed, opts.frames, Some(adapter_str.clone()))?;
 
@@ -308,4 +318,18 @@ pub fn write_report(
     }
     std::fs::write(out_dir.join("index.md"), md).map_err(|e| format!("wan report: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::probe_seed;
+
+    /// The probe follows the run: another run seed probes another stream, the
+    /// same run seed probes the same one, and it is not the training stream.
+    #[test]
+    fn the_probe_seed_follows_the_run_seed() {
+        assert_eq!(probe_seed(5), probe_seed(5));
+        assert_ne!(probe_seed(5), probe_seed(6));
+        assert_ne!(probe_seed(5), 5);
+    }
 }

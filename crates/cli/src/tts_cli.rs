@@ -406,7 +406,7 @@ fn clone(args: &[String]) {
             std::process::exit(1);
         }
     };
-    write_wav(&c.out, &wav);
+    write_wav(&c, "qwen3tts clone", speech_params(&c, &text), &wav);
 }
 
 fn synth(args: &[String]) {
@@ -441,7 +441,7 @@ fn synth(args: &[String]) {
             std::process::exit(1);
         }
     };
-    write_wav(&c.out, &wav);
+    write_wav(&c, "qwen3tts synth", speech_params(&c, &text), &wav);
 }
 
 /// `brain qwen3tts design --text "..." --instruct "..." [--speaker NAME] --out out.wav`
@@ -483,13 +483,34 @@ fn design(args: &[String]) {
             std::process::exit(1);
         }
     };
-    write_wav(&c.out, &wav);
+    let mut params = speech_params(&c, &text);
+    params["instruct"] = serde_json::json!(instruct);
+    params["speaker"] = serde_json::json!(speaker);
+    write_wav(&c, "qwen3tts design", params, &wav);
 }
 
-fn write_wav(path: &str, wav: &[f32]) {
+/// What shaped a speech output beyond the seed: the text, the language, the
+/// frame budget and the sampling knobs the caller pinned (the rest resolve from
+/// the checkpoint's own generation config).
+fn speech_params(c: &CommonArgs, text: &str) -> serde_json::Value {
+    let s = &c.opts.sampling;
+    serde_json::json!({
+        "text": text, "lang": c.lang, "max_frames": c.opts.max_frames,
+        "temperature": s.temperature, "top_k": s.top_k, "top_p": s.top_p,
+        "repetition_penalty": s.repetition_penalty,
+    })
+}
+
+/// Write the WAV and the run record beside it (the seed `c.opts.seed` made it).
+fn write_wav(c: &CommonArgs, command: &str, params: serde_json::Value, wav: &[f32]) {
+    let path = &c.out;
     let finite = wav.iter().all(|x| x.is_finite());
     if let Err(e) = audio::wav::write(path, wav, 24000) {
         eprintln!("write {path}: {e}");
+        std::process::exit(1);
+    }
+    if let Err(e) = crate::run_record::write_run_record(path, command, c.opts.seed, params) {
+        eprintln!("{e}");
         std::process::exit(1);
     }
     println!(

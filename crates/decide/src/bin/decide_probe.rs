@@ -96,7 +96,11 @@ fn main() {
     let tok = data::wordpiece::WordPiece::from_file(dir.join("tokenizer.json").to_str().unwrap()).unwrap();
     let head_init = match &head_path {
         Some(p) => checkpoint::safetensors::read(p).unwrap().into_iter().map(|x| (x.name, x.data)).collect(),
-        None => decide::init::init_head(&cfg, 0),
+        None => {
+            let seed = data::rng::random_seed();
+            println!("fresh head drawn under seed {seed}");
+            decide::init::init_head(&cfg, seed)
+        }
     };
     let gpu = gpu_core::Gpu::new(decide::kern::PIPELINES);
     let limits = Limits { cap_rows: 8192, cap_slots: 8, max_span: 256, overlap: 32 };

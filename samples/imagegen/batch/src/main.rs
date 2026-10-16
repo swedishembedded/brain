@@ -96,6 +96,11 @@ fn resolve_seed(given: Option<u64>) -> u64 {
     seed
 }
 
+/// The seed of image `index` in a run drawn from `base`.
+fn image_seed(base: u64, index: usize) -> u64 {
+    base.wrapping_add(index as u64)
+}
+
 fn run(a: &Args, prompts: &[String]) -> brain::Result<()> {
     std::fs::create_dir_all(&a.out_dir).map_err(brain::Error::from)?;
 
@@ -107,11 +112,14 @@ fn run(a: &Args, prompts: &[String]) -> brain::Result<()> {
     for (i, prompt) in prompts.iter().enumerate() {
         // Per-image seed derived from one base, so the whole run is
         // reproducible and no two images are accidentally identical.
-        let opts = brain::ImageGenerationOptions::new().seed(seed.wrapping_add(i as u64));
+        let for_image = image_seed(seed, i);
+        let opts = brain::ImageGenerationOptions::new().seed(for_image);
         let started = Instant::now();
         let image = pipeline.generate_with(prompt, opts)?;
         let path = format!("{}/{:03}.png", a.out_dir, i);
         image.save(&path)?;
+        let record = serde_json::json!({ "model": a.model, "prompt": prompt, "seed": for_image, "base_seed": seed, "index": i });
+        std::fs::write(format!("{path}.json"), record.to_string() + "\n").map_err(brain::Error::from)?;
         println!("{:3}  {:>8.1?}  {}  {}", i, started.elapsed(), path, prompt);
     }
 
@@ -156,5 +164,12 @@ mod tests {
     fn a_given_seed_is_kept_and_an_absent_one_is_drawn_per_run() {
         assert_eq!(resolve_seed(Some(5)), 5);
         assert_ne!(resolve_seed(None), resolve_seed(None));
+    }
+
+    #[test]
+    fn every_image_of_a_run_has_its_own_seed_derived_from_the_base() {
+        assert_eq!(image_seed(10, 0), 10);
+        assert_eq!(image_seed(10, 3), 13);
+        assert_eq!(image_seed(u64::MAX, 1), 0, "the derivation wraps instead of overflowing");
     }
 }

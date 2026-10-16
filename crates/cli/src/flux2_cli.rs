@@ -734,6 +734,15 @@ fn generate(args: &[String]) -> Result<(), String> {
         }
     }
     imaging::save(&out, &imaging::Rgb8::new(w, h, rgb)?)?;
+    crate::run_record::write_run_record(
+        &out,
+        "flux2 generate",
+        o.seed,
+        serde_json::json!({
+            "prompt": prompt, "variant": variant_name, "width": w, "height": h, "steps": o.steps,
+            "guidance": o.guidance, "strength": o.strength, "references": refs.len(),
+        }),
+    )?;
     eprintln!("flux2: wrote {out} ({w}x{h})");
     Ok(())
 }

@@ -84,13 +84,20 @@ fn resolve_seed(given: Option<u64>) -> u64 {
     seed
 }
 
+/// What made the image, written beside it so the picture can be reproduced
+/// without remembering the command line.
+fn run_record(a: &Args, seed: u64) -> serde_json::Value {
+    serde_json::json!({ "model": a.model, "prompt": a.prompt, "steps": a.steps, "seed": seed })
+}
+
 fn run(a: &Args) -> brain::Result<()> {
     println!("model  {}", a.model);
     println!("prompt {}", a.prompt);
 
     let pipeline = brain::ImagePipeline::from_pretrained(&a.model)?;
 
-    let mut opts = brain::ImageGenerationOptions::new().seed(resolve_seed(a.seed));
+    let seed = resolve_seed(a.seed);
+    let mut opts = brain::ImageGenerationOptions::new().seed(seed);
     if let Some(steps) = a.steps {
         opts = opts.steps(steps);
     }
@@ -100,8 +107,10 @@ fn run(a: &Args) -> brain::Result<()> {
         std::fs::create_dir_all(parent).map_err(brain::Error::from)?;
     }
     image.save(&a.out)?;
+    let record = format!("{}.json", a.out);
+    std::fs::write(&record, run_record(a, seed).to_string() + "\n").map_err(brain::Error::from)?;
 
-    println!("wrote  {} ({}x{})", a.out, image.width(), image.height());
+    println!("wrote  {} ({}x{}) and {record}", a.out, image.width(), image.height());
     Ok(())
 }
 
@@ -133,5 +142,14 @@ mod tests {
     fn a_given_seed_is_kept_and_an_absent_one_is_drawn_per_run() {
         assert_eq!(resolve_seed(Some(5)), 5);
         assert_ne!(resolve_seed(None), resolve_seed(None));
+    }
+
+    #[test]
+    fn the_run_record_names_the_seed_and_the_prompt() {
+        let a = Args { model: "m".into(), prompt: "a lighthouse".into(), out: "o.png".into(), steps: Some(4), seed: None };
+        let record = run_record(&a, 77);
+        assert_eq!(record["seed"], 77);
+        assert_eq!(record["prompt"], "a lighthouse");
+        assert_eq!(record["steps"], 4);
     }
 }
