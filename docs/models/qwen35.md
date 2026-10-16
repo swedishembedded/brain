@@ -33,9 +33,9 @@ host-side at import. No GGUF importer for this architecture - the real
 checkpoint is safetensors-only.
 
 A **GGUF** of the same model IS servable, though - see "Serving the real
-checkpoint from its Q8_0 GGUF" below. That path reads
-`unsloth/Qwen3.8-27B-GGUF`'s `Q8_0` file directly and never writes an fp32
-intermediate.
+checkpoint from its GGUF" below. That path reads
+`unsloth/Qwen3.8-27B-GGUF`'s `Q8_0` file (or any other quant) directly and
+never writes an fp32 intermediate.
 
 ## Running it
 
@@ -47,7 +47,9 @@ Serving (HTTP/D-Bus, paged continuous batching): drop the checkpoint (and its
 sibling `tokenizer.json`) under the models directory and `brain serve` finds
 it with no env var at all - resolved through `qwen35::spec::Qwen35Spec` (a
 `ModelCard.family == "qwen35"` `.safetensors`, or a `general.architecture ==
-"qwen35"` GGUF, paired with a co-located, vocab-compatible tokenizer). A
+"qwen35"` GGUF, paired with a co-located, vocab-compatible tokenizer; the
+server's own fp32 resident takes the `.safetensors` side only, through
+`Qwen35Fp32Spec`, because each released GGUF is a model of its own). A
 `--weights`/`--tokenizer` flag on `brain qwen35 infer` still names either
 file outright, and prints every real candidate (with the flag to pick it) if
 the models directory holds more than one.
@@ -56,9 +58,11 @@ the models directory holds more than one.
 brain serve
 ```
 
-## Serving the real checkpoint from its Q8_0 GGUF (multi-GPU, INT8)
+## Serving the real checkpoint from its GGUF (multi-GPU, INT8)
 
-Model id: `unsloth/Qwen3.8-27B-Q8_0`
+Model id: the file's store id - `unsloth/Qwen3.8-27B-GGUF` for
+`<models-dir>/unsloth/Qwen3.8-27B-GGUF/Q8_0.gguf`, `<vendor>/<repo>-<QUANT>`
+when one repo directory holds several quants
 (`crates/qwen35/src/int8_gguf_resident.rs`). A SEPARATE resident from
 `brain/qwen35` above, not a mode of it - the two coexist and are registered
 independently.
@@ -79,26 +83,30 @@ independently.
 > idle. Measure on the machine you serve from.
 
 ```bash
-# drop the file anywhere under the models directory (e.g.
-# <models-dir>/unsloth/Qwen3.8-27B/Q8_0.gguf) and it is discovered with no
-# env var at all - the same qwen35::spec::Qwen35Spec resolver `brain/qwen35`
-# above uses, told apart by its `.gguf` extension.
-brain serve
-BRAIN_QWEN35_GGUF_CTX=2048   # per-sequence prompt+max_new cap (default 2048)
-BRAIN_QWEN35_GGUF_TIER=q4    # per-leaf quantization tier: "i8" (default), "q4",
-                             # or "q4,in_proj_a.weight=f32,in_proj_b.weight=f32"
-                             # to pin specific tensors at fp32; a malformed
-                             # grammar panics rather than serving a silently
-                             # wrong precision
-BRAIN_QWEN35_KV=int8         # how the 16 GQA layers store K/V: "f32" (default), "bf16"
-                             # (half the bytes) or "int8" (one scale per token and kv
-                             # head, ~3.9x fewer bytes); anything else is an error
-BRAIN_QWEN35_GGUF_DEBUG=1    # extra diagnostics on the streaming GGUF residency path
+# Every qwen35 GGUF under the models directory is served as its own model, with
+# no per-model flag: the scan lists it, the scheduler loads it on first use,
+# and it is placed on the GPUs --device allows. A file that could never load
+# (no GPU allowed, weights that do not fit, no embedded tokenizer) is not
+# listed; `brain serve` logs why.
+brain --device gpu0,gpu1 serve --openai
+
+# Server-wide defaults for all of them (all optional):
+#   --qwen35-ctx 24576       fix the context. Default: the longest the cards
+#                            hold once the weights are placed
+#   --qwen35-tier q4         per-leaf quantization tier: "i8" (default), "q4",
+#                            or "q4,in_proj_a.weight=f32,in_proj_b.weight=f32"
+#                            to pin specific tensors at fp32; a malformed
+#                            grammar is refused rather than served at a
+#                            silently wrong precision
+#   --qwen35-kv int8         how the 16 GQA layers store K/V: "f32" (default),
+#                            "bf16" (half the bytes) or "int8" (one scale per
+#                            token and kv head, ~3.9x fewer bytes)
+#   --qwen35-max-batch N     concurrent decode slots (default 1)
 ```
 
 What it does differently:
 
-- **A compact KV cache** (`model::kv_tier`, `BRAIN_QWEN35_KV`). At 128k
+- **A compact KV cache** (`model::kv_tier`, `--qwen35-kv`). At 128k
   context the 16 GQA layers' KV cache is the whole bound on the batch - 16 GiB
   per sequence in f32 against 27 GiB of INT8 weights - so it can be stored
   narrower: `bf16` (8 GiB per sequence at 128k) or `int8` with one f32 scale
@@ -356,12 +364,12 @@ reading claims below, they have very different capabilities:
   fp32 `tok.weight`/`lm_head.weight` are each over `max_buffer_size`. Use the
   GGUF resident below for the real weights.
 - **The INT8 multi-GPU GGUF resident** (`crate::int8_gguf_resident`, model id
-  `unsloth/Qwen3.8-27B-Q8_0`, behind HTTP/D-Bus/`brain serve`) - the path that
+  the file's store id, behind HTTP/D-Bus/`brain serve`) - the path that
   actually serves the REAL checkpoint on real hardware: INT8 weights read
-  straight from the released Q8_0 GGUF, layer-sharded across as many cards as
+  straight from the released GGUF, layer-sharded across as many cards as
   its real per-layer bytes need, host-staged residual between cards. Also one
   sequence per dispatch and per-token prefill; no MTP, no vision, no LoRA.
-  See "Serving the real checkpoint from its Q8_0 GGUF" above.
+  See "Serving the real checkpoint from its GGUF" above.
 - **The streaming path** (`crate::stream`/`crate::stream_train`, behind
   `generate --streaming true` and the standalone `stream_train_step`
   binary - see "LoRA training" above) runs the REAL checkpoint on a machine

@@ -37,6 +37,15 @@
 //! one-time `brain import-gguf` command that makes it servable - see that
 //! module's doc for why the scan does not convert it in place.
 //!
+//! A released `qwen35` GGUF is the exception to both: it is served straight
+//! from the file, INT8 and layer-sharded across the cards the process may use
+//! (`catalog::resident_qwen35::gguf_resident`), each file its own model under
+//! its store id. Those residents span several devices, so they come back in
+//! [`Discovered::multi`] for `Executor::register_multi` rather than among the
+//! single-device residents. A file that could never load (no card to place it
+//! on, weights that do not fit, no embedded tokenizer) is not listed at all;
+//! the reason is logged.
+//!
 //! Each family's own checkpoint-writing code must
 //! attach a real [`ModelCard`] (`checkpoint::save_carded`, not the plain
 //! `checkpoint::save`, which never carries one) for a checkpoint to be
@@ -60,6 +69,7 @@ use catalog::adapter_registry::{AdapterBankSettings, AdapterTargets};
 use catalog::adapter_release::verify_adapter;
 use catalog::resident_llm::QwenResident;
 use checkpoint::st::{self, ModelCard};
+use residency::multi::MultiDeviceResidentModel;
 use residency::ResidentModel;
 
 /// A [`LocalModel`](brain_modelstore::LocalModel) [`discover`] could not turn
@@ -75,20 +85,48 @@ pub struct DiscoveryError {
     pub reason: String,
 }
 
+/// How a scan builds the residents it finds: the per-family serving knobs, and
+/// the cards a model that spans devices may be placed on.
+#[derive(Clone, Default)]
+pub struct ScanSettings {
+    /// The Qwen3 paged engine's knobs.
+    pub qwen: catalog::resident_llm::QwenServeConfig,
+    /// The Qwen3.8 knobs: `fp32` sizes the brain-checkpoint resident, `gguf`
+    /// the released-GGUF residents.
+    pub qwen35: catalog::resident_qwen35::Qwen35ServeConfig,
+    /// `(index, TOTAL bytes)` of every GPU the process may use - already
+    /// narrowed by `--device`. Empty means no model that needs a GPU can be
+    /// served, and none is listed.
+    pub gpus: Vec<(u32, u64)>,
+    /// Bytes kept free on each of [`Self::gpus`].
+    pub reserved: u64,
+}
+
+/// What [`discover`] found.
+pub struct Discovered {
+    /// Single-device residents, for `Executor::start`/`register`.
+    pub residents: Vec<Arc<dyn ResidentModel>>,
+    /// Residents that occupy several devices at once, for
+    /// `Executor::register_multi` (a plain `register` would budget only one of
+    /// the cards they occupy). Every entry places on at least one budgeted card.
+    pub multi: Vec<Arc<dyn MultiDeviceResidentModel>>,
+    /// Every [`DiscoveryError`] a compound model produced -- a partial scan
+    /// still serves what it can.
+    pub errors: Vec<DiscoveryError>,
+}
+
 /// Scan `dir` and build one resident per discovered model-card id. Deduplicates
 /// by id (first wins, store layout before flat layout). See the module docs
 /// for the layout precedence and the skip/warn policy.
-///
-/// Returns every [`DiscoveryError`] a compound model produced alongside the
-/// residents that DID construct -- a partial scan still serves what it can.
-pub fn discover(dir: &Path, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> (Vec<Arc<dyn ResidentModel>>, Vec<DiscoveryError>) {
+pub fn discover(dir: &Path, settings: &ScanSettings) -> Discovered {
     let mut errors: Vec<DiscoveryError> = Vec::new();
 
     let mut locals = brain_modelstore::Store::new(dir.to_path_buf()).scan();
     locals.sort_by(|a, b| a.weights.cmp(&b.weights)); // deterministic catalog order
     let (adapters, bases): (Vec<_>, Vec<_>) = locals.iter().partition(|l| l.adapter.is_some());
-    let mut scan = Scan::new(qwen_cfg, qwen35_sizing, &adapters);
+    let mut scan = Scan::new(settings, &adapters);
 
+    let released_per_repo = released_qwen35_per_repo(&bases);
     for local in bases {
         if local.roles.is_some() {
             // A compound model has no single weights path (`local.weights` is
@@ -96,6 +134,12 @@ pub fn discover(dir: &Path, qwen_cfg: catalog::resident_llm::QwenServeConfig, qw
             // single-file dispatcher and must never see one of these; go
             // through the compound-aware dispatch instead.
             register_compound(local, &mut scan, &mut errors);
+            continue;
+        }
+        if is_released_qwen35(local) {
+            let shares_repo = released_per_repo.get(&local.dir).copied().unwrap_or(0) > 1;
+            let card = local.card.clone().map(|c| ModelCard { id: released_qwen35_id(&local.reference, shares_repo), ..c });
+            scan.register(&local.weights, &card, &local.dir);
             continue;
         }
         scan.register(&local.weights, &local.card, &local.dir);
@@ -106,7 +150,35 @@ pub fn discover(dir: &Path, qwen_cfg: catalog::resident_llm::QwenServeConfig, qw
     for local in adapters {
         scan.register_adapter(local);
     }
-    (scan.out, errors)
+    Discovered { residents: scan.out, multi: scan.multi, errors }
+}
+
+/// Whether `local` is a released Qwen3.8 GGUF: served from the file itself by
+/// the multi-card INT8 resident, not converted and not a safetensors engine.
+fn is_released_qwen35(local: &brain_modelstore::LocalModel) -> bool {
+    local.weights.to_string_lossy().ends_with(".gguf") && local.card.as_ref().is_some_and(|c| brain_family(&c.family) == "qwen35")
+}
+
+/// How many released Qwen3.8 GGUFs each repo directory holds.
+fn released_qwen35_per_repo(bases: &[&brain_modelstore::LocalModel]) -> BTreeMap<PathBuf, usize> {
+    let mut counts = BTreeMap::new();
+    for local in bases.iter().filter(|l| is_released_qwen35(l)) {
+        *counts.entry(local.dir.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// The id a released GGUF is served under: its repo, `<vendor>/<repo>`, which
+/// is what a client knows the download by. A repo that holds several quants
+/// (`Q8_0.gguf`, `Q4_K_M.gguf`) would otherwise name them all alike, so each
+/// then carries its quant: `<vendor>/<repo>-<QUANT>`, the reference grammar
+/// `brain pull` writes.
+fn released_qwen35_id(reference: &brain_modelref::ModelRef, shares_repo: bool) -> String {
+    if shares_repo {
+        reference.to_string()
+    } else {
+        reference.base().to_string()
+    }
 }
 
 /// What one [`discover`] accumulates: the residents, and the settings the
@@ -118,15 +190,17 @@ struct Scan {
     /// The Qwen3 bases built so far, by card id: the adapter found beside one
     /// is served as a view over it ([`Scan::register_adapter`]).
     qwen_bases: BTreeMap<String, Arc<QwenResident>>,
-    qwen_cfg: catalog::resident_llm::QwenServeConfig,
-    qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing,
+    /// Multi-device residents ([`Discovered::multi`]).
+    multi: Vec<Arc<dyn MultiDeviceResidentModel>>,
+    settings: ScanSettings,
     /// The adapter bank each base that has adapters in the store is built
     /// with, by base card id.
     banks: BTreeMap<String, AdapterBankSettings>,
 }
 
 impl Scan {
-    fn new(qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, adapters: &[&brain_modelstore::LocalModel]) -> Scan {
+    fn new(settings: &ScanSettings, adapters: &[&brain_modelstore::LocalModel]) -> Scan {
+        let qwen_cfg = settings.qwen;
         let mut banks: BTreeMap<String, AdapterBankSettings> = BTreeMap::new();
         for local in adapters {
             let Some((base, card)) = local.card.as_ref().and_then(|c| Some((base_id_of(&c.id)?, c))) else { continue };
@@ -138,13 +212,13 @@ impl Scan {
                 *bank = widen_to_hold(*bank, card);
             }
         }
-        Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), qwen_cfg, qwen35_sizing, banks }
+        Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), multi: Vec::new(), settings: settings.clone(), banks }
     }
 
     /// The serving config for the Qwen3 base `id`: the operator's, plus a
     /// bank when the store holds adapters for it.
     fn qwen_cfg_for(&self, id: &str) -> catalog::resident_llm::QwenServeConfig {
-        catalog::resident_llm::QwenServeConfig { adapter_bank: self.banks.get(id).copied().or(self.qwen_cfg.adapter_bank), ..self.qwen_cfg }
+        catalog::resident_llm::QwenServeConfig { adapter_bank: self.banks.get(id).copied().or(self.settings.qwen.adapter_bank), ..self.settings.qwen }
     }
 
     /// Serve the adapter `local` as a model of its own over the Qwen3 base it
@@ -197,6 +271,10 @@ impl Scan {
             eprintln!("brain: skip {wp} (duplicate model id '{}')", card.id);
             return;
         }
+        if wp.ends_with(".gguf") && brain_family(&card.family) == "qwen35" {
+            self.register_released_qwen35(&wp, &card.id);
+            return;
+        }
         // GGUF carries its tokenizer in KV; a safetensors model reuses a sibling
         // tokenizer.json (HF convention). Absent it, register anyway (limited chat).
         let sibling = dir.join("tokenizer.json");
@@ -209,10 +287,24 @@ impl Scan {
             None
         };
 
-        match resident_for(&wp, card, tokenizer.as_deref(), self.qwen_cfg_for(&card.id), self.qwen35_sizing) {
+        match resident_for(&wp, card, tokenizer.as_deref(), self.qwen_cfg_for(&card.id), self.settings.qwen35.fp32) {
             Some(built) => self.keep(&card.id, built),
             None => {
                 self.seen.remove(&card.id); // free the id if the family declined
+            }
+        }
+    }
+
+    /// Serve the released Qwen3.8 GGUF at `weights` as the multi-card model
+    /// `id`, or leave it out with the reason: only a model that can load is
+    /// listed, and the id is freed for a later duplicate to claim.
+    fn register_released_qwen35(&mut self, weights: &str, id: &str) {
+        let ScanSettings { gpus, reserved, qwen35, .. } = &self.settings;
+        match catalog::resident_qwen35::gguf_resident(weights, id, gpus, *reserved, &qwen35.gguf) {
+            Ok(resident) => self.multi.push(Arc::new(resident)),
+            Err(reason) => {
+                eprintln!("brain: skip {id} ({weights}: {reason})");
+                self.seen.remove(id);
             }
         }
     }
@@ -281,7 +373,7 @@ fn register_compound(local: &brain_modelstore::LocalModel, scan: &mut Scan, erro
         errors.push(DiscoveryError { dir: local.dir.clone(), family, reason: format!("duplicate model id '{id}'") });
         return;
     }
-    match build_for_local(local, scan.qwen_cfg_for(&id), scan.qwen35_sizing) {
+    match build_for_local(local, scan.qwen_cfg_for(&id), scan.settings.qwen35.fp32) {
         Ok(built) => scan.keep(&id, built),
         Err(reason) => {
             scan.seen.remove(&id); // free the id if the family declined, same as `register`
@@ -458,6 +550,10 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
     // actionable import advice. Gating here rather than per-arm is what makes
     // the whole collision class impossible: an arm is reached by a `.gguf`
     // only if its family opted in via `family_reads_gguf`.
+    if weights.ends_with(".gguf") && family == "qwen35" {
+        eprintln!("brain: skip {} ({weights}: a released qwen35 GGUF is placed across the cards when `brain serve` starts; restart it to serve this one)", card.id);
+        return None;
+    }
     if weights.ends_with(".gguf") && !family_reads_gguf(family) {
         eprintln!("brain: skip {} ({})", card.id, gguf_advice(weights, &card.family));
         return None;
@@ -778,7 +874,7 @@ mod tests {
         let dir = tmp_dir("ggufqwensplit");
         write_gguf_qwen_split(&dir, "qwen3-split", "toy-qwen-gguf-split");
 
-        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
+        let residents = discover(&dir, &ScanSettings::default()).residents;
         let matching: Vec<&Arc<dyn ResidentModel>> = residents.iter().filter(|r| r.manifest().model == "toy-qwen-gguf-split").collect();
         assert_eq!(matching.len(), 1, "the 3-part split must register exactly once, not once per part");
 
@@ -807,7 +903,7 @@ mod tests {
         // GGUF card is synthesized from KV and dispatched by family.
         write_gguf(&dir, "toy.gguf", "gpt", "toy-gguf");
 
-        let got = ids(&discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).0);
+        let got = ids(&discover(&dir, &ScanSettings::default()).residents);
         assert!(got.contains(&"toy-base".to_string()), "base missing: {got:?}");
         assert!(got.contains(&"toy-ft".to_string()), "ft missing: {got:?}");
         assert!(!got.contains(&"toy-unknown".to_string()), "unknown family not skipped: {got:?}");
@@ -830,7 +926,7 @@ mod tests {
         write_st(&dir, "yolo.safetensors", "toy-yolo", "yolo");
         write_st(&dir, "depth.safetensors", "toy-depth", "depth");
 
-        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
+        let residents = discover(&dir, &ScanSettings::default()).residents;
         let got = ids(&residents);
         assert!(got.contains(&"toy-glm".to_string()), "glm missing: {got:?}");
         assert!(got.contains(&"toy-yolo".to_string()), "yolo missing: {got:?}");
@@ -843,7 +939,7 @@ mod tests {
         // No tokenizer.json → the encoder cannot construct → skipped (not fatal).
         let dir = tmp_dir("notok");
         write_st(&dir, "enc.safetensors", "toy-enc", "lfm");
-        let got = ids(&discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).0);
+        let got = ids(&discover(&dir, &ScanSettings::default()).residents);
         assert!(!got.contains(&"toy-enc".to_string()), "lfm registered without a tokenizer: {got:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -862,7 +958,7 @@ mod tests {
         // tokenizer.json, and advertises the streaming chat `generate` action.
         let dir = tmp_dir("ggufqwen");
         write_gguf_qwen(&dir, "qwen3.gguf", "toy-qwen-gguf");
-        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
+        let residents = discover(&dir, &ScanSettings::default()).residents;
         let got = ids(&residents);
         assert!(got.contains(&"toy-qwen-gguf".to_string()), "qwen gguf not registered: {got:?}");
 
@@ -884,8 +980,10 @@ mod tests {
     /// `checkpoint::load` (safetensors ONLY) and cannot open GGUF bytes at
     /// all. The collision must resolve to the `brain import-gguf` guidance,
     /// not to a resident that dies with a low-level parse error at activate().
-    /// A GGUF architecture whose resident DOES read GGUF (`qwen3` -> `qwen`)
-    /// is unaffected.
+    /// (A released `qwen35` GGUF is answered earlier still: the scan serves it
+    /// through the multi-card resident, so the single-device dispatch declines
+    /// it.) A GGUF architecture whose resident DOES read GGUF (`qwen3` ->
+    /// `qwen`) is unaffected.
     #[test]
     fn a_raw_gguf_never_reaches_a_safetensors_only_family_resident() {
         let dir = tmp_dir("gguf-family-collision");
@@ -953,7 +1051,7 @@ mod tests {
         )
         .unwrap();
 
-        let got = ids(&discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).0);
+        let got = ids(&discover(&dir, &ScanSettings::default()).residents);
         assert!(got.contains(&"VendorA/RepoX".to_string()), "A missing: {got:?}");
         assert!(
             !got.contains(&"VendorB/RepoY".to_string()),
@@ -999,7 +1097,7 @@ mod tests {
         )
         .unwrap();
 
-        let (residents, _) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
+        let residents = discover(&dir, &ScanSettings::default()).residents;
         let got = ids(&residents);
         assert!(got.contains(&"Qwen/Qwen3-Toy".to_string()), "base missing: {got:?}");
         assert!(got.contains(&adapter_id.to_string()), "adapter missing: {got:?}");
@@ -1046,11 +1144,11 @@ mod tests {
         .unwrap();
 
         let defaults = catalog::resident_llm::QwenServeConfig::default();
-        let (residents, _) = discover(&dir, defaults, catalog::resident_qwen35::Qwen35Sizing::default());
+        let residents = discover(&dir, &ScanSettings { qwen: defaults, ..Default::default() }).residents;
         assert!(ids(&residents).contains(&"Qwen/Qwen3-Toy:lab:wide:v1".to_string()), "rank 32 on down is above the defaults, so the bank grew: {:?}", ids(&residents));
 
         let sized = catalog::resident_llm::QwenServeConfig { adapter_bank: Some(AdapterBankSettings::default()), ..defaults };
-        let (residents, _) = discover(&dir, sized, catalog::resident_qwen35::Qwen35Sizing::default());
+        let residents = discover(&dir, &ScanSettings { qwen: sized, ..Default::default() }).residents;
         assert_eq!(ids(&residents), vec!["Qwen/Qwen3-Toy".to_string()], "an operator-sized bank is not widened for the store");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1081,7 +1179,7 @@ mod tests {
         std::fs::create_dir_all(&repo_dir).unwrap();
         let manifest = brain_modelstore::CompoundManifest { id: "deepseek-ai/tiny-llama".into(), family: "llama".into(), roles: [("weights".to_string(), ".".to_string())].into() };
         std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
-        let (residents, errors) = discover(&root, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
+        let Discovered { residents, errors, .. } = discover(&root, &ScanSettings::default());
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
         assert_eq!(ids(&residents), ["deepseek-ai/tiny-llama"]);
         let _ = std::fs::remove_dir_all(&root);
@@ -1096,7 +1194,7 @@ mod tests {
         std::fs::create_dir_all(&repo_dir).unwrap();
         let manifest = brain_modelstore::CompoundManifest { id: "zai-org/tiny-glm".into(), family: "glmdsa".into(), roles: [("weights".to_string(), ".".to_string())].into() };
         std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
-        let (residents, errors) = discover(&root, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
+        let Discovered { residents, errors, .. } = discover(&root, &ScanSettings::default());
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
         assert_eq!(ids(&residents), ["zai-org/tiny-glm"]);
         let _ = std::fs::remove_dir_all(&root);
@@ -1107,7 +1205,7 @@ mod tests {
         let dir = tmp_dir("compound-wan");
         write_compound_fixture(&dir, "Wan-AI", "Wan2.1-T2V-1.3B", "wan");
 
-        let (residents, errors) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
+        let Discovered { residents, errors, .. } = discover(&dir, &ScanSettings::default());
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
         let got = ids(&residents);
         assert!(got.contains(&"Wan-AI/Wan2.1-T2V-1.3B".to_string()), "wan compound model not discovered: {got:?}");
@@ -1119,12 +1217,108 @@ mod tests {
         let dir = tmp_dir("compound-unknown-family");
         write_compound_fixture(&dir, "Some-Vendor", "Mystery-Compound", "flux2");
 
-        let (residents, errors) = discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default());
+        let Discovered { residents, errors, .. } = discover(&dir, &ScanSettings::default());
         let got = ids(&residents);
         assert!(!got.contains(&"Some-Vendor/Mystery-Compound".to_string()), "unrecognized compound family must not register: {got:?}");
         assert_eq!(errors.len(), 1, "expected exactly one discovery error, got: {errors:?}");
         assert_eq!(errors[0].family, "flux2");
         assert_eq!(errors[0].dir, dir.join("Some-Vendor").join("Mystery-Compound"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- released Qwen3.8 GGUFs: every one is its own multi-card model
+
+    const GIB: u64 = 1 << 30;
+
+    /// A complete synthetic Qwen3.8 release at `<root>/<vendor>/<repo>/<file>`.
+    fn put_released_qwen35(root: &Path, vendor: &str, repo: &str, file: &str) -> PathBuf {
+        let dir = root.join(vendor).join(repo);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(file);
+        qwen35::gguf_import::testing::write_synthetic_servable_gguf(path.to_str().unwrap());
+        path
+    }
+
+    fn two_p40s() -> ScanSettings {
+        ScanSettings { gpus: vec![(0, 24 * GIB), (1, 24 * GIB)], reserved: 2 * GIB, ..Default::default() }
+    }
+
+    fn multi_ids(found: &Discovered) -> Vec<String> {
+        let mut ids: Vec<String> = found.multi.iter().map(|m| m.manifest().model).collect();
+        ids.sort();
+        ids
+    }
+
+    /// The point of the scan: two released quants in the store are two served
+    /// models under their store ids, neither disabling the other, and neither
+    /// is a single-device resident.
+    #[test]
+    fn every_released_qwen35_gguf_in_the_store_is_its_own_served_model() {
+        let dir = tmp_dir("released-qwen35");
+        put_released_qwen35(&dir, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0.gguf");
+        put_released_qwen35(&dir, "Abiray", "Qwen3.8-27B-Q4_K_M-GGUF", "Q4_K_M.gguf");
+
+        let found = discover(&dir, &two_p40s());
+        assert_eq!(multi_ids(&found), vec!["Abiray/Qwen3.8-27B-Q4_K_M-GGUF".to_string(), "unsloth/Qwen3.8-27B-GGUF".to_string()]);
+        assert!(found.residents.is_empty(), "a multi-card model must not also be registered as a single-device one: {:?}", ids(&found.residents));
+        assert!(found.errors.is_empty(), "{:?}", found.errors);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two quants of one repo would collide on `<vendor>/<repo>`, so each then
+    /// carries its quant instead of one being dropped as a duplicate.
+    #[test]
+    fn quants_sharing_a_repo_are_told_apart_by_their_quant() {
+        let dir = tmp_dir("released-qwen35-quants");
+        put_released_qwen35(&dir, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0.gguf");
+        put_released_qwen35(&dir, "unsloth", "Qwen3.8-27B-GGUF", "Q4_K_M.gguf");
+
+        let found = discover(&dir, &two_p40s());
+        assert_eq!(multi_ids(&found), vec!["unsloth/Qwen3.8-27B-GGUF-Q4_K_M".to_string(), "unsloth/Qwen3.8-27B-GGUF-Q8_0".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A listed model always loads: every entry places on at least one budgeted
+    /// card, and only cards the process may use. A file that could never load
+    /// is not listed, and does not take a loadable neighbour down with it.
+    #[test]
+    fn a_listed_qwen35_gguf_is_always_placeable_on_the_allowed_cards() {
+        let dir = tmp_dir("released-qwen35-listed");
+        put_released_qwen35(&dir, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0.gguf");
+        // No embedded vocabulary: weights fine, but no request could tokenize.
+        let bare = dir.join("Abiray").join("Qwen3.8-27B-Q4_K_M-GGUF");
+        std::fs::create_dir_all(&bare).unwrap();
+        qwen35::gguf_import::testing::write_synthetic_gguf(bare.join("Q4_K_M.gguf").to_str().unwrap());
+
+        let only_gpu1 = ScanSettings { gpus: vec![(1, 24 * GIB)], reserved: 2 * GIB, ..Default::default() };
+        let found = discover(&dir, &only_gpu1);
+        assert_eq!(multi_ids(&found), vec!["unsloth/Qwen3.8-27B-GGUF".to_string()]);
+        for m in &found.multi {
+            let key = m.instance_key("generate", &capability::Invocation::new());
+            let devices: Vec<residency::Device> = m.estimate_multi(&key).devices().collect();
+            assert_eq!(devices, vec![residency::Device::Gpu(1)], "{} must place only on the allowed card", m.manifest().model);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With no GPU the process may use, nothing that needs one is listed.
+    #[test]
+    fn without_an_allowed_gpu_no_released_qwen35_gguf_is_listed() {
+        let dir = tmp_dir("released-qwen35-nogpu");
+        put_released_qwen35(&dir, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0.gguf");
+        let found = discover(&dir, &ScanSettings::default());
+        assert!(found.multi.is_empty());
+        assert!(found.residents.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Weights that do not fit the allowed cards are not listed either.
+    #[test]
+    fn a_released_qwen35_gguf_that_does_not_fit_the_cards_is_not_listed() {
+        let dir = tmp_dir("released-qwen35-toobig");
+        put_released_qwen35(&dir, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0.gguf");
+        let tiny = ScanSettings { gpus: vec![(0, 3 * GIB)], reserved: 3 * GIB - 64, ..Default::default() };
+        assert!(discover(&dir, &tiny).multi.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -18,6 +18,7 @@ use catalog::resident_llm::QwenResident;
 use catalog::resident_yolo::YoloResident;
 use catalog::resident_zimage::ZImageResident;
 use residency::bridge::ProviderResident;
+use residency::multi::MultiDeviceResidentModel;
 use residency::{Device, Executor, Policy, ResidentModel};
 
 use crate::Machine;
@@ -61,8 +62,9 @@ fn register_qwen(models: &mut Vec<Arc<dyn ResidentModel>>, qwen: Option<QwenResi
 pub struct ServeKnobs {
     /// The Qwen3 paged engine.
     pub qwen: catalog::resident_llm::QwenServeConfig,
-    /// Qwen3.8: `gguf` selects the released GGUF served through the
-    /// multi-card INT8 resident and `fp32` sizes the brain-checkpoint resident.
+    /// Qwen3.8: `gguf` holds the server-wide defaults of every released GGUF
+    /// the model scan serves through the multi-card INT8 resident, and `fp32`
+    /// sizes the brain-checkpoint resident.
     pub qwen35: catalog::resident_qwen35::Qwen35ServeConfig,
     /// Which decision models to serve beyond the ones the model store holds,
     /// and which one `"auto"` resolves to.
@@ -97,10 +99,11 @@ pub struct ServeKnobs {
 ///
 /// `knobs` carries each model's serving knobs as parsed data (the CLI parses
 /// flags, this code never reads env): `knobs.qwen` for the Qwen3 paged engine,
-/// `knobs.qwen35.gguf` selecting the released GGUF served through the
-/// multi-card INT8 resident and `knobs.qwen35.fp32` sizing the brain-checkpoint
-/// resident resolved through `qwen35::spec::Qwen35Spec`, and `knobs.decision`
-/// naming the decision models served beyond those the store holds.
+/// `knobs.qwen35.gguf` configuring every released Qwen3.8 GGUF the model scan
+/// serves through the multi-card INT8 resident (placed on `gpus`, i.e. the
+/// cards `--device` allows), `knobs.qwen35.fp32` sizing the brain-checkpoint
+/// resident, and `knobs.decision` naming the decision models served beyond
+/// those the store holds.
 pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std::path::Path>, policy: Policy, knobs: ServeKnobs) -> Serving {
     let ServeKnobs { qwen: qwen_cfg, qwen35, decision } = knobs;
     let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
@@ -174,12 +177,14 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     if let Some(q) = catalog::resident_qwen35moe::Qwen35Resident::from_env() {
         models.push(Arc::new(q));
     }
-    // Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, resolved through
-    // `qwen35::spec::Qwen35Spec`'s `weights`/`tokenizer` roles -- same
-    // single-GPU, fp32 weights + KV scope as qwen35moe above (see
-    // resident_qwen35.rs's own module doc). Sized from the caller's parsed
-    // `fp32` knobs (context, batch ceiling).
-    match loader::resolver::try_resolve(models_dir, "qwen35", &qwen35::spec::Qwen35Spec, &Default::default()) {
+    // Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, a brain-format
+    // checkpoint resolved through `qwen35::spec::Qwen35Fp32Spec`'s
+    // `weights`/`tokenizer` roles -- same single-GPU, fp32 weights + KV scope
+    // as qwen35moe above (see resident_qwen35.rs's own module doc). Released
+    // GGUFs are not candidates: the model-dir scan serves each as its own
+    // multi-card model. Sized from the caller's parsed `fp32` knobs (context,
+    // batch ceiling).
+    match loader::resolver::try_resolve(models_dir, "qwen35", &qwen35::spec::Qwen35Fp32Spec, &Default::default()) {
         Ok(assembly) => {
             if let Some(q) = catalog::resident_qwen35::Qwen35Resident::from_assembly_sized(&assembly, qwen35.fp32.sanitized()) {
                 models.push(Arc::new(q));
@@ -337,11 +342,15 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // Global model directory: append every discovered file as its own catalog
     // entry (keyed by model-card id), deduped against the env-gated residents
     // above (their manifest model == id). Additive - the env-gated path stands
-    // on its own when no dir is configured or the scan finds nothing.
+    // on its own when no dir is configured or the scan finds nothing. Models
+    // that span several cards (released Qwen3.8 GGUFs) are held back for
+    // `register_multi` once the executor runs.
+    let mut multi_discovered: Vec<Arc<dyn MultiDeviceResidentModel>> = Vec::new();
     if let Some(dir) = models_dir {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
-        let (discovered, errors) = crate::model_dir::discover(dir, qwen_cfg, qwen35.fp32);
-        for r in discovered {
+        let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), gpus: gpus.clone(), reserved };
+        let discovered = crate::model_dir::discover(dir, &settings);
+        for r in discovered.residents {
             let id = r.manifest().model;
             if existing.contains(&id) {
                 eprintln!("brain: model dir entry '{id}' shadowed by an env-gated resident; keeping the env one");
@@ -349,7 +358,15 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
             }
             models.push(r);
         }
-        for e in &errors {
+        for m in discovered.multi {
+            let id = m.manifest().model;
+            if existing.contains(&id) {
+                eprintln!("brain: model dir entry '{id}' shadowed by an env-gated resident; keeping the env one");
+                continue;
+            }
+            multi_discovered.push(m);
+        }
+        for e in &discovered.errors {
             eprintln!("brain: {} (family '{}') not registered: {} -- check its brain.manifest.json roles, or re-fetch it", e.dir.display(), e.family, e.reason);
         }
     }
@@ -397,16 +414,15 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     } else {
         eprintln!("brain: {} not served over the scheduler (set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT)", qwen3omnimoe::int8_thinker_resident::MODEL);
     }
-    // Qwen3.8-27B straight from its released Q8_0 GGUF, INT8 and layer-sharded
-    // across as many cards as its real per-layer bytes need. Multi-device only,
-    // so registered here rather than folded into `models` above -- same reason
-    // as the two residents just above it. A separate model from `brain/qwen35`
-    // (the single-GPU fp32 brain-checkpoint path), not a mode of it; see
-    // `resident_qwen35::multi_gpu_gguf`'s own doc. The GGUF named, its context
-    // and its KV tier arrive as the parsed `gguf` config -- nothing is read
-    // from the environment.
-    if let Some((q, _id)) = catalog::resident_qwen35::multi_gpu_gguf(models_dir, gpus, reserved, &qwen35.gguf) {
-        exec.register_multi(Arc::new(q));
+    // Released Qwen3.8 GGUFs found by the model scan: INT8 straight from the
+    // file, layer-sharded across as many of the allowed cards as their real
+    // per-layer bytes need. Multi-device only, so registered here rather than
+    // folded into `models` above -- same reason as the two residents just
+    // above. Each is a separate model from `brain/qwen35` (the single-GPU fp32
+    // brain-checkpoint path), not a mode of it; see
+    // `resident_qwen35::gguf_resident`'s own doc.
+    for m in multi_discovered {
+        exec.register_multi(m);
     }
     Serving { executor: exec, qwen }
 }

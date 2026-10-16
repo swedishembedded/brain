@@ -173,6 +173,12 @@ impl GgufArchitectureImporter for Qwen35Importer {
     fn architecture(&self) -> &'static str {
         qwen35::gguf_import::GGUF_ARCHITECTURE
     }
+    fn loads_directly(&self) -> bool {
+        // The model scan serves a released GGUF straight from the file
+        // (`catalog::resident_qwen35::gguf_resident`); the conversion below
+        // is for an fp32 brain checkpoint (training, MTP) and is optional.
+        true
+    }
     fn summary(&self) -> &'static str {
         "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder + MTP"
     }
@@ -736,7 +742,7 @@ mod tests {
     /// holding a `.gguf` path reads that from the one table.
     #[test]
     fn architectures_with_a_direct_loader_declare_it() {
-        for arch in ["qwen3", "wan", "ltxv", "qwen3vl", "deepseek2-ocr"] {
+        for arch in ["qwen3", "qwen35", "wan", "ltxv", "qwen3vl", "deepseek2-ocr"] {
             assert!(importer_for(arch).is_some_and(|i| i.loads_directly()), "{arch} loads its GGUF directly and must declare it");
         }
         // qwen35moe genuinely has no direct loader: its real checkpoint is
@@ -796,7 +802,7 @@ mod tests {
         // The end of the loop: auto-discovery serves the conversion with no env
         // vars and no per-model wiring. The `.gguf` itself stays unregistered
         // (it needs the conversion, which is the whole design decision above).
-        let ids: Vec<String> = crate::model_dir::discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).0.iter().map(|r| r.manifest().model).collect();
+        let ids: Vec<String> = crate::model_dir::discover(&dir, &crate::model_dir::ScanSettings::default()).residents.iter().map(|r| r.manifest().model).collect();
         assert!(ids.contains(&"test/qwen35-tiny".to_string()), "the imported checkpoint must be discovered: {ids:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -837,7 +843,7 @@ mod tests {
         assert!(reader.tensor("mtp.fc_e.weight").is_some(), "the MTP head must be imported, unlike qwen35moe's own GGUF route");
         assert_eq!(reader.card().expect("a model card must be written").id, "test/qwen35-dense-tiny");
 
-        let ids: Vec<String> = crate::model_dir::discover(&dir, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).0.iter().map(|r| r.manifest().model).collect();
+        let ids: Vec<String> = crate::model_dir::discover(&dir, &crate::model_dir::ScanSettings::default()).residents.iter().map(|r| r.manifest().model).collect();
         assert!(ids.contains(&"test/qwen35-dense-tiny".to_string()), "the imported checkpoint must be discovered: {ids:?}");
         std::fs::remove_dir_all(&dir).ok();
     }

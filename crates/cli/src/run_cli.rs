@@ -241,16 +241,14 @@ QWEN3 SERVING TUNABLES  (which checkpoint to serve stays BRAIN_QWEN_WEIGHTS/
                          attention scratch buffer linearly, the single
                          largest per-token-scaling cost in the engine.
 
-QWEN3.8 SERVING TUNABLES  (released-GGUF multi-card resident; the brain-
-                          checkpoint fp32 resident is sized by the --qwen35-
-                          fp32-* flags below. What got us here stays BRAIN_*
-                          env as for every model; everything about HOW is a
-                          flag. GGUF accepts a store reference - `vendor/repo`
-                          or a quant-suffixed form like
-                          `unsloth/Qwen3.8-27B-GGUF-Q8_0` - or a .gguf path.)
-  --qwen35-gguf REF|PATH serve the released-GGUF multi-card INT8 resident for
-                         the named artifact (required to enable it).
-  --qwen35-ctx N         built context length (default 2048).
+QWEN3.8 SERVING  (every released Qwen3.8 GGUF in the model store is served
+                 under its store id, e.g. unsloth/Qwen3.8-27B-GGUF: straight
+                 from the file, loaded on first use, split across the GPUs
+                 --device allows, never converted or written to disk. These
+                 are server-wide defaults for all of them; the brain-
+                 checkpoint fp32 resident is sized by --qwen35-fp32-* below.)
+  --qwen35-ctx N         fix the context length. Default: the longest the
+                         cards hold once the weights are placed.
   --qwen35-tier SPEC     weight tier, uniform or per-leaf rules:
                          `i8` or e.g. `i8,blk.0.attn_q=f32` (default: uniform
                          int8 - what the checkpoints are released as).
@@ -285,12 +283,12 @@ STDIO CONTROLLER  (the default, with no surface flag)
   Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain serve --stdio
 
 MODEL CONFIGURATION (WHICH models: env vars; HOW to serve one: flags)
-  Which models this server actually serves is chosen ENTIRELY by BRAIN_* env
-  vars (BRAIN_QWEN_WEIGHTS, BRAIN_LFM2, BRAIN_NEMOTRONASR, ...): a model whose
-  weights var is unset is simply not served - with ONE exception: the
-  Qwen3.8 released-GGUF resident is named by --qwen35-gguf (below). Tuning
-  an already-selected model (context length, batching, precision, ...) is a
-  flag where one exists - see QWEN3 / QWEN3.8 SERVING TUNABLES above. Run
+  Which models this server serves: every model in the model store, each
+  under its store id, plus those named by BRAIN_* env vars
+  (BRAIN_QWEN_WEIGHTS, BRAIN_LFM2, BRAIN_NEMOTRONASR, ...) - a model whose
+  weights var is unset is simply not served. Tuning an already-selected
+  model (context length, batching, precision, ...) is a flag where one
+  exists - see QWEN3 / QWEN3.8 SERVING above. Run
   `brain serve --help` for the full reference table of every serving
   variable.
 
@@ -485,8 +483,8 @@ pub fn run_serve(args: &[String]) {
     let mut qwen_cfg = catalog::resident_llm::QwenServeConfig::default();
     // Every `--qwen35-*` flag, same story: `Qwen35ServeConfig`'s `Default`
     // is every historical env-var default. `fp32` sizes the brain-checkpoint
-    // resident, `gguf` configures the released-GGUF multi-card resident -
-    // two different models, so the flags are name-spaced apart.
+    // resident, `gguf` holds the defaults of every released-GGUF multi-card
+    // resident - two different models, so the flags are name-spaced apart.
     let mut qwen35_cfg = catalog::resident_qwen35::Qwen35ServeConfig::default();
     // `--decision-model` / `--decision-default`: the decision models served
     // beyond those the model store holds, and the one `auto` resolves to.
@@ -579,12 +577,10 @@ pub fn run_serve(args: &[String]) {
             "--qwen-weights-int8" => qwen_cfg.weights_int8 = Some(true),
             "--qwen-weights-fp32" => qwen_cfg.weights_int8 = Some(false),
             "--qwen-max-prefill" => qwen_cfg.max_prefill_cap = parsed(args, &mut i, "--qwen-max-prefill"),
-            // Released-GGUF resident (Qwen3.8): `--qwen35-gguf` both enables
-            // the resident and names the artifact - a store reference
-            // (`vendor/repo` or a quant-suffixed form) or a `.gguf` path.
             "--decision-model" => decision_cfg.models.push(val(args, &mut i, "--decision-model")),
             "--decision-default" => decision_cfg.default = Some(val(args, &mut i, "--decision-default")),
-            "--qwen35-gguf" => qwen35_cfg.gguf.gguf = Some(val(args, &mut i, "--qwen35-gguf")),
+            // Released-GGUF residents (Qwen3.8): server-wide defaults for
+            // every such model the store holds.
             "--qwen35-ctx" => qwen35_cfg.gguf.ctx = Some(parsed(args, &mut i, "--qwen35-ctx")),
             "--qwen35-tier" => {
                 let spec = val(args, &mut i, "--qwen35-tier");

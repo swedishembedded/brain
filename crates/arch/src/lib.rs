@@ -360,8 +360,8 @@ pub const ARCHS: &[Arch] = &[
     // row was already dead on arrival. All three (and this row's own stale
     // one) are now resolved through `qwen35::spec::Qwen35Spec`'s
     // `weights`/`tokenizer` roles instead - see `crates/catalog/src/lib.rs`'s
-    // `resolved_assembly_for`; the serving path names the GGUF release with
-    // the `--qwen35-gguf` flag.
+    // `resolved_assembly_for`; the serving path finds a GGUF release in the
+    // model store.
     arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8")),
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa"),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),

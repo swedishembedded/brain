@@ -31,18 +31,16 @@
 //! today.
 //!
 //! A THIRD way in lives at the bottom of this file:
-//! [`multi_gpu_gguf`], the factory for
+//! [`gguf_resident`], the factory for
 //! `qwen35::int8_gguf_resident::Qwen35GgufResident` - INT8 weights read
-//! straight from a released Q8_0 GGUF and layer-sharded across as many cards
-//! as they need, NOT a mode of the one above. The two coexist: this one still
-//! serves an fp32 brain checkpoint that fits one card, that one serves the
-//! real 27B release on a box with enough cards and no room on disk for a
-//! ~108 GB fp32 conversion - both reached through the SAME
-//! `qwen35::spec::Qwen35Spec` resolved `weights` role, told apart by its
-//! extension (`.safetensors` vs `.gguf`). The GGUF factory is configured by
-//! [`Qwen35GgufServeConfig`] - the checkpoint to serve (a `<vendor>/<repo>[-
-//! <QUANT>]` reference or a path), its sizing, and its tiers - parsed data
-//! from the CLI, never environment variables.
+//! straight from a released GGUF and layer-sharded across as many cards as
+//! they need, NOT a mode of the one above. The two coexist: this one still
+//! serves an fp32 brain checkpoint that fits one card, that one serves a
+//! released quant on a box with enough cards and no room on disk for a
+//! ~108 GB fp32 conversion. The model-dir scan (`serving::model_dir`) builds
+//! one per released `qwen35` GGUF it finds, under that file's store id; they
+//! are configured by [`Qwen35GgufServeConfig`] - server-wide sizing and tier
+//! defaults, parsed data from the CLI, never environment variables.
 
 use capability::{Invocation, Manifest};
 use data::qwen_tokenizer::QwenBpe;
@@ -62,7 +60,7 @@ pub use model::ops::TierPolicy as Qwen35TierPolicy;
 
 /// Everything `brain serve` parses for the Qwen3.8 family, threaded into
 /// `serving::build_executor` as one value: [`fp32`] sizes the
-/// brain-checkpoint resident, [`gguf`] configures the multi-card INT8
+/// brain-checkpoint resident, [`gguf`] configures every multi-card INT8
 /// released-GGUF resident (see [`Qwen35GgufServeConfig`]). One struct per
 /// family in the CLI's parsed output keeps the two residents' knobs from
 /// being confused with each other's.
@@ -121,7 +119,7 @@ impl Qwen35Resident {
     /// `None` when the resolver names no `weights`, or names one this
     /// engine cannot load: `Engine` only ever opens brain-native
     /// safetensors (this module's own doc) - a resolved `.gguf` is the OTHER
-    /// resident's checkpoint (`crate::resident_qwen35::multi_gpu_gguf`),
+    /// resident's checkpoint (`crate::resident_qwen35::gguf_resident`),
     /// not a mode of this one.
     pub fn from_assembly(assembly: &capability::Assembly) -> Option<Qwen35Resident> {
         Self::from_assembly_sized(assembly, Qwen35Sizing::default())
@@ -251,40 +249,16 @@ fn parse_qwen35(tok: &QwenBpe, inv: &Invocation) -> Result<qwen3::chat::ParsedRe
     parse_request(tok, &with_template_flavor_default(inv))
 }
 
-/// The INT8, multi-GPU, load-straight-from-GGUF Qwen3.8-27B
-/// (`qwen35::int8_gguf_resident::Qwen35GgufResident`). Reachable ONLY via
-/// `Executor::register_multi`: it occupies real bytes on SEVERAL cards at
-/// once, and a plain `register` would budget only one of them (see
-/// `crates/residency/src/multi.rs`' module doc).
-///
-/// The `.gguf` comes from `qwen35::spec::Qwen35Spec`'s resolved `weights`
-/// role (see [`resolve_qwen35_gguf`]) - anywhere under `models_dir`, the
-/// serving process's resolved models directory, never a hardcoded machine
-/// path. Nothing resolving ⇒ not served, and this returns `None`.
-///
-/// `gpus` is `build_executor`'s own budgeted GPU list as `(index, TOTAL
-/// bytes)` and `reserved` the per-card headroom it keeps free, so what is
-/// handed on is each card's genuinely USABLE capacity - the same figure the
-/// scheduler budgets against. Passing capacity (not just identity) is what
-/// lets `model::shard::plan_fewest_devices` size the split to the hardware
-/// instead of assuming matched cards.
-/// The GGUF-resident's configuration, as parsed data - what `brain serve`'s
-/// CLI builds from its `--qwen35-*` flags and hands down through
-/// `build_executor`. No environment variables: an operator names one
-/// checkpoint and its sizing on the command line, and the same flags are
-/// what a config file or supervisor passes.
+/// Server-wide defaults for every released-GGUF Qwen3.8 resident the model
+/// scan registers, as parsed data - what `brain serve`'s `--qwen35-*` flags
+/// build and `build_executor` hands down. No environment variables, and no
+/// per-model switch: which GGUFs are served is decided by what the store
+/// holds, how they are served by these.
 #[derive(Clone, Debug, Default)]
 pub struct Qwen35GgufServeConfig {
-    /// WHICH GGUF to serve, overriding whatever the model-store resolver
-    /// would otherwise pick: a `<vendor>/<repo>[-<QUANT>]` reference
-    /// (`unsloth/Qwen3.8-27B-GGUF-Q8_0`) or a direct path (absolute, or
-    /// relative to the store root - the override matcher accepts both).
-    /// `None` resolves over the whole store, which serves nothing when two
-    /// real `qwen35` GGUFs make the choice genuinely ambiguous.
-    pub gguf: Option<String>,
     /// Per-sequence `prompt + max_new` ceiling (also every stage's KV/GDN
-    /// cache capacity, charged into the placement). `None` keeps the
-    /// historical default (2048).
+    /// cache capacity, charged into the placement). `None` sizes it from the
+    /// memory the placement leaves ([`qwen35::int8_gguf_resident::auto_cap`]).
     pub ctx: Option<u32>,
     /// Per-leaf weight-tier policy (`model::ops::TierPolicy::parse`'s
     /// grammar). `None` keeps the historical default (uniform INT8).
@@ -303,11 +277,6 @@ pub struct Qwen35GgufServeConfig {
 }
 
 impl Qwen35GgufServeConfig {
-    /// The ctx knob with its historical default filled in.
-    pub fn ctx_or_default(&self) -> u32 {
-        self.ctx.unwrap_or(qwen35::int8_gguf_resident::DEFAULT_CTX).max(1)
-    }
-
     /// The weight-tier knob with its historical default filled in.
     pub fn tier_or_default(&self) -> model::ops::TierPolicy {
         self.tier.clone().unwrap_or_else(|| model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8))
@@ -342,234 +311,48 @@ pub const DEFAULT_MAX_BATCH: u32 = 8;
 /// conversations stay warm without crowding out the batch.
 pub const DEFAULT_PREFIX_SLOTS: u32 = 4;
 
-/// Build the multi-GPU GGUF resident from a [`Qwen35GgufServeConfig`]:
-/// resolve the configured (or store-implied) `.gguf`, then hand its path,
-/// the budgeted devices and the sizing/tier knobs to
-/// `qwen35::int8_gguf_resident::Qwen35GgufResident` as plain data.
+/// Build the multi-GPU resident for one released GGUF, to be registered with
+/// `Executor::register_multi` under `id`.
 ///
 /// `gpus` is `build_executor`'s own budgeted GPU list as `(index, TOTAL
-/// bytes)` and `reserved` the per-card headroom it keeps free, so what is
-/// handed on is each card's genuinely USABLE capacity - the same figure the
+/// bytes)` - already narrowed to the cards the process's `--device` selection
+/// allows - and `reserved` the per-card headroom it keeps free, so what is
+/// handed on is each card's genuinely USABLE capacity, the same figure the
 /// scheduler budgets against. Passing capacity (not just identity) is what
 /// lets `model::shard::plan_fewest_devices` size the split to the hardware
 /// instead of assuming matched cards.
 ///
-/// Returns the resident alongside the id it must be served under - derived
-/// from the RESOLVED artifact's position in the store
-/// (`modelstore::resolve::model_id_from_path`, e.g.
-/// `unsloth/Qwen3.8-27B-Q8_0`), not from any constant: two different quants
-/// on disk are two different models with two different names, each
-/// addressable under the name its files actually carry.
-///
-/// `None` - not served - when the store resolves no `.gguf` for this
-/// architecture, the config names one that does not exist, or no GPU is
-/// budgeted (the weights are int8 device buffers; there is no CPU path).
-/// The id accompanying a `Some` is `model_id_from_path`'s answer for the
-/// resolved path, falling back to [`GGUF_FALLBACK_ID`] only when the
-/// artifact sits outside the store the resolver scanned (a direct path
-/// pointing elsewhere), where no store-relative id exists to derive.
-pub fn multi_gpu_gguf(models_dir: Option<&std::path::Path>, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35GgufServeConfig) -> Option<(qwen35::int8_gguf_resident::Qwen35GgufResident, String)> {
-    let (path, id) = resolve_qwen35_gguf(models_dir, cfg)?;
-    if gpus.is_empty() {
-        eprintln!("brain: {id} not served (no GPU budgeted -- its weights are int8 device buffers, there is no CPU path)");
-        return None;
-    }
+/// The context length is `cfg.ctx` when the operator fixed one, else the
+/// longest the cards hold once the weights are placed. `Err` names why the
+/// model could never load (no GPU budgeted, an unreadable or non-Qwen3.8
+/// file, weights that do not fit the cards, no embedded tokenizer), so the
+/// caller can leave it out of the served set and say so: a model that is
+/// listed is one whose first request can load.
+pub fn gguf_resident(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35GgufServeConfig) -> Result<qwen35::int8_gguf_resident::Qwen35GgufResident, String> {
+    use qwen35::int8_gguf_resident::{auto_cap, resident_config, Qwen35GgufResident};
     let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
-    let r = qwen35::int8_gguf_resident::Qwen35GgufResident::new(path, devices, cfg.ctx_or_default(), cfg.tier_or_default())
-        .with_kv_tier(cfg.kv_or_default())
-        .with_max_batch(cfg.max_batch_or_default())
-        .with_prefix_slots(cfg.prefix_slots_or_default())
-        .with_model_id(id.clone());
-    Some((r, id))
-}
-
-/// The served id a resolved artifact OUTSIDE the scanned store falls back
-/// to - a direct-path configuration has no store-relative
-/// `<vendor>/<repo>` to derive, so the resident keeps the well-known
-/// release id it has always advertised.
-pub const GGUF_FALLBACK_ID: &str = qwen35::int8_gguf_resident::MODEL;
-
-/// [`multi_gpu_gguf`]'s artifact resolution: WHERE the served GGUF lives and
-/// WHAT id it is served under. Returns `(weights path, served id)`, or
-/// `None` (never a guessed path) when the configuration names nothing the
-/// store can answer for.
-///
-/// Precedence when [`Qwen35GgufServeConfig::gguf`] names an artifact:
-///   1. An existing `.gguf` FILE - absolute, or relative to the store root -
-///      is used verbatim. An operator who names a path gets exactly that
-///      path, including one outside the store entirely.
-///   2. A `<vendor>/<repo>[-<QUANT>]` reference is resolved through the
-///      store's own lookup ([`brain_modelstore::Store::local`]) - the same
-///      mechanism `brain pull`'s quant-suffix convention writes
-///      (`<repo>/<QUANT>.gguf`).
-///   3. A reference whose repo DIRECTORY exists but which resolved nothing
-///      above (an unsuffixed repo name holding one classifiable GGUF, say)
-///      narrows the model-store resolver's scan
-///      ([`loader::resolver::resolve_reference`]) to that directory - the
-///      same content-based classification the unnamed case uses, never a
-///      filename guess. A reference that names a quant is accepted only
-///      when the resolved weights ARE that quant's file: the scan ignores
-///      the reference's quant, so without this check a missing quant would
-///      silently resolve to whatever the repo holds.
-///   4. Anything else is a loud refusal, not a fallback to some other
-///      artifact.
-///
-/// Unnamed, the resolver classifies the whole store
-/// ([`loader::resolver::resolve_structured`]); a resolved brain-format
-/// `.safetensors` is `Qwen35Resident`'s own checkpoint
-/// (`crate::resident_qwen35::Qwen35Resident::from_assembly`), so a
-/// non-`.gguf` `weights` resolution is simply not this factory's model.
-/// More than one real `qwen35`-architecture GGUF with nothing naming one is
-/// a genuine ambiguity: refused, naming every candidate as the
-/// `--qwen35-gguf` value that would select it (a daemon's startup log being
-/// the only place its operator can read it).
-///
-/// The served id is derived from the resolved artifact's own position in
-/// the store ([`brain_modelstore::resolve::model_id_from_path`]) - the
-/// `<vendor>/<repo>` (or, for the flat back-compat layout,
-/// `<vendor>/<file-stem>`) name its files actually carry, so two different
-/// quants on disk are two different servable models, not two aliases of one
-/// constant. A path outside the store has no store-relative id and keeps
-/// [`GGUF_FALLBACK_ID`].
-fn resolve_qwen35_gguf(models_dir: Option<&std::path::Path>, cfg: &Qwen35GgufServeConfig) -> Option<(String, String)> {
-    let store_id = |path: &std::path::Path| -> String {
-        models_dir
-            .and_then(|root| brain_modelstore::resolve::model_id_from_path(path, root))
-            .unwrap_or_else(|| GGUF_FALLBACK_ID.to_string())
+    let (tier, kv, max_batch, prefix_slots) = (cfg.tier_or_default(), cfg.kv_or_default(), cfg.max_batch_or_default(), cfg.prefix_slots_or_default());
+    let cap = match cfg.ctx {
+        Some(ctx) => ctx.max(1),
+        None => {
+            if devices.is_empty() {
+                return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
+            }
+            let mg = checkpoint::gguf::MmapGguf::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
+            let model_cfg = resident_config(&mg, 1).map_err(|e| format!("'{gguf_path}' is not a servable Qwen3.8 GGUF: {e}"))?;
+            auto_cap(&model_cfg, &devices, &tier, kv, max_batch, prefix_slots).ok_or_else(|| format!("{gguf_path} does not fit across the {} budgeted device(s) even with a one-token context", devices.len()))?
+        }
     };
-
-    if let Some(named) = cfg.gguf.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        // 1. An existing file, absolute or store-relative.
-        let as_file = {
-            let p = std::path::Path::new(named);
-            (p.is_absolute() && p.is_file()).then(|| p.to_path_buf()).or_else(|| {
-                let in_store = models_dir?.join(named);
-                in_store.is_file().then_some(in_store)
-            })
-        };
-        if let Some(path) = as_file {
-            if !named.ends_with(".gguf") {
-                eprintln!("brain: qwen35 GGUF not served: {named} is not a .gguf file");
-                return None;
-            }
-            let id = store_id(&path);
-            return Some((path.to_string_lossy().into_owned(), id));
-        }
-        // 2./3. A `<vendor>/<repo>[-<QUANT>]` reference: the store's own
-        // lookup first, then a scan narrowed to that repo directory.
-        match brain_modelref::ModelRef::parse(named) {
-            Ok(r) => {
-                let store = brain_modelstore::Store::new(models_dir?.to_path_buf());
-                if let Some(local) = store.local(&r).filter(|m| m.weights.to_string_lossy().ends_with(".gguf")) {
-                    let id = store_id(&local.weights);
-                    return Some((local.weights.to_string_lossy().into_owned(), id));
-                }
-                if store.repo_dir(&r).is_dir() {
-                    return match loader::resolver::resolve_reference(models_dir, "qwen35", &qwen35::spec::Qwen35Spec, &r, &Default::default()) {
-                        Ok(resolution) => {
-                            // The store scan narrows to the reference's repo
-                            // directory but does not itself honor the
-                            // reference's quant, so a named-but-absent quant
-                            // would otherwise resolve to whatever GGUF the
-                            // repo does hold - exactly the silent fallback
-                            // step 4 forbids. When a quant is named, the
-                            // resolved weights must BE that quant; anything
-                            // else is a refusal naming the miss.
-                            let wanted = r.quant().map(|q| format!("{}.gguf", q.as_str()));
-                            let ok = match (&wanted, resolved_gguf_from(resolution, models_dir, &store_id)) {
-                                (Some(want), Some((path, id))) if std::path::Path::new(&path).file_name().map(|f| f.to_string_lossy().ends_with(want.as_str())).unwrap_or(false) => Some((path, id)),
-                                (Some(_), found) => {
-                                    eprintln!(
-                                        "brain: qwen35 GGUF not served: {named} names quant {} but the store's {} directory holds no {}.gguf{}",
-                                        r.quant().map(|q| q.as_str()).unwrap_or(""),
-                                        store.repo_dir(&r).display(),
-                                        r.quant().map(|q| q.as_str()).unwrap_or(""),
-                                        found.map(|(p, _)| format!(" (found {} instead)", std::path::Path::new(&p).file_name().unwrap_or_default().to_string_lossy())).unwrap_or_default()
-                                    );
-                                    None
-                                }
-                                (None, found) => found,
-                            };
-                            ok
-                        }
-                        Err(e) => {
-                            eprintln!("brain: qwen35 GGUF not served: {e}");
-                            None
-                        }
-                    };
-                }
-                let tried_file = models_dir.map(|root| root.join(named)).unwrap_or_else(|| std::path::PathBuf::from(named));
-                eprintln!(
-                    "brain: qwen35 GGUF not served: {named} names neither an existing .gguf file nor a model-store artifact (looked for {} and {})",
-                    tried_file.display(),
-                    store.repo_dir(&r).display()
-                );
-                return None;
-            }
-            Err(e) => {
-                eprintln!("brain: qwen35 GGUF not served: {named} is neither an existing .gguf file nor a parsable <vendor>/<repo>[-<QUANT>] reference ({e})");
-                return None;
-            }
-        }
+    let resident = Qwen35GgufResident::new(gguf_path.to_string(), devices, cap, tier).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_model_id(id);
+    match resident.unservable_reason() {
+        Some(reason) => Err(reason),
+        None => Ok(resident),
     }
-
-    // Unnamed: the whole store, classified.
-    match loader::resolver::resolve_structured(models_dir, "qwen35", &qwen35::spec::Qwen35Spec, &Default::default()) {
-        Ok(resolution) => resolved_gguf_from(resolution, models_dir, &store_id),
-        Err(e) => {
-            eprintln!("brain: qwen35 GGUF not served over the scheduler ({e})");
-            None
-        }
-    }
-}
-
-/// The `.gguf` `weights` path and derived id out of a resolver outcome -
-/// [`resolve_qwen35_gguf`]'s shared tail. An ambiguity is refused loudly,
-/// naming every real candidate as the `--qwen35-gguf` value that would
-/// select it.
-fn resolved_gguf_from(resolution: brain_modelstore::resolve::Resolution, _models_dir: Option<&std::path::Path>, store_id: &dyn Fn(&std::path::Path) -> String) -> Option<(String, String)> {
-    use brain_modelstore::resolve::Resolution as R;
-    match resolution {
-        R::Resolved(assembly) => {
-            let weights = assembly.roles.get("weights")?;
-            if !weights.to_string_lossy().ends_with(".gguf") {
-                return None;
-            }
-            Some((weights.to_string_lossy().into_owned(), store_id(weights)))
-        }
-        R::Ambiguous(a) => {
-            let values: Vec<&str> = a.choices.iter().flat_map(|c| c.selector.iter().map(|(_, value)| value.as_str())).collect();
-            eprintln!("{}", ambiguous_gguf_message(&values));
-            None
-        }
-        R::Missing(_) => None,
-    }
-}
-
-/// What is said when the store holds several qwen35 GGUF files and nothing
-/// names one. It says what is and is not affected - only this model is left
-/// unserved - so a server that is otherwise serving reads as healthy, and
-/// lists each file as the flag value that selects it.
-fn ambiguous_gguf_message(candidates: &[&str]) -> String {
-    let mut s = String::from(
-        "brain: the qwen35 GGUF model is not being served: the store holds more than one candidate and nothing names which. Every other model is unaffected. To serve it, pass --qwen35-gguf with one of:\n",
-    );
-    for value in candidates {
-        s.push_str(&format!("  --qwen35-gguf {value}\n"));
-    }
-    s
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_ambiguous_gguf_says_only_that_model_is_unserved_and_lists_the_flag_values() {
-        let text = ambiguous_gguf_message(&["/m/a/Q4_K_M.gguf", "/m/b/Q8_0.gguf"]);
-        assert!(text.contains("not being served") && text.contains("Every other model is unaffected"), "{text}");
-        assert!(text.contains("--qwen35-gguf /m/a/Q4_K_M.gguf") && text.contains("--qwen35-gguf /m/b/Q8_0.gguf"), "{text}");
-    }
 
     /// The sizing knobs are constructor data with the historical defaults,
     /// sanitized to their 1 floor - never read from the environment.
@@ -591,7 +374,7 @@ mod tests {
     }
 
     /// A resolved `.gguf` `weights` role is the OTHER resident's checkpoint
-    /// ([`multi_gpu_gguf`]'s `Qwen35GgufResident`) - `Engine` never opens a
+    /// ([`gguf_resident`]'s `Qwen35GgufResident`) - `Engine` never opens a
     /// `.gguf` at all, so this must decline rather than try.
     #[test]
     fn from_assembly_declines_a_resolved_gguf_weights_role() {
@@ -726,245 +509,101 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ========== the multi-GPU GGUF factory: `multi_gpu_gguf` ==========
-    //
-    // Fixtures use the SAME real-GGUF helper `activate_falls_back_to_the_
-    // gguf_embedded_tokenizer` uses above, plus the store-layout directories
-    // the resolver classifies through: a candidate is found by CONTENT
-    // (`general.architecture`), never by filename.
+    // ========== the multi-GPU GGUF factory: `gguf_resident` ==========
 
-    fn gguf_store(tag: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("brain-qwen35-gguf-factory-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        // A second, unrelated vendor directory: without one, every record
-        // lives under the fixture's single vendor alone, so `resolve()`'s
-        // `common_root` collapses onto it and the vendor-co-location checks
-        // (`classify_tokenizer_role`, the GGUF's own tokenizer self-
-        // satisfaction) compute a different "vendor" per role - the same
-        // fixture shape `qwen35::spec`'s and `resident_zimage`'s tests
-        // work around. The placeholder must be a SCANNABLE artifact (the
-        // inventory records only recognized model extensions), and it must
-        // classify as a foreign architecture so the qwen35 resolver never
-        // considers it a candidate.
-        std::fs::create_dir_all(root.join("other-vendor")).unwrap();
-        checkpoint::st::save_safetensors(
-            root.join("other-vendor").join("unrelated.safetensors").to_str().unwrap(),
-            &[("w".to_string(), vec![1], vec![0.0f32])],
-            &serde_json::json!({"architectures": ["UnrelatedModel"]}),
-            None,
-        )
-        .unwrap();
-        root
+    const GIB: u64 = 1 << 30;
+
+    /// A complete (weights + tokenizer) synthetic Qwen3.8 GGUF.
+    fn write_servable_gguf(tag: &str) -> String {
+        let path = std::env::temp_dir().join(format!("brain-qwen35-gguf-factory-{tag}-{}.gguf", std::process::id()));
+        qwen35::gguf_import::testing::write_synthetic_servable_gguf(path.to_str().unwrap());
+        path.to_string_lossy().into_owned()
     }
 
-    /// A real classifiable `qwen35`-architecture GGUF at the pulled-quant
-    /// store position `<root>/<vendor>/<repo>/<QUANT>.gguf`.
-    fn write_q35_gguf(root: &std::path::Path, vendor: &str, repo: &str, quant: &str) -> std::path::PathBuf {
-        let dir = root.join(vendor).join(repo);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("{quant}.gguf"));
-        write_gguf_with_gpt2_tokenizer(&path);
-        path
-    }
-
+    /// Two 24 GiB cards, 2 GiB kept free on each.
     fn gpu_budget() -> Vec<(u32, u64)> {
-        vec![(0, 24 << 30), (1, 24 << 30)]
+        vec![(0, 24 * GIB), (1, 24 * GIB)]
     }
 
-    fn named_cfg(named: &str) -> Qwen35GgufServeConfig {
-        Qwen35GgufServeConfig { gguf: Some(named.to_string()), ..Default::default() }
-    }
+    const RESERVED: u64 = 2 * GIB;
 
-    /// THE case this change exists for: two real `qwen35` GGUFs in the store
-    /// (the old env-var answer was "set the one GGUF variable or serve
-    /// nothing") and a `--qwen35-gguf <vendor>/<repo>[-<QUANT>]` reference
-    /// naming ONE - exactly the reference `brain pull`'s quant-suffix
-    /// convention writes. The named artifact must resolve, and the resident
-    /// must be served under the id the artifact's own store position
-    /// carries - not any hardcoded constant.
+    /// The resident is served under the id it is handed (the file's store id),
+    /// not any constant, and manifest and instance key agree on it.
     #[test]
-    fn a_named_reference_resolves_one_gguf_of_several_under_its_own_id() {
-        let root = gguf_store("named-ref");
-        let q8 = write_q35_gguf(&root, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0");
-        let _q4 = write_q35_gguf(&root, "Abiray", "Qwen3.8-27B-Q4_K_M-GGUF", "Q4_K_M");
-
-        let (r, id) = multi_gpu_gguf(Some(&root), &gpu_budget(), 2 << 30, &named_cfg("unsloth/Qwen3.8-27B-GGUF-Q8_0")).expect("the named reference must resolve");
-        assert_eq!(id, "unsloth/Qwen3.8-27B-GGUF", "the id comes from the artifact's own store position");
-        assert_eq!(r.manifest().model, id, "the manifest advertises the derived id, not a hardcoded const");
-        assert_eq!(q8.to_string_lossy(), r.gguf_path(), "the resolved weights are the named artifact");
-
-        std::fs::remove_dir_all(&root).ok();
+    fn the_resident_is_served_under_the_id_it_is_given() {
+        let path = write_servable_gguf("id");
+        let r = gguf_resident(&path, "unsloth/Qwen3.8-27B-GGUF", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).expect("a complete GGUF must build");
+        assert_eq!(r.model_id(), "unsloth/Qwen3.8-27B-GGUF");
+        assert_eq!(r.manifest().model, "unsloth/Qwen3.8-27B-GGUF");
+        assert_eq!(r.gguf_path(), path);
+        std::fs::remove_file(path).ok();
     }
 
-    /// The same disambiguation against the OTHER candidate - proving the
-    /// reference, not directory order, decides which one is served.
+    /// Without a fixed context the cards decide: far more than any development
+    /// default, placed within what the budget leaves after the reserve.
     #[test]
-    fn naming_the_other_reference_serves_the_other_artifact() {
-        let root = gguf_store("named-ref-other");
-        let _q8 = write_q35_gguf(&root, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0");
-        let q4 = write_q35_gguf(&root, "Abiray", "Qwen3.8-27B-Q4_K_M-GGUF", "Q4_K_M");
-
-        let (_, id) = multi_gpu_gguf(Some(&root), &gpu_budget(), 2 << 30, &named_cfg("Abiray/Qwen3.8-27B-Q4_K_M-GGUF-Q4_K_M")).expect("the named reference must resolve");
-        assert_eq!(id, "Abiray/Qwen3.8-27B-Q4_K_M-GGUF");
-        assert_eq!(q4.to_string_lossy().contains("Q4_K_M"), true);
-
-        std::fs::remove_dir_all(&root).ok();
+    fn an_unset_context_is_sized_from_the_memory_the_placement_leaves() {
+        let path = write_servable_gguf("auto-ctx");
+        let gpus = vec![(0, 4 * GIB)];
+        let r = gguf_resident(&path, "t/auto", &gpus, RESERVED, &Qwen35GgufServeConfig::default()).expect("builds");
+        assert!(r.cap() > 1_000_000, "a tiny model on a 2 GiB budget leaves room for a huge context: {}", r.cap());
+        let placed: u64 = r.placement().iter().map(|p| p.3).sum();
+        assert!(placed <= 2 * GIB, "the context must be charged into a placement that fits the usable bytes: {placed}");
+        std::fs::remove_file(path).ok();
     }
 
-    /// An absolute path is used verbatim - including one outside the store
-    /// - and keeps the well-known release id (no store-relative name
-    /// exists to derive).
-    #[test]
-    fn a_direct_path_outside_the_store_is_used_verbatim_under_the_fallback_id() {
-        let outside = gguf_store("direct-path");
-        let path = outside.join("hand-placed.gguf");
-        write_gguf_with_gpt2_tokenizer(&path);
-
-        let (r, id) = multi_gpu_gguf(Some(&gguf_store("direct-store")), &gpu_budget(), 2 << 30, &named_cfg(path.to_str().unwrap())).expect("a direct path must resolve");
-        assert_eq!(r.gguf_path(), path.to_str().unwrap(), "an operator who names a path gets exactly that path");
-        assert_eq!(id, GGUF_FALLBACK_ID, "an out-of-store artifact keeps the release id");
-
-        std::fs::remove_dir_all(&outside).ok();
-    }
-
-    /// A direct path pointing at an existing non-GGUF file is a loud
-    /// refusal, never a silent serve-nothing: the operator asked for that
-    /// file by name.
-    #[test]
-    fn a_direct_path_to_a_non_gguf_file_is_refused_by_name() {
-        let dir = gguf_store("not-gguf");
-        let path = dir.join("weights.safetensors");
-        std::fs::write(&path, b"not a gguf").unwrap();
-        // The file check precedes the extension check by design (an
-        // operator naming an existing file gets THAT file or a refusal
-        // naming it); a non-gguf name is refused either way.
-        assert!(
-            multi_gpu_gguf(Some(&dir), &gpu_budget(), 2 << 30, &named_cfg(path.to_str().unwrap())).is_none(),
-            "an existing non-.gguf file must not be served as one"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Unnamed and exactly one real `qwen35` GGUF in the store: served on
-    /// its own, under the id its store position carries - the zero-config
-    /// path staying as automatic as before.
-    #[test]
-    fn one_unnamed_gguf_is_served_on_its_own() {
-        let root = gguf_store("unnamed-single");
-        let path = write_q35_gguf(&root, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0");
-
-        let (r, id) = multi_gpu_gguf(Some(&root), &gpu_budget(), 2 << 30, &Qwen35GgufServeConfig::default()).expect("a single candidate must resolve on its own");
-        assert_eq!(id, "unsloth/Qwen3.8-27B-GGUF");
-        assert_eq!(r.gguf_path(), path.to_str().unwrap());
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Unnamed with TWO real candidates and nothing naming one: genuinely
-    /// ambiguous, so not served - and the refusal names every candidate as
-    /// the `--qwen35-gguf` value that would select it, since a daemon's
-    /// startup log is the only place its operator can read it. Naming one
-    /// candidate resolves it (the first test above pins that half).
-    #[test]
-    fn unnamed_ambiguity_refuses_and_names_the_flag_that_selects() {
-        let root = gguf_store("unnamed-ambiguous");
-        let a = write_q35_gguf(&root, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0");
-        let b = write_q35_gguf(&root, "Abiray", "Qwen3.8-27B-Q4_K_M-GGUF", "Q4_K_M");
-
-        assert!(
-            multi_gpu_gguf(Some(&root), &gpu_budget(), 2 << 30, &Qwen35GgufServeConfig::default()).is_none(),
-            "two candidates with nothing naming one must not be silently collapsed"
-        );
-        // The resolution behind the refusal is the resolver's own, so assert
-        // its message names both candidate paths and the selecting flag.
-        let records = brain_modelstore::inventory::scan(&root);
-        let resolution = brain_modelstore::resolve::resolve("qwen35", &records, &[&qwen35::spec::Qwen35Spec], &Default::default());
-        let brain_modelstore::resolve::Resolution::Ambiguous(amb) = resolution else { panic!("expected ambiguity") };
-        let msg = {
-            let mut s = String::new();
-            for c in &amb.choices {
-                for (_, value) in &c.selector {
-                    s.push_str(&format!("  --qwen35-gguf {value}\n"));
-                }
-            }
-            s
-        };
-        assert!(msg.contains("--qwen35-gguf"), "{msg}");
-        assert!(msg.contains(a.to_str().unwrap()) && msg.contains(b.to_str().unwrap()), "{msg}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// A config naming an artifact the store does not hold is a loud,
-    /// named refusal - never a silent not-served and never a fallback to a
-    /// different artifact.
-    #[test]
-    fn a_reference_the_store_does_not_hold_is_refused_by_name() {
-        let root = gguf_store("missing-ref");
-        let _ = write_q35_gguf(&root, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0");
-        assert!(
-            multi_gpu_gguf(Some(&root), &gpu_budget(), 2 << 30, &named_cfg("unsloth/Qwen3.8-27B-GGUF-Q4_K_M")).is_none(),
-            "a quant the store does not hold must not fall back to another quant"
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// The sizing and tier knobs travel as data into the built resident:
-    /// each knob lands where its accessor reports it.
+    /// The knobs travel as data into the built resident; an explicit context is
+    /// used verbatim.
     #[test]
     fn config_knobs_reach_the_resident_as_data() {
-        let root = gguf_store("knobs");
-        let _ = write_q35_gguf(&root, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0");
+        let path = write_servable_gguf("knobs");
         let cfg = Qwen35GgufServeConfig {
-            gguf: Some("unsloth/Qwen3.8-27B-GGUF-Q8_0".to_string()),
             ctx: Some(8192),
             tier: Some(model::ops::TierPolicy::parse("i8").unwrap()),
             kv: Some(model::kv_tier::KvTier::Int8),
             max_batch: Some(4),
             prefix_slots: Some(2),
         };
-        let (r, _) = multi_gpu_gguf(Some(&root), &gpu_budget(), 2 << 30, &cfg).expect("resolve");
+        let r = gguf_resident(&path, "t/knobs", &gpu_budget(), RESERVED, &cfg).expect("builds");
         assert_eq!(r.cap(), 8192);
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::Int8);
         assert_eq!(r.max_batch(), 4);
         assert_eq!(r.prefix_slots(), 2);
         // What `/v1/models` reports is the context the resident was built with.
         assert_eq!(r.manifest().max_context_tokens, Some(8192));
-        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_file(path).ok();
     }
 
-    /// Defaults of an all-`None` config: ctx 2048, uniform INT8 weights, f32
-    /// KV (the removed env readers' defaults), and [`DEFAULT_MAX_BATCH`] decode
-    /// slots so concurrent requests share every weight read.
+    /// An all-`None` config: the context sized from the memory the placement
+    /// leaves, uniform INT8 weights, an f32 KV cache, [`DEFAULT_MAX_BATCH`]
+    /// decode slots so concurrent requests share every weight read, and
+    /// [`DEFAULT_PREFIX_SLOTS`] cached prompts.
     #[test]
-    fn config_defaults_match_the_historical_env_defaults() {
-        let root = gguf_store("defaults");
-        let _ = write_q35_gguf(&root, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0");
-        let cfg = Qwen35GgufServeConfig { gguf: Some("unsloth/Qwen3.8-27B-GGUF-Q8_0".to_string()), ..Default::default() };
-        let (r, _) = multi_gpu_gguf(Some(&root), &gpu_budget(), 2 << 30, &cfg).expect("resolve");
-        assert_eq!(r.cap(), 2048);
+    fn config_defaults_size_the_context_and_batch_the_requests() {
+        let path = write_servable_gguf("defaults");
+        let r = gguf_resident(&path, "t/defaults", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).expect("builds");
+        assert!(r.cap() > 2048, "sized by memory, not a fixed default: {}", r.cap());
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::F32);
         assert_eq!(r.max_batch(), DEFAULT_MAX_BATCH);
         assert_eq!(r.prefix_slots(), DEFAULT_PREFIX_SLOTS);
-        assert_eq!(r.manifest().max_context_tokens, Some(2048));
-        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(r.manifest().max_context_tokens, Some(r.cap() as u64));
+        std::fs::remove_file(path).ok();
     }
 
-    /// No GPU budgeted: not served - the weights are int8 device buffers,
-    /// there is no CPU path (same refusal the old factory gave, now naming
-    /// the derived id).
+    /// Everything that would make the first request fail is refused here,
+    /// with the reason, instead of producing a model that is listed and never
+    /// loads.
     #[test]
-    fn no_gpu_budgeted_is_not_served() {
-        let root = gguf_store("no-gpu");
-        let _ = write_q35_gguf(&root, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0");
-        assert!(multi_gpu_gguf(Some(&root), &[], 2 << 30, &named_cfg("unsloth/Qwen3.8-27B-GGUF-Q8_0")).is_none());
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// No models directory at all: not served, quietly - the same policy
-    /// every other resolved-at-startup model follows.
-    #[test]
-    fn no_models_dir_is_not_served() {
-        assert!(multi_gpu_gguf(None, &gpu_budget(), 2 << 30, &Qwen35GgufServeConfig::default()).is_none());
+    fn a_resident_that_could_never_load_is_refused_with_the_reason() {
+        let path = write_servable_gguf("refused");
+        let no_gpu = gguf_resident(&path, "t/x", &[], RESERVED, &Qwen35GgufServeConfig::default()).err().expect("must be refused");
+        assert!(no_gpu.contains("no GPU"), "{no_gpu}");
+        let too_small = gguf_resident(&path, "t/x", &[(0, RESERVED + 64)], RESERVED, &Qwen35GgufServeConfig::default()).err().expect("must be refused");
+        assert!(too_small.contains("does not fit"), "{too_small}");
+        let fixed_ctx_too_small = gguf_resident(&path, "t/x", &[(0, RESERVED + 64)], RESERVED, &Qwen35GgufServeConfig { ctx: Some(1024), ..Default::default() }).err().expect("must be refused");
+        assert!(fixed_ctx_too_small.contains("budgeted GPU(s) offer"), "{fixed_ctx_too_small}");
+        let missing = gguf_resident("/nonexistent/m.gguf", "t/x", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).err().expect("must be refused");
+        assert!(missing.contains("/nonexistent/m.gguf"), "{missing}");
+        std::fs::remove_file(path).ok();
     }
 }
