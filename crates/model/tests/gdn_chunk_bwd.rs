@@ -450,12 +450,14 @@ fn gdn_chunk_bwd_gradcheck() {
     eprintln!("gdn_chunk_fwd_train forward cross-check: worst |delta| = {worst_fwd:e}");
 
     // ---- GdnBwdScratch buffers ----
-    let d_decayed_k = g.storage((bh * cn * dk) as u64);
-    let d_q_scaled = g.storage((bh * cn * dk) as u64);
-    let d_v_new = g.storage((bh * cn * dv) as u64);
-    let d_decay_scale = g.storage((bh * cn) as u64);
-    let d_query_chunk = g.storage((bh * cn * dk) as u64);
-    let d_key_chunk = g.storage((bh * cn * dk) as u64);
+    let d_decayed_k = g.storage((bhc * cn * dk) as u64);
+    let d_q_scaled = g.storage((bhc * cn * dk) as u64);
+    let d_v_new = g.storage((bhc * cn * dv) as u64);
+    let d_decay_scale = g.storage((bhc * cn) as u64);
+    let v_prime_all = g.storage((bhc * cn * dv) as u64);
+    let v_new_all = g.storage((bhc * cn * dv) as u64);
+    let decayed_k_all = g.storage((bhc * cn * dk) as u64);
+    let q_scaled_all = g.storage((bhc * cn * dk) as u64);
     let state_a = g.storage((bh * dk * dv) as u64);
     let state_b = g.storage((bh * dk * dv) as u64);
     let d_raw_intra = g.storage((bhc * cn * cn) as u64);
@@ -480,8 +482,10 @@ fn gdn_chunk_bwd_gradcheck() {
         d_q_scaled: &d_q_scaled,
         d_v_new: &d_v_new,
         d_decay_scale: &d_decay_scale,
-        d_query_chunk: &d_query_chunk,
-        d_key_chunk: &d_key_chunk,
+        v_prime_all: &v_prime_all,
+        v_new_all: &v_new_all,
+        decayed_k_all: &decayed_k_all,
+        q_scaled_all: &q_scaled_all,
         state_a: &state_a,
         state_b: &state_b,
         d_raw_intra: &d_raw_intra,
@@ -545,7 +549,10 @@ fn gdn_chunk_bwd_gradcheck() {
     // the forward, which dropped the same four commits) at this test's two
     // chunks: `73 + 4*2 = 81`. At Qwen3.8-27B's real `c=64` shape
     // this same closed form collapses `2*(c-1) = 126` dispatches to `2`.
-    assert_eq!(bwd_steps.len(), 81, "gdn_chunk_bwd dispatch count regressed -- see item 15's UT-transform-backward closed form (M5.11) and item 19's reverse-cumsum fusion (M5.8)");
+    // 47 whole-tensor dispatches (the `d_state`-free recomputation and gradients of Phase 1, and
+// all of Phase 2: item 15's closed-form UT backward, M5.11, and item 19's fused reverse
+// cumsum, M5.8) plus the seven the reverse sweep spends on each chunk.
+assert_eq!(bwd_steps.len(), 47 + 7 * n_chunks, "gdn_chunk_bwd dispatch count regressed");
     g.submit(&[&d_g_cs, &d_exp_g_cs, &d_u, &d_decay_mask, &d_query, &d_key, &d_beta], &bwd_steps);
 
     let got_d_query = g.read(&d_query, bhc * cn * dk);
