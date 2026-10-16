@@ -60,6 +60,15 @@ impl<K: Eq + Hash> JobRegistry<K> {
         self.0.lock().ok().and_then(|m| m.get(id).cloned())
     }
 
+    /// Cancel every registered job: what a stopping server does so that
+    /// in-flight generations end at their next poll instead of running on.
+    /// Entries stay until their owners [`remove`](Self::remove) them.
+    pub fn cancel_all(&self) {
+        if let Ok(m) = self.0.lock() {
+            m.values().for_each(CancelToken::cancel);
+        }
+    }
+
     /// How many jobs are currently registered (in flight).
     pub fn len(&self) -> usize {
         self.0.lock().map(|m| m.len()).unwrap_or(0)
@@ -95,6 +104,17 @@ mod tests {
         reg.remove(&1);
         assert_eq!(reg.len(), 0);
         assert!(reg.get(&1).is_none(), "removed id must miss");
+    }
+
+    #[test]
+    fn cancel_all_cancels_every_registered_job_and_keeps_the_entries() {
+        let reg: JobRegistry<u64> = JobRegistry::new();
+        let (a, b) = (CancelToken::armed(), CancelToken::armed());
+        reg.insert(1, a.clone());
+        reg.insert(2, b.clone());
+        reg.cancel_all();
+        assert!(a.is_cancelled() && b.is_cancelled());
+        assert_eq!(reg.len(), 2, "owners still remove their own entries");
     }
 
     #[test]

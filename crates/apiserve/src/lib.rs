@@ -156,9 +156,10 @@ pub struct ServeOpts {
     /// and every surface reacts to it.
     ///
     /// Each surface is served with axum's `with_graceful_shutdown`, so in-flight
-    /// requests drain instead of being cut off mid-response. The drain has no
-    /// upper bound of its own here; `run_apis` bounds the overall wait so a slow
-    /// client cannot hold the process open indefinitely.
+    /// requests drain instead of being cut off mid-response. The jobs behind
+    /// them are cancelled when the signal fires, and the drain is bounded by
+    /// [`SHUTDOWN_DRAIN`] so a slow client or an uninterruptible step cannot
+    /// hold the process open.
     pub shutdown: Option<brain_shutdown::Shutdown>,
     /// Attached to every surface's [`AppState`] ([`AppState::with_supplier`]) so
     /// an unresolved model auto-fetches instead of 404ing. `None` disables
@@ -197,6 +198,12 @@ impl ServeOpts {
     }
 }
 
+/// How long a stopping server waits for in-flight requests to finish after the
+/// shutdown fires and their jobs are cancelled. Cancellation is polled between
+/// decode steps, so a healthy job ends well inside it; a step that cannot be
+/// interrupted must not hold the process, and the GPUs behind it, any longer.
+pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Serve every [`Surface`] over the ONE shared [`Executor`] until `opts.shutdown`
 /// fires (or, with `opts.shutdown: None`, until this process's own Ctrl-C/SIGTERM).
 /// Builds a single multi-threaded Tokio runtime and one axum router per surface
@@ -206,13 +213,22 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
     let shutdown = opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
     let ServeOpts { supplier, ready, deadlines, .. } = opts;
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(async move {
+    let result = rt.block_on(async move {
         let mut set = tokio::task::JoinSet::new();
         for s in surfaces {
             let state = AppState::new(exec.clone(), s.api_key.clone(), s.provider)
                 .with_admit_deadline(deadlines.admit)
                 .with_cold_build_admit_deadline(deadlines.cold_build)
                 .with_supplier(supplier.clone());
+            // Graceful shutdown waits for every in-flight request, and a
+            // generation answers only when it ends: cancel them all the moment
+            // shutdown fires so they end at their next poll.
+            let jobs = state.jobs.clone();
+            let cancel_on = shutdown.clone();
+            tokio::spawn(async move {
+                cancel_on.wait().await;
+                jobs.cancel_all();
+            });
             let app = router(state);
             let (addr, provider) = (s.addr, s.provider);
             let sd = shutdown.clone();
@@ -233,10 +249,29 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
                 Ok::<(), anyhow::Error>(())
             });
         }
-        while let Some(res) = set.join_next().await {
-            res??;
+        // The drain bound starts when shutdown fires; whatever has not finished
+        // by then is abandoned.
+        let drain_expired = async {
+            shutdown.wait().await;
+            tokio::time::sleep(SHUTDOWN_DRAIN).await;
+        };
+        tokio::pin!(drain_expired);
+        loop {
+            tokio::select! {
+                joined = set.join_next() => match joined {
+                    Some(res) => res??,
+                    None => break,
+                },
+                _ = &mut drain_expired => {
+                    set.abort_all();
+                    break;
+                }
+            }
         }
         Ok(())
-    })
+    });
+    // Not a plain drop: that waits for every blocking task, and a request
+    // abandoned at the drain bound may still hold one.
+    rt.shutdown_background();
+    result
 }
-

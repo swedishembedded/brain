@@ -215,14 +215,25 @@ async fn signal_loop(trigger: Trigger, ready: std::sync::mpsc::Sender<()>) {
         _ = sigint.recv() => "SIGINT",
         _ = sigterm.recv() => "SIGTERM",
     };
-    eprintln!("brain: received {first}, shutting down (send it again to force-exit)");
+    // Fired BEFORE anything is logged: the log is a courtesy, the shutdown is
+    // the job. `eprintln!` panics when stderr's reader has gone (EPIPE) and
+    // blocks when it has stopped reading, and either would otherwise end this
+    // thread with the signal consumed and the server still running.
     trigger.fire();
+    note(&format!("brain: received {first}, shutting down (send it again to force-exit)"));
     tokio::select! {
         _ = sigint.recv() => {}
         _ = sigterm.recv() => {}
     }
-    eprintln!("brain: received a second signal, force-exiting");
-    std::process::exit(130);
+    note("brain: received a second signal, force-exiting");
+    exit_now(130);
+}
+
+/// Best-effort line on stderr for the shutdown path: a failed write (a closed
+/// pipe, a full terminal) is dropped rather than turned into a panic.
+fn note(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
 #[cfg(not(unix))]
@@ -233,11 +244,11 @@ async fn signal_loop(trigger: Trigger, ready: std::sync::mpsc::Sender<()>) {
     // primary target; see `docs/engine/*` for the supported platform list).
     let _ = ready.send(());
     let _ = tokio::signal::ctrl_c().await;
-    eprintln!("brain: received Ctrl-C, shutting down (send it again to force-exit)");
     trigger.fire();
+    note("brain: received Ctrl-C, shutting down (send it again to force-exit)");
     let _ = tokio::signal::ctrl_c().await;
-    eprintln!("brain: received a second Ctrl-C, force-exiting");
-    std::process::exit(130);
+    note("brain: received a second Ctrl-C, force-exiting");
+    exit_now(130);
 }
 
 #[cfg(test)]
