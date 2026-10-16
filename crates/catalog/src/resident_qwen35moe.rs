@@ -9,12 +9,10 @@
 //! **single-GPU**, **fp32 weights only** (`Engine::from_map`/`from_map_on`
 //! call `Qwen35::new_on`, never `new_on_i8` — weight quantization is
 //! explicitly named as deferred there), **fp32 KV** (no int8 KV path exists
-//! for this engine, unlike `qwen3::serve::Engine`'s `kv_int8` default), and
-//! **one truly-active sequence at a time on the GPU** (several sequences may
-//! be RESIDENT and interleaved by the `Scheduler` across iterations — real
-//! continuous batching at the admission/scheduling level — but never
-//! batched together into one GPU dispatch; see `qwen35moe::serve`'s module
-//! doc, "Deliberately deferred").
+//! for this engine, unlike `qwen3::serve::Engine`'s `kv_int8` default).
+//! Every resident sequence's decode row goes through one batched forward per
+//! scheduler iteration (the generic `model::serve::Scheduler`, driven by
+//! `llmserve`).
 //!
 //! Not present, because they don't exist anywhere in this crate yet: LoRA
 //! adapter folding (`qwen3::lora::fold_adapter_into` has no `qwen35moe`
@@ -57,14 +55,15 @@
 //!     how many are dispatched together on the GPU per step, which is always
 //!     1 for this engine). Default 4.
 
-use capability::{ActionResult, Invocation, Manifest, Progress};
+use capability::{Invocation, Manifest};
 use data::qwen_tokenizer::QwenBpe;
-use qwen3::chat::{parse_request, SeqState};
+use qwen3::chat::parse_request;
 use qwen35moe::config::{LayerType, Qwen35Config};
 use qwen35moe::serve::{Engine, Scheduler};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::resident_llm::{est_vram, generate_spec, on_device};
+use llmserve::{ScheduledInstance, TextFrontend};
 
 /// Catalog id: a `brain/`-prefixed synthetic id, matching `qwen35moe::caps::MODEL`
 /// exactly (`GptResident::from_env`'s doc explains why an env-loaded
@@ -112,8 +111,8 @@ impl Qwen35Resident {
     }
 
     /// How many sequences may be resident at once (`Engine::from_map`'s
-    /// `max_concurrent`, i.e. its `num_blocks`) — NOT how many run on the GPU
-    /// concurrently per step (always 1; see this module's own doc).
+    /// `max_concurrent`, i.e. its `num_blocks`), all decoded in one batched
+    /// step.
     fn max_concurrent() -> u32 {
         std::env::var("BRAIN_QWEN35MOE_MAX_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(4u32).max(1)
     }
@@ -135,6 +134,9 @@ impl ResidentModel for Qwen35Resident {
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
         InstanceKey::new(&self.id, "default")
+    }
+    fn batch_limit(&self) -> Option<usize> {
+        Some(Self::max_concurrent() as usize)
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         let cost = est_vram(&self.path);
@@ -191,122 +193,8 @@ impl ResidentModel for Qwen35Resident {
             let engine = Engine::from_map(cfg, &weights, ctx, max_concurrent);
             Scheduler::new(engine, max_concurrent as usize)
         })?;
-        Ok(Box::new(Qwen35Instance { tok, stop, sched }))
+        Ok(Box::new(ScheduledInstance::new(TextFrontend { tok, stop, label: "qwen35moe", parse: parse_request }, sched)))
     }
-}
-
-struct Qwen35Instance {
-    tok: QwenBpe,
-    /// The ids that end a generation (`data::generation::stop_ids`).
-    stop: Vec<u32>,
-    sched: Scheduler,
-}
-
-impl Instance for Qwen35Instance {
-    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
-    }
-
-    /// Every invocation in `invs` is submitted into the SAME persistent
-    /// `Scheduler` (built once at `activate`, so the KV pool and prefix cache
-    /// are shared and reused across calls) and driven to completion together
-    /// — mirroring `crate::resident_llm::run_batch_scheduled` exactly (same
-    /// admission/streaming/cancellation/rejection handling), just against
-    /// `qwen35moe::serve::Scheduler` instead of `qwen3`'s.
-    fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-        run_batch_scheduled(&mut self.sched, &self.tok, &self.stop, invs, progress)
-    }
-
-    /// The paged engine's prefix-cache effectiveness — same shape as
-    /// `crate::resident_llm::QwenInstance::metrics`'s `Batched` arm.
-    fn metrics(&self) -> Vec<(String, serde_json::Value)> {
-        let (hit, looked, cached) = self.sched.prefix_stats();
-        let rate = if looked > 0 { hit as f64 / looked as f64 } else { 0.0 };
-        vec![
-            ("kv_prefix_hit_rate".to_string(), serde_json::json!(rate)),
-            ("kv_prefix_hit_tokens".to_string(), serde_json::json!(hit)),
-            ("kv_prefix_lookup_tokens".to_string(), serde_json::json!(looked)),
-            ("kv_prefix_cached_blocks".to_string(), serde_json::json!(cached)),
-        ]
-    }
-}
-
-/// Drive every invocation in `invs` to completion on the SAME persistent
-/// `Scheduler` — a near-identical copy of
-/// `crate::resident_llm::run_batch_scheduled` (see that function's doc for
-/// the full reasoning on streaming/cancellation/rejection), specialized to
-/// `qwen35moe::serve::Scheduler` rather than generalized over the engine
-/// type: the two engines' constructor/sizing conventions differ enough
-/// (`Engine::from_map`'s `max_seq_len`/`max_concurrent` vs qwen3's
-/// `block_size`/`num_blocks`/`max_batch`/`max_blocks_per_seq`/`max_prefill`)
-/// that a shared generic wrapper would need its own abstraction layer, out
-/// of scope for this task.
-fn run_batch_scheduled(sched: &mut Scheduler, tok: &QwenBpe, stop: &[u32], invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-    let mut results: Vec<Option<ActionResult>> = vec![None; invs.len()];
-    let mut seq_for_bi: Vec<Option<SeqState>> = Vec::with_capacity(invs.len());
-    let mut id_for_bi: Vec<Option<u64>> = Vec::with_capacity(invs.len());
-
-    for (bi, inv) in invs.iter().enumerate() {
-        match parse_request(tok, inv) {
-            Ok(req) => {
-                let sample = model::serve::SampleParams { temp: req.temp, top_k: req.top_k, top_p: req.top_p };
-                let seed = req.seed;
-                let max_new = req.max_new;
-                let seq = SeqState::new(&req, inv.cancel.clone());
-                let id = sched.submit_sampled(model::serve::Request { prompt: req.ids, max_new, stop: stop.to_vec() }, sample, seed);
-                progress(bi, Progress::step(0, max_new as u32, "generating"));
-                seq_for_bi.push(Some(seq));
-                id_for_bi.push(Some(id));
-            }
-            Err(e) => {
-                results[bi] = Some(Err(e));
-                seq_for_bi.push(None);
-                id_for_bi.push(None);
-            }
-        }
-    }
-
-    let mut remaining: std::collections::HashSet<usize> = (0..invs.len()).filter(|&bi| id_for_bi[bi].is_some()).collect();
-    while !remaining.is_empty() {
-        let mut just_finished = Vec::new();
-        for &bi in &remaining {
-            let id = id_for_bi[bi].unwrap();
-            let Some(all_tokens) = sched.tokens_of(id) else { continue };
-            let seq = seq_for_bi[bi].as_mut().unwrap();
-            if seq.advance(tok, all_tokens, &mut |p| progress(bi, p)) {
-                let toks = sched.cancel(id).unwrap_or_default();
-                let seq = seq_for_bi[bi].take().unwrap();
-                results[bi] = Some(Ok(seq.finish(tok, &toks, &mut |p| progress(bi, p))));
-                just_finished.push(bi);
-            }
-        }
-        for bi in just_finished {
-            remaining.remove(&bi);
-        }
-        if remaining.is_empty() {
-            break;
-        }
-        let report = sched.step_report();
-        // A request the scheduler refuses at admission never appears in
-        // `completed` and never will; without handling it here its `bi`
-        // would stay in `remaining` forever (see
-        // `resident_llm::rejected_admission_resolves_promptly_instead_of_hanging`
-        // for the exact bug class this guards).
-        for (id, reason) in report.rejected {
-            let bi = id_for_bi.iter().position(|x| *x == Some(id)).expect("rejected id must belong to this batch");
-            seq_for_bi[bi] = None;
-            results[bi] = Some(Err(format!("qwen35moe: {reason}")));
-            remaining.remove(&bi);
-        }
-        for (id, toks) in report.completed {
-            let bi = id_for_bi.iter().position(|x| *x == Some(id)).expect("completed id must belong to this batch");
-            if let Some(seq) = seq_for_bi[bi].take() {
-                results[bi] = Some(Ok(seq.finish(tok, &toks, &mut |p| progress(bi, p))));
-            }
-            remaining.remove(&bi);
-        }
-    }
-    results.into_iter().map(|r| r.expect("every batch index resolved")).collect()
 }
 
 #[cfg(test)]

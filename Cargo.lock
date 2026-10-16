@@ -752,6 +752,7 @@ dependencies = [
  "brain-kronos",
  "brain-lfm2",
  "brain-llava",
+ "brain-llmserve",
  "brain-loader",
  "brain-lpips",
  "brain-ltxv",
@@ -1727,6 +1728,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-llmserve"
+version = "2.0.0"
+dependencies = [
+ "brain-capability",
+ "brain-data",
+ "brain-model",
+ "brain-qwen3",
+ "brain-residency",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-loader"
 version = "2.0.0"
 dependencies = [
@@ -2155,6 +2168,7 @@ dependencies = [
  "brain-gguf",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-llmserve",
  "brain-memauth",
  "brain-model",
  "brain-modelstore",

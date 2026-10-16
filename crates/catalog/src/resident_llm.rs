@@ -31,12 +31,13 @@ use serde_json::json;
 
 use crate::adapter_registry::{AdapterBankSettings, AdapterRegistry, AdapterSync, QwenAdapterView, ADAPTER_PARAM};
 use crate::adapter_release::{LoadedAdapter, ServedBase};
+use llmserve::{run_batch_scheduled, scheduler_metrics, Frontend};
 
 use std::sync::Arc;
 
 use data::rng::Rng;
 use data::tokenizer::{CharTokenizer, Tokenizer};
-use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat, SeqState};
+use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat};
 
 // ---------------------------------------------------------------- shared
 
@@ -930,6 +931,9 @@ impl ResidentModel for QwenResident {
     /// the instance holds the base weights once and the adapters beside them
     /// in a bank, so a request for any of them runs on it, in the same batch as
     /// the others ([`QwenAdapterView`] answers with this same key).
+    fn batch_limit(&self) -> Option<usize> {
+        Some(self.max_batch as usize)
+    }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
         InstanceKey::new(self.id.as_str(), "default")
     }
@@ -1173,159 +1177,47 @@ impl Instance for QwenInstance {
     /// swap never changes what a running sequence reads.
     fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         self.adapters.sync(self.engine.decoder_mut());
-        run_batch_scheduled(&mut self.engine, &self.decoding, &self.adapters, invs, progress)
+        run_batch_scheduled(&mut self.engine, &QwenFrontend { decoding: &self.decoding, adapters: &self.adapters }, invs, progress)
     }
 
     /// The prefix cache's effectiveness, surfaced through
     /// `Executor::stats().metrics` (reachable from HTTP/D-Bus).
     fn metrics(&self) -> Vec<(String, serde_json::Value)> {
-        let (hit, looked, cached) = self.engine.prefix_stats();
-        let rate = if looked > 0 { hit as f64 / looked as f64 } else { 0.0 };
-        vec![
-            ("kv_prefix_hit_rate".to_string(), serde_json::json!(rate)),
-            ("kv_prefix_hit_tokens".to_string(), serde_json::json!(hit)),
-            ("kv_prefix_lookup_tokens".to_string(), serde_json::json!(looked)),
-            ("kv_prefix_cached_blocks".to_string(), serde_json::json!(cached)),
-        ]
+        scheduler_metrics(&self.engine)
     }
 }
 
-/// Drive every invocation in `invs` to completion on the SAME persistent
-/// `Scheduler` - see [`QwenInstance::run_batch`]'s doc.
-fn run_batch_scheduled(
-    sched: &mut model::serve::Scheduler<qwen3::serve::Engine>,
-    decoding: &Decoding,
-    adapters: &AdapterSync,
-    invs: &[Invocation],
-    progress: &mut dyn FnMut(usize, Progress),
-) -> Vec<ActionResult> {
-    let Decoding { tok, format, stop } = decoding;
-    // The scheduler-level batch: how many concurrent requests residency
-    // bundled onto this SAME persistent `Scheduler` pass, as opposed to
-    // `bridge.rs`'s per-HTTP-request log, which knows nothing about
-    // scheduler-side batching at all.
-    residency::log::info(&format!("Qwen batch: {} request(s) admitted to the scheduler", invs.len()));
-    let mut results: Vec<Option<ActionResult>> = vec![None; invs.len()];
-    let mut seq_for_bi: Vec<Option<SeqState>> = Vec::with_capacity(invs.len());
-    let mut id_for_bi: Vec<Option<u64>> = Vec::with_capacity(invs.len());
-    // The release each request's adapter was routed to; a reply names it.
-    let mut identity_for_bi: Vec<Option<residency::AdapterIdentity>> = vec![None; invs.len()];
-    let named = |outcome: capability::Outcome, identity: &Option<residency::AdapterIdentity>| match identity {
-        Some(identity) => outcome.set("adapter", serde_json::json!({ "id": identity.id, "digest": identity.digest })),
-        None => outcome,
-    };
+/// Qwen3's request front end: its own chat format, and the adapter a
+/// request's model id stamped (see [`ADAPTER_PARAM`]).
+struct QwenFrontend<'a> {
+    decoding: &'a Decoding,
+    adapters: &'a AdapterSync,
+}
 
-    for (bi, inv) in invs.iter().enumerate() {
-        // The adapter this request's model id stands for. A name the bank no
-        // longer holds is the caller's "no model", never the base's answer
-        // under another name.
-        let adapter = match inv.get_str(ADAPTER_PARAM).map(|name| adapters.route(&name)).transpose() {
-            Ok(routed) => routed,
-            Err(e) => {
-                results[bi] = Some(Err(e));
-                seq_for_bi.push(None);
-                id_for_bi.push(None);
-                continue;
-            }
-        };
-        let (adapter, identity) = match adapter {
-            Some((adapter, identity)) => (Some(adapter), Some(identity)),
-            None => (None, None),
-        };
-        identity_for_bi[bi] = identity;
-        match parse_request_as(tok, format, inv) {
-            Ok(req) => {
-                let sample = model::serve::SampleParams { temp: req.temp, top_k: req.top_k, top_p: req.top_p };
-                let seed = req.seed;
-                let max_new = req.max_new;
-                let seq = SeqState::new(&req, inv.cancel.clone());
-                let request = model::serve::Request { prompt: req.ids, max_new, stop: stop.to_vec() };
-                let id = match adapter {
-                    Some(adapter) => sched.submit_for_adapter(request, adapter, sample, seed),
-                    None => sched.submit_sampled(request, sample, seed),
-                };
-                progress(bi, Progress::step(0, max_new as u32, "generating"));
-                seq_for_bi.push(Some(seq));
-                id_for_bi.push(Some(id));
-            }
-            Err(e) => {
-                results[bi] = Some(Err(e));
-                seq_for_bi.push(None);
-                id_for_bi.push(None);
-            }
+impl Frontend for QwenFrontend<'_> {
+    fn tok(&self) -> &data::qwen_tokenizer::QwenBpe {
+        &self.decoding.tok
+    }
+    fn stop(&self) -> &[u32] {
+        &self.decoding.stop
+    }
+    fn label(&self) -> &str {
+        "Qwen"
+    }
+    fn parse(&self, inv: &Invocation) -> Result<qwen3::chat::ParsedRequest, String> {
+        parse_request_as(&self.decoding.tok, &self.decoding.format, inv)
+    }
+    fn route(&self, inv: &Invocation) -> Result<Option<(model::serve::AdapterId, residency::AdapterIdentity)>, String> {
+        inv.get_str(ADAPTER_PARAM).map(|name| self.adapters.route(&name)).transpose()
+    }
+    fn rejection(&self, inv: &Invocation, reason: &model::serve::RejectReason) -> String {
+        match (reason, inv.get_str(ADAPTER_PARAM)) {
+            // An adapter the engine unloaded between routing and admission:
+            // as an unknown model, with no engine detail.
+            (model::serve::RejectReason::AdapterUnavailable { .. }, Some(name)) => format!("no model '{name}'"),
+            _ => format!("qwen: {reason}"),
         }
     }
-
-    let mut remaining: std::collections::HashSet<usize> = (0..invs.len()).filter(|&bi| id_for_bi[bi].is_some()).collect();
-    while !remaining.is_empty() {
-        // Stream each still-open sequence's newly generated suffix and check
-        // its stop-string/cancellation; a triggered sequence is cancelled
-        // (and finalised) immediately rather than waiting for the scheduler
-        // to reap it naturally - `Scheduler::cancel` returns its tokens so
-        // far synchronously and reclaims its blocks right away.
-        let mut just_finished = Vec::new();
-        for &bi in &remaining {
-            let id = id_for_bi[bi].unwrap();
-            let Some(all_tokens) = sched.tokens_of(id) else { continue };
-            let seq = seq_for_bi[bi].as_mut().unwrap();
-            if seq.advance(tok, all_tokens, &mut |p| progress(bi, p)) {
-                let toks = sched.cancel(id).unwrap_or_default();
-                let seq = seq_for_bi[bi].take().unwrap();
-                results[bi] = Some(Ok(named(seq.finish(tok, &toks, &mut |p| progress(bi, p)), &identity_for_bi[bi])));
-                just_finished.push(bi);
-            }
-        }
-        for bi in just_finished {
-            remaining.remove(&bi);
-        }
-        if remaining.is_empty() {
-            break;
-        }
-        let report = sched.step_report();
-        // Per-step scheduling detail: gated at level 3 ("finer scheduling
-        // detail" per `run_serve`'s HELP text) and the format cost skipped
-        // below it - a continuous-batching decode loop calls this once per
-        // TOKEN, so an unconditional `format!` here would cost real
-        // throughput even with nothing printed.
-        if residency::log::verbosity() >= 3 {
-            residency::log::debug(&format!(
-                "Qwen batch step: {} running, {} waiting, admitted={}, produced={}, finished={}, rejected={}, demoted={}, promoted={}",
-                sched.running_len(),
-                sched.waiting_len(),
-                report.admitted.len(),
-                report.produced.len(),
-                report.finished.len(),
-                report.rejected.len(),
-                report.demoted.len(),
-                report.promoted.len(),
-            ));
-        }
-        // A request the scheduler refuses at admission (a prompt token
-        // outside its vocabulary, or one that can never fit its per-sequence
-        // capacity - see `model::serve::RejectReason`) never appears in
-        // `completed` and never will; without handling it here its `bi`
-        // would stay in `remaining` forever, spinning this loop on an
-        // otherwise-empty scheduler.
-        for (id, reason) in report.rejected {
-            let bi = id_for_bi.iter().position(|x| *x == Some(id)).expect("rejected id must belong to this batch");
-            seq_for_bi[bi] = None;
-            results[bi] = Some(Err(match (&reason, invs[bi].get_str(ADAPTER_PARAM)) {
-                // An adapter the engine unloaded between routing and
-                // admission: as an unknown model, with no engine detail.
-                (model::serve::RejectReason::AdapterUnavailable { .. }, Some(name)) => format!("no model '{name}'"),
-                _ => format!("qwen: {reason}"),
-            }));
-            remaining.remove(&bi);
-        }
-        for (id, toks) in report.completed {
-            let bi = id_for_bi.iter().position(|x| *x == Some(id)).expect("completed id must belong to this batch");
-            if let Some(seq) = seq_for_bi[bi].take() {
-                results[bi] = Some(Ok(named(seq.finish(tok, &toks, &mut |p| progress(bi, p)), &identity_for_bi[bi])));
-            }
-            remaining.remove(&bi);
-        }
-    }
-    results.into_iter().map(|r| r.expect("every batch index resolved")).collect()
 }
 
 #[cfg(test)]
@@ -2033,7 +1925,7 @@ mod tests {
         let start = std::time::Instant::now();
         let decoding = Decoding { tok, format: ChatFormat::Qwen, stop: Vec::new() };
         let adapters = AdapterSync::new(AdapterRegistry::new(None, ServedBase::new("unused", None)));
-        let results = run_batch_scheduled(&mut sched, &decoding, &adapters, std::slice::from_ref(&inv), &mut |_i, _p| {});
+        let results = run_batch_scheduled(&mut sched, &QwenFrontend { decoding: &decoding, adapters: &adapters }, std::slice::from_ref(&inv), &mut |_i, _p| {});
         assert!(start.elapsed() < std::time::Duration::from_secs(5), "rejected admission must resolve promptly, not hang");
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err(), "an out-of-vocab prompt must be reported as an error, not silently dropped");

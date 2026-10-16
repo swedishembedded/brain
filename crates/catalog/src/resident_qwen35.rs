@@ -2,13 +2,12 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Resident-model adapter putting Qwen3.8-27B's paged serving engine
-//! (`qwen35::serve::Engine`/`Scheduler`) behind the residency [`Executor`].
-//! Mirrors `crate::resident_qwen35moe::Qwen35Resident` almost exactly - the
-//! GDN/GQA decode-step orchestration `Engine` wraps is architecture-
-//! identical between the two crates, so the scope (single-GPU, fp32 weights
-//! only, fp32 KV, one truly-active sequence at a time on the GPU) and the
-//! "deliberately deferred" list are identical too; see
-//! `crates/qwen35/src/serve.rs`'s own module doc for the authoritative list.
+//! (`qwen35::serve::Engine`) behind the residency [`Executor`]. Like every
+//! brain LLM resident it is driven by the generic continuous-batching
+//! `model::serve::Scheduler` through `llmserve` (all admitted sequences'
+//! decode rows go through ONE batched forward per iteration); see
+//! `crates/qwen35/src/serve.rs`'s own module doc for the engine's scope
+//! (single GPU, fp32 weights, fp32 KV, one KV block per sequence).
 //!
 //! Two ways in. [`Qwen35Resident::from_card`] serves a checkpoint the
 //! model-dir scan found (family `"qwen35"` - what `Qwen35::save` stamps,
@@ -45,15 +44,16 @@
 //! <QUANT>]` reference or a path), its sizing, and its tiers - parsed data
 //! from the CLI, never environment variables.
 
-use capability::{ActionResult, Invocation, Manifest, Progress};
+use capability::{Invocation, Manifest};
 use data::qwen_tokenizer::QwenBpe;
-use qwen3::chat::{parse_request, SeqState};
+use qwen3::chat::parse_request;
 use qwen35::caps::with_template_flavor_default;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::serve::{Engine, Scheduler};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::resident_llm::{est_vram, generate_spec, on_device};
+use llmserve::{ScheduledInstance, TextFrontend};
 
 // Re-exported tier types the config struct speaks in, so a CLI builder (or
 // a test) names ONE path for each.
@@ -87,8 +87,8 @@ pub struct Qwen35Sizing {
     /// its per-sequence block size).
     pub ctx: u32,
     /// How many sequences may be RESIDENT at once (`Engine::from_map`'s
-    /// `max_concurrent`, i.e. `num_blocks` - NOT how many are dispatched
-    /// together on the GPU per step, which is always 1 for this engine).
+    /// `max_concurrent`, i.e. `num_blocks`) and so decode together in one
+    /// batched step.
     pub max_batch: u32,
 }
 
@@ -163,8 +163,8 @@ impl Qwen35Resident {
     }
 
     /// How many sequences may be resident at once (`Engine::from_map`'s
-    /// `max_concurrent`, i.e. its `num_blocks`) - NOT how many run on the GPU
-    /// concurrently per step (always 1; see this module's own doc).
+    /// `max_concurrent`, i.e. its `num_blocks`), all decoded in one batched
+    /// step.
     fn max_concurrent(&self) -> u32 {
         self.sizing.max_batch
     }
@@ -177,13 +177,16 @@ impl ResidentModel for Qwen35Resident {
         // floor on real serving capacity.
         Manifest::new(
             &self.id,
-            "text generation (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder; single-GPU, fp32 weights + fp32 KV; multiple sequences may be admitted and scheduled concurrently on a shared engine, but the GPU dispatch itself runs one sequence's step at a time -- see crate::resident_qwen35's module doc)",
+            "text generation (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder; single-GPU, fp32 weights + fp32 KV; continuous batching: every resident sequence decodes in one batched step per iteration -- see crate::resident_qwen35's module doc)",
             vec![generate_spec("generate text (Qwen3.8-27B; chat template optional)", true)],
         )
         .with_max_context_tokens(self.ctx() as u64)
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
         InstanceKey::new(&self.id, "default")
+    }
+    fn batch_limit(&self) -> Option<usize> {
+        Some(self.max_concurrent() as usize)
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         let cost = est_vram(&self.path);
@@ -237,115 +240,15 @@ impl ResidentModel for Qwen35Resident {
             let engine = Engine::from_map(cfg, &weights, ctx, max_concurrent);
             Scheduler::new(engine, max_concurrent as usize)
         })?;
-        Ok(Box::new(Qwen35Instance { tok, stop, sched }))
+        Ok(Box::new(ScheduledInstance::new(TextFrontend { tok, stop, label: "qwen35", parse: parse_qwen35 }, sched)))
     }
 }
 
-struct Qwen35Instance {
-    tok: QwenBpe,
-    /// The ids that end a generation (`data::generation::stop_ids`).
-    stop: Vec<u32>,
-    sched: Scheduler,
-}
-
-impl Instance for Qwen35Instance {
-    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
-    }
-
-    /// Every invocation in `invs` is submitted into the SAME persistent
-    /// `Scheduler` (built once at `activate`, so the KV pool and prefix cache
-    /// are shared and reused across calls) and driven to completion together
-    /// - mirroring `crate::resident_qwen35moe::run_batch_scheduled` exactly.
-    fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-        run_batch_scheduled(&mut self.sched, &self.tok, &self.stop, invs, progress)
-    }
-
-    /// The paged engine's prefix-cache effectiveness.
-    fn metrics(&self) -> Vec<(String, serde_json::Value)> {
-        let (hit, looked, cached) = self.sched.prefix_stats();
-        let rate = if looked > 0 { hit as f64 / looked as f64 } else { 0.0 };
-        vec![
-            ("kv_prefix_hit_rate".to_string(), serde_json::json!(rate)),
-            ("kv_prefix_hit_tokens".to_string(), serde_json::json!(hit)),
-            ("kv_prefix_lookup_tokens".to_string(), serde_json::json!(looked)),
-            ("kv_prefix_cached_blocks".to_string(), serde_json::json!(cached)),
-        ]
-    }
-}
-
-/// Drive every invocation in `invs` to completion on the SAME persistent
-/// `Scheduler` - a near-identical copy of
-/// `crate::resident_qwen35moe::run_batch_scheduled`, specialized to
-/// `qwen35::serve::Scheduler` rather than generalized over the engine type.
-fn run_batch_scheduled(sched: &mut Scheduler, tok: &QwenBpe, stop: &[u32], invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-    let mut results: Vec<Option<ActionResult>> = vec![None; invs.len()];
-    let mut seq_for_bi: Vec<Option<SeqState>> = Vec::with_capacity(invs.len());
-    let mut id_for_bi: Vec<Option<u64>> = Vec::with_capacity(invs.len());
-
-    for (bi, inv) in invs.iter().enumerate() {
-        // This IS Qwen3.8-27B, so it renders the 3.8 template by default -
-        // `parse_request` alone defaults to the Qwen3-era flavor, which
-        // would silently mis-render this model's prompt (the GGUF resident
-        // and `caps.rs` both already apply this; this engine did not).
-        match parse_request(tok, &with_template_flavor_default(inv)) {
-            Ok(req) => {
-                let sample = model::serve::SampleParams { temp: req.temp, top_k: req.top_k, top_p: req.top_p };
-                let seed = req.seed;
-                let max_new = req.max_new;
-                let seq = SeqState::new(&req, inv.cancel.clone());
-                let id = sched.submit_sampled(model::serve::Request { prompt: req.ids, max_new, stop: stop.to_vec() }, sample, seed);
-                progress(bi, Progress::step(0, max_new as u32, "generating"));
-                seq_for_bi.push(Some(seq));
-                id_for_bi.push(Some(id));
-            }
-            Err(e) => {
-                results[bi] = Some(Err(e));
-                seq_for_bi.push(None);
-                id_for_bi.push(None);
-            }
-        }
-    }
-
-    let mut remaining: std::collections::HashSet<usize> = (0..invs.len()).filter(|&bi| id_for_bi[bi].is_some()).collect();
-    while !remaining.is_empty() {
-        let mut just_finished = Vec::new();
-        for &bi in &remaining {
-            let id = id_for_bi[bi].unwrap();
-            let Some(all_tokens) = sched.tokens_of(id) else { continue };
-            let seq = seq_for_bi[bi].as_mut().unwrap();
-            if seq.advance(tok, all_tokens, &mut |p| progress(bi, p)) {
-                let toks = sched.cancel(id).unwrap_or_default();
-                let seq = seq_for_bi[bi].take().unwrap();
-                results[bi] = Some(Ok(seq.finish(tok, &toks, &mut |p| progress(bi, p))));
-                just_finished.push(bi);
-            }
-        }
-        for bi in just_finished {
-            remaining.remove(&bi);
-        }
-        if remaining.is_empty() {
-            break;
-        }
-        let report = sched.step_report();
-        // A request the scheduler refuses at admission never appears in
-        // `completed` and never will; without handling it here its `bi`
-        // would stay in `remaining` forever.
-        for (id, reason) in report.rejected {
-            let bi = id_for_bi.iter().position(|x| *x == Some(id)).expect("rejected id must belong to this batch");
-            seq_for_bi[bi] = None;
-            results[bi] = Some(Err(format!("qwen35: {reason}")));
-            remaining.remove(&bi);
-        }
-        for (id, toks) in report.completed {
-            let bi = id_for_bi.iter().position(|x| *x == Some(id)).expect("completed id must belong to this batch");
-            if let Some(seq) = seq_for_bi[bi].take() {
-                results[bi] = Some(Ok(seq.finish(tok, &toks, &mut |p| progress(bi, p))));
-            }
-            remaining.remove(&bi);
-        }
-    }
-    results.into_iter().map(|r| r.expect("every batch index resolved")).collect()
+/// This model renders the 3.8 chat template by default - `parse_request`
+/// alone defaults to the Qwen3-era flavor, which would silently mis-render
+/// its prompt.
+fn parse_qwen35(tok: &QwenBpe, inv: &Invocation) -> Result<qwen3::chat::ParsedRequest, String> {
+    parse_request(tok, &with_template_flavor_default(inv))
 }
 
 /// The INT8, multi-GPU, load-straight-from-GGUF Qwen3.8-27B

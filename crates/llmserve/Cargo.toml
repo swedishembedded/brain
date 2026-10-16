@@ -1,0 +1,18 @@
+[package]
+name = "brain-llmserve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The one residency glue for brain's text LLMs: drives a request group through model::serve::Scheduler (continuous batching over any PagedDecoder), with per-request streaming, cancellation, stop strings and adapter routing, and the Instance that wraps it. What every LLM resident serves through."
+
+[lib]
+name = "llmserve"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+brain-data.workspace = true
+brain-model.workspace = true
+brain-qwen3.workspace = true
+brain-residency.workspace = true
+serde_json.workspace = true

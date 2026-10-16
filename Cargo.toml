@@ -105,6 +105,7 @@ default-members = [
     "crates/perf",
     "crates/gradcheck",
     "crates/testutil",
+    "crates/llmserve",
     "crates/modelref",
     "crates/modelstore",
     "crates/modelcost",
@@ -264,6 +265,7 @@ brain-bench = { path = "crates/bench" }
 brain-perf = { path = "crates/perf" }
 brain-gradcheck = { path = "crates/gradcheck" }
 brain-testutil = { path = "crates/testutil" }
+brain-llmserve = { path = "crates/llmserve" }
 brain-modelref = { path = "crates/modelref" }
 brain-modelstore = { path = "crates/modelstore" }
 brain-modelcost = { path = "crates/modelcost" }
