@@ -81,6 +81,7 @@ pub enum Error {
     /// The architecture exists but does not provide a capability the request
     /// needs (token objectives for DPO/GRPO, a chat fine-tuner). Refused when
     /// the request is configured, before any weights are read or device claimed.
+    #[cfg(feature = "study")]
     Unsupported(model::training::Unsupported),
     /// Fetching a model from the hub failed.
     Download(String),
@@ -132,6 +133,7 @@ impl std::fmt::Display for Error {
             Error::Ambiguous(a) => write!(f, "{}", describe_ambiguity(a)),
             Error::Missing(m) => write!(f, "{}", describe_missing(m)),
             Error::UnsupportedArchitecture(a) => write!(f, "unsupported architecture: {a}"),
+            #[cfg(feature = "study")]
             Error::Unsupported(u) => write!(f, "{u}"),
             Error::Download(m) => write!(f, "download failed: {m}"),
             Error::LicenseRequired(m) => write!(f, "license required: {m}"),
@@ -148,6 +150,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Io(e) => Some(e),
+            #[cfg(feature = "study")]
             Error::Unsupported(u) => Some(u),
             _ => None,
         }
