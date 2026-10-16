@@ -2379,7 +2379,7 @@ impl MultiDeviceResidentModel for Qwen35GgufResident {
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
         let (engine, tok, stop) = self.activate_engine(devices)?;
         let sched = model::serve::Scheduler::new(engine, self.max_batch as usize);
-        Ok(Box::new(llmserve::ScheduledInstance::new(llmserve::TextFrontend { tok, stop, label: "qwen35", parse: parse_request }, sched)))
+        Ok(Box::new(llmserve::ScheduledInstance::new(llmserve::TextFrontend { tok, stop, label: "qwen35", parse: parse_request }, sched, self.max_batch as usize)))
     }
 }
 

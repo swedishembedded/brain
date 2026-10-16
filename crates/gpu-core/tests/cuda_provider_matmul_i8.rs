@@ -324,12 +324,6 @@ fn the_int8_tensor_core_gemm_is_materially_faster_than_the_portable_kernel() {
 ///
 ///   cargo test --release -p brain-gpu-core --test cuda_provider_matmul_i8 -- --device gpu1 --backend cuda --ignored sweep
 fn sweep_tile_configurations() {
-    use backend_api::{BindKind, NativeSpec};
-    let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
-        eprintln!("sweep: no CUDA device on this box - skipping");
-        return;
-    };
-    let src = kernels_cuda::get("matmul_i8_mma").expect("registered").src;
     // (BM, BN, WARPS_M, WARPS_N, STAGES)
     let configs: &[(u32, u32, u32, u32, u32)] = &[
         (128, 64, 4, 2, 3),
@@ -339,8 +333,47 @@ fn sweep_tile_configurations() {
         (128, 128, 4, 2, 2),
         (256, 64, 4, 2, 2),
     ];
+    sweep(configs, &[(256u32, 5120u32, 5120u32), (256, 17408, 5120), (256, 5120, 17408), (512, 5120, 5120)]);
+}
+
+/// [`sweep_tile_configurations`] at the row counts of a batched DECODE step
+/// (16-128 sequences) on the 27B's projection shapes, where a block's 64x64
+/// output tile leaves most of a 132-SM part without a block and the kernel
+/// streams the weights at a fraction of the memory bandwidth: smaller weight
+/// tiles (more blocks) and deeper pipelines (more bytes in flight).
+///
+///   cargo test --release -p brain-gpu-core --test cuda_provider_matmul_i8 -- --backend cuda --ignored sweep_skinny
+fn sweep_skinny_tile_configurations() {
+    let configs: &[(u32, u32, u32, u32, u32)] = &[
+        (64, 64, 2, 2, 4),
+        (64, 32, 2, 1, 4),
+        (64, 32, 2, 1, 6),
+        (64, 16, 2, 1, 4),
+        (64, 16, 2, 1, 6),
+        (32, 32, 2, 1, 6),
+        (32, 16, 2, 1, 6),
+        (16, 32, 1, 1, 6),
+        (16, 16, 1, 1, 8),
+        (64, 32, 4, 1, 4),
+    ];
+    let mut shapes = Vec::new();
+    for m in [16u32, 32, 64, 128] {
+        for (n, k) in [(5120u32, 5120u32), (17408, 5120), (5120, 17408), (10240, 5120)] {
+            shapes.push((m, n, k));
+        }
+    }
+    sweep(configs, &shapes);
+}
+
+fn sweep(configs: &[(u32, u32, u32, u32, u32)], shapes: &[(u32, u32, u32)]) {
+    use backend_api::{BindKind, NativeSpec};
+    let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
+        eprintln!("sweep: no CUDA device on this box - skipping");
+        return;
+    };
+    let src = kernels_cuda::get("matmul_i8_mma").expect("registered").src;
     let bindings: &'static [BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
-    for &(m, n, k) in &[(256u32, 5120u32, 5120u32), (256, 17408, 5120), (256, 5120, 17408), (512, 5120, 5120)] {
+    for &(m, n, k) in shapes {
         let p = Problem::new(m, n, k, 9);
         let d = Device::upload(&gpu, &p);
         for &(bm, bn, wm, wn, st) in configs {
@@ -375,8 +408,9 @@ fn sweep_tile_configurations() {
             gpu.set_kernel_timing(false);
             let got = gpu.read(&d.y, 64);
             eprintln!(
-                "sweep: {m}x{n}x{k} cfg {bm}x{bn} w{wm}x{wn} s{st}: {best:.3} ms  {:.1} TOPS  (y[0]={:.3})",
+                "sweep: {m}x{n}x{k} cfg {bm}x{bn} w{wm}x{wn} s{st}: {best:.3} ms  {:.1} TOPS  {:.0} GB/s of weights  (y[0]={:.3})",
                 2.0 * m as f64 * n as f64 * k as f64 / (best * 1e-3) / 1e12,
+                n as f64 * k as f64 / (best * 1e-3) / 1e9,
                 got[0]
             );
         }
@@ -393,5 +427,5 @@ gpu_core::card_tests!(
     the_int8_tensor_core_gemm_is_routed_to_and_agrees_with_the_portable_kernel_on_real_shapes,
     the_int8_tensor_core_gemm_is_materially_faster_than_the_portable_kernel,
     ; host: the_selector_and_the_kernel_agree_on_the_tensor_core_floor,
-    ; ignored: sweep_tile_configurations,
+    ; ignored: sweep_tile_configurations, sweep_skinny_tile_configurations,
 );

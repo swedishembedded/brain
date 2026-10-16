@@ -85,6 +85,29 @@ pub trait ResidentModel: Send + Sync {
     }
 }
 
+/// The live end of a running job group: how an [`Instance::run_open`] call
+/// learns of jobs that arrived AFTER the group started, and hands each job's
+/// result back the moment it is done instead of when the whole group is.
+///
+/// Indices are the order jobs joined the group: the `invs` given to
+/// `run_open` are `0..invs.len()`, each job [`take`](Self::take) returns
+/// follows, and the `progress`/`finish` calls name a job by that index.
+pub trait JobFeed {
+    /// Jobs queued for this group since the last call, at most `max`.
+    /// Non-blocking; empty when nothing has arrived or `max` is 0.
+    fn take(&mut self, max: usize) -> Vec<Invocation>;
+
+    /// Job `index` is finished: deliver its result to its caller now.
+    /// Frees the slot it held, so a queued job can take it.
+    fn finish(&mut self, index: usize, result: ActionResult);
+
+    /// Stop accepting further jobs because the instance has nothing running.
+    /// `false` means a job slipped in between the last `take` and now - it is
+    /// waiting to be taken and the group must not end yet. After `true`, jobs
+    /// for this key wait for the next group.
+    fn close(&mut self) -> bool;
+}
+
 /// A built, Hot model instance. Dropping it frees the device memory (RAII), so the
 /// manager demotes simply by dropping. Actions run on the manager's worker thread,
 /// never on an async/bus thread.
@@ -97,6 +120,18 @@ pub trait Instance: Send {
     /// is called with the batch index so per-sequence token streams stay separate.
     fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         invs.iter().enumerate().map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p))).collect()
+    }
+
+    /// Run `invs` as an OPEN group: a model that decodes many requests per step
+    /// admits jobs that arrive while the group runs, between its steps, and
+    /// finishes each job as soon as it completes - continuous batching across
+    /// everything queued for this instance, not only what was queued when the
+    /// call started. Returns `true` when it handled the group (every job's
+    /// result delivered through `feed`); `false`, having done nothing, when
+    /// the model only batches a closed group ([`Self::run_batch`]) - the
+    /// default.
+    fn run_open(&mut self, _action: &str, _invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress), _feed: &mut dyn JobFeed) -> bool {
+        false
     }
 
     /// Model-specific observability metrics (e.g. a paged-KV serving engine's

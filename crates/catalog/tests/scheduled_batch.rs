@@ -93,3 +93,54 @@ fn a_cancelled_request_leaves_the_batch_without_disturbing_the_rest() {
     assert!(results[0].is_ok());
     assert_eq!(texts(vec![results[1].clone()]), alone);
 }
+
+/// Hands a group scripted late jobs: job `i` becomes available at the
+/// `after_polls`-th call of `take`, and every result is recorded in the order
+/// it was delivered.
+struct ScriptedFeed {
+    late: Vec<(usize, Invocation)>,
+    polls: usize,
+    finished: Vec<(usize, ActionResult)>,
+}
+
+impl residency::JobFeed for ScriptedFeed {
+    fn take(&mut self, max: usize) -> Vec<Invocation> {
+        self.polls += 1;
+        let mut out = Vec::new();
+        while out.len() < max && self.late.first().is_some_and(|(at, _)| *at <= self.polls) {
+            out.push(self.late.remove(0).1);
+        }
+        out
+    }
+    fn finish(&mut self, index: usize, result: ActionResult) {
+        self.finished.push((index, result));
+    }
+    fn close(&mut self) -> bool {
+        self.late.is_empty()
+    }
+}
+
+/// A request that arrives while a group is already decoding joins it between
+/// steps: it is answered when ITS generation ends (before the long request
+/// that was running when it arrived), and neither output differs from running
+/// that request alone.
+#[test]
+fn a_late_request_joins_the_running_group_and_is_answered_when_it_finishes() {
+    let front = front();
+    let long = inv("a long one", 10, 0.0, 1);
+    let short = inv("short", 3, 0.8, 9);
+    let alone_long = texts(run_batch_scheduled(&mut scheduler(1), &front, std::slice::from_ref(&long), &mut |_, _| {}));
+    let alone_short = texts(run_batch_scheduled(&mut scheduler(1), &front, std::slice::from_ref(&short), &mut |_, _| {}));
+
+    let mut feed = ScriptedFeed { late: vec![(3, short)], polls: 0, finished: Vec::new() };
+    llmserve::run_open_scheduled(&mut scheduler(4), &front, std::slice::from_ref(&long), 4, &mut |_, _| {}, &mut feed);
+
+    let order: Vec<usize> = feed.finished.iter().map(|(i, _)| *i).collect();
+    assert_eq!(order, vec![1, 0], "the late short request ends before the long one it joined");
+    let mut by_index = vec![String::new(); 2];
+    for (i, r) in feed.finished {
+        by_index[i] = texts(vec![r]).remove(0);
+    }
+    assert_eq!(by_index[0], alone_long[0]);
+    assert_eq!(by_index[1], alone_short[0]);
+}

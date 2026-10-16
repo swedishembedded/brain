@@ -193,7 +193,7 @@ impl ResidentModel for Qwen35Resident {
             let engine = Engine::from_map(cfg, &weights, ctx, max_concurrent);
             Scheduler::new(engine, max_concurrent as usize)
         })?;
-        Ok(Box::new(ScheduledInstance::new(TextFrontend { tok, stop, label: "qwen35moe", parse: parse_request }, sched)))
+        Ok(Box::new(ScheduledInstance::new(TextFrontend { tok, stop, label: "qwen35moe", parse: parse_request }, sched, max_concurrent as usize)))
     }
 }
 

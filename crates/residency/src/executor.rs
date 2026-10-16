@@ -224,6 +224,49 @@ struct RunReq {
     action: String,
     jobs: Vec<Pending>,
     key: InstanceKey,
+    /// Where the dispatcher hands this group jobs that arrive while it runs.
+    inbox: Arc<Inbox>,
+}
+
+/// The channel between the dispatcher and a RUNNING group for late jobs of the
+/// same instance: the dispatcher moves queued jobs in (up to `room`), the lane
+/// takes them between the instance's steps. `open` is flipped off by the lane
+/// under the same lock the dispatcher pushes under, so a job is either taken by
+/// the group or left in the queue for the next one - never stranded.
+struct Inbox {
+    /// Whether the dispatcher ever feeds this group (the model declared a batch
+    /// limit); fixed at creation, so a group that never does skips the inbox.
+    admits_late_jobs: bool,
+    state: Mutex<InboxState>,
+}
+
+struct InboxState {
+    open: bool,
+    /// Further jobs the group can hold right now (the model's `batch_limit`
+    /// minus what it is running).
+    room: usize,
+    jobs: Vec<Pending>,
+    /// Reply slots of every late job taken, so a panic in the group can still
+    /// answer them (see [`park_reply`]).
+    late_slots: Vec<ReplySlot>,
+    /// Jobs taken so far, for the group's `Done` accounting.
+    taken: usize,
+}
+
+impl Inbox {
+    fn new(open: bool, room: usize) -> Arc<Inbox> {
+        Arc::new(Inbox { admits_late_jobs: open, state: Mutex::new(InboxState { open, room, jobs: Vec::new(), late_slots: Vec::new(), taken: 0 }) })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, InboxState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// The dispatcher's record of a running group that still accepts late jobs.
+struct OpenGroup {
+    action: String,
+    inbox: Arc<Inbox>,
 }
 
 /// Cheap-to-clone submission handle (many front-ends can submit concurrently).
@@ -619,6 +662,8 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
     // Jobs handed to a lane and running now - tracked here (not in `queue`) so the
     // in-flight query can report them, keyed by the group's instance key.
     let mut running_jobs: Vec<RunningJob> = Vec::new();
+    // Running groups that still take late jobs of their instance, by key.
+    let mut open_groups: HashMap<InstanceKey, OpenGroup> = HashMap::new();
     // Monotonic job-id source; each submitted job gets the next value.
     let mut next_id: u64 = 0;
     // Best-effort observability refreshes on a TICK, not per message: rebuilding
@@ -681,7 +726,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         // queued this round.
         for msg in msgs {
             if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut next_id);
+                on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut open_groups, &mut next_id);
             })) {
                 eprintln!("[residency] dispatcher: panic processing a message: {} -- continuing", panic_message(p.as_ref()));
             }
@@ -693,8 +738,9 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         // goes back to blocking, since no MORE messages are coming just
         // because scheduling stalled. Own catch_unwind too: `assign`'s
         // eviction fallback can ALSO drop a Hot instance.
+        refill_open_groups(&mut queue, &open_groups, &mut running_jobs, &stats);
         if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs);
+            assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs, &mut open_groups);
         })) {
             eprintln!("[residency] dispatcher: panic during assign: {} -- continuing", panic_message(p.as_ref()));
         }
@@ -729,7 +775,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
 }
 
 #[allow(clippy::too_many_arguments)]
-fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, next_id: &mut u64) {
+fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, open_groups: &mut HashMap<InstanceKey, OpenGroup>, next_id: &mut u64) {
     match msg {
         Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
             Some(key) => {
@@ -831,6 +877,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             // `budgets`/`instances` happen before THEIR risky drop too (see
             // their own bodies).
             running.remove(&key);
+            open_groups.remove(&key);
             running_jobs.retain(|r| r.key != key); // group finished - drop its jobs
             busy.remove(&device);
             if failed {
@@ -850,6 +897,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
         Msg::DoneMulti { key, devices, batch, failed } => {
             // See `Msg::Done`'s identical reordering + doc, above.
             running.remove(&key);
+            open_groups.remove(&key);
             running_jobs.retain(|r| r.key != key);
             for &d in &devices {
                 busy.remove(&d);
@@ -896,7 +944,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
 
 /// Assign as many runnable groups as there are free device lanes.
 #[allow(clippy::too_many_arguments)]
-fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy, lanes: &HashMap<Device, Sender<RunReq>>, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>) {
+fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy, lanes: &HashMap<Device, Sender<RunReq>>, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, open_groups: &mut HashMap<InstanceKey, OpenGroup>) {
     // Groups whose claim came back `NoCapacity` THIS round. They are skipped
     // for the rest of it, and reconsidered on the next one (a lane finishing,
     // or the dispatcher's own idle tick).
@@ -1078,8 +1126,54 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             s.admitted += jobs.len() as u64;
             s.queue_depth = queue.len();
         }
+        // A model that declared a batch limit takes late jobs into this group
+        // up to that limit (an instance that cannot admit them mid-run closes
+        // the inbox at once and the lane runs whatever slipped in).
+        let limit = mgr.batch_limit(&model);
+        let inbox = Inbox::new(limit.is_some(), limit.map_or(0, |l| l.saturating_sub(jobs.len())));
+        if limit.is_some() {
+            open_groups.insert(ckey.clone(), OpenGroup { action: action.clone(), inbox: inbox.clone() });
+        }
         // Hand to the home lane (which builds the instance first when cold).
-        let _ = lanes[&home].send(RunReq { target, action, jobs, key: ckey });
+        let _ = lanes[&home].send(RunReq { target, action, jobs, key: ckey, inbox });
+    }
+}
+
+/// Move queued jobs into the running groups that accept them: for every open
+/// group, the oldest queued jobs of its instance and action, up to its room.
+///
+/// A group stops taking late jobs the moment a job of ANOTHER instance is
+/// waiting: the device would otherwise be held by a busy model for as long as
+/// its own traffic keeps coming, and the scheduler's age and fairness policy
+/// would never get to pick the waiting model. The group then drains and the
+/// policy chooses the next one.
+fn refill_open_groups(queue: &mut Vec<Pending>, open_groups: &HashMap<InstanceKey, OpenGroup>, running_jobs: &mut Vec<RunningJob>, stats: &Arc<Mutex<Stats>>) {
+    for (key, group) in open_groups {
+        if !queue.iter().any(|p| &p.key == key && p.action == group.action) || queue.iter().any(|p| &p.key != key) {
+            continue;
+        }
+        let mut state = group.inbox.lock();
+        if !state.open || state.room == 0 {
+            continue;
+        }
+        let mut idxs: Vec<usize> = queue.iter().enumerate().filter(|(_, p)| &p.key == key && p.action == group.action).map(|(i, _)| i).collect();
+        idxs.sort_by_key(|&i| queue[i].enqueued);
+        idxs.truncate(state.room);
+        idxs.sort_unstable_by(|a, b| b.cmp(a));
+        let mut jobs: Vec<Pending> = idxs.into_iter().map(|i| queue.remove(i)).collect();
+        jobs.reverse();
+        for j in jobs.iter_mut() {
+            if let Some(f) = j.on_admit.take() {
+                f();
+            }
+            running_jobs.push(RunningJob { id: j.id, model: j.model.clone(), action: j.action.clone(), key: key.clone(), enqueued: j.enqueued, building: false });
+        }
+        state.room -= jobs.len();
+        if let Ok(mut s) = stats.lock() {
+            s.admitted += jobs.len() as u64;
+            s.queue_depth = queue.len();
+        }
+        state.jobs.extend(jobs);
     }
 }
 
@@ -1165,6 +1259,7 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
     while let Ok(mut req) = rx.recv() {
         let batch = req.jobs.len();
         let key = req.key.clone();
+        let inbox = req.inbox.clone();
         // Salvage which `Done`/`DoneMulti` shape this group needs BEFORE `req`
         // moves into the `catch_unwind` closure below, so a panic can still
         // report on the right device(s) - matches `run_req`'s own `Ran` return
@@ -1185,13 +1280,30 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
         // is rebuilt fresh on its next claim instead of reusing an instance
         // whose internal state (and mutex) the panic may have poisoned.
         let slots: Vec<ReplySlot> = req.jobs.iter_mut().map(park_reply).collect();
-        let (failed, ran) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_req(req, &done))) {
+        // Jobs of a group whose instance could not be built: answered AFTER the
+        // `Done` below, so by the time a caller sees the error the dispatcher
+        // has already unwound the claim (budget, slot, instance) and anything
+        // the caller asks next sees that.
+        let mut failed_jobs: Option<(Vec<Pending>, String)> = None;
+        let (failed, ran) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_req(req, &done, &mut failed_jobs))) {
             Ok(outcome) => outcome,
             Err(p) => {
                 let what = panic_message(p.as_ref());
                 eprintln!("[residency] lane: panic while running {key}: {what}");
                 let msg = format!("{key}: panicked while running: {what}");
-                for slot in &slots {
+                // Close the inbox first so no job is stranded in it, then answer
+                // the group's own jobs and every late job it took or was given.
+                let mut late: Vec<ReplySlot> = {
+                    let mut st = inbox.lock();
+                    st.open = false;
+                    let mut late = std::mem::take(&mut st.late_slots);
+                    late.extend(st.jobs.iter_mut().map(park_reply));
+                    for p in st.jobs.drain(..) {
+                        (p.reply)(Err(msg.clone()));
+                    }
+                    late
+                };
+                for slot in slots.iter().chain(late.iter_mut().map(|s| &*s)) {
                     if let Some(reply) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                         reply(Err(msg.clone()));
                     }
@@ -1199,11 +1311,30 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
                 (true, ran_shape)
             }
         };
+        // Closing here (the dispatcher forgets the group on `Done`) makes sure a
+        // group that ended without closing its inbox - an activation failure -
+        // takes nothing more.
+        let late_jobs = if inbox.admits_late_jobs {
+            let mut st = inbox.lock();
+            st.open = false;
+            for p in st.jobs.drain(..) {
+                (p.reply)(Err(format!("{key}: the group ended before this job could join it")));
+            }
+            st.taken
+        } else {
+            0
+        };
+        let batch = batch + late_jobs;
         let done_msg = match ran {
             Ran::Single(device) => Msg::Done { key, device, batch, failed },
             Ran::Multi(devices) => Msg::DoneMulti { key, devices, batch, failed },
         };
         let _ = done.send(done_msg);
+        if let Some((jobs, msg)) = failed_jobs {
+            for p in jobs {
+                (p.reply)(Err(msg.clone()));
+            }
+        }
     }
 }
 
@@ -1215,8 +1346,8 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
 /// here). Runs under `lane_loop`'s `catch_unwind`; the `Done`/`DoneMulti` send
 /// stays OUTSIDE, in `lane_loop` itself, so it is delivered on every path
 /// including a panic.
-fn run_req(req: RunReq, done: &Sender<Msg>) -> (bool, Ran) {
-    let RunReq { target, action, jobs, key } = req;
+fn run_req(req: RunReq, done: &Sender<Msg>, failed_jobs: &mut Option<(Vec<Pending>, String)>) -> (bool, Ran) {
+    let RunReq { target, action, jobs, key, inbox } = req;
     let (handle, ran): (InstanceHandle, Ran) = match target {
         RunTarget::Single { work: Claimed::Hot(h), device } => (h, Ran::Single(device)),
         // Deferred activation happens HERE, on the device's own lane: a slow
@@ -1231,9 +1362,8 @@ fn run_req(req: RunReq, done: &Sender<Msg>) -> (bool, Ran) {
                 // Activation failed: every job in the group gets the error
                 // (never silence), and the dispatcher unwinds the claim.
                 let msg = format!("activate {key}: {e}");
-                for p in jobs {
-                    (p.reply)(Err(msg.clone()));
-                }
+                inbox.lock().open = false;
+                *failed_jobs = Some((jobs, msg));
                 return (true, Ran::Single(device));
             }
         },
@@ -1250,9 +1380,7 @@ fn run_req(req: RunReq, done: &Sender<Msg>) -> (bool, Ran) {
                 }
                 Err(e) => {
                     let msg = format!("promote {key}: {e}");
-                    for p in jobs {
-                        (p.reply)(Err(msg.clone()));
-                    }
+                    *failed_jobs = Some((jobs, msg));
                     return (true, Ran::Single(device));
                 }
             }
@@ -1270,9 +1398,7 @@ fn run_req(req: RunReq, done: &Sender<Msg>) -> (bool, Ran) {
             }
             Err(e) => {
                 let msg = format!("activate_multi {key}: {e}");
-                for p in jobs {
-                    (p.reply)(Err(msg.clone()));
-                }
+                *failed_jobs = Some((jobs, msg));
                 return (true, Ran::Multi(devices));
             }
         },
@@ -1280,38 +1406,110 @@ fn run_req(req: RunReq, done: &Sender<Msg>) -> (bool, Ran) {
     // `run_group` is one implementation shared by both shapes above - a
     // multi-device instance is just an `Instance` whose forward happens to
     // span devices internally; nothing here needs to know that.
-    run_group(&handle, &action, jobs);
+    run_group(&handle, &action, jobs, &inbox);
     (false, ran)
 }
 
-fn run_group(handle: &InstanceHandle, action: &str, jobs: Vec<Pending>) {
+fn run_group(handle: &InstanceHandle, action: &str, jobs: Vec<Pending>, inbox: &Arc<Inbox>) {
     let invs: Vec<Invocation> = jobs.iter().map(|p| p.inv.clone()).collect();
-    let mut sinks: Vec<Box<dyn FnMut(Progress) + Send>> = Vec::with_capacity(jobs.len());
-    let mut replies: Vec<Box<dyn FnOnce(ActionResult) + Send>> = Vec::with_capacity(jobs.len());
+    // Shared between the progress route and the feed: both address a job by its
+    // index in the group, and late jobs append.
+    let sinks: Arc<Mutex<Vec<Box<dyn FnMut(Progress) + Send>>>> = Arc::new(Mutex::new(Vec::with_capacity(jobs.len())));
+    let mut replies: Vec<Option<Box<dyn FnOnce(ActionResult) + Send>>> = Vec::with_capacity(jobs.len());
     for p in jobs {
-        sinks.push(p.on_progress);
-        replies.push(p.reply);
+        sinks.lock().unwrap_or_else(|e| e.into_inner()).push(p.on_progress);
+        replies.push(Some(p.reply));
     }
-    let results = {
-        let mut inst = handle.lock().unwrap();
-        // Route each progress update to ITS job's sink only (by batch index), so
-        // per-sequence token streams don't cross.
-        let mut route = |i: usize, pr: Progress| {
-            if let Some(s) = sinks.get_mut(i) {
-                s(pr);
-            }
-        };
-        inst.run_batch(action, &invs, &mut route)
+    let mut inst = handle.lock().unwrap();
+    // Route each progress update to ITS job's sink only (by group index), so
+    // per-sequence token streams don't cross.
+    let route_sinks = sinks.clone();
+    let mut route = move |i: usize, pr: Progress| {
+        if let Some(s) = route_sinks.lock().unwrap_or_else(|e| e.into_inner()).get_mut(i) {
+            s(pr);
+        }
     };
-    if results.len() == replies.len() {
-        for (r, o) in replies.into_iter().zip(results) {
-            r(o);
+    let mut feed = GroupFeed { inbox: inbox.clone(), sinks: sinks.clone(), replies };
+    if inst.run_open(action, &invs, &mut route, &mut feed) {
+        // Every result went out through the feed as its job finished; a job the
+        // instance never finished must not wait forever for an answer.
+        for r in feed.replies.drain(..).flatten() {
+            r(Err("the model ended the group without finishing this job".to_string()));
+        }
+        return;
+    }
+    // A model that only batches a closed group: close the inbox, and run
+    // whatever slipped in before the close together with the group's own jobs.
+    let late: Vec<Pending> = {
+        let mut st = inbox.lock();
+        st.open = false;
+        st.taken += st.jobs.len();
+        let mut jobs = std::mem::take(&mut st.jobs);
+        st.late_slots.extend(jobs.iter_mut().map(park_reply));
+        jobs
+    };
+    let mut invs = invs;
+    for p in late {
+        sinks.lock().unwrap_or_else(|e| e.into_inner()).push(p.on_progress);
+        feed.replies.push(Some(p.reply));
+        invs.push(p.inv);
+    }
+    let results = inst.run_batch(action, &invs, &mut route);
+    if results.len() == feed.replies.len() {
+        for (r, o) in feed.replies.drain(..).zip(results) {
+            if let Some(r) = r {
+                r(o);
+            }
         }
     } else {
-        let err = format!("model returned {} results for {} jobs", results.len(), replies.len());
-        for r in replies {
+        let err = format!("model returned {} results for {} jobs", results.len(), feed.replies.len());
+        for r in feed.replies.drain(..).flatten() {
             r(Err(err.clone()));
         }
+    }
+}
+
+/// [`JobFeed`] over a group's [`Inbox`]: the lane's side of late admission.
+struct GroupFeed {
+    inbox: Arc<Inbox>,
+    sinks: Arc<Mutex<Vec<Box<dyn FnMut(Progress) + Send>>>>,
+    /// One reply per job in group order; taken when the job finishes.
+    replies: Vec<Option<Box<dyn FnOnce(ActionResult) + Send>>>,
+}
+
+impl crate::model::JobFeed for GroupFeed {
+    fn take(&mut self, max: usize) -> Vec<Invocation> {
+        let mut st = self.inbox.lock();
+        let n = max.min(st.jobs.len());
+        let mut taken: Vec<Pending> = st.jobs.drain(..n).collect();
+        st.taken += n;
+        let slots: Vec<ReplySlot> = taken.iter_mut().map(park_reply).collect();
+        st.late_slots.extend(slots);
+        drop(st);
+        let mut invs = Vec::with_capacity(n);
+        let mut sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        for p in taken {
+            sinks.push(p.on_progress);
+            self.replies.push(Some(p.reply));
+            invs.push(p.inv);
+        }
+        invs
+    }
+
+    fn finish(&mut self, index: usize, result: ActionResult) {
+        if let Some(reply) = self.replies.get_mut(index).and_then(Option::take) {
+            reply(result);
+        }
+        self.inbox.lock().room += 1;
+    }
+
+    fn close(&mut self) -> bool {
+        let mut st = self.inbox.lock();
+        if !st.jobs.is_empty() {
+            return false;
+        }
+        st.open = false;
+        true
     }
 }
 
@@ -1554,6 +1752,96 @@ mod tests {
         // The first job occupies the instance while the other 19 queue up.
         submit_wait(&exec, &["wide"; 20]);
         assert!(WIDEST.load(Ordering::SeqCst) > Policy::default().max_batch as u32, "the model's own batch limit must override the policy cap, widest group was {}", WIDEST.load(Ordering::SeqCst));
+    }
+
+    /// A model that runs its group OPEN takes jobs that arrive while the group
+    /// is already running, between its steps, and answers each job when it is
+    /// done: one group, no waiting for the first request to finish.
+    #[test]
+    fn a_job_arriving_while_an_open_group_runs_joins_it_between_steps() {
+        use crate::model::JobFeed;
+        struct Open;
+        struct OpenInst;
+        static JOINED_WHILE_FIRST_RAN: AtomicU32 = AtomicU32::new(0);
+        impl ResidentModel for Open {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("open", "continuous", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("open", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(GB, 0)
+            }
+            fn batch_limit(&self) -> Option<usize> {
+                Some(8)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(OpenInst))
+            }
+        }
+        impl Instance for OpenInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                Ok(Outcome::new())
+            }
+            fn run_open(&mut self, _a: &str, invs: &[Invocation], _p: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+                // Each job needs 5 steps of 30 ms; jobs join between steps.
+                let mut active: Vec<(usize, u32)> = (0..invs.len()).map(|i| (i, 5)).collect();
+                let mut next = invs.len();
+                loop {
+                    for _ in feed.take(8usize.saturating_sub(active.len())) {
+                        if active.iter().any(|&(i, _)| i == 0) {
+                            JOINED_WHILE_FIRST_RAN.fetch_add(1, Ordering::SeqCst);
+                        }
+                        active.push((next, 5));
+                        next += 1;
+                    }
+                    if active.is_empty() {
+                        if feed.close() {
+                            return true;
+                        }
+                        continue;
+                    }
+                    std::thread::sleep(Duration::from_millis(30));
+                    for a in active.iter_mut() {
+                        a.1 -= 1;
+                    }
+                    let (done, rest): (Vec<_>, Vec<_>) = active.into_iter().partition(|a| a.1 == 0);
+                    active = rest;
+                    for (i, _) in done {
+                        feed.finish(i, Ok(Outcome::new()));
+                    }
+                }
+            }
+        }
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Open)];
+        let exec = Executor::start(models, budgets, Policy::default());
+        let (tx, rx) = channel();
+        let send = |tag: &'static str| {
+            let tx = tx.clone();
+            exec.submit(Job::new("open", "run", Invocation::new()).reply(move |r| {
+                r.unwrap();
+                let _ = tx.send((tag, Instant::now()));
+            }));
+        };
+        send("first");
+        std::thread::sleep(Duration::from_millis(60));
+        send("second");
+        let mut done = std::collections::HashMap::new();
+        for _ in 0..2 {
+            let (tag, at) = rx.recv_timeout(Duration::from_secs(10)).expect("both jobs are answered");
+            done.insert(tag, at);
+        }
+        assert_eq!(JOINED_WHILE_FIRST_RAN.load(Ordering::SeqCst), 1, "the second job must join the running group");
+        assert!(done["first"] < done["second"], "each job is answered when it finishes, the first before the later one");
+        // `Done` follows the last reply a moment later.
+        let t = Instant::now();
+        while exec.stats().batches == 0 && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(exec.stats().batches, 1, "one group served both jobs");
     }
 
     #[test]
