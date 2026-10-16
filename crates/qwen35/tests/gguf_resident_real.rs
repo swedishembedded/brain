@@ -876,3 +876,62 @@ fn scheduled_batches_reproduce_the_single_sequence_reference_on_the_real_checkpo
     };
     assert_eq!(solo, beside, "a seeded sampled sequence must not depend on its batch neighbours");
 }
+
+/// Prefix reuse on the real checkpoint: a prompt that starts with an already
+/// served one (an agent resending its history plus a new turn) resumes from the
+/// cached KV rows and the recurrent-state snapshot taken at the end of that
+/// prefill, prefills only its new tokens, and continues token for token like a
+/// cold prefill of the whole prompt. An identical prompt needs no prefill.
+#[test]
+fn a_prompt_extending_a_cached_one_prefills_only_its_new_tokens_and_continues_identically() {
+    use model::serve::{PagedDecoder, Request, Scheduler};
+
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.is_empty() {
+        brain_testutil::skip_unavailable("this gate wants at least one usable GPU");
+        return;
+    }
+    let r = Qwen35GgufResident::new(path, devices, 2048, TierPolicy::uniform(Dtype::I8)).with_max_batch(2).with_prefix_slots(2);
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    let (engine, tok, _stop) = r.activate_engine(&placed).expect("activate the real checkpoint");
+
+    let para = "France is a country in Western Europe. Its territory stretches from the Rhine to the Atlantic \
+                Ocean, and its people speak French. The country is known for its cuisine, its literature and \
+                its long history. Many travellers visit each year to see its museums, its cathedrals and its \
+                countryside. The Seine flows through the north of the country and past its largest urban area. ";
+    let history = para.repeat(5);
+    let first = tok.encode(&format!("{history}The capital city of France is"));
+    let second = tok.encode(&format!("{history}The capital city of France is Paris. The largest river in France is the"));
+    assert!(second.starts_with(&first) || second.len() > first.len(), "the second prompt extends the first");
+    let shared = first.iter().zip(&second).take_while(|(a, b)| a == b).count();
+    assert!(shared >= 64, "the prompts must share a real prefix, shared {shared}");
+
+    // Cold references first (`generate` resets every slot and bypasses the cache).
+    let want_first = engine.instance().generate(&first, 8, 0.0, 0, 1.0, 0, &mut |_| false).expect("cold first");
+    let want_second = engine.instance().generate(&second, 8, 0.0, 0, 1.0, 0, &mut |_| false).expect("cold second");
+
+    let mut sched = Scheduler::new(engine, 2);
+    let mut run = |sched: &mut Scheduler<_>, prompt: &[u32]| {
+        let t = std::time::Instant::now();
+        let id = sched.submit(Request { prompt: prompt.to_vec(), max_new: 8, stop: Vec::new() });
+        let out = sched.run().remove(&id).unwrap();
+        (out, t.elapsed().as_secs_f64())
+    };
+    let (got_first, cold_s) = run(&mut sched, &first);
+    assert_eq!(got_first, want_first);
+    let (hit0, _, cached0) = sched.prefix_stats();
+    assert_eq!((hit0, cached0), (0, 1), "the first prompt is cached, nothing was reused");
+
+    let (got_second, warm_s) = run(&mut sched, &second);
+    let (hit1, looked1, cached1) = sched.prefix_stats();
+    println!("  prefix reuse: first {} tokens cold {cold_s:.2} s, second {} tokens resumed {warm_s:.2} s; hit {hit1}/{looked1} tokens, {cached1} cached", first.len(), second.len());
+    assert_eq!(hit1, first.len() as u64, "the whole first prompt was reused");
+    assert_eq!(got_second, want_second, "resuming from a cached prefix must continue like a cold prefill");
+    assert_eq!(cached1, 1, "the longer prompt supersedes the shorter one");
+
+    let (again, _) = run(&mut sched, &second);
+    assert_eq!(again, want_second, "an identical prompt is served from its cached state");
+    assert_eq!(sched.prefix_stats().0, hit1 + second.len() as u64);
+}

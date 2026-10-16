@@ -144,3 +144,33 @@ fn a_late_request_joins_the_running_group_and_is_answered_when_it_finishes() {
     assert_eq!(by_index[0], alone_long[0]);
     assert_eq!(by_index[1], alone_short[0]);
 }
+
+/// Agent-style multi-turn traffic on the qwen3 serving engine: each turn
+/// resends the whole history plus a new message, with its own sampling
+/// parameters and seed. The persistent scheduler's prefix cache must serve the
+/// shared history from cached blocks (not recompute it), and the answer must be
+/// what a cold engine gives for the same prompt.
+#[test]
+fn a_resent_history_is_served_from_the_qwen3_prefix_cache() {
+    let cfg = qwen3::config::QwenConfig { vocab: 256, ..qwen3::config::QwenConfig::tiny() };
+    let weights = qwen3::init_weights(&cfg, 5);
+    let engine = |cfg: &qwen3::config::QwenConfig, w: &_| qwen3::serve::Engine::from_map(cfg.clone(), w, 8, 128, 4, 24, 16, false, false);
+    let front = front();
+    let history = "system: you are an agent. tools: shell, read. user: list the files in the repository root.";
+    let turn1 = inv(history, 6, 0.0, 1);
+    let turn2_prompt = format!("{history} assistant: ok. user: now count them and report.");
+    let turn2 = inv(&turn2_prompt, 6, 0.8, 7);
+
+    let mut warm = Scheduler::new(engine(&cfg, &weights), 4);
+    run_batch_scheduled(&mut warm, &front, std::slice::from_ref(&turn1), &mut |_, _| {});
+    let (hit0, _, _) = warm.prefix_stats();
+    assert_eq!(hit0, 0, "nothing to reuse on the first turn");
+    let got = texts(run_batch_scheduled(&mut warm, &front, std::slice::from_ref(&turn2), &mut |_, _| {}));
+    let (hit, looked, cached) = warm.prefix_stats();
+    let history_blocks = (history.len() / 8 * 8) as u64;
+    assert!(hit >= history_blocks, "turn 2 must reuse the history's full blocks: {hit} of {looked} tokens hit ({history_blocks} expected), {cached} blocks cached");
+
+    let mut cold = Scheduler::new(engine(&cfg, &weights), 4);
+    let want = texts(run_batch_scheduled(&mut cold, &front, std::slice::from_ref(&turn2), &mut |_, _| {}));
+    assert_eq!(got, want, "a cache hit must not change the answer");
+}

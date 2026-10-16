@@ -258,6 +258,10 @@ QWEN3.8 SERVING TUNABLES  (released-GGUF multi-card resident; the brain-
   --qwen35-max-batch N   decode slots: sequences decoded together in one batched
                          step (default 8). A configuration whose slots x ctx
                          do not fit the GPUs is refused at startup.
+  --qwen35-prefix-slots N
+                         prompts kept for prefix reuse (default 4, 0 = off): a
+                         prompt that starts with a cached one prefills only its
+                         new tokens. Each costs one sequence slot of KV.
   --qwen35-fp32-ctx N    context for the fp32 resident from a brain checkpoint
                          (default 4096).
   --qwen35-fp32-max-batch N
@@ -598,6 +602,7 @@ pub fn run_serve(args: &[String]) {
                     std::process::exit(2);
                 }));
             }
+            "--qwen35-prefix-slots" => qwen35_cfg.gguf.prefix_slots = Some(parsed(args, &mut i, "--qwen35-prefix-slots")),
             "--qwen35-max-batch" => qwen35_cfg.gguf.max_batch = Some(parsed(args, &mut i, "--qwen35-max-batch")),
             // Brain-checkpoint fp32 resident: same knobs, the `fp32` infix.
             "--qwen35-fp32-ctx" => qwen35_cfg.fp32.ctx = parsed(args, &mut i, "--qwen35-fp32-ctx"),

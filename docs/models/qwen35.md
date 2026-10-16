@@ -166,6 +166,17 @@ What it does differently:
   #313 and `make perf/model/qwen35-batch`. One KV block per sequence (block =
   context length) wastes the unused tail of a short sequence's window;
   sequences are not paged below context granularity.
+- **Prefix reuse.** An agent resends its whole history every turn. The
+  resident keeps `--qwen35-prefix-slots N` (default 4, 0 = off) finished
+  prompts: the sequence's KV rows (decoding never rewrites the prompt's rows, so
+  the block is simply retained) plus a snapshot of every Gated-DeltaNet layer's
+  recurrent state and conv history taken the moment the prefill ended, which a
+  recurrent layer needs because it keeps a state, not rows. A prompt that starts
+  with a cached one copies the rows in, restores the snapshot and prefills only
+  its new tokens (an identical prompt needs no compute); the longer prompt then
+  supersedes the shorter entry. Exact-token match, LRU. Each cached prompt costs
+  one sequence slot, charged into the placement. Gate: `crates/qwen35/tests/
+  gguf_resident_real.rs` (real checkpoint: same continuation as a cold prefill).
 - **Text only, per-token prefill when chunking is not profitable** - same
   shape as `crate::serve::Engine` and for the same reasons.
 

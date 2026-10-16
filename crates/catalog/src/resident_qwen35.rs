@@ -296,6 +296,10 @@ pub struct Qwen35GgufServeConfig {
     /// decode slots, charged into the placement). `None` takes
     /// [`DEFAULT_MAX_BATCH`].
     pub max_batch: Option<u32>,
+    /// Cached prompts kept for prefix reuse (see
+    /// `Qwen35GgufResident::with_prefix_slots`). `None` takes
+    /// [`DEFAULT_PREFIX_SLOTS`]; 0 turns the cache off.
+    pub prefix_slots: Option<u32>,
 }
 
 impl Qwen35GgufServeConfig {
@@ -314,6 +318,11 @@ impl Qwen35GgufServeConfig {
         self.kv.unwrap_or(model::kv_tier::KvTier::F32)
     }
 
+    /// The prefix-cache knob with its default filled in.
+    pub fn prefix_slots_or_default(&self) -> u32 {
+        self.prefix_slots.unwrap_or(DEFAULT_PREFIX_SLOTS)
+    }
+
     /// The batch knob with its default filled in.
     pub fn max_batch_or_default(&self) -> u32 {
         self.max_batch.unwrap_or(DEFAULT_MAX_BATCH).max(1)
@@ -326,6 +335,12 @@ impl Qwen35GgufServeConfig {
 /// a sequence at the default 2048 context with an f32 cache) leaves the
 /// two-24-GiB-card placement unchanged.
 pub const DEFAULT_MAX_BATCH: u32 = 8;
+
+/// Prompts a GGUF resident keeps for prefix reuse when `--qwen35-prefix-slots`
+/// is not given. An agent resends its whole history every turn; each cached
+/// prompt costs one sequence slot of KV (charged into the placement), so a few
+/// conversations stay warm without crowding out the batch.
+pub const DEFAULT_PREFIX_SLOTS: u32 = 4;
 
 /// Build the multi-GPU GGUF resident from a [`Qwen35GgufServeConfig`]:
 /// resolve the configured (or store-implied) `.gguf`, then hand its path,
@@ -363,6 +378,7 @@ pub fn multi_gpu_gguf(models_dir: Option<&std::path::Path>, gpus: &[(u32, u64)],
     let r = qwen35::int8_gguf_resident::Qwen35GgufResident::new(path, devices, cfg.ctx_or_default(), cfg.tier_or_default())
         .with_kv_tier(cfg.kv_or_default())
         .with_max_batch(cfg.max_batch_or_default())
+        .with_prefix_slots(cfg.prefix_slots_or_default())
         .with_model_id(id.clone());
     Some((r, id))
 }
@@ -905,11 +921,15 @@ mod tests {
             tier: Some(model::ops::TierPolicy::parse("i8").unwrap()),
             kv: Some(model::kv_tier::KvTier::Int8),
             max_batch: Some(4),
+            prefix_slots: Some(2),
         };
         let (r, _) = multi_gpu_gguf(Some(&root), &gpu_budget(), 2 << 30, &cfg).expect("resolve");
         assert_eq!(r.cap(), 8192);
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::Int8);
         assert_eq!(r.max_batch(), 4);
+        assert_eq!(r.prefix_slots(), 2);
+        // What `/v1/models` reports is the context the resident was built with.
+        assert_eq!(r.manifest().max_context_tokens, Some(8192));
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -925,6 +945,8 @@ mod tests {
         assert_eq!(r.cap(), 2048);
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::F32);
         assert_eq!(r.max_batch(), DEFAULT_MAX_BATCH);
+        assert_eq!(r.prefix_slots(), DEFAULT_PREFIX_SLOTS);
+        assert_eq!(r.manifest().max_context_tokens, Some(2048));
         std::fs::remove_dir_all(&root).ok();
     }
 

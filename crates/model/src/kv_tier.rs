@@ -218,6 +218,38 @@ impl KvPlane {
     pub fn data(&self) -> &DeviceBuffer {
         &self.data
     }
+
+    /// Steps that copy token rows `from_row .. from_row + rows` of this plane
+    /// over rows `to_row ..` of the SAME plane - element storage and, in the
+    /// int8 tier, the per-row scales - so a sequence's cached prefix can seed
+    /// another sequence's window. `splice` is the pipeline index of the
+    /// `splice` kernel (a flat word copy) on `gpu`. The ranges must not
+    /// overlap. Copies words, never values, so every tier is bit-exact.
+    pub fn copy_rows(&self, gpu: &Gpu, splice: usize, from_row: u64, to_row: u64, rows: u64, kv_stride: u64, head_dim: u64) -> Vec<Step> {
+        let mut steps = Vec::new();
+        let mut copy = |buf: &DeviceBuffer, per_row: u64| {
+            let n = rows * per_row;
+            if n > 0 {
+                steps.push(gpu.step_sliced(splice, &[buf, buf], &[(from_row * per_row, n), (to_row * per_row, n)], &[n as u32, 0], n as u32));
+            }
+        };
+        let per_row = match self.tier {
+            KvTier::F32 => kv_stride,
+            KvTier::Bf16 => kv_stride.div_ceil(2),
+            KvTier::Int8 => kv_stride.div_ceil(4),
+        };
+        // Rows are word-aligned only when a row is a whole number of words.
+        assert!(match self.tier {
+            KvTier::F32 => true,
+            KvTier::Bf16 => kv_stride.is_multiple_of(2),
+            KvTier::Int8 => kv_stride.is_multiple_of(4),
+        }, "KvPlane::copy_rows: a {}-element row is not a whole number of {} words", kv_stride, self.tier);
+        copy(&self.data, per_row);
+        if let Some(scales) = &self.scales {
+            copy(scales, kv_stride / head_dim);
+        }
+        steps
+    }
 }
 
 /// One layer's K and V planes.

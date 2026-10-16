@@ -22,10 +22,13 @@
 //! (greedy pick or top-k), so a batch step reads back token ids, not a
 //! `[batch, vocab]` logits block.
 
+use std::collections::HashMap;
+
 use gpu_core::DeviceStats;
 use model::paged::{BlockAllocator, BlockTable};
 use model::serve::PagedDecoder;
 
+use super::prefix::{Entry, PrefixCache, MIN_CACHED_TOKENS};
 use super::{Qwen35GgufInstance, MODEL};
 
 /// Candidates a non-greedy pick can sample from. Real sampling is exact
@@ -37,15 +40,41 @@ const TOPK_CAPACITY: usize = 32;
 pub struct Qwen35GgufEngine {
     inst: Qwen35GgufInstance,
     alloc: BlockAllocator,
+    /// Prompts whose KV rows and recurrent-state snapshot are kept for reuse
+    /// (see [`super::prefix`]).
+    cache: PrefixCache,
+    /// A finished prefill's cache record, held until its sequence ends: the
+    /// sequence's block becomes the cache entry's KV only then (decoding
+    /// appends rows past the prompt and never rewrites the prompt's own).
+    pending: HashMap<u32, Pending>,
+}
+
+/// What a sequence's prefill leaves for the cache once the sequence is over.
+struct Pending {
+    tokens: Vec<u32>,
+    snap_row: u32,
+    last_hidden: Vec<f32>,
 }
 
 impl Qwen35GgufEngine {
     /// Wrap an activated instance. The instance's `max_batch` becomes the
     /// number of sequences that may be resident at once and its `cap` the
     /// per-sequence `prompt + max_new` limit.
+    ///
+    /// The allocator holds `max_batch + prefix_slots` blocks: the scheduler
+    /// never runs more than `max_batch` sequences, so a cached prompt's retained
+    /// block never starves an admission.
     pub fn new(inst: Qwen35GgufInstance) -> Qwen35GgufEngine {
-        let alloc = BlockAllocator::new(inst.max_batch, inst.cap);
-        Qwen35GgufEngine { inst, alloc }
+        let alloc = BlockAllocator::new(inst.max_batch + inst.prefix_slots, inst.cap);
+        let cache = PrefixCache::new(inst.prefix_slots);
+        Qwen35GgufEngine { inst, alloc, cache, pending: HashMap::new() }
+    }
+
+    /// Free the blocks of entries the cache retired.
+    fn release_retired(&mut self, retired: impl IntoIterator<Item = BlockTable>) {
+        for mut table in retired {
+            table.release(&mut self.alloc);
+        }
     }
 
     /// The wrapped instance (tokenizer, config, profiling).
@@ -94,16 +123,34 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn blocks_for(&self, tokens: u32) -> u32 {
         tokens.div_ceil(self.inst.cap)
     }
-    /// No prefix cache: a sequence's slot holds recurrent state that is only
-    /// valid for its own whole prefix.
-    fn reclaim_prefix(&mut self, _want: u32) -> u32 {
-        0
+    /// Evict least recently used cached prompts until `want` blocks are freed.
+    fn reclaim_prefix(&mut self, want: u32) -> u32 {
+        let mut freed = 0;
+        while freed < want {
+            let Some(table) = self.cache.evict_lru() else { break };
+            self.release_retired([table]);
+            freed += 1;
+        }
+        freed
     }
+    /// A sequence that prefilled a cacheable prompt hands its block to the
+    /// prefix cache instead of freeing it; any other sequence frees it.
     fn release_table(&mut self, t: &mut BlockTable) {
-        t.release(&mut self.alloc);
+        let kept = t.blocks().first().and_then(|slot| self.pending.remove(slot));
+        match kept {
+            Some(p) => {
+                let table = std::mem::replace(t, BlockTable::new());
+                let retired = self.cache.insert(Entry::new(p.tokens, table, p.snap_row, p.last_hidden));
+                self.release_retired(retired);
+            }
+            None => t.release(&mut self.alloc),
+        }
     }
-    /// Prefill into the sequence's own slot (cleared first, other slots
-    /// untouched), returning the last prompt token's `[d_model]` hidden row.
+    /// Prefill into the sequence's own slot (other slots untouched), returning
+    /// the last prompt token's `[d_model]` hidden row. A prompt that starts
+    /// with a cached one resumes from it: the cached KV rows are copied in, the
+    /// recurrent state is restored from the snapshot taken when that prefix was
+    /// prefilled, and only the new tokens run.
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
         assert!(table.is_empty(), "{MODEL}: prefill expects a fresh sequence");
         assert!(!prompt.is_empty(), "{MODEL}: empty prompt");
@@ -113,7 +160,32 @@ impl PagedDecoder for Qwen35GgufEngine {
         }
         table.reserve(prompt.len() as u32, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
         let slot = table.blocks()[0];
-        self.inst.replay_prompt_hidden(prompt, slot).unwrap_or_else(|e| panic!("{e}"))
+        let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
+        let mut start = 0;
+        if cacheable {
+            if let Some(i) = self.cache.lookup(prompt) {
+                let e = self.cache.entry(i);
+                let (from, rows, snap) = (e.table.blocks()[0], e.tokens.len(), e.snap_row);
+                self.inst.seed_from_prefix(from, slot, rows as u32, snap);
+                if rows == prompt.len() {
+                    // The whole prompt is cached: its state in place, no compute.
+                    let hidden = e.last_hidden.clone();
+                    self.inst.store_prefilled(slot);
+                    return hidden;
+                }
+                start = rows;
+            }
+        }
+        let hidden = self.inst.prefill_hidden(prompt, start, slot).unwrap_or_else(|e| panic!("{e}"));
+        if cacheable {
+            let (row, evicted) = self.cache.take_row();
+            self.release_retired(evicted);
+            if let Some(row) = row {
+                self.inst.snapshot_prefill_state(row);
+                self.pending.insert(slot, Pending { tokens: prompt.to_vec(), snap_row: row, last_hidden: hidden.clone() });
+            }
+        }
+        hidden
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         self.inst.head_logits_rows(hidden, 1)
@@ -145,7 +217,7 @@ impl PagedDecoder for Qwen35GgufEngine {
         self.inst.head_topk_rows(&hidden, inputs.len() as u32, k)
     }
     fn prefix_stats(&self) -> (u64, u64, usize) {
-        (0, 0, 0)
+        self.cache.stats()
     }
     fn device_stats(&self) -> Option<DeviceStats> {
         self.inst.shards.last().and_then(|s| s.qwen35.gpu.stats())
@@ -153,11 +225,20 @@ impl PagedDecoder for Qwen35GgufEngine {
     /// Every stage's KV windows and recurrent state for all `max_batch` slots,
     /// as charged to the placement ([`super::layer_cost`] minus the weights).
     fn kv_pool_bytes(&self) -> u64 {
-        let slots = self.inst.max_batch as u64;
-        self.inst.cfg.layer_types().into_iter().map(|ty| slots * self.inst.cfg.layer_decode_state_bytes(ty, self.inst.cap, self.inst.kv_tier)).sum()
+        let slots = (self.inst.max_batch + self.inst.prefix_slots) as u64;
+        let snapshots = self.inst.prefix_slots as u64;
+        self.inst
+            .cfg
+            .layer_types()
+            .into_iter()
+            .map(|ty| {
+                let state = self.inst.cfg.layer_decode_state_bytes(ty, self.inst.cap, self.inst.kv_tier);
+                slots * state + if ty == crate::config::LayerType::Linear { snapshots * state } else { 0 }
+            })
+            .sum()
     }
     fn kv_pool_capacity_tokens(&self) -> u64 {
-        self.inst.max_batch as u64 * self.inst.cap as u64
+        (self.inst.max_batch + self.inst.prefix_slots) as u64 * self.inst.cap as u64
     }
     /// One batched step per window position: there is no on-device multi-step
     /// schedule across the stage boundary.

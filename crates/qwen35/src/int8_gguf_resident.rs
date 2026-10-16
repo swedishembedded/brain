@@ -133,6 +133,7 @@
 //! * **Text only.** `crate::vl`'s vision front-end is not spliced in here.
 
 mod engine;
+mod prefix;
 pub use engine::Qwen35GgufEngine;
 
 use std::cell::{Cell, RefCell};
@@ -302,16 +303,29 @@ fn head_i8_bytes(cfg: &Qwen35Config) -> u64 {
 /// this vocab a mis-charged endpoint is several GB, i.e. the difference
 /// between a plan that fits and a card that OOMs mid-load.
 pub fn layer_cost(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32) -> LayerBytes {
+    layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, 0)
+}
+
+/// [`layer_cost`] for a resident that also keeps `prefix_slots` cached prompts:
+/// each holds a whole sequence slot (the KV window of the prompt, and the GDN
+/// pool row that goes with the block) plus a snapshot row of every GDN layer's
+/// state, so the stage holds `max_batch + prefix_slots` slots and
+/// `prefix_slots` more recurrent states.
+pub fn layer_cost_with_prefix_slots(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32) -> LayerBytes {
     // Decode state is per SEQUENCE - a GQA layer's `[cap, kv_dim]` KV window
     // (stored in `kv`) and a GDN layer's fixed-size recurrent state alike - so a stage holding
     // `max_batch` concurrent sequences holds that many of each. Weights are
     // shared by the whole batch and are counted once, which is the entire
     // point of batching.
-    let slots = max_batch.max(1) as u64;
+    let slots = max_batch.max(1) as u64 + prefix_slots as u64;
+    let snapshots = prefix_slots as u64;
     let per_layer = cfg
         .layer_types()
         .into_iter()
-        .map(|ty| cfg.layer_weight_bytes(ty, tier) + slots * cfg.layer_decode_state_bytes(ty, cap, kv))
+        .map(|ty| {
+            let snapshot = if ty == LayerType::Linear { snapshots * cfg.layer_decode_state_bytes(ty, cap, kv) } else { 0 };
+            cfg.layer_weight_bytes(ty, tier) + slots * cfg.layer_decode_state_bytes(ty, cap, kv) + snapshot
+        })
         .collect();
     LayerBytes { per_layer, embed: 0, head: head_i8_bytes(cfg) + cfg.d_model as u64 * 4 }
 }
@@ -332,16 +346,16 @@ pub fn kv_pool_addressable(cfg: &Qwen35Config, cap: u32, max_batch: u32) -> bool
 /// (KV windows and recurrent state) is per sequence, so `max_batch` and `cap`
 /// are what a refusal tells the operator to lower, and a more compact KV tier
 /// what it suggests instead.
-pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, usable: &[u64]) -> Option<String> {
+pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32, usable: &[u64]) -> Option<String> {
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
-    if !kv_pool_addressable(cfg, cap, max_batch) {
+    if !kv_pool_addressable(cfg, cap, max_batch + prefix_slots) {
         return Some(format!(
-            "{max_batch} sequences of {cap} tokens is {} KV rows of {} elements per layer, past the kernels' u32 element index; lower --qwen35-max-batch or --qwen35-ctx",
-            max_batch as u64 * cap as u64,
+            "{max_batch} sequences and {prefix_slots} cached prompts of {cap} tokens is {} KV rows of {} elements per layer, past the kernels' u32 element index; lower --qwen35-max-batch, --qwen35-prefix-slots or --qwen35-ctx",
+            (max_batch + prefix_slots) as u64 * cap as u64,
             cfg.kv_dim()
         ));
     }
-    let cost = layer_cost(cfg, cap, tier, kv, max_batch);
+    let cost = layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, prefix_slots);
     let caps: Vec<(usize, u64)> = usable.iter().copied().enumerate().collect();
     if model::shard::plan_fewest_devices(&cost, &caps).is_some() {
         return None;
@@ -510,16 +524,26 @@ struct ShardCaches {
     /// stepped alone on.
     work_state: Vec<DeviceBuffer>,
     work_hist: Vec<DeviceBuffer>,
+    /// `[layer]`: `[snapshot_rows, state_len]` / `[snapshot_rows, hist_len]`
+    /// snapshots of the working copy taken at the end of a prefill, for prefix
+    /// reuse (dummy at non-owned / GQA layers).
+    snap_state: Vec<DeviceBuffer>,
+    snap_hist: Vec<DeviceBuffer>,
     /// `[layer]`: whether this stage owns the layer and it is a Gated-DeltaNet one.
     recurrent: Vec<bool>,
+    /// `[layer]`: whether this stage owns the layer and it is a full-attention one.
+    full: Vec<bool>,
     slots: u32,
     cap: u32,
-    /// Kernel index of `pool_rows_scatter2` on this stage's device.
+    /// Kernel indices of `pool_rows_scatter2`, `pool_rows_gather2` and `splice`
+    /// on this stage's device.
     scatter: usize,
+    gather: usize,
+    splice: usize,
 }
 
 impl ShardCaches {
-    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, kv_tier: KvTier) -> ShardCaches {
+    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, snapshot_rows: u32, kv_tier: KvTier) -> ShardCaches {
         assert!(slots > 0, "{MODEL}: ShardCaches needs at least one slot");
         let kv = cfg.kv_dim() as u64;
         let (state, hist) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
@@ -528,20 +552,26 @@ impl ShardCaches {
         let n = cfg.n_layers as usize;
         let types = cfg.layer_types();
         let mut gqa_kv = Vec::with_capacity(n);
-        let (mut pool_state, mut pool_hist, mut work_state, mut work_hist, mut recurrent) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut pool_state, mut pool_hist, mut work_state, mut work_hist, mut snap_state, mut snap_hist, mut recurrent, mut full_layers) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (l, ty) in types.iter().enumerate() {
             let full = shard.owns(l) && *ty == LayerType::Full;
+            full_layers.push(full);
             gqa_kv.push(if full { KvLayer::new(gpu, kv_tier, slots as u64 * cap as u64, kv, cfg.head_dim as u64) } else { KvLayer::placeholder(gpu) });
             let lin = shard.owns(l) && *ty == LayerType::Linear;
             recurrent.push(lin);
             let (ps, ph, ws, wh) = if lin { (slots as u64 * state, slots as u64 * hist, state, hist) } else { (1, 1, 1, 1) };
+            let (ss, sh) = if lin && snapshot_rows > 0 { (snapshot_rows as u64 * state, snapshot_rows as u64 * hist) } else { (1, 1) };
             pool_state.push(gpu.storage(ps));
             pool_hist.push(gpu.storage(ph));
             work_state.push(gpu.storage(ws));
             work_hist.push(gpu.storage(wh));
+            snap_state.push(gpu.storage(ss));
+            snap_hist.push(gpu.storage(sh));
         }
         let scatter = gpu.kernel_index("pool_rows_scatter2").expect("pool_rows_scatter2 is in the qwen35 kernel set");
-        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, recurrent, slots, cap, scatter };
+        let gather = gpu.kernel_index("pool_rows_gather2").expect("pool_rows_gather2 is in the qwen35 kernel set");
+        let splice = gpu.kernel_index("splice").expect("splice is in the qwen35 kernel set");
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, scatter, gather, splice };
         caches.reset(gpu);
         caches
     }
@@ -578,6 +608,49 @@ impl ShardCaches {
             .collect();
         gpu.submit(&[], &steps);
         // The scatters must have read the working copy before it is reused.
+        gpu.poll_wait();
+    }
+
+    /// Copy the working GDN state into snapshot row `row` (one row scatter per
+    /// owned recurrent layer) - the state a later prompt that starts with this
+    /// one resumes from.
+    fn snapshot_work(&self, gpu: &Gpu, cfg: &Qwen35Config, row: u32) {
+        let ids = gpu.storage(1);
+        gpu.write(&ids, &[row]);
+        let (sl, hl) = (cfg.gdn_state_len() as u32, cfg.gdn_hist_len() as u32);
+        let steps: Vec<_> = (0..self.snap_state.len())
+            .filter(|&l| self.recurrent[l])
+            .map(|l| gpu.step(self.scatter, &[&self.work_state[l], &self.work_hist[l], &ids, &self.snap_state[l], &self.snap_hist[l]], &[1, sl, hl], sl + hl))
+            .collect();
+        gpu.submit(&[], &steps);
+        gpu.poll_wait();
+    }
+
+    /// Make snapshot row `row` the working GDN state (one row gather per owned
+    /// recurrent layer).
+    fn restore_work(&self, gpu: &Gpu, cfg: &Qwen35Config, row: u32) {
+        let ids = gpu.storage(1);
+        gpu.write(&ids, &[row]);
+        let (sl, hl) = (cfg.gdn_state_len() as u32, cfg.gdn_hist_len() as u32);
+        let steps: Vec<_> = (0..self.snap_state.len())
+            .filter(|&l| self.recurrent[l])
+            .map(|l| gpu.step(self.gather, &[&self.snap_state[l], &self.snap_hist[l], &ids, &self.work_state[l], &self.work_hist[l]], &[1, sl, hl], sl + hl))
+            .collect();
+        gpu.submit(&[], &steps);
+        gpu.poll_wait();
+    }
+
+    /// Copy KV rows `0..rows` of slot `from` over the same rows of slot `to`,
+    /// in every owned full-attention layer.
+    fn copy_kv_rows(&self, gpu: &Gpu, cfg: &Qwen35Config, from: u32, to: u32, rows: u32) {
+        let (kv, hd, cap) = (cfg.kv_dim() as u64, cfg.head_dim as u64, self.cap as u64);
+        let mut steps = Vec::new();
+        for (layer, _) in self.gqa_kv.iter().zip(&self.full).filter(|(_, owned)| **owned) {
+            for plane in [&layer.k, &layer.v] {
+                steps.extend(plane.copy_rows(gpu, self.splice, from as u64 * cap, to as u64 * cap, rows as u64, kv, hd));
+            }
+        }
+        gpu.submit(&[], &steps);
         gpu.poll_wait();
     }
 
@@ -713,6 +786,8 @@ pub struct Qwen35GgufInstance {
     /// placement was charged for them ([`layer_cost`]). `1` is the default and
     /// leaves this instance byte-identical to an unbatched one.
     max_batch: u32,
+    /// Cached prompts the stages hold room for ([`Qwen35GgufResident::with_prefix_slots`]).
+    prefix_slots: u32,
     /// How every stage stores its GQA layers' K/V ([`KvTier`]).
     kv_tier: KvTier,
     /// The per-layer residual tap a cross-attending drafter needs - `None`
@@ -1175,31 +1250,41 @@ impl Qwen35GgufInstance {
         Ok((logits, pos))
     }
 
-    /// [`Self::replay_prompt`] for a sequence JOINING a running batch: slot
-    /// `slot`'s recurrent state is cleared (no other slot is touched), the
-    /// prompt is replayed into it, and the last prompt token's `[d_model]`
-    /// pre-norm hidden row comes back for the caller's head - a scheduler
-    /// picks the first token from it (greedy or sampled) without a
-    /// `[vocab]` readback. Leaves the state a following batched decode step
-    /// continues from, exactly as [`Self::replay_prompt`] does.
-    fn replay_prompt_hidden(&self, prompt: &[u32], slot: u32) -> Result<Vec<f32>, String> {
+    /// [`Self::replay_prompt`] for a sequence JOINING a running batch: prefill
+    /// `prompt[start..]` into slot `slot` on the working GDN state, write that
+    /// state into the slot's pool row, and return the last prompt token's
+    /// `[d_model]` pre-norm hidden row for the caller's head - a scheduler
+    /// picks the first token from it (greedy or sampled) without a `[vocab]`
+    /// readback. No other slot is touched.
+    ///
+    /// `start == 0` is a cold prefill (the working state is cleared first).
+    /// `start > 0` CONTINUES a cached prefix: the caller has already copied KV
+    /// rows `0..start` into the slot and restored the working GDN state to the
+    /// state after those `start` tokens ([`Self::seed_from_prefix`]); the rest
+    /// is prefilled exactly as the chunk loop would have reached it, so the
+    /// result is the cold prefill's.
+    fn prefill_hidden(&self, prompt: &[u32], start: usize, slot: u32) -> Result<Vec<f32>, String> {
         let d = self.cfg.d_model as usize;
-        for s in &self.shards {
-            s.caches.reset_work(&s.qwen35.gpu);
+        assert!(start < prompt.len(), "{MODEL}: a continued prefill needs at least one new token");
+        if start == 0 {
+            for s in &self.shards {
+                s.caches.reset_work(&s.qwen35.gpu);
+            }
         }
+        let rest = &prompt[start..];
         let mut last = Vec::new();
         if self.shards.iter().all(|s| s.qwen35.chunked_prefill_is_profitable()) {
-            let mut pos = 0u32;
-            for round in prompt.chunks(self.prefill_round_rows() as usize) {
+            let mut pos = start as u32;
+            for round in rest.chunks(self.prefill_round_rows() as usize) {
                 let (carry, _) = self.stack_chunk_carry(round, pos, slot)?;
                 last = carry[(round.len() - 1) * d..].to_vec();
                 pos += round.len() as u32;
             }
         } else {
-            for (pos, &t) in prompt.iter().enumerate() {
+            for (i, &t) in rest.iter().enumerate() {
                 let mut carry = self.embed_row(t)?;
                 for s in &self.shards {
-                    carry = s.qwen35.decode_step_stage(t, pos as u32, &s.caches.view(slot), Some(&carry));
+                    carry = s.qwen35.decode_step_stage(t, (start + i) as u32, &s.caches.view(slot), Some(&carry));
                 }
                 last = carry;
             }
@@ -1208,6 +1293,32 @@ impl Qwen35GgufInstance {
             s.caches.store_work(&s.qwen35.gpu, &self.cfg, slot);
         }
         Ok(last)
+    }
+
+    /// Seed slot `slot` with a cached prefix of `rows` tokens: KV rows `0..rows`
+    /// copied from slot `from`, and the working GDN state restored from
+    /// snapshot row `snap_row` (see [`Self::prefill_hidden`] with `start > 0`).
+    fn seed_from_prefix(&self, from: u32, slot: u32, rows: u32, snap_row: u32) {
+        for s in &self.shards {
+            s.caches.copy_kv_rows(&s.qwen35.gpu, &self.cfg, from, slot, rows);
+            s.caches.restore_work(&s.qwen35.gpu, &self.cfg, snap_row);
+        }
+    }
+
+    /// Snapshot the working GDN state (the state after the prefill that just
+    /// ran) into snapshot row `row`.
+    fn snapshot_prefill_state(&self, row: u32) {
+        for s in &self.shards {
+            s.caches.snapshot_work(&s.qwen35.gpu, &self.cfg, row);
+        }
+    }
+
+    /// Write the working GDN state into slot `slot`'s pool row (a prompt that
+    /// is wholly cached needs no prefill, only its state in place).
+    fn store_prefilled(&self, slot: u32) {
+        for s in &self.shards {
+            s.caches.store_work(&s.qwen35.gpu, &self.cfg, slot);
+        }
     }
 
     /// Rows per prefill round on this stack: [`TENSOR_CORE_PREFILL_TOKENS`] when
@@ -2101,6 +2212,8 @@ pub struct Qwen35GgufResident {
     /// [`Self::with_max_batch`]. Charged into [`layer_cost`], so the planner
     /// budgets the slots it will actually allocate.
     max_batch: u32,
+    /// Cached prompts kept for prefix reuse - [`Self::with_prefix_slots`].
+    prefix_slots: u32,
     /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`]. Charged
     /// into [`layer_cost`] at the bytes that tier really occupies.
     kv_tier: KvTier,
@@ -2117,7 +2230,7 @@ pub struct Qwen35GgufResident {
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, kv_tier: KvTier::F32, model_id: MODEL.to_string(), plan: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, model_id: MODEL.to_string(), plan: OnceLock::new() }
     }
 
     /// Serve this resident under `id` instead of [`MODEL`] - what the
@@ -2169,6 +2282,21 @@ impl Qwen35GgufResident {
     /// How many sequences one batch may carry - [`Self::with_max_batch`].
     pub fn max_batch(&self) -> u32 {
         self.max_batch
+    }
+
+    /// Keep up to `n` prompts' KV rows and recurrent-state snapshots so a later
+    /// prompt that starts with one prefills only its new tokens (0, the default,
+    /// is off). Each cached prompt holds a whole sequence slot, charged into the
+    /// placement like `max_batch`'s. Must be set BEFORE the first
+    /// `estimate_multi`/`activate_multi` call.
+    pub fn with_prefix_slots(mut self, n: u32) -> Qwen35GgufResident {
+        self.prefix_slots = n;
+        self
+    }
+
+    /// See [`Self::with_prefix_slots`].
+    pub fn prefix_slots(&self) -> u32 {
+        self.prefix_slots
     }
 
     /// Store the GQA layers' K and V in `kv` instead of `f32` (the default).
@@ -2236,11 +2364,11 @@ impl Qwen35GgufResident {
                 other => eprintln!("{MODEL}: ignoring non-GPU device {other:?} (this model is GPU-only)"),
             }
         }
-        if let Some(why) = sizing_refusal(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, &caps.iter().map(|&(_, c)| c).collect::<Vec<_>>()) {
+        if let Some(why) = sizing_refusal(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots, &caps.iter().map(|&(_, c)| c).collect::<Vec<_>>()) {
             eprintln!("{MODEL}: '{}' is not served: {why} -- reporting zero devices", self.gguf_path);
             return Plan { refusal: Some(format!("{MODEL}: {why}")), ..Plan::default() };
         }
-        let cost = layer_cost(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch);
+        let cost = layer_cost_with_prefix_slots(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots);
         let placements = model::shard::plan_fewest_devices(&cost, &caps).expect("sizing_refusal found the configuration placeable");
         let stages = placements
             .iter()
@@ -2265,7 +2393,7 @@ impl Qwen35GgufResident {
     pub fn total_device_bytes(&self) -> Result<u64, String> {
         let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
         let cfg = resident_config(&mg, self.cap)?;
-        Ok(layer_cost(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch).total())
+        Ok(layer_cost_with_prefix_slots(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots).total())
     }
 
     /// Which layer range and how many bytes each device holds, as planned -
@@ -2448,7 +2576,7 @@ impl Qwen35GgufResident {
             // below, at `self.cap` - the same split `crate::serve::Engine`
             // makes for the same reason.
             let qwen35 = Qwen35::new_shard_dt(cfg.clone(), 1, 1, &src, shard.clone(), &self.tier);
-            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, self.max_batch, self.kv_tier);
+            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, self.max_batch + self.prefix_slots, self.prefix_slots, self.kv_tier);
             shards.push(DeviceShard { qwen35, caches });
         }
 
@@ -2477,7 +2605,7 @@ impl Qwen35GgufResident {
         };
         let embed = EmbedTable { name: embed_name, d };
 
-        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, kv_tier: self.kv_tier, taps: RefCell::new(None) })
+        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, prefix_slots: self.prefix_slots, kv_tier: self.kv_tier, taps: RefCell::new(None) })
     }
 }
 
@@ -2654,12 +2782,12 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         let i8 = TierPolicy::uniform(Dtype::I8);
         let usable = [(97_871u64 << 20) - (2 << 30)];
-        assert_eq!(sizing_refusal(&cfg, 4096, &i8, KvTier::Bf16, 64, &usable), None, "64 x 4096 with a bf16 cache fits one GH200");
-        let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 256, &usable).expect("256 f32 sequences of 4096 tokens cannot fit");
+        assert_eq!(sizing_refusal(&cfg, 4096, &i8, KvTier::Bf16, 64, 0, &usable), None, "64 x 4096 with a bf16 cache fits one GH200");
+        let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 256, 0, &usable).expect("256 f32 sequences of 4096 tokens cannot fit");
         for needle in ["--qwen35-max-batch 256", "--qwen35-ctx 4096", "GiB weights", "more compact --qwen35-kv"] {
             assert!(why.contains(needle), "refusal must mention {needle:?}: {why}");
         }
-        let why = sizing_refusal(&cfg, 131_072, &i8, KvTier::Bf16, 40, &usable).expect("past the u32 plane index");
+        let why = sizing_refusal(&cfg, 131_072, &i8, KvTier::Bf16, 40, 0, &usable).expect("past the u32 plane index");
         assert!(why.contains("u32 element index"), "{why}");
     }
 
@@ -2673,7 +2801,7 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         let usable = (97_871u64 << 20) - (2 << 30);
         let i8 = TierPolicy::uniform(Dtype::I8);
-        let ceiling = |kv: KvTier| (1..=1024u32).take_while(|&b| sizing_refusal(&cfg, 4096, &i8, kv, b, &[usable]).is_none()).last().unwrap_or(0);
+        let ceiling = |kv: KvTier| (1..=1024u32).take_while(|&b| sizing_refusal(&cfg, 4096, &i8, kv, b, 0, &[usable]).is_none()).last().unwrap_or(0);
         let [f32b, bf16b, int8b] = KvTier::ALL.map(ceiling);
         println!("4096 tokens on one GH200: planner admits f32 {f32b}, bf16 {bf16b}, int8 {int8b} sequences");
         assert!(f32b >= 64, "64 f32 sequences of 4096 tokens must fit: {f32b}");

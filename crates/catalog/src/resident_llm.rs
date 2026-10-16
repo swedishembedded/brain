@@ -31,7 +31,7 @@ use serde_json::json;
 
 use crate::adapter_registry::{AdapterBankSettings, AdapterRegistry, AdapterSync, QwenAdapterView, ADAPTER_PARAM};
 use crate::adapter_release::{LoadedAdapter, ServedBase};
-use llmserve::{run_batch_scheduled, scheduler_metrics, Frontend};
+use llmserve::{run_batch_scheduled, run_open_scheduled, scheduler_metrics, Frontend};
 
 use std::sync::Arc;
 
@@ -1129,7 +1129,7 @@ impl ResidentModel for QwenResident {
             Ok(Box::new(model::serve::Scheduler::new(eng, max_batch as usize)))
         })??;
         gpu_core::profile::stage_time(&format!("{}: build engine (total, on_device)", self.id), stage_t0);
-        let mut instance = QwenInstance { decoding: Decoding { tok, format, stop }, engine, adapters: AdapterSync::new(self.adapters.clone()) };
+        let mut instance = QwenInstance { max_batch: Self::pool_sizing(self.ctx, self.max_batch, self.max_prefill_cap).1 as usize, decoding: Decoding { tok, format, stop }, engine, adapters: AdapterSync::new(self.adapters.clone()) };
         // Every adapter offered so far is registered with the engine before
         // the first request, so a cold instance answers an adapter request
         // as soon as it answers a base one.
@@ -1148,6 +1148,8 @@ struct Decoding {
 }
 
 struct QwenInstance {
+    /// Requests the scheduler runs at once (an open group admits up to this).
+    max_batch: usize,
     decoding: Decoding,
     /// The paged, continuous-batching serving engine, whatever the
     /// checkpoint's format. Boxed: `Scheduler<Engine>` is large by value.
@@ -1178,6 +1180,19 @@ impl Instance for QwenInstance {
     fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         self.adapters.sync(self.engine.decoder_mut());
         run_batch_scheduled(&mut self.engine, &QwenFrontend { decoding: &self.decoding, adapters: &self.adapters }, invs, progress)
+    }
+
+    /// The same group as [`Self::run_batch`], open to requests that arrive
+    /// while it runs: a long generation no longer holds back a short one that
+    /// came after it. The adapter bank is brought in line with the registry
+    /// when the group starts (no sequence is running then); an adapter offered
+    /// while a group runs is routable from the next group, a request naming it
+    /// earlier is answered "no model".
+    fn run_open(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn residency::JobFeed) -> bool {
+        self.adapters.sync(self.engine.decoder_mut());
+        let capacity = self.max_batch;
+        run_open_scheduled(&mut self.engine, &QwenFrontend { decoding: &self.decoding, adapters: &self.adapters }, invs, capacity, progress, feed);
+        true
     }
 
     /// The prefix cache's effectiveness, surfaced through
