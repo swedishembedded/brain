@@ -210,6 +210,12 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
         let mut v = STATIC_PIPELINES.to_vec();
+        // Cooperative grad-norm: `optim::Optim` resolves the pair by name and runs it on
+        // devices whose policy allows (the CPU JIT keeps the serial walk). The reference
+        // `gradnorm_sq` gives each tensor ONE thread to sum its elements, which for 118 M
+        // adapter parameters is seconds of a single thread's time per step.
+        v.push(("gradnorm_part", kernels::GRADNORM_PART));
+        v.push(("clip_coef_wg", kernels::CLIP_COEF_WG));
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
         v.push(("matmul_reg2", kernels::MATMUL_REG3));
         v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
