@@ -294,7 +294,7 @@ mod tests {
         let trainer = crate::train::SupirTrainer::new(gpu, cfg.clone(), &folded, h, w, t_enc, 0.7);
 
         let c = cfg.backbone.clone();
-        let mut rng = Rng::new(0xF00D_1234);
+        let mut rng = Rng::new(data::rng::random_seed());
         let mut r = |n: usize| -> Vec<f32> { (0..n).map(|_| 2.0 * rng.next_f32() - 1.0).collect() };
         let sample = r((c.in_channels * h * w) as usize);
         let hint = r((4 * h * w) as usize);
