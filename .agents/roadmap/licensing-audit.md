@@ -105,6 +105,40 @@ validating against goldens dumped from the real checkpoint
 reaches an independently-written Rust port is a real open legal question,
 separate from and not resolved by the copyright analysis above.
 
+## CUDA toolkit and driver components
+
+Brain's CUDA backend touches NVIDIA software in three ways, and none of them
+puts NVIDIA code into a shipped artifact.
+
+- **The runtime image ships no toolkit library.** The `runtime` stage of
+  `tools/container/aarch64-cuda.Containerfile` copies exactly two things out
+  of the build stage: the `brain` binary and the ahead-of-time kernel images
+  (the `BRAIN_CUDA_AOT_DIR` directory). The driver and `libcuda` come from the host through
+  the container runtime and are never redistributed by us. Without NVRTC or
+  cuBLAS in the image, kernels load from the AOT images and every GEMM runs on
+  brain's own kernels (`backend-cuda/src/cublas.rs`).
+- **The build stage uses the toolkit's redistributable archives and does not
+  ship them.** `scripts/build/install-cuda-userspace.py` downloads NVIDIA's
+  published redistributable archives (NVRTC, nvcc, cuBLAS, cuDNN, NCCL and
+  related components) into a user-owned prefix, verifying the SHA-256 the
+  vendor manifest carries for each file. They are used under the NVIDIA EULA
+  terms that apply to those components, for the build stage only; the `ci`
+  stage extends the build stage and is likewise not a distributed image. The
+  AOT images are cubins and PTX compiled from brain's own kernel sources, so
+  they are brain build products, not copies of toolkit files. Anyone who
+  distributes the `build` or `ci` stage as an image must first check the EULA's
+  redistribution terms for the components it contains; this audit does not
+  clear that.
+- **cuBLAS, NVRTC and `libcuda` are `dlopen`ed, never linked.**
+  `backend-cuda/src/cublas.rs`, `nvrtc.rs` and `driver.rs` resolve them at run
+  time with `libloading`, and no CUDA crate emits a link directive. The binary
+  therefore carries no NVIDIA code and runs, without those libraries, on
+  brain's own kernels.
+
+No dependency is added by this section: it records how the existing build and
+runtime already behave. It is a provenance note, not legal advice; a
+distribution that includes toolkit libraries needs its own review.
+
 ## Housekeeping (not a third-party risk)
 
 `crates/atif` is brain's own implementation of the ATIF v1.7 trajectory
