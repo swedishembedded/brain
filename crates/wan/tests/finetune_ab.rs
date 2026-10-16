@@ -49,7 +49,7 @@ const HELD_OUT_PROMPTS: [&str; 4] = [
     "a pink-purple triangle looping around a white circle on a dark background",
     "a magenta arrow-like shape rotating around a stationary white marker",
 ];
-const SEEDS: [u64; 4] = [11, 22, 33, 44];
+const SEEDS: [u64; 4] = [11, 22, 33, 44]; // seed: the concept-versus-matched-random A/B margin was measured on the real weights at this draw (ignored, needs weights; not run)
 
 fn read_pth(path: &str) -> Result<Vec<checkpoint::safetensors::StTensor>, String> {
     Ok(checkpoint::torchpt::read(path)?.into_iter().map(|t| checkpoint::safetensors::StTensor { name: t.name, shape: t.shape, data: t.data }).collect())
@@ -278,7 +278,7 @@ fn a_concept_lora_moves_held_out_generation_toward_the_concept_more_than_a_match
     let (lf, lh, lw) = cfg.latent_shape(frames, size as usize, size as usize).expect("latent shape");
     let tcfg = Cfg::from_wan(&cfg, lf, lh, lw);
     let train_set = wan::finetune::ClipSet::load_dir(&train_dir).expect("train set");
-    let mut rng = data::rng::Rng::new(1234);
+    let mut rng = data::rng::Rng::new(1234); // seed: the concept-versus-matched-random A/B margin was measured on the real weights at this draw (ignored, needs weights; not run)
     let n_train_samples = 24;
     let train_clips: Vec<wan::finetune::Clip> = (0..n_train_samples).map(|_| train_set.sample(&mut rng, frames).expect("sample")).collect();
 
@@ -331,7 +331,7 @@ fn a_concept_lora_moves_held_out_generation_toward_the_concept_more_than_a_match
     let mut adapter = LoraAdapter::new(&tcfg, LoraCfg::new(rank, 0)); // seed: fixed adapter init keeps the numeric checks reproducible
     let mut trainer = Trainer::open(&tcfg, Some("gpu"));
     trainer.begin_lora(&base_weights, rank);
-    let mut trng = data::rng::Rng::new(4242);
+    let mut trng = data::rng::Rng::new(4242); // seed: the concept-versus-matched-random A/B margin was measured on the real weights at this draw (ignored, needs weights; not run)
     let steps = 250;
     let t_train = std::time::Instant::now();
     let mut loss = 0.0f64;

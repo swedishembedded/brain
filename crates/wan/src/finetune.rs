@@ -436,7 +436,7 @@ mod tests {
 
         // Sampling is boundary-safe for the same reason, and a window longer
         // than every clip is an error rather than a short read.
-        let mut rng = Rng::new(4);
+        let mut rng = Rng::new(data::rng::random_seed());
         for _ in 0..20 {
             let c = set.sample(&mut rng, 5).expect("sample");
             assert_eq!(c.video.len(), 5 * 3 * 2 * 3);

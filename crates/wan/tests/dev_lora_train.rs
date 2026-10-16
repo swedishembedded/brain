@@ -374,7 +374,7 @@ fn a_gpu_trained_concept_lora_lowers_held_out_concept_loss_more_than_distractor_
     let train_set = wan::finetune::ClipSet::load_dir(&train_dir).expect("train set");
     let heldout_set = wan::finetune::ClipSet::load_dir(&heldout_dir).expect("heldout set");
     let distractor_set = wan::finetune::ClipSet::load_dir(&distractor_dir).expect("distractor set");
-    let mut drng = data::rng::Rng::new(777);
+    let mut drng = data::rng::Rng::new(777); // seed: the held-out concept-versus-distractor loss margin was measured on the real weights at this draw (ignored, needs weights; not run)
     let train_clips: Vec<wan::finetune::Clip> = (0..n_train).map(|_| train_set.sample(&mut drng, frames).expect("sample")).collect();
     let heldout_clips: Vec<wan::finetune::Clip> = (0..n_eval).map(|_| heldout_set.sample(&mut drng, frames).expect("sample")).collect();
     let distractor_clips: Vec<wan::finetune::Clip> = (0..n_eval).map(|_| distractor_set.sample(&mut drng, frames).expect("sample")).collect();
@@ -423,7 +423,7 @@ fn a_gpu_trained_concept_lora_lowers_held_out_concept_loss_more_than_distractor_
     let (train_s, rest) = samples.split_at(n_train);
     let (heldout_s, distractor_s) = rest.split_at(n_eval);
 
-    let mut ern = data::rng::Rng::new(555);
+    let mut ern = data::rng::Rng::new(555); // seed: the held-out concept-versus-distractor loss margin was measured on the real weights at this draw (ignored, needs weights; not run)
     let sigmas: Vec<f64> = (0..2 * n_eval).map(|_| (ern.next_f64()).clamp(1e-3, 1.0)).collect();
     let noises: Vec<Vec<f32>> = heldout_s
         .iter()
@@ -465,7 +465,7 @@ fn a_gpu_trained_concept_lora_lowers_held_out_concept_loss_more_than_distractor_
     }
 
     let steps = 15u32;
-    let mut trng = data::rng::Rng::new(4242);
+    let mut trng = data::rng::Rng::new(4242); // seed: the held-out concept-versus-distractor loss margin was measured on the real weights at this draw (ignored, needs weights; not run)
     let t2 = std::time::Instant::now();
     for _ in 0..steps {
         let idx = trng.gen_range_inclusive(0, train_s.len() as i64 - 1) as usize;
