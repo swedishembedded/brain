@@ -198,7 +198,7 @@ machinery as the loss-side `scaling::fit_power_law`, reused via
 
 ```bash
 BRAIN_DEVICE=cpu make bench/scale ARCH=gpt2              # or:
-./target/release/brain bench scale --arch gpt2 --seed 1234
+./target/release/brain bench scale --arch gpt2
 ```
 
 writes `results/scale-<arch>-<seed>.json` and prints:

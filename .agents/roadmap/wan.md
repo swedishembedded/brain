@@ -1004,7 +1004,6 @@ python -m ltx_pipelines.distilled \
   --text-encoder-path  models/.../gemma4-12b-with-proj-bf16.safetensors \
   --video-vae-path     models/.../video-vae-bf16.safetensors \
   --prompt "A belgian malinois running on a paved highway, cinematic lighting" \
-  --seed 42 \
   --output-path output_distilled.mp4
 ```
 
@@ -1027,7 +1026,7 @@ With auto-fetch this can beat the reference outright, since the paths become
 optional:
 
 ```
-brain wan t2v --prompt "..." --seed 42 --output-path out.mp4
+brain wan t2v --prompt "..." --output-path out.mp4
 ```
 
 That is the target. If the demo needs a paragraph of setup to explain, it is

@@ -55,7 +55,7 @@ See each model's page for its exact import command.
   the way to sanity-check a forecaster before trusting it in production: it
   fails if a model doesn't even beat a random-walk baseline.
   ```bash
-  brain forecast compare --windows 24 --seed 1337 --html report.html \
+  brain forecast compare --windows 24 --html report.html \
     [--chronos2 <weights>] [--fincast <weights>] [--timesfm3 <weights>] \
     [--kronos-tokenizer <dir> --kronos-decoder <dir>]
   ```

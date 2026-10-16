@@ -69,7 +69,7 @@ scan cannot decide.
 
 ```bash
 brain flux2 generate --prompt "a red fox on a mossy rock" --out fox.ppm \
-    --width 512 --height 512 --seed 7
+    --width 512 --height 512
 
 # reference-image editing: pass the source image as --ref and an instruction as the prompt
 brain flux2 generate --prompt "make it snow" --ref fox.ppm --out snow.ppm

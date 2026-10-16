@@ -56,7 +56,7 @@ brain forecast predict --csv crates/kronos/tests/data/synthetic_hourly.csv \
   --timesfm3 timesfm3.safetensors --horizon 32 --gnuplot chart.png
 
 # backtest against statistical baselines
-brain forecast compare --timesfm3 timesfm3.safetensors --windows 24 --seed 1337
+brain forecast compare --timesfm3 timesfm3.safetensors --windows 24
 
 # start a resident forecast server
 brain forecast serve --timesfm3 timesfm3.safetensors --socket /tmp/forecast.sock

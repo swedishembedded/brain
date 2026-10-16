@@ -1,9 +1,0 @@
-docs/models/chronos2.md	-:--seed=1337	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one
-docs/models/decision.md	-:--order-seed=1	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one
-docs/models/decision.md	-:--seed=7	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one
-docs/models/fincast.md	-:--seed=1337	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one
-docs/models/flux2.md	-:--seed=7	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one
-docs/models/forecast.md	-:--seed=1337	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one
-docs/models/kronos.md	-:--seed=1337	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one
-docs/models/timesfm3.md	-:--seed=1337	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one
-docs/models/wan.md	-:--seed=42	doc-seed	todo: B-19 the documented command pins a seed instead of showing the printed one

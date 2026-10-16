@@ -24,11 +24,11 @@ images upload directly (no letterbox) during training. Everything runs on the
 
 ```bash
 # 1. Generate a synthetic detection dataset (RGB shapes + exact boxes, 128px).
-BRAIN_DEVICE=cpu brain data gen detect --out data/detect --n 64 --seed 7
+BRAIN_DEVICE=cpu brain data gen detect --out data/detect --n 64
 
 # 2. Train the tiny YOLOv8 graph (real detection loss: assigner+BCE+CIoU+DFL).
 BRAIN_DEVICE=cpu brain yolo train data/detect --out out/yolo.safetensors \
-    --steps 150 --batch 4 --lr 3e-3 --seed 7
+    --steps 150 --batch 4 --lr 3e-3
 #   flags: --steps --batch --lr --wd --nc --input --seed
 #   prints the loss every 10 steps; saves a `.safetensors` checkpoint at the end.
 

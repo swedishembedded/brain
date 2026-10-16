@@ -109,7 +109,7 @@ materialising the whole model.
 
 ```bash
 brain wan t2v --prompt "A belgian malinois running on a paved highway" \
-              --seed 42 --output-path out.mp4
+              --output-path out.mp4
 
 # start small to check a set of weights before committing to a long run
 brain wan t2v --prompt "a golden retriever running along a sandy beach at sunset" \

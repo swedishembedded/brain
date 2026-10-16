@@ -38,7 +38,7 @@ action.
 
 ```bash
 # backtest against statistical baselines before trusting it
-brain forecast compare --chronos2 chronos2.safetensors --windows 24 --seed 1337 --html report.html
+brain forecast compare --chronos2 chronos2.safetensors --windows 24 --html report.html
 
 # start a resident forecast server
 brain forecast serve --chronos2 chronos2.safetensors --socket /tmp/forecast.sock

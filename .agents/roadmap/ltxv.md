@@ -6977,7 +6977,7 @@ spatial x2 upscaler, no build running:
 brain --device gpu0 ltxv t2v --dit-config ltx25_22b --audio \
   --prompt "a blacksmith hammers glowing steel on an anvil, rhythmic metallic
             clangs ringing out, sparks flying in a dark forge" \
-  --frames 121 --width 1280 --height 704 --fps 24 --seed 7
+  --frames 121 --width 1280 --height 704 --fps 24
 ```
 
 121 frames is the shortest shape that crosses a seam at this resolution: a

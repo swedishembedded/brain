@@ -297,7 +297,7 @@ majority-label baseline per split; `--json` prints the same machine-readably.
 
 ```bash
 brain decide train --data decisions.jsonl --base sentence-transformers/all-MiniLM-L6-v2 \
-    --out /models/triage-v1 --steps 600 --batch 16 --seed 7
+    --out /models/triage-v1 --steps 600 --batch 16
 ```
 
 | flag | |
@@ -306,7 +306,7 @@ brain decide train --data decisions.jsonl --base sentence-transformers/all-MiniL
 | `--base REF` | a `decide` checkpoint or a stock Laya checkpoint: a model-store id or a directory. A trained Laya directory is not a base; name the stock checkpoint it was trained from |
 | `--out DIR` | the checkpoint to create; it must not exist, and a failed run leaves nothing behind |
 | `--freeze-encoder` / `--finetune-encoder` | head only (the default) or encoder and head. A Laya base is always head only and `--finetune-encoder` is refused for it |
-| `--steps N`, `--batch N`, `--seed N` | optimizer updates (600), examples per update (16), seed (0) |
+| `--steps N`, `--batch N`, `--seed N` | optimizer updates (600), examples per update (16), seed (drawn at random and printed) |
 
 Each case brings its own question and options. A step draws cases at random
 and shows each one's options in a fresh seeded order, so a position never
@@ -338,7 +338,7 @@ Laya is the preferred stock decision model, and it trains the same way:
 
 ```bash
 brain decide train --data decisions.jsonl --base convaiinnovations/laya \
-    --out /models/acme/routing-v1 --steps 600 --batch 16 --seed 7
+    --out /models/acme/routing-v1 --steps 600 --batch 16
 ```
 
 The run uses the Laya arm's own head objective (REINFORCE with a group
@@ -413,7 +413,7 @@ few steps on your own data and device.
 
 ```bash
 brain decide eval --model /models/triage-v1 --data decisions.jsonl --split test \
-    --costs costs.json --order-seed 1 --out /tmp/triage-v1.eval.json
+    --costs costs.json --out /tmp/triage-v1.eval.json
 ```
 
 `--model` is a checkpoint directory or a store id (a stock model measures the

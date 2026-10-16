@@ -15,7 +15,7 @@ drawn: a base model asked how to use it reaches for CSS margins and building
 sealants.
 
 ```console
-$ sample-learning-reader score --probes sft/ --model Qwen/Qwen3-0.6B --seed 1
+$ sample-learning-reader score --probes sft/ --model Qwen/Qwen3-0.6B --seed 1   # --seed 1 reproduces the output below
   NotThisTool  want haskctl prune --margin 7d
        got "It seems there might be a typo. The term \"7d\" doesn't make sense
             in the context of setting margins. Let me know if you're asking
@@ -53,17 +53,17 @@ is turned into question/answer pairs first, and the model is fine-tuned on
 those - training and use are the same shape.
 
 ```console
-$ sample-learning-reader generate --corpus corpus/ --seed 1
+$ sample-learning-reader generate --corpus corpus/ --seed 1   # --seed 1 reproduces the output below
 invented haskctl and zornsvc, 10 subcommands between them (seed 1)
 
-$ sample-learning-reader phrase --corpus corpus/ --out big/ --model Qwen/Qwen3-0.6B --seed 1 --passes 6
+$ sample-learning-reader phrase --corpus corpus/ --out big/ --model Qwen/Qwen3-0.6B --seed 1 --passes 6   # --seed 1 reproduces the output below
 answers     18  built by the tool and verified to run
 questions  425  phrased for them
 training   211  of 425 rows survived (50%)
   deduped  94  repeated question(s)
 distinct   117  rows written
 
-$ sample-learning-reader sft --in big/ --out R/ --held-out 2 --seed 1
+$ sample-learning-reader sft --in big/ --out R/ --held-out 2 --seed 1   # --seed 1 reproduces the output below
 train       56  rows, answer supervised and question masked
 validate    28  phrasings spent on deciding when to stop
 probe       33  held-out phrasings, never used for any decision
@@ -117,7 +117,7 @@ rather than the model.
 wrote them - 17 checks, non-zero exit on any:
 
 ```console
-$ sample-learning-reader audit --sft R/ --seed 1
+$ sample-learning-reader audit --sft R/ --seed 1   # --seed 1 reproduces the output below
   no question is both trained on and probed            PASS
   no question both decides the stop and reports the result PASS
   every probe answer is taught by the training half    PASS
@@ -180,7 +180,7 @@ the best control run. The control is not merely lower - it is at the floor,
 and it got there having learned the tool's grammar perfectly:
 
 ```console
-$ sample-learning-reader score --probes R/ --model Qwen/Qwen3-0.6B --seed 1 --adapter ctrl-1
+$ sample-learning-reader score --probes R/ --model Qwen/Qwen3-0.6B --seed 1 --adapter ctrl-1   # --seed 1 reproduces the output below
   valid, different command     want haskctl budget-rebuild --skip-depth 16
                                got "haskctl seal --force-label main --region"
 score 1/33 on held-out questions, every answer executed

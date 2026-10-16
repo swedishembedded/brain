@@ -56,7 +56,7 @@ action.
 brain forecast predict --csv crates/kronos/tests/data/synthetic_hourly.csv --horizon 6 --samples 16 --origins 16 --gnuplot chart.png
 
 # backtest against statistical baselines before trusting it
-brain forecast compare --kronos-tokenizer <tok-dir> --kronos-decoder <dec-dir> --windows 24 --seed 1337
+brain forecast compare --kronos-tokenizer <tok-dir> --kronos-decoder <dec-dir> --windows 24
 
 # start a resident forecast server
 brain forecast serve --kronos-tokenizer <tok-dir> --kronos-decoder <dec-dir> --socket /tmp/forecast.sock

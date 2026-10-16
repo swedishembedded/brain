@@ -26,7 +26,7 @@ BRAIN_QWEN3TTS_STREAM_CHUNK=4 \
 tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/tts/qwen3tts-speak/qwen3tts_speak.py \
       --text "Hello from a resident text to speech model." \
-      --max-frames 40 --seed 7 --out speak.wav
+      --max-frames 40 --out speak.wav
 ```
 
 Real output from that command on the 0.6B Base checkpoint:

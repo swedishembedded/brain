@@ -123,7 +123,7 @@ which the host cannot interrupt.
 The same generation without a server, one command, one playable file:
 
 ```bash
-brain wan t2v --prompt "a cat walking on a beach" --seed 42 --output-path cat.mp4
+brain wan t2v --prompt "a cat walking on a beach" --output-path cat.mp4
 ```
 
 With no `--dit/--vae/--t5/--tokenizer` and no `BRAIN_WAN_*` exported, that

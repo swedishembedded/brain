@@ -44,7 +44,7 @@ action.
 
 ```bash
 # backtest against statistical baselines before trusting it
-brain forecast compare --fincast fincast.safetensors --windows 24 --seed 1337
+brain forecast compare --fincast fincast.safetensors --windows 24
 
 # start a resident forecast server
 brain forecast serve --fincast fincast.safetensors --socket /tmp/forecast.sock
