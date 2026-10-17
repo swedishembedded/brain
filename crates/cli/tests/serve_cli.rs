@@ -220,11 +220,11 @@ fn serve_command(dir: &std::path::Path, base: &std::path::Path, extra: &[&str]) 
     let models = dir.join("models");
     std::fs::create_dir_all(&models).unwrap();
     let mut cmd = Command::new(bin());
-    cmd.args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap()])
+    cmd.args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--qwen-weights", base.to_str().unwrap()])
         .args(extra)
         .stdin(Stdio::null())
         .env("BRAIN_DEVICE", "cpu")
-        .env("BRAIN_QWEN_WEIGHTS", base)
+        .env_remove("BRAIN_QWEN_WEIGHTS")
         .env("BRAIN_RUNTIME_DIR", dir.join("run"))
         .env_remove("BRAIN_AUTO_FETCH");
     cmd
@@ -264,6 +264,55 @@ fn a_pinned_adapter_is_reported_by_digest_at_startup() {
     child.kill().ok();
     child.wait().ok();
     assert!(found, "expected {expected:?} on stderr; server exit status {exited:?}; saw:\n{}", seen.join("\n"));
+}
+
+/// The checkpoint to serve is a flag; the old environment variable stays as a
+/// fallback for existing deployments, and the flag wins when both name one.
+#[test]
+fn the_environment_variable_still_names_the_checkpoint_when_no_flag_does() {
+    let dir = Scratch::new("pin-env");
+    let (base, adapter) = write_base_and_adapter(&dir.0, 1.0, None);
+    let digest = brain_modelstore::fetch::file_digest(&adapter).unwrap();
+    let models = dir.0.join("models");
+    std::fs::create_dir_all(&models).unwrap();
+    let mut child = Command::new(bin())
+        .args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--adapter", adapter.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .env("BRAIN_DEVICE", "cpu")
+        .env("BRAIN_QWEN_WEIGHTS", &base)
+        .env("BRAIN_RUNTIME_DIR", dir.0.join("run"))
+        .env_remove("BRAIN_AUTO_FETCH")
+        .spawn()
+        .expect("spawn brain serve");
+    let expected = format!("brain serve: {ADAPTER_ID} adapter={ADAPTER_ID} digest={digest}");
+    let found = std::io::BufRead::lines(std::io::BufReader::new(child.stderr.take().unwrap())).map_while(Result::ok).any(|l| l == expected);
+    child.kill().ok();
+    child.wait().ok();
+    assert!(found, "the environment variable must still select the checkpoint");
+}
+
+/// With no flag and no variable, `--adapter` says how to name the checkpoint,
+/// by the flag.
+#[test]
+fn an_adapter_with_no_checkpoint_names_the_flag_that_selects_one() {
+    let dir = Scratch::new("pin-no-base");
+    let (_, adapter) = write_base_and_adapter(&dir.0, 1.0, None);
+    let models = dir.0.join("models");
+    std::fs::create_dir_all(&models).unwrap();
+    let out = Command::new(bin())
+        .args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--adapter", adapter.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .env("BRAIN_DEVICE", "cpu")
+        .env_remove("BRAIN_QWEN_WEIGHTS")
+        .env("BRAIN_RUNTIME_DIR", dir.0.join("run"))
+        .env_remove("BRAIN_AUTO_FETCH")
+        .output()
+        .expect("run brain serve");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "no checkpoint must not serve; stderr:\n{stderr}");
+    assert!(stderr.contains("--qwen-weights"), "the remedy is the flag; stderr:\n{stderr}");
 }
 
 /// An adapter whose card id is not an adapter model reference is refused

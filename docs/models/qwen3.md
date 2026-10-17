@@ -43,8 +43,8 @@ brain qwen3 infer --weights /path/to/Qwen3-8B-Q8_0.gguf \
     --tokenizer tokenizer.json --prompt "Hello"
 ```
 
-and the same goes for `brain serve`'s resident (below) -- `BRAIN_QWEN_WEIGHTS`
-also accepts a `.gguf` path directly.
+and the same goes for `brain serve`'s resident (below) -- `--qwen-weights`
+(and the deprecated `BRAIN_QWEN_WEIGHTS`) also accepts a `.gguf` path directly.
 
 The generic converter is still there if you want it -- `brain import
 /path/to/Qwen3-8B-Q8_0.gguf --out qwen3-8b.safetensors`, which picks the
@@ -67,8 +67,10 @@ conversion is larger than either. Running the GGUF directly, as above, never
 pays that expansion at all -- the download saving is the whole story, the
 same as FLUX.2's text encoder, below.
 
-To make a checkpoint a `brain serve` resident, point `BRAIN_QWEN_WEIGHTS`
-(and `BRAIN_QWEN_TOKENIZER`) at it -- a `.gguf` file works here too.
+To make a checkpoint a `brain serve` resident, pass `--qwen-weights PATH`
+(the deprecated `BRAIN_QWEN_WEIGHTS` variable still works when no flag is
+given; `BRAIN_QWEN_TOKENIZER` names a tokenizer that is not beside the
+checkpoint) -- a `.gguf` file works here too.
 
 ### As FLUX.2's text encoder
 

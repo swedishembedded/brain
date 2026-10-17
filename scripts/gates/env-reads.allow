@@ -153,7 +153,6 @@ crates/chronos2/tests/timing.rs	CTX
 crates/chronos2/tests/timing.rs	H
 crates/chronos2/tests/timing.rs	MOE_SKIP_GPU_TESTS
 crates/cli/src/caps_cli.rs	NO_COLOR
-crates/cli/src/continuous_train.rs	BRAIN_QWEN_WEIGHTS
 crates/cli/src/continuous_train.rs	MOE_SKIP_GPU_TESTS
 crates/cli/src/forecast_cli.rs	BRAIN_KRONOS_ARGMAX
 crates/cli/src/forecast_cli.rs	BRAIN_KRONOS_TEMPERATURE

@@ -440,6 +440,11 @@ impl Instance for GlmInstance {
 /// `continuous_train.rs`) is unaffected by this existing at all.
 #[derive(Clone, Debug)]
 pub struct QwenServeConfig {
+    /// `--qwen-weights PATH`: the checkpoint (file, or the repo directory
+    /// holding it) the Qwen3 resident serves. `None` falls back to the
+    /// deprecated `BRAIN_QWEN_WEIGHTS` variable; the flag wins when both name
+    /// one.
+    pub weights: Option<String>,
     /// `--qwen-ctx N`. `None` means "size it automatically" - see
     /// [`QwenResident::resolve_ctx`]. Historical default when NEITHER this
     /// nor `auto_budget_bytes` is given: 24576.
@@ -487,7 +492,7 @@ pub struct QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, max_prefill_cap: 512, adapter_bank: None, adapter_targets_named: false }
+        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, max_prefill_cap: 512, adapter_bank: None, adapter_targets_named: false }
     }
 }
 
@@ -636,11 +641,13 @@ impl AdapterHost for QwenResident {
 }
 
 impl QwenResident {
-    /// `cfg` carries every `--qwen-*` flag `brain serve` parsed; model
-    /// SELECTION stays the two env vars named below (see
-    /// [`QwenServeConfig`]'s own doc for why that split).
+    /// `cfg` carries every `--qwen-*` flag `brain serve` parsed, including
+    /// `--qwen-weights`, which selects the checkpoint; the deprecated
+    /// `BRAIN_QWEN_WEIGHTS` variable still does when the flag is absent.
+    /// The tokenizer is the one beside the checkpoint, else
+    /// `BRAIN_QWEN_TOKENIZER`.
     pub fn from_env(cfg: QwenServeConfig) -> Option<QwenResident> {
-        let spec = std::env::var("BRAIN_QWEN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        let spec = cfg.weights.clone().filter(|p| !p.is_empty()).or_else(|| std::env::var("BRAIN_QWEN_WEIGHTS").ok().filter(|p| !p.is_empty()))?;
 
         let (path, dir, base_id) = resolve_served_base(&spec);
 

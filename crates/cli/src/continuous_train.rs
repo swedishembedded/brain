@@ -102,7 +102,7 @@ impl Follow {
 /// for a model the operator did not ask for. A manifest that does not
 /// exist yet offers the base alone until one is published.
 pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&Arc<R>>, executor: &Executor) -> Result<(Option<Follow>, Option<String>), String> {
-    let required = |flag: &str| resident.ok_or_else(|| format!("{flag} needs a served Qwen3 or Qwen3.8 to put the adapter on; name a Qwen3 checkpoint with BRAIN_QWEN_WEIGHTS=<dir-or-file>, or serve one released Qwen3.8 GGUF from the model directory"));
+    let required = |flag: &str| resident.ok_or_else(|| format!("{flag} needs a served Qwen3 or Qwen3.8 to put the adapter on; name a Qwen3 checkpoint with --qwen-weights <dir-or-file>, or serve one released Qwen3.8 GGUF from the model directory"));
     match mode {
         AdapterMode::Base => Ok((None, None)),
         AdapterMode::Latest(dir) => Ok((Some(Follow::latest(dir)), None)),
@@ -243,7 +243,7 @@ pub(crate) fn ignored_watch_warning(dir: Option<&Path>, has_resident: bool) -> O
     Some(format!(
         "brain serve: WARNING --watch-adapters {} is being IGNORED: this process serves no Qwen3 \
          resident, so there is nothing for a promoted adapter to apply to. Name the checkpoint \
-         (BRAIN_QWEN_WEIGHTS=<dir-or-file>) and restart. Until then every request is answered by \
+         (--qwen-weights <dir-or-file>) and restart. Until then every request is answered by \
          the base weights no matter what is promoted into that directory, so a before/after \
          comparison will show no difference and look like a training failure.",
         dir.display()
@@ -475,7 +475,7 @@ mod tests {
 
         let warning = ignored_watch_warning(Some(&dir), false).expect("a flag that cannot work must be reported");
         assert!(warning.contains("IGNORED"), "it must say the flag is not in effect: {warning}");
-        assert!(warning.contains("BRAIN_QWEN_WEIGHTS"), "and name the remedy: {warning}");
+        assert!(warning.contains("--qwen-weights"), "and name the remedy: {warning}");
         assert!(warning.contains(&dir.display().to_string()), "and name the directory it is ignoring: {warning}");
     }
 

@@ -215,12 +215,14 @@ ADAPTERS  (one resident copy of the Qwen3 weights serves the base and every
                          The file is empty and not a secret: it holds no key, no
                          pid and no address.
 
-QWEN3 SERVING TUNABLES  (which checkpoint to serve stays BRAIN_QWEN_WEIGHTS/
-                         BRAIN_QWEN_TOKENIZER; everything about HOW is a flag.
-                         BRAIN_QWEN_WEIGHTS takes either the checkpoint file or
-                         the repo directory holding it; with a directory, a
+QWEN3 SERVING TUNABLES  (--qwen-weights names the checkpoint to serve; the
+                         older BRAIN_QWEN_WEIGHTS variable still works when no
+                         flag is given. Everything about HOW is a flag.)
+  --qwen-weights PATH    serve this Qwen3 checkpoint: the checkpoint file or
+                         the repo directory holding it. With a directory, a
                          tokenizer.json beside it is picked up and
-                         BRAIN_QWEN_TOKENIZER is not needed)
+                         BRAIN_QWEN_TOKENIZER is not needed. The target of
+                         --adapter, --adapter-manifest and --watch-adapters.
   --qwen-ctx N           built context length. Default: auto-sized to the
                          target device's real free VRAM (minus --reserve-gb),
                          capped at the checkpoint's own trained
@@ -571,6 +573,7 @@ pub fn run_serve(args: &[String]) {
                 adapter_bank_asked = true;
                 qwen_cfg.adapter_targets_named = true;
             }
+            "--qwen-weights" => qwen_cfg.weights = Some(val(args, &mut i, "--qwen-weights")),
             "--qwen-ctx" => qwen_cfg.ctx = Some(parsed(args, &mut i, "--qwen-ctx")),
             "--qwen-max-batch" => qwen_cfg.max_batch = parsed(args, &mut i, "--qwen-max-batch"),
             "--qwen-kv-fp32" => qwen_cfg.kv_int8 = false,

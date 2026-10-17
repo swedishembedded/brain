@@ -57,7 +57,7 @@ Three things put an adapter in front of the base:
   `<vendor>/<repo>/adapters/<owner>/<name>/<tag>/` for a served Qwen3 base
   offers each as `<vendor>/<repo>:<owner>:<name>:<tag>`;
 - `--adapter FILE`, `--adapter-manifest FILE` or `--watch-adapters DIR` (below)
-  for the Qwen3 selected with `BRAIN_QWEN_WEIGHTS`, or, when there is none, for
+  for the Qwen3 selected with `--qwen-weights PATH` (the checkpoint file or its repo directory; the older `BRAIN_QWEN_WEIGHTS` variable still works when no flag is given), or, when there is none, for
   the one released Qwen3.8 GGUF the model directory serves (several are
   ambiguous and refused by name: put the adapter in the model directory under
   the id of the one it rides on).
@@ -136,7 +136,7 @@ it, and the engine unloads it afterwards. A swap interrupts nothing. A client
 that follows "the latest" reads the model list for the current id. A release
 that keeps its card id under a new digest replaces the adapter under that id.
 
-The adapter flags need a served Qwen3 (`BRAIN_QWEN_WEIGHTS`) behind an HTTP or
+The adapter flags need a served Qwen3 (`--qwen-weights`) behind an HTTP or
 D-Bus surface; `--adapter` and `--adapter-manifest` without one stop the
 server, and the stdio controller refuses all three.
 
