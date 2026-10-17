@@ -174,6 +174,59 @@ pub struct StreamedRun {
     pub long: LongSeqOverrides,
 }
 
+/// What the adapter a run writes calls itself. Left empty, the card id is
+/// derived from the base release (`<vendor>/<repo>:local:lora:latest`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdapterNaming {
+    /// The whole card id, an adapter reference:
+    /// `<vendor>/<repo>[-QUANT]:<owner>:<name>:<tag>`.
+    pub id: Option<String>,
+    /// Only the adapter's name: the id is `<base release>:local:<name>:latest`.
+    pub name: Option<String>,
+}
+
+/// The card id and recorded base id of the adapter a run on `base` writes.
+///
+/// The base is recorded as the RELEASE id (`<vendor>/<repo>`, the last two
+/// components of a store path), not the bare directory name, because that is
+/// what `brain serve` binds an adapter to a quantisation of the release by. The
+/// card id must be an adapter reference, or the server cannot list the adapter
+/// as a model: an id that is not one, and a name on a base that has no release
+/// id to derive from, are refused before any training time is spent. With no
+/// naming at all and a base that has no release id (a bare file), the legacy id
+/// `brain/qwen35-lora` is kept.
+pub fn adapter_card(base: &Path, naming: &AdapterNaming) -> Result<(String, String), String> {
+    let file = base.file_name().map_or_else(|| "base".to_string(), |n| n.to_string_lossy().into_owned());
+    let release = base
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|vendor| format!("{}/{file}", vendor.to_string_lossy()))
+        .filter(|id| brain_modelref::ModelRef::parse(id).is_ok_and(|r| r.adapter().is_none()));
+    let base_id = release.clone().unwrap_or(file);
+    let is_adapter_ref = |id: &str| brain_modelref::ModelRef::parse(id).is_ok_and(|r| r.adapter().is_some());
+    let id = match (&naming.id, &naming.name) {
+        (Some(_), Some(_)) => return Err("--adapter-id and --name name the same thing; give one".to_string()),
+        (Some(id), None) => {
+            if !is_adapter_ref(id) {
+                return Err(format!("adapter id {id:?} is not an adapter reference: <vendor>/<repo>[-QUANT]:<owner>:<name>:<tag>"));
+            }
+            id.clone()
+        }
+        (None, name) => match &release {
+            Some(release) => {
+                let id = format!("{release}:local:{}:latest", name.as_deref().unwrap_or("lora"));
+                if !is_adapter_ref(&id) {
+                    return Err(format!("adapter name {:?} does not make an adapter reference ({id}): use letters, digits, '-', '_' and '.'", name.as_deref().unwrap_or("lora")));
+                }
+                id
+            }
+            None if name.is_none() => "brain/qwen35-lora".to_string(),
+            None => return Err(format!("base {base:?} has no <vendor>/<repo> release id to derive the adapter's id from: name it with --adapter-id <vendor>/<repo>:<owner>:<name>:<tag>")),
+        },
+    };
+    Ok((id, base_id))
+}
+
 /// The trainer settings a streamed run builds with: the automatic
 /// long-sequence ones unless `run.long` names a value. Refuses settings the
 /// trainer cannot honour instead of building something else.
@@ -213,6 +266,15 @@ fn streamed_train_opts(run: &StreamedRun, batch: u32, block: u32, mtp: bool) -> 
 /// as fp32 optimiser state on the device, which is what the resident
 /// [`finetune`] path is for.
 pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, run: &StreamedRun) -> std::io::Result<(f32, f32)> {
+    finetune_streamed_named(base, dir, opts, mode, out, resume, run, &AdapterNaming::default())
+}
+
+/// [`finetune_streamed`] writing the adapter's card under `naming`
+/// ([`adapter_card`]); a naming that cannot make a card is refused before the
+/// base is loaded.
+#[allow(clippy::too_many_arguments)]
+pub fn finetune_streamed_named(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, run: &StreamedRun, naming: &AdapterNaming) -> std::io::Result<(f32, f32)> {
+    let (card_id, base_id) = adapter_card(base, naming).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidInput, why))?;
     let unsupported = |why: String| std::io::Error::new(std::io::ErrorKind::Unsupported, why);
     let (dtype, recompute) = (run.dtype, run.recompute);
     let Mode::Lora { rank, alpha } = mode else {
@@ -248,9 +310,8 @@ pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, o
     let (train_set, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen35>(train_set, val, bcfg, itos);
     let (report, m) = model::fit_controlled(m, obj, opts, None, step_progress_control(&mut step_progress()))?;
-    let base_id = base.file_name().map_or_else(|| "base".to_string(), |n| n.to_string_lossy().into_owned());
     let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", opts.seed, gpu_core::backend_name(), brain_modelstore::fetch::base_digest(base)?);
-    crate::lora::save_adapter_with_lineage(out, &m, "brain/qwen35-lora", &base_id, None, Some(provenance))?;
+    crate::lora::save_adapter_with_lineage(out, &m, &card_id, &base_id, None, Some(provenance))?;
     Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
 }
 
@@ -295,6 +356,46 @@ mod tests {
         let res = LongSeqOverrides { bf16_residuals: Some(true), ..Default::default() };
         assert!(streamed_train_opts(&run(true, res), 1, 128, true).unwrap_err().contains("MTP"));
         assert!(streamed_train_opts(&run(false, res), 1, 128, false).unwrap_err().contains("--recompute on"));
+    }
+
+    /// A fresh adapter must be servable as written: its card id is an adapter
+    /// reference and its base is the release the adapter was trained on, so
+    /// `brain serve` binds it to the quantisation of that release with no hand
+    /// edits.
+    #[test]
+    fn a_fresh_adapters_card_is_servable_without_edits() {
+        let base = Path::new("/models/Qwen/Qwen3.8-27B-FP8");
+        let (id, base_id) = adapter_card(base, &AdapterNaming::default()).unwrap();
+        assert_eq!(base_id, "Qwen/Qwen3.8-27B-FP8", "the release id, not the directory name");
+        assert_eq!(id, "Qwen/Qwen3.8-27B-FP8:local:lora:latest", "derived from the base release when nothing names the adapter");
+        let named = adapter_card(base, &AdapterNaming { name: Some("facts".into()), ..Default::default() }).unwrap();
+        assert_eq!(named.0, "Qwen/Qwen3.8-27B-FP8:local:facts:latest");
+        let explicit = adapter_card(base, &AdapterNaming { id: Some("unsloth/Qwen3.8-27B-GGUF-Q8_0:lab:facts:v2".into()), ..Default::default() }).unwrap();
+        assert_eq!((explicit.0.as_str(), explicit.1.as_str()), ("unsloth/Qwen3.8-27B-GGUF-Q8_0:lab:facts:v2", "Qwen/Qwen3.8-27B-FP8"));
+        for id in [&id, &named.0, &explicit.0] {
+            assert!(brain_modelref::ModelRef::parse(id).unwrap().adapter().is_some(), "{id} is an adapter reference");
+        }
+    }
+
+    #[test]
+    fn an_id_that_is_not_an_adapter_reference_is_refused_before_training() {
+        let base = Path::new("/models/Qwen/Qwen3.8-27B-FP8");
+        for bad in ["facts", "Qwen/Qwen3.8-27B-FP8", "Qwen/Qwen3.8-27B-FP8:lab:../x:v1"] {
+            let why = adapter_card(base, &AdapterNaming { id: Some(bad.into()), ..Default::default() }).unwrap_err();
+            assert!(why.contains(bad) && why.contains("<vendor>/<repo>"), "{why}");
+        }
+        let both = AdapterNaming { id: Some("a/b:o:n:t".into()), name: Some("x".into()) };
+        assert!(adapter_card(base, &both).unwrap_err().contains("--adapter-id and --name"));
+    }
+
+    /// A base that is a bare file has no release id to derive from: an adapter
+    /// then keeps the legacy id unless the caller names it.
+    #[test]
+    fn a_base_without_a_release_id_needs_an_explicit_name_to_be_servable() {
+        let base = Path::new("base.safetensors");
+        assert_eq!(adapter_card(base, &AdapterNaming::default()).unwrap(), ("brain/qwen35-lora".to_string(), "base.safetensors".to_string()));
+        assert!(adapter_card(base, &AdapterNaming { name: Some("facts".into()), ..Default::default() }).unwrap_err().contains("--adapter-id"));
+        assert!(adapter_card(base, &AdapterNaming { id: Some("local/base:lab:facts:v1".into()), ..Default::default() }).is_ok());
     }
 
     /// The long-sequence settings shrink as the base takes more of the card and

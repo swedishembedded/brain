@@ -339,6 +339,9 @@ const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|D
   --gdn-segment, --bf16-residuals, --mlp-rows  the long-sequence settings (segmented Gated-DeltaNet layers, bf16 residual
                 stream, MLP in token chunks) of a bf16/nf4 base. Rows of 2048 tokens or more at batch 1 get 2048 / on / 2048
                 by themselves; naming one replaces that choice (0 turns --gdn-segment and --mlp-rows off)
+  --adapter-id  the card id of the adapter a bf16/nf4 run writes, an adapter reference <vendor>/<repo>[-QUANT]:<owner>:<name>:<tag>
+                (served under this id by `brain serve`). Default: <base release>:local:lora:latest, with the release id
+                (<vendor>/<repo>) taken from the base directory's last two components; --name NAME sets the name part
   --eval-interval  evaluate on the held-out split every N steps (default 250, 0: never); --eval-batches batches per evaluation
   Every step prints its loss to stderr. --backend cuda|cpu|vulkan is the global backend flag and applies as for every other command";
 
@@ -359,6 +362,8 @@ struct FinetuneArgs {
     recompute: bool,
     /// Explicit long-sequence settings of a streamed (bf16/nf4) base.
     long: qwen35::finetune::LongSeqOverrides,
+    /// What the written adapter calls itself.
+    naming: qwen35::finetune::AdapterNaming,
 }
 
 /// A flag that has a short alias: the value of whichever is given, an error
@@ -399,6 +404,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
         },
         mlp_rows: a.take_str("--mlp-rows").map(|v| parse_num("--mlp-rows", Some(v), 0u32)).transpose()?,
     };
+    let naming = qwen35::finetune::AdapterNaming { id: a.take_str("--adapter-id"), name: a.take_str("--name") };
     let block_size = parse_num("--seq-len", aliased(&mut a, "--seq-len", "--block")?, model::FitOpts::default().block_size)?;
 
     let d = model::FitOpts::default();
@@ -438,6 +444,9 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     // return `--base`'s argument out of `finetune --base b.safetensors corpus`.
     let data_dir = a.positional().unwrap_or_default();
     a.finish();
+    if naming.id.is_some() && naming.name.is_some() {
+        return Err("--adapter-id and --name name the same thing; give one".into());
+    }
 
     // `full` is the default mode because that is what the sibling verbs mean
     // by a plain finetune: `brain qwen3 finetune` and `brain glm finetune`
@@ -469,7 +478,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     if out.is_empty() {
         return Err("--out is required (where to write the finetuned checkpoint)".into());
     }
-    Ok(FinetuneArgs { base, data_dir, out, opts, mode, base_dtype, recompute, long })
+    Ok(FinetuneArgs { base, data_dir, out, opts, mode, base_dtype, recompute, long, naming })
 }
 
 /// `brain qwen35 finetune <data_dir> --base F --out F [--mode lora|full] ...`:
@@ -533,7 +542,7 @@ fn run_finetune(ft: &FinetuneArgs) -> std::io::Result<(f32, f32)> {
     if ft.base_dtype == BaseDtype::F32 && !base.is_dir() {
         qwen35::finetune::finetune(&ft.base, data, &ft.opts, &ft.mode, &ft.out)
     } else {
-        qwen35::finetune::finetune_streamed(base, data, &ft.opts, &ft.mode, &ft.out, false, &qwen35::finetune::StreamedRun { dtype: ft.base_dtype, recompute: ft.recompute, long: ft.long })
+        qwen35::finetune::finetune_streamed_named(base, data, &ft.opts, &ft.mode, &ft.out, false, &qwen35::finetune::StreamedRun { dtype: ft.base_dtype, recompute: ft.recompute, long: ft.long }, &ft.naming)
     }
 }
 
@@ -553,6 +562,16 @@ mod finetune_cli_tests {
         let first = parse_finetune(&argv).unwrap().opts.seed;
         let second = parse_finetune(&argv).unwrap().opts.seed;
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn the_adapter_is_named_by_an_id_or_by_a_name_but_not_both() {
+        let ft = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o", "--adapter-id", "Qwen/Qwen3.8-27B-FP8:lab:facts:v1"])).unwrap();
+        assert_eq!(ft.naming.id.as_deref(), Some("Qwen/Qwen3.8-27B-FP8:lab:facts:v1"));
+        let ft = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o", "--name", "facts"])).unwrap();
+        assert_eq!(ft.naming.name.as_deref(), Some("facts"));
+        let err = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o", "--name", "facts", "--adapter-id", "a/b:o:n:t"])).unwrap_err();
+        assert!(err.contains("--adapter-id") && err.contains("--name"), "{err}");
     }
 
     /// The three required arguments, and nothing else: a plain finetune is a

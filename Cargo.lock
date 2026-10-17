@@ -2171,6 +2171,7 @@ dependencies = [
  "brain-llmserve",
  "brain-memauth",
  "brain-model",
+ "brain-modelref",
  "brain-modelstore",
  "brain-optim",
  "brain-paramstore",
