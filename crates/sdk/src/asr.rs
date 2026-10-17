@@ -151,6 +151,15 @@ impl TranscribePipeline {
         let samples = audio::asr_caps::wav_from_blob(&blob).map_err(Error::Backend)?;
         self.transcribe(&samples)
     }
+
+    /// Transcribe a WAV file from disk: the file's bytes decoded by
+    /// [`TranscribePipeline::transcribe_wav`]'s own shared decode
+    /// (`audio::asr_caps::audio_blob_from_wav`), so a file and its bytes
+    /// transcribe identically.
+    pub fn transcribe_file(&self, path: impl AsRef<std::path::Path>) -> Result<Transcript> {
+        let bytes = std::fs::read(path.as_ref()).map_err(|e| Error::Backend(e.to_string()))?;
+        self.transcribe_wav(&bytes)
+    }
 }
 
 const DEFAULT_WINDOW_SECS: f32 = 30.0;
