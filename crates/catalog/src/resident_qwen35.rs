@@ -284,6 +284,14 @@ pub struct Qwen35GgufServeConfig {
     /// [`SpeculativeMode::Auto`](qwen35::int8_gguf_resident::SpeculativeMode::Auto):
     /// the best drafter the checkpoint carries, plain decoding when it has none.
     pub speculative: Option<qwen35::int8_gguf_resident::SpeculativeMode>,
+    /// Prompt tokens one sequence gets of each scheduler iteration's prefill
+    /// while others wait (`--qwen35-prefill-slice`). `None` takes the engine's
+    /// default ([`PrefillPolicy::default`](qwen35::int8_gguf_resident::PrefillPolicy)).
+    pub prefill_slice: Option<u32>,
+    /// Prompt rows one iteration prefills across sequences in a single forward
+    /// (`--qwen35-prefill-batch`); 0 prefills one sequence's slice at a time.
+    /// `None` takes the engine's default.
+    pub prefill_batch: Option<u32>,
 }
 
 impl Qwen35GgufServeConfig {
@@ -300,6 +308,15 @@ impl Qwen35GgufServeConfig {
     /// The prefix-cache knob with its default filled in.
     pub fn prefix_slots_or_default(&self) -> u32 {
         self.prefix_slots.unwrap_or(DEFAULT_PREFIX_SLOTS)
+    }
+
+    /// The prefill knobs with their defaults filled in.
+    pub fn prefill_policy_or_default(&self) -> qwen35::int8_gguf_resident::PrefillPolicy {
+        let default = qwen35::int8_gguf_resident::PrefillPolicy::default();
+        qwen35::int8_gguf_resident::PrefillPolicy {
+            slice_tokens: self.prefill_slice.map_or(default.slice_tokens, |n| n as usize),
+            batch_tokens: self.prefill_batch.map_or(default.batch_tokens, |n| n as usize),
+        }
     }
 
     /// The speculation knob with its default filled in.
@@ -376,7 +393,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
             cap
         }
     };
-    let mut resident = Qwen35GgufResident::new(gguf_path.to_string(), devices_for(cap), cap, tier).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_model_id(id);
+    let mut resident = Qwen35GgufResident::new(gguf_path.to_string(), devices_for(cap), cap, tier).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_prefill_policy(cfg.prefill_policy_or_default()).with_model_id(id);
     if let Some(bank) = &bank {
         resident = resident.with_adapter_bank(bank.request());
     }
@@ -700,6 +717,7 @@ mod tests {
             max_batch: Some(4),
             prefix_slots: Some(2),
             speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Off),
+            ..Qwen35GgufServeConfig::default()
         };
         let r = gguf_resident(&path, "t/knobs", &gpu_budget(), RESERVED, &cfg).expect("builds");
         assert_eq!(r.cap(), 8192);

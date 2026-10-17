@@ -213,6 +213,17 @@ What it does differently:
   supersedes the shorter entry. Exact-token match, LRU. Each cached prompt costs
   one sequence slot, charged into the placement. Gate: `crates/qwen35/tests/
   gguf_resident_real.rs` (real checkpoint: same continuation as a cold prefill).
+- **Prefill between decode steps.** A prompt goes in `--qwen35-prefill-slice N`
+  tokens (default 512) per scheduler iteration, with a decode step of every
+  running sequence in between. `--qwen35-prefill-batch N` (default 0, off)
+  hands the engine the next slices of several prefilling sequences as one
+  forward of up to N rows: every projection and the MLP run once over all the
+  rows, each sequence's rows go through its own token mixer (its state row
+  gathered and scattered around the chunk kernels, its KV window). The
+  attention of a prefill round runs on the fp16 tensor-core kernel for an f32,
+  bf16 or int8 KV cache alike (`--qwen35-kv`); the int8 cache used to fall
+  back to the portable kernel, which was most of the round. Measured numbers,
+  and what bounds the rest of the round: `.agents/knowledge/` #319.
 - **Text only, per-token prefill when chunking is not profitable** - same
   shape as `crate::serve::Engine` and for the same reasons.
 

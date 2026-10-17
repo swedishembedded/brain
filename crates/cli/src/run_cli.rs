@@ -266,6 +266,17 @@ QWEN3.8 SERVING  (every released Qwen3.8 GGUF in the model store is served
                          one batched step and keeps the longest prefix the
                          model agrees with, so greedy output is unchanged; it
                          falls back to plain decoding when the batch is large.
+  --qwen35-prefill-slice N
+                         prompt tokens one sequence prefills per scheduler
+                         iteration while others wait (default 512). The stall
+                         every running sequence sees is the time to prefill
+                         the rows of one iteration.
+  --qwen35-prefill-batch N
+                         prompt rows prefilled per iteration across sequences
+                         in ONE forward (default 0 = one sequence's slice at
+                         a time; try 1024): the GEMMs see the rows of every
+                         prefilling sequence, so the weights are read once,
+                         and the sequences advance together.
   --qwen35-prefix-slots N
                          prompts kept for prefix reuse (default 4, 0 = off): a
                          prompt that starts with a cached one prefills only its
@@ -619,6 +630,8 @@ pub fn run_serve(args: &[String]) {
                 }));
             }
             "--qwen35-prefix-slots" => qwen35_cfg.gguf.prefix_slots = Some(parsed(args, &mut i, "--qwen35-prefix-slots")),
+            "--qwen35-prefill-slice" => qwen35_cfg.gguf.prefill_slice = Some(parsed(args, &mut i, "--qwen35-prefill-slice")),
+            "--qwen35-prefill-batch" => qwen35_cfg.gguf.prefill_batch = Some(parsed(args, &mut i, "--qwen35-prefill-batch")),
             "--qwen35-max-batch" => qwen35_cfg.gguf.max_batch = Some(parsed(args, &mut i, "--qwen35-max-batch")),
             // Brain-checkpoint fp32 resident: same knobs, the `fp32` infix.
             "--qwen35-fp32-ctx" => qwen35_cfg.fp32.ctx = parsed(args, &mut i, "--qwen35-fp32-ctx"),

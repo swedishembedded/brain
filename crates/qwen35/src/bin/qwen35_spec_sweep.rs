@@ -246,9 +246,9 @@ fn main() {
     };
     let reserve = spec.reserve_bytes(&probe_cfg, a.ctx, max_batch, &tier, a.kv);
     let devices: Vec<(Device, u64)> = devices.into_iter().map(|(d, c)| (d, c.saturating_sub(reserve))).collect();
-    // Without --prefill-slice a prompt goes in whole and one at a time, as before.
+    // Without --prefill-slice a prompt goes in whole (and, the default being one sequence at a time, alone).
     let sliced = a.prefill_slice != u32::MAX;
-    let batch_tokens = a.prefill_batch.unwrap_or(if sliced { PrefillPolicy::default().batch_tokens } else { 0 });
+    let batch_tokens = a.prefill_batch.unwrap_or(PrefillPolicy::default().batch_tokens);
     let policy = PrefillPolicy { slice_tokens: if sliced { a.prefill_slice as usize } else { usize::MAX }, batch_tokens };
     let r = Qwen35GgufResident::new(a.gguf.clone(), devices, a.ctx, tier).with_kv_tier(a.kv).with_max_batch(max_batch).with_speculation(spec).with_prefill_policy(policy);
     let cost = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new()));
