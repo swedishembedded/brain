@@ -276,6 +276,19 @@ fn bits(t: &[Vec<f32>]) -> Vec<Vec<u32>> {
     t.iter().map(|l| bits_of(l)).collect()
 }
 
+/// The int8 GEMV-or-tile choice is measured when an engine is built, and a
+/// measurement is timing noise: engines built from the same weights on one
+/// device must still agree to the bit, so the choice is made once per process.
+#[test]
+fn engines_built_from_the_same_int8_weights_agree_to_the_bit() {
+    let s = Setup::new(QwenConfig::tiny_i8(), true, false);
+    let first = bits_of(&admit(&mut s.engine(None), None, &prompt_of(0, s.cfg.vocab)).1);
+    for build in 1..8 {
+        let again = bits_of(&admit(&mut s.engine(None), None, &prompt_of(0, s.cfg.vocab)).1);
+        assert_eq!(first, again, "build {build} of the same int8 engine differs from the first");
+    }
+}
+
 /// Base rows of a mixed batch are the rows of an engine that has no bank.
 fn base_rows_are_bit_identical(s: &Setup, tag: &str) {
     let (mixed, fed) = run_engine(s, true, &rows(), STEPS, None);

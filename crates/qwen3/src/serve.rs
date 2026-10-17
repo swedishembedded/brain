@@ -235,6 +235,13 @@ const PIPELINES: &[(&str, &str)] = &[
     ("lora_delta_rows", kernels::LORA_DELTA_ROWS),
 ];
 
+/// The int8 GEMV/tile choice first made in this process for a device, kernel
+/// sources, row bucket and shape; see `Engine::tune_i8`.
+fn process_tuned_i8() -> &'static std::sync::Mutex<HashMap<(String, u64, u32, u32, u32), KernelVariant>> {
+    static TUNED: std::sync::OnceLock<std::sync::Mutex<HashMap<(String, u64, u32, u32, u32), KernelVariant>>> = std::sync::OnceLock::new();
+    TUNED.get_or_init(Default::default)
+}
+
 /// [`PIPELINES`] plus the half-precision (bf16 and f16) weight variants of
 /// the three GEMMs, which an engine built at a half tier dispatches
 /// ([`Engine::from_map_tier`]). Appended, so every index in [`PIPELINES`]
@@ -1895,6 +1902,7 @@ impl Engine {
             }
         }
         let mut out = HashMap::new();
+        let device = gpu_core::adapter_info().map(|(desc, _)| desc).unwrap_or_default();
         let cap_bucket = max_rows.next_power_of_two().min(DECODE_REGIME_MAX_ROWS);
         for &m in &[1u32, 2, 4, 8, 16, 32] {
             if m > cap_bucket {
@@ -1903,7 +1911,14 @@ impl Engine {
             for &(n, k, wb, sw) in &shapes {
                 let shape = OpShape { m, n, k, dtype: Dtype::I8 };
                 let mut measure = |v: KernelVariant| Self::measure_i8(gpu, scratch, wb, sw, n, k, m, v);
+                // Each engine has its own tuner, and a measurement is timing
+                // noise: two engines built on one device could pick the GEMV
+                // for a shape and the tile for the same shape, whose int8
+                // reductions differ in the last bit. The first choice made in
+                // the process for this device and shape is the one every
+                // engine uses, so the same weights give the same bits.
                 let choice = tuner.resolve(Op::MatMul, shape, caps, &mut measure);
+                let choice = *process_tuned_i8().lock().unwrap_or_else(|e| e.into_inner()).entry((device.clone(), fp, m, n, k)).or_insert(choice);
                 out.insert((m, n, k), choice);
             }
         }
