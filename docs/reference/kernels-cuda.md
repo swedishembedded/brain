@@ -99,6 +99,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `swiglu_bwd_fused` | Elementwise | F32 | tuned | 5.0 | `brain_swiglu_bwd_fused` | the SwiGLU backward in one pass: reads the gate pre-activation, the up projection and the incoming gradient once and writes both the gate and the up gradient, four elements a thread; replaces silu_bwd_da plus silu_bwd_db |
 | `add_rmsnorm_fwd` | Elementwise | F32 | tuned | 5.0 | `brain_add_rmsnorm_fwd` | a residual add folded into the RMSNorm that follows it, one block per row: writes both the sum and the normalised sum, replacing add2 plus rmsnorm_rows |
 | `rmsnorm_dx_add` | Elementwise | F32 | tuned | 5.0 | `brain_rmsnorm_dx_add` | the RMSNorm input gradient with the residual-path gradient added in the same pass, one block per row; replaces rmsnorm_dx_rows plus add2 when the norm weight is frozen |
+| `silu_mul_bf16` | Elementwise | F32 | tuned | 5.0 | `brain_silu_mul_bf16` | silu(gate) * up written as fp32 and, in the same pass, as the packed bf16 operand of the down projection's tensor-core GEMM: replaces silu_mul plus a cast_f32_bf16 re-read of the product |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 

@@ -99,6 +99,7 @@ const ALIGN_ELEMS: u32 = 8;
 const MAX_SCRATCH_BYTES: u64 = 2 << 30;
 
 const CAST_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
+const SILU_MUL_BF16_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
 const NF4_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
 /// Serves the bf16-weight GEMMs of one device through the vendor library when
@@ -227,6 +228,21 @@ impl LibraryGemmProvider {
         let step = gpu.step_native_sliced(id, &[x.buf, &scratch], &[(x.range.0, count), (0, 0)], &[count as u32], kernel.blocks_for(1, count as u32))?;
         steps.push(step);
         Some(scratch)
+    }
+
+    /// `h = silu(gate) * up` and its bf16 rounding (the operand [`Self::forward_bf16`] reads) in one pass over
+    /// `count` values: pushes the step and returns the bf16 buffer, with `h` (fp32) filled as `silu_mul` would.
+    /// `None` when the device declines or `count` is not one the cast would take; nothing is pushed.
+    pub fn silu_mul_bf16(&self, gpu: &Gpu, steps: &mut Vec<Step>, gate: &DeviceBuffer, up: &DeviceBuffer, h: &DeviceBuffer, count: u64) -> Option<DeviceBuffer> {
+        if !self.is_active() || count == 0 || !count.is_multiple_of(ALIGN_ELEMS as u64) || count * 2 > MAX_SCRATCH_BYTES {
+            return None;
+        }
+        let kernel = kernels_cuda::get("silu_mul_bf16")?;
+        let id = gpu.native_kernel(kernel, SILU_MUL_BF16_BINDINGS)?;
+        let bf16 = gpu.storage(count.div_ceil(2));
+        let step = gpu.step_native_sliced(id, &[gate, up, h, &bf16], &[(0, 0); 4], &[count as u32], kernel.blocks_for(1, count as u32))?;
+        steps.push(step);
+        Some(bf16)
     }
 
     /// `dx[m, k] (+)= dy[m, n] @ W[n, k]` for a bf16 `w`, with `dy` rounded to

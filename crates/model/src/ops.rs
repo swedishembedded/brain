@@ -1339,6 +1339,14 @@ impl Ops {
         Act { x: x.clone(), xr0, m: rows, k, quant: None, xgs: None, bf16: Default::default() }
     }
 
+    /// [`Self::act_f32`] for all `rows` rows of `x` whose bf16 rounding a fused kernel has already produced
+    /// (`bf16`, as [`library::LibraryGemmProvider::silu_mul_bf16`] returns it): the library products that
+    /// read this activation take it instead of casting it again.
+    pub fn act_f32_with_bf16(&self, x: &DeviceBuffer, rows: u32, k: u32, bf16: DeviceBuffer) -> Act {
+        assert!(rows > 0, "Ops::act_f32_with_bf16: rows must be > 0 (got 0)");
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: None, xgs: None, bf16: std::cell::RefCell::new(Some(bf16)) }
+    }
+
     /// The f32 rows of an activation built by [`Self::act_f32`]: the buffer, its
     /// first row, row count and width, for a caller that dispatches a kernel
     /// of its own over them.

@@ -2070,8 +2070,6 @@ impl Qwen35 {
         self.ps.g(name)
     }
 
-    /// RMSNorm backward via the shared builder: input grad always, gain grad
-    /// only when the gain is trainable.
     /// `sum = a + b; out = rmsnorm(sum) * w` (the residual add and the norm that follows it), as the one native
     /// launch `add_rmsnorm_fwd` where a CUDA device offers it, else `add2` and the norm.
     fn add_then_rmsnorm(&self, a: &DeviceBuffer, b: &DeviceBuffer, wname: &str, sum: &DeviceBuffer, out: &DeviceBuffer, d: u32, n: u32) {
@@ -2101,6 +2099,8 @@ impl Qwen35 {
         steps.push(self.gpu.step(ADD2, &[res, &dx, total], &[n * d], n * d));
     }
 
+    /// RMSNorm backward via the shared builder: input grad always, gain grad
+    /// only when the gain is trainable.
     fn rmsnorm_bwd_step(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         let inv = self.gpu.storage(rows as u64);
         let gw = self.trainable(wname).then(|| self.g(wname));
@@ -2620,8 +2620,24 @@ impl Qwen35 {
             (h.expect("a silu_mul epilogue hands back its product"), Some(act))
         } else {
             let h = g.storage((n * ff) as u64);
-            g.submit(&[], &[g.step(SILU_MUL, &[&gate_pre, &up, &h], &[n * ff], n * ff)]);
-            (h, None)
+            // On the vendor-library path the product and its bf16 rounding come out of one pass, and the
+            // `down` projection takes the rounding as its activation's cached cast.
+            let mut s = Vec::new();
+            let rounded = if self.weights.values().all(reads_float_acts) {
+                self.ops.tensor_gemm().silu_mul_bf16(g, &mut s, &gate_pre, &up, &h, n as u64 * ff as u64)
+            } else {
+                None
+            };
+            match rounded {
+                Some(bf16) => {
+                    g.submit(&[], &s);
+                    (h.clone(), Some(self.ops.act_f32_with_bf16(&h, n, ff, bf16)))
+                }
+                None => {
+                    g.submit(&[], &[g.step(SILU_MUL, &[&gate_pre, &up, &h], &[n * ff], n * ff)]);
+                    (h, None)
+                }
+            }
         };
         let down = want_out.then(|| {
             let down = g.storage((n * d) as u64);
