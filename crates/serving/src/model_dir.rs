@@ -215,9 +215,14 @@ impl Scan {
         let qwen_cfg = settings.qwen.clone();
         let mut banks: BTreeMap<String, AdapterBankSettings> = BTreeMap::new();
         let mut qwen35_bank = qwen_cfg.adapter_bank.clone();
+        // What the store's adapters may grow. A bank no flag sized is theirs to
+        // size; one sized by `--adapter-slots` / `--adapter-rank-cap` alone keeps
+        // those but still takes the targets the adapters need, since the
+        // operator named none; `--adapter-targets` makes the bank the operator's.
+        let widen = Widen { rank: qwen_cfg.adapter_bank.is_none(), targets: qwen_cfg.adapter_bank.is_none() || !qwen_cfg.adapter_targets_named };
         for local in adapters {
-            if let (None, Some(card)) = (&qwen_cfg.adapter_bank, local.card.as_ref().filter(|c| brain_family(&c.family) == "qwen35")) {
-                qwen35_bank = Some(widen_to_hold(qwen35_bank.take().unwrap_or_default(), card));
+            if let (true, Some(card)) = (widen.any(), local.card.as_ref().filter(|c| brain_family(&c.family) == "qwen35")) {
+                qwen35_bank = Some(widen_to_hold(qwen35_bank.take().unwrap_or_default(), card, widen));
                 continue;
             }
             let Some((base, card)) = local.card.as_ref().and_then(|c| Some((base_id_of(&c.id)?, c))) else { continue };
@@ -225,8 +230,8 @@ impl Scan {
             // is sized to hold every adapter the store has for the base, so
             // an adapter on disk is never refused for a limit nobody chose.
             let bank = banks.entry(base).or_insert_with(|| qwen_cfg.adapter_bank.clone().unwrap_or_default());
-            if qwen_cfg.adapter_bank.is_none() {
-                *bank = widen_to_hold(bank.clone(), card);
+            if widen.any() {
+                *bank = widen_to_hold(bank.clone(), card, widen);
             }
         }
         Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), qwen35_bases: BTreeMap::new(), multi: Vec::new(), qwen35_bank, settings: settings.clone(), banks }
@@ -366,13 +371,30 @@ fn base_id_of(adapter_id: &str) -> Option<String> {
     Some(r.without_adapter().to_string())
 }
 
+/// Which settings of a bank the adapters of the store may grow.
+#[derive(Clone, Copy)]
+struct Widen {
+    rank: bool,
+    targets: bool,
+}
+
+impl Widen {
+    fn any(self) -> bool {
+        self.rank || self.targets
+    }
+}
+
 /// `bank`, grown just enough to hold the adapter `card` describes: its rank
-/// and the linears it targets, as its card records them.
-fn widen_to_hold(bank: AdapterBankSettings, card: &ModelCard) -> AdapterBankSettings {
+/// and the linears it targets, as its card records them, for what `widen` lets
+/// the store grow.
+fn widen_to_hold(bank: AdapterBankSettings, card: &ModelCard, widen: Widen) -> AdapterBankSettings {
     let Some(adapter) = card.adapter.as_ref() else { return bank };
-    let rank_cap = bank.rank_cap.max(adapter.rank.unwrap_or(0));
+    let rank_cap = if widen.rank { bank.rank_cap.max(adapter.rank.unwrap_or(0)) } else { bank.rank_cap };
     let named = adapter.targets.as_ref().and_then(|t| AdapterTargets::parse(&t.join(",")).ok());
-    let targets = named.map_or(bank.targets.clone(), |named| AdapterTargets::union(bank.targets.clone(), named));
+    let targets = match named {
+        Some(named) if widen.targets => AdapterTargets::union(bank.targets.clone(), named),
+        _ => bank.targets.clone(),
+    };
     AdapterBankSettings { rank_cap, targets, ..bank }
 }
 
@@ -1245,9 +1267,21 @@ mod tests {
         let residents = discover(&dir, &ScanSettings { qwen: defaults.clone(), ..Default::default() }).residents;
         assert!(ids(&residents).contains(&"Qwen/Qwen3-Toy:lab:wide:v1".to_string()), "rank 32 on down is above the defaults, so the bank grew: {:?}", ids(&residents));
 
-        let sized = catalog::resident_llm::QwenServeConfig { adapter_bank: Some(AdapterBankSettings::default()), ..defaults };
-        let residents = discover(&dir, &ScanSettings { qwen: sized, ..Default::default() }).residents;
-        assert_eq!(ids(&residents), vec!["Qwen/Qwen3-Toy".to_string()], "an operator-sized bank is not widened for the store");
+        // `--adapter-targets` makes the bank the operator's: not widened.
+        let named = catalog::resident_llm::QwenServeConfig { adapter_bank: Some(AdapterBankSettings::default()), adapter_targets_named: true, ..defaults.clone() };
+        let residents = discover(&dir, &ScanSettings { qwen: named, ..Default::default() }).residents;
+        assert_eq!(ids(&residents), vec!["Qwen/Qwen3-Toy".to_string()], "an operator-named bank is not widened for the store");
+
+        // `--adapter-slots` / `--adapter-rank-cap` alone size the bank but name
+        // no targets: the store's adapters still widen the targets (down is not
+        // an attention linear), as with no bank flag at all, while the rank cap
+        // stays the operator's.
+        let roomy = catalog::resident_llm::QwenServeConfig { adapter_bank: Some(AdapterBankSettings { slots: 2, rank_cap: 32, ..AdapterBankSettings::default() }), ..defaults.clone() };
+        let residents = discover(&dir, &ScanSettings { qwen: roomy, ..Default::default() }).residents;
+        assert!(ids(&residents).contains(&"Qwen/Qwen3-Toy:lab:wide:v1".to_string()), "slots and rank cap given, targets not: the targets grew: {:?}", ids(&residents));
+        let tight = catalog::resident_llm::QwenServeConfig { adapter_bank: Some(AdapterBankSettings { slots: 2, rank_cap: 8, ..AdapterBankSettings::default() }), ..defaults };
+        let residents = discover(&dir, &ScanSettings { qwen: tight, ..Default::default() }).residents;
+        assert_eq!(ids(&residents), vec!["Qwen/Qwen3-Toy".to_string()], "a rank cap the operator gave is not widened");
         std::fs::remove_dir_all(&dir).ok();
     }
 

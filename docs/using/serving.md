@@ -90,7 +90,10 @@ above, or by one of these flags - and costs nothing otherwise:
 
 An adapter above the rank cap, or correcting a linear outside the targets, is
 refused when it is loaded, with the flag that would admit it. For adapters in a
-model directory the bank is widened to hold them unless these flags were given.
+model directory the bank is widened to hold them unless these flags were given:
+`--adapter-slots` and `--adapter-rank-cap` keep what they say but leave the
+targets to the adapters (widened to cover them); only `--adapter-targets` makes
+the targets the operator's, and an adapter outside them is skipped with that flag named.
 The bank's device bytes (`slots x rank-cap x (k + n) x 4` per targeted linear
 per layer) are part of the model's footprint, so placement budgets them.
 

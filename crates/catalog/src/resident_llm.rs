@@ -478,11 +478,16 @@ pub struct QwenServeConfig {
     /// adapters for a base turns the bank on for that base with the defaults
     /// of [`AdapterBankSettings`] when this is `None`.
     pub adapter_bank: Option<AdapterBankSettings>,
+    /// Whether the operator named `--adapter-targets`. When they sized the
+    /// bank by other flags only (`--adapter-slots`, `--adapter-rank-cap`), the
+    /// targets are not theirs: a model directory's adapters widen them, as they
+    /// do when no bank flag is given.
+    pub adapter_targets_named: bool,
 }
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, max_prefill_cap: 512, adapter_bank: None }
+        QwenServeConfig { ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, max_prefill_cap: 512, adapter_bank: None, adapter_targets_named: false }
     }
 }
 

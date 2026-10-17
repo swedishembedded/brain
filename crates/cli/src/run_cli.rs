@@ -569,6 +569,7 @@ pub fn run_serve(args: &[String]) {
                     std::process::exit(2);
                 });
                 adapter_bank_asked = true;
+                qwen_cfg.adapter_targets_named = true;
             }
             "--qwen-ctx" => qwen_cfg.ctx = Some(parsed(args, &mut i, "--qwen-ctx")),
             "--qwen-max-batch" => qwen_cfg.max_batch = parsed(args, &mut i, "--qwen-max-batch"),
