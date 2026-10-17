@@ -27,6 +27,7 @@
 //!       [--ctx 4096] [--kv bf16] [--batches 1,8,16,32,64,128]
 //!       [--workload code|agent|both] [--new 128] [--dump FILE]
 //!       [--batch-limit N] [--raw-hidden] [--equivalence] [--temp T]
+//!       [--prefill-slice N] [--mix LEN:NEW,LEN:NEW,...] [--backend cuda|vulkan|wgpu]
 //!
 //! `--equivalence` replaces the timing: for every workload and batch size it
 //! generates the same requests twice on the same scheduler, once with
@@ -70,9 +71,13 @@ struct Args {
     /// Prompt tokens prefilled per scheduler iteration (default: the whole prompt).
     prefill_slice: u32,
     mixed: bool,
+    /// `--mix LEN:NEW,...`: one request per entry (LEN prompt tokens, NEW new tokens), all submitted at once.
+    mix: Vec<(usize, usize)>,
     /// Greedy-decode this many long prompts (`--identity-prompts N,P`: N prompts of about P tokens)
     /// and write their tokens to `--dump`, to compare sliced against whole-prompt prefill.
     identity: Option<(usize, usize)>,
+    /// `--backend`: the compute backend to run on (default: the process default).
+    backend: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -96,7 +101,9 @@ fn parse_args() -> Args {
         prefill_tokens: Vec::new(),
         prefill_slice: u32::MAX,
         mixed: false,
+        mix: Vec::new(),
         identity: None,
+        backend: None,
     };
     while let Some(flag) = it.next() {
         let mut value = |name: &str| it.next().unwrap_or_else(|| panic!("{name} needs a value"));
@@ -120,7 +127,17 @@ fn parse_args() -> Args {
             "--equivalence" => a.equivalence = true,
             "--profile-verify" => a.profile_verify = true,
             "--kernel-table" => a.kernel_table = true,
+            "--backend" => a.backend = Some(value("--backend")),
             "--mixed" => a.mixed = true,
+            "--mix" => {
+                a.mix = value("--mix")
+                    .split(',')
+                    .map(|e| {
+                        let (len, new) = e.split_once(':').expect("--mix LEN:NEW,LEN:NEW");
+                        (len.trim().parse().expect("--mix LEN:NEW"), new.trim().parse().expect("--mix LEN:NEW"))
+                    })
+                    .collect()
+            }
             "--identity-prompts" => {
                 let v = value("--identity-prompts");
                 let (n, p) = v.split_once(',').expect("--identity-prompts N,P");
@@ -207,6 +224,9 @@ fn gib(bytes: u64) -> f64 {
 
 fn main() {
     let a = parse_args();
+    if let Some(backend) = &a.backend {
+        gpu_core::select_compute("gpu", Some(backend)).unwrap_or_else(|e| panic!("{e}"));
+    }
     let max_batch = *a.batches.iter().max().expect("a batch size");
     let devices: Vec<(Device, u64)> = gpu_core::devices::gpus().iter().map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE))).filter(|&(_, usable)| usable > 0).collect();
     if devices.is_empty() {
@@ -236,6 +256,44 @@ fn main() {
     let mut sched = Scheduler::new(engine, max_batch as usize);
     r.configure_scheduler(&mut sched);
     sched.set_prefill_budget(a.prefill_slice);
+
+    if !a.mix.is_empty() {
+        // The agent mix through the scheduler without the HTTP layer: every request arrives at
+        // once, prompts are distinct rotations of one passage (no shared prefix). Reports the
+        // aggregate prompt tokens per second and where the wall time went.
+        let mut base = tok.encode(REAL_PROMPT);
+        while base.len() < 4096 {
+            let more = base.clone();
+            base.extend(more);
+        }
+        let total: usize = a.mix.iter().map(|m| m.0).sum();
+        let before = sched.decoder_mut().spec_times().prefill;
+        let t = Instant::now();
+        let ids: Vec<u64> = a
+            .mix
+            .iter()
+            .enumerate()
+            .map(|(i, &(len, new))| {
+                let prompt: Vec<u32> = (0..len).map(|j| base[(i * 937 + j) % base.len()]).collect();
+                sched.submit(Request { prompt, max_new: new, stop: Vec::new() })
+            })
+            .collect();
+        let mut finish: Vec<f64> = Vec::new();
+        let mut generated = 0usize;
+        while sched.pending() {
+            for (id, toks) in sched.step() {
+                assert!(ids.contains(&id));
+                generated += toks.len();
+                finish.push(t.elapsed().as_secs_f64());
+            }
+        }
+        let wall = t.elapsed().as_secs_f64();
+        let prefill = (sched.decoder_mut().spec_times().prefill - before).as_secs_f64();
+        println!("mix: {} requests, {total} prompt tokens, {generated} generated; slice {}", a.mix.len(), if a.prefill_slice == u32::MAX { "whole prompt".to_string() } else { a.prefill_slice.to_string() });
+        println!("mix: wall {wall:.2} s = {:.0} prompt tok/s aggregate; inside prefill_chunk {prefill:.2} s = {:.0} tok/s; elsewhere (decode, admission) {:.2} s", total as f64 / wall, total as f64 / prefill, wall - prefill);
+        println!("mix: finish times (s): {}", finish.iter().map(|f| format!("{f:.1}")).collect::<Vec<_>>().join(" "));
+        return;
+    }
 
     if a.mixed {
         // The agent mix that exposed static waves: 16 requests with ~2k-token prompts arrive

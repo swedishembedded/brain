@@ -69,6 +69,8 @@ pub struct SpecTimes {
     pub draft: std::time::Duration,
     pub verify: std::time::Duration,
     pub commit: std::time::Duration,
+    /// Time inside `prefill_chunk` (every slice, including the prefix-cache lookup).
+    pub prefill: std::time::Duration,
 }
 
 /// A verify step awaiting its commit: who it carried, what rows, and the
@@ -216,6 +218,67 @@ impl Qwen35GgufEngine {
     }
 }
 
+impl Qwen35GgufEngine {
+    fn prefill_slice(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
+        assert!(!prompt.is_empty(), "{MODEL}: empty prompt");
+        if table.is_empty() {
+            assert!(prompt.len() <= self.inst.cap as usize, "{MODEL}: prompt of {} tokens exceeds the per-sequence capacity of {}", prompt.len(), self.inst.cap);
+            if let Some(&bad) = prompt.iter().find(|&&t| t >= self.inst.cfg.vocab) {
+                panic!("{MODEL}: prompt token {bad} is outside the model vocabulary ({})", self.inst.cfg.vocab);
+            }
+            table.reserve(prompt.len() as u32, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
+            let slot = table.blocks()[0];
+            let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
+            let mut start = 0;
+            // The cached prefix's last hidden state: the MTP head's input at the
+            // position the new tokens continue from.
+            let mut prefix_hidden: Option<Vec<f32>> = None;
+            if cacheable {
+                if let Some(i) = self.cache.lookup(table.kv_namespace(), prompt) {
+                    let e = self.cache.entry(i);
+                    let (from, rows, snap) = (e.table.blocks()[0], e.tokens.len(), e.snap_row);
+                    self.inst.seed_from_prefix(from, slot, rows as u32, snap);
+                    self.inst.mtp_seed_prefix(from, slot, rows as u32);
+                    if rows == prompt.len() {
+                        // The whole prompt is cached: its state in place, no compute.
+                        let hidden = e.last_hidden.clone();
+                        self.inst.store_prefilled(slot);
+                        self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
+                        return PrefillProgress::Done(hidden);
+                    }
+                    prefix_hidden = Some(e.last_hidden.clone());
+                    start = rows;
+                }
+            }
+            self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new() });
+        }
+        let slot = table.blocks()[0];
+        let mut p = self.partial.remove(&slot).expect("a prefill in progress has its state");
+        let end = p.done + budget.min(prompt.len() - p.done);
+        let collect = self.inst.has_mtp().then_some(&mut p.rows_hidden);
+        self.inst.prefill_adapter_slot.set(adapters::slot_of(self.inst.stage_models(), table.kv_namespace()));
+        let hidden = self.inst.prefill_hidden(prompt, p.done, end, slot, !p.fresh && p.done > 0, collect).unwrap_or_else(|e| panic!("{e}"));
+        self.inst.prefill_adapter_slot.set(LORA_SLOT_NONE);
+        let consumed = end - p.done;
+        p.done = end;
+        p.fresh = false;
+        if end < prompt.len() {
+            self.partial.insert(slot, p);
+            return PrefillProgress::Partial { consumed };
+        }
+        self.inst.mtp_after_prefill(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden);
+        if p.cacheable {
+            let (row, evicted) = self.cache.take_row();
+            self.release_retired(evicted);
+            if let Some(row) = row {
+                self.inst.snapshot_prefill_state(row);
+                self.pending.insert(slot, Pending { tokens: prompt.to_vec(), snap_row: row, last_hidden: hidden.clone() });
+            }
+        }
+        PrefillProgress::Done(hidden)
+    }
+}
+
 impl BankedEngine for Qwen35GgufEngine {
     fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
         Qwen35GgufEngine::load_adapter(self, adapter)
@@ -293,62 +356,10 @@ impl PagedDecoder for Qwen35GgufEngine {
     /// left in the slot's pool row; the last one files the prompt for reuse and
     /// hands the MTP head the prompt's hidden states.
     fn prefill_chunk(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
-        assert!(!prompt.is_empty(), "{MODEL}: empty prompt");
-        if table.is_empty() {
-            assert!(prompt.len() <= self.inst.cap as usize, "{MODEL}: prompt of {} tokens exceeds the per-sequence capacity of {}", prompt.len(), self.inst.cap);
-            if let Some(&bad) = prompt.iter().find(|&&t| t >= self.inst.cfg.vocab) {
-                panic!("{MODEL}: prompt token {bad} is outside the model vocabulary ({})", self.inst.cfg.vocab);
-            }
-            table.reserve(prompt.len() as u32, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
-            let slot = table.blocks()[0];
-            let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
-            let mut start = 0;
-            // The cached prefix's last hidden state: the MTP head's input at the
-            // position the new tokens continue from.
-            let mut prefix_hidden: Option<Vec<f32>> = None;
-            if cacheable {
-                if let Some(i) = self.cache.lookup(table.kv_namespace(), prompt) {
-                    let e = self.cache.entry(i);
-                    let (from, rows, snap) = (e.table.blocks()[0], e.tokens.len(), e.snap_row);
-                    self.inst.seed_from_prefix(from, slot, rows as u32, snap);
-                    self.inst.mtp_seed_prefix(from, slot, rows as u32);
-                    if rows == prompt.len() {
-                        // The whole prompt is cached: its state in place, no compute.
-                        let hidden = e.last_hidden.clone();
-                        self.inst.store_prefilled(slot);
-                        self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
-                        return PrefillProgress::Done(hidden);
-                    }
-                    prefix_hidden = Some(e.last_hidden.clone());
-                    start = rows;
-                }
-            }
-            self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new() });
-        }
-        let slot = table.blocks()[0];
-        let mut p = self.partial.remove(&slot).expect("a prefill in progress has its state");
-        let end = p.done + budget.min(prompt.len() - p.done);
-        let collect = self.inst.has_mtp().then_some(&mut p.rows_hidden);
-        self.inst.prefill_adapter_slot.set(adapters::slot_of(self.inst.stage_models(), table.kv_namespace()));
-        let hidden = self.inst.prefill_hidden(prompt, p.done, end, slot, !p.fresh && p.done > 0, collect).unwrap_or_else(|e| panic!("{e}"));
-        self.inst.prefill_adapter_slot.set(LORA_SLOT_NONE);
-        let consumed = end - p.done;
-        p.done = end;
-        p.fresh = false;
-        if end < prompt.len() {
-            self.partial.insert(slot, p);
-            return PrefillProgress::Partial { consumed };
-        }
-        self.inst.mtp_after_prefill(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden);
-        if p.cacheable {
-            let (row, evicted) = self.cache.take_row();
-            self.release_retired(evicted);
-            if let Some(row) = row {
-                self.inst.snapshot_prefill_state(row);
-                self.pending.insert(slot, Pending { tokens: prompt.to_vec(), snap_row: row, last_hidden: hidden.clone() });
-            }
-        }
-        PrefillProgress::Done(hidden)
+        let started = std::time::Instant::now();
+        let progress = self.prefill_slice(table, prompt, budget);
+        self.times.prefill += started.elapsed();
+        progress
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         self.inst.head_logits_rows(hidden, 1)

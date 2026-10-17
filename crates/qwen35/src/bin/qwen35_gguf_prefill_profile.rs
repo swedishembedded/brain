@@ -20,7 +20,7 @@
 //!
 //! Usage:
 //!   qwen35_gguf_prefill_profile <path to Qwen3.8-27B*.gguf> [depth] [rows] [rounds]
-//!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda]
+//!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda] [--kv f32|bf16|int8]
 //!
 //! `depth` (default 256) prompt tokens establish the KV depth first, `rows`
 //! (default 256) is the round width, `rounds` (default 4) the rounds per
@@ -61,9 +61,10 @@ fn main() {
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
     let cfg = resident_config(&mg, cap).expect("resident_config");
     drop(mg);
-    let r = Qwen35GgufResident::new(path, devices, cap, tier.clone());
+    let kv = model::kv_tier::KvTier::parse(flag("--kv").as_deref().unwrap_or("f32")).unwrap_or_else(|e| panic!("{e}"));
+    let r = Qwen35GgufResident::new(path, devices, cap, tier.clone()).with_kv_tier(kv);
     let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
-    println!("qwen35 prefill profile: {} layers, weight tier {}, {} stage(s), backend {}", cfg.n_layers, tier.describe(), placed.len(), gpu_core::backend_name());
+    println!("qwen35 prefill profile: {} layers, weight tier {}, kv {kv}, {} stage(s), backend {}", cfg.n_layers, tier.describe(), placed.len(), gpu_core::backend_name());
     let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
 
     // A/B switch: `BRAIN_PREFILL_ARENA=0` runs the rounds without the scratch arena
