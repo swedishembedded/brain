@@ -389,8 +389,9 @@ impl Qwen35GgufServed {
 }
 
 /// Ids of the full-precision releases the Qwen3.8-27B quantisations are made
-/// from, which an adapter's card names as its base.
-const QWEN35_SOURCES: [&str; 2] = ["Qwen/Qwen3.8-27B-FP8", "Qwen/Qwen3.8-27B"];
+/// from, which an adapter's card names as its base: the repo ids and the bare
+/// directory names `brain qwen35 finetune` records for a base it was pointed at.
+const QWEN35_SOURCES: [&str; 4] = ["Qwen/Qwen3.8-27B-FP8", "Qwen/Qwen3.8-27B", "Qwen3.8-27B-FP8", "Qwen3.8-27B"];
 
 impl std::ops::Deref for Qwen35GgufServed {
     type Target = qwen35::int8_gguf_resident::Qwen35GgufResident;

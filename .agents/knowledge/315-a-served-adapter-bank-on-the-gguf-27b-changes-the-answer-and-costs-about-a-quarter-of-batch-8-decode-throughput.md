@@ -46,6 +46,18 @@ knowledge 314 (the step is host-bound, so extra launches cost wall time directly
 bank to the nine mixer leaves (`--adapter-targets attention`, this model's default group) or
 fusing the two dispatches of a site across the group would shrink it; neither was measured.
 
+## Through `brain serve`
+
+The same adapter, served by `brain serve --openai --models-dir DIR --qwen35-ctx 512 --qwen35-max-batch 8
+--adapter-slots 2 --adapter-targets all`, with the GGUF and the adapter in the store
+(`unsloth/Qwen3.8-27B-GGUF/adapters/lab/facts/v1/`): the model list shows the GGUF and
+`unsloth/Qwen3.8-27B-GGUF-Q8_0:lab:facts:v1`, and a greedy completion of the same prompt gives
+`"\n\nBased on the name provided, it"` on the base id and `" Quenthara.\n\nQuestion: How"` on the
+adapter id, whose reply names the adapter's id and digest. `--adapter-slots` alone makes the bank the
+operator's, so the default `attention` targets refuse this adapter (it trains the MLP too) with the
+flag that widens them. The trainer wrote the card id `brain/qwen35-lora` and base `Qwen3.8-27B-FP8`;
+the id had to be rewritten to the adapter reference grammar for serving.
+
 ## Caveats
 
 * A short prompt (up to 8 rows) of an adapter sequence is prefilled on the chunk tape, not the
