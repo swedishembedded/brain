@@ -412,9 +412,11 @@ impl ChatFineTune {
     /// ([`ChatSample::answers_as_asked`]). Each turn's target is the same
     /// either way; packing renders the conversation once, so a long
     /// tool-using trajectory costs its length once instead of once per turn.
-    /// The loss then weighs every supervised token equally across the batch
-    /// (a longer trajectory counts for more), where per-turn examples weigh
-    /// every turn equally. A record with one supervised turn is unaffected.
+    /// A step's gradient is the mean over the supervised tokens of the rows it
+    /// accumulates either way, so a token weighs the same; what changes is
+    /// that a row is a whole conversation, so a step of `n` rows spans far
+    /// more tokens and an epoch has fewer rows. A record with one supervised
+    /// turn is unaffected.
     pub fn pack_answers(mut self, on: bool) -> Self {
         self.pack_answers = on;
         self
