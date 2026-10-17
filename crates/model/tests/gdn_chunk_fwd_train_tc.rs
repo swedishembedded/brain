@@ -238,7 +238,7 @@ fn the_token_major_backward_equals_the_chunk_major_one_with_the_permutes_folded(
         let shape = GdnShape { b, h, t, dk: 128, dv: 128, chunk };
         let (bhc, bh) = (shape.bhc() as usize, shape.bh() as usize);
         let (cn, dk, dv) = (chunk as usize, 128usize, 128usize);
-        let (n_chunks, heads, bsz) = (shape.n_chunks() as usize, h as usize, b as usize);
+        let (heads, bsz) = (h as usize, b as usize);
         let nkh = heads / group as usize;
         let tokens = bsz * t as usize;
         let mut s = 5u64;
