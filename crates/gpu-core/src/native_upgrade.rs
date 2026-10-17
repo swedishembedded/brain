@@ -925,7 +925,7 @@ impl Fused {
             Fused::GdnDecodePool | Fused::GdnVerifyPool => {
                 matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group && *b >= 1)
             }
-            Fused::GdnCommitPool => matches!(params, [b, state_len, hist_len, _] if *b >= 1 && *state_len >= 1 && hist_len <= state_len),
+            Fused::GdnCommitPool => matches!(params, [b, state_len, hist_len, _] if *b >= 1 && *state_len >= 4 && state_len % 4 == 0 && hist_len % 4 == 0 && hist_len <= state_len),
             // A head is one 256-thread block holding up to 512 values; the
             // rotated span `2 * half` has to fit inside it.
             Fused::GqaDecodePrep => {

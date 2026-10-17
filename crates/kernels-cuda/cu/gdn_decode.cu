@@ -444,7 +444,9 @@ brain_gdn_verify_pool(const unsigned int* params, const float* mixed, const floa
 
 // Put the snapshot row `sel[bi]` back over pool row `rows[bi]` for every
 // sequence that has one. Block (bi, c) copies the c-th 4096-element tile of the
-// state, and of the window for the first tiles that cover it.
+// state, and of the window for the first tiles that cover it, as 16-byte
+// vectors (the lengths are multiples of four floats, which `Fused::serves`
+// checks).
 #define BRAIN_GDN_COMMIT_TILE 4096
 extern "C" __global__ void __launch_bounds__(256)
 brain_gdn_commit_pool(const unsigned int* params, float* pool_state, float* pool_hist, const float* snap_state,
@@ -461,12 +463,24 @@ brain_gdn_commit_pool(const unsigned int* params, float* pool_state, float* pool
     if (pick == 0xffffffffu) { return; }              // block-uniform
     const unsigned long long row = rows[bi];
     const unsigned long long lo = static_cast<unsigned long long>(tile) * BRAIN_GDN_COMMIT_TILE;
-    for (unsigned long long i = lo + threadIdx.x; i < lo + BRAIN_GDN_COMMIT_TILE && i < state_len; i += blockDim.x) {
-        pool_state[row * state_len + i] = snap_state[static_cast<unsigned long long>(pick) * state_len + i];
+    {
+        const float4* src = reinterpret_cast<const float4*>(snap_state + static_cast<unsigned long long>(pick) * state_len + lo);
+        float4* dst = reinterpret_cast<float4*>(pool_state + row * state_len + lo);
+        const unsigned long long n4 = (state_len - lo < BRAIN_GDN_COMMIT_TILE ? state_len - lo : BRAIN_GDN_COMMIT_TILE) / 4;
+#pragma unroll
+        for (unsigned int it = 0; it < BRAIN_GDN_COMMIT_TILE / 4 / 256; ++it) {
+            const unsigned int i = threadIdx.x + it * 256u;
+            if (i < n4) { dst[i] = src[i]; }
+        }
     }
     if (lo < hist_len) {
-        for (unsigned long long i = lo + threadIdx.x; i < lo + BRAIN_GDN_COMMIT_TILE && i < hist_len; i += blockDim.x) {
-            pool_hist[row * hist_len + i] = snap_hist[static_cast<unsigned long long>(pick) * hist_len + i];
+        const float4* src = reinterpret_cast<const float4*>(snap_hist + static_cast<unsigned long long>(pick) * hist_len + lo);
+        float4* dst = reinterpret_cast<float4*>(pool_hist + row * hist_len + lo);
+        const unsigned long long n4 = (hist_len - lo < BRAIN_GDN_COMMIT_TILE ? hist_len - lo : BRAIN_GDN_COMMIT_TILE) / 4;
+#pragma unroll
+        for (unsigned int it = 0; it < BRAIN_GDN_COMMIT_TILE / 4 / 256; ++it) {
+            const unsigned int i = threadIdx.x + it * 256u;
+            if (i < n4) { dst[i] = src[i]; }
         }
     }
 }
