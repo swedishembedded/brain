@@ -351,8 +351,11 @@ __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params
             if (snap_state != nullptr && r + 1u < rows) {
                 float* snap_col = snap_state + static_cast<unsigned long long>(r) * nvh_total * BRAIN_GDN_HD * BRAIN_GDN_HD +
                                   ((unsigned long long)vh * BRAIN_GDN_HD) * BRAIN_GDN_HD + j;
+                // Streaming stores: the snapshot is written once and read only on a rejection. They
+                // also keep the 128 live state registers from being spilled around the stores (3140
+                // spill bytes per thread with plain stores, 1500 with these).
 #pragma unroll
-                for (int i = 0; i < BRAIN_GDN_HD; ++i) { snap_col[(unsigned long long)i * BRAIN_GDN_HD] = s[i]; }
+                for (int i = 0; i < BRAIN_GDN_HD; ++i) { __stcs(snap_col + static_cast<unsigned long long>(i) * BRAIN_GDN_HD, s[i]); }
             }
         }
 #pragma unroll
