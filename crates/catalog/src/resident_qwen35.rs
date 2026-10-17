@@ -280,6 +280,10 @@ pub struct Qwen35GgufServeConfig {
     /// `Qwen35GgufResident::with_prefix_slots`). `None` takes
     /// [`DEFAULT_PREFIX_SLOTS`]; 0 turns the cache off.
     pub prefix_slots: Option<u32>,
+    /// Speculative decoding (`--speculative`). `None` takes
+    /// [`SpeculativeMode::Auto`](qwen35::int8_gguf_resident::SpeculativeMode::Auto):
+    /// the best drafter the checkpoint carries, plain decoding when it has none.
+    pub speculative: Option<qwen35::int8_gguf_resident::SpeculativeMode>,
 }
 
 impl Qwen35GgufServeConfig {
@@ -296,6 +300,11 @@ impl Qwen35GgufServeConfig {
     /// The prefix-cache knob with its default filled in.
     pub fn prefix_slots_or_default(&self) -> u32 {
         self.prefix_slots.unwrap_or(DEFAULT_PREFIX_SLOTS)
+    }
+
+    /// The speculation knob with its default filled in.
+    pub fn speculative_or_default(&self) -> qwen35::int8_gguf_resident::SpeculativeMode {
+        self.speculative.unwrap_or(qwen35::int8_gguf_resident::SpeculativeMode::Auto)
     }
 
     /// The batch knob with its default filled in.
@@ -342,21 +351,38 @@ pub fn gguf_resident(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u
 /// (its device bytes are part of the placement), so adapters can be offered
 /// on it ([`AdapterHost`]).
 pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35GgufServeConfig, bank: Option<AdapterBankSettings>) -> Result<Qwen35GgufServed, String> {
-    use qwen35::int8_gguf_resident::{auto_cap, resident_config, Qwen35GgufResident};
-    let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
+    use qwen35::int8_gguf_resident::{auto_cap, resident_config, Qwen35GgufResident, SpecServing};
     let (tier, kv, max_batch, prefix_slots) = (cfg.tier_or_default(), cfg.kv_or_default(), cfg.max_batch_or_default(), cfg.prefix_slots_or_default());
+    let spec = SpecServing { mode: cfg.speculative_or_default(), ..SpecServing::default() };
+    let mg = checkpoint::gguf::MmapGguf::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
+    let model_cfg = resident_config(&mg, 1).map_err(|e| format!("'{gguf_path}' is not a servable Qwen3.8 GGUF: {e}"))?;
+    let devices_for = |cap: u32| -> Vec<(Device, u64)> {
+        // Speculation's scratch and drafter live outside the planned placement,
+        // so the budget handed to the planner leaves their bytes free.
+        let spec_bytes = spec.reserve_bytes(&model_cfg, cap, max_batch + prefix_slots, &tier, kv);
+        gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved).saturating_sub(spec_bytes))).collect()
+    };
     let cap = match cfg.ctx {
         Some(ctx) => ctx.max(1),
         None => {
+            let devices = devices_for(1);
             if devices.is_empty() {
                 return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
             }
-            let mg = checkpoint::gguf::MmapGguf::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
-            let model_cfg = resident_config(&mg, 1).map_err(|e| format!("'{gguf_path}' is not a servable Qwen3.8 GGUF: {e}"))?;
-            auto_cap(&model_cfg, &devices, &tier, kv, max_batch, prefix_slots).ok_or_else(|| format!("{gguf_path} does not fit across the {} budgeted device(s) even with a one-token context", devices.len()))?
+            // The speculation reserve grows with the context (the drafter's KV), so
+            // size the context against the budget that reserve leaves at it.
+            let mut cap = auto_cap(&model_cfg, &devices, &tier, kv, max_batch, prefix_slots).ok_or_else(|| format!("{gguf_path} does not fit across the {} budgeted device(s) even with a one-token context", devices.len()))?;
+            while cap > 1 {
+                match auto_cap(&model_cfg, &devices_for(cap), &tier, kv, max_batch, prefix_slots) {
+                    Some(fit) if fit >= cap => break,
+                    Some(fit) => cap = fit,
+                    None => cap /= 2,
+                }
+            }
+            cap
         }
     };
-    let mut resident = Qwen35GgufResident::new(gguf_path.to_string(), devices, cap, tier).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_model_id(id);
+    let mut resident = Qwen35GgufResident::new(gguf_path.to_string(), devices_for(cap), cap, tier).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_model_id(id);
     if let Some(bank) = &bank {
         resident = resident.with_adapter_bank(bank.request());
     }
@@ -663,12 +689,14 @@ mod tests {
             kv: Some(model::kv_tier::KvTier::Int8),
             max_batch: Some(4),
             prefix_slots: Some(2),
+            speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Off),
         };
         let r = gguf_resident(&path, "t/knobs", &gpu_budget(), RESERVED, &cfg).expect("builds");
         assert_eq!(r.cap(), 8192);
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::Int8);
         assert_eq!(r.max_batch(), 4);
         assert_eq!(r.prefix_slots(), 2);
+        assert_eq!(r.speculation().mode, qwen35::int8_gguf_resident::SpeculativeMode::Off);
         // What `/v1/models` reports is the context the resident was built with.
         assert_eq!(r.manifest().max_context_tokens, Some(8192));
         std::fs::remove_file(path).ok();
@@ -686,6 +714,7 @@ mod tests {
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::F32);
         assert_eq!(r.max_batch(), DEFAULT_MAX_BATCH);
         assert_eq!(r.prefix_slots(), DEFAULT_PREFIX_SLOTS);
+        assert_eq!(r.speculation().mode, qwen35::int8_gguf_resident::SpeculativeMode::Auto, "speculation is on by default and falls back to plain decode without a drafter");
         assert_eq!(r.manifest().max_context_tokens, Some(r.cap() as u64));
         std::fs::remove_file(path).ok();
     }

@@ -259,6 +259,13 @@ QWEN3.8 SERVING  (every released Qwen3.8 GGUF in the model store is served
   --qwen35-max-batch N   decode slots: sequences decoded together in one batched
                          step (default 8). A configuration whose slots x ctx
                          do not fit the GPUs is refused at startup.
+  --speculative MODE     speculative decoding for the Qwen3.8 GGUF models:
+                         auto|off|mtp|dflash|ngram (default auto = the best
+                         drafter the checkpoint offers, off when it has none).
+                         The scheduler verifies each sequence's proposals in
+                         one batched step and keeps the longest prefix the
+                         model agrees with, so greedy output is unchanged; it
+                         falls back to plain decoding when the batch is large.
   --qwen35-prefix-slots N
                          prompts kept for prefix reuse (default 4, 0 = off): a
                          prompt that starts with a cached one prefills only its
@@ -599,6 +606,14 @@ pub fn run_serve(args: &[String]) {
                 let tier = val(args, &mut i, "--qwen35-kv");
                 qwen35_cfg.gguf.kv = Some(model::kv_tier::KvTier::parse(&tier).unwrap_or_else(|e| {
                     eprintln!("brain serve: --qwen35-kv {tier:?}: {e}\n");
+                    eprint!("{HELP}");
+                    std::process::exit(2);
+                }));
+            }
+            "--speculative" => {
+                let mode = val(args, &mut i, "--speculative");
+                qwen35_cfg.gguf.speculative = Some(qwen35::int8_gguf_resident::SpeculativeMode::parse(&mode).unwrap_or_else(|e| {
+                    eprintln!("brain serve: --speculative {mode:?}: {e}\n");
                     eprint!("{HELP}");
                     std::process::exit(2);
                 }));
