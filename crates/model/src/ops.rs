@@ -98,7 +98,7 @@
 //! phase deliberately leaves for whoever needs it.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Concatenate `parts` end to end into one freshly allocated buffer, copying
 /// each part in parallel chunks rather than one `extend_from_slice` call per
@@ -1047,9 +1047,43 @@ pub struct Ops {
     /// reference tier: only a trainer that states a [`GemmPrecision`] (see
     /// [`Ops::set_gemm_precision`]) trades fp32 activations for bf16 ones.
     gemm: LibraryGemmProvider,
+    /// NF4 weights decoded to bf16 for the library path, kept while a [`DecodedWeightScope`] is open.
+    decoded: Mutex<DecodedWeights>,
+}
+
+/// The decoded-weight cache of an [`Ops`]: `depth` open scopes, and for each whole NF4 weight (keyed by the identity
+/// of its packed buffer) the bf16 scratch its first product decoded.
+#[derive(Default)]
+struct DecodedWeights {
+    depth: u32,
+    by_weight: HashMap<usize, DeviceBuffer>,
+}
+
+/// While alive, the library path decodes each whole NF4 weight to bf16 ONCE and every product that reads it
+/// (forward, activation rebuild, input gradient) shares the scratch, instead of decoding it again per product. Open
+/// one around a loop that applies the same weights to several row chunks. Dropping the last open scope releases
+/// the scratch. The decoded copies live as long as the scope, so it costs `2 * n * k` bytes per distinct weight.
+pub struct DecodedWeightScope<'a> {
+    ops: &'a Ops,
+}
+
+impl Drop for DecodedWeightScope<'_> {
+    fn drop(&mut self) {
+        let mut cache = self.ops.decoded.lock().unwrap_or_else(|e| e.into_inner());
+        cache.depth -= 1;
+        if cache.depth == 0 {
+            cache.by_weight.clear();
+        }
+    }
 }
 
 impl Ops {
+    /// Open a [`DecodedWeightScope`].
+    pub fn decoded_weight_scope(&self) -> DecodedWeightScope<'_> {
+        self.decoded.lock().unwrap_or_else(|e| e.into_inner()).depth += 1;
+        DecodedWeightScope { ops: self }
+    }
+
     /// [`Ops::with_selector`] with the default policy
     /// (`CachedSelector<DefaultSelector>`) - what every model crate except
     /// `qwen3::serve` uses today.
@@ -1136,7 +1170,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Fp32Reference);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, decoded: Mutex::new(DecodedWeights::default()) })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
@@ -1164,7 +1198,7 @@ impl Ops {
     /// `y[yoff ..] = act @ W[first.., :]^T` on the library path, for a bf16 or NF4 `w`;
     /// `false` (nothing pushed) when the fp32 kernels must run instead.
     fn library_forward(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
-        let Some((wb, window, mut prep)) = self.library_weight(w, rows) else { return false };
+        let Some((wb, window, mut prep, fresh_weight)) = self.library_weight(w, rows) else { return false };
         let k = w.k();
         let m = act.m;
         let (w_op, y_op) = (library::Operand { buf: &wb, range: window }, library::Operand { buf: y, range: (yoff, m as u64 * rows.1 as u64) });
@@ -1186,6 +1220,7 @@ impl Ops {
             if fresh {
                 *act.bf16.borrow_mut() = Some(xb);
             }
+            self.share_decoded(fresh_weight, &wb);
         }
         ok
     }
@@ -1194,7 +1229,7 @@ impl Ops {
     /// buffer, the range to bind and any steps that must run first (the
     /// decode of an NF4 window into a bf16 scratch). `None` for a tier or a
     /// device the library path does not serve.
-    fn library_weight(&self, w: &Weight, rows: (u32, u32)) -> Option<(DeviceBuffer, (u64, u64), Vec<Step>)> {
+    fn library_weight(&self, w: &Weight, rows: (u32, u32)) -> Option<(DeviceBuffer, (u64, u64), Vec<Step>, Option<usize>)> {
         if !self.gemm.is_active() {
             return None;
         }
@@ -1204,7 +1239,7 @@ impl Ops {
         match w {
             Weight::BF16 { w: wb, .. } => {
                 let window = if first == 0 && count == n { WHOLE } else { (first as u64 * k as u64 / 2, count as u64 * k as u64 / 2) };
-                Some((wb.clone(), window, prep))
+                Some((wb.clone(), window, prep, None))
             }
             Weight::NF4 { w: wb, s: sw, .. } => {
                 let (packed, scales) = if first == 0 && count == n {
@@ -1212,6 +1247,15 @@ impl Ops {
                 } else {
                     (Self::row_window(first, count, n, k, 8), Self::row_window(first, count, n, k, 32))
                 };
+                let whole = first == 0 && count == n;
+                let key = wb.alloc_id() as usize;
+                if whole {
+                    let cache = self.decoded.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(decoded) = cache.by_weight.get(&key) {
+                        // Decoded by an earlier product in this scope; its step is already in the stream.
+                        return Some((decoded.clone(), WHOLE, prep, None));
+                    }
+                }
                 let decoded = self.gemm.dequant_nf4(
                     &self.gpu,
                     &mut prep,
@@ -1219,7 +1263,9 @@ impl Ops {
                     &library::Operand { buf: sw, range: scales },
                     count as u64 * k as u64,
                 )?;
-                Some((decoded, WHOLE, prep))
+                // Whole weight decoded here with a scope open: the caller shares it once its products are in.
+                let fresh = (whole && self.decoded.lock().unwrap_or_else(|e| e.into_inner()).depth > 0).then_some(key);
+                Some((decoded, WHOLE, prep, fresh))
             }
             _ => None,
         }
@@ -1229,7 +1275,7 @@ impl Ops {
     /// for a bf16 `w`; `false` when the fp32 kernels must run instead.
     #[allow(clippy::too_many_arguments)]
     fn library_dx(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, dx_row0: u32, accumulate: bool) -> bool {
-        let Some((wb, window, mut prep)) = self.library_weight(w, rows) else { return false };
+        let Some((wb, window, mut prep, fresh)) = self.library_weight(w, rows) else { return false };
         let k = w.k();
         let dx_range = if dx_row0 == 0 { WHOLE } else { (dx_row0 as u64 * k as u64, m as u64 * k as u64) };
         let ok = self.gemm.dx(
@@ -1245,8 +1291,17 @@ impl Ops {
         );
         if ok {
             s.append(&mut prep);
+            self.share_decoded(fresh, &wb);
         }
         ok
+    }
+
+    /// Keep the NF4 scratch `decoded` (decoded by a product that is now in the step list) for the other
+    /// products of the open [`DecodedWeightScope`].
+    fn share_decoded(&self, key: Option<usize>, decoded: &DeviceBuffer) {
+        if let Some(key) = key {
+            self.decoded.lock().unwrap_or_else(|e| e.into_inner()).by_weight.insert(key, decoded.clone());
+        }
     }
 
     pub fn caps(&self) -> &DeviceCaps {
