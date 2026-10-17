@@ -102,9 +102,37 @@ brain --device gpu0,gpu1 serve --openai
 #                            "bf16" (half the bytes) or "int8" (one scale per
 #                            token and kv head, ~3.9x fewer bytes)
 #   --qwen35-max-batch N     concurrent decode slots (default 1)
+#   --speculative MODE       speculative decoding: auto (default: the checkpoint's
+#                            own MTP head when it has one, otherwise off), off,
+#                            mtp, ngram (prompt lookup, no second model), dflash
+#                            (refused: no DFlash2 draft checkpoint is configured)
 ```
 
 What it does differently:
+
+- **Speculative decoding** (`--speculative`, `model::serve::speculate`). The
+  generic scheduler asks a drafter for up to seven proposals per sequence,
+  scores the input and the proposals of every sequence in ONE batched step
+  (`Qwen35GgufEngine::forward_batched_verify`), keeps the longest prefix the
+  model agrees with and rolls the rest back: the paged KV by truncating the
+  block table, the 48 Gated DeltaNet layers' recurrent state from a snapshot
+  the `gdn_verify_pool` kernel takes after every row but the last
+  (`gdn_commit_pool` puts the chosen one back). The drafter is the checkpoint's
+  own multi-token-prediction head (`int8_gguf_resident/mtp.rs`: one
+  full-attention layer, `eh_proj`, the shared head; about 2 ms per proposal) or
+  prompt lookup. The window adapts per sequence from the proposals recently
+  accepted, and a step with more sequences than the measured crossover
+  (`--speculative` off the fast path) is the plain batched step. Greedy output
+  is the plain output wherever the batch composition does not change the
+  arithmetic (a request decoded alone is token-for-token identical on 32 real
+  prompts); the engine's attention splits its key range by batch size, so
+  plain decode of the same request already differs between batch sizes on many
+  prompts, and speculative decode differs from plain at that rate and no more.
+  Sampled requests use rejection sampling, which leaves the distribution
+  unchanged. The recurrent-state scratch costs 150 MB per verify row
+  (`SpecServing::scratch_rows`, 32 rows by default) and is left free of the
+  card budget. Measurements: `.agents/knowledge/` entry on speculative decoding
+  and `qwen35_spec_sweep`.
 
 - **A compact KV cache** (`model::kv_tier`, `--qwen35-kv`). At 128k
   context the 16 GQA layers' KV cache is the whole bound on the batch - 16 GiB

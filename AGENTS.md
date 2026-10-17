@@ -118,7 +118,11 @@ application", "an orchestrator"). Enforced by `make check/scope`
    one KV slot per sequence) driven by the generic continuous-batching
    scheduler like every other LLM resident: `--qwen35-max-batch N` sequences
    decode in ONE batched step per iteration (`make perf/model/qwen35-batch`
-   prints the aggregate-throughput table).
+   prints the aggregate-throughput table). `--speculative` (default `auto`) adds speculative
+   decoding to that same scheduler (`model::serve::speculate`): the engine
+   verifies `1 + k` rows per sequence in one batched step (`gdn_verify_pool`
+   keeps the recurrent state between rows) and drafts from the checkpoint's own
+   MTP head or prompt lookup; `qwen35_spec_sweep` measures it.
 3. **Sparse MoE Transformer** (`crates/toymoe`) - RMSNorm/RoPE, top-k experts; with
    **federated/sharded** expert training (`crates/federated`).
 4. **GLM-5.2 decoder** (`crates/glmdsa`) - `glm_moe_dsa`: **MLA** (low-rank q/kv with
