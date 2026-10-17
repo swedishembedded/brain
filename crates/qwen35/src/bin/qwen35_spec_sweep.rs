@@ -70,6 +70,9 @@ struct Args {
     /// Prompt tokens prefilled per scheduler iteration (default: the whole prompt).
     prefill_slice: u32,
     mixed: bool,
+    /// Greedy-decode this many long prompts (`--identity-prompts N,P`: N prompts of about P tokens)
+    /// and write their tokens to `--dump`, to compare sliced against whole-prompt prefill.
+    identity: Option<(usize, usize)>,
 }
 
 fn parse_args() -> Args {
@@ -93,6 +96,7 @@ fn parse_args() -> Args {
         prefill_tokens: Vec::new(),
         prefill_slice: u32::MAX,
         mixed: false,
+        identity: None,
     };
     while let Some(flag) = it.next() {
         let mut value = |name: &str| it.next().unwrap_or_else(|| panic!("{name} needs a value"));
@@ -117,6 +121,11 @@ fn parse_args() -> Args {
             "--profile-verify" => a.profile_verify = true,
             "--kernel-table" => a.kernel_table = true,
             "--mixed" => a.mixed = true,
+            "--identity-prompts" => {
+                let v = value("--identity-prompts");
+                let (n, p) = v.split_once(',').expect("--identity-prompts N,P");
+                a.identity = Some((n.parse().expect("--identity-prompts N,P"), p.parse().expect("--identity-prompts N,P")));
+            }
             "--prefill-slice" => a.prefill_slice = value("--prefill-slice").parse().expect("--prefill-slice N"),
             "--prefill-tokens" => a.prefill_tokens = value("--prefill-tokens").split(',').map(|s| s.trim().parse().expect("--prefill-tokens a,b,c")).collect(),
             "--temp" => a.temp = value("--temp").parse().expect("--temp T"),
@@ -254,6 +263,33 @@ fn main() {
         }
         println!("prefill slice {} tokens: finish times (s) of the 48-token answers: {}", if a.prefill_slice == u32::MAX { "whole prompt".to_string() } else { a.prefill_slice.to_string() }, at.iter().filter(|x| x.1 == 48).map(|x| format!("{:.1}", x.0)).collect::<Vec<_>>().join(" "));
         println!("                the 400-token runaway: {:.1} s", at.iter().find(|x| x.1 == 400).map_or(0.0, |x| x.0));
+        return;
+    }
+
+    if let Some((n, p)) = a.identity {
+        // N distinct long prompts (rotations of the passage, each a different length so the last
+        // slice of each ends at a different offset), decoded greedily alongside one another.
+        let mut base = tok.encode(REAL_PROMPT);
+        while base.len() < 4096 {
+            let more = base.clone();
+            base.extend(more);
+        }
+        let ids: Vec<u64> = (0..n)
+            .map(|i| {
+                let prompt: Vec<u32> = (0..p + i * 131).map(|j| base[(i * 37 + j) % base.len()]).collect();
+                assert!(prompt.len() + a.new_tokens + 8 <= a.ctx as usize, "prompt of {} tokens does not fit --ctx", prompt.len());
+                sched.submit(Request { prompt, max_new: a.new_tokens, stop: stop.clone() })
+            })
+            .collect();
+        let mut done = sched.run();
+        let mut dump = a.dump.as_ref().map(|path| std::fs::File::create(path).expect("create --dump file"));
+        for (i, id) in ids.iter().enumerate() {
+            let tokens = done.remove(id).expect("every request finishes");
+            println!("prompt {i}: {} tokens, first generated {:?}", p + i * 131, &tokens[..tokens.len().min(8)]);
+            if let Some(f) = dump.as_mut() {
+                writeln!(f, "{}", serde_json::json!({ "workload": "long", "batch": n, "request": i, "tokens": tokens })).expect("write --dump");
+            }
+        }
         return;
     }
 
