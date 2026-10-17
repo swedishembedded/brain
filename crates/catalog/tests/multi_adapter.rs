@@ -211,15 +211,34 @@ fn base_and_adapters_share_one_instance_and_one_batch() {
     let inv = Invocation::new();
     assert_eq!(served.instance_key("generate", &inv), key);
 
-    let asked: Vec<_> = [BASE, ONE, TWO, ONE].into_iter().map(|model| { let exec = exec.clone(); std::thread::spawn(move || ask(&exec, model, greedy(8))) }).collect();
+    // The first request is long and is running before the others are asked, so
+    // the others queue behind it and are admitted together with it or as one
+    // batch after it: batching is the property, not the thread scheduler.
+    let spawn = |model: &'static str, new: u64| { let exec = exec.clone(); std::thread::spawn(move || ask(&exec, model, greedy(new))) };
+    let mut asked = vec![spawn(BASE, 160)];
+    wait_for("the first request to be admitted", || exec.stats().admitted >= 1);
+    asked.extend([ONE, TWO, ONE].map(|model| spawn(model, 8)));
+    wait_for("all four requests to be in flight at once", || exec.in_flight().len() >= 4);
     for handle in asked {
         handle.join().unwrap().expect("the request is answered");
     }
+    wait_for("the executor to count all four jobs", || exec.stats().jobs >= 4);
     let stats = exec.stats();
     assert_eq!(stats.builds, 1, "one activation served the base and both adapters: {stats:?}");
     assert_eq!(exec.residency().placements.len(), 1, "one resident instance");
     assert!(stats.max_batch >= 2, "requests for different ids ran in one batch: {stats:?}");
     exec.shutdown();
+}
+
+/// Wait until `done` holds, failing with `what` after a minute. A reply reaches
+/// its caller before the dispatcher has counted the job as done, so a test that
+/// reads the executor's books right after a reply must wait for the books.
+fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 /// A name that is not offered is an unknown model, whatever shape it has; a
@@ -261,15 +280,16 @@ fn a_hot_swap_leaves_a_running_request_alone_and_serves_the_new_release_at_once(
     let before = ask(&exec, ONE, greedy(NEW_TOKENS)).unwrap();
 
     // A long request under the old release, running when it is swapped out.
+    // The reply to `before` arrives ahead of the dispatcher's own bookkeeping,
+    // so first wait for that job to leave the books: otherwise it is the job
+    // this test sees "in flight" and the long request may not have reached the
+    // executor when the old id is withdrawn.
+    wait_for("the previous request to leave the executor's books", || exec.in_flight().is_empty());
     let long = {
         let exec = exec.clone();
         std::thread::spawn(move || ask(&exec, ONE, greedy(160)))
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while exec.in_flight().is_empty() {
-        assert!(Instant::now() < deadline, "the long request never reached the executor");
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    wait_for("the long request to reach the executor", || !exec.in_flight().is_empty());
 
     offer(&live, &served, &f.adapters[1]);
     live.retire(ONE);
