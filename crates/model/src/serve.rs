@@ -171,6 +171,15 @@ pub trait PagedDecoder {
         usize::MAX
     }
 
+    /// Whether the time a step takes on this decoder is a signal worth acting
+    /// on: the scheduler then times plain and speculative steps and speculates
+    /// only where that has been producing more tokens per second, trying the
+    /// other mode again now and then. `false` (the default) leaves speculation
+    /// to the windows and [`Self::spec_max_batch`] alone.
+    fn spec_cost_aware(&self) -> bool {
+        false
+    }
+
     /// The decoder's own proposals: `ks[i]` is how many to propose after
     /// `queries[i]`'s context. Fewer (or none) is always allowed. Called only
     /// when no external [`Drafter`] is installed; the default proposes nothing.
@@ -731,6 +740,10 @@ pub struct Scheduler<D: PagedDecoder> {
     drafter: Option<Box<dyn Drafter>>,
     spec_policy: SpecPolicy,
     spec_stats: SpecStats,
+    /// Plain and speculative step rates per batch-size bucket - see [`speculate::CostGate`].
+    gate: speculate::CostGate,
+    /// Seconds, for the cost gate.
+    clock: Box<dyn Fn() -> f64 + Send>,
 }
 
 impl<D: PagedDecoder> Scheduler<D> {
@@ -754,6 +767,11 @@ impl<D: PagedDecoder> Scheduler<D> {
             drafter: None,
             spec_policy: SpecPolicy::default(),
             spec_stats: SpecStats::default(),
+            gate: speculate::CostGate::default(),
+            clock: {
+                let start = std::time::Instant::now();
+                Box::new(move || start.elapsed().as_secs_f64())
+            },
         }
     }
 
@@ -1237,6 +1255,8 @@ impl<D: PagedDecoder> Scheduler<D> {
         //    latency is never traded away silently.
         let active: Vec<usize> = (0..self.running.len()).filter(|&i| !self.running[i].done).collect();
         if !active.is_empty() && !self.speculative_step(&active) {
+            let plain_started = (self.clock)();
+            let generated_before: usize = active.iter().map(|&i| self.running[i].generated.len()).sum();
             let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
             let remaining_min = active
                 .iter()
@@ -1315,6 +1335,10 @@ impl<D: PagedDecoder> Scheduler<D> {
                     let len = r.table.len();
                     r.table.truncate(len - surplus, self.dec.alloc_mut());
                 }
+            }
+            if self.dec.spec_cost_aware() {
+                let produced: usize = active.iter().map(|&i| self.running[i].generated.len()).sum::<usize>() - generated_before;
+                self.gate.observe_plain(speculate::CostGate::bucket(active.len()), produced, (self.clock)() - plain_started);
             }
         }
 

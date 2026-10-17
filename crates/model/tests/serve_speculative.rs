@@ -28,6 +28,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use model::paged::{BlockAllocator, BlockTable};
 use model::serve::{verify_proposals, DraftQuery, Drafter, NgramDrafter, PagedDecoder, Request, SampleParams, Scheduler, SpecPolicy};
@@ -104,11 +106,16 @@ struct Toy {
     verifies: bool,
     batch_limit: usize,
     row_budget: usize,
+    /// Virtual time: what a step costs, in microseconds, on the clock the scheduler is given.
+    clock: Arc<AtomicU64>,
+    plain_us: u64,
+    row_us: u64,
+    cost_aware: bool,
 }
 
 impl Toy {
     fn new(probe: Shared, verifies: bool) -> Toy {
-        Toy { alloc: BlockAllocator::new(512, BLOCK), state: HashMap::new(), pending: HashMap::new(), probe, verifies, batch_limit: usize::MAX, row_budget: usize::MAX }
+        Toy { alloc: BlockAllocator::new(512, BLOCK), state: HashMap::new(), pending: HashMap::new(), probe, verifies, batch_limit: usize::MAX, row_budget: usize::MAX, clock: Arc::new(AtomicU64::new(0)), plain_us: 0, row_us: 0, cost_aware: false }
     }
     fn slot(t: &BlockTable) -> u32 {
         t.blocks()[0]
@@ -154,6 +161,7 @@ impl PagedDecoder for Toy {
     }
     fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
         self.probe.borrow_mut().plain_calls += 1;
+        self.clock.fetch_add(self.plain_us, Ordering::Relaxed);
         let mut out = Vec::new();
         for (t, &i) in tables.iter_mut().zip(inputs) {
             t.append(&mut self.alloc).unwrap();
@@ -212,8 +220,12 @@ impl PagedDecoder for Toy {
     fn spec_row_budget(&self) -> usize {
         self.row_budget
     }
+    fn spec_cost_aware(&self) -> bool {
+        self.cost_aware
+    }
     fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
         assert!(self.verifies, "the scheduler verified on a decoder that declared no speculation");
+        self.clock.fetch_add(self.plain_us + self.row_us * rows.iter().map(Vec::len).sum::<usize>() as u64, Ordering::Relaxed);
         let mut p = self.probe.borrow_mut();
         p.verify_calls += 1;
         p.verify_rows.push(rows.iter().map(|r| r.len()).collect());
@@ -422,6 +434,36 @@ fn a_verify_step_never_carries_more_rows_than_the_decoders_budget() {
     }
     let want = plain((0..3).map(|i| req(i, 5, 40)).collect());
     assert_eq!(ids.iter().map(|i| got[i].clone()).collect::<Vec<_>>(), want);
+}
+
+/// A decoder whose steps cost `plain_us` plus `row_us` per verified row, on a virtual clock.
+fn timed(plain_us: u64, row_us: u64) -> (Scheduler<Toy>, Shared) {
+    let probe = Shared::default();
+    let mut dec = Toy::new(probe.clone(), true);
+    let clock = dec.clock.clone();
+    (dec.plain_us, dec.row_us, dec.cost_aware) = (plain_us, row_us, true);
+    let mut sched = Scheduler::new(dec, 8);
+    sched.set_clock(Box::new(move || clock.load(Ordering::Relaxed) as f64 * 1e-6));
+    sched.set_drafter(Box::new(Scripted { right: 99 }));
+    (sched, probe)
+}
+
+#[test]
+fn speculation_that_pays_on_the_clock_is_used_and_speculation_that_does_not_is_left_to_probes() {
+    let want = plain((0..3).map(|i| req(i, 5, 80)).collect());
+    for (label, plain_us, row_us, expect_verify_share) in [("cheap rows", 1000u64, 10u64, 0.8), ("rows as dear as a step", 1000, 1000, 0.15)] {
+        let (mut sched, probe) = timed(plain_us, row_us);
+        let ids: Vec<u64> = (0..3).map(|i| sched.submit(req(i, 5, 80))).collect();
+        let got = sched.run();
+        assert_eq!(ids.iter().map(|i| got[i].clone()).collect::<Vec<_>>(), want, "{label}: the output changed");
+        let p = probe.borrow();
+        let share = p.verify_calls as f64 / (p.verify_calls + p.plain_calls) as f64;
+        if expect_verify_share > 0.5 {
+            assert!(share >= expect_verify_share, "{label}: speculation pays and should carry most steps, verify share {share:.2}");
+        } else {
+            assert!(share <= expect_verify_share, "{label}: speculation does not pay and should only probe, verify share {share:.2}");
+        }
+    }
 }
 
 #[test]

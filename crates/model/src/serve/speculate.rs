@@ -177,6 +177,101 @@ impl SeqSpec {
     }
 }
 
+/// Running estimate of how many tokens per second a kind of step produces.
+#[derive(Clone, Copy, Debug, Default)]
+struct Rate {
+    tokens: f64,
+    secs: f64,
+    samples: u32,
+}
+
+/// Weight of the newest step in a [`Rate`].
+const RATE_EWMA: f64 = 0.25;
+/// Steps after which the mode the gate is not using is tried again, so its
+/// estimate follows the workload (acceptance, batch composition) rather than
+/// freezing at the first measurement.
+const GATE_REFRESH_STEPS: u32 = 24;
+/// Speculation must beat plain decoding by this factor to be used.
+const GATE_MARGIN: f64 = 1.02;
+
+impl Rate {
+    fn observe(&mut self, tokens: usize, secs: f64) {
+        if self.samples == 0 {
+            (self.tokens, self.secs) = (tokens as f64, secs);
+        } else {
+            self.tokens += RATE_EWMA * (tokens as f64 - self.tokens);
+            self.secs += RATE_EWMA * (secs - self.secs);
+        }
+        self.samples += 1;
+    }
+
+    fn per_second(&self) -> f64 {
+        if self.secs > 0.0 {
+            self.tokens / self.secs
+        } else {
+            f64::INFINITY
+        }
+    }
+}
+
+/// What one batch-size bucket has measured of plain and speculative steps.
+#[derive(Clone, Copy, Debug, Default)]
+struct GateBucket {
+    plain: Rate,
+    spec: Rate,
+    since_plain: u32,
+    since_spec: u32,
+}
+
+/// **The self-calibrating crossover.** Whether a speculative step pays depends
+/// on the decoder, the batch size and the workload's acceptance, and none of
+/// them is known in advance. The gate times both kinds of step, per batch-size
+/// bucket, and speculates only where speculation has been producing more
+/// tokens per second than plain decoding; the mode it is not using is
+/// re-measured every [`GATE_REFRESH_STEPS`] steps. Only decoders that say their
+/// step cost is meaningful ([`PagedDecoder::spec_cost_aware`]) are gated.
+#[derive(Debug, Default)]
+pub(super) struct CostGate {
+    buckets: [GateBucket; 9],
+}
+
+impl CostGate {
+    /// The bucket of a step over `active` sequences: powers of two.
+    pub(super) fn bucket(active: usize) -> usize {
+        ((usize::BITS - active.max(1).leading_zeros()) as usize - 1).min(8)
+    }
+
+    /// Whether the next step over this bucket should speculate.
+    pub(super) fn speculate(&mut self, bucket: usize) -> bool {
+        let b = &mut self.buckets[bucket];
+        if b.spec.samples == 0 {
+            return true; // learn what speculation costs here
+        }
+        if b.plain.samples == 0 {
+            return false; // and what plain decoding does
+        }
+        if b.spec.per_second() >= b.plain.per_second() * GATE_MARGIN {
+            b.since_plain += 1;
+            b.since_plain < GATE_REFRESH_STEPS
+        } else {
+            b.since_spec += 1;
+            b.since_spec >= GATE_REFRESH_STEPS
+        }
+    }
+
+    pub(super) fn observe_plain(&mut self, bucket: usize, tokens: usize, secs: f64) {
+        let b = &mut self.buckets[bucket];
+        b.plain.observe(tokens, secs);
+        b.since_plain = 0;
+    }
+
+    pub(super) fn observe_spec(&mut self, bucket: usize, tokens: usize, secs: f64) {
+        let b = &mut self.buckets[bucket];
+        b.spec.observe(tokens, secs);
+        b.since_spec = 0;
+    }
+}
+
 /// The outcome of checking one sequence's proposals against the target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Verdict {
@@ -284,6 +379,12 @@ impl<D: PagedDecoder> Scheduler<D> {
         if active.len() > budget {
             return false;
         }
+        let bucket = CostGate::bucket(active.len());
+        let gated = self.dec.spec_cost_aware();
+        if gated && !self.gate.speculate(bucket) {
+            return false;
+        }
+        let started = (self.clock)();
         let mut ks = self.draft_windows(active, kmax);
         // Shrink the widest windows until the step fits the decoder's scratch.
         let mut rows = active.len() + ks.iter().sum::<usize>();
@@ -338,6 +439,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.dec.commit_verified(&mut active_tables(&mut self.running, active), &keep);
 
         self.spec_stats.verify_steps += 1;
+        let tokens_before: usize = active.iter().map(|&i| self.running[i].generated.len()).sum();
         for (bi, &si) in active.iter().enumerate() {
             let v = verdicts[bi];
             let r = &mut self.running[si];
@@ -356,7 +458,17 @@ impl<D: PagedDecoder> Scheduler<D> {
                 }
             }
         }
+        if gated {
+            let produced: usize = active.iter().map(|&i| self.running[i].generated.len()).sum::<usize>() - tokens_before;
+            self.gate.observe_spec(bucket, produced, (self.clock)() - started);
+        }
         true
+    }
+
+    /// Seconds on the clock the cost gate times steps with (default: wall time).
+    /// A test substitutes a virtual one.
+    pub fn set_clock(&mut self, clock: Box<dyn Fn() -> f64 + Send>) {
+        self.clock = clock;
     }
 
     /// Per-sequence proposal budget for this step: the adaptive window,
