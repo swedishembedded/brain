@@ -87,6 +87,20 @@ const PAGED_FLASH_PREFILL_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// The int8-KV form of the kernel above: the same buffers, then the K and V
+/// planes' `[pool rows, n_kv_heads]` row scales.
+const PAGED_FLASH_PREFILL_KV8_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+];
+
 /// `gdn_chunk_loop_f32`'s binding order: uniform, then key, query, w, u, g_cs,
 /// exp_g_cs, intra scores and the initial state (read), then the output and the
 /// final state (written).
@@ -931,19 +945,47 @@ pub fn rmsnorm_dx_add_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer;
 /// `[bsz, n_heads, n_kv_heads, head_dim, group, block_size, max_bt]`; `blocks`
 /// is its workgroup count.
 pub fn paged_flash_prefill_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<crate::Step> {
-    // A round of up to `DECODE_REGIME_MAX_ROWS` rows is a speculative-decoding
-    // verify or a ragged tail, not a prefill: there is nothing to win, and the
-    // contract that such a round computes what the token-by-token tape computes
-    // (to fp32 rounding) is worth more than the few microseconds - fp16 attention
-    // would break it.
-    let rows = params.first().copied().unwrap_or(0);
-    if head_dim != 256 || rows <= select::DECODE_REGIME_MAX_ROWS || !tensor_core_kernels_enabled(gpu) {
+    if !flash_prefill_offered(gpu, head_dim, params) {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
     let kernel = kernels_cuda::find(select::Op::PagedAttentionFused, Dtype::F32, cc)?;
     let id = gpu.native_kernel(kernel, PAGED_FLASH_PREFILL_BINDINGS)?;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 6], params, blocks)
+}
+
+/// Whether a prefill round of `rows` rows at `head_dim` may take a native fp16
+/// tensor-core attention kernel on this device. A round in the decode regime is
+/// a speculative verify or a ragged tail and keeps the fp32 kernel, whose
+/// arithmetic the token-by-token tape is held to.
+fn flash_prefill_offered(gpu: &crate::Gpu, head_dim: u32, params: &[u32]) -> bool {
+    let rows = params.first().copied().unwrap_or(0);
+    head_dim == 256 && rows > select::DECODE_REGIME_MAX_ROWS && tensor_core_kernels_enabled(gpu)
+}
+
+/// [`paged_flash_prefill_step`] over a bf16 KV cache: `bufs` and `params` are
+/// the portable bf16-pool kernel's own, the planes are read in place.
+pub fn paged_flash_prefill_bf16_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<crate::Step> {
+    if !flash_prefill_offered(gpu, head_dim, params) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("flash_prefill_f16_hd256_bf16").filter(|k| k.min_cc <= cc)?;
+    let id = gpu.native_kernel(kernel, PAGED_FLASH_PREFILL_BINDINGS)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 6], params, blocks)
+}
+
+/// [`paged_flash_prefill_step`] over an int8 KV cache: `bufs` are the portable
+/// kv8 kernel's own - queries, K data, V data, block tables, sequence lengths,
+/// context, then the K and V row scales.
+pub fn paged_flash_prefill_kv8_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer; 8], params: &[u32], blocks: u32) -> Option<crate::Step> {
+    if !flash_prefill_offered(gpu, head_dim, params) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("flash_prefill_f16_hd256_kv8").filter(|k| k.min_cc <= cc)?;
+    let id = gpu.native_kernel(kernel, PAGED_FLASH_PREFILL_KV8_BINDINGS)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 8], params, blocks)
 }
 
 impl OperatorProvider for CudaProvider {

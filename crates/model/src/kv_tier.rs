@@ -574,15 +574,27 @@ impl KvKernels {
         let grid = Dispatch::Workgroups(s.n_heads * s.n.div_ceil(64));
         match (&k.scales, &v.scales) {
             (None, None) => {
-                // The fp32 tier's planes are what the fp16 tensor-core kernel
-                // reads (same buffers, uniform and geometry as the portable one);
-                // a bf16 plane is not, and keeps its own pipeline.
-                let native = (self.native_prefill && self.tier == KvTier::F32)
-                    .then(|| crate::block::native_paged_flash_prefill(g, s.head_dim, &[q, &k.data, &v.data, block_ids, seq_lens, ctx], &params, s.n_heads * s.n.div_ceil(64)))
-                    .flatten();
-                native.unwrap_or_else(|| g.dispatch(self.prefill_hd256, &[q, &k.data, &v.data, block_ids, seq_lens, ctx], &params, grid))
+                // The fp32 and bf16 tiers' planes are what the fp16 tensor-core
+                // kernels read (same buffers, uniform and geometry as the
+                // portable one).
+                let bufs = [q, &k.data, &v.data, block_ids, seq_lens, ctx];
+                let blocks = s.n_heads * s.n.div_ceil(64);
+                let native = if !self.native_prefill {
+                    None
+                } else {
+                    match self.tier {
+                        KvTier::F32 => crate::block::native_paged_flash_prefill(g, s.head_dim, &bufs, &params, blocks),
+                        KvTier::Bf16 => crate::block::native_paged_flash_prefill_bf16(g, s.head_dim, &bufs, &params, blocks),
+                        KvTier::Int8 => None,
+                    }
+                };
+                native.unwrap_or_else(|| g.dispatch(self.prefill_hd256, &bufs, &params, grid))
             }
-            (Some(ks), Some(vs)) => g.dispatch(self.prefill_hd256, &[q, &k.data, &v.data, block_ids, seq_lens, ctx, ks, vs], &params, grid),
+            (Some(ks), Some(vs)) => {
+                let bufs = [q, &k.data, &v.data, block_ids, seq_lens, ctx, ks, vs];
+                let native = self.native_prefill.then(|| crate::block::native_paged_flash_prefill_kv8(g, s.head_dim, &bufs, &params, s.n_heads * s.n.div_ceil(64))).flatten();
+                native.unwrap_or_else(|| g.dispatch(self.prefill_hd256, &bufs, &params, grid))
+            }
             _ => unreachable!("check() pinned both planes to one tier"),
         }
     }

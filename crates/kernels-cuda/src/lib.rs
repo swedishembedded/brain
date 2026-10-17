@@ -314,6 +314,43 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/flash_prefill_f16_hd256.cu"),
     },
     CudaKernel {
+        name: "flash_prefill_f16_hd256_bf16",
+        // Asked for by name: `find` answers (PagedAttentionFused, F32) with the fp32-pool kernel.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd256_bf16",
+        what: "flash_prefill_f16_hd256 over a bf16 KV cache: the planes are widened while they are staged",
+        reported: "native:flash_prefill_f16_hd256_bf16",
+        block_dim: 256,
+        tile: (64, 1),
+        shared_bytes: 2 * 32 * (256 + 8) * 2,
+        src: concat!(
+            "#define BRAIN_KV_TIER 1\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd256_bf16\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd256_kv8",
+        op: Op::PagedAttentionFused,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd256_kv8",
+        what: "flash_prefill_f16_hd256 over an int8 KV cache with one scale per (token, kv head) row: the planes are dequantised while they are staged",
+        reported: "native:flash_prefill_f16_hd256_kv8",
+        block_dim: 256,
+        tile: (64, 1),
+        shared_bytes: 2 * 32 * (256 + 8) * 2,
+        src: concat!(
+            "#define BRAIN_KV_TIER 2\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd256_kv8\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu")
+        ),
+    },
+    CudaKernel {
         name: "gdn_chunk_loop_f32",
         op: Op::GatedDeltaChunkLoop,
         weight: Dtype::F32,

@@ -22,12 +22,78 @@
 //! scale, and an f64 host oracle over a sample of rows checks both kernels
 //! against the truth so a bug the two would share cannot hide.
 //!
+//! The same kernel serves a bf16 and an int8 KV cache (planes widened while they are
+//! staged); those tiers are checked against their own portable kernel and against the
+//! f64 oracle over the values the cache actually holds.
+//!
 //! Skipped without a device, or below the kernel's capability floor.
 
 use backend_api::select::{self, Dtype};
 use gpu_core::Gpu;
 
-static KERNELS: &[(&str, &str)] = &[("paged_flash_prefill_hd256", kernels::PAGED_FLASH_PREFILL_HD256)];
+/// The fp32 portable kernel and its bf16 and int8-KV rewrites: what a model that
+/// offers the compact tiers registers (`model::kv_tier::kernel_list`).
+fn kernel_list() -> &'static [(&'static str, &'static str)] {
+    use kernels::template::{dtype_variant, int8_kv_variant};
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let src = kernels::PAGED_FLASH_PREFILL_HD256;
+        let bf16_k = dtype_variant("paged_flash_prefill_hd256", src, "pool_k", Dtype::BF16).expect("pool_k is templatable");
+        let bf16 = dtype_variant(bf16_k.0, bf16_k.1, "pool_v", Dtype::BF16).expect("pool_v is templatable");
+        let i8_k = int8_kv_variant("paged_flash_prefill_hd256", src, "pool_k", "k_scales", "p.head_dim").expect("pool_k is templatable");
+        let i8 = int8_kv_variant(i8_k.0, i8_k.1, "pool_v", "v_scales", "p.head_dim").expect("pool_v is templatable");
+        vec![("paged_flash_prefill_hd256", src), bf16, i8]
+    })
+}
+
+/// How a compact KV cache stores its planes (the fp32 cache is the rest of this file).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kv {
+    Bf16,
+    Int8,
+}
+
+impl Kv {
+    fn portable_name(self) -> &'static str {
+        match self {
+            Kv::Bf16 => "paged_flash_prefill_hd256#pool_k=bf16#pool_v=bf16",
+            Kv::Int8 => "paged_flash_prefill_hd256#pool_k=kv8#pool_v=kv8",
+        }
+    }
+}
+
+fn bf16_bits(x: f32) -> u16 {
+    let b = x.to_bits();
+    ((b + 0x7fff + ((b >> 16) & 1)) >> 16) as u16
+}
+
+/// One plane stored in `kv`: its device words, its row scales (int8 only) and the
+/// f32 values a reader of the cache sees.
+fn store_plane(kv: Kv, vals: &[f32]) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+    let kv_row = (N_KV * HD) as usize;
+    match kv {
+        Kv::Bf16 => {
+            let bits: Vec<u16> = vals.iter().map(|v| bf16_bits(*v)).collect();
+            let words = bits.chunks(2).map(|c| c[0] as u32 | ((c.get(1).copied().unwrap_or(0) as u32) << 16)).collect();
+            (words, Vec::new(), bits.iter().map(|b| f32::from_bits((*b as u32) << 16)).collect())
+        }
+        Kv::Int8 => {
+            let (mut bytes, mut scales, mut seen) = (Vec::new(), Vec::new(), Vec::new());
+            for row in vals.chunks(kv_row) {
+                for head in row.chunks(HD as usize) {
+                    let scale = head.iter().fold(0f32, |m, v| m.max(v.abs())) / 127.0;
+                    scales.push(scale);
+                    for v in head {
+                        let q = (v / scale).round().clamp(-127.0, 127.0) as i8;
+                        bytes.push(q as u8);
+                        seen.push(q as f32 * scale);
+                    }
+                }
+            }
+            (bytes.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(), scales, seen)
+        }
+    }
+}
 
 const N_HEADS: u32 = 24;
 const N_KV: u32 = 4;
@@ -104,6 +170,14 @@ impl Problem {
         let seq_lens: Vec<u32> = (0..c.n).map(|i| c.start + i + 1).collect();
         let row_of = (0..total).map(|j| phys[(j / c.block_size) as usize] * c.block_size + j % c.block_size).collect();
         Problem { c, q, k_pool, v_pool, tables, seq_lens, max_bt, row_of }
+    }
+
+    /// The same problem with its K and V values as a cache in `kv` holds them.
+    fn as_stored(&self, kv: Kv) -> (Problem, [(Vec<u32>, Vec<f32>); 2]) {
+        let (kw, ks, kseen) = store_plane(kv, &self.k_pool);
+        let (vw, vs, vseen) = store_plane(kv, &self.v_pool);
+        let seen = Problem { c: Case { ..self.c }, q: self.q.clone(), k_pool: kseen, v_pool: vseen, tables: self.tables.clone(), seq_lens: self.seq_lens.clone(), max_bt: self.max_bt, row_of: self.row_of.clone() };
+        (seen, [(kw, ks), (vw, vs)])
     }
 
     /// f64 attention for one (row, head): the oracle.
@@ -199,7 +273,7 @@ impl Device {
 }
 
 fn device() -> Option<Gpu> {
-    let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
+    let Ok(gpu) = Gpu::try_new_cuda(kernel_list()) else {
         eprintln!("cuda_flash_prefill: no CUDA device on this box - skipping");
         return None;
     };
@@ -305,4 +379,119 @@ fn the_tensor_core_flash_prefill_is_materially_faster_than_the_portable_kernel()
         );
         assert!(!gate || speedup >= SPEEDUP_FLOOR, "n={n} start={start}: only {speedup:.1}x the portable kernel (floor {SPEEDUP_FLOOR}x)");
     }
+}
+
+/// A problem uploaded as a cache in one tier stores it.
+struct TierDevice {
+    kv: Kv,
+    base: Device,
+    k_scales: Option<backend_api::DeviceBuffer>,
+    v_scales: Option<backend_api::DeviceBuffer>,
+}
+
+impl TierDevice {
+    /// `seen` holds the values a reader of the stored cache sees (see [`Problem::as_stored`]).
+    fn upload(gpu: &Gpu, seen: &Problem, kv: Kv, stored: &[(Vec<u32>, Vec<f32>); 2]) -> TierDevice {
+        let mut base = Device::upload(gpu, seen);
+        let words = |w: &[u32]| {
+            let b = gpu.storage(w.len().max(1) as u64);
+            gpu.write(&b, w);
+            b
+        };
+        base.k = words(&stored[0].0);
+        base.v = words(&stored[1].0);
+        let scales = |s: &[f32]| (kv == Kv::Int8).then(|| gpu.storage_init("scales", s));
+        TierDevice { kv, base, k_scales: scales(&stored[0].1), v_scales: scales(&stored[1].1) }
+    }
+
+    fn bufs(&self) -> Vec<&backend_api::DeviceBuffer> {
+        let mut b = self.base.bufs().to_vec();
+        b.extend(self.k_scales.iter().chain(&self.v_scales));
+        b
+    }
+
+    fn portable(&self, gpu: &Gpu, p: &Problem) -> gpu_core::Step {
+        let kind = gpu.kernel_index(self.kv.portable_name()).expect("registered");
+        gpu.dispatch(kind, &self.bufs(), &Device::params(p), gpu_core::Dispatch::Workgroups(N_HEADS * p.c.n.div_ceil(64)))
+    }
+
+    fn native(&self, gpu: &Gpu, p: &Problem) -> Option<gpu_core::Step> {
+        let blocks = N_HEADS * p.c.n.div_ceil(64);
+        let b = self.bufs();
+        match self.kv {
+            Kv::Bf16 => gpu_core::provider::cuda::paged_flash_prefill_bf16_step(gpu, HD, &[b[0], b[1], b[2], b[3], b[4], b[5]], &Device::params(p), blocks),
+            Kv::Int8 => gpu_core::provider::cuda::paged_flash_prefill_kv8_step(gpu, HD, &[b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]], &Device::params(p), blocks),
+        }
+    }
+}
+
+/// A compact cache is read in place by the tensor-core kernel: it agrees with the
+/// portable kernel of its tier and with an f64 oracle over the values the cache holds.
+#[test]
+fn the_tensor_core_flash_prefill_reads_a_bf16_and_an_int8_cache() {
+    let Some(gpu) = device() else { return };
+    let cases = [
+        Case { n: 256, start: 0, block_size: 4096, scatter: false },
+        Case { n: 77, start: 1000, block_size: 4096, scatter: false },
+        Case { n: 200, start: 300, block_size: 128, scatter: true },
+        Case { n: 64, start: 31, block_size: 16, scatter: true },
+    ];
+    for kv in [Kv::Bf16, Kv::Int8] {
+        for (i, c) in cases.iter().enumerate() {
+            let desc = format!("{kv:?} case {i} (n={} start={} block={} scatter={})", c.n, c.start, c.block_size, c.scatter);
+            let p = Problem::new(Case { ..*c }, 0xC0DE + i as u64);
+            let (seen, stored) = p.as_stored(kv);
+            let d = TierDevice::upload(&gpu, &seen, kv, &stored);
+            let want = d.base.run(&gpu, &d.portable(&gpu, &seen), &seen);
+            let step = d.native(&gpu, &seen).expect("the production helper must take a head_dim-256 request on this device");
+            gpu.write(&d.base.ctx, &vec![0x7fc0_0000u32; (seen.c.n * N_HEADS * HD) as usize]);
+            let got = d.base.run(&gpu, &step, &seen);
+
+            let scale = rms(&want);
+            let maxdiff = want.iter().zip(&got).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+            assert!(got.iter().all(|x| x.is_finite()), "{desc}: non-finite output");
+            eprintln!("cuda_flash_prefill: {desc}: max|tc - portable| = {maxdiff:e} ({:.2e} of rms {scale:e})", maxdiff / scale);
+            assert!(maxdiff <= REL_TOL * scale, "{desc}: differs from the portable kernel by {maxdiff:e} (bar {:e})", REL_TOL * scale);
+            let mut rng = Rng(77 + i as u64);
+            for _ in 0..ORACLE_SAMPLES {
+                let (row, head) = ((rng.next() % seen.c.n as u64) as usize, (rng.next() % N_HEADS as u64) as usize);
+                let truth = seen.oracle(row, head);
+                let base = (row * N_HEADS as usize + head) * HD as usize;
+                let err = (0..HD as usize).map(|e| (got[base + e] as f64 - truth[e]).abs()).fold(0f64, f64::max);
+                assert!(err <= (REL_TOL * scale) as f64, "{desc}: row {row} head {head} is {err:e} from the f64 oracle");
+            }
+        }
+    }
+}
+
+/// The compact-tier kernels keep the decode-regime rule of the fp32 one.
+#[test]
+fn a_compact_cache_in_the_decode_regime_keeps_its_portable_kernel() {
+    let Some(gpu) = device() else { return };
+    for kv in [Kv::Bf16, Kv::Int8] {
+        let p = Problem::new(Case { n: 8, start: 100, block_size: 4096, scatter: false }, 5);
+        let (seen, stored) = p.as_stored(kv);
+        let d = TierDevice::upload(&gpu, &seen, kv, &stored);
+        assert!(d.native(&gpu, &seen).is_none(), "{kv:?}: an 8-row round must not take the fp16 kernel");
+    }
+}
+
+/// The reason the kernel exists: an int8 cache prefill on the portable kernel is the
+/// slowest part of a served prefill.
+#[test]
+fn the_int8_cache_prefill_is_materially_faster_than_the_portable_kernel() {
+    let Some(gpu) = device() else { return };
+    let (n, start) = (256u32, 1792u32);
+    let p = Problem::new(Case { n, start, block_size: 4096, scatter: false }, 21);
+    let (seen, stored) = p.as_stored(Kv::Int8);
+    let d = TierDevice::upload(&gpu, &seen, Kv::Int8, &stored);
+    let portable = d.portable(&gpu, &seen);
+    let native = d.native(&gpu, &seen).expect("native step");
+    d.base.run(&gpu, &portable, &seen);
+    d.base.run(&gpu, &native, &seen);
+    let t_ref = d.base.device_ms(&gpu, &portable, "paged_flash_prefill_hd256");
+    let t_tc = d.base.device_ms(&gpu, &native, "flash_prefill_f16_hd256");
+    let speedup = t_ref / t_tc;
+    eprintln!("cuda_flash_prefill: int8 cache n={n} start={start}: portable {t_ref:.3} ms, tensor-core {t_tc:.3} ms, {speedup:.1}x");
+    assert!(speedup >= SPEEDUP_FLOOR, "only {speedup:.1}x the portable kernel (floor {SPEEDUP_FLOOR}x)");
 }

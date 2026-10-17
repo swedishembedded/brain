@@ -24,6 +24,18 @@
 //
 // head_dim must be 256 (the caller checks; the entry does not re-validate it).
 //
+// KV tiers. The same source serves the three ways the KV cache stores its
+// planes (`BRAIN_KV_TIER`, default 0), with the argument list of the portable
+// kernel of that tier:
+//   0  f32  pool_k/pool_v are f32                          (7 arguments)
+//   1  bf16 pool_k/pool_v are bf16, two per 32-bit word    (7 arguments)
+//   2  int8 pool_k/pool_v are int8, four per word, plus
+//           k_scales/v_scales [pool rows, n_kv_heads] f32,
+//           one scale per (token, kv head) row            (9 arguments)
+// A compact plane is widened while it is staged (value = int8 * scale, or the
+// bf16 bit pattern shifted into an f32), so the matrix work after staging is
+// identical for every tier and rounds to fp16 exactly once per operand.
+//
 // Numerics. Q, K, V and the softmax weights P are rounded to fp16 for the MMAs
 // (`cvt.rn.satfinite`, so an outlier saturates instead of becoming inf); every
 // accumulator, the running max, the running sum and the output are fp32. That
@@ -50,6 +62,17 @@
 //     and a row with no live key writes 0 (as the portable kernel).
 //
 // No `__restrict__`: brain's device buffers alias by design.
+
+#ifndef BRAIN_KV_TIER
+#define BRAIN_KV_TIER 0
+#endif
+#if BRAIN_KV_TIER == 0
+typedef float KvT;
+#elif BRAIN_KV_TIER == 1
+typedef unsigned short KvT;
+#else
+typedef signed char KvT;
+#endif
 
 #define BR 64              // query rows per block
 #define BC 32              // keys per tile
@@ -86,13 +109,23 @@ __device__ __forceinline__ void brain_mma_f16(float (&d)[4], const unsigned int 
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
+#if BRAIN_KV_TIER == 2
+#define KV_SCALE_PARAMS , const float* k_scales, const float* v_scales
+#define SCALES_K k_scales
+#define SCALES_V v_scales
+#else
+#define KV_SCALE_PARAMS
+#define SCALES_K static_cast<const float*>(nullptr)
+#define SCALES_V static_cast<const float*>(nullptr)
+#endif
+
 extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16_hd256(const unsigned int* params,
                                                                                        const float* q,
-                                                                                       const float* pool_k,
-                                                                                       const float* pool_v,
+                                                                                       const KvT* pool_k,
+                                                                                       const KvT* pool_v,
                                                                                        const unsigned int* block_tables,
                                                                                        const unsigned int* seq_lens,
-                                                                                       float* ctx) {
+                                                                                       float* ctx KV_SCALE_PARAMS) {
     const unsigned int bsz = params[0];
     const unsigned int n_heads = params[1];
     const unsigned int n_kv_heads = params[2];
@@ -164,16 +197,30 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
     // smem bytes (conflict-free).
     const unsigned int cc = tid & 31u;
     float4 raw[4][2];
-    auto issue = [&](const float* pool, unsigned int kt) {
+    auto issue = [&](const KvT* pool, const float* scales, unsigned int kt) {
+        (void)scales;
 #pragma unroll
         for (int c = 0; c < 4; ++c) {
             const unsigned int j = kt * BC + (tid >> 5) + 8u * c;
             float4 lo = make_float4(0.f, 0.f, 0.f, 0.f), hi = lo;
             if (j < max_t) {
                 const unsigned int physical = block_tables[(unsigned long long)bt_row * max_bt + j / block_size];
-                const float* src = pool + ((unsigned long long)physical * block_size + (j % block_size)) * kv_row + hkv * HD + cc * 8u;
+                const unsigned long long row = (unsigned long long)physical * block_size + (j % block_size);
+                const KvT* src = pool + row * kv_row + hkv * HD + cc * 8u;
+#if BRAIN_KV_TIER == 0
                 lo = *reinterpret_cast<const float4*>(src);
                 hi = *reinterpret_cast<const float4*>(src + 4);
+#elif BRAIN_KV_TIER == 1
+                const uint4 w = *reinterpret_cast<const uint4*>(src);   // eight bf16: a bf16 is the top half of an f32
+                lo = make_float4(__uint_as_float(w.x << 16), __uint_as_float(w.x & 0xffff0000u), __uint_as_float(w.y << 16), __uint_as_float(w.y & 0xffff0000u));
+                hi = make_float4(__uint_as_float(w.z << 16), __uint_as_float(w.z & 0xffff0000u), __uint_as_float(w.w << 16), __uint_as_float(w.w & 0xffff0000u));
+#else
+                const uint2 w = *reinterpret_cast<const uint2*>(src);   // eight int8
+                const float sc = scales[row * n_kv_heads + hkv];
+                auto b = [&](unsigned int word, int i) { return static_cast<float>(static_cast<int>(static_cast<signed char>((word >> (8 * i)) & 0xffu))) * sc; };
+                lo = make_float4(b(w.x, 0), b(w.x, 1), b(w.x, 2), b(w.x, 3));
+                hi = make_float4(b(w.y, 0), b(w.y, 1), b(w.y, 2), b(w.y, 3));
+#endif
             }
             raw[c][0] = lo;
             raw[c][1] = hi;
@@ -192,7 +239,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
         }
     };
 
-    if (ntiles_k > 0u) { issue(pool_k, 0u); }
+    if (ntiles_k > 0u) { issue(pool_k, SCALES_K, 0u); }
 
     // ldmatrix lane geometry (see the MMA fragment layouts in the PTX ISA).
     //  K (B operand of S, non-transposed): matrices are (keys 0-7, k 0-7),
@@ -209,7 +256,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
     for (unsigned int kt = 0; kt < ntiles_k; ++kt) {
         __syncthreads();                   // every warp is done with the previous tile's K and V
         commit(Ks);
-        issue(pool_v, kt);                 // in flight while the scores are computed
+        issue(pool_v, SCALES_V, kt);                 // in flight while the scores are computed
         __syncthreads();                   // K visible
 
         // ---- S = Q K^T for 16 rows x 32 keys.
@@ -280,7 +327,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
         }
 
         commit(Vs);                        // V loads have had the whole score phase
-        if (kt + 1u < ntiles_k) { issue(pool_k, kt + 1u); }   // next K in flight under the PV MMAs
+        if (kt + 1u < ntiles_k) { issue(pool_k, SCALES_K, kt + 1u); }   // next K in flight under the PV MMAs
         __syncthreads();                   // V visible
 
         // ---- O += P V for this warp's 128 output columns.
