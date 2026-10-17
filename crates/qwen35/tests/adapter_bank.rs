@@ -86,14 +86,25 @@ fn reference_logits(make_gpu: fn(&[(&str, &str)]) -> Gpu, with_lora: &HashMap<St
     m.logits_all(&tokens(&cfg))
 }
 
-fn engine(make_gpu: fn(&[(&str, &str)]) -> Gpu, base: &HashMap<String, Vec<f32>>, slots: Option<u32>) -> Engine {
+/// An engine on `base`, with a bank of `slots` when asked: grouped as the model
+/// declares ([`AdapterServing::input_groups`]), the way a server builds it, or
+/// with every linear on its own.
+fn engine_with(make_gpu: fn(&[(&str, &str)]) -> Gpu, base: &HashMap<String, Vec<f32>>, slots: Option<u32>, grouped: bool) -> Engine {
     let cfg = Qwen35Config::tiny();
     let mut e = Engine::from_map_on(&make_gpu(pipelines()), cfg.clone(), base, cfg.block_size, 4);
     if let Some(slots) = slots {
         let targets = AdapterTargets::ALL.resolve(&cfg).unwrap();
-        e.enable_adapters(AdapterBankConfig::new(slots, 8, &targets)).unwrap();
+        let mut bank = AdapterBankConfig::new(slots, 8, &targets);
+        if grouped {
+            bank.groups = cfg.input_groups().into_iter().map(|g| g.into_iter().map(str::to_string).collect()).collect();
+        }
+        e.enable_adapters(bank).unwrap();
     }
     e
+}
+
+fn engine(make_gpu: fn(&[(&str, &str)]) -> Gpu, base: &HashMap<String, Vec<f32>>, slots: Option<u32>) -> Engine {
+    engine_with(make_gpu, base, slots, true)
 }
 
 fn admit(e: &mut Engine, id: AdapterId) {
@@ -159,6 +170,46 @@ fn mixed_batch_matches_training_forward_and_base_rows_are_untouched_cpu() {
 #[test]
 fn mixed_batch_matches_training_forward_and_base_rows_are_untouched_default_backend() {
     mixed_batch_matches_training_forward_and_base_rows_are_untouched(Gpu::new);
+}
+
+/// The grouped bank (one projection and one epilogue for the linears that read
+/// one activation) computes what the bank with every linear on its own does:
+/// the same adapter rows to the bit, because the zero padding of a stacked
+/// bank adds nothing. And it records fewer dispatches doing it.
+#[test]
+fn a_grouped_bank_equals_the_ungrouped_one_bit_for_bit() {
+    let cfg = Qwen35Config::tiny();
+    let toks = tokens(&cfg);
+    let (base, lora_a) = weights(99);
+    let run = |grouped: bool| {
+        let mut e = engine_with(Gpu::new_cpu, &base, Some(1), grouped);
+        let id = e.load_adapter(served(&cfg, &lora_a, "a")).unwrap();
+        admit(&mut e, id);
+        let mut t = BlockTable::with_namespace(id.kv_namespace());
+        let hidden = e.prefill(&mut t, &toks[..PREFIX]);
+        let mut out = vec![bits_of_f32(&hidden)];
+        for &tok in &toks[PREFIX..] {
+            let top = e.forward_batched_topk(&mut [&mut t], &[tok], 4);
+            out.push(top[0].iter().flat_map(|&(id, l)| [id, l.to_bits()]).collect());
+        }
+        out
+    };
+    assert_eq!(run(true), run(false));
+
+    // The byte count a placement budgets is what the grouped bank allocates.
+    let targets = AdapterTargets::ALL.resolve(&cfg).unwrap();
+    for grouped in [true, false] {
+        let e = engine_with(Gpu::new_cpu, &base, Some(1), grouped);
+        let mut bank = AdapterBankConfig::new(1, 8, &targets);
+        if grouped {
+            bank.groups = cfg.input_groups().into_iter().map(|g| g.into_iter().map(str::to_string).collect()).collect();
+        }
+        assert_eq!(e.adapter_bank_bytes(), bank.device_bytes(&cfg, 4u32.max(256)), "grouped: {grouped}");
+    }
+}
+
+fn bits_of_f32(v: &[f32]) -> Vec<u32> {
+    v.iter().map(|x| x.to_bits()).collect()
 }
 
 #[test]

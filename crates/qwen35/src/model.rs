@@ -1931,30 +1931,31 @@ impl Qwen35 {
         s.push(g.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
     }
 
-    /// The adapter corrections of one targeted linear whose base output `y`
-    /// is already recorded in `s`: the training LoRA (`float_tier` only: its
-    /// fp32 path needs a float-read base weight) and the served bank.
+    /// The training LoRA's correction of one targeted linear whose base output
+    /// `y` is already recorded in `s` (`float_tier` only: its fp32 path needs a
+    /// float-read base weight). The served bank corrects after the whole group
+    /// of linears that read `x` is recorded: [`Self::bank_fwd`].
     #[allow(clippy::too_many_arguments)]
     fn adapt(&self, float_tier: bool, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         if float_tier {
             self.lora_fwd(s, leaf, x, wname, y, m, k, nout);
         }
-        self.bank_fwd(s, wname, x, y, m, nout);
     }
 
-    /// The served bank's correction of the linear `wname`, per row, from the
-    /// same fp32 activation `x` the base linear read (whatever its weight
-    /// tier): `y[i] += scale * B_slot(i) (A_slot(i) x[i])`. Two dispatches for
-    /// the whole batch. Nothing when no row of this forward has an adapter,
-    /// and a row without one is untouched bit for bit.
-    fn bank_fwd(&self, s: &mut Vec<Step>, wname: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: u32, nout: u32) {
+    /// The served bank's correction of the linears `items` (`(base weight name,
+    /// its output)`, outputs recorded in `s`), all read from the same fp32
+    /// activation `x` whatever their weight tier: `y[i] += scale * B_slot(i)
+    /// (A_slot(i) x[i])`. Two dispatches for the whole group and batch. Nothing
+    /// when no row of this forward has an adapter, and a row without one is
+    /// untouched bit for bit.
+    fn bank_fwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, items: &[(&str, &DeviceBuffer)], m: u32) {
         let rows = self.adapter_rows.get();
         if rows == 0 {
             return;
         }
         assert_eq!(m, rows, "qwen35: this forward has {m} rows but {rows} adapter slots were set for it");
         if let Some(bank) = self.adapter_bank.borrow().as_ref() {
-            bank.correct_named(&self.gpu, s, wname, x, y, m, nout, 0);
+            bank.correct_named_many(&self.gpu, s, x, m, items);
         }
     }
 
@@ -2324,6 +2325,7 @@ impl Qwen35 {
         self.adapt(f32s[1], &mut s1, "in_proj_b", xn1, &b_w, &bproj, n, d, nvh);
         self.adapt(f32s[2], &mut s1, "in_proj_a", xn1, &a_w, &aproj, n, d, nvh);
         self.adapt(f32s[3], &mut s1, "in_proj_z", xn1, &z_w, &z, n, d, value_dim);
+        self.bank_fwd(&mut s1, xn1, &[(qkv_w.as_str(), &mixed_qkv), (z_w.as_str(), &z), (b_w.as_str(), &bproj), (a_w.as_str(), &aproj)], n);
         g.submit(&[], &s1);
 
         // conv+split+l2norm+decay-gate+recurrence+gated-norm - LoRA/dtype-
@@ -2406,6 +2408,7 @@ impl Qwen35 {
             let act3 = if epilogue { self.quant_epilogue(0, &gated, None, n, value_dim).1 } else { self.ops_act(&mut s, &gated, n, value_dim) };
             let float_tier = self.ops_linear(&mut s, &act3, &p("out_proj.weight"), &out);
             self.adapt(float_tier, &mut s, "out_proj", &gated, &p("out_proj.weight"), &out, n, value_dim, d);
+            self.bank_fwd(&mut s, &gated, &[(p("out_proj.weight").as_str(), &out)], n);
             g.submit(&[], &s);
         }
 
@@ -2455,6 +2458,7 @@ impl Qwen35 {
         self.adapt(f32s[0], &mut s1, "q_proj", xn1, &q_w, &q_full, n, d, qpd);
         self.adapt(f32s[1], &mut s1, "k_proj", xn1, &k_w, &k, n, d, kvd);
         self.adapt(f32s[2], &mut s1, "v_proj", xn1, &v_w, &v, n, d, kvd);
+        self.bank_fwd(&mut s1, xn1, &[(q_w.as_str(), &q_full), (k_w.as_str(), &k), (v_w.as_str(), &v)], n);
         g.submit(&[], &s1);
 
         // split+qknorm+rope+attention+gating - LoRA/dtype-agnostic, shared
@@ -2559,6 +2563,7 @@ impl Qwen35 {
             };
             let float_tier = self.ops_linear(&mut s, &act2, &p("o_proj.weight"), &out);
             self.adapt(float_tier, &mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, shape.qd(), d);
+            self.bank_fwd(&mut s, &ctx_gated, &[(p("o_proj.weight").as_str(), &out)], n);
             g.submit(&[], &s);
         }
 
@@ -2612,6 +2617,7 @@ impl Qwen35 {
             let f32s = self.ops_linear_group(&mut s, &act1, &[(&gate_w, &gate_pre), (&up_w, &up)]);
             self.adapt(f32s[0], &mut s, "gate", xn2, &gate_w, &gate_pre, n, d, ff);
             self.adapt(f32s[1], &mut s, "up", xn2, &up_w, &up, n, d, ff);
+            self.bank_fwd(&mut s, xn2, &[(gate_w.as_str(), &gate_pre), (up_w.as_str(), &up)], n);
             g.submit(&[], &s);
         }
         let (h, down_act) = if epilogue {
@@ -2648,6 +2654,7 @@ impl Qwen35 {
             };
             let float_tier = self.ops_linear(&mut s, &act2, &p("down.weight"), &down);
             self.adapt(float_tier, &mut s, "down", &h, &p("down.weight"), &down, n, ff, d);
+            self.bank_fwd(&mut s, &h, &[(p("down.weight").as_str(), &down)], n);
             g.submit(&[], &s);
             down
         });

@@ -62,7 +62,7 @@ use gpu_core::{DeviceBuffer, Gpu, Step};
 
 use super::sites::LoraSites;
 use super::LinearSite;
-use crate::dispatch::{lora_bank_rows, LoraBank, LoraBankKernels, LoraBankRows, LORA_SLOT_NONE};
+use crate::dispatch::{lora_bank_group_rows, lora_bank_rows, LoraBank, LoraBankKernels, LoraBankRows, LoraGroupBank, LoraGroupOut, LORA_GROUP_MAX, LORA_SLOT_NONE};
 use crate::lora::device_adapter::DeviceAdapter;
 use crate::paged::{KvNamespace, NamespaceIds, BASE_KV_NAMESPACE};
 use crate::serve::{AdapterAvailability, AdapterId};
@@ -90,6 +90,16 @@ pub trait AdapterServing: LoraSites {
             }
         }
         leaves
+    }
+
+    /// Leaves whose linears read the SAME activation, in the order a forward
+    /// finishes them: a bank corrects such a group with one projection and one
+    /// epilogue instead of two dispatches per linear
+    /// ([`AdapterBank::correct_named_many`]). At most [`LORA_GROUP_MAX`] leaves
+    /// per group. None by default: a model opts in when its forward calls the
+    /// bank per group.
+    fn input_groups(&self) -> Vec<Vec<&'static str>> {
+        Vec::new()
     }
 
     /// Adapters resident in device slots at once unless the operator says.
@@ -240,6 +250,7 @@ impl AdapterBankRequest {
     pub fn config<M: AdapterServing + ?Sized>(&self, model: &M) -> Result<AdapterBankConfig, String> {
         let mut cfg = AdapterBankConfig::new(self.slots, self.rank_cap, &self.targets.resolve(model)?);
         cfg.max_registered = self.max_registered;
+        cfg.groups = model.input_groups().into_iter().map(|g| g.into_iter().map(str::to_string).collect()).collect();
         Ok(cfg)
     }
 }
@@ -248,11 +259,11 @@ impl AdapterBankConfig {
     /// Device bytes of the sites of each layer `0..n_layers` (the per-stage
     /// term of [`AdapterBankConfig::device_bytes`], without the row scratch).
     pub fn device_bytes_by_layer<M: LoraSites + ?Sized>(&self, model: &M, n_layers: usize) -> Vec<u64> {
-        let (s, r) = (self.slots as u64, self.r_max as u64);
+        let sites = model.lora_sites();
         let mut by_layer = vec![0u64; n_layers];
-        for site in model.lora_sites().iter().filter(|site| self.targets_site(site)) {
-            if let Some(l) = site.layer.filter(|&l| l < n_layers) {
-                by_layer[l] += s * r * (site.spec.inn + site.spec.out) as u64 * 4 + s * 4;
+        for unit in self.units(&sites, &(0..usize::MAX)) {
+            if let Some(l) = sites[unit[0]].layer.filter(|&l| l < n_layers) {
+                by_layer[l] += self.unit_bytes(&sites, &unit);
             }
         }
         by_layer
@@ -261,7 +272,7 @@ impl AdapterBankConfig {
     /// Device bytes of the row scratch every bank carries for forwards of at
     /// most `rows` rows.
     pub fn row_scratch_bytes(&self, rows: u32) -> u64 {
-        rows as u64 * 4 + rows as u64 * self.r_max as u64 * 4
+        rows as u64 * 4 + rows as u64 * self.scratch_width() * 4
     }
 }
 
@@ -303,6 +314,10 @@ pub struct AdapterBankConfig {
     /// uploads before answering `Loading`: bounds the time a cold load takes
     /// out of one scheduler iteration. At least one linear is uploaded per call.
     pub upload_quantum_bytes: u64,
+    /// Leaves that read one activation ([`AdapterServing::input_groups`]); the
+    /// targeted members of a group in one layer share a stacked bank and are
+    /// corrected together. Empty: every linear is corrected on its own.
+    pub groups: Vec<Vec<String>>,
 }
 
 impl AdapterBankConfig {
@@ -311,17 +326,69 @@ impl AdapterBankConfig {
     /// upload quantum. Names are checked against the model when the bank is
     /// built ([`AdapterBank::new`]).
     pub fn new<T: SiteLeaf>(slots: u32, r_max: u32, targets: &[T]) -> AdapterBankConfig {
-        AdapterBankConfig { slots, r_max, targets: targets.iter().map(|t| t.site_leaf().to_string()).collect(), max_registered: 64, upload_quantum_bytes: 4 << 20 }
+        AdapterBankConfig { slots, r_max, targets: targets.iter().map(|t| t.site_leaf().to_string()).collect(), max_registered: 64, upload_quantum_bytes: 4 << 20, groups: Vec::new() }
     }
 
     /// A bank with `model`'s default size, correcting what `targets` resolves
     /// to on it.
     pub fn for_model<M: AdapterServing + ?Sized>(model: &M, targets: &AdapterTargets) -> Result<AdapterBankConfig, String> {
-        Ok(AdapterBankConfig::new(model.default_slots(), model.default_rank_cap(), &targets.resolve(model)?))
+        let mut cfg = AdapterBankConfig::new(model.default_slots(), model.default_rank_cap(), &targets.resolve(model)?);
+        cfg.groups = model.input_groups().into_iter().map(|g| g.into_iter().map(str::to_string).collect()).collect();
+        Ok(cfg)
     }
 
     fn targets_site(&self, site: &LinearSite) -> bool {
         self.targets.iter().any(|t| t == site.leaf)
+    }
+
+    /// The bank's units over `sites` in `layers`: each a single linear or a
+    /// group of two or more targeted linears of one layer that read one
+    /// activation, as site indices. The one place the grouping is decided, for
+    /// allocation and for the byte count alike.
+    fn units(&self, sites: &[LinearSite], layers: &std::ops::Range<usize>) -> Vec<Vec<usize>> {
+        let mut taken = vec![false; sites.len()];
+        let mut units = Vec::new();
+        for i in 0..sites.len() {
+            let site = &sites[i];
+            if taken[i] || site.layer.is_some_and(|l| !layers.contains(&l)) || !self.targets_site(site) {
+                continue;
+            }
+            let members = self.groups.iter().find(|g| g.iter().any(|leaf| leaf == site.leaf)).map(|group| {
+                group
+                    .iter()
+                    .take(LORA_GROUP_MAX)
+                    .filter_map(|leaf| (0..sites.len()).find(|&j| !taken[j] && sites[j].layer == site.layer && sites[j].leaf == leaf.as_str() && sites[j].spec.inn == site.spec.inn && self.targets_site(&sites[j])))
+                    .collect::<Vec<usize>>()
+            });
+            let unit = match members {
+                Some(m) if m.len() >= 2 && m.contains(&i) => m,
+                _ => vec![i],
+            };
+            for &j in &unit {
+                taken[j] = true;
+            }
+            units.push(unit);
+        }
+        units
+    }
+
+    /// Device bytes of one unit.
+    fn unit_bytes(&self, sites: &[LinearSite], unit: &[usize]) -> u64 {
+        let (s, r) = (self.slots as u64, self.r_max as u64);
+        let k = sites[unit[0]].spec.inn as u64;
+        match unit {
+            [one] => s * r * (k + sites[*one].spec.out as u64) * 4 + s * 4,
+            many => {
+                let n: u64 = many.iter().map(|&i| sites[i].spec.out as u64).sum();
+                s * many.len() as u64 * r * k * 4 + s * r * n * 4 + s * 4 + 2 * 4
+            }
+        }
+    }
+
+    /// Floats per row of the projection scratch: `r_max` per site of the
+    /// largest group.
+    fn scratch_width(&self) -> u64 {
+        self.r_max as u64 * self.groups.iter().map(|g| g.len().min(LORA_GROUP_MAX)).max().unwrap_or(1).max(1) as u64
     }
 
     /// Device bytes the bank allocates for `model` in an engine whose batches
@@ -330,9 +397,9 @@ impl AdapterBankConfig {
     /// engine does, so a caller can budget the bank when it places the engine.
     /// Allocation sums the buffers it makes and a test holds the two equal.
     pub fn device_bytes<M: LoraSites + ?Sized>(&self, model: &M, rows: u32) -> u64 {
-        let (s, r) = (self.slots as u64, self.r_max as u64);
-        let per_sites: u64 = model.lora_sites().iter().filter(|site| self.targets_site(site)).map(|site| s * r * (site.spec.inn + site.spec.out) as u64 * 4 + s * 4).sum();
-        per_sites + rows as u64 * 4 + rows as u64 * r * 4
+        let sites = model.lora_sites();
+        let units: u64 = self.units(&sites, &(0..usize::MAX)).iter().map(|u| self.unit_bytes(&sites, u)).sum();
+        units + self.row_scratch_bytes(rows)
     }
 }
 
@@ -413,8 +480,11 @@ pub struct AdapterInfo {
 /// What a bank does with one site of the model.
 #[derive(Clone, Copy)]
 enum SiteState {
-    /// Corrected here: index into the bank's sites.
+    /// Corrected here on its own: index into the bank's sites.
     Banked(usize),
+    /// Corrected here together with the other linears of its group that read
+    /// the same activation: the group's index and the linear's place in it.
+    Grouped { group: usize, member: usize },
     /// A site of the model that this bank's targets leave alone: an adapter
     /// that corrects it is refused.
     Untargeted,
@@ -430,13 +500,28 @@ struct BankSite {
     n: u32,
 }
 
+/// A group of linears that read one activation: one stacked bank for all of them.
+struct GroupSite {
+    bank: LoraGroupBank,
+    k: u32,
+    /// The members' output widths, in group order.
+    ns: Vec<u32>,
+}
+
 /// One linear of a registered adapter, in the bank's layout.
 struct HostSite {
-    bank_ix: usize,
     /// `A [rank, k]`.
     a: Vec<f32>,
     /// `B` transposed to `[rank, n]` with `alpha / rank` folded in.
     bt: Vec<f32>,
+}
+
+/// What one upload step writes: a linear on its own, or a whole group (a member
+/// the adapter does not correct is `None` and is written as zeros, so no stale
+/// factor of the slot's previous adapter survives in the stacked bank).
+enum HostUnit {
+    Single { bank_ix: usize, site: HostSite },
+    Group { group: usize, members: Vec<Option<HostSite>> },
 }
 
 enum Phase {
@@ -452,7 +537,7 @@ struct Entry {
     label: String,
     digest: String,
     rank: u32,
-    sites: Vec<HostSite>,
+    sites: Vec<HostUnit>,
     phase: Phase,
     pins: u32,
     draining: bool,
@@ -464,13 +549,14 @@ pub struct AdapterBank {
     cfg: AdapterBankConfig,
     kernels: LoraBankKernels,
     sites: Vec<BankSite>,
+    groups: Vec<GroupSite>,
     /// Base weight name of every site of the model, banked or not: tells "not
     /// a linear of this model" from "not a site this bank targets".
     model_sites: HashMap<String, SiteState>,
     /// Per layer, the bank index of each banked site by leaf.
     by_layer: Vec<HashMap<&'static str, usize>>,
     slot_buf: DeviceBuffer,
-    /// `[rows, r_max]` projection scratch shared by every corrected linear.
+    /// `[rows, r_max · largest group]` projection scratch shared by every corrected linear.
     tscr: DeviceBuffer,
     entries: HashMap<AdapterId, Entry>,
     by_digest: HashMap<String, AdapterId>,
@@ -516,41 +602,60 @@ impl AdapterBank {
         let kernels = LoraBankKernels::resolve(gpu).ok_or_else(|| AdapterError::BadConfig("the device does not register the LoRA bank kernels".into()))?;
         let (s, r) = (cfg.slots as u64, cfg.r_max as u64);
         let mut banked = Vec::new();
+        let mut grouped: Vec<GroupSite> = Vec::new();
         let mut model_sites = HashMap::new();
         let mut by_layer: Vec<HashMap<&'static str, usize>> = Vec::new();
         let mut bytes = 0u64;
         for site in sites {
             if site.layer.is_some_and(|l| !layers.contains(&l)) {
                 model_sites.insert(site.name.clone(), SiteState::Elsewhere);
-                continue;
-            }
-            if !cfg.targets_site(site) {
+            } else if !cfg.targets_site(site) {
                 model_sites.insert(site.name.clone(), SiteState::Untargeted);
-                continue;
             }
-            let (k, n) = (site.spec.inn as u32, site.spec.out as u32);
-            let widest = s * r * k.max(n) as u64 * 4;
+        }
+        for unit in cfg.units(sites, &layers) {
+            let k = sites[unit[0]].spec.inn as u32;
+            let widest = unit.iter().map(|&i| s * r * (unit.len() as u64 * k as u64).max(sites[i].spec.out as u64) * 4).max().unwrap_or(0);
             if widest > gpu.max_storage_binding_bytes() {
-                return Err(AdapterError::BadConfig(format!("{} slots of rank {} at {} x {} exceed one storage binding ({widest} bytes)", cfg.slots, cfg.r_max, k, n)));
+                return Err(AdapterError::BadConfig(format!("{} slots of rank {} at {} x {} exceed one storage binding ({widest} bytes)", cfg.slots, cfg.r_max, k, sites[unit[0]].spec.out)));
             }
             let rank = gpu.storage(s);
             gpu.write(&rank, &vec![0u32; cfg.slots as usize]);
-            let bank = LoraBank { a: gpu.storage(s * r * k as u64), bt: gpu.storage(s * r * n as u64), rank, slots: cfg.slots, r_max: cfg.r_max };
-            bytes += s * r * (k + n) as u64 * 4 + s * 4;
-            model_sites.insert(site.name.clone(), SiteState::Banked(banked.len()));
-            if let Some(layer) = site.layer {
-                if by_layer.len() <= layer {
-                    by_layer.resize_with(layer + 1, HashMap::new);
+            bytes += cfg.unit_bytes(sites, &unit);
+            if let [one] = unit[..] {
+                let site = &sites[one];
+                let n = site.spec.out as u32;
+                let bank = LoraBank { a: gpu.storage(s * r * k as u64), bt: gpu.storage(s * r * n as u64), rank, slots: cfg.slots, r_max: cfg.r_max };
+                model_sites.insert(site.name.clone(), SiteState::Banked(banked.len()));
+                if let Some(layer) = site.layer {
+                    if by_layer.len() <= layer {
+                        by_layer.resize_with(layer + 1, HashMap::new);
+                    }
+                    by_layer[layer].insert(site.leaf, banked.len());
                 }
-                by_layer[layer].insert(site.leaf, banked.len());
+                banked.push(BankSite { bank, k, n });
+            } else {
+                let ns: Vec<u32> = unit.iter().map(|&i| sites[i].spec.out as u32).collect();
+                let total_n: u64 = ns.iter().map(|&n| n as u64).sum();
+                let bank = LoraGroupBank {
+                    a: gpu.storage(s * unit.len() as u64 * r * k as u64),
+                    bt: gpu.storage(s * r * total_n),
+                    rank,
+                    slots: cfg.slots,
+                    r_max: cfg.r_max,
+                    spare: [gpu.storage(1), gpu.storage(1)],
+                };
+                for (member, &i) in unit.iter().enumerate() {
+                    model_sites.insert(sites[i].name.clone(), SiteState::Grouped { group: grouped.len(), member });
+                }
+                grouped.push(GroupSite { bank, k, ns });
             }
-            banked.push(BankSite { bank, k, n });
         }
         let slot_buf = gpu.storage(rows as u64);
-        let tscr = gpu.storage(rows as u64 * r);
-        bytes += rows as u64 * 4 + rows as u64 * r * 4;
+        let tscr = gpu.storage(rows as u64 * cfg.scratch_width());
+        bytes += cfg.row_scratch_bytes(rows);
         let slot_owner = vec![None; cfg.slots as usize];
-        Ok(AdapterBank { cfg, kernels, sites: banked, model_sites, by_layer, slot_buf, tscr, entries: HashMap::new(), by_digest: HashMap::new(), slot_owner, resident_slot: HashMap::new(), ids: NamespaceIds::default(), offered: None, pending_purge: Vec::new(), tick: 0, bytes })
+        Ok(AdapterBank { cfg, kernels, sites: banked, groups: grouped, model_sites, by_layer, slot_buf, tscr, entries: HashMap::new(), by_digest: HashMap::new(), slot_owner, resident_slot: HashMap::new(), ids: NamespaceIds::default(), offered: None, pending_purge: Vec::new(), tick: 0, bytes })
     }
 
     /// Device bytes the bank occupies.
@@ -592,6 +697,37 @@ impl AdapterBank {
         steps.extend(lora_bank_rows(gpu, &rq));
     }
 
+    /// Correct every linear in `items` (`(base weight name, its output)`, each
+    /// output a dense `[rows, n]`) that reads the activation `x`, the linears of
+    /// one group in one pair of dispatches and the others on their own. Names the
+    /// bank does not correct are ignored. A group must be passed whole: its
+    /// stacked bank is one projection, so a call naming only some of its members
+    /// is a bug in the forward and panics.
+    pub fn correct_named_many(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: &DeviceBuffer, rows: u32, items: &[(&str, &DeviceBuffer)]) {
+        let mut by_group: Vec<(usize, Vec<(usize, &DeviceBuffer)>)> = Vec::new();
+        for &(name, out) in items {
+            match self.model_sites.get(name) {
+                Some(&SiteState::Banked(ix)) => {
+                    let bs = &self.sites[ix];
+                    let rq = LoraBankRows { kernels: self.kernels, bank: &bs.bank, slot: &self.slot_buf, tscr: &self.tscr, x, out, row0: 0, rows, k: bs.k, n: bs.n, out_stride: bs.n, out_col0: 0 };
+                    steps.extend(lora_bank_rows(gpu, &rq));
+                }
+                Some(&SiteState::Grouped { group, member }) => match by_group.iter_mut().find(|(g, _)| *g == group) {
+                    Some((_, members)) => members.push((member, out)),
+                    None => by_group.push((group, vec![(member, out)])),
+                },
+                _ => {}
+            }
+        }
+        for (group, mut members) in by_group {
+            let gs = &self.groups[group];
+            members.sort_by_key(|&(member, _)| member);
+            assert!(members.iter().map(|&(m, _)| m).eq(0..gs.ns.len()), "the adapter bank corrects these linears as one group of {}, but a forward named {} of them", gs.ns.len(), members.len());
+            let outs: Vec<LoraGroupOut> = members.iter().map(|&(m, out)| LoraGroupOut { out, n: gs.ns[m], stride: gs.ns[m], col0: 0 }).collect();
+            steps.extend(lora_bank_group_rows(gpu, self.kernels, &gs.bank, &self.slot_buf, &self.tscr, x, &outs, rows, gs.k));
+        }
+    }
+
     /// Write each row's slot ([`AdapterBank::slot_of`]) for the batch about to
     /// run; at most the `rows` the bank was built for.
     pub fn write_slots(&self, gpu: &Gpu, slots: &[u32]) {
@@ -626,22 +762,43 @@ impl AdapterBank {
         }
         let scale = a.adapter.scale();
         let r = rank as usize;
-        let mut sites = Vec::with_capacity(a.adapter.sites.len());
+        let mut units: Vec<HostUnit> = Vec::with_capacity(a.adapter.sites.len());
+        let mut group_members: Vec<(usize, Vec<Option<HostSite>>)> = Vec::new();
         for site in &a.adapter.sites {
-            let bank_ix = match self.model_sites.get(&site.base) {
+            let state = match self.model_sites.get(&site.base) {
                 None => return Err(bad(format!("{} is not a linear of this model", site.base))),
                 Some(SiteState::Untargeted) => return Err(bad(format!("{} is not a site this bank targets", site.base))),
                 Some(SiteState::Elsewhere) => continue,
-                Some(&SiteState::Banked(ix)) => ix,
+                Some(&state) => state,
             };
-            let (k, n) = (self.sites[bank_ix].k as usize, self.sites[bank_ix].n as usize);
+            let (k, n) = match state {
+                SiteState::Banked(ix) => (self.sites[ix].k as usize, self.sites[ix].n as usize),
+                SiteState::Grouped { group, member } => (self.groups[group].k as usize, self.groups[group].ns[member] as usize),
+                _ => unreachable!("filtered above"),
+            };
             if site.a.len() != r * k || site.b.len() != n * r {
                 return Err(bad(format!("{} is [{n}, {k}] but the rank-{rank} pair holds A {} / B {} values", site.base, site.a.len(), site.b.len())));
             }
             // `B [n, r]` -> `[r, n]`, scaled: the layout the bank kernels read.
             let bt: Vec<f32> = (0..r).flat_map(|c| site.b.iter().skip(c).step_by(r).map(move |&v| v * scale)).collect();
-            sites.push(HostSite { bank_ix, a: site.a.clone(), bt });
+            let host = HostSite { a: site.a.clone(), bt };
+            match state {
+                SiteState::Banked(bank_ix) => units.push(HostUnit::Single { bank_ix, site: host }),
+                SiteState::Grouped { group, member } => {
+                    let at = match group_members.iter().position(|(g, _)| *g == group) {
+                        Some(at) => at,
+                        None => {
+                            group_members.push((group, (0..self.groups[group].ns.len()).map(|_| None).collect()));
+                            group_members.len() - 1
+                        }
+                    };
+                    group_members[at].1[member] = Some(host);
+                }
+                _ => unreachable!("filtered above"),
+            }
         }
+        units.extend(group_members.into_iter().map(|(group, members)| HostUnit::Group { group, members }));
+        let sites = units;
         let id = AdapterId::new(self.ids.fresh()).expect("fresh namespaces are never the base's");
         self.by_digest.insert(a.digest.clone(), id);
         self.entries.insert(id, Entry { label: a.label, digest: a.digest, rank, sites, phase: Phase::Cold, pins: 0, draining: false, last_used: 0 });
@@ -657,11 +814,34 @@ impl AdapterBank {
         let Phase::Uploading { slot, mut next } = e.phase else { unreachable!("upload_step on a non-uploading adapter") };
         let mut sent = 0u64;
         while next < e.sites.len() && (sent == 0 || sent < quantum) {
-            let hs = &e.sites[next];
-            let bs = &self.sites[hs.bank_ix];
-            gpu.write_f32_at(&bs.bank.a, slot as u64 * r_max * bs.k as u64, &hs.a);
-            gpu.write_f32_at(&bs.bank.bt, slot as u64 * r_max * bs.n as u64, &hs.bt);
-            sent += (hs.a.len() + hs.bt.len()) as u64 * 4;
+            match &e.sites[next] {
+                HostUnit::Single { bank_ix, site } => {
+                    let bs = &self.sites[*bank_ix];
+                    gpu.write_f32_at(&bs.bank.a, slot as u64 * r_max * bs.k as u64, &site.a);
+                    gpu.write_f32_at(&bs.bank.bt, slot as u64 * r_max * bs.n as u64, &site.bt);
+                    sent += (site.a.len() + site.bt.len()) as u64 * 4;
+                }
+                HostUnit::Group { group, members } => {
+                    let gs = &self.groups[*group];
+                    let (k, r) = (gs.k as usize, r_max as usize);
+                    let total_n: usize = gs.ns.iter().map(|&n| n as usize).sum();
+                    // Each member's `A` fills the first `rank` rows of its `r_max`-row block
+                    // and its `Bt` the first `rank` rows of its block; the rest is zero.
+                    let mut a = vec![0.0f32; members.len() * r * k];
+                    let mut bt = vec![0.0f32; r * total_n];
+                    let mut bt_off = 0usize;
+                    for (m, host) in members.iter().enumerate() {
+                        if let Some(h) = host {
+                            a[m * r * k..m * r * k + h.a.len()].copy_from_slice(&h.a);
+                            bt[bt_off..bt_off + h.bt.len()].copy_from_slice(&h.bt);
+                        }
+                        bt_off += r * gs.ns[m] as usize;
+                    }
+                    gpu.write_f32_at(&gs.bank.a, slot as u64 * a.len() as u64, &a);
+                    gpu.write_f32_at(&gs.bank.bt, slot as u64 * bt.len() as u64, &bt);
+                    sent += (a.len() + bt.len()) as u64 * 4;
+                }
+            }
             next += 1;
         }
         if next < e.sites.len() {
@@ -669,13 +849,22 @@ impl AdapterBank {
             return false;
         }
         // Ranks last: a row can only name this slot once every factor is in.
-        // A linear the adapter does not correct gets rank 0 (row untouched).
+        // A linear the adapter does not correct gets rank 0 (row untouched); a
+        // group gets the width of its stacked rank axis when the adapter
+        // corrects any member, 0 otherwise.
         let mut ranks = vec![0u32; self.sites.len()];
-        for hs in &e.sites {
-            ranks[hs.bank_ix] = e.rank;
+        let mut group_ranks = vec![0u32; self.groups.len()];
+        for unit in &e.sites {
+            match unit {
+                HostUnit::Single { bank_ix, .. } => ranks[*bank_ix] = e.rank,
+                HostUnit::Group { group, members } => group_ranks[*group] = r_max as u32 * members.len() as u32,
+            }
         }
         for (bs, rank) in self.sites.iter().zip(ranks) {
             gpu.write_at(&bs.bank.rank, slot as u64, &[rank]);
+        }
+        for (gs, rank) in self.groups.iter().zip(group_ranks) {
+            gpu.write_at(&gs.bank.rank, slot as u64, &[rank]);
         }
         e.phase = Phase::Resident { slot };
         self.resident_slot.insert(id.kv_namespace(), slot);

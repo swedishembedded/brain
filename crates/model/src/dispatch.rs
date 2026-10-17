@@ -183,8 +183,12 @@ pub struct LoraBank {
 /// for a model's pipeline list (they are resolved by name,
 /// [`LoraBankKernels::resolve`], so their position carries no meaning). A
 /// model that serves an adapter bank registers these.
-pub const LORA_BANK_PIPELINES: [(&str, &str); 3] =
-    [("lora_xa_rows", kernels::LORA_XA_ROWS), ("lora_xa_rows_serial", kernels::LORA_XA_ROWS_SERIAL), ("lora_delta_rows", kernels::LORA_DELTA_ROWS)];
+pub const LORA_BANK_PIPELINES: [(&str, &str); 4] = [
+    ("lora_xa_rows", kernels::LORA_XA_ROWS),
+    ("lora_xa_rows_serial", kernels::LORA_XA_ROWS_SERIAL),
+    ("lora_delta_rows", kernels::LORA_DELTA_ROWS),
+    ("lora_delta_rows_multi", kernels::LORA_DELTA_ROWS_MULTI),
+];
 
 /// The three pipeline indices [`lora_bank_rows`] chooses among, as the caller
 /// registered them.
@@ -197,6 +201,10 @@ pub struct LoraBankKernels {
     pub xa_serial: usize,
     /// `lora_delta_rows`.
     pub delta: usize,
+    /// `lora_delta_rows_multi`, the epilogue of a group of linears that share
+    /// their input ([`lora_bank_group_rows`]); `None` when the model did not
+    /// register it, in which case a group is corrected site by site.
+    pub delta_multi: Option<usize>,
 }
 
 impl LoraBankKernels {
@@ -208,6 +216,7 @@ impl LoraBankKernels {
             xa: g.kernel_index("lora_xa_rows")?,
             xa_serial: g.kernel_index("lora_xa_rows_serial")?,
             delta: g.kernel_index("lora_delta_rows")?,
+            delta_multi: g.kernel_index("lora_delta_rows_multi"),
         })
     }
 }
@@ -289,6 +298,84 @@ pub fn lora_bank_rows(g: &Gpu, rq: &LoraBankRows) -> [Step; 2] {
         &[rows, n, bank.r_max, bank.slots, out_stride, out_col0, row0],
         gpu_core::Dispatch::Threads(rows * n),
     );
+    [project, add]
+}
+
+/// The largest group of linears [`lora_bank_group_rows`] corrects in one
+/// epilogue dispatch (the kernel's output bindings).
+pub const LORA_GROUP_MAX: usize = 4;
+
+/// One output of a group correction: the base linear's output buffer, its width
+/// and where the correction lands in a row of it.
+pub struct LoraGroupOut<'a> {
+    /// The linear's output, `stride` floats per row.
+    pub out: &'a DeviceBuffer,
+    /// This linear's output width `n`.
+    pub n: u32,
+    /// Floats between consecutive output rows.
+    pub stride: u32,
+    /// First output column of the correction inside a row.
+    pub col0: u32,
+}
+
+/// A group's bank: the A matrices of linears that read ONE activation, stacked
+/// along the rank axis, and their `Bt` matrices laid end to end.
+pub struct LoraGroupBank {
+    /// `[slots, g·r_max, k]`: site `s`'s `A [r_max, k]` at rows `s·r_max`,
+    /// zero-padded past its rank.
+    pub a: DeviceBuffer,
+    /// `[slots, r_max · Σ n]`: site `s`'s `Bt [r_max, n_s]` at `r_max · Σ_{h<s} n_h`,
+    /// zero-padded past its rank.
+    pub bt: DeviceBuffer,
+    /// Per slot, non-zero when its adapter corrects any site of the group.
+    pub rank: DeviceBuffer,
+    /// Number of slots.
+    pub slots: u32,
+    /// Rank capacity of every site.
+    pub r_max: u32,
+    /// Two one-float buffers bound to the output slots a group of fewer than
+    /// four leaves unused (a buffer cannot be bound writable twice in a dispatch).
+    pub spare: [DeviceBuffer; 2],
+}
+
+/// One per-row-adapter correction of a group of 2..=[`LORA_GROUP_MAX`] linears
+/// that read the same activation `x`: the work of [`lora_bank_rows`] for each of
+/// them in TWO dispatches instead of two each. Rows whose slot is
+/// [`LORA_SLOT_NONE`] (or out of range, or whose slot corrects no site of the
+/// group) are not touched, so their output bits are what the base wrote.
+///
+/// # Panics
+///
+/// On a group the kernel cannot take (`outs` outside `2..=LORA_GROUP_MAX`, an
+/// empty window or bank), or when the model did not register
+/// `lora_delta_rows_multi`.
+#[allow(clippy::too_many_arguments)]
+pub fn lora_bank_group_rows(g: &Gpu, kernels: LoraBankKernels, bank: &LoraGroupBank, slot: &DeviceBuffer, tscr: &DeviceBuffer, x: &DeviceBuffer, outs: &[LoraGroupOut], rows: u32, k: u32) -> [Step; 2] {
+    use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
+
+    let sites = outs.len() as u32;
+    assert!((2..=LORA_GROUP_MAX as u32).contains(&sites), "lora_bank_group_rows: {sites} sites");
+    assert!(rows > 0 && k > 0 && bank.slots > 0 && bank.r_max > 0, "lora_bank_group_rows: empty window or bank");
+    let delta_multi = kernels.delta_multi.expect("lora_bank_group_rows: the model did not register lora_delta_rows_multi");
+    let stacked = sites * bank.r_max;
+    let shape = OpShape { m: rows, n: stacked, k, dtype: Dtype::F32 };
+    let (xa_kernel, xa_grid) = match gpu_core::select::DefaultSelector.select(Op::LoraBankProject, shape, &g.caps()) {
+        KernelVariant::WorkgroupPerOutput => (kernels.xa, gpu_core::Dispatch::Workgroups(rows * stacked)),
+        _ => (kernels.xa_serial, gpu_core::Dispatch::Threads(rows * stacked)),
+    };
+    // The projection runs over the stacked A bank as if it were one adapter of rank `g·r_max`.
+    let project = g.dispatch(xa_kernel, &[x, &bank.a, slot, &bank.rank, tscr], &[rows, k, stacked, bank.slots, 0], xa_grid);
+
+    let mut params = vec![rows, sites, bank.r_max, bank.slots, 0];
+    let mut off = 0u32;
+    for o in outs {
+        params.extend([o.n, o.stride, o.col0, off]);
+        off += bank.r_max * o.n;
+    }
+    params.resize(5 + 4 * LORA_GROUP_MAX, 0);
+    let total_n: u32 = outs.iter().map(|o| o.n).sum();
+    let bound = |i: usize| outs.get(i).map_or_else(|| &bank.spare[i - 2], |o| o.out);
+    let add = g.dispatch(delta_multi, &[tscr, &bank.bt, slot, &bank.rank, bound(0), bound(1), bound(2), bound(3)], &params, gpu_core::Dispatch::Threads(rows * total_n));
     [project, add]
 }
 

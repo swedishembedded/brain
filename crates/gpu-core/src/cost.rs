@@ -428,6 +428,14 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, n, r_max, slots) = (p(0)?, p(1)?, p(2)?, p(3)?);
             f(2 * rows * n * r_max, 4 * (rows * r_max + rows.min(slots) * r_max * n + 2 * rows * n))
         }
+        // The same epilogue for a group of up to four linears sharing one input:
+        // params [rows, g, r_max, slots, row0, then (n, out_stride, out_col0, off)
+        // per site]. The sites' widths add up to the thread count per row.
+        "lora_delta_rows_multi" => {
+            let (rows, r_max, slots) = (p(0)?, p(2)?, p(3)?);
+            let n: u64 = (0..4).map(|g| p(5 + 4 * g).unwrap_or(0)).sum();
+            f(2 * rows * n * r_max, 4 * (rows * r_max + rows.min(slots) * r_max * n + 2 * rows * n))
+        }
         // Sparse-MoE expert linear: params [m, k, n, n_experts, e_idx] - same
         // (m, k, n) GEMM shape as `matmul` in the first three slots, plus two
         // routing params that do not change the dispatch shape. A non-routed
@@ -1663,6 +1671,10 @@ mod tests {
         assert_eq!(xa.flops, 384);
         assert_eq!(xa.bytes, 4 * (6 * 8 + 2 * 4 * 8 + 6 * 4));
         assert_eq!(cost("lora_xa_rows_serial", &[6, 8, 4, 2, 0], 6 * 4).flops, 384);
+        // Three linears of widths 5, 3 and 2 in one epilogue: 6 rows x 10 outputs
+        // x 4 MACs x 2 = 480 flops, the sum of three `lora_delta_rows`.
+        let multi = cost("lora_delta_rows_multi", &[6, 3, 4, 2, 0, 5, 5, 0, 0, 3, 3, 0, 20, 2, 2, 0, 32, 0, 0, 0, 0], 60);
+        assert_eq!(multi.flops, 480);
         // out[6,n=5] += t[6,4] @ bt: 6*5 outputs x 4 MACs x 2 = 240 flops;
         // out_stride/out_col0/row0 (the last three words) do not change the volume.
         let delta = cost("lora_delta_rows", &[6, 5, 4, 2, 15, 5, 3], 30);

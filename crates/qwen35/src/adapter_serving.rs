@@ -32,6 +32,13 @@ impl AdapterServing for Qwen35Config {
     fn attention_leaves(&self) -> Vec<&'static str> {
         vec!["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj", "q_proj", "k_proj", "v_proj", "o_proj"]
     }
+
+    /// The linears that read one normed activation: a Gated-DeltaNet layer's
+    /// four input projections, a full-attention layer's q/k/v, and the MLP's
+    /// gate and up. (`out_proj`, `o_proj` and `down` each read their own.)
+    fn input_groups(&self) -> Vec<Vec<&'static str>> {
+        vec![vec!["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"], vec!["q_proj", "k_proj", "v_proj"], vec!["gate", "up"]]
+    }
 }
 
 /// Give every stage a bank of `cfg`, each sized for forwards of `rows` rows.
