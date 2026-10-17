@@ -55,15 +55,12 @@
 
 #define SWEEP_SMEM_FLOATS (2 * MAXC * SA + D * SS + 2 * MAXC * SS)
 
-__device__ __forceinline__ unsigned int brain_tf32(float x) {
-    unsigned int r;
-    asm("cvt.rna.tf32.f32 %0, %1;\n" : "=r"(r) : "f"(x));
-    return r;
-}
-
+// x = hi + lo with both parts TF32-representable. Truncation (a mask) instead of `cvt.rna.tf32`: the convert runs on
+// a slow pipe and the splits are most of the instructions around the MMAs. lo = x - hi is exact in fp32 and is then
+// truncated to TF32 itself, so the pair carries about 20 mantissa bits.
 __device__ __forceinline__ void brain_split_tf32(float x, unsigned int& hi, unsigned int& lo) {
-    hi = brain_tf32(x);
-    lo = brain_tf32(x - __uint_as_float(hi));
+    hi = __float_as_uint(x) & 0xFFFFE000u;
+    lo = __float_as_uint(x - __uint_as_float(hi)) & 0xFFFFE000u;
 }
 
 __device__ __forceinline__ void brain_mma_tf32(float (&d)[4], const unsigned int (&a)[4], unsigned int b0, unsigned int b1) {

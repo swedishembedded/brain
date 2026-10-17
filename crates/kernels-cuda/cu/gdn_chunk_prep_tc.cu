@@ -82,19 +82,14 @@
 // solved T, then the per-row cumulative decay, its exponential and beta.
 #define PREP_SMEM_FLOATS (MAXC * SK + MAXC * SX + 2 * MAXC * SC + 3 * MAXC)
 
-__device__ __forceinline__ unsigned int brain_tf32(float x) {
-    unsigned int r;
-    asm("cvt.rna.tf32.f32 %0, %1;\n" : "=r"(r) : "f"(x));
-    return r;
-}
-
-// x = hi + lo with both parts TF32-representable (lo is the rounding remainder).
+// x = hi + lo with both parts TF32-representable. Truncation (a mask) instead of `cvt.rna.tf32`: the convert runs on
+// a slow pipe and the splits are most of the instructions around the MMAs. lo = x - hi is exact in fp32 and is then
+// truncated to TF32 itself, so the pair carries about 20 mantissa bits.
 __device__ __forceinline__ void brain_split_tf32(float x, unsigned int& hi, unsigned int& lo) {
-    hi = brain_tf32(x);
-    lo = brain_tf32(x - __uint_as_float(hi));
+    hi = __float_as_uint(x) & 0xFFFFE000u;
+    lo = __float_as_uint(x - __uint_as_float(hi)) & 0xFFFFE000u;
 }
 
-// d += a * b, m16n8k8, TF32 inputs, f32 accumulate.
 __device__ __forceinline__ void brain_mma_tf32(float (&d)[4], const unsigned int (&a)[4], unsigned int b0, unsigned int b1) {
     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
                  : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
