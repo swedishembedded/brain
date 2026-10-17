@@ -77,6 +77,8 @@ pub use crate::train_base::TrainOpts;
 use crate::decode_state::DecodeState;
 #[path = "objectives.rs"]
 mod objectives;
+#[path = "spec_verify.rs"]
+pub(crate) mod verify;
 use crate::train_base::{read_weight_host, PackedResidual, reads_float_acts, table_tier, write_weight_host};
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
@@ -818,6 +820,9 @@ enum GdnCall<'a> {
     /// `n` consecutive decode steps of one sequence, in order - a short verify
     /// round, which must reproduce plain decode's arithmetic row by row.
     Rows(model::gdn_mixer::GdnStream<'a>),
+    /// A speculative verify step: several consecutive rows per sequence, each
+    /// sequence's state a row of a pool, the state between rows snapshotted.
+    VerifyPool { pool: model::gdn_mixer::GdnPoolRows<'a>, layout: model::gdn_verify::VerifyLayout<'a>, snaps: &'a model::gdn_verify::GdnRowSnapshots, n_tokens: u32 },
 }
 
 /// Which cached-KV shape a [`Qwen35::layer_gqa_fwd`] call is running in.
@@ -2337,7 +2342,7 @@ impl Qwen35 {
         let gdn_shape = match &call {
             GdnCall::Whole => GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
             GdnCall::Chunk(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) },
-            GdnCall::Decode(_) | GdnCall::DecodePool(_) => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
+            GdnCall::Decode(_) | GdnCall::DecodePool(_) | GdnCall::VerifyPool { .. } => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
             GdnCall::Rows(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: 1 },
         };
         let shape = model::gdn_mixer::GdnMixerShape { gdn: gdn_shape, nkh: c.linear_num_key_heads, conv_kernel: c.linear_conv_kernel_dim, rms_eps: c.rms_eps };
@@ -2375,6 +2380,11 @@ impl Qwen35 {
                     &z,
                     &model::gdn_mixer::GdnDecodeState::Pool(pool),
                 );
+                (gated, None)
+            }
+            GdnCall::VerifyPool { pool, layout, snaps, n_tokens } => {
+                let gated = model::gdn_verify::gdn_mixer_verify_pooled_fused(g, &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, &pool, &layout, n_tokens, snaps)
+                    .expect("the verify kernel was offered at engine construction (Qwen35GgufInstance::speculation_supported)");
                 (gated, None)
             }
             GdnCall::Rows(stream) => {
@@ -3587,6 +3597,15 @@ impl Qwen35 {
     /// block, the same cross-stage seam [`Self::run_decode_step`] documents at
     /// one row.
     pub(crate) fn run_decode_batch(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>) -> DeviceBuffer {
+        self.run_decode_batch_with(tokens, caches, input_override, None)
+    }
+
+    /// [`Self::run_decode_batch`], optionally as a speculative VERIFY step
+    /// ([`verify::VerifyBatch`]): the rows are then several consecutive tokens
+    /// of each sequence rather than one token of each, and the Gated-DeltaNet
+    /// layers take a sequence's rows in order and snapshot the state between
+    /// them. Everything else in the pass is row-agnostic.
+    fn run_decode_batch_with(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>, verify: Option<&verify::VerifyBatch>) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -3622,7 +3641,13 @@ impl Qwen35 {
         // replays a fixed request sequence, and a different count is a
         // different one. One row is the decode step itself and shares its arena
         // (and, with it, its graph).
-        let arena = if caches.one_sequence { round_arena(bsz) } else { DECODE_ARENA };
+        let arena = if verify.is_some() {
+            verify::VERIFY_ARENA
+        } else if caches.one_sequence {
+            round_arena(bsz)
+        } else {
+            DECODE_ARENA
+        };
         let _ops_scratch = self.ops.gpu().scratch_scope_in(arena);
         let _scratch = g.scratch_scope_in(arena);
         let _pass = g.pass_scope();
@@ -3667,6 +3692,9 @@ impl Qwen35 {
         g.write(&block_tables, &caches.seqs.iter().map(|s| s.phys).collect::<Vec<u32>>());
         let seq_lens = g.storage(bsz as u64);
         g.write(&seq_lens, &caches.seqs.iter().map(|s| s.pos + 1).collect::<Vec<u32>>());
+        // A verify step's per-sequence layout, uploaded with the rest of the
+        // step's inputs (a write after the first dispatch would split the pass).
+        let verify_layout = verify.map(|v| v.upload(g));
         let longest = caches.seqs.iter().map(|s| s.pos + 1).max().unwrap_or(1);
         let paged = model::gqa_mixer::PagedDecodeBatch {
             blocks: &blocks,
@@ -3729,7 +3757,21 @@ impl Qwen35 {
                     } else {
                         caches.seqs.iter().map(|s| model::gdn_mixer::GdnStream { state: &s.gdn_state[l], hist: &s.gdn_hist[l] }).collect()
                     };
-                    let call = if let Some(pool) = &caches.gdn_pool {
+                    let call = if let (Some(pool), Some(v), Some(layout)) = (&caches.gdn_pool, verify, &verify_layout) {
+                        GdnCall::VerifyPool {
+                            pool: model::gdn_mixer::GdnPoolRows {
+                                state: &pool.state[l],
+                                hist: &pool.hist[l],
+                                rows: &layout.rows,
+                                gather: POOL_ROWS_GATHER2,
+                                scatter: POOL_ROWS_SCATTER2,
+                                fuse: true,
+                            },
+                            layout: model::gdn_verify::VerifyLayout { rows: &layout.rows, counts: &layout.counts, offs: &layout.offs, b: v.sequences() },
+                            snaps: v.snapshots(l),
+                            n_tokens: bsz,
+                        }
+                    } else if let Some(pool) = &caches.gdn_pool {
                         GdnCall::DecodePool(model::gdn_mixer::GdnPoolRows {
                             state: &pool.state[l],
                             hist: &pool.hist[l],

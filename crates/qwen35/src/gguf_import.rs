@@ -209,7 +209,7 @@ fn mrope_section_from_kv(kv: &ArchKv, rotary_dim: u32) -> Result<[u32; 3], Strin
 /// layer), so the two paths cannot drift on what a leaf is called. Matches
 /// [`crate::import::classify_layer_leaf`]'s HF-side output exactly - both
 /// routes feed the same [`Qwen35Config::param_list`].
-fn block_leaf_suffix(role: Role, ty: LayerType) -> Option<&'static str> {
+pub(crate) fn block_leaf_suffix(role: Role, ty: LayerType) -> Option<&'static str> {
     Some(match (role, ty) {
         (Role::AttnNorm, _) => "ln1.weight",
         (Role::FfnNorm, _) => "ln2.weight",

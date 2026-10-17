@@ -134,7 +134,10 @@
 
 mod engine;
 mod prefix;
-pub use engine::Qwen35GgufEngine;
+mod mtp;
+mod speculate;
+pub use speculate::{SpecServing, SpeculativeMode};
+pub use engine::{Qwen35GgufEngine, SpecTimes};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -588,6 +591,10 @@ struct ShardCaches {
     full: Vec<bool>,
     slots: u32,
     cap: u32,
+    /// `[layer]`: where a speculative verify step keeps the recurrent state
+    /// between a sequence's rows (see [`speculate`]); empty until speculation
+    /// is enabled.
+    verify_snaps: Vec<model::gdn_verify::GdnRowSnapshots>,
     /// Kernel indices of `pool_rows_scatter2`, `pool_rows_gather2` and `splice`
     /// on this stage's device.
     scatter: usize,
@@ -624,7 +631,7 @@ impl ShardCaches {
         let scatter = gpu.kernel_index("pool_rows_scatter2").expect("pool_rows_scatter2 is in the qwen35 kernel set");
         let gather = gpu.kernel_index("pool_rows_gather2").expect("pool_rows_gather2 is in the qwen35 kernel set");
         let splice = gpu.kernel_index("splice").expect("splice is in the qwen35 kernel set");
-        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, scatter, gather, splice };
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, verify_snaps: Vec::new(), scatter, gather, splice };
         caches.reset(gpu);
         caches
     }
@@ -850,6 +857,11 @@ pub struct Qwen35GgufInstance {
     /// ([`LORA_SLOT_NONE`]: the base). Set by the engine around
     /// [`Self::prefill_hidden`]; a prefill is one sequence, so one slot.
     prefill_adapter_slot: Cell<u32>,
+    /// Packed rows a speculative verify step may carry (0: this instance does
+    /// not speculate) - see [`speculate`].
+    spec_rows: u32,
+    /// The checkpoint's multi-token-prediction head, when loaded - see [`mtp`].
+    mtp: Option<mtp::MtpDrafter>,
 }
 
 impl Qwen35GgufInstance {
@@ -1339,7 +1351,10 @@ impl Qwen35GgufInstance {
     /// state after those `start` tokens ([`Self::seed_from_prefix`]); the rest
     /// is prefilled exactly as the chunk loop would have reached it, so the
     /// result is the cold prefill's.
-    fn prefill_hidden(&self, prompt: &[u32], start: usize, slot: u32) -> Result<Vec<f32>, String> {
+    ///
+    /// `collect`, when given, receives every prefilled row's `[d_model]` pre-norm
+    /// hidden state (what the MTP head is fed from).
+    fn prefill_hidden(&self, prompt: &[u32], start: usize, slot: u32, mut collect: Option<&mut Vec<f32>>) -> Result<Vec<f32>, String> {
         let d = self.cfg.d_model as usize;
         assert!(start < prompt.len(), "{MODEL}: a continued prefill needs at least one new token");
         if start == 0 {
@@ -1354,6 +1369,9 @@ impl Qwen35GgufInstance {
             for round in rest.chunks(self.prefill_round_rows() as usize) {
                 let (carry, _) = self.stack_chunk_carry(round, pos, slot)?;
                 last = carry[(round.len() - 1) * d..].to_vec();
+                if let Some(all) = collect.as_deref_mut() {
+                    all.extend_from_slice(&carry);
+                }
                 pos += round.len() as u32;
             }
         } else {
@@ -1365,6 +1383,9 @@ impl Qwen35GgufInstance {
                     carry = s.qwen35.decode_step_stage(t, (start + i) as u32, &s.caches.view(slot), Some(&carry));
                 }
                 self.set_adapter_rows(&[]);
+                if let Some(all) = collect.as_deref_mut() {
+                    all.extend_from_slice(&carry);
+                }
                 last = carry;
             }
         }
@@ -2309,12 +2330,14 @@ pub struct Qwen35GgufResident {
     /// the stages that hold the layers it corrects, and enabled on the engine
     /// [`Self::activate_engine`] returns.
     bank: Option<AdapterBankRequest>,
+    /// Speculative decoding - [`Self::with_speculation`].
+    spec: SpecServing,
     plan: OnceLock<Plan>,
 }
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, model_id: MODEL.to_string(), bank: None, plan: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), plan: OnceLock::new() }
     }
 
     /// Serve this resident under `id` instead of [`MODEL`] - what the
@@ -2617,7 +2640,8 @@ impl MultiDeviceResidentModel for Qwen35GgufResident {
     /// and leave between steps - the same loop every brain LLM is served by.
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
         let (engine, tok, stop) = self.activate_engine(devices)?;
-        let sched = model::serve::Scheduler::new(engine, self.max_batch as usize);
+        let mut sched = model::serve::Scheduler::new(engine, self.max_batch as usize);
+        self.configure_scheduler(&mut sched);
         Ok(Box::new(llmserve::ScheduledInstance::new(llmserve::TextFrontend { tok, stop, label: "qwen35", parse: parse_request }, sched, self.max_batch as usize)))
     }
 }
@@ -2724,7 +2748,10 @@ impl Qwen35GgufResident {
         };
         let embed = EmbedTable { name: embed_name, d };
 
-        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, prefix_slots: self.prefix_slots, kv_tier: self.kv_tier, taps: RefCell::new(None), prefill_adapter_slot: Cell::new(LORA_SLOT_NONE) })
+        let mut inst = Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, prefix_slots: self.prefix_slots, kv_tier: self.kv_tier, taps: RefCell::new(None), prefill_adapter_slot: Cell::new(LORA_SLOT_NONE), spec_rows: 0, mtp: None };
+        let last_gpu = plan.stages.last().map(|(_, s, _)| s.gpu_index).unwrap_or(0);
+        inst.enable_speculation(self.spec, &self.gguf_path, &self.tier, last_gpu)?;
+        Ok(inst)
     }
 }
 
