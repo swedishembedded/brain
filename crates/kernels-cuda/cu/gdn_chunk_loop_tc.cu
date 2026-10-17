@@ -133,7 +133,9 @@ __device__ __forceinline__ void brain_gdn_chunk_loop_tc_body(const unsigned int*
             if (TRAIN && j0 == 0 && tid < C) { decay_hist[off_g + tid] = e; }
         }
         // Stage w into sA and scale*query*exp_g_cs into sB.
-        for (unsigned int e = tid; e < MAXC * (D / 4); e += THREADS) {
+#pragma unroll
+        for (unsigned int it = 0; it < MAXC * (D / 4) / THREADS; ++it) {
+            const unsigned int e = tid + it * THREADS;
             const unsigned int r = e / (D / 4), c4 = e % (D / 4);
             float4 wv = make_float4(0.0f, 0.0f, 0.0f, 0.0f), qv = wv;
             if (r < C) {
@@ -168,11 +170,15 @@ __device__ __forceinline__ void brain_gdn_chunk_loop_tc_body(const unsigned int*
         __syncthreads();
 
         // Stage intra into sA and the decayed key into sB.
-        for (unsigned int e = tid; e < MAXC * MAXC; e += THREADS) {
+#pragma unroll
+        for (unsigned int it = 0; it < MAXC * MAXC / THREADS; ++it) {
+            const unsigned int e = tid + it * THREADS;
             const unsigned int r = e / MAXC, k = e % MAXC;
             sA[r * SA + k] = (r < C && k < C) ? intra[off_cc + (unsigned long long)r * C + k] : 0.0f;
         }
-        for (unsigned int e = tid; e < MAXC * (D / 4); e += THREADS) {
+#pragma unroll
+        for (unsigned int it = 0; it < MAXC * (D / 4) / THREADS; ++it) {
+            const unsigned int e = tid + it * THREADS;
             const unsigned int r = e / (D / 4), c4 = e % (D / 4);
             float4 kv = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             if (r < C) {

@@ -147,7 +147,9 @@ brain_gdn_bwd_sweep_tc(const unsigned int* params, const float* key, const float
             d_state_hist[hist_base + (unsigned long long)k * D + j0 + j] = sS[k * SS + j];
         }
         // Stage key * decay_scale into sA, intra into sB and this block's d_out columns into sO.
-        for (unsigned int e = tid; e < MAXC * (D / 4); e += THREADS) {
+#pragma unroll
+        for (unsigned int it = 0; it < MAXC * (D / 4) / THREADS; ++it) {
+            const unsigned int e = tid + it * THREADS;
             const unsigned int r = e / (D / 4), c4 = e % (D / 4);
             float4 kv = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             if (r < C) {
@@ -157,11 +159,15 @@ brain_gdn_bwd_sweep_tc(const unsigned int* params, const float* key, const float
             }
             *reinterpret_cast<float4*>(sA + r * SA + c4 * 4) = kv;
         }
-        for (unsigned int e = tid; e < MAXC * MAXC; e += THREADS) {
+#pragma unroll
+        for (unsigned int it = 0; it < MAXC * MAXC / THREADS; ++it) {
+            const unsigned int e = tid + it * THREADS;
             const unsigned int r = e / MAXC, k = e % MAXC;
             sB[r * SA + k] = (r < C && k < C) ? intra[off_cc + (unsigned long long)r * C + k] : 0.0f;
         }
-        for (unsigned int e = tid; e < MAXC * CS; e += THREADS) {
+#pragma unroll
+        for (unsigned int it = 0; it < MAXC * CS / THREADS; ++it) {
+            const unsigned int e = tid + it * THREADS;
             const unsigned int r = e / CS, j = e % CS;
             sO[r * SS + j] = r < C ? d_out_chunk[r * d_out_stride + j0 + j] : 0.0f;
         }
@@ -191,7 +197,9 @@ brain_gdn_bwd_sweep_tc(const unsigned int* params, const float* key, const float
         __syncthreads();
 
         // Restage: w into sA and scale * query * exp_g_cs into sB.
-        for (unsigned int e = tid; e < MAXC * (D / 4); e += THREADS) {
+#pragma unroll
+        for (unsigned int it = 0; it < MAXC * (D / 4) / THREADS; ++it) {
+            const unsigned int e = tid + it * THREADS;
             const unsigned int r = e / (D / 4), c4 = e % (D / 4);
             float4 wv = make_float4(0.0f, 0.0f, 0.0f, 0.0f), qv = wv;
             if (r < C) {

@@ -131,7 +131,9 @@ __device__ __forceinline__ void warp_gemm_3xtf32(float (&acc)[NT][4], unsigned i
 // Rows of a [rows, 128] source into a zero-padded [64, stride] shared tile. `src` points at chunk
 // row 0; consecutive chunk rows are `row_stride` floats apart (128 for chunk-major buffers).
 __device__ __forceinline__ void brain_load_rows(float* dst, unsigned int stride, const float* src, unsigned long long row_stride, unsigned int C) {
-    for (unsigned int e = threadIdx.x; e < MAXC * (D / 4); e += THREADS) {
+#pragma unroll
+    for (unsigned int it = 0; it < MAXC * (D / 4) / THREADS; ++it) {  // unrolled so the loads of the iterations are in flight together
+        const unsigned int e = threadIdx.x + it * THREADS;
         const unsigned int r = e / (D / 4), c4 = e % (D / 4);
         float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         if (r < C) { v = *reinterpret_cast<const float4*>(src + (unsigned long long)r * row_stride + c4 * 4); }
@@ -284,14 +286,34 @@ __device__ __forceinline__ void brain_gdn_chunk_prep_body(const unsigned int* pa
     }
     __syncthreads();
 
-    // ---- T = (I - attn0)^-1 by forward substitution: row i needs the finished rows below it ----
-    for (unsigned int i = 1; i < C; ++i) {
-        if (tid < i) {
-            float acc = sA[i * SC + tid];
-            for (unsigned int k = tid + 1; k < i; ++k) { acc = acc + sA[i * SC + k] * sT[k * SC + tid]; }
-            sT[i * SC + tid] = acc;
+    // ---- T = (I - attn0)^-1 by forward substitution ----
+    // Outer-product form of  T[i][j] = attn0[i][j] + sum_{j<k<i} attn0[i][k] * T[k][j]: once row k is final, every row
+    // below it takes its k term in one parallel step. Each element still sums its terms in ascending k starting from
+    // attn0[i][j], so the result is bit-for-bit the row-by-row recurrence; the dependent chain per step is one
+    // multiply-add instead of up to 63 (the row-by-row form was over half of this kernel's cycles).
+    for (unsigned int e = tid; e < MAXC * SC; e += THREADS) { sT[e] = sA[e]; }
+    __syncthreads();
+    {
+        const unsigned int j = tid & (MAXC - 1), row_lane = tid / MAXC;  // a thread owns column j and every fourth row
+        for (unsigned int k = 1; k + 1 < C; ++k) {
+            if (j < k) {
+                const float t_kj = sT[k * SC + j];
+                // Batches of four rows: the loads of a batch are issued together before its stores (the compiler cannot
+                // prove the shared arrays do not alias, so a plain loop waits for every store).
+                unsigned int i = k + 1 + row_lane;
+                for (; i + 3 * (THREADS / MAXC) < C; i += 4 * (THREADS / MAXC)) {
+                    const unsigned int i1 = i + THREADS / MAXC, i2 = i1 + THREADS / MAXC, i3 = i2 + THREADS / MAXC;
+                    const float c0 = sT[i * SC + j], c1 = sT[i1 * SC + j], c2 = sT[i2 * SC + j], c3 = sT[i3 * SC + j];
+                    const float a0 = sA[i * SC + k], a1 = sA[i1 * SC + k], a2 = sA[i2 * SC + k], a3 = sA[i3 * SC + k];
+                    sT[i * SC + j] = c0 + a0 * t_kj;
+                    sT[i1 * SC + j] = c1 + a1 * t_kj;
+                    sT[i2 * SC + j] = c2 + a2 * t_kj;
+                    sT[i3 * SC + j] = c3 + a3 * t_kj;
+                }
+                for (; i < C; i += THREADS / MAXC) { sT[i * SC + j] = sT[i * SC + j] + sA[i * SC + k] * t_kj; }
+            }
+            __syncthreads();
         }
-        __syncthreads();
     }
     if (tid < C) { sT[tid * SC + tid] = 1.0f; }
     __syncthreads();
