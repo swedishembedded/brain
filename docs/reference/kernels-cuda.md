@@ -96,6 +96,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `gdn_conv_silu_tok` | GatedDeltaChunkLoop | F32 | tuned | 8.0 | `brain_gdn_conv_silu_tok` | Gated DeltaNet's causal depthwise convolution (4 taps, optional history), its SiLU and the query/key/value split in one pass over the token-major rows: replaces two layout transposes, the generic convolution, the activation and three row splits |
 | `gdn_conv_hist_tok` | GatedDeltaChunkLoop | F32 | tuned | 8.0 | `brain_gdn_conv_hist_tok` | the convolution history a chunked forward hands to its next round: the last 3 rows of [history | x], channel-major, updated in place |
 | `gdn_conv_silu_bwd_tok` | GatedDeltaChunkLoop | F32 | tuned | 8.0 | `brain_gdn_conv_silu_bwd_tok` | the backward of gdn_conv_silu_tok for a frozen convolution weight in one pass: SiLU adjoint, the query/key/value gradient concatenation and the causal-adjoint convolution, token-major, with the history rows' gradient of a continued round |
+| `swiglu_bwd_fused` | Elementwise | F32 | tuned | 5.0 | `brain_swiglu_bwd_fused` | the SwiGLU backward in one pass: reads the gate pre-activation, the up projection and the incoming gradient once and writes both the gate and the up gradient, four elements a thread; replaces silu_bwd_da plus silu_bwd_db |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 

@@ -1432,6 +1432,22 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         src: include_str!("../cu/gdn_conv_tok.cu"),
     },
+    // ---- t4: element-wise glue outside the mixer ----
+    CudaKernel {
+        name: "swiglu_bwd_fused",
+        op: Op::Elementwise,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_swiglu_bwd_fused",
+        what: "the SwiGLU backward in one pass: reads the gate pre-activation, the up projection and the incoming gradient once and writes both the gate and the up gradient, four elements a thread; replaces silu_bwd_da plus silu_bwd_db",
+        reported: "native:swiglu_bwd_fused",
+        block_dim: 256,
+        tile: (1, 1024),
+        shared_bytes: 0,
+        src: include_str!("../cu/swiglu_bwd_fused.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of

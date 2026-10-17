@@ -857,6 +857,28 @@ pub fn gdn_conv_silu_bwd_tok_step(gpu: &crate::Gpu, bufs: &[&backend_api::Device
     gpu.step_native_sliced(id, bufs, &[(0, 0); 7], &params, l.blocks(l.rows + ctx))
 }
 
+/// `swiglu_bwd_fused`: gate pre-activation, up, incoming gradient (read); gate gradient, up gradient (written).
+static SWIGLU_BWD_FUSED_BINDINGS: [BindKind; 6] = bwd_tc_bindings(3);
+
+/// Elements one block of `swiglu_bwd_fused` covers when `total` is a multiple of four (256 threads, four each).
+const SWIGLU_BWD_BLOCK_ELEMS: u32 = 1024;
+
+/// The SwiGLU backward as one launch (`swiglu_bwd_fused`) in place of `silu_bwd_da` and `silu_bwd_db`:
+/// `bufs` is `gate_pre, up, d_h` (read) and `d_gate, d_up` (every element overwritten), all `total` floats.
+/// `None` when `cuda` is named in `BRAIN_NO_PROVIDER`, the device reports no capability, or the backend
+/// declines; the caller then issues the two portable dispatches.
+pub fn swiglu_bwd_fused_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], total: u32) -> Option<crate::Step> {
+    if total == 0 || super::disabled_providers().iter().any(|d| d == "cuda") {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("swiglu_bwd_fused").filter(|k| k.min_cc <= cc)?;
+    let id = gpu.native_kernel(kernel, &SWIGLU_BWD_FUSED_BINDINGS)?;
+    // Four elements a thread when the total allows it, else one.
+    let per_block = if total.is_multiple_of(4) { SWIGLU_BWD_BLOCK_ELEMS } else { SWIGLU_BWD_BLOCK_ELEMS / 4 };
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 5], &[total], total.div_ceil(per_block))
+}
+
 /// The native tensor-core paged flash-prefill step for `head_dim = 256`, or
 /// `None` when the caller should dispatch the portable
 /// `paged_flash_prefill_hd256` it was going to anyway.

@@ -3453,7 +3453,19 @@ pub fn swiglu_fwd(g: &Gpu, k: &KernelIds, gate: &DeviceBuffer, up: &DeviceBuffer
     g.step(k.silu_mul, &[gate, up, h], &[total], total)
 }
 
-/// SwiGLU backward: grads w.r.t. the gate pre-activation and the up projection.
+/// The fused native SwiGLU backward where a CUDA provider offers it; `None` elsewhere (and on wasm).
+#[cfg(not(target_arch = "wasm32"))]
+fn native_swiglu_bwd(g: &Gpu, bufs: [&DeviceBuffer; 5], total: u32) -> Option<Step> {
+    gpu_core::provider::cuda::swiglu_bwd_fused_step(g, &bufs, total)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_swiglu_bwd(_g: &Gpu, _bufs: [&DeviceBuffer; 5], _total: u32) -> Option<Step> {
+    None
+}
+
+/// SwiGLU backward: grads w.r.t. the gate pre-activation and the up projection. One native launch on a CUDA
+/// device (the gate and up gradients share one read of the inputs), else the two portable dispatches.
 pub fn swiglu_bwd(
     g: &Gpu,
     k: &KernelIds,
@@ -3464,6 +3476,9 @@ pub fn swiglu_bwd(
     d_up: &DeviceBuffer,
     total: u32,
 ) -> Vec<Step> {
+    if let Some(fused) = native_swiglu_bwd(g, [gate, up, d_h, d_gate, d_up], total) {
+        return vec![fused];
+    }
     vec![
         g.step(k.silu_da, &[gate, up, d_h, d_gate], &[total], total),
         g.step(k.silu_db, &[gate, d_h, d_up], &[total], total),

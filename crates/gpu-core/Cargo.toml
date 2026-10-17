@@ -121,6 +121,10 @@ name = "gdn_qk_bwd_native"
 harness = false
 
 [[test]]
+name = "swiglu_bwd_native"
+harness = false
+
+[[test]]
 name = "gdn_dscale_native"
 harness = false
 
