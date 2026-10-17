@@ -149,6 +149,7 @@ use data::rng::Rng;
 use gguf::import::Mapped;
 use gguf::GdnFixSource;
 use gpu_core::{DeviceBuffer, Gpu};
+use model::adapter::bank::AdapterBankRequest;
 use model::dispatch::LORA_SLOT_NONE;
 use model::kv_tier::{KvLayer, KvTier};
 use model::ops::TierPolicy;
@@ -2303,12 +2304,17 @@ pub struct Qwen35GgufResident {
     /// well-known release id, for a caller that resolved nothing to derive
     /// from.
     model_id: String,
+    /// The adapter bank this resident builds beside its weights, when the
+    /// operator asked for adapters ([`Self::with_adapter_bank`]). Charged to
+    /// the stages that hold the layers it corrects, and enabled on the engine
+    /// [`Self::activate_engine`] returns.
+    bank: Option<AdapterBankRequest>,
     plan: OnceLock<Plan>,
 }
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, model_id: MODEL.to_string(), plan: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, model_id: MODEL.to_string(), bank: None, plan: OnceLock::new() }
     }
 
     /// Serve this resident under `id` instead of [`MODEL`] - what the
@@ -2319,6 +2325,15 @@ impl Qwen35GgufResident {
     /// Must be set before the first `manifest()`/`instance_key()` call.
     pub fn with_model_id(mut self, id: impl Into<String>) -> Qwen35GgufResident {
         self.model_id = id.into();
+        self
+    }
+
+    /// Build an adapter bank of `request` beside the weights, so sequences can
+    /// run under LoRA adapters ([`Qwen35GgufEngine::load_adapter`]). Its device
+    /// bytes are part of the placement. Must be set before the first
+    /// `estimate_multi` call.
+    pub fn with_adapter_bank(mut self, request: AdapterBankRequest) -> Qwen35GgufResident {
+        self.bank = Some(request);
         self
     }
 
@@ -2449,8 +2464,23 @@ impl Qwen35GgufResident {
         if let Some(why) = sizing_refusal(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots, &caps.iter().map(|&(_, c)| c).collect::<Vec<_>>()) {
             return refused(why);
         }
-        let cost = layer_cost_with_prefix_slots(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots);
-        let placements = model::shard::plan_fewest_devices(&cost, &caps).expect("sizing_refusal found the configuration placeable");
+        let mut cost = layer_cost_with_prefix_slots(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots);
+        if let Some(request) = &self.bank {
+            // The bank lives beside the weights of the layers it corrects, on
+            // the card that holds them; each stage also carries the row
+            // scratch, charged once to the head (a stage is at least a layer).
+            let bank = match request.config(&cfg) {
+                Ok(bank) => bank,
+                Err(why) => return refused(format!("adapter bank: {why}")),
+            };
+            for (layer, bytes) in bank.device_bytes_by_layer(&cfg, cost.per_layer.len()).into_iter().enumerate() {
+                cost.per_layer[layer] += bytes;
+            }
+            cost.head += bank.row_scratch_bytes(self.max_batch.max(MAX_PREFILL_TOKENS.max(TENSOR_CORE_PREFILL_TOKENS)));
+        }
+        let Some(placements) = model::shard::plan_fewest_devices(&cost, &caps) else {
+            return refused("the weights fit the cards but the adapter bank does not: lower --adapter-slots, --adapter-rank-cap or --adapter-targets".to_string());
+        };
         let stages = placements
             .iter()
             .map(|p| {
@@ -2501,7 +2531,7 @@ fn stop_ids(tok: &QwenBpe, declared: Option<u32>) -> Vec<u32> {
 
 /// This model renders the 3.8 chat template by default; `parse_request`
 /// alone defaults to the Qwen3-era flavor and would mis-render its prompt.
-fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<qwen3::chat::ParsedRequest, String> {
+pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<qwen3::chat::ParsedRequest, String> {
     qwen3::chat::parse_request(tok, &crate::caps::with_template_flavor_default(inv))
 }
 
@@ -2602,7 +2632,14 @@ impl Qwen35GgufResident {
         let gtok = inst.mg.tokenizer().ok_or_else(|| format!("{MODEL}: '{}' carries no embedded tokenizer", self.gguf_path))?;
         let tok = QwenBpe::from_gguf(&gtok).map_err(|e| format!("{MODEL}: embedded tokenizer: {e}"))?;
         let stop = inst.eos.clone();
-        Ok((Qwen35GgufEngine::new(inst), tok, stop))
+        let mut engine = Qwen35GgufEngine::new(inst);
+        if let Some(request) = &self.bank {
+            // Refusing here is deliberate: a server asked for adapters that
+            // cannot give them must say so, not serve the base under their names.
+            let bank = request.config(engine.instance().config())?;
+            engine.enable_adapters(bank).map_err(|e| format!("{MODEL}: adapter bank: {e}"))?;
+        }
+        Ok((engine, tok, stop))
     }
 
     /// [`MultiDeviceResidentModel::activate_multi`] returning the CONCRETE

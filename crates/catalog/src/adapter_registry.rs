@@ -52,15 +52,18 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use capability::{Invocation, Manifest};
+use capability::{ActionResult, Invocation, Manifest, Progress};
+use llmserve::{run_batch_scheduled, run_open_scheduled, scheduler_metrics, Frontend, TextFrontend};
+use model::serve::{PagedDecoder, Scheduler};
 use brain_modelref::ModelRef;
 use model::serve::AdapterId;
-use model::adapter::bank::{AdapterBankConfig, AdapterServing, DEFAULT_ATTENTION_LEAVES};
+use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterServing, BankedEngine};
 pub use model::adapter::bank::AdapterTargets;
-use qwen3::serve::{Engine, LoraSite};
+
+use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{AdapterIdentity, Device, Executor, Instance, InstanceKey, MemCost, ResidentModel};
 
-use crate::adapter_release::{LoadedAdapter, ServedBase};
+use crate::adapter_release::{LoadedAdapter, ServedBase, QWEN35_FAMILY, QWEN_FAMILY};
 use crate::resident_llm::QwenResident;
 
 /// The reserved invocation param a [`QwenAdapterView`] stamps with its
@@ -68,6 +71,37 @@ use crate::resident_llm::QwenResident;
 /// it, so `ActionSpec::validate_served` refuses it from every HTTP and D-Bus
 /// caller, and the base resident strips it ([`ResidentModel::stamp`]).
 pub const ADAPTER_PARAM: &str = "__adapter";
+
+/// What a served model family calls its linears: the leaves an adapter may
+/// correct and the `attention` group, as the family's [`AdapterServing`]
+/// config lists them. Leaf names do not depend on a config's dimensions, so a
+/// small config of the family stands for all of them.
+#[derive(Clone, Debug)]
+pub struct ServedFamily {
+    /// The `ModelCard.family` of the family's adapters.
+    pub tag: &'static str,
+    /// Every leaf the family has a site for.
+    pub all: Vec<&'static str>,
+    /// The leaves of the `attention` group.
+    pub attention: Vec<&'static str>,
+}
+
+impl ServedFamily {
+    /// The family of `model`, adapters tagged `tag`.
+    pub fn of<M: AdapterServing + ?Sized>(tag: &'static str, model: &M) -> ServedFamily {
+        ServedFamily { tag, all: model.all_leaves(), attention: model.attention_leaves() }
+    }
+
+    /// The family of adapters carrying card family `tag`, or `None` for a
+    /// family this crate does not serve.
+    pub fn named(tag: &str) -> Option<ServedFamily> {
+        match tag {
+            QWEN_FAMILY => Some(ServedFamily::of(QWEN_FAMILY, &qwen3::config::QwenConfig::tiny())),
+            QWEN35_FAMILY => Some(ServedFamily::of(QWEN35_FAMILY, &qwen35::config::Qwen35Config::tiny())),
+            _ => None,
+        }
+    }
+}
 
 /// Adapters the bank holds in device slots at once, unless `--adapter-slots`
 /// says otherwise. More adapters than slots are served by swapping the least
@@ -119,6 +153,12 @@ impl AdapterBankSettings {
         Ok(())
     }
 
+    /// These settings as a request a resident can place before it knows its
+    /// model's sites.
+    pub fn request(&self) -> model::adapter::bank::AdapterBankRequest {
+        model::adapter::bank::AdapterBankRequest { slots: self.slots, rank_cap: self.rank_cap, targets: self.targets.clone(), max_registered: MAX_SERVED_ADAPTERS }
+    }
+
     /// The engine's bank configuration for these settings on `model`.
     ///
     /// # Errors
@@ -156,6 +196,7 @@ pub struct AdapterRegistry {
     /// adapter.
     settings: Option<AdapterBankSettings>,
     base: ServedBase,
+    family: ServedFamily,
     state: Mutex<State>,
     /// Bumped on every change to the set, so an instance can tell in one
     /// atomic load that nothing changed since it last looked.
@@ -166,7 +207,8 @@ impl AdapterRegistry {
     /// A registry for a base served as `base`, offering adapters on a bank of
     /// `settings` (or none).
     pub fn new(settings: Option<AdapterBankSettings>, base: ServedBase) -> Arc<AdapterRegistry> {
-        Arc::new(AdapterRegistry { settings, base, state: Mutex::new(State::default()), generation: AtomicU64::new(0) })
+        let family = ServedFamily::named(base.family()).unwrap_or_else(|| panic!("no adapter family '{}' is served", base.family()));
+        Arc::new(AdapterRegistry { settings, base, family, state: Mutex::new(State::default()), generation: AtomicU64::new(0) })
     }
 
     /// The bank this registry's adapters run on; `None` when there is none.
@@ -199,15 +241,19 @@ impl AdapterRegistry {
     fn fits(&self, loaded: &LoadedAdapter) -> Result<(), String> {
         let settings = self.settings.as_ref().ok_or_else(|| "this server serves no adapters: start it with --adapter-slots (or --adapter, --adapter-manifest, --watch-adapters) to give the model an adapter bank".to_string())?;
         let id = &loaded.release.id;
+        if loaded.family != self.family.tag {
+            return Err(format!("adapter {id} is a {} adapter; the base it would ride on takes {} adapters", loaded.family, self.family.tag));
+        }
         if loaded.adapter.rank > settings.rank_cap {
             return Err(format!("adapter {id} has rank {}, above this server's --adapter-rank-cap {}", loaded.adapter.rank, settings.rank_cap));
         }
         for site in &loaded.adapter.sites {
             let leaf = site.base.rsplit('.').nth(1).unwrap_or_default();
-            match LoraSite::from_leaf(leaf) {
-                Some(_) if settings.targets.admits(leaf, &DEFAULT_ATTENTION_LEAVES) => {}
-                Some(_) => return Err(format!("adapter {id} corrects {leaf}, which this server's --adapter-targets ({}) does not; widen the flag to serve it", settings.targets)),
-                None => return Err(format!("adapter {id} holds a pair for {}, which is not a linear of a Qwen3 block", site.base)),
+            if !self.family.all.contains(&leaf) {
+                return Err(format!("adapter {id} holds a pair for {}, which is not a linear of a {} block (it has {})", site.base, self.family.tag, self.family.all.join(", ")));
+            }
+            if !settings.targets.admits(leaf, &self.family.attention) {
+                return Err(format!("adapter {id} corrects {leaf}, which this server's --adapter-targets ({}) does not; widen the flag to serve it", settings.targets));
             }
         }
         Ok(())
@@ -296,21 +342,49 @@ impl Drop for AdapterLease {
     }
 }
 
+/// A resident that carries an [`AdapterRegistry`] and can have adapters offered
+/// as models of their own beside it: Qwen3 ([`QwenResident`]) and the released
+/// Qwen3.8 GGUF ([`crate::resident_qwen35::Qwen35GgufServed`]).
+pub trait AdapterHost: ResidentModel + Send + Sync + Sized + 'static {
+    /// The adapters this base offers.
+    fn adapters(&self) -> &Arc<AdapterRegistry>;
+
+    /// Offer `adapter` as a model of its own on `executor`, which must be the
+    /// executor `self` is registered with: leases the adapter in the
+    /// registry and registers the view the way this resident's kind is
+    /// registered (single-device or multi-device).
+    fn register_view(self: &Arc<Self>, executor: &Executor, adapter: LoadedAdapter) -> Result<(), String>;
+
+    /// The base adapters are bound to, for [`crate::adapter_release::verify_adapter`].
+    fn served_base(&self) -> ServedBase {
+        self.adapters().base().clone()
+    }
+
+    /// The view of `adapter` over this resident, without registering it.
+    fn adapter_view(self: &Arc<Self>, adapter: LoadedAdapter) -> Result<AdapterView<Self>, String> {
+        let lease = self.adapters().attach(adapter)?;
+        Ok(AdapterView::new(self.clone(), lease))
+    }
+}
+
 /// The model id of one served adapter: a thin resident over the base's.
 ///
 /// Everything it does is the base's, except being listed under its own id,
 /// stamping which adapter a request named, and reporting the adapter's
 /// identity. See this module's doc.
-pub struct QwenAdapterView {
+pub struct AdapterView<R: AdapterHost> {
     id: String,
-    base: Arc<QwenResident>,
+    base: Arc<R>,
     _lease: AdapterLease,
 }
 
-impl QwenAdapterView {
+/// A Qwen3 adapter's view.
+pub type QwenAdapterView = AdapterView<QwenResident>;
+
+impl<R: AdapterHost> AdapterView<R> {
     /// The view of the adapter `lease` holds, over `base`.
-    pub(crate) fn new(base: Arc<QwenResident>, lease: AdapterLease) -> QwenAdapterView {
-        QwenAdapterView { id: lease.id.clone(), base, _lease: lease }
+    pub(crate) fn new(base: Arc<R>, lease: AdapterLease) -> AdapterView<R> {
+        AdapterView { id: lease.id.clone(), base, _lease: lease }
     }
 
     /// The model id this view is listed under.
@@ -319,7 +393,7 @@ impl QwenAdapterView {
     }
 }
 
-impl ResidentModel for QwenAdapterView {
+impl<R: AdapterHost> ResidentModel for AdapterView<R> {
     fn manifest(&self) -> Manifest {
         let mut manifest = self.base.manifest();
         manifest.model = self.id.clone();
@@ -336,6 +410,9 @@ impl ResidentModel for QwenAdapterView {
     fn estimate_at(&self, key: &InstanceKey, tier: residency::Tier) -> MemCost {
         self.base.estimate_at(key, tier)
     }
+    fn batch_limit(&self) -> Option<usize> {
+        self.base.batch_limit()
+    }
     /// Builds the BASE's instance (the executor may claim the view first).
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         self.base.activate(key, device)
@@ -350,6 +427,19 @@ impl ResidentModel for QwenAdapterView {
     }
 }
 
+impl<R: AdapterHost + MultiDeviceResidentModel> MultiDeviceResidentModel for AdapterView<R> {
+    fn unavailable_reason(&self, key: &InstanceKey) -> Option<String> {
+        self.base.unavailable_reason(key)
+    }
+    fn estimate_multi(&self, key: &InstanceKey) -> MultiDeviceCost {
+        self.base.estimate_multi(key)
+    }
+    /// Builds the BASE's instance, which every view of it shares.
+    fn activate_multi(&self, key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        self.base.activate_multi(key, devices)
+    }
+}
+
 /// Puts adapters in front of, and takes them out of, a RUNNING executor: the
 /// one place an adapter becomes (or stops being) a model of a live server.
 ///
@@ -357,15 +447,31 @@ impl ResidentModel for QwenAdapterView {
 /// unregistering it; nothing is rebuilt and no instance is evicted, so a
 /// request that is running or queued is never disturbed.
 pub struct LiveAdapters {
-    resident: Arc<QwenResident>,
+    target: Box<dyn AdapterTarget>,
     executor: Executor,
+}
+
+/// An [`AdapterHost`] with its type erased, so a watcher and a CLI can drive
+/// whichever resident the server put adapters on.
+trait AdapterTarget: Send + Sync {
+    fn registry(&self) -> &Arc<AdapterRegistry>;
+    fn offer(&self, executor: &Executor, adapter: LoadedAdapter) -> Result<(), String>;
+}
+
+impl<R: AdapterHost> AdapterTarget for Arc<R> {
+    fn registry(&self) -> &Arc<AdapterRegistry> {
+        self.adapters()
+    }
+    fn offer(&self, executor: &Executor, adapter: LoadedAdapter) -> Result<(), String> {
+        self.register_view(executor, adapter)
+    }
 }
 
 impl LiveAdapters {
     /// Offer and withdraw adapters of `resident` on `executor`, which must be
     /// the executor `resident` is registered with.
-    pub fn new(resident: Arc<QwenResident>, executor: Executor) -> LiveAdapters {
-        LiveAdapters { resident, executor }
+    pub fn new<R: AdapterHost>(resident: Arc<R>, executor: Executor) -> LiveAdapters {
+        LiveAdapters { target: Box::new(resident), executor }
     }
 
     /// Offer `adapter` under its card id as a model of its own. A card id that
@@ -382,14 +488,13 @@ impl LiveAdapters {
         let id = adapter.release.id.clone();
         let listed = self.executor.manifests().iter().any(|m| m.model == id);
         if !listed {
-            self.executor.register(Arc::new(self.resident.adapter_view(adapter)?));
-            return Ok(());
+            return self.target.offer(&self.executor, adapter);
         }
-        if !self.resident.adapters().ids().contains(&id) {
+        if !self.target.registry().ids().contains(&id) {
             return Err(format!("adapter id {id} is already a served model; an adapter does not replace a model"));
         }
         let identity = adapter.release.identity();
-        self.resident.adapters().replace(adapter)?;
+        self.target.registry().replace(adapter)?;
         self.executor.set_served_adapter(&id, Some(identity));
         Ok(())
     }
@@ -400,7 +505,7 @@ impl LiveAdapters {
     /// one of this resident's adapters is left alone: this cannot withdraw a
     /// model.
     pub fn retire(&self, id: &str) {
-        if self.resident.adapters().ids().iter().any(|offered| offered == id) {
+        if self.target.registry().ids().iter().any(|offered| offered == id) {
             self.executor.unregister(id);
         }
     }
@@ -434,7 +539,7 @@ impl AdapterSync {
 
     /// Bring `engine`'s bank in line with the registry: register what it
     /// gained, unload what it lost. One atomic load when nothing changed.
-    pub(crate) fn sync(&mut self, engine: &mut Engine) {
+    pub(crate) fn sync<E: BankedEngine>(&mut self, engine: &mut E) {
         if self.seen == Some(self.registry.generation.load(Ordering::SeqCst)) {
             return;
         }
@@ -464,7 +569,7 @@ impl AdapterSync {
             // `Draining` finishes by itself when the last sequence under the
             // adapter is done; an unknown id was already gone.
             if let Err(why) = engine.unload_adapter(engine_id) {
-                if !matches!(why, qwen3::serve::AdapterError::Unknown(_)) {
+                if !matches!(why, AdapterError::Unknown(_)) {
                     eprintln!("serve: unloading adapter {digest} from the bank: {why}");
                 }
             }
@@ -483,6 +588,87 @@ impl AdapterSync {
         match self.routes.get(id) {
             Some(Route::Ready(engine_id, identity)) => Ok((*engine_id, identity.clone())),
             Some(Route::Refused) | None => Err(format!("no model '{id}'")),
+        }
+    }
+}
+
+/// A scheduler-backed instance of a text family whose engine has an adapter
+/// bank: every request names its adapter by the reserved param its model id
+/// stamped ([`ADAPTER_PARAM`]), and the group runs base and adapter rows in
+/// the same batched steps. The engine's bank is brought in line with the
+/// registry first, between groups, when no sequence is running, so a hot swap
+/// never changes what a running sequence reads. An adapter offered while a
+/// group runs is routable from the next group; a request naming it earlier is
+/// answered "no model".
+pub struct AdaptedInstance<D: PagedDecoder + BankedEngine> {
+    front: TextFrontend,
+    sched: Scheduler<D>,
+    capacity: usize,
+    adapters: AdapterSync,
+}
+
+impl<D: PagedDecoder + BankedEngine> AdaptedInstance<D> {
+    /// `capacity` is the number of requests the scheduler runs at once.
+    pub fn new(front: TextFrontend, sched: Scheduler<D>, capacity: usize, registry: Arc<AdapterRegistry>) -> AdaptedInstance<D> {
+        let mut instance = AdaptedInstance { front, sched, capacity, adapters: AdapterSync::new(registry) };
+        // Every adapter offered so far is registered with the engine before
+        // the first request, so a cold instance answers an adapter request
+        // at once.
+        instance.adapters.sync(instance.sched.decoder_mut());
+        instance
+    }
+}
+
+impl<D: PagedDecoder + BankedEngine + Send> Instance for AdaptedInstance<D> {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
+    }
+
+    fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        self.adapters.sync(self.sched.decoder_mut());
+        run_batch_scheduled(&mut self.sched, &AdaptedFrontend { front: &self.front, adapters: &self.adapters }, invs, progress)
+    }
+
+    fn run_open(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn residency::JobFeed) -> bool {
+        self.adapters.sync(self.sched.decoder_mut());
+        run_open_scheduled(&mut self.sched, &AdaptedFrontend { front: &self.front, adapters: &self.adapters }, invs, self.capacity, progress, feed);
+        true
+    }
+
+    fn metrics(&self) -> Vec<(String, serde_json::Value)> {
+        scheduler_metrics(&self.sched)
+    }
+}
+
+/// The request front end of a family, plus the adapter a request's model id
+/// stamped.
+struct AdaptedFrontend<'a> {
+    front: &'a TextFrontend,
+    adapters: &'a AdapterSync,
+}
+
+impl Frontend for AdaptedFrontend<'_> {
+    fn tok(&self) -> &data::qwen_tokenizer::QwenBpe {
+        self.front.tok()
+    }
+    fn stop(&self) -> &[u32] {
+        self.front.stop()
+    }
+    fn label(&self) -> &str {
+        self.front.label()
+    }
+    fn parse(&self, inv: &Invocation) -> Result<qwen3::chat::ParsedRequest, String> {
+        self.front.parse(inv)
+    }
+    fn route(&self, inv: &Invocation) -> Result<Option<(AdapterId, AdapterIdentity)>, String> {
+        inv.get_str(ADAPTER_PARAM).map(|name| self.adapters.route(&name)).transpose()
+    }
+    fn rejection(&self, inv: &Invocation, reason: &model::serve::RejectReason) -> String {
+        match (reason, inv.get_str(ADAPTER_PARAM)) {
+            // An adapter the engine unloaded between routing and admission:
+            // as an unknown model, with no engine detail.
+            (model::serve::RejectReason::AdapterUnavailable { .. }, Some(name)) => format!("no model '{name}'"),
+            _ => self.front.rejection(inv, reason),
         }
     }
 }
@@ -508,6 +694,66 @@ mod tests {
     #[test]
     fn the_default_targets_are_the_attention_group() {
         assert_eq!(DEFAULT_ADAPTER_TARGETS, AdapterTargets::ATTENTION);
+    }
+
+    const Q35_ID: &str = "unsloth/Qwen3.8-27B-GGUF:lab:facts:v1";
+
+    fn qwen35_registry(settings: Option<AdapterBankSettings>) -> Arc<AdapterRegistry> {
+        AdapterRegistry::new(settings, ServedBase::of_family(QWEN35_FAMILY, "unused.gguf", Some("unsloth/Qwen3.8-27B-GGUF".to_string())).quantizing(&["Qwen/Qwen3.8-27B-FP8"]))
+    }
+
+    /// A Qwen3.8 adapter over the named linears of layer 0 (shapes are the
+    /// engine's to check, not the registry's).
+    fn qwen35_adapter(dir: &std::path::Path, bases: &[&str]) -> LoadedAdapter {
+        use brain_testutil::adapters::{write_lora_adapter_of, Linear};
+        let linears: Vec<Linear> = bases.iter().map(|b| Linear { base: format!("blocks.0.{b}.weight"), out: 4, inn: 3 }).collect();
+        let path = dir.join(format!("q35-{}.safetensors", bases.join("-").replace('.', "_")));
+        write_lora_adapter_of("qwen35", &path, Q35_ID, "Qwen/Qwen3.8-27B-FP8", 2, &linears, 5);
+        load_adapter(&path).expect("a trainer-shaped qwen35 adapter loads")
+    }
+
+    /// One registry implementation serves both families: the pre-attach check
+    /// resolves against the family's real sites, not the Qwen3 ones, names the
+    /// flag that widens the bank, and refuses an adapter of the other family.
+    #[test]
+    fn the_pre_attach_check_resolves_against_the_families_own_sites() {
+        let dir = scratch_dir("registry-qwen35");
+        let mixer = qwen35_adapter(&dir, &["linear_attn.in_proj_qkv", "self_attn.q_proj"]);
+        let mlp = qwen35_adapter(&dir, &["mlp.gate"]);
+        assert_eq!(mixer.family, "qwen35");
+
+        let attention = qwen35_registry(Some(AdapterBankSettings::default()));
+        assert!(attention.attach(mixer.clone()).is_ok(), "the default group of a Qwen3.8 is its mixers (in_proj_*, out_proj, q/k/v/o_proj)");
+        let why = attention.attach(mlp.clone()).err().unwrap();
+        assert!(why.contains("gate") && why.contains("--adapter-targets"), "{why}");
+
+        let all = qwen35_registry(Some(AdapterBankSettings { targets: AdapterTargets::ALL, ..Default::default() }));
+        assert!(all.attach(mlp.clone()).is_ok(), "`all` is every site the model has");
+        let down = qwen35_registry(Some(AdapterBankSettings { targets: AdapterTargets::parse("gate,up,down").unwrap(), ..Default::default() }));
+        assert!(down.attach(mlp).is_ok() && down.attach(mixer.clone()).is_err(), "named leaves are the family's own names");
+
+        // The other family's adapter and the other family's leaves.
+        let qwen3 = registry(Some(AdapterBankSettings::default()));
+        let why = qwen3.attach(mixer).err().unwrap();
+        assert!(why.contains("qwen35") && why.contains("qwen"), "an adapter of another family is refused by family: {why}");
+        let q3_adapter = loaded(&dir, "unsloth/Qwen3.8-27B-GGUF:lab:wq:v1", 0.5);
+        assert!(attention.attach(q3_adapter).err().unwrap().contains("qwen"), "a Qwen3 adapter does not ride on a Qwen3.8");
+    }
+
+    #[test]
+    fn a_quantisation_is_bound_by_the_release_it_was_made_from() {
+        let dir = scratch_dir("registry-quantizing");
+        let adapter = qwen35_adapter(&dir, &["self_attn.q_proj"]);
+        assert_eq!(adapter.release.id, Q35_ID);
+        // The adapter's card names `Qwen/Qwen3.8-27B-FP8`, which the served
+        // GGUF declares it quantises, so no file digest of the GGUF is needed.
+        let base = ServedBase::of_family(QWEN35_FAMILY, "unused.gguf", Some("unsloth/Qwen3.8-27B-GGUF".to_string())).quantizing(&["Qwen/Qwen3.8-27B-FP8"]);
+        assert!(crate::adapter_release::verify_adapter(&dir.join("q35-self_attn_q_proj.safetensors"), &base).is_ok());
+        let file = dir.join("other.gguf");
+        brain_testutil::adapters::write_base(&file, 1.0);
+        let other = ServedBase::of_family(QWEN35_FAMILY, &file, Some("unsloth/Other".to_string()));
+        let why = crate::adapter_release::verify_adapter(&dir.join("q35-self_attn_q_proj.safetensors"), &other).err().unwrap();
+        assert!(why.contains("Qwen/Qwen3.8-27B-FP8") && why.contains("unsloth/Other"), "a base that is not the release's quantisation is refused by name: {why}");
     }
 
     #[test]

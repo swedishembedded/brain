@@ -14,7 +14,7 @@
 //! engine's glue (the tape hook, the KV-namespace purge on unload) and the
 //! typed names of the seven linears the tape corrects.
 
-use model::adapter::bank::{AdapterBank, SiteLeaf};
+use model::adapter::bank::{AdapterBank, BankedEngine, SiteLeaf};
 pub use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, UnloadStatus, VerifiedAdapter};
 use model::adapter::sites::LoraSites;
 use model::paged::{KvNamespace, BASE_KV_NAMESPACE};
@@ -191,5 +191,14 @@ impl Engine {
             self.warned_calib_with_adapters = true;
             eprintln!("serve: KV clip ceilings were calibrated on the base model and are applied to adapter sequences too; an adapter whose K/V exceed them is clipped (drop the KV calibration for adapter serving)");
         }
+    }
+}
+
+impl BankedEngine for Engine {
+    fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
+        Engine::load_adapter(self, adapter)
+    }
+    fn unload_adapter(&mut self, id: AdapterId) -> Result<UnloadStatus, AdapterError> {
+        Engine::unload_adapter(self, id)
     }
 }

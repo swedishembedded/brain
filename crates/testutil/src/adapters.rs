@@ -65,6 +65,13 @@ pub struct Linear {
 /// factors (`seed`), big enough to move a tiny model's greedy decode. The card
 /// names `base_id` and carries no base digest, so the file is bound by id.
 pub fn write_lora_adapter(path: &Path, id: &str, base_id: &str, rank: u32, linears: &[Linear], seed: u64) {
+    write_lora_adapter_of("qwen", path, id, base_id, rank, linears, seed);
+}
+
+/// [`write_lora_adapter`] for a card of `family` (`qwen35` for a Qwen3.8
+/// adapter). The card lists the linears' leaf names as its targets, as a
+/// trainer writes them.
+pub fn write_lora_adapter_of(family: &str, path: &Path, id: &str, base_id: &str, rank: u32, linears: &[Linear], seed: u64) {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut next = move || {
         state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
@@ -77,9 +84,16 @@ pub fn write_lora_adapter(path: &Path, id: &str, base_id: &str, rank: u32, linea
         tensors.push((format!("{}.lora_b", l.base), vec![l.out as u64, r as u64], (0..l.out * r).map(|_| next()).collect::<Vec<f32>>()));
     }
     let alpha = 2.0 * rank as f32;
-    let mut card = ModelCard::new(id, "qwen");
+    let mut card = ModelCard::new(id, family);
     card.variant_of = Some(base_id.to_string());
-    card.adapter = Some(Adapter { kind: "lora".to_string(), rank: Some(rank), base: Some(base_id.to_string()), alpha: Some(alpha), ..Default::default() });
+    let mut targets: Vec<String> = Vec::new();
+    for l in linears {
+        let leaf = l.base.rsplit('.').nth(1).unwrap_or_default().to_string();
+        if !targets.contains(&leaf) {
+            targets.push(leaf);
+        }
+    }
+    card.adapter = Some(Adapter { kind: "lora".to_string(), rank: Some(rank), base: Some(base_id.to_string()), alpha: Some(alpha), targets: (family != "qwen").then_some(targets), ..Default::default() });
     checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({"rank": rank, "alpha": alpha}), Some(&card)).unwrap();
 }
 

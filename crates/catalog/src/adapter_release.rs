@@ -50,8 +50,8 @@ use std::sync::OnceLock;
 
 pub use brain_modelstore::adapter_manifest::AdapterManifest;
 use checkpoint::st::ModelCard;
-use qwen3::lora::DeviceAdapter;
-use qwen3::serve::VerifiedAdapter;
+use model::adapter::bank::VerifiedAdapter;
+use model::lora::device_adapter::DeviceAdapter;
 use residency::AdapterIdentity;
 
 /// The largest adapter file read into memory. An adapter is megabytes (a
@@ -67,14 +67,48 @@ const MAX_ADAPTER_BYTES: u64 = 2 << 30;
 pub struct ServedBase {
     path: PathBuf,
     id: Option<String>,
+    /// The `ModelCard.family` of the adapters this base takes.
+    family: &'static str,
+    /// Ids of the full-precision sources this base was made from (a released
+    /// quantisation of a model names the model it quantises). An adapter is
+    /// trained on the source and served on the quantisation, so its card's
+    /// base digest cannot equal this file's; naming one of these as the
+    /// adapter's base id binds it instead.
+    quantized_from: Vec<String>,
     digest: OnceLock<Result<String, String>>,
 }
 
+/// The card family of a Qwen3 adapter.
+pub const QWEN_FAMILY: &str = "qwen";
+/// The card family of a Qwen3.5/3.8 adapter.
+pub const QWEN35_FAMILY: &str = "qwen35";
+
 impl ServedBase {
-    /// The base at `path`, served under `id` when it has one (a catalog id, or
-    /// the id `BRAIN_QWEN_WEIGHTS` resolved to).
+    /// The Qwen3 base at `path`, served under `id` when it has one (a catalog
+    /// id, or the id `BRAIN_QWEN_WEIGHTS` resolved to).
     pub fn new(path: impl Into<PathBuf>, id: Option<String>) -> ServedBase {
-        ServedBase { path: path.into(), id, digest: OnceLock::new() }
+        ServedBase::of_family(QWEN_FAMILY, path, id)
+    }
+
+    /// The base at `path` for adapters of card family `family`.
+    pub fn of_family(family: &'static str, path: impl Into<PathBuf>, id: Option<String>) -> ServedBase {
+        ServedBase { path: path.into(), id, family, quantized_from: Vec::new(), digest: OnceLock::new() }
+    }
+
+    /// Declare the ids of the sources this base is a quantisation of.
+    pub fn quantizing(mut self, sources: &[&str]) -> ServedBase {
+        self.quantized_from = sources.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    /// Does this base quantise the release named `source`?
+    pub fn quantizes(&self, source: &str) -> bool {
+        self.quantized_from.iter().any(|q| q == source)
+    }
+
+    /// The card family of the adapters this base takes.
+    pub fn family(&self) -> &'static str {
+        self.family
     }
 
     fn digest(&self) -> Result<&str, String> {
@@ -113,6 +147,8 @@ impl AdapterRelease {
 /// An adapter read once: its name and its factors, both from the same bytes.
 #[derive(Clone)]
 pub struct LoadedAdapter {
+    /// The card family the file declares (`qwen`, `qwen35`).
+    pub family: String,
     /// The release this file is: card id, digest, where it was read.
     pub release: AdapterRelease,
     /// The factors, parsed from the bytes `release.digest` names.
@@ -121,16 +157,17 @@ pub struct LoadedAdapter {
 
 impl LoadedAdapter {
     /// The form the serving engine registers an adapter in
-    /// ([`qwen3::serve::Engine::load_adapter`]).
+    /// ([`model::adapter::bank::BankedEngine::load_adapter`]).
     pub fn into_engine(self) -> VerifiedAdapter {
         VerifiedAdapter { label: self.release.id, digest: self.release.digest, adapter: self.adapter }
     }
 }
 
 /// Read the adapter file at `path` ONCE: its digest, card and factors, all
-/// from the same bytes. Checks the file is a Qwen3 LoRA with at least one
-/// factor pair; nothing about the base.
-fn read_once(path: &Path) -> Result<(LoadedAdapter, ModelCard), String> {
+/// from the same bytes. Checks the file is a LoRA of a family this crate
+/// serves (`expect`: exactly that family) with at least one factor pair;
+/// nothing about the base.
+fn read_once(path: &Path, expect: Option<&str>) -> Result<(LoadedAdapter, ModelCard), String> {
     let shown = path.display();
     let len = std::fs::metadata(path).map_err(|e| format!("adapter {shown}: {e}"))?.len();
     if len > MAX_ADAPTER_BYTES {
@@ -138,19 +175,27 @@ fn read_once(path: &Path) -> Result<(LoadedAdapter, ModelCard), String> {
     }
     let bytes = std::fs::read(path).map_err(|e| format!("adapter {shown}: {e}"))?;
     let digest = format!("sha256:{}", brain_modelstore::fetch::bytes_digest(&bytes));
-    let (adapter, card) = qwen3::lora::parse_adapter(&bytes, &shown.to_string()).map_err(|e| match e.kind() {
+    let (adapter, card) = model::lora::device_adapter::parse_adapter(&bytes, &shown.to_string()).map_err(|e| match e.kind() {
         // The model crate says "has no ModelCard"; say what that means for a release.
         std::io::ErrorKind::InvalidData if e.to_string().contains("has no ModelCard") => format!("adapter {shown}: no model card, so nothing says which base it belongs to"),
         _ => e.to_string(),
     })?;
     let descriptor = card.adapter.as_ref().ok_or_else(|| format!("adapter {shown}: its card ({}) describes a model, not an adapter", card.id))?;
-    // The engine's bank implements exactly this family and kind; anything
-    // else would only fail later, at the first request.
-    if card.family != "qwen" || descriptor.kind != "lora" {
-        return Err(format!("adapter {shown}: a {} {:?} adapter; the served base is a Qwen3 that takes LoRA adapters", card.family, descriptor.kind));
+    // The engines' banks implement exactly these families and this kind;
+    // anything else would only fail later, at the first request.
+    let family_ok = match expect {
+        Some(family) => card.family == family,
+        None => card.family == QWEN_FAMILY || card.family == QWEN35_FAMILY,
+    };
+    if !family_ok || descriptor.kind != "lora" {
+        let served = match expect {
+            Some(QWEN35_FAMILY) => "a Qwen3.8",
+            Some(_) | None => "a Qwen3",
+        };
+        return Err(format!("adapter {shown}: a {} {:?} adapter; the served base is {served} that takes LoRA adapters of family {}", card.family, descriptor.kind, expect.unwrap_or("qwen or qwen35")));
     }
     let release = AdapterRelease { id: card.id.clone(), path: path.to_path_buf(), digest };
-    Ok((LoadedAdapter { release, adapter }, card))
+    Ok((LoadedAdapter { family: card.family.clone(), release, adapter }, card))
 }
 
 /// Read the adapter at `path` as a release, WITHOUT binding it to a base:
@@ -159,7 +204,7 @@ fn read_once(path: &Path) -> Result<(LoadedAdapter, ModelCard), String> {
 /// and the engine still checks the adapter's shapes against the model it is
 /// given to.
 pub fn load_adapter(path: &Path) -> Result<LoadedAdapter, String> {
-    read_once(path).map(|(loaded, _)| loaded)
+    read_once(path, None).map(|(loaded, _)| loaded)
 }
 
 /// Read `path` as a Qwen3 LoRA adapter and bind it to `base`. Every refusal
@@ -167,11 +212,15 @@ pub fn load_adapter(path: &Path) -> Result<LoadedAdapter, String> {
 /// digests.
 pub fn verify_adapter(path: &Path, base: &ServedBase) -> Result<LoadedAdapter, String> {
     let shown = path.display();
-    let (loaded, card) = read_once(path)?;
+    let (loaded, card) = read_once(path, Some(base.family))?;
     let adapter = card.adapter.as_ref().expect("read_once refused a card without an adapter descriptor");
     let recorded_base_digest = card.training.as_ref().and_then(|t| t.base_digest.as_deref());
     match (recorded_base_digest, adapter.base.as_deref()) {
-        (Some(trained_on), _) => {
+        (Some(trained_on), source) => {
+            // A quantisation is bound by the id of the source it was made from.
+            if source.is_some_and(|id| base.quantized_from.iter().any(|q| q == id)) {
+                return Ok(loaded);
+            }
             let served = base.digest()?;
             if trained_on != served {
                 return Err(format!(
@@ -181,7 +230,7 @@ pub fn verify_adapter(path: &Path, base: &ServedBase) -> Result<LoadedAdapter, S
             }
         }
         (None, Some(base_id)) => {
-            if base.id.as_deref() != Some(base_id) {
+            if base.id.as_deref() != Some(base_id) && !base.quantized_from.iter().any(|q| q == base_id) {
                 let served = base.digest()?;
                 return Err(format!(
                     "adapter {shown} names base {base_id:?} and records no base digest, but the served base {} is {:?} ({served}); refusing to put it on a different base",

@@ -930,7 +930,7 @@ fn run_apis(a: RunApis) {
     // supplier and the healer - so the flag decides the store everywhere.
     let models_dir = loader::model_dir::resolve(a.models_dir.as_deref());
     let supplier = build_auto_fetch_supplier(models_dir.as_deref());
-    let serving::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.knobs);
+    let serving::Serving { executor, qwen, qwen35 } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.knobs);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("{}", served_models_line(&served, models_dir.as_deref()));
@@ -963,7 +963,8 @@ fn run_apis(a: RunApis) {
     // watcher cannot outlive the surfaces it was swapping models under. `qwen`
     // is the CONCRETE resident handle -- `adapter_view` is inherent, so the
     // erased one the executor holds could not do this.
-    let follow = match crate::continuous_train::start_adapter_mode(a.adapter_mode, qwen.as_ref(), &executor) {
+    let host = crate::continuous_train::Host::pick(qwen, &qwen35);
+    let follow = match host.start(a.adapter_mode, &executor) {
         Ok((follow, serving_line)) => {
             if let Some(line) = serving_line {
                 eprintln!("{line}");
@@ -975,7 +976,7 @@ fn run_apis(a: RunApis) {
             std::process::exit(1);
         }
     };
-    let _adapter_watcher = crate::continuous_train::spawn_adapter_watcher(follow, qwen, &executor);
+    let _adapter_watcher = host.watch(follow, &executor);
 
     let dbus_handle = if a.dbus {
         let opts = brain_dbus::DbusOpts {

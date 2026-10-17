@@ -295,6 +295,22 @@ fn a_pinned_adapter_for_another_base_is_a_startup_error() {
     }
 }
 
+/// A Qwen3.8 adapter (card family `qwen35`) is not a Qwen3 adapter: pinned on
+/// a Qwen3 base it is refused by family, with both families named, never
+/// loaded into a bank that cannot hold its linears.
+#[test]
+fn a_pinned_qwen35_adapter_is_refused_on_a_qwen3_base_by_family() {
+    let dir = Scratch::new("pin-qwen35");
+    let (base, _) = write_base_and_adapter(&dir.0, 1.0, None);
+    let adapter = dir.0.join("qwen35-adapter.safetensors");
+    let linears = [brain_testutil::adapters::Linear { base: "blocks.0.linear_attn.in_proj_qkv.weight".to_string(), out: 4, inn: 2 }];
+    brain_testutil::adapters::write_lora_adapter_of("qwen35", &adapter, ADAPTER_ID, "local/base", 2, &linears, 1);
+    let out = serve_command(&dir.0, &base, &["--adapter", adapter.to_str().unwrap()]).output().expect("run brain serve");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a Qwen3.8 adapter must not serve on a Qwen3 base; stderr:\n{stderr}");
+    assert!(stderr.contains("qwen35") && stderr.contains("qwen"), "stderr must name both families; got:\n{stderr}");
+}
+
 /// A pinned adapter cannot be combined with a mode that would replace it,
 /// nor given where no Qwen3 is served.
 #[test]

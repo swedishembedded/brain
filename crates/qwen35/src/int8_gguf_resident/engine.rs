@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 
 use gpu_core::DeviceStats;
-use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, UnloadStatus, VerifiedAdapter};
+use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, BankedEngine, UnloadStatus, VerifiedAdapter};
 use model::dispatch::LORA_SLOT_NONE;
 use model::paged::{BlockAllocator, BlockTable, KvNamespace};
 use model::serve::{AdapterAvailability, AdapterId, PagedDecoder};
@@ -152,6 +152,15 @@ impl Qwen35GgufEngine {
         let hidden = self.inst.stack_decode_hidden(inputs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
         self.inst.set_adapter_rows(&[]);
         hidden
+    }
+}
+
+impl BankedEngine for Qwen35GgufEngine {
+    fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
+        Qwen35GgufEngine::load_adapter(self, adapter)
+    }
+    fn unload_adapter(&mut self, id: AdapterId) -> Result<UnloadStatus, AdapterError> {
+        Qwen35GgufEngine::unload_adapter(self, id)
     }
 }
 

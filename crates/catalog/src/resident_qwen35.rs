@@ -48,7 +48,13 @@ use qwen3::chat::parse_request;
 use qwen35::caps::with_template_flavor_default;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::serve::{Engine, Scheduler};
+use std::sync::Arc;
+
+use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
+
+use crate::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterRegistry, AdaptedInstance};
+use crate::adapter_release::{LoadedAdapter, ServedBase, QWEN35_FAMILY};
 
 use crate::resident_llm::{est_vram, generate_spec, on_device};
 use llmserve::{ScheduledInstance, TextFrontend};
@@ -328,7 +334,14 @@ pub const DEFAULT_PREFIX_SLOTS: u32 = 4;
 /// file, weights that do not fit the cards, no embedded tokenizer), so the
 /// caller can leave it out of the served set and say so: a model that is
 /// listed is one whose first request can load.
-pub fn gguf_resident(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35GgufServeConfig) -> Result<qwen35::int8_gguf_resident::Qwen35GgufResident, String> {
+pub fn gguf_resident(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35GgufServeConfig) -> Result<Qwen35GgufServed, String> {
+    gguf_resident_banked(gguf_path, id, gpus, reserved, cfg, None)
+}
+
+/// [`gguf_resident`] with an adapter bank of `bank` built beside the weights
+/// (its device bytes are part of the placement), so adapters can be offered
+/// on it ([`AdapterHost`]).
+pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35GgufServeConfig, bank: Option<AdapterBankSettings>) -> Result<Qwen35GgufServed, String> {
     use qwen35::int8_gguf_resident::{auto_cap, resident_config, Qwen35GgufResident};
     let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
     let (tier, kv, max_batch, prefix_slots) = (cfg.tier_or_default(), cfg.kv_or_default(), cfg.max_batch_or_default(), cfg.prefix_slots_or_default());
@@ -343,10 +356,96 @@ pub fn gguf_resident(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u
             auto_cap(&model_cfg, &devices, &tier, kv, max_batch, prefix_slots).ok_or_else(|| format!("{gguf_path} does not fit across the {} budgeted device(s) even with a one-token context", devices.len()))?
         }
     };
-    let resident = Qwen35GgufResident::new(gguf_path.to_string(), devices, cap, tier).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_model_id(id);
+    let mut resident = Qwen35GgufResident::new(gguf_path.to_string(), devices, cap, tier).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_model_id(id);
+    if let Some(bank) = &bank {
+        resident = resident.with_adapter_bank(bank.request());
+    }
     match resident.unservable_reason() {
         Some(reason) => Err(reason),
-        None => Ok(resident),
+        None => Ok(Qwen35GgufServed::new(resident, bank, gguf_path, id)),
+    }
+}
+
+/// A released Qwen3.8 GGUF resident with the adapters offered beside it.
+///
+/// Everything about the model is [`Qwen35GgufResident`]'s (it derefs to it:
+/// placement, activation, the engine); this adds the registry of adapters the
+/// operator wants served and the instance that applies them. Each served
+/// adapter is a model of its own ([`crate::adapter_registry::AdapterView`])
+/// registered with the executor beside this one, sharing its instance, so a
+/// batch mixes base and adapter requests in one batched decode step.
+pub struct Qwen35GgufServed {
+    inner: qwen35::int8_gguf_resident::Qwen35GgufResident,
+    adapters: Arc<AdapterRegistry>,
+}
+
+impl Qwen35GgufServed {
+    fn new(inner: qwen35::int8_gguf_resident::Qwen35GgufResident, bank: Option<AdapterBankSettings>, gguf_path: &str, id: &str) -> Qwen35GgufServed {
+        // An adapter trains on the full-precision release and serves on its
+        // quantisation: the card names the release, not this file.
+        let base = ServedBase::of_family(QWEN35_FAMILY, gguf_path, Some(id.to_string())).quantizing(&QWEN35_SOURCES);
+        Qwen35GgufServed { inner, adapters: AdapterRegistry::new(bank, base) }
+    }
+}
+
+/// Ids of the full-precision releases the Qwen3.8-27B quantisations are made
+/// from, which an adapter's card names as its base.
+const QWEN35_SOURCES: [&str; 2] = ["Qwen/Qwen3.8-27B-FP8", "Qwen/Qwen3.8-27B"];
+
+impl std::ops::Deref for Qwen35GgufServed {
+    type Target = qwen35::int8_gguf_resident::Qwen35GgufResident;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AdapterHost for Qwen35GgufServed {
+    fn adapters(&self) -> &Arc<AdapterRegistry> {
+        &self.adapters
+    }
+
+    fn register_view(self: &Arc<Self>, executor: &residency::Executor, adapter: LoadedAdapter) -> Result<(), String> {
+        executor.register_multi(Arc::new(self.adapter_view(adapter)?));
+        Ok(())
+    }
+}
+
+impl ResidentModel for Qwen35GgufServed {
+    fn manifest(&self) -> Manifest {
+        self.inner.manifest()
+    }
+    fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
+        self.inner.instance_key(action, inv)
+    }
+    fn estimate(&self, key: &InstanceKey) -> MemCost {
+        self.inner.estimate(key)
+    }
+    fn batch_limit(&self) -> Option<usize> {
+        self.inner.batch_limit()
+    }
+    fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        self.inner.activate(key, device)
+    }
+}
+
+impl MultiDeviceResidentModel for Qwen35GgufServed {
+    fn unavailable_reason(&self, key: &InstanceKey) -> Option<String> {
+        self.inner.unavailable_reason(key)
+    }
+    fn estimate_multi(&self, key: &InstanceKey) -> MultiDeviceCost {
+        self.inner.estimate_multi(key)
+    }
+
+    /// The served instance: the checkpoint as a `Qwen35GgufEngine` (with its
+    /// adapter bank, when one was asked for) under the generic
+    /// continuous-batching scheduler, so up to `max_batch` requests of the
+    /// base and of any adapters decode in ONE batched step per iteration.
+    fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        let (engine, tok, stop) = self.inner.activate_engine(devices)?;
+        let capacity = self.inner.max_batch() as usize;
+        let sched = model::serve::Scheduler::new(engine, capacity);
+        let front = llmserve::TextFrontend { tok, stop, label: "qwen35", parse: qwen35::int8_gguf_resident::parse_request };
+        Ok(Box::new(AdaptedInstance::new(front, sched, capacity, self.adapters.clone())))
     }
 }
 

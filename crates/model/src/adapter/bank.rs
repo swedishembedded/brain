@@ -209,6 +209,62 @@ impl fmt::Debug for AdapterTargets {
     }
 }
 
+/// An engine with an adapter bank, as a registry drives it: adapters are
+/// registered into and removed from the bank by their content digest.
+/// Implemented by every serving engine that owns an [`AdapterBank`].
+pub trait BankedEngine {
+    /// Register a verified adapter (host memory only); see [`AdapterBank::register`].
+    fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError>;
+    /// Unload an adapter, or mark it draining while sequences still use it.
+    fn unload_adapter(&mut self, id: AdapterId) -> Result<UnloadStatus, AdapterError>;
+}
+
+/// How an operator sized a bank, before any model is known: slots, rank cap
+/// and the target choice. [`AdapterBankRequest::config`] resolves it against a
+/// model; a resident that places a model on cards uses [`Self::device_bytes_by_layer`]
+/// to charge the bank to the stage that holds each layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdapterBankRequest {
+    pub slots: u32,
+    pub rank_cap: u32,
+    pub targets: AdapterTargets,
+    pub max_registered: u32,
+}
+
+impl AdapterBankRequest {
+    /// The bank configuration for `model`.
+    ///
+    /// # Errors
+    ///
+    /// A target the model has no site for ([`AdapterTargets::resolve`]).
+    pub fn config<M: AdapterServing + ?Sized>(&self, model: &M) -> Result<AdapterBankConfig, String> {
+        let mut cfg = AdapterBankConfig::new(self.slots, self.rank_cap, &self.targets.resolve(model)?);
+        cfg.max_registered = self.max_registered;
+        Ok(cfg)
+    }
+}
+
+impl AdapterBankConfig {
+    /// Device bytes of the sites of each layer `0..n_layers` (the per-stage
+    /// term of [`AdapterBankConfig::device_bytes`], without the row scratch).
+    pub fn device_bytes_by_layer<M: LoraSites + ?Sized>(&self, model: &M, n_layers: usize) -> Vec<u64> {
+        let (s, r) = (self.slots as u64, self.r_max as u64);
+        let mut by_layer = vec![0u64; n_layers];
+        for site in model.lora_sites().iter().filter(|site| self.targets_site(site)) {
+            if let Some(l) = site.layer.filter(|&l| l < n_layers) {
+                by_layer[l] += s * r * (site.spec.inn + site.spec.out) as u64 * 4 + s * 4;
+            }
+        }
+        by_layer
+    }
+
+    /// Device bytes of the row scratch every bank carries for forwards of at
+    /// most `rows` rows.
+    pub fn row_scratch_bytes(&self, rows: u32) -> u64 {
+        rows as u64 * 4 + rows as u64 * self.r_max as u64 * 4
+    }
+}
+
 /// Something that names one linear by its site leaf, so a bank can be
 /// configured from a model's own typed site names as well as from strings.
 pub trait SiteLeaf {

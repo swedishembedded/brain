@@ -65,9 +65,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
 
-use catalog::adapter_registry::{AdapterBankSettings, AdapterTargets};
+use catalog::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterTargets};
 use catalog::adapter_release::verify_adapter;
 use catalog::resident_llm::QwenResident;
+use catalog::resident_qwen35::Qwen35GgufServed;
 use checkpoint::st::{self, ModelCard};
 use residency::multi::MultiDeviceResidentModel;
 use residency::ResidentModel;
@@ -110,6 +111,9 @@ pub struct Discovered {
     /// `Executor::register_multi` (a plain `register` would budget only one of
     /// the cards they occupy). Every entry places on at least one budgeted card.
     pub multi: Vec<Arc<dyn MultiDeviceResidentModel>>,
+    /// The released Qwen3.8 GGUFs among `multi`, as concrete handles: adapters
+    /// are offered on them ([`catalog::adapter_registry::AdapterHost`]).
+    pub qwen35: Vec<Arc<Qwen35GgufServed>>,
     /// Every [`DiscoveryError`] a compound model produced -- a partial scan
     /// still serves what it can.
     pub errors: Vec<DiscoveryError>,
@@ -150,7 +154,8 @@ pub fn discover(dir: &Path, settings: &ScanSettings) -> Discovered {
     for local in adapters {
         scan.register_adapter(local);
     }
-    Discovered { residents: scan.out, multi: scan.multi, errors }
+    let qwen35 = scan.qwen35_bases.values().cloned().collect();
+    Discovered { residents: scan.out, multi: scan.multi, qwen35, errors }
 }
 
 /// Whether `local` is a released Qwen3.8 GGUF: served from the file itself by
@@ -190,8 +195,15 @@ struct Scan {
     /// The Qwen3 bases built so far, by card id: the adapter found beside one
     /// is served as a view over it ([`Scan::register_adapter`]).
     qwen_bases: BTreeMap<String, Arc<QwenResident>>,
+    /// The released Qwen3.8 GGUFs built so far, by served id: an adapter found
+    /// beside one is served as a view over it ([`Scan::register_adapter`]).
+    qwen35_bases: BTreeMap<String, Arc<Qwen35GgufServed>>,
     /// Multi-device residents ([`Discovered::multi`]).
     multi: Vec<Arc<dyn MultiDeviceResidentModel>>,
+    /// The adapter bank every released Qwen3.8 GGUF is built with: the
+    /// operator's, else sized to hold every Qwen3.8 adapter the store has,
+    /// else none.
+    qwen35_bank: Option<AdapterBankSettings>,
     settings: ScanSettings,
     /// The adapter bank each base that has adapters in the store is built
     /// with, by base card id.
@@ -202,7 +214,12 @@ impl Scan {
     fn new(settings: &ScanSettings, adapters: &[&brain_modelstore::LocalModel]) -> Scan {
         let qwen_cfg = settings.qwen.clone();
         let mut banks: BTreeMap<String, AdapterBankSettings> = BTreeMap::new();
+        let mut qwen35_bank = qwen_cfg.adapter_bank.clone();
         for local in adapters {
+            if let (None, Some(card)) = (&qwen_cfg.adapter_bank, local.card.as_ref().filter(|c| brain_family(&c.family) == "qwen35")) {
+                qwen35_bank = Some(widen_to_hold(qwen35_bank.take().unwrap_or_default(), card));
+                continue;
+            }
             let Some((base, card)) = local.card.as_ref().and_then(|c| Some((base_id_of(&c.id)?, c))) else { continue };
             // The bank an operator sized with flags is theirs; otherwise it
             // is sized to hold every adapter the store has for the base, so
@@ -212,7 +229,7 @@ impl Scan {
                 *bank = widen_to_hold(bank.clone(), card);
             }
         }
-        Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), multi: Vec::new(), settings: settings.clone(), banks }
+        Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), qwen35_bases: BTreeMap::new(), multi: Vec::new(), qwen35_bank, settings: settings.clone(), banks }
     }
 
     /// The serving config for the Qwen3 base `id`: the operator's, plus a
@@ -231,22 +248,42 @@ impl Scan {
             eprintln!("brain: skip {shown} ({e})");
             return;
         }
-        let Some(base) = base_id_of(&card.id).and_then(|b| self.qwen_bases.get(&b).cloned()) else {
-            eprintln!("brain: skip {shown} (its base is not served as a Qwen3 model, so adapter {} has nothing to ride on)", card.id);
+        let named = base_id_of(&card.id);
+        let on_qwen = named.as_ref().and_then(|b| self.qwen_bases.get(b).cloned());
+        let on_qwen35 = named.as_ref().and_then(|b| self.qwen35_bases.get(b).cloned()).or_else(|| self.released_base_of(card));
+        if on_qwen.is_none() && on_qwen35.is_none() {
+            eprintln!("brain: skip {shown} (its base is not served as a Qwen3 or Qwen3.8 model, so adapter {} has nothing to ride on)", card.id);
             return;
-        };
+        }
         if !self.seen.insert(card.id.clone()) {
             eprintln!("brain: skip {shown} (duplicate model id '{}')", card.id);
             return;
         }
-        let view = verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded));
-        match view {
-            Ok(view) => self.out.push(Arc::new(view)),
-            Err(e) => {
-                self.seen.remove(&card.id);
-                eprintln!("brain: skip {shown} ({e})");
-            }
+        let kept = match (on_qwen, on_qwen35) {
+            (Some(base), _) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| self.out.push(Arc::new(view))),
+            (None, Some(base)) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| self.multi.push(Arc::new(view))),
+            (None, None) => unreachable!("checked above"),
+        };
+        if let Err(e) = kept {
+            self.seen.remove(&card.id);
+            eprintln!("brain: skip {shown} ({e})");
         }
+    }
+
+    /// The released Qwen3.8 GGUF a carded adapter rides on when its id does
+    /// not name one exactly (a quant-qualified id names the file, a served id
+    /// of a repo with one quant does not): the GGUF whose served id is the
+    /// card's base, else the one that quantises the full-precision release the
+    /// card names. `None` when none matches or several do (the card's base
+    /// must then name the one it rides on).
+    fn released_base_of(&self, card: &ModelCard) -> Option<Arc<Qwen35GgufServed>> {
+        let named = card.adapter.as_ref()?.base.as_deref()?;
+        if let Some(served) = self.qwen35_bases.get(named) {
+            return Some(served.clone());
+        }
+        let mut matching = self.qwen35_bases.values().filter(|b| b.served_base().quantizes(named));
+        let first = matching.next()?.clone();
+        matching.next().is_none().then_some(first)
     }
 
     /// Dispatch one carded file to its family's resident and keep it (deduped
@@ -300,8 +337,12 @@ impl Scan {
     /// listed, and the id is freed for a later duplicate to claim.
     fn register_released_qwen35(&mut self, weights: &str, id: &str) {
         let ScanSettings { gpus, reserved, qwen35, .. } = &self.settings;
-        match catalog::resident_qwen35::gguf_resident(weights, id, gpus, *reserved, &qwen35.gguf) {
-            Ok(resident) => self.multi.push(Arc::new(resident)),
+        match catalog::resident_qwen35::gguf_resident_banked(weights, id, gpus, *reserved, &qwen35.gguf, self.qwen35_bank.clone()) {
+            Ok(resident) => {
+                let resident = Arc::new(resident);
+                self.qwen35_bases.insert(id.to_string(), resident.clone());
+                self.multi.push(resident);
+            }
             Err(reason) => {
                 eprintln!("brain: skip {id} ({weights}: {reason})");
                 self.seen.remove(id);
@@ -1116,6 +1157,63 @@ mod tests {
         base.stamp(&mut forged);
         assert_eq!(forged.get_str("__adapter"), None, "a caller reaching the base cannot select an adapter");
         assert!(base.estimate(&base.instance_key("generate", &inv)).vram == adapter.estimate(&adapter.instance_key("generate", &inv)).vram, "the view is budgeted as the base");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Adapters ride on a released Qwen3.8 GGUF the way they ride on a Qwen3:
+    /// each is a view of the multi-card base (its instance key, its placement),
+    /// found beside the base by its id or, when its card names the full-precision
+    /// release the GGUF quantises, by that; a Qwen3 adapter does not attach, and
+    /// the bank the adapters need is part of the base's placement.
+    #[test]
+    fn a_released_qwen35_gguf_serves_its_adapters_as_views_of_one_multi_card_model() {
+        let dir = tmp_dir("released-qwen35-adapters");
+        let gguf = put_released_qwen35(&dir, "unsloth", "Qwen3.8-27B-GGUF", "Q8_0.gguf");
+        let plain = discover(&dir, &two_p40s());
+        let plain_key = plain.multi[0].instance_key("generate", &capability::Invocation::new());
+        let plain_bytes: u64 = plain.multi[0].estimate_multi(&plain_key).devices().map(|d| plain.multi[0].estimate_multi(&plain_key).on(d)).sum();
+        assert!(plain.qwen35.len() == 1 && plain.multi.len() == 1);
+        let repo = gguf.parent().unwrap().to_path_buf();
+
+        let put_adapter = |id: &str, family: &str, slot: &str, base: &str| -> PathBuf {
+            use brain_testutil::adapters::{write_lora_adapter_of, Linear};
+            let adapter_dir = repo.join("adapters").join("lab").join(slot).join("v1");
+            std::fs::create_dir_all(&adapter_dir).unwrap();
+            let file = adapter_dir.join("adapter.brain.safetensors");
+            let leaf = if family == "qwen35" { "linear_attn.in_proj_qkv" } else { "attn.wq" };
+            write_lora_adapter_of(family, &file, id, base, 4, &[Linear { base: format!("blocks.0.{leaf}.weight"), out: 6, inn: 3 }], 3);
+            file
+        };
+        // The store files an adapter under the GGUF's repo and names its
+        // quant; the card's base says which model it was trained for.
+        let by_gguf_id = "unsloth/Qwen3.8-27B-GGUF-Q8_0:lab:by-id:v1";
+        let by_release = "unsloth/Qwen3.8-27B-GGUF-Q8_0:lab:by-release:v1";
+        let wrong_family = "unsloth/Qwen3.8-27B-GGUF-Q8_0:lab:wrong:v1";
+        let file = put_adapter(by_gguf_id, "qwen35", "by-id", "unsloth/Qwen3.8-27B-GGUF");
+        put_adapter(by_release, "qwen35", "by-release", "Qwen/Qwen3.8-27B-FP8");
+        put_adapter(wrong_family, "qwen", "wrong", "unsloth/Qwen3.8-27B-GGUF");
+
+        let found = discover(&dir, &two_p40s());
+        let mut want = vec![by_release.to_string(), by_gguf_id.to_string(), "unsloth/Qwen3.8-27B-GGUF".to_string()];
+        want.sort();
+        assert_eq!(multi_ids(&found), want, "the base and its two Qwen3.8 adapters; the Qwen3 adapter is not served");
+        assert!(found.residents.is_empty(), "views of a multi-card model are multi-card models");
+        let base = found.multi.iter().find(|m| m.manifest().model == "unsloth/Qwen3.8-27B-GGUF").unwrap();
+        let inv = capability::Invocation::new();
+        let key = base.instance_key("generate", &inv);
+        for id in [by_gguf_id, by_release] {
+            let view = found.multi.iter().find(|m| m.manifest().model == id).unwrap_or_else(|| panic!("{id} not served"));
+            assert_eq!(view.instance_key("generate", &inv), key, "base and adapter are one instance, so they batch");
+            assert_eq!(view.estimate_multi(&key).devices().collect::<Vec<_>>(), base.estimate_multi(&key).devices().collect::<Vec<_>>(), "the view is placed as the base");
+            let mut stamped = capability::Invocation::new();
+            view.stamp(&mut stamped);
+            assert_eq!(stamped.get_str("__adapter").as_deref(), Some(id));
+        }
+        let view = found.multi.iter().find(|m| m.manifest().model == by_gguf_id).unwrap();
+        assert_eq!(view.adapter_identity().map(|a| (a.id, a.digest)), Some((by_gguf_id.to_string(), brain_modelstore::fetch::file_digest(&file).unwrap())));
+        let banked_bytes: u64 = base.estimate_multi(&key).devices().map(|d| base.estimate_multi(&key).on(d)).sum();
+        assert!(banked_bytes > plain_bytes, "the adapter bank the store's adapters need is part of the base's placement ({banked_bytes} vs {plain_bytes})");
+        assert!(found.errors.is_empty(), "{:?}", found.errors);
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -2568,6 +2568,7 @@ dependencies = [
  "brain-residency",
  "brain-s3dit",
  "brain-supir",
+ "brain-testutil",
  "brain-wan",
  "serde_json",
 ]

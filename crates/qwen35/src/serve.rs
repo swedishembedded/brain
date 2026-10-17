@@ -156,7 +156,7 @@
 use std::collections::HashMap;
 
 use gpu_core::{DeviceBuffer, Gpu};
-use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, UnloadStatus, VerifiedAdapter};
+use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, BankedEngine, UnloadStatus, VerifiedAdapter};
 use model::gdn::{RecurrentSlot, RecurrentSlotShape};
 use model::kv_tier::{KvLayer, KvTier};
 use model::paged::{BlockAllocator, BlockTable};
@@ -681,6 +681,15 @@ impl PagedDecoder for Engine {
     }
     fn unpin_adapter(&mut self, adapter: AdapterId) {
         adapters::unpin(std::iter::once(&self.model), adapter);
+    }
+}
+
+impl BankedEngine for Engine {
+    fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
+        Engine::load_adapter(self, adapter)
+    }
+    fn unload_adapter(&mut self, id: AdapterId) -> Result<UnloadStatus, AdapterError> {
+        Engine::unload_adapter(self, id)
     }
 }
 

@@ -24,10 +24,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use catalog::adapter_registry::LiveAdapters;
+use catalog::adapter_registry::{AdapterHost, LiveAdapters};
 use catalog::adapter_release::{load_adapter, verify_adapter, LoadedAdapter, ManifestFollower, ManifestPoll};
 use catalog::resident_llm::QwenResident;
-use residency::Executor;
+use catalog::resident_qwen35::Qwen35GgufServed;
+use residency::{Executor, ResidentModel};
 
 /// Where `brain serve`'s Qwen3 gets its LoRA adapter from. One source at
 /// most. Each source names its adapters by their own card ids, so combining
@@ -100,8 +101,8 @@ impl Follow {
 /// to keep serving, and serving the base in its place would answer requests
 /// for a model the operator did not ask for. A manifest that does not
 /// exist yet offers the base alone until one is published.
-pub fn start_adapter_mode(mode: AdapterMode, resident: Option<&Arc<QwenResident>>, executor: &Executor) -> Result<(Option<Follow>, Option<String>), String> {
-    let required = |flag: &str| resident.ok_or_else(|| format!("{flag} needs a served Qwen3 to put the adapter on; name its checkpoint with BRAIN_QWEN_WEIGHTS=<dir-or-file>"));
+pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&Arc<R>>, executor: &Executor) -> Result<(Option<Follow>, Option<String>), String> {
+    let required = |flag: &str| resident.ok_or_else(|| format!("{flag} needs a served Qwen3 or Qwen3.8 to put the adapter on; name a Qwen3 checkpoint with BRAIN_QWEN_WEIGHTS=<dir-or-file>, or serve one released Qwen3.8 GGUF from the model directory"));
     match mode {
         AdapterMode::Base => Ok((None, None)),
         AdapterMode::Latest(dir) => Ok((Some(Follow::latest(dir)), None)),
@@ -129,6 +130,49 @@ pub fn start_adapter_mode(mode: AdapterMode, resident: Option<&Arc<QwenResident>
                 }
             };
             Ok((Some(Follow { source: FollowSource::Manifest(follower), served }), line))
+        }
+    }
+}
+
+/// Where `--adapter`, `--adapter-manifest` and `--watch-adapters` put their
+/// adapter: the env-selected Qwen3, else the one released Qwen3.8 GGUF the
+/// model scan served. Which of several is ambiguous and is refused by name.
+pub enum Host {
+    /// Nothing the adapters could ride on.
+    None,
+    Qwen(Arc<QwenResident>),
+    Qwen35(Arc<Qwen35GgufServed>),
+    /// Several released Qwen3.8 GGUFs are served and no Qwen3: the ids.
+    Ambiguous(Vec<String>),
+}
+
+impl Host {
+    /// The host for a server that serves `qwen` and `qwen35`.
+    pub fn pick(qwen: Option<Arc<QwenResident>>, qwen35: &[Arc<Qwen35GgufServed>]) -> Host {
+        match (qwen, qwen35) {
+            (Some(q), _) => Host::Qwen(q),
+            (None, []) => Host::None,
+            (None, [one]) => Host::Qwen35(one.clone()),
+            (None, many) => Host::Ambiguous(many.iter().map(|m| m.manifest().model).collect()),
+        }
+    }
+
+    /// [`start_adapter_mode`] on this host.
+    pub fn start(&self, mode: AdapterMode, executor: &Executor) -> Result<(Option<Follow>, Option<String>), String> {
+        match self {
+            Host::Qwen(q) => start_adapter_mode(mode, Some(q), executor),
+            Host::Qwen35(g) => start_adapter_mode(mode, Some(g), executor),
+            Host::Ambiguous(ids) if mode != AdapterMode::Base => Err(format!("{} models could take the adapter ({}); serve one Qwen3.8 GGUF, or put the adapter in the model directory under the id of the one it rides on", ids.len(), ids.join(", "))),
+            Host::None | Host::Ambiguous(_) => start_adapter_mode::<QwenResident>(mode, None, executor),
+        }
+    }
+
+    /// [`spawn_adapter_watcher`] on this host.
+    pub fn watch(self, follow: Option<Follow>, executor: &Executor) -> Option<AdapterWatcher> {
+        match self {
+            Host::Qwen(q) => spawn_adapter_watcher(follow, Some(q), executor),
+            Host::Qwen35(g) => spawn_adapter_watcher(follow, Some(g), executor),
+            Host::None | Host::Ambiguous(_) => spawn_adapter_watcher::<QwenResident>(follow, None, executor),
         }
     }
 }
@@ -210,7 +254,7 @@ pub(crate) fn ignored_watch_warning(dir: Option<&Path>, has_resident: bool) -> O
 /// `follow` is `None` (no following flag was given - the default, or a
 /// pinned adapter) or `resident` is `None` (this process serves no Qwen3, so
 /// no adapter could be applied to anything).
-pub fn spawn_adapter_watcher(follow: Option<Follow>, resident: Option<Arc<QwenResident>>, executor: &Executor) -> Option<AdapterWatcher> {
+pub fn spawn_adapter_watcher<R: AdapterHost>(follow: Option<Follow>, resident: Option<Arc<R>>, executor: &Executor) -> Option<AdapterWatcher> {
     // No flag: the default, and correctly silent.
     let mut follow = follow?;
     // A directory to watch but nothing to apply an adapter to. This is a
@@ -409,9 +453,9 @@ mod tests {
         let executor = Executor::start(Vec::new(), budgets, Policy::default());
         let dir = tmp("watcher-off");
 
-        assert!(spawn_adapter_watcher(None, None, &executor).is_none(), "no --watch-adapters must spawn no watcher");
+        assert!(spawn_adapter_watcher::<QwenResident>(None, None, &executor).is_none(), "no --watch-adapters must spawn no watcher");
         assert!(
-            spawn_adapter_watcher(Some(Follow::latest(dir)), None, &executor).is_none(),
+            spawn_adapter_watcher::<QwenResident>(Some(Follow::latest(dir)), None, &executor).is_none(),
             "a watched directory with no served Qwen3 has nothing to offer an adapter on, so it must spawn no watcher either"
         );
     }
@@ -630,7 +674,7 @@ mod tests {
             panic!("a server without an adapter bank cannot offer an adapter");
         };
         assert!(err.contains("--adapter-slots"), "{err}");
-        assert!(start_adapter_mode(AdapterMode::Pinned(adapter), None, &executor).is_err(), "an adapter with no Qwen3 to put it on is an error");
+        assert!(start_adapter_mode::<QwenResident>(AdapterMode::Pinned(adapter), None, &executor).is_err(), "an adapter with no Qwen3 to put it on is an error");
     }
 
     /// `--adapter-manifest`: a replaced manifest offers the new release only

@@ -57,7 +57,18 @@ Three things put an adapter in front of the base:
   `<vendor>/<repo>/adapters/<owner>/<name>/<tag>/` for a served Qwen3 base
   offers each as `<vendor>/<repo>:<owner>:<name>:<tag>`;
 - `--adapter FILE`, `--adapter-manifest FILE` or `--watch-adapters DIR` (below)
-  for the Qwen3 selected with `BRAIN_QWEN_WEIGHTS`.
+  for the Qwen3 selected with `BRAIN_QWEN_WEIGHTS`, or, when there is none, for
+  the one released Qwen3.8 GGUF the model directory serves (several are
+  ambiguous and refused by name: put the adapter in the model directory under
+  the id of the one it rides on).
+
+A released Qwen3.8 GGUF takes adapters the same way (card family `qwen35`, as
+`brain qwen35 finetune` writes them), on its multi-card INT8 weights: the
+adapter is found under the GGUF's repo directory, or by the full-precision
+release its card names as its base (`Qwen/Qwen3.8-27B-FP8`), which the GGUF
+quantises - an adapter is trained on the release and served on the
+quantisation, so the digest of the GGUF is not the one the card records. An
+adapter of the other family is refused by family.
 
 ### The adapter bank
 
@@ -70,7 +81,9 @@ above, or by one of these flags - and costs nothing otherwise:
   is swapped out of its slot when another is needed.
 - `--adapter-rank-cap R` - the highest LoRA rank a slot holds (default 16).
 - `--adapter-targets LIST` - the linears the bank corrects: `attention`
-  (the default; `wq,wk,wv,wo` on Qwen3, what the default LoRA training targets),
+  (the default; `wq,wk,wv,wo` on Qwen3, what the default LoRA training targets;
+  the Gated-DeltaNet and attention projections on Qwen3.8 - an adapter that also
+  trains the MLP needs `all`),
   `all` (every adapter site the model has), or a comma-separated list of the
   model's site names (`wq wk wv wo gate up down` on Qwen3). A name the model
   has no site for is refused when the bank is built, listing the ones it has.

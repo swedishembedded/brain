@@ -29,7 +29,7 @@ use checkpoint::st::ModelCard;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
-use crate::adapter_registry::{AdapterBankSettings, AdapterRegistry, AdapterSync, QwenAdapterView, ADAPTER_PARAM};
+use crate::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterRegistry, AdapterSync, QwenAdapterView, ADAPTER_PARAM};
 use crate::adapter_release::{LoadedAdapter, ServedBase};
 use llmserve::{run_batch_scheduled, run_open_scheduled, scheduler_metrics, Frontend};
 
@@ -616,6 +616,17 @@ fn resolve_served_base(spec: &str) -> (String, Option<std::path::PathBuf>, Optio
     match loader::model_dir::resolve_base(spec, None) {
         Ok((weights, dir, id)) => (qwen3::store_checkpoint_path(&weights, &dir).to_string_lossy().into_owned(), Some(dir), Some(id)),
         Err(_) => (spec.to_string(), None, None),
+    }
+}
+
+impl AdapterHost for QwenResident {
+    fn adapters(&self) -> &Arc<AdapterRegistry> {
+        &self.adapters
+    }
+
+    fn register_view(self: &Arc<Self>, executor: &residency::Executor, adapter: LoadedAdapter) -> Result<(), String> {
+        executor.register(Arc::new(self.adapter_view(adapter)?));
+        Ok(())
     }
 }
 

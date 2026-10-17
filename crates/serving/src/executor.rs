@@ -45,6 +45,10 @@ pub struct Serving {
     /// `None` when `BRAIN_QWEN_WEIGHTS` names no checkpoint, i.e. this
     /// process serves no env-selected Qwen3 for an adapter flag to apply to.
     pub qwen: Option<Arc<QwenResident>>,
+    /// The released Qwen3.8 GGUFs the model scan registered, as concrete
+    /// handles for the same reason: an adapter flag (or a watcher) offers its
+    /// adapters on the allocation the executor holds.
+    pub qwen35: Vec<Arc<catalog::resident_qwen35::Qwen35GgufServed>>,
 }
 
 /// Register `qwen` (when its weights are configured) as an ordinary erased
@@ -346,6 +350,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // that span several cards (released Qwen3.8 GGUFs) are held back for
     // `register_multi` once the executor runs.
     let mut multi_discovered: Vec<Arc<dyn MultiDeviceResidentModel>> = Vec::new();
+    let mut qwen35_discovered: Vec<Arc<catalog::resident_qwen35::Qwen35GgufServed>> = Vec::new();
     if let Some(dir) = models_dir {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
         let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), gpus: gpus.clone(), reserved };
@@ -365,6 +370,13 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
                 continue;
             }
             multi_discovered.push(m);
+        }
+        for q in discovered.qwen35 {
+            // Only the ones that were registered (not shadowed above).
+            let id = q.manifest().model;
+            if multi_discovered.iter().any(|m| m.manifest().model == id) {
+                qwen35_discovered.push(q);
+            }
         }
         for e in &discovered.errors {
             eprintln!("brain: {} (family '{}') not registered: {} -- check its brain.manifest.json roles, or re-fetch it", e.dir.display(), e.family, e.reason);
@@ -424,7 +436,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     for m in multi_discovered {
         exec.register_multi(m);
     }
-    Serving { executor: exec, qwen }
+    Serving { executor: exec, qwen, qwen35: qwen35_discovered }
 }
 
 #[cfg(test)]
