@@ -137,7 +137,7 @@ mod prefix;
 mod mtp;
 mod speculate;
 pub use speculate::{SpecServing, SpeculativeMode};
-pub use engine::{Qwen35GgufEngine, SpecTimes};
+pub use engine::{PrefillPolicy, Qwen35GgufEngine, SpecTimes};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -163,7 +163,7 @@ use serde_json::json;
 
 use crate::adapter_serving as adapters;
 use crate::config::{LayerType, Qwen35Config};
-use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, Qwen35, SpecDecodeStats};
+use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, PooledCaches, PrefillSeg, Qwen35, SpecDecodeStats};
 
 /// Catalog id. Names the real upstream release this resident loads, exactly
 /// (`https://huggingface.co/unsloth/Qwen3.8-27B-GGUF`, the `Q8_0` file) -
@@ -736,7 +736,22 @@ impl ShardCaches {
         DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.cap, gqa_base_row: slot * self.cap, gdn_state: &self.work_state, gdn_hist: &self.work_hist }
     }
 
-    /// The batch's rows: row `i` decodes slot `slots[i]` at absolute position
+    /// The pools as a multi-sequence prefill round works on them
+    /// ([`Qwen35::run_prefill_multi_stage`]): every sequence by its slot.
+    fn pooled(&self) -> PooledCaches<'_> {
+        PooledCaches {
+            gqa_kv: &self.gqa_kv,
+            gqa_cap: self.cap,
+            gdn_state: &self.pool_state,
+            gdn_hist: &self.pool_hist,
+            work_state: &self.work_state,
+            work_hist: &self.work_hist,
+            gather: self.gather,
+            scatter: self.scatter,
+        }
+    }
+
+    /// The batch's rows: row `i` decodes slot `slot[i]` at absolute position
     /// `positions[i]`. Rows name their slots, so a batch is any subset of the
     /// resident sequences in any order - what lets sequences join and leave
     /// between steps without renumbering the ones that stay. The GDN state is
@@ -748,6 +763,23 @@ impl ShardCaches {
     fn gdn_pool(&self) -> GdnPoolStore<'_> {
         GdnPoolStore { state: &self.pool_state, hist: &self.pool_hist }
     }
+}
+
+/// One sequence's share of a [`Qwen35GgufInstance::prefill_hidden_multi`] forward.
+struct MultiPrefillJob<'a> {
+    prompt: &'a [u32],
+    /// Prompt tokens `start..end` go in; `start` rows are already in the slot's KV window.
+    start: usize,
+    end: usize,
+    slot: u32,
+}
+
+/// What a multi-sequence forward hands back for one job.
+struct MultiPrefillRows {
+    /// The last row's `[d_model]` pre-norm hidden state.
+    last: Vec<f32>,
+    /// Every row's, in order, when asked for (the MTP head's input); else empty.
+    all: Vec<f32>,
 }
 
 /// The same generated positions scored by both of this crate's decode tapes -
@@ -1421,6 +1453,46 @@ impl Qwen35GgufInstance {
         Ok(last)
     }
 
+    /// Whether [`Self::prefill_hidden_multi`] can serve this instance now: a
+    /// multi-row round on every stage, no hidden taps armed (they record one
+    /// sequence's rows) and no served-adapter bank in play (its slot is one per
+    /// round). The sequential path serves everything else, identically.
+    fn multi_prefill_available(&self) -> bool {
+        self.taps.borrow().is_none()
+            && self.shards.iter().all(|s| s.qwen35.chunked_prefill_is_profitable() && s.qwen35.multi_prefill_supported())
+            && self.prefill_adapter_slot.get() == LORA_SLOT_NONE
+    }
+
+    /// [`Self::prefill_hidden`] for SEVERAL sequences in one forward: job `i`
+    /// prefills `prompt[start..end]` of slot `slot`, and every projection and MLP
+    /// runs once over the jobs' rows together (see
+    /// [`Qwen35::run_prefill_multi_stage`]).
+    ///
+    /// The state a sequence continues from is its pool row (not the working copy
+    /// the one-sequence path uses), so the caller has written it there first, and
+    /// the pool row is where the state is left. Returns each job's last row's
+    /// `[d_model]` pre-norm hidden state and, when `collect`, all its rows'.
+    fn prefill_hidden_multi(&self, jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<Vec<MultiPrefillRows>, String> {
+        let d = self.cfg.d_model as usize;
+        assert!(!jobs.is_empty() && jobs.iter().all(|j| j.start < j.end && j.end <= j.prompt.len()), "{MODEL}: a multi-sequence prefill needs at least one new token per job");
+        let tokens: Vec<u32> = jobs.iter().flat_map(|j| j.prompt[j.start..j.end].iter().copied()).collect();
+        let mut carry = self.embed_rows(&tokens)?;
+        for s in &self.shards {
+            let segs: Vec<PrefillSeg<'_>> =
+                jobs.iter().map(|j| PrefillSeg { tokens: &j.prompt[j.start..j.end], pos_start: j.start as u32, gqa_base_row: j.slot * self.cap, slot: j.slot }).collect();
+            carry = s.qwen35.prefill_multi_stage(&segs, &s.caches.pooled(), &carry);
+        }
+        let mut row0 = 0usize;
+        let mut out = Vec::with_capacity(jobs.len());
+        for j in jobs {
+            let rows = j.end - j.start;
+            let block = &carry[row0 * d..(row0 + rows) * d];
+            out.push(MultiPrefillRows { last: block[(rows - 1) * d..].to_vec(), all: if collect { block.to_vec() } else { Vec::new() } });
+            row0 += rows;
+        }
+        Ok(out)
+    }
+
     /// Seed slot `slot` with a cached prefix of `rows` tokens: KV rows `0..rows`
     /// copied from slot `from`, and the working GDN state restored from
     /// snapshot row `snap_row` (see [`Self::prefill_hidden`] with `start > 0`).
@@ -1436,6 +1508,20 @@ impl Qwen35GgufInstance {
     fn snapshot_prefill_state(&self, row: u32) {
         for s in &self.shards {
             s.caches.snapshot_work(&s.qwen35.gpu, &self.cfg, row);
+        }
+    }
+
+    /// Zero the working GDN state (a sequence about to be prefilled from nothing).
+    fn reset_work_state(&self) {
+        for s in &self.shards {
+            s.caches.reset_work(&s.qwen35.gpu);
+        }
+    }
+
+    /// Make slot `slot`'s pool row the working GDN state.
+    fn load_work_state(&self, slot: u32) {
+        for s in &self.shards {
+            s.caches.load_work(&s.qwen35.gpu, &self.cfg, slot);
         }
     }
 
@@ -2358,12 +2444,21 @@ pub struct Qwen35GgufResident {
     bank: Option<AdapterBankRequest>,
     /// Speculative decoding - [`Self::with_speculation`].
     spec: SpecServing,
+    /// How the engine spends prefill - [`Self::with_prefill_policy`].
+    prefill: PrefillPolicy,
     plan: OnceLock<Plan>,
 }
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), plan: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), prefill: PrefillPolicy::default(), plan: OnceLock::new() }
+    }
+
+    /// How the serving engine spends prefill between decode steps - the slice one
+    /// sequence gets and the rows one forward carries across sequences.
+    pub fn with_prefill_policy(mut self, policy: PrefillPolicy) -> Qwen35GgufResident {
+        self.prefill = policy;
+        self
     }
 
     /// Serve this resident under `id` instead of [`MODEL`] - what the
@@ -2683,6 +2778,7 @@ impl Qwen35GgufResident {
         let tok = QwenBpe::from_gguf(&gtok).map_err(|e| format!("{MODEL}: embedded tokenizer: {e}"))?;
         let stop = inst.eos.clone();
         let mut engine = Qwen35GgufEngine::new(inst);
+        engine.set_prefill_policy(self.prefill);
         if let Some(request) = &self.bank {
             // Refusing here is deliberate: a server asked for adapters that
             // cannot give them must say so, not serve the base under their names.

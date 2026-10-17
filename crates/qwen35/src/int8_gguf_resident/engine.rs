@@ -28,12 +28,12 @@ use gpu_core::DeviceStats;
 use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, BankedEngine, UnloadStatus, VerifiedAdapter};
 use model::dispatch::LORA_SLOT_NONE;
 use model::paged::{BlockAllocator, BlockTable, KvNamespace};
-use model::serve::{AdapterAvailability, AdapterId, DraftQuery, PagedDecoder, PrefillProgress};
+use model::serve::{AdapterAvailability, AdapterId, DraftQuery, PagedDecoder, PrefillJob, PrefillProgress};
 
 use crate::adapter_serving as adapters;
 
 use super::prefix::{Entry, PrefixCache, MIN_CACHED_TOKENS};
-use super::{Qwen35GgufInstance, MODEL};
+use super::{MultiPrefillJob, Qwen35GgufInstance, MODEL};
 
 /// Candidates a non-greedy pick can sample from. Real sampling is exact
 /// within this set; it only bounds how deep into the vocabulary nucleus
@@ -60,6 +60,7 @@ pub struct Qwen35GgufEngine {
     spec_batch_limit: usize,
     /// Wall time spent in the speculation hooks, for the benchmark.
     times: SpecTimes,
+    prefill: PrefillPolicy,
 }
 
 /// Where a speculating engine spends its time: the drafter, the verify
@@ -81,8 +82,24 @@ struct Verifying {
     hidden: Vec<f32>,
 }
 
-/// Prefill tokens per scheduler iteration while sequences are decoding.
-const PREFILL_SLICE_TOKENS: usize = 512;
+/// How the engine spends prefill between decode steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrefillPolicy {
+    /// Prompt tokens one sequence gets per scheduler iteration while others wait:
+    /// the stall every running sequence sees is the time to prefill the rows of
+    /// one iteration.
+    pub slice_tokens: usize,
+    /// Prompt rows one iteration prefills across sequences, in one forward (the
+    /// GEMMs see all of them, so the weights are read once for the lot); `0` runs
+    /// one sequence's slice at a time.
+    pub batch_tokens: usize,
+}
+
+impl Default for PrefillPolicy {
+    fn default() -> PrefillPolicy {
+        PrefillPolicy { slice_tokens: 512, batch_tokens: 1024 }
+    }
+}
 
 /// A prompt part of the way in.
 struct PartialPrefill {
@@ -116,7 +133,7 @@ impl Qwen35GgufEngine {
     pub fn new(inst: Qwen35GgufInstance) -> Qwen35GgufEngine {
         let alloc = BlockAllocator::new(inst.max_batch + inst.prefix_slots, inst.cap);
         let cache = PrefixCache::new(inst.prefix_slots);
-        Qwen35GgufEngine { inst, alloc, cache, pending: HashMap::new(), partial: HashMap::new(), verifying: None, spec_batch_limit: usize::MAX, times: SpecTimes::default() }
+        Qwen35GgufEngine { inst, alloc, cache, pending: HashMap::new(), partial: HashMap::new(), verifying: None, spec_batch_limit: usize::MAX, times: SpecTimes::default(), prefill: PrefillPolicy::default() }
     }
 
     /// Free the blocks of entries the cache retired.
@@ -169,6 +186,13 @@ impl Qwen35GgufEngine {
         }
     }
 
+    /// How prefill is spent between decode steps (see [`PrefillPolicy`]); call before
+    /// the engine is handed to a scheduler.
+    pub fn set_prefill_policy(&mut self, policy: PrefillPolicy) {
+        assert!(policy.slice_tokens > 0, "{MODEL}: a prefill slice of 0 tokens never finishes a prompt");
+        self.prefill = policy;
+    }
+
     /// Set the batch size past which the scheduler decodes plainly instead of
     /// speculating (the measured crossover; unbounded by default).
     pub fn set_spec_batch_limit(&mut self, limit: usize) {
@@ -219,46 +243,61 @@ impl Qwen35GgufEngine {
 }
 
 impl Qwen35GgufEngine {
-    fn prefill_slice(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
-        assert!(!prompt.is_empty(), "{MODEL}: empty prompt");
-        if table.is_empty() {
-            assert!(prompt.len() <= self.inst.cap as usize, "{MODEL}: prompt of {} tokens exceeds the per-sequence capacity of {}", prompt.len(), self.inst.cap);
-            if let Some(&bad) = prompt.iter().find(|&&t| t >= self.inst.cfg.vocab) {
-                panic!("{MODEL}: prompt token {bad} is outside the model vocabulary ({})", self.inst.cfg.vocab);
-            }
-            table.reserve(prompt.len() as u32, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
-            let slot = table.blocks()[0];
-            let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
-            let mut start = 0;
-            // The cached prefix's last hidden state: the MTP head's input at the
-            // position the new tokens continue from.
-            let mut prefix_hidden: Option<Vec<f32>> = None;
-            if cacheable {
-                if let Some(i) = self.cache.lookup(table.kv_namespace(), prompt) {
-                    let e = self.cache.entry(i);
-                    let (from, rows, snap) = (e.table.blocks()[0], e.tokens.len(), e.snap_row);
-                    self.inst.seed_from_prefix(from, slot, rows as u32, snap);
-                    self.inst.mtp_seed_prefix(from, slot, rows as u32);
-                    if rows == prompt.len() {
-                        // The whole prompt is cached: its state in place, no compute.
-                        let hidden = e.last_hidden.clone();
-                        self.inst.store_prefilled(slot);
-                        self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
-                        return PrefillProgress::Done(hidden);
-                    }
-                    prefix_hidden = Some(e.last_hidden.clone());
-                    start = rows;
-                }
-            }
-            self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new() });
+    /// A sequence's first slice: reserve its slot, look the prompt up in the prefix
+    /// cache and seed from it (the seeded recurrent state is left in the working
+    /// copy). `Some(hidden)` when the whole prompt was cached, so nothing needs
+    /// computing and the sequence is already complete; otherwise its progress is
+    /// recorded for [`Self::forward_slice`].
+    fn begin_prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Option<Vec<f32>> {
+        assert!(prompt.len() <= self.inst.cap as usize, "{MODEL}: prompt of {} tokens exceeds the per-sequence capacity of {}", prompt.len(), self.inst.cap);
+        if let Some(&bad) = prompt.iter().find(|&&t| t >= self.inst.cfg.vocab) {
+            panic!("{MODEL}: prompt token {bad} is outside the model vocabulary ({})", self.inst.cfg.vocab);
         }
+        table.reserve(prompt.len() as u32, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
         let slot = table.blocks()[0];
-        let mut p = self.partial.remove(&slot).expect("a prefill in progress has its state");
-        let end = p.done + budget.min(prompt.len() - p.done);
+        let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
+        let mut start = 0;
+        // The cached prefix's last hidden state: the MTP head's input at the
+        // position the new tokens continue from.
+        let mut prefix_hidden: Option<Vec<f32>> = None;
+        if cacheable {
+            if let Some(i) = self.cache.lookup(table.kv_namespace(), prompt) {
+                let e = self.cache.entry(i);
+                let (from, rows, snap) = (e.table.blocks()[0], e.tokens.len(), e.snap_row);
+                self.inst.seed_from_prefix(from, slot, rows as u32, snap);
+                self.inst.mtp_seed_prefix(from, slot, rows as u32);
+                if rows == prompt.len() {
+                    // The whole prompt is cached: its state in place, no compute.
+                    let hidden = e.last_hidden.clone();
+                    self.inst.store_prefilled(slot);
+                    self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
+                    return Some(hidden);
+                }
+                prefix_hidden = Some(e.last_hidden.clone());
+                start = rows;
+            }
+        }
+        self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new() });
+        None
+    }
+
+    /// One sequence's slice on its own, from the working copy of the recurrent
+    /// state (or the slot's pool row when `resume`): the rows `p.done..end` of
+    /// `prompt`. Returns the last row's hidden state.
+    fn forward_slice(&mut self, table: &BlockTable, prompt: &[u32], p: &mut PartialPrefill, end: usize, resume: bool) -> Vec<f32> {
+        let slot = table.blocks()[0];
         let collect = self.inst.has_mtp().then_some(&mut p.rows_hidden);
         self.inst.prefill_adapter_slot.set(adapters::slot_of(self.inst.stage_models(), table.kv_namespace()));
-        let hidden = self.inst.prefill_hidden(prompt, p.done, end, slot, !p.fresh && p.done > 0, collect).unwrap_or_else(|e| panic!("{e}"));
+        let hidden = self.inst.prefill_hidden(prompt, p.done, end, slot, resume, collect).unwrap_or_else(|e| panic!("{e}"));
         self.inst.prefill_adapter_slot.set(LORA_SLOT_NONE);
+        hidden
+    }
+
+    /// What follows a slice that took the sequence to `end`: record the progress, or
+    /// - when the prompt is in - hand the MTP head its hidden states and file the
+    /// prompt for reuse. `state_in_pool`: the recurrent state is in the slot's pool
+    /// row and not in the working copy (a multi-sequence forward leaves it there).
+    fn finish_slice(&mut self, slot: u32, prompt: &[u32], mut p: PartialPrefill, end: usize, hidden: Vec<f32>, state_in_pool: bool) -> PrefillProgress {
         let consumed = end - p.done;
         p.done = end;
         p.fresh = false;
@@ -271,11 +310,88 @@ impl Qwen35GgufEngine {
             let (row, evicted) = self.cache.take_row();
             self.release_retired(evicted);
             if let Some(row) = row {
+                if state_in_pool {
+                    self.inst.load_work_state(slot);
+                }
                 self.inst.snapshot_prefill_state(row);
                 self.pending.insert(slot, Pending { tokens: prompt.to_vec(), snap_row: row, last_hidden: hidden.clone() });
             }
         }
         PrefillProgress::Done(hidden)
+    }
+
+    fn prefill_slice(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
+        assert!(!prompt.is_empty(), "{MODEL}: empty prompt");
+        if table.is_empty() {
+            if let Some(hidden) = self.begin_prefill(table, prompt) {
+                return PrefillProgress::Done(hidden);
+            }
+        }
+        let slot = table.blocks()[0];
+        let mut p = self.partial.remove(&slot).expect("a prefill in progress has its state");
+        let end = p.done + budget.min(prompt.len() - p.done);
+        let resume = !p.fresh && p.done > 0;
+        let hidden = self.forward_slice(table, prompt, &mut p, end, resume);
+        self.finish_slice(slot, prompt, p, end, hidden, false)
+    }
+
+    /// The next slices of several sequences, the rows of all of them through the
+    /// layers as one forward when that pays; one sequence after another otherwise
+    /// (a single job, an adapter in play, a round too short to be a prefill). The
+    /// recurrent state of every sequence of a multi-sequence forward lives in its
+    /// pool row, so each is written there before the forward.
+    fn prefill_slices(&mut self, jobs: &mut [PrefillJob<'_>]) -> Vec<PrefillProgress> {
+        let adapter_in_play = jobs.iter().any(|j| adapters::slot_of(self.inst.stage_models(), j.table.kv_namespace()) != LORA_SLOT_NONE);
+        if jobs.len() < 2 || adapter_in_play || !self.inst.multi_prefill_available() {
+            return jobs.iter_mut().map(|j| self.prefill_slice(j.table, j.prompt, j.budget)).collect();
+        }
+        let mut answers: Vec<Option<PrefillProgress>> = Vec::with_capacity(jobs.len());
+        for j in jobs.iter_mut() {
+            assert!(!j.prompt.is_empty(), "{MODEL}: empty prompt");
+            if j.table.is_empty() {
+                let cached = self.begin_prefill(j.table, j.prompt);
+                if let Some(hidden) = cached {
+                    answers.push(Some(PrefillProgress::Done(hidden)));
+                    continue;
+                }
+                // The state this sequence starts from goes to its pool row now:
+                // the next sequence's seeding overwrites the working copy.
+                let slot = j.table.blocks()[0];
+                if self.partial[&slot].start == 0 {
+                    self.inst.reset_work_state();
+                }
+                self.inst.store_prefilled(slot);
+            }
+            answers.push(None);
+        }
+        // (index, slot, progress, end) of every sequence that still has rows to run.
+        let mut live: Vec<(usize, u32, PartialPrefill, usize)> = Vec::new();
+        for (i, j) in jobs.iter().enumerate().filter(|(i, _)| answers[*i].is_none()) {
+            let slot = j.table.blocks()[0];
+            let p = self.partial.remove(&slot).expect("a prefill in progress has its state");
+            let end = p.done + j.budget.min(j.prompt.len() - p.done);
+            live.push((i, slot, p, end));
+        }
+        let rows: usize = live.iter().map(|(_, _, p, end)| end - p.done).sum();
+        let mut hidden: Vec<(Vec<f32>, bool)> = Vec::with_capacity(live.len());
+        if live.len() >= 2 && rows > gpu_core::select::DECODE_REGIME_MAX_ROWS as usize {
+            let has_mtp = self.inst.has_mtp();
+            let multi: Vec<MultiPrefillJob<'_>> = live.iter().map(|(i, slot, p, end)| MultiPrefillJob { prompt: &*jobs[*i].prompt, start: p.done, end: *end, slot: *slot }).collect();
+            let out = self.inst.prefill_hidden_multi(&multi, has_mtp).unwrap_or_else(|e| panic!("{e}"));
+            for ((_, _, p, _), r) in live.iter_mut().zip(out) {
+                p.rows_hidden.extend_from_slice(&r.all);
+                hidden.push((r.last, true));
+            }
+        } else {
+            for (i, _, p, end) in live.iter_mut() {
+                let resume = p.done > 0;
+                hidden.push((self.forward_slice(&*jobs[*i].table, jobs[*i].prompt, p, *end, resume), false));
+            }
+        }
+        for ((i, slot, p, end), (h, in_pool)) in live.into_iter().zip(hidden) {
+            answers[i] = Some(self.finish_slice(slot, jobs[i].prompt, p, end, h, in_pool));
+        }
+        answers.into_iter().map(|a| a.expect("every job was answered")).collect()
     }
 }
 
@@ -348,7 +464,7 @@ impl PagedDecoder for Qwen35GgufEngine {
     /// Slices of this many tokens go in between decode steps: about 0.2 s of
     /// prefill at the measured rate, a few decode steps' worth of stall.
     fn prefill_interleave_tokens(&self) -> Option<usize> {
-        Some(PREFILL_SLICE_TOKENS)
+        Some(self.prefill.slice_tokens)
     }
     /// One slice of a prompt. The first call reserves the sequence's slot, looks
     /// the prompt up in the prefix cache and seeds from it; every call prefills
@@ -358,6 +474,16 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn prefill_chunk(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
         let started = std::time::Instant::now();
         let progress = self.prefill_slice(table, prompt, budget);
+        self.times.prefill += started.elapsed();
+        progress
+    }
+    /// Rows of one multi-sequence prefill forward ([`PrefillPolicy::batch_tokens`]).
+    fn prefill_batch_tokens(&self) -> Option<usize> {
+        (self.prefill.batch_tokens > 0).then_some(self.prefill.batch_tokens)
+    }
+    fn prefill_chunks(&mut self, jobs: &mut [PrefillJob<'_>]) -> Vec<PrefillProgress> {
+        let started = std::time::Instant::now();
+        let progress = self.prefill_slices(jobs);
         self.times.prefill += started.elapsed();
         progress
     }

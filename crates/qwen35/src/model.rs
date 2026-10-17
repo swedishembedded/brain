@@ -823,6 +823,9 @@ enum GdnCall<'a> {
     /// A speculative verify step: several consecutive rows per sequence, each
     /// sequence's state a row of a pool, the state between rows snapshotted.
     VerifyPool { pool: model::gdn_mixer::GdnPoolRows<'a>, layout: model::gdn_verify::VerifyLayout<'a>, snaps: &'a model::gdn_verify::GdnRowSnapshots, n_tokens: u32 },
+    /// Several sequences' prefill rounds one after another in the rows, each
+    /// continuing its own state row of a pool ([`Qwen35::run_prefill_multi_stage`]).
+    Segments(&'a MultiRound<'a>),
 }
 
 /// Which cached-KV shape a [`Qwen35::layer_gqa_fwd`] call is running in.
@@ -833,6 +836,61 @@ enum GdnCall<'a> {
 enum GqaCached<'a> {
     Chunk(&'a GqaChunkCtx<'a>),
     Decode(&'a GqaDecodeCtx<'a>),
+    /// Several sequences' rounds laid out one after another in the activation
+    /// rows ([`Qwen35::run_prefill_multi_stage`]), attending this layer's cache.
+    Segments(&'a MultiRound<'a>, &'a KvLayer),
+}
+
+/// One sequence's rows within a [`Qwen35::run_prefill_multi_stage`] round.
+pub(crate) struct PrefillSeg<'a> {
+    pub tokens: &'a [u32],
+    /// Absolute position of the first of `tokens`.
+    pub pos_start: u32,
+    /// Where the sequence's KV window starts in each layer's pool
+    /// (`slot * gqa_cap`).
+    pub gqa_base_row: u32,
+    /// The sequence's row of the recurrent-state pools.
+    pub slot: u32,
+}
+
+/// The pooled caches a multi-sequence prefill round reads and extends: every
+/// sequence's KV window is a slice of one pool per layer, and its recurrent state
+/// a row of one pool per layer. The chunk kernels run on one state at a time, so a
+/// sequence's row is gathered into the `work` copy before its rows go through a
+/// layer and scattered back after.
+pub(crate) struct PooledCaches<'a> {
+    pub gqa_kv: &'a [KvLayer],
+    pub gqa_cap: u32,
+    pub gdn_state: &'a [DeviceBuffer],
+    pub gdn_hist: &'a [DeviceBuffer],
+    pub work_state: &'a [DeviceBuffer],
+    pub work_hist: &'a [DeviceBuffer],
+    /// Pipeline indices of `pool_rows_gather2` / `pool_rows_scatter2`: row of the
+    /// pool -> work copy, and back.
+    pub gather: usize,
+    pub scatter: usize,
+}
+
+/// One sequence of a multi-sequence round, as the layers see it.
+struct SegRound {
+    rows: u32,
+    /// First activation row of the sequence.
+    row0: u32,
+    /// `[1]` u32: the sequence's row of the state pools.
+    slot: DeviceBuffer,
+    base_row: u32,
+    start: u32,
+    block_ids: DeviceBuffer,
+    offsets: DeviceBuffer,
+    seq_lens: DeviceBuffer,
+    cos: DeviceBuffer,
+    sin: DeviceBuffer,
+}
+
+/// A multi-sequence round: the caches and every sequence's coordinates.
+pub(crate) struct MultiRound<'a> {
+    caches: &'a PooledCaches<'a>,
+    segs: Vec<SegRound>,
 }
 
 /// Everything [`Qwen35::layer_gqa_fwd`]'s training branch saves for
@@ -2341,7 +2399,7 @@ impl Qwen35 {
         // token each; the whole-sequence forward keeps this instance's shape.
         let gdn_shape = match &call {
             GdnCall::Whole => GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
-            GdnCall::Chunk(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) },
+            GdnCall::Chunk(_) | GdnCall::Segments(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) },
             GdnCall::Decode(_) | GdnCall::DecodePool(_) | GdnCall::VerifyPool { .. } => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
             GdnCall::Rows(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: 1 },
         };
@@ -2391,6 +2449,38 @@ impl Qwen35 {
                 let gated = model::gdn_mixer::gdn_mixer_rows_fused(g, &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, &stream, n)
                     .expect("exact_round_ok said the device serves the multi-row recurrent kernel at this shape");
                 (gated, None)
+            }
+            GdnCall::Segments(round) => {
+                let c = round.caches;
+                let (sl, hl) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
+                let whole = round.segs.len() == 1;
+                let all = (!whole).then(|| g.storage((n * value_dim) as u64));
+                let mut only = None;
+                for seg in &round.segs {
+                    let rows = seg.rows;
+                    let (qkv_i, b_i, a_i, z_i) = if whole {
+                        (mixed_qkv.clone(), bproj.clone(), aproj.clone(), z.clone())
+                    } else {
+                        (
+                            self.take_rows(&mixed_qkv, conv_dim, n, seg.row0, rows),
+                            self.take_rows(&bproj, nvh, n, seg.row0, rows),
+                            self.take_rows(&aproj, nvh, n, seg.row0, rows),
+                            self.take_rows(&z, value_dim, n, seg.row0, rows),
+                        )
+                    };
+                    // The sequence's state row becomes the working copy, the rows
+                    // run on it, and it is written back.
+                    g.submit(&[], &[g.step(c.gather, &[&c.gdn_state[l], &c.gdn_hist[l], &seg.slot, &c.work_state[l], &c.work_hist[l]], &[1, sl, hl], sl + hl)]);
+                    let seg_shape = model::gdn_mixer::GdnMixerShape { gdn: GdnShape { t: rows, chunk: gdn_chunk_size(rows), ..shape.gdn }, ..shape };
+                    let cont = model::gdn_mixer::GdnStream { state: &c.work_state[l], hist: &c.work_hist[l] };
+                    let (gated_i, _) = model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &seg_shape, &weights, &qkv_i, &b_i, &a_i, &z_i, rows, false, Some(cont));
+                    g.submit(&[], &[g.step(c.scatter, &[&c.work_state[l], &c.work_hist[l], &seg.slot, &c.gdn_state[l], &c.gdn_hist[l]], &[1, sl, hl], sl + hl)]);
+                    match &all {
+                        Some(all) => self.put_rows_copy(&gated_i, all, value_dim, seg.row0, rows),
+                        None => only = Some(gated_i),
+                    }
+                }
+                (all.or(only).expect("a round has at least one sequence"), None)
             }
             GdnCall::Whole => match self.gdn_segment_tokens.get().filter(|_| self.is_train) {
                 Some(seg) => {
@@ -2481,6 +2571,8 @@ impl Qwen35 {
             None => (&self.cos, &self.sin),
             Some(GqaCached::Chunk(ch)) => (ch.cos, ch.sin),
             Some(GqaCached::Decode(dc)) => (dc.cos, dc.sin),
+            // Each sequence of a multi-sequence round brings its own tables below.
+            Some(GqaCached::Segments(round, _)) => (&round.segs[0].cos, &round.segs[0].sin),
         };
         let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos, sin };
         // Set by the decode arm that fuses the sigmoid gate into the quantiser.
@@ -2509,6 +2601,46 @@ impl Qwen35 {
                 ),
                 None,
             ),
+            Some(GqaCached::Segments(round, layer)) => {
+                let kv = self.kv_kernels(layer);
+                let (qpd, kvd) = (c.q_proj_dim(), c.kv_dim());
+                let whole = round.segs.len() == 1;
+                let all = (!whole).then(|| g.storage((n * shape.qd()) as u64));
+                let mut only = None;
+                for seg in &round.segs {
+                    let rows = seg.rows;
+                    let (q_i, k_i, v_i) = if whole {
+                        (q_full.clone(), k.clone(), v.clone())
+                    } else {
+                        (self.take_rows(&q_full, qpd, n, seg.row0, rows), self.take_rows(&k, kvd, n, seg.row0, rows), self.take_rows(&v, kvd, n, seg.row0, rows))
+                    };
+                    let seg_weights = model::gqa_mixer::GqaMixerWeights { q_norm: weights.q_norm, k_norm: weights.k_norm, cos: &seg.cos, sin: &seg.sin };
+                    let ctx_i = model::gqa_mixer::gqa_mixer_chunk_kv_fwd(
+                        g,
+                        &gqa_mixer_ids(),
+                        &kv,
+                        DECODE_SOFTMAX_BATCHED,
+                        &shape,
+                        &seg_weights,
+                        &q_i,
+                        &k_i,
+                        &v_i,
+                        rows,
+                        seg.base_row,
+                        seg.start,
+                        round.caches.gqa_cap,
+                        layer,
+                        &seg.block_ids,
+                        &seg.offsets,
+                        &seg.seq_lens,
+                    );
+                    match &all {
+                        Some(all) => self.put_rows_copy(&ctx_i, all, shape.qd(), seg.row0, rows),
+                        None => only = Some(ctx_i),
+                    }
+                }
+                (all.or(only).expect("a round has at least one sequence"), None)
+            }
             Some(GqaCached::Decode(dc)) if epilogue => {
                 // The sigmoid output gate rides on the quantisation below. The
                 // front half of the attention (split, QK norm, rotation, KV
@@ -3128,6 +3260,13 @@ impl Qwen35 {
     fn put_rows(&self, src: &DeviceBuffer, dst: &DeviceBuffer, width: u32, row0: u32, rows: u32) {
         let count = rows * width;
         self.gpu.submit(&[], &[self.gpu.step(SPLICE_ADD, &[src, dst], &[count, row0 * width], count)]);
+    }
+
+    /// `dst[row0 ..] = src` for a `[rows, width]` source: a copy, so `dst` need not
+    /// be zero-fresh (the rows of its sequences cover it).
+    fn put_rows_copy(&self, src: &DeviceBuffer, dst: &DeviceBuffer, width: u32, row0: u32, rows: u32) {
+        let count = rows * width;
+        self.gpu.submit(&[], &[self.gpu.step(SPLICE, &[src, dst], &[count, row0 * width], count)]);
     }
 
     /// [`Self::mlp_fwd`] over `rows`-row chunks of `xn2`, keeping nothing but the output.
@@ -3942,7 +4081,7 @@ impl Qwen35 {
             return self.run_exact_round(tokens, pos_start, caches, input_override);
         }
 
-        let mut res = if self.shard.embed {
+        let res = if self.shard.embed {
             assert!(
                 input_override.is_none(),
                 "qwen35: run_prefill_chunk_stage got an input_override on the EMBED stage - it gathers `tokens` itself, so a caller supplying both is a wiring error"
@@ -3990,6 +4129,139 @@ impl Qwen35 {
         g.write(&offsets, &(0..n).map(|i| pos_start + i).collect::<Vec<u32>>());
         g.write(&seq_lens, &(0..n).map(|i| pos_start + i + 1).collect::<Vec<u32>>());
 
+        let mut mixer = |l: usize, ty: LayerType, xn1: &DeviceBuffer| -> DeviceBuffer {
+            match ty {
+                LayerType::Linear => {
+                    let cont = model::gdn_mixer::GdnStream { state: &caches.gdn_state[l], hist: &caches.gdn_hist[l] };
+                    self.layer_gdn_fwd(l, xn1, n, GdnCall::Chunk(cont)).0
+                }
+                LayerType::Full => {
+                    let ctx = GqaChunkCtx {
+                        base_row: caches.gqa_base_row,
+                        start: pos_start,
+                        cap: caches.gqa_cap,
+                        layer: &caches.gqa_kv[l],
+                        block_ids: block_ids.clone(),
+                        offsets: offsets.clone(),
+                        seq_lens: seq_lens.clone(),
+                        cos: &cos,
+                        sin: &sin,
+                    };
+                    self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), xn1, n, Some(GqaCached::Chunk(&ctx))).0
+                }
+            }
+        };
+        self.prefill_layer_stack(res, n, &format!("pos_start={pos_start}"), &mut mixer)
+    }
+
+    /// [`Self::run_prefill_multi_stage`] staged to the HOST, as
+    /// [`Self::prefill_chunk_stage`] is for one sequence: `input_override` is the
+    /// previous stage's (or the embedding's) `[n, d_model]` block.
+    pub(crate) fn prefill_multi_stage(&self, segs: &[PrefillSeg<'_>], caches: &PooledCaches<'_>, input_override: &[f32]) -> Vec<f32> {
+        let out = self.run_prefill_multi_stage(segs, caches, Some(input_override));
+        self.gpu.read(&out, input_override.len())
+    }
+
+    /// Whether this build can run [`Self::run_prefill_multi_stage`]: not a LoRA build,
+    /// whose adapter scratch is sized for one sequence's round.
+    pub(crate) fn multi_prefill_supported(&self) -> bool {
+        self.cfg.lora.is_none()
+    }
+
+    /// **One forward over several sequences' prefill rounds**: `segs[i].tokens` are
+    /// consecutive prompt tokens of sequence `i` starting at `segs[i].pos_start`, the
+    /// sequences' rows laid out one after another. Every projection, the MLP and the
+    /// norms run once over all the rows - so the weights are read once for the lot and
+    /// the GEMMs see the sum of the rows - while each sequence's rows go through the
+    /// token mixer on their own: its recurrent state is its row of the pool (gathered
+    /// into the working copy and scattered back around the chunk kernels) and its
+    /// attention reads and extends its own KV window.
+    ///
+    /// The contract of [`Self::run_prefill_chunk_stage`] per sequence: the same KV rows
+    /// and state afterwards, and the same `[n, d_model]` block (here `n` is the total)
+    /// in the same row order. A row's arithmetic does not depend on which other rows
+    /// share the GEMM (activations are quantised per row and the tensor-core kernels
+    /// accumulate every output the same way at any tile), so a sequence's rows equal
+    /// what a round of its own gives, except where a kernel is picked by the number of
+    /// rows (a round of at most [`DECODE_REGIME_MAX_ROWS`] rows is a decode replay,
+    /// which this function is not for: the caller sends such a round through the
+    /// single-sequence path).
+    pub(crate) fn run_prefill_multi_stage(&self, segs: &[PrefillSeg<'_>], caches: &PooledCaches<'_>, input_override: Option<&[f32]>) -> DeviceBuffer {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let d = c.d_model;
+        assert!(!segs.is_empty(), "qwen35::run_prefill_multi_stage: no sequences");
+        assert!(c.lora.is_none(), "qwen35::run_prefill_multi_stage: a LoRA build's adapter scratch is sized for one sequence's round");
+        let n: u32 = segs.iter().map(|s| s.tokens.len() as u32).sum();
+        assert!(segs.iter().all(|s| !s.tokens.is_empty()), "qwen35::run_prefill_multi_stage: a sequence with no rows");
+        let res = if self.shard.embed {
+            assert!(input_override.is_none(), "qwen35: run_prefill_multi_stage got an input_override on the EMBED stage");
+            let all: Vec<u32> = segs.iter().flat_map(|s| s.tokens.iter().copied()).collect();
+            let tok_buf = g.storage(n as u64);
+            g.write(&tok_buf, &all);
+            let res = g.storage((n * d) as u64);
+            self.embed_rows(&tok_buf, n, &res);
+            res
+        } else {
+            let x = input_override.expect("qwen35: run_prefill_multi_stage on a NON-EMBED stage needs the previous stage's residual block");
+            assert_eq!(x.len(), (n * d) as usize, "qwen35: run_prefill_multi_stage input_override must be the round's whole [n, d_model] block");
+            g.storage_init("qwen35.prefill.res_in", x)
+        };
+
+        // The per-sequence tables a chunk round builds once, for each sequence: its
+        // absolute M-RoPE positions, the single-block table its KV window is, and
+        // its causal lengths.
+        let yarn = c.rope_table();
+        let mut row0 = 0u32;
+        let mut round = Vec::with_capacity(segs.len());
+        for seg in segs {
+            let rows = seg.tokens.len() as u32;
+            assert!(seg.pos_start + rows <= caches.gqa_cap, "qwen35::run_prefill_multi_stage: sequence ends at position {} but the KV window holds {} rows", seg.pos_start + rows, caches.gqa_cap);
+            assert!(seg.gqa_base_row.is_multiple_of(caches.gqa_cap), "qwen35::run_prefill_multi_stage: gqa_base_row {} is not a whole number of {}-row blocks", seg.gqa_base_row, caches.gqa_cap);
+            let positions: Vec<[u32; 3]> = (0..rows).map(|i| [seg.pos_start + i; 3]).collect();
+            let (cos, sin) = qwen3vl::mrope::mrope_tables_scaled(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
+            let words = |w: &[u32]| {
+                let buf = g.storage(w.len() as u64);
+                g.write(&buf, w);
+                buf
+            };
+            let slot = words(&[seg.slot]);
+            let block_ids = words(&vec![seg.gqa_base_row / caches.gqa_cap; rows as usize]);
+            let offsets = words(&(0..rows).map(|i| seg.pos_start + i).collect::<Vec<u32>>());
+            let seq_lens = words(&(0..rows).map(|i| seg.pos_start + i + 1).collect::<Vec<u32>>());
+            round.push(SegRound {
+                rows,
+                row0,
+                slot,
+                base_row: seg.gqa_base_row,
+                start: seg.pos_start,
+                block_ids,
+                offsets,
+                seq_lens,
+                cos: g.storage_init("qwen35.multi.cos", &cos),
+                sin: g.storage_init("qwen35.multi.sin", &sin),
+            });
+            row0 += rows;
+        }
+        let round = MultiRound { caches, segs: round };
+        let mut mixer = |l: usize, ty: LayerType, xn1: &DeviceBuffer| -> DeviceBuffer {
+            match ty {
+                LayerType::Linear => self.layer_gdn_fwd(l, xn1, n, GdnCall::Segments(&round)).0,
+                LayerType::Full => self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), xn1, n, Some(GqaCached::Segments(&round, &caches.gqa_kv[l]))).0,
+            }
+        };
+        self.prefill_layer_stack(res, n, &format!("{} sequences", segs.len()), &mut mixer)
+    }
+
+    /// The layers of a prefill round, whatever shape its sequences take: this stage's
+    /// layers over `res` (`[n, d_model]`), each layer's token mixer supplied by `mixer`
+    /// (given the layer index, its type and the normed input), then the head stage's
+    /// final norm. The residual, MLP, scratch-arena and drain discipline lives here once
+    /// for [`Self::run_prefill_chunk_stage`] (one sequence's rows) and
+    /// [`Self::run_prefill_multi_stage`] (several sequences' rows in one forward).
+    fn prefill_layer_stack(&self, mut res: DeviceBuffer, n: u32, label: &str, mixer: &mut dyn FnMut(usize, LayerType, &DeviceBuffer) -> DeviceBuffer) -> DeviceBuffer {
+        let g = &self.gpu;
+        let d = self.cfg.d_model;
         let pooled = n >= self.chunk_arena_min_rows.get();
         if pooled {
             // The quantised activations and the GEMM outputs are allocated by
@@ -4044,26 +4316,7 @@ impl Qwen35 {
             let xn1 = g.storage((n * d) as u64);
             g.submit(&[], &[rms_step(g, &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
 
-            let mixer_out = match ty {
-                LayerType::Linear => {
-                    let cont = model::gdn_mixer::GdnStream { state: &caches.gdn_state[l], hist: &caches.gdn_hist[l] };
-                    self.layer_gdn_fwd(l, &xn1, n, GdnCall::Chunk(cont)).0
-                }
-                LayerType::Full => {
-                    let ctx = GqaChunkCtx {
-                        base_row: caches.gqa_base_row,
-                        start: pos_start,
-                        cap: caches.gqa_cap,
-                        layer: &caches.gqa_kv[l],
-                        block_ids: block_ids.clone(),
-                        offsets: offsets.clone(),
-                        seq_lens: seq_lens.clone(),
-                        cos: &cos,
-                        sin: &sin,
-                    };
-                    self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), &xn1, n, Some(GqaCached::Chunk(&ctx))).0
-                }
-            };
+            let mixer_out = mixer(l, ty, &xn1);
 
             let xmid = g.storage((n * d) as u64);
             g.submit(&[], &[g.step(ADD2, &[&res, &mixer_out, &xmid], &[n * d], n * d)]);
@@ -4117,7 +4370,7 @@ impl Qwen35 {
             if std::env::var_os("QWEN35_DEBUG_LAYER_RMS").is_some() {
                 let last_row = g.read(&res, (n * d) as usize)[((n - 1) * d) as usize..].to_vec();
                 let rms = (last_row.iter().map(|v| v * v).sum::<f32>() / last_row.len() as f32).sqrt();
-                eprintln!("qwen35::run_prefill_chunk_stage: pos_start={pos_start} n={n} layer {l} ({ty:?}) last-row rms = {rms}");
+                eprintln!("qwen35::run_prefill_chunk_stage: {label} n={n} layer {l} ({ty:?}) last-row rms = {rms}");
             }
         }
         if std::env::var("QWEN35_DEBUG_SCRATCH_HELD").is_ok() {
@@ -5726,6 +5979,93 @@ mod tests {
 
             let got = decode_stage(&stage1, (tok + 1) % cfg.vocab, pos, Some(&boundary));
             assert_eq!(got, want, "pos {pos}: two-shard q4 decode diverged from the whole-shard q4 model");
+        }
+    }
+
+    /// Two sequences' prefill rounds in ONE forward ([`Qwen35::run_prefill_multi_stage`])
+    /// leave each sequence's KV rows and recurrent state exactly where its own rounds
+    /// do: the second multi-sequence round of each continues from the first's pool rows
+    /// and lands on the hidden state a one-sequence replay of the same rounds gives.
+    ///
+    /// Two rounds per sequence with ragged, unequal lengths (8+6 and 5+4 rows, so the
+    /// round shapes differ and a sequence's rows sit at a different offset in each) on
+    /// the eight-layer `tiny()`, which has a GQA layer at index 3 and 7. A wrong slot,
+    /// a state row not scattered back, a position taken from the round and not from
+    /// the sequence, or rows of one sequence attending the other's window all move the
+    /// second round's hidden states, which the first round's output alone would hide.
+    #[test]
+    fn a_multi_sequence_prefill_round_matches_each_sequence_alone() {
+        use std::collections::HashMap;
+        let cfg = Qwen35Config { n_layers: 8, ..Qwen35Config::tiny() };
+        let d = cfg.d_model as usize;
+        let mut init: HashMap<String, Vec<f32>> = crate::init::init_weights(&cfg, 7);
+        // A decay that keeps the recurrent state alive from one token to the next, as a
+        // trained checkpoint's does; at the fresh-weight init it is gone in two tokens
+        // and a dropped state would go unnoticed.
+        for (name, numel) in cfg.param_list() {
+            if name.ends_with(".A_log") {
+                init.insert(name, vec![0.05f32.ln(); numel]);
+            } else if name.ends_with(".dt_bias") {
+                init.insert(name, vec![-1.0f32; numel]);
+            }
+        }
+        let a: Vec<u32> = (0..14).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+        let b: Vec<u32> = (0..9).map(|i| (i * 7 + 1) % cfg.vocab).collect();
+
+        // Each sequence alone, its two rounds, on its own instance.
+        let alone = |prompt: &[u32], first: usize| -> (Vec<f32>, Vec<f32>) {
+            let m = Qwen35::new_on(Gpu::new(pipelines()), cfg.clone(), 1, cfg.block_size, &init);
+            m.set_chunk_arena_min_rows(u32::MAX);
+            m.reset_decode_cache();
+            let one = m.prefill_chunked(&prompt[..first], first as u32);
+            let two = m.prefill_chunked(&prompt[first..], (prompt.len() - first) as u32);
+            (one, two)
+        };
+        let (a1, a2) = alone(&a, 8);
+        let (b1, b2) = alone(&b, 5);
+
+        // The same rounds, the two sequences together, on pooled caches.
+        let m = Qwen35::new_on(Gpu::new(pipelines()), cfg.clone(), 1, cfg.block_size, &init);
+        let gpu = &m.gpu;
+        m.set_chunk_arena_min_rows(u32::MAX);
+        let (cap, slots) = (cfg.block_size, 2u32);
+        let (kv_dim, hd) = (cfg.kv_dim() as u64, cfg.head_dim as u64);
+        let types = cfg.layer_types();
+        let zeros = |n: u64| gpu.storage_init("test.zero", &vec![0f32; n as usize]);
+        let (sl, hl) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
+        let full = |l: usize| types[l] == LayerType::Full;
+        let gqa_kv: Vec<KvLayer> = (0..types.len()).map(|l| if full(l) { KvLayer::new(gpu, model::kv_tier::KvTier::F32, slots as u64 * cap as u64, kv_dim, hd) } else { KvLayer::placeholder(gpu) }).collect();
+        let per = |l: usize, n: u64| if full(l) { zeros(1) } else { zeros(n) };
+        let pool_state: Vec<DeviceBuffer> = (0..types.len()).map(|l| per(l, slots as u64 * sl)).collect();
+        let pool_hist: Vec<DeviceBuffer> = (0..types.len()).map(|l| per(l, slots as u64 * hl)).collect();
+        let work_state: Vec<DeviceBuffer> = (0..types.len()).map(|l| per(l, sl)).collect();
+        let work_hist: Vec<DeviceBuffer> = (0..types.len()).map(|l| per(l, hl)).collect();
+        let pooled = PooledCaches {
+            gqa_kv: &gqa_kv,
+            gqa_cap: cap,
+            gdn_state: &pool_state,
+            gdn_hist: &pool_hist,
+            work_state: &work_state,
+            work_hist: &work_hist,
+            gather: gpu.kernel_index("pool_rows_gather2").expect("in the qwen35 kernel set"),
+            scatter: gpu.kernel_index("pool_rows_scatter2").expect("in the qwen35 kernel set"),
+        };
+        let round = |segs: &[PrefillSeg<'_>]| -> Vec<f32> {
+            let out = m.run_prefill_multi_stage(segs, &pooled, None);
+            let n: usize = segs.iter().map(|s| s.tokens.len()).sum();
+            gpu.read(&out, n * d)
+        };
+        let seg = |tokens: &'static [u32], pos_start: u32, slot: u32| PrefillSeg { tokens, pos_start, gqa_base_row: slot * cap, slot };
+        let (a, b): (&'static [u32], &'static [u32]) = (Box::leak(a.into_boxed_slice()), Box::leak(b.into_boxed_slice()));
+        let r1 = round(&[seg(&a[..8], 0, 0), seg(&b[..5], 0, 1)]);
+        let r2 = round(&[seg(&a[8..], 8, 0), seg(&b[5..], 5, 1)]);
+
+        let last_of = |block: &[f32], row: usize| block[row * d..(row + 1) * d].to_vec();
+        let maxabs = |x: &[f32], y: &[f32]| x.iter().zip(y).fold(0f32, |m, (p, q)| m.max((p - q).abs()));
+        for (what, got, want) in [("round 1 of A", last_of(&r1, 7), &a1), ("round 1 of B", last_of(&r1, 12), &b1), ("round 2 of A", last_of(&r2, 5), &a2), ("round 2 of B", last_of(&r2, 9), &b2)] {
+            let err = maxabs(&got, want);
+            assert!(got.iter().all(|x| x.is_finite()), "{what}: non-finite hidden state");
+            assert!(err < 1e-5, "{what}: the multi-sequence round differs from the sequence alone by {err:e}");
         }
     }
 }

@@ -27,7 +27,7 @@
 //!       [--ctx 4096] [--kv bf16] [--batches 1,8,16,32,64,128]
 //!       [--workload code|agent|both] [--new 128] [--dump FILE]
 //!       [--batch-limit N] [--raw-hidden] [--equivalence] [--temp T]
-//!       [--prefill-slice N] [--mix LEN:NEW,LEN:NEW,...] [--backend cuda|vulkan|wgpu]
+//!       [--prefill-slice N] [--prefill-batch N] [--mix LEN:NEW,LEN:NEW,...] [--backend cuda|vulkan|wgpu]
 //!
 //! `--equivalence` replaces the timing: for every workload and batch size it
 //! generates the same requests twice on the same scheduler, once with
@@ -43,7 +43,7 @@ use data::tokenizer::Tokenizer;
 use model::kv_tier::KvTier;
 use model::paged::BlockTable;
 use model::serve::{PagedDecoder, Request, SampleParams, Scheduler, SpecPolicy};
-use qwen35::int8_gguf_resident::{Qwen35GgufResident, SpecServing, SpeculativeMode};
+use qwen35::int8_gguf_resident::{PrefillPolicy, Qwen35GgufResident, SpecServing, SpeculativeMode};
 use residency::multi::MultiDeviceResidentModel;
 use residency::{Device, ResidentModel};
 
@@ -68,8 +68,10 @@ struct Args {
     kernel_table: bool,
     temp: f32,
     prefill_tokens: Vec<usize>,
-    /// Prompt tokens prefilled per scheduler iteration (default: the whole prompt).
+    /// Prompt tokens one sequence gets per scheduler iteration (default: the whole prompt).
     prefill_slice: u32,
+    /// Rows one prefill forward carries across sequences (default: the engine's; 0 = one sequence per forward).
+    prefill_batch: Option<usize>,
     mixed: bool,
     /// `--mix LEN:NEW,...`: one request per entry (LEN prompt tokens, NEW new tokens), all submitted at once.
     mix: Vec<(usize, usize)>,
@@ -100,6 +102,7 @@ fn parse_args() -> Args {
         temp: 0.0,
         prefill_tokens: Vec::new(),
         prefill_slice: u32::MAX,
+        prefill_batch: None,
         mixed: false,
         mix: Vec::new(),
         identity: None,
@@ -143,6 +146,7 @@ fn parse_args() -> Args {
                 let (n, p) = v.split_once(',').expect("--identity-prompts N,P");
                 a.identity = Some((n.parse().expect("--identity-prompts N,P"), p.parse().expect("--identity-prompts N,P")));
             }
+            "--prefill-batch" => a.prefill_batch = Some(value("--prefill-batch").parse().expect("--prefill-batch N")),
             "--prefill-slice" => a.prefill_slice = value("--prefill-slice").parse().expect("--prefill-slice N"),
             "--prefill-tokens" => a.prefill_tokens = value("--prefill-tokens").split(',').map(|s| s.trim().parse().expect("--prefill-tokens a,b,c")).collect(),
             "--temp" => a.temp = value("--temp").parse().expect("--temp T"),
@@ -242,7 +246,11 @@ fn main() {
     };
     let reserve = spec.reserve_bytes(&probe_cfg, a.ctx, max_batch, &tier, a.kv);
     let devices: Vec<(Device, u64)> = devices.into_iter().map(|(d, c)| (d, c.saturating_sub(reserve))).collect();
-    let r = Qwen35GgufResident::new(a.gguf.clone(), devices, a.ctx, tier).with_kv_tier(a.kv).with_max_batch(max_batch).with_speculation(spec);
+    // Without --prefill-slice a prompt goes in whole and one at a time, as before.
+    let sliced = a.prefill_slice != u32::MAX;
+    let batch_tokens = a.prefill_batch.unwrap_or(if sliced { PrefillPolicy::default().batch_tokens } else { 0 });
+    let policy = PrefillPolicy { slice_tokens: if sliced { a.prefill_slice as usize } else { usize::MAX }, batch_tokens };
+    let r = Qwen35GgufResident::new(a.gguf.clone(), devices, a.ctx, tier).with_kv_tier(a.kv).with_max_batch(max_batch).with_speculation(spec).with_prefill_policy(policy);
     let cost = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new()));
     let placed: Vec<Device> = cost.devices().collect();
     if placed.is_empty() {
@@ -255,7 +263,6 @@ fn main() {
     println!("cold load {:.1} s; MTP head loaded: {}; verify rows {}", t0.elapsed().as_secs_f64(), engine.instance().has_mtp(), engine.instance().speculation_rows());
     let mut sched = Scheduler::new(engine, max_batch as usize);
     r.configure_scheduler(&mut sched);
-    sched.set_prefill_budget(a.prefill_slice);
 
     if !a.mix.is_empty() {
         // The agent mix through the scheduler without the HTTP layer: every request arrives at
@@ -289,7 +296,7 @@ fn main() {
         }
         let wall = t.elapsed().as_secs_f64();
         let prefill = (sched.decoder_mut().spec_times().prefill - before).as_secs_f64();
-        println!("mix: {} requests, {total} prompt tokens, {generated} generated; slice {}", a.mix.len(), if a.prefill_slice == u32::MAX { "whole prompt".to_string() } else { a.prefill_slice.to_string() });
+        println!("mix: {} requests, {total} prompt tokens, {generated} generated; slice {}, batch rows {}", a.mix.len(), if a.prefill_slice == u32::MAX { "whole prompt".to_string() } else { a.prefill_slice.to_string() }, policy.batch_tokens);
         println!("mix: wall {wall:.2} s = {:.0} prompt tok/s aggregate; inside prefill_chunk {prefill:.2} s = {:.0} tok/s; elsewhere (decode, admission) {:.2} s", total as f64 / wall, total as f64 / prefill, wall - prefill);
         println!("mix: finish times (s): {}", finish.iter().map(|f| format!("{f:.1}")).collect::<Vec<_>>().join(" "));
         return;
