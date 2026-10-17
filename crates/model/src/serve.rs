@@ -138,6 +138,31 @@ pub trait PagedDecoder {
     /// honor — the decoder's on-device top-K extraction scratch capacity.
     fn topk_capacity(&self) -> usize;
 
+    // ---- prefill interleaved with decode (optional) ----
+    //
+    // A decoder that can prefill a prompt in slices says so with
+    // `prefill_interleave_tokens`; the scheduler then prefills at most that many
+    // prompt tokens per iteration and decodes every running sequence in between,
+    // instead of stalling all of them for a whole prompt. The defaults are the
+    // whole-prompt prefill that every decoder had.
+
+    /// Prompt tokens per scheduler iteration to prefill when decode must keep
+    /// moving, or `None` (the default) if this decoder prefills a prompt in one
+    /// piece.
+    fn prefill_interleave_tokens(&self) -> Option<usize> {
+        None
+    }
+
+    /// Prefill the next slice of `prompt` into `table`: at most `budget` (>= 1)
+    /// tokens, continuing where the previous call for this sequence stopped
+    /// (`table` is empty on the first). The default prefills the whole prompt.
+    /// The decoder keeps whatever it needs between calls; the sequence can be
+    /// released between them ([`Self::release_table`]).
+    fn prefill_chunk(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
+        let _ = budget;
+        PrefillProgress::Done(self.prefill(table, prompt))
+    }
+
     // ---- speculative decoding (optional; see [`speculate`]) ----
     //
     // Every method below defaults to "this decoder does not speculate", so an
@@ -292,6 +317,14 @@ pub trait PagedDecoder {
     fn unpin_adapter(&mut self, adapter: AdapterId) {
         let _ = adapter;
     }
+}
+
+/// What one [`PagedDecoder::prefill_chunk`] call achieved.
+pub enum PrefillProgress {
+    /// The prompt is in: the final hidden state, as [`PagedDecoder::prefill`] returns it.
+    Done(Vec<f32>),
+    /// `consumed` prompt tokens went in and more remain.
+    Partial { consumed: usize },
 }
 
 /// Which adapter a request runs under. It doubles as the adapter's
@@ -648,6 +681,21 @@ struct Waiting {
     seed: u64,
 }
 
+/// A request being prefilled over several iterations: it holds its blocks and a
+/// slot of the batch but does not decode yet.
+struct Prefilling {
+    id: u64,
+    prompt: Vec<u32>,
+    /// Prompt tokens already in.
+    done: usize,
+    max_new: usize,
+    stop: Vec<u32>,
+    adapter: Option<AdapterId>,
+    sample: SampleParams,
+    seed: u64,
+    table: BlockTable,
+}
+
 /// A sequence the scheduler is actively decoding.
 struct Running {
     id: u64,
@@ -704,6 +752,8 @@ fn accept_token(r: &mut Running, next: u32) {
 pub struct Scheduler<D: PagedDecoder> {
     dec: D,
     waiting: VecDeque<Waiting>,
+    /// Requests admitted and being prefilled in slices, oldest first.
+    prefilling: VecDeque<Prefilling>,
     running: Vec<Running>,
     next_id: u64,
     max_running: usize,
@@ -751,10 +801,11 @@ impl<D: PagedDecoder> Scheduler<D> {
         // Default budget: two full prefill chunks per iteration. Enough to keep
         // admission moving under load, small enough that running sequences see
         // a decode step between arrivals.
-        let prefill_budget = dec.max_prefill_tokens().saturating_mul(2).max(1);
+        let prefill_budget = dec.prefill_interleave_tokens().map_or_else(|| dec.max_prefill_tokens().saturating_mul(2), |n| n as u32).max(1);
         Scheduler {
             dec,
             waiting: VecDeque::new(),
+            prefilling: VecDeque::new(),
             running: Vec::new(),
             next_id: 0,
             max_running,
@@ -851,6 +902,12 @@ impl<D: PagedDecoder> Scheduler<D> {
             self.waiting.remove(pos);
             return Some(Vec::new()); // never admitted, so nothing was produced
         }
+        if let Some(pos) = self.prefilling.iter().position(|p| p.id == id) {
+            let mut p = self.prefilling.remove(pos).expect("position just found it");
+            self.dec.release_table(&mut p.table);
+            self.unpin(p.adapter);
+            return Some(Vec::new()); // nothing generated yet
+        }
         if let Some(pos) = self.swapped.iter().position(|r| r.id == id) {
             // Demoted: its blocks are already back in the pool, its bytes are
             // in host RAM. Dropping the host record is the whole reclaim.
@@ -912,6 +969,12 @@ impl<D: PagedDecoder> Scheduler<D> {
                 self.dec.unpin_adapter(adapter);
             }
         }
+        for p in &mut self.prefilling {
+            self.dec.release_table(&mut p.table);
+            if let Some(adapter) = p.adapter {
+                self.dec.unpin_adapter(adapter);
+            }
+        }
         for r in &self.swapped {
             self.dec.discard_offloaded(r.id);
             if let Some(adapter) = r.adapter {
@@ -944,7 +1007,7 @@ impl<D: PagedDecoder> Scheduler<D> {
 
     /// True while any request is waiting, running, or preempted to host RAM.
     pub fn pending(&self) -> bool {
-        !self.waiting.is_empty() || !self.running.is_empty() || !self.swapped.is_empty()
+        !self.waiting.is_empty() || !self.prefilling.is_empty() || !self.running.is_empty() || !self.swapped.is_empty()
     }
 
 
@@ -1029,7 +1092,7 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// queue is in demotion order, so letting a later (smaller) sequence jump
     /// ahead of a stuck one is how a long sequence gets starved.
     fn resume_swapped(&mut self, report: &mut StepReport) {
-        while !self.swapped.is_empty() && self.running.len() < self.max_running {
+        while !self.swapped.is_empty() && self.running.len() + self.prefilling.len() < self.max_running {
             let id = self.swapped.front().expect("non-empty").id;
             // Its own blocks back, PLUS what the sequences already decoding
             // need to append this iteration, plus one for its own next token.
@@ -1168,6 +1231,28 @@ impl<D: PagedDecoder> Scheduler<D> {
         None
     }
 
+    /// A fully prefilled request becomes a running sequence: its first token is
+    /// picked from the prefill's final hidden state.
+    fn start_running(&mut self, p: Prefilling, hidden: Vec<f32>, report: &mut StepReport) {
+        let Prefilling { id, prompt, max_new, stop, adapter, sample, seed, table, .. } = p;
+        let mut rng = data::rng::Rng::new(seed);
+        // `admit_greedy`/`admit_topk` are on-device for a decoder that has
+        // one (`qwen3::serve::Engine`): neither ships a `[vocab]` block to
+        // the host for this one-time-per-request first token, matching
+        // the steady-state per-token decode loop.
+        let first = if sample.is_greedy() {
+            self.dec.admit_greedy(&hidden)
+        } else {
+            let k = self.dec.topk_capacity().max(1);
+            let candidates = self.dec.admit_topk(&hidden, k);
+            sample_from_topk(&candidates, sample, &mut rng)
+        };
+        let mut r = Running { id, table, adapter, generated: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, rng };
+        accept_token(&mut r, first);
+        report.admitted.push(id);
+        self.running.push(r);
+    }
+
     fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
         // 0. Resume preempted sequences before anything else touches the pool:
         //    work already in flight outranks work still queued.
@@ -1178,22 +1263,51 @@ impl<D: PagedDecoder> Scheduler<D> {
         //    must run between bursts of admissions). Nothing new is admitted
         //    while a preempted sequence is still waiting for its blocks - see
         //    `Scheduler::swapped`.
-        let mut budget_left = self.prefill_budget;
-        let mut admitted_this_iter = 0u32;
-        while self.swapped.is_empty() && self.running.len() < self.max_running {
+        let interleaved = self.dec.prefill_interleave_tokens().is_some();
+        let mut budget_left = self.prefill_budget as usize;
+        let mut worked = false;
+        loop {
+            // The oldest request still being prefilled gets the budget first.
+            if let Some(p) = self.prefilling.front_mut() {
+                if worked && budget_left == 0 {
+                    break;
+                }
+                let consumed = match self.dec.prefill_chunk(&mut p.table, &p.prompt, budget_left.max(1)) {
+                    PrefillProgress::Partial { consumed } => {
+                        p.done += consumed;
+                        consumed
+                    }
+                    PrefillProgress::Done(hidden) => {
+                        let consumed = p.prompt.len() - p.done;
+                        let p = self.prefilling.pop_front().expect("the front was just prefilled");
+                        self.start_running(p, hidden, report);
+                        consumed
+                    }
+                };
+                worked = true;
+                budget_left = budget_left.saturating_sub(consumed);
+                continue;
+            }
+            // Admit while there's batch room and enough free blocks for the
+            // prompt; nothing new is admitted while a preempted sequence is
+            // still waiting for its blocks - see `Scheduler::swapped`.
+            if !self.swapped.is_empty() || self.running.len() + self.prefilling.len() >= self.max_running {
+                break;
+            }
             // The first waiting request that can be admitted at all; one
             // that can never be (see `next_admissible`) is rejected on the way
             // and one whose adapter is still loading is stepped over.
             let Some(pos) = self.next_admissible(report) else { break };
             let fits = match self.waiting.get(pos) {
                 Some(Waiting { req, .. }) => {
-                    let need = req.prompt.len() as u32;
-                    // Always admit at least one request per iteration (no
-                    // starvation); after that, stop once the budget is spent.
-                    if admitted_this_iter > 0 && need > budget_left {
+                    let need = req.prompt.len();
+                    // Always start at least one request per iteration (no
+                    // starvation); after that, stop once the budget is spent. A
+                    // decoder that prefills in slices spends it slice by slice.
+                    if worked && (budget_left == 0 || (!interleaved && need > budget_left)) {
                         break;
                     }
-                    let want = self.dec.blocks_for(need + 1);
+                    let want = self.dec.blocks_for(need as u32 + 1);
                     let free = self.dec.free_blocks();
                     if free < want {
                         // Cached prefix blocks are reclaimable capacity: live
@@ -1208,32 +1322,14 @@ impl<D: PagedDecoder> Scheduler<D> {
                 break;
             }
             let Waiting { id, req, adapter, sample, seed } = self.waiting.remove(pos).expect("admissible position");
-            budget_left = budget_left.saturating_sub(req.prompt.len() as u32);
-            admitted_this_iter += 1;
-            let mut table = match adapter {
+            let table = match adapter {
                 Some(adapter) => {
                     self.dec.pin_adapter(adapter);
                     BlockTable::with_namespace(adapter.kv_namespace())
                 }
                 None => BlockTable::new(),
             };
-            let hidden = self.dec.prefill(&mut table, &req.prompt);
-            let mut rng = data::rng::Rng::new(seed);
-            // `admit_greedy`/`admit_topk` are on-device for a decoder that has
-            // one (`qwen3::serve::Engine`): neither ships a `[vocab]` block to
-            // the host for this one-time-per-request first token, matching
-            // the steady-state per-token decode loop below.
-            let first = if sample.is_greedy() {
-                self.dec.admit_greedy(&hidden)
-            } else {
-                let k = self.dec.topk_capacity().max(1);
-                let candidates = self.dec.admit_topk(&hidden, k);
-                sample_from_topk(&candidates, sample, &mut rng)
-            };
-            let mut r = Running { id, table, adapter, generated: Vec::new(), max_new: req.max_new, stop: req.stop, next_input: first, context: req.prompt, spec: speculate::SeqSpec::new(), done: false, sample, rng };
-            accept_token(&mut r, first);
-            report.admitted.push(id);
-            self.running.push(r);
+            self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table });
         }
 
         // 2. Make room for this iteration's decode. Admission only checks that
@@ -1272,7 +1368,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             // only case, and the common one) take the exact path they always
             // did, untouched.
             let all_greedy = active.iter().all(|&i| self.running[i].sample.is_greedy());
-            let mut k = if self.waiting.is_empty() && all_greedy { remaining_min.min(self.dec.decode_window_capacity()) } else { 1 };
+            let mut k = if self.waiting.is_empty() && self.prefilling.is_empty() && all_greedy { remaining_min.min(self.dec.decode_window_capacity()) } else { 1 };
             // Every append must succeed mid-window (no host decisions there):
             // require a comfortable block reserve, else fall back to one step.
             if k > 1 && (self.dec.free_blocks() as usize) < active.len() * k {
