@@ -17,12 +17,12 @@
 //! budget per iteration, decode runs every iteration and a prompt is prefilled
 //! over several of them.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use model::paged::{BlockAllocator, BlockTable};
-use model::serve::{PagedDecoder, PrefillProgress, Request, Scheduler};
+use model::serve::{PagedDecoder, PrefillJob, PrefillProgress, Request, Scheduler};
 
 const VOCAB: usize = 64;
 
@@ -32,11 +32,15 @@ struct Toy {
     /// Prompt tokens already prefilled per first block.
     progress: HashMap<u32, usize>,
     chunked: bool,
+    /// Rows per `prefill_chunks` call this toy takes across sequences (`None`: one sequence per call).
+    batch_rows: Option<usize>,
+    /// The (jobs, rows) of every `prefill_chunks` call, for the batching spec.
+    calls: Rc<RefCell<Vec<(usize, usize)>>>,
 }
 
 impl Toy {
     fn new(clock: Rc<Cell<u64>>, chunked: bool) -> Toy {
-        Toy { alloc: BlockAllocator::new(512, 8), clock, progress: HashMap::new(), chunked }
+        Toy { alloc: BlockAllocator::new(512, 8), clock, progress: HashMap::new(), chunked, batch_rows: None, calls: Rc::default() }
     }
 }
 
@@ -94,6 +98,19 @@ impl PagedDecoder for Toy {
         } else {
             PrefillProgress::Partial { consumed: n }
         }
+    }
+    fn prefill_batch_tokens(&self) -> Option<usize> {
+        self.batch_rows
+    }
+    /// One forward over every job's rows: the clock is charged once per call (a fixed
+    /// 40 units standing for the weight pass) plus one unit per row.
+    fn prefill_chunks(&mut self, jobs: &mut [PrefillJob<'_>]) -> Vec<PrefillProgress> {
+        let before = self.clock.get();
+        let out: Vec<PrefillProgress> = jobs.iter_mut().map(|j| self.prefill_chunk(j.table, j.prompt, j.budget)).collect();
+        let rows = (self.clock.get() - before) as usize;
+        self.clock.set(before + 40 + rows as u64);
+        self.calls.borrow_mut().push((jobs.len(), rows));
+        out
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         let mut l = vec![0.0; VOCAB];
@@ -180,4 +197,51 @@ fn a_cancelled_half_prefilled_request_returns_its_blocks() {
     assert_eq!(sched.cancel(id), Some(Vec::new()));
     assert_eq!(sched.free_blocks(), free);
     assert!(!sched.pending());
+}
+
+/// Eight 100-token prompts arrive together; the decoder takes 64 rows per forward and a
+/// sequence gets at most 16 of them while others wait.
+fn run_prefill_batched(batch_rows: Option<usize>) -> (Vec<(usize, usize)>, Vec<Vec<u32>>, u64) {
+    let clock = Rc::new(Cell::new(0));
+    let mut toy = Toy::new(clock.clone(), true);
+    toy.batch_rows = batch_rows;
+    let calls = toy.calls.clone();
+    let mut sched = Scheduler::new(toy, 16);
+    let ids: Vec<u64> = (0..8).map(|i| sched.submit(Request { prompt: prompt(10 + i, 100), max_new: 5, stop: Vec::new() })).collect();
+    let mut tokens: HashMap<u64, Vec<u32>> = HashMap::new();
+    while sched.pending() {
+        for (id, toks) in sched.step() {
+            tokens.insert(id, toks);
+        }
+    }
+    let calls = calls.borrow().clone();
+    (calls, ids.iter().map(|id| tokens[id].clone()).collect(), clock.get())
+}
+
+#[test]
+fn a_decoder_that_takes_rows_across_sequences_is_handed_several_prompts_slices_in_one_call() {
+    let (calls, batched_tokens, batched_time) = run_prefill_batched(Some(64));
+    let (_, one_by_one_tokens, _) = run_prefill_batched(None);
+    assert_eq!(batched_tokens, one_by_one_tokens, "batching the prefill must not change any answer");
+    assert!(!calls.is_empty(), "the scheduler never called prefill_chunks");
+    assert!(calls.iter().all(|&(_, rows)| rows <= 64), "no call carries more than the decoder's row limit: {calls:?}");
+    assert!(calls.iter().any(|&(jobs, rows)| jobs == 4 && rows == 64), "full calls gather four 16-row slices: {calls:?}");
+    // 800 prompt tokens at 64 rows a call is 13 calls, not the 50 one-slice calls of 16 rows.
+    assert!(calls.len() <= 14, "{} calls for 800 rows", calls.len());
+    assert_eq!(calls.iter().map(|c| c.1).sum::<usize>(), 800, "every prompt token goes in exactly once");
+    assert!(batched_time > 0);
+}
+
+#[test]
+fn a_lone_prefilling_sequence_may_use_the_whole_row_budget() {
+    let clock = Rc::new(Cell::new(0));
+    let mut toy = Toy::new(clock, true);
+    toy.batch_rows = Some(64);
+    let calls = toy.calls.clone();
+    let mut sched = Scheduler::new(toy, 4);
+    sched.submit(Request { prompt: prompt(3, 100), max_new: 2, stop: Vec::new() });
+    sched.run();
+    let calls = calls.borrow().clone();
+    assert_eq!(calls.iter().map(|c| c.0).max(), Some(1));
+    assert_eq!(calls[0].1, 64, "alone, the sequence takes the whole budget in one call, not its 16-row share: {calls:?}");
 }

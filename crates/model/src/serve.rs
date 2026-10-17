@@ -163,6 +163,32 @@ pub trait PagedDecoder {
         PrefillProgress::Done(self.prefill(table, prompt))
     }
 
+    // ---- prefill of several sequences in one forward (optional) ----
+    //
+    // A decoder whose forward is cheaper per row the more rows it carries (every
+    // weight is read once however many rows share the pass) says how many rows it
+    // takes with `prefill_batch_tokens`; the scheduler then hands it the next slices
+    // of SEVERAL prefilling sequences in one `prefill_chunks` call, instead of one
+    // sequence's slice per call. The default is the one-slice-per-call loop.
+
+    /// Total prompt rows the decoder prefills in one [`Self::prefill_chunks`] call
+    /// across sequences, or `None` (the default) if it prefills one sequence per
+    /// call. The scheduler's per-iteration prefill budget then defaults to it, and
+    /// [`Self::prefill_interleave_tokens`] stays the most one sequence gets of it
+    /// while others wait.
+    fn prefill_batch_tokens(&self) -> Option<usize> {
+        None
+    }
+
+    /// Prefill the next slice of every job in one call: job `i` gets at most
+    /// `jobs[i].budget` tokens, with the semantics of [`Self::prefill_chunk`], and
+    /// the answers come back in job order. The default is one `prefill_chunk` per
+    /// job; a decoder that overrides [`Self::prefill_batch_tokens`] overrides this
+    /// to run the jobs' rows as one forward.
+    fn prefill_chunks(&mut self, jobs: &mut [PrefillJob<'_>]) -> Vec<PrefillProgress> {
+        jobs.iter_mut().map(|j| self.prefill_chunk(j.table, j.prompt, j.budget)).collect()
+    }
+
     // ---- speculative decoding (optional; see [`speculate`]) ----
     //
     // Every method below defaults to "this decoder does not speculate", so an
@@ -317,6 +343,16 @@ pub trait PagedDecoder {
     fn unpin_adapter(&mut self, adapter: AdapterId) {
         let _ = adapter;
     }
+}
+
+/// One sequence's share of a [`PagedDecoder::prefill_chunks`] call.
+pub struct PrefillJob<'a> {
+    /// The sequence's blocks (empty on its first slice).
+    pub table: &'a mut BlockTable,
+    /// The whole prompt.
+    pub prompt: &'a [u32],
+    /// At most this many more prompt tokens (>= 1).
+    pub budget: usize,
 }
 
 /// What one [`PagedDecoder::prefill_chunk`] call achieved.
@@ -801,7 +837,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         // Default budget: two full prefill chunks per iteration. Enough to keep
         // admission moving under load, small enough that running sequences see
         // a decode step between arrivals.
-        let prefill_budget = dec.prefill_interleave_tokens().map_or_else(|| dec.max_prefill_tokens().saturating_mul(2), |n| n as u32).max(1);
+        let prefill_budget = dec.prefill_batch_tokens().or(dec.prefill_interleave_tokens()).map_or_else(|| dec.max_prefill_tokens().saturating_mul(2), |n| n as u32).max(1);
         Scheduler {
             dec,
             waiting: VecDeque::new(),
@@ -1253,6 +1289,94 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.running.push(r);
     }
 
+    /// Move the first admissible waiting request into `prefilling` when the batch has
+    /// room and the pool has blocks for its prompt (cached prefixes are reclaimed to
+    /// make them), and `allow(prompt tokens)` agrees. Nothing is admitted while a
+    /// preempted sequence is still waiting for its blocks - see `Scheduler::swapped`.
+    /// A request that can never be admitted (see `next_admissible`) is rejected on the
+    /// way and one whose adapter is still loading is stepped over.
+    fn admit_one(&mut self, report: &mut StepReport, allow: impl FnOnce(usize) -> bool) -> bool {
+        if !self.swapped.is_empty() || self.running.len() + self.prefilling.len() >= self.max_running {
+            return false;
+        }
+        let Some(pos) = self.next_admissible(report) else { return false };
+        let need = match self.waiting.get(pos) {
+            Some(w) => w.req.prompt.len(),
+            None => return false,
+        };
+        if !allow(need) {
+            return false;
+        }
+        let want = self.dec.blocks_for(need as u32 + 1);
+        let free = self.dec.free_blocks();
+        if free < want {
+            // Cached prefix blocks are reclaimable capacity: live sequences always
+            // outrank the cache.
+            self.dec.reclaim_prefix(want - free);
+        }
+        if self.dec.free_blocks() < want {
+            return false;
+        }
+        let Waiting { id, req, adapter, sample, seed } = self.waiting.remove(pos).expect("admissible position");
+        let table = match adapter {
+            Some(adapter) => {
+                self.dec.pin_adapter(adapter);
+                BlockTable::with_namespace(adapter.kv_namespace())
+            }
+            None => BlockTable::new(),
+        };
+        self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table });
+        true
+    }
+
+    /// One iteration's prefill for a decoder that takes rows across sequences
+    /// ([`PagedDecoder::prefill_batch_tokens`]): admit every waiting request that fits,
+    /// then hand the decoder the next slices of the oldest prefilling sequences in a
+    /// single call. Each gets at most [`PagedDecoder::prefill_interleave_tokens`] of the
+    /// budget while later ones wait for theirs; what is left over after every
+    /// sequence has had its share goes to the oldest ones, so a lone sequence uses the
+    /// whole budget.
+    fn prefill_batched(&mut self, report: &mut StepReport) {
+        while self.admit_one(report, |_| true) {}
+        if self.prefilling.is_empty() {
+            return;
+        }
+        let share = self.dec.prefill_interleave_tokens().unwrap_or(usize::MAX).max(1);
+        let mut left = self.prefill_budget as usize;
+        let mut takes = vec![0usize; self.prefilling.len()];
+        for pass_cap in [share, usize::MAX] {
+            for (p, take) in self.prefilling.iter().zip(&mut takes) {
+                let room = (p.prompt.len() - p.done - *take).min(pass_cap.saturating_sub(*take)).min(left);
+                *take += room;
+                left -= room;
+            }
+        }
+        let mut jobs: Vec<PrefillJob<'_>> =
+            self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take }).collect();
+        let progress = self.dec.prefill_chunks(&mut jobs);
+        drop(jobs);
+        assert_eq!(progress.len(), takes.iter().filter(|&&t| t > 0).count(), "prefill_chunks answers every job");
+        let mut finished = Vec::new();
+        let mut answers = progress.into_iter();
+        for (idx, p) in self.prefilling.iter_mut().enumerate() {
+            if takes[idx] == 0 {
+                continue;
+            }
+            match answers.next().expect("one answer per job") {
+                PrefillProgress::Partial { consumed } => p.done += consumed,
+                PrefillProgress::Done(hidden) => finished.push((idx, hidden)),
+            }
+        }
+        // Oldest first, as the one-sequence loop starts them.
+        let mut starting: Vec<(Prefilling, Vec<f32>)> = Vec::new();
+        for (idx, hidden) in finished.into_iter().rev() {
+            starting.push((self.prefilling.remove(idx).expect("index just visited"), hidden));
+        }
+        for (p, hidden) in starting.into_iter().rev() {
+            self.start_running(p, hidden, report);
+        }
+    }
+
     fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
         // 0. Resume preempted sequences before anything else touches the pool:
         //    work already in flight outranks work still queued.
@@ -1266,7 +1390,11 @@ impl<D: PagedDecoder> Scheduler<D> {
         let interleaved = self.dec.prefill_interleave_tokens().is_some();
         let mut budget_left = self.prefill_budget as usize;
         let mut worked = false;
-        loop {
+        let batched = self.dec.prefill_batch_tokens().is_some();
+        if batched {
+            self.prefill_batched(report);
+        }
+        while !batched {
             // The oldest request still being prefilled gets the budget first.
             if let Some(p) = self.prefilling.front_mut() {
                 if worked && budget_left == 0 {
@@ -1288,48 +1416,15 @@ impl<D: PagedDecoder> Scheduler<D> {
                 budget_left = budget_left.saturating_sub(consumed);
                 continue;
             }
-            // Admit while there's batch room and enough free blocks for the
-            // prompt; nothing new is admitted while a preempted sequence is
-            // still waiting for its blocks - see `Scheduler::swapped`.
-            if !self.swapped.is_empty() || self.running.len() + self.prefilling.len() >= self.max_running {
+            // Admit while there's batch room and enough free blocks for the prompt.
+            //
+            // Always start at least one request per iteration (no starvation); after
+            // that, stop once the budget is spent. A decoder that prefills in slices
+            // spends it slice by slice.
+            let (worked_now, left) = (worked, budget_left);
+            if !self.admit_one(report, |need| !(worked_now && (left == 0 || (!interleaved && need > left)))) {
                 break;
             }
-            // The first waiting request that can be admitted at all; one
-            // that can never be (see `next_admissible`) is rejected on the way
-            // and one whose adapter is still loading is stepped over.
-            let Some(pos) = self.next_admissible(report) else { break };
-            let fits = match self.waiting.get(pos) {
-                Some(Waiting { req, .. }) => {
-                    let need = req.prompt.len();
-                    // Always start at least one request per iteration (no
-                    // starvation); after that, stop once the budget is spent. A
-                    // decoder that prefills in slices spends it slice by slice.
-                    if worked && (budget_left == 0 || (!interleaved && need > budget_left)) {
-                        break;
-                    }
-                    let want = self.dec.blocks_for(need as u32 + 1);
-                    let free = self.dec.free_blocks();
-                    if free < want {
-                        // Cached prefix blocks are reclaimable capacity: live
-                        // sequences always outrank the cache.
-                        self.dec.reclaim_prefix(want - free);
-                    }
-                    self.dec.free_blocks() >= want
-                }
-                None => false,
-            };
-            if !fits {
-                break;
-            }
-            let Waiting { id, req, adapter, sample, seed } = self.waiting.remove(pos).expect("admissible position");
-            let table = match adapter {
-                Some(adapter) => {
-                    self.dec.pin_adapter(adapter);
-                    BlockTable::with_namespace(adapter.kv_namespace())
-                }
-                None => BlockTable::new(),
-            };
-            self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table });
         }
 
         // 2. Make room for this iteration's decode. Admission only checks that
