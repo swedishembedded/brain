@@ -43,7 +43,7 @@ From the knowledge 316 profile: the two SwiGLU backward kernels 186 ms to about 
 mostly gone plus one read of each normalised tensor; one fp32 read + bf16 write of the [n, 17408]
 product per MLP pass; the recurrence permute 95 ms; the NF4 decode 307 ms to roughly 90 ms (2,960
 launches to about a quarter). Together about 0.5 s of a 7.2 s step. An idle-card run of the whole tree
-is queued in `runs/t-gdn2/final.sh` form and must replace this paragraph.
+is prepared as `runs/t-gdn2/final-t4.sh` (baseline, 316 tree, this tree) and must replace this paragraph.
 
 ## Not done
 
