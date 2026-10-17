@@ -296,6 +296,49 @@ fn the_int8_tensor_core_gemm_is_routed_to_and_agrees_with_the_portable_kernel_on
     eprintln!("cuda_provider_matmul_i8: worst relative difference over all shapes {worst:.2e} (bar {REL_TOL:.0e})");
 }
 
+/// One launch of the registry kernel `name` on `p`, bypassing the row-count routing.
+fn run_named(gpu: &Gpu, name: &str, p: &Problem) -> Vec<f32> {
+    use backend_api::BindKind;
+    const BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+    let kernel = kernels_cuda::get(name).unwrap_or_else(|| panic!("{name} is registered"));
+    let id = gpu.native_kernel(kernel, BINDINGS).unwrap_or_else(|| panic!("{name} is offered on this device"));
+    let d = Device::upload(gpu, p);
+    let kg = p.k as u64 / 4;
+    let operands = [(&d.x, (0, p.m as u64 * kg)), (&d.w, (0, 0)), (&d.sx, (0, p.m as u64)), (&d.sw, (0, 0)), (&d.y, (0, p.m as u64 * p.n as u64))];
+    let bufs: Vec<&backend_api::DeviceBuffer> = operands.iter().map(|o| o.0).collect();
+    let offs: Vec<(u64, u64)> = operands.iter().map(|o| o.1).collect();
+    let blocks = p.m.div_ceil(kernel.tile.0) * p.n.div_ceil(kernel.tile.1);
+    let step = gpu.step_native_sliced(id, &bufs, &offs, &[p.m, kg as u32, p.n], blocks).expect("native step");
+    gpu.submit(&[&d.y], std::slice::from_ref(&step));
+    gpu.read(&d.y, (p.m * p.n) as usize)
+}
+
+/// Every tile of the int8 GEMM folds an output the same way, so the result for a row
+/// does not depend on how many rows share the launch: the decode-batch tiles and the
+/// 64x64 prefill tile give the same bits. That is what lets
+/// a prompt be prefilled in slices, in a batch with other prompts, or whole, and what
+/// lets a speculative verify step reproduce plain decode.
+fn every_tile_of_the_int8_gemm_gives_the_same_bits() {
+    let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
+        eprintln!("cuda_provider_matmul_i8: no CUDA device on this box - skipping");
+        return;
+    };
+    let cc = gpu.caps().arch.compute_capability.expect("the CUDA backend reports its capability");
+    if cc < kernels_cuda::MMA_S8_MIN_CC {
+        eprintln!("cuda_provider_matmul_i8: compute capability {}.{} has no int8 MMA - skipping", cc.0, cc.1);
+        return;
+    }
+    for (i, &(m, n, k)) in [(200u32, 2048u32, 1024u32), (19, 4096, 2048), (577, 1088, 5120)].iter().enumerate() {
+        let p = Problem::new(m, n, k, 0x7117 + i as u64);
+        let reference = run_named(&gpu, "matmul_i8_mma", &p);
+        for name in ["matmul_i8_mma_m128", "matmul_i8_mma_m32", "matmul_i8_mma_m16"] {
+            let got = run_named(&gpu, name, &p);
+            let differing = reference.iter().zip(&got).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            assert_eq!(differing, 0, "{m}x{n}x{k}: {name} differs from matmul_i8_mma in {differing} of {} outputs", reference.len());
+        }
+    }
+}
+
 /// A hand-written tensor-core kernel that is not materially faster than the
 /// DP4A kernel it displaces is a maintenance cost with a `Tuned` claim
 /// attached. Device time, at the real prefill round shape.
@@ -437,6 +480,7 @@ fn the_selector_and_the_kernel_agree_on_the_tensor_core_floor() {
 gpu_core::card_tests!(
     the_int8_tensor_core_gemm_is_routed_to_and_agrees_with_the_portable_kernel_on_real_shapes,
     the_int8_tensor_core_gemm_is_materially_faster_than_the_portable_kernel,
+    every_tile_of_the_int8_gemm_gives_the_same_bits,
     ; host: the_selector_and_the_kernel_agree_on_the_tensor_core_floor,
     ; ignored: sweep_tile_configurations, sweep_skinny_tile_configurations,
 );
