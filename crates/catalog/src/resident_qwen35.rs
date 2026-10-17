@@ -954,7 +954,10 @@ mod tests {
     fn an_unset_context_is_sized_from_the_memory_the_placement_leaves() {
         let path = write_servable_gguf("auto-ctx");
         let gpus = vec![(0, 4 * GIB)];
-        let r = gguf_resident(&path, "t/auto", &gpus, RESERVED, &Qwen35GgufServeConfig::default()).expect("builds");
+        // Speculation reserves device bytes that grow with the context; this test sizes the context
+        // from the budget alone.
+        let cfg = Qwen35GgufServeConfig { speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Off), ..Qwen35GgufServeConfig::default() };
+        let r = gguf_resident(&path, "t/auto", &gpus, RESERVED, &cfg).expect("builds");
         assert!(r.cap() > 1_000_000, "a tiny model on a 2 GiB budget leaves room for a huge context: {}", r.cap());
         let placed: u64 = r.placement().iter().map(|p| p.3).sum();
         assert!(placed <= 2 * GIB, "the context must be charged into a placement that fits the usable bytes: {placed}");
