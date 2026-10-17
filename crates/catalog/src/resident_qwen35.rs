@@ -370,15 +370,9 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
                 return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
             }
             // The speculation reserve grows with the context (the drafter's KV), so
-            // size the context against the budget that reserve leaves at it.
-            let mut cap = auto_cap(&model_cfg, &devices, &tier, kv, max_batch, prefix_slots).ok_or_else(|| format!("{gguf_path} does not fit across the {} budgeted device(s) even with a one-token context", devices.len()))?;
-            while cap > 1 {
-                match auto_cap(&model_cfg, &devices_for(cap), &tier, kv, max_batch, prefix_slots) {
-                    Some(fit) if fit >= cap => break,
-                    Some(fit) => cap = fit,
-                    None => cap /= 2,
-                }
-            }
+            // the context is the largest one that fits beside ITS OWN reserve.
+            let upper = auto_cap(&model_cfg, &devices, &tier, kv, max_batch, prefix_slots).ok_or_else(|| format!("{gguf_path} does not fit across the {} budgeted device(s) even with a one-token context", devices.len()))?;
+            let cap = largest_fitting(upper, |c| auto_cap(&model_cfg, &devices_for(c), &tier, kv, max_batch, prefix_slots).is_some_and(|fit| fit >= c));
             cap
         }
     };
@@ -390,6 +384,22 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         Some(reason) => Err(reason),
         None => Ok(Qwen35GgufServed::new(resident, bank, gguf_path, id)),
     }
+}
+
+/// The largest `c` in `1..=upper` for which `fits(c)` holds, given that it
+/// holds for small `c` and never again once it fails (a context that does not
+/// fit does not fit with a bigger reserve either). 1 when nothing larger fits.
+fn largest_fitting(upper: u32, fits: impl Fn(u32) -> bool) -> u32 {
+    let (mut lo, mut hi) = (1, upper.max(1));
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
 }
 
 /// A released Qwen3.8 GGUF resident with the adapters offered beside it.
@@ -717,6 +727,20 @@ mod tests {
         assert_eq!(r.speculation().mode, qwen35::int8_gguf_resident::SpeculativeMode::Auto, "speculation is on by default and falls back to plain decode without a drafter");
         assert_eq!(r.manifest().max_context_tokens, Some(r.cap() as u64));
         std::fs::remove_file(path).ok();
+    }
+
+    /// A reserve that grows with the context must not drag the sized context
+    /// down to a fixed point of "shrink to what fit at the previous size": the
+    /// result is the largest context that fits beside its own reserve.
+    #[test]
+    fn the_context_is_the_largest_that_fits_beside_its_own_reserve() {
+        // A budget of 2000 units; a context costs one per token plus a reserve of a quarter more.
+        let fits = |c: u32| c + c / 4 <= 2000;
+        let upper = 2000; // what fits with no reserve at all
+        let best = largest_fitting(upper, fits);
+        assert_eq!(best, 1600);
+        assert!(fits(best) && !fits(best + 1));
+        assert_eq!(largest_fitting(upper, |c| c <= 1), 1, "nothing beyond one token fits");
     }
 
     /// Everything that would make the first request fail is refused here,
