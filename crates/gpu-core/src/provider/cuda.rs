@@ -501,7 +501,7 @@ const GDN_CHUNK_LOOP_TC_DYNAMIC_SHARED_BYTES: u32 = (2 * 64 * 132 + 128 * 40 + 6
 const GDN_CHUNK_LOOP_TC_SPLITS: u32 = 4;
 
 /// [`gdn_chunk_loop_step`] on tensor cores (`gdn_chunk_loop_tc`): same buffers and
-/// contract, three-pass TF32 products instead of fp32 CUDA-core ones, so it
+/// contract (`heads_tok` non-zero writes `out` token-major, see the kernel header), three-pass TF32 products instead of fp32 CUDA-core ones, so it
 /// agrees with the fp32 kernel to about 1e-6 relative rather than bit for bit.
 /// `None` for the same reasons as [`gdn_chunk_loop_step`] and on a device below
 /// the tensor-core floor; the caller then asks for the fp32 kernel.
@@ -515,6 +515,7 @@ pub fn gdn_chunk_loop_tc_step(
     dv: u32,
     n_chunks: u32,
     scale: f32,
+    heads_tok: u32,
 ) -> Option<crate::Step> {
     if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
         return None;
@@ -523,7 +524,7 @@ pub fn gdn_chunk_loop_tc_step(
     let kernel = kernels_cuda::get("gdn_chunk_loop_tc").filter(|k| k.min_cc <= cc)?;
     let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_TC_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
     let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_LOOP_BINDINGS, launch)?;
-    gpu.step_native_sliced(id, bufs, &[(0, 0); 10], &[bh, c_len, dk, dv, n_chunks, scale.to_bits()], bh * GDN_CHUNK_LOOP_TC_SPLITS)
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 10], &[bh, c_len, dk, dv, n_chunks, scale.to_bits(), heads_tok], bh * GDN_CHUNK_LOOP_TC_SPLITS)
 }
 
 /// [`gdn_chunk_loop_tc_step`] for the training forward: also writes the state and
@@ -538,6 +539,7 @@ pub fn gdn_chunk_loop_train_tc_step(
     dv: u32,
     n_chunks: u32,
     scale: f32,
+    heads_tok: u32,
 ) -> Option<crate::Step> {
     if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
         return None;
@@ -546,7 +548,7 @@ pub fn gdn_chunk_loop_train_tc_step(
     let kernel = kernels_cuda::get("gdn_chunk_loop_train_tc").filter(|k| k.min_cc <= cc)?;
     let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_TC_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
     let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_LOOP_TRAIN_BINDINGS, launch)?;
-    gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks, scale.to_bits()], bh * GDN_CHUNK_LOOP_TC_SPLITS)
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks, scale.to_bits(), heads_tok], bh * GDN_CHUNK_LOOP_TC_SPLITS)
 }
 
 /// Whether the token-major tensor-core prefix can serve this call: the chunk

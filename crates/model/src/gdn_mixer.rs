@@ -379,11 +379,15 @@ pub fn gdn_mixer_stream_fwd(
     // the chunk-major permutes below happen inside that one kernel, which also writes the
     // chunk-major tensors the backward reads. `None` (no opt-in, no tensor cores, another head
     // width) leaves everything unwritten and the dispatch sequence it has always run follows.
+    // The tensor-core recurrence also writes its output rows token-major itself when it can (`out_is_tok`), which
+    // spares the chunk-major to token-major permute after it.
+    let out_is_tok = std::cell::Cell::new(false);
     let fused = scratch_train.as_ref().filter(|_| tokens_prefix_offered(g, &ids.chunk, &gdn, group)).and_then(|strain| {
         let cm = (g.storage(cm_len(khd)), g.storage(cm_len(khd)), g.storage(cm_len(vhd)), g.storage(cm_len(1)));
         let tok = GdnTokenInputs { query: &query, key: &key, value: &value, raw_g: &g_decay, beta: &beta, group, l2_eps: 1e-6 };
         let out = GdnChunkMajorOut { query_cm: &cm.0, key_cm: &cm.1, value_cm: &cm.2, beta_cm: &cm.3 };
-        let steps = gdn_chunk_fwd_train_tokens(g, &ids.chunk, &ids.chunk_bwd, &gdn, &tok, &out, initial_state, &strain.as_ref(), &out_cm, &final_state)?;
+        let (steps, token_major) = gdn_chunk_fwd_train_tokens(g, &ids.chunk, &ids.chunk_bwd, &gdn, &tok, &out, initial_state, &strain.as_ref(), &out_cm, &final_state, true)?;
+        out_is_tok.set(token_major);
         g.submit(&strain.clears(), &steps);
         Some(cm)
     });
@@ -396,8 +400,9 @@ pub fn gdn_mixer_stream_fwd(
             let (query_cm, key_cm) = (g.storage(cm_len(khd)), g.storage(cm_len(khd)));
             let scratch = GdnScratchBufs::new(g, &gdn);
             let tok = GdnTokenInputs { query: &query, key: &key, value: &value, raw_g: &g_decay, beta: &beta, group, l2_eps: 1e-6 };
-            match gdn_chunk_fwd_tokens(g, &ids.chunk, &gdn, &tok, &query_cm, &key_cm, initial_state, &scratch.as_ref(), &out_cm, &final_state) {
-                Some(steps) => {
+            match gdn_chunk_fwd_tokens(g, &ids.chunk, &gdn, &tok, &query_cm, &key_cm, initial_state, &scratch.as_ref(), &out_cm, &final_state, true) {
+                Some((steps, token_major)) => {
+                    out_is_tok.set(token_major);
                     g.submit(&scratch.clears(), &steps);
                     true
                 }
@@ -484,8 +489,13 @@ pub fn gdn_mixer_stream_fwd(
     }
 
     // Permute back to token-major.
-    let out_tok = g.storage((n * value_dim) as u64);
-    g.submit(&[], &[g.step(ids.gdn_layout_permute, &[&out_cm, &out_tok], &[b, nvh, n_chunks, chunk, vhd, 0], b * nvh * n_chunks * chunk * vhd)]);
+    let out_tok = if out_is_tok.get() {
+        out_cm
+    } else {
+        let out_tok = g.storage((n * value_dim) as u64);
+        g.submit(&[], &[g.step(ids.gdn_layout_permute, &[&out_cm, &out_tok], &[b, nvh, n_chunks, chunk, vhd, 0], b * nvh * n_chunks * chunk * vhd)]);
+        out_tok
+    };
 
     // Gated RMSNorm ("norm before gate"): normed = RMSNorm(out_tok)*weight,
     // THEN * SiLU(z).

@@ -817,13 +817,13 @@ fn native_chunk_prep_train(_g: &Gpu, _bufs: &[&DeviceBuffer; 17], _bhc: u32, _c:
 /// exists at all; `None` on wasm.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
-fn native_chunk_loop_tc(g: &Gpu, bufs: &[&DeviceBuffer; 10], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32) -> Option<Step> {
-    gpu_core::provider::cuda::gdn_chunk_loop_tc_step(g, bufs, bh, c, dk, dv, n_chunks, scale)
+fn native_chunk_loop_tc(g: &Gpu, bufs: &[&DeviceBuffer; 10], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32, heads_tok: u32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_loop_tc_step(g, bufs, bh, c, dk, dv, n_chunks, scale, heads_tok)
 }
 
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
-fn native_chunk_loop_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 10], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32) -> Option<Step> {
+fn native_chunk_loop_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 10], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32, _heads_tok: u32) -> Option<Step> {
     None
 }
 
@@ -831,13 +831,13 @@ fn native_chunk_loop_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 10], _bh: u32, _c: u32
 /// backend exists at all; `None` on wasm.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
-fn native_chunk_loop_train_tc(g: &Gpu, bufs: &[&DeviceBuffer; 12], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32) -> Option<Step> {
-    gpu_core::provider::cuda::gdn_chunk_loop_train_tc_step(g, bufs, bh, c, dk, dv, n_chunks, scale)
+fn native_chunk_loop_train_tc(g: &Gpu, bufs: &[&DeviceBuffer; 12], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32, heads_tok: u32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_loop_train_tc_step(g, bufs, bh, c, dk, dv, n_chunks, scale, heads_tok)
 }
 
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
-fn native_chunk_loop_train_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32) -> Option<Step> {
+fn native_chunk_loop_train_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32, _heads_tok: u32) -> Option<Step> {
     None
 }
 
@@ -1128,7 +1128,7 @@ pub fn gdn_chunk_fwd(
     // state copy and the whole chunk loop below are what it replaces.
     if ids.fast.is_some() && use_fast_kernels(g) {
         let bufs = [key, query, scratch.w, scratch.u, scratch.g_cs, scratch.exp_g_cs, scratch.intra_scores, initial_state, out, final_state];
-        let tc = if tensor_core_enabled(g, ids) { native_chunk_loop_tc(g, &bufs, bh, c, dk, dv, n_chunks, scale) } else { None };
+        let tc = if tensor_core_enabled(g, ids) { native_chunk_loop_tc(g, &bufs, bh, c, dk, dv, n_chunks, scale, 0) } else { None };
         if let Some(step) = tc.or_else(|| native_chunk_loop(g, &bufs, bh, c, dk, dv, n_chunks, scale)) {
             steps.push(step);
             return steps;
@@ -1362,7 +1362,7 @@ fn gdn_chunk_loop_train(
             scratch.state_history,
             scratch.decay_scale_hist,
         ];
-        let tc = if tensor_core_enabled(g, ids) { native_chunk_loop_train_tc(g, &bufs, bh, c, dk, dv, n_chunks, scale) } else { None };
+        let tc = if tensor_core_enabled(g, ids) { native_chunk_loop_train_tc(g, &bufs, bh, c, dk, dv, n_chunks, scale, 0) } else { None };
         if let Some(step) = tc.or_else(|| native_chunk_loop_train(g, &bufs, bh, c, dk, dv, n_chunks, scale)) {
             steps.push(step);
             return steps;
@@ -1441,6 +1441,10 @@ pub fn tokens_prefix_offered(g: &Gpu, ids: &GdnIds, shape: &GdnShape, group: u32
 /// chunk is longer than 64 rows, or the backend declined the kernel - and the caller then runs the
 /// normalisation, repeat, permutes and [`gdn_chunk_fwd_train`] it always ran. Callers must not have
 /// touched any output buffer in that case: nothing is written until the returned steps are submitted.
+///
+/// With `out_token_major` the tensor-core recurrence writes `out` in the token-major layout `[tokens, heads,
+/// dv]` (saving the caller its chunk-major to token-major permute); the returned flag says whether it did, and
+/// when it is false `out` is chunk-major as always.
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_chunk_fwd_train_tokens(
     g: &Gpu,
@@ -1453,7 +1457,8 @@ pub fn gdn_chunk_fwd_train_tokens(
     scratch: &GdnScratchTrain,
     out: &DeviceBuffer,
     final_state: &DeviceBuffer,
-) -> Option<Vec<Step>> {
+    out_token_major: bool,
+) -> Option<(Vec<Step>, bool)> {
     if !tensor_core_enabled(g, ids) || shape.dk != shape.dv {
         return None;
     }
@@ -1482,7 +1487,29 @@ pub fn gdn_chunk_fwd_train_tokens(
         cm.beta_cm,
     ];
     let prep = native_chunk_prep_tok_train(g, &bufs, layout)?;
-    Some(gdn_chunk_loop_train(g, ids, bwd_ids, shape, cm.query_cm, cm.key_cm, initial_state, scratch, out, final_state, vec![prep]))
+    // The recurrence's output rows in the mixer's token-major layout straight from the tensor-core loop, when
+    // asked for and served; otherwise the chunk-major `out` the portable loops write.
+    if out_token_major {
+        let (bh, c, n_chunks) = (shape.bh(), shape.chunk, shape.n_chunks());
+        let loop_bufs = [
+            cm.key_cm,
+            cm.query_cm,
+            scratch.w,
+            scratch.u,
+            scratch.g_cs,
+            scratch.exp_g_cs,
+            scratch.intra_scores,
+            initial_state,
+            out,
+            final_state,
+            scratch.state_history,
+            scratch.decay_scale_hist,
+        ];
+        if let Some(recurrence) = native_chunk_loop_train_tc(g, &loop_bufs, bh, c, shape.dk, shape.dv, n_chunks, 1.0f32 / (shape.dk as f32).sqrt(), shape.h) {
+            return Some((vec![prep, recurrence], true));
+        }
+    }
+    Some((gdn_chunk_loop_train(g, ids, bwd_ids, shape, cm.query_cm, cm.key_cm, initial_state, scratch, out, final_state, vec![prep]), false))
 }
 
 /// [`gdn_chunk_fwd`] fed with the mixer's token-major tensors, the inference sibling of
@@ -1500,7 +1527,8 @@ pub fn gdn_chunk_fwd_tokens(
     scratch: &GdnScratch,
     out: &DeviceBuffer,
     final_state: &DeviceBuffer,
-) -> Option<Vec<Step>> {
+    out_token_major: bool,
+) -> Option<(Vec<Step>, bool)> {
     if !tensor_core_enabled(g, ids) || shape.dk != shape.dv {
         return None;
     }
@@ -1526,8 +1554,13 @@ pub fn gdn_chunk_fwd_tokens(
     // The recurrence: one tensor-core launch, else the fp32 one. A device that took the prefix above
     // takes at least the fp32 loop (same compute-capability floor family); if neither is offered the
     // whole call declines so the caller runs its portable sequence from the start.
-    let recurrence = native_chunk_loop_tc(g, &loop_bufs, bh, c, dk, dv, n_chunks, scale).or_else(|| native_chunk_loop(g, &loop_bufs, bh, c, dk, dv, n_chunks, scale))?;
-    Some(vec![prep, recurrence])
+    if out_token_major {
+        if let Some(recurrence) = native_chunk_loop_tc(g, &loop_bufs, bh, c, dk, dv, n_chunks, scale, shape.h) {
+            return Some((vec![prep, recurrence], true));
+        }
+    }
+    let recurrence = native_chunk_loop_tc(g, &loop_bufs, bh, c, dk, dv, n_chunks, scale, 0).or_else(|| native_chunk_loop(g, &loop_bufs, bh, c, dk, dv, n_chunks, scale))?;
+    Some((vec![prep, recurrence], false))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

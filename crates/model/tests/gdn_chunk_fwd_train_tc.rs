@@ -351,3 +351,76 @@ fn the_token_major_backward_equals_the_chunk_major_one_with_the_permutes_folded(
         }
     }
 }
+
+/// The tensor-core recurrence writing its output token-major (`out_token_major`) gives the chunk-major result
+/// permuted, for the training and the inference token-major forwards, and says so in the returned flag.
+#[test]
+fn the_recurrence_output_can_be_written_token_major_and_matches_the_chunk_major_one() {
+    let Ok(g) = Gpu::try_new_cuda(PIPES) else {
+        eprintln!("gdn_chunk_fwd_train_tc: no CUDA device on this box - nothing to run");
+        return;
+    };
+    if !model::gdn::use_fast_kernels(&g) {
+        eprintln!("gdn_chunk_fwd_train_tc: this device does not take the fast kernels - nothing to run");
+        return;
+    }
+    use model::gdn::{gdn_chunk_fwd_tokens, gdn_chunk_fwd_train_tokens, GdnScratchBufs, GdnTokenInputs};
+    for (b, h, t, chunk, group) in [(1u32, 6u32, 256u32, 64u32, 3u32), (2, 6, 96, 32, 3)] {
+        let shape = GdnShape { b, h, t, dk: 128, dv: 128, chunk };
+        let (bhc, bh) = (shape.bhc() as usize, shape.bh() as usize);
+        let (cn, heads, bsz, nkh) = (chunk as usize, h as usize, b as usize, (h / group) as usize);
+        let tokens = bsz * t as usize;
+        let mut s = 21u64;
+        let q = g.storage_init("q", &rand(&mut s, tokens * nkh * 128, 1.0));
+        let k = g.storage_init("k", &rand(&mut s, tokens * nkh * 128, 1.0));
+        let v = g.storage_init("v", &rand(&mut s, tokens * heads * 128, 1.0));
+        let raw_g = g.storage_init("g", &rand(&mut s, tokens * heads, 0.2).iter().map(|x| -x.abs()).collect::<Vec<_>>());
+        let beta = g.storage_init("beta", &rand(&mut s, tokens * heads, 0.5).iter().map(|x| x + 0.5).collect::<Vec<_>>());
+        let initial = g.storage_init("s0", &rand(&mut s, bh * 128 * 128, 0.1));
+        let (ids, bids) = (ids(&g, Tier::TensorCore), bwd_ids(&g));
+        let tok = GdnTokenInputs { query: &q, key: &k, value: &v, raw_g: &raw_g, beta: &beta, group, l2_eps: 1e-6 };
+        let len = bhc * cn * 128;
+        let mut outs: Vec<Vec<f32>> = Vec::new();
+        for train in [true, false] {
+            for want_tok in [false, true] {
+                let (qcm, kcm, vcm, bcm) = (g.storage(len as u64), g.storage(len as u64), g.storage(len as u64), g.storage((bhc * cn) as u64));
+                let out = g.storage(len as u64);
+                let fin = g.storage((bh * 128 * 128) as u64);
+                let flag = if train {
+                    let scratch = GdnScratchTrainBufs::new(&g, &shape);
+                    let cm = GdnChunkMajorOut { query_cm: &qcm, key_cm: &kcm, value_cm: &vcm, beta_cm: &bcm };
+                    let (steps, flag) = gdn_chunk_fwd_train_tokens(&g, &ids, &bids, &shape, &tok, &cm, &initial, &scratch.as_ref(), &out, &fin, want_tok).expect("served");
+                    g.submit(&scratch.clears(), &steps);
+                    flag
+                } else {
+                    let scratch = GdnScratchBufs::new(&g, &shape);
+                    let (steps, flag) = gdn_chunk_fwd_tokens(&g, &ids, &shape, &tok, &qcm, &kcm, &initial, &scratch.as_ref(), &out, &fin, want_tok).expect("served");
+                    g.submit(&scratch.clears(), &steps);
+                    flag
+                };
+                assert_eq!(flag, want_tok, "b={b} train={train}: the tensor-core recurrence must honour the token-major request");
+                let mut o = g.read(&out, len);
+                if flag {
+                    // Back to chunk-major on the host for the comparison.
+                    let mut cm = vec![0f32; len];
+                    let n_chunks = (t / chunk) as usize;
+                    for blk in 0..bhc {
+                        let (ci, rem) = (blk / (bsz * heads), blk % (bsz * heads));
+                        let (bb, hh) = (rem / heads, rem % heads);
+                        for r in 0..cn {
+                            let row = ((bb * n_chunks + ci) * cn + r) * heads + hh;
+                            cm[(blk * cn + r) * 128..][..128].copy_from_slice(&o[row * 128..][..128]);
+                        }
+                    }
+                    o = cm;
+                }
+                outs.push(o);
+            }
+        }
+        for (i, o) in outs.iter().enumerate() {
+            let e = rel_diff(o, &outs[0]);
+            println!("b={b} h={h} variant {i}: {e:.2e}");
+            assert!(e == 0.0, "b={b}: variant {i} differs from the chunk-major training output by {e:.3e}");
+        }
+    }
+}

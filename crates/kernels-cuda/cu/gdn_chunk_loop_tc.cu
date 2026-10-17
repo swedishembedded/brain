@@ -22,8 +22,11 @@
 // behind the same opt-in as the tensor-core prefix.
 //
 // Contract (u32 params, then pointers; chunk-major layout, `bhc = chunk*bh + head`):
-//   params : [bh, c_len, dk, dv, n_chunks, scale (f32 bits)]
+//   params : [bh, c_len, dk, dv, n_chunks, scale (f32 bits), heads_tok]
 //   key, query, w : [n_chunks, bh, c_len, 128]   u, out : [n_chunks, bh, c_len, 128]
+//     (with heads_tok != 0 - the value-head count, bh = batch * heads_tok - `out` is written in the mixer's
+//      token-major layout [tokens, heads_tok, 128] instead, which folds the chunk-major to token-major permute
+//      of its consumer into the stores)
 //   g_cs, exp_g_cs : [n_chunks, bh, c_len]       intra : [n_chunks, bh, c_len, c_len]
 //   initial_state, final_state : [bh, 128, 128]
 //   TRAIN: state_hist [n_chunks + 1, bh, 128, 128] (the state ENTERING each chunk, then
@@ -90,6 +93,7 @@ __device__ __forceinline__ void brain_gdn_chunk_loop_tc_body(const unsigned int*
     const unsigned int C = params[1];
     const unsigned int n_chunks = params[4];
     const float scale = __uint_as_float(params[5]);
+    const unsigned int heads_tok = params[6];
 
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
     const unsigned int bhi = blk / SPLITS;
@@ -120,6 +124,14 @@ __device__ __forceinline__ void brain_gdn_chunk_loop_tc_body(const unsigned int*
         const unsigned long long off_g = row_base;
         const unsigned long long off_cc = row_base * C;
         const float g_last = g_cs[off_g + C - 1];
+        // Where this (head, chunk)'s output rows go: chunk-major, or the mixer's token-major rows.
+        float* out_chunk = out + off_dk;
+        unsigned long long out_stride = D;
+        if (heads_tok != 0) {
+            const unsigned long long tok0 = ((unsigned long long)(bhi / heads_tok) * n_chunks + ci) * C;
+            out_chunk = out + (tok0 * heads_tok + bhi % heads_tok) * D;
+            out_stride = (unsigned long long)heads_tok * D;
+        }
 
         if (TRAIN) {
             for (unsigned int i = tid; i < D * CS; i += THREADS) {
@@ -198,7 +210,7 @@ __device__ __forceinline__ void brain_gdn_chunk_loop_tc_body(const unsigned int*
             for (int h2 = 0; h2 < 2; ++h2) {
                 const unsigned int r = m0 + g + h2 * 8u;
                 if (r < C) {
-                    *reinterpret_cast<float2*>(out + off_dk + (unsigned long long)r * D + j0 + t * 8 + 2 * t4) = make_float2(acc2[t][2 * h2], acc2[t][2 * h2 + 1]);
+                    *reinterpret_cast<float2*>(out_chunk + (unsigned long long)r * out_stride + j0 + t * 8 + 2 * t4) = make_float2(acc2[t][2 * h2], acc2[t][2 * h2 + 1]);
                 }
             }
         }
