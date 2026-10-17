@@ -879,6 +879,37 @@ pub fn swiglu_bwd_fused_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffe
     gpu.step_native_sliced(id, bufs, &[(0, 0); 5], &[total], total.div_ceil(per_block))
 }
 
+/// `add_rmsnorm_fwd`: a, b, w (read); sum, out (written).
+static ADD_RMSNORM_BINDINGS: [BindKind; 6] = bwd_tc_bindings(3);
+/// `rmsnorm_dx_add`: x, w, dy, res (read); dx (written).
+static RMSNORM_DX_ADD_BINDINGS: [BindKind; 6] = bwd_tc_bindings(4);
+
+/// Shared checks of the fused RMSNorm kernels: rows of a multiple of four, no `cuda` in `BRAIN_NO_PROVIDER`.
+fn rmsnorm_fused_kernel(gpu: &crate::Gpu, name: &str, d: u32, rows: u32) -> Option<&'static kernels_cuda::CudaKernel> {
+    if d == 0 || rows == 0 || !d.is_multiple_of(4) || super::disabled_providers().iter().any(|x| x == "cuda") {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    kernels_cuda::get(name).filter(|k| k.min_cc <= cc)
+}
+
+/// `sum = a + b; out = rmsnorm(sum) * w` as one launch (`add_rmsnorm_fwd`), for `rows` rows of width `d`.
+/// `bufs` is `a, b, w` (read) and `sum, out` (every element overwritten). `None` when the width is not a
+/// multiple of four, `cuda` is disabled, or the device declines; the caller then issues `add2` and the norm.
+pub fn add_rmsnorm_fwd_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], d: u32, rows: u32, eps: f32) -> Option<crate::Step> {
+    let kernel = rmsnorm_fused_kernel(gpu, "add_rmsnorm_fwd", d, rows)?;
+    let id = gpu.native_kernel(kernel, &ADD_RMSNORM_BINDINGS)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 5], &[d, rows, eps.to_bits()], rows)
+}
+
+/// `dx = res + rmsnorm_dx(x, w, dy)` as one launch (`rmsnorm_dx_add`). `bufs` is `x, w, dy, res` (read) and
+/// `dx` (overwritten). `None` for the reasons of [`add_rmsnorm_fwd_step`].
+pub fn rmsnorm_dx_add_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], d: u32, rows: u32, eps: f32) -> Option<crate::Step> {
+    let kernel = rmsnorm_fused_kernel(gpu, "rmsnorm_dx_add", d, rows)?;
+    let id = gpu.native_kernel(kernel, &RMSNORM_DX_ADD_BINDINGS)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 5], &[d, rows, eps.to_bits()], rows)
+}
+
 /// The native tensor-core paged flash-prefill step for `head_dim = 256`, or
 /// `None` when the caller should dispatch the portable
 /// `paged_flash_prefill_hd256` it was going to anyway.

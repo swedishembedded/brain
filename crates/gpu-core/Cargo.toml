@@ -125,6 +125,10 @@ name = "swiglu_bwd_native"
 harness = false
 
 [[test]]
+name = "rmsnorm_fused_native"
+harness = false
+
+[[test]]
 name = "gdn_dscale_native"
 harness = false
 

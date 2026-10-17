@@ -97,6 +97,8 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `gdn_conv_hist_tok` | GatedDeltaChunkLoop | F32 | tuned | 8.0 | `brain_gdn_conv_hist_tok` | the convolution history a chunked forward hands to its next round: the last 3 rows of [history | x], channel-major, updated in place |
 | `gdn_conv_silu_bwd_tok` | GatedDeltaChunkLoop | F32 | tuned | 8.0 | `brain_gdn_conv_silu_bwd_tok` | the backward of gdn_conv_silu_tok for a frozen convolution weight in one pass: SiLU adjoint, the query/key/value gradient concatenation and the causal-adjoint convolution, token-major, with the history rows' gradient of a continued round |
 | `swiglu_bwd_fused` | Elementwise | F32 | tuned | 5.0 | `brain_swiglu_bwd_fused` | the SwiGLU backward in one pass: reads the gate pre-activation, the up projection and the incoming gradient once and writes both the gate and the up gradient, four elements a thread; replaces silu_bwd_da plus silu_bwd_db |
+| `add_rmsnorm_fwd` | Elementwise | F32 | tuned | 5.0 | `brain_add_rmsnorm_fwd` | a residual add folded into the RMSNorm that follows it, one block per row: writes both the sum and the normalised sum, replacing add2 plus rmsnorm_rows |
+| `rmsnorm_dx_add` | Elementwise | F32 | tuned | 5.0 | `brain_rmsnorm_dx_add` | the RMSNorm input gradient with the residual-path gradient added in the same pass, one block per row; replaces rmsnorm_dx_rows plus add2 when the norm weight is frozen |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 

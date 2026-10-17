@@ -562,6 +562,29 @@ const GDN_PAD_QUANTUM: u32 = 64;
 /// has to be passed explicitly here - see [`rms_step`].
 const RMS_EPS: f32 = 1e-6;
 
+/// The native fused residual-add + RMSNorm launch (`add_rmsnorm_fwd`), `None` off CUDA and on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_add_rmsnorm(g: &Gpu, bufs: [&DeviceBuffer; 5], d: u32, rows: u32, eps: f32) -> Option<Step> {
+    gpu_core::provider::cuda::add_rmsnorm_fwd_step(g, &bufs, d, rows, eps)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_add_rmsnorm(_g: &Gpu, _bufs: [&DeviceBuffer; 5], _d: u32, _rows: u32, _eps: f32) -> Option<Step> {
+    None
+}
+
+/// The native RMSNorm backward with the residual gradient added (`rmsnorm_dx_add`), `None` off CUDA and on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_rmsnorm_dx_add(g: &Gpu, bufs: [&DeviceBuffer; 5], d: u32, rows: u32, eps: f32) -> Option<Step> {
+    gpu_core::provider::cuda::rmsnorm_dx_add_step(g, &bufs, d, rows, eps)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_rmsnorm_dx_add(_g: &Gpu, _bufs: [&DeviceBuffer; 5], _d: u32, _rows: u32, _eps: f32) -> Option<Step> {
+    None
+}
+
+
 /// One RMSNorm through `block::rms_variant`: the cooperative workgroup-per-row
 /// kernel (`rmsnorm_rows`) where the device can run a workgroup reduction, the
 /// per-element `rmsnorm` otherwise.
@@ -2049,6 +2072,35 @@ impl Qwen35 {
 
     /// RMSNorm backward via the shared builder: input grad always, gain grad
     /// only when the gain is trainable.
+    /// `sum = a + b; out = rmsnorm(sum) * w` (the residual add and the norm that follows it), as the one native
+    /// launch `add_rmsnorm_fwd` where a CUDA device offers it, else `add2` and the norm.
+    fn add_then_rmsnorm(&self, a: &DeviceBuffer, b: &DeviceBuffer, wname: &str, sum: &DeviceBuffer, out: &DeviceBuffer, d: u32, n: u32) {
+        let g = &self.gpu;
+        let w = self.w(wname);
+        if let Some(fused) = native_add_rmsnorm(g, [a, b, w, sum, out], d, n, self.cfg.rms_eps) {
+            g.submit(&[], &[fused]);
+            return;
+        }
+        g.submit(&[], &[g.step(ADD2, &[a, b, sum], &[n * d], n * d)]);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), sum, w, out, d, n, self.cfg.rms_eps)]);
+    }
+
+    /// [`Self::rmsnorm_bwd_step`] followed by `total = res + dx`: one native launch (`rmsnorm_dx_add`) when the
+    /// norm weight is frozen (no weight gradient to form) and a CUDA device offers it, else the two dispatches.
+    /// The portable path needs a scratch `dx`; the fused one does not allocate it.
+    #[allow(clippy::too_many_arguments)]
+    fn rmsnorm_bwd_add_step(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, res: &DeviceBuffer, total: &DeviceBuffer, d: u32, n: u32) {
+        if !self.trainable(wname) {
+            if let Some(fused) = native_rmsnorm_dx_add(&self.gpu, [x, self.w(wname), dy, res, total], d, n, self.cfg.rms_eps) {
+                steps.push(fused);
+                return;
+            }
+        }
+        let dx = self.gpu.storage(n as u64 * d as u64);
+        self.rmsnorm_bwd_step(steps, x, wname, dy, &dx, d, n);
+        steps.push(self.gpu.step(ADD2, &[res, &dx, total], &[n * d], n * d));
+    }
+
     fn rmsnorm_bwd_step(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         let inv = self.gpu.storage(rows as u64);
         let gw = self.trainable(wname).then(|| self.g(wname));
@@ -2782,10 +2834,8 @@ impl Qwen35 {
         };
 
         let xmid = g.storage((n * d) as u64);
-        g.submit(&[], &[g.step(ADD2, &[xres, &mixer_out, &xmid], &[n * d], n * d)]);
-
         let xn2 = g.storage((n * d) as u64);
-        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, n, self.cfg.rms_eps)]);
+        self.add_then_rmsnorm(xres, &mixer_out, &format!("blocks.{l}.ln2.weight"), &xmid, &xn2, d, n);
 
         let prefix = format!("blocks.{l}.mlp");
         let chunk_rows = self.mlp_chunk_rows(n);
@@ -3213,12 +3263,10 @@ impl Qwen35 {
             let d_mlp_out = &d_res_next;
             let d_xn2 = self.mlp_bwd_saved(&format!("blocks.{l}.mlp"), &la.mlp, d_mlp_out, n);
 
-            let d_ln2_dx = g.storage((n * d) as u64);
             let d_xmid = g.storage((n * d) as u64);
             {
                 let mut s = Vec::new();
-                self.rmsnorm_bwd_step(&mut s, &la.xmid, &format!("blocks.{l}.ln2.weight"), &d_xn2, &d_ln2_dx, d, n);
-                s.push(g.step(ADD2, &[&d_res_next, &d_ln2_dx, &d_xmid], &[n * d], n * d));
+                self.rmsnorm_bwd_add_step(&mut s, &la.xmid, &format!("blocks.{l}.ln2.weight"), &d_xn2, &d_res_next, &d_xmid, d, n);
                 g.submit(&[], &s);
             }
 
@@ -3230,12 +3278,10 @@ impl Qwen35 {
             }
 
             // ---- ln1 backward: xn1 = rmsnorm(res[l]) -> d_res[l] = d_xmid + d_tmp ----
-            let d_ln1_dx = g.storage((n * d) as u64);
             let d_res_l = g.storage((n * d) as u64);
             {
                 let mut s = Vec::new();
-                self.rmsnorm_bwd_step(&mut s, x, &format!("blocks.{l}.ln1.weight"), &d_xn1, &d_ln1_dx, d, n);
-                s.push(g.step(ADD2, &[&d_xmid, &d_ln1_dx, &d_res_l], &[n * d], n * d));
+                self.rmsnorm_bwd_add_step(&mut s, x, &format!("blocks.{l}.ln1.weight"), &d_xn1, &d_xmid, &d_res_l, d, n);
                 g.submit(&[], &s);
             }
             d_res_next = d_res_l;
