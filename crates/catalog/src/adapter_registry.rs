@@ -53,7 +53,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
-use llmserve::{run_batch_scheduled, run_open_scheduled, scheduler_metrics, Frontend, TextFrontend};
+use llmserve::{run_batch_scheduled, run_open_scheduled, OpenGroup, scheduler_metrics, Frontend, TextFrontend};
 use model::serve::{PagedDecoder, Scheduler};
 use brain_modelref::ModelRef;
 use model::serve::AdapterId;
@@ -548,10 +548,16 @@ impl AdapterSync {
         AdapterSync { registry, seen: None, loaded: HashMap::new(), routes: HashMap::new() }
     }
 
+    /// Whether the registry has changed since the last [`Self::sync`]: the
+    /// routes may name a release that has been replaced.
+    pub(crate) fn stale(&self) -> bool {
+        self.seen != Some(self.registry.generation.load(Ordering::SeqCst))
+    }
+
     /// Bring `engine`'s bank in line with the registry: register what it
     /// gained, unload what it lost. One atomic load when nothing changed.
     pub(crate) fn sync<E: BankedEngine>(&mut self, engine: &mut E) {
-        if self.seen == Some(self.registry.generation.load(Ordering::SeqCst)) {
+        if !self.stale() {
             return;
         }
         let (generation, offered) = self.registry.snapshot();
@@ -642,7 +648,14 @@ impl<D: PagedDecoder + BankedEngine + Send> Instance for AdaptedInstance<D> {
 
     fn run_open(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn residency::JobFeed) -> bool {
         self.adapters.sync(self.sched.decoder_mut());
-        run_open_scheduled(&mut self.sched, &AdaptedFrontend { front: &self.front, adapters: &self.adapters }, invs, self.capacity, progress, feed);
+        let mut invs = invs;
+        // A group that idles while the registry has moved hands back: refresh the
+        // bank and routes, then go on with the jobs still queued on the feed.
+        let mut numbered = 0;
+        while let OpenGroup::Refresh { numbered: n } = run_open_scheduled(&mut self.sched, &AdaptedFrontend { front: &self.front, adapters: &self.adapters }, invs, self.capacity, numbered, progress, feed) {
+            self.adapters.sync(self.sched.decoder_mut());
+            (invs, numbered) = (&[], n);
+        }
         true
     }
 
@@ -673,6 +686,9 @@ impl Frontend for AdaptedFrontend<'_> {
     }
     fn route(&self, inv: &Invocation) -> Result<Option<(AdapterId, AdapterIdentity)>, String> {
         inv.get_str(ADAPTER_PARAM).map(|name| self.adapters.route(&name)).transpose()
+    }
+    fn stale(&self) -> bool {
+        self.adapters.stale()
     }
     fn rejection(&self, inv: &Invocation, reason: &model::serve::RejectReason) -> String {
         match (reason, inv.get_str(ADAPTER_PARAM)) {

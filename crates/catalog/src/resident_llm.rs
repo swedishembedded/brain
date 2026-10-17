@@ -31,7 +31,7 @@ use serde_json::json;
 
 use crate::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterRegistry, AdapterSync, QwenAdapterView, ADAPTER_PARAM};
 use crate::adapter_release::{LoadedAdapter, ServedBase};
-use llmserve::{run_batch_scheduled, run_open_scheduled, scheduler_metrics, Frontend};
+use llmserve::{run_batch_scheduled, run_open_scheduled, OpenGroup, scheduler_metrics, Frontend};
 
 use std::sync::Arc;
 
@@ -1214,7 +1214,14 @@ impl Instance for QwenInstance {
     fn run_open(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn residency::JobFeed) -> bool {
         self.adapters.sync(self.engine.decoder_mut());
         let capacity = self.max_batch;
-        run_open_scheduled(&mut self.engine, &QwenFrontend { decoding: &self.decoding, adapters: &self.adapters }, invs, capacity, progress, feed);
+        let mut invs = invs;
+        // A group that idles while the registry has moved hands back: refresh the
+        // bank and routes, then go on with the jobs still queued on the feed.
+        let mut numbered = 0;
+        while let OpenGroup::Refresh { numbered: n } = run_open_scheduled(&mut self.engine, &QwenFrontend { decoding: &self.decoding, adapters: &self.adapters }, invs, capacity, numbered, progress, feed) {
+            self.adapters.sync(self.engine.decoder_mut());
+            (invs, numbered) = (&[], n);
+        }
         true
     }
 
@@ -1247,6 +1254,9 @@ impl Frontend for QwenFrontend<'_> {
     }
     fn route(&self, inv: &Invocation) -> Result<Option<(model::serve::AdapterId, residency::AdapterIdentity)>, String> {
         inv.get_str(ADAPTER_PARAM).map(|name| self.adapters.route(&name)).transpose()
+    }
+    fn stale(&self) -> bool {
+        self.adapters.stale()
     }
     fn rejection(&self, inv: &Invocation, reason: &model::serve::RejectReason) -> String {
         match (reason, inv.get_str(ADAPTER_PARAM)) {

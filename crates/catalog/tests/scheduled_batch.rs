@@ -133,7 +133,7 @@ fn a_late_request_joins_the_running_group_and_is_answered_when_it_finishes() {
     let alone_short = texts(run_batch_scheduled(&mut scheduler(1), &front, std::slice::from_ref(&short), &mut |_, _| {}));
 
     let mut feed = ScriptedFeed { late: vec![(3, short)], polls: 0, finished: Vec::new() };
-    llmserve::run_open_scheduled(&mut scheduler(4), &front, std::slice::from_ref(&long), 4, &mut |_, _| {}, &mut feed);
+    llmserve::run_open_scheduled(&mut scheduler(4), &front, std::slice::from_ref(&long), 4, 0, &mut |_, _| {}, &mut feed);
 
     let order: Vec<usize> = feed.finished.iter().map(|(i, _)| *i).collect();
     assert_eq!(order, vec![1, 0], "the late short request ends before the long one it joined");
@@ -173,4 +173,47 @@ fn a_resent_history_is_served_from_the_qwen3_prefix_cache() {
     let mut cold = Scheduler::new(engine(&cfg, &weights), 4);
     let want = texts(run_batch_scheduled(&mut cold, &front, std::slice::from_ref(&turn2), &mut |_, _| {}));
     assert_eq!(got, want, "a cache hit must not change the answer");
+}
+
+/// A frontend whose routes can be marked out of date, over the plain one.
+struct Stale<'a> {
+    inner: &'a TextFrontend,
+    stale: std::cell::Cell<bool>,
+}
+
+impl llmserve::Frontend for Stale<'_> {
+    fn tok(&self) -> &QwenBpe {
+        self.inner.tok()
+    }
+    fn stop(&self) -> &[u32] {
+        self.inner.stop()
+    }
+    fn label(&self) -> &str {
+        self.inner.label()
+    }
+    fn parse(&self, inv: &Invocation) -> Result<qwen3::chat::ParsedRequest, String> {
+        self.inner.parse(inv)
+    }
+    fn stale(&self) -> bool {
+        self.stale.get()
+    }
+}
+
+/// An open group that is idle while the frontend's routes are out of date
+/// takes no job: a request that arrives then is routed after the refresh, not
+/// on the release that was replaced (a re-offered adapter id answered as the
+/// old release when its predecessor's group had not yet closed).
+#[test]
+fn an_idle_open_group_with_stale_routes_hands_back_before_taking_a_job() {
+    let plain = front();
+    let front = Stale { inner: &plain, stale: std::cell::Cell::new(true) };
+    let mut sched = scheduler(4);
+    let mut feed = ScriptedFeed { late: vec![(1, inv("late", 3, 0.0, 1))], polls: 0, finished: Vec::new() };
+    let handed = llmserve::run_open_scheduled(&mut sched, &front, &[], 4, 0, &mut |_, _| {}, &mut feed);
+    assert_eq!(handed, llmserve::OpenGroup::Refresh { numbered: 0 }, "stale and idle: handed back");
+    assert_eq!(feed.polls, 0, "no job was taken while the routes were stale");
+
+    front.stale.set(false);
+    assert_eq!(llmserve::run_open_scheduled(&mut sched, &front, &[], 4, 0, &mut |_, _| {}, &mut feed), llmserve::OpenGroup::Closed);
+    assert_eq!(feed.finished.len(), 1, "the job is served once the routes are fresh");
 }

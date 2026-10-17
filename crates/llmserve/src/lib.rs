@@ -41,6 +41,14 @@ pub trait Frontend {
     fn route(&self, _inv: &Invocation) -> Result<Option<(model::serve::AdapterId, AdapterIdentity)>, String> {
         Ok(None)
     }
+    /// Whether what [`Self::route`] answers from is out of date, so a request
+    /// routed now could run on a release that has since been replaced. An open
+    /// group that is idle (nothing running, so nothing a refresh could change
+    /// under it) hands control back to its instance instead of admitting
+    /// further jobs, and the instance refreshes before it calls again.
+    fn stale(&self) -> bool {
+        false
+    }
     /// The caller-facing message for a request the scheduler refused.
     fn rejection(&self, _inv: &Invocation, reason: &RejectReason) -> String {
         format!("{}: {reason}", self.label())
@@ -70,7 +78,23 @@ struct Group<'a, D: PagedDecoder> {
     open: std::collections::HashSet<usize>,
 }
 
+/// How [`run_open_scheduled`] ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OpenGroup {
+    /// The feed closed with nothing running.
+    Closed,
+    /// The group is idle and the frontend is stale; `numbered` jobs have been
+    /// numbered so far.
+    Refresh { numbered: usize },
+}
+
 impl<'a, D: PagedDecoder> Group<'a, D> {
+    /// Resume numbering after `n` jobs of an earlier call of the same open
+    /// group, all of which are finished: placeholders keep indices aligned.
+    fn skip_numbered(&mut self, n: usize) {
+        self.jobs.extend((0..n).map(|_| Job { invocation: Invocation::new(), seq: None, id: None, identity: None }));
+    }
+
     fn new(sched: &'a mut Scheduler<D>, front: &'a dyn Frontend) -> Self {
         Group { sched, front, jobs: Vec::new(), open: std::collections::HashSet::new() }
     }
@@ -225,16 +249,25 @@ pub fn run_batch_scheduled<D: PagedDecoder>(
 /// to the feed the moment it is final. Returns when nothing is running and the
 /// feed has closed - continuous batching across everything queued for the
 /// instance, not only what was queued when the call began.
+///
+/// Job indices continue from `numbered` (0 for a new group): the feed numbers
+/// the jobs of one group across calls. Returns [`OpenGroup::Closed`] when the
+/// feed closed, or [`OpenGroup::Refresh`] when the group went idle while the
+/// frontend was [stale](Frontend::stale): no further job was taken, and the
+/// caller refreshes the frontend's routes and calls again with `invs` empty
+/// and the `numbered` it was given.
 pub fn run_open_scheduled<D: PagedDecoder>(
     sched: &mut Scheduler<D>,
     front: &dyn Frontend,
     invs: &[Invocation],
     capacity: usize,
+    numbered: usize,
     progress: &mut dyn FnMut(usize, Progress),
     feed: &mut dyn JobFeed,
-) {
+) -> OpenGroup {
     residency::log::info(&format!("{} open batch: {} request(s) admitted to the scheduler", front.label(), invs.len()));
     let mut group = Group::new(sched, front);
+    group.skip_numbered(numbered);
     for inv in invs {
         let (bi, immediate) = group.admit(inv, progress);
         if let Some(result) = immediate {
@@ -242,6 +275,9 @@ pub fn run_open_scheduled<D: PagedDecoder>(
         }
     }
     loop {
+        if group.live() == 0 && front.stale() {
+            return OpenGroup::Refresh { numbered: group.jobs.len() };
+        }
         for inv in feed.take(capacity.saturating_sub(group.live())) {
             let (bi, immediate) = group.admit(&inv, progress);
             if let Some(result) = immediate {
@@ -250,7 +286,7 @@ pub fn run_open_scheduled<D: PagedDecoder>(
         }
         if group.live() == 0 {
             if feed.close() {
-                return;
+                return OpenGroup::Closed;
             }
             continue;
         }
@@ -319,7 +355,7 @@ impl<D: PagedDecoder + Send, F: Frontend + Send> Instance for ScheduledInstance<
         let started = std::time::Instant::now();
         let capacity = self.capacity;
         let mut counting = CountingFeed { inner: feed, requests: invs.len(), tokens: 0 };
-        run_open_scheduled(&mut self.sched, &self.front, invs, capacity, progress, &mut counting);
+        run_open_scheduled(&mut self.sched, &self.front, invs, capacity, 0, progress, &mut counting);
         self.last = LastBatch { requests: counting.requests, tokens: counting.tokens, seconds: started.elapsed().as_secs_f64() };
         true
     }
