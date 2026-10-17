@@ -671,6 +671,22 @@ impl ShardCaches {
         gpu.poll_wait();
     }
 
+    /// Make slot `slot`'s pool row the working GDN state (one row gather per
+    /// owned recurrent layer): how a prompt prefilled over several calls picks
+    /// up where its last call left off.
+    fn load_work(&self, gpu: &Gpu, cfg: &Qwen35Config, slot: u32) {
+        assert!(slot < self.slots, "{MODEL}: slot {slot} is outside this stage's {} slots", self.slots);
+        let ids = gpu.storage(1);
+        gpu.write(&ids, &[slot]);
+        let (sl, hl) = (cfg.gdn_state_len() as u32, cfg.gdn_hist_len() as u32);
+        let steps: Vec<_> = (0..self.pool_state.len())
+            .filter(|&l| self.recurrent[l])
+            .map(|l| gpu.step(self.gather, &[&self.pool_state[l], &self.pool_hist[l], &ids, &self.work_state[l], &self.work_hist[l]], &[1, sl, hl], sl + hl))
+            .collect();
+        gpu.submit(&[], &steps);
+        gpu.poll_wait();
+    }
+
     /// Copy the working GDN state into snapshot row `row` (one row scatter per
     /// owned recurrent layer) - the state a later prompt that starts with this
     /// one resumes from.
@@ -1354,15 +1370,25 @@ impl Qwen35GgufInstance {
     ///
     /// `collect`, when given, receives every prefilled row's `[d_model]` pre-norm
     /// hidden state (what the MTP head is fed from).
-    fn prefill_hidden(&self, prompt: &[u32], start: usize, slot: u32, mut collect: Option<&mut Vec<f32>>) -> Result<Vec<f32>, String> {
+    ///
+    /// Only `prompt[start..end]` is prefilled, so a long prompt can go in over
+    /// several calls: every call ends with the working state written into the
+    /// slot's pool row, and `resume` says the working state is NOT already the
+    /// state after `start` tokens (another sequence used it since), so it is
+    /// loaded from that pool row first.
+    fn prefill_hidden(&self, prompt: &[u32], start: usize, end: usize, slot: u32, resume: bool, mut collect: Option<&mut Vec<f32>>) -> Result<Vec<f32>, String> {
         let d = self.cfg.d_model as usize;
-        assert!(start < prompt.len(), "{MODEL}: a continued prefill needs at least one new token");
+        assert!(start < end && end <= prompt.len(), "{MODEL}: a continued prefill needs at least one new token");
         if start == 0 {
             for s in &self.shards {
                 s.caches.reset_work(&s.qwen35.gpu);
             }
+        } else if resume {
+            for s in &self.shards {
+                s.caches.load_work(&s.qwen35.gpu, &self.cfg, slot);
+            }
         }
-        let rest = &prompt[start..];
+        let rest = &prompt[start..end];
         let mut last = Vec::new();
         if self.shards.iter().all(|s| s.qwen35.chunked_prefill_is_profitable()) {
             let mut pos = start as u32;

@@ -38,12 +38,15 @@
 use std::io::Write;
 use std::time::Instant;
 
+use data::tokenizer::Tokenizer;
 use model::kv_tier::KvTier;
 use model::paged::BlockTable;
 use model::serve::{PagedDecoder, Request, SampleParams, Scheduler, SpecPolicy};
 use qwen35::int8_gguf_resident::{Qwen35GgufResident, SpecServing, SpeculativeMode};
 use residency::multi::MultiDeviceResidentModel;
 use residency::{Device, ResidentModel};
+
+const REAL_PROMPT: &str = include_str!("../../tests/fixtures/real_prompt.txt");
 
 const RESERVE: u64 = 2 << 30;
 
@@ -63,6 +66,10 @@ struct Args {
     profile_verify: bool,
     kernel_table: bool,
     temp: f32,
+    prefill_tokens: Vec<usize>,
+    /// Prompt tokens prefilled per scheduler iteration (default: the whole prompt).
+    prefill_slice: u32,
+    mixed: bool,
 }
 
 fn parse_args() -> Args {
@@ -83,6 +90,9 @@ fn parse_args() -> Args {
         profile_verify: false,
         kernel_table: false,
         temp: 0.0,
+        prefill_tokens: Vec::new(),
+        prefill_slice: u32::MAX,
+        mixed: false,
     };
     while let Some(flag) = it.next() {
         let mut value = |name: &str| it.next().unwrap_or_else(|| panic!("{name} needs a value"));
@@ -106,6 +116,9 @@ fn parse_args() -> Args {
             "--equivalence" => a.equivalence = true,
             "--profile-verify" => a.profile_verify = true,
             "--kernel-table" => a.kernel_table = true,
+            "--mixed" => a.mixed = true,
+            "--prefill-slice" => a.prefill_slice = value("--prefill-slice").parse().expect("--prefill-slice N"),
+            "--prefill-tokens" => a.prefill_tokens = value("--prefill-tokens").split(',').map(|s| s.trim().parse().expect("--prefill-tokens a,b,c")).collect(),
             "--temp" => a.temp = value("--temp").parse().expect("--temp T"),
             "--scratch-rows" => a.scratch_rows = value("--scratch-rows").parse().expect("--scratch-rows N"),
             other if !other.starts_with("--") && a.gguf.is_empty() => a.gguf = other.to_string(),
@@ -213,7 +226,62 @@ fn main() {
     println!("cold load {:.1} s; MTP head loaded: {}; verify rows {}", t0.elapsed().as_secs_f64(), engine.instance().has_mtp(), engine.instance().speculation_rows());
     let mut sched = Scheduler::new(engine, max_batch as usize);
     r.configure_scheduler(&mut sched);
-    sched.set_prefill_budget(u32::MAX);
+    sched.set_prefill_budget(a.prefill_slice);
+
+    if a.mixed {
+        // The agent mix that exposed static waves: 16 requests with ~2k-token prompts arrive
+        // together, one of them a runaway of 400 new tokens and fifteen of them 48-token
+        // answers. Print when each finished.
+        let mut base = tok.encode(REAL_PROMPT);
+        while base.len() < 4096 {
+            let more = base.clone();
+            base.extend(more);
+        }
+        let t = Instant::now();
+        let mut ids = Vec::new();
+        for i in 0..16usize {
+            let prompt: Vec<u32> = (0..2048).map(|j| base[(i * 37 + j) % base.len()]).collect();
+            let max_new = if i == 0 { 400 } else { 48 };
+            ids.push((sched.submit(Request { prompt, max_new, stop: Vec::new() }), max_new));
+        }
+        let mut at: Vec<(f64, usize)> = Vec::new();
+        while sched.pending() {
+            for (id, toks) in sched.step() {
+                let want = ids.iter().find(|x| x.0 == id).expect("known id").1;
+                at.push((t.elapsed().as_secs_f64(), want));
+                assert_eq!(toks.len(), want);
+            }
+        }
+        println!("prefill slice {} tokens: finish times (s) of the 48-token answers: {}", if a.prefill_slice == u32::MAX { "whole prompt".to_string() } else { a.prefill_slice.to_string() }, at.iter().filter(|x| x.1 == 48).map(|x| format!("{:.1}", x.0)).collect::<Vec<_>>().join(" "));
+        println!("                the 400-token runaway: {:.1} s", at.iter().find(|x| x.1 == 400).map_or(0.0, |x| x.0));
+        return;
+    }
+
+    if !a.prefill_tokens.is_empty() {
+        // Prompt-processing throughput through the scheduler's admission, as the server
+        // does it: `b` requests of `p` prompt tokens each and one new token, timed from
+        // submission to the last first token.
+        let mut base = tok.encode(REAL_PROMPT);
+        while base.len() < 4096 {
+            let more = base.clone();
+            base.extend(more);
+        }
+        println!("{:>6} {:>7} {:>10} {:>10}", "batch", "prompt", "wall s", "prefill tok/s");
+        for &p in &a.prefill_tokens {
+            for &b in &a.batches {
+                let t = Instant::now();
+                for i in 0..b as usize {
+                    // Distinct prompts of the same length: a rotation of the passage, so no prefix is shared.
+                    let prompt: Vec<u32> = (0..p).map(|j| base[(i * 37 + j) % base.len()]).collect();
+                    sched.submit(Request { prompt, max_new: 1, stop: Vec::new() });
+                }
+                sched.run();
+                let wall = t.elapsed().as_secs_f64();
+                println!("{:>6} {:>7} {:>10.2} {:>10.0}", b, p, wall, (b as usize * p) as f64 / wall);
+            }
+        }
+        return;
+    }
 
     if a.profile_verify {
         // The cost of one verify step against one plain step, per row count and batch size,

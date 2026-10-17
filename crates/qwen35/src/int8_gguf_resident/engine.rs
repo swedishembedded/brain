@@ -28,7 +28,7 @@ use gpu_core::DeviceStats;
 use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, BankedEngine, UnloadStatus, VerifiedAdapter};
 use model::dispatch::LORA_SLOT_NONE;
 use model::paged::{BlockAllocator, BlockTable, KvNamespace};
-use model::serve::{AdapterAvailability, AdapterId, DraftQuery, PagedDecoder};
+use model::serve::{AdapterAvailability, AdapterId, DraftQuery, PagedDecoder, PrefillProgress};
 
 use crate::adapter_serving as adapters;
 
@@ -51,6 +51,8 @@ pub struct Qwen35GgufEngine {
     /// sequence's block becomes the cache entry's KV only then (decoding
     /// appends rows past the prompt and never rewrites the prompt's own).
     pending: HashMap<u32, Pending>,
+    /// Prompts being prefilled over several scheduler iterations, by slot.
+    partial: HashMap<u32, PartialPrefill>,
     /// The sequences and row counts of the verify step awaiting its commit.
     verifying: Option<Verifying>,
     /// Running sequences past which a verify step no longer beats plain
@@ -77,6 +79,23 @@ struct Verifying {
     hidden: Vec<f32>,
 }
 
+/// Prefill tokens per scheduler iteration while sequences are decoding.
+const PREFILL_SLICE_TOKENS: usize = 512;
+
+/// A prompt part of the way in.
+struct PartialPrefill {
+    /// Where the cached prefix ended (0 for a cold prompt).
+    start: usize,
+    /// Prompt tokens in so far.
+    done: usize,
+    /// No slice has run yet, so the working GDN state is the seeded/reset one.
+    fresh: bool,
+    cacheable: bool,
+    prefix_hidden: Option<Vec<f32>>,
+    /// Hidden states of the prefilled rows, for the MTP head.
+    rows_hidden: Vec<f32>,
+}
+
 /// What a sequence's prefill leaves for the cache once the sequence is over.
 struct Pending {
     tokens: Vec<u32>,
@@ -95,7 +114,7 @@ impl Qwen35GgufEngine {
     pub fn new(inst: Qwen35GgufInstance) -> Qwen35GgufEngine {
         let alloc = BlockAllocator::new(inst.max_batch + inst.prefix_slots, inst.cap);
         let cache = PrefixCache::new(inst.prefix_slots);
-        Qwen35GgufEngine { inst, alloc, cache, pending: HashMap::new(), verifying: None, spec_batch_limit: usize::MAX, times: SpecTimes::default() }
+        Qwen35GgufEngine { inst, alloc, cache, pending: HashMap::new(), partial: HashMap::new(), verifying: None, spec_batch_limit: usize::MAX, times: SpecTimes::default() }
     }
 
     /// Free the blocks of entries the cache retired.
@@ -240,6 +259,7 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn release_table(&mut self, t: &mut BlockTable) {
         if let Some(&slot) = t.blocks().first() {
             self.inst.mtp_release(slot);
+            self.partial.remove(&slot);
         }
         let kept = t.blocks().first().and_then(|slot| self.pending.remove(slot));
         match kept {
@@ -257,42 +277,70 @@ impl PagedDecoder for Qwen35GgufEngine {
     /// recurrent state is restored from the snapshot taken when that prefix was
     /// prefilled, and only the new tokens run.
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
-        assert!(table.is_empty(), "{MODEL}: prefill expects a fresh sequence");
+        match self.prefill_chunk(table, prompt, usize::MAX) {
+            PrefillProgress::Done(hidden) => hidden,
+            PrefillProgress::Partial { .. } => unreachable!("an unbounded budget finishes the prompt"),
+        }
+    }
+    /// Slices of this many tokens go in between decode steps: about 0.2 s of
+    /// prefill at the measured rate, a few decode steps' worth of stall.
+    fn prefill_interleave_tokens(&self) -> Option<usize> {
+        Some(PREFILL_SLICE_TOKENS)
+    }
+    /// One slice of a prompt. The first call reserves the sequence's slot, looks
+    /// the prompt up in the prefix cache and seeds from it; every call prefills
+    /// up to `budget` more tokens from the working GDN state the previous one
+    /// left in the slot's pool row; the last one files the prompt for reuse and
+    /// hands the MTP head the prompt's hidden states.
+    fn prefill_chunk(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
         assert!(!prompt.is_empty(), "{MODEL}: empty prompt");
-        assert!(prompt.len() <= self.inst.cap as usize, "{MODEL}: prompt of {} tokens exceeds the per-sequence capacity of {}", prompt.len(), self.inst.cap);
-        if let Some(&bad) = prompt.iter().find(|&&t| t >= self.inst.cfg.vocab) {
-            panic!("{MODEL}: prompt token {bad} is outside the model vocabulary ({})", self.inst.cfg.vocab);
-        }
-        table.reserve(prompt.len() as u32, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
-        let slot = table.blocks()[0];
-        let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
-        let mut start = 0;
-        // The cached prefix's last hidden state: the MTP head's input at the
-        // position the new tokens continue from.
-        let mut prefix_hidden: Option<Vec<f32>> = None;
-        if cacheable {
-            if let Some(i) = self.cache.lookup(table.kv_namespace(), prompt) {
-                let e = self.cache.entry(i);
-                let (from, rows, snap) = (e.table.blocks()[0], e.tokens.len(), e.snap_row);
-                self.inst.seed_from_prefix(from, slot, rows as u32, snap);
-                self.inst.mtp_seed_prefix(from, slot, rows as u32);
-                if rows == prompt.len() {
-                    // The whole prompt is cached: its state in place, no compute.
-                    let hidden = e.last_hidden.clone();
-                    self.inst.store_prefilled(slot);
-                    self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
-                    return hidden;
-                }
-                prefix_hidden = Some(e.last_hidden.clone());
-                start = rows;
+        if table.is_empty() {
+            assert!(prompt.len() <= self.inst.cap as usize, "{MODEL}: prompt of {} tokens exceeds the per-sequence capacity of {}", prompt.len(), self.inst.cap);
+            if let Some(&bad) = prompt.iter().find(|&&t| t >= self.inst.cfg.vocab) {
+                panic!("{MODEL}: prompt token {bad} is outside the model vocabulary ({})", self.inst.cfg.vocab);
             }
+            table.reserve(prompt.len() as u32, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
+            let slot = table.blocks()[0];
+            let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
+            let mut start = 0;
+            // The cached prefix's last hidden state: the MTP head's input at the
+            // position the new tokens continue from.
+            let mut prefix_hidden: Option<Vec<f32>> = None;
+            if cacheable {
+                if let Some(i) = self.cache.lookup(table.kv_namespace(), prompt) {
+                    let e = self.cache.entry(i);
+                    let (from, rows, snap) = (e.table.blocks()[0], e.tokens.len(), e.snap_row);
+                    self.inst.seed_from_prefix(from, slot, rows as u32, snap);
+                    self.inst.mtp_seed_prefix(from, slot, rows as u32);
+                    if rows == prompt.len() {
+                        // The whole prompt is cached: its state in place, no compute.
+                        let hidden = e.last_hidden.clone();
+                        self.inst.store_prefilled(slot);
+                        self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
+                        return PrefillProgress::Done(hidden);
+                    }
+                    prefix_hidden = Some(e.last_hidden.clone());
+                    start = rows;
+                }
+            }
+            self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new() });
         }
+        let slot = table.blocks()[0];
+        let mut p = self.partial.remove(&slot).expect("a prefill in progress has its state");
+        let end = p.done + budget.min(prompt.len() - p.done);
+        let collect = self.inst.has_mtp().then_some(&mut p.rows_hidden);
         self.inst.prefill_adapter_slot.set(adapters::slot_of(self.inst.stage_models(), table.kv_namespace()));
-        let mut rows_hidden = Vec::new();
-        let hidden = self.inst.prefill_hidden(prompt, start, slot, self.inst.has_mtp().then_some(&mut rows_hidden)).unwrap_or_else(|e| panic!("{e}"));
+        let hidden = self.inst.prefill_hidden(prompt, p.done, end, slot, !p.fresh && p.done > 0, collect).unwrap_or_else(|e| panic!("{e}"));
         self.inst.prefill_adapter_slot.set(LORA_SLOT_NONE);
-        self.inst.mtp_after_prefill(slot, prompt, start, prefix_hidden.as_deref(), &rows_hidden);
-        if cacheable {
+        let consumed = end - p.done;
+        p.done = end;
+        p.fresh = false;
+        if end < prompt.len() {
+            self.partial.insert(slot, p);
+            return PrefillProgress::Partial { consumed };
+        }
+        self.inst.mtp_after_prefill(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden);
+        if p.cacheable {
             let (row, evicted) = self.cache.take_row();
             self.release_retired(evicted);
             if let Some(row) = row {
@@ -300,7 +348,7 @@ impl PagedDecoder for Qwen35GgufEngine {
                 self.pending.insert(slot, Pending { tokens: prompt.to_vec(), snap_row: row, last_hidden: hidden.clone() });
             }
         }
-        hidden
+        PrefillProgress::Done(hidden)
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         self.inst.head_logits_rows(hidden, 1)
