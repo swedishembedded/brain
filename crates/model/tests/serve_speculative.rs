@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use model::paged::{BlockAllocator, BlockTable};
-use model::serve::{verify_proposals, DraftQuery, Drafter, NgramDrafter, PagedDecoder, Request, SampleParams, Scheduler, SpecPolicy};
+use model::serve::{verify_proposals, AdapterAvailability, AdapterId, DraftQuery, Drafter, NgramDrafter, PagedDecoder, Request, SampleParams, Scheduler, SpecPolicy};
 
 const VOCAB: u32 = 32;
 const BLOCK: u32 = 4;
@@ -111,11 +111,13 @@ struct Toy {
     plain_us: u64,
     row_us: u64,
     cost_aware: bool,
+    /// Whether `adapter_availability` answers `Resident` (the toy applies no adapter itself).
+    serves_adapters: bool,
 }
 
 impl Toy {
     fn new(probe: Shared, verifies: bool) -> Toy {
-        Toy { alloc: BlockAllocator::new(512, BLOCK), state: HashMap::new(), pending: HashMap::new(), probe, verifies, batch_limit: usize::MAX, row_budget: usize::MAX, clock: Arc::new(AtomicU64::new(0)), plain_us: 0, row_us: 0, cost_aware: false }
+        Toy { alloc: BlockAllocator::new(512, BLOCK), state: HashMap::new(), pending: HashMap::new(), probe, verifies, batch_limit: usize::MAX, row_budget: usize::MAX, clock: Arc::new(AtomicU64::new(0)), plain_us: 0, row_us: 0, cost_aware: false, serves_adapters: false }
     }
     fn slot(t: &BlockTable) -> u32 {
         t.blocks()[0]
@@ -123,6 +125,13 @@ impl Toy {
 }
 
 impl PagedDecoder for Toy {
+    fn adapter_availability(&mut self, _adapter: AdapterId) -> AdapterAvailability {
+        if self.serves_adapters {
+            AdapterAvailability::Resident
+        } else {
+            AdapterAvailability::Unknown
+        }
+    }
     fn alloc_mut(&mut self) -> &mut BlockAllocator {
         &mut self.alloc
     }
@@ -486,6 +495,32 @@ fn speculation_can_be_switched_off() {
     sched.submit(req(1, 5, 20));
     sched.run();
     assert_eq!(probe.borrow().verify_calls, 0);
+}
+
+#[test]
+fn a_step_with_an_adapter_row_decodes_plainly_and_base_only_steps_still_speculate() {
+    let adapter = AdapterId::new(7).expect("a nonzero namespace is an adapter");
+    let toy = |probe: &Shared| {
+        let mut dec = Toy::new(probe.clone(), true);
+        dec.serves_adapters = true;
+        let mut sched = Scheduler::new(dec, 8);
+        sched.set_drafter(Box::new(Scripted { right: 99 }));
+        sched
+    };
+
+    let mixed = Shared::default();
+    let mut sched = toy(&mixed);
+    let want = plain(vec![req(1, 5, 30), req(2, 9, 30)]);
+    let ids = [sched.submit(req(1, 5, 30)), sched.submit_for_adapter(req(2, 9, 30), adapter, SampleParams::greedy(), 0)];
+    let done = sched.run();
+    assert_eq!(mixed.borrow().verify_calls, 0, "no step carrying an adapter row may be a verify step");
+    assert_eq!([done[&ids[0]].clone(), done[&ids[1]].clone()].to_vec(), want, "plain decode of mixed rows changed the output");
+
+    let base_only = Shared::default();
+    let mut sched = toy(&base_only);
+    sched.submit(req(1, 5, 30));
+    sched.run();
+    assert!(base_only.borrow().verify_calls > 0, "base-only traffic must keep speculating");
 }
 
 #[test]

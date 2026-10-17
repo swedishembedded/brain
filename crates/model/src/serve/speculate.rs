@@ -31,6 +31,9 @@
 //!   re-probed now and then. Past the decoder's crossover batch size
 //!   ([`PagedDecoder::spec_max_batch`]) speculation is off for the whole
 //!   step and decode is the plain batched step.
+//! * **Adapter rows do not speculate.** A step that carries a sequence running
+//!   under a runtime adapter is decoded plainly, where the adapter applies per
+//!   row; base-only steps keep speculating.
 //!
 //! Greedy output is identical to plain decode whatever the drafter proposes;
 //! the only difference a decoder can introduce is the floating-point
@@ -377,6 +380,12 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
         let budget = self.dec.spec_row_budget();
         if active.len() > budget {
+            return false;
+        }
+        // A verify step scores its rows under the base weights only: a decoder's
+        // verify path has no per-row adapter selection, so a step that carries a
+        // sequence running under an adapter is the plain batched step.
+        if active.iter().any(|&i| self.running[i].table.kv_namespace() != crate::paged::BASE_KV_NAMESPACE) {
             return false;
         }
         let bucket = CostGate::bucket(active.len());
