@@ -497,6 +497,7 @@ impl Executor {
     /// not to take it.
     pub fn register_multi(&self, model: Arc<dyn MultiDeviceResidentModel>) {
         let manifest = model.manifest();
+        self.adapters.seed(&manifest.model, model.adapter_identity());
         {
             // Copy-on-write -- see `register`'s identical dance and its doc.
             let mut g = self.manifests.write().unwrap();

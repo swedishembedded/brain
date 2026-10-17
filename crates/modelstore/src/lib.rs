@@ -533,7 +533,14 @@ impl Store {
                 out.push(m);
             }
         }
-        out.extend(self.scan_adapters(vendor, repo, dir));
+        // An adapter rides on the base the repo holds. A repo with only one
+        // released quant (no brain checkpoint, no `transformers` directory) has
+        // exactly one base: that quant, so the adapter is listed against it.
+        let sole_quant = match (seen.len(), seen.keys().next()) {
+            (1, Some(&q)) if !dir.join(BASE_WEIGHTS_FILE).is_file() && self.local_checkpoint_dir(&base, dir).is_none() => Some(q),
+            _ => None,
+        };
+        out.extend(self.scan_adapters(vendor, repo, dir, sole_quant));
         out
     }
 
@@ -541,7 +548,7 @@ impl Store {
     /// adapter on this base repo. Each level is skipped (not an error) if
     /// unreadable or contains a non-UTF8/non-directory entry -- a scan finds
     /// what's servable, it doesn't validate the whole tree.
-    fn scan_adapters(&self, vendor: &str, repo: &str, base_dir: &Path) -> Vec<LocalModel> {
+    fn scan_adapters(&self, vendor: &str, repo: &str, base_dir: &Path, quant: Option<Quant>) -> Vec<LocalModel> {
         let mut out = Vec::new();
         let Ok(owners) = std::fs::read_dir(base_dir.join(ADAPTERS_DIR)) else {
             return out;
@@ -555,7 +562,7 @@ impl Store {
                 for t in tags.flatten().filter(|e| e.path().is_dir()) {
                     let Some(tag) = t.file_name().to_str().map(str::to_string) else { continue };
                     let adapter = AdapterRef::new(&owner, &name, &tag);
-                    let r = ModelRef::new_adapter(vendor, repo, None, adapter);
+                    let r = ModelRef::new_adapter(vendor, repo, quant, adapter);
                     if let Some(m) = self.local_adapter(&r, base_dir) {
                         out.push(m);
                     }

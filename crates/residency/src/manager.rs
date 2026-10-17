@@ -312,7 +312,7 @@ impl ResidencyManager {
     /// The entry stays until [`Self::sweep_retired`] sees no job for it, so a
     /// job queued before the retirement is still served.
     pub fn retire(&mut self, model: &str) {
-        if self.models.contains_key(model) {
+        if self.models.contains_key(model) || self.multi_models.contains_key(model) {
             self.retiring.insert(model.to_string());
         }
     }
@@ -326,6 +326,7 @@ impl ResidencyManager {
         for model in done {
             self.retiring.remove(&model);
             self.models.remove(&model);
+            self.multi_models.remove(&model);
             self.event(format!("retired {model}"));
         }
     }
@@ -336,13 +337,17 @@ impl ResidencyManager {
     pub fn stamp(&self, model: &str, inv: &mut Invocation) {
         if let Some(m) = self.models.get(model) {
             m.stamp(inv);
+        } else if let Some(m) = self.multi_models.get(model) {
+            m.stamp(inv);
         }
     }
 
     /// Register a model reachable via [`Self::claim_multi`] - a SEPARATE
     /// registry from [`Self::register`] (see this file's own module doc).
     pub fn register_multi(&mut self, model: Arc<dyn MultiDeviceResidentModel>) {
-        self.multi_models.insert(model.manifest().model.clone(), model);
+        let name = model.manifest().model;
+        self.retiring.remove(&name);
+        self.multi_models.insert(name, model);
     }
 
     pub fn manifests(&self) -> Vec<Manifest> {
@@ -363,7 +368,7 @@ impl ResidencyManager {
             .get(model)
             .filter(|_| !self.retiring.contains(model))
             .map(|m| m.instance_key(action, inv))
-            .or_else(|| self.multi_models.get(model).map(|m| m.instance_key(action, inv)))
+            .or_else(|| self.multi_models.get(model).filter(|_| !self.retiring.contains(model)).map(|m| m.instance_key(action, inv)))
     }
 
     /// Whether `model` is registered as a [`MultiDeviceResidentModel`] - the
