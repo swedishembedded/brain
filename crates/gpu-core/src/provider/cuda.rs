@@ -755,7 +755,7 @@ pub struct GdnQkBwdLayout {
 /// `bufs` is `d_query_cm, d_key_cm, query, key` (read; `query` / `key` the raw projections) and
 /// `d_query, d_key` (every element overwritten).
 pub fn gdn_qk_bwd_tok_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 6], l: GdnQkBwdLayout) -> Option<crate::Step> {
-    if !gdn_chunk_prep_tok_shape_ok(128, 128, l.c_len, l.heads, l.group) || l.kv_heads * l.group != l.heads || l.seq_len % l.c_len != 0 {
+    if !gdn_chunk_prep_tok_shape_ok(128, 128, l.c_len, l.heads, l.group) || l.kv_heads * l.group != l.heads || !l.seq_len.is_multiple_of(l.c_len) {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
@@ -764,6 +764,97 @@ pub fn gdn_qk_bwd_tok_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer;
     let params = [l.tokens, l.kv_heads, l.group, l.heads, l.c_len, l.seq_len, l.batch, l.eps.to_bits()];
     let blocks = (2 * l.tokens * l.kv_heads).div_ceil(GDN_QK_BWD_ROWS_PER_BLOCK);
     gpu.step_native_sliced(id, bufs, &[(0, 0); 6], &params, blocks)
+}
+
+/// `gdn_conv_silu_tok`: x, w, hist (read); query, key, value, pre (written).
+static GDN_CONV_SILU_TOK_BINDINGS: [BindKind; 8] = bwd_tc_bindings(3);
+/// `gdn_conv_hist_tok`: x (read); hist (read and written).
+static GDN_CONV_HIST_TOK_BINDINGS: [BindKind; 3] = bwd_tc_bindings(1);
+/// `gdn_conv_silu_bwd_tok`: d_query, d_key, d_value, pre, w (read); d_x, d_hist (written).
+static GDN_CONV_SILU_BWD_TOK_BINDINGS: [BindKind; 8] = bwd_tc_bindings(5);
+
+/// Channels each block of the token-major convolution kernels serves, and rows each thread walks.
+const GDN_CONV_CHANNELS_PER_BLOCK: u32 = 128;
+const GDN_CONV_ROWS_PER_THREAD: u32 = 32;
+
+/// The mixer's convolution layout for [`gdn_conv_silu_tok_step`] and [`gdn_conv_silu_bwd_tok_step`].
+#[derive(Clone, Copy)]
+pub struct GdnConvLayout {
+    /// Rows of the token-major tensors, `batch * seq_len`.
+    pub rows: u32,
+    /// Channels, `2 * key_dim + value_dim`.
+    pub conv_dim: u32,
+    /// Tokens per sequence.
+    pub seq_len: u32,
+    pub key_dim: u32,
+    pub value_dim: u32,
+    /// Taps of the depthwise convolution (4 is the only size served).
+    pub kernel: u32,
+}
+
+impl GdnConvLayout {
+    fn served(&self, gpu: &crate::Gpu) -> Option<&'static kernels_cuda::CudaKernel> {
+        let shape_ok = self.kernel == 4
+            && self.rows != 0
+            && self.seq_len != 0
+            && self.rows.is_multiple_of(self.seq_len)
+            && self.conv_dim == 2 * self.key_dim + self.value_dim
+            && !super::disabled_providers().iter().any(|d| d == "cuda");
+        if !shape_ok {
+            return None;
+        }
+        let cc = gpu.caps().arch.compute_capability?;
+        kernels_cuda::get("gdn_conv_silu_tok").filter(|k| k.min_cc <= cc)
+    }
+
+    /// Blocks of a launch over `rows` output rows: channel tiles fastest.
+    fn blocks(&self, rows: u32) -> u32 {
+        self.conv_dim.div_ceil(GDN_CONV_CHANNELS_PER_BLOCK) * rows.div_ceil(GDN_CONV_ROWS_PER_THREAD)
+    }
+}
+
+/// The causal depthwise convolution of the mixer, its SiLU and the query / key / value split as one launch
+/// (`gdn_conv_silu_tok`), on the token-major rows of the projection: replaces two layout transposes, the
+/// generic convolution, the activation and three row splits. `bufs` is `x` (`[rows, conv_dim]`), `w`
+/// (`[conv_dim, 4]`), `hist` (`[conv_dim, 3]` channel-major, oldest first; read only when `has_hist`, then
+/// the history precedes row 0 and the call is a single sequence; any buffer otherwise), then `query`, `key`
+/// (`[rows, key_dim]`), `value` (`[rows, value_dim]`) and `pre` (`[rows, conv_dim]`, the pre-activation the
+/// backward reads; written only when `save_pre`, any buffer otherwise). `None` when the kernel size is not 4,
+/// the shape is inconsistent, `cuda` is named in `BRAIN_NO_PROVIDER`, or the device declines.
+pub fn gdn_conv_silu_tok_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 7], l: GdnConvLayout, has_hist: bool, save_pre: bool) -> Option<crate::Step> {
+    if has_hist && l.rows != l.seq_len {
+        return None;
+    }
+    let kernel = l.served(gpu)?;
+    let id = gpu.native_kernel(kernel, &GDN_CONV_SILU_TOK_BINDINGS)?;
+    let params = [l.rows, l.conv_dim, l.seq_len, l.key_dim, l.value_dim, has_hist as u32, save_pre as u32];
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 7], &params, l.blocks(l.rows))
+}
+
+/// `hist <- the last 3 rows of [hist | x]` (`gdn_conv_hist_tok`), the convolution history the next round of a
+/// chunked forward starts from. Launch it AFTER [`gdn_conv_silu_tok_step`] has read the old history.
+/// `bufs` is `x` (`[rows, conv_dim]`) and `hist` (`[conv_dim, 3]`, channel-major, oldest first).
+pub fn gdn_conv_hist_tok_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 2], l: GdnConvLayout) -> Option<crate::Step> {
+    l.served(gpu)?;
+    let kernel = kernels_cuda::get("gdn_conv_hist_tok")?;
+    let id = gpu.native_kernel(kernel, &GDN_CONV_HIST_TOK_BINDINGS)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 2], &[l.rows, l.conv_dim], l.conv_dim.div_ceil(GDN_CONV_CHANNELS_PER_BLOCK))
+}
+
+/// The backward of [`gdn_conv_silu_tok_step`] with a frozen convolution weight, as one launch
+/// (`gdn_conv_silu_bwd_tok`): `bufs` is `d_query`, `d_key` (`[rows, key_dim]`), `d_value` (`[rows, value_dim]`),
+/// `pre` (`[rows, conv_dim]`), `w` (`[conv_dim, 4]`) read and `d_x` (`[rows, conv_dim]`), `d_hist`
+/// (`[ctx, conv_dim]` token-major, the gradient of the history rows; any buffer when `ctx == 0`) written.
+/// `ctx` is 0 for a fresh sequence and 3 for a continued round.
+pub fn gdn_conv_silu_bwd_tok_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 7], l: GdnConvLayout, ctx: u32) -> Option<crate::Step> {
+    if ctx != 0 && (ctx != 3 || l.rows != l.seq_len) {
+        return None;
+    }
+    l.served(gpu)?;
+    let kernel = kernels_cuda::get("gdn_conv_silu_bwd_tok")?;
+    let id = gpu.native_kernel(kernel, &GDN_CONV_SILU_BWD_TOK_BINDINGS)?;
+    let params = [l.rows, l.conv_dim, l.seq_len, l.key_dim, l.value_dim, ctx];
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 7], &params, l.blocks(l.rows + ctx))
 }
 
 /// The native tensor-core paged flash-prefill step for `head_dim = 256`, or

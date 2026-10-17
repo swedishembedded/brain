@@ -4713,10 +4713,25 @@ impl Qwen35 {
         let la = &ta.layers[l - self.shard.start];
         let MixerActs::Gdn(gdn) = &la.mixer else { panic!("qwen35: debug_gdn_trace: layer {l} is not a GDN (Linear) layer") };
         let GdnSaved::Full(ia) = &gdn.saved else { panic!("qwen35: debug_gdn_trace needs the whole-sequence GDN activations (no gdn_segment_tokens)") };
+        // The convolution's channel-major copies: kept as they are by the generic forward, transposed here from the
+        // token-major tensors the fused forward keeps (a whole sequence, so `ncl_in` has no history rows).
+        let to_channel_major = |token_major: Vec<f32>| -> Vec<f32> {
+            let mut channel_major = vec![0f32; token_major.len()];
+            for row in 0..n {
+                for ch in 0..conv_dim {
+                    channel_major[ch * n + row] = token_major[row * conv_dim + ch];
+                }
+            }
+            channel_major
+        };
+        let (ncl_in, ncl_out) = match &ia.conv {
+            model::gdn_mixer::ConvActs::ChannelMajor { ncl_in, ncl_out } => (g.read(ncl_in, n * conv_dim), g.read(ncl_out, n * conv_dim)),
+            model::gdn_mixer::ConvActs::TokenMajor { x, pre, .. } => (to_channel_major(g.read(x, n * conv_dim)), to_channel_major(g.read(pre, n * conv_dim))),
+        };
         vec![
             ("xn1", g.read(&la.xn1, n * d)),
-            ("ncl_in", g.read(&ia.ncl_in, n * conv_dim)),
-            ("ncl_out", g.read(&ia.ncl_out, n * conv_dim)),
+            ("ncl_in", ncl_in),
+            ("ncl_out", ncl_out),
             ("query_pre_l2norm", g.read(&ia.query, n * key_dim)),
             ("key_pre_l2norm", g.read(&ia.key, n * key_dim)),
             ("value", g.read(&ia.value, n * value_dim)),

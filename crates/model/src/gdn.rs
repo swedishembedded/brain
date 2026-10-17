@@ -843,7 +843,7 @@ fn native_chunk_loop_train_tc(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _bh: u32, _
 
 /// Whether the caller opted in to the tensor-core kernels (the fused prefix and the
 /// recurrence) and this device takes the fast kernels at all.
-fn tensor_core_enabled(g: &Gpu, ids: &GdnIds) -> bool {
+pub(crate) fn tensor_core_enabled(g: &Gpu, ids: &GdnIds) -> bool {
     ids.fast.is_some_and(|f| f.tensor_core) && use_fast_kernels(g)
 }
 

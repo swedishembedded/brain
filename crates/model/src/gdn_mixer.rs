@@ -135,9 +135,8 @@ pub struct GdnMixerActs {
     /// holds `conv_ctx + t` rows per channel; [`gdn_mixer_stream_bwd`] reads it
     /// to size the conv backward and to hand the history's gradient back.
     pub conv_ctx: u32,
-    // conv1d: `x` (dw needs it) and pre-SiLU output (silu_bwd needs it).
-    pub ncl_in: DeviceBuffer,
-    pub ncl_out: DeviceBuffer,
+    // conv1d: its input (dw needs it) and pre-SiLU output (silu_bwd needs it).
+    pub conv: ConvActs,
     // pre-L2-norm query/key, and the (post-SiLU, post-split, un-permuted)
     // value - `gdn_chunk_bwd` never needs `value` token-major (only
     // `value_cm`, below), so this is diagnostic-only: parity-debugging
@@ -169,6 +168,17 @@ pub struct GdnMixerActs {
     pub normed: DeviceBuffer,
     pub z: DeviceBuffer,
     pub z_silu: DeviceBuffer,
+}
+
+/// What the convolution leaves for the backward: the layout depends on which forward ran.
+pub enum ConvActs {
+    /// The generic convolution's channel-major copies: `ncl_in` (`[conv_dim, conv_ctx + t]`, the history
+    /// rows followed by the round's) and the pre-SiLU `ncl_out` (`[conv_dim, t]`).
+    ChannelMajor { ncl_in: DeviceBuffer, ncl_out: DeviceBuffer },
+    /// The token-major fused convolution (`gdn_conv_silu_tok`) kept its input `x` (`[tokens, conv_dim]`, the
+    /// projection output), the pre-SiLU output `pre` (`[tokens, conv_dim]`) and, for a continued round, a copy
+    /// of the history it started from (`[conv_dim, K-1]`, channel-major).
+    TokenMajor { x: DeviceBuffer, pre: DeviceBuffer, hist_in: Option<DeviceBuffer> },
 }
 
 /// One sequence's PERSISTENT Gated-DeltaNet stream state, threaded across
@@ -265,65 +275,75 @@ pub fn gdn_mixer_stream_fwd(
         assert_eq!(b, 1, "gdn_mixer_stream_fwd: a persistent GdnStream is per SEQUENCE, so b must be 1 (got {b})");
     }
 
-    // Depthwise causal conv1d + SiLU (activation AFTER the conv).
-    // conv1d.wgsl is NCL ([N,Cin,L]); mixed_qkv is token-major ([B,T,C]).
-    let ncl_out = g.storage((n * conv_dim) as u64);
-    let ncl_in = match &cont {
+    // Depthwise causal conv1d + SiLU (activation AFTER the conv), then the split into query/key/value. On a device
+    // with the tensor-core kernels all of it is two launches on the token-major rows (three with a persistent
+    // stream); declined, the channel-major sequence below runs.
+    let (conv, query, key, value) = match conv_fused_fwd(g, ids, shape, w, mixed_qkv, n, is_train, cont.as_ref()) {
+        Some(f) => (ConvActs::TokenMajor { x: mixed_qkv.clone(), pre: f.pre, hist_in: f.hist_in }, f.query, f.key, f.value),
         None => {
-            let ncl_in = g.storage((n * conv_dim) as u64);
-            g.submit(&[], &[g.step(ids.nlc_nchw, &[mixed_qkv, &ncl_in], &[n * conv_dim, conv_dim, t], n * conv_dim)]);
-            let conv_shape = Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t };
-            g.submit(&[], &[conv1d_fwd(g, &ids.conv, &conv_shape, &ncl_in, w.conv1d_weight, &ncl_out)]);
-            ncl_in
-        }
-        Some(st) => {
-            // The K-1 history rows, channel-major -> token-major, so they can
-            // be prepended to this round's own token-major rows.
-            let kw1 = kw - 1;
-            let ext_rows = kw1 + t;
-            let hist_tok = g.storage((kw1 * conv_dim) as u64);
-            g.submit(&[], &[g.step(ids.nchw_nlc, &[st.hist, &hist_tok], &[kw1 * conv_dim, conv_dim, kw1], kw1 * conv_dim)]);
-            // [history | this round], a flat row concatenation (N=H=W=1).
-            let ext_tok = g.storage((ext_rows * conv_dim) as u64);
-            g.submit(&[], &[g.step(ids.concat2, &[&hist_tok, mixed_qkv, &ext_tok], &[1, kw1 * conv_dim, t * conv_dim, 1, 1], ext_rows * conv_dim)]);
-            // The NEXT round's history: the extended input's own last K-1
-            // rows (correct even when t < K-1, where some of them are still
-            // this round's inherited history). Read before `st.hist` is
-            // overwritten below - separate dispatches, submitted in order.
-            let tail_tok = g.storage((kw1 * conv_dim) as u64);
+            // Depthwise causal conv1d + SiLU (activation AFTER the conv).
+            // conv1d.wgsl is NCL ([N,Cin,L]); mixed_qkv is token-major ([B,T,C]).
+            let ncl_out = g.storage((n * conv_dim) as u64);
+            let ncl_in = match &cont {
+                None => {
+                    let ncl_in = g.storage((n * conv_dim) as u64);
+                    g.submit(&[], &[g.step(ids.nlc_nchw, &[mixed_qkv, &ncl_in], &[n * conv_dim, conv_dim, t], n * conv_dim)]);
+                    let conv_shape = Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t };
+                    g.submit(&[], &[conv1d_fwd(g, &ids.conv, &conv_shape, &ncl_in, w.conv1d_weight, &ncl_out)]);
+                    ncl_in
+                }
+                Some(st) => {
+                    // The K-1 history rows, channel-major -> token-major, so they can
+                    // be prepended to this round's own token-major rows.
+                    let kw1 = kw - 1;
+                    let ext_rows = kw1 + t;
+                    let hist_tok = g.storage((kw1 * conv_dim) as u64);
+                    g.submit(&[], &[g.step(ids.nchw_nlc, &[st.hist, &hist_tok], &[kw1 * conv_dim, conv_dim, kw1], kw1 * conv_dim)]);
+                    // [history | this round], a flat row concatenation (N=H=W=1).
+                    let ext_tok = g.storage((ext_rows * conv_dim) as u64);
+                    g.submit(&[], &[g.step(ids.concat2, &[&hist_tok, mixed_qkv, &ext_tok], &[1, kw1 * conv_dim, t * conv_dim, 1, 1], ext_rows * conv_dim)]);
+                    // The NEXT round's history: the extended input's own last K-1
+                    // rows (correct even when t < K-1, where some of them are still
+                    // this round's inherited history). Read before `st.hist` is
+                    // overwritten below - separate dispatches, submitted in order.
+                    let tail_tok = g.storage((kw1 * conv_dim) as u64);
+                    g.submit(
+                        &[],
+                        &[
+                            g.step(ids.concat_split, &[&ext_tok, &tail_tok], &[1, ext_rows * conv_dim, kw1 * conv_dim, t * conv_dim, 1, 1], kw1 * conv_dim),
+                            g.step(ids.nlc_nchw, &[&tail_tok, st.hist], &[kw1 * conv_dim, conv_dim, kw1], kw1 * conv_dim),
+                        ],
+                    );
+                    // pad = 0 over K-1+t inputs gives exactly t outputs, the causal
+                    // window of each already filled by real left context.
+                    let ncl_in = g.storage((ext_rows * conv_dim) as u64);
+                    g.submit(&[], &[g.step(ids.nlc_nchw, &[&ext_tok, &ncl_in], &[ext_rows * conv_dim, conv_dim, ext_rows], ext_rows * conv_dim)]);
+                    let conv_shape = Conv1d { n: 1, cin: conv_dim, l: ext_rows, cout: conv_dim, k: kw, stride: 1, pad: 0, dilation: 1, groups: conv_dim, lo: t };
+                    g.submit(&[], &[conv1d_fwd(g, &ids.conv, &conv_shape, &ncl_in, w.conv1d_weight, &ncl_out)]);
+                    ncl_in
+                }
+            };
+            let ncl_act = g.storage((n * conv_dim) as u64);
+            g.submit(&[], &[g.step(ids.silu, &[&ncl_out, &ncl_act], &[n * conv_dim], n * conv_dim)]);
+            let mixed_act = g.storage((n * conv_dim) as u64);
+            g.submit(&[], &[g.step(ids.nchw_nlc, &[&ncl_act, &mixed_act], &[n * conv_dim, conv_dim, t], n * conv_dim)]);
+
+            // Split into query/key/value - ONE whole-row contiguous split.
+            let query = g.storage((n * key_dim) as u64);
+            let key = g.storage((n * key_dim) as u64);
+            let value = g.storage((n * value_dim) as u64);
             g.submit(
                 &[],
                 &[
-                    g.step(ids.concat_split, &[&ext_tok, &tail_tok], &[1, ext_rows * conv_dim, kw1 * conv_dim, t * conv_dim, 1, 1], kw1 * conv_dim),
-                    g.step(ids.nlc_nchw, &[&tail_tok, st.hist], &[kw1 * conv_dim, conv_dim, kw1], kw1 * conv_dim),
+                    g.step(ids.concat_split, &[&mixed_act, &query], &[n, conv_dim, key_dim, 0, 1, 1], n * key_dim),
+                    g.step(ids.concat_split, &[&mixed_act, &key], &[n, conv_dim, key_dim, key_dim, 1, 1], n * key_dim),
+                    g.step(ids.concat_split, &[&mixed_act, &value], &[n, conv_dim, value_dim, 2 * key_dim, 1, 1], n * value_dim),
                 ],
             );
-            // pad = 0 over K-1+t inputs gives exactly t outputs, the causal
-            // window of each already filled by real left context.
-            let ncl_in = g.storage((ext_rows * conv_dim) as u64);
-            g.submit(&[], &[g.step(ids.nlc_nchw, &[&ext_tok, &ncl_in], &[ext_rows * conv_dim, conv_dim, ext_rows], ext_rows * conv_dim)]);
-            let conv_shape = Conv1d { n: 1, cin: conv_dim, l: ext_rows, cout: conv_dim, k: kw, stride: 1, pad: 0, dilation: 1, groups: conv_dim, lo: t };
-            g.submit(&[], &[conv1d_fwd(g, &ids.conv, &conv_shape, &ncl_in, w.conv1d_weight, &ncl_out)]);
-            ncl_in
+
+            (ConvActs::ChannelMajor { ncl_in, ncl_out }, query, key, value)
         }
     };
-    let ncl_act = g.storage((n * conv_dim) as u64);
-    g.submit(&[], &[g.step(ids.silu, &[&ncl_out, &ncl_act], &[n * conv_dim], n * conv_dim)]);
-    let mixed_act = g.storage((n * conv_dim) as u64);
-    g.submit(&[], &[g.step(ids.nchw_nlc, &[&ncl_act, &mixed_act], &[n * conv_dim, conv_dim, t], n * conv_dim)]);
-
-    // Split into query/key/value - ONE whole-row contiguous split.
-    let query = g.storage((n * key_dim) as u64);
-    let key = g.storage((n * key_dim) as u64);
-    let value = g.storage((n * value_dim) as u64);
-    g.submit(
-        &[],
-        &[
-            g.step(ids.concat_split, &[&mixed_act, &query], &[n, conv_dim, key_dim, 0, 1, 1], n * key_dim),
-            g.step(ids.concat_split, &[&mixed_act, &key], &[n, conv_dim, key_dim, key_dim, 1, 1], n * key_dim),
-            g.step(ids.concat_split, &[&mixed_act, &value], &[n, conv_dim, value_dim, 2 * key_dim, 1, 1], n * value_dim),
-        ],
-    );
 
     // beta = sigmoid(bproj); g = -exp(A_log)*softplus(aproj+dt_bias).
     let beta = g.storage((n * nvh) as u64);
@@ -487,8 +507,7 @@ pub fn gdn_mixer_stream_fwd(
         GdnMixerActs {
             shape: gdn,
             conv_ctx,
-            ncl_in,
-            ncl_out,
+            conv,
             query,
             key,
             value: value.clone(),
@@ -882,6 +901,169 @@ pub fn gdn_mixer_decode_pooled_fused(
     Some(gated)
 }
 
+/// The token-major convolution kernels' share of the mixer: the fused forward and backward below run on
+/// the opt-in the tensor-core chunk kernels use ([`crate::gdn::GdnFastIds::tensor_core`]) and decline for
+/// any convolution but four taps.
+fn conv_tokens_offered(g: &Gpu, ids: &GdnIds, shape: &GdnMixerShape) -> bool {
+    crate::gdn::tensor_core_enabled(g, ids) && shape.conv_kernel == 4
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type ConvLayout = gpu_core::provider::cuda::GdnConvLayout;
+
+#[cfg(target_arch = "wasm32")]
+type ConvLayout = ();
+
+#[cfg(not(target_arch = "wasm32"))]
+fn conv_layout(shape: &GdnMixerShape, n: u32) -> ConvLayout {
+    gpu_core::provider::cuda::GdnConvLayout { rows: n, conv_dim: shape.conv_dim(), seq_len: shape.gdn.t, key_dim: shape.key_dim(), value_dim: shape.value_dim(), kernel: shape.conv_kernel }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn conv_layout(_shape: &GdnMixerShape, _n: u32) -> ConvLayout {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_conv_fwd(g: &Gpu, bufs: &[&DeviceBuffer; 7], l: ConvLayout, has_hist: bool, save_pre: bool) -> Option<gpu_core::Step> {
+    gpu_core::provider::cuda::gdn_conv_silu_tok_step(g, bufs, l, has_hist, save_pre)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_conv_hist(g: &Gpu, bufs: &[&DeviceBuffer; 2], l: ConvLayout) -> Option<gpu_core::Step> {
+    gpu_core::provider::cuda::gdn_conv_hist_tok_step(g, bufs, l)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_conv_bwd(g: &Gpu, bufs: &[&DeviceBuffer; 7], l: ConvLayout, ctx: u32) -> Option<gpu_core::Step> {
+    gpu_core::provider::cuda::gdn_conv_silu_bwd_tok_step(g, bufs, l, ctx)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_conv_fwd(_g: &Gpu, _bufs: &[&DeviceBuffer; 7], _l: ConvLayout, _has_hist: bool, _save_pre: bool) -> Option<gpu_core::Step> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_conv_hist(_g: &Gpu, _bufs: &[&DeviceBuffer; 2], _l: ConvLayout) -> Option<gpu_core::Step> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_conv_bwd(_g: &Gpu, _bufs: &[&DeviceBuffer; 7], _l: ConvLayout, _ctx: u32) -> Option<gpu_core::Step> {
+    None
+}
+
+/// What [`conv_fused_fwd`] produced.
+struct FusedConvFwd {
+    query: DeviceBuffer,
+    key: DeviceBuffer,
+    value: DeviceBuffer,
+    /// The pre-SiLU convolution output the backward needs (a placeholder when `is_train` is off).
+    pre: DeviceBuffer,
+    /// A copy of the history a continued training round started from.
+    hist_in: Option<DeviceBuffer>,
+}
+
+/// The forward's depthwise convolution, SiLU and query/key/value split as the token-major kernels
+/// (`gdn_conv_silu_tok`, and `gdn_conv_hist_tok` for a continued round's next history), or `None` when this
+/// call is not served and nothing was submitted.
+#[allow(clippy::too_many_arguments)]
+fn conv_fused_fwd(g: &Gpu, ids: &GdnMixerIds, shape: &GdnMixerShape, w: &GdnMixerWeights, mixed_qkv: &DeviceBuffer, n: u32, is_train: bool, cont: Option<&GdnStream>) -> Option<FusedConvFwd> {
+    if !conv_tokens_offered(g, &ids.chunk, shape) {
+        return None;
+    }
+    let (conv_dim, key_dim, value_dim, kw1) = (shape.conv_dim(), shape.key_dim(), shape.value_dim(), shape.conv_kernel - 1);
+    let layout = conv_layout(shape, n);
+    let (query, key, value) = (g.storage((n * key_dim) as u64), g.storage((n * key_dim) as u64), g.storage((n * value_dim) as u64));
+    let pre = g.storage(if is_train { (n * conv_dim) as u64 } else { 1 });
+    let hist = cont.map(|st| st.hist);
+    let fwd = native_conv_fwd(g, &[mixed_qkv, w.conv1d_weight, hist.unwrap_or(w.conv1d_weight), &query, &key, &value, &pre], layout, cont.is_some(), is_train)?;
+    let tail = match hist {
+        Some(hist) => Some(native_conv_hist(g, &[mixed_qkv, hist], layout)?),
+        None => None,
+    };
+    // The history the training backward starts from, taken before the update below overwrites it.
+    let hist_in = hist.filter(|_| is_train).map(|hist| {
+        let copy = g.storage((conv_dim * kw1) as u64);
+        let len = conv_dim * kw1;
+        g.submit(&[], &[g.step(ids.chunk.region_copy, &[hist, &copy], &[1, len, len, 0], len)]);
+        copy
+    });
+    g.submit(&[], &[fwd]);
+    if let Some(tail) = tail {
+        g.submit(&[], &[tail]);
+    }
+    Some(FusedConvFwd { query, key, value, pre, hist_in })
+}
+
+/// The backward of the convolution chain as `gdn_conv_silu_bwd_tok` when the forward ran fused and the
+/// convolution weight is not trained: the gradients of `d_mixed_qkv` and, for a continued round, of the
+/// history rows. `None` (nothing submitted) otherwise.
+#[allow(clippy::too_many_arguments)]
+fn conv_fused_bwd(
+    g: &Gpu,
+    ids: &GdnMixerIds,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    gw: &GdnMixerGrads,
+    la: &GdnMixerActs,
+    d_query: &DeviceBuffer,
+    d_key: &DeviceBuffer,
+    d_value: &DeviceBuffer,
+    n: u32,
+) -> Option<(DeviceBuffer, Option<DeviceBuffer>)> {
+    let ConvActs::TokenMajor { pre, .. } = &la.conv else { return None };
+    if gw.conv1d_weight.is_some() || !conv_tokens_offered(g, &ids.chunk, shape) {
+        return None;
+    }
+    let (conv_dim, ctx) = (shape.conv_dim(), la.conv_ctx);
+    let d_mixed_qkv = g.storage((n * conv_dim) as u64);
+    let d_hist = (ctx > 0).then(|| g.storage((ctx * conv_dim) as u64));
+    let placeholder;
+    let d_hist_buf = match &d_hist {
+        Some(h) => h,
+        None => {
+            placeholder = g.storage(1);
+            &placeholder
+        }
+    };
+    let step = native_conv_bwd(g, &[d_query, d_key, d_value, pre, w.conv1d_weight, &d_mixed_qkv, d_hist_buf], conv_layout(shape, n), ctx)?;
+    g.submit(&[], &[step]);
+    Some((d_mixed_qkv, d_hist))
+}
+
+/// The channel-major `(ncl_in, ncl_out)` the generic convolution backward reads, rebuilt from what the
+/// token-major forward kept: `ncl_out` is the transposed pre-activation, `ncl_in` the transposed input
+/// (preceded by the history rows of a continued round).
+#[allow(clippy::too_many_arguments)]
+fn channel_major_conv(g: &Gpu, ids: &GdnMixerIds, shape: &GdnMixerShape, x: &DeviceBuffer, pre: &DeviceBuffer, hist_in: Option<&DeviceBuffer>, ctx: u32, n: u32) -> (DeviceBuffer, DeviceBuffer) {
+    let (conv_dim, t) = (shape.conv_dim(), shape.gdn.t);
+    let ncl_out = g.storage((n * conv_dim) as u64);
+    g.submit(&[], &[g.step(ids.nlc_nchw, &[pre, &ncl_out], &[n * conv_dim, conv_dim, t], n * conv_dim)]);
+    let ncl_in = match hist_in {
+        Some(hist) if ctx > 0 => {
+            let ext_rows = ctx + t;
+            let hist_tok = g.storage((ctx * conv_dim) as u64);
+            let ext_tok = g.storage((ext_rows * conv_dim) as u64);
+            let ncl_in = g.storage((ext_rows * conv_dim) as u64);
+            g.submit(
+                &[],
+                &[
+                    g.step(ids.nchw_nlc, &[hist, &hist_tok], &[ctx * conv_dim, conv_dim, ctx], ctx * conv_dim),
+                    g.step(ids.concat2, &[&hist_tok, x, &ext_tok], &[1, ctx * conv_dim, t * conv_dim, 1, 1], ext_rows * conv_dim),
+                    g.step(ids.nlc_nchw, &[&ext_tok, &ncl_in], &[ext_rows * conv_dim, conv_dim, ext_rows], ext_rows * conv_dim),
+                ],
+            );
+            ncl_in
+        }
+        _ => {
+            let ncl_in = g.storage((n * conv_dim) as u64);
+            g.submit(&[], &[g.step(ids.nlc_nchw, &[x, &ncl_in], &[n * conv_dim, conv_dim, t], n * conv_dim)]);
+            ncl_in
+        }
+    };
+    (ncl_in, ncl_out)
+}
+
 /// Reverse of [`gdn_mixer_fwd`]: `d_gated` (the caller's own `out_proj`
 /// backward output) -> `(d_mixed_qkv, d_bproj, d_aproj, d_z)`, for the
 /// caller's own `in_proj_*` backward. `n` must match the forward call's own.
@@ -1087,52 +1269,71 @@ pub fn gdn_mixer_stream_bwd(
         g.submit(&[], &s);
     }
 
-    // ---- qkv split backward (concat2 x2: the 3-way split's adjoint) ----
-    let d_qk = g.storage((n * 2 * key_dim) as u64);
-    let d_mixed_act = g.storage((n * conv_dim) as u64);
-    g.submit(
-        &[],
-        &[
-            g.step(ids.concat2, &[&d_query, &d_key, &d_qk], &[n, key_dim, key_dim, 1, 1], n * 2 * key_dim),
-            g.step(ids.concat2, &[&d_qk, &d_value, &d_mixed_act], &[n, 2 * key_dim, value_dim, 1, 1], n * conv_dim),
-        ],
-    );
-
-    // ---- conv1d + SiLU backward ----
-    // A continued forward convolved `[history | this round]` with pad 0, so the
-    // input gradient has `conv_ctx` extra leading rows: the history's gradient.
+    // ---- qkv split backward and conv1d + SiLU backward ----
+    // A continued forward convolved `[history | this round]` with pad 0, so the input gradient has `conv_ctx`
+    // extra leading rows: the history's gradient.
     let ctx = la.conv_ctx;
-    let ext_rows = ctx + t;
-    let d_ncl_act = g.storage((n * conv_dim) as u64);
-    let d_ncl_out = g.storage((n * conv_dim) as u64);
-    // `ctx == 0` convolves `b` sequences of `t` rows (`n = b * t` rows in all);
-    // a continued round is a single sequence of `ext_rows` (`n == t` there).
-    let d_ncl_in = g.storage((n.max(ext_rows) * conv_dim) as u64);
-    let d_mixed_qkv = g.storage((n * conv_dim) as u64);
-    let conv_shape = if ctx == 0 {
-        Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t }
-    } else {
-        Conv1d { n: 1, cin: conv_dim, l: ext_rows, cout: conv_dim, k: kw, stride: 1, pad: 0, dilation: 1, groups: conv_dim, lo: t }
-    };
-    let mut d_hist = None;
-    {
-        let mut s = vec![
-            g.step(ids.nlc_nchw, &[&d_mixed_act, &d_ncl_act], &[n * conv_dim, conv_dim, t], n * conv_dim),
-            g.step(ids.silu_bwd, &[&la.ncl_out, &d_ncl_act, &d_ncl_out], &[n * conv_dim], n * conv_dim),
-        ];
-        s.extend(conv1d_bwd(g, &ids.conv, &conv_shape, &d_ncl_out, &la.ncl_in, w.conv1d_weight, Some(&d_ncl_in), gw.conv1d_weight));
-        if ctx == 0 {
-            s.push(g.step(ids.nchw_nlc, &[&d_ncl_in, &d_mixed_qkv], &[n * conv_dim, conv_dim, t], n * conv_dim));
-        } else {
-            let d_ext_tok = g.storage((ext_rows * conv_dim) as u64);
-            let hist = g.storage((ctx * conv_dim) as u64);
-            s.push(g.step(ids.nchw_nlc, &[&d_ncl_in, &d_ext_tok], &[ext_rows * conv_dim, conv_dim, ext_rows], ext_rows * conv_dim));
-            s.push(g.step(ids.concat_split, &[&d_ext_tok, &hist], &[1, ext_rows * conv_dim, ctx * conv_dim, 0, 1, 1], ctx * conv_dim));
-            s.push(g.step(ids.concat_split, &[&d_ext_tok, &d_mixed_qkv], &[1, ext_rows * conv_dim, t * conv_dim, ctx * conv_dim, 1, 1], t * conv_dim));
-            d_hist = Some(hist);
+    let (d_mixed_qkv, d_hist) = match conv_fused_bwd(g, ids, shape, w, gw, la, &d_query, &d_key, &d_value, n) {
+        Some(grads) => grads,
+        None => {
+            // The channel-major copies the generic convolution backward reads: kept by the forward, or rebuilt
+            // from the token-major ones when the fused forward ran and this backward cannot be fused (a
+            // convolution weight that is trained, or a declined launch).
+            let rebuilt;
+            let (ncl_in, ncl_out) = match &la.conv {
+                ConvActs::ChannelMajor { ncl_in, ncl_out } => (ncl_in, ncl_out),
+                ConvActs::TokenMajor { x, pre, hist_in } => {
+                    rebuilt = channel_major_conv(g, ids, shape, x, pre, hist_in.as_ref(), ctx, n);
+                    (&rebuilt.0, &rebuilt.1)
+                }
+            };
+            // ---- qkv split backward (concat2 x2: the 3-way split's adjoint) ----
+            let d_qk = g.storage((n * 2 * key_dim) as u64);
+            let d_mixed_act = g.storage((n * conv_dim) as u64);
+            g.submit(
+                &[],
+                &[
+                    g.step(ids.concat2, &[&d_query, &d_key, &d_qk], &[n, key_dim, key_dim, 1, 1], n * 2 * key_dim),
+                    g.step(ids.concat2, &[&d_qk, &d_value, &d_mixed_act], &[n, 2 * key_dim, value_dim, 1, 1], n * conv_dim),
+                ],
+            );
+
+            // ---- conv1d + SiLU backward ----
+            let ext_rows = ctx + t;
+            let d_ncl_act = g.storage((n * conv_dim) as u64);
+            let d_ncl_out = g.storage((n * conv_dim) as u64);
+            // `ctx == 0` convolves `b` sequences of `t` rows (`n = b * t` rows in all);
+            // a continued round is a single sequence of `ext_rows` (`n == t` there).
+            let d_ncl_in = g.storage((n.max(ext_rows) * conv_dim) as u64);
+            let d_mixed_qkv = g.storage((n * conv_dim) as u64);
+            let conv_shape = if ctx == 0 {
+                Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t }
+            } else {
+                Conv1d { n: 1, cin: conv_dim, l: ext_rows, cout: conv_dim, k: kw, stride: 1, pad: 0, dilation: 1, groups: conv_dim, lo: t }
+            };
+            let mut d_hist = None;
+            {
+                let mut s = vec![
+                    g.step(ids.nlc_nchw, &[&d_mixed_act, &d_ncl_act], &[n * conv_dim, conv_dim, t], n * conv_dim),
+                    g.step(ids.silu_bwd, &[ncl_out, &d_ncl_act, &d_ncl_out], &[n * conv_dim], n * conv_dim),
+                ];
+                s.extend(conv1d_bwd(g, &ids.conv, &conv_shape, &d_ncl_out, ncl_in, w.conv1d_weight, Some(&d_ncl_in), gw.conv1d_weight));
+                if ctx == 0 {
+                    s.push(g.step(ids.nchw_nlc, &[&d_ncl_in, &d_mixed_qkv], &[n * conv_dim, conv_dim, t], n * conv_dim));
+                } else {
+                    let d_ext_tok = g.storage((ext_rows * conv_dim) as u64);
+                    let hist = g.storage((ctx * conv_dim) as u64);
+                    s.push(g.step(ids.nchw_nlc, &[&d_ncl_in, &d_ext_tok], &[ext_rows * conv_dim, conv_dim, ext_rows], ext_rows * conv_dim));
+                    s.push(g.step(ids.concat_split, &[&d_ext_tok, &hist], &[1, ext_rows * conv_dim, ctx * conv_dim, 0, 1, 1], ctx * conv_dim));
+                    s.push(g.step(ids.concat_split, &[&d_ext_tok, &d_mixed_qkv], &[1, ext_rows * conv_dim, t * conv_dim, ctx * conv_dim, 1, 1], t * conv_dim));
+                    d_hist = Some(hist);
+                }
+                g.submit(&[], &s);
+            }
+
+            (d_mixed_qkv, d_hist)
         }
-        g.submit(&[], &s);
-    }
+    };
 
     let carry = d_hist.map(|d_hist| GdnStreamGrad { d_state: d_initial_state, d_hist });
     ((d_mixed_qkv, d_bproj, d_aproj, d_z), carry)
