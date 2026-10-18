@@ -101,15 +101,33 @@ impl PrefixCache {
         &self.entries[i]
     }
 
-    /// A snapshot row for a prefill that is about to finish, evicting the least
-    /// recently used entry when none is free. The evicted entry's block table
-    /// is returned for the caller to release; `None` row when every row is
-    /// held by a prefill still in flight.
-    pub fn take_row(&mut self) -> (Option<u32>, Option<BlockTable>) {
+    /// A snapshot row for a prefill of `prompt` (in `namespace`) that is about
+    /// to finish: a free one, else the row of an entry `prompt` supersedes (a
+    /// cached prefix of it: the earlier turn of the same conversation, which
+    /// [`Self::insert`] retires anyway), else the least recently used entry's.
+    ///
+    /// Taking the superseded entry before an unrelated one matters when the
+    /// concurrent conversations fill the cache: every conversation holds its
+    /// previous turn's entry while the next turn runs, so evicting the least
+    /// recently used one drops a conversation whose next turn is about to
+    /// arrive, and that turn then prefills its whole history again (round-robin
+    /// turns defeat LRU exactly when conversations = rows).
+    ///
+    /// The evicted entry's block table is returned for the caller to release;
+    /// `None` row when every row is held by a prefill still in flight.
+    pub fn take_row(&mut self, namespace: KvNamespace, prompt: &[u32]) -> (Option<u32>, Option<BlockTable>) {
         if let Some(row) = self.free_rows.pop() {
             return (Some(row), None);
         }
-        match self.entries.iter().enumerate().min_by_key(|(_, e)| e.stamp).map(|(i, _)| i) {
+        let superseded = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.table.kv_namespace() == namespace && e.tokens.len() <= prompt.len() && prompt[..e.tokens.len()] == e.tokens[..])
+            .map(|(i, _)| i)
+            .next();
+        let victim = superseded.or_else(|| self.entries.iter().enumerate().min_by_key(|(_, e)| e.stamp).map(|(i, _)| i));
+        match victim {
             Some(i) => {
                 let e = self.entries.remove(i);
                 (Some(e.snap_row), Some(e.table))
@@ -180,9 +198,9 @@ mod tests {
     #[test]
     fn lookup_finds_the_longest_cached_prefix_only() {
         let mut c = PrefixCache::new(4);
-        let r1 = c.take_row().0.unwrap();
+        let r1 = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
         assert!(c.insert(entry(&[1, 2, 3], r1)).is_empty());
-        let r2 = c.take_row().0.unwrap();
+        let r2 = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
         // Not a prefix of the first: a different conversation.
         c.insert(entry(&[1, 2, 9, 9], r2));
         assert_eq!(c.lookup(BASE_KV_NAMESPACE, &[1, 2, 3, 4, 5]).map(|i| c.entry(i).tokens.len()), Some(3));
@@ -196,13 +214,13 @@ mod tests {
     #[test]
     fn a_longer_prompt_supersedes_the_prefix_it_extends() {
         let mut c = PrefixCache::new(2);
-        let r1 = c.take_row().0.unwrap();
+        let r1 = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
         c.insert(entry(&[1, 2], r1));
-        let r2 = c.take_row().0.unwrap();
+        let r2 = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
         let retired = c.insert(entry(&[1, 2, 3, 4], r2));
         assert_eq!(retired.len(), 1, "the shorter entry's block is returned for release");
         assert_eq!(c.stats().2, 1);
-        assert_eq!(c.take_row().0, Some(r1), "its snapshot row is free again");
+        assert_eq!(c.take_row(BASE_KV_NAMESPACE, &[]).0, Some(r1), "its snapshot row is free again");
     }
 
     /// With every row in use the least recently used entry is evicted, and a
@@ -211,14 +229,37 @@ mod tests {
     fn the_least_recently_used_entry_is_evicted_for_a_row() {
         let mut c = PrefixCache::new(2);
         for (tokens, _) in [([1u32, 1], 0), ([2, 2], 1)] {
-            let r = c.take_row().0.unwrap();
+            let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
             c.insert(entry(&tokens, r));
         }
         c.lookup(BASE_KV_NAMESPACE, &[1, 1, 5]); // [1,1] is now the most recently used
-        let (row, evicted) = c.take_row();
+        let (row, evicted) = c.take_row(BASE_KV_NAMESPACE, &[]);
         assert!(row.is_some() && evicted.is_some());
         assert!(c.lookup(BASE_KV_NAMESPACE, &[2, 2, 5]).is_none(), "[2,2] was the least recently used and is gone");
         assert!(c.lookup(BASE_KV_NAMESPACE, &[1, 1, 5]).is_some());
+    }
+
+    /// Round-robin turns of as many conversations as there are rows: a finishing
+    /// turn takes the row of its own earlier turn, not the least recently used
+    /// entry, which belongs to the conversation whose turn comes next.
+    #[test]
+    fn a_turn_takes_its_own_earlier_entry_before_another_conversations() {
+        let mut c = PrefixCache::new(2);
+        let (a1, b1) = ([1u32, 1, 1], [2u32, 2, 2]);
+        for tokens in [a1, b1] {
+            let r = c.take_row(BASE_KV_NAMESPACE, &tokens).0.unwrap();
+            c.insert(entry(&tokens, r));
+        }
+        for turn in 2..6u32 {
+            for conv in [1u32, 2] {
+                let prompt: Vec<u32> = std::iter::repeat_n(conv, 3).chain(std::iter::repeat_n(9, turn as usize)).collect();
+                assert!(c.lookup(BASE_KV_NAMESPACE, &prompt).is_some(), "turn {turn} of conversation {conv} resumes from its previous turn");
+                let (row, evicted) = c.take_row(BASE_KV_NAMESPACE, &prompt);
+                assert!(row.is_some() && evicted.is_some());
+                c.insert(entry(&prompt, row.unwrap()));
+            }
+        }
+        assert_eq!(c.stats().2, 2, "one entry per conversation");
     }
 
     /// K/V computed under an adapter are not the base's: a prompt resumes only
@@ -229,7 +270,7 @@ mod tests {
         let mut c = PrefixCache::new(3);
         let prompt = [1u32, 2, 3];
         for ns in [BASE_KV_NAMESPACE, 1, 2] {
-            let r = c.take_row().0.unwrap();
+            let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
             c.insert(Entry::new(prompt.to_vec(), BlockTable::with_namespace(ns), r, vec![0.0]));
         }
         assert_eq!(c.stats().2, 3, "the same prompt in three namespaces is three entries, none superseding another");
@@ -240,21 +281,21 @@ mod tests {
         assert!(c.lookup(7, &[1, 2, 3, 4]).is_none(), "a namespace with no entry misses");
         assert_eq!(c.evict_namespace(1).len(), 1);
         assert!(c.lookup(1, &[1, 2, 3]).is_none() && c.lookup(2, &[1, 2, 3]).is_some());
-        assert!(c.take_row().0.is_some(), "the dropped entry's snapshot row is free again");
+        assert!(c.take_row(BASE_KV_NAMESPACE, &[]).0.is_some(), "the dropped entry's snapshot row is free again");
     }
 
     #[test]
     fn a_disabled_cache_hands_out_no_rows() {
         let mut c = PrefixCache::new(0);
         assert!(!c.enabled());
-        let (row, evicted) = c.take_row();
+        let (row, evicted) = c.take_row(BASE_KV_NAMESPACE, &[]);
         assert!(row.is_none() && evicted.is_none());
     }
 
     #[test]
     fn stats_count_hit_and_looked_up_tokens() {
         let mut c = PrefixCache::new(1);
-        let r = c.take_row().0.unwrap();
+        let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
         c.insert(entry(&[1, 2, 3], r));
         c.lookup(BASE_KV_NAMESPACE, &[1, 2, 3, 4]);
         c.lookup(BASE_KV_NAMESPACE, &[9, 9]);

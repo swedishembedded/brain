@@ -306,7 +306,7 @@ impl Qwen35GgufEngine {
     /// - when the prompt is in - hand the MTP head its hidden states and file the
     /// prompt for reuse. `state_in_pool`: the recurrent state is in the slot's pool
     /// row and not in the working copy (a multi-sequence forward leaves it there).
-    fn finish_slice(&mut self, slot: u32, prompt: &[u32], mut p: PartialPrefill, end: usize, hidden: Vec<f32>, state_in_pool: bool) -> PrefillProgress {
+    fn finish_slice(&mut self, slot: u32, namespace: KvNamespace, prompt: &[u32], mut p: PartialPrefill, end: usize, hidden: Vec<f32>, state_in_pool: bool) -> PrefillProgress {
         let consumed = end - p.done;
         p.done = end;
         p.fresh = false;
@@ -316,7 +316,7 @@ impl Qwen35GgufEngine {
         }
         self.inst.mtp_after_prefill(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden);
         if p.cacheable {
-            let (row, evicted) = self.cache.take_row();
+            let (row, evicted) = self.cache.take_row(namespace, prompt);
             self.release_retired(evicted);
             if let Some(row) = row {
                 if state_in_pool {
@@ -341,7 +341,7 @@ impl Qwen35GgufEngine {
         let end = p.done + budget.min(prompt.len() - p.done);
         let resume = !p.fresh && p.done > 0;
         let hidden = self.forward_slice(table, prompt, &mut p, end, resume);
-        self.finish_slice(slot, prompt, p, end, hidden, false)
+        self.finish_slice(slot, table.kv_namespace(), prompt, p, end, hidden, false)
     }
 
     /// The next slices of several sequences, the rows of all of them through the
@@ -398,7 +398,7 @@ impl Qwen35GgufEngine {
             }
         }
         for ((i, slot, p, end), (h, in_pool)) in live.into_iter().zip(hidden) {
-            answers[i] = Some(self.finish_slice(slot, jobs[i].prompt, p, end, h, in_pool));
+            answers[i] = Some(self.finish_slice(slot, jobs[i].table.kv_namespace(), jobs[i].prompt, p, end, h, in_pool));
         }
         answers.into_iter().map(|a| a.expect("every job was answered")).collect()
     }
