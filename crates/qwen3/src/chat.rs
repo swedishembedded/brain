@@ -475,7 +475,13 @@ pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<Rendere
     let (tool_choice, tools) = resolve_tools(inv)?;
     let messages = inv.get_str("messages").filter(|s| !s.is_empty());
     let chat = messages.is_some() || inv.get_bool("chat").unwrap_or(true);
-    let flavor = qwen_chat::TemplateFlavor::Qwen3;
+    // The scanner reads tool calls in the wire form the template teaches the
+    // model: Qwen3.8's `<function=...>` XML when the template writes it,
+    // otherwise the JSON `<tool_call>` payload.
+    let flavor = match template {
+        Some(t) if t.source().contains("<function=") => qwen_chat::TemplateFlavor::Qwen38,
+        _ => qwen_chat::TemplateFlavor::Qwen3,
+    };
     if !chat {
         return Ok(RenderedPrompt { text: inv.get_str("prompt").unwrap_or_default(), tool_choice, flavor, thinking_open: false, raw: true });
     }
@@ -734,6 +740,20 @@ impl SeqState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A checkpoint template that teaches XML tool calls gets the XML
+    /// scanner; one that does not keeps the JSON scanner.
+    #[test]
+    fn a_template_decides_the_tool_call_wire_form() {
+        let xml = data::chat_template::ChatTemplate::compile(
+            "{% for m in messages %}{{ m.content }}{% endfor %}{% if tools %}<tool_call>\n<function=f>{% endif %}",
+        )
+        .unwrap();
+        let json = data::chat_template::ChatTemplate::compile("{% for m in messages %}{{ m.content }}{% endfor %}").unwrap();
+        let inv = Invocation::new().set("prompt", json!("hi"));
+        assert_eq!(render_prompt_as(&ChatFormat::Template(Box::new(xml)), &inv).unwrap().flavor, qwen_chat::TemplateFlavor::Qwen38);
+        assert_eq!(render_prompt_as(&ChatFormat::Template(Box::new(json)), &inv).unwrap().flavor, qwen_chat::TemplateFlavor::Qwen3);
+    }
 
     #[test]
     fn messages_parse_with_and_without_system() {
