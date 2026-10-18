@@ -476,6 +476,17 @@ fn sample_from_topk_impl(candidates: &[(u32, f32)], params: SampleParams, rng: &
     (candidates[last].0, probs[last].ln() - kept_sum.ln())
 }
 
+/// The log-probability of `token` under the distribution [`sample_from_topk`]
+/// draws from for `candidates` and `params` (`0.0` when decoding is greedy).
+/// A token outside the truncated set has probability zero, which is `-inf`.
+pub fn candidate_logprob(candidates: &[(u32, f32)], params: SampleParams, token: u32) -> f32 {
+    if params.is_greedy() {
+        return 0.0;
+    }
+    let (weights, kept_sum) = truncated_weights(candidates, params);
+    candidates[..weights.len()].iter().position(|&(t, _)| t == token).map_or(f32::NEG_INFINITY, |i| weights[i].ln() - kept_sum.ln())
+}
+
 /// The unnormalised weights (and their sum) of the distribution a non-greedy
 /// pick draws from: temperature scale, truncate to `top_k`, softmax, then
 /// nucleus-truncate to `top_p`. Weight `i` belongs to `candidates[i]`, and
@@ -700,6 +711,11 @@ pub struct StepReport {
     pub rejected: Vec<(u64, RejectReason)>,
     /// The same `(id, tokens)` pairs [`Scheduler::step`] returns.
     pub completed: Vec<(u64, Vec<u32>)>,
+    /// For each of `completed`, the log-probability of every generated token
+    /// under the distribution it was decoded from: the temperature, top-k and
+    /// top-p truncated softmax a sampled token was drawn from, and `0.0` for
+    /// greedy decoding (deterministic). Same order and lengths as `completed`.
+    pub completed_logprobs: Vec<(u64, Vec<f32>)>,
     /// Requests preempted this iteration: their KV went to host RAM and their
     /// device blocks back to the pool (see [`crate::kv_offload`]).
     pub demoted: Vec<u64>,
@@ -740,6 +756,9 @@ struct Running {
     /// (finished, cancelled, or the scheduler torn down), preempted or not.
     adapter: Option<AdapterId>,
     generated: Vec<u32>,
+    /// `logprobs[i]` is the log-probability `generated[i]` was decoded with
+    /// (see [`StepReport::completed_logprobs`]).
+    logprobs: Vec<f32>,
     max_new: usize,
     stop: Vec<u32>,
     next_input: u32,
@@ -765,12 +784,13 @@ struct Running {
 /// `next` is appended normally, and `r` is marked done if `max_new` is now
 /// reached. A free function (not `Scheduler<D>::accept_token`) because it
 /// only ever touches `Running`, never `D`/`self`.
-fn accept_token(r: &mut Running, next: u32) {
+fn accept_token(r: &mut Running, next: u32, logprob: f32) {
     if r.stop.contains(&next) {
         r.done = true;
         return;
     }
     r.generated.push(next);
+    r.logprobs.push(logprob);
     r.context.push(next);
     r.next_input = next;
     if r.generated.len() >= r.max_new {
@@ -934,15 +954,21 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// requests still being waited on need. Reclaiming on cancel is what stops a
     /// server under normal churn from losing its cache to dead sequences.
     pub fn cancel(&mut self, id: u64) -> Option<Vec<u32>> {
+        self.cancel_detailed(id).map(|(tokens, _)| tokens)
+    }
+
+    /// [`Self::cancel`], also returning the log-probability of each token it
+    /// produced (see [`StepReport::completed_logprobs`]).
+    pub fn cancel_detailed(&mut self, id: u64) -> Option<(Vec<u32>, Vec<f32>)> {
         if let Some(pos) = self.waiting.iter().position(|w| w.id == id) {
             self.waiting.remove(pos);
-            return Some(Vec::new()); // never admitted, so nothing was produced
+            return Some((Vec::new(), Vec::new())); // never admitted, so nothing was produced
         }
         if let Some(pos) = self.prefilling.iter().position(|p| p.id == id) {
             let mut p = self.prefilling.remove(pos).expect("position just found it");
             self.dec.release_table(&mut p.table);
             self.unpin(p.adapter);
-            return Some(Vec::new()); // nothing generated yet
+            return Some((Vec::new(), Vec::new())); // nothing generated yet
         }
         if let Some(pos) = self.swapped.iter().position(|r| r.id == id) {
             // Demoted: its blocks are already back in the pool, its bytes are
@@ -950,13 +976,13 @@ impl<D: PagedDecoder> Scheduler<D> {
             let r = self.swapped.remove(pos).expect("position just found it");
             self.dec.discard_offloaded(id);
             self.unpin(r.adapter);
-            return Some(r.generated);
+            return Some((r.generated, r.logprobs));
         }
         let pos = self.running.iter().position(|r| r.id == id)?;
         let mut r = self.running.remove(pos);
         self.dec.release_table(&mut r.table);
         self.unpin(r.adapter);
-        Some(r.generated)
+        Some((r.generated, r.logprobs))
     }
 
     fn unpin(&mut self, adapter: Option<AdapterId>) {
@@ -1276,15 +1302,15 @@ impl<D: PagedDecoder> Scheduler<D> {
         // one (`qwen3::serve::Engine`): neither ships a `[vocab]` block to
         // the host for this one-time-per-request first token, matching
         // the steady-state per-token decode loop.
-        let first = if sample.is_greedy() {
-            self.dec.admit_greedy(&hidden)
+        let (first, first_logprob) = if sample.is_greedy() {
+            (self.dec.admit_greedy(&hidden), 0.0)
         } else {
             let k = self.dec.topk_capacity().max(1);
             let candidates = self.dec.admit_topk(&hidden, k);
-            sample_from_topk(&candidates, sample, &mut rng)
+            sample_from_topk_with_logprob(&candidates, sample, &mut rng)
         };
-        let mut r = Running { id, table, adapter, generated: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, rng };
-        accept_token(&mut r, first);
+        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, rng };
+        accept_token(&mut r, first, first_logprob);
         report.admitted.push(id);
         self.running.push(r);
     }
@@ -1469,22 +1495,20 @@ impl<D: PagedDecoder> Scheduler<D> {
             if k > 1 && (self.dec.free_blocks() as usize) < active.len() * k {
                 k = 1;
             }
-            let window: Vec<Vec<u32>> = if all_greedy {
+            let window: Vec<Vec<(u32, f32)>> = if all_greedy {
                 let mut refs: Vec<&mut BlockTable> = Vec::new();
                 for (idx, r) in self.running.iter_mut().enumerate() {
                     if active.contains(&idx) {
                         refs.push(&mut r.table);
                     }
                 }
-                if k > 1 {
+                // Greedy tokens are deterministic: probability one, logprob zero.
+                let greedy = if k > 1 {
                     self.dec.forward_batched_greedy_window(&mut refs, &inputs, k)
                 } else {
-                    self.dec
-                        .forward_batched_greedy(&mut refs, &inputs)
-                        .into_iter()
-                        .map(|t| vec![t])
-                        .collect()
-                }
+                    self.dec.forward_batched_greedy(&mut refs, &inputs).into_iter().map(|t| vec![t]).collect()
+                };
+                greedy.into_iter().map(|row| row.into_iter().map(|t| (t, 0.0)).collect()).collect()
             } else {
                 let candidates = {
                     let mut refs: Vec<&mut BlockTable> = Vec::new();
@@ -1500,20 +1524,20 @@ impl<D: PagedDecoder> Scheduler<D> {
                     .enumerate()
                     .map(|(bi, &si)| {
                         let r = &mut self.running[si];
-                        vec![sample_from_topk(&candidates[bi], r.sample, &mut r.rng)]
+                        vec![sample_from_topk_with_logprob(&candidates[bi], r.sample, &mut r.rng)]
                     })
                     .collect()
             };
             for (bi, &si) in active.iter().enumerate() {
                 let r = &mut self.running[si];
                 let mut used = 0usize;
-                for &next in &window[bi] {
+                for &(next, logprob) in &window[bi] {
                     // `used` counts consumed window slots (a real decode step
                     // happened and wrote a KV-cache entry) regardless of
                     // whether `next` ends up in `generated` - EOS still
                     // occupies a real slot, it just isn't output text.
                     used += 1;
-                    accept_token(r, next);
+                    accept_token(r, next, logprob);
                     if r.done {
                         break;
                     }
@@ -1541,6 +1565,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 let mut r = self.running.remove(i);
                 self.dec.release_table(&mut r.table);
                 self.unpin(r.adapter);
+                report.completed_logprobs.push((r.id, r.logprobs));
                 completed.push((r.id, r.generated));
             } else {
                 i += 1;
@@ -1663,6 +1688,21 @@ mod tests {
         }
     }
 
+    /// The logprob a sampled token carries is the one of the truncated,
+    /// temperature-scaled distribution it was drawn from, whichever path
+    /// (plain sampling or speculative verification) produced it.
+    #[test]
+    fn candidate_logprob_is_the_probability_the_sampler_drew_with() {
+        let candidates: Vec<(u32, f32)> = vec![(7, 3.0), (2, 2.0), (9, 1.0), (4, 0.5)];
+        let params = SampleParams { temp: 0.8, top_k: 3, top_p: 0.95 };
+        let mut rng = data::rng::Rng::new(11);
+        for _ in 0..20 {
+            let (token, drawn) = sample_from_topk_with_logprob(&candidates, params, &mut rng);
+            assert!((candidate_logprob(&candidates, params, token) - drawn).abs() < 1e-6);
+        }
+        assert_eq!(candidate_logprob(&candidates, SampleParams::greedy(), 7), 0.0);
+    }
+
     // ── accept_token ─────────────────────────────────────────────
 
     fn running(stop: &[u32], max_new: usize) -> Running {
@@ -1671,6 +1711,7 @@ mod tests {
             table: BlockTable::new(),
             adapter: None,
             generated: Vec::new(),
+            logprobs: Vec::new(),
             max_new,
             stop: stop.to_vec(),
             next_input: 0,
@@ -1690,7 +1731,7 @@ mod tests {
         // text, e.g. Qwen's "<|im_end|>", leaking into every response).
         let mut r = running(&[99], 100);
         r.generated.push(5); // a real token already generated this turn
-        accept_token(&mut r, 99);
+        accept_token(&mut r, 99, 0.0);
         assert!(r.done, "EOS must mark the sequence done");
         assert_eq!(r.generated, vec![5], "EOS must not be appended to generated");
     }
@@ -1700,7 +1741,7 @@ mod tests {
     fn any_stop_id_finishes() {
         for id in [151643, 151645] {
             let mut r = running(&[151643, 151645], 100);
-            accept_token(&mut r, id);
+            accept_token(&mut r, id, 0.0);
             assert!(r.done && r.generated.is_empty(), "{id}");
         }
     }
@@ -1708,7 +1749,7 @@ mod tests {
     #[test]
     fn accept_token_normal_token_is_appended_and_not_done() {
         let mut r = running(&[99], 100);
-        accept_token(&mut r, 42);
+        accept_token(&mut r, 42, 0.0);
         assert!(!r.done);
         assert_eq!(r.generated, vec![42]);
         assert_eq!(r.next_input, 42);
@@ -1719,7 +1760,7 @@ mod tests {
         // Unlike EOS, hitting the length cap on a real token must still
         // include that token in the output - only EOS is excluded.
         let mut r = running(&[99], 1);
-        accept_token(&mut r, 42);
+        accept_token(&mut r, 42, 0.0);
         assert!(r.done);
         assert_eq!(r.generated, vec![42]);
     }
@@ -1727,7 +1768,7 @@ mod tests {
     #[test]
     fn accept_token_with_no_eos_configured_never_stops_on_token_value() {
         let mut r = running(&[], 100);
-        accept_token(&mut r, 99); // would be EOS if configured
+        accept_token(&mut r, 99, 0.0); // would be EOS if configured
         assert!(!r.done);
         assert_eq!(r.generated, vec![99]);
     }

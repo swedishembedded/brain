@@ -460,8 +460,9 @@ impl<D: PagedDecoder> Scheduler<D> {
                 self.spec_stats.proposed += ks[bi] as u64;
                 self.spec_stats.accepted += v.accepted as u64;
             }
-            for &tok in props[bi][..v.accepted].iter().chain(std::iter::once(&v.next)) {
-                accept_token(r, tok);
+            for (j, &tok) in props[bi][..v.accepted].iter().chain(std::iter::once(&v.next)).enumerate() {
+                // Row `j` scored the position `tok` was emitted at.
+                accept_token(r, tok, candidate_logprob(&scored[bi][j], r.sample, tok));
                 if r.done {
                     break;
                 }

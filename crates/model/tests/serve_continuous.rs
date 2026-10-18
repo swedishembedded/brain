@@ -245,3 +245,39 @@ fn a_lone_prefilling_sequence_may_use_the_whole_row_budget() {
     assert_eq!(calls.iter().map(|c| c.0).max(), Some(1));
     assert_eq!(calls[0].1, 64, "alone, the sequence takes the whole budget in one call, not its 16-row share: {calls:?}");
 }
+
+#[test]
+fn every_generated_token_has_a_logprob_reported_with_its_completion() {
+    let clock = Rc::new(Cell::new(0));
+    let mut sched = Scheduler::new(Toy::new(clock, false), 4);
+    let id = sched.submit(Request { prompt: prompt(2, 10), max_new: 6, stop: Vec::new() });
+    let mut tokens = Vec::new();
+    let mut logprobs = Vec::new();
+    while sched.pending() {
+        let report = sched.step_report();
+        for (done, toks) in report.completed {
+            assert_eq!(done, id);
+            tokens = toks;
+        }
+        for (done, lps) in report.completed_logprobs {
+            assert_eq!(done, id);
+            logprobs = lps;
+        }
+    }
+    assert_eq!(tokens.len(), 6);
+    // Greedy decoding is deterministic: each token had probability one.
+    assert_eq!(logprobs, vec![0.0; 6]);
+}
+
+#[test]
+fn a_cancelled_request_reports_the_logprobs_of_the_tokens_it_produced() {
+    let clock = Rc::new(Cell::new(0));
+    let mut sched = Scheduler::new(Toy::new(clock, false), 4);
+    let id = sched.submit(Request { prompt: prompt(2, 10), max_new: 50, stop: Vec::new() });
+    for _ in 0..3 {
+        sched.step();
+    }
+    let (tokens, logprobs) = sched.cancel_detailed(id).expect("a running request");
+    assert!(!tokens.is_empty());
+    assert_eq!(tokens.len(), logprobs.len());
+}
