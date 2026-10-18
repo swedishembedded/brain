@@ -97,7 +97,7 @@ fn a_rendered_frame_contains_the_scene_and_not_one_flat_colour() {
     // A blank frame is the failure this is here to catch: a context that never
     // became current, or a scene that was never populated, both produce a
     // uniformly-cleared image that passes every weaker check.
-    let mut colours: Vec<[u8; 3]> = frame.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+    let mut colours: Vec<[u8; 3]> = frame.as_chunks::<3>().0.iter().map(|c| [c[0], c[1], c[2]]).collect();
     colours.sort_unstable();
     colours.dedup();
     assert!(colours.len() > 16, "the frame has only {} distinct colours, so nothing was drawn", colours.len());
@@ -105,7 +105,7 @@ fn a_rendered_frame_contains_the_scene_and_not_one_flat_colour() {
     // The box is the only strongly red thing in the scene, so its presence is
     // evidence that geometry - not just a cleared background - reached the
     // framebuffer.
-    let red = frame.chunks_exact(3).filter(|c| c[0] > 120 && c[0] as u16 > c[1] as u16 * 2 && c[0] as u16 > c[2] as u16 * 2).count();
+    let red = frame.as_chunks::<3>().0.iter().filter(|c| c[0] > 120 && c[0] as u16 > c[1] as u16 * 2 && c[0] as u16 > c[2] as u16 * 2).count();
     assert!(red > 200, "only {red} reddish pixels, so the box did not render");
 }
 
@@ -257,7 +257,7 @@ fn moving_the_lookat_towards_plus_y_sweeps_the_subject_right() {
     // not in frame - which would make the comparison below meaningless.
     let centroid_x = |frame: &[u8], w: usize| -> Option<f64> {
         let (mut sum, mut n) = (0.0, 0usize);
-        for (i, px) in frame.chunks_exact(3).enumerate() {
+        for (i, px) in frame.as_chunks::<3>().0.iter().enumerate() {
             if px[0] > 120 && px[0] as u16 > px[1] as u16 * 2 && px[0] as u16 > px[2] as u16 * 2 {
                 sum += (i % w) as f64;
                 n += 1;

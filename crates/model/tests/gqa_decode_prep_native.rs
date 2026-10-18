@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The native `gqa_decode_prep` kernel (`kernels_cuda`, `cu/gqa_decode_prep.cu`)
-//! - the front half of a gated-attention decode step in one launch - against
+//! -- the front half of a gated-attention decode step in one launch - against
 //! the eight-kernel WGSL chain `gqa_mixer_decode_batched_attend` dispatches, on
 //! the same device from the same inputs.
 //!

@@ -35,7 +35,7 @@ pub fn decode_hwc(inv: &Invocation, name: &str) -> Result<(Vec<f32>, u32, u32, u
     let dim = |k: &str| b.meta.get(k).and_then(|v| v.as_u64()).ok_or_else(|| format!("'{name}' blob missing {k}"));
     let (w, h) = (dim("w")? as u32, dim("h")? as u32);
     let px = w as usize * h as usize;
-    let hwc: Vec<f32> = b.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+    let hwc: Vec<f32> = b.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
     if px == 0 || b.bytes.len() % 4 != 0 || !hwc.len().is_multiple_of(px) || hwc.is_empty() {
         return Err(format!("'{name}' payload ({} bytes) is not a whole number of {w}×{h} f32 planes", b.bytes.len()));
     }
@@ -101,7 +101,7 @@ pub fn decode_video(inv: &Invocation, name: &str) -> Result<Vec<(Vec<f32>, u32, 
             b.bytes.len()
         ));
     }
-    let all: Vec<f32> = b.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+    let all: Vec<f32> = b.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
     Ok(all.chunks_exact(per_frame).map(|chunk| (chunk.to_vec(), w, h)).collect())
 }
 

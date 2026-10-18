@@ -428,7 +428,7 @@ fn the_device_camera_is_the_host_camera() {
         let drad = isp.backward(1, &cam, &rgb, &up);
         let host = isp.gradient().to_vec();
         isp.clear_gradient();
-        g.write_f32(&io, &up.chunks_exact(3).flat_map(|u| [u[0], u[1], u[2], 0.25]).collect::<Vec<f32>>());
+        g.write_f32(&io, &up.as_chunks::<3>().0.iter().flat_map(|u| [u[0], u[1], u[2], 0.25]).collect::<Vec<f32>>());
         dev.backward(&g, Kernels::at(0), &mut isp, 1, &cam, &radiance, &io);
         let got = g.read(&io, px * 4);
         for p in 0..px {

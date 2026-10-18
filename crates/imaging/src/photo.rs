@@ -154,7 +154,7 @@ impl Photo {
     pub fn linear(&self) -> Vec<f32> {
         let m = self.to_rec709;
         let mut out = Vec::with_capacity(self.encoded.len());
-        for p in self.encoded.chunks_exact(3) {
+        for p in self.encoded.as_chunks::<3>().0 {
             let l = [self.transfer.decode(0, p[0]), self.transfer.decode(1, p[1]), self.transfer.decode(2, p[2])];
             match m {
                 None => out.extend_from_slice(&l),

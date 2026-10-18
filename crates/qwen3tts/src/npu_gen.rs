@@ -907,7 +907,7 @@ pub fn decode_with_session(sess: &mut CodecSession, codes: &[u32]) -> Result<Vec
         }
     }
     let wav_full = sess.run_codes(&cm).map_err(|e| e.to_string())?;
-    let spf = if tb > 0 { sess.out_len() / tb } else { 0 };
+    let spf = sess.out_len().checked_div(tb).unwrap_or(0);
     let real = (t * spf).min(wav_full.len());
     Ok(if real > 0 { wav_full[..real].to_vec() } else { wav_full })
 }

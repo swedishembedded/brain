@@ -118,7 +118,7 @@ fn run(g: &Gpu, ks: Kernels, k: f32) -> Outcome {
         .iter()
         .map(|c| {
             ren.render(g, &gs, c, &o);
-            ren.read_rgba(g, w, h).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()
+            ren.read_rgba(g, w, h).as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()
         })
         .collect();
 
@@ -148,7 +148,7 @@ fn run(g: &Gpu, ks: Kernels, k: f32) -> Outcome {
     let score = |ren: &mut Renderer, c: &Camera, want: &[f32]| -> (f64, f64) {
         ren.render(g, &fgs, c, &o);
         let got: Vec<f32> =
-            ren.read_rgba(g, w, h).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            ren.read_rgba(g, w, h).as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
         (psnr(&got, want), sharpness_ratio(&got, want, w as usize, h as usize))
     };
     let mut train = 0.0;

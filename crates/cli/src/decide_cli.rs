@@ -231,7 +231,7 @@ fn train_verb(args: &mut crate::args::Args) -> i32 {
 
     let steps = run.steps;
     let mut log = |step: usize, loss: f32| {
-        if step % 50 == 0 || step + 1 == steps {
+        if step.is_multiple_of(50) || step + 1 == steps {
             eprintln!("step {:>5}/{steps}  loss {loss:.4}", step + 1);
         }
     };

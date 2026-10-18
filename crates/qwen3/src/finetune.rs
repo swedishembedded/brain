@@ -175,8 +175,8 @@ fn plan_by_bytes(cfg: &QwenConfig, b: u32, t: u32, dt: Dtype, stages: usize) -> 
     // with stages 0..=s; cut[s][i] is where stage s then starts.
     let mut best = vec![vec![u64::MAX; layers + 1]; stages];
     let mut cut = vec![vec![0usize; layers + 1]; stages];
-    for i in 0..=layers {
-        best[0][i] = bytes(&stage(0, i, 0));
+    for (i, first_stage_best) in best[0].iter_mut().enumerate() {
+        *first_stage_best = bytes(&stage(0, i, 0));
     }
     for s in 1..stages {
         for i in 0..=layers {
@@ -255,10 +255,11 @@ pub fn plan_lora_layout(
     Err(format!("qwen3 finetune does not fit {cards} card(s): {}", refused.join("; ")))
 }
 
-/// A trained LoRA model: on one card, or split across several as a pipeline.
+/// A trained LoRA model: on one card, or split across several as a pipeline. Both arms are boxed:
+/// each is a whole on-device model, and the enum would be as large as the bigger one.
 pub enum Trained {
-    Single(Qwen),
-    Pipeline(PipelineModel<Qwen>),
+    Single(Box<Qwen>),
+    Pipeline(Box<PipelineModel<Qwen>>),
 }
 
 impl Trained {
@@ -273,8 +274,8 @@ impl Trained {
         training: Option<checkpoint::st::TrainingProvenance>,
     ) -> std::io::Result<()> {
         match self {
-            Trained::Single(m) => crate::lora::save_adapter_with_lineage(path, m, card_id, base_id, dataset_id, training),
-            Trained::Pipeline(m) => crate::lora::save_adapter_with_lineage(path, m, card_id, base_id, dataset_id, training),
+            Trained::Single(m) => crate::lora::save_adapter_with_lineage(path, &**m, card_id, base_id, dataset_id, training),
+            Trained::Pipeline(m) => crate::lora::save_adapter_with_lineage(path, &**m, card_id, base_id, dataset_id, training),
         }
     }
 
@@ -391,8 +392,8 @@ impl Trained {
     /// The names of the trained parameters.
     pub fn param_names(&self) -> Vec<String> {
         match self {
-            Trained::Single(m) => model::Model::param_names(m),
-            Trained::Pipeline(m) => model::Model::param_names(m),
+            Trained::Single(m) => model::Model::param_names(&**m),
+            Trained::Pipeline(m) => model::Model::param_names(&**m),
         }
     }
 
@@ -400,7 +401,7 @@ impl Trained {
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         match self {
             Trained::Single(m) => m.read_weight(name),
-            Trained::Pipeline(m) => model::Model::read_weight(m, name),
+            Trained::Pipeline(m) => model::Model::read_weight(&**m, name),
         }
     }
 
@@ -408,7 +409,7 @@ impl Trained {
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
         match self {
             Trained::Single(m) => m.read_grad(name),
-            Trained::Pipeline(m) => model::Model::read_grad(m, name),
+            Trained::Pipeline(m) => model::Model::read_grad(&**m, name),
         }
     }
 
@@ -424,21 +425,21 @@ impl Trained {
 /// was. The layout is printed, so an automatic split is never a silent one.
 pub fn build_trainer(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, dt: Dtype) -> std::io::Result<Trained> {
     if gpu_core::devices::current_gpu().is_some() {
-        return build_for_training(cfg, opts, init, dt).map(Trained::Single);
+        return build_for_training(cfg, opts, init, dt).map(|m| Trained::Single(Box::new(m)));
     }
     let place = |needs: &[Need]| gpu_core::devices::place(needs).map(|homes| homes.parts().iter().map(|(_, home)| *home).collect());
     let shards = plan_lora_layout(&cfg, opts.batch_size, opts.block_size, dt, gpu_core::devices::gpus().len(), place).map_err(std::io::Error::other)?;
     if let [whole] = shards.as_slice() {
         if whole.gpu_index == Shard::ANY_GPU {
-            return build_for_training(cfg, opts, init, dt).map(Trained::Single);
+            return build_for_training(cfg, opts, init, dt).map(|m| Trained::Single(Box::new(m)));
         }
         let built = gpu_core::devices::with_gpu(whole.gpu_index as u32, || build_for_training(cfg, opts, init, dt));
-        return built.map_err(std::io::Error::other)?.map(Trained::Single);
+        return built.map_err(std::io::Error::other)?.map(|m| Trained::Single(Box::new(m)));
     }
     let layout: Vec<String> = shards.iter().map(|sh| format!("gpu{} layers {}..{}", sh.gpu_index, sh.start, sh.end)).collect();
     println!("qwen3 finetune: pipeline of {} stages: {}", shards.len(), layout.join(", "));
     let pipe = Pipeline::<Qwen>::with_shards_dt(cfg.clone(), opts.batch_size, opts.block_size, init, shards, dt);
-    Ok(Trained::Pipeline(PipelineModel::new(pipe, cfg)))
+    Ok(Trained::Pipeline(Box::new(PipelineModel::new(pipe, cfg))))
 }
 
 /// The decoder of a multimodal fine-tune, built over `base` for `block`-token
@@ -448,7 +449,7 @@ pub fn build_trainer(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, d
 pub fn build_decoder_trainer(cfg: QwenConfig, base: Box<dyn TensorSource + '_>, dt: Dtype, block: u32, seed: u64) -> std::io::Result<Trained> {
     if cfg.lora.is_none() {
         let shard = crate::model::Shard::whole(cfg.n_layers as usize);
-        return Ok(Trained::Single(Qwen::new_shard(cfg, 1, block, &*base, true, shard)));
+        return Ok(Trained::Single(Box::new(Qwen::new_shard(cfg, 1, block, &*base, true, shard))));
     }
     let init = LoraInit::fresh(&cfg, base, seed);
     let opts = FitOpts { batch_size: 1, block_size: block, ..FitOpts::default() };
@@ -683,12 +684,12 @@ pub fn finetune_lora_controlled(
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     match m? {
         Trained::Single(m) => {
-            let (report, m) = model::fit_controlled(m, model::causal_lm::<Qwen>(train, val, bcfg, itos), opts, None, control)?;
-            Ok((report, Trained::Single(m)))
+            let (report, m) = model::fit_controlled(*m, model::causal_lm::<Qwen>(train, val, bcfg, itos), opts, None, control)?;
+            Ok((report, Trained::Single(Box::new(m))))
         }
         Trained::Pipeline(m) => {
-            let (report, m) = model::fit_controlled(m, model::causal_lm::<PipelineModel<Qwen>>(train, val, bcfg, itos), opts, None, control)?;
-            Ok((report, Trained::Pipeline(m)))
+            let (report, m) = model::fit_controlled(*m, model::causal_lm::<PipelineModel<Qwen>>(train, val, bcfg, itos), opts, None, control)?;
+            Ok((report, Trained::Pipeline(Box::new(m))))
         }
     }
 }

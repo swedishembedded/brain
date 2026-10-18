@@ -46,7 +46,7 @@ use brain_testutil::read_f32;
             brain_testutil::skip("Moondream checkpoint not present");
             return;
         };
-        let tokens: Vec<u32> = tok_raw.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
+        let tokens: Vec<u32> = tok_raw.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
         let cfg = MoondreamConfig::preview();
 
         // Stream the shards; keep only the first N (dense) blocks + tok/post_ln/lm_head.

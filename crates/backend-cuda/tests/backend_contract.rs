@@ -417,7 +417,7 @@ fn a_handle_waits_for_another_handle_s_work_on_a_buffer_it_consumes() {
     // device - which would make the producer finish before its submit returns
     // and hide exactly the overtaking this test is about.
     producer.submit(&[], &steps);
-    consumer.submit(&[], &[copy.clone()]);
+    consumer.submit(&[], std::slice::from_ref(&copy));
     producer.poll_wait();
     consumer.poll_wait();
     let warm = producer.read(&x, 1)[0];

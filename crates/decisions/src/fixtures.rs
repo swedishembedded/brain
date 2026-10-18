@@ -59,11 +59,9 @@ fn decide_tokenizer_json() -> String {
     for (i, t) in ["[PAD]", "[UNK]", "[CLS]", "[SEP]"].iter().enumerate() {
         vocab.insert((*t).to_string(), serde_json::json!(i));
     }
-    let mut next = 4u32;
-    for c in "abcdefghijklmnopqrstuvwxyz0123456789".chars() {
+    for (next, c) in (4u32..).zip("abcdefghijklmnopqrstuvwxyz0123456789".chars()) {
         vocab.insert(c.to_string(), serde_json::json!(next));
         vocab.insert(format!("##{c}"), serde_json::json!(next + 36));
-        next += 1;
     }
     serde_json::json!({
         "version": "1.0",

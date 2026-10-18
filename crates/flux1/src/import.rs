@@ -115,7 +115,8 @@ fn diffusers_to_bfl(name: &str) -> Option<String> {
                     "ff_context.net.2" => format!("double_blocks.{n}.txt_mlp.2"),
                     _ => return None,
                 }
-            } else if let Some(rest) = other.strip_prefix("single_transformer_blocks.") {
+            } else {
+                let rest = other.strip_prefix("single_transformer_blocks.")?;
                 let (n, leaf) = rest.split_once('.')?;
                 match leaf {
                     "norm.linear" => format!("single_blocks.{n}.modulation.lin"),
@@ -124,8 +125,6 @@ fn diffusers_to_bfl(name: &str) -> Option<String> {
                     "attn.norm_k" => format!("single_blocks.{n}.norm.key_norm.scale#"),
                     _ => return None,
                 }
-            } else {
-                return None;
             }
         }
     };

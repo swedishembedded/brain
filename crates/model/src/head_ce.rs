@@ -243,7 +243,7 @@ impl HeadCe {
         if (head.n(), head.k()) != (vocab, d_model) {
             return Err(format!("HeadCe: the head is [{}, {}], expected [{vocab}, {d_model}]", head.n(), head.k()));
         }
-        if matches!(head, Weight::NF4 { .. }) && d_model % 32 != 0 {
+        if matches!(head, Weight::NF4 { .. }) && !d_model.is_multiple_of(32) {
             return Err(format!("HeadCe: d_model {d_model} must be a multiple of the NF4 quantisation group (32)"));
         }
         if cfg.rows_per_chunk == 0 {
@@ -325,7 +325,7 @@ impl HeadCe {
     /// The `(first token, tokens)` chunks covering `n` tokens.
     #[must_use]
     pub fn chunks(&self, n: u32) -> Vec<(u32, u32)> {
-        assert!(n <= self.rows || self.rows % 64 == 0, "HeadCe: {n} tokens in chunks of {} rows - chunk starts must be multiples of 64 rows", self.rows);
+        assert!(n <= self.rows || self.rows.is_multiple_of(64), "HeadCe: {n} tokens in chunks of {} rows - chunk starts must be multiples of 64 rows", self.rows);
         (0..n).step_by(self.rows as usize).map(|r0| (r0, self.rows.min(n - r0))).collect()
     }
 

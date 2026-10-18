@@ -220,8 +220,8 @@ pub fn silu(x: f32) -> f32 {
     x / (1.0 + (-x).exp())
 }
 
-/// Classifier-free guidance: `unconditional + (conditional - unconditional)
-/// * scale`, element-wise. Scale 1 is the conditional branch alone, 0 the
+/// Classifier-free guidance: `unconditional + (conditional - unconditional) *
+/// scale`, element-wise. Scale 1 is the conditional branch alone, 0 the
 /// unconditional one; the diffusion samplers apply it to the predicted
 /// velocity or noise, the autoregressive ones to the logits.
 pub fn cfg_blend(conditional: &[f32], unconditional: &[f32], scale: f32) -> Vec<f32> {

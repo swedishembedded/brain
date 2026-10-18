@@ -827,7 +827,7 @@ mod tests {
     /// how the bug hid until a real CPU dispatch hit it).
     #[test]
     fn matmul_reg3_reuses_the_shared_slot_not_a_second_registration() {
-        assert!(super::K_MATMUL_REG3 < vae::blocks::NEXT_SLOT, "K_MATMUL_REG3 = {} must be inside the shared vae::blocks prefix (< {})", super::K_MATMUL_REG3, vae::blocks::NEXT_SLOT);
+        const { assert!(super::K_MATMUL_REG3 < vae::blocks::NEXT_SLOT, "K_MATMUL_REG3 must be inside the shared vae::blocks prefix (< NEXT_SLOT)") };
         assert_eq!(super::K_MATMUL_REG3, vae::blocks::MATMUL_REG3_SLOT);
         assert_eq!(super::KERNELS.iter().filter(|(n, _)| *n == "matmul_reg3").count(), 1, "matmul_reg3 must appear exactly once in KERNELS");
     }

@@ -207,7 +207,7 @@ impl EnvDevice {
         gpu.submit(&[], &[g, a]);
         let part = gpu.read(&self.partial, 16 * groups);
         let mut grad = vec![0.0f64; entries];
-        for (w, chunk) in part.chunks_exact(16).enumerate() {
+        for (w, chunk) in part.as_chunks::<16>().0.iter().enumerate() {
             let base = (w / blocks) * 16;
             for (j, v) in chunk.iter().enumerate() {
                 if base + j < entries {

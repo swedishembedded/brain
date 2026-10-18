@@ -299,11 +299,14 @@ impl Outcome {
 pub const ADAPTER_FILE: &str = "adapter.safetensors";
 pub const ALIGNER_FILE: &str = "aligner.safetensors";
 
+/// One dataset example before its images are decoded: image paths and the conversation.
+pub type PathExample = (Vec<PathBuf>, Vec<Turn>);
+
 /// A dataset's examples: each line of `train.jsonl` holds an `image` (a
 /// path, relative to `dir`) or `images` (a list of them, in the order the
 /// messages place them) and `messages` (`role` and `content`), ending in
 /// the assistant reply to learn.
-pub fn read_dataset(dir: &Path) -> Result<Vec<(Vec<PathBuf>, Vec<Turn>)>, String> {
+pub fn read_dataset(dir: &Path) -> Result<Vec<PathExample>, String> {
     let file = dir.join("train.jsonl");
     let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut out = Vec::new();
@@ -403,8 +406,11 @@ pub fn finetune(dir: &Path, dataset: &Path, opts: &Options, progress: &mut dyn F
     run(frontend, &rd, crate::import::ALIGNER_PREFIX, examples, opts, progress)
 }
 
+/// One dataset example with its images decoded.
+pub type LoadedExample = (Vec<Rgb8>, Vec<Turn>);
+
 /// [`read_dataset`] with every image decoded.
-pub fn load_examples(dataset: &Path) -> Result<Vec<(Vec<Rgb8>, Vec<Turn>)>, String> {
+pub fn load_examples(dataset: &Path) -> Result<Vec<LoadedExample>, String> {
     read_dataset(dataset)?
         .into_iter()
         .map(|(paths, turns)| {

@@ -142,7 +142,7 @@ fn the_forward_is_the_oracle_through_every_lens() {
                     let tol = if c == 0 { 2e-3 } else { 5e-4 };
                     assert!(dv < tol, "{name} aa {aa}: aux channel {c} differs by {dv} at pixel {at}");
                 }
-                assert!(img.chunks_exact(4).filter(|p| p[3] > 0.05).count() > 120, "{name}: the scene barely covers the frame");
+                assert!(img.as_chunks::<4>().0.iter().filter(|p| p[3] > 0.05).count() > 120, "{name}: the scene barely covers the frame");
             }
         }
     }
@@ -159,7 +159,7 @@ fn small_distant_gaussians_render_as_their_ewa_splats() {
     ren.render(&g, &gs, &cam, &o);
     let ewa = ren.read_rgba(&g, cam.width, cam.height);
     let (ray, _) = device_render(&g, &s, &vec![0.0; s.len()], &cam, &o);
-    let rgb = |v: &[f32]| v.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect::<Vec<f32>>();
+    let rgb = |v: &[f32]| v.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect::<Vec<f32>>();
     let psnr = splat::quality::psnr(&rgb(&ewa), &rgb(&ray));
     assert!(psnr > 38.0, "EWA and ray evaluation of small distant gaussians differ: {psnr:.1} dB");
 }
@@ -217,7 +217,7 @@ impl Probe {
 /// A probe for what `s` renders from `cam`.
 fn probe_for(g: &Gpu, s: &Splats, filt: &[f32], cam: &Camera, o: &RenderOpts, seed: u64) -> Probe {
     let (img, _) = device_render(g, s, filt, cam, o);
-    Probe::new(&img.chunks_exact(4).map(|p| p[3]).collect::<Vec<f32>>(), seed)
+    Probe::new(&img.as_chunks::<4>().0.iter().map(|p| p[3]).collect::<Vec<f32>>(), seed)
 }
 
 struct Analytic {
@@ -358,7 +358,7 @@ fn moved(c: &Camera, omega: [f64; 3], tau: [f64; 3]) -> Camera {
         })
     });
     let mut out = *c;
-    for (row, dst) in c.c2w.chunks_exact(4).zip(out.c2w.chunks_exact_mut(4)).take(3) {
+    for (row, dst) in c.c2w.as_chunks::<4>().0.iter().zip(out.c2w.as_chunks_mut::<4>().0.iter_mut()).take(3) {
         let rot = |col: &dyn Fn(usize) -> f64| (0..3).map(|t| row[t] as f64 * col(t)).sum::<f64>();
         for (j, d) in dst.iter_mut().take(3).enumerate() {
             *d = rot(&|t| r[t][j]) as f32;
@@ -421,7 +421,7 @@ fn camera_gradients_match_central_differences() {
 fn jumps(frames: &[Vec<f32>]) -> Vec<usize> {
     frames
         .windows(2)
-        .map(|f| f[0].chunks_exact(4).zip(f[1].chunks_exact(4)).filter(|(a, b)| (0..3).any(|k| (a[k] - b[k]).abs() > 0.2)).count())
+        .map(|f| f[0].as_chunks::<4>().0.iter().zip(f[1].as_chunks::<4>().0.iter()).filter(|(a, b)| (0..3).any(|k| (a[k] - b[k]).abs() > 0.2)).count())
         .collect()
 }
 
@@ -483,7 +483,7 @@ fn gradients_follow_each_pixels_order() {
     // the order must matter here, or this is the other gradient test again
     let (exact, _) = splat::reference::render_ray(&s, &[], &cam, &o);
     let (by_centre, _) = splat::reference::render_ray_ordered(&s, &[], &cam, &o, splat::reference::RayOrder::Mean);
-    let reordered = exact.chunks_exact(4).zip(by_centre.chunks_exact(4)).filter(|(a, b)| (0..3).any(|k| (a[k] - b[k]).abs() > 0.05)).count();
+    let reordered = exact.as_chunks::<4>().0.iter().zip(by_centre.as_chunks::<4>().0.iter()).filter(|(a, b)| (0..3).any(|k| (a[k] - b[k]).abs() > 0.05)).count();
     assert!(reordered > 60, "only {reordered} pixels depend on the per-pixel order");
     let filt = vec![0.0; s.len()];
     let probe = probe_for(&g, &s, &filt, &cam, &o, 0x0dd);
@@ -558,7 +558,7 @@ fn the_tile_backward_is_the_per_pixel_backward() {
     let cam = Camera { lens: Lens::Fisheye { k: [0.03, -0.01, 0.002, 0.0] }, fx: cam.fx * 0.8, fy: cam.fy * 0.8, ..cam };
     // spread across the fisheye's whole field
     let mut s = scene(2500, 0x7e57, 3.0, 0.3);
-    for m in s.means.chunks_exact_mut(3) {
+    for m in s.means.as_chunks_mut::<3>().0 {
         m[0] *= 2.5;
         m[1] *= 2.5;
     }
@@ -570,7 +570,7 @@ fn the_tile_backward_is_the_per_pixel_backward() {
     let mut ren = Renderer::new(&g, Kernels::at(0), s.len(), cam.width, cam.height, 0).growable();
     let stats = ren.render(&g, &GpuSplats::upload(&g, &s), &cam, &o);
     let tiles = (cam.width.div_ceil(16) * cam.height.div_ceil(16)) as usize;
-    let alpha: Vec<f32> = ren.read_rgba(&g, cam.width, cam.height).chunks_exact(4).map(|p| p[3]).collect();
+    let alpha: Vec<f32> = ren.read_rgba(&g, cam.width, cam.height).as_chunks::<4>().0.iter().map(|p| p[3]).collect();
     // a walk stops before transmittance reaches 1e-4, so its pixel ends
     // within a pair or so of opaque
     let saturated = alpha.iter().filter(|a| **a > 0.99).count();

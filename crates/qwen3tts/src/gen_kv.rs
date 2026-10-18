@@ -737,9 +737,8 @@ mod tests {
                     hkv * dd
                 } else if n.ends_with("attn.wo.weight") {
                     dd * hq
-                } else if n.ends_with("mlp.down.weight") {
-                    dd * ff
                 } else {
+                    // the MLP's gate/up and down projections, all `d_model x d_ff`
                     ff * dd
                 }
             };

@@ -113,12 +113,15 @@ fn req_from(inv: &Invocation) -> Result<Req, String> {
 
 // ===================== the shared work =====================
 
+/// What a built pipeline is keyed on: root, size, steps and precision label.
+type PipelineKey = (String, u32, u32, &'static str);
+
 /// The pipelines on one device, keyed by `(variant, h, w)` - the single
 /// implementation of `text2image`, shared by [`Flux1Provider`] and the
 /// residency adapter (`crates/catalog/src/resident_flux1.rs`).
 pub struct Session {
     root: String,
-    built: Mutex<std::collections::HashMap<(String, u32, u32, &'static str), Flux1>>,
+    built: Mutex<std::collections::HashMap<PipelineKey, Flux1>>,
 }
 
 impl Session {

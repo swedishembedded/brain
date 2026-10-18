@@ -63,7 +63,7 @@ fn parts() -> GenParts {
 fn example() -> GenPrepared {
     let codes = vec![3u32, 7, 7, 1, 9, 4];
     let mut tokens = vec![0u32, 5, 9, 2]; // bos, the prompt, <begin_of_image>
-    tokens.extend(std::iter::repeat(5).take(POSITIONS - 1));
+    tokens.extend(std::iter::repeat_n(5, POSITIONS - 1));
     GenPrepared { tokens, codes }
 }
 
@@ -202,7 +202,7 @@ fn a_two_stage_decoder_gives_every_generation_part_the_same_loss_and_gradient() 
     assert_eq!(shards.len(), 2);
     let d_model = cfg.d_model as usize;
     let pipe = model::Pipeline::<qwen3::Qwen>::with_shards_dt(cfg.clone(), 1, BLOCK, &init, shards, Dtype::F32);
-    let staged = qwen3::finetune::Trained::Pipeline(model::PipelineModel::new(pipe, cfg));
+    let staged = qwen3::finetune::Trained::Pipeline(Box::new(model::PipelineModel::new(pipe, cfg)));
     let (got_loss, got) = GenTrainer::with_decoder(staged, d_model, BLOCK, parts()).unwrap().loss_and_grads(&p);
 
     assert!((got_loss - loss).abs() < 1e-4 * loss.abs().max(1.0), "loss {got_loss} vs {loss}");

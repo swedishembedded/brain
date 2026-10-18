@@ -18,7 +18,7 @@
 //!    tiny fixture. Built twice from the SAME weight sources (the vision
 //!    `HashMap` is borrowed, not moved, so both builds read identical
 //!    tensors; the decoder `WeightReader` is reopened for the second build
-//!    - a second stream of the same file, not a second import path),
+//!    -- a second stream of the same file, not a second import path),
 //!    generating the SAME `n_new` tokens from the SAME prompt.
 //! 2. **A real VmHWM for the constant this phase's own doc flagged as
 //!    stale** (`crates/catalog/src/resident_deepseekocr.rs`'s

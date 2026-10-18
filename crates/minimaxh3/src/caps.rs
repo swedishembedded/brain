@@ -1124,7 +1124,7 @@ mod tests {
 
     /// The real Qwen3-VL text encoder, loaded from a real `BRAIN_MINIMAXH3_DIR`
     /// checkout, must actually produce real, finite, non-trivial conditioning
-    /// - not the stub, and [`text_conditioning`] must pick the real path over
+    /// -- not the stub, and [`text_conditioning`] must pick the real path over
     /// the stub automatically once weights exist. This is a genuinely large
     /// load (tens of GB); skips cleanly, like every other real-weight test in
     /// this crate, when the checkout is not present.

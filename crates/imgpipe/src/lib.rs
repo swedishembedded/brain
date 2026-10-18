@@ -449,7 +449,7 @@ fn blob_wh(b: &Blob) -> Option<(u32, u32)> {
 }
 
 fn as_f32(b: &Blob) -> Vec<f32> {
-    b.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    b.bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
 fn decode_plane(b: &Blob, w: u32, h: u32) -> Result<Vec<f32>, String> {

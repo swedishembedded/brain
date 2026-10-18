@@ -121,8 +121,7 @@ fn janus_pro_matches_the_reference() {
         m.decoder.release_table(&mut table);
         branch_logits.push(logits);
     }
-    for t in 0..sampled.len() {
-        let (cond, uncond) = (&branch_logits[0][t], &branch_logits[1][t]);
+    for (t, (cond, uncond)) in branch_logits[0].iter().zip(&branch_logits[1]).enumerate().take(sampled.len()) {
         r.check(&format!("logits_cond[{t}]"), cond, &step_rows("logits_cond", t, v));
         r.check(&format!("logits_uncond[{t}]"), uncond, &step_rows("logits_uncond", t, v));
         r.check(&format!("logits_cfg[{t}]"), &model::hostmath::cfg_blend(cond, uncond, weight), &step_rows("logits_cfg", t, v));

@@ -197,6 +197,6 @@ fn random_shapes_are_byte_identical() {
         let a = values(n, u64::from(r.next_u32()), 1.0);
         let b = values(n, u64::from(r.next_u32()), 2.0);
         let w = values(d as usize, u64::from(r.next_u32()), 1.0);
-        check(&gpu, rows, d, r.next_u32() % 2 == 0, &a, &b, &w, "seeded");
+        check(&gpu, rows, d, r.next_u32().is_multiple_of(2), &a, &b, &w, "seeded");
     }
 }

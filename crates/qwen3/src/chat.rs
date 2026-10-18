@@ -416,11 +416,10 @@ fn resolve_tools(inv: &Invocation) -> Result<(ToolChoice, Vec<String>), String> 
     let mut tools = parse_tools(inv.get_str("tools").as_deref())?;
     match &tool_choice {
         ToolChoice::None => tools.clear(),
-        ToolChoice::Named(name) => {
-            if !tool_schema_names(&tools).iter().any(|n| n == name) {
+        ToolChoice::Named(name)
+            if !tool_schema_names(&tools).iter().any(|n| n == name) => {
                 return Err(format!("qwen: tool_choice names function '{name}' which is not present in tools"));
             }
-        }
         _ => {}
     }
     Ok((tool_choice, tools))
@@ -433,7 +432,7 @@ pub enum ChatFormat {
     Qwen,
     /// The checkpoint's own Jinja chat template (R1's `<｜User｜>` turns,
     /// coder-instruct's `### Instruction:`, ...).
-    Template(data::chat_template::ChatTemplate),
+    Template(Box<data::chat_template::ChatTemplate>),
     /// No chat template: a base model, which accepts only a raw prompt.
     None,
 }
@@ -445,7 +444,7 @@ impl ChatFormat {
     /// else none.
     pub fn for_checkpoint(dir: Option<&std::path::Path>, tok: &QwenBpe) -> ChatFormat {
         match dir.map(data::chat_template::ChatTemplate::from_model_dir) {
-            Some(Ok(t)) if !t.source().contains("<|im_start|>") => ChatFormat::Template(t),
+            Some(Ok(t)) if !t.source().contains("<|im_start|>") => ChatFormat::Template(Box::new(t)),
             Some(Ok(_)) => ChatFormat::Qwen,
             _ if tok.special_id("<|im_start|>").is_some() => ChatFormat::Qwen,
             _ => ChatFormat::None,
@@ -470,7 +469,7 @@ impl ChatFormat {
 pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<RenderedPrompt, String> {
     let template = match format {
         ChatFormat::Qwen => return render_prompt(inv),
-        ChatFormat::Template(t) => Some(t),
+        ChatFormat::Template(t) => Some(t.as_ref()),
         ChatFormat::None => None,
     };
     let (tool_choice, tools) = resolve_tools(inv)?;

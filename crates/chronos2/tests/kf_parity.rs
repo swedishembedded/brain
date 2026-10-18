@@ -15,7 +15,7 @@ use brain_testutil::testdata_path;
 
 fn read_f32(p: &Path) -> Vec<f32> {
     std::fs::read(p).unwrap_or_else(|e| panic!("read {p:?}: {e}"))
-        .chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+        .as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();

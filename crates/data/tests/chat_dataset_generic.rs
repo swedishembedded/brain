@@ -110,7 +110,7 @@ fn a_preference_pair_keeps_the_think_block_its_candidates_open_with_when_asked()
         return;
     };
     let turn = |answer: &str| ChatSample {
-        messages: vec![ChatMessage::user("Shall we wait?"), ChatMessage::assistant(&format!("<think>\n\n</think>\n\n{answer}"), true)],
+        messages: vec![ChatMessage::user("Shall we wait?"), ChatMessage::assistant(format!("<think>\n\n</think>\n\n{answer}"), true)],
         tools: Vec::new(),
         rendered: None,
     };

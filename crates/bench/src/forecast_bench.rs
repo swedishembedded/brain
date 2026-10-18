@@ -123,7 +123,7 @@ impl Benchmark for ForecastBench {
 
         let bytes = std::fs::read(dir.join(DATASET))?;
         let vals: Vec<f32> = bytes
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect();
 

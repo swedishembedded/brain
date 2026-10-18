@@ -500,7 +500,7 @@ impl TargetView {
         };
         let normals = self.normals.as_ref().map(|n| {
             let mut m = down(n, 3);
-            for v in m.chunks_exact_mut(3) {
+            for v in m.as_chunks_mut::<3>().0 {
                 let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
                 if l > 1e-6 {
                     v.iter_mut().for_each(|c| *c /= l);
@@ -716,7 +716,7 @@ impl EnvFit {
     fn new(gpu: &Gpu, degree: u32, targets: &[TargetView]) -> EnvFit {
         let (mut sum, mut n) = ([0.0f64; 3], 0usize);
         for t in targets {
-            for p in t.rgb.chunks_exact(3) {
+            for p in t.rgb.as_chunks::<3>().0 {
                 for c in 0..3 {
                     sum[c] += p[c] as f64;
                 }
@@ -1428,8 +1428,8 @@ impl<'a> Fit<'a> {
             unexplained += u;
             total += a;
             let edges = level.edges.get(vi).cloned().unwrap_or_else(|| vec![0.0; (cam.width * cam.height) as usize]);
-            let alpha: Vec<f32> = rgba.chunks_exact(4).map(|p| p[3]).collect();
-            let rendered: Vec<f32> = aux.chunks_exact(5).map(|a| a[0]).collect();
+            let alpha: Vec<f32> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+            let rendered: Vec<f32> = aux.as_chunks::<5>().0.iter().map(|a| a[0]).collect();
             let geom = t.depth.as_ref().map(|prior| density::range_residual(&rendered, &alpha, prior));
             if cfg.carve {
                 // what this view measured: its prior where confident, else the
@@ -1463,7 +1463,7 @@ impl<'a> Fit<'a> {
             let credit = gpu.read(&scene.grads.d_colors, 3 * n);
             // a gaussian a view composited half a pixel's worth of has been
             // seen by it
-            seen.push(credit.chunks_exact(3).map(|c| c[0] > 0.5).collect());
+            seen.push(credit.as_chunks::<3>().0.iter().map(|c| c[0] > 0.5).collect());
             ev.add_view(&credit);
         }
         ev.absgrad = absgrad.to_vec();

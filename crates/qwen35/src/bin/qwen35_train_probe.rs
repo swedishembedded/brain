@@ -276,7 +276,7 @@ fn main() {
         if timed {
             // Dispatches by kernel (the launch census): what a step issues, not what it costs.
             let mut census: Vec<(String, u64)> = counters.by_kernel.iter().map(|(k, v)| (k.clone(), v.calls)).chain(counters.uncovered.iter().map(|(k, c)| (k.clone(), *c))).collect();
-            census.sort_by(|a, b| b.1.cmp(&a.1));
+            census.sort_by_key(|entry| std::cmp::Reverse(entry.1));
             for (name, calls) in census.iter().take(12) {
                 println!("CENSUS {calls:7} {name}");
             }

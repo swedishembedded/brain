@@ -374,7 +374,7 @@ impl sfm::matching::NearestNeighbours for DeviceMatcher<'_> {
         let step = g.dispatch(self.kernel, &[&ba, &bb, &out], &[na as u32, nb as u32], gpu_core::Dispatch::Workgroups(na.div_ceil(64) as u32));
         g.submit(&[], &[step]);
         g.read(&out, 3 * na)
-            .chunks_exact(3)
+            .as_chunks::<3>().0.iter()
             .map(|r| {
                 let j = r[0].to_bits();
                 (if j == u32::MAX { usize::MAX } else { j as usize }, r[1], r[2])

@@ -459,8 +459,9 @@ pub struct Reply {
 
 /// A loaded decision model of either architecture.
 pub enum Engine {
-    Decide(Decide),
-    /// Boxed: the Laya arm carries two whole on-device models.
+    /// Boxed with the Laya arm: both carry whole on-device models, and an unboxed one would make
+    /// every variant as large as it is.
+    Decide(Box<Decide>),
     Laya(Box<LayaEngine>),
 }
 

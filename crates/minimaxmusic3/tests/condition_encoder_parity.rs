@@ -21,7 +21,7 @@ const DUMPER: &str = "tools/goldens/minimaxmusic3_dump_reference.py";
 const COS_FLOOR: f64 = 0.9999;
 
 fn read_f32(p: &Path) -> Vec<f32> {
-    std::fs::read(p).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    std::fs::read(p).unwrap().as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
 fn check(tag: &str, cfg: &ConditionEncoderConfig, ident: &[(&str, i64)], weights_dir: &Path) {

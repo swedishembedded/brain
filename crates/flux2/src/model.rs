@@ -456,7 +456,7 @@ impl Flux2Model {
                 d.fold_into(&mut blk);
                 return LinA::plain(lin_n(label, &blk, n_out, k));
             }
-            let lo = delta.map(&up_lora);
+            let lo = delta.map(up_lora);
             if quantized(label) {
                 let tq = std::time::Instant::now();
                 let direct = src.try_i8_rect(store, stride, r0, n_out, c0, k);

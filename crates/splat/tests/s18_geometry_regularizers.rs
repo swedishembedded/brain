@@ -125,7 +125,7 @@ fn normal_terms_turn_discs_onto_the_surface() {
     let t = views(&g, &truth, w, h);
     let mut init = truth.clone();
     let mut rng = Lcg::new(random_seed());
-    for q in init.quats.chunks_exact_mut(4) {
+    for q in init.quats.as_chunks_mut::<4>().0 {
         for v in q.iter_mut() {
             *v = rng.signed();
         }

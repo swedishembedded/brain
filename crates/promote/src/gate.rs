@@ -151,8 +151,10 @@ pub struct GateReport {
 /// document study and the continual reader need the same null arm, and two
 /// coins with two seeds would make their control arms incomparable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum GatePolicy {
     /// The real [`gate`] decision decides.
+    #[default]
     Real,
     /// The null arm: the real gate still runs and is still recorded, but a
     /// coin decides what carries forward. A gated run that is not separated
@@ -161,11 +163,6 @@ pub enum GatePolicy {
     CoinFlip { seed: u64 },
 }
 
-impl Default for GatePolicy {
-    fn default() -> Self {
-        GatePolicy::Real
-    }
-}
 
 impl GatePolicy {
     /// Whether step `k`'s candidate carries forward. Deterministic for a

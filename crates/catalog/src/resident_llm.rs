@@ -122,7 +122,7 @@ pub(crate) fn est_vram(path: &str) -> MemCost {
 /// A linear's total element count IS `n*k`; the packed layout's `n*(k/32)*4`
 /// group-scale term equals `elems/32*4` for exactly the same reason,
 /// whenever `k` (every real head_dim/d_model/d_ff here) is a multiple of 32
-/// - true for every shipped Qwen3 config, so no separate `n`/`k` split is
+/// -- true for every shipped Qwen3 config, so no separate `n`/`k` split is
 /// needed to compute it.
 /// The device byte footprint of `cfg`'s weights at fp32, with the same 1.3x
 /// allowance [`est_vram`] gives a file - derived from the config, since the
@@ -432,7 +432,7 @@ impl Instance for GlmInstance {
 
 /// Every tunable that used to be its own `BRAIN_QWEN_*` env var, now the
 /// explicit config `brain serve`'s own `--qwen-*` flags build and pass down
-/// - model SELECTION (`BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER`, which
+/// -- model SELECTION (`BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER`, which
 /// checkpoint to serve at all) stays env-only, everything about HOW to
 /// serve it is a flag. `Default` reproduces every historical env-var
 /// default byte for byte, so a caller that builds `QwenServeConfig::
@@ -1370,7 +1370,7 @@ mod tests {
     }
 
     /// `ctx` at or under the checkpoint's own trained window is a pure no-op
-    /// - the overwhelming default (auto-sizing rarely needs to go past
+    /// -- the overwhelming default (auto-sizing rarely needs to go past
     /// native, an explicit `--qwen-ctx` usually doesn't either) must never
     /// perturb `rope_scaling` from `None`.
     #[test]
@@ -1609,11 +1609,13 @@ mod tests {
     #[test]
     fn the_preflight_constant_is_the_ceiling_no_device_can_exceed() {
         assert_eq!(WGPU_MAX_REPORTABLE_BINDING_BYTES, 2047 * (1 << 20));
-        assert!(
-            WGPU_MAX_REPORTABLE_BINDING_BYTES > 128 * (1 << 20),
-            "a real adapter may report as little as WebGPU's 128 MiB guarantee; this constant is \
-             deliberately NOT that number, so it must never be used to decide a real device fits"
-        );
+        const {
+            assert!(
+                WGPU_MAX_REPORTABLE_BINDING_BYTES > 128 * (1 << 20),
+                "a real adapter may report as little as WebGPU's 128 MiB guarantee; this constant is \
+                 deliberately NOT that number, so it must never be used to decide a real device fits"
+            );
+        }
     }
 
     /// The auto-sizer and the pre-flight guard must not disagree about what

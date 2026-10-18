@@ -64,7 +64,7 @@ fn read_f32(path: &PathBuf, name: &str) -> Option<(Vec<usize>, Vec<f32>)> {
     let off = t["data_offsets"].as_array()?;
     let (a, b) = (off[0].as_u64()? as usize, off[1].as_u64()? as usize);
     let bytes = &raw[8 + hdr_len + a..8 + hdr_len + b];
-    let vals: Vec<f32> = bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+    let vals: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
     Some((shape, vals))
 }
 

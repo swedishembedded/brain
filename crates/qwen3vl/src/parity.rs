@@ -42,7 +42,7 @@ use brain_testutil::read_f32;
             return;
         };
         std::env::set_var("BRAIN_DEVICE", "cpu");
-        let tokens: Vec<u32> = tok_raw.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
+        let tokens: Vec<u32> = tok_raw.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
 
         // Stream the shards one at a time, keeping only embed/norm + the first N blocks.
         let mut shards: Vec<_> = match std::fs::read_dir(DIR) {

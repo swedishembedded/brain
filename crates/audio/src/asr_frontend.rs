@@ -505,7 +505,7 @@ fn repo_path(rel: &str) -> String {
         let mut f = std::fs::File::open(path).unwrap_or_else(|_| panic!("missing golden {path}"));
         let mut buf = Vec::new();
         f.read_to_end(&mut buf).unwrap();
-        buf.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+        buf.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
     }
 
 

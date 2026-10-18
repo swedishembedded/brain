@@ -674,8 +674,7 @@ impl Int8ThinkerInstance {
         // New tokens are always plain text: continue the prompt's last
         // position diagonally, +1 on every axis per step.
         let mut mrope_pos = positions[positions.len() - 1].map(|p| p + 1);
-        let mut cache_row = n0;
-        for _ in 0..max_new_tokens {
+        for cache_row in (n0..).take(max_new_tokens as usize) {
             if eos_ids.contains(&next) {
                 break;
             }
@@ -687,7 +686,6 @@ impl Int8ThinkerInstance {
             let x_row = self.embed.row(&self.reader, next);
             let hidden = self.run_shards(&x_row, 1, &cos_tab, &sin_tab, Pass::Decode { cache: &cache, pos: cache_row });
             next = self.head_argmax(last, &hidden);
-            cache_row += 1;
             mrope_pos = mrope_pos.map(|p| p + 1);
         }
         out
@@ -869,14 +867,14 @@ impl Instance for Int8ThinkerInstance {
             "forward" => {
                 let blob = inv.get_blob("x").ok_or_else(|| format!("{MODEL}: missing 'x' blob"))?;
                 let n = blob.meta.get("n").and_then(|v| v.as_u64()).ok_or_else(|| format!("{MODEL}: 'x' blob missing meta.n"))? as u32;
-                let x_host: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+                let x_host: Vec<f32> = blob.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
                 let out = self.forward(&x_host, n);
                 let bytes: Vec<u8> = out.iter().flat_map(|f| f.to_le_bytes()).collect();
                 Ok(Outcome::new().blob("hidden", Blob::new(Media::Bytes, bytes).with_meta(serde_json::json!({"n": n}))))
             }
             "generate" => {
                 let blob = inv.get_blob("ids").ok_or_else(|| format!("{MODEL}: missing 'ids' blob"))?;
-                let prompt_ids: Vec<u32> = blob.bytes.chunks_exact(4).map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+                let prompt_ids: Vec<u32> = blob.bytes.as_chunks::<4>().0.iter().map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
                 let max_new_tokens = blob.meta.get("max_new_tokens").and_then(|v| v.as_u64()).ok_or_else(|| format!("{MODEL}: 'ids' blob missing meta.max_new_tokens"))? as u32;
                 let eos_ids: Vec<u32> = blob
                     .meta

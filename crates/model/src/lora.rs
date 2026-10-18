@@ -1302,7 +1302,7 @@ pub mod device_adapter {
         for base in names {
             let a = st.tensors.remove(&format!("{base}.lora_a")).expect("listed above");
             let b = st.tensors.remove(&format!("{base}.lora_b")).ok_or_else(|| invalid(adapter_path, format!("missing {base}.lora_b")))?;
-            if a.is_empty() || b.is_empty() || a.len() % r != 0 || b.len() % r != 0 {
+            if a.is_empty() || b.is_empty() || !a.len().is_multiple_of(r) || b.len() % r != 0 {
                 return Err(invalid(adapter_path, format!("{base}: factor sizes {} / {} are not whole rank-{rank} matrices", a.len(), b.len())));
             }
             sites.push(AdapterSite { base, a, b });

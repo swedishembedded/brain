@@ -31,7 +31,7 @@ pub fn hex(data: &[u8]) -> String {
     }
     msg.extend_from_slice(&bitlen.to_be_bytes());
 
-    for block in msg.chunks_exact(64) {
+    for block in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
         for (i, wi) in w.iter_mut().take(16).enumerate() {
             *wi = u32::from_be_bytes([block[i * 4], block[i * 4 + 1], block[i * 4 + 2], block[i * 4 + 3]]);

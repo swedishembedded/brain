@@ -177,7 +177,7 @@ fn decode_ref_audio(blob: &Blob) -> Result<(Vec<f32>, u32), String> {
         return Err(format!("cosyvoice synth: 'ref_audio' blob length {} is not a multiple of 4 (expected f32 little-endian PCM or a WAV container)", blob.bytes.len()));
     }
     let sample_rate = blob.meta.get("sample_rate").and_then(|v| v.as_u64()).unwrap_or(16000) as u32;
-    let samples: Vec<f32> = blob.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let samples: Vec<f32> = blob.bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     Ok((samples, sample_rate))
 }
 

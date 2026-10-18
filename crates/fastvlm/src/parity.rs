@@ -44,7 +44,7 @@ use brain_testutil::{read_f32, read_i32};
             brain_testutil::skip("FastVLM checkpoint not present");
             return;
         };
-        let tokens: Vec<u32> = tok_raw.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
+        let tokens: Vec<u32> = tok_raw.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
 
         // Build the decoder weight map from the checkpoint via the import mapping.
         let cfg = FastVlmConfig::fastvlm_0_5b().decoder;

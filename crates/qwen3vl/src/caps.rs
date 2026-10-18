@@ -564,11 +564,10 @@ pub fn parse_tool_request(inv: &Invocation) -> Result<(ToolChoice, Vec<String>),
     let mut tools = parse_tools(inv.get_str("tools").as_deref())?;
     match &tool_choice {
         ToolChoice::None => tools.clear(),
-        ToolChoice::Named(name) => {
-            if !tool_schema_names(&tools).iter().any(|n| n == name) {
+        ToolChoice::Named(name)
+            if !tool_schema_names(&tools).iter().any(|n| n == name) => {
                 return Err(format!("qwenvl generate: tool_choice names function '{name}' which is not present in tools"));
             }
-        }
         _ => {}
     }
     Ok((tool_choice, tools))

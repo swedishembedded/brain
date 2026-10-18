@@ -435,7 +435,7 @@ mod tests {
         write_decide(&d, 5);
         let gpu = gpu_core::testgpu::dev(decide::kern::PIPELINES);
         let weights = DecideWeights::read(d.to_str().unwrap(), None, 0).unwrap();
-        let engine = Engine::Decide(weights.build(gpu, decide::decide::Limits::default(), false));
+        let engine = Engine::Decide(Box::new(weights.build(gpu, decide::decide::Limits::default(), false)));
         (d, Session::new(Served::new("t/decide"), engine))
     }
 
@@ -537,14 +537,14 @@ mod tests {
     fn a_request_no_question_of_which_is_supported_is_unsupported_capability() {
         let (_d, mut s) = laya();
         s.served.question_types = vec![QuestionType::Choice];
-        let e = s.run(&call(r#"[{"id": "u", "type": "noul", "instruction": "x"}]"#)).err().expect("must fail");
+        let e = s.run(&call(r#"[{"id": "u", "type": "noul", "instruction": "x"}]"#)).expect_err("must fail");
         assert_eq!(class_of(&e), FailureClass::UnsupportedCapability, "{e}");
     }
 
     #[test]
     fn a_request_outside_the_published_limits_is_an_invalid_request_naming_the_question() {
         let (_d, mut s) = laya();
-        let e = s.run(&call(r#"[{"id": "rate", "type": "score", "instruction": "x", "options": ["only"]}]"#)).err().expect("must fail");
+        let e = s.run(&call(r#"[{"id": "rate", "type": "score", "instruction": "x", "options": ["only"]}]"#)).expect_err("must fail");
         assert_eq!(class_of(&e), FailureClass::InvalidRequest);
         assert!(e.contains("rate"), "{e}");
     }
@@ -554,7 +554,7 @@ mod tests {
         for (_d, mut s) in [laya(), decide_model()] {
             let long_ago = Instant::now() - Duration::from_secs(10);
             let inv = call(THREE).set("deadline_ms", json!(1));
-            let e = s.run_started(&inv, long_ago).err().expect("must time out");
+            let e = s.run_started(&inv, long_ago).expect_err("must time out");
             assert_eq!(class_of(&e), FailureClass::Timeout, "{e}");
         }
     }

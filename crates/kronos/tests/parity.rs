@@ -43,10 +43,10 @@ use std::path::Path;
 use brain_testutil::testdata_path;
 
 fn read_f32(p: &Path) -> Vec<f32> {
-    std::fs::read(p).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    std::fs::read(p).unwrap().as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 fn read_u32(p: &Path) -> Vec<u32> {
-    std::fs::read(p).unwrap().chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    std::fs::read(p).unwrap().as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let d: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();

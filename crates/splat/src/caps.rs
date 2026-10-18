@@ -544,7 +544,7 @@ mod caps_tests {
             .unwrap();
         let out = act.run(&inv, &mut |_| {}).expect("render");
         let img = out.blobs.get("image").expect("image blob");
-        let caps_rgb: Vec<f32> = img.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+        let caps_rgb: Vec<f32> = img.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
 
         let k = differing_bits(&direct_rgb, &caps_rgb);
         println!("render caps-vs-direct: {k} differing bits of {}", direct_rgb.len());

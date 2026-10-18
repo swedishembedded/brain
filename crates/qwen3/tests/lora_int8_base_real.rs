@@ -36,7 +36,10 @@ fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
     (diff / b.iter().map(|y| (*y as f64).powi(2)).sum::<f64>()).sqrt()
 }
 
-fn run(dt: Dtype, tokens: &[u32], targets: &[u32], dir: &str, adapter_seed: u64) -> Option<(f32, Vec<(String, Vec<f32>)>)> {
+/// A run's loss and its final adapter weights by name.
+type LossAndAdapter = (f32, Vec<(String, Vec<f32>)>);
+
+fn run(dt: Dtype, tokens: &[u32], targets: &[u32], dir: &str, adapter_seed: u64) -> Option<LossAndAdapter> {
     let (mut cfg, base) = qwen3::open_checkpoint(dir).expect("open the checkpoint");
     cfg.lora = Some(LoraCfg::attn(8, 16.0));
     cfg.block_size = tokens.len() as u32;

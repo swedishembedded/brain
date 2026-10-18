@@ -2673,7 +2673,7 @@ fn denoise(
     }
     // The latent's channel width - the axis `Modality.timesteps` `(B, T, 1)`
     // broadcasts over in [`to_denoised`].
-    let channels = if t == 0 { 1 } else { latent.len() / t };
+    let channels = latent.len().checked_div(t).unwrap_or(1);
     let steps = sigmas.len().saturating_sub(1);
     let mut noise_rng = data::rng::Rng::new(noise_seed);
     let t0 = Instant::now();
@@ -2782,7 +2782,7 @@ fn denoise(
             if !av.iter().all(|v| v.is_finite()) {
                 return Err(format!("the denoiser produced non-finite audio values at step {} (sigma = {sigma:.4})", i + 1));
             }
-            let a_channels = if a.ta == 0 { 1 } else { a.latent.len() / a.ta };
+            let a_channels = a.latent.len().checked_div(a.ta).unwrap_or(1);
             let mut a_denoised = to_denoised(&a.latent, &av, &a_timesteps, a_channels);
             // Both applications the video half takes, for the same reasons -
             // once on the x0 estimate before the step, and again on the
@@ -3095,7 +3095,7 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
             // encode is not free, and the loop case (one still at both ends) is
             // the common one.
             let enc = |p: &str| encode_still(sc.vcfg, sc.vweights, p, st.width, st.height, c, o.device.as_deref());
-            let start_tokens = o.start_frame.as_deref().map(&enc).transpose()?;
+            let start_tokens = o.start_frame.as_deref().map(enc).transpose()?;
             let end_tokens = match (&o.end_frame, &o.start_frame) {
                 (Some(e), Some(s)) if e == s => start_tokens.clone(),
                 (Some(e), _) => Some(enc(e.as_str())?),
@@ -3105,7 +3105,7 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
             // stages of a two-stage run, so the anchor names the same instant at
             // half resolution and at full.
             let mid_at = o.mid_frame.as_deref().map(|_| mid_anchor_frame(o.frames, o.mid_frame_at)).transpose()?;
-            let mid_tokens = o.mid_frame.as_deref().map(&enc).transpose()?;
+            let mid_tokens = o.mid_frame.as_deref().map(enc).transpose()?;
             let mid = mid_at.zip(mid_tokens.as_deref());
             if let Some((at, _)) = mid {
                 tracing::info!(stage = st.label, mid_frame = at, latent_frame = latent_frame_containing(at), of_frames = o.frames, "mid-frame anchor pinned into its latent slot");

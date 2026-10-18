@@ -324,7 +324,7 @@ impl MmapSafetensors {
             let n = chunk.min(numel - off);
             let start = self.blob_start + m.start + off * 4;
             scratch.clear();
-            scratch.extend(self.mmap[start..start + n * 4].chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+            scratch.extend(self.mmap[start..start + n * 4].as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
             f(off as u64, &scratch);
             off += n;
         }
@@ -347,7 +347,7 @@ impl MmapSafetensors {
         assert_eq!(m.dtype, "U32", "tensor_u32: '{name}' has dtype {}, not U32", m.dtype);
         self.meter.note((m.end - m.start) as u64);
         let raw = &self.mmap[self.blob_start + m.start..self.blob_start + m.end];
-        Some(raw.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
+        Some(raw.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
     }
 
     /// One tensor as an [`StTensor`] (shape + f32 data).

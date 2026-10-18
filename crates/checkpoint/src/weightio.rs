@@ -937,11 +937,11 @@ mod tests {
         let full = safetensors::SafeTensors::deserialize(&bytes).unwrap();
         let got_packed = full.tensor("expert.0.gate.weight").unwrap();
         assert_eq!(got_packed.shape(), &[2, 16]);
-        let got_packed_u32: Vec<u32> = got_packed.data().chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
+        let got_packed_u32: Vec<u32> = got_packed.data().as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
         assert_eq!(got_packed_u32, packed);
 
         let got_scale = full.tensor("expert.0.gate.scale").unwrap();
-        let got_scale_f32: Vec<f32> = got_scale.data().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        let got_scale_f32: Vec<f32> = got_scale.data().as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
         assert_eq!(got_scale_f32, scale);
 
         // Brain's own streaming reader reads both the F32 tensors AND the

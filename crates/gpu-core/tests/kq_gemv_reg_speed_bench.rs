@@ -64,7 +64,7 @@ fn rand_pos_f32(seed: u64, n: usize, lo: f32, hi: f32) -> Vec<f32> {
 }
 
 fn pack_i8_words(codes: &[i8]) -> Vec<u32> {
-    codes.chunks_exact(4).map(|c| c.iter().enumerate().fold(0u32, |w, (b, &v)| w | ((v as u8 as u32) << (8 * b)))).collect()
+    codes.as_chunks::<4>().0.iter().map(|c| c.iter().enumerate().fold(0u32, |w, (b, &v)| w | ((v as u8 as u32) << (8 * b)))).collect()
 }
 
 fn pack_affine_words(codes: &[i32], bits: u32) -> Vec<u32> {

@@ -136,7 +136,7 @@ pub fn fuse(gpu: &Gpu, ks: &Kernels, cams: &[Camera], depth: &[DepthMap], rgb: &
         .zip(&planes)
         .map(|(img, &p)| {
             let mut v = vec![0.0f32; 3 * p];
-            for (i, px) in img.chunks_exact(3).enumerate() {
+            for (i, px) in img.as_chunks::<3>().0.iter().enumerate() {
                 for c in 0..3 {
                     v[c * p + i] = px[c];
                 }

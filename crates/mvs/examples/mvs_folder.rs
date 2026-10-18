@@ -58,7 +58,7 @@ fn cameras_and_tracks(photos: &[imaging::Rgb8], cache: &std::path::Path) -> (Vec
             }
             Err(_) => {
                 let pts = splat::ply::read(&cache.join("points.ply").display().to_string()).expect("points.ply");
-                pts.means.chunks_exact(3).map(|m| mvs::select::Track { xyz: [m[0] as f64, m[1] as f64, m[2] as f64], views: Vec::new() }).collect()
+                pts.means.as_chunks::<3>().0.iter().map(|m| mvs::select::Track { xyz: [m[0] as f64, m[1] as f64, m[2] as f64], views: Vec::new() }).collect()
             }
         };
         println!("structure from motion: {} cameras, {} tracks, from {}", cams.len(), tracks.len(), cache.display());

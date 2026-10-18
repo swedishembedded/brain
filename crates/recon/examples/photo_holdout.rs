@@ -180,7 +180,7 @@ fn main() {
         let full: Vec<Camera> = train_ix.iter().map(|&i| cams[i]).collect();
         let rgb: Vec<&imaging::Rgb8> = train_ix.iter().map(|&i| &photos[source[i]]).collect();
         let tracks: Vec<mvs::Track> =
-            init.means.chunks_exact(3).map(|m| mvs::Track { xyz: [m[0] as f64, m[1] as f64, m[2] as f64], views: Vec::new() }).collect();
+            init.means.as_chunks::<3>().0.iter().map(|m| mvs::Track { xyz: [m[0] as f64, m[1] as f64, m[2] as f64], views: Vec::new() }).collect();
         let dcfg = recon::photogrammetry::DenseCfg {
             stereo: mvs::StereoCfg { halving: flags.parse("stereo-halving").unwrap_or(halvings), ..Default::default() },
             ..Default::default()

@@ -495,7 +495,7 @@ mod tests {
         move |state, _, options| {
             asked += 1;
             let right = options.iter().position(|o| o == desk_of(state)).unwrap();
-            let top = if wrong_every > 0 && asked % wrong_every == 0 { (right + 1) % options.len() } else { right };
+            let top = if wrong_every > 0 && asked.is_multiple_of(wrong_every) { (right + 1) % options.len() } else { right };
             let rest = (1.0 - p_right) / (options.len() - 1) as f32;
             Ok((0..options.len()).map(|i| if i == top { p_right } else { rest }).collect())
         }

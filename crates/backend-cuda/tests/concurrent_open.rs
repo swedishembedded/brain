@@ -48,7 +48,7 @@ fn backend() -> Option<CudaBackend> {
 /// cannot be waited on: the driver refuses with "operation not permitted when
 /// stream is capturing". `share` reports a refusal as "this backend cannot
 /// share a device", which a sharded model takes to mean it must run unsharded
-/// - a different, slower answer chosen at random by whichever thread happened
+/// -- a different, slower answer chosen at random by whichever thread happened
 /// to be capturing.
 ///
 /// One thread captures a stream of fresh shapes (every distinct chain length

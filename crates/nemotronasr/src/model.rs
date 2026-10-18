@@ -76,7 +76,7 @@ mod tests {
         let mut f = std::fs::File::open(format!("{gold}/output_ids.f32")).unwrap();
         let mut b = Vec::new();
         f.read_to_end(&mut b).unwrap();
-        let ref_ids: Vec<u32> = b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
+        let ref_ids: Vec<u32> = b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
         let ref_nonblank: Vec<u32> = ref_ids.into_iter().filter(|&x| x != cfg.blank_token_id).collect();
 
         let audio_s = wav.samples.len() as f32 / 16000.0;

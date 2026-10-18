@@ -100,7 +100,7 @@ impl ImageSplice {
                 continue;
             }
             out.extend(self.wrap.map(|w| w.0));
-            out.extend(std::iter::repeat(t).take(self.rows));
+            out.extend(std::iter::repeat_n(t, self.rows));
             out.extend(self.wrap.map(|w| w.1));
         }
         out

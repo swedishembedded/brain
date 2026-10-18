@@ -47,7 +47,7 @@ fn decode_f32(inv: &Invocation, name: &str) -> Result<(Vec<f32>, Vec<usize>), St
     if blob.bytes.len() % 4 != 0 {
         return Err(format!("forecast: input '{name}' is not a whole number of f32"));
     }
-    let data: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+    let data: Vec<f32> = blob.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
     let shape = blob
         .meta
         .get("shape")
@@ -58,9 +58,12 @@ fn decode_f32(inv: &Invocation, name: &str) -> Result<(Vec<f32>, Vec<usize>), St
     Ok((data, shape))
 }
 
+/// A decoded f32 wire input: its values and its shape.
+type DecodedF32 = (Vec<f32>, Vec<usize>);
+
 /// `decode_f32`, but `Ok(None)` when the named blob is simply absent - an
 /// optional wire input, not an error.
-fn decode_f32_opt(inv: &Invocation, name: &str) -> Result<Option<(Vec<f32>, Vec<usize>)>, String> {
+fn decode_f32_opt(inv: &Invocation, name: &str) -> Result<Option<DecodedF32>, String> {
     if inv.get_blob(name).is_none() {
         return Ok(None);
     }
@@ -70,7 +73,7 @@ fn decode_f32_opt(inv: &Invocation, name: &str) -> Result<Option<(Vec<f32>, Vec<
 /// Decode an optional u32-LE blob (e.g. kronos calendar stamps).
 fn decode_u32_opt(inv: &Invocation, name: &str) -> Option<Vec<u32>> {
     let blob = inv.get_blob(name)?;
-    Some(blob.bytes.chunks_exact(4).map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect())
+    Some(blob.bytes.as_chunks::<4>().0.iter().map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect())
 }
 
 /// Encode a forecast tensor as raw f32-LE + meta `{shape,dtype,kind,levels}`.
@@ -1232,7 +1235,7 @@ mod tests {
     #[test]
     fn kronos_refuses_a_malformed_seed_and_echoes_the_one_it_used() {
         for bad in [json!(-1), json!(2.5), json!("7")] {
-            let err = kronos_opts(&Invocation::new().set("seed", bad.clone())).err().expect("a malformed seed is refused");
+            let err = kronos_opts(&Invocation::new().set("seed", bad.clone())).expect_err("a malformed seed is refused");
             assert!(err.contains("seed"), "seed {bad} must be refused as a seed, got: {err}");
         }
         assert_eq!(kronos_opts(&Invocation::new().set("seed", json!(9))).unwrap().seed, 9);

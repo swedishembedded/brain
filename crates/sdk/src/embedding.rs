@@ -191,7 +191,7 @@ pub struct EmbeddingPipeline {
 enum Backend {
     #[cfg(feature = "vision")]
     Clip {
-        session: clip::caps::Session,
+        session: Box<clip::caps::Session>,
         /// Which CLIP tower every call embeds with - a pipeline-wide choice
         /// (`.tower(...)` on the builder), not a per-call parameter: unlike
         /// `ImagePipeline`'s two structurally interchangeable backends,
@@ -594,7 +594,7 @@ fn load_clip(model_id: &str, tower: String, download_policy: loader::DownloadPol
 
     let gpu = gpu_core::Gpu::new(clip::model::TEXT_PIPELINES);
     let session = clip::caps::Session::load(&dir.to_string_lossy(), gpu).map_err(Error::Backend)?;
-    Ok(Backend::Clip { session, tower })
+    Ok(Backend::Clip { session: Box::new(session), tower })
 }
 
 /// Resolve `model_id` against Qwen3 or LFM2 - the two `text`-feature

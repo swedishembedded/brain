@@ -97,7 +97,7 @@ fn f16_le(b: &[u8], i: usize) -> f32 {
 /// if both are correct - that agreement is exactly what this test checks).
 fn independent_deq_q8_0(raw: &[u8], numel: usize) -> Vec<f32> {
     let mut out = Vec::with_capacity(numel);
-    for blk in raw.chunks_exact(34) {
+    for blk in raw.as_chunks::<34>().0 {
         let scale = f16_le(blk, 0);
         for j in 0..32 {
             out.push(blk[2 + j] as i8 as f32 * scale);
@@ -158,7 +158,7 @@ fn deq_q8_0_matches_an_independent_from_spec_dequant_on_real_tensors() {
     let (raw, ty) = mg.raw_tensor_bytes(name).unwrap();
     assert_eq!(ty, 0, "F32 ggml type id must be 0");
     let numel = mg.numel(name).unwrap();
-    let want: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let want: Vec<f32> = raw.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
     assert_eq!(want.len(), numel);
     let got = mg.tensor(name).unwrap().unwrap();
     assert_eq!(got, want, "{name}: F32 raw-byte reinterpretation must match tensor() exactly");

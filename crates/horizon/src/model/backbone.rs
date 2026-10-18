@@ -87,7 +87,7 @@ pub(super) struct AttnBufs {
 /// The visit backbone's buffers, allocated when `cfg.visits > 0`.
 pub(super) enum BackboneBufs {
     State(StateBufs),
-    Attention(AttnBufs),
+    Attention(Box<AttnBufs>),
     Stack(Box<StackBufs>),
 }
 
@@ -126,7 +126,7 @@ impl BackboneBufs {
                 gpu.write(&seq_rows, &set_rows);
                 gpu.write(&query_rows, &q_rows);
                 gpu.write(&query_index, &vec![0u32; b as usize]);
-                BackboneBufs::Attention(AttnBufs {
+                BackboneBufs::Attention(Box::new(AttnBufs {
                     seq_rows,
                     query_rows,
                     query_index,
@@ -149,7 +149,7 @@ impl BackboneBufs {
                     d_u: st(s * d),
                     d_qa: st(bb * d),
                     d_qe: st(bb * d),
-                })
+                }))
             }
         })
     }

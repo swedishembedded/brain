@@ -88,7 +88,7 @@ fn render_with(g: &Gpu, s: &Splats, cam: &Camera, eps2d: f32, antialiased: bool)
     let mut r = Renderer::new(g, ks, s.len(), cam.width, cam.height, s.len() * 16);
     let gs = GpuSplats::upload(g, s);
     r.render(g, &gs, cam, &o);
-    r.read_rgba(g, cam.width, cam.height).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()
+    r.read_rgba(g, cam.width, cam.height).as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()
 }
 
 fn camera(w: u32, h: u32) -> Camera {

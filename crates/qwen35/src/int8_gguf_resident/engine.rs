@@ -303,7 +303,7 @@ impl Qwen35GgufEngine {
     }
 
     /// What follows a slice that took the sequence to `end`: record the progress, or
-    /// - when the prompt is in - hand the MTP head its hidden states and file the
+    /// -- when the prompt is in - hand the MTP head its hidden states and file the
     /// prompt for reuse. `state_in_pool`: the recurrent state is in the slot's pool
     /// row and not in the working copy (a multi-sequence forward leaves it there).
     fn finish_slice(&mut self, slot: u32, namespace: KvNamespace, prompt: &[u32], mut p: PartialPrefill, end: usize, hidden: Vec<f32>, state_in_pool: bool) -> PrefillProgress {

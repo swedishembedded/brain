@@ -45,10 +45,10 @@ fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
     num / (den + 1e-30)
 }
 fn read_f32(p: &Path) -> Vec<f32> {
-    std::fs::read(p).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    std::fs::read(p).unwrap().as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 fn read_u32(p: &Path) -> Vec<u32> {
-    std::fs::read(p).unwrap().chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    std::fs::read(p).unwrap().as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 /// Same band as the inference ladder: fp32 reassociation across two independent
 /// implementations costs ~1e-5 here.

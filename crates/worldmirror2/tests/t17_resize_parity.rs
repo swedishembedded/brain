@@ -29,7 +29,7 @@ use gpu_core::Gpu;
 
 fn read_f32(p: &str) -> Vec<f32> {
     let b = std::fs::read(p).unwrap_or_else(|e| panic!("{p}: {e}"));
-    b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
 #[test]

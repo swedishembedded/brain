@@ -1027,7 +1027,7 @@ impl Qwen3Vl {
         mut on_token: impl FnMut(u32),
     ) -> (Vec<u32>, f64, f64, f64) {
         let d_model = self.decoder.cfg.d_model as usize;
-        let n_visual = if d_model == 0 { 0 } else { visual.len() / d_model };
+        let n_visual = visual.len().checked_div(d_model).unwrap_or(0);
 
         // Prefill: placeholder rows via step_embed_mrope, text rows via
         // step_mrope, each with its own 1-row M-RoPE table (mrope_tables
@@ -1070,10 +1070,10 @@ impl Qwen3Vl {
         // host path this replaces read the WHOLE tied head table once per
         // caption -- 1.5 GB at the 4B config -- and then swept it, scalar and
         // single-threaded, for every generated token.
-        let mut next_pos = prompt_positions.last().map(|p| p[0] + 1).unwrap_or(0);
+        let first_pos = prompt_positions.last().map(|p| p[0] + 1).unwrap_or(0);
         let mut out = Vec::with_capacity(max_new as usize);
         let (mut decode_s, mut head_s) = (0.0, 0.0);
-        for _ in 0..max_new {
+        for next_pos in (first_pos..).take(max_new as usize) {
             let t_head = Instant::now();
             let next = crate::sample::sample_logits(&self.decoder.decode_logits(), sample.temperature, sample.top_k, sample.top_p, rng);
             head_s += t_head.elapsed().as_secs_f64();
@@ -1086,7 +1086,6 @@ impl Qwen3Vl {
             let (cos, sin) = mrope_tables(&[[next_pos; 3]], self.mrope_section, self.decoder.cfg.head_dim, self.decoder.cfg.rope_theta);
             self.decoder.prefill_mrope(qwen3::model::PrefillInput::Token(next), &cos, &sin, None);
             decode_s += t_step.elapsed().as_secs_f64();
-            next_pos += 1;
         }
         (out, prefill_s, decode_s, head_s)
     }

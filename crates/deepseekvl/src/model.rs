@@ -286,7 +286,7 @@ pub fn footprint(dir: &Path) -> Result<Footprint, String> {
 /// sized for `ctx` tokens (prompt, image rows and reply together), on the
 /// ambient device.
 pub fn load(dir: &Path, dtype: qwen3::Dtype, ctx: u32) -> Result<Vlm, String> {
-    load_with(dir, dtype, ctx, None, false, &|f| Ok(f()), &|f| Ok(f()))
+    load_with(dir, dtype, ctx, None, false, &|f| { f(); Ok(()) }, &|f| { f(); Ok(()) })
 }
 
 /// [`load`] as `placement` says: the tower on its card, the decoder on its,

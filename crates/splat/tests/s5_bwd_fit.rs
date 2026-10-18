@@ -153,7 +153,7 @@ fn fit_recovers_perturbed_scene() {
         .map(|c| {
             ren.render(&g, &gst, c, &o);
             let img = ren.read_rgba(&g, c.width, c.height);
-            let rgb: Vec<f32> = img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            let rgb: Vec<f32> = img.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
             TargetView::new(*c, rgb)
         })
         .collect();
@@ -230,7 +230,7 @@ fn a_fit_that_starts_diverging_recovers_instead_of_running_on() {
         .map(|c| {
             ren.render(&g, &gst, c, &o);
             let img = ren.read_rgba(&g, c.width, c.height);
-            TargetView::new(*c, img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
+            TargetView::new(*c, img.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect();
 

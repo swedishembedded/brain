@@ -197,7 +197,7 @@ fn stream_reader(pcm: OwnedFd, executor: Executor, model: String, window_samples
         };
         carry.extend_from_slice(&buf[..n]);
         let whole = carry.len() / 4 * 4;
-        samples.extend(carry[..whole].chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])));
+        samples.extend(carry[..whole].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])));
         carry.drain(..whole);
         while samples.len() >= window_samples {
             let window: Vec<f32> = samples.drain(..window_samples).collect();

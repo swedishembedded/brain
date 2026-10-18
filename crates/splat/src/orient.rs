@@ -371,9 +371,9 @@ pub fn dominant_normal(s: &Splats, hint: [f64; 3]) -> Option<[f64; 3]> {
             m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
             m[6] * v[0] + m[7] * v[1] + m[8] * v[2],
         ];
-        match norm3(nv) {
-            Some(u) => v = u,
-            None => return None,
+        {
+            let u = norm3(nv)?;
+            v = u
         }
     }
     // Is that axis actually DOMINANT, or merely the way the noise leans?

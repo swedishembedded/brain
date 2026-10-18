@@ -700,7 +700,7 @@ impl ResidencyManager {
             .iter()
             .map(|(k, e)| InstancePlacement { key: k.clone(), device: e.device, tier: e.tier, mem: e.cost.resident_on(e.device) })
             .collect();
-        placements.sort_by(|a, b| (a.key.model.clone(), a.key.config.clone(), device_order(a.device)).cmp(&(b.key.model.clone(), b.key.config.clone(), device_order(b.device))));
+        placements.sort_by_key(|a| (a.key.model.clone(), a.key.config.clone(), device_order(a.device)));
         let mut multi_placements: Vec<MultiInstancePlacement> = self
             .multi_residents
             .iter()
@@ -710,7 +710,7 @@ impl ResidencyManager {
                 tier: Tier::Hot,
             })
             .collect();
-        multi_placements.sort_by(|a, b| (a.key.model.clone(), a.key.config.clone()).cmp(&(b.key.model.clone(), b.key.config.clone())));
+        multi_placements.sort_by_key(|a| (a.key.model.clone(), a.key.config.clone()));
         let mut budgets: Vec<DeviceBudget> = self
             .budgets
             .devices()

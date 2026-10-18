@@ -153,6 +153,9 @@ struct Problem {
     row_of: Vec<u32>,
 }
 
+/// The K and V planes as a cache stores them: each plane's device words and row scales.
+type StoredPlanes = [(Vec<u32>, Vec<f32>); 2];
+
 impl Problem {
     fn new(c: Case, seed: u64) -> Problem {
         let mut r = Rng(seed);
@@ -173,7 +176,7 @@ impl Problem {
     }
 
     /// The same problem with its K and V values as a cache in `kv` holds them.
-    fn as_stored(&self, kv: Kv) -> (Problem, [(Vec<u32>, Vec<f32>); 2]) {
+    fn as_stored(&self, kv: Kv) -> (Problem, StoredPlanes) {
         let (kw, ks, kseen) = store_plane(kv, &self.k_pool);
         let (vw, vs, vseen) = store_plane(kv, &self.v_pool);
         let seen = Problem { c: Case { ..self.c }, q: self.q.clone(), k_pool: kseen, v_pool: vseen, tables: self.tables.clone(), seq_lens: self.seq_lens.clone(), max_bt: self.max_bt, row_of: self.row_of.clone() };

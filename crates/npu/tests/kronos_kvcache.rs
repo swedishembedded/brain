@@ -318,11 +318,10 @@ fn cached_rollout_driver_matches_full_window() {
         }
     }
     let mut ctx_last = get(&pout, "ctx")[(t - 1) * d..t * d].to_vec();
-    let mut s1_pos = t;
-    let mut dep_valid = t - 1;
     let mut worst = 1.0f32;
 
-    for k in 0..(cap - t) {
+    // Each step feeds the dep decoder one position behind the s1 decoder.
+    for (k, (s1_pos, dep_valid)) in (t..).zip(t - 1..).take(cap - t).enumerate() {
         // dep_step at position s1_pos-1 using ctx_last. The dep cross-attention
         // is rotary-free (see `build_kronos_dep_decode_graph`'s doc comment: the
         // reference builds its rotary table from the query length, which is 1 at
@@ -351,7 +350,6 @@ fn cached_rollout_driver_matches_full_window() {
                 }
             }
         }
-        dep_valid += 1;
 
         // s1_step at position s1_pos.
         let pos = s1_pos;
@@ -384,7 +382,6 @@ fn cached_rollout_driver_matches_full_window() {
             }
         }
         ctx_last = get(&sout, "ctx").to_vec();
-        s1_pos += 1;
         eprintln!("step k={k}: dep@{mdep} cos {c_s2:.6}, s1@{pos} cos {c_s1:.6}");
     }
     eprintln!("cached-rollout DRIVER vs full window: worst cosine {worst:.6}");

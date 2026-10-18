@@ -68,13 +68,16 @@ pub struct Subject<M: Model> {
     pub tiers: Vec<Tier<M>>,
 }
 
+/// A model's initial weights: master values by parameter name.
+pub type InitWeights = HashMap<String, Vec<f32>>;
+
 /// A frozen-base storage tier: how to build the model with its base held at
 /// that tier, and how far its gradients may stray from the f32 base's.
 pub struct Tier<M: Model> {
     pub name: &'static str,
     /// Build from the same config and weights as the f32 reference, for
     /// `(rows, seq)`, with the adapter rank the suite uses.
-    pub build: fn(M::Config, rows: u32, seq: u32, init: &HashMap<String, Vec<f32>>) -> M,
+    pub build: fn(M::Config, rows: u32, seq: u32, init: &InitWeights) -> M,
     /// Largest allowed `||g_tier - g_f32|| / ||g_f32||` over each trainable tensor.
     pub grad_rel_tol: f32,
 }

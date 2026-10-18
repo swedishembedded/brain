@@ -45,7 +45,10 @@ fn rms_eps() -> QwenConfig {
     QwenConfig { rms_eps: 1e-2, ..QwenConfig::tiny() }
 }
 
-const VARIANTS: [(&str, fn() -> QwenConfig); 4] =
+/// A config constructor.
+type ConfigFn = fn() -> QwenConfig;
+
+const VARIANTS: [(&str, ConfigFn); 4] =
     [("llama (MHA, untied)", llama_mha), ("llama (GQA, untied)", llama_gqa), ("qwen2 (GQA, bias, untied)", qwen2_gqa_untied), ("rms_eps 1e-2", rms_eps)];
 
 /// The model at `cfg` with a fixed batch where every position is supervised.
@@ -95,7 +98,7 @@ fn every_decoder_variant_lora_matches_finite_differences() {
 /// base config, which collects both the embedding's and the head's gradient.
 #[test]
 fn biases_norms_and_the_tied_table_match_element_by_element() {
-    let cases: [(fn() -> QwenConfig, &[&str]); 3] = [
+    let cases: [(ConfigFn, &[&str]); 3] = [
         (qwen2_gqa_untied, &["blocks.0.attn.wq.bias", "blocks.0.attn.wk.bias", "blocks.1.attn.wv.bias", "blocks.0.ln1.weight", "blocks.1.ln2.weight", "norm.weight"]),
         (llama_mha, &["lm_head.weight"]),
         (QwenConfig::tiny, &["tok.weight"]),

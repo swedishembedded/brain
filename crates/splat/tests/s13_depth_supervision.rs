@@ -122,7 +122,7 @@ fn shoot(g: &Gpu, ks: Kernels, s: &Splats, c: &Camera, o: &RenderOpts) -> (Vec<f
 }
 
 fn rgb_of(rgba: &[f32]) -> Vec<f32> {
-    rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()
+    rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()
 }
 
 fn mse(a: &[f32], b: &[f32]) -> f64 {

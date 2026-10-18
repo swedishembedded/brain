@@ -163,9 +163,9 @@ fn parity_against_golden_dump() {
 
     // Each .bin starts with a u64 LE element-count prefix (8 bytes), then data.
     let cb = std::fs::read(&codes_p).unwrap();
-    let codes: Vec<u32> = cb[8..].chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let codes: Vec<u32> = cb[8..].as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
     let rb = std::fs::read(&wav_p).unwrap();
-    let reference: Vec<f32> = rb[8..].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let reference: Vec<f32> = rb[8..].as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
 
     let got = codec.decode(&codes);
     let n = got.len().min(reference.len());

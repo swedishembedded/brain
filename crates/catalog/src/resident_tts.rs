@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn a_seed_that_is_not_a_non_negative_integer_is_refused_and_an_absent_one_is_drawn() {
         for bad in [json!(-1), json!(1.5), json!("7")] {
-            let err = TtsInstance::opts_from(&Invocation::new().set("seed", bad.clone())).err().expect("a malformed seed is refused");
+            let err = TtsInstance::opts_from(&Invocation::new().set("seed", bad.clone())).expect_err("a malformed seed is refused");
             assert!(err.contains("seed"), "seed {bad} must be refused as a seed, got: {err}");
         }
         assert_eq!(TtsInstance::opts_from(&Invocation::new().set("seed", json!(5))).unwrap().seed, 5);

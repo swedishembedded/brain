@@ -88,7 +88,7 @@ fn views(g: &Gpu, ks: Kernels, truth: &Splats, w: u32, h: u32) -> (Vec<TargetVie
         .map(|c| {
             ren.render(g, &gs, c, &o);
             let img = ren.read_rgba(g, c.width, c.height);
-            TargetView::new(*c, img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
+            TargetView::new(*c, img.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect();
     (t, ren)
@@ -128,7 +128,7 @@ fn a_fitted_scene_reproduces_its_views_sharply_and_not_merely_closely() {
     for (i, t) in targets.iter().enumerate() {
         ren.render(&g, &gs, &t.cam, &o);
         let rgba = ren.read_rgba(&g, w, h);
-        let rgb: Vec<f32> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        let rgb: Vec<f32> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
 
         let db = psnr(&rgb, &t.rgb);
         let sharp = sharpness_ratio(&rgb, &t.rgb, wu, hu);
@@ -162,7 +162,7 @@ fn the_gate_rejects_a_blurred_render_that_accuracy_alone_accepts() {
     let gs = GpuSplats::upload(&g, &truth);
     ren.render(&g, &gs, &targets[0].cam, &o);
     let rgba = ren.read_rgba(&g, w, h);
-    let exact: Vec<f32> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let exact: Vec<f32> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
 
     // the same scene, rendered through a 3x3 box - "slightly out of focus"
     let mut soft = exact.clone();
@@ -232,7 +232,7 @@ fn a_fitted_scene_is_still_right_from_a_view_it_never_saw() {
     let t = &test[0];
     ren.render(&g, &gs, &t.cam, &o);
     let rgba = ren.read_rgba(&g, w, h);
-    let rgb: Vec<f32> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let rgb: Vec<f32> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
     let (wu, hu) = (w as usize, h as usize);
     let db = psnr(&rgb, &t.rgb);
     let sharp = sharpness_ratio(&rgb, &t.rgb, wu, hu);
@@ -240,7 +240,7 @@ fn a_fitted_scene_is_still_right_from_a_view_it_never_saw() {
     let gs2 = GpuSplats::upload(&g, &needly);
     ren.render(&g, &gs2, &t.cam, &o);
     let r2 = ren.read_rgba(&g, w, h);
-    let rgb2: Vec<f32> = r2.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let rgb2: Vec<f32> = r2.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
     eprintln!("CAL held-out: clamped {db:.2} dB / {sharp:.3}  |  unclamped {:.2} dB / {:.3}",
               psnr(&rgb2, &t.rgb), sharpness_ratio(&rgb2, &t.rgb, wu, hu));
     assert!(

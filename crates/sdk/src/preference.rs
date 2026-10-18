@@ -340,12 +340,12 @@ impl PreferenceFineTune {
         let fit_err = |e: std::io::Error| Error::Backend(format!("training: {e}"));
         let (report, trained) = match policy {
             qwen3::finetune::Trained::Single(m) => {
-                let (r, m) = model::fit_controlled(m, objective, &opts, None, control).map_err(fit_err)?;
-                (r, qwen3::finetune::Trained::Single(m))
+                let (r, m) = model::fit_controlled(*m, objective, &opts, None, control).map_err(fit_err)?;
+                (r, qwen3::finetune::Trained::Single(Box::new(m)))
             }
             qwen3::finetune::Trained::Pipeline(m) => {
-                let (r, m) = model::fit_controlled(m, objective, &opts, None, control).map_err(fit_err)?;
-                (r, qwen3::finetune::Trained::Pipeline(m))
+                let (r, m) = model::fit_controlled(*m, objective, &opts, None, control).map_err(fit_err)?;
+                (r, qwen3::finetune::Trained::Pipeline(Box::new(m)))
             }
         };
 

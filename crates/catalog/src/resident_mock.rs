@@ -425,7 +425,7 @@ fn forecast(inv: &Invocation) -> ActionResult {
     if blob.bytes.is_empty() || !blob.bytes.len().is_multiple_of(4) {
         return Err(format!("mock: context blob is {} bytes, expected a non-empty multiple of 4 (f32-LE)", blob.bytes.len()));
     }
-    let context: Vec<f32> = blob.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let context: Vec<f32> = blob.bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     let horizon = inv.get_i64("horizon").unwrap_or(16).clamp(1, 4096) as usize;
     let last = *context.last().expect("checked non-empty above");
     let drift = if context.len() > 1 { (last - context[0]) / (context.len() - 1) as f32 } else { 0.0 };
@@ -662,7 +662,7 @@ mod tests {
         let blob = &out.blobs["embeddings"];
         assert_eq!(blob.meta, json!({ "shape": [1, EMBED_DIM] }));
         assert_eq!(blob.bytes.len(), EMBED_DIM * 4);
-        let floats: Vec<f32> = blob.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let floats: Vec<f32> = blob.bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         for (a, b) in floats.iter().zip(mean.iter()) {
             assert!((a - b.as_f64().unwrap() as f32).abs() < 1e-6, "blob vector must match outputs.mean: {floats:?} vs {mean:?}");
         }
@@ -734,7 +734,7 @@ mod tests {
         assert_eq!(blob.meta["levels"], json!(FORECAST_LEVELS));
         assert_eq!(blob.bytes.len(), 3 * 8 * 4);
 
-        let data: Vec<f32> = blob.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let data: Vec<f32> = blob.bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         // Context is a unit ramp ending at 25.0 (10 + 15); drift 1.0/step, so the
         // horizon's last median point must land near 25 + 8 = 33.
         let median_row = &data[8..16]; // levels = [0.1, 0.5, 0.9] -> row 1 is 0.5

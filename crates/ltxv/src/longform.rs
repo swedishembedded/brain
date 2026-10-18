@@ -470,7 +470,7 @@ pub fn window_plan_aligned(frames: usize, lh: usize, lw: usize, context: usize, 
     // The constrained windows split their share as evenly as the quantum
     // allows; the last one takes what is left.
     let (units, spread) = (constrained / align, n_cont - 1);
-    let (base, rem) = if spread == 0 { (0, 0) } else { (units / spread, units % spread) };
+    let (base, rem) = units.checked_div(spread).map_or((0, 0), |base| (base, units % spread));
     for i in 0..spread {
         let w = Window { context, new: align * (base + usize::from(i < rem)), first_frame };
         first_frame += w.emitted_frames();

@@ -74,7 +74,7 @@ pub fn episode_with(
         if cands.is_empty() {
             return None;
         }
-        let roll = (rng.next() >> 11) as f32 / (1u64 << 53) as f32;
+        let roll = (rng.next_u64() >> 11) as f32 / (1u64 << 53) as f32;
         let (index, moves) = if roll < epsilon || net.is_none() {
             let c = cands[rng.below(cands.len())];
             (c.index, c.moves)

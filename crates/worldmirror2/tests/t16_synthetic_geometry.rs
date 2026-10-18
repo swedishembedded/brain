@@ -343,9 +343,9 @@ fn a_thin_structure_is_recovered_as_accurately_as_the_ground_it_stands_on() {
     // ONE scale for the whole batch - the model's world is only defined up to it.
     let mut ratios: Vec<f64> = Vec::new();
     for (v, p) in views.iter().zip(&pred) {
-        for i in 0..hw {
-            if v.part[i] != Part::Sky && p[i] > 1e-6 {
-                ratios.push(v.depth[i] / p[i] as f64);
+        for (i, &pi) in p.iter().enumerate().take(hw) {
+            if v.part[i] != Part::Sky && pi > 1e-6 {
+                ratios.push(v.depth[i] / pi as f64);
             }
         }
     }
@@ -355,11 +355,11 @@ fn a_thin_structure_is_recovered_as_accurately_as_the_ground_it_stands_on() {
     let mut err: std::collections::HashMap<Part, Vec<f64>> = Default::default();
     let mut sgn: std::collections::HashMap<Part, Vec<f64>> = Default::default();
     for (v, p) in views.iter().zip(&pred) {
-        for i in 0..hw {
-            if v.part[i] == Part::Sky || !(p[i] > 1e-6) {
+        for (i, &pi) in p.iter().enumerate().take(hw) {
+            if v.part[i] == Part::Sky || pi.partial_cmp(&1e-6) != Some(std::cmp::Ordering::Greater) {
                 continue;
             }
-            let e = ((scale * p[i] as f64) - v.depth[i]) / v.depth[i];
+            let e = ((scale * pi as f64) - v.depth[i]) / v.depth[i];
             err.entry(v.part[i]).or_default().push(e.abs());
             sgn.entry(v.part[i]).or_default().push(e);
         }
@@ -368,13 +368,13 @@ fn a_thin_structure_is_recovered_as_accurately_as_the_ground_it_stands_on() {
     let mut kept: std::collections::HashMap<Part, Vec<f64>> = Default::default();
     let mut total: std::collections::HashMap<Part, usize> = Default::default();
     for ((v, p), m) in views.iter().zip(&pred).zip(&maps) {
-        for i in 0..hw {
-            if v.part[i] == Part::Sky || !(p[i] > 1e-6) {
+        for (i, &pi) in p.iter().enumerate().take(hw) {
+            if v.part[i] == Part::Sky || pi.partial_cmp(&1e-6) != Some(std::cmp::Ordering::Greater) {
                 continue;
             }
             *total.entry(v.part[i]).or_default() += 1;
             if m.conf[i] >= conf_floor {
-                let e = ((scale * p[i] as f64) - v.depth[i]).abs() / v.depth[i];
+                let e = ((scale * pi as f64) - v.depth[i]).abs() / v.depth[i];
                 kept.entry(v.part[i]).or_default().push(e);
             }
         }

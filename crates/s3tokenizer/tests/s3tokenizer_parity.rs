@@ -20,11 +20,11 @@ use s3tokenizer::model::{forward, S3TokenizerWeights};
 const DUMPER: &str = "tools/goldens/cosyvoice_dump_reference.py";
 
 fn read_f32(p: &Path) -> Vec<f32> {
-    std::fs::read(p).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    std::fs::read(p).unwrap().as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
 fn read_i32(p: &Path) -> Vec<i32> {
-    std::fs::read(p).unwrap().chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    std::fs::read(p).unwrap().as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
 /// `BRAIN_S3TOKENIZER_V2`, else the repo-relative

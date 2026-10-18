@@ -130,7 +130,7 @@ impl Evidence {
     /// Fold in one view's credit-assignment pass: the colour gradient of a
     /// backward run with upstream `(1, r, e·r)`, `[N*3]`.
     pub fn add_view(&mut self, credit: &[f32]) {
-        for (i, c) in credit.chunks_exact(3).enumerate() {
+        for (i, c) in credit.as_chunks::<3>().0.iter().enumerate() {
             self.contribution[i] += c[0];
             self.residual[i] += c[1];
             self.edge[i] += c[2];
@@ -177,7 +177,7 @@ pub fn range_residual(rendered: &[f32], alpha: &[f32], prior: &[f32]) -> Vec<f32
 /// its luminance, normalized by its own 99th percentile so the measure is
 /// independent of the photograph's contrast.
 pub fn edge_map(rgb: &[f32], w: usize, h: usize) -> Vec<f32> {
-    let lum: Vec<f32> = rgb.chunks_exact(3).map(|p| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]).collect();
+    let lum: Vec<f32> = rgb.as_chunks::<3>().0.iter().map(|p| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]).collect();
     let at = |x: isize, y: isize| lum[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize];
     let mut mag = vec![0.0f32; w * h];
     for y in 0..h as isize {

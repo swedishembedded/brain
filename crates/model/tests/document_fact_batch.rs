@@ -172,7 +172,7 @@ fn a_document_fact_batch_writes_a_masked_chat_dataset_load_dataset_accepts() {
 
     // And what that mask means in words: each example trains its answer,
     // framed by the template exactly as written, and nothing else.
-    let runs: Vec<String> = runs_by_example.into_iter().map(|r| r.expect("every example is drawn")).flatten().collect();
+    let runs: Vec<String> = runs_by_example.into_iter().flat_map(|r| r.expect("every example is drawn")).collect();
     let expected: Vec<String> = TRIPLES.iter().map(|(_, _, answer)| format!("[assistant] {answer}\n")).collect();
     assert_eq!(runs, expected, "the supervised spans must be the fact answers and nothing else");
 

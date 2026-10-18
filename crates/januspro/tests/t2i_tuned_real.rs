@@ -35,7 +35,7 @@ fn a_generation_fine_tune_draws_its_training_image() {
     let base = mse(&draw(None), &target);
     let tuned_img = draw(Some(Path::new(&tuned)));
     let tuned_mse = mse(&tuned_img, &target);
-    imaging::codec::save_png(&std::env::temp_dir().join("janus-tuned.png"), &tuned_img).unwrap();
+    imaging::codec::save_png(std::env::temp_dir().join("janus-tuned.png"), &tuned_img).unwrap();
     eprintln!("mse to the training image: base {base:.0}, tuned {tuned_mse:.0}");
     assert!(tuned_mse < base * 0.25, "tuned {tuned_mse:.0} vs base {base:.0}");
 }

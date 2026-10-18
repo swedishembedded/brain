@@ -216,7 +216,7 @@ impl Splats {
     pub fn bounds(&self) -> ([f32; 3], [f32; 3]) {
         let mut lo = [f32::INFINITY; 3];
         let mut hi = [f32::NEG_INFINITY; 3];
-        for m in self.means.chunks_exact(3) {
+        for m in self.means.as_chunks::<3>().0 {
             for k in 0..3 {
                 lo[k] = lo[k].min(m[k]);
                 hi[k] = hi[k].max(m[k]);

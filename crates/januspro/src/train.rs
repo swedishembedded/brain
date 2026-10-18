@@ -135,7 +135,7 @@ impl GenTrainer {
         if parts.aligner.0.out_dim != cfg.d_model || parts.head.0.input_dim != cfg.d_model {
             return Err(format!("the generation heads read and write {}- and {}-wide rows for a {}-wide decoder", parts.head.0.input_dim, parts.aligner.0.out_dim, cfg.d_model));
         }
-        if parts.positions < 2 || parts.aligner.0.input_dim as usize != parts.code_dim || parts.embed.len() % parts.code_dim != 0 || parts.embed.len() / parts.code_dim != parts.head.0.out_dim as usize {
+        if parts.positions < 2 || parts.aligner.0.input_dim as usize != parts.code_dim || !parts.embed.len().is_multiple_of(parts.code_dim) || parts.embed.len() / parts.code_dim != parts.head.0.out_dim as usize {
             return Err("the code embedding, the aligner's input and the head's vocabulary disagree".to_string());
         }
         let d_model = cfg.d_model as usize;
@@ -376,7 +376,7 @@ pub fn finetune_generation(dir: &Path, dataset: &Path, opts: &GenOptions, progre
             let cond = conditional_prompt(&tokenizer, &bos, IMAGE_START, &prompt)?;
             let tag = cond.len();
             let mut tokens = cond;
-            tokens.extend(std::iter::repeat(pad_id).take(codes.len() - 1));
+            tokens.extend(std::iter::repeat_n(pad_id, codes.len() - 1));
             examples.push((tokens, codes, tag));
         }
     }

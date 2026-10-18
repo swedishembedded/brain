@@ -21,11 +21,11 @@ use brain_testutil::testdata;
 // vocab is fixed), so no length prefix or side-car meta is needed.
 fn read_u32(path: &str) -> Option<Vec<u32>> {
     let b = std::fs::read(path).ok()?;
-    Some(b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    Some(b.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 fn read_f32(path: &str) -> Option<Vec<f32>> {
     let b = std::fs::read(path).ok()?;
-    Some(b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    Some(b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 
 #[test]

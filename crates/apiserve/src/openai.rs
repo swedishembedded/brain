@@ -1107,7 +1107,7 @@ fn image_b64_from_outcome(o: &capability::Outcome) -> Result<String, String> {
     if px == 0 || blob.bytes.len() % 4 != 0 {
         return Err("image blob is not a whole number of f32 samples".into());
     }
-    let samples: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+    let samples: Vec<f32> = blob.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
     if !samples.len().is_multiple_of(px) {
         return Err(format!("image blob ({} samples) is not a whole number of {w}×{h} planes", samples.len()));
     }
@@ -1384,10 +1384,8 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
             last["brain"] = served;
         }
         if let Some(capture) = captured {
-            for key in ["prompt_token_ids"] {
-                if let Some(v) = capture.get(key) {
-                    last[key] = v.clone();
-                }
+            if let Some(v) = capture.get("prompt_token_ids") {
+                last["prompt_token_ids"] = v.clone();
             }
             for key in ["token_ids", "logprobs"] {
                 if let Some(v) = capture["choices"][0].get(key) {

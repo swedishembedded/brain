@@ -76,7 +76,7 @@ fn generate_inv(prompt_ids: &[u32], max_new_tokens: u32, eos_ids: &[u32]) -> cap
 
 fn decode_ids(out: &capability::Outcome) -> Vec<u32> {
     let blob = out.blobs.get("ids").expect("ids blob");
-    blob.bytes.chunks_exact(4).map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect()
+    blob.bytes.as_chunks::<4>().0.iter().map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect()
 }
 
 /// The headline test: `generate` through the Executor must produce the EXACT

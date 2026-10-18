@@ -45,8 +45,8 @@ fn aligner_leaf(leaf: &str, kind: ProjectorKind) -> Option<String> {
         (_, m) => {
             let i: u32 = m.strip_prefix("layers.")?.parse().ok()?;
             let k = match kind {
-                ProjectorKind::HybridSplit if i % 2 == 1 => (i + 1) / 2,
-                ProjectorKind::Mlp if i % 2 == 0 && i > 0 => i / 2,
+                ProjectorKind::HybridSplit if i % 2 == 1 => i.div_ceil(2),
+                ProjectorKind::Mlp if i.is_multiple_of(2) && i > 0 => i / 2,
                 _ => return None,
             };
             format!("layers.{k}")

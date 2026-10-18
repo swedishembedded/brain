@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! ControlNet's [`ArchSpec`]: the two artifacts a controlled generation needs
-//! - the SDXL backbone it conditions (`sdxl`) and the trainable-copy
+//! -- the SDXL backbone it conditions (`sdxl`) and the trainable-copy
 //! checkpoint that produces the residuals (`control`).
 //!
 //! The `sdxl` role is NOT re-derived here: it is

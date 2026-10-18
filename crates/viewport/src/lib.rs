@@ -281,7 +281,7 @@ mod tests {
         // A present with no window must be a no-op, not a panic: the same loop
         // runs on a desk and on a build server.
         v.present();
-        assert_eq!(v.input().quit, false);
+        assert!(!v.input().quit);
         v.save(&path).expect("saves a png");
         assert!(std::fs::metadata(&path).expect("written").len() > 0);
         let _ = std::fs::remove_file(&path);

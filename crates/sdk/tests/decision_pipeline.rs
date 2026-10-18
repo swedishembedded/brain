@@ -39,13 +39,13 @@
 //!   refused by name. That a run actually learns is measured separately, on
 //!   real weights, by
 //!   [`real_laya_checkpoint_head_training_improves_held_out_accuracy`].
-//! - [`real_minilm_checkpoint_still_answers_through_the_decide_arm`]: THE
+//! - [`real_minilm_checkpoint_still_answers_through_the_decide_arm`] - THE
 //!   PRIMARY SAFETY BAR - `load_decide` is byte-identical after this
 //!   milestone, so a real `sentence-transformers/all-MiniLM-L6-v2` checkpoint
 //!   must answer exactly as it did before. Skips cleanly when the checkpoint
 //!   is not present in this checkout (same `brain_testutil::skip` convention
 //!   every other real-weight test in this plan uses).
-//! - [`real_laya_checkpoint_choose_and_probability_produce_real_numbers`]: the
+//! - [`real_laya_checkpoint_choose_and_probability_produce_real_numbers`] - the
 //!   same real-weight proof for the NEW arm, against the real downloaded
 //!   `convaiinnovations/laya` checkpoint. Skips cleanly when absent.
 //! - [`typed_questions_answer_one_per_question_on_the_synthetic_laya_fixture`]

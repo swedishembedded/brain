@@ -200,7 +200,7 @@ impl QwenBpe {
             }
         }
         // Longest content first so e.g. "<|im_start|>" matches before any prefix.
-        specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        specials.sort_by_key(|special| std::cmp::Reverse(special.0.len()));
 
         let byte_encoder = bytes_to_unicode();
         let mut byte_decoder = HashMap::with_capacity(256);
@@ -276,7 +276,7 @@ impl QwenBpe {
             }
         }
         // Longest content first so e.g. "<|im_start|>" matches before any prefix.
-        specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        specials.sort_by_key(|special| std::cmp::Reverse(special.0.len()));
 
         let byte_encoder = bytes_to_unicode();
         let mut byte_decoder = HashMap::with_capacity(256);
@@ -335,7 +335,7 @@ impl QwenBpe {
         // Longest content first, same invariant `from_json_bytes`/`from_gguf`
         // establish - a longer added token must match before a shorter one
         // that happens to be one of its prefixes.
-        self.specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        self.specials.sort_by_key(|special| std::cmp::Reverse(special.0.len()));
     }
 
     /// Number of distinct ids this tokenizer can produce (max id + 1,

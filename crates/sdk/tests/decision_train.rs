@@ -57,7 +57,7 @@ fn a_run_writes_a_checkpoint_whose_manifest_records_its_lineage_and_is_unvalidat
     assert_eq!(m.validation, Validation::Unvalidated, "training never claims validation");
     assert!(run.out.join(FILE).exists());
     let l = &m.lineage;
-    assert_eq!(l.base.as_deref(), Some(format!("local/base").as_str()));
+    assert_eq!(l.base.as_deref(), Some("local/base".to_string().as_str()));
     assert_eq!(l.base_sha256, Some(brain_modelstore::fetch::base_digest(&s.root.join("base")).unwrap()));
     assert_eq!(l.data_sha256, Some(brain_modelstore::fetch::file_digest(&s.root.join("data.jsonl")).unwrap()));
     let counts = l.split_counts.as_ref().unwrap();

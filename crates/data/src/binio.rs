@@ -99,7 +99,7 @@ pub fn read_u16_bin(path: &Path) -> io::Result<Vec<u16>> {
     let bytes = fs::read(path)?;
     reject_trailing(path, bytes.len(), 2)?;
     Ok(bytes
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect())
 }
@@ -120,7 +120,7 @@ pub fn read_u32_bin(path: &Path) -> io::Result<Vec<u32>> {
     let bytes = fs::read(path)?;
     reject_trailing(path, bytes.len(), 4)?;
     Ok(bytes
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect())
 }
@@ -137,7 +137,7 @@ pub fn write_u64_bin(path: &Path, values: &[u64]) -> io::Result<()> {
 pub fn read_u64_bin(path: &Path) -> io::Result<Vec<u64>> {
     let bytes = fs::read(path)?;
     reject_trailing(path, bytes.len(), 8)?;
-    Ok(bytes.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().expect("8-byte chunk"))).collect())
+    Ok(bytes.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect())
 }
 
 /// Read a token split as `u32`, choosing the width from what exists on disk:
@@ -168,7 +168,7 @@ pub fn read_f32_bin(path: &Path) -> io::Result<Vec<f32>> {
     let bytes = fs::read(path)?;
     reject_trailing(path, bytes.len(), 4)?;
     Ok(bytes
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect())
 }

@@ -343,14 +343,14 @@ pub fn reset_peak_rss() {
 /// near-identical copies in the fastvlm/qwenvl/moondream parity harnesses.
 pub fn read_f32(path: impl AsRef<std::path::Path>) -> Option<Vec<f32>> {
     let b = std::fs::read(path).ok()?;
-    Some(b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    Some(b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 
 /// Read a raw little-endian `i32` blob fixture as `u32` ids (token-id
 /// dumps), or `None` when absent - sibling of [`read_f32`].
 pub fn read_i32(path: impl AsRef<std::path::Path>) -> Option<Vec<u32>> {
     let b = std::fs::read(path).ok()?;
-    Some(b.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect())
+    Some(b.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect())
 }
 
 #[cfg(test)]

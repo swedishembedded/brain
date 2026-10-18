@@ -201,7 +201,7 @@ mod tests {
         let s = Scratch::new("provider-auto");
         write_laya(&s.join("a/laya"), 48);
         let inv = Invocation::new().set("state", json!("s")).set("questions", json!(r#"[{"id":"q","type":"noul","instruction":"x"}]"#)).set("model", json!("auto"));
-        let e = provider(&s).action("decide").unwrap().run(&inv, &mut |_| {}).err().expect("must fail");
+        let e = provider(&s).action("decide").unwrap().run(&inv, &mut |_| {}).expect_err("must fail");
         let (class, msg) = classify(&e).unwrap();
         assert_eq!(class, FailureClass::NotInstalled);
         assert!(msg.contains("a/laya") && msg.contains("no recorded validation"), "{msg}");

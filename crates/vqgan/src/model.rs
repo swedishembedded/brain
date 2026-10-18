@@ -155,7 +155,7 @@ pub fn record_lookup(
 
 /// Split the packed `vq_argmin` output into indices and minimum distances.
 fn unpack(packed: &[f32]) -> (Vec<u32>, Vec<f32>) {
-    (wm_core::vq::indices(packed), packed.chunks_exact(2).map(|c| c[1]).collect())
+    (wm_core::vq::indices(packed), packed.as_chunks::<2>().0.iter().map(|c| c[1]).collect())
 }
 
 /// The quantizer on its own: a resident codebook plus the assignment and

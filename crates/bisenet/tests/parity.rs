@@ -130,16 +130,16 @@ fn align_and_mask_match_the_reference_chain() {
     // test does not depend on `crates/scrfd` to stay a pure BiSeNet-family
     // parity check).
     let kps: [f32; 10] = [
-        188.21160888671875,
-        194.23048400878906,
-        265.7710876464844,
-        195.5060577392578,
-        228.64251708984375,
-        255.88075256347656,
-        199.5830535888672,
-        283.4732360839844,
-        255.55104064941406,
-        284.94000244140625,
+        188.211_61,
+        194.230_48,
+        265.771_1,
+        195.506_06,
+        228.642_52,
+        255.880_75,
+        199.583_05,
+        283.473_24,
+        255.551_04,
+        284.94,
     ];
 
     let photo = imaging::load(&photo_path).unwrap_or_else(|e| panic!("reading {photo_path}: {e}"));

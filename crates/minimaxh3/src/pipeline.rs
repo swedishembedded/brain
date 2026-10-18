@@ -892,7 +892,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
                 z[cc * num_audio_latents_gen + k] = row[cc] * ckpt.audio_latents_std[cc] + ckpt.audio_latents_mean[cc];
             }
         }
-        let wave = crate::vocoder::decode(&ckpt.vocoder_cfg, ckpt.vocoder_tensors, &z, num_audio_latents as u32, device);
+        let wave = crate::vocoder::decode(&ckpt.vocoder_cfg, ckpt.vocoder_tensors, &z, num_audio_latents, device);
         audio_channels_out.push(wave);
     }
 

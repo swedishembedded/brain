@@ -144,7 +144,7 @@ fn main() {
     }
 
     // The antagonist pairs this body actually opposes, and their phase.
-    println!("\n{:>24} {:>24}  {:>8}  {}", "agonist", "antagonist", "phase", "verdict");
+    println!("\n{:>24} {:>24}  {:>8}  verdict", "agonist", "antagonist", "phase");
     for (a, b) in [
         ("Tergopleural/Pleural_promotor", "Tergotr."),
         ("Ti_extensor", "Ti_flexor"),

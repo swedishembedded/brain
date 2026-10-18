@@ -82,7 +82,7 @@ pub fn wav_from_blob(blob: &Blob) -> Result<Vec<f32>, String> {
             return Err(format!("transcribe: sample_rate must be 16000, got {sr}"));
         }
     }
-    Ok(blob.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    Ok(blob.bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 
 /// Pack a transcription into an [`Outcome`]: `text` blob + `text`/`tokens`/

@@ -362,6 +362,9 @@ enum Derive {
     Qkv([String; 3]),
 }
 
+/// One packed weight: its brain name, int8 words and scales.
+type PackedWeight = (String, Vec<u32>, Vec<f32>);
+
 /// A Hugging Face Qwen3-Omni checkpoint directory read as the int8-native
 /// brain checkpoint [`import_as`] would write, computed as each tensor is
 /// read: names mapped, the audio q/k/v fused, and every
@@ -373,7 +376,7 @@ pub struct Int8View {
     derive: HashMap<String, Derive>,
     /// The last weight packed: its brain name, words and scale - the packing
     /// and its scale are read back to back, and are one computation.
-    last: std::sync::Mutex<Option<(String, Vec<u32>, Vec<f32>)>>,
+    last: std::sync::Mutex<Option<PackedWeight>>,
 }
 
 impl Int8View {
@@ -389,12 +392,12 @@ impl Int8View {
                 let (layer, _) = name.strip_prefix("thinker.audio_tower.layers.").and_then(|r| r.split_once('.')).ok_or_else(|| format!("bad audio layer name {name}"))?;
                 let leaf = if name.ends_with(".weight") { "weight" } else { "bias" };
                 let fused = format!("audio.blocks.{layer}.qkv.{leaf}");
-                if !derive.contains_key(&fused) {
+                if let std::collections::hash_map::Entry::Vacant(slot) = derive.entry(fused) {
                     let proj = |p: &str| format!("thinker.audio_tower.layers.{layer}.self_attn.{p}_proj.{leaf}");
                     let mut fused_shape = shape.clone();
                     fused_shape[0] *= 3;
-                    index.push((fused.clone(), fused_shape, "F32"));
-                    derive.insert(fused, Derive::Qkv([proj("q"), proj("k"), proj("v")]));
+                    index.push((slot.key().clone(), fused_shape, "F32"));
+                    slot.insert(Derive::Qkv([proj("q"), proj("k"), proj("v")]));
                 }
                 continue;
             }
@@ -581,7 +584,7 @@ mod import_as_tests {
         // qkv fused correctly: concatenated q|k|v, in that order.
         let qkv = sts.tensor("audio.blocks.0.qkv.weight").unwrap();
         assert_eq!(qkv.shape(), &[24, 32]); // 3*8 rows
-        let qkv_f32: Vec<f32> = qkv.data().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        let qkv_f32: Vec<f32> = qkv.data().as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
         let mut want = src_data["thinker.audio_tower.layers.0.self_attn.q_proj.weight"].clone();
         want.extend(&src_data["thinker.audio_tower.layers.0.self_attn.k_proj.weight"]);
         want.extend(&src_data["thinker.audio_tower.layers.0.self_attn.v_proj.weight"]);
@@ -612,8 +615,8 @@ mod import_as_tests {
         let quantized_bytes = packed_view.data().len() + scale_view.data().len();
         assert!(quantized_bytes < f32_equivalent_bytes, "quantized {quantized_bytes} B should be less than f32-equivalent {f32_equivalent_bytes} B");
         assert_eq!(scale_view.shape(), &[rows, gs], "the scale sibling must be [n, k/32], not [n]");
-        let packed_u32: Vec<u32> = packed_view.data().chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
-        let scale: Vec<f32> = scale_view.data().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        let packed_u32: Vec<u32> = packed_view.data().as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
+        let scale: Vec<f32> = scale_view.data().as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
         let original = &src_data["thinker.model.embed_tokens.weight"];
         for r in 0..rows {
             for c in 0..cols {
@@ -627,7 +630,7 @@ mod import_as_tests {
 
         // A 1-D tensor was kept exact f32 (no quantization, no scale sibling).
         let norm = sts.tensor("thinker.norm.weight").unwrap();
-        let norm_f32: Vec<f32> = norm.data().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        let norm_f32: Vec<f32> = norm.data().as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
         assert_eq!(norm_f32, src_data["thinker.model.norm.weight"]);
         assert!(meta.tensors().iter().find(|(n, _)| *n == "thinker.norm.weight.scale").is_none(), "a 1-D tensor must not get a scale sibling");
 

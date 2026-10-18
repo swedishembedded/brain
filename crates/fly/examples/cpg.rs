@@ -134,7 +134,7 @@ fn main() {
                 continue;
             }
             for (series, group) in out.iter_mut().zip(watch) {
-                series.push(group.iter().map(|&i| spike[*&i as usize] as f64).sum());
+                series.push(group.iter().map(|&i| spike[i as usize] as f64).sum());
             }
         }
         out

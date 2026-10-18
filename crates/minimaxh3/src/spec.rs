@@ -295,7 +295,7 @@ mod tests {
         std::fs::create_dir_all(&dit_path).unwrap();
         write_dit_safetensors(&dit_path.join("diffusion_pytorch_model.safetensors"));
         let te_path = vendor.join("text_encoder");
-        write_qwen3vl_hfdir(&te_path, TEXT_DIM as u64);
+        write_qwen3vl_hfdir(&te_path, TEXT_DIM);
         let vae_path = vendor.join("vae.safetensors");
         write_video_vae_safetensors(&vae_path);
         let voc_path = vendor.join("audio_vae.safetensors");
@@ -416,7 +416,7 @@ mod tests {
         .unwrap();
 
         let te_dir = repo.join("text_encoder");
-        write_qwen3vl_hfdir(&te_dir, TEXT_DIM as u64);
+        write_qwen3vl_hfdir(&te_dir, TEXT_DIM);
         // Every model component is the release's own role DIRECTORY
         // (`convert_h3`'s manifest names these same rel paths) - `read_model_dir`
         // resolves the shards inside each one at load time.
@@ -454,7 +454,7 @@ mod tests {
         // this manifest never declared, at Declared confidence only.
         let noise_te = dir.join("other-vendor").join("Qwen3VL-8B");
         std::fs::create_dir_all(noise_te.parent().unwrap()).unwrap();
-        write_qwen3vl_hfdir(&noise_te, TEXT_DIM as u64);
+        write_qwen3vl_hfdir(&noise_te, TEXT_DIM);
 
         let mut records = vec![
             complete(dit_dir.clone(), ArtifactKind::HfDir),

@@ -170,7 +170,7 @@ fn a_two_stage_decoder_gives_the_aligner_the_same_loss_and_gradient() {
     let shards = model::plan_balanced(&<qwen3::Qwen as model::Shardable>::shard_cost(&cfg, 1, BLOCK), &[model::Shard::ANY_GPU, model::Shard::ANY_GPU]);
     assert_eq!(shards.len(), 2);
     let pipe = model::Pipeline::<qwen3::Qwen>::with_shards_dt(cfg.clone(), 1, BLOCK, &init, shards, Dtype::F32);
-    let staged = qwen3::finetune::Trained::Pipeline(model::PipelineModel::new(pipe, cfg));
+    let staged = qwen3::finetune::Trained::Pipeline(Box::new(model::PipelineModel::new(pipe, cfg)));
     let (acfg, aw) = aligner();
     let mut t = Trainer::with_decoder(staged, BLOCK, acfg, aw, ROWS).unwrap();
     let (got_loss, got) = t.loss_and_aligner_grads(&p);

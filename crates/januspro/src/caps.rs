@@ -176,10 +176,11 @@ pub fn text2image_batch<D: DrawMany + ?Sized>(t2i: &mut D, invs: &[Invocation], 
     results
 }
 
-/// The build a process keeps loaded: one of the two, never both.
+/// The build a process keeps loaded: one of the two, never both. Both are boxed: each is a whole
+/// on-device model, and the enum would be as large as the bigger.
 enum Loaded {
-    Understanding(deepseekvl::caps::Session),
-    Generation(TextToImage),
+    Understanding(Box<deepseekvl::caps::Session>),
+    Generation(Box<TextToImage>),
 }
 
 static RESIDENT: Mutex<Option<(String, Loaded)>> = Mutex::new(None);
@@ -228,15 +229,15 @@ impl Action for JanusAction {
             *guard = None; // drop the other build before this one allocates
             let build = if want_generation {
                 let (card, context) = place_t2i_now(&dir)?;
-                Loaded::Generation(load_t2i(&dir, card, context, 1, None)?)
+                Loaded::Generation(Box::new(load_t2i(&dir, card, context, 1, None)?))
             } else {
-                Loaded::Understanding(load_understanding(&dir, place_understanding_now(&dir)?, None)?)
+                Loaded::Understanding(Box::new(load_understanding(&dir, place_understanding_now(&dir)?, None)?))
             };
             *guard = Some((dir, build));
         }
         match &mut guard.as_mut().expect("just loaded").1 {
             Loaded::Understanding(session) => session.generate(inv, progress),
-            Loaded::Generation(t2i) => text2image(t2i, inv, progress),
+            Loaded::Generation(t2i) => text2image(&mut **t2i, inv, progress),
         }
     }
 }

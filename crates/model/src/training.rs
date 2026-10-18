@@ -103,7 +103,7 @@ impl From<Unsupported> for std::io::Error {
 /// [`crate::Model::backward`].
 pub trait TokenObjectives {
     /// Opt into per-position weighted-loss training ([`crate::Batch::LmWeighted`])
-    /// - call once after construction, before the first backward. Ordinary
+    /// -- call once after construction, before the first backward. Ordinary
     /// (unweighted) training pays nothing for it until called.
     fn enable_weighted_loss(&mut self);
 

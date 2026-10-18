@@ -55,11 +55,8 @@ impl Dataset {
             // 128px, 3 classes, multi-object — the geometry the tiny YOLO uses.
             "detect" => Dataset::Detect { preset: crate::gen_detect::Preset::MultiObject, h: 128, w: 128, nc: 3 },
             other => {
-                if let Some(preset) = crate::gen_detect::Preset::from_name(other) {
-                    Dataset::Detect { preset, h: 128, w: 128, nc: 3 }
-                } else {
-                    return None;
-                }
+                let preset = crate::gen_detect::Preset::from_name(other)?;
+                Dataset::Detect { preset, h: 128, w: 128, nc: 3 }
             }
         })
     }

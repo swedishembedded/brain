@@ -371,7 +371,7 @@ mod tests {
         let cam = Camera::look_at([0.0; 3], [0.0, 0.0, 3.0], [0.0, -1.0, 0.0], 40.0, 32, 24);
         let mut viewer = Viewer::new(&g, &s, &[], RenderOpts::default(), 32, 24);
         let radiance = viewer.render(&cam);
-        let photo: Vec<f32> = radiance.chunks_exact(3).flat_map(|p| [p[0] * 1.6, p[1] * 1.45, p[2] * 1.3]).collect();
+        let photo: Vec<f32> = radiance.as_chunks::<3>().0.iter().flat_map(|p| [p[0] * 1.6, p[1] * 1.45, p[2] * 1.3]).collect();
         let view = TargetView::new(cam, photo);
         let (held, _) = score_held_out(&mut viewer, &[view], None);
         let (raw, fitted) = (held.raw.mean_psnr(), held.fitted.mean_psnr());

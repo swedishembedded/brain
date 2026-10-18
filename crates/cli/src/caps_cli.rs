@@ -459,7 +459,7 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
             let w = b.meta["w"].as_u64().ok_or("image blob missing w")? as u32;
             let h = b.meta["h"].as_u64().ok_or("image blob missing h")? as u32;
             let c = b.meta["c"].as_u64().unwrap_or(3) as usize;
-            let hwc: Vec<f32> = b.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+            let hwc: Vec<f32> = b.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
             // A depth map or a mask is one channel; the CLI's policy is to render
             // it as visible grey rather than refuse to save it. That is a real
             // choice, so it is spelled out rather than implied by the code.
@@ -479,7 +479,7 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
         }
         Media::Audio => {
             let sample_rate = b.meta.get("sample_rate").and_then(|v| v.as_u64()).ok_or("audio blob has no sample_rate and is not already a WAV -- cannot write a header")? as u32;
-            let samples: Vec<f32> = b.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+            let samples: Vec<f32> = b.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
             audio::wav::write(path, &samples, sample_rate).map_err(|e| e.to_string())
         }
         _ => std::fs::write(path, &b.bytes).map_err(|e| e.to_string()),
@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(blob.media, Media::Audio);
         assert_eq!(blob.bytes.len(), want.len() * 4, "one f32 per resampled sample");
         assert_eq!(blob.meta["sample_rate"], 16000);
-        let got: Vec<f32> = blob.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let got: Vec<f32> = blob.bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         assert_eq!(got, want);
         // The header must be gone: raw pass-through would have kept 44+ bytes of it.
         assert_ne!(blob.bytes.len(), wav_bytes.len());

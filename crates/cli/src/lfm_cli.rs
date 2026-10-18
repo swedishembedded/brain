@@ -299,7 +299,7 @@ fn embed(argv: &[String]) {
     }
     println!(
         "embedding[{d}] mean-pool head: {:?} …",
-        &mean[..8.min(d)].iter().map(|x| (x * 1000.0).round() / 1000.0).collect::<Vec<_>>()
+        mean[..8.min(d)].iter().map(|x| (x * 1000.0).round() / 1000.0).collect::<Vec<_>>()
     );
     eprintln!(
         "[{n} tokens, chunk {:?}] load {:.2}s  forward {:.3}s",

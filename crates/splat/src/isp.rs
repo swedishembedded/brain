@@ -668,7 +668,7 @@ impl Isp {
     pub fn clip_weight(&self, target: &[f32]) -> Vec<f32> {
         let hi = self.cfg.clip;
         target
-            .chunks_exact(3)
+            .as_chunks::<3>().0.iter()
             .map(|p| {
                 if hi <= 0.0 {
                     return 1.0;

@@ -368,17 +368,17 @@ fn a_transient_cannot_outscore_a_steady_walk_of_the_same_distance() {
         ..Episode::default()
     };
     // The same distance, all of it in one stretch out of four.
-    let lunge = Episode { sustained: 0.0, ..walk.clone() };
+    let lunge = Episode { sustained: 0.0, ..walk };
     assert!(walk.score() > 0.0, "a steady walk scores");
     assert_eq!(lunge.score(), 0.0, "a lunge that then stops scores nothing");
     assert!(walk.score() > lunge.score());
 
     // And the reverse failure: going nowhere while never stopping, which is
     // what walking in a circle looks like to a per-stretch measure.
-    let circle = Episode { net: 0.0, sustained: 1.0, ..walk.clone() };
+    let circle = Episode { net: 0.0, sustained: 1.0, ..walk };
     assert_eq!(circle.score(), 0.0, "a circle ends where it started and scores nothing");
 
     // Partial credit is monotone in between, so a search still has a gradient.
-    let halting = Episode { sustained: 0.5, ..walk.clone() };
+    let halting = Episode { sustained: 0.5, ..walk };
     assert!(halting.score() > lunge.score() && halting.score() < walk.score());
 }

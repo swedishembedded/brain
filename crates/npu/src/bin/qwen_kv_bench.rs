@@ -177,6 +177,10 @@ fn fake_id(k: usize, vocab: usize) -> u32 {
     ((k as u64).wrapping_mul(2_654_435_761) % vocab as u64).max(1) as u32
 }
 
+/// Ends `session` (the real backend closes its compiled model here) before the caller removes the files it
+/// was compiled from.
+fn close_session(_session: KvSession) {}
+
 fn cleanup(out: &PathBuf) {
     let data = out.with_file_name(format!("{}.data", out.file_name().unwrap().to_str().unwrap()));
     std::fs::remove_file(out).ok();
@@ -258,7 +262,7 @@ fn bench_cap(o: &Opts, cfg: &QwenConfig) {
                 Err(e) => eprintln!("cap={cap}: decode run failed: {e}"),
             }
         }
-        drop(sess);
+        close_session(sess);
         cleanup(&decode_path);
 
         let (m50, m99, mmean) = percentiles(marshal);
@@ -447,7 +451,7 @@ fn verify(o: &Opts, cfg: &QwenConfig) -> bool {
         }
         got.push(hidden);
     }
-    drop(sess);
+    close_session(sess);
     cleanup(&decode_path);
 
     let ref_flat: Vec<f32> = reference.into_iter().flatten().collect();

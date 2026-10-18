@@ -46,6 +46,12 @@ pub struct Request<'a> {
     pub seed: u64,
 }
 
+/// A conditional/unconditional prompt-id pair for classifier-free guidance.
+pub type PromptPair = (Vec<u32>, Vec<u32>);
+
+/// Picks one token per image from a step's blended logits `[parallel, vocab]`, given the step index.
+pub type TokenChooser<'a> = dyn FnMut(usize, &[f32]) -> Result<Vec<u32>, String> + 'a;
+
 pub struct TextToImage {
     engine: Engine,
     heads: GenHeads,
@@ -81,7 +87,7 @@ pub fn place(fp: &deepseekvl::model::Footprint, parallel: u32, cards: &[(u32, u6
     let context = (per_seq.min(fp.max_context as u64) as u32) / BLOCK * BLOCK;
     // The image's own 576 tokens and a prompt.
     if context < 1024 {
-        return Err(format!("{parallel} image(s) need {} GiB for the decoder and heads plus {} MiB per context token per sequence; the roomiest card has {} GiB free", (fp.decoder + GENERATION_EXTRA_BYTES) >> 30, fp.kv_per_token * rows >> 20, free >> 30));
+        return Err(format!("{parallel} image(s) need {} GiB for the decoder and heads plus {} MiB per context token per sequence; the roomiest card has {} GiB free", (fp.decoder + GENERATION_EXTRA_BYTES) >> 30, (fp.kv_per_token * rows) >> 20, free >> 30));
     }
     Ok((card, context))
 }
@@ -189,7 +195,7 @@ impl TextToImage {
     }
 
     /// The conditional and unconditional prompt ids for `prompt`.
-    pub fn prompt_ids(&self, prompt: &str) -> Result<(Vec<u32>, Vec<u32>), String> {
+    pub fn prompt_ids(&self, prompt: &str) -> Result<PromptPair, String> {
         let cond = conditional_prompt(&self.tokenizer, &self.bos, &self.image_start, prompt)?;
         let uncond = unconditional_prompt(&cond, self.pad_id);
         Ok((cond, uncond))
@@ -199,9 +205,9 @@ impl TextToImage {
     /// batch alike. At each step `choose` gets the step index and the blended
     /// logits `[parallel, vocab]` and returns one token per image. Returns
     /// each image's tokens.
-    pub fn run_tokens(&mut self, cond: &[u32], uncond: &[u32], cfg_weight: f32, steps: usize, choose: &mut dyn FnMut(usize, &[f32]) -> Result<Vec<u32>, String>) -> Result<Vec<Vec<u32>>, String> {
+    pub fn run_tokens(&mut self, cond: &[u32], uncond: &[u32], cfg_weight: f32, steps: usize, choose: &mut TokenChooser<'_>) -> Result<Vec<Vec<u32>>, String> {
         let p = self.parallel as usize;
-        let prompts: Vec<(Vec<u32>, Vec<u32>)> = (0..p).map(|_| (cond.to_vec(), uncond.to_vec())).collect();
+        let prompts: Vec<PromptPair> = (0..p).map(|_| (cond.to_vec(), uncond.to_vec())).collect();
         self.run_images(&prompts, &vec![cfg_weight; p], steps, choose)
     }
 
@@ -209,7 +215,7 @@ impl TextToImage {
     /// for each of up to `parallel` images; the images share the decoder's
     /// batch, so a few images cost little more than one. `choose` sees one
     /// blended row per image given.
-    pub fn run_images(&mut self, prompts: &[(Vec<u32>, Vec<u32>)], cfg_weights: &[f32], steps: usize, choose: &mut dyn FnMut(usize, &[f32]) -> Result<Vec<u32>, String>) -> Result<Vec<Vec<u32>>, String> {
+    pub fn run_images(&mut self, prompts: &[PromptPair], cfg_weights: &[f32], steps: usize, choose: &mut TokenChooser<'_>) -> Result<Vec<Vec<u32>>, String> {
         let images = prompts.len();
         if images == 0 || images > self.parallel as usize || cfg_weights.len() != images {
             return Err(format!("{images} prompts and {} guidance weights for a build of {} images", cfg_weights.len(), self.parallel));
@@ -226,7 +232,7 @@ impl TextToImage {
         result
     }
 
-    fn run_rows(&mut self, tables: &mut [BlockTable], prompts: &[(Vec<u32>, Vec<u32>)], cfg_weights: &[f32], steps: usize, choose: &mut dyn FnMut(usize, &[f32]) -> Result<Vec<u32>, String>) -> Result<Vec<Vec<u32>>, String> {
+    fn run_rows(&mut self, tables: &mut [BlockTable], prompts: &[PromptPair], cfg_weights: &[f32], steps: usize, choose: &mut TokenChooser<'_>) -> Result<Vec<Vec<u32>>, String> {
         let p = prompts.len();
         let v = self.heads.vocab();
         let mut hidden = Vec::new();

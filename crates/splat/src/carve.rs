@@ -69,5 +69,5 @@ pub fn carve(gpu: &Gpu, ks: Kernels, s: &GpuSplats, obs: &Observations, margin: 
     gpu.submit(&[], &[step]);
     let v = gpu.read(&out, 2 * s.n);
     gpu_core::reclaiming(gpu, || drop(out));
-    v.chunks_exact(2).map(|c| [c[0], c[1]]).collect()
+    v.as_chunks::<2>().0.iter().map(|c| [c[0], c[1]]).collect()
 }

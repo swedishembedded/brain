@@ -216,6 +216,9 @@ pub fn encoder_manifest(cfg: &DeepseekOcrConfig) -> Vec<(String, usize)> {
     v
 }
 
+/// The fetch plan of one half of the checkpoint: tensor name to how it is read.
+pub type FetchPlan = HashMap<String, Fetch>;
+
 /// Split a checkpoint's tensor names into the two halves' fetch plans, keyed
 /// by the brain-side name.
 ///
@@ -231,7 +234,7 @@ pub fn encoder_manifest(cfg: &DeepseekOcrConfig) -> Vec<(String, usize)> {
 /// while brain's decoder reads one `[n_experts, out, in]` bank per projection
 /// (the layout the GGUF release stores natively), so those are a
 /// `Fetch::Concat` of the experts in index order.
-pub fn plans(names: &[String], cfg: &DeepseekOcrConfig) -> Result<(HashMap<String, Fetch>, HashMap<String, Fetch>), String> {
+pub fn plans(names: &[String], cfg: &DeepseekOcrConfig) -> Result<(FetchPlan, FetchPlan), String> {
     let (mut enc, mut dec) = (HashMap::new(), HashMap::new());
     // bank name -> expert index -> source tensor. `BTreeMap` on the inner key
     // is what makes the concatenation expert-ordered by construction rather

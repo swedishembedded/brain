@@ -540,7 +540,7 @@ impl Archive {
     ///
     /// Not everything in here. The archive holds two different kinds of thing
     /// now - whole runs, and the best way to reach each place a search got to
-    /// - and only the first is behaviour. A search fragment is a record of
+    /// -- and only the first is behaviour. A search fragment is a record of
     /// somewhere worth returning to, which is what makes it worth keeping,
     /// and it is mostly a random walk, which is what makes it not worth
     /// copying.
@@ -619,7 +619,7 @@ fn measured_best(scored: &[f32]) -> Option<usize> {
     // The same tolerance `probe` counts `pivotal` with: two trajectories that
     // differ only in which way the player faced for one decision score the
     // same to within rounding.
-    if !(hi - lo > 1e-3) {
+    if (hi - lo).partial_cmp(&1e-3) != Some(std::cmp::Ordering::Greater) {
         return None;
     }
     scored
@@ -682,7 +682,7 @@ fn outcome_costs(scored: &[f32]) -> Vec<f32> {
 /// ```
 ///
 /// This is the objective AggreVaTe reduces to - `argmin_pi sum_i Q(pi(s_i))`
-/// - relaxed from a hard argmin to the stochastic policy the head already
+/// -- relaxed from a hard argmin to the stochastic policy the head already
 /// parameterises. Three properties, all of which the version it replaces had
 /// to reach for separately and one of which it never got:
 ///
@@ -1170,6 +1170,10 @@ const GUIDED_CHANCE: f32 = 0.34;
 /// is that handful.
 const MINIBATCH: usize = 64;
 
+/// What a student-labelling round returns: the labelled decisions, how far the student's episodes got
+/// (when measured) and how often it already agreed with the teacher.
+type StudentLabels = (Vec<Demo>, Option<f32>, f32);
+
 impl<E: Env> ControlPipeline<E> {
     /// Load an encoder checkpoint and start a stage chain on it, acting in
     /// `env`.
@@ -1545,7 +1549,7 @@ impl<E: Env> ControlPipeline<E> {
         &mut self,
         episodes: usize,
         max_steps: usize,
-    ) -> Result<Option<(Vec<Demo>, Option<f32>, f32)>> {
+    ) -> Result<Option<StudentLabels>> {
         let mut demos: Vec<Demo> = Vec::new();
         let (mut got, mut measured) = (0.0f32, 0usize);
         let (mut agreed, mut seen) = (0usize, 0usize);
@@ -2942,10 +2946,10 @@ impl<E: Env> ControlPipeline<E> {
                 // The starting point, so the archive is never empty and the
                 // first pick has somewhere to go.
                 if let Some(cell) = self.env.cell() {
-                    if !seen.contains_key(&cell) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(cell) {
                         let slot = self.next_slot;
                         if slot < slots && self.env.hold_at(slot) {
-                            seen.insert(cell, (slot, self.env.progress().unwrap_or(0.0), 0));
+                            e.insert((slot, self.env.progress().unwrap_or(0.0), 0));
                             self.next_slot += 1;
                         }
                     }

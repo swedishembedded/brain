@@ -276,7 +276,7 @@ fn clip_preprocess_chw(hwc: &[f32], w: u32, h: u32, side: u32) -> Vec<f32> {
         let dst = (y * side * 3) as usize;
         cropped[dst..dst + (side * 3) as usize].copy_from_slice(&resized[src..src + (side * 3) as usize]);
     }
-    for px in cropped.chunks_exact_mut(3) {
+    for px in cropped.as_chunks_mut::<3>().0 {
         for ((v, &mean), &std) in px.iter_mut().zip(crate::model::CLIP_MEAN.iter()).zip(crate::model::CLIP_STD.iter()) {
             *v = (*v - mean) / std;
         }

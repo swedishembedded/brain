@@ -28,7 +28,7 @@ const REL_CEIL: f64 = 1e-4;
 fn read_f32(p: &Path) -> Vec<f32> {
     std::fs::read(p)
         .unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }

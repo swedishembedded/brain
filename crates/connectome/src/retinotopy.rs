@@ -101,7 +101,7 @@ impl Sheet {
         }
 
         let mut shared: HashMap<(u32, u32), f32> = HashMap::new();
-        for (_, cols) in owners.iter() {
+        for cols in owners.values() {
             if cols.len() < 2 || cols.len() > policy.max_span {
                 continue;
             }

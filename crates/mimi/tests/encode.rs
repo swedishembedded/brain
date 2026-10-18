@@ -45,12 +45,12 @@ fn import_to_temp() -> String {
 /// Read a `<u64 count><f32...>` little-endian blob.
 fn read_f32(p: &std::path::Path) -> Vec<f32> {
     let b = std::fs::read(p).unwrap();
-    b[8..].chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    b[8..].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 /// Read a `<u64 count><u32...>` little-endian blob.
 fn read_u32(p: &std::path::Path) -> Vec<u32> {
     let b = std::fs::read(p).unwrap();
-    b[8..].chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    b[8..].as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
 /// A synthetic 24 kHz waveform: sum of sines (no external file needed).

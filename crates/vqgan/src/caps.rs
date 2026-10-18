@@ -195,7 +195,7 @@ impl Session {
         if b.bytes.len() != 4 * t {
             return Err(format!("vqgan decode: {} bytes of codes, expected {} (= 4 x {lh} x {lw})", b.bytes.len(), 4 * t));
         }
-        let indices: Vec<u32> = b.bytes.chunks_exact(4).map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+        let indices: Vec<u32> = b.bytes.as_chunks::<4>().0.iter().map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
         // `Vqgan::decode` PANICS on an out-of-range index (the `embed` gather has
         // no bounds check); over the wire the indices are caller-supplied, so
         // reject them here as an error instead.

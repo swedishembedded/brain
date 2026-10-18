@@ -1073,7 +1073,7 @@ pub fn write_ppm_rgb(path: &str, rgb: &[u8], w: usize, h: usize) {
 pub fn write_ppm(path: &str, rgba: &[f32], w: usize, h: usize, normalize: bool) {
     let hwc = if normalize {
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        for px in rgba.chunks_exact(4) {
+        for px in rgba.as_chunks::<4>().0 {
             if px[3] > 1e-6 {
                 lo = lo.min(px[0]);
                 hi = hi.max(px[0]);
@@ -1083,7 +1083,7 @@ pub fn write_ppm(path: &str, rgba: &[f32], w: usize, h: usize, normalize: bool) 
             lo = 0.0;
             hi = 1.0;
         }
-        rgba.chunks_exact(4).flat_map(|px| [(px[0] - lo) / (hi - lo), (px[1] - lo) / (hi - lo), (px[2] - lo) / (hi - lo)]).collect()
+        rgba.as_chunks::<4>().0.iter().flat_map(|px| [(px[0] - lo) / (hi - lo), (px[1] - lo) / (hi - lo), (px[2] - lo) / (hi - lo)]).collect()
     } else {
         rgba_to_rgb(rgba)
     };

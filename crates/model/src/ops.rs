@@ -1077,6 +1077,9 @@ impl Drop for DecodedWeightScope<'_> {
     }
 }
 
+/// A library-path weight: the buffer, the byte range to bind, steps that must run first and the scratch they use.
+type LibraryWeight = (DeviceBuffer, (u64, u64), Vec<Step>, Option<usize>);
+
 impl Ops {
     /// Open a [`DecodedWeightScope`].
     pub fn decoded_weight_scope(&self) -> DecodedWeightScope<'_> {
@@ -1229,7 +1232,7 @@ impl Ops {
     /// buffer, the range to bind and any steps that must run first (the
     /// decode of an NF4 window into a bf16 scratch). `None` for a tier or a
     /// device the library path does not serve.
-    fn library_weight(&self, w: &Weight, rows: (u32, u32)) -> Option<(DeviceBuffer, (u64, u64), Vec<Step>, Option<usize>)> {
+    fn library_weight(&self, w: &Weight, rows: (u32, u32)) -> Option<LibraryWeight> {
         if !self.gemm.is_active() {
             return None;
         }
@@ -2304,7 +2307,7 @@ impl Ops {
         }
         let (start, len) = (first as u64 * k as u64, count as u64 * k as u64);
         assert!(start % per_word == 0 && len % per_word == 0, "weight row window {first}+{count} of width {k} is not a whole number of words");
-        assert!(start / per_word % 64 == 0, "weight row window starting at row {first} (width {k}) is not a 256-byte binding offset");
+        assert!((start / per_word).is_multiple_of(64), "weight row window starting at row {first} (width {k}) is not a 256-byte binding offset");
         (start / per_word, len / per_word)
     }
 

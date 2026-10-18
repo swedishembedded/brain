@@ -40,7 +40,7 @@ fn main() {
         let gs = GpuSplats::upload(&g, &s);
         r.render(&g, &gs, &cam, &o);
         let rgba = r.read_rgba(&g, cam.width, cam.height);
-        let got: Vec<f32> = rgba.chunks_exact(4).flat_map(|q| [q[0], q[1], q[2]]).collect();
+        let got: Vec<f32> = rgba.as_chunks::<4>().0.iter().flat_map(|q| [q[0], q[1], q[2]]).collect();
         if let Ok(d) = std::env::var("EXACT_EVAL_DUMP") {
             let px: Vec<u8> = got.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8).collect();
             let mut f = std::fs::File::create(format!("{d}/render_{i:02}.ppm")).unwrap();

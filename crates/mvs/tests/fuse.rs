@@ -79,7 +79,7 @@ fn a_thinned_cloud_covers_the_same_surface() {
     let area = |c: &mvs::Fused| c.radius.iter().map(|r| (r * r) as f64).sum::<f64>();
     assert!((area(&t) - area(&f)).abs() < 1e-6 * area(&f), "covered area {} against {}", area(&t), area(&f));
     // uniformly: each quarter of the patch keeps about a quarter of the points
-    let left = t.xyz.chunks_exact(3).filter(|p| p[0] < 0.5).count();
+    let left = t.xyz.as_chunks::<3>().0.iter().filter(|p| p[0] < 0.5).count();
     assert!((1_000..1_500).contains(&left), "{left} of 2500 kept in the left half");
     assert_eq!(f.thinned(n + 5, 7), f, "a budget above the cloud keeps it whole");
 }

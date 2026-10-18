@@ -236,7 +236,7 @@ impl Precompiled {
             return Err("precompiled_charsmap: empty trie".into());
         }
         let trie: Vec<u32> =
-            trie_raw.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            trie_raw.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         let normalized = String::from_utf8(charsmap[blob_at..].to_vec())
             .map_err(|e| format!("precompiled_charsmap: normalized blob is not UTF-8: {e}"))?;
         Ok(Precompiled { trie, normalized })

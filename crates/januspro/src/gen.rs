@@ -128,7 +128,7 @@ impl GenHeads {
     /// for (the rest of the batch is padding the MLPs compute and this drops).
     pub fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         let width = self.head.cfg.input_dim as usize;
-        assert!(hidden.len() % width == 0 && hidden.len() <= self.rows as usize * width, "{} hidden values for at most {} rows of {width}", hidden.len(), self.rows);
+        assert!(hidden.len().is_multiple_of(width) && hidden.len() <= self.rows as usize * width, "{} hidden values for at most {} rows of {width}", hidden.len(), self.rows);
         let n = hidden.len() / width;
         let mut padded = hidden.to_vec();
         padded.resize(self.rows as usize * width, 0.0);

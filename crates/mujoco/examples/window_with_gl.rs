@@ -36,7 +36,7 @@ use wm_display::window::SdlWindow;
 
 fn pattern(w: u32, h: u32, phase: u32) -> Vec<u8> {
     let mut rgb = vec![0u8; (w * h * 3) as usize];
-    for (i, px) in rgb.chunks_exact_mut(3).enumerate() {
+    for (i, px) in rgb.as_chunks_mut::<3>().0.iter_mut().enumerate() {
         let (x, y) = (i as u32 % w, i as u32 / w);
         let on = ((x + phase * 8) / 40 + y / 40).is_multiple_of(2);
         px[0] = if on { 255 } else { 0 };

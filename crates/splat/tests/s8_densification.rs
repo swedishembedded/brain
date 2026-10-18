@@ -63,7 +63,7 @@ fn targets(g: &Gpu, ks: Kernels, truth: &Splats, w: u32, h: u32) -> Vec<TargetVi
         .map(|c| {
             ren.render(g, &gs, c, &o);
             let img = ren.read_rgba(g, c.width, c.height);
-            TargetView::new(*c, img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
+            TargetView::new(*c, img.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect()
 }
@@ -119,7 +119,7 @@ fn a_fit_that_can_add_gaussians_beats_one_that_cannot() {
     let mut render = |s: &Splats| -> Vec<f32> {
         let gs = GpuSplats::upload(&g, s);
         ren.render(&g, &gs, &t[0].cam, &o);
-        ren.read_rgba(&g, w, h).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()
+        ren.read_rgba(&g, w, h).as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()
     };
     let (ra, rb) = (render(&a), render(&b));
     let (da, db) = (psnr(&ra, &t[0].rgb), psnr(&rb, &t[0].rgb));
@@ -335,7 +335,7 @@ fn a_view_dependent_surface_needs_view_dependent_colour() {
             let gs = GpuSplats::upload(&g, &truth);
             ren.render(&g, &gs, c, &o);
             let rgba = ren.read_rgba(&g, w, h);
-            TargetView::new(*c, rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
+            TargetView::new(*c, rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect();
 
@@ -404,7 +404,7 @@ fn inflatable_scene(g: &Gpu, ks: Kernels) -> (Splats, Vec<TargetView>) {
             let c = cam_at(*e);
             ren.render(g, &gs, &c, &o);
             let img = ren.read_rgba(g, w, h);
-            TargetView::new(c, img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
+            TargetView::new(c, img.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect();
 

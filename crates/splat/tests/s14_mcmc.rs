@@ -47,7 +47,7 @@ fn render(g: &Gpu, ks: Kernels, s: &Splats, c: &Camera) -> Vec<f32> {
     let mut r = Renderer::new(g, ks, s.len().max(1), c.width, c.height, 0);
     let gs = GpuSplats::upload(g, s);
     r.render(g, &gs, c, &o);
-    r.read_rgba(g, c.width, c.height).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()
+    r.read_rgba(g, c.width, c.height).as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()
 }
 
 /// One gaussian, repeated `n` times at the same place, with the paper's
@@ -279,7 +279,7 @@ fn targets(g: &Gpu, ks: Kernels, truth: &Splats, w: u32, h: u32) -> Vec<TargetVi
         .map(|c| {
             ren.render(g, &gs, c, &o);
             let img = ren.read_rgba(g, c.width, c.height);
-            TargetView::new(*c, img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
+            TargetView::new(*c, img.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect()
 }
@@ -404,7 +404,7 @@ fn mcmc_reconstructs_better_than_the_heuristic_at_the_same_budget() {
     let mut shot = |s: &Splats| -> Vec<f32> {
         let gs = GpuSplats::upload(&g, s);
         ren.render(&g, &gs, &t[0].cam, &o);
-        ren.read_rgba(&g, w, h).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()
+        ren.read_rgba(&g, w, h).as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()
     };
     let (da, db) = (psnr(&shot(&a), &t[0].rgb), psnr(&shot(&b), &t[0].rgb));
     // 22.4 against 22.1 dB, small for the same reason the loss margin is.

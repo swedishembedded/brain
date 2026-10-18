@@ -35,7 +35,7 @@
 //! * **Real n-gram anti-repetition.** `model::serve::apply_no_repeat_ngram` -
 //!   a verbatim port of upstream's own `vllm-project/recipes` entry for this
 //!   model (`ngram_size = 30`, `window_size = 90`, `<td>`/`</td>` whitelisted)
-//!   - runs on every step's logits before argmax, through
+//!   and runs on every step's logits before argmax, through
 //!   `DeepseekOcr::generate_greedy_kv_from_prompt_stream_filtered`.
 //! * **Real token accounting.** `prompt_tokens` / `completion_tokens` /
 //!   `finish_reason` are set explicitly, because `apiserve::bridge::read_outcome`

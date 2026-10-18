@@ -148,7 +148,7 @@ fn the_scene_looks_like_the_photographs_it_was_built_from() {
         // the camera the model RECOVERED, not a look_at approximation of it
         ren.render(g, &gs, cam, &ro);
         let rgba = ren.read_rgba(g, w, h);
-        let rgb: Vec<f32> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        let rgb: Vec<f32> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
         let want: Vec<f32> = photos[i].px.iter().map(|&v| v as f32 / 255.0).collect();
 
         let db = psnr(&rgb, &want);

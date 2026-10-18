@@ -81,7 +81,7 @@ fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
     let inv = capability::Invocation::new().blob("x", capability::Blob::new(capability::Media::Bytes, x_bytes).with_meta(serde_json::json!({"n": n})));
     let out = instance.lock().unwrap().run("forward", &inv, &mut |_| {}).expect("forward");
     let hidden_blob = out.blobs.get("hidden").expect("hidden blob");
-    let sharded: Vec<f32> = hidden_blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+    let sharded: Vec<f32> = hidden_blob.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
 
     // ---- unsharded reference: SAME checkpoint, read via the SAME real
     // loaders, one device, no handoff ----
@@ -158,7 +158,7 @@ fn sharded_generate_matches_unsharded_generate() {
         );
         let out = instance.run("generate", &inv, &mut |_| {}).expect("generate");
         let blob = out.blobs.get("ids").expect("ids blob");
-        blob.bytes.chunks_exact(4).map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect()
+        blob.bytes.as_chunks::<4>().0.iter().map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect()
     };
 
     let mut sharded = sharded_resident.activate_multi(&key, &[Device::Gpu(0), Device::Gpu(1)]).expect("activate_multi sharded");
@@ -216,7 +216,7 @@ fn generate_first_token_matches_independently_assembled_reference() {
     );
     let out = instance.run("generate", &inv, &mut |_| {}).expect("generate");
     let blob = out.blobs.get("ids").expect("ids blob");
-    let via_generate: Vec<u32> = blob.bytes.chunks_exact(4).map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+    let via_generate: Vec<u32> = blob.bytes.as_chunks::<4>().0.iter().map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
     assert_eq!(via_generate.len(), 1, "expected exactly one generated token");
     drop(instance);
 
@@ -237,7 +237,7 @@ fn generate_first_token_matches_independently_assembled_reference() {
     let fwd_out = instance2.run("forward", &inv2, &mut |_| {}).expect("forward");
     drop(instance2);
     let hidden_blob = fwd_out.blobs.get("hidden").expect("hidden blob");
-    let hidden: Vec<f32> = hidden_blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+    let hidden: Vec<f32> = hidden_blob.bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
     let last_row = &hidden[(prompt_ids.len() - 1) * d..prompt_ids.len() * d];
 
     // Matching what Int8ThinkerInstance::generate() actually dispatches for

@@ -84,7 +84,7 @@ pub fn bytes_to_unicode() -> [char; 256] {
     }
 
     let mut table = ['\0'; 256];
-    for (b, c) in bs.into_iter().zip(cs.into_iter()) {
+    for (b, c) in bs.into_iter().zip(cs) {
         table[b as usize] = char::from_u32(c).expect("valid code point");
     }
     table

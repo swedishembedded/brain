@@ -381,7 +381,7 @@ pub fn reconstruct_with(photos: &[Photo], cfg: &SfmCfg, nn: &dyn NearestNeighbou
     // and the descriptors already are, extremum detection is not
     let feats: Features = backend_cpu::par::map(n, |i| {
         let p = &photos[i];
-        let gray: Vec<f32> = p.rgb.chunks_exact(3).map(|c| (0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32) / 255.0).collect();
+        let gray: Vec<f32> = p.rgb.as_chunks::<3>().0.iter().map(|c| (0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32) / 255.0).collect();
         detect(&gray, p.width as usize, p.height as usize, &cfg.sift)
     });
     let features_s = clock.elapsed().as_secs_f64();

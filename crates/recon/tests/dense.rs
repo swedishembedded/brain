@@ -57,7 +57,7 @@ fn stereo_priors_land_on_each_target_at_its_resolution_and_agree_with_the_surfac
         .iter()
         .map(|c| {
             ren.render(&g, &gs, c, &o);
-            Rgb8 { w, h, px: ren.read_rgba(&g, w, h).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect() }
+            Rgb8 { w, h, px: ren.read_rgba(&g, w, h).as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect() }
         })
         .collect();
     // targets one halving below the photographs; the truth rendered there
@@ -68,11 +68,11 @@ fn stereo_priors_land_on_each_target_at_its_resolution_and_agree_with_the_surfac
         ren.render(&g, &gs, &hc, &o);
         let rgba = ren.read_rgba(&g, hc.width, hc.height);
         let aux = ren.read_aux(&g, hc.width, hc.height);
-        targets.push(TargetView::new(hc, rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()));
-        want.push((rgba.chunks_exact(4).map(|p| p[3]).collect(), aux.chunks_exact(5).map(|a| a[0]).collect()));
+        targets.push(TargetView::new(hc, rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()));
+        want.push((rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect(), aux.as_chunks::<5>().0.iter().map(|a| a[0]).collect()));
     }
     let tracks: Vec<mvs::Track> =
-        truth.means.chunks_exact(3).step_by(7).map(|m| mvs::Track { xyz: [m[0] as f64, m[1] as f64, m[2] as f64], views: Vec::new() }).collect();
+        truth.means.as_chunks::<3>().0.iter().step_by(7).map(|m| mvs::Track { xyz: [m[0] as f64, m[1] as f64, m[2] as f64], views: Vec::new() }).collect();
     let cfg = DenseCfg { stereo: mvs::StereoCfg { halving: 0, levels: 2, ..Default::default() }, ..Default::default() };
     let refs: Vec<&Rgb8> = photos.iter().collect();
     let (init, report) = dense(&g, &mk, &full, &refs, &tracks, &mut targets, &cfg).expect("stereo runs");
@@ -111,7 +111,7 @@ fn stereo_priors_land_on_each_target_at_its_resolution_and_agree_with_the_surfac
     // noise (about 1% of a 3 m range here)
     let on_surface = init
         .means
-        .chunks_exact(3)
+        .as_chunks::<3>().0.iter()
         .filter(|m| {
             let floor = (m[1] - 1.0).abs() < 0.05;
             let (c, rad) = common::BALL;

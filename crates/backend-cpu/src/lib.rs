@@ -540,7 +540,7 @@ impl CpuBackend {
         let g = prof.lock().unwrap_or_else(|e| e.into_inner());
         let mut rows: Vec<(usize, std::time::Duration, u64)> =
             g.iter().enumerate().map(|(i, (d, c))| (i, *d, *c)).filter(|r| r.2 > 0).collect();
-        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.1));
         let total: std::time::Duration = g.iter().map(|(d, _)| *d).sum();
         eprintln!("=== BRAIN_PROFILE (CPU backend, total {:.1} ms) ===", total.as_secs_f64() * 1e3);
         for (i, d, c) in rows {

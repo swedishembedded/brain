@@ -2760,7 +2760,7 @@ async fn openai_chat_stream_sends_keepalive_comments_while_the_model_is_silent()
             Ok(None) => panic!("stream ended before any keepalive"),
             Ok(Some(frame)) => {
                 let bytes = frame.expect("stream frame");
-                if bytes.iter().any(|&b| b == b':') {
+                if bytes.contains(&b':') {
                     saw_comment = true;
                     break;
                 }

@@ -389,8 +389,8 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
             // The speculation reserve grows with the context (the drafter's KV), so
             // the context is the largest one that fits beside ITS OWN reserve.
             let upper = auto_cap(&model_cfg, &devices, &tier, kv, max_batch, prefix_slots).ok_or_else(|| format!("{gguf_path} does not fit across the {} budgeted device(s) even with a one-token context", devices.len()))?;
-            let cap = largest_fitting(upper, |c| auto_cap(&model_cfg, &devices_for(c), &tier, kv, max_batch, prefix_slots).is_some_and(|fit| fit >= c));
-            cap
+            
+            largest_fitting(upper, |c| auto_cap(&model_cfg, &devices_for(c), &tier, kv, max_batch, prefix_slots).is_some_and(|fit| fit >= c))
         }
     };
     let mut resident = Qwen35GgufResident::new(gguf_path.to_string(), devices_for(cap), cap, tier).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_prefill_policy(cfg.prefill_policy_or_default()).with_model_id(id);

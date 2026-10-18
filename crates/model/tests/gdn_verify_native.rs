@@ -42,6 +42,9 @@ fn u32s(g: &gpu_core::Gpu, v: &[u32]) -> gpu_core::DeviceBuffer {
     b
 }
 
+/// One verify case: key heads, group, rows per sequence, pool rows, pool row of each sequence.
+type GdnCase<'a> = (u32, u32, &'a [u32], u32, &'a [u32]);
+
 #[test]
 fn verify_rows_and_snapshots_equal_repeated_single_steps_and_commit_restores_them() {
     let g = gpu_core::testgpu::dev(&[]);
@@ -51,7 +54,7 @@ fn verify_rows_and_snapshots_equal_repeated_single_steps_and_commit_restores_the
     }
     let (dk, dv, kw) = (128u32, 128u32, 4u32);
     // (key heads, group, rows per sequence, pool rows, pool row of each sequence)
-    let cases: [(u32, u32, &[u32], u32, &[u32]); 4] =
+    let cases: [GdnCase; 4] =
         [(1, 1, &[1], 2, &[1]), (2, 3, &[3, 1, 5], 5, &[3, 0, 2]), (4, 2, &[8, 2, 1, 4], 6, &[5, 1, 0, 3]), (16, 3, &[2, 2], 3, &[2, 0])];
     for (case, &(nkh, group, counts, pool_rows, slots)) in cases.iter().enumerate() {
         let nvh = nkh * group;

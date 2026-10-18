@@ -50,7 +50,7 @@ fn bands_that_have_not_switched_on_stay_at_zero() {
     let (degree, rest) = out.sh_rest.expect("an SH fit returns its coefficients");
     assert_eq!(degree, 3);
     let (mut low, mut high) = (0.0f32, 0.0f32);
-    for coeffs in rest.chunks_exact(15) {
+    for coeffs in rest.as_chunks::<15>().0 {
         low += coeffs[..3].iter().map(|v| v.abs()).sum::<f32>();
         high += coeffs[3..].iter().map(|v| v.abs()).sum::<f32>();
     }
@@ -109,7 +109,7 @@ fn each_gaussian_gets_the_view_dependence_its_own_views_support() {
     blob(&mut truth, [0.0, -6.0, 0.0], 12); // B: far above it
     // strong view-dependent colour everywhere: degree 1, red along +x
     let mut rest = vec![0.0f32; truth.len() * 9];
-    for c in rest.chunks_exact_mut(9) {
+    for c in rest.as_chunks_mut::<9>().0 {
         c[2] = -0.6;
         c[3 + 2] = 0.3;
     }
@@ -152,7 +152,7 @@ fn each_gaussian_gets_the_view_dependence_its_own_views_support() {
     let (out, _) = fit(&g, Kernels::at(0), &init, &targets, &cfg, &mut |_, _| true);
     let (_, rest) = out.sh_rest.expect("an SH fit returns its coefficients");
     let (mut a, mut b) = (0.0f32, 0.0f32);
-    for (m, c) in out.means.chunks_exact(3).zip(rest.chunks_exact(9)) {
+    for (m, c) in out.means.as_chunks::<3>().0.iter().zip(rest.as_chunks::<9>().0.iter()) {
         let mag = c.iter().map(|v| v.abs()).sum::<f32>();
         if m[1] > -3.0 { a += mag } else { b += mag }
     }

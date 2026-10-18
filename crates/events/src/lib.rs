@@ -515,7 +515,7 @@ pub mod bytes {
             return Err(format!("f32 payload byte length {} not a multiple of 4", bytes.len()));
         }
         Ok(bytes
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect())
     }

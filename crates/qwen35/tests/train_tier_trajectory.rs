@@ -28,8 +28,11 @@ use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
 const STEPS: u32 = 30;
 
+/// What a training run reports: its loss curve, the final adapter weights and the GEMM path taken.
+type TrainOutcome = (Vec<f32>, Vec<(String, Vec<f32>)>, GemmPath);
+
 /// Loss curve and final adapter weights of `STEPS` AdamW steps on `gpu`.
-fn train(gpu: &Gpu, init: &std::collections::HashMap<String, Vec<f32>>, precision: GemmPrecision, gdn_segment: Option<u32>) -> (Vec<f32>, Vec<(String, Vec<f32>)>, GemmPath) {
+fn train(gpu: &Gpu, init: &std::collections::HashMap<String, Vec<f32>>, precision: GemmPrecision, gdn_segment: Option<u32>) -> TrainOutcome {
     let opts = TrainOpts { base: TierPolicy::uniform(Dtype::BF16), recompute: true, gemm_precision: precision, gdn_segment_tokens: gdn_segment, ..TrainOpts::default() };
     let m = Qwen35::new_train_opts_on(gpu.share(), lora_config(), 1, T as u32, init, &opts);
     m.set_batch(&TOKENS, &TARGETS);

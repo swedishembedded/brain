@@ -330,15 +330,15 @@ impl StModel {
 fn decode(dtype: safetensors::Dtype, raw: &[u8]) -> Result<Vec<f32>, String> {
     Ok(match dtype {
         safetensors::Dtype::F32 => raw
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect(),
         safetensors::Dtype::F16 => raw
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
             .collect(),
         safetensors::Dtype::BF16 => raw
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|b| half::bf16::from_le_bytes([b[0], b[1]]).to_f32())
             .collect(),
         other => return Err(format!("st: unsupported dtype {other:?}")),

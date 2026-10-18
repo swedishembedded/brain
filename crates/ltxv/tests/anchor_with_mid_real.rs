@@ -40,7 +40,7 @@ const PROMPT: &str = "a belgian malinois dog running at full speed along a mount
 fn mean_saturation(rgb: &[u8]) -> f64 {
     let n = rgb.len() / 3;
     let mut acc = 0.0f64;
-    for p in rgb.chunks_exact(3) {
+    for p in rgb.as_chunks::<3>().0 {
         let (r, g, b) = (p[0] as f64, p[1] as f64, p[2] as f64);
         let hi = r.max(g).max(b);
         let lo = r.min(g).min(b);

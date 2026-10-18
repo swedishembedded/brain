@@ -310,8 +310,9 @@ pub struct DecisionPipeline {
 /// not a trait object, per this milestone's design review.
 enum Backend {
     /// `crates/decide`'s MiniLM/BERT-family encoder + cross-attention head -
-    /// the pre-existing, unchanged path ([`load_decide`]).
-    Decide(Decide),
+    /// the pre-existing, unchanged path ([`load_decide`]). Boxed like `Laya`: the two are
+    /// whole on-device models and the enum would be as large as either.
+    Decide(Box<Decide>),
     /// `convaiinnovations/laya`'s ModernBERT-large trunk + its own decision
     /// head (`crates/modernbert`). Boxed: [`LayaEngine`] carries two whole
     /// on-device models, and would otherwise make every `Backend::Decide`
@@ -1004,7 +1005,7 @@ impl DecisionPipeline {
     /// this module's doc).
     pub fn inner(&mut self) -> Option<&mut Decide> {
         match &mut self.backend {
-            Backend::Decide(model) => Some(model),
+            Backend::Decide(model) => Some(model.as_mut()),
             Backend::Laya(_) => None,
         }
     }
@@ -1314,7 +1315,7 @@ fn resolve_decision_backend(dir: &str, head: Option<&str>, device: &Device, limi
     if decisions::engine::is_laya_dir(Path::new(dir)) {
         return Ok(Backend::Laya(Box::new(load_laya(dir, head, device, seed)?)));
     }
-    Ok(Backend::Decide(load_decide(dir, head, device, limits, seed)?))
+    Ok(Backend::Decide(Box::new(load_decide(dir, head, device, limits, seed)?)))
 }
 
 /// Build a [`LayaEngine`] from a `convaiinnovations/laya`-shaped checkpoint

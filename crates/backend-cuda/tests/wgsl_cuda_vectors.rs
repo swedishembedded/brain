@@ -315,10 +315,10 @@ fn inlined_helper_functions_return_early_loop_and_read_storage_correctly() {
         }
         acc
     };
-    for i in 0..N {
+    for (i, &value) in got.iter().enumerate().take(N) {
         let (a, bb) = (pick(i), pick(i + 1));
         let want = (((a.0 + a.0) + a.1) + sum_to(i % 8)) - (bb.1 + bb.1);
-        assert_eq!(got[i].to_bits(), want.to_bits(), "element {i}: {} vs {want}", got[i]);
+        assert_eq!(value.to_bits(), want.to_bits(), "element {i}: {value} vs {want}");
     }
 }
 
@@ -373,7 +373,7 @@ fn workgroup_scalars_start_at_zero_and_a_uniform_load_publishes_the_write() {
     let out = b.storage(N as u64);
     b.submit(&[], &[b.step(5, &[&out], &[N as u32], N as u32)]);
     let got = b.read(&out, N);
-    for g in 0..N {
+    for (g, &value) in got.iter().enumerate().take(N) {
         let wg = (g / 64) as u32;
         let f = 3.0f32 + wg as f32;
         let mut acc = 0.0f32;
@@ -381,7 +381,7 @@ fn workgroup_scalars_start_at_zero_and_a_uniform_load_publishes_the_write() {
             acc += f * k as f32;
         }
         let want = acc + (g % 64) as f32;
-        assert_eq!(got[g].to_bits(), want.to_bits(), "invocation {g}: {} vs {want}", got[g]);
+        assert_eq!(value.to_bits(), want.to_bits(), "invocation {g}: {value} vs {want}");
     }
 }
 

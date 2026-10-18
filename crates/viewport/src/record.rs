@@ -182,7 +182,7 @@ mod tests {
             let mut frame = vec![0u8; (w * h * 3) as usize];
             // Something that changes, so a decoder that returns the same frame
             // twenty times would be visible rather than plausible.
-            for px in frame.chunks_exact_mut(3) {
+            for px in frame.as_chunks_mut::<3>().0 {
                 px[0] = (i * 12) as u8;
             }
             rec.frame(&frame);
@@ -220,7 +220,7 @@ mod tests {
         // Raw video has no framing, so a short frame would not be rejected by
         // ffmpeg - it would shift every following frame by the difference and
         // produce a diagonally sheared video that looks like a driver bug.
-        rec.frame(&vec![0u8; 8 * 8 * 3 - 1]);
+        rec.frame(&[0u8; 8 * 8 * 3 - 1]);
         assert_eq!(rec.frames(), 0);
         let _ = rec.finish();
         let _ = std::fs::remove_file(&path);

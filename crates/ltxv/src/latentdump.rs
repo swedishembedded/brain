@@ -84,7 +84,7 @@ pub fn read(path: &str) -> Result<(LatentShape, Vec<f32>), String> {
     if raw.len() != shape.len() * 4 {
         return Err(format!("{path}: {shape:?} needs {} bytes of payload, file has {}", shape.len() * 4, raw.len()));
     }
-    let data = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let data = raw.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
     Ok((shape, data))
 }
 

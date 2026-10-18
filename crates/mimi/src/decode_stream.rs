@@ -253,7 +253,7 @@ impl<'a> Back<'a> {
             // way is correct for BOTH conventions (pad=0 always emits
             // exactly l*rate, so this is a no-op change for the standalone
             // codec's own existing behavior).
-            l = if out_dim > 0 { h.len() / out_dim } else { 0 };
+            l = h.len().checked_div(out_dim).unwrap_or(0);
             for (j, dil) in [(2usize, 1usize), (3, 3), (4, 9)] {
                 h = self.residual_unit(&h, &format!("{bp}.block.{j}"), out_dim, dil, l);
             }

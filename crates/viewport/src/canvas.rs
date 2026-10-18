@@ -90,7 +90,7 @@ impl Canvas {
     }
 
     pub fn clear(&mut self, c: [u8; 3]) {
-        for px in self.pixels.chunks_exact_mut(3) {
+        for px in self.pixels.as_chunks_mut::<3>().0 {
             px.copy_from_slice(&c);
         }
     }

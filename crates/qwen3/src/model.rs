@@ -1147,7 +1147,7 @@ impl Qwen {
         let int8_base = lora_base_tier && dt == Dtype::I8;
         // The tables of a half-precision or int8 base are held in bf16.
         let half_tables = lora_base_tier && Dtype::BF16.promote(&ops.caps().numeric) == Dtype::BF16;
-        assert!(!half_tables || cfg.d_model % 2 == 0, "a bf16 table packs two values to a word, so d_model must be even");
+        assert!(!half_tables || cfg.d_model.is_multiple_of(2), "a bf16 table packs two values to a word, so d_model must be even");
         let is_table = |name: &str| name == "tok.weight" || name == "lm_head.weight";
         let plist: Vec<(String, usize)> = shard_param_list(&cfg, &shard)
             .into_iter()
@@ -4585,7 +4585,7 @@ mod tests {
             return; // no f16 storage path on this device (already reported)
         };
         let cfg = tile_shaped_cfg();
-        let wide: Vec<u32> = (0..cfg.block_size).map(|i| (i * 7 % cfg.vocab) as u32).collect();
+        let wide: Vec<u32> = (0..cfg.block_size).map(|i| i * 7 % cfg.vocab).collect();
         let (wide_kernels, _) = half_tier_gate(cfg, 64, &wide, Dtype::F16).expect("f16 availability cannot change mid-test");
         println!("f16 kernels dispatched: narrow {narrow_kernels:?}, wide {wide_kernels:?}");
 

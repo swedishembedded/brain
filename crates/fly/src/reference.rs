@@ -78,8 +78,8 @@ impl Reference {
             ));
         }
         let data: Vec<f32> = bytes[head..]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>().0.iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         let moving = moving_dofs(&data, nq, nv, stride);
         Ok(Reference { timestep, nq, nv, lengths, offsets, data, moving })
@@ -154,7 +154,7 @@ impl Reference {
 
 /// Velocity indices whose value differs from the first frame anywhere.
 fn moving_dofs(data: &[f32], nq: usize, nv: usize, stride: usize) -> Vec<u32> {
-    let frames = if stride == 0 { 0 } else { data.len() / stride };
+    let frames = data.len().checked_div(stride).unwrap_or(0);
     let mut moving = vec![false; nv];
     if frames == 0 {
         return Vec::new();

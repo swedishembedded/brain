@@ -168,7 +168,7 @@ pub(crate) fn build_pipeline(ctx: &VkContext, spec: &NativeSpec) -> Result<Nativ
     if !code.len().is_multiple_of(4) {
         return Err(format!("SPIR-V blob is not word-aligned ({} bytes)", code.len()));
     }
-    let words: Vec<u32> = code.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let words: Vec<u32> = code.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
 
     let wgsl_bindings: Vec<vulkan::shader::WgslBinding> = bindings
         .iter()

@@ -74,7 +74,7 @@ impl Vocabulary {
         let mut sample: Vec<f32> = Vec::with_capacity(total.min(TRAIN_SAMPLE) * DESC);
         let mut k = 0usize;
         for d in images {
-            for f in d.chunks_exact(DESC) {
+            for f in d.as_chunks::<DESC>().0 {
                 if k.is_multiple_of(stride) {
                     sample.extend_from_slice(f);
                 }
@@ -146,13 +146,13 @@ impl Vocabulary {
     /// length. An image with no descriptors gets the zero vector.
     pub fn vlad(&self, desc: &[f32]) -> Vec<f32> {
         let mut v = vec![0.0f32; self.words * DESC];
-        for d in desc.chunks_exact(DESC) {
+        for d in desc.as_chunks::<DESC>().0 {
             let w = self.nearest(d);
             for (acc, (x, c)) in v[w * DESC..(w + 1) * DESC].iter_mut().zip(d.iter().zip(self.centre(w))) {
                 *acc += x - c;
             }
         }
-        for block in v.chunks_exact_mut(DESC) {
+        for block in v.as_chunks_mut::<DESC>().0 {
             let n = block.iter().map(|x| x * x).sum::<f32>().sqrt();
             if n > 0.0 {
                 block.iter_mut().for_each(|x| *x /= n);

@@ -72,7 +72,7 @@ fn run(ctx: &exec::Context, name: &str, wgsl: &str, block: u32, n_bindings: usiz
     ctx.sync().expect("sync");
     let mut raw = vec![0u8; total * 4];
     ctx.download(&mem, &mut raw).expect("download");
-    raw.chunks_exact(4).map(|c| u32::from_ne_bytes(c.try_into().unwrap())).collect()
+    raw.as_chunks::<4>().0.iter().map(|c| u32::from_ne_bytes(*c)).collect()
 }
 
 #[test]

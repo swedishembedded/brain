@@ -220,7 +220,7 @@ fn cached_clone_audio_quality() {
     if std::path::Path::new(&GOLD).exists() {
         let b = std::fs::read(&GOLD).unwrap();
         let gcodes: Vec<u32> = b[8..]
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         let gw = qwen3tts::pipeline::decode_codes(&paths.codec, &gcodes).unwrap();

@@ -331,5 +331,5 @@ fn check_one(name: &str, resident: impl ResidentModel, context: &[f32]) {
 }
 
 fn read_f32_le(bytes: &[u8]) -> Vec<f32> {
-    bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect()
+    bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect()
 }

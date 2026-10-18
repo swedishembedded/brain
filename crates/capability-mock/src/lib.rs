@@ -311,7 +311,7 @@ mod tests {
         assert_eq!(blob.meta, json!({"sample_rate": 8000, "channels": 2}));
         // 0.1s @ 8000Hz * 2 channels * 4 bytes/f32
         assert_eq!(blob.bytes.len(), 800 * 2 * 4);
-        let samples: Vec<f32> = blob.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let samples: Vec<f32> = blob.bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         assert!(samples.iter().any(|&s| s.abs() > 1e-6), "tone must not be silent");
         assert!(samples.iter().all(|&s| (-1.0..=1.0).contains(&s)));
     }

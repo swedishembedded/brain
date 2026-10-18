@@ -369,7 +369,7 @@ mod tests {
         let out = p.action("upscale").unwrap().run(&inv, &mut |_| {}).expect("run");
         let b = out.blobs.get("image").expect("image out");
         let flat: Vec<f32> =
-            b.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            b.bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         let got = imaging::pixels::hwc_to_chw(&flat, 3, 4, 4);
         for c in 0..3usize {
             for y in 0..4usize {

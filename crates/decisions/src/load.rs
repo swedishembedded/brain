@@ -80,7 +80,7 @@ pub fn load(id: &str, dir: &Path, make_gpu: impl FnOnce(Backend) -> Result<Gpu, 
                 return Err(failed(id, dir, "the encoder carries no trained head"));
             }
             let gpu = make_gpu(backend).map_err(|e| failed(id, dir, &e))?;
-            Engine::Decide(weights.build(gpu, decide::decide::Limits::default(), false))
+            Engine::Decide(Box::new(weights.build(gpu, decide::decide::Limits::default(), false)))
         }
         Backend::Laya => {
             let weights = LayaWeights::read(dir_str, None).map_err(|e| failed(id, dir, &e))?;

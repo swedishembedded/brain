@@ -80,7 +80,7 @@ fn credit_assignment_attributes_the_residual_to_its_cause() {
     let mut ev = Evidence::new(2);
     ev.add_view(&g.read(&grads.d_colors, 6));
 
-    let alpha: f32 = rgba.chunks_exact(4).map(|p| p[3]).sum();
+    let alpha: f32 = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).sum();
     let total: f32 = ev.contribution.iter().sum();
     assert!((total - alpha).abs() < 1e-3 * alpha, "contributions sum to {total}, the frame's alpha to {alpha}");
     assert!(
@@ -108,8 +108,8 @@ fn a_gaussian_at_the_wrong_depth_is_credited_with_the_error() {
     r.render(&g, &gs, &c, &o);
     let rgba = r.read_rgba(&g, c.width, c.height);
     let pred = rgba_to_rgb(&rgba);
-    let alpha: Vec<f32> = rgba.chunks_exact(4).map(|p| p[3]).collect();
-    let range: Vec<f32> = r.read_aux(&g, c.width, c.height).chunks_exact(5).map(|a| a[0]).collect();
+    let alpha: Vec<f32> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+    let range: Vec<f32> = r.read_aux(&g, c.width, c.height).as_chunks::<5>().0.iter().map(|a| a[0]).collect();
     // the prior agrees on the right half and puts the left half 20% farther
     let prior: Vec<f32> = range.iter().enumerate().map(|(p, v)| if p % 48 < 24 { 1.2 * v } else { *v }).collect();
     let geom = density::range_residual(&range, &alpha, &prior);
@@ -257,8 +257,8 @@ fn an_object_nothing_was_seeded_near_is_grown_where_the_photographs_show_it() {
             ren.render(&g, &gs, c, &o);
             let rgb = rgba_to_rgb(&ren.read_rgba(&g, w, h));
             let aux = ren.read_aux(&g, w, h);
-            let alpha: Vec<f32> = ren.read_rgba(&g, w, h).chunks_exact(4).map(|p| p[3]).collect();
-            let range: Vec<f32> = aux.chunks_exact(5).zip(&alpha).map(|(a, al)| if *al > 0.5 { a[0] } else { 0.0 }).collect();
+            let alpha: Vec<f32> = ren.read_rgba(&g, w, h).as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+            let range: Vec<f32> = aux.as_chunks::<5>().0.iter().zip(&alpha).map(|(a, al)| if *al > 0.5 { a[0] } else { 0.0 }).collect();
             TargetView::new(*c, rgb).with_depth(range, None)
         })
         .collect();
@@ -267,7 +267,7 @@ fn an_object_nothing_was_seeded_near_is_grown_where_the_photographs_show_it() {
         let mut s = truth.clone();
         s.opacities[..64].fill(0.0);
         ren.render(&g, &GpuSplats::upload(&g, &s), &cams[0], &o);
-        ren.read_rgba(&g, w, h).chunks_exact(4).enumerate().filter(|(_, p)| p[3] > 0.9).map(|(i, _)| i).collect()
+        ren.read_rgba(&g, w, h).as_chunks::<4>().0.iter().enumerate().filter(|(_, p)| p[3] > 0.9).map(|(i, _)| i).collect()
     };
     assert!(block_px.len() > 30, "the block covers {} pixels of the first view", block_px.len());
 
@@ -348,11 +348,11 @@ fn children_of_a_surface_gaussian_stay_in_its_surface() {
     // below a pixel: cloned, and the rest of a target of 8 grown at it
     density::round(&mut scene, &ev, &[0.5], &mut Vec::new(), 8, &policy, 11);
     assert_eq!(scene.len(), 8);
-    for m in scene.means.chunks_exact(3) {
+    for m in scene.means.as_chunks::<3>().0 {
         let off = (0..3).map(|k| (m[k] - parent.means[k]) * normal[k]).sum::<f32>();
         assert!(off.abs() < 1e-5, "a child sits {off} off its parent's surface");
     }
-    let spread = scene.means.chunks_exact(3).map(|m| (m[0] - 0.1).abs() + (m[1] + 0.2).abs()).fold(0.0f32, f32::max);
+    let spread = scene.means.as_chunks::<3>().0.iter().map(|m| (m[0] - 0.1).abs() + (m[1] + 0.2).abs()).fold(0.0f32, f32::max);
     assert!(spread > 0.01, "the children did not move across the surface at all");
 }
 

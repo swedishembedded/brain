@@ -1065,20 +1065,20 @@ pub(crate) fn dequantize(ty: u32, raw: &[u8], numel: usize) -> Result<Vec<f32>, 
         };
     };
     Ok(match t {
-        GgmlType::F32 => raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
-        GgmlType::F16 => raw.chunks_exact(2).map(|b| crate::safetensors::f16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
-        GgmlType::BF16 => raw.chunks_exact(2).map(|b| crate::safetensors::bf16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
+        GgmlType::F32 => raw.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
+        GgmlType::F16 => raw.as_chunks::<2>().0.iter().map(|b| crate::safetensors::f16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
+        GgmlType::BF16 => raw.as_chunks::<2>().0.iter().map(|b| crate::safetensors::bf16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
         // A plain scalar array, not a quantized block format - `numel`
         // elements read straight off the mapping with no scale to apply.
         // `as f32` is a lossy narrowing for I64/F64 outside f32's exact
         // integer/mantissa range, the same tradeoff this engine already
         // accepts everywhere else by being fp32-only; these ids almost never
         // carry model weights (auxiliary/index tensors, if present at all).
-        GgmlType::F64 => raw.chunks_exact(8).map(|b| f64::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
+        GgmlType::F64 => raw.as_chunks::<8>().0.iter().map(|b| f64::from_le_bytes(*b) as f32).collect(),
         GgmlType::I8 => raw.iter().map(|&b| b as i8 as f32).collect(),
-        GgmlType::I16 => raw.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32).collect(),
-        GgmlType::I32 => raw.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32).collect(),
-        GgmlType::I64 => raw.chunks_exact(8).map(|b| i64::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
+        GgmlType::I16 => raw.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes([b[0], b[1]]) as f32).collect(),
+        GgmlType::I32 => raw.as_chunks::<4>().0.iter().map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32).collect(),
+        GgmlType::I64 => raw.as_chunks::<8>().0.iter().map(|b| i64::from_le_bytes(*b) as f32).collect(),
         GgmlType::Q4_0 => deq_blocks(raw, numel, 18, deq_q4_0),
         GgmlType::Q4_1 => deq_blocks(raw, numel, 20, deq_q4_1),
         GgmlType::Q5_0 => deq_blocks(raw, numel, 22, deq_q5_0),
@@ -1562,7 +1562,7 @@ fn deq_tq1_0(b: &[u8], out: &mut Vec<f32>) {
 fn deq_tq2_0(b: &[u8], out: &mut Vec<f32>) {
     let qs = &b[0..64];
     let d = f16(b, 64);
-    for chunk in qs.chunks_exact(32) {
+    for chunk in qs.as_chunks::<32>().0 {
         for l in 0..4 {
             for &byte in chunk {
                 let q = ((byte >> (l * 2)) & 3) as f32;

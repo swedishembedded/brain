@@ -147,7 +147,7 @@ pub fn render_rgb(
     });
     ren.render(g, shaded.as_ref().unwrap_or(gs), cam, o);
     ren.read_rgba(g, cam.width, cam.height)
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .flat_map(|p| [p[0], p[1], p[2]])
         .collect()
 }

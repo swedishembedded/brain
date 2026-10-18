@@ -39,7 +39,7 @@ fn weights(cfg: &QwenConfig) -> HashMap<String, Vec<f32>> {
 }
 
 fn one_stage(cfg: &QwenConfig, init: &HashMap<String, Vec<f32>>) -> Trained {
-    Trained::Single(Qwen::new_lora_dt(cfg.clone(), 1, 10, init, Dtype::F32))
+    Trained::Single(Box::new(Qwen::new_lora_dt(cfg.clone(), 1, 10, init, Dtype::F32)))
 }
 
 fn two_stages(cfg: &QwenConfig, init: &HashMap<String, Vec<f32>>) -> Trained {
@@ -47,11 +47,14 @@ fn two_stages(cfg: &QwenConfig, init: &HashMap<String, Vec<f32>>) -> Trained {
     let shards = model::plan_balanced(&cost, &[Shard::ANY_GPU, Shard::ANY_GPU]);
     assert_eq!(shards.len(), 2);
     let pipe = Pipeline::<Qwen>::with_shards_dt(cfg.clone(), 1, 10, init, shards, Dtype::F32);
-    Trained::Pipeline(PipelineModel::new(pipe, cfg.clone()))
+    Trained::Pipeline(Box::new(PipelineModel::new(pipe, cfg.clone())))
 }
 
+/// A forward and backward's outputs: loss values, input-gradient rows and named weight gradients.
+type PipelineOutputs = (Vec<f32>, Vec<f32>, Vec<(String, Vec<f32>)>);
+
 /// Everything one forward and backward produces, through the multimodal seams.
-fn run(mut m: Trained, embeds: &[f32], d_hidden: &[f32]) -> (Vec<f32>, Vec<f32>, Vec<(String, Vec<f32>)>) {
+fn run(mut m: Trained, embeds: &[f32], d_hidden: &[f32]) -> PipelineOutputs {
     m.enable_mm_splices(&REGIONS);
     m.enable_external_head();
     m.write_img_embeds(embeds);

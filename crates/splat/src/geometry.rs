@@ -103,7 +103,7 @@ fn rot_cam(vm: &[f32; 12], v: [f32; 3]) -> [f32; 3] {
 /// composites into its depth output.
 pub fn depths(geo: &[f32], cam: &Camera) -> Vec<f32> {
     let vm = cam.viewmat();
-    geo.chunks_exact(GEO).map(|g| to_cam(&vm, [g[0], g[1], g[2]])[2]).collect()
+    geo.as_chunks::<GEO>().0.iter().map(|g| to_cam(&vm, [g[0], g[1], g[2]])[2]).collect()
 }
 
 /// Per-gaussian features for the distortion pass: `(z², 0, 0)`.
@@ -116,7 +116,7 @@ pub fn distortion_features(z: &[f32]) -> Vec<f32> {
 pub fn normals(geo: &[f32], cam: &Camera) -> Vec<f32> {
     let vm = cam.viewmat();
     let mut out = Vec::with_capacity(geo.len() / GEO * 3);
-    for g in geo.chunks_exact(GEO) {
+    for g in geo.as_chunks::<GEO>().0 {
         let (q, _) = unit(&g[6..10]);
         let n = rot_cam(&vm, axis(q, shortest(&g[3..6])));
         let c = to_cam(&vm, [g[0], g[1], g[2]]);
@@ -131,7 +131,7 @@ pub fn normals(geo: &[f32], cam: &Camera) -> Vec<f32> {
 /// distortion features `d_feat` (`[N*3]`, only the first slot used).
 pub fn distortion_backward(geo: &[f32], cam: &Camera, d_feat: &[f32], d_geo: &mut [f32]) {
     let vm = cam.viewmat();
-    for (i, g) in geo.chunks_exact(GEO).enumerate() {
+    for (i, g) in geo.as_chunks::<GEO>().0.iter().enumerate() {
         let z = to_cam(&vm, [g[0], g[1], g[2]])[2];
         let dz = 2.0 * z * d_feat[i * 3];
         for k in 0..3 {
@@ -146,7 +146,7 @@ pub fn distortion_backward(geo: &[f32], cam: &Camera, d_feat: &[f32], d_geo: &mu
 /// as they are piecewise constant.
 pub fn normals_backward(geo: &[f32], cam: &Camera, d_n: &[f32], d_geo: &mut [f32]) {
     let vm = cam.viewmat();
-    for (i, g) in geo.chunks_exact(GEO).enumerate() {
+    for (i, g) in geo.as_chunks::<GEO>().0.iter().enumerate() {
         let (q, qn) = unit(&g[6..10]);
         let k = shortest(&g[3..6]);
         let a = axis(q, k);

@@ -483,7 +483,7 @@ impl Renderer {
     /// depth supervision needs the colour and the depth of the same frame.
     pub fn read_depth(&self, gpu: &Gpu, w: u32, h: u32) -> Vec<f32> {
         if self.last_ray {
-            return self.read_aux(gpu, w, h).chunks_exact(5).map(|a| a[0]).collect();
+            return self.read_aux(gpu, w, h).as_chunks::<5>().0.iter().map(|a| a[0]).collect();
         }
         gpu.read(&self.depth, (w * h) as usize)
     }
@@ -1079,7 +1079,7 @@ impl Renderer {
         let groups = dispatched_groups(threads);
         let part = gpu.read(&scr.cam_partial, groups * CAMERA_GRAD_WORDS);
         let mut g = [0.0f64; CAMERA_GRAD_WORDS];
-        for c in part.chunks_exact(CAMERA_GRAD_WORDS) {
+        for c in part.as_chunks::<CAMERA_GRAD_WORDS>().0 {
             for (a, b) in g.iter_mut().zip(c) {
                 *a += *b as f64;
             }
@@ -1100,7 +1100,7 @@ impl Renderer {
 /// use - [`Renderer::read_rgba`]'s natural output is RGBA, but every consumer
 /// of a *rendered image* (a wire-format blob, an 8-bit quantizer) wants RGB.
 pub fn rgba_to_rgb(rgba: &[f32]) -> Vec<f32> {
-    rgba.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect()
+    rgba.as_chunks::<4>().0.iter().flat_map(|px| [px[0], px[1], px[2]]).collect()
 }
 
 pub fn sorted_by_depth(s: &Splats, cam: &Camera) -> Splats {

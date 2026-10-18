@@ -53,7 +53,7 @@ fn a_floater_is_where_the_cameras_saw_empty_space() {
         .map(|c| {
             r.render(&g, &gs, c, &o);
             let rgba = r.read_rgba(&g, w, h);
-            r.read_aux(&g, w, h).chunks_exact(5).zip(rgba.chunks_exact(4)).map(|(a, p)| if p[3] > 0.5 { a[0] } else { 0.0 }).collect()
+            r.read_aux(&g, w, h).as_chunks::<5>().0.iter().zip(rgba.as_chunks::<4>().0.iter()).map(|(a, p)| if p[3] > 0.5 { a[0] } else { 0.0 }).collect()
         })
         .collect();
     let obs = Observations::new(&g, &cams, &ranges);
@@ -93,7 +93,7 @@ fn a_fit_that_carves_leaves_no_floater() {
         .map(|c| {
             r.render(&g, &gs, c, &o);
             let rgba = r.read_rgba(&g, w, h);
-            let range: Vec<f32> = r.read_aux(&g, w, h).chunks_exact(5).zip(rgba.chunks_exact(4)).map(|(a, p)| if p[3] > 0.5 { a[0] } else { 0.0 }).collect();
+            let range: Vec<f32> = r.read_aux(&g, w, h).as_chunks::<5>().0.iter().zip(rgba.as_chunks::<4>().0.iter()).map(|(a, p)| if p[3] > 0.5 { a[0] } else { 0.0 }).collect();
             splat::opt::TargetView::new(*c, splat::renderer::rgba_to_rgb(&rgba)).with_depth(range, None)
         })
         .collect();
@@ -115,11 +115,11 @@ fn a_fit_that_carves_leaves_no_floater() {
         depth_weight: 0.0,
         ..Default::default()
     };
-    let near = |s: &Splats| s.means.chunks_exact(3).zip(&s.opacities).filter(|(m, &o)| m[2] < 2.4 && o > 0.05).count();
+    let near = |s: &Splats| s.means.as_chunks::<3>().0.iter().zip(&s.opacities).filter(|(m, &o)| m[2] < 2.4 && o > 0.05).count();
     let (plain, _) = splat::opt::fit(&g, Kernels::at(0), &init, &targets, &cfg, &mut |_, _| true);
     let (carved, _) = splat::opt::fit(&g, Kernels::at(0), &init, &targets, &splat::opt::FitCfg { carve: true, ..cfg }, &mut |_, _| true);
     assert!(near(&plain) > 0, "without carving the floaters survive the fit ({} left) - the test needs them to", near(&plain));
     assert_eq!(near(&carved), 0, "{} floaters survive a fit that carves", near(&carved));
-    let board_left = carved.means.chunks_exact(3).filter(|m| (m[2] - 3.0).abs() < 0.1).count();
+    let board_left = carved.means.as_chunks::<3>().0.iter().filter(|m| (m[2] - 3.0).abs() < 0.1).count();
     assert!(board_left as f64 > 0.95 * truth.len() as f64, "{board_left} of the board's {} gaussians remain", truth.len());
 }

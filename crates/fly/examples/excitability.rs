@@ -240,8 +240,8 @@ fn main() {
     };
 
     println!(
-        "\n{:>8}  {:>9}  {:>9}  {:>8}  {:>9}  {:>9}  {:>9}  {}",
-        "scale", "idle Hz", "mean Hz", "recruited", "current", "% pinned", "KC active", "verdict"
+        "\n{:>8}  {:>9}  {:>9}  {:>8}  {:>9}  {:>9}  {:>9}  verdict",
+        "scale", "idle Hz", "mean Hz", "recruited", "current", "% pinned", "KC active"
     );
     let mut ok: Vec<Measured> = Vec::new();
     for s in scales {

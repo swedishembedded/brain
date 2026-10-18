@@ -281,7 +281,7 @@ mod tests {
         let g = |_: &()| reg.run(MODEL, "gradient", Invocation::new().set("width", json!(32)).set("height", json!(32)).set("style", json!("ocean")), &mut |_| {}).unwrap();
         let (a, b) = (g(&()), g(&()));
         assert_eq!(a.blobs["image"].bytes, b.blobs["image"].bytes, "gradient must be deterministic");
-        let px: Vec<f32> = a.blobs["image"].bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+        let px: Vec<f32> = a.blobs["image"].bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
         assert_eq!(px.len(), 32 * 32 * 3);
         assert!(px.iter().all(|&v| (0.0..=1.0).contains(&v)));
     }

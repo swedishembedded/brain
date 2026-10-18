@@ -266,18 +266,14 @@ fn load_frames(spec: &str, cfg: &MirrorConfig, sel: &FrameSel, mask: Option<&str
     (all, images.len(), hp, wp)
 }
 
-/// Run the model, assemble the scene, then hand everything to `k` (the model
-/// OWNS the Gpu now - `model.gpu()` is how `k` and this function reach it -
-/// so the whole flow still lives in one scope, but only because `k` runs
-/// before `model` is dropped, not because of a borrow).
-#[allow(clippy::type_complexity)]
-fn with_scene<R>(
-    weights: &str,
-    images: &str,
+/// What [`with_scene`] runs on: the checkpoint, the capture, and every scene-assembly knob the CLI exposes.
+struct SceneArgs<'a> {
+    weights: &'a str,
+    images: &'a str,
     min_op: f32,
     max_depth: f32,
     prune_voxel: f32,
-    poses: Option<&str>,
+    poses: Option<&'a str>,
     gs_mask: f32,
     edge_rtol: f32,
     fuse_rtol: f32,
@@ -287,12 +283,42 @@ fn with_scene<R>(
     pos_from: PositionSource,
     nrm_from: NormalSource,
     scale_q: f32,
-    sel: &FrameSel,
-    mask: Option<&str>,
+    sel: &'a FrameSel,
+    mask: Option<&'a str>,
     target: usize,
-    frames_out: Option<&str>,
+    frames_out: Option<&'a str>,
+}
+
+/// Run the model, assemble the scene, then hand everything to `k` (the model
+/// OWNS the Gpu now - `model.gpu()` is how `k` and this function reach it -
+/// so the whole flow still lives in one scope, but only because `k` runs
+/// before `model` is dropped, not because of a borrow).
+#[allow(clippy::type_complexity)]
+fn with_scene<R>(
+    args: SceneArgs<'_>,
     k: impl FnOnce(&Gpu, &Mirror, &Splats, &[splat::types::Camera], usize, u32, u32) -> R,
 ) -> R {
+    let SceneArgs {
+        weights,
+        images,
+        min_op,
+        max_depth,
+        prune_voxel,
+        poses,
+        gs_mask,
+        edge_rtol,
+        fuse_rtol,
+        min_support,
+        conf_pct,
+        surf,
+        pos_from,
+        nrm_from,
+        scale_q,
+        sel,
+        mask,
+        target,
+        frames_out,
+    } = args;
     let cfg = MirrorConfig::default();
     let (frames, s, hp, wp) = load_frames(images, &cfg, sel, mask, target);
 
@@ -595,7 +621,28 @@ fn infer(argv: &[String]) {
 
     std::fs::create_dir_all(&out_dir).ok();
     let ply_path = ply.unwrap_or_else(|| format!("{out_dir}/scene.ply"));
-    with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, min_support, conf_pct, surf, pos_from, nrm_from, scale_q, &sel, mask.as_deref(), target, frames_out.as_deref(), |gpu, model, splats, cams, s, w, h| {
+    let scene = SceneArgs {
+        weights: &weights,
+        images: &images,
+        min_op,
+        max_depth,
+        prune_voxel: prune,
+        poses: poses.as_deref(),
+        gs_mask,
+        edge_rtol,
+        fuse_rtol,
+        min_support,
+        conf_pct,
+        surf,
+        pos_from,
+        nrm_from,
+        scale_q,
+        sel: &sel,
+        mask: mask.as_deref(),
+        target,
+        frames_out: frames_out.as_deref(),
+    };
+    with_scene(scene, |gpu, model, splats, cams, s, w, h| {
         let reframed = (!keep_frame && cams.len() >= 3).then(|| upright(splats, cams));
         let (splats, cams) = match &reframed {
             Some((sp, cm)) => (sp, &cm[..]),

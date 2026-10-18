@@ -235,10 +235,13 @@ const PIPELINES: &[(&str, &str)] = &[
     ("lora_delta_rows", kernels::LORA_DELTA_ROWS),
 ];
 
+/// A tuned-kernel table: variant by (device, kernel sources, row bucket, shape).
+type TunedI8 = std::sync::Mutex<HashMap<(String, u64, u32, u32, u32), KernelVariant>>;
+
 /// The int8 GEMV/tile choice first made in this process for a device, kernel
 /// sources, row bucket and shape; see `Engine::tune_i8`.
-fn process_tuned_i8() -> &'static std::sync::Mutex<HashMap<(String, u64, u32, u32, u32), KernelVariant>> {
-    static TUNED: std::sync::OnceLock<std::sync::Mutex<HashMap<(String, u64, u32, u32, u32), KernelVariant>>> = std::sync::OnceLock::new();
+fn process_tuned_i8() -> &'static TunedI8 {
+    static TUNED: std::sync::OnceLock<TunedI8> = std::sync::OnceLock::new();
     TUNED.get_or_init(Default::default)
 }
 

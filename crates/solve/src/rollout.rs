@@ -174,7 +174,7 @@ fn attempt_batch<S: StateSpace>(
                 if acc <= 0.0 {
                     continue;
                 }
-                let mut u = (rng.next() >> 11) as f64 / (1u64 << 53) as f64 * acc;
+                let mut u = (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * acc;
                 let mut pick = usize::MAX;
                 for (m, &w) in weights.iter().enumerate() {
                     if w > 0.0 {

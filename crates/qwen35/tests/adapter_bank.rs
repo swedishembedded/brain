@@ -204,7 +204,7 @@ fn a_grouped_bank_equals_the_ungrouped_one_bit_for_bit() {
         if grouped {
             bank.groups = cfg.input_groups().into_iter().map(|g| g.into_iter().map(str::to_string).collect()).collect();
         }
-        assert_eq!(e.adapter_bank_bytes(), bank.device_bytes(&cfg, 4u32.max(256)), "grouped: {grouped}");
+        assert_eq!(e.adapter_bank_bytes(), bank.device_bytes(&cfg, 256), "grouped: {grouped}");
     }
 }
 

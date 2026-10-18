@@ -219,7 +219,7 @@ impl EncoderLayer {
     /// Backward of [`Self::forward_train`]. `d_out`: grad of `normed2`
     /// (this layer's returned output). Writes into `scratch.d_x_q`+`.d_x_kv`
     /// = this layer's contribution flowing into the residual stream at `x`
-    /// - the caller (self-attention: `x_q == x_kv == x`) must add BOTH of
+    /// -- the caller (self-attention: `x_q == x_kv == x`) must add BOTH of
     /// those to whatever else feeds `x`'s gradient, per
     /// [`super::attn::BartAttn::backward`]'s own contract. Every LN
     /// weight/bias and projection weight/bias gradient (plus LoRA adapters,

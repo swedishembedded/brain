@@ -370,9 +370,8 @@ fn run_layers(
         let (cd, _, cos, sin) = cur.take().expect("a device is selected by now");
         cur = Some((cd, out, cos, sin));
         if let Some((layer, up)) = streamed {
-            gpu_core::reclaiming(g, || {
-                drop(layer);
-                drop(up);
+            gpu_core::reclaiming(g, move || {
+                let _streamed = (layer, up);
             });
         }
     }

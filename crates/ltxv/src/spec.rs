@@ -142,8 +142,8 @@ mod tests {
         checkpoint::st::save_safetensors(
             path.to_str().unwrap(),
             &[
-                ("audio_vae.encoder.conv_in.conv.weight".to_string(), vec![32, 1, 3], vec![0.0f32; 32 * 1 * 3]),
-                ("audio_vae.decoder.conv_out.conv.weight".to_string(), vec![1, 32, 3], vec![0.0f32; 1 * 32 * 3]),
+                ("audio_vae.encoder.conv_in.conv.weight".to_string(), vec![32, 1, 3], vec![0.0f32; 32 * 3]),
+                ("audio_vae.decoder.conv_out.conv.weight".to_string(), vec![1, 32, 3], vec![0.0f32; 32 * 3]),
                 ("vocoder.conv_pre.weight".to_string(), vec![8, 1, 7], vec![0.0f32; 8 * 7]),
             ],
             &serde_json::json!({}),
@@ -190,7 +190,7 @@ mod tests {
     }
 
     /// With NO vae candidate at all, the required role still goes `Missing`
-    /// - `optional_roles` narrows the exemption to exactly the four roles it
+    /// -- `optional_roles` narrows the exemption to exactly the four roles it
     /// names, not every declared role.
     #[test]
     fn missing_without_a_vae_even_though_every_other_role_is_optional() {

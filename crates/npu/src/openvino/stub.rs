@@ -8,6 +8,9 @@
 use super::{BenchResult, DeviceInfo, HeadOutputs, NpuConfig, NpuDevice, NpuError};
 use std::path::Path;
 
+/// One named output tensor: `(name, shape, row-major f32 data)`; the shape the real backend exports.
+pub type NamedTensor = (String, Vec<usize>, Vec<f32>);
+
 fn unsupported<T>() -> Result<T, NpuError> {
     Err(NpuError::Unsupported(std::env::consts::ARCH.to_string()))
 }
@@ -87,7 +90,7 @@ impl NpuGraph {
     pub fn output_names(&self) -> &[String] {
         &[]
     }
-    pub fn run(&mut self, _feeds: &[(&str, Feed)]) -> Result<Vec<(String, Vec<usize>, Vec<f32>)>, NpuError> {
+    pub fn run(&mut self, _feeds: &[(&str, Feed)]) -> Result<Vec<NamedTensor>, NpuError> {
         unsupported()
     }
 }

@@ -277,7 +277,7 @@ pub fn vq_quantize(gpu: &Gpu, x: &[f32], w: &VqWeights, n: u32, dim: u32, code_d
     let packed = gpu.storage((2 * n) as u64);
     gpu.submit(&[], &[gpu.step(k::VQ_ARGMAX_DOT, &[&zn, &cb, &packed], &[n, n_codes, code_dim], n)]);
     let packed_v = gpu.read(&packed, (2 * n) as usize);
-    let indices: Vec<u32> = packed_v.chunks_exact(2).map(|c| c[0] as u32).collect();
+    let indices: Vec<u32> = packed_v.as_chunks::<2>().0.iter().map(|c| c[0] as u32).collect();
 
     // gather codebook[idx] (raw) then project_out -> [n, dim]
     let idxb = gpu.storage(n as u64);

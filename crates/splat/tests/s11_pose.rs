@@ -114,7 +114,7 @@ fn a_fit_can_recover_cameras_that_were_handed_to_it_wrong() {
         .iter()
         .map(|c| {
             ren.render(&g, &gs, c, &o);
-            ren.read_rgba(&g, w, h).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()
+            ren.read_rgba(&g, w, h).as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()
         })
         .collect();
 
@@ -141,7 +141,7 @@ fn a_fit_can_recover_cameras_that_were_handed_to_it_wrong() {
         for (c, want) in wrong.iter().zip(&shots) {
             ren.render(&g, &gs, c, &o);
             let got: Vec<f32> =
-                ren.read_rgba(&g, w, h).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+                ren.read_rgba(&g, w, h).as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
             acc += psnr(&got, want);
         }
         acc / shots.len() as f64
@@ -168,7 +168,7 @@ fn a_fit_can_recover_cameras_that_were_handed_to_it_wrong() {
         for (c, want) in refined.iter().zip(&shots) {
             ren.render(&g, &gs2, c, &o);
             let got: Vec<f32> =
-                ren.read_rgba(&g, w, h).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+                ren.read_rgba(&g, w, h).as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
             acc += psnr(&got, want);
         }
         acc / shots.len() as f64

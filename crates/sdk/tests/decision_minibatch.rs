@@ -109,7 +109,7 @@ fn a_batch_of_one_is_the_per_example_loop_it_replaced() {
 
     let before = pipe.steps_taken();
     let mut n = 0usize;
-    pipe.train_choices(&ex, &opts, INSTRUCTIONS, 6, 1, 0x51_1, &mut |_, _| n += 1).expect("training runs");
+    pipe.train_choices(&ex, &opts, INSTRUCTIONS, 6, 1, 0x511, &mut |_, _| n += 1).expect("training runs");
     assert_eq!(pipe.steps_taken() - before, 6);
     assert_eq!(n, 6);
 }

@@ -319,7 +319,7 @@ impl ZipConfig {
             n
         };
         let depths = [count_blocks(1), count_blocks(2), count_blocks(3), count_blocks(4)];
-        if depths.iter().any(|&d| d == 0) {
+        if depths.contains(&0) {
             return Err("zipdepth: no `encoder.stage<N>.0.branch_3x3.0.weight` for some stage - not a ZipDepth checkpoint".to_string());
         }
 

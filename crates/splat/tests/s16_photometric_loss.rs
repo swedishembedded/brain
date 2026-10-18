@@ -24,14 +24,14 @@ use splat::loss::{DeviceLoss, PixelLoss};
 /// The device loss of `pred` (RGB) against `target`, and dLoss/dpred (RGB).
 fn photometric(g: &Gpu, loss: PixelLoss, pred: &[f32], target: &[f32], weight: Option<&[f32]>, w: usize, h: usize) -> (f64, Vec<f32>) {
     let px = w * h;
-    let rgba: Vec<f32> = pred.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 0.0]).collect();
+    let rgba: Vec<f32> = pred.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 0.0]).collect();
     let (pb, tb) = (g.storage_init("pred", &rgba), g.storage_init("target", target));
     let wb = weight.map(|m| g.storage_init("weight", m));
     let wsum = weight.map_or(px as f64, |m| m.iter().map(|&v| v as f64).sum());
     let dimg = g.storage(4 * px as u64);
     let dl = DeviceLoss::new(g, px);
     let value = dl.eval(g, splat::Kernels::at(0), loss, &pb, &tb, wb.as_ref(), wsum, w as u32, h as u32, &dimg);
-    let grad = g.read(&dimg, 4 * px).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let grad = g.read(&dimg, 4 * px).as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
     (value, grad)
 }
 

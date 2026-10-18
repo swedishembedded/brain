@@ -72,7 +72,7 @@ impl ProjectorConfig {
         if depth == 0 {
             return Err("a projector has at least one linear".to_string());
         }
-        if kind == ProjectorKind::HybridSplit && n_embed % 2 != 0 {
+        if kind == ProjectorKind::HybridSplit && !n_embed.is_multiple_of(2) {
             return Err(format!("a hybrid split projector needs an even n_embed, got {n_embed}"));
         }
         Ok(ProjectorConfig { kind, depth, input_dim, n_embed, out_dim: n_embed })
@@ -414,6 +414,9 @@ impl MlpProjector {
     }
 }
 
+/// AdamW state of one parameter: `(master weights, m, v)`.
+type AdamState = (Vec<f32>, Vec<f32>, Vec<f32>);
+
 /// A projector (an aligner, a generation head) on the device with its
 /// host-side AdamW state: what a trainable `model::projector::MlpProjector`
 /// needs around it.
@@ -424,7 +427,7 @@ pub struct TrainableProjector {
     d_out: DeviceBuffer,
     d_inputs: Vec<DeviceBuffer>,
     /// `(master weights, m, v)` by parameter name.
-    state: HashMap<String, (Vec<f32>, Vec<f32>, Vec<f32>)>,
+    state: HashMap<String, AdamState>,
     rows: usize,
 }
 

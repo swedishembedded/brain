@@ -52,7 +52,7 @@ fn packed(words: usize, seed: u64) -> Vec<u32> {
 
 fn scales(n: usize, seed: u64) -> Vec<f32> {
     let mut r = Lcg::new(seed);
-    (0..n).map(|_| 1e-3 + (r.next_u32() % 1000) as f32 * 1e-5 - if r.next_u32() % 7 == 0 { 2e-3 } else { 0.0 }).collect()
+    (0..n).map(|_| 1e-3 + (r.next_u32() % 1000) as f32 * 1e-5 - if r.next_u32().is_multiple_of(7) { 2e-3 } else { 0.0 }).collect()
 }
 
 fn upload_u32(gpu: &Gpu, v: &[u32]) -> gpu_core::DeviceBuffer {

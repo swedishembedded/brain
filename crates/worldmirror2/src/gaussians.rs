@@ -604,7 +604,7 @@ fn read_f32(path: &std::path::Path, n: usize) -> std::io::Result<Vec<f32>> {
             format!("{} holds {} bytes, expected {}", path.display(), bytes.len(), n * 4),
         ));
     }
-    Ok(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    Ok(bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 
 /// Read the GS head outputs for all frames and build the host scene.
@@ -672,7 +672,7 @@ pub fn assemble_from(
             let (pd, pc) = points_as_depth(&heads.pts[fi], cam, width as usize, height as usize);
             let gc: Vec<f32> = heads.gsd[fi][hw..2 * hw].iter().map(|v| 1.0 + v.exp()).collect();
             for i in 0..hw {
-                if !(pd[i] > 0.0) {
+                if pd[i].partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
                     continue;
                 }
                 depths[fi][i] = match opts.position_from {

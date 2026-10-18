@@ -65,7 +65,7 @@ pub fn blob_from_bgr_u8(gpu: &Gpu, bgr: &[u8], h: u32, w: u32, pre: &Preprocess)
     assert_eq!(bgr.len(), (h * w * 3) as usize, "blob_from_bgr_u8: expected HWC u8 [{h},{w},3]");
     // swapRB: reorder the interleaved triples, then permute HWC -> CHW.
     let hwc: Vec<f32> = if pre.swap_rb {
-        bgr.chunks_exact(3).flat_map(|p| [p[2] as f32, p[1] as f32, p[0] as f32]).collect()
+        bgr.as_chunks::<3>().0.iter().flat_map(|p| [p[2] as f32, p[1] as f32, p[0] as f32]).collect()
     } else {
         bgr.iter().map(|&v| v as f32).collect()
     };

@@ -67,7 +67,7 @@ impl Vq {
 
 /// Extract the integer code indices from the packed `[idx, score]` output.
 pub fn indices(packed: &[f32]) -> Vec<u32> {
-    packed.chunks_exact(2).map(|c| c[0] as u32).collect()
+    packed.as_chunks::<2>().0.iter().map(|c| c[0] as u32).collect()
 }
 
 /// EMA codebook update (van den Oord VQ-VAE): keeps a running cluster size

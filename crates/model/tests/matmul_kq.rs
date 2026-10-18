@@ -114,7 +114,7 @@ fn rand_pos_f32(seed: u64, n: usize, lo: f32, hi: f32) -> Vec<f32> {
 /// convention, what `xq` and (at CODE_BITS=8) `wq` share bit-for-bit.
 fn pack_i8_words(codes: &[i8]) -> Vec<u32> {
     assert_eq!(codes.len() % 4, 0);
-    codes.chunks_exact(4).map(|c| c.iter().enumerate().fold(0u32, |w, (b, &v)| w | ((v as u8 as u32) << (8 * b)))).collect()
+    codes.as_chunks::<4>().0.iter().map(|c| c.iter().enumerate().fold(0u32, |w, (b, &v)| w | ((v as u8 as u32) << (8 * b)))).collect()
 }
 
 /// `32/bits` unsigned codes per u32, low bits first - the affine `wq` layout

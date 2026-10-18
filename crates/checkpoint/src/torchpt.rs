@@ -752,21 +752,21 @@ impl<'a> Archive<'a> {
         }
         let data: Vec<f32> = match r.dtype {
             DType::F32 => raw
-                .chunks_exact(4)
+                .as_chunks::<4>().0.iter()
                 .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                 .collect(),
             DType::F64 => raw
-                .chunks_exact(8)
+                .as_chunks::<8>().0.iter()
                 .map(|b| {
                     f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
                 })
                 .collect(),
             DType::F16 => raw
-                .chunks_exact(2)
+                .as_chunks::<2>().0.iter()
                 .map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]])))
                 .collect(),
             DType::BF16 => raw
-                .chunks_exact(2)
+                .as_chunks::<2>().0.iter()
                 .map(|b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]])))
                 .collect(),
             // Integer storages exist in real checkpoints only as bookkeeping
@@ -777,7 +777,7 @@ impl<'a> Archive<'a> {
             // reader; callers that don't (every importer, which drops
             // `num_batches_tracked`) are unaffected.
             DType::I64 => raw
-                .chunks_exact(8)
+                .as_chunks::<8>().0.iter()
                 .map(|b| {
                     i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
                 })

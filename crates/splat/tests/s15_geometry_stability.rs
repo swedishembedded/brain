@@ -84,7 +84,7 @@ fn targets(g: &Gpu, ks: Kernels, s: &Splats, cams: &[Camera]) -> Vec<TargetView>
             let gs = GpuSplats::upload(g, s);
             ren.render(g, &gs, c, &o);
             let rgba = ren.read_rgba(g, c.width, c.height);
-            TargetView::new(*c, rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
+            TargetView::new(*c, rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect()
 }

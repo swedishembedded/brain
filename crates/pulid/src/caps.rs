@@ -34,7 +34,7 @@
 //! to BiSeNet's 512px FFHQ template (`bisenet::align::norm_crop_512`),
 //! parsed (`bisenet::BiSeNet::forward`, the real official
 //! `parsing_bisenet` weights), and masked (`bisenet::mask::whiten_and_gray`)
-//! - all gated at cosine 1.0000000000 against real `facexlib` output on a
+//! -- all gated at cosine 1.0000000000 against real `facexlib` output on a
 //! real photo, see `crates/bisenet/tests/parity.rs`. Only the resulting
 //! 512x512 masked image is then bicubic-resized to EVA-CLIP-L/336, replacing
 //! what used to be a plain resize of the raw face crop. `IdCond::from_image`
@@ -186,6 +186,12 @@ fn pulid_ca_bytes(cfg: &PulidConfig, n_ca: usize) -> u64 {
 
 // ===================== the pipeline =====================
 
+/// One face photo's identity inputs: ArcFace embedding, EVA-CLIP CLS embedding and the 5 tapped hidden states.
+type FaceEmbeds = (Vec<f32>, Vec<f32>, Vec<Vec<f32>>);
+
+/// What a built bundle is keyed on: root, size, steps and precision label.
+type BundleKey = (String, u32, u32, &'static str);
+
 /// One fully-built (FLUX.1 + PuLID) pair for a `(variant, h, w)`. Everything
 /// except the DiT and `PulidCa` is size-independent, but is rebuilt with them
 /// anyway - see the module docs' "no batching, size fixed at build time"
@@ -276,12 +282,12 @@ impl Bundle {
 
     /// One face photo (HWC->CHW RGB `[0,1]`, as `id_tokens` always fed it) ->
     /// its raw ArcFace embedding and its EVA-CLIP L2-normalized CLS embedding
-    /// + 5 tapped hidden states - the per-image half of identity extraction,
+    /// and 5 tapped hidden states - the per-image half of identity extraction,
     /// split out so [`Bundle::id_tokens`] can average it over 1-4 references
     /// (upstream PuLID v1.1's own "one primary + up to three auxiliary"
     /// shape) before the ONE `idcond::compose` + `IdFormer` call every
     /// request already made.
-    fn face_embeds(&self, chw: &[f32], w: u32, h: u32) -> Result<(Vec<f32>, Vec<f32>, Vec<Vec<f32>>), String> {
+    fn face_embeds(&self, chw: &[f32], w: u32, h: u32) -> Result<FaceEmbeds, String> {
         let (arc_raw, face) = self.arcface.embed_raw_chw(chw, w, h, true, true)?;
         // `align=true` only returns `Ok` once a face was found, and always
         // sets `Some` in that case - see `ArcFaceSession::embed_raw_chw`.
@@ -328,7 +334,7 @@ impl Bundle {
     /// docs), unaffected by this generalization.
     fn id_tokens(&self, faces: &[(Vec<f32>, u32, u32)]) -> Result<Vec<f32>, String> {
         assert!(!faces.is_empty(), "pulid: id_tokens needs at least one face image");
-        let per_image: Vec<(Vec<f32>, Vec<f32>, Vec<Vec<f32>>)> =
+        let per_image: Vec<FaceEmbeds> =
             faces.iter().map(|(chw, w, h)| self.face_embeds(chw, *w, *h)).collect::<Result<_, _>>()?;
 
         let n = per_image.len() as f32;
@@ -363,7 +369,7 @@ pub struct Session {
     arcface_root: String,
     clip_root: String,
     bisenet_root: String,
-    built: Mutex<std::collections::HashMap<(String, u32, u32, &'static str), Bundle>>,
+    built: Mutex<std::collections::HashMap<BundleKey, Bundle>>,
 }
 
 impl Session {
@@ -454,7 +460,7 @@ impl PulidProvider {
     /// file or its directory) + `BRAIN_ARCFACE_DIR` + `BRAIN_CLIP_DIR` (for the
     /// EVA-CLIP-L/336 file, the same variable `clip::caps` uses) +
     /// `BRAIN_BISENET_DIR` (a directory holding `parsing_bisenet.safetensors`
-    /// - see `BISENET_FILE`'s doc for how to produce one) - `None` unless
+    /// -- see `BISENET_FILE`'s doc for how to produce one) - `None` unless
     /// every one of the five is set and the FLUX.1 directory holds a
     /// released `transformer/`.
     pub fn from_env() -> Option<PulidProvider> {

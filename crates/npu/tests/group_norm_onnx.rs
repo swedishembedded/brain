@@ -148,7 +148,7 @@ fn the_emitted_graph_matches_the_host_formula() {
 
     let got: Vec<f32> = out
         .stdout
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     assert_eq!(got.len(), want.len(), "runtime returned {} floats, want {}", got.len(), want.len());

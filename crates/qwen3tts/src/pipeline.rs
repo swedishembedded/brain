@@ -268,11 +268,7 @@ impl Cancelled {
     /// Number of complete frames in [`Self::partial`], given the model's
     /// per-frame code-group width (16 for the real checkpoints).
     pub fn frames(&self, group_width: usize) -> usize {
-        if group_width == 0 {
-            0
-        } else {
-            self.partial.len() / group_width
-        }
+        self.partial.len().checked_div(group_width).unwrap_or(0)
     }
 }
 
