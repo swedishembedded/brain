@@ -73,8 +73,10 @@ continuations and one label loss.
 
 - [x] P0 reference capture: dumper, goldens.
 - [x] qwen35 refuses configs missing GDN/FFN dims (they vary per size).
-- [ ] P1 text-only decoder through `qwen35` from the HF directory, logits
-      parity, incremental decode == full prefill.
+- [x] P1 text-only decoder through `qwen35` from the HF directory, logits
+      parity, incremental decode == full prefill. Measured: last-8-row logits
+      cosine 1.0000000000, rel_l2 2.9e-6, greedy continuation identical
+      (`tests/text_parity.rs`).
 - [ ] P2 multi-run embedding splice shared in `model::vlm` (qwen3 + qwen35),
       in training forward and inference prefill; FD-gradchecked.
 - [ ] P3 vision tower: ragged per-view spans, nearest position ids,

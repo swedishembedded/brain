@@ -1,0 +1,20 @@
+[package]
+name = "brain-minicpmv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MiniCPM-V 4.6: NaViT SigLIP vision tower with an in-tower window merger, a 2x2 MLP merger and the Qwen3.5 hybrid decoder."
+
+[lib]
+name = "minicpmv"
+path = "src/lib.rs"
+
+[dependencies]
+brain-qwen35.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-checkpoint.workspace = true
+brain-gpu-core.workspace = true
+brain-model.workspace = true
+brain-testutil.workspace = true

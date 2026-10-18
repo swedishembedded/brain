@@ -432,6 +432,13 @@ pub const ARCHS: &[Arch] = &[
     // `moondream3::spec::Moondream3Spec` (the model-store resolver) instead
     // of `BRAIN_MOONDREAM3_WEIGHTS` - see `crates/catalog/src/lib.rs`'s
     // `resolved_assembly_for`.
+    // MiniCPM-V 4.6: a NaViT SigLIP tower with an in-tower 2x2 window merger,
+    // a 2x2 MLP merger, and the Qwen3.5-0.8B hybrid decoder `brain-qwen35`
+    // implements. `hf:` is the checkpoint's own `architectures[0]` and its
+    // `model_type`.
+    arch!("minicpmv", "MiniCPM-V 4.6 (NaViT SigLIP + window merger + Qwen3.5 decoder)", Multimodal, Brain, "brain-minicpmv",
+        hf: &["MiniCPMV4_6ForConditionalGeneration", "minicpmv4_6"], default_ref: Some("openbmb/MiniCPM-V-4.6"),
+        variants: &[Variant { reference: "openbmb/MiniCPM-V-4.6", params: 1_300_428_016, quants: &[], license: Some("apache-2.0") }]),
     arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream3", hf: &["Moondream3ForConditionalGeneration"], default_ref: Some("moondream/moondream3-preview")),
     // LLaVA-1.5: CLIP-L/14@336 vision tower + a Vicuna-1.5 (LLaMA-2) decoder,
     // an `mm_projector` splicing patch features into the text stream at

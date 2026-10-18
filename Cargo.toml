@@ -75,6 +75,7 @@ default-members = [
     "crates/nemotronasr",
     "crates/fastvlm",
     "crates/moondream3",
+    "crates/minicpmv",
     "crates/glmdsa",
     "crates/deepseek2",
     "crates/toyseq2seq",
@@ -317,6 +318,7 @@ brain-clip = { path = "crates/clip" }
 brain-deepseek2ocr = { path = "crates/deepseek2ocr" }
 brain-deepseekocr2 = { path = "crates/deepseekocr2" }
 brain-deepseekvl = { path = "crates/deepseekvl" }
+brain-minicpmv = { path = "crates/minicpmv" }
 brain-januspro = { path = "crates/januspro" }
 brain-t5encoder = { path = "crates/t5encoder" }
 brain-flux1 = { path = "crates/flux1" }

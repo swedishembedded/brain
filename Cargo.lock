@@ -1824,6 +1824,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-minicpmv"
+version = "2.0.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-model",
+ "brain-qwen35",
+ "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-minimaxh3"
 version = "2.0.0"
 dependencies = [
