@@ -32,66 +32,12 @@ pub(crate) fn argmax(s: &[f32]) -> usize {
     bi
 }
 
-/// Temperature + top-k + nucleus (top-p) sampling - identical contract to
-/// `qwen3::sample::sample_logits`: `temperature <= 0.0` is greedy argmax,
-/// `top_k == 0` disables top-k filtering, `top_p` outside `(0,1)` disables
-/// nucleus filtering.
-///
-/// `pub(crate)` (not just this module's own private helper): `crate::stream`'s
-/// real-generation entry point (real prompt -> real streaming forward -> real
-/// lm_head logits) needs the exact same temperature/top-k/top-p/greedy
-/// contract over a bare `&[f32]` logits slice this already implements -
-/// reusing it here, rather than re-implementing the same ~30 lines a second
-/// time in `stream.rs`, is what this visibility bump is for. Still not `pub`:
-/// no caller outside this crate needs it.
-pub(crate) fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32, rng: &mut Rng) -> u32 {
-    if temperature <= 0.0 {
-        return argmax(logits) as u32;
-    }
-    let mut scaled: Vec<f32> = logits.iter().map(|&l| l / temperature).collect();
-    if top_k > 0 && top_k < scaled.len() {
-        let mut idx: Vec<usize> = (0..scaled.len()).collect();
-        idx.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap());
-        let threshold = scaled[idx[top_k - 1]];
-        for v in scaled.iter_mut() {
-            if *v < threshold {
-                *v = f32::NEG_INFINITY;
-            }
-        }
-    }
-    let max = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0f32;
-    for v in scaled.iter_mut() {
-        *v = (*v - max).exp();
-        sum += *v;
-    }
-    if top_p > 0.0 && top_p < 1.0 && sum > 0.0 {
-        let mut idx: Vec<usize> = (0..scaled.len()).collect();
-        idx.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap());
-        let mut kept = 0.0f32;
-        let mut cut = idx.len();
-        for (rank, &i) in idx.iter().enumerate() {
-            kept += scaled[i];
-            if kept / sum >= top_p {
-                cut = rank + 1;
-                break;
-            }
-        }
-        for &i in &idx[cut..] {
-            scaled[i] = 0.0;
-        }
-        sum = kept;
-    }
-    let r = rng.next_f32() * sum;
-    let mut acc = 0.0f32;
-    for (i, &p) in scaled.iter().enumerate() {
-        acc += p;
-        if acc >= r {
-            return i as u32;
-        }
-    }
-    (scaled.len() - 1) as u32
-}
+/// Temperature + top-k + nucleus (top-p) sampling: `temperature <= 0.0` is
+/// greedy argmax, `top_k == 0` disables top-k filtering, `top_p` outside
+/// `(0,1)` disables nucleus filtering. The one implementation is
+/// `qwen3vl::sample::sample_logits` (NaN-safe), re-exported here for this
+/// crate's generation paths and the wrappers built on its decoder.
+pub use qwen3vl::sample::sample_logits;
 
 /// Generate `max_new` tokens continuing `prompt` via [`Qwen35::step`].
 /// `temperature <= 0` is greedy; `top_k = 0` disables top-k; `top_p` in
