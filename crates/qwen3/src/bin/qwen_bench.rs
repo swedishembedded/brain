@@ -543,24 +543,34 @@ fn pack_i8(v: &[i8]) -> Vec<u32> {
     v.chunks(4).map(|c| (c[0] as u8 as u32) | ((c[1] as u8 as u32) << 8) | ((c[2] as u8 as u32) << 16) | ((c[3] as u8 as u32) << 24)).collect()
 }
 
-/// Exact i32 host reference for an int8×int8 GEMM. The contraction is
-/// integer, hence exact — no tolerance needed, unlike an fp32 GEMM oracle.
-fn host_i8_gemm(x_i8: &[i8], w_i8: &[i8], sx: &[f32], sw: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+/// Host reference for an int8×int8 GEMM with a group-wise weight scale: each
+/// `model::int8::GROUP`-element K-group contracts exactly in i32, then folds
+/// into the f32 row total through that group's scale (`sw` is `[n, k/GROUP]`);
+/// `sx` is applied last. The same fold order as `matmul_i8_dyn`. Only the
+/// output rows in `rows` are computed (the rest stay 0), so a real-shape check
+/// does not pay for the whole product on the host.
+fn host_i8_gemm(x_i8: &[i8], w_i8: &[i8], sx: &[f32], sw: &[f32], rows: &[usize], m: usize, k: usize, n: usize) -> Vec<f32> {
+    const GROUP: usize = 32;
+    let ng = k / GROUP;
     let mut out = vec![0.0f32; m * n];
-    for mi in 0..m {
+    for &mi in rows {
         for ni in 0..n {
-            let mut acc: i32 = 0;
-            for ki in 0..k {
-                acc += x_i8[mi * k + ki] as i32 * w_i8[ni * k + ki] as i32;
+            let mut total = 0.0f32;
+            for g in 0..ng {
+                let mut acc: i32 = 0;
+                for ki in g * GROUP..(g + 1) * GROUP {
+                    acc += x_i8[mi * k + ki] as i32 * w_i8[ni * k + ki] as i32;
+                }
+                total += acc as f32 * sw[ni * ng + g];
             }
-            out[mi * n + ni] = acc as f32 * sx[mi] * sw[ni];
+            out[mi * n + ni] = total * sx[mi];
         }
     }
     out
 }
 
-/// A/B `matmul_i8_dyn` at one shape: exact correctness vs the host i32
-/// reference above, plus GOP/s against the measured DP4A roof (never the
+/// A/B `matmul_i8_dyn` at one shape: correctness vs the host group-wise
+/// reference above (a spread of rows), plus GOP/s against the measured DP4A roof (never the
 /// fp32 roof — `Roofs::compute_roof`/`utilisation_of` pick the DP4A one
 /// automatically when `int_ops > flops`, the fix for the flattering-by-the-
 /// DP4A-ratio bug recorded when profiling int8 weights on the served path).
@@ -568,7 +578,7 @@ fn host_i8_gemm(x_i8: &[i8], w_i8: &[i8], sx: &[f32], sw: &[f32], m: usize, k: u
 /// `qwen_bench gemm8 [m k n] [reps]` — defaults to the qkv-projection shape
 /// at Qwen3-0.6B's 128-row served prefill (`d_model=1024, q_dim=2048`).
 pub fn gemm8_ab(m: u32, k: u32, n: u32, reps: usize) {
-    assert_eq!(k % 4, 0, "k must be a multiple of 4 (int8 packing)");
+    assert_eq!(k % 32, 0, "k must be a multiple of the 32-element weight-scale group");
     let kg = k / 4;
     let gpu = Gpu::new(&[("matmul_i8_dyn", kernels::MATMUL_I8_DYN)]);
     let ki = gpu.kernel_index("matmul_i8_dyn").expect("matmul_i8_dyn registered above");
@@ -577,7 +587,7 @@ pub fn gemm8_ab(m: u32, k: u32, n: u32, reps: usize) {
     let x_i8 = rand_i8(&mut rng, (m * k) as usize);
     let w_i8 = rand_i8(&mut rng, (n * k) as usize);
     let sx: Vec<f32> = (0..m).map(|_| rng.next_f32() * 0.1 + 0.01).collect();
-    let sw: Vec<f32> = (0..n).map(|_| rng.next_f32() * 0.1 + 0.01).collect();
+    let sw: Vec<f32> = (0..n * (k / 32)).map(|_| rng.next_f32() * 0.1 + 0.01).collect();
 
     let xq = pack_i8(&x_i8);
     let wq = pack_i8(&w_i8);
@@ -594,9 +604,16 @@ pub fn gemm8_ab(m: u32, k: u32, n: u32, reps: usize) {
     let t = gpu_core::profile::best_of(&gpu, &st, reps);
     let got = gpu.read(&out, (m * n) as usize);
 
-    let want = host_i8_gemm(&x_i8, &w_i8, &sx, &sw, m as usize, k as usize, n as usize);
-    let max_abs = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-    let max_rel = got.iter().zip(&want).map(|(a, b)| (a - b).abs() / b.abs().max(1.0)).fold(0.0f32, f32::max);
+    // Every row of a small product; otherwise a spread that includes the
+    // first, the last (ragged tile edge) and an evenly strided middle.
+    let rows: Vec<usize> = if m <= 16 { (0..m as usize).collect() } else { (0..16).map(|i| i * (m as usize - 1) / 15).collect() };
+    let want = host_i8_gemm(&x_i8, &w_i8, &sx, &sw, &rows, m as usize, k as usize, n as usize);
+    let (mut max_abs, mut max_rel) = (0.0f32, 0.0f32);
+    for &r in &rows {
+        let (g, w) = (&got[r * n as usize..(r + 1) * n as usize], &want[r * n as usize..(r + 1) * n as usize]);
+        max_abs = g.iter().zip(w).map(|(a, b)| (a - b).abs()).fold(max_abs, f32::max);
+        max_rel = g.iter().zip(w).map(|(a, b)| (a - b).abs() / b.abs().max(1.0)).fold(max_rel, f32::max);
+    }
 
     let roofs = gpu_core::roof::ensure(&gpu);
     let int_ops = 8u64 * m as u64 * kg as u64 * n as u64;
