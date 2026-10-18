@@ -127,11 +127,16 @@ mod tests {
         assert_eq!((inv.get_i64("seed"), inv.get_i64("top_k"), inv.get_f64("temp")), (Some(7), Some(3), Some(0.2)));
     }
 
+    /// A seed is any 64-bit unsigned integer, the range the actions draw their
+    /// own seeds from, so a seed brain echoed can always be sent back.
     #[test]
-    fn a_seed_the_model_drew_is_accepted_back_over_the_whole_u64_range() {
+    fn a_seed_is_any_unsigned_64_bit_integer_and_a_negative_one_is_refused_by_name() {
         let inv = apply(P, &json!({"seed": u64::MAX}), Invocation::new()).unwrap();
         assert_eq!(inv.seed(), Ok(Some(u64::MAX)));
-        assert!(apply(P, &json!({"seed": -1}), Invocation::new()).is_err());
+        for bad in [json!(-1), json!(1.5)] {
+            let e = apply(P, &json!({"seed": bad}), Invocation::new()).unwrap_err();
+            assert!(format!("{e:?}").contains("'seed' must be a non-negative integer"), "{bad}: {e:?}");
+        }
     }
 
     #[test]
