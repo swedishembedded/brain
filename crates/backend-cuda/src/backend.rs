@@ -1767,7 +1767,7 @@ impl backend_api::Backend for CudaBackend {
         // blocks the caller never asked for.
         if let Some(dims) = c.shape.cluster {
             let size: u32 = dims.iter().product();
-            if threads % size != 0 {
+            if !threads.is_multiple_of(size) {
                 tracing::info!(kernel = %c.name, blocks = threads, cluster = size, "backend-cuda: declining a native step whose grid is not a whole number of clusters");
                 return None;
             }

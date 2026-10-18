@@ -162,7 +162,12 @@ unsafe impl Sync for Blas {}
 impl Blas {
     /// Load the library and bind a new handle to `stream`. The caller made the
     /// owning context current.
-    pub fn new(stream: CuStream) -> Result<Blas, String> {
+    ///
+    /// # Safety
+    ///
+    /// `stream` must be a live stream of the current context and must outlive
+    /// the returned handle: the vendor library keeps it and issues work on it.
+    pub unsafe fn new(stream: CuStream) -> Result<Blas, String> {
         let lib = lib().map_err(str::to_string)?;
         let mut handle: Handle = std::ptr::null_mut();
         // SAFETY: `handle` is a valid out-parameter.

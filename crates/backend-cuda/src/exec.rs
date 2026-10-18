@@ -343,7 +343,9 @@ impl Context {
         self.blas
             .get_or_init(|| {
                 self.make_current()?;
-                crate::cublas::Blas::new(self.stream)
+                // SAFETY: `self.stream` belongs to the context just made current
+                // and lives as long as `self`, which owns `blas` and drops it first.
+                unsafe { crate::cublas::Blas::new(self.stream) }
             })
             .as_ref()
             .map_err(Clone::clone)

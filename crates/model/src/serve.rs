@@ -1419,37 +1419,38 @@ impl<D: PagedDecoder> Scheduler<D> {
         let batched = self.dec.prefill_batch_tokens().is_some();
         if batched {
             self.prefill_batched(report);
-        }
-        while !batched {
-            // The oldest request still being prefilled gets the budget first.
-            if let Some(p) = self.prefilling.front_mut() {
-                if worked && budget_left == 0 {
+        } else {
+            loop {
+                // The oldest request still being prefilled gets the budget first.
+                if let Some(p) = self.prefilling.front_mut() {
+                    if worked && budget_left == 0 {
+                        break;
+                    }
+                    let consumed = match self.dec.prefill_chunk(&mut p.table, &p.prompt, budget_left.max(1)) {
+                        PrefillProgress::Partial { consumed } => {
+                            p.done += consumed;
+                            consumed
+                        }
+                        PrefillProgress::Done(hidden) => {
+                            let consumed = p.prompt.len() - p.done;
+                            let p = self.prefilling.pop_front().expect("the front was just prefilled");
+                            self.start_running(p, hidden, report);
+                            consumed
+                        }
+                    };
+                    worked = true;
+                    budget_left = budget_left.saturating_sub(consumed);
+                    continue;
+                }
+                // Admit while there's batch room and enough free blocks for the prompt.
+                //
+                // Always start at least one request per iteration (no starvation); after
+                // that, stop once the budget is spent. A decoder that prefills in slices
+                // spends it slice by slice.
+                let (worked_now, left) = (worked, budget_left);
+                if !self.admit_one(report, |need| !(worked_now && (left == 0 || (!interleaved && need > left)))) {
                     break;
                 }
-                let consumed = match self.dec.prefill_chunk(&mut p.table, &p.prompt, budget_left.max(1)) {
-                    PrefillProgress::Partial { consumed } => {
-                        p.done += consumed;
-                        consumed
-                    }
-                    PrefillProgress::Done(hidden) => {
-                        let consumed = p.prompt.len() - p.done;
-                        let p = self.prefilling.pop_front().expect("the front was just prefilled");
-                        self.start_running(p, hidden, report);
-                        consumed
-                    }
-                };
-                worked = true;
-                budget_left = budget_left.saturating_sub(consumed);
-                continue;
-            }
-            // Admit while there's batch room and enough free blocks for the prompt.
-            //
-            // Always start at least one request per iteration (no starvation); after
-            // that, stop once the budget is spent. A decoder that prefills in slices
-            // spends it slice by slice.
-            let (worked_now, left) = (worked, budget_left);
-            if !self.admit_one(report, |need| !(worked_now && (left == 0 || (!interleaved && need > left)))) {
-                break;
             }
         }
 
