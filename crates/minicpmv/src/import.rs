@@ -21,3 +21,12 @@ pub const VISION_PREFIXES: &[&str] = &["model.vision_tower.", "model.merger."];
 pub fn open_decoder(dir: &Path, cfg: &MiniCpmVConfig) -> Result<Qwen35Source, String> {
     Qwen35Source::open_dir_with(dir, &cfg.text, hf_fp8_block_size(dir)?, VISION_PREFIXES)
 }
+
+/// The vision tower and merger weights under [`crate::vision::tensor_manifest`]'s
+/// names, read from the checkpoint in `dir` with two-way coverage of
+/// [`VISION_PREFIXES`].
+pub fn vision_weights(dir: &Path, cfg: &MiniCpmVConfig) -> Result<std::collections::HashMap<String, Vec<f32>>, String> {
+    let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("minicpmv: open {}: {e}", dir.display()))?;
+    let names: Vec<String> = reader.names().map(str::to_string).collect();
+    crate::vision::import(&names, &mut |n| reader.tensor(n), cfg)
+}

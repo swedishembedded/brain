@@ -82,9 +82,15 @@ continuations and one label loss.
       runs (`gradcheck::check_qwen35_splices`); inference prefill from input
       embeddings (`Qwen35::prefill_embeds`) equal to the token prefill and to
       the spliced training forward (`qwen35/tests/prefill_embeds.rs`).
-- [ ] P3 vision tower: ragged per-view spans, nearest position ids,
-      in-tower merger hook, merger; per-stage parity (16x and 4x);
-      gradchecked.
+- [x] P3 vision tower forward (`vision.rs`): views packed with one span
+      each through `model::vit` blocks, nearest position ids, the window
+      merger after `insert_layer_id` on the uniform `attn_*_bidir` family
+      (T = 4), the merger; no new kernel. Real checkpoint, reference pixels
+      (`tests/vision_parity.rs`): every stage at cosine >= 0.9999999999,
+      rel_l2 <= 1.3e-5, at 16x, at 4x and for two packed images.
+- [ ] P3b vision backward (cached forward + `vit_block_bwd`, window merger
+      and merger adjoints) and its FD gradcheck - lands with P7, the first
+      consumer.
 - [ ] P4 preprocessing + prompt layout: exact ids/grids, resized views.
 - [ ] P5 end-to-end generate + serving contract (caps, resident, catalog,
       D-Bus, HTTP, sample, docs).

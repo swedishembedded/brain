@@ -13,8 +13,10 @@ Gated-DeltaNet/GQA decoder. Images, several images per prompt, and video.
 
 **Status: in progress.** The decoder loads straight from the checkpoint
 directory through `brain-qwen35` and matches the reference on text-only
-prompts (logits and greedy decode). The vision side is not wired yet; the
-plan and the gates are in the port's roadmap.
+prompts (logits and greedy decode). The vision tower, window merger and
+merger match the reference stage by stage on its own pixels, at 16x and 4x
+and with several images packed in one request. Preprocessing, the prompt
+layout and generation are not wired yet.
 
 ## Architecture
 

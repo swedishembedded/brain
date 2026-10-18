@@ -157,7 +157,7 @@ impl MiniCpmVConfig {
             insert_layer_id: u32_at(top, "insert_layer_id")?,
             window: square_or(vision_cfg, "window_kernel_size", 2)?,
         };
-        if vision.hidden % vision.heads != 0 {
+        if !vision.hidden.is_multiple_of(vision.heads) {
             return Err(format!("config.json: vision hidden {} is not divisible by {} heads", vision.hidden, vision.heads));
         }
         if vision.insert_layer_id >= vision.n_layers {

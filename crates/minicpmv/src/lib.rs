@@ -10,6 +10,8 @@
 //! * [`config`]: the checkpoint's `config.json`.
 //! * [`import`]: the checkpoint split between this crate's vision side and
 //!   the decoder, each held to two-way tensor coverage.
+//! * [`vision`]: the NaViT tower, the window merger and the merger, composed
+//!   from `model::vit`'s blocks.
 //!
 //! Swedish Embedded AB implements on-device vision-language models like this
 //! for its clients. If your team needs expertise in running multimodal models
@@ -18,5 +20,6 @@
 
 pub mod config;
 pub mod import;
+pub mod vision;
 
 pub use config::{Downsample, MiniCpmVConfig, VisionConfig};
