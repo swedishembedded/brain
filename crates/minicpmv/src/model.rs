@@ -169,33 +169,96 @@ impl MiniCpmV {
     /// token (end-of-generation ids excluded) and stops generation by
     /// returning `false`.
     pub fn generate_prepared(&mut self, prepared: &Prepared, opts: &GenOptions, on_token: &mut dyn FnMut(u32) -> bool) -> Result<Vec<u32>, String> {
-        let n = prepared.prompt.ids.len();
-        if n + opts.max_new > self.engine.max_seq_len() {
-            return Err(format!("minicpmv: {n} prompt tokens + {} new exceed the {}-token sequence capacity", opts.max_new, self.engine.max_seq_len()));
+        self.generate_batch(&[(prepared, opts)], &mut |_, t| on_token(t)).pop().expect("one result per request")
+    }
+
+    /// Generate for several prepared requests at once: each is prefilled on
+    /// its own, then every live sequence decodes in ONE batched step per
+    /// token on the shared KV pool, each with its own sampling. `on_token(r,
+    /// id)` streams request `r`'s tokens and stops that request alone by
+    /// returning `false`. Requests beyond the pool's free sequences wait for
+    /// the next wave. A request that does not fit the sequence capacity fails
+    /// alone.
+    pub fn generate_batch(&mut self, reqs: &[(&Prepared, &GenOptions)], on_token: &mut dyn FnMut(usize, u32) -> bool) -> Vec<Result<Vec<u32>, String>> {
+        let mut results: Vec<Result<Vec<u32>, String>> = reqs
+            .iter()
+            .map(|(p, o)| {
+                let n = p.prompt.ids.len();
+                if n + o.max_new > self.engine.max_seq_len() {
+                    Err(format!("minicpmv: {n} prompt tokens + {} new exceed the {}-token sequence capacity", o.max_new, self.engine.max_seq_len()))
+                } else {
+                    Ok(Vec::new())
+                }
+            })
+            .collect();
+        let pending: Vec<usize> = (0..reqs.len()).filter(|&r| results[r].is_ok()).collect();
+        for wave in pending.chunks(self.engine.free_blocks().max(1) as usize) {
+            self.decode_wave(reqs, wave, &mut results, on_token);
         }
-        let mut rng = Rng::new(opts.seed);
-        let mut table = BlockTable::new();
-        let hidden = self.engine.prefill_embeds(&mut table, &prepared.embeds);
-        let mut out = Vec::new();
-        let mut next = if opts.temperature <= 0.0 {
-            self.engine.admit_greedy(&hidden)
-        } else {
-            qwen35::sample::sample_logits(&self.engine.logits(&hidden), opts.temperature, opts.top_k, opts.top_p, &mut rng)
-        };
-        while out.len() < opts.max_new && !self.eos.contains(&next) {
-            out.push(next);
-            if !on_token(next) || out.len() == opts.max_new {
-                break;
-            }
-            next = if opts.temperature <= 0.0 {
-                self.engine.forward_batched_greedy(&mut [&mut table], &[next])[0]
+        results
+    }
+
+    /// Prefill and decode the requests `wave` names, together.
+    fn decode_wave(&mut self, reqs: &[(&Prepared, &GenOptions)], wave: &[usize], results: &mut [Result<Vec<u32>, String>], on_token: &mut dyn FnMut(usize, u32) -> bool) {
+        struct Live {
+            r: usize,
+            table: BlockTable,
+            rng: Rng,
+            next: u32,
+        }
+        let vocab = self.engine.vocab();
+        let mut live: Vec<Live> = Vec::with_capacity(wave.len());
+        for &r in wave {
+            let (p, o) = reqs[r];
+            let mut table = BlockTable::new();
+            let mut rng = Rng::new(o.seed);
+            let hidden = self.engine.prefill_embeds(&mut table, &p.embeds);
+            let next = if o.temperature <= 0.0 {
+                self.engine.admit_greedy(&hidden)
             } else {
-                let logits = self.engine.forward_batched_logits(&mut [&mut table], &[next]);
-                qwen35::sample::sample_logits(&logits, opts.temperature, opts.top_k, opts.top_p, &mut rng)
+                qwen35::sample::sample_logits(&self.engine.logits(&hidden), o.temperature, o.top_k, o.top_p, &mut rng)
             };
+            live.push(Live { r, table, rng, next });
         }
-        self.engine.release_table(&mut table);
-        Ok(out)
+        loop {
+            // Accept each sequence's pending token or retire the sequence.
+            let mut keep = Vec::with_capacity(live.len());
+            for mut l in live.drain(..) {
+                let max_new = reqs[l.r].1.max_new;
+                let out = results[l.r].as_mut().expect("only admitted requests are live");
+                let done = self.eos.contains(&l.next) || out.len() >= max_new || {
+                    out.push(l.next);
+                    !on_token(l.r, l.next) || out.len() >= max_new
+                };
+                if done {
+                    self.engine.release_table(&mut l.table);
+                } else {
+                    keep.push(l);
+                }
+            }
+            live = keep;
+            if live.is_empty() {
+                return;
+            }
+            let inputs: Vec<u32> = live.iter().map(|l| l.next).collect();
+            let greedy = live.iter().all(|l| reqs[l.r].1.temperature <= 0.0);
+            let mut tables: Vec<&mut BlockTable> = live.iter_mut().map(|l| &mut l.table).collect();
+            let next: Vec<u32> = if greedy {
+                self.engine.forward_batched_greedy(&mut tables, &inputs)
+            } else {
+                let logits = self.engine.forward_batched_logits(&mut tables, &inputs);
+                live.iter_mut()
+                    .zip(logits.chunks_exact(vocab))
+                    .map(|(l, row)| {
+                        let o = reqs[l.r].1;
+                        qwen35::sample::sample_logits(row, o.temperature, o.top_k, o.top_p, &mut l.rng)
+                    })
+                    .collect()
+            };
+            for (l, n) in live.iter_mut().zip(next) {
+                l.next = n;
+            }
+        }
     }
 
     /// [`Self::prepare`] then [`Self::generate_prepared`].

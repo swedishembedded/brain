@@ -53,3 +53,37 @@ fn greedy_generation_matches_the_reference_for_every_image_case() {
     table.print();
     assert!(table.failures.is_empty(), "{:#?}", table.failures);
 }
+
+/// Three different image prompts decoded TOGETHER (one batched decode step
+/// per token on the shared KV pool) each reproduce their own reference
+/// continuation: no state bleeds between sequences.
+#[test]
+fn batched_generation_keeps_every_request_exact() {
+    let Some(fx) = common::fixture() else { return };
+    let manifest = fx.manifest();
+    let gpu = gpu_core::testgpu::dev(qwen35::model::pipelines());
+    let mut m = MiniCpmV::load(&fx.dir, &gpu, 2048, 3, model::kv_tier::KvTier::F32).expect("load MiniCPM-V");
+    let cases = ["doc_16x", "room_16x", "two_images"];
+    let mut prepared = Vec::new();
+    let mut wants = Vec::new();
+    let mut opts = Vec::new();
+    for case in cases {
+        let entry = &manifest["model"][case];
+        let golden = fx.tensors(&format!("model/{case}.safetensors"));
+        let names: Vec<&str> = entry["images"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        let images: Vec<imaging::Rgb8> = names.iter().map(|n| imaging::codec::load(fx.golden.join(format!("inputs/{n}.png"))).unwrap()).collect();
+        let mut parts: Vec<Part> = names.iter().map(|_| Part::Image).collect();
+        parts.push(Part::Text(entry["question"].as_str().unwrap().into()));
+        let want = common::ids(&golden["greedy"].1);
+        let o = GenOptions { max_new: want.len(), ..GenOptions::default() };
+        prepared.push(m.prepare(&[Message::user(parts)], &images, &o).unwrap());
+        wants.push(want.iter().copied().take_while(|t| !m.eos.contains(t)).collect::<Vec<u32>>());
+        opts.push(o);
+    }
+    let reqs: Vec<_> = prepared.iter().zip(&opts).collect();
+    let got = m.generate_batch(&reqs, &mut |_, _| true);
+    for ((case, got), want) in cases.iter().zip(got).zip(&wants) {
+        assert_eq!(&got.unwrap(), want, "{case}: batched greedy continuation");
+    }
+    assert_eq!(m.engine.free_blocks(), 3, "every sequence released its KV block");
+}
