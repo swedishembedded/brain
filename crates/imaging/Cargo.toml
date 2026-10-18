@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-gpu-core.workspace = true
+serde_json.workspace = true
 # `backend_cpu::par` - the workspace's ONLY rayon seam (AGENTS.md). `host.rs`
 # needs it for the row-parallel resize the NPU paths depend on; no other crate
 # may reach for rayon directly.

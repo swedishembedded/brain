@@ -115,13 +115,112 @@ pub fn decode_frames_rgb8(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<Rgb
         _ => opts.fps,
     };
 
+    let mut out = Vec::new();
+    stream_frames(path, w, h, fps.map(|f| format!("fps={f}")), opts.max_frames, &mut |_, px| {
+        out.push(Rgb8 { w, h, px: px.to_vec() });
+        true
+    })?;
+    if out.is_empty() {
+        return Err(format!("imaging::video: ffmpeg produced no frames for {}", path.display()));
+    }
+    Ok(out)
+}
+
+/// A video stream's metadata, as the container reports it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VideoMeta {
+    pub w: u32,
+    pub h: u32,
+    /// Average frame rate (`avg_frame_rate`, the exact rational evaluated).
+    pub fps: f64,
+    /// Frames in the stream (`nb_frames`, counted by decoding when the
+    /// container does not record it).
+    pub frames: u64,
+    /// The stream's duration in seconds (the container's when the stream has
+    /// none, `frames / fps` when neither does).
+    pub duration: f64,
+}
+
+/// The first video stream's [`VideoMeta`], via `ffprobe`.
+pub fn probe_video(path: &Path) -> Result<VideoMeta, String> {
+    let probe = |entries: &str, count: bool| -> Result<serde_json::Value, String> {
+        let mut cmd = Command::new("ffprobe");
+        cmd.args(["-v", "error", "-select_streams", "v:0"]);
+        if count {
+            cmd.arg("-count_frames");
+        }
+        let out = cmd.args(["-show_entries", entries, "-of", "json"]).arg(path).output().map_err(|e| format!("imaging::video: running ffprobe: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("imaging::video: ffprobe could not read {}: {}", path.display(), String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("imaging::video: ffprobe output for {}: {e}", path.display()))
+    };
+    let v = probe("stream=width,height,avg_frame_rate,nb_frames,duration:format=duration", false)?;
+    let stream = &v["streams"][0];
+    let num = |x: &serde_json::Value| x.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| x.as_f64());
+    let w = stream["width"].as_u64().ok_or_else(|| format!("imaging::video: {} has no video stream", path.display()))? as u32;
+    let h = stream["height"].as_u64().unwrap_or(0) as u32;
+    let fps = stream["avg_frame_rate"]
+        .as_str()
+        .and_then(|r| r.split_once('/'))
+        .and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?)))
+        .filter(|(a, b)| *a > 0.0 && *b > 0.0)
+        .map(|(a, b)| a / b)
+        .ok_or_else(|| format!("imaging::video: {} reports no frame rate", path.display()))?;
+    let frames = match num(&stream["nb_frames"]).filter(|n| *n > 0.0) {
+        Some(n) => n as u64,
+        None => num(&probe("stream=nb_read_frames", true)?["streams"][0]["nb_read_frames"]).filter(|n| *n > 0.0).ok_or_else(|| format!("imaging::video: {} has no frames", path.display()))? as u64,
+    };
+    let duration = num(&stream["duration"]).or_else(|| num(&v["format"]["duration"])).filter(|d| *d > 0.0).unwrap_or(frames as f64 / fps);
+    Ok(VideoMeta { w, h, fps, frames, duration })
+}
+
+/// Decode exactly the frames at `indices` (0-based, in decode order), in the
+/// order asked - an index may repeat. Frames are streamed and only the ones
+/// asked for are kept, and decoding stops after the last one, so a few
+/// frames of a long clip cost a few frames of memory. An index past the
+/// clip's end is an error naming it.
+pub fn decode_frames_at(path: &Path, indices: &[u64]) -> Result<Vec<Rgb8>, String> {
+    if !ffmpeg_available() {
+        return Err("imaging::video: ffmpeg not found on PATH -- video file decoding needs the ffmpeg CLI".to_string());
+    }
+    let (w, h) = probe_size(path).ok_or_else(|| format!("imaging::video: ffprobe could not read the frame size of {}", path.display()))?;
+    let Some(&last) = indices.iter().max() else { return Ok(Vec::new()) };
+    let mut kept: std::collections::BTreeMap<u64, Vec<u8>> = indices.iter().map(|&i| (i, Vec::new())).collect();
+    stream_frames(path, w, h, None, 0, &mut |i, px| {
+        if let Some(slot) = kept.get_mut(&i) {
+            *slot = px.to_vec();
+        }
+        i < last
+    })?;
+    indices
+        .iter()
+        .map(|i| match &kept[i] {
+            px if px.is_empty() => Err(format!("imaging::video: {} has no frame {i}", path.display())),
+            px => Ok(Rgb8 { w, h, px: px.clone() }),
+        })
+        .collect()
+}
+
+/// Run ffmpeg over `path` and hand each decoded `w x h` RGB frame to
+/// `on_frame(index, bytes)` until the stream ends, `max_frames` (if non-zero)
+/// are produced, or `on_frame` returns `false`. `vf` is an optional ffmpeg
+/// filter graph applied before conversion.
+fn stream_frames(path: &Path, w: u32, h: u32, vf: Option<String>, max_frames: u32, on_frame: &mut dyn FnMut(u64, &[u8]) -> bool) -> Result<(), String> {
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-v").arg("error").arg("-i").arg(path);
-    if let Some(fps) = fps {
-        cmd.arg("-vf").arg(format!("fps={fps}"));
+    match vf {
+        Some(vf) => {
+            cmd.arg("-vf").arg(vf);
+        }
+        // Unfiltered: every decoded frame exactly once, so a frame's position
+        // in the pipe is its decode index.
+        None => {
+            cmd.args(["-fps_mode", "passthrough"]);
+        }
     }
-    if opts.max_frames > 0 {
-        cmd.arg("-frames:v").arg(opts.max_frames.to_string());
+    if max_frames > 0 {
+        cmd.arg("-frames:v").arg(max_frames.to_string());
     }
     // Raw RGB straight down a pipe: no container, no per-frame encode, and
     // nothing written to disk. The frame size is fixed and known, so the
@@ -132,19 +231,28 @@ pub fn decode_frames_rgb8(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<Rgb
     let mut child = cmd.spawn().map_err(|e| format!("imaging::video: spawning ffmpeg: {e}"))?;
     let mut stdout = child.stdout.take().expect("piped");
     let frame_bytes = (w as usize) * (h as usize) * 3;
-    let mut out = Vec::new();
     let mut buf = vec![0u8; frame_bytes];
+    let mut index = 0u64;
+    let mut stopped = false;
     loop {
         match read_exact_or_eof(&mut stdout, &mut buf)? {
             0 => break,
-            n if n == frame_bytes => out.push(Rgb8::new(w, h, buf.clone())?),
-            n => {
-                return Err(format!(
-                    "imaging::video: {} ended mid-frame ({n} of {frame_bytes} bytes)",
-                    path.display()
-                ))
+            n if n == frame_bytes => {
+                let more = on_frame(index, &buf);
+                index += 1;
+                if !more {
+                    stopped = true;
+                    break;
+                }
             }
+            n => return Err(format!("imaging::video: {} ended mid-frame ({n} of {frame_bytes} bytes)", path.display())),
         }
+    }
+    if stopped {
+        // The rest of the stream is not wanted: stop ffmpeg rather than read it.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(());
     }
     let status = child.wait().map_err(|e| format!("imaging::video: waiting for ffmpeg: {e}"))?;
     if !status.success() {
@@ -155,10 +263,7 @@ pub fn decode_frames_rgb8(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<Rgb
         }
         return Err(format!("imaging::video: ffmpeg exited {status}: {err}"));
     }
-    if out.is_empty() {
-        return Err(format!("imaging::video: ffmpeg produced no frames for {}", path.display()));
-    }
-    Ok(out)
+    Ok(())
 }
 
 /// Fill `buf`, returning how many bytes were read: `buf.len()` normally, `0`

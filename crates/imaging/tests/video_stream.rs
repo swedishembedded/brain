@@ -100,3 +100,36 @@ fn the_spread_reaches_the_end_of_the_clip() {
     );
     let _ = std::fs::remove_file(&clip);
 }
+
+/// `probe_video` reports what the container holds, and `decode_frames_at`
+/// returns exactly the frames at the asked indices - in the asked order,
+/// repeats included - equal to the same frames of a full decode, and refuses
+/// an index past the end. Covers a container that records its frame count
+/// (mp4) and one that does not (mkv, counted by decoding).
+#[test]
+fn frames_are_decoded_by_index_and_the_metadata_is_the_containers() {
+    if !ffmpeg_available() {
+        brain_testutil::skip("ffmpeg not on PATH");
+        return;
+    }
+    for ext in ["mp4", "mkv"] {
+        let clip = std::env::temp_dir().join(format!("brain-vidindex-{}.{ext}", std::process::id()));
+        if !synth(&clip, 3, 10, 64, 48) {
+            brain_testutil::skip("ffmpeg could not synthesise a test clip");
+            return;
+        }
+        let meta = imaging::video::probe_video(&clip).expect("probe");
+        assert_eq!((meta.w, meta.h, meta.frames), (64, 48, 30), "{ext}: {meta:?}");
+        assert!((meta.fps - 10.0).abs() < 1e-9 && (meta.duration - 3.0).abs() < 0.05, "{ext}: {meta:?}");
+
+        let all = decode_frames_rgb8(&clip, &VideoDecodeOpts { fps: None, max_frames: 0, spread: 0 }).expect("full decode");
+        assert_eq!(all.len(), 30);
+        let picked = imaging::video::decode_frames_at(&clip, &[29, 0, 10, 10]).expect("decode by index");
+        for (got, i) in picked.iter().zip([29usize, 0, 10, 10]) {
+            assert!(got.px == all[i].px, "{ext}: frame {i} differs from the full decode");
+        }
+        let e = imaging::video::decode_frames_at(&clip, &[3, 30]).unwrap_err();
+        assert!(e.contains("frame 30"), "{e}");
+        std::fs::remove_file(&clip).ok();
+    }
+}
