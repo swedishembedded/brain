@@ -516,15 +516,29 @@ impl Qwen35Config {
     /// Every JSON key [`Self::from_json`] must find to read this config's
     /// real per-checkpoint SHAPE rather than silently substitute an
     /// unrelated hardcoded default - see that function's own `g`/`gf`
-    /// closures. Deliberately excludes fields whose defaults are a
-    /// documented REFERENCE CONSTANT for this whole architecture family
-    /// (`partial_rotary_factor`, `mrope_section`, `full_attention_interval`,
-    /// the `linear_*` GDN dims, `max_position_embeddings`), not a
-    /// per-checkpoint value that varies by model size - unlike a missing
-    /// `vocab_size`/`d_model`/`n_layers`, which produces a DIFFERENT model,
-    /// silently.
-    pub const SHAPE_KEYS: &'static [&'static str] =
-        &["vocab_size", "block_size", "n_layers", "d_model", "n_heads", "n_kv_heads", "head_dim", "rms_norm_eps", "rope_theta"];
+    /// closures. The GDN head counts/dims and `intermediate_size` are
+    /// included because they vary by model size within this family (the 27B
+    /// has 48 value heads, the 0.8B decoder 16). Deliberately excludes
+    /// fields whose defaults are a documented REFERENCE CONSTANT for the
+    /// whole family (`partial_rotary_factor`, `mrope_section`,
+    /// `full_attention_interval`, `linear_conv_kernel_dim`,
+    /// `max_position_embeddings`).
+    pub const SHAPE_KEYS: &'static [&'static str] = &[
+        "vocab_size",
+        "block_size",
+        "n_layers",
+        "d_model",
+        "n_heads",
+        "n_kv_heads",
+        "head_dim",
+        "rms_norm_eps",
+        "rope_theta",
+        "linear_num_key_heads",
+        "linear_num_value_heads",
+        "linear_key_head_dim",
+        "linear_value_head_dim",
+        "intermediate_size",
+    ];
 
     /// Which of [`Self::SHAPE_KEYS`] `c` is missing.
     pub fn missing_shape_keys(c: &Value) -> Vec<&'static str> {
@@ -730,6 +744,22 @@ mod tests {
         assert!(err.contains("vocab_size"), "error {err:?} should name vocab_size");
     }
 
+    /// The GDN head counts/dims and the FFN width differ between sizes of this
+    /// family (the 27B's value heads are 48 wide-group heads, the 0.8B
+    /// decoder's are 16), so a config without them must be refused, not
+    /// read as the tiny test preset's values.
+    #[test]
+    fn from_json_checked_rejects_a_config_missing_gdn_or_ffn_dims() {
+        let c = serde_json::json!({
+            "vocab_size": 29, "block_size": 24, "n_layers": 4, "d_model": 96,
+            "n_heads": 3, "n_kv_heads": 1, "head_dim": 40, "rms_norm_eps": 1e-6, "rope_theta": 1e7,
+        });
+        let err = Qwen35Config::from_json_checked(&c).expect_err("missing GDN/FFN dims must be refused");
+        for key in ["linear_num_key_heads", "linear_num_value_heads", "linear_key_head_dim", "linear_value_head_dim", "intermediate_size"] {
+            assert!(err.contains(key), "error {err:?} should name {key:?}");
+        }
+    }
+
     #[test]
     fn layer_type_schedule_matches_reference_formula() {
         // Reference: "linear_attention" if bool((i+1) % interval) else "full_attention"
@@ -861,6 +891,8 @@ mod tests {
         let with = |scaling: serde_json::Value| serde_json::json!({
             "vocab_size": 29, "block_size": 24, "n_layers": 4, "d_model": 96,
             "n_heads": 3, "n_kv_heads": 1, "head_dim": 40, "rms_norm_eps": 1e-6, "rope_theta": 1e7,
+            "linear_num_key_heads": 2, "linear_num_value_heads": 6, "linear_key_head_dim": 16,
+            "linear_value_head_dim": 20, "intermediate_size": 112,
             "rope_scaling": scaling,
         });
         let linear = Qwen35Config::from_json_checked(&with(serde_json::json!({"type": "linear", "factor": 4.0}))).unwrap();
