@@ -253,6 +253,7 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
         let mut v = PIPELINES.to_vec();
+        v.push(kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("TN", I8_TILE_TN)]).expect("matmul_i8_dyn declares the TN register-block knob"));
         for dt in HALF_TIERS {
             for (name, src) in [("matmul", kernels::MATMUL), ("matmul_gemv", kernels::MATMUL_GEMV), ("matmul_reg3", kernels::MATMUL_REG3)] {
                 v.push(kernels::template::dtype_variant(name, src, "w", dt).expect("brain-kernels ships the bf16/f16 GEMM variants"));
@@ -260,6 +261,36 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
         }
         v
     })
+}
+
+/// Output columns per thread of the int8 prefill tile: 4 gives a 128x64
+/// workgroup tile whose register block fits two workgroups per SM, faster
+/// than the 128x128 default on a Tesla P40 at Qwen3-8B prefill shapes
+/// (`qwen_bench gemm8` reproduces the comparison; see `matmul_i8_dyn.wgsl`).
+const I8_TILE_TN: u32 = 4;
+
+/// The int8 tile GEMM and the output tile its workgroups cover. A device
+/// built from the bare [`PIPELINES`] set (tests) has only the default 128x128
+/// kernel, so the tile is resolved by name rather than assumed.
+#[derive(Clone, Copy, Debug)]
+struct I8Tile {
+    kernel: usize,
+    rows: u32,
+    cols: u32,
+}
+
+impl I8Tile {
+    fn resolve(gpu: &Gpu) -> I8Tile {
+        let name = kernels::template::variant_name("matmul_i8_dyn", &[("TN", I8_TILE_TN)]);
+        match gpu.kernel_index(&name) {
+            Some(kernel) => I8Tile { kernel, rows: 128, cols: 16 * I8_TILE_TN },
+            None => I8Tile { kernel: MATMUL_I8_DYN, rows: 128, cols: 128 },
+        }
+    }
+
+    fn workgroups(&self, m: u32, n: u32) -> u32 {
+        m.div_ceil(self.rows) * n.div_ceil(self.cols)
+    }
 }
 
 /// The storage tiers that keep a checkpoint's own half-precision values.
@@ -926,6 +957,8 @@ pub struct Engine {
     /// `self.selector`); `self.selector` is `Op::MatMul`'s FALLBACK for a
     /// shape this table has no measurement for, not a wrapper around it.
     tuned_i8: HashMap<(u32, u32, u32), KernelVariant>,
+    /// The int8 tile GEMM's kernel and output tile (see [`I8Tile`]).
+    i8_tile: I8Tile,
     /// M8.4: measured split-K [`Schedule`] choices for the fp32 register-tiled
     /// GEMM (S5, widened past `Op::MatMul`'s `KernelVariant` search to the
     /// schedule the chosen `RegisterTiled` variant dispatches with), keyed by
@@ -1373,6 +1406,7 @@ impl Engine {
         // build time (a few ms; persisted per adapter + kernel sources), so
         // the hot path only ever looks the choice up. Row counts vary freely
         // at runtime, so choices are keyed by power-of-two bucket.
+        let i8_tile = I8Tile::resolve(&gpu);
         let tuned_i8 = match &i8_scratch {
             Some(scratch) => Self::tune_i8(&gpu, &caps, &lin_weights, scratch, b as u32),
             None => HashMap::new(),
@@ -1435,6 +1469,7 @@ impl Engine {
             library_min_rows: if tier == Dtype::BF16 { LIBRARY_MIN_ROWS_BF16 } else { LIBRARY_MIN_ROWS },
             i8_scratch,
             tuned_i8,
+            i8_tile,
             tuned_splitk,
             sc,
             logits_dev,
@@ -1984,10 +2019,10 @@ impl Engine {
                 gpu_core::Dispatch::Workgroups(n),
             )),
             _ => s.push(self.gpu.dispatch(
-                MATMUL_I8_DYN,
+                self.i8_tile.kernel,
                 &[scratch.xq_for(k), w, &scratch.sx, sw, out],
                 &[rows, k / 4, n],
-                gpu_core::Dispatch::Workgroups(rows.div_ceil(128) * n.div_ceil(128)),
+                gpu_core::Dispatch::Workgroups(self.i8_tile.workgroups(rows, n)),
             )),
         }
     }
@@ -1998,7 +2033,7 @@ impl Engine {
     /// overhead amortises - and the winner persists per adapter + kernel
     /// sources. `BRAIN_NO_AUTOTUNE=1` skips every measurement (static policy).
     fn tune_i8(gpu: &Gpu, caps: &DeviceCaps, weights: &HashMap<String, Weight>, scratch: &I8Scratch, max_rows: u32) -> HashMap<(u32, u32, u32), KernelVariant> {
-        let fp = gpu_core::tune::source_fingerprint(&[kernels::MATMUL_I8_GEMV, kernels::MATMUL_I8_DYN]);
+        let fp = gpu_core::tune::source_fingerprint(&[kernels::MATMUL_I8_GEMV, kernels::MATMUL_I8_DYN, &I8_TILE_TN.to_string()]);
         let store = gpu_core::tune::FileTuneStore::for_adapter(fp)
             .map(|s| Box::new(s) as Box<dyn gpu_core::select::TuneStore>);
         let tuner = AutoTuner::new(store);
@@ -2050,12 +2085,10 @@ impl Engine {
                 &[m, k / 4, n],
                 gpu_core::Dispatch::Workgroups(n),
             ),
-            KernelVariant::PackedInt8 => gpu.dispatch(
-                MATMUL_I8_DYN,
-                &[scratch.xq_for(k), w, &scratch.sx, sw, &out],
-                &[m, k / 4, n],
-                gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128)),
-            ),
+            KernelVariant::PackedInt8 => {
+                let tile = I8Tile::resolve(gpu);
+                gpu.dispatch(tile.kernel, &[scratch.xq_for(k), w, &scratch.sx, sw, &out], &[m, k / 4, n], gpu_core::Dispatch::Workgroups(tile.workgroups(m, n)))
+            }
             other => unreachable!("int8 candidates are GEMV or tile, got {other:?}"),
         };
         // Warm-up (pipeline residency, first-touch allocations), then timed.
@@ -3809,6 +3842,21 @@ mod tests {
     /// half a quantization step of the truth, and the whole-tensor `rel_l2`
     /// stays under a DERIVED bound (not a hand-fitted one) - `rel_l2` because
     /// cosine alone cannot see a dropped or doubled scale factor.
+    /// The int8 prefill tile is the 128x64 specialisation where the device was
+    /// built with the full kernel set, and the default 128x128 kernel on a bare
+    /// [`PIPELINES`] device; either way the grid must cover every output tile.
+    #[test]
+    fn int8_tile_resolves_by_name_and_covers_the_output() {
+        let bare = I8Tile::resolve(&gpu_core::testgpu::dev(PIPELINES));
+        assert_eq!((bare.kernel, bare.rows, bare.cols), (MATMUL_I8_DYN, 128, 128));
+        assert_eq!(bare.workgroups(130, 200), 2 * 2);
+
+        let full = I8Tile::resolve(&gpu_core::testgpu::dev(pipelines()));
+        assert_ne!(full.kernel, MATMUL_I8_DYN);
+        assert_eq!((full.rows, full.cols), (128, 64));
+        assert_eq!(full.workgroups(130, 200), 2 * 4);
+    }
+
     #[test]
     fn int8_kv_scale_and_bytes_match_a_host_oracle() {
         let cfg = kv_probe_cfg();
