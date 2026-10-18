@@ -65,12 +65,15 @@ impl Gate {
         }
         // Fail fast if the parent directory does not exist / is not writable,
         // rather than discovering it only once every surface has already bound.
-        // `OpenOptions::create_new` + immediate delete is a real probe (not just
-        // an `exists()` check on the directory) without leaving anything behind
-        // for a racing waiter to see.
-        let probe = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
-        drop(probe);
-        std::fs::remove_file(&path)?;
+        // The probe is a real create + delete (not just an `exists()` check on
+        // the directory), under a sibling name: a waiter polls for `path`
+        // itself, and seeing it even for the moment between the create and the
+        // delete would read as "ready" before anything has bound.
+        let mut probe_name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        probe_name.push(format!(".probe-{}", std::process::id()));
+        let probe = path.with_file_name(probe_name);
+        drop(std::fs::OpenOptions::new().write(true).create_new(true).open(&probe)?);
+        std::fs::remove_file(&probe)?;
         Ok(Gate(Some(Arc::new(Inner { path, expected: expected.max(1), seen: AtomicUsize::new(0), fired: AtomicBool::new(false) }))))
     }
 
