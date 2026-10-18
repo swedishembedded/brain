@@ -32,9 +32,15 @@ fn decoder(lora: bool) -> QwenConfig {
 }
 
 /// The hybrid split aligner over two 8-wide streams into the decoder's 16.
+/// The aligner every trainer in this binary starts from. Its weights are
+/// random per run but drawn from ONE seed per process, so the trainers a test
+/// compares (plain against adapted, one card against two) hold the same
+/// aligner: a fresh seed per trainer made those comparisons measure two
+/// different aligners.
 fn aligner() -> (ProjectorConfig, HashMap<String, Vec<f32>>) {
+    static SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let cfg = ProjectorConfig::from_type("low_high_hybrid_split_mlp_gelu", 2, 8, 16).unwrap();
-    let mut rng = Rng::new(data::rng::random_seed());
+    let mut rng = Rng::new(*SEED.get_or_init(data::rng::random_seed));
     let w = cfg.param_list().into_iter().map(|(n, len)| (n, (0..len).map(|_| (rng.next_f32() - 0.5) * 0.6).collect())).collect();
     (cfg, w)
 }
