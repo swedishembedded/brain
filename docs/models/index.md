@@ -41,7 +41,7 @@ named on the model's own page (see
 | [`deepseekocr2`](deepseekocr2.md) | document image → text/markdown, global view only (no auto-fetch - no vendor GGUF exists yet) | [x] |
 | [`qwen3omnimoe`](qwen3omnimoe/readme.md) | text/audio/image/video → text, plus spoken output | [x] |
 | [`moondream3`](moondream3.md) | image + instruction → text (captioning) | [x] |
-| [`minicpmv`](minicpmv.md) | images / video + text → text | [ ] (in progress - text-only decoder parity) |
+| [`minicpmv`](minicpmv.md) ⤓ | images + text → text, tool calls | [x] |
 | [`florence2`](florence2.md) | visual grounding: a phrase + an image → a bounding box | [x] |
 
 ## Speech

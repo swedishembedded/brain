@@ -65,6 +65,23 @@ pub struct Prepared {
     pub embeds: Vec<f32>,
 }
 
+/// Device bytes a served instance holds beyond its weights for the vision
+/// tower's activations: the packed views of a request (a 36-slice image is
+/// about 37k patch rows at 4x) through the encoder's scratch and score slab.
+pub const TOWER_SCRATCH_BYTES: u64 = 3 << 30;
+
+/// Device bytes of a built composite: fp32 weights, the decoder's KV pool and
+/// per-sequence Gated-DeltaNet state, and the tower's scratch.
+pub fn footprint(cfg: &MiniCpmVConfig, max_seq_len: u32, max_concurrent: u32) -> u64 {
+    let vision: u64 = crate::vision::tensor_manifest(cfg).iter().map(|(_, n)| *n as u64).sum();
+    let text: u64 = cfg.text.param_list().iter().map(|(_, n)| *n as u64).sum();
+    let t = &cfg.text;
+    let full = t.layer_types().iter().filter(|l| **l == qwen35::config::LayerType::Full).count() as u64;
+    let kv = full * 2 * (t.n_kv_heads * t.head_dim) as u64 * max_seq_len as u64 * max_concurrent as u64 * 4;
+    let gdn = (t.n_layers as u64 - full) * t.gdn_state_len() * max_concurrent as u64 * 4;
+    4 * (vision + text) + kv + gdn + TOWER_SCRATCH_BYTES
+}
+
 pub struct MiniCpmV {
     pub cfg: MiniCpmVConfig,
     pub tower: Tower,
@@ -124,11 +141,17 @@ impl MiniCpmV {
     /// Process `images`, encode them, lay out and tokenize the conversation,
     /// and build the decoder's input embeddings.
     pub fn prepare(&self, messages: &[Message], images: &[Rgb8], opts: &GenOptions) -> Result<Prepared, String> {
+        let rendered = self.fmt.render(messages, true, opts.enable_thinking)?;
+        self.prepare_text(&rendered, images, opts)
+    }
+
+    /// [`Self::prepare`] for a conversation already rendered by the chat
+    /// template (one `<|image_pad|>` per image, in order).
+    pub fn prepare_text(&self, rendered: &str, images: &[Rgb8], opts: &GenOptions) -> Result<Prepared, String> {
         let io = self.options(opts);
         let processed: Vec<ProcessedImage> = images.iter().map(|img| process_image(img, &io)).collect();
         let layouts: Vec<String> = processed.iter().map(|p| view_layout(p, io.downsample, IMAGE_PAD)).collect();
-        let rendered = self.fmt.render(messages, true, opts.enable_thinking)?;
-        let prompt = self.fmt.expand(&rendered, &layouts, &[], io.use_image_id)?;
+        let prompt = self.fmt.expand(rendered, &layouts, &[], io.use_image_id)?;
         let visual = if processed.is_empty() {
             Vec::new()
         } else {
@@ -265,6 +288,11 @@ impl MiniCpmV {
     pub fn generate(&mut self, messages: &[Message], images: &[Rgb8], opts: &GenOptions, on_token: &mut dyn FnMut(u32) -> bool) -> Result<Vec<u32>, String> {
         let prepared = self.prepare(messages, images, opts)?;
         self.generate_prepared(&prepared, opts, on_token)
+    }
+
+    /// The longest prompt plus reply one sequence holds.
+    pub fn engine_capacity(&self) -> usize {
+        self.engine.max_seq_len()
     }
 
     pub fn decode(&self, ids: &[u32]) -> String {

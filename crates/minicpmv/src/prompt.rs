@@ -73,7 +73,7 @@ pub struct Prompt {
 /// The chat template and tokenizer of a checkpoint.
 pub struct Formatter {
     template: ChatTemplate,
-    pub tokenizer: QwenBpe,
+    pub tokenizer: std::sync::Arc<QwenBpe>,
     pub image_pad: u32,
     pub video_pad: u32,
 }
@@ -100,7 +100,7 @@ impl Formatter {
     pub fn from_dir(dir: &Path) -> Result<Formatter, String> {
         let template = ChatTemplate::from_model_dir(dir).map_err(|e| format!("minicpmv: chat template: {e:?}"))?;
         let tok_path = dir.join("tokenizer.json");
-        let tokenizer = QwenBpe::from_file(tok_path.to_str().ok_or("non-UTF-8 tokenizer path")?)?;
+        let tokenizer = std::sync::Arc::new(QwenBpe::from_file(tok_path.to_str().ok_or("non-UTF-8 tokenizer path")?)?);
         let id = |t: &str| tokenizer.special_id(t).ok_or_else(|| format!("minicpmv: the tokenizer has no {t}"));
         Ok(Formatter { image_pad: id(IMAGE_PAD)?, video_pad: id(VIDEO_PAD)?, template, tokenizer })
     }

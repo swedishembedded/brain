@@ -756,6 +756,7 @@ dependencies = [
  "brain-loader",
  "brain-lpips",
  "brain-ltxv",
+ "brain-minicpmv",
  "brain-minimaxh3",
  "brain-minimaxmusic3",
  "brain-model",
@@ -887,6 +888,7 @@ dependencies = [
  "brain-ltxv",
  "brain-memauth",
  "brain-mimi",
+ "brain-minicpmv",
  "brain-minimaxmusic3",
  "brain-model",
  "brain-modelcost",
@@ -1827,13 +1829,16 @@ dependencies = [
 name = "brain-minicpmv"
 version = "2.0.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-paramstore",
+ "brain-qwen3",
  "brain-qwen35",
  "brain-testutil",
  "minijinja",

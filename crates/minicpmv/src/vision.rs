@@ -156,7 +156,7 @@ pub fn nearest_position_ids(view: View, side: u32) -> Vec<u32> {
 /// contiguous (blocks row-major, each block's cells row-major), offset by
 /// `row0`. `h` and `w` must be multiples of `k`.
 fn block_major(view: View, k: u32, row0: u32) -> Vec<u32> {
-    assert!(view.h % k == 0 && view.w % k == 0, "a {}x{} grid does not tile into {k}x{k} blocks", view.h, view.w);
+    assert!(view.h.is_multiple_of(k) && view.w.is_multiple_of(k), "a {}x{} grid does not tile into {k}x{k} blocks", view.h, view.w);
     vit::WindowPlan::new(view.h, view.w, k, k).perm().iter().map(|&r| r + row0).collect()
 }
 
@@ -258,7 +258,7 @@ impl Tower {
         let n: u32 = views.iter().map(|v| v.patches()).sum();
         assert!(n > 0, "minicpmv: no views to encode");
         assert_eq!(patches.len(), (n * pp) as usize, "minicpmv: {} patch values for {n} patches of {pp}", patches.len());
-        let step = (self.cfg.merge * if mode == Downsample::X16 { v.window } else { 1 }) as u32;
+        let step = self.cfg.merge * if mode == Downsample::X16 { v.window } else { 1 };
         for view in views {
             assert!(view.h % step == 0 && view.w % step == 0, "minicpmv: a {}x{} view does not reduce by {step}x{step} ({} mode)", view.h, view.w, mode.name());
         }
@@ -315,7 +315,7 @@ impl Tower {
         let ln = self.ln();
         let post = g.storage((rows * c) as u64);
         g.submit(&[], &[model::block::layernorm_fwd(g, &ln, &x, self.w("post_norm.weight"), self.w("post_norm.bias"), &post, c, rows, v.eps)]);
-        if let Some(t) = taps.as_deref_mut() {
+        if let Some(t) = taps {
             t.post_norm = g.read(&post, (rows * c) as usize);
         }
 
@@ -440,36 +440,6 @@ pub fn patchify(pixels: &[f32], view: View, patch: u32) -> Vec<f32> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn nearest_position_ids_cover_the_table_corners_and_keep_row_major_order() {
-        let side = 70;
-        let ids = nearest_position_ids(View { h: 70, w: 70 }, side);
-        assert_eq!(ids, (0..70 * 70).collect::<Vec<u32>>(), "a native-size view reads the table in order");
-        let ids = nearest_position_ids(View { h: 2, w: 3 }, side);
-        // i/h in {0, 1/2}, j/w in {0, 1/3, 2/3}: buckets 0 and 35; 0, 23, 46.
-        assert_eq!(ids, vec![0, 23, 46, 35 * 70, 35 * 70 + 23, 35 * 70 + 46]);
-    }
-
-    #[test]
-    fn block_major_orders_windows_then_cells_row_major() {
-        assert_eq!(block_major(View { h: 2, w: 4 }, 2, 10), vec![10, 11, 14, 15, 12, 13, 16, 17]);
-    }
-
-    #[test]
-    fn patchify_lays_each_patch_out_channel_then_row_major() {
-        // A 1x2-patch view of patch 2: pixel value = c*100 + y*10 + x.
-        let (h, w) = (2usize, 4usize);
-        let px: Vec<f32> = (0..3).flat_map(|c| (0..h).flat_map(move |y| (0..w).map(move |x| (c * 100 + y * 10 + x) as f32))).collect();
-        let rows = patchify(&px, View { h: 1, w: 2 }, 2);
-        assert_eq!(&rows[..12], &[0., 1., 10., 11., 100., 101., 110., 111., 200., 201., 210., 211.]);
-        assert_eq!(&rows[12..16], &[2., 3., 12., 13.]);
-    }
-}
-
 /// Map the checkpoint's vision and merger tensors onto [`tensor_manifest`]'s
 /// names: the attention projections fused into `qkv` (q, k, v row blocks),
 /// the patch convolution flattened to `[C, 3*p*p]`. Two-way: every manifest
@@ -536,4 +506,34 @@ pub fn import(source_names: &[String], read: &mut dyn FnMut(&str) -> Option<Vec<
         return Err(format!("minicpmv: vision import ({} problems): {}", problems.len(), problems.join("; ")));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nearest_position_ids_cover_the_table_corners_and_keep_row_major_order() {
+        let side = 70;
+        let ids = nearest_position_ids(View { h: 70, w: 70 }, side);
+        assert_eq!(ids, (0..70 * 70).collect::<Vec<u32>>(), "a native-size view reads the table in order");
+        let ids = nearest_position_ids(View { h: 2, w: 3 }, side);
+        // i/h in {0, 1/2}, j/w in {0, 1/3, 2/3}: buckets 0 and 35; 0, 23, 46.
+        assert_eq!(ids, vec![0, 23, 46, 35 * 70, 35 * 70 + 23, 35 * 70 + 46]);
+    }
+
+    #[test]
+    fn block_major_orders_windows_then_cells_row_major() {
+        assert_eq!(block_major(View { h: 2, w: 4 }, 2, 10), vec![10, 11, 14, 15, 12, 13, 16, 17]);
+    }
+
+    #[test]
+    fn patchify_lays_each_patch_out_channel_then_row_major() {
+        // A 1x2-patch view of patch 2: pixel value = c*100 + y*10 + x.
+        let (h, w) = (2usize, 4usize);
+        let px: Vec<f32> = (0..3).flat_map(|c| (0..h).flat_map(move |y| (0..w).map(move |x| (c * 100 + y * 10 + x) as f32))).collect();
+        let rows = patchify(&px, View { h: 1, w: 2 }, 2);
+        assert_eq!(&rows[..12], &[0., 1., 10., 11., 100., 101., 110., 111., 200., 201., 210., 211.]);
+        assert_eq!(&rows[12..16], &[2., 3., 12., 13.]);
+    }
 }

@@ -679,6 +679,26 @@ history and exempt.
     Both documented on `docs/models/vlm.md`; full ledger
     `.agents/roadmap/vlm.md`.
 
+13d-bis. **MiniCPM-V 4.6** (`crates/minicpmv`) - served VLM, `brain/minicpmv`, on
+    one card: a NaViT SigLIP tower (views packed with one attention span each
+    through `model::vit` blocks, position embeddings at the nearest cell of a
+    70x70 table), a window merger after encoder layer 6 (2x2-window attention
+    on the uniform `attn_*_bidir` family, then 4 rows -> 1) and a 2x2 MLP
+    merger (16x, or 4x without the window merger), spliced into the
+    Qwen3.5-0.8B decoder `brain-qwen35` implements. Visual rows replace the
+    placeholder rows of the input embeddings (`Engine::prefill_embeds`);
+    positions stay 1-D. The image processor (slice grid, torch's uint8
+    antialiased bicubic `imaging::host::resize_bicubic_torch_u8`) and the
+    prompt layout (the checkpoint's own chat template through
+    `data::chat_template`) are exact against the reference; tower stages,
+    decoder logits and whole greedy continuations match it on the real
+    checkpoint (`crates/minicpmv/tests/*_parity.rs`). **Serving contract
+    met**: `minicpmv::caps` (one streaming `generate`, tools via the shared
+    `qwen3::chat` layer), `crates/catalog/src/resident_minicpmv.rs` (one
+    card, real `run_batch` batching on the paged KV pool), a `catalog.rs`
+    entry, `samples/python/vision/minicpmv-chat/`. Page:
+    `docs/models/minicpmv.md`; ledger: `.agents/roadmap/minicpmv.md`.
+
 13c-bis. **FastVLM-0.5B and Moondream 3** (`crates/fastvlm`, `crates/moondream3`) -
     the other two vision-language architectures alongside Qwen3-VL above; all
     three share one shape (vision encoder → connector/projector →

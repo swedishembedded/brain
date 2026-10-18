@@ -106,8 +106,14 @@ continuations and one label loss.
       next-token logits at cosine >= 0.9999999999 and the whole greedy
       continuation identical, for a sliced image at 16x and 4x, a document
       and two images.
-- [ ] P5b CLI, serving contract (caps, resident, catalog, D-Bus, HTTP,
-      sample), docs.
+- [x] P5b CLI (`brain minicpmv generate`), serving contract (`caps.rs`
+      over `qwen3::chat`'s template rendering, tool calls, stops and
+      cancellation; `catalog::resident_minicpmv` on one card with batched
+      `run_batch`; catalog entry; spec), `samples/python/vision/minicpmv-chat/`,
+      docs. Verified: `tests/serving.rs` (a batch through the capability
+      contract reproduces the reference; a cancelled request stops alone),
+      the CLI on a real JPEG, `brain serve --openai` with two images and with
+      a tool call (structured `get_weather({"city": "Paris"})`), `brain pull`.
 - [ ] P6 video: index-exact frame selection, frame layout, parity.
 - [ ] P7 training: decoder LoRA, merger, vision; overfit/held-out/reload
       gates; PEFT export.

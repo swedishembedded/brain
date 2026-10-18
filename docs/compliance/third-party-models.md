@@ -52,4 +52,5 @@ diffusers-derived crates (`diffusion`, `dit`, `vae`, `sdxlunet`'s *code*,
 DeepSeek `LICENSE-MODEL` governs the weights and was not diffed in detail),
 DeepSeek-OCR-2 (both code and weights Apache-2.0 per the model's own
 released repo - unlike v1, no separate model license applies), LLaVA, T5,
+MiniCPM-V 4.6 (`openbmb/MiniCPM-V-4.6`, Apache-2.0 per its model card),
 gpt2 (no real checkpoint fetch path).

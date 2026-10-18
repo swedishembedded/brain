@@ -36,7 +36,7 @@ Rust SDK.
 |---|---|---|
 | **Text** | Qwen3, Qwen3.5, Qwen3.8, GLM, GPT, LFM2.5 | chat, tool calls, embeddings; serve many users at once; train from scratch; fine-tune with LoRA |
 | **Vision** | YOLOv8, SAM 2.1, ZipDepth, SCRFD, ArcFace, CLIP, Florence-2 | object detection, segmentation and video tracking, depth, face detection and recognition |
-| **Vision and language** | Qwen3-VL, FastVLM, Moondream 3, DeepSeek-OCR, Qwen3-Omni | describe images, answer questions about them, turn documents into markdown |
+| **Vision and language** | Qwen3-VL, MiniCPM-V, FastVLM, Moondream 3, DeepSeek-OCR, Qwen3-Omni | describe images, answer questions about them, turn documents into markdown |
 | **Image generation** | Z-Image, FLUX.2 Klein, FLUX.1 Kontext, SDXL, ControlNet, PuLID | text to image, editing, inpainting, style and identity control, LoRA training |
 | **Image restoration** | CodeFormer, Real-ESRGAN, SUPIR | face restoration, 4x upscaling |
 | **Video** | Wan 2.1/2.2, LTX-2.5 | text to video, written straight to an mp4 |

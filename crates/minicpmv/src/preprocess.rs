@@ -107,9 +107,9 @@ fn refine_size(h: u32, w: u32, grid: (u32, u32), scale: u32, patch: u32) -> (u32
 }
 
 /// The reference's `get_sliced_grid`: `(rows, cols)`, or `None` for an image
-/// small enough to stay whole. Among slice counts `multiple - 1 ..= multiple
-/// + 1` it picks the factorization whose aspect is closest to the image's in
-/// log space, preferring more rows on a tie.
+/// small enough to stay whole. Among slice counts from `multiple - 1` to
+/// `multiple + 1` it picks the factorization whose aspect is closest to the
+/// image's in log space, preferring more rows on a tie.
 pub fn sliced_grid(h: u32, w: u32, max_slices: u32, scale: u32) -> Option<(u32, u32)> {
     let log_ratio = (w as f64 / h as f64).ln();
     let ratio = (w as f64 * h as f64) / (scale as f64 * scale as f64);
@@ -143,7 +143,7 @@ pub fn sliced_grid(h: u32, w: u32, max_slices: u32, scale: u32) -> Option<(u32, 
 fn normalize(img: &Rgb8) -> Vec<f32> {
     let n = (img.w * img.h) as usize;
     let mut out = vec![0f32; 3 * n];
-    for (i, px) in img.px.chunks_exact(3).enumerate() {
+    for (i, px) in img.px.as_chunks::<3>().0.iter().enumerate() {
         for c in 0..3 {
             out[c * n + i] = (px[c] as f32 - 127.5) / 127.5;
         }

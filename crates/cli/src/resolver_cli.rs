@@ -120,6 +120,7 @@ fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R
         "s3dit" => Some(f(&s3dit::spec::S3ditSpec)),
         "kronos" => Some(f(&kronos::spec::KronosSpec)),
         "qwen3vl" => Some(f(&qwen3vl::spec::Qwen3VlSpec)),
+        "minicpmv" => Some(f(&minicpmv::spec::MiniCpmVSpec)),
         "fastvlm" => Some(f(&fastvlm::spec::FastvlmSpec)),
         "deepseek2ocr" => Some(f(&deepseek2ocr::spec::Deepseek2ocrSpec)),
         "scrfd" => Some(f(&scrfd::spec::ScrfdSpec)),

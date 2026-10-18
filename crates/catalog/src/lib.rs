@@ -57,6 +57,7 @@ pub mod resident_decision;
 pub mod resident_deepseekocr;
 pub mod resident_deepseekocr2;
 pub mod resident_deepseekvl;
+pub mod resident_minicpmv;
 pub mod resident_depth;
 pub mod resident_florence2;
 pub mod resident_flux1;
@@ -806,6 +807,18 @@ pub fn models() -> Vec<ModelEntry> {
             },
             spec: Some(("deepseekvl", &deepseekvl::spec::DEEPSEEK_VL)),
             resident: crate::resident_multi_family!(crate::resident_deepseekvl::DeepseekVlResident::family_from_assembly),
+        },
+        // MiniCPM-V 4.6: images and a conversation in, text out, on one card.
+        // `dir` resolved through `minicpmv::spec::MiniCpmVSpec`; the resident
+        // is placed at registration (see `crate::resident_minicpmv`).
+        ModelEntry {
+            manifest: minicpmv::caps::manifest,
+            provider: |assembly: &Assembly| {
+                let dir = assembly.roles.get("dir").map(|p| p.to_string_lossy().into_owned());
+                Ok(Arc::new(minicpmv::caps::MiniCpmVProvider::new(dir)) as Arc<dyn Provider>)
+            },
+            spec: Some(("minicpmv", &minicpmv::spec::MiniCpmVSpec)),
+            resident: crate::resident_multi!(crate::resident_minicpmv::MiniCpmVResident::from_assembly),
         },
         // Janus-Pro: chat over images, and text to image, from one
         // checkpoint. `dir` resolved through `januspro::spec::JANUS_PRO`; the

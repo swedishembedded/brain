@@ -10,16 +10,20 @@ name = "minicpmv"
 path = "src/lib.rs"
 
 [dependencies]
+brain-capability.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true
 brain-gpu-core.workspace = true
 brain-imaging.workspace = true
 brain-kernels.workspace = true
 brain-model.workspace = true
+brain-modelstore.workspace = true
 brain-paramstore.workspace = true
+brain-qwen3.workspace = true
 brain-qwen35.workspace = true
 minijinja.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+brain-capability.workspace = true
 brain-testutil.workspace = true
