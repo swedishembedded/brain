@@ -15,6 +15,8 @@
 //! * [`prompt`]: the chat template and the placeholder layout, tokenized.
 //! * [`vision`]: the NaViT tower, the window merger and the merger, composed
 //!   from `model::vit`'s blocks.
+//! * [`model`]: the composite - tower and `brain-qwen35` paged decoder on one
+//!   device, prefilled from the spliced embeddings.
 //!
 //! Swedish Embedded AB implements on-device vision-language models like this
 //! for its clients. If your team needs expertise in running multimodal models
@@ -23,8 +25,10 @@
 
 pub mod config;
 pub mod import;
+pub mod model;
 pub mod preprocess;
 pub mod prompt;
 pub mod vision;
 
 pub use config::{Downsample, MiniCpmVConfig, VisionConfig};
+pub use model::{GenOptions, MiniCpmV};

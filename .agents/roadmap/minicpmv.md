@@ -99,8 +99,15 @@ continuations and one label loss.
       placeholder layout. Exact against all 14 processor cases and the 5
       model-case prompts (`tests/processor_parity.rs`): resized views byte
       for byte, grids, patches, rendered text, token ids.
-- [ ] P5 end-to-end generate + serving contract (caps, resident, catalog,
-      D-Bus, HTTP, sample, docs).
+- [x] P5a end-to-end generation (`model.rs`): processor, tower and the
+      `brain-qwen35` paged engine on one device, prefilled from the spliced
+      embeddings (`Engine::prefill_embeds`), greedy or sampled decode. On the
+      real checkpoint from the golden input images (`tests/generate_parity.rs`):
+      next-token logits at cosine >= 0.9999999999 and the whole greedy
+      continuation identical, for a sliced image at 16x and 4x, a document
+      and two images.
+- [ ] P5b CLI, serving contract (caps, resident, catalog, D-Bus, HTTP,
+      sample), docs.
 - [ ] P6 video: index-exact frame selection, frame layout, parity.
 - [ ] P7 training: decoder LoRA, merger, vision; overfit/held-out/reload
       gates; PEFT export.
