@@ -29,10 +29,15 @@
 //!   qwen_bench                      # prefill T=512 + decode, fp32, at 0.6B
 //!   qwen_bench prefill [T] [reps]
 //!   qwen_bench decode  [ctx] [reps]
-//!   qwen_bench serve   [rows] [reps] [ctx] [i8w|bf16w] [kv8] [--gemm auto|fp32] [--budget-gb N] [--library-min-rows N]
+//!   qwen_bench serve   [rows] [reps] [ctx] [i8w|bf16w] [kv8] [--gemm auto|fp32] [--budget-gb N] [--library-min-rows N] [--cap N]
 //!                                    # the PAGED serving tape (a different
 //!                                    # kernel set from the batched forward);
-//!                                    # `i8w` = int8 weights, `kv8` = int8 KV
+//!                                    # `i8w` = int8 weights, `kv8` = int8 KV;
+//!                                    # `--cap N` sizes the engine for N-token
+//!                                    # sequences while every row stays at
+//!                                    # `ctx` live tokens (the server's regime:
+//!                                    # its capacity is the engine maximum,
+//!                                    # not the batch's live length)
 //!   qwen_bench head    [reps]       # the tied 151936x1024 LM head alone
 //!   qwen_bench cost                 # offline FLOP/byte accounting, no device
 //!   qwen_bench lora-train --t T [--weights CKPT] [--steps N] [--rank R] [--profile]
@@ -415,6 +420,12 @@ fn main() {
             // than a wgpu "Out of Memory" panic ten seconds later.
             let seq: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(256);
             let mbs = seq.div_ceil(bs);
+            // Engine capacity per sequence: at least the live context. Only
+            // the block-table stride and the kernels' `cap` follow it; the
+            // pool holds just the live blocks.
+            let cap_tokens: u32 = a.iter().position(|x| x == "--cap").and_then(|i| a.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(seq);
+            assert!(cap_tokens >= seq, "qwen_bench serve: --cap {cap_tokens} is below the live context {seq}");
+            let mbs_cap = cap_tokens.div_ceil(bs);
             // `qwen3::serve::kv_pool_bytes` - the ONE place this layout
             // lives - not a re-derived fp32-only estimate: that stale
             // estimate used to ignore `kv8` entirely, printing (and
@@ -449,9 +460,9 @@ fn main() {
             }
             let t0 = Instant::now();
             let mut eng = if a.iter().any(|x| x == "bf16w") {
-                qwen3::serve::Engine::from_map_tier(cfg.clone(), &init, bs, rows * mbs, rows.max(8), mbs, rows.max(8), kv8, qwen3::Dtype::BF16)
+                qwen3::serve::Engine::from_map_tier(cfg.clone(), &init, bs, rows * mbs, rows.max(8), mbs_cap, rows.max(8), kv8, qwen3::Dtype::BF16)
             } else {
-                qwen3::serve::Engine::from_map(cfg.clone(), &init, bs, rows * mbs, rows.max(8), mbs, rows.max(8), kv8, i8w)
+                qwen3::serve::Engine::from_map(cfg.clone(), &init, bs, rows * mbs, rows.max(8), mbs_cap, rows.max(8), kv8, i8w)
             };
             eng.set_gemm_precision(gemm_flag(&a));
             if let Some(rows) = flag(&a, "--library-min-rows").and_then(|s| s.parse().ok()) {
@@ -478,7 +489,7 @@ fn main() {
             // which is the profiler catching the harness, not the kernel.
             let blocks: Vec<u32> = (0..rows).map(|i| i * mbs).collect();
             let offsets: Vec<u32> = (0..rows).map(|i| i % bs).collect();
-            let bt: Vec<u32> = (0..rows).flat_map(|i| (0..mbs).map(move |b| i * mbs + b)).collect();
+            let bt: Vec<u32> = (0..rows).flat_map(|i| (0..mbs_cap).map(move |b| if b < mbs { i * mbs + b } else { 0 })).collect();
 
             let tokens: Vec<u32> = (0..rows).map(|i| (i * 131 + 7) % cfg.vocab).collect();
             let steps =
