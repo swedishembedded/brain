@@ -344,13 +344,11 @@ fn every_tile_of_the_int8_gemm_gives_the_same_bits() {
 /// attached. Device time, at the real prefill round shape.
 fn the_int8_tensor_core_gemm_is_materially_faster_than_the_portable_kernel() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
-        eprintln!("cuda_provider_matmul_i8: no CUDA device on this box - skipping");
-        return;
+        return brain_testutil::skip_unavailable("cuda_provider_matmul_i8: no CUDA device on this box");
     };
     let cc = gpu.caps().arch.compute_capability.expect("the CUDA backend reports its capability");
     if cc < kernels_cuda::MMA_S8_MIN_CC {
-        eprintln!("cuda_provider_matmul_i8: compute capability {}.{} has no int8 MMA - skipping", cc.0, cc.1);
-        return;
+        return brain_testutil::skip_unvalidated_capability("int8-tensor-core-mma", &format!("compute capability {}.{} has no int8 MMA", cc.0, cc.1));
     }
     let (production, reference) = registries(&gpu);
     for &(m, n, k) in &[(256u32, 5120u32, 5120u32), (256, 17408, 5120), (256, 5120, 17408)] {
@@ -422,8 +420,7 @@ fn sweep_skinny_tile_configurations() {
 fn sweep(configs: &[(u32, u32, u32, u32, u32)], shapes: &[(u32, u32, u32)]) {
     use backend_api::{BindKind, NativeSpec};
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
-        eprintln!("sweep: no CUDA device on this box - skipping");
-        return;
+        return brain_testutil::skip_unavailable("sweep: no CUDA device on this box");
     };
     let src = kernels_cuda::get("matmul_i8_mma").expect("registered").src;
     let bindings: &'static [BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];

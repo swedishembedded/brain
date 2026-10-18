@@ -81,7 +81,7 @@ crates/gpu-core/src/roof.rs	1
 crates/gpu-core/tests/bench_upload_cadence.rs	1
 crates/gpu-core/tests/cuda_flash_prefill.rs	2
 crates/gpu-core/tests/cuda_provider_matmul.rs	3
-crates/gpu-core/tests/cuda_provider_matmul_i8.rs	5
+crates/gpu-core/tests/cuda_provider_matmul_i8.rs	4
 crates/gpu-core/tests/device_churn.rs	5
 crates/gpu-core/tests/device_sharing.rs	1
 crates/gpu-core/tests/device_stats.rs	1

@@ -7,6 +7,9 @@
 //! The real DeepSeek-R1-Distill-Qwen-1.5B, named by its hub id, answers
 //! through the chat surface with its own template and end token.
 
+// The whole file is about the `text` surface, so it compiles only with it.
+#![cfg(feature = "text")]
+
 // The shared fixtures' qwen3 safetensors writer is not needed here.
 #[allow(dead_code)]
 mod common;

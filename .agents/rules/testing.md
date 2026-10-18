@@ -462,9 +462,13 @@ Gated DeltaNet prefill to the portable kernels for A/B), `BRAIN_PREFILL_ARENA`
 rounds). The
 `qwen35moe_decode_profile` binary reads `BRAIN_PROFILE_PREFILL=<tokens>`
 (profile a cold prefill of that many tokens instead of decode),
+`BRAIN_PROFILE_CONTEXT=<tokens>` (the synthetic decode context),
+`BRAIN_PROFILE_BATCH=<sequences>` (sequences decoded together),
 `BRAIN_PROFILE_CHUNK=<tokens>` (its prefill round size) and
 `BRAIN_PROFILE_GROUPED_MIN_ROWS=<rows>` (the row count from which its expert
-GEMMs group their slots).
+GEMMs group their slots). `BRAIN_QWEN35_GGUF_DEBUG=1` makes the sharded GGUF
+resident dump, per step, the residual RMS leaving each card and the head's top
+five tokens (separates a plumbing bug from a weights bug).
 
 **Backend internals:** `BRAIN_VK_ALLOC_DEBUG` (verbose Vulkan allocator
 logging), `BRAIN_WGPU_SERIAL` / `BRAIN_WGPU_NO_SERIAL` (force / disable the
