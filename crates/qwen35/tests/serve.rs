@@ -258,3 +258,38 @@ fn batched_decode_matches_each_sequence_decoded_alone() {
         assert!(row.windows(2).all(|w| w[0].1 >= w[1].1), "sequence {b}: top-k candidates must come back best-first, got {row:?}");
     }
 }
+
+/// The paged engine prefilled from input embeddings (`Engine::prefill_embeds`,
+/// the multimodal seam) equal to the token gather continues exactly like the
+/// token prefill, and its full-logits decode (`forward_batched_logits`, what
+/// sampling needs) agrees with the greedy device head on the argmax.
+#[test]
+fn embedding_prefill_and_logits_decode_match_the_token_path() {
+    use model::paged::BlockTable;
+    let cfg = Qwen35Config::tiny();
+    let init = init_weights(&cfg, 13);
+    let prompt = vec![2u32, 6, 1, 8, 3, 9, 4];
+    let gpu = gpu_core::testgpu::dev(pipelines());
+    let mut engine = Engine::from_source_on(&gpu, cfg.clone(), &init, 16, 2, model::kv_tier::KvTier::F32);
+
+    let mut a = BlockTable::new();
+    let ha = engine.prefill(&mut a, &prompt);
+    let embeds = engine.embed_tokens(&prompt);
+    let mut b = BlockTable::new();
+    let hb = engine.prefill_embeds(&mut b, &embeds);
+    let worst = ha.iter().zip(&hb).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+    assert!(worst < 1e-5, "embedding prefill hidden differs by {worst}");
+
+    let (mut ta, mut tb) = (engine.admit_greedy(&ha), engine.admit_greedy(&hb));
+    assert_eq!(ta, tb);
+    for _ in 0..4 {
+        let greedy = engine.forward_batched_greedy(&mut [&mut a], &[ta])[0];
+        let logits = engine.forward_batched_logits(&mut [&mut b], &[tb]);
+        assert_eq!(logits.len(), cfg.vocab as usize);
+        let argmax = logits.iter().enumerate().fold((0, f32::MIN), |(bi, bv), (i, &v)| if v > bv { (i, v) } else { (bi, bv) }).0 as u32;
+        assert_eq!(argmax, greedy, "the logits decode and the greedy decode disagree");
+        (ta, tb) = (greedy, argmax);
+    }
+    engine.release_table(&mut a);
+    engine.release_table(&mut b);
+}

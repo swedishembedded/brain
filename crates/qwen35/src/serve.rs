@@ -269,14 +269,21 @@ impl Engine {
         Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, KvTier::F32)
     }
 
-    fn from_map_with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32, kv: KvTier) -> Engine {
+    /// [`Engine::from_map_on`] from any [`checkpoint::TensorSource`] - a
+    /// streaming checkpoint source loads tensor by tensor with no whole-model
+    /// host map - with the GQA pool stored in `kv`.
+    pub fn from_source_on(parent: &Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, kv: KvTier) -> Engine {
+        Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, kv)
+    }
+
+    fn from_map_with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, kv: KvTier) -> Engine {
         assert!(max_seq_len > 0, "max_seq_len must be > 0");
         assert!(max_concurrent > 0, "max_concurrent must be > 0");
         // b=1, t=1: this instance's own decode-state fields are dead weight
         // for `Engine` (see `Engine::model`'s own doc) - t=1 is the smallest
         // legal prefill length (`gdn_chunk_size(1) == 1`, so `t % chunk ==
         // 0` holds for every config).
-        let model = Qwen35::new_on(gpu, cfg.clone(), 1, 1, weights);
+        let model = Qwen35::new_on_dt(gpu, cfg.clone(), 1, 1, weights, &model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32));
         let kv_dim = cfg.kv_dim() as u64;
         let n_layers = cfg.n_layers as usize;
         let types = cfg.layer_types();
@@ -530,6 +537,43 @@ impl Engine {
     /// at all. Each round chains as a device buffer, and the one real
     /// `gpu.read` happens after the loop, off the final round's last row.
     pub fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
+        if let Some(&bad) = prompt.iter().find(|&&t| t >= self.model.cfg.vocab) {
+            panic!("prompt token {bad} is outside the model vocabulary ({})", self.model.cfg.vocab);
+        }
+        self.prefill_rows(table, prompt, None)
+    }
+
+    /// [`Engine::prefill`] from input EMBEDDINGS (`[n, d_model]`, row-major)
+    /// instead of token ids: a vision-language model passes the token gather
+    /// ([`Engine::embed_tokens`]) with its placeholder rows replaced by image
+    /// features. The sequence is left exactly as a token prefill leaves it.
+    pub fn prefill_embeds(&mut self, table: &mut BlockTable, embeds: &[f32]) -> Vec<f32> {
+        let d = self.model.cfg.d_model as usize;
+        assert!(embeds.len().is_multiple_of(d), "prefill_embeds: {} values is not a whole number of {d}-wide rows", embeds.len());
+        // The ids are unread when the rows are supplied; only their count is.
+        let lengths = vec![0u32; embeds.len() / d];
+        self.prefill_rows(table, &lengths, Some(embeds))
+    }
+
+    /// The token-embedding rows of `tokens` (`[n, d_model]`), for a caller
+    /// building [`Engine::prefill_embeds`]'s input.
+    pub fn embed_tokens(&self, tokens: &[u32]) -> Vec<f32> {
+        self.model.embed_tokens(tokens)
+    }
+
+    /// One decode step for the batch, returning every row's full logits
+    /// (`[rows * vocab]`, row-major) from the device head - what a sampler
+    /// with no top-k bound needs.
+    pub fn forward_batched_logits(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<f32> {
+        let hidden = self.decode_batch(tables, inputs);
+        let rows = inputs.len() as u32;
+        let logits = self.model.head_logits_rows_dev(&hidden, rows);
+        self.model.gpu.read(&logits, rows as usize * self.model.cfg.vocab as usize)
+    }
+
+    /// The prefill body: `prompt` gives the length (and, without `input`, the
+    /// ids); `input` supplies the rows instead of the token gather.
+    fn prefill_rows(&mut self, table: &mut BlockTable, prompt: &[u32], input: Option<&[f32]>) -> Vec<f32> {
         assert!(table.is_empty(), "prefill expects a fresh sequence");
         assert!(!prompt.is_empty(), "qwen35::serve::Engine::prefill: empty prompt (no token to produce a hidden state from)");
         assert!(
@@ -538,9 +582,6 @@ impl Engine {
             prompt.len(),
             self.max_seq_len()
         );
-        if let Some(&bad) = prompt.iter().find(|&&t| t >= self.model.cfg.vocab) {
-            panic!("prompt token {bad} is outside the model vocabulary ({})", self.model.cfg.vocab);
-        }
         // One `reserve` call for the whole prompt: since `block_size ==
         // max_seq_len` this allocates EXACTLY the sequence's one physical
         // block (see module doc) - every later `append` (decode) call
@@ -556,7 +597,8 @@ impl Engine {
         for round in prompt.chunks(MAX_PREFILL_TOKENS as usize) {
             let caches = self.caches_for(phys);
             adapters::set_rows(std::iter::once(&self.model), &vec![adapter_slot; round.len()]);
-            h = Some(self.model.run_prefill_chunk(round, pos, &caches, None));
+            let rows = input.map(|x| &x[pos as usize * d..(pos as usize + round.len()) * d]);
+            h = Some(self.model.run_prefill_chunk(round, pos, &caches, rows));
             adapters::set_rows(std::iter::once(&self.model), &[]);
             pos += round.len() as u32;
         }
