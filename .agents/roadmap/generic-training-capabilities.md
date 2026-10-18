@@ -24,9 +24,10 @@ qwen3, qwen35, qwen35moe and gpt2 are registered in the conformance suite.
       `qwen3/tests/engine_adapter_bank.rs`, `apiserve/tests/api.rs`. Also let
       `Qwen::attach_adapter_pairs` call `adapter::sites::validate` instead of its
       own shape checks.
-- [ ] The chat fine-tuners (`ChatFineTune`, `ChatFullFineTune`,
-      `PreferenceFineTune`) still call `qwen3::finetune`; a generic trainer over
-      `Model` + `LoraSites` would let `ArchEntry::chat_fine_tune` be true for
-      another architecture.
+- [ ] `ChatFullFineTune` and `PreferenceFineTune` still call `qwen3::finetune`; a
+      generic trainer over `Model` + `LoraSites` would let `ArchEntry::chat_fine_tune`
+      be true for another architecture. (`ChatFineTune` is done for qwen35: the
+      `ChatFamily` enum in `sdk/src/finetune.rs` names the two trainers; held-out
+      scoring on qwen35 needs a `score_chat` over `Model`.)
 - [ ] `Improve::run` boxes its environment and verifier to dispatch through the
       table; if that proves a cost, make the table entry generic instead.

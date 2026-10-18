@@ -106,11 +106,15 @@ pub(crate) trait StudyArch {
     /// the model itself by `declared_capabilities_match_the_models`.
     const TOKEN_OBJECTIVES: bool;
 
-    /// Whether the chat fine-tuners (`ChatFineTune`, `PreferenceFineTune`,
-    /// `ChatFullFineTune`) have an implementation for this architecture.
-    /// They sit on the architecture's own checkpoint reader and trainer
-    /// (`qwen3::finetune`), so a row opts in only when that exists.
+    /// Whether the full-parameter and preference chat fine-tuners
+    /// (`PreferenceFineTune`, `ChatFullFineTune`) have an implementation for
+    /// this architecture. They sit on the architecture's own checkpoint reader
+    /// and trainer (`qwen3::finetune`), so a row opts in only when that exists.
     const CHAT_FINE_TUNE: bool = false;
+
+    /// Whether the supervised chat LoRA fine-tuner (`ChatFineTune`) has an
+    /// implementation for this architecture (`finetune::ChatTrainer`).
+    const CHAT_LORA_FINE_TUNE: bool = false;
 
     /// This architecture's own LoRA overlay at `rank`/`alpha` - the four
     /// attention projections for `qwen3`, the fused/expert projections its
@@ -134,6 +138,7 @@ impl StudyArch for Qwen3 {
     const FAMILY: &'static str = "qwen";
     const TOKEN_OBJECTIVES: bool = true;
     const CHAT_FINE_TUNE: bool = true;
+    const CHAT_LORA_FINE_TUNE: bool = true;
     fn lora(rank: u32, alpha: f32) -> LoraCfg {
         LoraCfg::attn(rank, alpha)
     }
@@ -148,6 +153,7 @@ impl StudyArch for Qwen35 {
     const ID: &'static str = "qwen35";
     const FAMILY: &'static str = "qwen35";
     const TOKEN_OBJECTIVES: bool = true;
+    const CHAT_LORA_FINE_TUNE: bool = true;
     fn lora(rank: u32, alpha: f32) -> LoraCfg {
         qwen35::config::lora_cfg(rank, alpha)
     }
@@ -185,15 +191,17 @@ pub(crate) struct ArchEntry {
     pub family: &'static str,
     /// Claims `model::training::TokenObjectives`.
     pub token_objectives: bool,
-    /// Has an implementation of the chat fine-tuners.
+    /// Has an implementation of the full-parameter and preference chat fine-tuners.
     pub chat_fine_tune: bool,
+    /// Has an implementation of the supervised chat LoRA fine-tuner.
+    pub chat_lora_fine_tune: bool,
     study: StudyFn,
     improve: ImproveFn,
 }
 
 impl ArchEntry {
     pub(crate) const fn of<A: StudyArch>() -> ArchEntry {
-        ArchEntry { id: A::ID, family: A::FAMILY, token_objectives: A::TOKEN_OBJECTIVES, chat_fine_tune: A::CHAT_FINE_TUNE, study: run_for::<A>, improve: run_improve_dyn::<A> }
+        ArchEntry { id: A::ID, family: A::FAMILY, token_objectives: A::TOKEN_OBJECTIVES, chat_fine_tune: A::CHAT_FINE_TUNE, chat_lora_fine_tune: A::CHAT_LORA_FINE_TUNE, study: run_for::<A>, improve: run_improve_dyn::<A> }
     }
 
     /// Refuse, at configuration time, a run that needs a capability this
@@ -202,6 +210,7 @@ impl ArchEntry {
         let provided = match capability {
             Capability::TokenObjectives => self.token_objectives,
             Capability::ChatFineTune => self.chat_fine_tune,
+            Capability::ChatLoraFineTune => self.chat_lora_fine_tune,
         };
         if provided {
             Ok(())
@@ -846,7 +855,6 @@ mod tests {
             other => panic!("expected the typed refusal, got {other:?}"),
         };
         let dir = std::env::temp_dir();
-        assert_eq!(refused(crate::ChatFineTune::from_pretrained("none").arch("qwen35").dataset("d.jsonl").out_dir(&dir).run().map(|_| ())), "qwen35 does not provide chat fine-tuning yet");
         assert_eq!(refused(crate::ChatFullFineTune::from_pretrained("none").arch("qwen35moe").dataset("d.jsonl").out_dir(&dir).run().map(|_| ())), "qwen35moe does not provide chat fine-tuning yet");
         assert_eq!(refused(crate::PreferenceFineTune::from_pretrained("none").arch("qwen35").dataset("d.jsonl").out_dir(&dir).run().map(|_| ())), "qwen35 does not provide chat fine-tuning yet");
         match crate::ChatFineTune::from_pretrained("none").arch("nonesuch").dataset("d.jsonl").out_dir(&dir).run() {

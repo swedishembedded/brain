@@ -275,11 +275,39 @@ pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, o
 #[allow(clippy::too_many_arguments)]
 pub fn finetune_streamed_named(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, run: &StreamedRun, naming: &AdapterNaming) -> std::io::Result<(f32, f32)> {
     let (card_id, base_id) = adapter_card(base, naming).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidInput, why))?;
-    let unsupported = |why: String| std::io::Error::new(std::io::ErrorKind::Unsupported, why);
-    let (dtype, recompute) = (run.dtype, run.recompute);
     let Mode::Lora { rank, alpha } = mode else {
-        return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", dtype.name())));
+        return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", run.dtype.name())));
     };
+    let resume_from = resume.then(|| Path::new(out)).filter(|p| p.exists());
+    let mut progress = step_progress();
+    let (report, m) = finetune_lora_controlled(base, dir, opts, *rank, *alpha, resume_from, run, step_progress_control(&mut progress))?;
+    let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", opts.seed, gpu_core::backend_name(), brain_modelstore::fetch::base_digest(base)?);
+    crate::lora::save_adapter_with_lineage(out, &m, &card_id, &base_id, None, Some(provenance))?;
+    Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
+}
+
+fn unsupported(why: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Unsupported, why)
+}
+
+/// LoRA fine-tune on the streamed frozen base at `base` (see
+/// [`finetune_streamed`]), under the caller's `control` (per-step callback and
+/// cancellation, exact-resume state, evaluation snapshots), returning the
+/// trained model rather than writing an adapter: the caller saves what it
+/// wants of it with [`crate::lora::save_adapter_with_lineage`]. `resume_from`
+/// continues an adapter file's factors (same rank and alpha).
+#[allow(clippy::too_many_arguments)]
+pub fn finetune_lora_controlled(
+    base: &Path,
+    dir: &Path,
+    opts: &FitOpts,
+    rank: u32,
+    alpha: f32,
+    resume_from: Option<&Path>,
+    run: &StreamedRun,
+    control: model::FitControl<'_>,
+) -> std::io::Result<(model::FitReport, Qwen35)> {
+    let (dtype, recompute) = (run.dtype, run.recompute);
     // One micro-step of more than a few thousand tokens only fits the card with
     // the long-sequence settings (segmented Gated-DeltaNet layers, a bf16
     // residual stream, an MLP run in token chunks), which need a batch of one:
@@ -295,7 +323,7 @@ pub fn finetune_streamed_named(base: &Path, dir: &Path, opts: &FitOpts, mode: &M
             opts.batch_size * opts.grad_accum.max(1),
         )));
     }
-    let (cfg, src) = lora_base(base, *rank, *alpha, opts.seed, resume.then(|| Path::new(out)).filter(|p| p.exists())).map_err(unsupported)?;
+    let (cfg, src) = lora_base(base, rank, alpha, opts.seed, resume_from).map_err(unsupported)?;
     let train = streamed_train_opts(run, opts.batch_size, opts.block_size, cfg.mtp).map_err(unsupported)?;
     let t_load = std::time::Instant::now();
     let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &src, &train);
@@ -309,10 +337,7 @@ pub fn finetune_streamed_named(base: &Path, dir: &Path, opts: &FitOpts, mode: &M
     );
     let (train_set, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen35>(train_set, val, bcfg, itos);
-    let (report, m) = model::fit_controlled(m, obj, opts, None, step_progress_control(&mut step_progress()))?;
-    let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", opts.seed, gpu_core::backend_name(), brain_modelstore::fetch::base_digest(base)?);
-    crate::lora::save_adapter_with_lineage(out, &m, &card_id, &base_id, None, Some(provenance))?;
-    Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
+    model::fit_controlled(m, obj, opts, None, control)
 }
 
 #[cfg(test)]

@@ -111,18 +111,109 @@ pub struct ChatFineTune {
     device: Device,
     bf16_base: bool,
     int8_base: bool,
+    nf4_base: bool,
     thinking: bool,
     pack_answers: bool,
 }
 
-/// The tier the frozen base is held at: int8 over bf16 over fp32.
-fn base_tier(bf16: bool, int8: bool) -> qwen3::Dtype {
-    if int8 {
-        qwen3::Dtype::I8
-    } else if bf16 {
-        qwen3::Dtype::BF16
-    } else {
-        qwen3::Dtype::F32
+/// The architecture a [`ChatFineTune`] trains, with the tier its frozen base
+/// is held at. The one place that names a trainer: `qwen3` and `qwen35` each
+/// have their own checkpoint reader and LoRA trainer over the shared
+/// `model::fit_controlled` loop.
+enum ChatFamily {
+    /// Int8 over bf16 over fp32.
+    Qwen3(qwen3::Dtype),
+    /// NF4 over bf16 over fp32 (the 27B trains on one card only at the first two).
+    Qwen35(qwen35::base_source::BaseDtype),
+}
+
+/// A trained LoRA, whichever trainer produced it.
+enum TrainedLora {
+    Qwen3(qwen3::finetune::Trained),
+    Qwen35(Box<qwen35::model::Qwen35>),
+}
+
+impl TrainedLora {
+    fn save(&self, path: &str, card_id: &str, base_id: &str, dataset_id: Option<&str>, provenance: checkpoint::st::TrainingProvenance) -> std::io::Result<()> {
+        match self {
+            TrainedLora::Qwen3(t) => t.save_adapter_with_lineage(path, card_id, base_id, dataset_id, Some(provenance)),
+            TrainedLora::Qwen35(m) => qwen35::lora::save_adapter_with_lineage(path, m, card_id, base_id, dataset_id, Some(provenance)),
+        }
+    }
+}
+
+impl ChatFamily {
+    fn of(arch_id: &str, bf16: bool, int8: bool, nf4: bool) -> Result<ChatFamily> {
+        match arch_id {
+            "qwen3" if nf4 => Err(Error::Backend("ChatFineTune: nf4_base is a qwen35 tier; qwen3 holds its base at fp32, bf16 or int8".to_string())),
+            "qwen3" => Ok(ChatFamily::Qwen3(if int8 {
+                qwen3::Dtype::I8
+            } else if bf16 {
+                qwen3::Dtype::BF16
+            } else {
+                qwen3::Dtype::F32
+            })),
+            "qwen35" if int8 => Err(Error::Backend("ChatFineTune: int8_base is a qwen3 tier; qwen35 holds its base at fp32, bf16 or nf4".to_string())),
+            "qwen35" => {
+                use qwen35::base_source::BaseDtype;
+                Ok(ChatFamily::Qwen35(if nf4 {
+                    BaseDtype::Nf4
+                } else if bf16 {
+                    BaseDtype::Bf16
+                } else {
+                    BaseDtype::F32
+                }))
+            }
+            other => Err(Error::Unsupported(model::training::Unsupported::new(other, Capability::ChatLoraFineTune))),
+        }
+    }
+
+    /// Refuse what this family's trainer cannot do, before any file is read.
+    fn refuse_unsupported(&self, run: &ChatFineTune) -> Result<()> {
+        if let ChatFamily::Qwen35(_) = self {
+            // Scoring a base against held-out records and writing an adapter per
+            // evaluation are `qwen3::eval` and `qwen3` snapshot features.
+            if run.held_out.is_some() || run.held_out_text.is_some() || run.evaluations_dir.is_some() {
+                return Err(Error::Backend("ChatFineTune: qwen35 does not score held-out records or keep per-evaluation adapters yet; use .monitor() with .eval_every() for the loss curve".to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// The vocabulary the checkpoint at `open` was trained with.
+    fn vocab(&self, open: &Path) -> Result<usize> {
+        match self {
+            ChatFamily::Qwen3(_) => Ok(qwen3::checkpoint_config(utf8(open)?).map_err(Error::Backend)?.vocab as usize),
+            ChatFamily::Qwen35(_) => Ok(qwen35::base_source::open_base(open).map_err(Error::Backend)?.cfg.vocab as usize),
+        }
+    }
+
+    /// The tier held-out scoring runs at; `None` where the family cannot score.
+    fn scoring_tier(&self) -> Option<qwen3::Dtype> {
+        match self {
+            ChatFamily::Qwen3(tier) => Some(*tier),
+            ChatFamily::Qwen35(_) => None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn train(&self, open: &Path, prepared_dir: &Path, opts: &model::FitOpts, rank: u32, alpha: f32, continue_from: Option<&Path>, control: model::FitControl<'_>) -> std::io::Result<(model::FitReport, TrainedLora)> {
+        match self {
+            ChatFamily::Qwen3(tier) => {
+                let start = match continue_from {
+                    Some(path) => qwen3::finetune::LoraStart::Continue(path.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "adapter path is not UTF-8"))?),
+                    None => qwen3::finetune::LoraStart::Fresh,
+                };
+                let weights = open.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "checkpoint path is not UTF-8"))?;
+                let (report, trained) = qwen3::finetune::finetune_lora_controlled(weights, prepared_dir, opts, rank, alpha, &start, control, *tier)?;
+                Ok((report, TrainedLora::Qwen3(trained)))
+            }
+            ChatFamily::Qwen35(dtype) => {
+                let run = qwen35::finetune::StreamedRun { dtype: *dtype, recompute: dtype.is_frozen_only(), long: qwen35::finetune::LongSeqOverrides::default() };
+                let (report, trained) = qwen35::finetune::finetune_lora_controlled(open, prepared_dir, opts, rank, alpha, continue_from, &run, control)?;
+                Ok((report, TrainedLora::Qwen35(Box::new(trained))))
+            }
+        }
     }
 }
 
@@ -164,6 +255,7 @@ impl ChatFineTune {
             device: Device::default(),
             bf16_base: false,
             int8_base: false,
+            nf4_base: false,
             thinking: true,
             pack_answers: false,
         }
@@ -441,6 +533,15 @@ impl ChatFineTune {
         self
     }
 
+    /// Hold the frozen base as 4-bit NormalFloat blocks (QLoRA): the 27B
+    /// `qwen35` base then trains in 44 GiB instead of 80. `qwen35` only; the
+    /// adapters and optimiser stay fp32. Takes precedence over
+    /// [`Self::bf16_base`].
+    pub fn nf4_base(mut self, on: bool) -> Self {
+        self.nf4_base = on;
+        self
+    }
+
     /// Run to completion.
     pub fn run(&self) -> Result<ChatFineTuneOutcome> {
         self.run_with(&CancelToken::default(), |_| {})
@@ -453,14 +554,15 @@ impl ChatFineTune {
     /// again continues it.
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFineTuneOutcome> {
         let arch = crate::study::arch(&self.arch)?;
-        arch.require(Capability::ChatFineTune)?;
+        arch.require(Capability::ChatLoraFineTune)?;
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no out directory; call .out_dir(path)".to_string()))?;
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
         let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         let open = qwen3::store_checkpoint_path(&weights, &model_dir);
         let weights_str = utf8(&open)?;
-        let tier = base_tier(self.bf16_base, self.int8_base);
+        let family = ChatFamily::of(arch.id, self.bf16_base, self.int8_base, self.nf4_base)?;
+        family.refuse_unsupported(self)?;
 
         // Every file is checked against the base's own template before a
         // device is claimed.
@@ -495,14 +597,15 @@ impl ChatFineTune {
         // the monitoring set, else the held-out set, else (unread, when
         // nothing is evaluated) the training set.
         let val = monitor.as_deref().or(held_out.as_deref()).unwrap_or(&training[..]);
-        let cfg = qwen3::checkpoint_config(weights_str).map_err(Error::Backend)?;
+        let vocab = family.vocab(&open)?;
         let prepared_dir = out_dir.join(PREPARED_DIR);
-        let prepared = data::chat::prepare_chat_samples(&training, val, &tok, &tmpl, render, cfg.vocab as usize, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
+        let prepared = data::chat::prepare_chat_samples(&training, val, &tok, &tmpl, render, vocab, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
         let block = block_for(prepared.longest_example, self.max_block)?;
 
         crate::device::resolve(&self.device)?;
-        let base_score = held_out.as_ref().map(|records| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
-        let base_text_score = held_out_text.as_ref().map(|records| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
+        let scoring_tier = family.scoring_tier();
+        let base_score = held_out.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
+        let base_text_score = held_out_text.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
 
         if self.grad_accum == 0 {
             return Err(Error::Backend("ChatFineTune: grad_accum must be at least 1".to_string()));
@@ -548,11 +651,7 @@ impl ChatFineTune {
             None => None,
         };
         let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots };
-        let start = match &self.continue_from {
-            Some(path) => qwen3::finetune::LoraStart::Continue(utf8(path)?),
-            None => qwen3::finetune::LoraStart::Fresh,
-        };
-        let (report, trained) = qwen3::finetune::finetune_lora_controlled(weights_str, &prepared_dir, &opts, rank, alpha, &start, control, tier).map_err(|e| Error::Backend(format!("training: {e}")))?;
+        let (report, trained) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.continue_from.as_deref(), control).map_err(|e| Error::Backend(format!("training: {e}")))?;
 
         let (selected_step, selection) = match report.kept_best {
             Some(best) => (best.step, Selection::BestMonitorLoss),
@@ -626,13 +725,13 @@ impl ChatFineTune {
             cycle: self.cycle,
         };
         let dataset_id = digest(dataset)?;
-        trained.save_adapter_with_lineage(utf8(&adapter_path)?, &adapter_id, &base_id, Some(&dataset_id), Some(provenance))
+        trained.save(utf8(&adapter_path)?, &adapter_id, &base_id, Some(&dataset_id), provenance)
             .map_err(|e| Error::Backend(format!("{}: saving the adapter: {e}", adapter_path.display())))?;
         drop(trained);
         outcome.adapter_digest = Some(digest(&adapter_path)?);
         let adapter_str = utf8(&adapter_path)?;
-        outcome.tuned_score = held_out.as_ref().map(|records| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render));
-        outcome.tuned_text_score = held_out_text.as_ref().map(|records| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render));
+        outcome.tuned_score = held_out.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render));
+        outcome.tuned_text_score = held_out_text.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render));
         outcome.adapter = Some(adapter_path);
 
         let record_path = out_dir.join(RECORD_FILE);
@@ -1288,14 +1387,38 @@ mod tests {
 
 #[cfg(test)]
 mod base_tier_tests {
-    use super::base_tier;
+    use super::ChatFamily;
+    use qwen35::base_source::BaseDtype;
     use qwen3::Dtype;
+
+    fn qwen3_tier(bf16: bool, int8: bool) -> Dtype {
+        match ChatFamily::of("qwen3", bf16, int8, false).unwrap() {
+            ChatFamily::Qwen3(tier) => tier,
+            ChatFamily::Qwen35(_) => unreachable!(),
+        }
+    }
+
+    fn qwen35_tier(bf16: bool, nf4: bool) -> BaseDtype {
+        match ChatFamily::of("qwen35", bf16, false, nf4).unwrap() {
+            ChatFamily::Qwen35(tier) => tier,
+            ChatFamily::Qwen3(_) => unreachable!(),
+        }
+    }
 
     #[test]
     fn the_narrowest_requested_base_wins() {
-        assert_eq!(base_tier(false, false), Dtype::F32);
-        assert_eq!(base_tier(true, false), Dtype::BF16);
-        assert_eq!(base_tier(true, true), Dtype::I8);
-        assert_eq!(base_tier(false, true), Dtype::I8);
+        assert_eq!(qwen3_tier(false, false), Dtype::F32);
+        assert_eq!(qwen3_tier(true, false), Dtype::BF16);
+        assert_eq!(qwen3_tier(true, true), Dtype::I8);
+        assert_eq!(qwen3_tier(false, true), Dtype::I8);
+        assert_eq!(qwen35_tier(false, false), BaseDtype::F32);
+        assert_eq!(qwen35_tier(true, false), BaseDtype::Bf16);
+        assert_eq!(qwen35_tier(true, true), BaseDtype::Nf4);
+    }
+
+    #[test]
+    fn a_tier_the_architecture_lacks_is_refused() {
+        assert!(ChatFamily::of("qwen3", false, false, true).is_err());
+        assert!(ChatFamily::of("qwen35", false, true, false).is_err());
     }
 }

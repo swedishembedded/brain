@@ -271,3 +271,9 @@ serde_json.workspace = true
 # An independent SHA-256, so the chat surface's identity test checks the
 # digest it reports against the file's bytes rather than against itself.
 sha2.workspace = true
+
+# A command-line driver of `ChatFineTune` over any registered architecture: the
+# smallest way to run an SDK chat LoRA fine-tune on a real checkpoint.
+[[example]]
+name = "chat_finetune"
+required-features = ["study"]

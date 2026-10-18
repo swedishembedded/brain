@@ -32,9 +32,12 @@ use crate::Model;
 pub enum Capability {
     /// [`TokenObjectives`]: per-token weighted loss and log-probability readout.
     TokenObjectives,
-    /// An implementation of the chat fine-tuners (supervised, preference and
-    /// full fine-tuning) for the architecture.
+    /// An implementation of the full-parameter and preference chat
+    /// fine-tuners for the architecture.
     ChatFineTune,
+    /// An implementation of the supervised chat LoRA fine-tuner for the
+    /// architecture.
+    ChatLoraFineTune,
 }
 
 impl Capability {
@@ -43,6 +46,7 @@ impl Capability {
         match self {
             Capability::TokenObjectives => "token objectives",
             Capability::ChatFineTune => "chat fine-tuning",
+            Capability::ChatLoraFineTune => "chat LoRA fine-tuning",
         }
     }
 }

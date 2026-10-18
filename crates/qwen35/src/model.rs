@@ -5251,6 +5251,16 @@ impl model::Model for Qwen35 {
     fn poll_wait(&self) {
         Qwen35::poll_wait(self)
     }
+    fn optimized_params(&self) -> Option<Vec<String>> {
+        // Offloaded params keep their moments in host RAM, out of reach here.
+        self.ps.offload.is_empty().then(|| self.ps.opt_params().iter().map(|(n, _)| n.clone()).collect())
+    }
+    fn read_moments(&self, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+        self.ps.read_moments(&self.gpu, name)
+    }
+    fn write_moments(&self, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
+        self.ps.write_moments(&self.gpu, name, m, v)
+    }
     fn param_names(&self) -> Vec<String> {
         Qwen35::param_names(self)
     }
