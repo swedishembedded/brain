@@ -3111,20 +3111,26 @@ pub fn paged_scores_variant(g: &Gpu, reference: usize, coop: Option<usize>, batc
 /// inferred, because this function has no model config to read it from -
 /// every caller must pass its own real head_dim explicitly.
 ///
-/// `bsz` (M2.7): the selector's decode arm (`k = 0`, `shape.m`) is gated on
-/// the REAL per-dispatch batch size, unlike prefill's `k = 1` arm which
-/// never reads `m` at all - decode's split-key win (`paged_flash_decode_
-/// split` -> `paged_flash_decode_combine`) only holds at `batch == 1`
-/// (`Op::PagedAttentionFused`'s own doc has the measured A/B). A
-/// `causal_chunk = true` caller may pass any value here (prefill's arm
-/// ignores `m`); a `causal_chunk = false` (decode) caller MUST pass its own
-/// real batch size, not a cached/sentinel one - decode's availability is not
-/// a load-time constant the way prefill's is.
+/// `bsz`: the selector's decode arm (`k = 0`, `shape.m`) is gated on the REAL
+/// per-dispatch batch size at the F32 tier, whose split-key win only holds at
+/// `batch == 1` (`Op::PagedAttentionFused`'s own doc has the measured A/B);
+/// the I8 tier's batched kernel does not depend on it. A `causal_chunk = true`
+/// caller may pass any value here (prefill's arm ignores `m`); a
+/// `causal_chunk = false` (decode) caller MUST pass its own real batch size,
+/// not a cached/sentinel one - decode's availability is not a load-time
+/// constant for every tier.
 pub fn paged_attention_fused(g: &Gpu, causal_chunk: bool, kv_int8: bool, head_dim: u32, bsz: u32) -> bool {
+    paged_attention_fused_on(&g.caps(), causal_chunk, kv_int8, head_dim, bsz)
+}
+
+/// [`paged_attention_fused`] for a device described by its capabilities alone,
+/// for planners that size memory before a device exists. One implementation,
+/// so the plan and the dispatch cannot disagree.
+pub fn paged_attention_fused_on(caps: &gpu_core::DeviceCaps, causal_chunk: bool, kv_int8: bool, head_dim: u32, bsz: u32) -> bool {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let dtype = if kv_int8 { Dtype::I8 } else { Dtype::F32 };
     let shape = OpShape { m: bsz, n: head_dim, k: causal_chunk as u32, dtype };
-    gpu_core::select::DefaultSelector.select(Op::PagedAttentionFused, shape, &g.caps()) == KernelVariant::FusedFlash
+    gpu_core::select::DefaultSelector.select(Op::PagedAttentionFused, shape, caps) == KernelVariant::FusedFlash
 }
 
 /// LayerNorm forward: `y = (x-mean)/sqrt(var+eps) * gamma + beta` over `rows`

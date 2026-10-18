@@ -568,9 +568,9 @@ struct PoolProfile {
 }
 
 impl PoolProfile {
-    fn new(cfg: &qwen3::config::QwenConfig, block_size: u32, num_blocks: u32, max_batch: u32, max_prefill: u32, cap: u32, kv_int8: bool, fused_prefill_available: bool) -> PoolProfile {
+    fn new(cfg: &qwen3::config::QwenConfig, block_size: u32, num_blocks: u32, max_batch: u32, max_prefill: u32, cap: u32, kv_int8: bool, fused: qwen3::serve::FusedAttention) -> PoolProfile {
         let kv_bytes = qwen3::serve::kv_pool_bytes(cfg, block_size, num_blocks, kv_int8);
-        let scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(cfg, max_batch, max_prefill, cap, fused_prefill_available);
+        let scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(cfg, max_batch, max_prefill, cap, fused);
         // The per-layer KV figure comes from `qwen3::serve`, which owns the
         // pool layout -- the same function the engine itself checks against
         // the real device limit, so this pre-flight and that authoritative
@@ -580,9 +580,9 @@ impl PoolProfile {
     }
 
     /// The profile for a whole `ctx`, deriving the pool geometry itself.
-    fn at_ctx(cfg: &qwen3::config::QwenConfig, ctx: u32, max_batch: u32, max_prefill_cap: u32, kv_int8: bool, fused_prefill_available: bool) -> PoolProfile {
+    fn at_ctx(cfg: &qwen3::config::QwenConfig, ctx: u32, max_batch: u32, max_prefill_cap: u32, kv_int8: bool, fused: qwen3::serve::FusedAttention) -> PoolProfile {
         let (block_size, mb, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, max_batch, max_prefill_cap);
-        PoolProfile::new(cfg, block_size, num_blocks, mb, max_prefill, max_blocks_per_seq * block_size, kv_int8, fused_prefill_available)
+        PoolProfile::new(cfg, block_size, num_blocks, mb, max_prefill, max_blocks_per_seq * block_size, kv_int8, fused)
     }
 
     /// Total device bytes, given the ctx-independent weight cost.
@@ -605,13 +605,13 @@ impl PoolProfile {
 /// layer's buffer breaks the second. Both are monotonically increasing in
 /// `ctx`, so the first tier that fails either still ends the search.
 ///
-/// `fused_prefill_available` is `false` here on purpose: this runs before a
+/// `FusedAttention::default()` (nothing fused) is passed here on purpose: this runs before a
 /// device is chosen, so the never-fused scratch worst case is the only honest
 /// assumption. `activate()` re-checks with the real answer.
 fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config::QwenConfig, max_batch: u32, max_prefill_cap: u32, kv_int8: bool) -> u32 {
     let mut best = AUTO_CTX_TIERS[0];
     for &ctx in AUTO_CTX_TIERS {
-        let profile = PoolProfile::at_ctx(cfg, ctx, max_batch, max_prefill_cap, kv_int8, false);
+        let profile = PoolProfile::at_ctx(cfg, ctx, max_batch, max_prefill_cap, kv_int8, qwen3::serve::FusedAttention::default());
         if profile.total(weight_bytes) <= budget_bytes && profile.bindings_fit() {
             best = ctx;
         } else {
@@ -897,7 +897,7 @@ impl QwenResident {
     /// read) so a test can drive it directly at whatever `num_blocks` trips
     /// the ceiling, without needing a real multi-GiB allocation to prove it.
     fn check_fp32_kv_pool_fits(cfg: &qwen3::config::QwenConfig, block_size: u32, num_blocks: u32, ctx: u32, path: &str) -> Result<(), String> {
-        let pool_bytes = PoolProfile::new(cfg, block_size, num_blocks, 1, 1, block_size, false, true).kv_bytes;
+        let pool_bytes = PoolProfile::new(cfg, block_size, num_blocks, 1, 1, block_size, false, qwen3::serve::FusedAttention::default()).kv_bytes;
         if pool_bytes <= MAX_FP32_KV_POOL_BYTES {
             return Ok(());
         }
@@ -932,16 +932,16 @@ impl QwenResident {
     /// larger) queried limit: no `DeviceCaps` query happens here, so a bound
     /// every compliant device guarantees is the only one that is safe to
     /// assume without one - never-under (for the KV term; see
-    /// `fused_prefill_available`'s own note on the scratch term), the same
+    /// the `fused` argument's note on the scratch term), the same
     /// discipline every other pre-flight number in this file already
     /// follows.
     ///
-    /// `fused_prefill_available`: unlike `estimate()` (truly pre-placement,
-    /// no device chosen yet, always `false`), `activate()` already has a
+    /// `fused`: unlike `estimate()` (truly pre-placement,
+    /// no device chosen yet, always nothing fused), `activate()` already has a
     /// concrete `device` by the time it calls this - `device != Device::Cpu`
     /// is a safe proxy for the fused kernel's real gate
     /// (`caps.workgroup_reductions`, true on every GPU backend, false only
-    /// on the CPU JIT), so passing `false` here unconditionally caused a
+    /// on the CPU JIT), so passing nothing-fused here unconditionally caused a
     /// real, oversized-sounding refusal for a buffer the engine would never
     /// actually allocate once the fused kernel shrinks the scratch term.
     ///
@@ -962,9 +962,9 @@ impl QwenResident {
         kv_int8: bool,
         ctx: u32,
         path: &str,
-        fused_prefill_available: bool,
+        fused: qwen3::serve::FusedAttention,
     ) -> Result<(), String> {
-        let profile = PoolProfile::new(cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, fused_prefill_available);
+        let profile = PoolProfile::new(cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, fused);
         if profile.bindings_fit() {
             return Ok(());
         }
@@ -1023,12 +1023,12 @@ impl ResidentModel for QwenResident {
         // `--reserve-gb`'s flat, model-agnostic headroom to accidentally
         // cover a real, model-specific need it was never sized for, on top
         // of an ALREADY doubly-conservative weight estimate (`est_vram`'s
-        // static 1.3x). `fused_prefill_available` needs the target device's
+        // static 1.3x). the fused-attention answer needs the target device's
         // own `DeviceCaps`, unknown at this pre-placement point - `false` is
         // the larger of the two sizes `paged_attn_scratch_bytes` can return
         // (see its own doc), so this stays a worst-case, never-under bound.
         let cap = max_blocks_per_seq * block_size;
-        let scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, false);
+        let scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, qwen3::serve::FusedAttention::default());
         // `--weights-int8`'s equivalent (`BRAIN_QWEN_WEIGHTS_INT8`): the
         // weight term is by far the dominant one for any sizeable model, and
         // `weights_int8_bytes` reads it precisely off `cfg` - the SAME
@@ -1132,7 +1132,7 @@ impl ResidentModel for QwenResident {
             // reductions (only the CPU JIT lacks them, the same gate
             // `Op::PagedAttentionFused` itself checks), so this predicts the
             // real dispatch instead of assuming the never-fused worst case.
-            let fused_prefill_available = device != Device::Cpu && checkpoint_cfg.head_dim <= qwen3::serve::FUSED_MAX_HEAD_DIM;
+            let fused = if device == Device::Cpu { qwen3::serve::FusedAttention::default() } else { qwen3::serve::fused_attention_on_gpu(checkpoint_cfg.head_dim, kv_int8) };
             QwenResident::check_buffers_fit_one_binding(
                 &checkpoint_cfg,
                 block_size,
@@ -1143,7 +1143,7 @@ impl ResidentModel for QwenResident {
                 kv_int8,
                 ctx,
                 &self.path,
-                fused_prefill_available,
+                fused,
             )?;
             // `--qwen-weights-int8` -- requested, not asserted: the real
             // capability gate (`caps.numeric.int8_dot`) lives inside
@@ -1488,7 +1488,7 @@ mod tests {
     /// sizing) and zero change to decode-step shape (`max_prefill` only ever
     /// appears in the causal-chunk PREFILL term).
     ///
-    /// This is the `fused_prefill_available = false` branch, which is what
+    /// This is the nothing-fused branch, which is what
     /// every call site in THIS file deliberately prices (see `estimate`'s own
     /// comment: no target `DeviceCaps` exists pre-placement, so the never-
     /// under bound is the only honest one). On a device that can actually run
@@ -1508,12 +1508,12 @@ mod tests {
         let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill_default) = QwenResident::pool_sizing(ctx, max_batch, 512);
         assert_eq!(max_prefill_default, 512);
         let cap = max_blocks_per_seq * block_size;
-        let scratch_default = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill_default, cap, false);
+        let scratch_default = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill_default, cap, qwen3::serve::FusedAttention::default());
         let kv_default = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
 
         let (_, max_batch2, _, num_blocks2, max_prefill_128) = QwenResident::pool_sizing(ctx, max_batch, 128);
         assert_eq!(max_prefill_128, 128);
-        let scratch_128 = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch2, max_prefill_128, cap, false);
+        let scratch_128 = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch2, max_prefill_128, cap, qwen3::serve::FusedAttention::default());
         let kv_128 = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks2, true);
 
         assert_eq!(kv_128, kv_default, "the KV pool must be completely unaffected by max_prefill");
@@ -1604,15 +1604,15 @@ mod tests {
     fn per_buffer_guard_refuses_an_oversized_per_layer_kv_buffer_even_under_int8() {
         let cfg = qwen3::config::QwenConfig::tiny(); // n_layers=2, head_dim=8, n_kv_heads=2, hkv=16
         // Small, ordinary sizing on both dtypes: comfortably under.
-        assert!(QwenResident::check_buffers_fit_one_binding(&cfg, 16, 64, 4, 16, 256, true, 2048, "test.safetensors", false).is_ok());
-        assert!(QwenResident::check_buffers_fit_one_binding(&cfg, 16, 64, 4, 16, 256, false, 2048, "test.safetensors", false).is_ok());
+        assert!(QwenResident::check_buffers_fit_one_binding(&cfg, 16, 64, 4, 16, 256, true, 2048, "test.safetensors", Default::default()).is_ok());
+        assert!(QwenResident::check_buffers_fit_one_binding(&cfg, 16, 64, 4, 16, 256, false, 2048, "test.safetensors", Default::default()).is_ok());
         // num_blocks=3,000,000 -> per-layer fp32 KV buffer ~2.86 GiB, far over
         // the 128 MiB floor - even though this SAME sizing's fp32 TOTAL
         // pool (~11.4 GiB) is what `check_fp32_kv_pool_fits`'s own test
         // above already catches; this checks the independent per-buffer path.
-        // The KV term does not depend on `fused_prefill_available` at all,
+        // The KV term does not depend on the fused-attention answer at all,
         // so this must still refuse it under `true` too.
-        for fused in [false, true] {
+        for fused in [qwen3::serve::FusedAttention::default(), qwen3::serve::FusedAttention { prefill: true, decode: true }] {
             let err = QwenResident::check_buffers_fit_one_binding(&cfg, 16, 3_000_000, 4, 16, 256, false, 100_000_000, "test.safetensors", fused)
                 .expect_err("a ~2.86 GiB single buffer must be refused, not attempted");
             // Names the checkpoint and the requested ctx -- the two things an
@@ -1631,7 +1631,7 @@ mod tests {
         let cfg = qwen3::config::QwenConfig::tiny(); // n_heads=4
         // max_prefill=20_000 -> the causal-chunk term (max_prefill^2 * n_heads)
         // dominates: 20_000^2 * 4 = 1.6e9 words -> per-buffer ~5.96 GiB.
-        let err = QwenResident::check_buffers_fit_one_binding(&cfg, 16, 64, 4, 20_000, 320_000, true, 100_000_000, "test.safetensors", false)
+        let err = QwenResident::check_buffers_fit_one_binding(&cfg, 16, 64, 4, 20_000, 320_000, true, 100_000_000, "test.safetensors", Default::default())
             .expect_err("a ~5.96 GiB scratch buffer must be refused, not attempted");
         assert!(err.contains("test.safetensors") && err.contains("100000000"), "{err}");
     }
@@ -1641,21 +1641,21 @@ mod tests {
     /// device buffer ... 2.00 GiB, over WebGPU's own 2.00 GiB per-buffer
     /// floor" - on a live GPU that was actually about to dispatch the fused
     /// prefill kernel (a much smaller scratch buffer), because `activate()`
-    /// passed `fused_prefill_available=false` unconditionally even once it
+    /// passed nothing-fused unconditionally even once it
     /// already knew a concrete, non-CPU `device`. Proves the SAME sizing
     /// that this guard must refuse under `false` (the pre-fix behavior) it
     /// must now ACCEPT under `true`.
     #[test]
-    fn fused_prefill_available_shrinks_the_scratch_term_enough_to_admit_the_real_qwen3_8b_ctx_32768_shape() {
+    fn fused_attention_shrinks_the_scratch_term_enough_to_admit_the_real_qwen3_8b_ctx_32768_shape() {
         let cfg = qwen3::config::QwenConfig::qwen3_8b();
         let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(32768, 16, 512);
         let cap = max_blocks_per_seq * block_size;
         assert!(
-            QwenResident::check_buffers_fit_one_binding(&cfg, block_size, num_blocks, max_batch, max_prefill, cap, true, 32768, "test.safetensors", false).is_err(),
+            QwenResident::check_buffers_fit_one_binding(&cfg, block_size, num_blocks, max_batch, max_prefill, cap, true, 32768, "test.safetensors", qwen3::serve::FusedAttention::default()).is_err(),
             "this test's premise is the real reported refusal under the never-fused worst case"
         );
         assert!(
-            QwenResident::check_buffers_fit_one_binding(&cfg, block_size, num_blocks, max_batch, max_prefill, cap, true, 32768, "test.safetensors", true).is_ok(),
+            QwenResident::check_buffers_fit_one_binding(&cfg, block_size, num_blocks, max_batch, max_prefill, cap, true, 32768, "test.safetensors", qwen3::serve::fused_attention_on_gpu(cfg.head_dim, true)).is_ok(),
             "the fused kernel's real scratch buffer must fit, once activate() actually knows the device supports it"
         );
     }
@@ -1696,7 +1696,7 @@ mod tests {
             QwenResident::pool_sizing(ctx, max_batch, max_prefill_cap);
         let cap = max_blocks_per_seq * block_size;
         QwenResident::check_buffers_fit_one_binding(
-            &cfg, block_size, num_blocks, mb, max_prefill, cap, true, ctx, "qwen3-0.6b", true,
+            &cfg, block_size, num_blocks, mb, max_prefill, cap, true, ctx, "qwen3-0.6b", qwen3::serve::fused_attention_on_gpu(cfg.head_dim, true),
         )
         .unwrap_or_else(|e| panic!("auto-sizing chose ctx={ctx}, which its own guard refuses: {e}"));
     }
@@ -1713,11 +1713,11 @@ mod tests {
         let (block_size, mb, max_blocks_per_seq, num_blocks, max_prefill) =
             QwenResident::pool_sizing(ctx, 16, 512);
         let cap = max_blocks_per_seq * block_size;
-        let profile = PoolProfile::new(&cfg, block_size, num_blocks, mb, max_prefill, cap, true, true);
+        let profile = PoolProfile::new(&cfg, block_size, num_blocks, mb, max_prefill, cap, true, qwen3::serve::FusedAttention { prefill: true, decode: false });
         assert!(profile.largest_binding > 128 * (1 << 20), "too big for a 128 MiB device");
         assert!(profile.largest_binding < WGPU_MAX_REPORTABLE_BINDING_BYTES, "but fine on a desktop card");
         QwenResident::check_buffers_fit_one_binding(
-            &cfg, block_size, num_blocks, mb, max_prefill, cap, true, ctx, "qwen3-0.6b", true,
+            &cfg, block_size, num_blocks, mb, max_prefill, cap, true, ctx, "qwen3-0.6b", qwen3::serve::fused_attention_on_gpu(cfg.head_dim, true),
         )
         .expect("the early ceiling must not refuse a sizing real hardware runs");
     }
@@ -1843,7 +1843,7 @@ mod tests {
         let kv_int8 = resident.kv_int8_requested;
         let expected_kv_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
         let cap = max_blocks_per_seq * block_size;
-        let expected_scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, false);
+        let expected_scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, qwen3::serve::FusedAttention::default());
         let weights = weights_fp32_bytes(&cfg);
 
         let got = resident.estimate(&key);

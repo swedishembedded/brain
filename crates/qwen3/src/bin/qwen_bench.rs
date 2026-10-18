@@ -37,7 +37,11 @@
 //!                                    # sequences while every row stays at
 //!                                    # `ctx` live tokens (the server's regime:
 //!                                    # its capacity is the engine maximum,
-//!                                    # not the batch's live length)
+//!                                    # not the batch's live length). The
+//!                                    # cost model prices attention at `cap`,
+//!                                    # so with `--cap` above `ctx` the
+//!                                    # attention rows' roof percentages are
+//!                                    # not meaningful; compare milliseconds
 //!   qwen_bench head    [reps]       # the tied 151936x1024 LM head alone
 //!   qwen_bench cost                 # offline FLOP/byte accounting, no device
 //!   qwen_bench lora-train --t T [--weights CKPT] [--steps N] [--rank R] [--profile]
@@ -80,11 +84,12 @@
 //!                                          # shape and `qwen_bench serve`'s
 //!                                          # own steady-state seq_len==cap
 //!                                          # regime
-//!   qwen_bench flash-decode-i8 [seq] [reps] # the same A/B one storage tier
-//!                                          # down: `paged_flash_decode_i8`
-//!                                          # against the INT8 triad - never
-//!                                          # independently measured before
-//!                                          # (only correctness-gated, M2.2)
+//!   qwen_bench flash-decode-i8 [seq] [reps] [batch] [--cap N]
+//!                                          # the same A/B one storage tier
+//!                                          # down, at `batch` sequences: the
+//!                                          # INT8 triad against the unsplit
+//!                                          # `paged_flash_decode_i8` and the
+//!                                          # batched GQA split-key pair
 //!   qwen_bench flash-prefill [start] [cc] [reps]
 //!                                          # M2.4's per-kernel delta:
 //!                                          # `paged_flash_prefill` (M2.3)
@@ -320,7 +325,9 @@ fn main() {
     if mode == "flash-decode-i8" {
         let seq: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
         let reps: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
-        flash_decode_i8_bench(seq, reps);
+        let batch: u32 = a.get(4).and_then(|s| s.parse().ok()).filter(|b| *b > 0).unwrap_or(1);
+        let cap: u32 = a.iter().position(|x| x == "--cap").and_then(|i| a.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(seq);
+        flash_decode_i8_bench(&cfg, seq, reps, batch, cap);
         return;
     }
     if mode == "lora-train" {
@@ -838,23 +845,20 @@ fn quantize_pool_i8(pool: &[f32], n_kv: u32, hd: u32) -> (Vec<u32>, Vec<f32>) {
     (words, scales)
 }
 
-/// [`flash_decode_bench`]'s A/B one storage tier down: `paged_flash_decode_i8`
-/// against the INT8 triad (`paged_decode_scores_i8_batched` ->
-/// `decode_softmax_batched` -> `paged_decode_apply_i8_batched`) that
-/// `qwen3::serve`'s decode tape dispatches under `kv_int8` today - the
-/// SERVING DEFAULT. `Op::PagedAttentionFused`'s own doc names this exact gap:
-/// `paged_flash_decode_i8` was gated correctness-only (M2.2) and never
-/// independently measured for occupancy the way its F32 sibling was (M2.1,
-/// the regression that keeps `FusedFlash` off the table for `k=0` at every
-/// dtype but F32/`m==1`) - this is that measurement.
+/// [`flash_decode_bench`]'s A/B one storage tier down, at the shape and batch
+/// size the int8 serving tape decodes: `batch` sequences of `seq` live tokens
+/// in an engine whose capacity is `cap` tokens each, `cfg`'s head geometry.
+/// The int8 triad (`paged_decode_scores_i8_batched` -> `decode_softmax_batched`
+/// -> `paged_decode_apply_i8_batched`) is the reference and the baseline; the
+/// unsplit `paged_flash_decode_i8` and the batched GQA pair
+/// `paged_flash_decode_split_i8` -> `paged_flash_decode_combine_i8` (with the
+/// split count `qwen3::serve` would record) are timed against it, and the pair
+/// is checked against the triad's context. Every row owns its own physical
+/// blocks, so no two sequences share cache lines. Bandwidth percentages are
+/// against the ideal traffic: every live K and V byte once per kv head.
 ///
-/// Same shape as [`flash_decode_bench`] (batch=1, Qwen3-0.6B's real
-/// decode-head shape, steady-state `seq_len == cap`); only the KV storage
-/// tier and therefore the kernels differ, so the two runs are directly
-/// comparable.
-///
-/// `qwen_bench flash-decode-i8 [seq] [reps]`.
-pub fn flash_decode_i8_bench(seq: u32, reps: usize) {
+/// `qwen_bench flash-decode-i8 [seq] [reps] [batch] [--cap N]`.
+pub fn flash_decode_i8_bench(cfg: &QwenConfig, seq: u32, reps: usize, batch: u32, cap_tokens: u32) {
     let gpu = Gpu::new(&[
         ("paged_decode_scores_i8_batched", kernels::PAGED_DECODE_SCORES_I8_BATCHED),
         ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
@@ -865,22 +869,23 @@ pub fn flash_decode_i8_bench(seq: u32, reps: usize) {
     ]);
     let roofs = banner(&gpu);
 
-    let (batch, n_heads, n_kv_heads, head_dim, bs) = (1u32, 16u32, 8u32, 128u32, 16u32);
+    let (n_heads, n_kv_heads, head_dim, bs) = (cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, 16u32);
     let group = n_heads / n_kv_heads;
     let kv_stride = n_kv_heads * head_dim;
     let mbs = seq.div_ceil(bs);
-    let cap = mbs * bs;
+    let mbs_cap = cap_tokens.max(seq).div_ceil(bs);
+    let cap = mbs_cap * bs;
     let scale = 1.0f32 / (head_dim as f32).sqrt();
 
     let mut rng = data::rng::Rng::new(17);
     let q: Vec<f32> = (0..batch * n_heads * head_dim).map(|_| rng.next_gaussian() as f32).collect();
-    let pool_len = (mbs * bs * kv_stride) as usize;
+    let pool_len = (batch * mbs * bs * kv_stride) as usize;
     let pk: Vec<f32> = (0..pool_len).map(|_| rng.next_gaussian() as f32).collect();
     let pv: Vec<f32> = (0..pool_len).map(|_| rng.next_gaussian() as f32).collect();
     let (pk_words, sk) = quantize_pool_i8(&pk, n_kv_heads, head_dim);
     let (pv_words, sv) = quantize_pool_i8(&pv, n_kv_heads, head_dim);
-    let bt: Vec<u32> = (0..mbs).collect(); // one sequence, blocks laid out contiguously
-    let seq_lens = [cap];
+    let bt: Vec<u32> = (0..batch).flat_map(|i| (0..mbs_cap).map(move |b| if b < mbs { i * mbs + b } else { 0 })).collect();
+    let seq_lens = vec![seq; batch as usize];
 
     let qb = gpu.storage_init("q", &q);
     let poolk = gpu.storage(pk_words.len() as u64);
@@ -889,78 +894,68 @@ pub fn flash_decode_i8_bench(seq: u32, reps: usize) {
     gpu.write(&poolv, &pv_words);
     let scales_k = gpu.storage_init("sk", &sk);
     let scales_v = gpu.storage_init("sv", &sv);
-    let btb = gpu.storage(mbs as u64);
+    let btb = gpu.storage(bt.len() as u64);
     gpu.write(&btb, &bt);
-    let sl = gpu.storage(1);
+    let sl = gpu.storage(batch as u64);
     gpu.write(&sl, &seq_lens);
 
-    let sc = gpu.storage((n_heads * cap) as u64);
-    let pr = gpu.storage((n_heads * cap) as u64);
-    let ctx_ref = gpu.storage((n_heads * head_dim) as u64);
+    let sc = gpu.storage((batch * n_heads * cap) as u64);
+    let pr = gpu.storage((batch * n_heads * cap) as u64);
+    let ctx_ref = gpu.storage((batch * n_heads * head_dim) as u64);
     let ref_steps = vec![
         gpu.step(
             0,
             &[&qb, &poolk, &btb, &sl, &scales_k, &sc],
-            &[batch, n_heads, group, head_dim, bs, kv_stride, cap, mbs, scale.to_bits()],
+            &[batch, n_heads, group, head_dim, bs, kv_stride, cap, mbs_cap, scale.to_bits()],
             batch * n_heads * cap,
         ),
         gpu.step(1, &[&sc, &sl, &pr], &[batch, n_heads, cap], batch * n_heads),
         gpu.step(
             2,
             &[&pr, &poolv, &btb, &sl, &scales_v, &ctx_ref],
-            &[batch, n_heads, group, head_dim, bs, kv_stride, cap, mbs],
+            &[batch, n_heads, group, head_dim, bs, kv_stride, cap, mbs_cap],
             batch * n_heads * head_dim,
         ),
     ];
     let t_ref = gpu_core::profile::best_of(&gpu, &ref_steps, reps);
 
-    let ctx_flash = gpu.storage((n_heads * head_dim) as u64);
-    let flash_steps = vec![gpu.step(
+    let ctx_flash = gpu.storage((batch * n_heads * head_dim) as u64);
+    let flash_steps = vec![gpu.dispatch(
         3,
         &[&qb, &poolk, &poolv, &scales_k, &scales_v, &btb, &sl, &ctx_flash],
-        &[batch, n_heads, n_kv_heads, head_dim, group, bs, mbs],
-        batch * n_heads * 64, // 64 = paged_flash_decode_i8's own @workgroup_size
+        &[batch, n_heads, n_kv_heads, head_dim, group, bs, mbs_cap],
+        gpu_core::Dispatch::Workgroups(batch * n_heads),
     )];
     let t_flash = gpu_core::profile::best_of(&gpu, &flash_steps, reps);
 
-    // M2.7's split-key design, ported to int8 (`decode_split_shape`'s own
-    // formula, `qwen3::serve`'s ONE place this arithmetic lives - duplicated
-    // here for the same reason `flash_decode_bench`'s reproducer already
-    // duplicates `PAGED_SCORES_PER_WORKGROUP`: this crate cannot depend on
-    // `brain-qwen3`, `brain-qwen3` depends on this).
-    const BC: u32 = 8;
-    const DESIRED_SPLITS: u32 = 8;
-    let ntiles = cap.div_ceil(BC).max(1);
-    let tiles_per_split = ntiles.div_ceil(DESIRED_SPLITS).max(1);
-    let n_splits = ntiles.div_ceil(tiles_per_split).max(1);
-    let part_stride = 2u32 + 128u32; // PART_STRIDE = 2 + HD
-    let part = gpu.storage((batch * n_heads * n_splits * part_stride) as u64);
-    let ctx_split = gpu.storage((n_heads * head_dim) as u64);
+    let n_splits = qwen3::serve::int8_decode_splits(cfg, batch, cap);
+    let slabs = group.div_ceil(4); // paged_flash_decode_split_i8's own SLAB
+    let part = gpu.storage((batch * n_heads * n_splits * (2 + 128)) as u64);
+    let ctx_split = gpu.storage((batch * n_heads * head_dim) as u64);
     let split_steps = vec![
-        gpu.step(
+        gpu.dispatch(
             4,
             &[&qb, &poolk, &poolv, &scales_k, &scales_v, &btb, &sl, &part],
-            &[batch, n_heads, n_kv_heads, head_dim, group, bs, mbs, n_splits, tiles_per_split],
-            batch * n_heads * n_splits * 64, // 64 = paged_flash_decode_split_i8's own @workgroup_size
+            &[batch, n_heads, n_kv_heads, head_dim, group, bs, mbs_cap, n_splits],
+            gpu_core::Dispatch::Workgroups(batch * n_kv_heads * slabs * n_splits),
         ),
-        gpu.step(5, &[&part, &ctx_split], &[batch, n_heads, head_dim, n_splits], batch * n_heads * 128),
+        gpu.step(5, &[&part, &sl, &ctx_split], &[batch, n_heads, head_dim, n_splits], batch * n_heads * 128),
     ];
     let t_split = gpu_core::profile::best_of(&gpu, &split_steps, reps);
 
-    let bytes = (batch * n_heads * cap * head_dim) as u64 * 2; // int8: 1 byte/element, K+V once each
-    let pct = |secs: f64| roofs.and_then(|r| r.utilisation_of(0, 0, bytes, secs));
+    let want = gpu.read(&ctx_ref, (batch * n_heads * head_dim) as usize);
+    let got = gpu.read(&ctx_split, (batch * n_heads * head_dim) as usize);
+    let worst = want.iter().zip(&got).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+
+    let bytes = batch as u64 * n_kv_heads as u64 * seq as u64 * head_dim as u64 * 2; // int8: 1 byte/element, K+V once each
+    let pct = |secs: f64| roofs.and_then(|r| r.utilisation_of(0, 0, bytes, secs)).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into());
     println!(
-        "\npaged attention int8 @ seq={seq}: triad (scores_i8+softmax+apply_i8) {:>8.4} ms  vs  paged_flash_decode_i8 {:>8.4} ms  vs  split_i8+combine_i8 ({n_splits} splits) {:>8.4} ms",
+        "\npaged attention int8 @ batch={batch} seq={seq} cap={cap}: triad (scores_i8+softmax+apply_i8) {:>8.4} ms  vs  paged_flash_decode_i8 {:>8.4} ms  vs  split_i8+combine_i8 ({n_splits} splits) {:>8.4} ms",
         t_ref * 1e3,
         t_flash * 1e3,
         t_split * 1e3,
     );
-    println!(
-        "triad {}  |  flash {}  |  split {}",
-        pct(t_ref).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
-        pct(t_flash).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
-        pct(t_split).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
-    );
+    println!("triad {}  |  flash {}  |  split {}  |  split vs triad max|diff| {worst:.2e}", pct(t_ref), pct(t_flash), pct(t_split));
 }
 
 /// [`flash_prefill_bench`]'s A/B one storage tier down: `paged_flash_prefill_i8`
@@ -969,7 +964,7 @@ pub fn flash_decode_i8_bench(seq: u32, reps: usize) {
 /// `qwen3::serve::prefill` dispatches per CHUNK under `kv_int8` - the SERVING
 /// DEFAULT, so this is the arm that decides whether the default configuration
 /// gets the fused path (and with it the `Scratch::{scores,probs}` shrink
-/// `paged_attn_scratch_bytes` gates on `fused_prefill_available`) at all.
+/// `paged_attn_scratch_bytes` gates on `FusedAttention::prefill`) at all.
 ///
 /// Same shape, same `start`/`cc` semantics and the same Qwen3-0.6B head shape
 /// as the fp32 bench above, so the two runs are directly comparable; only the

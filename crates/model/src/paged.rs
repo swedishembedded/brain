@@ -1171,60 +1171,65 @@ mod flash_tests {
         assert!(worst < 1e-3, "paged_flash_decode_split+combine vs batched triad maxabs={worst}");
     }
 
-    /// The INT8-KV twin of `paged_flash_decode_split_matches_batched_triad`:
-    /// `paged_flash_decode_split_i8` -> `paged_flash_decode_combine_i8`
-    /// (its own combine phase, over the merged `[m, l, o]` partial-state
-    /// layout the split kernel's own header explains - NOT plain
-    /// `paged_flash_decode_combine`, which reads three separate buffers) -
-    /// against the int8 triad (`paged_decode_scores_i8_batched` ->
-    /// `decode_softmax_batched` -> `paged_decode_apply_i8_batched`)
-    /// `qwen3::serve` actually dispatches under `kv_int8` today. Same
-    /// shapes/lengths/scrambled block tables as the fp32 split test, and the
-    /// same real production quantization scheme (`quantize_pool_i8`)
-    /// `paged_flash_decode_int8_matches_fp32_fused_kernel` already uses, so
-    /// the only source of disagreement is genuine int8 quantization noise
-    /// plus the split/combine reassociation - comfortably inside the same
-    /// `1e-3` bound every other fused-vs-triad gate in this file uses.
-    #[test]
-    fn paged_flash_decode_split_i8_matches_int8_triad() {
+    /// One batched, GQA-aware int8 decode case: `lens` sequences of ragged
+    /// length in a pool whose block tables span `max_bt * bs` tokens (far
+    /// more than any live length), `kv_heads` x `group` heads of width `hd`.
+    struct SplitI8Case {
+        lens: Vec<u32>,
+        kv_heads: u32,
+        group: u32,
+        hd: u32,
+        max_bt: u32,
+        n_splits: u32,
+    }
+
+    /// Runs `paged_flash_decode_split_i8` -> `paged_flash_decode_combine_i8`
+    /// and the int8 triad (`paged_decode_scores_i8_batched` ->
+    /// `decode_softmax_batched` -> `paged_decode_apply_i8_batched`) over the
+    /// same randomly filled, really quantized (`quantize_pool_i8`) pool with
+    /// scrambled block tables; returns the worst absolute difference of the
+    /// two contexts. Both read the live length from `seq_lens`, so the
+    /// per-sequence lengths below `cap` are what is being exercised.
+    fn split_i8_vs_triad(c: &SplitI8Case) -> f32 {
         let g = gpu_core::testgpu::dev(PIPES);
-        let (nh, nkv, hd) = (4u32, 2u32, 8u32);
-        let group = nh / nkv;
+        let (nkv, group, hd) = (c.kv_heads, c.group, c.hd);
+        let nh = nkv * group;
         let (hkv, hq) = (nkv * hd, nh * hd);
         let scale = 1.0f32 / (hd as f32).sqrt();
-        let lens = [1u32, 7, 8, 9, 41, 100];
-        let batch = lens.len() as u32;
-        let bs = 4u32;
-        let num_blocks = 256u32;
-        let max_bt = 26u32; // >= ceil(100/4)
+        let batch = c.lens.len() as u32;
+        let bs = 16u32;
+        let max_bt = c.max_bt;
         let cap = max_bt * bs;
+        let max_len = *c.lens.iter().max().unwrap();
+        assert!(max_len <= cap);
+        let blocks_per_seq = max_len.div_ceil(bs);
+        let num_blocks = batch * blocks_per_seq;
 
-        let mut rng = Rng::new(29);
+        let mut rng = Rng::new(29 + u64::from(batch));
         let qflat: Vec<f32> = (0..batch * hq).map(|_| rng.next_gaussian() as f32).collect();
-        let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
-        let vs: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
-
-        let tables: Vec<Vec<u32>> = (0..batch).map(|b| (0..max_bt).map(|i| b + i * batch).collect()).collect();
-
+        // Blocks interleave across sequences so the paged indirection is
+        // genuinely exercised. Entries past a sequence's live blocks stay 0
+        // and must never be read.
+        let tables: Vec<Vec<u32>> =
+            (0..batch).map(|b| (0..max_bt).map(|i| if i < blocks_per_seq { b + i * batch } else { 0 }).collect()).collect();
         let mut pk = vec![0f32; (num_blocks * bs * hkv) as usize];
         let mut pv = vec![0f32; (num_blocks * bs * hkv) as usize];
-        for b in 0..batch as usize {
-            for tok in 0..lens[b] {
-                let phys = tables[b][(tok / bs) as usize];
-                let dst = ((phys * bs + tok % bs) * hkv) as usize;
-                let src = (tok * hkv) as usize;
-                pk[dst..dst + hkv as usize].copy_from_slice(&ks[b][src..src + hkv as usize]);
-                pv[dst..dst + hkv as usize].copy_from_slice(&vs[b][src..src + hkv as usize]);
+        for (table, &len) in tables.iter().zip(&c.lens) {
+            for tok in 0..len {
+                let dst = ((table[(tok / bs) as usize] * bs + tok % bs) * hkv) as usize;
+                for e in 0..hkv as usize {
+                    pk[dst + e] = rng.next_gaussian() as f32;
+                    pv[dst + e] = rng.next_gaussian() as f32;
+                }
             }
         }
 
         let qb = g.storage_init("q", &qflat);
-        let btflat: Vec<u32> = (0..batch as usize).flat_map(|b| tables[b].clone()).collect();
-        let bt = g.storage((batch * max_bt) as u64);
+        let btflat: Vec<u32> = tables.concat();
+        let bt = g.storage(btflat.len() as u64);
         g.write(&bt, &btflat);
         let sl = g.storage(batch as u64);
-        g.write(&sl, &lens);
-
+        g.write(&sl, &c.lens);
         let (pk_words, sk) = quantize_pool_i8(&pk, nkv, hd);
         let (pv_words, sv) = quantize_pool_i8(&pv, nkv, hd);
         let poolk = g.storage(pk_words.len() as u64);
@@ -1234,53 +1239,87 @@ mod flash_tests {
         let scales_k = g.storage_init("sk", &sk);
         let scales_v = g.storage_init("sv", &sv);
 
-        // --- reference: the int8 triad qwen3::serve actually dispatches ---
         let sc = g.storage((batch * nh * cap) as u64);
         let pr = g.storage((batch * nh * cap) as u64);
         let ctx_ref_buf = g.storage((batch * hq) as u64);
-        let steps = vec![
-            g.step(7, &[&qb, &poolk, &bt, &sl, &scales_k, &sc], &[batch, nh, group, hd, bs, hkv, cap, max_bt, fb(scale)], batch * nh * cap),
-            g.step(1, &[&sc, &sl, &pr], &[batch, nh, cap], batch * nh),
-            g.step(8, &[&pr, &poolv, &bt, &sl, &scales_v, &ctx_ref_buf], &[batch, nh, group, hd, bs, hkv, cap, max_bt], batch * nh * hd),
-        ];
-        g.submit(&[], &steps);
+        g.submit(
+            &[],
+            &[
+                g.step(7, &[&qb, &poolk, &bt, &sl, &scales_k, &sc], &[batch, nh, group, hd, bs, hkv, cap, max_bt, fb(scale)], batch * nh * cap),
+                g.step(1, &[&sc, &sl, &pr], &[batch, nh, cap], batch * nh),
+                g.step(8, &[&pr, &poolv, &bt, &sl, &scales_v, &ctx_ref_buf], &[batch, nh, group, hd, bs, hkv, cap, max_bt], batch * nh * hd),
+            ],
+        );
         let ctx_ref = g.read(&ctx_ref_buf, (batch * hq) as usize);
 
-        // --- split phase: ONE merged partial-state buffer per (sequence,
-        // head, split): [m, l, o_0..o_127] - see paged_flash_decode_split_i8's
-        // own header for why (two extra dequant-scale inputs vs the fp32
-        // split kernel push a naive 3-output port over WebGPU's 8-storage-
-        // buffer floor).
-        let tiles_per_split = 2u32;
-        let bc = 8u32; // paged_flash_decode_split_i8's own const BC
-        let part_stride = 2u32 + 128u32; // PART_STRIDE = 2 + HD (kernel's own HD, not this test's hd)
-        let max_ntiles = lens.iter().map(|&t| t.div_ceil(bc)).max().unwrap();
-        let n_splits = max_ntiles.div_ceil(tiles_per_split);
-
-        let part = g.storage((batch * nh * n_splits * part_stride) as u64);
-        let split_steps = vec![g.dispatch(
-            9,
-            &[&qb, &poolk, &poolv, &scales_k, &scales_v, &bt, &sl, &part],
-            &[batch, nh, nkv, hd, group, bs, max_bt, n_splits, tiles_per_split],
-            gpu_core::Dispatch::Workgroups(batch * nh * n_splits),
-        )];
-        g.submit(&[], &split_steps);
-
-        // --- combine phase: paged_flash_decode_combine_i8, this layout's own ---
+        // One workgroup per (sequence, kv head, 4-head slab, split); the
+        // partials are `[m, l, o_0..o_127]` per (sequence, head, split).
+        let slabs = group.div_ceil(4);
+        let part = g.storage((batch * nh * c.n_splits * (2 + 128)) as u64);
         let ctx_split_buf = g.storage((batch * hq) as u64);
-        let combine_steps = vec![g.step(
-            10,
-            &[&part, &ctx_split_buf],
-            &[batch, nh, hd, n_splits],
-            batch * nh * 128, // 128 = paged_flash_decode_combine_i8's own @workgroup_size
-        )];
-        g.submit(&[], &combine_steps);
+        g.submit(
+            &[],
+            &[
+                g.dispatch(
+                    9,
+                    &[&qb, &poolk, &poolv, &scales_k, &scales_v, &bt, &sl, &part],
+                    &[batch, nh, nkv, hd, group, bs, max_bt, c.n_splits],
+                    gpu_core::Dispatch::Workgroups(batch * nkv * slabs * c.n_splits),
+                ),
+                g.step(10, &[&part, &sl, &ctx_split_buf], &[batch, nh, hd, c.n_splits], batch * nh * 128),
+            ],
+        );
         let ctx_split = g.read(&ctx_split_buf, (batch * hq) as usize);
 
         let worst = ctx_ref.iter().zip(&ctx_split).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
-        println!("paged_flash_decode_split_i8+combine vs int8 triad: worst maxabs = {worst:e} (n_splits={n_splits})");
-        assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
-        assert!(worst < 1e-3, "paged_flash_decode_split_i8+combine vs int8 triad maxabs={worst}");
+        assert!(ctx_ref.iter().any(|v| v.abs() > 1e-3), "sanity: the reference context is not all zero");
+        worst
+    }
+
+    /// The batched GQA split-key int8 decode kernel pair must agree with the
+    /// int8 triad `qwen3::serve` falls back to. Covers the batch sizes a
+    /// server presents (1, 4, 37, 128), ragged lengths including 1, tile and
+    /// block boundaries (127/128/129, 15/16/17) and lengths far below `cap`,
+    /// a split count that is one, a few and far more than any sequence has
+    /// chunks (the surplus splits must exit without writing), GQA group 4 at
+    /// head_dim 128, plus groups 1, 2 and 8 (one and two head slabs) and
+    /// head_dim 64.
+    #[test]
+    fn paged_flash_decode_split_i8_matches_int8_triad() {
+        let ragged = |n: u32| -> Vec<u32> {
+            let fixed = [1u32, 2, 15, 16, 17, 127, 128, 129, 255, 256, 257, 700];
+            (0..n).map(|i| fixed[(i as usize * 7 + 3) % fixed.len()]).collect()
+        };
+        let mut cases = Vec::new();
+        for n_splits in [1u32, 3, 64] {
+            cases.push(SplitI8Case { lens: vec![1], kv_heads: 2, group: 4, hd: 128, max_bt: 64, n_splits });
+            cases.push(SplitI8Case { lens: vec![129], kv_heads: 2, group: 4, hd: 128, max_bt: 64, n_splits });
+            cases.push(SplitI8Case { lens: vec![1, 127, 128, 129], kv_heads: 2, group: 4, hd: 128, max_bt: 64, n_splits });
+            cases.push(SplitI8Case { lens: ragged(37), kv_heads: 2, group: 4, hd: 128, max_bt: 64, n_splits });
+            cases.push(SplitI8Case { lens: ragged(128), kv_heads: 2, group: 4, hd: 128, max_bt: 64, n_splits });
+        }
+        for (group, hd) in [(1u32, 128u32), (2, 128), (8, 128), (4, 64)] {
+            cases.push(SplitI8Case { lens: vec![1, 33, 300, 700], kv_heads: 2, group, hd, max_bt: 64, n_splits: 3 });
+        }
+        for c in &cases {
+            let worst = split_i8_vs_triad(c);
+            println!(
+                "split_i8+combine vs int8 triad: bsz={} group={} hd={} n_splits={} worst maxabs={worst:e}",
+                c.lens.len(),
+                c.group,
+                c.hd,
+                c.n_splits
+            );
+            assert!(
+                worst < 1e-3,
+                "split_i8+combine vs int8 triad: bsz={} lens={:?} group={} hd={} n_splits={} maxabs={worst}",
+                c.lens.len(),
+                c.lens,
+                c.group,
+                c.hd,
+                c.n_splits
+            );
+        }
     }
 
     /// Whole-tensor `rel_l2` (f64-accumulated sum-of-squares ratio) - the

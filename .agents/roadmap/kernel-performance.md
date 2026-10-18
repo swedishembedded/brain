@@ -2042,6 +2042,59 @@ ruled out by this entry's own measurement; profiling which SPECIFIC
 resource (register spill vs shared-memory-limited occupancy) actually
 capped this attempt, rather than reasoning about it from the design alone.
 
+### M2.11 - Batched GQA split-key int8 decode: `paged_flash_decode_split_i8` rewritten, the int8 triad leaves the decode path
+
+Profiled `qwen_bench serve 128 5 1024 i8w kv8 --model 8b` on a Tesla P40:
+816 ms per decode step, of which `paged_decode_scores_i8_batched` 267 ms and
+`paged_decode_apply_i8_batched` 250 ms (7% of the memory roof each). The
+triad is one thread per output element, re-reads K and V once per QUERY head
+(group 4) with per-element byte extraction, and is dispatched over the
+engine's capacity (`cap`), not the live length. The single-row int8 path was
+no better in the served regime: `qwen_bench serve 1 5 3000 i8w kv8 --cap
+24576` spent 143 ms of a 186 ms step in the old split kernel, whose split
+count came from `cap` and whose 8-key tiles serialised on barriers.
+
+**What shipped.** One kernel pair, selected at EVERY batch size for int8 KV
+whose `head_dim` is a multiple of 16 up to 128 (`Op::PagedAttentionFused`,
+`(0, I8)`):
+
+- One workgroup per (sequence, kv head, 4-head slab, key split). A lane
+  scores one key of a 128-key chunk against the four heads of the slab from
+  16-byte row loads (no shared K/V staging - each lane's 128-byte row is a
+  whole cache line it consumes alone), then a second pass accumulates values
+  with one coalesced word per lane. K and V are read once per slab: once for
+  Qwen3's groups of 2 and 4.
+- Work follows the live length. A sequence's chunks are divided over the
+  static split count on the device (`seq_lens` is read in the kernel and in
+  the combine), splits past the end exit before touching memory. The split
+  count is a function of the batch size only (`int8_decode_splits`: aim for
+  1024 workgroups), so recorded decode tapes stay valid for every step. The
+  partial buffer is bounded by that target, not by `cap` (about 2 MB at 128
+  rows, any `cap`).
+- `Scratch::{scores,probs}` shrink to one word when prefill AND decode are
+  fused (`FusedAttention`); the 128-row, 24576-token server sizing sheds
+  805 MB.
+
+**Measured** (random Qwen3-8B-shaped weights, int8 weights, int8 KV, whole
+tape on one P40, device time from `BRAIN_PROFILE`):
+
+| shape | before | after | attention kernels before -> after |
+| --- | --- | --- | --- |
+| 128 rows, ctx 1024 | 816 ms | 316 ms | 542 ms -> 41 ms (86% of roof) |
+| 128 rows, ctx 1024, cap 24576 | 834 ms | 317 ms | 555 ms -> 41 ms |
+| 1 row, ctx 3000, cap 24576 | 186 ms | 45 ms | 143 ms -> 2.6 ms |
+
+The remaining 250 ms at 128 rows is `matmul_i8_dyn`. With `--cap` above the
+context the profiler's cost model (which prices attention at `cap`) reports
+impossible roof percentages for the attention rows; the bandwidth figure
+above is the live-token one.
+
+**M2.10 is not contradicted.** Its group-sharing attempt kept the old
+kernel's 8-key barrier-bound tile walk and grew per-thread state and shared
+memory eightfold. This kernel stages no K tile in shared memory, keeps 16
+accumulator registers per thread and is bounded to a four-head slab; the
+measurement above is for that design, not a revision of M2.10's finding.
+
 ### M3.2 - Device admission head, and `PagedDecoder::admit_greedy`/`admit_topk`
 
 `qwen3::serve::Engine` kept a SECOND, host-only copy of the LM head

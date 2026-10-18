@@ -363,10 +363,10 @@ pub struct QwenPagedEngine {
     /// Checkpoint tensors decoded to f32, read once and reused by every
     /// `load` so the ladder does not re-read the checkpoint per rung.
     tensors: Option<HashMap<String, Vec<f32>>>,
-    /// `Some(true)` once a loaded engine showed the fused paged-attention
-    /// scratch size; before the first load the planner assumes the larger
-    /// unfused worst case.
-    fused_scratch: Option<bool>,
+    /// The attention paths a loaded engine fused, which decide its scratch
+    /// size; before the first load the planner assumes the larger unfused
+    /// worst case.
+    fused_attention: Option<qwen3::serve::FusedAttention>,
     eng: Option<qwen3::serve::Engine>,
     tables: Vec<BlockTable>,
 }
@@ -377,7 +377,7 @@ impl QwenPagedEngine {
         let gpu = gpu_budget().into_iter().next().ok_or("no GPU with queryable memory: longctx is GPU-only and has no host fallback")?;
         let cfg = qwen3::checkpoint_config(weights)?;
         let kv_int8 = crate::perf_cli::resolve_kv_int8(&cfg, kv_fp32, weights);
-        Ok(QwenPagedEngine { weights: weights.to_string(), cfg, weights_int8, kv_int8, gpu, tensors: None, fused_scratch: None, eng: None, tables: Vec::new() })
+        Ok(QwenPagedEngine { weights: weights.to_string(), cfg, weights_int8, kv_int8, gpu, tensors: None, fused_attention: None, eng: None, tables: Vec::new() })
     }
 
     /// `(blocks per sequence, pool blocks, prefill chunk)` for a sizing: room
@@ -388,7 +388,7 @@ impl QwenPagedEngine {
         (per_seq, per_seq * batch + batch, PREFILL_CHUNK.min(context))
     }
 
-    fn scratch_bytes(&self, batch: u32, context: u32, fused: bool) -> u64 {
+    fn scratch_bytes(&self, batch: u32, context: u32, fused: qwen3::serve::FusedAttention) -> u64 {
         let (per_seq, _, chunk) = Self::geometry(batch, context);
         qwen3::serve::paged_attn_scratch_bytes(&self.cfg, batch, chunk, per_seq * BLOCK_SIZE, fused)
     }
@@ -414,7 +414,7 @@ impl LongContextEngine for QwenPagedEngine {
         let (_, num_blocks, _) = Self::geometry(batch, context);
         let weights = if self.weights_int8 { catalog::resident_llm::weights_int8_bytes(&self.cfg) } else { catalog::resident_llm::weights_fp32_bytes(&self.cfg) };
         let kv = qwen3::serve::kv_pool_bytes(&self.cfg, BLOCK_SIZE, num_blocks, self.kv_int8);
-        let needed = weights + kv + self.scratch_bytes(batch, context, self.fused_scratch == Some(true));
+        let needed = weights + kv + self.scratch_bytes(batch, context, self.fused_attention.unwrap_or_default());
         Ok(Fit { fits: needed <= self.gpu.2, needed_bytes: needed, usable_bytes: self.gpu.2 })
     }
 
@@ -438,7 +438,7 @@ impl LongContextEngine for QwenPagedEngine {
         })?;
         // Learn which scratch formula the device really took, so later plans
         // are exact instead of worst-case.
-        self.fused_scratch = Some(built.paged_attn_scratch_bytes() == self.scratch_bytes(batch, context, true));
+        self.fused_attention = Some(built.fused_attention());
         self.eng = Some(built);
         Ok(())
     }
