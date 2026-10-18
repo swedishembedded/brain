@@ -77,8 +77,11 @@ continuations and one label loss.
       parity, incremental decode == full prefill. Measured: last-8-row logits
       cosine 1.0000000000, rel_l2 2.9e-6, greedy continuation identical
       (`tests/text_parity.rs`).
-- [ ] P2 multi-run embedding splice shared in `model::vlm` (qwen3 + qwen35),
-      in training forward and inference prefill; FD-gradchecked.
+- [x] P2 multi-run embedding splice shared in `model::vlm::SpliceRuns`
+      (qwen3, qwen35, qwen35moe, deepseek2), FD-gradchecked on three disjoint
+      runs (`gradcheck::check_qwen35_splices`); inference prefill from input
+      embeddings (`Qwen35::prefill_embeds`) equal to the token prefill and to
+      the spliced training forward (`qwen35/tests/prefill_embeds.rs`).
 - [ ] P3 vision tower: ragged per-view spans, nearest position ids,
       in-tower merger hook, merger; per-stage parity (16x and 4x);
       gradchecked.

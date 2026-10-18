@@ -3810,17 +3810,22 @@ impl Qwen35 {
         // dispatch is submitted. A write is ordered after all earlier
         // submissions, so one between dispatches would close the pass early and
         // split the token into two graphs.
-        let (tok_buf, mut res) = if self.shard.embed {
-            assert!(input_override.is_none(), "qwen35: run_decode_batch got an input_override on the EMBED stage - it embeds `tokens` itself, so a caller supplying both is a wiring error");
-            let tok_buf = g.storage(bsz as u64);
-            g.write(&tok_buf, tokens);
-            (Some(tok_buf), g.storage((bsz * d) as u64))
-        } else {
-            let x = input_override.expect("qwen35: run_decode_batch on a NON-EMBED stage needs the previous stage's residual as `input_override` (this stage holds no `tok.weight`)");
-            assert_eq!(x.len(), (bsz * d) as usize, "qwen35: run_decode_batch input_override must be the batch's whole [bsz, d_model] block");
-            let res = g.storage((bsz * d) as u64);
-            g.write_f32(&res, x);
-            (None, res)
+        // `input_override` is the batch's input rows: on a non-embed stage the
+        // previous stage's residual, on the embed stage the caller's own input
+        // embeddings in place of the token gather (`Qwen35::prefill_embeds`).
+        let (tok_buf, mut res) = match input_override {
+            Some(x) => {
+                assert_eq!(x.len(), (bsz * d) as usize, "qwen35: run_decode_batch input_override must be the batch's whole [bsz, d_model] block");
+                let res = g.storage((bsz * d) as u64);
+                g.write_f32(&res, x);
+                (None, res)
+            }
+            None => {
+                assert!(self.shard.embed, "qwen35: run_decode_batch on a NON-EMBED stage needs the previous stage's residual as `input_override` (this stage holds no `tok.weight`)");
+                let tok_buf = g.storage(bsz as u64);
+                g.write(&tok_buf, tokens);
+                (Some(tok_buf), g.storage((bsz * d) as u64))
+            }
         };
 
         // Built ONCE per step, shared by every layer in it (the same discipline
@@ -4027,7 +4032,10 @@ impl Qwen35 {
     /// the `[n, d_model]` boundary block on both ends: that is
     /// [`Self::prefill_chunk_stage`], and both funnel into the same
     /// [`Self::run_prefill_chunk_stage`] body.
-    pub(crate) fn run_prefill_chunk(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches) -> DeviceBuffer {
+    ///
+    /// `input` replaces the token gather with the caller's own `[n, d_model]`
+    /// input embeddings (`tokens` then only gives the round's length).
+    pub(crate) fn run_prefill_chunk(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches, input: Option<&[f32]>) -> DeviceBuffer {
         let g = &self.gpu;
         let d = self.cfg.d_model;
         let n = tokens.len() as u32;
@@ -4037,7 +4045,7 @@ impl Qwen35 {
             self.shard.embed,
             self.shard.head
         );
-        let xn_final = self.run_prefill_chunk_stage(tokens, pos_start, caches, None);
+        let xn_final = self.run_prefill_chunk_stage(tokens, pos_start, caches, input);
         // Only the LAST row is ever wanted (this round's next-token
         // prediction, or the seam into the next round).
         let last = g.storage(d as u64);
@@ -4098,21 +4106,25 @@ impl Qwen35 {
             return self.run_exact_round(tokens, pos_start, caches, input_override);
         }
 
-        let res = if self.shard.embed {
-            assert!(
-                input_override.is_none(),
-                "qwen35: run_prefill_chunk_stage got an input_override on the EMBED stage - it gathers `tokens` itself, so a caller supplying both is a wiring error"
-            );
-            let tok_buf = g.storage(n as u64);
-            g.write(&tok_buf, tokens);
-            let res = g.storage((n * d) as u64);
-            self.embed_rows(&tok_buf, n, &res);
-            res
-        } else {
-            let x = input_override
-                .expect("qwen35: run_prefill_chunk_stage on a NON-EMBED stage needs the previous stage's residual block as `input_override` (this stage holds no `tok.weight`)");
-            assert_eq!(x.len(), (n * d) as usize, "qwen35: run_prefill_chunk_stage input_override must be the round's whole [n, d_model] block");
-            g.storage_init("qwen35.prefill.res_in", x)
+        // `input_override` is the round's input rows: on a non-embed stage the
+        // previous stage's residual block, on the embed stage the caller's own
+        // input embeddings in place of the token gather.
+        let res = match input_override {
+            Some(x) => {
+                assert_eq!(x.len(), (n * d) as usize, "qwen35: run_prefill_chunk_stage input_override must be the round's whole [n, d_model] block");
+                g.storage_init("qwen35.prefill.res_in", x)
+            }
+            None => {
+                assert!(
+                    self.shard.embed,
+                    "qwen35: run_prefill_chunk_stage on a NON-EMBED stage needs the previous stage's residual block as `input_override` (this stage holds no `tok.weight`)"
+                );
+                let tok_buf = g.storage(n as u64);
+                g.write(&tok_buf, tokens);
+                let res = g.storage((n * d) as u64);
+                self.embed_rows(&tok_buf, n, &res);
+                res
+            }
         };
 
         // Built ONCE per round, shared by every GQA layer in it: the round's
@@ -4620,12 +4632,63 @@ impl Qwen35 {
         let caches = self.own_caches();
         let mut hidden = None;
         for round in tokens.chunks(max_chunk as usize) {
-            hidden = Some(self.run_prefill_chunk(round, pos, &caches));
+            hidden = Some(self.run_prefill_chunk(round, pos, &caches, None));
             pos += round.len() as u32;
         }
         self.dec_pos.set(pos);
         let hidden = hidden.expect("prefill_chunked: prompt is non-empty (asserted above)");
         self.gpu.read(&hidden, self.cfg.d_model as usize)
+    }
+
+    /// The token-embedding rows of `tokens` (`[n, d_model]`, row-major) - the
+    /// same gather every forward starts with, read back so a caller can build
+    /// its own input embeddings (replace some rows with image features) for
+    /// [`Self::prefill_embeds`].
+    pub fn embed_tokens(&self, tokens: &[u32]) -> Vec<f32> {
+        assert!(self.shard.embed, "qwen35::embed_tokens needs the stage that holds tok.weight");
+        if let Some(&bad) = tokens.iter().find(|&&t| t >= self.cfg.vocab) {
+            panic!("qwen35::embed_tokens: token {bad} exceeds vocab {}", self.cfg.vocab);
+        }
+        let n = tokens.len() as u32;
+        let tok_buf = self.gpu.storage(n as u64);
+        self.gpu.write(&tok_buf, tokens);
+        let out = self.gpu.storage((n * self.cfg.d_model) as u64);
+        self.embed_rows(&tok_buf, n, &out);
+        self.gpu.read(&out, (n * self.cfg.d_model) as usize)
+    }
+
+    /// [`Self::prefill_chunked`] from input EMBEDDINGS (`[n, d_model]`,
+    /// row-major) instead of token ids - the reference's `inputs_embeds`. The
+    /// rows enter the layer stack as they are, so a vision-language model
+    /// passes the token gather ([`Self::embed_tokens`]) with its placeholder
+    /// rows replaced by image features. Leaves the decode state exactly as a
+    /// token prefill would, so [`Self::step`] continues from it. Returns the
+    /// last row's final-norm hidden state.
+    pub fn prefill_embeds(&self, embeds: &[f32], max_chunk: u32) -> Vec<f32> {
+        assert_eq!(self.b, 1, "qwen35::prefill_embeds requires b==1 (single sequence)");
+        assert!(max_chunk > 0, "qwen35::prefill_embeds: max_chunk must be > 0");
+        let d = self.cfg.d_model as usize;
+        assert!(!embeds.is_empty() && embeds.len().is_multiple_of(d), "qwen35::prefill_embeds: {} values is not a whole number of {d}-wide rows", embeds.len());
+        let n = embeds.len() / d;
+        let mut pos = self.dec_pos.get();
+        assert!(
+            pos + n as u32 <= self.dec_cap,
+            "qwen35::prefill_embeds: prompt ends at position {} but this instance's decode capacity is {}",
+            pos + n as u32,
+            self.dec_cap
+        );
+        let caches = self.own_caches();
+        // The ids are unread when the rows are supplied; only the round length is.
+        let lengths = vec![0u32; max_chunk as usize];
+        let mut hidden = None;
+        for rows in embeds.chunks(max_chunk as usize * d) {
+            let len = rows.len() / d;
+            hidden = Some(self.run_prefill_chunk(&lengths[..len], pos, &caches, Some(rows)));
+            pos += len as u32;
+        }
+        self.dec_pos.set(pos);
+        let hidden = hidden.expect("prefill_embeds: the prompt is non-empty (asserted above)");
+        self.gpu.read(&hidden, d)
     }
 
     /// One Gated-DeltaNet layer's recurrent state, `[bh, dk, dv]` flattened -

@@ -556,7 +556,7 @@ impl Engine {
         for round in prompt.chunks(MAX_PREFILL_TOKENS as usize) {
             let caches = self.caches_for(phys);
             adapters::set_rows(std::iter::once(&self.model), &vec![adapter_slot; round.len()]);
-            h = Some(self.model.run_prefill_chunk(round, pos, &caches));
+            h = Some(self.model.run_prefill_chunk(round, pos, &caches, None));
             adapters::set_rows(std::iter::once(&self.model), &[]);
             pos += round.len() as u32;
         }
