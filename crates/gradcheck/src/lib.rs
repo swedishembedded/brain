@@ -627,29 +627,74 @@ pub fn check_vlm_splice(seed: u64) -> Report {
     model.backward();
     let g = model.read_d_img_embeds();
 
-    // Directional central difference (same recipe as `directional_check`, but on
-    // the input rather than a parameter).
+    let check = input_directional_check("img_embeds", &img0, &g, &mut rng, |x| {
+        model.write_img_embeds(x);
+        model.forward()
+    });
+    model.write_img_embeds(&img0); // restore
+    Report { checks: vec![check] }
+}
+
+/// Directional central difference of the loss with respect to a model INPUT
+/// (spliced image embeddings, not a parameter): perturb `x0` along random ±1
+/// directions, evaluate the loss through `loss_at` (which writes the input
+/// and runs the real forward), and compare `(L(x+ev) - L(x-ev)) / 2e` to the
+/// analytic directional derivative `grad . v`. The same recipe as
+/// [`directional_check`], keeping the best of four directions.
+fn input_directional_check(name: &str, x0: &[f32], grad: &[f32], rng: &mut Rng, mut loss_at: impl FnMut(&[f32]) -> f32) -> Check {
+    assert_eq!(x0.len(), grad.len(), "{name}: one analytic gradient element per input element");
     let (eps, n_dirs) = (5e-3f32, 4usize);
     let mut best: Option<Check> = None;
     for _ in 0..n_dirs {
-        let v: Vec<f32> = (0..img0.len()).map(|_| if rng.next_f32() < 0.5 { -1.0 } else { 1.0 }).collect();
-        let analytic: f32 = g.iter().zip(&v).map(|(&gi, &vi)| gi * vi).sum();
-        let ip: Vec<f32> = img0.iter().zip(&v).map(|(&w, &vi)| w + eps * vi).collect();
-        model.write_img_embeds(&ip);
-        let lp = model.forward();
-        let im: Vec<f32> = img0.iter().zip(&v).map(|(&w, &vi)| w - eps * vi).collect();
-        model.write_img_embeds(&im);
-        let lm = model.forward();
+        let v: Vec<f32> = (0..x0.len()).map(|_| if rng.next_f32() < 0.5 { -1.0 } else { 1.0 }).collect();
+        let analytic: f32 = grad.iter().zip(&v).map(|(&gi, &vi)| gi * vi).sum();
+        let lp = loss_at(&x0.iter().zip(&v).map(|(&w, &vi)| w + eps * vi).collect::<Vec<_>>());
+        let lm = loss_at(&x0.iter().zip(&v).map(|(&w, &vi)| w - eps * vi).collect::<Vec<_>>());
         let numeric = (lp - lm) / (2.0 * eps);
         let abs_err = (analytic - numeric).abs();
         let denom = analytic.abs().max(numeric.abs()).max(1e-3);
-        let cand = Check { param: "img_embeds".into(), analytic, numeric, abs_err, rel_err: abs_err / denom };
+        let cand = Check { param: name.into(), analytic, numeric, abs_err, rel_err: abs_err / denom };
         if best.as_ref().is_none_or(|b| cand.rel_err < b.rel_err) {
             best = Some(cand);
         }
     }
-    model.write_img_embeds(&img0); // restore
-    Report { checks: vec![best.unwrap()] }
+    best.expect("at least one direction")
+}
+
+/// The hybrid Qwen3.5 decoder's embedding splice over SEVERAL disjoint image
+/// runs (`Qwen35::enable_mm_splices`) - the shape a sliced image or several
+/// images produce, with text rows between runs. The runs are given out of
+/// row order so the concatenation order of `write_img_embeds` /
+/// `read_d_img_embeds` is exercised, and the image rows carry IGNORE targets
+/// so their influence on the loss is through the GDN recurrence and the
+/// attention layer only. Returns a one-entry report ("img_embeds").
+pub fn check_qwen35_splices(seed: u64) -> Report {
+    use model::IGNORE;
+    let mut model = qwen35_gradcheck_harness(seed);
+    let d = model.cfg.d_model as usize;
+    let runs = [(7u32, 3u32), (1, 2), (5, 1)];
+    model.enable_mm_splices(&runs);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 29).collect();
+    let mut y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 29).collect();
+    for &(row0, n) in &runs {
+        for r in row0..row0 + n {
+            y[r as usize] = IGNORE;
+        }
+    }
+    model.set_batch(&x, &y);
+    let n_rows: u32 = runs.iter().map(|r| r.1).sum();
+    let mut rng = Rng::new(seed ^ 0xA11CE);
+    let img0: Vec<f32> = (0..n_rows as usize * d).map(|_| rng.next_f32() - 0.5).collect();
+    model.write_img_embeds(&img0);
+    model.zero_grads();
+    let _ = model.forward();
+    model.backward();
+    let g = model.read_d_img_embeds();
+    let check = input_directional_check("img_embeds", &img0, &g, &mut rng, |v| {
+        model.write_img_embeds(v);
+        model.forward()
+    });
+    Report { checks: vec![check] }
 }
 
 /// Build a tiny sparse-MoE Trainer, set a fixed batch, and gradient-check it
@@ -2114,6 +2159,16 @@ mod tests {
         let report = check_vlm_splice(7);
         report.print();
         assert_grad_gate(&report, "VLM splice");
+    }
+
+    #[test]
+    fn qwen35_multi_run_splice_grad_matches_finite_differences() {
+        if brain_testutil::gpu_tests_skipped() {
+            return;
+        }
+        let report = check_qwen35_splices(7);
+        report.print();
+        assert_grad_gate(&report, "qwen35 splice runs");
     }
 
     #[test]

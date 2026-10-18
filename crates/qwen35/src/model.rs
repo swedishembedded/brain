@@ -1109,17 +1109,10 @@ pub struct Qwen35 {
     adapter_rows: Cell<u32>,
 
     // ---- vision-language embedding splice seam (see `crate::vl::Qwen35Vl`) ------
-    /// `Some((row0, n_rows))` once [`Self::enable_mm_splice`] has run: the
-    /// image-placeholder rows `run_forward` overwrites and `backward` routes
-    /// to [`Self::read_d_img_embeds`]. `None` (the default) makes both a
-    /// pure no-op, matching `qwen35moe::model::Qwen35`'s own splice seam.
-    mm_splice: Cell<Option<(u32, u32)>>,
-    /// `[n_rows*d_model]` : the projected image tokens to splice in on the
-    /// next `forward()`. 1-element dummy until `enable_mm_splice` resizes it.
-    img_embeds: DeviceBuffer,
-    /// `[n_rows*d_model]` : gradient of the spliced image tokens after
-    /// `backward()`. 1-element dummy until `enable_mm_splice` resizes it.
-    d_img_embeds: DeviceBuffer,
+    /// The image-placeholder runs `run_forward` overwrites and `backward`
+    /// routes to [`Self::read_d_img_embeds`], set by
+    /// [`Self::enable_mm_splices`]. Empty (the default) makes both a no-op.
+    splice: model::vlm::SpliceRuns,
 
     // ---- single-sequence incremental decode (see `Self::step`) ------------
     // Mirrors `qwen35moe::model::Qwen35`'s own decode-cache fields exactly
@@ -1803,9 +1796,6 @@ impl Qwen35 {
         let mtp_logits = gpu.storage(if cfg.mtp { n * cfg.vocab as u64 } else { 1 });
         let mtp_ce_buf = gpu.storage(if cfg.mtp { n } else { 1 });
 
-        let img_embeds = gpu.storage(1);
-        let d_img_embeds = gpu.storage(1);
-
         // Single-sequence incremental decode state - see `Qwen35::decode`.
         // `dec_cap = t`: this pass's decode capacity is this instance's own
         // fixed prefill length (see `dec_cap`'s own doc).
@@ -1860,9 +1850,7 @@ impl Qwen35 {
             lora_out,
             adapter_bank: RefCell::new(None),
             adapter_rows: Cell::new(0),
-            mm_splice: Cell::new(None),
-            img_embeds,
-            d_img_embeds,
+            splice: model::vlm::SpliceRuns::none(),
             dec_pos: Cell::new(0),
             dec_cap: t,
             decode,
@@ -2319,32 +2307,33 @@ impl Qwen35 {
     /// [`Self::read_d_img_embeds`] (zeroing them in the residual grad first so
     /// `EMB_BWD` never trains the image-placeholder token id). `run_forward`/
     /// `backward` already build their step lists fresh on every call, so
-    /// enabling the splice is pure buffer allocation + a flag - call once
-    /// after construction, before the first `forward()`. Mirrors
-    /// `qwen35moe::model::Qwen35::enable_mm_splice` exactly.
+    /// enabling the splice is pure buffer allocation - call once after
+    /// construction, before the first `forward()`.
     pub fn enable_mm_splice(&mut self, row0: u32, n_rows: u32) {
-        let sz = (n_rows * self.cfg.d_model) as u64;
-        self.img_embeds = self.gpu.storage(sz);
-        self.d_img_embeds = self.gpu.storage(sz);
-        self.mm_splice.set(Some((row0, n_rows)));
+        self.enable_mm_splices(&[(row0, n_rows)]);
     }
 
-    /// Write the projected image tokens `[n_rows, d_model]` (row-major) to
-    /// splice into the residual stream on the next `forward()`.
+    /// [`Self::enable_mm_splice`] for a prompt with several image runs (several
+    /// images, or the views of a sliced one): each `(row0, n_rows)` run is
+    /// overwritten by its own rows. [`Self::write_img_embeds`] takes the runs'
+    /// rows concatenated in this order and [`Self::read_d_img_embeds`] returns
+    /// their gradient the same way. The runs must not overlap.
+    pub fn enable_mm_splices(&mut self, runs: &[(u32, u32)]) {
+        self.splice = model::vlm::SpliceRuns::new(&self.gpu, runs, self.cfg.d_model);
+    }
+
+    /// Write the projected image tokens of every run (`[sum n_rows, d_model]`,
+    /// row-major, in run order) to splice into the residual stream on the next
+    /// `forward()`.
     pub fn write_img_embeds(&self, data: &[f32]) {
-        self.gpu.write_f32(&self.img_embeds, data);
+        self.splice.write(&self.gpu, data);
     }
 
-    /// Number of spliced image-embedding elements (`n_rows*d_model`); 0 if off.
-    fn img_numel(&self) -> usize {
-        self.mm_splice.get().map_or(0, |(_, n)| (n * self.cfg.d_model) as usize)
-    }
-
-    /// Read the gradient of the spliced image embeddings after `backward()` -
-    /// feeds the vision tower/connector backward. Requires a `new_train_on`
-    /// build (see [`Self::backward`]'s splice-gradient step).
+    /// Read the gradient of the spliced image embeddings after `backward()`,
+    /// in run order - feeds the vision tower/connector backward. Requires a
+    /// `new_train_on` build (see [`Self::backward`]'s splice-gradient step).
     pub fn read_d_img_embeds(&self) -> Vec<f32> {
-        self.gpu.read(&self.d_img_embeds, self.img_numel())
+        self.splice.read_grad(&self.gpu)
     }
 
     /// Overwrite the M-RoPE `cos`/`sin` tables (`[b*t, rotary_dim/2]`
@@ -3089,8 +3078,8 @@ impl Qwen35 {
             // tokens (see `Self::enable_mm_splice`'s doc). No-op unless
             // enabled. Only meaningful on the embed stage (operates on
             // `res[0]`, right after the gather above).
-            if let Some((row0, n_rows)) = self.mm_splice.get() {
-                g.submit(&[], &[model::vlm::splice_fwd(g, SPLICE, &self.img_embeds, &res[0], row0 * d, n_rows * d)]);
+            if !self.splice.is_empty() {
+                g.submit(&[], &self.splice.fwd(g, SPLICE, &res[0], 0, n));
             }
         }
 
@@ -3514,8 +3503,8 @@ impl Qwen35 {
             // a spurious `tok.weight` gradient from those rows. No-op unless
             // `enable_mm_splice` was called. Only meaningful on the embed
             // stage (operates on `res[0]`/`dres[0]`).
-            if let Some((row0, n_rows)) = self.mm_splice.get() {
-                g.submit(&[], &[model::vlm::splice_bwd(g, SPLICE_BWD, &d_res_next, &self.d_img_embeds, row0 * d, n_rows * d)]);
+            if !self.splice.is_empty() {
+                g.submit(&[], &self.splice.bwd(g, SPLICE_BWD, &d_res_next));
             }
 
             // ---- embedding backward (tok.weight) ----

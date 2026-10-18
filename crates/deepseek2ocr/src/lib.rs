@@ -100,8 +100,8 @@
 //! * **Stages exchange host buffers.** Each sub-model owns its own `Gpu` with
 //!   its own pipeline list, so SAM → CLIP → projector → decoder round-trip
 //!   through `Vec<f32>` -- the same arrangement `crates/qwenvl` uses. A
-//!   same-device fast path is additive (the splice seam already exposes
-//!   `img_embeds_buf`/`d_img_embeds_buf` for it) and is not built here.
+//!   same-device fast path is additive (`model::vlm::SpliceRuns` exposes
+//!   each run's buffers for it) and is not built here.
 //! * **The composed decode loop has no multimodal oracle.** The text decoder's
 //!   greedy loop is matched token for token against llama.cpp
 //!   (`crates/deepseekv2/tests/generate.rs`); the image+decoder loop is gated

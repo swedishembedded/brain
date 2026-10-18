@@ -553,16 +553,13 @@ pub struct DeepseekV2 {
     targets: DeviceBuffer,
     ce_grad_uni: DeviceBuffer,
 
-    /// Vision-language embedding splice, `Some((row0, n_rows))` once
+    /// Vision-language embedding splice, one run once
     /// [`DeepseekV2::enable_mm_splice`] has been called. The forward overwrites
-    /// residual rows `[row0, row0 + n_rows)` with `img_embeds` right after the
-    /// token-embedding gather; the backward moves those rows' gradient into
-    /// `d_img_embeds` and ZEROES them in `dres[0]` before `emb_bwd`, so the
-    /// placeholder token's embedding row is never trained on the image. Same
-    /// seam, same two kernels and same order as `crates/qwen3`.
-    mm_splice: Cell<Option<(u32, u32)>>,
-    img_embeds: DeviceBuffer,
-    d_img_embeds: DeviceBuffer,
+    /// the run's residual rows with the image rows right after the
+    /// token-embedding gather; the backward moves those rows' gradient out and
+    /// ZEROES them in `dres[0]` before `emb_bwd`, so the placeholder token's
+    /// embedding row is never trained on the image.
+    splice: model::vlm::SpliceRuns,
 
     res: Vec<DeviceBuffer>,
     dres: Vec<DeviceBuffer>,
@@ -905,9 +902,7 @@ impl DeepseekV2 {
             tokens: gpu.storage(n),
             targets: gpu.storage(n),
             ce_grad_uni: gpu.uniform_dynamic(4),
-            mm_splice: Cell::new(None),
-            img_embeds: gpu.storage(1),
-            d_img_embeds: gpu.storage(1),
+            splice: model::vlm::SpliceRuns::none(),
             res,
             dres,
             layers,
@@ -1106,9 +1101,7 @@ impl DeepseekV2 {
             s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
             // Vision-language splice: overwrite the image-placeholder rows of the
             // freshly-gathered residual stream with the projected image tokens.
-            if let Some((row0, n_rows)) = self.mm_splice.get() {
-                s.push(model::vlm::splice_fwd(&self.gpu, SPLICE, &self.img_embeds, &self.res[0], row0 * d, n_rows * d));
-            }
+            s.extend(self.splice.fwd(&self.gpu, SPLICE, &self.res[0], 0, n));
         }
 
         for l in self.shard.start..self.shard.end {
@@ -1381,9 +1374,7 @@ impl DeepseekV2 {
             // Move the image rows' residual grad into `d_img_embeds` and ZERO
             // them in dres[0] BEFORE emb_bwd, so the scatter below never
             // trains the placeholder token's embedding row.
-            if let Some((row0, n_rows)) = self.mm_splice.get() {
-                s.push(model::vlm::splice_bwd(&self.gpu, SPLICE_BWD, &self.dres[0], &self.d_img_embeds, row0 * d, n_rows * d));
-            }
+            s.extend(self.splice.bwd(&self.gpu, SPLICE_BWD, &self.dres[0]));
             // untied head: only the embedding path writes tok.weight
             if self.trainable("tok.weight") {
                 s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("tok.weight")], &[n, d, v], v * d));
@@ -1472,7 +1463,7 @@ impl DeepseekV2 {
         // The rebuilt tape carries the splice too, so a short sequence must still
         // CONTAIN the image run -- otherwise `splice_fwd` writes past `res[0]`'s
         // live rows into a region no layer reads, silently dropping the image.
-        if let Some((row0, n_rows)) = self.mm_splice.get() {
+        if let Some((row0, n_rows)) = self.splice_run() {
             assert!(row0 + n_rows <= t_use, "logits_all over {t_use} tokens does not contain the spliced image rows [{row0}, {})", row0 + n_rows);
         }
         let ignore = vec![IGNORE; t_use as usize];
@@ -1813,18 +1804,9 @@ impl DeepseekV2 {
         // spliced run, so a round either contains the whole thing or none of
         // it; a partial overlap here is a `chunk_plan` bug, not a case to
         // paper over.
-        if let Some((row0, n_rows)) = self.mm_splice.get() {
-            if row0 >= pos_start && row0 + n_rows <= pos_start + n {
-                s.push(model::vlm::splice_fwd(g, SPLICE, &self.img_embeds, &dec.res[0], (row0 - pos_start) * d, n_rows * d));
-            } else {
-                assert!(
-                    row0 + n_rows <= pos_start || row0 >= pos_start + n,
-                    "deepseekv2 decode_rows: round [{pos_start}, {}) partially overlaps the spliced run [{row0}, {}) - chunk_plan should never produce this",
-                    pos_start + n,
-                    row0 + n_rows
-                );
-            }
-        }
+        // `SpliceRuns::fwd` skips a run outside the round and refuses one that
+        // crosses its edge.
+        s.extend(self.splice.fwd(g, SPLICE, &dec.res[0], pos_start, n));
 
         for l in 0..c.n_layers() as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
@@ -1929,7 +1911,7 @@ impl DeepseekV2 {
     /// asserts the invariant this produces (a round either fully contains the
     /// splice or has none of it) rather than trusting this function silently.
     fn chunk_plan(&self, total: u32) -> Vec<(u32, u32)> {
-        let splice = self.mm_splice.get();
+        let splice = self.splice_run();
         if let Some((row0, n_rows)) = splice {
             assert!(row0 + n_rows <= total, "deepseekv2 chunk_plan: the spliced run [{row0}, {}) does not fit in {total} tokens", row0 + n_rows);
             assert!(
@@ -2122,10 +2104,7 @@ impl DeepseekV2 {
             let n = self.b * self.t;
             assert!(row0 + n_rows <= n, "splice rows [{row0}, {}) exceed the {n}-row batched residual stream", row0 + n_rows);
         }
-        let sz = (n_rows * self.cfg.d_model()) as u64;
-        self.img_embeds = self.gpu.storage(sz);
-        self.d_img_embeds = self.gpu.storage(sz);
-        self.mm_splice.set(Some((row0, n_rows)));
+        self.splice = model::vlm::SpliceRuns::new(&self.gpu, &[(row0, n_rows)], self.cfg.d_model());
         if self.batched {
             self.fwd_steps = self.build_forward(self.b, self.t);
             if !self.bwd_steps.is_empty() {
@@ -2134,36 +2113,20 @@ impl DeepseekV2 {
         }
     }
 
-    /// Number of spliced image-embedding elements (`n_rows * d_model`); 0 if off.
-    fn img_numel(&self) -> usize {
-        self.mm_splice.get().map_or(0, |(_, n)| (n * self.cfg.d_model()) as usize)
+    /// The spliced run, if any (this decoder takes one).
+    fn splice_run(&self) -> Option<(u32, u32)> {
+        self.splice.runs().first().copied()
     }
 
     /// Write the projected image tokens `[n_rows, d_model]` (row-major).
     pub fn write_img_embeds(&self, data: &[f32]) {
-        assert_eq!(data.len(), self.img_numel(), "img_embeds size mismatch (enable_mm_splice first?)");
-        self.gpu.write_f32(&self.img_embeds, data);
+        self.splice.write(&self.gpu, data);
     }
 
     /// The spliced image embeddings' gradient after [`Self::backward`] -- what a
     /// vision connector/encoder backward consumes.
     pub fn read_d_img_embeds(&self) -> Vec<f32> {
-        self.gpu.read(&self.d_img_embeds, self.img_numel())
-    }
-
-    /// The splice INPUT buffer, for a vision tower sharing THIS decoder's [`Gpu`]
-    /// -- write into it with a `Step` and the embedding never leaves the device.
-    /// Valid only after [`Self::enable_mm_splice`]; before that it is the
-    /// 1-float placeholder the constructor allocates.
-    pub fn img_embeds_buf(&self) -> &DeviceBuffer {
-        &self.img_embeds
-    }
-
-    /// The splice GRADIENT buffer -- the device-side counterpart of
-    /// [`Self::read_d_img_embeds`]. Same validity rule as
-    /// [`Self::img_embeds_buf`].
-    pub fn d_img_embeds_buf(&self) -> &DeviceBuffer {
-        &self.d_img_embeds
+        self.splice.read_grad(&self.gpu)
     }
 
     // ---- per-stage taps (what a composite's parity test compares) ----
