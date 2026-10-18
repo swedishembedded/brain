@@ -219,6 +219,46 @@ fn matmul_i8_dyn_qpg2_default_is_bit_identical_to_pre_qpg_kernel() {
     assert_eq!(got_new, got_orig, "matmul_i8_dyn QPG=2 (default) diverged from the pre-QPG kernel text -- not bit-identical");
 }
 
+// ---- Gate (a'): the TM x TN register-block knobs change speed, never bits ----
+
+/// A different per-thread register block re-tiles the workgroup (BM = 16*TM,
+/// BN = 16*TN) but must not change a single output bit: the group sums are
+/// exact integers and the cross-group fold order is the same. Shapes are
+/// ragged in both dimensions and span several k-chunks, so tile-edge guards
+/// of the narrower tiles are exercised, and the result is also held to the
+/// host oracle.
+#[test]
+fn matmul_i8_dyn_register_block_variants_are_bit_identical_to_default_tile() {
+    let shapes: &[(usize, usize, usize)] = &[(130, 352, 200), (1, 32, 3), (129, 96, 65)];
+    for &(tm, tn) in &[(8u32, 4u32), (4, 4), (8, 2)] {
+        let (name, src) = interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("TM", tm), ("TN", tn)]).unwrap();
+        let g = Gpu::new(&[("matmul_i8_dyn", kernels::MATMUL_I8_DYN), (name, src)]);
+        for (i, &(m, k, n)) in shapes.iter().enumerate() {
+            let (codes_x, xq, sx) = upload_activation(&g, 0xA11_0000 + i as u64, m, k);
+            let (codes_w, wq, sw) = upload_weight(&g, 0xA11_1111 + i as u64, n, k, 32);
+            let params = [m as u32, (k / 4) as u32, n as u32];
+            let default_tiles = (m as u32).div_ceil(128) * (n as u32).div_ceil(128);
+            let tiles = (m as u32).div_ceil(16 * tm) * (n as u32).div_ceil(16 * tn);
+
+            let out_default = g.storage((m * n) as u64);
+            let out_variant = g.storage((m * n) as u64);
+            g.submit(
+                &[],
+                &[
+                    g.dispatch(idx(&g, "matmul_i8_dyn"), &[&xq, &wq, &sx, &sw, &out_default], &params, gpu_core::Dispatch::Workgroups(default_tiles)),
+                    g.dispatch(idx(&g, name), &[&xq, &wq, &sx, &sw, &out_variant], &params, gpu_core::Dispatch::Workgroups(tiles)),
+                ],
+            );
+            let got_default = g.read(&out_default, m * n);
+            let got_variant = g.read(&out_variant, m * n);
+            assert_eq!(got_variant, got_default, "{name} diverged from the default tile at m={m} k={k} n={n}");
+
+            let want = host_oracle(&codes_x, &g.read(&sx, m), &codes_w, &g.read(&sw, n * (k / 32)), m, k, n, 32);
+            assert_matches_oracle(&format!("{name} m={m} k={k} n={n}"), &got_variant, &want);
+        }
+    }
+}
+
 // ---- Gate (b): every group=16 variant against the int8-code host oracle ----
 
 /// `matmul_i8_dyn#QPG=1` -- group=16 (Q6_K's shape). Same tile-spanning
