@@ -19,7 +19,6 @@
 //! gated kernel work, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use gpu_core::Gpu;
 use model::block;
 
 static KERNELS: &[(&str, &str)] =
@@ -36,7 +35,7 @@ fn tokens(n: u32, table: u32, seed: u32) -> Vec<u32> {
 
 #[test]
 fn the_compact_scatter_is_bit_identical_to_the_reference() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (kref, kuniq) = (gpu.kernel_index("emb_bwd").unwrap(), gpu.kernel_index("emb_bwd_uniq").unwrap());
 
     for &(rows, d, table) in SHAPES {
@@ -83,7 +82,7 @@ fn the_compact_scatter_is_bit_identical_to_the_reference() {
 /// work than the reference - a caller whose lookups cover the whole table.
 #[test]
 fn the_selector_keeps_the_reference_when_every_row_is_looked_up() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let ids = block::EmbBwdIds::resolve(&gpu, gpu.kernel_index("emb_bwd").unwrap());
     assert!(ids.emb_bwd_uniq.is_some(), "emb_bwd_uniq did not resolve");
 
