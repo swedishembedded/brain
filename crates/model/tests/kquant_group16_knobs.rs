@@ -41,6 +41,15 @@ use kernels::template::interned;
 /// second `.wgsl` file.
 const ORIGINAL_MATMUL_I8_DYN: &str = include_str!("fixtures/matmul_i8_dyn_pre_qpg.wgsl.snapshot");
 
+/// A handle on this binary's shared test device for `kernels`. Tests running
+/// side by side must share one device: several devices created and destroyed
+/// concurrently in one process deadlock the driver. A kernel list built at run
+/// time (an interned variant) is given the `'static` lifetime the pool keys on;
+/// a test leaks one small slice.
+fn dev(kernels: &[(&'static str, &'static str)]) -> Gpu {
+    gpu_core::testgpu::dev(Box::leak(kernels.to_vec().into_boxed_slice()))
+}
+
 fn idx(g: &Gpu, name: &str) -> usize {
     g.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"))
 }
@@ -197,7 +206,7 @@ fn upload_weight(g: &Gpu, seed: u64, n: usize, k: usize, group: usize) -> (Vec<i
 #[test]
 fn matmul_i8_dyn_qpg2_default_is_bit_identical_to_pre_qpg_kernel() {
     let kernels: &[(&str, &str)] = &[("matmul_i8_dyn", kernels::MATMUL_I8_DYN), ("matmul_i8_dyn_orig", ORIGINAL_MATMUL_I8_DYN)];
-    let g = Gpu::new(kernels);
+    let g = dev(kernels);
 
     let (m, k, n) = (160usize, 256usize, 176usize);
     let (_, xq, sx) = upload_activation(&g, 0xD11_0000, m, k);
@@ -232,7 +241,7 @@ fn matmul_i8_dyn_register_block_variants_are_bit_identical_to_default_tile() {
     let shapes: &[(usize, usize, usize)] = &[(130, 352, 200), (1, 32, 3), (129, 96, 65)];
     for &(tm, tn) in &[(8u32, 4u32), (4, 4), (8, 2)] {
         let (name, src) = interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("TM", tm), ("TN", tn)]).unwrap();
-        let g = Gpu::new(&[("matmul_i8_dyn", kernels::MATMUL_I8_DYN), (name, src)]);
+        let g = dev(&[("matmul_i8_dyn", kernels::MATMUL_I8_DYN), (name, src)]);
         for (i, &(m, k, n)) in shapes.iter().enumerate() {
             let (codes_x, xq, sx) = upload_activation(&g, 0xA11_0000 + i as u64, m, k);
             let (codes_w, wq, sw) = upload_weight(&g, 0xA11_1111 + i as u64, n, k, 32);
@@ -267,7 +276,7 @@ fn matmul_i8_dyn_register_block_variants_are_bit_identical_to_default_tile() {
 #[test]
 fn matmul_i8_dyn_qpg1_group16_matches_host_oracle() {
     let (name, src) = interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap();
-    let g = Gpu::new(&[(name, src)]);
+    let g = dev(&[(name, src)]);
 
     let (m, k, n) = (160usize, 256usize, 176usize);
     let (codes_x, xq, sx) = upload_activation(&g, 0x671_0000, m, k);
@@ -289,7 +298,7 @@ fn matmul_i8_dyn_qpg1_group16_matches_host_oracle() {
 #[test]
 fn matmul_i8_gemv_wpg4_group16_matches_host_oracle() {
     let (name, src) = interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap();
-    let g = Gpu::new(&[(name, src)]);
+    let g = dev(&[(name, src)]);
 
     let (m, k, n) = (24usize, 256usize, 48usize);
     let (codes_x, xq, sx) = upload_activation(&g, 0x674_0000, m, k);
@@ -314,7 +323,7 @@ fn matmul_i8_gemv_wpg4_group16_matches_host_oracle() {
 #[test]
 fn matmul_i8_gemv_reg_wpg4_group16_matches_host_oracle() {
     let (name, src) = interned("matmul_i8_gemv_reg", kernels::MATMUL_I8_GEMV_REG, &[("WPG", 4)]).unwrap();
-    let g = Gpu::new(&[(name, src)]);
+    let g = dev(&[(name, src)]);
 
     let (m, k, n) = (24usize, 256usize, 48usize);
     let (codes_x, xq, sx) = upload_activation(&g, 0x675_0000, m, k);
@@ -336,7 +345,7 @@ fn matmul_i8_gemv_reg_wpg4_group16_matches_host_oracle() {
 #[test]
 fn moe_linear_gated_i8_wpg4_group16_matches_host_oracle() {
     let (name, src) = interned("moe_linear_gated_i8", kernels::MOE_LINEAR_GATED_I8, &[("WPG", 4)]).unwrap();
-    let g = Gpu::new(&[(name, src)]);
+    let g = dev(&[(name, src)]);
 
     let (m, k, n) = (20usize, 256usize, 36usize);
     let (codes_x, xq, sx) = upload_activation(&g, 0x676_0000, m, k);
