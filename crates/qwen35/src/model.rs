@@ -1426,7 +1426,11 @@ impl Qwen35 {
     /// backend" the way a test comparing CPU-JIT vs GPU behaviour at the
     /// same tier needs (`Qwen35::new_on`/`new_on_i8` already had this
     /// property; a bare `Dtype`-parameterised tier deserves the same one).
-    pub fn new_on_dt(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, tier: &TierPolicy) -> Qwen35 {
+    ///
+    /// `init` is any [`checkpoint::TensorSource`] - an in-memory map or a
+    /// streaming checkpoint source - so a model loads tensor by tensor with no
+    /// whole-model host copy.
+    pub fn new_on_dt(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &dyn checkpoint::TensorSource, tier: &TierPolicy) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
         Qwen35::new_impl_on(gpu, cfg, b, t, init, tier, None, shard)
     }

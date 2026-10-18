@@ -207,8 +207,15 @@ fn classify_layer_leaf(leaf: &str, ty: LayerType) -> Option<String> {
     }
 }
 
-pub(crate) fn classify(name: &str, cfg: &Qwen35Config) -> Result<Option<String>, String> {
+/// `foreign` names tensor-name prefixes another component of a multimodal
+/// checkpoint owns (a wrapper's vision tower or projector); those tensors are
+/// out of scope here exactly like `mtp.`/`model.visual.`, and their owner
+/// accounts for them. Everything else must classify or is an error.
+pub(crate) fn classify(name: &str, cfg: &Qwen35Config, foreign: &[&str]) -> Result<Option<String>, String> {
     if name.starts_with("mtp.") || name.starts_with("model.visual.") || name == "model.visual" {
+        return Ok(None);
+    }
+    if foreign.iter().any(|p| name.starts_with(p)) {
         return Ok(None);
     }
     if name == "model.language_model.embed_tokens.weight" {
@@ -257,7 +264,7 @@ pub fn import_from_tensors(raw: Tensors, cfg: &Qwen35Config) -> Result<HashMap<S
 
     let mut renamed: HashMap<String, Vec<f32>> = HashMap::with_capacity(raw.len());
     for (name, (_, data)) in raw {
-        if let Some(canon) = classify(&name, cfg)? {
+        if let Some(canon) = classify(&name, cfg, &[])? {
             if renamed.insert(canon.clone(), data).is_some() {
                 return Err(format!("import: two source tensors mapped onto {canon}"));
             }
@@ -333,7 +340,7 @@ pub fn import_layer(reader: &checkpoint::mmap::MmapSafetensors, cfg: &Qwen35Conf
 
     let mut renamed: HashMap<String, Vec<f32>> = HashMap::with_capacity(raw.len());
     for (name, (_, data)) in raw {
-        if let Some(canon) = classify(&name, cfg)? {
+        if let Some(canon) = classify(&name, cfg, &[])? {
             if renamed.insert(canon.clone(), data).is_some() {
                 return Err(format!("import_layer: two source tensors mapped onto {canon}"));
             }
@@ -638,8 +645,8 @@ mod tests {
     #[test]
     fn embed_tokens_classifies_at_its_real_nested_name_not_the_unverified_guess() {
         let cfg = Qwen35Config::tiny();
-        assert_eq!(classify("model.language_model.embed_tokens.weight", &cfg).unwrap(), Some("tok.weight".to_string()));
-        assert!(classify("model.embed_tokens.weight", &cfg).is_err(), "the old unverified name must no longer classify as anything");
+        assert_eq!(classify("model.language_model.embed_tokens.weight", &cfg, &[]).unwrap(), Some("tok.weight".to_string()));
+        assert!(classify("model.embed_tokens.weight", &cfg, &[]).is_err(), "the old unverified name must no longer classify as anything");
     }
 
     #[test]

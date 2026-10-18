@@ -78,6 +78,15 @@ impl Qwen35Source {
     /// weight's scale plane has the wrong shape. `mtp.*` and `model.visual.*`
     /// tensors are out of scope here exactly as in [`crate::import`].
     pub fn open_dir(dir: &Path, cfg: &Qwen35Config, block: usize) -> Result<Qwen35Source, String> {
+        Qwen35Source::open_dir_with(dir, cfg, block, &[])
+    }
+
+    /// [`Self::open_dir`] over a checkpoint that also holds another
+    /// component's tensors: names under a `foreign` prefix are skipped (their
+    /// owner validates them), every other name is held to the same two-way
+    /// coverage. A multimodal wrapper around this decoder passes its vision
+    /// tower and projector prefixes here.
+    pub fn open_dir_with(dir: &Path, cfg: &Qwen35Config, block: usize, foreign: &[&str]) -> Result<Qwen35Source, String> {
         let files = shard_files(dir)?;
         let mut shards = Vec::with_capacity(files.len());
         for f in &files {
@@ -91,12 +100,12 @@ impl Qwen35Source {
                 if let Some(base) = name.strip_suffix("_scale_inv") {
                     // A scale plane belongs to its weight: out-of-scope weights
                     // (mtp.*, model.visual.*) take their scales with them.
-                    if classify(base, cfg)?.is_some() {
+                    if classify(base, cfg, foreign)?.is_some() {
                         scales.insert(base.to_string(), (si, name.clone()));
                     }
                     continue;
                 }
-                let Some(canon) = classify(name, cfg)? else { continue };
+                let Some(canon) = classify(name, cfg, foreign)? else { continue };
                 let entry = Entry { shard: si, hf_name: name.clone(), fp8: None, fold_one: is_plain_rmsnorm_weight(&canon) };
                 if entries.insert(canon.clone(), entry).is_some() {
                     return Err(format!("qwen35 source: two source tensors mapped onto {canon}"));

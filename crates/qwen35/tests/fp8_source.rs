@@ -338,6 +338,34 @@ fn a_checkpoint_that_disagrees_with_the_config_is_refused_by_name() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A multimodal wrapper whose own components (a vision tower, a projector)
+/// sit beside the decoder in one checkpoint: their tensors are refused unless
+/// the caller names their prefixes as owned elsewhere, and naming them never
+/// loosens the decoder's own coverage.
+#[test]
+fn tensors_owned_by_another_component_are_refused_unless_declared_foreign() {
+    let cfg = fixture_cfg();
+    let dir = write_checkpoint(&cfg, "foreign", None);
+    let index = dir.join("model.safetensors.index.json");
+    let mut idx: serde_json::Value = serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+    let extra = [("model.vision_tower.post_layernorm.weight", 4usize), ("model.merger.mlp.0.linear_1.bias", 6)];
+    let raws: Vec<Raw> = extra.iter().map(|(n, k)| Raw { name: (*n).into(), dtype: "BF16", shape: vec![*k], bytes: vec![0; k * 2] }).collect();
+    write_st(&dir.join("vision.safetensors"), &raws);
+    for (n, _) in extra {
+        idx["weight_map"][n] = serde_json::json!("vision.safetensors");
+    }
+    std::fs::write(&index, serde_json::to_vec(&idx).unwrap()).unwrap();
+
+    let err = Qwen35Source::open_dir(&dir, &cfg, BLOCK).err().expect("an undeclared foreign tensor must be refused");
+    assert!(err.contains("model.vision_tower.post_layernorm.weight") || err.contains("model.merger."), "{err}");
+    let foreign = ["model.vision_tower.", "model.merger."];
+    let src = Qwen35Source::open_dir_with(&dir, &cfg, BLOCK, &foreign).expect("declared foreign prefixes are skipped");
+    assert!(src.names().iter().all(|n| !n.starts_with("model.")), "a foreign tensor leaked into the decoder's names");
+    let narrow = Qwen35Config { intermediate_size: cfg.intermediate_size + 1, ..cfg.clone() };
+    assert!(Qwen35Source::open_dir_with(&dir, &narrow, BLOCK, &foreign).is_err(), "declaring foreign prefixes must not relax decoder coverage");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn a_model_built_from_the_lazy_source_equals_one_built_from_the_eager_map() {
     use qwen35::model::Qwen35;
