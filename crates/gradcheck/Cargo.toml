@@ -18,6 +18,7 @@ brain-qwen35moe.workspace = true
 # `check_qwen35` (src/lib.rs) - qwen35moe's dense sibling (same hybrid GDN/GQA
 # mixers, no MoE).
 brain-qwen35.workspace = true
+brain-minicpmv.workspace = true
 brain-lfm2.workspace = true
 brain-decide.workspace = true
 brain-glmdsa.workspace = true

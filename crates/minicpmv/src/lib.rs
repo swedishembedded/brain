@@ -19,6 +19,8 @@
 //!   video placeholder layout.
 //! * [`vision`]: the NaViT tower, the window merger and the merger, composed
 //!   from `model::vit`'s blocks.
+//! * [`vision_train`]: the vision side's backward (checkpointed) and LoRA on
+//!   the tower's linears.
 //! * [`model`]: the composite - tower and `brain-qwen35` paged decoder on one
 //!   device, prefilled from the spliced embeddings.
 //!
@@ -36,6 +38,7 @@ pub mod prompt;
 pub mod spec;
 pub mod video;
 pub mod vision;
+pub mod vision_train;
 
 pub use config::{Downsample, MiniCpmVConfig, VisionConfig};
 pub use model::{GenOptions, MiniCpmV};

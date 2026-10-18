@@ -33,6 +33,9 @@ check!(sam2_backward, gradcheck::check_sam2, "check_sam2");
 check!(arcface_backward, gradcheck::check_arcface, "check_arcface");
 check!(vqgan_backward, gradcheck::check_vqgan, "check_vqgan");
 check!(clip_backward, gradcheck::check_clip, "check_clip");
+check!(minicpmv_vision_backward, gradcheck::check_minicpmv_vision, "check_minicpmv_vision");
+check!(minicpmv_vision_4x_backward, gradcheck::check_minicpmv_vision_4x, "check_minicpmv_vision_4x");
+check!(minicpmv_vision_lora_backward, gradcheck::check_minicpmv_vision_lora, "check_minicpmv_vision_lora");
 check!(vocoder_backward, gradcheck::check_vocoder, "check_vocoder");
 check!(dit_backward, gradcheck::check_dit, "check_dit");
 // `check_dit` builds its trainer on `backend-cpu` unconditionally, so it can

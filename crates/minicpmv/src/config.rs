@@ -117,6 +117,24 @@ fn square_or(v: &Value, key: &str, default: u32) -> Result<u32, String> {
 }
 
 impl MiniCpmVConfig {
+    /// A tiny configuration with every structural feature of the released
+    /// one (window merger after a middle layer, 2x2 merger, ragged views) at
+    /// dimensions a finite-difference check can afford, over
+    /// `Qwen35Config::tiny()`. The width is a multiple of 64, as the released
+    /// 1152 is: a view's rows are bound at an offset into the packed
+    /// sequence, and the device's storage-binding alignment holds for any
+    /// view position only then.
+    pub fn tiny() -> MiniCpmVConfig {
+        MiniCpmVConfig {
+            vision: VisionConfig { n_layers: 3, hidden: 64, heads: 2, mlp: 40, patch: 2, pos_side: 6, eps: 1e-6, insert_layer_id: 1, window: 2 },
+            text: Qwen35Config::tiny(),
+            merge: 2,
+            image_token_id: 0,
+            video_token_id: 1,
+            downsample: Downsample::X16,
+        }
+    }
+
     /// Read `dir/config.json`.
     pub fn from_dir(dir: &Path) -> Result<MiniCpmVConfig, String> {
         let path = dir.join("config.json");

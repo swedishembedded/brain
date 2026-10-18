@@ -54,6 +54,10 @@ pub mod controlnet;
 pub use controlnet::{check_controlnet, check_controlnet_elementwise};
 
 pub mod clip;
+/// `check_minicpmv_vision{,_4x,_lora}` - MiniCPM-V's NaViT tower, window
+/// merger, merger and tower LoRA (`minicpmv::vision_train`).
+pub mod minicpmv;
+pub use minicpmv::{check_minicpmv_vision, check_minicpmv_vision_4x, check_minicpmv_vision_lora};
 pub use clip::check_clip;
 
 pub mod t5;

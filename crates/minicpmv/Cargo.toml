@@ -18,6 +18,7 @@ brain-imaging.workspace = true
 brain-kernels.workspace = true
 brain-model.workspace = true
 brain-modelstore.workspace = true
+brain-optim.workspace = true
 brain-paramstore.workspace = true
 brain-qwen3.workspace = true
 brain-qwen35.workspace = true

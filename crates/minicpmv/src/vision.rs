@@ -78,6 +78,60 @@ impl View {
     }
 }
 
+/// The merger's LayerNorm epsilon (the reference's `nn.LayerNorm(..., eps=1e-6)`).
+pub(crate) const MERGER_EPS: f32 = 1e-6;
+
+/// The window merger's activations.
+pub(crate) struct WmActs {
+    pub perm: DeviceBuffer,
+    pub ones: DeviceBuffer,
+    pub xp: DeviceBuffer,
+    pub ln1: DeviceBuffer,
+    pub qkv: DeviceBuffer,
+    pub probs: DeviceBuffer,
+    pub ctx: DeviceBuffer,
+    pub hw: DeviceBuffer,
+    pub flat_ln: DeviceBuffer,
+    pub h1: DeviceBuffer,
+    pub h2: DeviceBuffer,
+    pub out: DeviceBuffer,
+    pub rows: u32,
+    pub windows: u32,
+}
+
+/// The merger's activations.
+pub(crate) struct MergerActs {
+    pub perm: DeviceBuffer,
+    pub xp: DeviceBuffer,
+    pub xn: DeviceBuffer,
+    pub h1: DeviceBuffer,
+    pub h2: DeviceBuffer,
+    pub out: DeviceBuffer,
+    pub rows: u32,
+    pub out_rows: u32,
+}
+
+/// One encoder layer's input, kept by a training forward.
+pub(crate) struct LayerInput {
+    pub x: DeviceBuffer,
+    pub rows: u32,
+    pub spans: Vec<(u32, u32)>,
+}
+
+/// What a training forward keeps for the backward.
+pub(crate) struct Saved {
+    pub n: u32,
+    pub px: DeviceBuffer,
+    pub pos_idx: DeviceBuffer,
+    pub inputs: Vec<LayerInput>,
+    /// The window merger's activations (16x only).
+    pub wm: Option<WmActs>,
+    /// The post-layernorm's input.
+    pub x_last: DeviceBuffer,
+    pub rows_last: u32,
+    pub max_span: u32,
+}
+
 /// Intermediate activations a parity test compares, read back on request.
 #[derive(Default)]
 pub struct Taps {
@@ -196,7 +250,7 @@ impl Tower {
         t
     }
 
-    fn k(&self, name: &str) -> usize {
+    pub(crate) fn k(&self, name: &str) -> usize {
         self.gpu
             .kernel_index(name)
             .unwrap_or_else(|| panic!("minicpmv: vision kernel `{name}` is not registered on this handle - chain minicpmv::vision::VISION_PIPELINES into its kernel list"))
@@ -275,7 +329,16 @@ impl Tower {
 
     /// [`Self::encode`], also reading back the activations `taps` asks for
     /// (its `layers` field lists the encoder layers to tap, values empty).
-    pub fn encode_taps(&self, patches: &[f32], views: &[View], mode: Downsample, mut taps: Option<&mut Taps>) -> Vec<f32> {
+    pub fn encode_taps(&self, patches: &[f32], views: &[View], mode: Downsample, taps: Option<&mut Taps>) -> Vec<f32> {
+        let (merger, _) = self.forward(patches, views, mode, taps, false);
+        self.gpu.read(&merger.out, (merger.out_rows * self.cfg.text.d_model) as usize)
+    }
+
+    /// The whole forward over one packed pass. With `save`, it also keeps
+    /// what [`Self::backward`] needs: every encoder layer's input (the blocks
+    /// are recomputed from it), the window merger's and the merger's
+    /// activations.
+    pub(crate) fn forward(&self, patches: &[f32], views: &[View], mode: Downsample, mut taps: Option<&mut Taps>, save: bool) -> (MergerActs, Option<Saved>) {
         let g = &self.gpu;
         let v = &self.cfg.vision;
         let (c, pp) = (v.hidden, 3 * v.patch * v.patch);
@@ -288,7 +351,7 @@ impl Tower {
         }
         let sh = self.shape();
         let vk = VitKernelIds::by_name(g, "gelu");
-        let perm_ids = VitPermuteIds { embed: self.k("embed"), row_scatter: self.k("row_scatter") };
+        let perm_ids = self.perm_ids();
         let mut spans_now = spans(views);
         let max_span = views.iter().map(|v| v.patches()).max().unwrap_or(1);
         let chunk = vit::attn_chunk_for(&sh, max_span, ATTN_BUDGET_BYTES);
@@ -316,7 +379,12 @@ impl Tower {
         // 2-4. Encoder, with the window merger after `insert_layer_id`.
         let mut rows = n;
         let mut grid: Vec<View> = views.to_vec();
+        let mut inputs = Vec::new();
+        let mut wm_saved = None;
         for l in 0..v.n_layers {
+            if save {
+                inputs.push(LayerInput { x: self.copy(&x, rows * c), rows, spans: spans_now.clone() });
+            }
             let mut s = Vec::new();
             vit::vit_block_fwd(g, &vk, &sh, &self.block(l), &x, rows, &spans_now, chunk, &scr, &mut s);
             g.submit(&[], &s);
@@ -327,8 +395,12 @@ impl Tower {
                 }
             }
             if l == v.insert_layer_id && mode == Downsample::X16 {
-                x = self.window_merger(&x, &grid, &perm_ids);
+                let acts = self.window_merger(&x, &grid, &perm_ids);
+                x = acts.out.clone();
                 rows /= v.window * v.window;
+                if save {
+                    wm_saved = Some(acts);
+                }
                 grid = grid.iter().map(|g| View { h: g.h / v.window, w: g.w / v.window }).collect();
                 spans_now = spans(&grid);
                 if let Some(t) = taps.as_deref_mut() {
@@ -344,12 +416,26 @@ impl Tower {
         }
 
         // 5. Merger.
-        self.merger(&post, &grid, &perm_ids)
+        let merger = self.merger(&post, &grid, &perm_ids);
+        let saved = save.then(|| Saved { n, px, pos_idx, inputs, wm: wm_saved, x_last: x, rows_last: rows, max_span });
+        (merger, saved)
+    }
+
+    fn perm_ids(&self) -> VitPermuteIds {
+        VitPermuteIds { embed: self.k("embed"), row_scatter: self.k("row_scatter") }
+    }
+
+    /// A fresh copy of the first `len` floats of `src`.
+    pub(crate) fn copy(&self, src: &DeviceBuffer, len: u32) -> DeviceBuffer {
+        let dst = self.gpu.storage(len as u64);
+        self.gpu.submit(&[&dst], &[self.gpu.step(self.k("axpy"), &[&dst, src], &[len, f(1.0)], len)]);
+        dst
     }
 
     /// The window merger over `x` (`[rows, C]`, views packed per `grid`):
-    /// returns `[rows / window^2, C]`, each view's halved grid row-major.
-    fn window_merger(&self, x: &DeviceBuffer, grid: &[View], perm_ids: &VitPermuteIds) -> DeviceBuffer {
+    /// its output (`out`, `[rows / window^2, C]`, each view's halved grid
+    /// row-major) and the activations its backward reads.
+    fn window_merger(&self, x: &DeviceBuffer, grid: &[View], perm_ids: &VitPermuteIds) -> WmActs {
         let g = &self.gpu;
         let v = &self.cfg.vision;
         let (c, wk) = (v.hidden, v.window);
@@ -365,51 +451,57 @@ impl Tower {
             row0 += view.patches();
         }
         let perm = vit::row_index_buffer(g, "minicpmv.window_perm", &perm);
-        let xp = g.storage((rows * c) as u64);
-        let ln1 = g.storage((rows * c) as u64);
-        let qkv = g.storage((rows * 3 * c) as u64);
-        let scores = g.storage((windows * heads * ww * ww) as u64);
-        let probs = g.storage((windows * heads * ww * ww) as u64);
-        let ctx = g.storage((rows * c) as u64);
-        let proj = g.storage((rows * c) as u64);
-        let hw = g.storage((rows * c) as u64);
-        let mean = g.storage((windows * c) as u64);
-        let ones = vit::row_index_buffer(g, "minicpmv.window_mask", &vec![1u32; rows as usize]);
         let (wc, wm) = (v.window_hidden(), v.window_mlp());
-        let flat_ln = g.storage((windows * wc) as u64);
-        let h1 = g.storage((windows * wm) as u64);
-        let h2 = g.storage((windows * wm) as u64);
-        let out = g.storage((windows * c) as u64);
+        let a = WmActs {
+            xp: g.storage((rows * c) as u64),
+            ln1: g.storage((rows * c) as u64),
+            qkv: g.storage((rows * 3 * c) as u64),
+            probs: g.storage((windows * heads * ww * ww) as u64),
+            ctx: g.storage((rows * c) as u64),
+            hw: g.storage((rows * c) as u64),
+            flat_ln: g.storage((windows * wc) as u64),
+            h1: g.storage((windows * wm) as u64),
+            h2: g.storage((windows * wm) as u64),
+            out: g.storage((windows * c) as u64),
+            ones: vit::row_index_buffer(g, "minicpmv.window_mask", &vec![1u32; rows as usize]),
+            perm,
+            rows,
+            windows,
+        };
+        let scores = g.storage((windows * heads * ww * ww) as u64);
+        let proj = g.storage((rows * c) as u64);
+        let mean = g.storage((windows * c) as u64);
         let stride = 3 * c;
         let s = vec![
-            vit::gather_rows(g, perm_ids, &perm, x, &xp, rows, c),
-            model::block::layernorm_fwd(g, &ln, &xp, self.w("wm.norm1.weight"), self.w("wm.norm1.bias"), &ln1, c, rows, v.eps),
-            self.gemm(&ln1, self.w("wm.attn.qkv.weight"), &qkv, rows, c, stride),
-            self.bias(&qkv, self.w("wm.attn.qkv.bias"), rows, stride),
-            g.step(self.k("attn_scores_bidir"), &[&qkv, &scores], &[windows, heads, ww, hd, stride, 0, c], windows * heads * ww * ww),
-            g.step(self.k("attn_softmax_bidir"), &[&scores, &probs], &[windows, heads, ww], windows * heads * ww),
-            g.step(self.k("attn_apply_bidir"), &[&probs, &qkv, &ctx], &[windows, heads, ww, hd, stride, 2 * c, c], rows * c),
-            self.gemm(&ctx, self.w("wm.attn.proj.weight"), &proj, rows, c, c),
+            vit::gather_rows(g, perm_ids, &a.perm, x, &a.xp, rows, c),
+            model::block::layernorm_fwd(g, &ln, &a.xp, self.w("wm.norm1.weight"), self.w("wm.norm1.bias"), &a.ln1, c, rows, v.eps),
+            self.gemm(&a.ln1, self.w("wm.attn.qkv.weight"), &a.qkv, rows, c, stride),
+            self.bias(&a.qkv, self.w("wm.attn.qkv.bias"), rows, stride),
+            g.step(self.k("attn_scores_bidir"), &[&a.qkv, &scores], &[windows, heads, ww, hd, stride, 0, c], windows * heads * ww * ww),
+            g.step(self.k("attn_softmax_bidir"), &[&scores, &a.probs], &[windows, heads, ww], windows * heads * ww),
+            g.step(self.k("attn_apply_bidir"), &[&a.probs, &a.qkv, &a.ctx], &[windows, heads, ww, hd, stride, 2 * c, c], rows * c),
+            self.gemm(&a.ctx, self.w("wm.attn.proj.weight"), &proj, rows, c, c),
             self.bias(&proj, self.w("wm.attn.proj.bias"), rows, c),
-            g.step(self.k("add2"), &[&xp, &proj, &hw], &[rows * c], rows * c),
+            g.step(self.k("add2"), &[&a.xp, &proj, &a.hw], &[rows * c], rows * c),
             // The window's 4 rows are contiguous, so `[rows, C]` IS `[windows, 4C]`.
-            g.step(self.k("segment_sum_rows"), &[&ones, &hw, &mean], &[windows, ww, c], windows * c),
-            model::block::layernorm_fwd(g, &ln, &hw, self.w("wm.pre_norm.weight"), self.w("wm.pre_norm.bias"), &flat_ln, wc, windows, v.eps),
-            self.gemm(&flat_ln, self.w("wm.fc1.weight"), &h1, windows, wc, wm),
-            self.bias(&h1, self.w("wm.fc1.bias"), windows, wm),
-            g.step(self.k("gelu"), &[&h1, &h2], &[windows * wm], windows * wm),
-            self.gemm(&h2, self.w("wm.fc2.weight"), &out, windows, wm, c),
-            self.bias(&out, self.w("wm.fc2.bias"), windows, c),
+            g.step(self.k("segment_sum_rows"), &[&a.ones, &a.hw, &mean], &[windows, ww, c], windows * c),
+            model::block::layernorm_fwd(g, &ln, &a.hw, self.w("wm.pre_norm.weight"), self.w("wm.pre_norm.bias"), &a.flat_ln, wc, windows, v.eps),
+            self.gemm(&a.flat_ln, self.w("wm.fc1.weight"), &a.h1, windows, wc, wm),
+            self.bias(&a.h1, self.w("wm.fc1.bias"), windows, wm),
+            g.step(self.k("gelu"), &[&a.h1, &a.h2], &[windows * wm], windows * wm),
+            self.gemm(&a.h2, self.w("wm.fc2.weight"), &a.out, windows, wm, c),
+            self.bias(&a.out, self.w("wm.fc2.bias"), windows, c),
             // + the window mean (the segment sum scaled by 1/4).
-            g.step(self.k("axpy"), &[&out, &mean], &[windows * c, f(1.0 / ww as f32)], windows * c),
+            g.step(self.k("axpy"), &[&a.out, &mean], &[windows * c, f(1.0 / ww as f32)], windows * c),
         ];
         g.submit(&[], &s);
-        out
+        a
     }
 
     /// The merger over the post-norm tokens (`[rows, C]`, views packed per
-    /// `grid`): `[rows / merge^2, d_model]`.
-    fn merger(&self, x: &DeviceBuffer, grid: &[View], perm_ids: &VitPermuteIds) -> Vec<f32> {
+    /// `grid`): its output (`out`, `[rows / merge^2, d_model]`) and the
+    /// activations its backward reads.
+    fn merger(&self, x: &DeviceBuffer, grid: &[View], perm_ids: &VitPermuteIds) -> MergerActs {
         let g = &self.gpu;
         let v = &self.cfg.vision;
         let (c, k) = (v.hidden, self.cfg.merge);
@@ -422,24 +514,28 @@ impl Tower {
             perm.extend(block_major(view, k, row0));
             row0 += view.patches();
         }
-        let perm = vit::row_index_buffer(g, "minicpmv.merge_perm", &perm);
         let ln = self.ln();
-        let xp = g.storage((rows * c) as u64);
-        let xn = g.storage((out_rows * mc) as u64);
-        let h1 = g.storage((out_rows * mc) as u64);
-        let h2 = g.storage((out_rows * mc) as u64);
-        let out = g.storage((out_rows * d) as u64);
+        let a = MergerActs {
+            perm: vit::row_index_buffer(g, "minicpmv.merge_perm", &perm),
+            xp: g.storage((rows * c) as u64),
+            xn: g.storage((out_rows * mc) as u64),
+            h1: g.storage((out_rows * mc) as u64),
+            h2: g.storage((out_rows * mc) as u64),
+            out: g.storage((out_rows * d) as u64),
+            rows,
+            out_rows,
+        };
         let s = vec![
-            vit::gather_rows(g, perm_ids, &perm, x, &xp, rows, c),
-            model::block::layernorm_fwd(g, &ln, &xp, self.w("merger.pre_norm.weight"), self.w("merger.pre_norm.bias"), &xn, mc, out_rows, 1e-6),
-            self.gemm(&xn, self.w("merger.fc1.weight"), &h1, out_rows, mc, mc),
-            self.bias(&h1, self.w("merger.fc1.bias"), out_rows, mc),
-            g.step(self.k("gelu_erf"), &[&h1, &h2], &[out_rows * mc], out_rows * mc),
-            self.gemm(&h2, self.w("merger.fc2.weight"), &out, out_rows, mc, d),
-            self.bias(&out, self.w("merger.fc2.bias"), out_rows, d),
+            vit::gather_rows(g, perm_ids, &a.perm, x, &a.xp, rows, c),
+            model::block::layernorm_fwd(g, &ln, &a.xp, self.w("merger.pre_norm.weight"), self.w("merger.pre_norm.bias"), &a.xn, mc, out_rows, MERGER_EPS),
+            self.gemm(&a.xn, self.w("merger.fc1.weight"), &a.h1, out_rows, mc, mc),
+            self.bias(&a.h1, self.w("merger.fc1.bias"), out_rows, mc),
+            g.step(self.k("gelu_erf"), &[&a.h1, &a.h2], &[out_rows * mc], out_rows * mc),
+            self.gemm(&a.h2, self.w("merger.fc2.weight"), &a.out, out_rows, mc, d),
+            self.bias(&a.out, self.w("merger.fc2.bias"), out_rows, d),
         ];
         g.submit(&[], &s);
-        g.read(&out, (out_rows * d) as usize)
+        a
     }
 }
 
