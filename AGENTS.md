@@ -36,8 +36,11 @@ brain is the model engine.
 **Naming rule:** a tracked file names another project only if brain depends
 on it. brain depends on no agent runtime or orchestration service, so none
 is named - describe the caller generically ("an agent runtime", "an
-application", "an orchestrator"). Enforced by `make check/scope`
-(`scripts/gates/check-repo-scope.sh`); `CHANGELOG.md` is history and exempt.
+application", "an orchestrator"). The one exception is `README.md`, whose
+opening introduces brain's sibling projects (the agent runtime and the learning
+system built on both) so readers of any of the three find the others. Enforced
+by `make check/scope` (`scripts/gates/check-repo-scope.sh`); `CHANGELOG.md` is
+history and exempt.
 
 ---
 

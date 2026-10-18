@@ -1,28 +1,29 @@
 # What is brain?
 
-brain trains and runs neural networks **locally** - pure Rust, with hand-written
-WGSL GPU kernels doing the compute. There's no PyTorch and no Python required to
-build it, run it, or even to check that it learns correctly.
+brain trains and runs neural networks **locally**, in Rust. There is no PyTorch
+and no Python to build it, run it, or check that it learns correctly.
 
-## One engine, three eager backends, plus a separate NPU path
+## One set of kernels, every kind of hardware
 
-brain is a self-contained engine of a few hundred WGSL compute kernels. The same
-kernel source runs, unchanged, on three eager backends that all compile into
-every native build and are selected at runtime:
+brain's operations are written once, as portable WGSL compute kernels, and the
+same kernels run on four backends, chosen at run time with `--backend`:
 
-- **wgpu** (the default GPU backend) - covering Vulkan, Metal, DX12, and
-  WebGPU;
-- **CPU-JIT**, where the same WGSL is JIT-compiled to native code via a
-  Cranelift backend and runs across all your cores, no GPU required at all;
-- **native Vulkan**, a separate eager backend targeting Vulkan directly
-  (coopmat / tensor-core paths included).
+- **wgpu** (the default GPU backend) - any modern GPU through Vulkan, Metal or
+  DirectX 12, and the browser through WebGPU;
+- **native Vulkan** - Vulkan driven directly;
+- **CUDA** - NVIDIA GPUs through the NVIDIA driver: the portable kernels are
+  translated to CUDA and compiled on first use, and the paths that matter most
+  for speed have hand-written CUDA kernels beside them
+  ([Running on NVIDIA GPUs](../using/cuda.md));
+- **CPU** - the same kernels compiled to native code for the CPU's cores, so no
+  GPU is needed at all.
 
-A **web browser** is a build target of the wgpu backend, not a fourth
-backend: compiled to wasm32, a wasm build carries only wgpu/WebGPU, running
-the identical kernel source as the native wgpu backend.
+A **web browser** is a build target of the wgpu backend: a wasm build runs the
+same kernel source as the native one.
 
-Nothing is duplicated across these three: there is one implementation of each
-op, and it either runs correctly everywhere or it's a bug.
+A portable kernel either gives the same answer on every backend or it is a
+bug. Each hand-written CUDA kernel is checked against the portable kernel it
+replaces, or against a reference computation where it has no portable twin.
 
 Separately, an **Intel NPU** path exists for a subset of models
 (`crates/npu`). It is not one of the three eager backends and does not share
@@ -35,7 +36,7 @@ compiled graph, rather than dispatching brain's own kernels op by op. See
 
 Most from-scratch training code proves its backward pass is right by diffing
 against a PyTorch reference. brain doesn't have one to diff against - instead,
-every model's analytic WGSL gradients are checked against an in-repo
+the analytic gradients are checked against an in-repo
 finite-difference gradient checker (`make test/gradcheck`), on its own forward pass.
 That gate is what "correct" means here, and it runs as part of the normal test
 suite.

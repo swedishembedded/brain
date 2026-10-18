@@ -15,6 +15,10 @@
 # on a line that also contains "submarine" or "whale.png" is not a project
 # mention and is filtered out.
 #
+# README.md is exempt: its opening introduces brain's two sibling projects,
+# so that a reader of any one of the three finds the other two. Nothing else
+# in the tree names them.
+#
 # CHANGELOG.md is history (generated from past commit subjects) and exempt, as
 # is this script, which has to spell the names to match them. So is
 # .gitignore: an ignore pattern for a tool's state directory is a filter, not
@@ -39,7 +43,7 @@ else
 fi
 for f in "${candidates[@]}"; do
   case "$f" in
-  CHANGELOG.md | .gitignore | "$SELF") continue ;;
+  README.md | CHANGELOG.md | .gitignore | "$SELF") continue ;;
   esac
   # A tracked path deleted in the working tree has nothing left to scan.
   [ -f "$f" ] && files+=("$f")
