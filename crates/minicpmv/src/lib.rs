@@ -10,6 +10,9 @@
 //! * [`config`]: the checkpoint's `config.json`.
 //! * [`import`]: the checkpoint split between this crate's vision side and
 //!   the decoder, each held to two-way tensor coverage.
+//! * [`preprocess`]: the image processor - source view, slice grid, the
+//!   torch-exact resize, patch rows.
+//! * [`prompt`]: the chat template and the placeholder layout, tokenized.
 //! * [`vision`]: the NaViT tower, the window merger and the merger, composed
 //!   from `model::vit`'s blocks.
 //!
@@ -20,6 +23,8 @@
 
 pub mod config;
 pub mod import;
+pub mod preprocess;
+pub mod prompt;
 pub mod vision;
 
 pub use config::{Downsample, MiniCpmVConfig, VisionConfig};

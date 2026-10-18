@@ -1828,12 +1828,15 @@ name = "brain-minicpmv"
 version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
+ "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-paramstore",
  "brain-qwen35",
  "brain-testutil",
+ "minijinja",
  "serde_json",
 ]
 

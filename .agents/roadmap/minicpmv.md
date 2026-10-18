@@ -91,7 +91,14 @@ continuations and one label loss.
 - [ ] P3b vision backward (cached forward + `vit_block_bwd`, window merger
       and merger adjoints) and its FD gradcheck - lands with P7, the first
       consumer.
-- [ ] P4 preprocessing + prompt layout: exact ids/grids, resized views.
+- [x] P4 preprocessing + prompt layout (`preprocess.rs`, `prompt.rs`): the
+      slicing policy with Python's rounding, torch's uint8 antialiased bicubic
+      (`imaging::host::resize_bicubic_torch_u8`, not Pillow's - they differ by
+      one on ~0.4% of pixels), the fused `(x - 127.5) / 127.5`, the
+      checkpoint's own chat template through `data::chat_template`, the
+      placeholder layout. Exact against all 14 processor cases and the 5
+      model-case prompts (`tests/processor_parity.rs`): resized views byte
+      for byte, grids, patches, rendered text, token ids.
 - [ ] P5 end-to-end generate + serving contract (caps, resident, catalog,
       D-Bus, HTTP, sample, docs).
 - [ ] P6 video: index-exact frame selection, frame layout, parity.
