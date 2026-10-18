@@ -4,9 +4,10 @@
 
 """Print the reference resizes `crates/imaging/tests/resize_reference.rs`
 embeds: PIL's fixed-point bicubic on uint8 RGB (what torchvision's resize does
-to a PIL image) and torch's antialiased bilinear and bicubic on a float
-tensor (`F.interpolate(..., antialias=True, align_corners=False)`), at odd
-sizes, downscales and upscales.
+to a PIL image), torch's antialiased bicubic on a uint8 tensor (what
+torchvision's resize does to a tensor image), and torch's antialiased
+bilinear and bicubic on a float tensor (`F.interpolate(..., antialias=True,
+align_corners=False)`), at odd sizes, downscales and upscales.
 
 Run in the DeepSeek-VL reference environment (Pillow, torch):
 
@@ -39,6 +40,12 @@ def main() -> None:
     for (w, h) in [(3, 4), (11, 9)]:
         out = np.asarray(Image.fromarray(img).resize((w, h), Image.BICUBIC))
         rust(f"PIL_BICUBIC_{w}X{h}", out, "u8")
+
+    # torch's uint8 path: int16 weights, so it can differ from PIL by one.
+    u8 = torch.tensor(img.transpose(2, 0, 1).tolist(), dtype=torch.uint8)[None]
+    for (w, h) in [(3, 4), (11, 9), (23, 2)]:
+        out = F.interpolate(u8, size=(h, w), mode="bicubic", align_corners=False, antialias=True)[0]
+        rust(f"TORCH_U8_BICUBIC_AA_{w}X{h}", np.array(out.permute(1, 2, 0).tolist(), dtype=np.uint8), "u8")
 
     # Through lists: the reference environment's torch predates its NumPy.
     planar = (torch.tensor(img.transpose(2, 0, 1).tolist(), dtype=torch.float32) / 255.0)[None]

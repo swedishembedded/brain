@@ -143,65 +143,106 @@ fn cubic(x: f64) -> f64 {
     }
 }
 
-/// Pillow's `precompute_coeffs` for one axis: per output position, the
-/// source window `[xmin, xmin + n)` and its normalized fixed-point weights.
-fn pil_coeffs(in_size: usize, out_size: usize) -> (usize, Vec<(usize, usize)>, Vec<i32>) {
+/// How normalized resampling weights become fixed point.
+#[derive(Clone, Copy)]
+enum FixedPoint {
+    /// Pillow: always [`PRECISION_BITS`] fraction bits.
+    Pillow,
+    /// torch's uint8 antialiased resampler (`_compute_index_ranges_int16_weights`):
+    /// the most fraction bits (below 22) for which the axis's largest weight
+    /// still fits an `int16`.
+    TorchInt16,
+}
+
+/// One axis of the 8bpc resampler: per output position, the source window
+/// `[xmin, xmin + n)` and its normalized fixed-point weights, plus the number
+/// of fraction bits. Pillow's `precompute_coeffs` windowing, which torch's
+/// uint8 path ports verbatim; they differ only in [`FixedPoint`].
+fn fixed_coeffs(in_size: usize, out_size: usize, fixed: FixedPoint) -> (usize, Vec<(usize, usize)>, Vec<i32>, i32) {
     const SUPPORT: f64 = 2.0;
     let scale = in_size as f64 / out_size as f64;
     let filterscale = scale.max(1.0);
     let support = SUPPORT * filterscale;
     let ksize = support.ceil() as usize * 2 + 1;
-    let mut bounds = Vec::with_capacity(out_size);
-    let mut kk = vec![0i32; out_size * ksize];
     let inv = 1.0 / filterscale;
+    let mut bounds = Vec::with_capacity(out_size);
+    let mut weights = vec![0f64; out_size * ksize];
     for xx in 0..out_size {
         let center = (xx as f64 + 0.5) * scale;
-        let xmin = ((center - support).floor().max(0.0)) as usize;
-        let xmax = (((center + support).ceil()) as usize).min(in_size) - xmin;
+        let xmin = ((center - support + 0.5) as i64).max(0) as usize;
+        let xmax = (((center + support + 0.5) as i64) as usize).min(in_size) - xmin;
         let w: Vec<f64> = (0..xmax).map(|x| cubic((x as f64 + xmin as f64 - center + 0.5) * inv)).collect();
         let ww: f64 = w.iter().sum();
         for (x, &wx) in w.iter().enumerate() {
-            let k = wx / ww;
-            kk[xx * ksize + x] = if k < 0.0 { (-0.5 + k * (1i64 << PRECISION_BITS) as f64) as i32 } else { (0.5 + k * (1i64 << PRECISION_BITS) as f64) as i32 };
+            weights[xx * ksize + x] = if ww != 0.0 { wx / ww } else { wx };
         }
         bounds.push((xmin, xmax));
     }
-    (ksize, bounds, kk)
+    let bits = match fixed {
+        FixedPoint::Pillow => PRECISION_BITS,
+        FixedPoint::TorchInt16 => {
+            let max = weights.iter().cloned().fold(f64::MIN, f64::max);
+            (0..22).find(|&b| (0.5 + max * (1i64 << (b + 1)) as f64) as i32 >= 1 << 15).unwrap_or(22)
+        }
+    };
+    let one = (1i64 << bits) as f64;
+    let kk = weights.iter().map(|&k| if k < 0.0 { (-0.5 + k * one) as i32 } else { (0.5 + k * one) as i32 }).collect();
+    (ksize, bounds, kk, bits)
 }
 
-fn clip8(v: i32) -> u8 {
-    (v >> PRECISION_BITS).clamp(0, 255) as u8
-}
-
-/// One Pillow pass over interleaved RGB8: `n_lines` lines of `stride`
+/// One 8bpc pass over interleaved RGB8: `n_lines` lines of `stride`
 /// pixels, resampled along the axis `at(line, i)` addresses, into `out_len`
 /// positions per line.
-fn pil_pass(src: &[u8], in_size: usize, out_size: usize, n_lines: usize, at: impl Fn(usize, usize) -> usize, dst_at: impl Fn(usize, usize) -> usize, dst_len: usize) -> Vec<u8> {
-    let (ksize, bounds, kk) = pil_coeffs(in_size, out_size);
+fn fixed_pass(
+    fixed: FixedPoint,
+    src: &[u8],
+    in_size: usize,
+    out_size: usize,
+    n_lines: usize,
+    at: impl Fn(usize, usize) -> usize,
+    dst_at: impl Fn(usize, usize) -> usize,
+    dst_len: usize,
+) -> Vec<u8> {
+    let (ksize, bounds, kk, bits) = fixed_coeffs(in_size, out_size, fixed);
     let mut out = vec![0u8; dst_len];
     for line in 0..n_lines {
         for (o, &(min, n)) in bounds.iter().enumerate() {
             for ch in 0..3 {
-                let mut ss = 1i32 << (PRECISION_BITS - 1);
+                let mut ss = 1i32 << (bits - 1);
                 for i in 0..n {
                     ss += src[at(line, min + i) * 3 + ch] as i32 * kk[o * ksize + i];
                 }
-                out[dst_at(line, o) * 3 + ch] = clip8(ss);
+                out[dst_at(line, o) * 3 + ch] = (ss >> bits).clamp(0, 255) as u8;
             }
         }
     }
     out
 }
 
+/// A horizontal then a vertical 8bpc pass, each skipped when its axis keeps
+/// its size - the pass order Pillow and torch share.
+fn resize_fixed(img: &Rgb8, nw: usize, nh: usize, fixed: FixedPoint) -> Rgb8 {
+    let (w, h) = (img.w as usize, img.h as usize);
+    assert!(w > 0 && h > 0 && nw > 0 && nh > 0, "resize: empty extent");
+    let horiz = if nw != w { fixed_pass(fixed, &img.px, w, nw, h, |y, x| y * w + x, |y, x| y * nw + x, nw * h * 3) } else { img.px.clone() };
+    let px = if nh != h { fixed_pass(fixed, &horiz, h, nh, nw, |x, y| y * nw + x, |x, y| y * nw + x, nw * nh * 3) } else { horiz };
+    Rgb8 { w: nw as u32, h: nh as u32, px }
+}
+
 /// Pillow's `Image.resize((nw, nh), BICUBIC)` on interleaved RGB8, byte for
 /// byte: a horizontal then a vertical fixed-point pass, antialiased when
 /// shrinking, each skipped when its axis keeps its size.
 pub fn resize_bicubic_pil(img: &Rgb8, nw: usize, nh: usize) -> Rgb8 {
-    let (w, h) = (img.w as usize, img.h as usize);
-    assert!(w > 0 && h > 0 && nw > 0 && nh > 0, "resize_bicubic_pil: empty extent");
-    let horiz = if nw != w { pil_pass(&img.px, w, nw, h, |y, x| y * w + x, |y, x| y * nw + x, nw * h * 3) } else { img.px.clone() };
-    let px = if nh != h { pil_pass(&horiz, h, nh, nw, |x, y| y * nw + x, |x, y| y * nw + x, nw * nh * 3) } else { horiz };
-    Rgb8 { w: nw as u32, h: nh as u32, px }
+    resize_fixed(img, nw, nh, FixedPoint::Pillow)
+}
+
+/// torch's antialiased bicubic resize of a `uint8` image
+/// (`torchvision.transforms.v2.functional.resize(..., BICUBIC, antialias=True)`
+/// on a uint8 tensor), byte for byte. Pillow's resampler with int16 weights:
+/// fewer fraction bits than Pillow, so a pixel can differ from
+/// [`resize_bicubic_pil`] by one.
+pub fn resize_bicubic_torch_u8(img: &Rgb8, nw: usize, nh: usize) -> Rgb8 {
+    resize_fixed(img, nw, nh, FixedPoint::TorchInt16)
 }
 
 // ---- torch antialiased resampling (UpSampleKernel.cpp, `_upsample_*_aa`) ----
