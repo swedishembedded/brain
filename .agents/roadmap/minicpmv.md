@@ -114,6 +114,15 @@ continuations and one label loss.
       contract reproduces the reference; a cancelled request stops alone),
       the CLI on a real JPEG, `brain serve --openai` with two images and with
       a tool call (structured `get_weather({"city": "Paris"})`), `brain pull`.
-- [ ] P6 video: index-exact frame selection, frame layout, parity.
+- [x] P6 video (`video.rs`): `sample_frames` with Python's `round` and
+      numpy's `linspace`, `stack_frames > 1` refused (reference defect),
+      per-frame image processing and the `<|video_pad|>` layout; the tower
+      encodes views in bounded passes (`Tower::encode`, `ENCODE_ROWS`);
+      `imaging::video::{probe_video, decode_frames_at}` for an index-exact
+      decode; served as a `video` blob and the CLI's `video_path`. Verified
+      (`tests/video_parity.rs`): indices for all 8 recorded metadata rows,
+      the golden clip's ids, video features (cosine 1.0000000000), logits
+      and greedy reply; the CLI on a red/green/blue clip reports the colours
+      in order.
 - [ ] P7 training: decoder LoRA, merger, vision; overfit/held-out/reload
       gates; PEFT export.

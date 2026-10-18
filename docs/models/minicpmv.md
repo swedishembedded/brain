@@ -15,7 +15,9 @@ Gated-DeltaNet/GQA decoder. Images, several images per prompt, and video.
 the checkpoint is in the models directory, and `/v1/chat/completions` (or
 D-Bus `Run`, action `generate`) takes a conversation with up to 8 images:
 OpenAI `image_url` data URLs over HTTP, or `image`, `image1`, ... blobs over
-D-Bus. Each image part becomes a placeholder where it stands; an image sent
+D-Bus, which also takes a `video` blob of decoded frames (with meta `{fps}`
+the frames are sampled as the reference processor does; without it they are
+used as given, thinned evenly to `max_frames`). Each image part becomes a placeholder where it stands; an image sent
 without one opens the last user turn. Tools, `tool_choice`, stop strings,
 `enable_thinking` and the sampling parameters behave as for the other chat
 models; tool calls come back structured. Requests that arrive together
@@ -31,6 +33,7 @@ decoder's KV pool for 4 sequences of 16k tokens, and the tower's scratch.
 brain pull openbmb/MiniCPM-V-4.6
 brain minicpmv generate --image photo.jpg --prompt "Describe this image." --temp 0
 brain minicpmv generate --image diagram.png --downsample 4x --max_slices 36 --prompt "Explain the diagram."
+brain minicpmv generate --video_path clip.mp4 --prompt "What happens in this video?"
 brain serve --openai 8789 --api-keys-out /tmp/keys.json
 python3 samples/python/vision/minicpmv-chat/minicpmv_chat.py --image a.png --image b.png \
     --question "How do these differ?" --base-url http://127.0.0.1:8789 --keys-file /tmp/keys.json
@@ -43,6 +46,8 @@ python3 samples/python/vision/minicpmv-chat/minicpmv_chat.py --image a.png --ima
 | `--use_image_id false` | drop the `<image_id>N</image_id>` tag before each image |
 | `--enable_thinking` | let the model reason in a `<think>` block first (off by default, as the checkpoint's template) |
 | `--tools JSON` | OpenAI function definitions; replies come back as `tool_calls` |
+| `--video_path FILE` | a video on this host: frames picked by index from the container's metadata - one per second, or every tenth of a second thinned to `max_frames` for a clip longer than that many seconds |
+| `--max_frames N` | most frames one video contributes (default 128) |
 
 ## How it is validated
 
@@ -60,10 +65,18 @@ on CPU) on the real checkpoint, from goldens written by
 - **End to end**: the next-token logits after the prompt and the whole
   greedy continuation identical to the reference for a sliced photo (16x and
   4x), a document and two images in one prompt, decoded alone and batched.
+- **Video**: the frame indices for every recorded clip metadata (short clips,
+  long ones thinned to the budget, odd frame rates), and a synthetic clip end
+  to end - video features at cosine 1.0000000000 and the greedy reply
+  identical.
 
 ## Limits
 
-- Video is not wired yet.
+- `stack_frames > 1` is refused: the reference builds its per-second
+  composites and then processes the raw frames, so its own forward fails on
+  its output and there is nothing correct to match.
+- The OpenAI HTTP surface carries images, not video; video arrives over
+  D-Bus (`video` blob) or the CLI (`--video_path`).
 - Images are decoded by brain's own codecs; a JPEG can decode a pixel or two
   differently from PIL's libjpeg, which can move a long greedy continuation.
 - Fine-tuning is not wired yet.

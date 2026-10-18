@@ -58,6 +58,10 @@ pub const VISION_PIPELINES: &[(&str, &str)] = &[
     ("segment_sum_rows", kernels::SEGMENT_SUM_ROWS),
 ];
 
+/// Most patch rows one tower pass packs; [`Tower::encode`] splits a larger
+/// request into passes of whole views.
+pub const ENCODE_ROWS: u32 = 16384;
+
 /// Score-slab budget for the encoder's span attention.
 const ATTN_BUDGET_BYTES: u64 = 256 << 20;
 
@@ -245,8 +249,28 @@ impl Tower {
     /// in view order, `tokens(view) = h*w / mode.divisor()`. `patches` is
     /// `[N, 3*p*p]`, each row one patch flattened channel-major (`c, ky, kx`),
     /// views concatenated, each view's patches row-major.
+    ///
+    /// Views are encoded in groups of at most [`ENCODE_ROWS`] patches (a view
+    /// never splits; each is independent of the others), so the scratch a
+    /// long video or many images need stays bounded.
     pub fn encode(&self, patches: &[f32], views: &[View], mode: Downsample) -> Vec<f32> {
-        self.encode_taps(patches, views, mode, None)
+        let pp = (3 * self.cfg.vision.patch * self.cfg.vision.patch) as usize;
+        let mut out = Vec::new();
+        let (mut start, mut at) = (0usize, 0usize);
+        while start < views.len() {
+            let mut end = start;
+            let mut rows = 0u32;
+            while end < views.len() && (end == start || rows + views[end].patches() <= ENCODE_ROWS) {
+                rows += views[end].patches();
+                end += 1;
+            }
+            let len = rows as usize * pp;
+            out.extend(self.encode_taps(&patches[at..at + len], &views[start..end], mode, None));
+            at += len;
+            start = end;
+        }
+        assert_eq!(at, patches.len(), "minicpmv: {} patch values for the views given", patches.len());
+        out
     }
 
     /// [`Self::encode`], also reading back the activations `taps` asks for

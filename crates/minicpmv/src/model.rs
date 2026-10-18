@@ -142,24 +142,30 @@ impl MiniCpmV {
     /// and build the decoder's input embeddings.
     pub fn prepare(&self, messages: &[Message], images: &[Rgb8], opts: &GenOptions) -> Result<Prepared, String> {
         let rendered = self.fmt.render(messages, true, opts.enable_thinking)?;
-        self.prepare_text(&rendered, images, opts)
+        self.prepare_text(&rendered, images, &[], opts)
     }
 
     /// [`Self::prepare`] for a conversation already rendered by the chat
-    /// template (one `<|image_pad|>` per image, in order).
-    pub fn prepare_text(&self, rendered: &str, images: &[Rgb8], opts: &GenOptions) -> Result<Prepared, String> {
+    /// template: one `<|image_pad|>` per image and one `<|video_pad|>` per
+    /// video (each video given as its sampled frames), in order.
+    pub fn prepare_text(&self, rendered: &str, images: &[Rgb8], videos: &[Vec<Rgb8>], opts: &GenOptions) -> Result<Prepared, String> {
         let io = self.options(opts);
         let processed: Vec<ProcessedImage> = images.iter().map(|img| process_image(img, &io)).collect();
+        let clips: Vec<Vec<ProcessedImage>> = videos.iter().map(|frames| frames.iter().map(|f| process_image(f, &io)).collect()).collect();
         let layouts: Vec<String> = processed.iter().map(|p| view_layout(p, io.downsample, IMAGE_PAD)).collect();
-        let prompt = self.fmt.expand(rendered, &layouts, &[], io.use_image_id)?;
-        let visual = if processed.is_empty() {
-            Vec::new()
-        } else {
-            let views: Vec<View> = processed.iter().flat_map(|p| p.views.iter().copied()).collect();
-            let patches: Vec<f32> = processed.iter().flat_map(|p| p.patches.iter().copied()).collect();
+        let video_layouts: Vec<String> = clips.iter().map(|c| crate::video::video_layout(c, io.downsample)).collect();
+        let prompt = self.fmt.expand(rendered, &layouts, &video_layouts, io.use_image_id)?;
+        let encode = |items: Vec<&ProcessedImage>| -> Vec<f32> {
+            if items.is_empty() {
+                return Vec::new();
+            }
+            let views: Vec<View> = items.iter().flat_map(|p| p.views.iter().copied()).collect();
+            let patches: Vec<f32> = items.iter().flat_map(|p| p.patches.iter().copied()).collect();
             self.tower.encode(&patches, &views, io.downsample)
         };
-        let embeds = self.splice(&prompt, &visual, &[])?;
+        let image_rows = encode(processed.iter().collect());
+        let video_rows = encode(clips.iter().flatten().collect());
+        let embeds = self.splice(&prompt, &image_rows, &video_rows)?;
         Ok(Prepared { prompt, embeds })
     }
 

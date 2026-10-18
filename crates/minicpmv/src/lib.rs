@@ -15,6 +15,8 @@
 //!   torch-exact resize, patch rows.
 //! * [`prompt`]: the chat template and the placeholder layout, tokenized.
 //! * [`spec`]: model-store resolution of the checkpoint directory.
+//! * [`video`]: frame sampling by index from the clip's metadata, and the
+//!   video placeholder layout.
 //! * [`vision`]: the NaViT tower, the window merger and the merger, composed
 //!   from `model::vit`'s blocks.
 //! * [`model`]: the composite - tower and `brain-qwen35` paged decoder on one
@@ -32,6 +34,7 @@ pub mod model;
 pub mod preprocess;
 pub mod prompt;
 pub mod spec;
+pub mod video;
 pub mod vision;
 
 pub use config::{Downsample, MiniCpmVConfig, VisionConfig};
