@@ -49,6 +49,12 @@ pub trait Frontend {
     fn stale(&self) -> bool {
         false
     }
+    /// `sha256:<hex>` of the base checkpoint this front end serves, once it is
+    /// known (hashing a multi-gigabyte file takes a while and does not hold
+    /// requests up). `None` until then, or when the front end does not know it.
+    fn base_digest(&self) -> Option<String> {
+        None
+    }
     /// The caller-facing message for a request the scheduler refused.
     fn rejection(&self, _inv: &Invocation, reason: &RejectReason) -> String {
         format!("{}: {reason}", self.label())
@@ -64,6 +70,44 @@ struct Job {
     id: Option<u64>,
     /// The release the request's adapter was routed to; a reply names it.
     identity: Option<AdapterIdentity>,
+    /// What the request asked to get back about the tokens it was decoded
+    /// from, and the prompt ids to return when it asked for them.
+    capture: Capture,
+    /// The base checkpoint's digest when the request was admitted, if known.
+    base_digest: Option<String>,
+}
+
+/// The token-level facts a request asks to have returned (`logprobs`,
+/// `return_token_ids`): off unless set, so a request pays only for what it
+/// reads.
+#[derive(Default)]
+struct Capture {
+    logprobs: bool,
+    token_ids: bool,
+    prompt: Vec<u32>,
+}
+
+impl Capture {
+    fn of(inv: &Invocation, prompt: &[u32]) -> Capture {
+        let logprobs = inv.get_bool("logprobs").unwrap_or(false);
+        let token_ids = inv.get_bool("return_token_ids").unwrap_or(false);
+        Capture { logprobs, token_ids, prompt: if token_ids { prompt.to_vec() } else { Vec::new() } }
+    }
+
+    /// `outcome` with the requested ids and log-probabilities added.
+    fn attach(&self, outcome: capability::Outcome, tokens: &[u32], logprobs: &[f32]) -> capability::Outcome {
+        let mut outcome = outcome;
+        if self.token_ids {
+            outcome = outcome.set("prompt_token_ids", serde_json::json!(self.prompt)).set("completion_token_ids", serde_json::json!(tokens));
+        }
+        if self.logprobs {
+            outcome = outcome.set("completion_logprobs", serde_json::json!(logprobs));
+            if !self.token_ids {
+                outcome = outcome.set("completion_token_ids", serde_json::json!(tokens));
+            }
+        }
+        outcome
+    }
 }
 
 /// The requests of one `run_batch` / `run_open` call on a persistent
@@ -92,7 +136,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
     /// Resume numbering after `n` jobs of an earlier call of the same open
     /// group, all of which are finished: placeholders keep indices aligned.
     fn skip_numbered(&mut self, n: usize) {
-        self.jobs.extend((0..n).map(|_| Job { invocation: Invocation::new(), seq: None, id: None, identity: None }));
+        self.jobs.extend((0..n).map(|_| Job { invocation: Invocation::new(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: None }));
     }
 
     fn new(sched: &'a mut Scheduler<D>, front: &'a dyn Frontend) -> Self {
@@ -104,7 +148,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
     /// `None` is returned.
     fn admit(&mut self, inv: &Invocation, progress: &mut dyn FnMut(usize, Progress)) -> (usize, Option<ActionResult>) {
         let bi = self.jobs.len();
-        let mut job = Job { invocation: inv.clone(), seq: None, id: None, identity: None };
+        let mut job = Job { invocation: inv.clone(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: self.front.base_digest() };
         // A name the bank no longer holds is the caller's "no model", never
         // the base's answer under another name.
         let adapter = match self.front.route(inv) {
@@ -123,6 +167,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 let sample = SampleParams { temp: req.temp, top_k: req.top_k, top_p: req.top_p };
                 let seed = req.seed;
                 let max_new = req.max_new;
+                job.capture = Capture::of(inv, &req.ids);
                 let seq = SeqState::new(&req, inv.cancel.clone());
                 let request = Request { prompt: req.ids, max_new, stop: self.front.stop().to_vec() };
                 let id = match adapter {
@@ -148,8 +193,14 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         self.open.len()
     }
 
-    fn named(outcome: capability::Outcome, identity: &Option<AdapterIdentity>) -> capability::Outcome {
-        match identity {
+    /// What served the reply: the adapter that answered and, when known, the
+    /// base checkpoint's digest, the backend it ran on and the engine version.
+    fn named(outcome: capability::Outcome, job: &Job) -> capability::Outcome {
+        let mut outcome = outcome.set("backend", serde_json::json!(gpu_core::backend_name())).set("engine", serde_json::json!(concat!("brain ", env!("CARGO_PKG_VERSION"))));
+        if let Some(digest) = &job.base_digest {
+            outcome = outcome.set("base_digest", serde_json::json!(digest));
+        }
+        match &job.identity {
             Some(identity) => outcome.set("adapter", serde_json::json!({ "id": identity.id, "digest": identity.digest })),
             None => outcome,
         }
@@ -172,9 +223,10 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             let Some(all_tokens) = self.sched.tokens_of(id) else { continue };
             let seq = self.jobs[bi].seq.as_mut().expect("an open job has its stream");
             if seq.advance(tok, all_tokens, &mut |p| progress(bi, p)) {
-                let toks = self.sched.cancel(id).unwrap_or_default();
+                let (toks, logprobs) = self.sched.cancel_detailed(id).unwrap_or_default();
                 let seq = self.jobs[bi].seq.take().expect("checked above");
-                let outcome = Self::named(seq.finish(tok, &toks, &mut |p| progress(bi, p)), &self.jobs[bi].identity);
+                let outcome = Self::named(seq.finish(tok, &toks, &mut |p| progress(bi, p)), &self.jobs[bi]);
+                let outcome = self.jobs[bi].capture.attach(outcome, &toks, &logprobs);
                 self.open.remove(&bi);
                 finished.push((bi, Ok(outcome)));
             }
@@ -206,10 +258,13 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             self.open.remove(&bi);
             finished.push((bi, Err(self.front.rejection(&self.jobs[bi].invocation, &reason))));
         }
+        let mut logprobs_of: std::collections::HashMap<u64, Vec<f32>> = report.completed_logprobs.into_iter().collect();
         for (id, toks) in report.completed {
             let bi = job_of(&self.jobs, id);
+            let logprobs = logprobs_of.remove(&id).unwrap_or_default();
             if let Some(seq) = self.jobs[bi].seq.take() {
-                let outcome = Self::named(seq.finish(tok, &toks, &mut |p| progress(bi, p)), &self.jobs[bi].identity);
+                let outcome = Self::named(seq.finish(tok, &toks, &mut |p| progress(bi, p)), &self.jobs[bi]);
+                let outcome = self.jobs[bi].capture.attach(outcome, &toks, &logprobs);
                 finished.push((bi, Ok(outcome)));
             }
             self.open.remove(&bi);

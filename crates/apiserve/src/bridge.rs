@@ -131,9 +131,22 @@ pub struct ChatOutcome {
     pub reasoning: String,
     pub tool_calls: Vec<serde_json::Value>,
     /// The sampling seed the model decoded with, when it reports one.
-    pub seed: Option<i64>,
+    pub seed: Option<u64>,
     /// The `(id, digest)` of the adapter that answered, when one did.
     pub adapter: Option<(String, String)>,
+    /// `sha256:<hex>` of the base checkpoint that answered, when the model knows it.
+    pub base_digest: Option<String>,
+    /// The backend the decode ran on (`cuda`, `cpu`, ...).
+    pub backend: Option<String>,
+    /// The engine build that decoded (`brain <version>`).
+    pub engine: Option<String>,
+    /// The ids of the prompt as the model read it, when the request asked.
+    pub prompt_token_ids: Option<Vec<i64>>,
+    /// The ids of the tokens the model sampled, when the request asked.
+    pub completion_token_ids: Option<Vec<i64>>,
+    /// The log-probability of each sampled token under the distribution it was
+    /// drawn from, when the request asked.
+    pub logprobs: Option<Vec<f64>>,
 }
 
 impl ChatOutcome {
@@ -147,6 +160,11 @@ impl ChatOutcome {
         }
         if let Some((id, digest)) = &self.adapter {
             served.insert("adapter".into(), serde_json::json!({ "id": id, "digest": digest }));
+        }
+        for (key, value) in [("base_digest", &self.base_digest), ("backend", &self.backend), ("engine", &self.engine)] {
+            if let Some(value) = value {
+                served.insert(key.into(), serde_json::json!(value));
+            }
         }
         (!served.is_empty()).then_some(serde_json::Value::Object(served))
     }
@@ -164,9 +182,12 @@ pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
-    let seed = o.outputs.get("seed").and_then(|v| v.as_i64());
+    let seed = o.outputs.get("seed").and_then(|v| v.as_u64());
     let adapter = o.outputs.get("adapter").and_then(|a| Some((a.get("id")?.as_str()?.to_string(), a.get("digest")?.as_str()?.to_string())));
-    ChatOutcome { text, prompt_tokens, completion_tokens, finish, reasoning, tool_calls, seed, adapter }
+    let numbers = |key: &str| o.outputs.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_i64()).collect::<Vec<_>>());
+    let logprobs = o.outputs.get("completion_logprobs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_f64()).collect::<Vec<_>>());
+    let text_of = |key: &str| o.outputs.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    ChatOutcome { text, prompt_tokens, completion_tokens, finish, reasoning, tool_calls, seed, adapter, base_digest: text_of("base_digest"), backend: text_of("backend"), engine: text_of("engine"), prompt_token_ids: numbers("prompt_token_ids"), completion_token_ids: numbers("completion_token_ids"), logprobs }
 }
 
 /// Detect an admission-time `model::serve::RejectReason::ExceedsCapacity` reply -

@@ -1733,6 +1733,7 @@ version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-data",
+ "brain-gpu-core",
  "brain-model",
  "brain-qwen3",
  "brain-residency",

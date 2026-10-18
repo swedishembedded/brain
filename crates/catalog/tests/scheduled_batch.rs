@@ -217,3 +217,33 @@ fn an_idle_open_group_with_stale_routes_hands_back_before_taking_a_job() {
     assert_eq!(llmserve::run_open_scheduled(&mut sched, &front, &[], 4, 0, &mut |_, _| {}, &mut feed), llmserve::OpenGroup::Closed);
     assert_eq!(feed.finished.len(), 1, "the job is served once the routes are fresh");
 }
+
+/// A request that asks for them gets the token ids it was decoded from and the
+/// log-probability of each sampled token, in the outputs of the same reply; a
+/// request that does not ask pays for neither.
+#[test]
+fn token_ids_and_logprobs_come_back_only_when_asked_for() {
+    let front = front();
+    let asked = inv("token capture", 6, 0.8, 17).set("logprobs", json!(true)).set("return_token_ids", json!(true));
+    let plain = inv("token capture", 6, 0.8, 17);
+    let results = run_batch_scheduled(&mut scheduler(2), &front, &[asked, plain], &mut |_, _| {});
+    let asked = results[0].clone().expect("request succeeds").outputs;
+    let plain = results[1].clone().expect("request succeeds").outputs;
+
+    let completion: Vec<i64> = serde_json::from_value(asked["completion_token_ids"].clone()).expect("ids");
+    let logprobs: Vec<f64> = serde_json::from_value(asked["completion_logprobs"].clone()).expect("logprobs");
+    let prompt: Vec<i64> = serde_json::from_value(asked["prompt_token_ids"].clone()).expect("prompt ids");
+    assert_eq!(completion.len() as i64, asked["completion_tokens"].as_i64().unwrap());
+    assert_eq!(logprobs.len(), completion.len());
+    assert!(logprobs.iter().all(|lp| *lp <= 0.0), "{logprobs:?}");
+    assert_eq!(prompt.len() as i64, asked["prompt_tokens"].as_i64().unwrap());
+    assert_eq!(prompt, "token capture".bytes().map(i64::from).collect::<Vec<_>>(), "byte tokenizer: the prompt's own bytes");
+
+    for key in ["completion_token_ids", "completion_logprobs", "prompt_token_ids"] {
+        assert!(plain.get(key).is_none(), "{key} was not asked for");
+    }
+    assert_eq!(plain["text"], asked["text"], "capturing changes nothing about the decode");
+    // Every reply names what decoded it.
+    assert_eq!(asked["backend"], json!(gpu_core::backend_name()));
+    assert!(asked["engine"].as_str().is_some_and(|e| e.starts_with("brain ")), "{asked:?}");
+}

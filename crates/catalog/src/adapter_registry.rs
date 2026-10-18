@@ -208,6 +208,7 @@ impl AdapterRegistry {
     /// `settings` (or none).
     pub fn new(settings: Option<AdapterBankSettings>, base: ServedBase) -> Arc<AdapterRegistry> {
         let family = ServedFamily::named(base.family()).unwrap_or_else(|| panic!("no adapter family '{}' is served", base.family()));
+        base.warm_digest();
         Arc::new(AdapterRegistry { settings, base, family, state: Mutex::new(State::default()), generation: AtomicU64::new(0) })
     }
 
@@ -544,6 +545,11 @@ pub(crate) struct AdapterSync {
 }
 
 impl AdapterSync {
+    /// The served base's digest, once it has been hashed.
+    pub(crate) fn base_digest(&self) -> Option<String> {
+        self.registry.base().peek_digest()
+    }
+
     pub(crate) fn new(registry: Arc<AdapterRegistry>) -> AdapterSync {
         AdapterSync { registry, seen: None, loaded: HashMap::new(), routes: HashMap::new() }
     }
@@ -689,6 +695,9 @@ impl Frontend for AdaptedFrontend<'_> {
     }
     fn stale(&self) -> bool {
         self.adapters.stale()
+    }
+    fn base_digest(&self) -> Option<String> {
+        self.adapters.base_digest()
     }
     fn rejection(&self, inv: &Invocation, reason: &model::serve::RejectReason) -> String {
         match (reason, inv.get_str(ADAPTER_PARAM)) {

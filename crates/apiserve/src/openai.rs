@@ -379,7 +379,7 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     if body.get("n").and_then(|v| v.as_i64()).unwrap_or(1) > 1 {
         return Err(ApiError::invalid_request(provider, "'n' > 1 is not supported"));
     }
-    crate::sampling::refuse_unsupported_openai(provider, body)?;
+    crate::sampling::refuse_unsupported_openai(provider, body, true)?;
     let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // Every `role:"tool"` message must carry the `tool_call_id` it answers — a
@@ -401,7 +401,8 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     let inv = Invocation::new()
         .set("messages", json!(serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into())))
         .set("max_new", json!(max_new(provider, body)?));
-    let mut inv = crate::sampling::apply(provider, body, inv)?;
+    let inv = crate::sampling::apply_token_capture(provider, body, crate::sampling::apply(provider, body, inv)?)?;
+    let mut inv = inv;
     if let Some(stop) = normalize_stop(body.get("stop")) {
         inv = inv.set("stop", json!(stop));
     }
@@ -510,7 +511,7 @@ fn to_completion_invocation(provider: Provider, body: &Value) -> Result<(String,
     if body.get("echo").and_then(|v| v.as_bool()).unwrap_or(false) {
         return Err(ApiError::invalid_request(provider, "'echo' is not supported"));
     }
-    crate::sampling::refuse_unsupported_openai(provider, body)?;
+    crate::sampling::refuse_unsupported_openai(provider, body, false)?;
     let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let inv = Invocation::new().set("prompt", json!(prompt)).set("chat", json!(false)).set("max_new", json!(max_new(provider, body)?));
@@ -773,7 +774,31 @@ fn non_stream_body(model: &str, co: &bridge::ChatOutcome, native: bool) -> Value
         body["system_fingerprint"] = Value::Null;
     }
     attach_served(&mut body, co);
+    attach_token_capture(&mut body, co);
     body
+}
+
+/// Add the sampled tokens a request asked for to a reply or a stream's
+/// terminal chunk `frame`: `choices[0].logprobs.content` (OpenAI's shape, each
+/// token named `token_id:<id>` because the server relays ids, not text pieces),
+/// `choices[0].token_ids` and the top-level `prompt_token_ids` (vLLM's
+/// extension names). Nothing is added for what was not asked.
+fn attach_token_capture(frame: &mut Value, co: &bridge::ChatOutcome) {
+    if let Some(prompt) = &co.prompt_token_ids {
+        frame["prompt_token_ids"] = json!(prompt);
+    }
+    if let Some(ids) = &co.completion_token_ids {
+        frame["choices"][0]["token_ids"] = json!(ids);
+    }
+    if let Some(logprobs) = &co.logprobs {
+        let ids = co.completion_token_ids.as_deref().unwrap_or_default();
+        let content: Vec<Value> = logprobs
+            .iter()
+            .enumerate()
+            .map(|(i, lp)| json!({ "token": ids.get(i).map_or_else(String::new, |id| format!("token_id:{id}")), "logprob": lp, "bytes": Value::Null, "top_logprobs": [] }))
+            .collect();
+        frame["choices"][0]["logprobs"] = json!({ "content": content, "refusal": Value::Null });
+    }
 }
 
 /// Add the non-standard `brain` object (seed used, adapter that answered) to a
@@ -1288,6 +1313,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
         // only when nothing was streamed incrementally.
         let mut final_text = String::new();
         let mut served = None;
+        let mut captured = None;
         while let Some(msg) = src.next().await {
             match msg {
                 StreamMsg::Delta(piece) => {
@@ -1311,6 +1337,9 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                     announce!();
                     let co = bridge::read_chat_outcome(&outcome);
                     served = co.served();
+                    let mut capture = json!({ "choices": [{}] });
+                    attach_token_capture(&mut capture, &co);
+                    captured = Some(capture);
                     prompt = co.prompt_tokens;
                     completion = co.completion_tokens;
                     finish = co.finish;
@@ -1353,6 +1382,18 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
         let mut last = chunk(&id, &model, json!({}), Some(&finish), native);
         if let Some(served) = served {
             last["brain"] = served;
+        }
+        if let Some(capture) = captured {
+            for key in ["prompt_token_ids"] {
+                if let Some(v) = capture.get(key) {
+                    last[key] = v.clone();
+                }
+            }
+            for key in ["token_ids", "logprobs"] {
+                if let Some(v) = capture["choices"][0].get(key) {
+                    last["choices"][0][key] = v.clone();
+                }
+            }
         }
         yield Ok(Event::default().data(last.to_string()));
 

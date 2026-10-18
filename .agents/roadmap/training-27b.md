@@ -92,13 +92,14 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
 
 ## Server and SDK: token ids and logprobs (the on-policy data contract)
 
-Today the HTTP server refuses `logprobs`/`top_logprobs` and token-id prompts and
-returns `logprobs: null`; the seed used is not echoed; `/v1/models` has the adapter
-digest only. Needed, with tests in the api-conformance e2e:
-- accept `logprobs`, return `choices[].logprobs.content[]` with `token_id` and
-  `logprob`; accept token-id prompts; echo the seed used; `system_fingerprint` as a
-  digest of {base, adapter, tokenizer, template}; `base_digest`, `tokenizer_digest`,
-  `template_digest` in `/v1/models`; the adapter that answered in every response.
+Done (HTTP chat, `docs/using/http-api.md`): `logprobs: true` and `return_token_ids: true`
+return the sampled token ids, each token's log-probability under its decoding
+distribution and the prompt ids; the seed used, the answering adapter, the base
+digest, backend and engine are echoed in the reply's `brain` object. Still needed,
+with tests in the api-conformance e2e:
+- accept token-id prompts; `system_fingerprint` as a digest of {base, adapter,
+  tokenizer, template}; `base_digest`, `tokenizer_digest`, `template_digest` in
+  `/v1/models`.
 - SDK: `ChatRequest::logprobs`, `ChatResponse.{prompt_ids, tokens, logprobs, sampling,
   identity}`, `ModelIdentity.{tokenizer, template}`.
 - A `generic-rollout-v1` dataset format and reader beside the preference reader; the

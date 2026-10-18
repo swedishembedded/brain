@@ -38,8 +38,30 @@ pub fn apply(provider: Provider, body: &Value, mut inv: Invocation) -> Result<In
         inv = inv.set("top_k", json!(k));
     }
     if let Some(v) = present(body, "seed") {
-        let seed = v.as_i64().ok_or_else(|| ApiError::invalid_request(provider, "'seed' must be an integer"))?;
+        // A seed the model drew itself spans all of u64 and is echoed back as
+        // such; sending it back must reproduce the decode.
+        let seed = v.as_u64().ok_or_else(|| ApiError::invalid_request(provider, "'seed' must be a non-negative integer"))?;
         inv = inv.set("seed", json!(seed));
+    }
+    Ok(inv)
+}
+
+/// Ask the model for the sampled tokens' ids and log-probabilities when the
+/// client sent `logprobs: true` (the log-probability of each sampled token) or
+/// `return_token_ids: true` (the prompt's and the completion's token ids; the
+/// extension vLLM names the same way). Neither is forwarded unless sent, so a
+/// request that does not read them pays nothing.
+pub fn apply_token_capture(provider: Provider, body: &Value, mut inv: Invocation) -> Result<Invocation, ApiError> {
+    for name in ["logprobs", "return_token_ids"] {
+        match present(body, name) {
+            None => {}
+            Some(v) => {
+                let on = v.as_bool().ok_or_else(|| ApiError::invalid_request(provider, format!("'{name}' must be a boolean")))?;
+                if on {
+                    inv = inv.set(name, json!(true));
+                }
+            }
+        }
     }
     Ok(inv)
 }
@@ -56,7 +78,12 @@ pub fn max_tokens(provider: Provider, name: &str, v: Option<&Value>) -> Result<i
 /// Refuse an OpenAI parameter brain cannot honour when it asks for anything
 /// but its neutral value. Clients send the neutral values by default
 /// (`presence_penalty: 0`, `logprobs: false`), and those are accepted.
-pub fn refuse_unsupported_openai(provider: Provider, body: &Value) -> Result<(), ApiError> {
+///
+/// `token_capture` says the endpoint can return the sampled tokens' ids and
+/// log-probabilities (see [`apply_token_capture`]): there `logprobs: true` is
+/// honoured instead of refused. `top_logprobs` stays refused either way: only
+/// the sampled token's own log-probability is available, not the alternatives.
+pub fn refuse_unsupported_openai(provider: Provider, body: &Value, token_capture: bool) -> Result<(), ApiError> {
     let refuse = |name: &str| Err(ApiError::invalid_request(provider, format!("'{name}' is not supported")));
     for name in ["presence_penalty", "frequency_penalty"] {
         if present(body, name).is_some_and(|v| v.as_f64() != Some(0.0)) {
@@ -66,7 +93,7 @@ pub fn refuse_unsupported_openai(provider: Provider, body: &Value) -> Result<(),
     if present(body, "logit_bias").is_some_and(|v| v.as_object().is_none_or(|m| !m.is_empty())) {
         return refuse("logit_bias");
     }
-    if present(body, "logprobs").is_some_and(|v| v.as_bool() != Some(false)) {
+    if present(body, "logprobs").is_some_and(|v| v.as_bool() != Some(false) && !(token_capture && v.as_bool() == Some(true))) {
         return refuse("logprobs");
     }
     if present(body, "top_logprobs").is_some_and(|v| v.as_i64() != Some(0)) {
@@ -98,6 +125,13 @@ mod tests {
 
         let inv = apply(P, &json!({"seed": 7, "top_k": 3, "temperature": 0.2}), Invocation::new()).unwrap();
         assert_eq!((inv.get_i64("seed"), inv.get_i64("top_k"), inv.get_f64("temp")), (Some(7), Some(3), Some(0.2)));
+    }
+
+    #[test]
+    fn a_seed_the_model_drew_is_accepted_back_over_the_whole_u64_range() {
+        let inv = apply(P, &json!({"seed": u64::MAX}), Invocation::new()).unwrap();
+        assert_eq!(inv.seed(), Ok(Some(u64::MAX)));
+        assert!(apply(P, &json!({"seed": -1}), Invocation::new()).is_err());
     }
 
     #[test]
@@ -133,10 +167,21 @@ mod tests {
     }
 
     #[test]
+    fn token_capture_is_forwarded_only_when_asked_and_logprobs_are_honoured_where_it_is() {
+        let body = json!({"logprobs": true, "return_token_ids": false});
+        refuse_unsupported_openai(P, &body, true).unwrap();
+        let inv = apply_token_capture(P, &body, Invocation::new()).unwrap();
+        assert_eq!((inv.get_bool("logprobs"), inv.get_bool("return_token_ids")), (Some(true), None));
+        assert!(refuse_unsupported_openai(P, &body, false).is_err());
+        assert!(refuse_unsupported_openai(P, &json!({"top_logprobs": 3}), true).is_err());
+        assert!(apply_token_capture(P, &json!({"return_token_ids": "yes"}), Invocation::new()).is_err());
+    }
+
+    #[test]
     fn unsupported_openai_parameters_are_refused_unless_neutral() {
         let neutral = json!({"presence_penalty": 0, "frequency_penalty": 0.0, "logit_bias": {}, "logprobs": false,
             "top_logprobs": 0, "response_format": {"type": "text"}});
-        refuse_unsupported_openai(P, &neutral).unwrap();
+        refuse_unsupported_openai(P, &neutral, false).unwrap();
         for (body, name) in [
             (json!({"presence_penalty": 0.5}), "presence_penalty"),
             (json!({"frequency_penalty": -1}), "frequency_penalty"),
@@ -145,7 +190,7 @@ mod tests {
             (json!({"top_logprobs": 5}), "top_logprobs"),
             (json!({"response_format": {"type": "json_object"}}), "response_format"),
         ] {
-            let e = refuse_unsupported_openai(P, &body).unwrap_err();
+            let e = refuse_unsupported_openai(P, &body, false).unwrap_err();
             assert!(format!("{e:?}").contains(name), "{body}: {e:?}");
         }
     }

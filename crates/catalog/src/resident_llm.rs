@@ -1258,6 +1258,9 @@ impl Frontend for QwenFrontend<'_> {
     fn stale(&self) -> bool {
         self.adapters.stale()
     }
+    fn base_digest(&self) -> Option<String> {
+        self.adapters.base_digest()
+    }
     fn rejection(&self, inv: &Invocation, reason: &model::serve::RejectReason) -> String {
         match (reason, inv.get_str(ADAPTER_PARAM)) {
             // An adapter the engine unloaded between routing and admission:

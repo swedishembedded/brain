@@ -834,12 +834,13 @@ async fn chat_bad_bodies_are_400() {
     // temperature, top_p or completion budget.
     let (app, key) = chat_app(Provider::OpenAI);
     let msg = json!([{"role": "user", "content": "hi"}]);
-    let cases: [Value; 10] = [
+    let cases: [Value; 11] = [
         json!({"messages": msg}),                                    // no model
         json!({"model": "brain-chat"}),                              // no messages
         json!({"model": "brain-chat", "messages": msg, "n": 2}),     // n > 1
         json!({"model": "brain-chat", "messages": msg, "presence_penalty": 0.5}),
-        json!({"model": "brain-chat", "messages": msg, "logprobs": true}),
+        json!({"model": "brain-chat", "messages": msg, "top_logprobs": 5}),
+        json!({"model": "brain-chat", "messages": msg, "return_token_ids": "yes"}),
         json!({"model": "brain-chat", "messages": msg, "top_k": 5000}),
         json!({"model": "brain-chat", "messages": msg, "temperature": 3.0}),
         json!({"model": "brain-chat", "messages": msg, "top_p": 1.5}),
@@ -3502,6 +3503,12 @@ impl Instance for SiblingChatInst {
         if let Some(id) = adapter {
             out = out.set("adapter", json!({"id": id, "digest": adapter_identity().digest}));
         }
+        if inv.get_bool("logprobs") == Some(true) || inv.get_bool("return_token_ids") == Some(true) {
+            out = out.set("completion_token_ids", json!([11, 12])).set("completion_logprobs", json!([-0.5, -0.25]));
+        }
+        if inv.get_bool("return_token_ids") == Some(true) {
+            out = out.set("prompt_token_ids", json!([1, 2, 3, 4, 5]));
+        }
         let answer = match requested {
             Some(seed) => format!("answered by {who} with seed {seed}"),
             None => format!("answered by {who}"),
@@ -3748,4 +3755,39 @@ async fn a_reply_names_the_adapter_that_answered_by_digest() {
     assert_eq!(with_brain.len(), 1, "exactly the terminal chunk carries the extension: {sse}");
     assert_eq!(with_brain[0]["brain"], json!({"seed": 5, "adapter": {"id": ADAPTER_ID, "digest": adapter_identity().digest}}));
     assert_eq!(with_brain[0]["choices"][0]["finish_reason"], json!("stop"));
+}
+
+/// A chat request that asks for them gets the sampled token ids and each
+/// token's log-probability on the choice, and the prompt's token ids at the top
+/// level of the reply (streamed: on the terminal chunk); a request that does
+/// not ask gets neither. The legacy completions endpoint keeps refusing.
+#[tokio::test]
+async fn a_chat_reply_returns_token_ids_and_logprobs_only_when_asked() {
+    let (app, _exec, key) = adapter_app(Provider::OpenAI);
+    let mut asked = chat_body(ADAPTER_BASE);
+    asked["logprobs"] = json!(true);
+    asked["return_token_ids"] = json!(true);
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &asked).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["choices"][0]["token_ids"], json!([11, 12]));
+    assert_eq!(v["prompt_token_ids"], json!([1, 2, 3, 4, 5]));
+    let content = v["choices"][0]["logprobs"]["content"].as_array().expect("logprobs.content");
+    let logprobs: Vec<f64> = content.iter().map(|t| t["logprob"].as_f64().unwrap()).collect();
+    assert_eq!(logprobs, vec![-0.5, -0.25]);
+    assert_eq!(content[0]["token"], json!("token_id:11"));
+
+    let (_, plain) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &chat_body(ADAPTER_BASE)).await;
+    assert!(plain["choices"][0]["logprobs"].is_null() && plain["choices"][0].get("token_ids").is_none() && plain.get("prompt_token_ids").is_none(), "{plain}");
+
+    asked["stream"] = json!(true);
+    let (_, sse) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &asked).await;
+    let frames: Vec<Value> = sse_data(&sse).iter().filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
+    let terminal: Vec<&Value> = frames.iter().filter(|f| f["choices"][0]["finish_reason"].is_string()).collect();
+    assert_eq!(terminal.len(), 1, "{sse}");
+    assert_eq!(terminal[0]["choices"][0]["token_ids"], json!([11, 12]));
+    assert_eq!(terminal[0]["prompt_token_ids"], json!([1, 2, 3, 4, 5]));
+    assert_eq!(terminal[0]["choices"][0]["logprobs"]["content"].as_array().map(Vec::len), Some(2));
+
+    let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/completions", &json!({"model": ADAPTER_BASE, "prompt": "hi", "logprobs": 1})).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
 }

@@ -83,17 +83,31 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   unseeded request is sampled with a fresh random seed. OpenAI parameters brain
   cannot honour are refused with 400 `invalid_request_error` naming the
   parameter rather than ignored: `n` > 1, a non-zero `presence_penalty` or
-  `frequency_penalty`, a non-empty `logit_bias`, `logprobs: true`, a non-zero
-  `top_logprobs`, and a `response_format` other than `text`. Their neutral values
-  are accepted.
+  `frequency_penalty`, a non-empty `logit_bias`, a non-zero `top_logprobs`, and a
+  `response_format` other than `text`; on the legacy completions endpoint also
+  `logprobs: true`. Their neutral values are accepted.
+- **Sampled tokens (chat).** `logprobs: true` makes the reply carry
+  `choices[0].logprobs.content[]` (`{token, logprob, bytes, top_logprobs}`; the
+  server relays ids, so `token` is `token_id:<id>`, `top_logprobs` is empty) and
+  `choices[0].token_ids`; `return_token_ids: true` (the vLLM extension name) adds
+  the completion ids and the top-level `prompt_token_ids` the model read. A
+  streamed reply carries them on the terminal chunk. The `logprob` of a token is
+  its log-probability under the distribution it was decoded from (the
+  temperature-scaled, top-k and top-p truncated softmax), `0.0` for greedy
+  decoding where the choice is deterministic; it is not the untruncated model
+  distribution. A request that sets neither flag pays for neither.
 - **Seed and served identity.** An OpenAI or OpenRouter chat or completions
   reply (and the terminal chunk of a stream) carries a non-standard
-  `brain: {"seed": <int>, "adapter": {"id", "digest"}}` object. `seed` is the
+  `brain: {"seed": <int>, "adapter": {"id", "digest"}, "base_digest", "backend",
+  "engine"}` object. `seed` is the
   seed the decode used, drawn fresh for an unseeded request, so any reply can
   be reproduced by sending it back; `adapter` appears only when an adapter
   answered and names the release that did, the same pair its model card carries.
-  Each key is absent when the model does not report it. Over D-Bus the same two
-  values are keys of the `result` JSON of `Run`.
+  `base_digest` is the `sha256:<hex>` of the base checkpoint (hashed in the
+  background after load, so absent on the first replies of a large model),
+  `backend` the compute backend that ran the decode (`cuda`, `cpu`, ...) and
+  `engine` the build (`brain <version>`). Each key is absent when the model does
+  not report it. Over D-Bus the same values are keys of the `result` JSON of `Run`.
 - **Admission / backpressure:** a request that can't start on a lane within
   `--admit-deadline-ms` gets **429** (`Retry-After`) - unless the request's own
   model is still cold-building (its first-ever activation, which can take well over a

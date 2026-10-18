@@ -53,6 +53,7 @@ use checkpoint::st::ModelCard;
 use model::adapter::bank::VerifiedAdapter;
 use model::lora::device_adapter::DeviceAdapter;
 use residency::AdapterIdentity;
+use std::sync::Arc;
 
 /// The largest adapter file read into memory. An adapter is megabytes (a
 /// rank-16 attention adapter on an 8B base is tens of MiB); a file past this
@@ -75,7 +76,7 @@ pub struct ServedBase {
     /// base digest cannot equal this file's; naming one of these as the
     /// adapter's base id binds it instead.
     quantized_from: Vec<String>,
-    digest: OnceLock<Result<String, String>>,
+    digest: Arc<OnceLock<Result<String, String>>>,
 }
 
 /// The card family of a Qwen3 adapter.
@@ -92,7 +93,7 @@ impl ServedBase {
 
     /// The base at `path` for adapters of card family `family`.
     pub fn of_family(family: &'static str, path: impl Into<PathBuf>, id: Option<String>) -> ServedBase {
-        ServedBase { path: path.into(), id, family, quantized_from: Vec::new(), digest: OnceLock::new() }
+        ServedBase { path: path.into(), id, family, quantized_from: Vec::new(), digest: Arc::new(OnceLock::new()) }
     }
 
     /// Declare the ids of the sources this base is a quantisation of.
@@ -109,6 +110,20 @@ impl ServedBase {
     /// The card family of the adapters this base takes.
     pub fn family(&self) -> &'static str {
         self.family
+    }
+
+    /// Start hashing the base in the background, so replies can name it once
+    /// it is known without a request waiting for gigabytes to be read.
+    pub fn warm_digest(&self) {
+        let base = self.clone();
+        std::thread::spawn(move || {
+            let _ = base.digest();
+        });
+    }
+
+    /// The base's digest if hashing has finished and succeeded.
+    pub fn peek_digest(&self) -> Option<String> {
+        self.digest.get().and_then(|d| d.as_ref().ok().cloned())
     }
 
     fn digest(&self) -> Result<&str, String> {
