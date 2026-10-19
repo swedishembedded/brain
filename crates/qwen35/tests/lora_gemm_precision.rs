@@ -36,7 +36,7 @@ fn the_tensor_core_tier_trains_like_the_fp32_reference_and_reports_its_path() {
     };
     // One set of weights for both tiers: the comparison is about arithmetic only.
     let init = weights(&lora_config(), 0.3);
-    for (base, loss_tol, min_cos) in [(Dtype::F32, 1e-5, 0.99999), (Dtype::BF16, 2e-2, 0.999)] {
+    for (base, loss_tol, min_cos) in [(Dtype::F32, 1e-3, 0.999), (Dtype::BF16, 2e-2, 0.999)] {
         let reference = build(&gpu, &init, base, GemmPrecision::Fp32Reference);
         assert!(matches!(reference.gemm_path(), GemmPath::Fp32Kernels { .. }), "the pinned tier must run the fp32 kernels");
         let auto = build(&gpu, &init, base, GemmPrecision::Auto);

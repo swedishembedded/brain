@@ -239,6 +239,14 @@ QWEN3 SERVING TUNABLES  (--qwen-weights names the checkpoint to serve; the
                          or more, whose fp32 weights do not fit one 24 GB
                          card.
   --qwen-weights-fp32    keep every weight fp32, whatever the size.
+  --qwen-weights-bf16    store the linears and the head as bf16 (a bf16 checkpoint's
+                         own values: half the fp32 bytes in memory and per
+                         decode step, no weight rounding), decoded inline.
+  --qwen-gemm-fp32       pin exact fp32 arithmetic for the linears. By default
+                         the prefill-shaped (more than 32 rows) linears of
+                         fp32 weights run on TF32 tensor cores where the
+                         card has them (operands rounded to a 10-bit
+                         mantissa, fp32 accumulation, no extra memory).
   --qwen-max-prefill N   cap the chunked-prefill row count below its 512
                          default (clamped 1..=512) - shrinks the paged-
                          attention scratch buffer linearly, the single
@@ -599,6 +607,8 @@ pub fn run_serve(args: &[String]) {
             "--qwen-kv-offload-gb" => qwen_cfg.kv_offload_gb = parsed(args, &mut i, "--qwen-kv-offload-gb"),
             "--qwen-weights-int8" => qwen_cfg.weights_int8 = Some(true),
             "--qwen-weights-fp32" => qwen_cfg.weights_int8 = Some(false),
+            "--qwen-weights-bf16" => qwen_cfg.weights_bf16 = true,
+            "--qwen-gemm-fp32" => qwen_cfg.gemm_precision = gpu_core::provider::library::GemmPrecision::Fp32Reference,
             "--qwen-max-prefill" => qwen_cfg.max_prefill_cap = parsed(args, &mut i, "--qwen-max-prefill"),
             "--decision-model" => decision_cfg.models.push(val(args, &mut i, "--decision-model")),
             "--decision-default" => decision_cfg.default = Some(val(args, &mut i, "--decision-default")),

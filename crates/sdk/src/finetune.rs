@@ -112,6 +112,7 @@ pub struct ChatFineTune {
     bf16_base: bool,
     int8_base: bool,
     nf4_base: bool,
+    gemm_precision: crate::GemmPrecision,
     thinking: bool,
     pack_answers: bool,
 }
@@ -256,6 +257,7 @@ impl ChatFineTune {
             bf16_base: false,
             int8_base: false,
             nf4_base: false,
+            gemm_precision: crate::GemmPrecision::Auto,
             thinking: true,
             pack_answers: false,
         }
@@ -542,6 +544,16 @@ impl ChatFineTune {
         self
     }
 
+    /// Arithmetic of the frozen-base GEMMs. The default, [`GemmPrecision::Auto`], runs them on
+    /// tensor cores where the card has them (bf16 or NF4 base: bf16 operands; fp32 base: TF32
+    /// operands, a 10-bit mantissa, no extra memory), fp32 accumulation, and on the exact fp32
+    /// kernels elsewhere; [`GemmPrecision::Fp32Reference`] pins the fp32 kernels. The adapters
+    /// and their small products stay exact fp32 in every tier.
+    pub fn gemm_precision(mut self, precision: crate::GemmPrecision) -> Self {
+        self.gemm_precision = precision;
+        self
+    }
+
     /// Run to completion.
     pub fn run(&self) -> Result<ChatFineTuneOutcome> {
         self.run_with(&CancelToken::default(), |_| {})
@@ -621,6 +633,7 @@ impl ChatFineTune {
             // never reaches.
             patience: if self.keep_best && self.patience == 0 { u32::MAX } else { self.patience },
             weight_decay: self.weight_decay,
+            gemm_precision: self.gemm_precision,
             cooldown_steps: self.cooldown_steps.unwrap_or(self.steps / COOLDOWN_DIVISOR),
             ..fit_opts(self.steps, block, self.lr, seed)
         };
@@ -1230,6 +1243,7 @@ pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::Fit
         patience: 0,
         cooldown_steps: 0,
         adam: Default::default(),
+        gemm_precision: Default::default(),
     }
 }
 

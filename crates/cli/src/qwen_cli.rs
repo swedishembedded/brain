@@ -670,6 +670,7 @@ fn train(args: &[String], base: Option<&str>) {
         cooldown_steps: 0,
         seed,
         adam: Default::default(),
+        gemm_precision: Default::default(),
     };
     // finetune: the trained model comes from the base as it is on disk, and
     // continues `out` when that already exists.

@@ -140,6 +140,7 @@ fn train(args: &[String], base: Option<&str>) {
         cooldown_steps: 0,
         seed,
         adam: glmdsa::ADAM,
+        gemm_precision: Default::default(),
     };
     if let Some(p) = base {
         if !Path::new(&out).exists() {

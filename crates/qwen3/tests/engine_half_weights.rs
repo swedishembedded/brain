@@ -54,6 +54,8 @@ fn half_precision_linears_compute_what_fp32_does_on_the_rounded_weights() {
         };
         let mut reference = Engine::from_map(cfg.clone(), &rounded, 4, 32, 1, 16, 64, false, false);
         let mut half = Engine::from_map_tier(cfg.clone(), &w, 4, 32, 1, 16, 64, false, dt);
+        half.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
+        reference.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
         assert_eq!(half.weights_tier(), dt, "the engine keeps the requested tier");
         let (want, want_steps) = run(&mut reference);
         let (got, got_steps) = run(&mut half);

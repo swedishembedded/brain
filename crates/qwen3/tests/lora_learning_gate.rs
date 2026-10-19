@@ -146,6 +146,7 @@ fn train_adapter(base_path: &str, target: u32, out_dir: &Path, adapter_out: &Pat
         cooldown_steps: 0,
         seed: data::rng::random_seed(),
         adam: Default::default(),
+        gemm_precision: Default::default(),
     };
     // rank=3 is coprime with this config's head_dim=8 / d_model=16
     // (a degenerate rank equal to head_dim or d_model

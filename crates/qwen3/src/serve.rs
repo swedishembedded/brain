@@ -18,6 +18,7 @@ use gpu_core::select::{
     AutoTuner, CachedSelector, DefaultSelector, Dtype, KernelSelector, KernelVariant, Op, OpShape,
     Schedule, TileShape, gemm_schedule_candidates, DECODE_REGIME_MAX_ROWS,
 };
+use gpu_core::provider::library::{self, GemmPrecision, LibraryGemmProvider};
 use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
 use model::block::{self, KernelIds};
 use model::dispatch::I8Scratch;
@@ -851,6 +852,9 @@ pub struct Engine {
     tier: Dtype,
     /// The half-tier GEMMs, when `tier` is BF16 or F16.
     half_gemm: Option<HalfGemm>,
+    /// Tensor-core products for the prefill-shaped linears (`Self::set_gemm_precision`): on by
+    /// default where the device has them, pinned to the fp32 kernels by `Fp32Reference`.
+    gemm: LibraryGemmProvider,
     /// Int8 activation-quantization scratch (`model::dispatch::I8Scratch` -
     /// the SAME struct `model::ops::Ops::act` wraps, B3's façade) - `Some`
     /// only when at least one `Weight` in `weights` is `I8` (mirrors the old
@@ -1334,6 +1338,7 @@ impl Engine {
         let argmax_part_dev = st(max_batch as u64 * ARGMAX_CHUNKS as u64 * 2);
         let topk_vals_dev = st(max_batch as u64 * TOPK_CAPACITY as u64);
         let topk_idx_dev = st(max_batch as u64 * TOPK_CAPACITY as u64);
+        let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
         Engine {
             cfg,
             caps,
@@ -1366,6 +1371,7 @@ impl Engine {
             lin_weights,
             tier,
             half_gemm,
+            gemm,
             i8_scratch,
             tuned_i8,
             tuned_splitk,
@@ -1450,6 +1456,20 @@ impl Engine {
     /// was asked for.
     pub fn weights_int8(&self) -> bool {
         self.i8_scratch.is_some()
+    }
+
+    /// Choose the arithmetic of the prefill-shaped fp32-weight linears: `Auto` (the default) runs rows
+    /// above the decode regime on the vendor library's TF32 tensor cores where the device has them
+    /// (operands rounded to a 10-bit mantissa, binary32 accumulation); `Fp32Reference` keeps the
+    /// exact fp32 kernels.
+    /// Takes effect for steps built afterwards, so call it before the first request.
+    pub fn set_gemm_precision(&mut self, precision: GemmPrecision) {
+        self.gemm = LibraryGemmProvider::for_gpu(&self.gpu, precision);
+    }
+
+    /// Whether prefill-shaped fp32 linears run on TF32 tensor cores.
+    pub fn tf32_prefill(&self) -> bool {
+        self.gemm.tf32_enabled()
     }
 
     /// The storage tier the linears and head landed on: what was asked for,
@@ -1834,12 +1854,27 @@ impl Engine {
     /// `x` must already be quantized (`Self::quant_once`) when `w` is `I8`.
     fn linear(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, out: &DeviceBuffer, rows: u32) {
         match w {
-            Weight::F32 { w, n, k } => self.mm_into(s, x, w, out, rows, *k, *n),
+            Weight::F32 { w, n, k } => {
+                // Prefill-shaped rows on TF32 tensor cores when the server asked for that tier; the
+                // decode regime is bandwidth-bound and keeps the GEMV kernels.
+                let whole = |buf| library::Operand { buf, range: (0, 0) };
+                if rows > DECODE_REGIME_MAX_ROWS && self.gemm.forward_tf32(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
+                    return;
+                }
+                self.mm_into(s, x, w, out, rows, *k, *n)
+            }
             Weight::I8 { w, s: sw, n, k } => {
                 let scratch = self.i8_scratch.as_ref().expect("qwen3 serve: I8 weight built without i8_scratch");
                 self.mm8(s, scratch, w, sw, *n, *k, out, rows);
             }
             Weight::BF16 { w, n, k } | Weight::F16 { w, n, k } => {
+                // Prefill-shaped rows of a bf16 weight on bf16 tensor cores (the activation is rounded to
+                // bf16 for the product, fp32 accumulation); the decode regime streams the weight through
+                // the inline-decode GEMV below.
+                let whole = |buf| library::Operand { buf, range: (0, 0) };
+                if matches!(self.tier, Dtype::BF16) && rows > DECODE_REGIME_MAX_ROWS && self.gemm.forward(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
+                    return;
+                }
                 // Same kernels, same selection as the fp32 path, with the
                 // weight decoded inline; no split-K variant exists for them.
                 let h = self.half_gemm.expect("qwen3 serve: half weight built without its GEMM kernels");
@@ -2382,12 +2417,20 @@ impl Engine {
                     // @workgroup_size(256) its own launch shape (both pinned
                     // in its own WGSL header), identical to the fp32 twin.
                     let ntiles_q = b.div_ceil(64);
-                    s.push(g.dispatch(
-                        PAGED_FLASH_PREFILL_I8,
-                        &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
-                        &[b, nh, nkv, hd, group, bs, mbt],
-                        gpu_core::Dispatch::Workgroups(nh * ntiles_q),
-                    ));
+                    let params = [b, nh, nkv, hd, group, bs, mbt];
+                    // fp16 tensor cores where the device has them and the fp32 tier was not pinned
+                    // (same buffers, uniform and launch geometry as the portable kernel).
+                    let native = (!self.gemm.is_reference_pinned())
+                        .then(|| block::native_paged_flash_prefill_kv8(g, hd, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_k[l], &self.scales_v[l]], &params, nh * ntiles_q))
+                        .flatten();
+                    s.push(native.unwrap_or_else(|| {
+                        g.dispatch(
+                            PAGED_FLASH_PREFILL_I8,
+                            &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
+                            &params,
+                            gpu_core::Dispatch::Workgroups(nh * ntiles_q),
+                        )
+                    }));
                 } else if fused {
                     // M2.7's split-key FlashDecode, ported to int8 KV: the
                     // selector's decode arm only answers `true` at `bsz == 1`
@@ -2444,12 +2487,10 @@ impl Engine {
                     // kernel's own tile size, @workgroup_size(256) its own
                     // launch shape (both pinned in its own WGSL header).
                     let ntiles_q = b.div_ceil(64);
-                    s.push(g.dispatch(
-                        PAGED_FLASH_PREFILL,
-                        &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
-                        &[b, nh, nkv, hd, group, bs, mbt],
-                        gpu_core::Dispatch::Workgroups(nh * ntiles_q),
-                    ));
+                    let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx];
+                    let params = [b, nh, nkv, hd, group, bs, mbt];
+                    let native = (!self.gemm.is_reference_pinned()).then(|| block::native_paged_flash_prefill(g, hd, &bufs, &params, nh * ntiles_q)).flatten();
+                    s.push(native.unwrap_or_else(|| g.dispatch(PAGED_FLASH_PREFILL, &bufs, &params, gpu_core::Dispatch::Workgroups(nh * ntiles_q))));
                 } else if fused {
                     // M2.7: split-key FlashDecode - the selector's decode
                     // arm only ever answers `true` at `bsz == 1` (`Op::

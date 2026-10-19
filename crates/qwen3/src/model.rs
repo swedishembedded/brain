@@ -28,6 +28,7 @@ use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
+use gpu_core::provider::library::GemmPrecision;
 use model::ops::{Act, Ops, Weight};
 pub use model::Shard;
 use optim::Optim;
@@ -899,7 +900,7 @@ impl Qwen {
     pub fn load(path: &str, b: u32, t: u32) -> Qwen {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &*src, true, shard, Dtype::F32, false)
+        Qwen::new_impl(cfg, b, t, &*src, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference)
     }
 
     /// Load an **inference-only** model: parameters are frozen (weights only, no
@@ -916,7 +917,7 @@ impl Qwen {
     pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Qwen {
         let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, reader, false, shard, Dtype::F32, false)
+        Qwen::new_impl(cfg, b, t, reader, false, shard, Dtype::F32, false, GemmPrecision::Fp32Reference)
     }
 
     /// Streaming **decode-only** load: like [`Self::from_reader_inference`]
@@ -933,7 +934,7 @@ impl Qwen {
     pub fn from_reader_decode(reader: &checkpoint::weightio::WeightReader, ctx: u32) -> Qwen {
         let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, Dtype::F32, true)
+        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference)
     }
 
     /// [`Self::from_reader_decode`], but from an in-memory tensor map instead of
@@ -943,7 +944,7 @@ impl Qwen {
     /// without rebuilding, use [`Self::attach_adapter`] instead.
     pub fn from_tensors_decode(cfg: QwenConfig, tensors: &HashMap<String, Vec<f32>>, ctx: u32) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, Dtype::F32, true)
+        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference)
     }
 
     /// [`Self::load_inference`] with the int8 numeric tier: group-wise weight
@@ -965,7 +966,7 @@ impl Qwen {
     fn load_inference_with(path: &str, b: u32, t: u32, dt: Dtype) -> Qwen {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &*src, false, shard, dt, false)
+        Qwen::new_impl(cfg, b, t, &*src, false, shard, dt, false, GemmPrecision::Fp32Reference)
     }
 
     /// The config of a brain checkpoint `reader` has open. The `from_reader_*`
@@ -978,7 +979,7 @@ impl Qwen {
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard, Dtype::F32, false)
+        Qwen::new_impl(cfg, b, t, init, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference)
     }
 
     /// A LoRA training build whose frozen base linears are held at the
@@ -996,7 +997,21 @@ impl Qwen {
     /// [`Self::new_lora_dt`] for one pipeline stage: only `shard`'s layers
     /// (and endpoint weights) are built, read from `init` a tensor at a time.
     pub fn new_lora_shard_dt(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false)
+        Qwen::new_lora_shard_dt_gemm(cfg, b, t, init, shard, dt, GemmPrecision::Fp32Reference)
+    }
+
+    /// [`Self::new_lora_shard_dt`] with the arithmetic of the frozen-weight GEMMs chosen:
+    /// `Auto` records tensor-core products (bf16 for a bf16 or NF4 base, TF32 for an fp32
+    /// base) where the device has them, `Fp32Reference` the exact fp32 kernels. The tapes are
+    /// recorded at construction, so the choice is made here, not afterwards.
+    pub fn new_lora_shard_dt_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype, gemm: GemmPrecision) -> Qwen {
+        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false, gemm)
+    }
+
+    /// [`Self::new_lora_dt`] with the GEMM arithmetic chosen (see [`Self::new_lora_shard_dt_gemm`]).
+    pub fn new_lora_dt_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, dt: Dtype, gemm: GemmPrecision) -> Qwen {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_lora_shard_dt_gemm(cfg, b, t, init, shard, dt, gemm)
     }
 
     /// Build a single pipeline **stage**: only the layers (and endpoint weights)
@@ -1009,7 +1024,12 @@ impl Qwen {
     /// streaming mmap'd `WeightReader`/`RemapSource` pair, which never
     /// materializes the whole checkpoint on the host.
     pub fn new_shard(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, train: bool, shard: Shard) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, train, shard, Dtype::F32, false)
+        Qwen::new_shard_gemm(cfg, b, t, init, train, shard, GemmPrecision::Fp32Reference)
+    }
+
+    /// [`Self::new_shard`] with the GEMM arithmetic chosen (see [`Self::new_lora_shard_dt_gemm`]).
+    pub fn new_shard_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, train: bool, shard: Shard, gemm: GemmPrecision) -> Qwen {
+        Qwen::new_impl(cfg, b, t, init, train, shard, Dtype::F32, false, gemm)
     }
 
     /// Inference-only shard with the 7 per-layer linears quantized to int8 (DP4A).
@@ -1055,7 +1075,7 @@ impl Qwen {
     /// kernel variants. The per-layer RMSNorm/QK-norm gains stay fp32: they
     /// are `[d]`/`[head_dim]` vectors consumed by norm kernels, not GEMMs.
     pub fn new_shard_dt(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, false, shard, dt, false)
+        Qwen::new_impl(cfg, b, t, init, false, shard, dt, false, GemmPrecision::Fp32Reference)
     }
 
     /// [`Self::new_shard_dt`] shaped for **KV-cache decode**, the way
@@ -1081,7 +1101,7 @@ impl Qwen {
     /// what landed. Calling a batched forward/backward entry point on the
     /// result panics loudly rather than running past the smaller buffers.
     pub fn new_shard_dt_decode(cfg: QwenConfig, ctx: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
-        Qwen::new_impl(cfg, 1, ctx, init, false, shard, dt, true)
+        Qwen::new_impl(cfg, 1, ctx, init, false, shard, dt, true, GemmPrecision::Fp32Reference)
     }
 
     /// The shared builder behind every constructor. `decode_only` (set only by
@@ -1089,7 +1109,8 @@ impl Qwen {
     /// decode instead of the batched forward: activations at `n = 1`,
     /// `scores`/`probs` at `n_heads·ctx` (not `n_heads·ctx²`), no backward
     /// scratch, no `logits`/`d_logits`/CE buffers.
-    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, dt: Dtype, decode_only: bool) -> Qwen {
+    #[allow(clippy::too_many_arguments)]
+    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, dt: Dtype, decode_only: bool, gemm: GemmPrecision) -> Qwen {
         // ONE reduced-precision build, parameterised by `dt` - the int8 tier
         // is not a second code path, it is this one at `Dtype::I8`. Every
         // non-fp32 tier is inference-only for the same reason int8 always
@@ -1123,7 +1144,8 @@ impl Qwen {
         // own doc comment for why index-space compatibility, not just
         // physical-device sharing, is required here) for the `Ops` façade
         // (B7).
-        let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen: Ops::new: {e}"));
+        let mut ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen: Ops::new: {e}"));
+        ops.set_gemm_precision(gemm);
         if !train {
             // A decode step allocates and frees the same few hundred
             // temporaries every token; on CUDA each is a driver call (and a
@@ -3578,6 +3600,11 @@ impl Qwen {
     /// The device this model runs on (profiling/observability).
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
+    }
+
+    /// The path the frozen-weight GEMMs run on and whether fp32 weights take TF32.
+    pub fn gemm_report(&self) -> (gpu_core::provider::library::GemmPath, bool) {
+        (self.ops.gemm_path().clone(), self.ops.tensor_gemm().tf32_enabled())
     }
 
     /// The storage tier the 7 per-layer linears ACTUALLY landed on - read off

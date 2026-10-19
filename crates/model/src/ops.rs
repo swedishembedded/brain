@@ -1201,6 +1201,14 @@ impl Ops {
     /// `y[yoff ..] = act @ W[first.., :]^T` on the library path, for a bf16 or NF4 `w`;
     /// `false` (nothing pushed) when the fp32 kernels must run instead.
     fn library_forward(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
+        if let Weight::F32 { w: wb, n, k } = w {
+            // The TF32 tier reads the fp32 weight and activation as they are stored.
+            let window = if rows.0 == 0 && rows.1 == *n { WHOLE } else { Self::row_window(rows.0, rows.1, *n, *k, 1) };
+            let m = act.m;
+            let x_op = library::Operand { buf: &act.x, range: (act.xr0 as u64 * *k as u64, m as u64 * *k as u64) };
+            let y_op = library::Operand { buf: y, range: (yoff, m as u64 * rows.1 as u64) };
+            return self.gemm.forward_tf32(&self.gpu, s, &x_op, &library::Operand { buf: wb, range: window }, &y_op, m, rows.1, *k);
+        }
         let Some((wb, window, mut prep, fresh_weight)) = self.library_weight(w, rows) else { return false };
         let k = w.k();
         let m = act.m;
@@ -1278,6 +1286,12 @@ impl Ops {
     /// for a bf16 `w`; `false` when the fp32 kernels must run instead.
     #[allow(clippy::too_many_arguments)]
     fn library_dx(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, dx_row0: u32, accumulate: bool) -> bool {
+        if let Weight::F32 { w: wb, n, k } = w {
+            let window = if rows.0 == 0 && rows.1 == *n { WHOLE } else { Self::row_window(rows.0, rows.1, *n, *k, 1) };
+            let dx_range = if dx_row0 == 0 { WHOLE } else { (dx_row0 as u64 * *k as u64, m as u64 * *k as u64) };
+            let dy_op = library::Operand { buf: dy, range: WHOLE };
+            return self.gemm.dx_tf32(&self.gpu, s, &dy_op, &library::Operand { buf: wb, range: window }, &library::Operand { buf: dx, range: dx_range }, m, rows.1, *k, accumulate);
+        }
         let Some((wb, window, mut prep, fresh)) = self.library_weight(w, rows) else { return false };
         let k = w.k();
         let dx_range = if dx_row0 == 0 { WHOLE } else { (dx_row0 as u64 * k as u64, m as u64 * k as u64) };

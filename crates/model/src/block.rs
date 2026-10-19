@@ -699,34 +699,34 @@ pub fn gqa_chunk_fused(g: &Gpu, k: &GqaChunkIds, head_dim: u32) -> Option<usize>
 /// [`gpu_core::provider::cuda::paged_flash_prefill_step`] where a native
 /// backend exists at all; `None` (the portable kernel) on wasm.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn native_paged_flash_prefill(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<Step> {
+pub fn native_paged_flash_prefill(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<Step> {
     gpu_core::provider::cuda::paged_flash_prefill_step(g, head_dim, bufs, params, blocks)
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn native_paged_flash_prefill(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 6], _params: &[u32], _blocks: u32) -> Option<Step> {
+pub fn native_paged_flash_prefill(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 6], _params: &[u32], _blocks: u32) -> Option<Step> {
     None
 }
 
 /// [`gpu_core::provider::cuda::paged_flash_prefill_bf16_step`], the bf16-KV form.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn native_paged_flash_prefill_bf16(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<Step> {
+pub fn native_paged_flash_prefill_bf16(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<Step> {
     gpu_core::provider::cuda::paged_flash_prefill_bf16_step(g, head_dim, bufs, params, blocks)
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn native_paged_flash_prefill_bf16(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 6], _params: &[u32], _blocks: u32) -> Option<Step> {
+pub fn native_paged_flash_prefill_bf16(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 6], _params: &[u32], _blocks: u32) -> Option<Step> {
     None
 }
 
 /// [`gpu_core::provider::cuda::paged_flash_prefill_kv8_step`], the int8-KV form.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn native_paged_flash_prefill_kv8(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 8], params: &[u32], blocks: u32) -> Option<Step> {
+pub fn native_paged_flash_prefill_kv8(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 8], params: &[u32], blocks: u32) -> Option<Step> {
     gpu_core::provider::cuda::paged_flash_prefill_kv8_step(g, head_dim, bufs, params, blocks)
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn native_paged_flash_prefill_kv8(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 8], _params: &[u32], _blocks: u32) -> Option<Step> {
+pub fn native_paged_flash_prefill_kv8(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 8], _params: &[u32], _blocks: u32) -> Option<Step> {
     None
 }
 

@@ -58,6 +58,16 @@ application", "an orchestrator"). Enforced by `make check/scope`
    catching - a swapped `k`/`v` - is shape-compatible on every GQA layer).
    LoRA finetune, INT8 (`q8.rs`), tensor/expert sharding, tool-call
    eval, and the **concurrent paged-KV serving engine** (`serve.rs`, see below).
+   **Tensor cores are the default on a device that has them**, chosen on queried
+   capability through the provider seam (`gpu_core::provider::library`,
+   `kernels_cuda`): fp32-weight linears above the decode regime multiply as TF32
+   (cuBLAS, binary32 accumulation, no copy of the weights), bf16/NF4 bases as
+   bf16, LoRA training builds record the same products, and the paged flash
+   prefill at `head_dim` 128/256 runs on fp16 `mma`. `GemmPrecision::Fp32Reference`
+   (`--qwen-gemm-fp32` on `brain serve`, `gemm_precision` on the SDK fine-tune)
+   pins the exact fp32 WGSL/CUDA-core path; gradient checks and parity gates pin
+   it, and a device without tensor cores or cuBLAS falls back to it silently.
+   Measured deviation on real Qwen3-8B weights: knowledge #320.
    `brain qwen3 {import,infer,serve,export,precompile,train,finetune,toolcall}`,
    plus the generic `brain import` for a `qwen3` GGUF.
 2b. **Qwen3.5-35B-A3B hybrid decoder** (`crates/qwen35moe`) - 40 layers, 3:1

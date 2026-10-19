@@ -926,7 +926,7 @@ pub fn rmsnorm_dx_add_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 5], &[d, rows, eps.to_bits()], rows)
 }
 
-/// The native tensor-core paged flash-prefill step for `head_dim = 256`, or
+/// The native tensor-core paged flash-prefill step for `head_dim = 256` or `128`, or
 /// `None` when the caller should dispatch the portable
 /// `paged_flash_prefill_hd256` it was going to anyway.
 ///
@@ -949,7 +949,10 @@ pub fn paged_flash_prefill_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backen
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
-    let kernel = kernels_cuda::find(select::Op::PagedAttentionFused, Dtype::F32, cc)?;
+    let kernel = match head_dim {
+        128 => kernels_cuda::get("flash_prefill_f16_hd128").filter(|k| k.min_cc <= cc)?,
+        _ => kernels_cuda::find(select::Op::PagedAttentionFused, Dtype::F32, cc)?,
+    };
     let id = gpu.native_kernel(kernel, PAGED_FLASH_PREFILL_BINDINGS)?;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 6], params, blocks)
 }
@@ -960,7 +963,7 @@ pub fn paged_flash_prefill_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backen
 /// arithmetic the token-by-token tape is held to.
 fn flash_prefill_offered(gpu: &crate::Gpu, head_dim: u32, params: &[u32]) -> bool {
     let rows = params.first().copied().unwrap_or(0);
-    head_dim == 256 && rows > select::DECODE_REGIME_MAX_ROWS && tensor_core_kernels_enabled(gpu)
+    matches!(head_dim, 128 | 256) && rows > select::DECODE_REGIME_MAX_ROWS && tensor_core_kernels_enabled(gpu)
 }
 
 /// [`paged_flash_prefill_step`] over a bf16 KV cache: `bufs` and `params` are
@@ -970,7 +973,7 @@ pub fn paged_flash_prefill_bf16_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&b
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
-    let kernel = kernels_cuda::get("flash_prefill_f16_hd256_bf16").filter(|k| k.min_cc <= cc)?;
+    let kernel = kernels_cuda::get(if head_dim == 128 { "flash_prefill_f16_hd128_bf16" } else { "flash_prefill_f16_hd256_bf16" }).filter(|k| k.min_cc <= cc)?;
     let id = gpu.native_kernel(kernel, PAGED_FLASH_PREFILL_BINDINGS)?;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 6], params, blocks)
 }
@@ -983,7 +986,7 @@ pub fn paged_flash_prefill_kv8_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&ba
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
-    let kernel = kernels_cuda::get("flash_prefill_f16_hd256_kv8").filter(|k| k.min_cc <= cc)?;
+    let kernel = kernels_cuda::get(if head_dim == 128 { "flash_prefill_f16_hd128_kv8" } else { "flash_prefill_f16_hd256_kv8" }).filter(|k| k.min_cc <= cc)?;
     let id = gpu.native_kernel(kernel, PAGED_FLASH_PREFILL_KV8_BINDINGS)?;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 8], params, blocks)
 }

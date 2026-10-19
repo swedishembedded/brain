@@ -89,6 +89,10 @@ pub struct FitOpts {
     pub cooldown_steps: u32,
     /// AdamW's β1, β2 and ε for every step of the run.
     pub adam: crate::Adam,
+    /// Arithmetic of the frozen-weight GEMMs on a device with tensor cores (a model that runs them
+    /// through [`crate::ops::Ops`] honours it). The default, `Auto`, takes tensor cores where the
+    /// device has them (bf16 for bf16 bases, TF32 for fp32 bases); `Fp32Reference` pins the exact fp32 kernels.
+    pub gemm_precision: gpu_core::provider::library::GemmPrecision,
 }
 
 impl Default for FitOpts {
@@ -116,6 +120,7 @@ impl Default for FitOpts {
             patience: 0,
             cooldown_steps: 0,
             adam: crate::Adam::default(),
+            gemm_precision: gpu_core::provider::library::GemmPrecision::Auto,
         }
     }
 }

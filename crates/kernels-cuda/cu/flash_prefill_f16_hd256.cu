@@ -7,7 +7,7 @@
 // then you can procure our services by sending an email to
 // info@swedishembedded.com.
 //
-// Fused causal paged-attention PREFILL at head_dim = 256 on fp16 tensor cores
+// Fused causal paged-attention PREFILL at head_dim = 256 (or 128: `-DBRAIN_HD=128`) on fp16 tensor cores
 // (`mma.sync.m16n8k16`, fp32 accumulate): the CUDA form of
 // `paged_flash_prefill_hd256.wgsl`, with the identical argument contract,
 // launch geometry (256 threads, `n_heads * ceil(bsz / 64)` blocks, query-tile
@@ -22,7 +22,11 @@
 //                  decreasing within a tile: causality is carried by it)
 //   ctx          : [bsz, n_heads * 256]               f32
 //
-// head_dim must be 256 (the caller checks; the entry does not re-validate it).
+// head_dim must be BRAIN_HD, 256 unless the including source defines 128 first (the caller checks; the
+// entry does not re-validate it). Every width-dependent count below is derived from HD: a 128-wide head
+// stages 16 chunks of 8 values per key row (two rows per warp pass), keeps 8 Q fragments and 8 output tiles
+// per warp, and folds 1/sqrt(HD) into the softmax exponent instead of into Q, so a width whose scale is not a
+// power of two rounds Q exactly as the width that is.
 //
 // KV tiers. The same source serves the three ways the KV cache stores its
 // planes (`BRAIN_KV_TIER`, default 0), with the argument list of the portable
@@ -76,11 +80,25 @@ typedef signed char KvT;
 
 #define BR 64              // query rows per block
 #define BC 32              // keys per tile
-#define HD 256             // head_dim
+#define THREADS 256
+#ifndef BRAIN_HD
+#define BRAIN_HD 256
+#endif
+#define HD BRAIN_HD        // head_dim
+#define KSTEPS (HD / 16)   // k16 steps over the head width
+#define OTILES (HD / 16)   // n8 output tiles per warp (it owns half the columns)
+#define HALF_HD (HD / 2)
+#define CHUNKS_PER_ROW (HD / 8)             // 8 values per thread chunk
+#define ROWS_PER_PASS (THREADS / CHUNKS_PER_ROW)
+#define STAGE_ITERS (BC / ROWS_PER_PASS)
 #define PAD_HALVES 8       // smem row padding
 #define ROW_HALVES (HD + PAD_HALVES)
-#define THREADS 256
 #define LOG2E 1.4426950408889634f
+#if BRAIN_HD == 256
+#define SM_SCALE_LOG2 (LOG2E * 0.0625f)   // LOG2E / sqrt(256), exact in binary apart from LOG2E
+#else
+#define SM_SCALE_LOG2 (LOG2E * 0.08838834764831845f)  // LOG2E / sqrt(128)
+#endif
 #define NEG_BIG (-1.0e30f)
 
 __device__ __forceinline__ unsigned int brain_smem_addr(const void* p) {
@@ -148,7 +166,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
     const unsigned int lane = tid & 31u;
     const unsigned int warp = tid >> 5;
     const unsigned int rg = warp >> 1;       // row group: 16 query rows
-    const unsigned int hh = warp & 1u;       // which half of the 256 output columns
+    const unsigned int hh = warp & 1u;       // which half of the output columns
     const unsigned int g = lane >> 2;        // MMA groupID
     const unsigned int t4 = lane & 3u;       // MMA threadID_in_group
 
@@ -165,11 +183,10 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
     __shared__ __align__(16) unsigned short Ks[BC * ROW_HALVES];
     __shared__ __align__(16) unsigned short Vs[BC * ROW_HALVES];
 
-    // ---- Q as fp16 A-fragments: 16 k16-steps x 4 registers, softmax scale folded in.
-    const float scale = 0.0625f;  // 1/sqrt(256), exact in binary
-    unsigned int qf[16][4];
+    // ---- Q as fp16 A-fragments: KSTEPS k16-steps x 4 registers (the softmax scale is applied to the scores).
+    unsigned int qf[KSTEPS][4];
 #pragma unroll
-    for (int s = 0; s < 16; ++s) {
+    for (int s = 0; s < KSTEPS; ++s) {
         const unsigned int d = s * 16u + t4 * 2u;
         float2 a0 = make_float2(0.f, 0.f), a1 = a0, a2 = a0, a3 = a0;
         if (live_a) {
@@ -180,28 +197,29 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
             a1 = *reinterpret_cast<const float2*>(q + row_b * q_row + h * HD + d);
             a3 = *reinterpret_cast<const float2*>(q + row_b * q_row + h * HD + d + 8u);
         }
-        qf[s][0] = brain_pack_f16x2(a0.x * scale, a0.y * scale);
-        qf[s][1] = brain_pack_f16x2(a1.x * scale, a1.y * scale);
-        qf[s][2] = brain_pack_f16x2(a2.x * scale, a2.y * scale);
-        qf[s][3] = brain_pack_f16x2(a3.x * scale, a3.y * scale);
+        qf[s][0] = brain_pack_f16x2(a0.x, a0.y);
+        qf[s][1] = brain_pack_f16x2(a1.x, a1.y);
+        qf[s][2] = brain_pack_f16x2(a2.x, a2.y);
+        qf[s][3] = brain_pack_f16x2(a3.x, a3.y);
     }
 
-    float o[16][4];
+    float o[OTILES][4];
 #pragma unroll
-    for (int n = 0; n < 16; ++n) { o[n][0] = o[n][1] = o[n][2] = o[n][3] = 0.f; }
+    for (int n = 0; n < OTILES; ++n) { o[n][0] = o[n][1] = o[n][2] = o[n][3] = 0.f; }
     float m_a = NEG_BIG, m_b = NEG_BIG, l_a = 0.f, l_b = 0.f;
 
-    // Staging: 4 chunks of 8 consecutive head-dim values per thread. Chunk e
-    // = tid + 256 c is key row (tid >> 5) + 8 c, column chunk tid & 31, so a
-    // warp reads one key row (1 KiB, coalesced) and writes 512 contiguous
-    // smem bytes (conflict-free).
-    const unsigned int cc = tid & 31u;
-    float4 raw[4][2];
+    // Staging: STAGE_ITERS chunks of 8 consecutive head-dim values per thread. Chunk
+    // e = tid + 256 c is key row (tid / CHUNKS_PER_ROW) + ROWS_PER_PASS c, column chunk
+    // tid % CHUNKS_PER_ROW: at HD 256 a warp reads one key row (1 KiB, coalesced) and
+    // writes 512 contiguous smem bytes (conflict-free); at HD 128 it reads two rows.
+    const unsigned int cc = tid % CHUNKS_PER_ROW;
+    const unsigned int row0 = tid / CHUNKS_PER_ROW;
+    float4 raw[STAGE_ITERS][2];
     auto issue = [&](const KvT* pool, const float* scales, unsigned int kt) {
         (void)scales;
 #pragma unroll
-        for (int c = 0; c < 4; ++c) {
-            const unsigned int j = kt * BC + (tid >> 5) + 8u * c;
+        for (int c = 0; c < STAGE_ITERS; ++c) {
+            const unsigned int j = kt * BC + row0 + ROWS_PER_PASS * c;
             float4 lo = make_float4(0.f, 0.f, 0.f, 0.f), hi = lo;
             if (j < max_t) {
                 const unsigned int physical = block_tables[(unsigned long long)bt_row * max_bt + j / block_size];
@@ -228,8 +246,8 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
     };
     auto commit = [&](unsigned short* dst) {
 #pragma unroll
-        for (int c = 0; c < 4; ++c) {
-            const unsigned int kr = (tid >> 5) + 8u * c;
+        for (int c = 0; c < STAGE_ITERS; ++c) {
+            const unsigned int kr = row0 + ROWS_PER_PASS * c;
             uint4 v;
             v.x = brain_pack_f16x2(raw[c][0].x, raw[c][0].y);
             v.y = brain_pack_f16x2(raw[c][0].z, raw[c][0].w);
@@ -264,7 +282,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
 #pragma unroll
         for (int n = 0; n < 4; ++n) { sacc[n][0] = sacc[n][1] = sacc[n][2] = sacc[n][3] = 0.f; }
 #pragma unroll
-        for (int s = 0; s < 16; ++s) {
+        for (int s = 0; s < KSTEPS; ++s) {
 #pragma unroll
             for (int np = 0; np < 2; ++np) {
                 unsigned int b0, b1, b2, b3;
@@ -279,10 +297,10 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
 #pragma unroll
         for (int n = 0; n < 4; ++n) {
             const unsigned int j0 = kt * BC + n * 8u + t4 * 2u;
-            sacc[n][0] = (j0 < len_a) ? sacc[n][0] * LOG2E : NEG_BIG;
-            sacc[n][1] = (j0 + 1u < len_a) ? sacc[n][1] * LOG2E : NEG_BIG;
-            sacc[n][2] = (j0 < len_b) ? sacc[n][2] * LOG2E : NEG_BIG;
-            sacc[n][3] = (j0 + 1u < len_b) ? sacc[n][3] * LOG2E : NEG_BIG;
+            sacc[n][0] = (j0 < len_a) ? sacc[n][0] * SM_SCALE_LOG2 : NEG_BIG;
+            sacc[n][1] = (j0 + 1u < len_a) ? sacc[n][1] * SM_SCALE_LOG2 : NEG_BIG;
+            sacc[n][2] = (j0 < len_b) ? sacc[n][2] * SM_SCALE_LOG2 : NEG_BIG;
+            sacc[n][3] = (j0 + 1u < len_b) ? sacc[n][3] * SM_SCALE_LOG2 : NEG_BIG;
             mx_a = fmaxf(mx_a, fmaxf(sacc[n][0], sacc[n][1]));
             mx_b = fmaxf(mx_b, fmaxf(sacc[n][2], sacc[n][3]));
         }
@@ -309,7 +327,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
         l_a = l_a * al_a + sum_a;
         l_b = l_b * al_b + sum_b;
 #pragma unroll
-        for (int n = 0; n < 16; ++n) {
+        for (int n = 0; n < OTILES; ++n) {
             o[n][0] *= al_a;
             o[n][1] *= al_a;
             o[n][2] *= al_b;
@@ -330,13 +348,13 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
         if (kt + 1u < ntiles_k) { issue(pool_k, SCALES_K, kt + 1u); }   // next K in flight under the PV MMAs
         __syncthreads();                   // V visible
 
-        // ---- O += P V for this warp's 128 output columns.
+        // ---- O += P V for this warp's HALF_HD output columns.
 #pragma unroll
         for (int kk = 0; kk < 2; ++kk) {
 #pragma unroll
-            for (int np = 0; np < 8; ++np) {
+            for (int np = 0; np < OTILES / 2; ++np) {
                 unsigned int b0, b1, b2, b3;
-                brain_ldsm_x4_t(vs_base + (((kk * 16u + v_row_lane) * ROW_HALVES) + hh * 128u + np * 16u + v_col_lane) * 2u, b0, b1, b2, b3);
+                brain_ldsm_x4_t(vs_base + (((kk * 16u + v_row_lane) * ROW_HALVES) + hh * HALF_HD + np * 16u + v_col_lane) * 2u, b0, b1, b2, b3);
                 brain_mma_f16(o[2 * np], pf[kk], b0, b1);
                 brain_mma_f16(o[2 * np + 1], pf[kk], b2, b3);
             }
@@ -351,8 +369,8 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
     const float inv_a = l_a > 0.f ? 1.0f / l_a : 0.f;
     const float inv_b = l_b > 0.f ? 1.0f / l_b : 0.f;
 #pragma unroll
-    for (int n = 0; n < 16; ++n) {
-        const unsigned int d = hh * 128u + n * 8u + t4 * 2u;
+    for (int n = 0; n < OTILES; ++n) {
+        const unsigned int d = hh * HALF_HD + n * 8u + t4 * 2u;
         if (live_a) {
             *reinterpret_cast<float2*>(ctx + row_a * q_row + h * HD + d) = make_float2(o[n][0] * inv_a, o[n][1] * inv_a);
         }

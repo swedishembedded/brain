@@ -152,9 +152,9 @@ pub fn build_for_training(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSour
     let shard = crate::model::Shard::whole(cfg.n_layers as usize);
     crate::footprint::place_and_build(&cfg.clone(), &shard.clone(), dt, opts.batch_size, opts.block_size, true, false, "qwen3 finetune", || {
         if dt == Dtype::F32 {
-            Qwen::new_shard(cfg, opts.batch_size, opts.block_size, init, true, shard)
+            Qwen::new_shard_gemm(cfg, opts.batch_size, opts.block_size, init, true, shard, opts.gemm_precision)
         } else {
-            Qwen::new_lora_dt(cfg, opts.batch_size, opts.block_size, init, dt)
+            Qwen::new_lora_dt_gemm(cfg, opts.batch_size, opts.block_size, init, dt, opts.gemm_precision)
         }
     })
     .map_err(std::io::Error::other)

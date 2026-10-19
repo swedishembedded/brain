@@ -525,6 +525,9 @@ pub struct LibraryGemm {
     pub stride_b: i64,
     /// Elements between consecutive `C` matrices of a batch.
     pub stride_c: i64,
+    /// Let binary32 operands multiply on tensor cores as TF32 (10-bit mantissa, binary32
+    /// accumulation). `false` keeps binary32 products exact; ignored when an operand is bf16.
+    pub tf32: bool,
 }
 
 /// A provider's own compiled kernel, handed to [`Backend::register_native`] -

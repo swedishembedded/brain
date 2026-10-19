@@ -14,7 +14,7 @@
 //! One handle belongs to one [`crate::exec::Context`] and is bound to that
 //! context's stream, so a product is ordered with the kernels around it by the
 //! stream itself. Operands are bf16 with binary32 accumulation
-//! (`CUBLAS_COMPUTE_32F`), the mixed-precision recipe of bf16 LoRA/QLoRA
+//! (`CUBLAS_COMPUTE_32F`), or binary32 rounded to TF32 when a product asks for it (`LibraryGemm::tf32`), the mixed-precision recipe of bf16 LoRA/QLoRA
 //! training; the output is binary32.
 
 use std::ffi::{c_int, c_void};
@@ -34,6 +34,8 @@ const R_32F: c_int = 0;
 const R_16BF: c_int = 14;
 /// `CUBLAS_COMPUTE_32F`.
 const COMPUTE_32F: c_int = 68;
+/// `CUBLAS_COMPUTE_32F_FAST_TF32`: binary32 operands rounded to TF32 inside the tensor cores.
+const COMPUTE_32F_FAST_TF32: c_int = 74;
 /// `CUBLAS_GEMM_DEFAULT`: the library's own heuristic picks the algorithm.
 const GEMM_DEFAULT: c_int = -1;
 
@@ -185,6 +187,7 @@ impl Blas {
             LibraryDtype::F32 => R_32F,
             LibraryDtype::Bf16 => R_16BF,
         };
+        let compute = if gemm.tf32 && gemm.a == LibraryDtype::F32 && gemm.b == LibraryDtype::F32 { COMPUTE_32F_FAST_TF32 } else { COMPUTE_32F };
         let op = |t: bool| if t { OP_T } else { OP_N };
         let dim = |v: u32, what: &str| c_int::try_from(v).map_err(|_| format!("cublasGemmEx: {what} {v} exceeds the library's 32-bit range"));
         let _turn = self.busy.lock().unwrap_or_else(|e| e.into_inner());
@@ -216,7 +219,7 @@ impl Blas {
                     c as *mut c_void,
                     ty(gemm.c),
                     ldc,
-                    COMPUTE_32F,
+                    compute,
                     GEMM_DEFAULT,
                 )
             } else {
@@ -242,7 +245,7 @@ impl Blas {
                     ldc,
                     gemm.stride_c,
                     dim(gemm.batch, "batch")?,
-                    COMPUTE_32F,
+                    compute,
                     GEMM_DEFAULT,
                 )
             }

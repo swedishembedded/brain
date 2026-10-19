@@ -29,13 +29,14 @@
 //!   qwen_bench                      # prefill T=512 + decode, fp32, at 0.6B
 //!   qwen_bench prefill [T] [reps]
 //!   qwen_bench decode  [ctx] [reps]
-//!   qwen_bench serve   [rows] [reps] [ctx] [i8w] [kv8]
+//!   qwen_bench serve   [rows] [reps] [ctx] [i8w|bf16w] [kv8] [--gemm auto|fp32]
 //!                                    # the PAGED serving tape (a different
 //!                                    # kernel set from the batched forward);
 //!                                    # `i8w` = int8 weights, `kv8` = int8 KV
 //!   qwen_bench head    [reps]       # the tied 151936x1024 LM head alone
 //!   qwen_bench cost                 # offline FLOP/byte accounting, no device
 //!   qwen_bench lora-train --t T [--weights CKPT] [--steps N] [--rank R] [--profile]
+//!                         [--base bf16] [--gemm auto|fp32]
 //!                                    # one LoRA training step (zero_grads +
 //!                                    # forward + backward + AdamW) at batch 1
 //!                                    # and block T, rank R (default 8, alpha
@@ -53,6 +54,13 @@
 //!                                    # --step-cache replays recorded dispatches
 //!                                    # as the served path does
 //!                                    # (`Gpu::enable_step_cache`)
+//!   qwen_bench gemm-accuracy --weights CKPT_DIR --text FILE [--t T] [--windows W]
+//!                                    # REAL weights: logit/NLL deviation of the default
+//!                                    # tensor-core GEMM tier from exact fp32 on W windows of
+//!                                    # T tokens of FILE (needs the checkpoint's tokenizer.json)
+//!   qwen_bench serve-accuracy --weights CKPT_DIR --text FILE [--t T] [--prompts N] [--gen G] [--kv int8|fp32]
+//!                                    # REAL weights: the serving engine's last-token distribution and
+//!                                    # greedy tokens under fp32 / TF32 / bf16-weight / int8-weight tiers
 //!   qwen_bench gemm8   [m k n] [reps]      # A/B `matmul_i8_dyn` at one shape
 //!   qwen_bench gemm8-sweep [k n] [reps]    # `matmul_i8_dyn` GOP/s across an
 //!                                          # `m` sweep at fixed k,n — the D0
@@ -85,7 +93,7 @@
 //!                                          # `start`, so a nonzero `start`
 //!                                          # is the regime this kernel
 //!                                          # targets
-//!   qwen_bench serve-prefill [cc] [reps] [start] [i8w] [kv8]
+//!   qwen_bench serve-prefill [cc] [reps] [start] [i8w|bf16w] [kv8] [--gemm auto|fp32]
 //!                                          # the WHOLE serving tape in the
 //!                                          # causal-chunk PREFILL regime
 //!                                          # (`causal_chunk = true`), which
@@ -103,6 +111,8 @@
 
 use std::time::Instant;
 
+use data::Tokenizer as _;
+use gpu_core::provider::library::GemmPrecision;
 use gpu_core::roof::Roofs;
 use gpu_core::Gpu;
 use qwen3::{Qwen, QwenConfig};
@@ -312,6 +322,14 @@ fn main() {
         lora_train_bench(&a, cfg, model_name);
         return;
     }
+    if mode == "gemm-accuracy" {
+        gemm_accuracy(&a);
+        return;
+    }
+    if mode == "serve-accuracy" {
+        serve_accuracy(&a);
+        return;
+    }
     if mode == "lora-decode" {
         lora_decode_bench(&a);
         return;
@@ -327,7 +345,7 @@ fn main() {
         let cc: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
         let reps: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
         let start: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(512);
-        serve_prefill_bench(&cfg, model_name, cc, start, reps, a.iter().any(|x| x == "i8w"), a.iter().any(|x| x == "kv8"));
+        serve_prefill_bench(&cfg, model_name, cc, start, reps, a.iter().any(|x| x == "i8w"), a.iter().any(|x| x == "bf16w"), a.iter().any(|x| x == "kv8"), gemm_flag(&a));
         return;
     }
     if mode == "flash-prefill-i8" {
@@ -428,9 +446,12 @@ fn main() {
                 return;
             }
             let t0 = Instant::now();
-            let eng = qwen3::serve::Engine::from_map(
-                cfg.clone(), &init, bs, rows * mbs, rows.max(8), mbs, rows.max(8), kv8, i8w,
-            );
+            let mut eng = if a.iter().any(|x| x == "bf16w") {
+                qwen3::serve::Engine::from_map_tier(cfg.clone(), &init, bs, rows * mbs, rows.max(8), mbs, rows.max(8), kv8, qwen3::Dtype::BF16)
+            } else {
+                qwen3::serve::Engine::from_map(cfg.clone(), &init, bs, rows * mbs, rows.max(8), mbs, rows.max(8), kv8, i8w)
+            };
+            eng.set_gemm_precision(gemm_flag(&a));
             eprintln!("built in {:.1}s\n", t0.elapsed().as_secs_f32());
             let gpu = eng.gpu().share();
             let roofs = banner(&gpu);
@@ -1047,7 +1068,7 @@ pub fn flash_prefill_i8_bench(start: u32, cc: u32, reps: usize) {
 /// exactly the contract `paged_flash_prefill{,_i8}` documents.
 ///
 /// `qwen_bench serve-prefill [cc] [reps] [start] [i8w] [kv8]`.
-fn serve_prefill_bench(cfg: &QwenConfig, model_name: &str, cc: u32, start: u32, reps: usize, i8w: bool, kv8: bool) {
+fn serve_prefill_bench(cfg: &QwenConfig, model_name: &str, cc: u32, start: u32, reps: usize, i8w: bool, bf16w: bool, kv8: bool, gemm: GemmPrecision) {
     let bs = 16u32;
     let total = start + cc;
     let mbs = total.div_ceil(bs);
@@ -1059,7 +1080,13 @@ fn serve_prefill_bench(cfg: &QwenConfig, model_name: &str, cc: u32, start: u32, 
         if kv8 { ", int8 KV" } else { "" }
     );
     let init = init_weights_fast(cfg, 7);
-    let eng = qwen3::serve::Engine::from_map(cfg.clone(), &init, bs, num_blocks, cc.max(8), mbs, cc.max(8), kv8, i8w);
+    let mut eng = if bf16w {
+        qwen3::serve::Engine::from_map_tier(cfg.clone(), &init, bs, num_blocks, cc.max(8), mbs, cc.max(8), kv8, qwen3::Dtype::BF16)
+    } else {
+        qwen3::serve::Engine::from_map(cfg.clone(), &init, bs, num_blocks, cc.max(8), mbs, cc.max(8), kv8, i8w)
+    };
+    eng.set_gemm_precision(gemm);
+    eprintln!("gemm precision {gemm:?}: tf32 prefill {}", eng.tf32_prefill());
     let gpu = eng.gpu().share();
     let roofs = banner(&gpu);
 
@@ -1073,6 +1100,166 @@ fn serve_prefill_bench(cfg: &QwenConfig, model_name: &str, cc: u32, start: u32, 
     let steps = eng.steps_for_profile(cc, &tokens, &positions, &seqlens, &blocks, &offsets, &bt, true);
     let secs = report(&gpu, &format!("SERVE-PREFILL cc={cc} start={start}"), &steps, reps, roofs);
     println!("\none prefill chunk of {cc} rows at start={start}: {:.2} ms  ->  {:.0} tok/s", secs * 1e3, cc as f64 / secs);
+}
+
+/// `--gemm auto|fp32` (default auto): the arithmetic of the frozen-weight GEMMs.
+fn gemm_flag(a: &[String]) -> GemmPrecision {
+    match flag(a, "--gemm") {
+        None | Some("auto") => GemmPrecision::Auto,
+        Some("fp32") => GemmPrecision::Fp32Reference,
+        Some(other) => panic!("--gemm {other}: expected auto or fp32"),
+    }
+}
+
+/// Logits of `windows` consecutive `t`-token windows of `ids` under `precision`, concatenated.
+fn window_logits(dir: &str, ids: &[u32], t: usize, windows: usize, precision: GemmPrecision) -> Vec<f32> {
+    let (cfg, src) = qwen3::open_checkpoint(dir).unwrap_or_else(|e| panic!("{e}"));
+    let shard = qwen3::Shard::whole(cfg.n_layers as usize);
+    let m = Qwen::new_shard_gemm(cfg, 1, t as u32, &*src, false, shard, precision);
+    drop(src);
+    eprintln!("gemm-accuracy: {precision:?} -> {:?}", m.gemm_report());
+    let mut out = Vec::new();
+    for w in 0..windows {
+        out.extend(m.logits_all(&ids[w * t..(w + 1) * t]));
+    }
+    out
+}
+
+/// Real-weight logit deviation of the default (tensor-core) GEMM tier from the exact fp32 tier - see the
+/// `gemm-accuracy` usage line. Reports, over every position of every window: the worst absolute logit
+/// difference, the relative RMS difference, top-1 agreement, the KL divergence of the next-token
+/// distribution (fp32 -> tensor-core) and the mean next-token NLL of both tiers.
+fn gemm_accuracy(a: &[String]) {
+    let dir = flag(a, "--weights").unwrap_or_else(|| panic!("gemm-accuracy needs --weights CKPT"));
+    let text_path = flag(a, "--text").unwrap_or_else(|| panic!("gemm-accuracy needs --text FILE"));
+    let t: usize = flag(a, "--t").and_then(|s| s.parse().ok()).unwrap_or(512);
+    let windows: usize = flag(a, "--windows").and_then(|s| s.parse().ok()).unwrap_or(4);
+    let tok_path = std::path::Path::new(dir).join("tokenizer.json");
+    let tok = data::qwen_tokenizer::QwenBpe::from_file(tok_path.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
+    let text = std::fs::read_to_string(text_path).unwrap_or_else(|e| panic!("{text_path}: {e}"));
+    let ids = tok.encode(&text);
+    assert!(ids.len() > t * windows, "{text_path} holds {} tokens, need {}", ids.len(), t * windows + 1);
+    let reference = window_logits(dir, &ids, t, windows, GemmPrecision::Fp32Reference);
+    let tuned = window_logits(dir, &ids, t, windows, GemmPrecision::Auto);
+    let v = reference.len() / (t * windows);
+    let log_softmax = |row: &[f32]| -> Vec<f64> {
+        let mx = row.iter().cloned().fold(f32::MIN, f32::max) as f64;
+        let lse = mx + row.iter().map(|x| (*x as f64 - mx).exp()).sum::<f64>().ln();
+        row.iter().map(|x| *x as f64 - lse).collect()
+    };
+    let (mut worst, mut sq_diff, mut sq_ref, mut agree, mut kl_sum, mut kl_max) = (0f64, 0f64, 0f64, 0usize, 0f64, 0f64);
+    let (mut nll_ref, mut nll_tuned, mut scored) = (0f64, 0f64, 0usize);
+    for pos in 0..t * windows {
+        let (r, g) = (&reference[pos * v..(pos + 1) * v], &tuned[pos * v..(pos + 1) * v]);
+        for (x, y) in r.iter().zip(g) {
+            let d = (*x as f64 - *y as f64).abs();
+            worst = worst.max(d);
+            sq_diff += d * d;
+            sq_ref += (*x as f64).powi(2);
+        }
+        let argmax = |row: &[f32]| row.iter().enumerate().fold((0, f32::MIN), |b, (i, &x)| if x > b.1 { (i, x) } else { b }).0;
+        agree += (argmax(r) == argmax(g)) as usize;
+        let (lr, lg) = (log_softmax(r), log_softmax(g));
+        let kl: f64 = lr.iter().zip(&lg).map(|(a, b)| a.exp() * (a - b)).sum();
+        kl_sum += kl;
+        kl_max = kl_max.max(kl);
+        // The next token inside the window scores the position.
+        if pos % t + 1 < t {
+            let next = ids[pos / t * t + pos % t + 1] as usize;
+            nll_ref -= lr[next];
+            nll_tuned -= lg[next];
+            scored += 1;
+        }
+    }
+    let n = (t * windows) as f64;
+    println!(
+        "gemm-accuracy {dir} t={t} windows={windows} positions={}: max|dlogit|={worst:.4} rel_rms={:.3e} top1_agree={:.4} KL mean={:.3e} max={kl_max:.3e} NLL fp32={:.4} tensor-core={:.4} (n={scored})",
+        t * windows,
+        (sq_diff / sq_ref).sqrt(),
+        agree as f64 / n,
+        kl_sum / n,
+        nll_ref / scored as f64,
+        nll_tuned / scored as f64,
+    );
+}
+
+/// Serving-engine accuracy of each tensor-core / reduced-precision tier against the exact fp32 tier on
+/// REAL weights - see the `serve-accuracy` usage line. Per prompt: the final hidden state of a `t`-token
+/// prefill is projected through the LM head on the host (f64 accumulation); the table reports the worst
+/// absolute logit difference, KL(reference || tier) of the next-token distribution, top-1 agreement over
+/// the prompts, and the share of greedy tokens (of `gen` per prompt) that equal the reference's.
+fn serve_accuracy(a: &[String]) {
+    use model::paged::BlockTable;
+    let dir = flag(a, "--weights").unwrap_or_else(|| panic!("serve-accuracy needs --weights CKPT_DIR"));
+    let text_path = flag(a, "--text").unwrap_or_else(|| panic!("serve-accuracy needs --text FILE"));
+    let t: usize = flag(a, "--t").and_then(|s| s.parse().ok()).unwrap_or(256);
+    let n_prompts: usize = flag(a, "--prompts").and_then(|s| s.parse().ok()).unwrap_or(16);
+    let gen: usize = flag(a, "--gen").and_then(|s| s.parse().ok()).unwrap_or(24);
+    let greedy_prompts: usize = flag(a, "--greedy-prompts").and_then(|s| s.parse().ok()).unwrap_or(6);
+    let tok = data::qwen_tokenizer::QwenBpe::from_file(std::path::Path::new(dir).join("tokenizer.json").to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
+    let ids = tok.encode(&std::fs::read_to_string(text_path).unwrap_or_else(|e| panic!("{text_path}: {e}")));
+    assert!(ids.len() >= t * n_prompts, "{text_path} holds {} tokens, need {}", ids.len(), t * n_prompts);
+    let (cfg, src) = qwen3::open_checkpoint(dir).unwrap_or_else(|e| panic!("{e}"));
+    let tensors = qwen3::serve::Engine::tensors_from(&cfg, &*src).unwrap_or_else(|e| panic!("{e}"));
+    drop(src);
+    let (d, v) = (cfg.d_model as usize, cfg.vocab as usize);
+    let head = tensors.get(cfg.head_weight()).unwrap_or_else(|| panic!("no head weight")).clone();
+    let prompts: Vec<Vec<u32>> = (0..n_prompts).map(|i| ids[i * t..(i + 1) * t].to_vec()).collect();
+    let kv_int8 = flag(a, "--kv") != Some("fp32");
+    let bs = 16u32;
+    let mbs = (t + gen).div_ceil(bs as usize) as u32 + 1;
+    let num_blocks = mbs * (n_prompts as u32 + 4);
+    // (label, tier, precision)
+    let tiers: Vec<(&str, qwen3::Dtype, GemmPrecision)> = vec![
+        ("fp32 weights, fp32 kernels (reference)", qwen3::Dtype::F32, GemmPrecision::Fp32Reference),
+        ("fp32 weights, fp32 kernels (repeat: the noise floor)", qwen3::Dtype::F32, GemmPrecision::Fp32Reference),
+        ("fp32 weights, tensor cores (default)", qwen3::Dtype::F32, GemmPrecision::Auto),
+        ("bf16 weights, tensor cores (default)", qwen3::Dtype::BF16, GemmPrecision::Auto),
+        ("bf16 weights, fp32 kernels", qwen3::Dtype::BF16, GemmPrecision::Fp32Reference),
+        ("int8 weights", qwen3::Dtype::I8, GemmPrecision::Auto),
+    ];
+    let logits_of = |hidden: &[f32]| -> Vec<f64> { (0..v).map(|r| (0..d).map(|c| head[r * d + c] as f64 * hidden[c] as f64).sum::<f64>()).collect() };
+    let log_softmax = |row: &[f64]| -> Vec<f64> {
+        let mx = row.iter().cloned().fold(f64::MIN, f64::max);
+        let lse = mx + row.iter().map(|x| (x - mx).exp()).sum::<f64>().ln();
+        row.iter().map(|x| x - lse).collect()
+    };
+    let mut reference: Option<(Vec<Vec<f64>>, Vec<Vec<u32>>)> = None;
+    for (label, tier, precision) in tiers {
+        let t0 = Instant::now();
+        let mut eng = qwen3::serve::Engine::from_map_tier(cfg.clone(), &tensors, bs, num_blocks, 8, mbs, 512, kv_int8, tier);
+        eng.set_gemm_precision(precision);
+        let landed = eng.weights_tier();
+        let mut logits = Vec::new();
+        for p in &prompts {
+            let mut table = BlockTable::new();
+            logits.push(log_softmax(&logits_of(&eng.prefill_for_perf(&mut table, p))));
+        }
+        let greedy = eng.generate_greedy(&prompts[..greedy_prompts].to_vec(), gen, None);
+        drop(eng);
+        match &reference {
+            None => {
+                println!("serve-accuracy {label}: (reference) tier {landed:?}, {n_prompts} prompts of {t} tokens, built+ran in {:.0}s", t0.elapsed().as_secs_f32());
+                reference = Some((logits, greedy));
+            }
+            Some((rl, rg)) => {
+                let (mut worst, mut kl_sum, mut kl_max, mut agree) = (0f64, 0f64, 0f64, 0usize);
+                for (r, g) in rl.iter().zip(&logits) {
+                    worst = worst.max(r.iter().zip(g).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max));
+                    let kl: f64 = r.iter().zip(g).map(|(x, y)| x.exp() * (x - y)).sum();
+                    kl_sum += kl;
+                    kl_max = kl_max.max(kl);
+                    let am = |row: &[f64]| row.iter().enumerate().fold((0, f64::MIN), |b, (i, &x)| if x > b.1 { (i, x) } else { b }).0;
+                    agree += (am(r) == am(g)) as usize;
+                }
+                let (same, total) = rg.iter().zip(&greedy).fold((0usize, 0usize), |(s, n), (a, b)| (s + a.iter().zip(b).filter(|(x, y)| x == y).count(), n + a.len()));
+                println!(
+                    "serve-accuracy {label}: tier {landed:?} max|dlogprob|={worst:.4} KL mean={:.3e} max={kl_max:.3e} top1_agree={agree}/{n_prompts} greedy_tokens_equal={same}/{total} (prefix-aligned positionwise)",
+                    kl_sum / n_prompts as f64
+                );
+            }
+        }
+    }
 }
 
 /// The value after `flag` in argv, if present.
@@ -1197,11 +1384,13 @@ fn lora_train_bench(a: &[String], shape: QwenConfig, model_name: &str) {
     let t0 = Instant::now();
     let (cfg, init) = match flag(a, "--weights") {
         Some(w) => {
-            let c = checkpoint::load(w);
-            let mut cfg = QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{e}"));
+            // Any checkpoint `open_checkpoint` reads: a brain file, a Hugging Face directory or a GGUF.
+            let (mut cfg, src) = qwen3::open_checkpoint(w).unwrap_or_else(|e| panic!("{e}"));
+            let base = qwen3::serve::Engine::tensors_from(&cfg, &*src).unwrap_or_else(|e| panic!("{e}"));
+            drop(src);
             cfg.lora = Some(lora);
             let mut init = qwen3::init_weights(&cfg, 7);
-            init.extend(c.by_role(""));
+            init.extend(base);
             eprintln!("lora-train: {w} (real weights)");
             (cfg, init)
         }
@@ -1212,7 +1401,14 @@ fn lora_train_bench(a: &[String], shape: QwenConfig, model_name: &str) {
             (cfg, init)
         }
     };
-    let m = Qwen::new(cfg.clone(), 1, t, &init);
+    let gemm = gemm_flag(a);
+    let m = if flag(a, "--base") == Some("bf16") {
+        Qwen::new_lora_dt_gemm(cfg.clone(), 1, t, &init, qwen3::Dtype::BF16, gemm)
+    } else {
+        let shard = qwen3::Shard::whole(cfg.n_layers as usize);
+        Qwen::new_shard_gemm(cfg.clone(), 1, t, &init, true, shard, gemm)
+    };
+    eprintln!("lora-train: gemm path {:?}", m.gemm_report());
     drop(init);
     eprintln!("built at T={t}, rank {rank} in {:.1}s", t0.elapsed().as_secs_f32());
     let x: Vec<u32> = (0..t).map(|i| (i * 131 + 7) % cfg.vocab).collect();

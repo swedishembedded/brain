@@ -47,8 +47,11 @@ use crate::{DeviceBuffer, Gpu, Step};
 /// Which arithmetic a training GEMM against a bf16 weight uses.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum GemmPrecision {
-    /// bf16 tensor cores where the device offers them, the fp32 kernels
-    /// otherwise. The default: no flag, no failure on unsupported hardware.
+    /// Tensor cores wherever the device offers them, the fp32 kernels
+    /// otherwise: bf16 products for bf16/NF4 weights and TF32 products
+    /// (operands rounded to a 10-bit mantissa inside the multiply, binary32
+    /// accumulation, no copy of either) for fp32 weights. The default: no
+    /// flag, no failure on unsupported hardware.
     #[default]
     Auto,
     /// Always the fp32 kernels: the reference tier the gradient checks and
@@ -107,6 +110,11 @@ const NF4_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, Bi
 #[derive(Clone)]
 pub struct LibraryGemmProvider {
     path: GemmPath,
+    /// Fp32-stored weights also run on tensor cores as TF32 (the device runs the library path
+    /// and the precision is not the pinned fp32 reference).
+    tf32: bool,
+    /// The caller pinned the exact fp32 tier (it also bars the native fp16 attention kernels).
+    reference: bool,
 }
 
 /// A product operand: a buffer and the `(word offset, word length)` it binds.
@@ -137,7 +145,8 @@ impl LibraryGemmProvider {
         if precision != GemmPrecision::Fp32Reference {
             report_once(&path, precision);
         }
-        LibraryGemmProvider { path }
+        let tf32 = path == GemmPath::Bf16TensorCore;
+        LibraryGemmProvider { path, tf32, reference: precision == GemmPrecision::Fp32Reference }
     }
 
     /// The path this provider was assigned.
@@ -149,6 +158,18 @@ impl LibraryGemmProvider {
     /// tensor-core path); a caller preparing an operand for it checks first.
     pub fn is_active(&self) -> bool {
         self.path == GemmPath::Bf16TensorCore
+    }
+
+    /// Whether the exact fp32 reference tier was pinned: gradient checks and parity gates pin it, and
+    /// every native tensor-core kernel of the same pass (attention included) is then declined too.
+    pub fn is_reference_pinned(&self) -> bool {
+        self.reference
+    }
+
+    /// Whether fp32-stored weights take the TF32 tensor-core products
+    /// ([`Self::forward_tf32`], [`Self::dx_tf32`]).
+    pub fn tf32_enabled(&self) -> bool {
+        self.tf32
     }
 
     /// Decode `elems` weights of an NF4 window (`packed`: eight codes a word;
@@ -212,8 +233,66 @@ impl LibraryGemmProvider {
             stride_a: 0,
             stride_b: 0,
             stride_c: 0,
+            tf32: false,
         };
         self.product(gpu, steps, x, (m, k), w, y, gemm)
+    }
+
+    /// `y[m, n] = x[m, k] @ W[n, k]^T` with fp32 `x` and fp32 `W` multiplied as TF32 on tensor cores
+    /// (binary32 accumulation, binary32 output); nothing is copied or cast. `false` (nothing pushed)
+    /// unless [`Self::tf32_enabled`] and the operands are 16-byte aligned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_tf32(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, w: &Operand, y: &Operand, m: u32, n: u32, k: u32) -> bool {
+        // Row-major `y = x W^T` is column-major `y^T[n, m] = W[k, n]^T x^T[k, m]`.
+        let gemm = Self::tf32_product(true, m, n, k, k, k, n, 0.0);
+        self.tf32_step(gpu, steps, &gemm, &[w, x, y])
+    }
+
+    /// `dx[m, k] (+)= dy[m, n] @ W[n, k]` as [`Self::forward_tf32`] multiplies; `accumulate` adds to `dx`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dx_tf32(&self, gpu: &Gpu, steps: &mut Vec<Step>, dy: &Operand, w: &Operand, dx: &Operand, m: u32, n: u32, k: u32, accumulate: bool) -> bool {
+        // Row-major `dx = dy W` is column-major `dx^T[k, m] = W[k, n] dy^T[n, m]`.
+        let gemm = Self::tf32_product(false, m, k, n, k, n, k, if accumulate { 1.0 } else { 0.0 });
+        self.tf32_step(gpu, steps, &gemm, &[w, dy, dx])
+    }
+
+    /// The column-major product of `forward_tf32`/`dx_tf32`: `C[rows, cols] = op(A) B` over `depth`.
+    #[allow(clippy::too_many_arguments)]
+    fn tf32_product(trans_a: bool, cols: u32, rows: u32, depth: u32, lda: u32, ldb: u32, ldc: u32, beta: f32) -> LibraryGemm {
+        LibraryGemm {
+            trans_a,
+            trans_b: false,
+            m: rows,
+            n: cols,
+            k: depth,
+            lda,
+            ldb,
+            ldc,
+            a: LibraryDtype::F32,
+            b: LibraryDtype::F32,
+            c: LibraryDtype::F32,
+            alpha: 1.0,
+            beta,
+            batch: 1,
+            stride_a: 0,
+            stride_b: 0,
+            stride_c: 0,
+            tf32: true,
+        }
+    }
+
+    fn tf32_step(&self, gpu: &Gpu, steps: &mut Vec<Step>, gemm: &LibraryGemm, ops: &[&Operand; 3]) -> bool {
+        // Sub-ranges must stay 16-byte aligned (4 words), as for the bf16 products.
+        if !self.tf32 || ![gemm.m, gemm.n, gemm.k].iter().all(|&d| d > 0) || !ops.iter().all(|o| o.range.0.is_multiple_of(4)) {
+            return false;
+        }
+        match gpu.step_library_gemm(gemm, &[ops[0].buf, ops[1].buf, ops[2].buf], &[ops[0].range, ops[1].range, ops[2].range]) {
+            Some(step) => {
+                steps.push(step);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Round `count` fp32 values of `x` to a new bf16 buffer (the cast step is
@@ -269,6 +348,7 @@ impl LibraryGemmProvider {
             stride_a: 0,
             stride_b: 0,
             stride_c: 0,
+            tf32: false,
         };
         self.product(gpu, steps, ActSource::Fp32(dy), (m, n), w, dx, gemm)
     }
@@ -370,6 +450,7 @@ impl LibraryGemmProvider {
             stride_a: 0,
             stride_b: 0,
             stride_c: 0,
+            tf32: false,
         };
         match gpu.step_library_gemm(&gemm, &[b.buf, a.buf, c.buf], &[b.range, a.range, c.range]) {
             Some(step) => {

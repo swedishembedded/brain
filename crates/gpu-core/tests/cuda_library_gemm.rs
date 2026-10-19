@@ -133,6 +133,52 @@ fn the_library_forward_and_dx_agree_with_an_f64_oracle() {
     }
 }
 
+/// `out[m, n] = x[m, k] @ w[n, k]^T` in f64 over unrounded fp32 operands.
+fn forward_exact(x: &[f32], w: &[f32], m: usize, n: usize, k: usize) -> Vec<f64> {
+    (0..m * n).map(|i| (0..k).map(|t| x[(i / n) * k + t] as f64 * w[(i % n) * k + t] as f64).sum()).collect()
+}
+
+/// The default (Auto) tier multiplies fp32-stored weights and activations on tensor cores with no
+/// copy of either: its error against the exact product is the operands' 10-bit mantissa
+/// (about 2^-11 relative each), far below the bf16 tier's, and the plain fp32 tier stays
+/// exact. Forward and dx, over the 8B's projection shapes (k = 4096 and 12288).
+#[test]
+fn the_tf32_tier_multiplies_fp32_operands_within_tf32_rounding() {
+    let Some(gpu) = open() else { return };
+    let provider = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
+    if !provider.tf32_enabled() {
+        brain_testutil::skip_unavailable(&format!("cuda_library_gemm: this card has no TF32 tier ({:?})", provider.path()));
+        return;
+    }
+    assert!(!LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Fp32Reference).tf32_enabled(), "the pinned reference tier must never take TF32");
+    for &(m, n, k) in &[(8u32, 4096u32, 4096u32), (512, 12288, 4096), (300, 4096, 12288), (64, 1024, 4096)] {
+        let (mu, nu, ku) = (m as usize, n as usize, k as usize);
+        let w = values(nu * ku, 0.05, 11);
+        let x = values(mu * ku, 1.0, 12);
+        let dy = values(mu * nu, 1.0, 13);
+        let whole = |buf| Operand { buf, range: (0, 0) };
+        let (wb, xb, yb) = (gpu.storage_init("w", &w), gpu.storage_init("x", &x), gpu.storage((mu * nu) as u64));
+        let mut steps = Vec::new();
+        assert!(provider.forward_tf32(&gpu, &mut steps, &whole(&xb), &whole(&wb), &whole(&yb), m, n, k), "tf32 forward {m}x{n}x{k} declined");
+        gpu.submit(&[], &steps);
+        let want = forward_exact(&x, &w, mu, nu, ku);
+        let got = gpu.read(&yb, mu * nu);
+        let worst = got.iter().zip(&want).map(|(g, w)| (*g as f64 - w).abs()).fold(0.0, f64::max);
+        let rel = worst / rms(&want);
+        assert!(rel <= 4e-3, "tf32 forward {m}x{n}x{k}: worst error is {rel} of the output RMS");
+        assert!(rel >= 1e-6, "tf32 forward {m}x{n}x{k}: error {rel} is fp32-exact, so the TF32 path did not run");
+
+        let (dyb, dxb) = (gpu.storage_init("dy", &dy), gpu.storage((mu * ku) as u64));
+        let mut steps = Vec::new();
+        assert!(provider.dx_tf32(&gpu, &mut steps, &whole(&dyb), &whole(&wb), &whole(&dxb), m, n, k, false), "tf32 dx {m}x{n}x{k} declined");
+        gpu.submit(&[], &steps);
+        let want: Vec<f64> = (0..mu * ku).map(|i| (0..nu).map(|t| dy[(i / ku) * nu + t] as f64 * w[t * ku + i % ku] as f64).sum()).collect();
+        let got = gpu.read(&dxb, mu * ku);
+        let worst = got.iter().zip(&want).map(|(g, w)| (*g as f64 - w).abs()).fold(0.0, f64::max);
+        assert!(worst / rms(&want) <= 4e-3, "tf32 dx {m}x{n}x{k}: worst error is {} of the output RMS", worst / rms(&want));
+    }
+}
+
 /// A row window of the weight (the vocabulary-tile primitive) multiplies only
 /// its rows.
 #[test]

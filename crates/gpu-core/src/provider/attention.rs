@@ -128,6 +128,7 @@ impl LibraryGemmProvider {
             stride_a: sb,
             stride_b: sa,
             stride_c: sc,
+            tf32: false,
         };
         match gpu.step_library_gemm(&gemm, &[b.buf, a.buf, c.buf], &[b.range, a.range, c.range]) {
             Some(step) => {

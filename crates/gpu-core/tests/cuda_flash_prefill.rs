@@ -354,7 +354,7 @@ fn a_head_width_the_kernel_was_not_written_for_is_declined() {
     let Some(gpu) = device() else { return };
     let p = Problem::new(Case { n: 64, start: 0, block_size: 64, scatter: false }, 3);
     let d = Device::upload(&gpu, &p);
-    assert!(gpu_core::provider::cuda::paged_flash_prefill_step(&gpu, 128, &d.bufs(), &Device::params(&p), 24).is_none());
+    assert!(gpu_core::provider::cuda::paged_flash_prefill_step(&gpu, 96, &d.bufs(), &Device::params(&p), 24).is_none());
 }
 
 #[test]

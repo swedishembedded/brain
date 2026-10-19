@@ -132,6 +132,22 @@ pub fn weights_fp32_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
     cfg.param_list().into_iter().map(|(_, elems)| elems as u64 * 4).sum::<u64>() * 13 / 10
 }
 
+/// The device bytes of `cfg`'s weights with the linears and the head stored as bf16 (`--qwen-weights-bf16`):
+/// a bf16 checkpoint's own values at half the fp32 size; embeddings and norms stay fp32.
+pub fn weights_bf16_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
+    cfg.param_list()
+        .into_iter()
+        .map(|(name, elems)| {
+            let elems = elems as u64;
+            if qwen3::q8::Q8::is_i8_linear(&name) || name == cfg.head_weight() {
+                elems * 2
+            } else {
+                elems * 4
+            }
+        })
+        .sum()
+}
+
 pub fn weights_int8_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
     cfg.param_list()
         .into_iter()
@@ -473,8 +489,16 @@ pub struct QwenServeConfig {
     /// checkpoint of `qwen3::footprint::INT8_WEIGHTS_FROM_PARAMS` parameters
     /// or more, which at fp32 does not fit one 24 GB card.
     pub weights_int8: Option<bool>,
+    /// `--qwen-weights-bf16`: the linears and the head are stored as bf16 and decoded inline (a bf16
+    /// checkpoint's own values, so the weights lose nothing; half the fp32 bytes and half the bytes a
+    /// decode step streams). Takes precedence over `weights_int8`.
+    pub weights_bf16: bool,
     /// `--qwen-max-prefill N`, clamped to `1..=512`, default 512.
     pub max_prefill_cap: u32,
+    /// `--qwen-gemm-fp32` (`Fp32Reference`) pins exact fp32 arithmetic. Default `Auto`: the
+    /// prefill-shaped fp32-weight linears multiply on TF32 tensor cores where the device has them
+    /// (operands rounded to a 10-bit mantissa, fp32 accumulation).
+    pub gemm_precision: gpu_core::provider::library::GemmPrecision,
     /// `--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`: the
     /// size of the adapter bank built beside the base weights, which lets
     /// requests run under LoRA adapters ([`crate::adapter_registry`]). `None`
@@ -493,14 +517,25 @@ pub struct QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, max_prefill_cap: 512, adapter_bank: None, adapter_targets_named: false }
+        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, adapter_bank: None, adapter_targets_named: false }
     }
 }
 
 /// Whether `checkpoint`'s linears are served int8: the operator's explicit
 /// choice, else `qwen3::footprint::int8_by_default` (6B parameters and up).
-fn weights_int8_for(requested: Option<bool>, checkpoint: &qwen3::config::QwenConfig) -> bool {
-    requested.unwrap_or_else(|| qwen3::footprint::int8_by_default(checkpoint))
+fn weights_int8_for(cfg: &QwenServeConfig, checkpoint: &qwen3::config::QwenConfig) -> bool {
+    !cfg.weights_bf16 && cfg.weights_int8.unwrap_or_else(|| qwen3::footprint::int8_by_default(checkpoint))
+}
+
+/// Device bytes of the weights at the tier `cfg` asks for.
+fn serve_weight_bytes(cfg: &QwenServeConfig, checkpoint: &qwen3::config::QwenConfig) -> u64 {
+    if cfg.weights_bf16 {
+        weights_bf16_bytes(checkpoint)
+    } else if weights_int8_for(cfg, checkpoint) {
+        weights_int8_bytes(checkpoint)
+    } else {
+        weights_fp32_bytes(checkpoint)
+    }
 }
 
 /// Context-length tiers [`QwenResident::resolve_ctx`]'s auto-sizing path
@@ -611,7 +646,9 @@ pub struct QwenResident {
     kv_calib_opt_in: bool,
     kv_offload_bytes: u64,
     weights_int8_requested: bool,
+    weights_bf16_requested: bool,
     max_prefill_cap: u32,
+    gemm_precision: gpu_core::provider::library::GemmPrecision,
 }
 
 /// What `BRAIN_QWEN_WEIGHTS` names, as the `(path to open, repo directory,
@@ -703,10 +740,12 @@ impl QwenResident {
             // A checkpoint that cannot be read yet keeps the operator's
             // explicit choice or fp32; `activate` reports the real error.
             weights_int8_requested: match qwen3::checkpoint_config(path) {
-                Ok(checkpoint) => weights_int8_for(cfg.weights_int8, &checkpoint),
-                Err(_) => cfg.weights_int8.unwrap_or(false),
+                Ok(checkpoint) => weights_int8_for(&cfg, &checkpoint),
+                Err(_) => !cfg.weights_bf16 && cfg.weights_int8.unwrap_or(false),
             },
+            weights_bf16_requested: cfg.weights_bf16,
             max_prefill_cap: cfg.max_prefill_cap.clamp(1, 512),
+            gemm_precision: cfg.gemm_precision,
         }
     }
 
@@ -728,7 +767,7 @@ impl QwenResident {
         }
         let Some(budget) = cfg.auto_budget_bytes else { return HISTORICAL_DEFAULT };
         let Ok(checkpoint_cfg) = qwen3::checkpoint_config(path) else { return HISTORICAL_DEFAULT };
-        let weight_bytes = if weights_int8_for(cfg.weights_int8, &checkpoint_cfg) { weights_int8_bytes(&checkpoint_cfg) } else { weights_fp32_bytes(&checkpoint_cfg) };
+        let weight_bytes = serve_weight_bytes(cfg, &checkpoint_cfg);
         auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_int8)
     }
 
@@ -997,7 +1036,13 @@ impl ResidentModel for QwenResident {
         // from - rather than a flat fraction of `cost.vram`. `activate()`
         // below requests the identical `weights_int8` value, so the two
         // cannot silently disagree about which tensors are quantized.
-        let weight_bytes = if self.weights_int8_requested { weights_int8_bytes(&cfg) } else { weights_fp32_bytes(&cfg) };
+        let weight_bytes = if self.weights_bf16_requested {
+            weights_bf16_bytes(&cfg)
+        } else if self.weights_int8_requested {
+            weights_int8_bytes(&cfg)
+        } else {
+            weights_fp32_bytes(&cfg)
+        };
         // The adapter bank is allocated beside the weights at activation, sized
         // by the same settings, over the larger of the decode batch and the
         // prefill chunk (the rows the engine sizes its row buffers for).
@@ -1119,7 +1164,12 @@ impl ResidentModel for QwenResident {
             gpu_core::profile::stage_time(&format!("{}: re-load checkpoint tensors for engine build", self.id), load_t0);
             let mut cfg = checkpoint_cfg.clone();
             Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);
-            let mut eng = qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8);
+            let mut eng = if self.weights_bf16_requested {
+                qwen3::serve::Engine::from_map_tier(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, qwen3::Dtype::BF16)
+            } else {
+                qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+            };
+            eng.set_gemm_precision(self.gemm_precision);
             // The adapter bank, once per engine, from the settings the
             // estimate above budgeted. Refusing here is deliberate: a server
             // asked for adapters that cannot give them must say so, not serve

@@ -118,6 +118,7 @@ fn opts(seed: u64, steps: u32) -> model::FitOpts {
         cooldown_steps: 0,
         seed,
         adam: Default::default(),
+        gemm_precision: Default::default(),
     }
 }
 

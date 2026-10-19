@@ -302,6 +302,7 @@ pub use brain_modelstore::adapter_manifest::AdapterManifest;
 /// whatever hardware the machine actually has.
 #[cfg(feature = "device")]
 pub use gpu_core::devices::DeviceSpec as Device;
+pub use gpu_core::provider::library::GemmPrecision;
 /// A numeric tier. Re-exported, not reinvented: the SAME type flux2's own
 /// `Pipeline::build_sized` takes (`model::dispatch::Precision`).
 #[cfg(feature = "resolve")]

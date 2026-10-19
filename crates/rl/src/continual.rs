@@ -800,6 +800,7 @@ fn sft_cycle_opts<C: Curriculum>(cfg: &StudyConfig, sft: &SftConfig, curr: &C, c
         mask_before: curr.sft_mask_before(),
         mask_per_line: true,
         adam: Default::default(),
+        gemm_precision: Default::default(),
     }
 }
 
