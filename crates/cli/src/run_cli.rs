@@ -234,10 +234,11 @@ QWEN3 SERVING TUNABLES  (--qwen-weights names the checkpoint to serve; the
                          (off by default).
   --qwen-kv-offload-gb N host RAM for preempted sessions' KV, fractional
                          allowed (default 0, off).
-  --qwen-weights-int8    quantize the 7 per-layer linears to int8. The
-                         default does so for a checkpoint of 6B parameters
-                         or more, whose fp32 weights do not fit one 24 GB
-                         card.
+  --qwen-weights-int8    quantize the 7 per-layer linears to int8 (the least
+                         accurate tier). The default does so for a checkpoint
+                         of 6B parameters or more only when the largest
+                         card's free memory cannot hold its fp32 weights plus
+                         8 GiB; a card that can serves them fp32.
   --qwen-weights-fp32    keep every weight fp32, whatever the size.
   --qwen-weights-bf16    store the linears and the head as bf16 (rounded to bf16, exact for a
                          checkpoint that ships bf16: half the fp32 bytes in
