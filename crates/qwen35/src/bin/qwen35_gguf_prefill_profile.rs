@@ -41,10 +41,10 @@ fn main() {
     let rounds: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(4);
     let cap = depth + 2 * rows * rounds;
     let flag = |name: &str| a.iter().position(|arg| arg == name).and_then(|i| a.get(i + 1)).cloned();
-    // The head_dim 256 prefill attention over a bf16 or int8 cache: version 2 by default, `v1` for the original kernel.
+    // The head_dim 256 prefill attention over a bf16 or int8 cache: the original kernel (`v1`) by default, `v2` opts in to version 2.
     match flag("--flash-prefill").as_deref() {
-        None | Some("v2") => {}
-        Some("v1") => gpu_core::provider::cuda::set_flash_prefill_v2(false),
+        None | Some("v1") => {}
+        Some("v2") => gpu_core::provider::cuda::set_flash_prefill_v2(true),
         Some(other) => panic!("--flash-prefill takes v1 or v2, not {other}"),
     }
     let set = gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
