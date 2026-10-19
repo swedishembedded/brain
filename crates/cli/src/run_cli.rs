@@ -938,6 +938,11 @@ fn dbus_connect_hint(err: &dyn std::fmt::Display, system_bus: bool) -> String {
 /// second-signal escape hatch is the backstop if this window is not enough.
 const DBUS_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long the surfaces get to drain after the first SIGINT/SIGTERM before the
+/// process ends anyway: a signalled server must never stay up holding its GPU
+/// reservation because one connection or request will not finish.
+const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Build the transparent auto-fetch supplier for a live `brain serve`, but
 /// only when fetching is enabled: `--autofetch` (which `main` publishes by
 /// setting `BRAIN_AUTO_FETCH=1`) or the same variable the caller exported.
@@ -1155,6 +1160,10 @@ fn run_apis(a: RunApis) {
                 gpu_core::set_process_exiting();
             });
         }
+        brain_shutdown::bound_drain(shutdown.clone(), SHUTDOWN_DRAIN_TIMEOUT, || {
+            eprintln!("brain serve: the surfaces did not drain within {}s of the shutdown signal; exiting", SHUTDOWN_DRAIN_TIMEOUT.as_secs());
+            brain_shutdown::exit_now(0);
+        });
         let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines);
         if let Err(e) = apiserve::serve_all(executor, surfaces, opts) {
             eprintln!("brain serve: {e}");

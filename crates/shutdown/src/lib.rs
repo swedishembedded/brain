@@ -129,6 +129,24 @@ pub fn exit_now(code: i32) -> ! {
     std::process::exit(code)
 }
 
+/// Bound the drain that follows a shutdown signal: once `shutdown` has fired,
+/// wait up to `drain` for the process to finish on its own, then run `expire`
+/// (the caller ends the process there). A server that drained normally never
+/// reaches `expire`: the process is gone first.
+///
+/// Without a bound a drain that never completes (a connection that stays open,
+/// a request that never finishes) leaves a signalled server running forever,
+/// holding its GPU reservation, until a human sends a second signal.
+pub fn bound_drain(shutdown: Shutdown, drain: std::time::Duration, expire: impl FnOnce() + Send + 'static) {
+    let _ = std::thread::Builder::new().name("brain-drain-bound".to_string()).spawn(move || {
+        while !shutdown.is_shutdown() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(drain);
+        expire();
+    });
+}
+
 pub fn channel() -> (Trigger, Shutdown) {
     let (tx, rx) = watch::channel(false);
     (Trigger { tx }, Shutdown { rx })
@@ -255,6 +273,20 @@ async fn signal_loop(trigger: Trigger, ready: std::sync::mpsc::Sender<()>) {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// A drain that never completes must still end: after the bound, the
+    /// expiry action runs; before the signal it never does.
+    #[test]
+    fn a_drain_that_outlasts_its_bound_is_ended() {
+        let (trigger, shutdown) = channel();
+        let (tx, rx) = std::sync::mpsc::channel();
+        bound_drain(shutdown, Duration::from_millis(50), move || {
+            let _ = tx.send(());
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(150)).is_err(), "no expiry before the shutdown signal");
+        trigger.fire();
+        rx.recv_timeout(Duration::from_secs(2)).expect("the drain was not ended after its bound");
+    }
 
     #[tokio::test]
     async fn wait_returns_immediately_once_already_fired() {
