@@ -243,52 +243,6 @@ impl CudaProvider {
     }
 }
 
-/// `matmul_i8w_bf16a_wgmma`'s binding order: the `[m, k, n]` uniform, the bf16 activations, the
-/// packed int8 weights, their group scales, then the f32 output.
-const I8_WGMMA_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
-
-/// Dynamic shared memory of `matmul_i8w_bf16a_wgmma`: three ring slots of activation tile
-/// (32 KiB), raw int8 weight tile (16 KiB) and scales (2 KiB), two decoded weight tiles
-/// (32 KiB each), and 1 KiB to align the base to the swizzle period.
-const I8_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 3 * (32 * 1024 + 16 * 1024 + 2 * 1024) + 2 * 32 * 1024 + 1024;
-
-/// Fewest activation rows for which the warpgroup GEMM is used: below it a 128-row tile is mostly
-/// padding and the smaller-tile int8 kernels stream the weights better.
-pub const I8_WGMMA_MIN_ROWS: u32 = 128;
-
-/// The int8-weight GEMM on Hopper warpgroup tensor cores for `m` bf16 activation rows
-/// (`act`, `[m, k]` packed bf16), writing `out[out_range]` (`[m, n]` f32), or `None` when the
-/// caller should run the int8 `mma.sync` path it was going to use anyway: `cuda` is named in
-/// `BRAIN_NO_PROVIDER` (as `cuda`, or as `wgmma` for this path alone, to measure against the int8 `mma.sync` kernels), the device is not Hopper or cannot compile the architecture-specific
-/// target, the shape is not one the kernel tiles (`k` and `n` multiples of 128), or `m` is
-/// below [`I8_WGMMA_MIN_ROWS`].
-///
-/// Like [`gdn_chunk_loop_step`] this is a drop-in at one call site (`model::ops`), not a provider
-/// request: the request shape of the int8 path carries int8 activations, and this kernel reads
-/// the bf16 ones the vendor-library path already makes and shares between the linears of a group.
-#[allow(clippy::too_many_arguments)]
-pub fn i8_wgmma_step(
-    gpu: &crate::Gpu,
-    act: &backend_api::DeviceBuffer,
-    weight: &backend_api::DeviceBuffer,
-    scales: &backend_api::DeviceBuffer,
-    out: &backend_api::DeviceBuffer,
-    out_range: (u64, u64),
-    m: u32,
-    n: u32,
-    k: u32,
-) -> Option<crate::Step> {
-    if m < I8_WGMMA_MIN_ROWS || !k.is_multiple_of(128) || !n.is_multiple_of(128) || super::disabled_providers().iter().any(|d| d == "cuda" || d == "wgmma") {
-        return None;
-    }
-    let cc = gpu.caps().arch.compute_capability?;
-    let kernel = kernels_cuda::get("matmul_i8w_bf16a_wgmma").filter(|k| k.min_cc <= cc)?;
-    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: I8_WGMMA_DYNAMIC_SHARED_BYTES, shared_opt_in: true, arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE };
-    let id = gpu.native_kernel_launched(kernel, I8_WGMMA_BINDINGS, launch)?;
-    let blocks = kernel.blocks_for(m, n);
-    gpu.step_native_sliced(id, &[act, weight, scales, out], &[(0, 0), (0, 0), (0, 0), out_range], &[m, k, n], blocks)
-}
-
 /// Whether `gpu` runs this provider's tensor-core kernels: its device reports a
 /// compute capability at the int8 / fp16 MMA floor
 /// ([`kernels_cuda::MMA_S8_MIN_CC`]) and `cuda` is not named in

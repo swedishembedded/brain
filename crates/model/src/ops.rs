@@ -1236,38 +1236,6 @@ impl Ops {
         ok
     }
 
-    /// `y[yoff ..] = act @ W^T` for an int8 `w` on the warpgroup tensor cores, reading the
-    /// activations as bf16 (the cast the vendor-library path makes and shares between the
-    /// linears of a group) and decoding the weights a tile ahead of the MMA; `false` (nothing
-    /// pushed) when the device, the shape or the row count is not one it serves and the int8
-    /// `mma.sync` kernels must run instead.
-    fn i8_wgmma_forward(&self, s: &mut Vec<Step>, w: &Weight, act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
-        let Weight::I8 { w: wq, s: sw, n, k } = w else { return false };
-        if !self.gemm.is_active() {
-            return false;
-        }
-        let m = act.m;
-        let shared = act.bf16.borrow().clone();
-        let mut prep = Vec::new();
-        let (xb, fresh) = match shared {
-            Some(xb) => (xb, false),
-            None => {
-                let x_op = library::Operand { buf: &act.x, range: (act.xr0 as u64 * *k as u64, m as u64 * *k as u64) };
-                match self.gemm.cast_bf16(&self.gpu, &mut prep, &x_op, m as u64 * *k as u64) {
-                    Some(xb) => (xb, true),
-                    None => return false,
-                }
-            }
-        };
-        let Some(step) = gpu_core::provider::cuda::i8_wgmma_step(&self.gpu, &xb, wq, sw, y, (yoff, m as u64 * *n as u64), m, *n, *k) else { return false };
-        s.append(&mut prep);
-        s.push(step);
-        if fresh {
-            *act.bf16.borrow_mut() = Some(xb);
-        }
-        true
-    }
-
     /// The bf16 weight rows `rows` of `w` as the library path reads them: the
     /// buffer, the range to bind and any steps that must run first (the
     /// decode of an NF4 window into a bf16 scratch). `None` for a tier or a
@@ -1590,7 +1558,7 @@ impl Ops {
         let (n, k) = (w.n(), w.k());
         assert_eq!(act.k, k, "Ops::matmul: activation width {} does not match weight K {k}", act.k);
         let m = act.m;
-        if self.library_forward(s, w, (0, n), act, y, yoff) || self.i8_wgmma_forward(s, w, act, y, yoff) {
+        if self.library_forward(s, w, (0, n), act, y, yoff) {
             return;
         }
         let shape = OpShape { m, n, k, dtype: w.dtype() };
