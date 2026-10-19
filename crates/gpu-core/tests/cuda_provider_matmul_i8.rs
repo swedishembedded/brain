@@ -417,6 +417,33 @@ fn sweep_skinny_tile_configurations() {
     sweep(configs, &shapes);
 }
 
+/// [`sweep_skinny_tile_configurations`] at the 3-16 rows of the small-batch decode step (the rows the dp4a GEMV
+/// serves today, where its per-row f32 fold keeps the arithmetic pipes busy), weights cycled past L2.
+///
+///   cargo test --release -p brain-gpu-core --test cuda_provider_matmul_i8 -- --backend cuda --ignored sweep_decode
+fn sweep_decode_tile_configurations() {
+    let configs: &[(u32, u32, u32, u32, u32)] = &[
+        (16, 16, 1, 1, 8),
+        (16, 32, 1, 1, 8),
+        (16, 32, 1, 2, 6),
+        (16, 64, 1, 2, 6),
+        (16, 64, 1, 4, 6),
+        (16, 128, 1, 4, 4),
+        (16, 32, 1, 1, 12),
+        (16, 16, 1, 1, 14),
+    ];
+    let mut shapes = Vec::new();
+    for m in [4u32, 8, 16] {
+        for (n, k) in [(5120u32, 5120u32), (10240, 5120), (17408, 5120), (5120, 17408)] {
+            shapes.push((m, n, k));
+        }
+    }
+    sweep(configs, &shapes);
+}
+
+/// Distinct weight bytes cycled per timed pass in [`sweep`], well past L2.
+const SWEEP_FOOTPRINT_BYTES: u64 = 768 << 20;
+
 fn sweep(configs: &[(u32, u32, u32, u32, u32)], shapes: &[(u32, u32, u32)]) {
     use backend_api::{BindKind, NativeSpec};
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
@@ -427,6 +454,18 @@ fn sweep(configs: &[(u32, u32, u32, u32, u32)], shapes: &[(u32, u32, u32)]) {
     for &(m, n, k) in shapes {
         let p = Problem::new(m, n, k, 9);
         let d = Device::upload(&gpu, &p);
+        // Decode reads every weight from HBM once per token: cycle through enough copies
+        // of the weights to exceed L2 several times, or a small projection reports L2 bandwidth.
+        let kg = k as u64 / 4;
+        let wbytes = n as u64 * kg * 4 + n as u64 * (kg / 8) * 4;
+        let copies = (SWEEP_FOOTPRINT_BYTES / wbytes).max(1) as usize;
+        let extra: Vec<(backend_api::DeviceBuffer, backend_api::DeviceBuffer)> = (1..copies)
+            .map(|_| {
+                let w = gpu.storage(n as u64 * kg);
+                let s = gpu.storage(n as u64 * (kg / 8));
+                (w, s)
+            })
+            .collect();
         for &(bm, bn, wm, wn, st) in configs {
             let text: &'static str = Box::leak(
                 format!("#define BRAIN_I8_BM {bm}\n#define BRAIN_I8_BN {bn}\n#define BRAIN_I8_WARPS_M {wm}\n#define BRAIN_I8_WARPS_N {wn}\n#define BRAIN_I8_STAGES {st}\n{src}").into_boxed_str(),
@@ -436,32 +475,33 @@ fn sweep(configs: &[(u32, u32, u32, u32, u32)], shapes: &[(u32, u32, u32)]) {
                 eprintln!("sweep: {m}x{n}x{k} cfg {bm}x{bn} w{wm}x{wn} s{st}: declined");
                 continue;
             };
-            let kg = k as u64 / 4;
             let attrs = [m, kg as u32, n];
-            let operands = [(&d.x, (0, m as u64 * kg)), (&d.w, (0, 0)), (&d.sx, (0, m as u64)), (&d.sw, (0, 0)), (&d.y, (0, m as u64 * n as u64))];
-            let bufs: Vec<&backend_api::DeviceBuffer> = operands.iter().map(|o| o.0).collect();
-            let offs: Vec<(u64, u64)> = operands.iter().map(|o| o.1).collect();
             let blocks = m.div_ceil(bm) * n.div_ceil(bn);
-            let step = gpu.step_native_sliced(id, &bufs, &offs, &attrs, blocks).expect("native step");
-            gpu.submit(&[], std::slice::from_ref(&step));
+            let steps: Vec<_> = (0..copies)
+                .map(|c| {
+                    let (w, sw) = if c == 0 { (&d.w, &d.sw) } else { (&extra[c - 1].0, &extra[c - 1].1) };
+                    let bufs: [&backend_api::DeviceBuffer; 5] = [&d.x, w, &d.sx, sw, &d.y];
+                    let offs = [(0, m as u64 * kg), (0, 0), (0, m as u64), (0, 0), (0, m as u64 * n as u64)];
+                    gpu.step_native_sliced(id, &bufs, &offs, &attrs, blocks).expect("native step")
+                })
+                .collect();
+            gpu.submit(&[], &steps);
             gpu.poll_wait();
             gpu.set_kernel_timing(true);
             let mut best = f64::MAX;
-            for _ in 0..12 {
+            for _ in 0..7 {
                 gpu.reset_kernel_times();
-                for _ in 0..4 {
-                    gpu.submit(&[], std::slice::from_ref(&step));
-                }
+                gpu.submit(&[], &steps);
                 gpu.poll_wait();
                 let ms: f64 = gpu.kernel_times().unwrap_or_default().iter().map(|(_, ms, _)| ms).sum();
-                best = best.min(ms / 4.0);
+                best = best.min(ms / copies as f64);
             }
             gpu.set_kernel_timing(false);
             let got = gpu.read(&d.y, 64);
             eprintln!(
-                "sweep: {m}x{n}x{k} cfg {bm}x{bn} w{wm}x{wn} s{st}: {best:.3} ms  {:.1} TOPS  {:.0} GB/s of weights  (y[0]={:.3})",
+                "sweep: {m}x{n}x{k} cfg {bm}x{bn} w{wm}x{wn} s{st}: {best:.4} ms  {:.1} TOPS  {:.0} GB/s of weights+scales  (y[0]={:.3})",
                 2.0 * m as f64 * n as f64 * k as f64 / (best * 1e-3) / 1e12,
-                n as f64 * k as f64 / (best * 1e-3) / 1e9,
+                wbytes as f64 / (best * 1e-3) / 1e9,
                 got[0]
             );
         }
@@ -480,4 +520,5 @@ gpu_core::card_tests!(
     every_tile_of_the_int8_gemm_gives_the_same_bits,
     ; host: the_selector_and_the_kernel_agree_on_the_tensor_core_floor,
     ; ignored: sweep_tile_configurations, sweep_skinny_tile_configurations,
+    sweep_decode_tile_configurations,
 );

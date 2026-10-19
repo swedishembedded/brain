@@ -23,8 +23,10 @@
 use backend_api::DeviceBuffer;
 use gpu_core::{Dispatch, Fused, Gpu};
 
-const KERNELS: &[(&str, &str)] = &[("matmul_i8_gemv_ref", kernels::MATMUL_I8_GEMV)];
+const KERNELS: &[(&str, &str)] = &[("matmul_i8_gemv_ref", kernels::MATMUL_I8_GEMV), ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV)];
 const K_REF: usize = 0;
+/// The alias the upgrade table redirects to the native single-matrix kernel.
+const K_NATIVE: usize = 1;
 
 /// Whether this device is offered the native kernels: a CUDA device, with
 /// native kernels not withheld (`gpu_core::set_native_kernels`, the A/B
@@ -57,7 +59,9 @@ fn bits(v: Vec<f32>) -> Vec<u32> {
     v.iter().map(|f| f.to_bits()).collect()
 }
 
-/// Run `ns` (one matrix each, up to four) both ways and compare every output bit.
+/// Run `ns` (one matrix each, up to four) as one multi launch and as separate native single-matrix launches
+/// (the same block function, so every output bit must match), and against the WGSL kernel (the same bits
+/// below `kernels_cuda::I8_GEMV_MMA_MIN_ROWS` rows, f32 rounding of the running sum above).
 fn check(gpu: &Gpu, m: u32, kg: u32, ns: &[u32], seed: u64) {
     assert!(ns.len() <= 4);
     let ng = (kg / 8) as usize;
@@ -73,6 +77,7 @@ fn check(gpu: &Gpu, m: u32, kg: u32, ns: &[u32], seed: u64) {
         .collect();
     let sentinel = f32::from_bits(0x7fc0_dead);
     let outs_ref: Vec<DeviceBuffer> = ns.iter().map(|&n| gpu.storage_init("o", &vec![sentinel; (m * n) as usize])).collect();
+    let outs_single: Vec<DeviceBuffer> = ns.iter().map(|&n| gpu.storage_init("o", &vec![sentinel; (m * n) as usize])).collect();
     let outs_nat: Vec<DeviceBuffer> = ns.iter().map(|&n| gpu.storage_init("o", &vec![sentinel; (m * n) as usize])).collect();
 
     // Reference: one WGSL GEMV per matrix.
@@ -81,7 +86,13 @@ fn check(gpu: &Gpu, m: u32, kg: u32, ns: &[u32], seed: u64) {
         .enumerate()
         .map(|(i, &n)| gpu.dispatch(K_REF, &[&xq, &mats[i].0, &sx, &mats[i].1, &outs_ref[i]], &[m, kg, n], Dispatch::Workgroups(n)))
         .collect();
+    let singles: Vec<_> = ns
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| gpu.dispatch(K_NATIVE, &[&xq, &mats[i].0, &sx, &mats[i].1, &outs_single[i]], &[m, kg, n], Dispatch::Workgroups(n)))
+        .collect();
     gpu.submit(&[], &steps);
+    gpu.submit(&[], &singles);
 
     // Native: one launch. Unused sets are bound to buffers that are never
     // dereferenced (n = 0 owns no blocks), each its own one-word allocation:
@@ -104,8 +115,19 @@ fn check(gpu: &Gpu, m: u32, kg: u32, ns: &[u32], seed: u64) {
 
     for (i, &n) in ns.iter().enumerate() {
         let got = bits(gpu.read(&outs_nat[i], (m * n) as usize));
+        let single = bits(gpu.read(&outs_single[i], (m * n) as usize));
+        assert_eq!(got, single, "matrix {i} differs from its own single-matrix launch: m={m} kg={kg} ns={ns:?}");
         let want = bits(gpu.read(&outs_ref[i], (m * n) as usize));
-        assert_eq!(got, want, "matrix {i} differs: m={m} kg={kg} ns={ns:?}");
+        let tensor_core = m >= kernels_cuda::I8_GEMV_MMA_MIN_ROWS && gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= kernels_cuda::MMA_S8_MIN_CC);
+        if tensor_core {
+            let (g, w): (Vec<f32>, Vec<f32>) = (got.iter().map(|b| f32::from_bits(*b)).collect(), want.iter().map(|b| f32::from_bits(*b)).collect());
+            assert!(g.iter().all(|x| x.is_finite()), "matrix {i}: an output was left unwritten: m={m} kg={kg} ns={ns:?}");
+            let rms = (w.iter().map(|x| f64::from(*x) * f64::from(*x)).sum::<f64>() / w.len().max(1) as f64).sqrt();
+            let worst = g.iter().zip(&w).map(|(a, b)| f64::from(a - b).abs()).fold(0f64, f64::max);
+            assert!(worst <= 2e-5 * rms + 1e-30, "matrix {i} vs WGSL: worst {worst:.3e} against rms {rms:.3e}: m={m} kg={kg} ns={ns:?}");
+        } else {
+            assert_eq!(got, want, "matrix {i} differs from the WGSL tier: m={m} kg={kg} ns={ns:?}");
+        }
     }
 }
 

@@ -25,6 +25,13 @@
 //! and activation bindings that start at a word offset which is not 16-byte
 //! aligned (the scalar-load path), output windows inside larger buffers, and
 //! the real Qwen3.8-27B projection widths.
+//!
+//! From `kernels_cuda::I8_GEMV_MMA_MIN_ROWS` rows on a device with int8 tensor
+//! cores the native kernel runs its tensor-core block, which applies each
+//! group's scale once per 32 products with a fused multiply-add instead of
+//! folding 64 virtual accumulators: those rows are held to f32 rounding of the
+//! running sum against the WGSL tier (`assert_native_agrees`), every other
+//! row to its raw bits.
 
 use backend_api::select::Dtype;
 use gpu_core::{Dispatch, Gpu};
@@ -156,6 +163,28 @@ fn run(gpu: &Gpu, c: &Case) -> (Vec<u32>, Vec<u32>) {
     (a.window(&a.read_bits(gpu)), b.window(&b.read_bits(gpu)))
 }
 
+/// Whether an `m`-row batch runs the tensor-core block of the native GEMV on this device
+/// (`kernels_cuda::I8_GEMV_MMA_MIN_ROWS`): there the result agrees with the WGSL kernel to f32
+/// rounding of the running sum, not bit for bit.
+fn tensor_core_rows(gpu: &Gpu, m: u32) -> bool {
+    m >= kernels_cuda::I8_GEMV_MMA_MIN_ROWS && gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= kernels_cuda::MMA_S8_MIN_CC)
+}
+
+/// The native output against the WGSL kernel's: the same bits where the dp4a block ran, and within
+/// 2e-5 of the output's rms (f32 rounding of a few hundred group sums) where the tensor-core block did.
+fn assert_native_agrees(gpu: &Gpu, m: u32, got: &[u32], want: &[u32], context: &str) {
+    if !tensor_core_rows(gpu, m) {
+        assert_eq!(got, want, "{context}");
+        return;
+    }
+    let f = |v: &[u32]| v.iter().map(|b| f32::from_bits(*b)).collect::<Vec<_>>();
+    let (g, w) = (f(got), f(want));
+    assert!(g.iter().all(|x| x.is_finite()), "{context}: the tensor-core block left an output unwritten");
+    let rms = (w.iter().map(|x| f64::from(*x) * f64::from(*x)).sum::<f64>() / w.len().max(1) as f64).sqrt();
+    let worst = g.iter().zip(&w).map(|(a, b)| f64::from(a - b).abs()).fold(0f64, f64::max);
+    assert!(worst <= 2e-5 * rms + 1e-30, "{context}: worst |native - WGSL| {worst:.3e} against output rms {rms:.3e}");
+}
+
 fn f32_words(v: &[f32]) -> Vec<u32> {
     v.iter().map(|f| f.to_bits()).collect()
 }
@@ -187,8 +216,9 @@ fn the_native_kernel_is_selected_exactly_for_the_shapes_it_serves() {
     assert!(kernels_cuda::find(backend_api::select::Op::MatMul, Dtype::I8, gpu.caps().arch.compute_capability.unwrap()).is_some());
 }
 
-/// BYTE-identical to the WGSL tier at every row count the kernel serves, over
-/// tails, ragged `n`, and unaligned and aligned binding windows.
+/// Byte-identical to the WGSL tier below `I8_GEMV_MMA_MIN_ROWS` rows (and at every row count on a
+/// device without int8 tensor cores), within f32 rounding above it, over tails, ragged `n`, and
+/// unaligned and aligned binding windows.
 #[test]
 fn the_native_kernel_is_byte_identical_to_the_wgsl_tier() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
@@ -209,10 +239,12 @@ fn the_native_kernel_is_byte_identical_to_the_wgsl_tier() {
         for m in (1..=TILE_ROWS).chain([9, 12, 16, 17, 24, 31, NATIVE_ROWS]) {
             for lead in [aligned, ragged, quad] {
                 let (got, want) = run(&gpu, &Case { m, kg, n, lead });
-                assert_eq!(
-                    got, want,
-                    "native int8 GEMV differs from the WGSL tier at m={m} kg={kg} n={n} lead={lead:?} - both \
-                     fold the same terms in the same order, so this is a defect, not rounding"
+                assert_native_agrees(
+                    &gpu,
+                    m,
+                    &got,
+                    &want,
+                    &format!("native int8 GEMV differs from the WGSL tier at m={m} kg={kg} n={n} lead={lead:?}"),
                 );
             }
         }
@@ -235,7 +267,7 @@ fn random_shapes_and_windows_are_byte_identical() {
         let n = 1 + r.next_u32() % 100;
         let lead = [0, 1, 2, 3, 4].map(|_| u64::from(r.next_u32() % 8));
         let (got, want) = run(&gpu, &Case { m, kg, n, lead });
-        assert_eq!(got, want, "native int8 GEMV differs at m={m} kg={kg} n={n} lead={lead:?}");
+        assert_native_agrees(&gpu, m, &got, &want, &format!("native int8 GEMV differs at m={m} kg={kg} n={n} lead={lead:?}"));
     }
 }
 
@@ -252,7 +284,7 @@ fn the_real_27b_projection_shapes_are_byte_identical() {
     for (k, n) in [(5120u32, 48u32), (5120, 1024), (5120, 6144), (6144, 5120), (5120, 10240), (17408, 5120), (5120, 17408)] {
         for m in [1u32, 3, 8] {
             let (got, want) = run(&gpu, &Case { m, kg: k / 4, n, lead: [0; 5] });
-            assert_eq!(got, want, "native int8 GEMV differs at the real shape k={k} n={n} m={m}");
+            assert_native_agrees(&gpu, m, &got, &want, &format!("native int8 GEMV differs at the real shape k={k} n={n} m={m}"));
         }
     }
 }

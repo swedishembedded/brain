@@ -175,13 +175,20 @@ fn the_register_kernel_is_byte_identical_and_exact() {
         for m in 1..=MAX_ROWS {
             let (up, refr, want, mag) = run(&gpu, m, kg, n);
             let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
-            assert_eq!(
-                bits(&up),
-                bits(&refr),
-                "matmul_i8_gemv_reg must be BYTE-identical to matmul_i8_gemv at m={m}, kg={kg}, n={n} - \
-                 both form and fold the same terms in the same order, so a difference here is a real defect, \
-                 not rounding"
-            );
+            // On a CUDA device from `I8_GEMV_MMA_MIN_ROWS` rows the upgrade is the native tensor-core
+            // block, which is not bit-identical to the WGSL kernel (the oracle bound below holds it).
+            let tensor_core = gpu.kind() == "cuda"
+                && m >= kernels_cuda::I8_GEMV_MMA_MIN_ROWS
+                && gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= kernels_cuda::MMA_S8_MIN_CC);
+            if !tensor_core {
+                assert_eq!(
+                    bits(&up),
+                    bits(&refr),
+                    "matmul_i8_gemv_reg must be BYTE-identical to matmul_i8_gemv at m={m}, kg={kg}, n={n} - \
+                     both form and fold the same terms in the same order, so a difference here is a real defect, \
+                     not rounding"
+                );
+            }
             // Each group's sum is exact integer; the cross-group fold is f32,
             // so the bound is a few roundings of the terms' MAGNITUDE - not of
             // the cancelled result, and not a number fitted to what passed.

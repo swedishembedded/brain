@@ -63,6 +63,13 @@ pub const DP4A_MIN_CC: Cc = (6, 1);
 /// a kernel whose body issues them cannot declare a lower floor.
 pub const MMA_S8_MIN_CC: Cc = (8, 0);
 
+/// Rows of x from which `matmul_i8_gemv` runs its int8 tensor-core block (on a
+/// device at [`MMA_S8_MIN_CC`] or above); below it, the dp4a block that is bit
+/// for bit the WGSL kernel. The source's `BRAIN_I8G_MMA_MIN_ROWS` is the same
+/// number (a test holds the two together); a caller that gates a result on
+/// bit-identity asks here which side of it a batch falls.
+pub const I8_GEMV_MMA_MIN_ROWS: u32 = 5;
+
 /// The lowest compute capability a CUDA 12.x toolchain will emit code for at
 /// all (`--gpu-architecture=sm_50`). A kernel whose text uses nothing beyond
 /// the always-available core - shared memory, `__syncthreads`, fp32
@@ -627,11 +634,11 @@ pub const ALL: &[CudaKernel] = &[
         // `__dp4a` is the only instruction above the toolchain baseline.
         min_cc: DP4A_MIN_CC,
         entry: "brain_matmul_i8_gemv",
-        what: "packed-int8 skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads, dp4a, bit-identical to matmul_i8_gemv_reg",
+        what: "packed-int8 skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads and dp4a, bit-identical to matmul_i8_gemv_reg below 5 rows (and everywhere without int8 tensor cores), int8 tensor cores (mma.sync m16n8k32) from 5 rows on compute capability 8.0+",
         reported: "native:matmul_i8_gemv",
-        block_dim: 128,
-        // 8 rows of x by 8 weight rows per block.
-        tile: (8, 8),
+        block_dim: 256,
+        // 8 rows of x by 16 weight rows per block.
+        tile: (8, 16),
         shared_bytes: 0,
         src: include_str!("../cu/matmul_i8_gemv.cu"),
     },
@@ -651,8 +658,8 @@ pub const ALL: &[CudaKernel] = &[
         entry: "brain_matmul_i8_gemv_multi",
         what: "up to four int8 projections of one activation in one launch (blocks of every matrix fill the card together); runs the single GEMV's own block function, bit-identical to separate launches",
         reported: "native:matmul_i8_gemv_multi",
-        block_dim: 128,
-        tile: (8, 8),
+        block_dim: 256,
+        tile: (8, 16),
         shared_bytes: 0,
         src: include_str!("../cu/matmul_i8_gemv.cu"),
     },
@@ -1917,7 +1924,10 @@ pub fn check_table(table: &[CudaKernel]) -> Vec<String> {
                 k.name, k.min_cc.0, k.min_cc.1, DP4A_MIN_CC.0, DP4A_MIN_CC.1
             ));
         }
-        if (code.contains("mma.sync") || code.contains("cp.async")) && k.min_cc < MMA_S8_MIN_CC {
+        // A kernel may run on older parts too if it gates those instructions behind the capability itself
+        // (`__CUDA_ARCH__ >= 800`) and carries a body for the rest.
+        let gates_mma_itself = code.contains("__CUDA_ARCH__ >= 800");
+        if (code.contains("mma.sync") || code.contains("cp.async")) && k.min_cc < MMA_S8_MIN_CC && !gates_mma_itself {
             errs.push(format!(
                 "{}: issues mma.sync/cp.async but declares min_cc {}.{}, below the capability that introduced them ({}.{})",
                 k.name, k.min_cc.0, k.min_cc.1, MMA_S8_MIN_CC.0, MMA_S8_MIN_CC.1
@@ -1955,6 +1965,15 @@ pub fn check_table(table: &[CudaKernel]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_gemv_source_and_the_rust_constant_agree_on_where_the_tensor_core_block_starts() {
+        let src = get("matmul_i8_gemv").expect("registered").src;
+        assert!(
+            src.contains(&format!("#define BRAIN_I8G_MMA_MIN_ROWS {I8_GEMV_MMA_MIN_ROWS}\n")),
+            "matmul_i8_gemv.cu must define BRAIN_I8G_MMA_MIN_ROWS as {I8_GEMV_MMA_MIN_ROWS}"
+        );
+    }
+
     use super::*;
 
     /// The shipped table obeys its own invariants.
@@ -2083,6 +2102,32 @@ mod tests {
                   extern \"C\" __global__ void bk_prose(const float* a) {}\n",
         }];
         assert!(check_table(PROSE).is_empty(), "{:?}", check_table(PROSE));
+    }
+
+    /// A tensor-core instruction below its capability floor is a violation unless the kernel gates it on
+    /// the capability itself and carries a body for the older parts (as `matmul_i8_gemv` does).
+    #[test]
+    fn a_kernel_may_declare_an_older_floor_only_if_it_gates_its_tensor_core_instructions() {
+        const UNGATED: &str = "extern \"C\" __global__ void bk_mma(const int* a) { asm volatile(\"mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {}\"); }";
+        const GATED: &str = "#if __CUDA_ARCH__ >= 800\nextern \"C\" __global__ void bk_mma(const int* a) { asm volatile(\"mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {}\"); }\n#else\nextern \"C\" __global__ void bk_mma(const int* a) {}\n#endif\n";
+        let kernel = |src: &'static str| CudaKernel {
+            name: "mma_probe",
+            op: Op::MatMul,
+            weight: Dtype::I8,
+            by_name: false,
+            source: ImplSource::Tuned,
+            min_cc: DP4A_MIN_CC,
+            entry: "bk_mma",
+            what: "probe",
+            reported: "native:mma_probe",
+            block_dim: 64,
+            tile: (1, 64),
+            shared_bytes: 0,
+            src,
+        };
+        let joined = check_table(&[kernel(UNGATED)]).join("\n");
+        assert!(joined.contains("issues mma.sync/cp.async but declares min_cc"), "{joined}");
+        assert!(check_table(&[kernel(GATED)]).is_empty(), "{:?}", check_table(&[kernel(GATED)]));
     }
 
     #[test]

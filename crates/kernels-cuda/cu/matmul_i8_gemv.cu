@@ -8,8 +8,14 @@
 // info@swedishembedded.com.
 //
 // Skinny-M INT8 matmul, out = dequant(x_q @ W_q^T) - the hand-written CUDA
-// form of `matmul_i8_gemv_reg.wgsl`, with the identical buffer layout, the
-// identical uniform and the identical RESULT TO THE LAST BIT.
+// form of `matmul_i8_gemv_reg.wgsl`, with the identical buffer layout and the
+// identical uniform. Two blocks share the file:
+//  * the dp4a block, bit-identical to the WGSL kernel (the result to the last
+//    bit), serves every row count below BRAIN_I8G_MMA_MIN_ROWS and every row
+//    count on a device without int8 tensor cores (compute capability < 8.0);
+//  * the tensor-core block (below `brain_gemv_block_mma`) serves the larger
+//    batches from compute capability 8.0 and agrees with the WGSL kernel to
+//    f32 rounding of the running sum, not bit for bit.
 //
 //   params : u32 [m, kg, n]   kg = K/4 packed words per row, K a multiple of 32
 //   x_q    : [M, kg] u32      activations, 4 signed int8 per word
@@ -38,8 +44,8 @@
 //    matching vectors of x - before it consumes any. Loading x inside the
 //    consume loop serialises one L2 round trip per vector and cost about a
 //    quarter of the kernel's time on a 5120x6144 projection;
-//  * the register budget is capped (`__launch_bounds__`) so five blocks fit
-//    per SM. The widest row count (8 rows of x) wants more registers than the
+//  * the register budget is capped (`__launch_bounds__`) so three 256-thread
+//    blocks fit per SM. The widest row count (8 rows of x) wants more registers than the
 //    decode row count needs; left uncapped it set the occupancy of every
 //    launch, including the single-row one that is the whole point.
 // For more than two rows of x the staged vectors of x would not fit that
@@ -77,16 +83,28 @@
 // design (a sliced step binds ranges of one allocation).
 
 // Output columns (weight rows) one block covers, and threads per weight row.
-#define BRAIN_I8G_COLS 8
+#define BRAIN_I8G_COLS 16
 #define BRAIN_I8G_LANES 16
 #define BRAIN_I8G_THREADS (BRAIN_I8G_COLS * BRAIN_I8G_LANES)
 // Rows of x one block covers; larger m is split over blocks by the grid.
 #define BRAIN_I8G_ROWS 8
 // Blocks per SM the register budget is sized for.
-#define BRAIN_I8G_MIN_BLOCKS 5
+#ifndef BRAIN_I8G_MIN_BLOCKS
+#define BRAIN_I8G_MIN_BLOCKS 3
+#endif
+// From compute capability 8.0 a batch of at least this many rows of x takes the tensor-core block.
+#ifndef BRAIN_I8G_MMA_MIN_ROWS
+#define BRAIN_I8G_MMA_MIN_ROWS 5
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(BRAIN_I8G_NO_MMA)
+#define BRAIN_I8G_USE_MMA 1
+#endif
 // 16-byte vectors per thread in one stage of loads. Five divides the 20
 // vectors a thread reads of a 5120-wide row, the hottest decode width.
 #define BRAIN_I8G_UNROLL_NARROW 5
+#ifndef BRAIN_I8G_UNROLL_NARROW2
+#define BRAIN_I8G_UNROLL_NARROW2 3
+#endif
 #define BRAIN_I8G_UNROLL_WIDE 2
 // Up to this many rows of x are staged in registers with the weights.
 #define BRAIN_I8G_STAGED_ROWS 2
@@ -225,7 +243,7 @@ __device__ __forceinline__ void brain_gemv_tile(const unsigned int* xq, const un
 // `MR` > BRAIN_I8G_STAGED_ROWS rows of x against one weight row per 16 threads,
 // with the rows of x shared through shared memory.
 //
-// Why. Every thread of a block walks the same stretch of K, so the eight
+// Why. Every thread of a block walks the same stretch of K, so the sixteen
 // weight rows of a block all want the SAME vectors of x, once per row of x. Read
 // by each thread from global memory that is MR loads of x per vector of weights,
 // 4x the weights' own traffic at eight rows through the read-only cache, and it
@@ -320,7 +338,7 @@ __device__ __forceinline__ void brain_gemv_launch(BrainXTile xs, const unsigned 
                                                   unsigned int mrows, unsigned int m0,
                                                   unsigned int kg, unsigned int n, unsigned int col) {
     if (MR <= BRAIN_I8G_STAGED_ROWS) {
-        brain_gemv_tile<MR, BRAIN_I8G_UNROLL_NARROW, VEC>(xq, wq, sx, sw, out, mrows, m0, kg, n, col);
+        brain_gemv_tile<MR, (MR == 1 ? BRAIN_I8G_UNROLL_NARROW : BRAIN_I8G_UNROLL_NARROW2), VEC>(xq, wq, sx, sw, out, mrows, m0, kg, n, col);
     } else {
         brain_gemv_tile_shared_x<MR, BRAIN_I8G_UNROLL_WIDE, VEC>(xs, xq, wq, sx, sw, out, mrows, m0, kg, n, col);
     }
@@ -337,6 +355,138 @@ __device__ __forceinline__ void brain_gemv_select(BrainXTile xs, const unsigned 
     else                  { brain_gemv_launch<8, VEC>(xs, xq, wq, sx, sw, out, mrows, m0, kg, n, col); }
 }
 
+#ifdef BRAIN_I8G_USE_MMA
+// ---------------------------------------------------------------------------
+// The tensor-core block (compute capability 8.0 and up).
+//
+// Why. From five rows of x the dp4a block no longer streams the weights at
+// the memory system's rate: each weight byte meets every row of x on the
+// arithmetic pipes, and the rows of x are read back from shared memory at
+// as many bytes as the weights themselves (knowledge 332). A tensor core does
+// a whole 32-element group of 16 weight rows against eight rows of x in one
+// instruction, with the activation held in registers.
+//
+// How. One block covers BRAIN_I8G_COLS (16) weight rows and up to
+// BRAIN_I8G_ROWS (8) rows of x. Its warps split K between them (each takes one
+// contiguous stretch, so its loads of a weight row are adjacent) and every
+// warp runs `mma.m16n8k32` (s8 x s8 -> s32) per scale group with the 16
+// weight rows as the rows of A and the rows of x as the eight columns of B. A
+// group is exactly one MMA, so the group scale is folded per MMA: the
+// accumulator is seeded with 1.5 * 2^23 so the integer sum comes back as a
+// float bit pattern (exact for the group's |sum| <= 32 * 128 * 128), one FADD
+// removes the bias and one FFMA applies the scale to the running f32 total -
+// the construction of `matmul_i8_mma.cu`.
+//
+// The MMA fixes which k element sits in which register only up to a
+// permutation shared by A and B, so a thread takes the eight bytes
+// [8 * t4, 8 * t4 + 8) of a group from each of its two weight rows (one 8-byte
+// load each) and the same eight bytes of its x row. Weights stream through
+// with no L1 allocation; x (a few KiB per row) is read through L1.
+//
+// The warps' totals are added in warp order through shared memory, so the
+// result does not depend on scheduling. It is not bit-identical to the dp4a
+// block: the group scale is applied once per 32 products, as in the prefill
+// GEMM, with a fused multiply-add.
+#define BRAIN_I8G_MMA_WARPS (BRAIN_I8G_THREADS / 32)
+#ifndef BRAIN_I8G_MMA_UNROLL
+#define BRAIN_I8G_MMA_UNROLL 4
+#endif
+
+__device__ __forceinline__ void brain_mma_s8_m16n8k32(unsigned int (&d)[4], unsigned int a0, unsigned int a1, unsigned int a2, unsigned int a3, unsigned int b0, unsigned int b1) {
+    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %10, %10, %10};\n"
+                 : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0x4B400000u));
+}
+
+__device__ __forceinline__ uint2 brain_ld_stream2(const uint2* p) {
+    uint2 v;
+    asm("ld.global.nc.L1::no_allocate.v2.u32 {%0, %1}, [%2];" : "=r"(v.x), "=r"(v.y) : "l"(p));
+    return v;
+}
+
+template <bool VEC>
+__device__ __forceinline__ uint2 brain_mma_ld_w(const unsigned int* p) {
+    if (VEC) { return brain_ld_stream2(reinterpret_cast<const uint2*>(p)); }
+    return make_uint2(__ldg(p), __ldg(p + 1));
+}
+
+template <bool VEC>
+__device__ __forceinline__ uint2 brain_mma_ld_x(const unsigned int* p) {
+    if (VEC) { return *reinterpret_cast<const uint2*>(p); }
+    return make_uint2(p[0], p[1]);
+}
+
+template <bool VEC>
+__device__ __forceinline__ void brain_gemv_block_mma(const unsigned int* xq, const unsigned int* wq,
+                                                     const float* sx, const float* sw, float* out,
+                                                     unsigned int m0, unsigned int mrows,
+                                                     unsigned int kg, unsigned int n, unsigned int n0) {
+    constexpr int U = BRAIN_I8G_MMA_UNROLL;
+    __shared__ float red[BRAIN_I8G_MMA_WARPS][32][4];
+    const unsigned int lane = threadIdx.x & 31u;
+    const unsigned int warp = threadIdx.x >> 5;
+    const unsigned int g = lane >> 2;    // MMA groupID: weight rows g and g + 8 of A, the row of x of B
+    const unsigned int t4 = lane & 3u;
+    const unsigned int groups = kg >> 3;
+    // Rows past n read the last row; their outputs are dropped.
+    const unsigned int rlo = min(n0 + g, n - 1u);
+    const unsigned int rhi = min(n0 + g + 8u, n - 1u);
+    const unsigned int xrow = m0 + (g < mrows ? g : 0u);
+
+    const unsigned int* wlo = wq + (unsigned long long)rlo * kg + 2u * t4;
+    const unsigned int* whi = wq + (unsigned long long)rhi * kg + 2u * t4;
+    const float* slo = sw + (unsigned long long)rlo * groups;
+    const float* shi = sw + (unsigned long long)rhi * groups;
+    const unsigned int* xp = xq + (unsigned long long)xrow * kg + 2u * t4;
+
+    float f0 = 0.0f, f1 = 0.0f, f2 = 0.0f, f3 = 0.0f;
+    // Each warp takes one contiguous stretch of K, so its loads of a weight row are adjacent.
+    const unsigned int chunk = (groups + BRAIN_I8G_MMA_WARPS - 1u) / BRAIN_I8G_MMA_WARPS;
+    const unsigned int first = min(warp * chunk, groups);
+    const unsigned int per_warp = min(chunk, groups - first);
+    for (unsigned int i0 = 0; i0 < per_warp; i0 += U) {
+        uint2 wl[U], wh[U], x[U];
+        float sl[U], sh[U];
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            const unsigned int gi = first + i0 + u;
+            if (i0 + u < per_warp) {
+                wl[u] = brain_mma_ld_w<VEC>(wlo + 8ull * gi);
+                wh[u] = brain_mma_ld_w<VEC>(whi + 8ull * gi);
+                x[u] = brain_mma_ld_x<VEC>(xp + 8ull * gi);
+                sl[u] = slo[gi];
+                sh[u] = shi[gi];
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            if (i0 + u < per_warp) {
+                unsigned int d[4];
+                brain_mma_s8_m16n8k32(d, wl[u].x, wh[u].x, wl[u].y, wh[u].y, x[u].x, x[u].y);
+                f0 = fmaf(__uint_as_float(d[0]) - 12582912.0f, sl[u], f0);  // weight row g, row of x 2*t4
+                f1 = fmaf(__uint_as_float(d[1]) - 12582912.0f, sl[u], f1);  // weight row g, row of x 2*t4 + 1
+                f2 = fmaf(__uint_as_float(d[2]) - 12582912.0f, sh[u], f2);  // weight row g + 8
+                f3 = fmaf(__uint_as_float(d[3]) - 12582912.0f, sh[u], f3);
+            }
+        }
+    }
+    red[warp][lane][0] = f0;
+    red[warp][lane][1] = f1;
+    red[warp][lane][2] = f2;
+    red[warp][lane][3] = f3;
+    __syncthreads();
+    if (threadIdx.x < 128u) {
+        const unsigned int l = threadIdx.x >> 2, j = threadIdx.x & 3u;
+        float total = 0.0f;
+#pragma unroll
+        for (int w = 0; w < BRAIN_I8G_MMA_WARPS; ++w) { total += red[w][l][j]; }
+        const unsigned int orow = n0 + (l >> 2) + 8u * (j >> 1);
+        const unsigned int ocol = 2u * (l & 3u) + (j & 1u);
+        if (orow < n && ocol < mrows) { out[(unsigned long long)(m0 + ocol) * n + orow] = total * sx[m0 + ocol]; }
+    }
+}
+#endif
+
 // One block's share of a GEMV: the `tile_m`-th group of up to BRAIN_I8G_ROWS rows
 // of x against the `tile_n`-th group of BRAIN_I8G_COLS weight rows. Shared by
 // the single-matrix kernel below and by `matmul_i8_gemv_multi`, which runs it
@@ -349,6 +499,19 @@ __device__ __forceinline__ void brain_gemv_block(const unsigned int* xq, const u
     const unsigned int m0 = tile_m * BRAIN_I8G_ROWS;
     if (m0 >= m) { return; }  // block-uniform
     const unsigned int mrows = min(m - m0, (unsigned int)BRAIN_I8G_ROWS);
+#ifdef BRAIN_I8G_USE_MMA
+    if (m >= BRAIN_I8G_MMA_MIN_ROWS) {
+        // Eight-byte loads when x_q and w_q are 8-byte aligned, word by word otherwise.
+        const bool aligned8 = ((reinterpret_cast<unsigned long long>(xq) |
+                                reinterpret_cast<unsigned long long>(wq)) & 7ull) == 0ull;
+        if (aligned8) {
+            brain_gemv_block_mma<true>(xq, wq, sx, sw, out, m0, mrows, kg, n, tile_n * BRAIN_I8G_COLS);
+        } else {
+            brain_gemv_block_mma<false>(xq, wq, sx, sw, out, m0, mrows, kg, n, tile_n * BRAIN_I8G_COLS);
+        }
+        return;
+    }
+#endif
     const unsigned int col = tile_n * BRAIN_I8G_COLS + threadIdx.x / BRAIN_I8G_LANES;
 
     // One staging tile for whichever row-count instance the block runs.
@@ -395,9 +558,9 @@ brain_matmul_i8_gemv(const unsigned int* params, const unsigned int* xq, const u
 // all the matrices fill the card together and the launch count drops by two
 // thirds, which on a replayed graph is also a node boundary each.
 //
-// Bit identity. A block runs `brain_gemv_block` - the very function the
-// single-matrix kernel runs - on the block's own matrix, so every output
-// element is the one a separate launch would have produced, bit for bit. The
+// Bit identity between the launches. A block runs `brain_gemv_block` - the very
+// function the single-matrix kernel runs - on the block's own matrix, so every
+// output element is the one a separate launch would have produced, bit for bit. The
 // blocks of set 0 come first, then set 1, and so on; within a set the mapping
 // is the single kernel's (`tile_m` major, `tile_n` minor).
 
