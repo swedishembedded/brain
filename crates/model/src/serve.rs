@@ -56,6 +56,17 @@ pub trait PagedDecoder {
     /// sequences always outrank the prefix cache). Returns blocks actually freed.
     fn reclaim_prefix(&mut self, want: u32) -> u32;
 
+    /// [`Self::reclaim_prefix`] for the admission of a request with `prompt`
+    /// under `adapter`: the cached blocks that very prompt is about to adopt
+    /// are spared. A conversation's next turn finds its own earlier turn at
+    /// the cold end of the cache (the other conversations ran since), so
+    /// reclaiming in plain recency order would free exactly the blocks the
+    /// request is admitted to reuse. The default spares nothing.
+    fn reclaim_prefix_keeping(&mut self, want: u32, prompt: &[u32], adapter: Option<AdapterId>) -> u32 {
+        let _ = (prompt, adapter);
+        self.reclaim_prefix(want)
+    }
+
     /// Release a finished/cancelled sequence's blocks back to the pool.
     fn release_table(&mut self, t: &mut BlockTable);
 
@@ -1520,8 +1531,9 @@ impl<D: PagedDecoder> Scheduler<D> {
         let free = self.dec.free_blocks();
         if free < want {
             // Cached prefix blocks are reclaimable capacity: live sequences always
-            // outrank the cache.
-            self.dec.reclaim_prefix(want - free);
+            // outrank the cache, but not the cache this very request reuses.
+            let waiting = &self.waiting[pos];
+            self.dec.reclaim_prefix_keeping(want - free, &waiting.req.prompt, waiting.adapter);
         }
         if self.dec.free_blocks() < want {
             return false;

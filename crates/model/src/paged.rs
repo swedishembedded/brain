@@ -274,7 +274,7 @@ impl BlockTable {
 ///
 /// The cache holds one reference on every indexed block, so a cached block
 /// never returns to the free list while indexed; [`PrefixCache::evict`]
-/// releases least-recently-used entries under pool pressure. Only entries
+/// releases least-recently-used chain tails under pool pressure. Only entries
 /// whose block is cache-only (refcount 1) are evictable — a block still backing
 /// a live sequence stays.
 #[derive(Debug, Default)]
@@ -385,25 +385,77 @@ impl PrefixCache {
         }
     }
 
-    /// Release least-recently-used CACHE-ONLY entries (block refcount 1) until
-    /// `want` blocks have been freed or nothing more is evictable. Returns how
-    /// many were freed. Evicting a mid-chain parent strands its cached
-    /// children (unreachable by lookup); their stamps stop advancing, so they
-    /// become LRU and follow shortly.
+    /// [`Self::lookup_in`] without refreshing recency: how much of `prompt`
+    /// would hit, for a caller that only needs to know (admission).
+    pub fn peek_in(&self, namespace: KvNamespace, prompt: &[u32], block_size: u32, max_tokens: usize) -> Vec<u32> {
+        let bs = block_size as usize;
+        let mut parent = PREFIX_ROOT;
+        let mut out = Vec::new();
+        for chunk in prompt.chunks_exact(bs) {
+            if (out.len() + 1) * bs > max_tokens {
+                break;
+            }
+            match self.map.get(&(namespace, parent, chunk.to_vec())) {
+                Some(e) => {
+                    parent = e.block;
+                    out.push(e.block);
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// Release cache-only entries until `want` blocks have been freed or
+    /// nothing more is evictable; returns how many were freed. See
+    /// [`Self::evict_keeping`].
     pub fn evict(&mut self, want: u32, alloc: &mut BlockAllocator) -> u32 {
+        self.evict_keeping(want, &[], alloc)
+    }
+
+    /// [`Self::evict`] that never frees a block of `keep` (the chain the
+    /// caller is about to adopt).
+    ///
+    /// Only CACHE-ONLY entries (block refcount 1) are evictable, and only
+    /// LEAVES: an entry other cached blocks chain off stays until they are
+    /// gone, because freeing a chain's head strands every later block of it
+    /// (unreachable by lookup, still occupying the pool) while freeing its
+    /// tail merely shortens the prefix a later turn can reuse. Among leaves
+    /// the least recently used goes first; a chain whose last child was just
+    /// evicted becomes a leaf itself, so a cold conversation shrinks from the
+    /// tail, one block at a time.
+    pub fn evict_keeping(&mut self, want: u32, keep: &[u32], alloc: &mut BlockAllocator) -> u32 {
+        use std::cmp::Reverse;
+        let mut children: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        for key in self.map.keys() {
+            *children.entry(key.1).or_insert(0) += 1;
+        }
+        let evictable = |e: &PrefixEntry, children: &std::collections::HashMap<u32, u32>, alloc: &BlockAllocator| {
+            alloc.refcount(e.block) == 1 && !keep.contains(&e.block) && !children.contains_key(&e.block)
+        };
+        let mut leaves: std::collections::BinaryHeap<Reverse<(u64, u32)>> =
+            self.map.values().filter(|e| evictable(e, &children, alloc)).map(|e| Reverse((e.last_use, e.block))).collect();
         let mut freed = 0u32;
         while freed < want {
-            let victim = self
-                .map
-                .iter()
-                .filter(|(_, e)| alloc.refcount(e.block) == 1)
-                .min_by_key(|(_, e)| e.last_use)
-                .map(|(k, e)| (k.clone(), e.block));
-            let Some((key, block)) = victim else { break };
+            let Some(Reverse((_, block))) = leaves.pop() else { break };
+            let key = self.by_block.remove(&block).expect("a leaf is indexed");
             self.map.remove(&key);
-            self.by_block.remove(&block);
             alloc.decref(block);
             freed += 1;
+            let parent = key.1;
+            if parent == PREFIX_ROOT {
+                continue;
+            }
+            let remaining = children.get_mut(&parent).expect("the evicted entry counted its parent");
+            *remaining -= 1;
+            if *remaining == 0 {
+                children.remove(&parent);
+                if let Some(pe) = self.by_block.get(&parent).and_then(|k| self.map.get(k)) {
+                    if evictable(pe, &children, alloc) {
+                        leaves.push(Reverse((pe.last_use, pe.block)));
+                    }
+                }
+            }
         }
         freed
     }
@@ -586,6 +638,60 @@ mod tests {
         t.reserve(prompt.len() as u32, a).unwrap();
         cache.insert_chain_in(ns, prompt, t.blocks(), 0, a);
         t
+    }
+
+    /// Under pressure the cache gives up the TAIL of the coldest conversation,
+    /// not its head: evicting a chain's first block strands every later block
+    /// (unreachable by lookup yet still occupying the pool), whereas dropping
+    /// the tail keeps a shorter prefix that the conversation's next turn still
+    /// reuses.
+    #[test]
+    fn eviction_takes_a_cold_chains_tail_and_keeps_its_head_reachable() {
+        let mut a = BlockAllocator::new(16, 4);
+        let mut cache = PrefixCache::new();
+        let prompt: Vec<u32> = (1..=12).collect();
+        let mut t = prefill_into(&mut cache, &mut a, BASE_KV_NAMESPACE, &prompt);
+        let blocks = t.blocks().to_vec();
+        t.release(&mut a);
+        assert_eq!(cache.evict(1, &mut a), 1);
+        assert_eq!(cache.lookup(&prompt, 4, 12), blocks[..2].to_vec(), "the first two blocks are still a hit");
+    }
+
+    /// A request about to run must not lose its own earlier turn to the
+    /// reclaim its admission triggers: with as many conversations as the pool
+    /// holds, plain least-recently-used order evicts exactly the conversation
+    /// whose next turn arrives soonest.
+    #[test]
+    fn eviction_keeping_spares_the_named_chain_even_when_it_is_the_coldest() {
+        let mut a = BlockAllocator::new(16, 4);
+        let mut cache = PrefixCache::new();
+        let (mine, other): (Vec<u32>, Vec<u32>) = ((1..=8).collect(), (101..=108).collect());
+        let mut t = prefill_into(&mut cache, &mut a, BASE_KV_NAMESPACE, &mine);
+        let mine_blocks = t.blocks().to_vec();
+        t.release(&mut a);
+        let mut t = prefill_into(&mut cache, &mut a, BASE_KV_NAMESPACE, &other);
+        t.release(&mut a);
+        assert_eq!(cache.evict_keeping(2, &mine_blocks, &mut a), 2);
+        assert_eq!(cache.lookup(&mine, 4, 8), mine_blocks, "my chain survived");
+        assert!(cache.lookup(&other, 4, 8).is_empty(), "the other conversation paid");
+        assert_eq!(cache.evict_keeping(2, &mine_blocks, &mut a), 0, "kept blocks are never freed");
+    }
+
+    /// Looking a chain up must not refresh it when only asking how much of a
+    /// prompt would hit.
+    #[test]
+    fn peek_reports_the_hit_without_touching_recency() {
+        let mut a = BlockAllocator::new(16, 4);
+        let mut cache = PrefixCache::new();
+        let (first, second): (Vec<u32>, Vec<u32>) = ((1..=4).collect(), (101..=104).collect());
+        let mut t = prefill_into(&mut cache, &mut a, BASE_KV_NAMESPACE, &first);
+        let first_blocks = t.blocks().to_vec();
+        t.release(&mut a);
+        let mut t = prefill_into(&mut cache, &mut a, BASE_KV_NAMESPACE, &second);
+        t.release(&mut a);
+        assert_eq!(cache.peek_in(BASE_KV_NAMESPACE, &first, 4, 4), first_blocks);
+        assert_eq!(cache.evict(1, &mut a), 1);
+        assert!(cache.peek_in(BASE_KV_NAMESPACE, &first, 4, 4).is_empty(), "the peeked chain stayed the coldest and was the one evicted");
     }
 
     /// The same prompt prefilled under the base, adapter A and adapter B is

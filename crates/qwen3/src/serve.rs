@@ -24,7 +24,7 @@ use model::block::{self, KernelIds};
 use model::dispatch::I8Scratch;
 use model::ops::{Ops, Weight};
 use model::kv_offload::{HostKvPool, KvOffload, KvOffloadError, OffloadStats};
-use model::paged::{BlockAllocator, BlockTable, PrefixCache};
+use model::paged::{BlockAllocator, BlockTable, KvNamespace, PrefixCache, BASE_KV_NAMESPACE};
 use paramstore::ParamStore;
 
 use crate::config::QwenConfig;
@@ -3174,6 +3174,13 @@ impl Engine {
         self.prefix.evict(want, &mut self.alloc)
     }
 
+    /// [`Engine::reclaim_prefix`] sparing the blocks `prompt` would adopt under
+    /// `ns` (see [`model::serve::PagedDecoder::reclaim_prefix_keeping`]).
+    pub(crate) fn reclaim_prefix_keeping(&mut self, want: u32, ns: KvNamespace, prompt: &[u32]) -> u32 {
+        let keep = self.prefix.peek_in(ns, prompt, self.block_size, prompt.len().saturating_sub(1));
+        self.prefix.evict_keeping(want, &keep, &mut self.alloc)
+    }
+
     /// Prefix-cache effectiveness: `(tokens served from cache, tokens looked
     /// up, full blocks currently cached)`.
     pub fn prefix_stats(&self) -> (u64, u64, usize) {
@@ -3699,6 +3706,10 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn reclaim_prefix(&mut self, want: u32) -> u32 {
         Engine::reclaim_prefix(self, want)
+    }
+    fn reclaim_prefix_keeping(&mut self, want: u32, prompt: &[u32], adapter: Option<model::serve::AdapterId>) -> u32 {
+        let ns = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
+        Engine::reclaim_prefix_keeping(self, want, ns, prompt)
     }
     fn release_table(&mut self, t: &mut BlockTable) {
         self.release_table(t)
@@ -4337,6 +4348,37 @@ mod tests {
             assert!(hit1 > 0, "kv_int8={kv_int8}: the second prefill must actually reuse the prefix");
             assert_eq!(warm, cold, "kv_int8={kv_int8}: a cache hit must be byte-identical to computing the prefix");
         }
+    }
+
+    /// A conversation's next turn, admitted into a pool that the other
+    /// conversations' cached histories have filled, still computes only its
+    /// new suffix: the reclaim its admission triggers spares the blocks that
+    /// turn adopts, and its output equals a cold prefill's.
+    #[test]
+    fn next_turn_keeps_its_own_cached_history_when_admission_reclaims() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        // 20 blocks of 4 tokens: two 8-block histories fill the pool.
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 20, 2, 12, 16, false, false);
+        let (turn1, other): (Vec<u32>, Vec<u32>) = ((1..=32).map(|t| t % 7 + 1).collect(), (1..=32).map(|t| t % 5 + 2).collect());
+        let mut turn2 = turn1.clone();
+        turn2.extend([3, 4, 5, 6, 7, 1, 2, 3]);
+        for prompt in [&turn1, &other] {
+            let mut t = BlockTable::new();
+            eng.prefill(&mut t, prompt);
+            eng.release_table(&mut t);
+        }
+        // Turn 2 needs 10 blocks; 4 are free, so 6 must be reclaimed.
+        let need = eng.blocks_for(turn2.len() as u32 + 1);
+        assert_eq!(eng.reclaim_prefix_keeping(need - eng.free_blocks(), BASE_KV_NAMESPACE, &turn2), need - 4);
+        let (hit_before, _, _) = eng.prefix_stats();
+        let mut t = BlockTable::new();
+        let warm = eng.prefill(&mut t, &turn2);
+        let (hit_after, _, _) = eng.prefix_stats();
+        assert_eq!(hit_after - hit_before, 32, "the whole earlier turn was reused");
+        let mut cold_eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 20, 2, 12, 16, false, false);
+        let mut tc = BlockTable::new();
+        assert_eq!(warm, cold_eng.prefill(&mut tc, &turn2), "reuse must not change the hidden state");
     }
 
     /// `calibrate_kv` must report one stream per (layer, K|V, kv_head) with a
