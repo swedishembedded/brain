@@ -6,7 +6,7 @@
 #
 # `crates/qwen3/tests/no_kernel_names.rs` (still in place, unchanged -- see
 # below) polices ONE crate's ONE migrated fork: qwen3's fp32-vs-int8 linear
-# dispatch. The kernel catalogue (`docs/reference/kernels.md`) is
+# dispatch. The kernel catalogue (`docs/reference/kernels/index.md`) is
 # workspace-wide, and so is the class of bug it was written to catch -- a
 # model crate that hand-dispatches a kernel by name when a structurally
 # faster sibling already exists in the catalogue, bypassing whatever
@@ -15,7 +15,7 @@
 # repo's own worked example of what that costs.
 #
 # WHAT COUNTS AS "A FASTER SIBLING" -- cross-referenced against
-# docs/reference/kernels.md, not guessed:
+# docs/reference/kernels/index.md, not guessed:
 #
 #   Two kernels are siblings if their names share a STEM once trailing
 #   "structural variant" words are stripped from each -- the SAME six suffix
@@ -163,7 +163,7 @@ import sys
 root = pathlib.Path(".")
 
 # ---- 1. the kernel catalogue: name -> @opt, cross-referenced not guessed ---
-md = (root / "docs/reference/kernels.md").read_text()
+md = (root / "docs/reference/kernels/index.md").read_text()
 rows = re.findall(r"^\| \[`([a-z0-9_]+)`\]\([^)]*\) \| .*? \| .*? \| (\d)/5 \|", md, re.M)
 if len(rows) < 400:
     sys.exit(f"check-kernel-selection: parsed only {len(rows)} kernel rows from kernels.md - table format changed?")

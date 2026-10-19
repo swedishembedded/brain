@@ -121,7 +121,7 @@ first: `groupadd --system brain`).
 
 Model weights are not shipped in this package - point the relevant
 BRAIN_*_WEIGHTS / BRAIN_*_DIR environment variable (see `brain --help` and
-docs/models/) at a local checkpoint, or let auto-fetch retrieve one.
+docs/reference/models/) at a local checkpoint, or let auto-fetch retrieve one.
 EOF
 gzip -9n >"${STAGING}/usr/share/doc/brain/changelog.Debian.gz" <<EOF
 brain (${VERSION}) unstable; urgency=medium

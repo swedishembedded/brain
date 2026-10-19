@@ -441,7 +441,7 @@ varying provenance - adding a `FilesRecipe` naming one would misrepresent
 an unofficial third-party repo as the canonical upstream release the way
 every other recipe's `repos:` field implicitly claims. `BRAIN_DEEPSEEKOCR2_
 DIR` must be pointed at a manually-placed pair; documented as such in
-`docs/models/deepseekocr2.md` (a minimal stub - `check-arch-names.sh`
+`docs/reference/models/deepseekocr2.md` (a minimal stub - `check-arch-names.sh`
 requires the page to exist once the architecture registered; the full
 options/hardware-limits content is M11's job) and `docs/using/
 configuration.md`.
@@ -589,7 +589,7 @@ tests) and `cargo test -p brain-gradcheck --lib deepseekocr2` (the
 pre-existing M4 gradcheck, unaffected since it never sets `cfg.lora`) both
 green.
 
-M11 (user-facing docs) done: `docs/models/deepseekocr2.md` replaced M7's
+M11 (user-facing docs) done: `docs/reference/models/deepseekocr2.md` replaced M7's
 stub with the real page (honest support/hardware-limits sections, the
 no-vendor-GGUF guidance, real measured figures from M6/M7/M9 rather than
 placeholders), plus a license-compliance row (Apache-2.0, distinct from

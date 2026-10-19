@@ -15,7 +15,7 @@ naive-kernel list lessons §76 keeps finding elsewhere in the tree.
 
 The 3.0 pretrained weights carry a `timesfm-non-commercial-license-v1.0`
 restriction (non-commercial, non-production, checkpoint never
-redistributable) - see `docs/models/timesfm3.md`.
+redistributable) - see `docs/reference/models/timesfm3.md`.
 
 ## Done
 

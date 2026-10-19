@@ -45,8 +45,8 @@ silently skipped.
 `campplus`) before any other code, per porting.md §0. Three new crates
 (`brain-cosyvoice`, `brain-s3tokenizer`, `brain-campplus`) registered in the
 workspace `Cargo.toml` (`members`, `default-members`, `workspace.dependencies`)
-with module-doc-only `lib.rs` stubs stating scope and status. `docs/models/`
-stub pages added for all three, in the `docs/models/instantid.md`
+with module-doc-only `lib.rs` stubs stating scope and status. `docs/reference/models/`
+stub pages added for all three, in the `docs/reference/models/instantid.md`
 "not yet servable" style.
 
 ## Phase 1: golden dumper

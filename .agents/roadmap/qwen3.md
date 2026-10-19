@@ -49,7 +49,7 @@ instead of on a live server's first request.
 
 Verified against real hardware end to end: `brain serve --openai` +
 `curl .../v1/chat/completions` against the real checkpoint now returns a
-real completion (`docs/quickstart/img/serve.txt`).
+real completion (`docs/getting-started/img/serve.txt`).
 
 **This exact bug shape can recur** wherever a model hand-maintains its own
 kernel list instead of deriving it from `model::ops::REQUIRED_KERNELS`. The

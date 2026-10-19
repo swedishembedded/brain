@@ -19,7 +19,7 @@
 #   3. driver health     -- kernel debugfs reset/fault counters (host+root only)
 #   4. userspace libs    -- the intel-level-zero-npu package + the
 #                            libze_intel_vpu.so.1 compat symlink a stock
-#                            libze1 loader needs to find it (see docs/models/
+#                            libze1 loader needs to find it (see docs/reference/models/
 #                            yolov8/npu.md and ~/.claude memory
 #                            brain-npu-container-blocked.md for why)
 #   5. OpenVINO install  -- the pip wheel's unversioned-symlink gap that

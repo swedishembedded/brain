@@ -15,7 +15,7 @@ substitute for the other.
 The point is uniformity: one capability interface, one scheduler, one transport. A
 model that bolts on its own subcommand, its own thread pool, or its own socket is a
 maintenance island and a benchmark blind spot (`brain perf` measures anything behind
-`capability::Provider` for free — see `docs/performance/benchmarking.md`).
+`capability::Provider` for free - see `docs/guides/hardware/benchmarking.md`).
 
 ## The five obligations
 

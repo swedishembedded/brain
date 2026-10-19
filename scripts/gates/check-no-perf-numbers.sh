@@ -8,7 +8,7 @@
 # doc-comment or string literal is a claim that outlives the hardware, driver,
 # and code that produced it - the moment the kernel path changes or someone
 # reads it on different silicon, the number quietly becomes a lie the reader
-# has no way to detect. `docs/performance/overview.md` already says this
+# has no way to detect. `docs/concepts/execution/performance.md` already says this
 # explicitly ("not a promise for your hardware, always measure your own
 # setup"), but that discipline only holds if bare numbers don't creep back in
 # unreviewed. This gate makes that discipline mechanical: any bare number
@@ -40,7 +40,7 @@
 #                    measured result)
 #   - percentiles:  p50/p95/p99 followed by an actual value (defining what a
 #                    percentile IS, with no number attached, is fine - see
-#                    docs/performance/benchmarking.md)
+#                    docs/guides/hardware/benchmarking.md)
 #
 # NOT denied (these are not performance claims, so a bare number next to one
 # of these is left alone): model/tensor dimensions, static file sizes

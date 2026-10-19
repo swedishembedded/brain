@@ -3,7 +3,7 @@
 
 # 54. A hand-maintained "Supported" checkbox is a duplicate of a fact the code already derives, and three of them were wrong in two directions
 
-Every `docs/models/<model>.md` opens with a support table:
+Every `docs/reference/models/<model>.md` opens with a support table:
 
 ```
 | HTTP API               | [x] |

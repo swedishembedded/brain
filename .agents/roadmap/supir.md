@@ -195,7 +195,7 @@ mostly carry no or wrong licence metadata.
 
 Consequences, non-negotiable: no `default_ref`/auto-fetch for this
 architecture; no SUPIR weight bytes or SUPIR-produced image enters `testdata/`
-in a committed form; `docs/models/supir.md` carries the licence note
+in a committed form; `docs/reference/models/supir.md` carries the licence note
 prominently. `crates/flux2` gates its own NC-licensed 9B variant behind
 `BRAIN_FLUX2_ALLOW_NC=1` - the same opt-in-env-var mechanism is the right
 precedent for a future `BRAIN_SUPIR_ALLOW_NC=1` if this port ever needs to
@@ -312,10 +312,10 @@ distinguish "weights present" from "commercial-use cleared" at runtime.
       `crates/npu/src/supir_topology.rs` + `supir_export.rs`: `ZeroCrossAttn`
       (the one adaptor with LINEAR projections, quantized through the shared
       `topo::linear_quant` emitter) - structurally tested, no real checkpoint
-      or NPU hardware involved. Docs: `docs/models/supir.md` rewritten from
-      its Phase-0 placeholder, `docs/models/llava.md` (already Phase 6),
-      `docs/models/index.md` (both moved out of "Reserved, not started" into
-      their real tables), `docs/models/imgpipe.md` (the new stage),
+      or NPU hardware involved. Docs: `docs/reference/models/supir.md` rewritten from
+      its Phase-0 placeholder, `docs/reference/models/llava.md` (already Phase 6),
+      `docs/reference/models/index.md` (both moved out of "Reserved, not started" into
+      their real tables), `docs/reference/models/imgpipe.md` (the new stage),
       `README.md`'s model list. `docs/manifest.txt` already carried both
       pages' entries. Lesson recorded in `.agents/knowledge/` (#63):
       `vae::VaeEncoder`/`VaeDecoder` are diffusers-NAMED, not merely

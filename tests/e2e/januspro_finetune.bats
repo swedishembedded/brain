@@ -26,8 +26,8 @@ setup_file() {
   export BRAIN STORE="$store"
   export WORK="$(mktemp -d)"
   mkdir -p "$WORK/und" "$WORK/gen"
-  cp "$REPO/docs/quickstart/img/seed.png" "$WORK/und/dog.png"
-  cp "$REPO/docs/quickstart/img/seed.png" "$WORK/gen/dog.png"
+  cp "$REPO/docs/getting-started/img/seed.png" "$WORK/und/dog.png"
+  cp "$REPO/docs/getting-started/img/seed.png" "$WORK/gen/dog.png"
   printf '%s\n' \
     '{"image":"dog.png","messages":[{"role":"user","content":"<image_placeholder>\nWhat animal is this?"},{"role":"assistant","content":"This is a golden retriever puppy."}]}' \
     >"$WORK/und/train.jsonl"

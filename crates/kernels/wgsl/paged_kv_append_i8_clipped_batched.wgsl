@@ -18,7 +18,7 @@
 // engine, not per token. This keeps today's per-token adaptivity (a typical
 // token still gets its own tight scale) while denying a single rare-token
 // outlier the ability to crush every other token's resolution in that head —
-// see docs/models/qwen/... for the calibration writeup. `clip[head] ==
+// see docs/reference/models/qwen/... for the calibration writeup. `clip[head] ==
 // f32::MAX` (the "no calibration" sentinel `KvCalib`'s uncalibrated/disabled
 // case uploads) degrades this to bit-identical behaviour vs the uncalibrated
 // kernel, which is what makes the A/B clean.

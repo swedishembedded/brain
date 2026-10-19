@@ -275,13 +275,13 @@ WAN 2.1 (text-to-video; 81 frames at 16 fps, 480p on the 1.3B variant)
       writing the file needs ffmpeg; without it the frames land in
       <output-path>.frames/ and the assembling command is printed
 
-World models (playable action-conditioned video models; docs/models/world-models/)
+World models (playable action-conditioned video models; docs/reference/models/world-models/)
   brain diamond play  --model fake|diamond [--weights F --device cpu|gpu|npu --onnx M]   # SDL window
   brain diamond play  --model fake --headless --frames N [--actions FILE | --action-seq 1,2,0]
                  [--dump-ppm DIR] [--hashes]        # deterministic rollout + fnv1a hashes (CI)
   brain diamond bench --model fake [--frames N]          # ms/frame + fps
 
-WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/models/mirror/)
+WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/reference/models/mirror/)
   brain worldmirror2 import <model.safetensors|hf_dir> --out mirror.safetensors
       One-time conversion of the reference HY-WorldMirror-2.0 checkpoint (strict
       1:1, every tensor verified).

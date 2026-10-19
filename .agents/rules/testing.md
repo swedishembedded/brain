@@ -70,7 +70,7 @@ plus an extra exclusion list for trees whose mirror is a whole upstream checkout
 **Real upstream checkpoints (`fastvlm`, `moondream`, `qwenvl`, `nemotron`,
 `qwen-asr`'s parity/import tests) live in the model store, not `testdata/`** - the
 same `<models-dir>/<vendor>/<repo>/` tree `brain serve`'s auto-fetch (and
-`crates/modelstore::execute`) writes and scans (see `docs/models/naming.md`).
+`crates/modelstore::execute`) writes and scans (see `docs/reference/models/naming.md`).
 Tests resolve one with
 `brain_testutil::model_dir("<vendor>/<repo>")`, which wraps
 `brain_modelstore::default_root()` (`$BRAIN_MODELS_DIR`, else
@@ -281,7 +281,7 @@ falls back to `resources/ltxv/weights/<role>/<file>` under
 `CARGO_MANIFEST_DIR/../..` when unset, per that suite's own `setup()`.
 `BRAIN_LTXV_DIT`, `BRAIN_LTXV_TEXT_ENCODER`, `BRAIN_LTXV_TOKENIZER` - the real
 22B DiT and 12B Gemma-4 text encoder, read from the model store entry
-`Lightricks/LTX-2.5` (a released GGUF; see `docs/models/ltxv.md`).
+`Lightricks/LTX-2.5` (a released GGUF; see `docs/reference/models/ltxv.md`).
 
 **`fetch-testdata` mirror paths** (local-mirror source for `make testdata/fetch`;
 the one place a machine-specific path may appear in this repo). Two kinds:
@@ -359,7 +359,7 @@ today - these two exist only for the dev-only `sdxl` binary).
 
 Real production reads, but kernel-selection A/B switches and debug/benchmark
 knobs for contributors doing kernel or performance work - not part of the
-user-facing configuration surface in `docs/using/configuration.md`. A user
+user-facing configuration surface in `docs/reference/configuration.md`. A user
 should never need to set these; a contributor profiling or bisecting a kernel
 regression will.
 
@@ -438,7 +438,7 @@ upsampled output's un-normalize/statistics step), and `BRAIN_LTXV_PIXEL_DUMP`
 `ltxv::pipeline` is still a smoke test (real VAE + tiny random-weight DiT, no
 real text encoder), so none of these configure a shippable generation path
 yet; the two LTX-2.5 knobs that DO - `BRAIN_LTXV_TEXT_CACHE` and
-`BRAIN_LTXV_TEXT_PRECISION` - live in `docs/using/configuration.md` instead.
+`BRAIN_LTXV_TEXT_PRECISION` - live in `docs/reference/configuration.md` instead.
 Promote a knob there when the pipeline it tunes becomes real.
 - `BRAIN_LTXV_VAE_TILE` - tiling mode for the 3D VAE decode.
 - `BRAIN_LTXV_RESIDENT_BLOCKS` - how many DiT blocks stay resident on the

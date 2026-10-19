@@ -1,7 +1,7 @@
 # Kernel checklist — read before writing, dispatching, or optimizing one
 
 Every rule here was paid for with a real defect in this engine. This page is
-the pre-flight; `docs/performance/overview.md` is number-free methodology
+the pre-flight; `docs/concepts/execution/performance.md` is number-free methodology
 only (profiling, the runtime selector, INT8, `brain flops`) - the "why"
 behind a specific case study, with real measured numbers, lives in that
 model's own `.agents/roadmap/<model>.md`.
@@ -1005,12 +1005,12 @@ kind of finding belongs, so it stays found instead of being re-discovered:
 - **The session log with the real measured numbers behind it** (before/after
   timings, per-kernel profiles, what was tried and killed) belongs in that
   model's own `.agents/roadmap/<model>.md`, never in `docs/`.
-- **`docs/` gets zero measured numbers, ever** - `docs/performance/overview.md`
+- **`docs/` gets zero measured numbers, ever** - `docs/concepts/execution/performance.md`
   is methodology only, exactly to keep a documented finding from silently
   going stale the moment the hardware, driver, or kernel path it was measured
   on changes. This is also why a specific case study does not belong there
   even as an illustration: it accumulates the same way this rule's own
-  `docs/performance/overview.md` case-study section once did, and had to be
+  `docs/concepts/execution/performance.md` case-study section once did, and had to be
   cut back out.
 
 Where possible, the fix itself belongs in the *selector* so the next model

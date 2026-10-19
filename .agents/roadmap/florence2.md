@@ -378,7 +378,7 @@ self-consistent.
   genuinely large checkpoints; unlike M1-M3's 463 MiB weights, a full
   training run at the real model's scale is a meaningfully larger ask
   than a forward-only parity check and was not attempted here).
-- **M7**: docs (`docs/models/florence2.md`, README entry, excluded from
+- **M7**: docs (`docs/reference/models/florence2.md`, README entry, excluded from
   quickstart).
 
 ## Open gaps to track (not blocking, recorded so they aren't lost)

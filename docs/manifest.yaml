@@ -1,0 +1,536 @@
+schema: 1
+project: brain
+title: brain
+description: Run, fine-tune and serve neural networks on your own hardware, in pure Rust.
+repository: https://github.com/swedishembedded/brain
+branch: main
+home: docs/index.md
+navigation:
+  - title: Getting started
+    pages:
+      - docs/getting-started/what-is-brain.md
+      - docs/getting-started/install.md
+      - docs/getting-started/quickstart.md
+  - title: Guides
+    pages:
+      - title: Inference
+        pages:
+          - docs/guides/inference/models-and-weights.md
+          - docs/guides/inference/text.md
+          - docs/guides/inference/vision.md
+          - docs/guides/inference/imaging.md
+          - docs/guides/inference/image-generation.md
+          - docs/guides/inference/speech.md
+          - docs/guides/inference/forecasting.md
+          - docs/guides/inference/three-d.md
+          - docs/guides/inference/world-models.md
+      - title: Training
+        pages:
+          - docs/guides/training/labeling.md
+          - docs/guides/training/lora.md
+          - docs/guides/training/forecast-finetune.md
+          - docs/guides/training/federated-experts.md
+      - title: Hardware
+        pages:
+          - docs/guides/hardware/choosing-hardware.md
+          - docs/guides/hardware/cuda.md
+          - docs/guides/hardware/benchmarking.md
+      - title: Serving
+        pages:
+          - docs/guides/serving/serving.md
+          - docs/guides/serving/monitoring.md
+          - docs/guides/serving/security.md
+  - title: Concepts
+    pages:
+      - docs/concepts/architecture.md
+      - docs/concepts/execution/performance.md
+      - docs/concepts/scaling/overview.md
+      - docs/concepts/scaling/data-parallel.md
+      - docs/concepts/scaling/pipeline.md
+      - docs/concepts/scaling/tensor-parallel.md
+  - title: Reference
+    pages:
+      - docs/reference/cli.md
+      - docs/reference/sdk.md
+      - docs/reference/configuration.md
+      - title: API
+        pages:
+          - docs/reference/api/http.md
+          - docs/reference/api/dbus.md
+      - title: Models
+        pages:
+          - docs/reference/models/index.md
+          - docs/reference/models/decision.md
+          - docs/reference/models/optionhead.md
+          - docs/reference/models/qwen3.md
+          - docs/reference/models/qwen2.md
+          - docs/reference/models/llama.md
+          - docs/reference/models/qwen35moe.md
+          - docs/reference/models/qwen35.md
+          - docs/reference/models/gpt2.md
+          - docs/reference/models/glmdsa.md
+          - docs/reference/models/glmdsa/npu.md
+          - docs/reference/models/deepseek2.md
+          - docs/reference/models/lfm2.md
+          - docs/reference/models/qwen3omnimoe/readme.md
+          - docs/reference/models/qwen3vl.md
+          - docs/reference/models/qwen3vlmoe.md
+          - docs/reference/models/vlm.md
+          - docs/reference/models/fastvlm.md
+          - docs/reference/models/moondream3.md
+          - docs/reference/models/minicpmv.md
+          - docs/reference/models/florence2.md
+          - docs/reference/models/llava.md
+          - docs/reference/models/deepseek2ocr.md
+          - docs/reference/models/deepseekvl.md
+          - docs/reference/models/januspro.md
+          - docs/reference/models/deepseekocr2.md
+          - docs/reference/models/asr.md
+          - docs/reference/models/qwen3asr.md
+          - docs/reference/models/nemotronasr.md
+          - docs/reference/models/qwen3tts.md
+          - docs/reference/models/mimi.md
+          - docs/reference/models/ecapatdnn.md
+          - docs/reference/models/minimaxmusic3.md
+          - docs/reference/models/cosyvoice.md
+          - docs/reference/models/s3tokenizer.md
+          - docs/reference/models/campplus.md
+          - docs/reference/models/yolov8/readme.md
+          - docs/reference/models/yolov8/npu.md
+          - docs/reference/models/zipdepth.md
+          - docs/reference/models/scrfd.md
+          - docs/reference/models/arcface.md
+          - docs/reference/models/lpips.md
+          - docs/reference/models/sam1.md
+          - docs/reference/models/sam2.md
+          - docs/reference/models/clip.md
+          - docs/reference/models/autoencoderkl.md
+          - docs/reference/models/s3dit.md
+          - docs/reference/models/flux2.md
+          - docs/reference/models/flux1.md
+          - docs/reference/models/t5encoder.md
+          - docs/reference/models/gemma4.md
+          - docs/reference/models/sdxlunet.md
+          - docs/reference/models/controlnet.md
+          - docs/reference/models/supir.md
+          - docs/reference/models/pulid.md
+          - docs/reference/models/instantid.md
+          - docs/reference/models/codeformer.md
+          - docs/reference/models/rrdbnet.md
+          - docs/reference/models/vqgan.md
+          - docs/reference/models/imgpipe.md
+          - docs/reference/models/wan.md
+          - docs/reference/models/ltxv.md
+          - docs/reference/models/minimaxh3.md
+          - docs/reference/models/worldmirror2.md
+          - docs/reference/models/splat.md
+          - docs/reference/models/forecast.md
+          - docs/reference/models/chronos2.md
+          - docs/reference/models/fincast.md
+          - docs/reference/models/kronos.md
+          - docs/reference/models/timesfm3.md
+          - docs/reference/models/horizon.md
+          - docs/reference/models/world-models.md
+          - docs/reference/models/diamond.md
+          - docs/reference/models/genieredux.md
+          - docs/reference/models/fly.md
+          - docs/reference/models/toymoe.md
+          - docs/reference/models/toypid.md
+          - docs/reference/models/toyseq2seq.md
+      - title: Kernels
+        pages:
+          - docs/reference/kernels/index.md
+          - docs/reference/kernels/cuda.md
+  - title: Examples
+    pages:
+      # BEGIN SAMPLES MANIFEST (generated by scripts/build/gen-samples-manifest.py)
+      - source: samples/README.md
+        path: examples/index.md
+      - source: samples/decision/arena/README.md
+        path: examples/decision/arena.md
+      - source: samples/decision/doom/README.md
+        path: examples/decision/doom.md
+      - source: samples/decision/intents/README.md
+        path: examples/decision/intents.md
+      - source: samples/decision/json/README.md
+        path: examples/decision/json.md
+      - source: samples/decision/patterns/README.md
+        path: examples/decision/patterns.md
+      - source: samples/decision/rubiks/README.md
+        path: examples/decision/rubiks.md
+      - source: samples/decision/salesagent/README.md
+        path: examples/decision/salesagent.md
+      - source: samples/decision/triage/README.md
+        path: examples/decision/triage.md
+      - source: samples/fly/interactive/README.md
+        path: examples/fly/interactive.md
+      - source: samples/imagegen/batch/README.md
+        path: examples/imagegen/batch.md
+      - source: samples/imagegen/generate/README.md
+        path: examples/imagegen/generate.md
+      - source: samples/learning/reader/README.md
+        path: examples/learning/reader.md
+      - source: samples/learning/rlcd/README.md
+        path: examples/learning/rlcd.md
+      - source: samples/learning/visualclick/README.md
+        path: examples/learning/visualclick.md
+      - source: samples/python/api/deepseek-chat/README.md
+        path: examples/python/api/deepseek-chat.md
+      - source: samples/python/api/fim-completion/README.md
+        path: examples/python/api/fim-completion.md
+      - source: samples/python/api/openai-client/README.md
+        path: examples/python/api/openai-client.md
+      - source: samples/python/asr/bench-streams/README.md
+        path: examples/python/asr/bench-streams.md
+      - source: samples/python/asr/transcribe-mic/README.md
+        path: examples/python/asr/transcribe-mic.md
+      - source: samples/python/dbus/brain-dbus/README.md
+        path: examples/python/dbus/brain-dbus.md
+      - source: samples/python/dbus/detect-pipeline/README.md
+        path: examples/python/dbus/detect-pipeline.md
+      - source: samples/python/decision/served-decide/README.md
+        path: examples/python/decision/served-decide.md
+      - source: samples/python/embedding/clip-embed/README.md
+        path: examples/python/embedding/clip-embed.md
+      - source: samples/python/embedding/embed-document/README.md
+        path: examples/python/embedding/embed-document.md
+      - source: samples/python/embedding/lfm2-embed/README.md
+        path: examples/python/embedding/lfm2-embed.md
+      - source: samples/python/embedding/t5-embed/README.md
+        path: examples/python/embedding/t5-embed.md
+      - source: samples/python/forecast/forecast-client/README.md
+        path: examples/python/forecast/forecast-client.md
+      - source: samples/python/imagegen/controlnet/README.md
+        path: examples/python/imagegen/controlnet.md
+      - source: samples/python/imagegen/flux1/README.md
+        path: examples/python/imagegen/flux1.md
+      - source: samples/python/imagegen/flux2-klein/README.md
+        path: examples/python/imagegen/flux2-klein.md
+      - source: samples/python/imagegen/pulid/README.md
+        path: examples/python/imagegen/pulid.md
+      - source: samples/python/imagegen/sdxl/README.md
+        path: examples/python/imagegen/sdxl.md
+      - source: samples/python/imaging/edit-pipeline/README.md
+        path: examples/python/imaging/edit-pipeline.md
+      - source: samples/python/llm/glmdsa/README.md
+        path: examples/python/llm/glmdsa.md
+      - source: samples/python/llm/qwen35moe/README.md
+        path: examples/python/llm/qwen35moe.md
+      - source: samples/python/musicgen/generate-song/README.md
+        path: examples/python/musicgen/generate-song.md
+      - source: samples/python/qwen3omnimoe/omni/README.md
+        path: examples/python/qwen3omnimoe/omni.md
+      - source: samples/python/restore/restore-face/README.md
+        path: examples/python/restore/restore-face.md
+      - source: samples/python/restore/supir-restore/README.md
+        path: examples/python/restore/supir-restore.md
+      - source: samples/python/restore/vq-roundtrip/README.md
+        path: examples/python/restore/vq-roundtrip.md
+      - source: samples/python/tts/cosyvoice-synth/README.md
+        path: examples/python/tts/cosyvoice-synth.md
+      - source: samples/python/tts/qwen3tts-speak/README.md
+        path: examples/python/tts/qwen3tts-speak.md
+      - source: samples/python/tts/voice-server/README.md
+        path: examples/python/tts/voice-server.md
+      - source: samples/python/videogen/wan/README.md
+        path: examples/python/videogen/wan.md
+      - source: samples/python/vision/deepseek-multimodal/README.md
+        path: examples/python/vision/deepseek-multimodal.md
+      - source: samples/python/vision/deepseek-ocr/README.md
+        path: examples/python/vision/deepseek-ocr.md
+      - source: samples/python/vision/face-id/README.md
+        path: examples/python/vision/face-id.md
+      - source: samples/python/vision/minicpmv-chat/README.md
+        path: examples/python/vision/minicpmv-chat.md
+      - source: samples/python/vision/moondream3-caption/README.md
+        path: examples/python/vision/moondream3-caption.md
+      - source: samples/python/vision/qwen3vl-caption/README.md
+        path: examples/python/vision/qwen3vl-caption.md
+      - source: samples/python/vision/segment-image/README.md
+        path: examples/python/vision/segment-image.md
+      - source: samples/python/vision/splat/README.md
+        path: examples/python/vision/splat.md
+      - source: samples/python/vision/worldmirror2-reconstruct/README.md
+        path: examples/python/vision/worldmirror2-reconstruct.md
+      - source: samples/reconstruction/splat/README.md
+        path: examples/reconstruction/splat.md
+      - source: samples/shell/api/claude-with-brain/README.md
+        path: examples/shell/api/claude-with-brain.md
+      - source: samples/shell/dbus/busctl-smoke/README.md
+        path: examples/shell/dbus/busctl-smoke.md
+      - source: samples/shell/forecast/cooling-loop/README.md
+        path: examples/shell/forecast/cooling-loop.md
+      - source: samples/shell/imagegen/face-swap/README.md
+        path: examples/shell/imagegen/face-swap.md
+      - source: samples/shell/imagegen/identity-score/README.md
+        path: examples/shell/imagegen/identity-score.md
+      - source: samples/shell/imagegen/identity-yolo-pipeline/README.md
+        path: examples/shell/imagegen/identity-yolo-pipeline.md
+      - source: samples/shell/imagegen/lora/README.md
+        path: examples/shell/imagegen/lora.md
+      - source: samples/shell/imagegen/portrait-from-refs/README.md
+        path: examples/shell/imagegen/portrait-from-refs.md
+      - source: samples/shell/imagegen/rgb-to-ir/README.md
+        path: examples/shell/imagegen/rgb-to-ir.md
+      - source: samples/shell/restore/upscale/README.md
+        path: examples/shell/restore/upscale.md
+      - source: samples/shell/timeline/lifecycle/README.md
+        path: examples/shell/timeline/lifecycle.md
+      - source: samples/shell/timeline/predict/README.md
+        path: examples/shell/timeline/predict.md
+      - source: samples/shell/videogen/ltxv/README.md
+        path: examples/shell/videogen/ltxv.md
+      - source: samples/study/chat/README.md
+        path: examples/study/chat.md
+      - source: samples/study/document/README.md
+        path: examples/study/document.md
+      - source: samples/study/timeline/README.md
+        path: examples/study/timeline.md
+      - source: samples/text/embed-train/README.md
+        path: examples/text/embed-train.md
+      - source: samples/text/embed/README.md
+        path: examples/text/embed.md
+      - source: samples/text/encoder-finetune/README.md
+        path: examples/text/encoder-finetune.md
+      - source: samples/text/retrieve-json/README.md
+        path: examples/text/retrieve-json.md
+      - source: samples/text/retrieve/README.md
+        path: examples/text/retrieve.md
+      - source: samples/tts/clone/README.md
+        path: examples/tts/clone.md
+      # END SAMPLES MANIFEST
+  - title: Contributing
+    pages:
+      - docs/contributing/index.md
+  - title: Compliance
+    pages:
+      - docs/compliance/third-party-models.md
+  - title: About
+    pages:
+      - docs/about.md
+redirects:
+  - from: inference/forecasting
+    to: guides/inference/forecasting
+  - from: inference/image-generation
+    to: guides/inference/image-generation
+  - from: inference/imaging
+    to: guides/inference/imaging
+  - from: inference/speech
+    to: guides/inference/speech
+  - from: inference/text
+    to: guides/inference/text
+  - from: inference/three-d
+    to: guides/inference/three-d
+  - from: inference/vision
+    to: guides/inference/vision
+  - from: inference/world-models
+    to: guides/inference/world-models
+  - from: introduction/hardware
+    to: guides/hardware/choosing-hardware
+  - from: introduction/install
+    to: getting-started/install
+  - from: introduction/quickstart
+    to: getting-started/quickstart
+  - from: introduction/what-is-brain
+    to: getting-started/what-is-brain
+  - from: models/arcface
+    to: reference/models/arcface
+  - from: models/asr
+    to: reference/models/asr
+  - from: models/autoencoderkl
+    to: reference/models/autoencoderkl
+  - from: models/campplus
+    to: reference/models/campplus
+  - from: models/chronos2
+    to: reference/models/chronos2
+  - from: models/clip
+    to: reference/models/clip
+  - from: models/codeformer
+    to: reference/models/codeformer
+  - from: models/controlnet
+    to: reference/models/controlnet
+  - from: models/cosyvoice
+    to: reference/models/cosyvoice
+  - from: models/decision
+    to: reference/models/decision
+  - from: models/deepseek2
+    to: reference/models/deepseek2
+  - from: models/deepseek2ocr
+    to: reference/models/deepseek2ocr
+  - from: models/deepseekocr2
+    to: reference/models/deepseekocr2
+  - from: models/deepseekvl
+    to: reference/models/deepseekvl
+  - from: models/diamond
+    to: reference/models/diamond
+  - from: models/ecapatdnn
+    to: reference/models/ecapatdnn
+  - from: models/fastvlm
+    to: reference/models/fastvlm
+  - from: models/fincast
+    to: reference/models/fincast
+  - from: models/florence2
+    to: reference/models/florence2
+  - from: models/flux1
+    to: reference/models/flux1
+  - from: models/flux2
+    to: reference/models/flux2
+  - from: models/fly
+    to: reference/models/fly
+  - from: models/forecast
+    to: reference/models/forecast
+  - from: models/gemma4
+    to: reference/models/gemma4
+  - from: models/genieredux
+    to: reference/models/genieredux
+  - from: models/glmdsa
+    to: reference/models/glmdsa
+  - from: models/glmdsa/npu
+    to: reference/models/glmdsa/npu
+  - from: models/gpt2
+    to: reference/models/gpt2
+  - from: models/horizon
+    to: reference/models/horizon
+  - from: models/imgpipe
+    to: reference/models/imgpipe
+  - from: models
+    to: reference/models
+  - from: models/instantid
+    to: reference/models/instantid
+  - from: models/januspro
+    to: reference/models/januspro
+  - from: models/kronos
+    to: reference/models/kronos
+  - from: models/lfm2
+    to: reference/models/lfm2
+  - from: models/llama
+    to: reference/models/llama
+  - from: models/llava
+    to: reference/models/llava
+  - from: models/lpips
+    to: reference/models/lpips
+  - from: models/ltxv
+    to: reference/models/ltxv
+  - from: models/mimi
+    to: reference/models/mimi
+  - from: models/minicpmv
+    to: reference/models/minicpmv
+  - from: models/minimaxh3
+    to: reference/models/minimaxh3
+  - from: models/minimaxmusic3
+    to: reference/models/minimaxmusic3
+  - from: models/moondream3
+    to: reference/models/moondream3
+  - from: models/nemotronasr
+    to: reference/models/nemotronasr
+  - from: models/optionhead
+    to: reference/models/optionhead
+  - from: models/pulid
+    to: reference/models/pulid
+  - from: models/qwen2
+    to: reference/models/qwen2
+  - from: models/qwen3
+    to: reference/models/qwen3
+  - from: models/qwen35
+    to: reference/models/qwen35
+  - from: models/qwen35moe
+    to: reference/models/qwen35moe
+  - from: models/qwen3asr
+    to: reference/models/qwen3asr
+  - from: models/qwen3omnimoe/readme
+    to: reference/models/qwen3omnimoe/readme
+  - from: models/qwen3tts
+    to: reference/models/qwen3tts
+  - from: models/qwen3vl
+    to: reference/models/qwen3vl
+  - from: models/qwen3vlmoe
+    to: reference/models/qwen3vlmoe
+  - from: models/rrdbnet
+    to: reference/models/rrdbnet
+  - from: models/s3dit
+    to: reference/models/s3dit
+  - from: models/s3tokenizer
+    to: reference/models/s3tokenizer
+  - from: models/sam1
+    to: reference/models/sam1
+  - from: models/sam2
+    to: reference/models/sam2
+  - from: models/scrfd
+    to: reference/models/scrfd
+  - from: models/sdxlunet
+    to: reference/models/sdxlunet
+  - from: models/splat
+    to: reference/models/splat
+  - from: models/supir
+    to: reference/models/supir
+  - from: models/t5encoder
+    to: reference/models/t5encoder
+  - from: models/timesfm3
+    to: reference/models/timesfm3
+  - from: models/toymoe
+    to: reference/models/toymoe
+  - from: models/toypid
+    to: reference/models/toypid
+  - from: models/toyseq2seq
+    to: reference/models/toyseq2seq
+  - from: models/vlm
+    to: reference/models/vlm
+  - from: models/vqgan
+    to: reference/models/vqgan
+  - from: models/wan
+    to: reference/models/wan
+  - from: models/world-models
+    to: reference/models/world-models
+  - from: models/worldmirror2
+    to: reference/models/worldmirror2
+  - from: models/yolov8/npu
+    to: reference/models/yolov8/npu
+  - from: models/yolov8/readme
+    to: reference/models/yolov8/readme
+  - from: models/zipdepth
+    to: reference/models/zipdepth
+  - from: performance/benchmarking
+    to: guides/hardware/benchmarking
+  - from: performance/overview
+    to: concepts/execution/performance
+  - from: reference/kernels-cuda
+    to: reference/kernels/cuda
+  - from: scaling/data-parallel
+    to: concepts/scaling/data-parallel
+  - from: scaling/overview
+    to: concepts/scaling/overview
+  - from: scaling/pipeline
+    to: concepts/scaling/pipeline
+  - from: scaling/tensor-parallel
+    to: concepts/scaling/tensor-parallel
+  - from: training/federated-experts
+    to: guides/training/federated-experts
+  - from: training/forecast-finetune
+    to: guides/training/forecast-finetune
+  - from: training/labeling
+    to: guides/training/labeling
+  - from: training/lora
+    to: guides/training/lora
+  - from: using/cli
+    to: reference/cli
+  - from: using/configuration
+    to: reference/configuration
+  - from: using/cuda
+    to: guides/hardware/cuda
+  - from: using/dbus-api
+    to: reference/api/dbus
+  - from: using/http-api
+    to: reference/api/http
+  - from: using/models-and-weights
+    to: guides/inference/models-and-weights
+  - from: using/monitoring
+    to: guides/serving/monitoring
+  - from: using/sdk
+    to: reference/sdk
+  - from: using/security
+    to: guides/serving/security
+  - from: using/serving
+    to: guides/serving/serving
+exclude:
+  - docs/pandoc/**
+

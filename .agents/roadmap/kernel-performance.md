@@ -39,7 +39,7 @@ faking a measurement.
 
 | Finding | Evidence |
 |---|---|
-| **194 of 433 kernels (44.8%) are rated `@opt` 1 or 2** - 53 at 1/5, 141 at 2/5 | `docs/reference/kernels.md` |
+| **194 of 433 kernels (44.8%) are rated `@opt` 1 or 2** - 53 at 1/5, 141 at 2/5 | `docs/reference/kernels/index.md` |
 | Paged attention materialises a full `[batch, n_heads, cap]` f32 scores **and** probs slab, three dispatches, sized by context *capacity* not live seqlen | `crates/qwen3/src/serve.rs:359-360,543-544,1213-1227` |
 | `decode_softmax_batched` launches `b*nh` threads total and walks each row **serially three times** | `crates/kernels/wgsl/decode_softmax_batched.wgsl` |
 | A 4/5 fused `flash_attn_causal_gqa` exists but **`qwen3::serve` never dispatches any flash kernel** - its only production caller is `qwen3omnimoe::thinker` | `crates/qwen3/src/serve.rs:177-202` (`gqa_scores: block::UNREGISTERED`) |
@@ -432,7 +432,7 @@ kernel family by explicit design: `qwen35::serve`'s own module doc states
 whole KV history", chosen specifically to avoid "needing block-indirect
 (scatter/gather) attention kernels" like `paged_decode_scores_wg`'s
 block-table contract requires. `attn_decode_scores` has no cooperative
-sibling anywhere in `docs/reference/kernels.md` (only a windowed variant,
+sibling anywhere in `docs/reference/kernels/index.md` (only a windowed variant,
 same `@opt 2/5`, same one-thread-per-output shape) - there is nothing to
 wire these two crates onto without writing a new kernel, which is Phase 5
 territory (`kernels.md` §A: "does a good kernel already exist" - here the
@@ -2344,7 +2344,7 @@ reduction shape as `rmsnorm_rows` - RoPE's `(m, m+half)` pair is drawn from the
 SAME row RMSNorm just normalized, so after the one reduction barrier every
 thread re-reads its own pair from global memory (not a `var<function>` array
 sized off a runtime `head_dim` - the exact anti-pattern named in
-`docs/performance/overview.md`), applies norm-scale and rotation together, and
+`docs/concepts/execution/performance.md`), applies norm-scale and rotation together, and
 - for K - writes the rotated value to BOTH `sc.k` (still needed by
 `Engine::calibrate_kv` and test fixtures) and its paged-pool slot in the same
 store. Gated on the queried `caps.workgroup_reductions` exactly like
@@ -2877,7 +2877,7 @@ ledger entry.
 ### M5.6 - MLA/DSA/GDN family: one real defect fixed (`topk_mask`), ten kernels checked against real config dims and correctly rated
 
 The table's "5 + 6 @opt-2" count for this family resolves to exactly 11
-kernels in `docs/reference/kernels.md`: `mla_scores`, `mla_index_scores`,
+kernels in `docs/reference/kernels/index.md`: `mla_scores`, `mla_index_scores`,
 `mla_bwd_dk_pass`, `mla_bwd_dk_rope`, `topk_mask` (glmdsa's GLM-5.2
 MLA/DSA indexer) and `gdn_decay_mask_bwd`, `gdn_decay_scale_bwd_last`,
 `gdn_state_decay_bwd_dscale`, `gdn_ut_bwd_dattn0`, `gdn_ut_bwd_dtmat`,
@@ -2960,7 +2960,7 @@ correctly-rated kernel is a legitimate finding too.**
 **Gate**: TDD (RED confirmed against two distinct plausible mistakes in the
 `topk_mask` rewrite - a missing per-thread stride, then an off-by-one on
 the causal boundary - before GREEN), `cargo clippy -p brain-glmdsa
---all-targets` zero warnings, `docs/reference/kernels.md` needed no
+--all-targets` zero warnings, `docs/reference/kernels/index.md` needed no
 regeneration (the shipped kernel's `@what`/`@how`/`@opt` are unchanged from
 before - only its thread-to-output mapping changed). **Commits**: one
 (`8edd5ca9`, `topk_mask` only - the `gdn_state_decay_bwd_dscale` and MLA
@@ -3615,7 +3615,7 @@ synchronously verified past the library level in this pass because their
 `brain-gradcheck` dev-dependency transitively pulls in
 `brain-minimaxmusic3`, which had an unrelated, concurrently-edited syntax
 error in `dit.rs` (a large in-progress rewrite in another session) at
-commit time - not this milestone's code. `docs/reference/kernels.md`/
+commit time - not this milestone's code. `docs/reference/kernels/index.md`/
 `crates/kernels/src/lib.rs` regenerated via `make generate/kernels/registry`/
 `make generate/kernels/wgsl-table`, each change isolated to this milestone's own row
 before committing (a shared, concurrently-edited generated file - see
@@ -5526,7 +5526,7 @@ if `Q4` used this codebook, not an approximation of it (see each kernel's
 own header for the full derivation). Named with a `q4` marker
 (`matmul_q4_gemv_nf4`/`matmul_q4_gemv_f4e2m1`) per `scripts/build/
 kernelmeta.py`'s own `@quant q4` naming convention; headers validated by
-`make generate/kernels/wgsl-table` (`docs/reference/kernels.md` regenerated clean, zero
+`make generate/kernels/wgsl-table` (`docs/reference/kernels/index.md` regenerated clean, zero
 declaration/code mismatches).
 
 **`DType` wiring**: `bits()=4, per_word()=8 (derived), bytes()=1`, `promote()`
@@ -5638,7 +5638,7 @@ super-block indexed): one workgroup owns exactly one weight ROW, so the row-
 block index (`rb = col/128`) is a per-workgroup constant, while the column-
 block index (`bc = k/128`) advances every 128 elements as the k-loop runs -
 `scale[rb*cb + bc]`, `cb` passed as a `Params` field. Headers validated by
-`make generate/kernels/wgsl-table` (`docs/reference/kernels.md` regenerated clean).
+`make generate/kernels/wgsl-table` (`docs/reference/kernels/index.md` regenerated clean).
 
 **`DType` wiring**: `bits()=8, per_word()=4 (derived), bytes()=1`. A NEW
 `NumericSupport.fp8_storage`/`select::Requirement.fp8_storage` capability

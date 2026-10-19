@@ -92,7 +92,7 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
 
 ## Server and SDK: token ids and logprobs (the on-policy data contract)
 
-Done (HTTP chat, `docs/using/http-api.md`): `logprobs: true` and `return_token_ids: true`
+Done (HTTP chat, `docs/reference/api/http.md`): `logprobs: true` and `return_token_ids: true`
 return the sampled token ids, each token's log-probability under its decoding
 distribution and the prompt ids; the seed used, the answering adapter, the base
 digest, backend and engine are echoed in the reply's `brain` object. Still needed,

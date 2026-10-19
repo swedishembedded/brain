@@ -24,7 +24,7 @@ setup_file() {
   export BRAIN STORE="$store"
   export WORK="$(mktemp -d)"
   mkdir -p "$WORK/data"
-  cp "$REPO/docs/quickstart/img/seed.png" "$WORK/data/dog.png"
+  cp "$REPO/docs/getting-started/img/seed.png" "$WORK/data/dog.png"
   printf '%s\n' \
     '{"image":"dog.png","messages":[{"role":"user","content":"<image_placeholder>\nWhat animal is this?"},{"role":"assistant","content":"This is a golden retriever puppy."}]}' \
     '{"image":"dog.png","messages":[{"role":"user","content":"<image_placeholder>\nDescribe the picture."},{"role":"assistant","content":"A golden retriever puppy looking at the camera."}]}' \
@@ -51,8 +51,8 @@ teardown_file() {
 # messages, and a step may average several examples.
 @test "an example with two images trains, several examples to a step" {
   mkdir -p "$WORK/two"
-  cp "$REPO/docs/quickstart/img/seed.png" "$WORK/two/a.png"
-  cp "$REPO/docs/quickstart/img/depth.png" "$WORK/two/b.png"
+  cp "$REPO/docs/getting-started/img/seed.png" "$WORK/two/a.png"
+  cp "$REPO/docs/getting-started/img/depth.png" "$WORK/two/b.png"
   printf '%s\n' \
     '{"images":["a.png","b.png"],"messages":[{"role":"user","content":"<image_placeholder><image_placeholder>\nWhich of the two is a photograph?"},{"role":"assistant","content":"The first one."}]}' \
     '{"images":["b.png","a.png"],"messages":[{"role":"user","content":"<image_placeholder><image_placeholder>\nWhich of the two is a photograph?"},{"role":"assistant","content":"The second one."}]}' \

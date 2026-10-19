@@ -128,7 +128,7 @@ structurally and never parity-claimed here.
   orchestration they wrap is architecture-identical); `serve.rs`/
   `sample_generate.rs` tests confirm the paged engine reproduces `step()`'s
   decode token-for-token on both backends. (3) `crates/cli/src/qwen35_cli.rs, crates/catalog/src/resident_qwen35.rs`, `catalog.rs` `ModelEntry`, `resident.rs::
-  build_executor` arm, docs (`docs/models/qwen35.md`, README + index.md +
+  build_executor` arm, docs (`docs/reference/models/qwen35.md`, README + index.md +
   AGENTS.md rows - not the quickstart, per scope).
   **Found and fixed a real pre-existing bug while wiring `model_dir.rs`'s
   family dispatch**: `qwen35moe`'s own checkpoint save/import/LoRA paths
@@ -746,7 +746,7 @@ scope):** throughput tuning (the ~30-min/decode-step cost is unoptimized
 by design, deferred to a later milestone that gates the residency policy
 by real `brain-perf` measurement); persistent incremental KV/GDN decode
 state across steps (design decision 1 - every step re-runs a full forward
-over the whole growing sequence instead); `docs/models/qwen35.md` (M20);
+over the whole growing sequence instead); `docs/reference/models/qwen35.md` (M20);
 `messages`/`chat`/tools support in the streaming `caps.rs` path; any
 transcript longer than a couple of tokens (impractical at this per-step
 cost - not attempted, and not a bug).
@@ -927,7 +927,7 @@ rejection-sampling machinery - see Phase 2/3 above); MTP wired into
 `crate::caps`'s manifest for anything beyond the plain boolean pass-through
 (no dedicated response field reporting pass counts/speculation hit-rate to
 an HTTP caller); an isolated, non-contended re-measurement of real
-per-pass cost (see Phase 4's own note above); `docs/models/qwen35.md`
+per-pass cost (see Phase 4's own note above); `docs/reference/models/qwen35.md`
 (M20, carried over from M16).
 
 ### M18: streaming LoRA fine-tuning - forward AND backward through the real 64-layer checkpoint
@@ -1220,7 +1220,7 @@ this box's Vulkan adapter) and both resolve it the same way - pin the CPU
 backend for the affected pass. That is this engine's established answer to
 "one tensor exceeds one device buffer's ceiling," not a workaround specific
 to qwen35. No code changed as a result of this investigation (Option B was
-correct); `docs/models/qwen35.md`'s "Why training runs on the CPU backend,
+correct); `docs/reference/models/qwen35.md`'s "Why training runs on the CPU backend,
 not the GPU" section now records the same reasoning.
 
 ### M19: measure M15's residency-window choice + wire qwen35 into `crates/perf`

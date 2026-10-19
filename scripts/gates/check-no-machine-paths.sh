@@ -23,7 +23,7 @@
 #     shown to a human, not a silently-skipped test) but the fix is the same
 #     - show a placeholder like `[path/to/qwen3.8]`, never a literal that only
 #     resolves on the machine that happened to write it. Real incident: a
-#     freshly-written docs/models/qwen35.md example shipped
+#     freshly-written docs/reference/models/qwen35.md example shipped
 #     "/abs/workspace/resources/qwen3.8" verbatim, uncaught, because this
 #     gate only ever looked at crates/.
 #

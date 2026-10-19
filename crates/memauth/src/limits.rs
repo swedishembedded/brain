@@ -406,7 +406,7 @@ mod tests {
         );
     }
 
-    /// An NPU's bytes are host RAM (`docs/models/*`'s Meteor-Lake note), so
+    /// An NPU's bytes are host RAM (`docs/reference/models/*`'s Meteor-Lake note), so
     /// they belong to the RAM ceiling; a GPU's belong to the VRAM one. Setting
     /// only one flag must leave the other pool entirely unbounded.
     #[test]

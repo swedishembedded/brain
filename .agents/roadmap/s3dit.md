@@ -75,7 +75,7 @@ separate, smaller correctness fix caught by the same parity harness, not the
 root cause of the resolution corruption itself).
 
 Verified end to end with real, clean 512×512 renders
-(`docs/quickstart/img/seed.png`) - no center-only coherence, no speckle
+(`docs/getting-started/img/seed.png`) - no center-only coherence, no speckle
 noise, no visible block-grid artifact (the earlier "plausible per-token
 int8-quantization" hypothesis for a block texture at 256px did not
 independently reproduce once this fix landed; not investigated further since
@@ -112,7 +112,7 @@ prompt's requested edit. Root cause: the masked region was being seeded from
 a blend that still leaked the original latent's signal into the denoising
 trajectory, instead of pure noise, so the "edit" mostly re-derived the
 existing content. Fixed and verified with a real, visibly-correct edit
-(`docs/quickstart/img/inpainted.png` - the apple in `seed.png` is genuinely
+(`docs/getting-started/img/inpainted.png` - the apple in `seed.png` is genuinely
 replaced by a slice of chocolate cake, everything else held fixed).
 
 ## First-dispatch GPU wait bound too short on a cold Pascal card
@@ -128,7 +128,7 @@ first-ever heavy dispatch against a freshly-built 13 GB int8 DiT on a Tesla
 P40 (an old Pascal card, JIT/pipeline warm-up plus whatever one-time driver
 state the wgpu backend sets up on its first large submit) genuinely took
 longer than 30s. Retried with `BRAIN_GPU_WAIT_S=300` and it completed
-cleanly end to end (real image, `docs/quickstart/img/seed.png`). Worth a
+cleanly end to end (real image, `docs/getting-started/img/seed.png`). Worth a
 default review for this card generation - 30s as the FIRST-submit bound (as
 opposed to steady-state) is tight for a decade-old GPU with a large model.
 

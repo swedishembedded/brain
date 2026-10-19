@@ -711,7 +711,7 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
          change. Normalising text+load back to the baseline's 248.3 s puts run A
          at 28.1 min and run B at **21.9 min**. **This wants its own
          investigation and its own re-baseline before the headline table in
-         `docs/models/wan.md` is rewritten** - which is why that table was left
+         `docs/reference/models/wan.md` is rewritten** - which is why that table was left
          alone here.
 
       ## Profiler rewrite and a re-baseline under real host load
@@ -799,7 +799,7 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       to be A real, measurable contributor on top of whatever the original
       drift was. **The isolated, nothing-else-running re-measurement this file
       already asked for is still outstanding** and should be taken before
-      `docs/models/wan.md`'s headline table is touched.
+      `docs/reference/models/wan.md`'s headline table is touched.
 - [x] **`capability::Media::Video`**, landed ahead of `caps.rs` as its own unit
       of work, exactly as `.agents/rules/serving-contract.md` section 4 asks --
       extending `Media` rather than adding a side channel. Three things it
@@ -1116,7 +1116,7 @@ genuine (3,3,3) convolution, and that is the one real gap.
 
 ## Pre-existing drift found while surveying
 
-`docs/reference/kernels.md` claimed 401 kernels and was missing
+`docs/reference/kernels/index.md` claimed 401 kernels and was missing
 `flash_attn_causal_gqa`, which is present at
 `crates/kernels/wgsl/flash_attn_causal_gqa.wgsl` and registered in
 `crates/kernels/src/lib.rs`, so `make check/generated/kernels-wgsl-table` was already failing

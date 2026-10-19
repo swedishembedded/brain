@@ -79,7 +79,7 @@ pub struct ServeKnobs {
 /// budgets. `gpus` is `(index, total_bytes)` per card; `reserved` bytes are kept free
 /// on each. `unified_gpus` names the indices among `gpus` that physically share RAM
 /// with the CPU (an integrated GPU, or the no-discrete-GPU fallback) - every NPU
-/// always shares RAM too (`docs/models/*`'s Meteor-Lake NPU note) - so those,
+/// always shares RAM too (`docs/reference/models/*`'s Meteor-Lake NPU note) - so those,
 /// plus `Device::Cpu`, are declared into ONE `memauth` pool sized to `pool_ram` (the
 /// real, physical host RAM - see that parameter's own doc for why this must NEVER be
 /// `cpu_ram`); a discrete GPU keeps its own independent budget, unaffected. Falls back

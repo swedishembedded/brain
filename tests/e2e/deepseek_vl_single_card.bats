@@ -44,7 +44,7 @@ teardown_file() {
 }
 
 @test "one 24 GB card serves the model with an int8 decoder and it describes the image" {
-  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/quickstart/img/seed.png"; } >"$CONF_DIR/url.txt"
+  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/getting-started/img/seed.png"; } >"$CONF_DIR/url.txt"
   jq -n --arg m "$MODEL" --rawfile u "$CONF_DIR/url.txt" '{model: $m, max_tokens: 48, temperature: 0,
     messages: [{role: "user", content: [{type: "image_url", image_url: {url: $u}}, {type: "text", text: "Which animal is in this image? Answer in one short sentence."}]}]}' >"$CONF_DIR/body.json"
   local status

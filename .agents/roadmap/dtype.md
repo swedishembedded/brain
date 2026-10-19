@@ -44,15 +44,15 @@ counts are real hits from a live run, not estimates):
 
 | file | violations |
 |---|---|
-| `docs/performance/overview.md` | 209 |
-| `docs/models/deepseek2ocr.md` | 36 |
+| `docs/concepts/execution/performance.md` | 209 |
+| `docs/reference/models/deepseek2ocr.md` | 36 |
 | `docs/performance/hardware-notes.md` | 3 |
-| `docs/scaling/data-parallel.md` | 2 |
-| `docs/scaling/pipeline.md` | 1 |
-| `docs/models/asr.md` | 1 |
+| `docs/concepts/scaling/data-parallel.md` | 2 |
+| `docs/concepts/scaling/pipeline.md` | 1 |
+| `docs/reference/models/asr.md` | 1 |
 | **total** | **252** |
 
-`docs/models/asr.md`'s one hit ("default 30s" fixed transcription window) is
+`docs/reference/models/asr.md`'s one hit ("default 30s" fixed transcription window) is
 a capability limit rather than a measured result - left flagged rather than
 gate-refined around, since a human still has to decide "rephrase" vs.
 "escape-hatch" for it in A2; over-fitting the regex to one observed line
@@ -183,7 +183,7 @@ numbers found"). Full program from the approved plan, not just the gate:
 
 **Cut/rewritten, per file:**
 
-- **`docs/performance/overview.md`** (872 → 93 lines, 209 → 0 violations).
+- **`docs/concepts/execution/performance.md`** (872 → 93 lines, 209 → 0 violations).
   Kept the number-free methodology sections (profiling/roofline probe,
   runtime kernel selector, INT8 inference, `brain flops`). Deleted the
   ~800-line DeepSeek-OCR case-study / "a real example" section entirely
@@ -203,13 +203,13 @@ numbers found"). Full program from the approved plan, not just the gate:
   yours") in as its own methodology section.
 - **`docs/performance/hardware-notes.md`** - deleted (42 lines, two
   hedged single-machine illustrations that would always go stale). All
-  references fixed: `docs/manifest.txt`, `docs/readme.md`, `AGENTS.md`
+  references fixed: `docs/manifest.txt`, `docs/index.md`, `AGENTS.md`
   (table row split into a methodology row + a session-findings row pointing
   at `.agents/roadmap/<model>.md`), and the two scaling docs below.
   `AGENTS.md` is not in this task's formally scoped file list but item 4
   explicitly named it as a reference to fix, so it got the same two-line
   edit rather than leaving a dangling citation in the pandoc build.
-- **`docs/models/deepseek2ocr.md`** (36 → 0 violations). Stripped every
+- **`docs/reference/models/deepseek2ocr.md`** (36 → 0 violations). Stripped every
   wall-clock/percentage/speedup number from the "Hardware and limits"
   section down to the structural facts (KV-cache exists, split
   vision/decoder backend, what was optimized) plus a pointer to
@@ -226,20 +226,20 @@ numbers found"). Full program from the approved plan, not just the gate:
   "corrected" ~parity number either, since the whole point of this sweep is
   zero measured numbers in `docs/`, not more-honest measured numbers.
   **Flagging for a human**: this model is served (`brain deepseek2ocr`, HTTP, D-Bus)
-  but `docs/models/deepseek2ocr.md` is **not listed in `docs/manifest.txt`**
+  but `docs/reference/models/deepseek2ocr.md` is **not listed in `docs/manifest.txt`**
   - its docs never reach the compiled PDF. Not fixed here per the task's
   explicit instruction to flag rather than fix manifest structure.
-- **`docs/models/asr.md`** (1 → 0 violations, not one of the 12 numbered
+- **`docs/reference/models/asr.md`** (1 → 0 violations, not one of the 12 numbered
   items but part of the gate's worklist). The "default 30s" Qwen3-ASR window
   is a fixed config default (`BRAIN_QWEN3ASR_WINDOW`), not a measured result
   - marked `<!-- perf-number: fixed capability limit (config default), not a
   measured result -->` rather than rephrased, since the number itself
   (the actual default) is exactly the information a reader needs and won't
   go stale the way a timing claim would.
-- **`docs/scaling/data-parallel.md`** / **`docs/scaling/pipeline.md`**
+- **`docs/concepts/scaling/data-parallel.md`** / **`docs/concepts/scaling/pipeline.md`**
   (2 → 0, 1 → 0). Replaced the hedged "roughly 1.3x-1.6x" / "about 0.8x"
   single-machine speedup ranges with a qualitative explanation of what
-  determines speed plus a pointer to `docs/performance/overview.md`'s
+  determines speed plus a pointer to `docs/concepts/execution/performance.md`'s
   profiling tools. Checked the Makefile first for a dedicated multi-GPU
   scaling-speedup target - `make bench/scaling` exists but measures a
   different thing entirely (the L(N)=E+A·N^-alpha loss-vs-model-size scaling
@@ -248,7 +248,7 @@ numbers found"). Full program from the approved plan, not just the gate:
   data-parallel run directly - so no Makefile target was cited; the fix
   points at profiling your own configuration instead of a specific command
   that doesn't exist yet.
-- **`docs/introduction/hardware.md`** - rewrote the "Why one binary runs
+- **`docs/guides/hardware/choosing-hardware.md`** - rewrote the "Why one binary runs
   everywhere" section per the corrected thesis: portable fp32 baseline +
   capability-gated fast tiers (bf16/f16/int8/q4, declared per kernel) with
   automatic fallback, not "brain avoids these features." Verified against
@@ -259,7 +259,7 @@ numbers found"). Full program from the approved plan, not just the gate:
   paths are direction/in-progress (Group B), not shipped. Kept "no atomics,
   no subgroups" as accurate current facts, reframed as a chosen baseline
   rather than the whole precision story.
-- **`docs/introduction/what-is-brain.md`** - rewrote "One engine, three
+- **`docs/getting-started/what-is-brain.md`** - rewrote "One engine, three
   backends" to "three eager backends, plus a separate NPU path": wgpu/
   CPU-JIT/native-Vulkan as the three eager backends sharing one WGSL kernel
   source (matches `AGENTS.md`'s own "Three backends, one build, one API"
@@ -270,7 +270,7 @@ numbers found"). Full program from the approved plan, not just the gate:
   Intel NPU, or inside a web browser" sentence: "identically" now applies
   only to GPU/CPU/browser (same WGSL kernels, genuinely true), with the NPU
   described separately as a per-model ONNX/OpenVINO export path.
-- **`docs/using/configuration.md`** - corrected the false "the residency
+- **`docs/reference/configuration.md`** - corrected the false "the residency
   scheduler does not yet place jobs on the NPU on its own" claim. Verified
   against `crates/residency/src/place.rs`'s `pick_device` (NPU tried before
   GPU/CPU whenever `MemCost.npu > 0`) and every `crates/catalog/src/resident_*.rs`
@@ -285,7 +285,7 @@ numbers found"). Full program from the approved plan, not just the gate:
   fixed here (out of this task's scope). Rewrote `--device npu` as
   constraining/forcing the schedulable device set, not the sole trigger for
   reaching the NPU.
-- **`docs/models/glmdsa/npu.md`** - corrected "`infer --device npu` does not
+- **`docs/reference/models/glmdsa/npu.md`** - corrected "`infer --device npu` does not
   yet exist": `crates/cli/src/glm_cli.rs` dispatches it to
   `npu::glm_decode::generate` today (fp32 greedy decode, real). Also found
   `brain glmdsa export --int8` is implemented and tested
@@ -299,22 +299,22 @@ numbers found"). Full program from the approved plan, not just the gate:
   wording.
 - **`.agents/rules/kernels.md`** (the root-cause fix) - the "meta-rule"
   section used to instruct contributors to write cross-model findings
-  *into* `docs/performance/overview.md`, which is exactly why the deleted
+  *into* `docs/concepts/execution/performance.md`, which is exactly why the deleted
   800-line log accumulated there. Redirected: the generalizable
   finding/lesson goes in this file (or `.agents/knowledge/` if
   cross-cutting); the session log with real numbers goes in
   `.agents/roadmap/<model>.md`; `docs/` gets zero measured numbers, ever.
-  Also fixed the header's claim about what `docs/performance/overview.md`
+  Also fixed the header's claim about what `docs/concepts/execution/performance.md`
   contains now that it's methodology-only.
 
 **Judgment calls (item 12, the "fp32-only/no f16" sweep):**
 
 - Grepped `docs/**/*.md` for `fp32 only`/`no f16`/`no bf16`/`no atomics`/`no
   subgroup`. Beyond `hardware.md` (fixed above), found two more hits, both
-  left unchanged: `docs/models/moe.md:66` ("fp32 only" - a true, model-
+  left unchanged: `docs/reference/models/moe.md:66` ("fp32 only" - a true, model-
   specific capability statement about the Sparse MoE Transformer today, not
   the "avoids as a virtue" framing item 1 was about) and three hits in
-  `docs/reference/kernels.md` (per-kernel "no atomics" implementation notes
+  `docs/reference/kernels/index.md` (per-kernel "no atomics" implementation notes
   in an apparently generated reference table, describing a specific kernel's
   scatter-vs-gather strategy, not a portability pitch). Neither is the
   pattern this sweep targets.
@@ -1988,7 +1988,7 @@ generated table gained a `dtype` column (escaped via the existing `esc()`,
 since `f32|bf16|f16`'s pipes would otherwise break a markdown table cell) plus
 a new prose paragraph explaining the column and its `n/a`/tiered counts (read
 live off the same `counts` dict the other column summaries already use, so
-they cannot drift from the real numbers). `docs/reference/kernels.md`
+they cannot drift from the real numbers). `docs/reference/kernels/index.md`
 regenerated; `gen-kernel-table.py --check` passes clean (0 stale, 0 invalid).
 
 **`crates/wgsl-cpu/tests/compile_all.rs`** extended with a second test,
@@ -2042,16 +2042,16 @@ that format natively; atomics and subgroups remain genuinely absent
 workspace-wide - not overclaimed either direction.
 
 **A real, pre-existing, out-of-band defect found and fixed while regenerating
-`docs/reference/kernels.md` (not otherwise in this phase's scope, but directly
+`docs/reference/kernels/index.md` (not otherwise in this phase's scope, but directly
 in the path of this phase's own required step 7).** `scripts/build/
 gen-kernel-table.py`'s own static prose strings (`LEVELS`, the cpu/gpu/npu/
 quant explanation paragraphs, `NPU_CELL`/`QUANT_CELL`'s blank-cell glyph) and
 106 individual kernels' `// @what`/`// @how` header lines already contained
 literal em dashes (U+2014) in the committed tree - a latent defect from an
-earlier phase that the checked-in `docs/reference/kernels.md` never exposed,
+earlier phase that the checked-in `docs/reference/kernels/index.md` never exposed,
 because the table had not been regenerated since those em dashes were
 introduced (the CHECKED-IN doc still used plain hyphens throughout, confirmed
-via `git show HEAD:docs/reference/kernels.md | grep -cP '\x{2014}'` -> `0`).
+via `git show HEAD:docs/reference/kernels/index.md | grep -cP '\x{2014}'` -> `0`).
 Regenerating the table as this phase's step 7 requires would have silently
 reintroduced ~106+ forbidden em dashes into a file this phase commits - caught
 by grepping the ACTUAL diff (not just file contents, matching B5's own
@@ -2072,7 +2072,7 @@ header block (not pulled into any generated field, out of this phase's
 pre-existing prose as-is) - confirmed zero em dashes in this phase's actual
 added diff lines (`git diff -- crates/kernels/wgsl/*.wgsl | grep '^\+' | grep
 -cP '\x{2014}'` -> `0`) and zero anywhere in the final `docs/reference/
-kernels.md` (`grep -cP '\x{2014}' docs/reference/kernels.md` -> `0`).
+kernels.md` (`grep -cP '\x{2014}' docs/reference/kernels/index.md` -> `0`).
 
 **Verification (all scoped, no `make release`/`make test`/bare workspace
 build):**
@@ -2883,7 +2883,7 @@ re-ran: GREEN.
   field, never overwrites an existing one - verified by reading
   `insert_dtype_field`'s own guard directly, not assumed).
 - `scripts/build/gen-kernel-table.py --check`: clean after regenerating
-  `docs/reference/kernels.md` (7 rows changed: the 6 new kernels' `dtype`
+  `docs/reference/kernels/index.md` (7 rows changed: the 6 new kernels' `dtype`
   column plus the summary paragraph's templatized-kernel count, 3 -> 9;
   diffed the regenerated file's ADDED lines for em dashes specifically, per
   B6's own precedent that a table regen can silently reintroduce pre-existing

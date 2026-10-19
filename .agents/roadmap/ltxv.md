@@ -68,7 +68,7 @@ this port:
       weight's own 256-level grid and discards most of it.
 - [ ] **`ltxv` arch row + resource fetch** - `crates/arch/src/lib.rs` `ARCHS` row
       (`id`/`gguf` both `"ltxv"`, `hf: &["AVTransformer3DModel"]`,
-      `default_ref: Lightricks/LTX-2.5`), this ledger, `docs/models/ltxv.md`,
+      `default_ref: Lightricks/LTX-2.5`), this ledger, `docs/reference/models/ltxv.md`,
       weights under `resources/ltxv/weights/` (the runnable-everywhere subset
       only), source under `resources/ltxv/source/`.
 - [ ] **Shared DiT hoist** - `crates/dit` currently owns only RoPE despite its doc
@@ -4644,7 +4644,7 @@ code no longer enforces is worse than one that promises nothing.
 * **No capability action.** `upscale` is CLI-only. It would be the first
   action in this model to take an input BLOB (a whole video file) rather than
   parameters alone, and that action shape has not been designed. Recorded
-  here and in `docs/models/ltxv.md`'s support table rather than quietly
+  here and in `docs/reference/models/ltxv.md`'s support table rather than quietly
   skipped, because "a bespoke CLI subcommand is never the only entry point" is
   this repo's own serving contract.
 * **`--factor` accepts only 2.** The official checkpoint is an x2 network and

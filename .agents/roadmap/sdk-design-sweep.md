@@ -322,10 +322,10 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
       same real weights `generate()`'s own success path does (tracked
       above), and the two manifest functions already have their own tests
       in their home crates.
-- [x] **M9** - user-facing SDK docs page (finding 17): `docs/using/sdk.md`,
+- [x] **M9** - user-facing SDK docs page (finding 17): `docs/reference/sdk.md`,
       leading with both surfaces' three-line examples before options,
       features, errors, and the resource-safety note; registered in
-      `docs/readme.md`'s "Using brain" list next to `using/cli.md`.
+      `docs/index.md`'s "Using brain" list next to `using/cli.md`.
 - [x] **M10a** - the precision bug itself, fixed directly rather than via
       the full `build_resolved` extraction (see below for why that's
       still open). `flux2::caps::Flux2Action::run`'s served `text2image`/
@@ -1676,7 +1676,7 @@ was in progress, and it is the first real end-to-end USE of
 `TtsPipeline::clone_voice` this campaign has produced): `--voice PATH
 --text TEXT [--ref-text TEXT] [--out PATH] [--model ID]`, defaulting to
 Qwen3-TTS (`Qwen/Qwen3-TTS-12Hz-0.6B-Base`, the same real model id
-`crates/qwen3tts/src/spec.rs`'s own test fixture and `docs/models/
+`crates/qwen3tts/src/spec.rs`'s own test fixture and `docs/reference/models/
 qwen3tts.md` already use). With no `--out`, the cloned clip plays on the
 default audio output device instead of being written to disk - the first
 sample in this workspace to need real audio PLAYBACK (every existing

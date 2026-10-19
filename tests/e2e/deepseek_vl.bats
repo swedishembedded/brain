@@ -55,7 +55,7 @@ teardown_file() {
 
 @test "a chat completion with an image describes it and stops on its own end token" {
   local status
-  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/quickstart/img/seed.png"; } >"$CONF_DIR/url.txt"
+  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/getting-started/img/seed.png"; } >"$CONF_DIR/url.txt"
   jq -n --arg m "$MODEL" --rawfile u "$CONF_DIR/url.txt" '{model: $m, max_tokens: 64, temperature: 0,
     messages: [{role: "user", content: [{type: "image_url", image_url: {url: $u}}, {type: "text", text: "Which animal is in this image? Answer in one short sentence."}]}]}' >"$CONF_DIR/body.json"
   status=$(curl -sS --max-time 1800 -o "$CONF_DIR/chat.json" -w '%{http_code}' \
@@ -69,8 +69,8 @@ teardown_file() {
 
 @test "a chat completion with two images feeds the model both of them" {
   local status
-  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/quickstart/img/seed.png"; } >"$CONF_DIR/url1.txt"
-  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/quickstart/img/depth.png"; } >"$CONF_DIR/url2.txt"
+  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/getting-started/img/seed.png"; } >"$CONF_DIR/url1.txt"
+  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/getting-started/img/depth.png"; } >"$CONF_DIR/url2.txt"
   jq -n --arg m "$MODEL" --rawfile a "$CONF_DIR/url1.txt" --rawfile b "$CONF_DIR/url2.txt" '{model: $m, max_tokens: 48, temperature: 0,
     messages: [{role: "user", content: [{type: "image_url", image_url: {url: $a}}, {type: "image_url", image_url: {url: $b}}, {type: "text", text: "Describe each of the two images in one short sentence."}]}]}' >"$CONF_DIR/body2.json"
   status=$(curl -sS --max-time 1800 -o "$CONF_DIR/chat2.json" -w '%{http_code}' \
@@ -85,7 +85,7 @@ teardown_file() {
 # Requests that arrive together decode as one batch on the model's shared KV
 # pool; each answers exactly as it would alone (greedy).
 @test "two requests sent together each get the answer a lone request gets" {
-  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/quickstart/img/seed.png"; } >"$CONF_DIR/urlc.txt"
+  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/getting-started/img/seed.png"; } >"$CONF_DIR/urlc.txt"
   jq -n --arg m "$MODEL" --rawfile u "$CONF_DIR/urlc.txt" '{model: $m, max_tokens: 24, temperature: 0,
     messages: [{role: "user", content: [{type: "image_url", image_url: {url: $u}}, {type: "text", text: "Which animal is in this image? Answer in one short sentence."}]}]}' >"$CONF_DIR/bodyc.json"
   local pids=() i

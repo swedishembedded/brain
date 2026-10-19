@@ -164,7 +164,7 @@ differentiate the **unfolded** reference form, not the folded trick.
   training stack, and perf target can proceed concurrently as independent
   changes *once* `model.rs` is frozen by its gate; before that, everything is
   serial on the parity ladder.
-- **Ledger every found+fixed bug with numbers** (`docs/models/<m>/status.md`):
+- **Ledger every found+fixed bug with numbers** (`docs/reference/models/<m>/status.md`):
   the pre-fix cosine is what proves the fix mattered.
 - **Params structs must match byte-for-byte, not just field-count.** A struct
   with the right number of fields in the wrong order compiles and dispatches
@@ -209,7 +209,7 @@ there, the ladder is here:
    touch. Quantization pays for *capacity* (single-card residency, freeing a
    second GPU) and only pays for speed once the profile says arithmetic is
    the limiter.
-7. **Ledger it** in `docs/models/<m>/status.md` with before/after tables, the
+7. **Ledger it** in `docs/reference/models/<m>/status.md` with before/after tables, the
    hardware named exactly, and the hypotheses you killed with their numbers.
    Negative results are the deliverable that stops the next person re-running
    the same dead end.

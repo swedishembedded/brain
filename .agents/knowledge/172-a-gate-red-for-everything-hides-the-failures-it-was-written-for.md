@@ -5,7 +5,7 @@
 
 `scripts/gates/check-arch-names.sh`'s "every model page is published" check
 looked for `models/<page>.md` in `docs/manifest.txt`, which lists pages as
-`docs/models/<page>.md`. Once the manifest took that form every one of the 67
+`docs/reference/models/<page>.md`. Once the manifest took that form every one of the 67
 model pages was reported unpublished, the gate was red on every run, and a red
 that never changes is read as noise. Underneath it, four real violations had
 accumulated unseen: four infra verbs (`models`, `plan`, `gguf`, `roofline`)

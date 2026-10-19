@@ -180,7 +180,7 @@ side. Seven assertions, none needing a GPU (one builds the CPU device):
 
 `make generate/kernels/cuda-table` / `make check/generated/kernels-cuda-table`
 (`scripts/build/gen-cuda-kernel-table.py`, in `test/full`) regenerate and gate
-`docs/reference/kernels-cuda.md` from the registry, and fail when a `.cu` file
+`docs/reference/kernels/cuda.md` from the registry, and fail when a `.cu` file
 exists that no entry embeds - which `include_str!` cannot catch, since it proves
 registry -> file and never file -> registry. Verified to have teeth in both
 directions (an unregistered source, and a registered kernel missing from the

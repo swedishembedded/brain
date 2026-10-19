@@ -274,7 +274,7 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    a trial whose outcome a trained model can score at baseline.
 6. **SDK and serving.** SDK done: `brain::TimelineModel` (`timeline`
    surface, `brain_arch::Domain::Timeline`, architecture row `horizon`,
-   `docs/models/horizon.md`) trains with held-out early stopping, predicts
+   `docs/reference/models/horizon.md`) trains with held-out early stopping, predicts
    closed-form curves (`Prediction::cif`/`survival`), exposes the summary
    state, saves and loads (weights with the configuration in the header, the
    vocabulary beside them), and re-exports `brain::survival` and the

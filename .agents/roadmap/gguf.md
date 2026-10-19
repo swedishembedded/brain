@@ -1305,7 +1305,7 @@ this box yet.
       panicking, the tensor tree names a real tensor, and a large KV array
       is genuinely elided (and does NOT print every entry). `make test -p
       brain-cli --bins`: green (277 tests, 5 new for this file alone).
-- [x] Doc fixes: `docs/models/qwen3.md`'s GGUF section demonstrated
+- [x] Doc fixes: `docs/reference/models/qwen3.md`'s GGUF section demonstrated
       converting a Qwen3 GGUF to safetensors as the way to run one, despite
       qwen3 being direct-load (`gguf_import.rs`'s `Qwen3Importer::
       loads_directly` returns `true`, and `resident_llm.rs`'s Qwen resident
@@ -1314,7 +1314,7 @@ this box yet.
       *.gguf` directly, with the converter kept as an explicit "still
       available, now optional" path for callers who actually want a
       brain-native checkpoint (training, or pinning one on-disk format).
-      `docs/using/models-and-weights.md` gained a "Native K-quant GPU
+      `docs/guides/inference/models-and-weights.md` gained a "Native K-quant GPU
       execution" section describing the M8-M18 kernel/dispatch work
       (Q4_K/Q5_K via new affine kernels, Q6_K/Q5_0/Q4_0/Q8_0 through
       existing kernels via template knobs, all bit-exact host relayout) and

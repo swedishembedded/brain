@@ -88,7 +88,7 @@ LLaMA-2/Vicuna weights) scope.
   `resident.rs` (stateless resident registration), `label_cli.rs` (`--model
   llava`), `crates/catalog`'s `ModelEntry` - `brain llava caption`, `brain
   label images --model llava` and the D-Bus `Run` path all reach the
-  provider. `docs/models/llava.md` updated from "not started" to this state.
+  provider. `docs/reference/models/llava.md` updated from "not started" to this state.
 
 ## What is deferred, recorded rather than silently skipped
 

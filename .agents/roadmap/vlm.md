@@ -606,7 +606,7 @@ items that needed no new architecture, only wiring already-tested math
 
 ## qwen3vlmoe - name recognition + shape-only splice, real import deliberately not attempted
 
-Scope was to take Qwen3-VL-30B-A3B (the MoE sibling `docs/models/qwen3vl.md`
+Scope was to take Qwen3-VL-30B-A3B (the MoE sibling `docs/reference/models/qwen3vl.md`
 already named as refused-by-name) exactly as far as could be verified without
 a real checkpoint, and stop there rather than guess. Landed:
 `crates/arch`'s `qwen3vlmoe` row (its own real HF class,
@@ -674,7 +674,7 @@ safetensors leaf convention was refused rather than attempted - exactly the
 synthetic tiny configs (`model.rs`'s own tests): finite output, correct
 `[n, vocab]` shape, a `should_panic` on a token stream missing the image
 run. This is wiring proof, not real-weight parity, and neither this file nor
-`docs/models/qwen3vl.md` claims otherwise anywhere.
+`docs/reference/models/qwen3vl.md` claims otherwise anywhere.
 
 **Open, for whoever picks this up next**: (1) a real checkpoint (HF
 safetensors or GGUF) to import against - without one, the tensor-name mapping
@@ -747,7 +747,7 @@ being correct. `resident_qwen3vl.rs`'s
 `brain_qwen3vl_is_auto_exposed_on_openai_and_anthropic_model_lists` test
 drives a real `axum` router over a real `Executor` (weights path
 `/nonexistent`, no checkpoint needed - `GET /v1/models` never activates
-anything) and confirms `brain/qwen3vl` now appears on both. `docs/models/
+anything) and confirms `brain/qwen3vl` now appears on both. `docs/reference/models/
 qwen3vl.md`'s support table is updated to match - HTTP API and D-Bus both
 [x] - because this is now verified, not aspirational.
 
@@ -948,7 +948,7 @@ this key any more, per the finding above.
   runs end to end, stays in vocab, and is deterministic. There is no HF
   reference to check real Qwen3-VL video generation against in this
   workspace, matching this crate's existing image-path caveat (see
-  `docs/models/qwen3vl.md`).
+  `docs/reference/models/qwen3vl.md`).
 
 ## qwen3vl - tool-calling request/response contract, reused from qwen3::chat
 

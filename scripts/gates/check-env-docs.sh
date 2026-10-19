@@ -28,9 +28,9 @@
 set -u
 cd "$(dirname "$0")/../.."
 
-CONFIG_DOC=docs/using/configuration.md
+CONFIG_DOC=docs/reference/configuration.md
 TESTING_DOC=.agents/rules/testing.md
-MODELS_DIR=docs/models
+MODELS_DIR=docs/reference/models
 fail=0
 
 # Detection is shared with check-env-reads.sh (scripts/gates/env-reads.py).
@@ -47,7 +47,7 @@ done
 
 if [ "$fail" -ne 0 ]; then
   echo
-  echo "Add each variable to $CONFIG_DOC (user-facing), a docs/models/<model>.md"
+  echo "Add each variable to $CONFIG_DOC (user-facing), a docs/reference/models/<model>.md"
   echo "page (model-specific), or $TESTING_DOC (test-only / internal tuning)."
   exit 1
 fi

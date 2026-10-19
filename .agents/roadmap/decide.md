@@ -211,7 +211,7 @@ doc for the three runs).
 ## 6. Serving: what is open
 
 The serving contract is met for both decision architectures (see
-`docs/models/decision.md` and `crates/decisions`). One part of the plan is not:
+`docs/reference/models/decision.md` and `crates/decisions`). One part of the plan is not:
 
 - **`run_batch` is the serial default.** The plan called for a genuine batched
   state forward across concurrent requests. Within one request this arm already

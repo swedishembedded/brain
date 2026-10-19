@@ -4,7 +4,7 @@
 #
 # Runs every one-liner in README.md's Quick start, in order, against real
 # auto-fetched weights, and writes the images/text it produces into
-# docs/quickstart/img/ - the source of truth the README embeds and links to.
+# docs/getting-started/img/ - the source of truth the README embeds and links to.
 # Driven by `make docs/quickstart`.
 #
 # Design:
@@ -34,7 +34,7 @@ BRAIN="${BRAIN:-$REPO/target/release/brain}"
 export BRAIN_MODELS_DIR
 mkdir -p "$BRAIN_MODELS_DIR"
 
-IMG_DIR="$REPO/docs/quickstart/img"
+IMG_DIR="$REPO/docs/getting-started/img"
 mkdir -p "$IMG_DIR"
 
 # Every real HF token this box has, so a cold run does not eat the anonymous
@@ -66,7 +66,7 @@ fi
 
 step "2. text-to-image (s3dit, auto-fetches Tongyi-MAI/Z-Image-Turbo - ~33 GB, the slow step)"
 if ! need "$IMG_DIR/seed.png"; then
-  # seed: reproduces the image the README embeds (docs/quickstart/img/seed.png)
+  # seed: reproduces the image the README embeds (docs/getting-started/img/seed.png)
   "$BRAIN" --device gpu s3dit text2image \
     --prompt "a golden retriever dog and a red apple on a wooden table, photorealistic, natural lighting" \
     --width 512 --height 512 --seed 7 --steps 8 --precision int8 \

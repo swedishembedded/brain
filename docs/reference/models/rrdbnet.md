@@ -1,0 +1,58 @@
+# Upscale (4x super-resolution)
+
+Upscales an image 4x using a Real-ESRGAN-style generator - useful for
+restoring detail and sharpness lost to compression, resizing, or a low source
+resolution. Feed it any RGB image and get back a larger, sharper version.
+
+## Support
+
+| Capability | Supported |
+|---|---|
+| Inference             | [x] |
+| CLI (`brain <arch> <action>`)       | [x] |
+| HTTP API               | [ ] `upscale` takes a REQUIRED input image, so it is not a text-to-image action and has no HTTP route |
+| D-Bus                  | [x] |
+| Batched serving        | [ ] |
+
+## Getting the weights
+
+Model id: `brain/rrdbnet`. `RealESRGAN_x4plus.pth` auto-fetches (⤓, opt-in `--autofetch`) on first
+CLI use, no env var needed. To point at a different checkpoint, set
+`BRAIN_ESRGAN_WEIGHTS` to a released RRDBNet checkpoint file (`x2plus` and
+`x4plus_anime_6B` checkpoints also work - the scale factor is read from the
+checkpoint itself).
+
+## What it produces
+
+![a golden retriever behind a red apple on a wooden table, upscaled 4x from 512x512 to 2048x2048: individual hairs in the coat and the speckling on the apple skin are resolved](../../getting-started/img/upscaled.png)
+
+A 512x512 source at `--tile 128`, upscaled 4x to 2048x2048. Tiling is what
+keeps the memory cost bounded by the tile rather than the canvas; the halo the
+released net needs is real, and the overlap is cropped rather than blended
+because blending measured worse.
+
+## Running it
+
+```bash
+brain caps brain/rrdbnet
+brain rrdbnet upscale --tile 0 \
+    --in image=photo.ppm --out image=upscaled.ppm --json
+```
+
+Over D-Bus, the single action is `upscale`: input `image`, one int param
+`tile`, output `image` scaled up by the checkpoint's factor (4x on the
+released `x4plus` checkpoint).
+
+## Options
+
+- `tile` (default `0` = whole image at once) - process the image in tiles of
+  this many input pixels a side, for images too large to upscale in one pass
+  within available VRAM.
+
+## Hardware and limits
+
+Tiling trades a bit of speed for lower peak VRAM on large images. There is no
+training or fine-tuning path for this model - the released checkpoint ships
+inference-only weights. No batching beyond one image per request, and no HTTP
+endpoint - use `brain do` or D-Bus. Often used as the final stage of an
+[imgpipe](imgpipe.md) pipeline.

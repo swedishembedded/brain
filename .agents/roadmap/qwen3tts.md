@@ -244,7 +244,7 @@ two DIFFERENT reasons, before the real number above was measured:
 Verified against the real `Qwen/Qwen3-TTS-12Hz-{0.6B-Base,0.6B-CustomVoice,
 1.7B-VoiceDesign}` checkpoints (imported and run end-to-end: synth, clone
 (ICL + x-vector), CustomVoice preset speakers, VoiceDesign instruct -- see the
-"Measured" section below for numbers, per `docs/performance/overview.md`'s
+"Measured" section below for numbers, per `docs/concepts/execution/performance.md`'s
 own convention that session-specific measurements live here, not in
 `docs/`). Ordered cheapest/highest-leverage first; each phase is
 independently shippable.

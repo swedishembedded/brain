@@ -89,7 +89,7 @@ assumption that "I'll just look at the shapes."
    `LICENSE_MODEL`).
 2. Add a row to `docs/compliance/third-party-models.md`.
 3. If it's anything other than Apache-2.0/MIT/BSD, add the restriction
-   **inline** in `docs/models/<name>.md` too  -  the matrix alone is not
+   **inline** in `docs/reference/models/<name>.md` too  -  the matrix alone is not
    enough, per the FastVLM/CodeFormer/YOLOv8 gaps the audit found (silent
    one-command fetch, zero warning).
 4. If it's non-commercial, revenue-capped, field-of-use-restricted, or

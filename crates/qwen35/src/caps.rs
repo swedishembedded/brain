@@ -78,7 +78,7 @@ pub fn with_template_flavor_default(inv: &Invocation) -> Invocation {
 /// Default generated-token budget.
 ///
 /// **This was a bare `32`, repeated as a literal in two places per crate,
-/// with no stated reason in any doc comment, `docs/models/*.md` or roadmap
+/// with no stated reason in any doc comment, `docs/reference/models/*.md` or roadmap
 /// entry, and no measurement behind it.** Thirty-two tokens is half a
 /// sentence: it truncated essentially every real answer this decoder was
 /// asked for.

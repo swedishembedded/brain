@@ -87,7 +87,7 @@ def synthetic(name, w, h, seed):
 
 def load_inputs(out_dir):
     images = {}
-    for name, rel in [("room", "docs/models/flux2/staging-source.jpg"), ("doc", "docs/quickstart/img/doc.png")]:
+    for name, rel in [("room", "docs/reference/models/flux2/staging-source.jpg"), ("doc", "docs/getting-started/img/doc.png")]:
         images[name] = Image.open(os.path.join(REPO, rel)).convert("RGB")
     for name, img in [
         synthetic("tall", 300, 1400, 1),

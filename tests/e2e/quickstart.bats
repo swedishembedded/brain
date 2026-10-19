@@ -25,14 +25,14 @@ setup_file() {
   [ -x "$BRAIN" ] || skip "no brain binary (build with: make build/release, or set BRAIN_BIN)"
   export BRAIN
 
-  IMG_DIR="$REPO/docs/quickstart/img"
+  IMG_DIR="$REPO/docs/getting-started/img"
   export IMG_DIR
 
   # The full run (scripts/demo/quickstart.sh) is driven separately by `make
   # docs/quickstart` - this suite ASSERTS on whatever is already in $IMG_DIR
   # rather than re-running the whole multi-hour fetch itself, so a CI job can
   # run the fetch once and this suite many times against its output.
-  [ -d "$IMG_DIR" ] || skip "docs/quickstart/img missing -- run scripts/demo/quickstart.sh (or 'make docs/quickstart') first"
+  [ -d "$IMG_DIR" ] || skip "docs/getting-started/img missing -- run scripts/demo/quickstart.sh (or 'make docs/quickstart') first"
 }
 
 @test "quickstart: qwen3 text generation produced non-empty output" {
