@@ -34,9 +34,13 @@ fn a_peft_export_folds_as_the_adapter_brain_trained() {
     assert_eq!(serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(out.join("adapter_config.json")).unwrap()).unwrap()["base_model_name_or_path"], "acme/tiny", "the base comes from the card");
     let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out.join("adapter_config.json")).unwrap()).unwrap();
     assert_eq!((config["peft_type"].as_str(), config["r"].as_u64(), config["lora_alpha"].as_f64()), (Some("LORA"), Some(2), Some(2.0)));
-    let mut modules: Vec<&str> = config["target_modules"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
-    modules.sort();
-    assert_eq!(modules, ["down_proj", "q_proj", "v_proj"]);
+    assert_eq!(config["task_type"], "CAUSAL_LM");
+    let modules: Vec<&str> = config["target_modules"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(modules.len(), 3 * cfg.n_layers as usize, "every targeted linear is named in full");
+    let mut leaves: Vec<&str> = modules.iter().map(|m| m.rsplit('.').next().unwrap()).collect();
+    leaves.sort();
+    leaves.dedup();
+    assert_eq!(leaves, ["down_proj", "q_proj", "v_proj"]);
 
     // brain's fold, over brain's names...
     let base: std::collections::HashMap<String, Vec<f32>> = cfg.param_list().into_iter().filter(|(n, _)| !n.contains(".lora_")).map(|(n, _)| (n.clone(), init[&n].clone())).collect();
@@ -60,4 +64,40 @@ fn a_peft_export_folds_as_the_adapter_brain_trained() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Pairs of different rank and scale share one adapter file: each is padded
+/// to the largest rank with its own `alpha / r` folded into `B`, so PEFT's
+/// single `lora_alpha / r` applies every pair's own delta.
+#[test]
+fn pairs_of_different_rank_and_scale_keep_their_own_delta() {
+    use qwen3::export::{PeftAdapter, PeftLora};
+    let pair = |module: &str, r: usize, alpha: f32, n_in: usize, n_out: usize| PeftLora {
+        module: module.into(),
+        r,
+        alpha,
+        a: (0..r * n_in).map(|i| (i as f32 * 0.37).sin()).collect(),
+        b: (0..n_out * r).map(|i| (i as f32 * 0.91).cos()).collect(),
+    };
+    let loras = vec![pair("tower.fc", 2, 8.0, 3, 4), pair("decoder.q_proj", 4, 4.0, 5, 2)];
+    let delta = |l: &PeftLora, scale: f32| -> Vec<f32> {
+        let (n_in, n_out) = (l.a.len() / l.r, l.b.len() / l.r);
+        (0..n_out * n_in).map(|i| scale * (0..l.r).map(|k| l.b[(i / n_in) * l.r + k] * l.a[k * n_in + i % n_in]).sum::<f32>()).collect()
+    };
+    let want: Vec<Vec<f32>> = loras.iter().map(|l| delta(l, l.alpha / l.r as f32)).collect();
+    let dir = std::env::temp_dir().join(format!("brain-peft-mixed-{}", std::process::id()));
+    PeftAdapter { base_model: "acme/base".into(), task_type: None, loras, modules_to_save: vec!["head".into()], saved: vec![("head.weight".into(), vec![2], vec![1.0, 2.0])] }.write(&dir).unwrap();
+    let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("adapter_config.json")).unwrap()).unwrap();
+    let (r, alpha) = (config["r"].as_u64().unwrap() as usize, config["lora_alpha"].as_f64().unwrap() as f32);
+    assert_eq!((r, config["modules_to_save"].clone()), (4, serde_json::json!(["head"])));
+    let st = checkpoint::st::load_safetensors(dir.join("adapter_model.safetensors").to_str().unwrap()).unwrap();
+    assert_eq!(st.tensors["base_model.model.head.weight"], vec![1.0, 2.0], "a saved module's tensor under PEFT's prefix");
+    for (module, want) in ["tower.fc", "decoder.q_proj"].iter().zip(&want) {
+        let a = st.tensors[&format!("base_model.model.{module}.lora_A.weight")].clone();
+        let b = st.tensors[&format!("base_model.model.{module}.lora_B.weight")].clone();
+        let got = delta(&PeftLora { module: module.to_string(), r, alpha, a, b }, alpha / r as f32);
+        let worst = got.iter().zip(want).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-6, "{module}: delta differs by {worst}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }

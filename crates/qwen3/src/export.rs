@@ -618,9 +618,118 @@ fn read_lora(adapter_path: &str) -> Result<LoraFile, String> {
     Ok(LoraFile { r, alpha: adapter.alpha.unwrap_or(r as f32), base: adapter.base.clone(), pairs })
 }
 
+/// One LoRA pair under the HF module it applies to: `W += (alpha / r) B A`
+/// with `A [r, in]` and `B [out, r]`.
+pub struct PeftLora {
+    /// The HF module path, e.g. `model.layers.0.self_attn.q_proj`.
+    pub module: String,
+    pub r: usize,
+    pub alpha: f32,
+    pub a: Vec<f32>,
+    pub b: Vec<f32>,
+}
+
+/// A PEFT LoRA adapter directory's content: LoRA pairs, plus whole modules
+/// trained in full (PEFT's `modules_to_save`, their tensors under HF names).
+pub struct PeftAdapter {
+    pub base_model: String,
+    /// PEFT's `task_type` (`CAUSAL_LM` for a decoder); `None` leaves it out,
+    /// for a model PEFT has no task wrapper for.
+    pub task_type: Option<String>,
+    pub loras: Vec<PeftLora>,
+    /// Full-trained modules' HF paths, and every tensor of theirs as
+    /// `(HF tensor name, shape, values)`.
+    pub modules_to_save: Vec<String>,
+    pub saved: Vec<(String, Vec<u64>, Vec<f32>)>,
+}
+
+impl PeftAdapter {
+    /// Write `adapter_model.safetensors` and `adapter_config.json` into `out`,
+    /// so `peft.PeftModel.from_pretrained` over the HF checkpoint computes
+    /// exactly what brain computes. Target modules are named in full, so a
+    /// leaf name shared by two towers never targets the other one. Pairs of
+    /// different rank or scale are written at the largest rank with
+    /// `lora_alpha == r` (scale 1): each pair's own `alpha / r` is folded
+    /// into its `B` and the extra rank is zero, the same delta in any PEFT
+    /// version, without per-module patterns.
+    pub fn write(&self, out: &Path) -> Result<(), String> {
+        let first = self.loras.first().ok_or("PEFT export: no LoRA pairs")?;
+        let uniform = self.loras.iter().all(|l| l.r == first.r && l.alpha == first.alpha);
+        let r = self.loras.iter().map(|l| l.r).max().expect("non-empty");
+        let alpha = if uniform { first.alpha } else { r as f32 };
+        let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
+        let mut modules: Vec<String> = Vec::new();
+        for l in &self.loras {
+            if l.r == 0 || l.a.len() % l.r != 0 || l.b.len() % l.r != 0 {
+                return Err(format!("PEFT export: {}'s factors are not rank-{} matrices", l.module, l.r));
+            }
+            let (n_in, n_out) = (l.a.len() / l.r, l.b.len() / l.r);
+            let (a, b) = if uniform {
+                (l.a.clone(), l.b.clone())
+            } else {
+                let mut a = l.a.clone();
+                a.resize(r * n_in, 0.0);
+                let scale = l.alpha / l.r as f32;
+                let mut b = vec![0f32; n_out * r];
+                for o in 0..n_out {
+                    for k in 0..l.r {
+                        b[o * r + k] = l.b[o * l.r + k] * scale;
+                    }
+                }
+                (a, b)
+            };
+            tensors.push((format!("base_model.model.{}.lora_A.weight", l.module), vec![r as u64, n_in as u64], a));
+            tensors.push((format!("base_model.model.{}.lora_B.weight", l.module), vec![n_out as u64, r as u64], b));
+            modules.push(l.module.clone());
+        }
+        for (name, shape, v) in &self.saved {
+            if !self.modules_to_save.iter().any(|m| name.starts_with(&format!("{m}."))) {
+                return Err(format!("PEFT export: {name} belongs to no module to save"));
+            }
+            tensors.push((format!("base_model.model.{name}"), shape.clone(), v.clone()));
+        }
+        std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+        checkpoint::st::save_safetensors(&out.join("adapter_model.safetensors").to_string_lossy(), &tensors, &Value::Null, None).map_err(|e| format!("{}: {e}", out.display()))?;
+        let mut config = json!({
+            "peft_type": "LORA",
+            "base_model_name_or_path": self.base_model,
+            "r": r,
+            "lora_alpha": alpha,
+            "target_modules": modules,
+            "lora_dropout": 0.0,
+            "bias": "none",
+            "fan_in_fan_out": false,
+            "inference_mode": true,
+        });
+        if !self.modules_to_save.is_empty() {
+            config["modules_to_save"] = json!(self.modules_to_save);
+        }
+        if let Some(t) = &self.task_type {
+            config["task_type"] = json!(t);
+        }
+        write_json(&out.join("adapter_config.json"), &config)
+    }
+}
+
+/// A brain LoRA adapter file (`model::lora::device_adapter::save_adapter`'s
+/// format) as PEFT pairs, each base weight name mapped to its HF module by
+/// `hf_module` (`None`: an error naming the weight); also the base its card
+/// records.
+pub fn adapter_pairs(adapter_path: &str, hf_module: &dyn Fn(&str) -> Option<String>) -> Result<(Vec<PeftLora>, Option<String>), String> {
+    let LoraFile { r, alpha, base, pairs } = read_lora(adapter_path)?;
+    let loras = pairs
+        .into_iter()
+        .map(|(name, a, b)| {
+            let module = hf_module(&name).ok_or_else(|| format!("{adapter_path}: no HF module for {name}"))?;
+            Ok(PeftLora { module, r, alpha, a, b })
+        })
+        .collect::<Result<_, String>>()?;
+    Ok((loras, base))
+}
+
 /// Write a LoRA adapter brain trained for this decoder (`adapter_path`, as
-/// `qwen3::lora::save_adapter` writes it) as a PEFT adapter directory:
-/// `adapter_model.safetensors` under PEFT's names
+/// `qwen3::lora::save_adapter` writes it) as a PEFT adapter directory
+/// ([`PeftAdapter::write`]): `adapter_model.safetensors` under PEFT's names
 /// (`base_model.model.<HF module>.lora_A.weight` `[r, in]`, `.lora_B.weight`
 /// `[out, r]`) and an `adapter_config.json` carrying the rank, `lora_alpha`
 /// and target modules, so `peft.PeftModel.from_pretrained` applies it to the
@@ -628,35 +737,9 @@ fn read_lora(adapter_path: &str) -> Result<LoraFile, String> {
 /// `base_model` names the HF checkpoint it applies to; `None` takes the base
 /// the adapter's own card records.
 pub fn export_peft(adapter_path: &str, out: &Path, base_model: Option<&str>) -> Result<(), String> {
-    let LoraFile { r, alpha, base, pairs } = read_lora(adapter_path)?;
-    let base_model = base_model.map(str::to_string).or(base).ok_or_else(|| format!("{adapter_path}: no base model given and none on its card"))?;
-
     let names = HfNames::CAUSAL_LM;
-    let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
-    let mut modules: Vec<String> = Vec::new();
-    for (base, a, b) in &pairs {
-        let hf = names.from_brain(base).ok_or_else(|| format!("{adapter_path}: no HF name for {base}"))?;
-        let stem = hf.strip_suffix(".weight").ok_or_else(|| format!("{adapter_path}: {base} is not a weight"))?;
-        let module = stem.rsplit('.').next().unwrap_or(stem).to_string();
-        if !modules.contains(&module) {
-            modules.push(module);
-        }
-        tensors.push((format!("base_model.model.{stem}.lora_A.weight"), vec![r as u64, (a.len() / r) as u64], a.clone()));
-        tensors.push((format!("base_model.model.{stem}.lora_B.weight"), vec![(b.len() / r) as u64, r as u64], b.clone()));
-    }
-    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-    checkpoint::st::save_safetensors(&out.join("adapter_model.safetensors").to_string_lossy(), &tensors, &Value::Null, None).map_err(|e| format!("{}: {e}", out.display()))?;
-    let config = json!({
-        "peft_type": "LORA",
-        "task_type": "CAUSAL_LM",
-        "base_model_name_or_path": base_model,
-        "r": r,
-        "lora_alpha": alpha,
-        "target_modules": modules,
-        "lora_dropout": 0.0,
-        "bias": "none",
-        "fan_in_fan_out": false,
-        "inference_mode": true,
-    });
-    write_json(&out.join("adapter_config.json"), &config)
+    let module = |base: &str| names.from_brain(base).and_then(|hf| hf.strip_suffix(".weight").map(str::to_string));
+    let (loras, base) = adapter_pairs(adapter_path, &module)?;
+    let base_model = base_model.map(str::to_string).or(base).ok_or_else(|| format!("{adapter_path}: no base model given and none on its card"))?;
+    PeftAdapter { base_model, task_type: Some("CAUSAL_LM".into()), loras, modules_to_save: Vec::new(), saved: Vec::new() }.write(out)
 }
