@@ -580,3 +580,35 @@ fn a_submission_holding_a_library_product_is_captured_and_replayed() {
         }
     }
 }
+
+/// A large submission that is alternated with a small one (a decode step: the layer stack, then after a readback the
+/// one-node head) is captured and replayed although it never follows itself.
+#[test]
+fn a_large_submission_alternating_with_a_small_one_is_captured() {
+    let Some(b) = backend() else { return };
+    const ROUNDS: usize = 8;
+    const BIG: usize = 160;
+    let inp = b.storage_init("inp", &input());
+    let outs: Vec<_> = (0..BIG).map(|_| b.storage(N as u64)).collect();
+    let head = b.storage(N as u64);
+    let before = b.launch_stats();
+    for _ in 0..ROUNDS {
+        round(&b, &outs, &inp, N, 0.5);
+        // The readback that separates the stack from the head, as a decoder's sampling does.
+        let _ = b.read(&outs[0], 1);
+        round(&b, std::slice::from_ref(&head), &inp, N, 0.25);
+        let _ = b.read(&head, 1);
+    }
+    b.poll_wait();
+    let after = b.launch_stats();
+    // The large stack, and the small head (a submission that recurs between two of the stacks counts as repeating itself).
+    let captures = after.graph_captures - before.graph_captures;
+    assert!((1..=2).contains(&captures), "{captures} captures for two shapes");
+    assert!(after.graph_replays - before.graph_replays >= (ROUNDS - 3) as u64, "{} replays over {ROUNDS} rounds", after.graph_replays - before.graph_replays);
+    let want = input();
+    let got = b.read(&outs[BIG - 1], N);
+    for i in 0..N {
+        let expect = ROUNDS as f32 * 0.5 * want[i];
+        assert!((got[i] - expect).abs() <= 1e-5 * expect.abs().max(1.0), "element {i}: got {}, want {expect}", got[i]);
+    }
+}

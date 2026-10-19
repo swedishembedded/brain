@@ -8,3 +8,4 @@ crates/qwen3/src/bin/qwen_bench.rs	lora_train_bench:init_weights_fast#1=7	positi
 crates/qwen3/src/bin/qwen_bench.rs	main:init_weights_fast#1=7	positional	bench-input: synthetic weights and inputs that define the measured workload
 crates/qwen3/src/bin/qwen_bench.rs	serve_prefill_bench:init_weights_fast#1=7	positional	bench-input: synthetic weights and inputs that define the measured workload
 crates/qwen3/src/caps.rs	score_arm:Rng::new(0)	rng	greedy: argmax decode never consults the RNG
+crates/qwen3/src/bin/qwen_bench.rs	serve_calls:init_weights_fast#1=7	positional	bench-input: synthetic weights that define the measured workload

@@ -274,6 +274,16 @@ unsafe impl Send for Resolved {}
 /// staging until it is evicted, replaced or invalidated by a free.
 const MAX_LIVE: usize = 8;
 
+/// Nodes from which a submission that is not a pass chunk is still treated like one: captured the second time it is
+/// seen within the recent window rather than only when it repeats the submission just before it.
+///
+/// A decode step issues its layer stack and then, after a readback, a one-node head, and the two alternate: the stack
+/// never follows itself, so the immediate-repeat rule never captured a single-sequence decode (the batched ones
+/// captured only by accident, when two stacks happened to be adjacent). The rule's reason - a prefill round is
+/// hundreds of SMALL submissions, some recurring every few layers, each costing an instantiation - does not apply to a
+/// submission this large.
+const WINDOWED_MIN_NODES: usize = 128;
+
 /// How many distinct recent shapes [`GraphCache::seen`] remembers.
 const MAX_SEEN: usize = 8;
 
@@ -343,8 +353,8 @@ impl GraphCache {
     /// `chunk` says the submission is a pass chunk - a large piece of a step the
     /// caller repeats - rather than one the caller made on its own. A chunk is
     /// captured when it has been seen before at all (within the last
-    /// [`MAX_SEEN`] chunks); any other submission only when it repeats the one
-    /// before it.
+    /// [`MAX_SEEN`] chunks), and so is any submission of [`WINDOWED_MIN_NODES`] nodes or more; any
+    /// other submission only when it repeats the one before it.
     pub fn plan(&mut self, ctx: &exec::Context, sig: &SubmitSig, epoch: u64, chunk: bool) -> Plan {
         if self.failures >= MAX_FAILURES {
             return Plan::Eager;
@@ -364,7 +374,7 @@ impl GraphCache {
             sig.hash(&mut h);
             h.finish()
         };
-        if !chunk {
+        if !chunk && sig.nodes.len() < WINDOWED_MIN_NODES {
             if self.previous == Some((fingerprint, epoch)) {
                 self.previous = None;
                 return Plan::Capture;

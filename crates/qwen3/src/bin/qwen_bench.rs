@@ -70,6 +70,9 @@
 //!   qwen_bench serve-accuracy --weights CKPT_DIR --text FILE [--t T] [--prompts N] [--gen G] [--kv int8|fp32]
 //!                                    # REAL weights: the serving engine's last-token distribution and
 //!                                    # greedy tokens under fp32 / TF32 / bf16-weight / int8-weight tiers
+//!   qwen_bench serve-calls [rows] [tokens] [--gemm auto|fp32]
+//!                                    # host launches and graph replays per decode step of the
+//!                                    # serving engine (cuda_call_totals), after a capture warm-up
 //!   qwen_bench gemm8   [m k n] [reps]      # A/B `matmul_i8_dyn` at one shape
 //!   qwen_bench gemm8-sweep [k n] [reps]    # `matmul_i8_dyn` GOP/s across an
 //!                                          # `m` sweep at fixed k,n — the D0
@@ -336,6 +339,10 @@ fn main() {
     }
     if mode == "gemm-accuracy" {
         gemm_accuracy(&a);
+        return;
+    }
+    if mode == "serve-calls" {
+        serve_calls(&a, &cfg, model_name);
         return;
     }
     if mode == "serve-accuracy" {
@@ -1291,6 +1298,37 @@ fn serve_accuracy(a: &[String]) {
             }
         }
     }
+}
+
+/// How the serving decode step reaches the driver: host launches and graph replays per generated token, over
+/// `rows` concurrent sequences, after a warm-up that lets a capture happen - see the `serve-calls` usage line.
+fn serve_calls(a: &[String], cfg: &QwenConfig, model_name: &str) {
+    use model::paged::BlockTable;
+    let rows: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
+    let gen: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(24);
+    let (bs, mbs) = (16u32, 16u32);
+    let init = init_weights_fast(cfg, 7);
+    let mut eng = qwen3::serve::Engine::from_map(cfg.clone(), &init, bs, rows * mbs + 8, rows.max(8), mbs, 64, true, false);
+    eng.set_gemm_precision(gemm_flag(a));
+    let prompts: Vec<Vec<u32>> = (0..rows).map(|r| (0..40).map(|i| (r * 31 + i * 7 + 3) % cfg.vocab).collect()).collect();
+    let _ = BlockTable::new;
+    // Warm-up: the first rounds issue eagerly, then capture.
+    for _ in 0..3 {
+        let _ = eng.generate_greedy(&prompts, gen, None);
+    }
+    let before = gpu_core::cuda_call_totals();
+    let out = eng.generate_greedy(&prompts, gen, None);
+    let after = gpu_core::cuda_call_totals();
+    let tokens = out.iter().map(Vec::len).sum::<usize>().max(1) as f64;
+    let steps = gen as f64;
+    println!(
+        "serve-calls {model_name} rows={rows} gemm={:?}: per decode step {:.1} host launches, {:.2} graph replays, {:.1} allocation calls ({} tokens over {steps} steps)",
+        gemm_flag(a),
+        (after.host_launches - before.host_launches) as f64 / steps,
+        (after.graph_replays - before.graph_replays) as f64 / steps,
+        (after.device_alloc_calls - before.device_alloc_calls + after.pool_alloc_calls - before.pool_alloc_calls) as f64 / steps,
+        tokens
+    );
 }
 
 /// The value after `flag` in argv, if present.
