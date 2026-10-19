@@ -79,8 +79,10 @@ FIELD = {
     "entry": re.compile(r'entry:\s*"([^"]*)"'),
     "what": re.compile(r'what:\s*"((?:[^"\\]|\\.)*)"'),
     # `include_str!("...")` alone, or inside a `concat!(...)` that prefixes
-    # `#define`s to the same file (a tile variant of one kernel).
-    "src": re.compile(r'src:[^}]*?include_str!\("([^"]*)"\)', re.S),
+    # `#define`s to the same file (a tile variant of one kernel). When a kernel's source is
+    # a helper file followed by the file that defines its entry point (flash prefill version 2),
+    # the entry's file is the LAST `include_str!`.
+    "src": re.compile(r'src:[^}]*include_str!\("([^"]*)"\)', re.S),
 }
 
 

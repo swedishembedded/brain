@@ -467,6 +467,40 @@ fn the_tensor_core_flash_prefill_reads_a_bf16_and_an_int8_cache() {
     }
 }
 
+/// Version 2 of the compact-cache kernel (one warp per 16 rows over the whole head, two blocks per SM) does the
+/// arithmetic of the original in the same order, so the two agree to rounding noise at most; this holds it to
+/// 1e-4 of the output scale on ragged and scattered shapes, and the NaN-filled output proves every row is written.
+/// It flips the process-wide version switch; the other tests in this file are valid under either kernel.
+#[test]
+fn version_2_matches_the_original_kernel_on_a_bf16_and_an_int8_cache() {
+    let Some(gpu) = device() else { return };
+    let cases = [
+        Case { n: 256, start: 0, block_size: 4096, scatter: false },
+        Case { n: 77, start: 1000, block_size: 4096, scatter: false },
+        Case { n: 200, start: 300, block_size: 128, scatter: true },
+        Case { n: 33, start: 513, block_size: 16, scatter: true },
+    ];
+    for kv in [Kv::Bf16, Kv::Int8] {
+        for (i, c) in cases.iter().enumerate() {
+            let p = Problem::new(Case { ..*c }, 0xFA57 + i as u64);
+            let (seen, stored) = p.as_stored(kv);
+            let d = TierDevice::upload(&gpu, &seen, kv, &stored);
+            let mut out = Vec::new();
+            for v2 in [false, true] {
+                gpu_core::provider::cuda::set_flash_prefill_v2(v2);
+                let step = d.native(&gpu, &seen).expect("the production helper must take a head_dim-256 request on this device");
+                gpu.write(&d.base.ctx, &vec![0x7fc0_0000u32; (seen.c.n * N_HEADS * HD) as usize]);
+                out.push(d.base.run(&gpu, &step, &seen));
+            }
+            gpu_core::provider::cuda::set_flash_prefill_v2(true);
+            assert!(out[1].iter().all(|x| x.is_finite()), "{kv:?} case {i}: version 2 left a row unwritten");
+            let maxdiff = out[0].iter().zip(&out[1]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+            let bar = 1e-4 * rms(&out[0]);
+            assert!(maxdiff <= bar, "{kv:?} case {i} (n={} start={}): version 2 differs from version 1 by {maxdiff:e} (bar {bar:e})", c.n, c.start);
+        }
+    }
+}
+
 /// The compact-tier kernels keep the decode-regime rule of the fp32 one.
 #[test]
 fn a_compact_cache_in_the_decode_regime_keeps_its_portable_kernel() {
@@ -500,8 +534,9 @@ fn the_int8_cache_prefill_is_materially_faster_than_the_portable_kernel() {
 }
 
 /// The serving shape of the 27B's agentic prefill (a 512-row chunk behind 3584 cached tokens, int8 cache): 192
-/// blocks, i.e. more than one wave on 132 SMs, which the smaller cases above do not exercise. Reports the kernel's
-/// time for kernel-level A/B work; it asserts nothing about speed.
+/// blocks, i.e. more than one wave on 132 SMs, which the smaller cases above do not exercise. Reports the time of
+/// the original kernel and of version 2 and how far their outputs differ; it asserts nothing about speed. It flips the
+/// process-wide version switch, so run it alone (`--test-threads 1`, as `runs/b27/flash-bench.sh` does).
 #[test]
 #[ignore = "a timing report for kernel work, not a spec"]
 fn the_int8_cache_prefill_rates_at_the_serving_chunk() {
@@ -510,8 +545,16 @@ fn the_int8_cache_prefill_rates_at_the_serving_chunk() {
     let p = Problem::new(Case { n, start, block_size: 4096, scatter: false }, 23);
     let (seen, stored) = p.as_stored(Kv::Int8);
     let d = TierDevice::upload(&gpu, &seen, Kv::Int8, &stored);
-    let native = d.native(&gpu, &seen).expect("native step");
-    d.base.run(&gpu, &native, &seen);
-    let best = d.base.device_ms(&gpu, &native, "flash_prefill_f16_hd256");
-    eprintln!("cuda_flash_prefill: serving chunk int8 n={n} start={start}: tensor-core {best:.3} ms (best of the trials)");
+    let mut out = Vec::new();
+    for (v2, name) in [(false, "flash_prefill_f16_hd256_kv8"), (true, "flash_prefill_f16_hd256_v2_kv8")] {
+        gpu_core::provider::cuda::set_flash_prefill_v2(v2);
+        let native = d.native(&gpu, &seen).expect("native step");
+        let ctx = d.base.run(&gpu, &native, &seen);
+        let ms = d.base.device_ms(&gpu, &native, name);
+        eprintln!("cuda_flash_prefill: serving chunk int8 n={n} start={start}: {name} {ms:.3} ms");
+        out.push(ctx);
+    }
+    gpu_core::provider::cuda::set_flash_prefill_v2(true);
+    let diff = out[0].iter().zip(&out[1]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+    eprintln!("cuda_flash_prefill: version 1 vs version 2 max |diff| {diff:.2e} on outputs of rms {:.2e}", rms(&out[0]));
 }

@@ -154,6 +154,7 @@ __device__ __forceinline__ void brain_mma_f16(float (&d)[4], const unsigned int 
 #else
 #define FLASH_ARGS const unsigned int* params, const float* q, const KvT* pool_k, const KvT* pool_v, const unsigned int* block_tables, const unsigned int* seq_lens, float* ctx KV_SCALE_PARAMS
 #endif
+#ifndef BRAIN_FLASH_HELPERS_ONLY   // flash_prefill_f16_hd256_v2.cu reuses everything above
 extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16_hd256(FLASH_ARGS) {
     const unsigned int bsz = params[0];
     const unsigned int n_heads = params[1];
@@ -423,3 +424,4 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
         }
     }
 }
+#endif  // BRAIN_FLASH_HELPERS_ONLY

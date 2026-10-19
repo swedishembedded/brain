@@ -957,6 +957,23 @@ pub fn paged_flash_prefill_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backen
     gpu.step_native_sliced(id, bufs, &[(0, 0); 6], params, blocks)
 }
 
+/// Dynamic shared memory of `flash_prefill_f16_hd256_v2_*`: the Q tile (64 rows) and the K and V tiles (32 keys each),
+/// fp16 rows of 256 + 8 values. Two blocks of it fit one SM (2 x 66 KiB of the 227 KiB a Hopper block may opt in to).
+const FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES: u32 = (64 + 2 * 32) * (256 + 8) * 2;
+const FLASH_PREFILL_V2_LAUNCH: backend_api::CudaLaunch = backend_api::CudaLaunch { dynamic_shared_bytes: FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+
+static FLASH_PREFILL_V2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Choose the head_dim 256 prefill attention over a bf16 or int8 KV cache: version 2 (the default) or the original
+/// kernel, which stays as the fallback and as the baseline of an A/B. Process-wide; takes effect for steps built after.
+pub fn set_flash_prefill_v2(on: bool) {
+    FLASH_PREFILL_V2.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn flash_prefill_v2() -> bool {
+    FLASH_PREFILL_V2.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether a prefill round of `rows` rows at `head_dim` may take a native fp16
 /// tensor-core attention kernel on this device. A round in the decode regime is
 /// a speculative verify or a ragged tail and keeps the fp32 kernel, whose
@@ -973,6 +990,12 @@ pub fn paged_flash_prefill_bf16_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&b
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
+    if head_dim == 256 && flash_prefill_v2() {
+        if let Some(kernel) = kernels_cuda::get("flash_prefill_f16_hd256_v2_bf16").filter(|k| k.min_cc <= cc) {
+            let id = gpu.native_kernel_launched(kernel, PAGED_FLASH_PREFILL_BINDINGS, FLASH_PREFILL_V2_LAUNCH)?;
+            return gpu.step_native_sliced(id, bufs, &[(0, 0); 6], params, blocks);
+        }
+    }
     let kernel = kernels_cuda::get(if head_dim == 128 { "flash_prefill_f16_hd128_bf16" } else { "flash_prefill_f16_hd256_bf16" }).filter(|k| k.min_cc <= cc)?;
     let id = gpu.native_kernel(kernel, PAGED_FLASH_PREFILL_BINDINGS)?;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 6], params, blocks)
@@ -986,6 +1009,12 @@ pub fn paged_flash_prefill_kv8_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&ba
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
+    if head_dim == 256 && flash_prefill_v2() {
+        if let Some(kernel) = kernels_cuda::get("flash_prefill_f16_hd256_v2_kv8").filter(|k| k.min_cc <= cc) {
+            let id = gpu.native_kernel_launched(kernel, PAGED_FLASH_PREFILL_KV8_BINDINGS, FLASH_PREFILL_V2_LAUNCH)?;
+            return gpu.step_native_sliced(id, bufs, &[(0, 0); 8], params, blocks);
+        }
+    }
     let kernel = kernels_cuda::get(if head_dim == 128 { "flash_prefill_f16_hd128_kv8" } else { "flash_prefill_f16_hd256_kv8" }).filter(|k| k.min_cc <= cc)?;
     let id = gpu.native_kernel(kernel, PAGED_FLASH_PREFILL_KV8_BINDINGS)?;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 8], params, blocks)

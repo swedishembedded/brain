@@ -351,6 +351,50 @@ pub const ALL: &[CudaKernel] = &[
         ),
     },
     CudaKernel {
+        name: "flash_prefill_f16_hd256_v2_bf16",
+        // Asked for by name by `paged_flash_prefill_bf16_step` for head_dim 256 while the version-2 switch is on.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd256_v2_bf16",
+        what: "flash_prefill_f16_hd256 version 2 over a bf16 KV cache: one warp per 16 query rows over the whole head (no duplicated scores), Q in shared memory, two blocks per SM",
+        reported: "native:flash_prefill_f16_hd256_v2_bf16",
+        block_dim: 128,
+        tile: (64, 1),
+        // Everything is dynamic (opted in): Q, K and V tiles, see `FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES` in gpu-core.
+        shared_bytes: 0,
+        src: concat!(
+            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 1\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define brain_flash_prefill_f16_hd256_v2 brain_flash_prefill_f16_hd256_v2_bf16\n",
+            include_str!("../cu/flash_prefill_f16_hd256_v2.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd256_v2_kv8",
+        // Asked for by name by `paged_flash_prefill_kv8_step` for head_dim 256 while the version-2 switch is on.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd256_v2_kv8",
+        what: "flash_prefill_f16_hd256 version 2 over an int8 KV cache with one scale per (token, kv head) row: one warp per 16 query rows over the whole head, raw bytes widened at the shared-memory write, two blocks per SM",
+        reported: "native:flash_prefill_f16_hd256_v2_kv8",
+        block_dim: 128,
+        tile: (64, 1),
+        // Everything is dynamic (opted in): Q, K and V tiles, see `FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES` in gpu-core.
+        shared_bytes: 0,
+        src: concat!(
+            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define brain_flash_prefill_f16_hd256_v2 brain_flash_prefill_f16_hd256_v2_kv8\n",
+            include_str!("../cu/flash_prefill_f16_hd256_v2.cu")
+        ),
+    },
+    CudaKernel {
         name: "flash_prefill_f16_hd128",
         // Asked for by name: `find` answers (PagedAttentionFused, F32) with the head_dim 256 kernel.
         op: Op::PagedAttentionFused,

@@ -20,7 +20,7 @@
 //!
 //! Usage:
 //!   qwen35_gguf_prefill_profile <path to Qwen3.8-27B*.gguf> [depth] [rows] [rounds]
-//!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda] [--kv f32|bf16|int8]
+//!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda] [--kv f32|bf16|int8] [--flash-prefill v1|v2]
 //!
 //! `depth` (default 256) prompt tokens establish the KV depth first, `rows`
 //! (default 256) is the round width, `rounds` (default 4) the rounds per
@@ -41,6 +41,12 @@ fn main() {
     let rounds: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(4);
     let cap = depth + 2 * rows * rounds;
     let flag = |name: &str| a.iter().position(|arg| arg == name).and_then(|i| a.get(i + 1)).cloned();
+    // The head_dim 256 prefill attention over a bf16 or int8 cache: version 2 by default, `v1` for the original kernel.
+    match flag("--flash-prefill").as_deref() {
+        None | Some("v2") => {}
+        Some("v1") => gpu_core::provider::cuda::set_flash_prefill_v2(false),
+        Some(other) => panic!("--flash-prefill takes v1 or v2, not {other}"),
+    }
     let set = gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
 
     let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
