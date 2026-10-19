@@ -125,8 +125,8 @@ which picks the hardware itself. Omit it for wgpu.
 
   wgpu      portable WebGPU/wgpu path (default)
   vulkan    native Vulkan compute (ash, WGSL -> SPIR-V)
-  cuda      native CUDA driver API - DEVICE ENUMERATION ONLY so far; it cannot
-            run kernels yet and says so rather than running somewhere else
+  cuda      native CUDA driver API; kernels compile through NVRTC on first
+            dispatch, so it needs the CUDA toolkit's NVRTC beside the driver
   cpu       native CPU backend
 
 An explicitly named backend is a hard contract: if it cannot be built, brain
