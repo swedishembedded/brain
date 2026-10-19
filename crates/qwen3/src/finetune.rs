@@ -60,20 +60,6 @@ pub fn finetune_from(
     out: &str,
     resume: bool,
 ) -> std::io::Result<(f32, f32)> {
-    // BRAIN_OFFLOAD_ADAM is a process-global switch (the same convention
-    // `model::parallel`/`model::shard` use) -- save/restore the caller's prior
-    // value rather than clobbering it, so a nested or later call in the same
-    // process doesn't silently inherit this call's mode. This has to be set
-    // before `Qwen::new` runs regardless of resume-vs-fresh: it governs
-    // Role::Offload vs Role::Trainable for a `FullOffload` build, which
-    // `new_impl` reads at construction time no matter which checkpoint
-    // supplied the weights.
-    let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
-    match mode {
-        Mode::FullOffload => std::env::set_var("BRAIN_OFFLOAD_ADAM", "1"),
-        Mode::Lora { .. } => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
-    }
-
     let (cfg, init): (QwenConfig, Box<dyn TensorSource>) = if resume && Path::new(out).exists() {
         // Resume: architecture + weights come from the checkpoint being
         // continued, not `base` - the adapter's (or full model's)
@@ -103,12 +89,9 @@ pub fn finetune_from(
         crate::open_checkpoint(base).map_err(std::io::Error::other)?
     };
 
-    let m = build_for_training(cfg, opts, &*init, Dtype::F32);
-    match prev_off {
-        Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
-        None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
-    }
-    let m = m?;
+    // Role::Offload vs Role::Trainable for a `FullOffload` build is read when
+    // the model is built, whichever checkpoint supplied the weights.
+    let m = crate::model::with_offloaded_adam(matches!(mode, Mode::FullOffload), || build_for_training(cfg, opts, &*init, Dtype::F32))?;
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
     model::fit_with(m, obj, opts, Some(Path::new(out)))
@@ -122,16 +105,7 @@ pub fn finetune_from(
 /// three times the model), so the report says it was interrupted.
 pub fn finetune_full_controlled(base: &str, dir: &Path, opts: &FitOpts, out: &Path, control: model::FitControl<'_>) -> std::io::Result<model::FitReport> {
     let (cfg, init) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
-    // BRAIN_OFFLOAD_ADAM governs Role::Offload at construction; the caller's
-    // value is restored whether or not the build succeeds, as in
-    // `finetune_from`.
-    let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
-    std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
-    let built = build_for_training(cfg, opts, &*init, Dtype::F32);
-    match prev_off {
-        Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
-        None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
-    }
+    let built = crate::model::with_offloaded_adam(true, || build_for_training(cfg, opts, &*init, Dtype::F32));
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
     let (report, _) = model::fit_controlled(built?, obj, opts, Some(out), control)?;

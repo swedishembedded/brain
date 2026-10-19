@@ -292,10 +292,13 @@ impl ParamStore {
     /// (call once per effective batch, before the accumulating backward passes).
     /// Includes [`Self::frozen`] tensors: the backward pass still ACCUMULATES
     /// into their grad buffers, so skipping them would let a frozen tensor's
-    /// gradient grow without bound across a training run.
+    /// gradient grow without bound across a training run. So do the
+    /// [`Self::offload`] tensors: the host optimiser reads their gradient but
+    /// never clears it, so leaving them out made every step train on the sum of
+    /// its own gradient and all earlier ones.
     pub fn zero_grads(&self, gpu: &Gpu) {
         let clears: Vec<&gpu_core::DeviceBuffer> =
-            self.trainable.iter().chain(&self.frozen).map(|(n, _)| self.g(n)).collect();
+            self.trainable.iter().chain(&self.offload).chain(&self.frozen).map(|(n, _)| self.g(n)).collect();
         gpu.submit(&clears, &[]);
     }
 
@@ -359,6 +362,29 @@ mod tests {
         assert_eq!(ps.read_grad(&gpu, "w"), vec![9.0, 9.0, 9.0]);
         ps.zero_grads(&gpu);
         assert_eq!(ps.read_grad(&gpu, "w"), vec![0.0, 0.0, 0.0]);
+    }
+
+    /// A step starts from zero gradients for EVERY parameter the backward pass
+    /// accumulates into, whoever updates it. An offloaded parameter's gradient
+    /// lives on the device like any other; when it was left out of the clear,
+    /// each step trained on the sum of its own gradient and every earlier
+    /// step's.
+    #[test]
+    fn zero_grads_clears_offloaded_gradients_too() {
+        static KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];
+        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let mut init = HashMap::new();
+        for n in ["trained", "offloaded"] {
+            init.insert(n.to_string(), vec![1.0f32; 3]);
+        }
+        let ps = ParamStore::new_with_roles(&gpu, vec![("trained".to_string(), 3, Role::Trainable), ("offloaded".to_string(), 3, Role::Offload)], &init);
+        for n in ["trained", "offloaded"] {
+            gpu.write(ps.g(n), bytemuck::cast_slice(&[9.0f32; 3]));
+        }
+        ps.zero_grads(&gpu);
+        for n in ["trained", "offloaded"] {
+            assert_eq!(ps.read_grad(&gpu, n), vec![0.0; 3], "{n}");
+        }
     }
 
     /// A `TensorSource` test double that records, for one upload, the largest
