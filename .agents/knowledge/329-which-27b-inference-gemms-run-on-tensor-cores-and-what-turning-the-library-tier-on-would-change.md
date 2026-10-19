@@ -22,5 +22,5 @@ decode regime through TF32 (none exist under a uniform I8 policy; `--qwen35-tier
 them), and (b) make the Hopper int8-weight bf16-activation kernel (W8A16, `matmul_i8w_bf16a_wgmma`, reverted from main)
 selectable for prefill-sized rows: it needs `gemm.is_active()` for the bf16 cast of the shared activation. A
 "wgmma on" run with the tier off ran the int8 `mma.sync` kernels, so window5's identical on/off tables measured
-nothing; the engine-level speed and accuracy of W8A16 are measured by `runs/b27/window9.sh` (decision input: library
+nothing; the engine-level speed and accuracy of W8A16 are NOT yet measured in this tree (the window9 run script lives outside the repository; no number is recorded here) (decision input: library
 tier and W8A16 by default for the 27B, correctness over speed).
