@@ -949,9 +949,9 @@ struct SwapBufs {
 const KV_SWAP_STAGING_BYTES: u64 = 64 << 20;
 
 /// The fewest rows of one linear that run on the library's tensor-core GEMM by default: below it the GEMV kernels
-/// stream the weight once per row group at the bandwidth roof. Measured on the 8B at a 1024-token context, 32 rows
-/// (`qwen_bench serve 32 5 1024 kv8 --model 8b --library-min-rows N`): the GEMV step 220-310 ms against 74 ms
-/// through the library; 8 rows 77 ms against 57 ms (knowledge 326).
+/// stream the weight once per row group at the bandwidth roof. Swept on the real 8B shapes at a 1024-token context
+/// with `qwen_bench serve R 5 1024 kv8 --model 8b --library-min-rows N`: at 32 rows the GEMV step is several times
+/// slower than the library's, at 8 rows the library is still ahead (knowledge 326 has the figures and logs).
 const LIBRARY_MIN_ROWS: u32 = 8;
 
 impl Engine {

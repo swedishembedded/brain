@@ -515,8 +515,10 @@ fn the_drafters_prefill_feed_is_skipped_when_speculation_cannot_repay_it() {
     let dear = feeds_of(500_000, 12);
     assert_eq!(dear.len(), 24);
     assert!(dear[0], "the first request learns what the feed and speculation cost: {dear:?}");
+    // perf-number: the assertion message names the simulated feed cost the test sets up, not a measurement
     assert!(dear[8..].iter().filter(|&&f| f).count() <= 1, "short replies cannot repay a 0.5 s feed, only a probe may still pay it: {dear:?}");
     let cheap_and_long = feeds_of(500, 80);
+    // perf-number: the assertion message names the simulated feed cost the test sets up, not a measurement
     assert!(cheap_and_long.iter().all(|&f| f), "an 80-token reply repays a 0.5 ms feed: {cheap_and_long:?}");
 }
 
