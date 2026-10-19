@@ -564,6 +564,24 @@ const AUTO_CTX_TIERS: &[u32] = &[2048, 4096, 8192, 16384, 24576, 32768, 40960, 4
 /// context's own two-context pool is already larger than this.
 const DEFAULT_POOL_FLEET_TOKENS: u32 = 262_144;
 
+/// The default KV pool of a live server (see [`QwenResident::resolve_kv_tokens`]):
+/// room for `max_batch` half-context histories, capped at
+/// [`DEFAULT_POOL_FLEET_TOKENS`], when the whole footprint fits `budget`
+/// beside `weight_bytes`; `None` keeps the two-context pool.
+fn fleet_pool_tokens(checkpoint: &qwen3::config::QwenConfig, weight_bytes: u64, budget: u64, ctx: u32, cfg: &QwenServeConfig) -> Option<u32> {
+    let max_batch = cfg.max_batch.max(1);
+    let fleet = (u64::from(ctx) * u64::from(max_batch) / 2).min(u64::from(DEFAULT_POOL_FLEET_TOKENS)) as u32;
+    if fleet <= ctx.saturating_mul(2) {
+        return None;
+    }
+    let profile = PoolProfile::at_ctx(checkpoint, ctx, max_batch, cfg.max_prefill_cap.clamp(1, 512), Some(fleet), cfg.kv_int8, cfg.kv_offload_gb > 0.0, qwen3::serve::FusedAttention::default());
+    // The pool grows only the KV buffers. The scratch binding, which the unfused
+    // worst case of `PoolProfile` overstates at ctx 32768, does not change with
+    // it, so only the KV binding is checked beside the total.
+    let kv_binding = qwen3::serve::kv_binding_bytes(checkpoint, 16, fleet.div_ceil(16) + max_batch, cfg.kv_int8);
+    (profile.total(weight_bytes) <= budget && kv_binding <= WGPU_MAX_REPORTABLE_BINDING_BYTES).then_some(fleet)
+}
+
 /// What one `(ctx, batch, prefill)` sizing costs on the device: the totals a
 /// budget has to cover, and the largest SINGLE binding a driver has to accept.
 ///
@@ -810,14 +828,8 @@ impl QwenResident {
         }
         let budget = cfg.card_budget_bytes.or(cfg.auto_budget_bytes)?;
         let checkpoint_cfg = qwen3::checkpoint_config(path).ok()?;
-        let max_batch = cfg.max_batch.max(1);
-        let fleet = (u64::from(ctx) * u64::from(max_batch) / 2).min(u64::from(DEFAULT_POOL_FLEET_TOKENS)) as u32;
-        if fleet <= ctx.saturating_mul(2) {
-            return None;
-        }
         let weight_bytes = serve_weight_bytes(cfg, &checkpoint_cfg);
-        let profile = PoolProfile::at_ctx(&checkpoint_cfg, ctx, max_batch, cfg.max_prefill_cap.clamp(1, 512), Some(fleet), cfg.kv_int8, cfg.kv_offload_gb > 0.0, qwen3::serve::FusedAttention::default());
-        (profile.total(weight_bytes) <= budget && profile.bindings_fit()).then_some(fleet)
+        fleet_pool_tokens(&checkpoint_cfg, weight_bytes, budget, ctx, cfg)
     }
 
     /// `cfg.ctx` verbatim when the operator named one explicitly
@@ -1591,6 +1603,18 @@ mod tests {
         assert_eq!(big, 400_000 / 16 + 8);
         let (_, _, _, small, _) = QwenResident::pool_sizing(4096, 8, 512, Some(16));
         assert_eq!(small, per_seq + 8);
+    }
+
+    /// At the served 8B's real shape (ctx 32768, 32 slots) on a 94 GB card the
+    /// default pool is the full fleet: the unfused scratch worst case that makes
+    /// the plain two-context profile "unbindable" must not veto it.
+    #[test]
+    fn the_real_8b_on_a_big_card_gets_the_fleet_pool() {
+        let cfg = qwen3::config::QwenConfig::qwen3_8b();
+        let serve = QwenServeConfig { max_batch: 32, ..QwenServeConfig::default() };
+        let weights = weights_fp32_bytes(&cfg);
+        assert_eq!(fleet_pool_tokens(&cfg, weights, 94 << 30, 32768, &serve), Some(DEFAULT_POOL_FLEET_TOKENS));
+        assert_eq!(fleet_pool_tokens(&cfg, weights, 40 << 30, 32768, &serve), None, "no room beside the weights");
     }
 
     /// A live server (budget known) keeps `max_batch` half-context histories
