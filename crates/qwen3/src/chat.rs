@@ -182,11 +182,11 @@ pub fn tool_schema_names(tools: &[String]) -> Vec<String> {
 /// a no-tools request already streamed); reasoning/tool-call events become
 /// [`Progress::event`] with a neutral, consistently-shaped JSON payload —
 /// `{"kind":"reasoning","text":...}`, `{"kind":"tool_call_start","index":N,
-/// "id":"call_N","name":...}`, `{"kind":"tool_call_args","index":N,"text":...}`,
-/// `{"kind":"tool_call_end","index":N}`. The `id` mints as `call_<index>`,
-/// matching [`ChatScanner::tool_calls`]'s own id convention (see
-/// `qwen_chat::ChatScanner::close_call`) so a streamed id and the final
-/// non-streaming `tool_calls` id always agree.
+/// "id":"call_<hex>_N","name":...}`, `{"kind":"tool_call_args","index":N,"text":...}`,
+/// `{"kind":"tool_call_end","index":N}`. The `id` is the one the
+/// scanner minted (`call_<hex>_<index>`, unique across a conversation's
+/// responses), so a streamed id and the final non-streaming `tool_calls` id
+/// always agree.
 pub fn emit_chat_events(events: &[ChatEvent], progress: &mut dyn FnMut(Progress), step: u32, total: u32) {
     for ev in events {
         match ev {
@@ -198,11 +198,11 @@ pub fn emit_chat_events(events: &[ChatEvent], progress: &mut dyn FnMut(Progress)
             ChatEvent::Reasoning(text) => {
                 progress(Progress::event(step, total, json!({ "kind": "reasoning", "text": text })));
             }
-            ChatEvent::ToolCallStart { index, name } => {
+            ChatEvent::ToolCallStart { index, id, name } => {
                 progress(Progress::event(
                     step,
                     total,
-                    json!({ "kind": "tool_call_start", "index": index, "id": format!("call_{index}"), "name": name }),
+                    json!({ "kind": "tool_call_start", "index": index, "id": id, "name": name }),
                 ));
             }
             ChatEvent::ToolCallArgs { index, fragment } => {

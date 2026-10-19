@@ -20,6 +20,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 ### Bug Fixes
 
 - Chat and preference training records are refused when a tool call id repeats within a conversation, or when a tool result answers no earlier call that is still unanswered (`data::chat::check_tool_pairing`, run by `messages_from_wire`, so `from_jsonl`, the preference reader and `qwen3 lora_train` refuse it with the line and the id, and by `ChatSample::encode_with`, so every in-memory training path does). A recorded agent run whose calls all shared one id used to give every call every result of the run
+- `brain serve` names tool calls `call_<hex>_<index>`, the hex drawn once per response, instead of `call_<index>`: two responses of a conversation used to both name their first call `call_0`, so a recorded run held many calls under one id. The id streamed on `tool_call_start` is the one the final `tool_calls` list reports (`ChatEvent::ToolCallStart` carries it)
 
 ### Features
 

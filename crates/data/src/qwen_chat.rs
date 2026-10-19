@@ -781,7 +781,7 @@ fn append_xml_parameters(arguments: &str, out: &mut String) {
 pub enum ChatEvent {
     Content(String),
     Reasoning(String),
-    ToolCallStart { index: u32, name: String },
+    ToolCallStart { index: u32, id: String, name: String },
     ToolCallArgs { index: u32, fragment: String },
     ToolCallEnd { index: u32 },
 }
@@ -843,6 +843,10 @@ pub struct ChatScanner {
     think_lead_nl: bool,
     tool_calls: Vec<ToolCallMsg>,
     next_index: u32,
+    /// `call_<hex>` drawn once per scanner (one per response); a call's id is
+    /// this prefix and its index, so ids are unique across a conversation's
+    /// responses and within one.
+    id_prefix: String,
     cur_name: String,
     cur_args: String,
 }
@@ -876,6 +880,7 @@ impl ChatScanner {
             think_lead_nl: false,
             tool_calls: Vec::new(),
             next_index: 0,
+            id_prefix: format!("call_{:016x}", crate::rng::random_seed()),
             cur_name: String::new(),
             cur_args: String::new(),
         }
@@ -1009,10 +1014,14 @@ impl ChatScanner {
         }
     }
 
+    fn call_id(&self) -> String {
+        format!("{}_{}", self.id_prefix, self.next_index)
+    }
+
     fn close_call(&mut self, out: &mut Vec<ChatEvent>) {
         out.push(ChatEvent::ToolCallEnd { index: self.next_index });
         self.tool_calls.push(ToolCallMsg {
-            id: format!("call_{}", self.next_index),
+            id: self.call_id(),
             name: std::mem::take(&mut self.cur_name),
             arguments: std::mem::take(&mut self.cur_args),
         });
@@ -1071,7 +1080,7 @@ impl ChatScanner {
                             self.pending.drain(..byte_off);
                             self.cur_name = name.clone();
                             self.cur_args.clear();
-                            out.push(ChatEvent::ToolCallStart { index: self.next_index, name });
+                            out.push(ChatEvent::ToolCallStart { index: self.next_index, id: self.call_id(), name });
                             self.state = match self.flavor {
                                 TemplateFlavor::Qwen3 => St::CallArgs { in_string: false, escape: false, depth: 0, started: false },
                                 TemplateFlavor::Qwen38 => St::XmlBetween,
@@ -1791,6 +1800,11 @@ mod tests {
                     ChatEvent::ToolCallArgs { index, fragment },
                     Some(ChatEvent::ToolCallArgs { index: prev_index, fragment: prev_fragment }),
                 ) if index == prev_index => prev_fragment.push_str(fragment),
+                // The id carries a per-scanner random prefix; the invariant is
+                // about transitions, so it is compared by index only.
+                (ChatEvent::ToolCallStart { index, name, .. }, _) => {
+                    out.push(ChatEvent::ToolCallStart { index: *index, id: format!("call_{index}"), name: name.clone() })
+                }
                 _ => out.push(e),
             }
         }
@@ -1917,7 +1931,7 @@ mod tests {
         // newline on each side of the reasoning.
         assert_eq!(scanner.reasoning(), "checking the weather");
         let [call] = scanner.tool_calls() else { panic!("expected exactly one tool call, got {:?}", scanner.tool_calls()) };
-        assert_eq!(call.id, "call_0");
+        assert!(call.id.starts_with("call_") && call.id.ends_with("_0"), "id {}", call.id);
         assert_eq!(call.name, "get_weather");
         assert_eq!(call.arguments, r#"{"location": "Paris", "days": 3}"#);
         // Streaming events stay coherent: Start names the call, the adjacent
@@ -1927,7 +1941,7 @@ mod tests {
             vec![
                 ChatEvent::Reasoning("checking the weather".to_string()),
                 ChatEvent::Content("\n\nLet me look that up.".to_string()),
-                ChatEvent::ToolCallStart { index: 0, name: "get_weather".to_string() },
+                ChatEvent::ToolCallStart { index: 0, id: "call_0".to_string(), name: "get_weather".to_string() },
                 ChatEvent::ToolCallArgs { index: 0, fragment: r#"{"location": "Paris", "days": 3}"#.to_string() },
                 ChatEvent::ToolCallEnd { index: 0 },
                 ChatEvent::Content("Done.".to_string()),
@@ -2035,6 +2049,31 @@ mod tests {
         assert_eq!(v["days"], 3);
     }
 
+    /// Tool call ids name a call across the whole conversation, not only
+    /// within the response that made it: results come back by id, and a
+    /// recorded conversation pairs them by id. Two responses (two scanners)
+    /// of one conversation, and the parallel calls of one response, never
+    /// share an id; a streamed `ToolCallStart` carries the id the final
+    /// `tool_calls` list reports.
+    #[test]
+    fn scanner_tool_call_ids_are_unique_across_responses() {
+        let text = "<tool_call>\n{\"name\": \"a\", \"arguments\": {}}\n</tool_call>\
+                    <tool_call>\n{\"name\": \"b\", \"arguments\": {}}\n</tool_call>";
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let (mut events, mut scanner) = (Vec::new(), ChatScanner::new(false));
+            scanner.push(text, &mut events);
+            scanner.finish(&mut events);
+            let streamed: Vec<&str> = events.iter().filter_map(|e| if let ChatEvent::ToolCallStart { id, .. } = e { Some(id.as_str()) } else { None }).collect();
+            let reported: Vec<&str> = scanner.tool_calls().iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(streamed, reported);
+            ids.extend(reported.into_iter().map(str::to_string));
+        }
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), 4, "ids repeated: {ids:?}");
+        assert!(ids.iter().all(|id| id.starts_with("call_")), "OpenAI-style prefix: {ids:?}");
+    }
+
     #[test]
     fn scanner_parallel_calls_get_sequential_indices() {
         let text = "<tool_call>\n{\"name\": \"a\", \"arguments\": {}}\n</tool_call>\
@@ -2045,8 +2084,9 @@ mod tests {
         scanner.finish(&mut events);
         assert_eq!(scanner.tool_calls()[0].name, "a");
         assert_eq!(scanner.tool_calls()[1].name, "b");
-        assert!(events.contains(&ChatEvent::ToolCallStart { index: 0, name: "a".into() }));
-        assert!(events.contains(&ChatEvent::ToolCallStart { index: 1, name: "b".into() }));
+        let [a, b] = scanner.tool_calls() else { panic!("two calls") };
+        assert!(events.contains(&ChatEvent::ToolCallStart { index: 0, id: a.id.clone(), name: "a".into() }));
+        assert!(events.contains(&ChatEvent::ToolCallStart { index: 1, id: b.id.clone(), name: "b".into() }));
         assert!(events.contains(&ChatEvent::ToolCallEnd { index: 0 }));
         assert!(events.contains(&ChatEvent::ToolCallEnd { index: 1 }));
     }

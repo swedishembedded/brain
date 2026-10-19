@@ -140,7 +140,10 @@ fn a_tool_call_in_a_reply_parses_into_a_typed_call() {
     assert_eq!(reply.finish_reason, FinishReason::ToolCalls);
     assert_eq!(reply.tool_calls.len(), 1, "{reply:?}");
     let call = &reply.tool_calls[0];
-    assert_eq!((call.id.as_str(), call.name.as_str()), ("call_0", "get_weather"));
+    assert!(call.id.starts_with("call_") && call.id.ends_with("_0"), "id {}", call.id);
+    assert_eq!(call.name, "get_weather");
+    let again = request.parse_reply("<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Rome\"}}\n</tool_call>").unwrap();
+    assert_ne!(again.tool_calls[0].id, call.id, "two replies never reuse a call id");
     let args: serde_json::Value = serde_json::from_str(&call.arguments).expect("arguments are JSON text");
     assert_eq!(args["city"], "Paris");
     assert_eq!(reply.text.trim(), "");
