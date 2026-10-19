@@ -954,6 +954,11 @@ const KV_SWAP_STAGING_BYTES: u64 = 64 << 20;
 /// slower than the library's, at 8 rows the library is still ahead (knowledge 326 has the figures and logs).
 const LIBRARY_MIN_ROWS: u32 = 8;
 
+/// The same for bf16 weights: the library's bf16 GEMM beats the inline-decode GEMV at every row count including one
+/// (swept on the 1.7B shapes with `qwen_bench serve R 5 1024 kv8 bf16w --library-min-rows N`; knowledge 326), where
+/// its fp32 form loses to the GEMV below [`LIBRARY_MIN_ROWS`].
+const LIBRARY_MIN_ROWS_BF16: u32 = 1;
+
 impl Engine {
     /// Build from an in-memory decoder weight map (tests / embedded weights).
     /// `num_blocks` physical blocks of `block_size` tokens, up to `max_batch`
@@ -1380,7 +1385,7 @@ impl Engine {
             tier,
             half_gemm,
             gemm,
-            library_min_rows: LIBRARY_MIN_ROWS,
+            library_min_rows: if tier == Dtype::BF16 { LIBRARY_MIN_ROWS_BF16 } else { LIBRARY_MIN_ROWS },
             i8_scratch,
             tuned_i8,
             tuned_splitk,

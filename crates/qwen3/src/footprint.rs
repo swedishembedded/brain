@@ -215,6 +215,25 @@ pub fn int8_by_default(cfg: &QwenConfig) -> bool {
     cfg.param_list().iter().map(|(_, n)| *n as u64).sum::<u64>() >= INT8_WEIGHTS_FROM_PARAMS
 }
 
+/// Room beyond a checkpoint's fp32 weights that serving them still needs on a device (a KV pool for a working
+/// context, row buffers, library workspace).
+pub const FP32_SERVE_HEADROOM_BYTES: u64 = 8 << 30;
+
+/// Bytes of `cfg`'s weights at fp32.
+pub fn fp32_weight_bytes(cfg: &QwenConfig) -> u64 {
+    cfg.param_list().iter().map(|(_, n)| *n as u64 * 4).sum()
+}
+
+/// Whether a caller that did not choose a weight tier serves `cfg` with int8 linears: a checkpoint of
+/// [`INT8_WEIGHTS_FROM_PARAMS`] parameters or more, and only when the device cannot hold its fp32 weights plus
+/// [`FP32_SERVE_HEADROOM_BYTES`] (`device_bytes`, the memory the weights may use on the largest card; `None`
+/// when unknown, which keeps the size rule). int8 is the least accurate tier - on the 8B its next-token
+/// distribution is KL 7.5e-2 from the exact one against 1.6e-4 for fp32 on tensor cores (knowledge 326) - so a
+/// card that fits the fp32 weights serves them. The serving resident and the SDK pipeline both decide by this.
+pub fn int8_weights_default(cfg: &QwenConfig, device_bytes: Option<u64>) -> bool {
+    int8_by_default(cfg) && device_bytes.is_none_or(|bytes| bytes < fp32_weight_bytes(cfg) + FP32_SERVE_HEADROOM_BYTES)
+}
+
 /// Declares [`estimate_vram_bytes`]'s figure to [`gpu_core::devices::place`]
 /// before `f` builds anything, so an over-budget checkpoint is refused BY
 /// NAME (which part, how many bytes, what each card has free - see
@@ -243,6 +262,18 @@ pub fn place_and_build<R>(cfg: &QwenConfig, shard: &Shard, dt: Dtype, b: u32, t:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A large checkpoint is int8 by default only where its fp32 weights and the headroom do not fit; a small one never is.
+    #[test]
+    fn the_default_weight_tier_follows_the_device_that_serves_it() {
+        let big = QwenConfig::qwen3_8b();
+        let need = fp32_weight_bytes(&big) + FP32_SERVE_HEADROOM_BYTES;
+        assert!(int8_weights_default(&big, None), "no device known: the size rule stands");
+        assert!(int8_weights_default(&big, Some(24 << 30)), "a 24 GB card cannot hold the 8B at fp32");
+        assert!(int8_weights_default(&big, Some(need - 1)));
+        assert!(!int8_weights_default(&big, Some(need)), "a card that holds the fp32 weights and the headroom serves fp32");
+        assert!(!int8_weights_default(&QwenConfig::qwen3_1_7b(), Some(1 << 30)) && !int8_weights_default(&QwenConfig::qwen3_1_7b(), None), "below 6B parameters the default is fp32");
+    }
 
     fn tiny_cfg(n_layers: u32, d_model: u32, d_ff: u32) -> QwenConfig {
         QwenConfig {

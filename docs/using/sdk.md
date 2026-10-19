@@ -106,7 +106,8 @@ let pipe = brain::TextGenerationPipeline::builder("/models/qwen3-4b.safetensors"
 
 Generation stops on the checkpoint's own end tokens, and chat requests render
 through its own template. A checkpoint of 6B parameters or more loads with
-int8 linears (its fp32 weights do not fit one 24 GB card);
+int8 linears when the largest card cannot hold its fp32 weights plus 8 GiB
+(a 7-8B one does not fit a 24 GB card), and with fp32 linears otherwise;
 `.precision("fp32")` or `.precision("int8")` chooses explicitly, and
 `pipe.precision()` reports what was built.
 

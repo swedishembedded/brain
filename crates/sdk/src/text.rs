@@ -63,6 +63,22 @@ use serde_json::json;
 
 use crate::{Device, Error, Result};
 
+/// The memory of the largest card this load may run on - the selected device, else the biggest one the machine
+/// has - for the weight-tier default (`qwen3::footprint::int8_weights_default`); `None` when no card reports one
+/// (a CPU-only machine, or a build without the `device` surface), which keeps the size rule.
+fn largest_device_bytes() -> Option<u64> {
+    #[cfg(feature = "device")]
+    {
+        let selected = gpu_core::devices::selected_device().map(|d| d.identity.vram_bytes);
+        let biggest = gpu_core::devices::gpus().iter().map(|d| d.identity.vram_bytes).max();
+        selected.or(biggest).filter(|&bytes| bytes > 0)
+    }
+    #[cfg(not(feature = "device"))]
+    {
+        None
+    }
+}
+
 /// One generated completion: the detokenized text plus the accounting a
 /// caller needs to size a request or explain why it stopped.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -677,7 +693,7 @@ impl TextGenerationPipelineBuilder {
         let tok_dir = tok_file.as_deref().and_then(|t| Path::new(t).parent()).map(Path::to_path_buf);
         let format = qwen3::chat::ChatFormat::for_checkpoint(tok_dir.as_deref(), &tok);
         let eos = data::generation::stop_ids(tok_dir.as_deref(), &tok, embedded.as_ref().and_then(|g| g.eos), format.end_of_turn()).map_err(|e| Error::Backend(format!("qwen3: {e}")))?;
-        let precision = precision.unwrap_or(if qwen3::footprint::int8_by_default(&cfg) { Precision::Int8 } else { Precision::Fp32 });
+        let precision = precision.unwrap_or(if qwen3::footprint::int8_weights_default(&cfg, largest_device_bytes()) { Precision::Int8 } else { Precision::Fp32 });
         let dt = precision.dtype();
 
         // Built for KV-cache DECODE, which is the only thing a generation

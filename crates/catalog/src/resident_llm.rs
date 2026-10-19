@@ -520,23 +520,10 @@ impl Default for QwenServeConfig {
     }
 }
 
-/// Room beyond the fp32 weights that serving them still needs on the device (KV pool for a working context, row
-/// buffers, library workspace): below `weights + this`, a large checkpoint is served int8 by default.
-const FP32_SERVE_HEADROOM_BYTES: u64 = 8 << 30;
-
-/// Whether `checkpoint`'s linears are served int8: the operator's explicit choice, else - for a checkpoint of
-/// `qwen3::footprint::INT8_WEIGHTS_FROM_PARAMS` parameters or more - only when the device cannot hold its fp32
-/// weights plus [`FP32_SERVE_HEADROOM_BYTES`]. int8 weights are the least accurate tier (on the 8B, KL 7.5e-2 to the
-/// exact tier against 1.6e-4 for fp32 on tensor cores; knowledge 326), so a card that fits the fp32 weights serves
-/// them; with no device budget known, the size rule stands.
+/// Whether `checkpoint`'s linears are served int8: the operator's explicit choice, else
+/// `qwen3::footprint::int8_weights_default` for the largest card's free memory (the one rule the SDK shares).
 fn weights_int8_for(cfg: &QwenServeConfig, checkpoint: &qwen3::config::QwenConfig) -> bool {
-    if cfg.weights_bf16 {
-        return false;
-    }
-    cfg.weights_int8.unwrap_or_else(|| {
-        qwen3::footprint::int8_by_default(checkpoint)
-            && cfg.auto_budget_bytes.is_none_or(|budget| budget < checkpoint.param_list().iter().map(|(_, n)| *n as u64 * 4).sum::<u64>() + FP32_SERVE_HEADROOM_BYTES)
-    })
+    !cfg.weights_bf16 && cfg.weights_int8.unwrap_or_else(|| qwen3::footprint::int8_weights_default(checkpoint, cfg.auto_budget_bytes))
 }
 
 /// Device bytes of the weights at the tier `cfg` asks for.
@@ -1419,7 +1406,7 @@ mod tests {
         assert!(!with(&small, None), "a tiny checkpoint stays fp32");
         assert!(!with(&big, Some(false)) && with(&small, Some(true)), "the flags win over the size");
         // A card that holds the fp32 weights and the headroom serves them fp32 (the more accurate tier); a smaller one stays int8.
-        let fp32_need = qwen3::config::QwenConfig::qwen3_8b().param_list().iter().map(|(_, n)| *n as u64 * 4).sum::<u64>() + FP32_SERVE_HEADROOM_BYTES;
+        let fp32_need = qwen3::footprint::fp32_weight_bytes(&qwen3::config::QwenConfig::qwen3_8b()) + qwen3::footprint::FP32_SERVE_HEADROOM_BYTES;
         let eight_b = shaped("8b.safetensors", &qwen3::config::QwenConfig::qwen3_8b());
         let on = |budget: Option<u64>| QwenResident::from_card_configured(&eight_b, &card, None, QwenServeConfig { auto_budget_bytes: budget, ..QwenServeConfig::default() }).weights_int8_requested;
         assert!(on(None), "no budget known: the size rule stands");
