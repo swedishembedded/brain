@@ -564,7 +564,7 @@ fn the_int8_cache_prefill_rates_at_the_serving_chunk() {
 /// the absolute error of the score, which grows with the operands' magnitude, and the unit-scale cases above hide that.
 /// A real model's scaled scores reach several tens, so this scales queries and keys until the scores have a standard
 /// deviation of `mag * mag` (up to 16) and holds both kernel versions to the portable fp32 kernel by relative L2 over
-/// the whole output. Measured: 3e-4 at unit scale growing to 1.3e-3 at 4x; the bar is 3e-3. (Through the 27B's logits the
+/// the whole output. Measured: 3e-4 at unit scale growing to 1.3e-3 at mag = 4; the bar is 3e-3. (Through the 27B's logits the
 /// same kernels differ from fp32 by 0.1 - that is the W8A8 model's own sensitivity, `qwen35_gguf_logit_check` reports it
 /// next to its floor - so the kernel is gated here, where the cause of an error can be told.)
 #[test]
