@@ -1751,6 +1751,38 @@ impl Qwen35GgufInstance {
         Ok(rows)
     }
 
+    /// [`Self::teacher_forced_logits`] for several sequences decoded TOGETHER: sequence `i` is prefilled into slot
+    /// `i`, then every forced token of every sequence goes through one batched decode step per position - the
+    /// path a server's decode batch takes, and the one whose projections run the batch-sized GEMV kernels (the
+    /// single-sequence method only ever runs one row). Row `j` of sequence `i` is the logits after `prompts[i]` and
+    /// `forced[i][..j]`; every `forced[i]` has the same length.
+    pub fn teacher_forced_logits_batch(&self, prompts: &[Vec<u32>], forced: &[Vec<u32>]) -> Result<Vec<Vec<Vec<f32>>>, String> {
+        let n = prompts.len();
+        if n == 0 || n != forced.len() || forced.iter().any(|f| f.len() != forced[0].len() || f.is_empty()) || prompts.iter().any(|p| p.is_empty()) {
+            return Err(format!("{MODEL}: a batched teacher-forced run needs equally long non-empty forced streams and prompts, one per sequence"));
+        }
+        if n > self.max_batch as usize {
+            return Err(format!("{MODEL}: batch of {n} exceeds this instance's max_batch {}", self.max_batch));
+        }
+        self.reset();
+        let mut rows: Vec<Vec<Vec<f32>>> = vec![Vec::with_capacity(forced[0].len()); n];
+        let mut positions: Vec<u32> = Vec::with_capacity(n);
+        for (slot, prompt) in prompts.iter().enumerate() {
+            let hidden = self.prefill_hidden(prompt, 0, prompt.len(), slot as u32, false, None)?;
+            rows[slot].push(self.head_logits_rows(&hidden, 1));
+            positions.push(prompt.len() as u32);
+        }
+        for step in 0..forced[0].len() - 1 {
+            let tokens: Vec<u32> = forced.iter().map(|f| f[step]).collect();
+            let logits = self.stack_step_batch(&tokens, &positions)?;
+            for (slot, l) in logits.into_iter().enumerate() {
+                rows[slot].push(l);
+                positions[slot] += 1;
+            }
+        }
+        Ok(rows)
+    }
+
     /// **Real SPECULATIVE generation** of one sequence, greedy, across every
     /// stage - [`Self::generate`]'s sibling, not its replacement, and
     /// byte-for-byte identical to it at `temp = 0` whatever `draft` proposes.

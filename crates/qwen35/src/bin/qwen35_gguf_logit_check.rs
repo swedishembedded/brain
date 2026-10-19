@@ -15,7 +15,8 @@
 //! numeric drift), and whether the logits are bit-identical.
 //!
 //! Usage: `qwen35_gguf_logit_check <Q8_0.gguf> <text file> [--prompts 4] [--prompt-tokens 4000] [--steps 24]
-//!        [--device gpu1] [--backend cuda] [--kv int8] [--dump DIR] [--dry-run] [--raw] [--assert-within-floor M]`
+//!        [--device gpu1] [--backend cuda] [--kv int8] [--dump DIR] [--dry-run] [--raw] [--assert-within-floor M]
+//!        [--batched N] [--batched-only]`
 //!
 //! The prompt is the served chat rendering (user turn, then the assistant turn with an empty think block, as the
 //! server renders `enable_thinking: false`), and the continuation is the greedy decode-tape trace of
@@ -23,6 +24,12 @@
 //! tool fails loudly if the trace is shorter than `--steps`. `--dry-run` tokenizes on the CPU and prints the
 //! rendered prompt's token structure without touching a device. `--raw` renders the plain text without the chat
 //! markup (the prompt whose first greedy token can be an end-of-sequence token).
+//!
+//! `--batched N` (N at most 8, at most `--prompts`) afterwards decodes the first N prompts' greedy streams TOGETHER, one
+//! batched decode step per token (the path a server's decode batch runs, whose projections use the batch-sized GEMV
+//! kernels), and reports each stream's logits against the same stream decoded alone - mean rel-L2 (also in floors),
+//! mean KL and the argmax flips with their margins. `--assert-within-floor M` bounds it like the settings above.
+//! `--batched-only` skips the settings comparison (the numerics floor is still measured).
 //!
 //! `--dump DIR` writes each prompt's continuation ids and the logits rows of every setting (`p<N>.ids`,
 //! `p<N>.s<K>.f32`, plus `p<N>.first.f32` and `p<N>.last.f32`, little-endian) so a build of an older commit can be compared offline.
@@ -147,7 +154,8 @@ fn main() {
     let _cfg = resident_config(&mg, cap).expect("resident_config");
     drop(mg);
     let kv = model::kv_tier::KvTier::parse(flag("--kv").as_deref().unwrap_or("int8")).unwrap_or_else(|e| panic!("{e}"));
-    let r = Qwen35GgufResident::new(path, devices, cap, tier).with_kv_tier(kv);
+    let batched = flag("--batched").and_then(|v| v.parse::<u32>().ok());
+    let r = Qwen35GgufResident::new(path, devices, cap, tier).with_kv_tier(kv).with_max_batch(batched.unwrap_or(1));
     let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
     let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
 
@@ -173,6 +181,9 @@ fn main() {
         assert_eq!(ids.len(), steps, "prompt {p}: the greedy trace has {} tokens, {steps} were asked for: refusing to compare over fewer", ids.len());
         println!("prompt {p}: {} tokens; greedy continuation {:?}", prompt.len(), ids);
         println!("  numerics floor (this model's own decode tape vs its chunk tape, same kernels): mean rel-L2 {floor:.2e}");
+        if a.iter().any(|x| x == "--batched-only") {
+            continue;
+        }
         let mut base: Option<Vec<Vec<f32>>> = None;
         for (si, s) in settings.iter().enumerate() {
             apply(&inst, s);
@@ -220,9 +231,48 @@ fn main() {
         }
     }
     let floor = floors.iter().sum::<f64>() / floors.len() as f64;
+    if let Some(nb) = flag("--batched").and_then(|v| v.parse::<usize>().ok()) {
+        assert!((1..=prompts).contains(&nb), "--batched {nb} must be between 1 and --prompts {prompts}");
+        apply(&inst, settings.last().expect("settings"));
+        let mut toks: Vec<Vec<u32>> = Vec::new();
+        let mut forced: Vec<Vec<u32>> = Vec::new();
+        for p in 0..nb {
+            let prompt = inst.tokenize(&render(window(&text, p, ptoks), raw));
+            let prompt: Vec<u32> = prompt.into_iter().take(cap as usize - steps - 8).collect();
+            forced.push(inst.tape_comparison_trace(&prompt, steps as u32).expect("greedy trace").ids);
+            toks.push(prompt);
+        }
+        let alone: Vec<Vec<Vec<f32>>> = (0..nb).map(|p| inst.teacher_forced_logits(&toks[p], &forced[p]).expect("forced logits")).collect();
+        let together = inst.teacher_forced_logits_batch(&toks, &forced).expect("batched forced logits");
+        let mut means = Vec::new();
+        for p in 0..nb {
+            assert!(together[p].iter().all(|r| r.iter().all(|x| x.is_finite())), "batched stream {p}: non-finite logits");
+            let rels: Vec<f64> = together[p].iter().zip(&alone[p]).map(|(x, y)| rel_l2(x, y)).collect();
+            let flips: Vec<String> = together[p]
+                .iter()
+                .zip(&alone[p])
+                .enumerate()
+                .filter(|(_, (x, y))| argmax(x) != argmax(y))
+                .map(|(i, (_, y))| format!("step {i} (alone margin {:.3})", margin(y)))
+                .collect();
+            let mean_kl = together[p].iter().zip(&alone[p]).map(|(x, y)| kl(y, x)).sum::<f64>() / rels.len() as f64;
+            let mean = rels.iter().sum::<f64>() / rels.len() as f64;
+            means.push(mean);
+            println!(
+                "batched x{nb} stream {p}: mean rel-L2 to the same stream alone {mean:.2e} worst {:.2e} mean KL {mean_kl:.2e}; argmax flips: {}",
+                rels.iter().cloned().fold(0.0, f64::max),
+                if flips.is_empty() { "none".to_string() } else { flips.join(", ") }
+            );
+        }
+        let mean = means.iter().sum::<f64>() / means.len() as f64;
+        println!("SUMMARY batched x{nb} decode vs alone: mean rel-L2 {mean:.3e} = {:.2}x the floor {floor:.3e}", mean / floor);
+        if let Some(m) = flag("--assert-within-floor").and_then(|v| v.parse::<f64>().ok()) {
+            assert!(mean <= m * floor, "batched x{nb} decode: mean rel-L2 {mean:.3e} exceeds {m}x the numerics floor {floor:.3e}");
+        }
+    }
     println!("SUMMARY numerics floor {floor:.3e} (mean over {} prompts)", floors.len());
     let bound: Option<f64> = flag("--assert-within-floor").and_then(|v| v.parse().ok());
-    for (si, s) in settings.iter().enumerate().skip(1) {
+    for (si, s) in settings.iter().enumerate().skip(1).filter(|_| !a.iter().any(|x| x == "--batched-only")) {
         let mean = means[si].iter().sum::<f64>() / means[si].len().max(1) as f64;
         println!("SUMMARY {:<42} mean rel-L2 to the reference {mean:.3e} = {:.2}x the floor", s.name, mean / floor);
         if let Some(m) = bound {

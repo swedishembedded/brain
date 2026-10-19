@@ -362,7 +362,7 @@ __device__ __forceinline__ void brain_gemv_select(BrainXTile xs, const unsigned 
 // Why. From five rows of x the dp4a block no longer streams the weights at
 // the memory system's rate: each weight byte meets every row of x on the
 // arithmetic pipes, and the rows of x are read back from shared memory at
-// as many bytes as the weights themselves (knowledge 332). A tensor core does
+// as many bytes as the weights themselves (knowledge 335). A tensor core does
 // a whole 32-element group of 16 weight rows against eight rows of x in one
 // instruction, with the activation held in registers.
 //
