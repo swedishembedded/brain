@@ -4140,11 +4140,11 @@ impl Qwen35 {
         g.write(&offsets, &(0..n).map(|i| pos_start + i).collect::<Vec<u32>>());
         g.write(&seq_lens, &(0..n).map(|i| pos_start + i + 1).collect::<Vec<u32>>());
 
-        let mut mixer = |l: usize, ty: LayerType, xn1: &DeviceBuffer| -> DeviceBuffer {
+        let mut mixer = |l: usize, ty: LayerType, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool| -> DeviceBuffer {
             match ty {
                 LayerType::Linear => {
                     let cont = model::gdn_mixer::GdnStream { state: &caches.gdn_state[l], hist: &caches.gdn_hist[l] };
-                    self.layer_gdn_fwd(l, xn1, n, GdnCall::Chunk(cont)).0
+                    self.layer_gdn_fwd_pre(l, xn1, pre, epilogue, n, GdnCall::Chunk(cont)).0
                 }
                 LayerType::Full => {
                     let ctx = GqaChunkCtx {
@@ -4158,7 +4158,7 @@ impl Qwen35 {
                         cos: &cos,
                         sin: &sin,
                     };
-                    self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), xn1, n, Some(GqaCached::Chunk(&ctx))).0
+                    self.layer_gqa_fwd_pre(&format!("blocks.{l}.self_attn"), xn1, pre, epilogue, n, Some(GqaCached::Chunk(&ctx))).0
                 }
             }
         };
@@ -4255,10 +4255,10 @@ impl Qwen35 {
             row0 += rows;
         }
         let round = MultiRound { caches, segs: round };
-        let mut mixer = |l: usize, ty: LayerType, xn1: &DeviceBuffer| -> DeviceBuffer {
+        let mut mixer = |l: usize, ty: LayerType, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool| -> DeviceBuffer {
             match ty {
-                LayerType::Linear => self.layer_gdn_fwd(l, xn1, n, GdnCall::Segments(&round)).0,
-                LayerType::Full => self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), xn1, n, Some(GqaCached::Segments(&round, &caches.gqa_kv[l]))).0,
+                LayerType::Linear => self.layer_gdn_fwd_pre(l, xn1, pre, epilogue, n, GdnCall::Segments(&round)).0,
+                LayerType::Full => self.layer_gqa_fwd_pre(&format!("blocks.{l}.self_attn"), xn1, pre, epilogue, n, Some(GqaCached::Segments(&round, &caches.gqa_kv[l]))).0,
             }
         };
         self.prefill_layer_stack(res, n, &format!("{} sequences", segs.len()), &mut mixer)
@@ -4270,7 +4270,7 @@ impl Qwen35 {
     /// final norm. The residual, MLP, scratch-arena and drain discipline lives here once
     /// for [`Self::run_prefill_chunk_stage`] (one sequence's rows) and
     /// [`Self::run_prefill_multi_stage`] (several sequences' rows in one forward).
-    fn prefill_layer_stack(&self, mut res: DeviceBuffer, n: u32, label: &str, mixer: &mut dyn FnMut(usize, LayerType, &DeviceBuffer) -> DeviceBuffer) -> DeviceBuffer {
+    fn prefill_layer_stack(&self, mut res: DeviceBuffer, n: u32, label: &str, mixer: &mut dyn FnMut(usize, LayerType, &DeviceBuffer, Option<Act>, bool) -> DeviceBuffer) -> DeviceBuffer {
         let g = &self.gpu;
         let d = self.cfg.d_model;
         let pooled = n >= self.chunk_arena_min_rows.get();
@@ -4297,6 +4297,15 @@ impl Qwen35 {
         // one more layer's allocations after the check cannot cross it.
         let reclaim_budget = g.reclaim_ceiling_bytes() / 2;
         let types = self.cfg.layer_types();
+        // The residual add, the norm and the activation quantisation between two linears as ONE launch
+        // each, bit-identical to the unfused chain (see `run_decode_step`, which shares these gates).
+        let fused = self.fused_front_ok(n);
+        let epilogue = self.fused_epilogue_ok(n);
+        // The next layer's `(xn1, activation)`, when the previous layer produced it.
+        let mut front = (fused && self.shard.start < self.shard.end).then(|| {
+            let (_, xn, act) = self.rms_quant_front(&res, None, self.w(&format!("blocks.{}.ln1.weight", self.shard.start)), n);
+            (xn, act)
+        });
         #[allow(clippy::needless_range_loop)]
         for l in self.shard.start..self.shard.end {
             let ty = types[l];
@@ -4324,21 +4333,40 @@ impl Qwen35 {
             // the row count.
             let _scope = pooled.then(|| g.scratch_scope());
 
-            let xn1 = g.storage((n * d) as u64);
-            g.submit(&[], &[rms_step(g, &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
+            let (xn1, pre1) = match front.take() {
+                Some((xn, act)) => (xn, Some(act)),
+                None => {
+                    let xn1 = g.storage((n * d) as u64);
+                    g.submit(&[], &[rms_step(g, &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
+                    (xn1, None)
+                }
+            };
 
-            let mixer_out = mixer(l, ty, &xn1);
+            let mixer_out = mixer(l, ty, &xn1, pre1, epilogue);
 
-            let xmid = g.storage((n * d) as u64);
-            g.submit(&[], &[g.step(ADD2, &[&res, &mixer_out, &xmid], &[n * d], n * d)]);
+            let ln2 = format!("blocks.{l}.ln2.weight");
+            let (xmid, xn2, pre2) = if fused {
+                let (sum, xn, act) = self.rms_quant_front(&res, Some(&mixer_out), self.w(&ln2), n);
+                (sum.expect("an add front hands back its sum"), xn, Some(act))
+            } else {
+                let xmid = g.storage((n * d) as u64);
+                g.submit(&[], &[g.step(ADD2, &[&res, &mixer_out, &xmid], &[n * d], n * d)]);
+                let xn2 = g.storage((n * d) as u64);
+                g.submit(&[], &[rms_step(g, &xmid, self.w(&ln2), &xn2, d, n)]);
+                (xmid, xn2, None)
+            };
 
-            let xn2 = g.storage((n * d) as u64);
-            g.submit(&[], &[rms_step(g, &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, n)]);
-
-            let (mlp_out, _) = self.mlp_fwd(&format!("blocks.{l}.mlp"), &xn2, n);
-            let res_next = g.storage((n * d) as u64);
-            g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res_next], &[n * d], n * d)]);
-            res = res_next;
+            let (mlp_out, _) = self.mlp_fwd_pre(&format!("blocks.{l}.mlp"), &xn2, pre2, epilogue, n);
+            if fused && l + 1 < self.shard.end {
+                // The next layer's first norm rides on this residual add.
+                let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), n);
+                res = sum.expect("an add front hands back its sum");
+                front = Some((xn, act));
+            } else {
+                let res_next = g.storage((n * d) as u64);
+                g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res_next], &[n * d], n * d)]);
+                res = res_next;
+            }
 
             // The liveness boundary itself: recording (the `g.submit` calls
             // above) is not dispatching - a bind group names a buffer, it
