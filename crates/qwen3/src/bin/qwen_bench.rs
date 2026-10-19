@@ -29,7 +29,7 @@
 //!   qwen_bench                      # prefill T=512 + decode, fp32, at 0.6B
 //!   qwen_bench prefill [T] [reps]
 //!   qwen_bench decode  [ctx] [reps]
-//!   qwen_bench serve   [rows] [reps] [ctx] [i8w|bf16w] [kv8] [--gemm auto|fp32]
+//!   qwen_bench serve   [rows] [reps] [ctx] [i8w|bf16w] [kv8] [--gemm auto|fp32] [--budget-gb N]
 //!                                    # the PAGED serving tape (a different
 //!                                    # kernel set from the batched forward);
 //!                                    # `i8w` = int8 weights, `kv8` = int8 KV
@@ -424,7 +424,8 @@ fn main() {
             let num_blocks = rows * mbs;
             let pool_bytes = qwen3::serve::kv_pool_bytes(&cfg, bs, num_blocks, kv8);
             let pool_gb = pool_bytes as f64 / 1e9;
-            let weight_gb = total_params(&cfg) as f64 * if i8w { 1.0 } else { 4.0 } / 1e9;
+            let bf16w = a.iter().any(|x| x == "bf16w");
+            let weight_gb = total_params(&cfg) as f64 * if i8w { 1.0 } else if bf16w { 2.0 } else { 4.0 } / 1e9;
             eprintln!(
                 "paged pool: {num_blocks} blocks x {:.1} MB = {:.1} GB (+{:.1} GB weights)",
                 pool_bytes as f64 / num_blocks as f64 / 1e6,
@@ -437,7 +438,8 @@ fn main() {
             // request could pass a pool-only check and still not fit once
             // its (much larger) weights are added. 22.0 GB leaves ~2 GB
             // headroom on a 24 GB card, matching `--reserve-gb`'s own default.
-            if pool_gb + weight_gb > 22.0 {
+            let budget_gb: f64 = flag(&a, "--budget-gb").and_then(|s| s.parse().ok()).unwrap_or(22.0);
+            if pool_gb + weight_gb > budget_gb {
                 eprintln!(
                     "refusing: that pool ({pool_gb:.1} GB) + weights ({weight_gb:.1} GB) will not \
                      fit. Lower `rows` or the 4th arg (context, default 256): qwen_bench serve \

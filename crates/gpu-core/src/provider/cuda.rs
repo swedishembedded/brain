@@ -1020,6 +1020,87 @@ pub fn flash_causal_gqa_fwd_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceB
     gpu.step_native_sliced(id, bufs, &[(0, 0); 5], params, blocks)
 }
 
+const FLASH_BWD_SCALE_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// `flash_attn_causal_gqa_bwd_dq`'s order (uniform, q, k, v, o, dO, lse, dq, dsum) plus the call's scale.
+const FLASH_BWD_DQ_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+];
+
+/// `flash_attn_causal_gqa_bwd_dkv`'s order (uniform, q, k, v, dO, lse, dsum, dk, dv) plus the call's scale.
+const FLASH_BWD_DKV_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+];
+
+/// The buffers of one flash attention backward: what the portable `flash_attn_causal_gqa_bwd_{dq,dkv}` pair reads
+/// and writes.
+pub struct FlashBwdBufs<'a> {
+    /// Queries `[B*T, n_heads*hd]`.
+    pub q: &'a backend_api::DeviceBuffer,
+    /// Keys `[B*T, n_kv_heads*hd]`.
+    pub k: &'a backend_api::DeviceBuffer,
+    /// Values, as `k`.
+    pub v: &'a backend_api::DeviceBuffer,
+    /// The forward's context output.
+    pub o: &'a backend_api::DeviceBuffer,
+    /// The context gradient.
+    pub d_o: &'a backend_api::DeviceBuffer,
+    /// The forward's `[B, n_heads, T]` log-sum-exp.
+    pub lse: &'a backend_api::DeviceBuffer,
+    /// `[B, n_heads, T]` scratch the dQ kernel fills with `D = dO . O` for the dK/dV kernel.
+    pub dsum: &'a backend_api::DeviceBuffer,
+    /// Output: the query gradient.
+    pub d_q: &'a backend_api::DeviceBuffer,
+    /// Output: the key gradient.
+    pub d_k: &'a backend_api::DeviceBuffer,
+    /// Output: the value gradient.
+    pub d_v: &'a backend_api::DeviceBuffer,
+}
+
+/// The native tensor-core backward of causal grouped-query flash attention over dense `[B*T]` buffers at
+/// `head_dim` 128, as three steps (the call's gradient scale, dQ, dK and dV), or `None` when the caller should
+/// dispatch the portable pair. `params` is the portable kernels' uniform
+/// (`[b, n_heads, n_kv_heads, t, head_dim, group]`); every output is overwritten. `None` means: the head width is
+/// not 128, `cuda` is named in `BRAIN_NO_PROVIDER`, the device's compute capability is below a kernel's floor, or
+/// the backend declined one.
+pub fn flash_causal_gqa_bwd_steps(gpu: &crate::Gpu, bufs: &FlashBwdBufs<'_>, params: &[u32]) -> Option<Vec<crate::Step>> {
+    let &[b, n_heads, n_kv, t, head_dim, _] = params else { return None };
+    if head_dim != 128 || !tensor_core_kernels_enabled(gpu) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let get = |name: &str| kernels_cuda::get(name).filter(|k| k.min_cc <= cc);
+    let (scale_k, dq_k, dkv_k) = (get("flash_bwd_scale")?, get("flash_bwd_dq")?, get("flash_bwd_dkv")?);
+    let (scale_id, dq_id, dkv_id) = (gpu.native_kernel(scale_k, FLASH_BWD_SCALE_BINDINGS)?, gpu.native_kernel(dq_k, FLASH_BWD_DQ_BINDINGS)?, gpu.native_kernel(dkv_k, FLASH_BWD_DKV_BINDINGS)?);
+    let tiles = u64::from(t.div_ceil(64));
+    let q_blocks = u32::try_from(u64::from(b) * u64::from(n_heads) * tiles).ok()?;
+    let kv_blocks = u32::try_from(u64::from(b) * u64::from(n_kv) * tiles).ok()?;
+    let scale = gpu.storage(2);
+    Some(vec![
+        gpu.step_native_sliced(scale_id, &[bufs.d_o, &scale], &[(0, 0); 2], params, 1)?,
+        gpu.step_native_sliced(dq_id, &[bufs.q, bufs.k, bufs.v, bufs.o, bufs.d_o, bufs.lse, bufs.d_q, bufs.dsum, &scale], &[(0, 0); 9], params, q_blocks)?,
+        gpu.step_native_sliced(dkv_id, &[bufs.q, bufs.k, bufs.v, bufs.d_o, bufs.lse, bufs.dsum, bufs.d_k, bufs.d_v, &scale], &[(0, 0); 9], params, kv_blocks)?,
+    ])
+}
+
 impl OperatorProvider for CudaProvider {
     fn name(&self) -> &'static str {
         "cuda"

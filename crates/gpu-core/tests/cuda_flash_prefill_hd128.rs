@@ -34,7 +34,7 @@ impl Rng {
     fn gauss(&mut self) -> f32 {
         let u = |r: &mut Rng| ((r.next() >> 40) as f32 + 0.5) / (1u64 << 24) as f32;
         let (a, b) = (u(self), u(self));
-        (-2.0 * a.ln()).sqrt() * (6.2831853 * b).cos()
+        (-2.0 * a.ln()).sqrt() * (std::f32::consts::TAU * b).cos()
     }
 }
 

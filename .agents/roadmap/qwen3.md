@@ -182,8 +182,11 @@ queried capability (`GemmPrecision::Auto`, the default of `Engine`, `FitOpts` an
   values when it ships bf16): half the bytes in memory and per decode step.
 - The paged flash prefill runs on fp16 `mma` at `head_dim` 128 as well as 256, for
   fp32, bf16 and int8 KV (`flash_prefill_f16_hd128{,_bf16,_kv8}`).
-- Accuracy on the real 8B weights, throughput before/after and the open items
-  (training attention is still the fp32 WGSL flash kernel pair): knowledge #323.
+- The training attention runs on fp16 `mma` too: the dense forward (`flash_attn_fwd_f16_hd{128,256}`, also writing
+  the log-sum-exp) and, at `head_dim` 128, the backward (`flash_bwd_{scale,dq,dkv}`; dO is multiplied by one
+  power of two per call so a mean-reduced loss's gradients keep fp16's precision). `FlashGqaIds::native` is the
+  switch; `Fp32Reference` pins the portable fp32 trio.
+- Accuracy on the real 8B weights, throughput before/after and the open items: knowledge #323.
 
 ## Not yet done
 

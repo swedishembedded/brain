@@ -1180,11 +1180,29 @@ pub fn flash_gqa_causal_bwd(
     d_q: &DeviceBuffer,
     d_k: &DeviceBuffer,
     d_v: &DeviceBuffer,
-) -> [Step; 2] {
-    [
+) -> Vec<Step> {
+    if ids.native {
+        if let Some(steps) = native_flash_gqa_bwd(g, [q, k, v, ctx, d_ctx, lse, dsum, d_q, d_k, d_v], &a.params()) {
+            return steps;
+        }
+    }
+    vec![
         g.dispatch(ids.bwd_dq, &[q, k, v, ctx, d_ctx, lse, d_q, dsum], &a.params(), gpu_core::Dispatch::Workgroups(flash_gqa_workgroups(a, a.n_heads))),
         g.dispatch(ids.bwd_dkv, &[q, k, v, d_ctx, lse, dsum, d_k, d_v], &a.params(), gpu_core::Dispatch::Workgroups(flash_gqa_workgroups(a, a.n_kv_heads))),
     ]
+}
+
+/// [`gpu_core::provider::cuda::flash_causal_gqa_bwd_steps`] where a native backend exists at all; `None` (the
+/// portable pair) on wasm. `bufs` is `[q, k, v, ctx, d_ctx, lse, dsum, d_q, d_k, d_v]`.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_flash_gqa_bwd(g: &Gpu, bufs: [&DeviceBuffer; 10], params: &[u32]) -> Option<Vec<Step>> {
+    let [q, k, v, o, d_o, lse, dsum, d_q, d_k, d_v] = bufs;
+    gpu_core::provider::cuda::flash_causal_gqa_bwd_steps(g, &gpu_core::provider::cuda::FlashBwdBufs { q, k, v, o, d_o, lse, dsum, d_q, d_k, d_v }, params)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_flash_gqa_bwd(_g: &Gpu, _bufs: [&DeviceBuffer; 10], _params: &[u32]) -> Option<Vec<Step>> {
+    None
 }
 
 /// The single-token incremental-decode twin of [`gqa_attn_sublayer_fwd`]:
