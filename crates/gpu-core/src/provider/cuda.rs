@@ -970,6 +970,14 @@ pub fn set_flash_prefill_v2(on: bool) {
     FLASH_PREFILL_V2.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+static FLASH_PREFILL_PORTABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Withhold the native fp16 flash prefill kernels (every head width and cache tier) so the portable fp32 kernel runs:
+/// the reference an accuracy check scores them against. Process-wide; takes effect for steps built after.
+pub fn set_flash_prefill_portable(on: bool) {
+    FLASH_PREFILL_PORTABLE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn flash_prefill_v2() -> bool {
     FLASH_PREFILL_V2.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -980,7 +988,7 @@ fn flash_prefill_v2() -> bool {
 /// arithmetic the token-by-token tape is held to.
 fn flash_prefill_offered(gpu: &crate::Gpu, head_dim: u32, params: &[u32]) -> bool {
     let rows = params.first().copied().unwrap_or(0);
-    matches!(head_dim, 128 | 256) && rows > select::DECODE_REGIME_MAX_ROWS && tensor_core_kernels_enabled(gpu)
+    matches!(head_dim, 128 | 256) && rows > select::DECODE_REGIME_MAX_ROWS && tensor_core_kernels_enabled(gpu) && !FLASH_PREFILL_PORTABLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// [`paged_flash_prefill_step`] over a bf16 KV cache: `bufs` and `params` are

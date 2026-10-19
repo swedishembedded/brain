@@ -7,12 +7,12 @@
 
 //! Which of the prefill-path changes moves the real 27B's logits, and by how much, in ONE process on ONE load.
 //!
-//! The released Q8_0 GGUF scores the same greedy token stream under cumulative settings of the serving
-//! prefill: the original flash kernel with the per-layer drain and the unfused chain (`orig`), then version 2
-//! of the flash kernel, then the fused front end and quantisation epilogues, then no drain. For each
-//! setting it prints, against `orig`: the mean and worst relative L2 distance of the logits, how many
-//! positions pick another argmax and the `orig` margin over its runner-up at each (a flip at a large margin is a
-//! defect, a flip at a near-tie is numeric drift), and whether the logits are bit-identical.
+//! The released Q8_0 GGUF scores the same greedy token stream (taken under the first setting) under settings of the
+//! serving prefill: the portable fp32 attention kernel (the reference), the original fp16 flash kernel, version 2 of
+//! it, then the fused front end and quantisation epilogues, then no per-layer drain. For each setting it prints,
+//! against the first: the mean and worst relative L2 distance of the logits, the positions that pick another argmax
+//! with the reference margin over its runner-up (a flip at a large margin is a defect, a flip at a near-tie is
+//! numeric drift), and whether the logits are bit-identical.
 //!
 //! Usage: `qwen35_gguf_logit_check <Q8_0.gguf> <text file> [--prompts 4] [--prompt-tokens 4000] [--steps 24]
 //!        [--device gpu1] [--backend cuda] [--kv int8] [--dump DIR] [--dry-run] [--raw]`
@@ -24,8 +24,8 @@
 //! rendered prompt's token structure without touching a device. `--raw` renders the plain text without the chat
 //! markup (the prompt whose first greedy token can be an end-of-sequence token).
 //!
-//! `--dump DIR` writes each prompt's continuation ids and the logits rows of the first and last setting (`p<N>.ids`,
-//! `p<N>.first.f32`, `p<N>.last.f32`, little-endian) so a build of an older commit can be compared offline.
+//! `--dump DIR` writes each prompt's continuation ids and the logits rows of every setting (`p<N>.ids`,
+//! `p<N>.s<K>.f32`, plus `p<N>.first.f32` and `p<N>.last.f32`, little-endian) so a build of an older commit can be compared offline.
 
 use checkpoint::gguf::MmapGguf;
 use data::qwen_tokenizer::QwenBpe;
@@ -97,12 +97,14 @@ fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
 
 struct Setting {
     name: &'static str,
+    portable: bool,
     v2: bool,
     fusion: bool,
     drain: bool,
 }
 
 fn apply(inst: &Qwen35GgufInstance, s: &Setting) {
+    gpu_core::provider::cuda::set_flash_prefill_portable(s.portable);
     gpu_core::provider::cuda::set_flash_prefill_v2(s.v2);
     inst.set_decode_fusion(s.fusion);
     inst.set_chunk_arena_min_rows(1);
@@ -141,11 +143,13 @@ fn main() {
 
     let text = std::fs::read_to_string(&text_path).expect("read the text file");
     let settings = [
-        Setting { name: "orig (flash v1, drain, unfused)", v2: false, fusion: false, drain: true },
-        Setting { name: "+ flash v2", v2: true, fusion: false, drain: true },
-        Setting { name: "+ fused front end and epilogues", v2: true, fusion: true, drain: true },
-        Setting { name: "+ no per-layer drain (new default)", v2: true, fusion: true, drain: false },
+        Setting { name: "portable fp32 attention (reference)", portable: true, v2: false, fusion: false, drain: true },
+        Setting { name: "flash v1 (the original kernel)", portable: false, v2: false, fusion: false, drain: true },
+        Setting { name: "flash v2", portable: false, v2: true, fusion: false, drain: true },
+        Setting { name: "flash v1 + fused front end", portable: false, v2: false, fusion: true, drain: true },
+        Setting { name: "flash v1 + fused + no drain (the default)", portable: false, v2: false, fusion: true, drain: false },
     ];
+
     for p in 0..prompts {
         let prompt = inst.tokenize(&render(window(&text, p, ptoks), raw));
         let prompt: Vec<u32> = prompt.into_iter().take(cap as usize - steps - 8).collect();
@@ -154,7 +158,7 @@ fn main() {
         assert_eq!(ids.len(), steps, "prompt {p}: the greedy trace has {} tokens, {steps} were asked for: refusing to compare over fewer", ids.len());
         println!("prompt {p}: {} tokens; orig greedy continuation {:?}", prompt.len(), ids);
         let mut base: Option<Vec<Vec<f32>>> = None;
-        for s in &settings {
+        for (si, s) in settings.iter().enumerate() {
             apply(&inst, s);
             let rows = inst.teacher_forced_logits(&prompt, &ids).expect("forced logits");
             assert_eq!(rows.len(), steps, "{}: {} logit rows for {steps} forced tokens", s.name, rows.len());
@@ -181,13 +185,15 @@ fn main() {
                 }
             }
             if let Some(dir) = flag("--dump") {
-                let which = if base.is_none() { "first" } else if std::ptr::eq(s, settings.last().expect("settings")) { "last" } else { "" };
-                if !which.is_empty() {
-                    std::fs::create_dir_all(&dir).expect("dump dir");
-                    let bytes: Vec<u8> = rows.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
-                    std::fs::write(format!("{dir}/p{p}.{which}.f32"), bytes).expect("write logits");
-                    std::fs::write(format!("{dir}/p{p}.ids"), ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(" ")).expect("write ids");
+                std::fs::create_dir_all(&dir).expect("dump dir");
+                let bytes: Vec<u8> = rows.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
+                let last = si + 1 == settings.len();
+                for name in [format!("s{si}"), if si == 0 { "first".into() } else { String::new() }, if last { "last".into() } else { String::new() }] {
+                    if !name.is_empty() {
+                        std::fs::write(format!("{dir}/p{p}.{name}.f32"), &bytes).expect("write logits");
+                    }
                 }
+                std::fs::write(format!("{dir}/p{p}.ids"), ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(" ")).expect("write ids");
             }
             if base.is_none() {
                 base = Some(rows);
