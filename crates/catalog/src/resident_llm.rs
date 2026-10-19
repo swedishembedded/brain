@@ -559,27 +559,30 @@ fn serve_weight_bytes(cfg: &QwenServeConfig, checkpoint: &qwen3::config::QwenCon
 const AUTO_CTX_TIERS: &[u32] = &[2048, 4096, 8192, 16384, 24576, 32768, 40960, 49152, 65536, 98304, 131072, 196608, 262144];
 
 /// Upper bound, in tokens, of the default pool's room for `max_batch`
-/// half-context histories (see [`QwenResident::pool_sizing`]): enough for 16
-/// conversations of 16k tokens, about 19 GB of int8 KV on the 8B. A longer
-/// context's own two-context pool is already larger than this.
-const DEFAULT_POOL_FLEET_TOKENS: u32 = 262_144;
+/// half-context histories (see [`QwenResident::fleet_pool_tokens`]): 1M
+/// tokens, about 74 GB of int8 KV on the 8B, far beyond any card's budget
+/// beside the weights; it only keeps the arithmetic in range.
+const MAX_DEFAULT_POOL_TOKENS: u32 = 1 << 20;
 
 /// The default KV pool of a live server (see [`QwenResident::resolve_kv_tokens`]):
-/// room for `max_batch` half-context histories, capped at
-/// [`DEFAULT_POOL_FLEET_TOKENS`], when the whole footprint fits `budget`
-/// beside `weight_bytes`; `None` keeps the two-context pool.
+/// room for `max_batch` half-context histories, or the largest half of that
+/// (repeatedly) whose whole footprint fits `budget` beside `weight_bytes`;
+/// `None` keeps the two-context pool when not even the smallest does.
 fn fleet_pool_tokens(checkpoint: &qwen3::config::QwenConfig, weight_bytes: u64, budget: u64, ctx: u32, cfg: &QwenServeConfig) -> Option<u32> {
     let max_batch = cfg.max_batch.max(1);
-    let fleet = (u64::from(ctx) * u64::from(max_batch) / 2).min(u64::from(DEFAULT_POOL_FLEET_TOKENS)) as u32;
-    if fleet <= ctx.saturating_mul(2) {
-        return None;
+    let mut fleet = (u64::from(ctx) * u64::from(max_batch) / 2).min(u64::from(MAX_DEFAULT_POOL_TOKENS)) as u32;
+    while fleet > ctx.saturating_mul(2) {
+        let profile = PoolProfile::at_ctx(checkpoint, ctx, max_batch, cfg.max_prefill_cap.clamp(1, 512), Some(fleet), cfg.kv_int8, cfg.kv_offload_gb > 0.0, qwen3::serve::FusedAttention::default());
+        // The pool grows only the KV buffers. The scratch binding, which the
+        // unfused worst case of `PoolProfile` overstates at ctx 32768, does not
+        // change with it, so only the KV binding is checked beside the total.
+        let kv_binding = qwen3::serve::kv_binding_bytes(checkpoint, 16, fleet.div_ceil(16) + max_batch, cfg.kv_int8);
+        if profile.total(weight_bytes) <= budget && kv_binding <= WGPU_MAX_REPORTABLE_BINDING_BYTES {
+            return Some(fleet);
+        }
+        fleet /= 2;
     }
-    let profile = PoolProfile::at_ctx(checkpoint, ctx, max_batch, cfg.max_prefill_cap.clamp(1, 512), Some(fleet), cfg.kv_int8, cfg.kv_offload_gb > 0.0, qwen3::serve::FusedAttention::default());
-    // The pool grows only the KV buffers. The scratch binding, which the unfused
-    // worst case of `PoolProfile` overstates at ctx 32768, does not change with
-    // it, so only the KV binding is checked beside the total.
-    let kv_binding = qwen3::serve::kv_binding_bytes(checkpoint, 16, fleet.div_ceil(16) + max_batch, cfg.kv_int8);
-    (profile.total(weight_bytes) <= budget && kv_binding <= WGPU_MAX_REPORTABLE_BINDING_BYTES).then_some(fleet)
+    None
 }
 
 /// What one `(ctx, batch, prefill)` sizing costs on the device: the totals a
@@ -817,7 +820,7 @@ impl QwenResident {
     /// The KV pool size in tokens: `--qwen-kv-tokens` verbatim when named;
     /// otherwise, on a live server (a device budget is known), room for
     /// `max_batch` half-context histories - capped at
-    /// [`DEFAULT_POOL_FLEET_TOKENS`] - when that pool fits the budget beside
+    /// [`MAX_DEFAULT_POOL_TOKENS`] - when that pool fits the budget beside
     /// the weights, so a fleet of agents resending their histories finds each
     /// one cached at its next turn without a flag. `None` keeps the
     /// two-context pool: no budget known, nothing to add beyond two contexts,
@@ -1613,7 +1616,9 @@ mod tests {
         let cfg = qwen3::config::QwenConfig::qwen3_8b();
         let serve = QwenServeConfig { max_batch: 32, ..QwenServeConfig::default() };
         let weights = weights_fp32_bytes(&cfg);
-        assert_eq!(fleet_pool_tokens(&cfg, weights, 94 << 30, 32768, &serve), Some(DEFAULT_POOL_FLEET_TOKENS));
+        assert_eq!(fleet_pool_tokens(&cfg, weights, 94 << 30, 32768, &serve), Some(32768 * 32 / 2), "32 slots x half a context");
+        let tighter = fleet_pool_tokens(&cfg, weights, 60 << 30, 32768, &serve).expect("a smaller fleet fits");
+        assert!(tighter < 32768 * 32 / 2 && tighter > 65536, "a card with less room gets a halved fleet, got {tighter}");
         assert_eq!(fleet_pool_tokens(&cfg, weights, 40 << 30, 32768, &serve), None, "no room beside the weights");
     }
 

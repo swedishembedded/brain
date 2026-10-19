@@ -231,9 +231,9 @@ QWEN3 SERVING TUNABLES  (--qwen-weights names the checkpoint to serve; the
   --qwen-max-batch N     concurrent decode slots (default 16).
   --qwen-kv-tokens N     KV pool size in tokens, shared by all sequences and
                          the prompt-prefix cache (default: room for
-                         --qwen-max-batch half-context histories, up to 262144
-                         tokens, when that fits the card beside the weights,
-                         else two contexts). An
+                         --qwen-max-batch half-context histories when that fits the card
+                         beside the weights, else the largest half of it that
+                         does, else two contexts). An
                          agent fleet that resends long histories every turn
                          needs clients x history tokens here, or a
                          conversation's cached prefix is evicted before its

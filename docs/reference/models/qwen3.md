@@ -233,9 +233,9 @@ everything about HOW to serve it is a `brain serve` flag:
   second-guessed.
 - `--qwen-max-batch N` - concurrent serving batch slots (default 16).
 - `--qwen-kv-tokens N` - KV pool size in tokens, shared by every sequence
-  and by the prompt-prefix cache (default: room for `--qwen-max-batch` half-context histories, up to
-  262144 tokens, when that fits the card beside the weights; else two
-  contexts). An agent that
+  and by the prompt-prefix cache (default: room for `--qwen-max-batch` half-context histories when
+  that fits the card beside the weights, else the largest half of it that does,
+  else two contexts). An agent that
   resends its whole history every turn is served from the prefix cache only
   while its history stays cached between turns, so size this at clients x
   history tokens (int8 KV costs about 74 KB per token on the 8B, so 250000
