@@ -81,7 +81,7 @@ const MIN_BLOCK: u32 = 64;
 #[derive(Clone, Debug)]
 pub struct ChatFineTune {
     base: String,
-    arch: String,
+    arch: Option<String>,
     models_dir: Option<String>,
     dataset: Option<PathBuf>,
     held_out: Option<PathBuf>,
@@ -226,7 +226,7 @@ impl ChatFineTune {
     pub fn from_pretrained(base: impl Into<String>) -> ChatFineTune {
         ChatFineTune {
             base: base.into(),
-            arch: "qwen3".to_string(),
+            arch: None,
             models_dir: None,
             dataset: None,
             held_out: None,
@@ -263,11 +263,13 @@ impl ChatFineTune {
         }
     }
 
-    /// The architecture of the base (a `brain_arch` id; default `qwen3`).
-    /// Looked up in the same registry as [`crate::study::DocumentStudy`]; an
-    /// architecture without a chat fine-tuner is refused before anything is read.
+    /// The architecture of the base (a `brain_arch` id). Unnamed, it is the one
+    /// the base's `config.json` names (a Hugging Face checkpoint of the 27B is
+    /// `qwen35`), else `qwen3`. Looked up in the same registry as
+    /// [`crate::study::DocumentStudy`]; an architecture without a chat
+    /// fine-tuner is refused before anything is read.
     pub fn arch(mut self, id: impl Into<String>) -> Self {
-        self.arch = id.into();
+        self.arch = Some(id.into());
         self
     }
 
@@ -565,12 +567,23 @@ impl ChatFineTune {
     /// ([`ChatFineTuneOutcome::resume_state`]) and running the same fine-tune
     /// again continues it.
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFineTuneOutcome> {
-        let arch = crate::study::arch(&self.arch)?;
-        arch.require(Capability::ChatLoraFineTune)?;
+        // A named architecture is refused before anything is read.
+        let named = self.arch.as_deref().map(crate::study::arch).transpose()?;
+        if let Some(arch) = named {
+            arch.require(Capability::ChatLoraFineTune)?;
+        }
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no out directory; call .out_dir(path)".to_string()))?;
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
         let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let arch = match named {
+            Some(arch) => arch,
+            None => {
+                let arch = crate::study::arch_of_checkpoint(&model_dir).map_or_else(|| crate::study::arch("qwen3"), Ok)?;
+                arch.require(Capability::ChatLoraFineTune)?;
+                arch
+            }
+        };
         let open = qwen3::store_checkpoint_path(&weights, &model_dir);
         let weights_str = utf8(&open)?;
         let family = ChatFamily::of(arch.id, self.bf16_base, self.int8_base, self.nf4_base)?;

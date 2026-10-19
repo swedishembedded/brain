@@ -249,6 +249,19 @@ type StudyFn = fn(&Inputs) -> std::io::Result<DocumentStudyReport>;
 /// over them; `for<'e>` lets them borrow.
 type ImproveFn = for<'e> fn(&Improve, DynEnv<'e>, DynVerifier<'e>, &ImproveOptions, &Path, &str, &Path) -> std::io::Result<rl::improve::CycleOutcome>;
 
+/// The registered architecture a checkpoint directory's `config.json` names
+/// (its `architectures[0]` class, else its `model_type`), resolved through
+/// the `brain_arch` registry, or `None` when the directory has no config, the
+/// config names nothing registered, or the registry row has no entry here.
+/// What lets a caller leave the architecture unnamed for a Hugging Face
+/// checkpoint of the 27B.
+pub(crate) fn arch_of_checkpoint(dir: &Path) -> Option<&'static ArchEntry> {
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("config.json")).ok()?).ok()?;
+    let class = config["architectures"].get(0).and_then(|c| c.as_str()).or_else(|| config["model_type"].as_str())?;
+    let row = brain_arch::by_hf_config(class, |key| config.get(key).is_some())?;
+    ARCHS.iter().find(|a| a.id == row.id)
+}
+
 fn arch_names() -> String {
     arch_names_in(ARCHS)
 }
@@ -888,6 +901,27 @@ mod tests {
     /// `brain_arch` registry id (so `--arch qwen3` is the same word every
     /// other brain command uses), and more than one architecture is actually
     /// reachable - a one-row table would be a match arm with extra steps.
+    #[test]
+    fn a_checkpoint_directory_names_its_architecture_in_its_config() {
+        let root = std::env::temp_dir().join(format!("arch-of-checkpoint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let named = |dir: &str, config: Option<&str>| {
+            let path = root.join(dir);
+            std::fs::create_dir_all(&path).unwrap();
+            if let Some(text) = config {
+                std::fs::write(path.join("config.json"), text).unwrap();
+            }
+            arch_of_checkpoint(&path).map(|a| a.id)
+        };
+        assert_eq!(named("q35", Some(r#"{"architectures":["Qwen3_5ForConditionalGeneration"],"model_type":"qwen3_5"}"#)), Some("qwen35"));
+        assert_eq!(named("q35-type", Some(r#"{"model_type":"qwen3_5"}"#)), Some("qwen35"));
+        assert_eq!(named("q3", Some(r#"{"architectures":["Qwen3ForCausalLM"]}"#)), Some("qwen3"));
+        assert_eq!(named("unregistered", Some(r#"{"architectures":["GPT2LMHeadModel"]}"#)), None);
+        assert_eq!(named("no-config", None), None);
+        assert_eq!(named("garbled", Some("{")), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn every_registered_architecture_is_a_real_brain_arch_id() {
         assert!(ARCHS.len() > 1, "a registry with one row is not a seam");

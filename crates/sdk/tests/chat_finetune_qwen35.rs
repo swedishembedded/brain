@@ -90,6 +90,27 @@ fn a_qwen35_fine_tune_exports_a_servable_adapter_with_its_digests() {
     assert!(outcome.record.as_ref().is_some_and(|p| p.exists()), "the training record is written");
 }
 
+/// A Hugging Face checkpoint of the 27B names its architecture in its
+/// config; the caller leaves it out and the qwen35 trainer is the one that runs.
+#[test]
+fn a_base_whose_config_names_qwen35_trains_without_the_architecture_being_named() {
+    let model = qwen35_chat_model_dir("q35-detect");
+    std::fs::write(model.join("config.json"), r#"{"architectures":["Qwen3_5ForConditionalGeneration"],"model_type":"qwen3_5"}"#).unwrap();
+    let run = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+        .dataset(write_dataset(&model))
+        .out_dir(model.join("run"))
+        .adapter_id("local/tiny:lab:facts:v1")
+        .rank(2)
+        .steps(2)
+        .lr(1e-2)
+        .seed(7)
+        .device(cpu());
+    let outcome = run.run().expect("the fine-tune runs on the qwen35 trainer");
+    assert_eq!(outcome.status, FineTuneStatus::Completed);
+    let card = checkpoint::st::read_card(outcome.adapter.unwrap().to_str().unwrap()).unwrap().unwrap();
+    assert_eq!(card.family, "qwen35");
+}
+
 #[test]
 fn a_cancelled_qwen35_run_resumes_to_the_uninterrupted_adapter() {
     let model = qwen35_chat_model_dir("q35-resume");
