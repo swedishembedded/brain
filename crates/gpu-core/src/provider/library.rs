@@ -304,7 +304,8 @@ impl LibraryGemmProvider {
         }
         let kernel = kernels_cuda::get("cast_f32_bf16")?;
         let id = gpu.native_kernel(kernel, CAST_BINDINGS)?;
-        let scratch = gpu.storage(count.div_ceil(2));
+        // The cast writes all `count` values (an even multiple of ALIGN_ELEMS), so the scratch is not cleared.
+        let scratch = gpu.storage_uninit(count.div_ceil(2));
         let step = gpu.step_native_sliced(id, &[x.buf, &scratch], &[(x.range.0, count), (0, 0)], &[count as u32], kernel.blocks_for(1, count as u32))?;
         steps.push(step);
         Some(scratch)
@@ -319,7 +320,7 @@ impl LibraryGemmProvider {
         }
         let kernel = kernels_cuda::get("silu_mul_bf16")?;
         let id = gpu.native_kernel(kernel, SILU_MUL_BF16_BINDINGS)?;
-        let bf16 = gpu.storage(count.div_ceil(2));
+        let bf16 = gpu.storage_uninit(count.div_ceil(2)); // the kernel writes every value, as `cast_bf16` does
         let step = gpu.step_native_sliced(id, &[gate, up, h, &bf16], &[(0, 0); 4], &[count as u32], kernel.blocks_for(1, count as u32))?;
         steps.push(step);
         Some(bf16)

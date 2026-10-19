@@ -3299,7 +3299,8 @@ impl Qwen35 {
         };
         let d = self.cfg.d_model;
         let rows = self.mlp_rows.get().expect("qwen35: an MLP saved as rows needs mlp_rows");
-        let d_xn2 = self.gpu.storage((n * d) as u64);
+        // The row chunks tile all n rows, and each is written whole by put_rows.
+        let d_xn2 = self.gpu.storage_uninit((n * d) as u64);
         // Rebuild and backward of every chunk read the same weights: one decode each for the whole pass.
         let _decoded = self.ops.decoded_weight_scope();
         for row0 in (0..n).step_by(rows as usize) {
@@ -3319,18 +3320,20 @@ impl Qwen35 {
         let ff = c.intermediate_size;
         let p = |s: &str| format!("{prefix}.{s}");
 
-        let d_h = g.storage((n * ff) as u64);
+        // Each of these is written whole before it is read: the first projection into a buffer overwrites it
+        // (acc 0), and swiglu_bwd writes both of its outputs.
+        let d_h = g.storage_uninit((n * ff) as u64);
         {
             let mut s = Vec::new();
             self.proj_bwd(&mut s, "down", d_mlp_out, &la.h, &p("down.weight"), &d_h, n, ff, d, 0);
             g.submit(&[], &s);
         }
 
-        let d_gate_pre = g.storage((n * ff) as u64);
-        let d_up = g.storage((n * ff) as u64);
+        let d_gate_pre = g.storage_uninit((n * ff) as u64);
+        let d_up = g.storage_uninit((n * ff) as u64);
         g.submit(&[], &swiglu_bwd(g, &kernel_ids(), &la.gate_pre, &la.up, &d_h, &d_gate_pre, &d_up, n * ff));
 
-        let d_xn2 = g.storage((n * d) as u64);
+        let d_xn2 = g.storage_uninit((n * d) as u64);
         {
             let mut s = Vec::new();
             // FIRST touch to d_xn2 (acc=0); gate accumulates on top.
