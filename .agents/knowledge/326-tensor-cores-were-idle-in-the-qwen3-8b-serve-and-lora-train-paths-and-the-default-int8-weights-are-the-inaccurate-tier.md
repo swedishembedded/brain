@@ -116,3 +116,21 @@ One card with no other tenant (12:50-13:05), `--qwen-ctx 8192 --qwen-max-batch 3
   the checkpoint; the run itself loaded Qwen3-8B (164-172 s model build, 34 GB process footprint, the checkpoint's own 36-layer shape),
   and the label now prints the trained shape (`checkpoint (36 layers, d_model 4096, 8.19 B parameters)`). The earlier 1.50 s/step figure in
   the table above was measured before the later launch-count changes.
+
+## Graph-rule audit: intermittent failures (addendum)
+
+The windowed capture rule (submissions of 128 nodes or more are captured on second sight) was suspected of
+an int8-KV oracle assertion and one SIGSEGV. Findings:
+
+- The int8-KV failures (20 vs 21, -40 vs -41) are exact .5 ties: the device rounds half to even, the test
+  oracle used Rust `round()` (half away from zero). Graph-independent; the oracle now uses
+  `round_ties_even`. A tie test on the native append kernel confirms it matches the WGSL tier.
+- Differential digests with graphs on and off are identical; compute-sanitizer memcheck, racecheck,
+  synccheck and initcheck report 0 errors over serve runs with replays; 235 stress runs of the qwen3 lib
+  tests at 2-6 threads under GPU contention show no SIGSEGV. The only other failures (`caps` random-input
+  tests) occur with graphs off as well.
+- A captured graph holds the arena device pointers of its nodes; the plan key (Arc addresses plus epoch
+  bumped on frees) forces recapture when any buffer is reassigned. Library GEMM nodes carry their
+  descriptor in the signature.
+- The one SIGSEGV was not reproduced. If it recurs, `WINDOWED_MIN_NODES` is the single switch to bisect
+  (set it above any submission size to restore the previous rule).

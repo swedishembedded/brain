@@ -3957,7 +3957,8 @@ mod tests {
                         let word = packed[e / 4];
                         let byte = (word >> (8 * (e % 4))) & 0xff;
                         let signed = if byte > 127 { byte as i32 - 256 } else { byte as i32 };
-                        let expected_qv = (xv / actual_scale).round().clamp(-127.0, 127.0) as i32;
+                        // The device rounds half to even (rintf, as the WGSL tier does); a half-away oracle fails on exact .5 ties.
+                        let expected_qv = (xv / actual_scale).round_ties_even().clamp(-127.0, 127.0) as i32;
                         assert_eq!(signed, expected_qv, "{name} tok{tok} head{h} d{d}: quantized byte must be exact");
                         let dequant = signed as f32 * actual_scale;
                         let err = (dequant - xv).abs();

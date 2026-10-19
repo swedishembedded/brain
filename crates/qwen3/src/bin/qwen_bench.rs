@@ -1335,9 +1335,11 @@ fn serve_calls(a: &[String], cfg: &QwenConfig, model_name: &str) {
     let out = eng.generate_greedy(&prompts, gen, None);
     let after = gpu_core::cuda_call_totals();
     let tokens = out.iter().map(Vec::len).sum::<usize>().max(1) as f64;
+    // A digest of every generated token, so a run with graph replay can be compared with one without (BRAIN_CUDA_GRAPHS=0).
+    let digest = out.iter().flatten().fold(0xcbf2_9ce4_8422_2325u64, |h, &t| (h ^ u64::from(t)).wrapping_mul(0x0100_0000_01b3));
     let steps = gen as f64;
     println!(
-        "serve-calls {model_name} rows={rows} gemm={:?}: per decode step {:.1} host launches, {:.2} graph replays, {:.1} allocation calls ({} tokens over {steps} steps)",
+        "serve-calls {model_name} rows={rows} gemm={:?}: per decode step {:.1} host launches, {:.2} graph replays, {:.1} allocation calls ({} tokens over {steps} steps) digest {digest:016x}",
         gemm_flag(a),
         (after.host_launches - before.host_launches) as f64 / steps,
         (after.graph_replays - before.graph_replays) as f64 / steps,

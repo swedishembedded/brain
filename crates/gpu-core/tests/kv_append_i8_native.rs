@@ -22,13 +22,18 @@ const REFERENCE: usize = 1;
 /// Written into every pool word and scale first, so a write outside the appended slots shows.
 const SENTINEL: u32 = 0x7fc0_beef;
 
-fn run(gpu: &Gpu, kernel: usize, batch: u32, n_kv: u32, hd: u32, block_size: u32, seed: u64, clip: &[f32]) -> (Vec<u32>, Vec<u32>) {
+/// Whether every head's values sit exactly on rounding ties: the head's maximum is 127 (so the scale is exactly 1) and the
+/// rest are halves, where "round half to even" and "round half away" differ.
+fn run(gpu: &Gpu, kernel: usize, batch: u32, n_kv: u32, hd: u32, block_size: u32, seed: u64, clip: &[f32], ties: bool) -> (Vec<u32>, Vec<u32>) {
     let kv_stride = n_kv * hd;
     let mut rng = data::rng::Lcg::new(seed);
     let src: Vec<f32> = (0..batch * kv_stride)
         .map(|i| {
             let u = rng.next_u32();
             let row_zero = (i / hd) % 7 == 3;
+            if ties {
+                return if i % hd == 0 { 127.0 } else { ((u % 254) as f32 - 126.0) * 0.5 };
+            }
             if row_zero {
                 0.0
             } else {
@@ -70,17 +75,33 @@ fn the_native_append_writes_the_bits_the_wgsl_tier_writes() {
     };
     // The substitution must actually have happened, or the comparison below is the WGSL kernel against itself.
     assert!(gpu.set_kernel_timing(true));
-    let _ = run(&gpu, NATIVE, 4, 8, 128, 16, 1, &[f32::MAX; 8]);
+    let _ = run(&gpu, NATIVE, 4, 8, 128, 16, 1, &[f32::MAX; 8], false);
     let native_ran = gpu.kernel_times().unwrap_or_default().iter().any(|(name, _, _)| name.contains("kv_append_i8_clipped"));
     gpu.set_kernel_timing(false);
     assert!(native_ran, "the native kv_append_i8_clipped kernel was not launched for the WGSL kernel's name");
     for (i, &(batch, n_kv, hd, block_size)) in [(1u32, 8u32, 128u32, 16u32), (7, 8, 128, 16), (32, 8, 128, 16), (5, 4, 64, 4), (33, 2, 96, 8), (3, 1, 4, 2)].iter().enumerate() {
         for clip_kind in 0..2 {
             let clip: Vec<f32> = (0..n_kv).map(|h| if clip_kind == 0 { f32::MAX } else { 3.0 + h as f32 }).collect();
-            let want = run(&gpu, REFERENCE, batch, n_kv, hd, block_size, 99 + i as u64, &clip);
-            let got = run(&gpu, NATIVE, batch, n_kv, hd, block_size, 99 + i as u64, &clip);
+            let want = run(&gpu, REFERENCE, batch, n_kv, hd, block_size, 99 + i as u64, &clip, false);
+            let got = run(&gpu, NATIVE, batch, n_kv, hd, block_size, 99 + i as u64, &clip, false);
             assert_eq!(got.1, want.1, "scales differ: batch {batch} n_kv {n_kv} hd {hd} clip {clip_kind}");
             assert_eq!(got.0, want.0, "pool bytes differ: batch {batch} n_kv {n_kv} hd {hd} clip {clip_kind}");
         }
     }
+}
+
+/// On exact ties the native kernel rounds as the WGSL tier does (to even), so the substitution moves no byte there either.
+#[test]
+fn the_native_append_rounds_ties_as_the_wgsl_tier_does() {
+    let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
+        brain_testutil::skip_unavailable("kv_append_i8_native: no CUDA device");
+        return;
+    };
+    let clip = [f32::MAX; 8];
+    let want = run(&gpu, REFERENCE, 16, 8, 128, 16, 5, &clip, true);
+    let got = run(&gpu, NATIVE, 16, 8, 128, 16, 5, &clip, true);
+    assert_eq!(got.1, want.1, "scales differ on ties");
+    assert_eq!(got.0, want.0, "pool bytes differ on ties");
+    // The data really is ties: scale 1 and a half-valued element, whose even neighbour is what both tiers store.
+    assert!(want.1.iter().any(|&b| f32::from_bits(b) == 1.0));
 }
