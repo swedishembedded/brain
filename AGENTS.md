@@ -67,7 +67,7 @@ application", "an orchestrator"). Enforced by `make check/scope`
    (`--qwen-gemm-fp32` on `brain serve`, `gemm_precision` on the SDK fine-tune)
    pins the exact fp32 WGSL/CUDA-core path; gradient checks and parity gates pin
    it, and a device without tensor cores or cuBLAS falls back to it silently.
-   Measured deviation on real Qwen3-8B weights: knowledge #320.
+   Measured deviation on real Qwen3-8B weights: knowledge #326.
    `brain qwen3 {import,infer,serve,export,precompile,train,finetune,toolcall}`,
    plus the generic `brain import` for a `qwen3` GGUF.
 2b. **Qwen3.5-35B-A3B hybrid decoder** (`crates/qwen35moe`) - 40 layers, 3:1

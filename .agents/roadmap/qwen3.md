@@ -186,7 +186,7 @@ queried capability (`GemmPrecision::Auto`, the default of `Engine`, `FitOpts` an
   the log-sum-exp) and, at `head_dim` 128, the backward (`flash_bwd_{scale,dq,dkv}`; dO is multiplied by one
   power of two per call so a mean-reduced loss's gradients keep fp16's precision). `FlashGqaIds::native` is the
   switch; `Fp32Reference` pins the portable fp32 trio.
-- Accuracy on the real 8B weights, throughput before/after and the open items: knowledge #323.
+- Accuracy on the real 8B weights, throughput before/after and the open items: knowledge #326.
 
 ## Not yet done
 
