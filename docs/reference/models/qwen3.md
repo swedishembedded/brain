@@ -232,6 +232,12 @@ everything about HOW to serve it is a `brain serve` flag:
   would carry) - a checkpoint that already declares one is never
   second-guessed.
 - `--qwen-max-batch N` - concurrent serving batch slots (default 16).
+- `--qwen-kv-tokens N` - KV pool size in tokens, shared by every sequence
+  and by the prompt-prefix cache (default: two contexts). An agent that
+  resends its whole history every turn is served from the prefix cache only
+  while its history stays cached between turns, so size this at clients x
+  history tokens (int8 KV costs about 74 KB per token on the 8B, so 250000
+  tokens is about 18 GB). A pool is never smaller than one context.
 - `--qwen-kv-fp32` - opt out of the default int8 KV cache.
 - `--qwen-kv-calib` - opt in to per-head KV clip ranges produced by `brain
   qwen3 calib` (off by default).

@@ -229,6 +229,12 @@ QWEN3 SERVING TUNABLES  (--qwen-weights names the checkpoint to serve; the
                          max_position_embeddings. Give this to pin an exact
                          value instead.
   --qwen-max-batch N     concurrent decode slots (default 16).
+  --qwen-kv-tokens N     KV pool size in tokens, shared by all sequences and
+                         the prompt-prefix cache (default: two contexts). An
+                         agent fleet that resends long histories every turn
+                         needs clients x history tokens here, or a
+                         conversation's cached prefix is evicted before its
+                         next turn and its whole history is prefilled again.
   --qwen-kv-fp32         opt OUT of int8 KV (on by default).
   --qwen-kv-calib        opt IN to a kv_calib.json beside the checkpoint
                          (off by default).
@@ -614,6 +620,7 @@ pub fn run_serve(args: &[String]) {
             "--qwen-weights-bf16" => qwen_cfg.weights_bf16 = true,
             "--qwen-no-fuse-norm" => qwen_cfg.fuse_residual_norm = false,
             "--qwen-gemm-fp32" => qwen_cfg.gemm_precision = gpu_core::provider::library::GemmPrecision::Fp32Reference,
+            "--qwen-kv-tokens" => qwen_cfg.kv_tokens = Some(parsed(args, &mut i, "--qwen-kv-tokens")),
             "--qwen-max-prefill" => qwen_cfg.max_prefill_cap = parsed(args, &mut i, "--qwen-max-prefill"),
             "--decision-model" => decision_cfg.models.push(val(args, &mut i, "--decision-model")),
             "--decision-default" => decision_cfg.default = Some(val(args, &mut i, "--decision-default")),

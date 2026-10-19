@@ -494,6 +494,13 @@ pub struct QwenServeConfig {
     pub weights_bf16: bool,
     /// `--qwen-max-prefill N`, clamped to `1..=512`, default 512.
     pub max_prefill_cap: u32,
+    /// `--qwen-kv-tokens N`: the KV pool's size in tokens, shared by every
+    /// sequence and by the prompt-prefix cache. `None` (the default) sizes it
+    /// at two contexts, which holds one long agent history plus a little
+    /// cache; an agent fleet resending long histories every turn needs the
+    /// pool to hold all of their histories at once (clients x history
+    /// tokens), or the prefix cache evicts a conversation before its next turn.
+    pub kv_tokens: Option<u32>,
     /// `--qwen-gemm-fp32` (`Fp32Reference`) pins exact fp32 arithmetic. Default `Auto`: the
     /// fp32-weight linears of 8 or more rows (prefill, batched decode) multiply on TF32 tensor cores where the device has them
     /// (operands rounded to a 10-bit mantissa, fp32 accumulation).
@@ -518,7 +525,7 @@ pub struct QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false }
+        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false }
     }
 }
 
@@ -595,8 +602,8 @@ impl PoolProfile {
 
     /// The profile for a whole `ctx`, deriving the pool geometry itself;
     /// `offload` counts the swap staging of host-RAM KV offload.
-    fn at_ctx(cfg: &qwen3::config::QwenConfig, ctx: u32, max_batch: u32, max_prefill_cap: u32, kv_int8: bool, offload: bool, fused: qwen3::serve::FusedAttention) -> PoolProfile {
-        let (block_size, mb, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, max_batch, max_prefill_cap);
+    fn at_ctx(cfg: &qwen3::config::QwenConfig, ctx: u32, max_batch: u32, max_prefill_cap: u32, kv_tokens: Option<u32>, kv_int8: bool, offload: bool, fused: qwen3::serve::FusedAttention) -> PoolProfile {
+        let (block_size, mb, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, max_batch, max_prefill_cap, kv_tokens);
         let profile = PoolProfile::new(cfg, block_size, num_blocks, mb, max_prefill, max_blocks_per_seq * block_size, kv_int8, fused);
         if offload {
             profile.with_swap_staging(cfg, block_size, num_blocks, kv_int8)
@@ -628,10 +635,10 @@ impl PoolProfile {
 /// `FusedAttention::default()` (nothing fused) is passed here on purpose: this runs before a
 /// device is chosen, so the never-fused scratch worst case is the only honest
 /// assumption. `activate()` re-checks with the real answer.
-fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config::QwenConfig, max_batch: u32, max_prefill_cap: u32, kv_int8: bool, offload: bool) -> u32 {
+fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config::QwenConfig, max_batch: u32, max_prefill_cap: u32, kv_tokens: Option<u32>, kv_int8: bool, offload: bool) -> u32 {
     let mut best = AUTO_CTX_TIERS[0];
     for &ctx in AUTO_CTX_TIERS {
-        let profile = PoolProfile::at_ctx(cfg, ctx, max_batch, max_prefill_cap, kv_int8, offload, qwen3::serve::FusedAttention::default());
+        let profile = PoolProfile::at_ctx(cfg, ctx, max_batch, max_prefill_cap, kv_tokens, kv_int8, offload, qwen3::serve::FusedAttention::default());
         if profile.total(weight_bytes) <= budget_bytes && profile.bindings_fit() {
             best = ctx;
         } else {
@@ -667,6 +674,7 @@ pub struct QwenResident {
     weights_int8_requested: bool,
     weights_bf16_requested: bool,
     max_prefill_cap: u32,
+    kv_tokens: Option<u32>,
     gemm_precision: gpu_core::provider::library::GemmPrecision,
     fuse_residual_norm: bool,
 }
@@ -766,6 +774,7 @@ impl QwenResident {
             weights_int8_requested,
             weights_bf16_requested: cfg.weights_bf16,
             max_prefill_cap: cfg.max_prefill_cap.clamp(1, 512),
+            kv_tokens: cfg.kv_tokens,
             gemm_precision: cfg.gemm_precision,
             fuse_residual_norm: cfg.fuse_residual_norm,
         }
@@ -790,7 +799,7 @@ impl QwenResident {
         let Some(budget) = cfg.auto_budget_bytes else { return HISTORICAL_DEFAULT };
         let Ok(checkpoint_cfg) = qwen3::checkpoint_config(path) else { return HISTORICAL_DEFAULT };
         let weight_bytes = serve_weight_bytes(cfg, &checkpoint_cfg);
-        auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_int8, cfg.kv_offload_gb > 0.0)
+        auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_tokens, cfg.kv_int8, cfg.kv_offload_gb > 0.0)
     }
 
     /// The tensors the serving engine uploads, read from the checkpoint as it
@@ -900,10 +909,18 @@ impl QwenResident {
     /// fused prefill kernel the real allocation is `max_batch`-sized and does
     /// not depend on `max_prefill` at all - `lowering_max_prefill_shrinks_
     /// scratch_linearly_at_the_real_config`'s own doc has the split.
-    fn pool_sizing(ctx: u32, max_batch: u32, max_prefill_cap: u32) -> (u32, u32, u32, u32, u32) {
+    ///
+    /// `kv_tokens`: the pool's size in tokens when the operator named one
+    /// (`--qwen-kv-tokens`); `None` keeps the two-context default. A pool is
+    /// never smaller than one full context, so any admitted request can run
+    /// alone.
+    fn pool_sizing(ctx: u32, max_batch: u32, max_prefill_cap: u32, kv_tokens: Option<u32>) -> (u32, u32, u32, u32, u32) {
         let block_size = 16u32;
         let max_blocks_per_seq = ctx.div_ceil(block_size);
-        let num_blocks = max_blocks_per_seq * 2 + max_batch;
+        let num_blocks = match kv_tokens {
+            Some(tokens) => tokens.div_ceil(block_size).max(max_blocks_per_seq) + max_batch,
+            None => max_blocks_per_seq * 2 + max_batch,
+        };
         let max_prefill = ctx.min(max_prefill_cap);
         (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill)
     }
@@ -1036,7 +1053,7 @@ impl ResidentModel for QwenResident {
         let Ok(cfg) = qwen3::checkpoint_config(&self.path) else {
             return cost;
         };
-        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = Self::pool_sizing(self.ctx, self.max_batch, self.max_prefill_cap);
+        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = Self::pool_sizing(self.ctx, self.max_batch, self.max_prefill_cap, self.kv_tokens);
         let kv_int8 = self.kv_int8_requested && qwen3::serve::kv_int8_supported(&cfg);
         let kv_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
         // The paged-attention scores/probs scratch (`Scratch::{scores,probs}`)
@@ -1127,7 +1144,7 @@ impl ResidentModel for QwenResident {
             // See QwenResident::pool_sizing's doc comment for the arithmetic
             // -- the same derivation `estimate()` predicts a budget from, so
             // the two cannot silently drift apart.
-            let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, self.max_batch, self.max_prefill_cap);
+            let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, self.max_batch, self.max_prefill_cap, self.kv_tokens);
             // A DEFAULT-selecting caller degrades loudly rather than hitting
             // `Engine::from_map_with_gpu`'s hard assert: nobody explicitly
             // asked this checkpoint's unusual `head_dim` for int8, so a
@@ -1231,7 +1248,7 @@ impl ResidentModel for QwenResident {
             Ok(Box::new(model::serve::Scheduler::new(eng, max_batch as usize)))
         })??;
         gpu_core::profile::stage_time(&format!("{}: build engine (total, on_device)", self.id), stage_t0);
-        let mut instance = QwenInstance { max_batch: Self::pool_sizing(self.ctx, self.max_batch, self.max_prefill_cap).1 as usize, decoding: Decoding { tok, format, stop }, engine, adapters: AdapterSync::new(self.adapters.clone()) };
+        let mut instance = QwenInstance { max_batch: Self::pool_sizing(self.ctx, self.max_batch, self.max_prefill_cap, self.kv_tokens).1 as usize, decoding: Decoding { tok, format, stop }, engine, adapters: AdapterSync::new(self.adapters.clone()) };
         // Every adapter offered so far is registered with the engine before
         // the first request, so a cold instance answers an adapter request
         // as soon as it answers a base one.
@@ -1499,6 +1516,20 @@ mod tests {
         assert_eq!(cfg.rope_scaling, Some(declared), "an already-declared rope_scaling must survive untouched");
     }
 
+    /// `--qwen-kv-tokens` sizes the KV pool in tokens independently of the
+    /// per-sequence context, so many long agent histories can stay cached at
+    /// once; unnamed it is the two-context default, and it never drops below
+    /// one context (a lone admitted request must fit).
+    #[test]
+    fn kv_tokens_sets_the_pool_size_apart_from_the_context() {
+        let (_, _, per_seq, default_blocks, _) = QwenResident::pool_sizing(4096, 8, 512, None);
+        assert_eq!(default_blocks, per_seq * 2 + 8);
+        let (_, _, _, big, _) = QwenResident::pool_sizing(4096, 8, 512, Some(400_000));
+        assert_eq!(big, 400_000 / 16 + 8);
+        let (_, _, _, small, _) = QwenResident::pool_sizing(4096, 8, 512, Some(16));
+        assert_eq!(small, per_seq + 8);
+    }
+
     #[test]
     fn max_prefill_cap_is_clamped_at_construction() {
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
@@ -1533,13 +1564,13 @@ mod tests {
         let ctx = 24576u32;
         let max_batch = 16u32;
 
-        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill_default) = QwenResident::pool_sizing(ctx, max_batch, 512);
+        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill_default) = QwenResident::pool_sizing(ctx, max_batch, 512, None);
         assert_eq!(max_prefill_default, 512);
         let cap = max_blocks_per_seq * block_size;
         let scratch_default = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill_default, cap, qwen3::serve::FusedAttention::default());
         let kv_default = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
 
-        let (_, max_batch2, _, num_blocks2, max_prefill_128) = QwenResident::pool_sizing(ctx, max_batch, 128);
+        let (_, max_batch2, _, num_blocks2, max_prefill_128) = QwenResident::pool_sizing(ctx, max_batch, 128, None);
         assert_eq!(max_prefill_128, 128);
         let scratch_128 = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch2, max_prefill_128, cap, qwen3::serve::FusedAttention::default());
         let kv_128 = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks2, true);
@@ -1676,7 +1707,7 @@ mod tests {
     #[test]
     fn fused_attention_shrinks_the_scratch_term_enough_to_admit_the_real_qwen3_8b_ctx_32768_shape() {
         let cfg = qwen3::config::QwenConfig::qwen3_8b();
-        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(32768, 16, 512);
+        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(32768, 16, 512, None);
         let cap = max_blocks_per_seq * block_size;
         assert!(
             QwenResident::check_buffers_fit_one_binding(&cfg, block_size, num_blocks, max_batch, max_prefill, cap, true, 32768, "test.safetensors", qwen3::serve::FusedAttention::default()).is_err(),
@@ -1718,10 +1749,10 @@ mod tests {
         let (max_batch, max_prefill_cap) = (16u32, 512u32);
         // A budget far past any real card, so the binding limit is the only
         // thing that can bound the answer.
-        let ctx = auto_ctx_for_budget(0, u64::MAX / 4, &cfg, max_batch, max_prefill_cap, true, false);
+        let ctx = auto_ctx_for_budget(0, u64::MAX / 4, &cfg, max_batch, max_prefill_cap, None, true, false);
 
         let (block_size, mb, max_blocks_per_seq, num_blocks, max_prefill) =
-            QwenResident::pool_sizing(ctx, max_batch, max_prefill_cap);
+            QwenResident::pool_sizing(ctx, max_batch, max_prefill_cap, None);
         let cap = max_blocks_per_seq * block_size;
         QwenResident::check_buffers_fit_one_binding(
             &cfg, block_size, num_blocks, mb, max_prefill, cap, true, ctx, "qwen3-0.6b", qwen3::serve::fused_attention_on_gpu(cfg.head_dim, true),
@@ -1739,9 +1770,9 @@ mod tests {
         let fused = qwen3::serve::FusedAttention::default();
         let tier = AUTO_CTX_TIERS[3];
         // A budget that holds `tier` exactly, with nothing to spare.
-        let budget = PoolProfile::at_ctx(&cfg, tier, max_batch, max_prefill_cap, true, false, fused).total(0);
-        assert_eq!(auto_ctx_for_budget(0, budget, &cfg, max_batch, max_prefill_cap, true, false), tier);
-        let with_offload = auto_ctx_for_budget(0, budget, &cfg, max_batch, max_prefill_cap, true, true);
+        let budget = PoolProfile::at_ctx(&cfg, tier, max_batch, max_prefill_cap, None, true, false, fused).total(0);
+        assert_eq!(auto_ctx_for_budget(0, budget, &cfg, max_batch, max_prefill_cap, None, true, false), tier);
+        let with_offload = auto_ctx_for_budget(0, budget, &cfg, max_batch, max_prefill_cap, None, true, true);
         assert!(with_offload < tier, "offload staging must come out of the budget: chose ctx {with_offload}");
     }
 
@@ -1755,7 +1786,7 @@ mod tests {
         let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
         let ctx = 98304u32;
         let (block_size, mb, max_blocks_per_seq, num_blocks, max_prefill) =
-            QwenResident::pool_sizing(ctx, 16, 512);
+            QwenResident::pool_sizing(ctx, 16, 512, None);
         let cap = max_blocks_per_seq * block_size;
         let profile = PoolProfile::new(&cfg, block_size, num_blocks, mb, max_prefill, cap, true, qwen3::serve::FusedAttention { prefill: true, decode: false });
         assert!(profile.largest_binding > 128 * (1 << 20), "too big for a 128 MiB device");
@@ -1780,7 +1811,7 @@ mod tests {
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
         let resident = QwenResident::from_card("unused.safetensors", &card, Some("unused.json"));
         assert_eq!(resident.ctx, ctx, "this test's premise is the new default -- update it if the default changes");
-        let (block_size, _max_batch, _max_blocks_per_seq, num_blocks, _max_prefill) = QwenResident::pool_sizing(ctx, 16, 512);
+        let (block_size, _max_batch, _max_blocks_per_seq, num_blocks, _max_prefill) = QwenResident::pool_sizing(ctx, 16, 512, None);
 
         let int8_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
         let fp32_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, false);
@@ -1839,7 +1870,7 @@ mod tests {
         let resident = QwenResident::from_card("unused.safetensors", &card, Some("unused.json"));
         let ctx = resident.ctx;
         assert_eq!(ctx, 24576, "this test's premise is the new default");
-        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, 16, 512);
+        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, 16, 512, None);
         let expected_pool_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
 
         let before = perf::scenarios::soak::host_mem_mb();
@@ -1883,7 +1914,7 @@ mod tests {
         let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"));
         let key = InstanceKey::new("brain/qwen3", "default");
 
-        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(resident.ctx, resident.max_batch, resident.max_prefill_cap);
+        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(resident.ctx, resident.max_batch, resident.max_prefill_cap, resident.kv_tokens);
         let kv_int8 = resident.kv_int8_requested;
         let expected_kv_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
         let cap = max_blocks_per_seq * block_size;
