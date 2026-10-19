@@ -576,8 +576,8 @@ fn qkv_prepare(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWe
     // Per-head de-interleaved split of q_full's [query|gate] halves - NOT a
     // whole-row split. Fold n_heads into concat_split's own N so each head's
     // 2*head_dim block splits into its own first/second half.
-    let q_value = g.storage((n * qd) as u64);
-    let q_gate = g.storage((n * qd) as u64);
+    let q_value = g.storage_uninit((n * qd) as u64);
+    let q_gate = g.storage_uninit((n * qd) as u64);
     g.submit(
         &[],
         &[
@@ -588,8 +588,8 @@ fn qkv_prepare(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWe
         ],
     );
 
-    let q_normed = g.storage((n * qd) as u64);
-    let k_normed = g.storage((n * kvd) as u64);
+    let q_normed = g.storage_uninit((n * qd) as u64);
+    let k_normed = g.storage_uninit((n * kvd) as u64);
     g.submit(
         &[],
         &[
@@ -613,8 +613,8 @@ fn qkv_prepare(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWe
 /// The mixer's sigmoid output gate, shared by both forward entry points:
 /// `(gate, ctx_gated) = (sigmoid(q_gate), ctx * gate)`.
 pub fn gate_ctx(g: &Gpu, ids: &GqaMixerIds, ctx: &DeviceBuffer, q_gate: &DeviceBuffer, n: u32, qd: u32) -> (DeviceBuffer, DeviceBuffer) {
-    let gate = g.storage((n * qd) as u64);
-    let ctx_gated = g.storage((n * qd) as u64);
+    let gate = g.storage_uninit((n * qd) as u64);
+    let ctx_gated = g.storage_uninit((n * qd) as u64);
     g.submit(
         &[],
         &[
@@ -633,9 +633,10 @@ pub fn gqa_mixer_bwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaM
     let (qd, kvd) = (shape.qd(), shape.kvd());
 
     // ---- ctx*gate backward, sigmoid backward ----
-    let d_ctx = g.storage((n * qd) as u64);
-    let d_gate = g.storage((n * qd) as u64);
-    let d_q_gate = g.storage((n * qd) as u64);
+    // Elementwise products of exactly n rows: every word is written, so none is cleared.
+    let d_ctx = g.storage_uninit((n * qd) as u64);
+    let d_gate = g.storage_uninit((n * qd) as u64);
+    let d_q_gate = g.storage_uninit((n * qd) as u64);
     g.submit(
         &[],
         &[
@@ -679,11 +680,11 @@ pub fn gqa_mixer_bwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaM
     );
 
     // ---- per-head QK-norm backward ----
-    let d_q_value = g.storage((n * qd) as u64);
-    let d_k = g.storage((n * kvd) as u64);
+    let d_q_value = g.storage_uninit((n * qd) as u64);
+    let d_k = g.storage_uninit((n * kvd) as u64);
     {
-        let inv_q = g.storage((n * nh) as u64);
-        let inv_k = g.storage((n * nkv) as u64);
+        let inv_q = g.storage_uninit((n * nh) as u64);
+        let inv_k = g.storage_uninit((n * nkv) as u64);
         let mut s = Vec::new();
         s.extend(rmsnorm_bwd(g, &ids.kernels, &la.q_value, w.q_norm, &d_q_normed, &d_q_value, &inv_q, gw.q_norm, hd, n * nh, shape.rms_eps));
         s.extend(rmsnorm_bwd(g, &ids.kernels, &la.k, w.k_norm, &d_k_normed, &d_k, &inv_k, gw.k_norm, hd, n * nkv, shape.rms_eps));
@@ -692,7 +693,7 @@ pub fn gqa_mixer_bwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaM
 
     // ---- q_full [value|gate] split backward (concat2, per-head interleaved) ----
     let qpd = shape.n_heads * shape.head_dim * 2;
-    let d_q_full = g.storage((n * qpd) as u64);
+    let d_q_full = g.storage_uninit((n * qpd) as u64);
     g.submit(&[], &[g.step(ids.concat2, &[&d_q_value, &d_q_gate, &d_q_full], &[n * nh, 1, 1, 1, hd], n * nh * 2 * hd)]);
 
     (d_q_full, d_k, d_v)

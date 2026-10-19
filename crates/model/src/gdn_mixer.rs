@@ -346,8 +346,9 @@ pub fn gdn_mixer_stream_fwd(
     };
 
     // beta = sigmoid(bproj); g = -exp(A_log)*softplus(aproj+dt_bias).
-    let beta = g.storage((n * nvh) as u64);
-    let g_decay = g.storage((n * nvh) as u64);
+    // Elementwise products of exactly n rows: every word is written, so no clear.
+    let beta = g.storage_uninit((n * nvh) as u64);
+    let g_decay = g.storage_uninit((n * nvh) as u64);
     g.submit(
         &[],
         &[
@@ -492,16 +493,16 @@ pub fn gdn_mixer_stream_fwd(
     let out_tok = if out_is_tok.get() {
         out_cm
     } else {
-        let out_tok = g.storage((n * value_dim) as u64);
+        let out_tok = g.storage_uninit((n * value_dim) as u64);
         g.submit(&[], &[g.step(ids.gdn_layout_permute, &[&out_cm, &out_tok], &[b, nvh, n_chunks, chunk, vhd, 0], b * nvh * n_chunks * chunk * vhd)]);
         out_tok
     };
 
     // Gated RMSNorm ("norm before gate"): normed = RMSNorm(out_tok)*weight,
     // THEN * SiLU(z).
-    let normed = g.storage((n * value_dim) as u64);
-    let z_silu = g.storage((n * value_dim) as u64);
-    let gated = g.storage((n * value_dim) as u64);
+    let normed = g.storage_uninit((n * value_dim) as u64);
+    let z_silu = g.storage_uninit((n * value_dim) as u64);
+    let gated = g.storage_uninit((n * value_dim) as u64);
     g.submit(
         &[],
         &[
@@ -983,8 +984,9 @@ fn conv_fused_fwd(g: &Gpu, ids: &GdnMixerIds, shape: &GdnMixerShape, w: &GdnMixe
     }
     let (conv_dim, key_dim, value_dim, kw1) = (shape.conv_dim(), shape.key_dim(), shape.value_dim(), shape.conv_kernel - 1);
     let layout = conv_layout(shape, n);
-    let (query, key, value) = (g.storage((n * key_dim) as u64), g.storage((n * key_dim) as u64), g.storage((n * value_dim) as u64));
-    let pre = g.storage(if is_train { (n * conv_dim) as u64 } else { 1 });
+    // The fused kernel writes all n rows of each (and `pre` when training), so none is cleared.
+    let (query, key, value) = (g.storage_uninit((n * key_dim) as u64), g.storage_uninit((n * key_dim) as u64), g.storage_uninit((n * value_dim) as u64));
+    let pre = g.storage_uninit(if is_train { (n * conv_dim) as u64 } else { 1 });
     let hist = cont.map(|st| st.hist);
     let fwd = native_conv_fwd(g, &[mixed_qkv, w.conv1d_weight, hist.unwrap_or(w.conv1d_weight), &query, &key, &value, &pre], layout, cont.is_some(), is_train)?;
     let tail = match hist {
@@ -993,7 +995,7 @@ fn conv_fused_fwd(g: &Gpu, ids: &GdnMixerIds, shape: &GdnMixerShape, w: &GdnMixe
     };
     // The history the training backward starts from, taken before the update below overwrites it.
     let hist_in = hist.filter(|_| is_train).map(|hist| {
-        let copy = g.storage((conv_dim * kw1) as u64);
+        let copy = g.storage_uninit((conv_dim * kw1) as u64); // region_copy writes all `len` words
         let len = conv_dim * kw1;
         g.submit(&[], &[g.step(ids.chunk.region_copy, &[hist, &copy], &[1, len, len, 0], len)]);
         copy

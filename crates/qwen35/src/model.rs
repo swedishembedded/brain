@@ -2374,10 +2374,11 @@ impl Qwen35 {
         // own module doc). `xn1` quantized once here (`Ops::act`), reused
         // unchanged by in_proj_b/a/z below (no further `act` call on `xn1`
         // happens in between).
-        let mixed_qkv = g.storage((n * conv_dim) as u64);
-        let bproj = g.storage((n * nvh) as u64);
-        let aproj = g.storage((n * nvh) as u64);
-        let z = g.storage((n * value_dim) as u64);
+        // The four projections write every row of their outputs (the adapter then adds into them).
+        let mixed_qkv = g.storage_uninit((n * conv_dim) as u64);
+        let bproj = g.storage_uninit((n * nvh) as u64);
+        let aproj = g.storage_uninit((n * nvh) as u64);
+        let z = g.storage_uninit((n * value_dim) as u64);
         let mut s1 = Vec::new();
         let act1 = match pre {
             Some(a) => a,
@@ -2991,7 +2992,7 @@ impl Qwen35 {
         let _decoded = self.ops.decoded_weight_scope();
         let n = self.b * self.t;
         let d = self.cfg.d_model;
-        let xn1 = g.storage((n * d) as u64);
+        let xn1 = g.storage_uninit((n * d) as u64);
         g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), xres, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n, self.cfg.rms_eps)]);
 
         let (mixer_out, mixer_acts) = match self.cfg.layer_types()[l] {
@@ -3005,8 +3006,8 @@ impl Qwen35 {
             }
         };
 
-        let xmid = g.storage((n * d) as u64);
-        let xn2 = g.storage((n * d) as u64);
+        let xmid = g.storage_uninit((n * d) as u64);
+        let xn2 = g.storage_uninit((n * d) as u64);
         self.add_then_rmsnorm(xres, &mixer_out, &format!("blocks.{l}.ln2.weight"), &xmid, &xn2, d, n);
 
         let prefix = format!("blocks.{l}.mlp");
