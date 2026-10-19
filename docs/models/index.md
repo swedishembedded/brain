@@ -27,6 +27,7 @@ named on the model's own page (see
 | [`clip`](clip.md) | text/image embeddings | [x] |
 | [`scrfd`](scrfd.md) | face detection | [x] |
 | [`arcface`](arcface.md) | face identity embedding | [x] |
+| [`lpips`](lpips.md) | perceptual image distance (LPIPS, AlexNet) | [x] |
 | [`t5encoder`](t5encoder.md) | T5-XXL / umT5-XXL text-conditioning embeddings | [x] |
 
 ## Vision-language

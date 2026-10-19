@@ -112,7 +112,10 @@ EOF
 # name literally -- everything else routes through crate::resolve instead.
 # Keep this list in sync with that match arm-for-arm; a new infra verb needs
 # a line here, a new architecture must NOT need one.
-infra_verbs="data devices npu federated flops gradcheck bench perf forecast label caps fetch pull serve models plan gguf roofline help -h --help"
+# `doctor` is the can-a-model-be-served-here check. `decide` runs the decision
+# family's lifecycle verbs (train, eval, promote, rollback, inspect) in
+# decide_cli and hands every other verb to the resolve-routed family.
+infra_verbs="data devices npu federated flops gradcheck bench perf forecast label caps fetch pull serve models plan gguf roofline doctor decide help -h --help"
 
 # Bounded to fn main's own top-level `match argv.get(1)...` block, not the
 # whole file: nested match blocks further down (`run_bench`'s own `eval`/

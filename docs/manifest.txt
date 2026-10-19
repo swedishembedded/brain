@@ -151,6 +151,7 @@ docs/models/yolov8/npu.md
 docs/models/zipdepth.md
 docs/models/scrfd.md
 docs/models/arcface.md
+docs/models/lpips.md
 docs/models/sam1.md
 docs/models/sam2.md
 docs/models/clip.md
