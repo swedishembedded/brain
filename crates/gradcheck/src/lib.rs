@@ -57,7 +57,7 @@ pub mod clip;
 /// `check_minicpmv_vision{,_4x,_lora}` - MiniCPM-V's NaViT tower, window
 /// merger, merger and tower LoRA (`minicpmv::vision_train`).
 pub mod minicpmv;
-pub use minicpmv::{check_minicpmv_vision, check_minicpmv_vision_4x, check_minicpmv_vision_lora};
+pub use minicpmv::{check_minicpmv_composite, check_minicpmv_vision, check_minicpmv_vision_4x, check_minicpmv_vision_lora};
 pub use clip::check_clip;
 
 pub mod t5;

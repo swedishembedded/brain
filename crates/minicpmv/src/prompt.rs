@@ -105,6 +105,11 @@ impl Formatter {
         Ok(Formatter { image_pad: id(IMAGE_PAD)?, video_pad: id(VIDEO_PAD)?, template, tokenizer })
     }
 
+    /// The checkpoint's chat template.
+    pub fn template(&self) -> &ChatTemplate {
+        &self.template
+    }
+
     /// The conversation rendered by the chat template, media placeholders not
     /// yet expanded.
     pub fn render(&self, messages: &[Message], add_generation_prompt: bool, enable_thinking: bool) -> Result<String, String> {

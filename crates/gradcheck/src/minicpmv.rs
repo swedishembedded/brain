@@ -145,3 +145,90 @@ pub fn check_minicpmv_vision_lora(seed: u64) -> Report {
         .collect();
     Report { checks }
 }
+
+/// The whole trainer at the tiny configuration: two views spliced into the
+/// decoder at two runs, the next-token loss over a supervised span, and the
+/// gradients of a decoder LoRA factor, the merger and a tower LoRA factor
+/// against differences of that loss. This is the check that the decoder's
+/// input gradient reaches the right visual rows and through the tower.
+/// Both LoRAs start with non-zero `B` so every factor has a gradient.
+pub fn check_minicpmv_composite(seed: u64) -> Report {
+    use minicpmv::dataset::Sample;
+    use minicpmv::preprocess::ProcessedImage;
+    use minicpmv::train::{PartMode, TrainSpec, Trainer};
+    let cfg = MiniCpmVConfig::tiny();
+    let mut rng = Rng::new(seed);
+    let vision = tiny_weights(&cfg, &mut rng);
+    let mut dec = qwen35::init::init_weights(&cfg.text, seed);
+    for (name, v) in dec.iter_mut() {
+        if name.ends_with("in_proj_qkv.weight") || name.ends_with("conv1d.weight") {
+            v.iter_mut().for_each(|x| *x = 2.0 * (rng.next_f32() - 0.5));
+        }
+    }
+    let base = qwen35::base_source::BaseCheckpoint { cfg: cfg.text.clone(), src: Box::new(dec) };
+    let spec = TrainSpec {
+        decoder: PartMode::Lora { rank: 2, alpha: 4.0 },
+        connector: true,
+        vision: PartMode::Lora { rank: 2, alpha: 4.0 },
+        block: 12,
+        downsample: Downsample::X16,
+        lr: 0.0,
+        weight_decay: 0.0,
+        grad_clip: None,
+        seed,
+    };
+    let mut t = Trainer::new(&Gpu::new(train_pipelines()), cfg.clone(), &vision, base, spec).expect("trainer");
+    for name in t.decoder.param_names().into_iter().filter(|n| n.ends_with(".lora_b")) {
+        let n = t.decoder.read_weight(&name).len();
+        t.decoder.write_weight(&name, &(0..n).map(|_| 0.3 * (rng.next_f32() - 0.5)).collect::<Vec<_>>());
+    }
+    let lora = t.lora.as_ref().expect("vision LoRA");
+    for (name, _) in lora.ps.params.clone().into_iter().filter(|(n, _)| n.ends_with(".lora_b")) {
+        let b: Vec<f32> = (0..lora.ps.numel(&name)).map(|_| 0.3 * (rng.next_f32() - 0.5)).collect();
+        t.tower.gpu.write_f32(lora.ps.w(&name), &b);
+    }
+    t.refold();
+    let (views, patches) = views_and_patches(&cfg, &mut rng);
+    let image = ProcessedImage { views, patches, grid: None, resized: Vec::new() };
+    // tokens: text, run of 1 row (view 1), text, run of 2 rows (view 2), text
+    let ids: Vec<u32> = vec![3, 7, 0, 9, 4, 0, 0, 11, 5, 8, 2, 6];
+    let first = 8;
+    let targets: Vec<u32> = (0..ids.len()).map(|i| if i + 1 >= first && i + 1 < ids.len() { ids[i + 1] } else { model::IGNORE }).collect();
+    let s = Sample { ids, targets, image_runs: vec![(2, 1), (5, 2)], video_runs: vec![], images: vec![image], videos: vec![] };
+
+    let _ = t.accumulate(&s).expect("accumulate");
+    let mut checks = Vec::new();
+    let dec_name = "blocks.3.self_attn.v_proj.weight.lora_a".to_string();
+    let dec_name = if t.decoder.param_names().contains(&dec_name) { dec_name } else { t.decoder.param_names().into_iter().find(|n| n.ends_with(".lora_a")).expect("a decoder adapter") };
+    let analytic = t.decoder.read_grad(&dec_name);
+    let w0 = t.decoder.read_weight(&dec_name);
+    let tp = std::cell::RefCell::new(&mut t);
+    checks.push(directional(&dec_name, &analytic, &w0, &mut rng, 1e-2, |x| tp.borrow_mut().decoder.write_weight(&dec_name, x), || tp.borrow_mut().loss(&s).unwrap()));
+    for name in ["merger.fc1.weight", "merger.fc2.bias"] {
+        let analytic = tp.borrow().tower.read_grad(name);
+        let w0 = tp.borrow().tower.read_weight(name);
+        checks.push(directional(name, &analytic, &w0, &mut rng, 1e-2, |x| tp.borrow_mut().tower.write_weight(name, x), || tp.borrow_mut().loss(&s).unwrap()));
+    }
+    for name in ["blocks.0.attn.qkv.weight.lora_a", "blocks.2.mlp.fc2.weight.lora_b"] {
+        let (analytic, w0) = {
+            let tb = tp.borrow();
+            let l = tb.lora.as_ref().unwrap();
+            (l.ps.read_grad(&tb.tower.gpu, name), l.ps.read_weight(&tb.tower.gpu, name))
+        };
+        checks.push(directional(
+            name,
+            &analytic,
+            &w0,
+            &mut rng,
+            1e-2,
+            |x| {
+                let mut tb = tp.borrow_mut();
+                let buf = tb.lora.as_ref().unwrap().ps.w(name).clone();
+                tb.tower.gpu.write_f32(&buf, x);
+                tb.refold();
+            },
+            || tp.borrow_mut().loss(&s).unwrap(),
+        ));
+    }
+    Report { checks }
+}

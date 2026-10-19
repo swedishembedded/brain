@@ -23,6 +23,7 @@ brain-paramstore.workspace = true
 brain-qwen3.workspace = true
 brain-qwen35.workspace = true
 minijinja.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

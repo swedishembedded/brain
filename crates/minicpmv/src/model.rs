@@ -93,6 +93,19 @@ pub struct MiniCpmV {
     pub eos: Vec<u32>,
 }
 
+/// Every decoder tensor of `src` in host memory, by canonical name - what an
+/// adapter is folded into.
+fn decoder_map(src: &qwen35::fp8_source::Qwen35Source) -> std::collections::HashMap<String, Vec<f32>> {
+    src.names()
+        .into_iter()
+        .map(|n| {
+            let mut v = Vec::new();
+            checkpoint::TensorSource::with_tensor(src, n, &mut |d| v = d.to_vec());
+            (n.to_string(), v)
+        })
+        .collect()
+}
+
 /// `generation_config.json`'s end ids, or the template's end of turn.
 fn eos_ids(dir: &Path, fmt: &Formatter) -> Vec<u32> {
     let from_file = std::fs::read(dir.join("generation_config.json"))
@@ -111,15 +124,39 @@ impl MiniCpmV {
     /// sequence's prompt plus generation; `max_concurrent` how many sequences
     /// the decoder's KV pool holds at once.
     pub fn load(dir: &Path, gpu: &Gpu, max_seq_len: u32, max_concurrent: u32, kv: KvTier) -> Result<MiniCpmV, String> {
+        Self::load_tuned(dir, None, gpu, max_seq_len, max_concurrent, kv)
+    }
+
+    /// [`Self::load`] with a fine-tune (a directory
+    /// [`crate::train::Trainer::save_tune`] wrote) applied: its vision
+    /// tensors and folded LoRA factors over the tower, its decoder adapter
+    /// folded into (or its full weights in place of) the decoder.
+    pub fn load_tuned(dir: &Path, tune: Option<&Path>, gpu: &Gpu, max_seq_len: u32, max_concurrent: u32, kv: KvTier) -> Result<MiniCpmV, String> {
         let cfg = MiniCpmVConfig::from_dir(dir)?;
         let fmt = Formatter::from_dir(dir)?;
         let image_opts = ImageOptions::from_dir(dir, cfg.vision.patch, cfg.downsample)?;
-        let weights = crate::import::vision_weights(dir, &cfg)?;
+        let mut weights = crate::import::vision_weights(dir, &cfg)?;
+        if let Some(t) = tune {
+            crate::train::apply_vision_tune(&mut weights, t)?;
+        }
         let tower = Tower::new_on(gpu.new_like(VISION_PIPELINES), cfg.clone(), &weights);
         drop(weights);
         let src = crate::import::open_decoder(dir, &cfg)?;
         let text = qwen35::config::Qwen35Config { block_size: max_seq_len, ..cfg.text.clone() };
-        let engine = Engine::from_source_on(gpu, text, &src, max_seq_len, max_concurrent, kv);
+        let engine = match tune.map(|t| (t.join(crate::train::TUNE_DECODER_ADAPTER), t.join(crate::train::TUNE_DECODER_FULL))) {
+            Some((adapter, _)) if adapter.is_file() => {
+                let mut map = decoder_map(&src);
+                qwen35::lora::fold_adapter_into(&mut map, adapter.to_str().ok_or("non-UTF-8 adapter path")?).map_err(|e| format!("{}: {e}", adapter.display()))?;
+                Engine::from_source_on(gpu, text, &map, max_seq_len, max_concurrent, kv)
+            }
+            Some((_, full)) if full.is_file() => {
+                let p = full.to_str().ok_or("non-UTF-8 decoder path")?;
+                let st = checkpoint::st::load_safetensors(p).map_err(|e| format!("{p}: {e}"))?;
+                let map: std::collections::HashMap<String, Vec<f32>> = st.tensors.into_iter().collect();
+                Engine::from_source_on(gpu, text, &map, max_seq_len, max_concurrent, kv)
+            }
+            _ => Engine::from_source_on(gpu, text, &src, max_seq_len, max_concurrent, kv),
+        };
         let eos = eos_ids(dir, &fmt);
         Ok(MiniCpmV { cfg, tower, engine, fmt, image_opts, eos })
     }

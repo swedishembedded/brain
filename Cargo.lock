@@ -1845,6 +1845,7 @@ dependencies = [
  "brain-qwen35",
  "brain-testutil",
  "minijinja",
+ "serde",
  "serde_json",
 ]
 
