@@ -931,16 +931,17 @@ async fn openai_chat_stream_orders_chunks_and_concatenates() {
 /// exercised a mid-stream `StreamMsg::Err` for any provider.
 #[tokio::test]
 async fn openai_chat_stream_error_frame_is_named_and_generic() {
-    let (app, key) = failing_chat_app(Provider::OpenAI);
+    let (app, key) = failing_chat_app_after(Provider::OpenAI, std::time::Duration::from_millis(600));
     let body = json!({
         "model": "brain-chat",
         "messages": [{"role": "user", "content": "hi"}],
         "stream": true,
     });
     let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
-    // The failure surfaces mid-stream, after admission - the response is a
-    // normal 200 + SSE body, not a 4xx. Only a pre-admission rejection (bad
-    // request shape, auth, shed-under-load) is a plain non-2xx.
+    // The failure surfaces after the response has begun (the model fails 600 ms in, past
+    // the moment a streamed request gets to fail with a plain status - see
+    // `an_engine_refusal_is_an_immediate_http_error_streamed_or_not`) - the response is a
+    // normal 200 + SSE body, not a 4xx.
     assert_eq!(st, StatusCode::OK);
 
     let events = sse_events(&text);
@@ -986,7 +987,7 @@ async fn openai_chat_stream_error_frame_is_named_and_generic() {
 /// the failure for, whether or not the client inspects SSE event names.
 #[tokio::test]
 async fn openai_chat_stream_failure_emits_no_empty_assistant_message() {
-    let (app, key) = failing_chat_app(Provider::OpenAI);
+    let (app, key) = failing_chat_app_after(Provider::OpenAI, std::time::Duration::from_millis(600));
     let body = json!({
         "model": "brain-chat",
         "messages": [{"role": "user", "content": "hi"}],
@@ -1802,8 +1803,8 @@ async fn the_images_of_one_request_reach_the_model_as_one_batch() {
 
 /// A chat model whose `generate` always fails with an internal error string that
 /// embeds a filesystem path — the kind of detail that must NEVER reach a client.
-struct Failing;
-struct FailingInst;
+struct Failing(std::time::Duration);
+struct FailingInst(std::time::Duration);
 impl ResidentModel for Failing {
     fn manifest(&self) -> Manifest {
         chat_manifest()
@@ -1815,22 +1816,90 @@ impl ResidentModel for Failing {
         MemCost::default()
     }
     fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
-        Ok(Box::new(FailingInst))
+        Ok(Box::new(FailingInst(self.0)))
     }
 }
 impl Instance for FailingInst {
     fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        std::thread::sleep(self.0);
         Err("backend panic at /home/secret/models/weights.gguf: kernel exploded".into())
     }
 }
 
+/// The failing chat model, failing at once.
 fn failing_chat_app(provider: Provider) -> (Router, String) {
+    failing_chat_app_after(provider, std::time::Duration::ZERO)
+}
+
+/// The failing chat model, failing `after` its request started. A streamed request that fails
+/// within the first moments is answered with the HTTP status of the failure; one that fails
+/// later - after the response has begun - surfaces it as an `error` event, so the tests of that
+/// event fail the model slowly.
+fn failing_chat_app_after(provider: Provider, after: std::time::Duration) -> (Router, String) {
     let key = "sk-brain-test-key".to_string();
-    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Failing)];
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Failing(after))];
     let mut budgets = Budgets::new();
     budgets.set(Device::Cpu, 8 << 30, 0);
     let state = AppState::new(Executor::start(models, budgets, Policy::default()), key.clone(), provider);
     (router(state), key)
+}
+
+/// A chat model whose `generate` is refused by the engine at once, with the engine's own
+/// wording (what `llmserve`'s scheduler glue returns for a request it cannot serve).
+struct Refusing(&'static str);
+struct RefusingInst(&'static str);
+impl ResidentModel for Refusing {
+    fn manifest(&self) -> Manifest {
+        chat_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-chat", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(RefusingInst(self.0)))
+    }
+}
+impl Instance for RefusingInst {
+    fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        Err(self.0.into())
+    }
+}
+
+/// A request the engine refuses at admission is answered with an HTTP error status and an
+/// OpenAI-style error body, immediately, streamed or not - never a 200 event stream whose
+/// only event is the error (a client that waits for a `[DONE]` that never comes hangs on it)
+/// and never silence. The over-context refusal is `context_length_exceeded`; the engine's
+/// other refusals (a token outside the vocabulary, an adapter it does not hold, a prompt
+/// the chat template cannot render) are 4xx errors that leak nothing.
+#[tokio::test]
+async fn an_engine_refusal_is_an_immediate_http_error_streamed_or_not() {
+    let cases: [(&str, &str); 4] = [
+        ("qwen35: needs 33805 tokens, engine capacity is 32768", "context_length_exceeded"),
+        ("qwen35: token 70000 is outside the vocabulary (65000)", "invalid_request"),
+        ("qwen35: adapter 3 is not available", "invalid_request"),
+        ("qwen35: the chat template cannot render this conversation", "invalid_request"),
+    ];
+    for (refusal, code) in cases {
+        for stream in [false, true] {
+            let key = "sk-brain-test-key".to_string();
+            let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Refusing(refusal))];
+            let mut budgets = Budgets::new();
+            budgets.set(Device::Cpu, 8 << 30, 0);
+            let state = AppState::new(Executor::start(models, budgets, Policy::default()), key.clone(), Provider::OpenAI);
+            let app = router(state);
+            let body = json!({"model": "brain-chat", "stream": stream, "messages": [{"role": "user", "content": "hi"}]});
+            let answered = tokio::time::timeout(std::time::Duration::from_secs(5), post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body)).await;
+            let (st, v) = answered.unwrap_or_else(|_| panic!("stream={stream}: {refusal:?} was not answered within 5 s"));
+            assert_eq!(st, StatusCode::BAD_REQUEST, "stream={stream}: {refusal:?} must be an HTTP 400, got {st}: {v}");
+            assert_valid("openai.json", "ErrorResponse", &v);
+            assert_eq!(v["error"]["code"], code, "stream={stream}: {refusal:?}: {v}");
+            let msg = v["error"]["message"].as_str().unwrap_or("");
+            assert!(!msg.contains("qwen35:"), "the engine's internal prefix does not reach the client: {msg}");
+        }
+    }
 }
 
 /// An UNAUTHENTICATED request to an unknown path must be 401 (not 404): the key layer

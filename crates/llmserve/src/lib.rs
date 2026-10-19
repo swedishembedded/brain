@@ -188,6 +188,25 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         }
     }
 
+    /// Why a request can never be served by this group's scheduler, in the words its caller
+    /// gets: a route or parse failure (an unknown adapter, a malformed message, a template
+    /// error), or a request the scheduler would refuse at admission (too long for the
+    /// engine, a token outside the vocabulary, an adapter it does not hold). `None` when it
+    /// may be queued.
+    fn refusal(&mut self, inv: &Invocation) -> Option<String> {
+        let adapter = match self.front.route(inv) {
+            Ok(Some((adapter, _))) => Some(adapter),
+            Ok(None) => None,
+            Err(e) => return Some(e),
+        };
+        let req = match self.front.parse(inv) {
+            Ok(req) => req,
+            Err(e) => return Some(e),
+        };
+        let request = Request { prompt: req.ids, max_new: req.max_new, stop: Vec::new() };
+        self.sched.refusal(&request, adapter).map(|reason| self.front.rejection(inv, &reason))
+    }
+
     /// Jobs still running.
     fn live(&self) -> usize {
         self.open.len()
@@ -333,6 +352,9 @@ pub fn run_open_scheduled<D: PagedDecoder>(
         if group.live() == 0 && front.stale() {
             return OpenGroup::Refresh { numbered: group.jobs.len() };
         }
+        // Whatever waits for a slot is first asked whether it can ever run: a request that
+        // cannot is answered now, not after the running ones finish.
+        feed.screen(&mut |inv| group.refusal(inv));
         for inv in feed.take(capacity.saturating_sub(group.live())) {
             let (bi, immediate) = group.admit(&inv, progress);
             if let Some(result) = immediate {
@@ -449,6 +471,9 @@ impl JobFeed for CountingFeed<'_> {
     }
     fn close(&mut self) -> bool {
         self.inner.close()
+    }
+    fn screen(&mut self, check: &mut dyn FnMut(&Invocation) -> Option<String>) {
+        self.inner.screen(check)
     }
 }
 

@@ -101,6 +101,16 @@ pub trait JobFeed {
     /// Frees the slot it held, so a queued job can take it.
     fn finish(&mut self, index: usize, result: ActionResult);
 
+    /// Turn away jobs that are waiting to join this group but can never run,
+    /// without giving them a slot. `check` is asked once about each waiting job
+    /// that has not been asked yet and answers with the error to deliver, or
+    /// `None` to leave the job waiting. A refused job's caller is answered at
+    /// once, however long the running jobs will take: refusing a request is not
+    /// work that should wait for a free slot. The default refuses nothing.
+    fn screen(&mut self, check: &mut dyn FnMut(&Invocation) -> Option<String>) {
+        let _ = check;
+    }
+
     /// Stop accepting further jobs because the instance has nothing running.
     /// `false` means a job slipped in between the last `take` and now - it is
     /// waiting to be taken and the group must not end yet. After `true`, jobs

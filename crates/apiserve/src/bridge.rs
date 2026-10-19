@@ -466,12 +466,42 @@ impl Drop for CancelGuard {
 pub struct EventStream {
     rx: mpsc::UnboundedReceiver<StreamMsg>,
     _guard: CancelGuard,
+    /// The first message, when [`EventStream::settle_start`] read it to see whether the
+    /// request had already failed; handed out before anything else.
+    head: Option<StreamMsg>,
 }
 
 impl Stream for EventStream {
     type Item = StreamMsg;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<StreamMsg>> {
+        if let Some(first) = self.head.take() {
+            return Poll::Ready(Some(first));
+        }
         self.rx.poll_recv(cx)
+    }
+}
+
+/// How long a streamed request is given to fail before its response headers go out. A
+/// request the model refuses outright (too long for its context, an unknown adapter, a
+/// malformed message) is refused within milliseconds; the client then gets the HTTP status
+/// an unstreamed request would have got, instead of a 200 whose body is one error event.
+/// A request that is merely slow to produce its first token is not held up by this: its
+/// stream opens as soon as the window ends.
+const EARLY_FAILURE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
+
+impl EventStream {
+    /// Wait up to [`EARLY_FAILURE_WINDOW`] for the request's first message. A failure that
+    /// arrives within it is returned as the error; anything else (or nothing yet) leaves
+    /// the stream as it was.
+    pub async fn settle_start(mut self) -> Result<EventStream, ApiError> {
+        match tokio::time::timeout(EARLY_FAILURE_WINDOW, self.rx.recv()).await {
+            Ok(Some(StreamMsg::Err(e))) => Err(e),
+            Ok(first) => {
+                self.head = first;
+                Ok(self)
+            }
+            Err(_elapsed) => Ok(self),
+        }
     }
 }
 
@@ -486,7 +516,7 @@ impl Stream for EventStream {
 /// The `on_progress`/`reply` closures only touch the (`Send`) channel — never the
 /// model.
 pub async fn stream(state: &AppState, model: &str, action: &str, inv: Invocation) -> Result<EventStream, ApiError> {
-    stream_inner(state, model, action, inv, false).await
+    stream_inner(state, model, action, inv, false).await?.settle_start().await
 }
 
 /// Like [`stream`], but also forwards coarse `(step, total)` progress ticks as
@@ -551,7 +581,7 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
         return Err(refused(provider, &refusal));
     }
 
-    Ok(EventStream { rx, _guard: CancelGuard { token, jobs: state.jobs.clone(), id } })
+    Ok(EventStream { rx, _guard: CancelGuard { token, jobs: state.jobs.clone(), id }, head: None })
 }
 
 /// Like [`stream`]/[`stream_progress`], but for a `model` that is NOT already
@@ -667,7 +697,7 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
         }
     });
 
-    Ok(EventStream { rx, _guard: CancelGuard { token: guard_token, jobs: state.jobs.clone(), id } })
+    Ok(EventStream { rx, _guard: CancelGuard { token: guard_token, jobs: state.jobs.clone(), id }, head: None })
 }
 
 // ─── Unit tests ──────────────────────────────────────────────────────────────

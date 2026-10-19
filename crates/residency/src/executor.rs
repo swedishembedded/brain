@@ -77,6 +77,9 @@ struct Pending {
     on_progress: Box<dyn FnMut(Progress) + Send>,
     reply: Box<dyn FnOnce(ActionResult) + Send>,
     on_admit: Option<Box<dyn FnOnce() + Send>>,
+    /// The group this job is waiting to join has already asked whether it can
+    /// ever run ([`crate::model::JobFeed::screen`]).
+    screened: bool,
 }
 
 /// One job the executor currently holds - either still in the pending `queue`
@@ -797,6 +800,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
                     on_progress: job.on_progress,
                     reply: job.reply,
                     on_admit: job.on_admit,
+                    screened: false,
                 });
                 let mut s = stats.lock().unwrap();
                 s.queue_peak = s.queue_peak.max(queue.len());
@@ -1152,28 +1156,32 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
 /// its own traffic keeps coming, and the scheduler's age and fairness policy
 /// would never get to pick the waiting model. The group then drains and the
 /// policy chooses the next one.
+/// How many jobs beyond its free slots a running group may hold in its inbox, waiting.
+const INBOX_LOOKAHEAD: usize = 32;
+
 fn refill_open_groups(queue: &mut Vec<Pending>, open_groups: &HashMap<InstanceKey, OpenGroup>, running_jobs: &mut Vec<RunningJob>, stats: &Arc<Mutex<Stats>>) {
     for (key, group) in open_groups {
         if !queue.iter().any(|p| &p.key == key && p.action == group.action) || queue.iter().any(|p| &p.key != key) {
             continue;
         }
         let mut state = group.inbox.lock();
-        if !state.open || state.room == 0 {
+        // The inbox holds the jobs the group can start now (`room`) and a few
+        // more that wait in it for a slot: the group looks at those to turn away
+        // what can never run ([`crate::model::JobFeed::screen`]), which it could not
+        // do for jobs still in the dispatcher's queue.
+        let space = (state.room + INBOX_LOOKAHEAD).saturating_sub(state.jobs.len());
+        if !state.open || space == 0 {
             continue;
         }
         let mut idxs: Vec<usize> = queue.iter().enumerate().filter(|(_, p)| &p.key == key && p.action == group.action).map(|(i, _)| i).collect();
         idxs.sort_by_key(|&i| queue[i].enqueued);
-        idxs.truncate(state.room);
+        idxs.truncate(space);
         idxs.sort_unstable_by(|a, b| b.cmp(a));
         let mut jobs: Vec<Pending> = idxs.into_iter().map(|i| queue.remove(i)).collect();
         jobs.reverse();
-        for j in jobs.iter_mut() {
-            if let Some(f) = j.on_admit.take() {
-                f();
-            }
+        for j in jobs.iter() {
             running_jobs.push(RunningJob { id: j.id, model: j.model.clone(), action: j.action.clone(), key: key.clone(), enqueued: j.enqueued, building: false });
         }
-        state.room -= jobs.len();
         if let Ok(mut s) = stats.lock() {
             s.admitted += jobs.len() as u64;
             s.queue_depth = queue.len();
@@ -1488,17 +1496,58 @@ impl crate::model::JobFeed for GroupFeed {
         let n = max.min(st.jobs.len());
         let mut taken: Vec<Pending> = st.jobs.drain(..n).collect();
         st.taken += n;
+        st.room = st.room.saturating_sub(n);
         let slots: Vec<ReplySlot> = taken.iter_mut().map(park_reply).collect();
         st.late_slots.extend(slots);
         drop(st);
         let mut invs = Vec::with_capacity(n);
         let mut sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
-        for p in taken {
+        for mut p in taken {
+            // The job is on the group now: that is what admission means to its caller.
+            if let Some(f) = p.on_admit.take() {
+                f();
+            }
             sinks.push(p.on_progress);
             self.replies.push(Some(p.reply));
             invs.push(p.inv);
         }
         invs
+    }
+
+    fn screen(&mut self, check: &mut dyn FnMut(&Invocation) -> Option<String>) {
+        // Ask outside the inbox lock: checking a prompt means tokenizing it, and the
+        // dispatcher pushes under that lock.
+        let unasked: Vec<(u64, Invocation)> = {
+            let mut st = self.inbox.lock();
+            st.jobs.iter_mut().filter(|p| !p.screened).map(|p| {
+                p.screened = true;
+                (p.id, p.inv.clone())
+            }).collect()
+        };
+        if unasked.is_empty() {
+            return;
+        }
+        let verdicts: Vec<(u64, String)> = unasked.iter().filter_map(|(id, inv)| check(inv).map(|why| (*id, why))).collect();
+        if verdicts.is_empty() {
+            return;
+        }
+        let refused: Vec<(Pending, String)> = {
+            let mut st = self.inbox.lock();
+            let mut out = Vec::new();
+            for (id, why) in verdicts {
+                if let Some(at) = st.jobs.iter().position(|p| p.id == id) {
+                    out.push((st.jobs.remove(at), why));
+                }
+            }
+            st.taken += out.len();
+            out
+        };
+        for (mut p, why) in refused {
+            if let Some(f) = p.on_admit.take() {
+                f();
+            }
+            (p.reply)(Err(why));
+        }
     }
 
     fn finish(&mut self, index: usize, result: ActionResult) {
@@ -1847,6 +1896,99 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(exec.stats().batches, 1, "one group served both jobs");
+    }
+
+    /// A job that can never run is answered while the group is full: the group sees the jobs
+    /// waiting behind it and turns away the one it cannot serve, at once, with the job's own
+    /// admission signal fired (so a streaming caller's response is not held for a slot). The
+    /// job that can run keeps waiting for its slot.
+    #[test]
+    fn a_job_the_full_group_cannot_serve_is_refused_without_waiting_for_a_slot() {
+        use crate::model::JobFeed;
+        struct Full;
+        struct FullInst;
+        impl ResidentModel for Full {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("full", "one slot", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("full", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(GB, 0)
+            }
+            fn batch_limit(&self) -> Option<usize> {
+                Some(1)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(FullInst))
+            }
+        }
+        impl Instance for FullInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                Ok(Outcome::new())
+            }
+            fn run_open(&mut self, _a: &str, invs: &[Invocation], _p: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+                // One slot; every job needs 20 steps of 30 ms (600 ms).
+                let mut active: Vec<(usize, u32)> = (0..invs.len()).map(|i| (i, 20)).collect();
+                let mut next = invs.len();
+                loop {
+                    feed.screen(&mut |inv| inv.get_str("refuse"));
+                    for _ in feed.take(1usize.saturating_sub(active.len())) {
+                        active.push((next, 20));
+                        next += 1;
+                    }
+                    if active.is_empty() {
+                        if feed.close() {
+                            return true;
+                        }
+                        continue;
+                    }
+                    std::thread::sleep(Duration::from_millis(30));
+                    for a in active.iter_mut() {
+                        a.1 -= 1;
+                    }
+                    let (done, rest): (Vec<_>, Vec<_>) = active.into_iter().partition(|a| a.1 == 0);
+                    active = rest;
+                    for (i, _) in done {
+                        feed.finish(i, Ok(Outcome::new()));
+                    }
+                }
+            }
+        }
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Full)];
+        let exec = Executor::start(models, budgets, Policy::default());
+        let (tx, rx) = channel();
+        let (admit_tx, admit_rx) = channel();
+        let send = |tag: &'static str, inv: Invocation, admit: Option<std::sync::mpsc::Sender<Instant>>| {
+            let tx = tx.clone();
+            let mut job = Job::new("full", "run", inv).reply(move |r| {
+                let _ = tx.send((tag, r.is_ok(), Instant::now()));
+            });
+            if let Some(admit) = admit {
+                job = job.on_admit(move || {
+                    let _ = admit.send(Instant::now());
+                });
+            }
+            exec.submit(job);
+        };
+        send("running", Invocation::new(), None);
+        std::thread::sleep(Duration::from_millis(100));
+        let submitted = Instant::now();
+        send("too long", Invocation::new().set("refuse", serde_json::json!("needs 99 tokens, engine capacity is 24")), Some(admit_tx));
+        send("fits", Invocation::new(), None);
+        let mut got = std::collections::HashMap::new();
+        for _ in 0..3 {
+            let (tag, ok, at) = rx.recv_timeout(Duration::from_secs(10)).expect("all three jobs are answered");
+            got.insert(tag, (ok, at));
+        }
+        assert!(!got["too long"].0, "the job the group cannot serve gets the error");
+        assert!(got["too long"].1.duration_since(submitted) < Duration::from_millis(300), "it is refused at once, not after the 600 ms the running job needs");
+        assert!(admit_rx.try_recv().is_ok(), "its admission signal fired, so a streaming caller's response is not held");
+        assert!(got["running"].0 && got["fits"].0);
+        assert!(got["running"].1 < got["fits"].1, "the job that fits waits for its slot");
     }
 
     #[test]

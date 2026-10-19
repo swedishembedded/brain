@@ -626,6 +626,14 @@ impl std::fmt::Display for RejectReason {
     }
 }
 
+/// What [`Scheduler::admissibility`] found out about one request.
+enum Admissibility {
+    Admissible,
+    /// Its adapter is still loading: asked about again next iteration.
+    AdapterLoading,
+    Refused(RejectReason),
+}
+
 /// What the queue looks like when an admission decision is made.
 #[derive(Clone, Copy, Debug)]
 pub struct QueueState {
@@ -1265,32 +1273,57 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// does not fit the pool yet still holds the line (the caller stops at
     /// it), exactly as before adapters existed.
     fn next_admissible(&mut self, report: &mut StepReport) -> Option<usize> {
-        let cap = self.dec.max_seq_len();
-        let vocab = self.dec.vocab() as u32;
         let mut pos = 0;
         while let Some(w) = self.waiting.get(pos) {
-            let need = w.req.prompt.len() + w.req.max_new;
-            let bad_token = w.req.prompt.iter().find(|&&t| t >= vocab).copied();
-            let reject = if let Some(token) = bad_token {
-                RejectReason::InvalidToken { token, vocab }
-            } else if need > cap {
-                RejectReason::ExceedsCapacity { need: need as u32, capacity: cap as u32 }
-            } else {
-                match w.adapter.map(|a| (a, self.dec.adapter_availability(a))) {
-                    None | Some((_, AdapterAvailability::Resident)) => return Some(pos),
-                    Some((_, AdapterAvailability::Loading)) => {
-                        pos += 1;
-                        continue;
-                    }
-                    Some((adapter, AdapterAvailability::Unknown)) => RejectReason::AdapterUnavailable { adapter },
-                }
+            let (id, adapter) = (w.id, w.adapter);
+            let verdict = match self.static_refusal(&w.req.prompt, w.req.max_new) {
+                Some(reason) => Admissibility::Refused(reason),
+                None => self.adapter_verdict(adapter),
             };
-            let id = w.id;
-            self.waiting.remove(pos);
-            self.started.remove(&id);
-            report.rejected.push((id, reject));
+            match verdict {
+                Admissibility::Admissible => return Some(pos),
+                Admissibility::AdapterLoading => pos += 1,
+                Admissibility::Refused(reject) => {
+                    self.waiting.remove(pos);
+                    self.started.remove(&id);
+                    report.rejected.push((id, reject));
+                }
+            }
         }
         None
+    }
+
+    /// Whether `req` (for `adapter`) can ever be served by this decoder, without queueing it:
+    /// `None` when it can, or when only its adapter is still loading; otherwise why not. The
+    /// scheduler's admission applies the same test, so a caller that asks first gets the
+    /// refusal the queue would have given it - without waiting for a slot to find out.
+    pub fn refusal(&mut self, req: &Request, adapter: Option<AdapterId>) -> Option<RejectReason> {
+        if let Some(reason) = self.static_refusal(&req.prompt, req.max_new) {
+            return Some(reason);
+        }
+        match self.adapter_verdict(adapter) {
+            Admissibility::Refused(reason) => Some(reason),
+            Admissibility::Admissible | Admissibility::AdapterLoading => None,
+        }
+    }
+
+    /// A prompt that exceeds the engine's capacity, or a token outside the vocabulary.
+    fn static_refusal(&self, prompt: &[u32], max_new: usize) -> Option<RejectReason> {
+        let cap = self.dec.max_seq_len();
+        let vocab = self.dec.vocab() as u32;
+        if let Some(&token) = prompt.iter().find(|&&t| t >= vocab) {
+            return Some(RejectReason::InvalidToken { token, vocab });
+        }
+        let need = prompt.len() + max_new;
+        (need > cap).then_some(RejectReason::ExceedsCapacity { need: need as u32, capacity: cap as u32 })
+    }
+
+    fn adapter_verdict(&mut self, adapter: Option<AdapterId>) -> Admissibility {
+        match adapter.map(|a| (a, self.dec.adapter_availability(a))) {
+            None | Some((_, AdapterAvailability::Resident)) => Admissibility::Admissible,
+            Some((_, AdapterAvailability::Loading)) => Admissibility::AdapterLoading,
+            Some((adapter, AdapterAvailability::Unknown)) => Admissibility::Refused(RejectReason::AdapterUnavailable { adapter }),
+        }
     }
 
     /// A fully prefilled request becomes a running sequence: its first token is

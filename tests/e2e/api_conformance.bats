@@ -557,6 +557,22 @@ get_url() {
   [ "$st" -eq 400 ]
 }
 
+@test "a request the engine refuses for its length is an immediate 400 context_length_exceeded, streamed or not, on each provider" {
+  for provider in openai openrouter; do
+    path=/v1/chat/completions
+    [ "$provider" = openrouter ] && path=/chat/completions
+    for stream in false true; do
+      post_json "$provider" "$path" \
+        "{\"model\":\"brain/mock\",\"stream\":$stream,\"messages\":[{\"role\":\"user\",\"content\":\"__mock_over_context__\"}]}"
+      [ "$STATUS" -eq 400 ] || { echo "$provider stream=$stream: status $STATUS: $(cat "$RESP")"; false; }
+      [ "$(jq -r '.error.code' "$RESP")" = "context_length_exceeded" ]
+      # The engine's internal prefix does not reach the client; the counts do.
+      ! grep -q 'mock:' "$RESP"
+      grep -q '33805' "$RESP"
+    done
+  done
+}
+
 @test "unknown model -> 404 on each provider" {
   post_json openai /v1/chat/completions '{"model":"nope","messages":[{"role":"user","content":"hi"}]}'
   [ "$STATUS" -eq 404 ]

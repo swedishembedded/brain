@@ -162,6 +162,15 @@ grace window, `--cold-build-admit-deadline-ms N` (default 1800000), because
 that one activation is inherently slower than every request after it. Both
 must be positive; a value that is not is refused at startup.
 
+A request the engine can never serve - a prompt plus `max_tokens` longer than the
+model's context (`context_length` in `/v1/models`), a token outside the vocabulary, an
+adapter the server does not hold - is refused at once, whatever the running requests
+are doing: it does not wait for a free slot to be told no. The refusal is an HTTP 400
+with an OpenAI-style error body (`context_length_exceeded` for length), streamed or not:
+a streamed request is given 300 ms to fail before its response headers go out, so an
+early refusal is a plain status rather than a 200 stream holding one `error` event. A
+failure after the response has begun is an `error` event in the stream.
+
 The default is long on purpose. A request waiting behind sequences that are
 already running will start when they finish, and an agent turn runs for many
 minutes, so that wait is queueing, not overload: with a seconds-long limit the

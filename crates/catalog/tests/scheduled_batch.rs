@@ -247,3 +247,57 @@ fn token_ids_and_logprobs_come_back_only_when_asked_for() {
     assert_eq!(asked["backend"], json!(gpu_core::backend_name()));
     assert!(asked["engine"].as_str().is_some_and(|e| e.starts_with("brain ")), "{asked:?}");
 }
+
+/// A feed whose waiting jobs sit behind a full group: `take` hands one over only when the
+/// group asks for room, `screen` lets the group turn away what can never run. Records the
+/// order of what happened to each.
+struct WaitingFeed {
+    waiting: Vec<(Invocation, bool)>,
+    events: Vec<String>,
+}
+
+impl residency::JobFeed for WaitingFeed {
+    fn take(&mut self, max: usize) -> Vec<Invocation> {
+        let n = max.min(self.waiting.len());
+        self.waiting.drain(..n).map(|(inv, _)| inv).collect()
+    }
+    fn screen(&mut self, check: &mut dyn FnMut(&Invocation) -> Option<String>) {
+        let mut i = 0;
+        while i < self.waiting.len() {
+            if std::mem::replace(&mut self.waiting[i].1, true) {
+                i += 1;
+                continue;
+            }
+            match check(&self.waiting[i].0) {
+                Some(why) => {
+                    self.waiting.remove(i);
+                    self.events.push(format!("refused: {why}"));
+                }
+                None => i += 1,
+            }
+        }
+    }
+    fn finish(&mut self, index: usize, result: ActionResult) {
+        self.events.push(format!("finished {index}: {}", if result.is_ok() { "ok" } else { "error" }));
+    }
+    fn close(&mut self) -> bool {
+        self.waiting.is_empty()
+    }
+}
+
+/// A request that can never run is answered while the group is full of requests that will
+/// take a long time: refusing it needs no slot. The one that fits keeps waiting for its
+/// slot and is served after the running one ends.
+#[test]
+fn a_request_that_cannot_run_is_refused_while_the_group_is_full() {
+    let front = front();
+    let running = inv("a long one", 10, 0.0, 1);
+    let too_long = inv(&"x".repeat(30), 4, 0.0, 2);
+    let fits = inv("fits", 3, 0.0, 3);
+    let mut feed = WaitingFeed { waiting: vec![(too_long, false), (fits, false)], events: Vec::new() };
+    llmserve::run_open_scheduled(&mut scheduler(1), &front, std::slice::from_ref(&running), 1, 0, &mut |_, _| {}, &mut feed);
+
+    assert_eq!(feed.events.len(), 3, "{:?}", feed.events);
+    assert!(feed.events[0].starts_with("refused: test: needs 34 tokens, engine capacity is 24"), "the over-length request is refused first, before anything finishes: {:?}", feed.events);
+    assert_eq!(&feed.events[1..], ["finished 0: ok", "finished 1: ok"], "the running request ends, then the one that fits is served");
+}

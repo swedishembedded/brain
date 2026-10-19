@@ -163,6 +163,12 @@ impl Instance for MockInstance {
 /// the client. See [`generate`].
 pub const FAIL_TRIGGER: &str = "__mock_fail__";
 
+/// The substring a client sends to make the mock refuse the request the way a real engine
+/// refuses one that does not fit its context: with the engine's own wording
+/// (`"<label>: needs N tokens, engine capacity is C"`), which the API layer must turn into
+/// an HTTP 400 `context_length_exceeded`, immediately, streamed or not.
+pub const OVER_CONTEXT_TRIGGER: &str = "__mock_over_context__";
+
 /// The substring a client sends to trigger the mock **tool-calling** mode: instead
 /// of the plain `"You said: …"` echo, `generate` streams a scripted `reasoning`
 /// event followed by one or two tool calls (repeating the trigger in the user text
@@ -316,6 +322,11 @@ fn generate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResul
     // Failure mode (error-hygiene probe): never reflected verbatim to the client.
     if user.contains(FAIL_TRIGGER) {
         return Err(format!("mock resident action failed: {}", fake_internal_detail()));
+    }
+
+    // Over-context mode: the engine's refusal wording, as `llmserve` returns it.
+    if user.contains(OVER_CONTEXT_TRIGGER) {
+        return Err("mock: needs 33805 tokens, engine capacity is 32768".to_string());
     }
 
     // Delay mode: pin the lane, polling cancel so a shed/disconnected job frees it.
