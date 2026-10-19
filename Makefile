@@ -621,7 +621,7 @@ test/e2e/scheduler:
 # cross-model agreement it claims (yolo/qwen3vl on the same generated image,
 # the TTS->ASR->LLM round trip). NOT part of test/e2e. Run `make
 # docs/quickstart` first (or BRAIN_QUICKSTART_E2E=1 scripts/demo/quickstart.sh)
-# to populate docs/quickstart/img/, which this asserts against rather than
+# to populate docs/getting-started/img/, which this asserts against rather than
 # re-fetching itself.
 ## test/e2e/quickstart - OPT-IN, heavy: README Quick start against REAL auto-fetched weights
 test/e2e/quickstart: build/release
@@ -721,7 +721,7 @@ check/clippy: check/workspace
 # doc - an orphan gate), and no non-overridable absolute machine path. See
 # scripts/gates/check-scripts.sh for the full rationale. check-env-docs.sh
 # additionally requires every BRAIN_* env var read anywhere in crates/ to be
-# documented in docs/using/configuration.md, a docs/models/<model>.md page, or
+# documented in docs/reference/configuration.md, a docs/reference/models/<model>.md page, or
 # .agents/rules/testing.md (env-only config MUST have a reference).
 # check-no-doc-citations.sh additionally requires that crates/, scripts/,
 # tools/, and samples/ never cite a docs/ or .agents/ file path - see that
@@ -739,11 +739,11 @@ check/clippy: check/workspace
 # row to name a real, correspondingly-named crate (bar an explicit, dated
 # exception list), the CLI's top-level dispatch to never hard-code an
 # architecture name as its own match arm, and every non-toy architecture to
-# have (and every docs/models/*.md page to BE) a real registry id in both
+# have (and every docs/reference/models/*.md page to BE) a real registry id in both
 # directions - see that script for the full rationale.
 # check-linear-history.sh fails if HEAD's history contains a merge commit -
 # the working branch must always be rebased, never merged into.
-# check-kernel-selection.sh cross-references docs/reference/kernels.md for
+# check-kernel-selection.sh cross-references docs/reference/kernels/index.md for
 # every kernel that has a structurally faster sibling (a `_rows`/`_wg`/
 # `_reg*`/`_tiled`/`_part`/`_dyn` suffix, or a higher `@opt` sibling of the
 # same stem) and fails if it is dispatched by name outside a
@@ -829,11 +829,11 @@ check/make-targets:
 ## check/generated - default: every generated-file drift check below (read-only)
 check/generated: check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest check/generated/knowledge-index
 
-# Every column of docs/reference/kernels.md is derived from the sources, so the
+# Every column of docs/reference/kernels/index.md is derived from the sources, so the
 # table cannot be edited by hand - and this check is what stops it drifting
 # silently, which is the failure mode .agents/knowledge/ #29 records for the
 # registry generator.
-## check/generated/kernels-wgsl-table - docs/reference/kernels.md matches crates/kernels/wgsl/
+## check/generated/kernels-wgsl-table - docs/reference/kernels/index.md matches crates/kernels/wgsl/
 check/generated/kernels-wgsl-table:
 	scripts/build/gen-kernel-table.py --check
 
@@ -841,7 +841,7 @@ check/generated/kernels-wgsl-table:
 check/generated/kernels-cuda-table:
 	scripts/build/gen-cuda-kernel-table.py --check
 
-## check/generated/samples-manifest - docs/manifest.txt's Samples part matches the READMEs under samples/
+## check/generated/samples-manifest - docs/manifest.yaml's Examples part matches the READMEs under samples/
 check/generated/samples-manifest:
 	scripts/build/gen-samples-manifest.py --check
 
@@ -1291,7 +1291,7 @@ bench/char: build/release
 # ---- performance benchmarking (brain perf) --------------------------------
 # Distinct from `make bench`: bench asks whether an architecture LEARNS a task;
 # perf asks how much correct work the engine delivers per unit of hardware,
-# memory, energy and time. Design: docs/performance/benchmarking.md.
+# memory, energy and time. Design: docs/guides/hardware/benchmarking.md.
 #
 # TARGET selects what is measured. There is no synthetic-harness stand-in --
 # every target exercises a real engine. Default is `qwen-synth:<L>x<D>x<H>x<V>x
@@ -1310,7 +1310,7 @@ PERF_SCENARIO_TARGETS := $(addprefix perf/scenario/,$(PERF_SCENARIOS))
 # The whole core battery on the current device: latency floor, saturated
 # ceiling, realistic serving, and the concurrency curve.
 ## perf - default: the core PERFORMANCE battery (latency, throughput, serve, sweep) on qwen-synth
-##   (how fast + at what cost; docs/performance/benchmarking.md)
+##   (how fast + at what cost; docs/guides/hardware/benchmarking.md)
 perf: build/release
 	@set -e; for s in latency throughput serve; do \
 		$(BRAIN) perf run $$s --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) $(SEED_FLAG); \
@@ -1640,15 +1640,49 @@ $(EXAMPLE_RUN_TARGETS): crates/%/run:
 ## The docs bundle, files generated from the tree, test data, git hooks and
 ## the release flow. generate, testdata, hooks and release only list.
 
-# Build the full docs bundle: build/docs/brain-docs.{md,pdf}. Requires pandoc +
+# The documentation publication: docs/manifest.yaml is the one navigation order,
+# and the vendored publisher (tools/docs-publisher) turns docs/ into a validated
+# set of pages in build/docs/. Offline: it never compiles Rust or fetches
+# anything. The pin is verified unless DOCS_PUBLISHER is overridden on the
+# command line (developing against a newer publisher).
+NODE ?= node
+DOCS_PUBLISHER ?= tools/docs-publisher/docs-publisher.mjs
+
+## docs - default: build the manual (pandoc + xelatex) -> build/pdf/brain-docs.{md,pdf}
+docs: docs/pdf
+
+_docs/publisher-pin:
+	@$(if $(filter command line,$(origin DOCS_PUBLISHER)),true,\
+	  cd tools/docs-publisher && sha256sum -c docs-publisher.mjs.sha256 >/dev/null)
+
+## docs/build - build the documentation publication -> build/docs/ (offline)
+docs/build: _docs/publisher-pin
+	$(NODE) $(DOCS_PUBLISHER) build --root . --manifest docs/manifest.yaml --out build/docs
+
+# Publisher check (builds twice, compares, validates links and coverage), the
+# generated references (all three generators are pure Python over the sources
+# and run offline) and the quick documentation gates. The slower prose scan for
+# unreviewed performance numbers stays in `check/scripts`.
+## docs/check - the publication builds reproducibly and the docs gates pass
+docs/check: _docs/publisher-pin check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest
+	$(NODE) $(DOCS_PUBLISHER) check --root . --manifest docs/manifest.yaml
+	bash scripts/gates/check-doc-links.sh
+	bash scripts/gates/check-arch-names.sh
+	bash scripts/gates/check-env-docs.sh
+
+## docs/clean - remove generated documentation output (build/docs and build/pdf)
+docs/clean:
+	rm -rf build/docs build/pdf
+
+# The compiled manual, in the order of docs/manifest.yaml. Requires pandoc +
 # xelatex. No HTML is produced.
-## docs - default: build the full docs bundle (pandoc + xelatex) -> build/docs/brain-docs.{md,pdf}
-docs:
+## docs/pdf - build the manual (pandoc + xelatex) -> build/pdf/brain-docs.{md,pdf}
+docs/pdf:
 	python3 docs/pandoc/build-docs.py
 
 # Regenerates README.md's Quick start assets: every one-liner in it, run for
 # real against auto-fetched weights (tens of GB on a cold cache), writing
-# docs/quickstart/img/*.png and the *.txt/*.json outputs the README quotes.
+# docs/getting-started/img/*.png and the *.txt/*.json outputs the README quotes.
 # Heavy and network-bound, not compute-bound - see scripts/demo/quickstart.sh's
 # own docs. `test/e2e/quickstart` asserts on this target's output afterward.
 ## docs/quickstart - regenerate README's Quick start assets against REAL auto-fetched weights (heavy, network)
@@ -1671,10 +1705,10 @@ generate/kernels:
 generate/kernels/registry:
 	scripts/build/kernels-regen.sh
 
-# Regenerate docs/reference/kernels.md's catalogue from crates/kernels/wgsl/.
+# Regenerate docs/reference/kernels/index.md's catalogue from crates/kernels/wgsl/.
 # Every column is derived from the sources, so the table cannot be edited by
 # hand - and `check/generated/kernels-wgsl-table` is what stops it drifting.
-## generate/kernels/wgsl-table - regenerate docs/reference/kernels.md from the .wgsl sources
+## generate/kernels/wgsl-table - regenerate docs/reference/kernels/index.md from the .wgsl sources
 generate/kernels/wgsl-table:
 	scripts/build/gen-kernel-table.py
 
@@ -1688,7 +1722,7 @@ generate/kernels/wgsl-table:
 # operator the policy declares tuned never runs as generated - is a Rust test
 # (`brain-gpu-core`'s cuda_impl_policy), because it needs the real dispatch
 # record, not the table.
-## generate/kernels/cuda-table - regenerate docs/reference/kernels-cuda.md from crates/kernels-cuda
+## generate/kernels/cuda-table - regenerate docs/reference/kernels/cuda.md from crates/kernels-cuda
 generate/kernels/cuda-table:
 	scripts/build/gen-cuda-kernel-table.py
 
@@ -1696,11 +1730,10 @@ generate/kernels/cuda-table:
 generate/samples:
 	$(LIST_CHILDREN)
 
-# Regenerate docs/manifest.txt's Samples part from the READMEs that actually
+# Regenerate docs/manifest.yaml's Examples part from the READMEs that actually
 # exist under samples/, so a new sample cannot ship without reaching the
-# compiled manual (build-docs.py treats a manifest entry with no file as
-# fatal) and a deleted sample cannot leave a dangling one.
-## generate/samples/manifest - regenerate docs/manifest.txt's Samples part from the READMEs under samples/
+# published docs and the manual, and a deleted sample cannot leave a dangling one.
+## generate/samples/manifest - regenerate docs/manifest.yaml's Examples part from the READMEs under samples/
 generate/samples/manifest:
 	scripts/build/gen-samples-manifest.py
 
@@ -1909,7 +1942,7 @@ help:
         $(SAMPLE_BUILD_TARGETS) $(SAMPLE_RUN_TARGETS) \
         crates $(EXAMPLE_CRATE_TARGETS) $(EXAMPLE_GROUP_TARGETS) $(EXAMPLE_NAME_TARGETS) \
         $(EXAMPLE_BUILD_TARGETS) $(EXAMPLE_RUN_TARGETS) \
-        docs docs/quickstart \
+        docs docs/build docs/check docs/clean docs/pdf docs/quickstart \
         generate generate/kernels generate/kernels/registry generate/kernels/wgsl-table \
         generate/kernels/cuda-table generate/samples generate/samples/manifest \
         generate/knowledge generate/knowledge/index \
