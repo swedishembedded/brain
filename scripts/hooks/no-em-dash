@@ -34,7 +34,10 @@ EM_DASH = "\u2014"
 
 def main(argv):
     diff = subprocess.run(
-        ["git", "diff", "--cached", "--unified=0", "--no-color"],
+        # The vendored docs publisher reproduces third-party license texts
+        # verbatim and is pinned by sha256; it is not prose written here.
+        ["git", "diff", "--cached", "--unified=0", "--no-color", "--",
+         ".", ":(exclude)tools/docs-publisher/"],
         capture_output=True,
         text=True,
     ).stdout
