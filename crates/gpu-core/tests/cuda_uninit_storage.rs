@@ -24,7 +24,7 @@ const WORDS: u64 = 1 << 20;
 #[test]
 fn uninitialised_storage_skips_the_clear_and_is_poisoned_in_a_debug_build() {
     let Ok(gpu) = Gpu::try_new_cuda(&[]) else {
-        eprintln!("cuda_uninit_storage: no CUDA device on this box - skipping");
+        brain_testutil::skip_unavailable("cuda_uninit_storage: no CUDA device on this box");
         return;
     };
     let before = gpu_core::cuda_call_totals();
