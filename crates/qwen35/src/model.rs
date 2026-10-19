@@ -2750,8 +2750,10 @@ impl Qwen35 {
         let ff = c.intermediate_size;
         let p = |s: &str| format!("{prefix}.{s}");
 
-        let gate_pre = g.storage((n * ff) as u64);
-        let up = g.storage((n * ff) as u64);
+        // The gate and up projections write every row of their outputs (the adapter then adds into them), so
+        // neither needs the clear a zeroed allocation costs.
+        let gate_pre = g.storage_uninit((n * ff) as u64);
+        let up = g.storage_uninit((n * ff) as u64);
         {
             let mut s = Vec::new();
             let act1 = match pre {
@@ -2770,7 +2772,7 @@ impl Qwen35 {
             let (h, act) = self.quant_epilogue(1, &gate_pre, Some(&up), n, ff);
             (h.expect("a silu_mul epilogue hands back its product"), Some(act))
         } else {
-            let h = g.storage((n * ff) as u64);
+            let h = g.storage_uninit((n * ff) as u64); // both silu_mul forms write all n * ff words
             // On the vendor-library path the product and its bf16 rounding come out of one pass, and the
             // `down` projection takes the rounding as its activation's cached cast.
             let mut s = Vec::new();
@@ -2791,7 +2793,7 @@ impl Qwen35 {
             }
         };
         let down = want_out.then(|| {
-            let down = g.storage((n * d) as u64);
+            let down = g.storage_uninit((n * d) as u64);
             let mut s = Vec::new();
             let act2 = match down_act {
                 Some(a) => a,

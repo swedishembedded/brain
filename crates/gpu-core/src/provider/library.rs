@@ -185,7 +185,8 @@ impl LibraryGemmProvider {
         let words = elems / 8;
         let kernel = kernels_cuda::get("nf4_dequant_bf16")?;
         let id = gpu.native_kernel(kernel, NF4_BINDINGS)?;
-        let out = gpu.storage(elems / 2);
+        // The decode kernel writes every one of the `elems / 2` words, so the clear `storage` would add is skipped.
+        let out = gpu.storage_uninit(elems / 2);
         let step = gpu.step_native_sliced(
             id,
             &[packed.buf, scales.buf, &out],
