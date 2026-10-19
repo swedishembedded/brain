@@ -1168,6 +1168,9 @@ pub struct Qwen35 {
     /// This instance's [`CHUNK_ARENA_MIN_ROWS`] - see
     /// [`Self::set_chunk_arena_min_rows`].
     chunk_arena_min_rows: Cell<u32>,
+    /// Whether a pooled round drains the device between layers even where submissions are ordered - see
+    /// [`Self::set_chunk_arena_drain`]. `None`: only where the backend does not order its submissions.
+    chunk_arena_drain: Cell<Option<bool>>,
     /// Whether a short chunk round runs as plain decode steps - see
     /// [`Self::set_exact_rounds`].
     exact_rounds: Cell<bool>,
@@ -1865,6 +1868,7 @@ impl Qwen35 {
             taps: RefCell::new(Vec::new()),
             tapped: RefCell::new(Vec::new()),
             chunk_arena_min_rows: Cell::new(CHUNK_ARENA_MIN_ROWS),
+            chunk_arena_drain: Cell::new(None),
             exact_rounds: Cell::new(true),
             decode_fusion: Cell::new(true),
         }
@@ -1890,6 +1894,15 @@ impl Qwen35 {
     pub fn set_chunk_arena_min_rows(&self, rows: u32) {
         assert!(rows > 0, "qwen35::set_chunk_arena_min_rows: 0 would open a scope for an empty round; 1 is 'always pool'");
         self.chunk_arena_min_rows.set(rows);
+    }
+
+    /// Force the pooled round's per-layer device drain on (`Some(true)`), or off (`Some(false)`), instead of the
+    /// default (`None`): drain only on a backend whose submissions are not executed in order
+    /// ([`Gpu::submissions_ordered`]). On an ordered backend the drain is not what keeps a reused scratch slot safe
+    /// (the stream is), so the default lets the host record the next layer while the device runs this one.
+    /// A knob for an A/B and for the test that holds the two bit-identical.
+    pub fn set_chunk_arena_drain(&self, drain: Option<bool>) {
+        self.chunk_arena_drain.set(drain);
     }
 
     /// **Run a short chunk round as plain decode steps, or as a chunk.** On
@@ -4296,6 +4309,7 @@ impl Qwen35 {
         // a handful of times instead of once per layer. Half the ceiling, so
         // one more layer's allocations after the check cannot cross it.
         let reclaim_budget = g.reclaim_ceiling_bytes() / 2;
+        let drain_pooled = self.chunk_arena_drain.get().unwrap_or(!g.submissions_ordered());
         let types = self.cfg.layer_types();
         // The residual add, the norm and the activation quantisation between two linears as ONE launch
         // each, bit-identical to the unfused chain (see `run_decode_step`, which shares these gates).
@@ -4395,7 +4409,7 @@ impl Qwen35 {
             //
             // The second disjunct is a different obligation with the same
             // remedy - see `reclaim_budget` above.
-            if pooled || g.pending_reclaim_bytes() > reclaim_budget {
+            if (pooled && drain_pooled) || g.pending_reclaim_bytes() > reclaim_budget {
                 g.poll_wait();
             }
             g.flush();

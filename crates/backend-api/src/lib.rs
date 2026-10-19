@@ -1502,6 +1502,15 @@ pub trait Backend: Send + Sync {
         0
     }
 
+    /// Whether work submitted through ONE handle executes in submission order, so a dispatch recorded later
+    /// never starts before an earlier one on the same handle has finished with its buffers. A repeated pass
+    /// that recycles buffers across iterations (the prefill round's scratch arena) then owes no host-side
+    /// drain between iterations: stream order already keeps a writer behind the readers of the slot it
+    /// reuses. The default is `false` (a backend that may reorder or batch submissions keeps the drain).
+    fn submissions_ordered(&self) -> bool {
+        false
+    }
+
     /// Ask the backend to keep freed device blocks for reuse (`true`) or to
     /// return them and go back to freeing immediately (`false`).
     ///

@@ -1422,6 +1422,11 @@ mod native_facade {
             self.inner.hold_freed_blocks(on);
         }
 
+        /// See [`backend_api::Backend::submissions_ordered`].
+        pub fn submissions_ordered(&self) -> bool {
+            self.inner.submissions_ordered()
+        }
+
         /// Drop the default arena and every buffer it is holding. Blocks the backend
         /// has been holding for reuse stay held until the handle is dropped or
         /// [`Self::hold_freed_blocks`] is turned off: the next round wants

@@ -70,10 +70,15 @@ fn main() {
     let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
 
     // A/B switch: `BRAIN_PREFILL_ARENA=0` runs the rounds without the scratch arena
-    // (and so without its per-layer drain), `1` forces it on.
+    // (and so without its per-layer drain), `1` forces it on (its per-layer drain is skipped where the backend orders its
+    // submissions), `drain` forces it on WITH the per-layer drain.
     match std::env::var("BRAIN_PREFILL_ARENA").as_deref() {
         Ok("0") => inst.set_chunk_arena_min_rows(u32::MAX),
         Ok("1") => inst.set_chunk_arena_min_rows(1),
+        Ok("drain") => {
+            inst.set_chunk_arena_min_rows(1);
+            inst.set_chunk_arena_drain(Some(true));
+        }
         _ => {}
     }
 

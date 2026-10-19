@@ -1129,6 +1129,13 @@ impl Qwen35GgufInstance {
         }
     }
 
+    /// Every stage's [`Qwen35::set_chunk_arena_drain`].
+    pub fn set_chunk_arena_drain(&self, drain: Option<bool>) {
+        for s in &self.shards {
+            s.qwen35.set_chunk_arena_drain(drain);
+        }
+    }
+
     /// Every stage's [`Qwen35::set_exact_rounds`]: whether a short chunk round
     /// (a speculative verify round, a ragged prompt tail) runs as plain decode
     /// steps and so agrees with plain decode bit for bit. On by default; the
