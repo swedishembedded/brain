@@ -1374,7 +1374,7 @@ pub mod device_adapter {
     /// `W[o,i] += scale * sum_k B[o,k] * A[k,i]`, `A` is `[r,in]`, `B` is
     /// `[out,r]`, both row-major - the convention every device-adapter
     /// model's unfolded LoRA forward computes.
-    fn fold_delta(w: &mut [f32], a: &[f32], b: &[f32], r: usize, scale: f32) {
+    pub fn fold_delta(w: &mut [f32], a: &[f32], b: &[f32], r: usize, scale: f32) {
         let inn = a.len() / r;
         let out = b.len() / r;
         assert_eq!(w.len(), out * inn, "fold_delta: base weight shape does not match adapter rank/dims");

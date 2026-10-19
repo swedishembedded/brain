@@ -2322,6 +2322,23 @@ impl Qwen35 {
         self.splice = model::vlm::SpliceRuns::new(&self.gpu, runs, self.cfg.d_model);
     }
 
+    /// Turn the splice off again: the next `forward()` reads every row from
+    /// the token embedding (a text-only example after an image one).
+    pub fn disable_mm_splice(&mut self) {
+        self.splice = model::vlm::SpliceRuns::none();
+    }
+
+    /// The AdamW moments of trainable parameter `name` (`None` before the
+    /// first step or for a frozen one) - what a resumable checkpoint saves.
+    pub fn read_moments(&self, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+        self.ps.read_moments(&self.gpu, name)
+    }
+
+    /// Restore [`Self::read_moments`]'s values.
+    pub fn write_moments(&self, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
+        self.ps.write_moments(&self.gpu, name, m, v)
+    }
+
     /// Write the projected image tokens of every run (`[sum n_rows, d_model]`,
     /// row-major, in run order) to splice into the residual stream on the next
     /// `forward()`.

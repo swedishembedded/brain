@@ -141,7 +141,13 @@ impl TensorSource for AdapterOverlay {
 /// this base, is refused: its factors only mean what they mean at their own
 /// shape and scale.
 pub fn lora_base(path: &Path, rank: u32, alpha: f32, seed: u64, resume_from: Option<&Path>) -> Result<(Qwen35Config, AdapterOverlay), String> {
-    let BaseCheckpoint { mut cfg, src } = open_base(path)?;
+    lora_overlay(open_base(path)?, rank, alpha, seed, resume_from)
+}
+
+/// [`lora_base`] over a base already opened - a multimodal wrapper's decoder
+/// source, say, whose checkpoint also holds tensors this crate does not own.
+pub fn lora_overlay(base: BaseCheckpoint, rank: u32, alpha: f32, seed: u64, resume_from: Option<&Path>) -> Result<(Qwen35Config, AdapterOverlay), String> {
+    let BaseCheckpoint { mut cfg, src } = base;
     cfg.lora = Some(lora_cfg(rank, alpha));
     let mut adapter = None;
     if let Some(file) = resume_from {
