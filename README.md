@@ -34,41 +34,36 @@ Rust SDK.
 
 | | Models | What you can do |
 |---|---|---|
-| **Text** | Qwen3, Qwen3.5, Qwen3.8, GLM, GPT, LFM2.5 | chat, tool calls, embeddings; serve many users at once; train from scratch; fine-tune with LoRA |
+| **Text** | Qwen3, Qwen3.5, GLM, GPT, LFM2.5 | chat, tool calls, embeddings; serve many users at once; train from scratch; fine-tune with LoRA |
 | **Vision** | YOLOv8, SAM 2.1, ZipDepth, SCRFD, ArcFace, CLIP, Florence-2 | object detection, segmentation and video tracking, depth, face detection and recognition |
 | **Vision and language** | Qwen3-VL, MiniCPM-V, FastVLM, Moondream 3, DeepSeek-OCR, Qwen3-Omni | describe images, answer questions about them, turn documents into markdown |
-| **Image generation** | Z-Image, FLUX.2 Klein, FLUX.1 Kontext, SDXL, ControlNet, PuLID | text to image, editing, inpainting, style and identity control, LoRA training |
-| **Image restoration** | CodeFormer, Real-ESRGAN, SUPIR | face restoration, 4x upscaling |
-| **Video** | Wan 2.1/2.2, LTX-2.5 | text to video, written straight to an mp4 |
+| **Image and video generation** | Z-Image, FLUX.2 Klein, FLUX.1 Kontext, SDXL, Wan, LTX | text to image, editing, inpainting, identity control, LoRA training, text to video |
 | **Speech and audio** | Qwen3-TTS, CosyVoice, Nemotron ASR, Qwen3-ASR, MiniMax Music | text to speech with voice cloning, speech to text, music |
-| **Forecasting** | Chronos-2, Kronos, FinCast, TimesFM | time-series forecasts with uncertainty, and a backtester to score them |
-| **3D** | WorldMirror-2, Gaussian Splatting | turn photos into a 3D scene you can fly through |
-| **World models** | DIAMOND, GenieRedux | playable, action-driven video simulations |
-| **A digital animal** | [the fruit fly](docs/reference/models/fly.md) | a fruit-fly nervous system, run as a spiking network, moving a simulated body |
+| **Forecasting, 3D, world models** | Chronos-2, Kronos, WorldMirror-2, DIAMOND | time-series forecasts, photos to 3D scenes, playable simulations |
 
 Every model is used the same way: `brain <model> <action>` on the command
-line, and the same models over HTTP, D-Bus and the SDK. The full catalog, with
-a page per model saying what it supports and what it does not yet, is
+line, and the same models over HTTP, D-Bus and the SDK. The catalog, with a
+page per model saying what it supports and what it does not yet, is
 [`docs/reference/models/index.md`](docs/reference/models/index.md).
 
 ## Hardware
 
 brain picks up whatever compute the machine has; `brain devices` shows what it
-found.
+found. Four backends are compiled into every native build and share the same
+kernels; pick a device with `--device` and a backend with `--backend`:
 
-| Hardware | How brain runs on it |
+| Backend | Runs on |
 |---|---|
-| **NVIDIA GPUs** | natively through the NVIDIA driver (CUDA), with hand-tuned kernels for the hottest paths; nothing to install at build time ([`docs/guides/hardware/cuda.md`](docs/guides/hardware/cuda.md)) |
-| **Any modern GPU** | through Vulkan, Metal or DirectX 12: NVIDIA, AMD, Intel and Apple |
-| **CPU only** | the same models, compiled for the CPU's cores; slower, but nothing else needed |
-| **Intel NPU** | through OpenVINO, for the models that support it |
-| **A browser tab** | through WebGPU |
+| `wgpu` (default) | any GPU with a Vulkan, Metal or DirectX 12 driver: NVIDIA, AMD, Intel, Apple; also WebGPU in a browser |
+| `vulkan` | Vulkan driven directly |
+| `cuda` | NVIDIA GPUs through the driver, with hand-written kernels for the hottest paths ([details](docs/guides/hardware/cuda.md)) |
+| `cpu` | the CPU's cores; slower, but nothing else needed |
 
-Pick a device with `--device` (`--device gpu0`, `--device gpu`, `--device cpu`)
-and a GPU backend with `--backend` (`cuda`, `vulkan`, `wgpu`). A model too big
-for one card can be split across several, quantized to INT8 or INT4, or
-streamed from memory as it runs ([`docs/guides/hardware/choosing-hardware.md`](docs/guides/hardware/choosing-hardware.md),
-[`docs/concepts/scaling/overview.md`](docs/concepts/scaling/overview.md)).
+The **Intel NPU** is a separate path for a subset of models: they are exported
+to ONNX and run through OpenVINO rather than on brain's own kernels, and it is
+opt-in per model (each model page says whether it has one). A model too big for
+one card can be split across several, quantized, or streamed from memory as it
+runs ([`docs/guides/hardware/choosing-hardware.md`](docs/guides/hardware/choosing-hardware.md)).
 
 ## Get started
 
@@ -87,215 +82,44 @@ $ brain infer qwen3 --prompt "The capital of France is" --max-new 12
 The capital of France is Paris. The capital of Italy is Rome. The capital of
 ```
 
-Serve it behind an OpenAI-compatible API:
+Serve it behind an OpenAI-compatible API (it also speaks the Anthropic and
+OpenRouter APIs and D-Bus):
 
 ```bash
 $ brain serve --openai 8799 &
-APIKEY openai sk-brain-...
 $ curl http://127.0.0.1:8799/v1/chat/completions -H "Authorization: Bearer $APIKEY" \
     -H 'Content-Type: application/json' \
     -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Say hello in exactly five words."}]}'
 ```
 
-The server answers many requests together rather than one after another, keeps
-several models loaded within a memory budget, and also speaks the Anthropic and
-OpenRouter APIs and D-Bus. `braintop` shows what it is doing
-([`docs/guides/serving/serving.md`](docs/guides/serving/serving.md),
-[`docs/guides/serving/monitoring.md`](docs/guides/serving/monitoring.md)).
-
-A few more commands to find your way around:
-
-```bash
-brain pull Qwen/Qwen3-0.6B                  # download a model ahead of time
-brain caps                                  # every model and what it can do
-brain models list                           # what is on disk, and what it needs to run
-```
-
-[`docs/getting-started/quickstart.md`](docs/getting-started/quickstart.md) trains a
-small model from scratch and serves a real one in about five minutes.
-
-## See it work
-
-Every command below is real, and every picture is that command's output. The
-first few feed into each other: one model's output is the next model's input.
-
-### Generate an image, then take it apart
-
-```bash
-$ brain --device gpu s3dit text2image \
-    --prompt "a golden retriever dog and a red apple on a wooden table, photorealistic, natural lighting" \
-    --width 512 --height 512 --seed 7 --steps 8 --precision int8 --out image=seed.png   # the seed reproduces the picture below
-```
-
-![a golden retriever dog with a red apple, generated by s3dit](docs/getting-started/img/seed.png)
-
-A detector finds what the prompt asked for: an apple, a dog and a dining table.
-
-```bash
-$ brain yolov8 detect --weights <models>/Ultralytics/YOLOv8/model.brain.safetensors --image seed.ppm
-brain yolov8 detect: 3 detection(s) on 512x512
-```
-
-![the image with yolov8's detection boxes drawn on it](docs/getting-started/img/detected.png)
-
-A segmentation model cuts out the dog from one click, and a depth model
-estimates how far away everything is:
-
-```bash
-$ brain sam2 segment --in image=seed.png --points "220,180" --labels "1" --out mask=dog-mask.png
-$ brain zipdepth --image seed.ppm --weights <models>/zipdepth/zipdepth_base.pth \
-    --headless --view depth --colormap turbo --out depth.ppm
-```
-
-| segmentation (sam2) | depth (zipdepth) |
-|---|---|
-| ![the sam2 segmentation mask, isolating the dog](docs/getting-started/img/segmented.png) | ![zipdepth's depth estimate, the apple nearest and the background farthest](docs/getting-started/img/depth.png) |
-
-### Change everything except what you selected
-
-Turn the dog mask around and regenerate the rest of the picture. The dog stays
-exactly as it was; the table, the apple and the background change:
-
-```bash
-$ brain --device gpu s3dit inpaint --in image=seed.png --in mask=bg-mask.png \
-    --prompt "a golden retriever dog sitting behind a slice of chocolate cake on a white marble kitchen countertop, bright natural daylight, blurred modern kitchen background, photorealistic" \
-    --strength 1.0 --feather 0 --steps 8 --precision int8 \
-    --out image=inpainted.png
-```
-
-![the seed image with the table, apple and background replaced, the dog unchanged](docs/getting-started/img/inpainted.png)
-
-### Restore a damaged face, and check it is still the same person
-
-One model finds the face, a second restores a badly damaged copy, and a third
-compares the result with the original to check that the restoration kept the
-person's identity:
-
-```bash
-$ brain scrfd detect --in image=portrait.png --json
-$ brain codeformer restore_face --w 1.0 --in image=degraded.png --out image=restored.png
-$ brain arcface embed --align false --in image=restored.png --out embedding=restored.bin
-```
-
-![an original face, a badly damaged copy, and two restorations, each labelled with how close it is to the original](docs/getting-started/img/face-restore.jpg)
-
-The restoration at `w=1.0` is closer to the original than the damaged copy, both
-pixel by pixel and by identity. The one at `w=0.0` looks just as good and is
-further away on both: the third model catches what the eye does not
-([`docs/reference/models/codeformer.md`](docs/reference/models/codeformer.md)). The original
-portrait was generated by brain; it is not a photograph of a real person.
-
-### Furnish an empty room with a LoRA you trained
-
-Generate an empty room, then furnish it in a style learned from your own
-pictures, keeping the room itself:
-
-```bash
-$ brain --device gpu flux2 generate --variant klein-9b --precision int8 \
-    --prompt "Photorealistic professional real estate photograph of an empty unfurnished bedroom. Bare white walls, plain light oak floorboards, a single large window, a radiator under the window, a white panelled door. Completely empty room, no furniture, no rugs, no curtains." \
-    --width 1024 --height 768 --seed 20260827 --out empty-room.png   # the seed reproduces the picture below
-$ brain --device gpu flux2 generate --variant klein-9b --precision int8 \
-    --ref empty-room.png --strength 1.0 --ref-size 768 \
-    --adapter boho.brain --lora-scale 1.0 \
-    --prompt "a bohemian style room, photorealistic interior photograph, warm natural daylight, layered textiles and patterned fabrics, rattan and natural wood, plants, eclectic decor, professional real estate photography" \
-    --width 1024 --height 768 --seed 7 --out staged-room.png   # the seed reproduces the picture below
-```
-
-| before | after |
-|---|---|
-| ![an empty unfurnished bedroom](docs/reference/models/flux2/staging-source.jpg) | ![the same room furnished in a bohemian style](docs/reference/models/flux2/staging-result.jpg) |
-
-`brain flux2 finetune <captioned-image-dir> --out boho.brain` trains the style
-adapter; LoRA files from other tools load too
-([`docs/reference/models/flux2.md`](docs/reference/models/flux2.md)).
-
-### Text to video
-
-```bash
-$ brain --device gpu wan t2v \
-    --prompt "a golden retriever running along a sandy beach at sunset, waves in the background, cinematic" \
-    --frames 9 --width 416 --height 240 --steps 20 --seed 7 --output-path wan.mp4   # the seed reproduces the picture below
-```
-
-![five frames of the generated clip: a dog running along the waterline at sunset](docs/getting-started/img/wan-strip.png)
-
-### Text to speech and back
-
-```bash
-$ brain qwen3tts synth --text "Brain trains and runs neural networks from scratch, in Rust." --out spoken.wav
-$ brain nemotronasr transcribe --in audio=spoken.wav --json
-{"text":"Brain trains and runs neural networks from scratch in rust. ",...}
-```
-
-### Read a document
-
-```bash
-$ brain deepseek2ocr generate --in image=doc.png --prompt "<|grounding|>Convert the document to markdown."
-Brain trains and runs neural networks from scratch, in Rust.
-```
-
-### Forecast, and score the forecast
-
-```bash
-$ brain forecast predict --csv crates/kronos/tests/data/synthetic_hourly.csv \
-    --horizon 6 --samples 16 --origins 16 --gnuplot kronos-forecast.png
-```
-
-![a chart of the history, the actual continuation and the model's forecast with its uncertainty band](docs/getting-started/img/kronos-forecast.png)
-
-The forecast is scored against data the model never saw and against simple
-baselines, and the report says where the model's uncertainty band was too
-narrow rather than hiding it ([`docs/reference/models/kronos.md`](docs/reference/models/kronos.md)).
-
-### A fruit fly's nervous system, running
-
-A real *Drosophila* connectome, mapped by published neuroscience work, run as a
-network of spiking neurons on the GPU and moving a simulated body through the
-animal's own motor neurons:
-
-```bash
-$ make samples/fly/interactive/run ARGS="--connectome $BRAIN_CONNECTOME_DIR --body $BRAIN_FLYBODY_FRUITFLY_XML --frames 240"
-```
-
-![four frames of the connectome-driven fruit fly](docs/getting-started/img/fly-strip.jpg)
-
-It moves its legs; it does not walk yet. [`docs/reference/models/fly.md`](docs/reference/models/fly.md)
-says which behaviours are there and which are not.
+[`docs/getting-started/quickstart.md`](docs/getting-started/quickstart.md) trains
+a small model from scratch and serves a real one in about five minutes, and
+[`docs/getting-started/tour.md`](docs/getting-started/tour.md) shows real
+commands and their output, one model feeding the next.
 
 ## How you know it works
 
 brain does not lean on another framework to be correct, so it checks itself:
 
 - **Every imported model is compared with its reference implementation**, step
-  by step, by tests you can run; the agreement each one reached is in the test.
-- **Training is checked numerically.** The gradients brain computes are
-  compared with finite differences (`make test/gradcheck`).
-- **Backends are checked against each other.** The same computation must give
-  the same answer on every backend (`make test/parity`).
+  by step, by tests you can run.
+- **Training is checked numerically** against finite differences (`make test/gradcheck`).
+- **Backends are checked against each other** (`make test/parity`).
 - **Limits are written down.** Where a model is not yet trainable, not yet
   servable or not checked at full size, its page says so.
 
-`make test` runs the test suite.
-
 ## Documentation
+
+Everything is under [`docs/`](docs/index.md) and is published at
+<https://swedishembedded.com/docs/brain>.
 
 | | |
 |---|---|
-| **All documentation** | [`docs/index.md`](docs/index.md) |
-| What brain is | [`docs/getting-started/what-is-brain.md`](docs/getting-started/what-is-brain.md) |
-| Install and build | [`docs/getting-started/install.md`](docs/getting-started/install.md) |
-| Quickstart | [`docs/getting-started/quickstart.md`](docs/getting-started/quickstart.md) |
-| Hardware and devices | [`docs/guides/hardware/choosing-hardware.md`](docs/guides/hardware/choosing-hardware.md) |
-| NVIDIA GPUs | [`docs/guides/hardware/cuda.md`](docs/guides/hardware/cuda.md) |
-| Model catalog | [`docs/reference/models/index.md`](docs/reference/models/index.md) |
-| The command line | [`docs/reference/cli.md`](docs/reference/cli.md) |
-| Serving over HTTP and D-Bus | [`docs/guides/serving/serving.md`](docs/guides/serving/serving.md) |
-| The Rust SDK | [`docs/reference/sdk.md`](docs/reference/sdk.md) |
-| Configuration | [`docs/reference/configuration.md`](docs/reference/configuration.md) |
-| Fine-tuning with LoRA | [`docs/guides/training/lora.md`](docs/guides/training/lora.md) |
-| Using several GPUs | [`docs/concepts/scaling/overview.md`](docs/concepts/scaling/overview.md) |
-| Performance | [`docs/concepts/execution/performance.md`](docs/concepts/execution/performance.md) |
-| Contributing | [`AGENTS.md`](AGENTS.md) |
+| Start | [`docs/index.md`](docs/index.md), [install](docs/getting-started/install.md), [quickstart](docs/getting-started/quickstart.md) |
+| Guides | [inference](docs/guides/inference/models-and-weights.md), [training](docs/guides/training/lora.md), [hardware](docs/guides/hardware/choosing-hardware.md), [serving](docs/guides/serving/serving.md) |
+| Concepts | [architecture](docs/concepts/architecture.md), [scaling across GPUs](docs/concepts/scaling/overview.md) |
+| Reference | [CLI](docs/reference/cli.md), [SDK](docs/reference/sdk.md), [configuration](docs/reference/configuration.md), [models](docs/reference/models/index.md) |
+| Contributing | [`docs/contributing/index.md`](docs/contributing/index.md), [`AGENTS.md`](AGENTS.md) |
 
 ## Who builds brain
 

@@ -11,6 +11,7 @@ navigation:
       - docs/getting-started/what-is-brain.md
       - docs/getting-started/install.md
       - docs/getting-started/quickstart.md
+      - docs/getting-started/tour.md
   - title: Guides
     pages:
       - title: Inference
