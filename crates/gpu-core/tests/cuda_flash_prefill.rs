@@ -559,3 +559,35 @@ fn the_int8_cache_prefill_rates_at_the_serving_chunk() {
     let diff = out[0].iter().zip(&out[1]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
     eprintln!("cuda_flash_prefill: version 1 vs version 2 max |diff| {diff:.2e} on outputs of rms {:.2e}", rms(&out[0]));
 }
+
+/// Scores are exponentiated, so an error in `q . k` becomes a relative error in the attention weight: what matters is
+/// the absolute error of the score, which grows with the operands' magnitude, and the unit-scale cases above hide that.
+/// A real model's scaled scores reach several tens, so this scales queries and keys until the scores have a standard
+/// deviation of `mag * mag` (up to 16) and holds both kernel versions to the portable fp32 kernel by relative L2 over
+/// the whole output. Measured: 3e-4 at unit scale growing to 1.3e-3 at 4x; the bar is 3e-3. (Through the 27B's logits the
+/// same kernels differ from fp32 by 0.1 - that is the W8A8 model's own sensitivity, `qwen35_gguf_logit_check` reports it
+/// next to its floor - so the kernel is gated here, where the cause of an error can be told.)
+#[test]
+fn both_flash_versions_stay_close_to_fp32_at_large_score_magnitudes() {
+    let Some(gpu) = device() else { return };
+    for kv in [Kv::Bf16, Kv::Int8] {
+        for mag in [1.0f32, 2.0, 4.0] {
+            let mut p = Problem::new(Case { n: 128, start: 1920, block_size: 4096, scatter: false }, 5);
+            p.q.iter_mut().for_each(|x| *x *= mag);
+            p.k_pool.iter_mut().for_each(|x| *x *= mag);
+            let (seen, stored) = p.as_stored(kv);
+            let d = TierDevice::upload(&gpu, &seen, kv, &stored);
+            let want = d.base.run(&gpu, &d.portable(&gpu, &seen), &seen);
+            let norm = want.iter().map(|a| (*a as f64).powi(2)).sum::<f64>();
+            for v2 in [false, true] {
+                gpu_core::provider::cuda::set_flash_prefill_v2(v2);
+                let step = d.native(&gpu, &seen).expect("the production helper must take a head_dim-256 request on this device");
+                let got = d.base.run(&gpu, &step, &seen);
+                gpu_core::provider::cuda::set_flash_prefill_v2(false);
+                let rel = (want.iter().zip(&got).map(|(a, b)| ((a - b) as f64).powi(2)).sum::<f64>() / norm).sqrt();
+                eprintln!("cuda_flash_prefill: {kv:?} score scale {}x v2={v2}: rel-L2 to the portable kernel {rel:.2e}", mag * mag);
+                assert!(rel <= 3e-3, "{kv:?} at score scale {}x, v2={v2}: rel-L2 {rel:.2e} from the fp32 kernel (bar 3e-3)", mag * mag);
+            }
+        }
+    }
+}

@@ -15,7 +15,7 @@
 //! numeric drift), and whether the logits are bit-identical.
 //!
 //! Usage: `qwen35_gguf_logit_check <Q8_0.gguf> <text file> [--prompts 4] [--prompt-tokens 4000] [--steps 24]
-//!        [--device gpu1] [--backend cuda] [--kv int8] [--dump DIR] [--dry-run] [--raw]`
+//!        [--device gpu1] [--backend cuda] [--kv int8] [--dump DIR] [--dry-run] [--raw] [--assert-within-floor M]`
 //!
 //! The prompt is the served chat rendering (user turn, then the assistant turn with an empty think block, as the
 //! server renders `enable_thinking: false`), and the continuation is the greedy decode-tape trace of
@@ -150,13 +150,19 @@ fn main() {
         Setting { name: "flash v1 + fused + no drain (the default)", portable: false, v2: false, fusion: true, drain: false },
     ];
 
+    let mut floors: Vec<f64> = Vec::new();
+    let mut means: Vec<Vec<f64>> = vec![Vec::new(); settings.len()];
     for p in 0..prompts {
         let prompt = inst.tokenize(&render(window(&text, p, ptoks), raw));
         let prompt: Vec<u32> = prompt.into_iter().take(cap as usize - steps - 8).collect();
         apply(&inst, &settings[0]);
-        let ids = inst.tape_comparison_trace(&prompt, steps as u32).expect("greedy trace").ids;
+        let trace = inst.tape_comparison_trace(&prompt, steps as u32).expect("greedy trace");
+        let floor = trace.decode.iter().zip(&trace.chunk).map(|(x, y)| rel_l2(x, y)).sum::<f64>() / steps as f64;
+        floors.push(floor);
+        let ids = trace.ids;
         assert_eq!(ids.len(), steps, "prompt {p}: the greedy trace has {} tokens, {steps} were asked for: refusing to compare over fewer", ids.len());
-        println!("prompt {p}: {} tokens; orig greedy continuation {:?}", prompt.len(), ids);
+        println!("prompt {p}: {} tokens; greedy continuation {:?}", prompt.len(), ids);
+        println!("  numerics floor (this model's own decode tape vs its chunk tape, same kernels): mean rel-L2 {floor:.2e}");
         let mut base: Option<Vec<Vec<f32>>> = None;
         for (si, s) in settings.iter().enumerate() {
             apply(&inst, s);
@@ -167,6 +173,7 @@ fn main() {
                 None => println!("  {:<38} reference", s.name),
                 Some(b) => {
                     let rels: Vec<f64> = rows.iter().zip(b).map(|(x, y)| rel_l2(x, y)).collect();
+                    means[si].push(rels.iter().sum::<f64>() / rels.len() as f64);
                     let identical = rows.iter().zip(b).all(|(x, y)| x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits()));
                     let flips: Vec<String> = rows
                         .iter()
@@ -198,6 +205,16 @@ fn main() {
             if base.is_none() {
                 base = Some(rows);
             }
+        }
+    }
+    let floor = floors.iter().sum::<f64>() / floors.len() as f64;
+    println!("SUMMARY numerics floor {floor:.3e} (mean over {} prompts)", floors.len());
+    let bound: Option<f64> = flag("--assert-within-floor").and_then(|v| v.parse().ok());
+    for (si, s) in settings.iter().enumerate().skip(1) {
+        let mean = means[si].iter().sum::<f64>() / means[si].len().max(1) as f64;
+        println!("SUMMARY {:<42} mean rel-L2 to the reference {mean:.3e} = {:.2}x the floor", s.name, mean / floor);
+        if let Some(m) = bound {
+            assert!(mean <= m * floor, "{}: mean rel-L2 {mean:.3e} exceeds {m}x the numerics floor {floor:.3e}", s.name);
         }
     }
 }
