@@ -1226,7 +1226,9 @@ fn serve_accuracy(a: &[String]) {
         let lse = mx + row.iter().map(|x| (x - mx).exp()).sum::<f64>().ln();
         row.iter().map(|x| x - lse).collect()
     };
-    let mut reference: Option<(Vec<Vec<f64>>, Vec<Vec<u32>>)> = None;
+    /// Per-prompt log-softmax rows and the greedy tokens of the reference tier.
+    type Outcome = (Vec<Vec<f64>>, Vec<Vec<u32>>);
+    let mut reference: Option<Outcome> = None;
     for (label, tier, precision) in tiers {
         let t0 = Instant::now();
         let mut eng = qwen3::serve::Engine::from_map_tier(cfg.clone(), &tensors, bs, num_blocks, 8, mbs, 512, kv_int8, tier);
@@ -1237,7 +1239,7 @@ fn serve_accuracy(a: &[String]) {
             let mut table = BlockTable::new();
             logits.push(log_softmax(&logits_of(&eng.prefill_for_perf(&mut table, p))));
         }
-        let greedy = eng.generate_greedy(&prompts[..greedy_prompts].to_vec(), gen, None);
+        let greedy = eng.generate_greedy(&prompts[..greedy_prompts], gen, None);
         drop(eng);
         match &reference {
             None => {
