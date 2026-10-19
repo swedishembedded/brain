@@ -94,6 +94,9 @@ pub(crate) struct NodeSig {
     /// rewrites: two submissions differing only in a slice length must not
     /// share a graph.
     pub lens: Vec<u64>,
+    /// The vendor-library product this step stands for, as its descriptor's text: a graph holds the library's
+    /// kernels with the product's dimensions baked in, so two submissions that differ in them must not share one.
+    pub library: Option<String>,
 }
 
 /// A whole submission's structure.
@@ -168,6 +171,9 @@ pub(crate) struct LiveNode {
     /// what forces the wait below, so a submission that repeats unchanged
     /// costs one `cuGraphLaunch` and no synchronisation at all.
     staged: Vec<u32>,
+    /// A vendor-library product: the library's own kernels sit in the graph, with nothing a replay may change, so
+    /// the replay leaves it alone.
+    library: bool,
     _uniform: Option<Weak<exec::DeviceMem>>,
     _bufs: Vec<(Weak<exec::DeviceMem>, u64)>,
 }
@@ -460,12 +466,19 @@ impl GraphCache {
                 args[0] = block.device_ptr() + (at * 4) as u64;
             }
             let (gx, gy) = backend_api::grid_ws(s.threads, s.per_block);
-            // SAFETY: `s.func` was resolved from `s.compiled`'s module, which
-            // the node below keeps loaded, and `s.args` is the argument list
-            // that module's entry point takes.
-            unsafe { ctx.launch_shaped(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &s.compiled.shape, &args)? };
+            if let Some(gemm) = &s.library {
+                // The product's `A`, `B` and `C` are the placeholder's first three arguments (see `Resolved::library`).
+                // The library enqueues its own kernels on the capture stream; the node entry is inert in a replay.
+                ctx.library_gemm(gemm, args[0], args[1], args[2])?;
+            } else {
+                // SAFETY: `s.func` was resolved from `s.compiled`'s module, which
+                // the node below keeps loaded, and `s.args` is the argument list
+                // that module's entry point takes.
+                unsafe { ctx.launch_shaped(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &s.compiled.shape, &args)? };
+            }
             nodes.push(LiveNode {
-                node: capture.last_node()?,
+                node: if s.library.is_some() { std::ptr::null_mut() } else { capture.last_node()? },
+                library: s.library.is_some(),
                 func: s.func,
                 compiled: s.compiled.clone(),
                 block_dim: s.compiled.block_dim,
@@ -544,9 +557,10 @@ impl GraphCache {
         // therefore free of any wait, which is the whole reason the comparison
         // is made before the writes rather than after them.
         let changed = live.nodes.iter().zip(steps).any(|(n, s)| {
-            n.threads != s.threads
+            !n.library
+                && (n.threads != s.threads
                 || n.args[n.scalar_at..] != s.args[s.scalar_at..]
-                || (n.staging.is_some() && n.staged != s.params)
+                || (n.staging.is_some() && n.staged != s.params))
         });
         if changed && self.in_flight {
             counters.staging_waits.fetch_add(1, Ordering::Relaxed);
@@ -554,6 +568,9 @@ impl GraphCache {
             self.in_flight = false;
         }
         for (node, step) in live.nodes.iter_mut().zip(steps) {
+            if node.library {
+                continue;
+            }
             if let (Some((at, _)), Some(st)) = (node.staging, live.staging.as_ref()) {
                 if node.staged != step.params {
                     st.fill_at(at, &step.params);

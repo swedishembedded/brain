@@ -519,3 +519,64 @@ fn a_profiled_program_reports_every_dispatch_of_every_kernel() {
         assert!(got.iter().zip(&want).all(|(g, w)| (g - 4.0 * 0.5 * w).abs() <= 1e-5 * w.abs()), "profiled runs must execute the program");
     }
 }
+
+/// A submission that holds a vendor-library product is captured and replayed like any other: the library's kernels
+/// sit in the graph, the neighbouring kernel nodes still take each submission's own parameters, and every round
+/// computes what issuing the steps one at a time would.
+#[test]
+fn a_submission_holding_a_library_product_is_captured_and_replayed() {
+    let Some(b) = backend() else { return };
+    if let Some(why) = b.library_gemm_unavailable() {
+        brain_testutil::skip_unavailable(&format!("no library GEMM: {why}"));
+        return;
+    }
+    const ROUNDS: usize = 6;
+    const D: usize = 32;
+    let a_host: Vec<f32> = (0..D * D).map(|i| ((i * 7 % 13) as f32 - 6.0) * 0.25).collect();
+    let b_host: Vec<f32> = (0..D * D).map(|i| ((i * 5 % 11) as f32 - 5.0) * 0.5).collect();
+    let (a, bb) = (b.storage_init("a", &a_host), b.storage_init("b", &b_host));
+    let (c, out) = (b.storage((D * D) as u64), b.storage((D * D) as u64));
+    // Column-major C = A B, exact fp32 (no TF32 rounding), so the host oracle below is exact.
+    let gemm = backend_api::LibraryGemm {
+        trans_a: false,
+        trans_b: false,
+        m: D as u32,
+        n: D as u32,
+        k: D as u32,
+        lda: D as u32,
+        ldb: D as u32,
+        ldc: D as u32,
+        a: backend_api::LibraryDtype::F32,
+        b: backend_api::LibraryDtype::F32,
+        c: backend_api::LibraryDtype::F32,
+        alpha: 1.0,
+        beta: 0.0,
+        batch: 1,
+        stride_a: 0,
+        stride_b: 0,
+        stride_c: 0,
+        tf32: false,
+    };
+    let before = b.launch_stats();
+    let mut scale_sum = 0.0f32;
+    for round in 0..ROUNDS {
+        let s = 0.25 + round as f32 * 0.125;
+        scale_sum += s;
+        let product = b.step_library_gemm(&gemm, &[&a, &bb, &c], &[(0, 0); 3]).expect("the library product is offered");
+        // `out += s * C`: reads the product the library step wrote, with this round's scale.
+        let accumulate = b.step(AXPY, &[&out, &c], &[(D * D) as u32, s.to_bits()], (D * D) as u32);
+        b.submit(&[], &[product, accumulate]);
+    }
+    b.poll_wait();
+    let after = b.launch_stats();
+    assert_eq!(after.graph_captures - before.graph_captures, 1, "the same shape was captured more than once");
+    assert!(after.graph_replays - before.graph_replays >= (ROUNDS - 2) as u64, "{ROUNDS} identical submissions produced only {} replays", after.graph_replays - before.graph_replays);
+    let got = b.read(&out, D * D);
+    for j in 0..D {
+        for i in 0..D {
+            let truth: f32 = (0..D).map(|l| a_host[i + l * D] * b_host[l + j * D]).sum();
+            let want = scale_sum * truth;
+            assert!((got[i + j * D] - want).abs() <= 1e-4 * want.abs().max(1.0), "C[{i},{j}]: got {}, want {want}", got[i + j * D]);
+        }
+    }
+}

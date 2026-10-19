@@ -1121,6 +1121,7 @@ impl CudaBackend {
                     words: r.params.len(),
                     bufs: r.bufs.iter().map(|(m, off)| (Arc::as_ptr(m) as usize, *off)).collect(),
                     lens: r.lens.clone(),
+                    library: r.library.as_ref().map(|g| format!("{g:?}")),
                 })
                 .collect(),
         }
@@ -1182,10 +1183,9 @@ impl CudaBackend {
         let mut handled = false;
         let mut give_up = false;
         let timing = self.timing.load(Ordering::Acquire);
-        // A library product is several kernels the graph's per-node bookkeeping
-        // cannot track, so a submission holding one is issued step by step.
-        let has_library = resolved.iter().any(|r| r.library.is_some());
-        if let (Some(cache), false, false) = (&self.graph, timing, has_library) {
+        // A library product is captured into the graph like a kernel, with its descriptor in the submission's
+        // signature; a replay leaves its nodes untouched (nothing about them can change under the same signature).
+        if let (Some(cache), false) = (&self.graph, timing) {
             let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
             let sig = self.signature(&clears, &resolved);
             // Read AFTER the signature is built: every allocation the

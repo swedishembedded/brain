@@ -2476,11 +2476,20 @@ impl Engine {
             // fp32, so this is the ONE place that limit bites unconditionally.
             s.extend(self.embed_tiled(g, &sc.res[0], b));
         }
-        // The residual add and the norm that follows it are one native launch on an engine with no int8 activation
-        // quant to fold (the unfused pair otherwise): `add_rmsnorm_fwd` writes the sum and the normed row.
-        let fuse_add_rms = self.i8_scratch.is_none() && !self.gemm.is_reference_pinned();
-        let add_rms = |s: &mut Vec<Step>, a: &DeviceBuffer, b2: &DeviceBuffer, nw: &DeviceBuffer, sum: &DeviceBuffer, out: &DeviceBuffer| -> bool {
-            match fuse_add_rms.then(|| block::native_add_rmsnorm(g, &[a, b2, nw, sum, out], d, b, self.cfg.rms_eps)).flatten() {
+        // The residual add and the norm that follows it are one native launch: `add_rmsnorm_fwd` on an engine with no
+        // int8 activation quant to fold, `add_rms_quant` (the add, the norm and the int8 packing the next linears
+        // read, to the bit what the unfused chain produces) on an int8 engine. `quant` is whether the norm's reader
+        // is an int8 linear (the final norm's is the fp32 head). The unfused pair otherwise.
+        let native = !self.gemm.is_reference_pinned();
+        let add_rms = |s: &mut Vec<Step>, a: &DeviceBuffer, b2: &DeviceBuffer, nw: &DeviceBuffer, sum: &DeviceBuffer, out: &DeviceBuffer, quant: bool| -> bool {
+            let step = match &self.i8_scratch {
+                None => native.then(|| block::native_add_rmsnorm(g, &[a, b2, nw, sum, out], d, b, self.cfg.rms_eps)).flatten(),
+                Some(scratch) if native && quant && self.caps.workgroup_reductions && g.has_fused(gpu_core::Fused::AddRmsQuant) && gpu_core::Fused::AddRmsQuant.serves(&[d, b, 0, 1]) => {
+                    g.fused_step(gpu_core::Fused::AddRmsQuant, &[a, b2, nw, sum, out, scratch.xq_for(d), &scratch.sx], &[d, b, gpu_core::f(self.cfg.rms_eps), 1])
+                }
+                Some(_) => None,
+            };
+            match step {
                 Some(step) => {
                     s.push(step);
                     true
@@ -2678,7 +2687,7 @@ impl Engine {
             if lora {
                 self.lora_correct(&mut s, l, LoraSite::Wo, &sc.ctx, &sc.proj, b, d, 0);
             }
-            if !add_rms(&mut s, &sc.res[l], &sc.proj, w(&p("ln2.weight")), &sc.xmid, &sc.xn2) {
+            if !add_rms(&mut s, &sc.res[l], &sc.proj, w(&p("ln2.weight")), &sc.xmid, &sc.xn2, true) {
                 s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
                 // M4.3: same fusion as ln1 above, for `sc.xn2` -> gate/up.
                 self.rms_quant(&mut s, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b, lora && self.lora_reads(&[LoraSite::Gate, LoraSite::Up]));
@@ -2704,7 +2713,7 @@ impl Engine {
             // The layer's closing add and the next norm (the next layer's ln1, or the final norm after the last).
             let next_norm = if l + 1 < c.n_layers as usize { w(&format!("blocks.{}.ln1.weight", l + 1)) } else { w("norm.weight") };
             let next_out = if l + 1 < c.n_layers as usize { &sc.xn1 } else { &sc.xn_final };
-            ln1_done = add_rms(&mut s, &sc.xmid, &sc.mlp_out, next_norm, &sc.res[l + 1], next_out);
+            ln1_done = add_rms(&mut s, &sc.xmid, &sc.mlp_out, next_norm, &sc.res[l + 1], next_out, l + 1 < c.n_layers as usize);
             if !ln1_done {
                 s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[b * d], b * d));
             }
@@ -6064,6 +6073,9 @@ mod tests {
         for kv_int8 in [false, true] {
             let prefill_last = |max_prefill: u32| -> Vec<f32> {
                 let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, max_prefill, kv_int8, false);
+                // The chunks and the whole prompt present different row counts to the GEMMs, which the tensor-core
+                // tier tiles differently: this gate is about which slot a token lands in, so it pins the exact tier.
+                e.set_gemm_precision(GemmPrecision::Fp32Reference);
                 let mut t = BlockTable::new();
                 e.prefill(&mut t, &prompt)
             };
