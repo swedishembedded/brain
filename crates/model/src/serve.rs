@@ -23,6 +23,7 @@ use std::collections::{HashMap, VecDeque};
 use crate::paged::{BlockAllocator, BlockTable, KvNamespace};
 
 mod speculate;
+pub mod conformance;
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
 
 /// The seam a model's paged serving engine implements. Every method mirrors

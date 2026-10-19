@@ -454,6 +454,8 @@ impl BankedEngine for Qwen35GgufEngine {
     }
 }
 
+// gguf_resident_real.rs covers its prefix reuse, batching and adapter rows on the real model; its snapshot prefix cache is engine-owned.
+// conformance-exempt: needs the 27B GGUF (no CI-sized checkpoint exists), see gguf_resident_real.rs
 impl PagedDecoder for Qwen35GgufEngine {
     fn alloc_mut(&mut self) -> &mut BlockAllocator {
         &mut self.alloc

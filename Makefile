@@ -391,7 +391,7 @@ test/slow:
 # "green because skipped" risk.
 ## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + test/rl + test/gradcheck + every check/* gate
 ##   + test/parity + test/parity/strict (needs make testdata/fetch)
-test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck check/scripts check/env-reads check/test-skips check/seed-literals test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
+test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck check/scripts check/env-reads check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -665,6 +665,14 @@ check/env-reads:
 ## check/test-skips - no new silent test skips under crates/ (MOE_SKIP_GPU_TESTS early return, bare "skipping" + return); allowlist entries must still exist
 check/test-skips:
 	bash scripts/gates/check-test-skips.sh
+
+# Every `impl PagedDecoder for <Engine>` (an engine `brain serve` schedules) runs the
+# generic conformance suite model::serve::conformance (continuous batching, no
+# head-of-line blocking, prefix reuse, adapter KV isolation) or states why not.
+# See scripts/gates/check-serve-conformance.sh.
+## check/serve-conformance - every serving engine runs the generic conformance suite (or is exempt with a reason)
+check/serve-conformance:
+	bash scripts/gates/check-serve-conformance.sh
 
 # Every default seed is random. A literal seed in production code (Rust, Python
 # `--seed` defaults, Makefile `SEED ?=`) must be on
@@ -1925,7 +1933,7 @@ help:
         test/e2e test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
-        check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/paths check/scope \
+        check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/paths check/scope \
         check/files check/samples check/sdk-features check/make-targets \
         check/generated check/generated/kernels-wgsl-table check/generated/kernels-cuda-table \
         check/generated/samples-manifest \
