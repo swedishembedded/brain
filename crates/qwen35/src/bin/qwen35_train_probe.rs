@@ -255,6 +255,7 @@ fn main() {
         // (events around each launch, so launches are issued one at a time).
         let timed = profile && step == steps && steps > 1 && m.gpu.set_kernel_timing(true);
         m.gpu.reset_ops_counters();
+        let calls0 = gpu_core::cuda_call_totals();
         let cpu0 = cpu_seconds();
         let t = Instant::now();
         let (loss, fwd) = gpu_core::profile::device_table(&m.gpu, &format!("step {step}"), || {
@@ -270,7 +271,21 @@ fn main() {
         let counters = m.gpu.ops_counters();
         let dispatches = counters.steps;
         let cpu = cpu0.zip(cpu_seconds()).map_or("n/a".to_string(), |(a, b)| format!("{:.2}", b - a));
-        println!("PROBE step={step} loss={loss:.4} forward_s={fwd:.2} step_s={total:.2} tokens_per_s={:.0} dispatches={dispatches} cpu_s={cpu}", tokens as f64 / total);
+        // Host-side driver calls the step made: allocations, single launches, graph replays. A step that is
+        // host-bound shows launches near the dispatch count; one that replays shows graph_replays instead.
+        let calls = gpu_core::cuda_call_totals();
+        println!(
+            "PROBE step={step} loss={loss:.4} forward_s={fwd:.2} step_s={total:.2} tokens_per_s={:.0} dispatches={dispatches} cpu_s={cpu} loss_bits={:08x} alloc_calls={} host_launches={} graph_replays={} submit_s={:.2} wait_s={:.2} zero_calls={} zeroed_gib={:.1}",
+            tokens as f64 / total,
+            loss.to_bits(),
+            calls.device_alloc_calls - calls0.device_alloc_calls + calls.pool_alloc_calls - calls0.pool_alloc_calls,
+            calls.host_launches - calls0.host_launches,
+            calls.graph_replays - calls0.graph_replays,
+            (calls.submit_nanos - calls0.submit_nanos) as f64 * 1e-9,
+            (calls.wait_nanos - calls0.wait_nanos) as f64 * 1e-9,
+            calls.zero_calls - calls0.zero_calls,
+            (calls.zeroed_bytes - calls0.zeroed_bytes) as f64 / (1u64 << 30) as f64,
+        );
         if step > 1 {
             warm_secs += total;
         }

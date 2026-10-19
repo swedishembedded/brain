@@ -92,12 +92,28 @@ pub struct CallTotals {
     /// whether or not freed since: the pooled counterpart of
     /// [`Self::device_alloc_calls`].
     pub pool_alloc_calls: u64,
+    /// Nanoseconds the host spent recording, resolving and issuing
+    /// submissions: everything inside `submit`, `flush` and the end of a pass,
+    /// never the time spent waiting for the device.
+    pub submit_nanos: u64,
+    /// Nanoseconds the host spent blocked in `poll_wait` for the device to
+    /// drain. A step's wall time minus this is the time the host was busy; a
+    /// step whose busy time is close to its wall time is host-bound.
+    pub wait_nanos: u64,
+    /// `cuMemsetD8Async` calls that cleared a fresh allocation or a graph
+    /// clear, and the bytes they cleared. Device work no kernel table shows.
+    pub zero_calls: u64,
+    pub zeroed_bytes: u64,
 }
 
 static TOTAL_DEVICE_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_HOST_LAUNCHES: AtomicU64 = AtomicU64::new(0);
 static TOTAL_GRAPH_REPLAYS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_POOL_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_SUBMIT_NANOS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_ZERO_CALLS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_ZEROED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// See [`CallTotals`].
 pub fn call_totals() -> CallTotals {
@@ -106,11 +122,25 @@ pub fn call_totals() -> CallTotals {
         host_launches: TOTAL_HOST_LAUNCHES.load(Ordering::Relaxed),
         graph_replays: TOTAL_GRAPH_REPLAYS.load(Ordering::Relaxed),
         pool_alloc_calls: TOTAL_POOL_ALLOC_CALLS.load(Ordering::Relaxed),
+        submit_nanos: TOTAL_SUBMIT_NANOS.load(Ordering::Relaxed),
+        wait_nanos: TOTAL_WAIT_NANOS.load(Ordering::Relaxed),
+        zero_calls: TOTAL_ZERO_CALLS.load(Ordering::Relaxed),
+        zeroed_bytes: TOTAL_ZEROED_BYTES.load(Ordering::Relaxed),
     }
 }
 
 pub(crate) fn host_launched(n: u64) {
     TOTAL_HOST_LAUNCHES.fetch_add(n, Ordering::Relaxed);
+}
+pub(crate) fn host_submitted(nanos: u64) {
+    TOTAL_SUBMIT_NANOS.fetch_add(nanos, Ordering::Relaxed);
+}
+pub(crate) fn zeroed(bytes: usize) {
+    TOTAL_ZERO_CALLS.fetch_add(1, Ordering::Relaxed);
+    TOTAL_ZEROED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+pub(crate) fn host_waited(nanos: u64) {
+    TOTAL_WAIT_NANOS.fetch_add(nanos, Ordering::Relaxed);
 }
 pub(crate) fn graph_replayed() {
     TOTAL_GRAPH_REPLAYS.fetch_add(1, Ordering::Relaxed);

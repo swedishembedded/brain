@@ -1126,6 +1126,13 @@ impl CudaBackend {
         }
     }
 
+    /// Add `nanos` of host time spent inside a submission to this handle's
+    /// total and to the process-wide one ([`crate::live::CallTotals`]).
+    fn bill_host(&self, nanos: u64) {
+        self.counters.host_nanos.fetch_add(nanos, Ordering::Relaxed);
+        crate::live::host_submitted(nanos);
+    }
+
     /// What this handle's submissions have cost the host so far - see
     /// [`LaunchStats`].
     pub fn launch_stats(&self) -> LaunchStats {
@@ -1585,7 +1592,7 @@ impl backend_api::Backend for CudaBackend {
         self.counters.dispatches.fetch_add(f.dispatches as u64, Ordering::Relaxed);
         self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
         self.counters.graph.replays.fetch_add(1, Ordering::Relaxed);
-        self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        self.bill_host(t0.elapsed().as_nanos() as u64);
         true
     }
 
@@ -1828,7 +1835,7 @@ impl backend_api::Backend for CudaBackend {
             let mut pass = self.pass.lock().unwrap_or_else(|e| e.into_inner());
             if pass.depth > 0 && clears.is_empty() {
                 pass.held.extend(resolved);
-                self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                self.bill_host(t0.elapsed().as_nanos() as u64);
                 return;
             }
         }
@@ -1837,7 +1844,7 @@ impl backend_api::Backend for CudaBackend {
         // zero a buffer they still have to write, so the held run goes first.
         self.issue_held();
         self.issue_all(clears, resolved, false);
-        self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        self.bill_host(t0.elapsed().as_nanos() as u64);
     }
 
     /// Inside a pass, issue what is held so far once [`PASS_FLUSH_STEPS`] steps
@@ -1852,7 +1859,7 @@ impl backend_api::Backend for CudaBackend {
         if due {
             let t0 = std::time::Instant::now();
             self.issue_held();
-            self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            self.bill_host(t0.elapsed().as_nanos() as u64);
         }
     }
 
@@ -1874,7 +1881,7 @@ impl backend_api::Backend for CudaBackend {
         if outermost {
             let t0 = std::time::Instant::now();
             self.issue_held();
-            self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            self.bill_host(t0.elapsed().as_nanos() as u64);
         }
     }
 
@@ -1907,7 +1914,9 @@ impl backend_api::Backend for CudaBackend {
     fn poll_wait(&self) {
         self.issue_held();
         self.refuse_during_capture("poll_wait");
+        let waited = std::time::Instant::now();
         self.drain_staging();
+        crate::live::host_waited(waited.elapsed().as_nanos() as u64);
         self.release_dead_uniforms();
         if self.timing.load(Ordering::Acquire) {
             self.collect_timings();

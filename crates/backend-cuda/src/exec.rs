@@ -705,6 +705,7 @@ impl Context {
             return Ok(());
         }
         self.make_current()?;
+        crate::live::zeroed(mem.len);
         // SAFETY: `mem.ptr` names `mem.len` bytes on this context, and `mem`
         // outlives the enqueue; the caller keeps it alive until the stream has
         // drained (every caller here holds an `Arc` to it).
