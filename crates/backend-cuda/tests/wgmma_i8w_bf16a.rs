@@ -39,25 +39,6 @@ impl Lcg {
 
 /// Run the kernel; returns (out, seconds per launch).
 fn run(ctx: &Context, m: usize, n: usize, k: usize, reps: u32) -> (Vec<f32>, Vec<f32>, f64) {
-    run_variant(ctx, &Variant::SINGLE, m, n, k, reps)
-}
-
-/// A kernel source, its entry point and block size, and the compile-time probe defines it is built with.
-struct Variant {
-    label: &'static str,
-    src: &'static str,
-    entry: &'static str,
-    threads: u32,
-    defines: &'static [&'static str],
-}
-
-impl Variant {
-    const SINGLE: Variant = Variant { label: "single role", src: SRC, entry: "brain_matmul_i8w_bf16a_wgmma", threads: 256, defines: &[] };
-}
-
-fn run_variant(ctx: &Context, v: &Variant, m: usize, n: usize, k: usize, reps: u32) -> (Vec<f32>, Vec<f32>, f64) {
-    let (src, entry, threads) = (v.src, v.entry, v.threads);
-    let defines: Vec<(String, String)> = v.defines.iter().map(|d| (d.to_string(), "1".to_string())).collect();
     let mut rng = Lcg(0x5eed ^ (m * 31 + n * 7 + k) as u64); // seed: any data serves, the reference reads the same bytes
     let a: Vec<u16> = (0..m * k).map(|_| bf16_bits((rng.next() - 0.5) * 4.0)).collect();
     let w: Vec<i8> = (0..n * k).map(|_| ((rng.next() * 255.0) as i32 - 128) as i8).collect();
@@ -92,13 +73,13 @@ fn run_variant(ctx: &Context, v: &Variant, m: usize, n: usize, k: usize, reps: u
     let o_mem = ctx.alloc(m * n * 4).unwrap();
     ctx.zero(&o_mem).unwrap();
 
-    let module = ctx.compile_with(src, entry, &CompileOptions { features: ArchFeatures::Required, defines }).expect("compile");
-    let f = module.function(entry).expect("entry");
+    let module = ctx.compile_with(SRC, "brain_matmul_i8w_bf16a_wgmma", &CompileOptions { features: ArchFeatures::Required, defines: Vec::new() }).expect("compile");
+    let f = module.function("brain_matmul_i8w_bf16a_wgmma").expect("entry");
     let raw = f.raw();
     unsafe { ctx.allow_dynamic_shared(raw, SMEM).expect("opt in to the shared memory") };
     let grid = ((m.div_ceil(128) * (n / 128)) as u32, 1, 1);
     let args = [p_mem.device_ptr(), a_mem.device_ptr(), w_mem.device_ptr(), s_mem.device_ptr(), o_mem.device_ptr()];
-    let launch = || unsafe { ctx.launch_shaped(raw, grid, (threads, 1, 1), &Shape { shared_bytes: SMEM, cluster: None }, &args).expect("launch") };
+    let launch = || unsafe { ctx.launch_shaped(raw, grid, (256, 1, 1), &Shape { shared_bytes: SMEM, cluster: None }, &args).expect("launch") };
     launch();
     ctx.sync().unwrap();
     let t = std::time::Instant::now();
@@ -146,29 +127,5 @@ fn the_wgmma_kernel_rate_at_the_27b_shapes() {
     for (m, n, k) in [(512, 17408, 5120), (512, 5120, 17408), (1024, 17408, 5120), (512, 10240, 5120)] {
         let (_, _, secs) = run(&ctx, m, n, k, 20);
         println!("m={m} n={n} k={k}: {:.3} ms, {:.0} TFLOP/s", secs * 1e3, 2.0 * (m * n * k) as f64 / secs / 1e12);
-    }
-}
-
-const WS_SRC: &str = include_str!("../../kernels-cuda/cu/matmul_i8w_bf16a_wgmma_ws.cu");
-
-/// Where the time of the kernel goes: the same GEMM with parts compiled out (probe defines), and
-/// the warp-specialised variant. A measurement (`--ignored --nocapture`), not a gate.
-#[test]
-#[ignore = "a measurement; needs a Hopper card"]
-fn the_variants_rate_at_the_27b_shapes() {
-    let Some(ctx) = open() else { return };
-    let variants = [
-        Variant::SINGLE,
-        Variant { label: "no decode", defines: &["BRAIN_PROBE_NO_DECODE"], ..Variant::SINGLE },
-        Variant { label: "no loads", defines: &["BRAIN_PROBE_NO_LOAD"], ..Variant::SINGLE },
-        Variant { label: "no MMA", defines: &["BRAIN_PROBE_NO_MMA"], ..Variant::SINGLE },
-        Variant { label: "MMA only", defines: &["BRAIN_PROBE_NO_DECODE", "BRAIN_PROBE_NO_LOAD"], ..Variant::SINGLE },
-        Variant { label: "warp specialised", src: WS_SRC, entry: "brain_matmul_i8w_bf16a_wgmma_ws", threads: 384, defines: &[] },
-    ];
-    for v in &variants {
-        for (m, n, k) in [(512, 17408, 5120), (1024, 17408, 5120)] {
-            let (_, _, secs) = run_variant(&ctx, v, m, n, k, 20);
-            println!("{:>18}: m={m} n={n} k={k}: {:.3} ms, {:.0} TFLOP/s", v.label, secs * 1e3, 2.0 * (m * n * k) as f64 / secs / 1e12);
-        }
     }
 }
