@@ -305,3 +305,17 @@ The serving engine doesn't yet reuse a shared prompt prefix across
 separate requests (each request's prefill is independent). Mixture-of-experts
 style configs are defined in the parameter layout but the serving engine
 currently serves dense configs only.
+
+## Serving an embedding checkpoint
+
+A downloaded Qwen3-Embedding checkpoint (a repository whose name contains
+`embedding`; its config is the chat model's) is served for embeddings, not chat.
+`brain serve --openai` lists it with the `embeddings` capability and answers
+`POST /v1/embeddings` for it by the model's own pooling: the hidden state of the
+last token, with an end-of-text token appended, L2-normalised (dimension 1024
+for Qwen3-Embedding-0.6B). Inputs are embedded as plain passages; the
+asymmetric query instruction of the model card is the `instruction` param of the
+native `embed` action and is not reachable through the OpenAI route. The
+checkpoint loads on the first request and is not counted against the residency
+budget until then. A chat request for it is refused: it has no `generate`
+action.

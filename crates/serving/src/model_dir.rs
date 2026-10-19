@@ -725,6 +725,8 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
         let weights = dir.to_str().ok_or("weights path is not valid UTF-8")?;
         let tokenizer = dir.join("tokenizer.json");
         return match implementation {
+            // An embedding checkpoint of the family is served for embeddings, not chat.
+            Some("qwen3") if catalog::resident_qwen_embed::is_embedding_id(&card.id) => Ok(Built::Other(catalog::resident_qwen_embed::embedding_resident(weights, card, tokenizer.to_str()))),
             Some("qwen3") => Ok(Built::Qwen(Arc::new(QwenResident::from_card_configured(weights, card, tokenizer.to_str(), qwen_cfg)))),
             Some("glmdsa") => Ok(Built::Other(Arc::new(catalog::resident_llm::GlmResident::from_card(weights, card, None)))),
             Some("lfm2") => Ok(Built::Other(Arc::new(catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer.to_str())?))),
@@ -1345,6 +1347,25 @@ mod tests {
         let Discovered { residents, errors, .. } = discover(&root, &ScanSettings::default());
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
         assert_eq!(ids(&residents), ["deepseek-ai/tiny-llama"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A downloaded embedding checkpoint of the qwen3 family is an embedding
+    /// model, not a chat model: it is served with the `embed` action
+    /// (last-token pooling) so `/v1/embeddings` can reach it, and offers no
+    /// `generate`.
+    #[test]
+    fn discover_serves_a_qwen3_embedding_directory_as_an_embedding_model() {
+        let root = tmp_dir("discover-qwen3-embedding-dir");
+        let repo_dir = root.join("Qwen").join("Qwen3-Embedding-0.6B");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let manifest = brain_modelstore::CompoundManifest { id: "Qwen/Qwen3-Embedding-0.6B".into(), family: "qwen3".into(), roles: [("weights".to_string(), ".".to_string())].into() };
+        std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let Discovered { residents, errors, .. } = discover(&root, &ScanSettings::default());
+        assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
+        let resident = residents.iter().find(|r| r.manifest().model == "Qwen/Qwen3-Embedding-0.6B").expect("discovered");
+        let actions: Vec<String> = resident.manifest().actions.iter().map(|a| a.name.clone()).collect();
+        assert_eq!(actions, ["embed"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

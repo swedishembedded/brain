@@ -75,6 +75,7 @@ pub mod resident_moondream3;
 pub mod resident_omni;
 pub mod resident_pulid;
 pub mod resident_qwen35;
+pub mod resident_qwen_embed;
 pub mod resident_qwen35moe;
 pub mod resident_qwen3vl;
 pub mod resident_restore;
