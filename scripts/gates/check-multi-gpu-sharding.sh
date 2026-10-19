@@ -58,16 +58,21 @@ controlnet	A conditioning adapter added on top of a host backbone, not an indepe
 cosyvoice	default_ref FunAudioLLM/CosyVoice2-0.5B - 0.5B, single GPU by design.
 deepseek2ocr	The shared crates/deepseek2 decoder now implements Shardable, but this composite crate's own source (SAM+CLIP encoder, the splice into the decoder) never mentions it - the vision tower is not yet migrated; backlog.
 deepseekocr2	Same shared crates/deepseek2 decoder as deepseek2ocr, now Shardable - but this composite crate's own SAM/Qwen2-resampler vision tower is not yet migrated; backlog.
+deepseekvl	DeepSeek-VL 7B (7.3B): the vision tower and the decoder are placed on separate cards through its own Placement (deepseekvl::model::load_placed) and trained as a qwen3 Trained::Pipeline - placement, not model::shard's Shard/Shardable; backlog.
 diamond	EDM diffusion world model, forecasting/world-model scale, not LLM-scale - single GPU by design.
 ecapatdnn	Speaker-embedding backbone (ECAPA-TDNN), well under 1B params - single GPU by design.
 fincast	Patched decoder + sparse MoE at forecasting scale, not LLM-scale - single GPU by design.
+florence2	Florence-2 at 0.23B params (docs/models/florence2.md), CPU-viable by design - single GPU by design.
 flux1	FLUX.1 dev/Kontext/schnell is a ~12B MMDiT - fp32-promoted residency on Pascal likely exceeds one 24GB GPU; not yet migrated onto model::shard; backlog.
 flux2	default_ref black-forest-labs/FLUX.2-klein-4B - the shipped Klein distillation is 4B, single GPU by design.
 gemma4	LTX-2.5's own text encoder component, run inside ltxv's pipeline (which already uses model::shard for its own DiT) - not an independently sharded model in its own right.
 genieredux	ST-transformer world model, forecasting/world-model scale, not LLM-scale - single GPU by design.
 glmdsa	MoE decoder (MLA + sigmoid noaux_tc MoE + DSA), large by architecture family - not yet migrated onto model::shard; backlog.
 instantid	SDXL + IP-Adapter-FaceID identity conditioning, adapter-scale on top of a host backbone - single GPU by design.
+horizon	Timeline model whose default width is d_model 64 (crates/horizon/src/config.rs), forecasting-scale, not LLM-scale - single GPU by design.
+januspro	Janus-Pro 7B (7.4B): reuses deepseekvl's Placement for the tower/decoder split (januspro::model::load_understanding_placed) - placement, not model::shard's Shard/Shardable; backlog.
 kronos	default_ref NeoQuasar/Kronos-base, a candlestick-scale forecasting transformer - single GPU by design.
+lpips	AlexNet convolutional trunk plus five 1x1 heads, a few million parameters - single GPU by design.
 lfm2	default_ref LiquidAI/LFM2.5-350M - 350M, single GPU by design.
 mimi	Neural audio codec, well under 1B params - single GPU by design.
 moondream3	SigLIP + MoE decoder - not yet audited/migrated onto model::shard; backlog.

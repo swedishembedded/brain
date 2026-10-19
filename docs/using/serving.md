@@ -167,7 +167,7 @@ model's context (`context_length` in `/v1/models`), a token outside the vocabula
 adapter the server does not hold - is refused at once, whatever the running requests
 are doing: it does not wait for a free slot to be told no. The refusal is an HTTP 400
 with an OpenAI-style error body (`context_length_exceeded` for length), streamed or not:
-a streamed request is given 300 ms to fail before its response headers go out, so an
+a streamed request is given 300 ms to fail before its response headers go out, so an <!-- perf-number: the configured grace period before response headers go out, not a measurement -->
 early refusal is a plain status rather than a 200 stream holding one `error` event. A
 failure after the response has begun is an `error` event in the stream.
 

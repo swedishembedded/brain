@@ -111,6 +111,7 @@ emb_bwd	crates/toyseq2seq/src/model.rs	Two-stage replacement emb_bwd_part + dw_s
 layernorm_dgamma	crates/minimaxmusic3/src/dit_train.rs	Two-stage replacement layernorm_dgamma_part + bias_grad_final exists (horizon uses it); not a drop-in single dispatch (needs a chunk scratch), migrating this model is backlog.
 matmul	crates/model/tests/tensor_parallel.rs	Test harness for dp/shard-parity checks constructs raw GPU steps directly by design, never through model::ops::Ops - not a served/trained model path.
 matmul	crates/qwen3/src/model.rs	B7's Ops migration (no_kernel_names.rs) scoped only forward_steps/decode_steps/run_batched_steps/head_steps; lora_fwd/proj_bwd (LoRA delta + backward) were explicitly out of that scope and still hand-dispatch - backlog, not a new regression.
+matmul_gemv	crates/qwen3/src/model.rs	The LoRA delta (lora_fwd) is outside B7's Ops migration scope like the matmul row above and still hand-dispatches its low-rank gemv - backlog, not a new regression.
 matmul	crates/qwen35/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/qwen35moe/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/qwen3omnimoe/src/talker.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
@@ -137,6 +138,7 @@ matmul_dx	crates/model/tests/tensor_parallel.rs	Test harness for dp/shard-parity
 matmul_dx	crates/qwen35/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dx	crates/qwen35moe/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dx	crates/qwen3tts/src/mtp.rs	@opt 2/5, faster sibling matmul_dx_reg exists - not yet migrated onto it, MTP-specific backward path, backlog.
+decode_softmax	crates/qwen3tts/src/mtp.rs	@opt 1/5, faster sibling decode_softmax_batched exists - the MTP-specific step loop still dispatches the per-head softmax directly, same backlog as the matmul_dw and matmul_dx rows above.
 matmul_dx	crates/toyautoencoder/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dx	crates/toymoe/src/train.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dx	crates/toypid/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.

@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 <!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
 
-# 321. A request the engine would refuse waited for a free slot to be told so, and a streamed refusal was a 200
+# 323. A request the engine would refuse waited for a free slot to be told so, and a streamed refusal was a 200
 
 Symptom (a CE1 solve, 27B GGUF server, max batch 16): a request whose prompt plus `max_tokens`
 exceeded the engine's context (`qwen35: needs 33805 tokens, engine capacity is 32768`) was logged
