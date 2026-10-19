@@ -1,0 +1,153 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+//
+// Swedish Embedded AB implements solutions for attributing a numerical change in a quantised LLM serving stack
+// to the kernel that caused it, for its clients. If your team needs expertise in measuring logit drift between
+// inference kernels you can procure our services by sending an email to info@swedishembedded.com.
+
+//! Which of the prefill-path changes moves the real 27B's logits, and by how much, in ONE process on ONE load.
+//!
+//! The released Q8_0 GGUF scores the same greedy token stream under cumulative settings of the serving
+//! prefill: the original flash kernel with the per-layer drain and the unfused chain (`orig`), then version 2
+//! of the flash kernel, then the fused front end and quantisation epilogues, then no drain. For each
+//! setting it prints, against `orig`: the mean and worst relative L2 distance of the logits, how many
+//! positions pick another argmax and the `orig` margin over its runner-up at each (a flip at a large margin is a
+//! defect, a flip at a near-tie is numeric drift), and whether the logits are bit-identical.
+//!
+//! Usage: `qwen35_gguf_logit_check <Q8_0.gguf> <text file> [--prompts 4] [--prompt-tokens 4000] [--steps 24]
+//!        [--device gpu1] [--backend cuda] [--kv int8] [--dump DIR]`
+//!
+//! `--dump DIR` writes each prompt's continuation ids and the logits rows of the first and last setting (`p<N>.ids`,
+//! `p<N>.first.f32`, `p<N>.last.f32`, little-endian) so a build of an older commit can be compared offline.
+
+use checkpoint::gguf::MmapGguf;
+use qwen35::int8_gguf_resident::{resident_config, Qwen35GgufInstance, Qwen35GgufResident};
+use residency::multi::MultiDeviceResidentModel;
+use residency::{Device, ResidentModel};
+
+const RESERVE: u64 = 2 << 30;
+
+fn argmax(v: &[f32]) -> usize {
+    v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0)
+}
+
+fn margin(v: &[f32]) -> f32 {
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| b.total_cmp(a));
+    s[0] - s[1]
+}
+
+fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
+    let (mut d, mut n) = (0f64, 0f64);
+    for (x, y) in a.iter().zip(b) {
+        d += ((*x - *y) as f64).powi(2);
+        n += (*y as f64).powi(2);
+    }
+    (d / n.max(1e-30)).sqrt()
+}
+
+struct Setting {
+    name: &'static str,
+    v2: bool,
+    fusion: bool,
+    drain: bool,
+}
+
+fn apply(inst: &Qwen35GgufInstance, s: &Setting) {
+    gpu_core::provider::cuda::set_flash_prefill_v2(s.v2);
+    inst.set_decode_fusion(s.fusion);
+    inst.set_chunk_arena_min_rows(1);
+    inst.set_chunk_arena_drain(Some(s.drain));
+}
+
+fn main() {
+    let a: Vec<String> = std::env::args().collect();
+    let flag = |name: &str| a.iter().position(|arg| arg == name).and_then(|i| a.get(i + 1)).cloned();
+    let num = |name: &str, default: usize| flag(name).and_then(|v| v.parse().ok()).unwrap_or(default);
+    let (Some(path), Some(text_path)) = (a.get(1).cloned(), a.get(2).cloned()) else {
+        eprintln!("usage: qwen35_gguf_logit_check <Q8_0.gguf> <text file> [--prompts N] [--prompt-tokens N] [--steps N] [--device D] [--backend B] [--kv K]");
+        std::process::exit(2);
+    };
+    let (prompts, ptoks, steps) = (num("--prompts", 4), num("--prompt-tokens", 4000), num("--steps", 24));
+    let set = gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
+    let devices = qwen35::int8_gguf_resident::budgeted_gpus(&set.gpus, RESERVE);
+    if devices.is_empty() {
+        eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
+        std::process::exit(2);
+    }
+    let cap = (ptoks + steps + 256) as u32;
+    let tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
+    let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
+    let _cfg = resident_config(&mg, cap).expect("resident_config");
+    drop(mg);
+    let kv = model::kv_tier::KvTier::parse(flag("--kv").as_deref().unwrap_or("int8")).unwrap_or_else(|e| panic!("{e}"));
+    let r = Qwen35GgufResident::new(path, devices, cap, tier).with_kv_tier(kv);
+    let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
+    let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
+
+    let text = std::fs::read_to_string(&text_path).expect("read the text file");
+    let settings = [
+        Setting { name: "orig (flash v1, drain, unfused)", v2: false, fusion: false, drain: true },
+        Setting { name: "+ flash v2", v2: true, fusion: false, drain: true },
+        Setting { name: "+ fused front end and epilogues", v2: true, fusion: true, drain: true },
+        Setting { name: "+ no per-layer drain (new default)", v2: true, fusion: true, drain: false },
+    ];
+    let chars_per_token = 3usize;
+    for p in 0..prompts {
+        let start = ((p * 7919 + 13) * 104729) % text.len().saturating_sub(ptoks * chars_per_token).max(1);
+        let mut slice = start;
+        while !text.is_char_boundary(slice) {
+            slice += 1;
+        }
+        let mut end = (slice + ptoks * chars_per_token).min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let body = &text[slice..end];
+        let prompt = inst.tokenize(&format!("{body}\n\nSummarise the code above in one sentence.\n"));
+        let prompt: Vec<u32> = prompt.into_iter().take(cap as usize - steps - 8).collect();
+        apply(&inst, &settings[0]);
+        let mut ids = inst.generate(&prompt, steps as u32, 0.0, 1, 1.0, 1, &mut |_| false).expect("greedy continuation");
+        ids.truncate(steps);
+        println!("prompt {p}: {} tokens; orig greedy continuation {:?}", prompt.len(), ids);
+        let mut base: Option<Vec<Vec<f32>>> = None;
+        for s in &settings {
+            apply(&inst, s);
+            let rows = inst.teacher_forced_logits(&prompt, &ids).expect("forced logits");
+            assert!(rows.iter().all(|r| r.iter().all(|x| x.is_finite())), "{}: non-finite logits", s.name);
+            match &base {
+                None => println!("  {:<38} reference", s.name),
+                Some(b) => {
+                    let rels: Vec<f64> = rows.iter().zip(b).map(|(x, y)| rel_l2(x, y)).collect();
+                    let identical = rows.iter().zip(b).all(|(x, y)| x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits()));
+                    let flips: Vec<String> = rows
+                        .iter()
+                        .zip(b)
+                        .enumerate()
+                        .filter(|(_, (x, y))| argmax(x) != argmax(y))
+                        .map(|(i, (_, y))| format!("step {i} (orig margin {:.3})", margin(y)))
+                        .collect();
+                    println!(
+                        "  {:<38} identical={identical} mean rel-L2 {:.2e} worst {:.2e}; argmax flips vs orig: {}",
+                        s.name,
+                        rels.iter().sum::<f64>() / rels.len() as f64,
+                        rels.iter().cloned().fold(0.0, f64::max),
+                        if flips.is_empty() { "none".to_string() } else { flips.join(", ") }
+                    );
+                }
+            }
+            if let Some(dir) = flag("--dump") {
+                let which = if base.is_none() { "first" } else if std::ptr::eq(s, settings.last().expect("settings")) { "last" } else { "" };
+                if !which.is_empty() {
+                    std::fs::create_dir_all(&dir).expect("dump dir");
+                    let bytes: Vec<u8> = rows.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
+                    std::fs::write(format!("{dir}/p{p}.{which}.f32"), bytes).expect("write logits");
+                    std::fs::write(format!("{dir}/p{p}.ids"), ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(" ")).expect("write ids");
+                }
+            }
+            if base.is_none() {
+                base = Some(rows);
+            }
+        }
+    }
+}

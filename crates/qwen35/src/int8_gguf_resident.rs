@@ -1129,6 +1129,14 @@ impl Qwen35GgufInstance {
         }
     }
 
+    /// Every stage's [`Qwen35::set_decode_fusion`]: the native fused kernels of the decode step and of a prefill round
+    /// (on by default; off is the chain of dispatches they replace, bit for bit).
+    pub fn set_decode_fusion(&self, on: bool) {
+        for s in &self.shards {
+            s.qwen35.set_decode_fusion(on);
+        }
+    }
+
     /// Every stage's [`Qwen35::set_chunk_arena_drain`].
     pub fn set_chunk_arena_drain(&self, drain: Option<bool>) {
         for s in &self.shards {
