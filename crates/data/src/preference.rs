@@ -216,8 +216,9 @@ mod tests {
     #[test]
     fn tool_calls_take_the_chat_shape_and_its_checks() {
         let call = r#"{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}"#;
+        let again = call.replace("c1", "c2");
         let ok = format!(
-            r#"{{"prompt":[{{"role":"user","content":"weather?"}},{{"role":"assistant","content":"","tool_calls":[{call}]}},{{"role":"tool","content":"18C","tool_call_id":"c1"}}],"chosen":{{"role":"assistant","content":"18C and sunny"}},"rejected":{{"role":"assistant","content":"","tool_calls":[{call}]}},"tools":[{{"type":"function"}}]}}"#
+            r#"{{"prompt":[{{"role":"user","content":"weather?"}},{{"role":"assistant","content":"","tool_calls":[{call}]}},{{"role":"tool","content":"18C","tool_call_id":"c1"}}],"chosen":{{"role":"assistant","content":"18C and sunny"}},"rejected":{{"role":"assistant","content":"","tool_calls":[{again}]}},"tools":[{{"type":"function"}}]}}"#
         );
         let pairs = parse("tools.jsonl", &ok).expect("parses");
         assert_eq!(pairs[0].rejected.messages[3].tool_calls[0].name, "get_weather");
@@ -226,6 +227,12 @@ mod tests {
         let orphan = r#"{"prompt":[{"role":"user","content":"x"},{"role":"tool","content":"18C","tool_call_id":"nope"}],"chosen":{"role":"assistant","content":"a"},"rejected":{"role":"assistant","content":"b"}}"#;
         let err = parse("orphan.jsonl", orphan).unwrap_err().to_string();
         assert!(err.contains("does not match any tool_calls id") && err.contains(":1:"), "{err}");
+
+        // A candidate that re-uses the prompt's call id breaks the pairing
+        // rule: the conversation it completes names one id twice.
+        let reused = ok.replace("c2", "c1");
+        let err = parse("reused.jsonl", &reused).unwrap_err().to_string();
+        assert!(err.contains("c1") && err.contains("more than once") && err.contains(":1:"), "{err}");
     }
 
     #[test]

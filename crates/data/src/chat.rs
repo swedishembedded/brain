@@ -370,6 +370,11 @@ impl ChatSample {
         self.rendered_final_turn(tmpl, thinking).map(Some)
     }
 
+    /// The conversation obeys [`check_tool_pairing`].
+    pub fn validate(&self) -> Result<(), String> {
+        check_tool_pairing(&self.messages)
+    }
+
     /// [`ChatSample::encode_with`] at the default [`RenderOpts`].
     pub fn encode(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
         self.encode_with(tok, tmpl, RenderOpts::default())
@@ -384,7 +389,8 @@ impl ChatSample {
     /// template, not a hand-rolled approximation. A message's whole range is
     /// masked by its `train` flag, so a trained assistant turn trains its
     /// end-of-turn token too: that token is how the model learns to stop.
-    /// Fails (does not silently mismask) if the template's rendering of some
+    /// Refuses a conversation that breaks [`check_tool_pairing`], so no
+    /// training path can encode corrupt tool pairing. Fails (does not silently mismask) if the template's rendering of some
     /// message is not prefix-stable -- see `render_with_message_boundaries`'s
     /// doc for exactly when that happens.
     pub fn encode_with(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
@@ -397,6 +403,7 @@ impl ChatSample {
             }
             return Ok((ids, mask));
         }
+        self.validate().map_err(TemplateError)?;
         let messages: Vec<ChatMessage> = if opts.keep_reasoning {
             self.messages
                 .iter()
@@ -557,11 +564,11 @@ fn sample_from_wire(record: WireRecord) -> Result<ChatSample, String> {
 
 /// One conversation's wire messages as [`ChatMessage`]s, with the semantic
 /// checks [`sample_from_wire`] documents: tool-call arguments that are valid
-/// JSON, and every tool result answering a call made earlier in the same
-/// conversation. `messages[i]` in an error is the index into `wire`.
+/// JSON, a `tool_call_id` on every tool result, and every tool result answering a call made earlier in the same
+/// conversation ([`check_tool_pairing`]). `messages[i]` in an error is the
+/// index into `wire`.
 pub(crate) fn messages_from_wire(wire: Vec<WireMessage>) -> Result<Vec<ChatMessage>, String> {
     let mut messages = Vec::with_capacity(wire.len());
-    let mut known_tool_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (i, m) in wire.into_iter().enumerate() {
         let role = match m.role {
@@ -575,29 +582,66 @@ pub(crate) fn messages_from_wire(wire: Vec<WireMessage>) -> Result<Vec<ChatMessa
         for (j, tc) in m.tool_calls.into_iter().enumerate() {
             serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
                 .map_err(|e| format!("messages[{i}].tool_calls[{j}]: function.arguments is not valid JSON: {e}"))?;
-            if let Some(id) = &tc.id {
-                known_tool_call_ids.insert(id.clone());
-            }
             tool_calls.push(ToolCall { id: tc.id, name: tc.function.name, arguments: tc.function.arguments });
         }
 
-        if matches!(m.role, WireRole::Tool) {
-            let id = m
-                .tool_call_id
-                .as_deref()
-                .ok_or_else(|| format!("messages[{i}]: a \"tool\"-role message must carry \"tool_call_id\""))?;
-            if !known_tool_call_ids.contains(id) {
-                return Err(format!(
-                    "messages[{i}]: tool_call_id {id:?} does not match any tool_calls id from an \
-                     earlier assistant message in this sample -- a tool response with no matching \
-                     call is malformed input, not something to silently train on"
-                ));
-            }
+        if matches!(m.role, WireRole::Tool) && m.tool_call_id.is_none() {
+            return Err(format!("messages[{i}]: a \"tool\"-role message must carry \"tool_call_id\""));
         }
 
         messages.push(ChatMessage { role: role.to_string(), content: m.content, tool_calls, tool_call_id: m.tool_call_id, train: m.train });
     }
+    check_tool_pairing(&messages)?;
     Ok(messages)
+}
+
+/// The pairing rules every conversation that reaches training obeys, whatever
+/// produced it (a wire record, a recorded trajectory, an SDK caller):
+/// * every assistant tool call id is unique within the conversation;
+/// * a tool message naming a `tool_call_id` answers exactly one EARLIER call
+///   that no earlier tool message answered;
+/// * a tool message without an id answers the earliest call still unanswered
+///   (the order the chat template renders consecutive results in); there must
+///   be one.
+///
+/// A repeated id is the failure this exists for: results pair to calls by id,
+/// so a trajectory whose calls are all named alike gives every call every
+/// result - duplicated, reordered and future results in the context, which
+/// nothing downstream can detect. Errors name the message index (`messages[i]`).
+pub fn check_tool_pairing(messages: &[ChatMessage]) -> Result<(), String> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut unanswered: Vec<Option<&str>> = Vec::new();
+    for (i, m) in messages.iter().enumerate() {
+        for (j, tc) in m.tool_calls.iter().enumerate() {
+            if let Some(id) = tc.id.as_deref() {
+                if !seen.insert(id) {
+                    return Err(format!(
+                        "messages[{i}].tool_calls[{j}]: tool call id {id:?} is used more than once in this conversation -- \
+                         results cannot be paired to calls by id, so the record is refused"
+                    ));
+                }
+            }
+            unanswered.push(tc.id.as_deref());
+        }
+        if m.role != "tool" {
+            continue;
+        }
+        let at = match m.tool_call_id.as_deref() {
+            Some(id) => unanswered.iter().position(|c| *c == Some(id)).ok_or_else(|| {
+                let why = if seen.contains(id) {
+                    "that call was already answered"
+                } else {
+                    "it does not match any tool_calls id from an earlier assistant message in this sample"
+                };
+                format!("messages[{i}]: tool_call_id {id:?}: {why} -- a tool response must answer one earlier, unanswered call")
+            })?,
+            None if unanswered.is_empty() => return Err(format!("messages[{i}]: a tool message without an id has no unanswered call to answer")),
+            None => 0,
+        };
+        unanswered.remove(at);
+    }
+    Ok(())
 }
 
 /// How a sample renders for training.
@@ -938,6 +982,52 @@ mod tests {
         .unwrap();
         let err = ChatSample::from_jsonl(&path).unwrap_err();
         assert!(err.to_string().contains("does not match any tool_calls id"), "got: {err}");
+    }
+
+    fn jsonl_error(name: &str, body: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("brain-chat-jsonl-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("record.jsonl");
+        std::fs::write(&path, body).unwrap();
+        ChatSample::from_jsonl(&path).unwrap_err().to_string()
+    }
+
+    const CALL_0: &str = r#"{"role":"assistant","content":"","tool_calls":[{"id":"call_0","type":"function","function":{"name":"sh","arguments":"{}"}}],"train":true}"#;
+    const RESULT_0: &str = r#"{"role":"tool","content":"out","tool_call_id":"call_0","train":false}"#;
+
+    /// The corruption this rule exists for: a recorded agent run in which every
+    /// call is named `call_0`. Pairing results to calls by id then gives each
+    /// call every result; the record must be refused, naming the line and id.
+    #[test]
+    fn from_jsonl_rejects_a_tool_call_id_used_twice_in_a_conversation() {
+        let body = format!(r#"{{"messages":[{CALL_0},{RESULT_0},{CALL_0},{RESULT_0}]}}"#);
+        let err = jsonl_error("dupcall", &body);
+        assert!(err.contains(":1:") && err.contains("call_0") && err.contains("more than once"), "names line and id: {err}");
+    }
+
+    #[test]
+    fn from_jsonl_rejects_a_tool_call_answered_twice() {
+        let body = format!(r#"{{"messages":[{CALL_0},{RESULT_0},{RESULT_0}]}}"#);
+        let err = jsonl_error("answeredtwice", &body);
+        assert!(err.contains("call_0") && err.contains("already answered"), "got: {err}");
+    }
+
+    /// A result placed before the call it names is a future result.
+    #[test]
+    fn from_jsonl_rejects_a_tool_result_that_precedes_its_call() {
+        let body = format!(r#"{{"messages":[{RESULT_0},{CALL_0}]}}"#);
+        let err = jsonl_error("future", &body);
+        assert!(err.contains("call_0") && err.contains("does not match"), "got: {err}");
+    }
+
+    #[test]
+    fn a_tool_message_without_an_id_answers_the_next_unanswered_call_in_order() {
+        let call = |id: &str| ToolCall { id: Some(id.into()), name: "f".into(), arguments: "{}".into() };
+        let sample = |messages| ChatSample { messages, tools: Vec::new(), rendered: None };
+        let calls = ChatMessage::assistant_tool_calls("", vec![call("a"), call("b")], true);
+        sample(vec![ChatMessage::user("q"), calls.clone(), ChatMessage::tool_result("1"), ChatMessage::tool_result("2")]).validate().expect("in order");
+        let err = sample(vec![ChatMessage::user("q"), calls, ChatMessage::tool_result("1"), ChatMessage::tool_result("2"), ChatMessage::tool_result("3")]).validate().unwrap_err();
+        assert!(err.contains("no unanswered call"), "got: {err}");
     }
 
     #[test]

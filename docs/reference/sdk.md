@@ -383,8 +383,10 @@ The dataset is **`generic-preference-v1`** JSONL, one pair per line:
   renders; `metadata` (optional) is an object carried for the producer and
   never read.
 - Refused, by line and field: an unknown or mistyped field, a candidate that
-  is not an assistant turn, `chosen` identical to `rejected`, a tool result
-  answering no earlier call, and arguments that are not valid JSON.
+  is not an assistant turn, `chosen` identical to `rejected`, a tool call id
+  used twice in the conversation (a candidate must not reuse the prompt's id),
+  a tool result answering no earlier unanswered call, and arguments that are
+  not valid JSON.
   `brain::validate_preference_dataset_for(path, model_dir, max_block)` also
   renders both candidates through the base's own tokenizer and chat template
   and refuses a pair that does not render, whose candidates render to the
