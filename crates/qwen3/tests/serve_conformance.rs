@@ -70,10 +70,10 @@ fn load_adapter(e: &mut Engine) -> AdapterId {
 
 #[test]
 fn qwen3_with_fp32_kv_conforms() {
-    conformance::run_all(&Conformance { make: || engine(false), prefix_reuse: true, load_adapter: Some(load_adapter) });
+    conformance::run_all(&Conformance { make: || engine(false), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
 }
 
 #[test]
 fn qwen3_with_int8_kv_conforms() {
-    conformance::run_all(&Conformance { make: || engine(true), prefix_reuse: true, load_adapter: Some(load_adapter) });
+    conformance::run_all(&Conformance { make: || engine(true), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
 }

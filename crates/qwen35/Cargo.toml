@@ -38,3 +38,7 @@ brain-testutil.workspace = true
 brain-backend-cuda.workspace = true
 # A child-process memory measurement publishes its own ceiling.
 brain-memauth.workspace = true
+
+[[test]]
+name = "gguf_conformance"
+harness = false

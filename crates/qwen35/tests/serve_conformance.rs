@@ -23,5 +23,5 @@ fn engine() -> Engine {
 
 #[test]
 fn qwen35_engine_conforms() {
-    conformance::run_all(&Conformance { make: engine, prefix_reuse: false, load_adapter: None });
+    conformance::run_all(&Conformance { make: engine, prefix_reuse: false, prefix_prompt_tokens: 24, load_adapter: None });
 }

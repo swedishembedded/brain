@@ -388,6 +388,116 @@ pub mod testing {
         write_synthetic(path, true);
     }
 
+    /// Makes one tensor: shape, name, scale, offset, negated.
+    type TensorMaker<'a> = dyn FnMut(Vec<u64>, &str, f32, f32, bool) -> TensorOut + 'a;
+
+    /// A 2-layer (one Gated-DeltaNet, one full-attention) servable GGUF, plus
+    /// the MTP head the serving path requires, at a
+    /// shape the int8 serving path accepts (every linear's input width a
+    /// multiple of 32, `Qwen35Config::tiny_i8`'s dimensions), with random
+    /// weights drawn from `seed`: small enough to load a real
+    /// serving engine in a test, varied enough that different prompts produce
+    /// different tokens (the patterned weights of [`write_synthetic_gguf`] do
+    /// not).
+    pub fn write_random_servable_gguf(path: &str, seed: u64) {
+        let (d, n_heads, head_dim, n_kv) = (96u64, 3u64, 32u64, 1u64);
+        let (lin_kh, lin_kd, lin_vh, lin_vd) = (2u64, 16u64, 6u64, 16u64);
+        let (key_dim, value_dim) = (lin_kh * lin_kd, lin_vh * lin_vd);
+        let (conv_k, ff, vocab, rotary_dim) = (4u64, 128u64, 29u64, 8u64);
+        let mut rng = seed | 1;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            ((rng >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 2.0
+        };
+        let mut tensor = |shape: Vec<u64>, name: &str, scale: f32, offset: f32, negative: bool| {
+            let numel: u64 = shape.iter().product();
+            let data = (0..numel)
+                .flat_map(|_| {
+                    let v = offset + scale * next();
+                    (if negative { -v.abs() - 0.1 } else { v }).to_le_bytes()
+                })
+                .collect();
+            TensorOut { name: name.to_string(), shape: shape.iter().map(|&x| x as usize).collect(), ty: 0, data }
+        };
+        let w = |t: &mut TensorMaker<'_>, shape: Vec<u64>, name: &str| t(shape, name, 0.15, 0.0, false);
+        let norm = |t: &mut TensorMaker<'_>, n: u64, name: &str| t(vec![n], name, 0.1, 1.0, false);
+        let t: &mut TensorMaker<'_> = &mut tensor;
+        let mut tensors = vec![w(t, vec![vocab, d], "token_embd.weight"), w(t, vec![vocab, d], "output.weight"), norm(t, d, "output_norm.weight")];
+        let mlp = |tensors: &mut Vec<TensorOut>, t: &mut TensorMaker<'_>, prefix: &str| {
+            tensors.push(w(t, vec![ff, d], &format!("{prefix}ffn_gate.weight")));
+            tensors.push(w(t, vec![ff, d], &format!("{prefix}ffn_up.weight")));
+            tensors.push(w(t, vec![d, ff], &format!("{prefix}ffn_down.weight")));
+        };
+        tensors.push(norm(t, d, "blk.0.attn_norm.weight"));
+        tensors.push(norm(t, d, "blk.0.post_attention_norm.weight"));
+        tensors.push(w(t, vec![2 * key_dim + value_dim, d], "blk.0.attn_qkv.weight"));
+        tensors.push(w(t, vec![value_dim, d], "blk.0.attn_gate.weight"));
+        tensors.push(w(t, vec![lin_vh, d], "blk.0.ssm_alpha.weight"));
+        tensors.push(w(t, vec![lin_vh, d], "blk.0.ssm_beta.weight"));
+        tensors.push(w(t, vec![2 * key_dim + value_dim, conv_k], "blk.0.ssm_conv1d.weight"));
+        tensors.push(t(vec![lin_vh], "blk.0.ssm_a", 0.5, 0.0, true));
+        tensors.push(w(t, vec![lin_vh], "blk.0.ssm_dt.bias"));
+        tensors.push(norm(t, lin_vd, "blk.0.ssm_norm.weight"));
+        tensors.push(w(t, vec![d, value_dim], "blk.0.ssm_out.weight"));
+        mlp(&mut tensors, t, "blk.0.");
+        tensors.push(norm(t, d, "blk.1.attn_norm.weight"));
+        tensors.push(norm(t, d, "blk.1.post_attention_norm.weight"));
+        tensors.push(w(t, vec![n_heads * head_dim * 2, d], "blk.1.attn_q.weight"));
+        tensors.push(w(t, vec![n_kv * head_dim, d], "blk.1.attn_k.weight"));
+        tensors.push(w(t, vec![n_kv * head_dim, d], "blk.1.attn_v.weight"));
+        tensors.push(norm(t, head_dim, "blk.1.attn_q_norm.weight"));
+        tensors.push(norm(t, head_dim, "blk.1.attn_k_norm.weight"));
+        tensors.push(w(t, vec![d, n_heads * head_dim], "blk.1.attn_output.weight"));
+        mlp(&mut tensors, t, "blk.1.");
+        // The MTP head the serving path requires: a full-attention layer at
+        // index 2 plus the `nextn.*` leaves.
+        tensors.push(norm(t, d, "blk.2.attn_norm.weight"));
+        tensors.push(norm(t, d, "blk.2.post_attention_norm.weight"));
+        tensors.push(w(t, vec![n_heads * head_dim * 2, d], "blk.2.attn_q.weight"));
+        tensors.push(w(t, vec![n_kv * head_dim, d], "blk.2.attn_k.weight"));
+        tensors.push(w(t, vec![n_kv * head_dim, d], "blk.2.attn_v.weight"));
+        tensors.push(norm(t, head_dim, "blk.2.attn_q_norm.weight"));
+        tensors.push(norm(t, head_dim, "blk.2.attn_k_norm.weight"));
+        tensors.push(w(t, vec![d, n_heads * head_dim], "blk.2.attn_output.weight"));
+        mlp(&mut tensors, t, "blk.2.");
+        tensors.push(norm(t, d, "blk.2.nextn.enorm.weight"));
+        tensors.push(norm(t, d, "blk.2.nextn.hnorm.weight"));
+        tensors.push(norm(t, d, "blk.2.nextn.shared_head_norm.weight"));
+        tensors.push(w(t, vec![d, 2 * d], "blk.2.nextn.eh_proj.weight"));
+
+        let u = |v: u64| GgufValue::U32(v as u32);
+        let tokens: Vec<String> = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"].iter().map(|s| s.to_string()).chain((b'a'..=b'z').map(|c| (c as char).to_string())).collect();
+        assert_eq!(tokens.len() as u64, vocab);
+        let kvs = vec![
+            kv("general.architecture", GgufValue::String(GGUF_ARCHITECTURE.to_string())),
+            kv("qwen35.block_count", u(3)),
+            kv("qwen35.nextn_predict_layers", u(1)),
+            kv("qwen35.embedding_length", u(d)),
+            kv("qwen35.attention.head_count", u(n_heads)),
+            kv("qwen35.attention.head_count_kv", u(n_kv)),
+            kv("qwen35.attention.key_length", u(head_dim)),
+            kv("qwen35.attention.value_length", u(head_dim)),
+            kv("qwen35.attention.layer_norm_rms_epsilon", GgufValue::F32(1e-6)),
+            kv("qwen35.rope.freq_base", GgufValue::F32(1_000_000.0)),
+            kv("qwen35.rope.dimension_count", u(rotary_dim)),
+            kv("qwen35.rope.dimension_sections", GgufValue::Array(vec![u(2), u(1), u(1), u(0)])),
+            kv("qwen35.full_attention_interval", u(2)),
+            kv("qwen35.context_length", u(4096)),
+            kv("qwen35.feed_forward_length", u(ff)),
+            kv("qwen35.ssm.conv_kernel", u(conv_k)),
+            kv("qwen35.ssm.group_count", u(lin_kh)),
+            kv("qwen35.ssm.state_size", u(lin_kd)),
+            kv("tokenizer.ggml.model", GgufValue::String("gpt2".to_string())),
+            kv("tokenizer.ggml.tokens", GgufValue::Array(tokens.iter().map(|t| GgufValue::String(t.clone())).collect())),
+            kv("tokenizer.ggml.merges", GgufValue::Array(Vec::new())),
+            kv("tokenizer.ggml.token_type", GgufValue::Array(tokens.iter().enumerate().map(|(i, _)| GgufValue::I32(if i < 3 { 3 } else { 1 })).collect())),
+            kv("tokenizer.ggml.eos_token_id", u(2)),
+        ];
+        write(path, &kvs, &tensors, 32).unwrap();
+    }
+
     fn write_synthetic(path: &str, with_tokenizer: bool) {
         let d = 4u64; // hidden
         let n_heads = 2u64;

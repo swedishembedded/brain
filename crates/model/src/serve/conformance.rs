@@ -43,12 +43,17 @@ pub struct Conformance<D: PagedDecoder> {
     pub make: fn() -> D,
     /// Whether the decoder reuses KV prefixes (`prefix_stats` then counts hits).
     pub prefix_reuse: bool,
+    /// The prompt length the prefix test serves first, then extends by 8
+    /// tokens: an engine that caches only prompts of some minimum length needs
+    /// a longer one. The decoder must hold this plus 12 tokens per sequence.
+    pub prefix_prompt_tokens: usize,
     /// Loads one distinct adapter into a decoder and returns its id; `None`
     /// for a decoder without an adapter bank.
     pub load_adapter: Option<fn(&mut D) -> AdapterId>,
 }
 
-/// The per-sequence capacity (prompt + generated) a suite decoder must have.
+/// The per-sequence capacity (prompt + generated) a suite decoder must have
+/// (more for a `prefix_prompt_tokens` above 36).
 pub const MIN_SEQ_TOKENS: usize = 48;
 
 fn tokens(vocab: usize, seed: usize, n: usize) -> Vec<u32> {
@@ -143,7 +148,7 @@ fn held_behind_check<D: PagedDecoder>(c: &Conformance<D>, adapters: bool) {
 pub fn a_prefix_hit_prefills_only_the_suffix<D: PagedDecoder>(c: &Conformance<D>) {
     let mut sched = Scheduler::new((c.make)(), 4);
     let vocab = sched.decoder_mut().vocab();
-    let first = tokens(vocab, 3, 24);
+    let first = tokens(vocab, 3, c.prefix_prompt_tokens);
     let mut second = first.clone();
     second.extend(tokens(vocab, 4, 8));
     let id = sched.submit(request(first.clone(), 4));
