@@ -496,10 +496,10 @@ pub struct QwenServeConfig {
     pub max_prefill_cap: u32,
     /// `--qwen-kv-tokens N`: the KV pool's size in tokens, shared by every
     /// sequence and by the prompt-prefix cache. `None` (the default) sizes it
-    /// at two contexts, which holds one long agent history plus a little
-    /// cache; an agent fleet resending long histories every turn needs the
-    /// pool to hold all of their histories at once (clients x history
-    /// tokens), or the prefix cache evicts a conversation before its next turn.
+    /// for `max_batch` half-context histories (never under two contexts). An
+    /// agent fleet resending long histories every turn needs the pool to hold
+    /// all of their histories at once (clients x history tokens), or the
+    /// prefix cache evicts a conversation before its next turn.
     pub kv_tokens: Option<u32>,
     /// `--qwen-gemm-fp32` (`Fp32Reference`) pins exact fp32 arithmetic. Default `Auto`: the
     /// fp32-weight linears of 8 or more rows (prefill, batched decode) multiply on TF32 tensor cores where the device has them
@@ -550,6 +550,12 @@ fn serve_weight_bytes(cfg: &QwenServeConfig, checkpoint: &qwen3::config::QwenCon
 /// picks from, ascending - round numbers an operator recognizes in a log
 /// line, not an arbitrary byte-granularity sweep result.
 const AUTO_CTX_TIERS: &[u32] = &[2048, 4096, 8192, 16384, 24576, 32768, 40960, 49152, 65536, 98304, 131072, 196608, 262144];
+
+/// Upper bound, in tokens, of the default pool's room for `max_batch`
+/// half-context histories (see [`QwenResident::pool_sizing`]): enough for 16
+/// conversations of 16k tokens, about 19 GB of int8 KV on the 8B. A longer
+/// context's own two-context pool is already larger than this.
+const DEFAULT_POOL_FLEET_TOKENS: u32 = 262_144;
 
 /// What one `(ctx, batch, prefill)` sizing costs on the device: the totals a
 /// budget has to cover, and the largest SINGLE binding a driver has to accept.
@@ -761,6 +767,7 @@ impl QwenResident {
             Ok(checkpoint) => weights_int8_for(&cfg, &checkpoint),
             Err(_) => !cfg.weights_bf16 && cfg.weights_int8.unwrap_or(false),
         };
+        let kv_tokens = Self::resolve_kv_tokens(path, &cfg, ctx);
         QwenResident {
             id,
             path: path.to_string(),
@@ -774,10 +781,34 @@ impl QwenResident {
             weights_int8_requested,
             weights_bf16_requested: cfg.weights_bf16,
             max_prefill_cap: cfg.max_prefill_cap.clamp(1, 512),
-            kv_tokens: cfg.kv_tokens,
+            kv_tokens,
             gemm_precision: cfg.gemm_precision,
             fuse_residual_norm: cfg.fuse_residual_norm,
         }
+    }
+
+    /// The KV pool size in tokens: `--qwen-kv-tokens` verbatim when named;
+    /// otherwise, on a live server (a device budget is known), room for
+    /// `max_batch` half-context histories - capped at
+    /// [`DEFAULT_POOL_FLEET_TOKENS`] - when that pool fits the budget beside
+    /// the weights, so a fleet of agents resending their histories finds each
+    /// one cached at its next turn without a flag. `None` keeps the
+    /// two-context pool: no budget known, nothing to add beyond two contexts,
+    /// or the larger pool would not fit.
+    fn resolve_kv_tokens(path: &str, cfg: &QwenServeConfig, ctx: u32) -> Option<u32> {
+        if cfg.kv_tokens.is_some() {
+            return cfg.kv_tokens;
+        }
+        let budget = cfg.auto_budget_bytes?;
+        let checkpoint_cfg = qwen3::checkpoint_config(path).ok()?;
+        let max_batch = cfg.max_batch.max(1);
+        let fleet = (u64::from(ctx) * u64::from(max_batch) / 2).min(u64::from(DEFAULT_POOL_FLEET_TOKENS)) as u32;
+        if fleet <= ctx.saturating_mul(2) {
+            return None;
+        }
+        let weight_bytes = serve_weight_bytes(cfg, &checkpoint_cfg);
+        let profile = PoolProfile::at_ctx(&checkpoint_cfg, ctx, max_batch, cfg.max_prefill_cap.clamp(1, 512), Some(fleet), cfg.kv_int8, cfg.kv_offload_gb > 0.0, qwen3::serve::FusedAttention::default());
+        (profile.total(weight_bytes) <= budget && profile.bindings_fit()).then_some(fleet)
     }
 
     /// `cfg.ctx` verbatim when the operator named one explicitly
@@ -911,9 +942,10 @@ impl QwenResident {
     /// scratch_linearly_at_the_real_config`'s own doc has the split.
     ///
     /// `kv_tokens`: the pool's size in tokens when the operator named one
-    /// (`--qwen-kv-tokens`); `None` keeps the two-context default. A pool is
-    /// never smaller than one full context, so any admitted request can run
-    /// alone.
+    /// (`--qwen-kv-tokens`); `None` is two contexts (a live server
+    /// resolves a larger default first, see [`QwenResident::fleet_kv_tokens`]).
+    /// A pool is never smaller than one full context, so any admitted request
+    /// can run alone.
     fn pool_sizing(ctx: u32, max_batch: u32, max_prefill_cap: u32, kv_tokens: Option<u32>) -> (u32, u32, u32, u32, u32) {
         let block_size = 16u32;
         let max_blocks_per_seq = ctx.div_ceil(block_size);
@@ -1518,16 +1550,34 @@ mod tests {
 
     /// `--qwen-kv-tokens` sizes the KV pool in tokens independently of the
     /// per-sequence context, so many long agent histories can stay cached at
-    /// once; unnamed it is the two-context default, and it never drops below
-    /// one context (a lone admitted request must fit).
+    /// once; unnamed it holds `max_batch` half-context histories (at least two
+    /// contexts), and it never drops below one context (a lone admitted
+    /// request must fit).
     #[test]
     fn kv_tokens_sets_the_pool_size_apart_from_the_context() {
         let (_, _, per_seq, default_blocks, _) = QwenResident::pool_sizing(4096, 8, 512, None);
-        assert_eq!(default_blocks, per_seq * 2 + 8);
+        assert_eq!(default_blocks, per_seq * 2 + 8, "few slots: two contexts");
         let (_, _, _, big, _) = QwenResident::pool_sizing(4096, 8, 512, Some(400_000));
         assert_eq!(big, 400_000 / 16 + 8);
         let (_, _, _, small, _) = QwenResident::pool_sizing(4096, 8, 512, Some(16));
         assert_eq!(small, per_seq + 8);
+    }
+
+    /// A live server (budget known) keeps `max_batch` half-context histories
+    /// cached by default, when that fits; with no budget, no room, or an
+    /// operator's own number, the pool is the plain one.
+    #[test]
+    fn a_live_server_sizes_the_pool_for_a_fleet_of_histories_when_it_fits() {
+        let path = write_tiny_checkpoint(5, "fleet");
+        let path = path.to_str().unwrap();
+        let live = |budget: Option<u64>, kv_tokens: Option<u32>| QwenServeConfig { ctx: Some(4096), max_batch: 16, auto_budget_bytes: budget, kv_tokens, ..QwenServeConfig::default() };
+        let resolve = |cfg: &QwenServeConfig| QwenResident::resolve_kv_tokens(path, cfg, 4096);
+        assert_eq!(resolve(&live(Some(u64::MAX / 4), None)), Some(4096 * 16 / 2), "16 slots x half a context");
+        assert_eq!(resolve(&live(None, None)), None, "no card budget: the two-context pool");
+        assert_eq!(resolve(&live(Some(1 << 20), None)), None, "does not fit the budget");
+        assert_eq!(resolve(&live(Some(u64::MAX / 4), Some(1234))), Some(1234), "the operator's number wins");
+        let few = QwenServeConfig { max_batch: 2, ..live(Some(u64::MAX / 4), None) };
+        assert_eq!(resolve(&few), None, "two contexts already hold two half-contexts");
     }
 
     #[test]

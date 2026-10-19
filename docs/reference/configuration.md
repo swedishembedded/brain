@@ -224,7 +224,7 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 
 The Qwen3 and Qwen3.8 serving sizes are `brain serve` flags, not variables:
 `--qwen-ctx` (default: auto-sized to the card), `--qwen-max-batch` (default
-16), `--qwen-kv-tokens` (default: two contexts), `--qwen-kv-calib`, `--qwen35-ctx` (default: the longest the cards hold)
+16), `--qwen-kv-tokens` (default: batch x half a context when it fits), `--qwen-kv-calib`, `--qwen35-ctx` (default: the longest the cards hold)
 and `--qwen35-max-batch` (default 8). See the
 [Qwen3](models/qwen3.md) and [Qwen3.8](models/qwen35.md) pages.
 
