@@ -86,6 +86,16 @@ fn margin(v: &[f32]) -> f32 {
     s[0] - s[1]
 }
 
+/// KL(softmax(p) || softmax(q)) in nats: how far `q` is from the reference distribution `p`.
+fn kl(p: &[f32], q: &[f32]) -> f64 {
+    let lse = |v: &[f32]| {
+        let m = v.iter().cloned().fold(f32::MIN, f32::max) as f64;
+        m + v.iter().map(|x| ((*x as f64) - m).exp()).sum::<f64>().ln()
+    };
+    let (lp, lq) = (lse(p), lse(q));
+    p.iter().zip(q).map(|(a, b)| { let pa = ((*a as f64) - lp).exp(); if pa < 1e-12 { 0.0 } else { pa * (((*a as f64) - lp) - ((*b as f64) - lq)) } }).sum()
+}
+
 fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
     let (mut d, mut n) = (0f64, 0f64);
     for (x, y) in a.iter().zip(b) {
@@ -182,9 +192,11 @@ fn main() {
                         .filter(|(_, (x, y))| argmax(x) != argmax(y))
                         .map(|(i, (_, y))| format!("step {i} (orig margin {:.3})", margin(y)))
                         .collect();
+                    let mean_kl = rows.iter().zip(b).map(|(x, y)| kl(y, x)).sum::<f64>() / rows.len() as f64;
                     println!(
-                        "  {:<38} identical={identical} mean rel-L2 {:.2e} worst {:.2e}; argmax flips vs orig: {}",
+                        "  {:<38} identical={identical} step-0 rel-L2 {:.2e} mean rel-L2 {:.2e} worst {:.2e} mean KL {mean_kl:.2e}; argmax flips vs orig: {}",
                         s.name,
+                        rels[0],
                         rels.iter().sum::<f64>() / rels.len() as f64,
                         rels.iter().cloned().fold(0.0, f64::max),
                         if flips.is_empty() { "none".to_string() } else { flips.join(", ") }
