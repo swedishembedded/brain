@@ -23,7 +23,7 @@ over the same key named in the file.
 ```yaml
 # config.yaml
 BRAIN_API_KEY: sk-brain-your-own-fixed-key
-BRAIN_QWEN35_CTX: 8192
+BRAIN_QWEN35MOE_CTX: 8192
 ```
 
 ```
@@ -172,14 +172,9 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_NVRTC` | exact NVRTC library to load for the CUDA backend (a path or a SONAME); the only library tried when set | search `CUDA_PATH`, then the system loader |
 | `BRAIN_CUDA_AOT_DIR` | directory of ahead-of-time CUDA images and their manifest (`make cuda/aot`) | `cuda-aot` under the pipeline cache directory |
 | `BRAIN_CUDA_AOT` | `0` ignores the ahead-of-time directory so kernels compile with NVRTC | on |
-| `BRAIN_QWEN_CTX` | Qwen built context length | 24576 |
-| `BRAIN_QWEN_MAX_BATCH` | Qwen serving batch slots | 16 |
 | `BRAIN_QWEN_KV_INT8` | int8 KV cache (`0` opts out) | on |
-| `BRAIN_QWEN_KV_CALIB` | per-head KV clip ranges from `brain qwen3 calib` | unset |
 | `BRAIN_QWEN35MOE_CTX` | Qwen3.5 MoE built context length | model default |
 | `BRAIN_QWEN35MOE_MAX_BATCH` | Qwen3.5 MoE serving batch slots | model default |
-| `BRAIN_QWEN35_CTX` | Qwen3.8-27B dense built context length | 4096 |
-| `BRAIN_QWEN35_MAX_BATCH` | Qwen3.8-27B dense serving batch slots | 4 |
 | `BRAIN_LFM2_BATCH` | LFM batched-forward slots per instance | 2 |
 | `BRAIN_FLUX2_MAX_BATCH` | FLUX.2 concurrent same-size batch cap | 4 |
 | `BRAIN_FLUX2_FAMILY` | `klein` or `base`, combined with the DiT's own sniffed size (`4b`/`9b`) to pick the served variant when a resident is bound to explicit weight paths rather than a `--variant` flag | `klein` |
@@ -226,6 +221,12 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_MOCK_DELAY_MS` | mock model artificial latency | 0 |
 | `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache dir (ASR/NPU) | `$TMPDIR/brain_ov_cache` |
 | `BRAIN_GPT2` | stdio-loop GPT checkpoint (also `--gpt`) | fake echo model |
+
+The Qwen3 and Qwen3.8 serving sizes are `brain serve` flags, not variables:
+`--qwen-ctx` (default: auto-sized to the card), `--qwen-max-batch` (default
+16), `--qwen-kv-calib`, `--qwen35-ctx` (default: the longest the cards hold)
+and `--qwen35-max-batch` (default 8). See the
+[Qwen3](models/qwen3.md) and [Qwen3.8](models/qwen35.md) pages.
 
 Deeper per-model knobs not listed here are documented on that model's own
 page under `docs/reference/models/`.

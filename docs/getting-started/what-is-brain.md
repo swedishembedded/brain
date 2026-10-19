@@ -6,7 +6,8 @@ and no Python to build it, run it, or check that it learns correctly.
 ## One set of kernels, every kind of hardware
 
 brain's operations are written once, as portable WGSL compute kernels, and the
-same kernels run on four backends, chosen at run time with `--backend`:
+same kernels run on four backends. All four (wgpu, Vulkan, CUDA and CPU) are
+compiled into every native build and are chosen at run time with `--backend`:
 
 - **wgpu** (the default GPU backend) - any modern GPU through Vulkan, Metal or
   DirectX 12, and the browser through WebGPU;
@@ -25,8 +26,8 @@ A portable kernel either gives the same answer on every backend or it is a
 bug. Each hand-written CUDA kernel is checked against the portable kernel it
 replaces, or against a reference computation where it has no portable twin.
 
-Separately, an **Intel NPU** path exists for a subset of models
-(`crates/npu`). It is not one of the three eager backends and does not share
+Separately, an **Intel NPU** path exists for a subset of models, opt-in per
+model. It is not one of the four eager backends and does not share
 the WGSL kernels - OpenVINO is a whole-graph compiler, so reaching the NPU
 means exporting a model to ONNX, compiling it with OpenVINO, and running the
 compiled graph, rather than dispatching brain's own kernels op by op. See

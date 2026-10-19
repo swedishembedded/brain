@@ -88,7 +88,9 @@ dataset (`brain flux2 finetune`, `brain do`).
 ## Options
 
 - `--width` / `--height`
-- `--steps`, `--seed`
+- `--steps`, `--seed` - on the distilled Klein variants the sampler is fixed
+  at 4 steps, so `--steps` is ignored with a warning; `--experimental-steps`
+  makes it honour `--steps` again, for experiments only
 - `--guidance` - classifier-free guidance strength; only meaningful on the
   undistilled `base` variants, since Klein is guidance-distilled
 - `--variant klein-4b|klein-9b|base-4b|base-9b`

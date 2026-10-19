@@ -244,6 +244,14 @@ everything about HOW to serve it is a `brain serve` flag:
   shrinks the weight term from ~20.8 GiB to ~11.9 GiB. A device with no packed-int8 dot path (the CPU
   backend, or an unusual GPU) degrades to fp32 with a printed warning
   rather than failing.
+- `--qwen-weights-bf16` - store the linears and the head as bf16 (exact
+  for a checkpoint that ships bf16, half the fp32 bytes in memory), decoded
+  inline.
+- `--qwen-gemm-fp32` - pin exact fp32 arithmetic for the linears. By
+  default the linears of fp32 weights with at least 8 rows (prefill and
+  batched decode) run on TF32 tensor cores where the card has them
+  (operands rounded to a 10-bit mantissa, fp32 accumulation, no extra
+  memory).
 - `--qwen-max-prefill N` - cap the chunked-prefill row count below its
   512 default (clamped to `1..=512`; can only shrink it). The scores/probs
   scratch buffer this bounds is the single largest per-token-scaling cost
@@ -256,7 +264,7 @@ everything about HOW to serve it is a `brain serve` flag:
 ## Serving more sessions than the KV pool holds
 
 The KV pool is sized for a couple of full-length contexts, while the batch
-has `BRAIN_QWEN_MAX_BATCH` slots, so a busy server can admit more sessions
+has `--qwen-max-batch` slots (default 16), so a busy server can admit more sessions
 than the pool can keep cached at once. Admission only checks that a prompt
 fits, so the sequences it lets in can still outgrow the pool together while
 they decode. Whatever the offload setting, that never fails a request: the

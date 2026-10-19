@@ -101,7 +101,11 @@ brain --device gpu0,gpu1 serve --openai
 #   --qwen35-kv int8         how the 16 GQA layers store K/V: "f32" (default),
 #                            "bf16" (half the bytes) or "int8" (one scale per
 #                            token and kv head, ~3.9x fewer bytes)
-#   --qwen35-max-batch N     concurrent decode slots (default 1)
+#   --qwen35-max-batch N     concurrent decode slots (default 8)
+#   --qwen35-fp32-ctx N      context for the fp32 resident served from a brain
+#                            checkpoint (default 4096)
+#   --qwen35-fp32-max-batch N
+#                            decode slots for that fp32 resident (default 4)
 #   --speculative MODE       speculative decoding: auto (default: the checkpoint's
 #                            own MTP head when it has one, otherwise off), off,
 #                            mtp, ngram (prompt lookup, no second model), dflash

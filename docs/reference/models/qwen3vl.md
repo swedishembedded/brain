@@ -238,7 +238,7 @@ A real `temp` samples via the same temperature/top-k/nucleus algorithm
 
 Decoder context is a resident-build-time capacity, not a per-request
 parameter (the same philosophy `max_pixels` already uses): `$BRAIN_QWEN3VL_CTX`
-(default 24576, mirroring `qwen3`'s own `BRAIN_QWEN_CTX`) sizes the KV cache
+(default 24576) sizes the KV cache
 this resident's decoder is built with, clamped DOWN to the checkpoint's own
 declared `max_position_embeddings` so a request never allocates past what the
 checkpoint was actually trained for. A request whose prompt + `max_new`
