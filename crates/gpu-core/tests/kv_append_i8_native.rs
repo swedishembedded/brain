@@ -32,8 +32,8 @@ fn run(gpu: &Gpu, kernel: usize, batch: u32, n_kv: u32, hd: u32, block_size: u32
             if row_zero {
                 0.0
             } else {
-                let mag = (u % 20_000) as f32 * 1e-4 * if u % 97 == 0 { 40.0 } else { 1.0 };
-                if (u >> 20) % 2 == 0 { mag } else { -mag }
+                let mag = (u % 20_000) as f32 * 1e-4 * if u.is_multiple_of(97) { 40.0 } else { 1.0 };
+                if (u >> 20).is_multiple_of(2) { mag } else { -mag }
             }
         })
         .collect();
