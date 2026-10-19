@@ -855,6 +855,8 @@ pub struct Engine {
     /// Tensor-core products for the prefill-shaped linears (`Self::set_gemm_precision`): on by
     /// default where the device has them, pinned to the fp32 kernels by `Fp32Reference`.
     gemm: LibraryGemmProvider,
+    /// The fewest rows of one linear that run on the library's tensor-core GEMM (below it the GEMV kernels).
+    library_min_rows: u32,
     /// Int8 activation-quantization scratch (`model::dispatch::I8Scratch` -
     /// the SAME struct `model::ops::Ops::act` wraps, B3's façade) - `Some`
     /// only when at least one `Weight` in `weights` is `I8` (mirrors the old
@@ -1372,6 +1374,7 @@ impl Engine {
             tier,
             half_gemm,
             gemm,
+            library_min_rows: DECODE_REGIME_MAX_ROWS + 1,
             i8_scratch,
             tuned_i8,
             tuned_splitk,
@@ -1465,6 +1468,12 @@ impl Engine {
     /// Takes effect for steps built afterwards, so call it before the first request.
     pub fn set_gemm_precision(&mut self, precision: GemmPrecision) {
         self.gemm = LibraryGemmProvider::for_gpu(&self.gpu, precision);
+    }
+
+    /// The fewest rows of a linear that take the library's tensor-core GEMM (default: past the decode regime).
+    /// The sweep that picks a lower value for batched decode is `qwen_bench serve --library-min-rows`.
+    pub fn set_library_min_rows(&mut self, rows: u32) {
+        self.library_min_rows = rows.max(1);
     }
 
     /// Whether prefill-shaped fp32 linears run on TF32 tensor cores.
@@ -1858,7 +1867,7 @@ impl Engine {
                 // Prefill-shaped rows on TF32 tensor cores when the server asked for that tier; the
                 // decode regime is bandwidth-bound and keeps the GEMV kernels.
                 let whole = |buf| library::Operand { buf, range: (0, 0) };
-                if rows > DECODE_REGIME_MAX_ROWS && self.gemm.forward_tf32(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
+                if rows >= self.library_min_rows && self.gemm.forward_tf32(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
                     return;
                 }
                 self.mm_into(s, x, w, out, rows, *k, *n)
@@ -1872,7 +1881,7 @@ impl Engine {
                 // bf16 for the product, fp32 accumulation); the decode regime streams the weight through
                 // the inline-decode GEMV below.
                 let whole = |buf| library::Operand { buf, range: (0, 0) };
-                if matches!(self.tier, Dtype::BF16) && rows > DECODE_REGIME_MAX_ROWS && self.gemm.forward(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
+                if matches!(self.tier, Dtype::BF16) && rows >= self.library_min_rows && self.gemm.forward(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
                     return;
                 }
                 // Same kernels, same selection as the fp32 path, with the
