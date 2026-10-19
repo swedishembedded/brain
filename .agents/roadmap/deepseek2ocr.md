@@ -484,7 +484,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     guess or a clean-but-quiet run. What remains is a one-file, few-line,
     already-specified mechanical change in `crates/deepseek2ocr/src/
     caps.rs`, blocked only by this session's scope boundary, not by
-    unresolved doubt. `docs/performance/overview.md`'s "still open" line
+    unresolved doubt. `docs/concepts/execution/performance.md`'s "still open" line
     about the wgpu correctness bug is now stale and should be updated in
     the same follow-up that makes the `caps.rs` change (left alone this
     pass for the same scope reason).

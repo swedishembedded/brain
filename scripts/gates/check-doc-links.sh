@@ -22,7 +22,7 @@
 # are the routing guides every contributor (and every agent) navigates by, and
 # a rule that points at a page which no longer exists sends the reader looking
 # for guidance that appears to be missing. The first sweep found one there as
-# well (`docs/scaling/pipeline-sharding.md`, renamed to `pipeline.md`).
+# well (`docs/scaling/pipeline-sharding.md`, a page that no longer exists).
 #
 # Scope, deliberately narrow so it stays trustworthy rather than noisy:
 #   - relative links to `*.md` only. An anchor (`#section`) is stripped and NOT

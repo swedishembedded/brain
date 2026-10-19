@@ -443,7 +443,7 @@ every other recipe's `repos:` field implicitly claims. `BRAIN_DEEPSEEKOCR2_
 DIR` must be pointed at a manually-placed pair; documented as such in
 `docs/reference/models/deepseekocr2.md` (a minimal stub - `check-arch-names.sh`
 requires the page to exist once the architecture registered; the full
-options/hardware-limits content is M11's job) and `docs/using/
+options/hardware-limits content is M11's job) and `docs/reference/
 configuration.md`.
 
 **Real end-to-end, on the real checkpoint**: `brain caps --json` lists

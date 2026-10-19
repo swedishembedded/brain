@@ -7,8 +7,8 @@
 //! `None`, never a fabricated `0`, matching the rule the rest of this crate
 //! already enforces for unmeasured metrics (`schema.rs`).
 //!
-//! Two privilege tiers apply on an Intel iGPU box (see `docs/performance/
-//! arc.md` §0 once it exists):
+//! Two privilege tiers apply on an Intel iGPU box (see the hardware
+//! guide under `docs/guides/hardware/`):
 //!
 //! * **Frequency / RC6 / throttle reasons / package temperature** — plain
 //!   `/sys/class/drm/*/gt/gt0/*` and `/sys/class/hwmon/*` reads. No privilege
