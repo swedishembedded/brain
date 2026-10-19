@@ -560,6 +560,50 @@ pub fn patchify(pixels: &[f32], view: View, patch: u32) -> Vec<f32> {
     out
 }
 
+/// Each canonical tensor and the checkpoint tensors it is made of, in row
+/// order: the attention's `qkv` is HF's `q_proj`, `k_proj` and `v_proj`
+/// stacked, every other tensor is one checkpoint tensor as stored. The one
+/// table both [`import`] and the PEFT export read.
+pub fn hf_sources(cfg: &MiniCpmVConfig) -> Vec<(String, Vec<String>)> {
+    let vt = "model.vision_tower";
+    let mut out: Vec<(String, Vec<String>)> = vec![
+        ("patch.weight".into(), vec![format!("{vt}.embeddings.patch_embedding.weight")]),
+        ("patch.bias".into(), vec![format!("{vt}.embeddings.patch_embedding.bias")]),
+        ("pos.weight".into(), vec![format!("{vt}.embeddings.position_embedding.weight")]),
+    ];
+    let attn = |src: &str, dst: &str, out: &mut Vec<(String, Vec<String>)>| {
+        for part in ["weight", "bias"] {
+            out.push((format!("{dst}.attn.qkv.{part}"), ["q_proj", "k_proj", "v_proj"].iter().map(|p| format!("{src}.self_attn.{p}.{part}")).collect()));
+            out.push((format!("{dst}.attn.proj.{part}"), vec![format!("{src}.self_attn.out_proj.{part}")]));
+            out.push((format!("{dst}.norm1.{part}"), vec![format!("{src}.layer_norm1.{part}")]));
+        }
+    };
+    for l in 0..cfg.vision.n_layers {
+        let src = format!("{vt}.encoder.layers.{l}");
+        attn(&src, &format!("blocks.{l}"), &mut out);
+        for part in ["weight", "bias"] {
+            out.push((format!("blocks.{l}.norm2.{part}"), vec![format!("{src}.layer_norm2.{part}")]));
+            out.push((format!("blocks.{l}.mlp.fc1.{part}"), vec![format!("{src}.mlp.fc1.{part}")]));
+            out.push((format!("blocks.{l}.mlp.fc2.{part}"), vec![format!("{src}.mlp.fc2.{part}")]));
+        }
+    }
+    attn(&format!("{vt}.vit_merger"), "wm", &mut out);
+    for part in ["weight", "bias"] {
+        for (dst, src) in [
+            ("post_norm", format!("{vt}.post_layernorm")),
+            ("wm.pre_norm", format!("{vt}.vit_merger.pre_norm")),
+            ("wm.fc1", format!("{vt}.vit_merger.linear_1")),
+            ("wm.fc2", format!("{vt}.vit_merger.linear_2")),
+            ("merger.pre_norm", "model.merger.mlp.0.pre_norm".to_string()),
+            ("merger.fc1", "model.merger.mlp.0.linear_1".to_string()),
+            ("merger.fc2", "model.merger.mlp.0.linear_2".to_string()),
+        ] {
+            out.push((format!("{dst}.{part}"), vec![format!("{src}.{part}")]));
+        }
+    }
+    out
+}
+
 /// Map the checkpoint's vision and merger tensors onto [`tensor_manifest`]'s
 /// names: the attention projections fused into `qkv` (q, k, v row blocks),
 /// the patch convolution flattened to `[C, 3*p*p]`. Two-way: every manifest
@@ -567,44 +611,14 @@ pub fn patchify(pixels: &[f32], view: View, patch: u32) -> Vec<f32> {
 /// [`crate::import::VISION_PREFIXES`] (`source_names`) must be consumed.
 pub fn import(source_names: &[String], read: &mut dyn FnMut(&str) -> Option<Vec<f32>>, cfg: &MiniCpmVConfig) -> Result<HashMap<String, Vec<f32>>, String> {
     let mut used = std::collections::HashSet::new();
-    let mut get = |name: &str| {
-        used.insert(name.to_string());
-        read(name).ok_or_else(|| format!("minicpmv: the checkpoint has no {name}"))
-    };
     let mut out = HashMap::new();
-    let vt = "model.vision_tower";
-    out.insert("patch.weight".into(), get(&format!("{vt}.embeddings.patch_embedding.weight"))?);
-    out.insert("patch.bias".into(), get(&format!("{vt}.embeddings.patch_embedding.bias"))?);
-    out.insert("pos.weight".into(), get(&format!("{vt}.embeddings.position_embedding.weight"))?);
-    let attn = |get: &mut dyn FnMut(&str) -> Result<Vec<f32>, String>, src: &str, dst: &str, out: &mut HashMap<String, Vec<f32>>| -> Result<(), String> {
-        for part in ["weight", "bias"] {
-            let mut fused = get(&format!("{src}.self_attn.q_proj.{part}"))?;
-            fused.extend(get(&format!("{src}.self_attn.k_proj.{part}"))?);
-            fused.extend(get(&format!("{src}.self_attn.v_proj.{part}"))?);
-            out.insert(format!("{dst}.attn.qkv.{part}"), fused);
-            out.insert(format!("{dst}.attn.proj.{part}"), get(&format!("{src}.self_attn.out_proj.{part}"))?);
-            out.insert(format!("{dst}.norm1.{part}"), get(&format!("{src}.layer_norm1.{part}"))?);
+    for (dst, srcs) in hf_sources(cfg) {
+        let mut v = Vec::new();
+        for src in srcs {
+            v.extend(read(&src).ok_or_else(|| format!("minicpmv: the checkpoint has no {src}"))?);
+            used.insert(src);
         }
-        Ok(())
-    };
-    for l in 0..cfg.vision.n_layers {
-        let src = format!("{vt}.encoder.layers.{l}");
-        attn(&mut get, &src, &format!("blocks.{l}"), &mut out)?;
-        for part in ["weight", "bias"] {
-            out.insert(format!("blocks.{l}.norm2.{part}"), get(&format!("{src}.layer_norm2.{part}"))?);
-            out.insert(format!("blocks.{l}.mlp.fc1.{part}"), get(&format!("{src}.mlp.fc1.{part}"))?);
-            out.insert(format!("blocks.{l}.mlp.fc2.{part}"), get(&format!("{src}.mlp.fc2.{part}"))?);
-        }
-    }
-    attn(&mut get, &format!("{vt}.vit_merger"), "wm", &mut out)?;
-    for part in ["weight", "bias"] {
-        out.insert(format!("post_norm.{part}"), get(&format!("{vt}.post_layernorm.{part}"))?);
-        out.insert(format!("wm.pre_norm.{part}"), get(&format!("{vt}.vit_merger.pre_norm.{part}"))?);
-        out.insert(format!("wm.fc1.{part}"), get(&format!("{vt}.vit_merger.linear_1.{part}"))?);
-        out.insert(format!("wm.fc2.{part}"), get(&format!("{vt}.vit_merger.linear_2.{part}"))?);
-        out.insert(format!("merger.pre_norm.{part}"), get(&format!("model.merger.mlp.0.pre_norm.{part}"))?);
-        out.insert(format!("merger.fc1.{part}"), get(&format!("model.merger.mlp.0.linear_1.{part}"))?);
-        out.insert(format!("merger.fc2.{part}"), get(&format!("model.merger.mlp.0.linear_2.{part}"))?);
+        out.insert(dst, v);
     }
     let want = tensor_manifest(cfg);
     let mut problems: Vec<String> = want
