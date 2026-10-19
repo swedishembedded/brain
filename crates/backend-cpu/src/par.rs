@@ -94,8 +94,19 @@ pub fn map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync + Send) -> Vec<T> {
 /// Sum of squares over a set of tensors, accumulated in `f64` - the global
 /// grad-norm reduction. `f64` accumulation is part of the contract: summing
 /// millions of squares in `f32` loses the low bits the clip threshold needs.
+///
+/// The order of the additions is fixed: every tensor is cut into chunks of
+/// 16K elements, each chunk is summed in sequence, and the partials
+/// are added in order. Rayon's own `sum` splits adaptively, so its last bits
+/// depend on how many threads are free, and a grad-norm that differs in its
+/// last bit scales every weight update differently.
 pub fn sum_sq_f64(tensors: &[Vec<f32>]) -> f64 {
-    tensors.par_iter().map(|t| t.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>()).sum()
+    const SUM_CHUNK: usize = 16 * 1024;
+    let partials: Vec<Vec<f64>> = tensors
+        .par_iter()
+        .map(|t| t.par_chunks(SUM_CHUNK).map(|c| c.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>()).collect())
+        .collect();
+    partials.iter().flatten().sum()
 }
 
 /// Pairwise `f(a[i], b[i])` over two equal-length slices, in parallel - the
@@ -168,6 +179,26 @@ mod tests {
         // proxy asserting exactness instead of a heavyweight demo.
         let t = vec![vec![3.0f32; 4], vec![4.0f32; 4]];
         assert_eq!(sum_sq_f64(&t), (9.0 * 4.0) + (16.0 * 4.0));
+    }
+
+    /// The reduction order is part of the result: a grad-norm that differs in
+    /// its last bit scales every weight update differently, so two runs of one
+    /// seed diverge. The sum must not depend on how many threads share it.
+    #[test]
+    fn sum_sq_is_bitwise_the_same_on_any_number_of_threads() {
+        let mut state = 0x9e3779b97f4a7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 10f32.powi((state % 7) as i32 - 3)
+        };
+        let tensors: Vec<Vec<f32>> = (0..37).map(|i| (0..1000 + 7919 * i).map(|_| next()).collect()).collect();
+        let on = |threads: usize| rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(|| sum_sq_f64(&tensors).to_bits());
+        let reference = on(1);
+        for threads in [2, 3, 7, 16] {
+            assert_eq!(on(threads), reference, "{threads} threads");
+        }
     }
 
     #[test]
