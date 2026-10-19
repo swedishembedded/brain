@@ -29,7 +29,7 @@
 //!   qwen_bench                      # prefill T=512 + decode, fp32, at 0.6B
 //!   qwen_bench prefill [T] [reps]
 //!   qwen_bench decode  [ctx] [reps]
-//!   qwen_bench serve   [rows] [reps] [ctx] [i8w|bf16w] [kv8] [--gemm auto|fp32] [--budget-gb N] [--library-min-rows N] [--cap N]
+//!   qwen_bench serve   [rows] [reps] [ctx] [i8w|bf16w] [kv8] [--gemm auto|fp32] [--budget-gb N] [--library-min-rows N] [--cap N] [--no-fuse]
 //!                                    # the PAGED serving tape (a different
 //!                                    # kernel set from the batched forward);
 //!                                    # `i8w` = int8 weights, `kv8` = int8 KV;
@@ -472,6 +472,7 @@ fn main() {
                 qwen3::serve::Engine::from_map(cfg.clone(), &init, bs, rows * mbs, rows.max(8), mbs_cap, rows.max(8), kv8, i8w)
             };
             eng.set_gemm_precision(gemm_flag(&a));
+            eng.set_fuse_residual_norm(!a.iter().any(|x| x == "--no-fuse"));
             if let Some(rows) = flag(&a, "--library-min-rows").and_then(|s| s.parse().ok()) {
                 eng.set_library_min_rows(rows);
             }

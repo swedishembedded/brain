@@ -942,6 +942,8 @@ pub struct Engine {
     gemm: LibraryGemmProvider,
     /// The fewest rows of one linear that run on the library's tensor-core GEMM (below it the GEMV kernels).
     library_min_rows: u32,
+    /// Fold each residual add into the norm after it (`add_rmsnorm_fwd` / `add_rms_quant`); the A/B switch of that fusion.
+    fuse_residual_norm: bool,
     /// Int8 activation-quantization scratch (`model::dispatch::I8Scratch` -
     /// the SAME struct `model::ops::Ops::act` wraps, B3's façade) - `Some`
     /// only when at least one `Weight` in `weights` is `I8` (mirrors the old
@@ -1485,6 +1487,7 @@ impl Engine {
             tier,
             half_gemm,
             gemm,
+            fuse_residual_norm: true,
             library_min_rows: if tier == Dtype::BF16 { LIBRARY_MIN_ROWS_BF16 } else { LIBRARY_MIN_ROWS },
             i8_scratch,
             tuned_i8,
@@ -1586,6 +1589,11 @@ impl Engine {
     /// The sweep that picks a lower value for batched decode is `qwen_bench serve --library-min-rows`.
     pub fn set_library_min_rows(&mut self, rows: u32) {
         self.library_min_rows = rows.max(1);
+    }
+
+    /// Turn the residual-add + norm fusion off (`false`) to measure it; on by default.
+    pub fn set_fuse_residual_norm(&mut self, on: bool) {
+        self.fuse_residual_norm = on;
     }
 
     /// Whether prefill-shaped fp32 linears run on TF32 tensor cores.
@@ -2480,7 +2488,7 @@ impl Engine {
         // int8 activation quant to fold, `add_rms_quant` (the add, the norm and the int8 packing the next linears
         // read, to the bit what the unfused chain produces) on an int8 engine. `quant` is whether the norm's reader
         // is an int8 linear (the final norm's is the fp32 head). The unfused pair otherwise.
-        let native = !self.gemm.is_reference_pinned();
+        let native = !self.gemm.is_reference_pinned() && self.fuse_residual_norm;
         let add_rms = |s: &mut Vec<Step>, a: &DeviceBuffer, b2: &DeviceBuffer, nw: &DeviceBuffer, sum: &DeviceBuffer, out: &DeviceBuffer, quant: bool| -> bool {
             let step = match &self.i8_scratch {
                 None => native.then(|| block::native_add_rmsnorm(g, &[a, b2, nw, sum, out], d, b, self.cfg.rms_eps)).flatten(),

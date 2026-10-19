@@ -583,6 +583,23 @@ pub const ALL: &[CudaKernel] = &[
         ),
     },
     CudaKernel {
+        name: "kv_append_i8_clipped",
+        // Redirected to by name from the WGSL `paged_kv_append_i8_clipped_batched` (`gpu_core::native_upgrade`).
+        op: Op::Elementwise,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_kv_append_i8_clipped",
+        what: "int8 paged-KV append with a clipped per-(token, kv head) scale, one warp per head instead of one thread; bit-identical to paged_kv_append_i8_clipped_batched",
+        reported: "native:kv_append_i8_clipped",
+        block_dim: 128,
+        // Four (token, kv head) pairs per block.
+        tile: (4, 1),
+        shared_bytes: 0,
+        src: include_str!("../cu/kv_append_i8.cu"),
+    },
+    CudaKernel {
         name: "gdn_chunk_loop_f32",
         op: Op::GatedDeltaChunkLoop,
         weight: Dtype::F32,

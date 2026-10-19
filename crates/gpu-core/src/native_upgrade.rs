@@ -264,7 +264,36 @@ fn conv3x3_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
     cout.div_ceil(CONV3X3_CHANNELS) * n * h.div_ceil(CONV3X3_SIDE) * w.div_ceil(CONV3X3_SIDE)
 }
 
+/// `paged_kv_append_i8_clipped_batched.wgsl`'s bindings: params, `src`, `blocks`, `offsets`, `clip`, `pool`, `scales`.
+const KV_APPEND_I8_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
+/// `Params { batch, kv_stride, block_size, head_dim }`: heads of a whole number of four-value words.
+fn serves_kv_append_i8(p: &[u32]) -> bool {
+    matches!(p, [batch, kv_stride, block_size, hd] if *batch >= 1 && *block_size >= 1 && *hd >= 4 && hd % 4 == 0 && kv_stride % hd == 0 && *kv_stride >= *hd)
+}
+
+/// One block covers four (token, kv head) pairs.
+fn kv_append_i8_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    (p[0] * (p[1] / p[3])).div_ceil(tile.0)
+}
+
 pub(crate) const ROWS: &[Row] = &[
+    Row {
+        slow: "paged_kv_append_i8_clipped_batched",
+        target: Target::Named("kv_append_i8_clipped"),
+        bindings: KV_APPEND_I8_BINDINGS,
+        serves: serves_kv_append_i8,
+        blocks: kv_append_i8_blocks,
+        requires_wgsl_upgrade: false,
+    },
     Row {
         slow: "matmul_i8_gemv",
         target: Target::Operator { op: Op::MatMul, weight: Dtype::I8 },

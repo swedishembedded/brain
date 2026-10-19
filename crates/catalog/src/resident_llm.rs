@@ -498,6 +498,8 @@ pub struct QwenServeConfig {
     /// fp32-weight linears of 8 or more rows (prefill, batched decode) multiply on TF32 tensor cores where the device has them
     /// (operands rounded to a 10-bit mantissa, fp32 accumulation).
     pub gemm_precision: gpu_core::provider::library::GemmPrecision,
+    /// `--qwen-no-fuse-norm` turns off the residual-add + norm fusion (the A/B switch of that launch fusion); default on.
+    pub fuse_residual_norm: bool,
     /// `--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`: the
     /// size of the adapter bank built beside the base weights, which lets
     /// requests run under LoRA adapters ([`crate::adapter_registry`]). `None`
@@ -516,7 +518,7 @@ pub struct QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, adapter_bank: None, adapter_targets_named: false }
+        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false }
     }
 }
 
@@ -666,6 +668,7 @@ pub struct QwenResident {
     weights_bf16_requested: bool,
     max_prefill_cap: u32,
     gemm_precision: gpu_core::provider::library::GemmPrecision,
+    fuse_residual_norm: bool,
 }
 
 /// What `BRAIN_QWEN_WEIGHTS` names, as the `(path to open, repo directory,
@@ -764,6 +767,7 @@ impl QwenResident {
             weights_bf16_requested: cfg.weights_bf16,
             max_prefill_cap: cfg.max_prefill_cap.clamp(1, 512),
             gemm_precision: cfg.gemm_precision,
+            fuse_residual_norm: cfg.fuse_residual_norm,
         }
     }
 
@@ -1193,6 +1197,7 @@ impl ResidentModel for QwenResident {
                 qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
             };
             eng.set_gemm_precision(self.gemm_precision);
+            eng.set_fuse_residual_norm(self.fuse_residual_norm);
             // The adapter bank, once per engine, from the settings the
             // estimate above budgeted. Refusing here is deliberate: a server
             // asked for adapters that cannot give them must say so, not serve

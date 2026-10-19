@@ -240,6 +240,9 @@ QWEN3 SERVING TUNABLES  (--qwen-weights names the checkpoint to serve; the
                          card's free memory cannot hold its fp32 weights plus
                          8 GiB; a card that can serves them fp32.
   --qwen-weights-fp32    keep every weight fp32, whatever the size.
+  --qwen-no-fuse-norm    keep each residual add and the norm after it as two
+                         launches (the fusion is on by default; this is its
+                         A/B switch).
   --qwen-weights-bf16    store the linears and the head as bf16 (rounded to bf16, exact for a
                          checkpoint that ships bf16: half the fp32 bytes in
                          memory), decoded inline.
@@ -609,6 +612,7 @@ pub fn run_serve(args: &[String]) {
             "--qwen-weights-int8" => qwen_cfg.weights_int8 = Some(true),
             "--qwen-weights-fp32" => qwen_cfg.weights_int8 = Some(false),
             "--qwen-weights-bf16" => qwen_cfg.weights_bf16 = true,
+            "--qwen-no-fuse-norm" => qwen_cfg.fuse_residual_norm = false,
             "--qwen-gemm-fp32" => qwen_cfg.gemm_precision = gpu_core::provider::library::GemmPrecision::Fp32Reference,
             "--qwen-max-prefill" => qwen_cfg.max_prefill_cap = parsed(args, &mut i, "--qwen-max-prefill"),
             "--decision-model" => decision_cfg.models.push(val(args, &mut i, "--decision-model")),
