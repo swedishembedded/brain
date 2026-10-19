@@ -2587,13 +2587,6 @@ impl Engine {
                             gpu_core::Dispatch::Workgroups(nh * ntiles_q),
                         )
                     }));
-                } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned())
-                    .then(|| block::native_paged_decode_batched(g, true, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
-                    .flatten()
-                {
-                    // The whole triad as one launch for two or more sequences, the group's query heads sharing each K and V
-                    // row, on a device with the native kernels; the portable batched split-key pair below serves the rest.
-                    s.push(step);
                 } else if fused {
                     // Batched GQA split-key decode: one workgroup per
                     // (row, kv head, 4-head slab, split) reads each K/V byte
@@ -2611,6 +2604,13 @@ impl Engine {
                         gpu_core::Dispatch::Workgroups(b * nkv * slabs * n_splits),
                     ));
                     s.push(g.step(PAGED_FLASH_DECODE_COMBINE_I8, &[&sc.part_i8, &sc.seqlen_buf, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
+                } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned())
+                    .then(|| block::native_paged_decode_batched(g, true, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
+                    .flatten()
+                {
+                    // The whole triad as one launch for two or more sequences where the split-key pair above is not
+                    // selected; that pair is faster where both run (`qwen_bench flash-decode-i8` times the two).
+                    s.push(step);
                 } else {
                     s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], b * nh * cap));
                     s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
