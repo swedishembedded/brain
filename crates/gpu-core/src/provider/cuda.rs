@@ -957,9 +957,9 @@ pub fn paged_flash_prefill_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backen
     gpu.step_native_sliced(id, bufs, &[(0, 0); 6], params, blocks)
 }
 
-/// Dynamic shared memory of `flash_prefill_f16_hd256_v2_*`: the Q tile (64 rows) and the K and V tiles (32 keys each),
-/// fp16 rows of 256 + 8 values. Two blocks of it fit one SM (2 x 66 KiB of the 227 KiB a Hopper block may opt in to).
-const FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES: u32 = (64 + 2 * 32) * (256 + 8) * 2;
+/// Dynamic shared memory of `flash_prefill_f16_hd256_v2_*`: the Q tile (64 rows) and the K and V tiles (`V2_KEYS` = 64
+/// keys each, in the kernel source), fp16 rows of 256 + 8 values. Two blocks of it fit one SM (2 x 99 KiB of the 227 KiB).
+const FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES: u32 = (64 + 2 * 64) * (256 + 8) * 2;
 const FLASH_PREFILL_V2_LAUNCH: backend_api::CudaLaunch = backend_api::CudaLaunch { dynamic_shared_bytes: FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
 
 static FLASH_PREFILL_V2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);

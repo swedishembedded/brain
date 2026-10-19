@@ -468,8 +468,9 @@ fn the_tensor_core_flash_prefill_reads_a_bf16_and_an_int8_cache() {
 }
 
 /// Version 2 of the compact-cache kernel (one warp per 16 rows over the whole head, two blocks per SM) does the
-/// arithmetic of the original in the same order, so the two agree to rounding noise at most; this holds it to
-/// 1e-4 of the output scale on ragged and scattered shapes, and the NaN-filled output proves every row is written.
+/// arithmetic of the original with a different key tile (so a different running-max schedule and fp16 rounding of P),
+/// so the two agree to rounding noise; this holds it to 2e-3 of the output scale (the bar against the portable fp32
+/// kernel is 1e-2) on ragged and scattered shapes, and the NaN-filled output proves every row is written.
 /// It flips the process-wide version switch; the other tests in this file are valid under either kernel.
 #[test]
 fn version_2_matches_the_original_kernel_on_a_bf16_and_an_int8_cache() {
@@ -495,7 +496,7 @@ fn version_2_matches_the_original_kernel_on_a_bf16_and_an_int8_cache() {
             gpu_core::provider::cuda::set_flash_prefill_v2(true);
             assert!(out[1].iter().all(|x| x.is_finite()), "{kv:?} case {i}: version 2 left a row unwritten");
             let maxdiff = out[0].iter().zip(&out[1]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
-            let bar = 1e-4 * rms(&out[0]);
+            let bar = 2e-3 * rms(&out[0]);
             assert!(maxdiff <= bar, "{kv:?} case {i} (n={} start={}): version 2 differs from version 1 by {maxdiff:e} (bar {bar:e})", c.n, c.start);
         }
     }

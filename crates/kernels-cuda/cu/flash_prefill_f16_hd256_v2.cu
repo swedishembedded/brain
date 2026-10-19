@@ -16,16 +16,16 @@
 // What differs from version 1, and why:
 //   * a block is 4 warps of 128 threads and every warp owns 16 query rows over the WHOLE head: no pair of
 //     warps recomputes the same scores (version 1 spends 96 MMAs per warp per 32-key tile for 64 useful;
-//     here a warp issues 128 for its own 16 rows, 512 per block against version 1's 768);
+//     here a warp issues 128 per 32 keys for its own 16 rows, 1024 per block per 64 keys against version 1's 1536);
 //   * the output accumulator is 16 x 256 fp32 = 128 registers per thread, so Q cannot also live in registers:
 //     it stays in shared memory as fp16 and its A fragments are read with ldmatrix each tile;
-//   * the block is sized for TWO resident blocks per SM (128 threads, up to 255 registers, 66 KiB of dynamic
+//   * the block is sized for TWO resident blocks per SM (128 threads, up to 255 registers, 99 KiB of dynamic
 //     shared memory), so one block's global-load and barrier latency is covered by the other's matrix work,
 //     where version 1 runs one block of eight warps per SM;
 //   * a compact cache is staged as raw bytes and widened only when it is written to shared memory (version 1
 //     widens at load time and holds fp32), which keeps the in-flight tile at 16-32 registers.
 //
-// The pipeline per 32-key tile is version 1's: write K, start V's global loads, scores, softmax, write V,
+// The pipeline per 64-key tile (version 1 uses 32: half the barriers and Q fragment reads per key) is version 1's: write K, start V's global loads, scores, softmax, write V,
 // start the next K's loads, then P V.
 
 #ifndef BRAIN_FLASH_HELPERS_ONLY
@@ -37,12 +37,15 @@
 
 #define V2_THREADS 128
 #define V2_ROWS 64                              // query rows per block, 16 per warp
-#define V2_KEYS 32                              // keys per tile
+#ifndef V2_KEYS
+#define V2_KEYS 64                              // keys per tile; gpu-core's FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES must follow it
+#endif
+#define V2_SN (V2_KEYS / 8)                     // n8 score tiles per tile
+#define V2_KK (V2_KEYS / 16)                    // k16 steps of P V per tile
 #define V2_CHUNKS (HD / 8)                      // 8-value chunks per key row
 #define V2_ROWS_PER_PASS (V2_THREADS / V2_CHUNKS)
 #define V2_STAGE (V2_KEYS / V2_ROWS_PER_PASS)   // chunks a thread stages per tile and plane
 #define V2_NTILES (HD / 8)                      // n8 output tiles per warp
-#define V2_SMEM_HALVES ((V2_ROWS + 2 * V2_KEYS) * ROW_HALVES)
 
 extern "C" __global__ void __launch_bounds__(V2_THREADS, 2) brain_flash_prefill_f16_hd256_v2(FLASH_ARGS) {
     extern __shared__ __align__(16) unsigned short smem[];
@@ -194,16 +197,16 @@ extern "C" __global__ void __launch_bounds__(V2_THREADS, 2) brain_flash_prefill_
         issue(pool_v, SCALES_V, kt);       // in flight while the scores are computed
         __syncthreads();                   // K visible
 
-        // ---- S = Q K^T for 16 rows x 32 keys.
-        float sacc[4][4];
+        // ---- S = Q K^T for 16 rows x V2_KEYS keys.
+        float sacc[V2_SN][4];
 #pragma unroll
-        for (int n = 0; n < 4; ++n) { sacc[n][0] = sacc[n][1] = sacc[n][2] = sacc[n][3] = 0.f; }
+        for (int n = 0; n < V2_SN; ++n) { sacc[n][0] = sacc[n][1] = sacc[n][2] = sacc[n][3] = 0.f; }
 #pragma unroll
         for (int s = 0; s < HD / 16; ++s) {
             unsigned int qa[4];
             brain_ldsm_x4(qs_base + s * 32u, qa[0], qa[1], qa[2], qa[3]);
 #pragma unroll
-            for (int np = 0; np < 2; ++np) {
+            for (int np = 0; np < V2_SN / 2; ++np) {
                 unsigned int b0, b1, b2, b3;
                 brain_ldsm_x4(ks_base + ((np * 16u + k_row_lane) * ROW_HALVES + s * 16u + k_col_lane) * 2u, b0, b1, b2, b3);
                 brain_mma_f16(sacc[2 * np], qa, b0, b1);
@@ -211,10 +214,10 @@ extern "C" __global__ void __launch_bounds__(V2_THREADS, 2) brain_flash_prefill_
             }
         }
 
-        // ---- online softmax (exp2 domain) over this tile's 32 keys.
+        // ---- online softmax (exp2 domain) over this tile's keys.
         float mx_a = NEG_BIG, mx_b = NEG_BIG;
 #pragma unroll
-        for (int n = 0; n < 4; ++n) {
+        for (int n = 0; n < V2_SN; ++n) {
             const unsigned int j0 = kt * V2_KEYS + n * 8u + t4 * 2u;
             sacc[n][0] = (j0 < len_a) ? sacc[n][0] * SM_SCALE_LOG2 : NEG_BIG;
             sacc[n][1] = (j0 + 1u < len_a) ? sacc[n][1] * SM_SCALE_LOG2 : NEG_BIG;
@@ -233,7 +236,7 @@ extern "C" __global__ void __launch_bounds__(V2_THREADS, 2) brain_flash_prefill_
         m_b = mn_b;
         float sum_a = 0.f, sum_b = 0.f;
 #pragma unroll
-        for (int n = 0; n < 4; ++n) {
+        for (int n = 0; n < V2_SN; ++n) {
             // A masked score is NEG_BIG; when the whole row is masked mn is NEG_BIG too and the
             // difference is 0, so the weight is forced to 0.
             sacc[n][0] = (sacc[n][0] > NEG_BIG) ? exp2f(sacc[n][0] - mn_a) : 0.f;
@@ -254,9 +257,9 @@ extern "C" __global__ void __launch_bounds__(V2_THREADS, 2) brain_flash_prefill_
         }
 
         // P as fp16 A-fragments, straight from the score accumulators.
-        unsigned int pf[2][4];
+        unsigned int pf[V2_KK][4];
 #pragma unroll
-        for (int kk = 0; kk < 2; ++kk) {
+        for (int kk = 0; kk < V2_KK; ++kk) {
             pf[kk][0] = brain_pack_f16x2(sacc[2 * kk][0], sacc[2 * kk][1]);
             pf[kk][1] = brain_pack_f16x2(sacc[2 * kk][2], sacc[2 * kk][3]);
             pf[kk][2] = brain_pack_f16x2(sacc[2 * kk + 1][0], sacc[2 * kk + 1][1]);
@@ -269,7 +272,7 @@ extern "C" __global__ void __launch_bounds__(V2_THREADS, 2) brain_flash_prefill_
 
         // ---- O += P V over all 256 output columns.
 #pragma unroll
-        for (int kk = 0; kk < 2; ++kk) {
+        for (int kk = 0; kk < V2_KK; ++kk) {
 #pragma unroll
             for (int np = 0; np < V2_NTILES / 2; ++np) {
                 unsigned int b0, b1, b2, b3;
