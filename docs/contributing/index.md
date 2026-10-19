@@ -51,4 +51,5 @@ Links between pages are ordinary relative Markdown links so they work on
 GitHub. Links to other projects use the canonical
 `https://swedishembedded.com/docs/<project>` URLs. Performance figures do not
 belong in prose; `scripts/gates/check-no-perf-numbers.sh` explains how to mark
-a reviewed one.
+a reviewed one. A number cited as "measured by `x`" must name a test, bench,
+example or file that exists (`scripts/gates/check-measured-citations.sh`).

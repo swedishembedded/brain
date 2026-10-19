@@ -731,6 +731,10 @@ check/clippy: check/workspace
 # performance unit/claim (ms, s, fps, tok/s, % of peak, Nx speedup, ...)
 # anywhere in docs/**/*.md unless reviewed via a `<!-- perf-number: ... -->`
 # comment - see that script for the full rationale and escape-hatch syntax.
+# check-measured-citations.sh additionally requires every backticked path,
+# test/bench/example name or make target that a doc cites after "measured by/
+# with/via/using" (or "measured in/on") to exist in the tree - see
+# scripts/gates/measured-citations.py for the exact definition.
 # check-device-env-single-source.sh additionally requires BRAIN_DEVICE be read
 # via std::env::var in exactly one file (crates/gpu-core/src/devices.rs's
 # ambient_compute_set) rather than a second, independently-drifting parser -
@@ -762,12 +766,13 @@ check/clippy: check/workspace
 # and fails when a new streaming action joins them (or when a listed one starts
 # polling and the list goes stale).
 ## check/scripts - scripts/tools self-validation + env-var doc gate + no-doc-citations
-##   + no-perf-numbers + architecture, layering and link gates
+##   + no-perf-numbers + measured-citations + architecture, layering and link gates
 check/scripts:
 	bash scripts/gates/check-scripts.sh
 	bash scripts/gates/check-env-docs.sh
 	bash scripts/gates/check-no-doc-citations.sh
 	bash scripts/gates/check-no-perf-numbers.sh
+	bash scripts/gates/check-measured-citations.sh
 	bash scripts/gates/check-device-env-single-source.sh
 	bash scripts/gates/check-arch-names.sh
 	bash scripts/gates/check-linear-history.sh
