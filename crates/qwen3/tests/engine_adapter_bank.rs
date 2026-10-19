@@ -58,6 +58,9 @@ impl Setup {
 
     fn engine(&self, bank_slots: Option<u32>) -> Engine {
         let mut e = Engine::from_map_on(&parent(), self.cfg.clone(), &self.w, BLOCK, 96, 8, 8, 16, self.kv_int8, self.weights_int8);
+        // These gates compare logits bit for bit between a cold prefill and one that reuses cached blocks, which compute
+        // different row counts: the library GEMM's tiling follows the row count, so they pin the exact fp32 tier.
+        e.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
         if let Some(slots) = bank_slots {
             e.enable_adapters(AdapterBankConfig::new(slots, R_MAX, &LoraSite::ALL)).unwrap();
         }
