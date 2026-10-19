@@ -93,6 +93,8 @@ struct Probe {
     verify_calls: usize,
     verify_rows: Vec<Vec<usize>>,
     commits: usize,
+    /// For every prompt prefilled: whether the toy drafter was prepared for it.
+    prefill_feeds: Vec<bool>,
 }
 
 type Shared = Rc<RefCell<Probe>>;
@@ -111,13 +113,17 @@ struct Toy {
     plain_us: u64,
     row_us: u64,
     cost_aware: bool,
+    /// What preparing the drafter for one prompt costs, in microseconds of the virtual clock.
+    feed_us: u64,
+    spec_prefill: bool,
+    feed_secs: Option<f64>,
     /// Whether `adapter_availability` answers `Resident` (the toy applies no adapter itself).
     serves_adapters: bool,
 }
 
 impl Toy {
     fn new(probe: Shared, verifies: bool) -> Toy {
-        Toy { alloc: BlockAllocator::new(512, BLOCK), state: HashMap::new(), pending: HashMap::new(), probe, verifies, batch_limit: usize::MAX, row_budget: usize::MAX, clock: Arc::new(AtomicU64::new(0)), plain_us: 0, row_us: 0, cost_aware: false, serves_adapters: false }
+        Toy { alloc: BlockAllocator::new(512, BLOCK), state: HashMap::new(), pending: HashMap::new(), probe, verifies, batch_limit: usize::MAX, row_budget: usize::MAX, clock: Arc::new(AtomicU64::new(0)), plain_us: 0, row_us: 0, cost_aware: false, feed_us: 0, spec_prefill: true, feed_secs: None, serves_adapters: false }
     }
     fn slot(t: &BlockTable) -> u32 {
         t.blocks()[0]
@@ -163,7 +169,20 @@ impl PagedDecoder for Toy {
         table.reserve(prompt.len() as u32, &mut self.alloc).unwrap();
         let s = fold(prompt);
         self.state.insert(Self::slot(table), s);
+        if self.feed_us > 0 {
+            if self.spec_prefill {
+                self.clock.fetch_add(self.feed_us, Ordering::Relaxed);
+                self.feed_secs = Some(self.feed_us as f64 * 1e-6);
+            }
+            self.probe.borrow_mut().prefill_feeds.push(self.spec_prefill);
+        }
         vec![s as f32]
+    }
+    fn spec_prefill_cost(&self) -> Option<f64> {
+        self.feed_secs
+    }
+    fn set_spec_prefill(&mut self, on: bool) {
+        self.spec_prefill = on;
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         logits_of(hidden[0] as u32)
@@ -473,6 +492,32 @@ fn speculation_that_pays_on_the_clock_is_used_and_speculation_that_does_not_is_l
             assert!(share <= expect_verify_share, "{label}: speculation does not pay and should only probe, verify share {share:.2}");
         }
     }
+}
+
+/// Requests one after another on a decoder whose drafter costs `feed_us` to prepare per prompt;
+/// returns for each prompt whether the drafter was prepared.
+fn feeds_of(feed_us: u64, max_new: usize) -> Vec<bool> {
+    let (mut sched, probe) = timed(1000, 10);
+    sched.decoder_mut().feed_us = feed_us;
+    for i in 0..24 {
+        sched.submit(req(i, 5, max_new));
+        sched.run();
+    }
+    let feeds = probe.borrow().prefill_feeds.clone();
+    feeds
+}
+
+/// The drafter's per-prompt preparation is a cost speculation has to repay with what it saves
+/// decoding that prompt's reply: when replies are short and the preparation is dear, the
+/// scheduler stops paying it (measured, per request); when replies are long it keeps paying.
+#[test]
+fn the_drafters_prefill_feed_is_skipped_when_speculation_cannot_repay_it() {
+    let dear = feeds_of(500_000, 12);
+    assert_eq!(dear.len(), 24);
+    assert!(dear[0], "the first request learns what the feed and speculation cost: {dear:?}");
+    assert!(dear[8..].iter().filter(|&&f| f).count() <= 1, "short replies cannot repay a 0.5 s feed, only a probe may still pay it: {dear:?}");
+    let cheap_and_long = feeds_of(500, 80);
+    assert!(cheap_and_long.iter().all(|&f| f), "an 80-token reply repays a 0.5 ms feed: {cheap_and_long:?}");
 }
 
 #[test]

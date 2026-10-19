@@ -303,15 +303,18 @@ impl Qwen35GgufInstance {
     /// continued a cached prefix whose last hidden state was `prev_hidden`):
     /// run the head over every complete pair of the prompt and keep the last
     /// row pending.
-    pub(super) fn mtp_after_prefill(&mut self, slot: u32, prompt: &[u32], start: usize, prev_hidden: Option<&[f32]>, carry: &[f32]) {
+    /// `true` when every pair of the prompt reached the head's KV (the rows a
+    /// later prompt may resume from); `false` when the head was absent or the feed
+    /// stopped early.
+    pub(super) fn mtp_after_prefill(&mut self, slot: u32, prompt: &[u32], start: usize, prev_hidden: Option<&[f32]>, carry: &[f32]) -> bool {
         let Self { mtp, shards, .. } = self;
-        let Some(m) = mtp.as_mut() else { return };
+        let Some(m) = mtp.as_mut() else { return false };
         let head_gpu = &shards.last().expect("a stage").qwen35.gpu;
         let d = m.d;
         let (first, hidden): (usize, Vec<f32>) = match (start, prev_hidden) {
             (0, _) => (0, carry.to_vec()),
             (s, Some(prev)) => (s - 1, prev.iter().chain(carry).copied().collect()),
-            (_, None) => return, // no hidden state for the cached prefix's last row: this slot drafts from scratch
+            (_, None) => return false, // no hidden state for the cached prefix's last row: this slot drafts from scratch
         };
         let len = prompt.len();
         debug_assert_eq!(hidden.len(), (len - first) * d);
@@ -324,11 +327,20 @@ impl Qwen35GgufInstance {
             if let Err(e) = m.feed_chunk(head_gpu, slot, at as u32, toks, h, true) {
                 eprintln!("{MODEL}: MTP prefill failed, this sequence drafts from scratch: {e}");
                 m.slots.insert(slot, SlotState { fed: len as u32 - 1, ..SlotState::default() });
-                return;
+                return false;
             }
             at += n;
         }
         m.slots.insert(slot, SlotState { fed: (len - 1) as u32, hidden: hidden[(len - 1 - first) * d..].to_vec(), toks: vec![prompt[len - 1]] });
+        true
+    }
+
+    /// A prompt was prefilled without feeding the head (it would not pay): the slot
+    /// has no draft state, and drafts from scratch if speculation ever reaches it.
+    pub(super) fn mtp_skip_prefill(&mut self, slot: u32) {
+        if let Some(m) = self.mtp.as_mut() {
+            m.slots.remove(&slot);
+        }
     }
 
     /// A cached prefix of `rows` tokens was copied into `slot` from `from`: its

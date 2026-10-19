@@ -40,6 +40,9 @@ use super::{MultiPrefillJob, Qwen35GgufInstance, MODEL};
 /// sampling can reach (the same bound `crate::serve::Engine` uses).
 const TOPK_CAPACITY: usize = 32;
 
+/// Weight of the newest sequence in the running mean of MTP prefill-feed time.
+const FEED_EWMA: f64 = 0.3;
+
 /// [`Qwen35GgufInstance`] behind the paged-decoder seam. See the module doc.
 pub struct Qwen35GgufEngine {
     inst: Qwen35GgufInstance,
@@ -58,6 +61,11 @@ pub struct Qwen35GgufEngine {
     /// Running sequences past which a verify step no longer beats plain
     /// batched decode (`PagedDecoder::spec_max_batch`).
     spec_batch_limit: usize,
+    /// Whether a new prompt feeds the MTP head ([`PagedDecoder::set_spec_prefill`]).
+    spec_prefill: bool,
+    /// Seconds one sequence's MTP prefill feed took, averaged over recent ones
+    /// ([`PagedDecoder::spec_prefill_cost`]); `None` until one ran.
+    feed_secs: Option<f64>,
     /// Wall time spent in the speculation hooks, for the benchmark.
     times: SpecTimes,
     prefill: PrefillPolicy,
@@ -127,6 +135,9 @@ struct PartialPrefill {
     prefix_hidden: Option<Vec<f32>>,
     /// Hidden states of the prefilled rows, for the MTP head.
     rows_hidden: Vec<f32>,
+    /// Feed the MTP head this prompt: the engine's [`Qwen35GgufEngine::set_spec_prefill`]
+    /// when the prompt began, and only on a prefix whose own head rows are valid.
+    mtp_feed: bool,
 }
 
 /// What a sequence's prefill leaves for the cache once the sequence is over.
@@ -134,6 +145,8 @@ struct Pending {
     tokens: Vec<u32>,
     snap_row: u32,
     last_hidden: Vec<f32>,
+    /// The head's KV rows of this prompt were filled (see [`Entry::mtp_valid`]).
+    mtp_valid: bool,
 }
 
 impl Qwen35GgufEngine {
@@ -147,7 +160,7 @@ impl Qwen35GgufEngine {
     pub fn new(inst: Qwen35GgufInstance) -> Qwen35GgufEngine {
         let alloc = BlockAllocator::new(inst.max_batch + inst.prefix_slots, inst.cap);
         let cache = PrefixCache::new(inst.prefix_slots);
-        Qwen35GgufEngine { inst, alloc, cache, pending: HashMap::new(), partial: HashMap::new(), verifying: None, spec_batch_limit: usize::MAX, times: SpecTimes::default(), prefill: PrefillPolicy::default() }
+        Qwen35GgufEngine { inst, alloc, cache, pending: HashMap::new(), partial: HashMap::new(), verifying: None, spec_batch_limit: usize::MAX, spec_prefill: true, feed_secs: None, times: SpecTimes::default(), prefill: PrefillPolicy::default() }
     }
 
     /// Free the blocks of entries the cache retired.
@@ -274,24 +287,34 @@ impl Qwen35GgufEngine {
         // The cached prefix's last hidden state: the MTP head's input at the
         // position the new tokens continue from.
         let mut prefix_hidden: Option<Vec<f32>> = None;
+        // A cold prompt has no seeded head rows to be wrong; a resumed one has them
+        // only if the entry it resumes from had its head rows filled.
+        let mut seed_valid = true;
         if cacheable {
             if let Some(i) = self.cache.lookup(table.kv_namespace(), prompt) {
                 let e = self.cache.entry(i);
                 let (from, rows, snap) = (e.table.blocks()[0], e.tokens.len(), e.snap_row);
+                seed_valid = e.mtp_valid;
                 self.inst.seed_from_prefix(from, slot, rows as u32, snap);
-                self.inst.mtp_seed_prefix(from, slot, rows as u32);
+                if seed_valid {
+                    self.inst.mtp_seed_prefix(from, slot, rows as u32);
+                }
                 if rows == prompt.len() {
                     // The whole prompt is cached: its state in place, no compute.
                     let hidden = e.last_hidden.clone();
                     self.inst.store_prefilled(slot);
-                    self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
+                    if seed_valid {
+                        self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
+                    } else {
+                        self.inst.mtp_skip_prefill(slot);
+                    }
                     return Some(hidden);
                 }
                 prefix_hidden = Some(e.last_hidden.clone());
                 start = rows;
             }
         }
-        self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new() });
+        self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new(), mtp_feed: self.spec_prefill && seed_valid });
         None
     }
 
@@ -300,7 +323,7 @@ impl Qwen35GgufEngine {
     /// `prompt`. Returns the last row's hidden state.
     fn forward_slice(&mut self, table: &BlockTable, prompt: &[u32], p: &mut PartialPrefill, end: usize, resume: bool) -> Vec<f32> {
         let slot = table.blocks()[0];
-        let collect = self.inst.has_mtp().then_some(&mut p.rows_hidden);
+        let collect = (self.inst.has_mtp() && p.mtp_feed).then_some(&mut p.rows_hidden);
         self.inst.prefill_adapter_slot.set(adapters::slot_of(self.inst.stage_models(), table.kv_namespace()));
         let hidden = self.inst.prefill_hidden(prompt, p.done, end, slot, resume, collect).unwrap_or_else(|e| panic!("{e}"));
         self.inst.prefill_adapter_slot.set(LORA_SLOT_NONE);
@@ -319,7 +342,18 @@ impl Qwen35GgufEngine {
             self.partial.insert(slot, p);
             return PrefillProgress::Partial { consumed };
         }
-        self.inst.mtp_after_prefill(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden);
+        let mtp_valid = if p.mtp_feed {
+            let started = std::time::Instant::now();
+            let fed = self.inst.mtp_after_prefill(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden);
+            if self.inst.has_mtp() {
+                let secs = started.elapsed().as_secs_f64();
+                self.feed_secs = Some(self.feed_secs.map_or(secs, |m| m + FEED_EWMA * (secs - m)));
+            }
+            fed || !self.inst.has_mtp()
+        } else {
+            self.inst.mtp_skip_prefill(slot);
+            false
+        };
         if p.cacheable {
             let (row, evicted) = self.cache.take_row(namespace, prompt);
             self.release_retired(evicted);
@@ -328,7 +362,7 @@ impl Qwen35GgufEngine {
                     self.inst.load_work_state(slot);
                 }
                 self.inst.snapshot_prefill_state(row);
-                self.pending.insert(slot, Pending { tokens: prompt.to_vec(), snap_row: row, last_hidden: hidden.clone() });
+                self.pending.insert(slot, Pending { tokens: prompt.to_vec(), snap_row: row, last_hidden: hidden.clone(), mtp_valid });
             }
         }
         PrefillProgress::Done(hidden)
@@ -389,11 +423,13 @@ impl Qwen35GgufEngine {
         let rows: usize = live.iter().map(|(_, _, p, end)| end - p.done).sum();
         let mut hidden: Vec<(Vec<f32>, bool)> = Vec::with_capacity(live.len());
         if live.len() >= 2 && rows > gpu_core::select::DECODE_REGIME_MAX_ROWS as usize {
-            let has_mtp = self.inst.has_mtp();
+            let has_mtp = self.inst.has_mtp() && live.iter().any(|(_, _, p, _)| p.mtp_feed);
             let multi: Vec<MultiPrefillJob<'_>> = live.iter().map(|(i, slot, p, end)| MultiPrefillJob { prompt: &*jobs[*i].prompt, start: p.done, end: *end, slot: *slot }).collect();
             let out = self.inst.prefill_hidden_multi(&multi, has_mtp).unwrap_or_else(|e| panic!("{e}"));
             for ((_, _, p, _), r) in live.iter_mut().zip(out) {
-                p.rows_hidden.extend_from_slice(&r.all);
+                if p.mtp_feed {
+                    p.rows_hidden.extend_from_slice(&r.all);
+                }
                 hidden.push((r.last, true));
             }
         } else {
@@ -458,7 +494,7 @@ impl PagedDecoder for Qwen35GgufEngine {
         match kept {
             Some(p) => {
                 let table = std::mem::replace(t, BlockTable::new());
-                let retired = self.cache.insert(Entry::new(p.tokens, table, p.snap_row, p.last_hidden));
+                let retired = self.cache.insert(Entry::new(p.tokens, table, p.snap_row, p.last_hidden).with_mtp_valid(p.mtp_valid));
                 self.release_retired(retired);
             }
             None => t.release(&mut self.alloc),
@@ -595,6 +631,13 @@ impl PagedDecoder for Qwen35GgufEngine {
     /// int8 projections grow with rows), so the scheduler measures it.
     fn spec_cost_aware(&self) -> bool {
         self.inst.speculation_rows() > 0
+    }
+    fn spec_prefill_cost(&self) -> Option<f64> {
+        self.feed_secs
+    }
+
+    fn set_spec_prefill(&mut self, on: bool) {
+        self.spec_prefill = on;
     }
     /// Score every sequence's rows in one batched step. The rows land at
     /// consecutive positions of each sequence's own block, so the table just

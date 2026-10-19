@@ -231,6 +231,22 @@ pub trait PagedDecoder {
         false
     }
 
+    /// Seconds the decoder's per-prompt drafter preparation (feeding the drafter
+    /// the prompt's hidden states) has cost one sequence, averaged over recent
+    /// sequences; `None` (the default) when the decoder has no such cost or has
+    /// not measured one yet. The scheduler weighs it against what speculation
+    /// saves per request ([`speculate::PrefillGate`]).
+    fn spec_prefill_cost(&self) -> Option<f64> {
+        None
+    }
+
+    /// Whether prompts that begin from now on prepare the drafter. Off, their
+    /// sequences are decoded without drafts until they end. Called by the
+    /// scheduler before it starts prefilling; the default ignores it.
+    fn set_spec_prefill(&mut self, on: bool) {
+        let _ = on;
+    }
+
     /// The decoder's own proposals: `ks[i]` is how many to propose after
     /// `queries[i]`'s context. Fewer (or none) is always allowed. Called only
     /// when no external [`Drafter`] is installed; the default proposes nothing.
@@ -856,6 +872,8 @@ pub struct Scheduler<D: PagedDecoder> {
     spec_stats: SpecStats,
     /// Plain and speculative step rates per batch-size bucket - see [`speculate::CostGate`].
     gate: speculate::CostGate,
+    /// Whether new prompts prepare the drafter - see [`speculate::PrefillGate`].
+    prefill_gate: speculate::PrefillGate,
     /// Seconds, for the cost gate.
     clock: Box<dyn Fn() -> f64 + Send>,
 }
@@ -883,6 +901,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             spec_policy: SpecPolicy::default(),
             spec_stats: SpecStats::default(),
             gate: speculate::CostGate::default(),
+            prefill_gate: speculate::PrefillGate::default(),
             clock: {
                 let start = std::time::Instant::now();
                 Box::new(move || start.elapsed().as_secs_f64())
@@ -1441,6 +1460,13 @@ impl<D: PagedDecoder> Scheduler<D> {
         //    work already in flight outranks work still queued.
         self.resume_swapped(report);
 
+        // Prompts that begin now prepare the drafter only if speculation will repay it.
+        if self.spec_policy.enabled && self.dec.spec_max_draft() > 0 && self.dec.spec_cost_aware() {
+            let active = (self.running.len() + self.prefilling.len() + self.waiting.len()).clamp(1, self.max_running.max(1));
+            let prepare = self.prefill_gate.prepare(&self.gate, active, self.dec.spec_prefill_cost());
+            self.dec.set_spec_prefill(prepare);
+        }
+
         // 1. Admit while there's batch room, enough free blocks for the prompt,
         //    and prefill budget left this iteration (head-of-line guard: decode
         //    must run between bursts of admissions). Nothing new is admitted
@@ -1600,6 +1626,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 self.dec.release_table(&mut r.table);
                 self.unpin(r.adapter);
                 report.completed_logprobs.push((r.id, r.logprobs));
+                self.prefill_gate.observe_reply(r.generated.len());
                 completed.push((r.id, r.generated));
             } else {
                 i += 1;

@@ -50,12 +50,23 @@ pub(super) struct Entry {
     pub snap_row: u32,
     /// The last prompt token's `[d_model]` hidden row.
     pub last_hidden: Vec<f32>,
+    /// The MTP head's KV rows for positions `0..tokens.len() - 1` were filled
+    /// when this prompt was prefilled. A prompt prefilled while the drafter's
+    /// prefill feed was off (it did not pay) has none, and a prompt that resumes
+    /// from such an entry must not copy them.
+    pub mtp_valid: bool,
     stamp: u64,
 }
 
 impl Entry {
     pub fn new(tokens: Vec<u32>, table: BlockTable, snap_row: u32, last_hidden: Vec<f32>) -> Entry {
-        Entry { tokens, table, snap_row, last_hidden, stamp: 0 }
+        Entry { tokens, table, snap_row, last_hidden, mtp_valid: true, stamp: 0 }
+    }
+
+    /// Record whether the drafter's KV rows of this prompt were filled.
+    pub fn with_mtp_valid(mut self, valid: bool) -> Entry {
+        self.mtp_valid = valid;
+        self
     }
 }
 
@@ -282,6 +293,14 @@ mod tests {
         assert_eq!(c.evict_namespace(1).len(), 1);
         assert!(c.lookup(1, &[1, 2, 3]).is_none() && c.lookup(2, &[1, 2, 3]).is_some());
         assert!(c.take_row(BASE_KV_NAMESPACE, &[]).0.is_some(), "the dropped entry's snapshot row is free again");
+    }
+
+    /// An entry says whether the drafter's KV rows of its prompt were filled; a prompt
+    /// prefilled without the drafter must not be mistaken for one prefilled with it.
+    #[test]
+    fn an_entry_records_whether_its_drafter_rows_are_valid() {
+        assert!(entry(&[1, 2, 3], 0).mtp_valid, "the default is the drafter was fed");
+        assert!(!entry(&[1, 2, 3], 0).with_mtp_valid(false).mtp_valid);
     }
 
     #[test]

@@ -262,6 +262,14 @@ impl CostGate {
         }
     }
 
+    /// Seconds of decoding a generated token saves when this bucket speculates:
+    /// the difference of the two measured per-token costs, `None` until both
+    /// modes have been timed here. Zero where speculation is the slower one.
+    pub(super) fn saved_secs_per_token(&self, bucket: usize) -> Option<f64> {
+        let b = &self.buckets[bucket];
+        (b.plain.samples > 0 && b.spec.samples > 0).then(|| (1.0 / b.plain.per_second() - 1.0 / b.spec.per_second()).max(0.0))
+    }
+
     pub(super) fn observe_plain(&mut self, bucket: usize, tokens: usize, secs: f64) {
         let b = &mut self.buckets[bucket];
         b.plain.observe(tokens, secs);
@@ -272,6 +280,46 @@ impl CostGate {
         let b = &mut self.buckets[bucket];
         b.spec.observe(tokens, secs);
         b.since_spec = 0;
+    }
+}
+
+/// Every this-many-th prompt prepares the drafter whatever the arithmetic says, so the
+/// saving it makes possible keeps being measured.
+const PREFILL_PROBE_EVERY: u32 = 16;
+
+/// **Whether a new prompt should prepare the drafter.** A drafter that needs each prompt's
+/// hidden states ([`PagedDecoder::spec_prefill_cost`]) charges a cost per request; speculation
+/// repays it with what it saves decoding that request's reply. Both are measured: the cost by
+/// the decoder, the saving by the [`CostGate`]'s per-token rates times the running mean reply
+/// length. Where speculation cannot repay the preparation (long prompts, short replies: an
+/// agent turn) the prompt is not prepared, and its sequence decodes plainly; a probe every
+/// [`PREFILL_PROBE_EVERY`] prompts keeps the saving measured so the answer can change back.
+/// Until the cost, the reply length and both step rates are known the drafter is prepared.
+#[derive(Debug, Default)]
+pub(super) struct PrefillGate {
+    reply_tokens: Option<f64>,
+    skipped: u32,
+}
+
+impl PrefillGate {
+    pub(super) fn observe_reply(&mut self, tokens: usize) {
+        self.reply_tokens = Some(self.reply_tokens.map_or(tokens as f64, |m| m + RATE_EWMA * (tokens as f64 - m)));
+    }
+
+    /// Prepare the drafter for a prompt whose sequence will decode among about `active` others.
+    pub(super) fn prepare(&mut self, gate: &CostGate, active: usize, cost: Option<f64>) -> bool {
+        let (Some(cost), Some(reply)) = (cost, self.reply_tokens) else { return true };
+        let Some(saved) = gate.saved_secs_per_token(CostGate::bucket(active)) else { return true };
+        if reply * saved >= cost {
+            self.skipped = 0;
+            return true;
+        }
+        self.skipped += 1;
+        if self.skipped >= PREFILL_PROBE_EVERY {
+            self.skipped = 0;
+            return true;
+        }
+        false
     }
 }
 
