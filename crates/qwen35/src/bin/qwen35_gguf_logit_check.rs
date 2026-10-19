@@ -15,17 +15,62 @@
 //! defect, a flip at a near-tie is numeric drift), and whether the logits are bit-identical.
 //!
 //! Usage: `qwen35_gguf_logit_check <Q8_0.gguf> <text file> [--prompts 4] [--prompt-tokens 4000] [--steps 24]
-//!        [--device gpu1] [--backend cuda] [--kv int8] [--dump DIR]`
+//!        [--device gpu1] [--backend cuda] [--kv int8] [--dump DIR] [--dry-run]`
+//!
+//! The prompt is the served chat rendering (user turn, then the assistant turn with an empty think block, as the
+//! server renders `enable_thinking: false`), and the continuation is the greedy decode-tape trace of
+//! `tape_comparison_trace`, which runs a fixed number of steps and does NOT stop at an end-of-sequence token: the
+//! tool fails loudly if the trace is shorter than `--steps`. `--dry-run` tokenizes on the CPU and prints the
+//! rendered prompt's token structure without touching a device.
 //!
 //! `--dump DIR` writes each prompt's continuation ids and the logits rows of the first and last setting (`p<N>.ids`,
 //! `p<N>.first.f32`, `p<N>.last.f32`, little-endian) so a build of an older commit can be compared offline.
 
 use checkpoint::gguf::MmapGguf;
+use data::qwen_tokenizer::QwenBpe;
+use data::tokenizer::Tokenizer;
 use qwen35::int8_gguf_resident::{resident_config, Qwen35GgufInstance, Qwen35GgufResident};
 use residency::multi::MultiDeviceResidentModel;
 use residency::{Device, ResidentModel};
 
 const RESERVE: u64 = 2 << 30;
+
+/// The served rendering of one user turn with thinking off.
+fn render(body: &str) -> String {
+    format!("<|im_start|>user\n{body}\n\nSummarise the code above in one sentence.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+}
+
+/// The prompt-th source window of the text file, `ptoks` tokens' worth of characters.
+fn window(text: &str, p: usize, ptoks: usize) -> &str {
+    let chars_per_token = 3usize;
+    let start = ((p * 7919 + 13) * 104729) % text.len().saturating_sub(ptoks * chars_per_token).max(1);
+    let mut slice = start;
+    while !text.is_char_boundary(slice) {
+        slice += 1;
+    }
+    let mut end = (slice + ptoks * chars_per_token).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[slice..end]
+}
+
+fn dry_run(path: &str, text: &str, prompts: usize, ptoks: usize) {
+    let mg = MmapGguf::open(path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
+    let gtok = mg.tokenizer().expect("the checkpoint carries a tokenizer");
+    let tok = QwenBpe::from_gguf(&gtok).unwrap_or_else(|e| panic!("embedded tokenizer: {e}"));
+    for name in ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<think>", "</think>"] {
+        println!("special {name}: {:?}", tok.special_id(name));
+    }
+    println!("declared eos: {:?}", gtok.eos);
+    let start = tok.special_id("<|im_start|>").expect("<|im_start|> is a special token");
+    for p in 0..prompts {
+        let ids = tok.encode(&render(window(text, p, ptoks)));
+        assert!(ids.first() == Some(&start), "prompt {p} does not open with <|im_start|>: the template is not tokenized as markup");
+        let tail: Vec<u32> = ids[ids.len().saturating_sub(10)..].to_vec();
+        println!("prompt {p}: {} tokens, tail {tail:?} = {:?}", ids.len(), tok.decode(&tail));
+    }
+}
 
 fn argmax(v: &[f32]) -> usize {
     v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0)
@@ -69,6 +114,10 @@ fn main() {
         std::process::exit(2);
     };
     let (prompts, ptoks, steps) = (num("--prompts", 4), num("--prompt-tokens", 4000), num("--steps", 24));
+    if a.iter().any(|x| x == "--dry-run") {
+        dry_run(&path, &std::fs::read_to_string(&text_path).expect("read the text file"), prompts, ptoks);
+        return;
+    }
     let set = gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
     let devices = qwen35::int8_gguf_resident::budgeted_gpus(&set.gpus, RESERVE);
     if devices.is_empty() {
@@ -92,28 +141,18 @@ fn main() {
         Setting { name: "+ fused front end and epilogues", v2: true, fusion: true, drain: true },
         Setting { name: "+ no per-layer drain (new default)", v2: true, fusion: true, drain: false },
     ];
-    let chars_per_token = 3usize;
     for p in 0..prompts {
-        let start = ((p * 7919 + 13) * 104729) % text.len().saturating_sub(ptoks * chars_per_token).max(1);
-        let mut slice = start;
-        while !text.is_char_boundary(slice) {
-            slice += 1;
-        }
-        let mut end = (slice + ptoks * chars_per_token).min(text.len());
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let body = &text[slice..end];
-        let prompt = inst.tokenize(&format!("{body}\n\nSummarise the code above in one sentence.\n"));
+        let prompt = inst.tokenize(&render(window(&text, p, ptoks)));
         let prompt: Vec<u32> = prompt.into_iter().take(cap as usize - steps - 8).collect();
         apply(&inst, &settings[0]);
-        let mut ids = inst.generate(&prompt, steps as u32, 0.0, 1, 1.0, 1, &mut |_| false).expect("greedy continuation");
-        ids.truncate(steps);
+        let ids = inst.tape_comparison_trace(&prompt, steps as u32).expect("greedy trace").ids;
+        assert_eq!(ids.len(), steps, "prompt {p}: the greedy trace has {} tokens, {steps} were asked for: refusing to compare over fewer", ids.len());
         println!("prompt {p}: {} tokens; orig greedy continuation {:?}", prompt.len(), ids);
         let mut base: Option<Vec<Vec<f32>>> = None;
         for s in &settings {
             apply(&inst, s);
             let rows = inst.teacher_forced_logits(&prompt, &ids).expect("forced logits");
+            assert_eq!(rows.len(), steps, "{}: {} logit rows for {steps} forced tokens", s.name, rows.len());
             assert!(rows.iter().all(|r| r.iter().all(|x| x.is_finite())), "{}: non-finite logits", s.name);
             match &base {
                 None => println!("  {:<38} reference", s.name),
