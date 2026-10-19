@@ -2466,6 +2466,12 @@ impl Engine {
                         gpu_core::Dispatch::Workgroups(b * nh * n_splits),
                     ));
                     s.push(g.step(PAGED_FLASH_DECODE_COMBINE_I8, &[&sc.part_i8, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
+                } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned())
+                    .then(|| block::native_paged_decode_batched(g, true, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
+                    .flatten()
+                {
+                    // The whole triad as one launch for two or more sequences, the group's query heads sharing each K and V row.
+                    s.push(step);
                 } else {
                     s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], b * nh * cap));
                     s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
@@ -2524,6 +2530,11 @@ impl Engine {
                         gpu_core::Dispatch::Workgroups(b * nh * n_splits),
                     ));
                     s.push(g.step(PAGED_FLASH_DECODE_COMBINE, &[&sc.part_m, &sc.part_l, &sc.part_o, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
+                } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned())
+                    .then(|| block::native_paged_decode_batched(g, false, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
+                    .flatten()
+                {
+                    s.push(step);
                 } else {
                     // One workgroup per score where the device runs workgroup
                     // reductions: the per-element kernel's lanes are `kv_stride`

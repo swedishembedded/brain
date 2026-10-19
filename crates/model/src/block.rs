@@ -708,6 +708,18 @@ pub fn native_paged_flash_prefill(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuff
     None
 }
 
+/// [`gpu_core::provider::cuda::paged_decode_batched_step`] where a native backend exists at all; `None` (the
+/// portable triad) on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn native_paged_decode_batched(g: &Gpu, int8: bool, bufs: &[&DeviceBuffer], params: &[u32]) -> Option<Step> {
+    gpu_core::provider::cuda::paged_decode_batched_step(g, int8, bufs, params)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn native_paged_decode_batched(_g: &Gpu, _int8: bool, _bufs: &[&DeviceBuffer], _params: &[u32]) -> Option<Step> {
+    None
+}
+
 /// [`gpu_core::provider::cuda::paged_flash_prefill_bf16_step`], the bf16-KV form.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn native_paged_flash_prefill_bf16(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<Step> {

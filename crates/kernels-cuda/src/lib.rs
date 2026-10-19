@@ -499,6 +499,46 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/flash_attn_bwd_f16.cu"),
     },
     CudaKernel {
+        name: "decode_attn_batched_f32",
+        // Asked for by name by `gpu_core::provider::cuda::paged_decode_batched_step`.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_decode_attn_batched_f32",
+        what: "batched paged-KV decode attention at head_dim 128 over an fp32 pool: one launch per layer for 2 or more sequences, the query heads of a group sharing each K and V read",
+        reported: "native:decode_attn_batched_f32",
+        block_dim: 256,
+        tile: (1, 1),
+        // Shared: 8 warps x 8 heads x (max, sum) plus the merge tile of 8 x 8 x 32 float4.
+        shared_bytes: 8 * 8 * 4 * 2 + 8 * 8 * 32 * 16,
+        src: concat!(
+            "#define brain_decode_attn_batched brain_decode_attn_batched_f32\n",
+            include_str!("../cu/decode_attn_batched.cu")
+        ),
+    },
+    CudaKernel {
+        name: "decode_attn_batched_i8",
+        // Asked for by name by `gpu_core::provider::cuda::paged_decode_batched_step`.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_decode_attn_batched_i8",
+        what: "batched paged-KV decode attention at head_dim 128 over an int8 pool with one scale per (token, kv head) row",
+        reported: "native:decode_attn_batched_i8",
+        block_dim: 256,
+        tile: (1, 1),
+        // Shared: 8 warps x 8 heads x (max, sum) plus the merge tile of 8 x 8 x 32 float4.
+        shared_bytes: 8 * 8 * 4 * 2 + 8 * 8 * 32 * 16,
+        src: concat!(
+            "#define BRAIN_KV_INT8 1\n#define brain_decode_attn_batched brain_decode_attn_batched_i8\n",
+            include_str!("../cu/decode_attn_batched.cu")
+        ),
+    },
+    CudaKernel {
         name: "gdn_chunk_loop_f32",
         op: Op::GatedDeltaChunkLoop,
         weight: Dtype::F32,

@@ -1101,6 +1101,39 @@ pub fn flash_causal_gqa_bwd_steps(gpu: &crate::Gpu, bufs: &FlashBwdBufs<'_>, par
     ])
 }
 
+/// `paged_decode_scores_i8_batched`-family order for the batched decode attention over an int8 pool: uniform,
+/// queries, K data, V data, K scales, V scales, block tables, sequence lengths, context.
+const DECODE_ATTN_I8_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
+/// The native batched paged-KV decode attention (one launch for the whole triad) for `head_dim = 128`, or `None`
+/// when the caller should dispatch the portable triad (or the split-key kernel for one sequence).
+///
+/// `bufs` is queries, K pool, V pool, [K scales, V scales for an int8 pool,] block tables, sequence lengths,
+/// context; `params` the triad's `[bsz, n_heads, n_kv_heads, head_dim, group, block_size, max_bt]`. `None` means:
+/// the head width is not 128, the group is wider than 8, fewer than two sequences (the split-key kernel owns one),
+/// `cuda` is named in `BRAIN_NO_PROVIDER`, the device is below the kernel's floor, or the backend declined it.
+pub fn paged_decode_batched_step(gpu: &crate::Gpu, int8: bool, bufs: &[&backend_api::DeviceBuffer], params: &[u32]) -> Option<crate::Step> {
+    let &[bsz, _, n_kv, head_dim, group, _, _] = params else { return None };
+    if head_dim != 128 || !(1..=8).contains(&group) || bsz < 2 || !tensor_core_kernels_enabled(gpu) || bufs.len() != if int8 { 8 } else { 6 } {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get(if int8 { "decode_attn_batched_i8" } else { "decode_attn_batched_f32" }).filter(|k| k.min_cc <= cc)?;
+    let id = gpu.native_kernel(kernel, if int8 { DECODE_ATTN_I8_BINDINGS } else { PAGED_FLASH_PREFILL_BINDINGS })?;
+    let blocks = bsz.checked_mul(n_kv)?;
+    gpu.step_native_sliced(id, bufs, &vec![(0, 0); bufs.len()], params, blocks)
+}
+
 impl OperatorProvider for CudaProvider {
     fn name(&self) -> &'static str {
         "cuda"
