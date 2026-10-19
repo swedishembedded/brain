@@ -29,7 +29,7 @@ use crate::config::{Downsample, MiniCpmVConfig};
 use crate::dataset::{load_media, read_jsonl, samples, Record, Sample};
 use crate::preprocess::ImageOptions;
 use crate::prompt::Formatter;
-use crate::train::{PartMode, TrainSpec, Trainer};
+use crate::train::{PartMode, Rates, TrainSpec, Trainer};
 
 /// The training state's file name inside the output directory.
 pub const STATE_FILE: &str = "train_state.safetensors";
@@ -43,9 +43,14 @@ pub struct Options {
     pub epochs: u32,
     /// Supervised turns per optimiser step.
     pub batch: u32,
+    /// The peak rate of the decoder (and of a LoRA tower).
     pub lr: f32,
-    /// The rate the cosine decays to; `None` for a tenth of `lr`.
-    pub min_lr: Option<f32>,
+    /// The connector's peak rate; `None` for [`Rates::around`]'s.
+    pub connector_lr: Option<f32>,
+    /// The tower's peak rate; `None` for [`Rates::around`]'s.
+    pub vision_lr: Option<f32>,
+    /// Where the cosine ends, as a fraction of each peak.
+    pub min_lr_ratio: f32,
     // perf-number: a schedule default, not a measurement
     /// Warmup steps; `None` for 5% of the run (at least one).
     pub warmup: Option<u32>,
@@ -77,7 +82,9 @@ impl Options {
             epochs: 3,
             batch: 1,
             lr: 1e-4,
-            min_lr: None,
+            connector_lr: None,
+            vision_lr: None,
+            min_lr_ratio: 0.1,
             warmup: None,
             weight_decay: 0.0,
             grad_clip: Some(1.0),
@@ -92,9 +99,18 @@ impl Options {
     }
 }
 
+impl Options {
+    /// Each part's peak rate: the ones given, the rest from [`Rates::around`].
+    pub fn rates(&self) -> Rates {
+        let d = Rates::around(self.lr, self.vision);
+        Rates { decoder: self.lr, connector: self.connector_lr.unwrap_or(d.connector), vision: self.vision_lr.unwrap_or(d.vision) }
+    }
+}
+
 /// Progress reported to the caller.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    /// `lr` is the decoder's rate at this step.
     Step { step: u32, steps: u32, epoch: u32, loss: f32, lr: f32 },
     /// The mean held-out loss before training (`epoch` 0) and after each epoch.
     Eval { epoch: u32, loss: f32 },
@@ -232,7 +248,7 @@ fn run(gpu: &Gpu, job: Job, opts: &Options, progress: &mut dyn FnMut(&Event)) ->
         vision: opts.vision,
         block,
         downsample: b.image.downsample,
-        lr: opts.lr,
+        lr: opts.rates(),
         weight_decay: opts.weight_decay,
         grad_clip: opts.grad_clip,
         seed: opts.seed,
@@ -247,8 +263,8 @@ fn run(gpu: &Gpu, job: Job, opts: &Options, progress: &mut dyn FnMut(&Event)) ->
     let per_epoch = n.div_ceil(batch) as u32;
     let steps = per_epoch * opts.epochs;
     let schedule = LrSchedule {
-        peak: opts.lr,
-        floor: opts.min_lr.unwrap_or(opts.lr / 10.0),
+        peak: 1.0,
+        floor: opts.min_lr_ratio,
         warmup: opts.warmup.unwrap_or((steps / 20).max(1)),
         hold: 0,
         decay_iters: steps,
@@ -281,11 +297,11 @@ fn run(gpu: &Gpu, job: Job, opts: &Options, progress: &mut dyn FnMut(&Event)) ->
             for &k in chunk {
                 loss += t.accumulate(&b.sample(&train_split, train_split.turns[k])?)?;
             }
-            let lr = schedule.at(t.steps);
-            t.step(lr, chunk.len());
+            let factor = schedule.at(t.steps);
+            t.step(factor, chunk.len());
             i += chunk.len();
             position += chunk.len() as u64;
-            progress(&Event::Step { step: t.steps, steps, epoch: epoch + 1, loss: loss / chunk.len() as f32, lr });
+            progress(&Event::Step { step: t.steps, steps, epoch: epoch + 1, loss: loss / chunk.len() as f32, lr: factor * opts.lr });
             if opts.checkpoint_every > 0 && t.steps % opts.checkpoint_every == 0 {
                 checkpoint(&t, out, position)?;
                 progress(&Event::Checkpoint { step: t.steps });

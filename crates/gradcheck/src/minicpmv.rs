@@ -172,7 +172,7 @@ pub fn check_minicpmv_composite(seed: u64) -> Report {
         vision: PartMode::Lora { rank: 2, alpha: 4.0 },
         block: 12,
         downsample: Downsample::X16,
-        lr: 0.0,
+        lr: minicpmv::train::Rates::uniform(0.0),
         weight_decay: 0.0,
         grad_clip: None,
         seed,

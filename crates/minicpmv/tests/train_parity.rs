@@ -39,7 +39,7 @@ fn the_training_loss_is_the_references_label_loss() {
         vision: PartMode::Frozen,
         block: ids.len() as u32,
         downsample: opts.downsample,
-        lr: 0.0,
+        lr: minicpmv::train::Rates::uniform(0.0),
         weight_decay: 0.0,
         grad_clip: None,
         seed: 1,

@@ -70,7 +70,7 @@ fn a_saved_tune_serves_the_trained_numbers() {
             vision: PartMode::Lora { rank: 4, alpha: 8.0 },
             block: ids.len() as u32,
             downsample: opts.downsample,
-            lr: 0.0,
+            lr: minicpmv::train::Rates::uniform(0.0),
             weight_decay: 0.0,
             grad_clip: None,
             seed: 5,

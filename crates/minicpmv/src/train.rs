@@ -70,6 +70,34 @@ impl PartMode {
     }
 }
 
+/// Peak learning rates per part; the schedule scales all three alike. Parts
+/// trained in full need far smaller rates than LoRA factors: Adam moves
+/// every weight by about the rate each step, and the connector's and the
+/// tower's weights are small enough that a LoRA-sized rate scrambles them
+/// within a few dozen steps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rates {
+    pub decoder: f32,
+    pub connector: f32,
+    pub vision: f32,
+}
+
+impl Rates {
+    /// The same rate everywhere.
+    pub fn uniform(lr: f32) -> Rates {
+        Rates { decoder: lr, connector: lr, vision: lr }
+    }
+
+    /// The default rates around a LoRA rate `lr`: the decoder and a LoRA
+    /// tower at `lr`, the connector at a tenth, a tower in full at a fiftieth
+    /// (the usual ratios for fine-tuning a vision-language model's projector
+    /// and vision encoder).
+    pub fn around(lr: f32, vision: PartMode) -> Rates {
+        let vision = if vision == PartMode::Full { lr / 50.0 } else { lr };
+        Rates { decoder: lr, connector: lr / 10.0, vision }
+    }
+}
+
 /// What trains and how.
 #[derive(Clone, Debug)]
 pub struct TrainSpec {
@@ -79,7 +107,7 @@ pub struct TrainSpec {
     /// Tokens per sample the decoder is built for; longer samples are refused.
     pub block: u32,
     pub downsample: Downsample,
-    pub lr: f32,
+    pub lr: Rates,
     pub weight_decay: f32,
     pub grad_clip: Option<f32>,
     /// Seeds the adapters' `A` initialisation.
@@ -125,6 +153,14 @@ impl Trainer {
         let trainable = |n: &str| if n.starts_with("merger.") { spec.connector } else { tower_trains };
         let tgpu = gpu.new_like(train_pipelines());
         let mut tower = Tower::new_train_on(tgpu, cfg.clone(), vision, &trainable);
+        // One optimiser steps the connector and a tower trained in full, each
+        // at its own rate: the step's rate is the schedule factor, the
+        // per-tensor multiplier the part's peak.
+        let names: Vec<String> = tower.ps.opt_params().iter().map(|(n, _)| n.clone()).collect();
+        for n in names {
+            let rate = if n.starts_with("merger.") { spec.lr.connector } else { spec.lr.vision };
+            tower.ps.set_lr_mult(&n, rate);
+        }
         let lora = match spec.vision {
             PartMode::Lora { rank, alpha } => {
                 // The base keeps its gradient buffers (the factors' gradients
@@ -252,20 +288,21 @@ impl Trainer {
         Ok(loss)
     }
 
-    /// One AdamW step on every trained part (gradients averaged over
-    /// `batch` accumulated samples), then clear the gradients.
-    pub fn step(&mut self, lr: f32, batch: usize) {
+    /// One AdamW step on every trained part at `factor` (the schedule's
+    /// value in `[0, 1]`) times its peak rate, gradients averaged over
+    /// `batch` accumulated samples; then clear the gradients.
+    pub fn step(&mut self, factor: f32, batch: usize) {
         self.steps += 1;
         let (t, wd, clip, scale) = (self.steps, self.spec.weight_decay, self.spec.grad_clip, 1.0 / batch.max(1) as f32);
         let adam = model::Adam::default();
         if self.spec.decoder != PartMode::Frozen {
-            self.decoder.adamw_step(t, lr, wd, adam, clip, scale);
+            self.decoder.adamw_step(t, factor * self.spec.lr.decoder, wd, adam, clip, scale);
         }
         if !self.tower.ps.opt_params().is_empty() {
-            self.tower_opt.step(&self.tower.gpu, &self.tower.ps, t, lr, wd, adam, clip, scale);
+            self.tower_opt.step(&self.tower.gpu, &self.tower.ps, t, factor, wd, adam, clip, scale);
         }
         if let Some(l) = &self.lora {
-            self.lora_opt.step(&self.tower.gpu, &l.ps, t, lr, wd, adam, clip, scale);
+            self.lora_opt.step(&self.tower.gpu, &l.ps, t, factor * self.spec.lr.vision, wd, adam, clip, scale);
             l.ps.zero_grads(&self.tower.gpu);
             self.folded = false;
         }

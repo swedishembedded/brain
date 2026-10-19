@@ -31,7 +31,7 @@ fn trainer(spec: TrainSpec) -> Trainer {
 }
 
 fn spec(decoder: PartMode, connector: bool, vision: PartMode) -> TrainSpec {
-    TrainSpec { decoder, connector, vision, block: 12, downsample: Downsample::X16, lr: 2e-2, weight_decay: 0.0, grad_clip: Some(1.0), seed: 3 }
+    TrainSpec { decoder, connector, vision, block: 12, downsample: Downsample::X16, lr: minicpmv::train::Rates::uniform(2e-2), weight_decay: 0.0, grad_clip: Some(1.0), seed: 3 }
 }
 
 fn sample() -> Sample {
@@ -49,7 +49,7 @@ fn train(t: &mut Trainer, s: &Sample, steps: usize) -> Vec<f32> {
     (0..steps)
         .map(|_| {
             let l = t.accumulate(s).unwrap();
-            t.step(t.spec.lr, 1);
+            t.step(1.0, 1);
             l
         })
         .collect()
