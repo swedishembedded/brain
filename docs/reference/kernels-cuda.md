@@ -27,6 +27,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 |---|---|---|---|---|---|---|
 | `matmul_f32_tiled` | MatMul | F32 | tuned | 5.0 | `brain_matmul_f32_tiled` | fp32 out = x @ W^T; 64x64 shared tile, 4x4 register block, reference reduction order |
 | `matmul_i8_mma` | MatMul | I8 | tuned | 8.0 | `brain_matmul_i8_mma` | int8 tensor-core GEMM (mma.sync m16n8k32), dynamic per-token activation scale, group-32 weight scale folded per MMA |
+| `matmul_i8w_bf16a_wgmma` | MatMul | I8 | tuned | 9.0 | `brain_matmul_i8w_bf16a_wgmma` | int8-weight GEMM on Hopper warpgroup tensor cores (wgmma bf16): group-32 weight scales decoded to bf16 in shared memory a tile ahead of the MMA, bf16 activations, f32 accumulation over the whole K |
 | `matmul_i8_mma_m16` | MatMul | I8 | tuned | 8.0 | `brain_matmul_i8_mma_m16` | int8 tensor-core GEMM at a 16x16 tile for the up to 16-row GEMMs of a batched decode step; bit-identical to matmul_i8_mma |
 | `matmul_i8_mma_m32` | MatMul | I8 | tuned | 8.0 | `brain_matmul_i8_mma_m32` | int8 tensor-core GEMM at a 32x32 tile for the 17 to 32-row GEMMs of a batched decode step; bit-identical to matmul_i8_mma |
 | `matmul_i8_mma_m128` | MatMul | I8 | tuned | 8.0 | `brain_matmul_i8_mma_m128` | int8 tensor-core GEMM at a 64x32 tile for the 33 to 128-row GEMMs of a batched decode step; bit-identical to matmul_i8_mma |

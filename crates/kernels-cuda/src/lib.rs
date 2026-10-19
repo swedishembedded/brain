@@ -63,6 +63,11 @@ pub const DP4A_MIN_CC: Cc = (6, 1);
 /// a kernel whose body issues them cannot declare a lower floor.
 pub const MMA_S8_MIN_CC: Cc = (8, 0);
 
+/// The compute capability that introduced the warpgroup MMA (`wgmma.mma_async`): Hopper. The
+/// kernels that issue it also need the architecture-specific target (`sm_90a`), which the
+/// provider asks the backend for and declines without.
+pub const WGMMA_MIN_CC: Cc = (9, 0);
+
 /// The lowest compute capability a CUDA 12.x toolchain will emit code for at
 /// all (`--gpu-architecture=sm_50`). A kernel whose text uses nothing beyond
 /// the always-available core - shared memory, `__syncthreads`, fp32
@@ -209,6 +214,25 @@ pub const ALL: &[CudaKernel] = &[
         // 4 stages x (64x64 + 64x64 int8 tiles + 64x2 f32 group scales).
         shared_bytes: 4 * (64 * 64 + 64 * 64 + 64 * 2 * 4),
         src: include_str!("../cu/matmul_i8_mma.cu"),
+    },
+    CudaKernel {
+        name: "matmul_i8w_bf16a_wgmma",
+        // Asked for by name by the int8 linear of `model::ops` for prefill-sized row counts: it
+        // reads bf16 activations, which the (MatMul, I8) request's int8 operands do not carry.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_i8w_bf16a_wgmma",
+        what: "int8-weight GEMM on Hopper warpgroup tensor cores (wgmma bf16): group-32 weight scales decoded to bf16 in shared memory a tile ahead of the MMA, bf16 activations, f32 accumulation over the whole K",
+        reported: "native:matmul_i8w_bf16a_wgmma",
+        block_dim: 256,
+        // 128 activation rows x 128 weight rows per block; M tiles fastest in the flat grid.
+        tile: (128, 128),
+        // Everything is dynamic (opted in): see `I8_WGMMA_DYNAMIC_SHARED_BYTES` in gpu-core.
+        shared_bytes: 0,
+        src: include_str!("../cu/matmul_i8w_bf16a_wgmma.cu"),
     },
     CudaKernel {
         name: "matmul_i8_mma_m16",
