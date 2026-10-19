@@ -708,6 +708,18 @@ pub fn native_paged_flash_prefill(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuff
     None
 }
 
+/// [`gpu_core::provider::cuda::add_rmsnorm_fwd_step`] (`sum = a + b; out = rmsnorm(sum) * w` as one launch) where a
+/// native backend exists at all; `None` (an `add2` and a norm) on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn native_add_rmsnorm(g: &Gpu, bufs: &[&DeviceBuffer; 5], d: u32, rows: u32, eps: f32) -> Option<Step> {
+    gpu_core::provider::cuda::add_rmsnorm_fwd_step(g, bufs, d, rows, eps)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn native_add_rmsnorm(_g: &Gpu, _bufs: &[&DeviceBuffer; 5], _d: u32, _rows: u32, _eps: f32) -> Option<Step> {
+    None
+}
+
 /// [`gpu_core::provider::cuda::paged_decode_batched_step`] where a native backend exists at all; `None` (the
 /// portable triad) on wasm.
 #[cfg(not(target_arch = "wasm32"))]

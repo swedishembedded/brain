@@ -2371,6 +2371,19 @@ impl Engine {
             // fp32, so this is the ONE place that limit bites unconditionally.
             s.extend(self.embed_tiled(g, &sc.res[0], b));
         }
+        // The residual add and the norm that follows it are one native launch on an engine with no int8 activation
+        // quant to fold (the unfused pair otherwise): `add_rmsnorm_fwd` writes the sum and the normed row.
+        let fuse_add_rms = self.i8_scratch.is_none() && !self.gemm.is_reference_pinned();
+        let add_rms = |s: &mut Vec<Step>, a: &DeviceBuffer, b2: &DeviceBuffer, nw: &DeviceBuffer, sum: &DeviceBuffer, out: &DeviceBuffer| -> bool {
+            match fuse_add_rms.then(|| block::native_add_rmsnorm(g, &[a, b2, nw, sum, out], d, b, self.cfg.rms_eps)).flatten() {
+                Some(step) => {
+                    s.push(step);
+                    true
+                }
+                None => false,
+            }
+        };
+        let mut ln1_done = false;   // the previous layer's closing add already produced this layer's `xn1`
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
             // M4.3: RMSNorm fused with its own activation quant on an
@@ -2379,7 +2392,9 @@ impl Engine {
             // shared by every linear reading the quantized result (xn1 ->
             // q/k/v). Falls back to the unfused `rms` + `Self::quant_once`
             // pair (a no-op on an all-fp32 engine) otherwise.
-            self.rms_quant(&mut s, &sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b, lora && self.lora_reads(&[LoraSite::Wq, LoraSite::Wk, LoraSite::Wv]));
+            if !ln1_done {
+                self.rms_quant(&mut s, &sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b, lora && self.lora_reads(&[LoraSite::Wq, LoraSite::Wk, LoraSite::Wv]));
+            }
             // M4.1: one fused GEMM (`wq;wk;wv` concatenated at weight-load
             // time - see `from_map_with_gpu`) instead of three, then
             // `concat_split` narrows the wide `[b, hq+2*hkv]` output back
@@ -2561,9 +2576,11 @@ impl Engine {
             if lora {
                 self.lora_correct(&mut s, l, LoraSite::Wo, &sc.ctx, &sc.proj, b, d, 0);
             }
-            s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
-            // M4.3: same fusion as ln1 above, for `sc.xn2` -> gate/up.
-            self.rms_quant(&mut s, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b, lora && self.lora_reads(&[LoraSite::Gate, LoraSite::Up]));
+            if !add_rms(&mut s, &sc.res[l], &sc.proj, w(&p("ln2.weight")), &sc.xmid, &sc.xn2) {
+                s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
+                // M4.3: same fusion as ln1 above, for `sc.xn2` -> gate/up.
+                self.rms_quant(&mut s, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b, lora && self.lora_reads(&[LoraSite::Gate, LoraSite::Up]));
+            }
             // M4.1: one fused GEMM (`gate;up` concatenated at weight-load
             // time) instead of two, `concat_split` narrowing its `[b, 2*ff]`
             // output back into the compact `gate_pre`/`up` buffers
@@ -2582,10 +2599,18 @@ impl Engine {
             if lora {
                 self.lora_correct(&mut s, l, LoraSite::Down, &sc.h, &sc.mlp_out, b, d, 0);
             }
-            s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[b * d], b * d));
+            // The layer's closing add and the next norm (the next layer's ln1, or the final norm after the last).
+            let next_norm = if l + 1 < c.n_layers as usize { w(&format!("blocks.{}.ln1.weight", l + 1)) } else { w("norm.weight") };
+            let next_out = if l + 1 < c.n_layers as usize { &sc.xn1 } else { &sc.xn_final };
+            ln1_done = add_rms(&mut s, &sc.xmid, &sc.mlp_out, next_norm, &sc.res[l + 1], next_out);
+            if !ln1_done {
+                s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[b * d], b * d));
+            }
         }
         let last = c.n_layers as usize;
-        s.push(self.rms(&sc.res[last], w("norm.weight"), &sc.xn_final, d, b));
+        if !ln1_done {
+            s.push(self.rms(&sc.res[last], w("norm.weight"), &sc.xn_final, d, b));
+        }
         s
     }
 
