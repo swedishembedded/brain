@@ -207,6 +207,26 @@ fn classify_layer_leaf(leaf: &str, ty: LayerType) -> Option<String> {
     }
 }
 
+/// The HF checkpoint name of a decoder linear's weight
+/// (`blocks.{l}.<leaf>.weight` for one of [`crate::config::lora_targets`]),
+/// whose values this import stores unchanged, so a delta trained on it (a
+/// LoRA pair) applies to the HF tensor as it is. `None` for any other name:
+/// norms and `conv1d` are transformed on import and have no such identity.
+pub fn hf_linear_name(name: &str) -> Option<String> {
+    let rest = name.strip_prefix("blocks.")?;
+    let (l, leaf) = rest.split_once('.')?;
+    l.parse::<u32>().ok()?;
+    let hf_leaf = match leaf {
+        "mlp.gate.weight" => "mlp.gate_proj.weight",
+        "mlp.up.weight" => "mlp.up_proj.weight",
+        "mlp.down.weight" => "mlp.down_proj.weight",
+        "linear_attn.in_proj_qkv.weight" | "linear_attn.in_proj_z.weight" | "linear_attn.in_proj_b.weight" | "linear_attn.in_proj_a.weight" | "linear_attn.out_proj.weight"
+        | "self_attn.q_proj.weight" | "self_attn.k_proj.weight" | "self_attn.v_proj.weight" | "self_attn.o_proj.weight" => leaf,
+        _ => return None,
+    };
+    Some(format!("model.language_model.layers.{l}.{hf_leaf}"))
+}
+
 /// `foreign` names tensor-name prefixes another component of a multimodal
 /// checkpoint owns (a wrapper's vision tower or projector); those tensors are
 /// out of scope here exactly like `mtp.`/`model.visual.`, and their owner
@@ -483,6 +503,25 @@ pub fn import_mtp(reader: &checkpoint::mmap::MmapSafetensors, cfg: &Qwen35Config
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_lora_target_names_the_hf_tensor_it_was_imported_from() {
+        let cfg = Qwen35Config::tiny();
+        let types = cfg.layer_types();
+        let mut seen = 0;
+        for (name, _) in cfg.param_list() {
+            let leaf = name.rsplit('.').nth(1).unwrap_or("");
+            if !crate::config::lora_targets().iter().any(|t| t == leaf) {
+                assert_eq!(hf_linear_name(&name), None, "{name} is not a LoRA target");
+                continue;
+            }
+            let hf = hf_linear_name(&name).unwrap_or_else(|| panic!("{name} has no HF name"));
+            assert_eq!(classify(&hf, &cfg, &[]).unwrap().as_deref(), Some(name.as_str()), "{hf} does not import as {name}");
+            seen += 1;
+        }
+        let want: usize = types.iter().map(|t| if *t == LayerType::Linear { 5 + 3 } else { 4 + 3 }).sum();
+        assert_eq!(seen, want, "every GDN layer has 5 projections, every attention layer 4, each plus 3 MLP ones");
+    }
 
     fn one_f32(shape: Vec<usize>, v: f32) -> (Vec<usize>, Vec<f32>) {
         let n: usize = shape.iter().product();
