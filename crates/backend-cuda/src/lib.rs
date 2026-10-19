@@ -52,7 +52,7 @@ pub mod policy;
 
 pub use backend::{CudaBackend, LaunchStats, PASS_FIRST_FLUSH_STEPS, PASS_FLUSH_STEPS};
 pub use driver::{driver, CudaDevice};
-pub use live::{call_totals, live_resources, CallTotals, LiveResources};
+pub use live::{call_totals, live_resources, zeroed_by_size, CallTotals, LiveResources};
 
 /// Every CUDA-visible device as a brain [`backend_api::GpuIdentity`], in CUDA
 /// ordinal order - the shape `gpu_core::devices` consumes, matching

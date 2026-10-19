@@ -314,6 +314,10 @@ fn main() {
     if steps > 1 {
         let rate = (steps - 1) as f64 * tokens as f64 / warm_secs;
         let n = |c: Option<usize>| c.map_or("n/a".to_string(), |c| c.to_string());
+        // Which allocation sizes the cleared bytes come from (cumulative over all steps).
+        for (bucket, (n_calls, bytes)) in gpu_core::cuda_zeroed_by_size().into_iter().enumerate().filter(|(_, (c, _))| *c > 0) {
+            println!("PROBE zeroed size=2^{bucket}B calls={n_calls} gib={:.1}", bytes as f64 / (1u64 << 30) as f64);
+        }
         println!("PROBE warm_tokens_per_s={rate:.0} other_contexts_start={} other_contexts_end={}", n(others_start), n(other_compute_contexts()));
     }
     stop.store(true, Ordering::Relaxed);

@@ -2270,7 +2270,7 @@ pub use native_facade::{
 /// to show that a steady-state token pays none of the first two. All zero when
 /// the CUDA backend is not in use.
 #[cfg(not(target_arch = "wasm32"))]
-pub use backend_cuda::{call_totals as cuda_call_totals, CallTotals as CudaCallTotals};
+pub use backend_cuda::{call_totals as cuda_call_totals, zeroed_by_size as cuda_zeroed_by_size, CallTotals as CudaCallTotals};
 
 /// What `Gpu::try_storage` and friends return when the process-wide ceiling
 /// (`--limit-vram-total`/`--limit-ram-total`) refuses an allocation.

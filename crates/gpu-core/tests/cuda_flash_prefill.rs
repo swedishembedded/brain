@@ -498,3 +498,20 @@ fn the_int8_cache_prefill_is_materially_faster_than_the_portable_kernel() {
     eprintln!("cuda_flash_prefill: int8 cache n={n} start={start}: portable {t_ref:.3} ms, tensor-core {t_tc:.3} ms, {speedup:.1}x");
     assert!(speedup >= SPEEDUP_FLOOR, "only {speedup:.1}x the portable kernel (floor {SPEEDUP_FLOOR}x)");
 }
+
+/// The serving shape of the 27B's agentic prefill (a 512-row chunk behind 3584 cached tokens, int8 cache): 192
+/// blocks, i.e. more than one wave on 132 SMs, which the smaller cases above do not exercise. Reports the kernel's
+/// time for kernel-level A/B work; it asserts nothing about speed.
+#[test]
+#[ignore = "a timing report for kernel work, not a spec"]
+fn the_int8_cache_prefill_rates_at_the_serving_chunk() {
+    let Some(gpu) = device() else { return };
+    let (n, start) = (512u32, 3584u32);
+    let p = Problem::new(Case { n, start, block_size: 4096, scatter: false }, 23);
+    let (seen, stored) = p.as_stored(Kv::Int8);
+    let d = TierDevice::upload(&gpu, &seen, Kv::Int8, &stored);
+    let native = d.native(&gpu, &seen).expect("native step");
+    d.base.run(&gpu, &native, &seen);
+    let best = d.base.device_ms(&gpu, &native, "flash_prefill_f16_hd256");
+    eprintln!("cuda_flash_prefill: serving chunk int8 n={n} start={start}: tensor-core {best:.3} ms (best of the trials)");
+}

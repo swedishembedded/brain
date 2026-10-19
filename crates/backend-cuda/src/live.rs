@@ -138,6 +138,23 @@ pub(crate) fn host_submitted(nanos: u64) {
 pub(crate) fn zeroed(bytes: usize) {
     TOTAL_ZERO_CALLS.fetch_add(1, Ordering::Relaxed);
     TOTAL_ZEROED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    let bucket = (bytes.max(1).ilog2() as usize).min(ZERO_BUCKETS - 1);
+    ZERO_CALLS_BY_SIZE[bucket].fetch_add(1, Ordering::Relaxed);
+    ZERO_BYTES_BY_SIZE[bucket].fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+const ZERO_BUCKETS: usize = 48;
+static ZERO_CALLS_BY_SIZE: [AtomicU64; ZERO_BUCKETS] = [const { AtomicU64::new(0) }; ZERO_BUCKETS];
+static ZERO_BYTES_BY_SIZE: [AtomicU64; ZERO_BUCKETS] = [const { AtomicU64::new(0) }; ZERO_BUCKETS];
+
+/// The clears counted in [`CallTotals`], by allocation size: element `i` is
+/// `(calls, bytes)` for allocations of `2^i ..< 2^(i+1)` bytes. It says which
+/// sizes dominate the cleared bytes, so a caller that clears storage it then
+/// overwrites completely can be found.
+pub fn zeroed_by_size() -> Vec<(u64, u64)> {
+    (0..ZERO_BUCKETS)
+        .map(|i| (ZERO_CALLS_BY_SIZE[i].load(Ordering::Relaxed), ZERO_BYTES_BY_SIZE[i].load(Ordering::Relaxed)))
+        .collect()
 }
 pub(crate) fn host_waited(nanos: u64) {
     TOTAL_WAIT_NANOS.fetch_add(nanos, Ordering::Relaxed);
