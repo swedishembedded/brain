@@ -1470,6 +1470,8 @@ fn lora_train_bench(a: &[String], shape: QwenConfig, model_name: &str) {
     let secs = t0.elapsed().as_secs_f64() / steps as f64;
     fwd /= steps as f64;
     assert!(loss.is_finite(), "non-finite loss {loss} at T={t}");
+    // The model actually trained: the checkpoint's own shape when `--weights` was given, else `--model`'s.
+    let model_name = format!("{} ({} layers, d_model {}, {:.2} B parameters)", if flag(a, "--weights").is_some() { "checkpoint" } else { model_name }, cfg.n_layers, cfg.d_model, total_params(&cfg) as f64 / 1e9);
     println!(
         "lora-train {model_name} T={t} rank={rank}: {:.3} s/step ({:.3} s forward, {:.3} s backward incl. recompute + AdamW)  {:.3} steps/s  {:.0} tok/s  (loss {loss:.3})",
         secs,

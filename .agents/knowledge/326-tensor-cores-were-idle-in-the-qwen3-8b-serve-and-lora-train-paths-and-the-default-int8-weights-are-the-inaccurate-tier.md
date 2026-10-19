@@ -87,3 +87,32 @@ oracle (`crates/gpu-core/tests/cuda_flash_{prefill_hd128,attn_fwd,attn_bwd}.rs`;
   so the threshold is 8). What remains at 32 rows is the int8 attention triad (92 ms at a 1024-token context, growing
   with it) and per-dispatch cost: the next lever for an agentic request, whose 300 decode tokens (9.4 s at one
   stream) now cost more than its 4k-token prefill (0.6 s).
+
+## Quiet-card end-to-end, 8B through `brain serve` (addendum)
+
+One card with no other tenant (12:50-13:05), `--qwen-ctx 8192 --qwen-max-batch 32`, fp32 weights unless named, 8 prompts of about
+3.7k tokens for prefill and 300 greedy tokens per stream for decode (`e2e8b-decode.log`, rows stamped 12:5x; commands in `run8b5.sh`,
+`bench.py`, `benchdec.py`; single run each, so a 5 percent difference is not resolvable):
+
+| tier | prefill tok/s | decode tok/s at 1 / 8 / 32 streams | server memory |
+|---|---|---|---|
+| exact fp32 (`--qwen-gemm-fp32`, the CE4 registered flags) | 1100 | 33 / 134 / 186 | 34.6 GB |
+| default: TF32 GEMMs, fp16 attention, native batched decode attention | 8315 | 36 / 460 / 1607 | 34.7 GB |
+| bf16 weights (`--qwen-weights-bf16`) | 6596 | 46 / 569 / 1904 | 20.3 GB |
+| int8 weights | 4311 | 45 / 434 / 832 | 13.9 GB |
+
+- The default tier is 7.6x faster at prefill and 8.6x at 32 streams of decode than the exact tier; the bf16 tier decodes about
+  18 percent faster than fp32 at 8 and 32 streams on half the memory and prefills a fifth slower, and int8 is slower than both at batch
+  32 and, per the accuracy table, far less accurate. (Rows stamped 04:3x-04:4x in the same log are from a shared card and are not
+  comparable.) The one-stream rate barely moves: a single stream is bound by the weight stream and by per-step work, not by the GEMM.
+- The residual-add + norm fusion, switched off with `--qwen-no-fuse-norm` (`fp32-nofuse` row): 1432 / 405 tok/s at 32 / 8 streams
+  against 1607 / 460, and the 32-row decode pass in `qwen_bench serve` 17.55 ms against 15.50 ms (`ab-8b-r32-*.log`; 8 rows 17.19 against
+  15.05): about 11 percent.
+- CUDA-graph replay switched off (`BRAIN_CUDA_GRAPHS=0`, `fp32-nographs` row): 1600 against 1607 tok/s: no measurable effect at
+  these rates, so the library-GEMM capture support added for it has not been shown to matter (whether the serving tape replays at all was
+  not counted; `launch_stats().graph_replays` would say).
+- LoRA step on the final tree, 8B real weights, fp32 base, block 3532: 1.094 s/step, 3230 tok/s (`lora-final-fp32base-3532.log`), and bf16 base at
+  block 8192: 2.53 s/step, 3242 tok/s. The log line printed "Qwen3-0.6B" because the label came from the `--model` default rather than from
+  the checkpoint; the run itself loaded Qwen3-8B (164-172 s model build, 34 GB process footprint, the checkpoint's own 36-layer shape),
+  and the label now prints the trained shape (`checkpoint (36 layers, d_model 4096, 8.19 B parameters)`). The earlier 1.50 s/step figure in
+  the table above was measured before the later launch-count changes.
