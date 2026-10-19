@@ -34,7 +34,7 @@
 //!
 //! - the bias arm already implements Ultralytics' `Detect.bias_init` class
 //!   prior (`b = -log((1-p)/p)`, `p = 0.01`), so an appended class starts at a
-//! perf-number: prior probability constant of the bias init, not a timing
+// perf-number: prior probability constant of the bias init, not a timing
 //!   ~1% prior probability and cannot out-shout 80 trained classes before it has
 //!   seen a single gradient;
 //! - the weight arm is a zero-mean Gaussian whose `std` is a parameter, so we
