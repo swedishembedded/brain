@@ -745,6 +745,9 @@ pub struct StepReport {
     pub demoted: Vec<u64>,
     /// Requests whose KV came back from host RAM this iteration.
     pub promoted: Vec<u64>,
+    /// Requests preempted by recompute this iteration: their KV was dropped
+    /// and they were requeued to prefill their context again.
+    pub recomputed: Vec<u64>,
 }
 
 /// A submitted request that has not been admitted yet.
@@ -755,6 +758,25 @@ struct Waiting {
     adapter: Option<AdapterId>,
     sample: SampleParams,
     seed: u64,
+    /// `Some` when this is a running sequence that was preempted by
+    /// recompute: `req.prompt` is then the context whose KV must be rebuilt and
+    /// `req.max_new` is still the request's whole token budget.
+    resume: Option<Resume>,
+}
+
+/// What a sequence preempted by recompute carries through the waiting queue so
+/// that, once its context is prefilled again, it continues exactly where it
+/// stopped instead of starting over: the tokens already produced, the sampler's
+/// RNG stream and the adaptive speculation window. Its adapter stays pinned
+/// the whole time.
+struct Resume {
+    generated: Vec<u32>,
+    /// The log-probability of each token in `generated`.
+    logprobs: Vec<f32>,
+    /// The token whose K/V is not in the cache yet (the last one produced).
+    next_input: u32,
+    spec: speculate::SeqSpec,
+    rng: data::rng::Rng,
 }
 
 /// A request being prefilled over several iterations: it holds its blocks and a
@@ -770,6 +792,7 @@ struct Prefilling {
     sample: SampleParams,
     seed: u64,
     table: BlockTable,
+    resume: Option<Resume>,
 }
 
 /// A sequence the scheduler is actively decoding.
@@ -795,6 +818,9 @@ struct Running {
     /// (not per-batch) so a `seed` reproduces exactly regardless of what else
     /// is in the batch alongside it.
     sample: SampleParams,
+    /// The seed `rng` started from, kept so a preempted sequence can be
+    /// requeued as the request it was.
+    seed: u64,
     rng: data::rng::Rng,
 }
 
@@ -968,7 +994,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             return id;
         }
         self.started.insert(id, std::time::Instant::now());
-        self.waiting.push_back(Waiting { id, req, adapter, sample, seed });
+        self.waiting.push_back(Waiting { id, req, adapter, sample, seed, resume: None });
         id
     }
 
@@ -988,14 +1014,19 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// produced (see [`StepReport::completed_logprobs`]).
     pub fn cancel_detailed(&mut self, id: u64) -> Option<(Vec<u32>, Vec<f32>)> {
         if let Some(pos) = self.waiting.iter().position(|w| w.id == id) {
-            self.waiting.remove(pos);
-            return Some((Vec::new(), Vec::new())); // never admitted, so nothing was produced
+            let w = self.waiting.remove(pos).expect("position just found it");
+            // A request never admitted produced nothing; one preempted by
+            // recompute keeps its adapter pinned and has output to hand back.
+            return Some(w.resume.map_or_else(Default::default, |r| {
+                self.unpin(w.adapter);
+                (r.generated, r.logprobs)
+            }));
         }
         if let Some(pos) = self.prefilling.iter().position(|p| p.id == id) {
             let mut p = self.prefilling.remove(pos).expect("position just found it");
             self.dec.release_table(&mut p.table);
             self.unpin(p.adapter);
-            return Some((Vec::new(), Vec::new())); // nothing generated yet
+            return Some(p.resume.map_or_else(Default::default, |r| (r.generated, r.logprobs)));
         }
         if let Some(pos) = self.swapped.iter().position(|r| r.id == id) {
             // Demoted: its blocks are already back in the pool, its bytes are
@@ -1070,6 +1101,11 @@ impl<D: PagedDecoder> Scheduler<D> {
                 self.dec.unpin_adapter(adapter);
             }
         }
+        for w in self.waiting.iter().filter(|w| w.resume.is_some()) {
+            if let Some(adapter) = w.adapter {
+                self.dec.unpin_adapter(adapter);
+            }
+        }
         self.dec
     }
 
@@ -1079,14 +1115,17 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// the sequence to finish (`step`/`step_report` only return a completed
     /// sequence's full token list, not a running one's partial progress).
     pub fn tokens_of(&self, id: u64) -> Option<&[u32]> {
-        // Demoted sequences are included: preemption is invisible to a caller
+        // Preempted sequences are included: preemption is invisible to a caller
         // streaming a response, so its progress must stay readable while its
-        // KV sits in host RAM.
+        // KV sits in host RAM or is being recomputed.
+        let preempted = self.waiting.iter().filter_map(|w| w.resume.as_ref().map(|r| (w.id, r.generated.as_slice())));
         self.running
             .iter()
             .chain(self.swapped.iter())
-            .find(|r| r.id == id)
-            .map(|r| r.generated.as_slice())
+            .map(|r| (r.id, r.generated.as_slice()))
+            .chain(preempted)
+            .find(|&(rid, _)| rid == id)
+            .map(|(_, generated)| generated)
     }
 
     /// Requests admitted but not yet started.
@@ -1238,29 +1277,78 @@ impl<D: PagedDecoder> Scheduler<D> {
             .sum()
     }
 
-    /// Preempt until the pool can back one more token for every active
-    /// sequence, or until nothing more can be preempted.
+    /// Device blocks the sequences still being prefilled have been promised
+    /// (their whole prompt plus the first token) but do not hold yet. Prefill
+    /// takes them chunk by chunk, so until it has, the pool looks emptier than
+    /// it is.
+    fn prefill_debt(&self) -> u32 {
+        self.prefilling.iter().map(|p| self.dec.blocks_for(p.prompt.len() as u32 + 1).saturating_sub(p.table.blocks().len() as u32)).sum()
+    }
+
+    /// Blocks this iteration has already spoken for: one more token for every
+    /// running sequence and the unfinished prefills. Admission and speculative
+    /// proposals may only use what is left.
+    fn committed_blocks(&self) -> u32 {
+        self.blocks_for_next_token() + self.prefill_debt()
+    }
+
+    /// Make the pool able to back everything this iteration has committed to -
+    /// one more token for every active sequence and the rest of every prefill -
+    /// or leave it with a single sequence, which fits by construction
+    /// (`next_admissible` rejects a request larger than the pool).
     ///
-    /// The last active sequence is never demoted: it has nothing to yield to,
-    /// and swapping it out could only be undone by swapping it back in.
-    /// Without host offload (`kv_offload_bytes() == 0`, every decoder that has
-    /// not adopted it) this reduces to the prefix reclaim that was already
-    /// here, so behaviour is unchanged.
+    /// Admission only proves that a PROMPT fits, so the sequences it lets in can
+    /// outgrow the pool together while they decode. The victims are chosen newest
+    /// first - the sequences furthest from finishing, so the oldest keep running
+    /// and release their blocks soonest - and a sequence still prefilling is
+    /// always newer than one decoding:
+    ///
+    /// 1. A prefilling sequence loses its partial prefill and goes back to the
+    ///    head of the waiting queue; it has produced nothing.
+    /// 2. A decoding sequence is demoted to host RAM when the decoder can
+    ///    ([`PagedDecoder::demote_sequence`]) and has budget left: a copy of
+    ///    its cache costs less than recomputing it.
+    /// 3. Otherwise (no offload, or the host budget is spent) it is preempted by
+    ///    **recompute**: its blocks go back to the pool and it is requeued at the
+    ///    head of the waiting queue with the tokens it has produced, the sampler's
+    ///    RNG stream and its speculation window, to prefill its context again
+    ///    once the pool has room. Recompute was chosen over reserving
+    ///    `prompt + max_new` blocks for every admitted sequence because `max_new`
+    ///    is a ceiling, not a forecast: most sequences stop earlier, so a worst
+    ///    case reservation would keep the batch far below what the pool can
+    ///    actually hold, on every request, to avoid a cost paid only under
+    ///    overload. The continuation is the same tokens: the rebuilt cache holds
+    ///    the same positions, the next input is the token already chosen, and a
+    ///    sampled sequence resumes its own RNG where it stopped, so its seed
+    ///    still reproduces it.
+    ///
+    /// The last active sequence is never preempted: it has nothing to yield to.
     fn ensure_decode_room(&mut self, report: &mut StepReport) {
-        let mut need = self.blocks_for_next_token();
+        let mut need = self.committed_blocks();
         if self.dec.free_blocks() >= need {
             return;
         }
         self.dec.reclaim_prefix(need - self.dec.free_blocks());
         while self.dec.free_blocks() < need {
+            if let Some(p) = self.prefilling.pop_back() {
+                self.requeue_prefilling(p);
+                need = self.committed_blocks();
+                continue;
+            }
             if self.running.iter().filter(|r| !r.done).count() <= 1 {
                 return;
             }
-            // Never re-demote a sequence promoted in THIS iteration: it is
-            // the newest entry in `running`, so the plain "newest first"
+            // Prefer not to re-demote a sequence promoted in THIS iteration: it
+            // is the newest entry in `running`, so the plain "newest first"
             // choice would pick it, pay both transfers and produce no token -
-            // pure thrash. Anything else, newest first.
-            let Some(pos) = self.running.iter().rposition(|r| !r.done && !report.promoted.contains(&r.id)) else { return };
+            // pure thrash. Only when nothing else can yield does it go too:
+            // thrash beats a pool that cannot back the step.
+            let pos = self
+                .running
+                .iter()
+                .rposition(|r| !r.done && !report.promoted.contains(&r.id))
+                .or_else(|| self.running.iter().rposition(|r| !r.done))
+                .expect("at least two active sequences");
             let mut r = self.running.remove(pos);
             match self.dec.demote_sequence(r.id, &mut r.table) {
                 Ok(_) => {
@@ -1268,15 +1356,38 @@ impl<D: PagedDecoder> Scheduler<D> {
                     self.swapped.push_back(r);
                 }
                 Err(_) => {
-                    // No offload, or no host budget left: put it back and stop.
-                    // The decode below runs exactly as it did before this
-                    // existed.
-                    self.running.insert(pos, r);
-                    return;
+                    report.recomputed.push(r.id);
+                    self.requeue_for_recompute(r);
                 }
             }
-            need = self.blocks_for_next_token();
+            need = self.committed_blocks();
         }
+    }
+
+    /// Drop a partially prefilled request's blocks and put it back at the head
+    /// of the waiting queue. A sequence resumed after recompute keeps its
+    /// adapter pinned; a fresh one gives the pin back, since admission pins again.
+    fn requeue_prefilling(&mut self, mut p: Prefilling) {
+        self.dec.release_table(&mut p.table);
+        if p.resume.is_none() {
+            self.unpin(p.adapter);
+        }
+        let req = Request { prompt: p.prompt, max_new: p.max_new, stop: p.stop };
+        self.waiting.push_front(Waiting { id: p.id, req, adapter: p.adapter, sample: p.sample, seed: p.seed, resume: p.resume });
+    }
+
+    /// Preempt a decoding sequence by recompute (see [`Self::ensure_decode_room`]):
+    /// free its blocks and queue it, ahead of everything waiting, to prefill the
+    /// context its cache held. The last produced token is not in the cache yet -
+    /// it is the next decode input - so it travels as `next_input` rather than
+    /// as part of the context to prefill.
+    fn requeue_for_recompute(&mut self, mut r: Running) {
+        self.dec.release_table(&mut r.table);
+        let Running { id, adapter, generated, logprobs, max_new, stop, next_input, mut context, spec, sample, seed, rng, .. } = r;
+        let uncached = context.pop();
+        debug_assert_eq!(uncached, Some(next_input), "the newest token is the one with no cache entry yet");
+        let req = Request { prompt: context, max_new, stop };
+        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, next_input, spec, rng }) });
     }
 
     /// Index of the first waiting request that can be admitted this
@@ -1295,6 +1406,11 @@ impl<D: PagedDecoder> Scheduler<D> {
         let mut pos = 0;
         while let Some(w) = self.waiting.get(pos) {
             let (id, adapter) = (w.id, w.adapter);
+            // Already admitted once (so it passed every check below) and now
+            // waiting only for pool room to rebuild its cache.
+            if w.resume.is_some() {
+                return Some(pos);
+            }
             let verdict = match self.static_refusal(&w.req.prompt, w.req.max_new) {
                 Some(reason) => Admissibility::Refused(reason),
                 None => self.adapter_verdict(adapter),
@@ -1327,14 +1443,18 @@ impl<D: PagedDecoder> Scheduler<D> {
     }
 
     /// A prompt that exceeds the engine's capacity, or a token outside the vocabulary.
+    ///
+    /// A sequence can only ever run alone in the pool, so it must fit it: the KV
+    /// of every token but the last one it produces.
     fn static_refusal(&self, prompt: &[u32], max_new: usize) -> Option<RejectReason> {
-        let cap = self.dec.max_seq_len();
+        let pool_tokens = usize::try_from(self.dec.kv_pool_capacity_tokens()).unwrap_or(usize::MAX);
+        let cap = self.dec.max_seq_len().min(pool_tokens);
         let vocab = self.dec.vocab() as u32;
         if let Some(&token) = prompt.iter().find(|&&t| t >= vocab) {
             return Some(RejectReason::InvalidToken { token, vocab });
         }
         let need = prompt.len() + max_new;
-        (need > cap).then_some(RejectReason::ExceedsCapacity { need: need as u32, capacity: cap as u32 })
+        (need.saturating_sub(1) > cap).then_some(RejectReason::ExceedsCapacity { need: need as u32, capacity: cap as u32 })
     }
 
     fn adapter_verdict(&mut self, adapter: Option<AdapterId>) -> Admissibility {
@@ -1348,7 +1468,15 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// A fully prefilled request becomes a running sequence: its first token is
     /// picked from the prefill's final hidden state.
     fn start_running(&mut self, p: Prefilling, hidden: Vec<f32>, report: &mut StepReport) {
-        let Prefilling { id, prompt, max_new, stop, adapter, sample, seed, table, .. } = p;
+        let Prefilling { id, prompt, max_new, stop, adapter, sample, seed, table, resume, .. } = p;
+        if let Some(Resume { generated, logprobs, next_input, spec, rng }) = resume {
+            // The cache is whole again; the token to decode next was chosen
+            // before the preemption, so the prefill's own output is not used.
+            let mut context = prompt;
+            context.push(next_input);
+            self.running.push(Running { id, table, adapter, generated, logprobs, max_new, stop, next_input, context, spec, done: false, sample, seed, rng });
+            return;
+        }
         let mut rng = data::rng::Rng::new(seed);
         // `admit_greedy`/`admit_topk` are on-device for a decoder that has
         // one (`qwen3::serve::Engine`): neither ships a `[vocab]` block to
@@ -1361,7 +1489,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             let candidates = self.dec.admit_topk(&hidden, k);
             sample_from_topk_with_logprob(&candidates, sample, &mut rng)
         };
-        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, rng };
+        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, seed, rng };
         accept_token(&mut r, first, first_logprob);
         report.admitted.push(id);
         self.running.push(r);
@@ -1385,7 +1513,10 @@ impl<D: PagedDecoder> Scheduler<D> {
         if !allow(need) {
             return false;
         }
-        let want = self.dec.blocks_for(need as u32 + 1);
+        // The prompt, its first token, and what the sequences already in flight
+        // are owed this iteration: admitting into those blocks would only get the
+        // newcomer preempted before it produced anything.
+        let want = self.dec.blocks_for(need as u32 + 1) + self.committed_blocks();
         let free = self.dec.free_blocks();
         if free < want {
             // Cached prefix blocks are reclaimable capacity: live sequences always
@@ -1395,15 +1526,18 @@ impl<D: PagedDecoder> Scheduler<D> {
         if self.dec.free_blocks() < want {
             return false;
         }
-        let Waiting { id, req, adapter, sample, seed } = self.waiting.remove(pos).expect("admissible position");
+        let Waiting { id, req, adapter, sample, seed, resume } = self.waiting.remove(pos).expect("admissible position");
         let table = match adapter {
             Some(adapter) => {
-                self.dec.pin_adapter(adapter);
+                // A resumed sequence never gave its pin back.
+                if resume.is_none() {
+                    self.dec.pin_adapter(adapter);
+                }
                 BlockTable::with_namespace(adapter.kv_namespace())
             }
             None => BlockTable::new(),
         };
-        self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table });
+        self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table, resume });
         true
     }
 
@@ -1780,6 +1914,7 @@ mod tests {
             spec: speculate::SeqSpec::new(),
             done: false,
             sample: SampleParams { temp: 0.0, top_k: 0, top_p: 1.0 },
+            seed: 0,
             rng: data::rng::Rng::new(0),
         }
     }

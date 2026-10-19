@@ -532,7 +532,7 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// Per-sequence proposal budget for this step: the adaptive window,
     /// bounded by what the sequence can still emit and by free KV blocks.
     fn draft_windows(&mut self, active: &[usize], kmax: usize) -> Vec<usize> {
-        let mut spare = self.dec.free_blocks().saturating_sub(self.blocks_for_next_token());
+        let mut spare = self.dec.free_blocks().saturating_sub(self.committed_blocks());
         let mut ks = Vec::with_capacity(active.len());
         for &i in active {
             let r = &mut self.running[i];

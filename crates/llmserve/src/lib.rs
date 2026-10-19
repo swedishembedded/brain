@@ -258,7 +258,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         // `format!` would cost real throughput even with nothing printed.
         if residency::log::verbosity() >= 3 {
             residency::log::debug(&format!(
-                "{} batch step: {} running, {} waiting, admitted={}, produced={}, finished={}, rejected={}, demoted={}, promoted={}",
+                "{} batch step: {} running, {} waiting, admitted={}, produced={}, finished={}, rejected={}, demoted={}, promoted={}, recomputed={}",
                 self.front.label(),
                 self.sched.running_len(),
                 self.sched.waiting_len(),
@@ -268,6 +268,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 report.rejected.len(),
                 report.demoted.len(),
                 report.promoted.len(),
+                report.recomputed.len(),
             ));
         }
         let job_of = |jobs: &[Job], id: u64| jobs.iter().position(|j| j.id == Some(id)).expect("a scheduler id belongs to this group");
