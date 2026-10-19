@@ -56,8 +56,10 @@ pub enum ClaimError {
     /// budget could hold it, but not without evicting more than is
     /// currently evictable - try again once something frees).
     NoCapacity(String),
-    /// The instance exceeds EVERY device's usable budget even fully empty -
-    /// no eviction, however aggressive, could ever make room. Checked
+    /// The instance exceeds EVERY device's budget even with nothing resident -
+    /// no eviction, however aggressive, could ever make room. A budget is the
+    /// memory free on the device when serving started, so another process
+    /// holding a card then shrinks it for the life of this one. Checked
     /// BEFORE planning any eviction, so a claim that can never succeed never
     /// costs anything else its residency (see `place::could_ever_fit`).
     TooLarge(String),
@@ -822,7 +824,7 @@ impl ResidencyManager {
                 None => {
                     if !could_ever_fit(&hot_cost, &self.budgets) {
                         return Err(ClaimError::TooLarge(format!(
-                            "{key} ({} MiB) exceeds every device's usable budget even fully empty",
+                            "{key} ({} MiB) exceeds every device's budget even with nothing resident (a budget is the memory that was free on the device when serving started)",
                             hot_cost.vram.max(hot_cost.ram).max(hot_cost.npu) >> 20
                         )));
                     }
@@ -870,7 +872,7 @@ impl ResidencyManager {
                 // not after evicting everything else and still not fitting.
                 if !could_ever_fit(&cost, &self.budgets) {
                     return Err(ClaimError::TooLarge(format!(
-                        "{key} ({} MiB) exceeds every device's usable budget even fully empty",
+                        "{key} ({} MiB) exceeds every device's budget even with nothing resident (a budget is the memory that was free on the device when serving started)",
                         cost.vram.max(cost.ram).max(cost.npu) >> 20
                     )));
                 }
@@ -1021,7 +1023,7 @@ impl ResidencyManager {
                             // group through to here precisely so it gets a real,
                             // final error instead of sitting in the queue.
                             return Err(ClaimError::TooLarge(format!(
-                                "{key} ({} MiB on {d:?}) is too large for that device's usable budget even fully empty",
+                                "{key} ({} MiB on {d:?}) is too large for that device's budget even with nothing resident (a budget is the memory that was free on the device when serving started)",
                                 need >> 20
                             )));
                         }
