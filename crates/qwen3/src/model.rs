@@ -774,7 +774,7 @@ pub struct Qwen {
 /// Submitted one layer at a time rather than as one list: at a long block a
 /// layer is seconds of device work, and a whole pass handed over in one
 /// `submit` becomes one batch the backend waits on as a unit, which a
-/// 16k-token backward (~80 s on a P40) takes past `BRAIN_GPU_WAIT_S`. Short
+/// 16k-token backward (tens of seconds on a P40) takes past `BRAIN_GPU_WAIT_S`. Short
 /// blocks are unaffected: a submission the backend's size valve does not
 /// force out still joins the next one.
 #[derive(Default)]

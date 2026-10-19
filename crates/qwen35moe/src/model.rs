@@ -546,7 +546,9 @@ const MOE_GROUPED_COLS: u32 = 4;
 /// (`moe_i8_gemv_gather`) to the grouped kernel. Below it a token's experts are
 /// mostly distinct matrices and there is nothing to share. Swept on a GH200 on
 /// the real 35B-A3B decode step, device-timed (`qwen35moe_decode_profile`): the
+// perf-number: measured by `qwen35moe_decode_profile` on the real 35B-A3B Q8_0 GGUF
 /// gather GEMV leads through 5 rows (13.8 ms against 14.2 at 5), the grouped
+// perf-number: measured by `qwen35moe_decode_profile` on the real 35B-A3B Q8_0 GGUF
 /// kernel from 7 (15.4 against 14.4), and by 16 rows it is 18.0 ms against 28.1.
 pub const MOE_GROUPED_MIN_ROWS: u32 = 7;
 

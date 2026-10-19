@@ -14,15 +14,19 @@
 //! denoises the whole block at once - `block_size` rows, `block_size - 1`
 //! proposals - so `k` draft tokens cost ONE draft forward, not `k` of them.
 //! That is the entire economic argument for it on this stack: a target decode
+// perf-number: measured by `tests/dflash2_real.rs` (command in its header)
 //! step measures 152 ms here and a whole draft round measures 48 ms (44 ms of
+// perf-number: measured by `tests/dflash2_real.rs` (command in its header)
 //! device work, 4 ms of selector), so a per-token drafter would have to fit
 //! seven of its own passes inside one target step and this one does not have
 //! to.
 //!
+// perf-number: measured by `tests/dflash2_real.rs` (command in its header)
 //! Measured (2x Tesla P40, both checkpoints Q8_0 served INT8, greedy): 2.30
 //! accepted draft tokens per round on a free-form prompt and 6.00 on a
 //! repetition workload, against the model-free n-gram drafter's 0.57 and 5.12,
 //! and on free-form text the first drafter on this stack that is a net
+// perf-number: measured by `tests/dflash2_real.rs` (command in its header)
 //! win (1.08x at `k = 3`) rather than a loss. `tests/dflash2_real.rs` carries
 //! the full table and the cost model that explains why the wall-clock win is
 //! much smaller than the acceptance rate alone implies.
@@ -328,6 +332,7 @@ impl Dflash2 {
     /// not an academic option: this model amplifies its input by five orders
     /// of magnitude (the embedding it starts from has RMS 0.014, the hidden
     /// state it ends with has RMS ~1000), so "the INT8 and fp32 answers differ
+    // perf-number: illustrative tolerance in the argument, not a measurement
     /// by 10%" and "the port is wrong by 10%" are indistinguishable without
     /// running the tier the reference actually implements. Measured: see
     /// `tests/dflash2_real.rs`.

@@ -334,6 +334,7 @@ impl Qwen35Config {
     /// The ONE table both `Self::layer_weight_bytes` (the byte-cost formula)
     /// and `Qwen35::new_impl_on`'s upload loop (the actual dispatch) read -
     /// replacing a formula that once drifted from what `Weight::upload`
+    // perf-number: layout arithmetic (scale bytes over packed bytes), not a measurement
     /// really placed on the card by 12.5% (lesson #68). A hand-transcribed
     /// SECOND copy is exactly the failure mode this table exists to remove,
     /// not merely re-gate.
@@ -1074,6 +1075,7 @@ mod tests {
     /// The I8 arm is the check that was missing before M24: the scale used to
     /// be `[n]` (one per output row) and the formula still charged `n * 4`
     /// long after `model::int8::GROUP`-wise scales made the real cost
+    // perf-number: layout arithmetic (scale bytes over packed bytes), not a measurement
     /// `n * (k/32) * 4`, i.e. 12.5% of the packed weight rather than a
     /// rounding error (lesson #68). The Q4 arm is new coverage: Q4 packs
     /// 8 nibbles/`u32` (half I8's bytes) but shares I8's group-wise scale

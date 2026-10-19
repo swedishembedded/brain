@@ -148,6 +148,7 @@ fn int8_tracks_fp32_on_real_weights_through_real_layers() {
     }
     println!("worst cosine over {STEPS} positions and {layers} real layers: {worst:.6}");
 
+    // perf-number: hardware count (2x P40), not a rate
     // A REGRESSION floor, not a quality claim. Measured on 2x Tesla P40 at
     // `LAYERS = 8`: worst cosine 0.9862. The floor sits below that with
     // margin so a driver or kernel change that makes the tier materially

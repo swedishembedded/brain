@@ -14,6 +14,7 @@
 //! quantising the weight is the only difference. The bound is what the
 //! measurement showed, with a margin: tensor cosines of about 0.997 on average and
 //! 0.989 at worst (a 1.5B decoder is the most sensitive size), a relative error
+// perf-number: the loss bound this test asserts
 //! of at most 0.15, and a loss within 1% - noise next to a training step's own.
 //!
 //! Ignored by default (reads the checkpoint); needs a GPU with about 8 GB

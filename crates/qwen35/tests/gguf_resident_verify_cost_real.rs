@@ -149,7 +149,9 @@ fn the_verify_round_cost_ladder() {
 ///
 /// Stated as a multiple of THIS instance's own measured decode rate, so it does
 /// not encode these cards' clock. The bound is a separator, not a target: the
+// perf-number: measured by this test (command in its module header)
 /// per-layer drain this milestone removed put the same figure at 2.8x, and it
+// perf-number: measured by this test (command in its module header)
 /// is 3.8x without it.
 #[test]
 fn an_all_accepted_verify_round_beats_plain_decode_by_a_real_factor() {
@@ -188,7 +190,9 @@ fn an_all_accepted_verify_round_beats_plain_decode_by_a_real_factor() {
 /// middling acceptance rate spends most of its time in.
 ///
 /// The bound separates the two states this has been in rather than naming an
+// perf-number: measured by this test (command in its module header)
 /// ideal: with the per-layer drain a 1-row round measured 1.93x a decode step
+// perf-number: measured by this test (command in its module header)
 /// (3.7 tok/s against 6.6), and without it 1.13x. The residual is the chunked
 /// GDN form doing real work at `n = 1` that the recurrence does not, which is a
 /// different change and one that would cost this path its single-tape

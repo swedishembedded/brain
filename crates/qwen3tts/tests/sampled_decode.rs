@@ -55,6 +55,7 @@ const MAX_FRAMES: usize = 200;
 const MIN_RMS: f32 = 0.01;
 
 /// Shortest believable clip for this nine-word sentence at 12.5 Hz frames
+// perf-number: test threshold and the 12.5 Hz frame rate the clip length derives from
 /// (~2.5 s of speech is ~31 frames; the measured healthy run is 38). An EOS
 /// before this is the OTHER way to produce silence - a clip that stops
 /// immediately - and would otherwise slip past every assertion below.
@@ -133,6 +134,7 @@ fn default_sampled_decode_does_not_collapse_to_silence() {
     // (1) A natural EOS. The decode loop leaves only on the codec EOS or on the
     // frame cap, and never emits the EOS frame itself - so finishing under the
     // cap IS "the model chose to stop". The collapsed run finished at exactly
+    // perf-number: test threshold: half the frame cap
     // 200/200; the healthy one at 38. Half the cap keeps a 2.6x margin over the
     // measurement while staying far from "never terminated".
     assert!(

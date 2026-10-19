@@ -38,10 +38,12 @@
 //!
 //! The free-form column is the result that matters: **DFlash2 is the first
 //! drafter on this stack that is a net WIN on free-form text**, where the
+// perf-number: measured by this test (command in its module header)
 //! model-free one is exactly break-even. It out-drafts n-gram by 4x there
 //! (2.30 against 0.57 accepted per round) and still beats it on n-gram's own
 //! best workload (6.00 against 5.12) - though not on wall clock there, because
 //! n-gram costs nothing to run and this costs a 1.9B forward. Every `k` is now
+// perf-number: measured by this test (command in its module header)
 //! a win on both workloads; `k = 7` on free-form used to be a 0.86x LOSS, for
 //! a reason that was in the target's tape and not in the drafter.
 //!
@@ -55,8 +57,10 @@
 //! measured, every speculative round paid a 256-token prefill round's
 //! per-layer device drain (the qwen35 ledger's M29 profiles and removes it), so
 //! a chunk forward cost ~2.4 plain decode steps almost regardless of its row
+// perf-number: measured by this test (command in its module header)
 //! count, the `chunk tape, no spec` floor was 0.55x, and the real break-even
 //! sat near 5 accepted tokens per round - which is why `k = 7` on free-form
+// perf-number: measured by this test (command in its module header)
 //! text was a measured LOSS. The floor is now 0.91x and break-even is near 1,
 //! so the same drafter, unchanged, is a win at every `k` swept here.
 //!
@@ -194,6 +198,7 @@ fn report(label: &str, r: &Run, stats: Option<&qwen35::model::SpecDecodeStats>, 
             s.proposed,
             s.accepted_per_round()
         ),
+        // perf-number: format-string label: the baseline row is 1.00x by definition
         None => println!("  {label:<24} {:>6.2} tok/s  (1.00x)  |  {:>2} tokens in {:>4.1}s", r.tok_s, r.ids.len(), r.decode_s),
     }
 }
@@ -404,6 +409,7 @@ fn dflash2_speedup_ladder_on_a_free_form_prompt() {
     // **Swept over `k`, not measured at one value.** A wider window proposes
     // more per round but makes the verify chunk wider AND makes the re-commit
     // a rejecting round pays wider, and on this stack neither of those is
+    // perf-number: measured by this test (command in its module header)
     // free: the chunk tape's own floor row above is already 0.57x, and an
     // 8-row chunk is not an 8-times-cheaper 1-row chunk. Quoting `k = 7`
     // alone would report the model's best acceptance at the machine's worst

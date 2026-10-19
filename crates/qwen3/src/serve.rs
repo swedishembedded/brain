@@ -793,6 +793,7 @@ pub struct Engine {
     /// Per layer, the packed `[bq; bk; bv]` bias added to the fused WQKV
     /// output; empty when the config has no q/k/v bias.
     qkv_bias: Vec<DeviceBuffer>,
+    // perf-number: storage ratio: int8 is 4 per u32 against fp32's 1
     // int8 KV: pools hold packed int8 (4/u32, ~4x smaller) + per-(token,kv-head)
     // dequant scales. Empty when kv_int8 is false (fp32 pools).
     //
@@ -935,9 +936,9 @@ struct SwapBufs {
 }
 
 /// Staging budget for one KV swap chunk. Large enough that a swap is a handful
-/// of PCIe transfers rather than one per block (the measured device->host rate
-/// on this class of card is ~1.2 GB/s, so a 64 MiB chunk is ~50 ms of real
-/// transfer - far past the per-submit overhead it amortises), small enough to
+/// of PCIe transfers rather than one per block (device->host on this class of card
+/// is slow enough that a 64 MiB chunk is real
+/// transfer time - far past the per-submit overhead it amortises), small enough to
 /// be irrelevant next to the pool itself.
 const KV_SWAP_STAGING_BYTES: u64 = 64 << 20;
 
@@ -4527,7 +4528,7 @@ mod tests {
         // 128 words, `block::vocab_tiles_on` would slice THIS test's ~8.4M-row
         // synthetic weight into millions of separate `MATMUL_TILE` dispatches
         // instead of the handful the real (unmodified) budget produces -
-        // measured: minutes of 99% CPU and tens of GB RSS building `Step`s,
+        // measured: minutes of saturated CPU and tens of GB RSS building `Step`s,
         // not a correctness failure, but indistinguishable from a hang.
         let _guard = brain_testutil::env_lock();
         let cfg = QwenConfig::tiny();
@@ -4666,6 +4667,7 @@ mod tests {
         // independent measurement rounds (best-of-3 each) all found
         // split_k=8 faster, consistently, at ratios 1.048-1.094 - a real,
         // direction-stable signal, never once flipping which schedule won,
+        // perf-number: the test's own threshold history, not a result
         // just smaller than an arbitrary 10% bar. Lowered to 1.03 (the floor
         // every one of those rounds cleared with margin) and widened to
         // best-of-5 for a tighter noise floor, rather than accepting a

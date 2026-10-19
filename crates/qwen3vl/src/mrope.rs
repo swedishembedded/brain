@@ -527,6 +527,7 @@ mod tests {
 
     #[test]
     fn video_t_axis_handles_non_uniform_frame_spacing() {
+        // perf-number: fixture timestamps the test feeds in
         // Three real, NON-uniformly-spaced timestamps (0.0, 0.5, 3.0s) -- a
         // constant-fps assumption could only ever produce evenly spaced T
         // deltas, so this proves the T axis follows the REAL per-group

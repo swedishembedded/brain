@@ -318,6 +318,7 @@ pub const DEGENERATE_PROB: f32 = 0.99;
 /// not reseed, retune temperature, or force a different token. The sanctioned
 /// countermeasure is the reference's `repetition_penalty = 1.05`, which the
 /// resolved plan now carries by default. This exists because the reference
+// perf-number: rate the reference reports, quoted not measured here
 /// itself reports that roughly 0.5% of generations can still fail to find EOS
 /// even with correct settings, and when that happens the failure should be
 /// legible from the run's own stderr instead of costing another multi-hour

@@ -1013,7 +1013,9 @@ pub fn flash_prefill_i8_bench(start: u32, cc: u32, reps: usize) {
     // READ THE FUSED COLUMN AS A RATIO, NOT A UTILISATION: this is per-QUERY-
     // ROW traffic, and the fused kernel stages each K/V tile ONCE per (head,
     // BR=64 query-row tile) and reuses it across all 64 rows, so its real DRAM
+    // perf-number: tile arithmetic (BR=64 query rows share one K/V tile), not a result
     // traffic is up to 64x below what this counts. Its percentage therefore
+    // perf-number: definition of the roof percentage the bench prints, not a result
     // reads well ABOVE 100% of the roof - which is the tile reuse being
     // measured, not §E.0's host-timing tell (both arms are `best_of`,
     // `poll_wait()`-bracketed, on the same buffers). The triad has no such

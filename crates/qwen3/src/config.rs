@@ -329,6 +329,7 @@ impl QwenConfig {
     /// any shape-defining key instead of reading it - the gap that let a
     /// config spelling the vocab key `"vocab"` instead of `"vocab_size"` get
     /// silently priced as `vocab=23` with `brain flops`/`brain models
+    // perf-number: quotes the tool's output text for the bug it describes, not a result
     /// profile` reporting "100% covered, exact" for the wrong model. Every
     /// caller that prices or serves a REAL checkpoint (as opposed to
     /// building a synthetic `tiny()`-style config by hand, which has no JSON

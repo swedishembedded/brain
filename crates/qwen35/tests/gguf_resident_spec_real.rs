@@ -63,6 +63,7 @@
 //! * the plain path, same instance, as the baseline.
 //!
 //! Measured on two Tesla P40s, Q8_0 weights served INT8, greedy, one load
+// perf-number: measured by this test (command in its module header)
 //! per test (plain decode 5.7-6.7 tok/s across these prompts). The `before`
 //! column is the same ladder when a verify round still paid a 256-token
 //! prefill round's per-layer device drain, which the qwen35 ledger's M29
@@ -79,15 +80,19 @@
 //! | n-gram, repetition workload      |   9.1  | 10.36 |    1.81x |  5.12          |
 //!
 //! The floor is workload-dependent and the two `none` rows say why: it is
+// perf-number: measured by this test (command in its module header)
 //! 0.92x behind a 6-token prompt and 0.83x behind a 90-token one, because what
 //! remains of the gap is the chunk tape's own attention and GDN kernels doing
 //! more work per row than the decode tape's at the same context depth - not a
 //! fixed per-round cost, which is what this used to be.
 //!
 //! Read that table as the answer to "is a draft MODEL worth porting": the
+// perf-number: measured by this test (command in its module header)
 //! ceiling at a full block is 3.2x, and a drafter now has to average only ~1
 //! accepted token per round to break even rather than ~5, because the floor
+// perf-number: measured by this test (command in its module header)
 //! it starts from is 0.92x instead of 0.55x. The remaining gap between the
+// perf-number: measured by this test (command in its module header)
 //! oracle's 3.2x and the 8x a `k = 7` round would buy on a machine with no
 //! per-round cost at all is the verify round's own shape, not the drafter's:
 //! an 8-row round still reads every weight in the model once, the same as one
@@ -221,6 +226,7 @@ fn report(label: &str, r: &Run, stats: Option<&qwen35::model::SpecDecodeStats>, 
             s.proposed,
             s.accepted_per_round()
         ),
+        // perf-number: format-string label: the baseline row is 1.0x by definition
         None => println!("  {label:<22} {:>6.2} tok/s  (1.0x)  |  {:>2} tokens in {:>4.1}s", r.tok_s, r.ids.len(), r.decode_s),
     }
 }

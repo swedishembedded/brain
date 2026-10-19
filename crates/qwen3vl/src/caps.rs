@@ -252,6 +252,7 @@ pub fn generate_spec() -> ActionSpec {
             .default(json!(DEFAULT_SERVE_MAX_PIXELS)),
         )
         .param(
+            // perf-number: size ratio: int8 is 1 byte against fp32's 4, not a rate
             ParamSpec::new("precision", ParamType::Str, "decoder storage tier: fp32 (default, exact) or int8 (LOSSY, ~4x less weight traffic per token)")
                 .default(json!("fp32")),
         )
@@ -1461,6 +1462,7 @@ mod tests {
 
     /// A video request with no `fps` is refused BY NAME before any checkpoint
     /// is touched - real-timestamp M-RoPE has no meaning without a real
+    // perf-number: a literal default value the test refuses, not a rate
     /// frame rate, so this must never silently default to "1 fps" or "just
     /// count frames" (the exact bug this whole change fixes).
     #[test]

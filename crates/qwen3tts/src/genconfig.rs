@@ -230,6 +230,7 @@ pub struct GenerationPlan {
     ///   `instruct + input + max_frames + 64`.
     ///
     /// Defaulting to 8192 would grow every single run's cache allocation and
+    // perf-number: arithmetic: 8192 over the 256-frame cap, not a measurement
     /// NPU compile by ~32x to accommodate a ceiling a healthy clip never
     /// approaches (the measured repro reaches EOS at 38 frames). The reference
     /// pays nothing for a loose ceiling because its cache grows on demand;

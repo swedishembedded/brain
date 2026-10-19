@@ -470,6 +470,7 @@ pub struct LoraHyper {
     pub weight_decay: f32,
     /// Global gradient-norm clip; 0 disables it.
     pub grad_clip: f32,
+    // perf-number: the warmup default the code computes (5% of the run)
     /// Warmup steps; `None` for 5% of the run (at least one).
     pub warmup: Option<u32>,
     /// The rate the cosine decays to; `None` for a tenth of the peak.

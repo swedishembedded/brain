@@ -90,6 +90,7 @@ fn merger_flops(v: &VisionConfig, n: u64) -> u64 {
     2 * rows * merged * merged + 2 * rows * merged * v.out_hidden_size as u64
 }
 
+// perf-number: size ratio: fp32 weights are 4 bytes each, not a rate
 /// Decoder parameter count (fp32 weights are 4x this), for the per-token
 /// bandwidth floor a batch-1 decode step cannot go under.
 fn decoder_params(cfg: &qwen3::QwenConfig) -> u64 {
@@ -137,6 +138,7 @@ fn report(label: &str, secs: f64, flops: u64, bytes: u64, r: Option<roof::Roofs>
         Some(r) => {
             let bound = r.bound_of(flops, 0, bytes);
             // `utilisation_of` returns a PERCENT, not a fraction - scaling it
+            // perf-number: example of the metering bug this comment describes, not a result
             // again reported 1.6% of roof as 162%, which is the kind of
             // impossible number the meter, not the kernel, is responsible for.
             let pct = r.utilisation_of(flops, 0, bytes, secs).unwrap_or(0.0);
@@ -362,8 +364,10 @@ fn caption_mode(args: &Args) {
     // Prefill does NOT apply the head, and the embedding gather reads ONE row
     // rather than the table - so charging it the tied `[vocab, d_model]` table
     // per token overstated its traffic by about a tenth and reported it at
+    // perf-number: example of the metering bug this comment describes, not a result
     // 100.3% of a roof nothing can exceed. The layers alone are what a prefill
     // step reads, and at this tier's OWN width: pricing int8 weights at four
+    // perf-number: example of the metering bug this comment describes, not a result
     // bytes each reported prefill at 164.5% of roof, which is the meter
     // failing, not the kernel exceeding physics.
     let bpp = layer_bytes_per_param(args.precision);

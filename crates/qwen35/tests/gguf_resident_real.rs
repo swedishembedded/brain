@@ -347,6 +347,7 @@ fn a_real_two_card_load_runs_end_to_end() {
 /// two answer different questions. The plumbing has always worked: the
 /// model plans across two P40s, loads 29 GB of Q8_0 straight into INT8
 /// device weights with no fp32 intermediate, decodes at a measured
+// perf-number: measured by this test file (command in its module header)
 /// 7.44-7.57 tok/s (M22), and is bit-stable across requests. What was wrong
 /// was the OUTPUT: `"The capital city of France is"` used to continue
 /// `"..\n\n\n\n.."` (an earlier, already-fixed `ssm_a` bug - lesson #70),
@@ -574,6 +575,7 @@ fn decode_throughput_at_a_real_long_context() {
     // decoder degenerate into a trivial attention pattern) sized so a full
     // serving-sized context budget isn't needed: prompt + a modest decode
     // window must fit under this test's own CAP.
+    // perf-number: a calendar decade in prose fixture text, not a duration
     let paragraph = "The Antikythera mechanism is an ancient Greek hand-powered orrery, described as the oldest known example of an analogue computer, used to predict astronomical positions and eclipses decades in advance. It could also be used to track the four-year cycle of athletic games which was similar to an Olympiad, the cycle of the ancient Olympic Games. This artefact was retrieved from the sea in 1901, and identified in 1902 as containing a gear, which was found in the same location as a shipwreck off Point Antikythera in Greece. Study of the object was subsequently neglected until Derek J. de Solla Price took an interest in it and, with Charalampos Karakalos, published a seminal paper in 1974. After much modern scholarship since the 1970s, current understanding is that the artefact was made from a single sheet of bronze that was formed and then engraved with astronomical scales and text, and further sheets were later added to hold the mechanism together, making the object more resemble a book than a machine. ";
     let mut prompt = String::new();
     while prompt.split_whitespace().count() < 1050 {
@@ -649,9 +651,13 @@ fn long_factual_prompt() -> String {
 /// `two_shard_chunked_prefill_matches_token_by_token_replay`; this is that
 /// claim on 27B of real weights.
 ///
+// perf-number: hardware count (2x P40), not a rate
 /// Measured on this box (2x Tesla P40, INT8 tier, Q4_K_M source file, 1731
+// perf-number: measured by this test (command in the module header) and `qwen35_gguf_prefill_profile`
 /// prompt tokens): **262.8 s / 6.6 tok/s** with the old one-token-per-pass
+// perf-number: measured by this test (command in the module header) and `qwen35_gguf_prefill_profile`
 /// replay, **26.5 s / 65.4 tok/s** once the prompt is consumed in rounds -
+// perf-number: measured by this test (command in the module header) and `qwen35_gguf_prefill_profile`
 /// 9.9x. See `int8_gguf_resident::MAX_PREFILL_TOKENS` for the round-size
 /// sweep behind that second number.
 #[test]

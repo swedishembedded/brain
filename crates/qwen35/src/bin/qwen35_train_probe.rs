@@ -12,6 +12,7 @@
 //! 3 Gated-DeltaNet layers per GQA layer) with random weights and no
 //! checkpoint, runs `--steps` LoRA steps at `--tokens` tokens and prints the
 //! device memory and wall time. Memory is the process's own GPU footprint as
+// perf-number: the probe's own sampling cadence, not a result
 //! the driver reports it (`nvidia-smi`), sampled every 50 ms from a helper
 //! thread, so the peak is the highest sample; the steady figure is taken
 //! after the build. Everything is on stdout as `PROBE key=value` lines.

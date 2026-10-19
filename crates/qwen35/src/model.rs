@@ -543,6 +543,7 @@ const DECODE_CAP_BUCKET: u32 = 128;
 /// |------|------|------|------|------|------|------|------|------|------|
 /// | pooled/unpooled | 1.68 | 1.66 | 1.44 | 1.36 | 1.10 | 1.10 | 1.04 | 0.96 | 0.92 |
 ///
+// perf-number: measured by `gguf_resident_verify_cost_real::the_verify_round_cost_ladder`
 /// The fence costs 1.4-1.7x at exactly the row counts a speculative verify
 /// round uses (`k + 1`, so 2-8), and the curve crosses over between 64 and 128.
 /// Anywhere in 16..=64 is within measurement noise of the same choice and no
@@ -600,7 +601,9 @@ fn native_rmsnorm_dx_add(_g: &Gpu, _bufs: [&DeviceBuffer; 5], _d: u32, _rows: u3
 /// `rows = 1` of a decode step it runs a 5120-element reduction on ONE thread
 /// of a 3840-core card, with every 32-byte sector fetched serving a single
 /// useful float. Measured on the real two-card Qwen3.8-27B resident it was the
+// perf-number: measured by `qwen35_decode_profile` on the real 27B resident
 /// TOP row of the decode profile at 48% of all device time - more than the
+// perf-number: measured by `qwen35_decode_profile` on the real 27B resident
 /// entire 27 GB int8 weight stream underneath it - at 210 calls and 117 ms per
 /// token. `rmsnorm_rows` walks the row with 64 threads instead.
 ///
@@ -3960,7 +3963,9 @@ impl Qwen35 {
             // submission when it is made this is where the card was kept fed
             // while the host built the next layer (without it the whole step
             // was recorded before the first dispatch ran, and removing the
+            // perf-number: measured by `qwen35_decode_profile` before and after the M-RoPE flush removal
             // M-RoPE uploads that used to flush here cost 1.45x on the whole
+            // perf-number: measured by `qwen35_decode_profile` before and after the M-RoPE flush removal
             // pass: 7.19 -> 4.96 tok/s). On one that holds a pass whole it is
             // a no-op, and the step is issued as one when the pass ends.
             g.flush();
@@ -4346,6 +4351,7 @@ impl Qwen35 {
             //
             // The wait is a real cost, and how real depends entirely on `n`:
             // a 256-row round has enough per-layer device work to hide it
+            // perf-number: measured by `tests/gguf_resident_verify_cost_real.rs`
             // behind, a 1-row one has none and spends 60% of the round
             // blocked. That is why it is now gated on `pooled` (M29) rather
             // than paid by every round - it belongs to the POOL, not to the
@@ -4508,8 +4514,11 @@ impl Qwen35 {
     /// kernel this function used to exclude Q4 for. Measured on the real
     /// 27B, uniform Q4 on one P40, the real 1555-token prompt this crate's
     /// own long-context gate uses: chunked prefill through the now-tiled
+    // perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
     /// kernel is 22.9 s (68.0 tok/s), against 152.1 s (10.2 tok/s) per
+    // perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
     /// token - a ~6.6x win, not a regression, and slightly FASTER than the
+    // perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
     /// INT8 two-card stack's own chunked result (64.6-65.4 tok/s). See
     /// `crate::int8_gguf_resident::MAX_PREFILL_TOKENS`'s own doc for the
     /// full before/after.

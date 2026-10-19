@@ -53,6 +53,7 @@
 //!
 //! Both `[vocab, d_model]` tables are 5_085_593_600 bytes as fp32 at this
 //! shape. On a 24 GB Tesla P40 that is over `max_buffer_size` (~4.09 GiB) AND
+// perf-number: arithmetic: the fp32 table size above over the 2047 MiB binding limit
 //! 2.4x `max_storage_buffer_binding_size` (2047 MiB, which wgpu clamps to
 //! `i32::MAX` on every backend), so an fp32 endpoint is not a thing that can
 //! be allocated OR bound here - it is not a size question. Measured, not
@@ -99,8 +100,11 @@
 //!   run_prefill_chunk_stage` is that widened seam (`run_prefill_chunk`, the
 //!   whole-model M25 primitive `crate::serve::Engine` drives, is now a thin
 //!   wrapper over it), and [`Qwen35GgufInstance::stack_prefill_chunk`] drives
+// perf-number: hardware count, plus measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 //!   it round by round across every card. Measured on 2x Tesla P40 at a real
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 //!   1731-token prompt: 262.8 s (6.6 tok/s) before, 26.5 s (65.4 tok/s)
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 //!   after - 9.9x. What it did NOT need, contrary to that note, was `t`-sized
 //!   per-stage buffers on every card: every buffer a round touches is
 //!   allocated per call from `n`, so the stages stay built at `b = t = 1`.
@@ -111,12 +115,15 @@
 //!   the Q4 tier, and only there": a round was only worth issuing if the
 //!   tier's `m > 1` kernel was a real tiled GEMM, `Q4`'s was not
 //!   (`matmul_q4_dyn.wgsl`, naive by its own header), and on real weights
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 //!   that made a chunked replay 7.3x SLOWER than the per-token one, so
 //!   [`Qwen35GgufInstance::replay_prompt`] picked the tape by tier. Fixed by
 //!   wiring `matmul_q4_dyn_reg` (already proven bit-identical, kernel-
 //!   performance ledger M5.5) into `model::ops::Ops::bind` - `Qwen35::
 //!   chunked_prefill_is_profitable` no longer excludes Q4, and the real
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 //!   1555-token measurement moved from 152.1 s (10.2 tok/s) per-token /
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 //!   1108.3 s (1.4 tok/s) chunked to 22.9 s (68.0 tok/s) chunked, a ~6.6x
 //!   win. See [`MAX_PREFILL_TOKENS`] for the full before/after.
 //! * **Batched PREFILL.** Decode is genuinely multi-sequence as of
@@ -184,15 +191,20 @@ pub const MODEL: &str = "unsloth/Qwen3.8-27B-Q8_0";
 ///
 /// The same 256 `crate::serve::Engine` uses - but RE-MEASURED on this model
 /// rather than inherited, because the first honest attempt at it did not run
+// perf-number: hardware count (2x P40), not a rate
 /// at all. Measured on 2x Tesla P40, real Q4_K_M checkpoint at the INT8 tier,
 /// 1731-token prompt; `prefill_seconds` from the instance's own metrics, peak
 /// card occupancy sampled from `nvidia-smi`:
 ///
 /// | chunk | prefill | tok/s | peak VRAM |
 /// |-------|---------|-------|-----------|
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// | (per token) | 262.8 s | 6.6 | - |
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// | 64 | 36.5 s | 47.4 | 16.2 GiB |
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// | 128 | 26.6 s | 65.0 | 17.8 GiB |
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// | 192 | 26.4 s | 65.4 | 20.3 GiB |
 /// | 256 | OOM | - | (> 24 GiB) |
 ///
@@ -210,7 +222,9 @@ pub const MODEL: &str = "unsloth/Qwen3.8-27B-Q8_0";
 ///
 /// | chunk | prefill | tok/s | peak VRAM |
 /// |-------|---------|-------|-----------|
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// | 256 | 26.5 s | 65.4 | 15.3 GiB |
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// | 512 | 27.6 s | 62.8 | 16.6 GiB |
 ///
 /// 256 is now both the fastest measured round size AND cheaper in memory than
@@ -229,17 +243,24 @@ pub const MODEL: &str = "unsloth/Qwen3.8-27B-Q8_0";
 /// one-thread-per-output kernel its own header describes, and a round
 /// through it cost far MORE than the same tokens through `matmul_q4_gemv`'s
 /// coalesced `m = 1` path - measured on the real checkpoint, uniform Q4 on
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// ONE P40, 1555-token prompt: 152.1 s (10.2 tok/s) per token, 1108.3 s
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// (1.4 tok/s) in rounds of 256, a 7.3x REGRESSION, where the same change on
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// the INT8 two-card stack was a 9.9x win. Same host code, same round size;
 /// the only difference was which GEMM the weight tier bound.
 ///
 /// Fixed by wiring `matmul_q4_dyn_reg` (128x128 register-tiled, already
 /// proven bit-identical to `matmul_q4_dyn`, kernel-performance ledger M5.5:
+// perf-number: recorded in kernel-performance ledger M5.5 (matmul_q4_dyn_reg vs matmul_q4_dyn)
 /// 2.02x at `m = 32` rising to 12.56x at `m = 2048`) into `model::ops::
 /// Ops::bind`. Re-measured on the same real checkpoint, same one P40, the
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// same 1555-token prompt, same round size: **22.9 s (68.0 tok/s)** - a
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// ~6.6x win over the per-token baseline, and slightly FASTER than the
+// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 /// INT8 stack's own chunked result (64.6-65.4 tok/s) despite streaming
 /// fewer bytes per round, not more.
 const MAX_PREFILL_TOKENS: u32 = 256;
@@ -1736,11 +1757,14 @@ impl Qwen35GgufInstance {
     /// gate this path has (`tests/gguf_resident_spec_real.rs`, which holds the
     /// tape fixed and varies only the speculation).
     ///
+    // perf-number: measured by `tests/gguf_resident_verify_cost_real.rs`
     /// That uniformity used to cost ~1.8x: a one-row verify chunk ran at 3.7
     /// tok/s against the one-row decode step's 6.6, so a drafter that never
+    // perf-number: measured by `tests/gguf_resident_verify_cost_real.rs`
     /// fired made this ~0.55x plain decode rather than ~1.0x, and no drafter
     /// however good could reach past the ceiling that implied. The cause was
     /// NOT the round's setup (a re-uploaded M-RoPE table and index buffers, a
+    // perf-number: measured by `tests/gguf_resident_verify_cost_real.rs`
     /// measured 0.1% of the round) but a blocking `poll_wait` at every layer
     /// boundary, which a 256-row prefill round hides behind its own device
     /// work and a 1-row verify round cannot. It is now paid only where the
@@ -2943,6 +2967,7 @@ mod tests {
     /// what it places is what a 24 GB P40 can hold.
     ///
     /// Both `[vocab, d_model]` tables are 5_085_593_600 bytes as fp32 -
+    // perf-number: arithmetic: the fp32 table size above over the 2047 MiB binding limit
     /// simultaneously over that card's `max_buffer_size` (~4.09 GiB) and 2.4x
     /// its 2047 MiB storage-BINDING limit, so "just allocate it" is not an
     /// option this cost model may describe. The embedding is therefore not on

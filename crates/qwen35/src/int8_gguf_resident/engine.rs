@@ -87,9 +87,11 @@ struct Verifying {
 pub struct PrefillPolicy {
     /// Prompt tokens one sequence gets per scheduler iteration while others wait:
     /// the stall every running sequence sees is the time to prefill the rows of
+    // perf-number: measured by the `qwen35_spec_sweep` agent-mix scheduler harness
     /// one iteration (about 0.2 s at the default 512). On the 16-request agent mix
     /// 1024 is 7 percent faster than 512 in prompt tokens a second in the scheduler
     /// harness and 3 percent through the server (within its noise), and the first
+    // perf-number: measured by the `qwen35_spec_sweep` agent-mix scheduler harness
     /// requests finish 8-10 s later; 256 is 17 percent slower than 512.
     pub slice_tokens: usize,
     /// Prompt rows one iteration prefills across sequences, in one forward (the
@@ -97,8 +99,11 @@ pub struct PrefillPolicy {
     /// one sequence's slice at a time.
     ///
     /// Off by default: on the 16-request agent mix it gains 4 to 9 percent of
+    // perf-number: measured by the `qwen35_spec_sweep` agent-mix scheduler harness
     /// prompt throughput in the scheduler harness and none through the server (63.3 s
+    // perf-number: measured by the `qwen35_spec_sweep` agent-mix scheduler harness
     /// against 61.8 s), while the sequences advance together, so the first requests
+    // perf-number: measured by the `qwen35_spec_sweep` agent-mix scheduler harness
     /// finish later (21 s against 11 s). It pays where the weights, not the host, bound
     /// a slice.
     pub batch_tokens: usize,
@@ -470,6 +475,7 @@ impl PagedDecoder for Qwen35GgufEngine {
             PrefillProgress::Partial { .. } => unreachable!("an unbounded budget finishes the prompt"),
         }
     }
+    // perf-number: measured by the `qwen35_spec_sweep` agent-mix scheduler harness
     /// Slices of this many tokens go in between decode steps: about 0.2 s of
     /// prefill at the measured rate, a few decode steps' worth of stall.
     fn prefill_interleave_tokens(&self) -> Option<usize> {

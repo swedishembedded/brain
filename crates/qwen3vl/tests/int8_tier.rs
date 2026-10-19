@@ -22,7 +22,9 @@
 //!
 //! What int8 numerically costs is bounded one level down, by
 //! `qwen3`'s own `int8_kv_decode_tracks_fp32` (relative L2 of the decode
+// perf-number: the numeric bound asserted by qwen3's `int8_kv_decode_tracks_fp32`
 //! hidden state under 10%). That is a generous bound and it is the right one
+// perf-number: the numeric bound asserted by qwen3's `int8_kv_decode_tracks_fp32`
 //! to know before choosing this tier: a 10% perturbation of the hidden state
 //! flips a greedy argmax readily, which is precisely why the captions differ.
 

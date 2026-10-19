@@ -500,6 +500,7 @@ mod tests {
     /// `peak/1000` (`LrSchedule::at`). AdamW's first-step update magnitude is
     /// ~`lr` per parameter (bias-corrected `v_hat` ≈ `grad^2`, so
     /// `m_hat/(sqrt(v_hat)+eps)` ≈ `sign(grad)`), so the warmed-down run's
+    // perf-number: the ratio the test asserts (peak/1000)
     /// adapter movement must come out roughly 1000x smaller. Before the
     /// collapse this held identically regardless of `warmup` - RED.
     #[test]

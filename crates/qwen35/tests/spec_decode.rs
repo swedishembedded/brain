@@ -193,7 +193,9 @@ fn spec_decode_matches_plain_greedy() {
     // The tokens agreeing is necessary but not sufficient - argmax is a step
     // function - so pin the hidden states the speculative path actually
     // emitted from too. Measured on this fixture: 1.2e-7 correct, 1.8e-6 with
+    // perf-number: error-bound margins over this fixture's own residuals, asserted by this test
     // the recurrent restore deleted, so the 1e-5 bound sits 84x above correct
+    // perf-number: error-bound margins over this fixture's own residuals, asserted by this test
     // behaviour and 5.6x below that break. It is a real but SHALLOW gate for
     // the reason the module doc gives (this fixture's recurrent state is near
     // the noise floor); the rollback claim itself is carried by

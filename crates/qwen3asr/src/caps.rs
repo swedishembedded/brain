@@ -246,6 +246,7 @@ mod tests {
     fn the_encoder_is_told_every_frame_of_the_window_is_valid() {
         let window = 16_000 * 4;
         let (mel, valid_frames) = window_features(&vec![0.01f32; 16_000], window);
+        // perf-number: fixture constant: the 10 ms hop (160 samples at 16 kHz) the assertion checks
         assert_eq!(valid_frames as usize, window / 160, "one frame per 10 ms hop over the whole window");
         assert_eq!(mel.len(), 128 * valid_frames as usize, "128 mel bins per frame");
     }
