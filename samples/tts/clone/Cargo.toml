@@ -45,4 +45,7 @@ rodio = { version = "0.22", default-features = false, features = ["playback"] }
 # motion to recon added it to every consumer of the audio surface. Measured
 # via scripts/gates/check-samples.sh against the actual current closure.
 # 70 -> 71: the SDK links brain-seed (the shared draw and parser for an unset seed). The closure had already outgrown the earlier budget before this; that growth is not attributed here.
-max-brain-crates = 71
+# 71 -> 76, attributed by bisecting `cargo tree` from the 70 of 3e5167dd6: brain-camera (472c764a5, ray-evaluated renderer), brain-mvs (85906799a),
+# brain-lpips (430596e1f), brain-nemotronasr (c6c8e49c5, one-shot Nemotron ASR) and brain-seed (24d9aeaf8) were each added to the SDK's closure; brain-llmserve (0bd516395) is the sixth.
+# The earlier raise to 71 covered brain-seed only; the other four were never recorded.
+max-brain-crates = 76

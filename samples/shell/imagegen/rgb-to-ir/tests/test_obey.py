@@ -340,7 +340,7 @@ class Plumbing(unittest.TestCase):
         with open(os.path.join(tmp, "pairs.jsonl"), "w") as fh:
             fh.write("\n".join(json.dumps(r) for r in rows) + "\n")
         out = os.path.join(tmp, "obedience.json")
-        self.assertEqual(O.main([os.path.join(tmp, "pairs.jsonl"), "--out", out, "--resamples", "200"]), 0)
+        self.assertEqual(O.main([os.path.join(tmp, "pairs.jsonl"), "--out", out, "--resamples", "200", "--seed", "3"]), 0)
         with open(out) as fh:
             cli = json.load(fh)
         for p in pairs:

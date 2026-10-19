@@ -21,4 +21,6 @@ brain = { workspace = true, features = ["study"] }
 # Measured at 50: a study monomorphises over three decoder architectures, so
 # it carries more than an inference-only surface does.
 # 52 -> 53: the SDK links brain-seed (the shared draw and parser for an unset seed). The closure had already outgrown the earlier budget before this; that growth is not attributed here.
-max-brain-crates = 53
+# 53 -> 56, attributed by bisecting `cargo tree`: dee1333a3 (survival benchmarks) put brain-horizon and brain-survival in the SDK's
+# closure (+2, the closure was 54 from then; the budget of 53 only had brain-seed's +1 raised) and 0bd516395 (llmserve, the continuous-batching glue every LLM resident uses) added brain-llmserve (+1).
+max-brain-crates = 56

@@ -369,7 +369,7 @@ class ExplicitInstructions(World):
     def test_the_cli_reads_the_texts_from_a_json_file_and_requires_it(self):
         self.write_json("instructions.json", self.texts)
         args = ["generate", "--splits", self.splits, "--config", self.path("synth.json"), "--brain", self.brain,
-                "--out", self.out, "--modes", "explicit-warmer,explicit-cooler", "--retry-sleep", "0"]
+                "--out", self.out, "--modes", "explicit-warmer,explicit-cooler", "--retry-sleep", "0", "--seed", "3"]
         err = io.StringIO()
         with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
             S.main(args)
@@ -445,7 +445,7 @@ class Cli(World):
     def args(self, *extra):
         return ["generate", "--splits", self.splits, "--config", self.path("synth.json"), "--brain", self.brain,
                 "--out", self.out, "--modes", "neutral,prior", "--captions-report", self.path("captions-report.json"),
-                "--retry-sleep", "0", *extra]
+                "--retry-sleep", "0", "--seed", "3", *extra]
 
     def test_generate_runs_every_mode_for_the_split_and_summarises(self):
         self.assertEqual(S.main(self.args()), 0)
@@ -589,7 +589,7 @@ class IngestCli(World):
     def test_sensor_or_no_sensor_must_be_chosen_explicitly(self):
         self.generate()
         base = ["ingest", "--splits", self.splits, "--generated", os.path.join(self.out, "neutral"), "--arm", "c2",
-                "--out", self.path("arms")]
+                "--out", self.path("arms"), "--seed", "3"]
         err = io.StringIO()
         with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
             S.main(base)
@@ -597,7 +597,7 @@ class IngestCli(World):
         self.assertEqual(S.main([*base, "--no-sensor", "--only-existing"]), 0)
         self.assertTrue(os.path.isfile(self.path("arms/c2/manifest.jsonl")))
         self.write_json("sensor-model.json", {"datasets": {"d": MODEL.to_dict()}})
-        self.assertEqual(S.main([*base[:-2], "--out", self.path("arms2"), "--sensor-model", self.path("sensor-model.json")]), 0)
+        self.assertEqual(S.main([*base[:-4], "--out", self.path("arms2"), "--seed", "3", "--sensor-model", self.path("sensor-model.json")]), 0)
         self.assertTrue(os.path.isfile(self.path("arms2/c2/manifest.jsonl")))
 
 
@@ -761,7 +761,7 @@ class GateCli(GateWorld):
         self.splits = self.path("splits.json")
         with open(self.splits, "w") as fh:
             json.dump(self.doc, fh)
-        return ["gate", "--splits", self.splits, "--arm", "c2", "--out", self.path("arms"), *extra]
+        return ["gate", "--splits", self.splits, "--arm", "c2", "--out", self.path("arms"), "--seed", "3", *extra]
 
     def test_the_model_free_gates_run_from_the_command_line(self):
         self.assertEqual(S.main(self.args()), 0)

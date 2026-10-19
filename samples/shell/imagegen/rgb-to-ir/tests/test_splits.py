@@ -178,7 +178,7 @@ class Cli(unittest.TestCase):
         M.write_records(manifest, layout_b(tempfile.mkdtemp()))
         out, leaks = os.path.join(tmp, "splits.json"), os.path.join(tmp, "leaks.json")
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(S.main(["--manifest", manifest, "--out", out, "--leak-audit", leaks, "--workers", "1"]), 0)
+            self.assertEqual(S.main(["--manifest", manifest, "--out", out, "--leak-audit", leaks, "--workers", "1", "--seed", "3"]), 0)
         with open(out) as fh:
             doc = json.load(fh)
         self.assertEqual(doc["summary"]["b"]["splits"]["Test"]["sequences"], 2)
