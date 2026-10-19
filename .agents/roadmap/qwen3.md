@@ -165,6 +165,26 @@ Still to run on a card: `model::kv_tests::inference_flash_forward_matches_the_ma
 `crates/sdk/tests/score_long_record_real.rs` (a multi-thousand-token record on
 Qwen3-0.6B completes).
 
+## Tensor cores by default (serving and LoRA training)
+
+On a device with tensor cores and the vendor library, the engine chooses them on
+queried capability (`GemmPrecision::Auto`, the default of `Engine`, `FitOpts` and
+`ChatFineTune`); `GemmPrecision::Fp32Reference` (`--qwen-gemm-fp32`, SDK
+`gemm_precision`) pins the exact fp32 kernels and bars the native attention too.
+
+- Linears of fp32 weights above the decode regime (more than 32 rows) run as TF32
+  products (`LibraryGemmProvider::forward_tf32`/`dx_tf32`): operands keep their
+  binary32 storage and are rounded to a 10-bit mantissa inside the multiply, fp32
+  accumulation, no copy of the weights. bf16 weights run as bf16 (activation
+  rounded to bf16). The training tapes are recorded at construction, so the tier is
+  chosen by `Qwen::new_shard_gemm`/`new_lora_shard_dt_gemm`, not afterwards.
+- `--qwen-weights-bf16` stores the linears and the head as bf16 (the checkpoint's own
+  values when it ships bf16): half the bytes in memory and per decode step.
+- The paged flash prefill runs on fp16 `mma` at `head_dim` 128 as well as 256, for
+  fp32, bf16 and int8 KV (`flash_prefill_f16_hd128{,_bf16,_kv8}`).
+- Accuracy on the real 8B weights, throughput before/after and the open items
+  (training attention is still the fp32 WGSL flash kernel pair): knowledge #323.
+
 ## Not yet done
 
 - [ ] Faster KV swap-out: the gather side runs at about half the measured

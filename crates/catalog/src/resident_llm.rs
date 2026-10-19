@@ -727,6 +727,12 @@ impl QwenResident {
 
     fn build(path: &str, id: String, base_id: Option<String>, tokenizer: &str, cfg: QwenServeConfig) -> QwenResident {
         let ctx = Self::resolve_ctx(path, &cfg);
+        // A checkpoint that cannot be read yet keeps the operator's explicit choice or fp32; `activate`
+        // reports the real error.
+        let weights_int8_requested = match qwen3::checkpoint_config(path) {
+            Ok(checkpoint) => weights_int8_for(&cfg, &checkpoint),
+            Err(_) => !cfg.weights_bf16 && cfg.weights_int8.unwrap_or(false),
+        };
         QwenResident {
             id,
             path: path.to_string(),
@@ -737,12 +743,7 @@ impl QwenResident {
             kv_int8_requested: cfg.kv_int8,
             kv_calib_opt_in: cfg.kv_calib_opt_in,
             kv_offload_bytes: (cfg.kv_offload_gb.max(0.0) * (1u64 << 30) as f64) as u64,
-            // A checkpoint that cannot be read yet keeps the operator's
-            // explicit choice or fp32; `activate` reports the real error.
-            weights_int8_requested: match qwen3::checkpoint_config(path) {
-                Ok(checkpoint) => weights_int8_for(&cfg, &checkpoint),
-                Err(_) => !cfg.weights_bf16 && cfg.weights_int8.unwrap_or(false),
-            },
+            weights_int8_requested,
             weights_bf16_requested: cfg.weights_bf16,
             max_prefill_cap: cfg.max_prefill_cap.clamp(1, 512),
             gemm_precision: cfg.gemm_precision,

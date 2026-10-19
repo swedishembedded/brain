@@ -77,7 +77,7 @@ fn kernel_ids(g: &Gpu) -> KernelIds {
 }
 
 fn flash_ids(g: &Gpu) -> FlashGqaIds {
-    FlashGqaIds { fwd: idx(g, "flash_attn_causal_gqa"), bwd_dq: idx(g, "flash_attn_causal_gqa_bwd_dq"), bwd_dkv: idx(g, "flash_attn_causal_gqa_bwd_dkv") }
+    FlashGqaIds { fwd: idx(g, "flash_attn_causal_gqa"), bwd_dq: idx(g, "flash_attn_causal_gqa_bwd_dq"), bwd_dkv: idx(g, "flash_attn_causal_gqa_bwd_dkv"), native: false }
 }
 
 fn assert_close(what: &str, got: &[f32], want: &[f32], rel: f32) {
@@ -120,7 +120,7 @@ fn flash_trio_matches_the_materialised_chain_at_every_head_width() {
         let lse = g.storage((b * n_heads * t) as u64);
         let dsum = g.storage((b * n_heads * t) as u64);
         let (dq, dk, dv) = (g.storage((b * t * hq) as u64), g.storage((b * t * hkv) as u64), g.storage((b * t * hkv) as u64));
-        let mut steps = vec![flash_gqa_causal_fwd(&g, flash.fwd, &ga, &q, &k, &v, &ctx_flash, &lse)];
+        let mut steps = vec![flash_gqa_causal_fwd(&g, &flash, &ga, &q, &k, &v, &ctx_flash, &lse)];
         steps.extend(flash_gqa_causal_bwd(&g, &flash, &ga, &q, &k, &v, &ctx, &lse, &d_ctx, &dsum, &dq, &dk, &dv));
         g.submit(&[], &steps);
 

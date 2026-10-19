@@ -1023,7 +1023,7 @@ pub fn gqa_attn_sublayer_fwd(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &
         // the device cannot run.
         Some(flash) if g.caps().workgroup_reductions && g.caps().max_workgroup_size >= 256 => {
             let lse = g.storage((nh * n) as u64);
-            g.submit(&[], &[flash_gqa_causal_fwd(g, flash, &ga, &q, &k, &v, &ctx, &lse)])
+            g.submit(&[], &[flash_gqa_causal_fwd_portable(g, flash, &ga, &q, &k, &v, &ctx, &lse)])
         }
         _ => {
             let scores = g.storage((nh * n * n) as u64);
@@ -1059,8 +1059,34 @@ pub fn gqa_attn_sublayer_fwd(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &
 /// `lse` (`[b, n_heads, t]`) receives each row's log-sum-exp of the scaled
 /// scores - all [`flash_gqa_causal_bwd`] needs to rebuild the softmax.
 #[allow(clippy::too_many_arguments)]
-pub fn flash_gqa_causal_fwd(g: &Gpu, kernel: usize, a: &Gqa, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer, lse: &DeviceBuffer) -> Step {
+pub fn flash_gqa_causal_fwd(g: &Gpu, ids: &FlashGqaIds, a: &Gqa, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer, lse: &DeviceBuffer) -> Step {
+    // fp16 tensor cores where the device has them and the caller did not pin the fp32 tier (same buffers and
+    // uniform as the portable kernel); `native_flash_gqa_fwd` answers `None` on any decline.
+    if ids.native {
+        assert!(a.head_dim <= FLASH_GQA_MAX_HEAD_DIM, "flash attention holds head_dim <= {FLASH_GQA_MAX_HEAD_DIM}, got {}", a.head_dim);
+        if let Some(step) = native_flash_gqa_fwd(g, &[q, k, v, ctx, lse], &a.params()) {
+            return step;
+        }
+    }
+    flash_gqa_causal_fwd_portable(g, ids.fwd, a, q, k, v, ctx, lse)
+}
+
+/// [`flash_gqa_causal_fwd`] on the portable kernel `kernel` only: the exact fp32 forward.
+#[allow(clippy::too_many_arguments)]
+pub fn flash_gqa_causal_fwd_portable(g: &Gpu, kernel: usize, a: &Gqa, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer, lse: &DeviceBuffer) -> Step {
     g.dispatch(kernel, &[q, k, v, ctx, lse], &a.params(), gpu_core::Dispatch::Workgroups(flash_gqa_workgroups(a, a.n_heads)))
+}
+
+/// [`gpu_core::provider::cuda::flash_causal_gqa_fwd_step`] where a native backend exists at all; `None` (the
+/// portable kernel) on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_flash_gqa_fwd(g: &Gpu, bufs: &[&DeviceBuffer; 5], params: &[u32]) -> Option<Step> {
+    gpu_core::provider::cuda::flash_causal_gqa_fwd_step(g, bufs, params)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_flash_gqa_fwd(_g: &Gpu, _bufs: &[&DeviceBuffer; 5], _params: &[u32]) -> Option<Step> {
+    None
 }
 
 /// Largest `head_dim` the flash trio's tiles hold: `CH = 32` channels per lane
@@ -1099,6 +1125,9 @@ pub struct FlashGqaIds {
     pub fwd: usize,
     pub bwd_dq: usize,
     pub bwd_dkv: usize,
+    /// Offer the native fp16 tensor-core kernels (on a device that has them) before these portable ones. `false`
+    /// pins the portable fp32 kernels: what gradient checks and parity gates are stated against.
+    pub native: bool,
 }
 
 impl FlashGqaIds {

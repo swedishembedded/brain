@@ -1230,7 +1230,7 @@ impl Qwen {
         // A device without them (the CPU JIT) runs the materialised chain.
         // A decode-only build has no batched forward to route. The estimator
         // (`footprint::runs_flash`) states this same condition.
-        let flash = (!decode_only && block::FlashGqaIds::supported(&gpu, cfg.head_dim)).then_some(block::FlashGqaIds { fwd: FLASH_GQA_FWD, bwd_dq: FLASH_GQA_BWD_DQ, bwd_dkv: FLASH_GQA_BWD_DKV });
+        let flash = (!decode_only && block::FlashGqaIds::supported(&gpu, cfg.head_dim)).then_some(block::FlashGqaIds { fwd: FLASH_GQA_FWD, bwd_dq: FLASH_GQA_BWD_DQ, bwd_dkv: FLASH_GQA_BWD_DKV, native: !ops.tensor_gemm().is_reference_pinned() });
         let bht2 = attn_score_elems(decode_only || flash.is_some(), b, cfg.n_heads, t);
         let st = |x: u64| gpu.storage(x);
 
@@ -2243,7 +2243,7 @@ impl Qwen {
                 };
                 match (self.flash, self.kmask_on.get()) {
                     _ if fused.is_some() => s.extend(fused),
-                    (Some(fl), false) => s.push(block::flash_gqa_causal_fwd(&self.gpu, fl.fwd, &ga, q_buf, k_buf, &lb.v, &lb.ctx, &self.attn_lse)),
+                    (Some(fl), false) => s.push(block::flash_gqa_causal_fwd(&self.gpu, &fl, &ga, q_buf, k_buf, &lb.v, &lb.ctx, &self.attn_lse)),
                     // The padded-key mask is an encoder path the flash kernel
                     // does not take; a training build serves it on
                     // materialised scratch allocated the first time it is

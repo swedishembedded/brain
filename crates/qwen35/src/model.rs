@@ -1761,7 +1761,7 @@ impl Qwen35 {
         // table is whatever tier `weights` holds (bf16 for a narrow base), or
         // the fp32 store tensor shared as a `Weight`.
         let flash = match (gpu.kernel_index("flash_attn_causal_gqa"), gpu.kernel_index("flash_attn_causal_gqa_bwd_dq"), gpu.kernel_index("flash_attn_causal_gqa_bwd_dkv")) {
-            (Some(fwd), Some(bwd_dq), Some(bwd_dkv)) => Some(model::block::FlashGqaIds { fwd, bwd_dq, bwd_dkv }),
+            (Some(fwd), Some(bwd_dq), Some(bwd_dkv)) => Some(model::block::FlashGqaIds { fwd, bwd_dq, bwd_dkv, native: !ops.tensor_gemm().is_reference_pinned() }),
             _ => None,
         };
         let head_ce = (train && shard.head && !cfg.mtp).then(|| {

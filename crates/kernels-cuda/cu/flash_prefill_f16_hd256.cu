@@ -65,10 +65,22 @@
 //   * online softmax in the exp2 domain; masked scores contribute exactly 0,
 //     and a row with no live key writes 0 (as the portable kernel).
 //
+// Dense mode (BRAIN_DENSE 1, fp32 K and V only): the entry reads
+//   params : [bsz, n_heads, n_kv_heads, T, head_dim, group] u32 (the portable `flash_attn_causal_gqa`'s)
+//   q      : [bsz * T, n_heads * HD]    k, v : [bsz * T, n_kv_heads * HD]    ctx : [bsz * T, n_heads * HD]
+//   lse    : [bsz, n_heads, T]  natural-log log-sum-exp of the scaled scores of each row
+// with row i of a sample attending keys 0..=i, and a block covers 64 query rows of one (sample, head).
+//
 // No `__restrict__`: brain's device buffers alias by design.
 
 #ifndef BRAIN_KV_TIER
 #define BRAIN_KV_TIER 0
+#endif
+// BRAIN_DENSE 1 is the TRAINING forward: the same tiles over dense `[B*T, ...]` buffers
+// (`flash_attn_causal_gqa`'s contract) instead of a paged pool, which also writes the per-row
+// log-sum-exp the backward rebuilds its weights from. See the entry below.
+#ifndef BRAIN_DENSE
+#define BRAIN_DENSE 0
 #endif
 #if BRAIN_KV_TIER == 0
 typedef float KvT;
@@ -137,26 +149,40 @@ __device__ __forceinline__ void brain_mma_f16(float (&d)[4], const unsigned int 
 #define SCALES_V static_cast<const float*>(nullptr)
 #endif
 
-extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16_hd256(const unsigned int* params,
-                                                                                       const float* q,
-                                                                                       const KvT* pool_k,
-                                                                                       const KvT* pool_v,
-                                                                                       const unsigned int* block_tables,
-                                                                                       const unsigned int* seq_lens,
-                                                                                       float* ctx KV_SCALE_PARAMS) {
+#if BRAIN_DENSE
+#define FLASH_ARGS const unsigned int* params, const float* q, const KvT* pool_k, const KvT* pool_v, float* ctx, float* lse
+#else
+#define FLASH_ARGS const unsigned int* params, const float* q, const KvT* pool_k, const KvT* pool_v, const unsigned int* block_tables, const unsigned int* seq_lens, float* ctx KV_SCALE_PARAMS
+#endif
+extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16_hd256(FLASH_ARGS) {
     const unsigned int bsz = params[0];
     const unsigned int n_heads = params[1];
     const unsigned int n_kv_heads = params[2];
+#if BRAIN_DENSE
+    const unsigned int T = params[3];
+    const unsigned int group = params[5];
+    const unsigned int nrows = T;                   // query rows of one sample
+#else
     const unsigned int group = params[4];
     const unsigned int block_size = params[5];
     const unsigned int max_bt = params[6];
+    const unsigned int nrows = bsz;                 // query rows of the chunk
+#endif
 
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
-    const unsigned int ntiles_q = (bsz + BR - 1u) / BR;
+    const unsigned int ntiles_q = (nrows + BR - 1u) / BR;
     if (ntiles_q == 0u) { return; }
     const unsigned int qt = blk % ntiles_q;
+#if BRAIN_DENSE
+    const unsigned int h = (blk / ntiles_q) % n_heads;
+    const unsigned int sample = (blk / ntiles_q) / n_heads;
+    if (sample >= bsz) { return; }  // block-uniform: no barrier is skipped per-thread
+    const unsigned long long base_row = (unsigned long long)sample * T;   // first row of this sample
+#else
     const unsigned int h = blk / ntiles_q;
     if (h >= n_heads) { return; }  // block-uniform: no barrier is skipped per-thread
+    const unsigned long long base_row = 0ull;
+#endif
 
     const unsigned int hkv = h / (group == 0u ? 1u : group);
     const unsigned long long q_row = (unsigned long long)n_heads * HD;
@@ -173,12 +199,18 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
     const unsigned int i0 = qt * BR;
     const unsigned int row_a = i0 + rg * 16u + g;       // fragment rows g and g + 8
     const unsigned int row_b = row_a + 8u;
-    const bool live_a = row_a < bsz, live_b = row_b < bsz;
+    const bool live_a = row_a < nrows, live_b = row_b < nrows;
+#if BRAIN_DENSE
+    const unsigned int len_a = live_a ? row_a + 1u : 0u;      // causal: row i sees keys 0..=i
+    const unsigned int len_b = live_b ? row_b + 1u : 0u;
+    const unsigned int max_t = min(i0 + BR, T);
+#else
     const unsigned int len_a = live_a ? seq_lens[row_a] : 0u;
     const unsigned int len_b = live_b ? seq_lens[row_b] : 0u;
     const unsigned int max_t = seq_lens[min(i0 + BR - 1u, bsz - 1u)];
-    const unsigned int ntiles_k = (max_t + BC - 1u) / BC;
     const unsigned int bt_row = i0;
+#endif
+    const unsigned int ntiles_k = (max_t + BC - 1u) / BC;
 
     __shared__ __align__(16) unsigned short Ks[BC * ROW_HALVES];
     __shared__ __align__(16) unsigned short Vs[BC * ROW_HALVES];
@@ -190,12 +222,12 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
         const unsigned int d = s * 16u + t4 * 2u;
         float2 a0 = make_float2(0.f, 0.f), a1 = a0, a2 = a0, a3 = a0;
         if (live_a) {
-            a0 = *reinterpret_cast<const float2*>(q + row_a * q_row + h * HD + d);
-            a2 = *reinterpret_cast<const float2*>(q + row_a * q_row + h * HD + d + 8u);
+            a0 = *reinterpret_cast<const float2*>(q + (base_row + row_a) * q_row + h * HD + d);
+            a2 = *reinterpret_cast<const float2*>(q + (base_row + row_a) * q_row + h * HD + d + 8u);
         }
         if (live_b) {
-            a1 = *reinterpret_cast<const float2*>(q + row_b * q_row + h * HD + d);
-            a3 = *reinterpret_cast<const float2*>(q + row_b * q_row + h * HD + d + 8u);
+            a1 = *reinterpret_cast<const float2*>(q + (base_row + row_b) * q_row + h * HD + d);
+            a3 = *reinterpret_cast<const float2*>(q + (base_row + row_b) * q_row + h * HD + d + 8u);
         }
         qf[s][0] = brain_pack_f16x2(a0.x, a0.y);
         qf[s][1] = brain_pack_f16x2(a1.x, a1.y);
@@ -222,8 +254,12 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
             const unsigned int j = kt * BC + row0 + ROWS_PER_PASS * c;
             float4 lo = make_float4(0.f, 0.f, 0.f, 0.f), hi = lo;
             if (j < max_t) {
+#if BRAIN_DENSE
+                const unsigned long long row = base_row + j;
+#else
                 const unsigned int physical = block_tables[(unsigned long long)bt_row * max_bt + j / block_size];
                 const unsigned long long row = (unsigned long long)physical * block_size + (j % block_size);
+#endif
                 const KvT* src = pool + row * kv_row + hkv * HD + cc * 8u;
 #if BRAIN_KV_TIER == 0
                 lo = *reinterpret_cast<const float4*>(src);
@@ -368,14 +404,22 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16
     l_b += __shfl_xor_sync(0xffffffffu, l_b, 2);
     const float inv_a = l_a > 0.f ? 1.0f / l_a : 0.f;
     const float inv_b = l_b > 0.f ? 1.0f / l_b : 0.f;
+#if BRAIN_DENSE
+    // The row's log-sum-exp in nats: m and l are in the exp2 domain of the scaled scores. One lane per row.
+    if (hh == 0u && t4 == 0u) {
+        const unsigned long long lse_base = ((unsigned long long)sample * n_heads + h) * T;
+        if (live_a) { lse[lse_base + row_a] = (m_a + log2f(l_a)) / LOG2E; }
+        if (live_b) { lse[lse_base + row_b] = (m_b + log2f(l_b)) / LOG2E; }
+    }
+#endif
 #pragma unroll
     for (int n = 0; n < OTILES; ++n) {
         const unsigned int d = hh * HALF_HD + n * 8u + t4 * 2u;
         if (live_a) {
-            *reinterpret_cast<float2*>(ctx + row_a * q_row + h * HD + d) = make_float2(o[n][0] * inv_a, o[n][1] * inv_a);
+            *reinterpret_cast<float2*>(ctx + (base_row + row_a) * q_row + h * HD + d) = make_float2(o[n][0] * inv_a, o[n][1] * inv_a);
         }
         if (live_b) {
-            *reinterpret_cast<float2*>(ctx + row_b * q_row + h * HD + d) = make_float2(o[n][2] * inv_b, o[n][3] * inv_b);
+            *reinterpret_cast<float2*>(ctx + (base_row + row_b) * q_row + h * HD + d) = make_float2(o[n][2] * inv_b, o[n][3] * inv_b);
         }
     }
 }

@@ -183,7 +183,7 @@ pub fn gqa_mixer_fwd_tc(
         Some(fids) => {
             assert!(FlashGqaIds::supported(g, hd), "flash attention requested on a device that cannot run it at head_dim {hd}");
             let lse = g.storage(shape.b as u64 * nh as u64 * shape.t as u64);
-            g.submit(&[], &[flash_gqa_causal_fwd(g, fids.fwd, &ga, &prep.q_normed, &prep.k_normed, v, &ctx, &lse)]);
+            g.submit(&[], &[flash_gqa_causal_fwd(g, &fids, &ga, &prep.q_normed, &prep.k_normed, v, &ctx, &lse)]);
             AttnSaved::Flash { lse, ids: fids }
         }
         None => {

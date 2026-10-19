@@ -411,6 +411,46 @@ pub const ALL: &[CudaKernel] = &[
         ),
     },
     CudaKernel {
+        name: "flash_attn_fwd_f16_hd128",
+        // Asked for by name by `gpu_core::provider::cuda::flash_causal_gqa_fwd_step`.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_attn_fwd_f16_hd128",
+        what: "causal GQA flash attention forward over dense [B*T] buffers at head_dim 128 on fp16 tensor cores (fp32 accumulators), writing the row log-sum-exp the backward rebuilds its weights from",
+        reported: "native:flash_attn_fwd_f16_hd128",
+        block_dim: 256,
+        // 64 query rows per block of one (sample, head).
+        tile: (64, 1),
+        shared_bytes: 2 * 32 * (128 + 8) * 2,
+        src: concat!(
+            "#define BRAIN_DENSE 1\n#define BRAIN_HD 128\n#define brain_flash_prefill_f16_hd256 brain_flash_attn_fwd_f16_hd128\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_attn_fwd_f16_hd256",
+        // Asked for by name by `gpu_core::provider::cuda::flash_causal_gqa_fwd_step`.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_attn_fwd_f16_hd256",
+        what: "causal GQA flash attention forward over dense [B*T] buffers at head_dim 256 on fp16 tensor cores (fp32 accumulators), writing the row log-sum-exp the backward rebuilds its weights from",
+        reported: "native:flash_attn_fwd_f16_hd256",
+        block_dim: 256,
+        // 64 query rows per block of one (sample, head).
+        tile: (64, 1),
+        shared_bytes: 2 * 32 * (256 + 8) * 2,
+        src: concat!(
+            "#define BRAIN_DENSE 1\n#define BRAIN_HD 256\n#define brain_flash_prefill_f16_hd256 brain_flash_attn_fwd_f16_hd256\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu")
+        ),
+    },
+    CudaKernel {
         name: "gdn_chunk_loop_f32",
         op: Op::GatedDeltaChunkLoop,
         weight: Dtype::F32,

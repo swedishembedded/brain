@@ -991,6 +991,35 @@ pub fn paged_flash_prefill_kv8_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&ba
     gpu.step_native_sliced(id, bufs, &[(0, 0); 8], params, blocks)
 }
 
+/// `flash_attn_causal_gqa`'s own `@binding` order: uniform, queries, keys, values, context, log-sum-exp.
+const FLASH_GQA_FWD_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
+/// The native tensor-core forward of causal grouped-query flash attention over dense `[B*T]` buffers (the
+/// training forward), or `None` when the caller should dispatch the portable `flash_attn_causal_gqa`.
+///
+/// Same buffers (`q`, `k`, `v`, `ctx`, `lse`) and uniform (`[b, n_heads, n_kv_heads, t, head_dim, group]`) as
+/// the portable kernel; the launch geometry is its own (64 query rows per block of one (sample, head)).
+/// `None` means: the head width is not 128 or 256, `cuda` is named in `BRAIN_NO_PROVIDER`, the device's compute
+/// capability is below the kernel's floor, or the backend declined the kernel.
+pub fn flash_causal_gqa_fwd_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], params: &[u32]) -> Option<crate::Step> {
+    let &[b, n_heads, _, t, head_dim, _] = params else { return None };
+    if !matches!(head_dim, 128 | 256) || !tensor_core_kernels_enabled(gpu) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get(if head_dim == 128 { "flash_attn_fwd_f16_hd128" } else { "flash_attn_fwd_f16_hd256" }).filter(|k| k.min_cc <= cc)?;
+    let id = gpu.native_kernel(kernel, FLASH_GQA_FWD_BINDINGS)?;
+    let blocks = u32::try_from(u64::from(b) * u64::from(n_heads) * u64::from(t.div_ceil(64))).ok()?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 5], params, blocks)
+}
+
 impl OperatorProvider for CudaProvider {
     fn name(&self) -> &'static str {
         "cuda"
