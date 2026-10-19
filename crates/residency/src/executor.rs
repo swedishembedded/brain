@@ -1554,6 +1554,12 @@ impl crate::model::JobFeed for GroupFeed {
         if let Some(reply) = self.replies.get_mut(index).and_then(Option::take) {
             reply(result);
         }
+        // The sink may own the sender of a streaming response, which ends only
+        // when every sender is gone: holding it until the group ends would hold
+        // every finished stream open until the longest request finishes.
+        if let Some(sink) = self.sinks.lock().unwrap_or_else(|e| e.into_inner()).get_mut(index) {
+            *sink = Box::new(|_| {});
+        }
         self.inbox.lock().room += 1;
     }
 
@@ -1896,6 +1902,86 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(exec.stats().batches, 1, "one group served both jobs");
+    }
+
+    /// A streaming caller's response ends when its channel closes, and the
+    /// channel's sender is the job's progress sink: a job that finished while
+    /// the group kept running must let go of its sink at once, or every
+    /// stream in the group ends only when the longest request does.
+    #[test]
+    fn a_finished_job_releases_its_progress_sink_while_the_group_runs_on() {
+        use crate::model::JobFeed;
+        struct Lockstep;
+        struct LockstepInst;
+        impl ResidentModel for Lockstep {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("lockstep", "continuous", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("lockstep", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(GB, 0)
+            }
+            fn batch_limit(&self) -> Option<usize> {
+                Some(8)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(LockstepInst))
+            }
+        }
+        impl Instance for LockstepInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                Ok(Outcome::new())
+            }
+            fn run_open(&mut self, _a: &str, invs: &[Invocation], _p: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+                // Job 0 needs 30 steps of 20 ms, every later job 3.
+                let mut active: Vec<(usize, u32)> = (0..invs.len()).map(|i| (i, if i == 0 { 30 } else { 3 })).collect();
+                let mut next = invs.len();
+                loop {
+                    for _ in feed.take(8usize.saturating_sub(active.len())) {
+                        active.push((next, 3));
+                        next += 1;
+                    }
+                    if active.is_empty() {
+                        if feed.close() {
+                            return true;
+                        }
+                        continue;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                    for a in active.iter_mut() {
+                        a.1 -= 1;
+                    }
+                    let (done, rest): (Vec<_>, Vec<_>) = active.into_iter().partition(|a| a.1 == 0);
+                    active = rest;
+                    for (i, _) in done {
+                        feed.finish(i, Ok(Outcome::new()));
+                    }
+                }
+            }
+        }
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Lockstep)];
+        let exec = Executor::start(models, budgets, Policy::default());
+        let (long_done_tx, long_done_rx) = channel();
+        exec.submit(Job::new("lockstep", "run", Invocation::new()).reply(move |_| {
+            let _ = long_done_tx.send(());
+        }));
+        std::thread::sleep(Duration::from_millis(60));
+        // The short job's stream: the receiver sees the channel close when the
+        // sink (holding the only sender) is dropped.
+        let (sink_tx, sink_rx) = channel::<()>();
+        exec.submit(Job::new("lockstep", "run", Invocation::new()).on_progress(move |_| {
+            let _ = &sink_tx;
+        }));
+        assert!(
+            matches!(sink_rx.recv_timeout(Duration::from_millis(400)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)),
+            "the short job's sink was still alive after it finished (the long job runs ~600 ms)"
+        );
+        assert!(long_done_rx.try_recv().is_err(), "the long job is still running when the short stream closed");
+        long_done_rx.recv_timeout(Duration::from_secs(10)).expect("the long job finishes");
     }
 
     /// A job that can never run is answered while the group is full: the group sees the jobs
