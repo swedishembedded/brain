@@ -41,7 +41,11 @@ impl World {
     /// Train a model named `name` on `data`.
     fn train(&self, name: &str, data: &str, seed: u64) {
         let mut run = TrainRun::new(self.file(data), self.file("base").to_str().unwrap(), self.dir(name));
-        run.steps = 600;
+        // A head on a frozen random encoder converges slowly and at a rate that
+        // depends on the seed: at 600 steps seed 3 fit the task and seed 4 had
+        // not (loss 0.75, lift 0.13), so the second promotion below failed its
+        // gate. 1500 steps fit the task from either seed.
+        run.steps = 1500;
         run.batch = 8;
         run.seed = seed;
         train(&run, &mut |_, _| {}).unwrap();
