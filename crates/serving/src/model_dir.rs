@@ -111,6 +111,10 @@ pub struct Discovered {
     /// `Executor::register_multi` (a plain `register` would budget only one of
     /// the cards they occupy). Every entry places on at least one budgeted card.
     pub multi: Vec<Arc<dyn MultiDeviceResidentModel>>,
+    /// The Qwen3 bases among `residents`, as concrete handles: adapters may be
+    /// offered on them, and an env-selected resident serving the same
+    /// checkpoint is merged into them (see `build_executor`).
+    pub qwen: Vec<Arc<QwenResident>>,
     /// The released Qwen3.8 GGUFs among `multi`, as concrete handles: adapters
     /// are offered on them ([`catalog::adapter_registry::AdapterHost`]).
     pub qwen35: Vec<Arc<Qwen35GgufServed>>,
@@ -168,7 +172,8 @@ pub fn discover(dir: &Path, settings: &ScanSettings) -> Discovered {
         scan.register_adapter(local);
     }
     let qwen35 = scan.qwen35_bases.values().cloned().collect();
-    Discovered { residents: scan.out, multi: scan.multi, qwen35, errors }
+    let qwen = scan.qwen_bases.values().cloned().collect();
+    Discovered { residents: scan.out, multi: scan.multi, qwen, qwen35, errors }
 }
 
 /// Whether `local` is a released Qwen3.8 GGUF: served from the file itself by
@@ -253,7 +258,8 @@ impl Scan {
     /// The serving config for the Qwen3 base `id`: the operator's, plus a
     /// bank when the store holds adapters for it.
     fn qwen_cfg_for(&self, id: &str) -> catalog::resident_llm::QwenServeConfig {
-        catalog::resident_llm::QwenServeConfig { adapter_bank: self.banks.get(id).cloned().or_else(|| self.settings.qwen.adapter_bank.clone()), ..self.settings.qwen.clone() }
+        let card_budget_bytes = self.settings.qwen.card_budget_bytes.or_else(|| self.settings.gpus.iter().map(|&(_, total)| total.saturating_sub(self.settings.reserved)).max());
+        catalog::resident_llm::QwenServeConfig { adapter_bank: self.banks.get(id).cloned().or_else(|| self.settings.qwen.adapter_bank.clone()), card_budget_bytes, ..self.settings.qwen.clone() }
     }
 
     /// Serve the adapter `local` as a model of its own over the Qwen3 base it

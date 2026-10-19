@@ -175,9 +175,11 @@ pub fn weights_int8_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
 /// formula there; that formula no longer exists (`build_serving_executor`'s
 /// iGPU fallback now budgets the fallback GPU at the FULL `host_ram_available()`,
 /// no fixed cap or halving), so this ceiling is NOT device-budget-aware -
-/// it refuses the same 8 GiB regardless of how much VRAM the target card
-/// actually has, which is real headroom to revisit if this ever blocks a
-/// large-VRAM discrete card rather than the small-RAM box it was sized for.
+/// it is the FLOOR of the ceiling: a server that knows its card budget
+/// ([`QwenServeConfig::card_budget_bytes`]) allows an fp32 pool up to that
+/// budget (the placer's own memory check still decides whether it fits next
+/// to the weights), so a 96 GB card is not held to a limit sized for a
+/// small-RAM box.
 /// Only ever checked against the FP32 pool: at the historical 24576
 /// default context, int8 is comfortably under this on its own
 /// (`kv_pool_bytes_at_the_new_ctx_default_fits_the_igpu_budget`); fp32 is not.
@@ -474,6 +476,11 @@ pub struct QwenServeConfig {
     /// rather than guessing - auto-sizing is a property of the live
     /// serving path, not of this struct's mere existence.
     pub auto_budget_bytes: Option<u64>,
+    /// The usable bytes of the largest card this server may place the model on
+    /// (total minus `--reserve-gb`), when known. Unlike `auto_budget_bytes` it
+    /// never sizes `ctx`: it only bounds the default KV pool
+    /// ([`QwenResident::resolve_kv_tokens`]).
+    pub card_budget_bytes: Option<u64>,
     /// `--qwen-max-batch N`, default 16.
     pub max_batch: u32,
     /// `--qwen-kv-fp32` (presence opts OUT), default `true` (int8 KV is the
@@ -525,7 +532,7 @@ pub struct QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false }
+        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false }
     }
 }
 
@@ -681,6 +688,7 @@ pub struct QwenResident {
     weights_bf16_requested: bool,
     max_prefill_cap: u32,
     kv_tokens: Option<u32>,
+    card_budget_bytes: Option<u64>,
     gemm_precision: gpu_core::provider::library::GemmPrecision,
     fuse_residual_norm: bool,
 }
@@ -782,6 +790,7 @@ impl QwenResident {
             weights_bf16_requested: cfg.weights_bf16,
             max_prefill_cap: cfg.max_prefill_cap.clamp(1, 512),
             kv_tokens,
+            card_budget_bytes: cfg.card_budget_bytes.or(cfg.auto_budget_bytes),
             gemm_precision: cfg.gemm_precision,
             fuse_residual_norm: cfg.fuse_residual_norm,
         }
@@ -799,7 +808,7 @@ impl QwenResident {
         if cfg.kv_tokens.is_some() {
             return cfg.kv_tokens;
         }
-        let budget = cfg.auto_budget_bytes?;
+        let budget = cfg.card_budget_bytes.or(cfg.auto_budget_bytes)?;
         let checkpoint_cfg = qwen3::checkpoint_config(path).ok()?;
         let max_batch = cfg.max_batch.max(1);
         let fleet = (u64::from(ctx) * u64::from(max_batch) / 2).min(u64::from(DEFAULT_POOL_FLEET_TOKENS)) as u32;
@@ -874,6 +883,12 @@ impl QwenResident {
     /// The base checkpoint adapters are bound to, for
     /// `crate::adapter_release` to verify an adapter against before it is
     /// offered.
+    /// The checkpoint this resident serves: two residents with the same path
+    /// are one set of weights and must be one instance.
+    pub fn weights_path(&self) -> &str {
+        &self.path
+    }
+
     pub fn served_base(&self) -> ServedBase {
         self.adapters.base().clone()
     }
@@ -967,18 +982,18 @@ impl QwenResident {
     /// which buffer or why). A free function of its inputs (no I/O, no env
     /// read) so a test can drive it directly at whatever `num_blocks` trips
     /// the ceiling, without needing a real multi-GiB allocation to prove it.
-    fn check_fp32_kv_pool_fits(cfg: &qwen3::config::QwenConfig, block_size: u32, num_blocks: u32, ctx: u32, path: &str) -> Result<(), String> {
+    fn check_fp32_kv_pool_fits(cfg: &qwen3::config::QwenConfig, block_size: u32, num_blocks: u32, ctx: u32, ceiling: u64, path: &str) -> Result<(), String> {
         let pool_bytes = PoolProfile::new(cfg, block_size, num_blocks, 1, 1, block_size, false, qwen3::serve::FusedAttention::default()).kv_bytes;
-        if pool_bytes <= MAX_FP32_KV_POOL_BYTES {
+        if pool_bytes <= ceiling {
             return Ok(());
         }
         let int8_bytes = qwen3::serve::kv_pool_bytes(cfg, block_size, num_blocks, true);
         Err(format!(
             "qwen: {path}: fp32 KV pool at ctx={ctx} would be {:.2} GiB, over the {:.0} GiB safety ceiling \
-             (MAX_FP32_KV_POOL_BYTES) -- lower --qwen-ctx, or drop --qwen-kv-fp32 \
+             -- lower --qwen-ctx, or drop --qwen-kv-fp32 \
              so int8 KV (~{:.2} GiB at this ctx) is used instead",
             pool_bytes as f64 / (1u64 << 30) as f64,
-            MAX_FP32_KV_POOL_BYTES as f64 / (1u64 << 30) as f64,
+            ceiling as f64 / (1u64 << 30) as f64,
             int8_bytes as f64 / (1u64 << 30) as f64,
         ))
     }
@@ -1196,7 +1211,7 @@ impl ResidentModel for QwenResident {
             // opt-out (--qwen-kv-fp32) or an unsupported head_dim -- the
             // int8 default at the SAME ctx does not come close.
             if !kv_int8 {
-                QwenResident::check_fp32_kv_pool_fits(&checkpoint_cfg, block_size, num_blocks, ctx, &self.path)?;
+                QwenResident::check_fp32_kv_pool_fits(&checkpoint_cfg, block_size, num_blocks, ctx, self.card_budget_bytes.unwrap_or(0).max(MAX_FP32_KV_POOL_BYTES), &self.path)?;
             }
             // Runs on BOTH branches (unlike the fp32-only guard above): a
             // per-buffer overflow is a different failure mode than the
@@ -1548,6 +1563,21 @@ mod tests {
         assert_eq!(cfg.rope_scaling, Some(declared), "an already-declared rope_scaling must survive untouched");
     }
 
+    /// The fp32 KV ceiling is a floor, not a limit: a server that knows its
+    /// card budget accepts an fp32 pool up to it (a 96 GB card must not be held
+    /// to the 8 GiB a small-RAM box needs), while the unknown-budget ceiling
+    /// still refuses the same pool.
+    #[test]
+    fn a_known_card_budget_raises_the_fp32_kv_ceiling() {
+        let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
+        let (block_size, num_blocks) = (16u32, 3_000u32);
+        let bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, false);
+        assert!(bytes > MAX_FP32_KV_POOL_BYTES / 2 && bytes < 80 << 30);
+        let tight = QwenResident::check_fp32_kv_pool_fits(&cfg, block_size, num_blocks * 8, 1, MAX_FP32_KV_POOL_BYTES, "x");
+        assert!(tight.is_err(), "the default ceiling refuses a pool over 8 GiB");
+        assert!(QwenResident::check_fp32_kv_pool_fits(&cfg, block_size, num_blocks * 8, 1, 90 << 30, "x").is_ok(), "a 90 GiB card budget accepts it");
+    }
+
     /// `--qwen-kv-tokens` sizes the KV pool in tokens independently of the
     /// per-sequence context, so many long agent histories can stay cached at
     /// once; unnamed it holds `max_batch` half-context histories (at least two
@@ -1570,7 +1600,7 @@ mod tests {
     fn a_live_server_sizes_the_pool_for_a_fleet_of_histories_when_it_fits() {
         let path = write_tiny_checkpoint(5, "fleet");
         let path = path.to_str().unwrap();
-        let live = |budget: Option<u64>, kv_tokens: Option<u32>| QwenServeConfig { ctx: Some(4096), max_batch: 16, auto_budget_bytes: budget, kv_tokens, ..QwenServeConfig::default() };
+        let live = |budget: Option<u64>, kv_tokens: Option<u32>| QwenServeConfig { ctx: Some(4096), max_batch: 16, card_budget_bytes: budget, kv_tokens, ..QwenServeConfig::default() };
         let resolve = |cfg: &QwenServeConfig| QwenResident::resolve_kv_tokens(path, cfg, 4096);
         assert_eq!(resolve(&live(Some(u64::MAX / 4), None)), Some(4096 * 16 / 2), "16 slots x half a context");
         assert_eq!(resolve(&live(None, None)), None, "no card budget: the two-context pool");
@@ -1691,11 +1721,11 @@ mod tests {
     fn fp32_kv_pool_guard_refuses_over_ceiling_and_passes_under_it() {
         let cfg = qwen3::config::QwenConfig::tiny(); // head_dim=8, n_kv_heads=2, hkv=16
         // Small, ordinary sizing: comfortably under the ceiling.
-        assert!(QwenResident::check_fp32_kv_pool_fits(&cfg, 16, 64, 2048, "test.safetensors").is_ok());
+        assert!(QwenResident::check_fp32_kv_pool_fits(&cfg, 16, 64, 2048, MAX_FP32_KV_POOL_BYTES, "test.safetensors").is_ok());
         // num_blocks chosen so this TINY config's fp32 pool (256 bytes/slot)
         // alone exceeds MAX_FP32_KV_POOL_BYTES (8 GiB) -- num_blocks=3,000,000
         // -> slots=48,000,000 -> ~11.4 GiB, comfortably over.
-        let err = QwenResident::check_fp32_kv_pool_fits(&cfg, 16, 3_000_000, 100_000_000, "test.safetensors")
+        let err = QwenResident::check_fp32_kv_pool_fits(&cfg, 16, 3_000_000, 100_000_000, MAX_FP32_KV_POOL_BYTES, "test.safetensors")
             .expect_err("an 11+ GiB fp32 pool must be refused, not attempted");
         assert!(err.contains("test.safetensors"), "error must name the checkpoint: {err}");
         assert!(err.contains("100000000"), "error must name the requested ctx: {err}");
@@ -1880,7 +1910,7 @@ mod tests {
         // Driving it directly here re-derives the exact refusal `activate()`
         // would hit under `--qwen-kv-fp32` at this ctx.
         assert!(fp32_bytes > MAX_FP32_KV_POOL_BYTES, "fp32 KV pool at ctx=24576 must exceed the ceiling -- this is WHY the default is safe only under int8");
-        let err = QwenResident::check_fp32_kv_pool_fits(&cfg, block_size, num_blocks, ctx, "qwen3-0.6b")
+        let err = QwenResident::check_fp32_kv_pool_fits(&cfg, block_size, num_blocks, ctx, MAX_FP32_KV_POOL_BYTES, "qwen3-0.6b")
             .expect_err("the fp32 opt-out at the new ctx default must be refused, not attempted");
         assert!(err.contains("qwen3-0.6b") && err.contains("24576"), "refusal must name the checkpoint and the requested ctx: {err}");
     }

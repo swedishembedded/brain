@@ -60,6 +60,14 @@ fn register_qwen(models: &mut Vec<Arc<dyn ResidentModel>>, qwen: Option<QwenResi
     Some(q)
 }
 
+/// Whether two weight paths name the same file.
+fn same_checkpoint(a: &str, b: &str) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// The per-model serving knobs, parsed from flags. The CLI parses, this
 /// crate never reads the environment for them.
 #[derive(Default)]
@@ -172,8 +180,8 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // was ALSO given explicitly: `QwenResident::resolve_ctx` checks the
     // explicit value first, so filling this in unconditionally is harmless
     // when it is, and is what makes auto-sizing real when it is not.
-    let qwen_cfg = catalog::resident_llm::QwenServeConfig { auto_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(), ..qwen_cfg };
-    let qwen = register_qwen(&mut models, QwenResident::from_env(qwen_cfg.clone()));
+    let qwen_cfg = catalog::resident_llm::QwenServeConfig { auto_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(), card_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(), ..qwen_cfg };
+    let mut qwen = register_qwen(&mut models, QwenResident::from_env(qwen_cfg.clone()));
     // Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder
     // (BRAIN_QWEN35MOE_WEIGHTS + BRAIN_QWEN35MOE_TOKENIZER) -- single-GPU,
     // fp32 weights + KV only (see resident_qwen35moe.rs's own module doc for
@@ -355,6 +363,19 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
         let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), gpus: gpus.clone(), reserved };
         let discovered = crate::model_dir::discover(dir, &settings);
+        // The env-selected resident and a model-dir entry may be the same
+        // checkpoint. Two residents would be two instances: two copies of the
+        // weights, and base and adapter requests that never share a batch.
+        // The model-dir resident keeps the checkpoint; the env id becomes an
+        // alias of it, and the adapter flags attach to it.
+        if let Some(env) = qwen.clone() {
+            if let Some(shared) = discovered.qwen.iter().find(|d| same_checkpoint(d.weights_path(), env.weights_path())) {
+                let env_id = env.manifest().model;
+                models.retain(|m| m.manifest().model != env_id);
+                models.push(Arc::new(residency::Alias::new(env_id, shared.clone())));
+                qwen = Some(shared.clone());
+            }
+        }
         for r in discovered.residents {
             let id = r.manifest().model;
             if existing.contains(&id) {

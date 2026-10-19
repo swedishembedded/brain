@@ -1161,7 +1161,11 @@ const INBOX_LOOKAHEAD: usize = 32;
 
 fn refill_open_groups(queue: &mut Vec<Pending>, open_groups: &HashMap<InstanceKey, OpenGroup>, running_jobs: &mut Vec<RunningJob>, stats: &Arc<Mutex<Stats>>) {
     for (key, group) in open_groups {
-        if !queue.iter().any(|p| &p.key == key && p.action == group.action) || queue.iter().any(|p| &p.key != key) {
+        if !queue.iter().any(|p| &p.key == key && p.action == group.action) {
+            continue;
+        }
+        if let Some(other) = queue.iter().find(|p| &p.key != key) {
+            crate::log::debug(&format!("group {key} takes no late job: {} ({}) of instance {} is waiting", other.model, other.action, other.key));
             continue;
         }
         let mut state = group.inbox.lock();
@@ -1171,6 +1175,7 @@ fn refill_open_groups(queue: &mut Vec<Pending>, open_groups: &HashMap<InstanceKe
         // do for jobs still in the dispatcher's queue.
         let space = (state.room + INBOX_LOOKAHEAD).saturating_sub(state.jobs.len());
         if !state.open || space == 0 {
+            crate::log::debug(&format!("group {key} takes no late job: inbox open={} space={space}", state.open));
             continue;
         }
         let mut idxs: Vec<usize> = queue.iter().enumerate().filter(|(_, p)| &p.key == key && p.action == group.action).map(|(i, _)| i).collect();

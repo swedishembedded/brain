@@ -48,7 +48,7 @@ pub use adapter::AdapterIdentity;
 pub use devpool::DevicePool;
 pub use executor::{Executor, InFlightJob, Job};
 pub use manager::{DeviceBudget, InstancePlacement, ResidencyManager, ResidencyReport};
-pub use model::{Instance, JobFeed, ResidentModel};
+pub use model::{Alias, Instance, JobFeed, ResidentModel};
 pub use multi::{MultiDeviceCost, MultiDeviceResidentModel};
 pub use runplan::{Eviction, PlanError, Placement, RunPlan};
 pub use scheduler::Policy;

@@ -85,6 +85,50 @@ pub trait ResidentModel: Send + Sync {
     }
 }
 
+/// A model served under a second id by the SAME resident: every request for
+/// `id` runs on the inner model's instance (one set of weights, one batch),
+/// exactly as if it had named the inner model. Use it where two ids must mean
+/// one engine instead of loading a second copy of the checkpoint.
+pub struct Alias<M: ResidentModel + ?Sized> {
+    id: String,
+    inner: std::sync::Arc<M>,
+}
+
+impl<M: ResidentModel + ?Sized> Alias<M> {
+    pub fn new(id: impl Into<String>, inner: std::sync::Arc<M>) -> Alias<M> {
+        Alias { id: id.into(), inner }
+    }
+}
+
+impl<M: ResidentModel + ?Sized> ResidentModel for Alias<M> {
+    fn manifest(&self) -> Manifest {
+        let mut manifest = self.inner.manifest();
+        manifest.model = self.id.clone();
+        manifest
+    }
+    fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
+        self.inner.instance_key(action, inv)
+    }
+    fn estimate(&self, key: &InstanceKey) -> MemCost {
+        self.inner.estimate(key)
+    }
+    fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
+        self.inner.estimate_at(key, tier)
+    }
+    fn batch_limit(&self) -> Option<usize> {
+        self.inner.batch_limit()
+    }
+    fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        self.inner.activate(key, device)
+    }
+    fn stamp(&self, inv: &mut Invocation) {
+        self.inner.stamp(inv)
+    }
+    fn adapter_identity(&self) -> Option<AdapterIdentity> {
+        self.inner.adapter_identity()
+    }
+}
+
 /// The live end of a running job group: how an [`Instance::run_open`] call
 /// learns of jobs that arrived AFTER the group started, and hands each job's
 /// result back the moment it is done instead of when the whole group is.
@@ -311,5 +355,37 @@ mod tests {
         assert_eq!(live.load(Ordering::SeqCst), 0);
         assert!(inst.demote(Tier::Cold).is_ok());
         assert_eq!(live.load(Ordering::SeqCst), 0, "demoting an already-non-resident instance must not underflow");
+    }
+    struct One;
+    impl ResidentModel for One {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("one", "a model", Vec::new())
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("one", "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(1, 0)
+        }
+        fn batch_limit(&self) -> Option<usize> {
+            Some(8)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+            Err("not built in this test".into())
+        }
+    }
+
+    /// A second id for the same resident must be listed under its own name yet
+    /// run on the inner model's instance, or every id would load its own copy
+    /// of the weights and never share a batch.
+    #[test]
+    fn an_alias_is_listed_under_its_own_id_and_shares_the_inner_instance() {
+        let inner = Arc::new(One);
+        let alias = Alias::new("other", inner.clone());
+        assert_eq!(alias.manifest().model, "other");
+        assert_eq!(inner.manifest().model, "one");
+        let inv = Invocation::new();
+        assert_eq!(alias.instance_key("generate", &inv), inner.instance_key("generate", &inv));
+        assert_eq!(alias.batch_limit(), Some(8));
     }
 }
