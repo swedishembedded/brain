@@ -157,6 +157,7 @@ fn dit_weight_bytes(cfg: &Flux1Config, precision: Precision) -> u64 {
     // img + txt halves: qkv, proj, 2-layer MLP, and each stream's own
     // `Modulation(dim, double=true)` (shift/scale/gate for BOTH the attn and
     // mlp sub-layers = a [6d, d] linear) - omitting this term is what made an
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     // earlier version of this function undercount by 32% against the
     // measured ~11.9 B params (see `dit_weight_bytes_matches_measured_footprint`).
     let double_block = 2 * (lin(3 * d, d) + lin(d, d) + lin(mlp, d) + lin(d, mlp) + lin(6 * d, d));

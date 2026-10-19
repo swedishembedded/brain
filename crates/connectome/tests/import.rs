@@ -219,6 +219,7 @@ fn real_datasets_reproduce_their_published_statistics() {
     // The size count is a FACT ABOUT THE EXPORT, asserted exactly and in both
     // directions. The Codex copy of BANC publishes neither a volume nor a
     // surface area; MANC publishes a volume for every neuron; the Dataverse
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // copy of BANC publishes one for 81% of them. Asserting only the positive
     // case would let a parser regression turn MANC into BANC unnoticed, and
     // asserting nothing about the empty one would let a future export quietly

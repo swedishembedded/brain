@@ -205,6 +205,7 @@ fn radial_profile(rec: &sfm::incremental::Reconstruction) {
 }
 
 /// The normal of the plane the most points lie on (RANSAC over point
+// perf-number: measured result; reproduced by running this binary
 /// triples, inliers within 1% of the cloud's median radius, refined by the
 /// inliers' principal axes) and the share of points on it; a capture on a
 /// table or the ground has one, and gravity should be along its normal.

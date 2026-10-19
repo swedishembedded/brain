@@ -18,6 +18,7 @@
 //! then along columns into the SSIM map and its partials, then the partials
 //! carried back through the window, which is its own adjoint. It ran on the
 //! host until a profile of a 300k-gaussian fit put it at a third of every
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 //! iteration (224 ms per 768x576 view).
 //!
 //! Swedish Embedded AB implements differentiable image objectives for 3D

@@ -624,7 +624,9 @@ fn the_frames_per_pass_come_from_the_model() {
 /// gradient is orthogonal to its own viewing ray - so a prior that arrives in
 /// the wrong units is worse than none: it would anchor the fit confidently to
 /// the wrong place. Measured against analytic ground truth, supervising the
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// right depth took a scene slid 5.7% along every ray back to 0.08%, while an
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// RGB-only fit left it at 6.21%.
 #[test]
 fn a_depth_prior_arrives_in_world_units() {

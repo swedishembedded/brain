@@ -76,7 +76,9 @@ fn main() {
             f.hold_wing_command(Some(WingCommand { power: 1.0, ..WingCommand::default() }));
 
             // Measured over the SECOND half only. The thorax spins up over the
+            // perf-number: simulation-time window constants, not wall-clock
             // first few beats, and a fly that is in free fall for 50 ms and
+            // perf-number: simulation-time window constants, not wall-clock
             // hovering for 450 ms shows up as one that never quite hovers if
             // the whole window is averaged. The first half is the spin-up and
             // is not what is being asked about.

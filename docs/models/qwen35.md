@@ -119,7 +119,7 @@ What it does differently:
   the `gdn_verify_pool` kernel takes after every row but the last
   (`gdn_commit_pool` puts the chosen one back). The drafter is the checkpoint's
   own multi-token-prediction head (`int8_gguf_resident/mtp.rs`: one
-  full-attention layer, `eh_proj`, the shared head; about 2 ms per proposal) or
+  full-attention layer, `eh_proj`, the shared head; about 2 ms per proposal) or <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
   prompt lookup. The window adapts per sequence from the proposals recently
   accepted, and a step with more sequences than the measured crossover
   (`--speculative` off the fast path) is the plain batched step. Greedy output
@@ -147,7 +147,7 @@ What it does differently:
   97 GiB GH200 admits 4 / 8 / 15 sequences of 128k at f32 / bf16 / int8. Decode
   attention at head_dim 256 is the fused split-key kernel
   (`paged_flash_decode_gqa_hd256`, a GQA group of 6 or 8) in every tier - one
-  layer at 128k is 0.83 / 0.54 / 0.42 ms for one sequence against 63 ms for the
+  layer at 128k is 0.83 / 0.54 / 0.42 ms for one sequence against 63 ms for the <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
   scores/softmax/apply triad it replaced (`.agents/roadmap/qwen35.md` M30). The
   recurrent state of the 48 GDN layers (150 MiB per sequence) is not part of the
   cache and stays f32. Default stays `f32`. Gates: per-kernel rounding bounds in

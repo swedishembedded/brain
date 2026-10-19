@@ -95,7 +95,9 @@ fn a_fit_that_can_add_gaussians_beats_one_that_cannot() {
     // A margin is demanded rather than any improvement being accepted: a
     // round disturbs the fit (3DGS's clones double the opacity at their
     // site until they separate), and density control has to earn that back
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // before it pays at all. The margin is 5%, measured at 6.0% under
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // per-group log-space step sizes; it was 8.7% when one learning rate was
     // a fixed distance for every group, because the fit that CANNOT add
     // gaussians was much weaker then. A stronger baseline leaves density
@@ -158,7 +160,9 @@ fn density_control_leaves_an_adequate_scene_alone() {
 /// exploited that: a needle aligned with a training view's ray lowers that
 /// view's loss and is invisible in it, while from any other angle it is a
 /// streak across the frame. Measured on a real 23-view reconstruction, the
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// model's own output was 0.1% needles (worst axis ratio 54:1) and the same
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// scene after 400 iterations of fitting was 40.7% needles at up to 3000:1 -
 /// entirely manufactured by the fit, and entirely invisible to a metric that
 /// only renders the views it was fitted to.
@@ -434,6 +438,7 @@ fn inflatable_scene(g: &Gpu, ks: Kernels) -> (Splats, Vec<TargetView>) {
 /// converging.
 ///
 /// What was actually observed going wrong is GROWTH: a 400 iteration fit
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// inflated the longest axis of a real reconstruction 7.5x, which is what
 /// turns a scene into fog seen from anywhere it was not fitted. A bound
 /// relative to each gaussian's own starting size is scene-adaptive by

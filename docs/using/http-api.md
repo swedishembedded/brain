@@ -42,7 +42,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   `message_delta → message_stop`; OpenAI/OpenRouter emit `chat.completion.chunk`s
   (`text_completion` objects on `/completions`) ending in `data: [DONE]`. Client disconnect
   cancels the running job (frees the lane). Every SSE stream emits a comment keepalive
-  (`: keepalive`) roughly every 15 s while the model is silent - a long local prefill can
+  (`: keepalive`) roughly every 15 s while the model is silent - a long local prefill can <!-- perf-number: keepalive interval constant of the server -->
   be minutes without a real event, and idle-watchdog clients need bytes to stay attached.
 - **Reasoning.** A reasoning model's thinking is kept apart from its answer:
   `message.reasoning_content` (and `delta.reasoning_content` when streaming) on the

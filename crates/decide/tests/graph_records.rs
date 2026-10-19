@@ -13,8 +13,10 @@
 //! shape it already has - and re-records the reverse for a pass that, with a
 //! frozen encoder, is never going to run.
 //!
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 //! Measured on a DOOM policy with a frozen encoder, that was 78 ms of the
 //! 78-plus-game milliseconds a decision cost inside a training process,
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 //! against 20 ms for the same weights in a process that had not trained.
 //! Nothing about the numbers the model produces changes; what changes is
 //! whether an hour of probing is an hour of arithmetic.

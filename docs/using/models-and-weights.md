@@ -95,7 +95,7 @@ per-model cost.
 ```
 qwen3  Qwen3 dense decoder  (6 repos, 1 local)
 ├─ Qwen/Qwen3-0.6B  0.60B params  local
-│  ├─ qwen3 Qwen/Qwen3-0.6B          base    local  1.9 GiB  gpu0 fits  exact 1.2 GFLOP (100% covered)
+│  ├─ qwen3 Qwen/Qwen3-0.6B          base    local  1.9 GiB  gpu0 fits  exact <flops> GFLOP (<coverage> covered)
 │  └─ qwen3 Qwen/Qwen3-0.6B-Q8_0     Q8_0    not pulled
 └─ Qwen/Qwen3-8B  8.20B params  not pulled
    ├─ qwen3 Qwen/Qwen3-8B-Q4_K_M     Q4_K_M  not pulled

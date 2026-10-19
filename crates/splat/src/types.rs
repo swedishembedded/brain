@@ -256,6 +256,7 @@ pub struct RenderOpts {
     /// The crossover sits near half a pixel because that is where the
     /// compensation stops being a correction and starts being most of the
     /// opacity. A feed-forward pass emits one gaussian per source pixel and
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// lands at a median projected size of 0.46 px with 60% below half a
     /// pixel, so it sits on the losing side: on a real capture, fitted and
     /// scored against held-out photographs, the Mip filter gives 21.98 dB

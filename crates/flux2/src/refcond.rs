@@ -343,6 +343,7 @@ impl JointLayout {
     }
 }
 
+// perf-number: architecture constant (VAE downsample factor)
 /// A VAE latent **mean** at an `lh8×lw8` 8x-downsampled grid to packed DiT
 /// tokens `[(lh8/2)·(lw8/2), cin]`, row-major - the token order
 /// [`JointLayout::ids`] assigns position ids in.

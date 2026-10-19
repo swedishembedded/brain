@@ -7,6 +7,7 @@
 //! gradient is orthogonal to its own viewing ray, so a scene placed at the
 //! wrong DISTANCE - but scaled to subtend the same angle - renders the
 //! identical image and has an exactly zero RGB gradient. An analytic
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 //! ground-truth harness measured that as a systematic 5.7% depth error on a
 //! thin object, which is the number the headline test below reproduces
 //! deliberately.

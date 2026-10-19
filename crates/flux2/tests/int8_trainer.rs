@@ -35,10 +35,12 @@ const RANK: usize = 8;
 /// The tolerance the int8 base is held to, per adapter gradient tensor.
 ///
 /// A per-row int8 activation is accurate to half a quantisation step, about
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// 0.4% of the row's largest magnitude, and a block's gradient flows through
 /// a chain of such linears. Measured on this fixture (both layouts): worst
 /// cosine 0.99994, worst rel_l2 1.1e-2 - the same order as the weight term a
 /// real klein double block measured (`tests/int8_base_grads.rs`). The bounds
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// leave about 2.7x on the rel_l2, and sit two orders of magnitude below
 /// what a wrong scale group, a dropped stream or a mis-sliced row range
 /// produces (cosine near zero, rel_l2 near one).

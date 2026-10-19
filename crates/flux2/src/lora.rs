@@ -538,6 +538,7 @@ pub fn fold_adapters(
 /// requantizing rounds the overwhelming majority of adapted weights straight
 /// back to their base code: the correction is discarded for most of the model,
 /// and arrives distorted for the rest (`tests/lora_requant_int8.rs` measures
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 /// 94.8% unchanged and cosine 0.44 on the delivered remainder at a delta 0.5%
 /// of the weight magnitude). The surviving residue is a token-constant bias in
 /// every adapted matmul, which is what a VAE decoder's upsampling stages turn

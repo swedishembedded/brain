@@ -167,9 +167,9 @@ card by default: on two Tesla P40s the served build places the tower on one
 and the DeepSeek-V2 MoE decoder on the other.
 <!-- perf-number: the comparison this default rests on, measured on one host -->
 One real page (283-token prompt, 512 generated tokens) takes **62.4 s** that
-way against **91.8 s** with the decoder on the 48-thread CPU Cranelift JIT -
-**1.47x**, with byte-identical decoded markdown, and the 283-row prefill is
-**3.2 s against 5.6 s**.
+way against **91.8 s** with the decoder on the 48-thread CPU Cranelift JIT - <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
+**1.47x**, with byte-identical decoded markdown, and the 283-row prefill is <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
+**3.2 s against 5.6 s**. <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 
 Both figures above predate two changes that cut the page substantially: the
 CLIP tower was dispatching a naive GEMM (see `crates/clip`), and the decode
@@ -194,7 +194,7 @@ router picked, which is 1 083 456 of those 1 945 491 dispatches.
 
 <!-- perf-number: the CPU side of that comparison is not this repo's default build -->
 That CPU figure is the FAST one: it needs `crates/backend-cpu`'s rayon/GEMV
-scheduling fix, without which the same page takes 539 s. Comparing the card
+scheduling fix, without which the same page takes 539 s. Comparing the card <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 against an unfixed CPU would have overstated the win about six-fold, which is
 why the number quoted here is the fixed one.
 

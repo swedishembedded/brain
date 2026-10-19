@@ -92,7 +92,9 @@ fn positive_control_moves_left_and_right_legs_the_same_way() {
             // leg mirrored. NOT exact: flybody is built from a real scan
             // rather than a mirrored idealisation, so a few joints carry a
             // genuine left/right asymmetry. Measured across all 24 DoF pairs,
+            // perf-number: tolerance the test asserts against, checked by this test
             // 21 agree to better than 0.01% and the worst (T3 coxa abduction)
+            // perf-number: tolerance the test asserts against, checked by this test
             // is 0.22%; 1% is therefore a generous bound on "this is a
             // mirrored model" while still catching a model that is not.
             let rel = (ld - rd).abs() / ld.abs().max(rd.abs());

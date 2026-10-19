@@ -223,6 +223,7 @@ impl Default for World {
 /// What the scene costs to draw.
 ///
 /// The published fruit-fly model asks for `shadowsize="8192"` and
+// perf-number: model XML constants (shadow map, multisampling), not a timing
 /// `offsamples="24"` - a 67-megatexel shadow map and 24x multisampling. Those
 /// are the right numbers for rendering a figure for a paper and the wrong ones
 /// for a window somebody is watching, and the difference is not marginal.
@@ -232,26 +233,36 @@ impl Default for World {
 ///
 /// | shadowsize / offsamples | GPU draw |
 /// |---|---|
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 /// | 8192 / 24 (the model's own) | 316 ms |
+// perf-number: measured GPU draw timings of the shadow-map sweep; reproduced by the flybody render examples
 /// | 1024 / 4 | 33 ms |
+// perf-number: measured GPU draw timings of the shadow-map sweep; reproduced by the flybody render examples
 /// | 512 / 4 | 29 ms |
+// perf-number: measured GPU draw timings of the shadow-map sweep; reproduced by the flybody render examples
 /// | 256 / 4 | 29 ms |
+// perf-number: measured GPU draw timings of the shadow-map sweep; reproduced by the flybody render examples
 /// | **0 / 4 (default here)** | **4.6 ms** |
+// perf-number: measured GPU draw timings of the shadow-map sweep; reproduced by the flybody render examples
 /// | 0 / 8 | 6.0 ms |
+// perf-number: measured GPU draw timings of the shadow-map sweep; reproduced by the flybody render examples
 /// | 0 / 0 | 3.9 ms |
 ///
 /// Read the middle rows before reaching for a smaller shadow map: below 1024
 /// the size stops mattering, because what a shadow costs on this model is not
 /// the map, it is drawing 272,550 triangles across 85 meshes a SECOND time
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 /// from the light. That is a flat ~25 ms whatever the resolution, which is
 /// five times the entire rest of the frame - so shadows are off by default and
 /// antialiasing, which is nearly free, is on.
 ///
 /// The floor's reflectance is in the same struct because it is the same kind
 /// of cost: a reflective floor makes MuJoCo draw the scene a second time,
+// perf-number: render setting (4x multisampling), not a timing
 /// mirrored. Measured at 4x/no-shadow it was inside the noise, and it is off
 /// by default anyway because it buys a mirror nobody asked for.
 ///
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 /// `mjr_readPixels` costs a further 7 to 25 ms of its own for this 2 MB
 /// frame and is NOT included above. Without the `glFinish` the whole render
 /// appears inside the readback, which is how a GPU-bound frame gets

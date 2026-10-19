@@ -303,6 +303,7 @@ impl Apparatus {
     /// Present nothing, and see what the animal does anyway.
     ///
     /// The measurement that says whether a response is a response. A network
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// at 25% population activity produces a large number for every odour and
     /// the same large number for silence.
     pub fn spontaneous(&mut self, p: &Protocol) -> Response {

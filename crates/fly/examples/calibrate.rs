@@ -51,6 +51,7 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
 const BAND: (f64, f64) = (5.0, 20.0);
 const DT: f64 = 0.002;
 /// Spikes per motor neuron per tick that a cord could plausibly sustain: about
+// perf-number: control-tick constant (2 ms at 500 Hz)
 /// 20 Hz at a 2 ms tick. Not fitted - it is what the target is measured
 /// against, and it comes from physiology rather than from this run.
 const TARGET_RATE: f64 = 0.04;

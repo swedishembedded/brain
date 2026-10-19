@@ -16,6 +16,7 @@
 //! when the scale is divided, which is part of why the scale is logarithmic),
 //! and starts fresh only the samples density control placed from nothing.
 //! The global Adam timestep runs across density rounds. The fit this replaced
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 //! reset every moment at every round, which measured ~3.5% worse final loss
 //! from the lost momentum alone - paid exactly when refinement should
 //! accelerate.

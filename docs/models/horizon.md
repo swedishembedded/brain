@@ -79,7 +79,7 @@ checkup" means sending the history again with one more record.
   attained age for a person) or an ISO-8601 / RFC 3339 date
   (`YYYY-MM-DD`, midnight UTC) or datetime (`YYYY-MM-DDTHH:MM:SS[.f]` with `Z`
   or `+HH:MM`, normalised to UTC; leap seconds refused). A date needs `birth`
-  and becomes `(instant - birth) / 31 557 600 s` (the Julian year of 365.25
+  and becomes `(instant - birth) / 31 557 600 s` (the Julian year of 365.25 <!-- perf-number: Julian year constant in seconds -->
   days): exact integer nanoseconds, one floating-point division, the same on
   every machine. A date before `birth` is an error. horizon does not depend on
   a date library.

@@ -358,7 +358,9 @@ pub struct AssembleOpts {
     /// The model does not orient its gaussians to anything: measured on a real
     /// capture, the angle between a gaussian's shortest axis and the surface
     /// normal implied by its own depth map is indistinguishable from random
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// (median |cos| 0.416 against 0.5 for random, 5.0% within 20 degrees
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// against 6% by chance), and they are near-isotropic anyway (b/c median
     /// 1.38). So each one is a little ball sitting at the right depth rather
     /// than a piece of surface.
@@ -374,7 +376,9 @@ pub struct AssembleOpts {
     ///
     /// The model knows where it is guessing. Measured against multi-view
     /// agreement on a real capture, its least-confident quartile disagrees
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// with the other views twice as much as its most-confident one (0.99% vs
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// 0.53%, rank correlation -0.39). The merge weight carries no such signal
     /// (-0.03), so confidence is the only per-pixel quality estimate available.
     /// The threshold is global across frames, not per frame: a whole view can
@@ -740,7 +744,9 @@ pub fn assemble_from(
                 // as a weighted mean when it merges), and the difference is
                 // not cosmetic: measured on a six-photograph reconstruction
                 // rendered from the camera the model recovered for it, channel
+                // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
                 // 7 gives 12.5 dB carrying 7% of the photograph's detail, and
+                // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
                 // channel 11 gives 22.5 dB carrying 47%. Channel 7 renders as
                 // a milky smear.
                 let op = sigmoid(gsp[11 * hw + i]);
@@ -772,6 +778,7 @@ pub fn assemble_from(
                 // integer pixel indices against `cx = w/2`, which is half a
                 // pixel off from its own grid centre. Measured on a real
                 // capture, the choice is a wash - median cross-view depth
+                // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
                 // disagreement 0.6823% with the half pixel and 0.6854%
                 // without - so this keeps the convention that is right for
                 // the rasterizer that consumes it rather than chasing a

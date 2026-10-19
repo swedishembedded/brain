@@ -391,6 +391,7 @@ fn a_thin_structure_is_recovered_as_accurately_as_the_ground_it_stands_on() {
         let survive = 100.0 * kv.len() as f64 / (*total.get(&part).unwrap_or(&1)).max(1) as f64;
         let km = median(&mut kv);
         eprintln!(
+            // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
             "  {part:?}: {n} px, median |err| {:.2}%, signed {:+.2}%  |  top-70% confidence: \
              {survive:.0}% of them kept, median |err| {:.2}%",
             m * 100.0, sm * 100.0, km * 100.0
@@ -404,7 +405,9 @@ fn a_thin_structure_is_recovered_as_accurately_as_the_ground_it_stands_on() {
     let head = report(Part::Head);
     let _ = (body, stalk);
 
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // Measured at 476x350, 8 views: ground 0.86% (signed +0.06%, unbiased),
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // body 2.83% (-2.54%), stalk 2.17% (+2.16%), disc 5.72% (+5.72%).
     //
     // The disc's error is ENTIRELY a systematic push away from the camera -

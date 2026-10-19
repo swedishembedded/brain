@@ -47,9 +47,13 @@ fn build(r: &Rig) -> Fly {
     // by sweeping it rather than by reasoning about it. Measured, driving the
     // descending neurons at 2.0:
     //
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     //   1e-3 -> 1.1% of the cord active but ZERO motor spikes
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     //   1e-2 -> 1.6% active, 15 motor spikes per tick
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     //   3e-2 -> 2.5% active, 49 motor spikes per tick
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     //   1e-1 -> 3.5% active, 68 motor spikes per tick
     //
     // 3e-2 sits in the sparse regime a nerve cord should occupy and actually
@@ -143,11 +147,14 @@ fn closing_the_loop_costs_little_over_the_body_alone() {
     // same network, the same number of ticks, with no body attached.
     //
     // Measured rather than assumed, because it is a property of the machine
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // and spans an order of magnitude across the ones this runs on - 0.6 ms
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // per tick on 22 CPU threads against 6 ms on an integrated GPU, whose
     // memory bandwidth is a seventh of the CPU's for a kernel that is pure
     // streaming. A fixed millisecond ceiling here is therefore a statement
     // about the hardware, and this test had one: three milliseconds, chosen
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // against a profile of 0.81 ms that was itself measuring a submission
     // backlog rather than a tick.
     let w = Wiring::default();

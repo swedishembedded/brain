@@ -67,6 +67,7 @@ fn opts(steps: u32, lr: f32) -> TrainOpts {
 
 /// **The shipped default holds the peak rate and then cools down over the last
 /// fifth**, the constant-then-cooldown shape (arXiv:2405.18392), measured as tracking a
+// perf-number: training schedule fraction, not a timing
 /// full cosine with the benefit saturating around 20%.
 ///
 /// Two properties, both load-bearing:

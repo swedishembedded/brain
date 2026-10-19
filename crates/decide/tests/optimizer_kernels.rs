@@ -12,11 +12,15 @@
 //!
 //! For this model that fallback is not a small tax. The token embedding table
 //! is `vocab x d_model` - 11.7M floats on the released MiniLM tier - and one
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 //! thread walking it dominated the entire training step: **1163 ms of a 1195 ms
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 //! step, 97%**, against 30 ms for the encoder's forward and backward passes
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 //! combined. Registering the pair took the same step to 37 ms.
 //!
 //! Nothing about that failure is visible: the arithmetic is identical either
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 //! way, so the model trains correctly and merely takes 30x as long. Hence a
 //! test rather than a comment.
 

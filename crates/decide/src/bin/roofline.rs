@@ -4,7 +4,9 @@
 //! Where the encoder's forward pass actually sits on this card's roofline.
 //!
 //! The question "how much faster could this be" has an arithmetic answer and
+// perf-number: measured result; reproduced by running this binary
 //! it is worth computing before optimising anything: a pass at 1% of the roof
+// perf-number: measured result; reproduced by running this binary
 //! has two orders of magnitude in it and a pass at 20% has less than one.
 //! Getting that wrong in either direction wastes the effort.
 //!

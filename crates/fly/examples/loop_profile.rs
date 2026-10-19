@@ -18,6 +18,7 @@ use std::time::Instant;
 fn main() {
     // `CNS=brain` profiles the joined brain-and-cord network instead of the
     // cord alone: it is eight times the neurons and three times the edges, and
+    // perf-number: control-tick budget constant (2 ms at 500 Hz)
     // whether it fits a 2 ms control tick is the question that decides whether
     // the animal can have a brain at all.
     let which = match std::env::var("CNS").unwrap_or_default().as_str() {
@@ -114,6 +115,7 @@ fn main() {
     println!("  the same, plasticity on : {:8.3} ms", plastic * 1e3);
     println!();
     let tick = step_read + write_only;
+    // perf-number: control-tick budget constant printed next to the live measurement
     println!("one neural tick costs {:.2} ms against a 2.00 ms budget at 500 Hz", tick * 1e3);
     println!("-> {:.3}x real time from the cord alone", 0.002 / tick);
 

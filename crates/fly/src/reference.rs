@@ -85,6 +85,7 @@ impl Reference {
         Ok(Reference { timestep, nq, nv, lengths, offsets, data, moving })
     }
 
+    // perf-number: dataset frame period constant (published dataset), not a timing result
     /// Seconds per frame. Measured 2.000 ms on the published dataset, which is
     /// exactly the 500 Hz control period flybody's own walking tasks use - so
     /// one reference frame is one control tick and nothing is resampled.

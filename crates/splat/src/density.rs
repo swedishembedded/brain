@@ -412,8 +412,10 @@ pub fn round(
             // 1-(1-o)^0.6. Compositing is not additive, so matching moments
             // does not preserve the image; these constants are the least-
             // squares fit of two composited children to the parent's alpha
+            // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
             // profile along the axis, which they reproduce to 0.07-0.7%
             // relative error for opacities 0.3-0.95 (offsets of 0.75σ cannot
+            // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
             // do better than 3-5%). Further apart is not better: the fit
             // separates children the image asks to be separated.
             let k = (0..3).max_by(|&a, &b| s[a].total_cmp(&s[b])).unwrap();

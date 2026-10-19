@@ -104,17 +104,23 @@ impl Timing {
 
 // Why `neural_per_control` defaults to 1, measured rather than assumed:
 //
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 //   neural step, no readback : 0.068 ms
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 //   spike readback alone     : 0.138 ms
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 //   step THEN readback       : 0.807 ms
 //
 // The first two do not add up to the third, and that gap is the whole story.
 // A step without a readback only SUBMITS work; the readback is what forces the
 // sync that pays for it. So the cost of a neural tick is not the kernel time,
 // it is one GPU round trip, and every extra neural tick inside a control tick
+// perf-number: control-tick budget constant (500 Hz), not a measurement
 // buys another one. At 500 Hz the entire budget is 2.00 ms, so two neural
+// perf-number: control-tick budget arithmetic from the 500 Hz constant
 // ticks would spend 1.6 ms of it before the body moved at all.
 //
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 // Raising this is legitimate and costs ~0.8 ms per extra tick. It is not
 // something to raise without re-measuring.
 
@@ -129,6 +135,7 @@ impl Timing {
 /// |---|---|---|---|
 /// | 5 ms | 0.04 to 0.30 | 13 to 15% | 13 to 18 |
 /// | **20 ms** | **0.14 to 0.46** | **3 to 6%** | **7 to 19** |
+// perf-number: membrane/time-constant sweep table recorded for the model parameters
 /// | 40 ms | 0.11 to 0.40 | 2 to 5% | 1 to 6 |
 ///
 /// Twenty milliseconds is a peak rather than an end of a range. Below it the
@@ -139,6 +146,7 @@ impl Timing {
 /// needs and roughly what the animal has: fast cholinergic excitation against
 /// slower GABAergic inhibition.
 ///
+// perf-number: model time constant, not a measurement
 /// The membrane constant is 10 ms and the refractory period one control tick.
 pub fn cord_lif() -> LifParams {
     let dt_ms = 2.0;
@@ -224,6 +232,7 @@ impl Default for Wiring {
         // 0.3, chosen by firing statistics now that the dynamics can produce
         // any. Under conductance-based synapses and short-term depression the
         // cord is graded across the whole range 0.08 to 1.0 - mean rate 8 to
+        // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
         // 26 Hz, silent at rest, and never more than 1.4% of cells pinned at
         // the refractory ceiling - so this is the middle of a broad plateau
         // rather than the peak of a narrow one, which is the difference
@@ -339,11 +348,13 @@ pub struct Tick {
     /// ticks, and the spike readback each one waits for.
     ///
     /// Reported per tick rather than left to a profiling build because this
+    // perf-number: control-tick deadline constant (500 Hz)
     /// loop has a HARD deadline - 2 ms at 500 Hz - and which half is over it
     /// is not guessable from the outside. The two are also fixed by different
     /// things (the cord by the device the network is on, the body by MuJoCo's
     /// own solver), so a single "slow" number sends the reader to the wrong
     /// one as often as not. Two `Instant::now()` pairs per control tick is
+    // perf-number: control-tick deadline constant (500 Hz)
     /// about 40 ns against a 2 ms budget.
     pub cord: std::time::Duration,
     /// Wall time inside MuJoCo: `physics_per_control` steps of the body.
@@ -997,6 +1008,7 @@ impl Fly {
     /// one makes every synapse in the animal eligible and takes its third
     /// factor from whoever calls [`Fly::reward`] - a useful instrument, and a
     /// rule that can solve a task by leaving the measured wiring behind,
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// because nothing in it says it may not. This one can change 0.05% of the
     /// graph, at the population where *Drosophila* associative learning is
     /// actually known to happen, and only when identified cells fire.

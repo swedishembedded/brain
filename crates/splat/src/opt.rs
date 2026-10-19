@@ -114,6 +114,7 @@ pub struct FitCfg {
     /// schedule). The whole fit then moves a gaussian about
     /// `0.215 * iters * lr_position` of that unit at most (Adam's normalized
     /// step can exceed its rate while a gradient's scale settles, measured at
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// about 10% over), which is how a caller whose
     /// geometry is already metric says "settle onto the surface, do not leave
     /// it": `lr_position = 4.65 / iters` is one radius over the fit.
@@ -161,6 +162,7 @@ pub struct FitCfg {
     /// scene legitimately has gaussians many pixels across, while a
     /// feed-forward reconstruction emits SUB-pixel ones (median 0.6 px), and
     /// what was measured going wrong there is GROWTH - over 400 iterations a
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// fit inflated a real reconstruction's longest axis 7.5x, which is what
     /// turns a scene into fog from anywhere it was not fitted. A bound
     /// relative to where each gaussian started says "refine what the
@@ -335,7 +337,9 @@ impl FitCfg {
     /// of the fit, the 3D Mip filter under the 0.3 px dilation standard viewers
     /// render, as much view-dependent colour as the
     /// capture has views to support ([`sh_degree_for_views`]), the surface
+    // perf-number: training schedule constant
     /// regularizers once the scene has a shape (40%), two views per step, and
+    // perf-number: training schedule constant
     /// a pyramid of two halvings over the first 30%.
     pub fn from_sparse_points(iters: usize, budget: usize, views: usize) -> FitCfg {
         let every = (iters / 20).max(1);
@@ -1434,6 +1438,7 @@ impl<'a> Fit<'a> {
             if cfg.carve {
                 // what this view measured: its prior where confident, else the
                 // surface the scene renders there - only where that is a
+                // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
                 // surface (at least half covered, its weight within 2% of its
                 // range): a fog's expected range says nothing about empty
                 // space

@@ -30,6 +30,7 @@ use decide::model::Encoder;
 /// Per-element tolerance, set from what this actually measures rather than
 /// from a round number: the worst stage over both backends is `l0.ffn_act` at
 /// **1.34e-5** on the CPU backend and **6.20e-6** on the GPU one, with every
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// other rung between 8e-7 and 6e-6. 5e-5 leaves under 4x of headroom, so a
 /// real divergence trips this instead of being absorbed by a loose bound.
 ///

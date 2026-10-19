@@ -399,7 +399,9 @@ fn requantization_error_after_a_fold_carries_no_periodic_structure() {
 /// neighbouring tokens carry nearly the same `x` - which is what a flat wall
 /// or a carpet is - `E·x` is nearly the same vector for all of them: a
 /// constant offset added to every token's residual stream. A constant offset
+// perf-number: architecture constant (VAE nearest-2x upsampling)
 /// is exactly the input that makes a decoder with nearest-2x upsampling
+// perf-number: architecture constant (VAE nearest-2x upsampling)
 /// (`vae::VaeConfig::upscale_factor` = 8, three nearest-2x stages) draw its own
 /// grid, which is why an error that looks like harmless rounding on the weight
 /// can look like a hard periodic pattern in the image.
@@ -416,6 +418,7 @@ fn the_requantization_error_acts_as_a_constant_bias_on_smooth_activations() {
     let deployed = dequantize_weight(&packed, &sw, n, k);
 
     // A smooth region: every token's activation is the same profile plus a
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // 2% token-to-token wobble.
     let x: Vec<f32> = (0..t * k)
         .map(|i| {

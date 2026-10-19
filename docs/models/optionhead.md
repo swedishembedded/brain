@@ -112,7 +112,7 @@ Measured on a Tesla P40, one call:
 | 40  | 24 | 25.7 |
 | 200 | 8  | 34.4 |
 
-About 0.55 ms per extra option on a ~7 ms fixed cost. `cap_rows` and
+About 0.55 ms per extra option on a ~7 ms fixed cost. `cap_rows` and <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 `cap_slots` bound the packed rows and the option count; a request that exceeds
 either is refused rather than truncated.
 

@@ -176,6 +176,7 @@ impl ReconstructionModel for MirrorRecon<'_> {
         // The FUSED depth, not any single view's: the per-view maps disagree
         // along each pixel's own ray, which is the one direction the view that
         // made it cannot see, and reconciling them first takes cross-view
+        // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
         // disagreement from about 1.1% to 0.41% on a real capture. The
         // agreement count rides along as the confidence, because it says which
         // pixels deserve more weight than which others - which is all a

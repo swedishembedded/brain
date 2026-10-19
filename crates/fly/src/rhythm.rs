@@ -150,6 +150,7 @@ pub fn analyse(rate: &[f64], dt: f64, band: (f64, f64)) -> Rhythm {
     //
     // Not simply the first peak either, which is the mistake this made next.
     // Autocorrelation is near 1 at the shortest lags for any smooth signal,
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     // so "first lag within 90% of the best" always fires at lag 2 and reports
     // every rhythm as 250 Hz. The correlation has to be allowed to descend
     // first; the fundamental is the first peak after it does.

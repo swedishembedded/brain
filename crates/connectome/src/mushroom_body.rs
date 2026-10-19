@@ -36,7 +36,9 @@
 //! modulates only the Kenyon-cell synapses there, which is what makes sugar
 //! and shock different signals rather than one number with two signs. This
 //! module finds those populations and that compartment structure, and hands
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 //! back a [`neuro::Sites`] map restricting plasticity to them: in BANC, 0.1%
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 //! of the edges. The other 99.9% stay exactly as measured.
 //!
 //! Nothing here is curated by hand. The populations come from the dataset's

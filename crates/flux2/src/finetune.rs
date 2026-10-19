@@ -789,6 +789,7 @@ pub struct TrainOpts {
 ///
 /// A fifth is the measured saturation point of the constant-then-cooldown schedule (arXiv:2405.18392):
 /// constant-then-cooldown tracks a full cosine, and lengthening the cooldown
+// perf-number: training schedule fraction, not a timing
 /// past ~20% of the run stops buying anything. The shape matters more than the
 /// number here - every step before the cooldown runs at the rate the caller
 /// asked for, whatever `--steps` says, so a run that turns out to need three

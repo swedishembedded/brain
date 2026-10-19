@@ -12,6 +12,7 @@
 //!    refined to sub-sample accuracy by a quadratic fit (§4), rejected when
 //!    low-contrast or edge-like (principal-curvature ratio above 10, §4.1);
 //! 3. one or more orientations per keypoint from a 36-bin gradient histogram
+// perf-number: SIFT algorithm constant from the published method
 //!    (every peak within 80% of the highest, §5);
 //! 4. the 4x4x8 descriptor of gradient orientations relative to that
 //!    orientation, trilinearly binned under a gaussian window, normalized,

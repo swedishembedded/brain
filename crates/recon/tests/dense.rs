@@ -98,16 +98,19 @@ fn stereo_priors_land_on_each_target_at_its_resolution_and_agree_with_the_surfac
     }
     errs.sort_by(|a, b| a.total_cmp(b));
     let median = errs[errs.len() / 2];
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     println!("  coverage {:?}, {} fused points; {good}/{measured} measured within 1% of {opaque} opaque pixels, median error {median:+.4}", report.coverage, report.points);
     assert!(measured as f64 > 0.5 * opaque as f64, "stereo measured {measured} of {opaque} surface pixels");
     // A prior misplaced by a fraction of a pixel shows up as a bias across
     // the slanted floor; the stereo's own noise at 320x240 is a spread
     // around zero.
     assert!(median.abs() < 0.003, "median relative range error {median:+.4}: the priors are not aligned with their targets");
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     assert!(good as f64 > 0.75 * measured as f64, "{good} of {measured} measured ranges within 1% of the rendered surface");
     assert_eq!(init.len(), report.points);
 
     // the dense start lies on the true surfaces, to within the stereo's
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // noise (about 1% of a 3 m range here)
     let on_surface = init
         .means

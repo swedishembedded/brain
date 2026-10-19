@@ -187,6 +187,7 @@ pub enum Objective {
     /// reflex and is what that reward asks for. Imitation is worse here and
     /// the measurement is unambiguous: against a reference that walks away
     /// whatever the body does, every motion is velocity error, and a
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// PARALYSED fly scored 98.7% of the best driven score while driving the
     /// animal harder made the score monotonically worse.
     ///
@@ -305,7 +306,9 @@ impl Objective {
     /// STEADY sink rate rather than the transient. A fly starts from rest and
     /// its thorax has to spin up, so the first centimetre or two is dominated
     /// by acceleration whatever the wings are doing: measured, over two
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// centimetres a beating fly outlasts a still one by 1.6x, and over ten by
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     /// 4.6x, against a steady-state sink rate that differs by 4.7x. A short
     /// altitude does not measure flight, it measures falling.
     pub fn flight() -> Objective {

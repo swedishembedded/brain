@@ -266,8 +266,10 @@ pub fn tracks(scene: &Scene, cams: &[Camera], per_view: usize, seed: u64) -> Vec
 pub struct Score {
     /// Measured pixels over pixels with a surface.
     pub coverage: f64,
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     /// Of the measured pixels: within 0.5 % in range.
     pub within_half_percent: f64,
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     /// Of the measured pixels: off by more than 2 %, or where there is no
     /// surface at all.
     pub outliers: f64,

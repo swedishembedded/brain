@@ -13,6 +13,7 @@
 //! know how big the gaussian it moves is. Adam's step is ~lr regardless of
 //! gradient, so one rate in world units is a rounding error on the scene
 //! diagonal and a large fraction of a small gaussian's own radius. Measured
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 //! on a real capture that drove 94% of gaussians more than three radii off
 //! their surface, which reads as stray gaussians and lost sharpness however
 //! good the initial geometry was. A caller with metric geometry therefore

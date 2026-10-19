@@ -13,6 +13,7 @@
 //! Deploying a LoRA by folding it - rebuild `W' = W + s·B·A`, quantize, run -
 //! is exact while the destination is fp32 and destructive once it is int8.
 //! `tests/lora_requant_int8.rs` measures the weight-level damage on fixtures:
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 //! at a delta 0.5% of the weight magnitude, 94.8% of adapted weights round
 //! straight back to their base code and the surviving remainder has cosine
 //! 0.44 to the delta that was intended. The user-visible result is an adapted
@@ -188,6 +189,7 @@ fn runtime_corrections_describe_the_fold_without_writing_it() {
 /// The delta is deliberately larger here (5% of the weight magnitude) than the
 /// regime the defect lives in: at toy width (hidden 64) the int8 tier's own
 /// activation-quantization jitter is itself several percent of the output, so a
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// 0.5% delta would be measuring the tier's noise floor rather than this
 /// wiring. GPU only (int8 is DP4A).
 #[test]

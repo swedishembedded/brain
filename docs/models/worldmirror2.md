@@ -78,11 +78,11 @@ photograph was taken from, out:
 ```console
 $ brain worldmirror2 infer --weights mirror.safetensors --images views/ --maps --out scene
 running WorldMirror-2 on 4 frame(s) at 518x392 ...
-forward + assembly: 99.2s, 812224 gaussians
+forward + assembly: 99.2s, 812224 gaussians <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 wrote scene/scene.ply (812224 gaussians) + scene/cameras.json
 
 $ brain splat render scene/scene.ply --width 640 --height 480 --eye 0.53,-0.28,0.12 --target 0.02,-0.03,1.02 --out view.ppm
-scene/scene.ply: 812224 gaussians -> view.ppm (640x480, tiled, 1496463 isects, 195 ms)
+scene/scene.ply: 812224 gaussians -> view.ppm (640x480, tiled, 1496463 isects, 195 ms) <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 ```
 
 One feed-forward pass: no per-scene optimisation, no iterative refinement. The

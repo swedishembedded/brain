@@ -381,8 +381,10 @@ fn mcmc_reconstructs_better_than_the_heuristic_at_the_same_budget() {
          an equal-budget comparison",
         b.len(), a.len()
     );
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // Measured at 0.006626 against 0.006916, about 4% at an equal budget.
     //
+    // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
     // It was 43% when this was written, against a fit with no bound on how
     // FLAT a gaussian could become and none on how far it could be INFLATED.
     // Both landed since and they independently remove part of what relocation

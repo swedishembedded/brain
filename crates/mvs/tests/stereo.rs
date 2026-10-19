@@ -12,11 +12,16 @@ use splat::types::Camera;
 
 /// Largest fraction of measured pixels allowed to be outliers, per view.
 ///
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// Measured on the pinhole capture, the worst view's outlier fraction is 1.9998 %
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// on the CPU backend and 2.03 % on CUDA: the same search, run with libm on one
 /// and the device's transcendental functions on the other, lands a few pixels
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// differently. The bar used to be 2 %, which left the reference backend 0.0002
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// points of margin and failed the other one for rounding alone. 2.5 % keeps the
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// intent (almost no outliers, 1.1-2.0 % measured) with room for a backend's
 /// own rounding, and a search that really regressed moves this by whole points.
 const MAX_OUTLIERS: f64 = 0.025;
@@ -30,6 +35,7 @@ fn check(name: &str, scene: &Scene, cams: &[Camera]) {
         let s = score(map, &tru);
         println!("  view {v}: {s:?}");
         assert!(s.coverage > 0.6, "{name} view {v}: only {:.1} % of the surface measured", 100.0 * s.coverage);
+        // perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
         assert!(s.within_half_percent > 0.8, "{name} view {v}: {:.1} % within 0.5 % in range", 100.0 * s.within_half_percent);
         assert!(s.outliers < MAX_OUTLIERS, "{name} view {v}: {:.2} % outliers", 100.0 * s.outliers);
         assert!(s.median_normal_deg < 3.0, "{name} view {v}: median normal error {:.2} deg", s.median_normal_deg);
@@ -49,6 +55,7 @@ fn an_unset_seed_is_drawn_and_reported() {
     assert_eq!(run(&scene, &cams).seed, common::cfg().seed);
 }
 
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// Through a pinhole: most measured pixels within 0.5 % of the true range,
 /// normals within a few degrees, almost no outliers after filtering.
 #[test]

@@ -123,6 +123,7 @@ pub struct MuscleAction {
     ///
     /// **Settled, by measurement** (`tests/actuator_convention.rs`): flybody
     /// mirrors its own joint axes, so positive control moves the left and
+    // perf-number: model-parity tolerance, checked by actuator_convention test
     /// right legs the same anatomical way, to better than 0.01% on 21 of 24
     /// DoF pairs. One polarity per muscle is therefore correct and NO per-side
     /// flip is needed. Had it been otherwise, a uniform convention would have

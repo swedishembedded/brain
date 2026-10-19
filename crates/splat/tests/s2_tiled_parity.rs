@@ -181,6 +181,7 @@ fn instance_cap_clamps_gracefully() {
 /// tile-instance budget exactly as one sized for it from the start, instead
 /// of dropping the depth-latest splats. The fit renders this way: a dropped
 /// splat contributes nothing to any view, so it receives no gradient and
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 /// density control reads it as dead - measured on a sparse-start fit as 41%
 /// of the scene.
 #[test]

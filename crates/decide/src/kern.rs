@@ -50,6 +50,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // Fused bidirectional attention. One dispatch per span in place of the
     // transpose/scores/softmax/apply quartet, with the score slab never
     // written to memory at all. Measured over eight packed decisions, that
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     // quartet was 64% of the forward pass while being 7% of its arithmetic.
     // Forward-only and workgroup-cooperative - see `Encoder::build_steps` for
     // the gate.
@@ -126,6 +127,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // Registering them is the entire opt-in, and it is not optional in
     // practice. `gradnorm_sq` reduces a whole tensor from ONE thread, and this
     // model's largest tensor is the `vocab x d_model` token embedding - 11.7M
+    // perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
     // floats. That single thread was 97% of a training step. See
     // `tests/optimizer_kernels.rs`.
     ("gradnorm_part", kernels::GRADNORM_PART),

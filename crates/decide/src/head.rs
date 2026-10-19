@@ -47,6 +47,7 @@
 //! not honour an in-command-buffer barrier across such a binding, so
 //! `backend-wgpu` has to give every dispatch in the batch its own queue submit
 //! and fence, and one sliced dispatch serialises the whole flush. A gather is
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 //! two cheap dispatches; the offset cost 6.7x.
 
 use crate::Tensors;

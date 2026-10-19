@@ -4,6 +4,7 @@
 //! The reward has to be earnable ONLY by walking.
 //!
 //! This crate has already shipped a reward that a corpse could collect. Under
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 //! DeepMimic imitation, measured: a fly with every muscle severed scored 98.7%
 //! of the best driven score, and driving the animal harder made the score
 //! monotonically WORSE - correct behaviour for an imitation reward applied to

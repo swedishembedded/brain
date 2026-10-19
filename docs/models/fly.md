@@ -61,7 +61,7 @@ not reach one is reported with a reason.
 Three clocks run at genuinely different rates - neural ticks, control ticks and
 physics steps - and `fly::Timing` keeps them explicit, because pretending they
 are one rate is how a sensorimotor loop ends up running the body faster than the
-brain. The closed loop runs at **0.55x real time**.
+brain. The closed loop runs at **0.55x real time**. <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 
 MuJoCo is loaded at run time through `$BRAIN_MUJOCO_DIR` / `$MUJOCO_DIR`;
 nothing in brain builds against it, so a machine without it still builds and
@@ -92,7 +92,7 @@ it; the legs change pose because the motor neurons are driving them.
 ![four frames of the connectome-driven fruit fly on a grid floor, its legs in a different pose in each, labelled with the simulation tick and the spike counts at that tick](../quickstart/img/fly-strip.jpg)
 
 ```text
-23665 neurons, 330 motor neurons attached to 44 actuators, 407 unmapped - loaded in 7.9 s
+23665 neurons, 330 motor neurons attached to 44 actuators, 407 unmapped - loaded in 7.9 s <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 frame  60 tick 1020: drive 1.50 | 19044 spikes (209 motor) | -0.31,-0.13 | 1.7 BL/s now
 frame 120 tick 2040: drive 1.50 | 16226 spikes (198 motor) | -0.59,-0.21 | 1.3 BL/s now
 frame 180 tick 3060: drive 1.50 | 17518 spikes (300 motor) | -0.61,-0.47 | 0.6 BL/s now

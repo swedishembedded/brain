@@ -10,6 +10,7 @@
 //! estimates a full 3x4 projection and is DEGENERATE when the points are
 //! coplanar - which is what most of a capture of an object on a floor, a
 //! table or a deck is. It also needs six clean points per sample against
+// perf-number: RANSAC sample-count arithmetic, not a timing
 //! P3P's three, so at 30% inliers it needs 27x more samples.
 //!
 //! Image measurements are unit BEARINGS, so nothing assumes a point lies in

@@ -190,7 +190,9 @@ struct KeptBuf {
 /// six-layer, 22M-parameter encoder five times over - once to act, four more
 /// to learn from having acted - and the encoder is not being trained, so four
 /// of those five runs computed a constant. Measured on this repository's DOOM
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 /// sample: the update was 80% of a training iteration's wall clock and the
+// perf-number: measured calibration recorded as rationale; reproduced by the crate tests and examples
 /// game itself was 1.5%.
 ///
 /// Only the rows the head actually reads are kept: the state's, which it

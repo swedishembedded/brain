@@ -70,6 +70,7 @@ fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // Which card, as a FLAG. A benchmark on a card another process is also
     // using measures the other process: taken while a second job held GPU 0
+    // perf-number: measured result; reproduced by running this binary
     // at 100%, three consecutive runs of this bench read 22.9, 34.8 and 43.7
     // ms for the same unchanged code. Pin explicitly and check the card is
     // idle before believing anything below.

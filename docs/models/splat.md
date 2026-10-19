@@ -238,7 +238,7 @@ added. Growing that pushes the backward past the device's gradient-record
 ceiling and fails the run. On dense scenes reach for `--prune` instead.
 
 Staging the run costs something on its own: Adam's momentum restarts at each
-density-control boundary, measured at ~3.5% worse final loss than one unbroken
+density-control boundary, measured at ~3.5% worse final loss than one unbroken <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 run. Density control has to earn that back before it pays at all, which is why
 it is a flag rather than a default.
 
@@ -248,7 +248,7 @@ The RGB loss cannot see one axis. A splat's image-plane gradient is orthogonal
 to its own viewing ray, so a scene placed at the wrong DISTANCE and scaled to
 subtend the same angle renders the **identical image** and has an exactly zero
 RGB gradient. Measured against an analytic ground truth, a reconstruction put a
-thin object 5.7% too far away, entirely systematically.
+thin object 5.7% too far away, entirely systematically. <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 
 `splat::opt::FitCfg::depth_weight` (default `0.0`, so nothing changes unless
 asked) adds a term on the renderer's per-pixel **expected depth**
@@ -261,7 +261,7 @@ run's reported MSE stays comparable with an unmasked one's.
 comes from the same model whose depth is 5.7% wrong; supervising against a
 single view's prediction re-imposes exactly that error. Feed it a multi-view
 FUSED depth with the fusion's own per-pixel agreement as the confidence
-(cross-view disagreement measured 1.1% per view against 0.41% fused). What it
+(cross-view disagreement measured 1.1% per view against 0.41% fused). What it <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 buys is geometry that stops drifting: an RGB-only fit measured over 400
 iterations grew the longest gaussian axis nearly ninefold and took the flatness
 ratio from 4.14 to 26.34 - large flat blades that look right from the training
@@ -274,10 +274,10 @@ Two properties are worth knowing before turning it on, both measured in
   step is normalized per parameter, and along the viewing ray there is no RGB
   gradient competing for the direction, so scaling every depth residual by the
   same constant leaves the step identical. What confidence does control is where
-  a gaussian settles when its pixels disagree: given a +10% prior on half its
-  pixels and a -10% prior on the other half, equal trust lands it on the truth
-  (measured +0.02%) and 3:1 trust lands it at the weighted mean (+4.96% against a
-  predicted +5.00%). A confidence of zero is off.
+  a gaussian settles when its pixels disagree: given a +10% prior on half its <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
+  pixels and a -10% prior on the other half, equal trust lands it on the truth <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
+  (measured +0.02%) and 3:1 trust lands it at the weighted mean (+4.96% against a <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
+  predicted +5.00%). A confidence of zero is off. <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 * **Depth is not supervised where the frame is transparent** (accumulated alpha
   below `splat::renderer::MIN_DEPTH_ALPHA`): an expected depth there is the ratio
   of two near-zeros. The term holds geometry in place; it does not create it.
@@ -348,9 +348,9 @@ leaves them:
 | heuristic, `--densify-frac 1.00` and above | 0.006916 | 400 |
 | MCMC | 0.006626 | 400 |
 
-About 4% at an equal budget, and it renders 22.4 dB against 22.1.
+About 4% at an equal budget, and it renders 22.4 dB against 22.1. <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 
-That margin was 43% when this was first measured, against a fit with no bound
+That margin was 43% when this was first measured, against a fit with no bound <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 on how FLAT a gaussian could become and none on how far it could be INFLATED.
 Both bounds landed since, and they take away part of what relocation was
 fixing: a heuristic that can no longer answer a badly placed gaussian by

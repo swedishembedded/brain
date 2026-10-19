@@ -6,6 +6,7 @@
 //! The model does not orient them to anything. Measured on a real capture, the
 //! angle between a gaussian's shortest axis and the surface normal implied by
 //! its own depth map is indistinguishable from random - median |cos| 0.416
+// perf-number: measured calibration recorded as the rationale for this test bound; reproduced by running this test
 //! against 0.5 for random, 5.0% within 20 degrees against 6% by chance - and
 //! they are near-isotropic anyway (b/c median 1.38). Each one is a little ball
 //! sitting at the right depth rather than a piece of surface, which leaves
