@@ -1046,6 +1046,25 @@ const LIBRARY_MIN_ROWS: u32 = 8;
 /// its fp32 form loses to the GEMV below [`LIBRARY_MIN_ROWS`].
 const LIBRARY_MIN_ROWS_BF16: u32 = 1;
 
+/// Blocks one swap chunk carries: as many as `cap_bytes` of staging holds,
+/// never fewer than one nor more than the pool has.
+fn swap_chunk_blocks(block_words: usize, num_blocks: u32, cap_bytes: u64) -> u32 {
+    (cap_bytes / (block_words as u64 * 4)).clamp(1, num_blocks as u64) as u32
+}
+
+/// Device bytes the swap staging buffers cost for a pool of `num_blocks`
+/// blocks - what a host-RAM KV offload adds to the device footprint beyond
+/// the pool itself. The engine builds them when offload is enabled
+/// ([`Engine::set_kv_offload_bytes`]) and may shrink them to the device's
+/// workspace limit, so this is a bound, never an underestimate; a memory
+/// budget that includes it cannot be overrun by a later preemption.
+pub fn kv_swap_staging_bytes(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8: bool) -> u64 {
+    let block_words = kv_block_words(cfg, block_size, kv_int8);
+    let blocks = swap_chunk_blocks(block_words, num_blocks, KV_SWAP_STAGING_BYTES) as u64;
+    // The staging records plus the block-id list that selects them.
+    blocks * (block_words as u64 + 1) * 4
+}
+
 impl Engine {
     /// Build from an in-memory decoder weight map (tests / embedded weights).
     /// `num_blocks` physical blocks of `block_size` tokens, up to `max_batch`
@@ -3269,8 +3288,17 @@ impl Engine {
     /// being decoded still needs all of its KV resident, because causal
     /// attention reads all of it every step (see `model::kv_offload`'s header
     /// for the measured bus numbers behind that).
+    ///
+    /// The swap staging buffers are allocated here, up front, never on the
+    /// first preemption: that moment is when the pool is full and the device
+    /// is under the most pressure, and an allocation the driver refuses there
+    /// is an uncaptured device error that takes down every in-flight request.
+    /// Callers size the device budget with [`kv_swap_staging_bytes`].
     pub fn set_kv_offload_bytes(&mut self, capacity_bytes: u64) {
         self.host_kv.set_capacity_bytes(capacity_bytes);
+        if capacity_bytes > 0 {
+            self.ensure_swap_bufs();
+        }
     }
 
     /// Host bytes this engine may hold demoted KV in.
@@ -3289,20 +3317,20 @@ impl Engine {
         self.kv_block_words as f64 * 4.0 / self.block_size as f64
     }
 
-    /// Build the swap staging buffers on first use. Sized to
+    /// Build the swap staging buffers (once). Sized to
     /// [`KV_SWAP_STAGING_BYTES`], clamped to the pool's own block count (never
     /// stage more blocks than can exist) and to the scratch workspace this
-    /// device allows.
+    /// device allows. Offload being enabled builds them immediately (see
+    /// [`Self::set_kv_offload_bytes`]); this stays lazy for an engine whose
+    /// swap is driven directly through [`KvOffload`].
     fn ensure_swap_bufs(&mut self) {
         if self.swap.is_some() {
             return;
         }
-        let per_block = self.kv_block_words as u64 * 4;
         let cap_bytes = KV_SWAP_STAGING_BYTES.min(self.gpu.memory_limits().workspace_bytes);
-        let mut blocks = (cap_bytes / per_block).clamp(1, self.alloc.num_blocks() as u64) as u32;
-        // Halve on a memory-ceiling refusal rather than panicking: this
-        // allocation happens the first time a sequence is preempted, which is
-        // exactly when the device is under pressure, and a smaller chunk costs
+        let mut blocks = swap_chunk_blocks(self.kv_block_words, self.alloc.num_blocks(), cap_bytes);
+        // Halve on a memory-ceiling refusal (the accounting ceiling
+        // `try_storage` enforces) rather than panicking: a smaller chunk costs
         // transfers, not correctness. One block always fits - it is a fraction
         // of a pool that is already resident.
         let (ids, staging) = loop {
@@ -5460,6 +5488,24 @@ mod tests {
     /// moves packed bytes PLUS a separate per-`(slot, kv-head)` scale array,
     /// and a swap that forgot the scales would still round-trip plausible
     /// numbers - just wrong ones.
+    /// Enabling offload builds the swap staging at once, and the budget a
+    /// caller reserves for it ([`kv_swap_staging_bytes`]) covers what was built:
+    /// the first preemption then allocates nothing.
+    #[test]
+    fn enabling_offload_builds_the_staging_the_budget_counted() {
+        for kv_int8 in [false, true] {
+            let cfg = kv_probe_cfg();
+            let map = tiny_weights(&cfg);
+            let (bs, num_blocks) = (4u32, 48u32);
+            let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, bs, num_blocks, 2, 12, 16, kv_int8, false);
+            assert!(eng.swap.is_none(), "an engine nobody asked to offload allocates nothing");
+            eng.set_kv_offload_bytes(4 << 20);
+            let built = eng.swap.as_ref().expect("staging exists as soon as offload is on");
+            let bytes = built.blocks as u64 * (eng.kv_block_words as u64 + 1) * 4;
+            assert!(bytes <= kv_swap_staging_bytes(&cfg, bs, num_blocks, kv_int8), "built {bytes} B against a budget of {} B", kv_swap_staging_bytes(&cfg, bs, num_blocks, kv_int8));
+        }
+    }
+
     #[test]
     fn a_demoted_and_restored_sequence_decodes_identically() {
         for kv_int8 in [false, true] {

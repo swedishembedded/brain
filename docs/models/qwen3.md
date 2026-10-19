@@ -257,11 +257,20 @@ everything about HOW to serve it is a `brain serve` flag:
 
 The KV pool is sized for a couple of full-length contexts, while the batch
 has `BRAIN_QWEN_MAX_BATCH` slots, so a busy server can admit more sessions
-than the pool can keep cached at once. Without host offload that ends badly:
-the pool runs dry mid-decode and the serving lane fails with
-`KV pool exhausted`.
+than the pool can keep cached at once. Admission only checks that a prompt
+fits, so the sequences it lets in can still outgrow the pool together while
+they decode. Whatever the offload setting, that never fails a request: the
+scheduler preempts the newest sequences until the rest can append their next
+token. Without host offload (the default) a preempted sequence gives its blocks
+back, goes to the head of the waiting queue with the tokens it has produced and
+its sampler state, and prefills its context again once the pool has room; the
+batch stays as full as the pool allows and every request still produces the
+tokens it would have produced alone. That costs a re-prefill per preemption,
+which host offload below avoids. A request whose prompt plus `max_tokens`
+cannot fit the whole pool even alone is refused up front with a clear error.
 
-Give the engine host RAM and it preempts instead. A session the scheduler is
+Give the engine host RAM and it swaps instead (recomputing only when the host
+budget is spent). A session the scheduler is
 not advancing this round has its whole KV copied to host memory and its GPU
 blocks handed to the sessions that are decoding; when its turn comes round
 again the bytes are copied back and it continues **exactly** where it left
@@ -285,6 +294,10 @@ every ADMITTED session be resident simultaneously.
 It is off by default because it spends host memory, and a box with none to
 spare should not have it taken silently. Budget roughly the same bytes per
 cached token that the GPU pool spends - a swap is a verbatim copy.
+Offload also keeps a small device staging buffer (at most 64 MiB) that a swap
+moves blocks through; it is allocated when the engine loads and counted in the
+memory budget (and in `--qwen-ctx` auto-sizing), so the first preemption never
+asks the card for memory it does not have.
 
 ## Hardware and limits
 
