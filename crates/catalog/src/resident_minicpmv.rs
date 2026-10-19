@@ -7,9 +7,12 @@
 //! its KV pool - lives on ONE card: at registration the checkpoint's
 //! footprint (`minicpmv::model::footprint`, fp32 weights plus the pool for
 //! `SERVE_CONCURRENT` sequences of `SERVE_CONTEXT` tokens plus the tower's
-//! scratch) is placed on the budgeted card with the most room for it. All
-//! request work lives in `minicpmv::caps`; this file holds placement and
-//! budgeting only.
+//! scratch) is placed on the budgeted card with the most room for it. Each
+//! fine-tune stored beside the checkpoint (`adapters/<owner>/<name>/<tag>/`,
+//! what `brain minicpmv finetune` writes) is a model of its own,
+//! `brain/minicpmv:<owner>:<name>:<tag>`, placed the same way. All request
+//! work lives in `minicpmv::caps`; this file holds placement and budgeting
+//! only.
 
 use capability::{ActionResult, Assembly, Invocation, Manifest, Progress};
 use minicpmv::caps::{Session, MODEL, SERVE_CONCURRENT, SERVE_CONTEXT};
@@ -17,7 +20,12 @@ use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 pub struct MiniCpmVResident {
+    /// The model id this resident answers to: the base's, or the base's with
+    /// a stored fine-tune's `:owner:name:tag`.
+    id: String,
     dir: String,
+    /// The stored fine-tune applied when the model loads.
+    tune: Option<std::path::PathBuf>,
     bytes: u64,
     card: u32,
 }
@@ -40,22 +48,38 @@ impl MiniCpmVResident {
         };
         let bytes = minicpmv::model::footprint(&cfg, SERVE_CONTEXT, SERVE_CONCURRENT);
         match pick_card(gpus, reserved, bytes) {
-            Some(card) => Some(MiniCpmVResident { dir, bytes, card }),
+            Some(card) => Some(MiniCpmVResident { id: MODEL.to_string(), dir, tune: None, bytes, card }),
             None => {
                 eprintln!("brain: minicpmv not served (needs {} MiB on one card)", bytes >> 20);
                 None
             }
         }
     }
+
+    /// This resident again as each fine-tune stored beside the checkpoint.
+    pub fn stored_fine_tunes(&self) -> Vec<MiniCpmVResident> {
+        minicpmv::finetune::stored_tunes(std::path::Path::new(&self.dir))
+            .into_iter()
+            .map(|t| MiniCpmVResident { id: format!("{MODEL}:{}", t.label), dir: self.dir.clone(), tune: Some(t.dir), bytes: self.bytes, card: self.card })
+            .collect()
+    }
+
+    /// The base and every fine-tune stored beside it, as the model ids they serve.
+    pub fn family_from_assembly(assembly: &Assembly, gpus: &[(u32, u64)], reserved: u64) -> Vec<MiniCpmVResident> {
+        let Some(base) = Self::from_assembly(assembly, gpus, reserved) else { return Vec::new() };
+        let mut family = base.stored_fine_tunes();
+        family.insert(0, base);
+        family
+    }
 }
 
 impl ResidentModel for MiniCpmVResident {
     fn manifest(&self) -> Manifest {
-        minicpmv::caps::manifest_resident()
+        Manifest { model: self.id.clone(), ..minicpmv::caps::manifest_resident() }
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(MODEL, self.dir.clone())
+        InstanceKey::new(self.id.clone(), self.dir.clone())
     }
 
     /// Unusable by design: the model is claimed through `claim_multi` on the
@@ -78,7 +102,7 @@ impl MultiDeviceResidentModel for MiniCpmVResident {
         if devices != [Device::Gpu(self.card)] {
             return Err(format!("{MODEL}: activate_multi got devices {devices:?} but the plan placed Gpu({})", self.card));
         }
-        Ok(Box::new(MiniCpmVInstance { session: minicpmv::caps::load_session(&key.config, Some(self.card))? }))
+        Ok(Box::new(MiniCpmVInstance { session: minicpmv::caps::load_session(&key.config, self.tune.as_deref(), Some(self.card))? }))
     }
 }
 
@@ -118,10 +142,28 @@ mod tests {
 
     #[test]
     fn an_unplanned_device_is_refused() {
-        let r = MiniCpmVResident { dir: "/nonexistent".into(), bytes: 1, card: 1 };
+        let r = MiniCpmVResident { id: MODEL.into(), dir: "/nonexistent".into(), tune: None, bytes: 1, card: 1 };
         let e = r.activate_multi(&r.instance_key("generate", &Invocation::new()), &[Device::Gpu(0)]).err().unwrap_or_default();
         assert!(e.contains("plan placed"), "{e}");
         let cost = r.estimate_multi(&r.instance_key("generate", &Invocation::new()));
         assert_eq!((cost.devices().collect::<Vec<_>>(), cost.on(Device::Gpu(1))), (vec![Device::Gpu(1)], 1));
+    }
+
+    #[test]
+    fn a_stored_fine_tune_is_a_model_of_its_own() {
+        let root = std::env::temp_dir().join(format!("brain-minicpmv-resident-tuned-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let dir = minicpmv::finetune::store_dir(&root, "acme:receipts:v2").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(minicpmv::train::TUNE_MANIFEST), b"{}").unwrap();
+        let base = MiniCpmVResident { id: MODEL.into(), dir: root.to_string_lossy().into_owned(), tune: None, bytes: 7, card: 1 };
+        let tuned = base.stored_fine_tunes();
+        assert_eq!(tuned.len(), 1);
+        assert_eq!(tuned[0].manifest().model, "brain/minicpmv:acme:receipts:v2");
+        assert_eq!(tuned[0].tune.as_deref(), Some(dir.as_path()));
+        let key = |r: &MiniCpmVResident| r.instance_key("generate", &Invocation::new());
+        assert_ne!(key(&tuned[0]), key(&base), "the base and its fine-tune are separate instances");
+        assert_eq!((tuned[0].bytes, tuned[0].card), (base.bytes, base.card), "same weights, same card");
+        std::fs::remove_dir_all(&root).ok();
     }
 }

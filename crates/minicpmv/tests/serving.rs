@@ -21,7 +21,7 @@ fn image_inv(fx: &common::Fixture, name: &str, key: &str, inv: Invocation) -> In
 fn a_served_batch_reproduces_the_reference_and_a_cancel_stops_alone() {
     let Some(fx) = common::fixture() else { return };
     let manifest = fx.manifest();
-    let mut session = minicpmv::caps::load_session(fx.dir.to_str().unwrap(), None).expect("load the served session");
+    let mut session = minicpmv::caps::load_session(fx.dir.to_str().unwrap(), None, None).expect("load the served session");
 
     // The document case as OpenAI messages with the image part where it stands.
     let doc = &manifest["model"]["doc_16x"];

@@ -11,6 +11,8 @@
 //! * [`config`]: the checkpoint's `config.json`.
 //! * [`dataset`]: the multimodal fine-tuning records (`generic-messages-v2`
 //!   with image and video parts) and their supervised samples.
+//! * [`finetune`]: a whole run - epochs, held-out scoring, resumable
+//!   state - and where fine-tunes are stored beside their checkpoint.
 //! * [`import`]: the checkpoint split between this crate's vision side and
 //!   the decoder, each held to two-way tensor coverage.
 //! * [`preprocess`]: the image processor - source view, slice grid, the
@@ -36,6 +38,7 @@
 pub mod caps;
 pub mod config;
 pub mod dataset;
+pub mod finetune;
 pub mod import;
 pub mod model;
 pub mod preprocess;

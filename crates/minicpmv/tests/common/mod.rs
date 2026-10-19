@@ -75,3 +75,13 @@ pub fn head_logits(head: &[f32], hidden: &[f32]) -> Vec<f32> {
     let d = hidden.len();
     head.chunks_exact(d).map(|row| row.iter().zip(hidden).map(|(a, b)| a * b).sum()).collect()
 }
+
+/// The checkpoint directory alone, for tests that need no goldens, or
+/// `None` after naming what is absent.
+pub fn checkpoint() -> Option<PathBuf> {
+    let dir = brain_testutil::model_dir(REFERENCE).map(PathBuf::from).filter(|d| d.join("config.json").is_file());
+    if dir.is_none() {
+        brain_testutil::skip(&format!("{REFERENCE} is not in the model store (brain pull {REFERENCE})"));
+    }
+    dir
+}

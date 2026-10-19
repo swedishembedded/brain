@@ -810,7 +810,8 @@ pub fn models() -> Vec<ModelEntry> {
         },
         // MiniCPM-V 4.6: images and a conversation in, text out, on one card.
         // `dir` resolved through `minicpmv::spec::MiniCpmVSpec`; the resident
-        // is placed at registration (see `crate::resident_minicpmv`).
+        // and each stored fine-tune are placed at registration (see
+        // `crate::resident_minicpmv`).
         ModelEntry {
             manifest: minicpmv::caps::manifest,
             provider: |assembly: &Assembly| {
@@ -818,7 +819,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(minicpmv::caps::MiniCpmVProvider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("minicpmv", &minicpmv::spec::MiniCpmVSpec)),
-            resident: crate::resident_multi!(crate::resident_minicpmv::MiniCpmVResident::from_assembly),
+            resident: crate::resident_multi_family!(crate::resident_minicpmv::MiniCpmVResident::family_from_assembly),
         },
         // Janus-Pro: chat over images, and text to image, from one
         // checkpoint. `dir` resolved through `januspro::spec::JANUS_PRO`; the

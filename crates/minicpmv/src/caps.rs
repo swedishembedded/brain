@@ -296,15 +296,16 @@ impl Session {
 }
 
 /// Load MiniCPM-V from `dir` onto `gpu` (a card index, or the ambient device
-/// when `None`) for serving.
-pub fn load_session(dir: &str, gpu: Option<u32>) -> Result<Session, String> {
+/// when `None`) for serving, with the fine-tune in `tune` applied when given
+/// (a directory `brain minicpmv finetune` wrote).
+pub fn load_session(dir: &str, tune: Option<&Path>, gpu: Option<u32>) -> Result<Session, String> {
     let pipelines = qwen35::model::pipelines();
     let device = match gpu {
         Some(i) => gpu_core::Gpu::new_on_index(i, pipelines)?,
         None => gpu_core::Gpu::new(pipelines),
     };
     let dir = Path::new(dir);
-    let model = MiniCpmV::load(dir, &device, SERVE_CONTEXT, SERVE_CONCURRENT, KvTier::F32)?;
+    let model = MiniCpmV::load_tuned(dir, tune, &device, SERVE_CONTEXT, SERVE_CONCURRENT, KvTier::F32)?;
     let template = ChatTemplate::from_model_dir(dir).map_err(|e| format!("minicpmv: chat template: {e:?}"))?;
     Ok(Session::new(model, template))
 }
@@ -352,7 +353,7 @@ impl Action for GenerateAction {
         let mut guard = RESIDENT.lock().map_err(|_| "minicpmv: resident lock poisoned")?;
         if !matches!(&*guard, Some((d, _)) if *d == dir) {
             *guard = None; // drop the old build before the new one allocates
-            *guard = Some((dir.clone(), load_session(&dir, None)?));
+            *guard = Some((dir.clone(), load_session(&dir, None, None)?));
         }
         guard.as_mut().expect("just loaded").1.generate(inv, progress)
     }
