@@ -4305,7 +4305,7 @@ impl Qwen35 {
     /// final norm. The residual, MLP, scratch-arena and drain discipline lives here once
     /// for [`Self::run_prefill_chunk_stage`] (one sequence's rows) and
     /// [`Self::run_prefill_multi_stage`] (several sequences' rows in one forward).
-    fn prefill_layer_stack(&self, mut res: DeviceBuffer, n: u32, label: &str, mixer: &mut dyn FnMut(usize, LayerType, &DeviceBuffer, Option<Act>, bool) -> DeviceBuffer) -> DeviceBuffer {
+    fn prefill_layer_stack(&self, mut res: DeviceBuffer, n: u32, label: &str, mixer: &mut PrefillMixer<'_>) -> DeviceBuffer {
         let g = &self.gpu;
         let d = self.cfg.d_model;
         let pooled = n >= self.chunk_arena_min_rows.get();
@@ -5413,6 +5413,11 @@ impl model::Model for Qwen35 {
         self.cfg.to_json()
     }
 }
+
+/// A prefill round's token mixer for one layer: given the layer index, its type,
+/// the normed input, the fused epilogue the next GEMM may apply and whether the
+/// input is quantised, it returns the mixer output (see `prefill_layer_stack`).
+type PrefillMixer<'a> = dyn FnMut(usize, LayerType, &DeviceBuffer, Option<Act>, bool) -> DeviceBuffer + 'a;
 
 #[cfg(test)]
 mod tests {

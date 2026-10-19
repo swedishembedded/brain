@@ -25,7 +25,7 @@ const READS: usize = 48;
 #[test]
 fn a_reused_slot_is_not_written_before_the_previous_scopes_readers_finish() {
     let Ok(gpu) = Gpu::try_new_cuda(&KERNELS) else {
-        eprintln!("cuda_arena_reuse: no CUDA device on this box - skipping");
+        brain_testutil::skip_unavailable("cuda_arena_reuse needs a CUDA device");
         return;
     };
     assert!(gpu.submissions_ordered());
