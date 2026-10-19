@@ -140,7 +140,6 @@
 //! * **Text only.** `crate::vl`'s vision front-end is not spliced in here.
 
 mod engine;
-mod prefix;
 mod mtp;
 mod speculate;
 pub use speculate::{SpecServing, SpeculativeMode};

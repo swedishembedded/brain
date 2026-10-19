@@ -53,6 +53,18 @@ pub trait PagedDecoder {
     /// KV blocks needed to hold `tokens` cached positions.
     fn blocks_for(&self, tokens: u32) -> u32;
 
+    // Prefix reuse comes in two shapes, both keyed by adapter namespace plus exact
+    // token prefix and both counted in `prefix_stats`:
+    //  * shareable KV blocks (every attention layer): `crate::paged::PrefixCache`,
+    //    which the decoder consults inside `prefill` and which `reclaim_prefix`
+    //    shrinks;
+    //  * snapshot-at-boundary state (a recurrent layer keeps a state, not rows,
+    //    so a prefix resumes only from the state exactly after it):
+    //    `crate::snapshot_prefix::SnapshotPrefixCache`, the same keys and
+    //    recency rule over (KV rows, state snapshot row, resume payload) entries.
+    // A hybrid decoder uses both kinds' bookkeeping from the shared crate and
+    // implements only the device operations (copy rows, capture and restore state).
+
     /// Reclaim up to `want` cache-only prefix blocks back to the pool (live
     /// sequences always outrank the prefix cache). Returns blocks actually freed.
     fn reclaim_prefix(&mut self, want: u32) -> u32;

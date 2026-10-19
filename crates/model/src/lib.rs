@@ -37,6 +37,7 @@ pub mod conformance_grad;
 pub mod paged;
 pub mod rowemit;
 pub mod serve;
+pub mod snapshot_prefix;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod distributed;
 pub mod fp8;

@@ -32,7 +32,25 @@ use model::serve::{AdapterAvailability, AdapterId, DraftQuery, PagedDecoder, Pre
 
 use crate::adapter_serving as adapters;
 
-use super::prefix::{Entry, PrefixCache, MIN_CACHED_TOKENS};
+use model::snapshot_prefix::{Entry as CacheEntry, SnapshotPrefixCache};
+
+/// Prompts shorter than this are not worth a snapshot row and a retained block.
+const MIN_CACHED_TOKENS: usize = 64;
+
+/// What the engine needs to resume a prompt from a cache entry besides its KV
+/// rows and state snapshot.
+struct Resume {
+    /// The last prompt token's `[d_model]` hidden row, so a prompt that is
+    /// exactly the cached one needs no compute.
+    last_hidden: Vec<f32>,
+    /// The MTP head's KV rows for positions `0..tokens.len() - 1` were filled
+    /// when this prompt was prefilled. A prompt prefilled while the drafter's
+    /// prefill feed was off (it did not pay) has none, and a prompt that resumes
+    /// from such an entry must not copy them.
+    mtp_valid: bool,
+}
+
+type PrefixCache = SnapshotPrefixCache<Resume>;
 use super::{MultiPrefillJob, Qwen35GgufInstance, MODEL};
 
 /// Candidates a non-greedy pick can sample from. Real sampling is exact
@@ -145,7 +163,7 @@ struct Pending {
     tokens: Vec<u32>,
     snap_row: u32,
     last_hidden: Vec<f32>,
-    /// The head's KV rows of this prompt were filled (see [`Entry::mtp_valid`]).
+    /// The head's KV rows of this prompt were filled (see [`Resume::mtp_valid`]).
     mtp_valid: bool,
 }
 
@@ -294,14 +312,14 @@ impl Qwen35GgufEngine {
             if let Some(i) = self.cache.lookup(table.kv_namespace(), prompt) {
                 let e = self.cache.entry(i);
                 let (from, rows, snap) = (e.table.blocks()[0], e.tokens.len(), e.snap_row);
-                seed_valid = e.mtp_valid;
+                seed_valid = e.payload.mtp_valid;
                 self.inst.seed_from_prefix(from, slot, rows as u32, snap);
                 if seed_valid {
                     self.inst.mtp_seed_prefix(from, slot, rows as u32);
                 }
                 if rows == prompt.len() {
                     // The whole prompt is cached: its state in place, no compute.
-                    let hidden = e.last_hidden.clone();
+                    let hidden = e.payload.last_hidden.clone();
                     self.inst.store_prefilled(slot);
                     if seed_valid {
                         self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
@@ -310,7 +328,7 @@ impl Qwen35GgufEngine {
                     }
                     return Some(hidden);
                 }
-                prefix_hidden = Some(e.last_hidden.clone());
+                prefix_hidden = Some(e.payload.last_hidden.clone());
                 start = rows;
             }
         }
@@ -496,7 +514,7 @@ impl PagedDecoder for Qwen35GgufEngine {
         match kept {
             Some(p) => {
                 let table = std::mem::replace(t, BlockTable::new());
-                let retired = self.cache.insert(Entry::new(p.tokens, table, p.snap_row, p.last_hidden).with_mtp_valid(p.mtp_valid));
+                let retired = self.cache.insert(CacheEntry::new(p.tokens, table, p.snap_row, Resume { last_hidden: p.last_hidden, mtp_valid: p.mtp_valid }));
                 self.release_retired(retired);
             }
             None => t.release(&mut self.alloc),

@@ -6,11 +6,16 @@
 // needs expertise in prefix reuse for hybrid recurrent/attention models then you
 // can procure our services by sending an email to info@swedishembedded.com.
 
-//! The prompt-prefix cache of the released-GGUF engine: the bookkeeping only -
+//! The snapshot prompt-prefix cache: the bookkeeping only -
 //! which prompts are cached, which snapshot row and KV block each owns, who is
 //! evicted - with no device in it, so it is unit-tested directly.
 //!
 //! # What a cache entry is
+//!
+//! Shared by every engine whose layers keep a recurrent state (Gated-DeltaNet
+//! and the like): the entry is keyed like the block cache ([`crate::paged::PrefixCache`]) -
+//! namespace (adapter identity) plus exact token prefix - and evicted by the same
+//! recency rule, but resumes from a state snapshot instead of by sharing blocks
 //!
 //! An agent resends the same long history every turn; prefilling it again costs
 //! tens of seconds on the 27B. A full-attention model reuses KV rows for that.
@@ -37,53 +42,41 @@
 //! `table`'s): K/V computed under one adapter are not the base's or another
 //! adapter's, so a prompt only ever resumes from an entry of its own namespace.
 
-use model::paged::{BlockTable, KvNamespace};
-
-/// Prompts shorter than this are not worth a snapshot row and a retained block.
-pub(super) const MIN_CACHED_TOKENS: usize = 64;
+use crate::paged::{BlockTable, KvNamespace};
 
 /// One cached prompt.
-pub(super) struct Entry {
+pub struct Entry<P> {
     pub tokens: Vec<u32>,
     /// Owns the physical block holding KV rows `0..tokens.len()`.
     pub table: BlockTable,
     pub snap_row: u32,
-    /// The last prompt token's `[d_model]` hidden row.
-    pub last_hidden: Vec<f32>,
-    /// The MTP head's KV rows for positions `0..tokens.len() - 1` were filled
-    /// when this prompt was prefilled. A prompt prefilled while the drafter's
-    /// prefill feed was off (it did not pay) has none, and a prompt that resumes
-    /// from such an entry must not copy them.
-    pub mtp_valid: bool,
+    /// What the engine needs to resume from this entry besides the KV rows and
+    /// the snapshot (the last prompt token's hidden row, which drafter rows are
+    /// valid, ...): opaque to the cache.
+    pub payload: P,
     stamp: u64,
 }
 
-impl Entry {
-    pub fn new(tokens: Vec<u32>, table: BlockTable, snap_row: u32, last_hidden: Vec<f32>) -> Entry {
-        Entry { tokens, table, snap_row, last_hidden, mtp_valid: true, stamp: 0 }
-    }
-
-    /// Record whether the drafter's KV rows of this prompt were filled.
-    pub fn with_mtp_valid(mut self, valid: bool) -> Entry {
-        self.mtp_valid = valid;
-        self
+impl<P> Entry<P> {
+    pub fn new(tokens: Vec<u32>, table: BlockTable, snap_row: u32, payload: P) -> Entry<P> {
+        Entry { tokens, table, snap_row, payload, stamp: 0 }
     }
 }
 
 /// The cache: entries plus the pool of snapshot rows they and in-flight
 /// prefills draw from.
-pub(super) struct PrefixCache {
-    entries: Vec<Entry>,
+pub struct SnapshotPrefixCache<P> {
+    entries: Vec<Entry<P>>,
     free_rows: Vec<u32>,
     tick: u64,
     hit_tokens: u64,
     lookup_tokens: u64,
 }
 
-impl PrefixCache {
+impl<P> SnapshotPrefixCache<P> {
     /// A cache over `snapshot_rows` snapshot rows (0 disables it).
-    pub fn new(snapshot_rows: u32) -> PrefixCache {
-        PrefixCache { entries: Vec::new(), free_rows: (0..snapshot_rows).rev().collect(), tick: 0, hit_tokens: 0, lookup_tokens: 0 }
+    pub fn new(snapshot_rows: u32) -> SnapshotPrefixCache<P> {
+        SnapshotPrefixCache { entries: Vec::new(), free_rows: (0..snapshot_rows).rev().collect(), tick: 0, hit_tokens: 0, lookup_tokens: 0 }
     }
 
     pub fn enabled(&self) -> bool {
@@ -108,7 +101,7 @@ impl PrefixCache {
         Some(best)
     }
 
-    pub fn entry(&self, i: usize) -> &Entry {
+    pub fn entry(&self, i: usize) -> &Entry<P> {
         &self.entries[i]
     }
 
@@ -151,7 +144,7 @@ impl PrefixCache {
     /// it, which an agent conversation growing turn by turn always leaves
     /// behind - are removed, and an identical prompt keeps only the newer one.
     /// Returns the retired entries' tables and the rows they free.
-    pub fn insert(&mut self, mut entry: Entry) -> Vec<BlockTable> {
+    pub fn insert(&mut self, mut entry: Entry<P>) -> Vec<BlockTable> {
         let mut retired = Vec::new();
         let mut i = 0;
         while i < self.entries.len() {
@@ -173,7 +166,7 @@ impl PrefixCache {
     /// Drop every entry of `namespace` (its adapter was unloaded), returning
     /// their tables for the caller to release.
     pub fn evict_namespace(&mut self, namespace: KvNamespace) -> Vec<BlockTable> {
-        let (gone, kept): (Vec<Entry>, Vec<Entry>) = std::mem::take(&mut self.entries).into_iter().partition(|e| e.table.kv_namespace() == namespace);
+        let (gone, kept): (Vec<Entry<P>>, Vec<Entry<P>>) = std::mem::take(&mut self.entries).into_iter().partition(|e| e.table.kv_namespace() == namespace);
         self.entries = kept;
         self.free_rows.extend(gone.iter().map(|e| e.snap_row));
         gone.into_iter().map(|e| e.table).collect()
@@ -198,17 +191,17 @@ impl PrefixCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model::paged::BASE_KV_NAMESPACE;
+    use crate::paged::BASE_KV_NAMESPACE;
 
-    fn entry(tokens: &[u32], row: u32) -> Entry {
-        Entry::new(tokens.to_vec(), BlockTable::new(), row, vec![0.0])
+    fn entry(tokens: &[u32], row: u32) -> Entry<u32> {
+        Entry::new(tokens.to_vec(), BlockTable::new(), row, 0)
     }
 
     /// The longest cached prefix wins, an exact-length match counts, and a
     /// prompt that merely shares a start with an entry (not all of it) does not.
     #[test]
     fn lookup_finds_the_longest_cached_prefix_only() {
-        let mut c = PrefixCache::new(4);
+        let mut c = SnapshotPrefixCache::<u32>::new(4);
         let r1 = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
         assert!(c.insert(entry(&[1, 2, 3], r1)).is_empty());
         let r2 = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
@@ -224,7 +217,7 @@ mod tests {
     /// snapshot row and handing back the block to release.
     #[test]
     fn a_longer_prompt_supersedes_the_prefix_it_extends() {
-        let mut c = PrefixCache::new(2);
+        let mut c = SnapshotPrefixCache::<u32>::new(2);
         let r1 = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
         c.insert(entry(&[1, 2], r1));
         let r2 = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
@@ -238,7 +231,7 @@ mod tests {
     /// lookup counts as a use.
     #[test]
     fn the_least_recently_used_entry_is_evicted_for_a_row() {
-        let mut c = PrefixCache::new(2);
+        let mut c = SnapshotPrefixCache::<u32>::new(2);
         for (tokens, _) in [([1u32, 1], 0), ([2, 2], 1)] {
             let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
             c.insert(entry(&tokens, r));
@@ -255,7 +248,7 @@ mod tests {
     /// entry, which belongs to the conversation whose turn comes next.
     #[test]
     fn a_turn_takes_its_own_earlier_entry_before_another_conversations() {
-        let mut c = PrefixCache::new(2);
+        let mut c = SnapshotPrefixCache::<u32>::new(2);
         let (a1, b1) = ([1u32, 1, 1], [2u32, 2, 2]);
         for tokens in [a1, b1] {
             let r = c.take_row(BASE_KV_NAMESPACE, &tokens).0.unwrap();
@@ -278,11 +271,11 @@ mod tests {
     /// exactly its entries and frees their rows.
     #[test]
     fn entries_belong_to_their_adapters_namespace() {
-        let mut c = PrefixCache::new(3);
+        let mut c = SnapshotPrefixCache::<u32>::new(3);
         let prompt = [1u32, 2, 3];
         for ns in [BASE_KV_NAMESPACE, 1, 2] {
             let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
-            c.insert(Entry::new(prompt.to_vec(), BlockTable::with_namespace(ns), r, vec![0.0]));
+            c.insert(Entry::new(prompt.to_vec(), BlockTable::with_namespace(ns), r, 0));
         }
         assert_eq!(c.stats().2, 3, "the same prompt in three namespaces is three entries, none superseding another");
         for ns in [BASE_KV_NAMESPACE, 1, 2] {
@@ -295,17 +288,9 @@ mod tests {
         assert!(c.take_row(BASE_KV_NAMESPACE, &[]).0.is_some(), "the dropped entry's snapshot row is free again");
     }
 
-    /// An entry says whether the drafter's KV rows of its prompt were filled; a prompt
-    /// prefilled without the drafter must not be mistaken for one prefilled with it.
-    #[test]
-    fn an_entry_records_whether_its_drafter_rows_are_valid() {
-        assert!(entry(&[1, 2, 3], 0).mtp_valid, "the default is the drafter was fed");
-        assert!(!entry(&[1, 2, 3], 0).with_mtp_valid(false).mtp_valid);
-    }
-
     #[test]
     fn a_disabled_cache_hands_out_no_rows() {
-        let mut c = PrefixCache::new(0);
+        let mut c = SnapshotPrefixCache::<u32>::new(0);
         assert!(!c.enabled());
         let (row, evicted) = c.take_row(BASE_KV_NAMESPACE, &[]);
         assert!(row.is_none() && evicted.is_none());
@@ -313,7 +298,7 @@ mod tests {
 
     #[test]
     fn stats_count_hit_and_looked_up_tokens() {
-        let mut c = PrefixCache::new(1);
+        let mut c = SnapshotPrefixCache::<u32>::new(1);
         let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
         c.insert(entry(&[1, 2, 3], r));
         c.lookup(BASE_KV_NAMESPACE, &[1, 2, 3, 4]);
