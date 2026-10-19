@@ -11,6 +11,7 @@
 //! * [`config`]: the checkpoint's `config.json`.
 //! * [`dataset`]: the multimodal fine-tuning records (`generic-messages-v2`
 //!   with image and video parts) and their supervised samples.
+//! * [`export`]: a tune as one PEFT adapter over the Hugging Face checkpoint.
 //! * [`finetune`]: a whole run - epochs, held-out scoring, resumable
 //!   state - and where fine-tunes are stored beside their checkpoint.
 //! * [`import`]: the checkpoint split between this crate's vision side and
@@ -38,6 +39,7 @@
 pub mod caps;
 pub mod config;
 pub mod dataset;
+pub mod export;
 pub mod finetune;
 pub mod import;
 pub mod model;
