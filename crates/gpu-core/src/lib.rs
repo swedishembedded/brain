@@ -435,9 +435,9 @@ mod native_facade {
         /// Native Vulkan compute (ash + naga WGSL->SPIR-V). Falls back to wgpu if
         /// no Vulkan device/ICD is present.
         Vulkan,
-        /// Native CUDA driver API. Device enumeration only so far - selecting
-        /// it is an error at build time rather than a fall-back to another
-        /// backend (see `Gpu::cuda_not_executable`).
+        /// Native CUDA driver API (see `Gpu::try_new_cuda`). Kernels compile
+        /// through NVRTC on first dispatch; selecting it on a box without a
+        /// usable driver is an error, never a fall-back to another backend.
         Cuda,
     }
 
