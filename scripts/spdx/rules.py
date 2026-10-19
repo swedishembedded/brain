@@ -41,6 +41,10 @@ CBLOCK_EXTS = {"css", "scss", "less"}
 # file even if its extension would otherwise match (vendored/generated code).
 EXCLUDED_DIR_PARTS = {"vendor", "third_party", "node_modules", "generated", ".git"}
 
+# Vendored third-party artifacts that carry their own pinned licence header
+# (verified by a committed sha256, never edited in place).
+EXCLUDED_PATH_PREFIXES = ("tools/docs-publisher/",)
+
 _CODING_RE = re.compile(rb"^#.*coding[:=]\s*[-\w.]+")
 
 
@@ -49,6 +53,8 @@ def classify(path_bytes: bytes):
     path = path_bytes.decode("utf-8", "surrogateescape")
     parts = path.split("/")
     if any(part in EXCLUDED_DIR_PARTS for part in parts):
+        return None
+    if path.startswith(EXCLUDED_PATH_PREFIXES):
         return None
     base = parts[-1]
     if base in HASH_BASENAMES:
