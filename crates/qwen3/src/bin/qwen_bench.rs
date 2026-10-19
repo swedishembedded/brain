@@ -127,7 +127,7 @@ use std::time::Instant;
 use data::Tokenizer as _;
 use gpu_core::provider::library::GemmPrecision;
 use gpu_core::roof::Roofs;
-use gpu_core::Gpu;
+use gpu_core::{DeviceBuffer, Gpu};
 use qwen3::{Qwen, QwenConfig};
 
 /// [`qwen3::init_weights`], but every tensor is generated on its own thread
@@ -968,9 +968,20 @@ pub fn flash_decode_i8_bench(cfg: &QwenConfig, seq: u32, reps: usize, batch: u32
     ];
     let t_split = gpu_core::profile::best_of(&gpu, &split_steps, reps);
 
+    // The native batched kernel the serving tape takes ahead of the split pair
+    // where the backend has one (CUDA, two or more rows); absent elsewhere.
+    let ctx_native = gpu.storage((batch * n_heads * head_dim) as u64);
+    let native = gpu_core::provider::cuda::paged_decode_batched_step(
+        &gpu,
+        true,
+        &[&qb, &poolk, &poolv, &scales_k, &scales_v, &btb, &sl, &ctx_native],
+        &[batch, n_heads, n_kv_heads, head_dim, group, bs, mbs_cap],
+    )
+    .map(|step| gpu_core::profile::best_of(&gpu, &[step], reps));
+
     let want = gpu.read(&ctx_ref, (batch * n_heads * head_dim) as usize);
-    let got = gpu.read(&ctx_split, (batch * n_heads * head_dim) as usize);
-    let worst = want.iter().zip(&got).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+    let max_diff = |ctx: &DeviceBuffer| want.iter().zip(&gpu.read(ctx, (batch * n_heads * head_dim) as usize)).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+    let worst = max_diff(&ctx_split);
 
     let bytes = batch as u64 * n_kv_heads as u64 * seq as u64 * head_dim as u64 * 2; // int8: 1 byte/element, K+V once each
     let pct = |secs: f64| roofs.and_then(|r| r.utilisation_of(0, 0, bytes, secs)).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into());
@@ -981,6 +992,10 @@ pub fn flash_decode_i8_bench(cfg: &QwenConfig, seq: u32, reps: usize, batch: u32
         t_split * 1e3,
     );
     println!("triad {}  |  flash {}  |  split {}  |  split vs triad max|diff| {worst:.2e}", pct(t_ref), pct(t_flash), pct(t_split));
+    match native {
+        Some(t) => println!("native batched decode {:>8.4} ms  {}  |  native vs triad max|diff| {:.2e}", t * 1e3, pct(t), max_diff(&ctx_native)),
+        None => println!("native batched decode: not available on this backend or batch"),
+    }
 }
 
 /// [`flash_prefill_bench`]'s A/B one storage tier down: `paged_flash_prefill_i8`
