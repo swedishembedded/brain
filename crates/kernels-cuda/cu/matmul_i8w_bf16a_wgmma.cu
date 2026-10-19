@@ -167,6 +167,9 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_matmul_i8w_bf16a_
 
     // cp.async tile `kt` (A rows, raw int8 weights, scales) into ring slot `kt % STAGES`.
     auto issue_tile = [&](unsigned int kt) {
+#ifdef BRAIN_PROBE_NO_LOAD
+        if (kt > 1) return;
+#endif
         const unsigned int slot = kt % STAGES;
         const unsigned int a_dst = base + OFF_A + slot * A_STAGE_BYTES;
         for (unsigned int i = 0; i < 8; ++i) {            // 2048 16-byte chunks of A
@@ -193,6 +196,9 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_matmul_i8w_bf16a_
     // Decode the raw tile of ring slot `slot` into decoded buffer `buf`: thread t takes row t / 2 and
     // the 64 k of sub-tile t % 2.
     auto decode_tile = [&](unsigned int slot, unsigned int buf) {
+#ifdef BRAIN_PROBE_NO_DECODE
+        return;
+#endif
         const unsigned int row = tid >> 1, half = tid & 1;
         const unsigned char* raw = gen + OFF_RAW + slot * RAW_STAGE_BYTES;
         const float* scl = reinterpret_cast<const float*>(gen + OFF_SCL + slot * SCL_STAGE_BYTES) + row * 4;
@@ -200,12 +206,24 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_matmul_i8w_bf16a_
 #pragma unroll
         for (int j = 0; j < 4; ++j) {                      // chunk c = 4 * half + j of the 8 raw chunks
             const unsigned int c = 4 * half + j;
+#ifdef BRAIN_PROBE_DEC_NO_LDS
+            const uint4 r = make_uint4(c, row, j, half);
+#else
             const uint4 r = *reinterpret_cast<const uint4*>(raw + row * 128 + ((c ^ (row & 7)) << 4));
+#endif
             unsigned int px[8];
+#ifdef BRAIN_PROBE_DEC_NO_MATH
+            px[0] = r.x; px[1] = r.y; px[2] = r.z; px[3] = r.w; px[4] = r.x; px[5] = r.y; px[6] = r.z; px[7] = r.w;
+#else
             brain_decode16(r, scl[c >> 1], px);
+#endif
             // 16 bf16 = two 16-byte chunks, 2 * j and 2 * j + 1 of this sub-tile's row.
+#ifdef BRAIN_PROBE_DEC_NO_STS
+            if (px[0] == 0x12345678u && px[7] == 0x9abcdef0u) *reinterpret_cast<uint4*>(dst) = make_uint4(px[1], px[2], px[3], px[4]);
+#else
             *reinterpret_cast<uint4*>(dst + (((2 * j) ^ (row & 7)) << 4)) = make_uint4(px[0], px[1], px[2], px[3]);
             *reinterpret_cast<uint4*>(dst + (((2 * j + 1) ^ (row & 7)) << 4)) = make_uint4(px[4], px[5], px[6], px[7]);
+#endif
         }
     };
 
@@ -235,11 +253,13 @@ extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_matmul_i8w_bf16a_
         const unsigned int a_slot = base + OFF_A + (kt % STAGES) * A_STAGE_BYTES + wg * (64 * 128);
         const unsigned int b_buf = base + OFF_B + (kt & 1) * B_STAGE_BYTES;
         brain_wgmma_fence();
+#ifndef BRAIN_PROBE_NO_MMA
 #pragma unroll
         for (int ks = 0; ks < 8; ++ks) {
             const unsigned int sub = ks >> 2, kin = (ks & 3) * 32;   // bytes within the 128-byte row
             brain_wgmma_m64n128k16(acc, brain_desc(a_slot + sub * SUB_BYTES + kin), brain_desc(b_buf + sub * SUB_BYTES + kin), 1);
         }
+#endif
         brain_wgmma_commit();
 
         // 2. While they run: decode tile kt + 1. Its copies were issued an iteration ago; only tile
