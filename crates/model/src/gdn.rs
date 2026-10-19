@@ -519,6 +519,8 @@ pub struct GdnScratchTrainBufs {
 }
 
 impl GdnScratchTrainBufs {
+    /// No field is cleared at allocation: a step of the chunk forward writes each before it is read, except the
+    /// three `clears()` names, which the caller zeroes at submit (a debug build poisons the blocks).
     pub fn new(g: &Gpu, shape: &GdnShape) -> GdnScratchTrainBufs {
         let bhc = shape.bhc() as u64;
         let bh = shape.bh() as u64;
@@ -527,26 +529,26 @@ impl GdnScratchTrainBufs {
         let dv = shape.dv as u64;
         let n_chunks = shape.n_chunks() as u64;
         GdnScratchTrainBufs {
-            g_cs: g.storage(bhc * c),
-            exp_g_cs: g.storage(bhc * c),
-            k_beta: g.storage(bhc * c * dk),
-            v_beta: g.storage(bhc * c * dv),
-            k_beta_decay: g.storage(bhc * c * dk),
-            decay_mask: g.storage(bhc * c * c),
-            raw_attn0: g.storage(bhc * c * c),
-            attn0: g.storage(bhc * c * c),
-            t_mat: g.storage(bhc * c * c),
-            u: g.storage(bhc * c * dv),
-            w: g.storage(bhc * c * dk),
-            raw_intra: g.storage(bhc * c * c),
-            intra_scores: g.storage(bhc * c * c),
-            q_scaled: g.storage(bh * c * dk),
-            decay_scale: g.storage(bh * c),
-            decayed_k: g.storage(bh * c * dk),
-            v_prime: g.storage(bh * c * dv),
-            v_new: g.storage(bh * c * dv),
-            decay_scale_hist: g.storage(bhc * c),
-            state_history: g.storage((n_chunks + 1) * bh * dk * dv),
+            g_cs: g.storage_uninit(bhc * c),
+            exp_g_cs: g.storage_uninit(bhc * c),
+            k_beta: g.storage_uninit(bhc * c * dk),
+            v_beta: g.storage_uninit(bhc * c * dv),
+            k_beta_decay: g.storage_uninit(bhc * c * dk),
+            decay_mask: g.storage_uninit(bhc * c * c),
+            raw_attn0: g.storage_uninit(bhc * c * c),
+            attn0: g.storage_uninit(bhc * c * c),
+            t_mat: g.storage_uninit(bhc * c * c),
+            u: g.storage_uninit(bhc * c * dv),
+            w: g.storage_uninit(bhc * c * dk),
+            raw_intra: g.storage_uninit(bhc * c * c),
+            intra_scores: g.storage_uninit(bhc * c * c),
+            q_scaled: g.storage_uninit(bh * c * dk),
+            decay_scale: g.storage_uninit(bh * c),
+            decayed_k: g.storage_uninit(bh * c * dk),
+            v_prime: g.storage_uninit(bh * c * dv),
+            v_new: g.storage_uninit(bh * c * dv),
+            decay_scale_hist: g.storage_uninit(bhc * c),
+            state_history: g.storage_uninit((n_chunks + 1) * bh * dk * dv),
         }
     }
 
@@ -618,6 +620,8 @@ pub struct GdnBwdScratchBufs {
 
 impl GdnBwdScratchBufs {
     /// The scratch of the portable backward and of the fast kernels that keep its dispatch sequence.
+    /// Nothing is cleared at allocation; the four `clears()` names are zeroed by the caller at submit, and a
+    /// debug build poisons the rest.
     pub fn new(g: &Gpu, shape: &GdnShape) -> GdnBwdScratchBufs {
         let bhc = shape.bhc() as u64;
         let bh = shape.bh() as u64;
@@ -625,31 +629,31 @@ impl GdnBwdScratchBufs {
         let dk = shape.dk as u64;
         let dv = shape.dv as u64;
         GdnBwdScratchBufs {
-            d_decayed_k: g.storage(bhc * c * dk),
-            d_q_scaled: g.storage(bhc * c * dk),
-            d_v_new: g.storage(bhc * c * dv),
-            d_decay_scale: g.storage(bhc * c),
-            v_prime_all: g.storage(bhc * c * dv),
-            v_new_all: g.storage(bhc * c * dv),
-            decayed_k_all: g.storage(bhc * c * dk),
-            q_scaled_all: g.storage(bhc * c * dk),
-            state_a: g.storage(bh * dk * dv),
-            d_raw_intra: g.storage(bhc * c * c),
-            d_k_beta_decay: g.storage(bhc * c * dk),
-            d_v_beta: g.storage(bhc * c * dv),
-            d_raw_attn0: g.storage(bhc * c * c),
-            d_attn0: g.storage(bhc * c * c),
-            d_g_cs: g.storage(bhc * c),
-            d_exp_g_cs: g.storage(bhc * c),
-            d_t_mat: g.storage(bhc * c * c),
-            d_u: g.storage(bhc * c * dv),
-            d_w: g.storage(bhc * c * dk),
-            d_intra_scores: g.storage(bhc * c * c),
-            d_decay_mask: g.storage(bhc * c * c),
-            d_k_beta: g.storage(bhc * c * dk),
-            dot_scratch: g.storage(bhc * c),
-            mul_scratch: g.storage(bhc * c),
-            mul_scratch_cc: g.storage(bhc * c * c),
+            d_decayed_k: g.storage_uninit(bhc * c * dk),
+            d_q_scaled: g.storage_uninit(bhc * c * dk),
+            d_v_new: g.storage_uninit(bhc * c * dv),
+            d_decay_scale: g.storage_uninit(bhc * c),
+            v_prime_all: g.storage_uninit(bhc * c * dv),
+            v_new_all: g.storage_uninit(bhc * c * dv),
+            decayed_k_all: g.storage_uninit(bhc * c * dk),
+            q_scaled_all: g.storage_uninit(bhc * c * dk),
+            state_a: g.storage_uninit(bh * dk * dv),
+            d_raw_intra: g.storage_uninit(bhc * c * c),
+            d_k_beta_decay: g.storage_uninit(bhc * c * dk),
+            d_v_beta: g.storage_uninit(bhc * c * dv),
+            d_raw_attn0: g.storage_uninit(bhc * c * c),
+            d_attn0: g.storage_uninit(bhc * c * c),
+            d_g_cs: g.storage_uninit(bhc * c),
+            d_exp_g_cs: g.storage_uninit(bhc * c),
+            d_t_mat: g.storage_uninit(bhc * c * c),
+            d_u: g.storage_uninit(bhc * c * dv),
+            d_w: g.storage_uninit(bhc * c * dk),
+            d_intra_scores: g.storage_uninit(bhc * c * c),
+            d_decay_mask: g.storage_uninit(bhc * c * c),
+            d_k_beta: g.storage_uninit(bhc * c * dk),
+            dot_scratch: g.storage_uninit(bhc * c),
+            mul_scratch: g.storage_uninit(bhc * c),
+            mul_scratch_cc: g.storage_uninit(bhc * c * c),
             d_state_hist: None,
         }
     }
@@ -661,7 +665,7 @@ impl GdnBwdScratchBufs {
     pub fn new_for(g: &Gpu, ids: &GdnIds, shape: &GdnShape) -> GdnBwdScratchBufs {
         let mut bufs = Self::new(g, shape);
         if tensor_core_backward_offered(g, ids, shape) {
-            bufs.d_state_hist = Some(g.storage(shape.bhc() as u64 * shape.dk as u64 * shape.dv as u64));
+            bufs.d_state_hist = Some(g.storage_uninit(shape.bhc() as u64 * shape.dk as u64 * shape.dv as u64));
         }
         bufs
     }
