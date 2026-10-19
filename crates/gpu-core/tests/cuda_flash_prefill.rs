@@ -493,7 +493,7 @@ fn version_2_matches_the_original_kernel_on_a_bf16_and_an_int8_cache() {
                 gpu.write(&d.base.ctx, &vec![0x7fc0_0000u32; (seen.c.n * N_HEADS * HD) as usize]);
                 out.push(d.base.run(&gpu, &step, &seen));
             }
-            gpu_core::provider::cuda::set_flash_prefill_v2(false);
+            gpu_core::provider::cuda::set_flash_prefill_v2(true);
             assert!(out[1].iter().all(|x| x.is_finite()), "{kv:?} case {i}: version 2 left a row unwritten");
             let maxdiff = out[0].iter().zip(&out[1]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
             let bar = 2e-3 * rms(&out[0]);
@@ -555,7 +555,7 @@ fn the_int8_cache_prefill_rates_at_the_serving_chunk() {
         eprintln!("cuda_flash_prefill: serving chunk int8 n={n} start={start}: {name} {ms:.3} ms");
         out.push(ctx);
     }
-    gpu_core::provider::cuda::set_flash_prefill_v2(false);
+    gpu_core::provider::cuda::set_flash_prefill_v2(true);
     let diff = out[0].iter().zip(&out[1]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
     eprintln!("cuda_flash_prefill: version 1 vs version 2 max |diff| {diff:.2e} on outputs of rms {:.2e}", rms(&out[0]));
 }
@@ -583,7 +583,7 @@ fn both_flash_versions_stay_close_to_fp32_at_large_score_magnitudes() {
                 gpu_core::provider::cuda::set_flash_prefill_v2(v2);
                 let step = d.native(&gpu, &seen).expect("the production helper must take a head_dim-256 request on this device");
                 let got = d.base.run(&gpu, &step, &seen);
-                gpu_core::provider::cuda::set_flash_prefill_v2(false);
+                gpu_core::provider::cuda::set_flash_prefill_v2(true);
                 let rel = (want.iter().zip(&got).map(|(a, b)| ((a - b) as f64).powi(2)).sum::<f64>() / norm).sqrt();
                 eprintln!("cuda_flash_prefill: {kv:?} score scale {}x v2={v2}: rel-L2 to the portable kernel {rel:.2e}", mag * mag);
                 assert!(rel <= 3e-3, "{kv:?} at score scale {}x, v2={v2}: rel-L2 {rel:.2e} from the fp32 kernel (bar 3e-3)", mag * mag);

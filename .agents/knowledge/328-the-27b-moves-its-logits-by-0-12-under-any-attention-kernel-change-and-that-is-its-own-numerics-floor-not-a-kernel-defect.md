@@ -33,3 +33,13 @@ rel-L2) and the engine against the floor (3x), and report flips together with th
 
 Not a finding about the quality of the old kernel: it is simply one more point at the floor. Replies change under any
 numerics change of this size, so a "0 of N replies identical" check is not a defect detector for this model.
+
+Confirmation over eight prompts (window9, 2026-10-19 19:37, `runs/b27/window9.log`, card 1, 3070-3931 token prompts,
+24 greedy steps each, int8 KV): the numerics floor is 8.85e-2 mean rel-L2; flash v1 is 1.279e-1 (1.44x the floor), flash
+v2 1.292e-1 (1.46x), v1 with the fused front end and no drain 1.271e-1 (1.44x). v2 is within noise of v1 and well under
+the 3x gate, so version 2 is the default again (-16 ms per 512-row prefill round, knowledge 327).
+
+W8A16 (bf16 activations through the wgmma GEMM, scratch build) against the same portable-fp32-attention reference is not
+closer or more stable than W8A8: mean rel-L2 1.26e-1 vs 1.29e-1 (v1 attention), mean KL 3.3e-2..5.6e-2 vs 3.8e-2..4.2e-2
+and the same order of argmax flips; step-0 rel-L2 differs by prompt in both directions (0.19 vs 0.29, 0.49 vs 0.33).
+Activation precision is therefore not what sets the 27B's floor, and the wgmma path stays off main.

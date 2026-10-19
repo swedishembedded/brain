@@ -962,10 +962,10 @@ pub fn paged_flash_prefill_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backen
 const FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES: u32 = (64 + 2 * 64) * (256 + 8) * 2;
 const FLASH_PREFILL_V2_LAUNCH: backend_api::CudaLaunch = backend_api::CudaLaunch { dynamic_shared_bytes: FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
 
-static FLASH_PREFILL_V2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static FLASH_PREFILL_V2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// Choose the head_dim 256 prefill attention over a bf16 or int8 KV cache: the original kernel (the default) or
-/// version 2, which is opt-in until it agrees with the original on the real 27B (it moved the logits at large margins). Process-wide; takes effect for steps built after.
+/// Choose the head_dim 256 prefill attention over a bf16 or int8 KV cache: version 2 (the default) or the original
+/// kernel, which stays as the fallback and as the baseline of an A/B. Process-wide; takes effect for steps built after.
 pub fn set_flash_prefill_v2(on: bool) {
     FLASH_PREFILL_V2.store(on, std::sync::atomic::Ordering::Relaxed);
 }

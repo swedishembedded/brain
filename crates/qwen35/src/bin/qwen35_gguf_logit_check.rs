@@ -156,8 +156,8 @@ fn main() {
         Setting { name: "portable fp32 attention (reference)", portable: true, v2: false, fusion: false, drain: true },
         Setting { name: "flash v1 (the original kernel)", portable: false, v2: false, fusion: false, drain: true },
         Setting { name: "flash v2", portable: false, v2: true, fusion: false, drain: true },
-        Setting { name: "flash v1 + fused front end", portable: false, v2: false, fusion: true, drain: true },
-        Setting { name: "flash v1 + fused + no drain (the default)", portable: false, v2: false, fusion: true, drain: false },
+        Setting { name: "flash v2 + fused front end", portable: false, v2: true, fusion: true, drain: true },
+        Setting { name: "flash v2 + fused + no drain (the default)", portable: false, v2: true, fusion: true, drain: false },
     ];
 
     let mut floors: Vec<f64> = Vec::new();
