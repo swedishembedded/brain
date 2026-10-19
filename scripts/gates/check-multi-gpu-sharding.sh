@@ -75,6 +75,7 @@ kronos	default_ref NeoQuasar/Kronos-base, a candlestick-scale forecasting transf
 lpips	AlexNet convolutional trunk plus five 1x1 heads, a few million parameters - single GPU by design.
 lfm2	default_ref LiquidAI/LFM2.5-350M - 350M, single GPU by design.
 mimi	Neural audio codec, well under 1B params - single GPU by design.
+minicpmv	default_ref openbmb/MiniCPM-V-4.6 - a SigLIP ViT tower plus the Qwen3.5-0.8B decoder (crates/minicpmv/src/lib.rs), well under 2B params - fits one GPU's fp32 budget comfortably.
 moondream3	SigLIP + MoE decoder - not yet audited/migrated onto model::shard; backlog.
 nemotronasr	default_ref nemotron-3.5-asr-streaming-0.6b - 0.6B, single GPU by design.
 pulid	PuLID-FLUX identity conditioning, adapter-scale on top of a host backbone - single GPU by design.
