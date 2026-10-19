@@ -104,6 +104,10 @@ pub struct CallTotals {
     /// clear, and the bytes they cleared. Device work no kernel table shows.
     pub zero_calls: u64,
     pub zeroed_bytes: u64,
+    /// Allocations handed out without a clear (`Backend::storage_uninit`), and their bytes: the clears
+    /// the caller's full-overwrite promise saved.
+    pub uninit_calls: u64,
+    pub uninit_bytes: u64,
 }
 
 static TOTAL_DEVICE_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -114,6 +118,8 @@ static TOTAL_SUBMIT_NANOS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_ZERO_CALLS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_ZEROED_BYTES: AtomicU64 = AtomicU64::new(0);
+static TOTAL_UNINIT_CALLS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_UNINIT_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// See [`CallTotals`].
 pub fn call_totals() -> CallTotals {
@@ -126,6 +132,8 @@ pub fn call_totals() -> CallTotals {
         wait_nanos: TOTAL_WAIT_NANOS.load(Ordering::Relaxed),
         zero_calls: TOTAL_ZERO_CALLS.load(Ordering::Relaxed),
         zeroed_bytes: TOTAL_ZEROED_BYTES.load(Ordering::Relaxed),
+        uninit_calls: TOTAL_UNINIT_CALLS.load(Ordering::Relaxed),
+        uninit_bytes: TOTAL_UNINIT_BYTES.load(Ordering::Relaxed),
     }
 }
 
@@ -134,6 +142,10 @@ pub(crate) fn host_launched(n: u64) {
 }
 pub(crate) fn host_submitted(nanos: u64) {
     TOTAL_SUBMIT_NANOS.fetch_add(nanos, Ordering::Relaxed);
+}
+pub(crate) fn left_uninitialised(bytes: usize) {
+    TOTAL_UNINIT_CALLS.fetch_add(1, Ordering::Relaxed);
+    TOTAL_UNINIT_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
 }
 pub(crate) fn zeroed(bytes: usize) {
     TOTAL_ZERO_CALLS.fetch_add(1, Ordering::Relaxed);

@@ -1299,27 +1299,43 @@ mod native_facade {
 
         /// Device storage for `n` u32/f32 words.
         pub fn storage(&self, n: u64) -> DeviceBuffer {
+            self.storage_with(n, false)
+        }
+
+        /// [`Self::storage`] for a buffer whose every word a kernel writes before anything reads it: the
+        /// contents are unspecified (a CUDA debug build fills them with 0xFF bytes, so a read of an unwritten
+        /// word is visible in a test), and the backend skips the clear a zeroed allocation costs. A replayed
+        /// arena slot is handed back as it was left, exactly as for [`Self::storage`].
+        pub fn storage_uninit(&self, n: u64) -> DeviceBuffer {
+            self.storage_with(n, true)
+        }
+
+        fn storage_with(&self, n: u64, uninit: bool) -> DeviceBuffer {
             let mut g = self.arena.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((_, a)) = g.iter_mut().find(|(_, a)| a.active()) {
                 match a.take(n) {
                     crate::scratch::Slot::Hit(b) => return b,
                     crate::scratch::Slot::Miss(i) => {
-                        let b = self.fresh_storage(n);
+                        let b = self.fresh_storage(n, uninit);
                         a.install(i, n, b.clone());
                         return b;
                     }
                 }
             }
             drop(g);
-            self.fresh_storage(n)
+            self.fresh_storage(n, uninit)
         }
 
         /// [`Self::storage`] bypassing the arena - the allocation itself, and
         /// the only place the ceiling is charged (a recycled buffer was
         /// charged when it was created and is still held).
-        fn fresh_storage(&self, n: u64) -> DeviceBuffer {
+        fn fresh_storage(&self, n: u64, uninit: bool) -> DeviceBuffer {
             self.charge("storage", storage_bytes(n));
-            self.inner.storage(n)
+            if uninit {
+                self.inner.storage_uninit(n)
+            } else {
+                self.inner.storage(n)
+            }
         }
 
         /// Draw this handle's [`Self::storage`] calls from a replay arena

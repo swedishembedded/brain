@@ -280,7 +280,7 @@ fn main() {
         // host-bound shows launches near the dispatch count; one that replays shows graph_replays instead.
         let calls = gpu_core::cuda_call_totals();
         println!(
-            "PROBE step={step} loss={loss:.4} forward_s={fwd:.2} step_s={total:.2} tokens_per_s={:.0} dispatches={dispatches} cpu_s={cpu} loss_bits={:08x} alloc_calls={} host_launches={} graph_replays={} submit_s={:.2} wait_s={:.2} zero_calls={} zeroed_gib={:.1}",
+            "PROBE step={step} loss={loss:.4} forward_s={fwd:.2} step_s={total:.2} tokens_per_s={:.0} dispatches={dispatches} cpu_s={cpu} loss_bits={:08x} alloc_calls={} host_launches={} graph_replays={} submit_s={:.2} wait_s={:.2} zero_calls={} zeroed_gib={:.1} uninit_calls={} uninit_gib={:.1}",
             tokens as f64 / total,
             loss.to_bits(),
             calls.device_alloc_calls - calls0.device_alloc_calls + calls.pool_alloc_calls - calls0.pool_alloc_calls,
@@ -290,6 +290,8 @@ fn main() {
             (calls.wait_nanos - calls0.wait_nanos) as f64 * 1e-9,
             calls.zero_calls - calls0.zero_calls,
             (calls.zeroed_bytes - calls0.zeroed_bytes) as f64 / (1u64 << 30) as f64,
+            calls.uninit_calls - calls0.uninit_calls,
+            (calls.uninit_bytes - calls0.uninit_bytes) as f64 / (1u64 << 30) as f64,
         );
         if step > 1 {
             warm_secs += total;

@@ -1250,6 +1250,13 @@ impl Step {
 pub trait Backend: Send + Sync {
     /// Allocate `n` f32 words of zeroed device storage.
     fn storage(&self, n: u64) -> DeviceBuffer;
+    /// Allocate `n` f32 words of device storage with UNSPECIFIED contents, for a buffer whose every
+    /// word a kernel writes before anything reads it. A backend that can skip the clear does (the CUDA
+    /// backend, which otherwise enqueues a memset per allocation); the default is the zeroed
+    /// [`Self::storage`], so a backend without the optimisation is simply correct.
+    fn storage_uninit(&self, n: u64) -> DeviceBuffer {
+        self.storage(n)
+    }
     /// Allocate device storage initialised from host `data`.
     fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer;
     /// Allocate a buffer of `size` bytes with the given usage.
@@ -1780,6 +1787,13 @@ pub struct DeviceStats {
 pub trait Backend {
     /// Allocate `n` f32 words of zeroed device storage.
     fn storage(&self, n: u64) -> DeviceBuffer;
+    /// Allocate `n` f32 words of device storage with UNSPECIFIED contents, for a buffer whose every
+    /// word a kernel writes before anything reads it. A backend that can skip the clear does (the CUDA
+    /// backend, which otherwise enqueues a memset per allocation); the default is the zeroed
+    /// [`Self::storage`], so a backend without the optimisation is simply correct.
+    fn storage_uninit(&self, n: u64) -> DeviceBuffer {
+        self.storage(n)
+    }
     /// Allocate device storage initialised from host `data`.
     fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer;
     /// Allocate a buffer of `size` bytes with the given usage.

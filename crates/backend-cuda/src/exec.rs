@@ -715,6 +715,17 @@ impl Context {
         )
     }
 
+    /// Fill the whole allocation with 0xFF bytes, enqueued on [`Self::stream`]: the debug-build stand-in for
+    /// "uninitialised" (see `Backend::storage_uninit`). Not counted as a clear.
+    pub fn poison(&self, mem: &DeviceMem) -> Result<(), String> {
+        if mem.len == 0 {
+            return Ok(());
+        }
+        self.make_current()?;
+        // SAFETY: as in `zero`.
+        self.d.check(unsafe { (self.fns.memset_d8_async)(mem.ptr, 0xFF, mem.len, self.stream) }, "cuMemsetD8Async")
+    }
+
     /// Enqueue a copy of `src`'s words into `mem` on [`Self::stream`].
     ///
     /// `src` must stay alive and unmodified until the stream reaches the copy,

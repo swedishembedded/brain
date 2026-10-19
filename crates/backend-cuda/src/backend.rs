@@ -1409,6 +1409,18 @@ impl backend_api::Backend for CudaBackend {
         self.wrap_initialised(mem)
     }
 
+    fn storage_uninit(&self, n: u64) -> DeviceBuffer {
+        let mem = self.alloc(n * 4, "storage");
+        // Nothing clears the allocation: the caller promises a kernel writes every word first. A debug
+        // build (every `cargo test`) fills it with 0xFF bytes instead, an f32 NaN and an i32 -1, so a
+        // read of a word nobody wrote shows up in a test rather than as whatever the last tenant left.
+        crate::live::left_uninitialised(mem.len());
+        if cfg!(debug_assertions) {
+            self.ctx.poison(&mem).unwrap_or_else(|e| panic!("backend-cuda: poisoning new storage failed: {e}"));
+        }
+        self.wrap_initialised(mem)
+    }
+
     fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
         let buf = CudaBuf::wrap(self.alloc((data.len() * 4).max(4) as u64, name));
         let mem = &CudaBuf::of(&buf).mem;
