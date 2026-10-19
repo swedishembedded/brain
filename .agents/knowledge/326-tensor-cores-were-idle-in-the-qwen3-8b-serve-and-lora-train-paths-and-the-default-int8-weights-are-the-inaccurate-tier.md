@@ -30,12 +30,16 @@ GH200 card (cores pinned to the card's NUMA node), real Qwen3-8B weights where s
 |---|---|---|---|
 | prefill chunk of 512 rows, ms (tok/s) | 520.4 (984) | 71.3 (7185) | `sp-8b-kv8-{fp32,auto}.log` |
 | same, bf16 weights (`--qwen-weights-bf16`) | | 61.0 (8393) | `sp-8b-kv8-bf16w.log` |
-| LoRA step at block 3532, s (tok/s) | 12.85 (275) | 3.37 (1047) | `lora-8b-{fp32,auto2}.log` |
-| training forward, s | 4.16 | 0.31 | same |
+| LoRA step at block 3532, s (tok/s) | 12.85 (275) | 1.50 (2349) | `lora-8b-fp32.log`, `lora-final-fp32base-3532.log` |
+| training forward, s | 4.16 | 0.43 | same |
+| LoRA step, bf16 base, block 8192 (not run in the fp32 tier) | | 2.55 (3214) | `lora-final-bf16base-8192.log` |
+| batched decode step, 32 rows, ctx 1024, int8 KV, ms | 220-310 (GEMV) | 74 (library GEMM from 8 rows) | `dec2-8b-32-fp32-fp32.log`, `sweep-8b-r32-min*.log` |
+| same, 8 rows | 77 | 57 | `sweep-8b-r8-min*.log` |
 
-The training step went 12.85 -> 7.61 s with TF32 GEMMs plus the native attention forward (`lora-8b-auto.log`)
-and -> 3.37 s once the native backward and the library LoRA products landed. Memory is unchanged by the tier
-(peak 41.9 GB sampled by `nvidia-smi` over both runs, `gpu-run8b.csv`; L0 measured 41.4 GB for the fp32 trainer).
+The training step went 12.85 -> 7.61 s with TF32 GEMMs plus the native attention forward (`lora-8b-auto.log`),
+-> 3.37 s with the native backward and the library LoRA products (`lora-8b-auto2.log`) and -> 1.50 s on the final
+tree (`lora-final-fp32base-3532.log`). Memory is unchanged by the tier
+(peak 41.9 GB sampled by `nvidia-smi` over the first two runs, `gpu-run8b.csv`; L0 measured 41.4 GB for the fp32 trainer; the bf16-base run at block 8192 was not isolated per process).
 
 ## Accuracy against the exact fp32 tier (real Qwen3-8B)
 
@@ -78,3 +82,8 @@ oracle (`crates/gpu-core/tests/cuda_flash_{prefill_hd128,attn_fwd,attn_bwd}.rs`;
   power-of-two scale of the whole call, chosen from the largest |dO|, or the small rows underflow.
 - `qwen_bench serve` refused an 8B shape through a hard-coded 22 GB budget that no 90 GiB card needed; it is now
   `--budget-gb`.
+- Decode: at 32 rows the GEMV kernels re-read the weight per row group (15 percent of the memory roof); the
+  library GEMM from 8 rows cut the 8B step from 220-310 ms to 74 ms (a 2-row threshold gave 559 ms in one noisy run,
+  so the threshold is 8). What remains at 32 rows is the int8 attention triad (92 ms at a 1024-token context, growing
+  with it) and per-dispatch cost: the next lever for an agentic request, whose 300 decode tokens (9.4 s at one
+  stream) now cost more than its 4k-token prefill (0.6 s).
