@@ -6,6 +6,8 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-10-19
+
 ### Breaking Changes
 
 - A forecast or backtest over the stdio protocol reports the seed it ran under (`forecast_result.seed`, `backtest_result.seed`, `Event::ForecastResult::seed`, `Event::BacktestResult::seed`), and `brain-py`'s `forecast`/`backtest` no longer send `seed: 0` when none is given: they leave the draw to the server and expose it as `Forecast.seed` / `BacktestResult.seed`, so an unseeded call that used to sample at seed 0 now samples at a drawn seed. The DIAMOND parity fixtures (`make wm/fixtures`), the GenieRedux parity dumps, the ASR and FinCast golden dumps and the doom loop scripts (`ladder.sh`, `improve.sh`, `scoreboard.sh`, whose seed is recorded in their output directory) draw and print a seed when none is given instead of using a fixed one; `SEEDS` in `improve.sh` is now `CAMPAIGNS` and in `ladder.sh` `PROVE_EPISODES`, since they count campaigns and episodes
@@ -24,6 +26,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ### Features
 
+- The manual: `docs/` is restructured into getting started, guides, concepts, reference, examples and contributing, ordered by `docs/manifest.yaml` and published at https://swedishembedded.com/docs/brain. `make docs/build` builds the publication into `build/docs/` with the pinned publisher in `tools/docs-publisher/` (offline, no Rust build); `make docs/check` checks that it builds reproducibly and that the docs gates pass; `make docs/clean` removes `build/docs` and `build/pdf`. `make docs` and `make docs/pdf` render the PDF manual in the manifest's navigation order
 - Generated media carry a run record: `brain flux2 generate`, `brain qwen3tts clone|synth|design`, `brain wan t2v` and `brain ltxv t2v|upscale|v2v|dfr` write `<out>.json` beside the output with the seed and the decoding parameters, and the imagegen samples write one per image
 - `brain qwen3 finetune --lora` continues an adapter that already exists under the given `--adapter` instead of overwriting it; `--fresh` restarts from the base
 - Model references take `base+name` (and `base+name:tag`) as the short form of `base:local:name:latest`, so an adapter is selected the way a model is: `Qwen/Qwen3-8B+maren`
