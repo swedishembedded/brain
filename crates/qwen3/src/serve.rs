@@ -948,6 +948,12 @@ struct SwapBufs {
 /// be irrelevant next to the pool itself.
 const KV_SWAP_STAGING_BYTES: u64 = 64 << 20;
 
+/// The fewest rows of one linear that run on the library's tensor-core GEMM by default: below it the GEMV kernels
+/// stream the weight once per row group at the bandwidth roof. Measured on the 8B at a 1024-token context, 32 rows
+/// (`qwen_bench serve 32 5 1024 kv8 --model 8b --library-min-rows N`): the GEMV step 220-310 ms against 74 ms
+/// through the library; 8 rows 77 ms against 57 ms (knowledge 325, runs sweep-8b-*).
+const LIBRARY_MIN_ROWS: u32 = 8;
+
 impl Engine {
     /// Build from an in-memory decoder weight map (tests / embedded weights).
     /// `num_blocks` physical blocks of `block_size` tokens, up to `max_batch`
@@ -1374,7 +1380,7 @@ impl Engine {
             tier,
             half_gemm,
             gemm,
-            library_min_rows: DECODE_REGIME_MAX_ROWS + 1,
+            library_min_rows: LIBRARY_MIN_ROWS,
             i8_scratch,
             tuned_i8,
             tuned_splitk,
@@ -1461,8 +1467,8 @@ impl Engine {
         self.i8_scratch.is_some()
     }
 
-    /// Choose the arithmetic of the prefill-shaped fp32-weight linears: `Auto` (the default) runs rows
-    /// above the decode regime on the vendor library's TF32 tensor cores where the device has them
+    /// Choose the arithmetic of the fp32-weight linears: `Auto` (the default) runs rows from
+    /// [`LIBRARY_MIN_ROWS`] up on the vendor library's TF32 tensor cores where the device has them
     /// (operands rounded to a 10-bit mantissa, binary32 accumulation); `Fp32Reference` keeps the
     /// exact fp32 kernels.
     /// Takes effect for steps built afterwards, so call it before the first request.
@@ -1470,7 +1476,7 @@ impl Engine {
         self.gemm = LibraryGemmProvider::for_gpu(&self.gpu, precision);
     }
 
-    /// The fewest rows of a linear that take the library's tensor-core GEMM (default: past the decode regime).
+    /// The fewest rows of a linear that take the library's tensor-core GEMM (default [`LIBRARY_MIN_ROWS`]).
     /// The sweep that picks a lower value for batched decode is `qwen_bench serve --library-min-rows`.
     pub fn set_library_min_rows(&mut self, rows: u32) {
         self.library_min_rows = rows.max(1);
@@ -1864,8 +1870,8 @@ impl Engine {
     fn linear(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, out: &DeviceBuffer, rows: u32) {
         match w {
             Weight::F32 { w, n, k } => {
-                // Prefill-shaped rows on TF32 tensor cores when the server asked for that tier; the
-                // decode regime is bandwidth-bound and keeps the GEMV kernels.
+                // Rows from `library_min_rows` up (batched decode and prefill) on TF32 tensor cores; fewer
+                // rows are bandwidth-bound and keep the GEMV kernels.
                 let whole = |buf| library::Operand { buf, range: (0, 0) };
                 if rows >= self.library_min_rows && self.gemm.forward_tf32(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
                     return;
@@ -1877,8 +1883,8 @@ impl Engine {
                 self.mm8(s, scratch, w, sw, *n, *k, out, rows);
             }
             Weight::BF16 { w, n, k } | Weight::F16 { w, n, k } => {
-                // Prefill-shaped rows of a bf16 weight on bf16 tensor cores (the activation is rounded to
-                // bf16 for the product, fp32 accumulation); the decode regime streams the weight through
+                // Rows from `library_min_rows` up of a bf16 weight on bf16 tensor cores (the activation is
+                // rounded to bf16 for the product, fp32 accumulation); fewer rows stream the weight through
                 // the inline-decode GEMV below.
                 let whole = |buf| library::Operand { buf, range: (0, 0) };
                 if matches!(self.tier, Dtype::BF16) && rows >= self.library_min_rows && self.gemm.forward(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {

@@ -60,7 +60,7 @@ application", "an orchestrator"). Enforced by `make check/scope`
    eval, and the **concurrent paged-KV serving engine** (`serve.rs`, see below).
    **Tensor cores are the default on a device that has them**, chosen on queried
    capability through the provider seam (`gpu_core::provider::library`,
-   `kernels_cuda`): fp32-weight linears above the decode regime multiply as TF32
+   `kernels_cuda`): fp32-weight linears of 8 or more rows (prefill, batched decode) multiply as TF32
    (cuBLAS, binary32 accumulation, no copy of the weights), bf16/NF4 bases as
    bf16, LoRA training builds record the same products, and the paged flash
    prefill at `head_dim` 128/256 runs on fp16 `mma`. `GemmPrecision::Fp32Reference`

@@ -172,7 +172,7 @@ queried capability (`GemmPrecision::Auto`, the default of `Engine`, `FitOpts` an
 `ChatFineTune`); `GemmPrecision::Fp32Reference` (`--qwen-gemm-fp32`, SDK
 `gemm_precision`) pins the exact fp32 kernels and bars the native attention too.
 
-- Linears of fp32 weights above the decode regime (more than 32 rows) run as TF32
+- Linears of fp32 weights with at least 8 rows (prefill and batched decode) run as TF32
   products (`LibraryGemmProvider::forward_tf32`/`dx_tf32`): operands keep their
   binary32 storage and are rounded to a 10-bit mantissa inside the multiply, fp32
   accumulation, no copy of the weights. bf16 weights run as bf16 (activation

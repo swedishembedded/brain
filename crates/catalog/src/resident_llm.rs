@@ -489,14 +489,13 @@ pub struct QwenServeConfig {
     /// checkpoint of `qwen3::footprint::INT8_WEIGHTS_FROM_PARAMS` parameters
     /// or more, which at fp32 does not fit one 24 GB card.
     pub weights_int8: Option<bool>,
-    /// `--qwen-weights-bf16`: the linears and the head are stored as bf16 and decoded inline (a bf16
-    /// checkpoint's own values, so the weights lose nothing; half the fp32 bytes and half the bytes a
-    /// decode step streams). Takes precedence over `weights_int8`.
+    /// `--qwen-weights-bf16`: the linears and the head are stored as bf16 and decoded inline (rounded to
+    /// bf16, exact for a checkpoint that ships bf16; half the fp32 bytes). Takes precedence over `weights_int8`.
     pub weights_bf16: bool,
     /// `--qwen-max-prefill N`, clamped to `1..=512`, default 512.
     pub max_prefill_cap: u32,
     /// `--qwen-gemm-fp32` (`Fp32Reference`) pins exact fp32 arithmetic. Default `Auto`: the
-    /// prefill-shaped fp32-weight linears multiply on TF32 tensor cores where the device has them
+    /// fp32-weight linears of 8 or more rows (prefill, batched decode) multiply on TF32 tensor cores where the device has them
     /// (operands rounded to a 10-bit mantissa, fp32 accumulation).
     pub gemm_precision: gpu_core::provider::library::GemmPrecision,
     /// `--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`: the

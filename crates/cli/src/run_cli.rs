@@ -239,12 +239,12 @@ QWEN3 SERVING TUNABLES  (--qwen-weights names the checkpoint to serve; the
                          or more, whose fp32 weights do not fit one 24 GB
                          card.
   --qwen-weights-fp32    keep every weight fp32, whatever the size.
-  --qwen-weights-bf16    store the linears and the head as bf16 (a bf16 checkpoint's
-                         own values: half the fp32 bytes in memory and per
-                         decode step, no weight rounding), decoded inline.
+  --qwen-weights-bf16    store the linears and the head as bf16 (rounded to bf16, exact for a
+                         checkpoint that ships bf16: half the fp32 bytes in
+                         memory), decoded inline.
   --qwen-gemm-fp32       pin exact fp32 arithmetic for the linears. By default
-                         the prefill-shaped (more than 32 rows) linears of
-                         fp32 weights run on TF32 tensor cores where the
+                         the linears of fp32 weights with at least 8 rows
+                         (prefill and batched decode) run on TF32 tensor cores where the
                          card has them (operands rounded to a 10-bit
                          mantissa, fp32 accumulation, no extra memory).
   --qwen-max-prefill N   cap the chunked-prefill row count below its 512
