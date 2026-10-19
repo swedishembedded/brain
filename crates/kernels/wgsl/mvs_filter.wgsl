@@ -30,7 +30,7 @@
 // A patch with no texture at all costs the maximum (`mvs_pm.wgsl`) and so
 // never passes, however consistent its plane: a plane propagated out over a
 // featureless region is consistent in every view by construction, whether
-// the region is a blank surface or empty background (measured: 13.5 % of
+// the region is a blank surface or empty background (measured: a noticeable share of
 // one view's measurements off the surface of a synthetic scene when such
 // pixels were kept on consistency alone).
 //

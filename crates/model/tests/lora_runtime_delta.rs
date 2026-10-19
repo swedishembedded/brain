@@ -103,9 +103,10 @@ fn a_runtime_lora_delivers_the_whole_delta_a_folded_one_does_not() {
     let x = fill(0xA1, m * k, 1.0);
     let w = fill(0xB2, n * k, 0.05);
     let a = fill(0xC3, r * k, 0.05);
+    // perf-number: ~0.5% is this fixture's delta-to-weight ratio, not a timing
     // `B` is sized so the folded delta sits at ~0.5% of the weight magnitude -
     // the regime a trained adapter actually occupies, and the one
-    // `flux2/tests/lora_requant_int8.rs` measures as 94.8% of weights rounding
+    // `flux2/tests/lora_requant_int8.rs` measures as nearly all weights rounding
     // back to their base code.
     let b0 = fill(0xD4, n * r, 1.0);
     let raw_delta = {

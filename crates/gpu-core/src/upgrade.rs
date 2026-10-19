@@ -235,7 +235,7 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         // The q4 twin of the row above (`matmul_i8_gemv` -> `_reg`), added
         // once the shape that mattered was actually measured. An earlier
         // pass benchmarked ONLY the un-templated, worst-case MREG=32 build
-        // at one generic k=n=2048 shape and found it 15-29% SLOWER at
+        // at one generic k=n=2048 shape and found it SLOWER at
         // m=1..16 - the same "compiled for 32 rows, asked for 1" pathology
         // `matmul_gemv_reg`'s own bucket ladder exists to avoid, and exactly
         // what running the WORST-CASE build at every m would produce. Re-run

@@ -161,8 +161,8 @@ mod kname {
     /// one-thread-per-output sibling, mirroring `matmul_i8_dyn`'s own tiled
     /// shape) - bound by [`Ops::bind`]'s `(PackedInt8, Dtype::Q4)` arm in
     /// place of [`MATMUL_Q4_DYN`] since the kernel-performance ledger's M5.5
-    /// entry closed it as "a clean win at every measured shape" (2.02x at
-    /// m=32, rising to 12.56x at m=2048) and bit-identical to it.
+    /// entry closed it as "a clean win at every measured shape" (the gain
+    /// growing with m) and bit-identical to it.
     pub const MATMUL_Q4_DYN_REG: &str = "matmul_q4_dyn_reg";
     pub const MATMUL_Q4_GEMV: &str = "matmul_q4_gemv";
     pub const MAX_ABS_ROW: &str = "max_abs_row";
@@ -1385,7 +1385,7 @@ impl Ops {
     /// dispatch plus a fresh `I8Scratch` allocation per activation, and a
     /// decode tape builds one activation per linear group per layer per token.
     /// Measured on a Qwen3-VL-4B caption (fp32 weights throughout), the two
-    /// kernels were 4.4% of all device time and the allocations ran to tens of
+    /// kernels were a measurable share of all device time and the allocations ran to tens of
     /// thousands per image, for a buffer no dispatch ever bound.
     ///
     /// The declaration is the CALLER's because only the caller knows its
@@ -2407,8 +2407,8 @@ mod tests {
     /// `Ops::bind`'s `(PackedInt8, Dtype::Q4)` arm must resolve to the M5.5
     /// register-tiled kernel, `matmul_q4_dyn_reg` - NOT the naive
     /// one-thread-per-output `matmul_q4_dyn` this arm used to bind (see this
-    /// module's own kernel-performance ledger entry: 2.02x faster at m=32,
-    /// rising to 12.56x at m=2048, and bit-identical to `matmul_q4_dyn`,
+    /// module's own kernel-performance ledger entry: faster at every
+    /// measured shape, the gain growing with m, and bit-identical to `matmul_q4_dyn`,
     /// `crates/model/tests/matmul_q4_gemm.rs::
     /// matmul_q4_dyn_reg_matches_fp32_oracle_and_is_bit_identical_to_dyn`).
     /// The sibling `(PackedInt8, Dtype::I8)` arm already binds its own tiled

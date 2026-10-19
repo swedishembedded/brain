@@ -287,8 +287,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     // cost of every hypothesis against every source view - views outermost,
     // so the warps resident at any moment gather from ONE source image
     // instead of cycling all of them through the cache per pixel. Measured on
-    // the finest level of a 1632x1224 capture: 1.11x from this order alone,
-    // and it is what lets `mvs_quad`'s packed samples pay (a further 1.23x;
+    // the finest level of a 1632x1224 capture: a gain from this order alone,
+    // and it is what lets `mvs_quad`'s packed samples pay (a further gain;
     // with hypotheses outermost the packing gained nothing)
     var cm: array<f32, 144>;
     for (var k = 0u; k < p.nsrc; k = k + 1u) {

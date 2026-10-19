@@ -5,7 +5,7 @@
 //! upgrade (`gpu_core::upgrade`). The W4A8 twin of `i8_gemv_reg_upgrade.rs`:
 //! `crates/model/tests/matmul_q4_speed_bench.rs`'s
 //! `gemv_vs_gemv_reg_at_qwen35_decode_shapes` measured `_reg` winning
-//! (1.55-1.88x) at every real qwen35 decode shape - unlike the earlier,
+//! at every real qwen35 decode shape - unlike the earlier,
 //! un-templated measurement `gpu_core::upgrade`'s own module doc records as a
 //! killed hypothesis, the per-bucket templated builds this table actually
 //! dispatches do not regress. This file is the correctness half that measurement

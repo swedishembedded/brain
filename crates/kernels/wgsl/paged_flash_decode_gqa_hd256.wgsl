@@ -26,8 +26,8 @@
 // batched` is ONE thread per (sequence, head) walking every key, and the apply
 // kernel is one thread per (sequence, head, channel) walking every key. At 128k
 // tokens that is 24 resp. 6144 threads each looping 131072 times - measured on
-// a GH200 at 0.7-1.4 s and 0.6-1.0 s PER DECODE STEP for ONE sequence (the 16
-// GQA layers together), against ~6 ms for the bytes the step reads. It also
+// a GH200 at seconds PER DECODE STEP for ONE sequence (the 16
+// GQA layers together), against milliseconds for the bytes the step reads. It also
 // reads every key and value once per QUERY head, six times over for Qwen3.8's
 // group of six, and materialises a `[batch, n_heads, context]` score slab twice.
 // A compact KV cache saves memory either way; it only saves TIME once the
@@ -52,8 +52,8 @@
 //             map needs: its 32 lanes read 32 different rows, so every load
 //             instruction costs 32 L1 wavefronts whatever its width, and the
 //             first version of this kernel (scalar loads, each key scored by
-//             four threads) was bound at 95% of the L1/TEX pipe with DRAM at
-//             8% - 3.3 ms per layer for a 128k context, f32 and compact tiers
+//             four threads) was bound by the L1/TEX pipe with DRAM nearly
+//             idle - slow per layer for a 128k context, f32 and compact tiers
 //             alike, because every tier issued one load per ELEMENT.
 //   softmax - thread `t` owns head `t / 16` and keys `t % 16 + 16 m`: a 4-step
 //             tree reduces the tile's max and then its sum, per head.

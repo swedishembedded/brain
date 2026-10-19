@@ -208,8 +208,8 @@ struct FastIdx {
     // in that query and key length are one `seq_len` and the value buffer has
     // no fused-KV offset. Without these three the whole attention half of such
     // a forward runs one output element per JIT invocation: measured on
-    // MiniMax-H3's real block shape (56 heads x 128, seq 960), 1.1 GFLOP/s for
-    // `attn_apply_full` against the 29-62 GFLOP/s `matmul_abt` reaches on the
+    // MiniMax-H3's real block shape (56 heads x 128, seq 960), `attn_apply_full` ran
+    // orders of magnitude below the rate `matmul_abt` reaches on the
     // same host - a third of the entire DiT forward spent in one kernel.
     attn_scores_qk: Option<usize>,
     attn_softmax_bidir: Option<usize>,

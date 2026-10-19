@@ -53,7 +53,7 @@ pub struct GpuMem {
 }
 
 /// The fraction of an UNMEASURED card's total that is assumed already spoken
-/// for (1/8 = 12.5%).
+/// for (1/8).
 ///
 /// The tradeoff, stated plainly. When `nvidia-smi` cannot tell us how much of
 /// a card is free, the honest answer is "unknown", and there are two ways to

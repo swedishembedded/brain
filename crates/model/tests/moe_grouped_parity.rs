@@ -185,7 +185,7 @@ fn build(shape: MoeShape, seed: u64) -> Setup {
 /// This file's own header doc explains why this is a float tolerance, not
 /// `== 0.0`: `moe_group_combine.wgsl` is a new kernel, not textually
 /// identical to `scale_add.wgsl`'s per-expert accumulate chain, so a few-ULP
-/// contraction difference is legitimate. `1e-4` is ~50x the measured
+/// contraction difference is legitimate. `1e-4` is far above the measured
 /// ~2e-6-at-magnitude-~20 differences (headroom, not a fudge), while still
 /// being nowhere near what a real routing/indexing bug would produce - a
 /// misrouted row diverges by a whole output value, not a handful of ULP.

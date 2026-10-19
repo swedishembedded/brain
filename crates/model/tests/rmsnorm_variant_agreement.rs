@@ -99,7 +99,7 @@ fn the_reference_kernel_normalizes_on_the_cpu_jit() {
 /// for, so every Llama-family checkpoint (1e-5), GLM, Kronos and the Mimi
 /// codec were normalized with an epsilon they never declared. The inputs are
 /// ~1e-3 in magnitude, so `mean(x^2)` (~5e-7) is swamped by the requested
-/// 1e-2: a kernel still adding 1e-6 misses by ~100x, far outside tolerance,
+/// 1e-2: a kernel still adding 1e-6 misses by two orders of magnitude, far outside tolerance,
 /// where the builder-shape gate's O(1) inputs could not tell the two apart.
 #[test]
 fn every_variant_normalizes_at_the_callers_epsilon() {

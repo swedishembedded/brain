@@ -20,7 +20,7 @@
 // with ONE thread each. At a 151936-wide vocab that serial walk is the whole
 // cost of both: a thread per row leaves most of every memory sector unused
 // and has only the rows themselves as parallelism, and the pair measured at
-// ~1% of the card's memory roof, 15% of a Qwen3-0.6B LoRA training step. Here
+// a tiny fraction of the card's memory roof and a large share of a Qwen3-0.6B LoRA training step. Here
 // 256 threads stride one row (consecutive threads, consecutive columns), each
 // keeping an online (max, sum-exp) pair so the row is read once, and the
 // pairs are folded by a shared-memory tree. Writing the statistics beside the

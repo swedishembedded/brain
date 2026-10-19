@@ -39,7 +39,7 @@ const KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];
 
 /// Words per buffer and buffers per "layer": 4 x 256 KiB = 1 MiB per layer,
 /// small enough to be free and big enough that 16 of them cross the lowered
-/// ceiling below by 4x.
+/// ceiling below by a factor of four.
 const WORDS: u64 = 64 * 1024;
 const BUFS: usize = 4;
 const LAYER_BYTES: u64 = WORDS * 4 * BUFS as u64;

@@ -19,7 +19,7 @@
 // Here the caller passes `uniq`, the distinct token ids, and one invocation is
 // spent per (distinct row, channel): the cost becomes `n_uniq * d_model *
 // n_rows`. On a 30522-row table looked up by ~100 distinct tokens that is
-// ~300x less work for the same answer.
+// orders of magnitude less work for the same answer.
 //
 //   grad_emb[uniq[u], c] += sum_{n : tokens[n] == uniq[u]} d_x[n, c]
 //

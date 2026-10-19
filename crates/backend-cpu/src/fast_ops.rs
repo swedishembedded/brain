@@ -125,9 +125,10 @@ unsafe fn silu_mul_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
 /// what this function used to do, and it is **DRAM-bandwidth-bound, not
 /// compute-bound**: it walks the whole of `B` once per row of `A`, so a
 /// thread holding `R` rows moves `R · n · k · 4` bytes. At MiniMax-H3's FFN
-/// shape (`k=5376, n=14336`, a 308 MB weight) that measured 32 GFLOP/s
-/// against a ~100 GB/s memory system - i.e. it was running at essentially
-/// 100% of achievable bandwidth and ~2% of achievable FLOPs, so no amount of
+/// shape (`k=5376, n=14336`, a 308 MB weight) that ran far below the
+/// compute roof yet against the memory system's bandwidth - i.e. it was running
+/// at essentially all of achievable bandwidth and a small fraction of
+/// achievable FLOPs, so no amount of
 /// extra vector width or extra threads could have helped.
 ///
 /// Inverting the nest - hold a 4-column tile of `B` and sweep ALL of this
@@ -197,13 +198,14 @@ pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: us
     // Both directions are measured, not assumed - `matmul_shape_bench` runs
     // the two nests interleaved at these exact shapes:
     //   * `adaln_proj` (`m=5376, k=2688, n=2`): B is 21 KB against a 57 MB A,
-    //     so column-outer would stream all of A once PER COLUMN - 212 ms
-    //     against row-outer's 30 ms.
+    //     so column-outer would stream all of A once PER COLUMN - several
+    //     times slower than row-outer.
     //   * per-head attention scores (`m=960, k=128, n=960`): B is 492 KB,
-    //     cache-resident, and column-outer measured 18 GFLOP/s against
-    //     row-outer's 120.
+    //     cache-resident, and column-outer measured far below
+    //     row-outer's rate.
     //   * the FFN (`m=960, k=5376, n=14336`): B is 308 MB, nothing holds it,
-    //     and column-outer measured 225 GFLOP/s against 59.
+    //     and column-outer measured several times
+    //     row-outer's rate.
     #[cfg(target_arch = "x86_64")]
     const B_RESIDENT_FLOATS: usize = 512 * 1024; // 2 MB, past any per-core cache share
     #[cfg(target_arch = "x86_64")]
@@ -242,8 +244,8 @@ pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: us
     // `m == 1` is a GEMV, and a row split has exactly one non-empty task for
     // it: every projection of every autoregressive decode step used to run on
     // ONE core no matter how many the pool had - on a 2x12-core Xeon E5-2690
-    // v3, 11.3 GB/s against a measured 39.0 GB/s parallel DRAM roof, i.e. one
-    // core's share of it. [`gemv_cols`] splits the output columns instead,
+    // v3, a single core's streaming rate against the parallel DRAM roof the
+    // `roofline` probe measures, i.e. one core's share of it. [`gemv_cols`] splits the output columns instead,
     // bit-identically; see its doc.
     if m == 1 && n >= 8 {
         gemv_cols(a, b, c, k, n);
@@ -1567,17 +1569,17 @@ pub fn moe_linear_gated_fwd(
 ///
 /// Waking a sleeping worker is a futex round trip, and a dispatch that hands
 /// 48 of them a few kilobytes each spends more time in the kernel than in the
-/// arithmetic - measured on a 2x12-core host as 586 s of system time against
-/// 131 s of user time across one real DeepSeek-OCR page, almost all of it in
-/// per-row fan-out on kernels like this one. At a single core's ~11 GB/s
-/// streaming rate, 256 KiB is ~22 us of work - past that cost, and measured
+/// arithmetic - measured on a 2x12-core host as system time exceeding user time
+/// across one real DeepSeek-OCR page, almost all of it in
+/// per-row fan-out on kernels like this one. At a single core's streaming
+/// rate, 256 KiB is tens of microseconds of work - past that cost, and measured
 /// as the point where extra parallelism stops paying for extra wake-ups. The
 /// sweep that picked it (128 KiB / 256 KiB / 512 KiB / 1 MiB) ran on the REAL
 /// served path rather than on a microbenchmark, because the microbenchmark
 /// that models a whole prefill round has to hold ~10 GB of distinct weights
 /// and its run-to-run spread at that footprint is wider than the effect being
-/// tuned. On one real page's prefill: 17.1 s of kernel time at 256 KiB
-/// against 18.7 / 19.3 / 20.2 at 128 KiB / 512 KiB / 1 MiB.
+/// tuned. On one real page's prefill, 256 KiB gave the least kernel time
+/// of the four candidates.
 const MIN_TASK_BYTES: usize = 256 * 1024;
 
 /// Task count for `bytes` of streamed work: enough to use the pool on
@@ -2499,7 +2501,7 @@ mod tests {
     /// weight traffic, never by the FMA rate.
     ///
     /// An earlier attempt at an `m = 1` microbench was dropped as untrustworthy
-    /// (it read a physically impossible ~10-30 TFLOP/s). Two things made it
+    /// (it read a physically impossible compute rate). Two things made it
     /// lie, and this one fixes both rather than dropping the shape:
     ///
     /// * **One weight, re-read.** A single `n·k` matrix at this shape is 4.6 MB

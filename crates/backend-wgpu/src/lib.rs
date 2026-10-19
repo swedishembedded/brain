@@ -905,9 +905,9 @@ fn register_live_device(shared: &std::sync::Arc<DeviceShared>) {
 ///
 /// A one-shot `brain <arch> <verb>` run (e.g. `brain qwen3vl generate`)
 /// SUCCEEDS - the answer is generated and printed - and then segfaults on
-/// exit, roughly 2 out of 3 runs, measured over 10 back-to-back real
+/// exit, on a majority of runs, measured over back-to-back real
 /// `brain qwen3vl generate --precision int8` calls against a real 8B GGUF
-/// checkpoint on 2x Tesla P40 (Vulkan). `gdb` on the faulting process shows
+/// checkpoint on two Tesla P40 cards (Vulkan). `gdb` on the faulting process shows
 /// the crashing thread has ZERO Rust frames (`?? ()`, its own stack already
 /// unreadable) and was spawned exactly when device/adapter caps were
 /// queried - a live NVIDIA driver worker thread (the same class
@@ -1209,11 +1209,11 @@ const MAX_PENDING_TICK_BATCHES: usize = 256;
 /// reproductions - this is the actual mechanism behind an earlier session's
 /// already-recorded "device timestamps ... ~1.5e15 ms" observation on this
 /// same model/hardware, previously left unchased). No real dispatch in this
-/// engine's own measured history (all sub-100ms per call even for the
+/// engine's own measured history (all far below this ceiling even for the
 /// heaviest real matmuls) comes remotely close to this - a genuine
 /// multi-second single dispatch would itself be a separate, worse defect
 /// worth its own investigation, not a number to report as this pass's per-
-/// kernel time. 2000ms is deliberately generous: it must never reject a real
+/// kernel time. This ceiling is deliberately generous: it must never reject a real
 /// slow dispatch, only the multi-order-of-magnitude driver glitch (M6.6).
 pub const IMPLAUSIBLE_DISPATCH_MS: f64 = 2000.0;
 
@@ -2338,7 +2338,7 @@ impl WgpuBackend {
             // wrong is not "first write in the command buffer", and no
             // further guess was spent chasing the exact mechanism. The
             // `fold_ticks` whole-batch discard below is the actual fix: it
-            // has caught 100% of these across every run, so this device's
+            // has caught every one of these across every run, so this device's
             // per-kernel breakdown is honestly "unavailable" rather than
             // silently wrong (M6.6, `kernel-performance.md`).
             let qs = self.device().create_query_set(&wgpu::QuerySetDescriptor {

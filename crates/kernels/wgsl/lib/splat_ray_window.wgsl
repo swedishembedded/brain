@@ -41,8 +41,8 @@ const RAY_WINDOW: u32 = 6u; // the slots s0..s5 of RayWindow
 // `splat_ray_emit` alone, 183 with a window of 4, 129 with 6, 93 with 8 and
 // 24 with 16 (a list sorted by the range to the mean alone: 557). The window
 // is worked for every list entry any lane of a warp hits, and its registers
-// decide occupancy: on a P40 the rasterizer took 1.6x the time of plain list
-// order at 6 and up to 2x at 8, and the backward's walk 1.3x more at 8 than
+// decide occupancy: on a P40 the rasterizer took clearly longer than plain list
+// order at 6 and longer still at 8, and the backward's walk was slower at 8 than
 // at 6.
 
 // A pair in or leaving a window: its range and alpha along the pixel's ray,

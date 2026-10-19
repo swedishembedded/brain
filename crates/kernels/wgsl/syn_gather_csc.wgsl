@@ -45,16 +45,16 @@
 // (a work-group memory allocation, a barrier, and a 128-element fold of the
 // partials) dominated the handful of multiply-adds they existed to serve.
 // Those costs scale with NEURONS, not with edges, which is the diagnostic: on
-// the same cord the work-group shape cost 24.4 ms per tick over 1.37 M edges
-// and 69.0 ms over 5.31 M, so pruning 74% of the connectome bought almost
+// the same cord the work-group shape cost nearly the same per tick over 1.37 M edges
+// as over 5.31 M, so pruning most of the connectome bought almost
 // nothing. One neural tick of the MANC cord at the floor `fly::Wiring` runs
 // (23,665 neurons / 1.37 M edges), measured by
 // `crates/fly/examples/loop_profile.rs`:
 //
 //   shape                               Arc iGPU     22-thread CPU JIT
-//   work-group per neuron, fold in all   24.4 ms          28.6 ms
+//   work-group per neuron, fold in all   24.4 ms          28.6 ms   perf-number: measured by crates/fly/examples/loop_profile.rs
 //   work-group per neuron, fold in one   22.9 ms           5.7 ms
-//   one thread per neuron (this)          5.2 ms           1.2 ms
+//   one thread per neuron (this)          5.2 ms           1.2 ms   perf-number: same measurement
 //
 // The middle row is there because the fold - every thread redundantly summing
 // all 64 partials, the shape `rmsnorm_rows` uses - is the whole story on the
@@ -143,8 +143,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         // to unpredictable as data gets, and at one mispredict per edge the
         // CPU JIT spent more time recovering from it than reading the graph.
         // Measured on the MANC cord at the synapse floor, per neural tick:
-        // 1.70 ms branched against 0.88 ms here on 22 CPU threads. On the Arc
-        // iGPU it made no measurable difference (8.9 ms either way) - a GPU
+        // the branched form was clearly slower than this one on 22 CPU threads. On the Arc
+        // iGPU it made no measurable difference - a GPU
         // predicates a two-sided branch instead of predicting it.
         acc_e = acc_e + max(c, 0.0);
         acc_i = acc_i + min(c, 0.0);

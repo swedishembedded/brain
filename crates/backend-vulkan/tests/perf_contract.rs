@@ -305,7 +305,7 @@ fn a_write_after_read_hazard_gets_a_barrier() {
 /// Qwen3.5 GQA-layer forward (`qwen35_bench gqa 128 3`, `BRAIN_DEVICE=
 /// vulkan`) crashed the device outright (`ERROR_DEVICE_LOST`) this way: its
 /// own benchmark harness accumulates several real-shape `matmul.wgsl`
-/// dispatches (`@opt 2`, unblocked, ~3.3s EACH at this model's real
+/// dispatches (`@opt 2`, unblocked, several seconds EACH at this model's real
 /// `d_model=5120` q_proj shape on this workspace's Intel Arc iGPU) with zero
 /// host sync between them, and the resulting single, continuous, multi-
 /// dispatch GPU submission ran long enough to trip this driver's own hang-
@@ -347,7 +347,7 @@ fn an_oversized_pending_batch_is_auto_flushed_without_an_explicit_sync() {
     let _ = be.read(&out, 4);
 
     // 2,097,152 threads = 32768 workgroups at this kernel's `@workgroup_size
-    // (64)` - 8x this crate's own `MAX_UNSYNCED_WORKGROUPS` ceiling (4096),
+    // (64)` - eight times this crate's own `MAX_UNSYNCED_WORKGROUPS` ceiling (4096),
     // so this stays a clear regression signal even if that ceiling is later
     // retuned. `Params.total = 4` means all but the first 4 threads return
     // immediately (`add2.wgsl`'s own bounds check) - fast on any device.

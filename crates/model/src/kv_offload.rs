@@ -25,20 +25,21 @@
 //! whole KV across the host bus once per token.
 //!
 //! That is not a close call, on measured numbers from the box this was built
-//! on (2x Tesla P40, `crates/gpu-core/tests/pcie_handoff.rs` for the bus,
-//! `gpu_core::roof` for the card):
+//! on (two Tesla P40 cards, `crates/gpu-core/tests/pcie_handoff.rs` for the bus,
+//! `gpu_core::roof` for the card; rerun both rather than trusting a figure
+//! printed here):
 //!
 //! | path | measured |
 //! |---|---|
-//! | device DRAM (`roof::Roofs::gbs`) | ~287 GB/s |
-//! | host -> device (`Gpu::write_f32_chunked`, 216 MiB) | ~4.3 GB/s |
-//! | device -> host (`Gpu::read`, 216 MiB) | ~1.2 GB/s |
+//! | device DRAM (`roof::Roofs::gbs`) | by far the fastest |
+//! | host -> device (`Gpu::write_f32_chunked`, 216 MiB) | slow |
+//! | device -> host (`Gpu::read`, 216 MiB) | slowest |
 //!
-//! Reading a token's KV from VRAM is ~67x cheaper than fetching it across the
-//! bus and ~230x cheaper than evicting it there. A Qwen3-8B sequence at its
-//! full 40,960-token window holds 2.8 GiB of int8 KV; the attention that
-//! reads it from VRAM costs ~10 ms, streaming it in would cost ~0.7 s - per
-//! token. Per-block swap during active decode is decisively net-negative and
+//! Reading a token's KV from VRAM is orders of magnitude cheaper than
+//! fetching it across the bus, and more again than evicting it there. A
+//! Qwen3-8B sequence at its full 40,960-token window holds 2.8 GiB of int8
+//! KV; the attention that reads it from VRAM costs milliseconds, streaming it
+//! in would cost on the order of a second - per token. Per-block swap during active decode is decisively net-negative and
 //! is deliberately not implemented.
 //!
 //! What DOES pay is the transfer whose cost is paid once per *scheduling

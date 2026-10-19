@@ -56,12 +56,12 @@ static KERNELS: &[(&str, &str)] = &[("matmul", kernels::MATMUL)];
 /// ratio of DEVICE time (the driver's own events around each launch) for the
 /// identical dispatch.
 ///
-/// Measured at 13.1-13.3x on a GH200, repeatedly, with under 1 % spread; the
+/// Measured on a GH200, repeatedly, with a tight spread; the
 /// floor is set well below that so it states "a hand-written kernel replaced a
 /// mechanical translation and it was worth doing", not "this box was idle".
 ///
 /// Device time rather than host wall time, and the reason is a measurement:
-/// the same dispatches read 11.9x by wall clock on an idle host and 2.6x on a
+/// the same dispatches read a large ratio by wall clock on an idle host and a much smaller one on a
 /// loaded one. The tuned side is eight launches of a ~45 microsecond kernel, so
 /// its wall time is mostly the host thread waiting for a core between
 /// launches - a property of the machine, not of the kernel - while its device
@@ -167,7 +167,7 @@ fn time_provider(gpu: &Gpu, p: &dyn OperatorProvider, x: &backend_api::DeviceBuf
 /// The fastest run of each measure. On a card another process is using, a
 /// neighbour's time slice only ever LENGTHENS a run, so the minimum is the
 /// statistic it cannot inflate; a median of a few runs swung the measured
-/// speedup between 5.6x and 7.9x on one shared card within minutes.
+/// speedup widely on one shared card within minutes.
 fn fastest(runs: &[Timed]) -> Timed {
     Timed {
         wall: runs.iter().map(|t| t.wall).min().expect("at least one run"),

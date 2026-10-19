@@ -195,8 +195,8 @@ fn parse_reclaim_ceiling(raw: Option<&str>) -> Option<u64> {
 /// Calibrated empirically in `backend-vulkan` (M6.9) with a deliberately
 /// wide margin: an initial `65536` only reduced that crash's rate rather
 /// than eliminating it, because this box is measured to be thermally and
-/// contention noisy (roughly a 10x integrated-GPU clock swing idle-to-ramped,
-/// and ~3x again from a co-resident CPU load), so a ceiling calibrated
+/// contention noisy (a large integrated-GPU clock swing idle-to-ramped,
+/// and a further swing from a co-resident CPU load), so a ceiling calibrated
 /// against one clean session is not safe against a noisier one. 4096 sits
 /// UNDER even attention's own largest single dispatch (`gqa_scores`/
 /// `gqa_apply` at `nh*t*t/64 = 6144` workgroups at that shape), so in

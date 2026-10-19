@@ -21,7 +21,7 @@
 // window - against a card with thirty SMs and up. Every one of those dispatches
 // leaves most of the machine idle, and no amount of work inside the kernel
 // fixes a grid that is too small to fill it. Measured over eight packed
-// decisions, the per-span dispatches were half the forward pass at 2.5% of the
+// decisions, the per-span dispatches were half the forward pass at a few percent of the
 // fp32 roof.
 //
 // One dispatch over all spans has the opposite property: the grid is the SUM

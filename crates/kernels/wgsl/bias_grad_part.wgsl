@@ -15,7 +15,7 @@
 // `bias_grad` is one invocation per output feature `n`, walking all `m` rows
 // serially: at `m` in the tens of thousands (a real conv layer's spatial
 // extent x batch) that dispatches only `n` threads total - a couple of
-// workgroups against a card with dozens of SMs - and was measured at 1.3% of
+// workgroups against a card with dozens of SMs - and was measured at a tiny fraction of
 // the memory roof on a VQGAN training step (kernel-performance.md M5.7),
 // squarely the occupancy pathology C.3 names for grad-norm.
 //

@@ -136,7 +136,7 @@ impl Default for FitOpts {
 /// **Why `hold` exists, rather than cosine from step 0.** The constant-then-cooldown study
 /// (arXiv:2405.18392) measures constant-rate training followed by a short
 /// COOLDOWN against a full cosine and find the two scale "predictably and
-/// reliably" alike, with the cooldown's benefit saturating at roughly 20% of
+/// reliably" alike, with the cooldown's benefit saturating at roughly 20% of  perf-number: published figure, arXiv:2405.18392
 /// the run. That shape has a property a full cosine does not: the rate for
 /// most of the run does not depend on the step budget, so a run that is later
 /// extended has not already annealed itself on the strength of a total it was

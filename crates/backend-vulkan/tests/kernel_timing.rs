@@ -187,8 +187,8 @@ fn timing_is_off_by_default_and_disabling_reports_zero_calls() {
 /// Root-caused on this workspace's Intel Arc (Meteor Lake, Xe-LPG) iGPU via
 /// `qwen35_bench gqa 128 3` (`BRAIN_DEVICE=vulkan BRAIN_VK_SERIAL=1`): the
 /// native cooperative-matrix `matmul` kernel's per-dispatch device time
-/// reported up to ~9219 ms for a single dispatch, though the wall-clock pass
-/// it belonged to finished in ~29 ms total. Unlike `backend-wgpu`'s sibling
+/// reported a per-dispatch time far longer than the whole wall-clock pass
+/// it belonged to. Unlike `backend-wgpu`'s sibling
 /// defect (a literal garbled readback - an unwritten query reading 0, or a
 /// value wrong by orders of magnitude with neither side reading 0), this
 /// backend's queries read back real, monotonically increasing, internally-
@@ -201,7 +201,7 @@ fn timing_is_off_by_default_and_disabling_reports_zero_calls() {
 /// dispatch submit+fence+query-pool-reset path, without needing the model
 /// crate or `qwen35_bench` at all. `IMPLAUSIBLE_DISPATCH_MS`'s own doc has
 /// the quantitative throughput comparison proving this is not simply "coopmat
-/// is slow on this iGPU" - a real GQA-sized dispatch is ~300-500x slower than
+/// is slow on this iGPU" - a real GQA-sized dispatch is hundreds of times slower than
 /// this same pipeline's own directly-measured achievable rate.
 ///
 /// This does not assert the slowdown always fires (a driver fix, or
@@ -245,7 +245,7 @@ fn a_corrupted_timestamp_readback_is_discarded_not_reported() {
     // balanced one of the same total FLOP count, empirically, not fully
     // root-caused) to trigger the slowdown reliably, small enough (K kept
     // modest) to keep the packed weight buffer (`N*K` f16 elements) under
-    // half a gigabyte and the whole repro under ~15s wall clock.
+    // half a gigabyte and the whole repro to a modest wall clock.
     let (m, k, n) = (128u32, 4096u32, 196608u32);
     let x = vec![0.01f32; (m * k) as usize];
     let w = vec![0.01f32; (n * k) as usize];

@@ -155,7 +155,7 @@ impl Gqa {
 /// thread `t` row `t`, so a warp's 32 loads are `dim` floats apart and every
 /// 32-byte sector fetched serves ONE useful float. That penalty is worst at
 /// the `rows = 1` of a decode step - measured on a real two-card Qwen3.8-27B
-/// it was 48% of all device time per token, more than the whole int8 weight
+/// it was the dominant share of device time per token, more than the whole int8 weight
 /// stream underneath it - but the swept comparison in `rmsnorm_rows.wgsl` wins
 /// at every row width. Models compose this builder from inside
 /// [`gqa_attn_qkv`], [`crate::gqa_mixer`] and [`crate::gdn_mixer`], so a
@@ -2712,7 +2712,7 @@ pub fn rmsnorm_fwd_at(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, o
 /// The shared layout is now true of every RMSNorm kernel by construction:
 /// `rmsnorm` used to hardcode 1e-6 and ignore the third word, so a model with
 /// any other epsilon normalized differently depending on which variant the
-/// DEVICE selected (measured ~10% relative divergence for an `f32::EPSILON`
+/// DEVICE selected (measured a visible relative divergence for an `f32::EPSILON`
 /// model between a backend with workgroup reductions and one without).
 ///
 /// The policy itself lives in `backend_api::select`

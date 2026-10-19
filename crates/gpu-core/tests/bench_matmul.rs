@@ -51,7 +51,7 @@ const SHAPES: &[Shape] = &[
     // Wide-K / wide-N prefill linears at the scale brain's larger decoders
     // dispatch (d_model 4096, ffn 14336). The square probes above are a
     // roofline instrument, not a workload: they say nothing about how a tile
-    // schedule behaves when N is 3.5x M, which is the common case for an
+    // schedule behaves when N is several times M, which is the common case for an
     // up-projection and the case a 128x128 tile can most easily get wrong.
     Shape { label: "big qkv       1024x4096->6144", m: 1024, k: 4096, n: 6144 },
     Shape { label: "big ffn-up    1024x4096->14336", m: 1024, k: 4096, n: 14336 },
@@ -112,9 +112,9 @@ struct Arm {
 /// * **Every timed region is fenced.** `submit` only *records*; without the
 ///   `poll_wait` inside the timed span the loop would measure command-buffer
 ///   construction. An earlier unfenced native-Vulkan run in this tree reported
-///   a physically impossible 57 TFLOP/s exactly that way.
+///   a physically impossible compute rate exactly that way.
 /// * **Arms are interleaved, not run back-to-back**, and reduced with min-of-N.
-///   Run-to-run variance on this box has been measured as high as 4.6x when
+///   Run-to-run variance on this box has been measured as swinging severalfold when
 ///   another tenant is holding cores, so timing kernel A's whole batch and then
 ///   kernel B's whole batch attributes that drift to the kernel. Round-robin
 ///   (A, B, C, A, B, C, ...) spreads any drift across all arms equally, and the

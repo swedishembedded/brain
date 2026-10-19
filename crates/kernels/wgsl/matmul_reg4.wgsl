@@ -26,23 +26,24 @@
 //   bandwidth, and the SM can issue one such warp instruction per clock. A
 //   warp-wide 128-bit load moves 512 B but costs FOUR wavefronts - the same
 //   bytes per clock. Vectorizing therefore does NOT raise shared-memory
-//   throughput. (Measured: a GTX 1080 reaches 93.4% of the 128 B/clk figure
+//   throughput. (Measured: a GTX 1080 reaches nearly all of the 128 B/clk figure
 //   using scalar 32-bit accesses, and "using 64-bit data types did not make a
-//   significant difference"; on GP104 Tesla P4 it is 90.7%. On Fermi, 128-bit
+//   significant difference"; GP104 Tesla P4 likewise. On Fermi, 128-bit
 //   shared loads were outright SLOWER than 32-bit ones.)
 //
-// What a vec4 read does buy is 1 issue slot instead of 4, 4x fewer address
-// IADDs and 4x fewer dependency barriers - i.e. a larger fraction of the
+// What a vec4 read does buy is 1 issue slot instead of 4, four times fewer address
+// IADDs and four times fewer dependency barriers - i.e. a larger fraction of the
 // instruction stream is FFMA. Lai & Seznec (CGO'13) quantify exactly this for
-// SGEMM on NVIDIA: the FFMA fraction rises 75% (scalar LDS) -> 85.7% (LDS.64)
-// -> 92.3% (LDS.128). Scott Gray's maxas SGEMM likewise never justifies
+// SGEMM on NVIDIA: the FFMA fraction rises steadily from scalar LDS through
+// LDS.64 to LDS.128. Scott Gray's maxas SGEMM likewise never justifies
 // LDS.128 by bandwidth ("all memory operations are dual issued in our main loop
 // and don't factor into the flops calculation at all").
 //
 // Measured here on a real P40 (fenced, min-of-N, arms interleaved), m=n=k=2048
-// under native Vulkan: 4023 (matmul_reg3) -> 4455 GFLOP/s. That +10.7% is the
-// issue-slot effect, and it is the size Lai & Seznec's instruction-mix
-// accounting predicts - not the 4x a bandwidth argument would have predicted.
+// under native Vulkan: a modest gain over matmul_reg3 (the kernel
+// performance ledger records the figures). That gain is the issue-slot effect,
+// and it is the size Lai & Seznec's instruction-mix accounting predicts - not
+// the fourfold one a bandwidth argument would have predicted.
 //
 // This is the "vectorize SMEM access" step of the standard CUDA SGEMM
 // progression (Goto & van de Geijn's register-block micro-kernel, then float4
@@ -50,9 +51,9 @@
 //
 // WHY THE REGISTER TILE IS 8x8 AND NOT SMALLER. Shared-memory bandwidth sets a
 // hard floor on the tile: 128 B/clk/SM x 30 SM x 1.531 GHz = 5.88 TB/s against
-// 11.76 TFLOP/s is 0.5 B/flop of budget. A TxT register tile reads 2T floats
+// 11.76 TFLOP/s (perf-number: P40 datasheet peak) is 0.5 B/flop of budget. A TxT register tile reads 2T floats
 // per k-step to do 2T^2 flops = 4/T B/flop, so 4/T <= 0.5 forces T >= 8. A 4x4
-// tile needs 1.0 B/flop, twice the budget, and is capped near 50% of peak no
+// tile needs 1.0 B/flop, twice the budget, and is capped near half of peak no
 // matter how well it is scheduled. 8x8 sits exactly on the bound (Volkov, GTC
 // 2010, makes the same argument for Fermi).
 //
@@ -91,7 +92,8 @@
 // interleaves step k+1's loads with step k's FMAs. WGSL has no
 // `#pragma unroll` and no `__launch_bounds__`, so writing the BK=8 steps
 // out is the only way to express it. Measured here on a P40 (fenced,
-// min-of-N, interleaved): 4455 -> 5088 GFLOP/s at m=n=k=2048.
+// min-of-N, interleaved): a further gain at m=n=k=2048 (the kernel
+// performance ledger records the figures).
 //
 // WHEN TO PREFER THIS OVER matmul_reg3. Measured on a P40 at m=1024, n=4096,
 // sweeping K (fenced, min-of-N, arms interleaved, GFLOP/s reg3 -> this):
@@ -100,7 +102,7 @@
 //   K= 6144  5111 -> 6029   K=12288  4865 -> 4529   <- crosses over
 //   K= 8192  5177 -> 6132   K=14336  4867 -> 4488
 //
-// So this kernel is the faster one by 4-18% for K up to ~10k and LOSES to
+// So this kernel is the faster one by a clear margin for K up to ~10k and LOSES to
 // matmul_reg3 beyond ~12k. The crossover is sharp rather than gradual, which
 // points at a discrete threshold (occupancy or cache residency) rather than a
 // gradual bandwidth effect; the mechanism was NOT isolated. What was ruled out

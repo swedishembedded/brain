@@ -79,7 +79,7 @@ impl LinW {
 /// the base code - the correction is discarded - while the minority that do
 /// move deliver a badly distorted version of it. `flux2`'s
 /// `tests/lora_requant_int8.rs` measures both halves of that on fixtures:
-/// at a delta 0.5% of the weight magnitude, 94.8% of weights round back
+/// at a delta well under one percent of the weight magnitude, nearly all weights round back
 /// unchanged and the delivered delta's cosine to the intended one is 0.44.
 /// The residue is a token-CONSTANT bias in the matmul output, which is what
 /// turns into a visible periodic artifact once a VAE decoder's upsampling

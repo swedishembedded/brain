@@ -18,8 +18,9 @@
 //! what the norms alone cost, and what fraction of a served token that is
 //! depends on the rest of the pass, which is NOT measured here. The one
 //! whole-pass number this change can point at is qwen35's, on real weights on
-//! real hardware: the same swap took its decode from 3.94 to 7.44 tok/s, with
-//! RMSNorm falling from 48% of device time to 4.6%.
+//! real hardware: the same swap nearly doubled its decode rate, with
+//! RMSNorm falling from the dominant share of device time to a small one
+//! (the qwen35 roadmap records the figures).
 //!
 //! The shapes are transcribed from each model's decode step at its named
 //! config. Transcribed tables go stale: re-read the tape rather than trusting
@@ -119,7 +120,7 @@ fn price_one_decode_token_of_rmsnorm_per_model() {
             }
             // `submit` only QUEUES: without a readback to drain it the loop
             // below times enqueue cost, which is the same for both kernels and
-            // reports a dead heat (or worse, noise) for a real 20x. Read one
+            // reports a dead heat (or worse, noise) for a real large speedup. Read one
             // float back each rep - the same "the flush is the measurement"
             // discipline the qwen35 decode profiler needed.
             gpu.submit(&[], &steps); // warm

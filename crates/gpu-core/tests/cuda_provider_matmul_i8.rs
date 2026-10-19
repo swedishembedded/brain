@@ -55,7 +55,7 @@ const REL_TOL: f32 = 2.0e-5;
 const ORACLE_SAMPLES: usize = 2048;
 
 /// How much faster than the DP4A kernel the tensor-core kernel must be at the
-/// real prefill shapes, by device time. Set far under what is measured (16-18x on
+/// real prefill shapes, by device time. Set far under what is measured (on
 /// an idle part with int8 tensor cores) so a busy shared device cannot fail it, but high
 /// enough that a kernel which fell back to scalar work would.
 // perf-number: the asserted floor of this gate; the achieved ratio is printed.

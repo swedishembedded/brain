@@ -1176,7 +1176,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 /// operands to `f16` (`f16(a)`/`f16(b)`), multiplies in `f16`, then widens
 /// the product back to `f32` (`f32(ah * bh)`) before adding into the
 /// existing `f32` accumulator - narrow-register multiply, wide accumulate,
-/// exactly the mechanism `native_f16_poc::ROOF_FMA` measured (1.38x-3.76x on
+/// exactly the mechanism `native_f16_poc::ROOF_FMA` measured (a multi-fold gain on
 /// this campaign's own Intel Arc iGPU, `kernel-performance.md`'s B11/M8.7
 /// entries) rather than a bandwidth-driven win. A packed-f16 WEIGHT buffer
 /// (halving bytes moved, the way `dtype_variant`'s storage tier already

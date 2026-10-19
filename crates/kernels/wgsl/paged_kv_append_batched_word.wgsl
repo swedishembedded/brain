@@ -54,7 +54,7 @@
 // per-token design was race-free for either): the same guarantee as one thread
 // per token, at `kv_stride / CHUNK` times the parallelism. A decode step
 // appends one token per sequence, and one thread serially storing a 1024-wide
-// row cost ~100 us per layer - 7 ms a step at 64 sequences. The dispatcher
+// row cost tens of microseconds per layer - milliseconds a step at 64 sequences. The dispatcher
 // (`model::kv_tier::append_word_threads`) must launch
 // `batch * ceil(kv_stride / CHUNK)` threads; CHUNK is mirrored there.
 const CHUNK: u32 = 16u;

@@ -84,7 +84,7 @@
 // The integer sum inside a group is still exact and re-orderable; only the
 // cross-group folds are floating point.
 //
-// That costs 64 FMAs per 512 DP4A - about 12% of the inner loop's issue slots
+// That costs 64 FMAs per 512 DP4A - about an eighth of the inner loop's issue slots
 // at `QPG=2` (double that at `QPG=1`) - and, more importantly, DOUBLES the
 // accumulator register block (64 i32 for the live group plus 64 f32 for the
 // running sum). On a GP102 that pushes the kernel from two resident

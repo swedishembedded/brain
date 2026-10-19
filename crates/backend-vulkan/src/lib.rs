@@ -387,15 +387,15 @@ const MAX_TIMED_DISPATCHES: usize = 8192;
 /// workgroups; three-to-four such dispatches (the exact multiplicity that
 /// crashed) sum to ~150-200K. An initial `65536` (2^16) - roughly 1.3
 /// isolated-`matmul`-only reps, comfortably under the smallest accumulation
-/// this investigation measured surviving (16s at 153600) and the next step up
-/// that lost the device (~25-30s at 204800) - measurably helped (2 of 3
+/// this investigation measured surviving (at 153600 workgroups) and the next
+/// step up that lost the device (at 204800 workgroups) - measurably helped (2 of 3
 /// repeated full-binary repro runs went from crashing to clean) but did NOT
 /// fully close it: a 3rd repeated run still lost the device even with that
 /// ceiling in place. This box is measured, repeatedly, elsewhere in this same
 /// workspace, to be thermally/contention-noisy (a shared box: an idle-to-
-/// fully-ramped integrated GPU has been measured here at roughly a 10x clock
-/// swing, and a co-resident CPU load has been measured costing roughly 3x on
-/// its own) - so a ceiling calibrated against one clean measurement session
+/// fully-ramped integrated GPU has been measured here with a large clock
+/// swing, and a co-resident CPU load has been measured costing a large factor
+/// on its own) - so a ceiling calibrated against one clean measurement session
 /// is not safe against a noisier one. `4096` gives a much larger margin: it sits
 /// UNDER even attention's own single largest dispatch (`gqa_scores`/
 /// `gqa_apply` at `nh*t*t/64 = 6144` workgroups at this shape), so in
@@ -441,15 +441,15 @@ fn max_unsynced_workgroups() -> u64 {
 /// `vkCmdWriteTimestamp` pair with `backend-vulkan`'s Intel-ANV serialized
 /// (submit+fence-per-dispatch) path on this specific cooperative-matrix
 /// pipeline. A quantitative check against the SAME kernel confirms it is not
-/// simply "coopmat is slow on this iGPU": a synthetic dispatch with ~30x the
-/// real GQA matmul's FLOP count (128x4096x49152 vs. the ~1.7 GFLOP/call a
+/// simply "coopmat is slow on this iGPU": a synthetic dispatch with many times the
+/// real GQA matmul's FLOP count (128x4096x49152 vs. what a
 /// real T=128 GQA layer actually issues) measured a consistent, repeatable
-/// ~517-567 ms/call (~100 GFLOP/s sustained) - so a REAL ~1.7 GFLOP/call
-/// dispatch finishing in multiple SECONDS is 300-500x slower than this same
+/// sustained throughput - so a REAL GQA-sized
+/// dispatch finishing in multiple SECONDS is hundreds of times slower than this same
 /// pipeline's own directly-measured achievable throughput, not a plausible
 /// real number. Whatever the exact driver mechanism, the effect on the
 /// report is identical to M6.6's: an implausible number must never be folded
-/// into the per-kernel total as if it were real. 2000ms (matching `backend-
+/// into the per-kernel total as if it were real. This constant's value (matching `backend-
 /// wgpu`'s own `IMPLAUSIBLE_DISPATCH_MS`) is deliberately generous - it must
 /// never reject a real slow dispatch, only the multi-order-of-magnitude
 /// anomaly this constant exists to catch (M6.8).

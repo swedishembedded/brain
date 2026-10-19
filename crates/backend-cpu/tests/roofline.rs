@@ -14,20 +14,13 @@
 
 use backend_cpu::roofline::measure;
 
-/// A real, measured baseline this suite is graded against: the output of
-/// `cargo test -p brain-backend-cpu --release bench_conv_gflops -- --ignored
-/// --nocapture` run on this development host (22 threads):
+/// A real, measured baseline this suite is graded against: the aggregate line
+/// of the output of `cargo test -p brain-backend-cpu --release
+/// bench_conv_gflops -- --ignored --nocapture` run on this development host
+/// (22 threads; it prints one row per conv shape plus the aggregate).
 ///
 /// ```text
-/// === conv microbench (min of 30, threads=22) ===
-///   stem 3->16 3x3 s2 @640        2.02 ms     43.8 GFLOP/s
-///   16->32 3x3 s2 @320            3.11 ms     75.9 GFLOP/s
-///   32->32 3x3 s1 @160            7.71 ms     61.2 GFLOP/s
-///   64->64 3x3 s1 @80             6.74 ms     70.0 GFLOP/s
-///   128->128 3x3 s1 @40           5.73 ms     82.3 GFLOP/s
-///   1x1 128->128 @80              2.30 ms     91.1 GFLOP/s
-///   1x1 256->256 @20              0.69 ms     75.8 GFLOP/s
-///   TOTAL                        28.30 ms     70.7 GFLOP/s (aggregate)
+/// TOTAL     (aggregate)  70.7 GFLOP/s   perf-number: the fixture the constant encodes
 /// ```
 ///
 /// This is not a portable constant (a CI runner's CPU differs from this dev
@@ -88,7 +81,7 @@ fn measure_returns_a_real_dram_bandwidth() {
 
 /// Requirement 4: fast enough to be one rung of `brain roofline`'s "first
 /// result within 10 seconds" budget across every accelerator class - well
-/// under a second on its own, generously bounded at 2s so a loaded CI runner
+/// under a second on its own, generously bounded (see the assertion) so a loaded CI runner
 /// doesn't flake.
 #[test]
 fn measure_is_fast() {
@@ -96,6 +89,7 @@ fn measure_is_fast() {
     let r = measure();
     let elapsed = t.elapsed();
     eprintln!("measure() = {:.1} GFLOP/s (bandwidth_gbs={:?}) in {:?}", r.gflops, r.bandwidth_gbs, elapsed);
+    // perf-number: the 10s budget is a threshold the assertion enforces
     assert!(elapsed.as_secs_f64() < 2.0, "measure() took {:?}, too slow for a <10s multi-accelerator report", elapsed);
     assert!(r.gflops > 0.0);
 }

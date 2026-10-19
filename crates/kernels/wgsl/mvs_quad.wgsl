@@ -12,7 +12,7 @@
 //
 // PatchMatch samples every source view at hundreds of warped, non-integer
 // positions per pixel and hypothesis, and each bilinear sample is four
-// gathers - measured as half of `mvs_pm`'s time, and 1.23x faster as one
+// gathers - measured as half of `mvs_pm`'s time, and faster as one
 // 8-byte load (the finest level of a 1632x1224 capture, with `mvs_pm`'s
 // views-outermost loop order; with hypotheses outermost it gained
 // nothing). Here each pixel

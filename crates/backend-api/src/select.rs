@@ -70,7 +70,7 @@ pub enum Op {
     /// h*hd + d]`, `i` the thread-varying index) - `Op::MaxAbsRow`'s
     /// coalescing bug, not merely a slow reduction. Measured live in a real
     /// training pass (`brain gpt2 train`, `BRAIN_PROFILE=1`): `attn_bwd_
-    /// dscores` alone was 8.0% of total GPU time at `T=512`, ahead of both
+    /// dscores` alone was a leading share of total GPU time at `T=512`, ahead of both
     /// forward GEMM families in that profile.
     /// `attn_bwd_d{q,k,v}` are a DIFFERENT shape (thread-varying index is
     /// `d`, coalesced; the loop-scalar reads are workgroup-uniform
@@ -156,8 +156,8 @@ pub enum Op {
     /// size tested on this campaign's own hardware (M2.1's ledger entry for
     /// F32, reproduced via `qwen_bench flash-decode`; M2.2 inherited the
     /// same conclusion for I8 WITHOUT an independent measurement, then
-    /// `qwen_bench flash-decode-i8` finally took one and confirmed it - over
-    /// 2x slower than the int8 triad at every context length swept). Neither
+    /// `qwen_bench flash-decode-i8` finally took one and confirmed it -
+    /// clearly slower than the int8 triad at every context length swept). Neither
     /// unsplit kernel is ever a [`candidates`] member for `k = 0`.
     ///
     /// M2.7's split-key design (`paged_flash_decode_split` -> `_combine`)
@@ -167,7 +167,7 @@ pub enum Op {
     /// A/B `Op::PagedAttentionFused`'s `(0, F32)` arm's `m == 1` gate
     /// encodes). Its int8-KV twin (`paged_flash_decode_split_i8` -> `_
     /// combine_i8`) ports the identical fix and measured the identical shape
-    /// of win against the int8 triad (`qwen_bench flash-decode-i8`: 2x-3x
+    /// of win against the int8 triad (`qwen_bench flash-decode-i8`: clearly
     /// faster, widening with context length, at every length swept) - so
     /// `(0, Dtype::I8)` gets the same `m == 1` gate as `(0, Dtype::F32)`,
     /// not the unsplit kernel's blanket exclusion. `Reference` (the triad)
@@ -546,11 +546,11 @@ pub const I8_MMA_MIN_CC: (u32, u32) = (8, 0);
 /// [`I8_MMA_MIN_CC`]) keeps the GEMV through the whole decode regime: the
 /// native GEMV streams the weights at full width and takes more blocks for more
 /// rows, where the register-tiled kernel's 128x128 tile leaves a small batch on
-/// a few blocks (59% of a 16-row 35B-A3B decode step before the GEMV took
-/// over). A device with the tensor-core GEMM hands over to it at
+/// a few blocks (the dominant share of a 16-row 35B-A3B decode step before
+/// the GEMV took over). A device with the tensor-core GEMM hands over to it at
 /// [`I8_GEMV_MAX_ROWS`] rows: swept on a GH200 on a real 35B-A3B decode step,
-/// device-timed, the GEMV leads at 8 rows (15.1 ms against 16.1) and the GEMM
-/// from 9 (16.8 against 18.5), by 6% at 16 rows and 17% at 32.
+/// device-timed, the GEMV leads up to 8 rows and the GEMM from 9, with the gap
+/// widening at 16 and 32 rows.
 pub fn i8_gemv_max_rows(caps: &DeviceCaps) -> u32 {
     match caps.arch.compute_capability {
         Some(cc) if cc < I8_MMA_MIN_CC => DECODE_REGIME_MAX_ROWS,

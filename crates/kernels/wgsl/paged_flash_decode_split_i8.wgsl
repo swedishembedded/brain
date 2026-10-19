@@ -27,7 +27,7 @@
 // closes: `paged_flash_decode_i8` (the single-fused int8 kernel, M2.2) was
 // gated correctness-only and never independently measured for occupancy -
 // measured now (`qwen_bench flash-decode-i8`), it loses to the int8 triad by
-// over 2x, the same serialised-tile-walk regression M2.1 found and M2.7 fixed
+// a wide margin, the same serialised-tile-walk regression M2.1 found and M2.7 fixed
 // for fp32. This is that fix, ported.
 //
 // ONE merged partial-state output, NOT the fp32 split kernel's three
