@@ -175,7 +175,7 @@ impl Ctx {
 /// 128x128 tile" regime `pick_gemm` was measured against. `K_MATMUL_REG3`
 /// is a no-op on CPU (backend-cpu's native fast path treats it and `matmul`
 /// identically) and the fix for a real GPU, where plain `matmul` measured
-/// ~20x slower than the CPU path on this crate's own shapes precisely
+/// far slower than the CPU path on this crate's own shapes precisely
 /// because it has neither operand reuse nor coalesced access (adjacent GPU
 /// threads read weight rows `k` floats apart).
 pub(crate) fn linear(cx: &Ctx, x: &DeviceBuffer, w: &DeviceBuffer, bias: Option<&DeviceBuffer>, m: u32, k: u32, n: u32) -> DeviceBuffer {

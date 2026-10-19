@@ -64,12 +64,14 @@
 //! `eps = 2.5e-4`, [`gradcheck::check_unet`]'s own starting value - the two
 //! graphs share the same op mix (conv/GroupNorm/transformer) and the same
 //! `UNetConfig::tiny`-derived scale, just doubled (trainable copy + frozen
+//! perf-number: op-count ratio of the graph, not a timing
 //! backbone, the same "~2-3x a plain UNet's op count" [`gradcheck::check_supir`]'s
 //! own doc measures for its own trunk+adaptors+backbone graph). It needed no
 //! adjustment: measured `max_rel` over all 150 checked tensors at this eps is
 //! `1.395e-1`, comparable to `check_unet`'s own `9.5e-2` over 263. `time_embed_dim`
 //! narrows to 8 (not [`gradcheck::unet`]'s 16) for the elementwise check only,
 //! keeping `2·numel` (128 entries, both tensors) full forwards over the
+//! perf-number: op-count ratio of the graph, not a timing
 //! ~2x-costlier merged graph inside a comparable wall-clock budget to
 //! `check_unet_conditioning_elementwise`'s own (measured `max_rel = 8.205e-1`
 //! here - every outlier entry checked is one where both the analytic and the

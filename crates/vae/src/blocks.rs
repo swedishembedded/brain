@@ -194,7 +194,7 @@ pub const BWD_KERNELS: [(&str, &str); 38] = [
     // reverse reaches it through the caller-supplied [`XformerIds::mul`] slot -
     // the same arrangement `im2col_at` already uses via `super::K_IM2COL_AT`.
     // The two-stage replacement for `bias_grad`, which is one lane per output
-    // feature walking every row serially - measured at 1.3% of the memory
+    // feature walking every row serially - measured far below the memory
     // roof on a VQGAN training step (kernel-performance.md M5.7), the same
     // occupancy pathology `gn_dsum_part`/`gn_dgb_part` above already fixed for
     // GroupNorm's own per-channel reductions. APPENDED, so every existing

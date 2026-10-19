@@ -147,8 +147,8 @@ fn default_chunk_len() -> u32 {
 /// 273-row image block plus BOS plus the instruction left room for at most
 /// ~229 generated tokens, so 128 was picked from two real calibration
 /// requests to fit comfortably under that ceiling while still producing real
-/// multi-sentence markdown - 414 characters measured, 40.1-69.7 s served
-/// median for prefill plus up to 128 KV-cached steps).
+/// multi-sentence markdown - 414 characters measured, with the served
+/// median for prefill plus up to 128 KV-cached steps taken at calibration).
 ///
 /// Raised now that [`default_ctx_len`] is no longer capped near 512: real
 /// documents (tables, code listings, multi-column pages) routinely need
@@ -266,11 +266,10 @@ pub enum DecoderDevice {
 /// assumed, and measured against the CPU backend at ITS best rather than at
 /// its default: with `crates/backend-cpu`'s rayon/GEMV scheduling fix in
 /// place:
-/// perf-number: the comparison this default rests on, on the one host it was
-/// measured on - not a throughput promise for another.
+/// on the one host it was measured on - not a throughput promise for another:
 /// a real page (283-token prompt, 512 generated tokens) on two Tesla P40s
-/// takes 62.4 s with the decoder on a card against 91.8 s on the 48-thread
-/// Cranelift JIT, and the 283-row prefill 3.2 s against 5.6 s.
+/// is markedly faster with the decoder on a card than on the 48-thread
+/// Cranelift JIT, and the 283-row prefill likewise.
 /// Both produce the same ids, which
 /// `crates/deepseek2/tests/decode_throughput.rs` asserts rather than assumes.
 ///
@@ -416,9 +415,8 @@ impl Session {
     /// **the decoder on whatever [`decoder_device`] picks** - a real card
     /// wherever one fits, the CPU Cranelift JIT otherwise or on an operator's
     /// say-so.
-    /// perf-number: see [`decoder_device`] for what this compares against.
-    /// On two Tesla P40s a real page costs 62.4 s that way against
-    /// 91.8 s with the decoder on the 48-thread JIT, on roughly one host
+    /// On two Tesla P40s a real page is markedly faster that way than
+    /// with the decoder on the 48-thread JIT, on roughly one host
     /// thread instead of 48 - and decodes the same ids
     /// (`crates/deepseek2/tests/decode_throughput.rs`). See
     /// [`decoder_device`] for what that comparison is against.

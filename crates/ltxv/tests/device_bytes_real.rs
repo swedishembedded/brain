@@ -69,7 +69,9 @@ fn real_22b_int8_storage_ratio_is_measured_not_assumed() {
     // The ceiling is NOT four-to-one. A group-wise int8 weight costs 1 byte
     // per parameter for the packed lane PLUS one f32 scale per
     // `model::int8::GROUP` parameters, i.e. 4/32 = 0.125 B/param, so a model
+    // perf-number: byte-ratio arithmetic of the int8 packing, not a timing
     // with every tensor eligible would reach 4 / 1.125 = 3.5556x and no
+    // perf-number: byte-ratio arithmetic of the int8 packing, not a timing
     // more. That 12.5% is what a scale which does not span 17408 elements of
     // K costs, and it is the honest number to gate against - whole-channel
     // scales were free at this granularity and wrong at the one that matters

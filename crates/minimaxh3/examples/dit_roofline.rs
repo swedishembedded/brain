@@ -81,8 +81,8 @@ fn main() {
     // Every timed region ENDS IN A READBACK, and that is not decoration. On
     // the Vulkan backend `submit` only records and queues work; without a
     // fence the loop below measures command submission, not execution. Timed
-    // without this sync, the P40 reported 57 TFLOP/s for a 5376x7168 GEMM -
-    // roughly 5x the card's entire fp32 peak, i.e. an obviously impossible
+    // without this sync, the P40 reported a rate for a 5376x7168 GEMM
+    // several times the card's entire fp32 peak, i.e. an obviously impossible
     // number that a less suspicious harness would have reported as a win.
     // `read` waits for the queue, so timing `reps` submissions followed by one
     // readback and dividing measures real work on both backends (on CPU the

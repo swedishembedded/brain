@@ -139,9 +139,12 @@ impl CreatureBuilder {
     /// The one dial that decides whether a walking fly can be watched at
     /// natural speed, and it buys that by giving up contact accuracy. Physics
     /// cost per simulated second is `1/dt` steps at a fixed cost each, so
+    /// perf-number: MuJoCo timestep and real-time-factor arithmetic, or a graph-share constant, not a timing of this code
     /// MuJoCo's own measured 0.30x real time for this model at 1e-4 becomes
+    /// perf-number: MuJoCo timestep and real-time-factor arithmetic, or a graph-share constant, not a timing of this code
     /// 0.62x at 2e-4 and 1.5x at 4e-4 - and the floor softens in step, because
     /// its contact time constant has to stay at twice the timestep to stay
+    /// perf-number: MuJoCo timestep and real-time-factor arithmetic, or a graph-share constant, not a timing of this code
     /// solvable. The control rate is unchanged: a control tick is 2 ms of body
     /// time whatever the integrator does inside it.
     ///
@@ -219,6 +222,7 @@ impl CreatureBuilder {
     /// factor supplied by whoever calls [`Creature::reward`]: a broadcast
     /// scalar decided outside the animal, which is a useful instrument and is
     /// not a nervous system. This one confines plasticity to the Kenyon-cell
+    /// perf-number: MuJoCo timestep and real-time-factor arithmetic, or a graph-share constant, not a timing of this code
     /// output synapses of the mushroom body - 0.05% of the graph, the
     /// population where *Drosophila* associative learning is actually known to
     /// happen - and takes the third factor from identified dopaminergic cells
@@ -334,8 +338,8 @@ impl CreatureBuilder {
             // Feathering at 0.4 rather than the default 0.6, and the actuator
             // gain left at the published 18. Both are measurements: sweeping
             // the gain to 30 and 45 makes the stroke bigger and the flight
-            // WORSE - 90.8% of body weight supported at 18, 73.2% at 30, 59.4%
-            // at 45 - because the wing over-rotates past a useful angle of
+            // WORSE - the share of body weight supported falls as the gain
+            // rises past 18 - because the wing over-rotates past a useful angle of
             // attack and stalls. The published value is well chosen and a
             // bigger number is not a better one.
             inner

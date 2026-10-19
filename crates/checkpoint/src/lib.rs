@@ -87,7 +87,7 @@ pub trait TensorSource {
     /// already in memory). A quantised, mmap-backed source overrides it to
     /// decode only the blocks the range touches (`MmapGguf::tensor_range`):
     /// without that, reading ONE expert out of a stacked `[n_experts, ..]`
-    /// tensor costs the whole stack - 256x the work on a 256-expert layer.
+    /// tensor costs the whole stack - work proportional to the expert count of the layer.
     fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
         let mut in_range = false;
         let found = self.with_tensor(name, &mut |d| {

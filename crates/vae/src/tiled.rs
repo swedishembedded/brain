@@ -625,6 +625,7 @@ mod tests {
     fn the_tiled_cost_is_the_same_at_every_resolution_past_one_tile() {
         let cfg = VaeConfig::flux2();
         let at = |lh, lw| decoder_device_bytes_tiled(&cfg, lh, lw, Tiling::AUTO);
+        // perf-number: latent-size ratio asserted by the test, not a timing
         assert_eq!(at(256, 256), at(1024, 1024), "4x the latent, same tile");
         assert_eq!(at(256, 256), decoder_device_bytes(&cfg, 64, 64), "priced at one AUTO tile");
         // Below one tile there is nothing to bound: the plan is the image.

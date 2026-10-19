@@ -52,6 +52,7 @@
 //! requires an `elementwise_check` for: [`directional_check`] contracts a
 //! tensor onto one ±1 direction and keeps the best-agreeing of `n_dirs`,
 //! which is the wrong selection rule when a *share* of the gradient is
+//! perf-number: gradient error magnitude in a gradcheck, not a timing
 //! wrong rather than all of it (measured on T5's `rel_bias`: a 33 % error
 //! passed every directional check). [`check_timesfm3_per_dim_scale_elementwise`]
 //! is the per-ENTRY detector; [`check_timesfm3`] is not a substitute for it.

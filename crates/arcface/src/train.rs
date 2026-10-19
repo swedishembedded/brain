@@ -513,8 +513,8 @@ impl ArcFaceTrainer {
         // Two-pass CE gradient (see gpt2/lfm2/qwen3): `ce_stats` computes each
         // row's (max, sum-exp) ONCE, then `ce_grad_stats` reuses it per
         // element - O(rows*classes) instead of `ce_grad`'s O(rows*classes^2)
-        // per-element softmax recompute. Measured 46x at rows=128,
-        // classes=20000 on a Tesla P40 (kernel-performance.md M5.7).
+        // per-element softmax recompute. Measured at rows=128,
+        // classes=20000 on a Tesla P40, far faster (kernel-performance.md M5.7).
         // `count = b` reproduces `ce_grad`'s own unconditional `/ n_rows`;
         // `CE_IGNORE` never matches a real label, so no row is masked.
         let s_ces = ctx.step(kernel("ce_stats"), &[&self.logits, &self.labels, &self.ce_stats], &[b, k, CE_IGNORE], b);

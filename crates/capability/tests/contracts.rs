@@ -263,6 +263,7 @@ fn a_timer_firing_the_cancel_token_is_the_only_wall_clock_bound_there_is() {
     let elapsed = start.elapsed();
 
     assert_eq!(err, "cancelled", "a cancelled action reports cancellation, never a truncated success");
+    // perf-number: fixture: the test's own step budget, not a measured result
     assert!(elapsed < Duration::from_secs(10), "the whole run is 20s of steps; a fired token must end it promptly, took {elapsed:?}");
     assert!(steps_run.load(Ordering::SeqCst) < 10_000, "the action must stop early, not run to completion into a caller that has gone away");
 }

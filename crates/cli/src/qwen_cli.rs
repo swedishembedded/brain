@@ -815,6 +815,7 @@ fn finetune_lora(args: &[String]) {
     let mut grad_accum = 1u32;
     // Unset means "fit the row to the data": one example per row, so a row
     // only has to be as long as the longest example. Left at a fixed 1024 a
+    // perf-number: padding fraction computed from the example and row lengths, not a measurement
     // 42-token example spends 96% of every row, and every attention score in
     // it, on padding.
     let mut block: Option<u32> = None;

@@ -86,6 +86,7 @@ impl Residents {
     ///
     /// One job touches its instance twice - once when `claim` takes it, once
     /// when `release` gives it back - so `uses` counted every job twice.
+    /// perf-number: counting arithmetic of the scoring function, not a timing
     /// `CostAware::score` is `uses * bytes / age`, and while a uniform 2x
     /// cancels out of the ordering, `uses` is also read as a popularity figure
     /// in its own right, and "how many jobs has this served" should mean what

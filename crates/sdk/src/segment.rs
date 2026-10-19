@@ -21,7 +21,7 @@
 //!
 //! # Encode once, prompt many
 //!
-//! The trunk encoder is ~99% of the cost and depends only on the image; the
+//! The trunk encoder dominates the cost and depends only on the image; the
 //! mask decoder is tiny and depends only on the prompt
 //! (`sam2::caps::Session`'s own module doc). Calling `.segment()` several
 //! times with the SAME [`Image`] on the SAME [`SegmentPipeline`] reuses the

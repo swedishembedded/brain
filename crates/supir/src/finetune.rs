@@ -125,6 +125,7 @@ mod tests {
     // Matches `gradcheck::supir`'s own scale: each training step is a FULL
     // forward+backward of the fused trunk+adaptors+backbone graph, which
     // dominates this file's wall-clock at anything larger. `H=W=8` is still
+    // perf-number: architecture downscale factor, not a timing
     // SDXL-shaped - a multiple of `UNetConfig::tiny`'s 2x downscale, an
     // architecture constant, not a tuned number - and keeps the whole file's
     // test suite inside a normal `cargo test` budget.

@@ -53,6 +53,7 @@ const ENCODER_GPU8_BYTES: u64 = 10 << 30;
 /// paragraph of scene description (~1.5 kB of English) measures **324** ids
 /// through this model's own Qwen chat template, and the capacity this replaces
 /// (64) conditioned such a prompt on roughly its first sentence. 512 clears
+/// perf-number: capacity headroom arithmetic over a token count, not a timing
 /// that with ~58% headroom and stays cheap, because `cap_len` reaches the DiT
 /// only through `ntot = n_img + cap_len` and `n_img` is 4096 at 1024x1024 - so
 /// 64 -> 512 grows the quadratic joint sequence by 11%, not by a multiple.
@@ -1654,6 +1655,7 @@ mod caption_capacity_tests {
         assert!(fit_caption(vec![9; MEASURED], DEFAULT_CAP_LEN as usize).is_ok());
         assert!(
             DEFAULT_CAP_LEN as usize >= MEASURED + MEASURED / 4,
+            // perf-number: capacity headroom arithmetic over a token count, not a timing
             "DEFAULT_CAP_LEN {DEFAULT_CAP_LEN} leaves under 25% headroom over a measured {MEASURED}-token prompt"
         );
     }

@@ -12,6 +12,7 @@
 //!
 //! # What closing this backward actually took
 //!
+//! perf-number: upsampling factor of the architecture, not a timing
 //! Every conv, the channel concat and the nearest-2x upsample were already
 //! differentiable through `vae::blocks::Builder` - `check_rrdbnet` gates a
 //! genuinely NEW defect class instead: `crate::model`'s `lrelu`/`residual`

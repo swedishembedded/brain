@@ -139,6 +139,7 @@ const GATE: GateConfig = GateConfig { alpha: 0.05, min_effect_size: 0.05, anchor
 /// model's decoded probes must produce DISTINCT completions.
 const PREREG_MIN_DISTINCT_FRAC: f64 = 0.50;
 
+/// perf-number: statistical band (two standard deviations) the thresholds derive from, not a timing
 /// `max(0.15, 2s)` with the measured `s = 0.292` -> `0.583`, rounded to 0.59.
 /// Deliberately loose: this constant's job is to fail FIRST when the box or
 /// the model drifts far enough that the other thresholds are stale, not to
@@ -405,6 +406,7 @@ fn seed_noise_band_stays_within_the_preregistered_bound() {
     let mean = diagonals.iter().sum::<f64>() / diagonals.len() as f64;
     let sigma = (diagonals.iter().map(|d| (d - mean) * (d - mean)).sum::<f64>() / diagonals.len() as f64).sqrt();
     println!("\nR[1][1] over 5 seeds: {diagonals:?}\n  spread s = {spread:.3}   sigma = {sigma:.3}   mean = {mean:.3}   b_base = {:.3}", b_bases[0]);
+    // perf-number: statistical band (two standard deviations) the thresholds derive from, not a timing
     println!("  band the study's thresholds were sized against: {PREREG_NOISE_BAND:.3} = max(0.15, 2s)");
 
     assert!(

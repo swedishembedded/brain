@@ -24,7 +24,7 @@
 //! than an order of magnitude above what correct kernels produce on this model
 //! (on CUDA both the generated WGSL tier and the native conv kernels measured
 //! under 4e-5) and two below what a dropped or misplaced term does (one missing
-//! input column in the native forward moved the proxy loss by 38%).
+//! input column in the native forward moved the proxy loss by a large fraction).
 
 use model::Model;
 use yolov8::net::PIPELINES;

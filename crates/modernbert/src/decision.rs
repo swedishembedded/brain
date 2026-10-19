@@ -116,6 +116,7 @@ pub enum Training {
     /// The from-scratch decision head learns; the pretrained trunk is held
     /// fixed and is not even allocated gradient/moment storage.
     HeadOnly,
+    /// perf-number: device-memory ratio of the trainable state, not a timing
     /// Both halves learn, at separate learning rates. Costs ~4x the trunk's
     /// weight bytes in device memory.
     HeadAndTrunk,

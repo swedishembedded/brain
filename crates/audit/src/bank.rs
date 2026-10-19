@@ -254,7 +254,7 @@ impl ProbeSet {
         // information and would measure nothing in either direction.
         // Refusing the whole episode for one of them made the reader
         // unusable on real directories (measured on this repository:
-        // 17% of its prose and 92% of its source).
+        // a large share of its prose and most of its source).
         //
         // Iterated, because a dropped line rejoins the TRAINING half and can
         // make a line that was clean a moment ago reachable from it.
@@ -676,8 +676,8 @@ mod tests {
     /// Real text repeats itself, and a document is not unusable because one
     /// of its lines is boilerplate.
     ///
-    /// Measured before this changed: the containment check refused 17% of
-    /// this repository's own prose documentation and 92% of its source, on
+    /// Measured before this changed: the containment check refused a large
+    /// share of this repository's own prose documentation and most of its source, on
     /// answers like a markdown table separator or a lone `Paraphrase,`.
     /// Those lines are not leaks worth losing a document over - they carry
     /// no information, so probing them measures nothing in either

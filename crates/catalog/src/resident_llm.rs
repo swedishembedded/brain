@@ -83,6 +83,7 @@ pub(crate) fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
 /// `pub(crate)`: reused by [`crate::resident_qwen35moe::Qwen35Resident`] too.
 ///
 /// Measured against a real `Qwen/Qwen3-8B` checkpoint at the historical
+/// perf-number: memory-footprint ratio of the int8 weights, not a timing
 /// 24576 default context (`--qwen-ctx`), int8 KV: weights (1.3x a ~16 GiB bf16 file)
 /// ~20.8 GiB + KV pool ~3.5 GiB + paged-attention scratch ~3.0 GiB totals
 /// ~27.3 GiB - more than a single 24 GiB P40's ENTIRE capacity, before

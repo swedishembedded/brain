@@ -231,7 +231,7 @@ pub fn check_modernbert(seed: u64) -> crate::Report {
 /// `head.1.ff1.weight` has `256 * 64 = 16384` entries.
 /// [`crate::elementwise_check`]'s usual exhaustive `check_rrdbnet_elementwise`
 /// pattern costs `~2 * numel` forward passes - fine at RRDBNet's 1728 entries,
-/// but at this probe's measured ~140ms/forward (a real multi-layer
+/// but at this probe's measured per-forward cost (a real multi-layer
 /// transformer trunk + head, not a small conv net) `2 * 16384` calls is well
 /// over an HOUR, infeasible for a gate meant to run on every commit. This
 /// instead uses [`crate::elementwise_check_at`] on a fixed, deterministic

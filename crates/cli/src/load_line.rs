@@ -224,6 +224,7 @@ mod tests {
         l.on_event(&ev("/x/te.gguf", 4, 100), t0 + Duration::from_millis(200));
         assert_eq!(
             out(&rec),
+            // perf-number: fixture: expected progress-line text for a 16-of-100 byte count
             "\rltxv load dit.gguf 16% (16 B/100 B)"
                 .to_string()
                 + "\n\rltxv load te.gguf 4% (4 B/100 B)"

@@ -1226,6 +1226,7 @@ fn apply_config(path: Option<String>) {
 /// See `gpu_core::drain_all_devices`'s own doc for the measured segfault this
 /// exists to avoid: `brain qwen3vl generate` already prints its correct
 /// answer, then segfaults on exit ~2-4 out of 10 real runs (int8, a real 8B
+/// perf-number: hardware count (two cards) and a crash frequency in the bug report, not a timing
 /// GGUF checkpoint, 2x Tesla P40/Vulkan) - `gdb` shows the crashing thread
 /// has no Rust frames at all, a live NVIDIA driver worker thread killed
 /// mid-flight during process termination.

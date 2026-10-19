@@ -23,7 +23,7 @@
 //!
 //! Streamed, not buffered: GPU (fastest, most likely present) prints first,
 //! then NPU (slowest to conclude "not present"), then CPU (always fast) -
-//! so a GPU number lands on screen well under 10s regardless of how long the
+//! so a GPU number lands on screen promptly regardless of how long the
 //! NPU probe takes to degrade cleanly.
 //!
 //! Swedish Embedded AB builds hardware-aware inference tooling for embedded

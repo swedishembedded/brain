@@ -185,6 +185,7 @@ pub fn manifest() -> Manifest {
             .param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired clip's video and sound").required())
             .param(ParamSpec::new("width", ParamType::Int, "canvas width, px - must be given together with height (a multiple of the VAE spatial stride x the DiT's spatial patch size); omit both to resolve a 16:9 canvas at MiniMax-H3's own short-edge/max-pixels defaults"))
             .param(ParamSpec::new("height", ParamType::Int, "canvas height, px - see width"))
+            // perf-number: frame-rate constant / memory ratio, not a measured timing
             .param(ParamSpec::new("num_frames", ParamType::Int, "video frames at 24fps before alignment; snapped up to the VAE's own chunk grid, and the aligned duration must land in MiniMax-H3's 5-15 second bound").default(json!(default_frames)))
             .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (shared by both the video and the audio schedule, one forward per step - no CFG, this model is guidance-distilled)").default(json!(20)))
             .param(ParamSpec::new("seed", ParamType::Int, "initial-noise seed (omit for random; the outcome reports the one used)"))
@@ -385,6 +386,7 @@ const TEXT_ENCODER_SEQ_LEN: u32 = 512;
 /// `from_hf` implementation) decodes every tensor to f32 up front regardless
 /// of the caller's requested destination dtype - a ~126GB source held
 /// entirely in memory before `Qwen::new_shard_dt_decode` allocates a single
+/// perf-number: frame-rate constant / memory ratio, not a measured timing
 /// destination byte. That single fact, not a 2x-during-construction "peak",
 /// is what a real run's memory trace confirmed: switching the destination
 /// from fp32 to int8 (halving the DESTINATION buffer) made no measurable
@@ -419,6 +421,7 @@ const TEXT_ENCODER_SEQ_LEN: u32 = 512;
 /// The best per-layer-linear storage tier the AMBIENT device (`--device`/
 /// `BRAIN_DEVICE`) can actually deliver, cheapest-real-cost first: int8 (if
 /// `caps.numeric.int8_dot`), else bf16 (if `caps.numeric.bf16_storage` -
+/// perf-number: frame-rate constant / memory ratio, not a measured timing
 /// storage-only, decoded to fp32 inside the kernel, but still a genuine 2x
 /// on bytes moved/resident), else fp32.
 ///

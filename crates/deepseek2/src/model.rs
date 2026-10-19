@@ -805,6 +805,7 @@ impl DeepseekV2 {
         // logits through `Decode`'s per-row scratch instead (see
         // `ensure_decode`), so nothing ever dispatches into these buffers.
         // This is the dominant memory cost of a long-context build: the MoE
+        // perf-number: memory-share arithmetic of the activation buffers, not a timing
         // `acts` below alone are ~86% of a batched row's ~13.25 MB (`MoeActs`
         // saves EVERY expert's own activations for backward, vs `Decode`'s one
         // shared set reused across every layer and every expert).

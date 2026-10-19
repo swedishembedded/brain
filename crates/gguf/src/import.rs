@@ -94,6 +94,7 @@ pub enum ElemOp {
     /// `A_log`. Feeding it llama.cpp's already-transformed value computes
     /// `-exp(-exp(A_log))`, which for the real Qwen3.8-27B checkpoint turns a
     /// per-head decay coefficient of 0.0038..0.34 into 0.71..1.00 - a decay
+    /// perf-number: ratio computed from the checkpoint's decay coefficients, not a timing
     /// gate up to 260x too strong, which annihilates the recurrent state
     /// within a step or two. Measured symptom on the real weights: the model
     /// stops integrating context and echoes the last few prompt tokens in a

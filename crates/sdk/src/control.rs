@@ -144,7 +144,7 @@ pub trait Env {
     /// **Supply one if you possibly can.** A policy gradient from a random
     /// start has to discover a good action by sampling it, and over a text
     /// action space that is slow enough to look like a plateau: measured here,
-    /// 720 episodes of PPO from scratch moved the win rate 54% -> 56.5%, which
+    /// 720 episodes of PPO from scratch moved the win rate by less than its own noise, which
     /// is inside its own noise. The same budget after cloning a one-line
     /// scripted teacher starts where the teacher is and spends its samples
     /// improving on it. This is step one of the method's own recipe -
@@ -297,6 +297,7 @@ pub trait Env {
 ///
 /// 200 episodes, because 60 was not enough to compare against a baseline: a
 /// win rate over 60 episodes carries a standard error of about 6 points, so a
+/// perf-number: standard-error illustration / quoted paper constant, not a timing of this code
 /// policy at 57% and a heuristic at 65% were less than one and a half errors
 /// apart and could not be told apart at all. 200 halves that.
 pub const EVAL_SEEDS: std::ops::Range<u64> = 1_000_000..1_000_200;
@@ -611,7 +612,7 @@ fn ranking(gauged: Option<f32>, entering: Option<f32>) -> Option<(f32, Scored)> 
 /// A probe where every candidate led to the same place has no right answer to
 /// score a policy against, and averaging those in measures an arbitrary
 /// argmax over a flat set rather than anything about the policy. Measured on
-/// this sample, 40% to 52% of probed decisions are that decision - enough to
+/// this sample, a large share of probed decisions are that decision - enough to
 /// dominate any number they are allowed into.
 fn measured_best(scored: &[f32]) -> Option<usize> {
     let hi = scored.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -691,8 +692,8 @@ fn outcome_costs(scored: &[f32]) -> Vec<f32> {
 ///   which is unbounded below - a fact that cost this sample a training run
 ///   before it was recognised.
 /// * **Silent where nothing was learned.** All costs equal gives `c_k = L`
-///   for every k and a gradient of exactly zero, with no threshold. At 40% to
-///   52% of probed decisions that is the case.
+///   for every k and a gradient of exactly zero, with no threshold. On a large
+///   share of probed decisions that is the case.
 /// * **Proportionate.** The gradient carries the cost in the units it was
 ///   measured in rather than a rank sharpened by a temperature.
 fn outcome_pull(belief: &[f32], costs: &[f32]) -> (f32, Vec<f32>) {
@@ -2876,7 +2877,7 @@ impl<E: Env> ControlPipeline<E> {
     ///
     /// **It does not use the policy.** Exploration is random over the options
     /// the game offers, which costs an engine step and no forward pass:
-    /// measured on this sample, about 4 ms against 100 ms with a network in
+    /// measured on this sample, a small fraction of the cost with a network in
     /// the loop. The policy's job is the other half, compressing what this
     /// finds.
     ///
@@ -3058,6 +3059,7 @@ impl<E: Env> ControlPipeline<E> {
                 // KEEP DOING THE SAME THING, 95% of the time.
                 //
                 // "To help explore in a consistent direction, the probability
+                // perf-number: standard-error illustration / quoted paper constant, not a timing of this code
                 // of repeating the previous action is 95% for Atari and 90%
                 // for robotics" - Go-Explore, Methods. Without it, uniform
                 // random per step is a random walk: it covers distance like
@@ -4791,7 +4793,7 @@ mod outcome_tests {
 
     /// A decision where every candidate led to the same place teaches nothing
     /// and must pull nothing - with no threshold deciding what "the same" is.
-    /// Measured on this sample that is 40% to 52% of probed decisions, so an
+    /// Measured on this sample that is a large share of probed decisions, so an
     /// update that gave them any weight would spend most of its magnitude on
     /// them.
     #[test]
