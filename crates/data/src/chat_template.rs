@@ -300,6 +300,16 @@ impl ChatTemplate {
         Ok(t)
     }
 
+    /// Whether the template reads a tool call's `arguments` as an object
+    /// (`arguments|items`, as Qwen3.8's does) rather than passing the JSON text
+    /// through (Qwen3's `arguments is string` branch). The messages handed to
+    /// it must then carry the arguments parsed, as `transformers` does for a
+    /// served request, or rendering fails on the first tool call.
+    #[must_use]
+    pub fn reads_argument_objects(&self) -> bool {
+        self.source.contains("arguments|items") || self.source.contains("arguments | items")
+    }
+
     /// Render `messages` (a JSON array of `{role, content, tool_calls?,
     /// tool_call_id?, ...}` objects — build via [`parse_json_ordered`] or
     /// `Value::from_serialize`) through the template. `tools` is the JSON
@@ -336,8 +346,7 @@ impl ChatTemplate {
     /// and a template that never reasons renders as it always does.
     pub fn render_no_think(&self, messages: Value, tools: Option<Value>, extra: &BTreeMap<String, Value>) -> Result<String, TemplateError> {
         let mut extra = extra.clone();
-        extra.insert("enable_thinking".to_string(), Value::from(false));
-        extra.insert("thinking".to_string(), Value::from(false));
+        extra.extend(no_think_switches());
         let mut text = self.render(messages, tools, true, &extra)?;
         if text.trim_end_matches('\n').ends_with("<think>") {
             text.push_str("\n</think>\n\n");
@@ -352,7 +361,11 @@ impl ChatTemplate {
     #[must_use]
     pub fn no_think_block(&self) -> Option<String> {
         let probe = || parse_json_ordered(r#"[{"role":"user","content":"x"}]"#).ok();
-        let plain = self.render(probe()?, None, false, &BTreeMap::new()).ok()?;
+        // Plain is rendered with the switches off too: a template that adds
+        // reasoning instructions to the system turn while thinking is on
+        // (Qwen3.8's) would otherwise differ from the asked prompt before the
+        // assistant turn, and no block would be found.
+        let plain = self.render(probe()?, None, false, &no_think_switches()).ok()?;
         let asked = self.render_no_think(probe()?, None, &BTreeMap::new()).ok()?;
         let tail = asked.strip_prefix(plain.as_str())?;
         let at = ["<think>", "</think>"].iter().filter_map(|tag| tail.find(tag)).min()?;
@@ -402,7 +415,11 @@ impl ChatTemplate {
         };
         let context = Value::from(context.to_vec());
         let prompt = if thinking { self.render(context, tools.clone(), true, &BTreeMap::new())? } else { self.render_no_think(context, tools.clone(), &BTreeMap::new())? };
-        let full = self.render(Value::from(messages.to_vec()), tools, false, &BTreeMap::new())?;
+        // The answer is rendered with the switches the prompt was asked with:
+        // a template whose system turn depends on them (Qwen3.8's reasoning
+        // instructions) would not otherwise extend the prompt.
+        let switches = if thinking { BTreeMap::new() } else { no_think_switches() };
+        let full = self.render(Value::from(messages.to_vec()), tools, false, &switches)?;
         if !full.as_bytes().starts_with(prompt.as_bytes()) {
             return Err(TemplateError(format!(
                 "the final message does not follow the prompt the model is asked from: the template renders the conversation so far ({} bytes with the generation prompt) differently with and without it",
@@ -476,6 +493,12 @@ impl ChatTemplate {
         }
         Ok((full, boundaries))
     }
+}
+
+/// The context variables that turn reasoning off in the templates that have a
+/// switch: `enable_thinking` (Qwen3, Qwen3.8) and `thinking` (DeepSeek-V3.1).
+fn no_think_switches() -> BTreeMap<String, Value> {
+    BTreeMap::from([("enable_thinking".to_string(), Value::from(false)), ("thinking".to_string(), Value::from(false))])
 }
 
 /// `strftime_now(format)` for templates (Llama/Mistral date headers), over
@@ -554,6 +577,40 @@ mod tests {
             "{% for m in messages %}<|{{ m.role }}|>{{ m.content }}{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}",
         )
         .unwrap()
+    }
+
+    /// A template in the shape of Qwen3.8's: with thinking on (the default) the
+    /// system turn gains an instruction, and the assistant turn opens a reasoning
+    /// block; with it off the prompt closes an empty block instead.
+    fn switching_env() -> ChatTemplate {
+        ChatTemplate::compile(
+            "{%- set on = enable_thinking is undefined or enable_thinking is true -%}\
+             {%- for m in messages %}{%- if loop.first and on %}<|system|>THINK-HARD<|end|>\n{%- endif %}\
+             <|{{ m.role }}|>{{ '<think>\\n\\n</think>\\n\\n' if m.role == 'assistant' }}{{ m.content }}<|end|>\n{%- endfor %}\
+             {%- if add_generation_prompt %}<|assistant|>{{ '<think>\\n' if on else '<think>\\n\\n</think>\\n\\n' }}{%- endif %}",
+        )
+        .unwrap()
+    }
+
+    /// The block a model asked not to reason is trained to follow is found even
+    /// when the template's thinking-on render differs earlier in the prompt.
+    #[test]
+    fn the_no_think_block_is_found_when_thinking_changes_the_system_turn() {
+        assert_eq!(switching_env().no_think_block().as_deref(), Some("<think>\n\n</think>\n\n"));
+    }
+
+    /// An answer trained for no-think mode follows the prompt a no-think request
+    /// renders, though the thinking-on render of the same conversation differs.
+    #[test]
+    fn a_no_think_answer_follows_the_no_think_prompt() {
+        let tmpl = switching_env();
+        let user = parse_json_ordered(r#"{"role":"user","content":"hi"}"#).unwrap();
+        let answer = parse_json_ordered(r#"{"role":"assistant","content":"yo"}"#).unwrap();
+        let (full, supervised) = tmpl.render_with_supervised_suffix(&[user.clone(), answer], None, false).unwrap();
+        let prompt = tmpl.render_no_think(Value::from(vec![user]), None, &BTreeMap::new()).unwrap();
+        assert!(!prompt.contains("THINK-HARD"), "{prompt}");
+        assert_eq!(&full[..supervised.start], prompt);
+        assert_eq!(&full[supervised], "yo<|end|>");
     }
 
     #[test]

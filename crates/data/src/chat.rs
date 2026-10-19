@@ -127,12 +127,15 @@ impl ChatMessage {
     }
 
     /// This message as the JSON-shaped value a chat template reads
-    /// (`message.role`, `message.content`, `message.tool_calls`, …).
-    fn to_template_value(&self) -> minijinja::Value {
+    /// (`message.role`, `message.content`, `message.tool_calls`, …). A call's
+    /// arguments are the raw JSON text, or, for a template that iterates them
+    /// ([`ChatTemplate::reads_argument_objects`]), that text parsed with its key
+    /// order kept; text that does not parse stays text.
+    fn to_template_value(&self, argument_objects: bool) -> minijinja::Value {
         #[derive(serde::Serialize)]
         struct TplFunction<'a> {
             name: &'a str,
-            arguments: &'a str,
+            arguments: minijinja::Value,
         }
         #[derive(serde::Serialize)]
         struct TplToolCall<'a> {
@@ -156,11 +159,22 @@ impl ChatMessage {
             tool_calls: self
                 .tool_calls
                 .iter()
-                .map(|tc| TplToolCall { id: tc.id.as_deref(), r#type: "function", function: TplFunction { name: &tc.name, arguments: &tc.arguments } })
+                .map(|tc| TplToolCall { id: tc.id.as_deref(), r#type: "function", function: TplFunction { name: &tc.name, arguments: template_arguments(&tc.arguments, argument_objects) } })
                 .collect(),
             tool_call_id: self.tool_call_id.as_deref(),
         })
     }
+}
+
+/// A call's arguments as a template reads them: the parsed object when the
+/// template iterates them and the text is JSON, else the text itself.
+fn template_arguments(raw: &str, as_object: bool) -> minijinja::Value {
+    if as_object {
+        if let Ok(parsed) = serde_json::from_str::<minijinja::Value>(raw) {
+            return parsed;
+        }
+    }
+    minijinja::Value::from(raw)
 }
 
 /// A packed multi-turn chat sample: a full conversation, encoded and masked
@@ -272,7 +286,7 @@ impl ChatSample {
     /// context and only what the template renders for that message is
     /// supervised.
     fn rendered_final_turn(&self, tmpl: &ChatTemplate, thinking: bool) -> Result<ChatSample, TemplateError> {
-        let values: Vec<minijinja::Value> = self.messages.iter().map(ChatMessage::to_template_value).collect();
+        let values: Vec<minijinja::Value> = self.messages.iter().map(|m| m.to_template_value(tmpl.reads_argument_objects())).collect();
         let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
         let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
         let (prompt, completion) = full.split_at(answer.start);
@@ -312,7 +326,7 @@ impl ChatSample {
         let mut segments: Vec<RenderedSegment> = Vec::new();
         let mut previous_prompt = String::new();
         for at in (0..self.messages.len()).filter(|&at| self.messages[at].train) {
-            let values: Vec<minijinja::Value> = self.messages[..=at].iter().map(ChatMessage::to_template_value).collect();
+            let values: Vec<minijinja::Value> = self.messages[..=at].iter().map(|m| m.to_template_value(tmpl.reads_argument_objects())).collect();
             let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
             let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
             let (prompt, completion) = full.split_at(answer.start);
@@ -412,7 +426,7 @@ impl ChatSample {
         } else {
             self.messages.clone()
         };
-        let values: Vec<minijinja::Value> = messages.iter().map(ChatMessage::to_template_value).collect();
+        let values: Vec<minijinja::Value> = messages.iter().map(|m| m.to_template_value(tmpl.reads_argument_objects())).collect();
         let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
         let (full, ranges) = tmpl.render_with_message_boundaries(&values, tools)?;
 
@@ -1070,6 +1084,23 @@ mod tests {
         assert!(ChatSample::from_jsonl(&path).is_err());
     }
 
+    /// Qwen3.8's template iterates a call's arguments (`arguments|items`), so a
+    /// record's JSON text must reach it parsed and in its key order; Qwen3's
+    /// passes the text through, and still gets it verbatim.
+    #[test]
+    fn tool_call_arguments_reach_the_template_in_the_shape_it_reads() {
+        let call = ChatMessage::assistant_tool_calls("", vec![ToolCall { id: Some("c".into()), name: "f".into(), arguments: r#"{"b": 2, "a": "x"}"#.into() }], true);
+        let render = |template: &str| {
+            let tmpl = ChatTemplate::compile(template).unwrap();
+            let messages = minijinja::Value::from(vec![call.to_template_value(tmpl.reads_argument_objects())]);
+            tmpl.render(messages, None, false, &std::collections::BTreeMap::new()).unwrap()
+        };
+        let iterating = "{%- for m in messages %}{%- for tc in m.tool_calls %}{%- for k, v in tc.function.arguments|items %}{{ k }}={{ v }};{%- endfor %}{%- endfor %}{%- endfor %}";
+        assert_eq!(render(iterating), "b=2;a=x;");
+        let passing = "{%- for m in messages %}{%- for tc in m.tool_calls %}{{ tc.function.arguments }}{%- endfor %}{%- endfor %}";
+        assert_eq!(render(passing), r#"{"b": 2, "a": "x"}"#);
+    }
+
     #[test]
     fn to_template_value_omits_empty_tool_calls_and_tool_call_id() {
         // Fields the template checks with `is defined`/truthiness must be
@@ -1077,7 +1108,7 @@ mod tests {
         // `tool_calls: []` vs. a missing key can take different branches in
         // a real template (`{%- if message.tool_calls %}`).
         let m = ChatMessage::user("hi");
-        let v = m.to_template_value();
+        let v = m.to_template_value(false);
         assert_eq!(v.get_attr("tool_calls").unwrap().kind(), minijinja::value::ValueKind::Undefined);
         assert_eq!(v.get_attr("tool_call_id").unwrap().kind(), minijinja::value::ValueKind::Undefined);
     }

@@ -331,3 +331,58 @@ fn matches_qwen_chat_qwen38_with_enable_thinking_false_generation_prompt() {
 
     assert_eq!(got, expected);
 }
+
+/// What a trainer asked for no-think mode (`ChatSample::answers_as_asked`)
+/// shows the model before each supervised tool call is what `brain serve` renders
+/// for the same request (`qwen_chat::render`, Qwen3.8 flavor, thinking off,
+/// generation prompt): tool results in the context, earlier calls with their
+/// empty reasoning blocks, the tools preamble. A skew here trains on prompts the
+/// served model is never given.
+#[test]
+fn a_qwen38_training_prompt_is_the_prompt_the_server_renders() {
+    use data::chat::{ChatMessage, ChatSample, ToolCall};
+
+    let Some((tmpl, flavor)) = load_template() else {
+        brain_testutil::skip("Qwen3.8 tokenizer_config.json not found (set QWEN3_DIR to the qwen3.8 resources dir)");
+        return;
+    };
+    want_flavor!(flavor, Flavor::Qwen38, "Qwen3");
+
+    let tool = r#"{"type":"function","function":{"name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"location":{"type":"string"}}}}}"#;
+    let call = |id: &str, args: &str| ToolCall { id: Some(id.into()), name: "get_weather".into(), arguments: args.into() };
+    let sample = ChatSample {
+        messages: vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("Check the weather in Paris and Rome."),
+            ChatMessage::assistant_tool_calls("Checking.", vec![call("a", r#"{"location": "Paris"}"#)], true),
+            ChatMessage { tool_call_id: Some("a".into()), ..ChatMessage::tool_result("18C, sunny") },
+            ChatMessage::assistant_tool_calls("", vec![call("b", r#"{"location": "Rome"}"#), call("c", r#"{"location": "Oslo"}"#)], true),
+        ],
+        tools: vec![parse_json_ordered(tool).unwrap()],
+        rendered: None,
+    };
+    let trained = sample.answers_as_asked(&tmpl, false).expect("renders").expect("assistant turns");
+    assert_eq!(trained.len(), 2);
+
+    let served = |upto: usize| {
+        let msgs: Vec<QcMessage> = sample.messages[..upto]
+            .iter()
+            .map(|m| match m.role.as_str() {
+                "system" => QcMessage::system(&m.content),
+                "user" => QcMessage::user(&m.content),
+                "tool" => QcMessage::tool(&m.content),
+                _ => QcMessage::assistant(&m.content).with_tool_calls(
+                    m.tool_calls.iter().map(|c| ToolCallMsg { id: c.id.clone().unwrap_or_default(), name: c.name.clone(), arguments: c.arguments.clone() }).collect(),
+                ),
+            })
+            .collect();
+        qwen_chat::render(&msgs, &[tool.to_string()], TemplateOpts { add_generation_prompt: true, enable_thinking: false, flavor: TemplateFlavor::Qwen38, ..Default::default() }).expect("qwen_chat render")
+    };
+    for (answer, upto) in trained.iter().zip([2usize, 4]) {
+        let rendered = answer.rendered.as_ref().expect("an answer asked for as the model is");
+        let prompt = &rendered.segments[0];
+        assert!(!prompt.supervised);
+        assert_eq!(prompt.text, served(upto), "the training prompt before message {upto} differs from the served prompt");
+        assert!(rendered.segments[1].supervised && rendered.segments[1].text.contains("<tool_call>"));
+    }
+}
