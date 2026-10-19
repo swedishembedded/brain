@@ -696,8 +696,15 @@ history and exempt.
     met**: `minicpmv::caps` (one streaming `generate`, tools via the shared
     `qwen3::chat` layer), `crates/catalog/src/resident_minicpmv.rs` (one
     card, real `run_batch` batching on the paged KV pool), a `catalog.rs`
-    entry, `samples/python/vision/minicpmv-chat/`. Page:
-    `docs/models/minicpmv.md`; ledger: `.agents/roadmap/minicpmv.md`.
+    entry, `samples/python/vision/minicpmv-chat/`. **Fine-tuning**:
+    `minicpmv::train` (decoder LoRA/full/frozen, connector, tower
+    LoRA/full/frozen, each independent; checkpointed vision backward in
+    `vision_train`), `minicpmv::finetune` (epochs, held-out loss, resumable
+    state) behind `brain minicpmv finetune`; stored tunes serve as
+    `brain/minicpmv:<owner>:<name>:<tag>`, and `brain minicpmv export-peft`
+    writes one PEFT adapter over the HF checkpoint (`minicpmv::export` on
+    `qwen3::export::PeftAdapter`). Page: `docs/models/minicpmv.md`; ledger:
+    `.agents/roadmap/minicpmv.md`.
 
 13c-bis. **FastVLM-0.5B and Moondream 3** (`crates/fastvlm`, `crates/moondream3`) -
     the other two vision-language architectures alongside Qwen3-VL above; all

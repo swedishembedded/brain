@@ -90,6 +90,21 @@ prompt. The tokenizer is `tokenizer.json` in the base directory unless
 
 The `f32` tier is the existing trainer for small and merged checkpoints.
 
+## Images and video: `brain minicpmv finetune`
+
+MiniCPM-V 4.6 fine-tunes on conversations with image and video parts, the
+decoder (LoRA, full or frozen), the connector and the vision tower (LoRA,
+full or frozen) each trained on its own, at its own rate:
+
+```bash
+brain minicpmv finetune --dataset train.jsonl --held-out val.jsonl --vision lora:4 --label acme:receipts:v1
+brain minicpmv export-peft --tune acme:receipts:v1 --out receipts-peft
+```
+
+The tune is served as `brain/minicpmv:acme:receipts:v1`; the export is one
+PEFT adapter over the Hugging Face checkpoint. Dataset format, options and
+what is verified: [MiniCPM-V](../models/minicpmv.md#fine-tuning).
+
 ## Adapter references
 
 A fine-tuned adapter is addressed the same way as any other model: as a

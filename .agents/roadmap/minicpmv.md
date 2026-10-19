@@ -88,9 +88,12 @@ continuations and one label loss.
       (T = 4), the merger; no new kernel. Real checkpoint, reference pixels
       (`tests/vision_parity.rs`): every stage at cosine >= 0.9999999999,
       rel_l2 <= 1.3e-5, at 16x, at 4x and for two packed images.
-- [ ] P3b vision backward (cached forward + `vit_block_bwd`, window merger
-      and merger adjoints) and its FD gradcheck - lands with P7, the first
-      consumer.
+- [x] P3b vision backward (`vision_train.rs`): checkpointed (each block's
+      input kept, the block recomputed in backward) through `vit_block_bwd`,
+      the window merger's and the merger's adjoints, and LoRA on the tower's
+      linears (`W0 + (alpha/r) B A` folded per forward, factor gradients
+      projected from dW). FD-gated: `gradcheck::check_minicpmv_vision`
+      (16x), `_4x` and `_lora`, worst relative error 7.8e-3.
 - [x] P4 preprocessing + prompt layout (`preprocess.rs`, `prompt.rs`): the
       slicing policy with Python's rounding, torch's uint8 antialiased bicubic
       (`imaging::host::resize_bicubic_torch_u8`, not Pillow's - they differ by
@@ -124,5 +127,44 @@ continuations and one label loss.
       the golden clip's ids, video features (cosine 1.0000000000), logits
       and greedy reply; the CLI on a red/green/blue clip reports the colours
       in order.
-- [ ] P7 training: decoder LoRA, merger, vision; overfit/held-out/reload
-      gates; PEFT export.
+- [x] P7 training:
+  - [x] trainer (`train.rs`, `dataset.rs`): `generic-messages-v2` with
+        image/video parts, one sample per supervised turn rendered as
+        inference renders it; decoder LoRA/full/frozen, connector, tower
+        LoRA/full/frozen, each independent; resumable state; tune
+        directories and `MiniCpmV::load_tuned`. Gates:
+        `gradcheck::check_minicpmv_composite`, `tests/train_tiny.rs` (frozen
+        stays bit-identical, overfit, bit-identical resume).
+  - [x] run driver (`finetune.rs`) and `brain minicpmv finetune`: up-front
+        validation of every record, seeded per-epoch order, cosine schedule,
+        held-out loss per epoch, atomic state saves and `--resume`.
+  - [x] stored tunes served as `brain/minicpmv:<owner>:<name>:<tag>`
+        (`finetune::stored_tunes`, `catalog::resident_minicpmv` family).
+  - [x] per-part peak rates (`train::Rates`, defaults from
+        `Rates::around`: connector a tenth, full tower a fiftieth of the
+        LoRA rate). One shared rate scrambled the connector within a few
+        dozen steps and left a run at chance on the image.
+  - [x] real-checkpoint gates: `tests/train_parity.rs` (trainer label loss
+        = reference, 0.0396951 vs 0.0396935), `tests/tune_reload.rs` (a
+        perturbed tune serves the trainer's numbers, 27.11646 vs 27.11628),
+        `tests/finetune_real.rs` (decoder LoRA, connector and tower LoRA on
+        a colour-to-codeword task: held-out loss 11.6 -> 0.0056 in 32 steps,
+        every unseen image answered correctly by the served tune). CLI run
+        end to end: `finetune` into the store, `brain serve` lists and
+        answers as `brain/minicpmv:<label>`, `export-peft` by label.
+  - [ ] training step cost: about 8 s per turn with tower LoRA on a P40
+        (forward 2.1 s, backward 5.5 s, AdamW and zeroing 1.4 s for one
+        1024-patch view); the tower LoRA keeps full-size base gradients and
+        a base copy (about 15 GB). Computing the factor gradients from
+        activations instead of projecting dW would drop both.
+  - [x] PEFT export (`export.rs`, `brain minicpmv export-peft`) on the
+        shared `qwen3::export::PeftAdapter`: decoder and tower LoRA under
+        HF modules (fused qkv split three ways), full-trained parts as
+        `modules_to_save`, mixed ranks folded to one. Gate
+        (`tests/peft_export.rs` + `tools/goldens/minicpmv_peft_reference.py`):
+        transformers with the export applied gives brain's tuned logits at
+        cosine 1.0000000000, rel_l2 6.5e-5, and the same greedy reply; the
+        base alone is far off. The `peft` package itself was not available
+        to the reference (no network); the script applies PEFT's LoRA rule
+        and records which path it took, and uses `peft.PeftModel` when the
+        package is installed.

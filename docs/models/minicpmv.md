@@ -49,6 +49,71 @@ python3 samples/python/vision/minicpmv-chat/minicpmv_chat.py --image a.png --ima
 | `--video_path FILE` | a video on this host: frames picked by index from the container's metadata - one per second, or every tenth of a second thinned to `max_frames` for a clip longer than that many seconds |
 | `--max_frames N` | most frames one video contributes (default 128) |
 
+## Fine-tuning
+
+```bash
+brain minicpmv finetune --dataset train.jsonl --held-out val.jsonl --label acme:receipts:v1
+brain serve --openai 8789          # now also lists brain/minicpmv:acme:receipts:v1
+brain minicpmv export-peft --tune acme:receipts:v1 --out receipts-peft
+```
+
+The dataset is `generic-messages-v2` JSONL - one conversation per line,
+every message with an explicit `train` flag - whose message content may be a
+list of parts, media referenced by path relative to the file:
+
+```json
+{"messages": [
+  {"role": "user", "train": false, "content": [
+    {"type": "image", "path": "images/0001.png"},
+    {"type": "text", "text": "What is the total on this receipt?"}]},
+  {"role": "assistant", "train": true, "content": "42.50 EUR"}]}
+```
+
+Each assistant turn marked `train` is one training sample, rendered as the
+model is asked at inference (the checkpoint's template, no thinking block)
+with only the answer supervised. Every record, file and turn is checked
+before the first step; a bad one fails naming its line.
+
+Each part trains on its own:
+
+| flag | part | modes (default first) |
+|---|---|---|
+| `--decoder` | the Qwen3.5 decoder | `lora:16:32` (rank:alpha), `full`, `frozen` |
+| `--freeze-connector` | the merger | trained unless given |
+| `--vision` | the SigLIP tower and window merger | `frozen`, `lora:R:A` (on every layer's qkv, out, fc1, fc2), `full` |
+
+| option | effect |
+|---|---|
+| `--epochs N` / `--batch N` | passes over the data (default 3) and turns per AdamW step (default 1) |
+| `--lr X` | peak rate of the decoder and of a LoRA tower (default 1e-4) |
+| `--connector-lr X`, `--vision-lr X` | peak rates of the connector (default a tenth of `--lr`) and of the tower (`--lr` under LoRA, a fiftieth in full): Adam moves every weight by about the rate each step, and these weights are small enough that a LoRA-sized rate scrambles them |
+| `--warmup N`, `--min-lr-ratio R` | the cosine schedule every part follows: warmup over N steps (default a twentieth of the run), then down to R of each peak (default 0.1) |
+| `--weight-decay W`, `--grad-clip C` | AdamW decay (default 0) and global gradient clip (default 1; 0 disables) |
+| `--block T` | tokens per sample (default: the longest sample) |
+| `--downsample`, `--max-slices`, `--max-frames` | the processor options, as for `generate` |
+| `--checkpoint-every N`, `--resume` | save the whole training state every N steps (always at each epoch's end); `--resume` continues from it, drawing the same batches |
+| `--label owner:name:tag` / `--out DIR` | where the tune goes: beside the checkpoint in the model store under the label (served as `brain/minicpmv:<label>`), or a directory |
+| `--device gpuN`, `--seed S` | the card; the seed of the data order and adapter initialisation (random and printed when not given) |
+
+A tune directory holds `tune.json`, the decoder's LoRA adapter (or its full
+weights), and the vision side's trained tensors and LoRA factors. Serving
+applies it as the model loads: the vision LoRA and the decoder adapter are
+folded into the weights, so a tune runs exactly as fast as the base.
+`export-peft` writes it as one PEFT adapter over the Hugging Face checkpoint:
+the decoder's and the tower's LoRA pairs under their HF modules (a pair on
+the tower's fused `qkv` becomes three that share `A`), a connector or tower
+trained in full as `modules_to_save`. A decoder trained in full is no adapter
+and is refused.
+
+Training runs in fp32 on one card. With tower LoRA the tower keeps its
+full-size gradient buffers and a copy of its base weights beside the
+decoder: about 15 GB, and a supervised turn with one 448-pixel view takes
+several seconds on a P40. Training the tower is what lets a task that hinges on what
+the image shows learn quickly: on the codeword task below, 32 steps with
+tower LoRA reach a held-out loss of 0.0056, while the same budget with the
+tower frozen learns the answers' form but stays at chance on which answer
+the image calls for.
+
 ## How it is validated
 
 Against the reference implementation (`transformers`' `minicpmv4_6`, fp32
@@ -69,6 +134,30 @@ on CPU) on the real checkpoint, from goldens written by
   long ones thinned to the budget, odd frame rates), and a synthetic clip end
   to end - video features at cosine 1.0000000000 and the greedy reply
   identical.
+- **Training gradients**: every vision-side gradient (tower, window merger,
+  merger, tower LoRA, at 16x and 4x) and the composite's (decoder LoRA,
+  merger and tower LoRA through the splice) against finite differences of
+  the loss.
+- **Training behaviour** (a tiny model): frozen parts stay bit-identical
+  while trained parts move, the loss falls on an overfit run, and a run
+  saved and restored halfway ends bit-identical to an uninterrupted one.
+- **Fine-tuning the real checkpoint**: a synthetic task (the colour of a disc
+  on noise names a made-up codeword) with decoder LoRA, the connector and
+  tower LoRA all training (batches of 3, 8 epochs at `--lr 5e-4`) cuts the
+  held-out loss on unseen images from 11.6 to 0.0056, and the saved tune,
+  loaded as serving loads it, answers every unseen image with its codeword.
+- **Training forward and reload**: the trainer's label loss for the golden
+  photo and answer is the reference's (0.0396951 vs 0.0396935), and with
+  every trained part moved, the next-token loss the trainer computes and the
+  one the saved tune gives when served are the same number.
+- **PEFT export**: a deterministic tune (decoder LoRA on all twelve
+  projections, tower LoRA at another rank and scale, the connector in full)
+  exported and applied to the reference model by
+  `tools/goldens/minicpmv_peft_reference.py` gives the next-token logits
+  brain gives with the tune itself (cosine 1.0000000000, rel_l2 6.5e-5)
+  and the same greedy reply. Without the `peft` package installed the script
+  applies the adapter by PEFT's LoRA rule (`W += lora_alpha / r * B A`,
+  `modules_to_save` loaded in place) and records that it did.
 
 ## Limits
 
@@ -79,7 +168,8 @@ on CPU) on the real checkpoint, from goldens written by
   D-Bus (`video` blob) or the CLI (`--video_path`).
 - Images are decoded by brain's own codecs; a JPEG can decode a pixel or two
   differently from PIL's libjpeg, which can move a long greedy continuation.
-- Fine-tuning is not wired yet.
+- PEFT export needs at least one LoRA part, and a decoder trained in full
+  is not exported (its weights stay in the tune directory).
 
 ## Architecture
 
