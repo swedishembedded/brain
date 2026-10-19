@@ -1153,7 +1153,7 @@ const DECODE_ATTN_I8_BINDINGS: &[BindKind] = &[
 /// `cuda` is named in `BRAIN_NO_PROVIDER`, the device is below the kernel's floor, or the backend declined it.
 pub fn paged_decode_batched_step(gpu: &crate::Gpu, int8: bool, bufs: &[&backend_api::DeviceBuffer], params: &[u32]) -> Option<crate::Step> {
     let &[bsz, _, n_kv, head_dim, group, _, _] = params else { return None };
-    if head_dim != 128 || !(1..=8).contains(&group) || bsz < 2 || !tensor_core_kernels_enabled(gpu) || bufs.len() != if int8 { 8 } else { 6 } {
+    if head_dim != 128 || !(1..=8).contains(&group) || bsz < 2 || super::disabled_providers().iter().any(|d| d == "cuda") || bufs.len() != if int8 { 8 } else { 6 } {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
