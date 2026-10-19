@@ -2,24 +2,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Build the brain documentation bundle: one self-contained Markdown file and one
-professional PDF, from the docs listed in docs/manifest.txt.
+"""Build the brain documentation manual: one self-contained Markdown file and
+one PDF, ordered by the navigation in docs/manifest.yaml (the single source of
+page order, shared with the published documentation).
 
 Outputs (git-ignored, regenerate on demand):
-    build/docs/brain-docs.md
-    build/docs/brain-docs.pdf
+    build/pdf/brain-docs.md
+    build/pdf/brain-docs.pdf
 
+build/docs/ is reserved for the publication built by the docs publisher.
 No HTML is produced. Run from the repo root:  python3 docs/pandoc/build-docs.py
-Requires pandoc + xelatex.
+Requires pandoc + xelatex and PyYAML.
 """
 import os, re, sys, subprocess, posixpath
+import yaml
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DOCS = os.path.join(ROOT, "docs")
-OUT = os.path.join(ROOT, "build", "docs")
+OUT = os.path.join(ROOT, "build", "pdf")
 os.makedirs(OUT, exist_ok=True)
 
-DATE = "July 2026"
+# Used only when the sources are not in a git checkout, so the output stays
+# deterministic instead of depending on the wall clock.
+FALLBACK_DATE = "Unreleased"
+
+
+def source_date():
+    """Month and year of the last commit that touched docs/ (stable per commit)."""
+    r = subprocess.run(
+        ["git", "log", "-1", "--format=%cd", "--date=format:%B %Y", "--", "docs"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    out = r.stdout.strip()
+    return out if r.returncode == 0 and out else FALLBACK_DATE
+
+
 # `author` reaches the PDF title page; `header.tex` puts the same name in the
 # footer of every page. brain is Swedish Embedded AB's work and the document
 # that gets handed to a reader should say so on its face, the way any other
@@ -29,26 +46,35 @@ META = f"""---
 title: "brain --- Engineering Documentation"
 subtitle: "Pure-Rust GPU machine learning: engine, models, and multi-GPU scaling"
 author: "{AUTHOR} --- info@swedishembedded.com"
-date: "{DATE}"
+date: "{source_date()}"
 toc-title: "Contents"
 ---
 
 """
 
-def manifest():
-    """Yields ('part', title) for a `== Title` line, ('doc', rel_path) otherwise.
 
-    A doc path is repo-root-relative (e.g. `docs/using/cli.md` or
+def manifest():
+    """Yields ('part', title) for each top-level navigation group and
+    ('doc', rel_path) for every page in it, depth first, in manifest order.
+
+    A doc path is repo-root-relative (e.g. `docs/reference/cli.md` or
     `samples/python/dbus/brain-dbus/README.md`), not docs/-relative - so the
     manual can pull in a sample's own README alongside the docs/ pages."""
-    for line in open(os.path.join(DOCS, "manifest.txt")):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("== "):
-            yield ("part", line[3:].strip())
-        else:
-            yield ("doc", line)
+    with open(os.path.join(DOCS, "manifest.yaml"), encoding="utf-8") as fh:
+        nav = yaml.safe_load(fh)["navigation"]
+
+    def pages(items):
+        for item in items:
+            if isinstance(item, str):
+                yield ("doc", item)
+            elif "pages" in item:
+                yield from pages(item["pages"])
+            else:
+                yield ("doc", item["source"])
+
+    for group in nav:
+        yield ("part", group["title"])
+        yield from pages(group["pages"])
 
 # strip cross-document .md links to their text (no dead links in the bundle),
 # keep external links, anchors, and images.
@@ -78,7 +104,7 @@ def build_markdown():
         rel = val
         p = os.path.join(ROOT, rel)
         if not os.path.isfile(p):
-            sys.exit(f"docs/manifest.txt: missing file: {rel}")
+            sys.exit(f"docs/manifest.yaml: missing file: {rel}")
         parts.append(transform(rel, open(p).read()).rstrip() + "\n\n")
     md = os.path.join(OUT, "brain-docs.md")
     open(md, "w").write("".join(parts))
@@ -120,4 +146,4 @@ if __name__ == "__main__":
     md = build_markdown()
     pdf, bad = build_pdf(md)
     if bad:
-        print("WARNING: some content overflows the page; see build/docs/pandoc.log", file=sys.stderr)
+        print("WARNING: some content overflows the page; see build/pdf/pandoc.log", file=sys.stderr)
