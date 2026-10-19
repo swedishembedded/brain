@@ -624,6 +624,18 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 }
             }
             i += 2;
+        } else if argv[i] == "--vram-budget" {
+            // The VRAM this process was granted, in GiB: every card it budgets
+            // from is capped at it (the card helper sets this from the shares it
+            // reserved). Set before any device is probed.
+            match argv.get(i + 1).and_then(|v| v.parse::<f64>().ok()).filter(|g| *g > 0.0) {
+                Some(gib) => gpu_core::capacity::set_vram_budget((gib * (1u64 << 30) as f64) as u64),
+                None => {
+                    eprintln!("brain: --vram-budget needs a positive number of GiB");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
         } else if argv[i] == "--no-native-kernels" {
             // Every dispatch stays on the generated tier: the A/B switch the
             // native kernels are measured with. Set before any device is built.

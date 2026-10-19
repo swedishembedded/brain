@@ -96,6 +96,11 @@ conflicts with a few of its math headers; the installer patches them, so
 
 `--device gpu0` still says *which* card; the backend says *how* it is driven.
 
+`--vram-budget GiB` (a global flag, like `--device`) states the VRAM this process
+was granted: every card it budgets from is capped at it, so a server on a share of a
+card sizes its weights, KV pool and context to the share. A script that
+reserves a share of a card passes the GiB it reserved.
+
 `--profile-replays N` (a global flag, like `--device`) makes the passes that
 support it - the FLUX.2 DiT forward, the Qwen3 encoder forward, the VAE
 encode and decode graphs - also replay their recorded dispatches `N` times as

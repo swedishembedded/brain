@@ -131,7 +131,38 @@ pub fn probe_gpus() -> Vec<GpuMem> {
         }
     }
     mem.retain(|g| g.total > 0);
+    clamp_to_budget(&mut mem, vram_budget());
     mem
+}
+
+static VRAM_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bound every GPU this process budgets from to `bytes`: the VRAM the process
+/// was GRANTED (`--vram-budget`, which the card reservation helper sets), as
+/// opposed to what the card has. Set once at startup, before any probe; every
+/// consumer of [`probe_gpus`] (the serving budgets, pool sizing, placement)
+/// then sizes itself to the grant, so a process on a share of a card never
+/// plans for the whole card.
+pub fn set_vram_budget(bytes: u64) {
+    VRAM_BUDGET.store(bytes, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The process's VRAM grant, when one was set.
+pub fn vram_budget() -> Option<u64> {
+    match VRAM_BUDGET.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        bytes => Some(bytes),
+    }
+}
+
+/// Cap every card's total and free bytes at `budget`.
+fn clamp_to_budget(cards: &mut [GpuMem], budget: Option<u64>) {
+    if let Some(budget) = budget {
+        for card in cards {
+            card.total = card.total.min(budget);
+            card.free = card.free.min(budget);
+        }
+    }
 }
 
 /// `(index, available bytes)` for every card - what a `Budgets` GPU tier is
@@ -252,6 +283,19 @@ mod tests {
     const GIB: u64 = 1 << 30;
 
     /// A measured card offers what is free - not its size.
+    #[test]
+    fn a_vram_budget_caps_what_every_card_reports_and_never_raises_it() {
+        let mut cards = vec![
+            GpuMem { index: 0, total: 96 * GIB, free: 90 * GIB, measured: true },
+            GpuMem { index: 1, total: 96 * GIB, free: 10 * GIB, measured: true },
+        ];
+        clamp_to_budget(&mut cards, Some(66 * GIB));
+        assert_eq!((cards[0].total, cards[0].free), (66 * GIB, 66 * GIB), "the grant, not the card");
+        assert_eq!((cards[1].total, cards[1].free), (66 * GIB, 10 * GIB), "a card with less free than the grant keeps what it has");
+        clamp_to_budget(&mut cards, None);
+        assert_eq!(cards[0].total, 66 * GIB, "no budget changes nothing");
+    }
+
     #[test]
     fn a_measured_card_offers_its_free_bytes_not_its_total() {
         let g = GpuMem { index: 0, total: 24 * GIB, free: 6 * GIB, measured: true };
