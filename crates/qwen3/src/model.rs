@@ -28,7 +28,7 @@ use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
-use gpu_core::provider::library::GemmPrecision;
+use gpu_core::provider::library::{F32Product, GemmPrecision, Operand};
 use model::ops::{Act, Ops, Weight};
 pub use model::Shard;
 use optim::Optim;
@@ -408,6 +408,11 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
         v
     })
+}
+
+/// The whole-buffer operand of a library product (every operand binds whole).
+fn whole(buf: &DeviceBuffer) -> Operand<'_> {
+    Operand { buf, range: (0, 0) }
 }
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -1888,6 +1893,16 @@ impl Qwen {
                 s.extend(model::dispatch::lora_rows_off(&self.gpu, tier, delta_kernel, lora, xa, x, y, 0, 0, m, k, nout));
             }
             Some(LoraSite::Trainable { a, b, rank: r, scale }) => {
+                // mid = x A^t, then y += (alpha/r) mid B^t accumulated by the GEMM itself: fp32 library products
+                // where the device has them (the fp32 serial kernels below otherwise).
+                let tg = self.ops.tensor_gemm();
+                let mut lib = Vec::new();
+                let ok = tg.gemm_f32(&self.gpu, &mut lib, &whole(x), &whole(a), &whole(&self.lora_a), F32Product { m, n: r, k, trans_a: false, trans_b: true, alpha: 1.0, beta: 0.0 })
+                    && tg.gemm_f32(&self.gpu, &mut lib, &whole(&self.lora_a), &whole(b), &whole(y), F32Product { m, n: nout, k: r, trans_a: false, trans_b: true, alpha: scale, beta: 1.0 });
+                if ok {
+                    s.append(&mut lib);
+                    return;
+                }
                 s.push(match block::gemv_tier(&self.gpu, m, r) {
                     Some(grid) => self.gpu.dispatch(MATMUL_GEMV, &[x, a, &self.lora_a], &[m, k, r], grid),
                     None => self.gpu.step(MATMUL, &[x, a, &self.lora_a], &[m, k, r], m * r),
@@ -1912,6 +1927,9 @@ impl Qwen {
                 self.base_dx(s, d_out, wname, dx, m, k, nout, acc);
                 let a = format!("{wname}.lora_a");
                 let bnm = format!("{wname}.lora_b");
+                if self.lora_bwd_gemm(s, d_out, x, &a, &bnm, dx, (m, k, nout, r), scale) {
+                    return;
+                }
                 // a = (alpha/r)·(x·Aᵀ)  -> gB += d_outᵀ·a
                 s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
                 s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
@@ -1936,12 +1954,39 @@ impl Qwen {
         }
     }
 
+    /// The LoRA backward of one linear as fp32 library products (see [`Self::proj_bwd`] for the maths): each
+    /// one product with the scale folded into its alpha and the accumulations into beta. `false` (nothing pushed)
+    /// when the device runs the fp32 kernels, which `proj_bwd` then dispatches instead.
+    #[allow(clippy::too_many_arguments)]
+    fn lora_bwd_gemm(&self, steps: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, a: &str, bnm: &str, dx: &DeviceBuffer, dims: (u32, u32, u32, u32), scale: f32) -> bool {
+        let (m, k, nout, r) = dims;
+        let tg = self.ops.tensor_gemm();
+        if !tg.is_active() {
+            return false;
+        }
+        let g = &self.gpu;
+        let p = |m, n, k, trans_a, trans_b, alpha, beta| F32Product { m, n, k, trans_a, trans_b, alpha, beta };
+        let mut lib = Vec::new();
+        let ok = tg.gemm_f32(g, &mut lib, &whole(x), &whole(self.w(a)), &whole(&self.lora_a), p(m, r, k, false, true, scale, 0.0))
+            && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(&self.lora_a), &whole(self.g(bnm)), p(nout, r, m, true, false, 1.0, 1.0))
+            && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(self.w(bnm)), &whole(&self.lora_da), p(m, r, nout, false, false, scale, 0.0))
+            && tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(x), &whole(self.g(a)), p(r, k, m, true, false, 1.0, 1.0))
+            && tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(self.w(a)), &whole(dx), p(m, k, r, false, false, 1.0, 1.0));
+        if ok {
+            steps.append(&mut lib);
+        }
+        ok
+    }
+
     /// `dx (+)= d_out · W` through the tier the base linear `wname` was
     /// built at: the fp32 weight lives in the parameter store, a bf16 one
     /// only as its packed `Weight`.
     #[allow(clippy::too_many_arguments)]
     fn base_dx(&self, s: &mut Vec<Step>, d_out: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
         match self.weights.get(wname) {
+            // Tensor-core products where the device runs them (TF32 for an fp32 weight, bf16 for a bf16 one);
+            // `Ops::matmul_dx` then falls back to its own fp32 kernels on any decline.
+            Some(w @ (Weight::F32 { .. } | Weight::BF16 { .. })) if self.ops.tensor_gemm().is_active() => self.ops.matmul_dx(s, w, d_out, m, dx, acc != 0),
             Some(Weight::BF16 { w, .. }) => {
                 let (kernel, grid) = self.bf16_dx(m, k);
                 s.push(self.gpu.dispatch(kernel, &[d_out, w, dx], &[m, k, nout, acc], grid));
