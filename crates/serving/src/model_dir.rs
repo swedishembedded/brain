@@ -119,6 +119,13 @@ pub struct Discovered {
     pub errors: Vec<DiscoveryError>,
 }
 
+/// Families whose catalog entry registers their resident itself (a `spec`
+/// that resolves the checkpoint, and a `resident`), which the directory scan
+/// therefore leaves alone.
+fn catalog_served_families() -> std::collections::BTreeSet<&'static str> {
+    catalog::models().into_iter().filter(|e| e.resident.is_some()).filter_map(|e| e.spec.map(|(family, _)| family)).collect()
+}
+
 /// Scan `dir` and build one resident per discovered model-card id. Deduplicates
 /// by id (first wins, store layout before flat layout). See the module docs
 /// for the layout precedence and the skip/warn policy.
@@ -131,7 +138,13 @@ pub fn discover(dir: &Path, settings: &ScanSettings) -> Discovered {
     let mut scan = Scan::new(settings, &adapters);
 
     let released_per_repo = released_qwen35_per_repo(&bases);
+    let catalog_served = catalog_served_families();
     for local in bases {
+        if local.card.as_ref().is_some_and(|c| catalog_served.contains(c.family.as_str())) {
+            // Registered by its own catalog entry from the resolved assembly;
+            // building it here too would double it, or report it unservable.
+            continue;
+        }
         if local.roles.is_some() {
             // A compound model has no single weights path (`local.weights` is
             // the manifest file itself) -- `register`/`resident_for` is the
@@ -789,6 +802,24 @@ mod tests {
         let card = ModelCard::new(id, family);
         let p = dir.join(file);
         st::save_safetensors(p.to_str().unwrap(), &[("w".into(), vec![1u64], vec![0.0f32])], &serde_json::json!({}), Some(&card)).unwrap();
+    }
+
+    /// A pulled checkpoint whose family its own catalog entry serves
+    /// (MiniCPM-V, registered from its resolved assembly) is neither built a
+    /// second time by the scan nor reported as a family it cannot serve.
+    #[test]
+    fn a_catalog_served_checkpoint_is_left_to_its_catalog_entry() {
+        let dir = tmp_dir("catalog-served");
+        let repo = dir.join("openbmb").join("MiniCPM-V-4.6");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("config.json"), br#"{"architectures": ["MiniCPMV4_6ForConditionalGeneration"], "model_type": "minicpmv4_6"}"#).unwrap();
+        st::save_safetensors(repo.join("model.safetensors").to_str().unwrap(), &[("w".into(), vec![1u64], vec![0.0f32])], &serde_json::json!({}), None).unwrap();
+        write_tokenizer(&repo);
+        assert!(brain_modelstore::Store::new(dir.clone()).scan().iter().any(|l| l.card.as_ref().is_some_and(|c| c.family == "minicpmv")), "the store recognizes the checkpoint");
+        let found = discover(&dir, &ScanSettings::default());
+        assert!(found.errors.is_empty(), "{:?}", found.errors.iter().map(|e| &e.reason).collect::<Vec<_>>());
+        assert!(found.residents.is_empty() && found.multi.is_empty(), "the scan built it too");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn write_tokenizer(dir: &Path) {
