@@ -87,19 +87,18 @@ fn run(gpu: &Gpu, int8: bool, n_heads: usize, n_kv: usize, lens: &[u32], seed: u
     let (qb, bt, lb) = (gpu.storage_init("q", &q), words(&tables), words(lens));
     let ctx = gpu.storage((bsz * n_heads * HD) as u64);
     let params = [bsz as u32, n_heads as u32, n_kv as u32, HD as u32, group as u32, BS, max_bt as u32];
-    let (kv_k, kv_v, ks, vs, k_seen, v_seen);
-    let step = if int8 {
+    // The device buffers stay alive in `_pool` while the step runs.
+    let (step, _pool, k_seen, v_seen) = if int8 {
         let ((kw, kscale, kd), (vw, vscale, vd)) = (quant(&kf), quant(&vf));
-        (kv_k, kv_v, ks, vs) = (words(&kw), words(&vw), gpu.storage_init("ks", &kscale), gpu.storage_init("vs", &vscale));
-        (k_seen, v_seen) = (kd, vd);
-        paged_decode_batched_step(gpu, true, &[&qb, &kv_k, &kv_v, &ks, &vs, &bt, &lb, &ctx], &params)
+        let (k, v, ks, vs) = (words(&kw), words(&vw), gpu.storage_init("ks", &kscale), gpu.storage_init("vs", &vscale));
+        let step = paged_decode_batched_step(gpu, true, &[&qb, &k, &v, &ks, &vs, &bt, &lb, &ctx], &params);
+        (step, vec![k, v, ks, vs], kd, vd)
     } else {
-        (kv_k, kv_v) = (gpu.storage_init("k", &kf), gpu.storage_init("v", &vf));
-        (ks, vs) = (gpu.storage(1), gpu.storage(1));
-        (k_seen, v_seen) = (kf.clone(), vf.clone());
-        paged_decode_batched_step(gpu, false, &[&qb, &kv_k, &kv_v, &bt, &lb, &ctx], &params)
-    }
-    .expect("the native batched decode attention takes this shape");
+        let (k, v) = (gpu.storage_init("k", &kf), gpu.storage_init("v", &vf));
+        let step = paged_decode_batched_step(gpu, false, &[&qb, &k, &v, &bt, &lb, &ctx], &params);
+        (step, vec![k, v], kf.clone(), vf.clone())
+    };
+    let step = step.expect("the native batched decode attention takes this shape");
     gpu.write(&ctx, &vec![0x7fc0_0000u32; bsz * n_heads * HD]);
     gpu.submit(&[], &[step]);
     gpu.poll_wait();
