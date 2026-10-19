@@ -95,8 +95,7 @@ fn main() {
     let args = parse_args();
     let max_batch = args.batches.iter().chain(&args.e2e).copied().max().expect("non-empty");
     assert!(args.prompt_tokens as u64 + (args.steps as u64).max(args.e2e_new as u64) + 2 <= args.ctx as u64, "prompt + steps must fit --ctx");
-    let devices: Vec<(Device, u64)> =
-        gpu_core::devices::gpus().iter().map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE))).filter(|&(_, usable)| usable > 0).collect();
+    let devices = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
     if devices.is_empty() {
         eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
         std::process::exit(2);

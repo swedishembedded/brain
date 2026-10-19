@@ -562,6 +562,19 @@ pub fn resident_config(mg: &MmapGguf, cap: u32) -> Result<Qwen35Config, String> 
     Ok(cfg)
 }
 
+/// The cards a resident may be planned on, as `(device, usable bytes)`: only those in `allowed` (the
+/// `--device` set the process was given), each less `reserve` bytes kept free. A tool that planned on
+/// every physical card regardless would place the model on a card another job holds and fail the load
+/// there with an out-of-memory on a card it was told to leave alone.
+pub fn budgeted_gpus(allowed: &[u32], reserve: u64) -> Vec<(Device, u64)> {
+    budget_cards(gpu_core::devices::gpus().iter().map(|d| (d.index, d.identity.vram_bytes)), allowed, reserve)
+}
+
+/// [`budgeted_gpus`] over an explicit list of `(index, total bytes)` cards.
+pub fn budget_cards(cards: impl IntoIterator<Item = (u32, u64)>, allowed: &[u32], reserve: u64) -> Vec<(Device, u64)> {
+    cards.into_iter().filter(|(index, _)| allowed.contains(index)).map(|(index, total)| (Device::Gpu(index), total.saturating_sub(reserve))).filter(|&(_, usable)| usable > 0).collect()
+}
+
 // ------------------------------------------------------------ per-shard state
 
 /// One STAGE's decode state for up to `slots` concurrent sequences, indexed by
@@ -2903,6 +2916,17 @@ impl Qwen35GgufResident {
 
 #[cfg(test)]
 mod tests {
+    /// A tool given one card plans on that card only: another job's card is never in its budget.
+    #[test]
+    fn the_device_budget_names_only_the_cards_it_is_allowed() {
+        const GIB: u64 = 1 << 30;
+        let cards = [(0u32, 96 * GIB), (1, 96 * GIB)];
+        assert_eq!(super::budget_cards(cards, &[1], 2 * GIB), vec![(Device::Gpu(1), 94 * GIB)], "--device gpu1 never reaches card 0's budget");
+        assert_eq!(super::budget_cards(cards, &[0, 1], 2 * GIB).len(), 2);
+        assert!(super::budget_cards(cards, &[], 2 * GIB).is_empty(), "an empty set allows nothing");
+        assert!(super::budget_cards([(1u32, GIB)], &[1], 2 * GIB).is_empty(), "a card smaller than the reserve has no usable bytes");
+    }
+
     use super::*;
     use gpu_core::select::Dtype;
 
@@ -2939,8 +2963,7 @@ mod tests {
             return;
         };
         const RESERVE: u64 = 2 * GB;
-        let devices: Vec<(Device, u64)> =
-            gpu_core::devices::gpus().iter().map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE))).filter(|&(_, u)| u > 0).collect();
+        let devices = budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
         if devices.is_empty() {
             brain_testutil::skip_unavailable("no GPU with queryable VRAM - this resident is GPU-only");
             return;

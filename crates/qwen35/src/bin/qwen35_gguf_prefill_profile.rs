@@ -41,17 +41,13 @@ fn main() {
     let rounds: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(4);
     let cap = depth + 2 * rows * rounds;
     let flag = |name: &str| a.iter().position(|arg| arg == name).and_then(|i| a.get(i + 1)).cloned();
-    gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
+    let set = gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
 
     let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
         eprintln!("usage: qwen35_gguf_prefill_profile <path to Qwen3.8-27B*.gguf> [depth] [rows] [rounds]");
         std::process::exit(2);
     };
-    let devices: Vec<(Device, u64)> = gpu_core::devices::gpus()
-        .iter()
-        .map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE)))
-        .filter(|&(_, usable)| usable > 0)
-        .collect();
+    let devices = qwen35::int8_gguf_resident::budgeted_gpus(&set.gpus, RESERVE);
     if devices.is_empty() {
         eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
         std::process::exit(2);

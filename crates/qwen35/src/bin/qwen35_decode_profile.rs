@@ -50,12 +50,8 @@ const CAP: u32 = 512;
 /// Bytes kept free per card: `brain serve`'s own default `--reserve-gb 2`.
 const RESERVE: u64 = 2 << 30;
 
-fn real_devices() -> Vec<(Device, u64)> {
-    gpu_core::devices::gpus()
-        .iter()
-        .map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE)))
-        .filter(|&(_, usable)| usable > 0)
-        .collect()
+fn real_devices(allowed: &[u32]) -> Vec<(Device, u64)> {
+    qwen35::int8_gguf_resident::budgeted_gpus(allowed, RESERVE)
 }
 
 fn main() {
@@ -69,13 +65,13 @@ fn main() {
     }
     let batch: Option<u32> = flag("--batch").map(|v| v.parse().unwrap_or_else(|_| panic!("--batch takes a count, got {v:?}")));
     let context: Option<u32> = flag("--context").map(|v| v.parse().unwrap_or_else(|_| panic!("--context takes a token count, got {v:?}")));
-    gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
+    let set = gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
 
     let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
         eprintln!("usage: qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out] [--kv f32|bf16|int8]");
         std::process::exit(2);
     };
-    let devices = real_devices();
+    let devices = real_devices(&set.gpus);
     if devices.is_empty() {
         eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
         std::process::exit(2);

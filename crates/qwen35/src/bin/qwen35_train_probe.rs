@@ -57,13 +57,15 @@ use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
 const USAGE: &str = "usage: qwen35_train_probe [--tokens N] [--layers N] [--base bf16|nf4|f32] [--rank R] [--steps N] \\
      [--recompute on|off] [--gdn-segment N] [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N] \\
-     [--seed N] [--gemm-precision auto|fp32|bf16] [--profile]
+     [--seed N] [--gemm-precision auto|fp32|bf16] [--profile] [--device gpuN|cpu] [--backend cuda|cpu|vulkan|wgpu]
   Builds the first --layers layers of the real Qwen3.8-27B shape with random weights and times --steps LoRA steps at --tokens
   tokens. Every result is a `PROBE key=value` line on stdout. With BRAIN_PROFILE set, each step also prints the device
   time per kernel kind.";
 
 /// Every flag that takes a value; anything else starting with `--` is refused.
-const VALUE_FLAGS: [&str; 13] = [
+const VALUE_FLAGS: [&str; 15] = [
+    "--device",
+    "--backend",
     "--tokens",
     "--layers",
     "--base",
@@ -186,6 +188,9 @@ fn main() {
         eprintln!("qwen35_train_probe: {e}\n{USAGE}");
         std::process::exit(2);
     }
+    // The card and backend as flags (the global `--device`/`--backend` of the CLI), so a probe pinned to one card
+    // stays off the others and does not fall back to the default backend of the box.
+    gpu_core::select_compute(&arg(&args, "--device").unwrap_or_else(|| "gpu".to_string()), arg(&args, "--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
     let tokens: u32 = parsed(&args, "--tokens", 1024);
     let layers: u32 = parsed(&args, "--layers", 4);
     let rank: u32 = parsed(&args, "--rank", 16);

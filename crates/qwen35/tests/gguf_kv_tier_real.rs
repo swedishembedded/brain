@@ -58,11 +58,7 @@ const STEPS: u32 = 24;
 const RESERVE: u64 = 2 << 30;
 
 fn load(path: &str, kv: KvTier) -> Option<Qwen35GgufInstance> {
-    let devices: Vec<(Device, u64)> = gpu_core::devices::gpus()
-        .iter()
-        .map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE)))
-        .filter(|&(_, usable)| usable > 0)
-        .collect();
+    let devices: Vec<(Device, u64)> = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
     if devices.is_empty() {
         brain_testutil::skip_unavailable("no GPU with queryable VRAM");
         return None;

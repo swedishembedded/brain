@@ -61,11 +61,7 @@ fn load() -> Option<Qwen35GgufInstance> {
             return None;
         }
     };
-    let devices: Vec<(Device, u64)> = gpu_core::devices::gpus()
-        .iter()
-        .map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE)))
-        .filter(|&(_, usable)| usable > 0)
-        .collect();
+    let devices: Vec<(Device, u64)> = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
     if devices.is_empty() {
         brain_testutil::skip_unavailable("no GPU with enough free memory for the real checkpoint");
         return None;

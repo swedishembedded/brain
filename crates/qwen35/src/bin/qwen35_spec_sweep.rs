@@ -232,7 +232,7 @@ fn main() {
         gpu_core::select_compute("gpu", Some(backend)).unwrap_or_else(|e| panic!("{e}"));
     }
     let max_batch = *a.batches.iter().max().expect("a batch size");
-    let devices: Vec<(Device, u64)> = gpu_core::devices::gpus().iter().map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE))).filter(|&(_, usable)| usable > 0).collect();
+    let devices = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
     if devices.is_empty() {
         eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
         std::process::exit(2);

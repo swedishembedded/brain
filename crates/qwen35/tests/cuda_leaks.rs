@@ -209,11 +209,7 @@ fn dropping_a_real_gguf_instance_returns_all_device_memory() {
         return;
     };
     const RESERVE: u64 = 2 << 30;
-    let devices: Vec<(Device, u64)> = gpu_core::devices::gpus()
-        .iter()
-        .map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE)))
-        .filter(|&(_, usable)| usable > 0)
-        .collect();
+    let devices: Vec<(Device, u64)> = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
     if devices.is_empty() {
         brain_testutil::skip_unavailable("no GPU with queryable VRAM");
         return;
@@ -264,11 +260,7 @@ fn dropping_a_real_gguf_instance_with_a_compact_kv_cache_returns_every_device_ob
         return;
     };
     const RESERVE: u64 = 2 << 30;
-    let devices: Vec<(Device, u64)> = gpu_core::devices::gpus()
-        .iter()
-        .map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE)))
-        .filter(|&(_, usable)| usable > 0)
-        .collect();
+    let devices: Vec<(Device, u64)> = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
     if devices.is_empty() {
         brain_testutil::skip_unavailable("no GPU with queryable VRAM");
         return;

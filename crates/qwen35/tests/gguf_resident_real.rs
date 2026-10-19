@@ -68,11 +68,7 @@ fn gguf_path() -> Option<String> {
 /// same shape `crates/cli`'s `build_executor` hands its multi-device
 /// residents.
 fn real_devices() -> Vec<(Device, u64)> {
-    gpu_core::devices::gpus()
-        .iter()
-        .map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE)))
-        .filter(|&(_, usable)| usable > 0)
-        .collect()
+    qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE)
 }
 
 /// The `RemapSource` fetch plan for one stage must name EXACTLY the tensors
