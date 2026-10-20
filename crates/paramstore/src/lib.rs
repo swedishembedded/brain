@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use gpu_core::Gpu;
 
 pub mod dtype;
+pub mod precision;
 pub mod upload;
 
 /// Whether a parameter is optimised. `Frozen` parameters allocate **only** the
@@ -91,6 +92,11 @@ pub struct ParamStore {
     /// unaffected. Set via [`Self::set_lr_mult`] after construction, then
     /// read by `optim::Optim::build` when it writes each tensor's `desc`.
     pub lr_mult: HashMap<String, f32>,
+    /// Per-tensor training precision (value / grad / state / master) chosen by
+    /// the caller's [`precision::PrecisionPolicy`]. Absent = all-fp32, which is
+    /// what the device buffers above physically are today; the streamed
+    /// optimiser in `optim` is the consumer of non-default entries.
+    pub precision: HashMap<String, precision::ParamPrecision>,
 }
 
 impl ParamStore {
@@ -220,7 +226,7 @@ impl ParamStore {
         let n_parts: u64 = trainable.iter().map(|(_, n)| gradnorm_parts(*n) as u64).sum();
         let norms = gpu.storage(n_parts.max(trainable.len() as u64).max(1));
         let clip_coef = gpu.storage(1);
-        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload, frozen: Vec::new(), lr_mult: HashMap::new() }
+        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload, frozen: Vec::new(), lr_mult: HashMap::new(), precision: HashMap::new() }
     }
 
     /// Withdraw every trainable parameter whose name satisfies `pred` from the
@@ -252,6 +258,27 @@ impl ParamStore {
     /// bit-identical to today's single shared `lr`.
     pub fn set_lr_mult(&mut self, name: &str, mult: f32) {
         self.lr_mult.insert(name.to_string(), mult);
+    }
+
+    /// Record `name`'s training precision (see [`precision::PrecisionPolicy`]).
+    pub fn set_precision(&mut self, name: &str, p: precision::ParamPrecision) {
+        self.precision.insert(name.to_string(), p);
+    }
+
+    /// `name`'s training precision, or all-fp32 if never set.
+    pub fn precision_of(&self, name: &str) -> precision::ParamPrecision {
+        self.precision.get(name).copied().unwrap_or(precision::ParamPrecision::FP32)
+    }
+
+    /// Physical bytes of the training state of every optimised parameter
+    /// (trainable + offloaded) under their recorded precision, for an
+    /// optimiser rule with `moment_slots` state slots.
+    pub fn training_state_bytes(&self, moment_slots: usize) -> precision::ParamBytes {
+        let mut total = precision::ParamBytes::default();
+        for (n, numel) in self.trainable.iter().chain(&self.offload) {
+            total += self.precision_of(n).bytes(*numel, moment_slots);
+        }
+        total
     }
 
     /// `name`'s multiplier, or `1.0` if never set.
@@ -362,6 +389,24 @@ mod tests {
         assert_eq!(ps.read_grad(&gpu, "w"), vec![9.0, 9.0, 9.0]);
         ps.zero_grads(&gpu);
         assert_eq!(ps.read_grad(&gpu, "w"), vec![0.0, 0.0, 0.0]);
+    }
+
+    /// Spec: the store reports the physical training-state bytes of each
+    /// parameter under its own recorded precision (default fp32).
+    #[test]
+    fn training_state_bytes_follow_each_parameters_precision() {
+        static KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];
+        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let init: HashMap<String, Vec<f32>> =
+            [("a".to_string(), vec![0.0; 512]), ("b".to_string(), vec![0.0; 512])].into_iter().collect();
+        let mut ps = ParamStore::new(&gpu, vec![("a".to_string(), 512), ("b".to_string(), 512)], &init);
+        ps.set_precision(
+            "a",
+            precision::ParamPrecision { state: precision::StateFormat::Int8Block { block: 256 }, ..precision::ParamPrecision::FP32 },
+        );
+        let b = ps.training_state_bytes(2);
+        assert_eq!(b.moments, 2 * (512 + 8) + 2 * 512 * 4);
+        assert_eq!(b.value, 2 * 512 * 4);
     }
 
     /// A step starts from zero gradients for EVERY parameter the backward pass

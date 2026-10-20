@@ -64,9 +64,51 @@ pub fn device_f32_words(dtype: Option<&str>, stored_numel: u64) -> u64 {
     }
 }
 
-/// [`device_f32_words`] in bytes - what a placement planner charges a device.
+/// The physical encoding a tensor is placed in on the device. Placement and
+/// budget accounting must charge THIS, not the checkpoint's dtype and not an
+/// assumed f32: a bf16 destination costs 2 bytes per element, a packed int8
+/// destination one byte plus its scales.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Destination {
+    F32,
+    Bf16,
+    F16,
+    /// brain's group-wise int8 residency: one code byte per element plus one
+    /// f32 scale per `group` elements.
+    Int8Group { group: u32 },
+}
+
+impl Destination {
+    /// Physical bytes `logical_numel` elements occupy in this encoding.
+    pub fn bytes(self, logical_numel: u64) -> u64 {
+        match self {
+            Destination::F32 => logical_numel.saturating_mul(4),
+            Destination::Bf16 | Destination::F16 => logical_numel.saturating_mul(2),
+            Destination::Int8Group { group } => {
+                logical_numel.saturating_add(logical_numel.div_ceil(group.max(1) as u64).saturating_mul(4))
+            }
+        }
+    }
+}
+
+/// Logical element count of a tensor whose checkpoint dtype is `dtype` and
+/// whose STORED element count is `stored_numel` (the packed-int8 `U32`
+/// convention stores four elements per word).
+pub fn logical_numel(dtype: Option<&str>, stored_numel: u64) -> u64 {
+    device_f32_words(dtype, stored_numel)
+}
+
+/// Physical bytes a placement planner charges a device for the tensor once it
+/// is placed in `dest`.
+pub fn placement_bytes(dtype: Option<&str>, stored_numel: u64, dest: Destination) -> u64 {
+    dest.bytes(logical_numel(dtype, stored_numel))
+}
+
+/// [`placement_bytes`] for an f32 destination. Only correct for a caller that
+/// really decodes to f32 on the device; any other destination must say so via
+/// [`placement_bytes`].
 pub fn device_bytes(dtype: Option<&str>, stored_numel: u64) -> u64 {
-    device_f32_words(dtype, stored_numel).saturating_mul(4)
+    placement_bytes(dtype, stored_numel, Destination::F32)
 }
 
 /// One tensor's device cost, read straight off a checkpoint header: its own
@@ -75,8 +117,13 @@ pub fn device_bytes(dtype: Option<&str>, stored_numel: u64) -> u64 {
 /// a missing tensor means the caller's shape model and the checkpoint disagree
 /// and a plan built on a 0 would overrun the card it was placed on.
 pub fn tensor_device_bytes(reader: &checkpoint::weightio::WeightReader, name: &str) -> Option<u64> {
+    tensor_placement_bytes(reader, name, Destination::F32)
+}
+
+/// [`tensor_device_bytes`] for an explicit destination encoding.
+pub fn tensor_placement_bytes(reader: &checkpoint::weightio::WeightReader, name: &str, dest: Destination) -> Option<u64> {
     let numel: u64 = reader.shape(name)?.iter().product();
-    Some(device_bytes(reader.dtype(name), numel))
+    Some(placement_bytes(reader.dtype(name), numel, dest))
 }
 
 /// The ceilings one device imposes on a single buffer, read from that device.
@@ -143,6 +190,19 @@ mod tests {
         let tensors: [(Option<&str>, u64); 3] = [(Some("BF16"), 100), (Some("Q4_K"), 200), (Some("U32"), 50)];
         let total: u64 = tensors.iter().map(|&(d, n)| device_bytes(d, n)).sum();
         assert_eq!(total, 400 + 800 + 800);
+    }
+
+    /// Spec: placement charges the bytes of the DESTINATION encoding. A bf16
+    /// destination costs half of f32, a packed int8 destination one byte plus
+    /// its group scales - for a packed U32 source the logical count is four times stored.
+    #[test]
+    fn placement_charges_the_destination_encoding() {
+        assert_eq!(placement_bytes(Some("BF16"), 1000, Destination::Bf16), 2000);
+        assert_eq!(placement_bytes(Some("F32"), 1000, Destination::F32), 4000);
+        assert_eq!(placement_bytes(Some("F32"), 1024, Destination::Int8Group { group: 32 }), 1024 + 32 * 4);
+        // packed int8 checkpoint tensor [n, k/4] kept packed on the device
+        assert_eq!(placement_bytes(Some("U32"), 256, Destination::Int8Group { group: 32 }), 1024 + 32 * 4);
+        assert_eq!(placement_bytes(Some("U32"), 256, Destination::F32), 4096);
     }
 
     /// Spec: the allocation guard compares against the CARRIED (queried) limit
