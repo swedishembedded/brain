@@ -1009,21 +1009,50 @@ pub fn paged_flash_prefill_bf16_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&b
     gpu.step_native_sliced(id, bufs, &[(0, 0); 6], params, blocks)
 }
 
+/// The 8-bit element codecs the scaled paged prefill kernels read: the same packed rows and row
+/// scales, a different decode of each byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scaled8 {
+    Int8,
+    Fp8E4m3,
+}
+
+impl Scaled8 {
+    /// The kernel-name suffix of the codec (`flash_prefill_f16_hd256_<suffix>`).
+    fn suffix(self) -> &'static str {
+        match self {
+            Scaled8::Int8 => "kv8",
+            Scaled8::Fp8E4m3 => "kvfp8",
+        }
+    }
+}
+
 /// [`paged_flash_prefill_step`] over an int8 KV cache: `bufs` are the portable
 /// kv8 kernel's own - queries, K data, V data, block tables, sequence lengths,
 /// context, then the K and V row scales.
 pub fn paged_flash_prefill_kv8_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer; 8], params: &[u32], blocks: u32) -> Option<crate::Step> {
+    paged_flash_prefill_scaled8_step(gpu, head_dim, bufs, params, blocks, Scaled8::Int8)
+}
+
+/// [`paged_flash_prefill_kv8_step`] over an FP8 E4M3 KV cache (same buffers, same launch geometry): the
+/// tensor-core prefill reads the packed bytes in place and decodes them to fp16 as the tiles are staged.
+pub fn paged_flash_prefill_kvfp8_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer; 8], params: &[u32], blocks: u32) -> Option<crate::Step> {
+    paged_flash_prefill_scaled8_step(gpu, head_dim, bufs, params, blocks, Scaled8::Fp8E4m3)
+}
+
+fn paged_flash_prefill_scaled8_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer; 8], params: &[u32], blocks: u32, codec: Scaled8) -> Option<crate::Step> {
     if !flash_prefill_offered(gpu, head_dim, params) {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
+    let suffix = codec.suffix();
     if head_dim == 256 && flash_prefill_v2() {
-        if let Some(kernel) = kernels_cuda::get("flash_prefill_f16_hd256_v2_kv8").filter(|k| k.min_cc <= cc) {
+        if let Some(kernel) = kernels_cuda::get(&format!("flash_prefill_f16_hd256_v2_{suffix}")).filter(|k| k.min_cc <= cc) {
             let id = gpu.native_kernel_launched(kernel, PAGED_FLASH_PREFILL_KV8_BINDINGS, FLASH_PREFILL_V2_LAUNCH)?;
             return gpu.step_native_sliced(id, bufs, &[(0, 0); 8], params, blocks);
         }
     }
-    let kernel = kernels_cuda::get(if head_dim == 128 { "flash_prefill_f16_hd128_kv8" } else { "flash_prefill_f16_hd256_kv8" }).filter(|k| k.min_cc <= cc)?;
+    let kernel = kernels_cuda::get(&format!("flash_prefill_f16_hd{head_dim}_{suffix}")).filter(|k| k.min_cc <= cc)?;
     let id = gpu.native_kernel(kernel, PAGED_FLASH_PREFILL_KV8_BINDINGS)?;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 8], params, blocks)
 }

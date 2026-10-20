@@ -757,9 +757,14 @@ impl KvKernels {
             }
             (Some(ks), Some(vs)) => {
                 let bufs = [q, &k.data, &v.data, block_ids, seq_lens, ctx, ks, vs];
-                // No native tensor-core kernel reads fp8 rows yet: that tier runs the registered
-                // portable pipeline (knowledge entry for the measured cost).
-                let native = (self.native_prefill && self.tier.element == KvElement::Int8).then(|| crate::block::native_paged_flash_prefill_kv8(g, s.head_dim, &bufs, &params, s.n_heads * s.n.div_ceil(64))).flatten();
+                let blocks = s.n_heads * s.n.div_ceil(64);
+                let native = if !self.native_prefill {
+                    None
+                } else if self.tier.element == KvElement::Fp8E4m3 {
+                    crate::block::native_paged_flash_prefill_kvfp8(g, s.head_dim, &bufs, &params, blocks)
+                } else {
+                    crate::block::native_paged_flash_prefill_kv8(g, s.head_dim, &bufs, &params, blocks)
+                };
                 native.unwrap_or_else(|| g.dispatch(self.prefill_hd256, &bufs, &params, grid))
             }
             _ => unreachable!("check() pinned both planes to one tier"),

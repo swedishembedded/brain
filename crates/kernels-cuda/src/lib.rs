@@ -356,6 +356,24 @@ pub const ALL: &[CudaKernel] = &[
         ),
     },
     CudaKernel {
+        name: "flash_prefill_f16_hd256_kvfp8",
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd256_kvfp8",
+        what: "flash_prefill_f16_hd256 over an FP8 E4M3 KV cache with one scale per (token, kv head) row: the planes are decoded to fp16 while they are staged",
+        reported: "native:flash_prefill_f16_hd256_kvfp8",
+        block_dim: 256,
+        tile: (64, 1),
+        shared_bytes: 2 * 32 * (256 + 8) * 2,
+        src: concat!(
+            "#define BRAIN_KV_TIER 3\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd256_kvfp8\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu")
+        ),
+    },
+    CudaKernel {
         name: "flash_prefill_f16_hd256_v2_bf16",
         // Asked for by name by `paged_flash_prefill_bf16_step` for head_dim 256 while the version-2 switch is on.
         op: Op::PagedAttentionFused,
@@ -396,6 +414,28 @@ pub const ALL: &[CudaKernel] = &[
             "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu"),
             "\n#define brain_flash_prefill_f16_hd256_v2 brain_flash_prefill_f16_hd256_v2_kv8\n",
+            include_str!("../cu/flash_prefill_f16_hd256_v2.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd256_v2_kvfp8",
+        // Asked for by name by `paged_flash_prefill_kvfp8_step` for head_dim 256 while the version-2 switch is on.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd256_v2_kvfp8",
+        what: "flash_prefill_f16_hd256 version 2 over an FP8 E4M3 KV cache with one scale per (token, kv head) row: one warp per 16 query rows over the whole head, raw bytes decoded at the shared-memory write, two blocks per SM",
+        reported: "native:flash_prefill_f16_hd256_v2_kvfp8",
+        block_dim: 128,
+        tile: (64, 1),
+        // Everything is dynamic (opted in): Q, K and V tiles, see `FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES` in gpu-core.
+        shared_bytes: 0,
+        src: concat!(
+            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 3\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define brain_flash_prefill_f16_hd256_v2 brain_flash_prefill_f16_hd256_v2_kvfp8\n",
             include_str!("../cu/flash_prefill_f16_hd256_v2.cu")
         ),
     },
@@ -456,6 +496,26 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 2 * 32 * (128 + 8) * 2,
         src: concat!(
             "#define BRAIN_HD 128\n#define BRAIN_KV_TIER 2\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd128_kv8\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd128_kvfp8",
+        // Asked for by name: `find` answers (PagedAttentionFused, F32) with the head_dim 256 kernel.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd128_kvfp8",
+        what: "flash_prefill_f16_hd128 over an FP8 E4M3 KV cache with one scale per (token, kv head) row",
+        reported: "native:flash_prefill_f16_hd128_kvfp8",
+        block_dim: 256,
+        tile: (64, 1),
+        // K and V tiles of 32 keys x (128 + 8 pad) fp16.
+        shared_bytes: 2 * 32 * (128 + 8) * 2,
+        src: concat!(
+            "#define BRAIN_HD 128\n#define BRAIN_KV_TIER 3\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd128_kvfp8\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu")
         ),
     },

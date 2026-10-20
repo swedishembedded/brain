@@ -749,6 +749,17 @@ pub fn native_paged_flash_prefill_kv8(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuf
     gpu_core::provider::cuda::paged_flash_prefill_kv8_step(g, head_dim, bufs, params, blocks)
 }
 
+/// [`gpu_core::provider::cuda::paged_flash_prefill_kvfp8_step`], the FP8 E4M3-KV form.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn native_paged_flash_prefill_kvfp8(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 8], params: &[u32], blocks: u32) -> Option<Step> {
+    gpu_core::provider::cuda::paged_flash_prefill_kvfp8_step(g, head_dim, bufs, params, blocks)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn native_paged_flash_prefill_kvfp8(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 8], _params: &[u32], _blocks: u32) -> Option<Step> {
+    None
+}
+
 #[cfg(target_arch = "wasm32")]
 pub fn native_paged_flash_prefill_kv8(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 8], _params: &[u32], _blocks: u32) -> Option<Step> {
     None

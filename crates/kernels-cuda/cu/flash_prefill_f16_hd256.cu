@@ -87,8 +87,22 @@ typedef float KvT;
 #elif BRAIN_KV_TIER == 1
 typedef unsigned short KvT;
 #else
-typedef signed char KvT;
+typedef signed char KvT;   // tiers 2 (int8) and 3 (fp8 E4M3): one byte per element, one f32 scale per (token, kv head) row
 #endif
+
+// One byte of a packed 8-bit row as f32, before the row scale: a signed integer for tier 2, an FP8
+// E4M3 value for tier 3 (sign, 4 exponent bits with bias 7, 3 mantissa bits; exponent 0 is subnormal,
+// mantissa * 2^-9; the format's NaN code is never written by the append kernel).
+__device__ __forceinline__ float brain_kv8_value(unsigned int word, int i) {
+    const unsigned int byte = (word >> (8 * i)) & 0xffu;
+#if BRAIN_KV_TIER == 3
+    const unsigned int mag = byte & 0x7fu;
+    const float v = mag < 8u ? static_cast<float>(mag) * 0.001953125f : __uint_as_float((mag << 20) + 0x3C000000u);
+    return (byte & 0x80u) ? -v : v;
+#else
+    return static_cast<float>(static_cast<int>(static_cast<signed char>(byte)));
+#endif
+}
 
 #define BR 64              // query rows per block
 #define BC 32              // keys per tile
@@ -142,7 +156,7 @@ __device__ __forceinline__ void brain_mma_f16(float (&d)[4], const unsigned int 
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
-#if BRAIN_KV_TIER == 2
+#if BRAIN_KV_TIER >= 2
 #define KV_SCALE_PARAMS , const float* k_scales, const float* v_scales
 #define SCALES_K k_scales
 #define SCALES_V v_scales
@@ -275,7 +289,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, MIN_BLOCKS_PER_SM) brain_f
 #else
                 const uint2 w = *reinterpret_cast<const uint2*>(src);   // eight int8
                 const float sc = scales[row * n_kv_heads + hkv];
-                auto b = [&](unsigned int word, int i) { return static_cast<float>(static_cast<int>(static_cast<signed char>((word >> (8 * i)) & 0xffu))) * sc; };
+                auto b = [&](unsigned int word, int i) { return brain_kv8_value(word, i) * sc; };
                 lo = make_float4(b(w.x, 0), b(w.x, 1), b(w.x, 2), b(w.x, 3));
                 hi = make_float4(b(w.y, 0), b(w.y, 1), b(w.y, 2), b(w.y, 3));
 #endif

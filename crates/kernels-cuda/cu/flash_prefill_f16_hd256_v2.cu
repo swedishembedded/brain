@@ -10,7 +10,7 @@
 // Fused causal paged-attention PREFILL at head_dim 256, version 2 of flash_prefill_f16_hd256.cu: the same
 // argument contract, launch geometry (`n_heads * ceil(bsz / 64)` blocks, query tile fastest), numerics
 // (Q, K, V, P rounded to fp16, fp32 accumulators and softmax) and addressing, for the bf16 (BRAIN_KV_TIER 1)
-// and int8 (BRAIN_KV_TIER 2) caches. It is compiled after flash_prefill_f16_hd256.cu with
+// and int8 (BRAIN_KV_TIER 2) and fp8 E4M3 (BRAIN_KV_TIER 3) caches. It is compiled after flash_prefill_f16_hd256.cu with
 // BRAIN_FLASH_HELPERS_ONLY defined, which supplies the helpers, `KvT` and the tier macros used here.
 //
 // What differs from version 1, and why:
@@ -164,7 +164,7 @@ extern "C" __global__ void __launch_bounds__(V2_THREADS, 2) brain_flash_prefill_
 #else
             const uint2 w = raw[c];
             const float sc = rsc[c];
-            auto b = [&](unsigned int word, int i) { return static_cast<float>(static_cast<int>(static_cast<signed char>((word >> (8 * i)) & 0xffu))) * sc; };
+            auto b = [&](unsigned int word, int i) { return brain_kv8_value(word, i) * sc; };
             v.x = brain_pack_f16x2(b(w.x, 0), b(w.x, 1));
             v.y = brain_pack_f16x2(b(w.x, 2), b(w.x, 3));
             v.z = brain_pack_f16x2(b(w.y, 0), b(w.y, 1));

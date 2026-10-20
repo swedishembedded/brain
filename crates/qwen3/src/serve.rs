@@ -2604,9 +2604,15 @@ impl Engine {
                     let params = [b, nh, nkv, hd, group, bs, mbt];
                     // fp16 tensor cores where the device has them and the fp32 tier was not pinned
                     // (same buffers, uniform and launch geometry as the portable kernel).
-                    // No native tensor-core kernel reads fp8 rows: that codec runs the portable one.
-                    let native = (!self.gemm.is_reference_pinned() && self.kv_fp8.is_none())
-                        .then(|| block::native_paged_flash_prefill_kv8(g, hd, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_k[l], &self.scales_v[l]], &params, nh * ntiles_q))
+                    let native = (!self.gemm.is_reference_pinned())
+                        .then(|| {
+                            let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_k[l], &self.scales_v[l]];
+                            if self.kv_fp8.is_some() {
+                                block::native_paged_flash_prefill_kvfp8(g, hd, &bufs, &params, nh * ntiles_q)
+                            } else {
+                                block::native_paged_flash_prefill_kv8(g, hd, &bufs, &params, nh * ntiles_q)
+                            }
+                        })
                         .flatten();
                     s.push(native.unwrap_or_else(|| {
                         g.dispatch(

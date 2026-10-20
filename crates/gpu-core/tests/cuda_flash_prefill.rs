@@ -34,7 +34,7 @@ use gpu_core::Gpu;
 /// The fp32 portable kernel and its bf16 and int8-KV rewrites: what a model that
 /// offers the compact tiers registers (`model::kv_tier::kernel_list`).
 fn kernel_list() -> &'static [(&'static str, &'static str)] {
-    use kernels::template::{dtype_variant, int8_kv_variant};
+    use kernels::template::{dtype_variant, fp8_kv_variant, int8_kv_variant};
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
         let src = kernels::PAGED_FLASH_PREFILL_HD256;
@@ -42,7 +42,9 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
         let bf16 = dtype_variant(bf16_k.0, bf16_k.1, "pool_v", Dtype::BF16).expect("pool_v is templatable");
         let i8_k = int8_kv_variant("paged_flash_prefill_hd256", src, "pool_k", "k_scales", "p.head_dim").expect("pool_k is templatable");
         let i8 = int8_kv_variant(i8_k.0, i8_k.1, "pool_v", "v_scales", "p.head_dim").expect("pool_v is templatable");
-        vec![("paged_flash_prefill_hd256", src), bf16, i8]
+        let fp8_k = fp8_kv_variant("paged_flash_prefill_hd256", src, "pool_k", "k_scales", "p.head_dim").expect("pool_k is templatable");
+        let fp8 = fp8_kv_variant(fp8_k.0, fp8_k.1, "pool_v", "v_scales", "p.head_dim").expect("pool_v is templatable");
+        vec![("paged_flash_prefill_hd256", src), bf16, i8, fp8]
     })
 }
 
@@ -51,6 +53,7 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
 enum Kv {
     Bf16,
     Int8,
+    Fp8,
 }
 
 impl Kv {
@@ -58,8 +61,15 @@ impl Kv {
         match self {
             Kv::Bf16 => "paged_flash_prefill_hd256#pool_k=bf16#pool_v=bf16",
             Kv::Int8 => "paged_flash_prefill_hd256#pool_k=kv8#pool_v=kv8",
+            Kv::Fp8 => "paged_flash_prefill_hd256#pool_k=kvfp8#pool_v=kvfp8",
         }
     }
+}
+
+/// The value of E4M3 magnitude code `c` (`0..0x7f`): 4 exponent bits (bias 7), 3 mantissa bits, subnormal at exponent 0.
+fn e4m3_value(c: u32) -> f32 {
+    let (e, m) = ((c >> 3) as i32, (c & 7) as f32);
+    if e == 0 { m * 2f32.powi(-9) } else { (1.0 + m / 8.0) * 2f32.powi(e - 7) }
 }
 
 fn bf16_bits(x: f32) -> u16 {
@@ -76,6 +86,26 @@ fn store_plane(kv: Kv, vals: &[f32]) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
             let bits: Vec<u16> = vals.iter().map(|v| bf16_bits(*v)).collect();
             let words = bits.chunks(2).map(|c| c[0] as u32 | ((c.get(1).copied().unwrap_or(0) as u32) << 16)).collect();
             (words, Vec::new(), bits.iter().map(|b| f32::from_bits((*b as u32) << 16)).collect())
+        }
+        Kv::Fp8 => {
+            // E4M3 values, positive half: index = byte code (0x7f is NaN and never produced).
+            let table: Vec<f32> = (0u32..0x7f).map(e4m3_value).collect();
+            let (mut bytes, mut scales, mut seen) = (Vec::new(), Vec::new(), Vec::new());
+            for row in vals.chunks(kv_row) {
+                for head in row.chunks(HD as usize) {
+                    let scale = head.iter().fold(0f32, |m, v| m.max(v.abs())) / 448.0;
+                    scales.push(scale);
+                    for v in head {
+                        let y = (v / scale).abs();
+                        let code = (0..table.len()).min_by(|&a, &b| (table[a] - y).abs().total_cmp(&(table[b] - y).abs())).unwrap() as u8;
+                        let sign = if *v < 0.0 { 0x80u8 } else { 0 };
+                        bytes.push(code | sign);
+                        let mag = table[code as usize] * scale;
+                        seen.push(if sign != 0 { -mag } else { mag });
+                    }
+                }
+            }
+            (bytes.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(), scales, seen)
         }
         Kv::Int8 => {
             let (mut bytes, mut scales, mut seen) = (Vec::new(), Vec::new(), Vec::new());
@@ -403,7 +433,7 @@ impl TierDevice {
         };
         base.k = words(&stored[0].0);
         base.v = words(&stored[1].0);
-        let scales = |s: &[f32]| (kv == Kv::Int8).then(|| gpu.storage_init("scales", s));
+        let scales = |s: &[f32]| (kv != Kv::Bf16).then(|| gpu.storage_init("scales", s));
         TierDevice { kv, base, k_scales: scales(&stored[0].1), v_scales: scales(&stored[1].1) }
     }
 
@@ -424,6 +454,7 @@ impl TierDevice {
         match self.kv {
             Kv::Bf16 => gpu_core::provider::cuda::paged_flash_prefill_bf16_step(gpu, HD, &[b[0], b[1], b[2], b[3], b[4], b[5]], &Device::params(p), blocks),
             Kv::Int8 => gpu_core::provider::cuda::paged_flash_prefill_kv8_step(gpu, HD, &[b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]], &Device::params(p), blocks),
+            Kv::Fp8 => gpu_core::provider::cuda::paged_flash_prefill_kvfp8_step(gpu, HD, &[b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]], &Device::params(p), blocks),
         }
     }
 }
@@ -431,7 +462,7 @@ impl TierDevice {
 /// A compact cache is read in place by the tensor-core kernel: it agrees with the
 /// portable kernel of its tier and with an f64 oracle over the values the cache holds.
 #[test]
-fn the_tensor_core_flash_prefill_reads_a_bf16_and_an_int8_cache() {
+fn the_tensor_core_flash_prefill_reads_a_bf16_an_int8_and_an_fp8_cache() {
     let Some(gpu) = device() else { return };
     let cases = [
         Case { n: 256, start: 0, block_size: 4096, scatter: false },
@@ -439,7 +470,7 @@ fn the_tensor_core_flash_prefill_reads_a_bf16_and_an_int8_cache() {
         Case { n: 200, start: 300, block_size: 128, scatter: true },
         Case { n: 64, start: 31, block_size: 16, scatter: true },
     ];
-    for kv in [Kv::Bf16, Kv::Int8] {
+    for kv in [Kv::Bf16, Kv::Int8, Kv::Fp8] {
         for (i, c) in cases.iter().enumerate() {
             let desc = format!("{kv:?} case {i} (n={} start={} block={} scatter={})", c.n, c.start, c.block_size, c.scatter);
             let p = Problem::new(Case { ..*c }, 0xC0DE + i as u64);
@@ -473,7 +504,7 @@ fn the_tensor_core_flash_prefill_reads_a_bf16_and_an_int8_cache() {
 /// kernel is 1e-2) on ragged and scattered shapes, and the NaN-filled output proves every row is written.
 /// It flips the process-wide version switch; the other tests in this file are valid under either kernel.
 #[test]
-fn version_2_matches_the_original_kernel_on_a_bf16_and_an_int8_cache() {
+fn version_2_matches_the_original_kernel_on_a_bf16_an_int8_and_an_fp8_cache() {
     let Some(gpu) = device() else { return };
     let cases = [
         Case { n: 256, start: 0, block_size: 4096, scatter: false },
@@ -481,7 +512,7 @@ fn version_2_matches_the_original_kernel_on_a_bf16_and_an_int8_cache() {
         Case { n: 200, start: 300, block_size: 128, scatter: true },
         Case { n: 33, start: 513, block_size: 16, scatter: true },
     ];
-    for kv in [Kv::Bf16, Kv::Int8] {
+    for kv in [Kv::Bf16, Kv::Int8, Kv::Fp8] {
         for (i, c) in cases.iter().enumerate() {
             let p = Problem::new(Case { ..*c }, 0xFA57 + i as u64);
             let (seen, stored) = p.as_stored(kv);
@@ -506,7 +537,7 @@ fn version_2_matches_the_original_kernel_on_a_bf16_and_an_int8_cache() {
 #[test]
 fn a_compact_cache_in_the_decode_regime_keeps_its_portable_kernel() {
     let Some(gpu) = device() else { return };
-    for kv in [Kv::Bf16, Kv::Int8] {
+    for kv in [Kv::Bf16, Kv::Int8, Kv::Fp8] {
         let p = Problem::new(Case { n: 8, start: 100, block_size: 4096, scatter: false }, 5);
         let (seen, stored) = p.as_stored(kv);
         let d = TierDevice::upload(&gpu, &seen, kv, &stored);
@@ -517,21 +548,23 @@ fn a_compact_cache_in_the_decode_regime_keeps_its_portable_kernel() {
 /// The reason the kernel exists: an int8 cache prefill on the portable kernel is the
 /// slowest part of a served prefill.
 #[test]
-fn the_int8_cache_prefill_is_materially_faster_than_the_portable_kernel() {
+fn an_8_bit_cache_prefill_is_materially_faster_than_the_portable_kernel() {
     let Some(gpu) = device() else { return };
-    let (n, start) = (256u32, 1792u32);
-    let p = Problem::new(Case { n, start, block_size: 4096, scatter: false }, 21);
-    let (seen, stored) = p.as_stored(Kv::Int8);
-    let d = TierDevice::upload(&gpu, &seen, Kv::Int8, &stored);
-    let portable = d.portable(&gpu, &seen);
-    let native = d.native(&gpu, &seen).expect("native step");
-    d.base.run(&gpu, &portable, &seen);
-    d.base.run(&gpu, &native, &seen);
-    let t_ref = d.base.device_ms(&gpu, &portable, "paged_flash_prefill_hd256");
-    let t_tc = d.base.device_ms(&gpu, &native, "flash_prefill_f16_hd256");
-    let speedup = t_ref / t_tc;
-    eprintln!("cuda_flash_prefill: int8 cache n={n} start={start}: portable {t_ref:.3} ms, tensor-core {t_tc:.3} ms, {speedup:.1}x");
-    assert!(speedup >= SPEEDUP_FLOOR, "only {speedup:.1}x the portable kernel (floor {SPEEDUP_FLOOR}x)");
+    for kv in [Kv::Int8, Kv::Fp8] {
+        let (n, start) = (256u32, 1792u32);
+        let p = Problem::new(Case { n, start, block_size: 4096, scatter: false }, 21);
+        let (seen, stored) = p.as_stored(kv);
+        let d = TierDevice::upload(&gpu, &seen, kv, &stored);
+        let portable = d.portable(&gpu, &seen);
+        let native = d.native(&gpu, &seen).expect("native step");
+        d.base.run(&gpu, &portable, &seen);
+        d.base.run(&gpu, &native, &seen);
+        let t_ref = d.base.device_ms(&gpu, &portable, "paged_flash_prefill_hd256");
+        let t_tc = d.base.device_ms(&gpu, &native, "flash_prefill_f16_hd256");
+        let speedup = t_ref / t_tc;
+        eprintln!("cuda_flash_prefill: {kv:?} cache n={n} start={start}: portable {t_ref:.3} ms, tensor-core {t_tc:.3} ms, {speedup:.1}x");
+        assert!(speedup >= SPEEDUP_FLOOR, "only {speedup:.1}x the portable kernel (floor {SPEEDUP_FLOOR}x)");
+    }
 }
 
 /// The serving shape of the 27B's agentic prefill (a 512-row chunk behind 3584 cached tokens, int8 cache): 192
@@ -570,7 +603,7 @@ fn the_int8_cache_prefill_rates_at_the_serving_chunk() {
 #[test]
 fn both_flash_versions_stay_close_to_fp32_at_large_score_magnitudes() {
     let Some(gpu) = device() else { return };
-    for kv in [Kv::Bf16, Kv::Int8] {
+    for kv in [Kv::Bf16, Kv::Int8, Kv::Fp8] {
         for mag in [1.0f32, 2.0, 4.0] {
             let mut p = Problem::new(Case { n: 128, start: 1920, block_size: 4096, scatter: false }, 5);
             p.q.iter_mut().for_each(|x| *x *= mag);

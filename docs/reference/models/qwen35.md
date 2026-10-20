@@ -144,8 +144,8 @@ What it does differently:
   per sequence in f32 against 27 GiB of INT8 weights - so it can be stored
   narrower: `bf16` (8 GiB per sequence at 128k) or `int8` with one f32 scale
   per (token, kv-head) row (4.06 GiB), or `fp8` (E4M3 elements under the same
-  per-row scale, so the same bytes as int8; its prefill runs the portable
-  kernel because no tensor-core kernel reads fp8 rows). The attention arithmetic stays f32; each
+  per-row scale, so the same bytes as int8; the tensor-core prefill decodes
+  the E4M3 bytes to fp16 while it stages each tile). The attention arithmetic stays f32; each
   element is rounded once when it is written and widened as it is read, by the
   paged-KV kernel family (`paged_kv_append_batched_word`/
   `paged_kv_append_i8_clipped_batched`, the `paged_decode_*` scores/apply and the

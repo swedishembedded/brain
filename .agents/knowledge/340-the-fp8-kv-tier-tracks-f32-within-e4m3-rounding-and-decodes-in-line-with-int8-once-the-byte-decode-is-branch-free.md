@@ -26,5 +26,9 @@ At 32 rows (two interleaved pairs, bench8b-*-r32-c2048-r1/r2.log) the split-key 
 fp8 and 0.40-0.46 in int8; the whole step 32.7 and 26.4 ms (fp8) against 22.1 and 25.2 ms (int8), so a step-level
 cost of up to ten percent for fp8 cannot be excluded at n = 2 on a card shared with two servers.
 
-Not done: no tensor-core prefill kernel reads fp8 rows (the portable fused prefill runs), and the FP4/INT4 tiers are
-not started (the evidence above says fp8 is usable, int4 needs its own accuracy campaign).
+The tensor-core prefill reads fp8 rows in place (`flash_prefill_f16_hd{256,256_v2,128}_kvfp8`: the byte is decoded to
+fp16 at the shared-memory write, exactly where the int8 kernel widens). On a GH200 (runs/qkv/fp8prefill.log, 256 rows
+behind 1792 cached) it takes 0.49 ms against the portable kernel's 4.3 ms (8.9x; int8 0.28 against 3.9 ms, 14x), and
+agrees with the portable fp8 kernel to rel-L2 4.4e-4 at unit scores and 1.6e-3 at score scale 16 (bar 3e-3).
+
+Not done: the FP4/INT4 tiers are not started (the evidence above says fp8 is usable, int4 needs its own accuracy campaign).
