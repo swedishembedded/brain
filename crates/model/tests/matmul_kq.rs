@@ -37,21 +37,12 @@
 use gpu_core::{DeviceBuffer, Gpu};
 use kernels::template::interned;
 
-/// Every test below builds a real `Gpu::new` device directly rather than
-/// sharing the ambient one via `gpu_core::testgpu::dev`: `matmul_kq_dyn`/
-/// `matmul_kq_gemv` are register-tiled, multi-barrier kernels that need a
-/// real wgpu/Vulkan device, and pooling would take that guarantee away.
-/// Direct `Gpu::new` calls under `cargo test`'s default multi-threaded run
-/// can therefore build several independent devices on the same physical
-/// card at once - the exact driver deadlock `gpu_core::testgpu`'s own doc
-/// describes ("many concurrent devices deadlock, in a large fraction of
-/// runs, with every thread in futex wait") and that
-/// `crates/gpu-core/tests/device_sharing.rs`'s `DEVICE_SERIAL` (copied in
-/// `device_churn.rs`, `model/tests/conv_dtype_roundtrip.rs`,
-/// `model/tests/kv_bf16_roundtrip.rs`, `lfm2/tests/chunked_equiv.rs`) exists
-/// to prevent. Same fix here: one lock, held for each test's whole body, so
-/// at most one device is alive on the card at a time.
-static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Every test below builds a real `Gpu::new` device directly rather than
+// sharing the ambient one via `gpu_core::testgpu::dev`: `matmul_kq_dyn`/
+// `matmul_kq_gemv` are register-tiled, multi-barrier kernels that need a
+// real wgpu/Vulkan device, and pooling would take that guarantee away. Each
+// test therefore holds `gpu_core::testgpu::exclusive()` for its whole body,
+// so at most one device is alive on the card at a time.
 
 // ---------------------------------------------------------------------
 // Deterministic generators (Knuth MMIX LCG, matching
@@ -435,7 +426,7 @@ fn gemv_variant(g_kernels: &mut Vec<(&'static str, &'static str)>, bits: u32) ->
 /// dimensions and more than one k-chunk, for each `CODE_BITS`.
 #[test]
 fn dyn_matches_host_oracle_both_code_bits() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = gpu_core::testgpu::exclusive();
     for &bits in &[4u32, 8u32] {
         let mut kernels_list = Vec::new();
         let dn = dyn_variant(&mut kernels_list, bits);
@@ -450,7 +441,7 @@ fn dyn_matches_host_oracle_both_code_bits() {
 /// `matmul_kq_gemv`, `m` inside its `<= 32` contract, for each `CODE_BITS`.
 #[test]
 fn gemv_matches_host_oracle_both_code_bits() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = gpu_core::testgpu::exclusive();
     for &bits in &[4u32, 8u32] {
         let mut kernels_list = Vec::new();
         let gn = gemv_variant(&mut kernels_list, bits);
@@ -484,7 +475,7 @@ fn gemv_matches_host_oracle_both_code_bits() {
 /// exists to catch. Reverted after confirming red.
 #[test]
 fn case1_dmin_zero_vs_nonzero_are_genuinely_different() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = gpu_core::testgpu::exclusive();
     let bits = 4u32;
     let (m, k, n, group) = (40usize, 256usize, 48usize, 32usize);
     let ng = k / group;
@@ -552,7 +543,7 @@ fn case1_dmin_zero_vs_nonzero_are_genuinely_different() {
 /// Reverted after confirming red.
 #[test]
 fn case2_sub_block_scale_variation_across_groups() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = gpu_core::testgpu::exclusive();
     let bits = 8u32;
     let (m, k, n, group) = (40usize, 256usize, 48usize, 32usize);
     let ng = k / group; // 8 groups
@@ -600,7 +591,7 @@ fn case2_sub_block_scale_variation_across_groups() {
 /// path this case targets. Reverted after confirming red.
 #[test]
 fn case3_mixed_sign_activation_full_range_codes() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = gpu_core::testgpu::exclusive();
     let bits = 4u32;
     let (m, k, n, group) = (36usize, 256usize, 44usize, 32usize);
     let seed = data::rng::random_seed();
@@ -626,7 +617,7 @@ fn case3_mixed_sign_activation_full_range_codes() {
 /// NaN reaches the output, on top of the usual oracle match.
 #[test]
 fn case4_all_zero_subblock_no_nan() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = gpu_core::testgpu::exclusive();
     let bits = 8u32;
     let (m, k, n, group) = (20usize, 256usize, 24usize, 32usize);
     let ng = k / group;
@@ -663,7 +654,7 @@ fn case4_all_zero_subblock_no_nan() {
 /// rung-(b) shapes cannot reach.
 #[test]
 fn case5_subrectangle_nonzero_origin_two_superblocks() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = gpu_core::testgpu::exclusive();
     let bits = 4u32;
     let (m, k, n, group) = (300usize, 512usize, 260usize, 32usize);
     let ng = k / group; // 16
@@ -702,7 +693,7 @@ fn case5_subrectangle_nonzero_origin_two_superblocks() {
 /// `m` in `{1, 2, 7}` for `matmul_kq_gemv`.
 #[test]
 fn case6_ragged_tiles_dyn() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = gpu_core::testgpu::exclusive();
     for &bits in &[4u32, 8u32] {
         let (m, k, n, group) = (137usize, 256usize, 141usize, 32usize);
         let mut kernels_list = Vec::new();
@@ -716,7 +707,7 @@ fn case6_ragged_tiles_dyn() {
 
 #[test]
 fn case6_ragged_gemv() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = gpu_core::testgpu::exclusive();
     for &bits in &[4u32, 8u32] {
         for &m in &[1usize, 2, 7] {
             let (k, n, group) = (256usize, 37usize, 32usize);
@@ -739,7 +730,7 @@ fn case6_ragged_gemv() {
 /// that the kernel still matches the oracle.
 #[test]
 fn case7_x_and_w_word_densities_genuinely_differ() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = gpu_core::testgpu::exclusive();
     let bits = 4u32;
     let (m, k, n, group) = (48usize, 256usize, 56usize, 32usize);
     let kgx_words_per_row = k / 4; // xq's own density
@@ -761,7 +752,7 @@ fn case7_x_and_w_word_densities_genuinely_differ() {
 
 #[test]
 fn cross_kernel_dyn_and_gemv_agree() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = gpu_core::testgpu::exclusive();
     for &bits in &[4u32, 8u32] {
         let (m, k, n, group) = (24usize, 256usize, 48usize, 32usize);
         let mut kernels_list = Vec::new();

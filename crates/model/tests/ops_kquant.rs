@@ -140,6 +140,10 @@ fn rand_pos_f32(rng: &mut Lcg, n: usize, lo: f32, hi: f32) -> Vec<f32> {
 fn check_kquant(dtype: Dtype, bits: u32, dyn_kname: &'static str, gemv_kname: &'static str, m: usize, n: usize, k: usize, dmin_nonzero: bool) {
     assert!(k.is_multiple_of(GROUP), "test shape must keep k a multiple of GROUP (32)");
     let ng = k / GROUP;
+    // Not `testgpu::dev`: this builds its own device (see below), and
+    // libtest runs the three tests of this binary concurrently - unserialised
+    // that livelocked the driver about one run in fourteen.
+    let _device = gpu_core::testgpu::exclusive();
 
     // `kernel_list()` (M12's own builder) already registers BOTH `CODE_BITS`
     // specialisations of `matmul_kq_dyn`/`matmul_kq_gemv` via `interned`, so
@@ -251,6 +255,7 @@ fn kname_kq_gemv_8() -> &'static str {
 #[test]
 #[should_panic(expected = "xgs")]
 fn kquant_matmul_refuses_an_activation_built_without_xgs() {
+    let _device = gpu_core::testgpu::exclusive();
     let g = Gpu::new(kernel_list());
     let ops = Ops::new(g).expect("Ops::new");
     let g = ops.gpu();

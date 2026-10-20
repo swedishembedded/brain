@@ -380,6 +380,54 @@ pub mod testgpu {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
+    /// Held for the whole body of a test that builds its OWN `Gpu` (a kernel
+    /// set `dev` cannot serve, or a device the test must own), so at most one
+    /// such device is alive at a time. See [`exclusive`].
+    static EXCLUSIVE: Mutex<()> = Mutex::new(());
+
+    /// How long a test waits for [`exclusive`] before the process is aborted.
+    /// The slowest device test in this workspace runs in well under a minute;
+    /// a holder past this has wedged inside the driver.
+    const EXCLUSIVE_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// The one lock every test that builds its own `Gpu` takes, replacing the
+    /// per-file `DEVICE_SERIAL` statics: concurrent device creation and
+    /// teardown from several libtest threads livelocks the NVIDIA driver
+    /// (measured: three tests of `model/tests/ops_kquant.rs`, one run in
+    /// fourteen, a thread spinning in the driver's thread-exit
+    /// destructor with the others parked on its lock - hours, not an error).
+    ///
+    /// The wait is bounded. A holder wedged in the driver cannot be
+    /// interrupted, so a waiter that outlives [`EXCLUSIVE_WAIT`] aborts the
+    /// process with a message naming the test, instead of leaving CI to find
+    /// a 100%-CPU binary after hours. Returns the guard; drop order makes it
+    /// outlive the `Gpu` the test declares after it.
+    pub fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        exclusive_within(&EXCLUSIVE, EXCLUSIVE_WAIT).unwrap_or_else(|| {
+            let test = std::thread::current();
+            eprintln!(
+                "FATAL: test `{}` waited {}s for the device lock; the test holding it is wedged in the GPU driver",
+                test.name().unwrap_or("<unnamed>"),
+                EXCLUSIVE_WAIT.as_secs()
+            );
+            crate::hard_exit(101)
+        })
+    }
+
+    /// `lock`, or `None` if it stays held for `limit`. A poisoned lock (a
+    /// `should_panic` test, a failed assertion) is still a free lock.
+    fn exclusive_within(lock: &'static Mutex<()>, limit: std::time::Duration) -> Option<std::sync::MutexGuard<'static, ()>> {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            match lock.try_lock() {
+                Ok(g) => return Some(g),
+                Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() >= deadline => return None,
+                Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+    }
+
     /// Keyed by the kernel slice's address: kernel sets are `'static` consts,
     /// so the pointer is a stable identity.
     static POOL: OnceLock<Mutex<HashMap<usize, WeakGpu>>> = OnceLock::new();
@@ -410,6 +458,31 @@ pub mod testgpu {
             map.insert(key, w);
         }
         g
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::time::Duration;
+
+        /// A held lock is reported as held after the limit, not waited on
+        /// forever, and a lock released by a panicking holder is free.
+        #[test]
+        fn the_wait_for_the_device_lock_is_bounded_and_survives_a_panicking_holder() {
+            static LOCK: Mutex<()> = Mutex::new(());
+            let held = exclusive_within(&LOCK, Duration::from_secs(1)).expect("free lock");
+            let t0 = std::time::Instant::now();
+            assert!(exclusive_within(&LOCK, Duration::from_millis(50)).is_none(), "a held lock must time out");
+            assert!(t0.elapsed() < Duration::from_secs(5));
+            drop(held);
+
+            let _ = std::thread::spawn(|| {
+                let _g = exclusive_within(&LOCK, Duration::from_secs(1)).expect("free lock");
+                panic!("holder fails");
+            })
+            .join();
+            assert!(exclusive_within(&LOCK, Duration::from_secs(1)).is_some(), "a poisoned lock is still free");
+        }
     }
 }
 
