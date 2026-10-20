@@ -89,6 +89,8 @@ impl CardArgs {
                 f if IGNORED_WITH_VALUE.contains(&f) => {
                     value(f)?;
                 }
+                // `--test-threads=4`: the joined form cargo's own runner takes.
+                f if IGNORED_WITH_VALUE.iter().any(|w| f.strip_prefix(w).is_some_and(|rest| rest.starts_with('='))) => {}
                 f if IGNORED_FLAGS.contains(&f) => {}
                 f if f.starts_with('-') => return Err(format!("unknown option {f}")),
                 f => out.filters.push(f.to_string()),
@@ -208,6 +210,15 @@ mod tests {
 
     fn parse(a: &[&str]) -> CardArgs {
         CardArgs::parse(a.iter().map(|s| s.to_string())).unwrap()
+    }
+
+    /// `cargo test -- --test-threads=4` hands the binary the joined form of a libtest option.
+    #[test]
+    fn a_libtest_option_may_be_joined_to_its_value() {
+        let a = parse(&["--test-threads=4", "--device", "gpu1", "flash"]);
+        assert_eq!(a.device.as_deref(), Some("gpu1"));
+        assert_eq!(a.filters, vec!["flash".to_string()]);
+        assert!(CardArgs::parse(["--test-thread=4".to_string()]).is_err(), "a misspelt option is still an error");
     }
 
     #[test]
