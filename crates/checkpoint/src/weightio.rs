@@ -67,6 +67,13 @@ pub trait DerivedCheckpoint: Send + Sync {
     fn config(&self) -> Value {
         Value::Null
     }
+    /// When tensor `name` is exactly tensor `.1` of reader `.0`, unchanged and
+    /// only under another name, say so: a tile reader then reads the packed
+    /// bytes from the source instead of asking for the tensor as f32. `None`
+    /// (the default) for anything computed.
+    fn passthrough<'a>(&'a self, _name: &str) -> Option<(&'a WeightReader, &'a str)> {
+        None
+    }
 }
 
 /// Another checkpoint's tensors under new names, each read (and converted to
@@ -140,6 +147,9 @@ impl DerivedCheckpoint for Renamed {
     }
     fn config(&self) -> Value {
         self.config.clone()
+    }
+    fn passthrough<'a>(&'a self, name: &str) -> Option<(&'a WeightReader, &'a str)> {
+        Some((&self.src, self.map[*self.by_name.get(name)?].1.as_str()))
     }
 }
 
@@ -248,6 +258,18 @@ impl WeightReader {
         let shapes = index.iter().map(|(n, s, _)| (n.clone(), s.clone())).collect();
         let dtypes = index.into_iter().map(|(n, _, t)| (n, t)).collect();
         WeightReader { inner: Inner::Derived(d, dtypes), order, shapes }
+    }
+
+    /// Follow derived checkpoints that only rename (see
+    /// [`DerivedCheckpoint::passthrough`]) down to the reader that really holds
+    /// `name`, and the name it holds it under.
+    pub(crate) fn resolve(&self, name: &str) -> (&WeightReader, String) {
+        if let Inner::Derived(d, _) = &self.inner {
+            if let Some((src, from)) = d.passthrough(name) {
+                return src.resolve(from);
+            }
+        }
+        (self, name.to_string())
     }
 
     /// The safetensors mapping that holds `name` (single file or its shard), or

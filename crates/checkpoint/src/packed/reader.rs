@@ -94,7 +94,7 @@ impl PackedReader {
                 Ok(d) => hidden.extend(d.encoding.scales.iter().map(|l| format!("{n}{}", l.suffix))),
                 // An FP8 weight whose scale grid cannot be interpreted still owns
                 // it: the error belongs to the weight, not to a stray tensor.
-                Err(_) if self.inner.dtype(n) == Some("F8_E4M3") && self.inner.dtype(&format!("{n}_scale_inv")).is_some() => {
+                Err(_) if self.dtype_of(n).as_deref() == Some("F8_E4M3") && self.dtype_of(&format!("{n}_scale_inv")).is_some() => {
                     hidden.insert(format!("{n}_scale_inv"));
                 }
                 Err(_) => {}
@@ -103,8 +103,16 @@ impl PackedReader {
         self.hidden = hidden;
     }
 
-    fn sidecar_dtype(&self, name: &str) -> Option<&str> {
-        self.inner.dtype(name)
+    /// Dtype, shape and location queries all go to the reader that really
+    /// holds the tensor, so a renamed view of a checkpoint is read packed.
+    fn dtype_of(&self, name: &str) -> Option<String> {
+        let (r, n) = self.inner.resolve(name);
+        r.dtype(&n).map(str::to_string)
+    }
+
+    fn shape_of(&self, name: &str) -> Option<Vec<u64>> {
+        let (r, n) = self.inner.resolve(name);
+        r.shape(&n).map(<[u64]>::to_vec)
     }
 
     /// Infer the descriptor from dtype and sibling tensors, without checking sidecar sizes.
@@ -112,22 +120,24 @@ impl PackedReader {
         if let Some(d) = self.overrides.get(name) {
             return Ok(d.clone());
         }
-        let shape = self.inner.shape(name).ok_or_else(|| format!("{name}: not in checkpoint"))?.to_vec();
-        if let Some(g) = self.inner.gguf() {
-            let (_, ty) = g.raw_tensor_bytes(name).ok_or_else(|| format!("{name}: not in checkpoint"))?;
+        let shape = self.shape_of(name).ok_or_else(|| format!("{name}: not in checkpoint"))?;
+        let (holder, held) = self.inner.resolve(name);
+        if let Some(g) = holder.gguf() {
+            let (_, ty) = g.raw_tensor_bytes(&held).ok_or_else(|| format!("{name}: not in checkpoint"))?;
             return Ok(TensorDescriptor::new(name, shape, ggml_encoding(ty).map_err(|e| format!("{name}: {e}"))?));
         }
-        if self.inner.st_for(name).is_none() {
+        if holder.st_for(&held).is_none() {
             return Err(format!("{name}: torch and computed checkpoints can only be decoded whole; convert to safetensors first"));
         }
-        let dtype = self.inner.dtype(name).unwrap_or("");
-        let has = |suffix: &str, want: &str| self.sidecar_dtype(&format!("{name}{suffix}")) == Some(want);
+        let dtype = self.dtype_of(name).unwrap_or_default();
+        let dtype = dtype.as_str();
+        let has = |suffix: &str, want: &str| self.dtype_of(&format!("{name}{suffix}")).as_deref() == Some(want);
         let enc = match dtype {
             "F32" => QuantEncoding::f32(),
             "F16" => QuantEncoding::f16(),
             "BF16" => QuantEncoding::bf16(),
             "F8_E4M3" if has("_scale_inv", "BF16") || has("_scale_inv", "F32") => {
-                let grid = self.inner.shape(&format!("{name}_scale_inv")).map(<[u64]>::to_vec).unwrap_or_default();
+                let grid = self.shape_of(&format!("{name}_scale_inv")).unwrap_or_default();
                 let block = infer_fp8_block(&shape, &grid, self.fp8_block).ok_or_else(|| format!("{name}: {name}_scale_inv has shape {grid:?}, which fits no known FP8 block size for shape {shape:?}"))?;
                 let mut e = QuantEncoding::fp8_e4m3_tiled(block);
                 if has("_scale_inv", "F32") {
@@ -156,11 +166,12 @@ impl PackedReader {
 
     /// Whole payload bytes of `name` in storage, whichever file holds it.
     fn stored(&self, name: &str) -> Option<(&[u8], &str)> {
-        if let Some(g) = self.inner.gguf() {
-            return g.raw_tensor_bytes(name).map(|(b, _)| (b, "GGUF"));
+        let (holder, held) = self.inner.resolve(name);
+        if let Some(g) = holder.gguf() {
+            return g.raw_tensor_bytes(&held).map(|(b, _)| (b, "GGUF"));
         }
-        let m = self.inner.st_for(name)?;
-        Some((m.raw_range(name, 0..m.nbytes(name)? as usize)?, m.dtype(name)?))
+        let m = holder.st_for(&held)?;
+        Some((m.raw_range(&held, 0..m.nbytes(&held)? as usize)?, m.dtype(&held)?))
     }
 }
 
@@ -236,10 +247,11 @@ impl PackedTensorReader for PackedReader {
     fn release(&self, desc: &TensorDescriptor, elems: &Range<u64>) {
         let pr = desc.payload_range(elems);
         let range = pr.start as usize..pr.end as usize;
-        if let Some(g) = self.inner.gguf() {
-            g.advise_dontneed_range(&desc.name, range);
-        } else if let Some(m) = self.inner.st_for(&desc.name) {
-            m.advise_dontneed_range(&desc.name, range);
+        let (holder, held) = self.inner.resolve(&desc.name);
+        if let Some(g) = holder.gguf() {
+            g.advise_dontneed_range(&held, range);
+        } else if let Some(m) = holder.st_for(&held) {
+            m.advise_dontneed_range(&held, range);
         }
     }
 }
@@ -342,5 +354,29 @@ mod tests {
         let mut buf = TileBuf::default();
         r.read_blocks(&d, &(64..192), &mut buf).unwrap();
         assert_eq!(buf.payload, &q8[2 * 34..6 * 34]);
+    }
+
+    #[test]
+    fn a_renamed_view_is_read_packed_from_its_source() {
+        use crate::weightio::{Renamed, WeightReader};
+        let dir = TmpDir::new("renamed");
+        let w = e4m3_bytes(31, 20 * 40);
+        let grid = bf16_bytes(&[1.0, 2.0, 4.0, 8.0, 0.5, 0.25]);
+        write_safetensors(
+            &dir.join("m.safetensors"),
+            &[
+                RawTensor { name: "hf.w", dtype: "F8_E4M3", shape: vec![20, 40], bytes: w.clone() },
+                RawTensor { name: "hf.w_scale_inv", dtype: "BF16", shape: vec![2, 3], bytes: grid.clone() },
+            ],
+        );
+        let src = WeightReader::open(dir.join("m.safetensors").to_str().unwrap()).unwrap();
+        let map = vec![("blocks.0.w".to_string(), "hf.w".to_string()), ("blocks.0.w_scale_inv".to_string(), "hf.w_scale_inv".to_string())];
+        let view = WeightReader::derived(Box::new(Renamed::new(src, map, serde_json::Value::Null).unwrap()));
+        let r = PackedReader::new(view);
+        assert_eq!(r.names(), ["blocks.0.w"]);
+        let d = r.descriptor("blocks.0.w").unwrap();
+        assert_eq!(d.encoding, QuantEncoding::fp8_e4m3_tiled(16), "the renamed tensor keeps its stored encoding, not f32");
+        let buf = read_all(&r, &d);
+        assert_eq!((buf.payload, buf.scales[0].clone()), (w, grid));
     }
 }

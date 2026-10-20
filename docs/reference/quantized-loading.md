@@ -27,7 +27,8 @@ A new format is a `Codec` registered with `CodecRegistry::register`; no loader o
 nothing else; there is no whole-tensor method. `PackedReader` serves a memory-mapped safetensors file,
 a sharded HF directory (fp8 `_scale_inv` grids and NVFP4 `_scale`/`_scale_2` siblings are discovered
 and hidden behind their payload tensor) and GGUF (single or split). Torch pickles and computed
-checkpoints are refused at `descriptor()` time. Layouts that dtype alone cannot tell (brain's packed
+checkpoints are refused at `descriptor()` time. A `DerivedCheckpoint` that only renames (`weightio::Renamed`) declares
+`passthrough`, so a renamed view of a checkpoint is read packed from its source, never as f32. Layouts that dtype alone cannot tell (brain's packed
 int8/NF4 `U32` words) are declared with `PackedReader::with_descriptor`.
 
 ## Loading (`packed::load`)
@@ -53,3 +54,11 @@ The budget is process-local and shared: concurrent loads wait for each other's l
 releases its lease and calls `TensorSink::abort`, and `Pool::Pinned` is reserved for device
 transfers. File-backed pages of the mapped checkpoint are released with `madvise` after each tile and
 reported as `file_resident_growth_bytes`.
+
+## Existing by-name consumers (`packed::source`)
+
+`PackedSource` adapts a reader to `TensorSource`, the f32 by-name interface current model builders use,
+through a declarative name map (`Binding { source, add }`). Chunks are decoded tile by tile, so host
+scratch is `O(chunk)`. `qwen35::fp8_source::open_dir` is that map for the Qwen3.5/3.8 HuggingFace layout
+(FP8, bf16 or fp32); `qwen35::base_source::open_base` also accepts a GGUF of any decodable quantization
+as a LoRA/QLoRA base. New models write a name map and call `PackedSource::new`; they never decode.
