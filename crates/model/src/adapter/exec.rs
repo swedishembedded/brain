@@ -36,7 +36,7 @@ use paramstore::ParamStore;
 
 use super::device::{lora_names, param_name, LoraCfg};
 use super::kind::{lokr_factors, DeviceKind, DORA_A, DORA_B, DORA_M, IA3_D, LOKR_W1, LOKR_W2};
-use crate::block;
+use crate::block::{self, pick_gemm};
 
 /// Kernels the non-LoRA kinds dispatch beyond the ones every adapter model
 /// registers; a model that trains such a kind appends them to its pipelines
@@ -88,19 +88,17 @@ impl ParamAccess for ParamStore {
     }
 }
 
-/// Kernel indices the runtime dispatches, resolved by name once. The gemv entry
-/// is optional: a model that did not register it keeps the reference kernel.
-/// The channel/axis kernels are only needed by the kinds that use them. The
-/// weight and input gradients use the reference kernels: their contraction
-/// dimension is the adapter's small rank (or a small Kronecker factor), where a
-/// register-tiled kernel has nothing to tile - and the tiled kernels' shape
-/// contract is not one a rank-3 factor meets (a regression on a 4-bit base was
-/// the evidence).
+/// Kernel indices the runtime dispatches, resolved by name once. The gemv and
+/// the register-tiled gradient entries are optional: a model that did not
+/// register them keeps the reference kernels ([`tiled_or_reference`]). The
+/// channel/axis kernels are only needed by the kinds that use them.
 struct Kernels {
     matmul: usize,
     gemv: Option<usize>,
     dx: usize,
+    dx_reg: Option<usize>,
     dw: usize,
+    dw_reg: Option<usize>,
     axpy: usize,
     grad_scale: usize,
     scale_chan: Option<usize>,
@@ -118,7 +116,9 @@ impl Kernels {
             matmul: need("matmul"),
             gemv: gpu.kernel_index("matmul_gemv"),
             dx: need("matmul_dx"),
+            dx_reg: gpu.kernel_index("matmul_dx_reg"),
             dw: need("matmul_dw"),
+            dw_reg: gpu.kernel_index("matmul_dw_reg"),
             axpy: need("axpy"),
             grad_scale: need("grad_scale"),
             scale_chan: gpu.kernel_index("scale_chan"),
@@ -135,6 +135,18 @@ impl Kernels {
         slot.unwrap_or_else(|| {
             panic!("adapter runtime: a {} adapter needs kernel {name:?}; append model::adapter::exec::EXTRA_KERNELS to this model's pipelines (add_kernels)", kind.name())
         })
+    }
+}
+
+/// The kernel and dispatch for a GEMM with a `rows x cols` result: the
+/// register-tiled kernel (one workgroup per 128x128 tile) where the shape fills
+/// a tile AND the model registered it, else the reference kernel with one thread
+/// per output element. The tile grid must never be paired with the reference
+/// kernel: its workgroup is 64 threads, so a one-tile grid computes 64 outputs.
+fn tiled_or_reference(reference: usize, tiled: Option<usize>, rows: u32, cols: u32) -> (usize, gpu_core::Dispatch) {
+    match tiled {
+        Some(tiled) => pick_gemm(rows as usize, cols as usize, reference, tiled, false),
+        None => (reference, gpu_core::Dispatch::Threads(rows * cols)),
     }
 }
 
@@ -345,12 +357,14 @@ impl AdapterRuntime {
 
     /// `dW[n, k] += sum_m dY[m, n] X[m, k]` with `bufs = [dY, X, dW]`.
     fn dw(&self, bufs: &[&DeviceBuffer], m: u32, k: u32, n: u32) -> Step {
-        self.gpu.step(self.k.dw, bufs, &[m, k, n], n * k)
+        let (kern, grid) = tiled_or_reference(self.k.dw, self.k.dw_reg, n, k);
+        self.gpu.dispatch(kern, bufs, &[m, k, n], grid)
     }
 
     /// `dX[m, k] (+)= sum_n dY[m, n] W[n, k]` with `bufs = [dY, W, dX]`.
     fn dx(&self, bufs: &[&DeviceBuffer], m: u32, k: u32, n: u32, accumulate: u32) -> Step {
-        self.gpu.step(self.k.dx, bufs, &[m, k, n, accumulate], m * k)
+        let (kern, grid) = tiled_or_reference(self.k.dx, self.k.dx_reg, m, k);
+        self.gpu.dispatch(kern, bufs, &[m, k, n, accumulate], grid)
     }
 
     /// `out[i] = x[i] * v[(i / inner) % c]` over `total` elements.
@@ -571,5 +585,22 @@ impl AdapterRuntime {
             s.push(g.step(self.k.axpy, &[ga, &f1], &[r * k, f(scale)], r * k));
             s.push(g.step(self.k.axpy, &[ga, &f2], &[r * k, f(scale * scale)], r * k));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpu_core::Dispatch;
+
+    /// A model that did not register the tiled kernel must get the reference
+    /// kernel with one thread per output: pairing it with a tile-count grid
+    /// computed 64 outputs of a 12 x 128 result (a 4-bit base stopped learning).
+    #[test]
+    fn an_unregistered_tiled_kernel_falls_back_to_one_thread_per_output() {
+        assert_eq!(tiled_or_reference(7, None, 12, 128), (7, Dispatch::Threads(12 * 128)));
+        let (kern, grid) = tiled_or_reference(7, Some(9), 512, 512);
+        assert_eq!((kern, grid), (9, Dispatch::Workgroups(16)), "a shape that fills tiles takes the tiled kernel");
+        assert_eq!(tiled_or_reference(7, Some(9), 12, 64), (7, Dispatch::Threads(12 * 64)), "a thin shape stays on the reference kernel");
     }
 }
