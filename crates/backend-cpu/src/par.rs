@@ -28,6 +28,15 @@ pub fn rows_mut(buf: &mut [f32], row_len: usize, f: impl Fn(usize, &mut [f32]) +
     chunks_mut(buf, row_len, f)
 }
 
+/// Run `f` with the CPU backend's parallel loops confined to a pool of `threads`
+/// threads (its own, dropped on return), however many cores the machine has.
+/// A model whose kernels are a few hundred elements wide spends its time waking
+/// and spinning a pool sized for a large one: a tiny training loop that does 6 s
+/// of arithmetic used 12 CPU-minutes on 56 threads. For tests and small jobs.
+pub fn with_threads<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
+    rayon::ThreadPoolBuilder::new().num_threads(threads.max(1)).build().expect("a rayon pool").install(f)
+}
+
 /// [`rows_mut`] over any `Send` element type - the shape of a loop whose
 /// output rows are not `f32`: packed int8/int4 weight words (`u32`), decoded
 /// block spans, index tables.
@@ -199,6 +208,14 @@ mod tests {
         for threads in [2, 3, 7, 16] {
             assert_eq!(on(threads), reference, "{threads} threads");
         }
+    }
+
+    #[test]
+    fn with_threads_sizes_the_pool_the_loops_run_in() {
+        assert_eq!(with_threads(3, || rayon::current_num_threads()), 3);
+        let mut v = vec![0u32; 100];
+        with_threads(2, || chunks_mut(&mut v, 10, |i, c| c.iter_mut().for_each(|x| *x = i as u32)));
+        assert_eq!(v[99], 9);
     }
 
     #[test]

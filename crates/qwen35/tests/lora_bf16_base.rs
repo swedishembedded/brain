@@ -112,20 +112,24 @@ fn an_adapter_trained_on_a_bf16_base_survives_save_and_reload() {
 
 #[test]
 fn a_lora_trainer_on_a_bf16_base_overfits_a_fixed_batch() {
-    let cfg = lora_config();
-    let init = weights(&cfg, 0.0);
-    let m = build(&cfg, &init, Dtype::BF16);
-    m.set_batch(&TOKENS, &TARGETS);
-    let before = m.forward();
-    for step in 1..=120 {
-        m.zero_grads();
-        m.forward();
-        m.backward();
-        m.adamw_step(step, 3e-2, 0.0, Default::default(), Some(1.0), 1.0);
-        m.poll_wait();
-    }
-    let after = m.forward();
-    assert!(after < before * 0.8, "bf16-base LoRA did not learn: {before} -> {after}");
+    // The model is a few hundred elements wide: on every core of the machine its
+    // 120 steps spent 12 CPU-minutes waking a pool for 6 s of arithmetic.
+    Gpu::with_cpu_threads(2, || {
+        let cfg = lora_config();
+        let init = weights(&cfg, 0.0);
+        let m = build(&cfg, &init, Dtype::BF16);
+        m.set_batch(&TOKENS, &TARGETS);
+        let before = m.forward();
+        for step in 1..=120 {
+            m.zero_grads();
+            m.forward();
+            m.backward();
+            m.adamw_step(step, 3e-2, 0.0, Default::default(), Some(1.0), 1.0);
+            m.poll_wait();
+        }
+        let after = m.forward();
+        assert!(after < before * 0.8, "bf16-base LoRA did not learn: {before} -> {after}");
+    });
 }
 
 /// Full-parameter training stays fp32-only; only LoRA may sit on a narrow base.

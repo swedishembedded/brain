@@ -1074,6 +1074,13 @@ mod native_facade {
             self.inner.downgrade().map(|weak| WeakGpu { weak, names: self.names.clone(), mem_device: self.mem_device })
         }
 
+        /// Run `f` with the CPU backend's parallel loops confined to `threads`
+        /// threads (see `backend_cpu::par::with_threads`): for a tiny model, whose
+        /// kernels cost less than waking a pool sized for a large one.
+        pub fn with_cpu_threads<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
+            backend_cpu::par::with_threads(threads, f)
+        }
+
         /// Build on the native CPU backend regardless of the default selection.
         pub fn new_cpu(kernels: &[(&str, &str)]) -> Gpu {
             let kernels = &Self::expanded(kernels, true);
