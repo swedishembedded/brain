@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Layer-4 crates that still contain format-specific kernel or codec logic
+# (see check-format-logic.sh). path<TAB>count<TAB>reason. Shrink-only: lower or
+# delete the line in the commit that moves the logic into model::ops or the
+# provider. A new match is a design defect, not an allowlist addition.
+crates/flux1/src/model.rs	1	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/flux2/src/bin/flux2_bench.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
+crates/flux2/src/devgrad.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
+crates/flux2/src/model.rs	1	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/ltxv/src/block.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
+crates/ltxv/src/int8.rs	3	per-model int8 upload helper duplicating model::int8 routing; collapse onto model::ops::Weight::upload
+crates/minimaxmusic3/src/dit_int8.rs	3	per-model int8 upload helper duplicating model::int8 routing; collapse onto model::ops::Weight::upload
+crates/moondream3/src/decoder.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
+crates/npu/src/fold.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
+crates/npu/src/sim.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
+crates/npu/src/topology.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
+crates/qwen3/src/model.rs	10	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/qwen3/src/serve.rs	6	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/qwen35/src/bin/import_profile.rs	2	importer/FP8 source: decodes the checkpoint format while converting; belongs in a checkpoint codec (loader inventory, knowledge 337)
+crates/qwen35/src/config.rs	1	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/qwen35/src/dflash2.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
+crates/qwen35/src/fp8_source.rs	5	importer/FP8 source: decodes the checkpoint format while converting; belongs in a checkpoint codec (loader inventory, knowledge 337)
+crates/qwen35/src/import.rs	6	importer/FP8 source: decodes the checkpoint format while converting; belongs in a checkpoint codec (loader inventory, knowledge 337)
+crates/qwen35/src/int8_gguf_resident/mtp.rs	1	per-model int8 upload helper duplicating model::int8 routing; collapse onto model::ops::Weight::upload
+crates/qwen35/src/int8_gguf_resident.rs	1	per-model int8 upload helper duplicating model::int8 routing; collapse onto model::ops::Weight::upload
+crates/qwen35/src/model.rs	4	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/qwen35/src/stream.rs	1	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/qwen35/src/stream_train.rs	2	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/qwen35/src/train_base.rs	7	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/qwen35moe/src/model.rs	5	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/qwen35moe/src/q8.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
+crates/qwen3omnimoe/src/import.rs	1	importer/FP8 source: decodes the checkpoint format while converting; belongs in a checkpoint codec (loader inventory, knowledge 337)
+crates/qwen3omnimoe/src/int8_thinker_resident.rs	2	per-model int8 upload helper duplicating model::int8 routing; collapse onto model::ops::Weight::upload
+crates/sdxlunet/src/int8.rs	3	per-model int8 upload helper duplicating model::int8 routing; collapse onto model::ops::Weight::upload
+crates/supir/src/int8.rs	3	per-model int8 upload helper duplicating model::int8 routing; collapse onto model::ops::Weight::upload
+crates/toypid/src/data.rs	7	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
+crates/wan/src/block.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)

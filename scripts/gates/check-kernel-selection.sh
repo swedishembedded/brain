@@ -270,4 +270,6 @@ echo "$out"
 if [ "$rc" -ne 0 ]; then
   exit 1
 fi
-exit 0
+# The format half of the same rule: which kernel serves which storage format is
+# decided in model::ops and the provider, not in a model crate.
+bash "$(dirname "$0")/check-format-logic.sh"

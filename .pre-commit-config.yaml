@@ -151,6 +151,17 @@ repos:
         files: '(^crates/.*\.rs$|^scripts/gates/(whole-tensor-loads\.|check-whole-tensor-loads\.sh|ratchet\.py))'
         pass_filenames: false
         stages: [pre-commit]
+      - id: format-logic
+        name: "No format-specific kernel or codec logic in model crates"
+        description: >-
+          the format-logic ratchet fails on Weight-variant, kernel-lookup and codec calls in a layer-4 crate and on a stale entry, ignores layer 3, tests and comments. Allowlist: scripts/gates/format-logic.allow (path, count, reason;
+          shrink-only). See scripts/gates/check-format-logic.sh. Also run by
+          `make check/scripts`.
+        entry: bash scripts/gates/check-format-logic.sh
+        language: system
+        files: '(^crates/.*\.rs$|^scripts/gates/(format-logic\.|check-format-logic\.sh|ratchet\.py))'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: seed-literals
         name: "No new literal seeds in production code (every default seed is random)"
         description: >-
