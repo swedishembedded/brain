@@ -16,12 +16,13 @@
 pub mod bank;
 pub mod device;
 pub mod exec;
+pub mod file;
 pub mod kind;
 pub mod plan;
 pub mod select;
 pub mod sites;
 
-pub use kind::{AdapterDefinition, AdapterExecution, AdapterOptimization, ParamGroup, ParamInit, ParamSpec};
+pub use kind::{AdapterDefinition, AdapterExecution, AdapterGroups, AdapterOptimization, DeviceKind, ParamGroup, ParamInit, ParamSpec};
 
 use std::collections::HashMap;
 

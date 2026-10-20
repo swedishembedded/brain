@@ -137,7 +137,7 @@ fn base_tensor_names(cfg: &BartConfig, t_prompt: u32, max_t: u32) -> Vec<(String
 /// `.lora_a`/`.lora_b` for every LoRA-targetable weight in `base` (the FFN
 /// pair's `in`/`out` dims differ by leaf, recovered from `base`'s own
 /// element counts rather than re-deriving encoder/decoder ffn widths here).
-fn lora_tensor_names(base: &[(String, usize)], cfg: &BartConfig, hp: &model::adapter::TargetHp) -> Vec<(String, usize)> {
+fn lora_tensor_names(base: &[(String, usize)], cfg: &BartConfig, lora: &LoraCfg) -> Vec<(String, usize)> {
     let d = cfg.d_model as usize;
     let mut v = Vec::new();
     for (name, numel) in base {
@@ -146,7 +146,7 @@ fn lora_tensor_names(base: &[(String, usize)], cfg: &BartConfig, hp: &model::ada
         }
         let out_dim = numel / d.max(1);
         let (in_dim, out_dim) = if name.ends_with("fc1.weight") { (d, out_dim) } else if name.ends_with("fc2.weight") { (numel / d, d) } else { (d, out_dim) };
-        v.extend(model::adapter::device::param_list(name, hp, out_dim, in_dim));
+        v.extend(lora.param_list(name, out_dim, in_dim));
     }
     v
 }
@@ -158,7 +158,7 @@ pub fn param_list(cfg: &BartConfig, t_prompt: u32, max_t: u32, lora: Option<&Lor
     let base = base_tensor_names(cfg, t_prompt, max_t);
     let mut v = base.clone();
     if let Some(l) = lora {
-        v.extend(lora_tensor_names(&base, cfg, &l.hp()));
+        v.extend(lora_tensor_names(&base, cfg, l));
     }
     v
 }
@@ -233,7 +233,7 @@ impl Florence2Trainer {
         let base = base_tensor_names(&cfg, t_prompt, max_t);
         let mut all = base.clone();
         if let Some(l) = &lora {
-            all.extend(lora_tensor_names(&base, &cfg, &l.hp()));
+            all.extend(lora_tensor_names(&base, &cfg, l));
         }
         let roles: Vec<(String, usize, Role)> = all.into_iter().map(|(n, sz)| { let r = role_for(&n, lora.as_ref()); (n, sz, r) }).collect();
         let mut ps = ParamStore::new_with_roles(&gpu, roles, init);

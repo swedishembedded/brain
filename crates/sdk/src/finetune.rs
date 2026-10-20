@@ -507,6 +507,15 @@ impl ChatFineTune {
         self
     }
 
+    /// The adapter method: `lora` (default), `ia3` (learned output-channel
+    /// scales) or `lokr` (a Kronecker-product delta, applied without forming
+    /// it). A continued adapter must be continued with its own kind; the LoRA
+    /// variants (`rank_stabilized`, `lora_plus`, `freeze_a`) apply to LoRA only.
+    pub fn adapter_kind(mut self, kind: model::adapter::DeviceKind) -> Self {
+        self.tuning.kind = kind;
+        self
+    }
+
     /// rsLoRA: scale the update by `alpha / sqrt(rank)` instead of
     /// `alpha / rank`, so a higher rank is not suppressed. A continued adapter
     /// must be continued with the setting it trained with.
@@ -799,6 +808,7 @@ impl ChatFineTune {
             "parent": parent,
             "rank": rank,
             "alpha_bits": alpha.to_bits(),
+            "adapter_kind": self.tuning.kind.name(),
             "rank_stabilized": self.tuning.rank_stabilized,
             "lr_ratio_bits": self.tuning.lr_ratio.to_bits(),
             "freeze_a": self.tuning.freeze_a,

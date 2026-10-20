@@ -309,9 +309,11 @@ fn proj_bwd_streamed(ops: &Ops, lora: &LoraStore, leaf: &str, d_out: &DeviceBuff
     // resident tier (f32, bf16, NF4, FP8, ...) with no full-precision copy. An untargeted leaf, or the
     // shared head, has only this.
     debug_assert_eq!((base.n(), base.k()), (nout, k), "proj_bwd_streamed: weight shape does not match the linear");
-    ops.matmul_dx(s, base, d_out, m, dx, acc != 0);
+    let base_dx = |s: &mut Vec<Step>, dy: &DeviceBuffer| ops.matmul_dx(s, base, dy, m, dx, acc != 0);
     if lora.rt.hits(leaf) {
-        lora.rt.backward(lora.rt.reference_gemm(), s, &lora.ps, wname, d_out, x, dx, m, k, nout);
+        lora.rt.backward(lora.rt.reference_gemm(), s, &lora.ps, wname, d_out, x, dx, m, k, nout, &base_dx);
+    } else {
+        base_dx(s, d_out);
     }
 }
 

@@ -409,7 +409,7 @@ impl Qwen35Config {
             if lora_here {
                 out_v.push((name.clone(), o * i)); // frozen base
                 if let Some(l) = &self.lora {
-                    out_v.extend(model::adapter::device::param_list(&name, &l.hp_for(&name), o, i));
+                    out_v.extend(l.param_list(&name, o, i));
                 }
             } else {
                 out_v.push((name, o * i));

@@ -208,8 +208,8 @@ pub fn lora_overlay_tuned(base: BaseCheckpoint, rank: u32, alpha: f32, tuning: A
         let name = file.to_str().ok_or_else(|| format!("{}: not a UTF-8 path", file.display()))?;
         let st = checkpoint::st::load_safetensors(name).map_err(|e| format!("{name}: {e}"))?;
         let card = st.card().and_then(|c| c.adapter).ok_or_else(|| format!("{name}: not an adapter file (no adapter card)"))?;
-        if card.kind != "lora" {
-            return Err(format!("{name}: a {:?} adapter, only LoRA can be continued", card.kind));
+        if card.kind != tuning.kind.name() {
+            return Err(format!("{name}: a {:?} adapter, asked to continue as {:?}", card.kind, tuning.kind.name()));
         }
         if card.rank != Some(rank) || card.alpha.is_some_and(|a| !model::adapter::device::alpha_matches(a, card_alpha)) {
             return Err(format!("{name}: trained at rank {:?} alpha {:?}, asked to continue at rank {rank} alpha {card_alpha} ({tuning:?})", card.rank, card.alpha));

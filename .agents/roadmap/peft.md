@@ -94,6 +94,19 @@ milestone verification numbers are tracked in this repo's normal commit
 history and test suite, not duplicated here - see `crates/model/src/adapter/`
 for what has landed. Phases 2-9 below assume Phase 1 exists and is stable.
 
+IA3 (per-output-channel scales, stored as the delta from 1) and LoKr (a
+Kronecker-product delta applied as two GEMMs and two axis swaps, never formed
+densely) train on the device through that runtime on qwen3 and qwen35, are
+selected by `--adapter-kind` (or `ChatFineTune::adapter_kind`), fold into a
+host base with `adapter::file::AdapterFile`, and attach beside an unmodified
+qwen3 base as a runtime overlay. Their gates are
+`gradcheck/tests/adapter_kinds_fd{,_qwen35}.rs` (finite differences),
+`qwen3/tests/adapter_variants.rs` and `qwen35/tests/adapter_variants.rs` (fold,
+overlay, reload). Not done: DoRA, which needs the base weight's row norms and
+`W A^t` through any base storage (a decode-through-`Weight` operation owned by
+the quantized-ops lane), and the multi-adapter serving bank for kinds without a
+low-rank form.
+
 The kind is split into three roles in `crates/model/src/adapter/kind.rs`:
 `AdapterDefinition` (tensors per target, shapes, init), `AdapterExecution`
 (delta, runtime low-rank form, gradients from a dense `dW`) and
@@ -101,7 +114,7 @@ The kind is split into three roles in `crates/model/src/adapter/kind.rs`:
 (`adapter/device.rs`) recognises, initialises, freezes and saves adapter
 tensors from the definition, so no model crate spells a tensor suffix; a new
 kind (DoRA, LoKr, IA3) implements the three roles and is listed in
-`device::kinds()` and one arm in `adapter/exec.rs`, which records the
+`DeviceKind` (`adapter/kind.rs`) and one arm in `adapter/exec.rs`, which records the
 forward and backward steps for qwen3, qwen35 (resident and streamed),
 qwen35moe and deepseek2 alike.
 

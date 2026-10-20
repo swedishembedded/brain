@@ -325,6 +325,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // cache of that tier is used, so their kernels ride along here.
         let kv = model::kv_tier::kernel_list(&v);
         v.extend(kv);
+        model::adapter::exec::add_kernels(&mut v);
         v
     })
 }
@@ -2230,8 +2231,7 @@ impl Qwen35 {
         match self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
             Some(rt) => {
                 // base: dx += d_out*W (frozen weight - no dW).
-                self.base_dx(steps, d_out, wname, dx, m, k, nout, acc);
-                rt.backward(self.ops.tensor_gemm(), steps, &self.ps, wname, d_out, x, dx, m, k, nout);
+                rt.backward(self.ops.tensor_gemm(), steps, &self.ps, wname, d_out, x, dx, m, k, nout, &|s, dy| self.base_dx(s, dy, wname, dx, m, k, nout, acc));
             }
             None => {
                 if self.trainable(wname) {
@@ -5359,6 +5359,9 @@ impl model::Model for Qwen35 {
     }
     fn frozen_adapter_param_names(&self) -> Vec<String> {
         model::adapter::device::frozen_adapter_params(&self.ps)
+    }
+    fn adapter_sites(&self) -> Vec<model::adapter::LinearSite> {
+        model::adapter::sites::LoraSites::lora_sites(&self.cfg)
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         Qwen35::read_weight(self, name)

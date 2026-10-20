@@ -24,23 +24,22 @@
 use paramstore::{ParamStore, Role};
 use serde_json::Value;
 
-use super::kind::{AdapterDefinition, AdapterOptimization, ParamGroup, ParamInit};
+use super::kind::{DeviceKind, ParamGroup, ParamInit};
 use super::{TargetHp, TargetSpec};
-use crate::lora::LoraPair;
 
-/// The suffix sets of every adapter kind the device family knows.
-fn kinds() -> [&'static [&'static str]; 1] {
-    [LoraPair::suffixes()]
-}
-
-/// The suffix of `name`'s adapter tensor, if `name` is one.
-fn suffix_of(name: &str) -> Option<&'static str> {
-    kinds().into_iter().flatten().copied().find(|s| name.ends_with(s))
+/// The kind that owns the adapter tensor `name`, by its suffix.
+pub fn kind_of(name: &str) -> Option<DeviceKind> {
+    DeviceKind::ALL.into_iter().find(|k| k.suffixes().iter().any(|s| name.ends_with(s)))
 }
 
 /// Is `name` one of an adapter kind's own tensors (as opposed to a base weight)?
 pub fn is_adapter_param(name: &str) -> bool {
-    suffix_of(name).is_some()
+    kind_of(name).is_some()
+}
+
+/// The suffix of `name`'s adapter tensor, if `name` is one.
+fn suffix_of(name: &str) -> Option<&'static str> {
+    kind_of(name)?.suffixes().iter().copied().find(|s| name.ends_with(s))
 }
 
 /// The name of `base`'s adapter tensor `suffix`.
@@ -56,16 +55,16 @@ pub fn lora_names(base: &str) -> (String, String) {
 
 /// How the adapter tensor `name` starts; `None` for a base weight.
 pub fn init_of(name: &str) -> Option<ParamInit> {
-    let suffix = suffix_of(name)?;
+    let (kind, suffix) = (kind_of(name)?, suffix_of(name)?);
     // Init does not depend on dimensions: any target stands for all.
-    LoraPair::params(&TargetHp::new(1, 1.0), &TargetSpec::whole(1, 1)).into_iter().find(|p| p.suffix == suffix).map(|p| p.init)
+    kind.params(&TargetHp::new(1, 1.0), &TargetSpec::whole(1, 1)).into_iter().find(|p| p.suffix == suffix).map(|p| p.init)
 }
 
 /// The training group of the adapter tensor `name` under `hp`; `None` for a
 /// base weight.
 pub fn group_of(name: &str, hp: &TargetHp) -> Option<ParamGroup> {
-    let suffix = suffix_of(name)?;
-    LoraPair::groups(hp).into_iter().find(|g| g.suffix == suffix)
+    let (kind, suffix) = (kind_of(name)?, suffix_of(name)?);
+    kind.groups(hp).into_iter().find(|g| g.suffix == suffix)
 }
 
 /// The `ParamStore` role of `name` in an adapter-training build: the adapter's
@@ -101,13 +100,13 @@ pub fn frozen_adapter_params(ps: &ParamStore) -> Vec<String> {
 /// The shape of the adapter tensor `name` holding `len` elements at `rank`,
 /// for a file that stored it flat.
 pub fn shape_of(name: &str, rank: usize, len: usize) -> Option<Vec<usize>> {
-    LoraPair::shape_from_len(suffix_of(name)?, rank, len)
+    kind_of(name)?.shape_from_len(suffix_of(name)?, rank, len)
 }
 
 /// The `(name, numel)` entries a model's parameter list adds for the adapter
 /// of base weight `name` with `out x inn` dimensions.
-pub fn param_list(name: &str, hp: &TargetHp, out: usize, inn: usize) -> Vec<(String, usize)> {
-    LoraPair::params(hp, &TargetSpec::whole(out, inn)).into_iter().map(|p| (param_name(name, p.suffix), p.numel())).collect()
+pub fn param_list(name: &str, kind: DeviceKind, hp: &TargetHp, out: usize, inn: usize) -> Vec<(String, usize)> {
+    kind.params(hp, &TargetSpec::whole(out, inn)).into_iter().map(|p| (param_name(name, p.suffix), p.numel())).collect()
 }
 
 /// Device-side adapter configuration: the targets and hyper-parameters of an
@@ -126,6 +125,8 @@ pub struct LoraCfg {
     pub lr_ratio: f32,
     /// LoRA-FA: `A` stays at its init and only `B` trains.
     pub freeze_a: bool,
+    /// The adapter method (default LoRA).
+    pub kind: DeviceKind,
     /// Targets that take their own rank and/or alpha instead of the shared
     /// ones, first match wins.
     pub overrides: Vec<TargetOverride>,
@@ -150,20 +151,26 @@ pub struct AdapterTuning {
     pub lr_ratio: f32,
     /// LoRA-FA: `A` stays at its init.
     pub freeze_a: bool,
+    /// The adapter method.
+    pub kind: DeviceKind,
 }
 
 impl Default for AdapterTuning {
     fn default() -> AdapterTuning {
-        AdapterTuning { rank_stabilized: false, lr_ratio: 1.0, freeze_a: false }
+        AdapterTuning { rank_stabilized: false, lr_ratio: 1.0, freeze_a: false, kind: DeviceKind::Lora }
     }
 }
 
 impl AdapterTuning {
     /// The tuning the model-agnostic options name: `variant` is a comma list of
     /// `plain`, `rs` (rsLoRA) and `fa` (LoRA-FA), `plus_ratio` the LoRA+ ratio
-    /// for `B`. Every front end parses these two values with this one function.
-    pub fn parse(variant: Option<&str>, plus_ratio: Option<&str>) -> Result<AdapterTuning, String> {
+    /// for `B`, `kind` the adapter method. Every front end parses these three
+    /// values with this one function.
+    pub fn parse(variant: Option<&str>, plus_ratio: Option<&str>, kind: Option<&str>) -> Result<AdapterTuning, String> {
         let mut t = AdapterTuning::default();
+        if let Some(k) = kind {
+            t.kind = DeviceKind::from_name(k).ok_or_else(|| format!("--adapter-kind {k:?}: expected lora, ia3 or lokr"))?;
+        }
         for word in variant.into_iter().flat_map(|v| v.split(',')).map(str::trim).filter(|w| !w.is_empty()) {
             match word {
                 "plain" => {}
@@ -185,6 +192,9 @@ impl AdapterTuning {
         if !(self.lr_ratio.is_finite() && self.lr_ratio > 0.0) {
             return Err(format!("the LoRA+ learning-rate ratio must be positive, got {}", self.lr_ratio));
         }
+        if self.kind != DeviceKind::Lora && (self.rank_stabilized || self.freeze_a || self.lr_ratio != 1.0) {
+            return Err(format!("rsLoRA, LoRA-FA and LoRA+ are LoRA variants; a {} adapter takes none of them", self.kind.name()));
+        }
         Ok(())
     }
 }
@@ -205,7 +215,7 @@ fn target_matches(name: &str, target: &str) -> bool {
 impl LoraCfg {
     /// Plain LoRA on `targets`.
     pub fn new(rank: u32, alpha: f32, targets: Vec<String>) -> LoraCfg {
-        LoraCfg { rank, alpha, targets, rank_stabilized: false, lr_ratio: 1.0, freeze_a: false, overrides: Vec::new() }
+        LoraCfg { rank, alpha, targets, rank_stabilized: false, lr_ratio: 1.0, freeze_a: false, kind: DeviceKind::Lora, overrides: Vec::new() }
     }
 
     /// The default Qwen LoRA target set: the four attention projections.
@@ -217,17 +227,31 @@ impl LoraCfg {
         self.targets.iter().any(|t| t == leaf)
     }
 
+    /// This config with adapter method `kind`.
+    pub fn with_kind(mut self, kind: DeviceKind) -> LoraCfg {
+        self.kind = kind;
+        self
+    }
+
+    /// The `(name, numel)` parameter entries of the adapter on base weight
+    /// `name` of `out x inn`: this config's kind at the target's own
+    /// hyper-parameters.
+    pub fn param_list(&self, name: &str, out: usize, inn: usize) -> Vec<(String, usize)> {
+        param_list(name, self.kind, &self.hp_for(name), out, inn)
+    }
+
     /// This config with the run's hyper-parameters applied.
     pub fn with_tuning(mut self, tuning: AdapterTuning) -> LoraCfg {
         self.rank_stabilized = tuning.rank_stabilized;
         self.lr_ratio = tuning.lr_ratio;
         self.freeze_a = tuning.freeze_a;
+        self.kind = tuning.kind;
         self
     }
 
     /// The hyper-parameters this config carries, as a run chooses them.
     pub fn tuning(&self) -> AdapterTuning {
-        AdapterTuning { rank_stabilized: self.rank_stabilized, lr_ratio: self.lr_ratio, freeze_a: self.freeze_a }
+        AdapterTuning { rank_stabilized: self.rank_stabilized, lr_ratio: self.lr_ratio, freeze_a: self.freeze_a, kind: self.kind }
     }
 
     /// This config with `leaf` at its own rank and/or alpha.
@@ -293,6 +317,9 @@ impl LoraCfg {
         if self.freeze_a {
             v["freeze_a"] = true.into();
         }
+        if self.kind != DeviceKind::Lora {
+            v["kind"] = self.kind.name().into();
+        }
         if !self.overrides.is_empty() {
             v["overrides"] = self.overrides.iter().map(|o| serde_json::json!({ "leaf": o.leaf, "rank": o.rank, "alpha": o.alpha })).collect::<Vec<_>>().into();
         }
@@ -309,6 +336,7 @@ impl LoraCfg {
             rank_stabilized: v.get("rank_stabilized").and_then(Value::as_bool).unwrap_or(false),
             lr_ratio: v.get("lr_ratio").and_then(Value::as_f64).map_or(1.0, |r| r as f32),
             freeze_a: v.get("freeze_a").and_then(Value::as_bool).unwrap_or(false),
+            kind: v.get("kind").and_then(Value::as_str).and_then(DeviceKind::from_name).unwrap_or_default(),
             overrides: v
                 .get("overrides")
                 .and_then(Value::as_array)
@@ -349,7 +377,7 @@ mod tests {
         assert_eq!(shape_of("w.lora_a", 2, 10), Some(vec![2, 5]));
         assert_eq!(shape_of("w.lora_b", 2, 12), Some(vec![6, 2]));
         assert_eq!(shape_of("w.lora_b", 3, 10), None, "not a whole rank-3 matrix");
-        let list = param_list("w", &TargetHp::new(2, 2.0), 6, 5);
+        let list = param_list("w", DeviceKind::Lora, &TargetHp::new(2, 2.0), 6, 5);
         assert_eq!(list, vec![("w.lora_a".to_string(), 10), ("w.lora_b".to_string(), 12)]);
     }
 
@@ -375,12 +403,15 @@ mod tests {
 
     #[test]
     fn the_model_agnostic_options_parse_into_one_tuning() {
-        assert_eq!(AdapterTuning::parse(None, None).unwrap(), AdapterTuning::default());
-        let t = AdapterTuning::parse(Some("rs,fa"), Some("16")).unwrap();
-        assert_eq!(t, AdapterTuning { rank_stabilized: true, lr_ratio: 16.0, freeze_a: true });
-        assert!(AdapterTuning::parse(Some("dora"), None).unwrap_err().contains("--lora-variant"));
-        assert!(AdapterTuning::parse(None, Some("0")).unwrap_err().contains("LoRA+"));
-        assert!(AdapterTuning::parse(None, Some("fast")).unwrap_err().contains("--lora-plus-ratio"));
+        assert_eq!(AdapterTuning::parse(None, None, None).unwrap(), AdapterTuning::default());
+        let t = AdapterTuning::parse(Some("rs,fa"), Some("16"), None).unwrap();
+        assert_eq!(t, AdapterTuning { rank_stabilized: true, lr_ratio: 16.0, freeze_a: true, kind: DeviceKind::Lora });
+        assert!(AdapterTuning::parse(Some("dora"), None, None).unwrap_err().contains("--lora-variant"));
+        assert!(AdapterTuning::parse(None, Some("0"), None).unwrap_err().contains("LoRA+"));
+        assert!(AdapterTuning::parse(None, Some("fast"), None).unwrap_err().contains("--lora-plus-ratio"));
+        assert_eq!(AdapterTuning::parse(None, None, Some("lokr")).unwrap().kind, DeviceKind::Lokr);
+        assert!(AdapterTuning::parse(None, None, Some("oft")).unwrap_err().contains("--adapter-kind"));
+        assert!(AdapterTuning::parse(Some("rs"), None, Some("ia3")).unwrap_err().contains("LoRA variants"));
     }
 
     #[test]

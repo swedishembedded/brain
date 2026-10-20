@@ -36,7 +36,7 @@ pub use model::Shard;
 use optim::Optim;
 use paramstore::ParamStore;
 
-use crate::config::QwenConfig;
+use crate::config::{LoraCfg, QwenConfig};
 
 /// Cross-entropy ignore index (masked target positions); the loader's `-1 i32`
 /// reinterpreted as `u32`.
@@ -407,6 +407,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
+        model::adapter::exec::add_kernels(&mut v);
         v
     })
 }
@@ -870,12 +871,41 @@ struct AttachedLora {
     delta_kernel: usize,
 }
 
+/// An attached adapter of a kind the low-rank serving path cannot take: its
+/// tensors on the device and the runtime that applies them.
+struct AttachedRuntime {
+    rt: AdapterRuntime,
+    rank: u32,
+    alpha: f32,
+    params: HashMap<String, DeviceBuffer>,
+}
+
+impl model::adapter::exec::ParamAccess for AttachedRuntime {
+    fn weight(&self, name: &str) -> &DeviceBuffer {
+        &self.params[name]
+    }
+    fn grad(&self, _name: &str) -> Option<&DeviceBuffer> {
+        None
+    }
+}
+
+impl AttachedRuntime {
+    /// Does the attached adapter correct the linear `wname`?
+    fn has(&self, wname: &str) -> bool {
+        let first = self.rt.cfg().kind.suffixes()[0];
+        self.params.contains_key(&model::adapter::device::param_name(wname, first))
+    }
+}
+
 /// An inference-time replacement for a build's own adapter state. Training
 /// refuses to run under one: the backward differentiates the build's own
 /// parameters, which an override is not.
 enum AdapterOverride {
     /// Apply this adapter instead.
     Lora(AttachedLora),
+    /// Apply an adapter that has no low-rank form (IA3, LoKr) through the
+    /// shared adapter runtime, beside the unmodified base.
+    Runtime(Box<AttachedRuntime>),
     /// Apply no adapter at all: exactly the base weights.
     BaseOnly,
 }
@@ -1850,6 +1880,11 @@ impl Qwen {
                     s.extend(model::dispatch::lora_rows_off(&self.gpu, tier, at.delta_kernel, lora, &at.xa, x, y, 0, 0, m, k, nout));
                 }
             }
+            (Some(AdapterOverride::Runtime(at)), false) => {
+                if at.has(wname) {
+                    at.rt.forward(self.ops.tensor_gemm(), s, &**at, wname, x, y, m, k, nout);
+                }
+            }
             (Some(AdapterOverride::BaseOnly), false) => {}
             _ => {
                 if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
@@ -1870,8 +1905,7 @@ impl Qwen {
                 // base: dx += d_out·W (frozen weight - no dW). d_out is NOT mutated
                 // here: for `wo` it is `dxmid`, reused downstream as the residual
                 // grad.
-                self.base_dx(s, d_out, wname, dx, m, k, nout, acc);
-                rt.backward(self.ops.tensor_gemm(), s, &self.ps, wname, d_out, x, dx, m, k, nout);
+                rt.backward(self.ops.tensor_gemm(), s, &self.ps, wname, d_out, x, dx, m, k, nout, &|s, dy| self.base_dx(s, dy, wname, dx, m, k, nout, acc));
             }
             None => {
                 if self.trainable(wname) {
@@ -3409,8 +3443,46 @@ impl Qwen {
     /// pair for a layer another pipeline stage holds is not this shard's to
     /// apply and is skipped.
     pub fn attach_adapter(&mut self, path: &str) -> Result<(), String> {
+        let file = model::adapter::file::AdapterFile::read(path).map_err(|e| e.to_string())?;
+        if file.kind != model::adapter::DeviceKind::Lora {
+            return self.attach_runtime_adapter(&file).map_err(|e| format!("{path}: {e}"));
+        }
         let adapter = crate::lora::read_adapter(path).map_err(|e| format!("{path}: {e}"))?;
         self.attach_adapter_pairs(&adapter)
+    }
+
+    /// Attach an adapter of a kind with no low-rank form beside the unmodified
+    /// base, applied by the shared adapter runtime. Every tensor must belong to
+    /// a site of this model at that site's dimensions; a pair for a layer
+    /// another pipeline stage holds is skipped.
+    fn attach_runtime_adapter(&mut self, file: &model::adapter::file::AdapterFile) -> Result<(), String> {
+        let sites = self.cfg.lora_sites();
+        let mut params = HashMap::new();
+        for base in file.bases() {
+            let site = sites.iter().find(|s| s.name == base).ok_or_else(|| format!("{base} is not a linear of this model"))?;
+            if let Some((out, inn)) = file.dims.get(&base) {
+                if (*out, *inn) != (site.spec.out, site.spec.inn) {
+                    return Err(format!("{base}: the adapter was trained on a [{out}, {inn}] linear, this model's is [{}, {}]", site.spec.out, site.spec.inn));
+                }
+            }
+            if !linear_layer(&base, self.cfg.n_layers).is_some_and(|l| self.shard.owns(l)) {
+                continue;
+            }
+            for suffix in file.kind.suffixes() {
+                let name = model::adapter::device::param_name(&base, suffix);
+                let data = file.tensors.get(&name).ok_or_else(|| format!("{name} is missing"))?;
+                let want: usize = file.kind.params(&model::adapter::TargetHp::new(file.rank as usize, file.alpha), &site.spec).into_iter().find(|p| p.suffix == *suffix).map_or(0, |p| p.numel());
+                if data.len() != want {
+                    return Err(format!("{name} holds {} values, a {} adapter of this site holds {want}", data.len(), file.kind.name()));
+                }
+                params.insert(name, self.gpu.storage_init("attached_adapter", data));
+            }
+        }
+        let cfg = LoraCfg::new(file.rank, file.alpha, file.targets.clone()).with_kind(file.kind);
+        let max_out = sites.iter().map(|s| s.spec.out as u32).max().unwrap_or(1);
+        let rt = AdapterRuntime::new(&self.gpu, &cfg, self.rows, max_out);
+        self.set_override(Some(AdapterOverride::Runtime(Box::new(AttachedRuntime { rt, rank: file.rank, alpha: file.alpha, params }))));
+        Ok(())
     }
 
     /// [`Self::attach_adapter`] from an adapter already in host memory
@@ -3480,6 +3552,7 @@ impl Qwen {
     pub fn attached_adapter(&self) -> Option<(u32, f32)> {
         match &self.attached {
             Some(AdapterOverride::Lora(a)) => Some((a.rank, a.alpha)),
+            Some(AdapterOverride::Runtime(a)) => Some((a.rank, a.alpha)),
             _ => None,
         }
     }
@@ -3765,6 +3838,9 @@ impl model::Model for Qwen {
     }
     fn frozen_adapter_param_names(&self) -> Vec<String> {
         model::adapter::device::frozen_adapter_params(&self.ps)
+    }
+    fn adapter_sites(&self) -> Vec<model::adapter::LinearSite> {
+        model::adapter::sites::LoraSites::lora_sites(&self.cfg)
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         Qwen::read_weight(self, name)

@@ -111,3 +111,68 @@ fn folds_and_overlays(lora: LoraCfg) {
     assert!(over <= 1e-4 * scale, "overlay vs live adapter: {over:e} over logit scale {scale:e}");
     std::fs::remove_file(&path).ok();
 }
+
+/// IA3 and LoKr have no low-rank form: a saved file folds into the base
+/// (`AdapterFile::fold_into`), attaches beside the unmodified base through the
+/// shared adapter runtime, and reloads into a fresh adapter build - each giving
+/// the trained model's logits.
+#[test]
+fn ia3_and_lokr_fold_overlay_and_reload_to_the_trained_models_logits() {
+    for kind in [model::adapter::DeviceKind::Ia3, model::adapter::DeviceKind::Lokr] {
+        let lora = variant_base().with_kind(kind);
+        let cfg = QwenConfig { lora: Some(lora), ..QwenConfig::tiny() };
+        let init = qwen3::init_weights(&cfg, 21);
+        let x: Vec<u32> = (0..12).map(|i| (i * 7 + 1) % 23).collect();
+        let y: Vec<u32> = (0..12).map(|i| (i * 7 + 2) % 23).collect();
+        let trained = Qwen::new(cfg.clone(), 1, 12, &init);
+        trained.set_batch(&x, &y);
+        for step in 1..=8 {
+            trained.zero_grads();
+            trained.forward();
+            trained.backward();
+            trained.adamw_step(step, 5e-2, 0.0, Default::default(), Some(1.0), 1.0);
+            trained.poll_wait();
+        }
+        let want = trained.logits_all(&PROMPT);
+        let scale = want.iter().fold(1e-6f32, |m, v| m.max(v.abs()));
+
+        let path = std::env::temp_dir().join(format!("brain-qwen3-kind-{}-{}.safetensors", std::process::id(), kind.name()));
+        let path_str = path.to_str().unwrap();
+        qwen3::lora::save_adapter(path_str, &trained, "test/adapter", "test/base", None).unwrap();
+        let file = model::adapter::file::AdapterFile::read(path_str).unwrap();
+        assert_eq!(file.kind, kind);
+        assert!(!file.dims.is_empty(), "the file records the linears' dimensions");
+
+        let base: std::collections::HashMap<String, Vec<f32>> =
+            trained.ps.params.iter().map(|(n, _)| n).filter(|n| !model::adapter::device::is_adapter_param(n)).map(|n| (n.clone(), trained.read_weight(n))).collect();
+        let tiny = QwenConfig::tiny();
+        let shard = || qwen3::Shard::whole(tiny.n_layers as usize);
+
+        // Fused: fold into a plain base.
+        let mut folded_tensors = base.clone();
+        file.fold_into(&mut folded_tensors).unwrap();
+        let folded = Qwen::new_shard(tiny.clone(), 1, 12, &folded_tensors, false, shard());
+        let fused = max_diff(&folded.logits_all(&PROMPT), &want);
+        assert!(fused <= 1e-4 * scale, "{}: fused vs live adapter: {fused:e} over {scale:e}", kind.name());
+
+        // Overlay: the unmodified base plus the attached adapter.
+        let mut overlay = Qwen::new_shard(tiny.clone(), 1, 12, &base, false, shard());
+        let plain = overlay.logits_all(&PROMPT);
+        assert!(max_diff(&plain, &want) > 1e-2, "{}: the adapter must move the logits", kind.name());
+        overlay.attach_adapter(path_str).unwrap();
+        assert_eq!(overlay.attached_adapter().map(|(r, _)| r), Some(file.rank));
+        let over = max_diff(&overlay.logits_all(&PROMPT), &want);
+        assert!(over <= 1e-4 * scale, "{}: overlay vs live adapter: {over:e} over {scale:e}", kind.name());
+        assert!(overlay.detach_adapter());
+        assert_eq!(overlay.logits_all(&PROMPT), plain, "{}: detach restores the base", kind.name());
+
+        // Reload: a fresh adapter build given the file's tensors.
+        let fresh = Qwen::new(cfg.clone(), 1, 12, &init);
+        for (name, data) in &file.tensors {
+            fresh.write_weight(name, data);
+        }
+        let reloaded = max_diff(&fresh.logits_all(&PROMPT), &want);
+        assert!(reloaded <= 1e-6 * scale.max(1.0), "{}: reloaded vs trained: {reloaded:e}", kind.name());
+        std::fs::remove_file(&path).ok();
+    }
+}

@@ -1208,10 +1208,16 @@ pub mod device_adapter {
         training: Option<checkpoint::st::TrainingProvenance>,
     ) -> std::io::Result<()> {
         use crate::adapter::device::{is_adapter_param, shape_of};
+        use crate::adapter::kind::{lokr_factors, DeviceKind, LOKR_W1, LOKR_W2};
+        let kind = lora.kind;
         let uniform = lora.is_uniform();
+        if !uniform && kind != DeviceKind::Lora {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("per-target rank and alpha are LoRA's; a {} adapter takes one setting", kind.name())));
+        }
         let (rank, alpha) = if uniform { (lora.rank, lora.card_alpha()) } else { (lora.max_rank(), lora.max_rank() as f32) };
         let r = rank as usize;
         let targets = &lora.targets;
+        let dims: std::collections::HashMap<String, (usize, usize)> = model.adapter_sites().into_iter().map(|site| (site.name, (site.spec.out, site.spec.inn))).collect();
         // The adapter is every adapter tensor the model holds, not only the
         // optimised ones: LoRA-FA's `A` is frozen (it has no
         // gradient, so `param_names` omits it) yet the adapter is not
@@ -1234,22 +1240,24 @@ pub mod device_adapter {
             .map(|name| {
                 let values = data.remove(&name).expect("every listed name has data");
                 // Real 2-D shape, not the flattened `[len]` this used to
-                // write - recovered from `len`/`rank` by the kind's own
-                // definition, since the device family has no other place a
-                // shape could come from.
-                let shape = shape_of(&name, r, values.len())
-                    .unwrap_or_else(|| panic!("save_adapter: {name} holds {} elements, not a whole rank-{r} matrix", values.len()))
-                    .into_iter()
-                    .map(|d| d as u64)
-                    .collect();
-                (name, shape, values)
+                // write - recovered by the kind's own definition from the
+                // length and rank (LoRA, IA3), or from the linear's recorded
+                // dimensions (a Kronecker factor has no other source).
+                let shape: Vec<usize> = if let Some(base) = name.strip_suffix(LOKR_W1).or_else(|| name.strip_suffix(LOKR_W2)) {
+                    let (out, inn) = *dims.get(base).unwrap_or_else(|| panic!("save_adapter: the model does not list {base} as an adapter site"));
+                    let (a, c, b, d) = lokr_factors(out, inn);
+                    if name.ends_with(LOKR_W1) { vec![a, b] } else { vec![c, d] }
+                } else {
+                    shape_of(&name, r, values.len()).unwrap_or_else(|| panic!("save_adapter: {name} holds {} elements, not a whole rank-{r} matrix", values.len()))
+                };
+                (name, shape.into_iter().map(|d| d as u64).collect(), values)
             })
             .collect();
 
         let mut card = ModelCard::new(card_id, family);
         card.variant_of = Some(base_id.to_string());
         card.adapter = Some(Adapter {
-            kind: "lora".to_string(),
+            kind: kind.name().to_string(),
             rank: Some(rank),
             base: Some(base_id.to_string()),
             alpha: Some(alpha),
@@ -1259,7 +1267,10 @@ pub mod device_adapter {
         });
         card.training = training;
 
-        let config = serde_json::json!({ "rank": rank, "alpha": alpha, "targets": targets });
+        let mut config = serde_json::json!({ "rank": rank, "alpha": alpha, "targets": targets });
+        if !dims.is_empty() {
+            config["sites"] = dims.iter().map(|(k, (o, i))| (k.clone(), serde_json::json!([o, i]))).collect::<serde_json::Map<_, _>>().into();
+        }
         checkpoint::st::save_safetensors(path, &tensors, &config, Some(&card))
     }
 
@@ -1338,7 +1349,7 @@ pub mod device_adapter {
         // wrong - the "loader that quietly drops keys" failure
         // `read_external_adapter` refuses for third-party files.
         if a.kind != "lora" {
-            return Err(invalid(adapter_path, format!("adapter kind is {:?}, but only \"lora\" is implemented", a.kind)));
+            return Err(invalid(adapter_path, format!("a {:?} adapter has no low-rank form, so the low-rank serving paths cannot take it (fold it with adapter::file::AdapterFile, or attach it as a runtime overlay)", a.kind)));
         }
         if a.per_target.is_some() {
             return Err(invalid(adapter_path, "declares per-target rank/alpha, which device adapters do not carry".into()));
@@ -1536,7 +1547,7 @@ impl crate::adapter::AdapterExecution for LoraPair {
     }
 }
 
-impl crate::adapter::AdapterOptimization for LoraPair {
+impl crate::adapter::AdapterGroups for LoraPair {
     fn groups(hp: &crate::adapter::TargetHp) -> Vec<crate::adapter::ParamGroup> {
         use crate::adapter::ParamGroup;
         vec![
@@ -1544,9 +1555,11 @@ impl crate::adapter::AdapterOptimization for LoraPair {
             ParamGroup { suffix: LORA_B, trainable: true, lr_mult: hp.lr_ratio },
         ]
     }
+}
 
+impl crate::adapter::AdapterOptimization for LoraPair {
     fn step(&mut self, g: &LoraGrads, lr: f32, t: u64) {
-        let groups = Self::groups(&self.hp);
+        let groups = <Self as crate::adapter::AdapterGroups>::groups(&self.hp);
         if groups[0].trainable {
             self.pair.adam_a(&g.da, lr * groups[0].lr_mult, t);
         }

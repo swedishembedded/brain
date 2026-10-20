@@ -280,6 +280,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("moe_group_perm_emit", kernels::MOE_GROUP_PERM_EMIT),
     ("matmul_reg3_grouped", kernels::MATMUL_REG3_GROUPED),
     ("moe_group_combine", kernels::MOE_GROUP_COMBINE),
+    ("scale_chan", kernels::SCALE_CHAN),
+    ("swap_axes12_vec", kernels::SWAP_AXES12_VEC),
+    ("bias_grad", kernels::BIAS_GRAD),
 ];
 
 fn kernel_ids() -> KernelIds {
@@ -1034,7 +1037,9 @@ impl DeepseekV2 {
     #[allow(clippy::too_many_arguments)]
     fn lora_bwd(&self, s: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
-            rt.backward(rt.reference_gemm(), s, &self.ps, wname, d_out, x, dx, m, k, nout);
+            assert!(rt.cfg().kind != model::adapter::DeviceKind::Ia3, "deepseek2: IA3 rescales the gradient before the base, which this decoder's fused base backward cannot take");
+            // The base's input gradient was recorded by `mm_bwd` before this call.
+            rt.backward(rt.reference_gemm(), s, &self.ps, wname, d_out, x, dx, m, k, nout, &|_, _| {});
         }
     }
 

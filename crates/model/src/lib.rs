@@ -318,6 +318,13 @@ pub trait Model {
         Vec::new()
     }
 
+    /// The linears an adapter may correct, with their dimensions: what a saved
+    /// adapter records so a reader can shape factors that carry no shape of
+    /// their own (LoKr's). Empty for a model without adapter sites.
+    fn adapter_sites(&self) -> Vec<adapter::LinearSite> {
+        Vec::new()
+    }
+
     fn read_weight(&self, name: &str) -> Vec<f32>;
     fn write_weight(&self, name: &str, data: &[f32]);
     fn read_grad(&self, name: &str) -> Vec<f32>;

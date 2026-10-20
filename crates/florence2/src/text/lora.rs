@@ -56,7 +56,7 @@ pub fn lora_fwd(s: &mut Vec<Step>, ps: &ParamStore, wname: &str, scr: &LoraScrat
 /// trainer.
 #[allow(clippy::too_many_arguments)]
 pub fn lora_bwd(s: &mut Vec<Step>, ps: &ParamStore, wname: &str, scr: &LoraScratch, d_out: &DeviceBuffer, x: &DeviceBuffer, dx: &DeviceBuffer, m: u32, kk: u32, nout: u32) {
-    scr.rt.backward(scr.rt.reference_gemm(), s, ps, wname, d_out, x, dx, m, kk, nout);
+    scr.rt.backward(scr.rt.reference_gemm(), s, ps, wname, d_out, x, dx, m, kk, nout, &|_, _| {});
 }
 
 /// Bundle of everything a LoRA-fused forward/backward call needs, borrowed

@@ -594,8 +594,8 @@ pub fn lora_start_tuned(base: &str, rank: u32, alpha: f32, tuning: AdapterTuning
         LoraStart::Continue(path) => {
             let st = checkpoint::st::load_safetensors(path)?;
             let card = st.card().and_then(|c| c.adapter).ok_or_else(|| invalid(format!("{path}: not an adapter file (no adapter card)")))?;
-            if card.kind != "lora" {
-                return Err(invalid(format!("{path}: a {:?} adapter, only LoRA can be continued", card.kind)));
+            if card.kind != tuning.kind.name() {
+                return Err(invalid(format!("{path}: a {:?} adapter, asked to continue as {:?}", card.kind, tuning.kind.name())));
             }
             if card.rank != Some(rank) || card.alpha.is_some_and(|a| !model::adapter::device::alpha_matches(a, card_alpha)) {
                 return Err(invalid(format!("{path}: trained at rank {:?} alpha {:?}, asked to continue at rank {rank} alpha {card_alpha} ({tuning:?})", card.rank, card.alpha)));

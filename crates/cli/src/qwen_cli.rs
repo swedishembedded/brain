@@ -9,7 +9,7 @@
 //!   brain qwen3 train    <data_dir> --out F [--steps N --batch B --block T --lr X ...]
 //!   brain qwen3 finetune <data_dir> --weights BASE --out F [--steps N --lr X ...]
 //!   brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR
-//!                     [--alpha A --lora-variant V --lora-plus-ratio X --steps N --lr X --batch B --block T --seed S
+//!                     [--alpha A --lora-variant V --lora-plus-ratio X --adapter-kind K --steps N --lr X --batch B --block T --seed S
 //!                      --models-dir DIR --dataset-id ID]
 //!   brain qwen3 eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG]
 //!                     --block T --models-dir DIR]
@@ -785,7 +785,7 @@ impl Drop for ScratchDir {
 }
 
 /// `brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG]
-///     --dataset DIR [--alpha A --lora-variant V --lora-plus-ratio X --steps N --lr X --batch B --block T --seed S
+///     --dataset DIR [--alpha A --lora-variant V --lora-plus-ratio X --adapter-kind K --steps N --lr X --batch B --block T --seed S
 ///     --models-dir DIR --dataset-id ID]`
 ///
 /// Trains a NAMED LoRA adapter and saves ONLY the adapter tensors into the
@@ -807,6 +807,7 @@ fn finetune_lora(args: &[String]) {
     let mut rank = 0u32;
     let mut lora_variant: Option<String> = None;
     let mut lora_plus_ratio: Option<String> = None;
+    let mut adapter_kind: Option<String> = None;
     // Stop when the held-out loss stops improving, and keep the checkpoint
     // from before it turned. 0 keeps the old behaviour: run every step and
     // save the last model, which on a small dataset is the memorised one.
@@ -877,6 +878,7 @@ fn finetune_lora(args: &[String]) {
             "--alpha" => alpha = val(args, &mut i, "--alpha").parse().ok(),
             "--lora-variant" => lora_variant = Some(val(args, &mut i, "--lora-variant")),
             "--lora-plus-ratio" => lora_plus_ratio = Some(val(args, &mut i, "--lora-plus-ratio")),
+            "--adapter-kind" => adapter_kind = Some(val(args, &mut i, "--adapter-kind")),
             "--steps" => steps = val(args, &mut i, "--steps").parse().unwrap_or(steps),
             "--lr" => lr = val(args, &mut i, "--lr").parse().unwrap_or(lr),
             "--grad-accum" => grad_accum = val(args, &mut i, "--grad-accum").parse().ok().filter(|&n| n > 0).unwrap_or_else(|| {
@@ -905,7 +907,7 @@ fn finetune_lora(args: &[String]) {
         return;
     }
     let alpha = alpha.unwrap_or(rank as f32 * 2.0);
-    let tuning = match model::adapter::device::AdapterTuning::parse(lora_variant.as_deref(), lora_plus_ratio.as_deref()) {
+    let tuning = match model::adapter::device::AdapterTuning::parse(lora_variant.as_deref(), lora_plus_ratio.as_deref(), adapter_kind.as_deref()) {
         Ok(t) => t,
         Err(why) => {
             eprintln!("{why}");

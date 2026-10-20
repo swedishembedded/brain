@@ -343,13 +343,14 @@ fn tuning_desc(t: &model::adapter::device::AdapterTuning) -> String {
     out
 }
 
-const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|DIR --out F [--mode lora|full] [--lora-rank R --lora-alpha A --lora-variant V --lora-plus-ratio X] \
+const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|DIR --out F [--mode lora|full] [--lora-rank R --lora-alpha A --lora-variant V --lora-plus-ratio X --adapter-kind K] \
      [--base-dtype f32|bf16|nf4] [--seq-len T] [--recompute on|off] [--gdn-segment N] [--bf16-residuals on|off] [--mlp-rows N] \
      [--eval-interval N --eval-batches N] [--steps N --lr X --batch B --grad-accum G --warmup W --weight-decay X --grad-clip X --save-secs S --seed S --mask = --align]
   --base-dtype  how the frozen base is held on the device: f32 (default, whole model resident; full or LoRA),
                 bf16 (half the bytes; LoRA only) or nf4 (4-bit QLoRA; LoRA only). bf16/nf4 stream the base from
                 a HuggingFace checkpoint directory (FP8 release included) tensor by tensor.
   --seq-len     training sequence length (alias of --block); --rank/--alpha are aliases of --lora-rank/--lora-alpha
+  --adapter-kind  the adapter method: lora (default), ia3 (learned output-channel scales) or lokr (Kronecker-product delta)
   --lora-variant, --lora-plus-ratio  rsLoRA and LoRA-FA (--lora-variant rs,fa: scale alpha/sqrt(rank); A stays at its
                 init) and LoRA+ (B trains at X times the learning rate); a continued adapter must be continued with the same
   --recompute   recompute layer activations in the backward pass instead of keeping them (default on for bf16/nf4)
@@ -404,7 +405,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     let mode_name = a.str_or("--mode", "full");
     let rank = parse_num("--lora-rank", aliased(&mut a, "--lora-rank", "--rank")?, DEFAULT_LORA_RANK)?;
     let alpha = parse_num("--lora-alpha", aliased(&mut a, "--lora-alpha", "--alpha")?, rank as f32 * 2.0)?;
-    let tuning = model::adapter::device::AdapterTuning::parse(a.take_str("--lora-variant").as_deref(), a.take_str("--lora-plus-ratio").as_deref())?;
+    let tuning = model::adapter::device::AdapterTuning::parse(a.take_str("--lora-variant").as_deref(), a.take_str("--lora-plus-ratio").as_deref(), a.take_str("--adapter-kind").as_deref())?;
     let base_dtype: BaseDtype = a.str_or("--base-dtype", "f32").parse()?;
     let recompute_flag = match a.take_str("--recompute").as_deref() {
         None => None,
@@ -688,10 +689,12 @@ mod finetune_cli_tests {
         let plain = with(&[]).unwrap();
         assert!(matches!(plain.mode, qwen35::finetune::Mode::Lora { tuning, .. } if tuning == model::adapter::device::AdapterTuning::default()));
         let tuned = with(&["--lora-variant", "rs,fa", "--lora-plus-ratio", "16"]).unwrap();
-        let want = model::adapter::device::AdapterTuning { rank_stabilized: true, lr_ratio: 16.0, freeze_a: true };
+        let want = model::adapter::device::AdapterTuning { rank_stabilized: true, lr_ratio: 16.0, freeze_a: true, ..Default::default() };
         assert!(matches!(tuned.mode, qwen35::finetune::Mode::Lora { tuning, .. } if tuning == want), "{:?}", tuned.mode);
         assert!(with(&["--lora-plus-ratio", "0"]).unwrap_err().contains("LoRA+"));
         assert!(with(&["--lora-variant", "dora"]).unwrap_err().contains("--lora-variant"));
+        let lokr = with(&["--adapter-kind", "lokr"]).unwrap();
+        assert!(matches!(lokr.mode, qwen35::finetune::Mode::Lora { tuning, .. } if tuning.kind == model::adapter::DeviceKind::Lokr));
     }
 
     /// The corpus is a positional, so it must be recognised wherever it sits -
@@ -800,14 +803,19 @@ mod finetune_cli_tests {
         std::fs::write(data.join("meta.json"), Meta::vocab_only(cfg.vocab as usize)).unwrap();
         let out = dir.join("adapter.safetensors");
 
-        let ft = parse_finetune(&argv(&[
-            data.to_str().unwrap(), "--base", base.to_str().unwrap(), "--out", out.to_str().unwrap(), "--mode", "lora", "--lora-rank", "2",
-            "--steps", "3", "--batch", "1", "--seq-len", &cfg.block_size.to_string(), "--save-secs", "0", "--seed", "5",
-        ]))
-        .unwrap();
-        let (initial, last) = run_finetune(&ft).expect("tiny finetune");
-        assert!(initial.is_finite() && last.is_finite(), "{initial} -> {last}");
-        assert!(out.exists(), "the trained checkpoint must be written to --out");
+        // Every adapter method trains through the same entry and writes a file
+        // whose card names it.
+        for kind in ["lora", "ia3", "lokr"] {
+            let _ = std::fs::remove_file(&out);
+            let ft = parse_finetune(&argv(&[
+                data.to_str().unwrap(), "--base", base.to_str().unwrap(), "--out", out.to_str().unwrap(), "--mode", "lora", "--lora-rank", "2", "--adapter-kind", kind,
+                "--steps", "3", "--batch", "1", "--seq-len", &cfg.block_size.to_string(), "--save-secs", "0", "--seed", "5",
+            ]))
+            .unwrap();
+            let (initial, last) = run_finetune(&ft).expect("tiny finetune");
+            assert!(initial.is_finite() && last.is_finite(), "{kind}: {initial} -> {last}");
+            assert!(out.exists(), "the trained checkpoint must be written to --out");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

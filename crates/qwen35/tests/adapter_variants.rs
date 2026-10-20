@@ -111,3 +111,47 @@ fn an_rslora_adapter_saved_reloaded_and_served_as_an_overlay_matches_the_trainin
     let plain = served_logits(&base, served(&cfg, ALPHA, &with_lora, "plain-scale"), &toks);
     assert!(maxabs(&plain, want_last) > 10.0 * TOL, "the plain scale must be distinguishable from the rsLoRA one");
 }
+
+/// Gate A2/A3 for the kinds with no low-rank form on the hybrid model: an IA3
+/// or LoKr adapter saved by the trainer folds into a plain base
+/// (`AdapterFile::fold_into`) and reloads into a fresh adapter build, each
+/// computing what the live adapter computes.
+#[test]
+fn ia3_and_lokr_fold_and_reload_on_the_hybrid_model() {
+    for kind in [model::adapter::DeviceKind::Ia3, model::adapter::DeviceKind::Lokr] {
+        let mut lora = lora_cfg(RANK, ALPHA);
+        lora.kind = kind;
+        let cfg = Qwen35Config { lora: Some(lora), ..Qwen35Config::tiny() };
+        let (base, with_lora) = weights(&cfg);
+        let toks: Vec<u32> = (0..cfg.block_size).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+        let trained = Qwen35::new_train_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, cfg.block_size, &with_lora);
+        let want = trained.logits_all(&toks);
+        let scale = want.iter().fold(1e-6f32, |m, v| m.max(v.abs()));
+
+        let path = std::env::temp_dir().join(format!("brain-qwen35-kind-{}-{}.safetensors", std::process::id(), kind.name()));
+        let path_str = path.to_str().unwrap();
+        qwen35::lora::save_adapter(path_str, &trained, "test/kind", "test/base", None).unwrap();
+        let file = model::adapter::file::AdapterFile::read(path_str).unwrap();
+        assert_eq!(file.kind, kind);
+        std::fs::remove_file(&path).ok();
+
+        // Fused: fold into the plain base.
+        let mut folded = base.clone();
+        file.fold_into(&mut folded).unwrap();
+        let plain_cfg = Qwen35Config::tiny();
+        let fused = Qwen35::new_on(Gpu::new_cpu(pipelines()), plain_cfg.clone(), 1, plain_cfg.block_size, &folded).logits_all(&toks);
+        let plain = Qwen35::new_on(Gpu::new_cpu(pipelines()), plain_cfg.clone(), 1, plain_cfg.block_size, &base).logits_all(&toks);
+        assert!(maxabs(&plain, &want) > 20.0 * 1e-4 * scale, "{}: the adapter must move the logits well beyond the parity bound (moved {} on scale {scale})", kind.name(), maxabs(&plain, &want));
+        assert!(maxabs(&fused, &want) <= 1e-4 * scale, "{}: fused vs live: {}", kind.name(), maxabs(&fused, &want));
+
+        // Reload: a fresh adapter build given the file's tensors.
+        let init = qwen35::init::init_weights(&cfg, 7);
+        let mut start = init.clone();
+        start.extend(base.clone());
+        let fresh = Qwen35::new_train_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, cfg.block_size, &start);
+        for (name, data) in &file.tensors {
+            fresh.write_weight(name, data);
+        }
+        assert!(maxabs(&fresh.logits_all(&toks), &want) <= 1e-6 * scale.max(1.0), "{}: reloaded vs trained", kind.name());
+    }
+}
