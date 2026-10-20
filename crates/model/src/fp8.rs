@@ -170,7 +170,7 @@ impl Fp8Format {
 /// `byte_value * scale` (the `weight_scale_inv` convention of [`dequant_block128`]).
 pub fn quantize_weight_fp8(raw: &[f32], n: usize, k: usize, fmt: Fp8Format, block: usize) -> (Vec<u32>, Vec<f32>) {
     assert_eq!(raw.len(), n * k, "quantize_weight_fp8: raw len {} != n*k {}", raw.len(), n * k);
-    assert!(k % 4 == 0 && block > 0, "quantize_weight_fp8: k must be a multiple of 4 and block positive (k={k}, block={block})");
+    assert!(k.is_multiple_of(4) && block > 0, "quantize_weight_fp8: k must be a multiple of 4 and block positive (k={k}, block={block})");
     let (rb, cb) = scale_shape(n, k, block);
     let mut scales = vec![0f32; rb * cb];
     for br in 0..rb {

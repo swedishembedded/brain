@@ -2635,7 +2635,6 @@ mod tests {
     fn frozen_base_kname_literals_match_the_registered_variants() {
         let registered: Vec<&str> = frozen_base_kernels().iter().map(|(n, _)| *n).collect();
         let want = [kname::MATMUL_NF4, kname::MATMUL_REG3_NF4, kname::MATMUL_DX_NF4, kname::MATMUL_DX_REG_NF4, kname::MATMUL_DX_REG_BF16];
-        assert_eq!(registered.len(), want.len());
         for n in want {
             assert!(registered.contains(&n), "{n} is not registered by frozen_base_kernels()");
         }

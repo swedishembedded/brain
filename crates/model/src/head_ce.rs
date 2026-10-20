@@ -42,7 +42,8 @@ use crate::ops::{Act, Ops, Weight};
 pub use crate::train::IGNORE;
 
 /// The canonical `(name, source)` pairs [`HeadKernels::from_gpu`] resolves beyond
-/// the `Ops` facade set (`matmul_dw` is already in `model::ops::kernel_list`); a
+/// the `Ops` facade set (`matmul_dw` is already in `model::ops::kernel_list`, `copy_cols` in
+/// `model::ops::frozen_base_kernels`, which a head over tiled logits registers too); a
 /// model that does not already register these kernels appends this slice to its
 /// kernel list.
 #[must_use]
@@ -55,7 +56,6 @@ pub fn kernels() -> &'static [(&'static str, &'static str)] {
         ("grad_scale", kernels::GRAD_SCALE),
         ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
         ("scale_row", kernels::SCALE_ROW),
-        ("copy_cols", kernels::COPY_COLS),
         ("matmul_dw_reg", kernels::MATMUL_DW_REG),
     ]
 }
@@ -86,7 +86,7 @@ pub struct HeadKernels {
 impl HeadKernels {
     /// Resolve the canonical [`kernels`] names on `gpu`.
     pub fn from_gpu(gpu: &Gpu) -> Result<HeadKernels, String> {
-        let find = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("HeadKernels: kernel '{name}' is not registered on this Gpu (append model::head_ce::kernels())"));
+        let find = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("HeadKernels: kernel '{name}' is not registered on this Gpu (append model::head_ce::kernels() and model::ops::training_kernel_list())"));
         Ok(HeadKernels {
             ce_value: find("ce_value_masked")?,
             ce_value_stats_rows: gpu.kernel_index("ce_value_stats_rows"),

@@ -75,7 +75,7 @@ fn kernel_time_of_every_tier_against_the_dense_path() {
     let (m, n, k) = shape();
     let mut ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
     ops.set_gemm_precision(GemmPrecision::Auto);
-    let g = ops.gpu().clone();
+    let g = ops.gpu();
     println!("device {} gemm path {:?}", g.kind(), ops.gemm_path());
     let mut rng = Lcg::random();
     let x = g.storage_init("x", &rng.vec_scaled(m * k, 1.0));
