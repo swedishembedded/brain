@@ -4518,6 +4518,20 @@ impl Qwen35 {
         }
     }
 
+    /// Rows of one group of an exact round: [`I8_GEMV_MAX_ROWS`] where the int8 GEMV
+    /// is the same arithmetic at every row count, one fewer than the tensor-core
+    /// block's first row count where the device has it. A round of more rows costs
+    /// one more pass over the weights per group, and stays bit-identical to the
+    /// decode steps it stands for (`tests/chunk_tape_decode_parity.rs`).
+    fn exact_group_rows(&self) -> usize {
+        let tensor_core = self.gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= gpu_core::select::I8_MMA_MIN_CC);
+        if tensor_core {
+            (gpu_core::select::I8_GEMV_MMA_MIN_ROWS - 1).min(I8_GEMV_MAX_ROWS) as usize
+        } else {
+            I8_GEMV_MAX_ROWS as usize
+        }
+    }
+
     /// Whether a round of `n` rows runs as plain decode steps
     /// ([`Self::run_exact_round`]) rather than as a chunk.
     ///
@@ -4569,8 +4583,11 @@ impl Qwen35 {
     /// (`run_decode_batch`).
     ///
     /// The rows go through the batched decode machinery in groups of at most
-    /// [`I8_GEMV_MAX_ROWS`], the widest the native int8 GEMV serves in one pass
-    /// over the weights; a longer round is several groups, in order. Each group
+    /// [`Self::exact_group_rows`]: the widest group whose int8 projections run the
+    /// same arithmetic as a single decode step (on a device with int8 tensor cores
+    /// the native GEMV switches to a tensor-core block from
+    /// `select::I8_GEMV_MMA_MIN_ROWS` rows, which agrees to f32 rounding of
+    /// the running sum, not bit for bit); a longer round is several groups, in order. Each group
     /// is a whole pass over every layer, so the state hand-off between them is
     /// the same one a decode step makes.
     ///
@@ -4587,7 +4604,7 @@ impl Qwen35 {
             let x = input_override.map(|x| &x[start * d..(start + len) * d]);
             self.run_decode_batch(&tokens[start..start + len], &batch, x)
         };
-        let step = I8_GEMV_MAX_ROWS as usize;
+        let step = self.exact_group_rows();
         if tokens.len() <= step {
             return group(0, tokens.len());
         }

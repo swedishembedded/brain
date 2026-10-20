@@ -540,6 +540,12 @@ pub const ARGMAX_SPLIT_MIN_VOCAB: u32 = 4096;
 /// refining this boundary.
 pub const I8_GEMV_MAX_ROWS: u32 = 8;
 
+/// Rows of x from which the native int8 GEMV runs its int8 tensor-core block on a device at
+/// [`I8_MMA_MIN_CC`] or above; fewer rows (and every row count below that capability) run the
+/// dp4a block, which is bit for bit the WGSL kernel and the same arithmetic at every row count.
+/// `kernels-cuda` re-exports it and a test holds it to the kernel source's own define.
+pub const I8_GEMV_MMA_MIN_ROWS: u32 = 5;
+
 /// The first compute capability with the int8 tensor-core GEMM (Ampere);
 /// `gpu-core` pins this to the kernel's own floor in a test.
 pub const I8_MMA_MIN_CC: (u32, u32) = (8, 0);

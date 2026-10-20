@@ -47,10 +47,12 @@ and at margins up to 0.9; with the tensor-core block (`runs/b27/window11.log`, s
 1.1e-2 to 3.2e-2, argmax flips at near-ties and at margins up to 0.98 (stream 5, step 7) - the same picture as the dp4a
 baseline, a few percent apart per stream and inside the run-to-run spread of the settings in knowledge 328 (bound 3x).
 
-Consequence: batched decode no longer equals single-sequence decode bit for bit even before this change (the baseline
-above is already at the floor); a speculative verify round of five or more rows now also differs in the last bits from a
-plain decode step (rows one to four of a round still agree exactly). Replies change under any numerics change of this
-size (knowledge 328); gate a change like this against the floor, not against identity.
+Consequence: batched decode (separate sequences in one step) was never bit-identical to single-sequence decode (the baseline above is already at
+the floor), and from five rows it now uses the tensor-core block. A SINGLE sequence's exact round (a speculative verify pass,
+`Qwen35::run_exact_round`) must still equal its decode steps to the last bit (`tests/chunk_tape_decode_parity.rs`), so it runs in
+groups of at most `I8_GEMV_MMA_MIN_ROWS - 1` rows (four) on a device with the tensor-core block: a 5-8 row round costs two weight passes
+instead of one, and stays exact. Replies change under any numerics change of this size (knowledge 328); gate a change like this
+against the floor, not against identity, except where a documented contract (lossless speculation) needs identity.
 
 Trap: the plain gate binaries pick GPU 0 unless `BRAIN_DEVICE=gpuN` is set, and the reservation helper does not pin a
 device (knowledge 331). A bench on a card another job is using reads a fraction of the real rate.

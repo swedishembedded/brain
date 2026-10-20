@@ -63,12 +63,10 @@ pub const DP4A_MIN_CC: Cc = (6, 1);
 /// a kernel whose body issues them cannot declare a lower floor.
 pub const MMA_S8_MIN_CC: Cc = (8, 0);
 
-/// Rows of x from which `matmul_i8_gemv` runs its int8 tensor-core block (on a
-/// device at [`MMA_S8_MIN_CC`] or above); below it, the dp4a block that is bit
-/// for bit the WGSL kernel. The source's `BRAIN_I8G_MMA_MIN_ROWS` is the same
-/// number (a test holds the two together); a caller that gates a result on
-/// bit-identity asks here which side of it a batch falls.
-pub const I8_GEMV_MMA_MIN_ROWS: u32 = 5;
+/// Rows of x from which `matmul_i8_gemv` runs its int8 tensor-core block (see
+/// [`backend_api::select::I8_GEMV_MMA_MIN_ROWS`]); the source's `BRAIN_I8G_MMA_MIN_ROWS` is the
+/// same number and a test holds the two together.
+pub use backend_api::select::I8_GEMV_MMA_MIN_ROWS;
 
 /// The lowest compute capability a CUDA 12.x toolchain will emit code for at
 /// all (`--gpu-architecture=sm_50`). A kernel whose text uses nothing beyond
