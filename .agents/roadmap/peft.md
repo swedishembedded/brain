@@ -40,9 +40,12 @@ card without quantization or sharding).
    gate (lesson #40 - tiny configs can numerically starve a normalization op
    and produce a hollow-but-passing check).
 2. **INT8 frozen base before NF4.** NF4 is a strictly harder version of the
-   same problem (`Dtype::NF4` has no `Weight::` arm in `Ops::bind` at all,
-   `crates/model/src/ops.rs:664`) and int8 is the one with a real
-   measurement behind it (`crates/flux2/tests/int8_base_grads.rs`).
+   same problem and int8 is the one with a real measurement behind it
+   (`crates/flux2/tests/int8_base_grads.rs`). (Status 2026-10-20: both exist
+   now. `Weight::NF4` is a first-class variant with float-read forward and
+   input-gradient kernels, and the 27B LLM trains on an NF4 base; the int8
+   frozen base trains through the flux2 device trainer,
+   `BasePrecision::Int8`.)
 3. **A quantized training path is gated device-vs-fp32-device, not on
    `backend-cpu`.** `matmul_i8_dyn` is GPU-only. Lesson #5's both-backends
    rule stays satisfied by keeping the *fp32* path's existing both-backend
@@ -59,6 +62,23 @@ card without quantization or sharding).
    `scripts/gates/check-crate-layers.sh`) - no new crate.
 6. **No hand-maintained per-method docs column** (lesson #54). What brain
    supports is derived from code, not prose.
+
+---
+
+# Status board (re-read against the source on 2026-10-20)
+
+| phase | state |
+|---|---|
+| 1 substrate | `AdapterKind` with one implementation (`LoraPair`) on the host family; rsLoRA, LoRA+ and LoRA-FA exist as `TargetHp` fields on the host family only. The device family (`.lora_a`/`.lora_b` through `ParamStore`) is not parameter-set driven: its suffixes are spelled in `model::adapter::device::is_adapter_param` and in some thirty-five files (the adapter-naming gate lists them) |
+| 2 int8 frozen base | done for flux2 on CUDA (`devgrad::BasePrecision::Int8`, `tests/int8_trainer.rs`, `tests/int8_base_grads.rs`); the input gradient runs through the dequantised weight (`Fused::I8wDx`), so the transposed quantizer of M2.1 and the activation-term kill gate of M2.0 (`int8_act_grads.rs`) were never built |
+| 3 DoRA | not started: the word appears only in comments and the adapter module's header |
+| 4 external adapters | LoRA and LoKr fold-in for flux2 (`flux2/src/lora.rs`, `model/tests/lora_fold.rs`); LoHa and OFT keys, IA3 and textual inversion: not present |
+| 5 NF4/QLoRA | NF4 base for LoRA done for qwen35 (`tests/lora_nf4_base.rs`, real 27B run); `Weight::NF4` and its kernels exist; qwen3 and flux2 do not offer an NF4 base; double quantization and LoftQ: not present |
+| 6 OFT, 7 SVD/PiSSA/OLoRA, 8 LoKr/LoHa training, 9 VeRA | not present (no SVD primitive, no initializer family) |
+
+The generic, format-independent continuation of this ledger (parameter-set
+driven adapters, every adapter kind over every base `Weight`, adapter serving
+behind one site abstraction) is Phase 3 of `quantized-training.md`.
 
 ---
 
@@ -558,7 +578,13 @@ a sliced role on the existing one.
 Depends on Phase 2 (the transposed-copy pattern, the quantized-base
 backward seam, the M2.0 measurement harness).
 
-- `Dtype::NF4`/`F4E2M1` exist as tiers with host LUTs and a device GEMV
+- Status 2026-10-20: `Weight::NF4` exists (packed `[n, k/8]` words, group-32
+  f32 scales, float-read kernels that serve both `x W^T` and `dY W`, so no
+  transposed copy), with a tensor-core path through a bf16 decode scratch per
+  layer; qwen35 trains on it. What is still missing for DiT-style training
+  (the tiled, M~1536 regime) is a flux2 NF4 base, and double quantization of
+  the scale plane. The original note follows.
+- `Dtype::NF4`/`F4E2M1` existed as tiers with host LUTs and a device GEMV
   kernel, but no `Weight::NF4` arm in `Ops::bind` and no tiled `_dyn` NF4
   GEMM (DiT training is the M~1536 tiled regime, not decode). NF4 training
   needs a `matmul_nf4_dyn` sibling of the existing `matmul_q4_dyn`, plus a

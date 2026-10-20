@@ -5,7 +5,11 @@ distillation and the conformance suite without per-model glue. What exists:
 `model::training::TokenObjectives` (with the logit scale), the typed
 `Unsupported` refusal, `model::adapter::sites::LoraSites`, `model::conformance`
 (+ `rl::conformance`), the SDK's `ARCHS` table and `score_tokens`.
-qwen3, qwen35, qwen35moe and gpt2 are registered in the conformance suite.
+qwen3, qwen35, qwen35moe and gpt2 are registered in the conformance suite
+(`rl/tests/conformance.rs`); qwen3 registers the bf16 and int8 frozen-base
+tiers, qwen35 bf16 and NF4. Status re-read against the source on 2026-10-20:
+every open item below is still open. The tier, adapter and trainer work is
+part of the larger plan in `quantized-training.md`, which this file feeds.
 
 ## Not yet done
 
@@ -16,7 +20,9 @@ qwen3, qwen35, qwen35moe and gpt2 are registered in the conformance suite.
       head cross-entropy has landed (`model/src/head_ce.rs`); give `Subject` a
       chunk-size hook and make it check loss, log-probabilities and gradients
       against the unchunked head.
-- [ ] Conformance tiers: qwen35 registers bf16 and NF4, qwen3 bf16 and int8.
+- [ ] Conformance tiers: register the tiers still missing as they land (FP8; an
+      int8 tier for qwen35 once its trainer accepts one). `Subject::tiers` is the
+      hook; each tier carries its own gradient tolerance.
 - [ ] Move the serving `AdapterBank` (`qwen3/src/serve/adapters.rs`, built from
       `QwenConfig` and its own seven-site `LoraSite` enum) behind `LoraSites`, so
       qwen35 can use it, and stop `catalog/src/adapter_registry.rs` importing
