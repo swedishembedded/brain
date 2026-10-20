@@ -27,12 +27,14 @@
 //! | `fp8`  | 1 + 4 / head_dim  | E4M3 bytes, packed and scaled exactly like `int8` (scale = absmax / 448) |
 //!
 //! A tier is a descriptor, [`KvTier`] = ([`KvElement`], [`KvScale`]): the element
-//! codec and its bit width, and whether each (token, kv-head) row carries an
-//! `f32` scale. Sizes, addressing and row copies derive from those two fields
-//! alone; only the kernels (which decode an element) differ per element codec.
-//! The shape mirrors the checkpoint crate's planned `QuantEncoding` (element,
-//! packing, block geometry, scale hierarchy) with the block geometry fixed at
-//! one `head_dim` row; wave 2 replaces this local descriptor by that type.//!
+//! codec and whether each (token, kv-head) row carries an `f32` scale. It is the
+//! `Copy` handle for the subset of the checkpoint crate's [`QuantEncoding`] the
+//! attention kernels can decode ([`KvTier::encoding`] / [`KvTier::from_encoding`]),
+//! and every size derives from that encoding over the plane viewed as a
+//! `[rows * n_kv_heads, head_dim]` tensor ([`KvTier::plane_descriptor`]), so a
+//! planner that reasons about encodings and one that reasons about KV tiers
+//! cannot disagree on bytes. Only the kernels differ per element codec.
+//!
 //! The kernels are the repo's existing paged-KV family - nothing here is a
 //! second implementation of attention:
 //!
@@ -55,6 +57,7 @@
 //! at most [`MAX_PLANE_ELEMS`] (2^32) elements ([`KvTier::fits_addressing`]). At
 //! `kv_stride = 1024` that is 4 194 304 token rows - 32 sequences of 128k.
 
+use checkpoint::packed::{Element, FloatFormat, QuantEncoding, ScaleGranularity, ScaleLevel, TensorDescriptor};
 use gpu_core::{DeviceBuffer, Dispatch, Gpu, Step};
 
 use crate::ops::PagedDecodeShape;
@@ -72,17 +75,6 @@ pub enum KvElement {
     Int8,
     /// 8-bit float, 4 exponent and 3 mantissa bits (OCP FP8 E4M3, max 448).
     Fp8E4m3,
-}
-
-impl KvElement {
-    /// Storage bits per element; always a divisor of 32 so elements pack into words.
-    pub const fn bits(self) -> u64 {
-        match self {
-            KvElement::F32 => 32,
-            KvElement::Bf16 => 16,
-            KvElement::Int8 | KvElement::Fp8E4m3 => 8,
-        }
-    }
 }
 
 /// The scale hierarchy of a plane.
@@ -135,9 +127,38 @@ impl KvTier {
         self.scale
     }
 
+    /// The checkpoint-crate encoding of this tier's bytes: the element codec plus,
+    /// for a scaled tier, one `f32` scale per row of the `[rows * n_kv, head_dim]`
+    /// view of a plane.
+    pub fn encoding(self) -> QuantEncoding {
+        let element = match self.element {
+            KvElement::F32 => Element::Float(FloatFormat::F32),
+            KvElement::Bf16 => Element::Float(FloatFormat::Bf16),
+            KvElement::Int8 => Element::Int { bits: 8, signed: true },
+            KvElement::Fp8E4m3 => Element::Float(FloatFormat::E4M3Fn),
+        };
+        let scales = match self.scale {
+            KvScale::None => Vec::new(),
+            KvScale::PerRow => vec![ScaleLevel { granularity: ScaleGranularity::Row, format: FloatFormat::F32, suffix: "_scale".into() }],
+        };
+        QuantEncoding { element, scales }
+    }
+
+    /// The tier that stores exactly `enc`, or why none does (the kernels decode
+    /// f32, bf16, symmetric int8 and E4M3 elements, scaled per row or not at all).
+    pub fn from_encoding(enc: &QuantEncoding) -> Result<KvTier, String> {
+        KvTier::ALL.into_iter().find(|t| t.encoding() == *enc).ok_or_else(|| format!("no KV tier stores {enc}: supported are {}", KvTier::ALL.map(|t| t.encoding().to_string()).join(", ")))
+    }
+
+    /// A plane of `rows` token rows as the tensor `[rows * n_kv_heads, head_dim]` this
+    /// tier's encoding describes.
+    pub fn plane_descriptor(self, rows: u64, kv_stride: u64, head_dim: u64) -> TensorDescriptor {
+        TensorDescriptor::new("kv_plane", vec![rows * (kv_stride / head_dim), head_dim], self.encoding())
+    }
+
     /// Elements packed into one `u32` word.
     fn per_word(self) -> u64 {
-        32 / self.element.bits()
+        32 / self.encoding().payload_bits_per_elem() as u64
     }
 
     /// Parse a user-facing name: `f32`/`fp32`, `bf16`, `int8`/`i8`, `fp8`/`e4m3`/`fp8-e4m3`.
@@ -175,12 +196,12 @@ impl KvTier {
     /// The device words one K (or V) plane of `rows` token rows allocates.
     /// `kv_stride = n_kv_heads * head_dim`.
     pub fn plane_words(self, rows: u64, kv_stride: u64, head_dim: u64) -> PlaneWords {
-        let elems = rows * kv_stride;
-        let scales = match self.scale {
-            KvScale::None => 0,
-            KvScale::PerRow => rows * (kv_stride / head_dim),
-        };
-        PlaneWords { data: elems.div_ceil(self.per_word()), scales }
+        if rows == 0 {
+            return PlaneWords { data: 0, scales: 0 };
+        }
+        let d = self.plane_descriptor(rows, kv_stride, head_dim);
+        let scale_bytes = if d.encoding.scales.is_empty() { 0 } else { d.scale_bytes(0) };
+        PlaneWords { data: d.payload_bytes().div_ceil(4), scales: scale_bytes / 4 }
     }
 
     /// Device bytes of one K (or V) plane of `rows` token rows.
@@ -282,7 +303,8 @@ impl KvPlane {
         let elems = rows * kv_stride;
         let word_elems = self.tier.per_word() as usize;
         let words = gpu.read(&self.data, elems.div_ceil(word_elems));
-        let bits_of = |i: usize| (words[i / word_elems].to_bits() >> (self.tier.element.bits() as usize * (i % word_elems))) & ((1u64 << self.tier.element.bits()) - 1) as u32;
+        let elem_bits = 32 / word_elems;
+        let bits_of = |i: usize| (words[i / word_elems].to_bits() >> (elem_bits * (i % word_elems))) & (u32::MAX >> (32 - elem_bits));
         let scale_of = |i: usize, scales: &[f32]| scales[i / head_dim];
         let scales = self.scales.as_ref().map(|sc| gpu.read(sc, rows * (kv_stride / head_dim)));
         (0..elems)
@@ -769,6 +791,22 @@ mod tests {
         assert_eq!(decode_e4m3(0x01), 2f32.powi(-9));
         assert_eq!(decode_e4m3(0x38), 1.0);
         assert_eq!(decode_e4m3(0x00), 0.0);
+    }
+
+    /// The descriptor is the checkpoint crate's encoding: every tier round-trips through
+    /// it, its bytes are the encoding's bytes, and an encoding the kernels cannot decode
+    /// is named in the refusal.
+    #[test]
+    fn a_tier_is_the_checkpoint_encoding_of_its_bytes() {
+        for t in KvTier::ALL {
+            assert_eq!(KvTier::from_encoding(&t.encoding()), Ok(t));
+            let d = t.plane_descriptor(4096, 1024, 128);
+            d.validate().unwrap();
+            assert_eq!(t.plane_bytes(4096, 1024, 128), d.payload_bytes() + if d.encoding.scales.is_empty() { 0 } else { d.scale_bytes(0) });
+        }
+        let err = KvTier::from_encoding(&QuantEncoding::nf4_blocked(32)).unwrap_err();
+        assert!(err.contains("no KV tier"), "{err}");
+        assert!(KvTier::from_encoding(&QuantEncoding::fp8_e4m3_tiled(128)).is_err(), "tile-scaled fp8 is a weight layout, not a KV one");
     }
 
     #[test]
