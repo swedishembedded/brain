@@ -18,7 +18,9 @@
 //!    and no variant may be larger than the one before it, so the planner can never expand weights;
 //! 2. [`Lever::OptimizerState`] (narrower moment formats), 3. [`Lever::Recompute`], 4. [`Lever::ActivationPrecision`]
 //!    (only variants marked `validated`), 5. [`Lever::Offload`] (device bytes move to host bytes, which must fit),
-//!    6. [`Lever::CompactKv`] (a smaller [`crate::kv_tier::KvTier`], for rollouts), 7. [`Lever::Microbatch`].
+//!    6. [`Lever::ConvertWeights`] (an explicit, recorded Convert of the frozen base to a narrower format: only for a
+//!    caller that authorized it), 7. [`Lever::CompactKv`] (a smaller [`crate::kv_tier::KvTier`], for rollouts),
+//!    8. [`Lever::Microbatch`].
 //!
 //! Every choice the planner makes is recorded in the [`PlanReport`] (there is no silent precision change), and
 //! when nothing authorized fits it refuses with the arithmetic ([`PlanError::DoesNotFit`]).
@@ -30,6 +32,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use checkpoint::packed::{MemoryBudget, Pool};
+pub use paramstore::precision::ParamPrecision;
 
 use crate::kv_tier::KvTier;
 
@@ -56,6 +59,8 @@ pub enum Lever {
     Recompute,
     ActivationPrecision,
     Offload,
+    /// Convert the frozen base to a narrower storage format (bf16 -> NF4 / int8). Never implicit.
+    ConvertWeights,
     CompactKv,
     Microbatch,
 }
@@ -141,6 +146,16 @@ pub fn staging_variant(budget: &MemoryBudget) -> Demand {
     Demand { category: Category::Staging, variants: vec![Variant::new(Lever::Base, "bounded staging", 0, host + pinned)] }
 }
 
+/// Activation bytes per token per unit of `layers * width`, calibrated on the 27B (64 layers, width 5120): 78 GiB at 16K
+/// tokens against 67 GiB at 8K for the bf16 base is 1.4 MiB per token. An estimate for planning a step before a model is
+/// loaded, not a measurement of any one trainer.
+const ACTIVATION_BYTES_PER_TOKEN_PER_LAYER_WIDTH: f64 = 1.4 * 1048576.0 / (64.0 * 5120.0);
+
+/// Estimated activation bytes of one step over `tokens` tokens of a `layers`-deep, `width`-wide decoder.
+pub fn calibrated_activation_bytes(tokens: u32, layers: u64, width: u64) -> u64 {
+    (ACTIVATION_BYTES_PER_TOKEN_PER_LAYER_WIDTH * tokens as f64 * layers as f64 * width as f64) as u64
+}
+
 /// The device bytes of every demand at its preferred (stored) variant: what a sizing costs before
 /// any lever is pulled.
 pub fn device_total(demands: &[Demand]) -> u64 {
@@ -175,7 +190,7 @@ impl Authorized {
     }
 
     pub fn all() -> Authorized {
-        Authorized::only(&[Lever::OptimizerState, Lever::Recompute, Lever::ActivationPrecision, Lever::Offload, Lever::CompactKv, Lever::Microbatch])
+        Authorized::only(&[Lever::OptimizerState, Lever::Recompute, Lever::ActivationPrecision, Lever::Offload, Lever::ConvertWeights, Lever::CompactKv, Lever::Microbatch])
     }
 
     fn allows(&self, lever: Lever) -> bool {
@@ -255,7 +270,7 @@ pub fn plan(demands: &[Demand], capacity: Capacity, authorized: &Authorized) -> 
         let (d, h) = totals(chosen, demands);
         d <= capacity.device_bytes && h <= capacity.host_bytes
     };
-    const ORDER: [Lever; 6] = [Lever::OptimizerState, Lever::Recompute, Lever::ActivationPrecision, Lever::Offload, Lever::CompactKv, Lever::Microbatch];
+    const ORDER: [Lever; 7] = [Lever::OptimizerState, Lever::Recompute, Lever::ActivationPrecision, Lever::Offload, Lever::ConvertWeights, Lever::CompactKv, Lever::Microbatch];
     'levers: for lever in ORDER {
         if !authorized.allows(lever) {
             continue;
@@ -265,9 +280,11 @@ pub fn plan(demands: &[Demand], capacity: Capacity, authorized: &Authorized) -> 
                 if fits(&chosen) {
                     break 'levers;
                 }
-                let next = chosen[ci] + 1;
-                let Some(v) = demand.variants.get(next) else { break };
-                if v.lever != lever || (lever == Lever::ActivationPrecision && !v.validated) {
+                // The next variant of THIS lever after the current choice; variants of other levers between them
+                // (an unauthorized rung) are skipped, which cannot grow the device bytes.
+                let Some(next) = (chosen[ci] + 1..demand.variants.len()).find(|&i| demand.variants[i].lever == lever) else { break };
+                let v = &demand.variants[next];
+                if lever == Lever::ActivationPrecision && !v.validated {
                     break;
                 }
                 let mut trial = chosen.clone();
@@ -289,6 +306,62 @@ pub fn plan(demands: &[Demand], capacity: Capacity, authorized: &Authorized) -> 
     } else {
         Err(PlanError::DoesNotFit { capacity, best: report })
     }
+}
+
+/// What a training run holds, described the way the trainers know it: the frozen base as placed, the trainable
+/// manifest with its [`paramstore::precision::ParamPrecision`] (value, gradient, master copy, optimizer-state
+/// format - the physical byte accounting of `paramstore`), and the activations of one step.
+#[derive(Clone, Debug)]
+pub struct TrainingFootprint {
+    /// Physical device bytes of the frozen base (`paramstore::dtype::Destination` accounting), 0 for a full fine-tune.
+    pub frozen_weight_bytes: u64,
+    /// `(name, elements)` of every trainable parameter.
+    pub trainable: Vec<(String, usize)>,
+    pub precision: ParamPrecision,
+    /// Optimizer state slots per parameter (2 for AdamW, 1 for Lion / SGD momentum).
+    pub moment_slots: usize,
+    /// Block size of the 8-bit state format offered as the narrowest rung.
+    pub int8_block: u32,
+    /// The optimizer state already lives in host memory (the full fine-tune's layout); it then costs host bytes only.
+    pub optimizer_state_on_host: bool,
+    /// Activation bytes of one step when every layer's are kept, and when each layer is rebuilt in the backward
+    /// (`None`: this trainer cannot recompute).
+    pub activation_bytes: u64,
+    pub recompute_activation_bytes: Option<u64>,
+}
+
+/// The planner categories of a training run. Optimizer state is offered as the `optimizer_state_ladder` from the
+/// requested format down to 8-bit blocks (every rung counts its scales) and, if it is on the device, as an
+/// offload to host memory; activations as keep, then recompute when the trainer can.
+pub fn training_demands(f: &TrainingFootprint) -> Result<Vec<Demand>, PlanError> {
+    use paramstore::precision::StateFormat;
+    let numel: usize = f.trainable.iter().map(|(_, n)| *n).sum();
+    let bytes = f.precision.bytes(numel, f.moment_slots);
+    let mut demands = vec![Demand::fixed(Category::Weights, "frozen base", f.frozen_weight_bytes), Demand::fixed(Category::Weights, "trainable values", bytes.value), Demand::fixed(Category::Grads, "gradients", bytes.grad)];
+    if bytes.master > 0 {
+        demands.push(Demand::fixed(Category::Weights, "master copy", bytes.master));
+    }
+    let ladder = paramstore::precision::optimizer_state_ladder(&f.trainable, f.moment_slots, f.int8_block);
+    let requested = ladder.iter().position(|(fmt, _)| *fmt == f.precision.state).unwrap_or(0);
+    let label = |fmt: &StateFormat| format!("{fmt:?}");
+    let state = if f.optimizer_state_on_host {
+        let b = ladder[requested].1;
+        Demand { category: Category::OptimizerState, variants: vec![Variant::new(Lever::Base, format!("{} on the host", label(&ladder[requested].0)), 0, b)] }
+    } else {
+        let mut variants = vec![Variant::new(Lever::Base, label(&ladder[requested].0), ladder[requested].1, 0)];
+        variants.extend(ladder[requested + 1..].iter().map(|(fmt, b)| Variant::new(Lever::OptimizerState, label(fmt), *b, 0)));
+        // Offloading keeps the REQUESTED format on the host (a narrower rung taken before it is not carried over:
+        // host memory is the roomier side, and the report shows the change).
+        variants.push(Variant::new(Lever::Offload, format!("{} on the host", label(&ladder[requested].0)), 0, ladder[requested].1));
+        Demand::with_variants(Category::OptimizerState, variants)?
+    };
+    demands.push(state);
+    let mut act = vec![Variant::new(Lever::Base, "keep activations", f.activation_bytes, 0)];
+    if let Some(r) = f.recompute_activation_bytes {
+        act.push(Variant::new(Lever::Recompute, "recompute per layer", r, 0));
+    }
+    demands.push(Demand::with_variants(Category::Activations, act)?);
+    Ok(demands)
 }
 
 #[cfg(test)]
@@ -393,6 +466,66 @@ mod tests {
         let r = plan(&[Demand::fixed(Category::Weights, "int8", 27 * GIB), d], Capacity { device_bytes: 80 * GIB, host_bytes: 0 }, &Authorized::only(&[Lever::CompactKv])).unwrap();
         assert!(r.decisions.iter().all(|d| d.lever == Lever::CompactKv));
         assert!(r.device_bytes <= 80 * GIB);
+    }
+
+    fn training(trainable: usize, on_host: bool) -> TrainingFootprint {
+        TrainingFootprint {
+            frozen_weight_bytes: 0,
+            trainable: vec![("w".into(), trainable)],
+            precision: paramstore::precision::ParamPrecision::FP32,
+            moment_slots: 2,
+            int8_block: 256,
+            optimizer_state_on_host: on_host,
+            activation_bytes: 8 * GIB,
+            recompute_activation_bytes: Some(GIB),
+        }
+    }
+
+    /// An 8B full fine-tune at fp32 (the paramstore byte accounting): values 4n, grads 4n, AdamW state 8n. The
+    /// planner narrows the state first, offloads it only when authorized, and recomputes only after narrowing.
+    #[test]
+    fn a_full_finetune_is_planned_from_the_paramstore_byte_accounting() {
+        let n = 2_000_000_000usize; // 8 GB of values at fp32
+        let demands = training_demands(&training(n, false)).unwrap();
+        let total = device_total(&demands);
+        assert_eq!(total, 4 * n as u64 + 4 * n as u64 + 8 * n as u64 + 8 * GIB, "values + grads + AdamW f32 moments + activations");
+        let ladder = paramstore::precision::optimizer_state_ladder(&[("w".into(), n)], 2, 256);
+        let int8 = ladder[2].1;
+        // Needs the state narrowed to int8 blocks: 8n -> ~2n.
+        let room = total - (8 * n as u64 - int8) + 1;
+        let r = plan(&demands, Capacity { device_bytes: room, host_bytes: 0 }, &Authorized::only(&[Lever::OptimizerState])).unwrap();
+        assert_eq!(r.variant(Category::OptimizerState).unwrap().label, "Int8Block { block: 256 }");
+        assert_eq!(r.variant(Category::Activations).unwrap().label, "keep activations");
+        // Not authorized to narrow, but the host has room: the state moves there at the requested format.
+        let r = plan(&demands, Capacity { device_bytes: room, host_bytes: 16 * GIB * 4 }, &Authorized::only(&[Lever::Offload])).unwrap();
+        assert_eq!(r.variant(Category::OptimizerState).unwrap().label, "F32 on the host");
+        assert!(r.decisions.iter().all(|d| d.lever == Lever::Offload));
+        // Nothing authorized and nothing fits: the refusal carries the per-category arithmetic.
+        let err = plan(&demands, Capacity { device_bytes: GIB, host_bytes: 0 }, &Authorized::none()).unwrap_err().to_string();
+        assert!(err.contains("OptimizerState: F32") && err.contains("Grads: gradients"), "{err}");
+    }
+
+    /// The full fine-tune's layout: the optimizer state already lives on the host, so it costs host bytes only,
+    /// and the device holds values and gradients.
+    #[test]
+    fn state_already_on_the_host_is_charged_to_the_host() {
+        let n = 1_000_000_000usize;
+        let demands = training_demands(&training(n, true)).unwrap();
+        let r = plan(&demands, Capacity { device_bytes: 8 * n as u64 + 8 * GIB, host_bytes: 8 * n as u64 }, &Authorized::none()).unwrap();
+        assert_eq!((r.device_bytes, r.host_bytes), (8 * n as u64 + 8 * GIB, 8 * n as u64));
+        assert!(plan(&demands, Capacity { device_bytes: 8 * n as u64 + 8 * GIB, host_bytes: 4 * n as u64 }, &Authorized::none()).is_err(), "the host must hold the state too");
+    }
+
+    /// Converting the frozen base is a lever of its own, tried after offload and only when authorized.
+    #[test]
+    fn converting_the_base_is_a_recorded_authorized_lever() {
+        let weights = Demand::with_variants(Category::Weights, vec![Variant::new(Lever::Base, "bf16", 54 * GIB, 0), Variant::new(Lever::ConvertWeights, "nf4", 17 * GIB, 0)]).unwrap();
+        let acts = Demand::fixed(Category::Activations, "keep", 20 * GIB);
+        let room = Capacity { device_bytes: 60 * GIB, host_bytes: 0 };
+        let r = plan(&[weights.clone(), acts.clone()], room, &Authorized::only(&[Lever::ConvertWeights])).unwrap();
+        assert_eq!(r.decisions.len(), 1);
+        assert_eq!(r.decisions[0].lever, Lever::ConvertWeights);
+        assert!(plan(&[weights, acts], room, &Authorized::none()).is_err());
     }
 
     #[test]

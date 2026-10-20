@@ -257,7 +257,8 @@ impl ChatFullFineTune {
         // the rows themselves, unread.
         let prepared = data::chat::prepare_chat_samples(&rows, &rows, &tok, &tmpl, render, vocab, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
         let block = block_for(prepared.longest_example, self.max_block)?;
-        crate::device::resolve(&self.device)?;
+        let set = crate::device::resolve(&self.device)?;
+        plan_before_load(&open, block, &set)?;
 
         let seed = resolve_seed(self.seed, None)?;
         let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, ..fit_opts(self.steps, block, self.lr, seed) };
@@ -367,6 +368,43 @@ impl ChatFullFineTuneOutcome {
 
 /// The generic fine-tuners' entry points of architecture `arch`, or the
 /// refusal naming it and the capability it lacks.
+/// Refuse a full fine-tune that cannot fit the selected cards BEFORE the base is loaded, with the planner's
+/// per-category arithmetic. Every tensor trains in fp32; the AdamW moments and the master weights live in host
+/// memory ([`model::training::OptimizerState::HostOffload`]), so the cards hold the values, the gradients and one
+/// step's activations. The activation term is calibrated on the 27B (`crate::finetune::activation_bytes`) and
+/// included when the checkpoint's config names its depth and width. No selected card (a CPU run) is not checked.
+fn plan_before_load(open: &Path, block: u32, set: &gpu_core::devices::ComputeSet) -> Result<()> {
+    use model::memplan::{plan, training_demands, Authorized, Capacity, Category, Demand, TrainingFootprint};
+    let cards: Vec<u64> = gpu_core::devices::gpus().iter().filter(|d| set.gpus.contains(&d.index)).map(|d| d.identity.vram_bytes).collect();
+    if cards.is_empty() {
+        return Ok(());
+    }
+    let reader = checkpoint::weightio::WeightReader::open(open.to_str().ok_or_else(|| Error::Backend(format!("{}: not valid UTF-8", open.display())))?).map_err(|e| Error::Backend(format!("{}: {e}", open.display())))?;
+    let trainable: Vec<(String, usize)> = reader.names().map(|n| (n.to_string(), reader.shape(n).map_or(0, |s| s.iter().product::<u64>() as usize))).collect();
+    let config = reader.config();
+    let dim = |keys: &[&str]| keys.iter().find_map(|k| config.get(*k).and_then(|v| v.as_u64()));
+    let activation_bytes = match (dim(&["num_hidden_layers", "n_layers"]), dim(&["hidden_size", "d_model"])) {
+        (Some(layers), Some(width)) => crate::finetune::activation_bytes(block, layers, width),
+        _ => 0,
+    };
+    let numel: u64 = trainable.iter().map(|(_, n)| *n as u64).sum();
+    let footprint = TrainingFootprint {
+        frozen_weight_bytes: 0,
+        trainable,
+        precision: model::memplan::ParamPrecision::FP32,
+        moment_slots: 2,
+        int8_block: 256,
+        optimizer_state_on_host: true,
+        activation_bytes,
+        recompute_activation_bytes: None,
+    };
+    let mut demands = training_demands(&footprint).map_err(|e| Error::Backend(e.to_string()))?;
+    demands.push(Demand { category: Category::Weights, variants: vec![model::memplan::Variant::new(model::memplan::Lever::Base, "master weights on the host", 0, 4 * numel)] });
+    // The trainer runs on the selected cards together; host memory is not bounded by the planner here.
+    let capacity = Capacity { device_bytes: cards.iter().sum(), host_bytes: u64::MAX };
+    plan(&demands, capacity, &Authorized::none()).map(drop).map_err(|e| Error::Backend(format!("ChatFullFineTune: refusing to load {}: {e}", open.display())))
+}
+
 fn chat_entry(arch: &str) -> Result<crate::chat_trainer::ChatEntry> {
     let entry = crate::study::arch(arch)?;
     entry.require(Capability::ChatFineTune)?;

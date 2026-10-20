@@ -218,7 +218,9 @@ pub fn plan_lora_layout(
         }
         refused.clear();
     }
-    Err(format!("qwen3 finetune does not fit {cards} card(s): {}", refused.join("; ")))
+    // The planner's per-category arithmetic of the whole model on one stage, so the refusal shows what is being sized.
+    let whole = crate::footprint::footprint_demands(cfg, &plan_by_bytes(cfg, b, t, dt, 1)[0], dt, b, t, true, false);
+    Err(format!("qwen3 finetune does not fit {cards} card(s): {}; whole model: {}", refused.join("; "), model::memplan::summary(&whole)))
 }
 
 /// A trained LoRA model: on one card, or split across several as a pipeline. Both arms are boxed:

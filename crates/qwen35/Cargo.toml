@@ -29,6 +29,8 @@ brain-modelref.workspace = true
 brain-modelstore.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
+# The streamed trainer reads which card its Gpu is on, to refuse a footprint before loading.
+brain-memauth.workspace = true
 wgpu = "29"
 pollster = "0.4"
 
@@ -36,8 +38,6 @@ pollster = "0.4"
 brain-testutil.workspace = true
 # Live-resource counters and free-memory reads for the CUDA lifetime gates.
 brain-backend-cuda.workspace = true
-# A child-process memory measurement publishes its own ceiling.
-brain-memauth.workspace = true
 
 [[test]]
 name = "gguf_conformance"

@@ -806,6 +806,12 @@ impl StreamTrainer {
     /// loaded here - a caller streams those per step via [`Self::
     /// real_loader`].
     pub fn new_real(gpu: Gpu, cfg: &Qwen35Config, dir: &Path, n: u32, window_budget: u32, lora_init: &HashMap<String, Vec<f32>>) -> Result<StreamTrainer, String> {
+        // The planner refuses before the head is read: a card whose memory is known must hold the footprint.
+        if let memauth::Device::Gpu(i) = gpu.memory_device() {
+            if let Some(card) = gpu_core::devices::gpus().get(i as usize).map(|d| d.identity.vram_bytes).filter(|&b| b > 0) {
+                Self::plan_before_load(cfg, window_budget, lora_init, card)?;
+            }
+        }
         let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("stream_train: Ops::new: {e}"));
         let ids = train_ids(&gpu);
         let d = cfg.d_model as usize;
@@ -826,6 +832,37 @@ impl StreamTrainer {
 
         let lora = LoraStore::new(&gpu, cfg, lora_init, n);
         Ok(StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, final_norm, n, window_budget })
+    }
+
+    /// The streamed trainer's resident footprint as planner categories: `window_budget` layers of the stored
+    /// base (the larger layer type, int8-sized as the fp8 release is), the head and final norm, and the LoRA
+    /// values, gradients and AdamW state. Activations are NOT modelled here - the streamed backward owns them.
+    pub fn footprint_demands(cfg: &Qwen35Config, window_budget: u32, lora_init: &HashMap<String, Vec<f32>>) -> Vec<model::memplan::Demand> {
+        use model::memplan::{training_demands, Category, Demand, ParamPrecision, TrainingFootprint};
+        let tier = model::ops::TierPolicy::uniform(Dtype::I8);
+        let layer = [crate::config::LayerType::Linear, crate::config::LayerType::Full].into_iter().map(|t| cfg.layer_weight_bytes(t, &tier)).max().unwrap_or(0);
+        let head = cfg.vocab as u64 * cfg.d_model as u64 * 2 + cfg.d_model as u64 * 4;
+        let trainable: Vec<(String, usize)> = lora_init.iter().filter(|(k, _)| model::adapter::device::is_adapter_param(k)).map(|(k, v)| (k.clone(), v.len())).collect();
+        let footprint = TrainingFootprint {
+            frozen_weight_bytes: window_budget as u64 * layer + head,
+            trainable,
+            precision: ParamPrecision::FP32,
+            moment_slots: 2,
+            int8_block: 256,
+            optimizer_state_on_host: false,
+            activation_bytes: 0,
+            recompute_activation_bytes: None,
+        };
+        let mut demands = training_demands(&footprint).expect("the training categories are consistent");
+        demands.retain(|d| d.category != Category::Activations);
+        demands.push(Demand::fixed(Category::Activations, "not modelled here", 0));
+        demands
+    }
+
+    /// Refuse before loading when [`Self::footprint_demands`] cannot fit `device_bytes`, with the arithmetic.
+    pub fn plan_before_load(cfg: &Qwen35Config, window_budget: u32, lora_init: &HashMap<String, Vec<f32>>, device_bytes: u64) -> Result<(), String> {
+        let demands = Self::footprint_demands(cfg, window_budget, lora_init);
+        model::memplan::plan(&demands, model::memplan::Capacity { device_bytes, host_bytes: u64::MAX }, &model::memplan::Authorized::none()).map(drop).map_err(|e| format!("stream_train: refusing to load: {e}"))
     }
 
     /// Real per-token embedding rows for `ids`, off `dir/outside.
@@ -1104,5 +1141,24 @@ impl StreamTrainer {
 
         g.poll_wait();
         loss
+    }
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+
+    /// The streamed trainer asks the planner before it loads anything: a card too small is refused with the
+    /// per-category arithmetic, and a card that holds the footprint is accepted.
+    #[test]
+    fn the_preflight_refuses_a_card_that_cannot_hold_the_resident_footprint() {
+        let cfg = Qwen35Config::tiny_i8();
+        let init = crate::init::init_weights(&cfg, 11);
+        let demands = StreamTrainer::footprint_demands(&cfg, 2, &init);
+        let need = model::memplan::device_total(&demands);
+        assert!(need > 0);
+        assert!(StreamTrainer::plan_before_load(&cfg, 2, &init, need).is_ok(), "a card of exactly the footprint holds it");
+        let err = StreamTrainer::plan_before_load(&cfg, 2, &init, need - 1).unwrap_err();
+        assert!(err.contains("refusing to load") && err.contains("Weights: frozen base"), "{err}");
     }
 }

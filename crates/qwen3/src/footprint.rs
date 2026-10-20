@@ -195,13 +195,17 @@ fn head_bytes(cfg: &QwenConfig, shard: &Shard, n: u64, train: bool, decode_only:
 /// actually being built - see this module's doc for what is and is not
 /// counted.
 pub fn estimate_vram_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype, b: u32, t: u32, train: bool, decode_only: bool) -> u64 {
+    model::memplan::device_total(&footprint_demands(cfg, shard, dt, b, t, train, decode_only))
+}
+
+/// [`estimate_vram_bytes`] as the global planner's categories (`model::memplan`): the weights (with the gradient
+/// copy of a training build), the KV cache, and the activations (residual stream, step scratch, backward scratch
+/// and the head's rows). The one place the figure is summed, so a placement, a refusal and a plan agree.
+pub fn footprint_demands(cfg: &QwenConfig, shard: &Shard, dt: Dtype, b: u32, t: u32, train: bool, decode_only: bool) -> Vec<model::memplan::Demand> {
+    use model::memplan::{Category, Demand};
     let n = crate::model::activation_rows(b, t, decode_only);
-    weight_bytes(cfg, shard, dt, train)
-        + kv_cache_bytes(cfg, t, train)
-        + residual_bytes(cfg, shard, n, train)
-        + activation_scratch_bytes(cfg, n, t, b, decode_only)
-        + backward_scratch_bytes(cfg, n, t, b, train)
-        + head_bytes(cfg, shard, n, train, decode_only)
+    let activations = residual_bytes(cfg, shard, n, train) + activation_scratch_bytes(cfg, n, t, b, decode_only) + backward_scratch_bytes(cfg, n, t, b, train) + head_bytes(cfg, shard, n, train, decode_only);
+    vec![Demand::fixed(Category::Weights, "weights", weight_bytes(cfg, shard, dt, train)), Demand::fixed(Category::Kv, "kv cache", kv_cache_bytes(cfg, t, train)), Demand::fixed(Category::Activations, "activations and scratch", activations)]
 }
 
 /// The parameter count from which a decoder is served with int8 linears

@@ -197,6 +197,15 @@ impl ChatFamily {
         }
     }
 
+    /// Device bytes of `params` parameters held at this family's quantised base: group-wise int8 for `qwen3`
+    /// (one byte plus an f32 scale per group), NF4 for `qwen35` (half a byte plus an f32 scale per 32 weights).
+    fn quantised_base_bytes(&self, params: u64) -> u64 {
+        match self {
+            ChatFamily::Qwen3(_) => params + 4 * params.div_ceil(model::int8::GROUP as u64),
+            ChatFamily::Qwen35(_) => params / 2 + 4 * params.div_ceil(32),
+        }
+    }
+
     /// `(parameters, layers, model width)` of the checkpoint at `open`, what the tier choice sizes a base by.
     fn base_shape(&self, open: &Path) -> Result<(u64, u64, u64)> {
         match self {
@@ -270,9 +279,10 @@ pub(crate) enum BaseTierChoice {
     F32,
 }
 
-/// Activation bytes per token at a block, per unit of `layers * width`, calibrated on the 27B (64 layers,
-/// width 5120): 78 GiB at 16K tokens against 67 GiB at 8K for the bf16 base is 1.4 MiB per token.
-const ACTIVATION_BYTES_PER_TOKEN_PER_LAYER_WIDTH: f64 = 1.4 * 1048576.0 / (64.0 * 5120.0);
+/// Activation bytes of one `block`-token row of a `layers`-deep, `width`-wide decoder ([`model::memplan::calibrated_activation_bytes`]).
+pub(crate) fn activation_bytes(block: u32, layers: u64, width: u64) -> u64 {
+    model::memplan::calibrated_activation_bytes(block, layers, width)
+}
 
 /// The frozen base's tier when the caller named none: **the accelerator's native floating-point tensor-core
 /// tier by default, a quantised base only when that does not fit.**
@@ -286,18 +296,28 @@ const ACTIVATION_BYTES_PER_TOKEN_PER_LAYER_WIDTH: f64 = 1.4 * 1048576.0 / (64.0 
 ///   for the bf16 base needs; if even that cannot fit the caller is told.
 ///
 /// `cards` are the selected cards' total memory in bytes, `native` whether any has the native tier.
-pub(crate) fn choose_base_tier(single_card: bool, native: bool, params: u64, layers: u64, width: u64, block: u32, cards: &[u64]) -> (BaseTierChoice, String) {
+pub(crate) fn choose_base_tier(single_card: bool, native: bool, params: u64, layers: u64, width: u64, block: u32, quantised_bytes: u64, cards: &[u64]) -> std::result::Result<(BaseTierChoice, String), String> {
+    use model::memplan::{plan, Authorized, Capacity, Category, Demand, Lever, Variant};
     if !native {
-        return (BaseTierChoice::F32, "no selected device has native bf16 tensor cores: the fp32 reference tier".to_string());
+        return Ok((BaseTierChoice::F32, "no selected device has native bf16 tensor cores: the fp32 reference tier".to_string()));
     }
-    let activations = (ACTIVATION_BYTES_PER_TOKEN_PER_LAYER_WIDTH * block as f64 * layers as f64 * width as f64) as u64;
-    let bf16_need = 2 * params + activations;
+    let activations = activation_bytes(block, layers, width);
     let room = if single_card { cards.iter().copied().max().unwrap_or(0) } else { cards.iter().sum() };
     let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
-    if room == 0 || bf16_need <= room {
-        (BaseTierChoice::Bf16, format!("native bf16 tensor cores; the bf16 base and a {block}-token row need about {:.0} GiB of {:.0} GiB", gib(bf16_need), gib(room)))
+    if room == 0 {
+        // A device whose memory cannot be queried: the native tier, as before.
+        return Ok((BaseTierChoice::Bf16, format!("native bf16 tensor cores; the device's memory is unknown, so the bf16 base and a {block}-token row (about {:.0} GiB) are not checked", gib(2 * params + activations))));
+    }
+    // The planner decides: the bf16 base is the stored form; converting it to the quantised base is the one lever
+    // this caller authorizes, and it is only pulled when the bf16 base and the activations do not fit.
+    let weights = Demand::with_variants(Category::Weights, vec![Variant::new(Lever::Base, "bf16 base", 2 * params, 0), Variant::new(Lever::ConvertWeights, "quantised base", quantised_bytes, 0)]).map_err(|e| e.to_string())?;
+    let demands = [weights, Demand::fixed(Category::Activations, format!("{block}-token row"), activations)];
+    let report = plan(&demands, Capacity { device_bytes: room, host_bytes: 0 }, &Authorized::only(&[Lever::ConvertWeights])).map_err(|e| format!("refusing to load: {e}"))?;
+    let need = report.device_bytes;
+    if report.decisions.is_empty() {
+        Ok((BaseTierChoice::Bf16, format!("native bf16 tensor cores; the bf16 base and a {block}-token row need about {:.0} GiB of {:.0} GiB", gib(need), gib(room))))
     } else {
-        (BaseTierChoice::Quantised, format!("the bf16 base and a {block}-token row need about {:.0} GiB, more than the {:.0} GiB available: quantised base", gib(bf16_need), gib(room)))
+        Ok((BaseTierChoice::Quantised, format!("the bf16 base and a {block}-token row need about {:.0} GiB, more than the {:.0} GiB available: quantised base ({:.0} GiB with the row)", gib(2 * params + activations), gib(room), gib(need))))
     }
 }
 
@@ -772,7 +792,7 @@ impl ChatFineTune {
             let cards: Vec<u64> = gpu_core::devices::gpus().iter().filter(|d| set.gpus.contains(&d.index)).map(|d| d.identity.vram_bytes).collect();
             let native = !cards.is_empty() && gpu_core::Gpu::new(&[]).caps().arch.compute_capability.is_some_and(|cc| cc >= gpu_core::select::I8_MMA_MIN_CC);
             let (params, layers, width) = family.base_shape(&open)?;
-            let (choice, reason) = choose_base_tier(matches!(family, ChatFamily::Qwen35(_)), native, params, layers, width, block, &cards);
+            let (choice, reason) = choose_base_tier(matches!(family, ChatFamily::Qwen35(_)), native, params, layers, width, block, family.quantised_base_bytes(params), &cards).map_err(Error::Backend)?;
             (family.with_tier(choice), reason)
         };
         eprintln!("ChatFineTune: base tier {} ({base_tier_reason})", family.tier_name());
@@ -1654,9 +1674,11 @@ mod tier_tests {
     const GIB: u64 = 1 << 30;
     // The 27B: about 27e9 parameters, 64 layers, width 5120.
     const BIG: (u64, u64, u64) = (27_000_000_000, 64, 5120);
+    /// NF4 at 27e9 parameters: half a byte plus an f32 scale per 32 weights.
+    const NF4_27B: u64 = 27_000_000_000 / 2 + 4 * (27_000_000_000 / 32);
 
     fn pick(single: bool, native: bool, shape: (u64, u64, u64), block: u32, cards: &[u64]) -> BaseTierChoice {
-        choose_base_tier(single, native, shape.0, shape.1, shape.2, block, cards).0
+        choose_base_tier(single, native, shape.0, shape.1, shape.2, block, NF4_27B, cards).unwrap().0
     }
 
     #[test]
@@ -1667,12 +1689,19 @@ mod tier_tests {
 
     #[test]
     fn a_base_that_does_not_fit_at_bf16_falls_back_to_the_quantised_tier_and_says_why() {
-        let (choice, why) = choose_base_tier(true, true, BIG.0, BIG.1, BIG.2, 16384, &[64 * GIB]);
+        let (choice, why) = choose_base_tier(true, true, BIG.0, BIG.1, BIG.2, 16384, NF4_27B, &[64 * GIB]).unwrap();
         assert_eq!(choice, BaseTierChoice::Quantised);
         assert!(why.contains("quantised"), "{why}");
         // Two cards do not help a single-card trainer, but do help a pipelining one.
         assert_eq!(pick(true, true, BIG, 16384, &[48 * GIB, 48 * GIB]), BaseTierChoice::Quantised);
         assert_eq!(pick(false, true, BIG, 16384, &[48 * GIB, 48 * GIB]), BaseTierChoice::Bf16);
+    }
+
+    /// Even the quantised base and the row do not fit: refuse before anything loads, with the arithmetic.
+    #[test]
+    fn a_base_that_fits_at_no_tier_is_refused_with_the_planners_arithmetic() {
+        let err = choose_base_tier(true, true, BIG.0, BIG.1, BIG.2, 16384, NF4_27B, &[16 * GIB]).unwrap_err();
+        assert!(err.contains("refusing to load") && err.contains("Weights: quantised base") && err.contains("Activations"), "{err}");
     }
 
     #[test]
