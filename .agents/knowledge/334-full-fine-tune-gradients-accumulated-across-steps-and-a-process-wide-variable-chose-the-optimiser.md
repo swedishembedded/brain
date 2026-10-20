@@ -19,8 +19,9 @@ Two defects, one hiding the other:
 * Whether a build offloads was the process environment variable `BRAIN_OFFLOAD_ADAM`, set to `1` before
   the model was built and restored after. Two trainings in one process read each other's setting: one built
   with the device optimiser (correct gradients), the other with the offloading one (accumulating gradients), so
-  the same seed gave two different runs depending on timing. `qwen3::model::with_offloaded_adam` now scopes the
-  choice to the building thread; the variable is only the default.
+  the same seed gave two different runs depending on timing. `model::offload::with_adam_offloaded` now scopes the
+  choice to the building thread and the variable is gone; `make check/env-writes` keeps library code from writing
+  the process environment again.
 
 Also fixed on the way: `par::sum_sq_f64` added its per-tensor partials with rayon's adaptive sum, whose last bit
 depended on free threads (a grad-norm that differs in its last bit scales every update differently); it now cuts each

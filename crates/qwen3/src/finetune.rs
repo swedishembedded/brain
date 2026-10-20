@@ -91,7 +91,7 @@ pub fn finetune_from(
 
     // Role::Offload vs Role::Trainable for a `FullOffload` build is read when
     // the model is built, whichever checkpoint supplied the weights.
-    let m = crate::model::with_offloaded_adam(matches!(mode, Mode::FullOffload), || build_for_training(cfg, opts, &*init, Dtype::F32))?;
+    let m = model::offload::with_adam_offloaded(matches!(mode, Mode::FullOffload), || build_for_training(cfg, opts, &*init, Dtype::F32))?;
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
     model::fit_with(m, obj, opts, Some(Path::new(out)))
@@ -105,7 +105,7 @@ pub fn finetune_from(
 /// three times the model), so the report says it was interrupted.
 pub fn finetune_full_controlled(base: &str, dir: &Path, opts: &FitOpts, out: &Path, control: model::FitControl<'_>) -> std::io::Result<model::FitReport> {
     let (cfg, init) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
-    let built = crate::model::with_offloaded_adam(true, || build_for_training(cfg, opts, &*init, Dtype::F32));
+    let built = model::offload::with_adam_offloaded(true, || build_for_training(cfg, opts, &*init, Dtype::F32));
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
     let (report, _) = model::fit_controlled(built?, obj, opts, Some(out), control)?;
@@ -647,15 +647,9 @@ pub fn finetune_lora_controlled(
         snapshots.alpha = lora.alpha;
         snapshots.targets = lora.targets.clone();
     }
-    // A LoRA build never offloads its moments; the process-wide switch is
-    // cleared for the construction and restored after, as `finetune_from`
-    // does.
-    let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
-    std::env::remove_var("BRAIN_OFFLOAD_ADAM");
+    // A LoRA build never offloads its moments (outside any `with_adam_offloaded`
+    // scope the default is the device).
     let m = build_trainer(cfg, opts, &init, base_dtype);
-    if let Some(v) = prev_off {
-        std::env::set_var("BRAIN_OFFLOAD_ADAM", v);
-    }
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     match m? {
         Trained::Single(m) => {

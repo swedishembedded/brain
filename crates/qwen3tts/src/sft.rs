@@ -250,8 +250,8 @@ pub fn finetune_lora(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
 /// speech to codes, fine-tune the base model on them, serve the result
 /// through the CustomVoice interface) rather than the lighter-weight adapter
 /// path [`finetune_lora`] offers alongside it. AdamW moments offload to
-/// system RAM for the duration of the call (`BRAIN_OFFLOAD_ADAM`, the same
-/// convention `qwen3::finetune::Mode::FullOffload` uses) - full fine-tuning
+/// system RAM for the duration of the call (`model::offload::with_adam_offloaded`,
+/// as `qwen3::finetune::Mode::FullOffload` does) - full fine-tuning
 /// triples the optimizer state over the frozen-base LoRA path, and this is
 /// the one knob that keeps that affordable. Writes the fine-tuned checkpoint
 /// to `out` and returns `(initial_loss, final_loss)`.
@@ -274,14 +274,7 @@ pub fn finetune_full(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
         init.insert(k, v);
     }
 
-    let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
-    std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
-    let result = run_finetune(cfg, init, dir, out, opts);
-    match prev_off {
-        Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
-        None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
-    }
-    result
+    model::offload::with_adam_offloaded(true, || run_finetune(cfg, init, dir, out, opts))
 }
 
 /// The training loop shared by [`finetune_lora`]/[`finetune_full`]: the only

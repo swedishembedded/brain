@@ -289,7 +289,6 @@ pub fn run(
     let rope = zcfg.rope();
 
     // 4. trainer + adapter
-    std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
     let trainer = TrainerKind::new(cfg, opts.two_gpu);
     let mut adapter = LoraAdapter::new(&cfg, LoraCfg::new(opts.rank, opts.seed));
     let mut rng = (opts.seed ^ 0xf17e_7c7e_a5ad_a97e).wrapping_mul(2654435761).max(1);

@@ -83,22 +83,17 @@ impl<M: Model + Send> DataParallel<M> {
     /// full model's weights, uploaded to each card.
     pub fn new(cfg: M::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, gpus: &[usize]) -> DataParallel<M> {
         assert!(!gpus.is_empty(), "data-parallel needs at least one GPU");
-        let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
-        // Ask models that support it (qwen) to keep only weight+grad on the GPU —
+        // Ask models that support it (qwen) to keep only weight+grad on the GPU -
         // the moments live here in host RAM. Models that ignore it simply keep
         // their (unused) on-GPU moment buffers; correctness is unaffected.
-        std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
-        let mut replicas = Vec::with_capacity(gpus.len());
-        for &g in gpus {
-            // Scoped (thread-local, race-free) placement on canonical card `g`.
-            let replica = gpu_core::devices::with_gpu(g as u32, || M::new(cfg.clone(), b, t, init))
-                .unwrap_or_else(|e| panic!("data-parallel replica placement: {e}"));
-            replicas.push(replica);
-        }
-        match prev_off {
-            Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
-            None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
-        }
+        let replicas: Vec<M> = crate::offload::with_adam_offloaded(true, || {
+            gpus.iter()
+                .map(|&g| {
+                    // Scoped (thread-local, race-free) placement on canonical card `g`.
+                    gpu_core::devices::with_gpu(g as u32, || M::new(cfg.clone(), b, t, init)).unwrap_or_else(|e| panic!("data-parallel replica placement: {e}"))
+                })
+                .collect()
+        });
         let names = replicas[0].param_names();
         DataParallel { replicas, names, fused: None }
     }

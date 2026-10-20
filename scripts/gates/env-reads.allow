@@ -85,7 +85,6 @@ crates/catalog/src/resident_flux2.rs	BRAIN_FLUX2_FAMILY
 crates/catalog/src/resident_flux2.rs	BRAIN_FLUX2_MAX_BATCH
 crates/catalog/src/resident_forecast.rs	BRAIN_CHRONOS2
 crates/catalog/src/resident_forecast.rs	BRAIN_FINCAST
-crates/catalog/src/resident_forecast.rs	BRAIN_GPU_INDEX
 crates/catalog/src/resident_forecast.rs	BRAIN_KRONOS_DECODER
 crates/catalog/src/resident_forecast.rs	BRAIN_KRONOS_TOKENIZER
 crates/catalog/src/resident_forecast.rs	BRAIN_TIMESFM3
@@ -552,7 +551,6 @@ crates/gpt2/tests/bench_train_p40.rs	MOE_SKIP_GPU_TESTS
 crates/gpt2/tests/convergence.rs	MOE_SKIP_GPU_TESTS
 crates/gpt2/tests/cpu_reg_parity.rs	BRAIN_GPT2_NAIVE_MM
 crates/gpt2/tests/cpu_reg_parity.rs	MOE_SKIP_GPU_TESTS
-crates/gpt2/tests/dp_parity.rs	BRAIN_OFFLOAD_ADAM
 crates/gpt2/tests/dp_parity.rs	MOE_SKIP_GPU_TESTS
 crates/gpt2/tests/dp_parity.rs	SHARD_TEST_GPUS
 crates/gpt2/tests/shard_parity.rs	MOE_SKIP_GPU_TESTS
@@ -794,8 +792,6 @@ crates/model/src/block.rs	BRAIN_NO_FLASH_CROSS
 crates/model/src/block.rs	BRAIN_TILE_BUDGET_WORDS
 crates/model/src/gdn.rs	BRAIN_NO_GDN_FAST
 crates/model/src/kv_tier.rs	<var>
-crates/model/src/parallel.rs	BRAIN_OFFLOAD_ADAM
-crates/model/src/shard.rs	BRAIN_OFFLOAD_ADAM
 crates/model/src/shard.rs	BRAIN_STREAM_SHARD
 crates/model/tests/kv_tier_decode_bench.rs	<name>
 crates/model/tests/matmul_rows.rs	BRAIN_NO_FASTCONV
@@ -877,9 +873,7 @@ crates/qwen3/src/caps.rs	BRAIN_QWEN_STEP_CACHE
 crates/qwen3/src/caps.rs	QWEN_TOKENIZER
 crates/qwen3/src/chat.rs	QWEN3_DIR
 crates/qwen3/src/eval.rs	QWEN_TOKENIZER
-crates/qwen3/src/finetune.rs	BRAIN_OFFLOAD_ADAM
 crates/qwen3/src/gguf_import.rs	MOE_SKIP_GPU_TESTS
-crates/qwen3/src/model.rs	BRAIN_OFFLOAD_ADAM
 crates/qwen3/src/model.rs	BRAIN_QWEN_NAIVE_MM
 crates/qwen3/src/model.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/src/model.rs	MOE_SKIP_GPU_TESTS
@@ -894,7 +888,6 @@ crates/qwen3/tests/chunked_head.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/tests/chunked_head.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/tests/deepseek_gguf_parity.rs	DEEPSEEK_CODER_GGUF_DIR
 crates/qwen3/tests/deepseek_parity.rs	MOE_SKIP_GPU_TESTS
-crates/qwen3/tests/dp_parity.rs	BRAIN_OFFLOAD_ADAM
 crates/qwen3/tests/dp_parity.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/tests/dp_parity.rs	SHARD_TEST_GPUS
 crates/qwen3/tests/encoder_parity.rs	BRAIN_QWEN3_4B
@@ -916,7 +909,6 @@ crates/qwen3/tests/head_tiled_backward.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/tests/head_tiled_backward.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/tests/hf_shard_source_real.rs	BRAIN_QWEN3_HF_DIR
 crates/qwen3/tests/integration_qwen3.rs	<k>
-crates/qwen3/tests/integration_qwen3.rs	BRAIN_OFFLOAD_ADAM
 crates/qwen3/tests/integration_qwen3.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/tests/integration_qwen3.rs	QWEN3_DIR
 crates/qwen3/tests/kv_offload_real.rs	BRAIN_QWEN3_CKPT
@@ -950,7 +942,6 @@ crates/qwen3/tests/step_timing.rs	QWEN3_DIR
 crates/qwen35/src/bin/import_profile.rs	BRAIN_QWEN35_DIR
 crates/qwen35/src/bin/qwen35_gguf_prefill_profile.rs	BRAIN_PREFILL_ARENA
 crates/qwen35/src/caps.rs	QWEN_TOKENIZER
-crates/qwen35/src/finetune.rs	BRAIN_OFFLOAD_ADAM
 crates/qwen35/src/gguf_import.rs	BRAIN_QWEN35_GGUF
 crates/qwen35/src/int8_gguf_resident.rs	<REAL_GGUF_ENV>
 crates/qwen35/src/int8_gguf_resident.rs	BRAIN_PREFILL_PROFILE_SKIP_TABLE
@@ -1073,7 +1064,6 @@ crates/qwen3tts/src/serve.rs	BRAIN_QWEN3TTS_CODEC
 crates/qwen3tts/src/serve.rs	BRAIN_QWEN3TTS_MTP
 crates/qwen3tts/src/serve.rs	BRAIN_QWEN3TTS_STREAM_CHUNK
 crates/qwen3tts/src/serve.rs	BRAIN_QWEN3TTS_STREAM_WIN
-crates/qwen3tts/src/sft.rs	BRAIN_OFFLOAD_ADAM
 crates/qwen3tts/tests/asr_roundtrip.rs	BRAIN_NEMOTRONASR
 crates/qwen3tts/tests/asr_roundtrip.rs	BRAIN_QWEN3TTS_CKPT
 crates/qwen3tts/tests/asr_roundtrip.rs	BRAIN_QWEN3TTS_WEIGHTS
@@ -1118,7 +1108,6 @@ crates/runtime/tests/yolo_detect.rs	MOE_SKIP_GPU_TESTS
 crates/s3dit/src/bin/zimage_bench.rs	BRAIN_S3DIT_DIT
 crates/s3dit/src/bin/zimage_bench.rs	BRAIN_S3DIT_LAYERS
 crates/s3dit/src/block.rs	BRAIN_S3DIT_FLASH
-crates/s3dit/src/finetune.rs	BRAIN_OFFLOAD_ADAM
 crates/s3dit/src/finetune.rs	BRAIN_S3DIT_ENCODER_GPU
 crates/s3dit/src/pipeline.rs	<k>
 crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_DIT
@@ -1154,7 +1143,6 @@ crates/sam1/tests/wgpu_real_weight_parity.rs	MOE_SKIP_GPU_TESTS
 crates/scrfd/src/caps.rs	BRAIN_SCRFD_DIR
 crates/sdk/src/chat_tokens.rs	QWEN_TOKENIZER
 crates/sdk/src/error.rs	BRAIN_FLUX2_ALLOW_NC
-crates/sdk/src/preference.rs	BRAIN_OFFLOAD_ADAM
 crates/sdk/tests/auto_pipeline.rs	BRAIN_MODELS_DIR
 crates/sdk/tests/creature.rs	BRAIN_CONNECTOME_DIR
 crates/sdk/tests/creature.rs	BRAIN_FLYBODY_XML
@@ -1255,7 +1243,6 @@ crates/timesfm3/tests/lora.rs	MOE_SKIP_GPU_TESTS
 crates/timesfm3/tests/parity.rs	BRAIN_TIMESFM3
 crates/timesfm3/tests/t0_param_layout.rs	BRAIN_TIMESFM3
 crates/toyautoencoder/src/model.rs	MOE_SKIP_GPU_TESTS
-crates/toyautoencoder/tests/dp_parity.rs	BRAIN_OFFLOAD_ADAM
 crates/toyautoencoder/tests/dp_parity.rs	MOE_SKIP_GPU_TESTS
 crates/toyautoencoder/tests/dp_parity.rs	SHARD_TEST_GPUS
 crates/toymoe/src/model.rs	DUMP_LOGITS

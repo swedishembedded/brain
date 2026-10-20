@@ -26,7 +26,8 @@ use crate::model::{pipelines, Qwen35, TrainOpts};
 /// Which fine-tuning scheme.
 #[derive(Clone, Debug)]
 pub enum Mode {
-    /// Every weight trainable; AdamW moments offloaded to system RAM (Role::Offload).
+    /// Every weight trainable. (This build keeps the AdamW moments on the device; only the
+    /// Qwen3 trainer has a host-resident optimiser.)
     FullOffload,
     /// Low-rank adapters on the 12 targetable projections (`crate::config::
     /// lora_targets`); base frozen.
@@ -48,18 +49,6 @@ pub fn finetune(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str) 
 /// `resume` with `out` missing (the very first cycle) falls back to the
 /// fresh-start path unchanged.
 pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool) -> std::io::Result<(f32, f32)> {
-    // BRAIN_OFFLOAD_ADAM is a process-global switch (the same convention
-    // `model::parallel`/`model::shard` use) -- save/restore the caller's prior
-    // value rather than clobbering it, so a nested or later call in the same
-    // process doesn't silently inherit this call's mode. This has to be set
-    // before `Qwen35::new_train_on` runs regardless of resume-vs-fresh: it
-    // governs Role::Offload vs Role::Trainable for a `FullOffload` build.
-    let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
-    match mode {
-        Mode::FullOffload => std::env::set_var("BRAIN_OFFLOAD_ADAM", "1"),
-        Mode::Lora { .. } => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
-    }
-
     let (cfg, init) = if resume && Path::new(out).exists() {
         // Resume: architecture + weights come from the checkpoint being
         // continued, not `base` - the adapter's (or full model's)
@@ -96,10 +85,6 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
     };
 
     let m = Qwen35::new_train_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &init);
-    match prev_off {
-        Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
-        None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
-    }
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen35>(train, val, bcfg, itos);
     let (report, _) = model::fit_controlled(m, obj, opts, Some(Path::new(out)), step_progress_control(&mut step_progress()))?;

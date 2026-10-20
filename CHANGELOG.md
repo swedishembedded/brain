@@ -6,6 +6,10 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- The environment variable `BRAIN_OFFLOAD_ADAM` is gone: whether a training build keeps the AdamW moments in host RAM is a scope of the building thread (`model::offload::with_adam_offloaded`), which the data-parallel and sharded trainers, the Qwen3 and Qwen3-TTS fine-tunes and the preference trainer now open themselves. Setting the variable no longer does anything (the Qwen35 and S3-DiT trainers that set it were never read by anything). The forecast residents select their card with a thread-scoped placement instead of writing `BRAIN_GPU_INDEX` into the process environment
+
 ## [3.0.0] - 2026-10-19
 
 ### Breaking Changes
@@ -21,7 +25,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ### Bug Fixes
 
-- A full fine-tune whose AdamW moments live in host RAM (`ChatFullFineTune`, the data-parallel and sharded trainers) no longer trains on gradients summed over steps: `ParamStore::zero_grads` left the offloaded parameters out of the clear, so from the second step each update used its own gradient plus all earlier ones. A full fine-tune run before this change followed that trajectory and is not reproduced by its seed now. Whether a Qwen3 training build offloads is now chosen per building thread (`qwen3::model::with_offloaded_adam`) instead of through the process-wide `BRAIN_OFFLOAD_ADAM`, which two concurrent trainings in one process could read from each other, so one seed gave two different runs; the variable stays the default. The grad-norm sum of the CPU backend adds its partials in a fixed order
+- A full fine-tune whose AdamW moments live in host RAM (`ChatFullFineTune`, the data-parallel and sharded trainers) no longer trains on gradients summed over steps: `ParamStore::zero_grads` left the offloaded parameters out of the clear, so from the second step each update used its own gradient plus all earlier ones. A full fine-tune run before this change followed that trajectory and is not reproduced by its seed now. Whether a Qwen3 training build offloads is now chosen per building thread (`model::offload::with_adam_offloaded`) instead of through the process-wide `BRAIN_OFFLOAD_ADAM`, which two concurrent trainings in one process could read from each other, so one seed gave two different runs. The grad-norm sum of the CPU backend adds its partials in a fixed order
 - Chat and preference training records are refused when a tool call id repeats within a conversation, or when a tool result answers no earlier call that is still unanswered (`data::chat::check_tool_pairing`, run by `messages_from_wire`, so `from_jsonl`, the preference reader and `qwen3 lora_train` refuse it with the line and the id, and by `ChatSample::encode_with`, so every in-memory training path does). A recorded agent run whose calls all shared one id used to give every call every result of the run
 - `brain serve` names tool calls `call_<hex>_<index>`, the hex drawn once per response, instead of `call_<index>`: two responses of a conversation used to both name their first call `call_0`, so a recorded run held many calls under one id. The id streamed on `tool_call_start` is the one the final `tool_calls` list reports (`ChatEvent::ToolCallStart` carries it)
 

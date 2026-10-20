@@ -570,11 +570,6 @@ fn longest(pairs: &[(EncodedTurn, EncodedTurn)]) -> usize {
 /// moments kept on the device so the run can be resumed exactly.
 fn lora_model(weights: &str, rank: u32, alpha: f32, opts: &model::FitOpts, start: &qwen3::finetune::LoraStart<'_>) -> Result<qwen3::finetune::Trained> {
     let (cfg, init) = qwen3::finetune::lora_start(weights, rank, alpha, opts.seed, start).map_err(|e| Error::Backend(format!("{weights}: {e}")))?;
-    let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
-    std::env::remove_var("BRAIN_OFFLOAD_ADAM");
-    let built = qwen3::finetune::build_trainer(cfg, opts, &init, gpu_core::select::Dtype::F32);
-    if let Some(v) = prev_off {
-        std::env::set_var("BRAIN_OFFLOAD_ADAM", v);
-    }
+    let built = model::offload::with_adam_offloaded(false, || qwen3::finetune::build_trainer(cfg, opts, &init, gpu_core::select::Dtype::F32));
     built.map_err(|e| Error::Backend(e.to_string()))
 }

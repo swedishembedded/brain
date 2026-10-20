@@ -612,24 +612,21 @@ impl<M: Shardable> Pipeline<M> {
 
     /// Build every stage with `make`, each on its shard's card.
     fn from_stages(cfg: M::Config, shards: Vec<Shard>, make: impl Fn(M::Config, Shard) -> M) -> Pipeline<M> {
-        let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
-        std::env::set_var("BRAIN_OFFLOAD_ADAM", "1"); // stages keep weight+grad on GPU; moments in RAM
-        let mut stages = Vec::with_capacity(shards.len());
-        for sh in &shards {
-            // Scoped (thread-local, race-free) placement on the shard's card;
-            // an ANY_GPU shard keeps the ambient selection.
-            let stage = if sh.gpu_index == Shard::ANY_GPU {
-                make(cfg.clone(), sh.clone())
-            } else {
-                gpu_core::devices::with_gpu(sh.gpu_index as u32, || make(cfg.clone(), sh.clone()))
-                    .unwrap_or_else(|e| panic!("pipeline stage placement: {e}"))
-            };
-            stages.push(stage);
-        }
-        match prev_off {
-            Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
-            None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
-        }
+        // Stages keep weight+grad on the GPU; the moments live in host RAM.
+        let stages: Vec<M> = crate::offload::with_adam_offloaded(true, || {
+            shards
+                .iter()
+                .map(|sh| {
+                    // Scoped (thread-local, race-free) placement on the shard's card;
+                    // an ANY_GPU shard keeps the ambient selection.
+                    if sh.gpu_index == Shard::ANY_GPU {
+                        make(cfg.clone(), sh.clone())
+                    } else {
+                        gpu_core::devices::with_gpu(sh.gpu_index as u32, || make(cfg.clone(), sh.clone())).unwrap_or_else(|e| panic!("pipeline stage placement: {e}"))
+                    }
+                })
+                .collect()
+        });
         // param name -> holder stage indices, in a stable (first-seen) order.
         let mut holders: Vec<(String, Vec<usize>)> = Vec::new();
         let mut idx: HashMap<String, usize> = HashMap::new();

@@ -391,8 +391,7 @@ fn qwen3_dataparallel_speedup() {
 
     // --- single-GPU baseline (offload AdamW = host grad-norm, the fast optimiser
     // here; on-GPU clip's single-threaded gradnorm_sq is far slower over 152k vocab) ---
-    std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
-    let single = Qwen::load(ps, b, t);
+    let single = model::offload::with_adam_offloaded(true, || Qwen::load(ps, b, t));
     let mut single_fb = 0f64;
     let mut one_step_single = |step: u32, meas: bool| {
         single.zero_grads();

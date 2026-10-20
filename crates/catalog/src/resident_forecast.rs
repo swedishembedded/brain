@@ -110,6 +110,16 @@ fn base_forecast_spec(summary: &str) -> ActionSpec {
 
 /// Hot-footprint RAM estimate for a weights file (~1.3× the on-disk size for the
 /// f32 unpack + index overhead), mirroring the depth resident.
+/// Run `load` with the card `device` names as this thread's device selection.
+/// The selection is the thread's, so concurrent activations on other cards
+/// cannot read each other's choice (the process environment can be, and was).
+fn on_device<R>(device: Device, load: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
+    match device {
+        Device::Gpu(i) => gpu_core::devices::with_gpu(i, load)?,
+        _ => load(),
+    }
+}
+
 fn file_ram(path: &str) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0).saturating_mul(13) / 10
 }
@@ -176,10 +186,7 @@ impl ResidentModel for Chronos2Resident {
         MemCost::new(r, r).with_npu(512 << 20)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if let Device::Gpu(i) = device {
-            std::env::set_var("BRAIN_GPU_INDEX", i.to_string());
-        }
-        let model = chronos2::model::Chronos2::load(&self.path)?;
+        let model = on_device(device, || chronos2::model::Chronos2::load(&self.path))?;
         if let Device::Npu(_) = device {
             return Ok(Box::new(Chronos2NpuInstance {
                 model,
@@ -339,10 +346,7 @@ impl ResidentModel for FincastResident {
         MemCost::new(r, r).with_npu(1536 << 20)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if let Device::Gpu(i) = device {
-            std::env::set_var("BRAIN_GPU_INDEX", i.to_string());
-        }
-        let model = fincast::model::Fincast::load(&self.path)?;
+        let model = on_device(device, || fincast::model::Fincast::load(&self.path))?;
         if let Device::Npu(_) = device {
             return Ok(Box::new(FincastNpuInstance {
                 model,
@@ -567,14 +571,11 @@ impl ResidentModel for KronosResident {
         MemCost::new(0, ram).with_npu(512 << 20)
     }
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if let Device::Gpu(i) = device {
-            std::env::set_var("BRAIN_GPU_INDEX", i.to_string());
-        }
         let decoder = decoder_from_key(&key.config).to_string();
         if !std::path::Path::new(&decoder).exists() {
             return Err(format!("kronos checkpoint not found: {decoder}"));
         }
-        let model = kronos::import::load_model(&self.tokenizer, &decoder)?;
+        let model = on_device(device, || kronos::import::load_model(&self.tokenizer, &decoder))?;
         if let Device::Npu(_) = device {
             return Ok(Box::new(KronosNpuInstance {
                 model,
@@ -1045,10 +1046,7 @@ impl ResidentModel for Timesfm3Resident {
         MemCost::new(r, r)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if let Device::Gpu(i) = device {
-            std::env::set_var("BRAIN_GPU_INDEX", i.to_string());
-        }
-        let forecaster = timesfm3::Timesfm3Forecaster::load(&self.path)?;
+        let forecaster = on_device(device, || timesfm3::Timesfm3Forecaster::load(&self.path))?;
         Ok(Box::new(Timesfm3Instance { forecaster }))
     }
 }

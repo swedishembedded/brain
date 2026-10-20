@@ -55,7 +55,6 @@ fn dp_grad_parity_autoencoder() {
         .collect();
 
     // Single-GPU reference: accumulate all K micro-batches.
-    std::env::remove_var("BRAIN_OFFLOAD_ADAM");
     let single = <Autoencoder as Model>::new(cfg.clone(), b, t, &init);
     single.zero_grads();
     for (x, y) in &mbs {

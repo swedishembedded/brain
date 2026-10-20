@@ -449,32 +449,10 @@ fn linear_kernel(m: usize, n: usize) -> (usize, gpu_core::Dispatch) {
 /// and a large fraction of the card's fp32 peak) once both output dims fill a
 /// 128-tile, else naive. Small
 /// LoRA-rank matmuls fall back automatically. `BRAIN_QWEN_NAIVE_MM=1` forces naive.
-/// Full fine-tuning with AdamW moments offloaded to system RAM: what the
-/// innermost [`with_offloaded_adam`] scope of this thread says, else
-/// `BRAIN_OFFLOAD_ADAM=1`.
+/// Full fine-tuning with the AdamW moments offloaded to system RAM: the
+/// building thread's [`model::offload::with_adam_offloaded`] choice.
 fn offload_adam() -> bool {
-    OFFLOAD_SCOPE.with(std::cell::Cell::get).unwrap_or_else(|| std::env::var("BRAIN_OFFLOAD_ADAM").map(|v| v != "0").unwrap_or(false))
-}
-
-std::thread_local! {
-    static OFFLOAD_SCOPE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Run `build` (which constructs a [`Qwen`] for training) with the AdamW
-/// moments offloaded to system RAM, or not, as `offloaded` says. The choice is
-/// this thread's and ends with the call: the process environment is shared by
-/// every training running in the process, and setting then restoring a
-/// variable there let one run's build read another's setting, so two runs of
-/// one seed trained with different optimisers.
-pub fn with_offloaded_adam<R>(offloaded: bool, build: impl FnOnce() -> R) -> R {
-    struct Restore(Option<bool>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            OFFLOAD_SCOPE.with(|s| s.set(self.0));
-        }
-    }
-    let _restore = Restore(OFFLOAD_SCOPE.with(|s| s.replace(Some(offloaded))));
-    build()
+    model::offload::adam_offloaded()
 }
 
 /// Storage-binding offset alignment, in f32 words. WebGPU's
@@ -5351,25 +5329,6 @@ mod rollout_tests {
 /// A batch's loss is a sum over its supervised tokens divided by a count:
 /// its own by default, or the one a caller names so that several batches
 /// accumulated into one step share a single denominator.
-#[cfg(test)]
-mod offload_scope_tests {
-    use super::*;
-
-    /// A run's choice of optimiser must not be visible to a run building on
-    /// another thread, and must end with its own build.
-    #[test]
-    fn the_offload_choice_belongs_to_the_building_thread() {
-        let default = offload_adam();
-        with_offloaded_adam(!default, || {
-            assert_eq!(offload_adam(), !default);
-            assert_eq!(std::thread::spawn(offload_adam).join().unwrap(), default, "another thread sees the process default");
-            with_offloaded_adam(default, || assert_eq!(offload_adam(), default));
-            assert_eq!(offload_adam(), !default, "the outer scope is restored");
-        });
-        assert_eq!(offload_adam(), default);
-    }
-}
-
 #[cfg(test)]
 mod loss_denominator_tests {
     use super::*;
