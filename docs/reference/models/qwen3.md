@@ -225,12 +225,13 @@ everything about HOW to serve it is a `brain serve` flag:
   auto-sizes it to the target device's real usable VRAM instead of a fixed
   number, so raising the ceiling normally means freeing VRAM (or adding a
   card), not passing this flag. Set it to pin an exact value instead of the
-  auto-picked one. Neither the auto-sized nor an explicit value is capped at
-  the checkpoint's own trained context: going past it derives a YaRN
-  (arXiv 2309.00071) RoPE scaling automatically (`factor = ctx / native`,
-  the same ratio a real long-context checkpoint's own `rope_scaling` key
-  would carry) - a checkpoint that already declares one is never
-  second-guessed.
+  auto-picked one. The auto-sized value never exceeds the checkpoint's
+  declared `max_position_embeddings`; an explicit value past it derives a
+  YaRN (arXiv 2309.00071) RoPE scaling (Qwen's published recipe: `factor =
+  ctx / pretrained window`, the pretrained window being the largest power of
+  two not above the declared one, so `--qwen-ctx 131072` on Qwen3 is factor
+  4.0 over 32768) - a checkpoint that already declares one is never
+  second-guessed. YaRN rescales every request, short ones included.
 - `--qwen-max-batch N` - concurrent serving batch slots (default 16).
 - `--qwen-kv-tokens N` - KV pool size in tokens, shared by every sequence
   and by the prompt-prefix cache (default: room for `--qwen-max-batch` half-context histories when

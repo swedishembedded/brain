@@ -567,6 +567,15 @@ fn serve_weight_bytes(cfg: &QwenServeConfig, checkpoint: &qwen3::config::QwenCon
 /// line, not an arbitrary byte-granularity sweep result.
 const AUTO_CTX_TIERS: &[u32] = &[2048, 4096, 8192, 16384, 24576, 32768, 40960, 49152, 65536, 98304, 131072, 196608, 262144];
 
+/// The context length a checkpoint was pretrained on, the `original` of a YaRN
+/// extension, from its declared `max_position_embeddings`: the largest power
+/// of two not above it. Qwen3 declares 40960 for a model pretrained on 32768
+/// (the extra 8192 is generation headroom); every other window this serves is
+/// itself a power of two, which this leaves unchanged.
+fn pretrained_window(max_position_embeddings: u32) -> u32 {
+    1 << (u32::BITS - 1 - max_position_embeddings.max(1).leading_zeros())
+}
+
 /// Upper bound, in tokens, of the default pool's room for `max_batch`
 /// half-context histories (see [`QwenResident::fleet_pool_tokens`]): 1M
 /// tokens, about 74 GB of int8 KV on the 8B, far beyond any card's budget
@@ -669,6 +678,13 @@ impl PoolProfile {
 /// The largest tier in [`AUTO_CTX_TIERS`] that both fits `budget_bytes` and
 /// stays bindable, given `weight_bytes` is fixed (independent of `ctx`).
 ///
+/// Auto-sizing never goes past the window the checkpoint declares
+/// (`max_position_embeddings`; the smallest tier is always allowed): a context
+/// beyond it is served with a derived YaRN scaling that rescales every
+/// request, short ones included, so it is something an operator asks for with
+/// `--qwen-ctx`, never something a large card hands out silently (knowledge
+/// #338).
+///
 /// Fitting the budget was once the only test, which let this choose a ctx no
 /// driver would bind - total VRAM and per-binding size are independent limits,
 /// and a KV pool spread over many layers can clear the first while any single
@@ -680,7 +696,7 @@ impl PoolProfile {
 /// assumption. `activate()` re-checks with the real answer.
 fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config::QwenConfig, max_batch: u32, max_prefill_cap: u32, kv_tokens: Option<u32>, kv_int8: bool, offload: bool) -> u32 {
     let mut best = AUTO_CTX_TIERS[0];
-    for &ctx in AUTO_CTX_TIERS {
+    for &ctx in AUTO_CTX_TIERS.iter().take_while(|&&t| t <= cfg.max_position_embeddings.max(AUTO_CTX_TIERS[0])) {
         let profile = PoolProfile::at_ctx(cfg, ctx, max_batch, max_prefill_cap, kv_tokens, kv_int8, offload, qwen3::serve::FusedAttention::default());
         if profile.total(weight_bytes) <= budget_bytes && profile.bindings_fit() {
             best = ctx;
@@ -847,11 +863,10 @@ impl QwenResident {
     /// `cfg.ctx` verbatim when the operator named one explicitly
     /// (`--qwen-ctx`); else, when `cfg.auto_budget_bytes` names a real
     /// device budget (only `brain serve`'s own caller ever does), the
-    /// largest [`AUTO_CTX_TIERS`] entry whose real total fits it - no longer
-    /// capped at the checkpoint's own trained `max_position_embeddings`
-    /// (see [`apply_yarn_if_serving_past_native`], called from `activate`,
-    /// for what makes serving past it a real, not just a memory-shaped,
-    /// capability); else the historical 24576 default, unchanged. Must never
+    /// largest [`AUTO_CTX_TIERS`] entry whose real total fits it, capped at the
+    /// checkpoint's own `max_position_embeddings` (serving past it is an
+    /// explicit `--qwen-ctx`, which [`apply_yarn_if_serving_past_native`],
+    /// called from `activate`, backs with YaRN); else the historical 24576 default, unchanged. Must never
     /// itself hard-fail - a checkpoint this can't open just falls back to
     /// the historical default and defers the real, specific error to
     /// `activate`'s own open, exactly like `estimate` already does.
@@ -875,11 +890,19 @@ impl QwenResident {
 
     /// Give `cfg` a derived [`model::yarn::YarnConfig`] when `ctx` (the KV
     /// pool `activate` is actually about to build - `self.ctx`, whether from
-    /// `--qwen-ctx` or auto-sizing) exceeds the checkpoint's own trained
-    /// `max_position_embeddings` and nothing already named a scaling - the
-    /// same `extended / original` ratio HF's own `config.json` producers use
-    /// for `rope_scaling.factor`. A checkpoint that already declares its own
-    /// `rope_scaling` (a real long-context release) is never second-guessed.
+    /// `--qwen-ctx` or auto-sizing) exceeds the checkpoint's declared
+    /// `max_position_embeddings` and nothing already named a scaling. A
+    /// checkpoint that already declares its own `rope_scaling` (a real
+    /// long-context release) is never second-guessed.
+    ///
+    /// The scaling is Qwen's published recipe (`rope_type: yarn`, `factor:
+    /// 4.0`, `original_max_position_embeddings: 32768` for 131072 tokens on
+    /// Qwen3): `original` is the window the model was PRETRAINED on
+    /// ([`pretrained_window`]), not the declared `max_position_embeddings`
+    /// (Qwen3 declares 40960 = 32768 + 8192 of generation headroom), and
+    /// `factor` is `ctx / original`, so `--qwen-ctx 131072` on a Qwen3 is
+    /// exactly the recipe. Deriving against 40960 instead gave factor 3.2 and
+    /// a different correction range (knowledge #338).
     ///
     /// A DELIBERATE, resident-level decision, not something `qwen3::serve`
     /// derives on its own from its pool-sizing parameters: an `Engine`
@@ -890,13 +913,11 @@ impl QwenResident {
     /// into YaRN by accident. Only `activate`'s own `ctx` - `resolve_ctx`'s
     /// real output, `--qwen-ctx`/auto-sizing's own answer - means that.
     fn apply_yarn_if_serving_past_native(cfg: &mut qwen3::config::QwenConfig, ctx: u32) {
-        if cfg.rope_scaling.is_some() {
+        if cfg.rope_scaling.is_some() || ctx <= cfg.max_position_embeddings.max(1) {
             return;
         }
-        let native = cfg.max_position_embeddings.max(1);
-        if ctx > native {
-            cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(ctx as f32 / native as f32, native)));
-        }
+        let original = pretrained_window(cfg.max_position_embeddings);
+        cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(ctx as f32 / original as f32, original)));
     }
 
     /// The adapters this base offers.
@@ -1558,20 +1579,51 @@ mod tests {
         }
     }
 
-    /// `ctx` past the native window derives a real `YarnConfig` whose
-    /// `factor` is exactly `ctx / native` (HF's own `config.json` ratio) and
-    /// whose `original_max_position_embeddings` is the checkpoint's real
-    /// native window, not the requested `ctx`.
+    /// The real Qwen3 shape: declared window 40960 (32768 pretrained + 8192 of
+    /// generation headroom). Serving it at 131072 must be Qwen's published
+    /// recipe - factor 4.0 over `original_max_position_embeddings` 32768, not
+    /// 131072 / 40960 = 3.2 - and that recipe's frequency table must be the
+    /// reference one (`model::yarn`'s pinned oracle, attention factor
+    /// 0.1 ln 4 + 1). `--qwen-ctx 131072` on a checkpoint that spells the
+    /// recipe out in its own config.json (b8's needle run) and on one that
+    /// does not must therefore compute the same rotation.
     #[test]
-    fn apply_yarn_if_serving_past_native_derives_the_extended_over_original_ratio() {
+    fn serving_a_qwen3_at_128k_derives_qwens_published_yarn_recipe() {
         let mut cfg = qwen3::config::QwenConfig::qwen3_8b();
-        let native = cfg.max_position_embeddings;
-        cfg.rope_scaling = None;
-        let ctx = native * 4;
-        QwenResident::apply_yarn_if_serving_past_native(&mut cfg, ctx);
+        cfg.max_position_embeddings = 40960;
+        QwenResident::apply_yarn_if_serving_past_native(&mut cfg, 131072);
         let Some(model::rope_scaling::RopeScaling::Yarn(y)) = cfg.rope_scaling else { panic!("ctx past native must derive a YaRN scaling") };
-        assert_eq!(y.factor, 4.0);
-        assert_eq!(y.original_max_position_embeddings, native);
+        let published = model::yarn::YarnConfig::new(4.0, 32768);
+        assert_eq!(y, published);
+        let (freq, af) = model::yarn::scaled_inv_freq(cfg.head_dim, cfg.rope_theta, &y);
+        let (want_freq, want_af) = model::yarn::scaled_inv_freq(128, 1.0e6, &published);
+        assert_eq!(freq, want_freq);
+        assert_eq!(af, want_af);
+        assert!((af - 1.1386294).abs() < 1e-5, "attention factor {af}");
+    }
+
+    /// Other extensions scale the pretrained window by `ctx / original`, and a
+    /// declared window that is itself a power of two is the pretrained one.
+    #[test]
+    fn yarn_factor_is_ctx_over_the_pretrained_window() {
+        for (declared, ctx, want_factor, want_original) in [(40960u32, 65536u32, 2.0f32, 32768u32), (32768, 131072, 4.0, 32768), (131072, 262144, 2.0, 131072), (4096, 8192, 2.0, 4096)] {
+            let mut cfg = qwen3::config::QwenConfig::qwen3_8b();
+            cfg.max_position_embeddings = declared;
+            QwenResident::apply_yarn_if_serving_past_native(&mut cfg, ctx);
+            let Some(model::rope_scaling::RopeScaling::Yarn(y)) = cfg.rope_scaling else { panic!("declared {declared} ctx {ctx}: no YaRN") };
+            assert_eq!((y.factor, y.original_max_position_embeddings), (want_factor, want_original), "declared {declared} ctx {ctx}");
+        }
+    }
+
+    /// Auto-sizing must not hand out a context past the declared window: that
+    /// would switch YaRN on for every request of a server nobody asked to
+    /// extend (128k stays an explicit `--qwen-ctx` until verified).
+    #[test]
+    fn auto_sizing_stops_at_the_declared_window_however_big_the_budget() {
+        let mut cfg = qwen3::config::QwenConfig::qwen3_0_6b();
+        cfg.max_position_embeddings = 40960;
+        let ctx = auto_ctx_for_budget(0, u64::MAX / 4, &cfg, 16, 512, None, true, false);
+        assert_eq!(ctx, 40960);
     }
 
     /// A checkpoint that already names its own `rope_scaling` (a real
@@ -1863,7 +1915,8 @@ mod tests {
     /// a wgpu validation panic on a lane, mid-request, rather than a refusal.
     #[test]
     fn auto_sizing_never_picks_a_ctx_the_binding_guard_would_refuse() {
-        let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
+        let mut cfg = qwen3::config::QwenConfig::qwen3_0_6b();
+        cfg.max_position_embeddings = 262144;
         let (max_batch, max_prefill_cap) = (16u32, 512u32);
         // A budget far past any real card, so the binding limit is the only
         // thing that can bound the answer.
@@ -1883,7 +1936,8 @@ mod tests {
     /// that context with it, or the first preemption allocates past the budget.
     #[test]
     fn auto_sizing_leaves_room_for_the_swap_staging_when_offload_is_on() {
-        let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
+        let mut cfg = qwen3::config::QwenConfig::qwen3_0_6b();
+        cfg.max_position_embeddings = 262144;
         let (max_batch, max_prefill_cap) = (16u32, 512u32);
         let fused = qwen3::serve::FusedAttention::default();
         let tier = AUTO_CTX_TIERS[3];
