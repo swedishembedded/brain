@@ -29,7 +29,7 @@ RULES = [
     ("GDN chain", {"bmm_tiled", "kv_expand", "nchw_nlc", "nlc_nchw"},
      ("gdn_", "native:brain_gdn_", "l2norm_scale", "conv1d"), ("cumsum", "mask", "decay")),
     ("library GEMM", {"library_gemm"}, ("matmul_",), ()),
-    ("NF4 dequant", set(), ("nf4_dequant",), ()),
+    ("weight dequant", set(), ("nf4_dequant", "weight_dequant"), ()),
     ("RMSNorm", set(), ("rmsnorm", "rms_norm", "add_rms"), ()),
     ("attention element-wise", set(),
      ("flash_", "attn_", "softmax_rows", "rope", "gqa_"), ()),

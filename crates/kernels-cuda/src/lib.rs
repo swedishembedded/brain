@@ -1436,20 +1436,20 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/cast_f32_bf16.cu"),
     },
     CudaKernel {
-        name: "nf4_dequant_bf16",
+        name: "weight_dequant_bf16",
         op: Op::Elementwise,
-        weight: Dtype::NF4,
+        weight: Dtype::BF16,
         by_name: true,
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
-        entry: "brain_nf4_dequant_bf16",
-        what: "an NF4 weight window (eight codes a word, one scale per 32 weights) decoded to a bf16 scratch for a tensor-core GEMM, a thread per packed word",
-        reported: "native:nf4_dequant_bf16",
+        entry: "brain_weight_dequant_bf16",
+        what: "a window of rows of any packed weight tier (bf16, f16, int8, int4, NF4, FP8 E4M3/E5M2, Q4_K/Q5_K/Q6_K) decoded to a bf16 scratch for a tensor-core GEMM, a thread per eight weights",
+        reported: "native:weight_dequant_bf16",
         block_dim: 256,
-        // 256 packed words (2048 weights) per block.
+        // 256 threads of eight weights (2048 weights) per block.
         tile: (1, 256),
         shared_bytes: 0,
-        src: include_str!("../cu/nf4_dequant_bf16.cu"),
+        src: include_str!("../cu/weight_dequant_bf16.cu"),
     },
     CudaKernel {
         name: "gdn_chunk_loop_train_f32",

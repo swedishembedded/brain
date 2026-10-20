@@ -161,7 +161,17 @@ layer 6 - serving, front ends, SDK, samples
                            scale hierarchy over the checkpoint crate's QuantEncoding;
                            f32/bf16/int8/fp8-E4M3 tiers) with
                            its generic calibration interface (kvcalib), and
-                           the multi-GPU parallelism layer (see below)
+                           the multi-GPU parallelism layer (see below).
+                           `ops::Weight` is the one resident-weight type (f32,
+                           bf16, f16, int8, int4, NF4, FP8 E4M3/E5M2, K-quants)
+                           and `ops::tiled` is its quantized-execution
+                           contract: forward, input gradient and weight
+                           gradient (fp32 or bf16) for EVERY tier through one
+                           entry point, a bounded tile decode (`kernels`'
+                           `weight_decode`, one kernel for all tiers) feeding
+                           the dense tensor-core GEMM of `gpu-core`'s library
+                           provider. Model crates call `Ops`; none picks a
+                           kernel by storage format
    promote                 the model-agnostic promote/reject decision: the
                            Environment/Verifier reward seam, the exact paired
                            sign test, the four-bar gate over already-scored

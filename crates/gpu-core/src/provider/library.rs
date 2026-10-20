@@ -41,6 +41,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use backend_api::{BindKind, LibraryDtype, LibraryGemm};
+use kernels::template::DecodeFormat;
 
 use crate::{DeviceBuffer, Gpu, Step};
 
@@ -103,7 +104,14 @@ const MAX_SCRATCH_BYTES: u64 = 2 << 30;
 
 const CAST_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
 const SILU_MUL_BF16_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
-const NF4_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+const DEQUANT_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
 
 /// Serves the bf16-weight GEMMs of one device through the vendor library when
 /// [`decide`] chose it; otherwise answers `false` to every request.
@@ -115,6 +123,29 @@ pub struct LibraryGemmProvider {
     tf32: bool,
     /// The caller pinned the exact fp32 tier (it also bars the native fp16 attention kernels).
     reference: bool,
+}
+
+/// A window of rows of a packed weight to decode ([`LibraryGemmProvider::dequant_bf16`]): the planes the
+/// tier stores, bound at their ranges (a tier leaves the planes it does not use bound to any buffer).
+pub struct Dequant<'a> {
+    /// Which stored layout `codes` and the planes follow (`weight_decode.wgsl` documents each).
+    pub format: DecodeFormat,
+    /// The packed codes.
+    pub codes: Operand<'a>,
+    /// f32 scales (int8/int4/NF4/Q6_K groups, FP8 block grid).
+    pub scales: Operand<'a>,
+    /// Packed per-group sub-scales (affine K-quant).
+    pub sub_scales: Operand<'a>,
+    /// Packed per-super-block scales (affine K-quant).
+    pub super_scales: Operand<'a>,
+    /// First row of the window.
+    pub row0: u32,
+    /// Rows in the window.
+    pub rows: u32,
+    /// Row width.
+    pub k: u32,
+    /// FP8 scale block edge (1 for the other tiers).
+    pub block: u32,
 }
 
 /// A product operand: a buffer and the `(word offset, word length)` it binds.
@@ -177,25 +208,62 @@ impl LibraryGemmProvider {
     /// bf16 buffer and push the step. The result is a whole-buffer bf16 weight
     /// for [`Self::forward`] / [`Self::dx`], valid until the step has run.
     /// `None` when the device declines the decode kernel or the window is not a
-    /// whole number of 32-weight groups.
+    /// whole number of 32-weight groups. [`Self::dequant_bf16`] with the NF4 format.
     pub fn dequant_nf4(&self, gpu: &Gpu, steps: &mut Vec<Step>, packed: &Operand, scales: &Operand, elems: u64) -> Option<DeviceBuffer> {
-        if !self.is_active() || elems == 0 || !elems.is_multiple_of(32) || elems > MAX_SCRATCH_BYTES / 2 {
+        if !elems.is_multiple_of(32) || elems > u32::MAX as u64 || !self.can_dequant_bf16(1, elems as u32) {
             return None;
         }
-        let words = elems / 8;
-        let kernel = kernels_cuda::get("nf4_dequant_bf16")?;
-        let id = gpu.native_kernel(kernel, NF4_BINDINGS)?;
-        // The decode kernel writes every one of the `elems / 2` words, so the clear `storage` would add is skipped.
+        let unused = Operand { buf: packed.buf, range: (0, 0) };
+        let window = Dequant {
+            format: DecodeFormat::Nf4,
+            codes: Operand { buf: packed.buf, range: packed.range },
+            scales: Operand { buf: scales.buf, range: scales.range },
+            sub_scales: Operand { buf: unused.buf, range: unused.range },
+            super_scales: Operand { buf: unused.buf, range: unused.range },
+            row0: 0,
+            rows: 1,
+            k: elems as u32,
+            block: 1,
+        };
+        // The decode kernel writes every word, so the clear `storage` would add is skipped.
         let out = gpu.storage_uninit(elems / 2);
+        self.dequant_bf16(gpu, steps, &window, &out).then_some(out)
+    }
+
+    /// Whether [`Self::dequant_bf16`] takes a window of `rows` rows of width `k`: the device runs the
+    /// tensor-core path, `k` is a multiple of 8 and the bf16 window fits the scratch cap.
+    pub fn can_dequant_bf16(&self, rows: u32, k: u32) -> bool {
+        let elems = rows as u64 * k as u64;
+        self.is_active() && elems > 0 && k.is_multiple_of(8) && elems * 2 <= MAX_SCRATCH_BYTES
+    }
+
+    /// Decode rows `row0 .. row0 + rows` of a packed weight of any tier ([`DecodeFormat`]) into `out`, a
+    /// bf16 buffer of at least `rows * k / 2` words, and push the step: the operand a tensor-core GEMM
+    /// reads in place of the packed bytes. The caller owns `out`, so a loop over row tiles reuses one
+    /// scratch whatever the size of the tensor. `false` (nothing pushed) when [`Self::can_dequant_bf16`]
+    /// says no or the device declines the kernel.
+    pub fn dequant_bf16(&self, gpu: &Gpu, steps: &mut Vec<Step>, d: &Dequant, out: &DeviceBuffer) -> bool {
+        if !self.can_dequant_bf16(d.rows, d.k) {
+            return false;
+        }
+        let elems = d.rows as u64 * d.k as u64;
+        let Some(kernel) = kernels_cuda::get("weight_dequant_bf16") else { return false };
+        let Some(id) = gpu.native_kernel(kernel, DEQUANT_BINDINGS) else { return false };
+        let params = [d.format as u32, d.row0, d.rows, d.k, d.block, d.k.div_ceil(d.block.max(1)), d.k.div_ceil(32).div_ceil(2), d.k.div_ceil(256)];
         let step = gpu.step_native_sliced(
             id,
-            &[packed.buf, scales.buf, &out],
-            &[(packed.range.0, words), (scales.range.0, elems / 32), (0, 0)],
-            &[words as u32],
-            kernel.blocks_for(1, words as u32),
-        )?;
-        steps.push(step);
-        Some(out)
+            &[d.codes.buf, d.scales.buf, d.sub_scales.buf, d.super_scales.buf, out],
+            &[d.codes.range, d.scales.range, d.sub_scales.range, d.super_scales.range, (0, 0)],
+            &params,
+            kernel.blocks_for(1, (elems / 8) as u32),
+        );
+        match step {
+            Some(step) => {
+                steps.push(step);
+                true
+            }
+            None => false,
+        }
     }
 
     /// `y[m, n] = x[m, k] @ W[n, k]^T` for a bf16 `w`, with the activation
@@ -255,6 +323,17 @@ impl LibraryGemmProvider {
         // Row-major `dx = dy W` is column-major `dx^T[k, m] = W[k, n] dy^T[n, m]`.
         let gemm = Self::tf32_product(false, m, k, n, k, n, k, if accumulate { 1.0 } else { 0.0 });
         self.tf32_step(gpu, steps, &gemm, &[w, dy, dx])
+    }
+
+    /// `dw[n, k] (+)= dy[m, n]^T @ x[m, k]` as [`Self::forward_tf32`] multiplies: the weight gradient of a
+    /// linear, fp32 in and out, TF32 on the tensor cores; `accumulate` adds to `dw`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dw_tf32(&self, gpu: &Gpu, steps: &mut Vec<Step>, dy: &Operand, x: &Operand, dw: &Operand, m: u32, n: u32, k: u32, accumulate: bool) -> bool {
+        // Row-major `dw = dy^T x` is column-major `dw^T[k, n] = x[k, m] dy[n, m]^T` (x and dy as stored are
+        // column-major `[k, m]` and `[n, m]`).
+        let mut gemm = Self::tf32_product(false, n, k, m, k, n, k, if accumulate { 1.0 } else { 0.0 });
+        gemm.trans_b = true;
+        self.tf32_step(gpu, steps, &gemm, &[x, dy, dw])
     }
 
     /// The column-major product of `forward_tf32`/`dx_tf32`: `C[rows, cols] = op(A) B` over `depth`.

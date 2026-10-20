@@ -227,6 +227,66 @@ fn nf4_lut_fn() -> String {
     format!("fn nf4_lut(c: u32) -> f32 {{ return {}; }}\n\n", tree(0, 16))
 }
 
+/// The stored tiers `wgsl/weight_decode.wgsl` decodes, with the `FMT` constant each one selects.
+/// The discriminants are the contract with that file and with `model::ops`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecodeFormat {
+    Bf16 = 0,
+    F16 = 1,
+    I8 = 2,
+    Q4 = 3,
+    Nf4 = 4,
+    Fp8E4m3 = 5,
+    Fp8E5m2 = 6,
+    /// Affine K-quant with 4-bit codes (Q4_K).
+    KqAffine4 = 7,
+    /// Affine K-quant with 8-bit code slots (Q5_K).
+    KqAffine8 = 8,
+    /// Symmetric K-quant, 16-element groups (Q6_K).
+    KqSym8 = 9,
+}
+
+impl DecodeFormat {
+    /// Every format, in discriminant order.
+    pub const ALL: [DecodeFormat; 10] = [
+        DecodeFormat::Bf16,
+        DecodeFormat::F16,
+        DecodeFormat::I8,
+        DecodeFormat::Q4,
+        DecodeFormat::Nf4,
+        DecodeFormat::Fp8E4m3,
+        DecodeFormat::Fp8E5m2,
+        DecodeFormat::KqAffine4,
+        DecodeFormat::KqAffine8,
+        DecodeFormat::KqSym8,
+    ];
+
+    /// The registered kernel name of this format's variant of `weight_decode`.
+    pub fn kernel_name(self) -> String {
+        variant_name("weight_decode", &[("FMT", self as u32)])
+    }
+}
+
+/// One `weight_decode` kernel per [`DecodeFormat`]: the template source with the NF4 codebook and the
+/// FP8 decode expressions rendered in (single sources: [`NF4_CODEBOOK`], [`f8e4m3_decode_expr`],
+/// [`f8e5m2_decode_expr`]) and `FMT` set. Named by [`DecodeFormat::kernel_name`].
+pub fn weight_decode_variants() -> Vec<Variant> {
+    static FILLED: OnceLock<&'static str> = OnceLock::new();
+    let filled: &'static str = FILLED.get_or_init(|| {
+        let fp8 = format!(
+            "fn fp8_e4m3(b: u32) -> f32 {{ return {}; }}\n\nfn fp8_e5m2(b: u32) -> f32 {{ return {}; }}\n",
+            f8e4m3_decode_expr("b"),
+            f8e5m2_decode_expr("b")
+        );
+        let src = crate::WEIGHT_DECODE.replace("//@NF4_LUT@", nf4_lut_fn().trim_end()).replace("//@FP8_FNS@", fp8.trim_end());
+        Box::leak(src.into_boxed_str())
+    });
+    DecodeFormat::ALL
+        .iter()
+        .map(|&f| interned("weight_decode", filled, &[("FMT", f as u32)]).expect("weight_decode.wgsl has the FMT constant"))
+        .collect()
+}
+
 /// The weight-only NF4 sibling of [`int8_weight_variant`]: rewrites the f32
 /// weight binding `binding` of a matrix kernel into a packed 4-bit one - eight
 /// codes to a `u32` word, code `b` at bits `4b` (`model::lut4`'s layout) - and

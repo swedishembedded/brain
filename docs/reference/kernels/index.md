@@ -55,6 +55,7 @@ load of it must already be bare-identifier-indexed.
 
 | kernel | what it does | how | opt | cpu | gpu | npu | quant | dtype |
 |---|---|---|---|---|---|---|---|---|
+| [`accum_bf16`](../../../crates/kernels/wgsl/accum_bf16.wgsl) | Add an f32 tile into a packed bf16 gradient buffer (round to nearest even) and clear the tile | one thread per packed word (two elements), so no two threads share a word | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`adaln_row`](../../../crates/kernels/wgsl/adaln_row.wgsl) | Extract one row of a per-token adaLN table and add a per-block table row | one thread per output element, gathering the token's own table row | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`adamw`](../../../crates/kernels/wgsl/adamw.wgsl) | AdamW update (decoupled weight decay) fused with grad unscale/clip, matching torch.optim.AdamW + clip_grad_norm_ | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`adaptive_avgpool2d`](../../../crates/kernels/wgsl/adaptive_avgpool2d.wgsl) | torch adaptive_avg_pool2d (forward) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
@@ -623,6 +624,7 @@ load of it must already be bare-identifier-indexed.
 | [`upsample2_dx`](../../../crates/kernels/wgsl/upsample2_dx.wgsl) | Nearest-neighbour x2 upsample backward, GATHER form | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`vq_argmax_dot`](../../../crates/kernels/wgsl/vq_argmax_dot.wgsl) | Vector-quantization nearest-codebook assignment (COSINE similarity), used by GenieRedux-style tokenizers with `use_cosine_sim=True` | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | int8 | f32 |
 | [`vq_argmin`](../../../crates/kernels/wgsl/vq_argmin.wgsl) | Vector-quantization nearest-codebook assignment (Euclidean) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | int8 | f32 |
+| [`weight_decode`](../../../crates/kernels/wgsl/weight_decode.wgsl) | Decode a window of rows of any packed weight tier (bf16, f16, int8, int4, NF4, FP8 E4M3/E5M2, K-quant) to a dense f32 tile | one thread per decoded element, format chosen by the FMT template constant | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`weighted_gap`](../../../crates/kernels/wgsl/weighted_gap.wgsl) | Weighted global average pool | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`weighted_gap_dm`](../../../crates/kernels/wgsl/weighted_gap_dm.wgsl) | weighted_gap gradient wrt the WEIGHT MAP | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`weighted_gap_dx`](../../../crates/kernels/wgsl/weighted_gap_dx.wgsl) | weighted_gap gradient wrt the FEATURE MAP | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |

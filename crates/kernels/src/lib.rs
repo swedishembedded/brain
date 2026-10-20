@@ -40,6 +40,8 @@
 /// Kernel specialisation: one source, tunable constants (S3).
 pub mod template;
 
+/// `wgsl/accum_bf16.wgsl`
+pub const ACCUM_BF16: &str = include_str!("../wgsl/accum_bf16.wgsl");
 /// `wgsl/adaln_row.wgsl`
 pub const ADALN_ROW: &str = include_str!("../wgsl/adaln_row.wgsl");
 /// `wgsl/adamw.wgsl`
@@ -1281,6 +1283,10 @@ pub const UPSAMPLE2_DX: &str = include_str!("../wgsl/upsample2_dx.wgsl");
 pub const VQ_ARGMAX_DOT: &str = include_str!("../wgsl/vq_argmax_dot.wgsl");
 /// `wgsl/vq_argmin.wgsl`
 pub const VQ_ARGMIN: &str = include_str!("../wgsl/vq_argmin.wgsl");
+/// `wgsl/weight_decode.wgsl`: the tile decode of every packed weight tier. It is a template (its
+/// `//@..@` markers are filled in by [`template::weight_decode_variants`]), not a standalone shader,
+/// so it is not listed in [`ALL`].
+pub const WEIGHT_DECODE: &str = include_str!("../wgsl/weight_decode.wgsl");
 /// `wgsl/weighted_gap.wgsl`
 pub const WEIGHTED_GAP: &str = include_str!("../wgsl/weighted_gap.wgsl");
 /// `wgsl/weighted_gap_dm.wgsl`
@@ -1290,6 +1296,7 @@ pub const WEIGHTED_GAP_DX: &str = include_str!("../wgsl/weighted_gap_dx.wgsl");
 
 /// Every kernel as `(name, source)`, name = file stem.
 pub const ALL: &[(&str, &str)] = &[
+    ("accum_bf16", ACCUM_BF16),
     ("adaln_row", ADALN_ROW),
     ("adamw", ADAMW),
     ("adaptive_avgpool2d", ADAPTIVE_AVGPOOL2D),

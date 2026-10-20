@@ -113,6 +113,101 @@ pub fn dequant_block128(raw: &[f32], scale_inv: &[f32], rows: usize, cols: usize
 
 pub use checkpoint::safetensors::e5m2_to_f32;
 
+/// The two OCP FP8 element formats a [`crate::ops::Weight::FP8`] can store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fp8Format {
+    /// E4M3FN: 4 exponent bits (bias 7), 3 mantissa bits, no infinity, max finite 448.
+    E4M3,
+    /// E5M2: 5 exponent bits (bias 15), 2 mantissa bits, has infinities, max finite 57344.
+    E5M2,
+}
+
+impl Fp8Format {
+    /// The largest finite magnitude: the value a block's amax is scaled to.
+    pub fn max_finite(self) -> f32 {
+        match self {
+            Fp8Format::E4M3 => 448.0,
+            Fp8Format::E5M2 => 57344.0,
+        }
+    }
+
+    /// Decode one stored byte to its own (unscaled) f32 value.
+    pub fn decode(self, byte: u8) -> f32 {
+        match self {
+            Fp8Format::E4M3 => checkpoint::safetensors::e4m3fn_to_f32(byte),
+            Fp8Format::E5M2 => e5m2_to_f32(byte),
+        }
+    }
+
+    /// Encode `v` to the nearest finite byte (ties to the even code, saturating at the largest
+    /// finite magnitude; NaN keeps a NaN code). Exhaustive nearest search over the 127 positive
+    /// codes: the host encoder is a reference, not a hot path.
+    pub fn encode(self, v: f32) -> u8 {
+        if v.is_nan() {
+            return 0x7F;
+        }
+        let sign = if v.is_sign_negative() { 0x80u8 } else { 0 };
+        let mag = v.abs();
+        let mut best = (f32::INFINITY, 0u8);
+        for code in 0u8..0x7F {
+            let d = self.decode(code);
+            if !d.is_finite() {
+                continue;
+            }
+            let err = (d - mag).abs();
+            if err < best.0 || (err == best.0 && code % 2 == 0) {
+                best = (err, code);
+            }
+        }
+        sign | best.1
+    }
+}
+
+/// Block-scaled FP8 quantization of an `[n, k]` weight into the device layout of
+/// [`crate::ops::Weight::FP8`]: `(packed, scales)` with the bytes four to a `u32` along `k` (`k` a
+/// multiple of 4) and one f32 scale per `block x block` tile of the logical weight in the
+/// row-major `(row_block, col_block)` grid of [`scale_shape`]; the reconstruction is
+/// `byte_value * scale` (the `weight_scale_inv` convention of [`dequant_block128`]).
+pub fn quantize_weight_fp8(raw: &[f32], n: usize, k: usize, fmt: Fp8Format, block: usize) -> (Vec<u32>, Vec<f32>) {
+    assert_eq!(raw.len(), n * k, "quantize_weight_fp8: raw len {} != n*k {}", raw.len(), n * k);
+    assert!(k % 4 == 0 && block > 0, "quantize_weight_fp8: k must be a multiple of 4 and block positive (k={k}, block={block})");
+    let (rb, cb) = scale_shape(n, k, block);
+    let mut scales = vec![0f32; rb * cb];
+    for br in 0..rb {
+        for bc in 0..cb {
+            let mut amax = 0f32;
+            for r in br * block..((br + 1) * block).min(n) {
+                for c in bc * block..((bc + 1) * block).min(k) {
+                    amax = amax.max(raw[r * k + c].abs());
+                }
+            }
+            scales[br * cb + bc] = if amax > 0.0 { amax / fmt.max_finite() } else { 1.0 };
+        }
+    }
+    let mut packed = vec![0u32; n * k / 4];
+    for r in 0..n {
+        for c in 0..k {
+            let s = scales[(r / block) * cb + c / block];
+            let byte = fmt.encode(raw[r * k + c] / s) as u32;
+            packed[(r * k + c) / 4] |= byte << (8 * (c % 4));
+        }
+    }
+    (packed, scales)
+}
+
+/// The exact host inverse of [`quantize_weight_fp8`]: the f32 value every stored byte decodes to.
+pub fn dequantize_weight_fp8(packed: &[u32], scales: &[f32], n: usize, k: usize, fmt: Fp8Format, block: usize) -> Vec<f32> {
+    let (_, cb) = scale_shape(n, k, block);
+    assert_eq!(packed.len(), n * k / 4, "dequantize_weight_fp8: packed len");
+    (0..n * k)
+        .map(|i| {
+            let (r, c) = (i / k, i % k);
+            let byte = (packed[i / 4] >> (8 * (i % 4))) as u8;
+            fmt.decode(byte) * scales[(r / block) * cb + c / block]
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +325,21 @@ mod tests {
     /// has real infinities, a different max finite value, a different
     /// smallest-normal/subnormal), which is the whole point of them being
     /// separate `DType` tiers, not one decode with two labels.
+    #[test]
+    fn fp8_quantize_round_trips_within_format_precision_and_saturates() {
+        let (n, k, block) = (5usize, 16usize, 8usize);
+        let raw: Vec<f32> = (0..n * k).map(|i| ((i * 37 % 101) as f32 - 50.0) * 0.07).collect();
+        for (fmt, rel) in [(Fp8Format::E4M3, 0.07f32), (Fp8Format::E5M2, 0.14)] {
+            let (packed, scales) = quantize_weight_fp8(&raw, n, k, fmt, block);
+            let back = dequantize_weight_fp8(&packed, &scales, n, k, fmt, block);
+            for (o, d) in raw.iter().zip(&back) {
+                assert!((o - d).abs() <= rel * o.abs() + 0.02, "{fmt:?}: {o} -> {d}");
+            }
+        }
+        assert_eq!(Fp8Format::E4M3.decode(Fp8Format::E4M3.encode(1e9)), 448.0);
+        assert_eq!(Fp8Format::E5M2.decode(Fp8Format::E5M2.encode(-1e9)), -57344.0);
+    }
+
     #[test]
     fn e5m2_decode_known_values() {
         assert_eq!(e5m2_to_f32(0x00), 0.0);

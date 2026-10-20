@@ -70,6 +70,15 @@ history and exempt.
    (`--qwen-gemm-fp32` on `brain serve`, `gemm_precision` on the SDK fine-tune)
    pins the exact fp32 WGSL/CUDA-core path; gradient checks and parity gates pin
    it, and a device without tensor cores or cuBLAS falls back to it silently.
+   **Quantized frozen bases run through one contract** (`model::ops::tiled`): for every
+   `ops::Weight` tier (f32, bf16, f16, int8, int4, NF4, block-scaled FP8 E4M3/E5M2,
+   Q4_K/Q5_K/Q6_K) `Ops::matmul_rows` is the forward, `Ops::matmul_dx` the input gradient and
+   `Ops::weight_grad` the weight gradient in a chosen `GradDtype` (fp32 or bf16, accumulating).
+   A tier without a float-read kernel decodes a bounded tile of rows (`weight_decode`, one WGSL
+   kernel for every tier; `weight_dequant_bf16` is its CUDA twin writing the bf16 operand of
+   the library tensor-core product) and runs the dense GEMM on the tile, so the scratch is
+   `Ops::tile_budget_bytes`, never the size of the tensor. `qops_frozen_lora_grad` is the gate
+   (every tier against decoded fp32, tolerances per path); `qops_profile` the timing.
    Measured deviation on real Qwen3-8B weights: knowledge #326.
    `brain qwen3 {import,infer,serve,export,precompile,train,finetune,toolcall}`,
    plus the generic `brain import` for a `qwen3` GGUF.

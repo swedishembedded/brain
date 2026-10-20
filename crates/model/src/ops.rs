@@ -487,14 +487,20 @@ pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
         let nf4 = |name, src| {
             kernels::template::nf4_weight_variant(name, src, "w", "ws").expect("brain-kernels ships every NF4 weight variant")
         };
-        vec![
+        let mut list = vec![
             kernels::template::dtype_variant("matmul_dx_reg", kernels::MATMUL_DX_REG, "w", Dtype::BF16)
                 .expect("brain-kernels ships the bf16 tiled dx variant"),
             nf4("matmul", kernels::MATMUL),
             nf4("matmul_reg3", kernels::MATMUL_REG3),
             nf4("matmul_dx", kernels::MATMUL_DX),
             nf4("matmul_dx_reg", kernels::MATMUL_DX_REG),
-        ]
+            // The quantized-execution contract (`tiled`): the tile decode of every tier, the column copy
+            // that gathers and scatters tiles, and the bf16 gradient accumulation.
+            ("copy_cols", kernels::COPY_COLS),
+            ("accum_bf16", kernels::ACCUM_BF16),
+        ];
+        list.extend(kernels::template::weight_decode_variants());
+        list
     })
 }
 
@@ -598,6 +604,13 @@ pub enum Weight {
     /// `sz`: the weight-scale plane, `KqScale`-tagged (see that enum's own
     /// doc comment for the affine-vs-non-affine shapes it holds and why).
     KQuant { w: DeviceBuffer, sz: KqScale, n: u32, k: u32, group: u32, bits: u32, affine: bool },
+    /// Block-scaled FP8 storage tier (OCP E4M3 or E5M2 bytes, the `weight_scale_inv` convention of
+    /// `crate::fp8`): `w` the bytes four to a `u32` along `k` (`[n, k/4]`, `crate::fp8::quantize_weight_fp8`'s
+    /// layout), `s` one f32 scale per `block x block` tile of the logical `[n, k]` weight, row-major over
+    /// `(ceil(n/block), ceil(k/block))`; a value is `decode(byte) * scale`. Preserved storage: a checkpoint's
+    /// bytes and scales go in as they are. Float-read like [`Weight::NF4`] (no activation quantisation):
+    /// executed through the bounded tile decode of this module's `tiled` submodule.
+    FP8 { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32, fmt: crate::fp8::Fp8Format, block: u32 },
 }
 
 /// [`Weight::KQuant`]'s weight-scale plane - the shape differs by `affine`,
@@ -630,6 +643,10 @@ pub enum KqScale {
     Packed { wsm: DeviceBuffer, wd: DeviceBuffer },
 }
 
+/// The square block edge of the scale grid [`Weight::upload`] gives an FP8 weight: the 128x128 tiles
+/// of the `weight_scale_inv` checkpoint convention.
+pub const FP8_BLOCK: u32 = 128;
+
 impl Weight {
     pub fn dtype(&self) -> Dtype {
         match self {
@@ -639,6 +656,8 @@ impl Weight {
             Weight::I8 { .. } => Dtype::I8,
             Weight::Q4 { .. } => Dtype::Q4,
             Weight::NF4 { .. } => Dtype::NF4,
+            Weight::FP8 { fmt: crate::fp8::Fp8Format::E4M3, .. } => Dtype::F8E4M3,
+            Weight::FP8 { fmt: crate::fp8::Fp8Format::E5M2, .. } => Dtype::F8E5M2,
             // `affine` picks Q4_K vs Q5_K by `bits` (both group=32); a
             // non-affine (Q6_K) weight reuses `Dtype::I8` - it is, from the
             // selector's perspective, exactly `I8` with a different
@@ -676,6 +695,7 @@ impl Weight {
             | Weight::I8 { n, .. }
             | Weight::Q4 { n, .. }
             | Weight::NF4 { n, .. }
+            | Weight::FP8 { n, .. }
             | Weight::KQuant { n, .. } => *n,
         }
     }
@@ -688,6 +708,7 @@ impl Weight {
             | Weight::I8 { k, .. }
             | Weight::Q4 { k, .. }
             | Weight::NF4 { k, .. }
+            | Weight::FP8 { k, .. }
             | Weight::KQuant { k, .. } => *k,
         }
     }
@@ -697,13 +718,26 @@ impl Weight {
     /// asked for, never wider than what the device can execute - then
     /// uploads. A caller never hand-picks a buffer layout itself.
     ///
-    /// `want` must be `F32`, `BF16`, `F16`, `I8`, `Q4`, or `NF4`.
+    /// `want` must be `F32`, `BF16`, `F16`, `I8`, `Q4`, `NF4`, `F8E4M3` or `F8E5M2`. The FP8 tiers
+    /// are block-scaled at [`FP8_BLOCK`] and are never promoted: their decode is portable integer
+    /// arithmetic that needs no device capability.
     pub fn upload(ops: &Ops, raw: &[f32], n: usize, k: usize, want: Dtype) -> Weight {
         assert_eq!(raw.len(), n * k, "Weight::upload: raw len {} != n*k ({n}*{k})", raw.len());
         assert!(
-            matches!(want, Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::I8 | Dtype::Q4 | Dtype::NF4),
+            matches!(want, Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::I8 | Dtype::Q4 | Dtype::NF4 | Dtype::F8E4M3 | Dtype::F8E5M2),
             "Weight::upload: {want:?} weights are not implemented yet"
         );
+        if let Some(fmt) = match want {
+            Dtype::F8E4M3 => Some(crate::fp8::Fp8Format::E4M3),
+            Dtype::F8E5M2 => Some(crate::fp8::Fp8Format::E5M2),
+            _ => None,
+        } {
+            let (packed, scales) = crate::fp8::quantize_weight_fp8(raw, n, k, fmt, FP8_BLOCK as usize);
+            let w = ops.gpu.storage(packed.len() as u64);
+            ops.gpu.write(&w, &packed);
+            let s = ops.gpu.storage_init("weight_scale_fp8", &scales);
+            return Weight::FP8 { w, s, n: n as u32, k: k as u32, fmt, block: FP8_BLOCK };
+        }
         match want.promote(&ops.caps.numeric) {
             Dtype::F32 => {
                 let w = ops.gpu.storage_init("weight_f32", raw);
@@ -780,9 +814,7 @@ impl Weight {
             // shape as `NF4`/`F4E2M1` just above, and for the same reason:
             // the `assert!` above already refuses both before this match
             // runs.
-            Dtype::F8E4M3 | Dtype::F8E5M2 => {
-                unreachable!("Weight::upload: {want:?} is refused by the assert above -- kernels::template provides the decode expression and the device kernel exists, but no Weight::{want:?} façade arm has been built yet (M8.6 follow-up)")
-            }
+            Dtype::F8E4M3 | Dtype::F8E5M2 => unreachable!("Weight::upload: the FP8 tiers return before this match"),
         }
     }
 }
@@ -1049,6 +1081,10 @@ pub struct Ops {
     gemm: LibraryGemmProvider,
     /// NF4 weights decoded to bf16 for the library path, kept while a [`DecodedWeightScope`] is open.
     decoded: Mutex<DecodedWeights>,
+    /// Bytes of decoded f32 scratch one tile of a quantized product may use (see [`tiled`]).
+    tile_budget_bytes: u64,
+    /// A tiny buffer bound to the `weight_decode` bindings a tier does not use.
+    decode_dummy: std::sync::OnceLock<DeviceBuffer>,
 }
 
 /// The decoded-weight cache of an [`Ops`]: `depth` open scopes, and for each whole NF4 weight (keyed by the identity
@@ -1076,6 +1112,9 @@ impl Drop for DecodedWeightScope<'_> {
         }
     }
 }
+
+mod tiled;
+pub use tiled::{plan_linear, tile_rows, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES};
 
 /// A library-path weight: the buffer, the byte range to bind, steps that must run first and the scratch they use.
 type LibraryWeight = (DeviceBuffer, (u64, u64), Vec<Step>, Option<usize>);
@@ -1173,7 +1212,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Fp32Reference);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm, decoded: Mutex::new(DecodedWeights::default()) })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, decoded: Mutex::new(DecodedWeights::default()), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new() })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
@@ -1558,6 +1597,10 @@ impl Ops {
         let (n, k) = (w.n(), w.k());
         assert_eq!(act.k, k, "Ops::matmul: activation width {} does not match weight K {k}", act.k);
         let m = act.m;
+        // A float-read tier whose library decode would outgrow the scratch budget runs in tiles.
+        if matches!(w, Weight::NF4 { .. }) && matches!(self.linear_plan(w, n), LinearPlan::TileDecode { .. }) {
+            return self.matmul_rows(s, w, (0, n), act, y, yoff);
+        }
         if self.library_forward(s, w, (0, n), act, y, yoff) {
             return;
         }
@@ -1655,7 +1698,7 @@ impl Ops {
             // and multiplies it with the raw f32 activation, so this arm never
             // touches `act.quant` and bypasses the W4A8 selector arms. It binds
             // the variant itself, like the int8 frozen-base GEMM of `qwen3`.
-            Weight::NF4 { .. } => self.matmul_rows(s, w, (0, n), act, y, yoff),
+            Weight::NF4 { .. } | Weight::FP8 { .. } => self.matmul_rows(s, w, (0, n), act, y, yoff),
             // M12: affine K-quant (`Weight::KQuant { affine: true, .. }` -
             // Q4_K/Q5_K, `matmul_kq_dyn`/`matmul_kq_gemv`). The non-affine
             // (Q6_K, group=16) instantiation never constructs THIS variant's
@@ -1824,7 +1867,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } => {
+            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } => {
                 unreachable!("Ops::embed: bind_embed already panicked for this dtype above")
             }
         }
@@ -1909,7 +1952,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } => {
+            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } => {
                 unreachable!("Ops::moe_linear: bind_moe_linear already panicked for this dtype above")
             }
         }
@@ -2168,6 +2211,9 @@ impl Ops {
     /// not implemented.
     pub fn matmul_dx(&self, s: &mut Vec<Step>, w: &Weight, dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, accumulate: bool) {
         let (n, k) = (w.n(), w.k());
+        if matches!(self.linear_plan(w, n), LinearPlan::TileDecode { .. }) {
+            return self.dx_tiled(s, w, (0, n), dy, m, dx, 0, accumulate);
+        }
         if self.library_dx(s, w, (0, n), dy, m, dx, 0, accumulate) {
             return;
         }
@@ -2209,10 +2255,9 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::F16 { .. } | Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } => panic!(
-                "Ops::matmul_dx: no input-gradient kernel reads a {dt:?} weight -- F32, BF16 and NF4 are the \
-                 frozen-base training tiers; F16/I8/Q4/K-quant backward-through-the-weight is not implemented"
-            ),
+            Weight::F16 { .. } | Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } => {
+                unreachable!("{dt:?} runs through the tile decode above")
+            }
         }
     }
 
@@ -2239,6 +2284,9 @@ impl Ops {
         let (n, k, m) = (w.n(), w.k(), act.m);
         assert_eq!(act.k, k, "Ops::matmul_rows: activation width {} does not match weight K {k}", act.k);
         assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_rows: rows {first}+{count} outside the {n} rows of the weight");
+        if matches!(self.linear_plan(w, count), LinearPlan::TileDecode { .. }) {
+            return self.forward_tiled(s, w, rows, act, y, yoff);
+        }
         if self.library_forward(s, w, rows, act, y, yoff) {
             return;
         }
@@ -2281,6 +2329,9 @@ impl Ops {
         let (first, count) = rows;
         let (n, k) = (w.n(), w.k());
         assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_dx_rows: rows {first}+{count} outside the {n} rows of the weight");
+        if matches!(self.linear_plan(w, count), LinearPlan::TileDecode { .. }) {
+            return self.dx_tiled(s, w, rows, dy, m, dx, dx_row0, accumulate);
+        }
         if self.library_dx(s, w, rows, dy, m, dx, dx_row0, accumulate) {
             return;
         }
