@@ -25,7 +25,7 @@ use crate::paged::{BlockAllocator, BlockTable, KvNamespace};
 mod sampler;
 mod speculate;
 pub mod conformance;
-pub use sampler::{apply_processors, DryParams, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_THINK_CLOSE};
+pub use sampler::{apply_processors, DryParams, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_THINK_CLOSE, MAX_THINK_LEAD};
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
 
 /// The seam a model's paged serving engine implements. Every method mirrors

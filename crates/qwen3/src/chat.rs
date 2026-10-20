@@ -348,6 +348,12 @@ pub fn plain_sampler(temp: f32, top_k: usize, top_p: f32) -> SampleParams {
     SampleParams { temp, top_k, top_p, ..SampleParams::greedy() }
 }
 
+/// The last thought forced inside a think block whose budget ran out, before
+/// `</think>`: Qwen's own thinking-budget recipe (the Qwen3 quickstart's
+/// `early_stopping_text`), so the model answers from what it has thought rather
+/// than from a thought cut mid-sentence.
+pub const THINKING_BUDGET_LEAD_IN: &str = "\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n";
+
 /// The default DRY sequence breakers (llama.cpp's): a newline, a colon, a quote and an asterisk.
 const DEFAULT_DRY_BREAKERS: [&str; 4] = ["\n", ":", "\"", "*"];
 
@@ -381,7 +387,8 @@ fn sampler_params(tok: &QwenBpe, inv: &Invocation, temp: f32, top_k: usize, top_
         // The tag, then the blank line the chat format puts between a think block and the answer.
         let mut closing = vec![close];
         closing.extend(tok.encode("\n\n"));
-        p.thinking = Some(ThinkingBudget::new(budget.max(0) as u32, open, &closing, thinking_open));
+        let lead = tok.encode(THINKING_BUDGET_LEAD_IN);
+        p.thinking = Some(ThinkingBudget::new(budget.max(0) as u32, open, &closing, thinking_open).with_lead_in(&lead));
     }
     Ok(p)
 }
@@ -1047,6 +1054,7 @@ mod tests {
         let budget = asked.thinking.expect("a thinking budget");
         assert_eq!((budget.max_tokens, Some(budget.open), Some(budget.close()[0])), (64, tok.special_id("<think>"), tok.special_id("</think>")));
         assert!(budget.close().len() > 1, "the blank line after the tag is forced too");
+        assert_eq!(tok.decode(budget.lead_in()), THINKING_BUDGET_LEAD_IN, "the early-stopping thought of Qwen's budget recipe comes first");
         let off = parse_request(&tok, &base().set("thinking_budget", json!(64)).set("enable_thinking", json!(false))).unwrap().sampler;
         assert!(off.thinking.is_none(), "no think block, no budget");
         let own = parse_request(&tok, &base().set("dry_multiplier", json!(1.0)).set("dry_sequence_breakers", json!(r#"["STOP"]"#))).unwrap().sampler;

@@ -71,10 +71,12 @@ impl DryParams {
 }
 
 /// A thinking budget: once `max_tokens` tokens have been generated inside an
-/// open think block the scheduler forces the closing sequence (`</think>` and
-/// whatever separates it from the answer) in place of the model's own choices
-/// and then lets the model continue with its answer. The token ids belong to the
-/// model's tokenizer, so the frontend supplies them.
+/// open think block the scheduler forces an optional lead-in (a last thought
+/// that tells the model to answer from what it has, still inside the block)
+/// and then the closing sequence (`</think>` and whatever separates it from the
+/// answer) in place of the model's own choices, and then lets the model
+/// continue with its answer. The token ids belong to the model's tokenizer, so
+/// the frontend supplies them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThinkingBudget {
     /// Tokens the model may spend inside the think block (the tags excluded).
@@ -83,12 +85,17 @@ pub struct ThinkingBudget {
     pub open: u32,
     close: [u32; MAX_THINK_CLOSE],
     n_close: u8,
+    lead: [u32; MAX_THINK_LEAD],
+    n_lead: u8,
     /// The prompt already ended inside an open think block.
     pub open_at_start: bool,
 }
 
 /// The longest closing sequence a [`ThinkingBudget`] forces.
 pub const MAX_THINK_CLOSE: usize = 4;
+
+/// The longest lead-in a [`ThinkingBudget`] forces before its closing sequence.
+pub const MAX_THINK_LEAD: usize = 48;
 
 impl ThinkingBudget {
     /// `close` is the sequence forced when the budget runs out; its first token is
@@ -99,11 +106,35 @@ impl ThinkingBudget {
         let mut set = [0u32; MAX_THINK_CLOSE];
         let n = close.len().min(MAX_THINK_CLOSE);
         set[..n].copy_from_slice(&close[..n]);
-        ThinkingBudget { max_tokens, open, close: set, n_close: n as u8, open_at_start }
+        ThinkingBudget { max_tokens, open, close: set, n_close: n as u8, lead: [0; MAX_THINK_LEAD], n_lead: 0, open_at_start }
+    }
+
+    /// The same budget with `lead` forced before the closing sequence. Panics on
+    /// a lead-in longer than [`MAX_THINK_LEAD`]: it is the frontend's constant,
+    /// and a truncated one would be a different sentence.
+    pub fn with_lead_in(mut self, lead: &[u32]) -> ThinkingBudget {
+        assert!(lead.len() <= MAX_THINK_LEAD, "a thinking lead-in of {} tokens is over {MAX_THINK_LEAD}", lead.len());
+        self.lead[..lead.len()].copy_from_slice(lead);
+        self.n_lead = lead.len() as u8;
+        self
     }
 
     pub fn close(&self) -> &[u32] {
         &self.close[..self.n_close as usize]
+    }
+
+    pub fn lead_in(&self) -> &[u32] {
+        &self.lead[..self.n_lead as usize]
+    }
+
+    /// The `i`-th token forced when the budget runs out: the lead-in, then the closing sequence.
+    fn forced_at(&self, i: usize) -> u32 {
+        let lead = self.lead_in();
+        if i < lead.len() { lead[i] } else { self.close()[i - lead.len()] }
+    }
+
+    fn forced_len(&self) -> usize {
+        self.n_lead as usize + self.n_close as usize
     }
 }
 
@@ -113,7 +144,7 @@ pub(super) struct ThinkState {
     budget: ThinkingBudget,
     in_think: bool,
     count: u32,
-    /// The budget ran out: the closing sequence is being forced, `forced` tokens of it so far.
+    /// The budget ran out: the lead-in and closing sequence are being forced, `forced` tokens of them so far.
     closing: bool,
     forced: usize,
     /// The block was closed (by the model or by force): nothing left to watch.
@@ -136,7 +167,7 @@ impl ThinkState {
 
     /// The token the scheduler must emit next instead of the model's choice, while the closing sequence is being forced.
     pub(super) fn forced_next(&self) -> Option<u32> {
-        self.closing.then(|| self.budget.close()[self.forced])
+        self.closing.then(|| self.budget.forced_at(self.forced))
     }
 
     /// Whether the sequence still has to be decoded one host-checked token at a
@@ -148,7 +179,7 @@ impl ThinkState {
     pub(super) fn accept(&mut self, token: u32) {
         if self.closing {
             self.forced += 1;
-            if self.forced == self.budget.close().len() {
+            if self.forced == self.budget.forced_len() {
                 self.closing = false;
                 self.in_think = false;
                 self.done = true;
@@ -392,6 +423,26 @@ mod tests {
         s.accept(nl);
         assert_eq!(s.forced_next(), None, "after the forced sequence the model answers");
         assert!(!s.watching());
+    }
+
+    /// A lead-in is forced before the closing sequence when the budget runs out (inside the block, so
+    /// the model reads it as its own last thought); a model that closes in time never sees it.
+    #[test]
+    fn a_thinking_budget_forces_its_lead_in_then_the_closing_sequence() {
+        let (open, close_tag, nl, a, b) = (100u32, 101u32, 102u32, 200u32, 201u32);
+        let budget = ThinkingBudget::new(1, open, &[close_tag, nl], true).with_lead_in(&[a, b]);
+        let mut s = ThinkState::new(budget);
+        s.accept(7);
+        let mut forced = Vec::new();
+        while let Some(t) = s.forced_next() {
+            forced.push(t);
+            s.accept(t);
+        }
+        assert_eq!(forced, vec![a, b, close_tag, nl], "lead-in, then the tag and its separator");
+        assert!(!s.watching());
+        let mut early = ThinkState::new(budget);
+        early.accept(close_tag);
+        assert_eq!(early.forced_next(), None, "a block the model closes itself gets no lead-in");
     }
 
     /// A model that opens its own block is counted from the tag; one that closes in time is left alone.
