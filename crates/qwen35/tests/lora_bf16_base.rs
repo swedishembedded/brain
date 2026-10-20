@@ -113,7 +113,7 @@ fn an_adapter_trained_on_a_bf16_base_survives_save_and_reload() {
 #[test]
 fn a_lora_trainer_on_a_bf16_base_overfits_a_fixed_batch() {
     // The model is a few hundred elements wide: on every core of the machine its
-    // 120 steps spent 12 CPU-minutes waking a pool for 6 s of arithmetic.
+    // steps spend their time waking and spinning a pool for little arithmetic.
     Gpu::with_cpu_threads(2, || {
         let cfg = lora_config();
         let init = weights(&cfg, 0.0);
