@@ -84,7 +84,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use checkpoint::mmap::MmapSafetensors;
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use gpu_core::select::Dtype;
@@ -832,7 +831,7 @@ impl StreamTrainer {
     /// real-checkpoint counterpart of [`Self::embed_synthetic`], reusing
     /// `crate::stream::embed_rows` (unchanged) directly.
     pub fn embed_real(dir: &Path, ids: &[u32], d: usize) -> Result<Vec<f32>, String> {
-        let outside = MmapSafetensors::open(dir.join("outside.safetensors"))?;
+        let outside = crate::stream::open_outside(&dir.join("outside.safetensors"))?;
         crate::stream::embed_rows(&outside, "model.language_model.embed_tokens.weight", ids, d)
     }
 

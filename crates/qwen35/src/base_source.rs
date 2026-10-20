@@ -163,6 +163,11 @@ impl TensorSource for AdapterOverlay {
     fn advise_drop(&self, name: &str) {
         self.owner(name).advise_drop(name)
     }
+    /// The base's packed view; adapter names are unknown to it, so they fall
+    /// back to the f32 interface and reach `adapters`.
+    fn packed(&self) -> Option<&checkpoint::packed::PackedSource> {
+        self.base.packed()
+    }
 }
 
 /// The configuration and initial weights of a LoRA fine-tune of the base at

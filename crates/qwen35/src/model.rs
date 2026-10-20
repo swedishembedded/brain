@@ -1695,18 +1695,14 @@ impl Qwen35 {
             }
         }
         let mut weights: HashMap<String, Weight> = HashMap::new();
+        // Host staging for tiled uploads: one tile at a time, independent of the largest tensor.
+        let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(64 << 20, 0));
         let mut upload = |name: String, wn: u32, wk: u32, want: Dtype| {
             let w = if want == Dtype::F32 {
                 Weight::F32 { w: ps.w(&name).clone(), n: wn, k: wk }
             } else {
-                let mut built: Option<Weight> = None;
-                let found = src.with_tensor(&name, &mut |raw| {
-                    built = Some(Weight::upload(&ops, raw, wn as usize, wk as usize, want));
-                });
-                if !found {
-                    panic!("qwen35: missing init weight {name}");
-                }
-                built.unwrap()
+                model::ops::upload_from_source(&ops, src, &name, wn as usize, wk as usize, want, &staging)
+                    .unwrap_or_else(|| panic!("qwen35: missing init weight {name}"))
             };
             weights.insert(name, w);
         };
@@ -5255,9 +5251,9 @@ impl Qwen35 {
     /// Rebuild a training model from a file [`Self::save`] wrote (adapters
     /// included), sized for `b` sequences of `t` tokens.
     pub fn load(path: &str, b: u32, t: u32) -> Qwen35 {
-        let container = checkpoint::load(path);
-        let cfg = Qwen35Config::from_json(&container.header["config"]);
-        Qwen35::new_train_on(Gpu::new(pipelines()), cfg, b, t, &container.into_by_role(""))
+        let reader = checkpoint::weightio::WeightReader::open(path).unwrap_or_else(|e| panic!("qwen35: open {path}: {e}"));
+        let cfg = Qwen35Config::from_json(&reader.config());
+        Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, b, t, &reader, &TrainOpts::default())
     }
 
     pub fn save(&self, path: &str) {

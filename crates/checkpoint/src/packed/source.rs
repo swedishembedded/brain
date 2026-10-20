@@ -19,7 +19,10 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use super::budget::BoundedWorkspace;
 use super::codec::{CodecRegistry, Tile, TileBuf};
+use super::load::{LoadConfig, LoadPolicy, LoadReport, Loader};
+use super::sink::TensorSink;
 use super::encoding::TensorDescriptor;
 use super::reader::PackedTensorReader;
 use crate::TensorSource;
@@ -84,6 +87,42 @@ impl PackedSource {
 
     pub fn descriptor(&self, name: &str) -> Option<&TensorDescriptor> {
         self.tensors.get(name).map(|b| &b.desc)
+    }
+
+    /// Stream tensor `name` into `sink` under `policy` through the tiled load
+    /// executor, one tile of staging leased from `workspace`: the packed
+    /// counterpart of [`TensorSource::with_tensor`], for consumers (a device
+    /// upload) that can take the destination encoding directly.
+    ///
+    /// `Ok(None)` when the packed path does not apply and the caller should use
+    /// the f32 interface: the name is unknown, the binding carries an additive
+    /// fold the byte-level load cannot apply, or the policy has no plan for this
+    /// tensor (no encoder for the destination, no lossless repack). Nothing has
+    /// been written to `sink` in those cases. `Err` is a failure after the load
+    /// started.
+    pub fn load_into(&self, name: &str, policy: &LoadPolicy, sink: &mut dyn TensorSink, workspace: &BoundedWorkspace, config: &LoadConfig) -> Result<Option<LoadReport>, String> {
+        let Some(b) = self.tensors.get(name) else { return Ok(None) };
+        if b.add != 0.0 {
+            return Ok(None);
+        }
+        let loader = Loader { reader: &*self.reader, codecs: &self.codecs, workspace: workspace.clone(), config: config.clone() };
+        let Ok(step) = loader.plan(&b.desc.name, policy) else { return Ok(None) };
+        loader.execute(&step, sink).map(Some)
+    }
+
+    /// Elements `[start, start + len)` of `name`'s flat layout as f32, decoding
+    /// only the tiles that cover them (a handful of embedding rows out of a
+    /// large table). `None` when the name is unknown or the range leaves the
+    /// tensor. The decoded span is at most the range rounded out to the tensor's
+    /// tile quantum.
+    pub fn read_range(&self, name: &str, start: u64, len: u64) -> Result<Option<Vec<f32>>, String> {
+        let Some(b) = self.tensors.get(name) else { return Ok(None) };
+        let Some(end) = start.checked_add(len).filter(|&e| e <= b.desc.numel() && len > 0) else { return Ok(None) };
+        let q = b.desc.tile_quantum();
+        let span = start / q * q..(end.div_ceil(q) * q).min(b.desc.numel());
+        let (mut read, mut out) = (TileBuf::default(), Vec::new());
+        self.decode_range(b, &span, &mut read, &mut out)?;
+        Ok(Some(out[(start - span.start) as usize..(end - span.start) as usize].to_vec()))
     }
 
     /// Decode tile `elems` of `b` into `out` (replacing its contents), with
@@ -166,6 +205,10 @@ impl TensorSource for PackedSource {
         self.tensors.get(name).map(|b| b.desc.numel() as usize)
     }
 
+    fn packed(&self) -> Option<&PackedSource> {
+        Some(self)
+    }
+
     fn advise_drop(&self, name: &str) {
         if let Some(b) = self.tensors.get(name) {
             self.reader.release(&b.desc, &(0..b.desc.numel()));
@@ -214,5 +257,10 @@ mod tests {
         assert_eq!(whole, want);
         assert!(src.with_tensor("blocks.0.ln", &mut |d| assert_eq!(d, [1.5, 0.75, 2.5])));
         assert!(!src.with_tensor("missing", &mut |_| {}));
+        // A range inside one tile row and one straddling the scale bands: the same values as the whole decode.
+        for (start, len) in [(5u64, 7u64), (cols as u64 - 3, 9), (15 * cols as u64 + 40, 2 * cols as u64)] {
+            assert_eq!(src.read_range("blocks.0.a", start, len).unwrap().unwrap(), want[start as usize..(start + len) as usize], "range {start}+{len}");
+        }
+        assert_eq!(src.read_range("blocks.0.a", (rows * cols) as u64 - 1, 2).unwrap(), None, "a range past the end is refused, not truncated");
     }
 }

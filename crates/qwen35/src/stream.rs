@@ -82,6 +82,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use checkpoint::mmap::MmapSafetensors;
+use checkpoint::packed::PackedSource;
+use checkpoint::TensorSource;
 use data::qwen_tokenizer::QwenBpe;
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
@@ -960,18 +962,27 @@ pub(crate) fn pad_to_gdn_chunk(t: u32) -> u32 {
     t.div_ceil(GDN_DECODE_CHUNK) * GDN_DECODE_CHUNK
 }
 
+/// `outside.safetensors` (embedding, head, final norm) as a packed source: tile
+/// reads of exactly the rows asked for, whatever the stored encoding.
+pub(crate) fn open_outside(path: &Path) -> Result<PackedSource, String> {
+    PackedSource::identity(Box::new(checkpoint::packed::PackedReader::open(path)?), checkpoint::packed::CodecRegistry::reference())
+}
+
 /// Real per-token embedding rows for `ids`, read directly off `name`
 /// (`model.language_model.embed_tokens.weight`, `[vocab, d_model]`, plain
 /// BF16 - confirmed no `.weight_scale_inv` sibling, so a row read has zero
 /// cross-row dependency, unlike FP8's block-128 scale coupling) via
-/// [`MmapSafetensors::tensor_f32_range`] (design decision 3) - one targeted,
+/// [`PackedSource::read_range`] (design decision 3) - one targeted,
 /// `O(d_model)` read per token, never a whole-`[vocab, d_model]`-table decode
 /// or scan. Stacked `[ids.len(), d_model]` row-major - [`generate`]'s real
 /// replacement for [`seed_residual`]'s synthetic input.
-pub(crate) fn embed_rows(reader: &MmapSafetensors, name: &str, ids: &[u32], d: usize) -> Result<Vec<f32>, String> {
+pub(crate) fn embed_rows(reader: &PackedSource, name: &str, ids: &[u32], d: usize) -> Result<Vec<f32>, String> {
     let mut out = Vec::with_capacity(ids.len() * d);
     for &id in ids {
-        let row = reader.tensor_f32_range(name, id as usize * d, d).ok_or_else(|| format!("stream::generate: token id {id} out of range for {name}"))?;
+        let row = reader
+            .read_range(name, id as u64 * d as u64, d as u64)
+            .map_err(|e| format!("stream::generate: {e}"))?
+            .ok_or_else(|| format!("stream::generate: token id {id} out of range for {name}"))?;
         out.extend_from_slice(&row);
     }
     Ok(out)
@@ -983,10 +994,11 @@ pub(crate) fn embed_rows(reader: &MmapSafetensors, name: &str, ids: &[u32], d: u
 /// `(1+w)` reparameterization - see `crate::import`'s own module doc). A
 /// small (`[d_model]`) whole-tensor read, unlike [`embed_rows`]'s per-row one
 /// - there is only ever one of these per call.
-pub(crate) fn read_final_norm(reader: &MmapSafetensors, d: usize) -> Result<Vec<f32>, String> {
-    let raw = reader
-        .tensor_f32("model.language_model.norm.weight")
-        .ok_or_else(|| "stream::generate: model.language_model.norm.weight missing from outside.safetensors".to_string())?;
+pub(crate) fn read_final_norm(reader: &PackedSource, d: usize) -> Result<Vec<f32>, String> {
+    let mut raw = Vec::new();
+    if !reader.with_tensor_chunks("model.language_model.norm.weight", 0, &mut |_, c| raw.extend_from_slice(c)) {
+        return Err("stream::generate: model.language_model.norm.weight missing from outside.safetensors".to_string());
+    }
     if raw.len() != d {
         return Err(format!("stream::generate: norm.weight has {} elements, expected {d}", raw.len()));
     }
@@ -1209,7 +1221,7 @@ pub fn generate_with_stats(
 
     let d = cfg.d_model as usize;
     let outside_path = dir.join("outside.safetensors");
-    let outside = MmapSafetensors::open(&outside_path)?;
+    let outside = open_outside(&outside_path)?;
 
     let embed_name = "model.language_model.embed_tokens.weight";
     let head_name = if cfg.tie_embeddings { embed_name } else { "lm_head.weight" };
@@ -1311,7 +1323,7 @@ fn generate_mtp_accelerated(
     cfg: &Qwen35Config,
     tok: &QwenBpe,
     eos: &[u32],
-    outside: &MmapSafetensors,
+    outside: &PackedSource,
     embed_name: &str,
     gpu: &Gpu,
     head: &Weight,

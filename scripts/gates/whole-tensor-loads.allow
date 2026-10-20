@@ -75,8 +75,6 @@ crates/qwen35/src/bin/import_profile.rs	2	offline importer: one whole tensor per
 crates/qwen35/src/caps.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen35/src/finetune.rs	4	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
 crates/qwen35/src/import.rs	3	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
-crates/qwen35/src/model.rs	2	2 calls: the upload closure (l.1707) reads a whole tensor as f32 then Weight::upload, and Qwen35::load (l.5338) uses checkpoint::load for the whole container. Fix (Phase 1+2): Weight upload that consumes packed tiles from the reader; load via the planner
-crates/qwen35/src/stream.rs	2	2 calls, both bounded by one row or one vector: embedding row (l.974, tensor_f32_range of d elements) and final norm (l.988). Keep until the reader's range API replaces them; not a materialization risk
 crates/qwen35moe/src/caps.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen35moe/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen35moe/src/q8.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
@@ -113,3 +111,4 @@ crates/wan/src/pipeline.rs	2	class T: one whole tensor as fp32 on the host, then
 crates/web/src/web.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/worldmirror2/src/import.rs	2	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/yolov8/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
+crates/model/src/ops/upload_source.rs	1	fallback of upload_from_source for a source with no packed view (a plain f32 map, a computed or wrapped source): one tensor at a time, delete as sources gain packed views

@@ -192,6 +192,15 @@ pub trait TensorSource {
     /// resident footprint close to the true working set throughout the
     /// load, not just once memory pressure forces the issue.
     fn advise_drop(&self, _name: &str) {}
+
+    /// The packed, tile-granular view of this source when it has one, for a
+    /// consumer that can take a destination encoding directly (a device
+    /// upload) instead of the f32 interface above: see
+    /// [`packed::PackedSource::load_into`]. Default: none. A wrapper forwards it
+    /// only when it changes no tensor's values.
+    fn packed(&self) -> Option<&packed::PackedSource> {
+        None
+    }
 }
 
 impl TensorSource for HashMap<String, Vec<f32>> {
