@@ -122,7 +122,15 @@ layer 6 - serving, front ends, SDK, samples
  ─── 3. training substrate ─────────────────────────────────────────────────
    paramstore ⇄ optim      param/grad/Adam buffers; AdamW + global grad clip
    checkpoint              .safetensors container + manifest/SHA-256 + expert
-                           shards; target-agnostic, no wgpu, no fs on wasm
+                           shards; target-agnostic, no wgpu, no fs on wasm.
+                           `checkpoint::packed` is the quantized-tensor seam:
+                           TensorDescriptor/QuantEncoding (what bytes mean),
+                           the codec registry (reference tile decode/encode),
+                           PackedTensorReader/TensorSink (bounded tiled I/O,
+                           never a whole tensor), MemoryBudget (shared staging
+                           accounting) and the Preserve/Repack/Convert load
+                           executor with its LoadPlan report. Model crates
+                           supply names and shapes, never codecs or loaders.
    autodiff                shared SSA forward-cache scaffolding (placeholder)
    data                    char + GPT-2 BPE tokenizers, dataset generators,
                            loaders, masking/alignment, normalization

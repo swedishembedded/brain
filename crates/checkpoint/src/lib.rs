@@ -30,6 +30,7 @@ pub mod gguf_src;
 pub mod license;
 pub mod load_progress;
 pub mod remap;
+pub mod packed;
 pub mod split;
 pub mod srccheck;
 pub mod torchpt;
