@@ -62,6 +62,8 @@ pub mod lossw;
 pub mod lut4;
 pub mod moe;
 pub mod objective;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod score;
 pub mod ops;
 // wasm-gated like `distributed`/`parallel`/`shard`: a TCP transport has no
 // business compiling into the browser build, and its `pub use` below broke
@@ -99,6 +101,8 @@ pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 pub use shard::{plan_balanced, Pipeline, PipelineModel, Shard, ShardCost, Shardable, StreamPlan};
 
 pub use objective::{Objective, StepVerdict};
+#[cfg(not(target_arch = "wasm32"))]
+pub use score::{score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
 pub use train::{build_or_resume, causal_lm, fit, fit_controlled, fit_from, fit_with, load_dataset, load_dataset_with_itos, AdapterSnapshots, FitControl, FitReport, StepReport};

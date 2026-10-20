@@ -2014,6 +2014,32 @@ mod tests {
         assert_eq!(obj.eval(&model, &mut Rng::new(99), 0), Some(first), "the same split scores the same whatever the generator");
     }
 
+    /// Held-out scoring over any model: the supervised-position mean of the
+    /// split, with its record and position counts, the base score left out
+    /// when a run continues an adapter, and the tuned score filled in later.
+    #[test]
+    fn a_held_out_set_is_scored_before_and_after_by_any_model() {
+        let dir = tmp("score-held-out");
+        let mut split = data::chat::EncodedSplit::default();
+        for e in 0..3u32 {
+            split.push(&[e * 10, e * 10 + 1, e * 10 + 2, e * 10 + 3], &[false, false, true, true]);
+        }
+        data::chat::write_split(&dir, "train", &split).unwrap();
+        data::chat::write_split(&dir, "val", &split).unwrap();
+        std::fs::write(dir.join("meta.json"), Meta::vocab_only(64)).unwrap();
+        let opts = FitOpts { block_size: 6, batch_size: 2, eval_batches: 0, ..Default::default() };
+        let model = Recorder::new(RecorderCfg, 2, 6, &HashMap::new());
+        let sets = [dir.as_path()];
+        let mut scored = crate::score_base(&model, &sets, &opts, false).expect("score");
+        assert_eq!((scored[0].records, scored[0].positions), (3, 6));
+        assert!((scored[0].base_loss.expect("scored") - 12.5).abs() < 1e-5);
+        assert_eq!(scored[0].tuned_loss, None);
+        crate::score_tuned(&model, &sets, &opts, &mut scored).expect("score");
+        assert_eq!(scored[0].tuned_loss, scored[0].base_loss);
+        let continued = crate::score_base(&model, &sets, &opts, true).expect("score");
+        assert_eq!(continued[0].base_loss, None, "a continued adapter's start is not the base");
+    }
+
     /// Every step runs with the run's AdamW hyperparameters, not constants.
     #[test]
     fn every_step_uses_the_runs_adam_hyperparameters() {

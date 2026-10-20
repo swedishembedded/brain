@@ -237,7 +237,7 @@ impl ChatFamily {
         continue_from: Option<&Path>,
         control: model::FitControl<'_>,
         held_out: &[&Path],
-    ) -> std::io::Result<(model::FitReport, TrainedLora, Vec<qwen35::finetune::ScoredSet>)> {
+    ) -> std::io::Result<(model::FitReport, TrainedLora, Vec<model::ScoredSet>)> {
         match self {
             ChatFamily::Qwen3(tier) => {
                 let start = match continue_from {
@@ -797,7 +797,7 @@ impl ChatFineTune {
         let mut in_process = scored.into_iter();
         let mut take_scored = |present: bool| if present { in_process.next() } else { None };
         let (scored_held_out, scored_text) = (take_scored(held_out.is_some() && !held_out_dirs.is_empty()), take_scored(held_out_text.is_some() && !held_out_dirs.is_empty()));
-        let as_score = |loss: Option<f32>, set: &qwen35::finetune::ScoredSet| HeldOutScore { loss, token_accuracy: None, positions: set.positions, records: set.records, skipped: 0 };
+        let as_score = |loss: Option<f32>, set: &model::ScoredSet| HeldOutScore { loss, token_accuracy: None, positions: set.positions, records: set.records, skipped: 0 };
         let base_score = base_score.or(scored_held_out.as_ref().map(|set| as_score(set.base_loss, set)));
         let base_text_score = base_text_score.or(scored_text.as_ref().map(|set| as_score(set.base_loss, set)));
 

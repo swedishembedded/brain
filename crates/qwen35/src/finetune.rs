@@ -295,19 +295,6 @@ pub fn finetune_lora_controlled(
     finetune_lora_scored(base, dir, opts, rank, alpha, resume_from, run, control, &[]).map(|(report, trained, _)| (report, trained))
 }
 
-/// A held-out record set scored in the trainer's own process: the loss of the
-/// untouched base (`None` when the run continues an adapter, whose starting
-/// point is not the base) and of the model the run hands back, over exactly
-/// the positions training supervises.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ScoredSet {
-    pub base_loss: Option<f32>,
-    pub tuned_loss: Option<f32>,
-    /// Supervised positions scored, and the records they come from.
-    pub positions: usize,
-    pub records: usize,
-}
-
 /// [`finetune_lora_controlled`] that also scores the prepared datasets in
 /// `held_out` (each a directory [`data::chat::prepare_chat_samples`] wrote, its
 /// validation split being the records to score) before the first step and
@@ -325,7 +312,7 @@ pub fn finetune_lora_scored(
     run: &StreamedRun,
     control: model::FitControl<'_>,
     held_out: &[&Path],
-) -> std::io::Result<(model::FitReport, Qwen35, Vec<ScoredSet>)> {
+) -> std::io::Result<(model::FitReport, Qwen35, Vec<model::ScoredSet>)> {
     let (dtype, recompute) = (run.dtype, run.recompute);
     // One micro-step of more than a few thousand tokens only fits the card with
     // the long-sequence settings (segmented Gated-DeltaNet layers, a bf16
@@ -355,44 +342,13 @@ pub fn finetune_lora_scored(
         train.bf16_residuals
     );
     let (train_set, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
-    let mut scored: Vec<ScoredSet> = Vec::with_capacity(held_out.len());
-    for set in held_out {
-        let (_, records, set_cfg, _, _) = model::load_dataset_with_itos(set, opts)?;
-        let (count, positions) = supervised_positions(&records, &set_cfg);
-        let base_loss = if resume_from.is_none() { score_set(&m, set, opts)? } else { None };
-        scored.push(ScoredSet { base_loss, tuned_loss: None, positions, records: count });
-    }
+    let mut scored = model::score_base(&m, held_out, opts, resume_from.is_some())?;
     let obj = model::causal_lm::<Qwen35>(train_set, val, bcfg, itos);
     let (report, trained) = model::fit_controlled(m, obj, opts, None, control)?;
     if !report.interrupted {
-        for (set, slot) in held_out.iter().zip(scored.iter_mut()) {
-            slot.tuned_loss = score_set(&trained, set, opts)?;
-        }
+        model::score_tuned(&trained, held_out, opts, &mut scored)?;
     }
     Ok((report, trained, scored))
-}
-
-/// The mean cross-entropy of `m` over every supervised position of `records`.
-fn score_set(m: &Qwen35, set: &Path, opts: &FitOpts) -> std::io::Result<Option<f32>> {
-    use model::Objective;
-    let (train, records, cfg, _, itos) = model::load_dataset_with_itos(set, opts)?;
-    let mut obj = model::causal_lm::<Qwen35>(train, records, cfg, itos);
-    Ok(obj.eval(m, &mut data::rng::Rng::new(data::rng::random_seed()), 0))
-}
-
-/// `(records, supervised positions)` of a prepared split, counted the way the
-/// evaluation walks it.
-fn supervised_positions(records: &data::loader::TokenDataset, cfg: &data::loader::BatchConfig) -> (usize, usize) {
-    let count = records.example_count().unwrap_or(0);
-    let rows = cfg.batch_size.max(1);
-    let mut positions = 0;
-    let mut first = 0;
-    while first < count {
-        let Some((_, y)) = records.example_rows(cfg, first) else { break };
-        positions += y.iter().filter(|&&t| t != data::loader::IGNORE).count();
-        first += rows;
-    }
-    (count, positions)
 }
 
 #[cfg(test)]
