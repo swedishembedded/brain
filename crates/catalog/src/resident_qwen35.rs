@@ -370,7 +370,10 @@ impl Qwen35GgufServeConfig {
         let l = &p.limits;
         self.ctx = l.ctx.or(self.ctx);
         self.max_batch = l.max_batch.or(self.max_batch);
-        self.prefix_slots = l.prefix_slots.or(self.prefix_slots);
+        // A server asked to carry N concurrent sequences keeps N conversations'
+        // prefixes warm (never fewer than the default): the prefix-cache size is
+        // derived from the concurrency, not a separate option.
+        self.prefix_slots = l.prefix_slots.or(self.prefix_slots).or(l.max_batch.map(|b| b.max(DEFAULT_PREFIX_SLOTS)));
         self.prefill_slice = l.prefill_slice.or(self.prefill_slice);
         self.prefill_batch = l.prefill_batch.or(self.prefill_batch);
         let mut notes = Vec::new();
@@ -613,6 +616,12 @@ mod tests {
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(cfg.gguf.tier.as_ref().unwrap().describe(), "q4,in_proj_a.weight=f32");
         assert_eq!((cfg.gguf.kv.unwrap().as_str(), cfg.gguf.ctx, cfg.gguf.max_batch), ("fp8", Some(8192), Some(6)));
+        assert_eq!(cfg.gguf.prefix_slots, Some(6), "prefix slots follow the concurrency");
+        let mut wide = Qwen35ServeConfig::default();
+        let mut p16 = model::policy::ServePolicy::default();
+        p16.set("--max-batch", "16").unwrap();
+        wide.apply_policy(&p16).unwrap();
+        assert_eq!(wide.gguf.prefix_slots, Some(16));
         assert!(cfg.gguf.refused.is_none() && cfg.fp32.refused, "the fp32 resident cannot honour q4/fp8");
         assert!(cfg.fp32_refused.as_deref().unwrap().contains("brain checkpoint"));
 

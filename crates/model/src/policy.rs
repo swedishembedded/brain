@@ -51,7 +51,7 @@ pub struct ServeLimits {
     pub kv_tokens: Option<u32>,
     /// `--kv-offload-gb G`: host RAM for preempted sessions' KV (fractional).
     pub kv_offload_gb: Option<f64>,
-    /// Prefix-cache slots (derived by default): cached prompts kept for prefix reuse; 0 is off.
+    /// Prefix-cache slots (derived from the batch by default): cached prompts kept for prefix reuse; 0 is off.
     pub prefix_slots: Option<u32>,
     /// Cap on prompt rows prefilled per forward.
     pub max_prefill: Option<u32>,

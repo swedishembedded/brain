@@ -57,7 +57,7 @@ is not supported; supported: f32, int8, fp8`); the model does not serve, and
 the server refuses to start only when no served family can honour the policy.
 A limit that has no meaning for a model is reported as a note at startup.
 
-Only real choices are flags. The KV pool size, the prefix-cache slots, the
+Only real choices are flags. The prefix-cache slots follow `--max-batch` (one warm conversation per concurrent sequence, never fewer than four). The KV pool size, the prefix-cache slots, the
 prefill slice, batch and row cap, and the residual-add and norm fusion are
 derived from the model's metadata, the device and the memory plan (the context
 window from the model's declared window and the free memory) and are not
