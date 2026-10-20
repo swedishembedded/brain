@@ -99,8 +99,9 @@ brain --device gpu0,gpu1 serve --openai
 #                            grammar is refused rather than served at a
 #                            silently wrong precision
 #   --qwen35-kv int8         how the 16 GQA layers store K/V: "f32" (default),
-#                            "bf16" (half the bytes) or "int8" (one scale per
-#                            token and kv head, ~3.9x fewer bytes)
+#                            "bf16" (half the bytes), "int8" (one scale per
+#                            token and kv head, ~3.9x fewer bytes) or "fp8"
+#                            (E4M3, the same bytes and scales as int8)
 #   --qwen35-max-batch N     concurrent decode slots (default 8)
 #   --qwen35-fp32-ctx N      context for the fp32 resident served from a brain
 #                            checkpoint (default 4096)
@@ -142,7 +143,9 @@ What it does differently:
   context the 16 GQA layers' KV cache is the whole bound on the batch - 16 GiB
   per sequence in f32 against 27 GiB of INT8 weights - so it can be stored
   narrower: `bf16` (8 GiB per sequence at 128k) or `int8` with one f32 scale
-  per (token, kv-head) row (4.06 GiB). The attention arithmetic stays f32; each
+  per (token, kv-head) row (4.06 GiB), or `fp8` (E4M3 elements under the same
+  per-row scale, so the same bytes as int8; its prefill runs the portable
+  kernel because no tensor-core kernel reads fp8 rows). The attention arithmetic stays f32; each
   element is rounded once when it is written and widened as it is read, by the
   paged-KV kernel family (`paged_kv_append_batched_word`/
   `paged_kv_append_i8_clipped_batched`, the `paged_decode_*` scores/apply and the

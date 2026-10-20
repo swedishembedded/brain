@@ -242,6 +242,9 @@ everything about HOW to serve it is a `brain serve` flag:
   history tokens (int8 KV costs about 74 KB per token on the 8B, so 250000
   tokens is about 18 GB). A pool is never smaller than one context.
 - `--qwen-kv-fp32` - opt out of the default int8 KV cache.
+- `--qwen-kv-fp8` - store the packed KV pools as FP8 E4M3 instead of int8
+  (the same bytes per token; the prefill runs the portable kernel because no
+  tensor-core kernel reads fp8 rows; off by default).
 - `--qwen-kv-calib` - opt in to per-head KV clip ranges produced by `brain
   qwen3 calib` (off by default).
 - `--qwen-kv-offload-gb N` - host RAM the serving engine may use to park

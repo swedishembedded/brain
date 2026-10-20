@@ -88,6 +88,14 @@ var<workgroup> ksh:  array<f32, 1024>;  // BC*HD  -> 4 KiB
 var<workgroup> vsh:  array<f32, 1024>;  // BC*HD  -> 4 KiB
 var<workgroup> part: array<f32, 2048>;  // BC*BR*LANES -> 8 KiB
 
+// @kv8-decode-begin
+// Byte `lane` (0 = lowest) of a packed word as a signed int8, widened to f32.
+// (`kernels::template::fp8_decode_variant` swaps this block for an E4M3 decode.)
+fn kv8_byte(w: u32, lane: u32) -> f32 {
+    return f32(bitcast<i32>(w << (24u - 8u * lane)) >> 24u);
+}
+// @kv8-decode-end
+
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>,
@@ -158,15 +166,8 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
                 let tok_slot = physical * p.block_size + (j % p.block_size);
                 let elem = tok_slot * kv_row + hkv * hd + d;
 
-                let kbyte = (pool_k[elem / 4u] >> (8u * (elem % 4u))) & 0xffu;
-                let kiv = i32(kbyte);
-                let ksv = select(kiv, kiv - 256, kiv > 127);
-                ksh[e] = f32(ksv) * scales_k[tok_slot * p.n_kv_heads + hkv];
-
-                let vbyte = (pool_v[elem / 4u] >> (8u * (elem % 4u))) & 0xffu;
-                let viv = i32(vbyte);
-                let vsv = select(viv, viv - 256, viv > 127);
-                vsh[e] = f32(vsv) * scales_v[tok_slot * p.n_kv_heads + hkv];
+                ksh[e] = kv8_byte(pool_k[elem / 4u], elem % 4u) * scales_k[tok_slot * p.n_kv_heads + hkv];
+                vsh[e] = kv8_byte(pool_v[elem / 4u], elem % 4u) * scales_v[tok_slot * p.n_kv_heads + hkv];
             } else {
                 ksh[e] = 0.0;
                 vsh[e] = 0.0;

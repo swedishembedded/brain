@@ -302,6 +302,57 @@ pub fn fp8_kv_variant(name: &str, src: &'static str, binding: &str, scales: &str
     })
 }
 
+/// The FP8 E4M3 sibling of the int8 kernels that isolate their byte decode between
+/// `// @kv8-decode-begin` and `// @kv8-decode-end` marker lines (the split-key decode and the
+/// prefill over a packed pool): the block is replaced by the same function names decoding E4M3
+/// bytes instead of signed ones. The block names the shape the kernel calls, either
+/// `unpack_i8x4(word) -> vec4<f32>` or `kv8_byte(word, lane) -> f32`; anything else is refused,
+/// so a kernel that half-matches cannot silently keep the int8 decode. Named `"{name}#kv=fp8"`.
+pub fn fp8_decode_variant(name: &str, src: &'static str) -> Result<Variant, String> {
+    let vname = format!("{name}#kv=fp8");
+    static CACHE: OnceLock<Mutex<HashMap<(usize, String), Variant>>> = OnceLock::new();
+    let key = (src.as_ptr() as usize, vname.clone());
+    let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    if let Some(&hit) = cache.get(&key) {
+        return Ok(hit);
+    }
+    let (begin, end) = ("// @kv8-decode-begin\n", "// @kv8-decode-end\n");
+    let (b, e) = (src.find(begin).ok_or("fp8_decode_variant: no `@kv8-decode-begin` marker")?, src.find(end).ok_or("fp8_decode_variant: no `@kv8-decode-end` marker")?);
+    if e < b || src[b + begin.len()..].contains(begin) {
+        return Err("fp8_decode_variant: the kv8-decode markers are misplaced or repeated".into());
+    }
+    let block = &src[b + begin.len()..e];
+    let body = if block.contains("fn unpack_i8x4") {
+        FP8_UNPACK_X4
+    } else if block.contains("fn kv8_byte") {
+        FP8_BYTE
+    } else {
+        return Err("fp8_decode_variant: the kv8-decode block defines neither unpack_i8x4 nor kv8_byte".into());
+    };
+    let rewritten = format!("{}{}{}", &src[..b + begin.len()], body, &src[e..]);
+    let entry: Variant = (Box::leak(vname.into_boxed_str()), Box::leak(rewritten.into_boxed_str()));
+    cache.insert(key, entry);
+    Ok(entry)
+}
+
+const FP8_UNPACK_X4: &str = concat!(
+    fp8_e4m3_wgsl!(),
+    "// Four E4M3 bytes of a packed word as f32, lowest byte first.
+fn unpack_i8x4(w: u32) -> vec4<f32> {
+    return vec4<f32>(fp8_e4m3(w & 255u), fp8_e4m3((w >> 8u) & 255u), fp8_e4m3((w >> 16u) & 255u), fp8_e4m3(w >> 24u));
+}
+"
+);
+
+const FP8_BYTE: &str = concat!(
+    fp8_e4m3_wgsl!(),
+    "// Byte `lane` (0 = lowest) of a packed word as an E4M3 value.
+fn kv8_byte(w: u32, lane: u32) -> f32 {
+    return fp8_e4m3((w >> (8u * lane)) & 255u);
+}
+"
+);
+
 /// What [`int8_weight_variant`] and [`int8_kv_variant`] share: pack `binding`
 /// as int8, append the `scales` binding, and decode each load as
 /// `scales[scale_index(wi)] * int8`.

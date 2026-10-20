@@ -259,6 +259,7 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
                 v.push(kernels::template::dtype_variant(name, src, "w", dt).expect("brain-kernels ships the bf16/f16 GEMM variants"));
             }
         }
+        v.extend(model::kv_tier::fp8_pool_pipelines());
         v
     })
 }
@@ -888,6 +889,10 @@ pub struct Engine {
     // read from a different slot than its pool words, `warm_prefill_is_
     // identical_to_cold`'s int8 arm is what would fail.
     kv_int8: bool,
+    /// `Some` when the packed pools hold FP8 E4M3 bytes instead of int8 (the layout, sizes,
+    /// offload and clip tables are the int8 ones; only the kernels that write and read an
+    /// element differ). Set by [`Engine::set_kv_fp8`] before the first step.
+    kv_fp8: Option<model::kv_tier::Fp8PoolKernels>,
     scales_k: Vec<DeviceBuffer>,
     scales_v: Vec<DeviceBuffer>,
     /// What [`kv_pool_bytes`] computed for this sizing - recorded once at
@@ -1480,6 +1485,7 @@ impl Engine {
             scratch_bytes: scratch_bytes_val,
             fused_attention,
             kv_calib: None,
+            kv_fp8: None,
             clip_k,
             clip_v,
             yarn,
@@ -1614,6 +1620,27 @@ impl Engine {
     /// DP4A-bound `matmul_i8*` GEMM family `weights_int8`/`w8_on` gates).
     pub fn kv_int8(&self) -> bool {
         self.kv_int8
+    }
+
+    /// Store the packed KV pools as FP8 E4M3 instead of int8. The pools were sized for one byte per
+    /// element and one scale per (slot, kv head) either way, so this only switches which kernels
+    /// write and read them: call it right after construction, before any sequence is prefilled
+    /// (bytes already written would be read as the wrong codec). Needs `kv_int8: true` and an engine
+    /// whose device registered the fp8 pipelines ([`pipelines`] does).
+    pub fn set_kv_fp8(&mut self) -> Result<(), String> {
+        if !self.kv_int8 {
+            return Err("fp8 KV needs the packed pools: build the engine with kv_int8: true".into());
+        }
+        if self.alloc.free_blocks() != self.alloc.num_blocks() || !self.tape_cache.is_empty() {
+            return Err("set_kv_fp8 must run before the engine has served a sequence".into());
+        }
+        self.kv_fp8 = Some(model::kv_tier::Fp8PoolKernels::resolve(&self.gpu)?);
+        Ok(())
+    }
+
+    /// True when the packed pools hold FP8 E4M3 ([`Self::set_kv_fp8`]).
+    pub fn kv_fp8(&self) -> bool {
+        self.kv_fp8.is_some()
     }
 
     /// Device bytes the KV pool costs at this engine's sizing - recorded once
@@ -2558,8 +2585,9 @@ impl Engine {
                 // buffers hold either the calibrated ceilings or the
                 // f32::MAX sentinel, which the kernel's contract documents
                 // as bit-identical to the old unclipped twin.
-                s.push(g.step(APPEND_I8_CLIPPED, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.clip_k[l], &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
-                s.push(g.step(APPEND_I8_CLIPPED, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_v[l], &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
+                let append = self.kv_fp8.map_or(APPEND_I8_CLIPPED, |k| k.append);
+                s.push(g.step(append, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.clip_k[l], &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
+                s.push(g.step(append, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_v[l], &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
                 // The SAME `Op::PagedAttentionFused` question the fp32 branch
                 // below asks, only at `Dtype::I8`: `paged_flash_prefill_i8`
                 // serves causal-chunk prefill and the batched split-key pair
@@ -2576,12 +2604,13 @@ impl Engine {
                     let params = [b, nh, nkv, hd, group, bs, mbt];
                     // fp16 tensor cores where the device has them and the fp32 tier was not pinned
                     // (same buffers, uniform and launch geometry as the portable kernel).
-                    let native = (!self.gemm.is_reference_pinned())
+                    // No native tensor-core kernel reads fp8 rows: that codec runs the portable one.
+                    let native = (!self.gemm.is_reference_pinned() && self.kv_fp8.is_none())
                         .then(|| block::native_paged_flash_prefill_kv8(g, hd, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_k[l], &self.scales_v[l]], &params, nh * ntiles_q))
                         .flatten();
                     s.push(native.unwrap_or_else(|| {
                         g.dispatch(
-                            PAGED_FLASH_PREFILL_I8,
+                            self.kv_fp8.map_or(PAGED_FLASH_PREFILL_I8, |k| k.prefill),
                             &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
                             &params,
                             gpu_core::Dispatch::Workgroups(nh * ntiles_q),
@@ -2598,13 +2627,13 @@ impl Engine {
                     let n_splits = int8_decode_splits(c, b, cap);
                     let slabs = group.div_ceil(INT8_DECODE_SLAB);
                     s.push(g.dispatch(
-                        PAGED_FLASH_DECODE_SPLIT_I8,
+                        self.kv_fp8.map_or(PAGED_FLASH_DECODE_SPLIT_I8, |k| k.decode_split),
                         &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.part_i8],
                         &[b, nh, nkv, hd, group, bs, mbt, n_splits],
                         gpu_core::Dispatch::Workgroups(b * nkv * slabs * n_splits),
                     ));
                     s.push(g.step(PAGED_FLASH_DECODE_COMBINE_I8, &[&sc.part_i8, &sc.seqlen_buf, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
-                } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned())
+                } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned() && self.kv_fp8.is_none())
                     .then(|| block::native_paged_decode_batched(g, true, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
                     .flatten()
                 {
@@ -2612,9 +2641,17 @@ impl Engine {
                     // selected; that pair is faster where both run (`qwen_bench flash-decode-i8` times the two).
                     s.push(step);
                 } else {
-                    s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], b * nh * cap));
-                    s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
-                    s.push(g.step(APPLY_I8, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_v[l], &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
+                    let sp = [b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)];
+                    if let Some(k) = self.kv_fp8 {
+                        // The fp8 kernels are template rewrites of the f32 triad, which binds the scales last.
+                        s.push(g.step(k.scores, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores, &self.scales_k[l]], &sp, b * nh * cap));
+                        s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
+                        s.push(g.step(k.apply, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_v[l]], &sp[..8], b * nh * hd));
+                    } else {
+                        s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &sp, b * nh * cap));
+                        s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
+                        s.push(g.step(APPLY_I8, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_v[l], &sc.ctx], &sp[..8], b * nh * hd));
+                    }
                 }
             } else {
                 // K's norm+RoPE+append collapse into ONE dispatch here (the
@@ -4277,6 +4314,48 @@ mod tests {
             let alone = engine().generate_greedy(std::slice::from_ref(prompt), 10, None);
             assert_eq!(together[i], alone[0], "sequence {i}: batched int8 decode != the same sequence alone");
         }
+    }
+
+    /// The fp8 pools run the same fused kernels as int8 with an E4M3 decode of each byte, so the
+    /// same invariant holds: a batch decodes each of its sequences exactly as it would alone.
+    #[test]
+    fn fp8_batched_decode_matches_each_sequence_alone_at_a_fused_head_dim() {
+        let cfg = kv_probe_cfg();
+        let map = tiny_weights(&cfg);
+        let prompts: Vec<Vec<u32>> = vec![vec![1, 5, 3, 9, 2, 7, 11, 4, 6, 8, 10, 12, 3, 1, 2], vec![7, 2, 4], vec![5]];
+        let engine = || {
+            let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(pipelines()), cfg.clone(), &map, 4, 64, 4, 16, 32, true, false);
+            e.set_kv_fp8().expect("the fp8 pipelines are registered");
+            e
+        };
+        let together = engine().generate_greedy(&prompts, 10, None);
+        for (i, prompt) in prompts.iter().enumerate() {
+            let alone = engine().generate_greedy(std::slice::from_ref(prompt), 10, None);
+            assert_eq!(together[i], alone[0], "sequence {i}: batched fp8 decode != the same sequence alone");
+        }
+    }
+
+    /// The fp8 engine's logits after a prefill track the fp32-KV engine's within E4M3 rounding
+    /// (and are not identical to them: the compact pools were the ones read).
+    #[test]
+    fn fp8_kv_logits_track_the_f32_kv_engine() {
+        let cfg = kv_probe_cfg();
+        let map = tiny_weights(&cfg);
+        let prompt: Vec<u32> = vec![1, 5, 3, 9, 2, 7, 11, 4, 6, 8, 10, 12, 3, 1, 2, 7, 9];
+        let logits = |kv_int8: bool, fp8: bool| {
+            let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(pipelines()), cfg.clone(), &map, 4, 64, 2, 16, 32, kv_int8, false);
+            if fp8 {
+                e.set_kv_fp8().expect("the fp8 pipelines are registered");
+            }
+            let mut table = BlockTable::new();
+            let hidden = e.prefill(&mut table, &prompt);
+            e.logits(&hidden)
+        };
+        let (f32l, i8l, fp8l) = (logits(false, false), logits(true, false), logits(true, true));
+        let rel = |a: &[f32], b: &[f32]| (a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f32>() / a.iter().map(|x| x * x).sum::<f32>()).sqrt();
+        let (e_i8, e_fp8) = (rel(&f32l, &i8l), rel(&f32l, &fp8l));
+        eprintln!("qwen3 tiny logits rel-L2 vs f32 KV: int8 {e_i8:.3e}, fp8 {e_fp8:.3e}");
+        assert!(e_fp8 > 0.0 && e_fp8 < 1e-2, "fp8 KV logits drifted from f32 by {e_fp8}");
     }
 
     /// What a freshly recorded dispatch costs the device in per-dispatch

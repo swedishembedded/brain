@@ -118,7 +118,10 @@ var<workgroup> corr: array<f32, 4>;          // this chunk's accumulator rescale
 var<workgroup> fin:  array<f32, 512>;        // [head][channel] cross-key-group reduction
 var<workgroup> lfin: array<f32, 16>;         // [key group][head] denominator partials
 
-// Four signed bytes of a packed word as f32, lowest byte first.
+// @kv8-decode-begin
+// Four signed bytes of a packed word as f32, lowest byte first. (The block
+// between the markers is the whole of what the element codec changes:
+// `kernels::template::fp8_decode_variant` swaps it for an E4M3 decode.)
 fn unpack_i8x4(w: u32) -> vec4<f32> {
     return vec4<f32>(vec4<i32>(
         bitcast<i32>(w << 24u) >> 24u,
@@ -126,6 +129,7 @@ fn unpack_i8x4(w: u32) -> vec4<f32> {
         bitcast<i32>(w << 8u) >> 24u,
         bitcast<i32>(w) >> 24u));
 }
+// @kv8-decode-end
 
 // `acc + a . k`, as explicit fused multiply-adds (the CUDA build compiles
 // with contraction off, so `a * b + c` would be two instructions).

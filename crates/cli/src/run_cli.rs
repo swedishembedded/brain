@@ -239,6 +239,8 @@ QWEN3 SERVING TUNABLES  (--qwen-weights names the checkpoint to serve; the
                          conversation's cached prefix is evicted before its
                          next turn and its whole history is prefilled again.
   --qwen-kv-fp32         opt OUT of int8 KV (on by default).
+  --qwen-kv-fp8          store the int8-sized KV pools as FP8 E4M3 instead
+                         (off by default; needs the packed pools).
   --qwen-kv-calib        opt IN to a kv_calib.json beside the checkpoint
                          (off by default).
   --qwen-kv-offload-gb N host RAM for preempted sessions' KV, fractional
@@ -616,6 +618,7 @@ pub fn run_serve(args: &[String]) {
             "--qwen-ctx" => qwen_cfg.ctx = Some(parsed(args, &mut i, "--qwen-ctx")),
             "--qwen-max-batch" => qwen_cfg.max_batch = parsed(args, &mut i, "--qwen-max-batch"),
             "--qwen-kv-fp32" => qwen_cfg.kv_int8 = false,
+            "--qwen-kv-fp8" => qwen_cfg.kv_fp8 = true,
             "--qwen-kv-calib" => qwen_cfg.kv_calib_opt_in = true,
             "--qwen-kv-offload-gb" => qwen_cfg.kv_offload_gb = parsed(args, &mut i, "--qwen-kv-offload-gb"),
             "--qwen-weights-int8" => qwen_cfg.weights_int8 = Some(true),

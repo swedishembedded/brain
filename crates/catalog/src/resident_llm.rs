@@ -496,6 +496,9 @@ pub struct QwenServeConfig {
     /// serving default - see [`QwenResident::activate`]'s own doc for the
     /// measurement that earned it).
     pub kv_int8: bool,
+    /// `--qwen-kv-fp8` (presence opts IN), default `false`: store the packed KV pools as FP8 E4M3
+    /// instead of int8 (same bytes per token). Ignored, with a message, when the pools are fp32.
+    pub kv_fp8: bool,
     /// `--qwen-kv-calib` (presence opts IN), default `false`.
     pub kv_calib_opt_in: bool,
     /// `--qwen-kv-offload-gb N` (fractional allowed), default `0.0` (off).
@@ -541,7 +544,7 @@ pub struct QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false }
+        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false }
     }
 }
 
@@ -728,6 +731,7 @@ pub struct QwenResident {
     ctx: u32,
     max_batch: u32,
     kv_int8_requested: bool,
+    kv_fp8_requested: bool,
     kv_calib_opt_in: bool,
     kv_offload_bytes: u64,
     weights_int8_requested: bool,
@@ -830,6 +834,7 @@ impl QwenResident {
             ctx,
             max_batch: cfg.max_batch.max(1),
             kv_int8_requested: cfg.kv_int8,
+            kv_fp8_requested: cfg.kv_fp8,
             kv_calib_opt_in: cfg.kv_calib_opt_in,
             kv_offload_bytes: (cfg.kv_offload_gb.max(0.0) * (1u64 << 30) as f64) as u64,
             weights_int8_requested,
@@ -1305,6 +1310,13 @@ impl ResidentModel for QwenResident {
             } else {
                 qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
             };
+            if self.kv_fp8_requested {
+                if kv_int8 {
+                    eng.set_kv_fp8().map_err(|e| format!("qwen: --qwen-kv-fp8: {e}"))?;
+                } else {
+                    eprintln!("serve: {}: --qwen-kv-fp8 needs the packed KV pools but the KV cache is fp32; ignoring", self.path);
+                }
+            }
             eng.set_gemm_precision(self.gemm_precision);
             eng.set_fuse_residual_norm(self.fuse_residual_norm);
             // The adapter bank, once per engine, from the settings the

@@ -487,6 +487,46 @@ pub fn kernel_list(existing: &[(&str, &str)]) -> Vec<(&'static str, &'static str
     all.into_iter().chain(decode).filter(|(n, _)| !have.contains(n)).collect()
 }
 
+/// The fp8 tier for an engine that keeps its own int8 paged pools (`head_dim <= 128`, one scale per
+/// (token slot, kv head), K and V in separate per-layer buffers - `qwen3`'s serving engine) and
+/// owns the pipeline order itself: [`fp8_pool_pipelines`] is what it registers, and
+/// [`Fp8PoolKernels::resolve`] finds the kernels by name. The pool layout is the int8 one byte for
+/// byte, so the same buffers, sizes, offload and calibration clip tables serve both codecs; only
+/// the kernels that write and read an element differ.
+pub fn fp8_pool_pipelines() -> Vec<(&'static str, &'static str)> {
+    use kernels::template::{fp8_decode_variant, fp8_kv_variant};
+    vec![
+        (FP8_NAMES.append, kernels::PAGED_KV_APPEND_FP8_CLIPPED_BATCHED),
+        fp8_kv_variant("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED, "pool_k", "k_scales", "p.head_dim").expect("pool_k is templatable"),
+        fp8_kv_variant("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED, "pool_v", "v_scales", "p.head_dim").expect("pool_v is templatable"),
+        fp8_decode_variant("paged_flash_prefill_i8", kernels::PAGED_FLASH_PREFILL_I8).expect("the int8 prefill marks its decode block"),
+        fp8_decode_variant("paged_flash_decode_split_i8", kernels::PAGED_FLASH_DECODE_SPLIT_I8).expect("the int8 split decode marks its decode block"),
+    ]
+}
+
+/// Pipeline indices of [`fp8_pool_pipelines`] on one [`Gpu`].
+#[derive(Clone, Copy, Debug)]
+pub struct Fp8PoolKernels {
+    /// Same bindings as `paged_kv_append_i8_clipped_batched`.
+    pub append: usize,
+    /// The f32 triad's scores kernel over an fp8 pool; the scales are bound LAST.
+    pub scores: usize,
+    /// The f32 triad's apply kernel over an fp8 pool; the scales are bound LAST.
+    pub apply: usize,
+    /// Same bindings and launch geometry as `paged_flash_prefill_i8`.
+    pub prefill: usize,
+    /// Same bindings and launch geometry as `paged_flash_decode_split_i8`.
+    pub decode_split: usize,
+}
+
+impl Fp8PoolKernels {
+    pub fn resolve(gpu: &Gpu) -> Result<Fp8PoolKernels, String> {
+        let names: Vec<&str> = fp8_pool_pipelines().into_iter().map(|(n, _)| n).collect();
+        let find = |i: usize| gpu.kernel_index(names[i]).ok_or_else(|| format!("fp8 KV: kernel '{}' is not registered on this Gpu (add model::kv_tier::fp8_pool_pipelines to its pipelines)", names[i]));
+        Ok(Fp8PoolKernels { append: find(0)?, scores: find(1)?, apply: find(2)?, prefill: find(3)?, decode_split: find(4)? })
+    }
+}
+
 /// The pipeline indices of one tier's kernels on one [`Gpu`], and the step
 /// builders that bind a [`KvPlane`] to them.
 pub struct KvKernels {
