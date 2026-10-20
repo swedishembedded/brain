@@ -87,8 +87,9 @@ fn main() {
     let gpu = match device.as_str() {
         "cpu" => Gpu::new_cpu(pipelines()),
         "gpu" => Gpu::new_gpu(pipelines()),
+        "auto" => Gpu::new(pipelines()),
         "vulkan" => Gpu::try_new_vulkan(pipelines()).unwrap_or_else(|e| panic!("try_new_vulkan: {e}")),
-        other => panic!("unknown --device {other} (expected cpu|gpu|vulkan)"),
+        other => panic!("unknown --device {other} (expected cpu|gpu|vulkan|auto)"),
     };
     let t0 = Instant::now();
     let trainer = StreamTrainer::new_real(gpu, &cfg, &dir, n_tokens, window_budget, &lora_init).unwrap_or_else(|e| panic!("new_real: {e}"));
@@ -113,7 +114,8 @@ fn main() {
 
             let t0 = Instant::now();
             trainer.lora.zero_grads(&trainer.gpu);
-            let loss = trainer.forward_backward(&cfg, &loader, &x0, &targets);
+            // `BRAIN_PROFILE=1` prints the per-kernel device time of the step (the shared profile table).
+            let loss = gpu_core::profile::device_table(&trainer.gpu, "streamed step", || trainer.forward_backward(&cfg, &loader, &x0, &targets));
             trainer.lora.adamw_step(&trainer.gpu, step, lr);
             trainer.gpu.poll_wait();
             println!("PHASE=step STEP={step} LOSS={loss:.6} MINUTES={:.2}", t0.elapsed().as_secs_f64() / 60.0);

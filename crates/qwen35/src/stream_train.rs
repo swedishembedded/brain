@@ -87,9 +87,10 @@ use std::path::Path;
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use gpu_core::select::Dtype;
-use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block::{rmsnorm_bwd, rmsnorm_fwd, swiglu_bwd, swiglu_fwd, KernelIds};
 use model::gdn::{gdn_chunk_size, GdnShape};
+use model::head_ce::{HeadCe, HeadCeConfig, HeadKernels};
 use model::gdn_mixer::{gdn_mixer_bwd, gdn_mixer_fwd, GdnMixerActs, GdnMixerGrads, GdnMixerIds, GdnMixerShape, GdnMixerWeights};
 use model::gqa_mixer::{gqa_mixer_bwd, gqa_mixer_fwd, GqaMixerActs, GqaMixerGrads, GqaMixerIds, GqaMixerShape, GqaMixerWeights};
 use model::ops::{Ops, Weight};
@@ -112,8 +113,6 @@ struct TrainIds {
     gdn_mixer: GdnMixerIds,
     gqa_mixer: GqaMixerIds,
     add2: usize,
-    ce_value: usize,
-    ce_grad: usize,
 }
 
 fn train_ids(g: &Gpu) -> TrainIds {
@@ -122,9 +121,16 @@ fn train_ids(g: &Gpu) -> TrainIds {
         gdn_mixer: gdn_mixer_ids(g),
         gqa_mixer: gqa_mixer_ids(g),
         add2: idx(g, "add2"),
-        ce_value: idx(g, "ce_value"),
-        ce_grad: idx(g, "ce_grad"),
     }
+}
+
+/// Logit words one chunk of the chunked head cross-entropy may hold at once (the resident trainer's budget).
+const HEAD_BUDGET_WORDS: u64 = 1 << 28;
+
+fn build_head_ce(ops: &Ops, gpu: &Gpu, cfg: &Qwen35Config, head: &Weight, n: u32) -> HeadCe {
+    let rows = model::head_ce::rows_for_budget(n as u64, cfg.vocab as u64, HEAD_BUDGET_WORDS) as u32;
+    let kernels = HeadKernels::from_gpu(gpu).unwrap_or_else(|e| panic!("stream_train: LM head: {e}"));
+    HeadCe::new(ops, cfg.d_model, cfg.vocab, head, HeadCeConfig { rows_per_chunk: rows, tile_budget_words: None }, kernels).unwrap_or_else(|e| panic!("stream_train: LM head: {e}"))
 }
 
 /// Where one streamed layer's tensors come from: its norm gains and small vectors as f32, its weight
@@ -749,6 +755,7 @@ pub struct StreamTrainer {
     sin: DeviceBuffer,
     pub lora: LoraStore,
     head: Weight,
+    head_ce: HeadCe,
     final_norm: DeviceBuffer,
     n: u32,
     window_budget: u32,
@@ -778,8 +785,9 @@ impl StreamTrainer {
         let norm_raw = init.get("norm.weight").unwrap_or_else(|| panic!("stream_train: missing norm.weight"));
         let final_norm = gpu.storage_init("stream_train.final_norm", norm_raw);
 
+        let head_ce = build_head_ce(&ops, &gpu, cfg, &head, n);
         let lora = LoraStore::new(&gpu, cfg, init, n);
-        StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, final_norm, n, window_budget }
+        StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, head_ce, final_norm, n, window_budget }
     }
 
     /// Real per-token embedding rows for `ids` from a host-resident `tok.
@@ -827,8 +835,9 @@ impl StreamTrainer {
         let head = base.weight(&ops, head_name, v, d)?;
         let final_norm = gpu.storage_init("stream_train.final_norm", &base.small_f32("norm.weight")?);
 
+        let head_ce = build_head_ce(&ops, &gpu, cfg, &head, n);
         let lora = LoraStore::new(&gpu, cfg, lora_init, n);
-        Ok(StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, final_norm, n, window_budget })
+        Ok(StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, head_ce, final_norm, n, window_budget })
     }
 
     /// The streamed trainer's resident footprint as planner categories: `window_budget` layers of the stored
@@ -1066,36 +1075,14 @@ impl StreamTrainer {
 
         // ---- head forward + loss (resident, no re-streaming - read/
         // differentiated once per step, not once per layer). ----
-        let v = cfg.vocab;
         let xn_final = g.storage((n * d) as u64);
         g.submit(&[], &[rmsnorm_fwd(g, &self.ids.kernels, &xres_buf, &self.final_norm, &xn_final, d, n, cfg.rms_eps)]);
-        let logits = g.storage((n * v) as u64);
-        {
-            let mut s = Vec::new();
-            let act = self.ops.act(&mut s, &xn_final, 0, n, d);
-            self.ops.matmul(&mut s, &self.head, &act, &logits, 0);
-            g.submit(&[], &s);
-        }
-        let targets_buf = g.storage(n as u64);
-        g.write(&targets_buf, targets);
-        let ce_buf = g.storage(n as u64);
-        g.submit(&[], &[g.step(self.ids.ce_value, &[&logits, &targets_buf, &ce_buf], &[n, v, model::IGNORE], n)]);
-        let ce_vals = g.read(&ce_buf, n as usize);
+        // The shared chunked head cross-entropy (`model::head_ce`): the logits of a chunk of rows at a time, the loss
+        // and its gradient from the softmax statistics, never the whole `[n, vocab]` matrix and no per-element row rescan.
         let count = targets.iter().filter(|&&t| t != model::IGNORE).count().max(1) as f32;
-        let loss = ce_vals.iter().sum::<f32>() / count;
-
-        // ---- head backward ----
-        let ce_grad_uni = g.uniform_dynamic(4);
-        g.write(&ce_grad_uni, &[n, v, model::IGNORE, f(count)]);
-        let d_logits = g.storage((n * v) as u64);
-        g.submit(&[], &[g.step_buf(self.ids.ce_grad, &ce_grad_uni, &[&logits, &targets_buf, &d_logits], n * v)]);
-
+        let loss = (self.head_ce.forward(&self.ops, &xn_final, n, targets, None, 1.0).loss_sum / count as f64) as f32;
         let d_xn_final = g.storage((n * d) as u64);
-        {
-            let mut s = Vec::new();
-            self.ops.matmul_dx(&mut s, &self.head, &d_logits, n, &d_xn_final, false);
-            g.submit(&[], &s);
-        }
+        self.head_ce.backward(&self.ops, &xn_final, &d_xn_final, n, targets, None, 1.0 / count, 1.0, None);
 
         let mut d_res_next = g.storage((n * d) as u64);
         {
