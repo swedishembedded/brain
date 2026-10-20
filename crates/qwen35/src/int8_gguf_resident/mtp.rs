@@ -80,7 +80,7 @@ impl SlotState {
 /// The MTP layer, its projection and norms, and the per-slot draft state.
 pub(super) struct MtpDrafter {
     stage: Qwen35,
-    caches: ShardCaches,
+    pub(super) caches: ShardCaches,
     ops: Ops,
     fc: Weight,
     enorm: Vec<f32>,
@@ -131,6 +131,7 @@ impl MtpDrafter {
         cap: u32,
         slots: u32,
         kv_tier: KvTier,
+        layout: KvLayout,
         target_norm_name: &str,
         embed_name: &str,
         normed_hidden: bool,
@@ -164,7 +165,7 @@ impl MtpDrafter {
         src.validate(&crate::model::shard_param_list(&cfg1, &shard))?;
         let src = GdnFixSource::new(src, cfg1.gdn_head_order());
         let stage = Qwen35::new_shard_dt(cfg1.clone(), 1, 1, &src, shard.clone(), tier);
-        let caches = ShardCaches::new(&stage.gpu, &cfg1, &shard, cap, slots, 0, kv_tier, 0);
+        let caches = ShardCaches::new(&stage.gpu, &cfg1, &shard, cap, slots, 0, kv_tier, layout);
 
         let (w, s) = model::int8::upload_quantized(&mut paramstore::upload::Uploader::new(head_gpu), mg, &fc_name, d, 2 * d).map_err(|e| format!("{MODEL}: {e}"))?;
         let fc = Weight::I8 { w, s, n: d as u32, k: 2 * d as u32 };
@@ -278,7 +279,7 @@ impl Qwen35GgufInstance {
             (names.1, self.embed.name.clone())
         };
         let head_gpu = &self.shards.last().expect("a plan always has at least one stage").qwen35.gpu;
-        let loaded = MtpDrafter::load(gguf_path, &self.mg, &self.cfg, tier, gpu_index, head_gpu, self.cap, self.max_batch + self.prefix_slots, self.kv_tier, &target_norm, &embed_name, normed_hidden)?;
+        let loaded = MtpDrafter::load(gguf_path, &self.mg, &self.cfg, tier, gpu_index, head_gpu, self.cap, self.state_rows(), self.kv_tier, self.kv_layout, &target_norm, &embed_name, normed_hidden)?;
         self.mtp = loaded;
         Ok(self.mtp.is_some())
     }
@@ -343,14 +344,14 @@ impl Qwen35GgufInstance {
         }
     }
 
-    /// A cached prefix of `rows` tokens was copied into `slot` from `from`: its
+    /// A cached prefix of `rows` tokens was copied into the window `to` from `from`: its
     /// head KV follows (positions `0..rows - 1` are pure functions of the
     /// prefix).
-    pub(super) fn mtp_seed_prefix(&mut self, from: u32, slot: u32, rows: u32) {
+    pub(super) fn mtp_seed_prefix(&mut self, from: KvWindow<'_>, to: KvWindow<'_>, rows: u32) {
         let Self { mtp, cfg, .. } = self;
         let Some(m) = mtp.as_ref() else { return };
         if rows > 1 {
-            m.caches.copy_kv_rows(&m.stage.gpu, cfg, from, slot, rows - 1);
+            m.caches.copy_kv_rows(&m.stage.gpu, cfg, from, to, rows - 1);
         }
     }
 

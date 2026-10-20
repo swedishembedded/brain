@@ -8,11 +8,15 @@
 //!
 //! What the engine adds over [`Qwen35GgufInstance`] is only the sequence
 //! bookkeeping a scheduler needs. The instance already holds `max_batch`
-//! decode slots per stage (one GQA KV window of `cap` rows plus one GDN
-//! recurrent state per sequence); here a slot is a physical block of a
-//! [`BlockAllocator`] whose `block_size == cap`, exactly the layout
-//! `crate::serve::Engine` uses, so a sequence's whole lifetime is one block
-//! and `table.blocks()[0]` is its slot. A decode iteration then names the
+//! decode slots per stage (one GDN recurrent state per sequence, and a GQA
+//! KV window of `cap` rows per slot or a shared block pool). A sequence's slot
+//! is its `BlockTable::state_row`. In the default layout the allocator's
+//! `block_size == cap`, exactly the layout `crate::serve::Engine` uses, so a
+//! sequence's whole lifetime is one block and the slot is that block's id. In
+//! the paged layout ([`super::Qwen35GgufResident::with_kv_block_rows`]) the
+//! allocator hands out small blocks as the sequence grows, the slot comes from
+//! a free list, and the engine publishes the table's blocks to the stages
+//! before every forward. A decode iteration then names the
 //! live sequences' slots and positions, and the instance runs them as one
 //! batched step across the layer-sharded cards: weight reads are paid once
 //! for the whole batch, and sequences join (prefill into a fresh slot) and
@@ -51,7 +55,7 @@ struct Resume {
 }
 
 type PrefixCache = SnapshotPrefixCache<Resume>;
-use super::{MultiPrefillJob, Qwen35GgufInstance, MODEL};
+use super::{KvLayout, KvWindow, MultiPrefillJob, Qwen35GgufInstance, MODEL};
 
 /// Candidates a non-greedy pick can sample from. Real sampling is exact
 /// within this set; it only bounds how deep into the vocabulary nucleus
@@ -65,6 +69,9 @@ const FEED_EWMA: f64 = 0.3;
 pub struct Qwen35GgufEngine {
     inst: Qwen35GgufInstance,
     alloc: BlockAllocator,
+    /// Recurrent-state rows not owned by a sequence (paged layout only; in the
+    /// one-block layout a sequence's row is its block's id).
+    free_rows: Vec<u32>,
     /// Prompts whose KV rows and recurrent-state snapshot are kept for reuse
     /// (see [`super::prefix`]).
     cache: PrefixCache,
@@ -172,19 +179,55 @@ impl Qwen35GgufEngine {
     /// number of sequences that may be resident at once and its `cap` the
     /// per-sequence `prompt + max_new` limit.
     ///
-    /// The allocator holds `max_batch + prefix_slots` blocks: the scheduler
-    /// never runs more than `max_batch` sequences, so a cached prompt's retained
-    /// block never starves an admission.
+    /// The one-block layout's allocator holds `max_batch + prefix_slots` blocks:
+    /// the scheduler never runs more than `max_batch` sequences, so a cached
+    /// prompt's retained block never starves an admission. The paged layout's
+    /// holds the pool's blocks, and cached prompts' blocks are reclaimed for
+    /// live sequences like any cache.
     pub fn new(inst: Qwen35GgufInstance) -> Qwen35GgufEngine {
-        let alloc = BlockAllocator::new(inst.max_batch + inst.prefix_slots, inst.cap);
+        let (alloc, free_rows) = match inst.kv_layout {
+            KvLayout::OneBlock => (BlockAllocator::new(inst.max_batch + inst.prefix_slots, inst.cap), Vec::new()),
+            KvLayout::Paged { block_rows, pool_rows } => (BlockAllocator::new(pool_rows / block_rows, block_rows), (0..inst.max_batch).rev().collect()),
+        };
         let cache = PrefixCache::new(inst.prefix_slots);
-        Qwen35GgufEngine { inst, alloc, cache, pending: HashMap::new(), partial: HashMap::new(), verifying: None, spec_batch_limit: usize::MAX, spec_prefill: true, feed_secs: None, times: SpecTimes::default(), prefill: PrefillPolicy::default() }
+        Qwen35GgufEngine { inst, alloc, free_rows, cache, pending: HashMap::new(), partial: HashMap::new(), verifying: None, spec_batch_limit: usize::MAX, spec_prefill: true, feed_secs: None, times: SpecTimes::default(), prefill: PrefillPolicy::default() }
     }
 
     /// Free the blocks of entries the cache retired.
     fn release_retired(&mut self, retired: impl IntoIterator<Item = BlockTable>) {
         for mut table in retired {
             table.release(&mut self.alloc);
+        }
+    }
+
+    /// Give the sequence a recurrent-state row if it has none: the block's id in
+    /// the one-block layout (so the row and the window are the same slot), a
+    /// free row in the paged one. The table must already hold its blocks.
+    fn assign_state_row(&mut self, table: &mut BlockTable) -> u32 {
+        if let Some(row) = table.state_row() {
+            return row;
+        }
+        let row = match self.inst.kv_layout {
+            KvLayout::OneBlock => table.blocks()[0],
+            KvLayout::Paged { .. } => self.free_rows.pop().unwrap_or_else(|| panic!("{MODEL}: more sequences than the {} recurrent-state rows", self.inst.max_batch)),
+        };
+        table.set_state_row(row);
+        row
+    }
+
+    /// The sequence's recurrent-state row, with its KV blocks made known to
+    /// every stage (a no-op for the one-block layout).
+    fn slot(&mut self, table: &BlockTable) -> u32 {
+        let row = table.state_row().expect("a sequence being run has been given a state row");
+        self.inst.set_blocks(row, table.blocks());
+        row
+    }
+
+    /// The KV window of a table, in the form the stages copy rows between.
+    fn window<'a>(&self, table: &'a BlockTable) -> KvWindow<'a> {
+        match self.inst.kv_layout {
+            KvLayout::OneBlock => KvWindow::Block(table.blocks()[0]),
+            KvLayout::Paged { .. } => KvWindow::Table(table.blocks()),
         }
     }
 
@@ -260,9 +303,10 @@ impl Qwen35GgufEngine {
         let mut slots = Vec::with_capacity(tables.len());
         let mut positions = Vec::with_capacity(tables.len());
         for t in tables.iter_mut() {
-            let (_block, offset) = t.append(&mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted mid-decode: {e}"));
-            slots.push(t.blocks()[0]);
-            positions.push(offset);
+            t.append(&mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted mid-decode: {e}"));
+            slots.push(self.slot(t));
+            // The token's absolute position (the append's offset is within its block).
+            positions.push(t.len() - 1);
         }
         (slots, positions)
     }
@@ -299,7 +343,8 @@ impl Qwen35GgufEngine {
             panic!("{MODEL}: prompt token {bad} is outside the model vocabulary ({})", self.inst.cfg.vocab);
         }
         table.reserve(prompt.len() as u32, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
-        let slot = table.blocks()[0];
+        let slot = self.assign_state_row(table);
+        self.inst.set_blocks(slot, table.blocks());
         let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
         let mut start = 0;
         // The cached prefix's last hidden state: the MTP head's input at the
@@ -311,11 +356,12 @@ impl Qwen35GgufEngine {
         if cacheable {
             if let Some(i) = self.cache.lookup(table.kv_namespace(), prompt) {
                 let e = self.cache.entry(i);
-                let (from, rows, snap) = (e.table.blocks()[0], e.tokens.len(), e.snap_row);
+                let (rows, snap) = (e.tokens.len(), e.snap_row);
+                let (from, to) = (self.window(&e.table), self.window(table));
                 seed_valid = e.payload.mtp_valid;
-                self.inst.seed_from_prefix(from, slot, rows as u32, snap);
+                self.inst.seed_from_prefix(from, to, rows as u32, snap);
                 if seed_valid {
-                    self.inst.mtp_seed_prefix(from, slot, rows as u32);
+                    self.inst.mtp_seed_prefix(from, to, rows as u32);
                 }
                 if rows == prompt.len() {
                     // The whole prompt is cached: its state in place, no compute.
@@ -340,7 +386,7 @@ impl Qwen35GgufEngine {
     /// state (or the slot's pool row when `resume`): the rows `p.done..end` of
     /// `prompt`. Returns the last row's hidden state.
     fn forward_slice(&mut self, table: &BlockTable, prompt: &[u32], p: &mut PartialPrefill, end: usize, resume: bool) -> Vec<f32> {
-        let slot = table.blocks()[0];
+        let slot = self.slot(table);
         let collect = (self.inst.has_mtp() && p.mtp_feed).then_some(&mut p.rows_hidden);
         self.inst.prefill_adapter_slot.set(adapters::slot_of(self.inst.stage_models(), table.kv_namespace()));
         let hidden = self.inst.prefill_hidden(prompt, p.done, end, slot, resume, collect).unwrap_or_else(|e| panic!("{e}"));
@@ -393,7 +439,7 @@ impl Qwen35GgufEngine {
                 return PrefillProgress::Done(hidden);
             }
         }
-        let slot = table.blocks()[0];
+        let slot = table.state_row().expect("a prefill in progress has a state row");
         let mut p = self.partial.remove(&slot).expect("a prefill in progress has its state");
         let end = p.done + budget.min(prompt.len() - p.done);
         let resume = !p.fresh && p.done > 0;
@@ -422,7 +468,7 @@ impl Qwen35GgufEngine {
                 }
                 // The state this sequence starts from goes to its pool row now:
                 // the next sequence's seeding overwrites the working copy.
-                let slot = j.table.blocks()[0];
+                let slot = self.slot(j.table);
                 if self.partial[&slot].start == 0 {
                     self.inst.reset_work_state();
                 }
@@ -433,7 +479,7 @@ impl Qwen35GgufEngine {
         // (index, slot, progress, end) of every sequence that still has rows to run.
         let mut live: Vec<(usize, u32, PartialPrefill, usize)> = Vec::new();
         for (i, j) in jobs.iter().enumerate().filter(|(i, _)| answers[*i].is_none()) {
-            let slot = j.table.blocks()[0];
+            let slot = self.slot(j.table);
             let p = self.partial.remove(&slot).expect("a prefill in progress has its state");
             let end = p.done + j.budget.min(j.prompt.len() - p.done);
             live.push((i, slot, p, end));
@@ -489,33 +535,38 @@ impl PagedDecoder for Qwen35GgufEngine {
         self.inst.cfg.vocab as usize
     }
     fn blocks_for(&self, tokens: u32) -> u32 {
-        tokens.div_ceil(self.inst.cap)
+        tokens.div_ceil(self.alloc.block_size())
     }
     /// Evict least recently used cached prompts until `want` blocks are freed.
     fn reclaim_prefix(&mut self, want: u32) -> u32 {
-        let mut freed = 0;
-        while freed < want {
+        let before = self.alloc.free_blocks();
+        while self.alloc.free_blocks() - before < want {
             let Some(table) = self.cache.evict_lru() else { break };
             self.release_retired([table]);
-            freed += 1;
         }
-        freed
+        self.alloc.free_blocks() - before
     }
-    /// A sequence that prefilled a cacheable prompt hands its block to the
-    /// prefix cache instead of freeing it; any other sequence frees it.
+    /// A sequence that prefilled a cacheable prompt hands the blocks of its
+    /// prompt to the prefix cache instead of freeing them (the rows decoding
+    /// appended past the prompt are dropped); any other sequence frees all its
+    /// blocks. Its recurrent-state row goes back to the pool either way.
     fn release_table(&mut self, t: &mut BlockTable) {
-        if let Some(&slot) = t.blocks().first() {
+        let row = t.take_state_row();
+        if let Some(slot) = row {
             self.inst.mtp_release(slot);
             self.partial.remove(&slot);
         }
-        let kept = t.blocks().first().and_then(|slot| self.pending.remove(slot));
-        match kept {
+        match row.and_then(|slot| self.pending.remove(&slot)) {
             Some(p) => {
+                t.truncate(p.tokens.len() as u32, &mut self.alloc);
                 let table = std::mem::replace(t, BlockTable::new());
                 let retired = self.cache.insert(CacheEntry::new(p.tokens, table, p.snap_row, Resume { last_hidden: p.last_hidden, mtp_valid: p.mtp_valid }));
                 self.release_retired(retired);
             }
             None => t.release(&mut self.alloc),
+        }
+        if let (Some(slot), KvLayout::Paged { .. }) = (row, self.inst.kv_layout) {
+            self.free_rows.push(slot);
         }
     }
     /// Prefill into the sequence's own slot (other slots untouched), returning
@@ -591,23 +642,18 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn device_stats(&self) -> Option<DeviceStats> {
         self.inst.shards.last().and_then(|s| s.qwen35.gpu.stats())
     }
-    /// Every stage's KV windows and recurrent state for all `max_batch` slots,
-    /// as charged to the placement ([`super::layer_cost`] minus the weights).
+    /// Every stage's KV pool and recurrent state, as charged to the placement
+    /// ([`super::layer_cost`] minus the weights).
     fn kv_pool_bytes(&self) -> u64 {
-        let slots = (self.inst.max_batch + self.inst.prefix_slots) as u64;
-        let snapshots = self.inst.prefix_slots as u64;
-        self.inst
-            .cfg
-            .layer_types()
-            .into_iter()
-            .map(|ty| {
-                let state = self.inst.cfg.layer_decode_state_bytes(ty, self.inst.cap, self.inst.kv_tier);
-                slots * state + if ty == crate::config::LayerType::Linear { snapshots * state } else { 0 }
-            })
-            .sum()
+        let i = &self.inst;
+        let pool_rows = match i.kv_layout {
+            KvLayout::OneBlock => 0,
+            KvLayout::Paged { pool_rows, .. } => pool_rows,
+        };
+        i.cfg.layer_types().into_iter().map(|ty| super::layer_state_bytes(&i.cfg, ty, i.cap, i.kv_tier, i.max_batch, i.prefix_slots, pool_rows)).sum()
     }
     fn kv_pool_capacity_tokens(&self) -> u64 {
-        (self.inst.max_batch + self.inst.prefix_slots) as u64 * self.inst.cap as u64
+        self.alloc.num_blocks() as u64 * self.alloc.block_size() as u64
     }
     /// One batched step per window position: there is no on-device multi-step
     /// schedule across the stage boundary.
@@ -672,13 +718,13 @@ impl PagedDecoder for Qwen35GgufEngine {
             adapter_rows.extend(std::iter::repeat_n(slot, r.len()));
         }
         for (t, r) in tables.iter_mut().zip(rows) {
-            let mut first = None;
+            assert!(!r.is_empty(), "{MODEL}: a verify row set is never empty");
+            let first = t.len();
             for _ in 0..r.len() {
-                let (_block, offset) = t.append(&mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted mid-verify: {e}"));
-                first.get_or_insert(offset);
+                t.append(&mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted mid-verify: {e}"));
             }
-            slots.push(t.blocks()[0]);
-            positions.push(first.expect("a verify row set is never empty"));
+            slots.push(self.slot(t));
+            positions.push(first);
         }
         let row_refs: Vec<&[u32]> = rows.iter().map(|r| r.as_slice()).collect();
         self.inst.set_adapter_rows(&adapter_rows);
@@ -709,7 +755,7 @@ impl PagedDecoder for Qwen35GgufEngine {
         if !self.inst.has_mtp() {
             return vec![Vec::new(); queries.len()];
         }
-        let slots: Vec<u32> = queries.iter().map(|q| q.table.blocks()[0]).collect();
+        let slots: Vec<u32> = queries.iter().map(|q| self.slot(q.table)).collect();
         let consumed: Vec<u32> = queries.iter().map(|q| q.table.len()).collect();
         let next: Vec<u32> = queries.iter().map(|q| *q.context.last().expect("a running sequence has context")).collect();
         let t0 = std::time::Instant::now();

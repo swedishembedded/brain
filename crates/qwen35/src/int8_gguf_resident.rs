@@ -325,7 +325,22 @@ fn head_i8_bytes(cfg: &Qwen35Config) -> u64 {
 /// this vocab a mis-charged endpoint is several GB, i.e. the difference
 /// between a plan that fits and a card that OOMs mid-load.
 pub fn layer_cost(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32) -> LayerBytes {
-    layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, 0)
+    layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, 0, 0)
+}
+
+/// Device bytes one layer of type `ty` holds for decode state: the GQA layers'
+/// K/V (a `cap`-row window per slot, or the shared pool of `kv_pool_rows` rows
+/// when that is non-zero) and the GDN layers' recurrent state (per running
+/// sequence, plus one snapshot per cached prompt). The one place both the
+/// placement planner and the engine's pool accounting get the figure from.
+pub(crate) fn layer_state_bytes(cfg: &Qwen35Config, ty: LayerType, cap: u32, kv: KvTier, max_batch: u32, prefix_slots: u32, kv_pool_rows: u32) -> u64 {
+    let paged = kv_pool_rows > 0;
+    let slots = max_batch.max(1) as u64 + if paged { 0 } else { prefix_slots as u64 };
+    match ty {
+        LayerType::Full if paged => 2 * kv.plane_bytes(kv_pool_rows as u64, cfg.kv_dim() as u64, cfg.head_dim as u64),
+        LayerType::Full => slots * cfg.layer_decode_state_bytes(ty, cap, kv),
+        LayerType::Linear => (slots + prefix_slots as u64) * cfg.layer_decode_state_bytes(ty, cap, kv),
+    }
 }
 
 /// [`layer_cost`] for a resident that also keeps `prefix_slots` cached prompts:
@@ -333,22 +348,19 @@ pub fn layer_cost(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, m
 /// pool row that goes with the block) plus a snapshot row of every GDN layer's
 /// state, so the stage holds `max_batch + prefix_slots` slots and
 /// `prefix_slots` more recurrent states.
-pub fn layer_cost_with_prefix_slots(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32) -> LayerBytes {
+///
+/// `kv_pool_rows > 0` is the paged layout ([`KvLayout::Paged`]): the GQA layers
+/// hold one pool of that many KV rows shared by all sequences and cached
+/// prompts, and the recurrent state is per running sequence (`max_batch`)
+/// plus one snapshot per cached prompt, since a cached prompt keeps only
+/// blocks. `0` is one `cap`-row window per slot.
+pub fn layer_cost_with_prefix_slots(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32, kv_pool_rows: u32) -> LayerBytes {
     // Decode state is per SEQUENCE - a GQA layer's `[cap, kv_dim]` KV window
     // (stored in `kv`) and a GDN layer's fixed-size recurrent state alike - so a stage holding
     // `max_batch` concurrent sequences holds that many of each. Weights are
     // shared by the whole batch and are counted once, which is the entire
     // point of batching.
-    let slots = max_batch.max(1) as u64 + prefix_slots as u64;
-    let snapshots = prefix_slots as u64;
-    let per_layer = cfg
-        .layer_types()
-        .into_iter()
-        .map(|ty| {
-            let snapshot = if ty == LayerType::Linear { snapshots * cfg.layer_decode_state_bytes(ty, cap, kv) } else { 0 };
-            cfg.layer_weight_bytes(ty, tier) + slots * cfg.layer_decode_state_bytes(ty, cap, kv) + snapshot
-        })
-        .collect();
+    let per_layer = cfg.layer_types().into_iter().map(|ty| cfg.layer_weight_bytes(ty, tier) + layer_state_bytes(cfg, ty, cap, kv, max_batch, prefix_slots, kv_pool_rows)).collect();
     LayerBytes { per_layer, embed: 0, head: head_i8_bytes(cfg) + cfg.d_model as u64 * 4 }
 }
 
@@ -361,6 +373,11 @@ pub fn kv_pool_addressable(cfg: &Qwen35Config, cap: u32, max_batch: u32) -> bool
     KvTier::fits_addressing(max_batch as u64 * cap as u64, cfg.kv_dim() as u64)
 }
 
+/// [`kv_pool_addressable`] for a paged pool of `rows` KV rows.
+fn kv_rows_addressable(cfg: &Qwen35Config, rows: u32) -> bool {
+    KvTier::fits_addressing(rows as u64, cfg.kv_dim() as u64)
+}
+
 /// Why a serving configuration cannot be placed, in the operator's terms - or
 /// `None` when it fits. `usable` is each budgeted device's usable bytes.
 ///
@@ -368,16 +385,23 @@ pub fn kv_pool_addressable(cfg: &Qwen35Config, cap: u32, max_batch: u32) -> bool
 /// (KV windows and recurrent state) is per sequence, so `max_batch` and `cap`
 /// are what a refusal tells the operator to lower, and a more compact KV tier
 /// what it suggests instead.
-pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32, usable: &[u64]) -> Option<String> {
+pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32, kv_pool_rows: u32, usable: &[u64]) -> Option<String> {
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
-    if !kv_pool_addressable(cfg, cap, max_batch + prefix_slots) {
+    if kv_pool_rows > 0 {
+        if kv_pool_rows < cap {
+            return Some(format!("a KV pool of {kv_pool_rows} rows cannot hold one sequence of {cap} tokens; raise the pool or lower --qwen35-ctx"));
+        }
+        if !kv_rows_addressable(cfg, kv_pool_rows) {
+            return Some(format!("a KV pool of {kv_pool_rows} rows of {} elements per layer is past the kernels' u32 element index; lower the pool", cfg.kv_dim()));
+        }
+    } else if !kv_pool_addressable(cfg, cap, max_batch + prefix_slots) {
         return Some(format!(
             "{max_batch} sequences and {prefix_slots} cached prompts of {cap} tokens is {} KV rows of {} elements per layer, past the kernels' u32 element index; lower --qwen35-max-batch, --qwen35-prefix-slots or --qwen35-ctx",
             (max_batch + prefix_slots) as u64 * cap as u64,
             cfg.kv_dim()
         ));
     }
-    let cost = layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, prefix_slots);
+    let cost = layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, prefix_slots, kv_pool_rows);
     let caps: Vec<(usize, u64)> = usable.iter().copied().enumerate().collect();
     if model::shard::plan_fewest_devices(&cost, &caps).is_some() {
         return None;
@@ -425,7 +449,7 @@ const AUTO_CAP_GRANULE: u32 = 1024;
 /// exceed the cards.
 pub fn auto_cap(cfg: &Qwen35Config, devices: &[(Device, u64)], tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32) -> Option<u32> {
     let caps = gpu_capacities(devices, AUTO_CAP_HEADROOM_PER_DEVICE);
-    let fits = |cap: u32| kv_pool_addressable(cfg, cap, max_batch + prefix_slots) && model::shard::plan_fewest_devices(&layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, prefix_slots), &caps).is_some();
+    let fits = |cap: u32| kv_pool_addressable(cfg, cap, max_batch + prefix_slots) && model::shard::plan_fewest_devices(&layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, prefix_slots, 0), &caps).is_some();
     if caps.is_empty() || !fits(1) {
         return None;
     }
@@ -576,6 +600,31 @@ pub fn budget_cards(cards: impl IntoIterator<Item = (u32, u64)>, allowed: &[u32]
 
 // ------------------------------------------------------------ per-shard state
 
+/// How a stage lays out its sequences' GQA K/V.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KvLayout {
+    /// Every slot owns one `cap`-row window: slot `s` is block `s`.
+    OneBlock,
+    /// One pool of `pool_rows` rows in `block_rows`-row blocks, shared by every
+    /// sequence and cached prompt. A sequence's blocks are whatever its
+    /// [`model::paged::BlockTable`] holds, published with
+    /// [`ShardCaches::set_blocks`] before the sequence runs; a slot is only its
+    /// recurrent-state row.
+    Paged { block_rows: u32, pool_rows: u32 },
+}
+
+impl KvLayout {
+    /// Recurrent-state rows a stage holds: one per sequence that can run. The
+    /// one-block layout also gives each cached prompt its whole slot; a paged
+    /// layout keeps a cached prompt as blocks and a snapshot, so it takes none.
+    fn state_rows(self, max_batch: u32, prefix_slots: u32) -> u32 {
+        match self {
+            KvLayout::OneBlock => max_batch + prefix_slots,
+            KvLayout::Paged { .. } => max_batch,
+        }
+    }
+}
+
 /// One STAGE's decode state for up to `slots` concurrent sequences, indexed by
 /// ABSOLUTE layer index with a size-1 dummy everywhere the stage/layer-type
 /// does not apply - `crate::model::DecodeCaches`' own documented convention,
@@ -585,9 +634,11 @@ pub fn budget_cards(cards: impl IntoIterator<Item = (u32, u64)>, allowed: &[u32]
 /// decode dispatch carries every sequence's row and the slot table is the only
 /// thing that says whose state is whose:
 ///
-/// * **GQA**: ONE `[slots*cap, kv_dim]` pool per layer. Sequence `i` owns rows
-///   `i*cap .. +cap`, reached through the paged kernels' block table (`slot` IS
-///   the physical block id).
+/// * **GQA**: ONE `[kv_rows, kv_dim]` pool per layer, reached through the paged
+///   kernels' block table. In the [`KvLayout::OneBlock`] layout (`kv_rows =
+///   slots*cap`) sequence `i` owns rows `i*cap .. +cap` (`slot` IS the physical
+///   block id); in [`KvLayout::Paged`] the sequence's blocks are whatever the
+///   engine published for its slot.
 /// * **GDN**: per layer a `[slots, state_len]` pool and a `[slots, hist_len]`
 ///   pool, row `i` belonging to slot `i`. The batched step runs on those rows
 ///   IN PLACE (one native launch per layer where the device offers it, one
@@ -602,8 +653,9 @@ pub fn budget_cards(cards: impl IntoIterator<Item = (u32, u64)>, allowed: &[u32]
 /// row. The single-sequence APIs that never touch the pool (`generate`, the
 /// speculative loop) simply live on `work`.
 struct ShardCaches {
-    /// `[layer]` -> K and V planes of `[slots*cap, kv_dim]` in the cache's
-    /// KV tier (placeholder at non-owned / GQA layers).
+    /// `[layer]` -> K and V planes of `[kv_rows, kv_dim]` (`slots*cap` rows, or
+    /// the pool of a paged layout) in the cache's KV tier (placeholder at
+    /// non-owned / GQA layers).
     gqa_kv: Vec<KvLayer>,
     /// `[layer]`: `[slots, state_len]` / `[slots, hist_len]` pools (dummy at
     /// non-owned / GQA layers).
@@ -624,12 +676,15 @@ struct ShardCaches {
     full: Vec<bool>,
     slots: u32,
     cap: u32,
-    /// Rows per physical KV block when the sequences' KV is addressed through
-    /// block tables (`slot_tables` non-empty); `cap` when one block holds a
-    /// whole sequence.
+    /// Rows per physical KV block: the pool's block size when `paged`, `cap`
+    /// when one block holds a whole sequence.
     block_rows: u32,
-    /// `[slot]`: the blocks of that slot's KV window in logical order. Empty when
-    /// one block (the slot itself) holds the whole sequence.
+    /// Whether the sequences' KV is addressed through block tables.
+    paged: bool,
+    /// `[slot]`: the blocks of that slot's KV window in logical order (paged
+    /// layouts only). Starts as the contiguous run the one-block layout would
+    /// give the slot, which is what callers that never publish blocks (the
+    /// single-sequence APIs) see; the serving engine replaces it per sequence.
     slot_tables: Vec<Vec<u32>>,
     /// `[layer]`: where a speculative verify step keeps the recurrent state
     /// between a sequence's rows (see [`speculate`]); empty until speculation
@@ -643,7 +698,7 @@ struct ShardCaches {
 }
 
 impl ShardCaches {
-    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, snapshot_rows: u32, kv_tier: KvTier, kv_block_rows: u32) -> ShardCaches {
+    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, snapshot_rows: u32, kv_tier: KvTier, layout: KvLayout) -> ShardCaches {
         assert!(slots > 0, "{MODEL}: ShardCaches needs at least one slot");
         let kv = cfg.kv_dim() as u64;
         let (state, hist) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
@@ -656,7 +711,11 @@ impl ShardCaches {
         for (l, ty) in types.iter().enumerate() {
             let full = shard.owns(l) && *ty == LayerType::Full;
             full_layers.push(full);
-            gqa_kv.push(if full { KvLayer::new(gpu, kv_tier, slots as u64 * cap as u64, kv, cfg.head_dim as u64) } else { KvLayer::placeholder(gpu) });
+            let kv_rows = match layout {
+                KvLayout::OneBlock => slots as u64 * cap as u64,
+                KvLayout::Paged { pool_rows, .. } => pool_rows as u64,
+            };
+            gqa_kv.push(if full { KvLayer::new(gpu, kv_tier, kv_rows, kv, cfg.head_dim as u64) } else { KvLayer::placeholder(gpu) });
             let lin = shard.owns(l) && *ty == LayerType::Linear;
             recurrent.push(lin);
             let (ps, ph, ws, wh) = if lin { (slots as u64 * state, slots as u64 * hist, state, hist) } else { (1, 1, 1, 1) };
@@ -671,14 +730,16 @@ impl ShardCaches {
         let scatter = gpu.kernel_index("pool_rows_scatter2").expect("pool_rows_scatter2 is in the qwen35 kernel set");
         let gather = gpu.kernel_index("pool_rows_gather2").expect("pool_rows_gather2 is in the qwen35 kernel set");
         let splice = gpu.kernel_index("splice").expect("splice is in the qwen35 kernel set");
-        assert!(kv_block_rows == 0 || cap.is_multiple_of(kv_block_rows), "{MODEL}: a KV block of {kv_block_rows} rows does not divide the {cap}-row sequence capacity");
-        // Static paging: slot `s` owns the contiguous blocks `s * per_slot ..` of the pool, so its rows
-        // are where the one-block layout puts them, but every kernel addresses them through a table.
-        let (block_rows, slot_tables) = match cap.checked_div(kv_block_rows) {
-            None => (cap, Vec::new()),
-            Some(per_slot) => (kv_block_rows, (0..slots).map(|s| (0..per_slot).map(|i| s * per_slot + i).collect()).collect()),
+        let (block_rows, paged, slot_tables) = match layout {
+            KvLayout::OneBlock => (cap, false, Vec::new()),
+            KvLayout::Paged { block_rows, pool_rows } => {
+                assert!(block_rows > 0 && pool_rows >= block_rows, "{MODEL}: a paged KV pool needs whole blocks ({pool_rows} rows in blocks of {block_rows})");
+                let per_slot = cap.div_ceil(block_rows);
+                let pool_blocks = pool_rows / block_rows;
+                (block_rows, true, (0..slots).map(|s| (s * per_slot..(s + 1) * per_slot).take_while(|&b| b < pool_blocks).collect()).collect())
+            }
         };
-        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, block_rows, slot_tables, verify_snaps: Vec::new(), scatter, gather, splice };
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, verify_snaps: Vec::new(), scatter, gather, splice };
         caches.reset(gpu);
         caches
     }
@@ -763,14 +824,26 @@ impl ShardCaches {
         gpu.poll_wait();
     }
 
-    /// Copy KV rows `0..rows` of slot `from` over the same rows of slot `to`,
-    /// in every owned full-attention layer.
-    fn copy_kv_rows(&self, gpu: &Gpu, cfg: &Qwen35Config, from: u32, to: u32, rows: u32) {
-        let (kv, hd, cap) = (cfg.kv_dim() as u64, cfg.head_dim as u64, self.cap as u64);
+    /// Copy KV rows `0..rows` of the window `from` over the same rows of the
+    /// window `to`, in every owned full-attention layer. Windows of one layout
+    /// only: whole slots, or block tables (copied block by block).
+    fn copy_kv_rows(&self, gpu: &Gpu, cfg: &Qwen35Config, from: KvWindow<'_>, to: KvWindow<'_>, rows: u32) {
+        let (kv, hd) = (cfg.kv_dim() as u64, cfg.head_dim as u64);
+        // (source row, destination row, rows) of each contiguous run.
+        let runs: Vec<(u64, u64, u64)> = match (from, to) {
+            (KvWindow::Block(a), KvWindow::Block(b)) => vec![(a as u64 * self.cap as u64, b as u64 * self.cap as u64, rows as u64)],
+            (KvWindow::Table(a), KvWindow::Table(b)) => {
+                let bs = self.block_rows as u64;
+                (0..(rows as u64).div_ceil(bs)).map(|i| (a[i as usize] as u64 * bs, b[i as usize] as u64 * bs, (rows as u64 - i * bs).min(bs))).collect()
+            }
+            _ => panic!("{MODEL}: KV rows are copied between windows of one layout"),
+        };
         let mut steps = Vec::new();
         for (layer, _) in self.gqa_kv.iter().zip(&self.full).filter(|(_, owned)| **owned) {
             for plane in [&layer.k, &layer.v] {
-                steps.extend(plane.copy_rows(gpu, self.splice, from as u64 * cap, to as u64 * cap, rows as u64, kv, hd));
+                for &(src, dst, n) in &runs {
+                    steps.extend(plane.copy_rows(gpu, self.splice, src, dst, n, kv, hd));
+                }
             }
         }
         gpu.submit(&[], &steps);
@@ -784,9 +857,20 @@ impl ShardCaches {
 
     /// The physical KV blocks of `slot`'s sequence.
     fn window(&self, slot: u32) -> KvWindow<'_> {
-        match self.slot_tables.get(slot as usize) {
-            Some(table) => KvWindow::Table(table),
-            None => KvWindow::Block(slot),
+        if self.paged {
+            KvWindow::Table(&self.slot_tables[slot as usize])
+        } else {
+            KvWindow::Block(slot)
+        }
+    }
+
+    /// Publish the physical blocks of the sequence running in `slot`, in logical
+    /// order. Every kernel of the sequence addresses its KV through them, so the
+    /// engine calls this whenever the sequence's table changes, before the next
+    /// forward. A no-op for the one-block layout, where the slot is the block.
+    fn set_blocks(&mut self, slot: u32, blocks: &[u32]) {
+        if self.paged && self.slot_tables[slot as usize] != blocks {
+            self.slot_tables[slot as usize] = blocks.to_vec();
         }
     }
 
@@ -958,6 +1042,8 @@ pub struct Qwen35GgufInstance {
     prefix_slots: u32,
     /// How every stage stores its GQA layers' K/V ([`KvTier`]).
     kv_tier: KvTier,
+    /// How the stages address a sequence's K/V rows.
+    kv_layout: KvLayout,
     /// The per-layer residual tap a cross-attending drafter needs - `None`
     /// (and free) until [`Self::enable_hidden_taps`] turns it on.
     taps: RefCell<Option<HiddenTaps>>,
@@ -1568,12 +1654,29 @@ impl Qwen35GgufInstance {
         Ok(out)
     }
 
-    /// Seed slot `slot` with a cached prefix of `rows` tokens: KV rows `0..rows`
-    /// copied from slot `from`, and the working GDN state restored from
-    /// snapshot row `snap_row` (see [`Self::prefill_hidden`] with `start > 0`).
-    fn seed_from_prefix(&self, from: u32, slot: u32, rows: u32, snap_row: u32) {
+    /// Recurrent-state rows the stages hold ([`KvLayout::state_rows`]).
+    fn state_rows(&self) -> u32 {
+        self.kv_layout.state_rows(self.max_batch, self.prefix_slots)
+    }
+
+    /// Publish the blocks of the sequence in state row `slot` to every stage and
+    /// to the drafter ([`ShardCaches::set_blocks`]).
+    fn set_blocks(&mut self, slot: u32, blocks: &[u32]) {
+        for s in &mut self.shards {
+            s.caches.set_blocks(slot, blocks);
+        }
+        if let Some(m) = self.mtp.as_mut() {
+            m.caches.set_blocks(slot, blocks);
+        }
+    }
+
+    /// Seed the sequence in `slot` (KV window `to`) with a cached prefix of
+    /// `rows` tokens: KV rows `0..rows` copied from the window `from`, and the
+    /// working GDN state restored from snapshot row `snap_row` (see
+    /// [`Self::prefill_hidden`] with `start > 0`).
+    fn seed_from_prefix(&self, from: KvWindow<'_>, to: KvWindow<'_>, rows: u32, snap_row: u32) {
         for s in &self.shards {
-            s.caches.copy_kv_rows(&s.qwen35.gpu, &self.cfg, from, slot, rows);
+            s.caches.copy_kv_rows(&s.qwen35.gpu, &self.cfg, from, to, rows);
             s.caches.restore_work(&s.qwen35.gpu, &self.cfg, snap_row);
         }
     }
@@ -2542,6 +2645,9 @@ pub struct Qwen35GgufResident {
     /// Rows per KV block when the attention addresses each sequence's KV through a
     /// block table ([`Self::with_kv_block_rows`]); 0 keeps one block per sequence.
     kv_block_rows: u32,
+    /// Rows of the shared KV pool of the paged layout ([`Self::with_kv_pool_rows`]);
+    /// 0 sizes it as the one-block layout's `(max_batch + prefix_slots) * cap`.
+    kv_pool_rows: u32,
     /// The id this resident is SERVED under (`Manifest::model`,
     /// `InstanceKey::model`) - set by the caller that resolved the
     /// checkpoint ([`Self::with_model_id`], what
@@ -2564,7 +2670,7 @@ pub struct Qwen35GgufResident {
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), prefill: PrefillPolicy::default(), plan: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), prefill: PrefillPolicy::default(), plan: OnceLock::new() }
     }
 
     /// How the serving engine spends prefill between decode steps - the slice one
@@ -2645,14 +2751,46 @@ impl Qwen35GgufResident {
     }
 
     /// Address every sequence's KV through a block table of `rows`-row blocks
-    /// instead of one block per sequence (0, the default). Each slot still owns
-    /// the contiguous blocks its one-block window was, so the memory and the
-    /// arithmetic are those of the default layout; what changes is that the
-    /// attention reads and writes through the table, the form block sharing and
-    /// on-demand block allocation need. `rows` must divide the capacity.
+    /// instead of one block per sequence (0, the default), allocated from one
+    /// shared pool as the sequence grows and shared with the prefix cache: a
+    /// sequence holds the blocks its tokens need, not a whole `cap`-row window.
+    /// The pool is as large as the one-block layout's memory unless
+    /// [`Self::with_kv_pool_rows`] says otherwise. Must be set BEFORE the first
+    /// `estimate_multi`/`activate_multi` call.
     pub fn with_kv_block_rows(mut self, rows: u32) -> Qwen35GgufResident {
         self.kv_block_rows = rows;
         self
+    }
+
+    /// Rows of the paged layout's shared KV pool (0, the default:
+    /// `(max_batch + prefix_slots) * cap`, the memory of the one-block layout).
+    /// Smaller pools serve more sequences at their real lengths; the scheduler
+    /// admits by free blocks and preempts when they run out. Only meaningful
+    /// with [`Self::with_kv_block_rows`].
+    pub fn with_kv_pool_rows(mut self, rows: u32) -> Qwen35GgufResident {
+        self.kv_pool_rows = rows;
+        self
+    }
+
+    /// How the stages address a sequence's K/V rows.
+    fn kv_layout(&self) -> KvLayout {
+        match self.kv_block_rows {
+            0 => KvLayout::OneBlock,
+            block_rows => {
+                // The default pool backs every sequence and cached prompt at full capacity, whole blocks each.
+                let default_rows = (self.max_batch + self.prefix_slots).saturating_mul(self.cap.div_ceil(block_rows)).saturating_mul(block_rows);
+                let rows = if self.kv_pool_rows > 0 { self.kv_pool_rows } else { default_rows };
+                KvLayout::Paged { block_rows, pool_rows: rows.div_ceil(block_rows).saturating_mul(block_rows) }
+            }
+        }
+    }
+
+    /// Rows of the paged pool for the sizing functions; 0 for the one-block layout.
+    fn paged_pool_rows(&self) -> u32 {
+        match self.kv_layout() {
+            KvLayout::OneBlock => 0,
+            KvLayout::Paged { pool_rows, .. } => pool_rows,
+        }
     }
 
     /// See [`Self::with_prefix_slots`].
@@ -2729,10 +2867,10 @@ impl Qwen35GgufResident {
         if caps.is_empty() {
             return refused("no GPU is budgeted for it (this model is GPU-only)".to_string());
         }
-        if let Some(why) = sizing_refusal(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots, &caps.iter().map(|&(_, c)| c).collect::<Vec<_>>()) {
+        if let Some(why) = sizing_refusal(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots, self.paged_pool_rows(), &caps.iter().map(|&(_, c)| c).collect::<Vec<_>>()) {
             return refused(why);
         }
-        let mut cost = layer_cost_with_prefix_slots(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots);
+        let mut cost = layer_cost_with_prefix_slots(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots, self.paged_pool_rows());
         if let Some(request) = &self.bank {
             // The bank lives beside the weights of the layers it corrects, on
             // the card that holds them; each stage also carries the row
@@ -2772,7 +2910,7 @@ impl Qwen35GgufResident {
     pub fn total_device_bytes(&self) -> Result<u64, String> {
         let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
         let cfg = resident_config(&mg, self.cap)?;
-        Ok(layer_cost_with_prefix_slots(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots).total())
+        Ok(layer_cost_with_prefix_slots(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots, self.paged_pool_rows()).total())
     }
 
     /// Which layer range and how many bytes each device holds, as planned -
@@ -2949,6 +3087,8 @@ impl Qwen35GgufResident {
         let eos = stop_ids(&tok, declared_eos);
         let (embed_name, norm_name, head_name) = endpoint_names(&mg, &cfg)?;
 
+        let layout = self.kv_layout();
+        let state_rows = layout.state_rows(self.max_batch, self.prefix_slots);
         let mut shards = Vec::with_capacity(plan.stages.len());
         for (_, placed, _) in &plan.stages {
             // The planner's `embed`/`head` flags say which stage is CHARGED
@@ -2965,7 +3105,7 @@ impl Qwen35GgufResident {
             // below, at `self.cap` - the same split `crate::serve::Engine`
             // makes for the same reason.
             let qwen35 = Qwen35::new_shard_dt(cfg.clone(), 1, 1, &src, shard.clone(), &self.tier);
-            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, self.max_batch + self.prefix_slots, self.prefix_slots, self.kv_tier, self.kv_block_rows);
+            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, state_rows, self.prefix_slots, self.kv_tier, layout);
             shards.push(DeviceShard { qwen35, caches });
         }
 
@@ -2994,7 +3134,7 @@ impl Qwen35GgufResident {
         };
         let embed = EmbedTable { name: embed_name, d };
 
-        let mut inst = Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, prefix_slots: self.prefix_slots, kv_tier: self.kv_tier, taps: RefCell::new(None), prefill_adapter_slot: Cell::new(LORA_SLOT_NONE), spec_rows: 0, mtp: None };
+        let mut inst = Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, prefix_slots: self.prefix_slots, kv_tier: self.kv_tier, kv_layout: layout, taps: RefCell::new(None), prefill_adapter_slot: Cell::new(LORA_SLOT_NONE), spec_rows: 0, mtp: None };
         let last_gpu = plan.stages.last().map(|(_, s, _)| s.gpu_index).unwrap_or(0);
         inst.enable_speculation(self.spec, &self.gguf_path, &self.tier, last_gpu)?;
         Ok(inst)
@@ -3187,12 +3327,12 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         let i8 = TierPolicy::uniform(Dtype::I8);
         let usable = [(97_871u64 << 20) - (2 << 30)];
-        assert_eq!(sizing_refusal(&cfg, 4096, &i8, KvTier::BF16, 64, 0, &usable), None, "64 x 4096 with a bf16 cache fits one GH200");
-        let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 256, 0, &usable).expect("256 f32 sequences of 4096 tokens cannot fit");
+        assert_eq!(sizing_refusal(&cfg, 4096, &i8, KvTier::BF16, 64, 0, 0, &usable), None, "64 x 4096 with a bf16 cache fits one GH200");
+        let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 256, 0, 0, &usable).expect("256 f32 sequences of 4096 tokens cannot fit");
         for needle in ["--qwen35-max-batch 256", "--qwen35-ctx 4096", "GiB weights", "more compact --qwen35-kv"] {
             assert!(why.contains(needle), "refusal must mention {needle:?}: {why}");
         }
-        let why = sizing_refusal(&cfg, 131_072, &i8, KvTier::BF16, 40, 0, &usable).expect("past the u32 plane index");
+        let why = sizing_refusal(&cfg, 131_072, &i8, KvTier::BF16, 40, 0, 0, &usable).expect("past the u32 plane index");
         assert!(why.contains("u32 element index"), "{why}");
     }
 
@@ -3206,7 +3346,7 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         let usable = (97_871u64 << 20) - (2 << 30);
         let i8 = TierPolicy::uniform(Dtype::I8);
-        let ceiling = |kv: KvTier| (1..=1024u32).take_while(|&b| sizing_refusal(&cfg, 4096, &i8, kv, b, 0, &[usable]).is_none()).last().unwrap_or(0);
+        let ceiling = |kv: KvTier| (1..=1024u32).take_while(|&b| sizing_refusal(&cfg, 4096, &i8, kv, b, 0, 0, &[usable]).is_none()).last().unwrap_or(0);
         let [f32b, bf16b, int8b, _fp8b] = KvTier::ALL.map(ceiling);
         println!("4096 tokens on one GH200: planner admits f32 {f32b}, bf16 {bf16b}, int8 {int8b} sequences");
         assert!(f32b >= 64, "64 f32 sequences of 4096 tokens must fit: {f32b}");

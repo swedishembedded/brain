@@ -19,7 +19,7 @@ use model::adapter::bank::{AdapterBankRequest, AdapterTargets, VerifiedAdapter};
 use model::adapter::sites::LoraSites;
 use model::lora::device_adapter::{AdapterSite, DeviceAdapter};
 use model::serve::conformance::{self, Conformance};
-use model::serve::{AdapterId, Request, Scheduler};
+use model::serve::{AdapterId, PagedDecoder, Request, Scheduler};
 use qwen35::int8_gguf_resident::{budgeted_gpus, Qwen35GgufEngine, Qwen35GgufResident};
 
 /// Per-sequence capacity: the prefix test's 72-token prompt (the engine caches
@@ -41,6 +41,11 @@ fn engine_with(kv_block_rows: u32) -> Qwen35GgufEngine {
 }
 
 fn engine_with_kv(kv_block_rows: u32, kv_tier: KvTier) -> Qwen35GgufEngine {
+    engine_with_pool(kv_block_rows, kv_tier, 0)
+}
+
+/// `kv_pool_rows` 0 sizes the paged pool as the one-block layout's memory.
+fn engine_with_pool(kv_block_rows: u32, kv_tier: KvTier, kv_pool_rows: u32) -> Qwen35GgufEngine {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let path = std::env::temp_dir().join(format!("brain-gguf-conformance-{}-{n}.gguf", std::process::id())).to_string_lossy().into_owned();
@@ -48,7 +53,7 @@ fn engine_with_kv(kv_block_rows: u32, kv_tier: KvTier) -> Qwen35GgufEngine {
     let devices = budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, 2 << 30);
     let device = devices.first().expect("the suite needs a GPU").0;
     let bank = AdapterBankRequest { slots: 2, rank_cap: 4, targets: AdapterTargets::ALL, max_registered: 4 };
-    let resident = Qwen35GgufResident::new(path.clone(), devices, CAP, TierPolicy::uniform(Dtype::I8)).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(kv_block_rows).with_kv_tier(kv_tier).with_adapter_bank(bank);
+    let resident = Qwen35GgufResident::new(path.clone(), devices, CAP, TierPolicy::uniform(Dtype::I8)).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(kv_block_rows).with_kv_pool_rows(kv_pool_rows).with_kv_tier(kv_tier).with_adapter_bank(bank);
     let (engine, _, _) = resident.activate_engine(&[device]).expect("the tiny GGUF loads");
     std::fs::remove_file(path).ok();
     engine
@@ -140,6 +145,30 @@ fn paging_does_not_move_the_tokens_of_any_kv_tier() {
     }
 }
 
+/// A paged pool smaller than `max_batch * cap` holds the sequences at their real lengths: four
+/// 32-token sequences fit eight 16-row blocks, which the one-block layout (four 96-row windows)
+/// could never hold in that memory; six blocks cannot hold all four, so the scheduler must preempt
+/// and recompute. In both cases the tokens are the one-block layout's, and every block and state
+/// row is back in the pool afterwards.
+fn a_small_pool_serves_what_fits_and_preempts_what_does_not() {
+    let prompts: Vec<Vec<u32>> = (0..4u32).map(|k| (1..=20u32).map(|i| 3 + (i * (k + 2) + k) % 26).collect()).collect();
+    let run = |mut sched: Scheduler<Qwen35GgufEngine>| {
+        let ids: Vec<u64> = prompts.iter().map(|p| sched.submit(Request { prompt: p.clone(), max_new: 12, stop: Vec::new() })).collect();
+        let mut done = sched.run();
+        let tokens: Vec<Vec<u32>> = ids.iter().map(|id| done.remove(id).expect("every request completes")).collect();
+        (tokens, sched)
+    };
+    let (want, _) = run(Scheduler::new(engine_with(0), 4));
+    for pool_blocks in [8u32, 6] {
+        let engine = engine_with_pool(16, KvTier::F32, pool_blocks * 16);
+        assert_eq!(engine.kv_pool_capacity_tokens(), pool_blocks as u64 * 16);
+        let (got, mut sched) = run(Scheduler::new(engine, 4));
+        assert_eq!(got, want, "{pool_blocks} blocks: tokens differ from the one-block layout's");
+        let e = sched.decoder_mut();
+        assert_eq!(e.free_blocks(), pool_blocks, "{pool_blocks} blocks: blocks leaked");
+    }
+}
+
 const RECORDED: [[u32; 12]; 3] = [[10, 9, 26, 17, 9, 10, 1, 8, 21, 12, 2, 4], [11, 9, 1, 19, 2, 13, 4, 26, 11, 18, 17, 22], [22, 12, 2, 12, 7, 17, 22, 14, 9, 1, 28, 16]];
 
 gpu_core::card_tests!(
@@ -147,5 +176,6 @@ gpu_core::card_tests!(
     the_released_gguf_engine_conforms_with_its_kv_paged,
     greedy_tokens_are_the_recorded_ones,
     greedy_tokens_are_the_recorded_ones_with_its_kv_paged,
-    paging_does_not_move_the_tokens_of_any_kv_tier
+    paging_does_not_move_the_tokens_of_any_kv_tier,
+    a_small_pool_serves_what_fits_and_preempts_what_does_not
 );
