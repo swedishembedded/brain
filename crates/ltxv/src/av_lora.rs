@@ -47,7 +47,7 @@
 
 use crate::av_grad::{AvBlockGrads, AvBlockW};
 use crate::av_modelgrad::{AvCfg, AvModelGrads, AvModelWeights};
-use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
+use model::adapter::{AdapterExecution, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
 pub use model::lora::LoraCfg;
 use model::lora::{LoraGrads, LoraPair};
 

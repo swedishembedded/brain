@@ -1660,14 +1660,17 @@ impl Qwen35 {
                 let role = if !train {
                     Role::Frozen
                 } else if cfg.lora.is_some() {
-                    if model::adapter::device::is_adapter_param(&n) { Role::Trainable } else { Role::Frozen }
+                    model::adapter::device::role_of(&n, &cfg.lora.as_ref().expect("checked by the branch").hp())
                 } else {
                     Role::Trainable
                 };
                 (n, c, role)
             })
             .collect();
-        let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
+            model::adapter::device::apply_groups(&mut ps, &lora.hp());
+        }
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         // Per-layer mixer/MLP linears: every layer this shard owns gets its
@@ -2015,7 +2018,7 @@ impl Qwen35 {
     /// e.g. `"fc_e"`/`"fc_h"`/`"lm_head"`, which are never LoRA-targetable).
     /// Mirrors `qwen35moe::model::Qwen35::lora_for` exactly.
     fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
-        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
+        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.scale()))
     }
 
     /// Forward LoRA delta for a targeted linear: `y += (alpha/r)*(x*A^t)*B^t`.
@@ -2027,8 +2030,7 @@ impl Qwen35 {
     fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         let Some((r, scale)) = self.lora_for(leaf) else { return };
         let g = &self.gpu;
-        let a = format!("{wname}.lora_a");
-        let bnm = format!("{wname}.lora_b");
+        let (a, bnm) = model::adapter::device::lora_names(wname);
         // mid = x A^t, then y += (alpha/r) mid B^t accumulated by the GEMM itself.
         let tg = self.ops.tensor_gemm();
         let mut lib = Vec::new();
@@ -2275,8 +2277,7 @@ impl Qwen35 {
             Some((r, scale)) => {
                 // base: dx += d_out*W (frozen weight - no dW).
                 self.base_dx(steps, d_out, wname, dx, m, k, nout, acc);
-                let a = format!("{wname}.lora_a");
-                let bnm = format!("{wname}.lora_b");
+                let (a, bnm) = model::adapter::device::lora_names(wname);
                 if self.lora_bwd_gemm(steps, d_out, x, &a, &bnm, dx, (m, k, nout, r), scale) {
                     return;
                 }
@@ -2287,7 +2288,9 @@ impl Qwen35 {
                 // da = (alpha/r)*(d_out*B) -> gA += da^t*x ; dx += da*A
                 steps.push(g.step(MATMUL_DX, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], m * r));
                 steps.push(g.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
-                steps.push(g.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
+                if self.trainable(&a) {
+                    steps.push(g.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
+                }
                 steps.push(g.step(MATMUL_DX, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], m * k));
             }
             None => {
@@ -2318,7 +2321,7 @@ impl Qwen35 {
         let ok = tg.gemm_f32(g, &mut lib, &whole(x), &whole(self.w(a)), &whole(&self.lora_a), p(m, r, k, false, true, scale, 0.0))
             && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(&self.lora_a), &whole(self.g(bnm)), p(nout, r, m, true, false, 1.0, 1.0))
             && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(self.w(bnm)), &whole(&self.lora_da), p(m, r, nout, false, false, scale, 0.0))
-            && tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(x), &whole(self.g(a)), p(r, k, m, true, false, 1.0, 1.0))
+            && (!self.trainable(a) || tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(x), &whole(self.g(a)), p(r, k, m, true, false, 1.0, 1.0)))
             && tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(self.w(a)), &whole(dx), p(m, k, r, false, false, 1.0, 1.0));
         if ok {
             steps.append(&mut lib);
@@ -5440,6 +5443,9 @@ impl model::Model for Qwen35 {
     }
     fn param_names(&self) -> Vec<String> {
         Qwen35::param_names(self)
+    }
+    fn frozen_adapter_param_names(&self) -> Vec<String> {
+        model::adapter::device::frozen_adapter_params(&self.ps)
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         Qwen35::read_weight(self, name)

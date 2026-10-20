@@ -161,7 +161,7 @@ pub fn lora_overlay(base: BaseCheckpoint, rank: u32, alpha: f32, seed: u64, resu
             return Err(format!("{name}: trained at rank {:?} alpha {:?}, asked to continue at rank {rank} alpha {alpha}", card.rank, card.alpha));
         }
         let targets = card.targets.ok_or_else(|| format!("{name}: the adapter card names no targets"))?;
-        cfg.lora = Some(LoraCfg { rank, alpha, targets });
+        cfg.lora = Some(LoraCfg::new(rank, alpha, targets));
         adapter = Some(st.tensors);
     }
     let mut adapters = crate::init::init_lora_only(&cfg, seed);

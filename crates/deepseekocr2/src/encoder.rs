@@ -277,14 +277,17 @@ impl Resampler {
                 let role = if !train {
                     Role::Frozen
                 } else if cfg.lora.is_some() {
-                    if model::adapter::device::is_adapter_param(&n) { Role::Trainable } else { Role::Frozen }
+                    model::adapter::device::role_of(&n, &cfg.lora.as_ref().expect("checked by the branch").hp())
                 } else {
                     Role::Trainable
                 };
                 (n, numel, role)
             })
             .collect();
-        let ps = ParamStore::new_with_roles_src(&gpu, roles, init);
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, init);
+        if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
+            model::adapter::device::apply_groups(&mut ps, &lora.hp());
+        }
         let idx = |name: &str| gpu.kernel_index(name).unwrap_or_else(|| panic!("deepseekocr2: {name} not registered - is it missing from PIPELINES?"));
         let opt = optim::Optim::new(idx("adamw"), idx("gradnorm_sq"), idx("grad_scale"), idx("clip_coef"), idx("grad_scale_buf"));
         Resampler { gpu, ps, ids, cfg, opt }

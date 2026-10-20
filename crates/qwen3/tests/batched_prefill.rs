@@ -182,7 +182,7 @@ fn tmp(name: &str) -> std::path::PathBuf {
 /// with the frozen base tensors it was trained on.
 fn trained_adapter(tag: &str) -> (HashMap<String, Vec<f32>>, String) {
     let targets = ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect();
-    let lora_cfg = QwenConfig { lora: Some(LoraCfg { rank: 3, alpha: 6.0, targets }), ..QwenConfig::tiny() };
+    let lora_cfg = QwenConfig { lora: Some(LoraCfg::new(3, 6.0, targets)), ..QwenConfig::tiny() };
     let trained = Qwen::new(lora_cfg.clone(), 1, 12, &qwen3::init_weights(&lora_cfg, 21));
     trained.set_batch(&prompt(12, 23), &prompt(13, 23)[1..]);
     for step in 1..=8 {

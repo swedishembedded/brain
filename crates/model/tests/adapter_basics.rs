@@ -9,7 +9,7 @@
 
 use data::rng::{random_seed, Lcg};
 use model::adapter::select::{glob_match, LayerRange, TargetSelector};
-use model::adapter::{AdapterKind, LinearSite, TargetHp, TargetSpec};
+use model::adapter::{AdapterExecution, AdapterKind, AdapterOptimization, LinearSite, TargetHp, TargetSpec};
 use model::lora::{LoraPair, Pair};
 
 #[test]

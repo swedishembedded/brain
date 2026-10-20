@@ -26,6 +26,7 @@ use serde_json::Value;
 
 use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use model::adapter::sites::LoraSites;
 use model::block::{self, Gqa, KernelIds};
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
 use gpu_core::provider::library::{F32Product, GemmPrecision, Operand};
@@ -1183,7 +1184,7 @@ impl Qwen {
         //  - inference (`!train`): every parameter Frozen (weights only).
         //  - LoRA training: only `*.lora_a`/`*.lora_b` trainable; base Frozen.
         //  - full training: every parameter Trainable (or Offload).
-        let ps = if !train {
+        let mut ps = if !train {
             let roles = plist
                 .into_iter()
                 .map(|(n, c)| (n, c, paramstore::Role::Frozen))
@@ -1193,11 +1194,7 @@ impl Qwen {
             let roles = plist
                 .into_iter()
                 .map(|(n, c)| {
-                    let role = if model::adapter::device::is_adapter_param(&n) {
-                        paramstore::Role::Trainable
-                    } else {
-                        paramstore::Role::Frozen
-                    };
+                    let role = model::adapter::device::role_of(&n, &cfg.lora.as_ref().expect("checked by the branch").hp());
                     (n, c, role)
                 })
                 .collect();
@@ -1213,6 +1210,9 @@ impl Qwen {
         } else {
             ParamStore::new_src(&gpu, plist, src)
         };
+        if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
+            model::adapter::device::apply_groups(&mut ps, &lora.hp());
+        }
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
         // Lazily-built host optimiser for the offloaded params (None unless any
         // parameter took Role::Offload).
@@ -1802,7 +1802,7 @@ impl Qwen {
             .lora
             .as_ref()
             .filter(|lc| lc.targets_leaf(leaf))
-            .map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
+            .map(|lc| (lc.rank, lc.scale()))
     }
 
     /// The activation every per-layer linear on this shard reads, packed for
@@ -1867,7 +1867,7 @@ impl Qwen {
             _ => {}
         }
         let (rank, scale) = self.lora_for(leaf)?;
-        Some(LoraSite::Trainable { a: self.w(&format!("{wname}.lora_a")), b: self.w(&format!("{wname}.lora_b")), rank, scale })
+        Some(LoraSite::Trainable { a: self.w(&model::adapter::device::lora_names(wname).0), b: self.w(&model::adapter::device::lora_names(wname).1), rank, scale })
     }
 
     /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`.
@@ -1922,8 +1922,7 @@ impl Qwen {
                 // here: for `wo` it is `dxmid`, reused downstream as the residual
                 // grad, so the adapter scale is folded into the private scratch.
                 self.base_dx(s, d_out, wname, dx, m, k, nout, acc);
-                let a = format!("{wname}.lora_a");
-                let bnm = format!("{wname}.lora_b");
+                let (a, bnm) = model::adapter::device::lora_names(wname);
                 if self.lora_bwd_gemm(s, d_out, x, &a, &bnm, dx, (m, k, nout, r), scale) {
                     return;
                 }
@@ -1936,8 +1935,10 @@ impl Qwen {
                 let (bk, bt) = dx_kernel_bw(m, r);
                 s.push(self.gpu.dispatch(bk, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], bt));
                 s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
-                let (bk, bt) = dw_kernel_bw(r, k);
-                s.push(self.gpu.dispatch(bk, &[&self.lora_da, x, self.g(&a)], &[m, k, r], bt));
+                if self.trainable(&a) {
+                    let (bk, bt) = dw_kernel_bw(r, k);
+                    s.push(self.gpu.dispatch(bk, &[&self.lora_da, x, self.g(&a)], &[m, k, r], bt));
+                }
                 let (bk, bt) = dx_kernel_bw(m, k);
                 s.push(self.gpu.dispatch(bk, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], bt));
             }
@@ -1967,7 +1968,7 @@ impl Qwen {
         let ok = tg.gemm_f32(g, &mut lib, &whole(x), &whole(self.w(a)), &whole(&self.lora_a), p(m, r, k, false, true, scale, 0.0))
             && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(&self.lora_a), &whole(self.g(bnm)), p(nout, r, m, true, false, 1.0, 1.0))
             && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(self.w(bnm)), &whole(&self.lora_da), p(m, r, nout, false, false, scale, 0.0))
-            && tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(x), &whole(self.g(a)), p(r, k, m, true, false, 1.0, 1.0))
+            && (!self.trainable(a) || tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(x), &whole(self.g(a)), p(r, k, m, true, false, 1.0, 1.0)))
             && tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(self.w(a)), &whole(dx), p(m, k, r, false, false, 1.0, 1.0));
         if ok {
             steps.append(&mut lib);
@@ -3512,18 +3513,18 @@ impl Qwen {
         if r == 0 {
             return Err("attach_adapter: adapter rank is 0".into());
         }
+        // Every pair is a site of this model with that site's shapes (the
+        // check every model shares); a shard then keeps only the pairs of the
+        // layers it owns.
+        model::adapter::sites::validate(adapter, &self.cfg.lora_sites()).map_err(|e| format!("attach_adapter: {e}"))?;
         let mut owned = Vec::with_capacity(adapter.sites.len());
         for site in &adapter.sites {
-            let Some(layer) = linear_layer(&site.base, self.cfg.n_layers) else {
-                return Err(format!("attach_adapter: {} is not a linear of this model", site.base));
-            };
+            let layer = linear_layer(&site.base, self.cfg.n_layers).ok_or_else(|| format!("attach_adapter: {} is not a linear of this model", site.base))?;
             if !self.shard.owns(layer) {
                 continue;
             }
-            let w = self.weights.get(&site.base).ok_or_else(|| format!("attach_adapter: {} is not resident on this shard", site.base))?;
-            let (out, inn) = site.dims(r);
-            if (out, inn) != (w.n() as usize, w.k() as usize) || site.a.len() != r as usize * inn || site.b.len() != out * r as usize {
-                return Err(format!("attach_adapter: {} is [{}, {}] but the rank-{r} adapter pair is A {} / B {} values", site.base, w.n(), w.k(), site.a.len(), site.b.len()));
+            if !self.weights.contains_key(&site.base) {
+                return Err(format!("attach_adapter: {} is not resident on this shard", site.base));
             }
             owned.push(site);
         }
@@ -3854,6 +3855,9 @@ impl model::Model for Qwen {
             .chain(self.ps.offload.iter())
             .map(|(n, _)| n.clone())
             .collect()
+    }
+    fn frozen_adapter_param_names(&self) -> Vec<String> {
+        model::adapter::device::frozen_adapter_params(&self.ps)
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         Qwen::read_weight(self, name)

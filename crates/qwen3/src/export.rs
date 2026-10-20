@@ -19,6 +19,7 @@
 //! between training stacks, you can procure our services by sending an email
 //! to info@swedishembedded.com.
 
+use model::adapter::kind::{LORA_A, LORA_B};
 use std::io::Write;
 use std::path::Path;
 
@@ -601,15 +602,15 @@ fn read_lora(adapter_path: &str) -> Result<LoraFile, String> {
         return Err(format!("{adapter_path}: a {:?} adapter is not a LoRA", adapter.kind));
     }
     let r = adapter.rank.filter(|&r| r > 0).ok_or_else(|| format!("{adapter_path}: the adapter has no rank"))? as usize;
-    let mut bases: Vec<String> = st.tensors.keys().filter_map(|n| n.strip_suffix(".lora_a")).map(str::to_string).collect();
+    let mut bases: Vec<String> = st.tensors.keys().filter_map(|n| n.strip_suffix(LORA_A)).map(str::to_string).collect();
     bases.sort();
     if bases.is_empty() {
         return Err(format!("{adapter_path}: no .lora_a/.lora_b pairs"));
     }
     let mut pairs = Vec::with_capacity(bases.len());
     for base in bases {
-        let a = st.tensors.remove(&format!("{base}.lora_a")).expect("listed");
-        let b = st.tensors.remove(&format!("{base}.lora_b")).ok_or_else(|| format!("{adapter_path}: {base}.lora_a has no .lora_b"))?;
+        let a = st.tensors.remove(&format!("{base}{LORA_A}")).expect("listed");
+        let b = st.tensors.remove(&format!("{base}{LORA_B}")).ok_or_else(|| format!("{adapter_path}: {base}.lora_a has no .lora_b"))?;
         if a.len() % r != 0 || b.len() % r != 0 {
             return Err(format!("{adapter_path}: {base}'s factors are not rank-{r} matrices"));
         }

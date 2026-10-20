@@ -33,7 +33,7 @@ const CODES: usize = 12;
 const CODE_DIM: usize = 4;
 
 fn decoder(lora: bool) -> QwenConfig {
-    QwenConfig { block_size: BLOCK, lora: lora.then(|| LoraCfg { rank: 4, alpha: 8.0, targets: ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect() }), ..QwenConfig::tiny() }
+    QwenConfig { block_size: BLOCK, lora: lora.then(|| LoraCfg::new(4, 8.0, ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect())), ..QwenConfig::tiny() }
 }
 
 fn random(cfg: &ProjectorConfig, seed: u64) -> HashMap<String, Vec<f32>> {

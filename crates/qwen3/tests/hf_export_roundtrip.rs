@@ -76,7 +76,7 @@ fn an_unrepresentable_configuration_is_refused() {
 fn a_folded_adapter_exports_as_the_folded_weights() {
     use model::Model;
     let base_cfg = QwenConfig::tiny();
-    let lora_cfg = QwenConfig { lora: Some(qwen3::LoraCfg { rank: 2, alpha: 6.0, targets: vec!["wq".into(), "up".into()] }), ..base_cfg.clone() };
+    let lora_cfg = QwenConfig { lora: Some(qwen3::LoraCfg::new(2, 6.0, vec!["wq".into(), "up".into()])), ..base_cfg.clone() };
     let init = qwen3::init_weights(&lora_cfg, 9);
     let model = qwen3::Qwen::new(lora_cfg.clone(), 1, 4, &init);
     for name in model.param_names().into_iter().filter(|n| n.contains(".lora_")) {

@@ -404,7 +404,7 @@ pub fn finetune_generation(dir: &Path, dataset: &Path, opts: &GenOptions, progre
     };
     let mut decoder_cfg = base_cfg.clone();
     if o.rank > 0 {
-        decoder_cfg.lora = Some(qwen3::LoraCfg { rank: o.rank, alpha: o.alpha, targets: o.targets.clone() });
+        decoder_cfg.lora = Some(qwen3::LoraCfg::new(o.rank, o.alpha, o.targets.clone()));
     }
     let base = qwen3::import::nested_source(&rd, deepseekvl::import::DECODER, &base_cfg)?;
     let mut trainer = GenTrainer::new(decoder_cfg, Box::new(base), o.dtype, block, parts, o.seed)?;

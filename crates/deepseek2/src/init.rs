@@ -28,6 +28,8 @@
 //! selection is decided by tie-breaking order and the gate is uniform - a
 //! degenerate starting point that hides router bugs instead of exercising them.
 
+use model::adapter::device::init_of;
+use model::adapter::ParamInit;
 use std::collections::HashMap;
 
 use data::rng::Lcg;
@@ -41,7 +43,7 @@ pub fn init_weights(cfg: &DeepseekV2Config, seed: u64) -> HashMap<String, Vec<f3
     for (name, numel) in cfg.param_list() {
         let v = if name.ends_with("norm.weight") || name.ends_with("ln1.weight") || name.ends_with("ln2.weight") {
             vec![1.0f32; numel]
-        } else if name.ends_with(".lora_b") {
+        } else if init_of(&name) == Some(ParamInit::Zeros) {
             vec![0.0f32; numel] // zero-init so a fresh adapter starts as an exact no-op
         } else {
             rng.vec_scaled(numel, std)

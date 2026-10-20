@@ -34,7 +34,7 @@ pub fn save_adapter(path: &str, model: &DeepseekV2, card_id: &str, base_id: &str
         .lora
         .as_ref()
         .unwrap_or_else(|| panic!("save_adapter: model was not built with a LoraCfg"));
-    model::lora::device_adapter::save_adapter(path, model, lora.rank, lora.alpha, &lora.targets, card_id, base_id, "deepseekv2", dataset_id)
+    model::lora::device_adapter::save_adapter(path, model, lora.rank, lora.card_alpha(), &lora.targets, card_id, base_id, "deepseekv2", dataset_id)
 }
 
 /// Fold an adapter saved by [`save_adapter`] into a base model's host tensor
@@ -44,7 +44,7 @@ pub fn save_adapter(path: &str, model: &DeepseekV2, card_id: &str, base_id: &str
 /// `model::lora::device_adapter::fold_adapter_into`.
 pub fn fold_adapter_into(base: &mut HashMap<String, Vec<f32>>, adapter_path: &str) -> std::io::Result<LoraCfg> {
     let (rank, alpha) = model::lora::device_adapter::fold_adapter_into(base, adapter_path)?;
-    Ok(LoraCfg { rank, alpha, targets: vec![] })
+    Ok(LoraCfg::new(rank, alpha, vec![]))
 }
 
 #[cfg(test)]

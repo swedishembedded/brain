@@ -9,7 +9,7 @@
 //! on it.
 
 use data::rng::{random_seed, Lcg};
-use model::adapter::{AdapterKind, TargetHp, TargetSpec};
+use model::adapter::{AdapterExecution, AdapterKind, TargetHp, TargetSpec};
 use model::lora::LoraPair;
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {

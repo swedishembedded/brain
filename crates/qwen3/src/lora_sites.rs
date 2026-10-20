@@ -58,7 +58,7 @@ mod tests {
     /// Distinct, non-square widths: d_model 16, q_dim 24, kv_dim 12, d_ff 40.
     fn config(rank: u32) -> QwenConfig {
         let targets = ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect();
-        QwenConfig { head_dim: 6, d_ff: 40, lora: Some(LoraCfg { rank, alpha: rank as f32, targets }), ..QwenConfig::tiny() }
+        QwenConfig { head_dim: 6, d_ff: 40, lora: Some(LoraCfg::new(rank, rank as f32, targets)), ..QwenConfig::tiny() }
     }
 
     /// The sites are exactly the adapters the config's own parameter list

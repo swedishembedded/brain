@@ -10,35 +10,7 @@
 
 use serde_json::Value;
 
-/// LoRA adapter configuration (low-rank fine-tuning). When present, the targeted
-/// projections keep a frozen base weight plus trainable `A`/`B` adapters.
-///
-/// `PartialEq` (on top of the `Clone, Debug` every other config-carried struct
-/// in this tree gets): `crates/deepseek2::config::DeepseekV2Config` derives it
-/// and round-trips through JSON in its own tests, and reusing this struct as-is
-/// rather than redeclaring it (this crate's own `Qwen35Config`/`Qwen35`
-/// precedent) means the derive has to hold here too.
-#[derive(Clone, Debug, PartialEq)]
-pub struct LoraCfg {
-    pub rank: u32,
-    pub alpha: f32,
-    /// Which projections get adapters (matched by the leaf name, e.g. "wq").
-    pub targets: Vec<String>,
-}
-
-impl LoraCfg {
-    /// The default Qwen LoRA target set: the four attention projections.
-    pub fn attn(rank: u32, alpha: f32) -> LoraCfg {
-        LoraCfg {
-            rank,
-            alpha,
-            targets: ["wq", "wk", "wv", "wo"].iter().map(|s| s.to_string()).collect(),
-        }
-    }
-    pub fn targets_leaf(&self, leaf: &str) -> bool {
-        self.targets.iter().any(|t| t == leaf)
-    }
-}
+pub use model::adapter::device::LoraCfg;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct QwenConfig {
@@ -294,9 +266,7 @@ impl QwenConfig {
         // rebuilds without the `.lora_a`/`.lora_b` names on load and the trained
         // adapters are silently dropped (see crates/qwen3/tests/lora_roundtrip.rs).
         if let Some(l) = &self.lora {
-            v["lora"] = serde_json::json!({
-                "rank": l.rank, "alpha": l.alpha, "targets": l.targets,
-            });
+            v["lora"] = l.to_json();
         }
         if let Some(scaling) = &self.rope_scaling {
             v["rope_scaling"] = scaling.to_config();
@@ -388,14 +358,7 @@ impl QwenConfig {
             // Qwen3 default (QK-norm on, bias-free); a Qwen2 loader sets these.
             qk_norm: c["qk_norm"].as_bool().unwrap_or(true),
             attn_bias: c["attention_bias"].as_bool().unwrap_or(false),
-            lora: c.get("lora").and_then(|l| l.as_object()).map(|l| LoraCfg {
-                rank: l["rank"].as_u64().unwrap_or(0) as u32,
-                alpha: l["alpha"].as_f64().unwrap_or(0.0) as f32,
-                targets: l["targets"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
-                    .unwrap_or_default(),
-            }),
+            lora: c.get("lora").and_then(|l| l.as_object()).map(LoraCfg::from_json),
             rope_scaling,
         }
         .with_defaults()
@@ -446,22 +409,17 @@ impl QwenConfig {
         let hq = self.q_dim() as usize;
         let hkv = self.kv_dim() as usize;
         let hd = self.head_dim as usize;
-        let r = self.lora.as_ref().map(|l| l.rank as usize);
 
         let mut out: Vec<(String, usize)> = vec![("tok.weight".to_string(), v * d)];
         // A linear `[out, in]` either as a plain trainable weight, or (LoRA on a
         // targeted leaf) as a frozen base + A[r,in] + B[out,r] adapters.
         let lin = |out_v: &mut Vec<(String, usize)>, name: String, leaf: &str, o: usize, i: usize| {
-            let lora_here = r.is_some()
-                && self
-                    .lora
-                    .as_ref()
-                    .map(|l| l.targets_leaf(leaf))
-                    .unwrap_or(false);
-            if let (true, Some(rk)) = (lora_here, r) {
+            let lora_here = self.lora.as_ref().is_some_and(|l| l.targets_leaf(leaf));
+            if lora_here {
                 out_v.push((name.clone(), o * i)); // frozen base
-                out_v.push((format!("{name}.lora_a"), rk * i));
-                out_v.push((format!("{name}.lora_b"), o * rk));
+                if let Some(l) = &self.lora {
+                    out_v.extend(model::adapter::device::param_list(&name, &l.hp(), o, i));
+                }
             } else {
                 out_v.push((name, o * i));
             }
@@ -629,7 +587,7 @@ mod tests {
         let mut scaled = QwenConfig::qwen2_1_5b();
         scaled.rope_scaling = Some(model::rope_scaling::RopeScaling::Linear { factor: 4.0 });
         let mut lora = QwenConfig::tiny();
-        lora.lora = Some(LoraCfg { rank: 4, alpha: 8.0, targets: vec!["q".into(), "v".into()] });
+        lora.lora = Some(LoraCfg::new(4, 8.0, vec!["q".into(), "v".into()]));
         for cfg in [
             QwenConfig::tiny(),
             QwenConfig::tiny_i8(),

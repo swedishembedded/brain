@@ -231,5 +231,5 @@ pub fn lora_targets() -> Vec<String> {
 /// A [`LoraCfg`] targeting every one of [`lora_targets`] at the given
 /// rank/alpha - the vision-tower analogue of `deepseek2::config::lora_cfg`.
 pub fn lora_cfg(rank: u32, alpha: f32) -> LoraCfg {
-    LoraCfg { rank, alpha, targets: lora_targets() }
+    LoraCfg::new(rank, alpha, lora_targets())
 }

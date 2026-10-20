@@ -16,7 +16,7 @@ use model::conformance::{Declares, Subject, Tier};
 /// (every contraction width a whole number of int8 groups).
 fn qwen3_subject() -> Subject<qwen3::Qwen> {
     fn config(adapter_rank: Option<u32>) -> qwen3::QwenConfig {
-        let lora = adapter_rank.map(|rank| qwen3::LoraCfg { rank, alpha: rank as f32, targets: ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect() });
+        let lora = adapter_rank.map(|rank| qwen3::LoraCfg::new(rank, rank as f32, ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect()));
         qwen3::QwenConfig { lora, ..qwen3::QwenConfig::tiny_i8() }
     }
     Subject {

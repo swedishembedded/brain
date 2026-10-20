@@ -354,7 +354,7 @@ pub fn run(frontend: Frontend, rd: &WeightReader, aligner_prefix: &str, examples
     drop(frontend);
     let mut decoder_cfg = base_cfg.clone();
     if opts.rank > 0 {
-        decoder_cfg.lora = Some(qwen3::LoraCfg { rank: opts.rank, alpha: opts.alpha, targets: opts.targets.clone() });
+        decoder_cfg.lora = Some(qwen3::LoraCfg::new(opts.rank, opts.alpha, opts.targets.clone()));
     }
 
     let longest = prepared.iter().map(|p| p.tokens.len()).max().expect("a dataset has examples");

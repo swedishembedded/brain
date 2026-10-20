@@ -1466,7 +1466,7 @@ fn lora_train_bench(a: &[String], shape: QwenConfig, model_name: &str) {
     let t: u32 = flag(a, "--t").and_then(|s| s.parse().ok()).unwrap_or(1024);
     let steps: usize = flag(a, "--steps").and_then(|s| s.parse().ok()).unwrap_or(5);
     let rank: u32 = flag(a, "--rank").and_then(|s| s.parse().ok()).unwrap_or(8);
-    let lora = qwen3::LoraCfg { rank, alpha: 2.0 * rank as f32, targets: qwen3::finetune::default_lora_targets() };
+    let lora = qwen3::LoraCfg::new(rank, 2.0 * rank as f32, qwen3::finetune::default_lora_targets());
     let t0 = Instant::now();
     let (cfg, init) = match flag(a, "--weights") {
         Some(w) => {

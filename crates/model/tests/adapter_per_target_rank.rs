@@ -10,7 +10,7 @@
 use data::rng::{random_seed, Lcg};
 use model::adapter::plan::{parse_map, AdapterPlan, TargetHpPatch};
 use model::adapter::select::TargetSelector;
-use model::adapter::{AdapterKind, KeyStyle, LinearSite, TargetHp, TargetSpec};
+use model::adapter::{AdapterExecution, AdapterKind, AdapterOptimization, KeyStyle, LinearSite, TargetHp, TargetSpec};
 use model::lora::LoraPair;
 use std::collections::HashMap;
 

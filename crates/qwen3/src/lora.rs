@@ -45,7 +45,7 @@ pub fn save_adapter_with_lineage<M: model::Model<Config = QwenConfig>>(
         .lora
         .as_ref()
         .unwrap_or_else(|| panic!("save_adapter: model was not built with a LoraCfg"));
-    model::lora::device_adapter::save_adapter_with_lineage(path, model, lora.rank, lora.alpha, &lora.targets, card_id, base_id, "qwen", dataset_id, training)
+    model::lora::device_adapter::save_adapter_with_lineage(path, model, lora.rank, lora.card_alpha(), &lora.targets, card_id, base_id, "qwen", dataset_id, training)
 }
 
 /// An adapter file read and validated into host memory, with no base model
@@ -58,5 +58,5 @@ pub use model::lora::device_adapter::{parse_adapter, read_adapter, AdapterSite, 
 /// `blocks.0.attn.wq.weight`). See `model::lora::device_adapter::fold_adapter_into`.
 pub fn fold_adapter_into(base: &mut HashMap<String, Vec<f32>>, adapter_path: &str) -> std::io::Result<LoraCfg> {
     let (rank, alpha) = model::lora::device_adapter::fold_adapter_into(base, adapter_path)?;
-    Ok(LoraCfg { rank, alpha, targets: vec![] })
+    Ok(LoraCfg::new(rank, alpha, vec![]))
 }

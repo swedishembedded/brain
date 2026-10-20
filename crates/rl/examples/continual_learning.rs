@@ -177,7 +177,7 @@ const PRETRAIN_RULES: usize = 16;
 const PRETRAIN_SEED: u64 = 20;
 
 fn lora_cfg() -> LoraCfg {
-    LoraCfg { rank: LORA_RANK, alpha: LORA_ALPHA, targets: LORA_TARGETS.iter().map(|s| s.to_string()).collect() }
+    LoraCfg::new(LORA_RANK, LORA_ALPHA, LORA_TARGETS.iter().map(|s| s.to_string()).collect())
 }
 
 /// The full-parameter pretraining shape. NOT `QwenConfig::tiny`: at

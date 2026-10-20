@@ -304,6 +304,15 @@ pub trait Model {
 
     // ---- parameter access (also satisfies gradcheck::CheckModel) ----
     fn param_names(&self) -> Vec<String>;
+
+    /// Adapter tensors the model holds but does not optimise (LoRA-FA's `A`):
+    /// they have no gradient, so [`Self::param_names`] omits them, yet a saved
+    /// adapter is incomplete without them. None unless the model can freeze
+    /// part of an adapter.
+    fn frozen_adapter_param_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     fn read_weight(&self, name: &str) -> Vec<f32>;
     fn write_weight(&self, name: &str, data: &[f32]);
     fn read_grad(&self, name: &str) -> Vec<f32>;

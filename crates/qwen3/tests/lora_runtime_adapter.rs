@@ -24,7 +24,7 @@ fn tmp(name: &str) -> std::path::PathBuf {
 /// Every linear a Qwen3 block has, so the MLP sites are exercised as well as
 /// the attention ones.
 fn all_targets(rank: u32, alpha: f32) -> LoraCfg {
-    LoraCfg { rank, alpha, targets: ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect() }
+    LoraCfg::new(rank, alpha, ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect())
 }
 
 /// Train a small adapter off its `B = 0` init so its delta is non-trivial,

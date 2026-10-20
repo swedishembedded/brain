@@ -15,9 +15,12 @@
 
 pub mod bank;
 pub mod device;
+pub mod kind;
 pub mod plan;
 pub mod select;
 pub mod sites;
+
+pub use kind::{AdapterDefinition, AdapterExecution, AdapterOptimization, ParamGroup, ParamInit, ParamSpec};
 
 use std::collections::HashMap;
 
@@ -152,12 +155,12 @@ impl KeyStyle {
     /// style has no special spelling for passes through unchanged.
     pub fn suffix(&self, canonical: &str) -> String {
         match (self, canonical) {
-            (KeyStyle::Peft { .. }, ".lora_a") => ".lora_A.weight".to_string(),
-            (KeyStyle::Peft { .. }, ".lora_b") => ".lora_B.weight".to_string(),
-            (KeyStyle::DownUp, ".lora_a") => ".lora_down.weight".to_string(),
-            (KeyStyle::DownUp, ".lora_b") => ".lora_up.weight".to_string(),
-            (KeyStyle::DotDownUp, ".lora_a") => ".lora.down.weight".to_string(),
-            (KeyStyle::DotDownUp, ".lora_b") => ".lora.up.weight".to_string(),
+            (KeyStyle::Peft { .. }, kind::LORA_A) => ".lora_A.weight".to_string(),
+            (KeyStyle::Peft { .. }, kind::LORA_B) => ".lora_B.weight".to_string(),
+            (KeyStyle::DownUp, kind::LORA_A) => ".lora_down.weight".to_string(),
+            (KeyStyle::DownUp, kind::LORA_B) => ".lora_up.weight".to_string(),
+            (KeyStyle::DotDownUp, kind::LORA_A) => ".lora.down.weight".to_string(),
+            (KeyStyle::DotDownUp, kind::LORA_B) => ".lora.up.weight".to_string(),
             (_, s) => s.to_string(),
         }
     }
@@ -180,28 +183,20 @@ impl KeyStyle {
     }
 }
 
-/// One parameter-efficient adapter parameterization for a single linear.
-/// Implementors: [`crate::lora::LoraPair`] (LoRA, wrapping
-/// [`crate::lora::Pair`] unchanged) today; DoRA/LoKr/LoHa/OFT later.
+/// One parameter-efficient adapter parameterization for a single linear:
+/// the conjunction of its [`AdapterDefinition`] (schema), [`AdapterExecution`]
+/// (what it does to a linear) and [`AdapterOptimization`] (how it trains),
+/// plus the instance lifecycle. Implementors: [`crate::lora::LoraPair`] (LoRA,
+/// wrapping [`crate::lora::Pair`] unchanged) today; DoRA/LoKr/IA3 later.
 ///
-/// `Grads` is an associated type, NOT `dw: &[f32]`, because the device
-/// trainers in this tree (flux2's `LoraAdapter::step_projected`, wan's
-/// `project`/`step_projected` split) compute an adapter's gradient directly
-/// from low-rank device intermediates and never materialize a dense
-/// `dL/dW_eff` to project - a `step(&mut self, dw: &[f32])` signature would
-/// exclude exactly those (the *default*, not exceptional) training paths.
-pub trait AdapterKind: Sized + Send {
-    type Grads: Sync;
-
-    fn kind_name() -> &'static str;
-
-    /// The extra trainable tensors this kind adds for ONE target, as
-    /// `(canonical_suffix, shape)` relative to the base leaf name - e.g.
-    /// LoRA's `[(".lora_a", [r,in]), (".lora_b", [out,r])]`. Both the
-    /// device param list and the host serializer read this, so they cannot
-    /// disagree about what a kind needs.
-    fn param_suffixes(hp: &TargetHp, spec: &TargetSpec) -> Vec<(&'static str, Vec<usize>)>;
-
+/// `Grads` (on [`AdapterExecution`]) is an associated type, NOT `dw: &[f32]`,
+/// because the device trainers in this tree (flux2's
+/// `LoraAdapter::step_projected`, wan's `project`/`step_projected` split)
+/// compute an adapter's gradient directly from low-rank device intermediates
+/// and never materialize a dense `dL/dW_eff` to project - a
+/// `step(&mut self, dw: &[f32])` signature would exclude exactly those (the
+/// *default*, not exceptional) training paths.
+pub trait AdapterKind: AdapterDefinition + AdapterExecution + AdapterOptimization + Sized + Send {
     /// Fresh adapter for one target. `init` is the CALLER's distribution,
     /// drawn in the same order [`crate::lora::Pair::new`] always has, so
     /// every existing seed keeps reproducing bit-identical adapters.
@@ -210,39 +205,11 @@ pub trait AdapterKind: Sized + Send {
     fn spec(&self) -> TargetSpec;
     fn hp(&self) -> &TargetHp;
 
-    /// `dst[(row0+o)*row_stride + col0 + i] += strength * scale * delta[o,i]`.
-    /// `strength` is the inference dial (flux2's `fold_into_tensors_at`),
-    /// multiplied ON TOP of `hp().scale()`, never replacing it.
-    fn delta_into(&self, strength: f32, dst: &mut [f32]);
-
-    /// Dense `dL/dW_eff` -> this kind's grads. Host dense-projection path
-    /// only - device trainers call [`AdapterKind::step`] directly with
-    /// grads they computed some other way.
-    fn project(&self, dw: &[f32]) -> Self::Grads;
-
-    /// One optimizer step at 1-based Adam counter `t`.
-    fn step(&mut self, g: &Self::Grads, lr: f32, t: u64);
-
-    /// The fused one-liner every per-linear walk calls - the exact body of
-    /// [`crate::lora::proj_step`].
-    fn proj_step(&mut self, dw: &[f32], lr: f32, t: u64) {
-        let g = self.project(dw);
-        self.step(&g, lr, t);
-    }
-
     fn to_tensors(&self) -> Vec<(&'static str, Vec<usize>, Vec<f32>)>;
 
     /// `get(canonical_suffix)` returns the tensor this adapter should load
     /// for that suffix, if present in the source file.
     fn load_tensors(&mut self, get: &dyn Fn(&str) -> Option<TensorShapeAndData>) -> Result<(), String>;
-
-    /// This kind's correction as an operator on the linear's **input
-    /// activation**, `Δy = scale·B·(A·x)`, when it has one - the form that
-    /// can be delivered beside an unmodified base weight instead of being
-    /// folded into it. `None` says the kind has no such form, which
-    /// [`AdapterSet::delivery`] turns into a refusal rather than a fold onto
-    /// a quantized grid.
-    fn low_rank(&self) -> Option<LowRank<'_>>;
 }
 
 /// One target's low-rank correction, borrowed from the adapter that owns it:

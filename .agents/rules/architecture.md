@@ -135,6 +135,11 @@ layer 6 - serving, front ends, SDK, samples
    data                    char + GPT-2 BPE tokenizers, dataset generators,
                            loaders, masking/alignment, normalization
    model                   architecture-agnostic Model trait + generic trainer,
+                           adapter runtime (`model::adapter`: a kind is a definition /
+                           execution / optimization triple, `device` derives every
+                           device-side tensor name, init, role and learning-rate
+                           group from it, `bank` serves many adapters as overlays
+                           over `LoraSites`),
                            shared block builders (block.rs, vit.rs), paged KV,
                            the KV storage descriptor (kv_tier: element codec x
                            scale hierarchy over the checkpoint crate's QuantEncoding;

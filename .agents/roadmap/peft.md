@@ -94,6 +94,15 @@ milestone verification numbers are tracked in this repo's normal commit
 history and test suite, not duplicated here - see `crates/model/src/adapter/`
 for what has landed. Phases 2-9 below assume Phase 1 exists and is stable.
 
+The kind is split into three roles in `crates/model/src/adapter/kind.rs`:
+`AdapterDefinition` (tensors per target, shapes, init), `AdapterExecution`
+(delta, runtime low-rank form, gradients from a dense `dW`) and
+`AdapterOptimization` (parameter groups and the update). The device family
+(`adapter/device.rs`) recognises, initialises, freezes and saves adapter
+tensors from the definition, so no model crate spells a tensor suffix; a new
+kind (DoRA, LoKr, IA3) implements the three roles and is listed in
+`device::kinds()`.
+
 **Two things scoped out of Phase 1, on purpose, and why:**
 
 1. **`minimaxmusic3`'s three LoRA modules were not migrated.** They are a
@@ -113,11 +122,15 @@ for what has landed. Phases 2-9 below assume Phase 1 exists and is stable.
      four crates' `LoraCfg` exposes anything but a single scalar `rank`,
      so there is no real caller to size mixed-rank device scratch buffers
      against yet.
-   - **Device-side LoRA-FA** (`Role::Frozen` specifically for `.lora_a`,
-     leaving `.lora_b` trainable) - the host substrate's `freeze_a` is
-     structural (`Pair::freeze_a`, gated by
-     `crates/model/tests/adapter_lora_fa.rs`), but none of the four
-     device-family crates' configs expose a `freeze_a` flag.
+   - ~~Device-side LoRA-FA~~ - done: `model::adapter::device::LoraCfg`
+     carries `rank_stabilized` (rsLoRA scale), `lr_ratio` (LoRA+) and
+     `freeze_a` (LoRA-FA); the qwen3/qwen35/qwen35moe/deepseek2 builds read the
+     trainable set and the per-tensor learning-rate multiplier from the kind's
+     parameter groups (`AdapterOptimization::groups`), and the backward skips
+     the frozen `A`'s weight gradient. Gated by
+     `crates/gradcheck/tests/adapter_kinds_fd.rs`. The high-level fine-tune
+     entry points (`Mode::Lora`, `LoraStart`) still take only rank/alpha/targets;
+     exposing the three flags there is the sdk lane's wiring.
    - **LoRA dropout on the device family** - the host path now hard-errors
      on a nonzero `TargetHp::dropout` (`crates/model/tests/
      adapter_dropout.rs` - `LoraPair::project` consumes a dense

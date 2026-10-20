@@ -51,7 +51,7 @@
 
 use crate::grad::{BlockGrads, BlockW};
 use crate::modelgrad::{Cfg, ModelGrads, ModelWeights};
-use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
+use model::adapter::{AdapterExecution, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
 pub use model::lora::LoraCfg;
 use model::lora::{LoraGrads, LoraPair};
 

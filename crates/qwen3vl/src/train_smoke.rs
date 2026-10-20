@@ -68,7 +68,7 @@ mod tests {
             // `LoraCfg::attn` gradcheck shortcut - this smoke test's job is
             // proving the production loop converges, so it should have the
             // production loop's own capacity.
-            lora: Some(LoraCfg { rank: 8, alpha: 16.0, targets: crate::finetune::lora_targets() }),
+            lora: Some(LoraCfg::new(8, 16.0, crate::finetune::lora_targets())),
             rope_scaling: None,
         };
 

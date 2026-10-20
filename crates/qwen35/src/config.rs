@@ -48,7 +48,7 @@ pub fn lora_targets() -> Vec<String> {
 /// [`LoraCfg`] targeting every one of [`lora_targets`] at the given rank/alpha
 /// - the qwen35-dense analogue of `qwen35moe::config::lora_cfg`.
 pub fn lora_cfg(rank: u32, alpha: f32) -> LoraCfg {
-    LoraCfg { rank, alpha, targets: lora_targets() }
+    LoraCfg::new(rank, alpha, lora_targets())
 }
 
 /// Which token-mixer a decoder layer uses. Generated from
@@ -503,9 +503,7 @@ impl Qwen35Config {
         // rebuilds without the `.lora_a`/`.lora_b` names on load and the trained
         // adapters are silently dropped.
         if let Some(l) = &self.lora {
-            v["lora"] = serde_json::json!({
-                "rank": l.rank, "alpha": l.alpha, "targets": l.targets,
-            });
+            v["lora"] = l.to_json();
         }
         if let Some(scaling) = &self.rope_scaling {
             v["rope_scaling"] = scaling.to_config();
@@ -602,14 +600,7 @@ impl Qwen35Config {
 
             intermediate_size: g("intermediate_size", 112),
 
-            lora: c.get("lora").and_then(|l| l.as_object()).map(|l| LoraCfg {
-                rank: l["rank"].as_u64().unwrap_or(0) as u32,
-                alpha: l["alpha"].as_f64().unwrap_or(0.0) as f32,
-                targets: l["targets"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
-                    .unwrap_or_default(),
-            }),
+            lora: c.get("lora").and_then(|l| l.as_object()).map(LoraCfg::from_json),
             mtp: c["mtp"].as_bool().unwrap_or(false),
         }
     }
@@ -624,16 +615,16 @@ impl Qwen35Config {
     pub fn param_list(&self) -> Vec<(String, usize)> {
         let d = self.d_model as usize;
         let v = self.vocab as usize;
-        let r = self.lora.as_ref().map(|l| l.rank as usize);
         // A linear `[out, in]` either as a plain trainable weight, or (LoRA on
         // a targeted leaf) as a frozen base + A[r,in] + B[out,r] adapters -
         // same shape as `qwen35moe::config::Qwen35Config::param_list`'s `lin`.
         let lin = |out_v: &mut Vec<(String, usize)>, name: String, leaf: &str, o: usize, i: usize| {
-            let lora_here = r.is_some() && self.lora.as_ref().map(|l| l.targets_leaf(leaf)).unwrap_or(false);
-            if let (true, Some(rk)) = (lora_here, r) {
+            let lora_here = self.lora.as_ref().is_some_and(|l| l.targets_leaf(leaf));
+            if lora_here {
                 out_v.push((name.clone(), o * i)); // frozen base
-                out_v.push((format!("{name}.lora_a"), rk * i));
-                out_v.push((format!("{name}.lora_b"), o * rk));
+                if let Some(l) = &self.lora {
+                    out_v.extend(model::adapter::device::param_list(&name, &l.hp(), o, i));
+                }
             } else {
                 out_v.push((name, o * i));
             }

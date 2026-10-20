@@ -8,7 +8,7 @@
 //! rather than silently train it.
 
 use data::rng::{random_seed, Lcg};
-use model::adapter::{AdapterKind, TargetHp, TargetSpec};
+use model::adapter::{AdapterExecution, AdapterKind, AdapterOptimization, TargetHp, TargetSpec};
 use model::lora::{LoraPair, Pair};
 
 #[test]

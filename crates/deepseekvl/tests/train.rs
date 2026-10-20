@@ -28,7 +28,7 @@ const ROWS: usize = 3;
 const BLOCK: u32 = 12;
 
 fn decoder(lora: bool) -> QwenConfig {
-    QwenConfig { block_size: BLOCK, lora: lora.then(|| LoraCfg { rank: 4, alpha: 8.0, targets: ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect() }), ..QwenConfig::tiny() }
+    QwenConfig { block_size: BLOCK, lora: lora.then(|| LoraCfg::new(4, 8.0, ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect())), ..QwenConfig::tiny() }
 }
 
 /// The hybrid split aligner over two 8-wide streams into the decoder's 16.

@@ -81,7 +81,7 @@ const SFT_LR: f32 = 3e-3;
 const SFT_DATA_SEED: u64 = 1;
 
 fn lora_cfg() -> LoraCfg {
-    LoraCfg { rank: LORA_RANK, alpha: LORA_ALPHA, targets: LORA_TARGETS.iter().map(|s| s.to_string()).collect() }
+    LoraCfg::new(LORA_RANK, LORA_ALPHA, LORA_TARGETS.iter().map(|s| s.to_string()).collect())
 }
 
 fn pretrain_config() -> QwenConfig {

@@ -26,8 +26,7 @@ fn step_timing() {
     let mut cfg = QwenConfig::from_json(&c.header["config"]);
     let lora = std::env::var("LORA").is_ok();
     if lora {
-        cfg.lora = Some(qwen3::LoraCfg { rank: 16, alpha: 32.0,
-            targets: ["wq","wk","wv","wo","gate","up","down"].iter().map(|s| s.to_string()).collect() });
+        cfg.lora = Some(qwen3::LoraCfg::new(16, 32.0, ["wq","wk","wv","wo","gate","up","down"].iter().map(|s| s.to_string()).collect()));
     }
     println!("lora={lora}");
     let block = std::env::var("BLK").ok().and_then(|v| v.parse().ok()).unwrap_or(512u32);

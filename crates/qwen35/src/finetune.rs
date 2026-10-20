@@ -72,7 +72,7 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
         let mut cfg = Qwen35Config::from_json(&c.header["config"]);
         let base_w = c.by_role("");
         if let Mode::Lora { rank, alpha } = mode {
-            cfg.lora = Some(LoraCfg { rank: *rank, alpha: *alpha, targets: lora_targets() });
+            cfg.lora = Some(LoraCfg::new(*rank, *alpha, lora_targets()));
         }
         // Fresh init for the (possibly LoRA-extended) param set, then overwrite
         // the base params with the checkpoint's -- adapters stay at their

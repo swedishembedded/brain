@@ -30,7 +30,7 @@
 
 use crate::grad::{GradsF32, WeightsF32};
 use crate::modelgrad::{Cfg, ModelGradsF32, ModelWeightsF32};
-use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
+use model::adapter::{AdapterExecution, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
 // The generic pair machinery (A/B init, ΔW apply, dW→(dA,dB) projection, Adam
 // moments) is model-agnostic and lives ONCE in `model::lora` — this module
 // keeps only the Z-Image-specific block walk and serialization naming.

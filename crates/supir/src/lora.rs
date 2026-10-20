@@ -62,7 +62,7 @@
 
 use std::collections::HashMap;
 
-use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
+use model::adapter::{AdapterExecution, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
 pub use model::lora::LoraCfg;
 use model::lora::{LoraGrads, LoraPair};
 use sdxlunet::import::Tensors;

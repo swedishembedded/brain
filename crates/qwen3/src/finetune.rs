@@ -603,7 +603,7 @@ pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStar
         }
     };
     let (mut cfg, base_src) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
-    cfg.lora = Some(LoraCfg { rank, alpha, targets });
+    cfg.lora = Some(LoraCfg::new(rank, alpha, targets));
     // A fresh adapter starts at its zero-delta init; the base's own weights
     // are never copied, they stay behind `base_src`.
     let mut init = LoraInit::fresh(&cfg, base_src, seed);
@@ -644,7 +644,7 @@ pub fn finetune_lora_controlled(
     // builds.
     if let (Some(snapshots), Some(lora)) = (control.snapshots.as_mut(), cfg.lora.as_ref()) {
         snapshots.rank = lora.rank;
-        snapshots.alpha = lora.alpha;
+        snapshots.alpha = lora.card_alpha();
         snapshots.targets = lora.targets.clone();
     }
     // A LoRA build never offloads its moments (outside any `with_adam_offloaded`

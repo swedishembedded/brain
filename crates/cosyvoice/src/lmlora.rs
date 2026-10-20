@@ -42,7 +42,7 @@
 
 use crate::lmgrad::{Fp, LmDims, LmGrads, LmWeights};
 pub use model::lora::LoraCfg;
-use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
+use model::adapter::{AdapterExecution, AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
 use model::lora::{LoraGrads, LoraPair};
 
 /// Every linear this crate offers to a PEFT adapter: `wq`/`wk`/`wv`/`wo` per

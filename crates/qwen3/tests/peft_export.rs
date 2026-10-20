@@ -15,7 +15,7 @@ fn a_peft_export_folds_as_the_adapter_brain_trained() {
     let targets: Vec<String> = ["wq", "wv", "down"].iter().map(|s| s.to_string()).collect();
     // alpha == rank: PEFT keeps alpha in adapter_config.json, not in the
     // tensors, and the reader alone therefore scales by 1.
-    let cfg = QwenConfig { lora: Some(LoraCfg { rank: 2, alpha: 2.0, targets: targets.clone() }), ..QwenConfig::tiny() };
+    let cfg = QwenConfig { lora: Some(LoraCfg::new(2, 2.0, targets.clone())), ..QwenConfig::tiny() };
     let init = qwen3::init_weights(&cfg, 3);
     let model = Qwen::new(cfg.clone(), 1, 4, &init);
     // Non-zero factors on both sides, so the fold is not trivially the base.

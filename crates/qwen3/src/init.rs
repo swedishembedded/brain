@@ -7,6 +7,8 @@
 //! - other linear weights + embedding: Normal(0, 0.02)
 //! - LoRA `A`: Normal(0, 0.02); LoRA `B`: 0 (adapter starts as a no-op).
 
+use model::adapter::device::init_of;
+use model::adapter::ParamInit;
 use std::collections::HashMap;
 
 use data::rng::Rng;
@@ -39,9 +41,9 @@ pub fn init_weights(cfg: &QwenConfig, seed: u64) -> HashMap<String, Vec<f32>> {
     for (name, numel) in cfg.param_list() {
         let v = if is_norm_gain(&name) {
             vec![1.0; numel]
-        } else if name.ends_with(".lora_b") {
+        } else if init_of(&name) == Some(ParamInit::Zeros) {
             vec![0.0; numel] // zero-init so the adapter starts as identity
-        } else if name.ends_with(".lora_a") {
+        } else if init_of(&name) == Some(ParamInit::Drawn) {
             normal(numel, std, &mut rng)
         } else if is_residual_proj(&name) {
             normal(numel, proj_std, &mut rng)
@@ -62,9 +64,9 @@ pub fn init_adapter_weights(cfg: &QwenConfig, seed: u64) -> HashMap<String, Vec<
     cfg.param_list()
         .into_iter()
         .filter_map(|(name, numel)| {
-            let v = if name.ends_with(".lora_b") {
+            let v = if init_of(&name) == Some(ParamInit::Zeros) {
                 vec![0.0; numel]
-            } else if name.ends_with(".lora_a") {
+            } else if init_of(&name) == Some(ParamInit::Drawn) {
                 (0..numel).map(|_| (rng.next_gaussian() as f32) * 0.02).collect()
             } else {
                 return None;

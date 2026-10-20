@@ -132,7 +132,7 @@ pub fn run(
     progress(0, opts.steps, format!("loaded {} images from {}", samples.len(), data_dir.display()));
 
     // 3. Enable LoRA on the decoder config.
-    cfg.text.lora = Some(LoraCfg { rank: opts.rank, alpha: opts.alpha, targets: lora_targets() });
+    cfg.text.lora = Some(LoraCfg::new(opts.rank, opts.alpha, lora_targets()));
 
     // 4. Fixed prompt template -> image placement, constant for every sample
     // (see this module's own doc on the fixed-size-per-run constraint).

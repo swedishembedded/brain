@@ -1463,14 +1463,17 @@ impl Qwen35 {
                 let role = if !train {
                     Role::Frozen
                 } else if cfg.lora.is_some() {
-                    if model::adapter::device::is_adapter_param(&n) { Role::Trainable } else { Role::Frozen }
+                    model::adapter::device::role_of(&n, &cfg.lora.as_ref().expect("checked by the branch").hp())
                 } else {
                     Role::Trainable
                 };
                 (n, c, role)
             })
             .collect();
-        let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
+            model::adapter::device::apply_groups(&mut ps, &lora.hp());
+        }
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         // See the field's own doc: computed once here so the per-expert
@@ -1733,7 +1736,7 @@ impl Qwen35 {
     /// (one of the 9 targetable leaf names - never an MoE expert leaf).
     /// Mirrors `qwen3::model.rs`'s own `lora_for` exactly.
     fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
-        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
+        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.scale()))
     }
 
     /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`.
@@ -1744,8 +1747,7 @@ impl Qwen35 {
     fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         let Some((r, scale)) = self.lora_for(leaf) else { return };
         let g = &self.gpu;
-        let a = format!("{wname}.lora_a");
-        let bnm = format!("{wname}.lora_b");
+        let (a, bnm) = model::adapter::device::lora_names(wname);
         s.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
         s.push(g.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
         s.push(g.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
@@ -1886,8 +1888,7 @@ impl Qwen35 {
             Some((r, scale)) => {
                 // base: dx += d_out·W (frozen weight - no dW).
                 steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
-                let a = format!("{wname}.lora_a");
-                let bnm = format!("{wname}.lora_b");
+                let (a, bnm) = model::adapter::device::lora_names(wname);
                 // a = (alpha/r)·(x·Aᵀ)  -> gB += d_outᵀ·a
                 steps.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
                 steps.push(g.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
@@ -1895,7 +1896,9 @@ impl Qwen35 {
                 // da = (alpha/r)·(d_out·B) -> gA += daᵀ·x ; dx += da·A
                 steps.push(g.step(MATMUL_DX, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], m * r));
                 steps.push(g.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
-                steps.push(g.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
+                if self.trainable(&a) {
+                    steps.push(g.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
+                }
                 steps.push(g.step(MATMUL_DX, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], m * k));
             }
             None => {
@@ -3887,6 +3890,9 @@ impl model::Model for Qwen35 {
     }
     fn param_names(&self) -> Vec<String> {
         Qwen35::param_names(self)
+    }
+    fn frozen_adapter_param_names(&self) -> Vec<String> {
+        model::adapter::device::frozen_adapter_params(&self.ps)
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         Qwen35::read_weight(self, name)

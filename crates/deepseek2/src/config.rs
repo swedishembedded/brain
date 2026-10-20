@@ -50,7 +50,7 @@ pub fn lora_targets() -> Vec<String> {
 /// [`LoraCfg`] targeting every one of [`lora_targets`] at the given rank/alpha
 /// -- the deepseekv2 analogue of `qwen3::LoraCfg::attn`/`qwen35moe::config::lora_cfg`.
 pub fn lora_cfg(rank: u32, alpha: f32) -> LoraCfg {
-    LoraCfg { rank, alpha, targets: lora_targets() }
+    LoraCfg::new(rank, alpha, lora_targets())
 }
 
 /// If `name` is one of this decoder's four attention-projection weights
@@ -251,15 +251,13 @@ impl DeepseekV2Config {
         let mut out = self.shape.param_list();
         if let Some(lora) = &self.lora {
             let d = self.d_model() as usize;
-            let r = lora.rank as usize;
             let mut extra = Vec::new();
             for (name, _) in &out {
                 let Some(leaf) = attn_leaf(name) else { continue };
                 if !lora.targets_leaf(leaf) {
                     continue;
                 }
-                extra.push((format!("{name}.lora_a"), r * d));
-                extra.push((format!("{name}.lora_b"), r * d));
+                extra.extend(model::adapter::device::param_list(name, &lora.hp(), d, d));
             }
             out.extend(extra);
         }
@@ -282,7 +280,7 @@ impl DeepseekV2Config {
         // `crates/qwen3/tests/lora_roundtrip.rs` gates for that crate's own
         // `LoraCfg` field.
         if let Some(l) = &self.lora {
-            v["lora"] = serde_json::json!({ "rank": l.rank, "alpha": l.alpha, "targets": l.targets });
+            v["lora"] = l.to_json();
         }
         v
     }
@@ -320,14 +318,7 @@ impl DeepseekV2Config {
             block_size: g("block_size", shape.max_position_embeddings),
             norm_topk_prob: c["norm_topk_prob"].as_bool().unwrap_or(false),
             routed_scaling: gf("routed_scaling_factor", 1.0),
-            lora: c.get("lora").and_then(|l| l.as_object()).map(|l| LoraCfg {
-                rank: l["rank"].as_u64().unwrap_or(0) as u32,
-                alpha: l["alpha"].as_f64().unwrap_or(0.0) as f32,
-                targets: l["targets"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-                    .unwrap_or_default(),
-            }),
+            lora: c.get("lora").and_then(|l| l.as_object()).map(LoraCfg::from_json),
             shape,
         }
     }
@@ -409,7 +400,7 @@ mod tests {
         }
         // A narrower target set adds proportionally fewer tensors.
         let one_leaf = DeepseekV2Config {
-            lora: Some(qwen3::LoraCfg { rank: 2, alpha: 4.0, targets: vec!["q_proj".to_string()] }),
+            lora: Some(qwen3::LoraCfg::new(2, 4.0, vec!["q_proj".to_string()])),
             ..base.clone()
         };
         assert_eq!(one_leaf.param_list().len(), base_list.len() + base.n_layers() as usize * 2);

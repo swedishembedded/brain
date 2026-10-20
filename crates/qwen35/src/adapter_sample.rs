@@ -62,7 +62,7 @@ impl AdapterSampler {
         };
         let opts = TrainOpts { base: TierPolicy::uniform(tier), recompute: dtype.is_frozen_only(), ..TrainOpts::default() };
         let model = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, 1, len, &src, &opts);
-        let lora_b = model.param_names().into_iter().filter(|n| n.ends_with(".lora_b")).map(|n| { let w = model.read_weight(&n); (n, w) }).collect();
+        let lora_b = model.param_names().into_iter().filter(|n| model::adapter::device::init_of(n) == Some(model::adapter::ParamInit::Zeros)).map(|n| { let w = model.read_weight(&n); (n, w) }).collect();
         Ok(AdapterSampler { model, len, lora_b, enabled: true })
     }
 

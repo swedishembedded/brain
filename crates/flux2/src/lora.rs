@@ -46,7 +46,7 @@
 
 use crate::grad::{SingleW, StreamG, StreamW};
 use crate::modelgrad::{Cfg, ModelGrads, ModelWeights};
-use model::adapter::{AdapterKind, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
+use model::adapter::{AdapterExecution, AdapterOptimization, AdapterSet, KeyStyle, LinearSite, TargetHp, TargetSpec};
 // The generic pair machinery (A/B init, ΔW apply, dW→(dA,dB) projection, Adam
 // moments) is model-agnostic and lives ONCE in `model::lora` - this module
 // keeps only the FLUX.2-specific block walk, fused-tensor offsets and

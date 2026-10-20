@@ -769,7 +769,7 @@ impl DeepseekV2 {
                 let role = if !train {
                     Role::Frozen
                 } else if cfg.lora.is_some() {
-                    if model::adapter::device::is_adapter_param(&n) { Role::Trainable } else { Role::Frozen }
+                    model::adapter::device::role_of(&n, &cfg.lora.as_ref().expect("checked by the branch").hp())
                 } else {
                     Role::Trainable
                 };
@@ -788,7 +788,10 @@ impl DeepseekV2 {
         let profile = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
         let t_ps = std::time::Instant::now();
         let n_params = roles.len();
-        let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
+            model::adapter::device::apply_groups(&mut ps, &lora.hp());
+        }
         if profile {
             eprintln!("deepseekv2: new_on: ParamStore::new_with_roles_src ({n_params} tensors): {:.1} ms", t_ps.elapsed().as_secs_f64() * 1e3);
         }
@@ -1015,7 +1018,7 @@ impl DeepseekV2 {
     /// configured at all, or this leaf is not targeted) -- mirrors
     /// `qwen3::model.rs`'s own `lora_for` exactly.
     fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
-        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
+        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.scale()))
     }
 
     /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`, in
@@ -1026,8 +1029,7 @@ impl DeepseekV2 {
     /// persistent `lora_a`/`lora_out` scratch).
     fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         let Some((r, scale)) = self.lora_for(leaf) else { return };
-        let a = format!("{wname}.lora_a");
-        let bnm = format!("{wname}.lora_b");
+        let (a, bnm) = model::adapter::device::lora_names(wname);
         s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
         s.push(self.gpu.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
         s.push(self.gpu.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
@@ -1048,8 +1050,7 @@ impl DeepseekV2 {
     #[allow(clippy::too_many_arguments)]
     fn lora_bwd(&self, s: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         let Some((r, scale)) = self.lora_for(leaf) else { return };
-        let a = format!("{wname}.lora_a");
-        let bnm = format!("{wname}.lora_b");
+        let (a, bnm) = model::adapter::device::lora_names(wname);
         // a = x·Aᵀ ; gB += scale·d_outᵀ·a  (scale folded into `a`, private scratch)
         s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
         s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
@@ -1057,7 +1058,9 @@ impl DeepseekV2 {
         // da = scale·(d_out·B) ; gA += daᵀ·x ; dx += da·A
         s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], m * r));
         s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
-        s.push(self.gpu.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
+        if self.trainable(&a) {
+            s.push(self.gpu.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
+        }
         s.push(self.gpu.step(MATMUL_DX, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], m * k));
     }
 
@@ -2240,6 +2243,9 @@ impl model::Model for DeepseekV2 {
     }
     fn param_names(&self) -> Vec<String> {
         DeepseekV2::param_names(self)
+    }
+    fn frozen_adapter_param_names(&self) -> Vec<String> {
+        model::adapter::device::frozen_adapter_params(&self.ps)
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         DeepseekV2::read_weight(self, name)

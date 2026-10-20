@@ -1134,6 +1134,7 @@ pub mod device_adapter {
 
     use checkpoint::st::{Adapter, ModelCard};
 
+    use crate::adapter::kind::{LORA_A, LORA_B};
     use crate::Model;
 
     /// Write only `model`'s `.lora_a`/`.lora_b` tensors - never the frozen
@@ -1171,19 +1172,26 @@ pub mod device_adapter {
         training: Option<checkpoint::st::TrainingProvenance>,
     ) -> std::io::Result<()> {
         let r = rank as usize;
+        // The adapter is every adapter tensor the model holds, not only the
+        // optimised ones: LoRA-FA's `A` is frozen (it has no
+        // gradient, so `param_names` omits it) yet the adapter is not
+        // complete, or foldable, without it.
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = model
             .param_names()
             .into_iter()
+            .chain(model.frozen_adapter_param_names())
             .filter(|name| crate::adapter::device::is_adapter_param(name))
             .map(|name| {
                 let data = model.read_weight(&name);
                 // Real 2-D shape, not the flattened `[len]` this used to
-                // write - recovered from `data.len()`/`rank` exactly like
-                // `read_external_adapter` already does for third-party
-                // files, since the device family has no other place a
-                // shape could come from. `.lora_a` is `[r,in]`, `.lora_b`
-                // is `[out,r]`.
-                let shape = if name.ends_with(".lora_a") { vec![r as u64, (data.len() / r) as u64] } else { vec![(data.len() / r) as u64, r as u64] };
+                // write - recovered from `data.len()`/`rank` by the kind's
+                // own definition, since the device family has no other place
+                // a shape could come from.
+                let shape = crate::adapter::device::shape_of(&name, r, data.len())
+                    .unwrap_or_else(|| panic!("save_adapter: {name} holds {} elements, not a whole rank-{r} matrix", data.len()))
+                    .into_iter()
+                    .map(|d| d as u64)
+                    .collect();
                 (name.clone(), shape, data)
             })
             .collect();
@@ -1292,16 +1300,16 @@ pub mod device_adapter {
         }
         let alpha = a.alpha.unwrap_or(rank as f32);
 
-        if let Some(orphan) = st.tensors.keys().filter_map(|n| n.strip_suffix(".lora_b")).find(|base| !st.tensors.contains_key(&format!("{base}.lora_a"))) {
+        if let Some(orphan) = st.tensors.keys().filter_map(|n| n.strip_suffix(LORA_B)).find(|base| !st.tensors.contains_key(&format!("{base}{LORA_A}"))) {
             return Err(invalid(adapter_path, format!("{orphan}.lora_b has no matching .lora_a")));
         }
-        let mut names: Vec<String> = st.tensors.keys().filter_map(|n| n.strip_suffix(".lora_a")).map(str::to_string).collect();
+        let mut names: Vec<String> = st.tensors.keys().filter_map(|n| n.strip_suffix(LORA_A)).map(str::to_string).collect();
         names.sort();
         let r = rank as usize;
         let mut sites = Vec::with_capacity(names.len());
         for base in names {
-            let a = st.tensors.remove(&format!("{base}.lora_a")).expect("listed above");
-            let b = st.tensors.remove(&format!("{base}.lora_b")).ok_or_else(|| invalid(adapter_path, format!("missing {base}.lora_b")))?;
+            let a = st.tensors.remove(&format!("{base}{LORA_A}")).expect("listed above");
+            let b = st.tensors.remove(&format!("{base}{LORA_B}")).ok_or_else(|| invalid(adapter_path, format!("missing {base}.lora_b")))?;
             if a.is_empty() || b.is_empty() || !a.len().is_multiple_of(r) || b.len() % r != 0 {
                 return Err(invalid(adapter_path, format!("{base}: factor sizes {} / {} are not whole rank-{rank} matrices", a.len(), b.len())));
             }
@@ -1401,6 +1409,8 @@ pub struct LoraGrads {
     pub db: Vec<f32>,
 }
 
+use crate::adapter::kind::{LORA_A, LORA_B};
+
 /// [`Pair`] wearing the generic [`crate::adapter::AdapterKind`] seam. `Pair`
 /// itself is untouched by this wrapper - every method below calls straight
 /// through to it, so every existing seed reproduces bit-identical adapters
@@ -1428,17 +1438,76 @@ impl LoraPair {
     }
 }
 
-impl crate::adapter::AdapterKind for LoraPair {
-    type Grads = LoraGrads;
-
+impl crate::adapter::AdapterDefinition for LoraPair {
     fn kind_name() -> &'static str {
         "lora"
     }
 
-    fn param_suffixes(hp: &crate::adapter::TargetHp, spec: &crate::adapter::TargetSpec) -> Vec<(&'static str, Vec<usize>)> {
-        vec![(".lora_a", vec![hp.rank, spec.inn]), (".lora_b", vec![spec.out, hp.rank])]
+    fn params(hp: &crate::adapter::TargetHp, spec: &crate::adapter::TargetSpec) -> Vec<crate::adapter::ParamSpec> {
+        use crate::adapter::{ParamInit, ParamSpec};
+        vec![
+            ParamSpec { suffix: LORA_A, shape: vec![hp.rank, spec.inn], init: ParamInit::Drawn },
+            ParamSpec { suffix: LORA_B, shape: vec![spec.out, hp.rank], init: ParamInit::Zeros },
+        ]
     }
 
+    fn suffixes() -> &'static [&'static str] {
+        &[LORA_A, LORA_B]
+    }
+
+    fn shape_from_len(suffix: &str, rank: usize, len: usize) -> Option<Vec<usize>> {
+        if rank == 0 || len == 0 || !len.is_multiple_of(rank) {
+            return None;
+        }
+        match suffix {
+            LORA_A => Some(vec![rank, len / rank]),
+            LORA_B => Some(vec![len / rank, rank]),
+            _ => None,
+        }
+    }
+}
+
+impl crate::adapter::AdapterExecution for LoraPair {
+    type Grads = LoraGrads;
+
+    fn delta_into(&self, strength: f32, dst: &mut [f32]) {
+        self.pair.delta_strided(self.hp.scale() * strength, dst, self.spec.row0, self.spec.row_stride, self.spec.col0);
+    }
+
+    fn project(&self, dw: &[f32]) -> LoraGrads {
+        let (da, db) = self.pair.project(dw, self.hp.scale());
+        LoraGrads { da, db }
+    }
+
+    /// LoRA's delta IS a product of two small factors, so the runtime form is
+    /// the same `A`/`B` the fold would multiply out - handed over unmultiplied
+    /// so a quantized base never has to see the dense `B·A` at all.
+    fn low_rank(&self) -> Option<crate::adapter::LowRank<'_>> {
+        Some(crate::adapter::LowRank { a: &self.pair.a, b: &self.pair.b, rank: self.pair.r, scale: self.hp.scale() })
+    }
+}
+
+impl crate::adapter::AdapterOptimization for LoraPair {
+    fn groups(hp: &crate::adapter::TargetHp) -> Vec<crate::adapter::ParamGroup> {
+        use crate::adapter::ParamGroup;
+        vec![
+            ParamGroup { suffix: LORA_A, trainable: !hp.freeze_a, lr_mult: 1.0 },
+            ParamGroup { suffix: LORA_B, trainable: true, lr_mult: hp.lr_ratio },
+        ]
+    }
+
+    fn step(&mut self, g: &LoraGrads, lr: f32, t: u64) {
+        let groups = Self::groups(&self.hp);
+        if groups[0].trainable {
+            self.pair.adam_a(&g.da, lr * groups[0].lr_mult, t);
+        }
+        if groups[1].trainable {
+            self.pair.adam_b(&g.db, lr * groups[1].lr_mult, t);
+        }
+    }
+}
+
+impl crate::adapter::AdapterKind for LoraPair {
     fn new(spec: crate::adapter::TargetSpec, hp: crate::adapter::TargetHp, init: &mut dyn FnMut() -> f32) -> LoraPair {
         // LoRA dropout needs the adapter's INPUT activation `x` (mask
         // `drop(x)` before `A·x`) - this host path's whole shape is
@@ -1470,34 +1539,11 @@ impl crate::adapter::AdapterKind for LoraPair {
         &self.hp
     }
 
-    fn delta_into(&self, strength: f32, dst: &mut [f32]) {
-        self.pair.delta_strided(self.hp.scale() * strength, dst, self.spec.row0, self.spec.row_stride, self.spec.col0);
-    }
-
-    fn project(&self, dw: &[f32]) -> LoraGrads {
-        let (da, db) = self.pair.project(dw, self.hp.scale());
-        LoraGrads { da, db }
-    }
-
-    fn step(&mut self, g: &LoraGrads, lr: f32, t: u64) {
-        if !self.hp.freeze_a {
-            self.pair.adam_a(&g.da, lr, t);
-        }
-        self.pair.adam_b(&g.db, lr * self.hp.lr_ratio, t);
-    }
-
     fn to_tensors(&self) -> Vec<(&'static str, Vec<usize>, Vec<f32>)> {
         vec![
-            (".lora_a", vec![self.pair.r, self.pair.inn], self.pair.a.clone()),
-            (".lora_b", vec![self.pair.out, self.pair.r], self.pair.b.clone()),
+            (LORA_A, vec![self.pair.r, self.pair.inn], self.pair.a.clone()),
+            (LORA_B, vec![self.pair.out, self.pair.r], self.pair.b.clone()),
         ]
-    }
-
-    /// LoRA's delta IS a product of two small factors, so the runtime form is
-    /// the same `A`/`B` the fold would multiply out - handed over unmultiplied
-    /// so a quantized base never has to see the dense `B·A` at all.
-    fn low_rank(&self) -> Option<crate::adapter::LowRank<'_>> {
-        Some(crate::adapter::LowRank { a: &self.pair.a, b: &self.pair.b, rank: self.pair.r, scale: self.hp.scale() })
     }
 
     fn load_tensors(&mut self, get: &dyn Fn(&str) -> Option<(Vec<usize>, Vec<f32>)>) -> Result<(), String> {
@@ -1509,7 +1555,7 @@ impl crate::adapter::AdapterKind for LoraPair {
         // hard error: wan's own reason (an A/B swap is length-compatible on
         // square targets) is exactly why a real shape must be checked when
         // one is available.
-        if let Some((shape, data)) = get(".lora_a") {
+        if let Some((shape, data)) = get(LORA_A) {
             let want = [self.pair.r, self.pair.inn];
             if !shape.is_empty() && shape != want {
                 return Err(format!("LoraPair::load_tensors: .lora_a shape {shape:?} does not match {want:?}"));
@@ -1519,7 +1565,7 @@ impl crate::adapter::AdapterKind for LoraPair {
             }
             self.pair.a = data;
         }
-        if let Some((shape, data)) = get(".lora_b") {
+        if let Some((shape, data)) = get(LORA_B) {
             let want = [self.pair.out, self.pair.r];
             if !shape.is_empty() && shape != want {
                 return Err(format!("LoraPair::load_tensors: .lora_b shape {shape:?} does not match {want:?}"));

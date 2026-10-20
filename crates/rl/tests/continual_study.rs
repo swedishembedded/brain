@@ -179,7 +179,7 @@ const LORA_ALPHA: f32 = 16.0;
 const LORA_TARGETS: [&str; 4] = ["wq", "wk", "wv", "wo"];
 
 fn lora_cfg() -> LoraCfg {
-    LoraCfg { rank: LORA_RANK, alpha: LORA_ALPHA, targets: LORA_TARGETS.iter().map(|s| s.to_string()).collect() }
+    LoraCfg::new(LORA_RANK, LORA_ALPHA, LORA_TARGETS.iter().map(|s| s.to_string()).collect())
 }
 
 /// Sequences of PRETRAINING data (pretrain-only cues; no study rule appears).

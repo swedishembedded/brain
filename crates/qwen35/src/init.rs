@@ -25,6 +25,8 @@
 //! zero-initialised so a freshly-built adapter starts as an exact no-op
 //! (`B @ A = 0`) - same convention as `qwen3::init::init_weights`.
 
+use model::adapter::device::init_of;
+use model::adapter::ParamInit;
 use std::collections::HashMap;
 
 use data::rng::Lcg;
@@ -43,7 +45,7 @@ pub fn init_weights(cfg: &Qwen35Config, seed: u64) -> HashMap<String, Vec<f32>> 
             // A ~ Uniform(0,16), A_log = log(A). Floor A away from 0 so log
             // never returns -inf for a fresh (never-trained) init.
             (0..numel).map(|_| (rng.unit() * 16.0).max(1e-4).ln()).collect()
-        } else if name.ends_with(".lora_b") {
+        } else if init_of(&name) == Some(ParamInit::Zeros) {
             vec![0.0f32; numel] // zero-init so the adapter starts as identity
         } else {
             // every plain base tensor, and `.lora_a`.
@@ -66,9 +68,9 @@ pub fn init_lora_only(cfg: &Qwen35Config, seed: u64) -> HashMap<String, Vec<f32>
     let std = 0.02f32;
     let mut w = HashMap::new();
     for (name, numel) in cfg.param_list() {
-        if name.ends_with(".lora_b") {
+        if init_of(&name) == Some(ParamInit::Zeros) {
             w.insert(name, vec![0.0f32; numel]);
-        } else if name.ends_with(".lora_a") {
+        } else if init_of(&name) == Some(ParamInit::Drawn) {
             w.insert(name, rng.vec_scaled(numel, std));
         }
         // else: a base tensor -- the caller supplies the real weight.

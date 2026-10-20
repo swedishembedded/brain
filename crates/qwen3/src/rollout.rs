@@ -19,6 +19,7 @@
 //! in training models on your own hardware, you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
+use model::adapter::kind::{LORA_A, LORA_B};
 use std::collections::HashMap;
 
 use data::rng::Rng;
@@ -94,12 +95,12 @@ impl SyncRollout for EngineRollout {
         };
         let result = (|| -> Result<(), String> {
             for (name, value) in trained {
-                if name.ends_with(".lora_b") {
+                if name.ends_with(LORA_B) {
                     continue;
                 }
-                let (base_name, new) = if let Some(base_name) = name.strip_suffix(".lora_a") {
+                let (base_name, new) = if let Some(base_name) = name.strip_suffix(LORA_A) {
                     let lora = self.lora.as_ref().ok_or_else(|| format!("{name}: an adapter, but this rollout was built without a LoRA shape"))?;
-                    let b = trained.get(&format!("{base_name}.lora_b")).ok_or_else(|| format!("{name} has no .lora_b"))?;
+                    let b = trained.get(&format!("{base_name}{LORA_B}")).ok_or_else(|| format!("{name} has no .lora_b"))?;
                     let w = self.base.get(base_name).ok_or_else(|| format!("{base_name}: the adapter's base is not a weight of this model"))?;
                     let r = lora.rank as usize;
                     let (inn, out) = (value.len() / r, b.len() / r);
@@ -107,7 +108,7 @@ impl SyncRollout for EngineRollout {
                         return Err(format!("{base_name}: a rank-{r} adapter of [{out}, {inn}] on a weight of {} values", w.len()));
                     }
                     let mut folded = w.clone();
-                    let scale = lora.alpha / lora.rank as f32;
+                    let scale = lora.scale();
                     model::lora::Pair::from_ab(out, inn, r, value.clone(), b.clone()).delta(scale, &mut folded);
                     (base_name.to_string(), folded)
                 } else {

@@ -20,6 +20,7 @@
 
 use std::fmt;
 
+use super::kind::{LORA_A, LORA_B};
 use super::LinearSite;
 use crate::lora::device_adapter::DeviceAdapter;
 
@@ -31,7 +32,7 @@ pub trait LoraSites {
 
 /// The names of the two tensors an adapter stores for `site`.
 pub fn tensor_names(site: &LinearSite) -> (String, String) {
-    (format!("{}.lora_a", site.name), format!("{}.lora_b", site.name))
+    (super::device::param_name(&site.name, LORA_A), super::device::param_name(&site.name, LORA_B))
 }
 
 /// The shapes of the two tensors a rank-`rank` adapter stores for `site`:

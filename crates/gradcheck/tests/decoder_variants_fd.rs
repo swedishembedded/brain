@@ -81,7 +81,7 @@ fn every_decoder_variant_matches_finite_differences() {
 fn every_decoder_variant_lora_matches_finite_differences() {
     for (name, cfg) in VARIANTS {
         let targets = qwen3::finetune::LORA_TARGETS.iter().map(|t| t.to_string()).collect();
-        let model = built(QwenConfig { lora: Some(LoraCfg { rank: 2, alpha: 4.0, targets }), ..cfg() }, 7);
+        let model = built(QwenConfig { lora: Some(LoraCfg::new(2, 4.0, targets)), ..cfg() }, 7);
         for step in 1..=5 {
             model.zero_grads();
             model.forward();

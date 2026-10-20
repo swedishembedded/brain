@@ -305,8 +305,11 @@ impl LoraStore {
         let lora_init: HashMap<String, Vec<f32>> = init.iter().filter(|(k, _)| model::adapter::device::is_adapter_param(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
         let expect_n = cfg.param_list().iter().filter(|(k, _)| model::adapter::device::is_adapter_param(k)).count();
         assert_eq!(lora_init.len(), expect_n, "stream_train::LoraStore::new: init map is missing some of cfg.param_list()'s .lora_a/.lora_b tensors");
-        let params: Vec<(String, usize)> = lora_init.iter().map(|(k, v)| (k.clone(), v.len())).collect();
-        let ps = ParamStore::new(gpu, params, &lora_init);
+        let hp = cfg.lora.as_ref().expect("asserted above").hp();
+        let roles: Vec<(String, usize, paramstore::Role)> =
+            lora_init.iter().map(|(k, v)| (k.clone(), v.len(), model::adapter::device::role_of(k, &hp))).collect();
+        let mut ps = ParamStore::new_with_roles(gpu, roles, &lora_init);
+        model::adapter::device::apply_groups(&mut ps, &hp);
         let opt = Optim::new(idx(gpu, "adamw"), idx(gpu, "gradnorm_sq"), idx(gpu, "grad_scale"), idx(gpu, "clip_coef"), idx(gpu, "grad_scale_buf"));
         LoraStore { ps, opt }
     }
@@ -314,7 +317,7 @@ impl LoraStore {
     /// `Some((rank, alpha/rank))` if `leaf` is LoRA-targeted under `cfg`;
     /// `None` otherwise. Mirrors `Qwen35::lora_for` exactly.
     fn lora_for(cfg: &Qwen35Config, leaf: &str) -> Option<(u32, f32)> {
-        cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
+        cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.scale()))
     }
 
     pub fn adamw_step(&self, gpu: &Gpu, t: u32, lr: f32) {
@@ -331,8 +334,7 @@ impl LoraStore {
 /// adapter weights from a [`LoraStore`] instead of `self.w`.
 #[allow(clippy::too_many_arguments)]
 fn lora_fwd_streamed(gpu: &Gpu, ids: &TrainIds, lora: &ParamStore, wname: &str, r: u32, scale: f32, x: &DeviceBuffer, y: &DeviceBuffer, m: u32, k: u32, nout: u32, s: &mut Vec<Step>) {
-    let a = format!("{wname}.lora_a");
-    let bnm = format!("{wname}.lora_b");
+    let (a, bnm) = model::adapter::device::lora_names(wname);
     let lora_a_buf = gpu.storage((m * r) as u64);
     let lora_out_buf = gpu.storage((m * nout) as u64);
     s.push(gpu.step(ids.matmul, &[x, lora.w(&a), &lora_a_buf], &[m, k, r], m * r));
@@ -357,8 +359,7 @@ fn proj_bwd_streamed(gpu: &Gpu, ids: &TrainIds, lora: &LoraStore, cfg: &Qwen35Co
             // base: dx += d_out*W (frozen weight - no dW).
             s.push(gpu.step(ids.matmul_dx, &[d_out, base_buf, dx], &[m, k, nout, acc], m * k));
 
-            let a = format!("{wname}.lora_a");
-            let bnm = format!("{wname}.lora_b");
+            let (a, bnm) = model::adapter::device::lora_names(wname);
             // a = (alpha/r)*(x*A^t)  -> gB += d_out^t*a
             let lora_a_buf = gpu.storage((m * r) as u64);
             s.push(gpu.step(ids.matmul, &[x, lora.ps.w(&a), &lora_a_buf], &[m, k, r], m * r));
@@ -368,7 +369,9 @@ fn proj_bwd_streamed(gpu: &Gpu, ids: &TrainIds, lora: &LoraStore, cfg: &Qwen35Co
             let lora_da_buf = gpu.storage((m * r) as u64);
             s.push(gpu.step(ids.matmul_dx, &[d_out, lora.ps.w(&bnm), &lora_da_buf], &[m, r, nout, 0], m * r));
             s.push(gpu.step(ids.grad_scale, &[&lora_da_buf], &[m * r, f(scale)], m * r));
-            s.push(gpu.step(ids.matmul_dw, &[&lora_da_buf, x, lora.ps.g(&a)], &[m, k, r], r * k));
+            if lora.ps.grad.contains_key(&a) {
+                s.push(gpu.step(ids.matmul_dw, &[&lora_da_buf, x, lora.ps.g(&a)], &[m, k, r], r * k));
+            }
             s.push(gpu.step(ids.matmul_dx, &[&lora_da_buf, lora.ps.w(&a), dx], &[m, k, r, 1], m * k));
         }
         None => {
