@@ -166,9 +166,7 @@ impl LayerTensors for PackedLayerTensors<'_> {
         self.gpu.storage_init(name, &v)
     }
     fn weight(&self, name: &str, n: usize, k: usize) -> Weight {
-        let w = self.base.weight(self.ops, name).unwrap_or_else(|e| panic!("stream_train: {e}"));
-        assert_eq!((w.n() as usize, w.k() as usize), (n, k), "stream_train: {name} is {}x{}, the config expects {n}x{k}", w.n(), w.k());
-        w
+        self.base.weight(self.ops, name, n, k).unwrap_or_else(|e| panic!("stream_train: {e}"))
     }
 }
 
@@ -826,8 +824,7 @@ impl StreamTrainer {
         // checkpoint stores it in (bf16 for the real release), never expanded to fp32.
         let base = crate::fp8_source::PackedBase::open(dir, cfg, crate::fp8_source::hf_fp8_block_size(dir)?)?;
         let head_name = if cfg.tie_embeddings { "tok.weight" } else { "lm_head.weight" };
-        let head = base.weight(&ops, head_name)?;
-        assert_eq!((head.n() as usize, head.k() as usize), (v, d), "stream_train: {head_name} is {}x{}, the config expects {v}x{d}", head.n(), head.k());
+        let head = base.weight(&ops, head_name, v, d)?;
         let final_norm = gpu.storage_init("stream_train.final_norm", &base.small_f32("norm.weight")?);
 
         let lora = LoraStore::new(&gpu, cfg, lora_init, n);

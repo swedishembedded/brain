@@ -94,46 +94,35 @@ const WEIGHT_STAGING_BYTES: u64 = 64 << 20;
 
 /// A Qwen3.5/3.8 checkpoint directory served in two ways under brain-canonical names: small tensors (norm
 /// gains, conv and gate vectors) decoded to f32 on demand, and weight matrices PRESERVED in their stored
-/// encoding straight into a resident [`Weight`] tier through the checkpoint crate's tiled loader. A layer
+/// encoding straight into a resident `Weight` tier through the shared packed-upload path
+/// (`model::ops::upload_preserved`: the checkpoint crate's tiled loader into `DeviceWeightSink`). A layer
 /// of an FP8 checkpoint therefore reaches the device as FP8 bytes plus block scales, one tile of host
 /// staging at a time, and is never expanded to fp32 on the host or the device.
 pub struct PackedBase {
-    reader: PackedReader,
-    codecs: CodecRegistry,
-    stored: std::collections::HashMap<String, String>,
-    small: PackedSource,
+    src: PackedSource,
+    staging: checkpoint::packed::BoundedWorkspace,
 }
 
 impl PackedBase {
     /// Open `dir` for model `cfg` (`block` as in [`open_dir`]); the same two-way coverage check as
     /// [`open_dir`] applies.
     pub fn open(dir: &Path, cfg: &Qwen35Config, block: usize) -> Result<PackedBase, String> {
-        let open_reader = || PackedReader::open(dir).map(|r| r.with_fp8_block(block as u32)).map_err(|e| format!("qwen35 source: {e}"));
-        let reader = open_reader()?;
-        let bindings = bindings_for(&reader, cfg, &[])?;
-        let stored = bindings.iter().map(|(canon, b)| (canon.clone(), b.source.clone())).collect();
-        let small = PackedSource::new(Box::new(open_reader()?), CodecRegistry::reference(), bindings).map_err(|e| format!("qwen35 source: {e}"))?;
-        check_coverage(&small, cfg)?;
-        Ok(PackedBase { reader, codecs: CodecRegistry::reference(), stored, small })
+        let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(WEIGHT_STAGING_BYTES, 0));
+        Ok(PackedBase { src: open_dir(dir, cfg, block)?, staging })
     }
 
     /// `name` decoded to f32, in bounded tiles (a small tensor: a norm gain or a conv/gate vector; the `(1+w)`
     /// norm fold applied). Weight matrices go through [`Self::weight`], never this.
     pub fn small_f32(&self, name: &str) -> Result<Vec<f32>, String> {
-        let mut out = Vec::with_capacity(self.small.numel(name).ok_or_else(|| format!("qwen35 source: no tensor {name}"))?);
-        self.small.with_tensor_chunks(name, 1 << 20, &mut |_, chunk| out.extend_from_slice(chunk));
+        let mut out = Vec::with_capacity(self.src.numel(name).ok_or_else(|| format!("qwen35 source: no tensor {name}"))?);
+        self.src.with_tensor_chunks(name, 1 << 20, &mut |_, chunk| out.extend_from_slice(chunk));
         Ok(out)
     }
 
-    /// `name` as a resident weight in the tier of its stored encoding (Preserve: no numeric change).
-    /// An encoding with no tier is an error, never a widening.
-    pub fn weight(&self, ops: &model::ops::Ops, name: &str) -> Result<model::ops::Weight, String> {
-        use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, Loader, MemoryBudget};
-        let stored = self.stored.get(name).ok_or_else(|| format!("qwen35 source: no tensor {name}"))?;
-        let loader = Loader { reader: &self.reader, codecs: &self.codecs, workspace: BoundedWorkspace::new(MemoryBudget::new(WEIGHT_STAGING_BYTES, 0)), config: LoadConfig::default() };
-        let mut sink = model::ops::DeviceWeightSink::new(ops);
-        loader.load(stored, &LoadPolicy::Preserve, &mut sink).map_err(|e| format!("qwen35 source: {name}: {e}"))?;
-        sink.take_weight().ok_or_else(|| format!("qwen35 source: {name}: the load produced no weight"))
+    /// The `[n, k]` matrix `name` as a resident weight in the tier of its stored encoding (Preserve: no numeric
+    /// change). An encoding with no tier is an error, never a widening.
+    pub fn weight(&self, ops: &model::ops::Ops, name: &str, n: usize, k: usize) -> Result<model::ops::Weight, String> {
+        model::ops::upload_preserved(ops, &self.src, name, n, k, &self.staging).map_err(|e| format!("qwen35 source: {e}"))
     }
 }
 

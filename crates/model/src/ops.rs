@@ -1106,7 +1106,7 @@ mod sink;
 mod upload_source;
 mod tiled;
 pub use sink::DeviceWeightSink;
-pub use upload_source::{upload_fused_from_source, upload_from_source};
+pub use upload_source::{upload_fused_from_source, upload_from_source, upload_preserved};
 pub use tiled::{plan_linear, tile_rows, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES};
 
 impl Ops {

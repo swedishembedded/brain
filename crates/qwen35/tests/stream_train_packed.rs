@@ -142,7 +142,7 @@ fn a_checkpoint_layer_loads_packed_and_equals_the_eager_importer() {
         let eager = import_layer(&shard, &cfg, l, BLOCK).unwrap();
         for (suffix, n, k) in cfg.layer_leaves(*ty) {
             let name = format!("blocks.{l}.{suffix}");
-            let w = base.weight(&ops, &name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let w = base.weight(&ops, &name, n as usize, k as usize).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!((w.n() as usize, w.k() as usize), (n as usize, k as usize), "{name}");
             fp8 += matches!(w, Weight::FP8 { .. }) as usize;
             if let Some(f32_ref) = eager.get(&name) {

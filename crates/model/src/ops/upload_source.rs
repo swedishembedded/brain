@@ -93,3 +93,22 @@ pub fn upload_fused_from_source(ops: &Ops, src: &dyn TensorSource, names: &[&str
     let refs: Vec<&[f32]> = parts.iter().map(Vec::as_slice).collect();
     Some(Weight::upload(ops, &super::concat_rows_parallel(&refs), n_total, k, want))
 }
+
+/// Upload tensor `name` of `src` as an `[n, k]` weight in the encoding it is STORED in - Preserve, no
+/// numeric change - whichever resident tier that is: f32, bf16, f16, int8, NF4, FP8 (E4M3 or E5M2 with
+/// tile scales), NVFP4, MXFP4 or MXFP8. This is how a streamed trainer keeps a checkpoint layer packed;
+/// [`upload_from_source`] is the call for a tier chosen by the caller. A source with no packed view, a
+/// shape that disagrees, or a stored encoding with no tier is an error: nothing is silently widened.
+pub fn upload_preserved(ops: &Ops, src: &dyn TensorSource, name: &str, n: usize, k: usize, staging: &BoundedWorkspace) -> Result<Weight, String> {
+    let desc = src.packed_descriptor(name).ok_or_else(|| format!("{name}: the source has no packed view of this tensor"))?;
+    if desc.shape != [n as u64, k as u64] {
+        return Err(format!("{name}: stored shape {:?}, expected [{n}, {k}]", desc.shape));
+    }
+    let config = LoadConfig::default();
+    let mut sink = DeviceWeightSink::new(ops);
+    let req = LoadRequest { policy: &LoadPolicy::Preserve, workspace: staging, config: &config };
+    match src.load_packed(&[name], &req, &mut sink)? {
+        Some(_) => sink.take_weight().ok_or_else(|| format!("{name}: a finished load produced no weight")),
+        None => Err(format!("{name}: the source cannot serve this tensor packed (a value-changing binding?)")),
+    }
+}
