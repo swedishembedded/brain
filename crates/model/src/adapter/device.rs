@@ -141,7 +141,7 @@ pub struct TargetOverride {
 }
 
 /// The adapter hyper-parameters a fine-tune run chooses on top of rank, alpha
-/// and targets: what `--lora-rs`, `--lora-lr-ratio` and `--lora-freeze-a` set.
+/// and targets: what `--lora-variant` and `--lora-plus-ratio` set.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdapterTuning {
     /// rsLoRA: scale `alpha/sqrt(rank)`.
@@ -159,6 +159,26 @@ impl Default for AdapterTuning {
 }
 
 impl AdapterTuning {
+    /// The tuning the model-agnostic options name: `variant` is a comma list of
+    /// `plain`, `rs` (rsLoRA) and `fa` (LoRA-FA), `plus_ratio` the LoRA+ ratio
+    /// for `B`. Every front end parses these two values with this one function.
+    pub fn parse(variant: Option<&str>, plus_ratio: Option<&str>) -> Result<AdapterTuning, String> {
+        let mut t = AdapterTuning::default();
+        for word in variant.into_iter().flat_map(|v| v.split(',')).map(str::trim).filter(|w| !w.is_empty()) {
+            match word {
+                "plain" => {}
+                "rs" => t.rank_stabilized = true,
+                "fa" => t.freeze_a = true,
+                other => return Err(format!("--lora-variant {other:?}: expected a comma list of plain, rs, fa")),
+            }
+        }
+        if let Some(r) = plus_ratio {
+            t.lr_ratio = r.parse().map_err(|_| format!("--lora-plus-ratio {r:?}: not a valid number"))?;
+        }
+        t.validate()?;
+        Ok(t)
+    }
+
     /// Refuse a tuning no run can honour (a non-positive or non-finite LoRA+
     /// ratio).
     pub fn validate(&self) -> Result<(), String> {
@@ -351,6 +371,16 @@ mod tests {
         let back = LoraCfg::from_json(tuned.to_json().as_object().unwrap());
         assert_eq!(back, tuned);
         assert_eq!(LoraCfg::from_json(plain.to_json().as_object().unwrap()), plain);
+    }
+
+    #[test]
+    fn the_model_agnostic_options_parse_into_one_tuning() {
+        assert_eq!(AdapterTuning::parse(None, None).unwrap(), AdapterTuning::default());
+        let t = AdapterTuning::parse(Some("rs,fa"), Some("16")).unwrap();
+        assert_eq!(t, AdapterTuning { rank_stabilized: true, lr_ratio: 16.0, freeze_a: true });
+        assert!(AdapterTuning::parse(Some("dora"), None).unwrap_err().contains("--lora-variant"));
+        assert!(AdapterTuning::parse(None, Some("0")).unwrap_err().contains("LoRA+"));
+        assert!(AdapterTuning::parse(None, Some("fast")).unwrap_err().contains("--lora-plus-ratio"));
     }
 
     #[test]

@@ -343,15 +343,15 @@ fn tuning_desc(t: &model::adapter::device::AdapterTuning) -> String {
     out
 }
 
-const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|DIR --out F [--mode lora|full] [--lora-rank R --lora-alpha A --lora-rs --lora-lr-ratio X --lora-freeze-a] \
+const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|DIR --out F [--mode lora|full] [--lora-rank R --lora-alpha A --lora-variant V --lora-plus-ratio X] \
      [--base-dtype f32|bf16|nf4] [--seq-len T] [--recompute on|off] [--gdn-segment N] [--bf16-residuals on|off] [--mlp-rows N] \
      [--eval-interval N --eval-batches N] [--steps N --lr X --batch B --grad-accum G --warmup W --weight-decay X --grad-clip X --save-secs S --seed S --mask = --align]
   --base-dtype  how the frozen base is held on the device: f32 (default, whole model resident; full or LoRA),
                 bf16 (half the bytes; LoRA only) or nf4 (4-bit QLoRA; LoRA only). bf16/nf4 stream the base from
                 a HuggingFace checkpoint directory (FP8 release included) tensor by tensor.
   --seq-len     training sequence length (alias of --block); --rank/--alpha are aliases of --lora-rank/--lora-alpha
-  --lora-rs, --lora-lr-ratio, --lora-freeze-a  rsLoRA (scale alpha/sqrt(rank)), LoRA+ (B trains at X times the learning rate)
-                and LoRA-FA (A stays at its init); a continued adapter must be continued with the same three
+  --lora-variant, --lora-plus-ratio  rsLoRA and LoRA-FA (--lora-variant rs,fa: scale alpha/sqrt(rank); A stays at its
+                init) and LoRA+ (B trains at X times the learning rate); a continued adapter must be continued with the same
   --recompute   recompute layer activations in the backward pass instead of keeping them (default on for bf16/nf4)
   --gdn-segment, --bf16-residuals, --mlp-rows  the long-sequence settings (segmented Gated-DeltaNet layers, bf16 residual
                 stream, MLP in token chunks) of a bf16/nf4 base. Rows of 2048 tokens or more at batch 1 get 2048 / on / 2048
@@ -404,12 +404,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     let mode_name = a.str_or("--mode", "full");
     let rank = parse_num("--lora-rank", aliased(&mut a, "--lora-rank", "--rank")?, DEFAULT_LORA_RANK)?;
     let alpha = parse_num("--lora-alpha", aliased(&mut a, "--lora-alpha", "--alpha")?, rank as f32 * 2.0)?;
-    let tuning = model::adapter::device::AdapterTuning {
-        rank_stabilized: a.take_flag("--lora-rs"),
-        lr_ratio: parse_num("--lora-lr-ratio", a.take_str("--lora-lr-ratio"), 1.0f32)?,
-        freeze_a: a.take_flag("--lora-freeze-a"),
-    };
-    tuning.validate()?;
+    let tuning = model::adapter::device::AdapterTuning::parse(a.take_str("--lora-variant").as_deref(), a.take_str("--lora-plus-ratio").as_deref())?;
     let base_dtype: BaseDtype = a.str_or("--base-dtype", "f32").parse()?;
     let recompute_flag = match a.take_str("--recompute").as_deref() {
         None => None,
@@ -684,19 +679,19 @@ mod finetune_cli_tests {
         assert!(ft.opts.align_to_lines);
     }
 
-    /// rsLoRA, LoRA+ and LoRA-FA reach the trainer through the LoRA mode, and a
-    /// ratio that cannot train is refused by name.
+    /// rsLoRA, LoRA+ and LoRA-FA reach the trainer through the LoRA mode by the
+    /// model-agnostic options, and a value that cannot train is refused.
     #[test]
-    fn the_adapter_hyper_parameters_are_flags_of_the_lora_mode() {
+    fn the_adapter_variant_options_are_flags_of_the_lora_mode() {
         let base = ["corpus", "--base", "b", "--out", "o", "--mode", "lora"];
         let with = |extra: &[&str]| parse_finetune(&argv(&[&base[..], extra].concat()));
         let plain = with(&[]).unwrap();
         assert!(matches!(plain.mode, qwen35::finetune::Mode::Lora { tuning, .. } if tuning == model::adapter::device::AdapterTuning::default()));
-        let tuned = with(&["--lora-rs", "--lora-lr-ratio", "16", "--lora-freeze-a"]).unwrap();
+        let tuned = with(&["--lora-variant", "rs,fa", "--lora-plus-ratio", "16"]).unwrap();
         let want = model::adapter::device::AdapterTuning { rank_stabilized: true, lr_ratio: 16.0, freeze_a: true };
         assert!(matches!(tuned.mode, qwen35::finetune::Mode::Lora { tuning, .. } if tuning == want), "{:?}", tuned.mode);
-        assert!(with(&["--lora-lr-ratio", "0"]).unwrap_err().contains("LoRA+"));
-        assert!(with(&["--lora-lr-ratio", "fast"]).unwrap_err().contains("--lora-lr-ratio"));
+        assert!(with(&["--lora-plus-ratio", "0"]).unwrap_err().contains("LoRA+"));
+        assert!(with(&["--lora-variant", "dora"]).unwrap_err().contains("--lora-variant"));
     }
 
     /// The corpus is a positional, so it must be recognised wherever it sits -

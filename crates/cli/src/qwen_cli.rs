@@ -9,7 +9,7 @@
 //!   brain qwen3 train    <data_dir> --out F [--steps N --batch B --block T --lr X ...]
 //!   brain qwen3 finetune <data_dir> --weights BASE --out F [--steps N --lr X ...]
 //!   brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR
-//!                     [--alpha A --lora-rs --lora-lr-ratio X --lora-freeze-a --steps N --lr X --batch B --block T --seed S
+//!                     [--alpha A --lora-variant V --lora-plus-ratio X --steps N --lr X --batch B --block T --seed S
 //!                      --models-dir DIR --dataset-id ID]
 //!   brain qwen3 eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG]
 //!                     --block T --models-dir DIR]
@@ -785,7 +785,7 @@ impl Drop for ScratchDir {
 }
 
 /// `brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG]
-///     --dataset DIR [--alpha A --lora-rs --lora-lr-ratio X --lora-freeze-a --steps N --lr X --batch B --block T --seed S
+///     --dataset DIR [--alpha A --lora-variant V --lora-plus-ratio X --steps N --lr X --batch B --block T --seed S
 ///     --models-dir DIR --dataset-id ID]`
 ///
 /// Trains a NAMED LoRA adapter and saves ONLY the adapter tensors into the
@@ -805,7 +805,8 @@ fn finetune_lora(args: &[String]) {
     let mut fresh = false;
     let mut dataset_dir = String::new();
     let mut rank = 0u32;
-    let mut tuning = model::adapter::device::AdapterTuning::default();
+    let mut lora_variant: Option<String> = None;
+    let mut lora_plus_ratio: Option<String> = None;
     // Stop when the held-out loss stops improving, and keep the checkpoint
     // from before it turned. 0 keeps the old behaviour: run every step and
     // save the last model, which on a small dataset is the memorised one.
@@ -874,9 +875,8 @@ fn finetune_lora(args: &[String]) {
             "--fresh" => fresh = true,
             "--patience" => patience = val(args, &mut i, "--patience").parse().unwrap_or(patience),
             "--alpha" => alpha = val(args, &mut i, "--alpha").parse().ok(),
-            "--lora-rs" => tuning.rank_stabilized = true,
-            "--lora-lr-ratio" => tuning.lr_ratio = val(args, &mut i, "--lora-lr-ratio").parse().unwrap_or(f32::NAN),
-            "--lora-freeze-a" => tuning.freeze_a = true,
+            "--lora-variant" => lora_variant = Some(val(args, &mut i, "--lora-variant")),
+            "--lora-plus-ratio" => lora_plus_ratio = Some(val(args, &mut i, "--lora-plus-ratio")),
             "--steps" => steps = val(args, &mut i, "--steps").parse().unwrap_or(steps),
             "--lr" => lr = val(args, &mut i, "--lr").parse().unwrap_or(lr),
             "--grad-accum" => grad_accum = val(args, &mut i, "--grad-accum").parse().ok().filter(|&n| n > 0).unwrap_or_else(|| {
@@ -905,10 +905,13 @@ fn finetune_lora(args: &[String]) {
         return;
     }
     let alpha = alpha.unwrap_or(rank as f32 * 2.0);
-    if let Err(why) = tuning.validate() {
-        eprintln!("--lora-lr-ratio: {why}");
-        return;
-    }
+    let tuning = match model::adapter::device::AdapterTuning::parse(lora_variant.as_deref(), lora_plus_ratio.as_deref()) {
+        Ok(t) => t,
+        Err(why) => {
+            eprintln!("{why}");
+            return;
+        }
+    };
 
     let store_root = loader::model_dir::resolve(models_dir.as_deref());
     let (base_weights_path, base_dir, base_id) = match loader::model_dir::resolve_base(&base, store_root.as_deref()) {
