@@ -112,6 +112,7 @@ pub struct ChatFineTune {
     bf16_base: bool,
     int8_base: bool,
     nf4_base: bool,
+    f32_base: bool,
     gemm_precision: crate::GemmPrecision,
     thinking: bool,
     pack_answers: bool,
@@ -169,6 +170,46 @@ impl ChatFamily {
         }
     }
 
+    /// The tier name recorded on an outcome.
+    fn tier_name(&self) -> &'static str {
+        match self {
+            ChatFamily::Qwen3(qwen3::Dtype::I8) => "int8",
+            ChatFamily::Qwen3(qwen3::Dtype::BF16) => "bf16",
+            ChatFamily::Qwen3(_) => "f32",
+            ChatFamily::Qwen35(dtype) => dtype.name(),
+        }
+    }
+
+    /// The same family at tier `tier`.
+    fn with_tier(&self, tier: BaseTierChoice) -> ChatFamily {
+        match self {
+            ChatFamily::Qwen3(_) => ChatFamily::Qwen3(match tier {
+                BaseTierChoice::Bf16 => qwen3::Dtype::BF16,
+                BaseTierChoice::Quantised => qwen3::Dtype::I8,
+                BaseTierChoice::F32 => qwen3::Dtype::F32,
+            }),
+            ChatFamily::Qwen35(_) => ChatFamily::Qwen35(match tier {
+                BaseTierChoice::Bf16 => qwen35::base_source::BaseDtype::Bf16,
+                BaseTierChoice::Quantised => qwen35::base_source::BaseDtype::Nf4,
+                BaseTierChoice::F32 => qwen35::base_source::BaseDtype::F32,
+            }),
+        }
+    }
+
+    /// `(parameters, layers, model width)` of the checkpoint at `open`, what the tier choice sizes a base by.
+    fn base_shape(&self, open: &Path) -> Result<(u64, u64, u64)> {
+        match self {
+            ChatFamily::Qwen3(_) => {
+                let cfg = qwen3::checkpoint_config(utf8(open)?).map_err(Error::Backend)?;
+                Ok((cfg.param_list().iter().map(|(_, n)| *n as u64).sum(), cfg.n_layers as u64, cfg.d_model as u64))
+            }
+            ChatFamily::Qwen35(_) => {
+                let cfg = qwen35::base_source::open_base(open).map_err(Error::Backend)?.cfg;
+                Ok((cfg.param_list().iter().map(|(_, n)| *n as u64).sum(), cfg.n_layers as u64, cfg.d_model as u64))
+            }
+        }
+    }
+
     /// The vocabulary the checkpoint at `open` was trained with.
     fn vocab(&self, open: &Path) -> Result<usize> {
         match self {
@@ -216,6 +257,48 @@ impl ChatFamily {
     }
 }
 
+/// The tier the automatic choice picks, before it is named per family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BaseTierChoice {
+    /// The device's native 16-bit floating-point tensor-core tier.
+    Bf16,
+    /// A quantised base (int8 for `qwen3`, NF4 for `qwen35`).
+    Quantised,
+    /// The exact fp32 reference tier.
+    F32,
+}
+
+/// Activation bytes per token at a block, per unit of `layers * width`, calibrated on the 27B (64 layers,
+/// width 5120): 78 GiB at 16K tokens against 67 GiB at 8K for the bf16 base is 1.4 MiB per token.
+const ACTIVATION_BYTES_PER_TOKEN_PER_LAYER_WIDTH: f64 = 1.4 * 1048576.0 / (64.0 * 5120.0);
+
+/// The frozen base's tier when the caller named none: **the accelerator's native floating-point tensor-core
+/// tier by default, a quantised base only when that does not fit.**
+///
+/// * No selected card with native 16-bit tensor cores (compute capability 8.0 and up: a CPU, an older or
+///   non-CUDA card): fp32, the exact reference, as before.
+/// * Otherwise bf16 (the native tier brain trains in; there is no fp8 training path yet - see knowledge 336)
+///   when the bf16 base plus the activations of a `block`-token row fit: on the largest single card for
+///   `qwen35` (its trainer is one card), on the cards together for `qwen3` (it pipelines).
+/// * Otherwise the quantised base (NF4 for `qwen35`, int8 for `qwen3`), which is also what a card too small
+///   for the bf16 base needs; if even that cannot fit the caller is told.
+///
+/// `cards` are the selected cards' total memory in bytes, `native` whether any has the native tier.
+pub(crate) fn choose_base_tier(single_card: bool, native: bool, params: u64, layers: u64, width: u64, block: u32, cards: &[u64]) -> (BaseTierChoice, String) {
+    if !native {
+        return (BaseTierChoice::F32, "no selected device has native bf16 tensor cores: the fp32 reference tier".to_string());
+    }
+    let activations = (ACTIVATION_BYTES_PER_TOKEN_PER_LAYER_WIDTH * block as f64 * layers as f64 * width as f64) as u64;
+    let bf16_need = 2 * params + activations;
+    let room = if single_card { cards.iter().copied().max().unwrap_or(0) } else { cards.iter().sum() };
+    let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
+    if room == 0 || bf16_need <= room {
+        (BaseTierChoice::Bf16, format!("native bf16 tensor cores; the bf16 base and a {block}-token row need about {:.0} GiB of {:.0} GiB", gib(bf16_need), gib(room)))
+    } else {
+        (BaseTierChoice::Quantised, format!("the bf16 base and a {block}-token row need about {:.0} GiB, more than the {:.0} GiB available: quantised base", gib(bf16_need), gib(room)))
+    }
+}
+
 impl ChatFineTune {
     /// A fine-tune of `base`: a checkpoint file, a `<models>/<vendor>/<repo>`
     /// directory, or a `vendor/repo` reference in the model store. The
@@ -255,6 +338,7 @@ impl ChatFineTune {
             bf16_base: false,
             int8_base: false,
             nf4_base: false,
+            f32_base: false,
             gemm_precision: crate::GemmPrecision::Auto,
             thinking: true,
             pack_answers: false,
@@ -544,6 +628,14 @@ impl ChatFineTune {
         self
     }
 
+    /// Hold the frozen base at fp32, the exact reference tier, whatever the device could run natively.
+    /// Without any of the `*_base` choices the tier is picked from what the device has and what fits
+    /// ([`choose_base_tier`]) and recorded on the outcome ([`ChatFineTuneOutcome::base_tier`]).
+    pub fn f32_base(mut self, on: bool) -> Self {
+        self.f32_base = on;
+        self
+    }
+
     /// Arithmetic of the frozen-base GEMMs. The default, [`GemmPrecision::Auto`], runs them on
     /// tensor cores where the card has them (bf16 or NF4 base: bf16 operands; fp32 base: TF32
     /// operands, a 10-bit mantissa, no extra memory), fp32 accumulation, and on the exact fp32
@@ -638,7 +730,18 @@ impl ChatFineTune {
         }
         let block = block_for(longest, self.max_block)?;
 
-        crate::device::resolve(&self.device)?;
+        let set = crate::device::resolve(&self.device)?;
+        let explicit = self.bf16_base || self.int8_base || self.nf4_base || self.f32_base;
+        let (family, base_tier_reason) = if explicit {
+            (family, "asked for".to_string())
+        } else {
+            let cards: Vec<u64> = gpu_core::devices::gpus().iter().filter(|d| set.gpus.contains(&d.index)).map(|d| d.identity.vram_bytes).collect();
+            let native = !cards.is_empty() && gpu_core::Gpu::new(&[]).caps().arch.compute_capability.is_some_and(|cc| cc >= gpu_core::select::I8_MMA_MIN_CC);
+            let (params, layers, width) = family.base_shape(&open)?;
+            let (choice, reason) = choose_base_tier(matches!(family, ChatFamily::Qwen35(_)), native, params, layers, width, block, &cards);
+            (family.with_tier(choice), reason)
+        };
+        eprintln!("ChatFineTune: base tier {} ({base_tier_reason})", family.tier_name());
         let scoring_tier = family.scoring_tier();
         let base_score = held_out.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
         let base_text_score = held_out_text.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
@@ -734,6 +837,8 @@ impl ChatFineTune {
             tuned_score: None,
             base_text_score,
             tuned_text_score: None,
+            base_tier: family.tier_name().to_string(),
+            base_tier_reason,
         };
         if report.interrupted {
             outcome.status = FineTuneStatus::Cancelled;
@@ -885,6 +990,10 @@ pub struct ChatFineTuneOutcome {
     pub base_text_score: Option<HeldOutScore>,
     /// Base plus the new adapter on the same records.
     pub tuned_text_score: Option<HeldOutScore>,
+    /// The tier the frozen base was held at (`f32`, `bf16`, `int8` or `nf4`) and why: asked for, or the
+    /// automatic choice ([`choose_base_tier`]) with its reason.
+    pub base_tier: String,
+    pub base_tier_reason: String,
 }
 
 impl ChatFineTuneOutcome {
@@ -922,6 +1031,8 @@ impl ChatFineTuneOutcome {
             "tuned_score": score(&self.tuned_score),
             "base_text_score": score(&self.base_text_score),
             "tuned_text_score": score(&self.tuned_text_score),
+            "base_tier": self.base_tier,
+            "base_tier_reason": self.base_tier_reason,
         })
     }
 }
@@ -1472,5 +1583,40 @@ mod base_tier_tests {
     fn a_tier_the_architecture_lacks_is_refused() {
         assert!(ChatFamily::of("qwen3", false, false, true).is_err());
         assert!(ChatFamily::of("qwen35", false, true, false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+
+    const GIB: u64 = 1 << 30;
+    // The 27B: about 27e9 parameters, 64 layers, width 5120.
+    const BIG: (u64, u64, u64) = (27_000_000_000, 64, 5120);
+
+    fn pick(single: bool, native: bool, shape: (u64, u64, u64), block: u32, cards: &[u64]) -> BaseTierChoice {
+        choose_base_tier(single, native, shape.0, shape.1, shape.2, block, cards).0
+    }
+
+    #[test]
+    fn a_device_with_native_tensor_cores_trains_at_bf16_when_the_base_fits() {
+        assert_eq!(pick(true, true, BIG, 16384, &[96 * GIB]), BaseTierChoice::Bf16, "the 27B at 16K tokens needs about 78 GiB of 96");
+        assert_eq!(pick(true, true, BIG, 8192, &[80 * GIB]), BaseTierChoice::Bf16);
+    }
+
+    #[test]
+    fn a_base_that_does_not_fit_at_bf16_falls_back_to_the_quantised_tier_and_says_why() {
+        let (choice, why) = choose_base_tier(true, true, BIG.0, BIG.1, BIG.2, 16384, &[64 * GIB]);
+        assert_eq!(choice, BaseTierChoice::Quantised);
+        assert!(why.contains("quantised"), "{why}");
+        // Two cards do not help a single-card trainer, but do help a pipelining one.
+        assert_eq!(pick(true, true, BIG, 16384, &[48 * GIB, 48 * GIB]), BaseTierChoice::Quantised);
+        assert_eq!(pick(false, true, BIG, 16384, &[48 * GIB, 48 * GIB]), BaseTierChoice::Bf16);
+    }
+
+    #[test]
+    fn a_device_without_native_tensor_cores_keeps_the_fp32_reference() {
+        assert_eq!(pick(true, false, BIG, 1024, &[96 * GIB]), BaseTierChoice::F32);
+        assert_eq!(pick(false, false, (600_000_000, 28, 1024), 1024, &[]), BaseTierChoice::F32, "a CPU run");
     }
 }

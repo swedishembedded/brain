@@ -71,6 +71,9 @@ fn a_qwen35_fine_tune_exports_a_servable_adapter_with_its_digests() {
     let outcome = fine_tune(&model, &model.join("run")).adapter_id("local/tiny:lab:facts:v1").run().expect("the fine-tune runs");
 
     assert_eq!(outcome.status, FineTuneStatus::Completed);
+    // No native tensor-core device here (CPU): the automatic choice is the fp32 reference, and it is recorded.
+    assert_eq!(outcome.base_tier, "f32");
+    assert!(outcome.base_tier_reason.contains("native"), "{}", outcome.base_tier_reason);
     assert_eq!(outcome.steps_completed, 6);
     let (first, last) = (outcome.initial_loss.unwrap(), outcome.final_loss.unwrap());
     assert!(first.is_finite() && last.is_finite() && last < first, "the loss falls on its own training data: {first} -> {last}");
