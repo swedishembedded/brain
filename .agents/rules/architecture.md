@@ -120,7 +120,23 @@ layer 6 - serving, front ends, SDK, samples
                   per-backend model code.
 
  ─── 3. training substrate ─────────────────────────────────────────────────
-   paramstore ⇄ optim      param/grad/Adam buffers; AdamW + global grad clip
+   paramstore ⇄ optim      param/grad/Adam buffers; AdamW + global grad clip.
+                           paramstore::precision: the per-parameter training
+                           precision (value / grad / state / master, each
+                           independent, resolved per group by a reported
+                           policy) and its physical byte accounting;
+                           paramstore::dtype charges placement by the
+                           destination encoding. optim: one update `Rule`
+                           (AdamW, Lion, SGD-momentum; the CPU reference every
+                           fused device kernel is gated against), state codecs
+                           (f32, bf16, blockwise int8, stochastic rounding),
+                           `OptimizerStateStorage` (tile read/write over RAM or
+                           a file under a bounded workspace), the
+                           `StreamedOptimizer` driver over a `ParamTiles` seam
+                           (what a generic trainer implements), and the
+                           transactional run checkpoint. A model crate supplies
+                           parameter names and roles only; formats, rules and
+                           storage are added here without touching it.
    checkpoint              .safetensors container + manifest/SHA-256 + expert
                            shards; target-agnostic, no wgpu, no fs on wasm.
                            `checkpoint::packed` is the quantized-tensor seam:

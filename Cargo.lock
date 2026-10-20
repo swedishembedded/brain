@@ -2091,6 +2091,7 @@ dependencies = [
  "brain-testutil",
  "bytemuck",
  "pollster",
+ "serde_json",
  "wgpu",
 ]
 

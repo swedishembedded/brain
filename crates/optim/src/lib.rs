@@ -66,6 +66,15 @@ use paramstore::ParamStore;
 pub mod offload;
 pub use offload::OffloadAdam;
 
+pub mod codec;
+pub mod rule;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod checkpoint;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod storage;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod streamed;
+
 /// AdamW's moment decay rates and denominator epsilon. The default is
 /// `torch.optim.AdamW`'s; a run that wants others (β2 0.95 is common for
 /// large language models) sets them, and every optimiser in the tree
