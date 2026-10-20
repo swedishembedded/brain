@@ -34,7 +34,7 @@ use paramstore::{ParamStore, Role};
 use crate::text::attn::BartAttnKernelIds;
 use crate::text::decoder::{Decoder, DecoderBwdKernelIds, DecoderKernelIds};
 use crate::text::encoder::{Encoder, EncoderBwdKernelIds, EncoderKernelIds};
-use crate::text::lora::{trainable, LoraCfg, LoraKernelIds};
+use crate::text::lora::{trainable, LoraCfg};
 use crate::text::{BartConfig, POSITION_OFFSET};
 
 pub const PIPELINES: &[(&str, &str)] = &[
@@ -137,7 +137,7 @@ fn base_tensor_names(cfg: &BartConfig, t_prompt: u32, max_t: u32) -> Vec<(String
 /// `.lora_a`/`.lora_b` for every LoRA-targetable weight in `base` (the FFN
 /// pair's `in`/`out` dims differ by leaf, recovered from `base`'s own
 /// element counts rather than re-deriving encoder/decoder ffn widths here).
-fn lora_tensor_names(base: &[(String, usize)], cfg: &BartConfig, rank: u32) -> Vec<(String, usize)> {
+fn lora_tensor_names(base: &[(String, usize)], cfg: &BartConfig, hp: &model::adapter::TargetHp) -> Vec<(String, usize)> {
     let d = cfg.d_model as usize;
     let mut v = Vec::new();
     for (name, numel) in base {
@@ -146,8 +146,7 @@ fn lora_tensor_names(base: &[(String, usize)], cfg: &BartConfig, rank: u32) -> V
         }
         let out_dim = numel / d.max(1);
         let (in_dim, out_dim) = if name.ends_with("fc1.weight") { (d, out_dim) } else if name.ends_with("fc2.weight") { (numel / d, d) } else { (d, out_dim) };
-        v.push((format!("{name}.lora_a"), rank as usize * in_dim));
-        v.push((format!("{name}.lora_b"), out_dim * rank as usize));
+        v.extend(model::adapter::device::param_list(name, hp, out_dim, in_dim));
     }
     v
 }
@@ -155,11 +154,11 @@ fn lora_tensor_names(base: &[(String, usize)], cfg: &BartConfig, rank: u32) -> V
 /// Full parameter list (base + LoRA adapters when `lora` is `Some`) -
 /// what [`Florence2Trainer::new`] builds the [`ParamStore`] from and what
 /// [`init_weights`] must produce every name for.
-pub fn param_list(cfg: &BartConfig, t_prompt: u32, max_t: u32, lora: Option<LoraCfg>) -> Vec<(String, usize)> {
+pub fn param_list(cfg: &BartConfig, t_prompt: u32, max_t: u32, lora: Option<&LoraCfg>) -> Vec<(String, usize)> {
     let base = base_tensor_names(cfg, t_prompt, max_t);
     let mut v = base.clone();
     if let Some(l) = lora {
-        v.extend(lora_tensor_names(&base, cfg, l.rank));
+        v.extend(lora_tensor_names(&base, cfg, &l.hp()));
     }
     v
 }
@@ -176,7 +175,7 @@ pub fn param_list(cfg: &BartConfig, t_prompt: u32, max_t: u32, lora: Option<Lora
 /// fresh (`B=0`) adapter be verified as an exact forward no-op.
 pub fn init_weights(names: &[(String, usize)], std: f32, seed: u64) -> HashMap<String, Vec<f32>> {
     let mut rng = data::rng::Lcg::new(seed);
-    let is_lora = |n: &str| n.ends_with(".lora_a") || n.ends_with(".lora_b");
+    let is_lora = model::adapter::device::is_adapter_param;
     let mut sorted: Vec<&(String, usize)> = names.iter().filter(|(n, _)| !is_lora(n)).collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
     let mut lora_sorted: Vec<&(String, usize)> = names.iter().filter(|(n, _)| is_lora(n)).collect();
@@ -186,7 +185,7 @@ pub fn init_weights(names: &[(String, usize)], std: f32, seed: u64) -> HashMap<S
     for (name, numel) in sorted {
         let data: Vec<f32> = if name.ends_with("layer_norm.weight") || name.ends_with("layernorm_embedding.weight") {
             vec![1.0; *numel]
-        } else if name.ends_with(".bias") || name.ends_with(".lora_b") || name.ends_with("layer_norm.bias") || name.ends_with("layernorm_embedding.bias") {
+        } else if name.ends_with(".bias") || model::adapter::device::init_of(name) == Some(model::adapter::ParamInit::Zeros) || name.ends_with("layer_norm.bias") || name.ends_with("layernorm_embedding.bias") {
             vec![0.0; *numel]
         } else {
             (0..*numel).map(|_| rng.scaled(std)).collect()
@@ -196,11 +195,11 @@ pub fn init_weights(names: &[(String, usize)], std: f32, seed: u64) -> HashMap<S
     out
 }
 
-fn role_for(name: &str, lora: bool) -> Role {
-    if lora && is_lora_leaf(name) {
-        Role::Frozen
-    } else {
-        Role::Trainable
+fn role_for(name: &str, lora: Option<&LoraCfg>) -> Role {
+    match lora {
+        Some(l) if model::adapter::device::is_adapter_param(name) => model::adapter::device::role_of(name, &l.hp()),
+        Some(_) if is_lora_leaf(name) => Role::Frozen,
+        _ => Role::Trainable,
     }
 }
 
@@ -216,7 +215,6 @@ pub struct Florence2Trainer {
     dec_k: DecoderKernelIds,
     enc_bwd_k: EncoderBwdKernelIds,
     dec_bwd_k: DecoderBwdKernelIds,
-    lora_ids: Option<LoraKernelIds>,
     prompt_idx: DeviceBuffer,
     decoder_idx: DeviceBuffer,
     targets_idx: DeviceBuffer,
@@ -234,22 +232,24 @@ impl Florence2Trainer {
     pub fn new(gpu: Gpu, cfg: BartConfig, t_prompt: u32, max_t: u32, lora: Option<LoraCfg>, init: &HashMap<String, Vec<f32>>) -> Florence2Trainer {
         let base = base_tensor_names(&cfg, t_prompt, max_t);
         let mut all = base.clone();
-        if let Some(l) = lora {
-            all.extend(lora_tensor_names(&base, &cfg, l.rank));
+        if let Some(l) = &lora {
+            all.extend(lora_tensor_names(&base, &cfg, &l.hp()));
         }
-        let roles: Vec<(String, usize, Role)> = all.into_iter().map(|(n, sz)| { let r = role_for(&n, lora.is_some()); (n, sz, r) }).collect();
-        let ps = ParamStore::new_with_roles(&gpu, roles, init);
+        let roles: Vec<(String, usize, Role)> = all.into_iter().map(|(n, sz)| { let r = role_for(&n, lora.as_ref()); (n, sz, r) }).collect();
+        let mut ps = ParamStore::new_with_roles(&gpu, roles, init);
+        if let Some(l) = &lora {
+            model::adapter::device::apply_groups(&mut ps, &l.hp());
+        }
 
         let d = cfg.d_model;
         let lora_max_nout = d.max(cfg.encoder_ffn_dim).max(cfg.decoder_ffn_dim);
-        let encoder = Encoder::new_train(&gpu, cfg.encoder_attention_heads, d, cfg.encoder_ffn_dim, cfg.encoder_layers, t_prompt, cfg.layer_norm_eps, lora, lora_max_nout);
+        let encoder = Encoder::new_train(&gpu, cfg.encoder_attention_heads, d, cfg.encoder_ffn_dim, cfg.encoder_layers, t_prompt, cfg.layer_norm_eps, lora.clone(), lora_max_nout);
         let decoder = Decoder::new_train(&gpu, cfg.decoder_attention_heads, d, cfg.decoder_ffn_dim, cfg.decoder_layers, max_t, t_prompt, cfg.layer_norm_eps, lora, lora_max_nout);
 
         let enc_k = EncoderKernelIds { attn: BartAttnKernelIds::resolve(PIPELINES), embed: idx("embed"), add2: idx("add2"), add_inplace: idx("add_inplace"), layernorm: idx("layernorm"), matmul_rows: idx("matmul_rows"), bias_add: idx("bias_add"), gelu_erf: idx("gelu_erf") };
         let dec_k = DecoderKernelIds { attn: BartAttnKernelIds::resolve(PIPELINES), embed: idx("embed"), add2: idx("add2"), add_inplace: idx("add_inplace"), layernorm: idx("layernorm"), matmul_rows: idx("matmul_rows"), bias_add: idx("bias_add"), gelu_erf: idx("gelu_erf") };
         let enc_bwd_k = EncoderBwdKernelIds::resolve(PIPELINES);
         let dec_bwd_k = DecoderBwdKernelIds::resolve(PIPELINES);
-        let lora_ids = lora.map(|_| LoraKernelIds::resolve(PIPELINES));
 
         let prompt_idx = gpu.buffer("florence2_train_prompt_idx", (t_prompt * 4) as u64, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
         let decoder_idx = gpu.buffer("florence2_train_dec_idx", (max_t * 4) as u64, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
@@ -275,7 +275,6 @@ impl Florence2Trainer {
             dec_k,
             enc_bwd_k,
             dec_bwd_k,
-            lora_ids,
             prompt_idx,
             decoder_idx,
             targets_idx,
@@ -312,10 +311,10 @@ impl Florence2Trainer {
         let d = self.cfg.d_model;
         let shared = self.ps.w("language_model.model.shared.weight");
         self.gpu.submit(&[], &[self.gpu.step(self.k("embed"), &[&self.prompt_idx, shared, &self.encoder_input], &[d, self.t_prompt], self.t_prompt * d)]);
-        let enc_out = self.encoder.forward_train(&self.gpu, &self.enc_k, &self.ps, &self.encoder_input, self.lora_ids.as_ref());
+        let enc_out = self.encoder.forward_train(&self.gpu, &self.enc_k, &self.ps, &self.encoder_input);
 
         self.gpu.submit(&[], &[self.gpu.step(self.k("embed"), &[&self.decoder_idx, shared, &self.dec_embedded], &[d, self.max_t], self.max_t * d)]);
-        let dec_hidden = self.decoder.forward_train(&self.gpu, &self.dec_k, &self.ps, &self.dec_embedded, enc_out, self.max_t, self.lora_ids.as_ref());
+        let dec_hidden = self.decoder.forward_train(&self.gpu, &self.dec_k, &self.ps, &self.dec_embedded, enc_out, self.max_t);
 
         let bias = self.ps.w("language_model.final_logits_bias");
         let v = self.cfg.vocab_size;
@@ -356,13 +355,13 @@ impl Florence2Trainer {
         self.gpu.submit(&[], &s);
 
         let enc_out = self.encoder.last_hidden();
-        let (d_dec_embedded, d_enc_out) = self.decoder.backward(&self.gpu, &self.dec_k, &self.dec_bwd_k, &self.ps, enc_out, &self.d_hidden, t, self.lora_ids.as_ref());
+        let (d_dec_embedded, d_enc_out) = self.decoder.backward(&self.gpu, &self.dec_k, &self.dec_bwd_k, &self.ps, enc_out, &self.d_hidden, t);
         if trainable(&self.ps, shared_n) {
             let vocab = v;
             self.gpu.submit(&[], &[self.gpu.step(self.k("emb_bwd"), &[&self.decoder_idx, d_dec_embedded, self.ps.g(shared_n)], &[self.max_t, d, vocab], vocab * d)]);
         }
 
-        let d_inputs_embeds = self.encoder.backward(&self.gpu, &self.enc_k, &self.enc_bwd_k, &self.ps, d_enc_out, self.lora_ids.as_ref());
+        let d_inputs_embeds = self.encoder.backward(&self.gpu, &self.enc_k, &self.enc_bwd_k, &self.ps, d_enc_out);
         if trainable(&self.ps, shared_n) {
             let vocab = v;
             self.gpu.submit(&[], &[self.gpu.step(self.k("emb_bwd"), &[&self.prompt_idx, d_inputs_embeds, self.ps.g(shared_n)], &[self.t_prompt, d, vocab], vocab * d)]);

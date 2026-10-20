@@ -16,4 +16,4 @@ pub use config::{BartConfig, POSITION_OFFSET};
 pub use decoder::{Decoder, DecoderBwdKernelIds, DecoderKernelIds};
 pub use encoder::{Encoder, EncoderBwdKernelIds, EncoderKernelIds};
 pub use lm::{Florence2Lm, Florence2LmKernelIds};
-pub use lora::{LoraCfg, LoraCtx, LoraKernelIds, LoraScratch};
+pub use lora::{LoraCfg, LoraCtx, LoraScratch};

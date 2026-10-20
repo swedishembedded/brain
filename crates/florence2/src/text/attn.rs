@@ -173,17 +173,17 @@ impl BartAttn {
             gpu.step(k.bias_add, &[&self.q, qb], &[tq, d], tq * d),
         ];
         if let Some(l) = lora {
-            lora_fwd(&mut s1, gpu, l.ids, ps, &format!("{prefix}.q_proj.weight"), l.cfg, l.scratch, x_q, &self.q, tq, d, d);
+            lora_fwd(&mut s1, ps, &format!("{prefix}.q_proj.weight"), l.scratch, x_q, &self.q, tq, d, d);
         }
         s1.push(gpu.step(k.matmul_rows, &[x_kv, kw, &self.k], &[tkv, d, d], tkv.div_ceil(8) * d));
         s1.push(gpu.step(k.bias_add, &[&self.k, kb], &[tkv, d], tkv * d));
         if let Some(l) = lora {
-            lora_fwd(&mut s1, gpu, l.ids, ps, &format!("{prefix}.k_proj.weight"), l.cfg, l.scratch, x_kv, &self.k, tkv, d, d);
+            lora_fwd(&mut s1, ps, &format!("{prefix}.k_proj.weight"), l.scratch, x_kv, &self.k, tkv, d, d);
         }
         s1.push(gpu.step(k.matmul_rows, &[x_kv, vw, &self.v], &[tkv, d, d], tkv.div_ceil(8) * d));
         s1.push(gpu.step(k.bias_add, &[&self.v, vb], &[tkv, d], tkv * d));
         if let Some(l) = lora {
-            lora_fwd(&mut s1, gpu, l.ids, ps, &format!("{prefix}.v_proj.weight"), l.cfg, l.scratch, x_kv, &self.v, tkv, d, d);
+            lora_fwd(&mut s1, ps, &format!("{prefix}.v_proj.weight"), l.scratch, x_kv, &self.v, tkv, d, d);
         }
         gpu.submit(&[], &s1);
 
@@ -199,7 +199,7 @@ impl BartAttn {
 
         let mut s3 = vec![gpu.step(k.matmul_rows, &[&self.ctx, ow, &self.out], &[tq, d, d], tq.div_ceil(8) * d)];
         if let Some(l) = lora {
-            lora_fwd(&mut s3, gpu, l.ids, ps, &format!("{prefix}.out_proj.weight"), l.cfg, l.scratch, &self.ctx, &self.out, tq, d, d);
+            lora_fwd(&mut s3, ps, &format!("{prefix}.out_proj.weight"), l.scratch, &self.ctx, &self.out, tq, d, d);
         }
         s3.push(gpu.step(k.bias_add, &[&self.out, ob], &[tq, d], tq * d));
         gpu.submit(&[], &s3);
@@ -234,7 +234,7 @@ impl BartAttn {
         }
         s1.push(gpu.step(bwd.matmul_dx, &[d_out, ps.w(&ow_n), &scratch.d_ctx], &[tq, d, d, 0], tq * d));
         if let Some(l) = lora {
-            lora_bwd(&mut s1, gpu, l.ids, ps, &ow_n, l.cfg, l.scratch, d_out, &self.ctx, &scratch.d_ctx, tq, d, d);
+            lora_bwd(&mut s1, ps, &ow_n, l.scratch, d_out, &self.ctx, &scratch.d_ctx, tq, d, d);
         }
         gpu.submit(&[], &s1);
 
@@ -274,7 +274,7 @@ impl BartAttn {
         }
         s3.push(gpu.step(bwd.matmul_dx, &[&scratch.d_q, ps.w(&qw_n), d_x_q], &[tq, d, d, 0], tq * d));
         if let Some(l) = lora {
-            lora_bwd(&mut s3, gpu, l.ids, ps, &qw_n, l.cfg, l.scratch, &scratch.d_q, x_q, d_x_q, tq, d, d);
+            lora_bwd(&mut s3, ps, &qw_n, l.scratch, &scratch.d_q, x_q, d_x_q, tq, d, d);
         }
 
         if trainable(ps, &format!("{prefix}.k_proj.bias")) {
@@ -285,7 +285,7 @@ impl BartAttn {
         }
         s3.push(gpu.step(bwd.matmul_dx, &[&scratch.d_k, ps.w(&kw_n), d_x_kv], &[tkv, d, d, 0], tkv * d));
         if let Some(l) = lora {
-            lora_bwd(&mut s3, gpu, l.ids, ps, &kw_n, l.cfg, l.scratch, &scratch.d_k, x_kv, d_x_kv, tkv, d, d);
+            lora_bwd(&mut s3, ps, &kw_n, l.scratch, &scratch.d_k, x_kv, d_x_kv, tkv, d, d);
         }
         gpu.submit(&[], &s3);
 
@@ -301,7 +301,7 @@ impl BartAttn {
         }
         s4.push(gpu.step(bwd.matmul_dx, &[&scratch.d_v, ps.w(&vw_n), d_x_kv], &[tkv, d, d, 1], tkv * d));
         if let Some(l) = lora {
-            lora_bwd(&mut s4, gpu, l.ids, ps, &vw_n, l.cfg, l.scratch, &scratch.d_v, x_kv, d_x_kv, tkv, d, d);
+            lora_bwd(&mut s4, ps, &vw_n, l.scratch, &scratch.d_v, x_kv, d_x_kv, tkv, d, d);
         }
         gpu.submit(&[], &s4);
     }

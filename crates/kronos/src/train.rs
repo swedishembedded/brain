@@ -23,6 +23,7 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
 use model::IGNORE;
 use optim::Optim;
+use model::adapter::exec::AdapterRuntime;
 use paramstore::ParamStore;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -69,7 +70,6 @@ const DK_BIDIR: usize = 36;
 const DV_BIDIR: usize = 37;
 const CONCAT2: usize = 38;
 const CONCAT_SPLIT: usize = 39;
-const AXPY: usize = 40;
 
 pub(crate) const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -126,9 +126,10 @@ pub(crate) const PIPELINES: &[(&str, &str)] = &[
 /// the anti-overfit default for weekly fine-tuning.
 #[derive(Clone, Debug)]
 pub struct LoraCfg {
-    pub rank: usize,
-    pub alpha: f32,
-    pub targets: Vec<String>,
+    /// Rank, alpha, targets (matched as weight-name suffixes) and the
+    /// rsLoRA / LoRA+ / LoRA-FA hyper-parameters, as every adapter-training
+    /// model carries them.
+    pub adapter: model::adapter::device::LoraCfg,
     /// Seeds the adapters' initial `A` factors. Two trainers built from equal
     /// seeds start from equal adapters, different seeds from different ones.
     pub seed: u64,
@@ -138,20 +139,8 @@ impl LoraCfg {
     /// Default surface: the self-attention projections in every transformer
     /// block, with a freshly drawn init seed ([`Self::with_seed`] pins one).
     pub fn attn(rank: usize, alpha: f32) -> LoraCfg {
-        LoraCfg {
-            rank,
-            alpha,
-            targets: [
-                "self_attn.q_proj.weight",
-                "self_attn.k_proj.weight",
-                "self_attn.v_proj.weight",
-                "self_attn.out_proj.weight",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-            seed: data::rng::random_seed(),
-        }
+        let targets = ["self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.out_proj.weight"].iter().map(|s| s.to_string()).collect();
+        LoraCfg { adapter: model::adapter::device::LoraCfg::new(rank as u32, alpha, targets), seed: data::rng::random_seed() }
     }
 
     /// This config with its adapter init seeded by `seed`.
@@ -160,8 +149,10 @@ impl LoraCfg {
         self
     }
 
-    fn hits(&self, wname: &str) -> bool {
-        self.targets.iter().any(|t| wname.ends_with(t))
+    /// The target `wname` matches (a weight-name suffix), which is also the
+    /// leaf the adapter runtime is asked about.
+    fn target_of(&self, wname: &str) -> Option<&str> {
+        self.adapter.targets.iter().map(String::as_str).find(|t| wname.ends_with(t))
     }
 }
 
@@ -198,9 +189,7 @@ pub struct KronosTrain {
     count: Cell<f32>,
     sqrt_d: f32,
     lora: Option<LoraCfg>,
-    lora_a_buf: DeviceBuffer,
-    lora_da_buf: DeviceBuffer,
-    lora_out_buf: DeviceBuffer,
+    adapter: Option<AdapterRuntime>,
 
     // inputs (uploaded per batch)
     s1_ids: DeviceBuffer,
@@ -404,25 +393,26 @@ impl KronosTrain {
         let ps = if let Some(lc) = &lora {
             // seed adapters + build role list (base Frozen, adapters Trainable).
             let mut lcg = data::rng::Lcg::new(lc.seed); // the unified LCG (audit F40): the adapter init is a pure function of the run's seed
+            let hp = lc.adapter.hp();
             let mut roles: Vec<(String, usize, paramstore::Role)> = Vec::new();
             for (name, numel) in param_list_c(&cfg) {
                 roles.push((name.clone(), numel, paramstore::Role::Frozen));
-                if lc.hits(&name) {
-                    let (r, k, nout) = (lc.rank, d, numel / d); // targeted projections are d×k
-                    init2.entry(format!("{name}.lora_a")).or_insert_with(|| {
-                        (0..r * k).map(|_| lcg.scaled(0.01)).collect()
-                    });
-                    init2.entry(format!("{name}.lora_b")).or_insert_with(|| vec![0.0f32; nout * r]);
-                    roles.push((format!("{name}.lora_a"), r * k, paramstore::Role::Trainable));
-                    roles.push((format!("{name}.lora_b"), nout * r, paramstore::Role::Trainable));
+                if lc.target_of(&name).is_some() {
+                    let (k, nout) = (d, numel / d); // targeted projections are d x k
+                    for (pname, pnumel) in model::adapter::device::param_list(&name, &hp, nout, k) {
+                        let drawn = model::adapter::device::init_of(&pname) == Some(model::adapter::ParamInit::Drawn);
+                        init2.entry(pname.clone()).or_insert_with(|| if drawn { (0..pnumel).map(|_| lcg.scaled(0.01)).collect() } else { vec![0.0f32; pnumel] });
+                        roles.push((pname.clone(), pnumel, model::adapter::device::role_of(&pname, &hp)));
+                    }
                 }
             }
-            ParamStore::new_with_roles(&gpu, roles, &init2)
+            let mut ps = ParamStore::new_with_roles(&gpu, roles, &init2);
+            model::adapter::device::apply_groups(&mut ps, &hp);
+            ps
         } else {
             ParamStore::new(&gpu, param_list_c(&cfg), &init2)
         };
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
-        let lora_r = lora.as_ref().map(|l| l.rank as u64).unwrap_or(1).max(1);
 
         let d = cfg.d_model as u64;
         let ff = cfg.ff_dim as u64;
@@ -460,10 +450,8 @@ impl KronosTrain {
             b,
             count: Cell::new(1.0),
             sqrt_d: (d as f32).sqrt(),
+            adapter: lora.as_ref().map(|lc| AdapterRuntime::new(&gpu, &lc.adapter, n as u32, d as u32)),
             lora,
-            lora_a_buf: st(n * lora_r),
-            lora_da_buf: st(n * lora_r),
-            lora_out_buf: st(n * d),
             ps,
             opt,
             s1_ids: idbuf("s1_ids"),
@@ -557,19 +545,19 @@ impl KronosTrain {
     fn trainable(&self, name: &str) -> bool {
         self.ps.grad.contains_key(name)
     }
-    fn lora_for(&self, wname: &str) -> Option<(u32, f32)> {
-        self.lora.as_ref().filter(|lc| lc.hits(wname)).map(|lc| (lc.rank as u32, lc.alpha / lc.rank as f32))
+    /// The adapter runtime when `wname` is a targeted projection.
+    fn adapted(&self, wname: &str) -> Option<(&AdapterRuntime, &str)> {
+        let (rt, lc) = (self.adapter.as_ref()?, self.lora.as_ref()?);
+        let target = lc.target_of(wname)?;
+        Some((rt, target))
     }
-    /// Forward LoRA delta `y += (alpha/r)·(x·Aᵀ)·Bᵀ` for a targeted projection
+    /// Forward LoRA delta `y += scale*(x*A^t)*B^t` for a targeted projection
     /// (no-op otherwise). Must be wired at the SAME projections `proj_bwd`'s LoRA
     /// branch fires on, so forward and backward stay consistent.
     fn lora_fwd(&self, s: &mut Vec<Step>, wname: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        let Some((r, scale)) = self.lora_for(wname) else { return };
-        let a = format!("{wname}.lora_a");
-        let b = format!("{wname}.lora_b");
-        s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a_buf], &[m, k, r], m * r));
-        s.push(self.gpu.step(MATMUL, &[&self.lora_a_buf, self.w(&b), &self.lora_out_buf], &[m, r, nout], m * nout));
-        s.push(self.gpu.step(AXPY, &[y, &self.lora_out_buf], &[m * nout, f(scale)], m * nout));
+        if let Some((rt, _)) = self.adapted(wname) {
+            rt.forward(rt.reference_gemm(), s, &self.ps, wname, x, y, m, k, nout);
+        }
     }
     /// Backward for a linear `y = x·Wᵀ + b`. Full: dW, db, dX. LoRA: base weight
     /// frozen (dX only, no dW), adapter grads gA/gB (Qwen pattern). Frozen params
@@ -579,19 +567,11 @@ impl KronosTrain {
         if self.trainable(bname) {
             s.push(self.gpu.step(BIAS_GRAD, &[d_out, self.g(bname)], &[m, nout], nout));
         }
-        match self.lora_for(wname) {
-            Some((r, scale)) => {
+        match self.adapted(wname) {
+            Some((rt, _)) => {
                 // frozen base: dx += d_out·W (no dW)
                 s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
-                let a = format!("{wname}.lora_a");
-                let b = format!("{wname}.lora_b");
-                s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a_buf], &[m, k, r], m * r));
-                s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_a_buf], &[m * r, f(scale)], m * r));
-                s.push(self.gpu.step(MATMUL_DW, &[d_out, &self.lora_a_buf, self.g(&b)], &[m, r, nout], nout * r));
-                s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(&b), &self.lora_da_buf], &[m, r, nout, 0], m * r));
-                s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_da_buf], &[m * r, f(scale)], m * r));
-                s.push(self.gpu.step(MATMUL_DW, &[&self.lora_da_buf, x, self.g(&a)], &[m, k, r], r * k));
-                s.push(self.gpu.step(MATMUL_DX, &[&self.lora_da_buf, self.w(&a), dx], &[m, k, r, 1], m * k));
+                rt.backward(rt.reference_gemm(), s, &self.ps, wname, d_out, x, dx, m, k, nout);
             }
             None => {
                 if self.trainable(wname) {
@@ -978,21 +958,10 @@ impl KronosTrain {
             // Under LoRA the base weight is frozen; fold the trained adapter into it
             // so the saved checkpoint carries the adaptation: W += (α/r)·(B·A),
             // A = lora_a [r, k], B = lora_b [nout, r], W [nout, k].
-            if let Some((r, scale)) = self.lora_for(&name) {
-                let r = r as usize;
-                let a = self.ps.read_weight(&self.gpu, &format!("{name}.lora_a"));
-                let b = self.ps.read_weight(&self.gpu, &format!("{name}.lora_b"));
-                let k = a.len() / r; // A is [r, k]
-                let nout = wv.len() / k;
-                for o in 0..nout {
-                    for j in 0..k {
-                        let mut acc = 0.0f32;
-                        for x in 0..r {
-                            acc += b[o * r + x] * a[x * k + j];
-                        }
-                        wv[o * k + j] += scale * acc;
-                    }
-                }
+            if let Some(lc) = self.lora.as_ref().filter(|lc| lc.target_of(&name).is_some()) {
+                let (an, bn) = model::adapter::device::lora_names(&name);
+                let (a, b) = (self.ps.read_weight(&self.gpu, &an), self.ps.read_weight(&self.gpu, &bn));
+                model::lora::device_adapter::fold_delta(&mut wv, &a, &b, lc.adapter.rank as usize, lc.adapter.scale());
             }
             w.insert(name.clone(), wv);
         }

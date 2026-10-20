@@ -63,9 +63,9 @@ impl CheckModel for Harness {
 fn harness(lora: Option<LoraCfg>, seed: u64) -> Harness {
     let cfg = BartConfig::tiny();
     let (t_prompt, max_t) = (3u32, 3u32);
-    let names = train::param_list(&cfg, t_prompt, max_t, lora);
+    let names = train::param_list(&cfg, t_prompt, max_t, lora.as_ref());
     let init: HashMap<String, Vec<f32>> = train::init_weights(&names, 0.15, seed);
-    let m = Florence2Trainer::new(gpu_core::testgpu::dev(train::PIPELINES), cfg, t_prompt, max_t, lora, &init);
+    let m = Florence2Trainer::new(gpu_core::testgpu::dev(train::PIPELINES), cfg, t_prompt, max_t, lora.clone(), &init);
     let prompt_ids: Vec<u32> = (0..t_prompt).map(|i| (i * 5 + 1) % cfg.vocab_size).collect();
     let decoder_ids: Vec<u32> = (0..max_t).map(|i| (i * 3 + 2) % cfg.vocab_size).collect();
     let targets: Vec<u32> = (0..max_t).map(|i| (i * 7 + 3) % cfg.vocab_size).collect();
@@ -83,6 +83,6 @@ pub fn check_florence2(seed: u64) -> Report {
 /// `directional_check`'s own `param_names()` walk already restricts to
 /// `ps.trainable`, so this is the SAME call over a different `ParamStore`.
 pub fn check_florence2_lora(seed: u64) -> Report {
-    let m = harness(Some(LoraCfg { rank: 2, alpha: 4.0 }), seed);
+    let m = harness(Some(LoraCfg::new(2, 4.0, ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"].iter().map(|s| s.to_string()).collect())), seed);
     directional_check(&m, 5e-3, 4, seed)
 }

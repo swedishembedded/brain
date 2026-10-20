@@ -230,13 +230,13 @@ impl DecoderLayer {
         let mut s3 = vec![gpu.step(k.matmul_rows, &[&self.normed2, fc1_w, &self.ff_hidden], &[t, d_model, ffn_dim], t.div_ceil(8) * ffn_dim)];
         s3.push(gpu.step(k.bias_add, &[&self.ff_hidden, fc1_b], &[t, ffn_dim], t * ffn_dim));
         if let Some(l) = lora {
-            lora_fwd(&mut s3, gpu, l.ids, ps, &format!("{prefix}.fc1.weight"), l.cfg, l.scratch, &self.normed2, &self.ff_hidden, t, d_model, ffn_dim);
+            lora_fwd(&mut s3, ps, &format!("{prefix}.fc1.weight"), l.scratch, &self.normed2, &self.ff_hidden, t, d_model, ffn_dim);
         }
         s3.push(gpu.step(k.gelu_erf, &[&self.ff_hidden, &self.ff_act], &[t * ffn_dim], t * ffn_dim));
         s3.push(gpu.step(k.matmul_rows, &[&self.ff_act, fc2_w, &self.ff_out], &[t, ffn_dim, d_model], t.div_ceil(8) * d_model));
         s3.push(gpu.step(k.bias_add, &[&self.ff_out, fc2_b], &[t, d_model], t * d_model));
         if let Some(l) = lora {
-            lora_fwd(&mut s3, gpu, l.ids, ps, &format!("{prefix}.fc2.weight"), l.cfg, l.scratch, &self.ff_act, &self.ff_out, t, ffn_dim, d_model);
+            lora_fwd(&mut s3, ps, &format!("{prefix}.fc2.weight"), l.scratch, &self.ff_act, &self.ff_out, t, ffn_dim, d_model);
         }
         s3.push(gpu.step(k.add2, &[&self.normed2, &self.ff_out, &self.sum3], &[t * d_model], t * d_model));
         s3.push(layernorm_fwd(gpu, &ln, &self.sum3, ln3_w, ln3_b, &self.normed3, d_model, t, eps));
@@ -280,7 +280,7 @@ impl DecoderLayer {
         }
         s2.push(gpu.step(bwd.matmul_dx, &[&scr.d_sum3, ps.w(&fc2_w_n), &scr.d_ff_act], &[t, ffn_dim, d_model, 0], t * ffn_dim));
         if let Some(l) = lora {
-            lora_bwd(&mut s2, gpu, l.ids, ps, &fc2_w_n, l.cfg, l.scratch, &scr.d_sum3, &self.ff_act, &scr.d_ff_act, t, ffn_dim, d_model);
+            lora_bwd(&mut s2, ps, &fc2_w_n, l.scratch, &scr.d_sum3, &self.ff_act, &scr.d_ff_act, t, ffn_dim, d_model);
         }
         s2.push(gpu.step(bwd.gelu_erf_bwd, &[&self.ff_hidden, &scr.d_ff_act, &scr.d_ff_hidden], &[t * ffn_dim], t * ffn_dim));
         if trainable(ps, &format!("{prefix}.fc1.bias")) {
@@ -291,7 +291,7 @@ impl DecoderLayer {
         }
         s2.push(gpu.step(bwd.matmul_dx, &[&scr.d_ff_hidden, ps.w(&fc1_w_n), &scr.d_normed2_ffn], &[t, d_model, ffn_dim, 0], t * d_model));
         if let Some(l) = lora {
-            lora_bwd(&mut s2, gpu, l.ids, ps, &fc1_w_n, l.cfg, l.scratch, &scr.d_ff_hidden, &self.normed2, &scr.d_normed2_ffn, t, d_model, ffn_dim);
+            lora_bwd(&mut s2, ps, &fc1_w_n, l.scratch, &scr.d_ff_hidden, &self.normed2, &scr.d_normed2_ffn, t, d_model, ffn_dim);
         }
         s2.push(gpu.step(bwd.add2, &[&scr.d_sum3, &scr.d_normed2_ffn, &scr.d_normed2], &[t * d_model], t * d_model));
         gpu.submit(&[], &s2);
@@ -389,7 +389,7 @@ impl Decoder {
     /// for `lora_cfg`/`lora_max_nout`.
     pub fn new_train(gpu: &Gpu, heads: u32, d_model: u32, ffn_dim: u32, layers: u32, max_t: u32, t_enc: u32, eps: f32, lora_cfg: Option<super::lora::LoraCfg>, lora_max_nout: u32) -> Decoder {
         let mut m = Decoder::new(gpu, heads, d_model, ffn_dim, layers, max_t, t_enc, eps);
-        let lora_scratch = lora_cfg.map(|c| super::lora::LoraScratch::new(gpu, max_t, c.rank, lora_max_nout));
+        let lora_scratch = lora_cfg.as_ref().map(|c| super::lora::LoraScratch::new(gpu, c, max_t, lora_max_nout));
         m.train = Some(DecoderTrain {
             lora_cfg,
             lora_scratch,
@@ -432,7 +432,7 @@ impl Decoder {
 
     /// Same math as [`Self::forward`], with an optional LoRA delta fused
     /// onto every layer.
-    pub fn forward_train<'a>(&'a self, gpu: &Gpu, k: &DecoderKernelIds, ps: &paramstore::ParamStore, decoder_inputs_embeds: &DeviceBuffer, enc: &DeviceBuffer, t: u32, lora_ids: Option<&super::lora::LoraKernelIds>) -> &'a DeviceBuffer {
+    pub fn forward_train<'a>(&'a self, gpu: &Gpu, k: &DecoderKernelIds, ps: &paramstore::ParamStore, decoder_inputs_embeds: &DeviceBuffer, enc: &DeviceBuffer, t: u32) -> &'a DeviceBuffer {
         assert!(t <= self.max_t, "florence2 decoder: t {t} exceeds max_t {}", self.max_t);
         let d = self.d_model;
         let ln = LayerNormIds::resolve_fwd(gpu, k.layernorm);
@@ -448,7 +448,7 @@ impl Decoder {
         gpu.submit(&[], &s0);
 
         let train = self.train.as_ref().expect("forward_train: build with Decoder::new_train");
-        let lora_ctx = train.lora_cfg.as_ref().map(|cfg| LoraCtx { cfg, ids: lora_ids.expect("lora_ids required when new_train's lora_cfg is Some"), scratch: train.lora_scratch.as_ref().expect("lora_scratch") });
+        let lora_ctx = train.lora_cfg.as_ref().map(|_| LoraCtx { scratch: train.lora_scratch.as_ref().expect("lora_scratch") });
 
         let mut cur: &DeviceBuffer = &self.embedded;
         for (i, layer) in self.layers.iter().enumerate() {
@@ -470,10 +470,10 @@ impl Decoder {
     /// `d_enc_out` is the FULL sum of every layer's cross-attention
     /// contribution to the encoder's output, ready to seed
     /// `Encoder::backward` directly.
-    pub fn backward<'a>(&'a self, gpu: &Gpu, k: &DecoderKernelIds, bwd: &DecoderBwdKernelIds, ps: &paramstore::ParamStore, enc: &DeviceBuffer, d_hidden_seed: &DeviceBuffer, t: u32, lora_ids: Option<&super::lora::LoraKernelIds>) -> (&'a DeviceBuffer, &'a DeviceBuffer) {
+    pub fn backward<'a>(&'a self, gpu: &Gpu, k: &DecoderKernelIds, bwd: &DecoderBwdKernelIds, ps: &paramstore::ParamStore, enc: &DeviceBuffer, d_hidden_seed: &DeviceBuffer, t: u32) -> (&'a DeviceBuffer, &'a DeviceBuffer) {
         let (d, t_enc) = (self.d_model, self.t_enc);
         let train = self.train.as_ref().expect("backward: build with Decoder::new_train");
-        let lora_ctx = train.lora_cfg.as_ref().map(|cfg| LoraCtx { cfg, ids: lora_ids.expect("lora_ids required when new_train's lora_cfg is Some"), scratch: train.lora_scratch.as_ref().expect("lora_scratch") });
+        let lora_ctx = train.lora_cfg.as_ref().map(|_| LoraCtx { scratch: train.lora_scratch.as_ref().expect("lora_scratch") });
 
         gpu.submit(&[&train.d_enc_out], &[]);
 

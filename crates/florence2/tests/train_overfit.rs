@@ -153,13 +153,13 @@ fn lora_makes_large_progress_against_a_real_base() {
 
     let trained: HashMap<String, Vec<f32>> = base.param_names().into_iter().map(|n| { let v = base.read_weight(&n); (n, v) }).collect();
 
-    let lora_cfg = LoraCfg { rank: 2, alpha: 4.0 };
-    let lora_names = train::param_list(&cfg, t_prompt, max_t, Some(lora_cfg));
+    let lora_cfg = LoraCfg::new(2, 4.0, vec!["q_proj".into(), "k_proj".into(), "v_proj".into(), "out_proj".into(), "fc1".into(), "fc2".into()]);
+    let lora_names = train::param_list(&cfg, t_prompt, max_t, Some(&lora_cfg));
     let mut lora_init = train::init_weights(&lora_names, 0.15, 909);
     for (name, data) in trained {
         lora_init.insert(name, data);
     }
-    let lora_m = build(&cfg, t_prompt, max_t, Some(lora_cfg), &lora_init);
+    let lora_m = build(&cfg, t_prompt, max_t, Some(lora_cfg.clone()), &lora_init);
     lora_m.set_batch(&lora_ex.prompt_ids, &lora_ex.decoder_ids, &lora_ex.targets);
 
     let lr = 3e-2f32;
@@ -198,8 +198,8 @@ fn a_fresh_adapter_is_a_no_op() {
 
     let base_names = train::param_list(&cfg, t_prompt, max_t, None);
     let base_init = train::init_weights(&base_names, 0.15, seed);
-    let lora_cfg = LoraCfg { rank: 2, alpha: 4.0 };
-    let lora_names = train::param_list(&cfg, t_prompt, max_t, Some(lora_cfg));
+    let lora_cfg = LoraCfg::new(2, 4.0, vec!["q_proj".into(), "k_proj".into(), "v_proj".into(), "out_proj".into(), "fc1".into(), "fc2".into()]);
+    let lora_names = train::param_list(&cfg, t_prompt, max_t, Some(&lora_cfg));
     let lora_init = train::init_weights(&lora_names, 0.15, seed);
     for (name, data) in &base_init {
         assert_eq!(lora_init.get(name), Some(data), "{name}: base tensor value drifted between the plain and LoRA-configured init");
@@ -209,7 +209,7 @@ fn a_fresh_adapter_is_a_no_op() {
     base.set_batch(&ex.prompt_ids, &ex.decoder_ids, &ex.targets);
     let loss_base = base.loss();
 
-    let lora_m = build(&cfg, t_prompt, max_t, Some(lora_cfg), &lora_init);
+    let lora_m = build(&cfg, t_prompt, max_t, Some(lora_cfg.clone()), &lora_init);
     lora_m.set_batch(&ex.prompt_ids, &ex.decoder_ids, &ex.targets);
     let loss_lora = lora_m.loss();
 

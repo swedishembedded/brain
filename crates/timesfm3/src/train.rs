@@ -67,6 +67,7 @@ use std::collections::HashMap;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block;
 use optim::Optim;
+use model::adapter::exec::AdapterRuntime;
 use paramstore::{ParamStore, Role};
 
 use crate::config::Timesfm3Config;
@@ -110,7 +111,6 @@ const K_UNPACK_QKV: usize = 30;
 // ---- LoRA: the fused adapter delta on a projection's OUTPUT, and the scaled
 // copy its backward needs (the `attn_bwd_*`/`matmul_*` family has no scale
 // parameter, so the factor is applied to the intermediate instead) ----
-const K_AXPY: usize = 31;
 const K_GRAD_SCALE: usize = 32;
 // ---- the optimiser step (`optim::Optim`), so a trainer is still one device
 // handle ----
@@ -171,9 +171,9 @@ pub const TRAIN_PIPELINES: &[(&str, &str)] = &[
 /// leaves repeat across two different attention sublayers).
 #[derive(Clone, Debug)]
 pub struct LoraCfg {
-    pub rank: usize,
-    pub alpha: f32,
-    pub targets: Vec<String>,
+    /// Rank, alpha, targets (weight-name suffixes) and the rsLoRA / LoRA+ /
+    /// LoRA-FA hyper-parameters, as every adapter-training model carries them.
+    pub adapter: model::adapter::device::LoraCfg,
     /// Seeds the `A` factors' initial draw, so two fine-tunes start from
     /// different adapters unless they name one seed. A fresh draw by default.
     pub seed: u64,
@@ -212,7 +212,7 @@ impl LoraCfg {
     /// `per_dim_scale` a product of two live tensors rather than a linear
     /// map, which is not the object LoRA is defined over.
     pub fn attn(rank: usize, alpha: f32) -> LoraCfg {
-        LoraCfg { rank, alpha, targets: LORA_TARGETS.iter().map(|s| s.to_string()).collect(), seed: seed::random_seed() }
+        LoraCfg { adapter: model::adapter::device::LoraCfg::new(rank as u32, alpha, LORA_TARGETS.iter().map(|s| s.to_string()).collect()), seed: seed::random_seed() }
     }
 
     /// The adapter initialisation seed to use instead of the drawn one.
@@ -227,17 +227,23 @@ impl LoraCfg {
     /// what a fine-tune onto a new quantile regime wants and what a fine-tune
     /// that only re-mixes an existing representation does not.
     pub fn with_output_head(mut self) -> LoraCfg {
-        self.targets.push("output_head.weight".into());
+        self.adapter.targets.push("output_head.weight".into());
         self
     }
 
-    /// The delta scale, `alpha/rank`.
+    /// The delta scale.
     pub fn scale(&self) -> f32 {
-        self.alpha / self.rank as f32
+        self.adapter.scale()
+    }
+
+    /// The target `weight_name` matches (a weight-name suffix), which is also
+    /// the leaf the adapter runtime is asked about.
+    fn target_of(&self, weight_name: &str) -> Option<&str> {
+        self.adapter.targets.iter().map(String::as_str).find(|t| weight_name.ends_with(t))
     }
 
     fn hits(&self, weight_name: &str) -> bool {
-        self.targets.iter().any(|t| weight_name.ends_with(t.as_str()))
+        self.target_of(weight_name).is_some()
     }
 }
 
@@ -264,7 +270,7 @@ fn kmasks(patch_mask: &[bool], b: usize, v: usize, n: usize) -> (Vec<f32>, Vec<f
 /// the workspace-wide adapter spelling (`model::adapter::device::
 /// is_adapter_param` is the one predicate that recognises them).
 fn adapter_names(weight: &str) -> (String, String) {
-    (format!("{weight}.lora_a"), format!("{weight}.lora_b"))
+    model::adapter::device::lora_names(weight)
 }
 
 /// Every parameter's role under `lc`: the checkpoint's own tensors Frozen,
@@ -280,9 +286,11 @@ fn adapter_roles(cfg: &Timesfm3Config, lc: &LoraCfg) -> Vec<(String, usize, Role
             // `param_list` gives every adapted weight as `[out, in]`, which is
             // a PyTorch `nn.Linear` weight and exactly what `linear` expects.
             let (out, inn) = (shape[0], shape[1]);
-            let (a, bnm) = adapter_names(&name);
-            roles.push((a, lc.rank * inn, Role::Trainable));
-            roles.push((bnm, out * lc.rank, Role::Trainable));
+            let hp = lc.adapter.hp();
+            for (pname, numel) in model::adapter::device::param_list(&name, &hp, out, inn) {
+                let role = model::adapter::device::role_of(&pname, &hp);
+                roles.push((pname, numel, role));
+            }
         }
     }
     roles
@@ -300,50 +308,40 @@ fn seed_adapters(cfg: &Timesfm3Config, lc: &LoraCfg, init: &mut HashMap<String, 
             continue;
         }
         let (out, inn) = (shape[0], shape[1]);
-        let (a, bnm) = adapter_names(&name);
-        init.entry(a).or_insert_with(|| (0..lc.rank * inn).map(|_| lcg_next(&mut state) * 0.01).collect());
-        init.entry(bnm).or_insert_with(|| vec![0.0f32; out * lc.rank]);
+        for (pname, numel) in model::adapter::device::param_list(&name, &lc.adapter.hp(), out, inn) {
+            let drawn = model::adapter::device::init_of(&pname) == Some(model::adapter::ParamInit::Drawn);
+            init.entry(pname).or_insert_with(|| if drawn { (0..numel).map(|_| lcg_next(&mut state) * 0.01).collect() } else { vec![0.0f32; numel] });
+        }
     }
 }
 
-/// The adapter wiring both passes share: the config, and the three scratch
-/// buffers they reuse.
-///
-/// Shared rather than SSA, matching `kronos::train` and `qwen3::model`: the
-/// reverse RECOMPUTES `x·Aᵀ` from the forward's own (SSA) input activation
-/// instead of reading a cached copy, so no adapter intermediate has to
-/// survive past the three consecutive steps that produce and consume it.
+/// The adapter wiring both passes share: the config and the runtime that
+/// records an adapted projection's forward and backward. `None` runtime is a
+/// graph with no adapter, which is then bit-unchanged.
 struct LoraWiring {
     cfg: Option<LoraCfg>,
-    /// `[rows * rank]` - `x·Aᵀ`, and in the reverse the same product scaled.
-    mid: DeviceBuffer,
-    /// `[rows * rank]` - `d(x·Aᵀ)`.
-    dmid: DeviceBuffer,
-    /// `[rows * max_out]` - the adapter's own contribution to a projection's
-    /// output, before the `axpy` folds it in.
-    out: DeviceBuffer,
+    rt: Option<AdapterRuntime>,
 }
 
 impl LoraWiring {
-    /// `(rank, alpha/rank)` if `weight` carries an adapter.
-    fn of(&self, weight: &str) -> Option<(u32, f32)> {
-        self.cfg.as_ref().filter(|lc| lc.hits(weight)).map(|lc| (lc.rank as u32, lc.scale()))
+    /// The runtime when `weight` carries an adapter.
+    fn of(&self, weight: &str) -> Option<&AdapterRuntime> {
+        let (rt, lc) = (self.rt.as_ref()?, self.cfg.as_ref()?);
+        lc.hits(weight).then_some(rt)
     }
 }
 
-/// `y += (alpha/r)·(x·Aᵀ)·Bᵀ` for an adapted projection; nothing at all
-/// otherwise, so a non-LoRA graph is bit-unchanged. Must be wired at exactly
-/// the projections [`proj_bwd`] adapts, or the forward and the reverse
-/// disagree about which weights are frozen.
+/// The adapter's correction of an adapted projection, added onto `y`; nothing
+/// at all otherwise. Must be wired at exactly the projections [`proj_bwd`]
+/// adapts, or the forward and the reverse disagree about which weights are
+/// frozen.
 #[allow(clippy::too_many_arguments)]
-fn lora_fwd(g: &Gpu, ps: &ParamStore, lw: &LoraWiring, weight: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: usize, k: usize, nout: usize) -> Vec<Step> {
-    let Some((r, scale)) = lw.of(weight) else { return Vec::new() };
-    let (a, bnm) = adapter_names(weight);
-    vec![
-        g.step(K_MATMUL, &[x, ps.w(&a), &lw.mid], &[m as u32, k as u32, r], (m * r as usize) as u32),
-        g.step(K_MATMUL, &[&lw.mid, ps.w(&bnm), &lw.out], &[m as u32, r, nout as u32], (m * nout) as u32),
-        g.step(K_AXPY, &[y, &lw.out], &[(m * nout) as u32, f(scale)], (m * nout) as u32),
-    ]
+fn lora_fwd(_g: &Gpu, ps: &ParamStore, lw: &LoraWiring, weight: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: usize, k: usize, nout: usize) -> Vec<Step> {
+    let mut steps = Vec::new();
+    if let Some(rt) = lw.of(weight) {
+        rt.forward(rt.reference_gemm(), &mut steps, ps, weight, x, y, m as u32, k as u32, nout as u32);
+    }
+    steps
 }
 
 /// One mixing layer's SSA activations - every buffer the reverse pass needs
@@ -511,14 +509,8 @@ impl Timesfm3Train {
         // One set of adapter scratch buffers for the whole graph. `out` is
         // sized for the WIDEST adapted projection, which is the quantile head
         // when it is targeted and the feedforward hidden otherwise.
-        let rank = lora.as_ref().map(|lc| lc.rank).unwrap_or(0);
         let widest = d.max(cfg.hidden_dims).max(cfg.head_out_dim());
-        let lw = LoraWiring {
-            cfg: lora.clone(),
-            mid: g.storage((rows * rank.max(1)) as u64),
-            dmid: g.storage((rows * rank.max(1)) as u64),
-            out: g.storage((rows * widest) as u64),
-        };
+        let lw = LoraWiring { cfg: lora.clone(), rt: lora.as_ref().map(|lc| AdapterRuntime::new(g, &lc.adapter, rows as u32, widest as u32)) };
 
         let resblock_input_buf = g.storage_init("resblock_input", resblock_input);
 
@@ -853,35 +845,16 @@ impl Timesfm3Train {
     /// saves through the identical shape for the identical reason.
     pub fn to_reference_weights(&self) -> HashMap<String, Vec<f32>> {
         let mut out = HashMap::new();
-        for (name, shape) in self.cfg.param_list() {
+        for (name, _) in self.cfg.param_list() {
             let mut w = self.read_weight(&name);
             if let Some(lc) = self.lora.as_ref().filter(|lc| lc.hits(&name)) {
                 let (a_name, b_name) = adapter_names(&name);
                 let (a, b) = (self.read_weight(&a_name), self.read_weight(&b_name));
-                fold_delta(&mut w, &a, &b, lc.rank, shape[1], lc.scale());
+                model::lora::device_adapter::fold_delta(&mut w, &a, &b, lc.adapter.rank as usize, lc.scale());
             }
             out.insert(name, w);
         }
         out
-    }
-}
-
-/// `W[o,i] += scale·Σ_k B[o,k]·A[k,i]` over a `[out, in]` row-major weight,
-/// `A` `[r, in]`, `B` `[out, r]`. The same contraction
-/// `model::lora::device_adapter::fold_adapter_into` performs when it reads an
-/// adapter file back, kept here because this model folds from LIVE device
-/// tensors (there is no adapter sidecar - see
-/// [`Timesfm3Train::to_reference_weights`]).
-fn fold_delta(w: &mut [f32], a: &[f32], b: &[f32], r: usize, inn: usize, scale: f32) {
-    let out = w.len() / inn;
-    for o in 0..out {
-        for i in 0..inn {
-            let mut acc = 0.0f32;
-            for k in 0..r {
-                acc += b[o * r + k] * a[k * inn + i];
-            }
-            w[o * inn + i] += scale * acc;
-        }
     }
 }
 
@@ -1061,20 +1034,10 @@ fn grad_of<'a>(ps: &'a ParamStore, name: &str) -> Option<&'a DeviceBuffer> {
 fn proj_bwd(g: &Gpu, ps: &ParamStore, lw: &LoraWiring, weight: &str, dy: &DeviceBuffer, x: &DeviceBuffer, dx: &DeviceBuffer, m: usize, k: usize, nout: usize, accumulate: bool) -> Vec<Step> {
     let mut steps = Vec::new();
     match lw.of(weight) {
-        Some((r, scale)) => {
-            let (a, bnm) = adapter_names(weight);
-            let (mr, rn) = ((m * r as usize) as u32, f(scale));
-            // Frozen base: dX only.
+        Some(rt) => {
+            // Frozen base: dX only; the adapter records its own share.
             steps.push(linear_dx(g, dy, ps.w(weight), dx, m, k, nout, accumulate));
-            // dB = dYᵀ·(scale·x·Aᵀ)
-            steps.push(g.step(K_MATMUL, &[x, ps.w(&a), &lw.mid], &[m as u32, k as u32, r], mr));
-            steps.push(g.step(K_GRAD_SCALE, &[&lw.mid], &[mr, rn], mr));
-            steps.push(linear_dw(g, dy, &lw.mid, ps.g(&bnm), m, r as usize, nout));
-            // dmid = scale·dY·B, then dA = dmidᵀ·x and dX += dmid·A
-            steps.push(linear_dx(g, dy, ps.w(&bnm), &lw.dmid, m, r as usize, nout, false));
-            steps.push(g.step(K_GRAD_SCALE, &[&lw.dmid], &[mr, rn], mr));
-            steps.push(linear_dw(g, &lw.dmid, x, ps.g(&a), m, k, r as usize));
-            steps.push(linear_dx(g, &lw.dmid, ps.w(&a), dx, m, k, r as usize, true));
+            rt.backward(rt.reference_gemm(), &mut steps, ps, weight, dy, x, dx, m as u32, k as u32, nout as u32);
         }
         None => {
             if let Some(dw) = grad_of(ps, weight) {
