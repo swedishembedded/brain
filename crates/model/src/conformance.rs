@@ -15,11 +15,13 @@
 //! * C4 zero-initialised LoRA `B` leaves the logits bit-identical to the base;
 //! * C6 save, reload, identical log-probabilities;
 //! * C9 every declared frozen-base tier gives gradients within its stated
-//!   tolerance of the f32 base.
+//!   tolerance of the f32 base;
+//! * C8 a chunked LM-head cross-entropy equals the unchunked one (loss,
+//!   log-probabilities, gradients), for a subject that provides the
+//!   [`ChunkedHead`] hook.
 //!
 //! The objective-level checks (C7, one SFT/DPO/GRPO/distill step each) need the
-//! objectives themselves and live in `rl::conformance`; C8 (chunked head CE
-//! equals unchunked) is registered by `rl/tests/conformance.rs`.
+//! objectives themselves and live in `rl::conformance`.
 //!
 //! A capability a model declares absent is asserted absent ([`Declares`]): the
 //! suite fails if the model offers what it says it does not, and fails if it
@@ -66,6 +68,50 @@ pub struct Subject<M: Model> {
     /// The frozen-base tiers (besides the f32 reference) the model offers
     /// for training; each is checked by C9.
     pub tiers: Vec<Tier<M>>,
+    /// How many tensors and directions the finite-difference check probes.
+    pub budget: Budget,
+    /// Builds the model with a chunked LM head, for C8; `None` when the
+    /// model's head has no chunking to verify.
+    pub chunked_head: Option<ChunkedHead<M>>,
+}
+
+/// How much of the model the finite-difference check (C3) probes. Each probe
+/// is two forward passes, so a large model bounds the check by tensors and
+/// directions instead of walking every parameter.
+#[derive(Clone, Copy, Debug)]
+pub struct Budget {
+    /// At most this many trainable tensors per logit scale, evenly spread over
+    /// the parameter list; `None` probes all of them.
+    pub tensors: Option<usize>,
+    /// Random directions tried per tensor; the best agreement counts.
+    pub directions: usize,
+}
+
+impl Default for Budget {
+    fn default() -> Budget {
+        Budget { tensors: None, directions: 3 }
+    }
+}
+
+impl Budget {
+    /// The indices of `n` tensors this budget probes, ascending.
+    pub(crate) fn pick(&self, n: usize) -> Vec<usize> {
+        match self.tensors {
+            Some(k) if k < n => (0..k).map(|i| i * n / k).collect(),
+            _ => (0..n).collect(),
+        }
+    }
+}
+
+/// The model built for C8 with its LM head's logits held to a word budget.
+pub struct ChunkedHead<M: Model> {
+    /// Sequence length of the check, long enough for several 64-row chunks.
+    pub seq: u32,
+    /// Build the one-row model for `seq` tokens, from the weights `seed`
+    /// draws, with an adapter of the given rank (or none), whose LM head
+    /// keeps at most `head_budget_words` words of logits alive at once
+    /// (`u64::MAX`: the whole row).
+    pub build: fn(adapter_rank: Option<u32>, head_budget_words: u64, seed: u64) -> M,
 }
 
 /// A model's initial weights: master values by parameter name.
@@ -119,6 +165,7 @@ pub fn run<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), String> {
         logprobs_follow_logit_scale(subject, seed)?;
         crate::conformance_grad::unit_weights_reproduce_plain_training(subject, seed)?;
         crate::conformance_grad::weighted_loss_gradient_matches_finite_differences(subject, seed)?;
+        crate::conformance_head::chunked_head_ce_equals_unchunked(subject, seed)?;
     }
     if subject.declares.adapters {
         crate::conformance_adapter::zero_b_leaves_logits_unchanged(subject, seed)?;

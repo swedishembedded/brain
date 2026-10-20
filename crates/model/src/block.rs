@@ -3283,6 +3283,26 @@ pub fn tile_budget_words_upper_bound() -> u64 {
     (u32::MAX as u64 / TILE_BUDGET_FRACTION / 4).max(TILE_BUDGET_WORDS)
 }
 
+thread_local! {
+    static TILE_BUDGET_SCOPE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `build` with the tile budget of the devices it builds on forced to
+/// `words`, for this thread only: a model built inside it tiles its LM head
+/// and weights as a small device would. The process-wide
+/// `BRAIN_TILE_BUDGET_WORDS` does the same for every thread, which a test
+/// suite running models side by side cannot use. Scopes nest.
+pub fn with_tile_budget_words<R>(words: u64, build: impl FnOnce() -> R) -> R {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TILE_BUDGET_SCOPE.with(|s| s.set(self.0));
+        }
+    }
+    let _restore = Restore(TILE_BUDGET_SCOPE.with(|s| s.replace(Some(words))));
+    build()
+}
+
 /// The budget for `gpu`, from its **queried** max storage-binding size.
 ///
 /// The constant above is a floor for an unknown device, and using it on a known
@@ -3296,6 +3316,9 @@ pub fn tile_budget_words_upper_bound() -> u64 {
 ///
 /// An explicit `BRAIN_TILE_BUDGET_WORDS` still wins, so tests can force tiling.
 pub fn tile_budget_words_for(gpu: &Gpu) -> u64 {
+    if let Some(w) = TILE_BUDGET_SCOPE.with(std::cell::Cell::get) {
+        return w;
+    }
     if let Some(w) =
         std::env::var("BRAIN_TILE_BUDGET_WORDS").ok().and_then(|s| s.parse::<u64>().ok()).filter(|&w| w > 0)
     {

@@ -36,6 +36,7 @@ pub mod collective;
 pub mod conformance;
 pub mod conformance_adapter;
 pub mod conformance_grad;
+pub mod conformance_head;
 pub mod paged;
 pub mod policy;
 pub mod rowemit;

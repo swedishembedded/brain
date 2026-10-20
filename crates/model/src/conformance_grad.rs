@@ -26,7 +26,6 @@ use crate::{Batch, Model, ModelConfig};
 const EPS: f32 = 5e-3;
 const ATOL: f32 = 4e-3;
 const RTOL: f32 = 8e-2;
-const DIRECTIONS: usize = 3;
 /// A gradient tensor smaller than this fraction of the largest one has no
 /// signal for the tier comparison (see [`tiers_track_the_f32_gradients`]).
 const SIGNAL_FLOOR: f32 = 1e-3;
@@ -108,10 +107,11 @@ pub fn weighted_loss_gradient_matches_finite_differences<M: Model>(subject: &Sub
         require_token_objectives(&mut m).map_err(|e| e.to_string())?.set_logit_scale(scale);
         m.set_batch(Batch::LmWeighted { tokens: &tokens, targets: &targets, weights: &weights });
         let analytic = gradients(&m);
-        for (name, g) in &analytic {
+        for index in subject.budget.pick(analytic.len()) {
+            let (name, g) = &analytic[index];
             let w0 = m.read_weight(name);
             let mut best: Option<(f32, f32, f32)> = None;
-            for _ in 0..DIRECTIONS {
+            for _ in 0..subject.budget.directions.max(1) {
                 let v: Vec<f32> = (0..w0.len()).map(|_| if rng.next_f32() < 0.5 { -1.0 } else { 1.0 }).collect();
                 let a: f32 = g.iter().zip(&v).map(|(g, v)| g * v).sum();
                 let shifted = |sign: f32| -> f32 {

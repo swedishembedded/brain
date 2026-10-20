@@ -10,7 +10,10 @@
 //! your team needs expertise in conformance testing for ML training code you
 //! can procure our services by sending an email to info@swedishembedded.com.
 
-use model::conformance::{Declares, Subject, Tier};
+use model::conformance::{Budget, ChunkedHead, Declares, Subject, Tier};
+
+/// Tokens of the C8 row: three full 64-row head chunks and a partial one.
+const CHUNK_SEQ: u32 = 200;
 
 /// Distinct, non-square dims: d_model 64, q_dim 32, kv_dim 16, d_ff 96, vocab 23
 /// (every contraction width a whole number of int8 groups).
@@ -18,6 +21,11 @@ fn qwen3_subject() -> Subject<qwen3::Qwen> {
     fn config(adapter_rank: Option<u32>) -> qwen3::QwenConfig {
         let lora = adapter_rank.map(|rank| qwen3::LoraCfg::new(rank, rank as f32, ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect()));
         qwen3::QwenConfig { lora, ..qwen3::QwenConfig::tiny_i8() }
+    }
+    fn chunked(adapter_rank: Option<u32>, head_budget_words: u64, seed: u64) -> qwen3::Qwen {
+        let cfg = qwen3::QwenConfig { block_size: CHUNK_SEQ, max_position_embeddings: CHUNK_SEQ, ..config(adapter_rank) };
+        let init = qwen3::init_weights(&cfg, seed);
+        model::block::with_tile_budget_words(head_budget_words, || qwen3::Qwen::new(cfg, 1, CHUNK_SEQ, &init))
     }
     Subject {
         name: "qwen3",
@@ -28,6 +36,8 @@ fn qwen3_subject() -> Subject<qwen3::Qwen> {
             Tier { name: "bf16", build: |cfg, rows, seq, init| qwen3::Qwen::new_lora_dt(cfg, rows, seq, init, qwen3::Dtype::BF16), grad_rel_tol: 5e-2 },
             Tier { name: "int8", build: |cfg, rows, seq, init| qwen3::Qwen::new_lora_dt(cfg, rows, seq, init, qwen3::Dtype::I8), grad_rel_tol: 2e-1 },
         ],
+        budget: Budget::default(),
+        chunked_head: Some(ChunkedHead { seq: CHUNK_SEQ, build: chunked }),
     }
 }
 
@@ -37,7 +47,15 @@ fn gpt2_subject() -> Subject<gpt2::Gpt> {
         assert!(adapter_rank.is_none(), "gpt2 declares no adapters");
         gpt2::GptConfig { vocab: 23, block_size: 12, n_layers: 2, d_model: 16, n_heads: 2, d_ff: 40 }
     }
-    Subject { name: "gpt2", config, declares: Declares { token_objectives: true, adapters: false }, load: |path, rows, seq| gpt2::Gpt::load(path, rows, seq), tiers: Vec::new() }
+    Subject {
+        name: "gpt2",
+        config,
+        declares: Declares { token_objectives: true, adapters: false },
+        load: |path, rows, seq| gpt2::Gpt::load(path, rows, seq),
+        tiers: Vec::new(),
+        budget: Budget::default(),
+        chunked_head: None,
+    }
 }
 
 /// A Qwen3.5 hybrid decoder: three Gated-DeltaNet layers and one
@@ -66,6 +84,12 @@ fn qwen35_subject() -> Subject<qwen35::model::Qwen35> {
         let opts = qwen35::model::TrainOpts { base: TierPolicy::uniform(base), ..Default::default() };
         qwen35::model::Qwen35::new_train_opts_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg, rows, seq, init, &opts)
     }
+    fn chunked(adapter_rank: Option<u32>, head_budget_words: u64, seed: u64) -> qwen35::model::Qwen35 {
+        let cfg = qwen35::config::Qwen35Config { block_size: CHUNK_SEQ, max_position_embeddings: CHUNK_SEQ, ..config(adapter_rank) };
+        let init = <qwen35::model::Qwen35 as model::Model>::init_weights(&cfg, seed);
+        let opts = qwen35::model::TrainOpts { head_budget_words: Some(head_budget_words), ..Default::default() };
+        qwen35::model::Qwen35::new_train_opts_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg, 1, CHUNK_SEQ, &init, &opts)
+    }
     Subject {
         name: "qwen35",
         config,
@@ -75,6 +99,10 @@ fn qwen35_subject() -> Subject<qwen35::model::Qwen35> {
             Tier { name: "bf16", build: |cfg, rows, seq, init| frozen(Dtype::BF16, cfg, rows, seq, init), grad_rel_tol: 5e-2 },
             Tier { name: "nf4", build: |cfg, rows, seq, init| frozen(Dtype::NF4, cfg, rows, seq, init), grad_rel_tol: 4e-1 },
         ],
+        // A finite-difference probe is two forward passes of a four-layer hybrid
+        // decoder: ten tensors spread over the parameter list, two directions each.
+        budget: Budget { tensors: Some(10), directions: 2 },
+        chunked_head: Some(ChunkedHead { seq: CHUNK_SEQ, build: chunked }),
     }
 }
 
@@ -97,6 +125,8 @@ fn qwen35moe_subject() -> Subject<qwen35moe::model::Qwen35> {
         declares: Declares { token_objectives: true, adapters: true },
         load: |path, rows, seq| qwen35moe::model::Qwen35::load(path, rows, seq),
         tiers: Vec::new(),
+        budget: Budget { tensors: Some(10), directions: 2 },
+        chunked_head: None,
     }
 }
 
@@ -204,7 +234,7 @@ fn a_model_without_token_objectives_is_refused_by_every_objective() {
     fn config(_adapter_rank: Option<u32>) -> FakeConfig {
         FakeConfig
     }
-    let subject: Subject<Fake> = Subject { name: "fake", config, declares: Declares { token_objectives: false, adapters: false }, load: |_, _, _| Fake, tiers: Vec::new() };
+    let subject: Subject<Fake> = Subject { name: "fake", config, declares: Declares { token_objectives: false, adapters: false }, load: |_, _, _| Fake, tiers: Vec::new(), budget: Budget::default(), chunked_head: None };
     // seed: fixed so a failure reproduces
     let seed = 41;
     model::conformance::check_declaration(&subject, seed).unwrap_or_else(|e| panic!("{e}"));
@@ -220,14 +250,4 @@ fn a_false_declaration_fails_the_suite() {
     // seed: fixed so a failure reproduces
     let err = model::conformance::run(&subject, 41).expect_err("a model that offers the capability but declares it absent must fail");
     assert!(err.contains("declares token_objectives=false"), "{err}");
-}
-
-/// C8: a chunked LM-head cross-entropy equals the unchunked one (loss,
-/// log-probabilities and gradients). The shared chunked head lands with
-/// lane A1's `head_ce`; until then qwen3's own chunked head is covered by
-/// `qwen3/tests/chunked_head.rs` and this stays a visible, failing-when-run gap.
-#[test]
-#[ignore = "waits for the shared chunked head cross-entropy (head_ce)"]
-fn chunked_head_ce_equals_unchunked() {
-    panic!("C8 is not implemented: register the chunked-head hook on Subject once head_ce lands");
 }
