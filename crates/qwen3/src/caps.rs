@@ -436,7 +436,7 @@ impl Action for GenerateAction {
                     Some(_) => Vec::new(),
                     None => data::generation::stop_ids(tok_dir, t, None, format.end_of_turn())?,
                 };
-                Plan::Chat { req, eos }
+                Plan::Chat { req: Box::new(req), eos }
             }
             None => {
                 if inv.get_str("suffix").is_some() {
@@ -1279,7 +1279,7 @@ fn guarded<T>(what: &str, f: impl FnOnce() -> T) -> Result<T, String> {
 /// chat-serving parse (chat template, tool schemas, stop strings); without
 /// one, raw token ids in and out, with no detokenization possible.
 enum Plan {
-    Chat { req: ParsedRequest, eos: Vec<u32> },
+    Chat { req: Box<ParsedRequest>, eos: Vec<u32> },
     Raw { ids: Vec<u32>, max_new: usize, temp: f32, top_k: usize, top_p: f32, seed: u64, eos: Vec<u32> },
 }
 

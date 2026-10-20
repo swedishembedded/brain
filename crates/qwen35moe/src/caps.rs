@@ -190,7 +190,7 @@ impl Action for GenerateAction {
                     Some(_) => Vec::new(),
                     None => ["<|im_end|>", "<|endoftext|>"].iter().filter_map(|s| t.encode(s).first().copied()).collect(),
                 };
-                Plan::Chat { req, eos }
+                Plan::Chat { req: Box::new(req), eos }
             }
             None => {
                 let prompt = inv.get_str("prompt").unwrap_or_default();
@@ -284,7 +284,7 @@ impl Action for GenerateAction {
 /// `qwen3::chat`); without one, raw token ids in and out, with no
 /// detokenization possible.
 enum Plan {
-    Chat { req: ParsedRequest, eos: Vec<u32> },
+    Chat { req: Box<ParsedRequest>, eos: Vec<u32> },
     Raw { ids: Vec<u32>, max_new: usize, temp: f32, top_k: usize, top_p: f32, seed: u64, eos: Vec<u32> },
 }
 
