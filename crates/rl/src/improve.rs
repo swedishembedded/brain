@@ -541,7 +541,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "scoring decodes greedily")]
     fn a_sampling_rollout_is_refused() {
-        require_greedy(&RolloutParams { max_new: 4, sample: model::serve::SampleParams { temp: 0.7, top_k: 0, top_p: 1.0 }, eos: None });
+        require_greedy(&RolloutParams { max_new: 4, sample: model::serve::SampleParams { temp: 0.7, top_k: 0, top_p: 1.0, ..model::serve::SampleParams::greedy() }, eos: None });
     }
 
     #[test]

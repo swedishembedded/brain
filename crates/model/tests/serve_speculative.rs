@@ -609,7 +609,7 @@ fn greedy_verification_accepts_the_longest_matching_prefix() {
 fn rejection_sampling_preserves_the_target_distribution() {
     let cands = p_table();
     let p = softmax(&cands);
-    let params = SampleParams { temp: 1.0, top_k: 0, top_p: 1.0 };
+    let params = SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..SampleParams::greedy() };
     // The drafter proposes the SECOND most likely token every time.
     let rows = vec![cands.clone(), cands.clone()];
     let mut rng = data::rng::Rng::new(77);
@@ -629,7 +629,7 @@ fn rejection_sampling_preserves_the_target_distribution() {
 #[test]
 fn a_proposal_outside_the_target_support_is_always_rejected() {
     let cands = p_table();
-    let params = SampleParams { temp: 1.0, top_k: 2, top_p: 1.0 };
+    let params = SampleParams { temp: 1.0, top_k: 2, top_p: 1.0, ..SampleParams::greedy() };
     let rows = vec![cands.clone(), cands.clone()];
     let mut rng = data::rng::Rng::new(5);
     for _ in 0..500 {
@@ -641,7 +641,7 @@ fn a_proposal_outside_the_target_support_is_always_rejected() {
 
 #[test]
 fn sampled_speculation_matches_the_sampled_distribution_end_to_end() {
-    let params = SampleParams { temp: 1.0, top_k: 2, top_p: 1.0 };
+    let params = SampleParams { temp: 1.0, top_k: 2, top_p: 1.0, ..SampleParams::greedy() };
     let counts = |spec: bool| {
         let mut m: HashMap<Vec<u32>, usize> = HashMap::new();
         for seed in 0..3000u64 {

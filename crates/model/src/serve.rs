@@ -22,8 +22,10 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::paged::{BlockAllocator, BlockTable, KvNamespace};
 
+mod sampler;
 mod speculate;
 pub mod conformance;
+pub use sampler::{apply_processors, DryParams, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_THINK_CLOSE};
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
 
 /// The seam a model's paged serving engine implements. Every method mirrors
@@ -452,6 +454,22 @@ pub struct SampleParams {
     pub top_k: usize,
     /// `<= 0.0` or `>= 1.0` disables nucleus filtering.
     pub top_p: f32,
+    /// Drop every token whose probability is below `min_p` times the best
+    /// token's, after temperature, top-k and top-p; `<= 0.0` disables it.
+    pub min_p: f32,
+    /// OpenAI `presence_penalty`: subtracted from the logit of every token that
+    /// already appears in the generated text. `0.0` disables it.
+    pub presence_penalty: f32,
+    /// OpenAI `frequency_penalty`: subtracted once per occurrence in the
+    /// generated text. `0.0` disables it.
+    pub frequency_penalty: f32,
+    /// vLLM `repetition_penalty`: divides a seen token's positive logit (multiplies
+    /// a negative one), the prompt included. `1.0` disables it.
+    pub repetition_penalty: f32,
+    /// The DRY repetition penalty over the whole context (prompt and generated).
+    pub dry: DryParams,
+    /// Force the closing tag after this many tokens inside a think block.
+    pub thinking: Option<ThinkingBudget>,
 }
 
 impl Default for SampleParams {
@@ -462,10 +480,22 @@ impl Default for SampleParams {
 
 impl SampleParams {
     pub fn greedy() -> SampleParams {
-        SampleParams { temp: 0.0, top_k: 0, top_p: 1.0 }
+        SampleParams { temp: 0.0, top_k: 0, top_p: 1.0, min_p: 0.0, presence_penalty: 0.0, frequency_penalty: 0.0, repetition_penalty: 1.0, dry: DryParams::off(), thinking: None }
     }
     pub fn is_greedy(&self) -> bool {
         self.temp <= 0.0
+    }
+    /// Whether any logit processor (penalty or DRY) is asked for. Off by
+    /// default; a request that asks for none samples exactly as it always did.
+    pub fn has_processors(&self) -> bool {
+        self.presence_penalty != 0.0 || self.frequency_penalty != 0.0 || (self.repetition_penalty != 1.0 && self.repetition_penalty > 0.0) || self.dry.active()
+    }
+    /// Whether the step must see the decoder's candidate list instead of taking
+    /// its on-device argmax: real sampling, or a processor that changes which
+    /// token is the best (a penalised greedy decode is an argmax of the
+    /// penalised logits, so it needs the candidates too).
+    pub fn needs_candidates(&self) -> bool {
+        !self.is_greedy() || self.has_processors()
     }
 }
 
@@ -493,6 +523,19 @@ pub fn sample_from_topk(candidates: &[(u32, f32)], params: SampleParams, rng: &m
 /// (`logprob = 0.0`).
 pub fn sample_from_topk_with_logprob(candidates: &[(u32, f32)], params: SampleParams, rng: &mut data::rng::Rng) -> (u32, f32) {
     sample_from_topk_impl(candidates, params, rng)
+}
+
+/// [`sample_from_topk_with_logprob`] for a sequence with a context: the request's
+/// logit processors (penalties, DRY) are applied to the candidates first, so the
+/// choice (greedy or drawn) and the reported log-probability are those of the
+/// processed distribution. With no processor asked for it is the plain function.
+pub fn sample_in_context(candidates: &[(u32, f32)], params: SampleParams, ctx: &SampleContext<'_>, rng: &mut data::rng::Rng) -> (u32, f32) {
+    if !params.has_processors() {
+        return sample_from_topk_impl(candidates, params, rng);
+    }
+    let mut processed = candidates.to_vec();
+    apply_processors(&mut processed, &params, ctx);
+    sample_from_topk_impl(&processed, params, rng)
 }
 
 /// Shared body for [`sample_from_topk`]/[`sample_from_topk_with_logprob`] -
@@ -557,6 +600,13 @@ fn truncated_weights(candidates: &[(u32, f32)], params: SampleParams) -> (Vec<f3
         }
     }
     probs.truncate(cut);
+    // min-p: the candidates are sorted, so the survivors are a prefix, and the
+    // best token (`probs[0]`) always survives.
+    if params.min_p > 0.0 {
+        let floor = probs[0] * params.min_p;
+        let keep = probs.iter().take_while(|&&p| p >= floor).count().max(1);
+        probs.truncate(keep);
+    }
     let kept_sum: f32 = probs.iter().sum();
     (probs, kept_sum)
 }
@@ -801,6 +851,8 @@ struct Resume {
     next_input: u32,
     spec: speculate::SeqSpec,
     rng: data::rng::Rng,
+    /// Where the sequence was in its think block.
+    think: Option<sampler::ThinkState>,
 }
 
 /// A request being prefilled over several iterations: it holds its blocks and a
@@ -842,6 +894,8 @@ struct Running {
     /// (not per-batch) so a `seed` reproduces exactly regardless of what else
     /// is in the batch alongside it.
     sample: SampleParams,
+    /// Where the sequence is in its think block when a thinking budget was asked for.
+    think: Option<sampler::ThinkState>,
     /// The seed `rng` started from, kept so a preempted sequence can be
     /// requeued as the request it was.
     seed: u64,
@@ -862,6 +916,9 @@ fn accept_token(r: &mut Running, next: u32, logprob: f32) {
     if r.stop.contains(&next) {
         r.done = true;
         return;
+    }
+    if let Some(t) = r.think.as_mut() {
+        t.accept(next);
     }
     r.generated.push(next);
     r.logprobs.push(logprob);
@@ -1407,11 +1464,11 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// as part of the context to prefill.
     fn requeue_for_recompute(&mut self, mut r: Running) {
         self.dec.release_table(&mut r.table);
-        let Running { id, adapter, generated, logprobs, max_new, stop, next_input, mut context, spec, sample, seed, rng, .. } = r;
+        let Running { id, adapter, generated, logprobs, max_new, stop, next_input, mut context, spec, sample, seed, rng, think, .. } = r;
         let uncached = context.pop();
         debug_assert_eq!(uncached, Some(next_input), "the newest token is the one with no cache entry yet");
         let req = Request { prompt: context, max_new, stop };
-        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, next_input, spec, rng }) });
+        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, next_input, spec, rng, think }) });
     }
 
     /// Index of the first waiting request that can be admitted this
@@ -1493,12 +1550,12 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// picked from the prefill's final hidden state.
     fn start_running(&mut self, p: Prefilling, hidden: Vec<f32>, report: &mut StepReport) {
         let Prefilling { id, prompt, max_new, stop, adapter, sample, seed, table, resume, .. } = p;
-        if let Some(Resume { generated, logprobs, next_input, spec, rng }) = resume {
+        if let Some(Resume { generated, logprobs, next_input, spec, rng, think }) = resume {
             // The cache is whole again; the token to decode next was chosen
             // before the preemption, so the prefill's own output is not used.
             let mut context = prompt;
             context.push(next_input);
-            self.running.push(Running { id, table, adapter, generated, logprobs, max_new, stop, next_input, context, spec, done: false, sample, seed, rng });
+            self.running.push(Running { id, table, adapter, generated, logprobs, max_new, stop, next_input, context, spec, done: false, sample, think, seed, rng });
             return;
         }
         let mut rng = data::rng::Rng::new(seed);
@@ -1506,14 +1563,18 @@ impl<D: PagedDecoder> Scheduler<D> {
         // one (`qwen3::serve::Engine`): neither ships a `[vocab]` block to
         // the host for this one-time-per-request first token, matching
         // the steady-state per-token decode loop.
-        let (first, first_logprob) = if sample.is_greedy() {
+        let think = sample.thinking.map(sampler::ThinkState::new);
+        let (first, first_logprob) = if let Some(forced) = think.and_then(|t| t.forced_next()) {
+            // A prompt that ends inside a think block whose budget is zero: the closing tag comes first.
+            (forced, 0.0)
+        } else if !sample.needs_candidates() {
             (self.dec.admit_greedy(&hidden), 0.0)
         } else {
             let k = self.dec.topk_capacity().max(1);
             let candidates = self.dec.admit_topk(&hidden, k);
-            sample_from_topk_with_logprob(&candidates, sample, &mut rng)
+            sample_in_context(&candidates, sample, &SampleContext { context: &prompt, prompt_len: prompt.len() }, &mut rng)
         };
-        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, seed, rng };
+        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, seed, rng };
         accept_token(&mut r, first, first_logprob);
         report.admitted.push(id);
         self.running.push(r);
@@ -1707,8 +1768,10 @@ impl<D: PagedDecoder> Scheduler<D> {
             // k=1 for everyone this iteration. Purely-greedy batches (today's
             // only case, and the common one) take the exact path they always
             // did, untouched.
-            let all_greedy = active.iter().all(|&i| self.running[i].sample.is_greedy());
-            let mut k = if self.waiting.is_empty() && self.prefilling.is_empty() && all_greedy { remaining_min.min(self.dec.decode_window_capacity()) } else { 1 };
+            let all_greedy = active.iter().all(|&i| !self.running[i].sample.needs_candidates());
+            // A thinking budget is checked on the host after every token, so such a batch takes no window either.
+            let host_checked = active.iter().any(|&i| self.running[i].think.is_some_and(|t| t.watching()));
+            let mut k = if self.waiting.is_empty() && self.prefilling.is_empty() && all_greedy && !host_checked { remaining_min.min(self.dec.decode_window_capacity()) } else { 1 };
             // Every append must succeed mid-window (no host decisions there):
             // require a comfortable block reserve, else fall back to one step.
             if k > 1 && (self.dec.free_blocks() as usize) < active.len() * k {
@@ -1743,7 +1806,8 @@ impl<D: PagedDecoder> Scheduler<D> {
                     .enumerate()
                     .map(|(bi, &si)| {
                         let r = &mut self.running[si];
-                        vec![sample_from_topk_with_logprob(&candidates[bi], r.sample, &mut r.rng)]
+                        let ctx = SampleContext { context: &r.context, prompt_len: r.context.len() - r.generated.len() };
+                        vec![sample_in_context(&candidates[bi], r.sample, &ctx, &mut r.rng)]
                     })
                     .collect()
             };
@@ -1751,6 +1815,11 @@ impl<D: PagedDecoder> Scheduler<D> {
                 let r = &mut self.running[si];
                 let mut used = 0usize;
                 for &(next, logprob) in &window[bi] {
+                    // The budget ran out: the closing sequence replaces the model's choice.
+                    let (next, logprob) = match r.think.and_then(|t| t.forced_next()) {
+                        Some(forced) => (forced, 0.0),
+                        None => (next, logprob),
+                    };
                     // `used` counts consumed window slots (a real decode step
                     // happened and wrote a KV-cache entry) regardless of
                     // whether `next` ends up in `generated` - EOS still
@@ -1818,7 +1887,7 @@ mod tests {
         // by construction; this asserts the greedy short-circuit trusts that
         // contract rather than re-deriving it).
         let mut rng = data::rng::Rng::new(1);
-        let params = SampleParams { temp: 0.0, top_k: 0, top_p: 1.0 };
+        let params = SampleParams { temp: 0.0, top_k: 0, top_p: 1.0, ..SampleParams::greedy() };
         assert_eq!(sample_from_topk(&candidates, params, &mut rng), 7);
     }
 
@@ -1828,7 +1897,7 @@ mod tests {
         // picking the single highest-value candidate, regardless of the RNG
         // draw -- there is only one candidate left to draw from.
         let candidates = [(3u32, 9.0f32), (1, 4.0), (2, -1.0)];
-        let params = SampleParams { temp: 0.7, top_k: 1, top_p: 1.0 };
+        let params = SampleParams { temp: 0.7, top_k: 1, top_p: 1.0, ..SampleParams::greedy() };
         for seed in 0..8u64 {
             let mut rng = data::rng::Rng::new(seed);
             assert_eq!(sample_from_topk(&candidates, params, &mut rng), 3);
@@ -1839,7 +1908,7 @@ mod tests {
     fn sample_from_topk_never_returns_a_token_outside_the_candidate_set() {
         let candidates: Vec<(u32, f32)> = (0..40).map(|i| (100 + i, 40.0 - i as f32)).collect();
         let ids: std::collections::HashSet<u32> = candidates.iter().map(|&(id, _)| id).collect();
-        let params = SampleParams { temp: 1.0, top_k: 10, top_p: 0.9 };
+        let params = SampleParams { temp: 1.0, top_k: 10, top_p: 0.9, ..SampleParams::greedy() };
         let mut rng = data::rng::Rng::new(42);
         for _ in 0..200 {
             let t = sample_from_topk(&candidates, params, &mut rng);
@@ -1847,10 +1916,28 @@ mod tests {
         }
     }
 
+    /// min-p keeps the tokens whose probability is at least `min_p` times the best token's (after
+    /// temperature, top-k and top-p) and never removes the best one; 0 leaves the set alone.
+    #[test]
+    fn min_p_drops_tokens_far_below_the_best() {
+        let candidates = [(1u32, 2.0f32), (2, 1.9), (3, -3.0)];
+        let plain = SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..SampleParams::greedy() };
+        let with = SampleParams { min_p: 0.5, ..plain };
+        assert!(candidate_logprob(&candidates, plain, 3).is_finite(), "without min-p the tail token can be drawn");
+        assert_eq!(candidate_logprob(&candidates, with, 3), f32::NEG_INFINITY, "its probability is far below half the best's");
+        assert!(candidate_logprob(&candidates, with, 2).is_finite(), "0.91 of the best survives min_p 0.5");
+        let extreme = SampleParams { min_p: 1.0, ..plain };
+        assert!(candidate_logprob(&candidates, extreme, 1).is_finite() && candidate_logprob(&candidates, extreme, 2) == f32::NEG_INFINITY, "min_p 1 keeps only the best");
+        let mut rng = data::rng::Rng::new(3);
+        for _ in 0..200 {
+            assert_ne!(sample_from_topk(&candidates, with, &mut rng), 3);
+        }
+    }
+
     #[test]
     fn sample_from_topk_is_reproducible_for_a_fixed_seed() {
         let candidates: Vec<(u32, f32)> = (0..40).map(|i| (i, 40.0 - i as f32 * 0.3)).collect();
-        let params = SampleParams { temp: 0.8, top_k: 20, top_p: 0.95 };
+        let params = SampleParams { temp: 0.8, top_k: 20, top_p: 0.95, ..SampleParams::greedy() };
         let draw = |seed: u64| {
             let mut rng = data::rng::Rng::new(seed);
             (0..20).map(|_| sample_from_topk(&candidates, params, &mut rng)).collect::<Vec<u32>>()
@@ -1866,7 +1953,7 @@ mod tests {
     #[test]
     fn sample_from_topk_with_logprob_matches_a_manual_softmax_over_the_kept_set() {
         let candidates = [(5u32, 2.0f32), (1, 1.0), (9, 0.5), (3, -3.0)];
-        let params = SampleParams { temp: 0.7, top_k: 3, top_p: 1.0 };
+        let params = SampleParams { temp: 0.7, top_k: 3, top_p: 1.0, ..SampleParams::greedy() };
         for seed in 0..16u64 {
             let mut rng = data::rng::Rng::new(seed);
             let (tok, logprob) = sample_from_topk_with_logprob(&candidates, params, &mut rng);
@@ -1889,7 +1976,7 @@ mod tests {
     fn sample_from_topk_with_logprob_is_zero_at_greedy() {
         let candidates = [(7u32, 3.0f32), (2, 5.0), (9, 1.0)];
         let mut rng = data::rng::Rng::new(1);
-        let params = SampleParams { temp: 0.0, top_k: 0, top_p: 1.0 };
+        let params = SampleParams { temp: 0.0, top_k: 0, top_p: 1.0, ..SampleParams::greedy() };
         let (tok, logprob) = sample_from_topk_with_logprob(&candidates, params, &mut rng);
         assert_eq!(tok, 7); // first entry, matching sample_from_topk's greedy contract
         assert_eq!(logprob, 0.0);
@@ -1901,7 +1988,7 @@ mod tests {
         // the mass at temp=1. A tight top_p must keep drawing it; top_p=1
         // (disabled) must occasionally draw further down the tail.
         let candidates = [(0u32, 20.0f32), (1, 1.0), (2, 0.5), (3, 0.1)];
-        let narrow = SampleParams { temp: 1.0, top_k: 0, top_p: 0.5 };
+        let narrow = SampleParams { temp: 1.0, top_k: 0, top_p: 0.5, ..SampleParams::greedy() };
         let mut rng = data::rng::Rng::new(7);
         for _ in 0..50 {
             assert_eq!(sample_from_topk(&candidates, narrow, &mut rng), 0, "tight top_p must stay on the dominant candidate");
@@ -1914,7 +2001,7 @@ mod tests {
     #[test]
     fn candidate_logprob_is_the_probability_the_sampler_drew_with() {
         let candidates: Vec<(u32, f32)> = vec![(7, 3.0), (2, 2.0), (9, 1.0), (4, 0.5)];
-        let params = SampleParams { temp: 0.8, top_k: 3, top_p: 0.95 };
+        let params = SampleParams { temp: 0.8, top_k: 3, top_p: 0.95, ..SampleParams::greedy() };
         let mut rng = data::rng::Rng::new(11);
         for _ in 0..20 {
             let (token, drawn) = sample_from_topk_with_logprob(&candidates, params, &mut rng);
@@ -1938,7 +2025,8 @@ mod tests {
             context: Vec::new(),
             spec: speculate::SeqSpec::new(),
             done: false,
-            sample: SampleParams { temp: 0.0, top_k: 0, top_p: 1.0 },
+            sample: SampleParams::greedy(),
+            think: None,
             seed: 0,
             rng: data::rng::Rng::new(0),
         }

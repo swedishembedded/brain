@@ -552,7 +552,7 @@ mod tests {
         // Sampling is greedy over candidate rows, so token 1 is drawn then token 3 (the stop token).
         let rows = vec![vec![0.0, 5.0, 0.0, 0.0], vec![0.0, 0.0, 0.0, 9.0], vec![0.0; 4]];
         let m = ToyModel { cfg: ToyCfg { vocab, block_size: 8 }, rows, calls: Cell::new(0) };
-        let params = RolloutParams { max_new: 4, sample: SampleParams { temp: 1.0, top_k: 0, top_p: 1.0 }, eos: Some(3) };
+        let params = RolloutParams { max_new: 4, sample: SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..SampleParams::greedy() }, eos: Some(3) };
         // seed: fixed so the draw (token 1, then the stop token) reproduces
         let mut rng = data::rng::Rng::new(1);
         let c = ModelRollout::new(&m).sample_n(&[0], 1, &params, &mut rng).pop().unwrap();

@@ -838,7 +838,7 @@ async fn chat_bad_bodies_are_400() {
         json!({"messages": msg}),                                    // no model
         json!({"model": "brain-chat"}),                              // no messages
         json!({"model": "brain-chat", "messages": msg, "n": 2}),     // n > 1
-        json!({"model": "brain-chat", "messages": msg, "presence_penalty": 0.5}),
+        json!({"model": "brain-chat", "messages": msg, "presence_penalty": 3.0}),
         json!({"model": "brain-chat", "messages": msg, "top_logprobs": 5}),
         json!({"model": "brain-chat", "messages": msg, "return_token_ids": "yes"}),
         json!({"model": "brain-chat", "messages": msg, "top_k": 5000}),

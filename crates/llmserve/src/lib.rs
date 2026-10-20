@@ -23,7 +23,7 @@
 
 use capability::{ActionResult, Invocation, Progress};
 use data::qwen_tokenizer::QwenBpe;
-use model::serve::{PagedDecoder, RejectReason, Request, SampleParams, Scheduler};
+use model::serve::{PagedDecoder, RejectReason, Request, Scheduler};
 use qwen3::chat::{ParsedRequest, SeqState};
 use residency::{AdapterIdentity, Instance, JobFeed};
 
@@ -164,7 +164,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         };
         match self.front.parse(inv) {
             Ok(req) => {
-                let sample = SampleParams { temp: req.temp, top_k: req.top_k, top_p: req.top_p };
+                let sample = req.sampler;
                 let seed = req.seed;
                 let max_new = req.max_new;
                 job.capture = Capture::of(inv, &req.ids);

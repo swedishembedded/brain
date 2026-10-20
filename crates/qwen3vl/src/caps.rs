@@ -438,6 +438,7 @@ impl Resident {
             temp: temperature,
             top_k,
             top_p,
+            sampler: qwen3::chat::plain_sampler(temperature, top_k, top_p),
             seed,
             stops: Vec::new(),
             tool_choice: tool_choice.clone(),

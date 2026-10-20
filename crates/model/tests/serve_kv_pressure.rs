@@ -259,7 +259,7 @@ fn sequences_outgrowing_the_pool_and_a_too_small_host_budget_finish_with_their_s
 
 #[test]
 fn a_preempted_sampled_sequence_keeps_its_seeded_stream() {
-    let sample = SampleParams { temp: 0.8, top_k: 3, top_p: 1.0 };
+    let sample = SampleParams { temp: 0.8, top_k: 3, top_p: 1.0, ..SampleParams::greedy() };
     let (got, _) = run_oversubscribed(0, sample);
     assert_each_matches_running_alone(&got, sample);
 }
@@ -279,7 +279,7 @@ fn run_with_logprobs(sched: &mut Scheduler<Mock>) -> HashMap<u64, (Vec<u32>, Vec
 
 #[test]
 fn a_preempted_sampled_sequence_reports_the_log_probabilities_of_its_solo_run() {
-    let sample = SampleParams { temp: 0.8, top_k: 3, top_p: 1.0 };
+    let sample = SampleParams { temp: 0.8, top_k: 3, top_p: 1.0, ..SampleParams::greedy() };
     let mut sched = Scheduler::new(Mock::new(POOL_BLOCKS, 0), 8);
     let ids: Vec<u64> = SEEDS.iter().map(|&s| sched.submit_sampled(request(s), sample, 100 + s as u64)).collect();
     let mut together = run_with_logprobs(&mut sched);

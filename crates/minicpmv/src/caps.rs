@@ -284,6 +284,7 @@ impl Session {
             temp,
             top_p,
             top_k,
+            sampler: qwen3::chat::plain_sampler(temp, top_k, top_p),
             seed,
             stops: qwen3::chat::parse_stops(inv.get_str("stop").as_deref())?,
             tool_choice: rendered.tool_choice,

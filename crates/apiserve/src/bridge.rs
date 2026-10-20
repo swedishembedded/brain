@@ -127,6 +127,8 @@ pub struct ChatOutcome {
     pub text: String,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
+    /// Of `completion_tokens`, those spent inside think blocks.
+    pub reasoning_tokens: i64,
     pub finish: String,
     pub reasoning: String,
     pub tool_calls: Vec<serde_json::Value>,
@@ -187,7 +189,7 @@ pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
     let numbers = |key: &str| o.outputs.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_i64()).collect::<Vec<_>>());
     let logprobs = o.outputs.get("completion_logprobs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_f64()).collect::<Vec<_>>());
     let text_of = |key: &str| o.outputs.get(key).and_then(|v| v.as_str()).map(str::to_string);
-    ChatOutcome { text, prompt_tokens, completion_tokens, finish, reasoning, tool_calls, seed, adapter, base_digest: text_of("base_digest"), backend: text_of("backend"), engine: text_of("engine"), prompt_token_ids: numbers("prompt_token_ids"), completion_token_ids: numbers("completion_token_ids"), logprobs }
+    ChatOutcome { text, prompt_tokens, completion_tokens, reasoning_tokens: o.outputs.get("reasoning_tokens").and_then(|v| v.as_i64()).unwrap_or_default(), finish, reasoning, tool_calls, seed, adapter, base_digest: text_of("base_digest"), backend: text_of("backend"), engine: text_of("engine"), prompt_token_ids: numbers("prompt_token_ids"), completion_token_ids: numbers("completion_token_ids"), logprobs }
 }
 
 /// Detect an admission-time `model::serve::RejectReason::ExceedsCapacity` reply -

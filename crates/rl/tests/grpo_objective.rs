@@ -72,7 +72,7 @@ fn grpo_group_size_two_runs_end_to_end_through_fit_with() {
         seq_len: 8,
         rollout: model::rollout::RolloutParams {
             max_new: 3,
-            sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0 },
+            sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..model::serve::SampleParams::greedy() },
             eos: None,
         },
         max_attempts: 1,
@@ -123,7 +123,7 @@ fn grpo_group_size_one_is_the_rft_star_path_and_runs_end_to_end() {
         seq_len: 8,
         rollout: model::rollout::RolloutParams {
             max_new: 3,
-            sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0 },
+            sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..model::serve::SampleParams::greedy() },
             eos: None,
         },
         max_attempts: 4,
@@ -196,7 +196,7 @@ fn an_external_rollout_is_synced_on_schedule_and_its_logprobs_are_recomputed() {
         clip_eps: 0.2,
         kl_beta: 0.0,
         seq_len: 8,
-        rollout: model::rollout::RolloutParams { max_new: 3, sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0 }, eos: None },
+        rollout: model::rollout::RolloutParams { max_new: 3, sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..model::serve::SampleParams::greedy() }, eos: None },
         max_attempts: 1,
         options: GrpoOptions { advantage: AdvantageNorm::ZScore, ..GrpoOptions::default() },
     };

@@ -767,7 +767,7 @@ fn non_stream_body(model: &str, co: &bridge::ChatOutcome, native: bool) -> Value
         "created": CREATED_UNIX,
         "model": model,
         "choices": [choice],
-        "usage": usage(co.prompt_tokens, co.completion_tokens),
+        "usage": usage(co.prompt_tokens, co.completion_tokens, co.reasoning_tokens),
     });
     if native {
         // OpenRouter's ChatResult requires system_fingerprint (nullable).
@@ -824,14 +824,19 @@ fn completion_object(id: &str, model: &str, text: &str, finish: Option<&str>) ->
     })
 }
 
-fn usage(prompt: i64, completion: i64) -> Value {
-    json!({ "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion })
+fn usage(prompt: i64, completion: i64, reasoning: i64) -> Value {
+    let mut u = json!({ "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion });
+    // OpenAI's name for the share of the completion spent thinking.
+    if reasoning > 0 {
+        u["completion_tokens_details"] = json!({ "reasoning_tokens": reasoning });
+    }
+    u
 }
 
 /// The non-streaming `text_completion` body.
 fn completion_body(model: &str, co: &bridge::ChatOutcome) -> Value {
     let mut body = completion_object(&format!("cmpl-{}", Uuid::new_v4().simple()), model, &co.text, Some(&co.finish));
-    body["usage"] = usage(co.prompt_tokens, co.completion_tokens);
+    body["usage"] = usage(co.prompt_tokens, co.completion_tokens, 0);
     attach_served(&mut body, co);
     body
 }
@@ -880,7 +885,7 @@ fn render_completion_stream(mut src: bridge::EventStream, model: String, want_us
         if want_usage {
             let mut frame = completion_object(&id, &model, "", None);
             frame["choices"] = json!([]);
-            frame["usage"] = usage(prompt, completion);
+            frame["usage"] = usage(prompt, completion, 0);
             yield Ok(Event::default().data(frame.to_string()));
         }
         yield Ok(Event::default().data("[DONE]"));
@@ -1302,7 +1307,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
         }
 
         let mut finish = String::from("stop");
-        let (mut prompt, mut completion) = (0i64, 0i64);
+        let (mut prompt, mut completion, mut reasoning) = (0i64, 0i64, 0i64);
         // Whether any real token delta was streamed. A model that only reports
         // coarse `Progress::step` ticks (no `delta`) - `brain/qwen3omnimoe` is one -
         // produces its whole answer in the terminal `Outcome` and would
@@ -1342,6 +1347,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                     captured = Some(capture);
                     prompt = co.prompt_tokens;
                     completion = co.completion_tokens;
+                    reasoning = co.reasoning_tokens;
                     finish = co.finish;
                     final_text = co.text;
                 }
@@ -1402,7 +1408,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                 "created": CREATED_UNIX,
                 "model": model,
                 "choices": [],
-                "usage": usage(prompt, completion),
+                "usage": usage(prompt, completion, reasoning),
             });
             yield Ok(Event::default().data(usage_chunk.to_string()));
         }
@@ -1413,6 +1419,15 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
 
 #[cfg(test)]
 mod tests {
+    /// OpenAI's `completion_tokens_details.reasoning_tokens` appears only when the reply spent tokens thinking.
+    #[test]
+    fn usage_reports_reasoning_tokens_only_when_there_were_some() {
+        assert!(usage(10, 5, 0).get("completion_tokens_details").is_none());
+        let u = usage(10, 5, 3);
+        assert_eq!(u["completion_tokens_details"]["reasoning_tokens"], 3);
+        assert_eq!((u["prompt_tokens"].as_i64(), u["completion_tokens"].as_i64(), u["total_tokens"].as_i64()), (Some(10), Some(5), Some(15)));
+    }
+
     use super::*;
 
     /// An unseeded image request leaves the seed to each image's action (a

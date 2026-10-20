@@ -37,11 +37,57 @@ pub fn apply(provider: Provider, body: &Value, mut inv: Invocation) -> Result<In
         let k = k.ok_or_else(|| ApiError::invalid_request(provider, format!("'top_k' must be an integer in 0..={MAX_TOP_K}")))?;
         inv = inv.set("top_k", json!(k));
     }
+    inv = apply_extended(provider, body, inv)?;
     if let Some(v) = present(body, "seed") {
         // A seed the model drew itself spans all of u64 and is echoed back as
         // such; sending it back must reproduce the decode.
         let seed = v.as_u64().ok_or_else(|| ApiError::invalid_request(provider, "'seed' must be a non-negative integer"))?;
         inv = inv.set("seed", json!(seed));
+    }
+    Ok(inv)
+}
+
+/// The sampler fields beyond temperature, top-k and top-p, forwarded only when
+/// the client sent them (and, for the penalties, only when not neutral): the
+/// OpenAI `presence_penalty` and `frequency_penalty`, vLLM's `min_p` and
+/// `repetition_penalty`, llama.cpp's DRY (`dry_multiplier`, `dry_base`,
+/// `dry_allowed_length`, `dry_sequence_breakers`), and the thinking budget under
+/// the names servers use for it (`thinking_budget`, `thinking_token_budget`,
+/// `max_thinking_tokens`). A model that has no such sampler refuses the field by
+/// name, as it does any parameter it does not declare.
+fn apply_extended(provider: Provider, body: &Value, mut inv: Invocation) -> Result<Invocation, ApiError> {
+    let bad = |name: &str, what: &str| ApiError::invalid_request(provider, format!("'{name}' must be {what}"));
+    let number = |name: &str, lo: f64, hi: f64| -> Result<Option<f64>, ApiError> {
+        match present(body, name) {
+            None => Ok(None),
+            Some(v) => v.as_f64().filter(|x| (lo..=hi).contains(x)).map(Some).ok_or_else(|| bad(name, &format!("a number in {lo}..={hi}"))),
+        }
+    };
+    for (name, lo, hi, neutral) in [("presence_penalty", -2.0, 2.0, 0.0), ("frequency_penalty", -2.0, 2.0, 0.0), ("min_p", 0.0, 1.0, 0.0), ("repetition_penalty", 0.01, 4.0, 1.0), ("dry_multiplier", 0.0, 100.0, 0.0)] {
+        if let Some(x) = number(name, lo, hi)? {
+            if x != neutral {
+                inv = inv.set(name, json!(x));
+            }
+        }
+    }
+    if let Some(x) = number("dry_base", 1.0, 16.0)? {
+        inv = inv.set("dry_base", json!(x));
+    }
+    if let Some(v) = present(body, "dry_allowed_length") {
+        let n = v.as_i64().filter(|n| (0..=4096).contains(n)).ok_or_else(|| bad("dry_allowed_length", "an integer in 0..=4096"))?;
+        inv = inv.set("dry_allowed_length", json!(n));
+    }
+    if let Some(v) = present(body, "dry_sequence_breakers") {
+        let ok = v.as_array().filter(|a| a.iter().all(Value::is_string));
+        let breakers = ok.ok_or_else(|| bad("dry_sequence_breakers", "an array of strings"))?;
+        inv = inv.set("dry_sequence_breakers", json!(serde_json::to_string(breakers).unwrap_or_default()));
+    }
+    for name in ["thinking_budget", "thinking_token_budget", "max_thinking_tokens"] {
+        if let Some(v) = present(body, name) {
+            let n = v.as_i64().filter(|n| *n >= 0).ok_or_else(|| bad(name, "a non-negative integer"))?;
+            inv = inv.set("thinking_budget", json!(n));
+            break;
+        }
     }
     Ok(inv)
 }
@@ -85,11 +131,6 @@ pub fn max_tokens(provider: Provider, name: &str, v: Option<&Value>) -> Result<i
 /// the sampled token's own log-probability is available, not the alternatives.
 pub fn refuse_unsupported_openai(provider: Provider, body: &Value, token_capture: bool) -> Result<(), ApiError> {
     let refuse = |name: &str| Err(ApiError::invalid_request(provider, format!("'{name}' is not supported")));
-    for name in ["presence_penalty", "frequency_penalty"] {
-        if present(body, name).is_some_and(|v| v.as_f64() != Some(0.0)) {
-            return refuse(name);
-        }
-    }
     if present(body, "logit_bias").is_some_and(|v| v.as_object().is_none_or(|m| !m.is_empty())) {
         return refuse("logit_bias");
     }
@@ -182,14 +223,51 @@ mod tests {
         assert!(apply_token_capture(P, &json!({"return_token_ids": "yes"}), Invocation::new()).is_err());
     }
 
+    /// The extended sampler fields reach the action only when the client asked for
+    /// something: the neutral values every client sends by default are dropped, so
+    /// a request that asks for nothing is the request it always was.
+    #[test]
+    fn extended_sampler_fields_are_forwarded_only_when_asked_for() {
+        let neutral = json!({"presence_penalty": 0, "frequency_penalty": 0.0, "min_p": 0, "repetition_penalty": 1.0, "dry_multiplier": 0});
+        let inv = apply(P, &neutral, Invocation::new()).unwrap();
+        for k in ["presence_penalty", "frequency_penalty", "min_p", "repetition_penalty", "dry_multiplier", "thinking_budget"] {
+            assert_eq!(inv.get_f64(k), None, "{k}");
+        }
+        let asked = json!({"presence_penalty": 0.5, "frequency_penalty": -0.25, "min_p": 0.05, "repetition_penalty": 1.1,
+            "dry_multiplier": 0.8, "dry_base": 1.75, "dry_allowed_length": 2, "dry_sequence_breakers": ["\n", ":"], "max_thinking_tokens": 512});
+        let inv = apply(P, &asked, Invocation::new()).unwrap();
+        assert_eq!((inv.get_f64("presence_penalty"), inv.get_f64("frequency_penalty"), inv.get_f64("min_p"), inv.get_f64("repetition_penalty")), (Some(0.5), Some(-0.25), Some(0.05), Some(1.1)));
+        assert_eq!((inv.get_f64("dry_multiplier"), inv.get_f64("dry_base"), inv.get_i64("dry_allowed_length")), (Some(0.8), Some(1.75), Some(2)));
+        assert_eq!(inv.get_str("dry_sequence_breakers").as_deref(), Some("[\"\\n\",\":\"]"));
+        assert_eq!(inv.get_i64("thinking_budget"), Some(512), "every name servers use for it lands on one field");
+        for name in ["thinking_budget", "thinking_token_budget"] {
+            assert_eq!(apply(P, &json!({ name: 7 }), Invocation::new()).unwrap().get_i64("thinking_budget"), Some(7));
+        }
+    }
+
+    #[test]
+    fn out_of_range_extended_sampler_fields_are_refused_by_name() {
+        for (body, name) in [
+            (json!({"presence_penalty": 3}), "presence_penalty"),
+            (json!({"min_p": 1.5}), "min_p"),
+            (json!({"repetition_penalty": 0}), "repetition_penalty"),
+            (json!({"dry_base": 0.5}), "dry_base"),
+            (json!({"dry_allowed_length": -1}), "dry_allowed_length"),
+            (json!({"dry_sequence_breakers": [1]}), "dry_sequence_breakers"),
+            (json!({"thinking_budget": -1}), "thinking_budget"),
+            (json!({"max_thinking_tokens": "lots"}), "max_thinking_tokens"),
+        ] {
+            let e = apply(P, &body, Invocation::new()).unwrap_err();
+            assert!(format!("{e:?}").contains(name), "{body}: {e:?}");
+        }
+    }
+
     #[test]
     fn unsupported_openai_parameters_are_refused_unless_neutral() {
         let neutral = json!({"presence_penalty": 0, "frequency_penalty": 0.0, "logit_bias": {}, "logprobs": false,
             "top_logprobs": 0, "response_format": {"type": "text"}});
         refuse_unsupported_openai(P, &neutral, false).unwrap();
         for (body, name) in [
-            (json!({"presence_penalty": 0.5}), "presence_penalty"),
-            (json!({"frequency_penalty": -1}), "frequency_penalty"),
             (json!({"logit_bias": {"50256": -100}}), "logit_bias"),
             (json!({"logprobs": true}), "logprobs"),
             (json!({"top_logprobs": 5}), "top_logprobs"),

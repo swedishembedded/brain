@@ -1458,7 +1458,7 @@ pub fn generate<M: Model>(
     use crate::rollout::{ModelRollout, Rollout, RolloutParams};
     use crate::serve::SampleParams;
 
-    let params = RolloutParams { max_new, sample: SampleParams { temp: temperature, top_k, top_p: 1.0 }, eos: None };
+    let params = RolloutParams { max_new, sample: SampleParams { temp: temperature, top_k, top_p: 1.0, ..SampleParams::greedy() }, eos: None };
     let mut rollout = ModelRollout::new(m);
     rollout.sample_n(prompt, 1, &params, rng).pop().expect("sample_n(1) returns exactly one completion").tokens
 }

@@ -532,7 +532,7 @@ fn main() {
                 .map(|i| {
                     let prompt = prompt_ids(&tok, workload, i);
                     assert!(prompt.len() + a.new_tokens + 8 <= a.ctx as usize, "prompt of {} tokens does not fit --ctx", prompt.len());
-                    sched.submit_sampled(Request { prompt, max_new: a.new_tokens, stop: stop.clone() }, SampleParams { temp: a.temp, top_k: 20, top_p: 0.95 }, seed_base.wrapping_add(i as u64))
+                    sched.submit_sampled(Request { prompt, max_new: a.new_tokens, stop: stop.clone() }, SampleParams { temp: a.temp, top_k: 20, top_p: 0.95, ..SampleParams::greedy() }, seed_base.wrapping_add(i as u64))
                 })
                 .collect();
             // Admit everything (prefill), then time the decode alone.

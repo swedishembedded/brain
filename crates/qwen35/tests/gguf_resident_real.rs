@@ -864,7 +864,7 @@ fn scheduled_batches_reproduce_the_single_sequence_reference_on_the_real_checkpo
 
     // Seeded sampling is per sequence: the same seed gives the same tokens
     // whether the sequence runs alone or beside others.
-    let sample = SampleParams { temp: 0.8, top_k: 40, top_p: 0.95 };
+    let sample = SampleParams { temp: 0.8, top_k: 40, top_p: 0.95, ..SampleParams::greedy() };
     let solo = {
         let id = sched.submit_sampled(Request { prompt: ids[0].clone(), max_new: 8, stop: Vec::new() }, sample, 7);
         sched.run().remove(&id).unwrap()

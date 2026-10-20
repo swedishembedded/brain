@@ -76,7 +76,7 @@ pub fn config(group: usize, temp: f32, options: GrpoOptions) -> GrpoConfig {
         clip_eps: 0.2,
         kl_beta: 0.0,
         seq_len: T,
-        rollout: RolloutParams { max_new: 4, sample: SampleParams { temp, top_k: 0, top_p: 1.0 }, eos: None },
+        rollout: RolloutParams { max_new: 4, sample: SampleParams { temp, top_k: 0, top_p: 1.0, ..SampleParams::greedy() }, eos: None },
         max_attempts: 1,
         options,
     }

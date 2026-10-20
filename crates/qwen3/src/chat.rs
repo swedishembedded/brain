@@ -24,6 +24,7 @@ use capability::{Blob, CancelToken, Invocation, Media, Outcome, Progress};
 use data::qwen_chat::{self, ChatEvent, ChatMessage, ChatScanner, Role, ToolCallMsg};
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
+use model::serve::{DryParams, SampleParams, ThinkingBudget};
 use serde_json::json;
 
 /// Parse the `messages` param into [`ChatMessage`]s, prepending a leading `system`
@@ -297,6 +298,9 @@ pub struct ParsedRequest {
     pub temp: f32,
     pub top_k: usize,
     pub top_p: f32,
+    /// How the scheduler picks this request's tokens: the three fields above plus
+    /// the request's `min_p`, penalties, DRY and thinking budget.
+    pub sampler: SampleParams,
     pub seed: u64,
     pub stops: Vec<String>,
     /// The parsed `tool_choice` constraint - enforced at prompt level for
@@ -314,6 +318,72 @@ pub struct ParsedRequest {
     /// A raw completion (no chat template): the output is plain text, with
     /// no reasoning or tool-call markup read out of it.
     pub raw: bool,
+}
+
+/// How many of `generated`'s tokens were spent inside think blocks, the tags
+/// themselves excluded: what `usage.completion_tokens_details.reasoning_tokens`
+/// reports. `open_at_start` says the prompt already ended inside a block.
+pub fn reasoning_tokens(tok: &QwenBpe, generated: &[u32], open_at_start: bool) -> usize {
+    let (Some(open), Some(close)) = (tok.special_id("<think>"), tok.special_id("</think>")) else { return 0 };
+    reasoning_token_count(generated, open, close, open_at_start)
+}
+
+fn reasoning_token_count(generated: &[u32], open: u32, close: u32, open_at_start: bool) -> usize {
+    let mut inside = open_at_start;
+    let mut n = 0;
+    for &t in generated {
+        if t == open {
+            inside = true;
+        } else if t == close {
+            inside = false;
+        } else if inside {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// A request's sampler when it names nothing beyond temperature, top-k and top-p.
+pub fn plain_sampler(temp: f32, top_k: usize, top_p: f32) -> SampleParams {
+    SampleParams { temp, top_k, top_p, ..SampleParams::greedy() }
+}
+
+/// The default DRY sequence breakers (llama.cpp's): a newline, a colon, a quote and an asterisk.
+const DEFAULT_DRY_BREAKERS: [&str; 4] = ["\n", ":", "\"", "*"];
+
+/// The request's sampler: temperature, top-k and top-p as parsed, plus the
+/// optional `min_p`, `presence_penalty`, `frequency_penalty`, `repetition_penalty`,
+/// DRY (`dry_multiplier`, `dry_base`, `dry_allowed_length`,
+/// `dry_sequence_breakers`, a JSON array of strings, each reduced to its first
+/// token) and `thinking_budget` (tokens allowed inside the think block).
+/// Everything the request does not name is off.
+fn sampler_params(tok: &QwenBpe, inv: &Invocation, temp: f32, top_k: usize, top_p: f32, thinking_open: bool, chat: bool) -> Result<SampleParams, String> {
+    let mut p = SampleParams { temp, top_k, top_p, ..SampleParams::greedy() };
+    p.min_p = inv.get_f64("min_p").unwrap_or(0.0) as f32;
+    p.presence_penalty = inv.get_f64("presence_penalty").unwrap_or(0.0) as f32;
+    p.frequency_penalty = inv.get_f64("frequency_penalty").unwrap_or(0.0) as f32;
+    p.repetition_penalty = inv.get_f64("repetition_penalty").unwrap_or(1.0) as f32;
+    let multiplier = inv.get_f64("dry_multiplier").unwrap_or(0.0) as f32;
+    if multiplier > 0.0 {
+        let breakers: Vec<String> = match inv.get_str("dry_sequence_breakers").filter(|s| !s.is_empty()) {
+            Some(raw) => parse_stops(Some(&raw)).map_err(|e| e.replace("stop", "dry_sequence_breakers"))?,
+            None => DEFAULT_DRY_BREAKERS.iter().map(|s| s.to_string()).collect(),
+        };
+        let ids: Vec<u32> = breakers.iter().filter_map(|b| tok.encode(b).first().copied()).collect();
+        let base = inv.get_f64("dry_base").unwrap_or(1.75) as f32;
+        let allowed = inv.get_i64("dry_allowed_length").unwrap_or(2).max(0) as u32;
+        p.dry = DryParams::new(multiplier, base, allowed, &ids);
+    }
+    // A budget is about the think block of a chat reply, and only when thinking is on.
+    if let (Some(budget), true) = (inv.get_i64("thinking_budget"), chat && inv.get_bool("enable_thinking") != Some(false)) {
+        let tag = |t: &str| tok.special_id(t).ok_or_else(|| format!("qwen: thinking_budget needs the {t} token, which this vocabulary does not have"));
+        let (open, close) = (tag("<think>")?, tag("</think>")?);
+        // The tag, then the blank line the chat format puts between a think block and the answer.
+        let mut closing = vec![close];
+        closing.extend(tok.encode("\n\n"));
+        p.thinking = Some(ThinkingBudget::new(budget.max(0) as u32, open, &closing, thinking_open));
+    }
+    Ok(p)
 }
 
 /// The chat-template render of one request, before tokenization: the prompt
@@ -535,7 +605,8 @@ pub fn parse_request_as(tok: &QwenBpe, format: &ChatFormat, inv: &Invocation) ->
         return Err("qwen: empty prompt".to_string());
     }
     let stops = parse_stops(inv.get_str("stop").as_deref())?;
-    Ok(ParsedRequest { ids, max_new, temp, top_p, top_k, seed, stops, tool_choice, flavor, thinking_open, raw })
+    let sampler = sampler_params(tok, inv, temp, top_k, top_p, thinking_open && !raw, !raw)?;
+    Ok(ParsedRequest { ids, max_new, temp, top_p, top_k, sampler, seed, stops, tool_choice, flavor, thinking_open, raw })
 }
 
 /// Why a `suffix` cannot be honoured: the vocabulary has no
@@ -573,6 +644,8 @@ pub fn parse_reply(inv: &Invocation, text: &str) -> Result<Outcome, String> {
         prompt_tokens: None,
         tool_choice: prompt.tool_choice,
         seed: None,
+        thinking_open: prompt.thinking_open,
+        raw: prompt.raw,
     };
     Ok(seq.finish_text(text, None, &mut |_| {}))
 }
@@ -595,6 +668,10 @@ pub struct SeqState {
     /// caller can reproduce a decode it did not seed; `None` for
     /// [`parse_reply`], which samples nothing.
     seed: Option<u64>,
+    /// The prompt ended inside an open think block / the request is a raw
+    /// completion: what counting the reply's reasoning tokens needs.
+    thinking_open: bool,
+    raw: bool,
 }
 
 impl SeqState {
@@ -615,6 +692,8 @@ impl SeqState {
             prompt_tokens: Some(req.ids.len()),
             tool_choice: req.tool_choice.clone(),
             seed: Some(req.seed),
+            thinking_open: req.thinking_open,
+            raw: req.raw,
         }
     }
 
@@ -654,7 +733,12 @@ impl SeqState {
     /// by `max_new`) rather than silently dropping it.
     pub fn finish(self, tok: &QwenBpe, all_tokens: &[u32], progress: &mut dyn FnMut(Progress)) -> Outcome {
         let full = tok.decode(all_tokens);
-        self.finish_text(&full, Some(all_tokens.len()), progress)
+        let reasoning = (!self.raw).then(|| reasoning_tokens(tok, all_tokens, self.thinking_open));
+        let outcome = self.finish_text(&full, Some(all_tokens.len()), progress);
+        match reasoning {
+            Some(n) => outcome.set("reasoning_tokens", json!(n)),
+            None => outcome,
+        }
     }
 
     /// [`SeqState::finish`] over already-decoded text. `generated` is how many
@@ -739,6 +823,16 @@ impl SeqState {
 
 #[cfg(test)]
 mod tests {
+    /// Reasoning tokens are those between the tags, whichever side of the prompt the block opened on.
+    #[test]
+    fn reasoning_tokens_count_what_is_inside_think_blocks() {
+        let (open, close) = (100u32, 101u32);
+        assert_eq!(super::reasoning_token_count(&[open, 1, 2, 3, close, 4, 5], open, close, false), 3);
+        assert_eq!(super::reasoning_token_count(&[1, 2, close, 4], open, close, true), 2, "the prompt opened the block");
+        assert_eq!(super::reasoning_token_count(&[4, 5], open, close, false), 0);
+        assert_eq!(super::reasoning_token_count(&[open, 1, 2], open, close, false), 2, "cut off by max_tokens inside the block");
+    }
+
     use super::*;
 
     /// A checkpoint template that teaches XML tool calls gets the XML
@@ -924,6 +1018,40 @@ mod tests {
     }
 
     const WEATHER_TOOLS: &str = r#"[{"type":"function","function":{"name":"get_weather","description":"get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}},{"type":"function","function":{"name":"get_time","description":"get time","parameters":{}}}]"#;
+
+    /// The request fields reach the sampler: untouched they leave it plain, named they set it, and the
+    /// thinking budget is built from the vocabulary's own tags.
+    #[test]
+    fn sampler_fields_of_a_request_reach_the_parsed_sampler() {
+        let Some(tok) = real_tok() else { return };
+        let base = || Invocation::new().set("messages", json!(r#"[{"role": "user", "content": "hi"}]"#)).set("temp", json!(0.6)).set("top_p", json!(0.95)).set("top_k", json!(20));
+        let plain = parse_request(&tok, &base()).unwrap().sampler;
+        assert!(!plain.has_processors() && plain.thinking.is_none() && plain.min_p == 0.0, "a request that asks for nothing extra samples as before");
+        assert_eq!((plain.temp, plain.top_k, plain.top_p), (0.6, 20, 0.95));
+        let asked = parse_request(
+            &tok,
+            &base()
+                .set("min_p", json!(0.05))
+                .set("presence_penalty", json!(0.5))
+                .set("frequency_penalty", json!(0.25))
+                .set("repetition_penalty", json!(1.1))
+                .set("dry_multiplier", json!(0.8))
+                .set("dry_allowed_length", json!(3))
+                .set("thinking_budget", json!(64)),
+        )
+        .unwrap()
+        .sampler;
+        assert_eq!((asked.min_p, asked.presence_penalty, asked.frequency_penalty, asked.repetition_penalty), (0.05, 0.5, 0.25, 1.1));
+        assert!(asked.dry.active() && asked.dry.allowed_length == 3 && asked.dry.base == 1.75, "llama.cpp's DRY base by default");
+        assert_eq!(asked.dry.breakers().len(), 4, "newline, colon, quote and asterisk by default");
+        let budget = asked.thinking.expect("a thinking budget");
+        assert_eq!((budget.max_tokens, Some(budget.open), Some(budget.close()[0])), (64, tok.special_id("<think>"), tok.special_id("</think>")));
+        assert!(budget.close().len() > 1, "the blank line after the tag is forced too");
+        let off = parse_request(&tok, &base().set("thinking_budget", json!(64)).set("enable_thinking", json!(false))).unwrap().sampler;
+        assert!(off.thinking.is_none(), "no think block, no budget");
+        let own = parse_request(&tok, &base().set("dry_multiplier", json!(1.0)).set("dry_sequence_breakers", json!(r#"["STOP"]"#))).unwrap().sampler;
+        assert_eq!(own.dry.breakers().len(), 1, "the request's own breakers replace the defaults");
+    }
 
     /// Parse a chat request with the weather tools and the given serialized
     /// `tool_choice` invocation value.

@@ -197,7 +197,7 @@ fn train_round(base: &Path, out: &Path, env: PositionCopyEnv, args: &Args, round
         clip_eps: 0.2,
         kl_beta: 0.0,
         seq_len: curriculum::SEQ_LEN,
-        rollout: RolloutParams { max_new: curriculum::OUT_LEN, sample: SampleParams { temp: args.temp, top_k: 0, top_p: 1.0 }, eos: None },
+        rollout: RolloutParams { max_new: curriculum::OUT_LEN, sample: SampleParams { temp: args.temp, top_k: 0, top_p: 1.0, ..SampleParams::greedy() }, eos: None },
         max_attempts: 1,
         options: Default::default(),
     };

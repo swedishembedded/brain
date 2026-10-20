@@ -436,6 +436,12 @@ impl<D: PagedDecoder> Scheduler<D> {
         if active.iter().any(|&i| self.running[i].table.kv_namespace() != crate::paged::BASE_KV_NAMESPACE) {
             return false;
         }
+        // The request's logit processors read the tokens chosen earlier in the same
+        // step, which a verify step scores in one pass: a step that carries a
+        // sequence with one is the plain step.
+        if active.iter().any(|&i| self.running[i].sample.has_processors() || self.running[i].think.is_some_and(|t| t.watching())) {
+            return false;
+        }
         let bucket = CostGate::bucket(active.len());
         let gated = self.dec.spec_cost_aware();
         if gated && !self.gate.speculate(bucket) {
@@ -476,7 +482,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
 
         let rows: Vec<Vec<u32>> = active.iter().zip(&props).map(|(&i, p)| std::iter::once(self.running[i].next_input).chain(p.iter().copied()).collect()).collect();
-        let all_greedy = active.iter().all(|&i| self.running[i].sample.is_greedy());
+        let all_greedy = active.iter().all(|&i| !self.running[i].sample.needs_candidates());
         let cands = if all_greedy { 1 } else { self.dec.topk_capacity().max(1) };
         let before: Vec<u32> = active.iter().map(|&i| self.running[i].table.len()).collect();
 

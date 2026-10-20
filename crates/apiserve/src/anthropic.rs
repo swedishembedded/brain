@@ -129,8 +129,8 @@ const MIN_THINKING_BUDGET: i64 = 1024;
 /// `{"type": "enabled", "budget_tokens": N}` (Anthropic's own bounds,
 /// `1024 <= N < max_tokens`) turns reasoning on, `{"type": "disabled"}` off,
 /// and an absent config leaves the model's own default. The budget is the
-/// target Anthropic defines it as: reasoning counts against `max_tokens`, which
-/// is what bounds it.
+/// target Anthropic defines it as - reasoning counts against `max_tokens` - and
+/// `to_invocation` also hands it on as the think block's token budget.
 fn thinking(body: &Value, max_tokens: i64) -> Result<Option<bool>, ApiError> {
     let Some(cfg) = body.get("thinking").filter(|v| !v.is_null()) else { return Ok(None) };
     let bad = |msg: String| Err(ApiError::invalid_request(PROVIDER, msg));
@@ -164,6 +164,10 @@ pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiErro
     let mut inv = crate::sampling::apply(PROVIDER, body, inv)?;
     if let Some(on) = thinking(body, max_tokens)? {
         inv = inv.set("enable_thinking", json!(on));
+        // The validated `budget_tokens` is the think block's token budget.
+        if let Some(n) = body.get("thinking").and_then(|t| t.get("budget_tokens")).and_then(Value::as_i64).filter(|_| on) {
+            inv = inv.set("thinking_budget", json!(n));
+        }
     }
     let system = system_text(body.get("system"));
     if !system.is_empty() {

@@ -121,7 +121,7 @@ fn write_base_checkpoint(path: &Path, seed: u64) -> QwenConfig {
 }
 
 fn rollout_params() -> RolloutParams {
-    RolloutParams { max_new: 3, sample: SampleParams { temp: 1.0, top_k: 0, top_p: 1.0 }, eos: None }
+    RolloutParams { max_new: 3, sample: SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..SampleParams::greedy() }, eos: None }
 }
 
 fn greedy_rollout_params() -> RolloutParams {

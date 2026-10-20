@@ -5911,7 +5911,7 @@ mod tests {
         let map = tiny_weights(&cfg);
         let prompt = vec![1u32, 5, 3, 9];
         let max_new = 12usize;
-        let params = SampleParams { temp: 2.0, top_k: 20, top_p: 1.0 };
+        let params = SampleParams { temp: 2.0, top_k: 20, top_p: 1.0, ..SampleParams::greedy() };
 
         let run_sampled = |seed: u64| {
             let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 96, 4, 12, 32, false, false);
@@ -6862,7 +6862,7 @@ mod rollout_tests {
         let prompt = vec![1u32, 5, 3];
 
         let run = |top_p: f32, seed: u64| {
-            let params = RolloutParams { max_new: 5, sample: SampleParams { temp: 2.0, top_k: 0, top_p }, eos: None };
+            let params = RolloutParams { max_new: 5, sample: SampleParams { temp: 2.0, top_k: 0, top_p, ..SampleParams::greedy() }, eos: None };
             let mut roll = ModelRollout::new(&qwen);
             roll.sample_n(&prompt, 1, &params, &mut Rng::new(seed)).pop().expect("sample_n(1)").tokens
         };

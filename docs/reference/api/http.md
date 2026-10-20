@@ -82,10 +82,28 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   when the request sets them; otherwise the model applies its own defaults, and an
   unseeded request is sampled with a fresh random seed. OpenAI parameters brain
   cannot honour are refused with 400 `invalid_request_error` naming the
-  parameter rather than ignored: `n` > 1, a non-zero `presence_penalty` or
-  `frequency_penalty`, a non-empty `logit_bias`, a non-zero `top_logprobs`, and a
-  `response_format` other than `text`; on the legacy completions endpoint also
-  `logprobs: true`. Their neutral values are accepted.
+  parameter rather than ignored: `n` > 1, a non-empty `logit_bias`, a non-zero
+  `top_logprobs`, and a `response_format` other than `text`; on the legacy
+  completions endpoint also `logprobs: true`. Their neutral values are accepted.
+- **Anti-repetition sampling and the thinking budget.** For the text models that
+  serve through the shared scheduler, a request may add (all off unless sent;
+  a model without them refuses the field as an unknown parameter):
+  `presence_penalty` and `frequency_penalty` (-2..=2, subtracted from the logit
+  of tokens already generated, once and per occurrence), `repetition_penalty`
+  (vLLM; divides the positive logit of every token in the prompt and the
+  generated text), `min_p` (drop tokens below that fraction of the best token's
+  probability), and DRY as llama.cpp defines it over the whole context:
+  `dry_multiplier`, `dry_base` (default 1.75), `dry_allowed_length` (default 2)
+  and `dry_sequence_breakers` (an array of strings, each reduced to its first
+  token; default newline, colon, quote, asterisk). Processors run on the
+  decoder's candidate list (its 64 best tokens) before temperature, top-k, top-p
+  and min-p, and also steer a greedy request (`temperature: 0` then takes the
+  best penalised token). `thinking_budget` (also accepted as
+  `thinking_token_budget` and `max_thinking_tokens`; Anthropic's
+  `thinking.budget_tokens` sets it too) limits the tokens inside a think block:
+  when it is spent the closing tag and the blank line after it are forced and
+  the model answers. A reply reports the tokens spent thinking in
+  `usage.completion_tokens_details.reasoning_tokens`.
 - **Sampled tokens (chat).** `logprobs: true` makes the reply carry
   `choices[0].logprobs.content[]` (`{token, logprob, bytes, top_logprobs}`; the
   server relays ids, so `token` is `token_id:<id>`, `top_logprobs` is empty) and
