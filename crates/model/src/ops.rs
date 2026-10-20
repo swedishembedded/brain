@@ -649,6 +649,14 @@ pub enum KqScale {
 pub const FP8_BLOCK: u32 = 128;
 
 impl Weight {
+    /// A dense fp32 weight `[n, k]` over a parameter buffer the model already holds (shared, not copied): how
+    /// a model hands an fp32 tensor to the shared ops (the chunked LM head, per-leaf matmuls) without naming
+    /// the variant.
+    #[must_use]
+    pub fn dense_f32(w: DeviceBuffer, n: u32, k: u32) -> Weight {
+        Weight::F32 { w, n, k }
+    }
+
     pub fn dtype(&self) -> Dtype {
         match self {
             Weight::F32 { .. } => Dtype::F32,

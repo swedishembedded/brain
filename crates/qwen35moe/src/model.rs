@@ -1569,7 +1569,7 @@ impl Qwen35 {
                 }
                 built.unwrap()
             } else {
-                Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
+                Weight::dense_f32(ps.w(&name).clone(), wn as u32, wk as u32)
             };
             weights.insert(name, w);
         };
@@ -1644,7 +1644,7 @@ impl Qwen35 {
             let head = match weights.get(name) {
                 Some(w) => w,
                 None => {
-                    fp32_head = Weight::F32 { w: ps.w(name).clone(), n: cfg.vocab, k: cfg.d_model };
+                    fp32_head = Weight::dense_f32(ps.w(name).clone(), cfg.vocab, cfg.d_model);
                     &fp32_head
                 }
             };
@@ -2407,7 +2407,7 @@ impl Qwen35 {
         let router_w: &Weight = match &ml.router_ext {
             Some(w) => w,
             None => {
-                own_router = Weight::F32 { w: self.w(&p("mlp.router.weight")).clone(), n: e, k: d };
+                own_router = Weight::dense_f32(self.w(&p("mlp.router.weight")).clone(), e, d);
                 &own_router
             }
         };
@@ -3662,7 +3662,7 @@ impl Qwen35 {
                 }
             },
             None => {
-                let head = Weight::F32 { w: self.w(name).clone(), n: v, k: d };
+                let head = Weight::dense_f32(self.w(name).clone(), v, d);
                 self.ops.matmul(steps, &head, &self.ops.act_f32(hidden, 0, rows, d), logits, 0);
             }
         }

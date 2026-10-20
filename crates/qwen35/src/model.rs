@@ -1709,7 +1709,7 @@ impl Qwen35 {
         let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(64 << 20, 0));
         let mut upload = |name: String, wn: u32, wk: u32, want: Dtype| {
             let w = if want == Dtype::F32 {
-                Weight::F32 { w: ps.w(&name).clone(), n: wn, k: wk }
+                Weight::dense_f32(ps.w(&name).clone(), wn, wk)
             } else {
                 model::ops::upload_from_source(&ops, src, &name, wn as usize, wk as usize, want, &staging)
                     .unwrap_or_else(|| panic!("qwen35: missing init weight {name}"))
@@ -1802,7 +1802,7 @@ impl Qwen35 {
             let head = match weights.get(name) {
                 Some(w) => w,
                 None => {
-                    fp32_head = Weight::F32 { w: ps.w(name).clone(), n: cfg.vocab, k: cfg.d_model };
+                    fp32_head = Weight::dense_f32(ps.w(name).clone(), cfg.vocab, cfg.d_model);
                     &fp32_head
                 }
             };
