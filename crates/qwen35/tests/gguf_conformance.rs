@@ -19,6 +19,7 @@ use model::adapter::bank::{AdapterBankRequest, AdapterTargets, VerifiedAdapter};
 use model::adapter::sites::LoraSites;
 use model::lora::device_adapter::{AdapterSite, DeviceAdapter};
 use model::serve::conformance::{self, Conformance};
+use model::paged::BlockTable;
 use model::serve::{AdapterId, PagedDecoder, Request, Scheduler};
 use qwen35::int8_gguf_resident::{budgeted_gpus, Qwen35GgufEngine, Qwen35GgufResident};
 
@@ -169,6 +170,55 @@ fn a_small_pool_serves_what_fits_and_preempts_what_does_not() {
     }
 }
 
+/// A prompt of `n` tokens, distinct per `seed` (the engine caches prompts of at least 64).
+fn prompt_of(seed: u32, n: u32) -> Vec<u32> {
+    (0..n).map(|i| 3 + (i * (seed + 5) + i * i + seed) % 26).collect()
+}
+
+/// Prefill `prompt` on its own and release it, leaving it in the engine's prefix cache.
+fn cache_prompt(e: &mut Qwen35GgufEngine, prompt: &[u32]) {
+    let mut table = BlockTable::new();
+    e.prefill(&mut table, prompt);
+    e.release_table(&mut table);
+}
+
+/// A prompt resuming a cached one does not copy the cached KV: it holds the same physical blocks. The 72-token entry
+/// fills four 16-row blocks and half of a fifth; an 80-token prompt extending it holds the four full ones as the
+/// entry's own and takes one block of its own for the rest (the shared half-full tail is copied before it is written),
+/// so the pool is short of six blocks, not ten.
+fn a_prefix_hit_shares_the_cached_blocks() {
+    let mut e = paged_engine();
+    let total = e.free_blocks();
+    let first = prompt_of(1, 72);
+    cache_prompt(&mut e, &first);
+    assert_eq!(e.free_blocks(), total - 5, "the entry retains its five blocks");
+    let mut extended = first.clone();
+    extended.extend(prompt_of(2, 8));
+    let mut table = BlockTable::new();
+    e.prefill(&mut table, &extended);
+    assert_eq!(e.prefix_stats().0, 72, "the extended prompt resumed from the entry");
+    assert_eq!(e.free_blocks(), total - 6, "four blocks shared, one of its own");
+    e.release_table(&mut table);
+}
+
+/// Admission reclaims cached prompts for a waiting request but spares the one that request resumes from, even when
+/// it is the least recently used: reclaiming in recency order would free exactly the rows the request came to reuse.
+fn reclaim_spares_the_prefix_the_waiting_prompt_resumes_from() {
+    let mut e = paged_engine();
+    let (a, b) = (prompt_of(1, 72), prompt_of(3, 72));
+    cache_prompt(&mut e, &a);
+    cache_prompt(&mut e, &b);
+    let free = e.free_blocks();
+    let mut a_next = a.clone();
+    a_next.extend(prompt_of(2, 8));
+    assert_eq!(e.reclaim_prefix_keeping(5, &a_next, None), 5, "the other conversation's five blocks");
+    assert_eq!(e.free_blocks(), free + 5);
+    let mut table = BlockTable::new();
+    e.prefill(&mut table, &a_next);
+    assert_eq!(e.prefix_stats().0, 72, "the spared entry is still there to resume from");
+    e.release_table(&mut table);
+}
+
 const RECORDED: [[u32; 12]; 3] = [[10, 9, 26, 17, 9, 10, 1, 8, 21, 12, 2, 4], [11, 9, 1, 19, 2, 13, 4, 26, 11, 18, 17, 22], [22, 12, 2, 12, 7, 17, 22, 14, 9, 1, 28, 16]];
 
 gpu_core::card_tests!(
@@ -177,5 +227,7 @@ gpu_core::card_tests!(
     greedy_tokens_are_the_recorded_ones,
     greedy_tokens_are_the_recorded_ones_with_its_kv_paged,
     paging_does_not_move_the_tokens_of_any_kv_tier,
-    a_small_pool_serves_what_fits_and_preempts_what_does_not
+    a_small_pool_serves_what_fits_and_preempts_what_does_not,
+    a_prefix_hit_shares_the_cached_blocks,
+    reclaim_spares_the_prefix_the_waiting_prompt_resumes_from
 );

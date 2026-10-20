@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use gpu_core::DeviceStats;
 use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, BankedEngine, UnloadStatus, VerifiedAdapter};
 use model::dispatch::LORA_SLOT_NONE;
-use model::paged::{BlockAllocator, BlockTable, KvNamespace};
+use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
 use model::serve::{AdapterAvailability, AdapterId, DraftQuery, PagedDecoder, PrefillJob, PrefillProgress};
 
 use crate::adapter_serving as adapters;
@@ -342,10 +342,17 @@ impl Qwen35GgufEngine {
         if let Some(&bad) = prompt.iter().find(|&&t| t >= self.inst.cfg.vocab) {
             panic!("{MODEL}: prompt token {bad} is outside the model vocabulary ({})", self.inst.cfg.vocab);
         }
-        table.reserve(prompt.len() as u32, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
+        let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
+        let hit = if cacheable { self.cache.lookup(table.kv_namespace(), prompt) } else { None };
+        // The paged layout resumes by sharing the entry's blocks; the one-block layout copies the rows into
+        // the sequence's own window below.
+        if let (Some(i), KvLayout::Paged { block_rows, .. }) = (hit, self.inst.kv_layout) {
+            self.adopt_cached_blocks(table, i, block_rows);
+        }
+        let rest = prompt.len() as u32 - table.len();
+        table.reserve(rest, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
         let slot = self.assign_state_row(table);
         self.inst.set_blocks(slot, table.blocks());
-        let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
         let mut start = 0;
         // The cached prefix's last hidden state: the MTP head's input at the
         // position the new tokens continue from.
@@ -353,33 +360,53 @@ impl Qwen35GgufEngine {
         // A cold prompt has no seeded head rows to be wrong; a resumed one has them
         // only if the entry it resumes from had its head rows filled.
         let mut seed_valid = true;
-        if cacheable {
-            if let Some(i) = self.cache.lookup(table.kv_namespace(), prompt) {
-                let e = self.cache.entry(i);
-                let (rows, snap) = (e.tokens.len(), e.snap_row);
-                let (from, to) = (self.window(&e.table), self.window(table));
-                seed_valid = e.payload.mtp_valid;
-                self.inst.seed_from_prefix(from, to, rows as u32, snap);
-                if seed_valid {
-                    self.inst.mtp_seed_prefix(from, to, rows as u32);
-                }
-                if rows == prompt.len() {
-                    // The whole prompt is cached: its state in place, no compute.
-                    let hidden = e.payload.last_hidden.clone();
-                    self.inst.store_prefilled(slot);
+        if let Some(i) = hit {
+            let e = self.cache.entry(i);
+            let (rows, snap) = (e.tokens.len(), e.snap_row);
+            seed_valid = e.payload.mtp_valid;
+            match self.inst.kv_layout {
+                KvLayout::OneBlock => {
+                    let (from, to) = (self.window(&e.table), self.window(table));
+                    self.inst.seed_from_prefix(from, to, rows as u32, snap);
                     if seed_valid {
-                        self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
-                    } else {
-                        self.inst.mtp_skip_prefill(slot);
+                        self.inst.mtp_seed_prefix(from, to, rows as u32);
                     }
-                    return Some(hidden);
                 }
-                prefix_hidden = Some(e.payload.last_hidden.clone());
-                start = rows;
+                KvLayout::Paged { .. } => self.inst.seed_state_from_snapshot(snap),
             }
+            if rows == prompt.len() {
+                // The whole prompt is cached: its state in place, no compute.
+                let hidden = e.payload.last_hidden.clone();
+                self.inst.store_prefilled(slot);
+                if seed_valid {
+                    self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
+                } else {
+                    self.inst.mtp_skip_prefill(slot);
+                }
+                return Some(hidden);
+            }
+            prefix_hidden = Some(e.payload.last_hidden.clone());
+            start = rows;
         }
         self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new(), mtp_feed: self.spec_prefill && seed_valid });
         None
+    }
+
+    /// Make `table` (fresh) hold the first `rows` rows of cache entry `i` by sharing its blocks instead of copying
+    /// them. The entry keeps serving later prompts from the same blocks, so what this sequence may write must not
+    /// be one: the block it continues in is copied first when the entry's rows end inside it, and also when they
+    /// end on its boundary while the MTP head is loaded (the head's KV row `rows - 1` is written once the next
+    /// token is known, and that is the last row of the last shared block).
+    fn adopt_cached_blocks(&mut self, table: &mut BlockTable, i: usize, block_rows: u32) {
+        let e = self.cache.entry(i);
+        let rows = e.tokens.len() as u32;
+        let shared = &e.table.blocks()[..rows.div_ceil(block_rows) as usize];
+        table.adopt_rows(shared, rows, &mut self.alloc);
+        if !rows.is_multiple_of(block_rows) || self.inst.has_mtp() {
+            let live = if rows.is_multiple_of(block_rows) { block_rows } else { rows % block_rows };
+            let (from, to) = table.unshare_tail(&mut self.alloc).unwrap_or_else(|| panic!("{MODEL}: a block shared with the prefix cache has a single owner"));
+            self.inst.copy_block_rows(from, to, live);
+        }
     }
 
     /// One sequence's slice on its own, from the working copy of the recurrent
@@ -542,6 +569,15 @@ impl PagedDecoder for Qwen35GgufEngine {
         let before = self.alloc.free_blocks();
         while self.alloc.free_blocks() - before < want {
             let Some(table) = self.cache.evict_lru() else { break };
+            self.release_retired([table]);
+        }
+        self.alloc.free_blocks() - before
+    }
+    fn reclaim_prefix_keeping(&mut self, want: u32, prompt: &[u32], adapter: Option<AdapterId>) -> u32 {
+        let namespace = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
+        let before = self.alloc.free_blocks();
+        while self.alloc.free_blocks() - before < want {
+            let Some(table) = self.cache.evict_lru_keeping(namespace, prompt) else { break };
             self.release_retired([table]);
         }
         self.alloc.free_blocks() - before

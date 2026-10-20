@@ -1716,6 +1716,23 @@ impl Qwen35GgufInstance {
         }
     }
 
+    /// Resume from a cached prefix whose KV blocks the sequence already shares: only the working GDN state is
+    /// restored from snapshot row `snap_row`.
+    fn seed_state_from_snapshot(&self, snap_row: u32) {
+        for s in &self.shards {
+            s.caches.restore_work(&s.qwen35.gpu, &self.cfg, snap_row);
+        }
+    }
+
+    /// Copy the first `rows` rows of physical KV block `from` into block `to`, in every stage and the MTP head: the
+    /// copy-on-write of a block a cached prefix shares with a sequence that is about to write into it.
+    fn copy_block_rows(&self, from: u32, to: u32, rows: u32) {
+        for s in &self.shards {
+            s.caches.copy_kv_rows(&s.qwen35.gpu, &self.cfg, KvWindow::Table(&[from]), KvWindow::Table(&[to]), rows);
+        }
+        self.mtp_copy_block_rows(from, to, rows);
+    }
+
     /// Snapshot the working GDN state (the state after the prefill that just
     /// ran) into snapshot row `row`.
     fn snapshot_prefill_state(&self, row: u32) {

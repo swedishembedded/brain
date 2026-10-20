@@ -33,8 +33,8 @@
 //! * the last prompt token's **hidden row**, so a prompt that is exactly the
 //!   cached one needs no compute at all.
 //!
-//! A new prompt that starts with a cached prompt copies the KV rows into its own
-//! block, restores the snapshot and prefills only the rest. Entries are
+//! A new prompt that starts with a cached prompt gets the KV rows (copied into its
+//! own block, or - with paged KV - by sharing the entry's blocks), restores the snapshot and prefills only the rest. Entries are
 //! exact-token prefixes (no hashing, no false sharing between prompts that
 //! merely look alike), at most `capacity` of them, evicted least recently used.
 //!
@@ -83,18 +83,22 @@ impl<P> SnapshotPrefixCache<P> {
         !self.entries.is_empty() || !self.free_rows.is_empty()
     }
 
+    /// The entry [`Self::lookup`] would pick, without counting the lookup or refreshing the entry.
+    pub fn peek(&self, namespace: KvNamespace, prompt: &[u32]) -> Option<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.table.kv_namespace() == namespace && e.tokens.len() <= prompt.len() && prompt[..e.tokens.len()] == e.tokens[..])
+            .max_by_key(|(_, e)| e.tokens.len())
+            .map(|(i, _)| i)
+    }
+
     /// The entry holding the longest cached prefix of `prompt` (an entry equal
     /// to the whole prompt qualifies), refreshed as most recently used.
     /// Counts the lookup for [`Self::stats`].
     pub fn lookup(&mut self, namespace: KvNamespace, prompt: &[u32]) -> Option<usize> {
         self.lookup_tokens += prompt.len() as u64;
-        let best = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.table.kv_namespace() == namespace && e.tokens.len() <= prompt.len() && prompt[..e.tokens.len()] == e.tokens[..])
-            .max_by_key(|(_, e)| e.tokens.len())
-            .map(|(i, _)| i)?;
+        let best = self.peek(namespace, prompt)?;
         self.tick += 1;
         self.entries[best].stamp = self.tick;
         self.hit_tokens += self.entries[best].tokens.len() as u64;
@@ -175,7 +179,18 @@ impl<P> SnapshotPrefixCache<P> {
     /// Evict the least recently used entry, returning its table (to free a
     /// block). `None` when the cache is empty.
     pub fn evict_lru(&mut self) -> Option<BlockTable> {
-        let i = self.entries.iter().enumerate().min_by_key(|(_, e)| e.stamp).map(|(i, _)| i)?;
+        self.evict_lru_sparing(None)
+    }
+
+    /// [`Self::evict_lru`] sparing the entry [`Self::lookup`] would pick for `prompt` in `namespace`: the
+    /// admission of that prompt is about to resume from it. `None` when nothing else is cached.
+    pub fn evict_lru_keeping(&mut self, namespace: KvNamespace, prompt: &[u32]) -> Option<BlockTable> {
+        let keep = self.peek(namespace, prompt);
+        self.evict_lru_sparing(keep)
+    }
+
+    fn evict_lru_sparing(&mut self, keep: Option<usize>) -> Option<BlockTable> {
+        let i = self.entries.iter().enumerate().filter(|(i, _)| Some(*i) != keep).min_by_key(|(_, e)| e.stamp).map(|(i, _)| i)?;
         let e = self.entries.remove(i);
         self.free_rows.push(e.snap_row);
         Some(e.table)
@@ -286,6 +301,20 @@ mod tests {
         assert_eq!(c.evict_namespace(1).len(), 1);
         assert!(c.lookup(1, &[1, 2, 3]).is_none() && c.lookup(2, &[1, 2, 3]).is_some());
         assert!(c.take_row(BASE_KV_NAMESPACE, &[]).0.is_some(), "the dropped entry's snapshot row is free again");
+    }
+
+    /// Reclaiming for a waiting prompt spares the entry that prompt resumes from, however old it is.
+    #[test]
+    fn eviction_for_a_waiting_prompt_spares_the_entry_it_resumes_from() {
+        let mut c = SnapshotPrefixCache::<u32>::new(2);
+        for tokens in [[1u32, 1, 1], [2, 2, 2]] {
+            let r = c.take_row(BASE_KV_NAMESPACE, &tokens).0.unwrap();
+            c.insert(entry(&tokens, r));
+        }
+        assert!(c.evict_lru_keeping(BASE_KV_NAMESPACE, &[1, 1, 1, 9]).is_some(), "the other entry goes");
+        assert!(c.peek(BASE_KV_NAMESPACE, &[1, 1, 1, 9]).is_some());
+        assert!(c.evict_lru_keeping(BASE_KV_NAMESPACE, &[1, 1, 1, 9]).is_none(), "nothing else is left to give");
+        assert_eq!(c.stats(), (0, 0, 1), "peeking counts no lookup");
     }
 
     #[test]

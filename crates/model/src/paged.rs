@@ -276,6 +276,21 @@ impl BlockTable {
     }
 }
 
+impl BlockTable {
+    /// Start a FRESH table that shares the blocks holding the first `len` tokens of a cached sequence (incref each).
+    /// Unlike [`Self::adopt_prefix`] the last shared block may be partly filled; the caller makes it private with
+    /// [`Self::unshare_tail`] before writing past `len`.
+    pub fn adopt_rows(&mut self, blocks: &[u32], len: u32, alloc: &mut BlockAllocator) {
+        assert!(self.is_empty(), "adopt_rows expects a fresh sequence");
+        assert_eq!(blocks.len() as u32, len.div_ceil(alloc.block_size()), "adopt_rows: {len} tokens live in exactly {} blocks", len.div_ceil(alloc.block_size()));
+        for &b in blocks {
+            alloc.incref(b);
+            self.blocks.push(b);
+        }
+        self.len = len;
+    }
+}
+
 /// Content-addressed index of FULL, immutable KV blocks for prompt-prefix
 /// reuse. An entry maps `(namespace, parent physical block, this block's
 /// token ids)` to the physical block holding that prefix's K/V.

@@ -355,6 +355,13 @@ impl Qwen35GgufInstance {
         }
     }
 
+    /// [`Self::copy_block_rows`] for the head's own KV.
+    pub(super) fn mtp_copy_block_rows(&self, from: u32, to: u32, rows: u32) {
+        if let Some(m) = self.mtp.as_ref() {
+            m.caches.copy_kv_rows(&m.stage.gpu, &self.cfg, KvWindow::Table(&[from]), KvWindow::Table(&[to]), rows);
+        }
+    }
+
     /// The target consumed one token in each of `slots` (`inputs`), producing the
     /// `[n, d]` hidden block `hidden`.
     pub(super) fn mtp_record_step(&mut self, slots: &[u32], inputs: &[u32], hidden: &[f32]) {
