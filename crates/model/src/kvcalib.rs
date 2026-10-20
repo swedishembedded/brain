@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Calibrated INT8 KV-cache scales — architecture-agnostic, like the rest of
+//! Calibrated KV-cache clip ceilings for the scaled KV tiers (int8, fp8) -
+//! architecture-agnostic, like the rest of
 //! this crate (`paged`'s `BlockAllocator`/`BlockTable`, `serve`'s
 //! `PagedDecoder` trait + `Scheduler<D>`, `actstats`'s percentile reservoir).
 //! [`KvCalib`] itself names no model: it is a pure `(layer, kv_head, K|V) ->
@@ -32,8 +33,95 @@
 //!
 //! This was built against a real-checkpoint measurement, on the one
 //! consumer that exists today.
+//!
+//! # Calibrating any architecture
+//!
+//! A model joins by implementing [`KvCalibrationSource`]: it runs its own prefill
+//! over a prompt set and reports each KV layer's K and V rows to a [`KvObserver`]
+//! (a plane's dequantized rows go through [`observe_rows`], which splits them per
+//! kv-head). [`calibrate`] turns those observations into a [`KvCalib`] at a
+//! percentile; [`KvCalib::apply_to_layer`] installs one layer's ceilings on a
+//! [`KvLayer`](crate::kv_tier::KvLayer) of any scaled tier. Layers without KV (a
+//! hybrid decoder's recurrent layers) are simply never observed and keep the
+//! uncalibrated sentinel, so a table is indexed by the model's own layer index.
+//! The ceiling applies unchanged to int8 (`scale = min(absmax, clip) / 127`) and
+//! fp8 E4M3 (`/ 448`): both are per-row absmax scalings, so the same outlier
+//! argument holds.
+//!
+//! Swedish Embedded AB implements solutions for serving long contexts in the
+//! least GPU memory that keeps accuracy. If your team needs expertise in KV
+//! cache quantization and calibration you can procure our services by sending
+//! an email to info@swedishembedded.com.
 
 use std::path::Path;
+
+/// Which half of a layer's KV cache a row belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KvSide {
+    K,
+    V,
+}
+
+/// The collector stream a `(layer, side, kv_head)` row set is accumulated under.
+/// The one place the naming convention lives: [`KvCalib::from_collector`] reads
+/// exactly these names.
+pub fn stream_name(layer: usize, side: KvSide, head: usize) -> String {
+    let side = match side {
+        KvSide::K => 'k',
+        KvSide::V => 'v',
+    };
+    format!("layer{layer:02}.{side}.head{head}")
+}
+
+/// Receives the K and V rows a model computes while it prefills calibration prompts.
+pub trait KvObserver {
+    /// `values` are the elements of one kv-head's rows (any number of tokens
+    /// concatenated), K post-RoPE exactly as the cache would store them.
+    fn observe(&mut self, layer: usize, side: KvSide, head: usize, values: &[f32]);
+}
+
+impl KvObserver for crate::actstats::Collector {
+    fn observe(&mut self, layer: usize, side: KvSide, head: usize, values: &[f32]) {
+        crate::actstats::Collector::observe(self, &stream_name(layer, side, head), values);
+    }
+}
+
+/// Feed `rows` (`[tokens, n_kv * head_dim]`, f32) of one layer's plane to `obs`, one
+/// call per (token, kv-head) so every head's stream sees its own rows.
+pub fn observe_rows(obs: &mut dyn KvObserver, layer: usize, side: KvSide, rows: &[f32], n_kv: usize, head_dim: usize) {
+    let stride = n_kv * head_dim;
+    assert!(stride > 0 && rows.len().is_multiple_of(stride), "observe_rows: {} values are not whole rows of {n_kv} x {head_dim}", rows.len());
+    for row in rows.chunks_exact(stride) {
+        for (head, values) in row.chunks_exact(head_dim).enumerate() {
+            obs.observe(layer, side, head, values);
+        }
+    }
+}
+
+/// What a model offers to be calibrated: nothing about its attention beyond running prompts.
+pub trait KvCalibrationSource {
+    /// `(layers, kv heads, head_dim)`: `layers` counts ALL decoder layers, so
+    /// tables are indexed by the model's own layer index.
+    fn kv_geometry(&self) -> (usize, usize, usize);
+
+    /// Run every prompt through the model's real prefill - in a representation
+    /// that keeps the pre-quantization values (an f32 cache) - and report each
+    /// KV layer's rows to `obs`.
+    fn observe_prompts(&mut self, prompts: &[Vec<u32>], obs: &mut dyn KvObserver) -> Result<(), String>;
+}
+
+/// Calibrate `model_id`'s KV clip ceilings at percentile `q` from `prompts`.
+/// Refuses an empty prompt set: a table built from nothing would be all
+/// sentinels, which is "uncalibrated" and must not be saved as a calibration.
+pub fn calibrate(source: &mut dyn KvCalibrationSource, model_id: &str, prompts: &[Vec<u32>], q: f32) -> Result<KvCalib, String> {
+    if prompts.is_empty() {
+        return Err("calibrate: no prompts".into());
+    }
+    let (n_layers, n_kv, head_dim) = source.kv_geometry();
+    let mut collector = crate::actstats::Collector::new();
+    source.observe_prompts(prompts, &mut collector)?;
+    Ok(KvCalib::from_collector(model_id, n_layers, n_kv, head_dim, q, &collector))
+}
 
 /// One checkpoint's calibrated KV clip ceilings, `[layer][kv_head]` for K and
 /// V independently (K is quantized post-RoPE, a different distribution than
@@ -66,6 +154,22 @@ impl KvCalib {
             k: vec![vec![f32::MAX; n_kv]; n_layers],
             v: vec![vec![f32::MAX; n_kv]; n_layers],
         }
+    }
+
+    /// The per-kv-head ceilings of `layer`'s K or V plane.
+    pub fn clip(&self, layer: usize, side: KvSide) -> &[f32] {
+        match side {
+            KvSide::K => &self.k[layer],
+            KvSide::V => &self.v[layer],
+        }
+    }
+
+    /// Install `layer`'s ceilings on a layer's planes. A plane of an unscaled tier
+    /// (f32, bf16) has no scale to cap, so it is left alone and `false` is returned.
+    pub fn apply_to_layer(&self, gpu: &gpu_core::Gpu, layer: usize, planes: &mut crate::kv_tier::KvLayer) -> bool {
+        let k = planes.k.set_clip(gpu, self.clip(layer, KvSide::K));
+        let v = planes.v.set_clip(gpu, self.clip(layer, KvSide::V));
+        k && v
     }
 
     pub fn is_disabled(&self) -> bool {
@@ -194,6 +298,63 @@ mod tests {
         v_tail.push(100_000.0);
         c.observe("layer00.v.head0", &v_tail);
         c
+    }
+
+    /// A stand-in decoder: `kv_layers` of its `n_layers` keep KV; layer l's K rows
+    /// are `l + 1` times a ramp, V rows carry one huge outlier token.
+    struct FakeModel {
+        n_layers: usize,
+        kv_layers: Vec<usize>,
+    }
+
+    impl KvCalibrationSource for FakeModel {
+        fn kv_geometry(&self) -> (usize, usize, usize) {
+            (self.n_layers, 2, 4)
+        }
+
+        fn observe_prompts(&mut self, prompts: &[Vec<u32>], obs: &mut dyn KvObserver) -> Result<(), String> {
+            for &l in &self.kv_layers {
+                for prompt in prompts {
+                    let k: Vec<f32> = (0..prompt.len() * 8).map(|i| (l + 1) as f32 * (1 + i % 1000) as f32).collect();
+                    let mut v = vec![1.0f32; prompt.len() * 8];
+                    v[0] = 1e6;
+                    observe_rows(obs, l, KvSide::K, &k, 2, 4);
+                    observe_rows(obs, l, KvSide::V, &v, 2, 4);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn any_model_is_calibrated_through_the_source_trait_and_non_kv_layers_stay_uncalibrated() {
+        let mut model = FakeModel { n_layers: 4, kv_layers: vec![1, 3] };
+        let prompts = vec![vec![0u32; 600]; 2];
+        let calib = calibrate(&mut model, "fake", &prompts, 0.99).unwrap();
+        assert_eq!((calib.n_layers, calib.n_kv, calib.head_dim), (4, 2, 4));
+        assert_eq!(calib.clip(0, KvSide::K), &[f32::MAX; 2], "layer 0 keeps no KV");
+        assert_eq!(calib.clip(2, KvSide::V), &[f32::MAX; 2]);
+        for l in [1usize, 3] {
+            assert!(calib.clip(l, KvSide::K).iter().all(|&c| c > 0.0 && c <= (l + 1) as f32 * 1000.0), "layer {l} K ceiling is bounded by its own range");
+            assert!(calib.clip(l, KvSide::V).iter().all(|&c| c < 1e5), "layer {l} V ceiling must ignore the 1e6 outlier");
+        }
+        assert!(calib.clip(3, KvSide::K)[0] > calib.clip(1, KvSide::K)[0], "ceilings follow each layer's own scale");
+    }
+
+    #[test]
+    fn calibrating_from_no_prompts_is_refused() {
+        let mut model = FakeModel { n_layers: 1, kv_layers: vec![0] };
+        assert!(calibrate(&mut model, "fake", &[], 0.99).unwrap_err().contains("no prompts"));
+    }
+
+    #[test]
+    fn observe_rows_gives_each_head_its_own_stream() {
+        let mut obs = crate::actstats::Collector::new();
+        // two tokens x (2 heads x 2 dims): head 0 holds 1,2 / 5,6; head 1 holds 3,4 / 7,8.
+        observe_rows(&mut obs, 5, KvSide::K, &[1., 2., 3., 4., 5., 6., 7., 8.], 2, 2);
+        assert_eq!(obs.quantile(&stream_name(5, KvSide::K, 0), 1.0), Some(6.0));
+        assert_eq!(obs.quantile(&stream_name(5, KvSide::K, 1), 1.0), Some(8.0));
+        assert_eq!(obs.quantile(&stream_name(5, KvSide::V, 0), 1.0), None);
     }
 
     #[test]

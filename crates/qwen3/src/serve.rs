@@ -3457,8 +3457,16 @@ impl Engine {
     /// the KV append in `run_batched_submit`), matching exactly
     /// what a real INT8 KV scale would be quantizing.
     pub fn calibrate_kv(&mut self, prompts: &[Vec<u32>]) -> model::actstats::Collector {
+        let mut collector = model::actstats::Collector::new();
+        self.observe_kv(prompts, &mut collector);
+        collector
+    }
+
+    /// [`Self::calibrate_kv`]'s pass, reporting to any [`model::kvcalib::KvObserver`]
+    /// (the [`model::kvcalib::KvCalibrationSource`] impl below).
+    fn observe_kv(&mut self, prompts: &[Vec<u32>], obs: &mut dyn model::kvcalib::KvObserver) {
+        use model::kvcalib::{observe_rows, KvSide};
         assert!(!self.kv_int8, "calibrate_kv needs an fp32-KV engine (build with kv_int8: false)");
-        let collector = model::actstats::Collector::new();
         let hd = self.cfg.head_dim as usize;
         let n_kv = self.cfg.n_kv_heads as usize;
         let hkv = n_kv * hd;
@@ -3487,10 +3495,8 @@ impl Engine {
                     let phys = table.blocks()[tok / bs] as usize;
                     let off = tok % bs;
                     let base = (phys * bs + off) * hkv;
-                    for h in 0..n_kv {
-                        collector.observe(&format!("layer{l:02}.k.head{h}"), &pk[base + h * hd..base + (h + 1) * hd]);
-                        collector.observe(&format!("layer{l:02}.v.head{h}"), &pv[base + h * hd..base + (h + 1) * hd]);
-                    }
+                    observe_rows(obs, l, KvSide::K, &pk[base..base + hkv], n_kv, hd);
+                    observe_rows(obs, l, KvSide::V, &pv[base..base + hkv], n_kv, hd);
                 }
             }
         }
@@ -3498,7 +3504,6 @@ impl Engine {
         for (mut table, _) in tables {
             self.release_table(&mut table);
         }
-        collector
     }
 
     /// Greedy generation of `max_new` tokens for each prompt, run with a **paged
@@ -3653,6 +3658,23 @@ pub type Scheduler = model::serve::Scheduler<Engine>;
 /// `model::kv_offload::KvOffload`'s provided methods, shared with every future
 /// adopter - only these four are Qwen-specific, and even they are written
 /// against `kv_pool_words`, this engine's own single source of pool layout.
+impl model::kvcalib::KvCalibrationSource for Engine {
+    fn kv_geometry(&self) -> (usize, usize, usize) {
+        (self.cfg.n_layers as usize, self.cfg.n_kv_heads as usize, self.cfg.head_dim as usize)
+    }
+
+    fn observe_prompts(&mut self, prompts: &[Vec<u32>], obs: &mut dyn model::kvcalib::KvObserver) -> Result<(), String> {
+        if self.kv_int8 {
+            return Err("KV calibration needs an fp32-KV engine (build with kv_int8: false)".into());
+        }
+        if prompts.iter().any(|p| p.is_empty()) {
+            return Err("KV calibration: empty prompt".into());
+        }
+        self.observe_kv(prompts, obs);
+        Ok(())
+    }
+}
+
 impl KvOffload for Engine {
     fn kv_block_words(&self) -> usize {
         self.kv_block_words
