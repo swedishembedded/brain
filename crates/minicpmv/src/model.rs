@@ -95,7 +95,7 @@ pub struct MiniCpmV {
 
 /// Every decoder tensor of `src` in host memory, by canonical name - what an
 /// adapter is folded into.
-fn decoder_map(src: &qwen35::fp8_source::Qwen35Source) -> std::collections::HashMap<String, Vec<f32>> {
+fn decoder_map(src: &checkpoint::packed::PackedSource) -> std::collections::HashMap<String, Vec<f32>> {
     src.names()
         .into_iter()
         .map(|n| {

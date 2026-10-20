@@ -470,7 +470,7 @@ pub fn auto_cap(cfg: &Qwen35Config, devices: &[(Device, u64)], tier: &TierPolicy
 /// here: one produces SEVERAL destinations from one source, the other
 /// reorders rows, and a plain rename can express neither; this
 /// architecture's map emits neither.
-fn gguf_name_map(mg: &MmapGguf, cfg: &Qwen35Config) -> HashMap<String, String> {
+pub(crate) fn gguf_name_map(mg: &MmapGguf, cfg: &Qwen35Config) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for name in mg.names() {
         match crate::gguf_import::classify(name, cfg) {

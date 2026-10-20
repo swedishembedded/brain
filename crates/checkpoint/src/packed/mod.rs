@@ -13,6 +13,7 @@ pub mod encoding;
 pub mod load;
 pub mod reader;
 pub mod sink;
+pub mod source;
 #[cfg(test)]
 mod testfix;
 
@@ -22,3 +23,4 @@ pub use encoding::{BlockGeometry, Codebook, Element, FloatFormat, Packing, Quant
 pub use load::{LoadConfig, LoadOp, LoadPlan, LoadPolicy, LoadReport, LoadStep, Loader};
 pub use reader::{PackedReader, PackedTensorReader};
 pub use sink::{MemorySink, TensorSink};
+pub use source::{Binding, PackedSource};

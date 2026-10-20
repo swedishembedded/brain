@@ -6,15 +6,18 @@
 //!
 //! [`open_base`] turns a path into a configuration plus a lazy
 //! [`checkpoint::TensorSource`]: a HuggingFace directory (the FP8 release, or
-//! a bf16/fp32 one) is served by [`crate::fp8_source::Qwen35Source`], a
+//! a bf16/fp32 one) is served by [`crate::fp8_source::open_dir`], a
 //! brain-native `.safetensors` by the mmap-backed `WeightReader`. Neither
 //! decodes more than one tensor (or one row band of the head) at a time, so
 //! a 27B base never exists on the host as a whole. [`lora_base`] layers the
 //! small, fresh LoRA adapters over that source, which is the shape the model
 //! constructors take (adapters from memory, every frozen tensor streamed).
 //!
-//! GGUF is not opened here: convert it once with `brain import-gguf`, which
-//! produces the brain-native file this accepts.
+//! A GGUF (any quantization the checkpoint codecs decode, Q8_0 to Q4_K) is served
+//! lazily as well: llama.cpp's names are mapped onto the canonical ones by
+//! `gguf_import::classify`, the Gated-DeltaNet leaves get their value fixes on
+//! read, and every other tensor streams block by block, so a quantized GGUF
+//! base needs no import step.
 //!
 //! Swedish Embedded AB implements solutions for fine-tuning very large
 //! language models on a single accelerator for its clients. If your team
@@ -24,11 +27,12 @@
 use std::path::Path;
 use std::str::FromStr;
 
+use checkpoint::remap::{Fetch, RemapSource};
 use checkpoint::weightio::WeightReader;
 use checkpoint::TensorSource;
 
 use crate::config::{lora_cfg, LoraCfg, Qwen35Config};
-use crate::fp8_source::{hf_config, hf_fp8_block_size, Qwen35Source};
+use crate::fp8_source::{self, hf_config, hf_fp8_block_size};
 
 /// Precision of the frozen base weights on the device during a fine-tune.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,16 +87,47 @@ pub struct BaseCheckpoint {
 pub fn open_base(path: &Path) -> Result<BaseCheckpoint, String> {
     if path.is_dir() {
         let cfg = hf_config(path)?;
-        let src = Qwen35Source::open_dir(path, &cfg, hf_fp8_block_size(path)?)?;
+        let src = fp8_source::open_dir(path, &cfg, hf_fp8_block_size(path)?)?;
         return Ok(BaseCheckpoint { cfg, src: Box::new(src) });
     }
     if path.extension().is_some_and(|e| e == "gguf") {
-        return Err(format!("{}: a GGUF file; convert it with `brain import-gguf` and name the .safetensors it writes", path.display()));
+        return open_gguf_base(path);
     }
     let name = path.to_str().ok_or_else(|| format!("{}: not a UTF-8 path", path.display()))?;
     let reader = WeightReader::open(name).map_err(|e| format!("open {name}: {e}"))?;
     let cfg = Qwen35Config::from_json_checked(&reader.config()).map_err(|e| format!("{name}: {e}"))?;
     Ok(BaseCheckpoint { cfg, src: Box::new(reader) })
+}
+
+/// A GGUF as a streamed base: the config from its metadata, every parameter the
+/// config lists mapped to the GGUF tensor that holds it (two-way coverage is
+/// checked from shapes before any data is read), the llama.cpp-only value
+/// fixes applied on read.
+fn open_gguf_base(path: &Path) -> Result<BaseCheckpoint, String> {
+    let name = path.to_str().ok_or_else(|| format!("{}: not a UTF-8 path", path.display()))?;
+    let mg = checkpoint::gguf::MmapGguf::open(name).map_err(|e| format!("open {name}: {e}"))?;
+    let mut cfg = crate::gguf_import::config_from_gguf(&mg).map_err(|e| format!("{name}: {e}"))?;
+    // The MTP head is not part of a fine-tuned base.
+    cfg.mtp = false;
+    let available = crate::int8_gguf_resident::gguf_name_map(&mg, &cfg);
+    let want: Vec<(String, usize)> = cfg.param_list().into_iter().filter(|(n, _)| !model::adapter::device::is_adapter_param(n)).collect();
+    let (mut plan, mut missing) = (std::collections::HashMap::new(), Vec::new());
+    for (param, _) in &want {
+        match available.get(param) {
+            Some(src) => {
+                plan.insert(param.clone(), Fetch::Whole(src.clone()));
+            }
+            None => missing.push(param.as_str()),
+        }
+    }
+    if !missing.is_empty() {
+        missing.truncate(16);
+        return Err(format!("{name}: no GGUF tensor for {}", missing.join(", ")));
+    }
+    let remap = RemapSource::owning(Box::new(mg), plan);
+    remap.validate(&want).map_err(|e| format!("{name}: {e}"))?;
+    let order = cfg.gdn_head_order();
+    Ok(BaseCheckpoint { cfg, src: Box::new(gguf::GdnFixSource::new(remap, order)) })
 }
 
 /// Fresh zero-delta LoRA adapters held in memory over a streamed base.

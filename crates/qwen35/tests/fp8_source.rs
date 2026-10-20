@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `qwen35::fp8_source::Qwen35Source`: the lazy, memory-bounded view of a
+//! `qwen35::fp8_source::open_dir`: the lazy, memory-bounded view of a
 //! HuggingFace Qwen3.5/3.8 checkpoint directory that the LoRA/QLoRA trainer
 //! loads its frozen base from.
 //!
@@ -29,7 +29,8 @@ use checkpoint::mmap::MmapSafetensors;
 use checkpoint::TensorSource;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::base_source::{lora_base, open_base, BaseDtype};
-use qwen35::fp8_source::{hf_config, hf_fp8_block_size, Qwen35Source};
+use checkpoint::packed::PackedSource;
+use qwen35::fp8_source::{self, hf_config, hf_fp8_block_size};
 use qwen35::import::{import_dir, import_layer};
 
 // ---- counting allocator: peak live heap bytes of the measuring thread ----
@@ -232,7 +233,7 @@ fn hf_config_json(cfg: &Qwen35Config, block: usize) -> serde_json::Value {
     })
 }
 
-fn read_all(src: &Qwen35Source, name: &str) -> Vec<f32> {
+fn read_all(src: &PackedSource, name: &str) -> Vec<f32> {
     let mut out = None;
     assert!(src.with_tensor(name, &mut |d| out = Some(d.to_vec())), "{name} not served");
     out.unwrap()
@@ -242,7 +243,7 @@ fn read_all(src: &Qwen35Source, name: &str) -> Vec<f32> {
 fn every_tensor_equals_the_eager_importers_bit_for_bit() {
     let cfg = fixture_cfg();
     let dir = write_checkpoint(&cfg, "equal", None);
-    let src = Qwen35Source::open_dir(&dir, &cfg, BLOCK).unwrap();
+    let src = fp8_source::open_dir(&dir, &cfg, BLOCK).unwrap();
     let eager = import_dir(&dir, &cfg, BLOCK).unwrap();
 
     let mut names: Vec<&String> = eager.keys().collect();
@@ -267,7 +268,7 @@ fn every_tensor_equals_the_eager_importers_bit_for_bit() {
 fn chunked_reads_concatenate_to_the_same_values_in_bounded_chunks() {
     let cfg = fixture_cfg();
     let dir = write_checkpoint(&cfg, "chunks", None);
-    let src = Qwen35Source::open_dir(&dir, &cfg, BLOCK).unwrap();
+    let src = fp8_source::open_dir(&dir, &cfg, BLOCK).unwrap();
     let eager = import_dir(&dir, &cfg, BLOCK).unwrap();
     // The widest matrix in the fixture: its block band is the chunk floor.
     let widest = cfg.intermediate_size as usize;
@@ -295,7 +296,7 @@ fn chunked_reads_concatenate_to_the_same_values_in_bounded_chunks() {
 fn streaming_the_whole_model_keeps_host_allocation_near_one_tensor() {
     let cfg = fixture_cfg();
     let dir = write_checkpoint(&cfg, "peak", None);
-    let src = Qwen35Source::open_dir(&dir, &cfg, BLOCK).unwrap();
+    let src = fp8_source::open_dir(&dir, &cfg, BLOCK).unwrap();
     let total: usize = cfg.param_list().iter().map(|(_, n)| n * 4).sum();
     let largest: usize = cfg.param_list().iter().map(|(_, n)| n * 4).max().unwrap();
 
@@ -325,15 +326,15 @@ fn streaming_the_whole_model_keeps_host_allocation_near_one_tensor() {
 fn a_checkpoint_that_disagrees_with_the_config_is_refused_by_name() {
     let cfg = fixture_cfg();
     let dir = write_checkpoint(&cfg, "missing", Some("blocks.3.mlp.up.weight"));
-    let err = Qwen35Source::open_dir(&dir, &cfg, BLOCK).err().expect("a missing tensor must be refused");
+    let err = fp8_source::open_dir(&dir, &cfg, BLOCK).err().expect("a missing tensor must be refused");
     assert!(err.contains("missing blocks.3.mlp.up.weight"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 
     let dir = write_checkpoint(&cfg, "dims", None);
     let wrong = Qwen35Config { intermediate_size: cfg.intermediate_size + 1, ..cfg.clone() };
-    let err = Qwen35Source::open_dir(&dir, &wrong, BLOCK).err().expect("a dimension mismatch must be refused");
+    let err = fp8_source::open_dir(&dir, &wrong, BLOCK).err().expect("a dimension mismatch must be refused");
     assert!(err.contains("blocks.0.mlp.gate.weight") && err.contains("elements"), "{err}");
-    let err = Qwen35Source::open_dir(&dir, &cfg, 64).err().expect("a wrong FP8 block size must be refused");
+    let err = fp8_source::open_dir(&dir, &cfg, 64).err().expect("a wrong FP8 block size must be refused");
     assert!(err.contains("_scale_inv") && err.contains("shape"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -356,13 +357,13 @@ fn tensors_owned_by_another_component_are_refused_unless_declared_foreign() {
     }
     std::fs::write(&index, serde_json::to_vec(&idx).unwrap()).unwrap();
 
-    let err = Qwen35Source::open_dir(&dir, &cfg, BLOCK).err().expect("an undeclared foreign tensor must be refused");
+    let err = fp8_source::open_dir(&dir, &cfg, BLOCK).err().expect("an undeclared foreign tensor must be refused");
     assert!(err.contains("model.vision_tower.post_layernorm.weight") || err.contains("model.merger."), "{err}");
     let foreign = ["model.vision_tower.", "model.merger."];
-    let src = Qwen35Source::open_dir_with(&dir, &cfg, BLOCK, &foreign).expect("declared foreign prefixes are skipped");
+    let src = fp8_source::open_dir_with(&dir, &cfg, BLOCK, &foreign).expect("declared foreign prefixes are skipped");
     assert!(src.names().iter().all(|n| !n.starts_with("model.")), "a foreign tensor leaked into the decoder's names");
     let narrow = Qwen35Config { intermediate_size: cfg.intermediate_size + 1, ..cfg.clone() };
-    assert!(Qwen35Source::open_dir_with(&dir, &narrow, BLOCK, &foreign).is_err(), "declaring foreign prefixes must not relax decoder coverage");
+    assert!(fp8_source::open_dir_with(&dir, &narrow, BLOCK, &foreign).is_err(), "declaring foreign prefixes must not relax decoder coverage");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -374,7 +375,7 @@ fn a_model_built_from_the_lazy_source_equals_one_built_from_the_eager_map() {
     // The standard tiny config at fp8-compatible dims, small enough for the CPU backend.
     let cfg = Qwen35Config { vocab: 64, n_layers: 4, d_model: 96, intermediate_size: 112, ..Qwen35Config::tiny() };
     let dir = write_checkpoint(&cfg, "model", None);
-    let src = Qwen35Source::open_dir(&dir, &cfg, BLOCK).unwrap();
+    let src = fp8_source::open_dir(&dir, &cfg, BLOCK).unwrap();
     let eager = import_dir(&dir, &cfg, BLOCK).unwrap();
     let t = cfg.block_size;
     let shard = Shard { start: 0, end: cfg.n_layers as usize, embed: true, head: true, gpu_index: Shard::ANY_GPU };
@@ -426,8 +427,9 @@ fn open_base_serves_an_hf_directory_and_a_brain_native_file_alike() {
     assert_eq!(nat.cfg.to_json(), cfg.to_json());
     assert!(nat.src.with_tensor("blocks.1.mlp.up.weight", &mut |d| assert_eq!(d, &eager["blocks.1.mlp.up.weight"][..])));
 
-    let err = open_base(&dir.join("model.gguf")).err().expect("a GGUF must be refused with the way forward");
-    assert!(err.contains("import-gguf"), "{err}");
+    std::fs::write(dir.join("model.gguf"), b"not a gguf").unwrap();
+    let err = open_base(&dir.join("model.gguf")).err().expect("a file that is not a GGUF must be refused by name");
+    assert!(err.contains("model.gguf"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -511,7 +513,7 @@ fn real_27b_checkpoint_streams_under_8_gib_host_rss() {
     assert_eq!(cfg.to_json(), want.to_json(), "hf_config disagrees with the built-in 27B shape");
 
     let t0 = std::time::Instant::now();
-    let src = Qwen35Source::open_dir(&dir, &cfg, 128).unwrap();
+    let src = fp8_source::open_dir(&dir, &cfg, 128).unwrap();
     let mut bytes = 0u64;
     let mut peak_rss_kib = 0u64;
     let names: Vec<String> = src.names().iter().map(|s| s.to_string()).collect();

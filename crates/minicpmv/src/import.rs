@@ -9,7 +9,8 @@
 
 use std::path::Path;
 
-use qwen35::fp8_source::{hf_fp8_block_size, Qwen35Source};
+use checkpoint::packed::PackedSource;
+use qwen35::fp8_source::{self, hf_fp8_block_size};
 
 use crate::config::MiniCpmVConfig;
 
@@ -18,8 +19,8 @@ pub const VISION_PREFIXES: &[&str] = &["model.vision_tower.", "model.merger."];
 
 /// The decoder's tensors under `brain-qwen35`'s canonical names, streamed
 /// from the checkpoint in `dir` with two-way coverage of its own scope.
-pub fn open_decoder(dir: &Path, cfg: &MiniCpmVConfig) -> Result<Qwen35Source, String> {
-    Qwen35Source::open_dir_with(dir, &cfg.text, hf_fp8_block_size(dir)?, VISION_PREFIXES)
+pub fn open_decoder(dir: &Path, cfg: &MiniCpmVConfig) -> Result<PackedSource, String> {
+    fp8_source::open_dir_with(dir, &cfg.text, hf_fp8_block_size(dir)?, VISION_PREFIXES)
 }
 
 /// The vision tower and merger weights under [`crate::vision::tensor_manifest`]'s

@@ -46,6 +46,9 @@ pub struct PackedReader {
     inner: WeightReader,
     overrides: HashMap<String, TensorDescriptor>,
     hidden: HashSet<String>,
+    /// The FP8 tile size the checkpoint declares (`weight_block_size`), tried
+    /// before the inference candidates.
+    fp8_block: Option<u32>,
 }
 
 /// FP8 `weight_block_size` candidates tried when inferring the tile from the
@@ -61,7 +64,7 @@ impl PackedReader {
     }
 
     pub fn new(inner: WeightReader) -> PackedReader {
-        let mut r = PackedReader { inner, overrides: HashMap::new(), hidden: HashSet::new() };
+        let mut r = PackedReader { inner, overrides: HashMap::new(), hidden: HashSet::new(), fp8_block: None };
         r.hide_sidecars();
         r
     }
@@ -74,14 +77,27 @@ impl PackedReader {
         self
     }
 
+    /// Declare the checkpoint's FP8 `weight_block_size`. A scale grid alone can
+    /// fit several block sizes (3 bands over 300 rows fits 100 and 128); the
+    /// declared one is tried first, and a grid it does not fit is an error.
+    pub fn with_fp8_block(mut self, block: u32) -> PackedReader {
+        self.fp8_block = Some(block);
+        self.hide_sidecars();
+        self
+    }
+
     fn hide_sidecars(&mut self) {
         let mut hidden = HashSet::new();
         let names: Vec<String> = self.inner.names().map(str::to_string).collect();
         for n in &names {
-            if let Ok(d) = self.descriptor_unchecked(n) {
-                for l in &d.encoding.scales {
-                    hidden.insert(format!("{n}{}", l.suffix));
+            match self.descriptor_unchecked(n) {
+                Ok(d) => hidden.extend(d.encoding.scales.iter().map(|l| format!("{n}{}", l.suffix))),
+                // An FP8 weight whose scale grid cannot be interpreted still owns
+                // it: the error belongs to the weight, not to a stray tensor.
+                Err(_) if self.inner.dtype(n) == Some("F8_E4M3") && self.inner.dtype(&format!("{n}_scale_inv")).is_some() => {
+                    hidden.insert(format!("{n}_scale_inv"));
                 }
+                Err(_) => {}
             }
         }
         self.hidden = hidden;
@@ -112,7 +128,7 @@ impl PackedReader {
             "BF16" => QuantEncoding::bf16(),
             "F8_E4M3" if has("_scale_inv", "BF16") || has("_scale_inv", "F32") => {
                 let grid = self.inner.shape(&format!("{name}_scale_inv")).map(<[u64]>::to_vec).unwrap_or_default();
-                let block = infer_fp8_block(&shape, &grid).ok_or_else(|| format!("{name}: scale grid {grid:?} fits no known FP8 block size for shape {shape:?}"))?;
+                let block = infer_fp8_block(&shape, &grid, self.fp8_block).ok_or_else(|| format!("{name}: {name}_scale_inv has shape {grid:?}, which fits no known FP8 block size for shape {shape:?}"))?;
                 let mut e = QuantEncoding::fp8_e4m3_tiled(block);
                 if has("_scale_inv", "F32") {
                     e.scales[0].format = FloatFormat::F32;
@@ -148,9 +164,13 @@ impl PackedReader {
     }
 }
 
-fn infer_fp8_block(shape: &[u64], grid: &[u64]) -> Option<u32> {
+fn infer_fp8_block(shape: &[u64], grid: &[u64], declared: Option<u32>) -> Option<u32> {
     let ([rows, cols], [gr, gc]) = (<[u64; 2]>::try_from(shape).ok()?, <[u64; 2]>::try_from(grid).ok()?);
-    FP8_BLOCKS.into_iter().find(|&b| rows.div_ceil(b as u64) == gr && cols.div_ceil(b as u64) == gc)
+    let fits = |b: &u32| rows.div_ceil(*b as u64) == gr && cols.div_ceil(*b as u64) == gc;
+    match declared {
+        Some(b) => Some(b).filter(fits),
+        None => FP8_BLOCKS.into_iter().find(fits),
+    }
 }
 
 /// A GGUF tensor type as an encoding. Plain float types become float encodings
