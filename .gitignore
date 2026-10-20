@@ -97,3 +97,5 @@ samples/decision/doom/.data/
 .sven/
 cuda-matrix.json
 cuda-coverage.json
+# Virtualenvs `make check/samples` builds from a sample's requirements.txt.
+.samples-venv/

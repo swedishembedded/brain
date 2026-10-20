@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+# Python dependencies of the rgb-to-ir sample (README "Dependencies"). `make check/samples`
+# installs them into .samples-venv/ to run the sample's unit tests.
+numpy
+opencv-python-headless
+Pillow

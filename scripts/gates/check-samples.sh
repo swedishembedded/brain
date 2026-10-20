@@ -86,8 +86,29 @@ if [ "${#script_dirs[@]}" -gt 0 ]; then
 		done
 
 		# A sample may carry unit tests of its own helpers in tests/test_*.py; they are part of its contract.
+		# Its Python dependencies are declared in its own requirements.txt; the gate
+		# installs them into a venv of its own (rebuilt when the file changes), so a
+		# host without them fails the sample's tests loudly instead of skipping them.
 		if compgen -G "$d/tests/test_*.py" >/dev/null; then
-			if ! out="$(python3 -m unittest discover -s "$d/tests" 2>&1)"; then
+			py=python3
+			if [ -f "$d/requirements.txt" ]; then
+				venv=".samples-venv/$(printf '%s' "$d" | tr / _)"
+				stamp="$venv/.requirements.sha256"
+				want="$(sha256sum "$d/requirements.txt" | cut -d' ' -f1)"
+				if [ "$(cat "$stamp" 2>/dev/null || true)" != "$want" ]; then
+					rm -rf "$venv"
+					if python3 -m venv "$venv" && "$venv/bin/pip" install -q -r "$d/requirements.txt"; then
+						printf '%s' "$want" >"$stamp"
+					else
+						bad "$d: cannot install requirements.txt into $venv"
+						continue
+					fi
+				fi
+				# The tests also run the sample's own scripts, which call `python3`: put the
+				# venv first on PATH, as activating it would.
+				py="env PATH=$PWD/$venv/bin:$PATH $PWD/$venv/bin/python"
+			fi
+			if ! out="$($py -m unittest discover -s "$d/tests" 2>&1)"; then
 				printf '%s\n' "$out" | tail -20
 				bad "$d: unit tests fail"
 			fi

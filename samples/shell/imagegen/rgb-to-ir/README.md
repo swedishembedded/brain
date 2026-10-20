@@ -629,7 +629,8 @@ was scored on the same `packed/eval-<split>`.
 
 ## Dependencies
 
-`python3` with `numpy`, `opencv-python` and `Pillow`; the `brain` binary for the
+`python3` with `numpy`, `opencv-python` and `Pillow` (`requirements.txt`: `pip install -r requirements.txt`, which
+`make check/samples` does into `.samples-venv/` for the unit tests); the `brain` binary for the
 fine-tune steps, for `evaluate`, for `generate` and for `measure`, which also needs `jeepney` for the default
 D-Bus backend (as does `gate --sam2`).
 
