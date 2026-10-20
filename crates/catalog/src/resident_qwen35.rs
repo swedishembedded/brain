@@ -713,7 +713,7 @@ mod tests {
         let cfg = Qwen35GgufServeConfig {
             ctx: Some(8192),
             tier: Some(model::ops::TierPolicy::parse("i8").unwrap()),
-            kv: Some(model::kv_tier::KvTier::Int8),
+            kv: Some(model::kv_tier::KvTier::INT8),
             max_batch: Some(4),
             prefix_slots: Some(2),
             speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Off),
@@ -721,7 +721,7 @@ mod tests {
         };
         let r = gguf_resident(&path, "t/knobs", &gpu_budget(), RESERVED, &cfg).expect("builds");
         assert_eq!(r.cap(), 8192);
-        assert_eq!(r.kv_tier(), model::kv_tier::KvTier::Int8);
+        assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8);
         assert_eq!(r.max_batch(), 4);
         assert_eq!(r.prefix_slots(), 2);
         assert_eq!(r.speculation().mode, qwen35::int8_gguf_resident::SpeculativeMode::Off);

@@ -136,7 +136,9 @@ layer 6 - serving, front ends, SDK, samples
                            loaders, masking/alignment, normalization
    model                   architecture-agnostic Model trait + generic trainer,
                            shared block builders (block.rs, vit.rs), paged KV,
-                           and the multi-GPU parallelism layer (see below)
+                           the KV storage descriptor (kv_tier: element codec x
+                           scale hierarchy; f32/bf16/int8/fp8-E4M3 tiers), and
+                           the multi-GPU parallelism layer (see below)
    promote                 the model-agnostic promote/reject decision: the
                            Environment/Verifier reward seam, the exact paired
                            sign test, the four-bar gate over already-scored

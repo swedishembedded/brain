@@ -120,7 +120,7 @@ fn compact_kv_tiers_agree_with_the_f32_cache_on_a_real_prompt() {
     let floor = Stats::of(&trace.decode, &trace.chunk, &trace.ids);
     println!("f32 decode tape vs f32 chunk tape (the numerics' own floor): {floor}");
 
-    for (tier, max_floor_multiple, min_top1) in [(KvTier::Bf16, 2.0, 0.9), (KvTier::Int8, 3.0, 0.9)] {
+    for (tier, max_floor_multiple, min_top1) in [(KvTier::BF16, 2.0, 0.9), (KvTier::INT8, 3.0, 0.9)] {
         if std::env::var("KV_TIER_ONLY").is_ok_and(|only| only != tier.as_str()) {
             continue;
         }

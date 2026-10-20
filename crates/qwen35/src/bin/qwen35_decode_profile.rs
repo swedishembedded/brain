@@ -30,7 +30,7 @@
 //! **Batches and long contexts** - `--batch <n>` and/or `--context <tokens>`
 //! switch to a SYNTHETIC context (fresh caches, decode work at a real position,
 //! as `brain perf run longctx` does) with `n` rows (default 1) at that context
-//! (default 512); the KV cache storage comes from `--kv <f32|bf16|int8>`
+//! (default 512); the KV cache storage comes from `--kv <f32|bf16|int8|fp8>`
 //! (default f32). The report is the per-kernel DEVICE time per decode step,
 //! which a loaded host cannot distort the way it stretches the wall clock, and
 //! the weight bandwidth that step achieved.
@@ -68,7 +68,7 @@ fn main() {
     let set = gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
 
     let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
-        eprintln!("usage: qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out] [--kv f32|bf16|int8]");
+        eprintln!("usage: qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out] [--kv f32|bf16|int8|fp8]");
         std::process::exit(2);
     };
     let devices = real_devices(&set.gpus);

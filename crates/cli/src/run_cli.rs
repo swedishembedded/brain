@@ -276,7 +276,7 @@ QWEN3.8 SERVING  (every released Qwen3.8 GGUF in the model store is served
   --qwen35-tier SPEC     weight tier, uniform or per-leaf rules:
                          `i8` or e.g. `i8,blk.0.attn_q=f32` (default: uniform
                          int8 - what the checkpoints are released as).
-  --qwen35-kv TIER       GQA cache storage: f32|bf16|int8 (default f32).
+  --qwen35-kv TIER       GQA cache storage: f32|bf16|int8|fp8 (default f32).
   --qwen35-max-batch N   decode slots: sequences decoded together in one batched
                          step (default 8). A configuration whose slots x ctx
                          do not fit the GPUs is refused at startup.

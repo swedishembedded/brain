@@ -268,6 +268,40 @@ pub fn int8_kv_variant(name: &str, src: &'static str, binding: &str, scales: &st
     int8_scaled_variant(vname, src, binding, scales, |wi| format!("{wi} / {group}"))
 }
 
+/// WGSL decoding one E4M3 byte (`b` in `0..=255`) to `f32`: sign in bit 7, four
+/// exponent bits (bias 7), three mantissa bits; exponent 0 is subnormal
+/// (`m * 2^-9`). Code 0x7F / 0xFF is NaN in the format and is never written by
+/// the append kernel; this decode maps it to the format's largest-exponent
+/// value rather than testing for it.
+macro_rules! fp8_e4m3_wgsl {
+    () => {
+        "fn fp8_e4m3(b: u32) -> f32 {
+    let e = (b >> 3u) & 15u;
+    let m = b & 7u;
+    let neg = (b & 128u) != 0u;
+    if (e == 0u) {
+        let sub = f32(m) * 0.001953125;
+        return select(sub, -sub, neg);
+    }
+    return bitcast<f32>(((b & 128u) << 24u) | ((e + 120u) << 23u) | (m << 20u));
+}
+"
+    };
+}
+
+const FP8_E4M3_DECODE: &str = concat!(fp8_e4m3_wgsl!(), "\n");
+
+/// The FP8 E4M3 sibling of [`int8_kv_variant`]: the same packed layout (four
+/// bytes to a `u32` word, one `f32` scale per `group` elements in a new
+/// `scales` binding) with each byte decoded as an E4M3 value instead of an
+/// int8. Named `"{name}#{binding}=kvfp8"`.
+pub fn fp8_kv_variant(name: &str, src: &'static str, binding: &str, scales: &str, group: &str) -> Result<Variant, String> {
+    let vname = format!("{name}#{binding}=kvfp8");
+    packed_scaled_variant(vname, src, binding, scales, FP8_E4M3_DECODE, |wi| {
+        format!("(fp8_e4m3((({binding}[{wi} >> 2u]) >> (({wi} & 3u) * 8u)) & 255u) * {scales}[{wi} / {group}])")
+    })
+}
+
 /// What [`int8_weight_variant`] and [`int8_kv_variant`] share: pack `binding`
 /// as int8, append the `scales` binding, and decode each load as
 /// `scales[scale_index(wi)] * int8`.
@@ -301,7 +335,10 @@ fn packed_scaled_variant(vname: String, src: &'static str, binding: &str, scales
     let mut with_scales = String::with_capacity(with_decl.len() + 96 + helpers.len());
     with_scales.push_str(&with_decl[..entry_at]);
     with_scales.push_str(&format!("@group(0) @binding({}) var<storage, read> {scales}: array<f32>;\n\n", last + 1));
-    with_scales.push_str(helpers);
+    // A kernel reading two bindings is rewritten twice (K then V): declare each helper once.
+    if !with_decl.contains(helpers) {
+        with_scales.push_str(helpers);
+    }
     with_scales.push_str(&with_decl[entry_at..]);
     let rewritten = rewrite_loads_with(&with_scales, binding, decode)?;
 
@@ -321,6 +358,8 @@ pub enum CompactKv {
     /// per 256-element (token, kv-head) row in a pair of extra bindings (7 and
     /// 8, after the kernel's six).
     Int8,
+    /// FP8 E4M3 bytes packed like [`CompactKv::Int8`], same scale bindings.
+    Fp8,
 }
 
 impl CompactKv {
@@ -328,6 +367,7 @@ impl CompactKv {
         match self {
             CompactKv::Bf16 => "bf16",
             CompactKv::Int8 => "int8",
+            CompactKv::Fp8 => "fp8",
         }
     }
 
@@ -336,6 +376,7 @@ impl CompactKv {
         match self {
             CompactKv::Bf16 => (BF16_KV_DECLS, BF16_KV_LOADS),
             CompactKv::Int8 => (INT8_KV_DECLS, INT8_KV_LOADS),
+            CompactKv::Fp8 => (INT8_KV_DECLS, FP8_KV_LOADS),
         }
     }
 }
@@ -391,6 +432,30 @@ fn v2(row: u32, i: u32) -> vec2<f32> {
 fn k_scale(row: u32) -> f32 { return k_scales[row >> 8u]; }
 fn v_scale(row: u32) -> f32 { return v_scales[row >> 8u]; }
 ";
+
+/// The fp8 loads: the int8 block's byte addressing with an E4M3 decode of each byte.
+const FP8_KV_LOADS: &str = concat!(
+    fp8_e4m3_wgsl!(),
+    "fn f8x(w: u32, shift: u32) -> f32 { return fp8_e4m3((w >> shift) & 255u); }
+fn k4(row: u32, i: u32) -> vec4<f32> {
+    let w4 = pool_k[(row >> 4u) + (i >> 2u)];
+    let c = i & 3u;
+    var w = w4.x;
+    if (c == 1u) { w = w4.y; }
+    if (c == 2u) { w = w4.z; }
+    if (c == 3u) { w = w4.w; }
+    return vec4<f32>(f8x(w, 0u), f8x(w, 8u), f8x(w, 16u), f8x(w, 24u));
+}
+fn v2(row: u32, i: u32) -> vec2<f32> {
+    let e = row + 2u * i;
+    let w = pool_v[e >> 2u];
+    let sh = (e & 3u) * 8u;
+    return vec2<f32>(f8x(w, sh), f8x(w, sh + 8u));
+}
+fn k_scale(row: u32) -> f32 { return k_scales[row >> 8u]; }
+fn v_scale(row: u32) -> f32 { return v_scales[row >> 8u]; }
+"
+);
 
 /// Rewrite a kernel that isolates everything a KV storage tier changes between
 /// `// @kv-tier-begin <block>` and `// @kv-tier-end <block>` marker lines -

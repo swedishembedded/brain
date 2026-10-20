@@ -125,7 +125,7 @@
 //!   int8), from any [`checkpoint::TensorSource`] - in particular straight from
 //!   the released Q8_0 GGUF through [`crate::gguf_load::source`], so the 35B
 //!   model is resident at ~38 GB with no fp32 copy anywhere.
-//! - **KV**: the GQA layers' K/V pool is stored f32, bf16 or per-row int8
+//! - **KV**: the GQA layers' K/V pool is stored f32, bf16, per-row int8 or per-row fp8
 //!   ([`model::kv_tier::KvTier`], chosen in [`EngineOptions`]) and decoded
 //!   through the fused split-key attention in every tier.
 //! - **Prefill**: chunked - one dispatch shape per layer per round of

@@ -184,8 +184,8 @@ fn the_fused_prep_is_offered_only_where_it_can_run() {
     assert!(!try_it(&shape, 0, &f32_layer), "an empty batch has nothing to launch");
     assert!(!try_it(&GqaMixerShape { head_dim: 1024, ..shape }, 1, &f32_layer), "a head wider than the block holds");
     assert!(!try_it(&GqaMixerShape { rotary_half: 40, ..shape }, 1, &f32_layer), "a rotated span wider than the head");
-    assert!(!try_it(&shape, 1, &layer_in(KvTier::Bf16)), "a compact KV tier keeps the tier's own append");
-    assert!(!try_it(&shape, 1, &layer_in(KvTier::Int8)), "a compact KV tier keeps the tier's own append");
+    assert!(!try_it(&shape, 1, &layer_in(KvTier::BF16)), "a compact KV tier keeps the tier's own append");
+    assert!(!try_it(&shape, 1, &layer_in(KvTier::INT8)), "a compact KV tier keeps the tier's own append");
 }
 
 #[test]

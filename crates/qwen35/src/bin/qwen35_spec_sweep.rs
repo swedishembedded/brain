@@ -87,7 +87,7 @@ fn parse_args() -> Args {
     let mut a = Args {
         gguf: String::new(),
         ctx: 4096,
-        kv: KvTier::Bf16,
+        kv: KvTier::BF16,
         mode: SpeculativeMode::Off,
         batches: vec![1, 8, 16, 32, 64, 128],
         workloads: vec!["code", "agent"],
@@ -156,7 +156,7 @@ fn parse_args() -> Args {
         }
     }
     if a.gguf.is_empty() {
-        eprintln!("usage: qwen35_spec_sweep <Qwen3.8-27B*.gguf> --speculative off|auto|mtp|ngram [--ctx N] [--kv f32|bf16|int8] [--batches a,b,c] [--workload code|agent|both] [--new N] [--dump FILE]");
+        eprintln!("usage: qwen35_spec_sweep <Qwen3.8-27B*.gguf> --speculative off|auto|mtp|ngram [--ctx N] [--kv f32|bf16|int8|fp8] [--batches a,b,c] [--workload code|agent|both] [--new N] [--dump FILE]");
         std::process::exit(2);
     }
     a

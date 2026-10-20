@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The compact KV tiers (`bf16`, per-row `int8`) against the `f32` tier, on the
+//! The compact KV tiers (`bf16`, per-row `int8`, per-row `fp8` E4M3) against the `f32` tier, on the
 //! CPU kernels and on the real GPU.
 //!
 //! Swedish Embedded AB implements long-context inference serving for clients
@@ -29,7 +29,7 @@
 use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::paged_attention_fused;
-use model::kv_tier::{kernel_list, FlashDecodeShape, KvAppend, KvKernels, KvPlane, KvTier, PrefillShape};
+use model::kv_tier::{kernel_list, FlashDecodeShape, KvAppend, KvElement, KvKernels, KvPlane, KvTier, PrefillShape};
 use model::ops::PagedDecodeShape;
 
 /// Real-device tests share one adapter; see `kv_bf16_roundtrip.rs`.
@@ -116,11 +116,14 @@ fn write_is_within_the_formats_rounding_bound(g: &Gpu, tier: KvTier, label: &str
             let (src, got) = (&rows[j * s.kv_stride() as usize + head * s.head_dim as usize..][..s.head_dim as usize], &stored[slot * s.kv_stride() as usize + head * s.head_dim as usize..][..s.head_dim as usize]);
             let absmax = src.iter().fold(0f32, |m, x| m.max(x.abs()));
             for (d, (&x, &y)) in src.iter().zip(got).enumerate() {
-                let bound = match tier {
-                    KvTier::F32 => 0.0,
-                    KvTier::Bf16 => x.abs() * 2f32.powi(-8),
+                let bound = match tier.element() {
+                    KvElement::F32 => 0.0,
+                    KvElement::Bf16 => x.abs() * 2f32.powi(-8),
                     // round-to-nearest to a multiple of absmax/127, plus f32 slack on the division.
-                    KvTier::Int8 => absmax / 127.0 * 0.5 * (1.0 + 1e-5),
+                    KvElement::Int8 => absmax / 127.0 * 0.5 * (1.0 + 1e-5),
+                    // E4M3 on x / (absmax / 448): half an ulp is 2^-4 of a normal value (3
+                    // mantissa bits), and 2^-10 absolute in the subnormal range below 2^-6.
+                    KvElement::Fp8E4m3 => (x.abs() * 2f32.powi(-4)).max(absmax / 448.0 * 2f32.powi(-10)) * (1.0 + 1e-5),
                 };
                 let err = (x - y).abs();
                 worst = worst.max(if bound > 0.0 { err / bound } else { err });
@@ -312,15 +315,89 @@ fn fused_decode_equals_exact_attention_over_the_decoded_planes(g: &Gpu, tier: Kv
     eprintln!("{label} {tier} fused decode, group {group}: worst relative error to exact {worst:.2e}");
 }
 
+/// Gate 3: the whole attention (scores, softmax, apply) over a compact plane against the
+/// ORIGINAL `f32` rows - not their decoded values - so the format's quantisation error is
+/// measured at the attention output, which is what a model sees. Tolerances are
+/// format-specific relative L2 bounds on the context (round-off of the format's mantissa
+/// averaged over the keys); the printed numbers are the measurements.
+fn attention_against_the_original_f32_rows_stays_within_the_formats_tolerance(g: &Gpu, tier: KvTier, label: &str) {
+    let s = Shape { n_heads: 4, n_kv: 2, head_dim: 64, block_size: 16, num_blocks: 12 };
+    let (len, max_bt) = (120u32, 8u32);
+    let phys = [6u32, 1, 4, 7, 2, 9, 0, 11];
+    let (blocks, offsets) = place(len, s.block_size, &phys);
+    let (krows, vrows) = (random(0xD1, (len * s.kv_stride()) as usize), random(0xD2, (len * s.kv_stride()) as usize));
+    let (kc, vc) = (filled(g, tier, &s, &krows, &blocks, &offsets), filled(g, tier, &s, &vrows, &blocks, &offsets));
+    let (kf, vf) = (filled(g, KvTier::F32, &s, &krows, &blocks, &offsets), filled(g, KvTier::F32, &s, &vrows, &blocks, &offsets));
+    let (table, seq_lens) = (u32s(g, &phys), u32s(g, &[len]));
+    let q = g.storage_init("q", &random(0xD3, (s.n_heads * s.head_dim) as usize));
+    let shape = PagedDecodeShape { batch: 1, n_heads: s.n_heads, group: s.n_heads / s.n_kv, head_dim: s.head_dim, block_size: s.block_size, kv_stride: s.kv_stride(), cap: len, max_bt, scale: 1.0 / (s.head_dim as f32).sqrt() };
+    let run = |kernels: &KvKernels, k: &KvPlane, v: &KvPlane| -> Vec<f32> {
+        let n_scores = (s.n_heads * len) as usize;
+        let sc = g.storage(n_scores as u64);
+        g.submit(&[], &[kernels.scores(g, &q, k, &table, &seq_lens, &sc, shape)]);
+        let mut probs = g.read(&sc, n_scores);
+        for row in probs.chunks_mut(len as usize) {
+            let m = row.iter().fold(f32::MIN, |a, &x| a.max(x));
+            let z: f32 = row.iter().map(|x| (x - m).exp()).sum();
+            row.iter_mut().for_each(|x| *x = (*x - m).exp() / z);
+        }
+        let (probs, ctx) = (g.storage_init("probs", &probs), g.storage((s.n_heads * s.head_dim) as u64));
+        g.submit(&[], &[kernels.apply(g, &probs, v, &table, &seq_lens, &ctx, shape)]);
+        g.read(&ctx, (s.n_heads * s.head_dim) as usize)
+    };
+    let want = run(&KvKernels::resolve(g, KvTier::F32).unwrap(), &kf, &vf);
+    let have = run(&KvKernels::resolve(g, tier).unwrap(), &kc, &vc);
+    let rel_l2 = (have.iter().zip(&want).map(|(a, b)| (a - b).powi(2)).sum::<f32>() / want.iter().map(|b| b * b).sum::<f32>()).sqrt();
+    let bound = match tier.element() {
+        KvElement::F32 => 1e-6,
+        KvElement::Bf16 => 4e-3,
+        KvElement::Int8 => 2e-2,
+        KvElement::Fp8E4m3 => 6e-2,
+    };
+    eprintln!("{label} {tier} attention vs original f32: rel-L2 {rel_l2:.3e} (bound {bound:.0e})");
+    assert!(rel_l2 <= bound, "{label} {tier}: attention output differs from the f32 original by rel-L2 {rel_l2} (bound {bound})");
+}
+
+/// A calibrated ceiling caps the stored magnitude of a scaled plane: no element is
+/// stored above `clip`, the typical elements keep their resolution, and an
+/// unscaled plane refuses a ceiling.
+fn a_calibrated_ceiling_caps_the_stored_magnitude(g: &Gpu, tier: KvTier, label: &str) {
+    let s = Shape { n_heads: 2, n_kv: 2, head_dim: 8, block_size: 4, num_blocks: 2 };
+    let (blocks, offsets) = place(1, s.block_size, &[1]);
+    // head 0 carries an outlier of 100, head 1 stays within 1.
+    let mut row = vec![0.5f32; s.kv_stride() as usize];
+    row[3] = 100.0;
+    row[8 + 2] = -0.75;
+    let mut plane = KvPlane::new(g, tier, s.rows(), s.kv_stride() as u64, s.head_dim as u64);
+    assert!(plane.set_clip(g, &[2.0, f32::MAX]), "{label} {tier}: a scaled plane takes a ceiling");
+    let k = KvKernels::resolve(g, tier).unwrap();
+    let src = g.storage_init("kv.src", &row);
+    g.submit(&[], &[k.append(g, &plane, &src, &u32s(g, &blocks), &u32s(g, &offsets), KvAppend { batch: 1, kv_stride: s.kv_stride(), block_size: s.block_size, head_dim: s.head_dim })]);
+    let stored = plane.read_dequantized(g, s.rows() as usize, s.kv_stride() as usize, s.head_dim as usize);
+    let slot = (blocks[0] * s.block_size + offsets[0]) as usize * s.kv_stride() as usize;
+    assert!((stored[slot + 3] - 2.0).abs() < 1e-5, "{label} {tier}: the outlier is clamped to the ceiling, got {}", stored[slot + 3]);
+    assert!((stored[slot] - 0.5).abs() < 0.05, "{label} {tier}: a typical element keeps its value under the ceiling, got {}", stored[slot]);
+    assert!((stored[slot + 10] + 0.75).abs() < 0.02, "{label} {tier}: the uncalibrated head is untouched, got {}", stored[slot + 10]);
+}
+
+#[test]
+fn a_ceiling_is_refused_by_unscaled_planes() {
+    let g = Gpu::new_cpu(kernels());
+    for tier in [KvTier::F32, KvTier::BF16] {
+        let mut plane = KvPlane::new(&g, tier, 8, 16, 8);
+        assert!(!plane.set_clip(&g, &[1.0, 1.0]), "{tier} has no row scale to cap");
+    }
+}
+
 fn on_cpu(f: impl Fn(&Gpu, KvTier, &str)) {
     let g = Gpu::new_cpu(kernels());
-    for tier in [KvTier::Bf16, KvTier::Int8] {
+    for tier in [KvTier::BF16, KvTier::INT8, KvTier::FP8] {
         f(&g, tier, "cpu");
     }
 }
 
 fn on_gpu(f: impl Fn(&Gpu, KvTier, &str)) {
-    on_gpu_in(&[KvTier::Bf16, KvTier::Int8], f);
+    on_gpu_in(&[KvTier::BF16, KvTier::INT8, KvTier::FP8], f);
 }
 
 /// [`on_gpu`] with the `f32` tier too, for gates whose reference is not another
@@ -343,6 +420,22 @@ fn on_gpu_in(tiers: &[KvTier], f: impl Fn(&Gpu, KvTier, &str)) {
 #[test]
 fn a_compact_plane_stores_each_row_within_its_formats_rounding_bound_on_cpu() {
     on_cpu(write_is_within_the_formats_rounding_bound);
+}
+
+#[test]
+fn attention_over_a_compact_plane_stays_within_the_formats_tolerance_of_the_f32_original_on_cpu() {
+    let g = Gpu::new_cpu(kernels());
+    for tier in KvTier::ALL {
+        attention_against_the_original_f32_rows_stays_within_the_formats_tolerance(&g, tier, "cpu");
+    }
+}
+
+#[test]
+fn a_calibrated_ceiling_caps_a_scaled_planes_stored_magnitude_on_cpu() {
+    let g = Gpu::new_cpu(kernels());
+    for tier in [KvTier::INT8, KvTier::FP8] {
+        a_calibrated_ceiling_caps_the_stored_magnitude(&g, tier, "cpu");
+    }
 }
 
 #[test]

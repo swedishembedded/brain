@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Compact KV-cache tiers for batched paged decode: how a GQA layer's K and V
-//! planes are stored (`f32`, `bf16` or per-row `int8`), and the kernels that
-//! append to, and attend over, a plane of each tier.
+//! planes are stored (`f32`, `bf16`, or per-row scaled `int8` / `fp8` E4M3), and
+//! the kernels that append to, and attend over, a plane of each tier.
 //!
 //! Swedish Embedded AB implements long-context inference serving for clients
 //! whose GPU memory, not their compute, decides how many concurrent users one
@@ -24,7 +24,15 @@
 //! | `f32`  | 4                 | one word per element                                |
 //! | `bf16` | 2                 | two per `u32` word, the top half of an `f32`        |
 //! | `int8` | 1 + 4 / head_dim  | four per `u32` word, one `f32` scale per (token, kv-head) row |
+//! | `fp8`  | 1 + 4 / head_dim  | E4M3 bytes, packed and scaled exactly like `int8` (scale = absmax / 448) |
 //!
+//! A tier is a descriptor, [`KvTier`] = ([`KvElement`], [`KvScale`]): the element
+//! codec and its bit width, and whether each (token, kv-head) row carries an
+//! `f32` scale. Sizes, addressing and row copies derive from those two fields
+//! alone; only the kernels (which decode an element) differ per element codec.
+//! The shape mirrors the checkpoint crate's planned `QuantEncoding` (element,
+//! packing, block geometry, scale hierarchy) with the block geometry fixed at
+//! one `head_dim` row; wave 2 replaces this local descriptor by that type.//!
 //! The kernels are the repo's existing paged-KV family - nothing here is a
 //! second implementation of attention:
 //!
@@ -33,7 +41,9 @@
 //!   [`kernels::template`]'s bf16 variants;
 //! * `int8`: `paged_kv_append_i8_clipped_batched`, `paged_decode_scores_i8_batched`
 //!   and `paged_decode_apply_i8_batched`;
-//! * the fused `head_dim = 256` prefill kernel, whose bf16 and int8 loads are
+//! * `fp8`: `paged_kv_append_fp8_clipped_batched` and the f32 scores/apply/prefill
+//!   kernels rewritten by [`kernels::template::fp8_kv_variant`];
+//! * the fused `head_dim = 256` prefill kernel, whose bf16, int8 and fp8 loads are
 //!   template variants of the one `f32` source.
 //!
 //! [`kernel_list`] is what a model registers on its [`Gpu`] to run any tier;
@@ -53,12 +63,43 @@ use crate::ops::PagedDecodeShape;
 /// index reaches `0..2^32`. Past it a pool would silently alias its own start.
 pub const MAX_PLANE_ELEMS: u64 = 1 << 32;
 
-/// How a KV plane is stored. See the module doc for the layouts.
+/// How one KV element is encoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum KvTier {
+pub enum KvElement {
     F32,
     Bf16,
+    /// Signed 8-bit integer, symmetric around zero (`-127..=127`).
     Int8,
+    /// 8-bit float, 4 exponent and 3 mantissa bits (OCP FP8 E4M3, max 448).
+    Fp8E4m3,
+}
+
+impl KvElement {
+    /// Storage bits per element; always a divisor of 32 so elements pack into words.
+    pub const fn bits(self) -> u64 {
+        match self {
+            KvElement::F32 => 32,
+            KvElement::Bf16 => 16,
+            KvElement::Int8 | KvElement::Fp8E4m3 => 8,
+        }
+    }
+}
+
+/// The scale hierarchy of a plane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KvScale {
+    /// Elements are stored at their own magnitude.
+    None,
+    /// One `f32` scale per (token, kv-head) row of `head_dim` elements.
+    PerRow,
+}
+
+/// How a KV plane is stored: an element codec and a scale hierarchy. The
+/// associated constants name the supported tiers; see the module doc for layouts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct KvTier {
+    element: KvElement,
+    scale: KvScale,
 }
 
 /// Device words one plane of a tier allocates.
@@ -78,25 +119,45 @@ impl PlaneWords {
 }
 
 impl KvTier {
-    /// Every tier, in order of decreasing size.
-    pub const ALL: [KvTier; 3] = [KvTier::F32, KvTier::Bf16, KvTier::Int8];
+    pub const F32: KvTier = KvTier { element: KvElement::F32, scale: KvScale::None };
+    pub const BF16: KvTier = KvTier { element: KvElement::Bf16, scale: KvScale::None };
+    pub const INT8: KvTier = KvTier { element: KvElement::Int8, scale: KvScale::PerRow };
+    pub const FP8: KvTier = KvTier { element: KvElement::Fp8E4m3, scale: KvScale::PerRow };
 
-    /// Parse a user-facing name: `f32`/`fp32`, `bf16`, `int8`/`i8`.
+    /// Every tier, in order of decreasing size.
+    pub const ALL: [KvTier; 4] = [KvTier::F32, KvTier::BF16, KvTier::INT8, KvTier::FP8];
+
+    pub fn element(self) -> KvElement {
+        self.element
+    }
+
+    pub fn scale(self) -> KvScale {
+        self.scale
+    }
+
+    /// Elements packed into one `u32` word.
+    fn per_word(self) -> u64 {
+        32 / self.element.bits()
+    }
+
+    /// Parse a user-facing name: `f32`/`fp32`, `bf16`, `int8`/`i8`, `fp8`/`e4m3`/`fp8-e4m3`.
     pub fn parse(s: &str) -> Result<KvTier, String> {
         match s.trim().to_ascii_lowercase().as_str() {
             "f32" | "fp32" => Ok(KvTier::F32),
-            "bf16" => Ok(KvTier::Bf16),
-            "int8" | "i8" => Ok(KvTier::Int8),
-            other => Err(format!("unknown KV tier {other:?}: expected f32, bf16 or int8")),
+            "bf16" => Ok(KvTier::BF16),
+            "int8" | "i8" => Ok(KvTier::INT8),
+            "fp8" | "e4m3" | "fp8-e4m3" | "fp8e4m3" => Ok(KvTier::FP8),
+            other => Err(format!("unknown KV tier {other:?}: expected f32, bf16, int8 or fp8")),
         }
     }
 
     /// The name [`Self::parse`] accepts, and the one reports print.
     pub fn as_str(self) -> &'static str {
-        match self {
-            KvTier::F32 => "f32",
-            KvTier::Bf16 => "bf16",
-            KvTier::Int8 => "int8",
+        match self.element {
+            KvElement::F32 => "f32",
+            KvElement::Bf16 => "bf16",
+            KvElement::Int8 => "int8",
+            KvElement::Fp8E4m3 => "fp8",
         }
     }
 
@@ -115,11 +176,11 @@ impl KvTier {
     /// `kv_stride = n_kv_heads * head_dim`.
     pub fn plane_words(self, rows: u64, kv_stride: u64, head_dim: u64) -> PlaneWords {
         let elems = rows * kv_stride;
-        match self {
-            KvTier::F32 => PlaneWords { data: elems, scales: 0 },
-            KvTier::Bf16 => PlaneWords { data: elems.div_ceil(2), scales: 0 },
-            KvTier::Int8 => PlaneWords { data: elems.div_ceil(4), scales: rows * (kv_stride / head_dim) },
-        }
+        let scales = match self.scale {
+            KvScale::None => 0,
+            KvScale::PerRow => rows * (kv_stride / head_dim),
+        };
+        PlaneWords { data: elems.div_ceil(self.per_word()), scales }
     }
 
     /// Device bytes of one K (or V) plane of `rows` token rows.
@@ -140,6 +201,15 @@ impl std::fmt::Display for KvTier {
     }
 }
 
+/// Host reference decode of one FP8 E4M3 byte (sign, 4 exponent bits with bias 7,
+/// 3 mantissa bits; exponent 0 is subnormal). `0x7F` and `0xFF` are NaN in the
+/// format; the append kernel never writes them.
+pub fn decode_e4m3(byte: u8) -> f32 {
+    let (e, m) = (i32::from(byte >> 3 & 15), f32::from(byte & 7));
+    let mag = if e == 0 { m * 2f32.powi(-9) } else { (1.0 + m / 8.0) * 2f32.powi(e - 7) };
+    if byte & 0x80 != 0 { -mag } else { mag }
+}
+
 /// One K or V plane of one layer: `rows` token rows in a [`KvTier`].
 pub struct KvPlane {
     tier: KvTier,
@@ -150,27 +220,30 @@ pub struct KvPlane {
     /// `[n_kv_heads]` calibrated append ceiling of the int8 tier, `f32::MAX`:
     /// no calibration, so the append kernel's scale is the row's own absmax.
     clip: Option<DeviceBuffer>,
+    /// Entries of `clip` (kv heads); `0` for tiers without one.
+    n_kv: usize,
 }
 
 impl KvPlane {
     /// A plane of `rows` token rows of `kv_stride = n_kv_heads * head_dim`
     /// elements. Panics if the plane cannot be addressed ([`MAX_PLANE_ELEMS`])
-    /// or `kv_stride` is not a whole number of heads, or - int8 - the head is
-    /// not a whole number of packed words.
+    /// or `kv_stride` is not a whole number of heads, or - for a
+    /// per-row scaled tier - the head is not a whole number of packed words.
     pub fn new(gpu: &Gpu, tier: KvTier, rows: u64, kv_stride: u64, head_dim: u64) -> KvPlane {
         assert!(head_dim > 0 && kv_stride.is_multiple_of(head_dim), "KvPlane: kv_stride {kv_stride} is not a whole number of {head_dim}-wide heads");
         assert!(KvTier::fits_addressing(rows, kv_stride), "KvPlane: {rows} rows x {kv_stride} elements exceed the kernels' u32 element index ({MAX_PLANE_ELEMS})");
         let words = tier.plane_words(rows, kv_stride, head_dim);
-        match tier {
-            KvTier::F32 | KvTier::Bf16 => KvPlane { tier, data: gpu.storage(words.data), scales: None, clip: None },
-            KvTier::Int8 => {
-                assert!(head_dim.is_multiple_of(4), "KvPlane: an int8 head of {head_dim} elements is not a whole number of packed words");
+        match tier.scale {
+            KvScale::None => KvPlane { tier, data: gpu.storage(words.data), scales: None, clip: None, n_kv: 0 },
+            KvScale::PerRow => {
+                assert!(head_dim.is_multiple_of(tier.per_word()), "KvPlane: a {tier} head of {head_dim} elements is not a whole number of packed words");
                 let n_kv = (kv_stride / head_dim) as usize;
                 KvPlane {
                     tier,
                     data: gpu.storage(words.data),
                     scales: Some(gpu.storage(words.scales)),
                     clip: Some(gpu.storage_init("kv.clip", &vec![f32::MAX; n_kv])),
+                    n_kv,
                 }
             }
         }
@@ -180,11 +253,25 @@ impl KvPlane {
     /// one another shard owns): every layer index carries a plane, so callers
     /// never branch on layer type to index.
     pub fn placeholder(gpu: &Gpu) -> KvPlane {
-        KvPlane { tier: KvTier::F32, data: gpu.storage(1), scales: None, clip: None }
+        KvPlane { tier: KvTier::F32, data: gpu.storage(1), scales: None, clip: None, n_kv: 0 }
     }
 
     pub fn tier(&self) -> KvTier {
         self.tier
+    }
+
+    /// Install per-kv-head calibrated append ceilings (`[n_kv]`, see
+    /// [`crate::kvcalib`]) on a scaled plane; `f32::MAX` leaves a head uncalibrated.
+    /// Returns `false`, changing nothing, for a tier without row scales.
+    pub fn set_clip(&mut self, gpu: &Gpu, ceilings: &[f32]) -> bool {
+        match &self.clip {
+            Some(buf) => {
+                assert_eq!(ceilings.len(), self.n_kv, "KvPlane::set_clip: {} ceilings for a plane with a different head count", ceilings.len());
+                gpu.write_f32(buf, ceilings);
+                true
+            }
+            None => false,
+        }
     }
 
     /// The plane's first `rows` rows decoded to `f32` on the host, `[rows,
@@ -193,24 +280,22 @@ impl KvPlane {
     /// values. Reads the whole plane back - never on a serving path.
     pub fn read_dequantized(&self, gpu: &Gpu, rows: usize, kv_stride: usize, head_dim: usize) -> Vec<f32> {
         let elems = rows * kv_stride;
-        match self.tier {
-            KvTier::F32 => gpu.read(&self.data, elems),
-            KvTier::Bf16 => {
-                let words = gpu.read(&self.data, elems.div_ceil(2));
-                (0..elems).map(|i| f32::from_bits(((words[i / 2].to_bits() >> (16 * (i % 2))) & 0xFFFF) << 16)).collect()
-            }
-            KvTier::Int8 => {
-                let words = gpu.read(&self.data, elems.div_ceil(4));
-                let n_kv = kv_stride / head_dim;
-                let scales = gpu.read(self.scales.as_ref().expect("int8 plane has scales"), rows * n_kv);
-                (0..elems)
-                    .map(|i| {
-                        let byte = (words[i / 4].to_bits() >> (8 * (i % 4))) & 0xFF;
-                        f32::from(byte as u8 as i8) * scales[i / head_dim]
-                    })
-                    .collect()
-            }
-        }
+        let word_elems = self.tier.per_word() as usize;
+        let words = gpu.read(&self.data, elems.div_ceil(word_elems));
+        let bits_of = |i: usize| (words[i / word_elems].to_bits() >> (self.tier.element.bits() as usize * (i % word_elems))) & ((1u64 << self.tier.element.bits()) - 1) as u32;
+        let scale_of = |i: usize, scales: &[f32]| scales[i / head_dim];
+        let scales = self.scales.as_ref().map(|sc| gpu.read(sc, rows * (kv_stride / head_dim)));
+        (0..elems)
+            .map(|i| {
+                let raw = bits_of(i);
+                match self.tier.element {
+                    KvElement::F32 => f32::from_bits(raw),
+                    KvElement::Bf16 => f32::from_bits(raw << 16),
+                    KvElement::Int8 => f32::from(raw as u8 as i8) * scale_of(i, scales.as_ref().expect("int8 plane has scales")),
+                    KvElement::Fp8E4m3 => decode_e4m3(raw as u8) * scale_of(i, scales.as_ref().expect("fp8 plane has scales")),
+                }
+            })
+            .collect()
     }
 
     /// The element storage, for kernels outside this module that read an `f32`
@@ -233,17 +318,10 @@ impl KvPlane {
                 steps.push(gpu.step_sliced(splice, &[buf, buf], &[(from_row * per_row, n), (to_row * per_row, n)], &[n as u32, 0], n as u32));
             }
         };
-        let per_row = match self.tier {
-            KvTier::F32 => kv_stride,
-            KvTier::Bf16 => kv_stride.div_ceil(2),
-            KvTier::Int8 => kv_stride.div_ceil(4),
-        };
+        let word_elems = self.tier.per_word();
         // Rows are word-aligned only when a row is a whole number of words.
-        assert!(match self.tier {
-            KvTier::F32 => true,
-            KvTier::Bf16 => kv_stride.is_multiple_of(2),
-            KvTier::Int8 => kv_stride.is_multiple_of(4),
-        }, "KvPlane::copy_rows: a {}-element row is not a whole number of {} words", kv_stride, self.tier);
+        assert!(kv_stride.is_multiple_of(word_elems), "KvPlane::copy_rows: a {}-element row is not a whole number of {} words", kv_stride, self.tier);
+        let per_row = kv_stride / word_elems;
         copy(&self.data, per_row);
         if let Some(scales) = &self.scales {
             copy(scales, kv_stride / head_dim);
@@ -294,10 +372,11 @@ const FLASH_GROUPS: [u32; 2] = [6, 8];
 /// `kernels::template::interned` and `kv_tier_variant` give them.
 fn decode_name(tier: KvTier, group: u32) -> String {
     let base = kernels::template::variant_name("paged_flash_decode_gqa_hd256", &[("GRP", group)]);
-    match tier {
-        KvTier::F32 => base,
-        KvTier::Bf16 => format!("{base}#kv=bf16"),
-        KvTier::Int8 => format!("{base}#kv=int8"),
+    match tier.element {
+        KvElement::F32 => base,
+        KvElement::Bf16 => format!("{base}#kv=bf16"),
+        KvElement::Int8 => format!("{base}#kv=int8"),
+        KvElement::Fp8E4m3 => format!("{base}#kv=fp8"),
     }
 }
 
@@ -322,12 +401,20 @@ const INT8_NAMES: Names = Names {
     prefill_hd256: "paged_flash_prefill_hd256#pool_k=kv8#pool_v=kv8",
 };
 
+const FP8_NAMES: Names = Names {
+    append: "paged_kv_append_fp8_clipped_batched",
+    scores: "paged_decode_scores_batched#pool_k=kvfp8",
+    apply: "paged_decode_apply_batched#pool_v=kvfp8",
+    prefill_hd256: "paged_flash_prefill_hd256#pool_k=kvfp8#pool_v=kvfp8",
+};
+
 impl KvTier {
     fn names(self) -> &'static Names {
-        match self {
-            KvTier::F32 => &F32_NAMES,
-            KvTier::Bf16 => &BF16_NAMES,
-            KvTier::Int8 => &INT8_NAMES,
+        match self.element {
+            KvElement::F32 => &F32_NAMES,
+            KvElement::Bf16 => &BF16_NAMES,
+            KvElement::Int8 => &INT8_NAMES,
+            KvElement::Fp8E4m3 => &FP8_NAMES,
         }
     }
 }
@@ -336,7 +423,7 @@ impl KvTier {
 /// for, across all tiers - what a model that offers the compact tiers adds to
 /// its own pipeline list. Names already in `existing` are not repeated.
 pub fn kernel_list(existing: &[(&str, &str)]) -> Vec<(&'static str, &'static str)> {
-    use kernels::template::{dtype_variant, dtype_variant_store, int8_kv_variant, interned, kv_tier_variant, CompactKv};
+    use kernels::template::{dtype_variant, dtype_variant_store, fp8_kv_variant, int8_kv_variant, interned, kv_tier_variant, CompactKv};
     use gpu_core::select::Dtype;
 
     let have: std::collections::HashSet<&str> = existing.iter().map(|(n, _)| *n).collect();
@@ -344,12 +431,17 @@ pub fn kernel_list(existing: &[(&str, &str)]) -> Vec<(&'static str, &'static str
     let bf16_prefill = dtype_variant(bf16_prefill_k.0, bf16_prefill_k.1, "pool_v", Dtype::BF16).expect("pool_v is templatable");
     let i8_prefill_k = int8_kv_variant("paged_flash_prefill_hd256", kernels::PAGED_FLASH_PREFILL_HD256, "pool_k", "k_scales", "p.head_dim").expect("pool_k is templatable");
     let i8_prefill = int8_kv_variant(i8_prefill_k.0, i8_prefill_k.1, "pool_v", "v_scales", "p.head_dim").expect("pool_v is templatable");
+    let fp8_prefill_k = fp8_kv_variant("paged_flash_prefill_hd256", kernels::PAGED_FLASH_PREFILL_HD256, "pool_k", "k_scales", "p.head_dim").expect("pool_k is templatable");
+    let fp8_prefill = fp8_kv_variant(fp8_prefill_k.0, fp8_prefill_k.1, "pool_v", "v_scales", "p.head_dim").expect("pool_v is templatable");
+    let fp8_scores = fp8_kv_variant("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED, "pool_k", "k_scales", "p.head_dim").expect("pool_k is templatable");
+    let fp8_apply = fp8_kv_variant("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED, "pool_v", "v_scales", "p.head_dim").expect("pool_v is templatable");
     let mut decode = Vec::new();
     for group in FLASH_GROUPS {
         let base = interned("paged_flash_decode_gqa_hd256", kernels::PAGED_FLASH_DECODE_GQA_HD256, &[("GRP", group)]).expect("the decode kernel declares GRP");
         decode.push(base);
         decode.push(kv_tier_variant(base.0, base.1, CompactKv::Bf16).expect("the decode kernel marks its kv-tier blocks"));
         decode.push(kv_tier_variant(base.0, base.1, CompactKv::Int8).expect("the decode kernel marks its kv-tier blocks"));
+        decode.push(kv_tier_variant(base.0, base.1, CompactKv::Fp8).expect("the decode kernel marks its kv-tier blocks"));
     }
     let all: Vec<(&'static str, &'static str)> = vec![
         (FLASH_COMBINE, kernels::PAGED_FLASH_DECODE_GQA_COMBINE),
@@ -365,6 +457,10 @@ pub fn kernel_list(existing: &[(&str, &str)]) -> Vec<(&'static str, &'static str
         (INT8_NAMES.scores, kernels::PAGED_DECODE_SCORES_I8_BATCHED),
         (INT8_NAMES.apply, kernels::PAGED_DECODE_APPLY_I8_BATCHED),
         i8_prefill,
+        (FP8_NAMES.append, kernels::PAGED_KV_APPEND_FP8_CLIPPED_BATCHED),
+        fp8_scores,
+        fp8_apply,
+        fp8_prefill,
     ];
     all.into_iter().chain(decode).filter(|(n, _)| !have.contains(n)).collect()
 }
@@ -502,12 +598,12 @@ impl KvKernels {
     pub fn append(&self, g: &Gpu, plane: &KvPlane, src: &DeviceBuffer, blocks: &DeviceBuffer, offsets: &DeviceBuffer, a: KvAppend) -> Step {
         self.check(plane);
         let KvAppend { batch, kv_stride, block_size, head_dim } = a;
-        match self.tier {
-            KvTier::F32 => g.step(self.append, &[src, blocks, offsets, &plane.data], &[batch, kv_stride, block_size], batch * kv_stride),
+        match self.tier.element {
+            KvElement::F32 => g.step(self.append, &[src, blocks, offsets, &plane.data], &[batch, kv_stride, block_size], batch * kv_stride),
             // One thread per even-sized chunk of a token: a packed word is then private to one thread.
-            KvTier::Bf16 => g.step(self.append, &[src, blocks, offsets, &plane.data], &[batch, kv_stride, block_size], append_word_threads(batch, kv_stride)),
-            KvTier::Int8 => {
-                let (clip, scales) = (plane.clip.as_ref().expect("int8 plane has a clip"), plane.scales.as_ref().expect("int8 plane has scales"));
+            KvElement::Bf16 => g.step(self.append, &[src, blocks, offsets, &plane.data], &[batch, kv_stride, block_size], append_word_threads(batch, kv_stride)),
+            KvElement::Int8 | KvElement::Fp8E4m3 => {
+                let (clip, scales) = (plane.clip.as_ref().expect("a scaled plane has a clip"), plane.scales.as_ref().expect("a scaled plane has scales"));
                 g.step(self.append, &[src, blocks, offsets, clip, &plane.data, scales], &[batch, kv_stride, block_size, head_dim], batch * (kv_stride / head_dim))
             }
         }
@@ -518,9 +614,12 @@ impl KvKernels {
         self.check(k);
         let params = [s.batch, s.n_heads, s.group, s.head_dim, s.block_size, s.kv_stride, s.cap, s.max_bt, s.scale.to_bits()];
         let threads = s.batch * s.n_heads * s.cap;
-        match &k.scales {
-            None => g.step(self.scores, &[q, &k.data, block_tables, seq_lens, scores], &params, threads),
-            Some(sc) => g.step(self.scores, &[q, &k.data, block_tables, seq_lens, sc, scores], &params, threads),
+        match (&k.scales, self.tier.element) {
+            (None, _) => g.step(self.scores, &[q, &k.data, block_tables, seq_lens, scores], &params, threads),
+            // The int8 kernel is hand-written with its scales before the output; the fp8 one is a
+            // template rewrite of the f32 kernel, which appends the scales binding last.
+            (Some(sc), KvElement::Fp8E4m3) => g.step(self.scores, &[q, &k.data, block_tables, seq_lens, scores, sc], &params, threads),
+            (Some(sc), _) => g.step(self.scores, &[q, &k.data, block_tables, seq_lens, sc, scores], &params, threads),
         }
     }
 
@@ -529,9 +628,10 @@ impl KvKernels {
         self.check(v);
         let params = [s.batch, s.n_heads, s.group, s.head_dim, s.block_size, s.kv_stride, s.cap, s.max_bt];
         let threads = s.batch * s.n_heads * s.head_dim;
-        match &v.scales {
-            None => g.step(self.apply, &[probs, &v.data, block_tables, seq_lens, ctx], &params, threads),
-            Some(sc) => g.step(self.apply, &[probs, &v.data, block_tables, seq_lens, sc, ctx], &params, threads),
+        match (&v.scales, self.tier.element) {
+            (None, _) => g.step(self.apply, &[probs, &v.data, block_tables, seq_lens, ctx], &params, threads),
+            (Some(sc), KvElement::Fp8E4m3) => g.step(self.apply, &[probs, &v.data, block_tables, seq_lens, ctx, sc], &params, threads),
+            (Some(sc), _) => g.step(self.apply, &[probs, &v.data, block_tables, seq_lens, sc, ctx], &params, threads),
         }
     }
 
@@ -585,17 +685,19 @@ impl KvKernels {
                 let native = if !self.native_prefill {
                     None
                 } else {
-                    match self.tier {
-                        KvTier::F32 => crate::block::native_paged_flash_prefill(g, s.head_dim, &bufs, &params, blocks),
-                        KvTier::Bf16 => crate::block::native_paged_flash_prefill_bf16(g, s.head_dim, &bufs, &params, blocks),
-                        KvTier::Int8 => None,
+                    match self.tier.element {
+                        KvElement::F32 => crate::block::native_paged_flash_prefill(g, s.head_dim, &bufs, &params, blocks),
+                        KvElement::Bf16 => crate::block::native_paged_flash_prefill_bf16(g, s.head_dim, &bufs, &params, blocks),
+                        KvElement::Int8 | KvElement::Fp8E4m3 => None,
                     }
                 };
                 native.unwrap_or_else(|| g.dispatch(self.prefill_hd256, &bufs, &params, grid))
             }
             (Some(ks), Some(vs)) => {
                 let bufs = [q, &k.data, &v.data, block_ids, seq_lens, ctx, ks, vs];
-                let native = self.native_prefill.then(|| crate::block::native_paged_flash_prefill_kv8(g, s.head_dim, &bufs, &params, s.n_heads * s.n.div_ceil(64))).flatten();
+                // No native tensor-core kernel reads fp8 rows yet: that tier runs the registered
+                // portable pipeline (knowledge entry for the measured cost).
+                let native = (self.native_prefill && self.tier.element == KvElement::Int8).then(|| crate::block::native_paged_flash_prefill_kv8(g, s.head_dim, &bufs, &params, s.n_heads * s.n.div_ceil(64))).flatten();
                 native.unwrap_or_else(|| g.dispatch(self.prefill_hd256, &bufs, &params, grid))
             }
             _ => unreachable!("check() pinned both planes to one tier"),
@@ -630,8 +732,9 @@ mod tests {
             assert_eq!(KvTier::parse(t.as_str()), Ok(t));
         }
         assert_eq!(KvTier::parse("FP32"), Ok(KvTier::F32));
-        assert_eq!(KvTier::parse(" i8 "), Ok(KvTier::Int8));
-        assert!(KvTier::parse("fp8").unwrap_err().contains("f32, bf16 or int8"));
+        assert_eq!(KvTier::parse(" i8 "), Ok(KvTier::INT8));
+        assert_eq!(KvTier::parse("E4M3"), Ok(KvTier::FP8));
+        assert!(KvTier::parse("fp4").unwrap_err().contains("f32, bf16, int8 or fp8"));
     }
 
     /// The numbers a planner quotes: Qwen3.8-27B's GQA layer is
@@ -641,16 +744,37 @@ mod tests {
         let (rows, stride, hd) = (131_072u64, 1024u64, 256u64);
         let f32b = KvTier::F32.plane_bytes(rows, stride, hd);
         assert_eq!(f32b, rows * stride * 4);
-        assert_eq!(KvTier::Bf16.plane_bytes(rows, stride, hd), f32b / 2);
+        assert_eq!(KvTier::BF16.plane_bytes(rows, stride, hd), f32b / 2);
         // 1 byte per element plus one f32 scale per (row, kv head).
-        assert_eq!(KvTier::Int8.plane_bytes(rows, stride, hd), rows * stride + rows * 4 * 4);
-        assert!(KvTier::Int8.plane_bytes(rows, stride, hd) * 3 < f32b, "int8 must be more than 3x smaller");
+        assert_eq!(KvTier::INT8.plane_bytes(rows, stride, hd), rows * stride + rows * 4 * 4);
+        assert!(KvTier::INT8.plane_bytes(rows, stride, hd) * 3 < f32b, "int8 must be more than 3x smaller");
+    }
+
+    /// FP8 E4M3 stores one byte per element and one f32 scale per row, exactly the int8
+    /// footprint, so a planner may swap the two without re-sizing a pool.
+    #[test]
+    fn an_fp8_plane_has_the_int8_footprint() {
+        for (rows, stride, hd) in [(131_072u64, 1024u64, 256u64), (4096, 1024, 128), (7, 8, 4)] {
+            assert_eq!(KvTier::FP8.plane_words(rows, stride, hd), KvTier::INT8.plane_words(rows, stride, hd));
+        }
+    }
+
+    /// The host reference decode names the format's landmarks: the largest finite value 448,
+    /// the smallest normal 2^-6, the smallest subnormal 2^-9, and signed zero.
+    #[test]
+    fn the_e4m3_reference_decode_hits_the_formats_landmarks() {
+        assert_eq!(decode_e4m3(0x7E), 448.0);
+        assert_eq!(decode_e4m3(0xFE), -448.0);
+        assert_eq!(decode_e4m3(0x08), 2f32.powi(-6));
+        assert_eq!(decode_e4m3(0x01), 2f32.powi(-9));
+        assert_eq!(decode_e4m3(0x38), 1.0);
+        assert_eq!(decode_e4m3(0x00), 0.0);
     }
 
     #[test]
     fn an_odd_element_count_still_gets_a_whole_trailing_word() {
-        assert_eq!(KvTier::Bf16.plane_words(1, 3, 3).data, 2);
-        assert_eq!(KvTier::Int8.plane_words(1, 5, 5).data, 2);
+        assert_eq!(KvTier::BF16.plane_words(1, 3, 3).data, 2);
+        assert_eq!(KvTier::INT8.plane_words(1, 5, 5).data, 2);
     }
 
     #[test]

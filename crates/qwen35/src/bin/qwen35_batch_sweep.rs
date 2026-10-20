@@ -21,7 +21,7 @@
 //! tokens, for `--steps` timed steps after a warm-up step.
 //!
 //! Usage:
-//!   qwen35_batch_sweep <Qwen3.8-27B*.gguf> [--ctx 4096] [--kv f32|bf16|int8]
+//!   qwen35_batch_sweep <Qwen3.8-27B*.gguf> [--ctx 4096] [--kv f32|bf16|int8|fp8]
 //!       [--prompt-tokens 512] [--steps 24] [--batches 1,4,8,16,32,64]
 //!       [--sampled] [--e2e 8,32] [--e2e-new 64]
 //!
@@ -81,7 +81,7 @@ fn parse_args() -> Args {
         }
     }
     if args.gguf.is_empty() || args.batches.is_empty() {
-        eprintln!("usage: qwen35_batch_sweep <Qwen3.8-27B*.gguf> [--ctx N] [--kv f32|bf16|int8] [--prompt-tokens N] [--steps N] [--batches a,b,c] [--sampled]");
+        eprintln!("usage: qwen35_batch_sweep <Qwen3.8-27B*.gguf> [--ctx N] [--kv f32|bf16|int8|fp8] [--prompt-tokens N] [--steps N] [--batches a,b,c] [--sampled]");
         std::process::exit(2);
     }
     args

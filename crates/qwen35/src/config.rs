@@ -1030,10 +1030,10 @@ mod tests {
         let cap = 131_072u64;
         let gqa = |kv| cfg.layer_decode_state_bytes(LayerType::Full, cap as u32, kv);
         assert_eq!(gqa(KvTier::F32), 2 * cap * 1024 * 4, "4 kv heads x 256 dims, f32, K and V");
-        assert_eq!(gqa(KvTier::Bf16), gqa(KvTier::F32) / 2);
-        assert_eq!(gqa(KvTier::Int8), 2 * (cap * 1024 + cap * 4 * 4));
+        assert_eq!(gqa(KvTier::BF16), gqa(KvTier::F32) / 2);
+        assert_eq!(gqa(KvTier::INT8), 2 * (cap * 1024 + cap * 4 * 4));
         let gdn = |kv| cfg.layer_decode_state_bytes(LayerType::Linear, cap as u32, kv);
-        assert_eq!(gdn(KvTier::Int8), gdn(KvTier::F32));
+        assert_eq!(gdn(KvTier::INT8), gdn(KvTier::F32));
     }
 
     /// THE regression this pair of functions exists for: `brain qwen35 infer`

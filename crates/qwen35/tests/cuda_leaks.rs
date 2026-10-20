@@ -266,7 +266,7 @@ fn dropping_a_real_gguf_instance_with_a_compact_kv_cache_returns_every_device_ob
         return;
     }
     let baseline = live_resources();
-    for tier in [KvTier::Bf16, KvTier::Int8] {
+    for tier in [KvTier::BF16, KvTier::INT8] {
         let r = Qwen35GgufResident::new(path.clone(), devices.clone(), 4096, TierPolicy::uniform(Dtype::I8)).with_kv_tier(tier).with_max_batch(2);
         let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
         if placed.is_empty() {

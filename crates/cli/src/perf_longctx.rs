@@ -85,13 +85,15 @@ pub struct Qwen35Engine {
     prompt_seed: Option<Vec<u32>>,
 }
 
-/// The artifact's name for a KV tier: `fp32`/`bf16`/`int8`, the spellings the
+/// The artifact's name for a KV tier: `fp32`/`bf16`/`int8`/`fp8`, the spellings the
 /// paged engine's own fingerprint and the weight tier already use.
 fn kv_label(kv: model::kv_tier::KvTier) -> &'static str {
-    match kv {
-        model::kv_tier::KvTier::F32 => "fp32",
-        model::kv_tier::KvTier::Bf16 => "bf16",
-        model::kv_tier::KvTier::Int8 => "int8",
+    use model::kv_tier::KvElement;
+    match kv.element() {
+        KvElement::F32 => "fp32",
+        KvElement::Bf16 => "bf16",
+        KvElement::Int8 => "int8",
+        KvElement::Fp8E4m3 => "fp8",
     }
 }
 
@@ -622,7 +624,7 @@ mod tests {
         assert!(e.plan(8, 1024).unwrap().needed_bytes > small.needed_bytes);
         assert!(e.plan(1, 131_072).unwrap().needed_bytes > small.needed_bytes);
         let fp32_kv = e.plan(8, 65_536).unwrap().needed_bytes;
-        let mut compact = moe_engine(i8(), KvTier::Int8);
+        let mut compact = moe_engine(i8(), KvTier::INT8);
         assert!(compact.plan(8, 65_536).unwrap().needed_bytes < fp32_kv);
         assert_eq!(compact.describe().kv_precision, "int8");
         assert_eq!(compact.describe().weight_tier, "i8");

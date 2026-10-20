@@ -101,7 +101,7 @@ fn a_compact_kv_pool_answers_like_the_f32_pool() {
         (h, hs)
     };
     let (h32, d32) = run(KvTier::F32);
-    for (kv, bound) in [(KvTier::Bf16, 5e-3), (KvTier::Int8, 5e-2)] {
+    for (kv, bound) in [(KvTier::BF16, 5e-3), (KvTier::INT8, 5e-2)] {
         let (h, d) = run(kv);
         let e = rel_l2(&h, &h32);
         assert!(e < bound, "{kv}: the prompt's last hidden differs from f32's by {e:e} (bound {bound})");

@@ -123,8 +123,8 @@ history and exempt.
    placed on the cards `--device` allows, and its context sized from the
    memory the placement leaves (`int8_gguf_resident::auto_cap`) unless
    `--qwen35-ctx` fixes it. A file that could never load is not listed.
-   That resident's 16 GQA layers store their KV cache `f32` (default), `bf16`
-   or per-row `int8` (`--qwen35-kv`, `model::kv_tier`: 4 / 8 / 15 sequences
+   That resident's 16 GQA layers store their KV cache `f32` (default), `bf16`,
+   per-row `int8` or per-row `fp8` E4M3 (`--qwen35-kv`, `model::kv_tier`: 4 / 8 / 15 sequences
    of 128k on one GH200) and decode through a fused split-key attention
    (`paged_flash_decode_gqa_hd256`) in every tier; see M30 in the same ledger.
    It is a `model::serve::PagedDecoder` (`int8_gguf_resident::Qwen35GgufEngine`,

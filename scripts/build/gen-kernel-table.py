@@ -70,7 +70,7 @@ LEVELS = {
 CPU_CELL = {"yes": "✓", "no": "✗", "native": "native", "native-only": "native only"}
 GPU_CELL = {"yes": "✓", "yes-wg256": "✓ (256)", "no": "✗"}
 NPU_CELL = {"yes": "✓", "no": "-"}
-QUANT_CELL = {"int8": "int8", "q4": "q4", "none": "-"}
+QUANT_CELL = {"int8": "int8", "q4": "q4", "fp8": "fp8", "none": "-"}
 
 
 def parse_meta(text):
@@ -120,6 +120,11 @@ def cross_check(name, text, meta):
     # anything already in the tree.
     if meta["quant"] == "q4" and "q4" not in name:
         errs.append("@quant q4 declared but the kernel name has no 'q4' marker")
+
+    # fp8 kernels decode E4M3/E5M2 bytes by arithmetic; like q4 there is no builtin to grep, so
+    # the name is the signature.
+    if meta["quant"] == "fp8" and "fp8" not in name:
+        errs.append("@quant fp8 declared but the kernel name has no 'fp8' marker")
 
     # A function-scope array in a work-group kernel IS a per-thread register
     # block - that is the only thing such an array can be. Without this the ragged

@@ -138,22 +138,32 @@ fn real_dims() -> Qwen35Config {
 
 #[test]
 fn bf16_kv_tracks_f32_logits_on_the_tiny_hybrid() {
-    gate(&tiny(), "tiny", 5e-5, 5e-5, KvTier::Bf16);
+    gate(&tiny(), "tiny", 5e-5, 5e-5, KvTier::BF16);
 }
 
 #[test]
 fn int8_kv_tracks_f32_logits_on_the_tiny_hybrid() {
-    gate(&tiny(), "tiny", 1e-4, 1e-4, KvTier::Int8);
+    gate(&tiny(), "tiny", 1e-4, 1e-4, KvTier::INT8);
+}
+
+#[test]
+fn fp8_kv_tracks_f32_logits_on_the_tiny_hybrid() {
+    gate(&tiny(), "tiny", 4e-4, 4e-4, KvTier::FP8);
+}
+
+#[test]
+fn fp8_kv_tracks_f32_logits_at_the_real_attention_dims() {
+    gate(&real_dims(), "real-dims", 1.5e-2, 1.5e-2, KvTier::FP8);
 }
 
 #[test]
 fn bf16_kv_tracks_f32_logits_at_the_real_attention_dims() {
-    gate(&real_dims(), "real-dims", 1e-3, 1e-3, KvTier::Bf16);
+    gate(&real_dims(), "real-dims", 1e-3, 1e-3, KvTier::BF16);
 }
 
 #[test]
 fn int8_kv_tracks_f32_logits_at_the_real_attention_dims() {
-    gate(&real_dims(), "real-dims", 4e-3, 4e-3, KvTier::Int8);
+    gate(&real_dims(), "real-dims", 4e-3, 4e-3, KvTier::INT8);
 }
 
 #[test]
@@ -161,6 +171,7 @@ fn a_compact_pool_is_reported_at_the_bytes_it_occupies() {
     let cfg = tiny();
     let weights = qwen35::init::init_weights(&cfg, 11);
     let bytes = |tier| Engine::from_map_kv(cfg.clone(), &weights, 64, 2, tier).kv_pool_bytes();
-    let (f32b, bf16b, int8b) = (bytes(KvTier::F32), bytes(KvTier::Bf16), bytes(KvTier::Int8));
+    let (f32b, bf16b, int8b, fp8b) = (bytes(KvTier::F32), bytes(KvTier::BF16), bytes(KvTier::INT8), bytes(KvTier::FP8));
     assert!(bf16b < f32b && int8b < bf16b, "pool bytes must shrink with the tier: f32 {f32b}, bf16 {bf16b}, int8 {int8b}");
+    assert_eq!(fp8b, int8b, "fp8 has the int8 footprint");
 }

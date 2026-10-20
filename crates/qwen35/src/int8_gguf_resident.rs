@@ -2807,7 +2807,7 @@ impl ResidentModel for Qwen35GgufResident {
     fn manifest(&self) -> Manifest {
         let generate = ActionSpec::new(
             "generate",
-            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from a released GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16 or int8 (`--qwen35-kv`); up to --qwen35-max-batch sequences per batched dispatch)",
+            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from a released GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16, int8 or fp8 E4M3 (`--qwen35-kv`); up to --qwen35-max-batch sequences per batched dispatch)",
         )
         .streaming()
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
@@ -3122,14 +3122,15 @@ mod tests {
     /// fallback to a different precision than was asked for).
     #[test]
     fn the_kv_tier_is_parsed_data_refusing_unknown_names() {
-        assert_eq!(KvTier::parse("int8"), Ok(KvTier::Int8));
-        assert_eq!(KvTier::parse("bf16"), Ok(KvTier::Bf16));
+        assert_eq!(KvTier::parse("int8"), Ok(KvTier::INT8));
+        assert_eq!(KvTier::parse("bf16"), Ok(KvTier::BF16));
         assert_eq!(KvTier::parse("f32"), Ok(KvTier::F32));
-        let e = KvTier::parse("fp8").unwrap_err();
-        assert!(e.contains("fp8"), "{e}");
+        assert_eq!(KvTier::parse("fp8"), Ok(KvTier::FP8));
+        let e = KvTier::parse("fp4").unwrap_err();
+        assert!(e.contains("fp4"), "{e}");
         // ...and the constructor carries it through.
         let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![], 2048, TierPolicy::uniform(Dtype::I8)).with_kv_tier(KvTier::parse("int8").unwrap());
-        assert_eq!(r.kv_tier(), KvTier::Int8);
+        assert_eq!(r.kv_tier(), KvTier::INT8);
     }
 
     /// The served id is caller-set constructor data
@@ -3169,8 +3170,9 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         let usable = (97_871u64 << 20) - (2 << 30);
         let cap = 131_072;
-        let [f32b, bf16b, int8b] = KvTier::ALL.map(|kv| max_batch_on_one_card(&cfg, cap, kv, usable));
-        println!("128k on one GH200: planner admits f32 {f32b}, bf16 {bf16b}, int8 {int8b} sequences");
+        let [f32b, bf16b, int8b, fp8b] = KvTier::ALL.map(|kv| max_batch_on_one_card(&cfg, cap, kv, usable));
+        println!("128k on one GH200: planner admits f32 {f32b}, bf16 {bf16b}, int8 {int8b}, fp8 {fp8b} sequences");
+        assert_eq!(fp8b, int8b, "fp8 has the int8 footprint");
         assert!(f32b >= 1, "one f32 sequence must fit, or this sizing is not the one under test");
         assert!(bf16b >= 2 * f32b, "bf16 halves the cache, so it must at least double the batch: f32 {f32b}, bf16 {bf16b}");
         assert!(int8b >= 3 * f32b, "int8 is ~3.9x smaller, so it must at least triple the batch: f32 {f32b}, int8 {int8b}");
@@ -3185,12 +3187,12 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         let i8 = TierPolicy::uniform(Dtype::I8);
         let usable = [(97_871u64 << 20) - (2 << 30)];
-        assert_eq!(sizing_refusal(&cfg, 4096, &i8, KvTier::Bf16, 64, 0, &usable), None, "64 x 4096 with a bf16 cache fits one GH200");
+        assert_eq!(sizing_refusal(&cfg, 4096, &i8, KvTier::BF16, 64, 0, &usable), None, "64 x 4096 with a bf16 cache fits one GH200");
         let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 256, 0, &usable).expect("256 f32 sequences of 4096 tokens cannot fit");
         for needle in ["--qwen35-max-batch 256", "--qwen35-ctx 4096", "GiB weights", "more compact --qwen35-kv"] {
             assert!(why.contains(needle), "refusal must mention {needle:?}: {why}");
         }
-        let why = sizing_refusal(&cfg, 131_072, &i8, KvTier::Bf16, 40, 0, &usable).expect("past the u32 plane index");
+        let why = sizing_refusal(&cfg, 131_072, &i8, KvTier::BF16, 40, 0, &usable).expect("past the u32 plane index");
         assert!(why.contains("u32 element index"), "{why}");
     }
 
@@ -3205,7 +3207,7 @@ mod tests {
         let usable = (97_871u64 << 20) - (2 << 30);
         let i8 = TierPolicy::uniform(Dtype::I8);
         let ceiling = |kv: KvTier| (1..=1024u32).take_while(|&b| sizing_refusal(&cfg, 4096, &i8, kv, b, 0, &[usable]).is_none()).last().unwrap_or(0);
-        let [f32b, bf16b, int8b] = KvTier::ALL.map(ceiling);
+        let [f32b, bf16b, int8b, _fp8b] = KvTier::ALL.map(ceiling);
         println!("4096 tokens on one GH200: planner admits f32 {f32b}, bf16 {bf16b}, int8 {int8b} sequences");
         assert!(f32b >= 64, "64 f32 sequences of 4096 tokens must fit: {f32b}");
         assert!(bf16b > f32b && int8b > bf16b, "a more compact tier admits more sequences: f32 {f32b}, bf16 {bf16b}, int8 {int8b}");
@@ -3220,7 +3222,7 @@ mod tests {
         assert!(kv_pool_addressable(&cfg, 131_072, 31));
         assert!(!kv_pool_addressable(&cfg, 131_072, 33));
         let huge = 1u64 << 40; // far more than any card holds, so only addressing can stop the count
-        assert_eq!(max_batch_on_one_card(&cfg, 131_072, KvTier::Int8, huge), 32);
+        assert_eq!(max_batch_on_one_card(&cfg, 131_072, KvTier::INT8, huge), 32);
     }
 
     /// The real model at the real shape does NOT fit one 24 GB P40 and DOES
@@ -3401,7 +3403,7 @@ mod tests {
         let roomier = vec![(Device::Gpu(0), 40 * GB), (Device::Gpu(1), 40 * GB)];
         let f32_cap = auto_cap(&cfg, &pair, &i8, KvTier::F32, 1, 0).unwrap();
         assert!(auto_cap(&cfg, &roomier, &i8, KvTier::F32, 1, 0).unwrap() > f32_cap);
-        assert!(auto_cap(&cfg, &pair, &i8, KvTier::Int8, 1, 0).unwrap() > f32_cap);
+        assert!(auto_cap(&cfg, &pair, &i8, KvTier::INT8, 1, 0).unwrap() > f32_cap);
         assert!(auto_cap(&cfg, &pair, &i8, KvTier::F32, 4, 0).unwrap() < f32_cap, "more concurrent slots share the same leftover");
     }
 

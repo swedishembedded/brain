@@ -919,6 +919,8 @@ pub const PAGED_KV_APPEND_BATCHED: &str = include_str!("../wgsl/paged_kv_append_
 pub const PAGED_KV_APPEND_BATCHED_WORD: &str = include_str!("../wgsl/paged_kv_append_batched_word.wgsl");
 /// `wgsl/paged_kv_append_i8_clipped_batched.wgsl`
 pub const PAGED_KV_APPEND_I8_CLIPPED_BATCHED: &str = include_str!("../wgsl/paged_kv_append_i8_clipped_batched.wgsl");
+/// `wgsl/paged_kv_append_fp8_clipped_batched.wgsl`
+pub const PAGED_KV_APPEND_FP8_CLIPPED_BATCHED: &str = include_str!("../wgsl/paged_kv_append_fp8_clipped_batched.wgsl");
 /// `wgsl/pexp_nll_grad.wgsl`
 pub const PEXP_NLL_GRAD: &str = include_str!("../wgsl/pexp_nll_grad.wgsl");
 /// `wgsl/pexp_nll_value.wgsl`
@@ -1709,6 +1711,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_kv_append", PAGED_KV_APPEND),
     ("paged_kv_append_batched", PAGED_KV_APPEND_BATCHED),
     ("paged_kv_append_batched_word", PAGED_KV_APPEND_BATCHED_WORD),
+    ("paged_kv_append_fp8_clipped_batched", PAGED_KV_APPEND_FP8_CLIPPED_BATCHED),
     ("paged_kv_append_i8_clipped_batched", PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
     ("pexp_nll_grad", PEXP_NLL_GRAD),
     ("pexp_nll_value", PEXP_NLL_VALUE),

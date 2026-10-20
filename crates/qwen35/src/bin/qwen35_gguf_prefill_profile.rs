@@ -20,7 +20,7 @@
 //!
 //! Usage:
 //!   qwen35_gguf_prefill_profile <path to Qwen3.8-27B*.gguf> [depth] [rows] [rounds]
-//!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda] [--kv f32|bf16|int8] [--flash-prefill v1|v2]
+//!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda] [--kv f32|bf16|int8|fp8] [--flash-prefill v1|v2]
 //!
 //! `depth` (default 256) prompt tokens establish the KV depth first, `rows`
 //! (default 256) is the round width, `rounds` (default 4) the rounds per
