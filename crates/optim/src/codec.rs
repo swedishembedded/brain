@@ -179,8 +179,9 @@ impl StateCodec {
                 for (bi, chunk) in vals.chunks(block).enumerate() {
                     let absmax = chunk.iter().fold(0f32, |m, v| m.max(v.abs()));
                     scales[4 * bi..4 * bi + 4].copy_from_slice(&absmax.to_le_bytes());
+                    let inv = if absmax > 0.0 { 1.0 / absmax } else { 0.0 };
                     for (j, v) in chunk.iter().enumerate() {
-                        data[bi * block + j] = encode_code(self.kind, *v, absmax, u(bi * block + j));
+                        data[bi * block + j] = encode_code(self.kind, *v, inv, u(bi * block + j));
                     }
                 }
             }
@@ -188,13 +189,17 @@ impl StateCodec {
     }
 }
 
+/// f32 nearest to 1/127 and 1/255, spelled out so the WGSL kernels use the identical constants.
+pub const INV_127: f32 = 0.007_874_016;
+pub const INV_255: f32 = 0.003_921_569;
+
 /// Code -> value for one 8-bit element.
 #[inline]
 pub fn decode_code(kind: SlotKind, q: u8, scale: f32) -> f32 {
     match kind {
         SlotKind::Signed => {
             let c = q as i8;
-            let r = c.unsigned_abs() as f32 / 127.0;
+            let r = c.unsigned_abs() as f32 * INV_127;
             let m = r * r * scale;
             if c < 0 {
                 -m
@@ -203,7 +208,7 @@ pub fn decode_code(kind: SlotKind, q: u8, scale: f32) -> f32 {
             }
         }
         SlotKind::NonNegative => {
-            let r = q as f32 / 255.0;
+            let r = q as f32 * INV_255;
             let r2 = r * r;
             r2 * r2 * scale
         }
@@ -218,22 +223,24 @@ fn round_code(x: f32, u: Option<f32>) -> f32 {
     }
 }
 
-/// Value -> code for one 8-bit element of a block with maximum `absmax`.
+/// Value -> code for one 8-bit element of a block whose maximum has reciprocal
+/// `inv` (0 for an all-zero block). A reciprocal multiply rather than a divide
+/// per element: the device kernels do the same, bit for bit.
 #[inline]
-pub fn encode_code(kind: SlotKind, v: f32, absmax: f32, u: Option<f32>) -> u8 {
-    if absmax <= 0.0 || !v.is_finite() {
+pub fn encode_code(kind: SlotKind, v: f32, inv: f32, u: Option<f32>) -> u8 {
+    if inv <= 0.0 || !v.is_finite() {
         return 0;
     }
     match kind {
         SlotKind::Signed => {
-            let q = round_code((v.abs() / absmax).min(1.0).sqrt() * 127.0, u).clamp(0.0, 127.0) as i8;
+            let q = round_code((v.abs() * inv).min(1.0).sqrt() * 127.0, u).clamp(0.0, 127.0) as i8;
             (if v < 0.0 { -q } else { q }) as u8
         }
         SlotKind::NonNegative => {
             if v <= 0.0 {
                 return 0;
             }
-            let q = round_code((v / absmax).min(1.0).sqrt().sqrt() * 255.0, u).clamp(1.0, 255.0);
+            let q = round_code((v * inv).min(1.0).sqrt().sqrt() * 255.0, u).clamp(1.0, 255.0);
             q as u8
         }
     }

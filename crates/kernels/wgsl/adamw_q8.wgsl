@@ -85,14 +85,14 @@ fn signed_code(c: u32) -> i32 {
 
 fn decode_m(c: u32, scale: f32) -> f32 {
     let q = signed_code(c);
-    let r = f32(abs(q)) / 127.0;
+    let r = f32(abs(q)) * 0.0078740157;
     let m = r * r * scale;
     if (q < 0) { return -m; }
     return m;
 }
 
 fn decode_v(c: u32, scale: f32) -> f32 {
-    let r = f32(c) / 255.0;
+    let r = f32(c) * 0.0039215689;
     let r2 = r * r;
     return r2 * r2 * scale;
 }
@@ -102,17 +102,17 @@ fn round_code(x: f32, sr: bool, u: f32) -> f32 {
     return floor(x + 0.5);
 }
 
-fn encode_m(v: f32, absmax: f32, sr: bool, u: f32) -> u32 {
-    if (absmax <= 0.0) { return 0u; }
-    let q = i32(clamp(round_code(sqrt(min(abs(v) / absmax, 1.0)) * 127.0, sr, u), 0.0, 127.0));
+fn encode_m(v: f32, inv: f32, sr: bool, u: f32) -> u32 {
+    if (inv <= 0.0) { return 0u; }
+    let q = i32(clamp(round_code(sqrt(min(abs(v) * inv, 1.0)) * 127.0, sr, u), 0.0, 127.0));
     var s = q;
     if (v < 0.0) { s = -q; }
     return u32(s) & 0xffu;
 }
 
-fn encode_v(v: f32, absmax: f32, sr: bool, u: f32) -> u32 {
-    if (absmax <= 0.0 || v <= 0.0) { return 0u; }
-    let q = clamp(round_code(sqrt(sqrt(min(v / absmax, 1.0))) * 255.0, sr, u), 1.0, 255.0);
+fn encode_v(v: f32, inv: f32, sr: bool, u: f32) -> u32 {
+    if (inv <= 0.0 || v <= 0.0) { return 0u; }
+    let q = clamp(round_code(sqrt(sqrt(min(v * inv, 1.0))) * 255.0, sr, u), 1.0, 255.0);
     return u32(q);
 }
 
@@ -161,6 +161,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         vmax = max(vmax, max(v, 0.0));
     }
 
+    var minv = 0.0;
+    if (mmax > 0.0) { minv = 1.0 / mmax; }
+    var vinv = 0.0;
+    if (vmax > 0.0) { vinv = 1.0 / vmax; }
     let k0m = key_lo();
     let k1m = key_hi(tensor, 0u);
     let k1v = key_hi(tensor, 1u);
@@ -170,8 +174,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         let um = unit(k0m, k1m, idx);
         let uv = unit(k0m, k1v, idx);
         let shift = (j & 3u) * 8u;
-        mwords[j >> 2u] = mwords[j >> 2u] | (encode_m(mvals[j], mmax, sr, um) << shift);
-        vwords[j >> 2u] = vwords[j >> 2u] | (encode_v(vvals[j], vmax, sr, uv) << shift);
+        mwords[j >> 2u] = mwords[j >> 2u] | (encode_m(mvals[j], minv, sr, um) << shift);
+        vwords[j >> 2u] = vwords[j >> 2u] | (encode_v(vvals[j], vinv, sr, uv) << shift);
     }
     for (var i = 0u; i < 16u; i = i + 1u) {
         if (i * 4u < n) {

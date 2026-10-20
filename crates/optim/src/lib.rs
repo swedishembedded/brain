@@ -296,7 +296,12 @@ impl Optim {
                 let desc = gpu.storage(4);
                 gpu.write(&desc, &[*numel as u32, f(ps.lr_mult_of(name)), ti as u32, sr]);
                 let blocks = numel.div_ceil(paramstore::DEVICE_INT8_BLOCK as usize) as u32;
-                let threads = if kernel == gpu.kernel_index("adamw_q8_wg").unwrap_or(usize::MAX) { blocks * paramstore::DEVICE_INT8_BLOCK } else { blocks };
+                let threads = if kernel == gpu.kernel_index("adamw_q8_wg").unwrap_or(usize::MAX) {
+                    // four blocks per 64-lane workgroup (see `adamw_q8_wg.wgsl`)
+                    blocks.div_ceil(4) * paramstore::DEVICE_INT8_BLOCK
+                } else {
+                    blocks
+                };
                 steps.push(gpu.step_buf(
                     kernel,
                     hparams_q.as_ref().unwrap(),
