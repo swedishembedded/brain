@@ -16,7 +16,7 @@ The page is rendered from scripts/gates/training-capabilities.tsv. Checking
   - a declared arch is not rendered in any table, or a capability name is unknown;
   - a registration disagrees: each tier registered for a subject in
     crates/rl/tests/conformance.rs needs a lora_<tier> row, and each
-    architecture in crates/sdk/src/study.rs declaring CHAT_FINE_TUNE needs a
+    architecture in crates/sdk/src/study.rs registered `with_chat_trainer` needs a
     full_ft row and CHAT_LORA_FINE_TUNE a lora_* row.
 That a named test passes is `make test`'s job; this gate keeps the page and the
 test names honest.
@@ -145,14 +145,17 @@ def check_registrations(cells, root):
                     problems.append(f"UNDECLARED TIER: rl/tests/conformance.rs registers {subject} tier {t} but the declaration has no {subject} {cap} row")
     study = root / "crates/sdk/src/study.rs"
     if study.exists():
-        for block in re.split(r"impl StudyArch for ", study.read_text())[1:]:
+        text = study.read_text()
+        chat_rows = set(re.findall(r"ArchEntry::of::<(\w+)>\(\)\s*\.with_chat_trainer", text))
+        for block in re.split(r"impl StudyArch for ", text)[1:]:
+            struct = re.match(r"(\w+)", block).group(1)
             block = block.split("fn study_config")[0]
             ident = re.search(r'const ID: &\'static str = "(\w+)"', block)
             if not ident:
                 continue
             a = ident.group(1)
-            if re.search(r"const CHAT_FINE_TUNE: bool = true", block) and (a, "full_ft") not in have:
-                problems.append(f"UNDECLARED CAPABILITY: sdk study.rs declares {a} CHAT_FINE_TUNE but there is no {a} full_ft row")
+            if struct in chat_rows and (a, "full_ft") not in have:
+                problems.append(f"UNDECLARED CAPABILITY: sdk study.rs registers a chat trainer for {a} but there is no {a} full_ft row")
             if re.search(r"const CHAT_LORA_FINE_TUNE: bool = true", block) and not any(k[0] == a and k[1].startswith("lora_") for k in have):
                 problems.append(f"UNDECLARED CAPABILITY: sdk study.rs declares {a} CHAT_LORA_FINE_TUNE but there is no {a} lora_* row")
     rendered = {a for _, archs, _, _ in TABLES for a in archs}
