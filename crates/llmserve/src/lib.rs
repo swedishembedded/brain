@@ -24,7 +24,8 @@
 use capability::{ActionResult, Invocation, Progress};
 use data::qwen_tokenizer::QwenBpe;
 use model::serve::{PagedDecoder, RejectReason, Request, Scheduler};
-use qwen3::chat::{ParsedRequest, SeqState};
+pub use qwen3::chat::ParsedRequest;
+use qwen3::chat::SeqState;
 use residency::{AdapterIdentity, Instance, JobFeed};
 
 /// How one model family turns a request into a prompt and names its failures.

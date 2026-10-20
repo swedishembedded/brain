@@ -17,7 +17,7 @@
 //! [`AdapterRegistry`]. The registry is the set of verified adapters
 //! ([`LoadedAdapter`]: the factors and the digest of the very bytes they were
 //! parsed from) the operator wants served, keyed by serving id. It holds no
-//! device state. The engine's adapter bank ([`qwen3::serve::Engine`]) is the
+//! device state. The engine's adapter bank ([`model::adapter::bank::AdapterBank`]) is the
 //! data plane: when the resident's instance is built, and again at the start
 //! of every batch whose registry changed, [`AdapterSync`] loads what the
 //! registry gained into the bank and unloads what it lost. A load is a host
@@ -63,45 +63,15 @@ pub use model::adapter::bank::AdapterTargets;
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{AdapterIdentity, Device, Executor, Instance, InstanceKey, MemCost, ResidentModel};
 
-use crate::adapter_release::{LoadedAdapter, ServedBase, QWEN35_FAMILY, QWEN_FAMILY};
+use crate::adapter_release::{LoadedAdapter, ServedBase};
 use crate::resident_llm::QwenResident;
+pub use crate::served_family::ServedFamily;
 
 /// The reserved invocation param a [`QwenAdapterView`] stamps with its
 /// serving id. It is the host's word, never a caller's: no manifest declares
 /// it, so `ActionSpec::validate_served` refuses it from every HTTP and D-Bus
 /// caller, and the base resident strips it ([`ResidentModel::stamp`]).
 pub const ADAPTER_PARAM: &str = "__adapter";
-
-/// What a served model family calls its linears: the leaves an adapter may
-/// correct and the `attention` group, as the family's [`AdapterServing`]
-/// config lists them. Leaf names do not depend on a config's dimensions, so a
-/// small config of the family stands for all of them.
-#[derive(Clone, Debug)]
-pub struct ServedFamily {
-    /// The `ModelCard.family` of the family's adapters.
-    pub tag: &'static str,
-    /// Every leaf the family has a site for.
-    pub all: Vec<&'static str>,
-    /// The leaves of the `attention` group.
-    pub attention: Vec<&'static str>,
-}
-
-impl ServedFamily {
-    /// The family of `model`, adapters tagged `tag`.
-    pub fn of<M: AdapterServing + ?Sized>(tag: &'static str, model: &M) -> ServedFamily {
-        ServedFamily { tag, all: model.all_leaves(), attention: model.attention_leaves() }
-    }
-
-    /// The family of adapters carrying card family `tag`, or `None` for a
-    /// family this crate does not serve.
-    pub fn named(tag: &str) -> Option<ServedFamily> {
-        match tag {
-            QWEN_FAMILY => Some(ServedFamily::of(QWEN_FAMILY, &qwen3::config::QwenConfig::tiny())),
-            QWEN35_FAMILY => Some(ServedFamily::of(QWEN35_FAMILY, &qwen35::config::Qwen35Config::tiny())),
-            _ => None,
-        }
-    }
-}
 
 /// Adapters the bank holds in device slots at once, unless `--adapter-slots`
 /// says otherwise. More adapters than slots are served by swapping the least
@@ -687,7 +657,7 @@ impl Frontend for AdaptedFrontend<'_> {
     fn label(&self) -> &str {
         self.front.label()
     }
-    fn parse(&self, inv: &Invocation) -> Result<qwen3::chat::ParsedRequest, String> {
+    fn parse(&self, inv: &Invocation) -> Result<llmserve::ParsedRequest, String> {
         self.front.parse(inv)
     }
     fn route(&self, inv: &Invocation) -> Result<Option<(AdapterId, AdapterIdentity)>, String> {
@@ -712,7 +682,7 @@ impl Frontend for AdaptedFrontend<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter_release::load_adapter;
+    use crate::adapter_release::{load_adapter, QWEN35_FAMILY};
     use brain_testutil::adapters::{scratch_dir, write_adapter};
 
     fn registry(settings: Option<AdapterBankSettings>) -> Arc<AdapterRegistry> {
@@ -802,7 +772,7 @@ mod tests {
         ] {
             assert!(bad.validate().unwrap_err().contains(flag), "{bad:?}");
         }
-        let model = qwen3::config::QwenConfig::tiny();
+        let model = crate::served_family::tiny_qwen();
         let cfg = AdapterBankSettings { slots: 3, rank_cap: 8, targets: AdapterTargets::ALL }.bank_config(&model).unwrap();
         assert_eq!((cfg.slots, cfg.r_max, cfg.targets.len(), cfg.max_registered), (3, 8, 7, MAX_SERVED_ADAPTERS), "`all` is every site the model has");
         let attention = AdapterBankSettings::default().bank_config(&model).unwrap();

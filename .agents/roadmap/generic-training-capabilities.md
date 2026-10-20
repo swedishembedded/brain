@@ -23,13 +23,14 @@ part of the larger plan in `quantized-training.md`, which this file feeds.
 - [ ] Conformance tiers: register the tiers still missing as they land (FP8; an
       int8 tier for qwen35 once its trainer accepts one). `Subject::tiers` is the
       hook; each tier carries its own gradient tolerance.
-- [ ] Move the serving `AdapterBank` (`qwen3/src/serve/adapters.rs`, built from
-      `QwenConfig` and its own seven-site `LoraSite` enum) behind `LoraSites`, so
-      qwen35 can use it, and stop `catalog/src/adapter_registry.rs` importing
-      qwen3 types. Regression gates: `catalog/tests/multi_adapter.rs`,
-      `qwen3/tests/engine_adapter_bank.rs`, `apiserve/tests/api.rs`. Also let
-      `Qwen::attach_adapter_pairs` call `adapter::sites::validate` instead of its
-      own shape checks.
+- [x] The serving `AdapterBank` is `model::adapter::bank` over `LoraSites` /
+      `AdapterServing`; qwen3 and qwen35 (fp32 and GGUF engines) serve adapters
+      from it as overlays without folding into the base, and
+      `catalog/src/adapter_registry.rs` names no architecture (the family table
+      is `catalog/src/served_family.rs`). `Qwen::attach_adapter_pairs` checks
+      shapes with `adapter::sites::validate`. Regression gates:
+      `catalog/tests/multi_adapter.rs`, `qwen3/tests/engine_adapter_bank.rs`,
+      `qwen35/tests/adapter_bank.rs`, `apiserve/tests/api.rs`.
 - [ ] `ChatFullFineTune` and `PreferenceFineTune` still call `qwen3::finetune`; a
       generic trainer over `Model` + `LoraSites` would let `ArchEntry::chat_fine_tune`
       be true for another architecture. (`ChatFineTune` is done for qwen35: the

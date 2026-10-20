@@ -91,6 +91,7 @@ pub mod resident_wan;
 pub mod resident_worldmirror2;
 pub mod resident_yolo;
 pub mod resident_zimage;
+mod served_family;
 mod serving;
 
 pub use serving::{multi_residents, residents};
