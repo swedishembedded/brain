@@ -191,7 +191,7 @@ pub fn int8_weight_variant(name: &str, src: &'static str, binding: &str, scales:
 /// The 16-entry bitsandbytes NF4 codebook (`create_normal_map` quantile
 /// values), ascending: code `i` decodes to `NF4_CODEBOOK[i]` times its group
 /// scale. The single source of the table: `model::lut4::NF4_LUT` (the host
-/// quantizer) re-exports it, and [`nf4_weight_variant`] renders it into the
+/// quantizer) re-exports it, and [`weight_decode_variants`] renders it into the
 /// WGSL decode helper, so host and device cannot disagree.
 pub const NF4_CODEBOOK: [f32; 16] = [
     -1.0,
@@ -297,26 +297,6 @@ pub fn weight_decode_variants() -> Vec<Variant> {
         .iter()
         .map(|&f| interned("weight_decode", filled, &[("FMT", f as u32)]).expect("weight_decode.wgsl has the FMT constant"))
         .collect()
-}
-
-/// The weight-only NF4 sibling of [`int8_weight_variant`]: rewrites the f32
-/// weight binding `binding` of a matrix kernel into a packed 4-bit one - eight
-/// codes to a `u32` word, code `b` at bits `4b` (`model::lut4`'s layout) - and
-/// decodes each load as `NF4_CODEBOOK[code] * scales[group]`, the scale of a
-/// 32-weight group read from a new storage binding `scales` (an
-/// `array<f32>`, added after the kernel's last binding). The activations stay
-/// f32 and the accumulation stays f32: nothing is quantised but the stored
-/// weight (QLoRA's semantic, unlike the W4A8 `matmul_q4_gemv_nf4`).
-///
-/// The flat weight index `wi = row * k + col` names both the word (`wi >> 3`)
-/// and the group (`wi >> 5`), which holds for rows a multiple of 32 wide.
-/// Same bare-identifier index precondition as [`dtype_variant`]. Named
-/// `"{name}#{binding}=nf4"`.
-pub fn nf4_weight_variant(name: &str, src: &'static str, binding: &str, scales: &str) -> Result<Variant, String> {
-    let vname = format!("{name}#{binding}=nf4");
-    packed_scaled_variant(vname, src, binding, scales, &nf4_lut_fn(), |wi| {
-        format!("(nf4_lut(({binding}[{wi} >> 3u] >> (({wi} & 7u) * 4u)) & 15u) * {scales}[{wi} >> 5u])")
-    })
 }
 
 /// The KV-cache sibling of [`int8_weight_variant`]: rewrites the f32 pool
@@ -1707,21 +1687,18 @@ mod tests {
         assert_eq!(int8_weight_variant("matmul", crate::MATMUL, "w", "ws").unwrap().1.as_ptr(), src.as_ptr());
     }
 
-    /// The NF4 weight variant packs eight codes to a word, scales per 32
-    /// weights, and renders the one codebook ([`NF4_CODEBOOK`]) into the decode
-    /// helper - for all four matrix kernels a frozen-base trainer reads.
+    /// The tile decode renders the one NF4 codebook ([`NF4_CODEBOOK`]) into its helper and has one variant
+    /// per stored tier, named by [`DecodeFormat::kernel_name`].
     #[test]
-    fn the_nf4_weight_variant_packs_codes_and_renders_the_codebook() {
-        for (name, kernel) in [("matmul", crate::MATMUL), ("matmul_reg3", crate::MATMUL_REG3), ("matmul_dx", crate::MATMUL_DX), ("matmul_dx_reg", crate::MATMUL_DX_REG)] {
-            let (vname, src) = nf4_weight_variant(name, kernel, "w", "ws").unwrap();
-            assert_eq!(vname, format!("{name}#w=nf4"));
-            assert!(src.contains("array<u32>;") && src.contains(" ws: array<f32>;"), "{name}: packed weight plus scale binding");
-            assert!(src.contains("nf4_lut((w[wi >> 3u] >> ((wi & 7u) * 4u)) & 15u) * ws[wi >> 5u]"), "{name}: the load is decoded: {src}");
-            assert_eq!(nf4_weight_variant(name, kernel, "w", "ws").unwrap().1.as_ptr(), src.as_ptr(), "{name}: interned");
-        }
-        let (_, src) = nf4_weight_variant("matmul", crate::MATMUL, "w", "ws").unwrap();
-        for v in NF4_CODEBOOK {
-            assert!(src.contains(&format!("{v:?}")), "codebook entry {v:?} is rendered into the helper");
+    fn the_weight_decode_variants_render_the_codebook_and_cover_every_format() {
+        let variants = weight_decode_variants();
+        assert_eq!(variants.len(), DecodeFormat::ALL.len());
+        for (f, (name, src)) in DecodeFormat::ALL.iter().zip(&variants) {
+            assert_eq!(*name, f.kernel_name());
+            assert!(src.contains(&format!("const FMT: u32 = {}u;", *f as u32)), "{name}: FMT is set");
+            for v in NF4_CODEBOOK {
+                assert!(src.contains(&format!("{v:?}")), "{name}: codebook entry {v:?} is rendered into the helper");
+            }
         }
     }
 

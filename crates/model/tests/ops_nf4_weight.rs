@@ -173,7 +173,7 @@ fn nf4_is_a_spellable_tier() {
 #[test]
 fn the_training_kernel_list_registers_the_frozen_base_kernels() {
     let names: Vec<&str> = training_kernel_list().iter().map(|(n, _)| *n).collect();
-    for want in ["matmul#w=nf4", "matmul_reg3#w=nf4", "matmul_dx#w=nf4", "matmul_dx_reg#w=nf4", "matmul_dx_reg#w=bf16"] {
+    for want in ["matmul_dx_reg#w=bf16", "weight_decode#FMT=4", "copy_cols"] {
         assert!(names.contains(&want), "training_kernel_list() lacks {want}");
     }
 }

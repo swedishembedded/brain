@@ -30,3 +30,7 @@ Things that bite:
   kernels are optional (`model::ops::frozen_base_kernels()`, union in
   `training_kernel_list()`) so models that register only `kernel_list()` keep
   working with the naive bf16 dX.
+
+**Superseded (qops, 2026-10-20):** the `#w=nf4` float-read kernel variants and the decoded-weight scope are gone. NF4 is one of the tiers of
+`model::ops::tiled`: a bounded row tile is decoded (`weight_decode`, or `weight_dequant_bf16` for the tensor-core library path) and the dense
+GEMM runs on the tile; the one stored copy still serves forward and dX.

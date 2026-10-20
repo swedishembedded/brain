@@ -98,7 +98,7 @@
 //! phase deliberately leaves for whoever needs it.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Concatenate `parts` end to end into one freshly allocated buffer, copying
 /// each part in parallel chunks rather than one `extend_from_slice` call per
@@ -269,22 +269,11 @@ mod kname {
     /// dtype knob to get wrong.
     pub const MATMUL_DW: &str = "matmul_dw";
 
-    // --- frozen-base training tier: float-read NF4 and the tiled bf16 dx ---
+    // --- frozen-base training tier: the tiled f32/bf16 input gradient ---
     //
-    // NOT in `ALL`: a model that never trains over a quantized/bf16 base does
-    // not have to register them (`Ops::new` would otherwise refuse every
-    // existing kernel list). They are looked up when first dispatched and a
-    // missing one is a named panic - register `training_kernel_list()`.
+    // NOT in `ALL`: a model that never trains over a bf16 base does not have to register them. They are looked
+    // up when first dispatched and a missing one is a named panic - register `training_kernel_list()`.
 
-    /// `matmul.wgsl` reading a NF4 weight (`kernels::template::nf4_weight_variant`):
-    /// the naive one-thread-per-output forward. Bindings `x, w, out, ws`.
-    pub const MATMUL_NF4: &str = "matmul#w=nf4";
-    /// `matmul_reg3.wgsl` reading a NF4 weight: the 128x128 register-tiled forward.
-    pub const MATMUL_REG3_NF4: &str = "matmul_reg3#w=nf4";
-    /// `matmul_dx.wgsl` reading a NF4 weight: the naive input gradient.
-    pub const MATMUL_DX_NF4: &str = "matmul_dx#w=nf4";
-    /// `matmul_dx_reg.wgsl` reading a NF4 weight: the tiled input gradient.
-    pub const MATMUL_DX_REG_NF4: &str = "matmul_dx_reg#w=nf4";
     /// The plain f32 `matmul_dx_reg.wgsl`: the tiled input gradient of the f32
     /// tier (registered under this name by models that have it).
     pub const MATMUL_DX_REG: &str = "matmul_dx_reg";
@@ -475,25 +464,18 @@ pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
 }
 
 /// The kernels a frozen-base trainer needs beyond the [`REQUIRED_KERNELS`]
-/// facade set: the tiled bf16 input gradient and the float-read NF4 forward and
-/// input-gradient pairs (naive and tiled). A model that builds its own kernel
+/// facade set: the tiled bf16 input gradient and the kernels of the quantized-execution contract (the
+/// `weight_decode` variant of every stored tier, `copy_cols`, `accum_bf16`). A model that builds its own kernel
 /// list appends this slice; [`training_kernel_list`] is the ready-made union
 /// with [`kernel_list`]. Kept out of [`REQUIRED_KERNELS`] on purpose: an `Ops`
-/// that never trains over an NF4 or bf16 base must not have to register them.
+/// that never trains over a quantized or bf16 base must not have to register them.
 #[must_use]
 pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
-        let nf4 = |name, src| {
-            kernels::template::nf4_weight_variant(name, src, "w", "ws").expect("brain-kernels ships every NF4 weight variant")
-        };
         let mut list = vec![
             kernels::template::dtype_variant("matmul_dx_reg", kernels::MATMUL_DX_REG, "w", Dtype::BF16)
                 .expect("brain-kernels ships the bf16 tiled dx variant"),
-            nf4("matmul", kernels::MATMUL),
-            nf4("matmul_reg3", kernels::MATMUL_REG3),
-            nf4("matmul_dx", kernels::MATMUL_DX),
-            nf4("matmul_dx_reg", kernels::MATMUL_DX_REG),
             // The quantized-execution contract (`tiled`): the tile decode of every tier, the column copy
             // that gathers and scatters tiles, and the bf16 gradient accumulation.
             ("copy_cols", kernels::COPY_COLS),
@@ -505,7 +487,7 @@ pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
 }
 
 /// [`kernel_list`] plus [`frozen_base_kernels`]: the list an `Ops` that trains
-/// over an NF4 or bf16 frozen base feeds `Gpu::new`.
+/// over a quantized or bf16 frozen base feeds `Gpu::new`.
 #[must_use]
 pub fn training_kernel_list() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
@@ -580,10 +562,10 @@ pub enum Weight {
     /// NF4 frozen-weight tier (QLoRA): `w` packed `[n, k/8]` u32, code `b` of a
     /// word at bits `4b` (`model::lut4::quantize_weight_lut4`'s layout with
     /// `NF4_LUT`), `s` the group-wise `[n, k/32]` f32 scale. Unlike [`Weight::Q4`]
-    /// this tier is FLOAT-read: the `#w=nf4` kernel variants decode
-    /// `NF4_LUT[code] * scale` per load and multiply it with the f32
-    /// activations, so nothing but the stored weight is quantised and one copy
-    /// serves both `x * W^T` and `dY * W`.
+    /// this tier is FLOAT-read: its tile decode (`weight_decode`) yields
+    /// `NF4_LUT[code] * scale` and the dense GEMM multiplies the tile with the
+    /// f32 activations, so nothing but the stored weight is quantised and one
+    /// copy serves both `x * W^T` and `dY * W`.
     NF4 { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32 },
     /// The canonical brain K-quant device layout (M8-M11, byte-compressed in
     /// M14; see `crate::kquant`'s module doc for the full shape/correction-
@@ -1114,38 +1096,10 @@ pub struct Ops {
     /// checks and parity gates pin [`GemmPrecision::Fp32Reference`] through
     /// [`Ops::set_gemm_precision`].
     gemm: LibraryGemmProvider,
-    /// NF4 weights decoded to bf16 for the library path, kept while a [`DecodedWeightScope`] is open.
-    decoded: Mutex<DecodedWeights>,
     /// Bytes of decoded f32 scratch one tile of a quantized product may use (see [`tiled`]).
     tile_budget_bytes: u64,
     /// A tiny buffer bound to the `weight_decode` bindings a tier does not use.
     decode_dummy: std::sync::OnceLock<DeviceBuffer>,
-}
-
-/// The decoded-weight cache of an [`Ops`]: `depth` open scopes, and for each whole NF4 weight (keyed by the identity
-/// of its packed buffer) the bf16 scratch its first product decoded.
-#[derive(Default)]
-struct DecodedWeights {
-    depth: u32,
-    by_weight: HashMap<usize, DeviceBuffer>,
-}
-
-/// While alive, the library path decodes each whole NF4 weight to bf16 ONCE and every product that reads it
-/// (forward, activation rebuild, input gradient) shares the scratch, instead of decoding it again per product. Open
-/// one around a loop that applies the same weights to several row chunks. Dropping the last open scope releases
-/// the scratch. The decoded copies live as long as the scope, so it costs `2 * n * k` bytes per distinct weight.
-pub struct DecodedWeightScope<'a> {
-    ops: &'a Ops,
-}
-
-impl Drop for DecodedWeightScope<'_> {
-    fn drop(&mut self) {
-        let mut cache = self.ops.decoded.lock().unwrap_or_else(|e| e.into_inner());
-        cache.depth -= 1;
-        if cache.depth == 0 {
-            cache.by_weight.clear();
-        }
-    }
 }
 
 mod sink;
@@ -1155,16 +1109,7 @@ pub use sink::DeviceWeightSink;
 pub use upload_source::{upload_fused_from_source, upload_from_source};
 pub use tiled::{plan_linear, tile_rows, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES};
 
-/// A library-path weight: the buffer, the byte range to bind, steps that must run first and the scratch they use.
-type LibraryWeight = (DeviceBuffer, (u64, u64), Vec<Step>, Option<usize>);
-
 impl Ops {
-    /// Open a [`DecodedWeightScope`].
-    pub fn decoded_weight_scope(&self) -> DecodedWeightScope<'_> {
-        self.decoded.lock().unwrap_or_else(|e| e.into_inner()).depth += 1;
-        DecodedWeightScope { ops: self }
-    }
-
     /// [`Ops::with_selector`] with the default policy
     /// (`CachedSelector<DefaultSelector>`) - what every model crate except
     /// `qwen3::serve` uses today.
@@ -1251,7 +1196,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm, decoded: Mutex::new(DecodedWeights::default()), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new() })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new() })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
@@ -1276,7 +1221,8 @@ impl Ops {
         self.gemm.path()
     }
 
-    /// `y[yoff ..] = act @ W[first.., :]^T` on the library path, for a bf16 or NF4 `w`;
+    /// `y[yoff ..] = act @ W[first.., :]^T` on the library path, for an f32 or bf16 `w` (every other tier
+    /// reaches the library as a decoded bf16 tile, see [`tiled`]);
     /// `false` (nothing pushed) when the fp32 kernels must run instead.
     fn library_forward(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
         if let Weight::F32 { w: wb, n, k } = w {
@@ -1287,7 +1233,8 @@ impl Ops {
             let y_op = library::Operand { buf: y, range: (yoff, m as u64 * rows.1 as u64) };
             return self.gemm.forward_tf32(&self.gpu, s, &x_op, &library::Operand { buf: wb, range: window }, &y_op, m, rows.1, *k);
         }
-        let Some((wb, window, mut prep, fresh_weight)) = self.library_weight(w, rows) else { return false };
+        let Some((wb, window)) = self.library_weight(w, rows) else { return false };
+        let mut prep = Vec::new();
         let k = w.k();
         let m = act.m;
         let (w_op, y_op) = (library::Operand { buf: &wb, range: window }, library::Operand { buf: y, range: (yoff, m as u64 * rows.1 as u64) });
@@ -1309,52 +1256,22 @@ impl Ops {
             if fresh {
                 *act.bf16.borrow_mut() = Some(xb);
             }
-            self.share_decoded(fresh_weight, &wb);
         }
         ok
     }
 
-    /// The bf16 weight rows `rows` of `w` as the library path reads them: the
-    /// buffer, the range to bind and any steps that must run first (the
-    /// decode of an NF4 window into a bf16 scratch). `None` for a tier or a
-    /// device the library path does not serve.
-    fn library_weight(&self, w: &Weight, rows: (u32, u32)) -> Option<LibraryWeight> {
+    /// The bf16 weight rows `rows` of `w` as the library path reads them: the buffer and the range to bind.
+    /// `None` for a tier or a device the library path does not serve (only bf16 storage is read in place).
+    fn library_weight(&self, w: &Weight, rows: (u32, u32)) -> Option<(DeviceBuffer, (u64, u64))> {
         if !self.gemm.is_active() {
             return None;
         }
         let (first, count) = rows;
         let (n, k) = (w.n(), w.k());
-        let mut prep = Vec::new();
         match w {
             Weight::BF16 { w: wb, .. } => {
                 let window = if first == 0 && count == n { WHOLE } else { (first as u64 * k as u64 / 2, count as u64 * k as u64 / 2) };
-                Some((wb.clone(), window, prep, None))
-            }
-            Weight::NF4 { w: wb, s: sw, .. } => {
-                let (packed, scales) = if first == 0 && count == n {
-                    (WHOLE, WHOLE)
-                } else {
-                    (Self::row_window(first, count, n, k, 8), Self::row_window(first, count, n, k, 32))
-                };
-                let whole = first == 0 && count == n;
-                let key = wb.alloc_id() as usize;
-                if whole {
-                    let cache = self.decoded.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(decoded) = cache.by_weight.get(&key) {
-                        // Decoded by an earlier product in this scope; its step is already in the stream.
-                        return Some((decoded.clone(), WHOLE, prep, None));
-                    }
-                }
-                let decoded = self.gemm.dequant_nf4(
-                    &self.gpu,
-                    &mut prep,
-                    &library::Operand { buf: wb, range: packed },
-                    &library::Operand { buf: sw, range: scales },
-                    count as u64 * k as u64,
-                )?;
-                // Whole weight decoded here with a scope open: the caller shares it once its products are in.
-                let fresh = (whole && self.decoded.lock().unwrap_or_else(|e| e.into_inner()).depth > 0).then_some(key);
-                Some((decoded, WHOLE, prep, fresh))
+                Some((wb.clone(), window))
             }
             _ => None,
         }
@@ -1370,7 +1287,8 @@ impl Ops {
             let dy_op = library::Operand { buf: dy, range: WHOLE };
             return self.gemm.dx_tf32(&self.gpu, s, &dy_op, &library::Operand { buf: wb, range: window }, &library::Operand { buf: dx, range: dx_range }, m, rows.1, *k, accumulate);
         }
-        let Some((wb, window, mut prep, fresh)) = self.library_weight(w, rows) else { return false };
+        let Some((wb, window)) = self.library_weight(w, rows) else { return false };
+        let mut prep = Vec::new();
         let k = w.k();
         let dx_range = if dx_row0 == 0 { WHOLE } else { (dx_row0 as u64 * k as u64, m as u64 * k as u64) };
         let ok = self.gemm.dx(
@@ -1386,17 +1304,8 @@ impl Ops {
         );
         if ok {
             s.append(&mut prep);
-            self.share_decoded(fresh, &wb);
         }
         ok
-    }
-
-    /// Keep the NF4 scratch `decoded` (decoded by a product that is now in the step list) for the other
-    /// products of the open [`DecodedWeightScope`].
-    fn share_decoded(&self, key: Option<usize>, decoded: &DeviceBuffer) {
-        if let Some(key) = key {
-            self.decoded.lock().unwrap_or_else(|e| e.into_inner()).by_weight.insert(key, decoded.clone());
-        }
     }
 
     pub fn caps(&self) -> &DeviceCaps {
@@ -1636,10 +1545,6 @@ impl Ops {
         let (n, k) = (w.n(), w.k());
         assert_eq!(act.k, k, "Ops::matmul: activation width {} does not match weight K {k}", act.k);
         let m = act.m;
-        // A float-read tier whose library decode would outgrow the scratch budget runs in tiles.
-        if matches!(w, Weight::NF4 { .. }) && matches!(self.linear_plan(w, n), LinearPlan::TileDecode { .. }) {
-            return self.matmul_rows(s, w, (0, n), act, y, yoff);
-        }
         if self.library_forward(s, w, (0, n), act, y, yoff) {
             return;
         }
@@ -1824,7 +1729,7 @@ impl Ops {
     fn frozen_base_kernel(&self, name: &str) -> usize {
         self.gpu.kernel_index(name).unwrap_or_else(|| {
             panic!(
-                "Ops: kernel '{name}' is not registered on this Gpu -- a frozen NF4/bf16-training \
+                "Ops: kernel '{name}' is not registered on this Gpu -- a frozen-base bf16/quantized-training \
                  build must register model::ops::training_kernel_list()"
             )
         })
@@ -2240,8 +2145,8 @@ impl Ops {
     /// the forward multiplied by, so `dX` stays consistent with it.
     ///
     /// `w` may be `Weight::F32`, `Weight::BF16` (B10: inline bitcast decode,
-    /// `dtype_variant`) or `Weight::NF4` (`nf4_weight_variant`: codebook value
-    /// times group scale, decoded per load; no transposed copy exists). A
+    /// `dtype_variant`) or any quantized tier (decoded in bounded row tiles, see
+    /// the `tiled` module; no transposed copy exists). A
     /// result that fills 128x128 tiles runs the register-tiled `matmul_dx_reg`
     /// kernel of the tier on a device that executes workgroup barriers, the
     /// naive `matmul_dx` otherwise; the bf16 tiled kernel is optional (see
@@ -2263,7 +2168,6 @@ impl Ops {
         // the naive one keeps working.
         let tiled = self.tiled_gemm(m, k);
         match w {
-            Weight::NF4 { .. } => self.matmul_dx_rows(s, w, (0, n), dy, m, dx, 0, accumulate),
             Weight::BF16 { .. } if tiled && self.gpu.kernel_index(kname::MATMUL_DX_REG_BF16).is_some() => {
                 self.matmul_dx_rows(s, w, (0, n), dy, m, dx, 0, accumulate)
             }
@@ -2294,7 +2198,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::F16 { .. } | Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } => {
+            Weight::F16 { .. } | Weight::I8 { .. } | Weight::NF4 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } => {
                 unreachable!("{dt:?} runs through the tile decode above")
             }
         }
@@ -2341,18 +2245,9 @@ impl Ops {
             Weight::BF16 { w: wb, .. } => {
                 (if tiled { kname::MATMUL_REG3_BF16 } else { kname::MATMUL_BF16 }, vec![&act.x, wb, y], vec![xo, Self::row_window(first, count, n, k, 2), oo])
             }
-            Weight::NF4 { w: wb, s: sw, .. } => {
-                assert_eq!(act.xr0 % 64, 0, "Ops::matmul_rows: the NF4 kernels bind activation rows from a 256-byte aligned row {}", act.xr0);
-                (
-                    if tiled { kname::MATMUL_REG3_NF4 } else { kname::MATMUL_NF4 },
-                    vec![&act.x, wb, y, sw],
-                    vec![xo, Self::row_window(first, count, n, k, 8), oo, Self::row_window(first, count, n, k, 32)],
-                )
-            }
-            other => panic!("Ops::matmul_rows: {:?} is not a float-read weight tier (F32, BF16, NF4)", other.dtype()),
+            other => unreachable!("Ops::matmul_rows: {:?} runs through the tile decode above", other.dtype()),
         };
-        let kind = if matches!(w, Weight::NF4 { .. }) { self.frozen_base_kernel(name) } else { self.idx[name] };
-        s.push(self.gpu.dispatch_sliced(kind, &bufs, &ranges, &params, grid));
+        s.push(self.gpu.dispatch_sliced(self.idx[name], &bufs, &ranges, &params, grid));
     }
 
     /// [`Self::matmul_dx`] against the row window `rows = (first, count)` of
@@ -2384,13 +2279,7 @@ impl Ops {
             Weight::BF16 { w: wb, .. } => {
                 (kname::MATMUL_DX_BF16, kname::MATMUL_DX_REG_BF16, vec![dy, wb, dx], vec![WHOLE, Self::row_window(first, count, n, k, 2), dxo])
             }
-            Weight::NF4 { w: wb, s: sw, .. } => (
-                kname::MATMUL_DX_NF4,
-                kname::MATMUL_DX_REG_NF4,
-                vec![dy, wb, dx, sw],
-                vec![WHOLE, Self::row_window(first, count, n, k, 8), dxo, Self::row_window(first, count, n, k, 32)],
-            ),
-            other => panic!("Ops::matmul_dx_rows: {:?} is not a float-read weight tier (F32, BF16, NF4)", other.dtype()),
+            other => unreachable!("Ops::matmul_dx_rows: {:?} runs through the tile decode above", other.dtype()),
         };
         let registered = |name: &str| self.gpu.kernel_index(name);
         let (kind, tile) = match (tiled_wanted, registered(tiled)) {
@@ -2677,7 +2566,7 @@ mod tests {
     #[test]
     fn frozen_base_kname_literals_match_the_registered_variants() {
         let registered: Vec<&str> = frozen_base_kernels().iter().map(|(n, _)| *n).collect();
-        let want = [kname::MATMUL_NF4, kname::MATMUL_REG3_NF4, kname::MATMUL_DX_NF4, kname::MATMUL_DX_REG_NF4, kname::MATMUL_DX_REG_BF16];
+        let want = [kname::MATMUL_DX_REG_BF16];
         for n in want {
             assert!(registered.contains(&n), "{n} is not registered by frozen_base_kernels()");
         }

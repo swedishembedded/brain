@@ -2966,8 +2966,6 @@ impl Qwen35 {
     /// replay stops after `xn2` and leaves `out` unwritten.
     fn layer_forward(&self, l: usize, xres: &DeviceBuffer, out: &DeviceBuffer, rebuild: bool) -> Option<LayerTrainActs> {
         let g = &self.gpu;
-        // Decode an NF4 base's weights once per layer pass (segments and row chunks share them).
-        let _decoded = self.ops.decoded_weight_scope();
         let n = self.b * self.t;
         let d = self.cfg.d_model;
         let xn1 = g.storage_uninit((n * d) as u64);
@@ -3257,8 +3255,6 @@ impl Qwen35 {
     fn mlp_fwd_rows(&self, prefix: &str, xn2: &DeviceBuffer, n: u32, rows: u32) -> DeviceBuffer {
         let d = self.cfg.d_model;
         let out = self.gpu.storage((n * d) as u64);
-        // The chunks apply the same three weights: decode an NF4 base's once for the whole pass.
-        let _decoded = self.ops.decoded_weight_scope();
         for row0 in (0..n).step_by(rows as usize) {
             let rc = rows.min(n - row0);
             let (chunk_out, _) = self.mlp_fwd(prefix, &self.take_rows(xn2, d, n, row0, rc), rc);
@@ -3280,8 +3276,6 @@ impl Qwen35 {
         let rows = self.mlp_rows.get().expect("qwen35: an MLP saved as rows needs mlp_rows");
         // The row chunks tile all n rows, and each is written whole by put_rows.
         let d_xn2 = self.gpu.storage_uninit((n * d) as u64);
-        // Rebuild and backward of every chunk read the same weights: one decode each for the whole pass.
-        let _decoded = self.ops.decoded_weight_scope();
         for row0 in (0..n).step_by(rows as usize) {
             let rc = rows.min(n - row0);
             let acts = self.mlp_acts_only(prefix, &self.take_rows(xn2, d, n, row0, rc), rc);
@@ -3409,9 +3403,6 @@ impl Qwen35 {
         // Where a recomputed layer writes its (unused) output residual.
         let recompute_out = ta.recomputed.then(|| g.storage((n * d) as u64));
         for l in (self.shard.start..self.shard.end).rev() {
-            // The rebuilt forward and the backward of this layer read the same weights: an NF4 base is decoded once
-            // for both (and shared across the layer's segments and MLP row chunks).
-            let _decoded = self.ops.decoded_weight_scope();
             // This layer's input boundary (decoded into `res[0]` when packed).
             let x = match &self.res_bf16 {
                 Some(packed) => {

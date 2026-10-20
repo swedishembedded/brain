@@ -13,7 +13,7 @@
 //!
 //! # Contract
 //!
-//! * A tier with no float-read kernel of its own (`F16`, `I8`, `Q4`, `KQuant`, `FP8`) is multiplied by
+//! * A tier that is not dense (`F16`, `I8`, `Q4`, `NF4`, `KQuant`, `FP8`, `Micro`) is multiplied by
 //!   decoding a TILE of its rows to f32 (`weight_decode`, one kernel for all tiers, see
 //!   `kernels::template::weight_decode_variants`) and running the dense product on the tile through the
 //!   same entry points an f32 weight takes: the vendor-library TF32 tensor-core GEMM on a device that has
@@ -22,8 +22,8 @@
 //!   chosen from the budget and `k` by [`tile_rows`], never from the size of the tensor: a weight larger
 //!   than the budget is processed in several tiles of one reused scratch. Nothing here allocates a
 //!   full-size copy of a quantized weight.
-//! * `NF4`, `BF16` and `F32` keep their float-read kernels and library paths (`matmul_rows`,
-//!   `matmul_dx_rows`); they are the same contract with a decode folded into the GEMM operand load.
+//! * `BF16` and `F32` are dense: their own kernels and library paths (`matmul_rows`, `matmul_dx_rows`) are the
+//!   same contract with nothing to decode. NF4 is a tile-decoded tier like the rest.
 //! * The weight gradient does not read the weight at all (`dW = dY^T X`); its shape comes from the weight
 //!   and its dtype ([`GradDtype`]) from the caller. An fp32 gradient is one GEMM into the caller's buffer;
 //!   a bf16 gradient is computed per row tile into a bounded fp32 scratch and added with round to nearest
@@ -68,15 +68,12 @@ pub enum LinearPlan {
 /// `bf16_scratch` says the device can decode this tier to bf16 for the library GEMM
 /// ([`gpu_core::provider::library::LibraryGemmProvider::can_dequant_bf16`]).
 ///
-/// `F32` and `BF16` are dense. `NF4` has a float-read kernel (no scratch at all) and, on the library path,
-/// a bf16 decode of the whole window: it stays [`LinearPlan::Native`] while that window fits the budget and
-/// tiles like the other tiers when it does not. Every other tier decodes tiles.
+/// `F32` and `BF16` are dense and keep their kernels and library paths. Every other tier - NF4 included -
+/// decodes tiles.
 pub fn plan_linear(tier: Dtype, rows: u32, k: u32, budget_bytes: u64, bf16_scratch: bool) -> LinearPlan {
-    let tiles = LinearPlan::TileDecode { tile_rows: tile_rows(rows, k, budget_bytes, if bf16_scratch { 2 } else { 4 }), bf16: bf16_scratch };
     match tier {
         Dtype::F32 | Dtype::BF16 => LinearPlan::Native,
-        Dtype::NF4 if !bf16_scratch || rows as u64 * k as u64 * 2 <= budget_bytes => LinearPlan::Native,
-        _ => tiles,
+        _ => LinearPlan::TileDecode { tile_rows: tile_rows(rows, k, budget_bytes, if bf16_scratch { 2 } else { 4 }), bf16: bf16_scratch },
     }
 }
 
@@ -335,13 +332,10 @@ mod tests {
 
     #[test]
     fn native_tiers_keep_their_kernels_and_quantized_tiers_tile_by_budget() {
-        for tier in [Dtype::F32, Dtype::BF16, Dtype::NF4] {
+        for tier in [Dtype::F32, Dtype::BF16] {
             assert_eq!(plan_linear(tier, 1000, 512, 1 << 20, true), LinearPlan::Native, "{tier:?}");
         }
-        // NF4 on the library path tiles once its bf16 window outgrows the budget; without the library it never needs scratch.
-        assert_eq!(plan_linear(Dtype::NF4, 4000, 512, 1 << 20, true), LinearPlan::TileDecode { tile_rows: 1024, bf16: true });
-        assert_eq!(plan_linear(Dtype::NF4, 4000, 512, 1 << 20, false), LinearPlan::Native);
-        for tier in [Dtype::F16, Dtype::I8, Dtype::Q4, Dtype::Q4K, Dtype::Q8K, Dtype::F8E4M3, Dtype::F8E5M2] {
+        for tier in [Dtype::NF4, Dtype::F16, Dtype::I8, Dtype::Q4, Dtype::Q4K, Dtype::Q8K, Dtype::F8E4M3, Dtype::F8E5M2] {
             // 1 MiB of f32 over 512-wide rows is 512 rows per tile; a bf16 scratch fits twice the rows.
             assert_eq!(plan_linear(tier, 1000, 512, 1 << 20, false), LinearPlan::TileDecode { tile_rows: 512, bf16: false }, "{tier:?}");
             assert_eq!(plan_linear(tier, 1000, 512, 1 << 20, true), LinearPlan::TileDecode { tile_rows: 1000, bf16: true }, "{tier:?}");
