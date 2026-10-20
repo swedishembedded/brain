@@ -101,6 +101,7 @@ const WEIGHT_STAGING_BYTES: u64 = 64 << 20;
 pub struct PackedBase {
     src: PackedSource,
     staging: checkpoint::packed::BoundedWorkspace,
+    convert: Option<gpu_core::select::Dtype>,
 }
 
 impl PackedBase {
@@ -108,7 +109,14 @@ impl PackedBase {
     /// [`open_dir`] applies.
     pub fn open(dir: &Path, cfg: &Qwen35Config, block: usize) -> Result<PackedBase, String> {
         let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(WEIGHT_STAGING_BYTES, 0));
-        Ok(PackedBase { src: open_dir(dir, cfg, block)?, staging })
+        Ok(PackedBase { src: open_dir(dir, cfg, block)?, staging, convert: None })
+    }
+
+    /// Convert every weight matrix to `tier` on the way to the device (an explicit, bounded, tiled requantization, e.g.
+    /// FP8 to NF4) instead of preserving the stored encoding.
+    pub fn converting_to(mut self, tier: gpu_core::select::Dtype) -> PackedBase {
+        self.convert = Some(tier);
+        self
     }
 
     /// `name` decoded to f32, in bounded tiles (a small tensor: a norm gain or a conv/gate vector; the `(1+w)`
@@ -122,7 +130,10 @@ impl PackedBase {
     /// The `[n, k]` matrix `name` as a resident weight in the tier of its stored encoding (Preserve: no numeric
     /// change). An encoding with no tier is an error, never a widening.
     pub fn weight(&self, ops: &model::ops::Ops, name: &str, n: usize, k: usize) -> Result<model::ops::Weight, String> {
-        model::ops::upload_preserved(ops, &self.src, name, n, k, &self.staging).map_err(|e| format!("qwen35 source: {e}"))
+        match self.convert {
+            None => model::ops::upload_preserved(ops, &self.src, name, n, k, &self.staging).map_err(|e| format!("qwen35 source: {e}")),
+            Some(tier) => model::ops::upload_from_source(ops, &self.src, name, n, k, tier, &self.staging).ok_or_else(|| format!("qwen35 source: no tensor {name}")),
+        }
     }
 }
 

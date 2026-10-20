@@ -1003,7 +1003,16 @@ impl StreamTrainer {
     /// checkpoint stores them in (FP8 stays FP8 with its block scales), one tile of host staging at a time.
     /// The FP8 block size is the checkpoint's own `weight_block_size`.
     pub fn real_loader<'a>(&'a self, cfg: &'a Qwen35Config, dir: &'a Path) -> Result<impl Fn(usize) -> OwnedStreamedLayer + Sync + 'a, String> {
-        let base = crate::fp8_source::PackedBase::open(dir, cfg, crate::fp8_source::hf_fp8_block_size(dir)?)?;
+        self.real_loader_as(cfg, dir, None)
+    }
+
+    /// [`Self::real_loader`] converting every layer matrix to `convert` (an explicit tiled requantization such as
+    /// FP8 to NF4) instead of keeping the stored encoding.
+    pub fn real_loader_as<'a>(&'a self, cfg: &'a Qwen35Config, dir: &'a Path, convert: Option<Dtype>) -> Result<impl Fn(usize) -> OwnedStreamedLayer + Sync + 'a, String> {
+        let mut base = crate::fp8_source::PackedBase::open(dir, cfg, crate::fp8_source::hf_fp8_block_size(dir)?)?;
+        if let Some(tier) = convert {
+            base = base.converting_to(tier);
+        }
         let (ops, gpu) = (&self.ops, &self.gpu);
         Ok(move |l| load_layer_packed(ops, gpu, &base, cfg, l))
     }
