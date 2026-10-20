@@ -943,11 +943,9 @@ pub struct AdapterSnapshots<'a> {
     pub base_id: &'a str,
     /// The architecture family tag of the card (`"qwen"`).
     pub family: &'a str,
-    /// The adapter's rank, alpha and the projections it covers: whoever
-    /// builds the model fills them in.
-    pub rank: u32,
-    pub alpha: f32,
-    pub targets: Vec<String>,
+    /// The adapter's configuration (rank, alpha, projections, per-target
+    /// overrides, hyper-parameters): whoever builds the model fills it in.
+    pub lora: crate::adapter::device::LoraCfg,
 }
 
 impl AdapterSnapshots<'_> {
@@ -1204,15 +1202,14 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
                 println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, loss, eval_loss);
                 if let Some(snapshots) = &control.snapshots {
                     let path = snapshots.path(step + 1);
-                    crate::lora::device_adapter::save_adapter(
+                    crate::lora::device_adapter::save_lora_with_lineage(
                         path.to_str().expect("utf-8 path"),
                         &model,
-                        snapshots.rank,
-                        snapshots.alpha,
-                        &snapshots.targets,
+                        &snapshots.lora,
                         snapshots.card_id,
                         snapshots.base_id,
                         snapshots.family,
+                        None,
                         None,
                     )?;
                 }

@@ -117,13 +117,12 @@ qwen35moe and deepseek2 alike.
 2. **Three capabilities have real, tested substrate support but no wired
    consumer, and were deliberately left unwired rather than built as
    unreachable code ahead of one:**
-   - **Per-target rank/alpha on the DEVICE family** (qwen3/qwen35/
-     qwen35moe/deepseek2/kronos) - `AdapterPlan`/`AdapterSet::
-     build_planned` exist and are tested on the host substrate
-     (`crates/model/tests/adapter_per_target_rank.rs`), but none of those
-     four crates' `LoraCfg` exposes anything but a single scalar `rank`,
-     so there is no real caller to size mixed-rank device scratch buffers
-     against yet.
+   - ~~Per-target rank/alpha on the DEVICE family~~ - done: `LoraCfg::with_override`
+     gives a target its own rank and/or alpha; parameter lists, the runtime
+     scratch and the trained scale follow `LoraCfg::hp_for`, and the saved file
+     is written uniform (padded to the widest rank, each scale folded into B)
+     so fold, overlay, bank and export read it unchanged. Gated by
+     `adapter_kinds_fd.rs` and `qwen3/tests/adapter_variants.rs`.
    - ~~Device-side LoRA-FA~~ - done: `model::adapter::device::LoraCfg`
      carries `rank_stabilized` (rsLoRA scale), `lr_ratio` (LoRA+) and
      `freeze_a` (LoRA-FA); the qwen3/qwen35/qwen35moe/deepseek2 builds read the

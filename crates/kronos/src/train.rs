@@ -399,7 +399,7 @@ impl KronosTrain {
                 roles.push((name.clone(), numel, paramstore::Role::Frozen));
                 if lc.target_of(&name).is_some() {
                     let (k, nout) = (d, numel / d); // targeted projections are d x k
-                    for (pname, pnumel) in model::adapter::device::param_list(&name, &hp, nout, k) {
+                    for (pname, pnumel) in model::adapter::device::param_list(&name, &lc.adapter.hp_for(&name), nout, k) {
                         let drawn = model::adapter::device::init_of(&pname) == Some(model::adapter::ParamInit::Drawn);
                         init2.entry(pname.clone()).or_insert_with(|| if drawn { (0..pnumel).map(|_| lcg.scaled(0.01)).collect() } else { vec![0.0f32; pnumel] });
                         roles.push((pname.clone(), pnumel, model::adapter::device::role_of(&pname, &hp)));

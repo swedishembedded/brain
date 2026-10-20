@@ -1137,12 +1137,12 @@ pub mod device_adapter {
     use crate::adapter::kind::{LORA_A, LORA_B};
     use crate::Model;
 
-    /// Write only `model`'s `.lora_a`/`.lora_b` tensors - never the frozen
-    /// base - to `path`, carrying a `ModelCard` with `variant_of: base_id`
-    /// and an `Adapter` descriptor, so the adapter is discoverable and
-    /// reloadable without the base's shape being re-derived by guesswork.
-    /// `family` is the `ModelCard`'s architecture tag (e.g. `"qwen"`,
-    /// `"qwen35"`, `"deepseekv2"`).
+    /// Write only `model`'s adapter tensors - never the frozen base - to
+    /// `path`, carrying a `ModelCard` with `variant_of: base_id` and an
+    /// `Adapter` descriptor, so the adapter is discoverable and reloadable
+    /// without the base's shape being re-derived by guesswork. `family` is the
+    /// `ModelCard`'s architecture tag (e.g. `"qwen"`, `"qwen35"`,
+    /// `"deepseekv2"`).
     pub fn save_adapter<M: Model>(
         path: &str,
         model: &M,
@@ -1171,31 +1171,80 @@ pub mod device_adapter {
         dataset_id: Option<&str>,
         training: Option<checkpoint::st::TrainingProvenance>,
     ) -> std::io::Result<()> {
+        let lora = crate::adapter::device::LoraCfg::new(rank, alpha, targets.to_vec());
+        save_lora_with_lineage(path, model, &lora, card_id, base_id, family, dataset_id, training)
+    }
+
+    /// Pad one site's factors to `rank_to` and fold its scale into `B`, so a
+    /// file whose targets differ in rank and alpha reads as one uniform
+    /// adapter (rank `rank_to`, scale 1) in every consumer: the extra rank
+    /// rows of `A` and columns of `B` are zero, which adds nothing to the
+    /// product.
+    fn normalized_pair(a: &[f32], b: &[f32], rank: usize, scale: f32, rank_to: usize) -> (Vec<f32>, Vec<f32>) {
+        let (inn, out) = (a.len() / rank, b.len() / rank);
+        let mut a2 = a.to_vec();
+        a2.resize(rank_to * inn, 0.0);
+        let mut b2 = vec![0.0f32; out * rank_to];
+        for o in 0..out {
+            for k in 0..rank {
+                b2[o * rank_to + k] = b[o * rank + k] * scale;
+            }
+        }
+        (a2, b2)
+    }
+
+    /// [`save_adapter_with_lineage`] for a model built from a [`LoraCfg`]:
+    /// the file carries the scale each target trained with (an rsLoRA scale
+    /// in the card's alpha; targets with their own rank or alpha padded to
+    /// the widest rank with their scale folded into `B`).
+    pub fn save_lora_with_lineage<M: Model>(
+        path: &str,
+        model: &M,
+        lora: &crate::adapter::device::LoraCfg,
+        card_id: &str,
+        base_id: &str,
+        family: &str,
+        dataset_id: Option<&str>,
+        training: Option<checkpoint::st::TrainingProvenance>,
+    ) -> std::io::Result<()> {
+        use crate::adapter::device::{is_adapter_param, shape_of};
+        let uniform = lora.is_uniform();
+        let (rank, alpha) = if uniform { (lora.rank, lora.card_alpha()) } else { (lora.max_rank(), lora.max_rank() as f32) };
         let r = rank as usize;
+        let targets = &lora.targets;
         // The adapter is every adapter tensor the model holds, not only the
         // optimised ones: LoRA-FA's `A` is frozen (it has no
         // gradient, so `param_names` omits it) yet the adapter is not
         // complete, or foldable, without it.
-        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = model
-            .param_names()
+        let names: Vec<String> = model.param_names().into_iter().chain(model.frozen_adapter_param_names()).filter(|n| is_adapter_param(n)).collect();
+        assert!(!names.is_empty(), "save_adapter: no adapter tensors in the param store");
+        let mut data: std::collections::HashMap<String, Vec<f32>> = names.iter().map(|n| (n.clone(), model.read_weight(n))).collect();
+        if !uniform {
+            for base in names.iter().filter_map(|n| n.strip_suffix(LORA_A)).map(str::to_string).collect::<Vec<_>>() {
+                let hp = lora.hp_for(&base);
+                let (an, bn) = (format!("{base}{LORA_A}"), format!("{base}{LORA_B}"));
+                let (a, b) = (data.remove(&an).expect("listed"), data.remove(&bn).unwrap_or_else(|| panic!("save_adapter: {bn} is missing")));
+                let (a2, b2) = normalized_pair(&a, &b, hp.rank, hp.scale(), r);
+                data.insert(an, a2);
+                data.insert(bn, b2);
+            }
+        }
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = names
             .into_iter()
-            .chain(model.frozen_adapter_param_names())
-            .filter(|name| crate::adapter::device::is_adapter_param(name))
             .map(|name| {
-                let data = model.read_weight(&name);
+                let values = data.remove(&name).expect("every listed name has data");
                 // Real 2-D shape, not the flattened `[len]` this used to
-                // write - recovered from `data.len()`/`rank` by the kind's
-                // own definition, since the device family has no other place
-                // a shape could come from.
-                let shape = crate::adapter::device::shape_of(&name, r, data.len())
-                    .unwrap_or_else(|| panic!("save_adapter: {name} holds {} elements, not a whole rank-{r} matrix", data.len()))
+                // write - recovered from `len`/`rank` by the kind's own
+                // definition, since the device family has no other place a
+                // shape could come from.
+                let shape = shape_of(&name, r, values.len())
+                    .unwrap_or_else(|| panic!("save_adapter: {name} holds {} elements, not a whole rank-{r} matrix", values.len()))
                     .into_iter()
                     .map(|d| d as u64)
                     .collect();
-                (name.clone(), shape, data)
+                (name, shape, values)
             })
             .collect();
-        assert!(!tensors.is_empty(), "save_adapter: no adapter tensors in the param store");
 
         let mut card = ModelCard::new(card_id, family);
         card.variant_of = Some(base_id.to_string());

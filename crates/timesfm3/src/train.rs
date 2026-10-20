@@ -287,7 +287,7 @@ fn adapter_roles(cfg: &Timesfm3Config, lc: &LoraCfg) -> Vec<(String, usize, Role
             // a PyTorch `nn.Linear` weight and exactly what `linear` expects.
             let (out, inn) = (shape[0], shape[1]);
             let hp = lc.adapter.hp();
-            for (pname, numel) in model::adapter::device::param_list(&name, &hp, out, inn) {
+            for (pname, numel) in model::adapter::device::param_list(&name, &lc.adapter.hp_for(&name), out, inn) {
                 let role = model::adapter::device::role_of(&pname, &hp);
                 roles.push((pname, numel, role));
             }
@@ -308,7 +308,7 @@ fn seed_adapters(cfg: &Timesfm3Config, lc: &LoraCfg, init: &mut HashMap<String, 
             continue;
         }
         let (out, inn) = (shape[0], shape[1]);
-        for (pname, numel) in model::adapter::device::param_list(&name, &lc.adapter.hp(), out, inn) {
+        for (pname, numel) in model::adapter::device::param_list(&name, &lc.adapter.hp_for(&name), out, inn) {
             let drawn = model::adapter::device::init_of(&pname) == Some(model::adapter::ParamInit::Drawn);
             init.entry(pname).or_insert_with(|| if drawn { (0..numel).map(|_| lcg_next(&mut state) * 0.01).collect() } else { vec![0.0f32; numel] });
         }

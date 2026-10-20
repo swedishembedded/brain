@@ -786,7 +786,7 @@ impl ChatFineTune {
         let snapshots = match &self.evaluations_dir {
             Some(dir) => {
                 std::fs::create_dir_all(dir).map_err(|e| Error::Backend(format!("{}: {e}", dir.display())))?;
-                Some(model::AdapterSnapshots { dir, card_id: &snapshot_card, base_id: &base_id, family: arch.family, rank, alpha, targets: Vec::new() })
+                Some(model::AdapterSnapshots { dir, card_id: &snapshot_card, base_id: &base_id, family: arch.family, lora: model::adapter::device::LoraCfg::new(rank, alpha, Vec::new()) })
             }
             None => None,
         };

@@ -257,7 +257,7 @@ impl DeepseekV2Config {
                 if !lora.targets_leaf(leaf) {
                     continue;
                 }
-                extra.extend(model::adapter::device::param_list(name, &lora.hp(), d, d));
+                extra.extend(model::adapter::device::param_list(name, &lora.hp_for(name), d, d));
             }
             out.extend(extra);
         }

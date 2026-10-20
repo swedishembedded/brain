@@ -112,7 +112,7 @@ impl AdapterRuntime {
     /// Scratch for forwards and backwards of up to `rows` rows through linears
     /// of up to `max_out` outputs.
     pub fn new(gpu: &Gpu, cfg: &LoraCfg, rows: u32, max_out: u32) -> AdapterRuntime {
-        let r = cfg.rank.max(1) as u64;
+        let r = cfg.max_rank().max(1) as u64;
         AdapterRuntime {
             gpu: gpu.share(),
             cfg: cfg.clone(),
@@ -167,7 +167,8 @@ impl AdapterRuntime {
     fn lora_forward(&self, gemm: &LibraryGemmProvider, s: &mut Vec<Step>, p: &dyn ParamAccess, base: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         let (an, bn) = lora_names(base);
         let (a, b) = (p.weight(&an), p.weight(&bn));
-        let (r, scale) = (self.cfg.rank, self.cfg.scale());
+        let hp = self.cfg.hp_for(base);
+        let (r, scale) = (hp.rank as u32, hp.scale());
         let g = &self.gpu;
         let mut lib = Vec::new();
         let tg = gemm;
@@ -194,7 +195,8 @@ impl AdapterRuntime {
         let (a, b) = (p.weight(&an), p.weight(&bn));
         let gb = p.grad(&bn).unwrap_or_else(|| panic!("adapter runtime: {bn} has no gradient buffer"));
         let ga = p.grad(&an);
-        let (r, scale) = (self.cfg.rank, self.cfg.scale());
+        let hp = self.cfg.hp_for(base);
+        let (r, scale) = (hp.rank as u32, hp.scale());
         let g = &self.gpu;
         let mut lib = Vec::new();
         let tg = gemm;

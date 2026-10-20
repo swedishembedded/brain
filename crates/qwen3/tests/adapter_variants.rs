@@ -30,13 +30,34 @@ fn variant() -> LoraCfg {
     }
 }
 
+fn per_target() -> LoraCfg {
+    variant_base().with_override("wq", Some(2), Some(2.0)).with_override("down", Some(4), Some(1.0))
+}
+
+fn variant_base() -> LoraCfg {
+    LoraCfg::new(3, 6.0, ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect())
+}
+
 fn max_diff(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
 }
 
 #[test]
 fn a_variant_adapter_folds_and_overlays_to_the_trained_models_logits() {
-    let cfg = QwenConfig { lora: Some(variant()), ..QwenConfig::tiny() };
+    folds_and_overlays(variant());
+}
+
+/// Targets with their own rank and alpha are written as one uniform adapter
+/// (padded to the widest rank, each scale folded into B), so fold, overlay and
+/// every other reader agree with the live per-target forward.
+#[test]
+fn per_target_rank_and_alpha_fold_and_overlay_to_the_trained_models_logits() {
+    folds_and_overlays(per_target());
+}
+
+fn folds_and_overlays(lora: LoraCfg) {
+    let tag = lora.rank_stabilized as u8 + 2 * lora.overrides.len() as u8;
+    let cfg = QwenConfig { lora: Some(lora), ..QwenConfig::tiny() };
     let init = qwen3::init_weights(&cfg, 21);
     let x: Vec<u32> = (0..12).map(|i| (i * 7 + 1) % 23).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 7 + 2) % 23).collect();
@@ -51,17 +72,23 @@ fn a_variant_adapter_folds_and_overlays_to_the_trained_models_logits() {
     }
     let want = trained.logits_all(&PROMPT);
 
-    let path = std::env::temp_dir().join(format!("brain-qwen3-variants-{}.safetensors", std::process::id()));
+    let path = std::env::temp_dir().join(format!("brain-qwen3-variants-{}-{}.safetensors", std::process::id(), tag));
     let path_str = path.to_str().unwrap();
     qwen3::lora::save_adapter(path_str, &trained, "test/adapter", "test/base", None).unwrap();
 
     // The file carries the trained scale, and the frozen factor is its init.
     let file = model::lora::device_adapter::read_adapter(path_str).unwrap();
     let lora = cfg.lora.as_ref().unwrap();
-    assert!((file.scale() - lora.scale()).abs() < 1e-6, "file scale {} vs trained {}", file.scale(), lora.scale());
-    for site in &file.sites {
-        let a_name = model::adapter::device::param_name(&site.base, model::adapter::kind::LORA_A);
-        assert_eq!(site.a, init[&a_name], "{a_name}: LoRA-FA must leave A at its init");
+    if lora.is_uniform() {
+        assert!((file.scale() - lora.scale()).abs() < 1e-6, "file scale {} vs trained {}", file.scale(), lora.scale());
+    } else {
+        assert_eq!((file.rank, file.alpha), (lora.max_rank(), lora.max_rank() as f32), "a per-target adapter is written at the widest rank, scale 1");
+    }
+    if lora.freeze_a {
+        for site in &file.sites {
+            let a_name = model::adapter::device::param_name(&site.base, model::adapter::kind::LORA_A);
+            assert_eq!(site.a, init[&a_name], "{a_name}: LoRA-FA must leave A at its init");
+        }
     }
 
     let base: std::collections::HashMap<String, Vec<f32>> =

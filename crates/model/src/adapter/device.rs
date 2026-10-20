@@ -126,12 +126,31 @@ pub struct LoraCfg {
     pub lr_ratio: f32,
     /// LoRA-FA: `A` stays at its init and only `B` trains.
     pub freeze_a: bool,
+    /// Targets that take their own rank and/or alpha instead of the shared
+    /// ones, first match wins.
+    pub overrides: Vec<TargetOverride>,
+}
+
+/// One target's own rank and alpha. `leaf` is matched like a target: the whole
+/// name, a trailing dotted suffix of it, or its leaf component.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetOverride {
+    pub leaf: String,
+    pub rank: Option<u32>,
+    pub alpha: Option<f32>,
+}
+
+/// Does `name` (a base weight name, or a bare leaf) belong to `target`?
+fn target_matches(name: &str, target: &str) -> bool {
+    let stem = name.strip_suffix(".weight").unwrap_or(name);
+    let hit = |n: &str| n == target || n.ends_with(&format!(".{target}"));
+    hit(name) || hit(stem)
 }
 
 impl LoraCfg {
     /// Plain LoRA on `targets`.
     pub fn new(rank: u32, alpha: f32, targets: Vec<String>) -> LoraCfg {
-        LoraCfg { rank, alpha, targets, rank_stabilized: false, lr_ratio: 1.0, freeze_a: false }
+        LoraCfg { rank, alpha, targets, rank_stabilized: false, lr_ratio: 1.0, freeze_a: false, overrides: Vec::new() }
     }
 
     /// The default Qwen LoRA target set: the four attention projections.
@@ -141,6 +160,33 @@ impl LoraCfg {
 
     pub fn targets_leaf(&self, leaf: &str) -> bool {
         self.targets.iter().any(|t| t == leaf)
+    }
+
+    /// This config with `leaf` at its own rank and/or alpha.
+    pub fn with_override(mut self, leaf: &str, rank: Option<u32>, alpha: Option<f32>) -> LoraCfg {
+        self.overrides.push(TargetOverride { leaf: leaf.to_string(), rank, alpha });
+        self
+    }
+
+    /// The hyper-parameters of the target `name` (a base weight name or a leaf):
+    /// the shared ones with that target's own rank and alpha applied.
+    pub fn hp_for(&self, name: &str) -> TargetHp {
+        let mut hp = self.hp();
+        if let Some(o) = self.overrides.iter().find(|o| target_matches(name, &o.leaf)) {
+            hp.rank = o.rank.map_or(hp.rank, |r| r as usize);
+            hp.alpha = o.alpha.unwrap_or(hp.alpha);
+        }
+        hp
+    }
+
+    /// The widest rank any target takes: what a scratch buffer is sized for.
+    pub fn max_rank(&self) -> u32 {
+        self.overrides.iter().filter_map(|o| o.rank).fold(self.rank, u32::max)
+    }
+
+    /// Do all targets share one rank and scale?
+    pub fn is_uniform(&self) -> bool {
+        self.overrides.is_empty()
     }
 
     /// The per-target hyper-parameters every kind's schema, scale and groups
@@ -175,6 +221,9 @@ impl LoraCfg {
         if self.freeze_a {
             v["freeze_a"] = true.into();
         }
+        if !self.overrides.is_empty() {
+            v["overrides"] = self.overrides.iter().map(|o| serde_json::json!({ "leaf": o.leaf, "rank": o.rank, "alpha": o.alpha })).collect::<Vec<_>>().into();
+        }
         v
     }
 
@@ -188,6 +237,21 @@ impl LoraCfg {
             rank_stabilized: v.get("rank_stabilized").and_then(Value::as_bool).unwrap_or(false),
             lr_ratio: v.get("lr_ratio").and_then(Value::as_f64).map_or(1.0, |r| r as f32),
             freeze_a: v.get("freeze_a").and_then(Value::as_bool).unwrap_or(false),
+            overrides: v
+                .get("overrides")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|o| {
+                            Some(TargetOverride {
+                                leaf: o.get("leaf")?.as_str()?.to_string(),
+                                rank: o.get("rank").and_then(Value::as_u64).map(|r| r as u32),
+                                alpha: o.get("alpha").and_then(Value::as_f64).map(|a| a as f32),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -235,6 +299,18 @@ mod tests {
         let back = LoraCfg::from_json(tuned.to_json().as_object().unwrap());
         assert_eq!(back, tuned);
         assert_eq!(LoraCfg::from_json(plain.to_json().as_object().unwrap()), plain);
+    }
+
+    #[test]
+    fn a_target_can_take_its_own_rank_and_alpha() {
+        let cfg = LoraCfg::attn(4, 8.0).with_override("wq", Some(2), None).with_override("blocks.0.attn.wk.weight", None, Some(1.0));
+        assert_eq!((cfg.hp_for("blocks.3.attn.wq.weight").rank, cfg.hp_for("blocks.3.attn.wq.weight").scale()), (2, 4.0));
+        assert_eq!(cfg.hp_for("wq").rank, 2, "a bare leaf matches too");
+        assert_eq!(cfg.hp_for("blocks.0.attn.wk.weight").alpha, 1.0);
+        assert_eq!(cfg.hp_for("blocks.1.attn.wk.weight").alpha, 8.0, "another layer's wk keeps the shared alpha");
+        assert_eq!(cfg.hp_for("blocks.0.attn.wv.weight").rank, 4);
+        assert_eq!((cfg.max_rank(), cfg.is_uniform()), (4, false));
+        assert_eq!(LoraCfg::from_json(cfg.to_json().as_object().unwrap()), cfg);
     }
 
     #[test]

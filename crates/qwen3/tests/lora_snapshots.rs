@@ -87,9 +87,7 @@ fn every_evaluation_of_a_lora_run_leaves_a_loadable_adapter() {
             card_id: "test:adapter",
             base_id: "test:base",
             family: "qwen",
-            rank: 3,
-            alpha: 6.0,
-            targets: LoraCfg::attn(3, 6.0).targets,
+            lora: LoraCfg::attn(3, 6.0),
         }),
         ..Default::default()
     };

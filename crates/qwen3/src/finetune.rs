@@ -643,9 +643,7 @@ pub fn finetune_lora_controlled(
     // The adapter files the run writes at its evaluations are of the shape it
     // builds.
     if let (Some(snapshots), Some(lora)) = (control.snapshots.as_mut(), cfg.lora.as_ref()) {
-        snapshots.rank = lora.rank;
-        snapshots.alpha = lora.card_alpha();
-        snapshots.targets = lora.targets.clone();
+        snapshots.lora = lora.clone();
     }
     // A LoRA build never offloads its moments (outside any `with_adam_offloaded`
     // scope the default is the device).
