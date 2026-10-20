@@ -1120,8 +1120,9 @@ impl ComputeSet {
     /// top of [`Self::apply_backend`], sizes the rayon pool to the selected
     /// core count and pins the process's CPU affinity to those cores, so
     /// `cpu21` really is one core rather than one core's worth of threads
-    /// spread over the machine. Called once at start-up, before any model is
-    /// built, so every later `Gpu::new()` and every rayon pool observes it.
+    /// spread over the machine. For a program's start-up, before any model is
+    /// built (the CLI, `appopts`), so every later `Gpu::new()` and rayon loop
+    /// observes it; the SDK, a library, applies only [`Self::apply_backend`].
     ///
     /// Note this bounds **compute**, not memory: host RAM and disk remain
     /// available as cache/spill tiers regardless.
@@ -1130,11 +1131,14 @@ impl ComputeSet {
         self.apply_backend()?;
 
         if self.cpu_enabled() {
-            // Only override when the user narrowed the CPU; otherwise respect an
-            // existing RAYON_NUM_THREADS.
+            // Only override when the user narrowed the CPU; otherwise the pool keeps
+            // its default size (which honours an inherited RAYON_NUM_THREADS). The
+            // pool is sized through its own API, not the process environment; a
+            // pool something already built keeps its size and the pinning still
+            // bounds the cores it runs on.
             let total = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
             if self.cpu_cores.len() < total {
-                std::env::set_var("RAYON_NUM_THREADS", self.cpu_cores.len().to_string());
+                let _ = backend_cpu::par::set_global_threads(self.cpu_cores.len());
                 pin_to_cores(&self.cpu_cores)?;
             }
         }

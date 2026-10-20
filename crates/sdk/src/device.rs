@@ -19,7 +19,12 @@ pub(crate) fn resolve(device: &Device) -> Result<gpu_core::devices::ComputeSet> 
     let probe = gpu_core::Inventory::probe();
     let mut set = device.resolve(&probe).map_err(Error::Backend)?;
     gpu_core::devices::apply_requested_backend(&mut set).map_err(Error::Backend)?;
-    set.apply().map_err(Error::Backend)?;
+    // Not `ComputeSet::apply`: narrowing the CPU pins the whole process to the
+    // chosen cores and sizes the global pool, which is for a program's start-up
+    // (the CLI, `appopts`), not for a library building a pipeline among other
+    // threads. The backend and the card pin are applied; CPU cores stay the
+    // process's.
+    set.apply_backend().map_err(Error::Backend)?;
     gpu_core::publish_compute_set(set.clone());
     Ok(set)
 }

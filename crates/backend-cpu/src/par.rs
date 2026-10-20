@@ -10,7 +10,7 @@
 //! image-row post-processing) belong to the same pool under the same policy.
 //! Before this module, six crates depended on rayon directly and each ad-hoc
 //! `par_iter` ran on a pool nobody owned: thread-count policy (`--device cpu0-7`
-//! pins affinity and sizes the pool via `RAYON_NUM_THREADS`) only holds if
+//! pins affinity and sizes the pool, see [`set_global_threads`]) only holds if
 //! every parallel loop goes through the scheduler that honours it.
 //!
 //! The API is deliberately domain-shaped (rows of `f32`, tensor lists) rather
@@ -31,10 +31,18 @@ pub fn rows_mut(buf: &mut [f32], row_len: usize, f: impl Fn(usize, &mut [f32]) +
 /// Run `f` with the CPU backend's parallel loops confined to a pool of `threads`
 /// threads (its own, dropped on return), however many cores the machine has.
 /// A model whose kernels are a few hundred elements wide spends its time waking
-/// and spinning a pool sized for a large one: a tiny training loop that does 6 s
-/// of arithmetic used 12 CPU-minutes on 56 threads. For tests and small jobs.
+/// and spinning a pool sized for a large one: a tiny training loop burned
+/// hundreds of times its arithmetic in CPU time on a wide machine. For tests and
+/// small jobs.
 pub fn with_threads<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
     rayon::ThreadPoolBuilder::new().num_threads(threads.max(1)).build().expect("a rayon pool").install(f)
+}
+
+/// Size the process-wide pool the parallel loops run in, before anything has used
+/// it. This replaces setting `RAYON_NUM_THREADS`, which is process-global state
+/// and which no running pool re-reads. Errs when the pool already exists.
+pub fn set_global_threads(threads: usize) -> Result<(), String> {
+    rayon::ThreadPoolBuilder::new().num_threads(threads.max(1)).build_global().map_err(|e| format!("the CPU pool is already built: {e}"))
 }
 
 /// [`rows_mut`] over any `Send` element type - the shape of a loop whose
