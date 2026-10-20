@@ -320,11 +320,41 @@ fn the_f32_product_covers_every_transpose_and_accumulates() {
         let (ab, bb, cb) = (gpu.storage_init("a", &a), gpu.storage_init("b", &b), gpu.storage_init("c", &c0));
         let whole = |buf| Operand { buf, range: (0, 0) };
         let mut steps = Vec::new();
-        let p = F32Product { m: m as u32, n: n as u32, k: k as u32, trans_a, trans_b, alpha: 0.5, beta: 1.0 };
+        let p = F32Product { m: m as u32, n: n as u32, k: k as u32, trans_a, trans_b, alpha: 0.5, beta: 1.0, tf32: false };
         assert!(provider.gemm_f32(&gpu, &mut steps, &whole(&ab), &whole(&bb), &whole(&cb), p));
         gpu.submit(&[], &steps);
         let got = gpu.read(&cb, m * n);
         let worst = got.iter().zip(&want).map(|(g, w)| (*g as f64 - w).abs()).fold(0.0, f64::max);
         assert!(worst < 1e-4, "trans_a={trans_a} trans_b={trans_b}: worst error {worst}");
     }
+}
+
+/// The TF32 form of the same product rounds each operand to 10 mantissa bits (a relative error of 2^-11 each) and
+/// accumulates in fp32: against the f64 oracle the error stays within a few of those roundings of the result's
+/// scale, and it differs from the exact form (the flag is honoured, not ignored).
+#[test]
+fn the_tf32_f32_product_stays_within_operand_rounding_of_the_oracle() {
+    let Some(gpu) = open() else { return };
+    let provider = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
+    if !provider.is_active() {
+        return;
+    }
+    let (m, n, k) = (96usize, 16usize, 256usize);
+    let a = values(m * k, 1.0, 11);
+    let b = values(n * k, 1.0, 12);
+    let want: Vec<f64> = (0..m * n).map(|x| (0..k).map(|t| a[(x / n) * k + t] as f64 * b[(x % n) * k + t] as f64).sum::<f64>()).collect();
+    let rms = (want.iter().map(|w| w * w).sum::<f64>() / want.len() as f64).sqrt();
+    let run = |tf32: bool| {
+        let (ab, bb, cb) = (gpu.storage_init("a", &a), gpu.storage_init("b", &b), gpu.storage(m as u64 * n as u64));
+        let whole = |buf| Operand { buf, range: (0, 0) };
+        let mut steps = Vec::new();
+        let p = F32Product { m: m as u32, n: n as u32, k: k as u32, trans_a: false, trans_b: true, alpha: 1.0, beta: 0.0, tf32 };
+        assert!(provider.gemm_f32(&gpu, &mut steps, &whole(&ab), &whole(&bb), &whole(&cb), p));
+        gpu.submit(&[], &steps);
+        let got = gpu.read(&cb, m * n);
+        got.iter().zip(&want).map(|(g, w)| (*g as f64 - w).abs()).fold(0.0, f64::max) / rms
+    };
+    let (exact, tf32) = (run(false), run(true));
+    assert!(exact < 1e-5, "the exact form drifted: {exact}");
+    assert!(tf32 > 10.0 * exact && tf32 < 3e-3, "TF32 error {tf32} (exact {exact}) should sit at operand-rounding scale");
 }

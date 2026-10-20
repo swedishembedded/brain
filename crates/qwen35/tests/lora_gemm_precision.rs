@@ -7,9 +7,9 @@
 // can procure our services by sending an email to info@swedishembedded.com.
 
 //! The tensor-core GEMM tier agrees with the fp32 reference tier on the same
-//! tiny model: the LoRA products run in fp32 on the library (so an fp32 base
-//! differs only by summation order), and a bf16 or NF4 base additionally rounds
-//! its activation operand to bf16. On a device without the library the
+//! tiny model: the LoRA products run on the library with TF32 operands and fp32
+//! accumulation, and a bf16 or NF4 base additionally rounds its activation operand
+//! to bf16. On a device without the library the
 //! automatic tier is the reference tier, so the comparison is trivially exact
 //! and the reported path says why.
 

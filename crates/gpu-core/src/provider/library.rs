@@ -502,12 +502,16 @@ pub struct F32Product {
     pub alpha: f32,
     /// Scale of the existing `C`: 0 overwrites, 1 accumulates.
     pub beta: f32,
+    /// Round both operands to TF32 (10 mantissa bits) and run on tensor cores, accumulating in fp32. Off: no
+    /// operand is rounded and the product runs on the fp32 CUDA cores.
+    pub tf32: bool,
 }
 
 impl LibraryGemmProvider {
-    /// A row-major fp32 product with fp32 accumulation, no rounding of any
-    /// operand: the small low-rank products of a LoRA adapter, whose serial
-    /// kernels were the training step's second-largest cost. `false` (nothing
+    /// A row-major fp32 product with fp32 accumulation: the small low-rank
+    /// products of a LoRA adapter, whose serial kernels were the training
+    /// step's second-largest cost. Operands are rounded only when
+    /// [`F32Product::tf32`] asks for the tensor cores. `false` (nothing
     /// pushed) when this device runs the fp32 kernels.
     pub fn gemm_f32(&self, gpu: &Gpu, steps: &mut Vec<Step>, a: &Operand, b: &Operand, c: &Operand, p: F32Product) -> bool {
         if !self.is_active() || p.m == 0 || p.n == 0 || p.k == 0 {
@@ -534,7 +538,7 @@ impl LibraryGemmProvider {
             stride_a: 0,
             stride_b: 0,
             stride_c: 0,
-            tf32: false,
+            tf32: p.tf32,
         };
         match gpu.step_library_gemm(&gemm, &[b.buf, a.buf, c.buf], &[b.range, a.range, c.range]) {
             Some(step) => {

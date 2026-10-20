@@ -17,8 +17,8 @@
 //! The runtime reads only the fp32 activation `x` and the incoming gradient, so
 //! it is independent of how the base weight is stored: an f32, bf16, NF4 or
 //! int8 base all run through the same code, and mixed formats across linears
-//! need nothing special. Kernel choice (library fp32 GEMMs where the device has
-//! them, else the register-tiled or reference kernels by shape) is made here
+//! need nothing special. Kernel choice (library GEMMs with TF32 operands where the tier has
+//! tensor cores, else the register-tiled or reference kernels by shape) is made here
 //! once, not in each model.
 //!
 //! Which adapter kind runs is [`DeviceKind`]: a new kind is one more arm in
@@ -256,7 +256,7 @@ impl AdapterRuntime {
         }
     }
 
-    /// `mid = x A^t`, then `y += scale * mid B^t`: fp32 library products where
+    /// `mid = x A^t`, then `y += scale * mid B^t`: library products (TF32 operands, fp32 accumulation) where
     /// the device has them, else the serial kernels (the workgroup-per-output
     /// GEMV for the first product where the device runs it, since at decode
     /// `m = 1` the naive kernel would run `r` threads down a long serial loop).
@@ -269,8 +269,8 @@ impl AdapterRuntime {
         let g = &self.gpu;
         let mut lib = Vec::new();
         let tg = gemm;
-        let ok = tg.gemm_f32(g, &mut lib, &whole(x), &whole(a), &whole(&self.mid), F32Product { m, n: r, k, trans_a: false, trans_b: true, alpha: 1.0, beta: 0.0 })
-            && tg.gemm_f32(g, &mut lib, &whole(&self.mid), &whole(b), &whole(y), F32Product { m, n: nout, k: r, trans_a: false, trans_b: true, alpha: scale, beta: 1.0 });
+        let ok = tg.gemm_f32(g, &mut lib, &whole(x), &whole(a), &whole(&self.mid), F32Product { m, n: r, k, trans_a: false, trans_b: true, alpha: 1.0, beta: 0.0, tf32: true })
+            && tg.gemm_f32(g, &mut lib, &whole(&self.mid), &whole(b), &whole(y), F32Product { m, n: nout, k: r, trans_a: false, trans_b: true, alpha: scale, beta: 1.0, tf32: true });
         if ok {
             s.append(&mut lib);
             return;
@@ -297,7 +297,7 @@ impl AdapterRuntime {
         let g = &self.gpu;
         let mut lib = Vec::new();
         let tg = gemm;
-        let pr = |m, n, k, trans_a, trans_b, alpha, beta| F32Product { m, n, k, trans_a, trans_b, alpha, beta };
+        let pr = |m, n, k, trans_a, trans_b, alpha, beta| F32Product { m, n, k, trans_a, trans_b, alpha, beta, tf32: true };
         let ok = tg.gemm_f32(g, &mut lib, &whole(x), &whole(a), &whole(&self.mid), pr(m, r, k, false, true, scale, 0.0))
             && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(&self.mid), &whole(gb), pr(nout, r, m, true, false, 1.0, 1.0))
             && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(b), &whole(&self.dmid), pr(m, r, nout, false, false, scale, 0.0))
