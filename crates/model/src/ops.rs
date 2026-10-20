@@ -1113,7 +1113,9 @@ impl Drop for DecodedWeightScope<'_> {
     }
 }
 
+mod sink;
 mod tiled;
+pub use sink::DeviceWeightSink;
 pub use tiled::{plan_linear, tile_rows, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES};
 
 /// A library-path weight: the buffer, the byte range to bind, steps that must run first and the scratch they use.
