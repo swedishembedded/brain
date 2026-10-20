@@ -49,34 +49,63 @@ fn values(n: usize, scale: f32, salt: u32) -> Vec<f32> {
         .collect()
 }
 
+/// A spread of output positions of an oracle: the oracle is exact f64 over the full reduction, but only
+/// for these positions (at most `PICKS`, strided so every row and column of a large product is hit), which
+/// keeps a 5120-deep product over a 512x2048 output from costing minutes of unoptimised host arithmetic.
+const PICKS: usize = 4096;
+
+struct Sampled {
+    index: Vec<usize>,
+    want: Vec<f64>,
+}
+
+impl Sampled {
+    /// `value(i)` at the picked positions of a `total`-element output.
+    fn of(total: usize, value: impl Fn(usize) -> f64) -> Sampled {
+        let step = (total / PICKS).max(1) | 1;
+        let mut index: Vec<usize> = (0..total).step_by(step).collect();
+        index.push(total - 1);
+        let want = index.iter().map(|&i| value(i)).collect();
+        Sampled { index, want }
+    }
+
+    fn scaled(&self, factor: f64) -> Sampled {
+        Sampled { index: self.index.clone(), want: self.want.iter().map(|v| v * factor).collect() }
+    }
+
+    fn got(&self, full: &[f32]) -> Vec<f64> {
+        self.index.iter().map(|&i| full[i] as f64).collect()
+    }
+
+    fn worst_relative_to_rms(&self, full: &[f32]) -> f64 {
+        let worst = self.got(full).iter().zip(&self.want).map(|(g, w)| (g - w).abs()).fold(0.0, f64::max);
+        worst / rms(&self.want)
+    }
+}
+
 /// `out[m, n] = x[m, k] @ w[n, k]^T` in f64 over the bf16-rounded activation.
-fn forward_oracle(x: &[f32], w: &[f32], m: usize, n: usize, k: usize) -> Vec<f64> {
-    (0..m * n)
-        .map(|i| {
-            let (r, c) = (i / n, i % n);
-            (0..k).map(|t| round_bf16(x[r * k + t]) as f64 * w[c * k + t] as f64).sum()
-        })
-        .collect()
+fn forward_oracle(x: &[f32], w: &[f32], m: usize, n: usize, k: usize) -> Sampled {
+    Sampled::of(m * n, |i| {
+        let (r, c) = (i / n, i % n);
+        (0..k).map(|t| round_bf16(x[r * k + t]) as f64 * w[c * k + t] as f64).sum()
+    })
 }
 
 /// `dx[m, k] = dy[m, n] @ w[n, k]` in f64 over the bf16-rounded gradient.
-fn dx_oracle(dy: &[f32], w: &[f32], m: usize, n: usize, k: usize) -> Vec<f64> {
-    (0..m * k)
-        .map(|i| {
-            let (r, c) = (i / k, i % k);
-            (0..n).map(|t| round_bf16(dy[r * n + t]) as f64 * w[t * k + c] as f64).sum()
-        })
-        .collect()
+fn dx_oracle(dy: &[f32], w: &[f32], m: usize, n: usize, k: usize) -> Sampled {
+    Sampled::of(m * k, |i| {
+        let (r, c) = (i / k, i % k);
+        (0..n).map(|t| round_bf16(dy[r * n + t]) as f64 * w[t * k + c] as f64).sum()
+    })
 }
 
 fn rms(v: &[f64]) -> f64 {
     (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt()
 }
 
-fn assert_close(got: &[f32], want: &[f64], what: &str) {
-    let bar = 1e-2 * rms(want);
-    let worst = got.iter().zip(want).map(|(g, w)| (*g as f64 - w).abs()).fold(0.0, f64::max);
-    assert!(worst <= bar, "{what}: worst error {worst} exceeds 1e-2 of the output RMS ({bar})");
+fn assert_close(got: &[f32], want: &Sampled, what: &str) {
+    let rel = want.worst_relative_to_rms(got);
+    assert!(rel <= 1e-2, "{what}: worst error is {rel} of the output RMS (bar 1e-2)");
 }
 
 fn open() -> Option<Gpu> {
@@ -128,20 +157,20 @@ fn the_library_forward_and_dx_agree_with_an_f64_oracle() {
         let mut steps = Vec::new();
         assert!(provider.dx(&gpu, &mut steps, &whole(&dyb), &whole(&wb), &whole(&dxb), m, n, k, true));
         gpu.submit(&[], &steps);
-        let twice: Vec<f64> = want.iter().map(|v| 2.0 * v).collect();
+        let twice = want.scaled(2.0);
         assert_close(&gpu.read(&dxb, mu * ku), &twice, &format!("accumulating dx {m}x{n}x{k}"));
     }
 }
 
-/// `out[m, n] = x[m, k] @ w[n, k]^T` in f64 over unrounded fp32 operands.
-fn forward_exact(x: &[f32], w: &[f32], m: usize, n: usize, k: usize) -> Vec<f64> {
-    (0..m * n).map(|i| (0..k).map(|t| x[(i / n) * k + t] as f64 * w[(i % n) * k + t] as f64).sum()).collect()
+/// `out[m, n] = x[m, k] @ w[n, k]^T` in f64 over unrounded fp32 operands (sampled, see [`Sampled`]).
+fn forward_exact(x: &[f32], w: &[f32], m: usize, n: usize, k: usize) -> Sampled {
+    Sampled::of(m * n, |i| (0..k).map(|t| x[(i / n) * k + t] as f64 * w[(i % n) * k + t] as f64).sum())
 }
 
 /// The default (Auto) tier multiplies fp32-stored weights and activations on tensor cores with no
 /// copy of either: its error against the exact product is the operands' 10-bit mantissa
 /// (about 2^-11 relative each), far below the bf16 tier's, and the plain fp32 tier stays
-/// exact. Forward and dx, over the 8B's projection shapes (k = 4096 and 12288).
+/// exact. Forward and dx, over reduced 8B projection shapes (k = 4096 and 12288).
 #[test]
 fn the_tf32_tier_multiplies_fp32_operands_within_tf32_rounding() {
     let Some(gpu) = open() else { return };
@@ -151,7 +180,7 @@ fn the_tf32_tier_multiplies_fp32_operands_within_tf32_rounding() {
         return;
     }
     assert!(!LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Fp32Reference).tf32_enabled(), "the pinned reference tier must never take TF32");
-    for &(m, n, k) in &[(8u32, 4096u32, 4096u32), (512, 12288, 4096), (300, 4096, 12288), (64, 1024, 4096)] {
+    for &(m, n, k) in &[(8u32, 4096u32, 4096u32), (512, 2048, 4096), (300, 1024, 12288), (64, 1024, 4096)] {
         let (mu, nu, ku) = (m as usize, n as usize, k as usize);
         let w = values(nu * ku, 0.05, 11);
         let x = values(mu * ku, 1.0, 12);
@@ -162,9 +191,7 @@ fn the_tf32_tier_multiplies_fp32_operands_within_tf32_rounding() {
         assert!(provider.forward_tf32(&gpu, &mut steps, &whole(&xb), &whole(&wb), &whole(&yb), m, n, k), "tf32 forward {m}x{n}x{k} declined");
         gpu.submit(&[], &steps);
         let want = forward_exact(&x, &w, mu, nu, ku);
-        let got = gpu.read(&yb, mu * nu);
-        let worst = got.iter().zip(&want).map(|(g, w)| (*g as f64 - w).abs()).fold(0.0, f64::max);
-        let rel = worst / rms(&want);
+        let rel = want.worst_relative_to_rms(&gpu.read(&yb, mu * nu));
         assert!(rel <= 4e-3, "tf32 forward {m}x{n}x{k}: worst error is {rel} of the output RMS");
         assert!(rel >= 1e-6, "tf32 forward {m}x{n}x{k}: error {rel} is fp32-exact, so the TF32 path did not run");
 
@@ -172,10 +199,9 @@ fn the_tf32_tier_multiplies_fp32_operands_within_tf32_rounding() {
         let mut steps = Vec::new();
         assert!(provider.dx_tf32(&gpu, &mut steps, &whole(&dyb), &whole(&wb), &whole(&dxb), m, n, k, false), "tf32 dx {m}x{n}x{k} declined");
         gpu.submit(&[], &steps);
-        let want: Vec<f64> = (0..mu * ku).map(|i| (0..nu).map(|t| dy[(i / ku) * nu + t] as f64 * w[t * ku + i % ku] as f64).sum()).collect();
-        let got = gpu.read(&dxb, mu * ku);
-        let worst = got.iter().zip(&want).map(|(g, w)| (*g as f64 - w).abs()).fold(0.0, f64::max);
-        assert!(worst / rms(&want) <= 4e-3, "tf32 dx {m}x{n}x{k}: worst error is {} of the output RMS", worst / rms(&want));
+        let want = Sampled::of(mu * ku, |i| (0..nu).map(|t| dy[(i / ku) * nu + t] as f64 * w[t * ku + i % ku] as f64).sum());
+        let rel = want.worst_relative_to_rms(&gpu.read(&dxb, mu * ku));
+        assert!(rel <= 4e-3, "tf32 dx {m}x{n}x{k}: worst error is {rel} of the output RMS");
     }
 }
 

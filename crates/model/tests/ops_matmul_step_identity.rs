@@ -28,6 +28,7 @@
 //! caller of `Ops::matmul` itself goes through, untouched by this move.
 
 use gpu_core::select::Dtype;
+use gpu_core::provider::library::GemmPrecision;
 use gpu_core::{Gpu, Step};
 use gpu_core::provider::ProviderRegistry;
 use gpu_core::select::{self, KernelSelector};
@@ -46,7 +47,10 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
 /// (`gpu-core`'s `cuda_provider_matmul`).
 fn reference_ops(gpu: Gpu) -> Ops {
     let selector: Arc<dyn KernelSelector> = Arc::new(select::CachedSelector::new(select::DefaultSelector));
-    Ops::with_providers(gpu, ProviderRegistry::reference(selector)).expect("Ops::with_providers")
+    let mut ops = Ops::with_providers(gpu, ProviderRegistry::reference(selector)).expect("Ops::with_providers");
+    // These tests state exact (bit-identical or finite-difference) properties: the fp32 reference tier.
+    ops.set_gemm_precision(GemmPrecision::Fp32Reference);
+    ops
 }
 
 fn idx(g: &Gpu, name: &str) -> usize {

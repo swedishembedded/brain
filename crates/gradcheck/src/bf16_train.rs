@@ -150,7 +150,9 @@ struct Harness {
 impl Harness {
     fn new(seed: u64) -> Harness {
         let g = gpu_core::testgpu::dev(kernel_list());
-        let ops = Ops::new(g.share()).expect("Ops::new: full facade kernel set must be registered");
+        let mut ops = Ops::new(g.share()).expect("Ops::new: full facade kernel set must be registered");
+        // A gradient check differentiates the exact arithmetic: the fp32 reference tier.
+        ops.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
         let mut rng = Rng::new(seed ^ 0xB10);
         let mut init = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.next_f32() - 0.5).collect() };
         let x = init((M * K) as usize);
@@ -319,7 +321,8 @@ pub fn bf16_training_sanity(seed: u64, steps: usize, lr: f32) -> (Vec<f32>, Vec<
 
 fn run_sgd(seed: u64, steps: usize, lr: f32, dt: Dtype) -> Vec<f32> {
     let g = gpu_core::testgpu::dev(kernel_list());
-    let ops = Ops::new(g.share()).expect("Ops::new: full facade kernel set must be registered");
+    let mut ops = Ops::new(g.share()).expect("Ops::new: full facade kernel set must be registered");
+    ops.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
     let mut rng = Rng::new(seed ^ 0x5A11); // SAME seed for both dtypes - identical init/target/x.
     let mut init = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.next_f32() - 0.5).collect() };
     let x = init((M * K) as usize);

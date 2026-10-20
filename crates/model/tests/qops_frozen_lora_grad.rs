@@ -41,8 +41,11 @@ const O: usize = 64;
 const RANK: usize = 4;
 const LORA_SCALE: f32 = 0.5;
 
+/// The exact fp32 reference tier: the oracle tolerances of the first tests are stated against it.
 fn ops() -> Ops {
-    Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new")
+    let mut ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
+    ops.set_gemm_precision(GemmPrecision::Fp32Reference);
+    ops
 }
 
 fn upload_u32(g: &Gpu, data: &[u32]) -> DeviceBuffer {

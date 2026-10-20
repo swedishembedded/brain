@@ -23,6 +23,7 @@
 
 use data::rng::Lcg;
 use gpu_core::select::Dtype;
+use gpu_core::provider::library::GemmPrecision;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::lut4::{dequantize_weight_lut4, quantize_weight_lut4, NF4_LUT};
 use model::ops::{training_kernel_list, Ops, TierPolicy, Weight};
@@ -55,7 +56,10 @@ fn assert_close(got: &[f32], want: &[f64], what: &str) {
 }
 
 fn ops() -> Ops {
-    Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new")
+    let mut ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
+    // These tests state exact (bit-identical or finite-difference) properties: the fp32 reference tier.
+    ops.set_gemm_precision(GemmPrecision::Fp32Reference);
+    ops
 }
 
 fn forward(ops: &Ops, w: &Weight, x: &DeviceBuffer, xr0: u32, m: u32) -> Vec<f32> {

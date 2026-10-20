@@ -1075,9 +1075,10 @@ pub struct Ops {
     /// which of this façade's other methods are deliberately outside it.
     providers: ProviderRegistry,
     /// bf16-weight GEMMs on the vendor library's tensor cores, or the decline
-    /// that sends them to the fp32 kernels. Starts pinned to the fp32
-    /// reference tier: only a trainer that states a [`GemmPrecision`] (see
-    /// [`Ops::set_gemm_precision`]) trades fp32 activations for bf16 ones.
+    /// that sends them to the fp32 kernels. Starts at [`GemmPrecision::Auto`]
+    /// (tensor cores wherever the device has them, by default); gradient
+    /// checks and parity gates pin [`GemmPrecision::Fp32Reference`] through
+    /// [`Ops::set_gemm_precision`].
     gemm: LibraryGemmProvider,
     /// NF4 weights decoded to bf16 for the library path, kept while a [`DecodedWeightScope`] is open.
     decoded: Mutex<DecodedWeights>,
@@ -1213,7 +1214,7 @@ impl Ops {
             })?;
             idx.insert(name, i);
         }
-        let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Fp32Reference);
+        let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
         Ok(Ops { gpu, caps, idx, selector, providers, gemm, decoded: Mutex::new(DecodedWeights::default()), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new() })
     }
 

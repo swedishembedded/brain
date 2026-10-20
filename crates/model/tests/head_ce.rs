@@ -22,6 +22,7 @@ use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::head_ce::{HeadCe, HeadCeConfig, HeadKernels, IGNORE};
 use model::lut4::{dequantize_weight_lut4, quantize_weight_lut4, NF4_LUT};
+use gpu_core::provider::library::GemmPrecision;
 use model::ops::{training_kernel_list, Ops, Weight};
 
 fn all_kernels() -> &'static [(&'static str, &'static str)] {
@@ -30,7 +31,10 @@ fn all_kernels() -> &'static [(&'static str, &'static str)] {
 }
 
 fn ops() -> Ops {
-    Ops::new(Gpu::new(all_kernels())).expect("Ops::new")
+    let mut ops = Ops::new(Gpu::new(all_kernels())).expect("Ops::new");
+    // These tests state exact (bit-identical or finite-difference) properties: the fp32 reference tier.
+    ops.set_gemm_precision(GemmPrecision::Fp32Reference);
+    ops
 }
 
 /// What the head weight holds after the tier's rounding, as f32 `[v, d]`.
