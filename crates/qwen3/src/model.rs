@@ -26,10 +26,11 @@ use serde_json::Value;
 
 use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use model::adapter::exec::AdapterRuntime;
 use model::adapter::sites::LoraSites;
 use model::block::{self, Gqa, KernelIds};
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
-use gpu_core::provider::library::{F32Product, GemmPrecision, Operand};
+use gpu_core::provider::library::GemmPrecision;
 use model::ops::{Act, Ops, Weight};
 pub use model::Shard;
 use optim::Optim;
@@ -86,7 +87,6 @@ const GRADNORM_SQ: usize = 25;
 const GRAD_SCALE: usize = 26;
 const CLIP_COEF: usize = 27;
 const GRAD_SCALE_BUF: usize = 28;
-const AXPY: usize = 29;
 const EMBED_TILE: usize = 30;
 const MATMUL_DX_REG: usize = 32;
 const MATMUL_DW_REG: usize = 33;
@@ -411,11 +411,6 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
     })
 }
 
-/// The whole-buffer operand of a library product (every operand binds whole).
-fn whole(buf: &DeviceBuffer) -> Operand<'_> {
-    Operand { buf, range: (0, 0) }
-}
-
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
 /// `[m,k]·[n,k]ᵀ`. Delegates to `model::block::pick_gemm` (B2: a thin adapter
 /// over `backend_api::select::candidates`, whose `GEMM_TILE_MIN_ROWS`/
@@ -690,9 +685,9 @@ pub struct Qwen {
     inv: DeviceBuffer,
 
     // LoRA scratch (sized for rank `r`; trivially small when LoRA is off).
-    lora_a: DeviceBuffer,   // [n*r] : a = x @ A^T
-    lora_da: DeviceBuffer,  // [n*r] : grad wrt a
-    lora_out: DeviceBuffer, // [n*max_out] : delta = a @ B^T
+    /// The trainable adapter's execution (forward correction, backward), when
+    /// `cfg.lora` is set.
+    adapter: Option<AdapterRuntime>,
     /// What the forward applies in place of this build's own adapter state
     /// ([`Self::attach_adapter`], [`Self::bypass_adapter`]); `None` applies
     /// the build's own: nothing on a plain build, `cfg.lora`'s trainable
@@ -883,16 +878,6 @@ enum AdapterOverride {
     Lora(AttachedLora),
     /// Apply no adapter at all: exactly the base weights.
     BaseOnly,
-}
-
-/// One linear's low-rank correction as the forward consumes it, whichever
-/// store it lives in.
-enum LoraSite<'a> {
-    /// A LoRA build's own trainable pair, `A [r, in]` and unscaled `B [out, r]`
-    /// - the layout its backward differentiates.
-    Trainable { a: &'a DeviceBuffer, b: &'a DeviceBuffer, rank: u32, scale: f32 },
-    /// An attached adapter's runtime correction.
-    Attached { lora: &'a model::dispatch::LoraW, xa: &'a DeviceBuffer, delta_kernel: usize },
 }
 
 impl Qwen {
@@ -1310,9 +1295,9 @@ impl Qwen {
         // `inv` must hold the per-row RMS for the largest norm: QK-norm-q has
         // n*n_heads rows (>= n*n_kv and >= n).
         let inv_rows = n * cfg.n_heads as u64;
-        // LoRA scratch (rank r; max projection output across all sites).
-        let r = cfg.lora.as_ref().map(|l| l.rank as u64).unwrap_or(0).max(1);
+        // The widest projection output across all adapter sites.
         let max_out = hq.max(ff).max(d).max(hkv);
+        let adapter = cfg.lora.as_ref().map(|lora| AdapterRuntime::new(&gpu, lora, n as u32, max_out as u32));
 
         // Head-only buffers (final norm + lm_head + cross-entropy). Only the last
         // pipeline stage carries them; on other stages they are size-1 dummies -
@@ -1507,9 +1492,7 @@ impl Qwen {
             d_gate_pre: bwd(n * ff),
             d_up: bwd(n * ff),
             inv: bwd(inv_rows),
-            lora_a: st(n * r),
-            lora_da: st(n * r),
-            lora_out: st(n * max_out),
+            adapter,
             attached: None,
             fwd_steps: Tape::default(),
             bwd_steps: Tape::default(),
@@ -1796,15 +1779,6 @@ impl Qwen {
         s.extend(block::rmsnorm_bwd(&self.gpu, &Self::ids(), x, self.w(wname), dy, dx, &self.inv, gw, dim, rows, self.cfg.rms_eps));
     }
 
-    /// True if a LoRA adapter is configured for the given projection leaf.
-    fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
-        self.cfg
-            .lora
-            .as_ref()
-            .filter(|lc| lc.targets_leaf(leaf))
-            .map(|lc| (lc.rank, lc.scale()))
-    }
-
     /// The activation every per-layer linear on this shard reads, packed for
     /// int8 only where an int8 weight will actually read it.
     ///
@@ -1854,58 +1828,33 @@ impl Qwen {
         self.gpu.kernel_index(name).unwrap_or_else(|| panic!("qwen: kernel {name} is not registered"))
     }
 
-    /// The adapter pair correcting base linear `wname` (leaf `leaf`), if any:
-    /// an attached adapter's, or a LoRA build's own trainable one. `own`
-    /// ignores any override - the backward's recompute, which must rebuild
-    /// the activations of the parameters it differentiates.
-    fn lora_site(&self, leaf: &str, wname: &str, own: bool) -> Option<LoraSite<'_>> {
-        match (&self.attached, own) {
-            (Some(AdapterOverride::Lora(at)), false) => {
-                return at.sites.get(wname).map(|lora| LoraSite::Attached { lora, xa: &at.xa, delta_kernel: at.delta_kernel });
-            }
-            (Some(AdapterOverride::BaseOnly), false) => return None,
-            _ => {}
-        }
-        let (rank, scale) = self.lora_for(leaf)?;
-        Some(LoraSite::Trainable { a: self.w(&model::adapter::device::lora_names(wname).0), b: self.w(&model::adapter::device::lora_names(wname).1), rank, scale })
-    }
-
-    /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`.
-    /// No-op for an untargeted leaf. `m`×`k` is the input, `nout` the output.
+    /// Forward correction of a targeted linear: `y += scale * (x A^t) B^t`, or
+    /// an attached adapter's runtime correction. No-op for an untargeted leaf.
+    /// `m` x `k` is the input, `nout` the output.
     ///
     /// `x` is the fp32 activation whatever tier the base linear ran at, so the
-    /// correction is exact on a quantized base too. `own`: see
-    /// [`Self::lora_site`].
+    /// correction is exact on a quantized base too. `own` ignores any attached
+    /// override - the backward's recompute, which must rebuild the activations
+    /// of the parameters it differentiates.
     #[allow(clippy::too_many_arguments)]
     fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32, own: bool) {
-        // The A projection of both stores: the fp32 GEMM selector's tier, with
-        // the workgroup-per-output GEMV on a device that runs it - at decode
-        // (`m = 1`) the naive kernel would run `r` threads down a serial
-        // `k`-long loop.
-        let gemv = if self.coop { Some(MATMUL_GEMV) } else { None };
-        let tier = block::GemmVariants::Fast { gemv, tiled: MATMUL_REG3 };
-        match self.lora_site(leaf, wname, own) {
-            None => {}
-            Some(LoraSite::Attached { lora, xa, delta_kernel }) => {
-                s.extend(model::dispatch::lora_rows_off(&self.gpu, tier, delta_kernel, lora, xa, x, y, 0, 0, m, k, nout));
-            }
-            Some(LoraSite::Trainable { a, b, rank: r, scale }) => {
-                // mid = x A^t, then y += (alpha/r) mid B^t accumulated by the GEMM itself: fp32 library products
-                // where the device has them (the fp32 serial kernels below otherwise).
-                let tg = self.ops.tensor_gemm();
-                let mut lib = Vec::new();
-                let ok = tg.gemm_f32(&self.gpu, &mut lib, &whole(x), &whole(a), &whole(&self.lora_a), F32Product { m, n: r, k, trans_a: false, trans_b: true, alpha: 1.0, beta: 0.0 })
-                    && tg.gemm_f32(&self.gpu, &mut lib, &whole(&self.lora_a), &whole(b), &whole(y), F32Product { m, n: nout, k: r, trans_a: false, trans_b: true, alpha: scale, beta: 1.0 });
-                if ok {
-                    s.append(&mut lib);
-                    return;
+        match (&self.attached, own) {
+            (Some(AdapterOverride::Lora(at)), false) => {
+                if let Some(lora) = at.sites.get(wname) {
+                    // The A projection: the fp32 GEMM selector's tier, with the
+                    // workgroup-per-output GEMV on a device that runs it - at
+                    // decode (`m = 1`) the naive kernel would run `r` threads
+                    // down a serial `k`-long loop.
+                    let gemv = if self.coop { Some(MATMUL_GEMV) } else { None };
+                    let tier = block::GemmVariants::Fast { gemv, tiled: MATMUL_REG3 };
+                    s.extend(model::dispatch::lora_rows_off(&self.gpu, tier, at.delta_kernel, lora, &at.xa, x, y, 0, 0, m, k, nout));
                 }
-                s.push(match block::gemv_tier(&self.gpu, m, r) {
-                    Some(grid) => self.gpu.dispatch(MATMUL_GEMV, &[x, a, &self.lora_a], &[m, k, r], grid),
-                    None => self.gpu.step(MATMUL, &[x, a, &self.lora_a], &[m, k, r], m * r),
-                });
-                s.push(self.gpu.step(MATMUL, &[&self.lora_a, b, &self.lora_out], &[m, r, nout], m * nout));
-                s.push(self.gpu.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
+            }
+            (Some(AdapterOverride::BaseOnly), false) => {}
+            _ => {
+                if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
+                    rt.forward(self.ops.tensor_gemm(), s, &self.ps, wname, x, y, m, k, nout);
+                }
             }
         }
     }
@@ -1916,31 +1865,13 @@ impl Qwen {
     /// adapter grads gA/gB are produced (scale folded in by scaling `d_out`).
     #[allow(clippy::too_many_arguments)]
     fn proj_bwd(&self, s: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
-        match self.lora_for(leaf) {
-            Some((r, scale)) => {
+        match self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
+            Some(rt) => {
                 // base: dx += d_out·W (frozen weight - no dW). d_out is NOT mutated
                 // here: for `wo` it is `dxmid`, reused downstream as the residual
-                // grad, so the adapter scale is folded into the private scratch.
+                // grad.
                 self.base_dx(s, d_out, wname, dx, m, k, nout, acc);
-                let (a, bnm) = model::adapter::device::lora_names(wname);
-                if self.lora_bwd_gemm(s, d_out, x, &a, &bnm, dx, (m, k, nout, r), scale) {
-                    return;
-                }
-                // a = (alpha/r)·(x·Aᵀ)  -> gB += d_outᵀ·a
-                s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
-                s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
-                let (bk, bt) = dw_kernel_bw(nout, r);
-                s.push(self.gpu.dispatch(bk, &[d_out, &self.lora_a, self.g(&bnm)], &[m, r, nout], bt));
-                // da = (alpha/r)·(d_out·B) -> gA += daᵀ·x ; dx += da·A
-                let (bk, bt) = dx_kernel_bw(m, r);
-                s.push(self.gpu.dispatch(bk, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], bt));
-                s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
-                if self.trainable(&a) {
-                    let (bk, bt) = dw_kernel_bw(r, k);
-                    s.push(self.gpu.dispatch(bk, &[&self.lora_da, x, self.g(&a)], &[m, k, r], bt));
-                }
-                let (bk, bt) = dx_kernel_bw(m, k);
-                s.push(self.gpu.dispatch(bk, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], bt));
+                rt.backward(self.ops.tensor_gemm(), s, &self.ps, wname, d_out, x, dx, m, k, nout);
             }
             None => {
                 if self.trainable(wname) {
@@ -1950,30 +1881,6 @@ impl Qwen {
                 self.base_dx(s, d_out, wname, dx, m, k, nout, acc);
             }
         }
-    }
-
-    /// The LoRA backward of one linear as fp32 library products (see [`Self::proj_bwd`] for the maths): each
-    /// one product with the scale folded into its alpha and the accumulations into beta. `false` (nothing pushed)
-    /// when the device runs the fp32 kernels, which `proj_bwd` then dispatches instead.
-    #[allow(clippy::too_many_arguments)]
-    fn lora_bwd_gemm(&self, steps: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, a: &str, bnm: &str, dx: &DeviceBuffer, dims: (u32, u32, u32, u32), scale: f32) -> bool {
-        let (m, k, nout, r) = dims;
-        let tg = self.ops.tensor_gemm();
-        if !tg.is_active() {
-            return false;
-        }
-        let g = &self.gpu;
-        let p = |m, n, k, trans_a, trans_b, alpha, beta| F32Product { m, n, k, trans_a, trans_b, alpha, beta };
-        let mut lib = Vec::new();
-        let ok = tg.gemm_f32(g, &mut lib, &whole(x), &whole(self.w(a)), &whole(&self.lora_a), p(m, r, k, false, true, scale, 0.0))
-            && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(&self.lora_a), &whole(self.g(bnm)), p(nout, r, m, true, false, 1.0, 1.0))
-            && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(self.w(bnm)), &whole(&self.lora_da), p(m, r, nout, false, false, scale, 0.0))
-            && (!self.trainable(a) || tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(x), &whole(self.g(a)), p(r, k, m, true, false, 1.0, 1.0)))
-            && tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(self.w(a)), &whole(dx), p(m, k, r, false, false, 1.0, 1.0));
-        if ok {
-            steps.append(&mut lib);
-        }
-        ok
     }
 
     /// `dx (+)= d_out · W` through the tier the base linear `wname` was

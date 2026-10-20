@@ -80,6 +80,7 @@ use model::moe::{
 };
 use model::Shard;
 use optim::Optim;
+use model::adapter::exec::AdapterRuntime;
 use paramstore::{ParamStore, Role};
 
 use crate::config::DeepseekV2Config;
@@ -133,7 +134,6 @@ const SPLICE_BWD: usize = 40;
 /// kernel the base decoder's forward/backward never needed on its own --
 /// every other LoRA dispatch (`MATMUL`/`MATMUL_DX`/`MATMUL_DW`/`GRAD_SCALE`)
 /// reuses a slot already registered above.
-const AXPY: usize = 41;
 // ---- incremental/chunked KV-cache decode kernels (`n` new rows vs the
 // growing cache, `n = 1` being a plain decode step) -- see
 // `DeepseekV2::decode_rows`'s doc. Appended so every index above stays
@@ -610,9 +610,9 @@ pub struct DeepseekV2 {
     // one sequential Vec<Step> tape, exactly as `qwen3`/`qwen35moe` reuse
     // their own single set. `.max(1)`-sized so a non-LoRA build still gets a
     // valid (unused, one-element) buffer.
-    lora_a: DeviceBuffer,
-    lora_da: DeviceBuffer,
-    lora_out: DeviceBuffer,
+    /// The trainable adapter's execution (forward correction, backward), when
+    /// `cfg.lora` is set.
+    adapter: Option<AdapterRuntime>,
 
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
@@ -821,10 +821,7 @@ impl DeepseekV2 {
 
         // LoRA scratch: rank `r` (1 when unconfigured), output width `d_model`
         // (every targetable projection is square).
-        let lora_r = cfg.lora.as_ref().map(|l| l.rank as u64).unwrap_or(0).max(1);
-        let lora_a = st(n * lora_r);
-        let lora_da = st(n * lora_r);
-        let lora_out = st(n * d);
+        let adapter = cfg.lora.as_ref().map(|lora| AdapterRuntime::new(&gpu, lora, n as u32, d as u32));
 
         // Backward-only buffers are sized at a 1-element stub whenever
         // `build_backward` will not be called (`!train`, which already covers
@@ -935,9 +932,7 @@ impl DeepseekV2 {
             d_expert_out: st(bn * d),
             fe: st(e),
             inv: st(bn),
-            lora_a,
-            lora_da,
-            lora_out,
+            adapter,
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
             dec: RefCell::new(None),
@@ -1013,26 +1008,15 @@ impl DeepseekV2 {
         s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
     }
 
-    /// `Some((rank, alpha/rank))` when `leaf` (e.g. `"q_proj"`) is one of
-    /// [`DeepseekV2Config::lora`]'s targets, `None` otherwise (no LoRA
-    /// configured at all, or this leaf is not targeted) -- mirrors
-    /// `qwen3::model.rs`'s own `lora_for` exactly.
-    fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
-        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.scale()))
-    }
-
-    /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`, in
-    /// place on `y` (which [`Self::mm`] has already written `x·Wᵀ` into for
-    /// the SAME `wname`, immediately before this call at every call site). A
-    /// no-op when `leaf` is not targeted -- mirrors `qwen3::model.rs`'s own
-    /// `lora_fwd` exactly (same two-matmul + `AXPY` fusion, this file's own
-    /// persistent `lora_a`/`lora_out` scratch).
+    /// The training LoRA's correction of a targeted linear, in place on `y`
+    /// (which [`Self::mm`] has already written `x·Wᵀ` into for the SAME
+    /// `wname`, immediately before this call at every call site). A no-op when
+    /// `leaf` is not targeted.
+    #[allow(clippy::too_many_arguments)]
     fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        let Some((r, scale)) = self.lora_for(leaf) else { return };
-        let (a, bnm) = model::adapter::device::lora_names(wname);
-        s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
-        s.push(self.gpu.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
-        s.push(self.gpu.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
+        if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
+            rt.forward(rt.reference_gemm(), s, &self.ps, wname, x, y, m, k, nout);
+        }
     }
 
     /// Backward for the OPTIONAL LoRA delta on a targeted linear, split out
@@ -1049,19 +1033,9 @@ impl DeepseekV2 {
     /// `MATMUL`/`MATMUL_DX`/`MATMUL_DW`/`GRAD_SCALE` kernel ids.
     #[allow(clippy::too_many_arguments)]
     fn lora_bwd(&self, s: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        let Some((r, scale)) = self.lora_for(leaf) else { return };
-        let (a, bnm) = model::adapter::device::lora_names(wname);
-        // a = x·Aᵀ ; gB += scale·d_outᵀ·a  (scale folded into `a`, private scratch)
-        s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
-        s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
-        s.push(self.gpu.step(MATMUL_DW, &[d_out, &self.lora_a, self.g(&bnm)], &[m, r, nout], nout * r));
-        // da = scale·(d_out·B) ; gA += daᵀ·x ; dx += da·A
-        s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], m * r));
-        s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
-        if self.trainable(&a) {
-            s.push(self.gpu.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
+        if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
+            rt.backward(rt.reference_gemm(), s, &self.ps, wname, d_out, x, dx, m, k, nout);
         }
-        s.push(self.gpu.step(MATMUL_DX, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], m * k));
     }
 
     fn norm_fwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, dim: u32, rows: u32) {

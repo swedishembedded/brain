@@ -50,17 +50,14 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 
-use gpu_core::provider::library::{self, F32Product};
 use gpu_core::select::{Dtype, DECODE_REGIME_MAX_ROWS, I8_GEMV_MAX_ROWS};
+use gpu_core::provider::library;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
-/// A library operand bound whole.
-fn whole(buf: &DeviceBuffer) -> library::Operand<'_> {
-    library::Operand { buf, range: (0, 0) }
-}
 use paramstore::{ParamStore, Role};
 
 use audio::conv::ConvKernels;
+use model::adapter::exec::AdapterRuntime;
 use model::adapter::bank::{AdapterBank, AdapterBankConfig, AdapterError};
 use model::adapter::sites::LoraSites;
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels};
@@ -405,7 +402,6 @@ const EMB_BWD: usize = 69;
 const CE_GRAD: usize = 70;
 const SCALE_ADD: usize = 71;
 const L2NORM_SCALE_DX: usize = 72;
-const AXPY: usize = 73;
 const SPLICE: usize = 74;
 const SPLICE_BWD: usize = 75;
 const CAUSAL_CONV1D_STEP: usize = 76;
@@ -1130,12 +1126,9 @@ pub struct Qwen35 {
     // branch. Size-1 dummies when `cfg.lora` is `None` (rank forced to 1 in
     // `new_impl_on`, never read) - mirrors `qwen35moe::model::Qwen35`'s own
     // `lora_a`/`lora_da`/`lora_out` fields exactly.
-    /// `[n*r]` : `a = x @ Aᵀ`.
-    lora_a: DeviceBuffer,
-    /// `[n*r]` : grad wrt `a`.
-    lora_da: DeviceBuffer,
-    /// `[n*max_out]` : `delta = a @ Bᵀ`.
-    lora_out: DeviceBuffer,
+    /// The trainable adapter's execution (forward correction, backward), when
+    /// `cfg.lora` is set.
+    adapter: Option<AdapterRuntime>,
 
     // ---- served adapter bank (see `Self::enable_adapter_bank`) ----
     /// Many adapters on this one copy of the weights, each row of a batch
@@ -1759,18 +1752,7 @@ impl Qwen35 {
         // `intermediate_size` for this model's dense-MLP `gate`/`up` leaves,
         // which qwen35moe never targets). `.max(1)` so a `cfg.lora: None`
         // build still gets a valid (unused) 1-element rank.
-        let lora_r = cfg.lora.as_ref().map(|l| l.rank as u64).unwrap_or(0).max(1);
-        let lora_max_out = cfg
-            .linear_conv_dim()
-            .max(cfg.linear_value_dim())
-            .max(cfg.linear_num_value_heads)
-            .max(cfg.d_model)
-            .max(cfg.q_proj_dim())
-            .max(cfg.kv_dim())
-            .max(cfg.intermediate_size) as u64;
-        let lora_a = gpu.storage((b * t) as u64 * lora_r);
-        let lora_da = gpu.storage((b * t) as u64 * lora_r);
-        let lora_out = gpu.storage((b * t) as u64 * lora_max_out);
+        let adapter = cfg.lora.as_ref().map(|lora| AdapterRuntime::new(&gpu, lora, b * t, cfg.adapter_max_out()));
 
         let ones_khd = gpu.storage_init("qwen35.ones_khd", &vec![1.0f32; cfg.linear_key_head_dim as usize]);
 
@@ -1889,9 +1871,7 @@ impl Qwen35 {
             mtp_acts: RefCell::new(None),
             ops,
             weights,
-            lora_a,
-            lora_da,
-            lora_out,
+            adapter,
             adapter_bank: RefCell::new(None),
             adapter_rows: Cell::new(0),
             splice: model::vlm::SpliceRuns::none(),
@@ -2012,37 +1992,15 @@ impl Qwen35 {
         self.ps.grad.contains_key(name)
     }
 
-    /// `Some((rank, alpha/rank))` if `leaf` (one of `crate::config::
-    /// lora_targets`'s 12 names) has a LoRA adapter configured; `None`
-    /// otherwise (either `cfg.lora` is unset, or this leaf isn't targeted -
-    /// e.g. `"fc_e"`/`"fc_h"`/`"lm_head"`, which are never LoRA-targetable).
-    /// Mirrors `qwen35moe::model::Qwen35::lora_for` exactly.
-    fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
-        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.scale()))
-    }
-
-    /// Forward LoRA delta for a targeted linear: `y += (alpha/r)*(x*A^t)*B^t`.
-    /// No-op for an untargeted leaf. `m`x`k` is the input, `nout` the output -
-    /// mirrors `qwen35moe::model::Qwen35::lora_fwd` exactly (same two-matmul +
-    /// `AXPY` fusion, using this file's own persistent `lora_a`/`lora_out`
-    /// scratch).
+    /// The training LoRA's correction of a targeted linear: `y += scale *
+    /// (x A^t) B^t`. No-op for an untargeted leaf (including `fc_e`, `fc_h` and
+    /// `lm_head`, which are never targetable). `m` x `k` is the input, `nout`
+    /// the output.
     #[allow(clippy::too_many_arguments)]
     fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        let Some((r, scale)) = self.lora_for(leaf) else { return };
-        let g = &self.gpu;
-        let (a, bnm) = model::adapter::device::lora_names(wname);
-        // mid = x A^t, then y += (alpha/r) mid B^t accumulated by the GEMM itself.
-        let tg = self.ops.tensor_gemm();
-        let mut lib = Vec::new();
-        let ok = tg.gemm_f32(g, &mut lib, &whole(x), &whole(self.w(&a)), &whole(&self.lora_a), F32Product { m, n: r, k, trans_a: false, trans_b: true, alpha: 1.0, beta: 0.0 })
-            && tg.gemm_f32(g, &mut lib, &whole(&self.lora_a), &whole(self.w(&bnm)), &whole(y), F32Product { m, n: nout, k: r, trans_a: false, trans_b: true, alpha: scale, beta: 1.0 });
-        if ok {
-            s.append(&mut lib);
-            return;
+        if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
+            rt.forward(self.ops.tensor_gemm(), s, &self.ps, wname, x, y, m, k, nout);
         }
-        s.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
-        s.push(g.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
-        s.push(g.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
     }
 
     /// The training LoRA's correction of one targeted linear whose base output
@@ -2273,25 +2231,11 @@ impl Qwen35 {
     #[allow(clippy::too_many_arguments)]
     fn proj_bwd(&self, steps: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
         let g = &self.gpu;
-        match self.lora_for(leaf) {
-            Some((r, scale)) => {
+        match self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
+            Some(rt) => {
                 // base: dx += d_out*W (frozen weight - no dW).
                 self.base_dx(steps, d_out, wname, dx, m, k, nout, acc);
-                let (a, bnm) = model::adapter::device::lora_names(wname);
-                if self.lora_bwd_gemm(steps, d_out, x, &a, &bnm, dx, (m, k, nout, r), scale) {
-                    return;
-                }
-                // a = (alpha/r)*(x*A^t)  -> gB += d_out^t*a
-                steps.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
-                steps.push(g.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
-                steps.push(g.step(MATMUL_DW, &[d_out, &self.lora_a, self.g(&bnm)], &[m, r, nout], nout * r));
-                // da = (alpha/r)*(d_out*B) -> gA += da^t*x ; dx += da*A
-                steps.push(g.step(MATMUL_DX, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], m * r));
-                steps.push(g.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
-                if self.trainable(&a) {
-                    steps.push(g.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
-                }
-                steps.push(g.step(MATMUL_DX, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], m * k));
+                rt.backward(self.ops.tensor_gemm(), steps, &self.ps, wname, d_out, x, dx, m, k, nout);
             }
             None => {
                 if self.trainable(wname) {
@@ -2300,33 +2244,6 @@ impl Qwen35 {
                 self.base_dx(steps, d_out, wname, dx, m, k, nout, acc);
             }
         }
-    }
-
-    /// The LoRA backward of one linear as library GEMMs (see [`Self::proj_bwd`]
-    /// for the maths): `lora_a = (alpha/r) x A^t`, `gB += d_out^t lora_a`,
-    /// `lora_da = (alpha/r) d_out B`, `gA += lora_da^t x` and
-    /// `dx += lora_da A`, each one product with the scale folded into its
-    /// alpha and the accumulations into beta. `false` (nothing pushed) when the
-    /// device runs the fp32 kernels, which `proj_bwd` then dispatches instead.
-    #[allow(clippy::too_many_arguments)]
-    fn lora_bwd_gemm(&self, steps: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, a: &str, bnm: &str, dx: &DeviceBuffer, dims: (u32, u32, u32, u32), scale: f32) -> bool {
-        let (m, k, nout, r) = dims;
-        let tg = self.ops.tensor_gemm();
-        if !tg.is_active() {
-            return false;
-        }
-        let g = &self.gpu;
-        let p = |m, n, k, trans_a, trans_b, alpha, beta| F32Product { m, n, k, trans_a, trans_b, alpha, beta };
-        let mut lib = Vec::new();
-        let ok = tg.gemm_f32(g, &mut lib, &whole(x), &whole(self.w(a)), &whole(&self.lora_a), p(m, r, k, false, true, scale, 0.0))
-            && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(&self.lora_a), &whole(self.g(bnm)), p(nout, r, m, true, false, 1.0, 1.0))
-            && tg.gemm_f32(g, &mut lib, &whole(d_out), &whole(self.w(bnm)), &whole(&self.lora_da), p(m, r, nout, false, false, scale, 0.0))
-            && (!self.trainable(a) || tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(x), &whole(self.g(a)), p(r, k, m, true, false, 1.0, 1.0)))
-            && tg.gemm_f32(g, &mut lib, &whole(&self.lora_da), &whole(self.w(a)), &whole(dx), p(m, k, r, false, false, 1.0, 1.0));
-        if ok {
-            steps.append(&mut lib);
-        }
-        ok
     }
 
     /// `dx (+)= d_out * W` through the tier weight `wname` is held at: the 12

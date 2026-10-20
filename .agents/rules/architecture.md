@@ -154,7 +154,9 @@ layer 6 - serving, front ends, SDK, samples
                            adapter runtime (`model::adapter`: a kind is a definition /
                            execution / optimization triple, `device` derives every
                            device-side tensor name, init, role and learning-rate
-                           group from it, `bank` serves many adapters as overlays
+                           group from it, `exec` records one adapted linear's forward and
+                           backward for every model whatever its base weight format,
+                           `bank` serves many adapters as overlays
                            over `LoraSites`),
                            shared block builders (block.rs, vit.rs), paged KV,
                            the KV storage descriptor (kv_tier: element codec x

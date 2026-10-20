@@ -101,7 +101,9 @@ The kind is split into three roles in `crates/model/src/adapter/kind.rs`:
 (`adapter/device.rs`) recognises, initialises, freezes and saves adapter
 tensors from the definition, so no model crate spells a tensor suffix; a new
 kind (DoRA, LoKr, IA3) implements the three roles and is listed in
-`device::kinds()`.
+`device::kinds()` and one arm in `adapter/exec.rs`, which records the
+forward and backward steps for qwen3, qwen35 (resident and streamed),
+qwen35moe and deepseek2 alike.
 
 **Two things scoped out of Phase 1, on purpose, and why:**
 

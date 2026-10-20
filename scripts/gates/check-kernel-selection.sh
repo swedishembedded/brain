@@ -92,7 +92,6 @@ conv2d	crates/minimaxmusic3/src/discriminator.rs	Outside Op::Conv2d's deliberate
 decode_softmax	crates/glmdsa/src/model.rs	No select::Op covers this model's own paged/incremental-decode softmax yet (Op::Softmax is a different kernel family - see its doc); part of the campaign's already-identified paged-attention triad, tracked for Phase 2/Phase 5.
 decode_softmax	crates/gpt2/src/model.rs	No select::Op covers this model's own paged/incremental-decode softmax yet (Op::Softmax is a different kernel family - see its doc); part of the campaign's already-identified paged-attention triad, tracked for Phase 2/Phase 5.
 layernorm	crates/glmdsa/src/model.rs	Not yet migrated onto the existing Op::LayerNorm seam - Phase 1 M1.4 / Phase 5 backlog item (see this gate's M1.3 inventory in kernel-performance.md), not fixed here.
-matmul	crates/deepseek2/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/fincast/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/gpt2/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/kronos/src/train.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
@@ -110,8 +109,6 @@ emb_bwd	crates/toypid/src/model.rs	Two-stage replacement emb_bwd_part + dw_split
 emb_bwd	crates/toyseq2seq/src/model.rs	Two-stage replacement emb_bwd_part + dw_splitk_reduce exists (horizon uses it: the token tables of a small vocabulary over tens of thousands of rows); not a drop-in single dispatch (needs a block scratch), migrating this model is backlog.
 layernorm_dgamma	crates/minimaxmusic3/src/dit_train.rs	Two-stage replacement layernorm_dgamma_part + bias_grad_final exists (horizon uses it); not a drop-in single dispatch (needs a chunk scratch), migrating this model is backlog.
 matmul	crates/model/tests/tensor_parallel.rs	Test harness for dp/shard-parity checks constructs raw GPU steps directly by design, never through model::ops::Ops - not a served/trained model path.
-matmul	crates/qwen3/src/model.rs	B7's Ops migration (no_kernel_names.rs) scoped only forward_steps/decode_steps/run_batched_steps/head_steps; lora_fwd/proj_bwd (LoRA delta + backward) were explicitly out of that scope and still hand-dispatch - backlog, not a new regression.
-matmul_gemv	crates/qwen3/src/model.rs	The LoRA delta (lora_fwd) is outside B7's Ops migration scope like the matmul row above and still hand-dispatches its low-rank gemv - backlog, not a new regression.
 matmul	crates/qwen35/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/qwen35moe/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/qwen3omnimoe/src/talker.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.

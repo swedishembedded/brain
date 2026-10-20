@@ -15,6 +15,7 @@
 
 pub mod bank;
 pub mod device;
+pub mod exec;
 pub mod kind;
 pub mod plan;
 pub mod select;

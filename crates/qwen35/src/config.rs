@@ -245,6 +245,12 @@ impl Qwen35Config {
         layer_types(self.n_layers, self.full_attention_interval)
     }
 
+    /// The widest output among the linears an adapter may correct: sizes the
+    /// adapter runtime's correction scratch.
+    pub fn adapter_max_out(&self) -> u32 {
+        self.linear_conv_dim().max(self.linear_value_dim()).max(self.linear_num_value_heads).max(self.d_model).max(self.q_proj_dim()).max(self.kv_dim()).max(self.intermediate_size)
+    }
+
     // -- full-attention (GQA) derived shapes --
     /// Query projection width, **doubled** for the value+gate split
     /// (`Qwen3_5Attention.q_proj` emits `num_heads * head_dim * 2`).

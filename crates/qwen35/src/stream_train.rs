@@ -121,6 +121,7 @@ use model::gdn_mixer::{gdn_mixer_bwd, gdn_mixer_fwd, GdnMixerActs, GdnMixerGrads
 use model::gqa_mixer::{gqa_mixer_bwd, gqa_mixer_fwd, GqaMixerActs, GqaMixerGrads, GqaMixerIds, GqaMixerShape, GqaMixerWeights};
 use model::ops::{Ops, Weight};
 use optim::Optim;
+use model::adapter::exec::AdapterRuntime;
 use paramstore::ParamStore;
 
 use crate::config::Qwen35Config;
@@ -139,11 +140,7 @@ struct TrainIds {
     gdn_mixer: GdnMixerIds,
     gqa_mixer: GqaMixerIds,
     add2: usize,
-    matmul: usize,
     matmul_dx: usize,
-    matmul_dw: usize,
-    axpy: usize,
-    grad_scale: usize,
     ce_value: usize,
     ce_grad: usize,
 }
@@ -154,11 +151,7 @@ fn train_ids(g: &Gpu) -> TrainIds {
         gdn_mixer: gdn_mixer_ids(g),
         gqa_mixer: gqa_mixer_ids(g),
         add2: idx(g, "add2"),
-        matmul: idx(g, "matmul"),
         matmul_dx: idx(g, "matmul_dx"),
-        matmul_dw: idx(g, "matmul_dw"),
-        axpy: idx(g, "axpy"),
-        grad_scale: idx(g, "grad_scale"),
         ce_value: idx(g, "ce_value"),
         ce_grad: idx(g, "ce_grad"),
     }
@@ -281,6 +274,8 @@ fn build_head_f32_from_mmap(gpu: &Gpu, reader: &MmapSafetensors, name: &str, n: 
 pub struct LoraStore {
     pub ps: ParamStore,
     opt: Optim,
+    /// The adapter's forward and backward, shared with the resident trainer.
+    rt: AdapterRuntime,
 }
 
 impl LoraStore {
@@ -300,7 +295,7 @@ impl LoraStore {
     /// adapters (the equivalence gate's whole point) must control that by
     /// passing the SAME map to both, not by passing the same seed to two
     /// independent generators.
-    pub fn new(gpu: &Gpu, cfg: &Qwen35Config, init: &HashMap<String, Vec<f32>>) -> LoraStore {
+    pub fn new(gpu: &Gpu, cfg: &Qwen35Config, init: &HashMap<String, Vec<f32>>, rows: u32) -> LoraStore {
         assert!(cfg.lora.is_some(), "stream_train::LoraStore::new: cfg.lora must be set");
         let lora_init: HashMap<String, Vec<f32>> = init.iter().filter(|(k, _)| model::adapter::device::is_adapter_param(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
         let expect_n = cfg.param_list().iter().filter(|(k, _)| model::adapter::device::is_adapter_param(k)).count();
@@ -311,13 +306,8 @@ impl LoraStore {
         let mut ps = ParamStore::new_with_roles(gpu, roles, &lora_init);
         model::adapter::device::apply_groups(&mut ps, &hp);
         let opt = Optim::new(idx(gpu, "adamw"), idx(gpu, "gradnorm_sq"), idx(gpu, "grad_scale"), idx(gpu, "clip_coef"), idx(gpu, "grad_scale_buf"));
-        LoraStore { ps, opt }
-    }
-
-    /// `Some((rank, alpha/rank))` if `leaf` is LoRA-targeted under `cfg`;
-    /// `None` otherwise. Mirrors `Qwen35::lora_for` exactly.
-    fn lora_for(cfg: &Qwen35Config, leaf: &str) -> Option<(u32, f32)> {
-        cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.scale()))
+        let rt = AdapterRuntime::new(gpu, cfg.lora.as_ref().expect("asserted above"), rows, cfg.adapter_max_out());
+        LoraStore { ps, opt, rt }
     }
 
     pub fn adamw_step(&self, gpu: &Gpu, t: u32, lr: f32) {
@@ -327,19 +317,6 @@ impl LoraStore {
     pub fn zero_grads(&self, gpu: &Gpu) {
         self.ps.zero_grads(gpu);
     }
-}
-
-/// Forward LoRA delta for a targeted linear: `y += (alpha/r)*(x*A^t)*B^t` -
-/// a direct kernel-dispatch transcription of `Qwen35::lora_fwd`, reading the
-/// adapter weights from a [`LoraStore`] instead of `self.w`.
-#[allow(clippy::too_many_arguments)]
-fn lora_fwd_streamed(gpu: &Gpu, ids: &TrainIds, lora: &ParamStore, wname: &str, r: u32, scale: f32, x: &DeviceBuffer, y: &DeviceBuffer, m: u32, k: u32, nout: u32, s: &mut Vec<Step>) {
-    let (a, bnm) = model::adapter::device::lora_names(wname);
-    let lora_a_buf = gpu.storage((m * r) as u64);
-    let lora_out_buf = gpu.storage((m * nout) as u64);
-    s.push(gpu.step(ids.matmul, &[x, lora.w(&a), &lora_a_buf], &[m, k, r], m * r));
-    s.push(gpu.step(ids.matmul, &[&lora_a_buf, lora.w(&bnm), &lora_out_buf], &[m, r, nout], m * nout));
-    s.push(gpu.step(ids.axpy, &[y, &lora_out_buf], &[m * nout, f(scale)], m * nout));
 }
 
 /// Backward for one (possibly-LoRA) streamed linear `y = x*Wᵀ`, accumulating
@@ -352,33 +329,13 @@ fn lora_fwd_streamed(gpu: &Gpu, ids: &TrainIds, lora: &ParamStore, wname: &str, 
 /// there is no full-fine-tune path), matching `proj_bwd`'s own `None` arm
 /// restricted to `dx`-only for exactly that reason.
 #[allow(clippy::too_many_arguments)]
-fn proj_bwd_streamed(gpu: &Gpu, ids: &TrainIds, lora: &LoraStore, cfg: &Qwen35Config, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, base: &Weight, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32, s: &mut Vec<Step>) {
+fn proj_bwd_streamed(gpu: &Gpu, ids: &TrainIds, lora: &LoraStore, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, base: &Weight, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32, s: &mut Vec<Step>) {
     let base_buf = f32_buf(base);
-    match LoraStore::lora_for(cfg, leaf) {
-        Some((r, scale)) => {
-            // base: dx += d_out*W (frozen weight - no dW).
-            s.push(gpu.step(ids.matmul_dx, &[d_out, base_buf, dx], &[m, k, nout, acc], m * k));
-
-            let (a, bnm) = model::adapter::device::lora_names(wname);
-            // a = (alpha/r)*(x*A^t)  -> gB += d_out^t*a
-            let lora_a_buf = gpu.storage((m * r) as u64);
-            s.push(gpu.step(ids.matmul, &[x, lora.ps.w(&a), &lora_a_buf], &[m, k, r], m * r));
-            s.push(gpu.step(ids.grad_scale, &[&lora_a_buf], &[m * r, f(scale)], m * r));
-            s.push(gpu.step(ids.matmul_dw, &[d_out, &lora_a_buf, lora.ps.g(&bnm)], &[m, r, nout], nout * r));
-            // da = (alpha/r)*(d_out*B) -> gA += da^t*x ; dx += da*A
-            let lora_da_buf = gpu.storage((m * r) as u64);
-            s.push(gpu.step(ids.matmul_dx, &[d_out, lora.ps.w(&bnm), &lora_da_buf], &[m, r, nout, 0], m * r));
-            s.push(gpu.step(ids.grad_scale, &[&lora_da_buf], &[m * r, f(scale)], m * r));
-            if lora.ps.grad.contains_key(&a) {
-                s.push(gpu.step(ids.matmul_dw, &[&lora_da_buf, x, lora.ps.g(&a)], &[m, k, r], r * k));
-            }
-            s.push(gpu.step(ids.matmul_dx, &[&lora_da_buf, lora.ps.w(&a), dx], &[m, k, r, 1], m * k));
-        }
-        None => {
-            // untargeted leaf, or the shared head: base is always frozen in
-            // this module, so dx only, never dW.
-            s.push(gpu.step(ids.matmul_dx, &[d_out, base_buf, dx], &[m, k, nout, acc], m * k));
-        }
+    // base: dx += d_out*W (frozen weight - no dW). An untargeted leaf, or the
+    // shared head, has only this.
+    s.push(gpu.step(ids.matmul_dx, &[d_out, base_buf, dx], &[m, k, nout, acc], m * k));
+    if lora.rt.hits(leaf) {
+        lora.rt.backward(lora.rt.reference_gemm(), s, &lora.ps, wname, d_out, x, dx, m, k, nout);
     }
 }
 
@@ -410,14 +367,14 @@ fn mlp_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lo
         ops.matmul(&mut s, up_w, &act1, &up, 0);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "gate") {
+    if lora.rt.hits("gate") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("gate.weight"), r, scale, xn2, &gate_pre, n, d, ff, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("gate.weight"), xn2, &gate_pre, n, d, ff);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "up") {
+    if lora.rt.hits("up") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("up.weight"), r, scale, xn2, &up, n, d, ff, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("up.weight"), xn2, &up, n, d, ff);
         gpu.submit(&[], &s);
     }
 
@@ -431,9 +388,9 @@ fn mlp_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lo
         ops.matmul(&mut s, down_w, &act2, &down, 0);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "down") {
+    if lora.rt.hits("down") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("down.weight"), r, scale, &h, &down, n, ff, d, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("down.weight"), &h, &down, n, ff, d);
         gpu.submit(&[], &s);
     }
 
@@ -451,7 +408,7 @@ fn mlp_backward_lora(gpu: &Gpu, ids: &TrainIds, lora: &LoraStore, cfg: &Qwen35Co
     let d_h = gpu.storage((n * ff) as u64);
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, cfg, "down", d_mlp_out, &la.h, down_w, &p("down.weight"), &d_h, n, ff, d, 0, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "down", d_mlp_out, &la.h, down_w, &p("down.weight"), &d_h, n, ff, d, 0, &mut s);
         gpu.submit(&[], &s);
     }
 
@@ -462,8 +419,8 @@ fn mlp_backward_lora(gpu: &Gpu, ids: &TrainIds, lora: &LoraStore, cfg: &Qwen35Co
     let d_xn2 = gpu.storage((n * d) as u64);
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, cfg, "up", &d_up, &la.xn2, up_w, &p("up.weight"), &d_xn2, n, d, ff, 0, &mut s);
-        proj_bwd_streamed(gpu, ids, lora, cfg, "gate", &d_gate_pre, &la.xn2, gate, &p("gate.weight"), &d_xn2, n, d, ff, 1, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "up", &d_up, &la.xn2, up_w, &p("up.weight"), &d_xn2, n, d, ff, 0, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "gate", &d_gate_pre, &la.xn2, gate, &p("gate.weight"), &d_xn2, n, d, ff, 1, &mut s);
         gpu.submit(&[], &s);
     }
     d_xn2
@@ -516,9 +473,9 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
         ops.matmul(&mut s, &layer.in_proj_qkv, &act1, &mixed_qkv, 0);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "in_proj_qkv") {
+    if lora.rt.hits("in_proj_qkv") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("in_proj_qkv.weight"), r, scale, &xn1, &mixed_qkv, n, d, conv_dim, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("in_proj_qkv.weight"), &xn1, &mixed_qkv, n, d, conv_dim);
         gpu.submit(&[], &s);
     }
 
@@ -533,19 +490,19 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
         ops.matmul(&mut s, &layer.in_proj_z, &act1, &z, 0);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "in_proj_b") {
+    if lora.rt.hits("in_proj_b") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("in_proj_b.weight"), r, scale, &xn1, &bproj, n, d, nvh, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("in_proj_b.weight"), &xn1, &bproj, n, d, nvh);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "in_proj_a") {
+    if lora.rt.hits("in_proj_a") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("in_proj_a.weight"), r, scale, &xn1, &aproj, n, d, nvh, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("in_proj_a.weight"), &xn1, &aproj, n, d, nvh);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "in_proj_z") {
+    if lora.rt.hits("in_proj_z") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("in_proj_z.weight"), r, scale, &xn1, &z, n, d, value_dim, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("in_proj_z.weight"), &xn1, &z, n, d, value_dim);
         gpu.submit(&[], &s);
     }
 
@@ -561,9 +518,9 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
         ops.matmul(&mut s, &layer.out_proj, &act3, &mixer_out, 0);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "out_proj") {
+    if lora.rt.hits("out_proj") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("out_proj.weight"), r, scale, &gated, &mixer_out, n, value_dim, d, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("out_proj.weight"), &gated, &mixer_out, n, value_dim, d);
         gpu.submit(&[], &s);
     }
 
@@ -599,7 +556,7 @@ fn gdn_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: 
     let d_gated = gpu.storage((n * value_dim) as u64);
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, cfg, "out_proj", d_out, gated, &layer.out_proj, &p("out_proj.weight"), &d_gated, n, value_dim, d, 0, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "out_proj", d_out, gated, &layer.out_proj, &p("out_proj.weight"), &d_gated, n, value_dim, d, 0, &mut s);
         gpu.submit(&[], &s);
     }
 
@@ -610,14 +567,14 @@ fn gdn_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: 
 
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, cfg, "in_proj_b", &d_bproj, xn1, &layer.in_proj_b, &p("in_proj_b.weight"), d_xn1, n, d, nvh, 0, &mut s);
-        proj_bwd_streamed(gpu, ids, lora, cfg, "in_proj_a", &d_aproj, xn1, &layer.in_proj_a, &p("in_proj_a.weight"), d_xn1, n, d, nvh, 1, &mut s);
-        proj_bwd_streamed(gpu, ids, lora, cfg, "in_proj_z", &d_z, xn1, &layer.in_proj_z, &p("in_proj_z.weight"), d_xn1, n, d, value_dim, 1, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "in_proj_b", &d_bproj, xn1, &layer.in_proj_b, &p("in_proj_b.weight"), d_xn1, n, d, nvh, 0, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "in_proj_a", &d_aproj, xn1, &layer.in_proj_a, &p("in_proj_a.weight"), d_xn1, n, d, nvh, 1, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "in_proj_z", &d_z, xn1, &layer.in_proj_z, &p("in_proj_z.weight"), d_xn1, n, d, value_dim, 1, &mut s);
         gpu.submit(&[], &s);
     }
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, cfg, "in_proj_qkv", &d_mixed_qkv, xn1, &layer.in_proj_qkv, &p("in_proj_qkv.weight"), d_xn1, n, d, conv_dim, 1, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "in_proj_qkv", &d_mixed_qkv, xn1, &layer.in_proj_qkv, &p("in_proj_qkv.weight"), d_xn1, n, d, conv_dim, 1, &mut s);
         gpu.submit(&[], &s);
     }
 }
@@ -692,19 +649,19 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
         ops.matmul(&mut s, &layer.v_proj, &act1, &v, 0);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "q_proj") {
+    if lora.rt.hits("q_proj") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("q_proj.weight"), r, scale, &xn1, &q_full, n, d, qpd, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("q_proj.weight"), &xn1, &q_full, n, d, qpd);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "k_proj") {
+    if lora.rt.hits("k_proj") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("k_proj.weight"), r, scale, &xn1, &k, n, d, kvd, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("k_proj.weight"), &xn1, &k, n, d, kvd);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "v_proj") {
+    if lora.rt.hits("v_proj") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("v_proj.weight"), r, scale, &xn1, &v, n, d, kvd, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("v_proj.weight"), &xn1, &v, n, d, kvd);
         gpu.submit(&[], &s);
     }
 
@@ -720,9 +677,9 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
         ops.matmul(&mut s, &layer.o_proj, &act2, &mixer_out, 0);
         gpu.submit(&[], &s);
     }
-    if let Some((r, scale)) = LoraStore::lora_for(cfg, "o_proj") {
+    if lora.rt.hits("o_proj") {
         let mut s = Vec::new();
-        lora_fwd_streamed(gpu, ids, &lora.ps, &p("o_proj.weight"), r, scale, &ctx_gated, &mixer_out, n, shape.qd(), d, &mut s);
+        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("o_proj.weight"), &ctx_gated, &mixer_out, n, shape.qd(), d);
         gpu.submit(&[], &s);
     }
 
@@ -753,7 +710,7 @@ fn gqa_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: 
     let d_ctx_gated = gpu.storage((n * qd) as u64);
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, cfg, "o_proj", d_out, ctx_gated, &layer.o_proj, &p("o_proj.weight"), &d_ctx_gated, n, qd, d, 0, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "o_proj", d_out, ctx_gated, &layer.o_proj, &p("o_proj.weight"), &d_ctx_gated, n, qd, d, 0, &mut s);
         gpu.submit(&[], &s);
     }
 
@@ -764,9 +721,9 @@ fn gqa_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: 
 
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, cfg, "q_proj", &d_q_full, xn1, &layer.q_proj, &p("q_proj.weight"), d_xn1, n, d, qpd, 0, &mut s);
-        proj_bwd_streamed(gpu, ids, lora, cfg, "k_proj", &d_k, xn1, &layer.k_proj, &p("k_proj.weight"), d_xn1, n, d, kvd, 1, &mut s);
-        proj_bwd_streamed(gpu, ids, lora, cfg, "v_proj", &d_v, xn1, &layer.v_proj, &p("v_proj.weight"), d_xn1, n, d, kvd, 1, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "q_proj", &d_q_full, xn1, &layer.q_proj, &p("q_proj.weight"), d_xn1, n, d, qpd, 0, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "k_proj", &d_k, xn1, &layer.k_proj, &p("k_proj.weight"), d_xn1, n, d, kvd, 1, &mut s);
+        proj_bwd_streamed(gpu, ids, lora, "v_proj", &d_v, xn1, &layer.v_proj, &p("v_proj.weight"), d_xn1, n, d, kvd, 1, &mut s);
         gpu.submit(&[], &s);
     }
 }
@@ -845,7 +802,7 @@ impl StreamTrainer {
         let norm_raw = init.get("norm.weight").unwrap_or_else(|| panic!("stream_train: missing norm.weight"));
         let final_norm = gpu.storage_init("stream_train.final_norm", norm_raw);
 
-        let lora = LoraStore::new(&gpu, cfg, init);
+        let lora = LoraStore::new(&gpu, cfg, init, n);
         StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, final_norm, n, window_budget }
     }
 
@@ -892,7 +849,7 @@ impl StreamTrainer {
         let final_norm = gpu.storage_init("stream_train.final_norm", &norm_raw);
         drop(outside);
 
-        let lora = LoraStore::new(&gpu, cfg, lora_init);
+        let lora = LoraStore::new(&gpu, cfg, lora_init, n);
         Ok(StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, final_norm, n, window_budget })
     }
 

@@ -124,6 +124,7 @@ use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Dispatch, Gpu, Step};
 use model::ops::{Act, Ops, TierPolicy, Weight};
 use model::Shard;
+use model::adapter::exec::AdapterRuntime;
 use paramstore::{ParamStore, Role};
 
 use audio::conv::ConvKernels;
@@ -503,7 +504,6 @@ const CE_GRAD: usize = 84;
 const CAUSAL_CONV1D_STEP: usize = 85;
 const SPLICE: usize = 90;
 const SPLICE_BWD: usize = 91;
-const AXPY: usize = 92;
 const ROUTER_TOPK_COMPACT: usize = 93;
 const MOE_GROUP_COUNTS: usize = 96;
 const SCAN_BLOCK: usize = 97;
@@ -993,20 +993,9 @@ pub struct Qwen35 {
     /// [`Self::reset_decode_cache`].
     gdn_hist: Vec<DeviceBuffer>,
 
-    // ---- LoRA scratch (persistent, reused across every targeted linear) ----
-    // Sized once at construction for `cfg.lora`'s rank and the widest output
-    // dimension across the 9 targetable leaves (GDN's `in_proj_qkv`/
-    // `in_proj_z`/`in_proj_b`/`in_proj_a`/`out_proj`, GQA's `q_proj`/
-    // `k_proj`/`v_proj`/`o_proj`) - mirrors `qwen3::Qwen`'s own
-    // `lora_a`/`lora_da`/`lora_out` fields exactly (see [`Self::lora_fwd`]/
-    // [`Self::proj_bwd`]'s LoRA branch). Size-1 dummies when `cfg.lora` is
-    // `None` (rank forced to 1 in [`Self::new_impl_on`], never read).
-    /// `[n*r]` : `a = x @ Aᵀ`.
-    lora_a: DeviceBuffer,
-    /// `[n*r]` : grad wrt `a`.
-    lora_da: DeviceBuffer,
-    /// `[n*max_out]` : `delta = a @ Bᵀ`.
-    lora_out: DeviceBuffer,
+    /// The trainable adapter's execution (forward correction, backward), when
+    /// `cfg.lora` is set.
+    adapter: Option<AdapterRuntime>,
 
     // ---- pipeline-parallel cross-stage seam (`model::Shardable`) ----------
     // Unlike `qwen3::Qwen`, this file carries no persistent per-layer `dres`
@@ -1610,22 +1599,17 @@ impl Qwen35 {
         let dres_boundary_in = gpu.storage(n * d);
         let dres_boundary_out = RefCell::new(gpu.storage(n * d));
 
-        // LoRA scratch (rank r; max projection output across all 9 targetable
-        // leaves -- GDN's in_proj_qkv/in_proj_z/in_proj_b/in_proj_a/out_proj,
-        // GQA's q_proj/k_proj/v_proj/o_proj -- mirrors `qwen3::model.rs`'s own
-        // sizing exactly). `.max(1)` so a `cfg.lora: None` build still gets a
-        // valid (unused) 1-element rank.
-        let lora_r = cfg.lora.as_ref().map(|l| l.rank as u64).unwrap_or(0).max(1);
+        // The widest output across all 9 targetable leaves (GDN's in_proj_qkv/
+        // in_proj_z/in_proj_b/in_proj_a/out_proj, GQA's q/k/v/o_proj): sizes the
+        // adapter runtime's correction scratch.
         let lora_max_out = cfg
             .linear_conv_dim()
             .max(cfg.linear_value_dim())
             .max(cfg.linear_num_value_heads)
             .max(d as u32)
             .max(cfg.q_proj_dim())
-            .max(cfg.kv_dim()) as u64;
-        let lora_a = gpu.storage(n * lora_r);
-        let lora_da = gpu.storage(n * lora_r);
-        let lora_out = gpu.storage(n * lora_max_out);
+            .max(cfg.kv_dim());
+        let adapter = cfg.lora.as_ref().map(|lora| AdapterRuntime::new(&gpu, lora, n as u32, lora_max_out));
 
         let ones_khd = gpu.storage_init("qwen35.ones_khd", &vec![1.0f32; cfg.linear_key_head_dim as usize]);
 
@@ -1704,9 +1688,7 @@ impl Qwen35 {
             decode_fusion: Cell::new(true),
             gdn_state,
             gdn_hist,
-            lora_a,
-            lora_da,
-            lora_out,
+            adapter,
             dres_boundary_in,
             dres_boundary_out,
         }
@@ -1732,25 +1714,14 @@ impl Qwen35 {
         self.ps.g(name)
     }
 
-    /// True if a LoRA adapter is configured for the given projection leaf
-    /// (one of the 9 targetable leaf names - never an MoE expert leaf).
-    /// Mirrors `qwen3::model.rs`'s own `lora_for` exactly.
-    fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
-        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.scale()))
-    }
-
-    /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`.
-    /// No-op for an untargeted leaf. `m`×`k` is the input, `nout` the output -
-    /// mirrors `qwen3::model.rs`'s own `lora_fwd` exactly (same two-matmul +
-    /// `AXPY` fusion, using this file's own persistent `lora_a`/`lora_out`
-    /// scratch).
+    /// The training LoRA's correction of a targeted linear: `y += scale *
+    /// (x A^t) B^t`. No-op for an untargeted leaf. `m` x `k` is the input,
+    /// `nout` the output.
+    #[allow(clippy::too_many_arguments)]
     fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        let Some((r, scale)) = self.lora_for(leaf) else { return };
-        let g = &self.gpu;
-        let (a, bnm) = model::adapter::device::lora_names(wname);
-        s.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
-        s.push(g.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
-        s.push(g.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
+        if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
+            rt.forward(self.ops.tensor_gemm(), s, &self.ps, wname, x, y, m, k, nout);
+        }
     }
 
     /// Dispatch one of the 9 GDN/GQA mixer linears via `self.ops`/
@@ -1884,22 +1855,11 @@ impl Qwen35 {
     #[allow(clippy::too_many_arguments)]
     fn proj_bwd(&self, steps: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
         let g = &self.gpu;
-        match self.lora_for(leaf) {
-            Some((r, scale)) => {
+        match self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
+            Some(rt) => {
                 // base: dx += d_out·W (frozen weight - no dW).
                 steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
-                let (a, bnm) = model::adapter::device::lora_names(wname);
-                // a = (alpha/r)·(x·Aᵀ)  -> gB += d_outᵀ·a
-                steps.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
-                steps.push(g.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
-                steps.push(g.step(MATMUL_DW, &[d_out, &self.lora_a, self.g(&bnm)], &[m, r, nout], nout * r));
-                // da = (alpha/r)·(d_out·B) -> gA += daᵀ·x ; dx += da·A
-                steps.push(g.step(MATMUL_DX, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], m * r));
-                steps.push(g.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
-                if self.trainable(&a) {
-                    steps.push(g.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
-                }
-                steps.push(g.step(MATMUL_DX, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], m * k));
+                rt.backward(self.ops.tensor_gemm(), steps, &self.ps, wname, d_out, x, dx, m, k, nout);
             }
             None => {
                 if self.trainable(wname) {
