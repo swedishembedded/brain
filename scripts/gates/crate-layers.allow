@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Allowed upward dependencies (from<TAB>to<TAB>reason). Shrink-only: delete the
+# line in the commit that removes the edge. A new upward dependency is a design
+# defect; fix the layering instead of adding a line here.
+brain-januspro	brain-runtime	the image-generation resident drives the event runtime directly; move the controller seam down or invert the dependency
+brain-npu	brain-eval	the NPU export reuses eval's detection scoring; move that scoring into a layer 3 crate
+brain-npu	brain-perf	the NPU export only needs stats::Dist, which perf re-uses; depend on brain-stats directly

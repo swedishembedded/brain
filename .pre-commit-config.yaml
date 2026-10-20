@@ -126,6 +126,20 @@ repos:
         files: '(^crates/.*\.rs$|^scripts/gates/env-writes\.(allow|py)$)'
         pass_filenames: false
         stages: [pre-commit]
+      - id: crate-layers
+        name: "Every workspace crate is on a layer and no crate depends upward"
+        description: >-
+          scripts/gates/crate-layers.map assigns EVERY workspace package a
+          layer (1-6); a normal dependency on a higher-numbered layer fails
+          unless listed with a reason in scripts/gates/crate-layers.allow
+          (shrink-only), and the crate table in .agents/rules/architecture.md
+          must match the map. See scripts/gates/check-crate-layers.sh. Also run
+          by `make check/scripts`.
+        entry: bash scripts/gates/check-crate-layers.sh
+        language: system
+        files: '(^crates/.*Cargo\.toml$|^Cargo\.toml$|^scripts/gates/(crate-layers\.|check-crate-layers\.sh)|^\.agents/rules/architecture\.md$)'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: seed-literals
         name: "No new literal seeds in production code (every default seed is random)"
         description: >-

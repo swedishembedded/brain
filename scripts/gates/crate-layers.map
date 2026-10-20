@@ -1,0 +1,216 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Swedish Embedded AB implements solutions for keeping large Rust inference and
+# training stacks layered and buildable for its clients. If your team needs
+# expertise in architectural dependency enforcement then you can procure our
+# services by sending an email to info@swedishembedded.com.
+#
+# The single source of truth for brain's crate layering
+# (scripts/gates/check-crate-layers.sh; the crate graph in
+# .agents/rules/architecture.md is generated from this file).
+#
+# One line per workspace package: <package><TAB><layer>. A crate may depend
+# (normal dependencies, optional ones included) on crates of its own layer or
+# a lower-numbered one, never on a higher-numbered one; the few existing
+# exceptions are listed with a reason in crate-layers.allow and only shrink.
+#
+#   1  kernels, architecture registry, device-neutral leaf contracts
+#   2  accelerator seam: backends and the gpu-core facade
+#   3  training substrate and shared contracts (checkpoint, paramstore, optim,
+#      model, data, capability and modelstore contracts, residency, events)
+#   4  models (and the services that only models use)
+#   5  cross-cutting evaluation and tooling
+#   6  serving, front ends, the SDK, samples
+
+
+# layer 1: kernels, architecture registry, device-neutral contracts
+brain-arch	1
+brain-backend-api	1
+brain-kernels	1
+brain-kernels-cuda	1
+brain-memauth	1
+brain-seed	1
+
+# layer 2: accelerator seam
+brain-backend-cpu	2
+brain-backend-cuda	2
+brain-backend-vulkan	2
+brain-backend-wgpu	2
+brain-cuda-aot	2
+brain-gpu-core	2
+brain-vulkan	2
+brain-wgsl-cpu	2
+brain-wgsl-cuda	2
+
+# layer 3: training substrate and shared contracts
+brain-atif	3
+brain-audio	3
+brain-audit	3
+brain-camera	3
+brain-capability	3
+brain-checkpoint	3
+brain-data	3
+brain-diffusion	3
+brain-dit	3
+brain-events	3
+brain-forecast	3
+brain-gguf	3
+brain-model	3
+brain-modelref	3
+brain-modelstore	3
+brain-neuro	3
+brain-onnx	3
+brain-optim	3
+brain-paramstore	3
+brain-promote	3
+brain-residency	3
+brain-rlcd	3
+brain-search	3
+brain-shutdown	3
+brain-solve	3
+brain-stats	3
+brain-survival	3
+brain-testutil	3
+brain-timeseries	3
+brain-trace	3
+brain-vae	3
+brain-vision	3
+brain-weightset	3
+
+# layer 4: models
+brain-arcface	4
+brain-bisenet	4
+brain-campplus	4
+brain-captioner	4
+brain-chronos2	4
+brain-clip	4
+brain-codeformer	4
+brain-connectome	4
+brain-controlnet	4
+brain-cosyvoice	4
+brain-decide	4
+brain-decisions	4
+brain-deepseek2	4
+brain-deepseek2ocr	4
+brain-deepseekocr2	4
+brain-deepseekvl	4
+brain-diamond	4
+brain-ecapatdnn	4
+brain-fastvlm	4
+brain-fincast	4
+brain-florence2	4
+brain-flux1	4
+brain-flux2	4
+brain-fly	4
+brain-flybody	4
+brain-gemma4	4
+brain-genieredux	4
+brain-glmdsa	4
+brain-gpt2	4
+brain-horizon	4
+brain-imaging	4
+brain-imgpipe	4
+brain-instantid	4
+brain-januspro	4
+brain-kronos	4
+brain-lfm2	4
+brain-llava	4
+brain-llmserve	4
+brain-lpips	4
+brain-ltxv	4
+brain-mimi	4
+brain-minicpmv	4
+brain-minimaxh3	4
+brain-minimaxmusic3	4
+brain-modernbert	4
+brain-moondream3	4
+brain-mujoco	4
+brain-mvs	4
+brain-nemotronasr	4
+brain-npu	4
+brain-pulid	4
+brain-qwen3	4
+brain-qwen35	4
+brain-qwen35moe	4
+brain-qwen3asr	4
+brain-qwen3omnimoe	4
+brain-qwen3tts	4
+brain-qwen3vl	4
+brain-qwen3vlmoe	4
+brain-recon	4
+brain-rrdbnet	4
+brain-s3dit	4
+brain-s3tokenizer	4
+brain-sam1	4
+brain-sam2	4
+brain-scrfd	4
+brain-sdxlunet	4
+brain-sfm	4
+brain-splat	4
+brain-supir	4
+brain-t5encoder	4
+brain-timesfm3	4
+brain-toyautoencoder	4
+brain-toymoe	4
+brain-toypid	4
+brain-toyseq2seq	4
+brain-viewport	4
+brain-vqgan	4
+brain-wan	4
+brain-wm-core	4
+brain-wm-display	4
+brain-worldmirror2	4
+brain-yolov8	4
+brain-zipdepth	4
+
+# layer 5: cross-cutting services
+brain-bench	5
+brain-capture	5
+brain-eval	5
+brain-fcbench	5
+brain-federated	5
+brain-gradcheck	5
+brain-modelcost	5
+brain-rl	5
+
+# layer 6: serving, front ends, SDK, samples
+brain	6
+brain-apiserve	6
+brain-appopts	6
+brain-capability-mock	6
+brain-catalog	6
+brain-cli	6
+brain-dbus	6
+brain-hfsm	6
+brain-loader	6
+brain-perf	6
+brain-runtime	6
+brain-server	6
+brain-serving	6
+brain-web	6
+braintop	6
+sample-decision-arena	6
+sample-decision-doom	6
+sample-decision-intents	6
+sample-decision-json	6
+sample-decision-patterns	6
+sample-decision-rubiks	6
+sample-decision-salesagent	6
+sample-decision-triage	6
+sample-fly-interactive	6
+sample-imagegen-batch	6
+sample-imagegen-generate	6
+sample-learning-reader	6
+sample-learning-rlcd	6
+sample-learning-visualclick	6
+sample-reconstruction-splat	6
+sample-study-chat	6
+sample-study-document	6
+sample-study-timeline	6
+sample-text-embed	6
+sample-text-embed-train	6
+sample-text-encoder-finetune	6
+sample-text-retrieve	6
+sample-text-retrieve-json	6
+sample-tts-clone	6

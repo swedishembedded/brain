@@ -699,8 +699,8 @@ check/seed-literals/tests:
 	bash scripts/gates/check-seed-literals.sh --tests
 
 # Spec for the gate above, run against throwaway trees (needs only bats).
-## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels)
-test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels
+## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers)
+test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers
 
 ## test/gates/test-skips - the silent-skip ratchet fails on a new bare skip and on a stale entry, passes on a match
 test/gates/test-skips:
@@ -717,6 +717,10 @@ test/gates/env-writes:
 ## test/gates/seed-literals - the seed-literal ratchet fails on a new literal, a stale entry and (in test mode) a bare test seed
 test/gates/seed-literals:
 	bats tests/gates/seed_literals.bats
+
+## test/gates/crate-layers - the layer map gate fails on an unassigned package, an upward dependency, a stale allowlist entry and a drifted crate table
+test/gates/crate-layers:
+	bats tests/gates/crate_layers.bats
 
 ## test/gates/group-kernels - the kernel-table grouping sums to the table total and bills unknown kernels to misc
 test/gates/group-kernels:

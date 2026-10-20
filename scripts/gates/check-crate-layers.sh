@@ -19,7 +19,8 @@
 # side of the cycle. This gate is the thing that says so, at check time,
 # instead of six months later at the next call site.
 #
-# The rule: a leaf crate's whole normal-dependency closure (its own
+# The whole-workspace rule (every package on a layer, no upward dependency) is
+# scripts/gates/crate-layers.py, called below. The leaf rule: a leaf crate's whole normal-dependency closure (its own
 # dependencies, transitively - dev-dependencies excluded, since Cargo permits
 # cycles through those and they never reach a consumer) may contain only
 # crates from layers 1-3.
@@ -36,30 +37,17 @@ cd "$(dirname "$0")/../.." || exit 2
 # Crates that must remain usable from a layer-4 model crate.
 LEAF_CRATES="brain-promote brain-rlcd brain-search brain-audit brain-survival brain-seed"
 
-# Layers 1-3 of .agents/rules/architecture.md: kernels + the architecture
-# registry, the accelerator seam, and the training substrate. Everything else
-# in the workspace is layer 4 or below it and may not appear in a leaf crate's
-# closure.
-LAYER_1_TO_3="
-brain-kernels
-brain-arch
-brain-backend-api
-brain-backend-wgpu
-brain-backend-cpu
-brain-backend-vulkan
-brain-wgsl-cpu
-brain-wgsl-cuda
-brain-gpu-core
-brain-paramstore
-brain-optim
-brain-checkpoint
-brain-gguf
-brain-data
-brain-seed
-brain-model
-"
+# Layers 1-3 of .agents/rules/architecture.md, read from the single layer map
+# (crate-layers.map). Everything else in the workspace is layer 4 or above and
+# may not appear in a leaf crate's closure.
+LAYER_1_TO_3="$(awk -F'\t' '!/^#/ && NF >= 2 && $2 <= 3 {print $1}' scripts/gates/crate-layers.map)"
 
 fail=0
+
+# Whole-workspace layer map: every package assigned, no upward dependency
+# beyond the reasoned allowlist, architecture.md's crate table in agreement.
+python3 scripts/gates/crate-layers.py || fail=1
+
 
 for leaf in $LEAF_CRATES; do
     if ! tree=$(cargo tree --offline --edges normal --prefix none --all-features -p "$leaf" 2>&1); then

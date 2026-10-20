@@ -37,7 +37,48 @@ depend on what.
 
 ## Crate graph
 
-Six layers. Each may depend only on layers above it.
+Six layers. Each may depend only on layers above it (and on its own layer).
+The table below is generated from `scripts/gates/crate-layers.map`, which
+`scripts/gates/check-crate-layers.sh` enforces for every workspace package;
+where the prose diagram that follows disagrees with it, the table wins and the
+diagram is stale.
+
+<!-- crate-layers:begin (generated from scripts/gates/crate-layers.map; edit the map, then run scripts/gates/crate-layers.py --write-doc) -->
+```text
+layer 1 - kernels, architecture registry, device-neutral contracts
+    arch, backend-api, kernels, kernels-cuda, memauth, seed
+layer 2 - accelerator seam: backends and the gpu-core facade
+    backend-cpu, backend-cuda, backend-vulkan, backend-wgpu, cuda-aot, gpu-core, vulkan, wgsl-
+    cpu, wgsl-cuda
+layer 3 - training substrate and shared contracts
+    atif, audio, audit, camera, capability, checkpoint, data, diffusion, dit, events, forecast,
+    gguf, model, modelref, modelstore, neuro, onnx, optim, paramstore, promote, residency, rlcd,
+    search, shutdown, solve, stats, survival, testutil, timeseries, trace, vae, vision,
+    weightset
+layer 4 - models
+    arcface, bisenet, campplus, captioner, chronos2, clip, codeformer, connectome, controlnet,
+    cosyvoice, decide, decisions, deepseek2, deepseek2ocr, deepseekocr2, deepseekvl, diamond,
+    ecapatdnn, fastvlm, fincast, florence2, flux1, flux2, fly, flybody, gemma4, genieredux,
+    glmdsa, gpt2, horizon, imaging, imgpipe, instantid, januspro, kronos, lfm2, llava, llmserve,
+    lpips, ltxv, mimi, minicpmv, minimaxh3, minimaxmusic3, modernbert, moondream3, mujoco, mvs,
+    nemotronasr, npu, pulid, qwen3, qwen35, qwen35moe, qwen3asr, qwen3omnimoe, qwen3tts,
+    qwen3vl, qwen3vlmoe, recon, rrdbnet, s3dit, s3tokenizer, sam1, sam2, scrfd, sdxlunet, sfm,
+    splat, supir, t5encoder, timesfm3, toyautoencoder, toymoe, toypid, toyseq2seq, viewport,
+    vqgan, wan, wm-core, wm-display, worldmirror2, yolov8, zipdepth
+layer 5 - cross-cutting evaluation and tooling
+    bench, capture, eval, fcbench, federated, gradcheck, modelcost, rl
+layer 6 - serving, front ends, SDK, samples
+    apiserve, appopts, brain, braintop, capability-mock, catalog, cli, dbus, hfsm, loader, perf,
+    runtime, sample-decision-arena, sample-decision-doom, sample-decision-intents, sample-
+    decision-json, sample-decision-patterns, sample-decision-rubiks, sample-decision-salesagent,
+    sample-decision-triage, sample-fly-interactive, sample-imagegen-batch, sample-imagegen-
+    generate, sample-learning-reader, sample-learning-rlcd, sample-learning-visualclick, sample-
+    reconstruction-splat, sample-study-chat, sample-study-document, sample-study-timeline,
+    sample-text-embed, sample-text-embed-train, sample-text-encoder-finetune, sample-text-
+    retrieve, sample-text-retrieve-json, sample-tts-clone, server, serving, web
+```
+<!-- crate-layers:end -->
+
 
 ```
  ─── 1. kernels & architecture registry ────────────────────────────────────
