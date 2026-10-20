@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn with_threads_sizes_the_pool_the_loops_run_in() {
-        assert_eq!(with_threads(3, || rayon::current_num_threads()), 3);
+        assert_eq!(with_threads(3, rayon::current_num_threads), 3);
         let mut v = vec![0u32; 100];
         with_threads(2, || chunks_mut(&mut v, 10, |i, c| c.iter_mut().for_each(|x| *x = i as u32)));
         assert_eq!(v[99], 9);
