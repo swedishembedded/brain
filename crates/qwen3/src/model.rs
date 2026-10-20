@@ -3539,7 +3539,7 @@ impl Qwen {
                 // reads coalesced.
                 let bt: Vec<f32> = (0..r as usize).flat_map(|k| site.b.iter().skip(k).step_by(r as usize).map(move |&v| v * scale)).collect();
                 debug_assert_eq!(bt.len(), out * r as usize);
-                let lora = model::dispatch::LoraW { a: self.gpu.storage_init("lora_a", &site.a), bt: self.gpu.storage_init("lora_bt", &bt), r };
+                let lora = model::dispatch::LoraW { a: self.gpu.storage_init("adapter_a", &site.a), bt: self.gpu.storage_init("adapter_bt", &bt), r };
                 (site.base.clone(), lora)
             })
             .collect();

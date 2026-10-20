@@ -1195,7 +1195,7 @@ pub mod device_adapter {
                 (name.clone(), shape, data)
             })
             .collect();
-        assert!(!tensors.is_empty(), "save_adapter: no .lora_a/.lora_b tensors in the param store");
+        assert!(!tensors.is_empty(), "save_adapter: no adapter tensors in the param store");
 
         let mut card = ModelCard::new(card_id, family);
         card.variant_of = Some(base_id.to_string());
@@ -1301,7 +1301,7 @@ pub mod device_adapter {
         let alpha = a.alpha.unwrap_or(rank as f32);
 
         if let Some(orphan) = st.tensors.keys().filter_map(|n| n.strip_suffix(LORA_B)).find(|base| !st.tensors.contains_key(&format!("{base}{LORA_A}"))) {
-            return Err(invalid(adapter_path, format!("{orphan}.lora_b has no matching .lora_a")));
+            return Err(invalid(adapter_path, format!("{orphan}{LORA_B} has no matching {LORA_A}")));
         }
         let mut names: Vec<String> = st.tensors.keys().filter_map(|n| n.strip_suffix(LORA_A)).map(str::to_string).collect();
         names.sort();
@@ -1309,14 +1309,14 @@ pub mod device_adapter {
         let mut sites = Vec::with_capacity(names.len());
         for base in names {
             let a = st.tensors.remove(&format!("{base}{LORA_A}")).expect("listed above");
-            let b = st.tensors.remove(&format!("{base}{LORA_B}")).ok_or_else(|| invalid(adapter_path, format!("missing {base}.lora_b")))?;
+            let b = st.tensors.remove(&format!("{base}{LORA_B}")).ok_or_else(|| invalid(adapter_path, format!("missing {base}{LORA_B}")))?;
             if a.is_empty() || b.is_empty() || !a.len().is_multiple_of(r) || b.len() % r != 0 {
                 return Err(invalid(adapter_path, format!("{base}: factor sizes {} / {} are not whole rank-{rank} matrices", a.len(), b.len())));
             }
             sites.push(AdapterSite { base, a, b });
         }
         if sites.is_empty() {
-            return Err(invalid(adapter_path, "contains no .lora_a/.lora_b pairs".into()));
+            return Err(invalid(adapter_path, "contains no adapter pairs".into()));
         }
         if let Some(declared) = a.targets.as_deref() {
             check_declared_targets(declared, &sites).map_err(|why| invalid(adapter_path, why))?;
@@ -1558,20 +1558,20 @@ impl crate::adapter::AdapterKind for LoraPair {
         if let Some((shape, data)) = get(LORA_A) {
             let want = [self.pair.r, self.pair.inn];
             if !shape.is_empty() && shape != want {
-                return Err(format!("LoraPair::load_tensors: .lora_a shape {shape:?} does not match {want:?}"));
+                return Err(format!("LoraPair::load_tensors: {LORA_A} shape {shape:?} does not match {want:?}"));
             }
             if data.len() != want[0] * want[1] {
-                return Err(format!("LoraPair::load_tensors: .lora_a has {} elements, expected {}", data.len(), want[0] * want[1]));
+                return Err(format!("LoraPair::load_tensors: {LORA_A} has {} elements, expected {}", data.len(), want[0] * want[1]));
             }
             self.pair.a = data;
         }
         if let Some((shape, data)) = get(LORA_B) {
             let want = [self.pair.out, self.pair.r];
             if !shape.is_empty() && shape != want {
-                return Err(format!("LoraPair::load_tensors: .lora_b shape {shape:?} does not match {want:?}"));
+                return Err(format!("LoraPair::load_tensors: {LORA_B} shape {shape:?} does not match {want:?}"));
             }
             if data.len() != want[0] * want[1] {
-                return Err(format!("LoraPair::load_tensors: .lora_b has {} elements, expected {}", data.len(), want[0] * want[1]));
+                return Err(format!("LoraPair::load_tensors: {LORA_B} has {} elements, expected {}", data.len(), want[0] * want[1]));
             }
             self.pair.b = data;
         }
@@ -1595,6 +1595,7 @@ impl crate::adapter::AdapterKind for LoraPair {
 /// does - do not match the moment tensors and are unaffected, so a pool
 /// adapter can still be folded by the ordinary path.
 pub mod resumable {
+    use super::{LORA_A, LORA_B};
     use checkpoint::st::{Adapter, ModelCard};
 
     use super::Pair;
@@ -1610,13 +1611,13 @@ pub mod resumable {
         let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::with_capacity(pairs.len() * 6);
         for (key, p) in pairs {
             let (a_shape, b_shape) = (vec![p.r as u64, p.inn as u64], vec![p.out as u64, p.r as u64]);
-            tensors.push((format!("{key}.lora_a"), a_shape.clone(), p.a.clone()));
-            tensors.push((format!("{key}.lora_b"), b_shape.clone(), p.b.clone()));
+            tensors.push((format!("{key}{LORA_A}"), a_shape.clone(), p.a.clone()));
+            tensors.push((format!("{key}{LORA_B}"), b_shape.clone(), p.b.clone()));
             if p.has_moments() {
-                tensors.push((format!("{key}.lora_a.m"), a_shape.clone(), p.ma.clone()));
-                tensors.push((format!("{key}.lora_a.v"), a_shape, p.va.clone()));
-                tensors.push((format!("{key}.lora_b.m"), b_shape.clone(), p.mb.clone()));
-                tensors.push((format!("{key}.lora_b.v"), b_shape, p.vb.clone()));
+                tensors.push((format!("{key}{LORA_A}.m"), a_shape.clone(), p.ma.clone()));
+                tensors.push((format!("{key}{LORA_A}.v"), a_shape, p.va.clone()));
+                tensors.push((format!("{key}{LORA_B}.m"), b_shape.clone(), p.mb.clone()));
+                tensors.push((format!("{key}{LORA_B}.v"), b_shape, p.vb.clone()));
             }
         }
 
@@ -1649,15 +1650,15 @@ pub mod resumable {
             .and_then(|c| c.adapter.as_ref().and_then(|a| a.rank))
             .unwrap_or_else(|| panic!("resumable::load: {path} carries no adapter rank")) as usize;
 
-        let mut keys: Vec<&str> = st.tensors.keys().filter_map(|n| n.strip_suffix(".lora_a")).collect();
+        let mut keys: Vec<&str> = st.tensors.keys().filter_map(|n| n.strip_suffix(LORA_A)).collect();
         keys.sort();
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
-            let a = st.tensors.get(&format!("{key}.lora_a")).expect("checked by the filter above").clone();
+            let a = st.tensors.get(&format!("{key}{LORA_A}")).expect("checked by the filter above").clone();
             let b = st
                 .tensors
-                .get(&format!("{key}.lora_b"))
-                .unwrap_or_else(|| panic!("resumable::load: {path} has {key}.lora_a with no matching .lora_b"))
+                .get(&format!("{key}{LORA_B}"))
+                .unwrap_or_else(|| panic!("resumable::load: {path} has {key}{LORA_A} with no matching {LORA_B}"))
                 .clone();
             let inn = a.len() / rank;
             let o = b.len() / rank;

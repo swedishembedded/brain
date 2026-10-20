@@ -100,7 +100,7 @@ impl SyncRollout for EngineRollout {
                 }
                 let (base_name, new) = if let Some(base_name) = name.strip_suffix(LORA_A) {
                     let lora = self.lora.as_ref().ok_or_else(|| format!("{name}: an adapter, but this rollout was built without a LoRA shape"))?;
-                    let b = trained.get(&format!("{base_name}{LORA_B}")).ok_or_else(|| format!("{name} has no .lora_b"))?;
+                    let b = trained.get(&format!("{base_name}{LORA_B}")).ok_or_else(|| format!("{name} has no {LORA_B}"))?;
                     let w = self.base.get(base_name).ok_or_else(|| format!("{base_name}: the adapter's base is not a weight of this model"))?;
                     let r = lora.rank as usize;
                     let (inn, out) = (value.len() / r, b.len() / r);

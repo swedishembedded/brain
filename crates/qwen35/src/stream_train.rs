@@ -304,7 +304,7 @@ impl LoraStore {
         assert!(cfg.lora.is_some(), "stream_train::LoraStore::new: cfg.lora must be set");
         let lora_init: HashMap<String, Vec<f32>> = init.iter().filter(|(k, _)| model::adapter::device::is_adapter_param(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
         let expect_n = cfg.param_list().iter().filter(|(k, _)| model::adapter::device::is_adapter_param(k)).count();
-        assert_eq!(lora_init.len(), expect_n, "stream_train::LoraStore::new: init map is missing some of cfg.param_list()'s .lora_a/.lora_b tensors");
+        assert_eq!(lora_init.len(), expect_n, "stream_train::LoraStore::new: init map is missing some of cfg.param_list()'s adapter tensors");
         let hp = cfg.lora.as_ref().expect("asserted above").hp();
         let roles: Vec<(String, usize, paramstore::Role)> =
             lora_init.iter().map(|(k, v)| (k.clone(), v.len(), model::adapter::device::role_of(k, &hp))).collect();
