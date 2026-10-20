@@ -22,5 +22,9 @@ exponent and mantissa bits into an f32, a select for the subnormal range, the si
 int8's 0.37 in an interleaved pair (bench8b-*-b.log); the whole 16-row step was 17.1 ms (fp8) against 21.6 ms (int8)
 there, which is the noise of the shared card, not a gain: fp8 and int8 are indistinguishable at the step level.
 
+At 32 rows (two interleaved pairs, bench8b-*-r32-c2048-r1/r2.log) the split-key decode took 0.42-0.44 ms per call in
+fp8 and 0.40-0.46 in int8; the whole step 32.7 and 26.4 ms (fp8) against 22.1 and 25.2 ms (int8), so a step-level
+cost of up to ten percent for fp8 cannot be excluded at n = 2 on a card shared with two servers.
+
 Not done: no tensor-core prefill kernel reads fp8 rows (the portable fused prefill runs), and the FP4/INT4 tiers are
 not started (the evidence above says fp8 is usable, int4 needs its own accuracy campaign).
