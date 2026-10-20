@@ -271,19 +271,16 @@ pub fn int8_kv_variant(name: &str, src: &'static str, binding: &str, scales: &st
 /// WGSL decoding one E4M3 byte (`b` in `0..=255`) to `f32`: sign in bit 7, four
 /// exponent bits (bias 7), three mantissa bits; exponent 0 is subnormal
 /// (`m * 2^-9`). Code 0x7F / 0xFF is NaN in the format and is never written by
-/// the append kernel; this decode maps it to the format's largest-exponent
-/// value rather than testing for it.
+/// the append kernel; this decode does not test for it.
 macro_rules! fp8_e4m3_wgsl {
     () => {
-        "fn fp8_e4m3(b: u32) -> f32 {
-    let e = (b >> 3u) & 15u;
-    let m = b & 7u;
-    let neg = (b & 128u) != 0u;
-    if (e == 0u) {
-        let sub = f32(m) * 0.001953125;
-        return select(sub, -sub, neg);
-    }
-    return bitcast<f32>(((b & 128u) << 24u) | ((e + 120u) << 23u) | (m << 20u));
+        "// Branch-free: a normal value is the byte's exponent and mantissa bits moved into an f32 with
+// the exponent rebiased (+120); a subnormal (exponent 0) is mantissa * 2^-9; the sign bit ORs in.
+fn fp8_e4m3(b: u32) -> f32 {
+    let normal = bitcast<f32>(((b & 127u) << 20u) + 1006632960u);
+    let sub = f32(b & 7u) * 0.001953125;
+    let mag = select(normal, sub, (b & 120u) == 0u);
+    return bitcast<f32>(bitcast<u32>(mag) | ((b & 128u) << 24u));
 }
 "
     };

@@ -389,6 +389,52 @@ fn a_ceiling_is_refused_by_unscaled_planes() {
     }
 }
 
+/// Every finite E4M3 value survives a round trip through the device: appended at scale 1 (each
+/// row carries 448, so the row scale is exactly 1) it is stored as its own byte, and the read
+/// kernels decode that byte back to the same value. Exhaustive over the 254 finite codes, so the
+/// encode rounding, the subnormal range and both decode paths are pinned, not sampled.
+fn every_finite_e4m3_value_round_trips_through_append_and_the_read_kernel(g: &Gpu, label: &str) {
+    let tier = KvTier::FP8;
+    let s = Shape { n_heads: 1, n_kv: 1, head_dim: 64, block_size: 8, num_blocks: 1 };
+    let values: Vec<f32> = (0..=255u8).filter(|c| c & 0x7F != 0x7F).map(model::kv_tier::decode_e4m3).collect();
+    let mut rows = Vec::new();
+    for chunk in values.chunks(63) {
+        rows.push(448.0);
+        rows.extend_from_slice(chunk);
+        rows.resize(rows.len().next_multiple_of(64), 0.0);
+    }
+    let t = (rows.len() / 64) as u32;
+    let (blocks, offsets) = place(t, s.block_size, &[0]);
+    let plane = filled(g, tier, &s, &rows, &blocks, &offsets);
+    let stored = plane.read_dequantized(g, s.rows() as usize, 64, 64);
+    assert_eq!(&stored[..rows.len()], &rows[..], "{label}: append stored a different value than it was given");
+
+    // One-hot queries read each element back through the scores kernel: score[j] = K[j][d].
+    let (table, seq_lens) = (u32s(g, &[0]), u32s(g, &[t]));
+    let kernels = KvKernels::resolve(g, tier).unwrap();
+    let shape = PagedDecodeShape { batch: 1, n_heads: 1, group: 1, head_dim: 64, block_size: s.block_size, kv_stride: 64, cap: t, max_bt: 1, scale: 1.0 };
+    for d in 0..64usize {
+        let mut q = vec![0f32; 64];
+        q[d] = 1.0;
+        let (q, sc) = (g.storage_init("q", &q), g.storage(t as u64));
+        g.submit(&[], &[kernels.scores(g, &q, &plane, &table, &seq_lens, &sc, shape)]);
+        let got = g.read(&sc, t as usize);
+        for j in 0..t as usize {
+            assert_eq!(got[j], rows[j * 64 + d], "{label}: scores kernel read {} for stored {} (row {j}, dim {d})", got[j], rows[j * 64 + d]);
+        }
+    }
+}
+
+#[test]
+fn every_finite_e4m3_value_round_trips_on_cpu_and_gpu() {
+    every_finite_e4m3_value_round_trips_through_append_and_the_read_kernel(&Gpu::new_cpu(kernels()), "cpu");
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    if brain_testutil::gpu_tests_skipped() {
+        return;
+    }
+    every_finite_e4m3_value_round_trips_through_append_and_the_read_kernel(&Gpu::new_gpu(kernels()), "gpu");
+}
+
 fn on_cpu(f: impl Fn(&Gpu, KvTier, &str)) {
     let g = Gpu::new_cpu(kernels());
     for tier in [KvTier::BF16, KvTier::INT8, KvTier::FP8] {
