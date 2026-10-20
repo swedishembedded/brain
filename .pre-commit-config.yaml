@@ -162,6 +162,17 @@ repos:
         files: '(^crates/.*\.rs$|^scripts/gates/(format-logic\.|check-format-logic\.sh|ratchet\.py))'
         pass_filenames: false
         stages: [pre-commit]
+      - id: adapter-naming
+        name: "Adapter parameter naming lives only in model::adapter"
+        description: >-
+          the adapter-naming ratchet fails on a .lora_a/.lora_b string outside model::adapter and on a stale entry, ignores comments and tests. Allowlist: scripts/gates/adapter-naming.allow (path, count, reason;
+          shrink-only). See scripts/gates/check-adapter-naming.sh. Also run by
+          `make check/scripts`.
+        entry: bash scripts/gates/check-adapter-naming.sh
+        language: system
+        files: '(^crates/.*\.rs$|^scripts/gates/(adapter-naming\.|check-adapter-naming\.sh|ratchet\.py))'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: seed-literals
         name: "No new literal seeds in production code (every default seed is random)"
         description: >-
