@@ -43,7 +43,7 @@ fn decode_step_time_and_concurrency_per_kv_tier_at_the_27b_attention_shape() {
                 let logits = engine.logits(&hidden);
                 next.push(logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).unwrap());
             }
-            let mut step = |engine: &mut Engine, tables: &mut Vec<BlockTable>, next: &mut Vec<u32>| {
+            let step = |engine: &mut Engine, tables: &mut Vec<BlockTable>, next: &mut Vec<u32>| {
                 let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
                 *next = engine.forward_batched_greedy(&mut refs, next);
             };
