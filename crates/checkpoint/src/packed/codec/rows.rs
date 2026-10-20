@@ -81,9 +81,33 @@ pub(super) enum EncodeKind {
     Float(FloatFormat),
     Int8Block(usize),
     Nf4Block(usize),
+    /// Unscaled FP8.
+    Fp8(FloatFormat),
+    /// FP8 with one bf16/f32 scale per `rows x cols` tile.
+    Fp8Tiled { fmt: FloatFormat, rows: usize, cols: usize, scale: FloatFormat },
+    /// E2M1 with an E4M3 scale per 16 and an f32 scale per tensor.
+    Nvfp4,
+    /// E2M1 with an E8M0 scale per 32.
+    Mxfp4,
 }
 
 pub(super) fn encode_kind(enc: &QuantEncoding) -> Option<EncodeKind> {
+    if *enc == QuantEncoding::nvfp4() {
+        return Some(EncodeKind::Nvfp4);
+    }
+    if *enc == QuantEncoding::mxfp4() {
+        return Some(EncodeKind::Mxfp4);
+    }
+    match (enc.element, enc.scales.as_slice()) {
+        (Element::Float(f @ (FloatFormat::E4M3Fn | FloatFormat::E5M2)), []) => return Some(EncodeKind::Fp8(f)),
+        (Element::Float(f @ (FloatFormat::E4M3Fn | FloatFormat::E5M2)), [l]) => {
+            return match (l.granularity, l.format) {
+                (ScaleGranularity::Tile2d { rows, cols }, s @ (FloatFormat::Bf16 | FloatFormat::F32)) => Some(EncodeKind::Fp8Tiled { fmt: f, rows: rows as usize, cols: cols as usize, scale: s }),
+                _ => None,
+            }
+        }
+        _ => {}
+    }
     let block = match enc.scales.as_slice() {
         [] => None,
         [l] if l.format == FloatFormat::F32 => match l.granularity {
@@ -111,7 +135,7 @@ fn f32s_to_le(vals: &[f32], out: &mut Vec<u8>) {
 }
 
 /// Encode tile `elems` (`values`, row-major) of `desc` into `out`.
-pub(super) fn encode(desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32], out: &mut TileBuf) -> Result<(), String> {
+pub(super) fn encode(desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32], ctx: &super::EncodeCtx, out: &mut TileBuf) -> Result<(), String> {
     let kind = encode_kind(&desc.encoding).ok_or_else(|| format!("{}: cannot encode {}", desc.name, desc.encoding))?;
     if values.len() as u64 != elems.end - elems.start {
         return Err(format!("{}: {} values for tile {elems:?}", desc.name, values.len()));
@@ -123,8 +147,22 @@ pub(super) fn encode(desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32]
             return Err(format!("{}: tile {elems:?} is not aligned to {n}-element blocks", desc.name));
         }
     }
+    if let EncodeKind::Fp8Tiled { rows, .. } = kind {
+        let band = rows * inner;
+        if !(elems.start as usize).is_multiple_of(band) || !(values.len().is_multiple_of(band) || elems.end == desc.numel()) {
+            return Err(format!("{}: tile {elems:?} is not aligned to whole {rows}-row scale bands", desc.name));
+        }
+    }
     out.scales.clear();
     match kind {
+        EncodeKind::Fp8(fmt) => {
+            let grid = grid(fmt);
+            out.payload.clear();
+            out.payload.extend(values.iter().map(|&v| nearest(grid, v)));
+        }
+        EncodeKind::Fp8Tiled { fmt, rows, cols, scale } => encode_fp8_tiled(values, inner, fmt, rows, cols, scale, out),
+        EncodeKind::Nvfp4 => encode_nvfp4(values, ctx.tensor_absmax, out),
+        EncodeKind::Mxfp4 => encode_mxfp4(values, out),
         EncodeKind::Float(FloatFormat::F32) => f32s_to_le(values, &mut out.payload),
         EncodeKind::Float(FloatFormat::F16) => {
             out.payload.clear();
@@ -153,4 +191,145 @@ pub(super) fn encode(desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32]
         }
     }
     Ok(())
+}
+
+/// The finite non-negative codes of a float format with their values, ascending, for nearest-value
+/// encoding. Index == value order, so a binary search finds the neighbours.
+struct Grid {
+    /// `(value, code)`, ascending by value.
+    mags: Vec<(f32, u8)>,
+    /// The code's sign bit.
+    sign: u8,
+}
+
+fn grid(fmt: FloatFormat) -> &'static Grid {
+    use std::sync::OnceLock;
+    static E4M3: OnceLock<Grid> = OnceLock::new();
+    static E5M2: OnceLock<Grid> = OnceLock::new();
+    static E2M1: OnceLock<Grid> = OnceLock::new();
+    let build = |codes: u16, sign: u8| {
+        let mut mags: Vec<(f32, u8)> = (0..codes as u8).map(|c| (super::decode_float_code(fmt, c as u32), c)).filter(|(v, _)| v.is_finite()).collect();
+        mags.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Grid { mags, sign }
+    };
+    match fmt {
+        FloatFormat::E4M3Fn => E4M3.get_or_init(|| build(0x80, 0x80)),
+        FloatFormat::E5M2 => E5M2.get_or_init(|| build(0x80, 0x80)),
+        FloatFormat::E2M1 => E2M1.get_or_init(|| build(8, 0x8)),
+        other => unreachable!("{other:?} has no code grid"),
+    }
+}
+
+/// The code nearest to `v` (saturating at the format's largest finite value; ties go to the even code,
+/// the usual round-to-nearest-even of the format's mantissa). NaN encodes as zero.
+fn nearest(g: &Grid, v: f32) -> u8 {
+    let a = v.abs();
+    if a.is_nan() {
+        return 0;
+    }
+    let hi = g.mags.partition_point(|m| m.0 < a);
+    let code = if hi == 0 {
+        g.mags[0].1
+    } else if hi == g.mags.len() {
+        g.mags[hi - 1].1
+    } else {
+        let (lo, up) = (g.mags[hi - 1], g.mags[hi]);
+        let (dl, du) = (a - lo.0, up.0 - a);
+        if dl < du || (dl == du && lo.1 % 2 == 0) { lo.1 } else { up.1 }
+    };
+    if v.is_sign_negative() && code != 0 { code | g.sign } else { code }
+}
+
+fn max_finite(fmt: FloatFormat) -> f32 {
+    grid(fmt).mags.last().map_or(1.0, |m| m.0)
+}
+
+/// Round `s` to the precision of a stored scale format.
+fn as_scale(fmt: FloatFormat, s: f32) -> f32 {
+    match fmt {
+        FloatFormat::Bf16 => half::bf16::from_f32(s).to_f32(),
+        _ => s,
+    }
+}
+
+fn scale_bytes(fmt: FloatFormat, s: f32, out: &mut Vec<u8>) {
+    match fmt {
+        FloatFormat::Bf16 => out.extend_from_slice(&half::bf16::from_f32(s).to_le_bytes()),
+        _ => out.extend_from_slice(&s.to_le_bytes()),
+    }
+}
+
+fn absmax(xs: &[f32]) -> f32 {
+    xs.iter().fold(0f32, |m, &v| if v.is_nan() { m } else { m.max(v.abs()) })
+}
+
+/// FP8 with one scale per `rows x cols` tile: scale = tile absmax / largest finite code (floored to 1
+/// for an all-zero tile), stored at the scale format's precision and divided out with that stored value.
+fn encode_fp8_tiled(values: &[f32], inner: usize, fmt: FloatFormat, rows: usize, cols: usize, scale_fmt: FloatFormat, out: &mut TileBuf) {
+    let (g, top) = (grid(fmt), max_finite(fmt));
+    let n_rows = values.len() / inner;
+    let per_band = inner.div_ceil(cols);
+    out.payload.clear();
+    out.payload.resize(values.len(), 0);
+    out.scales.push(Vec::new());
+    for b in 0..n_rows.div_ceil(rows) {
+        let (r0, r1) = (b * rows, ((b + 1) * rows).min(n_rows));
+        for cb in 0..per_band {
+            let (c0, c1) = (cb * cols, ((cb + 1) * cols).min(inner));
+            let amax = (r0..r1).flat_map(|r| values[r * inner + c0..r * inner + c1].iter()).fold(0f32, |m, &v| if v.is_nan() { m } else { m.max(v.abs()) });
+            let s = if amax > 0.0 { as_scale(scale_fmt, amax / top) } else { 1.0 };
+            let s = if s > 0.0 && s.is_finite() { s } else { 1.0 };
+            scale_bytes(scale_fmt, s, &mut out.scales[0]);
+            for r in r0..r1 {
+                for c in c0..c1 {
+                    out.payload[r * inner + c] = nearest(g, values[r * inner + c] / s);
+                }
+            }
+        }
+    }
+}
+
+fn pack_nibbles(codes: impl Iterator<Item = u8>, n: usize, out: &mut Vec<u8>) {
+    out.clear();
+    out.resize(n.div_ceil(2), 0);
+    for (i, c) in codes.enumerate() {
+        out[i / 2] |= (c & 0xF) << (4 * (i % 2));
+    }
+}
+
+/// NVFP4: the tensor scale is `tensor_absmax / (6 * 448)`, each 16-block scale is the E4M3 code nearest
+/// to `block_absmax / (6 * tensor_scale)`, and each value the E2M1 code nearest to `v / (block scale *
+/// tensor scale)` with the block scale as stored.
+fn encode_nvfp4(values: &[f32], tensor_absmax: f32, out: &mut TileBuf) {
+    let (g4, g2) = (grid(FloatFormat::E4M3Fn), grid(FloatFormat::E2M1));
+    let (top2, top4) = (max_finite(FloatFormat::E2M1), max_finite(FloatFormat::E4M3Fn));
+    let tensor_scale = if tensor_absmax > 0.0 { tensor_absmax / (top2 * top4) } else { 1.0 };
+    out.scales.clear();
+    out.scales.push(tensor_scale.to_le_bytes().to_vec());
+    out.scales.push(Vec::with_capacity(values.len() / 16));
+    let mut codes = Vec::with_capacity(values.len());
+    for blk in values.chunks(16) {
+        let sc = nearest(g4, absmax(blk) / (top2 * tensor_scale));
+        out.scales[1].push(sc);
+        let eff = super::decode_float_code(FloatFormat::E4M3Fn, sc as u32) * tensor_scale;
+        codes.extend(blk.iter().map(|&v| if eff > 0.0 { nearest(g2, v / eff) } else { 0 }));
+    }
+    pack_nibbles(codes.into_iter(), values.len(), &mut out.payload);
+}
+
+/// MXFP4: the block scale is the power of two `2^(floor(log2(block_absmax)) - 2)` (E2M1's largest
+/// exponent is 2, so the block maximum lands in [4, 8) and saturates at 6), stored as an E8M0 byte.
+fn encode_mxfp4(values: &[f32], out: &mut TileBuf) {
+    let g2 = grid(FloatFormat::E2M1);
+    out.scales.clear();
+    out.scales.push(Vec::with_capacity(values.len() / 32));
+    let mut codes = Vec::with_capacity(values.len());
+    for blk in values.chunks(32) {
+        let amax = absmax(blk);
+        let exp = if amax > 0.0 { (amax.log2().floor() as i32 - 2).clamp(-127, 127) } else { 0 };
+        out.scales[0].push((exp + 127) as u8);
+        let s = 2f32.powi(exp);
+        codes.extend(blk.iter().map(|&v| nearest(g2, v / s)));
+    }
+    pack_nibbles(codes.into_iter(), values.len(), &mut out.payload);
 }

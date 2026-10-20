@@ -23,8 +23,8 @@ use std::fmt;
 use std::ops::Range;
 
 use super::budget::{resident_file_bytes, BoundedWorkspace, Pool};
-use super::codec::{CodecRegistry, Tile, TileBuf};
-use super::encoding::{Element, QuantEncoding, TensorDescriptor};
+use super::codec::{CodecRegistry, EncodeCtx, Tile, TileBuf};
+use super::encoding::{Element, QuantEncoding, ScaleGranularity, TensorDescriptor};
 use super::reader::PackedTensorReader;
 use super::sink::TensorSink;
 use crate::gguf::GgmlType;
@@ -183,8 +183,11 @@ impl Loader<'_> {
             self.codecs.encoder(&dst.encoding).map_err(|e| format!("{name}: {e}"))?;
         }
         let mut quantum = src.tile_quantum();
-        if op != LoadOp::Preserve {
+        if op == LoadOp::Repack {
             quantum = lcm(quantum, dst.tile_quantum());
+        }
+        if op == LoadOp::Convert {
+            quantum = lcm(quantum, dst.encode_quantum());
         }
         let cost = |elems: u64| staging_bytes(&src, &dst, op, elems);
         if cost(quantum) > self.tile_cap() {
@@ -255,6 +258,8 @@ impl Loader<'_> {
         let mut read = TileBuf::default();
         let mut encoded = TileBuf::default();
         let mut decoded: Vec<f32> = Vec::new();
+        // A per-tensor scale needs the whole tensor's range before the first tile is encoded.
+        let ctx = EncodeCtx { tensor_absmax: self.tensor_absmax(step, &mut read, &mut decoded)? };
         let mut start = 0;
         while start < numel {
             let elems: Range<u64> = start..(start + step.tile_elems).min(numel);
@@ -271,7 +276,7 @@ impl Loader<'_> {
                     decoded.clear();
                     decoded.reserve_exact((elems.end - elems.start) as usize);
                     self.codecs.decoder(&step.src.encoding)?.decode_tile(&step.src, &src_tile, &mut decoded)?;
-                    self.codecs.encoder(&step.dst.encoding)?.encode_tile(&step.dst, &elems, &decoded, &mut encoded)?;
+                    self.codecs.encoder(&step.dst.encoding)?.encode_tile(&step.dst, &elems, &decoded, &ctx, &mut encoded)?;
                     sink.write_tile(&step.dst, &Tile { elems: elems.clone(), payload: &encoded.payload, scales: encoded.scales.iter().map(Vec::as_slice).collect() })?;
                 }
             }
@@ -283,6 +288,29 @@ impl Loader<'_> {
             start = elems.end;
         }
         Ok(())
+    }
+
+    /// The largest magnitude of the decoded tensor when the destination has a per-tensor scale (a
+    /// bounded first pass over the same tiles); `0.0` when it does not need one.
+    fn tensor_absmax(&self, step: &LoadStep, read: &mut TileBuf, decoded: &mut Vec<f32>) -> Result<f32, String> {
+        let needs = step.op == LoadOp::Convert && step.dst.encoding.scales.iter().any(|s| s.granularity == ScaleGranularity::Tensor);
+        if !needs {
+            return Ok(0.0);
+        }
+        let (numel, mut start, mut amax) = (step.src.numel(), 0, 0f32);
+        let codec = self.codecs.decoder(&step.src.encoding)?;
+        while start < numel {
+            let elems = start..(start + step.tile_elems).min(numel);
+            self.reader.read_blocks(&step.src, &elems, read)?;
+            let tile = Tile { elems: elems.clone(), payload: &read.payload, scales: read.scales.iter().map(Vec::as_slice).collect() };
+            decoded.clear();
+            decoded.reserve_exact((elems.end - elems.start) as usize);
+            codec.decode_tile(&step.src, &tile, decoded)?;
+            amax = decoded.iter().fold(amax, |m, &v| if v.is_nan() { m } else { m.max(v.abs()) });
+            self.reader.release(&step.src, &elems);
+            start = elems.end;
+        }
+        Ok(amax)
     }
 
     /// Plan and run one tensor.
@@ -452,6 +480,28 @@ mod tests {
         let rep = l.load("w", &LoadPolicy::Convert(QuantEncoding::nf4_blocked(32)), &mut sink).unwrap();
         assert!(rep.tiles_written > 8, "{} tiles", rep.tiles_written);
         assert_eq!((sink.payload, sink.scales[0].clone()), (want_payload, want_scales));
+    }
+
+    #[test]
+    fn fp8_to_nvfp4_and_mxfp4_convert_is_independent_of_the_tiling() {
+        let dir = TmpDir::new("nv");
+        let (rows, cols) = (32usize, 64usize);
+        write_safetensors(
+            &dir.join("m.safetensors"),
+            &[
+                RawTensor { name: "w", dtype: "F8_E4M3", shape: vec![rows as u64, cols as u64], bytes: e4m3_bytes(51, rows * cols) },
+                RawTensor { name: "w_scale_inv", dtype: "BF16", shape: vec![2, 4], bytes: bf16_bytes(&[0.5, 1.0, 2.0, 0.25, 4.0, 1.5, 0.75, 3.0]) },
+            ],
+        );
+        let r = PackedReader::open(&dir.join("m.safetensors")).unwrap();
+        let (codecs, budget) = (CodecRegistry::reference(), MemoryBudget::new(1 << 20, 0));
+        for enc in [QuantEncoding::nvfp4(), QuantEncoding::mxfp4(), QuantEncoding::fp8_e4m3_tiled(16), QuantEncoding::fp8(crate::packed::FloatFormat::E5M2)] {
+            let (mut small, mut big) = (MemorySink::default(), MemorySink::default());
+            let rs = loader(&r, &codecs, &budget, 700).load("w", &LoadPolicy::Convert(enc.clone()), &mut small).unwrap();
+            loader(&r, &codecs, &budget, 1 << 20).load("w", &LoadPolicy::Convert(enc.clone()), &mut big).unwrap();
+            assert!(rs.tiles_written > 1, "{enc}: {} tiles", rs.tiles_written);
+            assert_eq!((small.payload, small.scales), (big.payload, big.scales), "{enc}: tiled result differs from the single-tile result");
+        }
     }
 
     #[test]

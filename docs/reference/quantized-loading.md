@@ -18,7 +18,7 @@ or read whole tensors.
 ## Codecs (`packed::codec`)
 
 `CodecRegistry::reference()` decodes (`decode_tile`) every encoding above on the CPU and encodes the
-ones a load can target (f32, f16, bf16, block-scaled int8 and NF4, GGUF types the quantizers cover).
+ones a load can target (f32, f16, bf16, block-scaled int8 and NF4, FP8 E4M3/E5M2 plain or tile-scaled, NVFP4, MXFP4, GGUF types the quantizers cover). NVFP4's per-tensor scale needs the tensor maximum, so the executor measures it in a bounded first pass.
 A new format is a `Codec` registered with `CodecRegistry::register`; no loader or model changes.
 
 ## Reading (`packed::reader`)

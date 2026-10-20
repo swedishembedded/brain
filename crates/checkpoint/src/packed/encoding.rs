@@ -356,6 +356,18 @@ impl TensorDescriptor {
         q
     }
 
+    /// Smallest tile an encoder can produce exactly: [`Self::tile_quantum`], and whole scale bands
+    /// for 2-D tile scales (a scale is computed from all of its tile's values at once).
+    pub fn encode_quantum(&self) -> u64 {
+        let mut q = self.tile_quantum();
+        for s in &self.encoding.scales {
+            if let ScaleGranularity::Tile2d { rows, .. } = s.granularity {
+                q = lcm(q, rows as u64 * self.inner());
+            }
+        }
+        q
+    }
+
     /// Payload byte range covering tile `elems` (`start` must be block aligned).
     pub fn payload_range(&self, elems: &Range<u64>) -> Range<u64> {
         let g = self.encoding.block_geometry();

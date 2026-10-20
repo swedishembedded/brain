@@ -19,7 +19,7 @@ pub mod source;
 mod testfix;
 
 pub use budget::{BoundedWorkspace, BudgetError, Lease, MemoryBudget, Pool, PoolStats};
-pub use codec::{Codec, CodecRegistry, Tile, TileBuf};
+pub use codec::{Codec, CodecRegistry, EncodeCtx, Tile, TileBuf};
 pub use encoding::{BlockGeometry, Codebook, Element, FloatFormat, Packing, QuantEncoding, ScaleGranularity, ScaleLevel, TensorDescriptor};
 pub use load::{LoadConfig, LoadOp, LoadPlan, LoadPolicy, LoadReport, LoadRequest, LoadStep, Loader};
 pub use reader::{PackedReader, PackedTensorReader};

@@ -55,6 +55,14 @@ pub struct Tile<'a> {
     pub scales: Vec<&'a [u8]>,
 }
 
+/// What an encoder needs to know beyond the tile itself.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EncodeCtx {
+    /// Largest magnitude over the whole tensor, for formats with a per-tensor scale (NVFP4);
+    /// the load executor measures it in a first pass when the destination needs it.
+    pub tensor_absmax: f32,
+}
+
 /// A tile being produced by an encoder: owned buffers the codec fills.
 #[derive(Debug, Default, Clone)]
 pub struct TileBuf {
@@ -75,7 +83,7 @@ pub trait Codec: Send + Sync {
     fn decode_tile(&self, desc: &TensorDescriptor, tile: &Tile<'_>, out: &mut Vec<f32>) -> Result<(), String>;
     /// Encode `values` (the f32 values of tile `elems`) into `out`, replacing its
     /// contents. The tile must be aligned to [`TensorDescriptor::tile_quantum`].
-    fn encode_tile(&self, desc: &TensorDescriptor, _elems: &Range<u64>, _values: &[f32], _out: &mut TileBuf) -> Result<(), String> {
+    fn encode_tile(&self, desc: &TensorDescriptor, _elems: &Range<u64>, _values: &[f32], _ctx: &EncodeCtx, _out: &mut TileBuf) -> Result<(), String> {
         Err(format!("{}: codec {} cannot encode {}", desc.name, self.name(), desc.encoding))
     }
 }
@@ -258,8 +266,8 @@ impl Codec for ScalarCodec {
         Ok(())
     }
 
-    fn encode_tile(&self, desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32], out: &mut TileBuf) -> Result<(), String> {
-        rows::encode(desc, elems, values, out)
+    fn encode_tile(&self, desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32], ctx: &EncodeCtx, out: &mut TileBuf) -> Result<(), String> {
+        rows::encode(desc, elems, values, ctx, out)
     }
 }
 
@@ -287,7 +295,7 @@ impl Codec for GgmlCodec {
         crate::gguf::block_expand(ty, tile.payload, 0, n, out).map_err(|e| format!("{}: {e}", desc.name))
     }
 
-    fn encode_tile(&self, desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32], out: &mut TileBuf) -> Result<(), String> {
+    fn encode_tile(&self, desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32], _ctx: &EncodeCtx, out: &mut TileBuf) -> Result<(), String> {
         let Element::Ggml(ty) = desc.encoding.element else { unreachable!("can_encode") };
         let be = ty.block_elems() as u64;
         if !elems.start.is_multiple_of(be) || !(elems.end - elems.start).is_multiple_of(be) {
@@ -377,7 +385,7 @@ mod tests {
         for (enc, tol) in [(QuantEncoding::f32(), 0.0), (QuantEncoding::bf16(), 0.01), (QuantEncoding::int8_blocked(32), 0.01), (QuantEncoding::nf4_blocked(32), 0.3), (QuantEncoding::ggml(GgmlType::Q8_0), 0.02)] {
             let desc = TensorDescriptor::new("w", vec![rows as u64, cols as u64], enc.clone());
             let mut buf = TileBuf::default();
-            reg.encoder(&enc).unwrap().encode_tile(&desc, &(0..desc.numel()), &data, &mut buf).unwrap();
+            reg.encoder(&enc).unwrap().encode_tile(&desc, &(0..desc.numel()), &data, &EncodeCtx::default(), &mut buf).unwrap();
             let got = decode_all(&desc, &buf.payload, &buf.scales.iter().map(Vec::as_slice).collect::<Vec<_>>());
             // NF4's widest codebook gap is 0.30 of the block maximum (~1.9 here).
             let worst = got.iter().zip(&data).map(|(g, w)| (g - w).abs()).fold(0f32, f32::max);
@@ -391,5 +399,52 @@ mod tests {
         let tile = Tile { elems: 8..40, payload: &[0; 16], scales: vec![&[0; 4], &[0; 8]] };
         let mut out = Vec::new();
         assert!(CodecRegistry::reference().decoder(&desc.encoding).unwrap().decode_tile(&desc, &tile, &mut out).is_err());
+    }
+
+    /// Decode of an encode, with per-block bounds: the error of each value is at most `frac` of its
+    /// block's largest magnitude (the widest gap of the element grid, relative to its maximum).
+    fn round_trip(enc: QuantEncoding, shape: &[u64], block: usize, frac: f32) {
+        let desc = TensorDescriptor::new("w", shape.to_vec(), enc.clone());
+        desc.validate().unwrap();
+        let data: Vec<f32> = (0..desc.numel()).map(|i| ((i * 2654435761 % 1000) as f32 / 500.0 - 1.0) * (1.0 + (i / 97) as f32)).collect();
+        let amax = data.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let mut buf = TileBuf::default();
+        let ctx = EncodeCtx { tensor_absmax: amax };
+        let reg = CodecRegistry::reference();
+        reg.encoder(&enc).unwrap().encode_tile(&desc, &(0..desc.numel()), &data, &ctx, &mut buf).unwrap();
+        let scales: Vec<&[u8]> = buf.scales.iter().map(Vec::as_slice).collect();
+        let got = decode_all(&desc, &buf.payload, &scales);
+        for (b, (g, w)) in got.chunks(block).zip(data.chunks(block)).enumerate() {
+            let bmax = w.iter().fold(0f32, |m, v| m.max(v.abs()));
+            let worst = g.iter().zip(w).map(|(a, c)| (a - c).abs()).fold(0f32, f32::max);
+            assert!(worst <= frac * bmax + 1e-6, "{enc}: block {b} error {worst} exceeds {frac} of its maximum {bmax}");
+        }
+    }
+
+    #[test]
+    fn fp8_nvfp4_and_mxfp4_encoders_round_trip_within_their_grid_gaps() {
+        round_trip(QuantEncoding::fp8_e4m3_tiled(16), &[32, 48], 48, 0.07);
+        round_trip(QuantEncoding::fp8(FloatFormat::E4M3Fn), &[4, 64], 64, 0.07);
+        round_trip(QuantEncoding::fp8(FloatFormat::E5M2), &[4, 64], 64, 0.13);
+        // E2M1's widest gap is 2 of 6; the E4M3 block scale adds up to ~6% on top.
+        round_trip(QuantEncoding::nvfp4(), &[8, 64], 16, 0.36);
+        // The power-of-two scale lets the block maximum sit anywhere in [4, 8): gap 2 of 4 at worst.
+        round_trip(QuantEncoding::mxfp4(), &[8, 64], 32, 0.5);
+    }
+
+    #[test]
+    fn values_on_the_grid_encode_exactly() {
+        // E2M1 magnitudes at scale 1 (MXFP4 block max 6 -> exponent 0): every grid value survives.
+        let desc = TensorDescriptor::new("w", vec![1, 32], QuantEncoding::mxfp4());
+        let grid = [0.0f32, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+        let data: Vec<f32> = (0..32).map(|i| grid[i % 8] * if i % 3 == 0 { -1.0 } else { 1.0 }).collect();
+        let mut buf = TileBuf::default();
+        CodecRegistry::reference().encoder(&desc.encoding).unwrap().encode_tile(&desc, &(0..32), &data, &EncodeCtx::default(), &mut buf).unwrap();
+        let got = decode_all(&desc, &buf.payload, &[&buf.scales[0]]);
+        assert_eq!(got.iter().map(|v| v.abs()).collect::<Vec<_>>(), data.iter().map(|v| v.abs()).collect::<Vec<_>>());
+        // An E4M3 value and its negative are encoded symmetrically.
+        let d2 = TensorDescriptor::new("w", vec![1, 4], QuantEncoding::fp8(FloatFormat::E4M3Fn));
+        CodecRegistry::reference().encoder(&d2.encoding).unwrap().encode_tile(&d2, &(0..4), &[448.0, -448.0, 1000.0, 0.0], &EncodeCtx::default(), &mut buf).unwrap();
+        assert_eq!(decode_all(&d2, &buf.payload, &[]), [448.0, -448.0, 448.0, 0.0], "values past the format maximum saturate");
     }
 }
