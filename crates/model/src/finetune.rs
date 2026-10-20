@@ -36,7 +36,8 @@ use crate::Model;
 
 /// Where the AdamW moments of a full-parameter run live.
 ///
-/// Today both are fp32; the type is the seam a dtype-aware state plugs into.
+/// The precision of the moments is the run's [`paramstore::precision::PrecisionPolicy`]
+/// ([`OptimizerState::scope_with`]); fp32 unless a run says otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OptimizerState {
     /// On the device beside the weights and gradients.
@@ -49,6 +50,15 @@ impl OptimizerState {
     /// Run `build` (a model's construction) with this state selected.
     pub fn scope<R>(self, build: impl FnOnce() -> R) -> R {
         crate::offload::with_adam_offloaded(self == OptimizerState::HostOffload, build)
+    }
+}
+
+impl OptimizerState {
+    /// [`Self::scope`] with `policy` as the precision of every trainable
+    /// parameter: value, gradient, optimizer-state format and master, resolved per
+    /// parameter group. The default policy (all fp32) is today's behaviour.
+    pub fn scope_with<R>(self, policy: &paramstore::precision::PrecisionPolicy, build: impl FnOnce() -> R) -> R {
+        crate::offload::with_precision_policy(policy, || self.scope(build))
     }
 }
 
@@ -84,8 +94,21 @@ impl ModelFit for CausalLmFit<'_, '_> {
 /// times the model), so the report says it was interrupted and `out` is left
 /// absent.
 pub fn fit_full<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, out: &Path, state: OptimizerState, control: FitControl<'_>) -> std::io::Result<FitReport> {
+    fit_full_with::<T>(base, dir, opts, out, state, &paramstore::precision::PrecisionPolicy::uniform(paramstore::precision::ParamPrecision::FP32), control)
+}
+
+/// [`fit_full`] with a training precision policy (see [`OptimizerState::scope_with`]).
+pub fn fit_full_with<T: ChatTrainer>(
+    base: &Path,
+    dir: &Path,
+    opts: &FitOpts,
+    out: &Path,
+    state: OptimizerState,
+    policy: &paramstore::precision::PrecisionPolicy,
+    control: FitControl<'_>,
+) -> std::io::Result<FitReport> {
     let mut fit = CausalLmFit { dir, opts, out: Some(out), control: Some(control) };
-    let (report, _) = T::train_full(base, opts, state, &mut fit)?;
+    let (report, _) = crate::offload::with_precision_policy(policy, || T::train_full(base, opts, state, &mut fit))?;
     if report.interrupted {
         // fit_controlled does not write an interrupted run's model; make sure
         // a periodic save did not leave a partial one under the final name.

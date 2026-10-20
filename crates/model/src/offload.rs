@@ -46,6 +46,55 @@ pub fn adam_offloaded() -> bool {
     SCOPE.with(Cell::get).unwrap_or(false)
 }
 
+use std::cell::RefCell;
+
+use paramstore::precision::{GradDtype, MasterPolicy, ParamPrecision, PrecisionPolicy, StateFormat, ValueDtype};
+
+std::thread_local! {
+    static POLICY: RefCell<Option<PrecisionPolicy>> = const { RefCell::new(None) };
+}
+
+/// Run `build` with `policy` as the training precision of every parameter the
+/// build creates (the same thread-scoped seam as [`with_adam_offloaded`]).
+pub fn with_precision_policy<R>(policy: &PrecisionPolicy, build: impl FnOnce() -> R) -> R {
+    struct Restore(Option<PrecisionPolicy>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            POLICY.with(|p| *p.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(POLICY.with(|p| p.borrow_mut().replace(policy.clone())));
+    build()
+}
+
+/// The innermost [`with_precision_policy`] on this thread; all-fp32 outside any scope.
+pub fn precision_policy() -> PrecisionPolicy {
+    POLICY.with(|p| p.borrow().clone()).unwrap_or_else(|| PrecisionPolicy::uniform(ParamPrecision::FP32))
+}
+
+/// The scope's precision for each of `params`, checked against what the
+/// device training paths run: weights and gradients are f32 device buffers
+/// and the device AdamW keeps f32 moments, so those are the only choices there;
+/// with the moments offloaded to the host any state format (f32, bf16, int8
+/// blocks) is available. Anything else is an error naming the parameter,
+/// never a silent fp32 fallback.
+pub fn resolve_precisions(params: &[(String, usize)], host_offload: bool) -> Result<Vec<ParamPrecision>, String> {
+    let policy = precision_policy();
+    params
+        .iter()
+        .map(|(name, numel)| {
+            let p = policy.resolve(name, *numel).precision;
+            if p.value != ValueDtype::F32 || p.grad != GradDtype::F32 || p.master != MasterPolicy::None {
+                return Err(format!("{name}: this trainer keeps f32 device weights and gradients with no master copy; got {p:?}"));
+            }
+            if !host_offload && p.state != StateFormat::F32 {
+                return Err(format!("{name}: the device optimiser keeps f32 moments; {:?} moments need the host-offloaded optimizer state", p.state));
+            }
+            Ok(p)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

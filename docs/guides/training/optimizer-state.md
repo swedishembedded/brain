@@ -78,3 +78,15 @@ values, optimizer state, step, seed and the trainer's schedule scalars as one
 atomic generation (temporary directory, fsync, rename, length and hash
 verification on restore, the two newest valid generations kept); `restore`
 returns the newest generation that verifies.
+
+## Full fine-tune of a chat model
+
+`model::finetune::OptimizerState::scope_with` and `fit_full_with` take a
+`PrecisionPolicy`; the default is all fp32. qwen3 full fine-tunes honour the
+optimizer-state format when the moments are host-offloaded (`HostOffload`):
+f32, bf16 or int8 blocks per parameter group. The device optimizer keeps f32
+moments, weights and gradients stay f32 device buffers with no master copy, and
+a policy asking for anything else is refused with the parameter's name
+(`model::offload::resolve_precisions`), for qwen3 and qwen35 alike. Bf16/FP8
+device weights, a master copy and the streamed low-precision export of a
+full fine-tune need the quantized backward (dW) path and are not wired yet.

@@ -1662,6 +1662,10 @@ impl Qwen35 {
             })
             .collect();
         let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        if train && cfg.lora.is_none() {
+            // A full fine-tune keeps f32 device state; a policy asking for more is refused, not ignored.
+            model::offload::resolve_precisions(&ps.params, false).unwrap_or_else(|e| panic!("qwen35 full fine-tune: {e}"));
+        }
         if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
             model::adapter::device::apply_groups(&mut ps, &lora.hp());
         }

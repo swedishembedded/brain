@@ -1223,12 +1223,15 @@ impl Qwen {
         } else if offload_adam() {
             // Full fine-tuning with the AdamW moments in system RAM (Role::Offload):
             // GPU holds only weight+grad (2×model) instead of 4×model.
-            let roles = plist
-                .into_iter()
-                .map(|(n, c)| (n, c, paramstore::Role::Offload))
-                .collect();
-            ParamStore::new_with_roles_src(&gpu, roles, src)
+            let precisions = model::offload::resolve_precisions(&plist, true).unwrap_or_else(|e| panic!("qwen3 full fine-tune: {e}"));
+            let roles: Vec<_> = plist.iter().cloned().map(|(n, c)| (n, c, paramstore::Role::Offload)).collect();
+            let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+            for ((n, _), p) in plist.iter().zip(precisions) {
+                ps.set_precision(n, p);
+            }
+            ps
         } else {
+            model::offload::resolve_precisions(&plist, false).unwrap_or_else(|e| panic!("qwen3 full fine-tune: {e}"));
             ParamStore::new_src(&gpu, plist, src)
         };
         if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
