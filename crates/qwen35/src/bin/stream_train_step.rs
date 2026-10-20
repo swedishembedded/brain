@@ -93,7 +93,7 @@ fn main() {
     let t0 = Instant::now();
     let trainer = StreamTrainer::new_real(gpu, &cfg, &dir, n_tokens, window_budget, &lora_init).unwrap_or_else(|e| panic!("new_real: {e}"));
     eprintln!("stream_train_step: trainer construction: {:.1}s", t0.elapsed().as_secs_f64());
-    let loader = trainer.real_loader(&cfg, &dir);
+    let loader = trainer.real_loader(&cfg, &dir).unwrap_or_else(|e| panic!("real_loader: {e}"));
 
     match phase.as_str() {
         "before" | "after" => {

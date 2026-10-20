@@ -37,56 +37,30 @@
 //! activation individually would (one `[n, d_model]` buffer per layer instead
 //! of several smaller ones per targeted leaf).
 //!
-//! # Backward through a streamed weight: the real API available (see the
-//! milestone's own "Step 0" research)
+//! # Backward through a streamed weight: any tier, packed
 //!
-//! `model::ops::Ops::matmul_dx`/`Ops::matmul_dw` (the `dX`/`dW` backward-of-
-//! matmul dispatch pair, B10) exist, but are deliberately scoped to `F32`/
-//! `BF16` weights only - `Ops::matmul_dx`'s own doc: "F16/I8/Q4 backward-
-//! through-the-weight is a real, reachable follow-up, not attempted here".
-//! Backward through an INT8-quantized weight is not wired up anywhere in
-//! this tree (`Ops`, `model::dispatch`, or any model crate). Extending that
-//! kernel family to int8 would be genuinely new kernel work, out of
-//! proportion for this module.
+//! The frozen base's input gradient `dx = d_out @ W` and its forward `y = x W^T` go through
+//! `model::ops::Ops` (`matmul_rows`, `matmul_dx`): the shared quantized-execution contract, which decodes a
+//! bounded tile of rows of a packed weight (FP8, NF4, int8, K-quant, bf16, f32) and runs the tensor-core GEMM
+//! on it. So a layer is resident in the encoding the checkpoint stores it in
+//! ([`crate::fp8_source::PackedBase`] preserves it through the checkpoint crate's tiled loader and
+//! `model::ops::DeviceWeightSink`), and no layer is ever expanded to fp32 on the host or the device. The base
+//! gets no `dW` here (it is frozen, there is no full-fine-tune path); the adapter gradients come from the
+//! LoRA-internal activations as in `crate::model::Qwen35::proj_bwd`.
 //!
-//! This module avoids the problem structurally instead of extending that
-//! kernel family: [`crate::import::import_layer`] already dequantizes every
-//! FP8 tensor to f32 in host RAM BEFORE [`crate::stream::StreamState::
-//! build_layer`] optionally packs it down to int8 for the (inference-only)
-//! streaming forward - the f32 values already exist as a byproduct of every
-//! streamed layer load, at zero extra host compute. This module's own layer
-//! loader ([`build_layer_f32`]) simply skips that packing step and uploads
-//! the SAME already-dequantized f32 values as `model::ops::Weight::F32`
-//! instead - trading a ~4x larger streamed-weight footprint (fp32 vs the
-//! inference path's int8) for exact correctness through a kernel family
-//! (`matmul_dx`/`matmul_dw`, plus plain `matmul` for the tiny LoRA-internal
-//! math) that is already proven and gradient-checked
-//! (`crates/qwen35/src/model.rs::proj_bwd`'s own LoRA branch dispatches
-//! these exact kernels by name, gated by `gradcheck::check_qwen35_lora`).
-//! The frozen base's own dX/dW dispatch here is a direct kernel-name
-//! transcription of that LoRA branch (not the `Ops` façade, which offers no
-//! benefit once the weight is already known to be plain f32) - see
-//! [`proj_bwd_streamed`].
-//!
-//! The one place this module DOES need a resident (never re-streamed)
-//! weight at more than int8 precision is the shared `lm_head`/`embed_tokens`
-//! table: like `crate::stream::generate`, this module keeps it resident for
-//! the whole call (never re-streamed per layer - it is read/differentiated
-//! once per step, not once per layer), but at `Weight::F32` or `Weight::BF16`
-//! (never int8, for the same `matmul_dx` reason above) - see
-//! [`StreamTrainer::new_real`]'s own doc for the memory tradeoff.
+//! The one weight kept resident for the whole call (never re-streamed per layer: it is read and
+//! differentiated once per step, not once per layer) is the shared `lm_head`/`embed_tokens` table, at
+//! stored encoding (bf16 for the real release) - see [`StreamTrainer::new_real`].
 //!
 //! # What is reused, unchanged
 //!
-//! - [`crate::import::import_layer`] / [`crate::stream::get`] - the proven
-//!   per-shard host loader and its accessor.
+//! - [`crate::stream::get`] - the host-map accessor of the tiny-scale gates.
 //! - `model::gdn_mixer::{gdn_mixer_fwd, gdn_mixer_bwd}` / `model::gqa_mixer::
 //!   {gqa_mixer_fwd, gqa_mixer_bwd}` - the SAME hoisted mixer math
 //!   `crate::model::Qwen35`'s own resident trainer and `crate::stream`'s own
 //!   inference forward both already drive.
-//! - `model::ops::{Ops, Weight}` for the FORWARD dispatch of every streamed
-//!   linear (frozen base) - exactly `crate::stream`'s own convention, just
-//!   requesting `Dtype::F32` instead of `Dtype::I8`.
+//! - `model::ops::{Ops, Weight}` for the forward and input-gradient dispatch of
+//!   every streamed linear (frozen base), float-read at any tier.
 //! - `crate::model::Qwen35::proj_bwd`'s exact LoRA-branch math (frozen base:
 //!   `dx` only, no `dW`; adapter grads `gA`/`gB` from the LoRA-internal
 //!   activations) - transcribed kernel-dispatch-for-kernel-dispatch in
@@ -125,7 +99,6 @@ use model::adapter::exec::AdapterRuntime;
 use paramstore::ParamStore;
 
 use crate::config::Qwen35Config;
-use crate::import::import_layer;
 use crate::stream::{gdn_mixer_ids, get, gqa_mixer_ids, idx, kernel_ids, OwnedGdnLayer, OwnedGqaLayer, OwnedStreamedLayer};
 
 /// Kernel indices this module dispatches, resolved once against a `Gpu`
@@ -140,7 +113,6 @@ struct TrainIds {
     gdn_mixer: GdnMixerIds,
     gqa_mixer: GqaMixerIds,
     add2: usize,
-    matmul_dx: usize,
     ce_value: usize,
     ce_grad: usize,
 }
@@ -151,43 +123,68 @@ fn train_ids(g: &Gpu) -> TrainIds {
         gdn_mixer: gdn_mixer_ids(g),
         gqa_mixer: gqa_mixer_ids(g),
         add2: idx(g, "add2"),
-        matmul_dx: idx(g, "matmul_dx"),
         ce_value: idx(g, "ce_value"),
         ce_grad: idx(g, "ce_grad"),
     }
 }
 
-/// The raw device buffer under an `F32`-tier [`Weight`] - every streamed
-/// frozen-base weight in this module is always this tier (see this module's
-/// own doc for why); any other tier reaching here would be a real bug in
-/// this module's own layer loader, not a normal runtime condition.
-fn f32_buf(w: &Weight) -> &DeviceBuffer {
-    match w {
-        Weight::F32 { w, .. } => w,
-        other => panic!(
-            "stream_train: expected an F32 streamed weight (this module's frozen-base backward only \
-             supports F32 - matmul_dx has no int8 backward, see this module's own doc), got {:?}",
-            other.dtype()
-        ),
+/// Where one streamed layer's tensors come from: its norm gains and small vectors as f32, its weight
+/// matrices as resident [`Weight`]s of whatever tier the source holds them in.
+trait LayerTensors {
+    fn small(&self, name: &str) -> DeviceBuffer;
+    fn weight(&self, name: &str, n: usize, k: usize) -> Weight;
+}
+
+/// A host map of f32 tensors (the tiny-scale gates), uploading every matrix at `tier`.
+struct HostLayerTensors<'a> {
+    ops: &'a Ops,
+    gpu: &'a Gpu,
+    l: usize,
+    map: &'a HashMap<String, Vec<f32>>,
+    tier: Dtype,
+}
+
+impl LayerTensors for HostLayerTensors<'_> {
+    fn small(&self, name: &str) -> DeviceBuffer {
+        self.gpu.storage_init(name, get(self.map, name, self.l))
+    }
+    fn weight(&self, name: &str, n: usize, k: usize) -> Weight {
+        Weight::upload(self.ops, get(self.map, name, self.l), n, k, self.tier)
     }
 }
 
-/// Build one decoder layer's weights as [`OwnedStreamedLayer`], every
-/// quantizable leaf uploaded as `Weight::F32` (not the int8 DP4A tier
-/// `crate::stream::StreamState::build_layer` uses for inference) - see this
-/// module's own doc for why training needs the f32 tier specifically.
-/// Otherwise field-for-field identical to `build_layer` (same naming, same
-/// non-quantized aux tensors as plain fp32 buffers).
-pub(crate) fn build_layer_f32(ops: &Ops, gpu: &Gpu, cfg: &Qwen35Config, l: usize, w: &HashMap<String, Vec<f32>>) -> OwnedStreamedLayer {
+/// A checkpoint directory: matrices preserved in their stored encoding (FP8 stays FP8), no host or device
+/// fp32 copy of a layer.
+struct PackedLayerTensors<'a> {
+    ops: &'a Ops,
+    gpu: &'a Gpu,
+    base: &'a crate::fp8_source::PackedBase,
+}
+
+impl LayerTensors for PackedLayerTensors<'_> {
+    fn small(&self, name: &str) -> DeviceBuffer {
+        let v = self.base.small_f32(name).unwrap_or_else(|e| panic!("stream_train: {e}"));
+        self.gpu.storage_init(name, &v)
+    }
+    fn weight(&self, name: &str, n: usize, k: usize) -> Weight {
+        let w = self.base.weight(self.ops, name).unwrap_or_else(|e| panic!("stream_train: {e}"));
+        assert_eq!((w.n() as usize, w.k() as usize), (n, k), "stream_train: {name} is {}x{}, the config expects {n}x{k}", w.n(), w.k());
+        w
+    }
+}
+
+/// Build one decoder layer as [`OwnedStreamedLayer`] from `t`: every matrix a resident [`Weight`] of the
+/// source's own tier (training multiplies and differentiates through any tier with `Ops`, see this module's
+/// doc), every other tensor a plain fp32 buffer. Field-for-field the layout of
+/// `crate::stream::StreamState::build_layer`.
+fn build_layer(cfg: &Qwen35Config, l: usize, t: &dyn LayerTensors) -> OwnedStreamedLayer {
     use crate::config::LayerType;
     let ty = cfg.layer_types()[l];
     let p = |s: &str| format!("blocks.{l}.{s}");
-    let f32buf = |name: &str| gpu.storage_init(name, get(w, name, l));
-    let f32w = |name: &str, n: usize, k: usize| Weight::upload(ops, get(w, name, l), n, k, Dtype::F32);
     let d = cfg.d_model as usize;
     let ff = cfg.intermediate_size as usize;
     let (mlp_gate, mlp_up, mlp_down) =
-        (f32w(&p("mlp.gate.weight"), ff, d), f32w(&p("mlp.up.weight"), ff, d), f32w(&p("mlp.down.weight"), d, ff));
+        (t.weight(&p("mlp.gate.weight"), ff, d), t.weight(&p("mlp.up.weight"), ff, d), t.weight(&p("mlp.down.weight"), d, ff));
 
     match ty {
         LayerType::Linear => {
@@ -195,17 +192,17 @@ pub(crate) fn build_layer_f32(ops: &Ops, gpu: &Gpu, cfg: &Qwen35Config, l: usize
             let value_dim = cfg.linear_value_dim() as usize;
             let nvh = cfg.linear_num_value_heads as usize;
             OwnedStreamedLayer::Linear(OwnedGdnLayer {
-                ln1: f32buf(&p("ln1.weight")),
-                ln2: f32buf(&p("ln2.weight")),
-                conv1d_weight: f32buf(&p("linear_attn.conv1d.weight")),
-                a_log: f32buf(&p("linear_attn.A_log")),
-                dt_bias: f32buf(&p("linear_attn.dt_bias")),
-                norm_weight: f32buf(&p("linear_attn.norm.weight")),
-                in_proj_qkv: f32w(&p("linear_attn.in_proj_qkv.weight"), conv_dim, d),
-                in_proj_z: f32w(&p("linear_attn.in_proj_z.weight"), value_dim, d),
-                in_proj_b: f32w(&p("linear_attn.in_proj_b.weight"), nvh, d),
-                in_proj_a: f32w(&p("linear_attn.in_proj_a.weight"), nvh, d),
-                out_proj: f32w(&p("linear_attn.out_proj.weight"), d, value_dim),
+                ln1: t.small(&p("ln1.weight")),
+                ln2: t.small(&p("ln2.weight")),
+                conv1d_weight: t.small(&p("linear_attn.conv1d.weight")),
+                a_log: t.small(&p("linear_attn.A_log")),
+                dt_bias: t.small(&p("linear_attn.dt_bias")),
+                norm_weight: t.small(&p("linear_attn.norm.weight")),
+                in_proj_qkv: t.weight(&p("linear_attn.in_proj_qkv.weight"), conv_dim, d),
+                in_proj_z: t.weight(&p("linear_attn.in_proj_z.weight"), value_dim, d),
+                in_proj_b: t.weight(&p("linear_attn.in_proj_b.weight"), nvh, d),
+                in_proj_a: t.weight(&p("linear_attn.in_proj_a.weight"), nvh, d),
+                out_proj: t.weight(&p("linear_attn.out_proj.weight"), d, value_dim),
                 mlp_gate,
                 mlp_up,
                 mlp_down,
@@ -216,14 +213,14 @@ pub(crate) fn build_layer_f32(ops: &Ops, gpu: &Gpu, cfg: &Qwen35Config, l: usize
             let hkv = cfg.kv_dim() as usize;
             let hq = cfg.q_dim() as usize;
             OwnedStreamedLayer::Full(OwnedGqaLayer {
-                ln1: f32buf(&p("ln1.weight")),
-                ln2: f32buf(&p("ln2.weight")),
-                q_norm: f32buf(&p("self_attn.q_norm.weight")),
-                k_norm: f32buf(&p("self_attn.k_norm.weight")),
-                q_proj: f32w(&p("self_attn.q_proj.weight"), hqp, d),
-                k_proj: f32w(&p("self_attn.k_proj.weight"), hkv, d),
-                v_proj: f32w(&p("self_attn.v_proj.weight"), hkv, d),
-                o_proj: f32w(&p("self_attn.o_proj.weight"), d, hq),
+                ln1: t.small(&p("ln1.weight")),
+                ln2: t.small(&p("ln2.weight")),
+                q_norm: t.small(&p("self_attn.q_norm.weight")),
+                k_norm: t.small(&p("self_attn.k_norm.weight")),
+                q_proj: t.weight(&p("self_attn.q_proj.weight"), hqp, d),
+                k_proj: t.weight(&p("self_attn.k_proj.weight"), hkv, d),
+                v_proj: t.weight(&p("self_attn.v_proj.weight"), hkv, d),
+                o_proj: t.weight(&p("self_attn.o_proj.weight"), d, hq),
                 mlp_gate,
                 mlp_up,
                 mlp_down,
@@ -232,37 +229,16 @@ pub(crate) fn build_layer_f32(ops: &Ops, gpu: &Gpu, cfg: &Qwen35Config, l: usize
     }
 }
 
-/// [`build_layer_f32`]'s disk-backed half - streams `dir/layers-{l}.safetensors`
-/// via [`import_layer`] (unchanged) then uploads at f32. The training
-/// counterpart of `crate::stream::StreamState::load_layer`.
-pub(crate) fn load_layer_f32(ops: &Ops, gpu: &Gpu, dir: &Path, cfg: &Qwen35Config, l: usize) -> OwnedStreamedLayer {
-    let shard = dir.join(format!("layers-{l}.safetensors"));
-    let reader = MmapSafetensors::open(&shard).unwrap_or_else(|e| panic!("stream_train: open {}: {e}", shard.display()));
-    let w = import_layer(&reader, cfg, l, 128).unwrap_or_else(|e| panic!("stream_train: import_layer({l}): {e}"));
-    drop(reader);
-    build_layer_f32(ops, gpu, cfg, l, &w)
+/// [`build_layer`] over a host map, every matrix uploaded at `tier` (`Dtype::F32` reproduces the exact
+/// reference; a quantized tier trains through it packed).
+pub(crate) fn build_layer_host(ops: &Ops, gpu: &Gpu, cfg: &Qwen35Config, l: usize, w: &HashMap<String, Vec<f32>>, tier: Dtype) -> OwnedStreamedLayer {
+    build_layer(cfg, l, &HostLayerTensors { ops, gpu, l, map: w, tier })
 }
 
-/// Build a resident `Weight::F32` for `name` (`[n, k]`, plain BF16 on disk -
-/// `lm_head.weight`/`model.language_model.embed_tokens.weight`) straight
-/// from the mmap, in row-chunks, WITHOUT ever holding the whole dequantized
-/// `[n, k]` f32 array in host RAM at once - the same bounded-host-memory
-/// design `crate::stream::quantize_i8_from_mmap_rows` already established
-/// for its own (int8) resident head, minus the quantization step (this
-/// module's frozen-base backward needs F32/BF16, never int8 - see this
-/// module's own doc). At the real checkpoint's `[248320, 5120]` shape this
-/// is ~4.74 GiB resident (vs int8's ~1.18 GiB) - the real memory cost of
-/// training through this head at all, paid once per run, never per layer.
-fn build_head_f32_from_mmap(gpu: &Gpu, reader: &MmapSafetensors, name: &str, n: usize, k: usize, rows_per_chunk: usize) -> Weight {
-    let w = gpu.storage((n * k) as u64);
-    let mut any = false;
-    let found = reader.with_tensor_chunks(name, rows_per_chunk * k, &mut |off, chunk| {
-        any = true;
-        assert_eq!(off as usize % k, 0, "build_head_f32_from_mmap: chunk offset {off} is not row-aligned (k={k})");
-        gpu.write_f32_at(&w, off, chunk);
-    });
-    assert!(found && any, "build_head_f32_from_mmap: {name} not found or empty");
-    Weight::F32 { w, n: n as u32, k: k as u32 }
+/// [`build_layer`] over a checkpoint directory ([`crate::fp8_source::PackedBase`]): the training counterpart
+/// of `crate::stream::StreamState::load_layer`, with the matrices kept in their stored encoding.
+pub(crate) fn load_layer_packed(ops: &Ops, gpu: &Gpu, base: &crate::fp8_source::PackedBase, cfg: &Qwen35Config, l: usize) -> OwnedStreamedLayer {
+    build_layer(cfg, l, &PackedLayerTensors { ops, gpu, base })
 }
 
 /// The small, fully-resident LoRA adapter store for a whole training run:
@@ -329,11 +305,12 @@ impl LoraStore {
 /// there is no full-fine-tune path), matching `proj_bwd`'s own `None` arm
 /// restricted to `dx`-only for exactly that reason.
 #[allow(clippy::too_many_arguments)]
-fn proj_bwd_streamed(gpu: &Gpu, ids: &TrainIds, lora: &LoraStore, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, base: &Weight, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32, s: &mut Vec<Step>) {
-    let base_buf = f32_buf(base);
-    // base: dx += d_out*W (frozen weight - no dW). An untargeted leaf, or the
+fn proj_bwd_streamed(ops: &Ops, lora: &LoraStore, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, base: &Weight, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32, s: &mut Vec<Step>) {
+    // base: dx += d_out*W (frozen weight - no dW), through the shared quantized-execution contract: any
+    // resident tier (f32, bf16, NF4, FP8, ...) with no full-precision copy. An untargeted leaf, or the
     // shared head, has only this.
-    s.push(gpu.step(ids.matmul_dx, &[d_out, base_buf, dx], &[m, k, nout, acc], m * k));
+    debug_assert_eq!((base.n(), base.k()), (nout, k), "proj_bwd_streamed: weight shape does not match the linear");
+    ops.matmul_dx(s, base, d_out, m, dx, acc != 0);
     if lora.rt.hits(leaf) {
         lora.rt.backward(lora.rt.reference_gemm(), s, &lora.ps, wname, d_out, x, dx, m, k, nout);
     }
@@ -362,9 +339,9 @@ fn mlp_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lo
     let up = gpu.storage((n * ff) as u64);
     {
         let mut s = Vec::new();
-        let act1 = ops.act(&mut s, xn2, 0, n, d);
-        ops.matmul(&mut s, gate, &act1, &gate_pre, 0);
-        ops.matmul(&mut s, up_w, &act1, &up, 0);
+        let act1 = ops.act_f32(xn2, 0, n, d);
+        ops.matmul_rows(&mut s, gate, (0, gate.n()), &act1, &gate_pre, 0);
+        ops.matmul_rows(&mut s, up_w, (0, up_w.n()), &act1, &up, 0);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("gate") {
@@ -384,8 +361,8 @@ fn mlp_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lo
     let down = gpu.storage((n * d) as u64);
     {
         let mut s = Vec::new();
-        let act2 = ops.act(&mut s, &h, 0, n, ff);
-        ops.matmul(&mut s, down_w, &act2, &down, 0);
+        let act2 = ops.act_f32(&h, 0, n, ff);
+        ops.matmul_rows(&mut s, down_w, (0, down_w.n()), &act2, &down, 0);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("down") {
@@ -400,7 +377,7 @@ fn mlp_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lo
 /// Reverse of [`mlp_forward_lora`] - a direct transcription of `Qwen35::
 /// mlp_bwd`.
 #[allow(clippy::too_many_arguments)]
-fn mlp_backward_lora(gpu: &Gpu, ids: &TrainIds, lora: &LoraStore, cfg: &Qwen35Config, prefix: &str, la: &MlpActsL, gate: &Weight, up_w: &Weight, down_w: &Weight, d_mlp_out: &DeviceBuffer, n: u32) -> DeviceBuffer {
+fn mlp_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, lora: &LoraStore, cfg: &Qwen35Config, prefix: &str, la: &MlpActsL, gate: &Weight, up_w: &Weight, down_w: &Weight, d_mlp_out: &DeviceBuffer, n: u32) -> DeviceBuffer {
     let d = cfg.d_model;
     let ff = cfg.intermediate_size;
     let p = |s: &str| format!("{prefix}.{s}");
@@ -408,7 +385,7 @@ fn mlp_backward_lora(gpu: &Gpu, ids: &TrainIds, lora: &LoraStore, cfg: &Qwen35Co
     let d_h = gpu.storage((n * ff) as u64);
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, "down", d_mlp_out, &la.h, down_w, &p("down.weight"), &d_h, n, ff, d, 0, &mut s);
+        proj_bwd_streamed(ops, lora, "down", d_mlp_out, &la.h, down_w, &p("down.weight"), &d_h, n, ff, d, 0, &mut s);
         gpu.submit(&[], &s);
     }
 
@@ -419,8 +396,8 @@ fn mlp_backward_lora(gpu: &Gpu, ids: &TrainIds, lora: &LoraStore, cfg: &Qwen35Co
     let d_xn2 = gpu.storage((n * d) as u64);
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, "up", &d_up, &la.xn2, up_w, &p("up.weight"), &d_xn2, n, d, ff, 0, &mut s);
-        proj_bwd_streamed(gpu, ids, lora, "gate", &d_gate_pre, &la.xn2, gate, &p("gate.weight"), &d_xn2, n, d, ff, 1, &mut s);
+        proj_bwd_streamed(ops, lora, "up", &d_up, &la.xn2, up_w, &p("up.weight"), &d_xn2, n, d, ff, 0, &mut s);
+        proj_bwd_streamed(ops, lora, "gate", &d_gate_pre, &la.xn2, gate, &p("gate.weight"), &d_xn2, n, d, ff, 1, &mut s);
         gpu.submit(&[], &s);
     }
     d_xn2
@@ -469,8 +446,8 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     let mixed_qkv = gpu.storage((n * conv_dim) as u64);
     {
         let mut s = Vec::new();
-        let act1 = ops.act(&mut s, &xn1, 0, n, d);
-        ops.matmul(&mut s, &layer.in_proj_qkv, &act1, &mixed_qkv, 0);
+        let act1 = ops.act_f32(&xn1, 0, n, d);
+        ops.matmul_rows(&mut s, &layer.in_proj_qkv, (0, layer.in_proj_qkv.n()), &act1, &mixed_qkv, 0);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("in_proj_qkv") {
@@ -484,10 +461,10 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     let z = gpu.storage((n * value_dim) as u64);
     {
         let mut s = Vec::new();
-        let act1 = ops.act(&mut s, &xn1, 0, n, d);
-        ops.matmul(&mut s, &layer.in_proj_b, &act1, &bproj, 0);
-        ops.matmul(&mut s, &layer.in_proj_a, &act1, &aproj, 0);
-        ops.matmul(&mut s, &layer.in_proj_z, &act1, &z, 0);
+        let act1 = ops.act_f32(&xn1, 0, n, d);
+        ops.matmul_rows(&mut s, &layer.in_proj_b, (0, layer.in_proj_b.n()), &act1, &bproj, 0);
+        ops.matmul_rows(&mut s, &layer.in_proj_a, (0, layer.in_proj_a.n()), &act1, &aproj, 0);
+        ops.matmul_rows(&mut s, &layer.in_proj_z, (0, layer.in_proj_z.n()), &act1, &z, 0);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("in_proj_b") {
@@ -514,8 +491,8 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     let mixer_out = gpu.storage((n * d) as u64);
     {
         let mut s = Vec::new();
-        let act3 = ops.act(&mut s, &gated, 0, n, value_dim);
-        ops.matmul(&mut s, &layer.out_proj, &act3, &mixer_out, 0);
+        let act3 = ops.act_f32(&gated, 0, n, value_dim);
+        ops.matmul_rows(&mut s, &layer.out_proj, (0, layer.out_proj.n()), &act3, &mixer_out, 0);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("out_proj") {
@@ -544,7 +521,7 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
 /// ungraded (`GdnMixerGrads` all `None` - no aux tensor is ever a LoRA
 /// target in this module, see `crate::config::lora_targets`).
 #[allow(clippy::too_many_arguments)]
-fn gdn_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: &LoraStore, layer_idx: usize, layer: &OwnedGdnLayer, xn1: &DeviceBuffer, gated: &DeviceBuffer, mixer_acts: &GdnMixerActs, d_out: &DeviceBuffer, d_xn1: &DeviceBuffer, n: u32, ones_khd: &DeviceBuffer) {
+fn gdn_mixer_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lora: &LoraStore, layer_idx: usize, layer: &OwnedGdnLayer, xn1: &DeviceBuffer, gated: &DeviceBuffer, mixer_acts: &GdnMixerActs, d_out: &DeviceBuffer, d_xn1: &DeviceBuffer, n: u32, ones_khd: &DeviceBuffer) {
     let d = cfg.d_model;
     let conv_dim = cfg.linear_conv_dim();
     let value_dim = cfg.linear_value_dim();
@@ -556,7 +533,7 @@ fn gdn_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: 
     let d_gated = gpu.storage((n * value_dim) as u64);
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, "out_proj", d_out, gated, &layer.out_proj, &p("out_proj.weight"), &d_gated, n, value_dim, d, 0, &mut s);
+        proj_bwd_streamed(ops, lora, "out_proj", d_out, gated, &layer.out_proj, &p("out_proj.weight"), &d_gated, n, value_dim, d, 0, &mut s);
         gpu.submit(&[], &s);
     }
 
@@ -567,14 +544,14 @@ fn gdn_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: 
 
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, "in_proj_b", &d_bproj, xn1, &layer.in_proj_b, &p("in_proj_b.weight"), d_xn1, n, d, nvh, 0, &mut s);
-        proj_bwd_streamed(gpu, ids, lora, "in_proj_a", &d_aproj, xn1, &layer.in_proj_a, &p("in_proj_a.weight"), d_xn1, n, d, nvh, 1, &mut s);
-        proj_bwd_streamed(gpu, ids, lora, "in_proj_z", &d_z, xn1, &layer.in_proj_z, &p("in_proj_z.weight"), d_xn1, n, d, value_dim, 1, &mut s);
+        proj_bwd_streamed(ops, lora, "in_proj_b", &d_bproj, xn1, &layer.in_proj_b, &p("in_proj_b.weight"), d_xn1, n, d, nvh, 0, &mut s);
+        proj_bwd_streamed(ops, lora, "in_proj_a", &d_aproj, xn1, &layer.in_proj_a, &p("in_proj_a.weight"), d_xn1, n, d, nvh, 1, &mut s);
+        proj_bwd_streamed(ops, lora, "in_proj_z", &d_z, xn1, &layer.in_proj_z, &p("in_proj_z.weight"), d_xn1, n, d, value_dim, 1, &mut s);
         gpu.submit(&[], &s);
     }
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, "in_proj_qkv", &d_mixed_qkv, xn1, &layer.in_proj_qkv, &p("in_proj_qkv.weight"), d_xn1, n, d, conv_dim, 1, &mut s);
+        proj_bwd_streamed(ops, lora, "in_proj_qkv", &d_mixed_qkv, xn1, &layer.in_proj_qkv, &p("in_proj_qkv.weight"), d_xn1, n, d, conv_dim, 1, &mut s);
         gpu.submit(&[], &s);
     }
 }
@@ -591,7 +568,7 @@ fn gdn_layer_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Con
     let d = cfg.d_model;
     let (_out, acts) = gdn_layer_forward_lora(gpu, ops, ids, cfg, lora, layer_idx, layer, xres_l, n, ones_khd);
 
-    let d_xn2 = mlp_backward_lora(gpu, ids, lora, cfg, &format!("blocks.{layer_idx}.mlp"), &acts.mlp, &layer.mlp_gate, &layer.mlp_up, &layer.mlp_down, d_res_next, n);
+    let d_xn2 = mlp_backward_lora(gpu, ops, ids, lora, cfg, &format!("blocks.{layer_idx}.mlp"), &acts.mlp, &layer.mlp_gate, &layer.mlp_up, &layer.mlp_down, d_res_next, n);
 
     let d_xmid = gpu.storage((n * d) as u64);
     {
@@ -603,7 +580,7 @@ fn gdn_layer_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Con
     }
 
     let d_xn1 = gpu.storage((n * d) as u64);
-    gdn_mixer_backward_lora(gpu, ids, cfg, lora, layer_idx, layer, &acts.xn1, &acts.gated, &acts.mixer, &d_xmid, &d_xn1, n, ones_khd);
+    gdn_mixer_backward_lora(gpu, ops, ids, cfg, lora, layer_idx, layer, &acts.xn1, &acts.gated, &acts.mixer, &d_xmid, &d_xn1, n, ones_khd);
 
     let d_res_l = gpu.storage((n * d) as u64);
     {
@@ -643,10 +620,10 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     let v = gpu.storage((n * kvd) as u64);
     {
         let mut s = Vec::new();
-        let act1 = ops.act(&mut s, &xn1, 0, n, d);
-        ops.matmul(&mut s, &layer.q_proj, &act1, &q_full, 0);
-        ops.matmul(&mut s, &layer.k_proj, &act1, &k, 0);
-        ops.matmul(&mut s, &layer.v_proj, &act1, &v, 0);
+        let act1 = ops.act_f32(&xn1, 0, n, d);
+        ops.matmul_rows(&mut s, &layer.q_proj, (0, layer.q_proj.n()), &act1, &q_full, 0);
+        ops.matmul_rows(&mut s, &layer.k_proj, (0, layer.k_proj.n()), &act1, &k, 0);
+        ops.matmul_rows(&mut s, &layer.v_proj, (0, layer.v_proj.n()), &act1, &v, 0);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("q_proj") {
@@ -673,8 +650,8 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     let mixer_out = gpu.storage((n * d) as u64);
     {
         let mut s = Vec::new();
-        let act2 = ops.act(&mut s, &ctx_gated, 0, n, shape.qd());
-        ops.matmul(&mut s, &layer.o_proj, &act2, &mixer_out, 0);
+        let act2 = ops.act_f32(&ctx_gated, 0, n, shape.qd());
+        ops.matmul_rows(&mut s, &layer.o_proj, (0, layer.o_proj.n()), &act2, &mixer_out, 0);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("o_proj") {
@@ -701,7 +678,7 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
 /// direct transcription of `Qwen35::gqa_mixer_bwd`, `q_norm`/`k_norm` always
 /// ungraded (never a LoRA target).
 #[allow(clippy::too_many_arguments)]
-fn gqa_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: &LoraStore, layer_idx: usize, layer: &OwnedGqaLayer, xn1: &DeviceBuffer, ctx_gated: &DeviceBuffer, mixer_acts: &GqaMixerActs, d_out: &DeviceBuffer, d_xn1: &DeviceBuffer, n: u32, cos: &DeviceBuffer, sin: &DeviceBuffer) {
+fn gqa_mixer_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lora: &LoraStore, layer_idx: usize, layer: &OwnedGqaLayer, xn1: &DeviceBuffer, ctx_gated: &DeviceBuffer, mixer_acts: &GqaMixerActs, d_out: &DeviceBuffer, d_xn1: &DeviceBuffer, n: u32, cos: &DeviceBuffer, sin: &DeviceBuffer) {
     let d = cfg.d_model;
     let (nh, nkv, hd) = (cfg.n_heads, cfg.n_kv_heads, cfg.head_dim);
     let (qpd, qd, kvd) = (cfg.q_proj_dim(), cfg.q_dim(), cfg.kv_dim());
@@ -710,7 +687,7 @@ fn gqa_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: 
     let d_ctx_gated = gpu.storage((n * qd) as u64);
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, "o_proj", d_out, ctx_gated, &layer.o_proj, &p("o_proj.weight"), &d_ctx_gated, n, qd, d, 0, &mut s);
+        proj_bwd_streamed(ops, lora, "o_proj", d_out, ctx_gated, &layer.o_proj, &p("o_proj.weight"), &d_ctx_gated, n, qd, d, 0, &mut s);
         gpu.submit(&[], &s);
     }
 
@@ -721,9 +698,9 @@ fn gqa_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: 
 
     {
         let mut s = Vec::new();
-        proj_bwd_streamed(gpu, ids, lora, "q_proj", &d_q_full, xn1, &layer.q_proj, &p("q_proj.weight"), d_xn1, n, d, qpd, 0, &mut s);
-        proj_bwd_streamed(gpu, ids, lora, "k_proj", &d_k, xn1, &layer.k_proj, &p("k_proj.weight"), d_xn1, n, d, kvd, 1, &mut s);
-        proj_bwd_streamed(gpu, ids, lora, "v_proj", &d_v, xn1, &layer.v_proj, &p("v_proj.weight"), d_xn1, n, d, kvd, 1, &mut s);
+        proj_bwd_streamed(ops, lora, "q_proj", &d_q_full, xn1, &layer.q_proj, &p("q_proj.weight"), d_xn1, n, d, qpd, 0, &mut s);
+        proj_bwd_streamed(ops, lora, "k_proj", &d_k, xn1, &layer.k_proj, &p("k_proj.weight"), d_xn1, n, d, kvd, 1, &mut s);
+        proj_bwd_streamed(ops, lora, "v_proj", &d_v, xn1, &layer.v_proj, &p("v_proj.weight"), d_xn1, n, d, kvd, 1, &mut s);
         gpu.submit(&[], &s);
     }
 }
@@ -734,7 +711,7 @@ fn gqa_layer_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Con
     let d = cfg.d_model;
     let (_out, acts) = gqa_layer_forward_lora(gpu, ops, ids, cfg, lora, layer_idx, layer, xres_l, n, cos, sin);
 
-    let d_xn2 = mlp_backward_lora(gpu, ids, lora, cfg, &format!("blocks.{layer_idx}.mlp"), &acts.mlp, &layer.mlp_gate, &layer.mlp_up, &layer.mlp_down, d_res_next, n);
+    let d_xn2 = mlp_backward_lora(gpu, ops, ids, lora, cfg, &format!("blocks.{layer_idx}.mlp"), &acts.mlp, &layer.mlp_gate, &layer.mlp_up, &layer.mlp_down, d_res_next, n);
 
     let d_xmid = gpu.storage((n * d) as u64);
     {
@@ -746,7 +723,7 @@ fn gqa_layer_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Con
     }
 
     let d_xn1 = gpu.storage((n * d) as u64);
-    gqa_mixer_backward_lora(gpu, ids, cfg, lora, layer_idx, layer, &acts.xn1, &acts.ctx_gated, &acts.mixer, &d_xmid, &d_xn1, n, cos, sin);
+    gqa_mixer_backward_lora(gpu, ops, ids, cfg, lora, layer_idx, layer, &acts.xn1, &acts.ctx_gated, &acts.mixer, &d_xmid, &d_xn1, n, cos, sin);
 
     let d_res_l = gpu.storage((n * d) as u64);
     {
@@ -823,10 +800,8 @@ impl StreamTrainer {
     /// Build against a real checkpoint directory (`dir`, the SAME
     /// `Qwen/Qwen3.8-27B-FP8` layout `crate::stream::generate` reads):
     /// `lm_head.weight`/`embed_tokens.weight` (tied per `cfg.tie_embeddings`)
-    /// and `norm.weight` are streamed ONCE from `dir/outside.safetensors`
-    /// and kept resident for the whole run (never re-streamed per layer -
-    /// see [`build_head_f32_from_mmap`]'s own doc for the memory cost this
-    /// pays, and why it is paid once). The 64 main-stack layers are NOT
+    /// and `norm.weight` are loaded ONCE (the head in its stored encoding)
+    /// and kept resident for the whole run, never re-streamed per layer. The 64 main-stack layers are NOT
     /// loaded here - a caller streams those per step via [`Self::
     /// real_loader`].
     pub fn new_real(gpu: Gpu, cfg: &Qwen35Config, dir: &Path, n: u32, window_budget: u32, lora_init: &HashMap<String, Vec<f32>>) -> Result<StreamTrainer, String> {
@@ -840,14 +815,13 @@ impl StreamTrainer {
         let cos = gpu.storage_init("stream_train.rope_cos", &cos);
         let sin = gpu.storage_init("stream_train.rope_sin", &sin);
 
-        let outside_path = dir.join("outside.safetensors");
-        let outside = MmapSafetensors::open(&outside_path)?;
-        let embed_name = "model.language_model.embed_tokens.weight";
-        let head_name = if cfg.tie_embeddings { embed_name } else { "lm_head.weight" };
-        let head = build_head_f32_from_mmap(&gpu, &outside, head_name, v, d, 4096);
-        let norm_raw = crate::stream::read_final_norm(&outside, d)?;
-        let final_norm = gpu.storage_init("stream_train.final_norm", &norm_raw);
-        drop(outside);
+        // The shared head and final norm stay resident for the whole call: the head in the encoding the
+        // checkpoint stores it in (bf16 for the real release), never expanded to fp32.
+        let base = crate::fp8_source::PackedBase::open(dir, cfg, crate::fp8_source::hf_fp8_block_size(dir)?)?;
+        let head_name = if cfg.tie_embeddings { "tok.weight" } else { "lm_head.weight" };
+        let head = base.weight(&ops, head_name)?;
+        assert_eq!((head.n() as usize, head.k() as usize), (v, d), "stream_train: {head_name} is {}x{}, the config expects {v}x{d}", head.n(), head.k());
+        let final_norm = gpu.storage_init("stream_train.final_norm", &base.small_f32("norm.weight")?);
 
         let lora = LoraStore::new(&gpu, cfg, lora_init, n);
         Ok(StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, final_norm, n, window_budget })
@@ -971,21 +945,23 @@ impl StreamTrainer {
     /// host weight map - the tiny-scale equivalence gate's own loader (no
     /// disk I/O).
     pub fn synthetic_loader<'a>(&'a self, cfg: &'a Qwen35Config, init: &'a HashMap<String, Vec<f32>>) -> impl Fn(usize) -> OwnedStreamedLayer + 'a {
-        move |l| build_layer_f32(&self.ops, &self.gpu, cfg, l, init)
+        self.synthetic_loader_at(cfg, init, Dtype::F32)
     }
 
-    /// A ready-made [`Self::step`]/[`Self::forward_backward`] `loader` that
-    /// streams each layer from a real checkpoint directory via
-    /// [`load_layer_f32`] - the real-checkpoint run's own loader.
-    pub fn real_loader<'a>(&'a self, cfg: &'a Qwen35Config, dir: &'a Path) -> impl Fn(usize) -> OwnedStreamedLayer + 'a {
-        move |l| load_layer_f32(&self.ops, &self.gpu, dir, cfg, l)
+    /// [`Self::synthetic_loader`] with every matrix of the layer resident at `tier` (quantized from the
+    /// host map): the trainer then runs forward and backward through that tier packed.
+    pub fn synthetic_loader_at<'a>(&'a self, cfg: &'a Qwen35Config, init: &'a HashMap<String, Vec<f32>>, tier: Dtype) -> impl Fn(usize) -> OwnedStreamedLayer + 'a {
+        move |l| build_layer_host(&self.ops, &self.gpu, cfg, l, init, tier)
     }
 
-    /// One forward+backward+AdamW step (the normal training-loop entry
-    /// point): zeroes the LoRA adapter gradients, runs [`Self::
-    /// forward_backward`], then one AdamW step on the resident adapters.
-    /// Returns the mean cross-entropy loss. See [`Self::forward_backward`]'s
-    /// own doc for `loader`/`x0`/`targets`.
+    /// The loader of a real checkpoint directory: every layer's matrices go to the device in the encoding the
+    /// checkpoint stores them in (FP8 stays FP8 with its block scales), one tile of host staging at a time.
+    /// The FP8 block size is the checkpoint's own `weight_block_size`.
+    pub fn real_loader<'a>(&'a self, cfg: &'a Qwen35Config, dir: &'a Path) -> Result<impl Fn(usize) -> OwnedStreamedLayer + 'a, String> {
+        let base = crate::fp8_source::PackedBase::open(dir, cfg, crate::fp8_source::hf_fp8_block_size(dir)?)?;
+        Ok(move |l| load_layer_packed(&self.ops, &self.gpu, &base, cfg, l))
+    }
+
     pub fn step<F: Fn(usize) -> OwnedStreamedLayer>(&self, cfg: &Qwen35Config, loader: F, x0: &[f32], targets: &[u32], lr: f32, adam_t: u32) -> f32 {
         self.lora.zero_grads(&self.gpu);
         let loss = self.forward_backward(cfg, loader, x0, targets);
@@ -1080,7 +1056,11 @@ impl StreamTrainer {
         g.submit(&[], &[g.step_buf(self.ids.ce_grad, &ce_grad_uni, &[&logits, &targets_buf, &d_logits], n * v)]);
 
         let d_xn_final = g.storage((n * d) as u64);
-        g.submit(&[], &[g.step(self.ids.matmul_dx, &[&d_logits, f32_buf(&self.head), &d_xn_final], &[n, d, v, 0], n * d)]);
+        {
+            let mut s = Vec::new();
+            self.ops.matmul_dx(&mut s, &self.head, &d_logits, n, &d_xn_final, false);
+            g.submit(&[], &s);
+        }
 
         let mut d_res_next = g.storage((n * d) as u64);
         {

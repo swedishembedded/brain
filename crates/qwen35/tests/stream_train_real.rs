@@ -127,7 +127,7 @@ fn short_real_streaming_lora_finetune_reduces_loss_and_shifts_generation() {
         .unwrap_or_else(|e| panic!("stream_train_real: StreamTrainer::new_real: {e}"));
     println!("stream_train_real: trainer construction (resident head+norm load): {:.1}s", t0.elapsed().as_secs_f64());
 
-    let loader = trainer.real_loader(&cfg, &dir);
+    let loader = trainer.real_loader(&cfg, &dir).unwrap_or_else(|e| panic!("stream_train_real: real_loader: {e}"));
     let x0 = StreamTrainer::embed_real(&dir, &tokens, cfg.d_model as usize).unwrap_or_else(|e| panic!("stream_train_real: embed_real: {e}"));
 
     // ---- BEFORE: generate with the fresh (zero-`.lora_b`, exact-no-op) adapter ----

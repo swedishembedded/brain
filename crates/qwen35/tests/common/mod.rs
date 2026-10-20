@@ -12,6 +12,8 @@
 
 #![allow(dead_code)]
 
+pub mod hf_fixture;
+
 use std::collections::HashMap;
 
 use data::rng::Rng;

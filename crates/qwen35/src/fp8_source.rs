@@ -65,6 +65,15 @@ pub fn open_dir(dir: &Path, cfg: &Qwen35Config, block: usize) -> Result<PackedSo
 /// around this decoder passes its vision tower and projector prefixes here.
 pub fn open_dir_with(dir: &Path, cfg: &Qwen35Config, block: usize, foreign: &[&str]) -> Result<PackedSource, String> {
     let reader = PackedReader::open(dir).map_err(|e| format!("qwen35 source: {e}"))?.with_fp8_block(block as u32);
+    let bindings = bindings_for(&reader, cfg, foreign)?;
+    let src = PackedSource::new(Box::new(reader), CodecRegistry::reference(), bindings).map_err(|e| format!("qwen35 source: {e}"))?;
+    check_coverage(&src, cfg)?;
+    Ok(src)
+}
+
+/// The canonical-name bindings of `reader`'s tensors: which stored tensor is which parameter, and which plain
+/// RMSNorm weights are stored as `w` and applied as `1 + w`.
+fn bindings_for(reader: &PackedReader, cfg: &Qwen35Config, foreign: &[&str]) -> Result<Vec<(String, Binding)>, String> {
     let mut bindings: Vec<(String, Binding)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for name in reader.names() {
@@ -77,9 +86,55 @@ pub fn open_dir_with(dir: &Path, cfg: &Qwen35Config, block: usize, foreign: &[&s
         let add = if is_plain_rmsnorm_weight(&canon) { 1.0 } else { 0.0 };
         bindings.push((canon, Binding { source: name, add }));
     }
-    let src = PackedSource::new(Box::new(reader), CodecRegistry::reference(), bindings).map_err(|e| format!("qwen35 source: {e}"))?;
-    check_coverage(&src, cfg)?;
-    Ok(src)
+    Ok(bindings)
+}
+
+/// Host staging a [`PackedBase::weight`] load may hold at once (one tile of the destination encoding).
+const WEIGHT_STAGING_BYTES: u64 = 64 << 20;
+
+/// A Qwen3.5/3.8 checkpoint directory served in two ways under brain-canonical names: small tensors (norm
+/// gains, conv and gate vectors) decoded to f32 on demand, and weight matrices PRESERVED in their stored
+/// encoding straight into a resident [`Weight`] tier through the checkpoint crate's tiled loader. A layer
+/// of an FP8 checkpoint therefore reaches the device as FP8 bytes plus block scales, one tile of host
+/// staging at a time, and is never expanded to fp32 on the host or the device.
+pub struct PackedBase {
+    reader: PackedReader,
+    codecs: CodecRegistry,
+    stored: std::collections::HashMap<String, String>,
+    small: PackedSource,
+}
+
+impl PackedBase {
+    /// Open `dir` for model `cfg` (`block` as in [`open_dir`]); the same two-way coverage check as
+    /// [`open_dir`] applies.
+    pub fn open(dir: &Path, cfg: &Qwen35Config, block: usize) -> Result<PackedBase, String> {
+        let open_reader = || PackedReader::open(dir).map(|r| r.with_fp8_block(block as u32)).map_err(|e| format!("qwen35 source: {e}"));
+        let reader = open_reader()?;
+        let bindings = bindings_for(&reader, cfg, &[])?;
+        let stored = bindings.iter().map(|(canon, b)| (canon.clone(), b.source.clone())).collect();
+        let small = PackedSource::new(Box::new(open_reader()?), CodecRegistry::reference(), bindings).map_err(|e| format!("qwen35 source: {e}"))?;
+        check_coverage(&small, cfg)?;
+        Ok(PackedBase { reader, codecs: CodecRegistry::reference(), stored, small })
+    }
+
+    /// `name` decoded to f32, in bounded tiles (a small tensor: a norm gain or a conv/gate vector; the `(1+w)`
+    /// norm fold applied). Weight matrices go through [`Self::weight`], never this.
+    pub fn small_f32(&self, name: &str) -> Result<Vec<f32>, String> {
+        let mut out = Vec::with_capacity(self.small.numel(name).ok_or_else(|| format!("qwen35 source: no tensor {name}"))?);
+        self.small.with_tensor_chunks(name, 1 << 20, &mut |_, chunk| out.extend_from_slice(chunk));
+        Ok(out)
+    }
+
+    /// `name` as a resident weight in the tier of its stored encoding (Preserve: no numeric change).
+    /// An encoding with no tier is an error, never a widening.
+    pub fn weight(&self, ops: &model::ops::Ops, name: &str) -> Result<model::ops::Weight, String> {
+        use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, Loader, MemoryBudget};
+        let stored = self.stored.get(name).ok_or_else(|| format!("qwen35 source: no tensor {name}"))?;
+        let loader = Loader { reader: &self.reader, codecs: &self.codecs, workspace: BoundedWorkspace::new(MemoryBudget::new(WEIGHT_STAGING_BYTES, 0)), config: LoadConfig::default() };
+        let mut sink = model::ops::DeviceWeightSink::new(ops);
+        loader.load(stored, &LoadPolicy::Preserve, &mut sink).map_err(|e| format!("qwen35 source: {name}: {e}"))?;
+        sink.take_weight().ok_or_else(|| format!("qwen35 source: {name}: the load produced no weight"))
+    }
 }
 
 /// Two-way coverage against `cfg.param_list()` from shapes alone.
