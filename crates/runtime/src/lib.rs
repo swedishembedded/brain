@@ -52,7 +52,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod pump;
-pub mod sample;
+pub use data::sample;
 /// The real Qwen3-TTS [`SynthModel`] adapter. Behind the `qwen3tts` feature so the
 /// default build never links the voice stack - see the module's own doc.
 #[cfg(feature = "qwen3tts")]

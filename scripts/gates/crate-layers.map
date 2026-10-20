@@ -24,6 +24,7 @@
 #   6  serving, front ends, the SDK, samples
 
 
+
 # layer 1: kernels, architecture registry, device-neutral contracts
 brain-arch	1
 brain-backend-api	1
@@ -97,6 +98,7 @@ brain-deepseekocr2	4
 brain-deepseekvl	4
 brain-diamond	4
 brain-ecapatdnn	4
+brain-eval	4
 brain-fastvlm	4
 brain-fincast	4
 brain-florence2	4
@@ -167,7 +169,6 @@ brain-zipdepth	4
 # layer 5: cross-cutting services
 brain-bench	5
 brain-capture	5
-brain-eval	5
 brain-fcbench	5
 brain-federated	5
 brain-gradcheck	5

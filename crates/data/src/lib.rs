@@ -33,6 +33,7 @@ pub mod mlm;
 pub mod qwen_chat;
 pub mod qwen_tokenizer;
 pub mod rng;
+pub mod sample;
 pub mod tokenizer;
 pub mod unigram;
 pub mod wordpiece;

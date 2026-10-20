@@ -29,6 +29,7 @@ brain-hfsm.workspace = true
 brain-gpt2.workspace = true
 brain-yolov8.workspace = true
 brain-checkpoint.workspace = true
+brain-data.workspace = true
 brain-forecast.workspace = true
 brain-fcbench.workspace = true
 brain-seed.workspace = true

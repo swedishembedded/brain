@@ -1479,9 +1479,9 @@ pub fn bench(
         samples.push(t.elapsed().as_secs_f64() * 1e3);
     }
     let wall = t0.elapsed().as_secs_f64();
-    // Shared latency stats (`perf::stats::Dist`) instead of a locally
+    // Shared latency stats (`brain_stats::latency::Dist`) instead of a locally
     // reimplemented sort+index percentile.
-    let mut d = perf::stats::Dist::from_millis(samples);
+    let mut d = brain_stats::latency::Dist::from_millis(samples);
     let n = d.len();
     Ok(BenchResult {
         device: session.device().to_string(),

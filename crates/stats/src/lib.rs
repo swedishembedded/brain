@@ -29,6 +29,7 @@
 //! automatically. Collections are always data-driven — never hardcode a count.
 
 pub mod build;
+pub mod latency;
 pub mod snapshot;
 pub mod source;
 

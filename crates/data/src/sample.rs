@@ -2,11 +2,11 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Token sampling from a vocab logit row — temperature + top-k, the same scheme
-//! as `gpt2::sample`, lifted here so [`crate::StreamPump`] can run against any
-//! [`crate::InferModel`] (real GPT or a fake) without depending on gpt internals.
+//! as `gpt2::sample`, shared so any streaming pump or image-token sampler can
+//! run against any model without depending on gpt internals.
 
 /// A tiny deterministic PRNG (SplitMix64), so sampling is reproducible from a
-/// seed without pulling in the `data` crate.
+/// seed.
 #[derive(Clone, Debug)]
 pub struct Rng {
     state: u64,

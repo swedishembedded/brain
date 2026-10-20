@@ -58,15 +58,15 @@ layer 3 - training substrate and shared contracts
 layer 4 - models
     arcface, bisenet, campplus, captioner, chronos2, clip, codeformer, connectome, controlnet,
     cosyvoice, decide, decisions, deepseek2, deepseek2ocr, deepseekocr2, deepseekvl, diamond,
-    ecapatdnn, fastvlm, fincast, florence2, flux1, flux2, fly, flybody, gemma4, genieredux,
-    glmdsa, gpt2, horizon, imaging, imgpipe, instantid, januspro, kronos, lfm2, llava, llmserve,
-    lpips, ltxv, mimi, minicpmv, minimaxh3, minimaxmusic3, modernbert, moondream3, mujoco, mvs,
-    nemotronasr, npu, pulid, qwen3, qwen35, qwen35moe, qwen3asr, qwen3omnimoe, qwen3tts,
-    qwen3vl, qwen3vlmoe, recon, rrdbnet, s3dit, s3tokenizer, sam1, sam2, scrfd, sdxlunet, sfm,
-    splat, supir, t5encoder, timesfm3, toyautoencoder, toymoe, toypid, toyseq2seq, viewport,
-    vqgan, wan, wm-core, wm-display, worldmirror2, yolov8, zipdepth
+    ecapatdnn, eval, fastvlm, fincast, florence2, flux1, flux2, fly, flybody, gemma4,
+    genieredux, glmdsa, gpt2, horizon, imaging, imgpipe, instantid, januspro, kronos, lfm2,
+    llava, llmserve, lpips, ltxv, mimi, minicpmv, minimaxh3, minimaxmusic3, modernbert,
+    moondream3, mujoco, mvs, nemotronasr, npu, pulid, qwen3, qwen35, qwen35moe, qwen3asr,
+    qwen3omnimoe, qwen3tts, qwen3vl, qwen3vlmoe, recon, rrdbnet, s3dit, s3tokenizer, sam1, sam2,
+    scrfd, sdxlunet, sfm, splat, supir, t5encoder, timesfm3, toyautoencoder, toymoe, toypid,
+    toyseq2seq, viewport, vqgan, wan, wm-core, wm-display, worldmirror2, yolov8, zipdepth
 layer 5 - cross-cutting evaluation and tooling
-    bench, capture, eval, fcbench, federated, gradcheck, modelcost, rl
+    bench, capture, fcbench, federated, gradcheck, modelcost, rl
 layer 6 - serving, front ends, SDK, samples
     apiserve, appopts, brain, braintop, capability-mock, catalog, cli, dbus, hfsm, loader, perf,
     runtime, sample-decision-arena, sample-decision-doom, sample-decision-intents, sample-

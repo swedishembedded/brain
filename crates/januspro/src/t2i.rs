@@ -269,14 +269,14 @@ impl TextToImage {
     pub fn generate(&mut self, req: &Request, cancelled: &dyn Fn() -> bool, progress: &mut dyn FnMut(usize, usize)) -> Result<Vec<Rgb8>, String> {
         let (cond, uncond) = self.prompt_ids(req.prompt)?;
         let (v, total) = (self.heads.vocab(), self.tokens);
-        let mut rng = runtime::sample::Rng::new(req.seed);
+        let mut rng = data::sample::Rng::new(req.seed);
         let temperature = req.temperature;
         let codes = self.run_tokens(&cond, &uncond, req.cfg_weight, total, &mut |step, blended| {
             if cancelled() {
                 return Err("cancelled".into());
             }
             progress(step + 1, total);
-            Ok(blended.chunks(v).map(|l| runtime::sample::sample_logits(l, temperature, 0, &mut rng)).collect())
+            Ok(blended.chunks(v).map(|l| data::sample::sample_logits(l, temperature, 0, &mut rng)).collect())
         })?;
         Ok(self.decode(&codes))
     }
@@ -289,13 +289,13 @@ impl TextToImage {
         let prompts = reqs.iter().map(|r| self.prompt_ids(r.prompt)).collect::<Result<Vec<_>, _>>()?;
         let weights: Vec<f32> = reqs.iter().map(|r| r.cfg_weight).collect();
         let (v, total) = (self.heads.vocab(), self.tokens);
-        let mut rngs: Vec<runtime::sample::Rng> = reqs.iter().map(|r| runtime::sample::Rng::new(r.seed)).collect();
+        let mut rngs: Vec<data::sample::Rng> = reqs.iter().map(|r| data::sample::Rng::new(r.seed)).collect();
         let codes = self.run_images(&prompts, &weights, total, &mut |step, blended| {
             if cancelled() {
                 return Err("cancelled".into());
             }
             progress(step + 1, total);
-            Ok(blended.chunks(v).zip(reqs.iter().zip(rngs.iter_mut())).map(|(l, (r, rng))| runtime::sample::sample_logits(l, r.temperature, 0, rng)).collect())
+            Ok(blended.chunks(v).zip(reqs.iter().zip(rngs.iter_mut())).map(|(l, (r, rng))| data::sample::sample_logits(l, r.temperature, 0, rng)).collect())
         })?;
         Ok(self.decode(&codes))
     }

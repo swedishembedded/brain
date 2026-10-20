@@ -163,11 +163,11 @@ fn assert_device(got: &str, want: NpuDevice, allow_fallback: bool) {
     }
 }
 
-/// p50/p99/mean over `xs`, via the shared [`perf::stats::Dist`] so this bin
+/// p50/p99/mean over `xs`, via the shared [`brain_stats::latency::Dist`] so this bin
 /// reports latency the same way the rest of the performance suite does,
 /// rather than a locally reimplemented percentile.
 fn percentiles(xs: Vec<f64>) -> (f64, f64, f64) {
-    let mut d = perf::stats::Dist::from_millis(xs);
+    let mut d = brain_stats::latency::Dist::from_millis(xs);
     (d.percentile(0.50).unwrap_or(0.0), d.percentile(0.99).unwrap_or(0.0), d.mean().unwrap_or(0.0))
 }
 

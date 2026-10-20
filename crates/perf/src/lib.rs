@@ -61,7 +61,8 @@ pub mod metrics;
 pub mod report;
 pub mod scenarios;
 pub mod schema;
-pub mod stats;
+/// Latency statistics live in the shared stats crate.
+pub use brain_stats::latency as stats;
 pub mod target;
 pub mod targets;
 pub mod workload;
