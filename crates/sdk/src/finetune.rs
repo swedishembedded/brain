@@ -96,6 +96,7 @@ pub struct ChatFineTune {
     adapter_id: Option<String>,
     rank: Option<u32>,
     alpha: Option<f32>,
+    tuning: model::adapter::device::AdapterTuning,
     weight_decay: f32,
     cooldown_steps: Option<u32>,
     steps: u32,
@@ -234,6 +235,7 @@ impl ChatFamily {
         opts: &model::FitOpts,
         rank: u32,
         alpha: f32,
+        tuning: model::adapter::device::AdapterTuning,
         continue_from: Option<&Path>,
         control: model::FitControl<'_>,
         held_out: &[&Path],
@@ -245,12 +247,12 @@ impl ChatFamily {
                     None => qwen3::finetune::LoraStart::Fresh,
                 };
                 let weights = open.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "checkpoint path is not UTF-8"))?;
-                let (report, trained) = qwen3::finetune::finetune_lora_controlled(weights, prepared_dir, opts, rank, alpha, &start, control, *tier)?;
+                let (report, trained) = qwen3::finetune::finetune_lora_tuned(weights, prepared_dir, opts, rank, alpha, tuning, &start, control, *tier)?;
                 Ok((report, TrainedLora::Qwen3(trained), Vec::new()))
             }
             ChatFamily::Qwen35(dtype) => {
                 let run = qwen35::finetune::StreamedRun { dtype: *dtype, recompute: dtype.is_frozen_only(), long: qwen35::finetune::LongSeqOverrides::default() };
-                let (report, trained, scored) = qwen35::finetune::finetune_lora_scored(open, prepared_dir, opts, rank, alpha, continue_from, &run, control, held_out)?;
+                let (report, trained, scored) = qwen35::finetune::finetune_lora_scored_tuned(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &run, control, held_out)?;
                 Ok((report, TrainedLora::Qwen35(Box::new(trained)), scored))
             }
         }
@@ -322,6 +324,7 @@ impl ChatFineTune {
             adapter_id: None,
             rank: None,
             alpha: None,
+            tuning: Default::default(),
             weight_decay: LORA_WEIGHT_DECAY,
             cooldown_steps: None,
             steps: 100,
@@ -501,6 +504,28 @@ impl ChatFineTune {
     /// or a continued adapter's own alpha - a different one is refused).
     pub fn alpha(mut self, alpha: f32) -> Self {
         self.alpha = Some(alpha);
+        self
+    }
+
+    /// rsLoRA: scale the update by `alpha / sqrt(rank)` instead of
+    /// `alpha / rank`, so a higher rank is not suppressed. A continued adapter
+    /// must be continued with the setting it trained with.
+    pub fn rank_stabilized(mut self, on: bool) -> Self {
+        self.tuning.rank_stabilized = on;
+        self
+    }
+
+    /// LoRA+: train the adapter's `B` matrices at `ratio` times the learning
+    /// rate (default 1, plain LoRA).
+    pub fn lora_plus(mut self, ratio: f32) -> Self {
+        self.tuning.lr_ratio = ratio;
+        self
+    }
+
+    /// LoRA-FA: keep the `A` matrices at their initial values and train only
+    /// `B`, which halves the adapter's gradient and optimizer state.
+    pub fn freeze_a(mut self, on: bool) -> Self {
+        self.tuning.freeze_a = on;
         self
     }
 
@@ -704,7 +729,7 @@ impl ChatFineTune {
             return Err(Error::Backend("ChatFineTune: selecting on the monitoring loss needs eval_every > 0".to_string()));
         }
 
-        let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha)?;
+        let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha, self.tuning)?;
 
         let Mix { rows: training, replay_records, repeats } = mix_rows(train_samples, replay_samples, self.replay_share, weighted_samples)?;
         // The packed validation split is what a periodic evaluation scores:
@@ -774,6 +799,9 @@ impl ChatFineTune {
             "parent": parent,
             "rank": rank,
             "alpha_bits": alpha.to_bits(),
+            "rank_stabilized": self.tuning.rank_stabilized,
+            "lr_ratio_bits": self.tuning.lr_ratio.to_bits(),
+            "freeze_a": self.tuning.freeze_a,
             "weight_decay_bits": self.weight_decay.to_bits(),
             "repeats": repeats,
             "grad_accum": self.grad_accum,
@@ -792,7 +820,7 @@ impl ChatFineTune {
         };
         let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots };
         let held_out_refs: Vec<&Path> = held_out_dirs.iter().map(PathBuf::as_path).collect();
-        let (report, trained, scored) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.continue_from.as_deref(), control, &held_out_refs).map_err(|e| Error::Backend(format!("training: {e}")))?;
+        let (report, trained, scored) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, &held_out_refs).map_err(|e| Error::Backend(format!("training: {e}")))?;
         // In-process scores (qwen35): the sets come back in the order they were given.
         let mut in_process = scored.into_iter();
         let mut take_scored = |present: bool| if present { in_process.next() } else { None };
@@ -1150,7 +1178,8 @@ fn score_records(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &Cha
 /// continues: a fresh adapter is rank 8 (or `rank`) at alpha `2 * rank`; a
 /// continued one is its own rank - a different requested rank is refused -
 /// and its own alpha. `alpha` overrides either.
-pub(crate) fn lora_shape(continue_from: Option<&Path>, rank: Option<u32>, alpha: Option<f32>) -> Result<(u32, f32, Option<String>)> {
+pub(crate) fn lora_shape(continue_from: Option<&Path>, rank: Option<u32>, alpha: Option<f32>, tuning: model::adapter::device::AdapterTuning) -> Result<(u32, f32, Option<String>)> {
+    tuning.validate().map_err(Error::Backend)?;
     let (rank, default_alpha, parent) = match continue_from {
         None => {
             let rank = rank.unwrap_or(8);
@@ -1163,7 +1192,11 @@ pub(crate) fn lora_shape(continue_from: Option<&Path>, rank: Option<u32>, alpha:
             if let Some(asked) = rank.filter(|&asked| asked != own) {
                 return Err(Error::Backend(format!("{}: a rank-{own} adapter cannot be continued at rank {asked}", path.display())));
             }
-            (own, adapter.alpha.unwrap_or(own as f32), Some(digest(path)?))
+            // The card holds the scale the adapter trained at; under rsLoRA the
+            // training alpha that reproduces it is that scale times sqrt(rank).
+            let card_alpha = adapter.alpha.unwrap_or(own as f32);
+            let trained_alpha = if tuning.rank_stabilized { card_alpha / (own as f32).sqrt() } else { card_alpha };
+            (own, trained_alpha, Some(digest(path)?))
         }
     };
     Ok((rank, alpha.unwrap_or(default_alpha), parent))
@@ -1413,6 +1446,24 @@ pub(crate) fn utf8(path: &Path) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A continued rsLoRA adapter trains on at the alpha that reproduces the
+    /// scale its card records, and a LoRA+ ratio that cannot train is refused.
+    #[test]
+    fn a_continued_rslora_adapter_keeps_the_scale_its_card_records() {
+        use model::adapter::device::{alpha_matches, AdapterTuning, LoraCfg};
+        let path = std::env::temp_dir().join(format!("brain-sdk-rs-card-{}.safetensors", std::process::id()));
+        let trained = LoraCfg::new(4, 8.0, vec!["wq".into()]).with_tuning(AdapterTuning { rank_stabilized: true, ..Default::default() });
+        let mut card = checkpoint::st::ModelCard::new("test:adapter", "qwen");
+        card.adapter = Some(checkpoint::st::Adapter { kind: "lora".into(), rank: Some(4), base: None, alpha: Some(trained.card_alpha()), targets: Some(vec!["wq".into()]), dataset_id: None, per_target: None });
+        checkpoint::st::save_safetensors(path.to_str().unwrap(), &[("a.lora_a".to_string(), vec![4, 2], vec![0.0; 8])], &serde_json::json!({}), Some(&card)).unwrap();
+        let tuning = AdapterTuning { rank_stabilized: true, ..Default::default() };
+        let (rank, alpha, parent) = lora_shape(Some(&path), None, None, tuning).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!((rank, parent.is_some()), (4, true));
+        assert!(alpha_matches(alpha, 8.0), "the training alpha is {alpha}");
+        assert!(lora_shape(None, None, None, AdapterTuning { lr_ratio: -1.0, ..Default::default() }).is_err());
+    }
 
     /// A fine-tune warms up over a twentieth of its steps, decays the rate
     /// over all of them, and decays no weights unless asked.

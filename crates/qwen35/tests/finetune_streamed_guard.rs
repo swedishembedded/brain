@@ -26,7 +26,7 @@ fn opts(batch: u32, block: u32, accum: u32) -> model::FitOpts {
 
 #[test]
 fn a_wide_batch_of_long_rows_is_refused_with_the_equivalent_accumulation() {
-    let mode = Mode::Lora { rank: 16, alpha: 32.0 };
+    let mode = Mode::Lora { rank: 16, alpha: 32.0, tuning: Default::default() };
     let err = finetune_streamed(Path::new("no-such-checkpoint"), Path::new("no-such-data"), &opts(32, 1024, 1), &mode, "out.adapter", false, &nf4_recompute()).expect_err("32 x 1024 tokens per micro-step must be refused");
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     let msg = err.to_string();
@@ -35,7 +35,7 @@ fn a_wide_batch_of_long_rows_is_refused_with_the_equivalent_accumulation() {
 
 #[test]
 fn a_batch_of_one_long_row_is_not_refused_by_the_guard() {
-    let mode = Mode::Lora { rank: 16, alpha: 32.0 };
+    let mode = Mode::Lora { rank: 16, alpha: 32.0, tuning: Default::default() };
     let err = finetune_streamed(Path::new("no-such-checkpoint"), Path::new("no-such-data"), &opts(1, 32768, 1), &mode, "out.adapter", false, &nf4_recompute()).expect_err("the checkpoint does not exist");
     // Past the guard: the failure is the missing checkpoint, not the batch.
     assert!(!err.to_string().contains("--grad-accum"), "{err}");

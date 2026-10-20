@@ -53,6 +53,12 @@ brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-dtype f
   `--mode full` is refused.
 - `--lora-rank`, `--lora-alpha` - adapter shape (aliases `--rank`, `--alpha`;
   alpha defaults to twice the rank).
+- `--lora-rs`, `--lora-lr-ratio X`, `--lora-freeze-a` - rsLoRA (the update is
+  scaled by `alpha / sqrt(rank)`), LoRA+ (the `B` matrices train at `X` times
+  the learning rate) and LoRA-FA (the `A` matrices stay at their initial
+  values and only `B` trains). Continue an adapter with the same three; the
+  `brain qwen3 finetune` verb takes them too, and the SDK's `ChatFineTune`
+  exposes `rank_stabilized`, `lora_plus` and `freeze_a`.
 - `--seq-len` - training sequence length (alias `--block`).
 - `--recompute` - recompute layer activations in the backward pass instead of
   keeping them; the default for `bf16` and `nf4`. The `f32` resident trainer

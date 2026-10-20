@@ -17,6 +17,7 @@ use std::path::Path;
 use checkpoint::TensorSource;
 use gpu_core::devices::{Home, Need};
 use gpu_core::select::Dtype;
+use model::adapter::device::AdapterTuning;
 use model::{FitOpts, Pipeline, PipelineModel, Shard};
 
 use crate::config::{LoraCfg, QwenConfig};
@@ -29,7 +30,7 @@ pub enum Mode {
     FullOffload,
     /// Low-rank adapters on the `targets` projections (see
     /// [`parse_lora_targets`]); base frozen.
-    Lora { rank: u32, alpha: f32, targets: Vec<String> },
+    Lora { rank: u32, alpha: f32, targets: Vec<String>, tuning: AdapterTuning },
 }
 
 /// Fine-tune `base` on the masked dataset in `dir`, writing `out`. Returns
@@ -68,7 +69,7 @@ pub fn finetune_from(
         // earlier cycles instead of being reset back to its zero-delta init.
         let c = checkpoint::load(out);
         let cfg = QwenConfig::from_json_checked(&c.header["config"]).map_err(std::io::Error::other)?;
-        if let Mode::Lora { rank, alpha, targets } = mode {
+        if let Mode::Lora { rank, alpha, targets, tuning } = mode {
             let lora = cfg
                 .lora
                 .as_ref()
@@ -76,11 +77,12 @@ pub fn finetune_from(
             assert_eq!(lora.rank, *rank, "resume checkpoint {out} LoRA rank {} does not match requested rank {rank}", lora.rank);
             assert_eq!(lora.alpha, *alpha, "resume checkpoint {out} LoRA alpha {} does not match requested alpha {alpha}", lora.alpha);
             assert_eq!(&lora.targets, targets, "resume checkpoint {out} adapts {:?}, not the requested {targets:?}", lora.targets);
+            assert_eq!(lora.tuning(), *tuning, "resume checkpoint {out} was trained with {:?}, not the requested {tuning:?}", lora.tuning());
         }
         (cfg, Box::new(c.by_role("")))
-    } else if let Mode::Lora { rank, alpha, targets } = mode {
+    } else if let Mode::Lora { rank, alpha, targets, tuning } = mode {
         let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
-        let (cfg, init) = lora_start(base, *rank, *alpha, opts.seed, &LoraStart::FreshOn(&targets))?;
+        let (cfg, init) = lora_start_tuned(base, *rank, *alpha, *tuning, opts.seed, &LoraStart::FreshOn(&targets))?;
         (cfg, Box::new(init))
     } else {
         // Fresh full fine-tune: the base's architecture and weights, read as
@@ -585,6 +587,16 @@ impl TensorSource for LoraInit<'_> {
 /// at is refused: its factors only mean what they mean at their own shape
 /// and scale.
 pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStart<'_>) -> std::io::Result<(QwenConfig, LoraInit<'static>)> {
+    lora_start_tuned(base, rank, alpha, AdapterTuning::default(), seed, start)
+}
+
+/// [`lora_start`] with the run's hyper-parameters (rsLoRA, LoRA+, LoRA-FA).
+/// A continued adapter must be continued with the tuning it was trained with:
+/// its card alpha is the scale it trained at, which a different tuning would
+/// change.
+pub fn lora_start_tuned(base: &str, rank: u32, alpha: f32, tuning: AdapterTuning, seed: u64, start: &LoraStart<'_>) -> std::io::Result<(QwenConfig, LoraInit<'static>)> {
+    tuning.validate().map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidInput, why))?;
+    let card_alpha = LoraCfg::new(rank, alpha, Vec::new()).with_tuning(tuning).card_alpha();
     let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, why);
     let (targets, adapter) = match start {
         LoraStart::Fresh => (LORA_TARGETS.iter().map(|s| s.to_string()).collect::<Vec<_>>(), None),
@@ -595,15 +607,15 @@ pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStar
             if card.kind != "lora" {
                 return Err(invalid(format!("{path}: a {:?} adapter, only LoRA can be continued", card.kind)));
             }
-            if card.rank != Some(rank) || card.alpha.is_some_and(|a| a != alpha) {
-                return Err(invalid(format!("{path}: trained at rank {:?} alpha {:?}, asked to continue at rank {rank} alpha {alpha}", card.rank, card.alpha)));
+            if card.rank != Some(rank) || card.alpha.is_some_and(|a| !model::adapter::device::alpha_matches(a, card_alpha)) {
+                return Err(invalid(format!("{path}: trained at rank {:?} alpha {:?}, asked to continue at rank {rank} alpha {card_alpha} ({tuning:?})", card.rank, card.alpha)));
             }
             let targets = card.targets.ok_or_else(|| invalid(format!("{path}: the adapter card names no targets")))?;
             (targets, Some(st.tensors))
         }
     };
     let (mut cfg, base_src) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
-    cfg.lora = Some(LoraCfg::new(rank, alpha, targets));
+    cfg.lora = Some(LoraCfg::new(rank, alpha, targets).with_tuning(tuning));
     // A fresh adapter starts at its zero-delta init; the base's own weights
     // are never copied, they stay behind `base_src`.
     let mut init = LoraInit::fresh(&cfg, base_src, seed);
@@ -636,10 +648,26 @@ pub fn finetune_lora_controlled(
     rank: u32,
     alpha: f32,
     start: &LoraStart<'_>,
+    control: model::FitControl<'_>,
+    base_dtype: Dtype,
+) -> std::io::Result<(model::FitReport, Trained)> {
+    finetune_lora_tuned(base, dir, opts, rank, alpha, AdapterTuning::default(), start, control, base_dtype)
+}
+
+/// [`finetune_lora_controlled`] with the run's hyper-parameters.
+#[allow(clippy::too_many_arguments)]
+pub fn finetune_lora_tuned(
+    base: &str,
+    dir: &Path,
+    opts: &FitOpts,
+    rank: u32,
+    alpha: f32,
+    tuning: AdapterTuning,
+    start: &LoraStart<'_>,
     mut control: model::FitControl<'_>,
     base_dtype: Dtype,
 ) -> std::io::Result<(model::FitReport, Trained)> {
-    let (cfg, init) = lora_start(base, rank, alpha, opts.seed, start)?;
+    let (cfg, init) = lora_start_tuned(base, rank, alpha, tuning, opts.seed, start)?;
     // The adapter files the run writes at its evaluations are of the shape it
     // builds.
     if let (Some(snapshots), Some(lora)) = (control.snapshots.as_mut(), cfg.lora.as_ref()) {

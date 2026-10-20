@@ -17,9 +17,10 @@ use std::path::Path;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
+use model::adapter::device::AdapterTuning;
 use model::FitOpts;
 
-use crate::base_source::{lora_base, BaseDtype};
+use crate::base_source::{lora_base_tuned, BaseDtype};
 use crate::config::{lora_targets, LoraCfg, Qwen35Config};
 use crate::model::{pipelines, Qwen35, TrainOpts};
 
@@ -31,7 +32,7 @@ pub enum Mode {
     FullOffload,
     /// Low-rank adapters on the 12 targetable projections (`crate::config::
     /// lora_targets`); base frozen.
-    Lora { rank: u32, alpha: f32 },
+    Lora { rank: u32, alpha: f32, tuning: AdapterTuning },
 }
 
 /// Fine-tune `base` on the masked dataset in `dir`, writing `out`. Returns
@@ -57,13 +58,14 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
         // earlier cycles instead of being reset back to its zero-delta init.
         let c = checkpoint::load(out);
         let cfg = Qwen35Config::from_json(&c.header["config"]);
-        if let Mode::Lora { rank, alpha } = mode {
+        if let Mode::Lora { rank, alpha, tuning } = mode {
             let lora = cfg
                 .lora
                 .as_ref()
                 .unwrap_or_else(|| panic!("resume checkpoint {out} has no LoRA config, but mode is Lora {{ rank: {rank}, alpha: {alpha} }}"));
             assert_eq!(lora.rank, *rank, "resume checkpoint {out} LoRA rank {} does not match requested rank {rank}", lora.rank);
             assert_eq!(lora.alpha, *alpha, "resume checkpoint {out} LoRA alpha {} does not match requested alpha {alpha}", lora.alpha);
+            assert_eq!(lora.tuning(), *tuning, "resume checkpoint {out} was trained with {:?}, not the requested {tuning:?}", lora.tuning());
         }
         (cfg, c.by_role(""))
     } else {
@@ -71,8 +73,8 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
         let c = checkpoint::load(base);
         let mut cfg = Qwen35Config::from_json(&c.header["config"]);
         let base_w = c.by_role("");
-        if let Mode::Lora { rank, alpha } = mode {
-            cfg.lora = Some(LoraCfg::new(*rank, *alpha, lora_targets()));
+        if let Mode::Lora { rank, alpha, tuning } = mode {
+            cfg.lora = Some(LoraCfg::new(*rank, *alpha, lora_targets()).with_tuning(*tuning));
         }
         // Fresh init for the (possibly LoRA-extended) param set, then overwrite
         // the base params with the checkpoint's -- adapters stay at their
@@ -260,12 +262,12 @@ pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, o
 #[allow(clippy::too_many_arguments)]
 pub fn finetune_streamed_named(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, run: &StreamedRun, naming: &AdapterNaming) -> std::io::Result<(f32, f32)> {
     let (card_id, base_id) = adapter_card(base, naming).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidInput, why))?;
-    let Mode::Lora { rank, alpha } = mode else {
+    let Mode::Lora { rank, alpha, tuning } = mode else {
         return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", run.dtype.name())));
     };
     let resume_from = resume.then(|| Path::new(out)).filter(|p| p.exists());
     let mut progress = step_progress();
-    let (report, m) = finetune_lora_controlled(base, dir, opts, *rank, *alpha, resume_from, run, step_progress_control(&mut progress))?;
+    let (report, m) = finetune_lora_tuned(base, dir, opts, *rank, *alpha, *tuning, resume_from, run, step_progress_control(&mut progress))?;
     let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", opts.seed, gpu_core::backend_name(), brain_modelstore::fetch::base_digest(base)?);
     crate::lora::save_adapter_with_lineage(out, &m, &card_id, &base_id, None, Some(provenance))?;
     Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
@@ -292,7 +294,23 @@ pub fn finetune_lora_controlled(
     run: &StreamedRun,
     control: model::FitControl<'_>,
 ) -> std::io::Result<(model::FitReport, Qwen35)> {
-    finetune_lora_scored(base, dir, opts, rank, alpha, resume_from, run, control, &[]).map(|(report, trained, _)| (report, trained))
+    finetune_lora_tuned(base, dir, opts, rank, alpha, AdapterTuning::default(), resume_from, run, control)
+}
+
+/// [`finetune_lora_controlled`] with the run's hyper-parameters.
+#[allow(clippy::too_many_arguments)]
+pub fn finetune_lora_tuned(
+    base: &Path,
+    dir: &Path,
+    opts: &FitOpts,
+    rank: u32,
+    alpha: f32,
+    tuning: AdapterTuning,
+    resume_from: Option<&Path>,
+    run: &StreamedRun,
+    control: model::FitControl<'_>,
+) -> std::io::Result<(model::FitReport, Qwen35)> {
+    finetune_lora_scored_tuned(base, dir, opts, rank, alpha, tuning, resume_from, run, control, &[]).map(|(report, trained, _)| (report, trained))
 }
 
 /// [`finetune_lora_controlled`] that also scores the prepared datasets in
@@ -308,6 +326,23 @@ pub fn finetune_lora_scored(
     opts: &FitOpts,
     rank: u32,
     alpha: f32,
+    resume_from: Option<&Path>,
+    run: &StreamedRun,
+    control: model::FitControl<'_>,
+    held_out: &[&Path],
+) -> std::io::Result<(model::FitReport, Qwen35, Vec<model::ScoredSet>)> {
+    finetune_lora_scored_tuned(base, dir, opts, rank, alpha, AdapterTuning::default(), resume_from, run, control, held_out)
+}
+
+/// [`finetune_lora_scored`] with the run's hyper-parameters.
+#[allow(clippy::too_many_arguments)]
+pub fn finetune_lora_scored_tuned(
+    base: &Path,
+    dir: &Path,
+    opts: &FitOpts,
+    rank: u32,
+    alpha: f32,
+    tuning: AdapterTuning,
     resume_from: Option<&Path>,
     run: &StreamedRun,
     control: model::FitControl<'_>,
@@ -329,7 +364,7 @@ pub fn finetune_lora_scored(
             opts.batch_size * opts.grad_accum.max(1),
         )));
     }
-    let (cfg, src) = lora_base(base, rank, alpha, opts.seed, resume_from).map_err(unsupported)?;
+    let (cfg, src) = lora_base_tuned(base, rank, alpha, tuning, opts.seed, resume_from).map_err(unsupported)?;
     let train = streamed_train_opts(run, opts.batch_size, opts.block_size, cfg.mtp).map_err(unsupported)?;
     let t_load = std::time::Instant::now();
     let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &src, &train);

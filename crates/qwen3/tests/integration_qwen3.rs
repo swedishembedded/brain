@@ -539,7 +539,7 @@ fn qwen3_full_vs_lora_toolcall() {
     // for a fair comparison — aggressive scale/LR makes the adapters memorise the
     // tiny synthetic set (train loss -> 0) without generalising.
     let lora_ckpt = out.join("lora.safetensors");
-    let (ll0, ll1) = qwen3::finetune::finetune(base_s, &out, &opts(1e-4), &qwen3::finetune::Mode::Lora { rank: 16, alpha: 16.0, targets: qwen3::finetune::default_lora_targets() }, lora_ckpt.to_str().unwrap()).unwrap();
+    let (ll0, ll1) = qwen3::finetune::finetune(base_s, &out, &opts(1e-4), &qwen3::finetune::Mode::Lora { rank: 16, alpha: 16.0, targets: qwen3::finetune::default_lora_targets(), tuning: Default::default() }, lora_ckpt.to_str().unwrap()).unwrap();
     let (exl, _) = qwen3::toolcall_eval::eval(&Qwen::load_inference(lora_ckpt.to_str().unwrap(), 1, 512), &t, &chat_template(&d), &held);
 
     println!("\n=== Qwen3-0.6B tool-call: FULL (offload) vs LoRA, {steps} steps ===");

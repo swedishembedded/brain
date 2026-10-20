@@ -296,7 +296,7 @@ impl PreferenceFineTune {
         let render = data::chat::RenderOpts { keep_reasoning: self.keep_reasoning };
         let train = encode_checked(dataset, &tok, &tmpl, self.max_block, render)?;
         let held_out = self.held_out.as_deref().map(|path| encode_checked(path, &tok, &tmpl, None, render)).transpose()?;
-        let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha)?;
+        let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha, Default::default())?;
         let block = block_for(longest(&train), self.max_block)?;
         let seq_len = block as usize;
         let packed = train

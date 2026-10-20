@@ -700,7 +700,7 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
 
     progress(Progress::step(2, 4, format!("training {steps} steps (rank {rank}, alpha {alpha})")));
     let full = scratch.join("full.safetensors");
-    let (l0, l1) = crate::finetune::finetune(weights, &data_dir, &opts, &crate::finetune::Mode::Lora { rank, alpha, targets }, &full.to_string_lossy())
+    let (l0, l1) = crate::finetune::finetune(weights, &data_dir, &opts, &crate::finetune::Mode::Lora { rank, alpha, targets, tuning: Default::default() }, &full.to_string_lossy())
         .map_err(|e| format!("qwen lora_train: {e}"))?;
 
     progress(Progress::step(3, 4, "saving adapter"));

@@ -328,13 +328,30 @@ fn run_sample(sa: &SampleArgs) -> Result<(), String> {
 /// (`qwen_cli::finetune_lora`, `forecast_cli::train`).
 const DEFAULT_LORA_RANK: u32 = 8;
 
-const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|DIR --out F [--mode lora|full] [--lora-rank R --lora-alpha A] \
+/// ` rs lr-ratio=X freeze-a` for the hyper-parameters a run turned on.
+fn tuning_desc(t: &model::adapter::device::AdapterTuning) -> String {
+    let mut out = String::new();
+    if t.rank_stabilized {
+        out.push_str(" rs");
+    }
+    if t.lr_ratio != 1.0 {
+        out.push_str(&format!(" lr-ratio={}", t.lr_ratio));
+    }
+    if t.freeze_a {
+        out.push_str(" freeze-a");
+    }
+    out
+}
+
+const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|DIR --out F [--mode lora|full] [--lora-rank R --lora-alpha A --lora-rs --lora-lr-ratio X --lora-freeze-a] \
      [--base-dtype f32|bf16|nf4] [--seq-len T] [--recompute on|off] [--gdn-segment N] [--bf16-residuals on|off] [--mlp-rows N] \
      [--eval-interval N --eval-batches N] [--steps N --lr X --batch B --grad-accum G --warmup W --weight-decay X --grad-clip X --save-secs S --seed S --mask = --align]
   --base-dtype  how the frozen base is held on the device: f32 (default, whole model resident; full or LoRA),
                 bf16 (half the bytes; LoRA only) or nf4 (4-bit QLoRA; LoRA only). bf16/nf4 stream the base from
                 a HuggingFace checkpoint directory (FP8 release included) tensor by tensor.
   --seq-len     training sequence length (alias of --block); --rank/--alpha are aliases of --lora-rank/--lora-alpha
+  --lora-rs, --lora-lr-ratio, --lora-freeze-a  rsLoRA (scale alpha/sqrt(rank)), LoRA+ (B trains at X times the learning rate)
+                and LoRA-FA (A stays at its init); a continued adapter must be continued with the same three
   --recompute   recompute layer activations in the backward pass instead of keeping them (default on for bf16/nf4)
   --gdn-segment, --bf16-residuals, --mlp-rows  the long-sequence settings (segmented Gated-DeltaNet layers, bf16 residual
                 stream, MLP in token chunks) of a bf16/nf4 base. Rows of 2048 tokens or more at batch 1 get 2048 / on / 2048
@@ -387,6 +404,12 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     let mode_name = a.str_or("--mode", "full");
     let rank = parse_num("--lora-rank", aliased(&mut a, "--lora-rank", "--rank")?, DEFAULT_LORA_RANK)?;
     let alpha = parse_num("--lora-alpha", aliased(&mut a, "--lora-alpha", "--alpha")?, rank as f32 * 2.0)?;
+    let tuning = model::adapter::device::AdapterTuning {
+        rank_stabilized: a.take_flag("--lora-rs"),
+        lr_ratio: parse_num("--lora-lr-ratio", a.take_str("--lora-lr-ratio"), 1.0f32)?,
+        freeze_a: a.take_flag("--lora-freeze-a"),
+    };
+    tuning.validate()?;
     let base_dtype: BaseDtype = a.str_or("--base-dtype", "f32").parse()?;
     let recompute_flag = match a.take_str("--recompute").as_deref() {
         None => None,
@@ -453,7 +476,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     // are both full-parameter unless a LoRA rank is asked for explicitly.
     let mode = match mode_name.as_str() {
         "full" => qwen35::finetune::Mode::FullOffload,
-        "lora" => qwen35::finetune::Mode::Lora { rank, alpha },
+        "lora" => qwen35::finetune::Mode::Lora { rank, alpha, tuning },
         other => return Err(format!("--mode {other:?}: expected \"lora\" or \"full\"")),
     };
     if base_dtype.is_frozen_only() && !matches!(mode, qwen35::finetune::Mode::Lora { .. }) {
@@ -504,7 +527,7 @@ fn finetune(args: &[String]) {
     };
     let mode_desc = match &ft.mode {
         qwen35::finetune::Mode::FullOffload => "full (offloaded AdamW moments)".to_string(),
-        qwen35::finetune::Mode::Lora { rank, alpha } => format!("lora rank={rank} alpha={alpha}"),
+        qwen35::finetune::Mode::Lora { rank, alpha, tuning } => format!("lora rank={rank} alpha={alpha}{}", tuning_desc(tuning)),
     };
     eprintln!(
         "qwen35 finetune: {} on {} [{mode_desc}, base {}{}] steps={} batch={} block={} lr={} grad-accum={} seed={} -> {}",
@@ -625,16 +648,16 @@ mod finetune_cli_tests {
     #[test]
     fn lora_mode_defaults_its_rank_and_alpha() {
         let ft = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o", "--mode", "lora"])).unwrap();
-        let qwen35::finetune::Mode::Lora { rank, alpha } = ft.mode else { panic!("--mode lora must select a LoRA mode") };
+        let qwen35::finetune::Mode::Lora { rank, alpha, .. } = ft.mode else { panic!("--mode lora must select a LoRA mode") };
         assert_eq!(rank, DEFAULT_LORA_RANK);
         assert_eq!(alpha, DEFAULT_LORA_RANK as f32 * 2.0);
 
         let ft = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o", "--mode", "lora", "--rank", "4"])).unwrap();
-        let qwen35::finetune::Mode::Lora { rank, alpha } = ft.mode else { panic!("expected LoRA") };
+        let qwen35::finetune::Mode::Lora { rank, alpha, .. } = ft.mode else { panic!("expected LoRA") };
         assert_eq!((rank, alpha), (4, 8.0), "alpha must follow an explicit --rank, not stay at the default rank's");
 
         let ft = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o", "--mode", "lora", "--rank", "4", "--alpha", "1.5"])).unwrap();
-        let qwen35::finetune::Mode::Lora { rank, alpha } = ft.mode else { panic!("expected LoRA") };
+        let qwen35::finetune::Mode::Lora { rank, alpha, .. } = ft.mode else { panic!("expected LoRA") };
         assert_eq!((rank, alpha), (4, 1.5));
     }
 
@@ -659,6 +682,21 @@ mod finetune_cli_tests {
         assert_eq!(ft.opts.mask_before, Some('='));
         assert!(ft.opts.mask_per_line);
         assert!(ft.opts.align_to_lines);
+    }
+
+    /// rsLoRA, LoRA+ and LoRA-FA reach the trainer through the LoRA mode, and a
+    /// ratio that cannot train is refused by name.
+    #[test]
+    fn the_adapter_hyper_parameters_are_flags_of_the_lora_mode() {
+        let base = ["corpus", "--base", "b", "--out", "o", "--mode", "lora"];
+        let with = |extra: &[&str]| parse_finetune(&argv(&[&base[..], extra].concat()));
+        let plain = with(&[]).unwrap();
+        assert!(matches!(plain.mode, qwen35::finetune::Mode::Lora { tuning, .. } if tuning == model::adapter::device::AdapterTuning::default()));
+        let tuned = with(&["--lora-rs", "--lora-lr-ratio", "16", "--lora-freeze-a"]).unwrap();
+        let want = model::adapter::device::AdapterTuning { rank_stabilized: true, lr_ratio: 16.0, freeze_a: true };
+        assert!(matches!(tuned.mode, qwen35::finetune::Mode::Lora { tuning, .. } if tuning == want), "{:?}", tuned.mode);
+        assert!(with(&["--lora-lr-ratio", "0"]).unwrap_err().contains("LoRA+"));
+        assert!(with(&["--lora-lr-ratio", "fast"]).unwrap_err().contains("--lora-lr-ratio"));
     }
 
     /// The corpus is a positional, so it must be recognised wherever it sits -
@@ -689,7 +727,7 @@ mod finetune_cli_tests {
         ]))
         .unwrap();
         assert_eq!(ft.base_dtype, BaseDtype::Nf4);
-        assert!(matches!(ft.mode, qwen35::finetune::Mode::Lora { rank: 16, alpha } if alpha == 8.0), "{:?}", ft.mode);
+        assert!(matches!(ft.mode, qwen35::finetune::Mode::Lora { rank: 16, alpha, .. } if alpha == 8.0), "{:?}", ft.mode);
         assert_eq!(ft.opts.block_size, 512, "--seq-len is the training sequence length");
         assert!(ft.recompute, "a frozen-base tier recomputes by default");
 

@@ -31,7 +31,7 @@ fn a_resumed_bf16_base_lora_run_starts_from_the_saved_adapter() {
     std::fs::write(data.join("meta.json"), Meta::vocab_only(cfg.vocab as usize)).unwrap();
     let out = dir.join("adapter.safetensors");
     let out_s = out.to_str().unwrap();
-    let mode = Mode::Lora { rank: 5, alpha: 8.0 };
+    let mode = Mode::Lora { rank: 5, alpha: 8.0, tuning: Default::default() };
     let opts = |seed| model::FitOpts { steps: 8, batch_size: 1, block_size: t, lr: 5e-2, min_lr: 5e-3, warmup: 2, decay_iters: 8, checkpoint_secs: 0, eval_interval: 0, eval_batches: 0, seed, ..Default::default() };
 
     let (first_start, _) = finetune_streamed(&base, &data, &opts(1), &mode, out_s, false, &StreamedRun { dtype: BaseDtype::Bf16, recompute: true, long: LongSeqOverrides::default() }).expect("cycle 1");

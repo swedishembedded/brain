@@ -140,6 +140,41 @@ pub struct TargetOverride {
     pub alpha: Option<f32>,
 }
 
+/// The adapter hyper-parameters a fine-tune run chooses on top of rank, alpha
+/// and targets: what `--lora-rs`, `--lora-lr-ratio` and `--lora-freeze-a` set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdapterTuning {
+    /// rsLoRA: scale `alpha/sqrt(rank)`.
+    pub rank_stabilized: bool,
+    /// LoRA+: `B` trains at this multiple of the learning rate.
+    pub lr_ratio: f32,
+    /// LoRA-FA: `A` stays at its init.
+    pub freeze_a: bool,
+}
+
+impl Default for AdapterTuning {
+    fn default() -> AdapterTuning {
+        AdapterTuning { rank_stabilized: false, lr_ratio: 1.0, freeze_a: false }
+    }
+}
+
+impl AdapterTuning {
+    /// Refuse a tuning no run can honour (a non-positive or non-finite LoRA+
+    /// ratio).
+    pub fn validate(&self) -> Result<(), String> {
+        if !(self.lr_ratio.is_finite() && self.lr_ratio > 0.0) {
+            return Err(format!("the LoRA+ learning-rate ratio must be positive, got {}", self.lr_ratio));
+        }
+        Ok(())
+    }
+}
+
+/// Do two alphas name the same scale? Equal up to the rounding of the
+/// `alpha -> alpha/sqrt(rank) -> card alpha` round trip of rsLoRA.
+pub fn alpha_matches(a: f32, b: f32) -> bool {
+    (a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1.0)
+}
+
 /// Does `name` (a base weight name, or a bare leaf) belong to `target`?
 fn target_matches(name: &str, target: &str) -> bool {
     let stem = name.strip_suffix(".weight").unwrap_or(name);
@@ -160,6 +195,19 @@ impl LoraCfg {
 
     pub fn targets_leaf(&self, leaf: &str) -> bool {
         self.targets.iter().any(|t| t == leaf)
+    }
+
+    /// This config with the run's hyper-parameters applied.
+    pub fn with_tuning(mut self, tuning: AdapterTuning) -> LoraCfg {
+        self.rank_stabilized = tuning.rank_stabilized;
+        self.lr_ratio = tuning.lr_ratio;
+        self.freeze_a = tuning.freeze_a;
+        self
+    }
+
+    /// The hyper-parameters this config carries, as a run chooses them.
+    pub fn tuning(&self) -> AdapterTuning {
+        AdapterTuning { rank_stabilized: self.rank_stabilized, lr_ratio: self.lr_ratio, freeze_a: self.freeze_a }
     }
 
     /// This config with `leaf` at its own rank and/or alpha.
@@ -204,7 +252,11 @@ impl LoraCfg {
     /// that computes `alpha / rank` (fold, serve, export) applies exactly the
     /// scale this adapter trained with, rsLoRA or not.
     pub fn card_alpha(&self) -> f32 {
-        self.scale() * self.rank as f32
+        if self.rank_stabilized {
+            self.scale() * self.rank as f32
+        } else {
+            self.alpha
+        }
     }
 
     /// The JSON a model config carries so a checkpoint rebuilds its adapter

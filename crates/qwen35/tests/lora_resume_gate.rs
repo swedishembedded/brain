@@ -163,7 +163,7 @@ fn lora_resume_continues_the_same_adapter_instead_of_resetting_it() {
     let data_dir = scratch.join("data");
     write_dataset(&data_dir, vocab);
 
-    let mode = qwen35::finetune::Mode::Lora { rank: RANK, alpha: ALPHA };
+    let mode = qwen35::finetune::Mode::Lora { rank: RANK, alpha: ALPHA, tuning: Default::default() };
     let out = scratch.join("adapter.safetensors");
     let out_str = out.to_str().unwrap();
 

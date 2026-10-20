@@ -24,6 +24,7 @@
 //! needs expertise in parameter-efficient or quantized fine-tuning then you
 //! can procure our services by sending an email to info@swedishembedded.com.
 
+use model::adapter::device::AdapterTuning;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -176,14 +177,27 @@ impl TensorSource for AdapterOverlay {
 /// this base, is refused: its factors only mean what they mean at their own
 /// shape and scale.
 pub fn lora_base(path: &Path, rank: u32, alpha: f32, seed: u64, resume_from: Option<&Path>) -> Result<(Qwen35Config, AdapterOverlay), String> {
-    lora_overlay(open_base(path)?, rank, alpha, seed, resume_from)
+    lora_base_tuned(path, rank, alpha, AdapterTuning::default(), seed, resume_from)
+}
+
+/// [`lora_base`] with the run's hyper-parameters (rsLoRA, LoRA+, LoRA-FA). A
+/// continued adapter must be continued with the tuning it trained with.
+pub fn lora_base_tuned(path: &Path, rank: u32, alpha: f32, tuning: AdapterTuning, seed: u64, resume_from: Option<&Path>) -> Result<(Qwen35Config, AdapterOverlay), String> {
+    lora_overlay_tuned(open_base(path)?, rank, alpha, tuning, seed, resume_from)
 }
 
 /// [`lora_base`] over a base already opened - a multimodal wrapper's decoder
 /// source, say, whose checkpoint also holds tensors this crate does not own.
 pub fn lora_overlay(base: BaseCheckpoint, rank: u32, alpha: f32, seed: u64, resume_from: Option<&Path>) -> Result<(Qwen35Config, AdapterOverlay), String> {
+    lora_overlay_tuned(base, rank, alpha, AdapterTuning::default(), seed, resume_from)
+}
+
+/// [`lora_overlay`] with the run's hyper-parameters.
+pub fn lora_overlay_tuned(base: BaseCheckpoint, rank: u32, alpha: f32, tuning: AdapterTuning, seed: u64, resume_from: Option<&Path>) -> Result<(Qwen35Config, AdapterOverlay), String> {
+    tuning.validate()?;
     let BaseCheckpoint { mut cfg, src } = base;
-    cfg.lora = Some(lora_cfg(rank, alpha));
+    cfg.lora = Some(lora_cfg(rank, alpha).with_tuning(tuning));
+    let card_alpha = cfg.lora.as_ref().expect("just set").card_alpha();
     let mut adapter = None;
     if let Some(file) = resume_from {
         let name = file.to_str().ok_or_else(|| format!("{}: not a UTF-8 path", file.display()))?;
@@ -192,11 +206,11 @@ pub fn lora_overlay(base: BaseCheckpoint, rank: u32, alpha: f32, seed: u64, resu
         if card.kind != "lora" {
             return Err(format!("{name}: a {:?} adapter, only LoRA can be continued", card.kind));
         }
-        if card.rank != Some(rank) || card.alpha.is_some_and(|a| a != alpha) {
-            return Err(format!("{name}: trained at rank {:?} alpha {:?}, asked to continue at rank {rank} alpha {alpha}", card.rank, card.alpha));
+        if card.rank != Some(rank) || card.alpha.is_some_and(|a| !model::adapter::device::alpha_matches(a, card_alpha)) {
+            return Err(format!("{name}: trained at rank {:?} alpha {:?}, asked to continue at rank {rank} alpha {card_alpha} ({tuning:?})", card.rank, card.alpha));
         }
         let targets = card.targets.ok_or_else(|| format!("{name}: the adapter card names no targets"))?;
-        cfg.lora = Some(LoraCfg::new(rank, alpha, targets));
+        cfg.lora = Some(LoraCfg::new(rank, alpha, targets).with_tuning(tuning));
         adapter = Some(st.tensors);
     }
     let mut adapters = crate::init::init_lora_only(&cfg, seed);
