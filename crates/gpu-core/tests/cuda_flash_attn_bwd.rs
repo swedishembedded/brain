@@ -84,13 +84,16 @@ fn open() -> Option<Gpu> {
     }
 }
 
-fn run(gpu: &Gpu, s: Shape, d_scale: f32, seed: u64) {
-    let what = format!("b={} t={} heads={}/{} dO x {d_scale:e}", s.b, s.t, s.n_heads, s.n_kv);
+/// `last_boost` multiplies dO's final element: the largest gradient of the call then sits in the last element
+/// any share of the scale's reduction reaches, and a reduction that missed it would saturate fp16 there.
+fn run(gpu: &Gpu, s: Shape, d_scale: f32, last_boost: f32, seed: u64) {
+    let what = format!("b={} t={} heads={}/{} dO x {d_scale:e} (last element x {last_boost})", s.b, s.t, s.n_heads, s.n_kv);
     let mut r = Rng(seed);
     let q: Vec<f32> = (0..s.q_len()).map(|_| r.gauss()).collect();
     let k: Vec<f32> = (0..s.kv_len()).map(|_| r.gauss()).collect();
     let v: Vec<f32> = (0..s.kv_len()).map(|_| r.gauss()).collect();
-    let d_o: Vec<f32> = (0..s.q_len()).map(|_| r.gauss() * d_scale).collect();
+    let mut d_o: Vec<f32> = (0..s.q_len()).map(|_| r.gauss() * d_scale).collect();
+    *d_o.last_mut().expect("dO is not empty") *= last_boost;
     let (qb, kb, vb, dob) = (gpu.storage_init("q", &q), gpu.storage_init("k", &k), gpu.storage_init("v", &v), gpu.storage_init("d_o", &d_o));
     let (ctx, lse) = (gpu.storage(s.q_len() as u64), gpu.storage(s.lse_len() as u64));
     let params = s.params();
@@ -136,16 +139,18 @@ fn the_tensor_core_backward_agrees_with_the_portable_pair() {
     let Some(gpu) = open() else { return };
     // Qwen3-8B's attention (32 query heads over 8 KV heads) at ragged lengths and two samples; a narrow GQA head
     // and plain MHA; each with a unit-scale gradient and one a million times smaller.
-    for (i, (shape, d_scale)) in [
-        (Shape { b: 2, t: 300, n_heads: 32, n_kv: 8 }, 1.0),
-        (Shape { b: 2, t: 300, n_heads: 32, n_kv: 8 }, 1e-6),
-        (Shape { b: 1, t: 64, n_heads: 8, n_kv: 2 }, 1.0),
-        (Shape { b: 1, t: 77, n_heads: 4, n_kv: 4 }, 1e-4),
+    for (i, (shape, d_scale, last_boost)) in [
+        (Shape { b: 2, t: 300, n_heads: 32, n_kv: 8 }, 1.0, 1.0),
+        (Shape { b: 2, t: 300, n_heads: 32, n_kv: 8 }, 1e-6, 1.0),
+        (Shape { b: 1, t: 64, n_heads: 8, n_kv: 2 }, 1.0, 1.0),
+        (Shape { b: 1, t: 77, n_heads: 4, n_kv: 4 }, 1e-4, 1.0),
+        // Larger than one block's share of the scale reduction, with the call's largest gradient in its last element.
+        (Shape { b: 1, t: 1500, n_heads: 16, n_kv: 8 }, 1.0, 64.0),
     ]
     .into_iter()
     .enumerate()
     {
-        run(&gpu, shape, d_scale, 11 + i as u64);
+        run(&gpu, shape, d_scale, last_boost, 11 + i as u64);
     }
 }
 

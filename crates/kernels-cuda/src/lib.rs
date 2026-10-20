@@ -500,6 +500,22 @@ pub const ALL: &[CudaKernel] = &[
         ),
     },
     CudaKernel {
+        name: "flash_bwd_absmax",
+        // Asked for by name by `gpu_core::provider::cuda::flash_causal_gqa_bwd_steps`.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_bwd_absmax",
+        what: "the largest |dO| of each of 256 blocks of one flash attention backward call (first pass of its power-of-two scale)",
+        reported: "native:flash_bwd_absmax",
+        block_dim: 512,
+        tile: (64, 1),
+        shared_bytes: 16 * 4,
+        src: include_str!("../cu/flash_attn_bwd_f16.cu"),
+    },
+    CudaKernel {
         name: "flash_bwd_scale",
         // Asked for by name by `gpu_core::provider::cuda::flash_causal_gqa_bwd_steps`.
         op: Op::PagedAttentionFused,
@@ -508,11 +524,11 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: MMA_S8_MIN_CC,
         entry: "brain_flash_bwd_scale",
-        what: "the power-of-two scale of one flash attention backward call: the largest |dO| of the call mapped to [32, 64)",
+        what: "the power-of-two scale of one flash attention backward call: the 256 partial maxima of |dO| reduced and mapped to [32, 64)",
         reported: "native:flash_bwd_scale",
-        block_dim: 1024,
+        block_dim: 256,
         tile: (64, 1),
-        shared_bytes: 32 * 4,
+        shared_bytes: 8 * 4,
         src: include_str!("../cu/flash_attn_bwd_f16.cu"),
     },
     CudaKernel {

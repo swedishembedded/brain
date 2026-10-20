@@ -10,10 +10,11 @@
 // Causal grouped-query flash attention BACKWARD at head_dim 128 on fp16 tensor
 // cores (`mma.sync.m16n8k16`, fp32 accumulate): the CUDA form of
 // `flash_attn_causal_gqa_bwd_dq.wgsl` and `flash_attn_causal_gqa_bwd_dkv.wgsl`
-// over dense `[B*T, ...]` buffers, FlashAttention-2 shaped. Three entries, run in
+// over dense `[B*T, ...]` buffers, FlashAttention-2 shaped. Four entries, run in
 // this order by `gpu_core::provider::cuda::flash_causal_gqa_bwd_steps`:
 //
-//   brain_flash_bwd_scale  params, d_o, scale   one block: scale = 2^k with max|d_o| * scale in [32, 64)
+//   brain_flash_bwd_absmax params, d_o, partials   256 blocks: each one's largest |d_o|
+//   brain_flash_bwd_scale  params, partials, scale one block: scale = 2^k with max|d_o| * scale in [32, 64)
 //   brain_flash_bwd_dq     params, q, k, v, o, d_o, lse, dq, dsum, scale
 //   brain_flash_bwd_dkv    params, q, k, v, d_o, lse, dsum, dk, dv, scale
 //
@@ -32,7 +33,7 @@
 // accumulator, D, the log-sum-exp arithmetic and the outputs are fp32. A gradient is far below fp16's normal
 // range (a mean-reduced loss makes dO ~ 1e-5 and dS smaller still), so dO is multiplied by one power of two
 // `s` for the whole call: dP, D and dS all carry the factor, which `dq`/`dkv` divide out of their outputs
-// exactly. `s` comes from the largest |dO| of the call (`brain_flash_bwd_scale`), so the largest gradients sit
+// exactly. `s` comes from the largest |dO| of the call (`brain_flash_bwd_absmax`, `brain_flash_bwd_scale`), so the largest gradients sit
 // near 2^5 and fp16's 11 bits are spent on them; rows a thousand times smaller keep normal fp16 values.
 //
 // Structure (the paged prefill kernel's, `flash_prefill_f16_hd256.cu`): a block is 8 warps = 4 row groups x 2
@@ -138,17 +139,41 @@ __device__ __forceinline__ void brain_stage_tile(unsigned short* dst, const floa
 
 // ---- the scale of the call --------------------------------------------------------------------------------
 
-extern "C" __global__ void __launch_bounds__(1024) brain_flash_bwd_scale(const unsigned int* params, const float* d_o, float* scale) {
-    const unsigned long long n = (unsigned long long)params[0] * params[3] * params[1] * HD;
+// Pass 1: ABSMAX_BLOCKS blocks each take a grid-strided share of dO (float4 loads: the element count is a
+// multiple of HD) and write their largest |d_o|. A single block over the whole tensor ran at under 2 percent of
+// the memory roof (a 30 MB dO took 0.65 ms per layer, 7 percent of a small model's training step).
+#define ABSMAX_BLOCKS 256
+#define ABSMAX_THREADS 512
+extern "C" __global__ void __launch_bounds__(ABSMAX_THREADS) brain_flash_bwd_absmax(const unsigned int* params, const float* d_o, float* partials) {
+    const unsigned long long n4 = (unsigned long long)params[0] * params[3] * params[1] * (HD / 4);
     float m = 0.f;
-    for (unsigned long long i = threadIdx.x; i < n; i += 1024) { m = fmaxf(m, fabsf(d_o[i])); }
-    __shared__ float part[32];
+    const float4* src = reinterpret_cast<const float4*>(d_o);
+    for (unsigned long long i = (unsigned long long)blockIdx.x * ABSMAX_THREADS + threadIdx.x; i < n4; i += (unsigned long long)ABSMAX_BLOCKS * ABSMAX_THREADS) {
+        const float4 v = src[i];
+        m = fmaxf(m, fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w))));
+    }
+    __shared__ float part[ABSMAX_THREADS / 32];
     for (int o = 16; o > 0; o >>= 1) { m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o)); }
     if ((threadIdx.x & 31u) == 0u) { part[threadIdx.x >> 5] = m; }
     __syncthreads();
     if (threadIdx.x == 0u) {
         float mx = 0.f;
-        for (int w = 0; w < 32; ++w) { mx = fmaxf(mx, part[w]); }
+        for (int w = 0; w < ABSMAX_THREADS / 32; ++w) { mx = fmaxf(mx, part[w]); }
+        partials[blockIdx.x] = mx;
+    }
+}
+
+// Pass 2: one block reduces the partials and derives the call's power-of-two scale.
+extern "C" __global__ void __launch_bounds__(ABSMAX_BLOCKS) brain_flash_bwd_scale(const unsigned int* params, const float* partials, float* scale) {
+    (void)params;
+    float m = partials[threadIdx.x];
+    __shared__ float part[ABSMAX_BLOCKS / 32];
+    for (int o = 16; o > 0; o >>= 1) { m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o)); }
+    if ((threadIdx.x & 31u) == 0u) { part[threadIdx.x >> 5] = m; }
+    __syncthreads();
+    if (threadIdx.x == 0u) {
+        float mx = 0.f;
+        for (int w = 0; w < ABSMAX_BLOCKS / 32; ++w) { mx = fmaxf(mx, part[w]); }
         float s = 1.0f;
         if (mx > 0.f && mx < 3.0e38f) {
             int e;

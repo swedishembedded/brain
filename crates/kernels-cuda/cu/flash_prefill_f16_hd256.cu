@@ -103,6 +103,9 @@ typedef signed char KvT;
 #define CHUNKS_PER_ROW (HD / 8)             // 8 values per thread chunk
 #define ROWS_PER_PASS (THREADS / CHUNKS_PER_ROW)
 #define STAGE_ITERS (BC / ROWS_PER_PASS)
+// Two blocks per SM at head_dim 128 (the accumulators and Q fragments fit 128 registers), one at 256 (they do not):
+// the extra resident warps hide the shared-memory and fixed-latency stalls that dominate this kernel.
+#define MIN_BLOCKS_PER_SM (HD <= 128 ? 2 : 1)
 #define PAD_HALVES 8       // smem row padding
 #define ROW_HALVES (HD + PAD_HALVES)
 #define LOG2E 1.4426950408889634f
@@ -155,7 +158,7 @@ __device__ __forceinline__ void brain_mma_f16(float (&d)[4], const unsigned int 
 #define FLASH_ARGS const unsigned int* params, const float* q, const KvT* pool_k, const KvT* pool_v, const unsigned int* block_tables, const unsigned int* seq_lens, float* ctx KV_SCALE_PARAMS
 #endif
 #ifndef BRAIN_FLASH_HELPERS_ONLY   // flash_prefill_f16_hd256_v2.cu reuses everything above
-extern "C" __global__ void __launch_bounds__(THREADS, 1) brain_flash_prefill_f16_hd256(FLASH_ARGS) {
+extern "C" __global__ void __launch_bounds__(THREADS, MIN_BLOCKS_PER_SM) brain_flash_prefill_f16_hd256(FLASH_ARGS) {
     const unsigned int bsz = params[0];
     const unsigned int n_heads = params[1];
     const unsigned int n_kv_heads = params[2];

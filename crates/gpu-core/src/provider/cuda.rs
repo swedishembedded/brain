@@ -1057,6 +1057,10 @@ pub fn flash_causal_gqa_fwd_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceB
     gpu.step_native_sliced(id, bufs, &[(0, 0); 5], params, blocks)
 }
 
+/// Blocks of `brain_flash_bwd_absmax` (its `ABSMAX_BLOCKS`): the partial maxima `brain_flash_bwd_scale` reduces.
+const FLASH_BWD_ABSMAX_BLOCKS: u32 = 256;
+
+/// Both scale passes bind (uniform, read, read-write): dO then the partials, and the partials then the scale.
 const FLASH_BWD_SCALE_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
 
 /// `flash_attn_causal_gqa_bwd_dq`'s order (uniform, q, k, v, o, dO, lse, dq, dsum) plus the call's scale.
@@ -1125,14 +1129,16 @@ pub fn flash_causal_gqa_bwd_steps(gpu: &crate::Gpu, bufs: &FlashBwdBufs<'_>, par
     }
     let cc = gpu.caps().arch.compute_capability?;
     let get = |name: &str| kernels_cuda::get(name).filter(|k| k.min_cc <= cc);
-    let (scale_k, dq_k, dkv_k) = (get("flash_bwd_scale")?, get("flash_bwd_dq")?, get("flash_bwd_dkv")?);
-    let (scale_id, dq_id, dkv_id) = (gpu.native_kernel(scale_k, FLASH_BWD_SCALE_BINDINGS)?, gpu.native_kernel(dq_k, FLASH_BWD_DQ_BINDINGS)?, gpu.native_kernel(dkv_k, FLASH_BWD_DKV_BINDINGS)?);
+    let (absmax_k, scale_k, dq_k, dkv_k) = (get("flash_bwd_absmax")?, get("flash_bwd_scale")?, get("flash_bwd_dq")?, get("flash_bwd_dkv")?);
+    let (absmax_id, scale_id, dq_id, dkv_id) = (gpu.native_kernel(absmax_k, FLASH_BWD_SCALE_BINDINGS)?, gpu.native_kernel(scale_k, FLASH_BWD_SCALE_BINDINGS)?, gpu.native_kernel(dq_k, FLASH_BWD_DQ_BINDINGS)?, gpu.native_kernel(dkv_k, FLASH_BWD_DKV_BINDINGS)?);
     let tiles = u64::from(t.div_ceil(64));
     let q_blocks = u32::try_from(u64::from(b) * u64::from(n_heads) * tiles).ok()?;
     let kv_blocks = u32::try_from(u64::from(b) * u64::from(n_kv) * tiles).ok()?;
     let scale = gpu.storage(2);
+    let partials = gpu.storage(FLASH_BWD_ABSMAX_BLOCKS.into());
     Some(vec![
-        gpu.step_native_sliced(scale_id, &[bufs.d_o, &scale], &[(0, 0); 2], params, 1)?,
+        gpu.step_native_sliced(absmax_id, &[bufs.d_o, &partials], &[(0, 0); 2], params, FLASH_BWD_ABSMAX_BLOCKS)?,
+        gpu.step_native_sliced(scale_id, &[&partials, &scale], &[(0, 0); 2], params, 1)?,
         gpu.step_native_sliced(dq_id, &[bufs.q, bufs.k, bufs.v, bufs.o, bufs.d_o, bufs.lse, bufs.d_q, bufs.dsum, &scale], &[(0, 0); 9], params, q_blocks)?,
         gpu.step_native_sliced(dkv_id, &[bufs.q, bufs.k, bufs.v, bufs.d_o, bufs.lse, bufs.dsum, bufs.d_k, bufs.d_v, &scale], &[(0, 0); 9], params, kv_blocks)?,
     ])
