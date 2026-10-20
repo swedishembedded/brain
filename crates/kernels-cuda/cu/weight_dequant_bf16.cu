@@ -16,6 +16,8 @@
 //   0 bf16 (copy)   1 f16   2 int8 (group 32)   3 int4 (group 32)   4 NF4 (group 32)
 //   5 fp8 e4m3   6 fp8 e5m2   (block x block f32 scales)
 //   7 Q4_K  8 Q5_K  (affine, packed sub-scale / super-scale planes)   9 Q6_K (group 16)
+//   10 NVFP4 (E2M1, E4M3 byte per 16, f32 global)  11 MXFP4 (E2M1, E8M0 byte per 32)
+//   12 / 13 MXFP8 E4M3 / E5M2 (E8M0 byte per 32); the byte scales are bound as the f32 plane `s` read as bytes
 //
 // A decoded value is the exact f32 `decode * scale` of the reference rounded to
 // bf16 with round-to-nearest-even; a device test compares it with the host
@@ -24,7 +26,7 @@
 // One thread per eight consecutive weights of a row (K is a multiple of 8, so
 // the eight share a row, a scale group and a block) writing one 16-byte store.
 //
-// params: [fmt, row0, rows, k, block, cb, sm_per_row, wd_per_row]
+// params: [fmt, row0, rows, k, block, cb, sm_per_row, wd_per_row, global scale bits (NVFP4)]
 // Bindings: uniform, packed codes, f32 scales, packed sub-scales (wsm), packed
 // super-scales (wd), bf16 output; a tier leaves the planes it does not use
 // bound to any buffer.
@@ -72,6 +74,21 @@ __device__ __forceinline__ float brain_wd_e5m2(unsigned b) {
     if (e == 31u) { return __uint_as_float(sign | 0x7f800000u | (m << 21)); }
     const float mag = e == 0u ? (float)m * 1.52587890625e-5f : __uint_as_float(((e + 112u) << 23) | (m << 21));
     return brain_wd_with_sign(mag, sign);
+}
+
+__device__ __forceinline__ float brain_wd_e2m1(unsigned c) {
+    const unsigned m = c & 7u;
+    const float mag = m < 2u ? 0.5f * (float)m : __uint_as_float(((m >> 1) + 126u) << 23 | ((m & 1u) << 22));
+    return brain_wd_with_sign(mag, (c & 8u) << 28);
+}
+
+__device__ __forceinline__ float brain_wd_e8m0(unsigned b) {
+    if (b == 255u) { return __uint_as_float(0x7fc00000u); }
+    return b == 0u ? __uint_as_float(0x00400000u) : __uint_as_float(b << 23);
+}
+
+__device__ __forceinline__ unsigned brain_wd_plane_byte(const float* s, unsigned long long i) {
+    return (__float_as_uint(s[i >> 2]) >> (8 * (unsigned)(i & 3ull))) & 0xffu;
 }
 
 __device__ __forceinline__ float brain_wd_sext(unsigned v, int bits) {
@@ -124,6 +141,21 @@ extern "C" __global__ void __launch_bounds__(BRAIN_WD_THREADS) brain_weight_dequ
         for (int i = 0; i < 8; ++i) {
             const unsigned byte = ((i < 4 ? r.x : r.y) >> (8 * (i & 3))) & 0xffu;
             v[i] = (fmt == 5u ? brain_wd_e4m3(byte) : brain_wd_e5m2(byte)) * sc;
+        }
+    } else if (fmt == 10u || fmt == 11u) {
+        const unsigned word = w[wi >> 3];
+        const unsigned sb = brain_wd_plane_byte(s, fmt == 10u ? (wi >> 4) : (wi >> 5));
+        const float g = fmt == 10u ? __uint_as_float(params[8]) : 1.0f;
+        const float sc = fmt == 10u ? brain_wd_e4m3(sb) : brain_wd_e8m0(sb);
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) { v[i] = brain_wd_e2m1((word >> (4 * i)) & 15u) * g * sc; }
+    } else if (fmt == 12u || fmt == 13u) {
+        const uint2 r = *reinterpret_cast<const uint2*>(w + (wi >> 2));
+        const float sc = brain_wd_e8m0(brain_wd_plane_byte(s, wi >> 5));
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const unsigned byte = ((i < 4 ? r.x : r.y) >> (8 * (i & 3))) & 0xffu;
+            v[i] = (fmt == 12u ? brain_wd_e4m3(byte) : brain_wd_e5m2(byte)) * sc;
         }
     } else {
         // Affine K-quant: ds * code - dm per 32-element group.

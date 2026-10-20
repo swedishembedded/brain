@@ -244,11 +244,19 @@ pub enum DecodeFormat {
     KqAffine8 = 8,
     /// Symmetric K-quant, 16-element groups (Q6_K).
     KqSym8 = 9,
+    /// NVFP4: E2M1 codes, an E4M3 scale byte per 16 weights, one f32 scale per tensor.
+    Nvfp4 = 10,
+    /// MXFP4: E2M1 codes, an E8M0 scale byte per 32 weights.
+    Mxfp4 = 11,
+    /// MXFP8 with E4M3 elements: an E8M0 scale byte per 32 weights.
+    Mxfp8E4m3 = 12,
+    /// MXFP8 with E5M2 elements: an E8M0 scale byte per 32 weights.
+    Mxfp8E5m2 = 13,
 }
 
 impl DecodeFormat {
     /// Every format, in discriminant order.
-    pub const ALL: [DecodeFormat; 10] = [
+    pub const ALL: [DecodeFormat; 14] = [
         DecodeFormat::Bf16,
         DecodeFormat::F16,
         DecodeFormat::I8,
@@ -259,6 +267,10 @@ impl DecodeFormat {
         DecodeFormat::KqAffine4,
         DecodeFormat::KqAffine8,
         DecodeFormat::KqSym8,
+        DecodeFormat::Nvfp4,
+        DecodeFormat::Mxfp4,
+        DecodeFormat::Mxfp8E4m3,
+        DecodeFormat::Mxfp8E5m2,
     ];
 
     /// The registered kernel name of this format's variant of `weight_decode`.

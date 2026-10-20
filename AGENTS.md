@@ -72,7 +72,7 @@ history and exempt.
    it, and a device without tensor cores or cuBLAS falls back to it silently.
    **Quantized frozen bases run through one contract** (`model::ops::tiled`): for every
    `ops::Weight` tier (f32, bf16, f16, int8, int4, NF4, block-scaled FP8 E4M3/E5M2,
-   Q4_K/Q5_K/Q6_K) `Ops::matmul_rows` is the forward, `Ops::matmul_dx` the input gradient and
+   NVFP4/MXFP4/MXFP8, Q4_K/Q5_K/Q6_K) `Ops::matmul_rows` is the forward, `Ops::matmul_dx` the input gradient and
    `Ops::weight_grad` the weight gradient in a chosen `GradDtype` (fp32 or bf16, accumulating).
    A tier without a float-read kernel decodes a bounded tile of rows (`weight_decode`, one WGSL
    kernel for every tier; `weight_dequant_bf16` is its CUDA twin writing the bf16 operand of

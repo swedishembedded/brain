@@ -146,6 +146,8 @@ pub struct Dequant<'a> {
     pub k: u32,
     /// FP8 scale block edge (1 for the other tiers).
     pub block: u32,
+    /// The per-tensor f32 scale of NVFP4 (1.0 for every other tier).
+    pub global: f32,
 }
 
 /// A product operand: a buffer and the `(word offset, word length)` it binds.
@@ -224,6 +226,7 @@ impl LibraryGemmProvider {
             rows: 1,
             k: elems as u32,
             block: 1,
+            global: 1.0,
         };
         // The decode kernel writes every word, so the clear `storage` would add is skipped.
         let out = gpu.storage_uninit(elems / 2);
@@ -249,7 +252,7 @@ impl LibraryGemmProvider {
         let elems = d.rows as u64 * d.k as u64;
         let Some(kernel) = kernels_cuda::get("weight_dequant_bf16") else { return false };
         let Some(id) = gpu.native_kernel(kernel, DEQUANT_BINDINGS) else { return false };
-        let params = [d.format as u32, d.row0, d.rows, d.k, d.block, d.k.div_ceil(d.block.max(1)), d.k.div_ceil(32).div_ceil(2), d.k.div_ceil(256)];
+        let params = [d.format as u32, d.row0, d.rows, d.k, d.block, d.k.div_ceil(d.block.max(1)), d.k.div_ceil(32).div_ceil(2), d.k.div_ceil(256), d.global.to_bits()];
         let step = gpu.step_native_sliced(
             id,
             &[d.codes.buf, d.scales.buf, d.sub_scales.buf, d.super_scales.buf, out],

@@ -12,7 +12,7 @@
 //! no tier is refused with a message (never widened). The oracle is the host quantizer of each tier and
 //! the exact device tile decode of the resulting weight.
 
-use checkpoint::packed::{QuantEncoding, TensorDescriptor, TensorSink, Tile};
+use checkpoint::packed::{CodecRegistry, Element, FloatFormat, QuantEncoding, ScaleGranularity, ScaleLevel, TensorDescriptor, TensorSink, Tile};
 use data::rng::Lcg;
 use gpu_core::Gpu;
 use model::fp8::{dequantize_weight_fp8, quantize_weight_fp8, Fp8Format};
@@ -110,10 +110,95 @@ fn a_tiled_load_becomes_the_resident_tier_of_its_encoding_whatever_the_tiling() 
 #[test]
 fn an_encoding_without_a_tier_is_refused_not_widened() {
     let ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
-    let desc = TensorDescriptor::new("moe.expert.weight", vec![N as u64, K as u64], QuantEncoding::nvfp4());
+    let desc = TensorDescriptor::new("moe.expert.weight", vec![N as u64, K as u64], QuantEncoding::ggml(checkpoint::gguf::GgmlType::Q4K));
     let mut sink = DeviceWeightSink::new(&ops);
-    let err = sink.begin(&desc).expect_err("NVFP4 has no resident tier yet");
+    let err = sink.begin(&desc).expect_err("a GGUF block format has no resident tier yet");
     assert!(err.contains("moe.expert.weight") && err.contains("no resident Weight tier"), "{err}");
     let rank3 = TensorDescriptor::new("t", vec![2, 3, 32], QuantEncoding::bf16());
     assert!(sink.begin(&rank3).is_err());
+}
+
+/// The microscaling family (NVFP4, MXFP4, MXFP8 E4M3/E5M2) loads as `Weight::Micro` with its scale BYTES kept as
+/// bytes, and decodes - on the portable kernel and, where the device has the tensor-core path, to bf16 - to exactly
+/// what the checkpoint crate's reference codec decodes the same bytes to, whatever the tiling.
+#[test]
+fn microscaling_tiers_preserve_their_bytes_and_decode_like_the_reference_codec() {
+    let ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
+    let mut rng = Lcg::random();
+    let level = |granularity, format, suffix: &str| ScaleLevel { granularity, format, suffix: suffix.into() };
+    let nvfp4 = QuantEncoding::nvfp4();
+    let mxfp4 = QuantEncoding::mxfp4();
+    let mxfp8 = |f| QuantEncoding { element: Element::Float(f), scales: vec![level(ScaleGranularity::Block(32), FloatFormat::E8M0, "_scale")] };
+    let cases = [("nvfp4", nvfp4), ("mxfp4", mxfp4), ("mxfp8 e4m3", mxfp8(FloatFormat::E4M3Fn)), ("mxfp8 e5m2", mxfp8(FloatFormat::E5M2))];
+    for (label, enc) in cases {
+        let desc = TensorDescriptor::new("w", vec![N as u64, K as u64], enc.clone());
+        desc.validate().unwrap();
+        // Valid codes only: no NaN/inf elements, scales around 1.
+        let element_is_float8 = matches!(enc.element, Element::Float(FloatFormat::E4M3Fn | FloatFormat::E5M2));
+        let payload: Vec<u8> = (0..desc.payload_bytes())
+            .map(|_| loop {
+                let b = rng.next_u32() as u8;
+                let bad = match enc.element {
+                    Element::Float(FloatFormat::E4M3Fn) => b & 0x7f == 0x7f,
+                    Element::Float(FloatFormat::E5M2) => (b >> 2) & 31 == 31,
+                    _ => false,
+                };
+                if !(element_is_float8 && bad) {
+                    break b;
+                }
+            })
+            .collect();
+        let scales: Vec<Vec<u8>> = (0..enc.scales.len())
+            .map(|l| {
+                let lvl = &enc.scales[l];
+                if lvl.format == FloatFormat::F32 {
+                    return (1.5f32).to_le_bytes().to_vec(); // NVFP4's per-tensor scale
+                }
+                (0..desc.scale_bytes(l)).map(|_| if lvl.format == FloatFormat::E8M0 { 120 + (rng.next_u32() % 16) as u8 } else { 0x30 + (rng.next_u32() % 0x20) as u8 }).collect()
+            })
+            .collect();
+
+        // The oracle: the reference codec over the whole tensor.
+        let codecs = CodecRegistry::reference();
+        let whole = Tile { elems: 0..desc.numel(), payload: &payload, scales: scales.iter().map(Vec::as_slice).collect() };
+        let mut want = Vec::new();
+        codecs.decoder(&enc).unwrap().decode_tile(&desc, &whole, &mut want).unwrap();
+
+        let quantum = desc.tile_quantum();
+        for tile_elems in [desc.numel(), quantum, quantum * 3] {
+            let mut sink = DeviceWeightSink::new(&ops);
+            sink.begin(&desc).unwrap();
+            let mut start = 0;
+            while start < desc.numel() {
+                let end = (start + tile_elems).min(desc.numel());
+                let elems = start..end;
+                let pr = desc.payload_range(&elems);
+                let tile_scales: Vec<&[u8]> = (0..enc.scales.len())
+                    .map(|l| {
+                        let w = enc.scales[l].format.bits() as u64 / 8;
+                        let r = desc.scale_range(l, &elems);
+                        &scales[l][(r.start * w) as usize..(r.end * w) as usize]
+                    })
+                    .collect();
+                sink.write_tile(&desc, &Tile { elems: elems.clone(), payload: &payload[pr.start as usize..pr.end as usize], scales: tile_scales }).unwrap();
+                start = end;
+            }
+            sink.finish(&desc).unwrap();
+            let w = sink.take_weight().unwrap();
+            assert!(matches!(w, Weight::Micro { .. }), "{label}: preserved as the microscaling tier");
+            let got = decoded(&ops, &w);
+            assert!(got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()), "{label} (tile {tile_elems}): the portable decode differs from the reference codec");
+            let g = ops.gpu();
+            let out16 = g.storage((N * K / 2) as u64);
+            let mut steps = Vec::new();
+            if ops.decode_tile_bf16(&mut steps, &w, 0, N as u32, &out16) {
+                g.submit(&[], &steps);
+                let words = g.read(&out16, N * K / 2);
+                for (i, v) in want.iter().enumerate() {
+                    let half = (words[i / 2].to_bits() >> ((i % 2) * 16)) & 0xffff;
+                    assert_eq!(half, model::half::f32_to_bf16(*v) as u32, "{label}: bf16 element {i}");
+                }
+            }
+        }
+    }
 }

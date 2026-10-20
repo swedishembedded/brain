@@ -1443,7 +1443,7 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_weight_dequant_bf16",
-        what: "a window of rows of any packed weight tier (bf16, f16, int8, int4, NF4, FP8 E4M3/E5M2, Q4_K/Q5_K/Q6_K) decoded to a bf16 scratch for a tensor-core GEMM, a thread per eight weights",
+        what: "a window of rows of any packed weight tier (bf16, f16, int8, int4, NF4, FP8 E4M3/E5M2, NVFP4, MXFP4, MXFP8, Q4_K/Q5_K/Q6_K) decoded to a bf16 scratch for a tensor-core GEMM, a thread per eight weights",
         reported: "native:weight_dequant_bf16",
         block_dim: 256,
         // 256 threads of eight weights (2048 weights) per block.

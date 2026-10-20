@@ -37,9 +37,13 @@
 //   FMT 7 kq q4_k  w: [n, k/8] unsigned codes; wsm/wd: packed (sc, m) / (d, dmin)
 //   FMT 8 kq q5_k  w: [n, k/4] unsigned codes; wsm/wd as FMT 7
 //   FMT 9 kq q6_k  w: [n, k/4] signed bytes;           s: [n, k/16] f32
+//   FMT 10 nvfp4   w: [n, k/8] E2M1 codes; s: one E4M3 byte per 16 weights (four to a word); global f32 in `pad`
+//   FMT 11 mxfp4   w: [n, k/8] E2M1 codes; s: one E8M0 byte per 32 weights
+//   FMT 12/13 mxfp8 e4m3/e5m2  w: [n, k/4] bytes; s: one E8M0 byte per 32 weights
+//                  (value = element * global * scale, in that order, as the checkpoint codec decodes)
 //
 //   params: row0 (first row decoded), rows (rows in the tile), k, block, cb,
-//           wsm words per row, wd words per row, padding.
+//           wsm words per row, wd words per row, global scale bits (FMT 10 only, else 0).
 //   out   : [rows, k] f32, row r = weight row row0 + r.
 
 struct Params {
@@ -76,6 +80,22 @@ fn f16_to_f32(h: u32) -> f32 {
 
 //@FP8_FNS@
 
+fn e2m1(c: u32) -> f32 {
+    let m = c & 7u;
+    let mag = select(bitcast<f32>((((m >> 1u) + 126u) << 23u) | ((m & 1u) << 22u)), 0.5 * f32(m), m < 2u);
+    return select(mag, -mag, (c & 8u) != 0u);
+}
+
+// An E8M0 power-of-two scale byte: 2^(b - 127), 0xFF is NaN.
+fn e8m0(b: u32) -> f32 {
+    return select(select(bitcast<f32>(b << 23u), bitcast<f32>(0x00400000u), b == 0u), bitcast<f32>(0x7FC00000u), b == 255u);
+}
+
+// Byte `i` of a plane of packed bytes bound as f32 words.
+fn plane_byte(i: u32) -> u32 {
+    return (bitcast<u32>(s[i >> 2u]) >> ((i & 3u) * 8u)) & 0xFFu;
+}
+
 fn sext8(b: u32) -> f32 {
     return f32(bitcast<i32>(b << 24u) >> 24u);
 }
@@ -110,6 +130,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         v = fp8_e5m2((w[wi >> 2u] >> ((wi & 3u) * 8u)) & 0xFFu) * s[(row / p.block) * p.cb + c / p.block];
     } else if (FMT == 9u) {
         v = sext8((w[wi >> 2u] >> ((wi & 3u) * 8u)) & 0xFFu) * s[wi >> 4u];
+    } else if (FMT == 10u) {
+        v = e2m1((w[wi >> 3u] >> ((wi & 7u) * 4u)) & 0xFu) * bitcast<f32>(p.pad) * fp8_e4m3(plane_byte(wi >> 4u));
+    } else if (FMT == 11u) {
+        v = e2m1((w[wi >> 3u] >> ((wi & 7u) * 4u)) & 0xFu) * e8m0(plane_byte(wi >> 5u));
+    } else if (FMT == 12u) {
+        v = fp8_e4m3((w[wi >> 2u] >> ((wi & 3u) * 8u)) & 0xFFu) * e8m0(plane_byte(wi >> 5u));
+    } else if (FMT == 13u) {
+        v = fp8_e5m2((w[wi >> 2u] >> ((wi & 3u) * 8u)) & 0xFFu) * e8m0(plane_byte(wi >> 5u));
     } else {
         // Affine K-quant (FMT 7: 4-bit codes, FMT 8: 8-bit slots): ds * code - dm per 32-element group.
         var code = 0.0;

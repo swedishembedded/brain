@@ -611,6 +611,25 @@ pub enum Weight {
     /// bytes and scales go in as they are. Float-read like [`Weight::NF4`] (no activation quantisation):
     /// executed through the bounded tile decode of this module's `tiled` submodule.
     FP8 { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32, fmt: crate::fp8::Fp8Format, block: u32 },
+    /// The OCP microscaling family, preserved: NVFP4 (E2M1 codes, an E4M3 scale byte per 16 weights, `global`
+    /// per tensor), MXFP4 (E2M1, an E8M0 byte per 32) and MXFP8 (E4M3/E5M2, an E8M0 byte per 32). `w` the
+    /// element codes in the tier's packing (`[n, k/8]` words of nibbles, or `[n, k/4]` words of bytes), `s` the
+    /// scale bytes in row-major block order, four to a word. A value is `element * global * scale`, in that
+    /// order, as the checkpoint codec decodes it. Float-read through the tile decode like [`Weight::FP8`].
+    Micro { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32, kind: MicroScaled, global: f32 },
+}
+
+/// Which member of the microscaling family a [`Weight::Micro`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MicroScaled {
+    /// E2M1 codes, an E4M3 scale per 16 weights and a per-tensor f32 scale.
+    Nvfp4,
+    /// E2M1 codes, an E8M0 scale per 32 weights.
+    Mxfp4,
+    /// E4M3 elements, an E8M0 scale per 32 weights.
+    Mxfp8E4m3,
+    /// E5M2 elements, an E8M0 scale per 32 weights.
+    Mxfp8E5m2,
 }
 
 /// [`Weight::KQuant`]'s weight-scale plane - the shape differs by `affine`,
@@ -658,6 +677,9 @@ impl Weight {
             Weight::NF4 { .. } => Dtype::NF4,
             Weight::FP8 { fmt: crate::fp8::Fp8Format::E4M3, .. } => Dtype::F8E4M3,
             Weight::FP8 { fmt: crate::fp8::Fp8Format::E5M2, .. } => Dtype::F8E5M2,
+            Weight::Micro { kind: MicroScaled::Nvfp4 | MicroScaled::Mxfp4, .. } => Dtype::F4E2M1,
+            Weight::Micro { kind: MicroScaled::Mxfp8E4m3, .. } => Dtype::F8E4M3,
+            Weight::Micro { kind: MicroScaled::Mxfp8E5m2, .. } => Dtype::F8E5M2,
             // `affine` picks Q4_K vs Q5_K by `bits` (both group=32); a
             // non-affine (Q6_K) weight reuses `Dtype::I8` - it is, from the
             // selector's perspective, exactly `I8` with a different
@@ -696,6 +718,7 @@ impl Weight {
             | Weight::Q4 { n, .. }
             | Weight::NF4 { n, .. }
             | Weight::FP8 { n, .. }
+            | Weight::Micro { n, .. }
             | Weight::KQuant { n, .. } => *n,
         }
     }
@@ -709,6 +732,7 @@ impl Weight {
             | Weight::Q4 { k, .. }
             | Weight::NF4 { k, .. }
             | Weight::FP8 { k, .. }
+            | Weight::Micro { k, .. }
             | Weight::KQuant { k, .. } => *k,
         }
     }
@@ -1701,7 +1725,7 @@ impl Ops {
             // and multiplies it with the raw f32 activation, so this arm never
             // touches `act.quant` and bypasses the W4A8 selector arms. It binds
             // the variant itself, like the int8 frozen-base GEMM of `qwen3`.
-            Weight::NF4 { .. } | Weight::FP8 { .. } => self.matmul_rows(s, w, (0, n), act, y, yoff),
+            Weight::NF4 { .. } | Weight::FP8 { .. } | Weight::Micro { .. } => self.matmul_rows(s, w, (0, n), act, y, yoff),
             // M12: affine K-quant (`Weight::KQuant { affine: true, .. }` -
             // Q4_K/Q5_K, `matmul_kq_dyn`/`matmul_kq_gemv`). The non-affine
             // (Q6_K, group=16) instantiation never constructs THIS variant's
@@ -1870,7 +1894,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } => {
+            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } => {
                 unreachable!("Ops::embed: bind_embed already panicked for this dtype above")
             }
         }
@@ -1955,7 +1979,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } => {
+            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } => {
                 unreachable!("Ops::moe_linear: bind_moe_linear already panicked for this dtype above")
             }
         }
@@ -2258,7 +2282,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::F16 { .. } | Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } => {
+            Weight::F16 { .. } | Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } => {
                 unreachable!("{dt:?} runs through the tile decode above")
             }
         }

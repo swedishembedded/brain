@@ -20,11 +20,12 @@
 //! | signed int8, f32 scale per 32 | `I8` |
 //! | NF4 codebook, f32 scale per 32 | `NF4` |
 //! | FP8 E4M3 / E5M2, bf16 or f32 scale per `b x b` tile | `FP8` (scales widened to f32, exact) |
+//! | E2M1 with E4M3 per 16 + f32 per tensor, E2M1 / FP8 with E8M0 per 32 | `Micro` (NVFP4, MXFP4, MXFP8; scale bytes kept as bytes) |
 
 use checkpoint::packed::{Codebook, Element, FloatFormat, QuantEncoding, ScaleGranularity, TensorDescriptor, TensorSink, Tile};
-use gpu_core::DeviceBuffer;
+use gpu_core::{DeviceBuffer, Gpu};
 
-use super::{Ops, Weight};
+use super::{MicroScaled, Ops, Weight};
 use crate::fp8::Fp8Format;
 
 /// The tier a destination encoding maps to.
@@ -36,40 +37,103 @@ enum Tier {
     I8,
     Nf4,
     Fp8(Fp8Format, u32),
+    Micro(MicroScaled),
 }
 
 /// The tier of `enc`, or why none exists.
 fn tier_of(enc: &QuantEncoding) -> Result<Tier, String> {
-    let scale = |i: usize| enc.scales.get(i);
-    let unsupported = || format!("no resident Weight tier holds the encoding {enc:?}; supported: f32, bf16, f16, int8 and NF4 (f32 scale per 32), FP8 E4M3/E5M2 (2-D tile scales)");
+    let level = |i: usize| enc.scales.get(i).map(|s| (s.granularity, s.format));
+    let unsupported = || {
+        format!(
+            "no resident Weight tier holds the encoding {enc:?}; supported: f32, bf16, f16, int8 and NF4 (f32 scale per 32), FP8 E4M3/E5M2 (2-D tile scales), \
+             NVFP4, MXFP4 and MXFP8 (byte scales per 16/32)"
+        )
+    };
+    let f32_per_32 = Some((ScaleGranularity::Block(32), FloatFormat::F32));
+    let e8m0_per_32 = Some((ScaleGranularity::Block(32), FloatFormat::E8M0));
     match (&enc.element, enc.scales.len()) {
         (Element::Float(FloatFormat::F32), 0) => Ok(Tier::F32),
         (Element::Float(FloatFormat::Bf16), 0) => Ok(Tier::Bf16),
         (Element::Float(FloatFormat::F16), 0) => Ok(Tier::F16),
-        (Element::Int { bits: 8, signed: true }, 1) if matches!((scale(0).map(|s| s.granularity), scale(0).map(|s| s.format)), (Some(ScaleGranularity::Block(32)), Some(FloatFormat::F32))) => Ok(Tier::I8),
-        (Element::Codebook(Codebook::Nf4), 1) if matches!((scale(0).map(|s| s.granularity), scale(0).map(|s| s.format)), (Some(ScaleGranularity::Block(32)), Some(FloatFormat::F32))) => Ok(Tier::Nf4),
-        (Element::Float(f @ (FloatFormat::E4M3Fn | FloatFormat::E5M2)), 1) => match scale(0).map(|s| (s.granularity, s.format)) {
+        (Element::Int { bits: 8, signed: true }, 1) if level(0) == f32_per_32 => Ok(Tier::I8),
+        (Element::Codebook(Codebook::Nf4), 1) if level(0) == f32_per_32 => Ok(Tier::Nf4),
+        (Element::Float(f @ (FloatFormat::E4M3Fn | FloatFormat::E5M2)), 1) => match level(0) {
             Some((ScaleGranularity::Tile2d { rows, cols }, FloatFormat::Bf16 | FloatFormat::F32)) if rows == cols => {
                 Ok(Tier::Fp8(if *f == FloatFormat::E4M3Fn { Fp8Format::E4M3 } else { Fp8Format::E5M2 }, rows))
             }
+            _ if level(0) == e8m0_per_32 => Ok(Tier::Micro(if *f == FloatFormat::E4M3Fn { MicroScaled::Mxfp8E4m3 } else { MicroScaled::Mxfp8E5m2 })),
             _ => Err(unsupported()),
         },
+        (Element::Float(FloatFormat::E2M1), 1) if level(0) == e8m0_per_32 => Ok(Tier::Micro(MicroScaled::Mxfp4)),
+        (Element::Float(FloatFormat::E2M1), 2)
+            if level(0) == Some((ScaleGranularity::Tensor, FloatFormat::F32)) && level(1) == Some((ScaleGranularity::Block(16), FloatFormat::E4M3Fn)) =>
+        {
+            Ok(Tier::Micro(MicroScaled::Nvfp4))
+        }
         _ => Err(unsupported()),
     }
+}
+
+/// An in-order byte stream into a device buffer of whole words: tiles arrive ascending and contiguous, so a
+/// trailing partial word is carried to the next tile and only whole words are written.
+struct Stream {
+    buf: DeviceBuffer,
+    written: u64,
+    carry: Vec<u8>,
+    total_bytes: u64,
+}
+
+impl Stream {
+    fn new(gpu: &Gpu, total_bytes: u64) -> Stream {
+        Stream { buf: gpu.storage(total_bytes.div_ceil(4)), written: 0, carry: Vec::new(), total_bytes }
+    }
+
+    /// Where the next byte goes.
+    fn position(&self) -> u64 {
+        self.written + self.carry.len() as u64
+    }
+
+    fn push(&mut self, gpu: &Gpu, bytes: &[u8]) {
+        let mut data = std::mem::take(&mut self.carry);
+        data.extend_from_slice(bytes);
+        let whole = data.len() / 4 * 4;
+        if whole > 0 {
+            let words: Vec<u32> = data[..whole].as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
+            gpu.write_at(&self.buf, self.written / 4, &words);
+            self.written += whole as u64;
+        }
+        self.carry = data[whole..].to_vec();
+    }
+
+    /// Every byte arrived: flush a final partial word (zero padded, never read).
+    fn finish(&mut self, gpu: &Gpu, what: &str, name: &str) -> Result<DeviceBuffer, String> {
+        if self.position() != self.total_bytes {
+            return Err(format!("tensor '{name}': the load wrote {} of {} {what} bytes", self.position(), self.total_bytes));
+        }
+        if !self.carry.is_empty() {
+            let pad = vec![0u8; 4 - self.carry.len()];
+            self.push(gpu, &pad);
+        }
+        Ok(self.buf.clone())
+    }
+}
+
+/// The scale plane of a tier.
+enum Scales {
+    /// f32 words, one scale per entry (bf16 scale bytes are widened on the way in).
+    F32 { buf: DeviceBuffer, from_bf16: bool },
+    /// One byte per block (E4M3 or E8M0 codes), kept as bytes.
+    Bytes(Stream),
 }
 
 struct Pending {
     tier: Tier,
     n: u32,
     k: u32,
-    payload: DeviceBuffer,
-    scales: Option<DeviceBuffer>,
-    scale_is_bf16: bool,
-    /// Payload bytes handed to the device so far.
-    written: u64,
-    /// The bytes of a trailing partial word, held until the next tile completes it.
-    carry: Vec<u8>,
-    payload_bytes: u64,
+    payload: Stream,
+    scales: Option<Scales>,
+    /// NVFP4's per-tensor scale, read from the first tile.
+    global: f32,
 }
 
 /// Uploads a tiled load into a resident [`Weight`]. One sink loads one tensor at a time; take the result
@@ -90,18 +154,6 @@ impl<'a> DeviceWeightSink<'a> {
     pub fn take_weight(&mut self) -> Option<Weight> {
         self.done.take()
     }
-
-    fn flush_words(&self, p: &mut Pending, bytes: &[u8]) {
-        let mut data = std::mem::take(&mut p.carry);
-        data.extend_from_slice(bytes);
-        let whole = data.len() / 4 * 4;
-        if whole > 0 {
-            let words: Vec<u32> = data[..whole].as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
-            self.ops.gpu().write_at(&p.payload, p.written / 4, &words);
-            p.written += whole as u64;
-        }
-        p.carry = data[whole..].to_vec();
-    }
 }
 
 impl TensorSink for DeviceWeightSink<'_> {
@@ -114,50 +166,60 @@ impl TensorSink for DeviceWeightSink<'_> {
         if n > u32::MAX as u64 || k > u32::MAX as u64 {
             return Err(format!("tensor '{}': shape {:?} exceeds the 32-bit extents of a Weight", dst.name, dst.shape));
         }
-        let multiple = match tier {
+        let group = match tier {
             Tier::F32 => 1,
             Tier::Bf16 | Tier::F16 => 2,
-            Tier::I8 | Tier::Fp8(..) => 4,
-            Tier::Nf4 => 8,
+            Tier::Fp8(..) => 4,
+            Tier::I8 | Tier::Nf4 | Tier::Micro(_) => 32,
         };
-        let group = if matches!(tier, Tier::I8 | Tier::Nf4) { 32 } else { multiple };
+        let group = if tier == Tier::Micro(MicroScaled::Nvfp4) { 16 } else { group };
         if k % group != 0 {
             return Err(format!("tensor '{}': K = {k} must be a multiple of {group} for this tier", dst.name));
         }
         let gpu = self.ops.gpu();
-        let payload_bytes = dst.payload_bytes();
-        let scales = (!dst.encoding.scales.is_empty()).then(|| gpu.storage(dst.scale_numel(0)));
+        let scales = match (tier, dst.encoding.scales.last()) {
+            (_, None) => None,
+            (Tier::Micro(_), Some(_)) => Some(Scales::Bytes(Stream::new(gpu, dst.scale_bytes(dst.encoding.scales.len() - 1)))),
+            (_, Some(level)) => Some(Scales::F32 { buf: gpu.storage(dst.scale_numel(0)), from_bf16: level.format == FloatFormat::Bf16 }),
+        };
         self.done = None;
-        self.pending = Some(Pending {
-            tier,
-            n: n as u32,
-            k: k as u32,
-            payload: gpu.storage(payload_bytes.div_ceil(4)),
-            scales,
-            scale_is_bf16: dst.encoding.scales.first().is_some_and(|s| s.format == FloatFormat::Bf16),
-            written: 0,
-            carry: Vec::new(),
-            payload_bytes,
-        });
+        self.pending = Some(Pending { tier, n: n as u32, k: k as u32, payload: Stream::new(gpu, dst.payload_bytes()), scales, global: 1.0 });
         Ok(())
     }
 
     fn write_tile(&mut self, dst: &TensorDescriptor, tile: &Tile<'_>) -> Result<(), String> {
         let mut p = self.pending.take().ok_or("DeviceWeightSink::write_tile before begin")?;
+        let gpu = self.ops.gpu();
         let range = dst.payload_range(&tile.elems);
-        if range.start != p.written + p.carry.len() as u64 {
-            let at = p.written + p.carry.len() as u64;
-            return Err(format!("tensor '{}': tiles must arrive in order (tile starts at byte {}, expected {at})", dst.name, range.start));
+        if range.start != p.payload.position() {
+            return Err(format!("tensor '{}': tiles must arrive in order (tile starts at byte {}, expected {})", dst.name, range.start, p.payload.position()));
         }
-        self.flush_words(&mut p, tile.payload);
-        if let (Some(buf), Some(bytes)) = (&p.scales, tile.scales.first()) {
-            let at = dst.scale_range(0, &tile.elems).start;
-            let words: Vec<u32> = if p.scale_is_bf16 {
-                bytes.as_chunks::<2>().0.iter().map(|c| (u16::from_le_bytes(*c) as u32) << 16).collect()
-            } else {
-                bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect()
-            };
-            self.ops.gpu().write_at(buf, at, &words);
+        p.payload.push(gpu, tile.payload);
+        match &mut p.scales {
+            Some(Scales::F32 { buf, from_bf16 }) => {
+                let bytes = tile.scales.first().ok_or("a scaled tile carries its scales")?;
+                let at = dst.scale_range(0, &tile.elems).start;
+                let words: Vec<u32> = if *from_bf16 {
+                    bytes.as_chunks::<2>().0.iter().map(|c| (u16::from_le_bytes(*c) as u32) << 16).collect()
+                } else {
+                    bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect()
+                };
+                gpu.write_at(buf, at, &words);
+            }
+            Some(Scales::Bytes(stream)) => {
+                let last = dst.encoding.scales.len() - 1;
+                if last == 1 {
+                    let g = tile.scales.first().and_then(|b| b.as_chunks::<4>().0.first().copied()).ok_or("an NVFP4 tile carries the tensor scale")?;
+                    p.global = f32::from_le_bytes(g);
+                }
+                let bytes = tile.scales.get(last).ok_or("a scaled tile carries its scales")?;
+                let at = dst.scale_range(last, &tile.elems).start;
+                if at != stream.position() {
+                    return Err(format!("tensor '{}': scale tiles must arrive in order (starts at {at}, expected {})", dst.name, stream.position()));
+                }
+                stream.push(gpu, bytes);
+            }
+            None => {}
         }
         self.pending = Some(p);
         Ok(())
@@ -165,23 +227,22 @@ impl TensorSink for DeviceWeightSink<'_> {
 
     fn finish(&mut self, dst: &TensorDescriptor) -> Result<(), String> {
         let mut p = self.pending.take().ok_or("DeviceWeightSink::finish before begin")?;
-        if !p.carry.is_empty() {
-            // The final partial word (an odd number of 16-bit elements): zero padded, never read.
-            let pad = vec![0u8; 4 - p.carry.len()];
-            self.flush_words(&mut p, &pad);
-        }
-        if p.written < p.payload_bytes.div_ceil(4) * 4 {
-            return Err(format!("tensor '{}': the load wrote {} of {} payload bytes", dst.name, p.written, p.payload_bytes));
-        }
+        let gpu = self.ops.gpu();
+        let payload = p.payload.finish(gpu, "payload", &dst.name)?;
         let (n, k) = (p.n, p.k);
-        let scales = p.scales;
+        let scales = match p.scales {
+            Some(Scales::F32 { buf, .. }) => Some(buf),
+            Some(Scales::Bytes(mut stream)) => Some(stream.finish(gpu, "scale", &dst.name)?),
+            None => None,
+        };
         self.done = Some(match (p.tier, scales) {
-            (Tier::F32, _) => Weight::F32 { w: p.payload, n, k },
-            (Tier::Bf16, _) => Weight::BF16 { w: p.payload, n, k },
-            (Tier::F16, _) => Weight::F16 { w: p.payload, n, k },
-            (Tier::I8, Some(s)) => Weight::I8 { w: p.payload, s, n, k },
-            (Tier::Nf4, Some(s)) => Weight::NF4 { w: p.payload, s, n, k },
-            (Tier::Fp8(fmt, block), Some(s)) => Weight::FP8 { w: p.payload, s, n, k, fmt, block },
+            (Tier::F32, _) => Weight::F32 { w: payload, n, k },
+            (Tier::Bf16, _) => Weight::BF16 { w: payload, n, k },
+            (Tier::F16, _) => Weight::F16 { w: payload, n, k },
+            (Tier::I8, Some(s)) => Weight::I8 { w: payload, s, n, k },
+            (Tier::Nf4, Some(s)) => Weight::NF4 { w: payload, s, n, k },
+            (Tier::Fp8(fmt, block), Some(s)) => Weight::FP8 { w: payload, s, n, k, fmt, block },
+            (Tier::Micro(kind), Some(s)) => Weight::Micro { w: payload, s, n, k, kind, global: p.global },
             (_, None) => unreachable!("a scaled tier always allocates its scale plane in begin"),
         });
         Ok(())

@@ -168,7 +168,8 @@ layer 6 - serving, front ends, SDK, samples
                            and
                            the multi-GPU parallelism layer (see below).
                            `ops::Weight` is the one resident-weight type (f32,
-                           bf16, f16, int8, int4, NF4, FP8 E4M3/E5M2, K-quants)
+                           bf16, f16, int8, int4, NF4, FP8 E4M3/E5M2, NVFP4/MXFP4/MXFP8,
+                           K-quants)
                            and `ops::tiled` is its quantized-execution
                            contract: forward, input gradient and weight
                            gradient (fp32 or bf16) for EVERY tier through one

@@ -99,6 +99,10 @@ impl Weight {
             Weight::NF4 { .. } => DecodeFormat::Nf4,
             Weight::FP8 { fmt: Fp8Format::E4M3, .. } => DecodeFormat::Fp8E4m3,
             Weight::FP8 { fmt: Fp8Format::E5M2, .. } => DecodeFormat::Fp8E5m2,
+            Weight::Micro { kind: MicroScaled::Nvfp4, .. } => DecodeFormat::Nvfp4,
+            Weight::Micro { kind: MicroScaled::Mxfp4, .. } => DecodeFormat::Mxfp4,
+            Weight::Micro { kind: MicroScaled::Mxfp8E4m3, .. } => DecodeFormat::Mxfp8E4m3,
+            Weight::Micro { kind: MicroScaled::Mxfp8E5m2, .. } => DecodeFormat::Mxfp8E5m2,
             Weight::KQuant { affine: true, bits: 4, .. } => DecodeFormat::KqAffine4,
             Weight::KQuant { affine: true, .. } => DecodeFormat::KqAffine8,
             Weight::KQuant { affine: false, bits: 8, group: 16, .. } => DecodeFormat::KqSym8,
@@ -141,7 +145,7 @@ impl Ops {
         let dummy = self.decode_dummy.get_or_init(|| self.gpu.storage(4));
         match w {
             Weight::BF16 { w: wb, .. } | Weight::F16 { w: wb, .. } => [wb, dummy, dummy, dummy],
-            Weight::I8 { w: wb, s: sb, .. } | Weight::Q4 { w: wb, s: sb, .. } | Weight::NF4 { w: wb, s: sb, .. } | Weight::FP8 { w: wb, s: sb, .. } => {
+            Weight::I8 { w: wb, s: sb, .. } | Weight::Q4 { w: wb, s: sb, .. } | Weight::NF4 { w: wb, s: sb, .. } | Weight::FP8 { w: wb, s: sb, .. } | Weight::Micro { w: wb, s: sb, .. } => {
                 [wb, sb, dummy, dummy]
             }
             Weight::KQuant { w: wb, sz: KqScale::PlainF32(sb), .. } => [wb, sb, dummy, dummy],
@@ -161,7 +165,8 @@ impl Ops {
         let k = w.k();
         let [wb, sb, wsm, wd] = self.decode_planes(w);
         let block = if let Weight::FP8 { block, .. } = w { *block } else { 1 };
-        let params = [row0, rows, k, block, k.div_ceil(block), k.div_ceil(32).div_ceil(2), k.div_ceil(256), 0];
+        let global = if let Weight::Micro { global, .. } = w { global.to_bits() } else { 0 };
+        let params = [row0, rows, k, block, k.div_ceil(block), k.div_ceil(32).div_ceil(2), k.div_ceil(256), global];
         let name = fmt.kernel_name();
         s.push(self.gpu.step(self.tiled_kernel(&name), &[wb, sb, wsm, wd, out], &params, rows * k));
     }
@@ -184,6 +189,7 @@ impl Ops {
             rows,
             k: w.k(),
             block,
+            global: if let Weight::Micro { global, .. } = w { *global } else { 1.0 },
         };
         self.gemm.dequant_bf16(&self.gpu, s, &window, out)
     }
