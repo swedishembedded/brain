@@ -169,6 +169,27 @@ impl TensorSource for RemapSource<'_> {
         }
     }
 
+    /// A renamed tensor is the source tensor: `Whole` fetches forward the packed view under the
+    /// source name. Slices, concatenations and row permutations change the byte layout and stay on
+    /// the f32 interface.
+    fn packed_descriptor(&self, name: &str) -> Option<crate::packed::TensorDescriptor> {
+        match self.plan.get(name)? {
+            Fetch::Whole(src) => self.src().packed_descriptor(src),
+            _ => None,
+        }
+    }
+
+    fn load_packed(&self, names: &[&str], req: &crate::packed::LoadRequest<'_>, sink: &mut dyn crate::packed::TensorSink) -> Result<Option<crate::packed::LoadReport>, String> {
+        let mut inner = Vec::with_capacity(names.len());
+        for n in names {
+            match self.plan.get(*n) {
+                Some(Fetch::Whole(src)) => inner.push(src.as_str()),
+                _ => return Ok(None),
+            }
+        }
+        self.src().load_packed(&inner, req, sink)
+    }
+
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
         let Some(fetch) = self.plan.get(name) else { return false };
         match fetch {

@@ -182,7 +182,14 @@ pub fn nested_source<'a>(r: &'a checkpoint::weightio::WeightReader, names: crate
 /// must outlive the scope that opened it (a resident, a cached model).
 pub fn owned_source(r: checkpoint::weightio::WeightReader, cfg: &QwenConfig) -> Result<checkpoint::remap::RemapSource<'static>, String> {
     let plan = source(&r, cfg)?.into_plan();
-    Ok(checkpoint::remap::RemapSource::owning(Box::new(r), plan))
+    // A safetensors or GGUF checkpoint is read through its packed view: the renamed tensors reach a
+    // device upload in their stored encoding, one tile at a time, instead of decoded to f32 whole.
+    let inner: Box<dyn checkpoint::TensorSource> = if r.is_tile_readable() && r.gguf().is_none() {
+        Box::new(checkpoint::packed::PackedSource::identity_lenient(Box::new(checkpoint::packed::PackedReader::new(r)), checkpoint::packed::CodecRegistry::reference()))
+    } else {
+        Box::new(r)
+    };
+    Ok(checkpoint::remap::RemapSource::owning(inner, plan))
 }
 
 /// The pre-GGUF spelling of [`source`]. A forwarder, not a second

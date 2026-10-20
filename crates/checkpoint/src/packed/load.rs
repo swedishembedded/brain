@@ -105,6 +105,14 @@ pub struct LoadReport {
     pub file_resident_growth_bytes: Option<u64>,
 }
 
+/// How a consumer wants a tensor loaded: what to do to it, and the staging it may use.
+#[derive(Clone, Copy)]
+pub struct LoadRequest<'a> {
+    pub policy: &'a LoadPolicy,
+    pub workspace: &'a BoundedWorkspace,
+    pub config: &'a LoadConfig,
+}
+
 /// Executor settings.
 #[derive(Clone, Debug)]
 pub struct LoadConfig {

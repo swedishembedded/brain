@@ -1152,7 +1152,7 @@ mod sink;
 mod upload_source;
 mod tiled;
 pub use sink::DeviceWeightSink;
-pub use upload_source::upload_from_source;
+pub use upload_source::{upload_fused_from_source, upload_from_source};
 pub use tiled::{plan_linear, tile_rows, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES};
 
 /// A library-path weight: the buffer, the byte range to bind, steps that must run first and the scratch they use.

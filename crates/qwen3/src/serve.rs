@@ -1108,6 +1108,21 @@ impl Engine {
         Self::build(parent.new_like(pipelines()), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
     }
 
+    /// [`Self::from_map_tier`] reading each tensor from a checkpoint source as it uploads, so a model is
+    /// never held as a whole-model f32 host map: a source with a packed view (`TensorSource::load_packed`)
+    /// streams straight into the tier through the tile executor (one tile of host staging), any other
+    /// source is read one tensor at a time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_source_tier(cfg: QwenConfig, src: &dyn checkpoint::TensorSource, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
+        Self::build(Gpu::new(pipelines()), cfg, src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
+    }
+
+    /// [`Self::from_source_tier`] on `parent`'s device.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_source_tier_on(parent: &Gpu, cfg: QwenConfig, src: &dyn checkpoint::TensorSource, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
+        Self::build(parent.new_like(pipelines()), cfg, src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn from_map_with_gpu(gpu: Gpu, cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
         let tier = if weights_int8 { Dtype::I8 } else { Dtype::F32 };
@@ -1115,7 +1130,7 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build(gpu: Gpu, cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
+    fn build(gpu: Gpu, cfg: QwenConfig, weights: &dyn checkpoint::TensorSource, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
         assert!(matches!(tier, Dtype::F32 | Dtype::I8 | Dtype::BF16 | Dtype::F16), "serve: {tier:?} weights are not a serving tier (F32, I8, BF16, F16)");
         let weights_int8 = tier == Dtype::I8;
         let half = HALF_TIERS.contains(&tier);
@@ -1164,9 +1179,10 @@ impl Engine {
             .map(|(n, c)| (n, c, paramstore::Role::Frozen))
             .collect();
         let stage_t0 = std::time::Instant::now();
-        let ps = ParamStore::new_with_roles(&gpu, roles, weights);
+        let ps = ParamStore::new_with_roles_src(&gpu, roles, weights);
         gpu_core::profile::stage_time("qwen engine build: fp32 paramstore upload", stage_t0);
-        let head = weights.get(cfg.head_weight()).cloned().unwrap_or_else(|| weights.get("tok.weight").cloned().expect("head weight"));
+        // The LM head: its own tensor, or the tied embedding.
+        let head_src = if weights.numel(cfg.head_weight()).is_some() { cfg.head_weight() } else { "tok.weight" };
 
         let (d, ff) = (cfg.d_model as u64, cfg.d_ff as u64);
         let (hq, hkv) = (cfg.q_dim() as u64, cfg.kv_dim() as u64);
@@ -1330,6 +1346,8 @@ impl Engine {
         // private `HashMap` before falling back to a second, separate
         // selector field.
         let want = if half { tier } else if weights_int8 { Dtype::I8 } else { Dtype::F32 };
+        // Host staging for the tiled uploads: one tile at a time, whatever the tensor size.
+        let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(64 << 20, 0));
         let ops = Ops::new(gpu.new_like(ops_kernel_list())).unwrap_or_else(|e| panic!("serve: Ops::new: {e}"));
         let (dm, ffm) = (cfg.d_model as usize, cfg.d_ff as usize);
         let (hqm, hkvm) = (cfg.q_dim() as usize, cfg.kv_dim() as usize);
@@ -1352,8 +1370,7 @@ impl Engine {
                 let name = format!("blocks.{l}.{leaf}");
                 let (wn, wk) = dims(leaf);
                 let w = if packed {
-                    let raw = weights.get(&name).unwrap_or_else(|| panic!("serve: missing weight {name}"));
-                    Weight::upload(&ops, raw, wn, wk, want)
+                    model::ops::upload_from_source(&ops, weights, &name, wn, wk, want, &staging).unwrap_or_else(|| panic!("serve: missing weight {name}"))
                 } else {
                     Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
                 };
@@ -1375,15 +1392,9 @@ impl Engine {
             // - see `fused_qkv_and_gateup_are_bit_identical_to_split` for
             // both dtypes.
             let fused_weight = |leaves: &[&str], n_total: usize| -> Weight {
-                let parts: Vec<&[f32]> = leaves
-                    .iter()
-                    .map(|leaf| {
-                        let name = format!("blocks.{l}.{leaf}");
-                        weights.get(&name).unwrap_or_else(|| panic!("serve: missing weight {name}")).as_slice()
-                    })
-                    .collect();
-                let raw = model::ops::concat_rows_parallel(&parts);
-                Weight::upload(&ops, &raw, n_total, dm, want)
+                let names: Vec<String> = leaves.iter().map(|leaf| format!("blocks.{l}.{leaf}")).collect();
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                model::ops::upload_fused_from_source(&ops, weights, &names, n_total, dm, want, &staging).unwrap_or_else(|| panic!("serve: missing weight among {names:?}"))
             };
             lin_weights.insert(format!("blocks.{l}.{WQKV}"), fused_weight(&["attn.wq.weight", "attn.wk.weight", "attn.wv.weight"], hqm + 2 * hkvm));
             lin_weights.insert(format!("blocks.{l}.{WGATEUP}"), fused_weight(&["mlp.gate.weight", "mlp.up.weight"], 2 * ffm));
@@ -1395,7 +1406,7 @@ impl Engine {
         // for the `F32` tier either; `Weight::upload` always uploads it
         // fresh, exactly the cost the old `head_dev = gpu.storage_init(...)`
         // this replaces already paid.
-        lin_weights.insert(head_name, Weight::upload(&ops, &head, cfg.vocab as usize, cfg.d_model as usize, want));
+        lin_weights.insert(head_name, model::ops::upload_from_source(&ops, weights, head_src, cfg.vocab as usize, cfg.d_model as usize, want, &staging).expect("head weight"));
         if half {
             // A half weight is bound whole: two bytes a value.
             if let Some((name, w)) = lin_weights.iter().find(|(_, w)| w.n() as u64 * w.k() as u64 * 2 > gpu.max_storage_binding_bytes()) {
@@ -1414,13 +1425,11 @@ impl Engine {
         let qkv_bias: Vec<DeviceBuffer> = if cfg.attn_bias {
             (0..cfg.n_layers)
                 .map(|l| {
-                    let parts: Vec<f32> = QKV_BIAS
-                        .iter()
-                        .flat_map(|leaf| {
-                            let name = format!("blocks.{l}.{leaf}");
-                            weights.get(&name).unwrap_or_else(|| panic!("serve: missing weight {name}")).iter().copied()
-                        })
-                        .collect();
+                    let mut parts: Vec<f32> = Vec::new();
+                    for leaf in QKV_BIAS {
+                        let name = format!("blocks.{l}.{leaf}");
+                        assert!(weights.with_tensor(&name, &mut |b| parts.extend_from_slice(b)), "serve: missing weight {name}");
+                    }
                     gpu.storage_init("qkv_bias", &parts)
                 })
                 .collect()
@@ -1520,8 +1529,8 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub fn load(path: &str, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
-        let map = Engine::tensors_from(&cfg, &*src).unwrap_or_else(|e| panic!("{path}: {e}"));
-        Engine::from_map(cfg, &map, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+        let tier = if weights_int8 { Dtype::I8 } else { Dtype::F32 };
+        Engine::from_source_tier(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
     }
 
     /// The tensors an engine for `cfg` uploads, read from `src` (any checkpoint

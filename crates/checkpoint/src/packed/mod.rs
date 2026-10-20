@@ -9,6 +9,7 @@
 
 pub mod budget;
 pub mod codec;
+mod concat;
 pub mod encoding;
 pub mod load;
 pub mod reader;
@@ -20,7 +21,7 @@ mod testfix;
 pub use budget::{BoundedWorkspace, BudgetError, Lease, MemoryBudget, Pool, PoolStats};
 pub use codec::{Codec, CodecRegistry, Tile, TileBuf};
 pub use encoding::{BlockGeometry, Codebook, Element, FloatFormat, Packing, QuantEncoding, ScaleGranularity, ScaleLevel, TensorDescriptor};
-pub use load::{LoadConfig, LoadOp, LoadPlan, LoadPolicy, LoadReport, LoadStep, Loader};
+pub use load::{LoadConfig, LoadOp, LoadPlan, LoadPolicy, LoadReport, LoadRequest, LoadStep, Loader};
 pub use reader::{PackedReader, PackedTensorReader};
 pub use sink::{MemorySink, TensorSink};
 pub use source::{Binding, PackedSource};

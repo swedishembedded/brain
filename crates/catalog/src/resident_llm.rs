@@ -968,13 +968,6 @@ impl QwenResident {
         auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_tokens, cfg.kv_int8, cfg.kv_offload_gb > 0.0)
     }
 
-    /// The tensors the serving engine uploads, read from the checkpoint as it
-    /// is on disk and decoded to f32 one tensor at a time.
-    fn engine_tensors(&self) -> Result<std::collections::HashMap<String, Vec<f32>>, String> {
-        let (cfg, src) = qwen3::open_checkpoint(&self.path).map_err(|e| format!("qwen: {e}"))?;
-        qwen3::serve::Engine::tensors_from(&cfg, &*src).map_err(|e| format!("qwen: {e}"))
-    }
-
     /// Give `cfg` a derived [`model::yarn::YarnConfig`] when `ctx` (the KV
     /// pool `activate` is actually about to build - `self.ctx`, whether from
     /// `--ctx` or auto-sizing) exceeds the checkpoint's declared
@@ -1376,18 +1369,22 @@ impl ResidentModel for QwenResident {
             let weights_int8 = self.weights_int8_requested;
             // `Engine::load` re-derives its own `QwenConfig` straight from the
             // file, with no seam for `ctx`'s own YaRN decision below to reach
-            // it - go through load-tensors-then-`from_map` so the config is
-            // mutated in one place.
+            // it - open the checkpoint here and build from its source, so the config is
+            // mutated in one place. The engine reads each tensor as it uploads (a packed
+            // source streams into the tier tile by tile), never a whole-model host map.
             let load_t0 = std::time::Instant::now();
-            let tensors = self.engine_tensors()?;
-            gpu_core::profile::stage_time(&format!("{}: re-load checkpoint tensors for engine build", self.id), load_t0);
+            let (_, src) = qwen3::open_checkpoint(&self.path).map_err(|e| format!("qwen: {e}"))?;
+            gpu_core::profile::stage_time(&format!("{}: open checkpoint source for engine build", self.id), load_t0);
             let mut cfg = checkpoint_cfg.clone();
             Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);
-            let mut eng = if self.weights_bf16_requested {
-                qwen3::serve::Engine::from_map_tier(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, qwen3::Dtype::BF16)
+            let tier = if self.weights_bf16_requested {
+                qwen3::Dtype::BF16
+            } else if weights_int8 {
+                qwen3::Dtype::I8
             } else {
-                qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+                qwen3::Dtype::F32
             };
+            let mut eng = qwen3::serve::Engine::from_source_tier(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier);
             if self.kv_fp8_requested {
                 if kv_int8 {
                     eng.set_kv_fp8().map_err(|e| format!("qwen: --kv-cache fp8: {e}"))?;

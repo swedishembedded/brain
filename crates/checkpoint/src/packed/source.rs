@@ -19,9 +19,9 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use super::budget::BoundedWorkspace;
 use super::codec::{CodecRegistry, Tile, TileBuf};
-use super::load::{LoadConfig, LoadPolicy, LoadReport, Loader};
+use super::concat::ConcatView;
+use super::load::{LoadReport, LoadRequest, Loader};
 use super::sink::TensorSink;
 use super::encoding::TensorDescriptor;
 use super::reader::PackedTensorReader;
@@ -78,6 +78,21 @@ impl PackedSource {
         PackedSource::new(reader, codecs, bindings)
     }
 
+    /// [`Self::identity`] over every tensor the reader can serve packed; tensors
+    /// with no packed encoding (an integer buffer, an unsupported GGUF type) are
+    /// left out instead of failing the open. For a checkpoint that also holds
+    /// tensors the caller never asks for.
+    pub fn identity_lenient(reader: Box<dyn PackedTensorReader>, codecs: CodecRegistry) -> PackedSource {
+        let mut tensors = HashMap::new();
+        for name in reader.names() {
+            let Ok(desc) = reader.descriptor(&name) else { continue };
+            if codecs.decoder(&desc.encoding).is_ok() {
+                tensors.insert(name, Bound { desc, add: 0.0 });
+            }
+        }
+        PackedSource { reader, codecs, tensors }
+    }
+
     /// Canonical names served, sorted.
     pub fn names(&self) -> Vec<&str> {
         let mut v: Vec<&str> = self.tensors.keys().map(String::as_str).collect();
@@ -87,27 +102,6 @@ impl PackedSource {
 
     pub fn descriptor(&self, name: &str) -> Option<&TensorDescriptor> {
         self.tensors.get(name).map(|b| &b.desc)
-    }
-
-    /// Stream tensor `name` into `sink` under `policy` through the tiled load
-    /// executor, one tile of staging leased from `workspace`: the packed
-    /// counterpart of [`TensorSource::with_tensor`], for consumers (a device
-    /// upload) that can take the destination encoding directly.
-    ///
-    /// `Ok(None)` when the packed path does not apply and the caller should use
-    /// the f32 interface: the name is unknown, the binding carries an additive
-    /// fold the byte-level load cannot apply, or the policy has no plan for this
-    /// tensor (no encoder for the destination, no lossless repack). Nothing has
-    /// been written to `sink` in those cases. `Err` is a failure after the load
-    /// started.
-    pub fn load_into(&self, name: &str, policy: &LoadPolicy, sink: &mut dyn TensorSink, workspace: &BoundedWorkspace, config: &LoadConfig) -> Result<Option<LoadReport>, String> {
-        let Some(b) = self.tensors.get(name) else { return Ok(None) };
-        if b.add != 0.0 {
-            return Ok(None);
-        }
-        let loader = Loader { reader: &*self.reader, codecs: &self.codecs, workspace: workspace.clone(), config: config.clone() };
-        let Ok(step) = loader.plan(&b.desc.name, policy) else { return Ok(None) };
-        loader.execute(&step, sink).map(Some)
     }
 
     /// Elements `[start, start + len)` of `name`'s flat layout as f32, decoding
@@ -205,8 +199,44 @@ impl TensorSource for PackedSource {
         self.tensors.get(name).map(|b| b.desc.numel() as usize)
     }
 
-    fn packed(&self) -> Option<&PackedSource> {
-        Some(self)
+    /// Only the tiles that cover the range are decoded.
+    fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.read_range(name, start as u64, len as u64).unwrap_or_else(|e| panic!("PackedSource: {name}: {e}")) {
+            Some(v) => {
+                f(&v);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn packed_descriptor(&self, name: &str) -> Option<TensorDescriptor> {
+        self.tensors.get(name).map(|b| b.desc.clone())
+    }
+
+    /// Several names are fused row-wise (see `concat`); a binding with an
+    /// additive fold cannot be loaded as bytes and is left to the f32 interface.
+    fn load_packed(&self, names: &[&str], req: &LoadRequest<'_>, sink: &mut dyn TensorSink) -> Result<Option<LoadReport>, String> {
+        let mut parts = Vec::with_capacity(names.len());
+        for n in names {
+            match self.tensors.get(*n) {
+                Some(b) if b.add == 0.0 => parts.push(b.desc.clone()),
+                _ => return Ok(None),
+            }
+        }
+        let mut run = |reader: &dyn PackedTensorReader, name: &str| -> Result<Option<LoadReport>, String> {
+            let loader = Loader { reader, codecs: &self.codecs, workspace: req.workspace.clone(), config: req.config.clone() };
+            let Ok(step) = loader.plan(name, req.policy) else { return Ok(None) };
+            loader.execute(&step, sink).map(Some)
+        };
+        match parts.as_slice() {
+            [] => Ok(None),
+            [one] => run(&*self.reader, &one.name),
+            _ => match ConcatView::new(&*self.reader, parts) {
+                Ok(view) => run(&view, &view.descriptor().name.clone()),
+                Err(_) => Ok(None),
+            },
+        }
     }
 
     fn advise_drop(&self, name: &str) {
@@ -262,5 +292,40 @@ mod tests {
             assert_eq!(src.read_range("blocks.0.a", start, len).unwrap().unwrap(), want[start as usize..(start + len) as usize], "range {start}+{len}");
         }
         assert_eq!(src.read_range("blocks.0.a", (rows * cols) as u64 - 1, 2).unwrap(), None, "a range past the end is refused, not truncated");
+    }
+
+    #[test]
+    fn fused_parts_load_as_the_parts_bytes_end_to_end_and_unfusable_parts_are_declined() {
+        use crate::packed::budget::{BoundedWorkspace, MemoryBudget};
+        use crate::packed::load::{LoadConfig, LoadPolicy};
+        use crate::packed::sink::MemorySink;
+        let dir = TmpDir::new("fuse");
+        let cols = 32usize;
+        let (a, b) = (e4m3_bytes(41, 16 * cols), e4m3_bytes(42, 32 * cols));
+        let (ga, gb) = (bf16_bytes(&[1.0, 2.0]), bf16_bytes(&[4.0, 8.0, 0.5, 0.25]));
+        write_safetensors(
+            &dir.join("m.safetensors"),
+            &[
+                RawTensor { name: "a", dtype: "F8_E4M3", shape: vec![16, cols as u64], bytes: a.clone() },
+                RawTensor { name: "a_scale_inv", dtype: "BF16", shape: vec![1, 2], bytes: ga.clone() },
+                RawTensor { name: "b", dtype: "F8_E4M3", shape: vec![32, cols as u64], bytes: b.clone() },
+                RawTensor { name: "b_scale_inv", dtype: "BF16", shape: vec![2, 2], bytes: gb.clone() },
+                RawTensor { name: "n", dtype: "BF16", shape: vec![3], bytes: bf16_bytes(&[1.0; 3]) },
+            ],
+        );
+        let reader = PackedReader::open(&dir.join("m.safetensors")).unwrap().with_fp8_block(16);
+        let src = PackedSource::identity(Box::new(reader), CodecRegistry::reference()).unwrap();
+        let (ws, cfg) = (BoundedWorkspace::new(MemoryBudget::new(1 << 20, 0)), LoadConfig { tile_bytes: 700 });
+        let req = LoadRequest { policy: &LoadPolicy::Preserve, workspace: &ws, config: &cfg };
+        let mut sink = MemorySink::default();
+        let rep = src.load_packed(&["a", "b"], &req, &mut sink).unwrap().expect("same-encoding tiled parts fuse");
+        assert!(rep.tiles_written > 1, "{} tiles", rep.tiles_written);
+        assert_eq!(sink.payload, [a, b].concat());
+        assert_eq!(sink.scales[0], [ga, gb].concat());
+        // Parts of different shape class or encoding are declined, nothing is written.
+        let mut untouched = MemorySink::default();
+        assert!(src.load_packed(&["a", "n"], &req, &mut untouched).unwrap().is_none());
+        assert!(src.load_packed(&["a", "missing"], &req, &mut untouched).unwrap().is_none());
+        assert_eq!(untouched.tiles, 0);
     }
 }

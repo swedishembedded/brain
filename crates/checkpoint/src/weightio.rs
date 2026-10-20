@@ -260,6 +260,16 @@ impl WeightReader {
         WeightReader { inner: Inner::Derived(d, dtypes), order, shapes }
     }
 
+    /// Whether tiles of this reader's tensors can be read as packed bytes: memory-mapped safetensors
+    /// (single or sharded) and GGUF. A torch pickle or a computed checkpoint can only be decoded whole.
+    pub fn is_tile_readable(&self) -> bool {
+        match &self.inner {
+            Inner::St(_) | Inner::StSharded(..) | Inner::Gguf(_) => true,
+            Inner::Torch(..) => false,
+            Inner::Derived(..) => false,
+        }
+    }
+
     /// Follow derived checkpoints that only rename (see
     /// [`DerivedCheckpoint::passthrough`]) down to the reader that really holds
     /// `name`, and the name it holds it under.

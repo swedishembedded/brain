@@ -193,13 +193,27 @@ pub trait TensorSource {
     /// load, not just once memory pressure forces the issue.
     fn advise_drop(&self, _name: &str) {}
 
-    /// The packed, tile-granular view of this source when it has one, for a
-    /// consumer that can take a destination encoding directly (a device
-    /// upload) instead of the f32 interface above: see
-    /// [`packed::PackedSource::load_into`]. Default: none. A wrapper forwards it
-    /// only when it changes no tensor's values.
-    fn packed(&self) -> Option<&packed::PackedSource> {
+    /// The stored descriptor (shape, encoding) of `name` when this source can
+    /// serve it packed; `None` for a source with no packed view.
+    fn packed_descriptor(&self, _name: &str) -> Option<packed::TensorDescriptor> {
         None
+    }
+
+    /// Stream the tensors `names` (one tensor, or several joined row-wise into
+    /// one fused tensor) into `sink` through the tiled load executor under
+    /// `req`: the packed counterpart of [`with_tensor`](Self::with_tensor), for a
+    /// consumer (a device upload) that takes a destination encoding directly,
+    /// with one tile of staging leased from `req.workspace` and no f32 copy of
+    /// the tensor.
+    ///
+    /// `Ok(None)` means "not served here, use the f32 interface": the default
+    /// (no packed view), an unknown name, a value-changing wrapper, a request
+    /// the executor cannot plan (no encoder, no lossless repack, parts that
+    /// cannot be fused without re-quantizing). Nothing has been written to
+    /// `sink` then. `Err` is a failure after the load started. A wrapper
+    /// forwards this only for tensors whose values it does not change.
+    fn load_packed(&self, _names: &[&str], _req: &packed::LoadRequest<'_>, _sink: &mut dyn packed::TensorSink) -> Result<Option<packed::LoadReport>, String> {
+        Ok(None)
     }
 }
 

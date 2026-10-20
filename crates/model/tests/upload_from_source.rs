@@ -11,34 +11,46 @@
 //! identical to uploading its f32 decode, while the host holds one tile of staging instead of the tensor.
 
 use checkpoint::packed::{BoundedWorkspace, Binding, CodecRegistry, MemoryBudget, PackedReader, PackedSource, Pool};
+use checkpoint::remap::{Fetch, RemapSource};
 use checkpoint::TensorSource;
 use gpu_core::Gpu;
 use gpu_core::select::Dtype;
-use model::ops::{training_kernel_list, upload_from_source, Ops, Weight};
+use model::ops::{training_kernel_list, upload_fused_from_source, upload_from_source, Ops, Weight};
 
 const N: usize = 256;
 const K: usize = 512;
 
-/// A one-tensor FP8 safetensors file with a bf16 128x128 scale grid.
+const N2: usize = 128;
+
+/// An FP8 safetensors file with a bf16 128x128 scale grid per tensor: `w` is `[N, K]`, `v` is `[N2, K]`.
 fn write_fp8_checkpoint(dir: &std::path::Path) {
     let mut s = 0x2545_f491_4f6c_dd1du64;
-    let w: Vec<u8> = (0..N * K)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let b = (s >> 33) as u8;
-            if b & 0x7f == 0x7f { b & 0xfe } else { b }
-        })
-        .collect();
-    let grid: Vec<u8> = (0..(N / 128) * (K / 128)).flat_map(|i| half::bf16::from_f32(0.5 + i as f32 * 0.25).to_le_bytes()).collect();
-    let header = serde_json::json!({
-        "w": {"dtype": "F8_E4M3", "shape": [N, K], "data_offsets": [0, w.len()]},
-        "w_scale_inv": {"dtype": "BF16", "shape": [N / 128, K / 128], "data_offsets": [w.len(), w.len() + grid.len()]},
-    });
+    let mut tensor = |rows: usize, grid0: f32| {
+        let w: Vec<u8> = (0..rows * K)
+            .map(|_| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let b = (s >> 33) as u8;
+                if b & 0x7f == 0x7f { b & 0xfe } else { b }
+            })
+            .collect();
+        let grid: Vec<u8> = (0..(rows / 128) * (K / 128)).flat_map(|i| half::bf16::from_f32(grid0 + i as f32 * 0.25).to_le_bytes()).collect();
+        (w, grid)
+    };
+    let (w, wg) = tensor(N, 0.5);
+    let (v, vg) = tensor(N2, 1.5);
+    let mut header = serde_json::Map::new();
+    let mut off = 0usize;
+    for (name, shape, bytes) in [("w", vec![N, K], &w), ("w_scale_inv", vec![N / 128, K / 128], &wg), ("v", vec![N2, K], &v), ("v_scale_inv", vec![N2 / 128, K / 128], &vg)] {
+        let dtype = if name.ends_with("scale_inv") { "BF16" } else { "F8_E4M3" };
+        header.insert(name.into(), serde_json::json!({"dtype": dtype, "shape": shape, "data_offsets": [off, off + bytes.len()]}));
+        off += bytes.len();
+    }
     let h = serde_json::to_vec(&header).unwrap();
     let mut out = (h.len() as u64).to_le_bytes().to_vec();
     out.extend(h);
-    out.extend(w);
-    out.extend(grid);
+    for b in [&w, &wg, &v, &vg] {
+        out.extend_from_slice(b);
+    }
     std::fs::write(dir.join("m.safetensors"), out).unwrap();
 }
 
@@ -57,7 +69,7 @@ fn a_packed_tensor_uploads_as_the_requested_tier_with_one_tile_of_staging() {
     std::fs::create_dir_all(&dir).unwrap();
     write_fp8_checkpoint(&dir);
     let reader = PackedReader::open(&dir.join("m.safetensors")).unwrap();
-    let src = PackedSource::new(Box::new(reader), CodecRegistry::reference(), [("blocks.0.w".to_string(), Binding::new("w"))]).unwrap();
+    let src = PackedSource::new(Box::new(reader), CodecRegistry::reference(), [("blocks.0.w".to_string(), Binding::new("w")), ("blocks.0.v".to_string(), Binding::new("v"))]).unwrap();
     let ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
 
     let mut whole = Vec::new();
@@ -74,5 +86,25 @@ fn a_packed_tensor_uploads_as_the_requested_tier_with_one_tile_of_staging() {
         assert_eq!(staging.budget().stats(Pool::HostStaging).in_use, 0);
     }
     assert!(upload_from_source(&ops, &src, "missing", N, K, Dtype::BF16, &BoundedWorkspace::new(MemoryBudget::new(1 << 20, 0))).is_none());
+
+    // A fused projection joins the parts packed: same weight as uploading the concatenated f32 rows.
+    let (mut v, mut fused_ref) = (Vec::new(), whole.clone());
+    assert!(src.with_tensor("blocks.0.v", &mut |d| v = d.to_vec()));
+    fused_ref.extend_from_slice(&v);
+    for want in [Dtype::BF16, Dtype::NF4] {
+        let staging = BoundedWorkspace::new(MemoryBudget::new(300 << 10, 0));
+        let got = upload_fused_from_source(&ops, &src, &["blocks.0.w", "blocks.0.v"], N + N2, K, want, &staging).expect("both parts exist");
+        assert!(staging.peak() > 0, "{want:?}: the fused load must take the packed path");
+        let reference = Weight::upload(&ops, &fused_ref, N + N2, K, want);
+        let (a, b) = (decoded(&ops, &got), decoded(&ops, &reference));
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "{want:?}: fused tiled upload differs from the concatenated whole upload");
+    }
+
+    // A renamed view of the source (a RemapSource over it) keeps the packed path.
+    let plan = [("up".to_string(), Fetch::Whole("blocks.0.w".to_string()))].into_iter().collect();
+    let remap = RemapSource::new(&src, plan);
+    let staging = BoundedWorkspace::new(MemoryBudget::new(300 << 10, 0));
+    upload_from_source(&ops, &remap, "up", N, K, Dtype::BF16, &staging).expect("renamed tensor");
+    assert!(staging.peak() > 0, "a Whole remap must forward the packed view");
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -16,7 +16,7 @@
 //! explicit Convert otherwise, never a whole-tensor f32 copy. A source without a packed view (or a tier
 //! the executor cannot produce) falls back to the f32 interface, which is bounded by one tensor.
 
-use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, QuantEncoding};
+use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, LoadRequest, QuantEncoding};
 use checkpoint::TensorSource;
 
 use super::{DeviceWeightSink, Dtype, Ops, Weight, FP8_BLOCK};
@@ -38,10 +38,16 @@ fn encoding_of(ops: &Ops, want: Dtype) -> Option<QuantEncoding> {
     })
 }
 
-fn upload_packed(ops: &Ops, src: &dyn TensorSource, name: &str, n: usize, k: usize, want: Dtype, staging: &BoundedWorkspace) -> Option<Weight> {
-    let packed = src.packed()?;
-    let desc = packed.descriptor(name)?;
-    if desc.shape != [n as u64, k as u64] {
+fn upload_packed(ops: &Ops, src: &dyn TensorSource, names: &[&str], n: usize, k: usize, want: Dtype, staging: &BoundedWorkspace) -> Option<Weight> {
+    let mut rows = 0u64;
+    for name in names {
+        let desc = src.packed_descriptor(name)?;
+        if desc.shape.len() != 2 || desc.shape[1] != k as u64 {
+            return None;
+        }
+        rows += desc.shape[0];
+    }
+    if rows != n as u64 {
         return None;
     }
     let enc = encoding_of(ops, want)?;
@@ -49,10 +55,11 @@ fn upload_packed(ops: &Ops, src: &dyn TensorSource, name: &str, n: usize, k: usi
     // Lossless layout change first (Q8_0 to int8 blocks); an explicit numeric Convert otherwise.
     for policy in [LoadPolicy::Repack(enc.clone()), LoadPolicy::Convert(enc)] {
         let mut sink = DeviceWeightSink::new(ops);
-        match packed.load_into(name, &policy, &mut sink, staging, &config) {
-            Ok(Some(_)) => return Some(sink.take_weight().unwrap_or_else(|| panic!("upload {name}: a finished load produced no weight"))),
+        let req = LoadRequest { policy: &policy, workspace: staging, config: &config };
+        match src.load_packed(names, &req, &mut sink) {
+            Ok(Some(_)) => return Some(sink.take_weight().unwrap_or_else(|| panic!("upload {names:?}: a finished load produced no weight"))),
             Ok(None) => continue,
-            Err(e) => panic!("upload {name}: {e}"),
+            Err(e) => panic!("upload {names:?}: {e}"),
         }
     }
     None
@@ -61,10 +68,28 @@ fn upload_packed(ops: &Ops, src: &dyn TensorSource, name: &str, n: usize, k: usi
 /// Upload tensor `name` of `src` as an `[n, k]` weight of tier `want`; `None` when the source has no such
 /// tensor. `staging` bounds the host memory a packed load may hold at once.
 pub fn upload_from_source(ops: &Ops, src: &dyn TensorSource, name: &str, n: usize, k: usize, want: Dtype, staging: &BoundedWorkspace) -> Option<Weight> {
-    if let Some(w) = upload_packed(ops, src, name, n, k, want, staging) {
+    if let Some(w) = upload_packed(ops, src, &[name], n, k, want, staging) {
         return Some(w);
     }
     let mut built = None;
     src.with_tensor(name, &mut |raw| built = Some(Weight::upload(ops, raw, n, k, want)));
     built
+}
+
+/// Upload the row-wise concatenation of tensors `names` (a fused `q|k|v` or `gate|up` projection) as one
+/// `[n_total, k]` weight of tier `want`. Packed sources join the parts' bytes without re-quantizing when
+/// their encodings agree; otherwise the parts are concatenated as f32 and uploaded. `None` when a part is
+/// missing.
+pub fn upload_fused_from_source(ops: &Ops, src: &dyn TensorSource, names: &[&str], n_total: usize, k: usize, want: Dtype, staging: &BoundedWorkspace) -> Option<Weight> {
+    if let Some(w) = upload_packed(ops, src, names, n_total, k, want, staging) {
+        return Some(w);
+    }
+    let mut parts: Vec<Vec<f32>> = Vec::with_capacity(names.len());
+    for name in names {
+        let mut part = None;
+        src.with_tensor(name, &mut |raw| part = Some(raw.to_vec()));
+        parts.push(part?);
+    }
+    let refs: Vec<&[f32]> = parts.iter().map(Vec::as_slice).collect();
+    Some(Weight::upload(ops, &super::concat_rows_parallel(&refs), n_total, k, want))
 }

@@ -224,6 +224,22 @@ impl TensorSource for GdnFixSource<'_> {
         self.inner.raw_blocks(name)
     }
 
+    /// The packed view of every tensor this wrapper leaves untouched; the
+    /// transformed GDN leaves must go through `with_tensor`, where the fix is applied.
+    fn packed_descriptor(&self, name: &str) -> Option<checkpoint::packed::TensorDescriptor> {
+        if GdnLeaf::of(name).is_some() {
+            return None;
+        }
+        self.inner.packed_descriptor(name)
+    }
+
+    fn load_packed(&self, names: &[&str], req: &checkpoint::packed::LoadRequest<'_>, sink: &mut dyn checkpoint::packed::TensorSink) -> Result<Option<checkpoint::packed::LoadReport>, String> {
+        if names.iter().any(|n| GdnLeaf::of(n).is_some()) {
+            return Ok(None);
+        }
+        self.inner.load_packed(names, req, sink)
+    }
+
     fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
         if GdnLeaf::of(name).is_some() {
             return self.with_tensor(name, &mut |d| f(0, d));
