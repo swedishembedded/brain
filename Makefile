@@ -699,8 +699,8 @@ check/seed-literals/tests:
 	bash scripts/gates/check-seed-literals.sh --tests
 
 # Spec for the gate above, run against throwaway trees (needs only bats).
-## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads, format-logic, adapter-naming, placement-accounting, training-capabilities)
-test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities
+## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads, format-logic, adapter-naming, placement-accounting, training-capabilities, model-flags)
+test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities test/gates/model-flags
 
 ## test/gates/test-skips - the silent-skip ratchet fails on a new bare skip and on a stale entry, passes on a match
 test/gates/test-skips:
@@ -741,6 +741,10 @@ test/gates/placement-accounting:
 ## test/gates/training-capabilities - the capability page is generated from its declaration; a missing or ignored test, an unregistered tier and a drifted page fail
 test/gates/training-capabilities:
 	bats tests/gates/training_capabilities.bats
+
+## test/gates/model-flags - the model-flag gate fails on an architecture-prefixed flag (incl. a version-less stem) and a stale alias entry, ignores generic flags, tool crates and comments
+test/gates/model-flags:
+	bats tests/gates/model_flags.bats
 
 ## test/gates/group-kernels - the kernel-table grouping sums to the table total and bills unknown kernels to misc
 test/gates/group-kernels:
@@ -827,6 +831,7 @@ check/scripts:
 	bash scripts/gates/check-crate-layers.sh
 	bash scripts/gates/check-placement-accounting.sh
 	bash scripts/gates/check-training-capabilities.sh
+	bash scripts/gates/check-model-flags.sh
 	bash scripts/gates/check-adapter-naming.sh
 	bash scripts/gates/check-format-logic.sh
 	bash scripts/gates/check-whole-tensor-loads.sh

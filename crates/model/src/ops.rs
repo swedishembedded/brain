@@ -886,6 +886,16 @@ impl TierPolicy {
         self.rules.iter().rev().find(|(pat, _)| name.contains(pat.as_str())).map(|(_, dt)| dt).copied().unwrap_or(self.default)
     }
 
+    /// The tier every leaf without a rule takes.
+    pub fn default_dtype(&self) -> Dtype {
+        self.default
+    }
+
+    /// How many `pattern=tier` rules were declared.
+    pub fn rule_count(&self) -> usize {
+        self.rules.len()
+    }
+
     /// `true` if any leaf can land at a non-F32 tier - the train/quantize
     /// mutual-exclusion assert the old `i8: bool` gated reads this instead.
     pub fn quantizes_anything(&self) -> bool {
@@ -895,7 +905,7 @@ impl TierPolicy {
     /// Round-trippable string form: `"q4"` (uniform), or
     /// `"q4,in_proj_a.weight=f32,in_proj_b.weight=f32"` (default, then
     /// `pattern=tier` rules in declaration order) - what the serving CLI's
-    /// `--qwen35-tier` flag parses.
+    /// `--weight-format` flag parses.
     pub fn describe(&self) -> String {
         let mut s = self.default.name().to_string();
         for (pat, dt) in &self.rules {

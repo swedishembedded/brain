@@ -32,7 +32,7 @@ its `deepseek-ai/<checkpoint>` id; the R1 distills' reasoning comes back as
 checkpoint of 6B parameters or more is served with int8 linears by default
 only on a card that cannot hold its fp32 weights (a 7-8B one fits a single
 24 GB card that way); a larger card serves it fp32, the more accurate tier, and
-`--qwen-weights-int8` / `--qwen-weights-fp32` choose explicitly.
+`--weight-format int8` / `--weight-format f32` choose explicitly.
 
 The coder base checkpoints fill in the middle of code: `POST /v1/completions`
 with the code before the cursor as `prompt` and the code after it as

@@ -35,6 +35,38 @@ At least one surface flag is meaningful for a useful server; an unknown flag
 is a hard error (exit 2), not a warning. Run `brain serve --help` for the
 authoritative flag list.
 
+## The serving policy
+
+How a model is stored and sized is one model-agnostic policy, the same for
+every model that serves it; no flag is spelled with an architecture name.
+
+| flag | what it chooses |
+|---|---|
+| `--checkpoint PATH` | the LLM checkpoint to serve (file or repo directory) |
+| `--weight-format SPEC` | weight storage: `f32`, `bf16`, `f16`, `int8`, `q4`, `nf4`, or per leaf `int8,blk.0.attn_q=f32` where the model supports rules |
+| `--kv-cache TIER` | KV-cache storage: `f32`, `bf16`, `int8`, `fp8` |
+| `--gemm auto\|fp32` | `fp32` pins exact fp32 arithmetic (the reference tier); `auto` uses tensor cores where the device has them |
+| `--kv-calibration` | use a `kv_calib.json` beside the checkpoint |
+| `--ctx N` | cap the context window below the model's declared one |
+| `--max-batch N` | the concurrency the server must carry |
+| `--kv-offload-gb N` | host RAM granted for preempted sessions' KV |
+
+Each model declares which formats it supports. A choice a model cannot honour
+is refused by name with the supported set (for example `qwen3: KV cache bf16
+is not supported; supported: f32, int8, fp8`); the model does not serve, and
+the server refuses to start only when no served family can honour the policy.
+A limit that has no meaning for a model is reported as a note at startup.
+
+Only real choices are flags. The KV pool size, the prefix-cache slots, the
+prefill slice, batch and row cap, and the residual-add and norm fusion are
+derived from the model's metadata, the device and the memory plan (the context
+window from the model's declared window and the free memory) and are not
+options; the values a server runs with are reported at startup. The old
+architecture-prefixed spellings (`--qwen-ctx`, `--qwen35-kv`,
+`--qwen-weights-int8`, `--kronos-decoder`, ...) still work with a deprecation
+warning until their callers have moved; the ones for derived settings still
+set them so existing launch lines behave as before.
+
 ## Serving LoRA adapters
 
 One resident copy of a Qwen3's weights serves the base and any number of LoRA
@@ -57,7 +89,7 @@ Three things put an adapter in front of the base:
   `<vendor>/<repo>/adapters/<owner>/<name>/<tag>/` for a served Qwen3 base
   offers each as `<vendor>/<repo>:<owner>:<name>:<tag>`;
 - `--adapter FILE`, `--adapter-manifest FILE` or `--watch-adapters DIR` (below)
-  for the Qwen3 selected with `--qwen-weights PATH` (the checkpoint file or its repo directory; the older `BRAIN_QWEN_WEIGHTS` variable still works when no flag is given), or, when there is none, for
+  for the Qwen3 selected with `--checkpoint PATH` (the checkpoint file or its repo directory; the older `BRAIN_QWEN_WEIGHTS` variable still works when no flag is given), or, when there is none, for
   the one released Qwen3.8 GGUF the model directory serves (several are
   ambiguous and refused by name: put the adapter in the model directory under
   the id of the one it rides on).
@@ -136,12 +168,12 @@ it, and the engine unloads it afterwards. A swap interrupts nothing. A client
 that follows "the latest" reads the model list for the current id. A release
 that keeps its card id under a new digest replaces the adapter under that id.
 
-The adapter flags need a served Qwen3 (`--qwen-weights`) behind an HTTP or
+The adapter flags need a served Qwen3 (`--checkpoint`) behind an HTTP or
 D-Bus surface; `--adapter` and `--adapter-manifest` without one stop the
 server, and the stdio controller refuses all three.
 
 Adapters are served in fp32 on the fp32 activation, so they are exact on int8
-weights too. Clip ceilings calibrated on the base (`--qwen-kv-calib`) are
+weights too. Clip ceilings calibrated on the base (`--kv-calibration`) are
 applied to adapter sequences as well, and the server says so once.
 
 ## Access control is always on

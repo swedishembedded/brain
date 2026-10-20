@@ -198,7 +198,9 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // batch ceiling).
     match loader::resolver::try_resolve(models_dir, "qwen35", &qwen35::spec::Qwen35Fp32Spec, &Default::default()) {
         Ok(assembly) => {
-            if let Some(q) = catalog::resident_qwen35::Qwen35Resident::from_assembly_sized(&assembly, qwen35.fp32.sanitized()) {
+            if let Some(why) = qwen35.fp32_refused.as_ref().filter(|_| qwen35.fp32.refused) {
+                eprintln!("brain: qwen35 (brain checkpoint) not served: {why}");
+            } else if let Some(q) = catalog::resident_qwen35::Qwen35Resident::from_assembly_sized(&assembly, qwen35.fp32.sanitized()) {
                 models.push(Arc::new(q));
             }
         }

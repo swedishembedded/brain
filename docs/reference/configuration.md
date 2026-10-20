@@ -103,7 +103,7 @@ served, with no error.
 
 | Variable | Serves | Value |
 | --- | --- | --- |
-| `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` (deprecated for the weights: use `brain serve --qwen-weights PATH`, which wins when both are given) | the `brain serve` scheduler's Qwen3 resident ONLY (`crate::resident_llm::QwenResident`, see `docs/reference/models/qwen3.md`); the target of `--adapter`, `--adapter-manifest` and `--watch-adapters` | checkpoint + `tokenizer.json`. The `brain caps`/`brain do qwen …` capability path (`generate`/`lora_train`/`lora_gate`/`embed`) does NOT read this variable - it is resolved from the model store instead (`qwen3::spec::Qwen3Spec`), same as the `FLUX2`/`S3DIT` rows below; an explicit `weights`/`tokenizer` param on the request still overrides the resolver's own pick |
+| `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` (deprecated for the weights: use `brain serve --checkpoint PATH`, which wins when both are given) | the `brain serve` scheduler's Qwen3 resident ONLY (`crate::resident_llm::QwenResident`, see `docs/reference/models/qwen3.md`); the target of `--adapter`, `--adapter-manifest` and `--watch-adapters` | checkpoint + `tokenizer.json`. The `brain caps`/`brain do qwen …` capability path (`generate`/`lora_train`/`lora_gate`/`embed`) does NOT read this variable - it is resolved from the model store instead (`qwen3::spec::Qwen3Spec`), same as the `FLUX2`/`S3DIT` rows below; an explicit `weights`/`tokenizer` param on the request still overrides the resolver's own pick |
 | `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint (produced by `brain import`) + `tokenizer.json` |
 | `BRAIN_GPT2_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
 | `BRAIN_GLMDSA_WEIGHTS` | GLM decoder | checkpoint (char-level) |
@@ -130,7 +130,7 @@ served, with no error.
 | `BRAIN_CHRONOS2` | Chronos-2 forecasting | weights |
 | `BRAIN_FINCAST` | FinCast forecasting | weights |
 | `BRAIN_TIMESFM3` | TimesFM-3 forecasting (natively multivariate; target-only over this served path). `brain pull google/timesfm-3.0-pytorch` fetches the checkpoint, but no caller sets this variable for you yet - point it at the fetched directory (or an imported `.safetensors`) yourself | weights |
-| `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | Kronos OHLCV forecasting (the served path, `brain serve`, and `brain forecast compare`/`finetune`). `brain forecast predict` instead resolves both roles from the models directory (`NeoQuasar/Kronos-Tokenizer-base` + `NeoQuasar/Kronos-base`, told apart by their own `config.json` content) via `--kronos-tokenizer`/`--kronos-decoder` or automatically when the store holds exactly one candidate each | the two checkpoint dirs (the decoder also accepts a `.safetensors` fine-tune file) |
+| `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | Kronos OHLCV forecasting (the served path, `brain serve`, and `brain forecast compare`/`finetune`). `brain forecast predict` instead resolves both roles from the models directory (`NeoQuasar/Kronos-Tokenizer-base` + `NeoQuasar/Kronos-base`, told apart by their own `config.json` content) via `--tokenizer-dir`/`--decoder-dir` or automatically when the store holds exactly one candidate each | the two checkpoint dirs (the decoder also accepts a `.safetensors` fine-tune file) |
 | `BRAIN_KRONOS_ARGMAX` | force Kronos's deterministic modal rollout (argmax over the token distribution) instead of nucleus sampling: one reproducible path, N times cheaper. Set by `brain forecast predict --samples 1` | `0` (sample) |
 | `BRAIN_QWEN3TTS_WEIGHTS` (+ `BRAIN_QWEN3TTS_CKPT`) | Qwen3-TTS `speak` | the checkpoint dir, or a dir of files from `brain qwen3tts import` (+ HF checkpoint dir for config/tokenizer) |
 | `BRAIN_NEMOTRONASR` | Nemotron 3.5 streaming ASR | HF checkpoint dir |
@@ -223,9 +223,9 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_GPT2` | stdio-loop GPT checkpoint (also `--gpt`) | fake echo model |
 
 The Qwen3 and Qwen3.8 serving sizes are `brain serve` flags, not variables:
-`--qwen-ctx` (default: auto-sized to the card), `--qwen-max-batch` (default
-16), `--qwen-kv-tokens` (default: batch x half a context when it fits), `--qwen-kv-calib`, `--qwen-kv-fp8`, `--qwen35-ctx` (default: the longest the cards hold)
-and `--qwen35-max-batch` (default 8). See the
+`--ctx` (default: auto-sized to the card), `--max-batch` (default
+16), the KV pool size (default: batch x half a context when it fits), `--kv-calibration`, `--kv-cache fp8`, `--ctx` (default: the longest the cards hold)
+and `--max-batch` (default 8). See the
 [Qwen3](models/qwen3.md) and [Qwen3.8](models/qwen35.md) pages.
 
 Deeper per-model knobs not listed here are documented on that model's own

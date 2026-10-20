@@ -43,7 +43,7 @@ brain qwen3 infer --weights /path/to/Qwen3-8B-Q8_0.gguf \
     --tokenizer tokenizer.json --prompt "Hello"
 ```
 
-and the same goes for `brain serve`'s resident (below) -- `--qwen-weights`
+and the same goes for `brain serve`'s resident (below) -- `--checkpoint`
 (and the deprecated `BRAIN_QWEN_WEIGHTS`) also accepts a `.gguf` path directly.
 
 The generic converter is still there if you want it -- `brain import
@@ -67,7 +67,7 @@ conversion is larger than either. Running the GGUF directly, as above, never
 pays that expansion at all -- the download saving is the whole story, the
 same as FLUX.2's text encoder, below.
 
-To make a checkpoint a `brain serve` resident, pass `--qwen-weights PATH`
+To make a checkpoint a `brain serve` resident, pass `--checkpoint PATH`
 (the deprecated `BRAIN_QWEN_WEIGHTS` variable still works when no flag is
 given; `BRAIN_QWEN_TOKENIZER` names a tokenizer that is not beside the
 checkpoint) -- a `.gguf` file works here too.
@@ -221,7 +221,7 @@ everything about HOW to serve it is a `brain serve` flag:
   action takes the same settings as `targets`, `weight_decay`, `grad_clip`,
   `warmup`, `min_lr`, `beta1`, `beta2` and `eps`.
 - `--device cpu|gpu|vulkan` - backend selection.
-- `--qwen-ctx N` - built context length. Unset by default: the resident
+- `--ctx N` - built context length. Unset by default: the resident
   auto-sizes it to the target device's real usable VRAM instead of a fixed
   number, so raising the ceiling normally means freeing VRAM (or adding a
   card), not passing this flag. Set it to pin an exact value instead of the
@@ -229,42 +229,42 @@ everything about HOW to serve it is a `brain serve` flag:
   declared `max_position_embeddings`; an explicit value past it derives a
   YaRN (arXiv 2309.00071) RoPE scaling (Qwen's published recipe: `factor =
   ctx / pretrained window`, the pretrained window being the largest power of
-  two not above the declared one, so `--qwen-ctx 131072` on Qwen3 is factor
+  two not above the declared one, so `--ctx 131072` on Qwen3 is factor
   4.0 over 32768) - a checkpoint that already declares one is never
   second-guessed. YaRN rescales every request, short ones included.
-- `--qwen-max-batch N` - concurrent serving batch slots (default 16).
-- `--qwen-kv-tokens N` - KV pool size in tokens, shared by every sequence
-  and by the prompt-prefix cache (default: room for `--qwen-max-batch` half-context histories when
+- `--max-batch N` - concurrent serving batch slots (default 16).
+- the KV pool size - KV pool size in tokens, shared by every sequence
+  and by the prompt-prefix cache (default: room for `--max-batch` half-context histories when
   that fits the card beside the weights, else the largest half of it that does,
   else two contexts). An agent that
   resends its whole history every turn is served from the prefix cache only
   while its history stays cached between turns, so size this at clients x
   history tokens (int8 KV costs about 74 KB per token on the 8B, so 250000
   tokens is about 18 GB). A pool is never smaller than one context.
-- `--qwen-kv-fp32` - opt out of the default int8 KV cache.
-- `--qwen-kv-fp8` - store the packed KV pools as FP8 E4M3 instead of int8
+- `--kv-cache f32` - opt out of the default int8 KV cache.
+- `--kv-cache fp8` - store the packed KV pools as FP8 E4M3 instead of int8
   (the same bytes per token; the tensor-core prefill decodes the E4M3 bytes
   while staging; off by default).
-- `--qwen-kv-calib` - opt in to per-head KV clip ranges produced by `brain
+- `--kv-calibration` - opt in to per-head KV clip ranges produced by `brain
   qwen3 calib` (off by default).
-- `--qwen-kv-offload-gb N` - host RAM the serving engine may use to park
+- `--kv-offload-gb N` - host RAM the serving engine may use to park
   preempted sessions' KV cache (default `0`, off). See below.
-- `--qwen-weights-int8` / `--qwen-weights-fp32` - quantize the 7
+- `--weight-format int8` / `--weight-format f32` - quantize the 7
   per-layer linears to int8, or keep them fp32. Unset, a checkpoint of 6B
   parameters or more is quantized (its fp32 weights do not fit one 24 GB
   card) and a smaller one is not - at the real Qwen3-8B config, int8
   shrinks the weight term from ~20.8 GiB to ~11.9 GiB. A device with no packed-int8 dot path (the CPU
   backend, or an unusual GPU) degrades to fp32 with a printed warning
   rather than failing.
-- `--qwen-weights-bf16` - store the linears and the head as bf16 (exact
+- `--weight-format bf16` - store the linears and the head as bf16 (exact
   for a checkpoint that ships bf16, half the fp32 bytes in memory), decoded
   inline.
-- `--qwen-gemm-fp32` - pin exact fp32 arithmetic for the linears. By
+- `--gemm fp32` - pin exact fp32 arithmetic for the linears. By
   default the linears of fp32 weights with at least 8 rows (prefill and
   batched decode) run on TF32 tensor cores where the card has them
   (operands rounded to a 10-bit mantissa, fp32 accumulation, no extra
   memory).
-- `--qwen-max-prefill N` - cap the chunked-prefill row count below its
+- the prefill row cap - cap the chunked-prefill row count below its
   512 default (clamped to `1..=512`; can only shrink it). The scores/probs
   scratch buffer this bounds is the single largest per-token-scaling cost
   in the whole engine - larger than the KV pool itself - and shrinks
@@ -275,8 +275,8 @@ everything about HOW to serve it is a `brain serve` flag:
 
 ## Serving more sessions than the KV pool holds
 
-The KV pool is sized for a fleet of half-length histories (see `--qwen-kv-tokens`), while the batch
-has `--qwen-max-batch` slots (default 16), so a busy server can admit more sessions
+The KV pool is sized for a fleet of half-length histories (see the KV pool size), while the batch
+has `--max-batch` slots (default 16), so a busy server can admit more sessions
 than the pool can keep cached at once. Admission only checks that a prompt
 fits, so the sequences it lets in can still outgrow the pool together while
 they decode. Whatever the offload setting, that never fails a request: the
@@ -299,7 +299,7 @@ produce are identical to the ones it would have produced had it never been
 preempted. That is a tested property, not an aspiration.
 
 ```bash
-brain serve --openai 8080 --qwen-kv-offload-gb 16
+brain serve --openai 8080 --kv-offload-gb 16
 ```
 
 What this buys is **concurrency**, not a longer single context. A session
@@ -316,7 +316,7 @@ spare should not have it taken silently. Budget roughly the same bytes per
 cached token that the GPU pool spends - a swap is a verbatim copy.
 Offload also keeps a small device staging buffer (at most 64 MiB) that a swap
 moves blocks through; it is allocated when the engine loads and counted in the
-memory budget (and in `--qwen-ctx` auto-sizing), so the first preemption never
+memory budget (and in `--ctx` auto-sizing), so the first preemption never
 asks the card for memory it does not have.
 
 ## Hardware and limits

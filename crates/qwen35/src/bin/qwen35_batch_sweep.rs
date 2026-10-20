@@ -13,7 +13,7 @@
 //! It drives the same `Qwen35GgufEngine` the server's continuous-batching
 //! scheduler drives (`PagedDecoder::prefill` into a slot, then one
 //! `forward_batched_greedy` step for all live sequences per iteration), so a
-//! number here is a number `brain serve --qwen35-max-batch N` can reach, minus
+//! number here is a number `brain serve --max-batch N` can reach, minus
 //! the host-side streaming work per token.
 //!
 //! One activation at the largest batch; each row of the table then decodes

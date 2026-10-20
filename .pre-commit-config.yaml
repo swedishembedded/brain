@@ -199,6 +199,19 @@ repos:
         files: '(^crates/.*\.rs$|^docs/reference/training-capabilities\.md$|^scripts/gates/(training-capabilities\.|check-training-capabilities\.sh))'
         pass_filenames: false
         stages: [pre-commit]
+      - id: model-flags
+        name: "No architecture-prefixed command-line flags"
+        description: >-
+          A flag spelled --<architecture>-<option> (--qwen-ctx, --kronos-decoder,
+          ...) is refused in production code: options are model-agnostic
+          (model::policy) or derived from the memory plan. Deprecated aliases are
+          listed with a reason in scripts/gates/model-flags.allow (shrink-only).
+          See scripts/gates/check-model-flags.sh. Also run by `make check/scripts`.
+        entry: bash scripts/gates/check-model-flags.sh
+        language: system
+        files: '(^crates/.*\.rs$|^scripts/gates/(model-flags\.|check-model-flags\.sh|ratchet\.py))'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: seed-literals
         name: "No new literal seeds in production code (every default seed is random)"
         description: >-

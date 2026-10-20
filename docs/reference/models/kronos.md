@@ -56,10 +56,10 @@ action.
 brain forecast predict --csv crates/kronos/tests/data/synthetic_hourly.csv --horizon 6 --samples 16 --origins 16 --gnuplot chart.png
 
 # backtest against statistical baselines before trusting it
-brain forecast compare --kronos-tokenizer <tok-dir> --kronos-decoder <dec-dir> --windows 24
+brain forecast compare --tokenizer-dir <tok-dir> --decoder-dir <dec-dir> --windows 24
 
 # start a resident forecast server
-brain forecast serve --kronos-tokenizer <tok-dir> --kronos-decoder <dec-dir> --socket /tmp/forecast.sock
+brain forecast serve --tokenizer-dir <tok-dir> --decoder-dir <dec-dir> --socket /tmp/forecast.sock
 ```
 
 D-Bus action `forecast`: input `context` (OHLCV bars, or a plain close-price

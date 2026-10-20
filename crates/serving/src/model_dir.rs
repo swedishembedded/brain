@@ -669,6 +669,7 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
         // its own checkpoints - a distinct family from "qwen35moe" above
         // (a pre-existing collision between the two crates, fixed in the
         // same commit that added this arm).
+        "qwen35" if qwen35_sizing.refused => None,
         "qwen35" => match catalog::resident_qwen35::Qwen35Resident::from_card_sized(weights, card, tokenizer, qwen35_sizing) {
             Ok(q) => Some(Arc::new(q)),
             Err(e) => {

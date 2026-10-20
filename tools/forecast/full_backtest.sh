@@ -58,7 +58,7 @@ echo "T0=$T0  first OOS origin=$START"
 
 echo "== [2/4] fine-tune on the ft-half (data <= T0, gated) =="
 "$ROOT/target/release/brain" --device "$FT_DEVICE" forecast finetune \
-    --kronos-tokenizer "$TOK" --kronos-decoder "$BASE_DEC" \
+    --tokenizer-dir "$TOK" --decoder-dir "$BASE_DEC" \
     --data "$OUT/ft" --holdout-data "$OUT/holdout" \
     --context "$CTX" --horizon "$HOR" --epochs "$EPOCHS" --lr "$LR" --lora "$LORA" \
     --out "$OUT/ft.weights"

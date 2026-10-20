@@ -395,7 +395,7 @@ impl StoreSupplier {
         // resolved reference is what `Store::local` finds the fetched bytes
         // under. Identical to `r` for every recipe that makes no choice.
         let local = self.store.local(&plan.reference).ok_or_else(|| format!("{model}: fetched but not found on disk (unexpected)"))?;
-        // `QwenServeConfig::default()`, not the live server's real `--qwen-*`
+        // `QwenServeConfig::default()`, not the live server's real serving policy
         // flags/VRAM budget: this supplier is built before `brain serve`'s own
         // device probe runs (`run_cli::build_auto_fetch_supplier` predates
         // `build_serving_executor`), so a model first served via on-demand

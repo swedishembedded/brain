@@ -30,7 +30,7 @@ generation ends on the checkpoint's own end-of-sentence token. See
 A checkpoint of 6B parameters or more is served with int8 linears by
 default only on a card that cannot hold its fp32 weights (a 7-8B one fits a
 single 24 GB card that way); a larger card serves it fp32, the more accurate
-tier, and `--qwen-weights-int8` / `--qwen-weights-fp32` choose explicitly. Their Qwen vocabulary carries the
+tier, and `--weight-format int8` / `--weight-format f32` choose explicitly. Their Qwen vocabulary carries the
 fill-in-the-middle tokens, so `POST /v1/completions` accepts a `suffix`.
 From Rust, `brain::TextGenerationPipeline::from_pretrained("deepseek-ai/<checkpoint>")`
 loads either ([SDK](../sdk.md)).

@@ -71,7 +71,7 @@ impl MmapSafetensors {
     /// cheap the per-byte decode work itself is (a bulk-copy decode and a
     /// per-element one paid the identical wall time, which is the signature
     /// of a bottleneck neither touches). Reproduce with `BRAIN_PROFILE=1
-    /// brain serve --qwen-weights-int8`'s `re-load checkpoint tensors for
+    /// brain serve --weights int8`'s `re-load checkpoint tensors for
     /// engine build` stage.
     pub fn open_populated<P: AsRef<Path>>(path: P) -> Result<MmapSafetensors, String> {
         Self::open_impl(path, true)
@@ -482,7 +482,7 @@ fn decode(raw: &[u8], width: usize, f: fn(&[u8]) -> f32, out: &mut Vec<f32>) {
 /// un-inlinable `fn` across the parallel loop in `decode_elems_into`) for
 /// work that is really just a bulk byte copy - profiled as the dominant cost
 /// of loading a real multi-GB fp32 checkpoint end to end (`brain serve`'s own
-/// cold-activation path: `BRAIN_PROFILE=1 brain serve --qwen-weights-int8`,
+/// cold-activation path: `BRAIN_PROFILE=1 brain serve --weights int8`,
 /// the `stage ...: re-load checkpoint tensors for engine build` line). This
 /// bypasses the per-element path entirely on the little-endian targets this
 /// engine actually ships for.

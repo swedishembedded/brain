@@ -67,7 +67,7 @@ history and exempt.
    (cuBLAS, binary32 accumulation, no copy of the weights), bf16/NF4 bases as
    bf16, LoRA training builds record the same products, and the paged flash
    prefill at `head_dim` 128/256 runs on fp16 `mma`. `GemmPrecision::Fp32Reference`
-   (`--qwen-gemm-fp32` on `brain serve`, `gemm_precision` on the SDK fine-tune)
+   (`--gemm fp32` on `brain serve`, `gemm_precision` on the SDK fine-tune)
    pins the exact fp32 WGSL/CUDA-core path; gradient checks and parity gates pin
    it, and a device without tensor cores or cuBLAS falls back to it silently.
    **Quantized frozen bases run through one contract** (`model::ops::tiled`): for every
@@ -131,14 +131,14 @@ history and exempt.
    `catalog::resident_qwen35::gguf_resident`): loaded lazily by the scheduler,
    placed on the cards `--device` allows, and its context sized from the
    memory the placement leaves (`int8_gguf_resident::auto_cap`) unless
-   `--qwen35-ctx` fixes it. A file that could never load is not listed.
+   `--ctx` fixes it. A file that could never load is not listed.
    That resident's 16 GQA layers store their KV cache `f32` (default), `bf16`,
-   per-row `int8` or per-row `fp8` E4M3 (`--qwen35-kv`, `model::kv_tier`: 4 / 8 / 15 sequences
+   per-row `int8` or per-row `fp8` E4M3 (`--kv-cache`, `model::kv_tier`: 4 / 8 / 15 sequences
    of 128k on one GH200) and decode through a fused split-key attention
    (`paged_flash_decode_gqa_hd256`) in every tier; see M30 in the same ledger.
    It is a `model::serve::PagedDecoder` (`int8_gguf_resident::Qwen35GgufEngine`,
    one KV slot per sequence) driven by the generic continuous-batching
-   scheduler like every other LLM resident: `--qwen35-max-batch N` sequences
+   scheduler like every other LLM resident: `--max-batch N` sequences
    decode in ONE batched step per iteration (`make perf/model/qwen35-batch`
    prints the aggregate-throughput table). `--speculative` (default `auto`) adds speculative
    decoding to that same scheduler (`model::serve::speculate`): the engine
@@ -984,7 +984,7 @@ The recent workstream (P7.x) is concurrent LLM serving. Key pieces:
 | Paged KV foundation | `crates/model/src/paged.rs` | block allocator, `BlockTable` (+`truncate`) |
 | Serving engine | `crates/qwen3/src/serve.rs` | shared block pools, batched **ragged paged decode**, batched + **chunked prefill**, **int8 paged KV - the serving DEFAULT** (3.88× smaller pool at Qwen3's `head_dim=128`; opt out with `--kv-fp32` / `BRAIN_QWEN_KV_INT8=0`), calibration opt-in (`--kv-calib` / `BRAIN_QWEN_KV_CALIB=1`), **speculative decoding**, **an adapter bank (many LoRA adapters, or none, per row of one batch on one copy of the weights)**, on-device greedy/top-K sampling head, `Engine::load` from checkpoint; implements the generic `model::serve::PagedDecoder` seam. Served context length defaults to `BRAIN_QWEN_CTX=24576` (sized to what int8 KV buys; the fp32 opt-out is guarded and refuses over the iGPU's 8 GiB policy budget rather than OOMing - `crates/catalog/src/resident_llm.rs`). |
 | Scheduler | `crates/model/src/serve.rs` | `PagedDecoder`-generic continuous batching (multi-sequence concurrent admission/decode) + real (non-greedy) sampling; `qwen3::serve::Scheduler` is a type alias over `Engine` - the seam a future decoder LM adopts by implementing `PagedDecoder`, not by duplicating the scheduler |
-| LLM resident glue | `crates/llmserve` | the ONE `Instance` glue every text LLM resident (Qwen3, Qwen3.8 fp32 and the released GGUF, Qwen3.5-MoE) serves through: requests of a `run_batch` group go into `model::serve::Scheduler<D: PagedDecoder>`, one batched decode step per iteration, per-request seeds, stop strings, cancellation and adapter routing via the `Frontend` seam. A model declares how many queued jobs one call may take with `ResidentModel::batch_limit` (`--qwen35-max-batch` for the GGUF 27B) |
+| LLM resident glue | `crates/llmserve` | the ONE `Instance` glue every text LLM resident (Qwen3, Qwen3.8 fp32 and the released GGUF, Qwen3.5-MoE) serves through: requests of a `run_batch` group go into `model::serve::Scheduler<D: PagedDecoder>`, one batched decode step per iteration, per-request seeds, stop strings, cancellation and adapter routing via the `Frontend` seam. A model declares how many queued jobs one call may take with `ResidentModel::batch_limit` (`--max-batch` for the GGUF 27B) |
 | Shared Qwen chat serving | `crates/qwen3/src/chat.rs` | chat-template rendering, tool-call/stop-string streaming, cancellation - one implementation shared by `resident_llm.rs` (HTTP/D-Bus) and `qwen3::caps.rs` (`brain qwen3 infer`), so they cannot diverge |
 | Residency | `crates/residency` | tiers model weights GPU/RAM/disk by a size/reload-cost-aware policy within a memory budget; schedules jobs (batch-by-model, queue-age-aware, parallel lanes); `crates/residency/src/admission.rs` is the shared edge-concurrency-ceiling/admit-deadline policy both HTTP and D-Bus read from |
 | Capability interface | `crates/capability` | models advertise a `Manifest` of typed `ActionSpec`s; CLI (`brain caps` / `brain <arch> <verb>`) and the event API dispatch generically - adding a capability = implementing `Action`, no new subcommand or event variant |

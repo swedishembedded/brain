@@ -17,7 +17,24 @@
 use crate::args::Args;
 use std::sync::Arc;
 
+/// Deprecated architecture-prefixed spellings of the Kronos component paths,
+/// rewritten to the generic names (with a warning) until their callers moved.
+fn migrate_component_flags(argv: &[String]) -> Vec<String> {
+    argv.iter()
+        .map(|a| {
+            let new = match a.as_str() {
+                "--kronos-tokenizer" => "--tokenizer-dir",
+                "--kronos-decoder" => "--decoder-dir",
+                other => return other.to_string(),
+            };
+            eprintln!("brain forecast: warning: {a} is deprecated and will be removed; use {new}");
+            new.to_string()
+        })
+        .collect()
+}
+
 pub fn run_forecast(argv: &[String]) {
+    let argv = &migrate_component_flags(argv);
     match argv.first().map(|s| s.as_str()) {
         Some("predict") => predict(&argv[1..]),
         Some("compare") => compare(&argv[1..]),
@@ -62,8 +79,8 @@ fn predict(args: &[String]) {
     let gnuplot = a.take_str("--gnuplot");
     let top_p = a.f32_or("--top-p", 0.0);
     let temperature = a.f32_or("--temperature", 0.0);
-    let kronos_tok = a.take_str("--kronos-tokenizer");
-    let kronos_dec = a.take_str("--kronos-decoder");
+    let kronos_tok = a.take_str("--tokenizer-dir");
+    let kronos_dec = a.take_str("--decoder-dir");
     let timesfm3_weights = a.take_str("--timesfm3");
     a.finish();
 
@@ -81,7 +98,7 @@ fn predict(args: &[String]) {
         eprintln!("usage: brain forecast predict --csv <ohlcv.csv> [--horizon 48] [--context N] [--samples N]");
         eprintln!("         [--origins 1] [--seed 7] [--season 24] [--gnuplot chart.png]");
         eprintln!("         [--top-p 0.9] [--temperature 1.0]");
-        eprintln!("         [--kronos-tokenizer D --kronos-decoder D]");
+        eprintln!("         [--tokenizer-dir D --decoder-dir D]");
         eprintln!("         [--timesfm3 <weights>]  (uses this model instead of kronos when given)");
         eprintln!();
         eprintln!("The CSV is timestamp,open,high,low,close,volume. The last --horizon rows are held out");
@@ -134,7 +151,7 @@ fn predict(args: &[String]) {
         let context = if context == 0 { max_context.min(512) } else { context.min(max_context) };
         (Box::new(m), "timesfm3", context)
     } else {
-        // Weights: `--kronos-tokenizer`/`--kronos-decoder` (when given) are
+        // Weights: `--tokenizer-dir`/`--decoder-dir` (when given) are
         // the model-store resolver's own role overrides now
         // (`brain_modelstore::resolve::resolve` + `kronos::spec::KronosSpec`)
         // instead of `BRAIN_KRONOS_TOKENIZER`/`BRAIN_KRONOS_DECODER` -
@@ -562,8 +579,8 @@ fn compare(args: &[String]) {
     let seed = a.seed("brain forecast compare");
     let html_path = a.take_str("--html");
     let chronos2_weights = a.take_str("--chronos2");
-    let kronos_tok = a.take_str("--kronos-tokenizer");
-    let kronos_dec = a.take_str("--kronos-decoder");
+    let kronos_tok = a.take_str("--tokenizer-dir");
+    let kronos_dec = a.take_str("--decoder-dir");
     let fincast_weights = a.take_str("--fincast");
     let timesfm3_weights = a.take_str("--timesfm3");
     a.finish();
@@ -636,8 +653,8 @@ fn serve(args: &[String]) {
     let socket = a.take_str("--socket");
     let listen = a.take_str("--listen");
     let chronos2 = a.take_str("--chronos2");
-    let kronos_tok = a.take_str("--kronos-tokenizer");
-    let kronos_dec = a.take_str("--kronos-decoder");
+    let kronos_tok = a.take_str("--tokenizer-dir");
+    let kronos_dec = a.take_str("--decoder-dir");
     let fincast = a.take_str("--fincast");
     let timesfm3 = a.take_str("--timesfm3");
     let max_conn = a.usize_or("--max-connections", 64);
@@ -844,7 +861,7 @@ fn load_universe_or_exit(dir: &str, label: &str, min_rows: usize, skip_invalid: 
 /// split.
 ///
 /// Which model runs is inferred from the flags rather than named separately:
-/// `--timesfm3 <weights>` selects TimesFM-3, `--kronos-decoder <dir>` selects
+/// `--timesfm3 <weights>` selects TimesFM-3, `--decoder-dir <dir>` selects
 /// Kronos. That keeps every existing Kronos invocation working unchanged, and
 /// it is the same inference `predict`/`compare`/`serve` already make from the
 /// same flag.
@@ -878,8 +895,8 @@ enum FinetuneModel {
 /// finetune` keeps printing exactly the usage block it always did.
 fn finetune_model(args: &[String]) -> Result<FinetuneModel, String> {
     let has = |flag: &str| args.iter().any(|a| a == flag);
-    match (has("--timesfm3"), has("--kronos-decoder") || has("--kronos-tokenizer")) {
-        (true, true) => Err("brain forecast finetune: --timesfm3 and --kronos-decoder/--kronos-tokenizer select different models; pass one or the other".into()),
+    match (has("--timesfm3"), has("--decoder-dir") || has("--tokenizer-dir")) {
+        (true, true) => Err("brain forecast finetune: --timesfm3 and --decoder-dir/--tokenizer-dir select different models; pass one or the other".into()),
         (true, false) => Ok(FinetuneModel::Timesfm3),
         (false, _) => Ok(FinetuneModel::Kronos),
     }
@@ -889,8 +906,8 @@ fn finetune_model(args: &[String]) -> Result<FinetuneModel, String> {
 /// the verb learned a second model.
 fn finetune_kronos(args: &[String]) {
     let mut a = Args::new(args);
-    let tok = a.str_or("--kronos-tokenizer", "");
-    let dec = a.str_or("--kronos-decoder", "");
+    let tok = a.str_or("--tokenizer-dir", "");
+    let dec = a.str_or("--decoder-dir", "");
     let data = a.str_or("--data", "");
     let out = a.take_str("--out");
     let holdout = a.take_str("--holdout-data");
@@ -904,7 +921,7 @@ fn finetune_kronos(args: &[String]) {
     let skip_invalid = a.take_flag("--skip-invalid");
     a.finish();
     if tok.is_empty() || dec.is_empty() || data.is_empty() {
-        eprintln!("usage: brain forecast finetune --kronos-tokenizer <dir> --kronos-decoder <dir> --data <csv-dir> \\");
+        eprintln!("usage: brain forecast finetune --tokenizer-dir <dir> --decoder-dir <dir> --data <csv-dir> \\");
         eprintln!("         [--out <ckpt>] [--context 180] [--horizon 5] [--epochs 8] [--lr 4e-5] [--lora RANK] [--embargo N] [--batch B]");
         eprintln!("         [--holdout-data <csv-dir>] [--skip-invalid]");
         eprintln!();
@@ -1167,7 +1184,7 @@ mod tests {
     /// The `--timesfm3` arm is what stops the verb from being Kronos-only:
     /// before this, `--timesfm3` was an unrecognised flag, so the run fell
     /// through to the Kronos usage block and exited 2 complaining about a
-    /// missing `--kronos-decoder`.
+    /// missing `--decoder-dir`.
     #[test]
     fn finetune_selects_its_model_from_the_flags_it_was_given() {
         let argv = |s: &str| -> Vec<String> { s.split_whitespace().map(str::to_string).collect() };
@@ -1176,14 +1193,14 @@ mod tests {
 
         // Every shape an existing Kronos command line takes, including the
         // bare one whose whole job is to print the usage block.
-        for cmd in ["--kronos-tokenizer t --kronos-decoder d --data csv", "--kronos-decoder d --data csv", "--data csv", ""] {
+        for cmd in ["--tokenizer-dir t --decoder-dir d --data csv", "--decoder-dir d --data csv", "--data csv", ""] {
             assert_eq!(finetune_model(&argv(cmd)).unwrap(), FinetuneModel::Kronos, "{cmd:?} must still select kronos");
         }
 
         // Both is a mistake, not a preference.
-        let e = finetune_model(&argv("--timesfm3 w --kronos-decoder d --data csv")).expect_err("naming both models must be refused");
+        let e = finetune_model(&argv("--timesfm3 w --decoder-dir d --data csv")).expect_err("naming both models must be refused");
         assert!(e.contains("--timesfm3"), "{e}");
-        assert!(e.contains("--kronos-decoder"), "{e}");
+        assert!(e.contains("--decoder-dir"), "{e}");
     }
 
     #[test]

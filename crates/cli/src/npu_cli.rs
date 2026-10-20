@@ -679,8 +679,14 @@ fn kronos(args: &[String]) {
             continue;
         }
         match args[i].as_str() {
-            "--kronos-tokenizer" | "--tokenizer" => tok_dir = val(args, &mut i, "--kronos-tokenizer"),
-            "--kronos-decoder" | "--decoder" => dec_dir = val(args, &mut i, "--kronos-decoder"),
+            "--tokenizer-dir" | "--tokenizer" => tok_dir = val(args, &mut i, "--tokenizer-dir"),
+            "--decoder-dir" | "--decoder" => dec_dir = val(args, &mut i, "--decoder-dir"),
+            old @ ("--kronos-tokenizer" | "--kronos-decoder") => {
+                let new = if old == "--kronos-tokenizer" { "--tokenizer-dir" } else { "--decoder-dir" };
+                eprintln!("brain npu: warning: {old} is deprecated and will be removed; use {new}");
+                let dir = val(args, &mut i, old);
+                if new == "--tokenizer-dir" { tok_dir = dir } else { dec_dir = dir }
+            }
             "--context-len" => context_len = val(args, &mut i, "--context-len").parse().unwrap_or(0),
             "--horizon" => horizon = val(args, &mut i, "--horizon").parse().unwrap_or(horizon),
             "--compare" => compare = true,
@@ -693,7 +699,7 @@ fn kronos(args: &[String]) {
     }
     if tok_dir.is_empty() || dec_dir.is_empty() {
         eprintln!(
-            "usage: brain npu kronos --kronos-tokenizer T --kronos-decoder D \
+            "usage: brain npu kronos --tokenizer-dir T --decoder-dir D \
              [--context-len N] [--horizon H] [--ov-device NPU] [--compare]"
         );
         return;

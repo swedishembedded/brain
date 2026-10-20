@@ -57,7 +57,7 @@ See each model's page for its exact import command.
   ```bash
   brain forecast compare --windows 24 --html report.html \
     [--chronos2 <weights>] [--fincast <weights>] [--timesfm3 <weights>] \
-    [--kronos-tokenizer <dir> --kronos-decoder <dir>]
+    [--tokenizer-dir <dir> --decoder-dir <dir>]
   ```
 - **`serve`** - start a resident forecast server (stdio by default, or a
   Unix socket / TCP listener), loaded with whichever models' weight flags
@@ -65,13 +65,13 @@ See each model's page for its exact import command.
   ```bash
   brain forecast serve --socket /tmp/forecast.sock --max-connections 64 \
     [--chronos2 <weights>] [--fincast <weights>] [--timesfm3 <weights>] \
-    [--kronos-tokenizer <dir> --kronos-decoder <dir>]
+    [--tokenizer-dir <dir> --decoder-dir <dir>]
   ```
 - **`import`** - convert an upstream checkpoint into the brain
   `.safetensors` format Chronos-2, FinCast and TimesFM-3 serve from (see
   their pages for the exact form).
 - **`finetune`** - Kronos or TimesFM-3, selected by which checkpoint flag is
-  given (`--kronos-decoder` vs `--timesfm3`); naming both is refused. Same
+  given (`--decoder-dir` vs `--timesfm3`); naming both is refused. Same
   flags, same promotion-gate line and same exit codes either way. See
   [Kronos](kronos.md), [TimesFM-3](timesfm3.md) and
   [Fine-tuning a forecaster](../../guides/training/forecast-finetune.md).

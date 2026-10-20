@@ -389,14 +389,14 @@ pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTie
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
     if kv_pool_rows > 0 {
         if kv_pool_rows < cap {
-            return Some(format!("a KV pool of {kv_pool_rows} rows cannot hold one sequence of {cap} tokens; raise the pool or lower --qwen35-ctx"));
+            return Some(format!("a KV pool of {kv_pool_rows} rows cannot hold one sequence of {cap} tokens; raise the pool or lower --ctx"));
         }
         if !kv_rows_addressable(cfg, kv_pool_rows) {
             return Some(format!("a KV pool of {kv_pool_rows} rows of {} elements per layer is past the kernels' u32 element index; lower the pool", cfg.kv_dim()));
         }
     } else if !kv_pool_addressable(cfg, cap, max_batch + prefix_slots) {
         return Some(format!(
-            "{max_batch} sequences and {prefix_slots} cached prompts of {cap} tokens is {} KV rows of {} elements per layer, past the kernels' u32 element index; lower --qwen35-max-batch, --qwen35-prefix-slots or --qwen35-ctx",
+            "{max_batch} sequences and {prefix_slots} cached prompts of {cap} tokens is {} KV rows of {} elements per layer, past the kernels' u32 element index; lower --max-batch, the prefix-slot setting or --ctx",
             (max_batch + prefix_slots) as u64 * cap as u64,
             cfg.kv_dim()
         ));
@@ -426,11 +426,11 @@ pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTie
     };
     let (weights, kv_bytes, state) = (bytes_of(model::memplan::Category::Weights), bytes_of(model::memplan::Category::Kv), bytes_of(model::memplan::Category::DecodeState));
     let advice = match suggestion {
-        Some(t) => format!("a more compact --qwen35-kv ({t}) would fit these cards"),
-        None => "lower --qwen35-max-batch or --qwen35-ctx, or choose a more compact --qwen35-kv".to_string(),
+        Some(t) => format!("a more compact --kv-cache ({t}) would fit these cards"),
+        None => "lower --max-batch or --ctx, or choose a more compact --kv-cache".to_string(),
     };
     Some(format!(
-        "--qwen35-max-batch {max_batch} x --qwen35-ctx {cap} with a {} KV cache needs {:.1} GiB ({:.1} GiB weights + {:.1} GiB KV cache + {:.1} GiB recurrent state for {max_batch} sequences) but the {} budgeted GPU(s) offer {:.1} GiB; {advice}",
+        "--max-batch {max_batch} x --ctx {cap} with a {} KV cache needs {:.1} GiB ({:.1} GiB weights + {:.1} GiB KV cache + {:.1} GiB recurrent state for {max_batch} sequences) but the {} budgeted GPU(s) offer {:.1} GiB; {advice}",
         kv.as_str(),
         gib(weights + kv_bytes + state),
         gib(weights),
@@ -2980,7 +2980,7 @@ impl ResidentModel for Qwen35GgufResident {
     fn manifest(&self) -> Manifest {
         let generate = ActionSpec::new(
             "generate",
-            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from a released GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16, int8 or fp8 E4M3 (`--qwen35-kv`); up to --qwen35-max-batch sequences per batched dispatch)",
+            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from a released GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16, int8 or fp8 E4M3 (`--kv-cache`); up to --max-batch sequences per batched dispatch)",
         )
         .streaming()
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
@@ -3364,7 +3364,7 @@ mod tests {
         let usable = [(97_871u64 << 20) - (2 << 30)];
         assert_eq!(sizing_refusal(&cfg, 4096, &i8, KvTier::BF16, 64, 0, 0, &usable), None, "64 x 4096 with a bf16 cache fits one GH200");
         let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 256, 0, 0, &usable).expect("256 f32 sequences of 4096 tokens cannot fit");
-        for needle in ["--qwen35-max-batch 256", "--qwen35-ctx 4096", "GiB weights", "more compact --qwen35-kv"] {
+        for needle in ["--max-batch 256", "--ctx 4096", "GiB weights", "more compact --kv-cache"] {
             assert!(why.contains(needle), "refusal must mention {needle:?}: {why}");
         }
         let why = sizing_refusal(&cfg, 131_072, &i8, KvTier::BF16, 40, 0, 0, &usable).expect("past the u32 plane index");
@@ -3379,10 +3379,10 @@ mod tests {
         let i8 = TierPolicy::uniform(Dtype::I8);
         let usable = [(97_871u64 << 20) - (2 << 30)];
         let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 200, 0, 0, &usable).expect("200 f32 sequences of 4096 tokens cannot fit");
-        assert!(why.contains("a more compact --qwen35-kv (bf16) would fit") || why.contains("a more compact --qwen35-kv (int8) would fit"), "{why}");
+        assert!(why.contains("a more compact --kv-cache (bf16) would fit") || why.contains("a more compact --kv-cache (int8) would fit"), "{why}");
         assert!(why.contains("GiB weights") && why.contains("GiB KV cache") && why.contains("GiB recurrent state"), "{why}");
         let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 1000, 0, 0, &usable).unwrap();
-        assert!(!why.contains("would fit") && why.contains("choose a more compact --qwen35-kv"), "{why}");
+        assert!(!why.contains("would fit") && why.contains("choose a more compact --kv-cache"), "{why}");
         // The categories add up to what the placement cost charges.
         let total: u64 = serving_demands(&cfg, 4096, &i8, KvTier::F32, 200, 0, 0).iter().map(|d| d.variants[0].device_bytes).sum();
         assert_eq!(total, layer_cost_with_prefix_slots(&cfg, 4096, &i8, KvTier::F32, 200, 0, 0).total());

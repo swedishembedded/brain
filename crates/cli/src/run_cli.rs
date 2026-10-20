@@ -215,73 +215,36 @@ ADAPTERS  (one resident copy of the Qwen3 weights serves the base and every
                          The file is empty and not a secret: it holds no key, no
                          pid and no address.
 
-QWEN3 SERVING TUNABLES  (--qwen-weights names the checkpoint to serve; the
-                         older BRAIN_QWEN_WEIGHTS variable still works when no
-                         flag is given. Everything about HOW is a flag.)
-  --qwen-weights PATH    serve this Qwen3 checkpoint: the checkpoint file or
-                         the repo directory holding it. With a directory, a
-                         tokenizer.json beside it is picked up and
-                         BRAIN_QWEN_TOKENIZER is not needed. The target of
-                         --adapter, --adapter-manifest and --watch-adapters.
-  --qwen-ctx N           built context length. Default: auto-sized to the
-                         target device's real free VRAM (minus --reserve-gb),
-                         capped at the checkpoint's own trained
-                         max_position_embeddings. Give this to pin an exact
-                         value instead.
-  --qwen-max-batch N     concurrent decode slots (default 16).
-  --qwen-kv-tokens N     KV pool size in tokens, shared by all sequences and
-                         the prompt-prefix cache (default: room for
-                         --qwen-max-batch half-context histories when that fits the card
-                         beside the weights, else the largest half of it that
-                         does, else two contexts). An
-                         agent fleet that resends long histories every turn
-                         needs clients x history tokens here, or a
-                         conversation's cached prefix is evicted before its
-                         next turn and its whole history is prefilled again.
-  --qwen-kv-fp32         opt OUT of int8 KV (on by default).
-  --qwen-kv-fp8          store the int8-sized KV pools as FP8 E4M3 instead
-                         (off by default; needs the packed pools).
-  --qwen-kv-calib        opt IN to a kv_calib.json beside the checkpoint
-                         (off by default).
-  --qwen-kv-offload-gb N host RAM for preempted sessions' KV, fractional
+SERVING POLICY  (one model-agnostic policy for every model that serves it.
+                 Each model declares what it supports; a choice it cannot
+                 honour is refused naming the model and the supported set -
+                 never a silent fallback. Everything not given here is derived
+                 from the model's own metadata, the device and the memory plan,
+                 and the values chosen are reported at startup.)
+  --checkpoint PATH      serve this LLM checkpoint: the file or the repo
+                         directory holding it (a tokenizer.json beside a
+                         directory is picked up). The older BRAIN_QWEN_WEIGHTS
+                         variable still works when no flag is given. The target
+                         of --adapter, --adapter-manifest and --watch-adapters.
+  --weight-format SPEC   weight storage format: f32|bf16|f16|int8|q4|nf4, or per
+                         leaf `int8,blk.0.attn_q=f32` where the model supports
+                         rules. Default: the model's own (a checkpoint that does
+                         not fit its card in fp32 is served int8).
+  --kv-cache TIER        KV-cache storage: f32|bf16|int8|fp8. Default: the
+                         model's own (int8 for the Qwen3 engine, f32 for the
+                         released Qwen3.8 GGUFs).
+  --gemm auto|fp32       `fp32` pins exact fp32 arithmetic for the linears (the
+                         reference tier); `auto` (default) uses tensor cores
+                         where the device has them.
+  --kv-calibration       opt in to a kv_calib.json beside the checkpoint.
+  --ctx N                cap the context window below the model's declared one
+                         (default: the declared window, shrunk to what the
+                         device holds).
+  --max-batch N          concurrent sequences the server must carry (default:
+                         the model's own; a configuration whose slots x ctx do
+                         not fit the GPUs is refused at startup).
+  --kv-offload-gb N      host RAM granted for preempted sessions' KV, fractional
                          allowed (default 0, off).
-  --qwen-weights-int8    quantize the 7 per-layer linears to int8 (the least
-                         accurate tier). The default does so for a checkpoint
-                         of 6B parameters or more only when the largest
-                         card's free memory cannot hold its fp32 weights plus
-                         8 GiB; a card that can serves them fp32.
-  --qwen-weights-fp32    keep every weight fp32, whatever the size.
-  --qwen-no-fuse-norm    keep each residual add and the norm after it as two
-                         launches (the fusion is on by default; this is its
-                         A/B switch).
-  --qwen-weights-bf16    store the linears and the head as bf16 (rounded to bf16, exact for a
-                         checkpoint that ships bf16: half the fp32 bytes in
-                         memory), decoded inline.
-  --qwen-gemm-fp32       pin exact fp32 arithmetic for the linears. By default
-                         the linears of fp32 weights with at least 8 rows
-                         (prefill and batched decode) run on TF32 tensor cores where the
-                         card has them (operands rounded to a 10-bit
-                         mantissa, fp32 accumulation, no extra memory).
-  --qwen-max-prefill N   cap the chunked-prefill row count below its 512
-                         default (clamped 1..=512) - shrinks the paged-
-                         attention scratch buffer linearly, the single
-                         largest per-token-scaling cost in the engine.
-
-QWEN3.8 SERVING  (every released Qwen3.8 GGUF in the model store is served
-                 under its store id, e.g. unsloth/Qwen3.8-27B-GGUF: straight
-                 from the file, loaded on first use, split across the GPUs
-                 --device allows, never converted or written to disk. These
-                 are server-wide defaults for all of them; the brain-
-                 checkpoint fp32 resident is sized by --qwen35-fp32-* below.)
-  --qwen35-ctx N         fix the context length. Default: the longest the
-                         cards hold once the weights are placed.
-  --qwen35-tier SPEC     weight tier, uniform or per-leaf rules:
-                         `i8` or e.g. `i8,blk.0.attn_q=f32` (default: uniform
-                         int8 - what the checkpoints are released as).
-  --qwen35-kv TIER       GQA cache storage: f32|bf16|int8|fp8 (default f32).
-  --qwen35-max-batch N   decode slots: sequences decoded together in one batched
-                         step (default 8). A configuration whose slots x ctx
-                         do not fit the GPUs is refused at startup.
   --speculative MODE     speculative decoding for the Qwen3.8 GGUF models:
                          auto|off|mtp|dflash|ngram (default auto = the best
                          drafter the checkpoint offers, off when it has none).
@@ -289,25 +252,10 @@ QWEN3.8 SERVING  (every released Qwen3.8 GGUF in the model store is served
                          one batched step and keeps the longest prefix the
                          model agrees with, so greedy output is unchanged; it
                          falls back to plain decoding when the batch is large.
-  --qwen35-prefill-slice N
-                         prompt tokens one sequence prefills per scheduler
-                         iteration while others wait (default 512). The stall
-                         every running sequence sees is the time to prefill
-                         the rows of one iteration.
-  --qwen35-prefill-batch N
-                         prompt rows prefilled per iteration across sequences
-                         in ONE forward (default 0 = one sequence's slice at
-                         a time; try 1024): the GEMMs see the rows of every
-                         prefilling sequence, so the weights are read once,
-                         and the sequences advance together.
-  --qwen35-prefix-slots N
-                         prompts kept for prefix reuse (default 4, 0 = off): a
-                         prompt that starts with a cached one prefills only its
-                         new tokens. Each costs one sequence slot of KV.
-  --qwen35-fp32-ctx N    context for the fp32 resident from a brain checkpoint
-                         (default 4096).
-  --qwen35-fp32-max-batch N
-                         decode slots for it (default 4).
+  Not flags any more (derived, reported at startup): the KV pool size, the
+  prefix-cache slots, the prefill slice, batch and row cap, the norm fusion.
+  Deprecated spellings (--qwen-*, --qwen35-*) still work, with a warning, until
+  their callers have moved.
 
 DECISION MODELS  (decide + Laya; every servable one in the model store is
                  served under its store id, e.g. convaiinnovations/laya)
@@ -371,6 +319,40 @@ EXAMPLES
 /// mean \"no checkpoint\", erasing a `BRAIN_GPT2` already read from the
 /// environment, and a trailing `--models-dir` used to silently scan the XDG
 /// default instead of the directory the caller meant to name.
+/// A policy value or flag that does not parse: say so with the usage and stop.
+fn policy_error(e: &str) -> ! {
+    eprintln!("brain serve: {e}\n");
+    eprint!("{HELP}");
+    std::process::exit(2);
+}
+
+fn policy_flag(policy: &mut model::policy::ServePolicy, flag: &str, value: &str) {
+    if let Err(e) = policy.set(flag, value) {
+        policy_error(&e);
+    }
+}
+
+/// Hand the model-agnostic policy to every serving family. A family that cannot
+/// honour a precision choice refuses at build time, naming itself; the server
+/// refuses to start only when NO family can honour it.
+fn apply_policy(policy: &model::policy::ServePolicy, qwen: &mut catalog::resident_llm::QwenServeConfig, qwen35: &mut catalog::resident_qwen35::Qwen35ServeConfig) {
+    if *policy == model::policy::ServePolicy::default() {
+        return;
+    }
+    eprintln!("brain serve: serving policy: {}", policy.describe());
+    match (qwen.apply_policy(policy), qwen35.apply_policy(policy)) {
+        (Err(a), Err(b)) => policy_error(&format!("no served model family can honour this policy: {a}; {b}")),
+        (a, b) => {
+            for r in [a, b] {
+                match r {
+                    Ok(notes) => notes.iter().for_each(|n| eprintln!("brain serve: note: {n}")),
+                    Err(why) => eprintln!("brain serve: note: {why} (that family will not serve)"),
+                }
+            }
+        }
+    }
+}
+
 fn val(args: &[String], i: &mut usize, flag: &str) -> String {
     *i += 1;
     match args.get(*i) {
@@ -521,15 +503,16 @@ pub fn run_serve(args: &[String]) {
     // above, asks for adapters.
     let mut adapter_bank = catalog::adapter_registry::AdapterBankSettings::default();
     let mut adapter_bank_asked = false;
-    // Every `--qwen-*` flag, built up as its own arm below is matched -
+    // Every serving-policy flag, built up as its own arm below is matched -
     // `catalog::resident_llm::QwenServeConfig`'s own `Default` is every
     // historical env-var default, byte for byte.
     let mut qwen_cfg = catalog::resident_llm::QwenServeConfig::default();
-    // Every `--qwen35-*` flag, same story: `Qwen35ServeConfig`'s `Default`
+    // Every Qwen3.8 serving-policy flag, same story: `Qwen35ServeConfig`'s `Default`
     // is every historical env-var default. `fp32` sizes the brain-checkpoint
     // resident, `gguf` holds the defaults of every released-GGUF multi-card
     // resident - two different models, so the flags are name-spaced apart.
     let mut qwen35_cfg = catalog::resident_qwen35::Qwen35ServeConfig::default();
+    let mut policy = model::policy::ServePolicy::default();
     // `--decision-model` / `--decision-default`: the decision models served
     // beyond those the model store holds, and the one `auto` resolves to.
     let mut decision_cfg = catalog::resident_decision::DecisionServeConfig::default();
@@ -614,41 +597,43 @@ pub fn run_serve(args: &[String]) {
                 adapter_bank_asked = true;
                 qwen_cfg.adapter_targets_named = true;
             }
-            "--qwen-weights" => qwen_cfg.weights = Some(val(args, &mut i, "--qwen-weights")),
-            "--qwen-ctx" => qwen_cfg.ctx = Some(parsed(args, &mut i, "--qwen-ctx")),
-            "--qwen-max-batch" => qwen_cfg.max_batch = parsed(args, &mut i, "--qwen-max-batch"),
-            "--qwen-kv-fp32" => qwen_cfg.kv_int8 = false,
-            "--qwen-kv-fp8" => qwen_cfg.kv_fp8 = true,
-            "--qwen-kv-calib" => qwen_cfg.kv_calib_opt_in = true,
-            "--qwen-kv-offload-gb" => qwen_cfg.kv_offload_gb = parsed(args, &mut i, "--qwen-kv-offload-gb"),
-            "--qwen-weights-int8" => qwen_cfg.weights_int8 = Some(true),
-            "--qwen-weights-fp32" => qwen_cfg.weights_int8 = Some(false),
-            "--qwen-weights-bf16" => qwen_cfg.weights_bf16 = true,
-            "--qwen-no-fuse-norm" => qwen_cfg.fuse_residual_norm = false,
-            "--qwen-gemm-fp32" => qwen_cfg.gemm_precision = gpu_core::provider::library::GemmPrecision::Fp32Reference,
-            "--qwen-kv-tokens" => qwen_cfg.kv_tokens = Some(parsed(args, &mut i, "--qwen-kv-tokens")),
-            "--qwen-max-prefill" => qwen_cfg.max_prefill_cap = parsed(args, &mut i, "--qwen-max-prefill"),
+            "--checkpoint" => qwen_cfg.weights = Some(val(args, &mut i, "--checkpoint")),
+            f if model::policy::VALUE_FLAGS.contains(&f) => {
+                let value = val(args, &mut i, f);
+                policy_flag(&mut policy, f, &value);
+            }
+            f if model::policy::SWITCH_FLAGS.contains(&f) => {
+                if let Err(e) = policy.switch(f) {
+                    policy_error(&e);
+                }
+            }
+            f if model::policy::rewrite_legacy(f).is_some() => {
+                let r = model::policy::rewrite_legacy(f).expect("matched above");
+                eprintln!("brain serve: {}", model::policy::deprecation_warning(f, r));
+                use model::policy::Replacement as R;
+                match r {
+                    R::Renamed(to) => {
+                        let value = val(args, &mut i, f);
+                        if to == "--checkpoint" {
+                            qwen_cfg.weights = Some(value);
+                        } else {
+                            policy_flag(&mut policy, to, &value);
+                        }
+                    }
+                    R::Fixed(to, value) => policy_flag(&mut policy, to, value),
+                    R::Switch(to) | R::DerivedSwitch(to) => {
+                        if let Err(e) = policy.switch(to) {
+                            policy_error(&e);
+                        }
+                    }
+                    R::Derived(what) => {
+                        let value = val(args, &mut i, f);
+                        policy_flag(&mut policy, what, &value);
+                    }
+                }
+            }
             "--decision-model" => decision_cfg.models.push(val(args, &mut i, "--decision-model")),
             "--decision-default" => decision_cfg.default = Some(val(args, &mut i, "--decision-default")),
-            // Released-GGUF residents (Qwen3.8): server-wide defaults for
-            // every such model the store holds.
-            "--qwen35-ctx" => qwen35_cfg.gguf.ctx = Some(parsed(args, &mut i, "--qwen35-ctx")),
-            "--qwen35-tier" => {
-                let spec = val(args, &mut i, "--qwen35-tier");
-                qwen35_cfg.gguf.tier = Some(model::ops::TierPolicy::parse(&spec).unwrap_or_else(|e| {
-                    eprintln!("brain serve: --qwen35-tier {spec:?}: {e}\n");
-                    eprint!("{HELP}");
-                    std::process::exit(2);
-                }));
-            }
-            "--qwen35-kv" => {
-                let tier = val(args, &mut i, "--qwen35-kv");
-                qwen35_cfg.gguf.kv = Some(model::kv_tier::KvTier::parse(&tier).unwrap_or_else(|e| {
-                    eprintln!("brain serve: --qwen35-kv {tier:?}: {e}\n");
-                    eprint!("{HELP}");
-                    std::process::exit(2);
-                }));
-            }
             "--speculative" => {
                 let mode = val(args, &mut i, "--speculative");
                 qwen35_cfg.gguf.speculative = Some(qwen35::int8_gguf_resident::SpeculativeMode::parse(&mode).unwrap_or_else(|e| {
@@ -657,13 +642,6 @@ pub fn run_serve(args: &[String]) {
                     std::process::exit(2);
                 }));
             }
-            "--qwen35-prefix-slots" => qwen35_cfg.gguf.prefix_slots = Some(parsed(args, &mut i, "--qwen35-prefix-slots")),
-            "--qwen35-prefill-slice" => qwen35_cfg.gguf.prefill_slice = Some(parsed(args, &mut i, "--qwen35-prefill-slice")),
-            "--qwen35-prefill-batch" => qwen35_cfg.gguf.prefill_batch = Some(parsed(args, &mut i, "--qwen35-prefill-batch")),
-            "--qwen35-max-batch" => qwen35_cfg.gguf.max_batch = Some(parsed(args, &mut i, "--qwen35-max-batch")),
-            // Brain-checkpoint fp32 resident: same knobs, the `fp32` infix.
-            "--qwen35-fp32-ctx" => qwen35_cfg.fp32.ctx = parsed(args, &mut i, "--qwen35-fp32-ctx"),
-            "--qwen35-fp32-max-batch" => qwen35_cfg.fp32.max_batch = parsed(args, &mut i, "--qwen35-fp32-max-batch"),
             "--anthropic" => anthropic = Some(take_addrs(args, &mut i, 8787)),
             "--openai" => openai = Some(take_addrs(args, &mut i, 8788)),
             "--openrouter" => openrouter = Some(take_addrs(args, &mut i, 8789)),
@@ -712,6 +690,7 @@ pub fn run_serve(args: &[String]) {
         }
         qwen_cfg.adapter_bank = Some(adapter_bank);
     }
+    apply_policy(&policy, &mut qwen_cfg, &mut qwen35_cfg);
 
     // Each bound ADDRESS reports its own `Gate::bound` call (`apiserve::serve_all`
     // spawns one listener per address), not each dialect flag - so a dialect
@@ -909,7 +888,7 @@ struct RunApis {
     /// Where the served Qwen3's adapter comes from: `--adapter`,
     /// `--adapter-manifest`, `--watch-adapters`, or none of them.
     adapter_mode: crate::continuous_train::AdapterMode,
-    /// Every per-model serving flag (`--qwen-*`, `--qwen35-*`,
+    /// Every per-model serving flag (the deprecated aliases,
     /// `--decision-*`), parsed once here - see `serving::ServeKnobs`.
     knobs: serving::ServeKnobs,
 }

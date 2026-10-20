@@ -61,15 +61,15 @@ cost you the generalization report at the end of a finished run.
 
 ```
 brain forecast finetune \
-    --kronos-tokenizer <tokenizer-dir> \
-    --kronos-decoder   <decoder-dir> \
+    --tokenizer-dir <tokenizer-dir> \
+    --decoder-dir   <decoder-dir> \
     --data <your-ohlcv-dir> \
     --context 180 --horizon 5 --epochs 8 --lr 4e-5 \
     --lora 8 \
     --out <output-checkpoint>.safetensors
 ```
 
-- `--kronos-tokenizer` / `--kronos-decoder` — local paths to the released
+- `--tokenizer-dir` / `--decoder-dir` - local paths to the released
   Kronos tokenizer and decoder checkpoints.
 - `--data` — your directory of OHLCV CSVs.
 - `--context` / `--horizon` — the window shape (history length / forecast

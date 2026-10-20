@@ -91,21 +91,21 @@ independently.
 brain --device gpu0,gpu1 serve --openai
 
 # Server-wide defaults for all of them (all optional):
-#   --qwen35-ctx 24576       fix the context. Default: the longest the cards
+#   --ctx 24576       fix the context. Default: the longest the cards
 #                            hold once the weights are placed
-#   --qwen35-tier q4         per-leaf quantization tier: "i8" (default), "q4",
+#   --weight-format q4         per-leaf quantization tier: "i8" (default), "q4",
 #                            or "q4,in_proj_a.weight=f32,in_proj_b.weight=f32"
 #                            to pin specific tensors at fp32; a malformed
 #                            grammar is refused rather than served at a
 #                            silently wrong precision
-#   --qwen35-kv int8         how the 16 GQA layers store K/V: "f32" (default),
+#   --kv-cache int8         how the 16 GQA layers store K/V: "f32" (default),
 #                            "bf16" (half the bytes), "int8" (one scale per
 #                            token and kv head, ~3.9x fewer bytes) or "fp8"
 #                            (E4M3, the same bytes and scales as int8)
-#   --qwen35-max-batch N     concurrent decode slots (default 8)
-#   --qwen35-fp32-ctx N      context for the fp32 resident served from a brain
+#   --max-batch N     concurrent decode slots (default 8)
+#   --ctx N      context for the fp32 resident served from a brain
 #                            checkpoint (default 4096)
-#   --qwen35-fp32-max-batch N
+#   --max-batch N
 #                            decode slots for that fp32 resident (default 4)
 #   --speculative MODE       speculative decoding: auto (default: the checkpoint's
 #                            own MTP head when it has one, otherwise off), off,
@@ -139,7 +139,7 @@ What it does differently:
   card budget. Measurements: `.agents/knowledge/` entry on speculative decoding
   and `qwen35_spec_sweep`.
 
-- **A compact KV cache** (`model::kv_tier`, `--qwen35-kv`). At 128k
+- **A compact KV cache** (`model::kv_tier`, `--kv-cache`). At 128k
   context the 16 GQA layers' KV cache is the whole bound on the batch - 16 GiB
   per sequence in f32 against 27 GiB of INT8 weights - so it can be stored
   narrower: `bf16` (8 GiB per sequence at 128k) or `int8` with one f32 scale
@@ -196,21 +196,21 @@ What it does differently:
 - **Continuous batching.** The resident is a `model::serve::PagedDecoder`
   (`Qwen35GgufEngine`, one KV slot per sequence) driven by the generic
   `model::serve::Scheduler` through `llmserve`, like every brain LLM:
-  `--qwen35-max-batch N` (default 8) requests decode in ONE batched step per
+  `--max-batch N` (default 8) requests decode in ONE batched step per
   iteration - the weight reads are paid once for all of them - and requests
   join and leave between steps, including ones that arrive while the group is
   running (`Instance::run_open`). Each sequence has its own sampling
   parameters, seed, stop strings and cancellation. The recurrent state of the
   48 GDN layers is a per-layer pool addressed by slot (the native
   `gdn_decode_pool` launch), prefill of a joining sequence works on a private
-  copy and is scattered into its row. `--qwen35-ctx` and `--qwen35-kv` size the
+  copy and is scattered into its row. `--ctx` and `--kv-cache` size the
   slots; a configuration whose slots do not fit the cards is refused with the
   arithmetic and the flags to change. Measured numbers: `.agents/knowledge/`
   #313 and `make perf/model/qwen35-batch`. One KV block per sequence (block =
   context length) wastes the unused tail of a short sequence's window;
   sequences are not paged below context granularity.
 - **Prefix reuse.** An agent resends its whole history every turn. The
-  resident keeps `--qwen35-prefix-slots N` (default 4, 0 = off) finished
+  resident keeps the prefix-slot setting (default 4, 0 = off) finished
   prompts: the sequence's KV rows (decoding never rewrites the prompt's rows, so
   the block is simply retained) plus a snapshot of every Gated-DeltaNet layer's
   recurrent state and conv history taken the moment the prefill ended, which a
@@ -220,15 +220,15 @@ What it does differently:
   supersedes the shorter entry. Exact-token match, LRU. Each cached prompt costs
   one sequence slot, charged into the placement. Gate: `crates/qwen35/tests/
   gguf_resident_real.rs` (real checkpoint: same continuation as a cold prefill).
-- **Prefill between decode steps.** A prompt goes in `--qwen35-prefill-slice N`
+- **Prefill between decode steps.** A prompt goes in the prefill-slice setting
   tokens (default 512) per scheduler iteration, with a decode step of every
-  running sequence in between. `--qwen35-prefill-batch N` (default 0, off)
+  running sequence in between. the prefill-batch setting (default 0, off)
   hands the engine the next slices of several prefilling sequences as one
   forward of up to N rows: every projection and the MLP run once over all the
   rows, each sequence's rows go through its own token mixer (its state row
   gathered and scattered around the chunk kernels, its KV window). The
   attention of a prefill round runs on the fp16 tensor-core kernel for an f32,
-  bf16 or int8 KV cache alike (`--qwen35-kv`); the int8 cache used to fall
+  bf16 or int8 KV cache alike (`--kv-cache`); the int8 cache used to fall
   back to the portable kernel, which was most of the round. Measured numbers,
   and what bounds the rest of the round: `.agents/knowledge/` #319.
 - **Text only, per-token prefill when chunking is not profitable** - same

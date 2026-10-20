@@ -18,9 +18,9 @@
 //! `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` name WHICH checkpoint to
 //! serve; each `from_env` returns `None` when its primary weights var is
 //! unset/empty. HOW to serve Qwen3 - context length, batching, KV/weight
-//! precision - is [`QwenServeConfig`], which `run_cli.rs`'s `--qwen-*`
+//! precision - is [`QwenServeConfig`], which `run_cli.rs`'s serving-policy
 //! flags build; see that struct's own doc for every field and its default.
-//! With no `--qwen-ctx` given, context auto-sizes to the target device's
+//! With no `--ctx` given, context auto-sizes to the target device's
 //! real free VRAM (see [`QwenResident::resolve_ctx`]) rather than a single
 //! fixed number for every box.
 
@@ -93,7 +93,7 @@ pub(crate) fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
 ///
 /// Measured against a real `Qwen/Qwen3-8B` checkpoint at the historical
 /// perf-number: memory-footprint ratio of the int8 weights, not a timing
-/// 24576 default context (`--qwen-ctx`), int8 KV: weights (1.3x a ~16 GiB bf16 file)
+/// 24576 default context (`--ctx`), int8 KV: weights (1.3x a ~16 GiB bf16 file)
 /// ~20.8 GiB + KV pool ~3.5 GiB + paged-attention scratch ~3.0 GiB totals
 /// ~27.3 GiB - more than a single 24 GiB P40's ENTIRE capacity, before
 /// `--reserve-gb` even enters the picture. `weights_int8_bytes` below is the
@@ -141,7 +141,7 @@ pub fn weights_fp32_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
     cfg.param_list().into_iter().map(|(_, elems)| elems as u64 * 4).sum::<u64>() * 13 / 10
 }
 
-/// The device bytes of `cfg`'s weights with the linears and the head stored as bf16 (`--qwen-weights-bf16`):
+/// The device bytes of `cfg`'s weights with the linears and the head stored as bf16 (`--weight-format bf16`):
 /// a bf16 checkpoint's own values at half the fp32 size; embeddings and norms stay fp32.
 pub fn weights_bf16_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
     cfg.param_list()
@@ -459,7 +459,7 @@ impl Instance for GlmInstance {
 // ---------------------------------------------------------------- qwen
 
 /// Every tunable that used to be its own `BRAIN_QWEN_*` env var, now the
-/// explicit config `brain serve`'s own `--qwen-*` flags build and pass down
+/// explicit config `brain serve`'s own serving-policy flags build and pass down
 /// -- model SELECTION (`BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER`, which
 /// checkpoint to serve at all) stays env-only, everything about HOW to
 /// serve it is a flag. `Default` reproduces every historical env-var
@@ -468,12 +468,12 @@ impl Instance for GlmInstance {
 /// `continuous_train.rs`) is unaffected by this existing at all.
 #[derive(Clone, Debug)]
 pub struct QwenServeConfig {
-    /// `--qwen-weights PATH`: the checkpoint (file, or the repo directory
+    /// `--checkpoint PATH`: the checkpoint (file, or the repo directory
     /// holding it) the Qwen3 resident serves. `None` falls back to the
     /// deprecated `BRAIN_QWEN_WEIGHTS` variable; the flag wins when both name
     /// one.
     pub weights: Option<String>,
-    /// `--qwen-ctx N`. `None` means "size it automatically" - see
+    /// `--ctx N`. `None` means "size it automatically" - see
     /// [`QwenResident::resolve_ctx`]. Historical default when NEITHER this
     /// nor `auto_budget_bytes` is given: 24576.
     pub ctx: Option<u32>,
@@ -490,41 +490,41 @@ pub struct QwenServeConfig {
     /// never sizes `ctx`: it only bounds the default KV pool
     /// ([`QwenResident::resolve_kv_tokens`]).
     pub card_budget_bytes: Option<u64>,
-    /// `--qwen-max-batch N`, default 16.
+    /// `--max-batch N`, default 16.
     pub max_batch: u32,
-    /// `--qwen-kv-fp32` (presence opts OUT), default `true` (int8 KV is the
+    /// `--kv-cache f32` (presence opts OUT), default `true` (int8 KV is the
     /// serving default - see [`QwenResident::activate`]'s own doc for the
     /// measurement that earned it).
     pub kv_int8: bool,
-    /// `--qwen-kv-fp8` (presence opts IN), default `false`: store the packed KV pools as FP8 E4M3
+    /// `--kv-cache fp8` (presence opts IN), default `false`: store the packed KV pools as FP8 E4M3
     /// instead of int8 (same bytes per token). Ignored, with a message, when the pools are fp32.
     pub kv_fp8: bool,
-    /// `--qwen-kv-calib` (presence opts IN), default `false`.
+    /// `--kv-calibration` (presence opts IN), default `false`.
     pub kv_calib_opt_in: bool,
-    /// `--qwen-kv-offload-gb N` (fractional allowed), default `0.0` (off).
+    /// `--kv-offload-gb N` (fractional allowed), default `0.0` (off).
     pub kv_offload_gb: f64,
-    /// `--qwen-weights-int8` (`Some(true)`) or `--qwen-weights-fp32`
+    /// `--weight-format int8` (`Some(true)`) or `--weight-format f32`
     /// (`Some(false)`); `None` (the default) quantizes the linears of a
     /// checkpoint of `qwen3::footprint::INT8_WEIGHTS_FROM_PARAMS` parameters
     /// or more, which at fp32 does not fit one 24 GB card.
     pub weights_int8: Option<bool>,
-    /// `--qwen-weights-bf16`: the linears and the head are stored as bf16 and decoded inline (rounded to
+    /// `--weight-format bf16`: the linears and the head are stored as bf16 and decoded inline (rounded to
     /// bf16, exact for a checkpoint that ships bf16; half the fp32 bytes). Takes precedence over `weights_int8`.
     pub weights_bf16: bool,
-    /// `--qwen-max-prefill N`, clamped to `1..=512`, default 512.
+    /// `the prefill row cap N`, clamped to `1..=512`, default 512.
     pub max_prefill_cap: u32,
-    /// `--qwen-kv-tokens N`: the KV pool's size in tokens, shared by every
+    /// `the KV pool size N`: the KV pool's size in tokens, shared by every
     /// sequence and by the prompt-prefix cache. `None` (the default) sizes it
     /// for `max_batch` half-context histories (never under two contexts). An
     /// agent fleet resending long histories every turn needs the pool to hold
     /// all of their histories at once (clients x history tokens), or the
     /// prefix cache evicts a conversation before its next turn.
     pub kv_tokens: Option<u32>,
-    /// `--qwen-gemm-fp32` (`Fp32Reference`) pins exact fp32 arithmetic. Default `Auto`: the
+    /// `--gemm fp32` (`Fp32Reference`) pins exact fp32 arithmetic. Default `Auto`: the
     /// fp32-weight linears of 8 or more rows (prefill, batched decode) multiply on TF32 tensor cores where the device has them
     /// (operands rounded to a 10-bit mantissa, fp32 accumulation).
     pub gemm_precision: gpu_core::provider::library::GemmPrecision,
-    /// `--qwen-no-fuse-norm` turns off the residual-add + norm fusion (the A/B switch of that launch fusion); default on.
+    /// `the norm-fusion switch` turns off the residual-add + norm fusion (the A/B switch of that launch fusion); default on.
     pub fuse_residual_norm: bool,
     /// `--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`: the
     /// size of the adapter bank built beside the base weights, which lets
@@ -540,11 +540,72 @@ pub struct QwenServeConfig {
     /// targets are not theirs: a model directory's adapters widen them, as they
     /// do when no bank flag is given.
     pub adapter_targets_named: bool,
+    /// Why the serving policy this server was started with cannot be honoured
+    /// by the Qwen3 resident (set by [`Self::apply_policy`]); activation
+    /// refuses with it instead of serving something else.
+    pub refused: Option<String>,
+}
+
+/// What the Qwen3 paged engine honours of a [`model::policy::ServePolicy`].
+pub const QWEN3_POLICY: model::policy::PolicySupport = model::policy::PolicySupport {
+    model: "qwen3",
+    weights: &[gpu_core::select::Dtype::F32, gpu_core::select::Dtype::BF16, gpu_core::select::Dtype::I8],
+    weight_rules: false,
+    kv_cache: &["f32", "int8", "fp8"],
+    gemm: true,
+    fuse_norm: true,
+    kv_calibration: true,
+};
+
+impl QwenServeConfig {
+    /// Apply the model-agnostic serving policy. A precision choice this engine
+    /// cannot honour is recorded in [`Self::refused`] (and returned) rather
+    /// than ignored. Returns notes for limits that have no meaning here.
+    pub fn apply_policy(&mut self, p: &model::policy::ServePolicy) -> Result<Vec<String>, String> {
+        if let Err(e) = QWEN3_POLICY.check(p) {
+            self.refused = Some(e.clone());
+            return Err(e);
+        }
+        if let Some(w) = &p.weights {
+            use gpu_core::select::Dtype;
+            let (int8, bf16) = match w.default_dtype() {
+                Dtype::I8 => (Some(true), false),
+                Dtype::BF16 => (None, true),
+                _ => (Some(false), false),
+            };
+            self.weights_int8 = int8;
+            self.weights_bf16 = bf16;
+        }
+        if let Some(t) = p.kv_cache {
+            self.kv_int8 = t.as_str() != "f32";
+            self.kv_fp8 = t.as_str() == "fp8";
+        }
+        self.kv_calib_opt_in |= p.kv_calibration;
+        if let Some(g) = p.gemm {
+            self.gemm_precision = g;
+        }
+        if let Some(f) = p.fuse_norm {
+            self.fuse_residual_norm = f;
+        }
+        let l = &p.limits;
+        self.ctx = l.ctx.or(self.ctx);
+        self.max_batch = l.max_batch.unwrap_or(self.max_batch);
+        self.kv_tokens = l.kv_tokens.or(self.kv_tokens);
+        self.kv_offload_gb = l.kv_offload_gb.unwrap_or(self.kv_offload_gb);
+        self.max_prefill_cap = l.max_prefill.unwrap_or(self.max_prefill_cap);
+        let mut notes = Vec::new();
+        for (set, name) in [(l.prefix_slots, "prefix-slots"), (l.prefill_slice, "prefill-slice"), (l.prefill_batch, "prefill-batch")] {
+            if set.is_some() {
+                notes.push(format!("qwen3: the {name} setting has no meaning for this engine and is ignored"));
+            }
+        }
+        Ok(notes)
+    }
 }
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false }
+        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false, refused: None }
     }
 }
 
@@ -704,7 +765,7 @@ impl PoolProfile {
 /// (`max_position_embeddings`; the smallest tier is always allowed): a context
 /// beyond it is served with a derived YaRN scaling that rescales every
 /// request, short ones included, so it is something an operator asks for with
-/// `--qwen-ctx`, never something a large card hands out silently (knowledge
+/// `--ctx`, never something a large card hands out silently (knowledge
 /// #338).
 ///
 /// Fitting the budget was once the only test, which let this choose a ctx no
@@ -731,7 +792,7 @@ fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config
 
 /// The Qwen3 BPE decoder behind the scheduler (`BRAIN_QWEN_WEIGHTS` +
 /// `BRAIN_QWEN_TOKENIZER` name WHICH checkpoint; [`QwenServeConfig`]'s
-/// `--qwen-*` flags configure HOW to serve it). Runs the CPU/GPU forward
+/// serving-policy flags configure HOW to serve it). Runs the CPU/GPU forward
 /// `generate` path (never the NPU branch).
 ///
 /// One resident is one copy of the weights, however many LoRA adapters ride
@@ -760,6 +821,7 @@ pub struct QwenResident {
     card_budget_bytes: Option<u64>,
     gemm_precision: gpu_core::provider::library::GemmPrecision,
     fuse_residual_norm: bool,
+    refused: Option<String>,
 }
 
 /// What `BRAIN_QWEN_WEIGHTS` names, as the `(path to open, repo directory,
@@ -790,8 +852,8 @@ impl AdapterHost for QwenResident {
 }
 
 impl QwenResident {
-    /// `cfg` carries every `--qwen-*` flag `brain serve` parsed, including
-    /// `--qwen-weights`, which selects the checkpoint; the deprecated
+    /// `cfg` carries every serving-policy flag `brain serve` parsed, including
+    /// `--checkpoint`, which selects the checkpoint; the deprecated
     /// `BRAIN_QWEN_WEIGHTS` variable still does when the flag is absent.
     /// The tokenizer is the one beside the checkpoint, else
     /// `BRAIN_QWEN_TOKENIZER`.
@@ -863,10 +925,11 @@ impl QwenResident {
             card_budget_bytes: cfg.card_budget_bytes.or(cfg.auto_budget_bytes),
             gemm_precision: cfg.gemm_precision,
             fuse_residual_norm: cfg.fuse_residual_norm,
+            refused: cfg.refused.clone(),
         }
     }
 
-    /// The KV pool size in tokens: `--qwen-kv-tokens` verbatim when named;
+    /// The KV pool size in tokens: `the KV pool size` verbatim when named;
     /// otherwise, on a live server (a device budget is known), room for
     /// `max_batch` half-context histories - capped at
     /// [`MAX_DEFAULT_POOL_TOKENS`] - when that pool fits the budget beside
@@ -885,11 +948,11 @@ impl QwenResident {
     }
 
     /// `cfg.ctx` verbatim when the operator named one explicitly
-    /// (`--qwen-ctx`); else, when `cfg.auto_budget_bytes` names a real
+    /// (`--ctx`); else, when `cfg.auto_budget_bytes` names a real
     /// device budget (only `brain serve`'s own caller ever does), the
     /// largest [`AUTO_CTX_TIERS`] entry whose real total fits it, capped at the
     /// checkpoint's own `max_position_embeddings` (serving past it is an
-    /// explicit `--qwen-ctx`, which [`apply_yarn_if_serving_past_native`],
+    /// explicit `--ctx`, which [`apply_yarn_if_serving_past_native`],
     /// called from `activate`, backs with YaRN); else the historical 24576 default, unchanged. Must never
     /// itself hard-fail - a checkpoint this can't open just falls back to
     /// the historical default and defers the real, specific error to
@@ -914,7 +977,7 @@ impl QwenResident {
 
     /// Give `cfg` a derived [`model::yarn::YarnConfig`] when `ctx` (the KV
     /// pool `activate` is actually about to build - `self.ctx`, whether from
-    /// `--qwen-ctx` or auto-sizing) exceeds the checkpoint's declared
+    /// `--ctx` or auto-sizing) exceeds the checkpoint's declared
     /// `max_position_embeddings` and nothing already named a scaling. A
     /// checkpoint that already declares its own `rope_scaling` (a real
     /// long-context release) is never second-guessed.
@@ -924,7 +987,7 @@ impl QwenResident {
     /// Qwen3): `original` is the window the model was PRETRAINED on
     /// ([`pretrained_window`]), not the declared `max_position_embeddings`
     /// (Qwen3 declares 40960 = 32768 + 8192 of generation headroom), and
-    /// `factor` is `ctx / original`, so `--qwen-ctx 131072` on a Qwen3 is
+    /// `factor` is `ctx / original`, so `--ctx 131072` on a Qwen3 is
     /// exactly the recipe. Deriving against 40960 instead gave factor 3.2 and
     /// a different correction range (knowledge #338).
     ///
@@ -935,7 +998,7 @@ impl QwenResident {
     /// relation to "please extend this checkpoint's real context" - inferring
     /// intent from bare pool geometry there would auto-opt every such caller
     /// into YaRN by accident. Only `activate`'s own `ctx` - `resolve_ctx`'s
-    /// real output, `--qwen-ctx`/auto-sizing's own answer - means that.
+    /// real output, `--ctx`/auto-sizing's own answer - means that.
     fn apply_yarn_if_serving_past_native(cfg: &mut qwen3::config::QwenConfig, ctx: u32) {
         if cfg.rope_scaling.is_some() || ctx <= cfg.max_position_embeddings.max(1) {
             return;
@@ -1026,7 +1089,7 @@ impl QwenResident {
     /// scratch_linearly_at_the_real_config`'s own doc has the split.
     ///
     /// `kv_tokens`: the pool's size in tokens when the operator named one
-    /// (`--qwen-kv-tokens`); `None` is two contexts (a live server
+    /// (`the KV pool size`); `None` is two contexts (a live server
     /// resolves a larger default first, see [`QwenResident::fleet_kv_tokens`]).
     /// A pool is never smaller than one full context, so any admitted request
     /// can run alone.
@@ -1059,7 +1122,7 @@ impl QwenResident {
         let int8_bytes = qwen3::serve::kv_pool_bytes(cfg, block_size, num_blocks, true);
         Err(format!(
             "qwen: {path}: fp32 KV pool at ctx={ctx} would be {:.2} GiB, over the {:.0} GiB safety ceiling \
-             -- lower --qwen-ctx, or drop --qwen-kv-fp32 \
+             -- lower --ctx, or drop --kv-cache f32 \
              so int8 KV (~{:.2} GiB at this ctx) is used instead",
             pool_bytes as f64 / (1u64 << 30) as f64,
             ceiling as f64 / (1u64 << 30) as f64,
@@ -1068,7 +1131,7 @@ impl QwenResident {
     }
 
     /// The device bytes of the weights this resident will load, for the tier it requests:
-    /// `--weights-int8` reads them off `cfg` (the same canonical-name derivation
+    /// `--weight-format int8` reads them off `cfg` (the same canonical-name derivation
     /// `decoder_param_list` builds the engine from), so the estimate and `activate()`
     /// cannot disagree about which tensors are quantized.
     fn weight_bytes(&self, cfg: &qwen3::config::QwenConfig) -> u64 {
@@ -1140,7 +1203,7 @@ impl QwenResident {
         Err(format!(
             "qwen: {path}: at ctx={ctx} (kv_int8={kv_int8}) the largest single device buffer this engine \
              would allocate is {:.0} MiB, over the {:.0} MiB no device can exceed -- lower \
-             --qwen-ctx or --qwen-max-prefill",
+             --ctx or the prefill row cap",
             profile.largest_binding as f64 / (1u64 << 20) as f64,
             WGPU_MAX_REPORTABLE_BINDING_BYTES as f64 / (1u64 << 20) as f64,
         ))
@@ -1209,6 +1272,9 @@ impl ResidentModel for QwenResident {
         // depend on `residency` just for this), a handful of stage markers so
         // `-v -v` shows SOMETHING moving during a cold activate that can take
         // over a minute, without turning into a per-layer scroll.
+        if let Some(why) = &self.refused {
+            return Err(why.clone());
+        }
         let stage_t0 = std::time::Instant::now();
         residency::log::info(&format!("{}: step 1/3 opening checkpoint", self.id));
         // The checkpoint is read as it is on disk (a Hugging Face directory, a
@@ -1261,7 +1327,7 @@ impl ResidentModel for QwenResident {
             // Boundary guard: refuse a fp32 KV pool over the safety ceiling,
             // loudly and specifically, BEFORE Engine::from_map_with_gpu
             // attempts the device allocation. Only reachable via an explicit
-            // opt-out (--qwen-kv-fp32) or an unsupported head_dim -- the
+            // opt-out (--kv-cache f32) or an unsupported head_dim -- the
             // int8 default at the SAME ctx does not come close.
             if !kv_int8 {
                 QwenResident::check_fp32_kv_pool_fits(&checkpoint_cfg, block_size, num_blocks, ctx, self.card_budget_bytes.unwrap_or(0).max(MAX_FP32_KV_POOL_BYTES), &self.path)?;
@@ -1296,9 +1362,9 @@ impl ResidentModel for QwenResident {
                 let profile = PoolProfile::new(&checkpoint_cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, fused);
                 let profile = if self.kv_offload_bytes > 0 { profile.with_swap_staging(&checkpoint_cfg, block_size, num_blocks, kv_int8) } else { profile };
                 let bank_bytes = self.adapters.settings().map_or(0, |bank| bank.device_bytes(&checkpoint_cfg, max_batch.max(max_prefill)));
-                profile.plan(self.weight_bytes(&checkpoint_cfg), bank_bytes, card).map_err(|e| format!("qwen: {}: refusing to load, {e}; lower --qwen-ctx, --qwen-max-batch or --qwen-kv-tokens", self.path))?;
+                profile.plan(self.weight_bytes(&checkpoint_cfg), bank_bytes, card).map_err(|e| format!("qwen: {}: refusing to load, {e}; lower --ctx, --max-batch or the KV pool size", self.path))?;
             }
-            // `--qwen-weights-int8` -- requested, not asserted: the real
+            // `--weight-format int8` -- requested, not asserted: the real
             // capability gate (`caps.numeric.int8_dot`) lives inside
             // `Engine::from_map_with_gpu` itself, which degrades to fp32
             // weights with its own loud fallback message when a device (the
@@ -1324,9 +1390,9 @@ impl ResidentModel for QwenResident {
             };
             if self.kv_fp8_requested {
                 if kv_int8 {
-                    eng.set_kv_fp8().map_err(|e| format!("qwen: --qwen-kv-fp8: {e}"))?;
+                    eng.set_kv_fp8().map_err(|e| format!("qwen: --kv-cache fp8: {e}"))?;
                 } else {
-                    eprintln!("serve: {}: --qwen-kv-fp8 needs the packed KV pools but the KV cache is fp32; ignoring", self.path);
+                    eprintln!("serve: {}: --kv-cache fp8 needs the packed KV pools but the KV cache is fp32; ignoring", self.path);
                 }
             }
             eng.set_gemm_precision(self.gemm_precision);
@@ -1338,7 +1404,7 @@ impl ResidentModel for QwenResident {
             if let Some(bank) = self.adapters.settings() {
                 eng.enable_adapters(bank.bank_config(&checkpoint_cfg)?).map_err(|e| format!("qwen: adapter bank: {e}"))?;
             }
-            // --qwen-kv-calib: opt IN to a kv_calib.json beside the
+            // --kv-calibration: opt IN to a kv_calib.json beside the
             // BASE checkpoint (measured on the base's K/V distribution, which
             // an adapter's differs from: the engine warns when the two are
             // combined) --
@@ -1353,7 +1419,7 @@ impl ResidentModel for QwenResident {
             }
             // Host-RAM KV offload (`model::kv_offload`): with a pool sized for
             // about two full contexts (see `pool_sizing`) but a batch of
-            // `--qwen-max-batch` slots, a busy server can admit far more
+            // `--max-batch` slots, a busy server can admit far more
             // sessions than the pool can hold cached at once. Without host RAM
             // the scheduler preempts by recompute; given host RAM, it parks the
             // sessions it is not advancing and brings them back byte-identical,
@@ -1487,6 +1553,31 @@ impl Frontend for QwenFrontend<'_> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_serving_policy_maps_onto_the_qwen3_engine_and_refusals_name_it() {
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--weight-format", "bf16").unwrap();
+        p.set("--kv-cache", "fp8").unwrap();
+        p.set("--gemm", "fp32").unwrap();
+        p.set("--ctx", "4096").unwrap();
+        p.set("--max-batch", "32").unwrap();
+        p.set("--kv-offload-gb", "2").unwrap();
+        p.set("prefix-slots", "16").unwrap();
+        let mut cfg = QwenServeConfig::default();
+        let notes = cfg.apply_policy(&p).unwrap();
+        assert!(cfg.weights_bf16 && cfg.kv_int8 && cfg.kv_fp8);
+        assert_eq!((cfg.ctx, cfg.max_batch, cfg.kv_offload_gb), (Some(4096), 32, 2.0));
+        assert_eq!(cfg.gemm_precision, gpu_core::provider::library::GemmPrecision::Fp32Reference);
+        assert!(notes.iter().any(|n| n.contains("prefix-slots")), "{notes:?}");
+
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--kv-cache", "bf16").unwrap();
+        let mut cfg = QwenServeConfig::default();
+        let e = cfg.apply_policy(&p).unwrap_err();
+        assert!(e.contains("qwen3") && e.contains("f32, int8, fp8"), "{e}");
+        assert_eq!(cfg.refused.as_deref(), Some(e.as_str()));
+    }
+
     /// `BRAIN_QWEN_WEIGHTS` naming a Hugging Face repo directory serves the
     /// directory itself, the form `open_checkpoint` reads (its `config.json`
     /// holds the architecture); a carded brain checkpoint serves as its
@@ -1590,7 +1681,7 @@ mod tests {
 
     /// `ctx` at or under the checkpoint's own trained window is a pure no-op
     /// -- the overwhelming default (auto-sizing rarely needs to go past
-    /// native, an explicit `--qwen-ctx` usually doesn't either) must never
+    /// native, an explicit `--ctx` usually doesn't either) must never
     /// perturb `rope_scaling` from `None`.
     #[test]
     fn apply_yarn_if_serving_past_native_is_a_no_op_at_or_under_the_native_window() {
@@ -1608,7 +1699,7 @@ mod tests {
     /// recipe - factor 4.0 over `original_max_position_embeddings` 32768, not
     /// 131072 / 40960 = 3.2 - and that recipe's frequency table must be the
     /// reference one (`model::yarn`'s pinned oracle, attention factor
-    /// 0.1 ln 4 + 1). `--qwen-ctx 131072` on a checkpoint that spells the
+    /// 0.1 ln 4 + 1). `--ctx 131072` on a checkpoint that spells the
     /// recipe out in its own config.json (b8's needle run) and on one that
     /// does not must therefore compute the same rotation.
     #[test]
@@ -1641,7 +1732,7 @@ mod tests {
 
     /// Auto-sizing must not hand out a context past the declared window: that
     /// would switch YaRN on for every request of a server nobody asked to
-    /// extend (128k stays an explicit `--qwen-ctx` until verified).
+    /// extend (128k stays an explicit `--ctx` until verified).
     #[test]
     fn auto_sizing_stops_at_the_declared_window_however_big_the_budget() {
         let mut cfg = qwen3::config::QwenConfig::qwen3_0_6b();
@@ -1678,7 +1769,7 @@ mod tests {
         assert!(QwenResident::check_fp32_kv_pool_fits(&cfg, block_size, num_blocks * 8, 1, 90 << 30, "x").is_ok(), "a 90 GiB card budget accepts it");
     }
 
-    /// `--qwen-kv-tokens` sizes the KV pool in tokens independently of the
+    /// `the KV pool size` sizes the KV pool in tokens independently of the
     /// per-sequence context, so many long agent histories can stay cached at
     /// once; unnamed it holds `max_batch` half-context histories (at least two
     /// contexts), and it never drops below one context (a lone admitted
@@ -1734,7 +1825,7 @@ mod tests {
         }
     }
 
-    /// End to end at the REAL Qwen3-8B config: lowering `--qwen-max-prefill`
+    /// End to end at the REAL Qwen3-8B config: lowering `the prefill row cap`
     /// shrinks `paged_attn_scratch_bytes` (3.00 of an 18.41 GiB device total
     /// at the operator's real ctx=24576) linearly, with zero change to
     /// `kv_pool_bytes` (prefill chunk size never enters the KV pool's own
@@ -1749,7 +1840,7 @@ mod tests {
     /// branch, where `max_prefill` does not appear at all and the buffer is
     /// `max_batch`-sized instead - `qwen3::serve`'s own
     /// `paged_attn_scratch_at_the_real_8b_serving_default_shape` pins both
-    /// arms at this same shape. So `--qwen-max-prefill` moves the pre-
+    /// arms at this same shape. So `the prefill row cap` moves the pre-
     /// placement budget and the triad-path allocation; it does not move a
     /// fused-path one.
     #[test]
@@ -2037,7 +2128,7 @@ mod tests {
         // what dtype the caller actually intends to serve -- it's only ever
         // CALLED from `activate()` on the `!kv_int8` arm (the fp32 opt-out).
         // Driving it directly here re-derives the exact refusal `activate()`
-        // would hit under `--qwen-kv-fp32` at this ctx.
+        // would hit under `--kv-cache f32` at this ctx.
         assert!(fp32_bytes > MAX_FP32_KV_POOL_BYTES, "fp32 KV pool at ctx=24576 must exceed the ceiling -- this is WHY the default is safe only under int8");
         let err = QwenResident::check_fp32_kv_pool_fits(&cfg, block_size, num_blocks, ctx, MAX_FP32_KV_POOL_BYTES, "qwen3-0.6b")
             .expect_err("the fp32 opt-out at the new ctx default must be refused, not attempted");

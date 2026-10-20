@@ -220,7 +220,7 @@ fn serve_command(dir: &std::path::Path, base: &std::path::Path, extra: &[&str]) 
     let models = dir.join("models");
     std::fs::create_dir_all(&models).unwrap();
     let mut cmd = Command::new(bin());
-    cmd.args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--qwen-weights", base.to_str().unwrap()])
+    cmd.args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--checkpoint", base.to_str().unwrap()])
         .args(extra)
         .stdin(Stdio::null())
         .env("BRAIN_DEVICE", "cpu")
@@ -312,7 +312,7 @@ fn an_adapter_with_no_checkpoint_names_the_flag_that_selects_one() {
         .expect("run brain serve");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "no checkpoint must not serve; stderr:\n{stderr}");
-    assert!(stderr.contains("--qwen-weights"), "the remedy is the flag; stderr:\n{stderr}");
+    assert!(stderr.contains("--checkpoint"), "the remedy is the flag; stderr:\n{stderr}");
 }
 
 /// An adapter whose card id is not an adapter model reference is refused
@@ -428,4 +428,32 @@ fn every_startup_resolver_scans_the_models_dir_flag_not_the_environment_store() 
         "a startup resolver scanned the BRAIN_MODELS_DIR store although --models-dir named another; stderr:\n{stderr}"
     );
     assert!(flag_store.join(cache).exists(), "no startup resolver scanned the --models-dir store; stderr:\n{stderr}");
+}
+
+#[test]
+fn a_bad_serving_policy_value_names_its_flag_and_exits_2() {
+    for (flag, value) in [("--kv-cache", "fp4"), ("--gemm", "tf32"), ("--weight-format", "q9"), ("--ctx", "many")] {
+        let out = run(&["serve", flag, value]);
+        assert_eq!(out.status.code(), Some(2), "{flag} {value}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(flag), "{flag} {value}: stderr:\n{stderr}");
+    }
+}
+
+#[test]
+fn a_policy_no_served_family_can_honour_is_refused_naming_the_families() {
+    // The Qwen3 engine has no nf4 weights and the Qwen3.8 resident has no --gemm.
+    let out = run(&["serve", "--weight-format", "nf4", "--gemm", "fp32"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("qwen3") && stderr.contains("qwen35") && stderr.contains("supported"), "stderr:\n{stderr}");
+}
+
+#[test]
+fn a_deprecated_architecture_prefixed_flag_still_works_and_says_what_replaces_it() {
+    let out = run(&["serve", "--qwen-kv-fp8", "--help"]);
+    // --help ends the parse after the alias was applied and warned about.
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--qwen-kv-fp8 is deprecated") && stderr.contains("--kv-cache fp8"), "stderr:\n{stderr}");
 }

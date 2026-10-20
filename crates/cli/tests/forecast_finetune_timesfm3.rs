@@ -183,10 +183,10 @@ fn the_kronos_path_and_the_both_flags_refusal_are_unchanged() {
     let bare = Command::new(bin()).args(["forecast", "finetune"]).output().expect("run brain");
     assert_eq!(bare.status.code(), Some(2));
     let e = String::from_utf8_lossy(&bare.stderr);
-    assert!(e.contains("--kronos-tokenizer"), "a bare finetune still prints the Kronos usage\nstderr:\n{e}");
+    assert!(e.contains("--tokenizer-dir"), "a bare finetune still prints the Kronos usage\nstderr:\n{e}");
 
     let both = Command::new(bin())
-        .args(["forecast", "finetune", "--timesfm3", "w", "--kronos-decoder", "d", "--data", "csv"])
+        .args(["forecast", "finetune", "--timesfm3", "w", "--decoder-dir", "d", "--data", "csv"])
         .output()
         .expect("run brain");
     assert_eq!(both.status.code(), Some(2));

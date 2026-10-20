@@ -37,6 +37,7 @@ pub mod conformance;
 pub mod conformance_adapter;
 pub mod conformance_grad;
 pub mod paged;
+pub mod policy;
 pub mod rowemit;
 pub mod serve;
 pub mod snapshot_prefix;

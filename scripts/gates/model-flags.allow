@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Architecture-prefixed flags still present (see check-model-flags.sh).
+# path<TAB>count<TAB>reason. Shrink-only: lower or delete the line in the commit
+# that removes the alias. A new flag spelled --<architecture>-<option> is a design
+# defect, not an allowlist addition.
+crates/cli/src/forecast_cli.rs	2	deprecated --kronos-tokenizer/--kronos-decoder aliases of --tokenizer-dir/--decoder-dir; delete when callers have moved
+crates/cli/src/npu_cli.rs	2	deprecated --kronos-tokenizer/--kronos-decoder aliases of --tokenizer-dir/--decoder-dir; delete when callers have moved
+crates/cli/src/yolo_cli.rs	3	--arcface-dir names a composed pipeline's second component (identity matching); replace by a generic --component role path
+crates/model/src/policy.rs	23	the LEGACY alias table: deprecated --qwen-*/--qwen35-* spellings rewritten onto the serving policy with a warning; delete a row when its last caller has moved, the file entry with the last row

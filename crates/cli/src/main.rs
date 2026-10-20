@@ -160,7 +160,7 @@ CONFIG FILE (global - valid on any subcommand)
     BRAIN_QWEN_WEIGHTS: checkpoints/qwen3.8-27b
 
   Per-model serving tunables (context, batching, KV storage) are command-line
-  flags, not config keys - `brain serve --qwen35-ctx 8192` and friends; run
+  flags, not config keys - `brain serve --ctx 8192` and friends; run
   `brain serve --help` for the full list.
 
 MODEL STORE (global - valid on any subcommand)

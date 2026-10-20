@@ -74,6 +74,8 @@ pub use model::ops::TierPolicy as Qwen35TierPolicy;
 pub struct Qwen35ServeConfig {
     pub fp32: Qwen35Sizing,
     pub gguf: Qwen35GgufServeConfig,
+    /// Why the serving policy cannot be honoured by the fp32 resident (see [`Qwen35ServeConfig::apply_policy`]).
+    pub fp32_refused: Option<String>,
 }
 
 /// Catalog id: a `brain/`-prefixed synthetic id, matching `qwen35::caps::MODEL`
@@ -94,11 +96,14 @@ pub struct Qwen35Sizing {
     /// `max_concurrent`, i.e. `num_blocks`) and so decode together in one
     /// batched step.
     pub max_batch: u32,
+    /// The serving policy cannot be honoured by this resident (the reason is
+    /// [`Qwen35ServeConfig::fp32_refused`]): it is not built.
+    pub refused: bool,
 }
 
 impl Default for Qwen35Sizing {
     fn default() -> Self {
-        Qwen35Sizing { ctx: 4096, max_batch: 4 }
+        Qwen35Sizing { ctx: 4096, max_batch: 4, refused: false }
     }
 }
 
@@ -106,7 +111,7 @@ impl Qwen35Sizing {
     /// Clamp both knobs to their 1 floor - what the old env readers did to
     /// any parsed value, now applied to the parsed struct once, here.
     pub fn sanitized(self) -> Qwen35Sizing {
-        Qwen35Sizing { ctx: self.ctx.max(1), max_batch: self.max_batch.max(1) }
+        Qwen35Sizing { ctx: self.ctx.max(1), max_batch: self.max_batch.max(1), refused: self.refused }
     }
 }
 
@@ -256,7 +261,7 @@ fn parse_qwen35(tok: &QwenBpe, inv: &Invocation) -> Result<qwen3::chat::ParsedRe
 }
 
 /// Server-wide defaults for every released-GGUF Qwen3.8 resident the model
-/// scan registers, as parsed data - what `brain serve`'s `--qwen35-*` flags
+/// scan registers, as parsed data - what `brain serve`'s serving-policy flags
 /// build and `build_executor` hands down. No environment variables, and no
 /// per-model switch: which GGUFs are served is decided by what the store
 /// holds, how they are served by these.
@@ -285,13 +290,97 @@ pub struct Qwen35GgufServeConfig {
     /// the best drafter the checkpoint carries, plain decoding when it has none.
     pub speculative: Option<qwen35::int8_gguf_resident::SpeculativeMode>,
     /// Prompt tokens one sequence gets of each scheduler iteration's prefill
-    /// while others wait (`--qwen35-prefill-slice`). `None` takes the engine's
+    /// while others wait (`the prefill-slice setting`). `None` takes the engine's
     /// default ([`PrefillPolicy::default`](qwen35::int8_gguf_resident::PrefillPolicy)).
     pub prefill_slice: Option<u32>,
     /// Prompt rows one iteration prefills across sequences in a single forward
-    /// (`--qwen35-prefill-batch`); 0 prefills one sequence's slice at a time.
+    /// (`the prefill-batch setting`); 0 prefills one sequence's slice at a time.
     /// `None` takes the engine's default.
     pub prefill_batch: Option<u32>,
+    /// Why the serving policy cannot be honoured by this resident (set by
+    /// [`Self::apply_policy`]); building the resident refuses with it.
+    pub refused: Option<String>,
+}
+
+/// What the released-GGUF Qwen3.8 resident honours of a [`model::policy::ServePolicy`].
+pub const QWEN35_GGUF_POLICY: model::policy::PolicySupport = model::policy::PolicySupport {
+    model: "qwen35",
+    weights: &[
+        gpu_core::select::Dtype::F32,
+        gpu_core::select::Dtype::BF16,
+        gpu_core::select::Dtype::F16,
+        gpu_core::select::Dtype::I8,
+        gpu_core::select::Dtype::Q4,
+        gpu_core::select::Dtype::NF4,
+    ],
+    weight_rules: true,
+    kv_cache: &["f32", "bf16", "int8", "fp8"],
+    gemm: false,
+    fuse_norm: false,
+    kv_calibration: false,
+};
+
+/// What the brain-checkpoint fp32 Qwen3.8 resident honours: it is fp32 by definition.
+pub const QWEN35_FP32_POLICY: model::policy::PolicySupport = model::policy::PolicySupport {
+    model: "qwen35 (brain checkpoint)",
+    weights: &[gpu_core::select::Dtype::F32],
+    weight_rules: false,
+    kv_cache: &["f32"],
+    gemm: false,
+    fuse_norm: false,
+    kv_calibration: false,
+};
+
+impl Qwen35ServeConfig {
+    /// Apply the model-agnostic policy to both residents. A family that cannot
+    /// honour a precision choice records why and refuses to build; the call is
+    /// an error only when NO family can honour it. Returns notes.
+    pub fn apply_policy(&mut self, p: &model::policy::ServePolicy) -> Result<Vec<String>, String> {
+        let gguf = self.gguf.apply_policy(p);
+        let fp32 = QWEN35_FP32_POLICY.check(p);
+        if let Err(e) = &fp32 {
+            self.fp32_refused = Some(e.clone());
+            self.fp32.refused = true;
+        } else {
+            if let Some(c) = p.limits.ctx {
+                self.fp32.ctx = c;
+            }
+            if let Some(b) = p.limits.max_batch {
+                self.fp32.max_batch = b;
+            }
+        }
+        match (gguf, fp32) {
+            (Err(a), Err(b)) => Err(format!("{a}; {b}")),
+            (g, _) => g,
+        }
+    }
+}
+
+impl Qwen35GgufServeConfig {
+    /// Apply the policy to the released-GGUF resident (see [`Qwen35ServeConfig::apply_policy`]).
+    pub fn apply_policy(&mut self, p: &model::policy::ServePolicy) -> Result<Vec<String>, String> {
+        if let Err(e) = QWEN35_GGUF_POLICY.check(p) {
+            self.refused = Some(e.clone());
+            return Err(e);
+        }
+        if p.weights.is_some() {
+            self.tier = p.weights.clone();
+        }
+        self.kv = p.kv_cache.or(self.kv);
+        let l = &p.limits;
+        self.ctx = l.ctx.or(self.ctx);
+        self.max_batch = l.max_batch.or(self.max_batch);
+        self.prefix_slots = l.prefix_slots.or(self.prefix_slots);
+        self.prefill_slice = l.prefill_slice.or(self.prefill_slice);
+        self.prefill_batch = l.prefill_batch.or(self.prefill_batch);
+        let mut notes = Vec::new();
+        for (set, name) in [(l.kv_offload_gb.is_some(), "--kv-offload-gb"), (l.kv_tokens.is_some(), "kv-tokens"), (l.max_prefill.is_some(), "max-prefill")] {
+            if set {
+                notes.push(format!("qwen35: {name} has no meaning for this engine and is ignored"));
+            }
+        }
+        Ok(notes)
+    }
 }
 
 impl Qwen35GgufServeConfig {
@@ -330,14 +419,14 @@ impl Qwen35GgufServeConfig {
     }
 }
 
-/// Decode slots a GGUF resident is built with when `--qwen35-max-batch` is not
+/// Decode slots a GGUF resident is built with when `--max-batch` is not
 /// given: concurrent requests share every weight read, so a single slot would
 /// serve them one at a time. Small enough that the decode state (about 0.4 GiB
 /// a sequence at the default 2048 context with an f32 cache) leaves the
 /// two-24-GiB-card placement unchanged.
 pub const DEFAULT_MAX_BATCH: u32 = 8;
 
-/// Prompts a GGUF resident keeps for prefix reuse when `--qwen35-prefix-slots`
+/// Prompts a GGUF resident keeps for prefix reuse when `the prefix-slot setting`
 /// is not given. An agent resends its whole history every turn; each cached
 /// prompt costs one sequence slot of KV (charged into the placement), so a few
 /// conversations stay warm without crowding out the batch.
@@ -369,6 +458,9 @@ pub fn gguf_resident(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u
 /// on it ([`AdapterHost`]).
 pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35GgufServeConfig, bank: Option<AdapterBankSettings>) -> Result<Qwen35GgufServed, String> {
     use qwen35::int8_gguf_resident::{auto_cap, resident_config, Qwen35GgufResident, SpecServing};
+    if let Some(why) = &cfg.refused {
+        return Err(why.clone());
+    }
     let (tier, kv, max_batch, prefix_slots) = (cfg.tier_or_default(), cfg.kv_or_default(), cfg.max_batch_or_default(), cfg.prefix_slots_or_default());
     let spec = SpecServing { mode: cfg.speculative_or_default(), ..SpecServing::default() };
     let mg = checkpoint::gguf::MmapGguf::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
@@ -507,13 +599,38 @@ impl MultiDeviceResidentModel for Qwen35GgufServed {
 mod tests {
     use super::*;
 
+    /// The model-agnostic policy reaches every Qwen3.8 resident, and a choice a
+    /// resident cannot honour makes only that resident refuse, naming itself.
+    #[test]
+    fn the_serving_policy_maps_onto_the_residents_and_refusals_name_the_model() {
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--weight-format", "q4,in_proj_a.weight=f32").unwrap();
+        p.set("--kv-cache", "fp8").unwrap();
+        p.set("--ctx", "8192").unwrap();
+        p.set("--max-batch", "6").unwrap();
+        let mut cfg = Qwen35ServeConfig::default();
+        let notes = cfg.apply_policy(&p).expect("the GGUF resident honours it");
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(cfg.gguf.tier.as_ref().unwrap().describe(), "q4,in_proj_a.weight=f32");
+        assert_eq!((cfg.gguf.kv.unwrap().as_str(), cfg.gguf.ctx, cfg.gguf.max_batch), ("fp8", Some(8192), Some(6)));
+        assert!(cfg.gguf.refused.is_none() && cfg.fp32.refused, "the fp32 resident cannot honour q4/fp8");
+        assert!(cfg.fp32_refused.as_deref().unwrap().contains("brain checkpoint"));
+
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--gemm", "fp32").unwrap();
+        let mut cfg = Qwen35ServeConfig::default();
+        let e = cfg.apply_policy(&p).unwrap_err();
+        assert!(e.contains("qwen35") && e.contains("--gemm"), "{e}");
+        assert!(gguf_resident("none.gguf", "t/x", &[], 0, &cfg.gguf).err().unwrap().contains("--gemm"), "a refused resident must not build");
+    }
+
     /// The sizing knobs are constructor data with the historical defaults,
     /// sanitized to their 1 floor - never read from the environment.
     #[test]
     fn sizing_defaults_and_sanitization() {
         let d = Qwen35Sizing::default();
         assert_eq!((d.ctx, d.max_batch), (4096, 4));
-        let s = Qwen35Sizing { ctx: 0, max_batch: u32::MAX }.sanitized();
+        let s = Qwen35Sizing { ctx: 0, max_batch: u32::MAX, refused: false }.sanitized();
         assert_eq!((s.ctx, s.max_batch), (1, u32::MAX));
     }
 
