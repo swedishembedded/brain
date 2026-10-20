@@ -228,13 +228,18 @@ let logprobs = brain::score_tokens(base, Some(adapter.as_path()), &tokens, &targ
 ```
 
 The three fine-tuners (`ChatFineTune`, `ChatFullFineTune`,
-`PreferenceFineTune`) take `.arch("qwen3")`, the architecture's `brain_arch`
-id. `ChatFineTune` also takes `.arch("qwen35")`, the Qwen3.8-27B architecture:
-`.nf4_base(true)` (QLoRA) or `.bf16_base(true)` hold the frozen base on one card,
-and the adapter it writes is served by `brain serve` beside the base. On
-`qwen35` the held-out scoring (`held_out`, `held_out_text`,
-`keep_evaluations`) and the int8 tier are refused; the monitor curve, replay,
-`continue_from`, cancel and exact resume work as on `qwen3`. The `chat_finetune`
+`PreferenceFineTune`) take `.arch("qwen3")` or `.arch("qwen35")`, the
+architecture's `brain_arch` id. `ChatFineTune` on `qwen35`, the Qwen3.8-27B
+architecture: `.nf4_base(true)` (QLoRA) or `.bf16_base(true)` hold the frozen base
+on one card, and the adapter it writes is served by `brain serve` beside the
+base. Held-out scoring (`held_out`, `held_out_text`), `keep_evaluations`, the
+monitor curve, replay, `continue_from`, cancel and exact resume work as on
+`qwen3`; the int8 tier is a `qwen3` tier. `ChatFullFineTune` and
+`PreferenceFineTune` run on any architecture that implements
+`model::finetune::ChatTrainer` (`qwen3` and `qwen35`): a `qwen35` full
+fine-tune writes its brain-format weights as the checkpoint's
+`model.safetensors` and a `qwen35` DPO run does not score preference pairs yet
+(`train_score` is `None`). The `chat_finetune`
 example runs it from the command line. An architecture that lacks what the run needs (a chat fine-tuner, or the
 token objectives DPO and GRPO are built on) is refused before any file is
 read, with `brain::Error::Unsupported` naming the architecture and the

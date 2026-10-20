@@ -161,8 +161,9 @@ pub mod chat_dataset;
 #[cfg(feature = "study")]
 pub mod study;
 #[cfg(feature = "study")]
-mod finetune;
+mod chat_trainer;
 #[cfg(feature = "study")]
+mod finetune;
 #[cfg(feature = "study")]
 /// The target that masks a position out of [`score_tokens`] (it scores `0.0`).
 pub use model::IGNORE as IGNORE_TARGET;

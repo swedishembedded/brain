@@ -177,17 +177,7 @@ pub fn score_chat_rendered(weights: &str, adapter: Option<&str>, tok: &QwenBpe, 
     }
 }
 
-/// Per-pair preference margins of a policy against a reference over
-/// `generic-preference-v1` pairs; see [`preference_margins`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct PreferenceMargins {
-    /// `(log pi(chosen) - log ref(chosen)) - (log pi(rejected) - log
-    /// ref(rejected))` per scored pair, in nats, each log-probability summed
-    /// over that candidate's supervised tokens only.
-    pub margins: Vec<f64>,
-    /// Pairs not scored because a candidate does not fit the scoring row.
-    pub skipped: usize,
-}
+pub use model::finetune::PreferenceMargins;
 
 /// Score preference pairs: each candidate's sequence log-probability (summed
 /// over exactly the tokens its mask supervises, the positions DPO training

@@ -179,7 +179,14 @@ layer 6 - serving, front ends, SDK, samples
                            `weight_decode`, one kernel for all tiers) feeding
                            the dense tensor-core GEMM of `gpu-core`'s library
                            provider. Model crates call `Ops`; none picks a
-                           kernel by storage format
+                           kernel by storage format.
+                           `finetune.rs` is the seam the generic fine-tuners
+                           (full-parameter, LoRA, DPO) run on: a model family
+                           implements `ChatTrainer` (build, export, save an
+                           adapter) and hands its model to a `ModelFit`
+                           visitor, so the loop, objectives and optimizer-state
+                           choice (`OptimizerState`) never name a family.
+                           `score.rs` is held-out scoring over any Model
    promote                 the model-agnostic promote/reject decision: the
                            Environment/Verifier reward seam, the exact paired
                            sign test, the four-bar gate over already-scored

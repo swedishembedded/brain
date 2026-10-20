@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use brain::{ChatFineTune, FineTuneStatus};
+use brain::{ChatFineTune, ChatFullFineTune, FineTuneStatus, PreferenceFineTune};
 
 #[path = "chat_fixture/common.rs"]
 mod common;
@@ -194,4 +194,72 @@ fn continuing_a_qwen35_adapter_records_its_parent() {
     assert_ne!(second.adapter_digest, first.adapter_digest, "it trained on top of the parent");
     let card = checkpoint::st::read_card(second.adapter.as_ref().unwrap().to_str().unwrap()).unwrap().unwrap();
     assert_eq!(card.training.unwrap().trained_from, first.adapter_digest);
+}
+
+/// The full-parameter and preference fine-tuners are written once over the
+/// model seam: a second architecture runs them with nothing but its trainer.
+#[test]
+fn a_qwen35_full_fine_tune_trains_every_weight_and_writes_a_base() {
+    let model = qwen35_chat_model_dir("q35-full");
+    let out = model.join("run");
+    let outcome = ChatFullFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+        .arch("qwen35")
+        .dataset(write_dataset(&model))
+        .out_dir(&out)
+        .steps(6)
+        .lr(1e-2)
+        .seed(7)
+        .device(cpu())
+        .run()
+        .expect("the full fine-tune runs");
+
+    assert_eq!(outcome.status, FineTuneStatus::Completed);
+    assert_eq!(outcome.steps_completed, 6);
+    assert!(outcome.final_loss.zip(outcome.initial_loss).is_some_and(|(last, first)| last < first), "{outcome:?}");
+    let checkpoint = outcome.checkpoint.expect("a completed run writes its checkpoint directory");
+    assert!(checkpoint.join("tokenizer.json").is_file());
+    assert!(!out.join("tuned.brain.safetensors").exists(), "the training format is not left behind");
+    // The written weights are a qwen35 base: they open, and every tensor of the
+    // architecture is there.
+    let base = qwen35::base_source::open_base(&checkpoint.join("model.safetensors")).expect("the checkpoint opens as a qwen35 base");
+    assert_eq!(base.cfg.param_list().len(), qwen35::config::Qwen35Config::tiny().param_list().len());
+}
+
+#[test]
+fn a_qwen35_preference_fine_tune_exports_a_dpo_adapter() {
+    let model = qwen35_chat_model_dir("q35-dpo");
+    let pairs = model.join("pairs.jsonl");
+    let lines: Vec<String> = [("cab", "bad", "wig"), ("fed", "deaf", "vow"), ("ace", "face", "jug"), ("bag", "gab", "mop")]
+        .iter()
+        .map(|(u, c, r)| {
+            serde_json::json!({
+                "prompt": [{"role": "user", "content": u}],
+                "chosen": {"role": "assistant", "content": c},
+                "rejected": {"role": "assistant", "content": r},
+                "metadata": {"source": "test"}
+            })
+            .to_string()
+        })
+        .collect();
+    std::fs::write(&pairs, lines.join("\n")).unwrap();
+    let outcome = PreferenceFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+        .arch("qwen35")
+        .dataset(&pairs)
+        .out_dir(model.join("run"))
+        .rank(2)
+        .steps(6)
+        .lr(1e-1)
+        .seed(7)
+        .device(cpu())
+        .run()
+        .expect("the preference fine-tune runs");
+
+    assert_eq!(outcome.status, FineTuneStatus::Completed);
+    let initial = outcome.initial_loss.expect("measured");
+    assert!((initial - std::f32::consts::LN_2).abs() < 1e-3, "the margin starts at zero against the starting model: {initial}");
+    assert!(outcome.final_loss.is_some_and(|last| last < initial), "{outcome:?}");
+    let adapter = outcome.adapter.expect("a completed run exports its adapter");
+    let card = checkpoint::st::read_card(adapter.to_str().unwrap()).unwrap().expect("the adapter carries a card");
+    assert_eq!(card.training.expect("its training run is recorded").regime, "dpo");
+    assert_eq!(outcome.train_score, None, "this architecture does not score preference pairs yet");
 }

@@ -58,6 +58,7 @@
 //! forgetting what it knew, you can procure our services by sending an email
 //! to info@swedishembedded.com.
 
+use crate::chat_trainer::ChatEntry;
 use crate::{Error, Result};
 
 use std::path::{Path, PathBuf};
@@ -106,12 +107,6 @@ pub(crate) trait StudyArch {
     /// the model itself by `declared_capabilities_match_the_models`.
     const TOKEN_OBJECTIVES: bool;
 
-    /// Whether the full-parameter and preference chat fine-tuners
-    /// (`PreferenceFineTune`, `ChatFullFineTune`) have an implementation for
-    /// this architecture. They sit on the architecture's own checkpoint reader
-    /// and trainer (`qwen3::finetune`), so a row opts in only when that exists.
-    const CHAT_FINE_TUNE: bool = false;
-
     /// Whether the supervised chat LoRA fine-tuner (`ChatFineTune`) has an
     /// implementation for this architecture (`finetune::ChatTrainer`).
     const CHAT_LORA_FINE_TUNE: bool = false;
@@ -137,7 +132,6 @@ impl StudyArch for Qwen3 {
     const ID: &'static str = "qwen3";
     const FAMILY: &'static str = "qwen";
     const TOKEN_OBJECTIVES: bool = true;
-    const CHAT_FINE_TUNE: bool = true;
     const CHAT_LORA_FINE_TUNE: bool = true;
     fn lora(rank: u32, alpha: f32) -> LoraCfg {
         LoraCfg::attn(rank, alpha)
@@ -193,6 +187,8 @@ pub(crate) struct ArchEntry {
     pub token_objectives: bool,
     /// Has an implementation of the full-parameter and preference chat fine-tuners.
     pub chat_fine_tune: bool,
+    /// Their entry points, for the architectures that have them.
+    pub(crate) chat: Option<ChatEntry>,
     /// Has an implementation of the supervised chat LoRA fine-tuner.
     pub chat_lora_fine_tune: bool,
     study: StudyFn,
@@ -201,7 +197,15 @@ pub(crate) struct ArchEntry {
 
 impl ArchEntry {
     pub(crate) const fn of<A: StudyArch>() -> ArchEntry {
-        ArchEntry { id: A::ID, family: A::FAMILY, token_objectives: A::TOKEN_OBJECTIVES, chat_fine_tune: A::CHAT_FINE_TUNE, chat_lora_fine_tune: A::CHAT_LORA_FINE_TUNE, study: run_for::<A>, improve: run_improve_dyn::<A> }
+        ArchEntry { id: A::ID, family: A::FAMILY, token_objectives: A::TOKEN_OBJECTIVES, chat_fine_tune: false, chat: None, chat_lora_fine_tune: A::CHAT_LORA_FINE_TUNE, study: run_for::<A>, improve: run_improve_dyn::<A> }
+    }
+
+    /// This row with the generic full-parameter and preference fine-tuners
+    /// running on the model family's `ChatTrainer`.
+    pub(crate) const fn with_chat_trainer<T: model::finetune::ChatTrainer>(mut self) -> ArchEntry {
+        self.chat_fine_tune = true;
+        self.chat = Some(ChatEntry::of::<T>());
+        self
     }
 
     /// Refuse, at configuration time, a run that needs a capability this
@@ -228,7 +232,11 @@ impl ArchEntry {
 /// See this module's doc comment for the one property a candidate must have
 /// that `M: Model` does not imply: an HF `tokenizer.json` BPE, because
 /// `DocumentCurriculum` names `QwenBpe`.
-const ARCHS: &[ArchEntry] = &[ArchEntry::of::<Qwen3>(), ArchEntry::of::<Qwen35>(), ArchEntry::of::<Qwen35Moe>()];
+const ARCHS: &[ArchEntry] = &[
+    ArchEntry::of::<Qwen3>().with_chat_trainer::<qwen3::finetune::Qwen3Trainer>(),
+    ArchEntry::of::<Qwen35>().with_chat_trainer::<qwen35::finetune::Qwen35Trainer>(),
+    ArchEntry::of::<Qwen35Moe>(),
+];
 
 /// The row for architecture `id`, or the refusal listing the known ids.
 pub(crate) fn arch(id: &str) -> Result<&'static ArchEntry> {
@@ -869,7 +877,7 @@ mod tests {
         };
         let dir = std::env::temp_dir();
         assert_eq!(refused(crate::ChatFullFineTune::from_pretrained("none").arch("qwen35moe").dataset("d.jsonl").out_dir(&dir).run().map(|_| ())), "qwen35moe does not provide chat fine-tuning yet");
-        assert_eq!(refused(crate::PreferenceFineTune::from_pretrained("none").arch("qwen35").dataset("d.jsonl").out_dir(&dir).run().map(|_| ())), "qwen35 does not provide chat fine-tuning yet");
+        assert_eq!(refused(crate::PreferenceFineTune::from_pretrained("none").arch("qwen35moe").dataset("d.jsonl").out_dir(&dir).run().map(|_| ())), "qwen35moe does not provide chat fine-tuning yet");
         match crate::ChatFineTune::from_pretrained("none").arch("nonesuch").dataset("d.jsonl").out_dir(&dir).run() {
             Err(Error::UnsupportedArchitecture(m)) => assert!(m.contains("nonesuch") && m.contains("qwen3"), "{m}"),
             other => panic!("expected an unknown-architecture refusal, got {:?}", other.map(|_| ())),

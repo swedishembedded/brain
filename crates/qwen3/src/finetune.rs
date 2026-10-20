@@ -106,17 +106,7 @@ pub fn finetune_from(
 /// stopped by `control` writes nothing (the optimizer state a resume needs is
 /// three times the model), so the report says it was interrupted.
 pub fn finetune_full_controlled(base: &str, dir: &Path, opts: &FitOpts, out: &Path, control: model::FitControl<'_>) -> std::io::Result<model::FitReport> {
-    let (cfg, init) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
-    let built = model::offload::with_adam_offloaded(true, || build_for_training(cfg, opts, &*init, Dtype::F32));
-    let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
-    let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
-    let (report, _) = model::fit_controlled(built?, obj, opts, Some(out), control)?;
-    if report.interrupted {
-        // fit_controlled does not write an interrupted run's model; make sure
-        // a periodic save did not leave a partial one under the final name.
-        let _ = std::fs::remove_file(out);
-    }
-    Ok(report)
+    model::finetune::fit_full::<Qwen3Trainer>(Path::new(base), dir, opts, out, model::finetune::OptimizerState::HostOffload, control)
 }
 
 /// The trainable model at `opts`' batch and context, its frozen base
@@ -673,20 +663,86 @@ pub fn finetune_lora_tuned(
     if let (Some(snapshots), Some(lora)) = (control.snapshots.as_mut(), cfg.lora.as_ref()) {
         snapshots.lora = lora.clone();
     }
-    // A LoRA build never offloads its moments (outside any `with_adam_offloaded`
-    // scope the default is the device).
-    let m = build_trainer(cfg, opts, &init, base_dtype);
-    let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
-    match m? {
+    let mut fit = model::finetune::CausalLmFit { dir, opts, out: None, control: Some(control) };
+    lora_trained(cfg, &init, opts, base_dtype, &mut fit)
+}
+
+/// The LoRA model of `cfg` over `init` at `dt`, laid out over the cards
+/// ([`build_trainer`]) and handed to `fit` as the concrete type that layout
+/// gave. A LoRA build never offloads its moments.
+fn lora_trained(cfg: QwenConfig, init: &dyn TensorSource, opts: &FitOpts, dt: Dtype, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Trained)> {
+    let built = model::finetune::OptimizerState::Device.scope(|| build_trainer(cfg, opts, init, dt));
+    match built? {
         Trained::Single(m) => {
-            let (report, m) = model::fit_controlled(*m, model::causal_lm::<Qwen>(train, val, bcfg, itos), opts, None, control)?;
+            let (report, m) = fit.fit(*m)?;
             Ok((report, Trained::Single(Box::new(m))))
         }
         Trained::Pipeline(m) => {
-            let (report, m) = model::fit_controlled(*m, model::causal_lm::<PipelineModel<Qwen>>(train, val, bcfg, itos), opts, None, control)?;
+            let (report, m) = fit.fit(*m)?;
             Ok((report, Trained::Pipeline(Box::new(m))))
         }
     }
+}
+
+/// Qwen3 and its fine-tune variants as a [`model::finetune::ChatTrainer`]:
+/// the generic full-parameter, LoRA and preference fine-tuners run on it.
+pub struct Qwen3Trainer;
+
+impl model::finetune::ChatTrainer for Qwen3Trainer {
+    type Trained = Trained;
+
+    fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {
+        crate::store_checkpoint_path(weights, model_dir)
+    }
+
+    fn vocab(open: &Path) -> Result<usize, String> {
+        Ok(crate::checkpoint_config(path_str(open)?).map_err(|e| e.to_string())?.vocab as usize)
+    }
+
+    /// Every weight trains in fp32; the moments follow `state`.
+    fn train_full(base: &Path, opts: &FitOpts, state: model::finetune::OptimizerState, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Trained)> {
+        let base = path_str(base).map_err(std::io::Error::other)?;
+        let (cfg, init) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
+        let m = state.scope(|| build_for_training(cfg, opts, &*init, Dtype::F32))?;
+        let (report, m) = fit.fit(m)?;
+        Ok((report, Trained::Single(Box::new(m))))
+    }
+
+    fn train_lora(base: &Path, lora: &model::finetune::LoraRequest<'_>, opts: &FitOpts, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Trained)> {
+        let start = match lora.continue_from {
+            Some(path) => LoraStart::Continue(path_str(path).map_err(std::io::Error::other)?),
+            None => LoraStart::Fresh,
+        };
+        let (cfg, init) = lora_start(path_str(base).map_err(std::io::Error::other)?, lora.rank, lora.alpha, opts.seed, &start)?;
+        lora_trained(cfg, &init, opts, Dtype::F32, fit)
+    }
+
+    fn save_adapter(trained: &Trained, path: &Path, lineage: &model::finetune::AdapterLineage<'_>) -> std::io::Result<()> {
+        trained.save_adapter_with_lineage(path_str(path).map_err(std::io::Error::other)?, lineage.card_id, lineage.base_id, lineage.dataset_id, lineage.provenance.clone())
+    }
+
+    fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>) -> Result<(), String> {
+        let (cfg, src) = crate::open_checkpoint(path_str(trained)?)?;
+        let adapter = adapter.map(path_str).transpose()?;
+        let opts = crate::export::HfExport { dtype: crate::export::HfDtype::F32, shard_bytes: u64::MAX, tokenizer_dir: Some(tokenizer_dir), adapter };
+        crate::export::export_hf(&*src, &cfg, out, &opts).map_err(|e| format!("{}: writing the checkpoint: {e}", out.display()))
+    }
+
+    fn preference_margins(
+        weights: &Path,
+        reference: Option<&Path>,
+        policy: &Path,
+        pairs: &[(data::preference::EncodedTurn, data::preference::EncodedTurn)],
+        block: u32,
+    ) -> Option<model::finetune::PreferenceMargins> {
+        let weights = path_str(weights).ok()?;
+        let reference = reference.map(path_str).transpose().ok()?;
+        Some(crate::eval::preference_margins(weights, reference, Some(path_str(policy).ok()?), pairs, block))
+    }
+}
+
+fn path_str(path: &Path) -> Result<&str, String> {
+    path.to_str().ok_or_else(|| format!("{}: not a UTF-8 path", path.display()))
 }
 
 #[cfg(test)]

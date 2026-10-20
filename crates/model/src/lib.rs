@@ -37,6 +37,8 @@ pub mod conformance;
 pub mod conformance_adapter;
 pub mod conformance_grad;
 pub mod conformance_head;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod finetune;
 pub mod paged;
 pub mod policy;
 pub mod rowemit;

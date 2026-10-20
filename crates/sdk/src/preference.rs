@@ -48,6 +48,7 @@ use data::chat_template::ChatTemplate;
 use data::preference::EncodedTurn;
 use data::qwen_tokenizer::QwenBpe;
 
+use crate::chat_trainer::{ChatEntry, PreferenceJob};
 use crate::finetune::{block_for, digest, fit_opts, lora_shape, resolve_seed, tokenizer_and_template, utf8};
 use model::training::Capability;
 
@@ -275,6 +276,7 @@ impl PreferenceFineTune {
         let arch = crate::study::arch(&self.arch)?;
         arch.require(Capability::ChatFineTune)?;
         arch.require(Capability::TokenObjectives)?;
+        let chat = arch.chat.ok_or_else(|| Error::Unsupported(model::training::Unsupported::new(arch.id, Capability::ChatFineTune)))?;
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("PreferenceFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("PreferenceFineTune: no out directory; call .out_dir(path)".to_string()))?;
         if !(self.nll_weight.is_finite() && self.nll_weight >= 0.0) {
@@ -288,8 +290,7 @@ impl PreferenceFineTune {
         }
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
         let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
-        let weights_str = utf8(&weights)?;
-
+        
         // Every file is checked against the base's own template before a
         // device is claimed.
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
@@ -331,23 +332,41 @@ impl PreferenceFineTune {
             !cancel.is_cancelled()
         };
         let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None };
-        let start = match &self.continue_from {
-            Some(path) => qwen3::finetune::LoraStart::Continue(utf8(path)?),
-            None => qwen3::finetune::LoraStart::Fresh,
+        let adapter_path = out_dir.join(ADAPTER_FILE);
+        let adapter_id = self.adapter_id.clone().unwrap_or_else(|| format!("{base_id}:local:dpo:latest"));
+        let provenance = checkpoint::st::TrainingProvenance {
+            code_revision: format!("brain {}", env!("CARGO_PKG_VERSION")),
+            regime: "dpo".to_string(),
+            seed,
+            hyperparams: serde_json::json!({
+                "rank": rank,
+                "alpha": alpha,
+                "beta": self.beta,
+                "nll_weight": self.nll_weight,
+                "grad_accum": self.grad_accum,
+                "keep_reasoning": self.keep_reasoning,
+                "steps": self.steps,
+                "lr": self.lr,
+                "block": block,
+                "train_pairs": train.len(),
+                "reference": { "base_digest": base_digest, "adapter_digest": parent },
+            }),
+            environment: gpu_core::backend_name().to_string(),
+            gate: None,
+            trained_from: parent.clone(),
+            base_digest: Some(base_digest.clone()),
+            cycle: self.cycle,
         };
-        let policy = lora_model(weights_str, rank, alpha, &opts, &start)?;
-        let objective = rl::objective::dpo::Dpo::from_dataset(rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight }, packed);
-        let fit_err = |e: std::io::Error| Error::Backend(format!("training: {e}"));
-        let (report, trained) = match policy {
-            qwen3::finetune::Trained::Single(m) => {
-                let (r, m) = model::fit_controlled(*m, objective, &opts, None, control).map_err(fit_err)?;
-                (r, qwen3::finetune::Trained::Single(Box::new(m)))
-            }
-            qwen3::finetune::Trained::Pipeline(m) => {
-                let (r, m) = model::fit_controlled(*m, objective, &opts, None, control).map_err(fit_err)?;
-                (r, qwen3::finetune::Trained::Pipeline(Box::new(m)))
-            }
+        let job = PreferenceJob {
+            base: &weights,
+            lora: model::finetune::LoraRequest { rank, alpha, continue_from: self.continue_from.as_deref() },
+            opts: &opts,
+            dpo: rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight },
+            pairs: packed,
+            adapter: &adapter_path,
+            lineage: model::finetune::AdapterLineage { card_id: &adapter_id, base_id: &base_id, dataset_id: Some(&dataset_id), provenance: Some(provenance) },
         };
+        let report = (chat.preference)(job, control).map_err(|e| Error::Backend(format!("training: {e}")))?;
 
         let mut outcome = PreferenceFineTuneOutcome {
             status: FineTuneStatus::Completed,
@@ -378,40 +397,11 @@ impl PreferenceFineTune {
             return Ok(outcome);
         }
 
-        let adapter_path = out_dir.join(ADAPTER_FILE);
-        let adapter_id = self.adapter_id.clone().unwrap_or_else(|| format!("{base_id}:local:dpo:latest"));
-        let provenance = checkpoint::st::TrainingProvenance {
-            code_revision: format!("brain {}", env!("CARGO_PKG_VERSION")),
-            regime: "dpo".to_string(),
-            seed,
-            hyperparams: serde_json::json!({
-                "rank": rank,
-                "alpha": alpha,
-                "beta": self.beta,
-                "nll_weight": self.nll_weight,
-                "grad_accum": self.grad_accum,
-                "keep_reasoning": self.keep_reasoning,
-                "steps": self.steps,
-                "lr": self.lr,
-                "block": block,
-                "train_pairs": outcome.train_pairs,
-                "reference": { "base_digest": base_digest, "adapter_digest": parent },
-            }),
-            environment: gpu_core::backend_name().to_string(),
-            gate: None,
-            trained_from: parent,
-            base_digest: Some(base_digest),
-            cycle: self.cycle,
-        };
-        trained.save_adapter_with_lineage(utf8(&adapter_path)?, &adapter_id, &base_id, Some(&dataset_id), Some(provenance))
-            .map_err(|e| Error::Backend(format!("{}: saving the adapter: {e}", adapter_path.display())))?;
-        drop(trained);
         outcome.adapter_digest = Some(digest(&adapter_path)?);
 
-        let reference = self.continue_from.as_deref().map(utf8).transpose()?;
-        let adapter_str = utf8(&adapter_path)?;
-        outcome.train_score = Some(score_pairs(weights_str, reference, adapter_str, &train));
-        outcome.held_out_score = held_out.as_ref().map(|pairs| score_pairs(weights_str, reference, adapter_str, pairs));
+        let reference = self.continue_from.as_deref();
+        outcome.train_score = score_pairs(&chat, &weights, reference, &adapter_path, &train);
+        outcome.held_out_score = held_out.as_ref().and_then(|pairs| score_pairs(&chat, &weights, reference, &adapter_path, pairs));
         outcome.adapter = Some(adapter_path);
 
         let record_path = out_dir.join(RECORD_FILE);
@@ -533,23 +523,25 @@ pub fn score_preference(base: &str, adapter: &Path, dataset: &Path) -> Result<Pr
     checkpoint::st::read_card(utf8(adapter)?).map_err(|e| Error::Backend(format!("{}: {e}", adapter.display())))?;
     let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
     let pairs = encode_checked(dataset, &tok, &tmpl, None, data::chat::RenderOpts::default())?;
-    Ok(score_pairs(weights_str, None, utf8(adapter)?, &pairs))
+    // Scoring folds an adapter into the base the way serving does: a qwen3 path.
+    let chat = crate::study::arch("qwen3")?.chat.expect("qwen3 has chat fine-tuners");
+    score_pairs(&chat, &weights, None, adapter, &pairs).ok_or_else(|| Error::Backend("qwen3 does not score preference pairs".to_string()))
 }
 
 /// The policy `weights` + `policy` against the reference `weights` +
 /// `reference` (or the base alone), on a scoring row that fits the longest
-/// candidate.
-fn score_pairs(weights: &str, reference: Option<&str>, policy: &str, pairs: &[(EncodedTurn, EncodedTurn)]) -> PreferenceScore {
+/// candidate; `None` when the architecture does not score preference pairs.
+fn score_pairs(chat: &ChatEntry, weights: &Path, reference: Option<&Path>, policy: &Path, pairs: &[(EncodedTurn, EncodedTurn)]) -> Option<PreferenceScore> {
     let block = block_for(longest(pairs), None).expect("no cap, so every length fits");
-    let m = qwen3::eval::preference_margins(weights, reference, Some(policy), pairs, block);
+    let m = (chat.margins)(weights, reference, policy, pairs, block)?;
     let n = m.margins.len();
     let scored = (n > 0).then_some(n as f64);
-    PreferenceScore {
+    Some(PreferenceScore {
         accuracy: scored.map(|n| (m.margins.iter().filter(|&&x| x > 0.0).count() as f64 / n) as f32),
         mean_margin: scored.map(|n| (m.margins.iter().sum::<f64>() / n) as f32),
         pairs: n,
         skipped: m.skipped,
-    }
+    })
 }
 
 fn encode_checked(path: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, max_block: Option<u32>, render: data::chat::RenderOpts) -> Result<Vec<(EncodedTurn, EncodedTurn)>> {
@@ -562,14 +554,4 @@ fn encode_checked(path: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, max_block: Op
 
 fn longest(pairs: &[(EncodedTurn, EncodedTurn)]) -> usize {
     pairs.iter().map(|(c, r)| c.ids.len().max(r.ids.len())).max().unwrap_or(0)
-}
-
-/// The trainable LoRA policy at `opts`' two rows and context: the same
-/// start (`qwen3::finetune::lora_start`) and footprint-checked placement
-/// `qwen3::finetune::finetune_lora_controlled` builds, with the adapter's
-/// moments kept on the device so the run can be resumed exactly.
-fn lora_model(weights: &str, rank: u32, alpha: f32, opts: &model::FitOpts, start: &qwen3::finetune::LoraStart<'_>) -> Result<qwen3::finetune::Trained> {
-    let (cfg, init) = qwen3::finetune::lora_start(weights, rank, alpha, opts.seed, start).map_err(|e| Error::Backend(format!("{weights}: {e}")))?;
-    let built = model::offload::with_adam_offloaded(false, || qwen3::finetune::build_trainer(cfg, opts, &init, gpu_core::select::Dtype::F32));
-    built.map_err(|e| Error::Backend(e.to_string()))
 }

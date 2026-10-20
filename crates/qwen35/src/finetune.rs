@@ -20,7 +20,7 @@ use model::ops::TierPolicy;
 use model::adapter::device::AdapterTuning;
 use model::FitOpts;
 
-use crate::base_source::{lora_base_tuned, BaseDtype};
+use crate::base_source::{lora_base_tuned, open_base, BaseCheckpoint, BaseDtype};
 use crate::config::{lora_targets, LoraCfg, Qwen35Config};
 use crate::model::{pipelines, Qwen35, TrainOpts};
 
@@ -313,6 +313,96 @@ pub fn finetune_lora_tuned(
     finetune_lora_scored_tuned(base, dir, opts, rank, alpha, tuning, resume_from, run, control, &[]).map(|(report, trained, _)| (report, trained))
 }
 
+/// The LoRA model of the base at `base`, its frozen linears held at
+/// `run.dtype` and streamed from disk, sized for `opts`' rows.
+fn build_lora_model(base: &Path, opts: &FitOpts, rank: u32, alpha: f32, tuning: AdapterTuning, resume_from: Option<&Path>, run: &StreamedRun) -> std::io::Result<Qwen35> {
+    let (dtype, recompute) = (run.dtype, run.recompute);
+    // One micro-step of more than a few thousand tokens only fits the card with
+    // the long-sequence settings (segmented Gated-DeltaNet layers, a bf16
+    // residual stream, an MLP run in token chunks), which need a batch of one:
+    // refuse a wide batch up front and name the way to get the same effective
+    // batch (`--batch 1 --grad-accum G`) instead of failing deep in the run.
+    let tokens = opts.batch_size as u64 * opts.block_size as u64;
+    if recompute && opts.batch_size > 1 && tokens > LONG_STEP_TOKENS as u64 {
+        return Err(unsupported(format!(
+            "batch {} x seq-len {} is {tokens} tokens per micro-step; a {} base trains up to {LONG_STEP_TOKENS} tokens per micro-step in a batch wider than one. Use --batch 1 with --grad-accum {} for the same effective batch",
+            opts.batch_size,
+            opts.block_size,
+            dtype.name(),
+            opts.batch_size * opts.grad_accum.max(1),
+        )));
+    }
+    let (cfg, src) = lora_base_tuned(base, rank, alpha, tuning, opts.seed, resume_from).map_err(unsupported)?;
+    let train = streamed_train_opts(run, opts.batch_size, opts.block_size, cfg.mtp).map_err(unsupported)?;
+    let t_load = std::time::Instant::now();
+    let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &src, &train);
+    eprintln!(
+        "qwen35 finetune: base loaded as {} in {:.1}s (gdn segment {:?}, mlp rows {:?}, bf16 residuals {})",
+        dtype.name(),
+        t_load.elapsed().as_secs_f64(),
+        train.gdn_segment_tokens,
+        train.mlp_rows,
+        train.bf16_residuals
+    );
+    Ok(m)
+}
+
+/// Qwen3.5 as a [`model::finetune::ChatTrainer`]: the generic full-parameter,
+/// LoRA and preference fine-tuners run on it. The base is held at fp32 (the
+/// tier these trainers expose; `ChatFineTune` picks narrower ones itself).
+pub struct Qwen35Trainer;
+
+impl model::finetune::ChatTrainer for Qwen35Trainer {
+    type Trained = Qwen35;
+
+    fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {
+        qwen3::store_checkpoint_path(weights, model_dir)
+    }
+
+    fn vocab(open: &Path) -> Result<usize, String> {
+        Ok(open_base(open)?.cfg.vocab as usize)
+    }
+
+    /// Every weight trains in fp32; the moments follow `state`.
+    fn train_full(base: &Path, opts: &FitOpts, state: model::finetune::OptimizerState, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Qwen35)> {
+        let BaseCheckpoint { cfg, src } = open_base(base).map_err(std::io::Error::other)?;
+        let train = TrainOpts::default();
+        let m = state.scope(|| Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &*src, &train));
+        fit.fit(m)
+    }
+
+    fn train_lora(base: &Path, lora: &model::finetune::LoraRequest<'_>, opts: &FitOpts, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Qwen35)> {
+        let run = StreamedRun { dtype: BaseDtype::F32, recompute: false, long: LongSeqOverrides::default() };
+        let m = model::finetune::OptimizerState::Device.scope(|| build_lora_model(base, opts, lora.rank, lora.alpha, AdapterTuning::default(), lora.continue_from, &run))?;
+        fit.fit(m)
+    }
+
+    fn save_adapter(trained: &Qwen35, path: &Path, lineage: &model::finetune::AdapterLineage<'_>) -> std::io::Result<()> {
+        let path = path.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "adapter path is not UTF-8"))?;
+        crate::lora::save_adapter_with_lineage(path, trained, lineage.card_id, lineage.base_id, lineage.dataset_id, lineage.provenance.clone())
+    }
+
+    /// The checkpoint directory holds the brain-format weights as
+    /// `model.safetensors` (which [`open_base`] reads back) and the tokenizer
+    /// files; there is no Hugging Face writer for this architecture, and an
+    /// adapter is not folded in.
+    fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>) -> Result<(), String> {
+        if adapter.is_some() {
+            return Err("qwen35 does not fold an adapter into a checkpoint yet".to_string());
+        }
+        std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+        let copy = |from: &Path, to: &Path| std::fs::copy(from, to).map(drop).map_err(|e| format!("{}: {e}", from.display()));
+        copy(trained, &out.join("model.safetensors"))?;
+        for f in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "generation_config.json"] {
+            let from = tokenizer_dir.join(f);
+            if from.is_file() {
+                copy(&from, &out.join(f))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// [`finetune_lora_controlled`] that also scores the prepared datasets in
 /// `held_out` (each a directory [`data::chat::prepare_chat_samples`] wrote, its
 /// validation split being the records to score) before the first step and
@@ -348,34 +438,7 @@ pub fn finetune_lora_scored_tuned(
     control: model::FitControl<'_>,
     held_out: &[&Path],
 ) -> std::io::Result<(model::FitReport, Qwen35, Vec<model::ScoredSet>)> {
-    let (dtype, recompute) = (run.dtype, run.recompute);
-    // One micro-step of more than a few thousand tokens only fits the card with
-    // the long-sequence settings (segmented Gated-DeltaNet layers, a bf16
-    // residual stream, an MLP run in token chunks), which need a batch of one:
-    // refuse a wide batch up front and name the way to get the same effective
-    // batch (`--batch 1 --grad-accum G`) instead of failing deep in the run.
-    let tokens = opts.batch_size as u64 * opts.block_size as u64;
-    if recompute && opts.batch_size > 1 && tokens > LONG_STEP_TOKENS as u64 {
-        return Err(unsupported(format!(
-            "batch {} x seq-len {} is {tokens} tokens per micro-step; a {} base trains up to {LONG_STEP_TOKENS} tokens per micro-step in a batch wider than one. Use --batch 1 with --grad-accum {} for the same effective batch",
-            opts.batch_size,
-            opts.block_size,
-            dtype.name(),
-            opts.batch_size * opts.grad_accum.max(1),
-        )));
-    }
-    let (cfg, src) = lora_base_tuned(base, rank, alpha, tuning, opts.seed, resume_from).map_err(unsupported)?;
-    let train = streamed_train_opts(run, opts.batch_size, opts.block_size, cfg.mtp).map_err(unsupported)?;
-    let t_load = std::time::Instant::now();
-    let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &src, &train);
-    eprintln!(
-        "qwen35 finetune: base loaded as {} in {:.1}s (gdn segment {:?}, mlp rows {:?}, bf16 residuals {})",
-        dtype.name(),
-        t_load.elapsed().as_secs_f64(),
-        train.gdn_segment_tokens,
-        train.mlp_rows,
-        train.bf16_residuals
-    );
+    let m = build_lora_model(base, opts, rank, alpha, tuning, resume_from, run)?;
     let (train_set, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let mut scored = model::score_base(&m, held_out, opts, resume_from.is_some())?;
     let obj = model::causal_lm::<Qwen35>(train_set, val, bcfg, itos);
