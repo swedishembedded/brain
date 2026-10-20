@@ -143,10 +143,11 @@ pub enum DeviceKind {
     Lora,
     Ia3,
     Lokr,
+    Dora,
 }
 
 impl DeviceKind {
-    pub const ALL: [DeviceKind; 3] = [DeviceKind::Lora, DeviceKind::Ia3, DeviceKind::Lokr];
+    pub const ALL: [DeviceKind; 4] = [DeviceKind::Lora, DeviceKind::Ia3, DeviceKind::Lokr, DeviceKind::Dora];
 
     /// The name an adapter file's card records.
     pub fn name(self) -> &'static str {
@@ -154,6 +155,7 @@ impl DeviceKind {
             DeviceKind::Lora => "lora",
             DeviceKind::Ia3 => "ia3",
             DeviceKind::Lokr => "lokr",
+            DeviceKind::Dora => "dora",
         }
     }
 
@@ -166,6 +168,7 @@ impl DeviceKind {
             DeviceKind::Lora => crate::lora::LoraPair::params(hp, spec),
             DeviceKind::Ia3 => Ia3::params(hp, spec),
             DeviceKind::Lokr => Lokr::params(hp, spec),
+            DeviceKind::Dora => Dora::params(hp, spec),
         }
     }
 
@@ -174,6 +177,7 @@ impl DeviceKind {
             DeviceKind::Lora => <crate::lora::LoraPair as AdapterGroups>::groups(hp),
             DeviceKind::Ia3 => Ia3::groups(hp),
             DeviceKind::Lokr => Lokr::groups(hp),
+            DeviceKind::Dora => Dora::groups(hp),
         }
     }
 
@@ -182,6 +186,7 @@ impl DeviceKind {
             DeviceKind::Lora => crate::lora::LoraPair::suffixes(),
             DeviceKind::Ia3 => Ia3::suffixes(),
             DeviceKind::Lokr => Lokr::suffixes(),
+            DeviceKind::Dora => Dora::suffixes(),
         }
     }
 
@@ -190,9 +195,17 @@ impl DeviceKind {
             DeviceKind::Lora => crate::lora::LoraPair::shape_from_len(suffix, rank, len),
             DeviceKind::Ia3 => Ia3::shape_from_len(suffix, rank, len),
             DeviceKind::Lokr => Lokr::shape_from_len(suffix, rank, len),
+            DeviceKind::Dora => Dora::shape_from_len(suffix, rank, len),
         }
     }
 }
+
+/// Suffixes of DoRA's tensors: the low-rank direction update `A [r, in]` and
+/// `B [out, r]`, and the magnitude `M [out]`, stored as the relative change
+/// of each output row's norm.
+pub const DORA_A: &str = ".dora_a";
+pub const DORA_B: &str = ".dora_b";
+pub const DORA_M: &str = ".dora_m";
 
 /// Suffix of IA3's output-channel scale: the stored value is the DELTA from 1
 /// (`y' = y * (1 + d)`), so a fresh adapter is exactly zero and invisible.
@@ -269,6 +282,50 @@ impl AdapterDefinition for Lokr {
 impl AdapterGroups for Lokr {
     fn groups(_hp: &TargetHp) -> Vec<ParamGroup> {
         vec![ParamGroup { suffix: LOKR_W1, trainable: true, lr_mult: 1.0 }, ParamGroup { suffix: LOKR_W2, trainable: true, lr_mult: 1.0 }]
+    }
+}
+
+/// DoRA: weight-decomposed low-rank adaptation (Liu et al. 2024,
+/// arXiv:2402.09353). The linear's direction is `W + scale*B*A`; each output row
+/// is rescaled to the magnitude `(1 + m_o) * |W_o|`, so a fresh adapter (`B = 0`,
+/// `m = 0`) is the identity. The row norms are computed on the device from the
+/// resident base weight and the factors, never from a dense `B*A`.
+pub struct Dora;
+
+impl AdapterDefinition for Dora {
+    fn kind_name() -> &'static str {
+        "dora"
+    }
+    fn params(hp: &TargetHp, spec: &TargetSpec) -> Vec<ParamSpec> {
+        vec![
+            ParamSpec { suffix: DORA_A, shape: vec![hp.rank, spec.inn], init: ParamInit::Drawn },
+            ParamSpec { suffix: DORA_B, shape: vec![spec.out, hp.rank], init: ParamInit::Zeros },
+            ParamSpec { suffix: DORA_M, shape: vec![spec.out], init: ParamInit::Zeros },
+        ]
+    }
+    fn suffixes() -> &'static [&'static str] {
+        &[DORA_A, DORA_B, DORA_M]
+    }
+    fn shape_from_len(suffix: &str, rank: usize, len: usize) -> Option<Vec<usize>> {
+        if len == 0 {
+            return None;
+        }
+        match suffix {
+            DORA_M => Some(vec![len]),
+            DORA_A if rank > 0 && len.is_multiple_of(rank) => Some(vec![rank, len / rank]),
+            DORA_B if rank > 0 && len.is_multiple_of(rank) => Some(vec![len / rank, rank]),
+            _ => None,
+        }
+    }
+}
+
+impl AdapterGroups for Dora {
+    fn groups(hp: &TargetHp) -> Vec<ParamGroup> {
+        vec![
+            ParamGroup { suffix: DORA_A, trainable: !hp.freeze_a, lr_mult: 1.0 },
+            ParamGroup { suffix: DORA_B, trainable: true, lr_mult: hp.lr_ratio },
+            ParamGroup { suffix: DORA_M, trainable: true, lr_mult: 1.0 },
+        ]
     }
 }
 

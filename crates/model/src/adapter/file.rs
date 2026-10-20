@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use super::device::param_name;
-use super::kind::{lokr_factors, DeviceKind, IA3_D, LOKR_W1, LOKR_W2};
+use super::kind::{lokr_factors, DeviceKind, DORA_A, DORA_B, DORA_M, IA3_D, LOKR_W1, LOKR_W2};
 use crate::lora::device_adapter::fold_delta;
 
 /// A saved adapter file: card fields, per-linear dimensions and tensors.
@@ -99,6 +99,15 @@ impl AdapterFile {
                     }
                     Fold::Ia3
                 }
+                DeviceKind::Dora => {
+                    let (a, b, mu) = (self.tensor(name, DORA_A)?, self.tensor(name, DORA_B)?, self.tensor(name, DORA_M)?);
+                    let r = self.rank as usize;
+                    let (inn, out) = (a.len() / r, b.len() / r);
+                    if out * inn != w.len() || mu.len() != out {
+                        return Err(format!("{name}: adapter is [{out}, {inn}] but the base weight holds {} values", w.len()));
+                    }
+                    Fold::Dora
+                }
                 DeviceKind::Lokr => {
                     let (w1, w2) = (self.tensor(name, LOKR_W1)?, self.tensor(name, LOKR_W2)?);
                     let (out, inn) = *self.dims.get(name).ok_or_else(|| format!("{name}: the file does not record this linear's dimensions"))?;
@@ -115,6 +124,32 @@ impl AdapterFile {
             let w = base.get_mut(&name).expect("validated above");
             match fold {
                 Fold::Lora => fold_delta(w, self.tensor(&name, super::kind::LORA_A)?, self.tensor(&name, super::kind::LORA_B)?, self.rank as usize, scale),
+                Fold::Dora => {
+                    let (a, b, mu) = (self.tensor(&name, DORA_A)?, self.tensor(&name, DORA_B)?, self.tensor(&name, DORA_M)?);
+                    let r = self.rank as usize;
+                    let (inn, out) = (a.len() / r, b.len() / r);
+                    // Row o of the folded weight is (1 + mu_o) |W_o| times the unit
+                    // direction of W_o + scale (B A)_o.
+                    let mut row = vec![0.0f32; inn];
+                    for o in 0..out {
+                        let wo = &mut w[o * inn..(o + 1) * inn];
+                        row.copy_from_slice(wo);
+                        for k in 0..r {
+                            let bok = scale * b[o * r + k];
+                            if bok != 0.0 {
+                                for i in 0..inn {
+                                    row[i] += bok * a[k * inn + i];
+                                }
+                            }
+                        }
+                        let nw = wo.iter().map(|v| v * v).sum::<f32>().sqrt();
+                        let nv = row.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-15);
+                        let g = (1.0 + mu[o]) * nw / nv;
+                        for i in 0..inn {
+                            wo[i] = g * row[i];
+                        }
+                    }
+                }
                 Fold::Ia3 => {
                     let d = self.tensor(&name, IA3_D)?;
                     let inn = w.len() / d.len();
@@ -149,6 +184,7 @@ impl AdapterFile {
 
 enum Fold {
     Lora,
+    Dora,
     Ia3,
     Lokr { out: usize, inn: usize },
 }

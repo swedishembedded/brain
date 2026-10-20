@@ -169,7 +169,7 @@ impl AdapterTuning {
     pub fn parse(variant: Option<&str>, plus_ratio: Option<&str>, kind: Option<&str>) -> Result<AdapterTuning, String> {
         let mut t = AdapterTuning::default();
         if let Some(k) = kind {
-            t.kind = DeviceKind::from_name(k).ok_or_else(|| format!("--adapter-kind {k:?}: expected lora, ia3 or lokr"))?;
+            t.kind = DeviceKind::from_name(k).ok_or_else(|| format!("--adapter-kind {k:?}: expected lora, ia3, lokr or dora"))?;
         }
         for word in variant.into_iter().flat_map(|v| v.split(',')).map(str::trim).filter(|w| !w.is_empty()) {
             match word {
@@ -192,8 +192,8 @@ impl AdapterTuning {
         if !(self.lr_ratio.is_finite() && self.lr_ratio > 0.0) {
             return Err(format!("the LoRA+ learning-rate ratio must be positive, got {}", self.lr_ratio));
         }
-        if self.kind != DeviceKind::Lora && (self.rank_stabilized || self.freeze_a || self.lr_ratio != 1.0) {
-            return Err(format!("rsLoRA, LoRA-FA and LoRA+ are LoRA variants; a {} adapter takes none of them", self.kind.name()));
+        if !matches!(self.kind, DeviceKind::Lora | DeviceKind::Dora) && (self.rank_stabilized || self.freeze_a || self.lr_ratio != 1.0) {
+            return Err(format!("rsLoRA, LoRA-FA and LoRA+ are low-rank variants; a {} adapter takes none of them", self.kind.name()));
         }
         Ok(())
     }
@@ -411,7 +411,7 @@ mod tests {
         assert!(AdapterTuning::parse(None, Some("fast"), None).unwrap_err().contains("--lora-plus-ratio"));
         assert_eq!(AdapterTuning::parse(None, None, Some("lokr")).unwrap().kind, DeviceKind::Lokr);
         assert!(AdapterTuning::parse(None, None, Some("oft")).unwrap_err().contains("--adapter-kind"));
-        assert!(AdapterTuning::parse(Some("rs"), None, Some("ia3")).unwrap_err().contains("LoRA variants"));
+        assert!(AdapterTuning::parse(Some("rs"), None, Some("ia3")).unwrap_err().contains("low-rank variants"));
     }
 
     #[test]

@@ -117,8 +117,8 @@ fn an_rslora_adapter_saved_reloaded_and_served_as_an_overlay_matches_the_trainin
 /// (`AdapterFile::fold_into`) and reloads into a fresh adapter build, each
 /// computing what the live adapter computes.
 #[test]
-fn ia3_and_lokr_fold_and_reload_on_the_hybrid_model() {
-    for kind in [model::adapter::DeviceKind::Ia3, model::adapter::DeviceKind::Lokr] {
+fn ia3_lokr_and_dora_fold_and_reload_on_the_hybrid_model() {
+    for kind in [model::adapter::DeviceKind::Ia3, model::adapter::DeviceKind::Lokr, model::adapter::DeviceKind::Dora] {
         let mut lora = lora_cfg(RANK, ALPHA);
         lora.kind = kind;
         let cfg = Qwen35Config { lora: Some(lora), ..Qwen35Config::tiny() };

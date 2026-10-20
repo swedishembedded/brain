@@ -8,7 +8,7 @@
 // info@swedishembedded.com.
 
 //! Gate A1: the device-side adapter variants (plain LoRA, rsLoRA, LoRA+,
-//! per-target rank and alpha, LoRA-FA, IA3, LoKr) match central finite differences on a tiny decoder with adapters on
+//! per-target rank and alpha, LoRA-FA, IA3, LoKr, DoRA) match central finite differences on a tiny decoder with adapters on
 //! every projection, and the parameter groups do what the variant says:
 //! LoRA-FA leaves `A` exactly at its init while `B` trains, LoRA+ moves `B`
 //! `lr_ratio` times as far as plain LoRA on the first Adam step.
@@ -30,7 +30,8 @@ fn variants() -> Vec<(&'static str, LoraCfg)> {
         ("per-target", plain.clone().with_override("wq", Some(3), Some(3.0)).with_override("up", Some(1), Some(5.0))),
         ("lora-fa", LoraCfg { freeze_a: true, ..plain.clone() }),
         ("ia3", plain.clone().with_kind(DeviceKind::Ia3)),
-        ("lokr", plain.with_kind(DeviceKind::Lokr)),
+        ("lokr", plain.clone().with_kind(DeviceKind::Lokr)),
+        ("dora", plain.with_kind(DeviceKind::Dora)),
     ]
 }
 

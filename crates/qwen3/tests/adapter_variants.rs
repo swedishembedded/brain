@@ -112,13 +112,13 @@ fn folds_and_overlays(lora: LoraCfg) {
     std::fs::remove_file(&path).ok();
 }
 
-/// IA3 and LoKr have no low-rank form: a saved file folds into the base
+/// IA3, LoKr and DoRA have no low-rank form: a saved file folds into the base
 /// (`AdapterFile::fold_into`), attaches beside the unmodified base through the
 /// shared adapter runtime, and reloads into a fresh adapter build - each giving
 /// the trained model's logits.
 #[test]
-fn ia3_and_lokr_fold_overlay_and_reload_to_the_trained_models_logits() {
-    for kind in [model::adapter::DeviceKind::Ia3, model::adapter::DeviceKind::Lokr] {
+fn ia3_lokr_and_dora_fold_overlay_and_reload_to_the_trained_models_logits() {
+    for kind in [model::adapter::DeviceKind::Ia3, model::adapter::DeviceKind::Lokr, model::adapter::DeviceKind::Dora] {
         let lora = variant_base().with_kind(kind);
         let cfg = QwenConfig { lora: Some(lora), ..QwenConfig::tiny() };
         let init = qwen3::init_weights(&cfg, 21);

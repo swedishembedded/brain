@@ -657,6 +657,9 @@ pub fn finetune_lora_tuned(
     mut control: model::FitControl<'_>,
     base_dtype: Dtype,
 ) -> std::io::Result<(model::FitReport, Trained)> {
+    if tuning.kind == model::adapter::DeviceKind::Dora && base_dtype != Dtype::F32 {
+        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("a dora adapter reads the base weight, which a {base_dtype:?} base does not keep as fp32")));
+    }
     let (cfg, init) = lora_start_tuned(base, rank, alpha, tuning, opts.seed, start)?;
     // The adapter files the run writes at its evaluations are of the shape it
     // builds.

@@ -470,6 +470,9 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     // `full` is the default mode because that is what the sibling verbs mean
     // by a plain finetune: `brain qwen3 finetune` and `brain glm finetune`
     // are both full-parameter unless a LoRA rank is asked for explicitly.
+    if tuning.kind == model::adapter::DeviceKind::Dora && base_dtype.is_frozen_only() {
+        return Err(format!("--adapter-kind dora reads the base weight, so it needs --base-dtype f32 (a {} base is held narrow)", base_dtype.name()));
+    }
     let mode = match mode_name.as_str() {
         "full" => qwen35::finetune::Mode::FullOffload,
         "lora" => qwen35::finetune::Mode::Lora { rank, alpha, tuning },
@@ -805,7 +808,7 @@ mod finetune_cli_tests {
 
         // Every adapter method trains through the same entry and writes a file
         // whose card names it.
-        for kind in ["lora", "ia3", "lokr"] {
+        for kind in ["lora", "ia3", "lokr", "dora"] {
             let _ = std::fs::remove_file(&out);
             let ft = parse_finetune(&argv(&[
                 data.to_str().unwrap(), "--base", base.to_str().unwrap(), "--out", out.to_str().unwrap(), "--mode", "lora", "--lora-rank", "2", "--adapter-kind", kind,

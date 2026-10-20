@@ -35,14 +35,21 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use paramstore::ParamStore;
 
 use super::device::{lora_names, param_name, LoraCfg};
-use super::kind::{lokr_factors, DeviceKind, IA3_D, LOKR_W1, LOKR_W2};
+use super::kind::{lokr_factors, DeviceKind, DORA_A, DORA_B, DORA_M, IA3_D, LOKR_W1, LOKR_W2};
 use crate::block;
 
 /// Kernels the non-LoRA kinds dispatch beyond the ones every adapter model
 /// registers; a model that trains such a kind appends them to its pipelines
 /// with [`add_kernels`].
 pub const EXTRA_KERNELS: &[(&str, &str)] =
-    &[("scale_chan", kernels::SCALE_CHAN), ("swap_axes12_vec", kernels::SWAP_AXES12_VEC), ("bias_grad", kernels::BIAS_GRAD)];
+    &[
+    ("scale_chan", kernels::SCALE_CHAN),
+    ("swap_axes12_vec", kernels::SWAP_AXES12_VEC),
+    ("bias_grad", kernels::BIAS_GRAD),
+    ("row_dot", kernels::ROW_DOT),
+    ("dora_gain", kernels::DORA_GAIN),
+    ("dora_gain_bwd", kernels::DORA_GAIN_BWD),
+];
 
 /// Append [`EXTRA_KERNELS`] a pipeline list does not already hold. Appending
 /// keeps every existing kernel's index.
@@ -61,6 +68,12 @@ pub trait ParamAccess {
     fn weight(&self, name: &str) -> &DeviceBuffer;
     /// `None` for a frozen tensor (no gradient buffer exists).
     fn grad(&self, name: &str) -> Option<&DeviceBuffer>;
+    /// The base weight `name` as a resident fp32 `[out, in]` buffer, when it
+    /// is one. A kind that reads the base itself (DoRA's row norms) needs it;
+    /// a quantized base answers `None` and the kind refuses.
+    fn base(&self, _name: &str) -> Option<&DeviceBuffer> {
+        None
+    }
 }
 
 impl ParamAccess for ParamStore {
@@ -69,6 +82,9 @@ impl ParamAccess for ParamStore {
     }
     fn grad(&self, name: &str) -> Option<&DeviceBuffer> {
         self.grad.get(name)
+    }
+    fn base(&self, name: &str) -> Option<&DeviceBuffer> {
+        self.weight.get(name)
     }
 }
 
@@ -90,6 +106,9 @@ struct Kernels {
     scale_chan: Option<usize>,
     swap: Option<usize>,
     bias_grad: Option<usize>,
+    row_dot: Option<usize>,
+    dora_gain: Option<usize>,
+    dora_gain_bwd: Option<usize>,
 }
 
 impl Kernels {
@@ -105,6 +124,9 @@ impl Kernels {
             scale_chan: gpu.kernel_index("scale_chan"),
             swap: gpu.kernel_index("swap_axes12_vec"),
             bias_grad: gpu.kernel_index("bias_grad"),
+            row_dot: gpu.kernel_index("row_dot"),
+            dora_gain: gpu.kernel_index("dora_gain"),
+            dora_gain_bwd: gpu.kernel_index("dora_gain_bwd"),
         }
     }
 
@@ -139,7 +161,8 @@ pub struct AdapterRuntime {
     dmid: DeviceBuffer,
     /// The correction before it is added to the base output, `[rows, max_out]`.
     out: DeviceBuffer,
-    /// A vector of ones, for the channel kernel used as a copy.
+    /// A vector of ones (`max_out * max_rank` long), for the channel kernel used
+    /// as a copy.
     ones: DeviceBuffer,
     /// General scratch of the kinds that need more than `mid`/`dmid`/`out`.
     scratch: RefCell<Vec<Option<Scratch>>>,
@@ -150,7 +173,7 @@ pub struct AdapterRuntime {
     reference: LibraryGemmProvider,
 }
 
-const SCRATCH_SLOTS: usize = 4;
+const SCRATCH_SLOTS: usize = 24;
 
 impl AdapterRuntime {
     /// Scratch for forwards and backwards of up to `rows` rows through linears
@@ -164,7 +187,7 @@ impl AdapterRuntime {
             mid: gpu.storage(rows as u64 * r),
             dmid: gpu.storage(rows as u64 * r),
             out: gpu.storage(rows as u64 * max_out as u64),
-            ones: gpu.storage_init("adapter_ones", &vec![1.0f32; max_out as usize]),
+            ones: gpu.storage_init("adapter_ones", &vec![1.0f32; max_out as usize * r as usize]),
             scratch: RefCell::new((0..SCRATCH_SLOTS).map(|_| None).collect()),
             saved: RefCell::new(HashMap::new()),
             reference: LibraryGemmProvider::for_gpu(gpu, GemmPrecision::Fp32Reference),
@@ -217,9 +240,10 @@ impl AdapterRuntime {
     #[allow(clippy::too_many_arguments)]
     pub fn forward(&self, gemm: &LibraryGemmProvider, s: &mut Vec<Step>, p: &dyn ParamAccess, base: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         match self.cfg.kind {
-            DeviceKind::Lora => self.lora_forward(gemm, s, p, base, x, y, m, k, nout),
+            DeviceKind::Lora => self.lora_forward(gemm, s, p, base, lora_names(base), x, y, m, k, nout),
             DeviceKind::Ia3 => self.ia3_forward(s, p, base, y, m, nout),
             DeviceKind::Lokr => self.lokr_forward(s, p, base, x, y, m, k, nout),
+            DeviceKind::Dora => self.dora_forward(gemm, s, p, base, x, y, m, k, nout),
         }
     }
 
@@ -246,13 +270,14 @@ impl AdapterRuntime {
         match self.cfg.kind {
             DeviceKind::Lora => {
                 base_dx(s, d_out);
-                self.lora_backward(gemm, s, p, base, d_out, x, dx, m, k, nout);
+                self.lora_backward(gemm, s, p, base, lora_names(base), d_out, x, dx, m, k, nout);
             }
             DeviceKind::Ia3 => self.ia3_backward(s, p, base, d_out, m, nout, base_dx),
             DeviceKind::Lokr => {
                 base_dx(s, d_out);
                 self.lokr_backward(s, p, base, d_out, x, dx, m, k, nout);
             }
+            DeviceKind::Dora => self.dora_backward(gemm, s, p, base, d_out, x, dx, m, k, nout, base_dx),
         }
     }
 
@@ -261,8 +286,7 @@ impl AdapterRuntime {
     /// GEMV for the first product where the device runs it, since at decode
     /// `m = 1` the naive kernel would run `r` threads down a long serial loop).
     #[allow(clippy::too_many_arguments)]
-    fn lora_forward(&self, gemm: &LibraryGemmProvider, s: &mut Vec<Step>, p: &dyn ParamAccess, base: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        let (an, bn) = lora_names(base);
+    fn lora_forward(&self, gemm: &LibraryGemmProvider, s: &mut Vec<Step>, p: &dyn ParamAccess, base: &str, (an, bn): (String, String), x: &DeviceBuffer, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         let (a, b) = (p.weight(&an), p.weight(&bn));
         let hp = self.cfg.hp_for(base);
         let (r, scale) = (hp.rank as u32, hp.scale());
@@ -287,8 +311,7 @@ impl AdapterRuntime {
     /// With `mid = scale * x A^t` and `dmid = scale * d_out B`: `gB += d_out^t
     /// mid`, `gA += dmid^t x` (skipped when `A` is frozen), `dx += dmid A`.
     #[allow(clippy::too_many_arguments)]
-    fn lora_backward(&self, gemm: &LibraryGemmProvider, s: &mut Vec<Step>, p: &dyn ParamAccess, base: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, dx: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        let (an, bn) = lora_names(base);
+    fn lora_backward(&self, gemm: &LibraryGemmProvider, s: &mut Vec<Step>, p: &dyn ParamAccess, base: &str, (an, bn): (String, String), d_out: &DeviceBuffer, x: &DeviceBuffer, dx: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         let (a, b) = (p.weight(&an), p.weight(&bn));
         let gb = p.grad(&bn).unwrap_or_else(|| panic!("adapter runtime: {bn} has no gradient buffer"));
         let ga = p.grad(&an);
@@ -425,5 +448,128 @@ impl AdapterRuntime {
             s.push(self.dw(&[&t, x, g2], m * b, d, c));
         }
         s.push(self.dx(&[&t, w2, dx], m * b, d, c, 1));
+    }
+    /// `out[r] = alpha * sum_d a[r, d] * b[r, d]` over `rows` rows of width `d`.
+    fn row_dot(&self, kind: DeviceKind, a: &DeviceBuffer, b: &DeviceBuffer, out: &DeviceBuffer, rows: u32, d: u32) -> Step {
+        let kern = Kernels::extra(self.k.row_dot, "row_dot", kind);
+        self.gpu.step(kern, &[a, b, out], &[rows, d, 0, 0, f(1.0)], rows)
+    }
+
+    /// The base weight of `base`, resident as fp32: DoRA reads it for row norms.
+    fn dora_base<'a>(p: &'a dyn ParamAccess, base: &str) -> &'a DeviceBuffer {
+        p.base(base).unwrap_or_else(|| panic!("adapter runtime: a dora adapter needs {base} resident as fp32; a quantized or half-precision base is not supported"))
+    }
+
+    /// DoRA's per-channel gain of `base`: `g = (1 + mu) * |W_o| / |W_o + s (BA)_o|`
+    /// and the pieces the backward reads, written to scratch. The row norms come
+    /// from `|W_o|^2` and the products `C = W A^t`, `G = A A^t`, `B G` - never from
+    /// a dense `B A`. Returns `(gain [g | ratio | 1/v2], C [out, r], B G [out, r])`.
+    #[allow(clippy::too_many_arguments)]
+    fn dora_gain(&self, s: &mut Vec<Step>, p: &dyn ParamAccess, base: &str, r: u32, k: u32, nout: u32, scale: f32) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+        let kind = DeviceKind::Dora;
+        let (a, b, mu) = (p.weight(&param_name(base, DORA_A)), p.weight(&param_name(base, DORA_B)), p.weight(&param_name(base, DORA_M)));
+        let w = Self::dora_base(p, base);
+        let rr = (r * nout) as u64;
+        let (ct, gm, bg, cm) = (self.scratch(4, rr), self.scratch(5, (r * r) as u64), self.scratch(6, rr), self.scratch(7, rr));
+        let (w2, s1, s2, gain) = (self.scratch(8, nout as u64), self.scratch(9, nout as u64), self.scratch(10, nout as u64), self.scratch(11, 3 * nout as u64));
+        let g = &self.gpu;
+        s.push(g.step(self.k.matmul, &[a, w, &ct], &[r, k, nout], r * nout));
+        s.push(g.step(self.k.matmul, &[a, a, &gm], &[r, k, r], r * r));
+        s.push(g.step(self.k.matmul, &[b, &gm, &bg], &[nout, r, r], nout * r));
+        s.push(self.swap(&ct, &cm, 1, r, nout));
+        s.push(self.row_dot(kind, w, w, &w2, nout, k));
+        s.push(self.row_dot(kind, b, &cm, &s1, nout, r));
+        s.push(self.row_dot(kind, b, &bg, &s2, nout, r));
+        let kern = Kernels::extra(self.k.dora_gain, "dora_gain", kind);
+        s.push(g.step(kern, &[&w2, &s1, &s2, mu, &gain], &[nout, f(scale)], nout));
+        (gain, cm, bg)
+    }
+
+    /// DoRA forward: `y = (x W^t + s (x A^t) B^t) * g`. The pre-scale output is
+    /// saved for the gradient of `g`.
+    #[allow(clippy::too_many_arguments)]
+    fn dora_forward(&self, gemm: &LibraryGemmProvider, s: &mut Vec<Step>, p: &dyn ParamAccess, base: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+        let hp = self.cfg.hp_for(base);
+        let (r, scale) = (hp.rank as u32, hp.scale());
+        let names = (param_name(base, DORA_A), param_name(base, DORA_B));
+        self.lora_forward(gemm, s, p, base, names, x, y, m, k, nout);
+        let total = m * nout;
+        let saved = self.saved(base, total as u64);
+        s.push(self.chan(DeviceKind::Dora, y, &self.ones, &saved, total, nout, 1));
+        let (gain, _, _) = self.dora_gain(s, p, base, r, k, nout, scale);
+        s.push(self.chan(DeviceKind::Dora, &saved, &gain, y, total, nout, 1));
+    }
+
+    /// DoRA backward. The gradient reaching the pre-scale output is
+    /// `d_out * g`: it goes to the base and through the low-rank path like
+    /// LoRA's. The gradient of `g` gives the magnitude gradient and, through the
+    /// row norms, a direction gradient `dV_o = c_o V_o` that reaches `A` and `B`
+    /// as `dB = s diag(c)(C + s B G)` and `dA = s E^t W + s^2 (E^t B) A` with
+    /// `E = diag(c) B`.
+    #[allow(clippy::too_many_arguments)]
+    fn dora_backward(
+        &self,
+        gemm: &LibraryGemmProvider,
+        s: &mut Vec<Step>,
+        p: &dyn ParamAccess,
+        base: &str,
+        d_out: &DeviceBuffer,
+        x: &DeviceBuffer,
+        dx: &DeviceBuffer,
+        m: u32,
+        k: u32,
+        nout: u32,
+        base_dx: &dyn Fn(&mut Vec<Step>, &DeviceBuffer),
+    ) {
+        let kind = DeviceKind::Dora;
+        let hp = self.cfg.hp_for(base);
+        let (r, scale) = (hp.rank as u32, hp.scale());
+        let (an, bn, mn) = (param_name(base, DORA_A), param_name(base, DORA_B), param_name(base, DORA_M));
+        let (a, b) = (p.weight(&an), p.weight(&bn));
+        let w = Self::dora_base(p, base);
+        let g = &self.gpu;
+        let total = m * nout;
+        let saved = self.saved(base, total as u64);
+        let (gain, cm, bg) = self.dora_gain(s, p, base, r, k, nout, scale);
+
+        // dg_o = sum_m d_out * y_pre; gmu += dg * ratio; c = -dg * g / v2.
+        let prod = self.scratch(12, total as u64);
+        let dg = self.scratch(13, nout as u64);
+        s.push(self.chan(kind, d_out, &saved, &prod, total, total, 1));
+        s.push(g.step(self.k.grad_scale, &[&dg], &[nout, f(0.0)], nout));
+        s.push(g.step(Kernels::extra(self.k.bias_grad, "bias_grad", kind), &[&prod, &dg], &[m, nout], nout));
+        let gmu = match p.grad(&mn) {
+            Some(gm) => gm.clone(),
+            None => self.scratch(14, nout as u64),
+        };
+        let cvec = self.scratch(15, nout as u64);
+        s.push(g.step(Kernels::extra(self.k.dora_gain_bwd, "dora_gain_bwd", kind), &[&dg, &gain, &gmu, &cvec], &[nout], nout));
+
+        // The pre-scale gradient: to the base, and through the low-rank path.
+        let dy = self.scratch(16, total as u64);
+        s.push(self.chan(kind, d_out, &gain, &dy, total, nout, 1));
+        base_dx(s, &dy);
+        self.lora_backward(gemm, s, p, base, (an.clone(), bn.clone()), &dy, x, dx, m, k, nout);
+
+        // The norm path into the direction.
+        let rr = (r * nout) as u64;
+        let (m1, d_b, e, et) = (self.scratch(17, rr), self.scratch(18, rr), self.scratch(19, rr), self.scratch(20, rr));
+        s.push(self.chan(kind, &cm, &self.ones, &m1, nout * r, nout * r, 1));
+        s.push(g.step(self.k.axpy, &[&m1, &bg], &[nout * r, f(scale)], nout * r));
+        s.push(self.chan(kind, &m1, &cvec, &d_b, nout * r, nout, r));
+        s.push(g.step(self.k.grad_scale, &[&d_b], &[nout * r, f(scale)], nout * r));
+        let gb = p.grad(&bn).unwrap_or_else(|| panic!("adapter runtime: {bn} has no gradient buffer"));
+        s.push(g.step(self.k.axpy, &[gb, &d_b], &[nout * r, f(1.0)], nout * r));
+        if let Some(ga) = p.grad(&an) {
+            s.push(self.chan(kind, b, &cvec, &e, nout * r, nout, r));
+            s.push(self.swap(&e, &et, 1, nout, r));
+            let (f1, f2, etb) = (self.scratch(21, (r * k) as u64), self.scratch(22, (r * k) as u64), self.scratch(23, (r * r) as u64));
+            s.push(self.gpu.step(self.k.dx, &[&et, w, &f1], &[r, k, nout, 0], r * k));
+            s.push(g.step(self.k.grad_scale, &[&etb], &[r * r, f(0.0)], r * r));
+            s.push(self.gpu.step(self.k.dw, &[&e, b, &etb], &[nout, r, r], r * r));
+            s.push(self.gpu.step(self.k.dx, &[&etb, a, &f2], &[r, k, r, 0], r * k));
+            s.push(g.step(self.k.axpy, &[ga, &f1], &[r * k, f(scale)], r * k));
+            s.push(g.step(self.k.axpy, &[ga, &f2], &[r * k, f(scale * scale)], r * k));
+        }
     }
 }

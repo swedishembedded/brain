@@ -878,9 +878,15 @@ struct AttachedRuntime {
     rank: u32,
     alpha: f32,
     params: HashMap<String, DeviceBuffer>,
+    /// The fp32 base weights of the adapted linears, for the kinds that read
+    /// them (DoRA).
+    bases: HashMap<String, DeviceBuffer>,
 }
 
 impl model::adapter::exec::ParamAccess for AttachedRuntime {
+    fn base(&self, name: &str) -> Option<&DeviceBuffer> {
+        self.bases.get(name)
+    }
     fn weight(&self, name: &str) -> &DeviceBuffer {
         &self.params[name]
     }
@@ -3458,6 +3464,7 @@ impl Qwen {
     fn attach_runtime_adapter(&mut self, file: &model::adapter::file::AdapterFile) -> Result<(), String> {
         let sites = self.cfg.lora_sites();
         let mut params = HashMap::new();
+        let mut bases = HashMap::new();
         for base in file.bases() {
             let site = sites.iter().find(|s| s.name == base).ok_or_else(|| format!("{base} is not a linear of this model"))?;
             if let Some((out, inn)) = file.dims.get(&base) {
@@ -3467,6 +3474,14 @@ impl Qwen {
             }
             if !linear_layer(&base, self.cfg.n_layers).is_some_and(|l| self.shard.owns(l)) {
                 continue;
+            }
+            if file.kind == model::adapter::DeviceKind::Dora {
+                match self.ps.weight.get(&base) {
+                    Some(w) => {
+                        bases.insert(base.clone(), w.clone());
+                    }
+                    None => return Err(format!("{base}: a dora adapter reads the base weight, which must be resident as fp32")),
+                }
             }
             for suffix in file.kind.suffixes() {
                 let name = model::adapter::device::param_name(&base, suffix);
@@ -3481,7 +3496,7 @@ impl Qwen {
         let cfg = LoraCfg::new(file.rank, file.alpha, file.targets.clone()).with_kind(file.kind);
         let max_out = sites.iter().map(|s| s.spec.out as u32).max().unwrap_or(1);
         let rt = AdapterRuntime::new(&self.gpu, &cfg, self.rows, max_out);
-        self.set_override(Some(AdapterOverride::Runtime(Box::new(AttachedRuntime { rt, rank: file.rank, alpha: file.alpha, params }))));
+        self.set_override(Some(AdapterOverride::Runtime(Box::new(AttachedRuntime { rt, rank: file.rank, alpha: file.alpha, params, bases }))));
         Ok(())
     }
 
