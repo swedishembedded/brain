@@ -111,37 +111,7 @@ pub fn dequant_block128(raw: &[f32], scale_inv: &[f32], rows: usize, cols: usize
     out
 }
 
-/// Decode an `E5M2` (OCP FP8) byte to its OWN f32 value: 1 sign, 5 exponent
-/// (bias 15), 2 mantissa bits - unlike [`checkpoint::safetensors::e4m3fn_to_f32`]'s E4M3FN
-/// (this checkpoint format's usual raw byte, decoded by that function), E5M2
-/// HAS real infinities (`exponent==31, mantissa==0`), only `mantissa!=0` at
-/// `exponent==31` is NaN. No checkpoint import path in this tree reads E5M2
-/// today (`checkpoint::safetensors`'s own `F8_E5M2` arm is a loud `Err`) -
-/// this exists as the HOST-side parity oracle for `kernels::template::
-/// f8e5m2_decode_expr`'s device decode (M8.6), the same role
-/// [`checkpoint::safetensors::e4m3fn_to_f32`] already plays for E4M3.
-///
-/// Direct sign/exponent/mantissa field reconstruction (not a bit trick),
-/// same style as `checkpoint::safetensors::e4m3fn_to_f32_scalar` - this is
-/// the ORACLE the device decode is checked against, so it must be the most
-/// obviously-correct implementation available, not the fastest one.
-pub fn e5m2_to_f32(b: u8) -> f32 {
-    let sign = if b & 0x80 != 0 { -1.0f32 } else { 1.0f32 };
-    let exp = (b >> 2) & 0x1F;
-    let mant = (b & 0x03) as f32;
-    if exp == 0x1F {
-        if mant == 0.0 {
-            return sign * f32::INFINITY;
-        }
-        return f32::NAN;
-    }
-    if exp == 0 {
-        // subnormal: mant/4 * 2^(1-bias), bias=15 -> 2^-14
-        return sign * (mant / 4.0) * 2f32.powi(-14);
-    }
-    // normal: (1 + mant/4) * 2^(exp-bias)
-    sign * (1.0 + mant / 4.0) * 2f32.powi(exp as i32 - 15)
-}
+pub use checkpoint::safetensors::e5m2_to_f32;
 
 #[cfg(test)]
 mod tests {

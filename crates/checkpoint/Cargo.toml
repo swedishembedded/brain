@@ -10,6 +10,9 @@ name = "checkpoint"
 path = "src/lib.rs"
 
 [dependencies]
+# The NF4 codebook is owned by `kernels` (the device decode is generated from it); the
+# host codec reads that one table instead of keeping a second copy.
+brain-kernels.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 half.workspace = true

@@ -54,8 +54,7 @@ pub const NF4_LUT: [f32; 16] = kernels::template::NF4_CODEBOOK;
 /// `F4E2M1_LUT[code]` is exactly `sign(code) * magnitude(code & 0x7)`, spelled
 /// out as a flat table because the device kernel needs the SAME table, not
 /// the formula.
-pub const F4E2M1_LUT: [f32; 16] =
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0];
+pub const F4E2M1_LUT: [f32; 16] = checkpoint::packed::codec::E2M1_CODEBOOK;
 
 /// Group-wise codebook quantization of an `[n, k]` weight, following
 /// [`crate::int4::quantize_weight_q4`]'s packing exactly (`k` a multiple of
@@ -72,35 +71,12 @@ pub const F4E2M1_LUT: [f32; 16] =
 pub fn quantize_weight_lut4(w: &[f32], n: usize, k: usize, lut: &[f32; 16]) -> (Vec<u32>, Vec<f32>) {
     assert_eq!(k % GROUP, 0, "lut4 K must be a multiple of {GROUP} (got {k})");
     assert_eq!(w.len(), n * k, "weight len {} != n*k {}", w.len(), n * k);
-    let lut_absmax = lut.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8);
     let kg = k / 8;
     let gs = k / GROUP;
     let mut packed = vec![0u32; n * kg];
     let mut sw = vec![0f32; n * gs];
     backend_cpu::par::chunks2_mut(&mut packed, kg, &mut sw, gs, |r, prow, srow| {
-        let row = &w[r * k..r * k + k];
-        for (g, s) in srow.iter_mut().enumerate() {
-            let amax = row[g * GROUP..g * GROUP + GROUP].iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8);
-            *s = amax / lut_absmax;
-        }
-        for (g, word_out) in prow.iter_mut().enumerate() {
-            let inv = 1.0 / srow[g / (GROUP / 8)];
-            let mut word = 0u32;
-            for b in 0..8 {
-                let target = row[g * 8 + b] * inv;
-                let mut best_code = 0u32;
-                let mut best_err = f32::INFINITY;
-                for (code, &v) in lut.iter().enumerate() {
-                    let err = (target - v).abs();
-                    if err < best_err {
-                        best_err = err;
-                        best_code = code as u32;
-                    }
-                }
-                word |= best_code << (4 * b);
-            }
-            *word_out = word;
-        }
+        checkpoint::packed::codec::rows::codebook4_quantize_row(&w[r * k..(r + 1) * k], GROUP, lut, prow, srow);
     });
     (packed, sw)
 }

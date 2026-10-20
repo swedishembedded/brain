@@ -7,6 +7,10 @@
 //! Quantized tensors as first-class citizens: descriptors, codecs, bounded
 //! tiled reads and loads. See [`encoding`] for the vocabulary.
 
+pub mod codec;
 pub mod encoding;
+#[cfg(test)]
+mod testfix;
 
+pub use codec::{Codec, CodecRegistry, Tile, TileBuf};
 pub use encoding::{BlockGeometry, Codebook, Element, FloatFormat, Packing, QuantEncoding, ScaleGranularity, ScaleLevel, TensorDescriptor};

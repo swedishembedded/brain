@@ -805,6 +805,7 @@ version = "3.0.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-data",
+ "brain-kernels",
  "brain-testutil",
  "bytemuck",
  "half",

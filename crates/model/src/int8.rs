@@ -122,11 +122,7 @@ pub fn quantize_weight(w: &[f32], n: usize, k: usize) -> (Vec<u32>, Vec<f32>) {
 /// about the scale.
 #[inline]
 pub fn group_scales(row: &[f32], out: &mut [f32]) {
-    debug_assert_eq!(row.len(), out.len() * GROUP, "group_scales: row {} vs {} groups", row.len(), out.len());
-    for (g, s) in out.iter_mut().enumerate() {
-        let blk = &row[g * GROUP..g * GROUP + GROUP];
-        *s = blk.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / 127.0;
-    }
+    checkpoint::packed::codec::rows::int8_block_scales(row, GROUP, out)
 }
 
 /// Pack one row to `[k/4]` u32 (4 int8 per word, little-endian along K) given
@@ -134,17 +130,7 @@ pub fn group_scales(row: &[f32], out: &mut [f32]) {
 /// its note on why these two are shared rather than duplicated.
 #[inline]
 pub fn pack_row(row: &[f32], scales: &[f32], out: &mut [u32]) {
-    debug_assert_eq!(out.len(), scales.len() * WORDS_PER_GROUP, "pack_row: {} words vs {} groups", out.len(), scales.len());
-    for (g, word_out) in out.iter_mut().enumerate() {
-        // Word `g` covers int8 lanes `4g .. 4g+4`, all inside group `g/8`.
-        let inv = 1.0 / scales[g / WORDS_PER_GROUP];
-        let mut word = 0u32;
-        for b in 0..4 {
-            let q = (row[g * 4 + b] * inv).round().clamp(-127.0, 127.0) as i32;
-            word |= ((q as u8) as u32) << (8 * b);
-        }
-        *word_out = word;
-    }
+    checkpoint::packed::codec::rows::int8_pack_row(row, GROUP, scales, out)
 }
 
 /// The exact host-side inverse of [`quantize_weight`]: unpack `[n, k/4]` u32
