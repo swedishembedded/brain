@@ -114,6 +114,7 @@ pub struct BlockTable {
     blocks: Vec<u32>, // logical block index -> physical block id
     len: u32,         // tokens stored
     kv_namespace: KvNamespace,
+    state_row: Option<u32>, // the sequence's row in a hybrid decoder's recurrent-state pool
 }
 
 impl BlockTable {
@@ -140,6 +141,24 @@ impl BlockTable {
     /// The physical block ids (logical order) — uploaded to the GPU for the kernel.
     pub fn blocks(&self) -> &[u32] {
         &self.blocks
+    }
+
+    /// The row of the decoder's recurrent-state pool this sequence owns, for a
+    /// hybrid decoder (linear-attention layers keep a fixed-size state per
+    /// SEQUENCE, not per token, so it lives beside the paged KV blocks rather
+    /// than in them). `None` until the decoder assigns one. Not shared by
+    /// [`Self::fork`] or restored by [`Self::restore`]: a row belongs to
+    /// exactly one live sequence.
+    pub fn state_row(&self) -> Option<u32> {
+        self.state_row
+    }
+    /// Record the recurrent-state row the decoder assigned to this sequence.
+    pub fn set_state_row(&mut self, row: u32) {
+        self.state_row = Some(row);
+    }
+    /// Hand the recurrent-state row back (to the pool it came from).
+    pub fn take_state_row(&mut self) -> Option<u32> {
+        self.state_row.take()
     }
 
     /// The `(physical_block, offset)` holding logical token `tok` (must be < len).
@@ -208,7 +227,7 @@ impl BlockTable {
         for &b in &self.blocks {
             alloc.incref(b);
         }
-        BlockTable { blocks: self.blocks.clone(), len: self.len, kv_namespace: self.kv_namespace }
+        BlockTable { blocks: self.blocks.clone(), len: self.len, kv_namespace: self.kv_namespace, state_row: None }
     }
 
     /// Copy-on-write the last (writable) block if it is shared: allocate a private
@@ -240,7 +259,7 @@ impl BlockTable {
     /// demoted from: the restored bytes are only valid under it.
     pub fn restore(kv_namespace: KvNamespace, blocks: Vec<u32>, len: u32) -> BlockTable {
         assert!(!blocks.is_empty() || len == 0, "restore: {len} tokens cannot live in zero blocks");
-        BlockTable { blocks, len, kv_namespace }
+        BlockTable { blocks, len, kv_namespace, state_row: None }
     }
 
     /// Start a FRESH table from shared full prefix blocks (incref each): the
@@ -835,6 +854,22 @@ mod tests {
         assert_eq!(a.refcount(old), 1);
         // Full prefix block[0] is still shared by both.
         assert_eq!(a.refcount(parent.blocks()[0]), 2);
+    }
+
+    /// A recurrent-state row belongs to one live sequence: a fork shares its
+    /// KV blocks but must not share (and then overwrite) its state row.
+    #[test]
+    fn a_state_row_is_owned_by_one_sequence_and_not_forked() {
+        let mut a = BlockAllocator::new(8, 4);
+        let mut parent = BlockTable::new();
+        assert_eq!(parent.state_row(), None);
+        parent.set_state_row(3);
+        parent.append(&mut a).unwrap();
+        let child = parent.fork(&mut a);
+        assert_eq!(parent.state_row(), Some(3));
+        assert_eq!(child.state_row(), None);
+        assert_eq!(parent.take_state_row(), Some(3));
+        assert_eq!(parent.state_row(), None);
     }
 }
 
