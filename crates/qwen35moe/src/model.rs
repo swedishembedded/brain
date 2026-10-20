@@ -3752,9 +3752,27 @@ impl Qwen35 {
     /// Rebuild a training model from a file [`Self::save`] wrote (adapters
     /// included), sized for `b` sequences of `t` tokens.
     pub fn load(path: &str, b: u32, t: u32) -> Qwen35 {
+        Qwen35::load_with_adapter(path, b, t, None)
+    }
+
+    /// [`Self::load`] with a fresh zero-delta LoRA adapter drawn from `seed`
+    /// over the file's weights when `adapter` (its config and seed) is given and the file has none (a
+    /// file that already holds adapters keeps its own). The whole file is read
+    /// as fp32 on the host: this architecture's trainer has no streamed
+    /// constructor yet.
+    pub fn load_with_adapter(path: &str, b: u32, t: u32, adapter: Option<(crate::config::LoraCfg, u64)>) -> Qwen35 {
         let container = checkpoint::load(path);
-        let cfg = Qwen35Config::from_json(&container.header["config"]);
-        Qwen35::new_train_on(Gpu::new(pipelines()), cfg, b, t, &container.into_by_role(""))
+        let mut cfg = Qwen35Config::from_json(&container.header["config"]);
+        let mut weights = container.into_by_role("");
+        if let Some((lora, seed)) = adapter {
+            cfg.lora = Some(lora);
+            for (name, init) in crate::init::init_weights(&cfg, seed) {
+                if model::adapter::device::is_adapter_param(&name) {
+                    weights.entry(name).or_insert(init);
+                }
+            }
+        }
+        Qwen35::new_train_on(Gpu::new(pipelines()), cfg, b, t, &weights)
     }
 
     pub fn save(&self, path: &str) {

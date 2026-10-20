@@ -695,6 +695,7 @@ pub struct Qwen3Trainer;
 
 impl model::finetune::ChatTrainer for Qwen3Trainer {
     type Trained = Trained;
+    const SCORES_EXPORTED_PAIRS: bool = true;
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {
         crate::store_checkpoint_path(weights, model_dir)

@@ -390,19 +390,7 @@ impl model::finetune::ChatTrainer for Qwen35Trainer {
     /// files; there is no Hugging Face writer for this architecture, and an
     /// adapter is not folded in.
     fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>) -> Result<(), String> {
-        if adapter.is_some() {
-            return Err("qwen35 does not fold an adapter into a checkpoint yet".to_string());
-        }
-        std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-        let copy = |from: &Path, to: &Path| std::fs::copy(from, to).map(drop).map_err(|e| format!("{}: {e}", from.display()));
-        copy(trained, &out.join("model.safetensors"))?;
-        for f in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "generation_config.json"] {
-            let from = tokenizer_dir.join(f);
-            if from.is_file() {
-                copy(&from, &out.join(f))?;
-            }
-        }
-        Ok(())
+        model::finetune::export_brain_checkpoint("qwen35", trained, tokenizer_dir, out, adapter)
     }
 }
 

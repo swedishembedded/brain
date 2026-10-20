@@ -261,5 +261,7 @@ fn a_qwen35_preference_fine_tune_exports_a_dpo_adapter() {
     let adapter = outcome.adapter.expect("a completed run exports its adapter");
     let card = checkpoint::st::read_card(adapter.to_str().unwrap()).unwrap().expect("the adapter carries a card");
     assert_eq!(card.training.expect("its training run is recorded").regime, "dpo");
-    assert_eq!(outcome.train_score, None, "this architecture does not score preference pairs yet");
+    let score = outcome.train_score.expect("a run on the resident model scores its training pairs");
+    assert_eq!((score.pairs, score.skipped), (4, 0));
+    assert!(score.mean_margin.is_some_and(|m| m > 0.0), "the trained policy prefers chosen over rejected more than its start did: {score:?}");
 }

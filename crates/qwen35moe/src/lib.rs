@@ -10,6 +10,7 @@
 
 pub mod caps;
 pub mod config;
+pub mod finetune;
 pub mod gguf_load;
 pub mod import;
 pub mod init;

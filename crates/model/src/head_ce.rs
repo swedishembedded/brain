@@ -322,6 +322,12 @@ impl HeadCe {
         self.scale_buf = buf;
     }
 
+    /// Tokens whose logits are alive at once.
+    #[must_use]
+    pub fn rows_per_chunk(&self) -> u32 {
+        self.rows
+    }
+
     /// The `(first token, tokens)` chunks covering `n` tokens.
     #[must_use]
     pub fn chunks(&self, n: u32) -> Vec<(u32, u32)> {

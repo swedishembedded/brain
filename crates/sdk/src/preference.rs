@@ -357,6 +357,23 @@ impl PreferenceFineTune {
             base_digest: Some(base_digest.clone()),
             cycle: self.cycle,
         };
+        // A family that cannot score its exported adapter is scored on the
+        // resident model: the training pairs and the held-out pairs that fit the row.
+        let (score_sets, held_out_skipped) = if chat.scores_exported_pairs {
+            (Vec::new(), 0)
+        } else {
+            let fits: Vec<rl::objective::dpo::PackedPair> = held_out
+                .iter()
+                .flatten()
+                .filter_map(|(c, r)| rl::objective::dpo::PackedPair::from_masked(seq_len, (&c.ids, &c.mask), (&r.ids, &r.mask)).ok())
+                .collect();
+            let skipped = held_out.as_ref().map_or(0, |pairs| pairs.len() - fits.len());
+            let mut sets = vec![packed.clone()];
+            if held_out.is_some() {
+                sets.push(fits);
+            }
+            (sets, skipped)
+        };
         let job = PreferenceJob {
             base: &weights,
             lora: model::finetune::LoraRequest { rank, alpha, continue_from: self.continue_from.as_deref() },
@@ -365,8 +382,9 @@ impl PreferenceFineTune {
             pairs: packed,
             adapter: &adapter_path,
             lineage: model::finetune::AdapterLineage { card_id: &adapter_id, base_id: &base_id, dataset_id: Some(&dataset_id), provenance: Some(provenance) },
+            score_sets,
         };
-        let report = (chat.preference)(job, control).map_err(|e| Error::Backend(format!("training: {e}")))?;
+        let (report, resident) = (chat.preference)(job, control).map_err(|e| Error::Backend(format!("training: {e}")))?;
 
         let mut outcome = PreferenceFineTuneOutcome {
             status: FineTuneStatus::Completed,
@@ -400,8 +418,13 @@ impl PreferenceFineTune {
         outcome.adapter_digest = Some(digest(&adapter_path)?);
 
         let reference = self.continue_from.as_deref();
-        outcome.train_score = score_pairs(&chat, &weights, reference, &adapter_path, &train);
-        outcome.held_out_score = held_out.as_ref().and_then(|pairs| score_pairs(&chat, &weights, reference, &adapter_path, pairs));
+        if chat.scores_exported_pairs {
+            outcome.train_score = score_pairs(&chat, &weights, reference, &adapter_path, &train);
+            outcome.held_out_score = held_out.as_ref().and_then(|pairs| score_pairs(&chat, &weights, reference, &adapter_path, pairs));
+        } else {
+            outcome.train_score = resident.first().map(|margins| margins_score(margins, 0));
+            outcome.held_out_score = resident.get(1).map(|margins| margins_score(margins, held_out_skipped));
+        }
         outcome.adapter = Some(adapter_path);
 
         let record_path = out_dir.join(RECORD_FILE);
@@ -542,6 +565,18 @@ fn score_pairs(chat: &ChatEntry, weights: &Path, reference: Option<&Path>, polic
         pairs: n,
         skipped: m.skipped,
     })
+}
+
+/// The score of pairs whose margins were measured on the resident model.
+fn margins_score(margins: &[f64], skipped: usize) -> PreferenceScore {
+    let n = margins.len();
+    let scored = (n > 0).then_some(n as f64);
+    PreferenceScore {
+        accuracy: scored.map(|n| (margins.iter().filter(|&&x| x > 0.0).count() as f64 / n) as f32),
+        mean_margin: scored.map(|n| (margins.iter().sum::<f64>() / n) as f32),
+        pairs: n,
+        skipped,
+    }
 }
 
 fn encode_checked(path: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, max_block: Option<u32>, render: data::chat::RenderOpts) -> Result<Vec<(EncodedTurn, EncodedTurn)>> {

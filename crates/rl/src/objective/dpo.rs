@@ -295,6 +295,20 @@ impl PackedPair {
         }
     }
 
+    /// The reference-normalized margin `(logpi_c - logref_c) - (logpi_r - logref_r)`
+    /// of this pair under `model` (nats, without `beta`): the quantity DPO
+    /// trains up. The pair's reference must have been scored
+    /// ([`Self::score_reference`]); `model` is built at `b = 2`, `t = seq_len`.
+    pub fn margin<M: Model>(&self, model: &M) -> f64 {
+        let seq_len = self.seq_len();
+        model.set_batch(Batch::Lm { tokens: &self.tokens, targets: &self.targets });
+        let _ = model.forward();
+        let new_lp = model::training::objectives(model).batch_token_logprobs();
+        let (new_c, ref_c, _) = row_sum(&new_lp, &self.ref_lp, &self.targets, 0, seq_len);
+        let (new_r, ref_r, _) = row_sum(&new_lp, &self.ref_lp, &self.targets, 1, seq_len);
+        ((new_c - ref_c) - (new_r - ref_r)) as f64
+    }
+
     /// The packed `[2 * seq_len]` token ids, row 0 chosen, row 1 rejected.
     pub fn tokens(&self) -> &[u32] {
         &self.tokens

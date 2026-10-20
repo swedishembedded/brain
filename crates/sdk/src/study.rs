@@ -235,7 +235,7 @@ impl ArchEntry {
 const ARCHS: &[ArchEntry] = &[
     ArchEntry::of::<Qwen3>().with_chat_trainer::<qwen3::finetune::Qwen3Trainer>(),
     ArchEntry::of::<Qwen35>().with_chat_trainer::<qwen35::finetune::Qwen35Trainer>(),
-    ArchEntry::of::<Qwen35Moe>(),
+    ArchEntry::of::<Qwen35Moe>().with_chat_trainer::<qwen35moe::finetune::Qwen35MoeTrainer>(),
 ];
 
 /// The row for architecture `id`, or the refusal listing the known ids.
@@ -876,8 +876,12 @@ mod tests {
             other => panic!("expected the typed refusal, got {other:?}"),
         };
         let dir = std::env::temp_dir();
-        assert_eq!(refused(crate::ChatFullFineTune::from_pretrained("none").arch("qwen35moe").dataset("d.jsonl").out_dir(&dir).run().map(|_| ())), "qwen35moe does not provide chat fine-tuning yet");
-        assert_eq!(refused(crate::PreferenceFineTune::from_pretrained("none").arch("qwen35moe").dataset("d.jsonl").out_dir(&dir).run().map(|_| ())), "qwen35moe does not provide chat fine-tuning yet");
+        // A row without the generic chat trainer is refused by name; every
+        // registered architecture has one.
+        let table = [ArchEntry::of::<Fake>()];
+        assert_eq!(refused(arch_in(&table, "fake").unwrap().require(Capability::ChatFineTune)), "fake does not provide chat fine-tuning yet");
+        assert!(ARCHS.iter().all(|a| a.chat_fine_tune && a.chat.is_some()));
+        assert!(matches!(crate::ChatFullFineTune::from_pretrained("none").arch("nonesuch").dataset("d.jsonl").out_dir(&dir).run(), Err(Error::UnsupportedArchitecture(_))));
         match crate::ChatFineTune::from_pretrained("none").arch("nonesuch").dataset("d.jsonl").out_dir(&dir).run() {
             Err(Error::UnsupportedArchitecture(m)) => assert!(m.contains("nonesuch") && m.contains("qwen3"), "{m}"),
             other => panic!("expected an unknown-architecture refusal, got {:?}", other.map(|_| ())),

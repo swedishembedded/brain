@@ -117,6 +117,10 @@ impl Qwen35 {
 }
 
 impl TokenObjectives for Qwen35 {
+    fn head_chunk_rows(&self) -> Option<u32> {
+        self.head_ce.as_ref().map(model::head_ce::HeadCe::rows_per_chunk)
+    }
+
     fn enable_weighted_loss(&mut self) {
         if self.objectives.weighted.is_some() {
             return;

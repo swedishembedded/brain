@@ -132,6 +132,13 @@ pub trait TokenObjectives {
     /// positive. `Model::logits_all` returns the scaled logits while a scale
     /// is set, so reset it to `1.0` before scoring raw logits.
     fn set_logit_scale(&mut self, scale: f32);
+
+    /// Tokens whose logits the LM head keeps alive at once ([`crate::head_ce`]),
+    /// `None` for a model that does not report it. What lets the conformance
+    /// suite assert that a chunked head really was chunked.
+    fn head_chunk_rows(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// The model's [`TokenObjectives`], or the typed refusal naming `M`.

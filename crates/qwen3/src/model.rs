@@ -3759,6 +3759,9 @@ impl model::training::TokenObjectives for Qwen {
     fn set_loss_weights(&self, weights: &[f32]) {
         Qwen::write_weights(self, weights)
     }
+    fn head_chunk_rows(&self) -> Option<u32> {
+        Some(self.head_rows)
+    }
     fn set_loss_denominator(&self, tokens: f32) {
         Qwen::set_loss_denominator(self, tokens)
     }

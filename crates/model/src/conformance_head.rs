@@ -70,6 +70,12 @@ pub fn chunked_head_ce_equals_unchunked<M: Model>(subject: &Subject<M>, seed: u6
     if (chunked.loss - whole.loss).abs() > LOSS_TOL * whole.loss.abs().max(1.0) {
         return Err(format!("{}: chunked head loss {} vs unchunked {}", subject.name, chunked.loss, whole.loss));
     }
+    // The comparison is only meaningful if one head really chunked and the other did not.
+    let rows = |m: &M| m.token_objectives().and_then(|o| o.head_chunk_rows());
+    match (rows(&whole_model), rows(&chunked_model)) {
+        (Some(whole), Some(chunked)) if whole >= *seq && chunked < *seq => {}
+        other => return Err(format!("{}: the unchunked head must hold the whole {seq}-token row and the chunked one fewer rows, got {other:?}", subject.name)),
+    }
     let rel = max_rel(&chunked.logprobs, &whole.logprobs);
     if rel > LOSS_TOL {
         return Err(format!("{}: chunked head log-probabilities differ by {rel:e} (relative)", subject.name));

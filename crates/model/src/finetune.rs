@@ -144,6 +144,11 @@ pub trait ChatTrainer {
     /// `weights` is the resolved file, `model_dir` the directory it lives in.
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> PathBuf;
 
+    /// Whether [`Self::preference_margins`] scores pairs after the run from the
+    /// exported adapter. A family that does not is scored on the resident
+    /// model instead (reference = the model the run starts from).
+    const SCORES_EXPORTED_PAIRS: bool = false;
+
     /// The vocabulary of the checkpoint at `open`.
     fn vocab(open: &Path) -> Result<usize, String>;
 
@@ -185,4 +190,24 @@ pub struct PreferenceMargins {
     pub margins: Vec<f64>,
     /// Pairs not scored because a candidate does not fit the scoring row.
     pub skipped: usize,
+}
+
+/// The [`ChatTrainer::export_checkpoint`] of a family with no Hugging Face
+/// writer: a checkpoint directory holding the brain-format weights as
+/// `model.safetensors` and the tokenizer files of `tokenizer_dir`. An adapter
+/// is not folded in.
+pub fn export_brain_checkpoint(family: &str, trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>) -> Result<(), String> {
+    if adapter.is_some() {
+        return Err(format!("{family} does not fold an adapter into a checkpoint yet"));
+    }
+    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let copy = |from: &Path, to: &Path| std::fs::copy(from, to).map(drop).map_err(|e| format!("{}: {e}", from.display()));
+    copy(trained, &out.join("model.safetensors"))?;
+    for f in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "generation_config.json"] {
+        let from = tokenizer_dir.join(f);
+        if from.is_file() {
+            copy(&from, &out.join(f))?;
+        }
+    }
+    Ok(())
 }
