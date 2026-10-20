@@ -299,6 +299,24 @@ impl Engine {
         Engine { model, alloc: BlockAllocator::new(max_concurrent, max_seq_len), block_size: max_seq_len, kv_tier: kv, gqa_kv, gdn_slots: HashMap::new() }
     }
 
+    /// Install a KV calibration table ([`model::kvcalib`]) on this engine's scaled GQA planes: each
+    /// full-attention layer's K and V append ceilings, indexed by the model's own layer number
+    /// (recurrent layers keep no KV and are skipped). Returns the number of layers installed; an
+    /// engine whose tier has no row scale (f32, bf16) installs none, because there is no scale to cap.
+    pub fn set_kv_calib(&mut self, calib: &model::kvcalib::KvCalib) -> Result<usize, String> {
+        let cfg = &self.model.cfg;
+        if (calib.n_layers, calib.n_kv, calib.head_dim) != (cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize) {
+            return Err(format!("kv calibration is for {} layers x {} kv heads x head_dim {}, this model has {} x {} x {}", calib.n_layers, calib.n_kv, calib.head_dim, cfg.n_layers, cfg.n_kv_heads, cfg.head_dim));
+        }
+        let full: Vec<usize> = cfg.layer_types().iter().enumerate().filter(|(_, t)| **t == LayerType::Full).map(|(l, _)| l).collect();
+        let mut installed = 0;
+        for l in full {
+            installed += usize::from(calib.apply_to_layer(&self.model.gpu, l, &mut self.gqa_kv[l]));
+        }
+        Ok(installed)
+    }
+
+    /// Give this engine an adapter bank, so sequences can run under LoRA
     /// Give this engine an adapter bank, so sequences can run under LoRA
     /// adapters registered with [`Engine::load_adapter`] beside base
     /// sequences, in the same batches, on this one copy of the weights. Call
@@ -648,6 +666,51 @@ impl Engine {
         }
         let hidden = self.decode_batch(tables, inputs);
         self.model.head_topk_rows_dev(&hidden, inputs.len() as u32, k)
+    }
+}
+
+/// Any hybrid decoder calibrates through the generic interface: the f32 cache of a calibration
+/// engine holds the pre-quantization K (post-RoPE) and V rows of every full-attention layer.
+impl model::kvcalib::KvCalibrationSource for Engine {
+    fn kv_geometry(&self) -> (usize, usize, usize) {
+        let cfg = &self.model.cfg;
+        (cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize)
+    }
+
+    fn observe_prompts(&mut self, prompts: &[Vec<u32>], obs: &mut dyn model::kvcalib::KvObserver) -> Result<(), String> {
+        use model::kvcalib::{observe_rows, KvSide};
+        if self.kv_tier != KvTier::F32 {
+            return Err(format!("KV calibration reads the pre-quantization values: build the engine with the f32 cache, not {}", self.kv_tier));
+        }
+        if prompts.iter().any(|p| p.is_empty() || p.len() > self.block_size as usize) {
+            return Err(format!("KV calibration: every prompt must hold 1..={} tokens", self.block_size));
+        }
+        if prompts.len() > self.alloc.num_blocks() as usize {
+            return Err(format!("KV calibration: {} prompts but only {} sequence slots", prompts.len(), self.alloc.num_blocks()));
+        }
+        let mut tables = Vec::with_capacity(prompts.len());
+        for prompt in prompts {
+            let mut table = BlockTable::new();
+            self.prefill_rows(&mut table, prompt, None);
+            tables.push((table, prompt.len()));
+        }
+        let (kv_stride, head_dim, n_kv) = (self.model.cfg.kv_dim() as usize, self.model.cfg.head_dim as usize, self.model.cfg.n_kv_heads as usize);
+        let rows = self.alloc.num_blocks() as usize * self.block_size as usize;
+        for (l, ty) in self.model.cfg.layer_types().iter().enumerate() {
+            if *ty != LayerType::Full {
+                continue;
+            }
+            let (k, v) = (self.gqa_kv[l].k.read_dequantized(&self.model.gpu, rows, kv_stride, head_dim), self.gqa_kv[l].v.read_dequantized(&self.model.gpu, rows, kv_stride, head_dim));
+            for (table, len) in &tables {
+                let start = table.blocks()[0] as usize * self.block_size as usize * kv_stride;
+                observe_rows(obs, l, KvSide::K, &k[start..start + len * kv_stride], n_kv, head_dim);
+                observe_rows(obs, l, KvSide::V, &v[start..start + len * kv_stride], n_kv, head_dim);
+            }
+        }
+        for (mut table, _) in tables {
+            self.release_table(&mut table);
+        }
+        Ok(())
     }
 }
 

@@ -175,3 +175,44 @@ fn a_compact_pool_is_reported_at_the_bytes_it_occupies() {
     assert!(bf16b < f32b && int8b < bf16b, "pool bytes must shrink with the tier: f32 {f32b}, bf16 {bf16b}, int8 {int8b}");
     assert_eq!(fp8b, int8b, "fp8 has the int8 footprint");
 }
+
+/// The generic calibration interface on a hybrid decoder: the f32 engine reports its
+/// full-attention layers' K/V rows, recurrent layers stay at the uncalibrated sentinel, and the
+/// table installs on every scaled tier (never on an unscaled one) where, at a binding percentile,
+/// it changes what the cache stores.
+#[test]
+fn a_hybrid_decoder_is_calibrated_through_the_generic_interface_and_the_table_binds_on_scaled_tiers() {
+    use model::kvcalib::{calibrate, KvSide};
+    use model::serve::PagedDecoder;
+    let cfg = tiny();
+    let weights = qwen35::init::init_weights(&cfg, 11);
+    let max_seq = 64u32;
+    let prompts: Vec<Vec<u32>> = (0..2).map(|s| prompt(s, 48, cfg.vocab)).collect();
+    let mut source = Engine::from_map_kv(cfg.clone(), &weights, max_seq, 2, KvTier::F32);
+    let calib = calibrate(&mut source, "tiny-hybrid", &prompts, 0.5).unwrap();
+    let full: Vec<usize> = cfg.layer_types().iter().enumerate().filter(|(_, t)| **t == qwen35::config::LayerType::Full).map(|(l, _)| l).collect();
+    assert!(!full.is_empty() && full.len() < cfg.n_layers as usize, "the tiny config must be a hybrid");
+    for l in 0..cfg.n_layers as usize {
+        let observed = full.contains(&l);
+        assert_eq!(calib.clip(l, KvSide::K).iter().all(|&c| c < f32::MAX), observed, "layer {l}: only full-attention layers are calibrated");
+    }
+
+    let logits = |tier: KvTier, calibrated: bool| -> (Vec<f32>, usize) {
+        let mut e = Engine::from_map_kv(cfg.clone(), &weights, max_seq, 2, tier);
+        let installed = if calibrated { e.set_kv_calib(&calib).unwrap() } else { 0 };
+        let mut table = BlockTable::new();
+        let hidden = e.prefill(&mut table, &prompts[0]);
+        (e.logits(&hidden), installed)
+    };
+    for tier in [KvTier::INT8, KvTier::FP8] {
+        let (plain, _) = logits(tier, false);
+        let (clipped, installed) = logits(tier, true);
+        assert_eq!(installed, full.len(), "{tier}: every full-attention layer takes the table");
+        assert!(plain.iter().zip(&clipped).any(|(a, b)| a != b), "{tier}: a median ceiling must change the stored rows");
+    }
+    for tier in [KvTier::F32, KvTier::BF16] {
+        assert_eq!(logits(tier, true).1, 0, "{tier} has no row scale to cap");
+    }
+    let wrong = model::kvcalib::KvCalib::disabled(cfg.n_layers as usize + 1, 1, 1);
+    assert!(Engine::from_map_kv(cfg.clone(), &weights, max_seq, 2, KvTier::INT8).set_kv_calib(&wrong).is_err());
+}
