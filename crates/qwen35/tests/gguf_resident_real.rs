@@ -833,6 +833,16 @@ fn decode_tok_per_s_across_context_depth() {
 /// tokens when its neighbours change.
 #[test]
 fn scheduled_batches_reproduce_the_single_sequence_reference_on_the_real_checkpoint() {
+    scheduled_batches_reproduce_the_reference(0);
+}
+
+/// The same gate with every sequence's KV in 16-row blocks of the shared pool (the layout that is not yet the default).
+#[test]
+fn scheduled_batches_reproduce_the_single_sequence_reference_with_paged_kv() {
+    scheduled_batches_reproduce_the_reference(16);
+}
+
+fn scheduled_batches_reproduce_the_reference(kv_block_rows: u32) {
     use model::serve::{Request, SampleParams, Scheduler};
 
     let Some(path) = gguf_path() else { return };
@@ -841,7 +851,7 @@ fn scheduled_batches_reproduce_the_single_sequence_reference_on_the_real_checkpo
         brain_testutil::skip_unavailable("this gate wants at least one usable GPU");
         return;
     }
-    let r = Qwen35GgufResident::new(path, devices, CAP, TierPolicy::uniform(Dtype::I8)).with_max_batch(4);
+    let r = Qwen35GgufResident::new(path, devices, CAP, TierPolicy::uniform(Dtype::I8)).with_max_batch(4).with_kv_block_rows(kv_block_rows);
     let key = r.instance_key("generate", &capability::Invocation::new());
     let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
     let (engine, tok, _stop) = r.activate_engine(&placed).expect("activate the real checkpoint");
@@ -886,6 +896,16 @@ fn scheduled_batches_reproduce_the_single_sequence_reference_on_the_real_checkpo
 /// cold prefill of the whole prompt. An identical prompt needs no prefill.
 #[test]
 fn a_prompt_extending_a_cached_one_prefills_only_its_new_tokens_and_continues_identically() {
+    a_prompt_extending_a_cached_one_resumes_from_it(0);
+}
+
+/// The same gate with the KV in 16-row blocks: the extension shares the cached prompt's blocks.
+#[test]
+fn a_prompt_extending_a_cached_one_resumes_identically_with_paged_kv() {
+    a_prompt_extending_a_cached_one_resumes_from_it(16);
+}
+
+fn a_prompt_extending_a_cached_one_resumes_from_it(kv_block_rows: u32) {
     use model::serve::{Request, Scheduler};
 
     let Some(path) = gguf_path() else { return };
@@ -894,7 +914,7 @@ fn a_prompt_extending_a_cached_one_prefills_only_its_new_tokens_and_continues_id
         brain_testutil::skip_unavailable("this gate wants at least one usable GPU");
         return;
     }
-    let r = Qwen35GgufResident::new(path, devices, 2048, TierPolicy::uniform(Dtype::I8)).with_max_batch(2).with_prefix_slots(2);
+    let r = Qwen35GgufResident::new(path, devices, 2048, TierPolicy::uniform(Dtype::I8)).with_max_batch(2).with_prefix_slots(2).with_kv_block_rows(kv_block_rows);
     let key = r.instance_key("generate", &capability::Invocation::new());
     let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
     let (engine, tok, _stop) = r.activate_engine(&placed).expect("activate the real checkpoint");
