@@ -42,6 +42,9 @@ pub enum Op {
     /// (`gradnorm_sq` vs `gradnorm_part` + `clip_coef_wg`). Shape is `m = 1`
     /// row of `n = numel` — see [`candidates`] for why `n` does not gate it.
     GradNorm,
+    /// AdamW over blockwise-int8 moments (`adamw_q8` vs `adamw_q8_wg`). Shape
+    /// is `m = 1`, `n = numel`; the cooperative form wins at every size.
+    AdamWQ8,
     /// Per-row max|x| for the int8 dynamic activation quant (`max_abs_row` vs
     /// `max_abs_rows`). `m` rows of `n = k` — see [`candidates`] for why
     /// neither gates it.
@@ -920,6 +923,13 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // trade either. `workgroup_reductions` is the correctness gate: the CPU
         // JIT mis-executes the barrier.
         Op::MaxAbsRow => vec![WorkgroupPerOutput, Reference],
+        // AdamW with int8 moments: the reference gives one thread a whole
+        // 64-element block (lanes 256 bytes apart, a measured fraction of the
+        // memory bandwidth the elementwise AdamW reaches); the cooperative form
+        // maps one element per lane and reduces the block maximum with a
+        // barrier, bit-identically (max is exact). No shape gate;
+        // `workgroup_reductions` is the correctness gate, as for `MaxAbsRow`.
+        Op::AdamWQ8 => vec![WorkgroupPerOutput, Reference],
         // Per-row-adapter LoRA projection: `Op::MaxAbsRow`'s exact rule (a long
         // reduction behind a short output, no shape gate, `workgroup_reductions`
         // the correctness gate) - see `Op::LoraBankProject`. The cooperative

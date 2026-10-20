@@ -137,6 +137,7 @@ fn device_int8_adamw_on_the_ambient_device_follows_the_host_reference() {
         ("clip_coef", kernels::CLIP_COEF),
         ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
         ("adamw_q8", kernels::ADAMW_Q8),
+        ("adamw_q8_wg", kernels::ADAMW_Q8_WG),
     ];
     run(&gpu_core::testgpu::dev(KERNELS), true, Some(0.5), 2e-2);
 }

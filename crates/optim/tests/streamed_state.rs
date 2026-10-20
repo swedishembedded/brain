@@ -22,11 +22,27 @@ use paramstore::precision::{GradDtype, MasterPolicy, ParamPrecision, StateFormat
 
 const TILE: usize = 256;
 
-fn scratch(name: &str) -> PathBuf {
+/// A scratch directory under the temp dir, removed when dropped.
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
     let d = std::env::temp_dir().join(format!("brain-optim-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    d
+    Scratch(d)
 }
 
 fn prec(state: StateFormat, sr: bool) -> ParamPrecision {

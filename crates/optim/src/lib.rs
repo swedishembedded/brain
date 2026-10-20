@@ -287,18 +287,17 @@ impl Optim {
         let hparams_q = q8.then(|| gpu.uniform_dynamic(12));
         for (ti, (name, numel)) in ps.opt_params().iter().enumerate() {
             if let Some(scales) = ps.moment_scales.get(name) {
-                let kernel = gpu
-                    .kernel_index("adamw_q8")
-                    .unwrap_or_else(|| panic!("{name} has int8 moments but this device has no `adamw_q8` kernel registered"));
+                let kernel = self.q8_kernel(gpu).unwrap_or_else(|| panic!("{name} has int8 moments but this device has no `adamw_q8` kernel registered"));
                 let sr = ps.precision_of(name).stochastic_rounding as u32;
                 let desc = gpu.storage(4);
                 gpu.write(&desc, &[*numel as u32, f(ps.lr_mult_of(name)), ti as u32, sr]);
                 let blocks = numel.div_ceil(paramstore::DEVICE_INT8_BLOCK as usize) as u32;
+                let threads = if kernel == gpu.kernel_index("adamw_q8_wg").unwrap_or(usize::MAX) { blocks * paramstore::DEVICE_INT8_BLOCK } else { blocks };
                 steps.push(gpu.step_buf(
                     kernel,
                     hparams_q.as_ref().unwrap(),
                     &[ps.w(name), ps.g(name), &ps.adam_m[name], &ps.adam_v[name], scales, &desc, &coef_buf],
-                    blocks,
+                    threads,
                 ));
                 const_unis.push(desc);
                 continue;
@@ -316,6 +315,21 @@ impl Optim {
         }
 
         Graph { clipped, n_opt: ps.opt_params().len(), n_norm_inputs, steps, clip_uni, hparams, hparams_q, _const_unis: const_unis }
+    }
+
+    /// The int8-moment AdamW kernel for this device: the cooperative
+    /// `adamw_q8_wg` where the selection policy offers it (and the model
+    /// registered it), else the portable `adamw_q8`. Resolved by name like
+    /// [`Self::coop_gradnorm`], so registering the kernel is the whole opt-in.
+    fn q8_kernel(&self, gpu: &Gpu) -> Option<usize> {
+        use gpu_core::select::{candidates, Dtype, KernelVariant, Op, OpShape};
+        let shape = OpShape { m: 1, n: 1 << 20, k: 0, dtype: Dtype::F32 };
+        if candidates(Op::AdamWQ8, shape, &gpu.caps())[0] == KernelVariant::WorkgroupPerOutput {
+            if let Some(k) = gpu.kernel_index("adamw_q8_wg") {
+                return Some(k);
+            }
+        }
+        gpu.kernel_index("adamw_q8")
     }
 
     /// The cooperative grad-norm pair `(gradnorm_part, clip_coef_wg)` for this

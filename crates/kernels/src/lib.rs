@@ -48,6 +48,8 @@ pub const ADALN_ROW: &str = include_str!("../wgsl/adaln_row.wgsl");
 pub const ADAMW: &str = include_str!("../wgsl/adamw.wgsl");
 /// `wgsl/adamw_q8.wgsl`
 pub const ADAMW_Q8: &str = include_str!("../wgsl/adamw_q8.wgsl");
+/// `wgsl/adamw_q8_wg.wgsl`
+pub const ADAMW_Q8_WG: &str = include_str!("../wgsl/adamw_q8_wg.wgsl");
 /// `wgsl/adaptive_avgpool2d.wgsl`
 pub const ADAPTIVE_AVGPOOL2D: &str = include_str!("../wgsl/adaptive_avgpool2d.wgsl");
 /// `wgsl/adaptive_avgpool2d_dx.wgsl`
@@ -1285,9 +1287,7 @@ pub const UPSAMPLE2_DX: &str = include_str!("../wgsl/upsample2_dx.wgsl");
 pub const VQ_ARGMAX_DOT: &str = include_str!("../wgsl/vq_argmax_dot.wgsl");
 /// `wgsl/vq_argmin.wgsl`
 pub const VQ_ARGMIN: &str = include_str!("../wgsl/vq_argmin.wgsl");
-/// `wgsl/weight_decode.wgsl`: the tile decode of every packed weight tier. It is a template (its
-/// `//@..@` markers are filled in by [`template::weight_decode_variants`]), not a standalone shader,
-/// so it is not listed in [`ALL`].
+/// `wgsl/weight_decode.wgsl`
 pub const WEIGHT_DECODE: &str = include_str!("../wgsl/weight_decode.wgsl");
 /// `wgsl/weighted_gap.wgsl`
 pub const WEIGHTED_GAP: &str = include_str!("../wgsl/weighted_gap.wgsl");
@@ -1302,6 +1302,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("adaln_row", ADALN_ROW),
     ("adamw", ADAMW),
     ("adamw_q8", ADAMW_Q8),
+    ("adamw_q8_wg", ADAMW_Q8_WG),
     ("adaptive_avgpool2d", ADAPTIVE_AVGPOOL2D),
     ("adaptive_avgpool2d_dx", ADAPTIVE_AVGPOOL2D_DX),
     ("add", ADD),
@@ -1868,6 +1869,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("upsample2_dx", UPSAMPLE2_DX),
     ("vq_argmax_dot", VQ_ARGMAX_DOT),
     ("vq_argmin", VQ_ARGMIN),
+    ("weight_decode", WEIGHT_DECODE),
     ("weighted_gap", WEIGHTED_GAP),
     ("weighted_gap_dm", WEIGHTED_GAP_DM),
     ("weighted_gap_dx", WEIGHTED_GAP_DX),

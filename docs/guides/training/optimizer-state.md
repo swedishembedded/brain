@@ -39,7 +39,8 @@ It runs
   parameter count), used by `OffloadAdam` and by a generic trainer through
   `TrainState`;
 * on the device, fused decode-update-encode for AdamW with int8 moments
-  (`adamw_q8.wgsl`, block 64), reached through `Optim` when a `ParamStore` is
+  (`adamw_q8.wgsl`, block 64; `adamw_q8_wg.wgsl`, the cooperative form the
+  selection policy picks where the device has workgroup reductions), reached through `Optim` when a `ParamStore` is
   built with `new_with_policy_src`; the CUDA backend compiles the same source.
   Both are gated against the host reference.
 
