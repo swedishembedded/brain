@@ -2480,6 +2480,12 @@ impl Qwen {
             slot.as_mut().unwrap().step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
         }
     }
+    /// Physical bytes of the host-offloaded optimizer state and the host staging
+    /// its update holds; `None` before the first offloaded step or when no
+    /// parameter is offloaded.
+    pub fn offload_host_bytes(&self) -> Option<(u64, usize)> {
+        self.offload_opt.borrow().as_ref().map(|o| o.host_bytes())
+    }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
         self.ps.read_grad(&self.gpu, name)
     }
