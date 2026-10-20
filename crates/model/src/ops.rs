@@ -2556,7 +2556,11 @@ mod tests {
         let (m, n, k) = (4u32, 8u32, 8u32);
         let w_h = vec![0f32; (n * k) as usize];
 
-        let dispatch = |ops: &Ops| -> usize {
+        // The selector governs the WGSL kernels; the vendor-library GEMM
+        // (the default tensor-core tier on CUDA) answers the F32 product
+        // before any selector is asked, so pin the fp32 reference tier here.
+        let dispatch = |ops: &mut Ops| -> usize {
+            ops.set_gemm_precision(GemmPrecision::Fp32Reference);
             let x = ops.gpu().storage((m * k) as u64);
             let weight = Weight::upload(ops, &w_h, n as usize, k as usize, Dtype::F32);
             let act = ops.act_f32(&x, 0, m, k);
@@ -2569,17 +2573,17 @@ mod tests {
         // Reference provider only: this is about the selector reaching the
         // dispatch, and a native provider (CUDA's tiled GEMM) answers for the
         // plain F32 shape regardless of what a selector says.
-        let ops_default = Ops::with_providers(
+        let mut ops_default = Ops::with_providers(
             gpu_core::testgpu::dev(kernel_list()),
             ProviderRegistry::reference(Arc::new(select::CachedSelector::new(select::DefaultSelector))),
         )
         .expect("Ops::with_providers");
-        let ops_flip = Ops::with_providers(gpu_core::testgpu::dev(kernel_list()), ProviderRegistry::reference(Arc::new(Flip)))
+        let mut ops_flip = Ops::with_providers(gpu_core::testgpu::dev(kernel_list()), ProviderRegistry::reference(Arc::new(Flip)))
             .expect("Ops::with_providers");
 
         assert_ne!(
-            dispatch(&ops_default),
-            dispatch(&ops_flip),
+            dispatch(&mut ops_default),
+            dispatch(&mut ops_flip),
             "Ops::with_selector's injected selector must be consulted by Ops::matmul, not ignored \
              in favour of Ops::new's fixed CachedSelector<DefaultSelector>"
         );
