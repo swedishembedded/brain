@@ -129,8 +129,11 @@ Acceptance: the same workflow runs on `qwen3` (NF4, FP8, int8), `qwen35`,
 Status: the state manager is landed (`paramstore::precision`, `optim::{codec, rule,
 storage, streamed, checkpoint, trainstate}`, `adamw_q8` fused device AdamW,
 `OffloadAdam` on the streamed state; see `docs/guides/training/optimizer-state.md`).
-Open: Adafactor and logarithmic 8-bit state, bf16 device state kernel, and the
-generic full trainer below.
+Wave 2 pieces landed: values in any registered encoding with a master (QAT),
+layer-streamed updates with deferred publication, streamed export of masters.
+Open: Adafactor and logarithmic 8-bit state, bf16 device state kernel, the
+FP8 encoder moving into `checkpoint`, and the generic full trainer that wires
+these to the model-generic objectives.
 A trainable parameter with independent value storage, gradient dtype, optimizer
 state dtype and optional master copy (none, bf16, fp32). A bounded-tile
 parameter update (decode tile, update, re-encode) with fp32, bf16 and 8-bit

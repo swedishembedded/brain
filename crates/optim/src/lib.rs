@@ -67,6 +67,10 @@ pub mod offload;
 pub use offload::OffloadAdam;
 
 pub mod codec;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod deferred;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod encoded;
 pub mod rule;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod checkpoint;

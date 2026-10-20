@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 brain-gpu-core.workspace = true
 brain-paramstore.workspace = true
+brain-checkpoint.workspace = true
 brain-kernels.workspace = true
 bytemuck.workspace = true
 serde_json.workspace = true

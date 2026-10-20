@@ -134,7 +134,9 @@ layer 6 - serving, front ends, SDK, samples
                            a file under a bounded workspace), the
                            `StreamedOptimizer` driver over a `ParamTiles` seam
                            (what a generic trainer implements; `TrainState`
-                           is its one-call entry point), the fused device
+                           is its one-call entry point; `EncodedValues` keeps values in any registered
+                           codec encoding, `DeferredPublish` and `export_values`
+                           serve layer-streamed trainers), the fused device
                            int8-moment AdamW (`adamw_q8`), and the
                            transactional run checkpoint. A model crate supplies
                            parameter names and roles only; formats, rules and

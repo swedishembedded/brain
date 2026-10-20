@@ -2084,6 +2084,7 @@ dependencies = [
 name = "brain-optim"
 version = "3.0.0"
 dependencies = [
+ "brain-checkpoint",
  "brain-gpu-core",
  "brain-kernels",
  "brain-paramstore",

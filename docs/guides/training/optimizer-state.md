@@ -46,6 +46,29 @@ It runs
 
 Adafactor and logarithmic 8-bit state are not implemented yet.
 
+## Values in a quantized encoding, layer streaming, export
+
+`optim::encoded::EncodedValues` stores a parameter's value in any encoding the
+checkpoint codec registry can encode and decode (bf16, int8, NF4, GGUF block
+formats, block-scaled FP8);
+reading decodes a tile, writing re-encodes one. With an optimizer master copy
+this is mixed-precision and quantization-aware training: the master accumulates
+the updates, the stored value is its quantization, and the gradient taken at
+the stored value is applied to the master (the straight-through estimator).
+Without a master a low-precision value loses small updates, and the stochastic
+rounding request is refused for encoded values rather than quietly rounded
+to nearest.
+
+A trainer that finishes one layer at a time calls `begin_step` once, then
+`update_tensor` per tensor. `DeferredPublish` keeps the new values aside until
+`publish`, so every gradient of a step is taken against one parameter version
+(tied or shared weights make an in-place update wrong). The global clip needs
+the whole gradient norm, so a layer-streamed trainer passes its own multiplier.
+
+`export_values` streams values - from the live store, or from the masters
+through `MasterView` - into any `TensorSink` in a chosen encoding, a tile at a
+time.
+
 ## Wiring a trainer
 
 A model supplies only a manifest of `(name, numel)`. A trainer creates a

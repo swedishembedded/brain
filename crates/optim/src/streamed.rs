@@ -48,6 +48,12 @@ pub trait ParamTiles {
     fn read_value(&mut self, tensor: usize, start: usize, out: &mut [f32]) -> io::Result<()>;
     fn write_value(&mut self, tensor: usize, start: usize, vals: &[f32], rnd: Rounding) -> io::Result<()>;
     fn read_grad(&mut self, tensor: usize, start: usize, out: &mut [f32]) -> io::Result<()>;
+    /// Deliver a gradient tile into the store [`Self::read_grad`] reads, for a
+    /// trainer that produces gradients one layer at a time through this seam.
+    /// Stores whose gradients the backward pass writes itself keep the default.
+    fn write_grad(&mut self, tensor: usize, _start: usize, _grad: &[f32]) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, format!("tensor {tensor}: this store does not accept gradient writes")))
+    }
 }
 
 /// Codecs of every slot of one tensor: the rule's slots (in `state` format)
@@ -88,6 +94,33 @@ impl<V: Backing, G: Backing> ParamTiles for HostParams<V, G> {
     }
     fn read_grad(&mut self, tensor: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
         self.grads.read_tile(tensor, 0, start, out)
+    }
+    fn write_grad(&mut self, tensor: usize, start: usize, grad: &[f32]) -> io::Result<()> {
+        self.grads.write_tile(tensor, 0, start, grad, Rounding::NEAREST)
+    }
+}
+
+/// Read-only [`ParamTiles`] whose values are the optimiser's MASTER copies
+/// (the stored value where a tensor has none). Export from this to publish the
+/// highest-precision weights in a chosen format rather than re-quantizing the
+/// already-quantized training values.
+pub struct MasterView<'a, S: OptimizerStateStorage> {
+    pub opt: &'a mut StreamedOptimizer<S>,
+    pub values: &'a mut dyn ParamTiles,
+}
+
+impl<S: OptimizerStateStorage> ParamTiles for MasterView<'_, S> {
+    fn read_value(&mut self, tensor: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
+        match self.opt.master_slot(tensor) {
+            Some(ms) => self.opt.state.read_tile(tensor, ms, start, out),
+            None => self.values.read_value(tensor, start, out),
+        }
+    }
+    fn write_value(&mut self, tensor: usize, _start: usize, _vals: &[f32], _rnd: Rounding) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, format!("tensor {tensor}: a master view is read-only")))
+    }
+    fn read_grad(&mut self, tensor: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
+        self.values.read_grad(tensor, start, out)
     }
 }
 
@@ -240,8 +273,11 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
         Ok(())
     }
 
-    /// Sum of squares of every gradient, f64, tile by tile.
-    fn grad_sum_sq(&mut self, params: &mut dyn ParamTiles) -> io::Result<f64> {
+    /// Sum of squares of every gradient, f64, tile by tile. With
+    /// [`crate::grad_multiplier`] this is the global clip; a layer-streamed
+    /// trainer that cannot hold every gradient computes it as it goes and passes
+    /// the resulting multiplier to [`Self::update_tensor`].
+    pub fn grad_sum_sq(&mut self, params: &mut dyn ParamTiles) -> io::Result<f64> {
         let mut acc = 0f64;
         for ti in 0..self.specs.len() {
             let numel = self.specs[ti].numel;
@@ -261,47 +297,64 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
     pub fn step(&mut self, params: &mut dyn ParamTiles, lr: f32, clip: Option<f32>, extra_scale: f32) -> io::Result<StepReport> {
         let sumsq = if clip.is_some() { self.grad_sum_sq(params)? } else { 0.0 };
         let mult = crate::grad_multiplier(sumsq, clip, extra_scale);
-        self.step += 1;
-        let scalars = StepScalars { t: self.step, lr, grad_scale: mult };
-        let nslots = self.rule.slots().len();
+        let step = self.begin_step();
         for ti in 0..self.specs.len() {
-            let prec = self.specs[ti].precision;
-            let numel = self.specs[ti].numel;
-            let master_slot = self.master_slot(ti);
-            let sr = prec.stochastic_rounding;
-            for start in (0..numel).step_by(self.tile) {
-                let n = self.tile.min(numel - start);
-                match master_slot {
-                    Some(ms) => self.state.read_tile(ti, ms, start, &mut self.w[..n])?,
-                    None => params.read_value(ti, start, &mut self.w[..n])?,
-                }
-                params.read_grad(ti, start, &mut self.g[..n])?;
-                for s in 0..nslots {
-                    self.state.read_tile(ti, s, start, &mut self.st[s][..n])?;
-                }
-                for i in 0..n {
-                    let mut st = [self.st[0][i], self.st[1][i]];
-                    self.rule.update(scalars, &mut self.w[i], self.g[i], &mut st);
-                    self.st[0][i] = st[0];
-                    self.st[1][i] = st[1];
-                }
-                for s in 0..nslots {
-                    let rnd = Rounding { stochastic: sr, key: rounding_key(self.seed, self.step, ti, s) };
-                    self.state.write_tile(ti, s, start, &self.st[s][..n], rnd)?;
-                }
-                if let Some(ms) = master_slot {
-                    let rnd = Rounding { stochastic: sr, key: rounding_key(self.seed, self.step, ti, ms) };
-                    self.master[..n].copy_from_slice(&self.w[..n]);
-                    self.state.write_tile(ti, ms, start, &self.master[..n], rnd)?;
-                }
-                let vr = Rounding {
-                    stochastic: sr && prec.value != ValueDtype::F32,
-                    key: rounding_key(self.seed, self.step, ti, VALUE_ROUNDING_SLOT),
-                };
-                params.write_value(ti, start, &self.w[..n], vr)?;
-            }
+            self.update_tensor(params, ti, lr, mult)?;
         }
-        Ok(StepReport { step: self.step, grad_multiplier: mult })
+        Ok(StepReport { step, grad_multiplier: mult })
+    }
+
+    /// Start the next optimisation step and return its 1-based index. The
+    /// first half of the incremental form of [`Self::step`]: a trainer that
+    /// finishes tensors one layer at a time calls this once, then
+    /// [`Self::update_tensor`] per tensor in any order, each exactly once.
+    pub fn begin_step(&mut self) -> u32 {
+        self.step += 1;
+        self.step
+    }
+
+    /// Update tensor `ti` for the step opened by [`Self::begin_step`], with its
+    /// gradient multiplied by `grad_multiplier`. Reads the tensor's value (or
+    /// master), gradient and state, writes state, master and value.
+    pub fn update_tensor(&mut self, params: &mut dyn ParamTiles, ti: usize, lr: f32, grad_multiplier: f32) -> io::Result<()> {
+        let scalars = StepScalars { t: self.step, lr, grad_scale: grad_multiplier };
+        let nslots = self.rule.slots().len();
+        let prec = self.specs[ti].precision;
+        let numel = self.specs[ti].numel;
+        let master_slot = self.master_slot(ti);
+        let sr = prec.stochastic_rounding;
+        for start in (0..numel).step_by(self.tile) {
+            let n = self.tile.min(numel - start);
+            match master_slot {
+                Some(ms) => self.state.read_tile(ti, ms, start, &mut self.w[..n])?,
+                None => params.read_value(ti, start, &mut self.w[..n])?,
+            }
+            params.read_grad(ti, start, &mut self.g[..n])?;
+            for s in 0..nslots {
+                self.state.read_tile(ti, s, start, &mut self.st[s][..n])?;
+            }
+            for i in 0..n {
+                let mut st = [self.st[0][i], self.st[1][i]];
+                self.rule.update(scalars, &mut self.w[i], self.g[i], &mut st);
+                self.st[0][i] = st[0];
+                self.st[1][i] = st[1];
+            }
+            for s in 0..nslots {
+                let rnd = Rounding { stochastic: sr, key: rounding_key(self.seed, self.step, ti, s) };
+                self.state.write_tile(ti, s, start, &self.st[s][..n], rnd)?;
+            }
+            if let Some(ms) = master_slot {
+                let rnd = Rounding { stochastic: sr, key: rounding_key(self.seed, self.step, ti, ms) };
+                self.master[..n].copy_from_slice(&self.w[..n]);
+                self.state.write_tile(ti, ms, start, &self.master[..n], rnd)?;
+            }
+            let vr = Rounding {
+                stochastic: sr && prec.value != ValueDtype::F32,
+                key: rounding_key(self.seed, self.step, ti, VALUE_ROUNDING_SLOT),
+            };
+            params.write_value(ti, start, &self.w[..n], vr)?;
+        }
+        Ok(())
     }
 }
 
