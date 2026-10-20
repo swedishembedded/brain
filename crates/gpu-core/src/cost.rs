@@ -682,6 +682,14 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
         // params [total, c, hw] (layout permutations).
         "nlc_nchw" | "nchw_nlc" => f(0, 8 * p(0)?),
+        // params [a0, a1, a2, d]: pure movement, every one of the a0*a1*a2*d
+        // output scalars is read once and written once (4 B in + 4 B out).
+        // params [n, s]: per output channel, four f32 reads and three writes of the
+        // DoRA gain (about fifteen flops with the sqrt and the reciprocal).
+        // params [n]: per channel gmu read-modify-write plus dg, three gain reads and one c write.
+        "dora_gain_bwd" => f(5 * p(0)?, 28 * p(0)?),
+        "dora_gain" => f(15 * p(0)?, 28 * p(0)?),
+        "swap_axes12_vec" => f(0, 8 * p(0)? * p(1)? * p(2)? * p(3)?),
         // Replicate pad on NCL, params [total, l, left, right]. Pure movement,
         // no arithmetic: every output element is written once and reads one
         // source element, so the streaming traffic is 4 B in + 4 B out per
