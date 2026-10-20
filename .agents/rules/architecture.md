@@ -2,20 +2,34 @@
 
 brain is a Cargo **workspace** of many small, single-responsibility crates
 (currently in the neighborhood of 90). The engine is pure Rust + raw WGSL,
-**core-compute-only** (single bind group, ≤8 storage buffers/kernel, no
-atomics/subgroups/f16, `@workgroup_size(64)` apart from the register-tiled
-matmuls at 256) so the exact same kernels run on old desktop GPUs and on
-WebGPU in the browser. Storage/activations are **fp32, never f16** - WGSL f16
-needs the optional `shader-f16` extension, which old GPUs and WebGPU do not
-reliably have, so it is never used. That is a **narrower** claim than
-"fp32-only": **int8 is a first-class, load-bearing compute path**, not a
-storage-only quantization - real DP4A dot-product WGSL kernels
-(`matmul_i8*.wgsl`, `moe_linear_gated_i8.wgsl`, `crates/kernels/wgsl/`) drive
-Qwen3.5's int8 paged KV cache (the *serving default*), `qwen3`/`s3dit`/
-`qwen35moe`'s `--precision int8` inference paths, and INT8 PTQ for the Intel
-NPU export. int8 activates the same DP4A hardware path fp16 would have used on
-a modern GPU, without needing `shader-f16` - so "no f16" did not mean "no
-reduced precision", and this doc should not have implied it did.
+**core-compute-only** (single bind group, <=8 storage buffers/kernel, no
+atomics/subgroups, no `shader-f16` extension, `@workgroup_size(64)` apart from
+the register-tiled matmuls at 256) so the exact same kernels run on old desktop
+GPUs and on WebGPU in the browser. The portable WGSL path is the reference and
+the fallback; it is never the only path:
+
+- **Activations and master parameters are fp32** on the portable path. Reduced
+  *storage* tiers are decoded inline by pure-integer WGSL, needing no device
+  feature: `Weight::{F32, BF16, F16, I8, Q4, NF4, KQuant}` (`model::ops`),
+  with `Weight::upload` the one capability-gated place a tier is chosen
+  (`want.promote(caps.numeric)`). bf16/f16 here are packed storage, not f16
+  arithmetic.
+- **int8 is a first-class compute path**, not storage-only: DP4A dot-product
+  WGSL kernels (`matmul_i8*.wgsl`, `moe_linear_gated_i8.wgsl`,
+  `crates/kernels/wgsl/`) drive the int8 paged KV cache, the `--precision int8`
+  inference paths and INT8 PTQ for the Intel NPU export.
+- **Tensor cores are the default where the device has them**, selected on
+  queried capability through the gpu-core provider seam (cuBLAS TF32/bf16 for
+  GEMMs, fp16 `mma` in paged flash prefill, int8 tensor-core GEMM); the fp32
+  WGSL/CUDA-core path is what a gradient check or parity gate pins
+  (`GemmPrecision::Fp32Reference`).
+- **Training state is fp32 today**: `paramstore` holds weight, gradient and
+  Adam moments as fp32 buffers, `optim::offload` keeps fp32 host moments, and
+  placement charges 4 bytes per element except packed int8. A frozen base may
+  be held reduced (bf16, int8, NF4) only through `Weight`, i.e. for adapter
+  training. There is no FP8, NVFP4 or MX storage tier and no low-precision
+  full fine-tune yet; the planned placement of those concepts is in "Where the
+  quantized load/train concepts live" below.
 
 `AGENTS.md` is the routing guide (which crate does what, task → file); this
 document is the *shape* of the workspace: how the layers stack and what may
@@ -208,6 +222,29 @@ validated in `crates/model/tests/tensor_parallel.rs`. See
 [overview](../../docs/concepts/scaling/overview.md), [data parallel](../../docs/concepts/scaling/data-parallel.md),
 [pipeline sharding](../../docs/concepts/scaling/pipeline.md),
 [tensor parallel](../../docs/concepts/scaling/tensor-parallel.md).
+
+## Where the quantized load/train concepts live
+
+The quantized-training programme (`.agents/roadmap/quantized-training.md`)
+adds concepts that must land in one layer each; this is their placement. An
+entry names a target, not a shipped capability - check the roadmap's status
+before relying on one.
+
+| concept | layer / crate | rule |
+|---|---|---|
+| codec decode/encode, quantized GEMM tiles, fused optimizer-update kernels | 1 `kernels`, `kernels-cuda` | kernel text lives only here; portable WGSL reference first |
+| kernel choice from operand descriptors + device caps | 2 `gpu-core` provider | the one selection seam (`check-kernel-selection.sh`); no model crate picks a kernel by format |
+| tensor descriptor, quantization encoding, codec registry, packed tensor reader/sink, memory budget, load plan executor, declarative name/layout mapping (`remap.rs`) | 3 `checkpoint` | the lowest layer that needs a shared type owns it; no wgpu dependency |
+| trainable parameter with independent storage/gradient/optimizer-state dtype, optimizer state formats and storage, transactional state | 3 `paramstore`, `optim` | one AdamW definition; state formats are data, not new optimizers per format |
+| `Weight` variants and generic quantized forward/input-grad/weight-grad ops, adapter runtime (definition, execution, optimization), KV storage descriptor, saved-activation policy, generic trainers and objectives, parameter manifest and capability traits | 3 `model` | extend `model::ops`, `adapter::sites`, `model::training`, `model::conformance` rather than adding parallel seams |
+| graph, parameter manifest (roles, adapter targets), declarative checkpoint mapping, I/O and objectives, custom ops | 4 model crates | nothing else: no codec, loader, adapter, optimizer or trainer code |
+| residency, serving, sdk | 5-6 | consume `MemoryBudget`/`LoadPlan` and the generic trainers; never re-implement them |
+
+Acceptance test of the layering: adding a storage format, adapter kind,
+optimizer or objective touches no model crate, and adding a model touches no
+codec, adapter, optimizer or trainer code. No upward dependencies and no
+duplicated descriptors (the KV tier adopts the checkpoint crate's encoding
+rather than keeping its own).
 
 ## Conventions
 

@@ -166,5 +166,9 @@ Notes on the columns:
 
 - **LoRA** columns are omitted for model families where fine-tuning isn't
   offered at all (rather than shown as an empty box everywhere).
-- **QLoRA is not implemented anywhere in brain** - INT8/GGUF paths are
-  inference-only.
+- **Quantized-base LoRA** is offered on `qwen3` (bf16 and int8 base),
+  `qwen35` (bf16 and NF4 base, "QLoRA", including the 27B on one card) and
+  `flux2` (int8 base, CUDA). Everything else fine-tunes an fp32 base, and no
+  architecture fine-tunes a quantized or fp8 base in full. INT8/GGUF serving
+  paths are inference-only. The per-architecture matrix, with the test that
+  backs each cell, is in [training capabilities](../training-capabilities.md).

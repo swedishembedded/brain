@@ -1114,7 +1114,7 @@ front-end to depend on.
 | Task | Where |
 |---|---|
 | Architecture & crate graph | `.agents/rules/architecture.md` |
-| **Defects this repo has already paid for** (gates that lie, metrics that cannot see a bug, backend-specific silent-zero gradients) | **`.agents/knowledge/index.md`** - the knowledge base's routing table: 146 findings, one file each, cited by a stable id (`#55`). Read before designing a gate, and before calling a number an architecture's ceiling |
+| **Defects this repo has already paid for** (gates that lie, metrics that cannot see a bug, backend-specific silent-zero gradients) | **`.agents/knowledge/index.md`** - the knowledge base's routing table: one file per finding, cited by a stable id (`#55`). Read before designing a gate, and before calling a number an architecture's ceiling |
 | Testing strategy + gradient-check gate | `.agents/rules/testing.md` |
 | **Porting a new model** (goldens → import → kernel contracts → parity ladder → training) | **`.agents/rules/porting.md`** - read BEFORE starting any port |
 | Multi-GPU scaling (data / pipeline / tensor parallel) | `docs/concepts/scaling/*.md`; `crates/model/src/{distributed,parallel,collective,shard,plan,grid}.rs` |

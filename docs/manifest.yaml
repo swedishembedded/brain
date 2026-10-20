@@ -54,6 +54,7 @@ navigation:
       - docs/reference/cli.md
       - docs/reference/sdk.md
       - docs/reference/configuration.md
+      - docs/reference/training-capabilities.md
       - title: API
         pages:
           - docs/reference/api/http.md
