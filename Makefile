@@ -699,8 +699,8 @@ check/seed-literals/tests:
 	bash scripts/gates/check-seed-literals.sh --tests
 
 # Spec for the gate above, run against throwaway trees (needs only bats).
-## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers)
-test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers
+## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads)
+test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads
 
 ## test/gates/test-skips - the silent-skip ratchet fails on a new bare skip and on a stale entry, passes on a match
 test/gates/test-skips:
@@ -721,6 +721,10 @@ test/gates/seed-literals:
 ## test/gates/crate-layers - the layer map gate fails on an unassigned package, an upward dependency, a stale allowlist entry and a drifted crate table
 test/gates/crate-layers:
 	bats tests/gates/crate_layers.bats
+
+## test/gates/whole-tensor-loads - the whole-tensor load ratchet fails on a new whole-tensor call and on a stale entry, ignores bounded readers, tests and checkpoint internals
+test/gates/whole-tensor-loads:
+	bats tests/gates/whole_tensor_loads.bats
 
 ## test/gates/group-kernels - the kernel-table grouping sums to the table total and bills unknown kernels to misc
 test/gates/group-kernels:
@@ -805,6 +809,7 @@ check/scripts:
 	bash scripts/gates/check-kernel-selection.sh
 	bash scripts/gates/check-multi-gpu-sharding.sh
 	bash scripts/gates/check-crate-layers.sh
+	bash scripts/gates/check-whole-tensor-loads.sh
 	bash scripts/gates/check-cancellable-actions.sh
 
 # SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...

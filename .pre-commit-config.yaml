@@ -140,6 +140,17 @@ repos:
         files: '(^crates/.*Cargo\.toml$|^Cargo\.toml$|^scripts/gates/(crate-layers\.|check-crate-layers\.sh)|^\.agents/rules/architecture\.md$)'
         pass_filenames: false
         stages: [pre-commit]
+      - id: whole-tensor-loads
+        name: "No new whole-tensor fp32 loads in production loaders"
+        description: >-
+          the whole-tensor load ratchet fails on a new whole-tensor call and on a stale entry, ignores bounded readers, tests and checkpoint internals. Allowlist: scripts/gates/whole-tensor-loads.allow (path, count, reason;
+          shrink-only). See scripts/gates/check-whole-tensor-loads.sh. Also run by
+          `make check/scripts`.
+        entry: bash scripts/gates/check-whole-tensor-loads.sh
+        language: system
+        files: '(^crates/.*\.rs$|^scripts/gates/(whole-tensor-loads\.|check-whole-tensor-loads\.sh|ratchet\.py))'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: seed-literals
         name: "No new literal seeds in production code (every default seed is random)"
         description: >-
