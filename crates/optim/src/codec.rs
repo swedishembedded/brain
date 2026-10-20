@@ -54,24 +54,33 @@ impl Rounding {
     pub const NEAREST: Rounding = Rounding { stochastic: false, key: 0 };
 }
 
-/// splitmix64 finaliser.
+/// 32-bit integer mixer. The rounding randomness is defined on 32-bit words
+/// so the device kernels (`adamw_q8.wgsl`, which has no 64-bit integers) draw
+/// bit-identical numbers.
 #[inline]
-fn mix(mut z: u64) -> u64 {
-    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
+pub fn mix32(mut x: u32) -> u32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^ (x >> 16)
 }
 
-/// Combine identifying fields into one rounding key.
+/// Combine identifying fields into one rounding key (low word from the seed
+/// and step, high word from the seed and the tensor/slot).
 pub fn rounding_key(seed: u64, step: u32, tensor: usize, slot: usize) -> u64 {
-    mix(mix(mix(seed ^ step as u64) ^ tensor as u64) ^ slot as u64)
+    let lo = mix32(seed as u32 ^ mix32(step));
+    let ts = (((tensor as u32) << 8) | (slot as u32 & 0xff)).wrapping_add(0x9E37_79B9);
+    let hi = mix32((seed >> 32) as u32 ^ mix32(ts));
+    ((hi as u64) << 32) | lo as u64
 }
 
 /// Uniform in `[0, 1)` for element `idx` under `key`.
 #[inline]
 fn unit(key: u64, idx: u64) -> f32 {
-    ((mix(key ^ mix(idx)) >> 40) as f32) * (1.0 / (1u64 << 24) as f32)
+    let (k0, k1) = (key as u32, (key >> 32) as u32);
+    let h = mix32(mix32(k0 ^ idx as u32) ^ k1 ^ mix32((idx >> 32) as u32));
+    ((h >> 8) as f32) * (1.0 / (1u64 << 24) as f32)
 }
 
 /// f32 -> bf16 bits. Nearest-even, or stochastic with `u` in `[0,1)`.

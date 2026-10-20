@@ -58,7 +58,7 @@
 //! percent more". Re-attempting that specific fusion without new evidence
 //! would be building a hypothesis the profile has already killed.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use gpu_core::{f, Gpu, Step};
 use paramstore::ParamStore;
@@ -160,6 +160,10 @@ struct Graph {
     /// rewritten once per `step()` call regardless of tensor count. See the
     /// module doc.
     hparams: gpu_core::DeviceBuffer,
+    /// Hyperparameters of the int8-moment kernel (`adamw_q8`), present when the
+    /// store has such tensors: the eight above plus the rounding seed halves
+    /// and the step index.
+    hparams_q: Option<gpu_core::DeviceBuffer>,
     // constant/write-once buffers kept alive for the lifetime of their bind
     // groups: gradnorm's per-tensor uniforms, the unit coef buffer (unclipped
     // mode), and every tensor's `numel` descriptor.
@@ -180,6 +184,9 @@ pub struct Optim {
     /// Unused for the same reason as `grad_scale` above.
     pub grad_scale_buf: usize,
     cache: RefCell<Option<Graph>>,
+    /// Seed of the stochastic rounding of int8 moments. Random per `Optim`
+    /// unless [`Optim::set_rounding_seed`] pins it (a resumed run restores it).
+    rounding_seed: Cell<u64>,
 }
 
 impl Optim {
@@ -190,7 +197,19 @@ impl Optim {
         clip_coef: usize,
         grad_scale_buf: usize,
     ) -> Optim {
-        Optim { adamw, gradnorm_sq, grad_scale, clip_coef, grad_scale_buf, cache: RefCell::new(None) }
+        use std::hash::{BuildHasher, Hasher};
+        let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
+        Optim { adamw, gradnorm_sq, grad_scale, clip_coef, grad_scale_buf, cache: RefCell::new(None), rounding_seed: Cell::new(random) }
+    }
+
+    /// Pin the stochastic-rounding seed of int8 moments (checkpoint resume).
+    pub fn set_rounding_seed(&self, seed: u64) {
+        self.rounding_seed.set(seed);
+    }
+
+    /// The seed in use; record it with the run so it can be resumed.
+    pub fn rounding_seed(&self) -> u64 {
+        self.rounding_seed.get()
     }
 
     /// Build the dispatch graph. `clipped` selects whether the grad-norm ->
@@ -262,7 +281,26 @@ impl Optim {
         // never called on, so an all-1.0 store is bit-identical to before
         // this field existed) - written once, here, never again (neither can
         // change for the life of this graph).
-        for (name, numel) in ps.opt_params() {
+        let q8 = ps.opt_params().iter().any(|(n, _)| ps.moment_scales.contains_key(n));
+        let hparams_q = q8.then(|| gpu.uniform_dynamic(12));
+        for (ti, (name, numel)) in ps.opt_params().iter().enumerate() {
+            if let Some(scales) = ps.moment_scales.get(name) {
+                let kernel = gpu
+                    .kernel_index("adamw_q8")
+                    .unwrap_or_else(|| panic!("{name} has int8 moments but this device has no `adamw_q8` kernel registered"));
+                let sr = ps.precision_of(name).stochastic_rounding as u32;
+                let desc = gpu.storage(4);
+                gpu.write(&desc, &[*numel as u32, f(ps.lr_mult_of(name)), ti as u32, sr]);
+                let blocks = numel.div_ceil(paramstore::DEVICE_INT8_BLOCK as usize) as u32;
+                steps.push(gpu.step_buf(
+                    kernel,
+                    hparams_q.as_ref().unwrap(),
+                    &[ps.w(name), ps.g(name), &ps.adam_m[name], &ps.adam_v[name], scales, &desc, &coef_buf],
+                    blocks,
+                ));
+                const_unis.push(desc);
+                continue;
+            }
             let words = kernels::adamw_desc(*numel, ps.lr_mult_of(name));
             let desc = gpu.storage(words.len() as u64);
             gpu.write(&desc, &words);
@@ -275,7 +313,7 @@ impl Optim {
             const_unis.push(desc);
         }
 
-        Graph { clipped, n_opt: ps.opt_params().len(), n_norm_inputs, steps, clip_uni, hparams, _const_unis: const_unis }
+        Graph { clipped, n_opt: ps.opt_params().len(), n_norm_inputs, steps, clip_uni, hparams, hparams_q, _const_unis: const_unis }
     }
 
     /// The cooperative grad-norm pair `(gradnorm_part, clip_coef_wg)` for this
@@ -344,9 +382,41 @@ impl Optim {
         // already folded it into `clip_coef`'s own `extra_scale` field).
         let scale = if clipped { 1.0 } else { extra_scale };
         gpu.write(&g.hparams, &[f(lr), f(adam.beta1), f(adam.beta2), f(adam.eps), f(wd), f(bc1), f(bc2), f(scale)]);
+        if let Some(hq) = &g.hparams_q {
+            let seed = self.rounding_seed.get();
+            gpu.write(hq, &[f(lr), f(adam.beta1), f(adam.beta2), f(adam.eps), f(wd), f(bc1), f(bc2), f(scale), seed as u32, (seed >> 32) as u32, t, 0]);
+        }
 
         gpu.submit(&[], &g.steps);
     }
+}
+
+/// Decode the blockwise-int8 moments of `name` from the device into f32
+/// (`(first, second)`), through the same codec the host optimiser uses. `None`
+/// when the parameter's moments are not int8 (use `ParamStore::read_moments`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_moments_q8(gpu: &Gpu, ps: &ParamStore, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+    use codec::{SlotKind, StateCodec};
+    use paramstore::precision::StateFormat;
+    let scales = ps.moment_scales.get(name)?;
+    let n = ps.numel(name);
+    let nb = n.div_ceil(paramstore::DEVICE_INT8_BLOCK as usize);
+    let words = n.div_ceil(4);
+    let sc = gpu.read(scales, 2 * nb);
+    let bytes_of = |buf: &gpu_core::DeviceBuffer| -> Vec<u8> {
+        let w = gpu.read(buf, words);
+        bytemuck::cast_slice::<f32, u8>(&w)[..n].to_vec()
+    };
+    let format = StateFormat::Int8Block { block: paramstore::DEVICE_INT8_BLOCK };
+    let decode = |kind, codes: Vec<u8>, scales: &[f32]| {
+        let mut out = vec![0f32; n];
+        StateCodec { format, kind }.decode(&codes, bytemuck::cast_slice(scales), &mut out);
+        out
+    };
+    Some((
+        decode(SlotKind::Signed, bytes_of(&ps.adam_m[name]), &sc[..nb]),
+        decode(SlotKind::NonNegative, bytes_of(&ps.adam_v[name]), &sc[nb..]),
+    ))
 }
 
 #[cfg(test)]

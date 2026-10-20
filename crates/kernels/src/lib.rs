@@ -46,6 +46,8 @@ pub const ACCUM_BF16: &str = include_str!("../wgsl/accum_bf16.wgsl");
 pub const ADALN_ROW: &str = include_str!("../wgsl/adaln_row.wgsl");
 /// `wgsl/adamw.wgsl`
 pub const ADAMW: &str = include_str!("../wgsl/adamw.wgsl");
+/// `wgsl/adamw_q8.wgsl`
+pub const ADAMW_Q8: &str = include_str!("../wgsl/adamw_q8.wgsl");
 /// `wgsl/adaptive_avgpool2d.wgsl`
 pub const ADAPTIVE_AVGPOOL2D: &str = include_str!("../wgsl/adaptive_avgpool2d.wgsl");
 /// `wgsl/adaptive_avgpool2d_dx.wgsl`
@@ -919,10 +921,10 @@ pub const PAGED_KV_APPEND: &str = include_str!("../wgsl/paged_kv_append.wgsl");
 pub const PAGED_KV_APPEND_BATCHED: &str = include_str!("../wgsl/paged_kv_append_batched.wgsl");
 /// `wgsl/paged_kv_append_batched_word.wgsl`
 pub const PAGED_KV_APPEND_BATCHED_WORD: &str = include_str!("../wgsl/paged_kv_append_batched_word.wgsl");
-/// `wgsl/paged_kv_append_i8_clipped_batched.wgsl`
-pub const PAGED_KV_APPEND_I8_CLIPPED_BATCHED: &str = include_str!("../wgsl/paged_kv_append_i8_clipped_batched.wgsl");
 /// `wgsl/paged_kv_append_fp8_clipped_batched.wgsl`
 pub const PAGED_KV_APPEND_FP8_CLIPPED_BATCHED: &str = include_str!("../wgsl/paged_kv_append_fp8_clipped_batched.wgsl");
+/// `wgsl/paged_kv_append_i8_clipped_batched.wgsl`
+pub const PAGED_KV_APPEND_I8_CLIPPED_BATCHED: &str = include_str!("../wgsl/paged_kv_append_i8_clipped_batched.wgsl");
 /// `wgsl/pexp_nll_grad.wgsl`
 pub const PEXP_NLL_GRAD: &str = include_str!("../wgsl/pexp_nll_grad.wgsl");
 /// `wgsl/pexp_nll_value.wgsl`
@@ -1299,6 +1301,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("accum_bf16", ACCUM_BF16),
     ("adaln_row", ADALN_ROW),
     ("adamw", ADAMW),
+    ("adamw_q8", ADAMW_Q8),
     ("adaptive_avgpool2d", ADAPTIVE_AVGPOOL2D),
     ("adaptive_avgpool2d_dx", ADAPTIVE_AVGPOOL2D_DX),
     ("add", ADD),

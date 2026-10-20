@@ -24,11 +24,11 @@ pub enum Role {
     Frozen,
     /// Optimised **off-device**: the weight and its gradient live on the GPU (the
     /// forward/backward need them), but the AdamW moments (`m`/`v`) do NOT — they
-    /// are held in system RAM by [`optim::OffloadAdam`], which reads the grad off
-    /// the GPU, updates host-resident `m`/`v`/master-weights on the CPU (AVX2),
+    /// are held in host memory or on disk by [`optim::OffloadAdam`], which reads
+    /// the grad off the GPU, updates the host-resident `m`/`v` (in the
+    /// parameter's own state format: fp32, bf16 or blockwise int8) on the CPU,
     /// and writes the new weight back. Cuts GPU optimiser state from 4×params to
-    /// 2×params (weight+grad) and puts the other 2× (m+v) in the box's 177 GB of
-    /// RAM — enabling much larger models than fit in 24 GB of VRAM.
+    /// 2×params (weight+grad) - enabling much larger models than fit in VRAM.
     Offload,
 }
 
@@ -41,6 +41,9 @@ pub const GRADNORM_ELEMS_PER_WG: usize = 8192;
 /// bandwidth and every extra workgroup is one more f32 for the second pass to
 /// fold; 512 workgroups = 32 768 threads, several times a P40's core count.
 pub const GRADNORM_MAX_WG: usize = 512;
+
+/// Block size of the int8 moments the device optimiser (`adamw_q8`) runs.
+pub const DEVICE_INT8_BLOCK: u32 = 64;
 
 /// Per-tensor upload chunk size, in elements (4 MiB as f32/u32 words). Bounds
 /// the HOST-side scratch a weight upload ever materializes to this many
@@ -92,6 +95,12 @@ pub struct ParamStore {
     /// unaffected. Set via [`Self::set_lr_mult`] after construction, then
     /// read by `optim::Optim::build` when it writes each tensor's `desc`.
     pub lr_mult: HashMap<String, f32>,
+    /// Block scales of the parameters whose moments are blockwise int8
+    /// ([`precision::StateFormat::Int8Block`] with block 64): `adam_m`/`adam_v`
+    /// then hold packed code bytes (four per word) and this buffer holds the
+    /// `ceil(numel/64)` first-moment scales followed by as many second-moment
+    /// scales. Absent for fp32-moment parameters.
+    pub moment_scales: HashMap<String, gpu_core::DeviceBuffer>,
     /// Per-tensor training precision (value / grad / state / master) chosen by
     /// the caller's [`precision::PrecisionPolicy`]. Absent = all-fp32, which is
     /// what the device buffers above physically are today; the streamed
@@ -135,6 +144,26 @@ impl ParamStore {
         params_roles: Vec<(String, usize, Role)>,
         source: &dyn checkpoint::TensorSource,
     ) -> ParamStore {
+        Self::new_with_policy_src(gpu, params_roles, source, &precision::PrecisionPolicy::uniform(precision::ParamPrecision::FP32))
+    }
+
+    /// [`Self::new_with_roles_src`] where each trainable parameter's training
+    /// precision comes from `policy`. The device buffers honour the optimiser
+    /// state format: fp32 moments, or blockwise-int8 moments of block
+    /// [`DEVICE_INT8_BLOCK`] (code bytes plus scales, see [`Self::moment_scales`]).
+    /// Anything the device optimiser cannot run (bf16/other-block state, a
+    /// master copy, non-fp32 value or gradient storage) panics naming the
+    /// parameter: those formats are served by the streamed host optimiser in
+    /// `optim`, and silently falling back to fp32 would break the byte budget
+    /// the policy was chosen for.
+    pub fn new_with_policy_src(
+        gpu: &Gpu,
+        params_roles: Vec<(String, usize, Role)>,
+        source: &dyn checkpoint::TensorSource,
+        policy: &precision::PrecisionPolicy,
+    ) -> ParamStore {
+        let mut moment_scales = HashMap::new();
+        let mut precisions = HashMap::new();
         let mut weight = HashMap::new();
         let mut grad = HashMap::new();
         let mut adam_m = HashMap::new();
@@ -184,6 +213,34 @@ impl ParamStore {
             weight.insert(name.clone(), wbuf);
             match role {
                 Role::Trainable => {
+                    let pr = policy.resolve(name, *numel).precision;
+                    if pr != precision::ParamPrecision::FP32 {
+                        precisions.insert(name.clone(), pr);
+                    }
+                    if let precision::StateFormat::Int8Block { block } = pr.state {
+                        assert!(
+                            block == DEVICE_INT8_BLOCK
+                                && pr.value == precision::ValueDtype::F32
+                                && pr.grad == precision::GradDtype::F32
+                                && pr.master == precision::MasterPolicy::None,
+                            "{name}: the device optimiser runs int8 moments only with block {DEVICE_INT8_BLOCK}, f32 value and grad and no master; got {pr:?}"
+                        );
+                        let words = numel.div_ceil(4) as u64;
+                        grad.insert(name.clone(), gpu.storage(*numel as u64));
+                        adam_m.insert(name.clone(), gpu.storage(words));
+                        adam_v.insert(name.clone(), gpu.storage(words));
+                        moment_scales.insert(name.clone(), gpu.storage(2 * numel.div_ceil(DEVICE_INT8_BLOCK as usize) as u64));
+                        trainable.push((name.clone(), *numel));
+                        params.push((name.clone(), *numel));
+                        continue;
+                    }
+                    assert!(
+                        pr.state == precision::StateFormat::F32
+                            && pr.value == precision::ValueDtype::F32
+                            && pr.grad == precision::GradDtype::F32
+                            && pr.master == precision::MasterPolicy::None,
+                        "{name}: the device optimiser supports f32 moments or blockwise-int8 moments (f32 value/grad, no master); got {pr:?}"
+                    );
                     // `gpu.storage(numel)` - NOT `storage_init`, and no write
                     // at all - for the zero-initialized grad/Adam moment
                     // buffers. Measured precisely on this backend: a buffer
@@ -226,7 +283,7 @@ impl ParamStore {
         let n_parts: u64 = trainable.iter().map(|(_, n)| gradnorm_parts(*n) as u64).sum();
         let norms = gpu.storage(n_parts.max(trainable.len() as u64).max(1));
         let clip_coef = gpu.storage(1);
-        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload, frozen: Vec::new(), lr_mult: HashMap::new(), precision: HashMap::new() }
+        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload, frozen: Vec::new(), lr_mult: HashMap::new(), moment_scales, precision: precisions }
     }
 
     /// Withdraw every trainable parameter whose name satisfies `pred` from the
@@ -345,6 +402,9 @@ impl ParamStore {
     /// from one step to the next.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read_moments(&self, gpu: &Gpu, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+        if self.moment_scales.contains_key(name) {
+            return None; // int8 moments: decode with `optim::read_moments_q8`
+        }
         let (m, v) = (self.adam_m.get(name)?, self.adam_v.get(name)?);
         let n = self.numel(name);
         Some((gpu.read(m, n), gpu.read(v, n)))
@@ -357,6 +417,9 @@ impl ParamStore {
         let (Some(mb), Some(vb)) = (self.adam_m.get(name), self.adam_v.get(name)) else {
             return Err(format!("{name} has no AdamW moments on the device"));
         };
+        if self.moment_scales.contains_key(name) {
+            return Err(format!("{name} has int8 moments; restore them with the optim crate's int8 codec"));
+        }
         let n = self.numel(name);
         if m.len() != n || v.len() != n {
             return Err(format!("{name}: moments of {}/{} values for a {n}-value parameter", m.len(), v.len()));
