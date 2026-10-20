@@ -250,6 +250,17 @@ impl WeightReader {
         WeightReader { inner: Inner::Derived(d, dtypes), order, shapes }
     }
 
+    /// The safetensors mapping that holds `name` (single file or its shard), or
+    /// `None` for GGUF, torch and computed checkpoints. Tile readers use this to
+    /// reach raw byte ranges.
+    pub(crate) fn st_for(&self, name: &str) -> Option<&MmapSafetensors> {
+        match &self.inner {
+            Inner::St(m) => m.dtype(name).map(|_| m),
+            Inner::StSharded(readers, owner) => owner.get(name).map(|&i| &readers[i]),
+            Inner::Gguf(_) | Inner::Torch(..) | Inner::Derived(..) => None,
+        }
+    }
+
     /// Tensor names, in the underlying file's order.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.order.iter().map(|s| s.as_str())

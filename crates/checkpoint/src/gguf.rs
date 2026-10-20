@@ -1812,6 +1812,17 @@ impl MmapGguf {
         let &(part, ty, start, nbytes, _numel) = self.index.get(name)?;
         Some((&self.mmaps[part][start..start + nbytes], ty))
     }
+
+    /// Drop the file-backed pages behind bytes `bytes` (relative to the tensor's
+    /// start) of `name`; the GGUF twin of `MmapSafetensors::advise_dontneed_range`.
+    pub fn advise_dontneed_range(&self, name: &str, bytes: std::ops::Range<usize>) {
+        let Some(&(part, _ty, start, nbytes, _numel)) = self.index.get(name) else { return };
+        if bytes.start >= bytes.end || bytes.end > nbytes {
+            return;
+        }
+        // SAFETY: read-only file mapping => MADV_DONTNEED loses no data.
+        let _ = unsafe { self.mmaps[part].unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start + bytes.start, bytes.end - bytes.start) };
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

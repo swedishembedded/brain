@@ -119,7 +119,7 @@ pub(super) fn encode(desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32]
     let inner = *desc.shape.last().unwrap_or(&1) as usize;
     if let EncodeKind::Int8Block(n) | EncodeKind::Nf4Block(n) = kind {
         // Block scales are per row, so a tile must be whole rows (or one whole row's blocks).
-        if !(elems.start as usize).is_multiple_of(n) || !values.len().is_multiple_of(n) || inner % n != 0 {
+        if !(elems.start as usize).is_multiple_of(n) || !values.len().is_multiple_of(n) || !inner.is_multiple_of(n) {
             return Err(format!("{}: tile {elems:?} is not aligned to {n}-element blocks", desc.name));
         }
     }

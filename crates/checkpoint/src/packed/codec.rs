@@ -174,10 +174,10 @@ fn decode_elements(el: Element, payload: &[u8], n: usize, out: &mut Vec<f32>) ->
         Element::Int { bits, signed } => match (bits, signed) {
             (8, true) => out.extend(payload.iter().take(n).map(|&b| b as i8 as f32)),
             (8, false) => out.extend(payload.iter().take(n).map(|&b| b as f32)),
-            (16, true) => out.extend(payload.chunks_exact(2).take(n).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32)),
-            (16, false) => out.extend(payload.chunks_exact(2).take(n).map(|b| u16::from_le_bytes([b[0], b[1]]) as f32)),
-            (32, true) => out.extend(payload.chunks_exact(4).take(n).map(|b| i32::from_le_bytes(b.try_into().unwrap()) as f32)),
-            (32, false) => out.extend(payload.chunks_exact(4).take(n).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as f32)),
+            (16, true) => out.extend(payload.as_chunks::<2>().0.iter().take(n).map(|b| i16::from_le_bytes(*b) as f32)),
+            (16, false) => out.extend(payload.as_chunks::<2>().0.iter().take(n).map(|b| u16::from_le_bytes(*b) as f32)),
+            (32, true) => out.extend(payload.as_chunks::<4>().0.iter().take(n).map(|b| i32::from_le_bytes(*b) as f32)),
+            (32, false) => out.extend(payload.as_chunks::<4>().0.iter().take(n).map(|b| u32::from_le_bytes(*b) as f32)),
             (4, signed) => out.extend((0..n).map(|i| {
                 let c = (payload[i / 2] >> (4 * (i % 2))) & 0xF;
                 if signed { (((c << 4) as i8) >> 4) as f32 } else { c as f32 }

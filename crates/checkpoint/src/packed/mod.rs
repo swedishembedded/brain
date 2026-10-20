@@ -7,10 +7,18 @@
 //! Quantized tensors as first-class citizens: descriptors, codecs, bounded
 //! tiled reads and loads. See [`encoding`] for the vocabulary.
 
+pub mod budget;
 pub mod codec;
 pub mod encoding;
+pub mod load;
+pub mod reader;
+pub mod sink;
 #[cfg(test)]
 mod testfix;
 
+pub use budget::{BoundedWorkspace, BudgetError, Lease, MemoryBudget, Pool, PoolStats};
 pub use codec::{Codec, CodecRegistry, Tile, TileBuf};
 pub use encoding::{BlockGeometry, Codebook, Element, FloatFormat, Packing, QuantEncoding, ScaleGranularity, ScaleLevel, TensorDescriptor};
+pub use load::{LoadConfig, LoadOp, LoadPlan, LoadPolicy, LoadReport, LoadStep, Loader};
+pub use reader::{PackedReader, PackedTensorReader};
+pub use sink::{MemorySink, TensorSink};

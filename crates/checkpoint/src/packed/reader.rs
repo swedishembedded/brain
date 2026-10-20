@@ -1,0 +1,326 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+// Swedish Embedded AB implements memory-bounded loading and training of quantized models for its clients. If your
+// team needs expertise in low-precision model storage then you can procure our services by sending an email to
+// info@swedishembedded.com.
+
+//! Tile reads over checkpoints: [`PackedTensorReader`] hands out the packed
+//! bytes of a flat element range and nothing else.
+//!
+//! There is deliberately no whole-tensor method and no fallback to one: a
+//! source that cannot serve a range (a torch pickle, a computed checkpoint)
+//! reports an error at [`PackedTensorReader::descriptor`] time instead of
+//! quietly decoding the tensor whole. [`PackedReader`] serves memory-mapped
+//! safetensors (single file or sharded HF directory) and GGUF (single or split).
+
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::path::Path;
+
+use super::codec::TileBuf;
+use super::encoding::{Element, FloatFormat, QuantEncoding, TensorDescriptor};
+use crate::gguf::GgmlType;
+use crate::weightio::WeightReader;
+
+/// Read-only, tile-granular access to a checkpoint's quantized tensors.
+pub trait PackedTensorReader: Send + Sync {
+    /// Payload tensor names. Sidecar scale tensors that belong to a payload
+    /// tensor are not listed; they are read through it.
+    fn names(&self) -> Vec<String>;
+
+    /// What `name` is, or why it cannot be read as packed tiles.
+    fn descriptor(&self, name: &str) -> Result<TensorDescriptor, String>;
+
+    /// Fill `dst` with the payload bytes and scale values covering the flat
+    /// element range `elems` (aligned to `desc.tile_quantum()`), replacing its
+    /// contents. Reads and copies only those bytes.
+    fn read_blocks(&self, desc: &TensorDescriptor, elems: &Range<u64>, dst: &mut TileBuf) -> Result<(), String>;
+
+    /// Hint that tile `elems` is consumed: drop its file-backed pages from
+    /// this process's residency. Best effort; a later read re-faults them.
+    fn release(&self, desc: &TensorDescriptor, elems: &Range<u64>);
+}
+
+/// [`PackedTensorReader`] over a safetensors file, HF directory or GGUF.
+pub struct PackedReader {
+    inner: WeightReader,
+    overrides: HashMap<String, TensorDescriptor>,
+    hidden: HashSet<String>,
+}
+
+/// FP8 `weight_block_size` candidates tried when inferring the tile from the
+/// scale grid's shape, most common first. The first that reproduces the grid
+/// exactly wins (a grid alone is ambiguous: 3 bands over 300 rows fits 100 and 128).
+const FP8_BLOCKS: [u32; 5] = [128, 64, 32, 256, 16];
+
+impl PackedReader {
+    /// Open a `.safetensors`/`.gguf` file or a HF checkpoint directory.
+    pub fn open(path: &Path) -> Result<PackedReader, String> {
+        let inner = WeightReader::open_hf_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self::new(inner))
+    }
+
+    pub fn new(inner: WeightReader) -> PackedReader {
+        let mut r = PackedReader { inner, overrides: HashMap::new(), hidden: HashSet::new() };
+        r.hide_sidecars();
+        r
+    }
+
+    /// Declare the encoding of a tensor whose dtype alone does not say (brain's
+    /// packed-int8 / NF4 `U32` words). Validated against the stored size on use.
+    pub fn with_descriptor(mut self, desc: TensorDescriptor) -> PackedReader {
+        self.overrides.insert(desc.name.clone(), desc);
+        self.hide_sidecars();
+        self
+    }
+
+    fn hide_sidecars(&mut self) {
+        let mut hidden = HashSet::new();
+        let names: Vec<String> = self.inner.names().map(str::to_string).collect();
+        for n in &names {
+            if let Ok(d) = self.descriptor_unchecked(n) {
+                for l in &d.encoding.scales {
+                    hidden.insert(format!("{n}{}", l.suffix));
+                }
+            }
+        }
+        self.hidden = hidden;
+    }
+
+    fn sidecar_dtype(&self, name: &str) -> Option<&str> {
+        self.inner.dtype(name)
+    }
+
+    /// Infer the descriptor from dtype and sibling tensors, without checking sidecar sizes.
+    fn descriptor_unchecked(&self, name: &str) -> Result<TensorDescriptor, String> {
+        if let Some(d) = self.overrides.get(name) {
+            return Ok(d.clone());
+        }
+        let shape = self.inner.shape(name).ok_or_else(|| format!("{name}: not in checkpoint"))?.to_vec();
+        if let Some(g) = self.inner.gguf() {
+            let (_, ty) = g.raw_tensor_bytes(name).ok_or_else(|| format!("{name}: not in checkpoint"))?;
+            return Ok(TensorDescriptor::new(name, shape, ggml_encoding(ty).map_err(|e| format!("{name}: {e}"))?));
+        }
+        if self.inner.st_for(name).is_none() {
+            return Err(format!("{name}: torch and computed checkpoints can only be decoded whole; convert to safetensors first"));
+        }
+        let dtype = self.inner.dtype(name).unwrap_or("");
+        let has = |suffix: &str, want: &str| self.sidecar_dtype(&format!("{name}{suffix}")) == Some(want);
+        let enc = match dtype {
+            "F32" => QuantEncoding::f32(),
+            "F16" => QuantEncoding::f16(),
+            "BF16" => QuantEncoding::bf16(),
+            "F8_E4M3" if has("_scale_inv", "BF16") || has("_scale_inv", "F32") => {
+                let grid = self.inner.shape(&format!("{name}_scale_inv")).map(<[u64]>::to_vec).unwrap_or_default();
+                let block = infer_fp8_block(&shape, &grid).ok_or_else(|| format!("{name}: scale grid {grid:?} fits no known FP8 block size for shape {shape:?}"))?;
+                let mut e = QuantEncoding::fp8_e4m3_tiled(block);
+                if has("_scale_inv", "F32") {
+                    e.scales[0].format = FloatFormat::F32;
+                }
+                e
+            }
+            "F8_E4M3" => QuantEncoding::fp8(FloatFormat::E4M3Fn),
+            "F8_E5M2" => QuantEncoding::fp8(FloatFormat::E5M2),
+            "U8" if has("_scale", "F8_E4M3") && has("_scale_2", "F32") => {
+                // NVFP4: two E2M1 codes per stored byte, so the logical row is twice as long.
+                let mut logical = shape.clone();
+                *logical.last_mut().ok_or_else(|| format!("{name}: scalar NVFP4 tensor"))? *= 2;
+                return Ok(TensorDescriptor::new(name, logical, QuantEncoding::nvfp4()));
+            }
+            "U8" => QuantEncoding { element: Element::Int { bits: 8, signed: false }, scales: Vec::new() },
+            "U32" => QuantEncoding { element: Element::Int { bits: 32, signed: false }, scales: Vec::new() },
+            other => return Err(format!("{name}: dtype {other} has no packed encoding; declare one with PackedReader::with_descriptor")),
+        };
+        Ok(TensorDescriptor::new(name, shape, enc))
+    }
+
+    fn sidecar_name(desc: &TensorDescriptor, level: usize) -> String {
+        format!("{}{}", desc.name, desc.encoding.scales[level].suffix)
+    }
+
+    /// Whole payload bytes of `name` in storage, whichever file holds it.
+    fn stored(&self, name: &str) -> Option<(&[u8], &str)> {
+        if let Some(g) = self.inner.gguf() {
+            return g.raw_tensor_bytes(name).map(|(b, _)| (b, "GGUF"));
+        }
+        let m = self.inner.st_for(name)?;
+        Some((m.raw_range(name, 0..m.nbytes(name)? as usize)?, m.dtype(name)?))
+    }
+}
+
+fn infer_fp8_block(shape: &[u64], grid: &[u64]) -> Option<u32> {
+    let ([rows, cols], [gr, gc]) = (<[u64; 2]>::try_from(shape).ok()?, <[u64; 2]>::try_from(grid).ok()?);
+    FP8_BLOCKS.into_iter().find(|&b| rows.div_ceil(b as u64) == gr && cols.div_ceil(b as u64) == gc)
+}
+
+/// A GGUF tensor type as an encoding. Plain float types become float encodings
+/// so they decode without a block decoder; types with no decoder are refused.
+fn ggml_encoding(ty: u32) -> Result<QuantEncoding, String> {
+    match GgmlType::from_id(ty) {
+        Some(GgmlType::F32) => Ok(QuantEncoding::f32()),
+        Some(GgmlType::F16) => Ok(QuantEncoding::f16()),
+        Some(GgmlType::BF16) => Ok(QuantEncoding::bf16()),
+        Some(t) if t.block_elems() > 1 => Ok(QuantEncoding::ggml(t)),
+        Some(t) => Err(format!("ggml type {} has no packed encoding", t.name())),
+        None => Err(format!("unknown ggml type id {ty}")),
+    }
+}
+
+impl PackedTensorReader for PackedReader {
+    fn names(&self) -> Vec<String> {
+        self.inner.names().filter(|n| !self.hidden.contains(*n)).map(str::to_string).collect()
+    }
+
+    fn descriptor(&self, name: &str) -> Result<TensorDescriptor, String> {
+        let d = self.descriptor_unchecked(name)?;
+        d.validate()?;
+        let (payload, _) = self.stored(name).ok_or_else(|| format!("{name}: not in checkpoint"))?;
+        if payload.len() as u64 != d.payload_bytes() {
+            return Err(format!("{name}: stored payload is {} bytes but {} of shape {:?} needs {}", payload.len(), d.encoding, d.shape, d.payload_bytes()));
+        }
+        for (l, level) in d.encoding.scales.iter().enumerate() {
+            let side = Self::sidecar_name(&d, l);
+            let (bytes, _) = self.stored(&side).ok_or_else(|| format!("{name}: scale tensor {side} is missing"))?;
+            if bytes.len() as u64 != d.scale_bytes(l) {
+                return Err(format!("{name}: scale tensor {side} is {} bytes, expected {} for {:?} {:?}", bytes.len(), d.scale_bytes(l), level.granularity, level.format));
+            }
+        }
+        Ok(d)
+    }
+
+    fn read_blocks(&self, desc: &TensorDescriptor, elems: &Range<u64>, dst: &mut TileBuf) -> Result<(), String> {
+        let name = &desc.name;
+        if elems.start >= elems.end || elems.end > desc.numel() {
+            return Err(format!("{name}: tile {elems:?} is outside {} elements", desc.numel()));
+        }
+        let (payload, _) = self.stored(name).ok_or_else(|| format!("{name}: not in checkpoint"))?;
+        let pr = desc.payload_range(elems);
+        let src = payload.get(pr.start as usize..pr.end as usize).ok_or_else(|| format!("{name}: payload range {pr:?} outside {} stored bytes", payload.len()))?;
+        dst.payload.clear();
+        dst.payload.reserve_exact(src.len());
+        dst.payload.extend_from_slice(src);
+        dst.scales.resize_with(desc.encoding.scales.len(), Vec::new);
+        for (l, level) in desc.encoding.scales.iter().enumerate() {
+            let side = Self::sidecar_name(desc, l);
+            let (bytes, _) = self.stored(&side).ok_or_else(|| format!("{name}: scale tensor {side} is missing"))?;
+            let w = level.format.bits() as u64 / 8;
+            let r = desc.scale_range(l, elems);
+            let s = bytes.get((r.start * w) as usize..(r.end * w) as usize).ok_or_else(|| format!("{side}: scale range {r:?} outside stored scales"))?;
+            dst.scales[l].clear();
+            dst.scales[l].reserve_exact(s.len());
+            dst.scales[l].extend_from_slice(s);
+        }
+        Ok(())
+    }
+
+    fn release(&self, desc: &TensorDescriptor, elems: &Range<u64>) {
+        let pr = desc.payload_range(elems);
+        let range = pr.start as usize..pr.end as usize;
+        if let Some(g) = self.inner.gguf() {
+            g.advise_dontneed_range(&desc.name, range);
+        } else if let Some(m) = self.inner.st_for(&desc.name) {
+            m.advise_dontneed_range(&desc.name, range);
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gguf_write::{write, TensorOut};
+    use crate::packed::testfix::{bf16_bytes, bytes, e4m3_bytes, f32_bytes, write_safetensors, RawTensor, TmpDir};
+
+    fn read_all(r: &PackedReader, d: &TensorDescriptor) -> TileBuf {
+        let mut buf = TileBuf::default();
+        r.read_blocks(d, &(0..d.numel()), &mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn a_scale_grid_that_fits_no_block_size_is_an_error_naming_it() {
+        let dir = TmpDir::new("rd");
+        write_safetensors(
+            &dir.join("m.safetensors"),
+            &[
+                RawTensor { name: "a.weight", dtype: "F8_E4M3", shape: vec![6, 10], bytes: e4m3_bytes(1, 60) },
+                RawTensor { name: "a.weight_scale_inv", dtype: "BF16", shape: vec![3, 2], bytes: bf16_bytes(&[1.0; 6]) },
+                RawTensor { name: "norm", dtype: "F32", shape: vec![4], bytes: f32_bytes(&[1.0; 4]) },
+            ],
+        );
+        let r = PackedReader::open(&dir.join("m.safetensors")).unwrap();
+        assert_eq!(r.descriptor("norm").unwrap().encoding, QuantEncoding::f32());
+        assert!(r.descriptor("a.weight").unwrap_err().contains("fits no known FP8 block size"));
+    }
+
+    #[test]
+    fn fp8_with_scale_grid_reads_tile_by_tile_across_shards() {
+        let dir = TmpDir::new("shard");
+        let (rows, cols) = (20usize, 40usize);
+        let w = e4m3_bytes(5, rows * cols);
+        let grid = bf16_bytes(&[1.0, 2.0, 4.0, 8.0, 0.5, 0.25]);
+        write_safetensors(&dir.join("s1.safetensors"), &[RawTensor { name: "a.weight", dtype: "F8_E4M3", shape: vec![rows as u64, cols as u64], bytes: w.clone() }]);
+        write_safetensors(&dir.join("s2.safetensors"), &[RawTensor { name: "a.weight_scale_inv", dtype: "BF16", shape: vec![2, 3], bytes: grid.clone() }]);
+        let index = serde_json::json!({"weight_map": {"a.weight": "s1.safetensors", "a.weight_scale_inv": "s2.safetensors"}});
+        std::fs::write(dir.join("model.safetensors.index.json"), index.to_string()).unwrap();
+        let r = PackedReader::open(&dir.0).unwrap();
+        assert_eq!(r.names(), ["a.weight"]);
+        let d = r.descriptor("a.weight").unwrap();
+        assert_eq!(d.encoding, QuantEncoding::fp8_e4m3_tiled(16));
+        let mut buf = TileBuf::default();
+        r.read_blocks(&d, &(10 * 40..20 * 40), &mut buf).unwrap();
+        assert_eq!(buf.payload, &w[400..800]);
+        assert_eq!(buf.scales[0], grid, "rows 10..20 straddle both scale bands");
+        r.read_blocks(&d, &(16 * 40..20 * 40), &mut buf).unwrap();
+        assert_eq!(buf.scales[0], &grid[6..12], "rows 16..20 sit in the second band only");
+    }
+
+    #[test]
+    fn declared_packed_layouts_and_nvfp4_siblings_are_recognised() {
+        let dir = TmpDir::new("decl");
+        let words = bytes(7, 4 * 8 * 4); // [4, 32] int8 as [4, 8] u32 words
+        write_safetensors(
+            &dir.join("m.safetensors"),
+            &[
+                RawTensor { name: "q.weight", dtype: "U32", shape: vec![4, 8], bytes: words.clone() },
+                RawTensor { name: "q.weight_scale", dtype: "F32", shape: vec![4, 1], bytes: f32_bytes(&[1.0; 4]) },
+                RawTensor { name: "f.weight", dtype: "U8", shape: vec![2, 16], bytes: bytes(8, 32) },
+                RawTensor { name: "f.weight_scale", dtype: "F8_E4M3", shape: vec![2, 2], bytes: e4m3_bytes(9, 4) },
+                RawTensor { name: "f.weight_scale_2", dtype: "F32", shape: vec![], bytes: f32_bytes(&[2.0]) },
+            ],
+        );
+        let declared = TensorDescriptor::new("q.weight", vec![4, 32], QuantEncoding::int8_blocked(32));
+        let mut declared_enc = declared.clone();
+        declared_enc.encoding.scales[0].suffix = "_scale".into();
+        let r = PackedReader::open(&dir.join("m.safetensors")).unwrap().with_descriptor(declared_enc);
+        assert_eq!(r.names(), ["f.weight", "q.weight"]);
+        let q = r.descriptor("q.weight").unwrap();
+        assert_eq!(read_all(&r, &q).payload, words);
+        let f = r.descriptor("f.weight").unwrap();
+        assert_eq!((f.shape.clone(), f.encoding.clone()), (vec![2, 32], QuantEncoding::nvfp4()));
+        let wrong = PackedReader::open(&dir.join("m.safetensors")).unwrap().with_descriptor(TensorDescriptor::new("q.weight", vec![4, 64], QuantEncoding::int8_blocked(32)));
+        assert!(wrong.descriptor("q.weight").unwrap_err().contains("stored payload"), "a declared layout that disagrees with the stored size is refused");
+    }
+
+    #[test]
+    fn gguf_block_types_are_served_as_raw_block_ranges() {
+        let dir = TmpDir::new("gguf");
+        let data: Vec<f32> = (0..4 * 64).map(|i| (i as f32 * 0.37).sin()).collect();
+        let q8 = crate::quant::quantize(crate::gguf::TYPE_Q8_0, &data).unwrap();
+        let t = |name: &str, shape: Vec<usize>, ty: u32, data: Vec<u8>| TensorOut { name: name.into(), shape, ty, data };
+        write(
+            dir.join("m.gguf").to_str().unwrap(),
+            &[],
+            &[t("w", vec![4, 64], crate::gguf::TYPE_Q8_0, q8.clone()), t("n", vec![8], 0, f32_bytes(&[1.0; 8]))],
+            32,
+        )
+        .unwrap();
+        let r = PackedReader::open(&dir.join("m.gguf")).unwrap();
+        let d = r.descriptor("w").unwrap();
+        assert_eq!((d.shape.clone(), d.encoding.clone()), (vec![4, 64], QuantEncoding::ggml(GgmlType::Q8_0)));
+        assert_eq!(r.descriptor("n").unwrap().encoding, QuantEncoding::f32());
+        let mut buf = TileBuf::default();
+        r.read_blocks(&d, &(64..192), &mut buf).unwrap();
+        assert_eq!(buf.payload, &q8[2 * 34..6 * 34]);
+    }
+}

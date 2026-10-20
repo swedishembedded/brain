@@ -371,6 +371,31 @@ impl MmapSafetensors {
         let _ = unsafe { self.mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
     }
 
+    /// Bytes `bytes` (relative to the tensor's start) of `name`, borrowed from
+    /// the mapping: no allocation, no decode. `None` for an unknown tensor or a
+    /// range outside it. The only way tile readers touch tensor data.
+    pub fn raw_range(&self, name: &str, bytes: std::ops::Range<usize>) -> Option<&[u8]> {
+        let m = self.index.get(name)?;
+        if bytes.start > bytes.end || bytes.end > m.end - m.start {
+            return None;
+        }
+        self.meter.note((bytes.end - bytes.start) as u64);
+        Some(&self.mmap[self.blob_start + m.start + bytes.start..self.blob_start + m.start + bytes.end])
+    }
+
+    /// [`Self::advise_dontneed_tensor`] for a sub-range of the tensor, so a tiled
+    /// reader can drop each tile's pages as soon as it has consumed them. The
+    /// kernel works in whole pages, so pages shared with a neighbouring range
+    /// are dropped too and simply re-fault if read again.
+    pub fn advise_dontneed_range(&self, name: &str, bytes: std::ops::Range<usize>) {
+        let Some(m) = self.index.get(name) else { return };
+        if bytes.start >= bytes.end || bytes.end > m.end - m.start {
+            return;
+        }
+        // SAFETY: read-only file mapping => MADV_DONTNEED loses no data.
+        let _ = unsafe { self.mmap.unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, self.blob_start + m.start + bytes.start, bytes.end - bytes.start) };
+    }
+
     /// [`Self::advise_dontneed`] for one tensor's byte range only — per-group
     /// demotion (dropping the pages a specific slice no longer needs) without
     /// discarding the whole mapping's page-cache footprint.
