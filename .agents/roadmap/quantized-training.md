@@ -126,6 +126,11 @@ Acceptance: the same workflow runs on `qwen3` (NF4, FP8, int8), `qwen35`,
 `qwen35moe` and `flux2`.
 
 ### Phase 5 - full fine-tuning state (paramstore, optim)
+Status: the state manager is landed (`paramstore::precision`, `optim::{codec, rule,
+storage, streamed, checkpoint, trainstate}`, `adamw_q8` fused device AdamW,
+`OffloadAdam` on the streamed state; see `docs/guides/training/optimizer-state.md`).
+Open: Adafactor and logarithmic 8-bit state, bf16 device state kernel, and the
+generic full trainer below.
 A trainable parameter with independent value storage, gradient dtype, optimizer
 state dtype and optional master copy (none, bf16, fp32). A bounded-tile
 parameter update (decode tile, update, re-encode) with fp32, bf16 and 8-bit

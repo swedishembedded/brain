@@ -110,6 +110,21 @@ fn lcm(a: usize, b: usize) -> usize {
     a / gcd(a, b) * b
 }
 
+/// The tile size an optimiser over `specs` actually uses for a requested one:
+/// rounded up to a multiple of every block size in use, so tiles start on
+/// block boundaries. Size a storage's `max_tile_elems` with this.
+pub fn effective_tile(specs: &[TensorSpec], requested: usize) -> usize {
+    let mut tile = requested.max(1);
+    for s in specs {
+        if let StateFormat::Int8Block { block } = s.precision.state {
+            if block > 0 {
+                tile = lcm(tile, block as usize);
+            }
+        }
+    }
+    tile
+}
+
 const VALUE_ROUNDING_SLOT: usize = 255;
 
 /// Streamed optimiser over a state storage.
@@ -132,13 +147,10 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
     /// storage must have been created with at least that tile bound
     /// (see [`Self::tile_elems`]) and the layout from [`state_layout`].
     pub fn new(rule: Rule, specs: Vec<TensorSpec>, state: S, seed: u64, tile_elems: usize) -> io::Result<Self> {
-        let mut tile = tile_elems.max(1);
+        let tile = effective_tile(&specs, tile_elems);
         for s in &specs {
-            if let StateFormat::Int8Block { block } = s.precision.state {
-                if block == 0 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{}: block size 0", s.name)));
-                }
-                tile = lcm(tile, block as usize);
+            if let StateFormat::Int8Block { block: 0 } = s.precision.state {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{}: block size 0", s.name)));
             }
             if s.precision.master.format().is_some_and(|f| matches!(f, StateFormat::Int8Block { .. })) {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{}: an 8-bit master is not supported", s.name)));

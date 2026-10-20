@@ -74,6 +74,8 @@ pub mod checkpoint;
 pub mod storage;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod streamed;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod trainstate;
 
 /// AdamW's moment decay rates and denominator epsilon. The default is
 /// `torch.optim.AdamW`'s; a run that wants others (β2 0.95 is common for

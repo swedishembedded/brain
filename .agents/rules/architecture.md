@@ -133,7 +133,9 @@ layer 6 - serving, front ends, SDK, samples
                            `OptimizerStateStorage` (tile read/write over RAM or
                            a file under a bounded workspace), the
                            `StreamedOptimizer` driver over a `ParamTiles` seam
-                           (what a generic trainer implements), and the
+                           (what a generic trainer implements; `TrainState`
+                           is its one-call entry point), the fused device
+                           int8-moment AdamW (`adamw_q8`), and the
                            transactional run checkpoint. A model crate supplies
                            parameter names and roles only; formats, rules and
                            storage are added here without touching it.

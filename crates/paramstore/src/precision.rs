@@ -241,6 +241,18 @@ impl PrecisionPolicy {
     }
 }
 
+/// The optimiser-state byte ladder of a parameter manifest: the physical total
+/// of `moment_slots` state slots per parameter under each candidate format,
+/// widest first. This is what a memory planner offers as the variants of its
+/// optimiser-state category; every entry counts scales, so a narrower format
+/// is never over-credited.
+pub fn optimizer_state_ladder(params: &[(String, usize)], moment_slots: usize, int8_block: u32) -> Vec<(StateFormat, u64)> {
+    [StateFormat::F32, StateFormat::Bf16, StateFormat::Int8Block { block: int8_block }]
+        .into_iter()
+        .map(|f| (f, params.iter().map(|(_, n)| moment_slots as u64 * f.bytes(*n)).sum()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +276,17 @@ mod tests {
         assert_eq!(b.master, 4000);
         assert_eq!(ParamPrecision::FP32.bytes(1000, 2).total(), 4000 * 4);
         assert_eq!(ParamPrecision { master: MasterPolicy::None, ..p }.bytes(1000, 1).master, 0);
+    }
+
+    /// Spec: the ladder is widest first, strictly decreasing, and pays scales.
+    #[test]
+    fn the_state_ladder_is_physical_and_decreasing() {
+        let params = vec![("a".to_string(), 1000usize), ("b".to_string(), 24)];
+        let l = optimizer_state_ladder(&params, 2, 256);
+        assert_eq!(l[0], (StateFormat::F32, 2 * 4 * 1024));
+        assert_eq!(l[1], (StateFormat::Bf16, 2 * 2 * 1024));
+        assert_eq!(l[2], (StateFormat::Int8Block { block: 256 }, 2 * ((1000 + 16) + (24 + 4))));
+        assert!(l[0].1 > l[1].1 && l[1].1 > l[2].1);
     }
 
     /// Spec: a per-group policy gives different precision to different
