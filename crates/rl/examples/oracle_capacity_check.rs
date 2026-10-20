@@ -253,6 +253,7 @@ fn main() {
         mask_before: Some(curriculum::mask_before_char()),
         mask_per_line: true,
         adam: Default::default(),
+        ..model::FitOpts::default()
     };
 
     let (train, _val, batch_cfg, vocab) = model::load_dataset(&data_dir, &opts).expect("load sft dataset");

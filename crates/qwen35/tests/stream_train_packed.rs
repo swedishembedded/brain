@@ -149,7 +149,7 @@ fn a_checkpoint_layer_loads_packed_and_equals_the_eager_importer() {
                 let g = ops.gpu();
                 let out = g.storage((n * k) as u64);
                 let mut steps = Vec::new();
-                ops.decode_tile(&mut steps, &w, 0, n as u32, &out);
+                ops.decode_tile(&mut steps, &w, 0, n, &out);
                 g.submit(&[], &steps);
                 let got = g.read(&out, (n * k) as usize);
                 assert!(got.iter().zip(f32_ref).all(|(a, b)| a.to_bits() == b.to_bits() || (a - b).abs() <= 1e-6 * b.abs()), "{name}: the resident tile differs from the eager import");
