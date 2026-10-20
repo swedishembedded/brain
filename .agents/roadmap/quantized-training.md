@@ -50,6 +50,7 @@ cell, is `docs/reference/training-capabilities.md`.
 | `check-format-logic.sh` (also run by `check-kernel-selection.sh`) | no `Weight::<format>`, `kernels_cuda::` or codec call in a model crate | `format-logic.allow` |
 | `check-adapter-naming.sh` | `.lora_a`/`.lora_b` spelled only inside `model::adapter` | `adapter-naming.allow` |
 | `check-placement-accounting.sh` | no new caller of fp32-element sizing helpers | `placement-accounting.allow` |
+| `check-training-capabilities.sh` | the capability page is generated from `training-capabilities.tsv`; every named test exists and is a live `#[test]`; every registered conformance tier and SDK chat fine-tuner has a row | none (the declaration is the source) |
 
 A migration that removes a call site deletes or lowers its allowlist entry in
 the same commit. A new violation is a design defect, not an allowlist addition.

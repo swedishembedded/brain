@@ -184,6 +184,21 @@ repos:
         files: '(^crates/.*\.rs$|^scripts/gates/(placement-accounting\.|check-placement-accounting\.sh|ratchet\.py))'
         pass_filenames: false
         stages: [pre-commit]
+      - id: training-capabilities
+        name: "The capability matrix page matches its declaration and the tests it names exist"
+        description: >-
+          docs/reference/training-capabilities.md is generated from
+          scripts/gates/training-capabilities.tsv; the gate fails on drift, on a
+          named test that is missing, not a #[test] or #[ignore]d without a
+          (real)/(cuda) flag, and on a conformance tier or SDK fine-tuner
+          declaration with no row. Regenerate with
+          scripts/gates/training-capabilities.py --write. Also run by
+          `make check/scripts`.
+        entry: bash scripts/gates/check-training-capabilities.sh
+        language: system
+        files: '(^crates/.*\.rs$|^docs/reference/training-capabilities\.md$|^scripts/gates/(training-capabilities\.|check-training-capabilities\.sh))'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: seed-literals
         name: "No new literal seeds in production code (every default seed is random)"
         description: >-
