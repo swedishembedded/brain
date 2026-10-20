@@ -119,6 +119,11 @@ fn qwen35moe_subject() -> Subject<qwen35moe::model::Qwen35> {
             ..qwen35moe::config::Qwen35Config::tiny()
         }
     }
+    fn chunked(adapter_rank: Option<u32>, head_budget_words: u64, seed: u64) -> qwen35moe::model::Qwen35 {
+        let cfg = qwen35moe::config::Qwen35Config { block_size: CHUNK_SEQ, max_position_embeddings: CHUNK_SEQ, ..config(adapter_rank) };
+        let init = <qwen35moe::model::Qwen35 as model::Model>::init_weights(&cfg, seed);
+        model::block::with_tile_budget_words(head_budget_words, || qwen35moe::model::Qwen35::new_train(cfg, 1, CHUNK_SEQ, &init))
+    }
     Subject {
         name: "qwen35moe",
         config,
@@ -126,7 +131,7 @@ fn qwen35moe_subject() -> Subject<qwen35moe::model::Qwen35> {
         load: |path, rows, seq| qwen35moe::model::Qwen35::load(path, rows, seq),
         tiers: Vec::new(),
         budget: Budget { tensors: Some(10), directions: 2 },
-        chunked_head: None,
+        chunked_head: Some(ChunkedHead { seq: CHUNK_SEQ, build: chunked }),
     }
 }
 

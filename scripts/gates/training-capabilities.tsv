@@ -30,13 +30,13 @@ qwen35	lora_nf4	QLoRA, including the real 27B	qwen35/tests/lora_nf4_base.rs::the
 qwen35	adapter_serving	bank of adapters in a batch; folded	qwen35/tests/adapter_bank.rs::mixed_batch_matches_training_forward_and_base_rows_are_untouched_cpu;qwen35/tests/lora_serve_fold.rs::folded_serve_matches_live_training_and_diverges_from_the_unadapted_base
 qwen35	quant_serving	int8 and int4 linears; real GGUF	qwen35/tests/model_i8_smoke.rs::int8_forward_tracks_fp32_within_quant_tolerance_default_backend;qwen35/tests/model_q4_smoke.rs::q4_forward_tracks_fp32_within_quant_tolerance_default_backend;qwen35/tests/gguf_resident_real.rs (real)
 qwen35	kv_tiers	fp32, bf16, int8; real GGUF	qwen35/tests/kv_tier.rs::bf16_kv_tracks_f32_logits_on_the_tiny_hybrid;qwen35/tests/kv_tier.rs::int8_kv_tracks_f32_logits_at_the_real_attention_dims;qwen35/tests/gguf_kv_tier_real.rs::compact_kv_tiers_agree_with_the_f32_cache_on_a_real_prompt (real)
-qwen35moe	full_ft	fp32 resident; experts and router train; brain-format export	sdk/tests/chat_finetune_qwen35moe.rs::a_qwen35moe_full_fine_tune_trains_every_weight_and_writes_a_base (cuda)
+qwen35moe	full_ft	fp32 resident; experts and router train; brain-format export	sdk/tests/chat_finetune_qwen35moe.rs::a_qwen35moe_full_fine_tune_trains_every_weight_and_writes_a_base
 qwen35moe	lora_f32	mixer projections only, never experts	qwen35moe/tests/lora_freezes_base.rs::lora_training_only_updates_adapters_cpu
 qwen35moe	quant_serving	int8 mixer linears and head	qwen35moe/tests/model_i8_smoke.rs::int8_forward_tracks_fp32_within_quant_tolerance_default_backend
 qwen35moe	kv_tiers	compact pool	qwen35moe/tests/engine_tiers.rs::a_compact_kv_pool_answers_like_the_f32_pool
 glmdsa	full_ft		glmdsa/tests/convergence.rs::glm_overfits_fixed_batch
 flux2	lora_f32	host reference and device trainer	flux2/tests/dev_grad.rs;flux2/tests/device_train.rs
-flux2	lora_int8	device trainer, CUDA	flux2/tests/int8_trainer.rs (cuda);flux2/tests/int8_base_grads.rs
+flux2	lora_int8	device trainer, CUDA	flux2/tests/int8_trainer.rs;flux2/tests/int8_base_grads.rs
 flux2	other	adapters fold or apply at run time, including over an int8 base	flux2/tests/lora_stack.rs::two_adapters_stack_each_at_its_own_scale;flux2/tests/lora_runtime_int8.rs::an_int8_runtime_adapted_forward_tracks_its_fp32_reference
 s3dit	lora_f32		s3dit/tests/lora_train.rs::lora_only_overfits_with_base_frozen;s3dit/tests/device_train.rs::device_grads_match_host
 s3dit	other	full model trains	s3dit/tests/model_train.rs

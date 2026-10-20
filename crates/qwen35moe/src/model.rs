@@ -122,6 +122,7 @@ use std::collections::HashMap;
 
 use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Dispatch, Gpu, Step};
+use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels};
 use model::ops::{Act, Ops, TierPolicy, Weight};
 use model::Shard;
 use model::adapter::exec::AdapterRuntime;
@@ -408,6 +409,13 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
+        // The chunked LM head resolves its elementwise passes by name. Appended
+        // unless already registered above.
+        for &(name, src) in model::ops::frozen_base_kernels().iter().chain(model::head_ce::kernels()) {
+            if !v.iter().any(|(have, _)| *have == name) {
+                v.push((name, src));
+            }
+        }
         // The compact KV tiers (`model::kv_tier`) are resolved BY NAME when a
         // cache of that tier is used, so their kernels ride along here.
         let kv = model::kv_tier::kernel_list(&v);
@@ -416,6 +424,9 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v
     })
 }
+
+/// Words of logits the chunked LM head keeps alive at once: 1 GiB of fp32.
+const HEAD_BUDGET_WORDS: u64 = 1 << 28;
 
 const RMSNORM: usize = 0;
 const RMSNORM_ROWS: usize = 94;
@@ -501,7 +512,6 @@ const GRAD_SCALE: usize = 80;
 const CLIP_COEF: usize = 81;
 const GRAD_SCALE_BUF: usize = 82;
 const EMB_BWD: usize = 83;
-const CE_GRAD: usize = 84;
 const CAUSAL_CONV1D_STEP: usize = 85;
 const SPLICE: usize = 90;
 const SPLICE_BWD: usize = 91;
@@ -933,6 +943,10 @@ pub struct Qwen35 {
 
     logits: DeviceBuffer,
     ce_buf: DeviceBuffer,
+    /// The chunked LM head of a training build that owns the head: the loss and the
+    /// logit gradient come from `rows_per_chunk` rows of logits at a time, so no
+    /// `n x vocab` logits buffer exists ([`Self::logits`] is a size-1 dummy then).
+    head_ce: Option<HeadCe>,
 
     /// Backward's activation cache - `Some` only right after a `forward()`
     /// call on a [`Self::new_train`] instance (populated by `run_forward`'s
@@ -945,7 +959,6 @@ pub struct Qwen35 {
     train_acts: RefCell<Option<TrainActs>>,
     /// CE-gradient uniform (`[n, vocab, IGNORE, count]`), written once per
     /// `backward()` call (`count` is only known after `set_batch`).
-    ce_grad_uni: DeviceBuffer,
     /// Per-token objectives (weighted loss, logit scale) when opted into.
     objectives: objectives::State,
 
@@ -1623,9 +1636,24 @@ impl Qwen35 {
 
         let tokens = gpu.storage(n);
         let targets = gpu.storage(n);
-        let logits = gpu.storage(n * cfg.vocab as u64);
+        // A training build keeps a few hundred rows of logits and recomputes them in the backward
+        // (`model::head_ce`); every other build keeps the full logits its inference paths read.
+        let head_ce = (train && shard.head).then(|| {
+            let name = cfg.head_weight();
+            let fp32_head;
+            let head = match weights.get(name) {
+                Some(w) => w,
+                None => {
+                    fp32_head = Weight::F32 { w: ps.w(name).clone(), n: cfg.vocab, k: cfg.d_model };
+                    &fp32_head
+                }
+            };
+            let rows = model::head_ce::rows_for_budget(n, cfg.vocab as u64, HEAD_BUDGET_WORDS.min(block::tile_budget_words_for(&gpu))) as u32;
+            let kernels = HeadKernels::from_gpu(&gpu).unwrap_or_else(|e| panic!("qwen35moe: LM head: {e}"));
+            HeadCe::new(&ops, cfg.d_model, cfg.vocab, head, HeadCeConfig { rows_per_chunk: rows, tile_budget_words: None }, kernels).unwrap_or_else(|e| panic!("qwen35moe: LM head: {e}"))
+        });
+        let logits = gpu.storage(if head_ce.is_none() { n * cfg.vocab as u64 } else { 1 });
         let ce_buf = gpu.storage(n);
-        let ce_grad_uni = gpu.uniform_dynamic(4);
 
         // Single-sequence incremental decode state -- see `Qwen35::step`'s
         // doc and the struct fields' own docs for what each buffer holds.
@@ -1678,8 +1706,8 @@ impl Qwen35 {
             splice: model::vlm::SpliceRuns::none(),
             logits,
             ce_buf,
+            head_ce,
             train_acts: RefCell::new(None),
-            ce_grad_uni,
             objectives: Default::default(),
             dec_pos: Cell::new(0),
             dec_cap: t,
@@ -2632,10 +2660,11 @@ impl Qwen35 {
         let xn_final = if self.shard.head {
             let xn_final = g.storage((n * d) as u64);
             g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &self.res[self.cfg.n_layers as usize], self.w("norm.weight"), &xn_final, d, n, self.cfg.rms_eps)]);
-            let mut head_steps = Vec::new();
-            self.head_matmul(&mut head_steps, &xn_final, None, n, &self.logits);
-            self.objectives.scale_logits(g, &mut head_steps, &self.logits, n * self.cfg.vocab);
-            g.submit(&[], &head_steps);
+            if self.head_ce.is_none() {
+                let mut head_steps = Vec::new();
+                self.head_matmul(&mut head_steps, &xn_final, None, n, &self.logits);
+                g.submit(&[], &head_steps);
+            }
             xn_final
         } else {
             g.storage(1)
@@ -2887,16 +2916,30 @@ impl Qwen35 {
         // final norm -- a non-head stage starts instead from the externally
         // supplied gradient at `res[shard.end]` (`Self::write_out_dres`).
         let mut d_res_next = if self.shard.head {
-            g.write(&self.ce_grad_uni, &[n, v, model::IGNORE, f(self.objectives.grad_divisor(self.count.get()))]);
-            let d_logits = g.storage((n * v) as u64);
-            g.submit(&[], &[g.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &d_logits], n * v)]);
-
-            // ---- lm_head backward ----
+            // ---- CE gradient and lm_head backward ----
             let d_xn_final = g.storage((n * d) as u64);
             {
+                let head = self.head_ce.as_ref().expect("qwen35moe: a training build owns the chunked head");
+                // Chunked: recompute each chunk's logits, turn them into the logit gradient and
+                // apply the head, never holding n * vocab.
+                let name = self.cfg.head_weight();
+                let dw = self.trainable(name).then(|| self.g(name));
                 let mut s = Vec::new();
-                let d_logits = self.objectives.weigh(g, &mut s, &d_logits);
-                self.proj_bwd(&mut s, "lm_head", d_logits, &ta.xn_final, self.cfg.head_weight(), &d_xn_final, n, d, v, 0);
+                head.backward_steps(
+                    &self.ops,
+                    &mut s,
+                    &HeadBackward {
+                        hidden: &ta.xn_final,
+                        d_hidden: &d_xn_final,
+                        n,
+                        labels: &self.targets,
+                        grad_scale: GradScale::Const(self.objectives.grad_factor(self.count.get())),
+                        logit_scale: 1.0,
+                        row_weights: self.objectives.row_weights(),
+                        dw,
+                        forward_state_held: false,
+                    },
+                );
                 g.submit(&[], &s);
             }
 
@@ -3011,6 +3054,16 @@ impl Qwen35 {
     pub fn forward(&self) -> f32 {
         self.run_forward();
         let n = self.b * self.t;
+        if let Some(head) = &self.head_ce {
+            // Recorded on `self.gpu`, not through `HeadCe::forward`: that submits on the `Ops`
+            // handle, a separate command stream not ordered after this handle's layer work.
+            let ta = self.train_acts.borrow();
+            let xn_final = &ta.as_ref().expect("qwen35moe: a head_ce build is a training build").xn_final;
+            let mut s = Vec::new();
+            head.forward_steps(&self.ops, &mut s, xn_final, n, &self.targets, &self.ce_buf, 1.0);
+            self.gpu.submit(&[], &s);
+            return self.objectives.loss(&self.gpu, &self.gpu.read(&self.ce_buf, n as usize), self.count.get());
+        }
         self.gpu.submit(&[], &[self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, self.cfg.vocab, model::IGNORE], n)]);
         let vals = self.gpu.read(&self.ce_buf, n as usize);
         self.objectives.loss(&self.gpu, &vals, self.count.get())
@@ -3029,7 +3082,23 @@ impl Qwen35 {
         padded.resize(self.t as usize, 0);
         self.gpu.write(&self.tokens, &padded);
         self.run_forward();
-        self.gpu.read(&self.logits, tokens.len() * self.cfg.vocab as usize)
+        let real = tokens.len() * self.cfg.vocab as usize;
+        let Some(head) = &self.head_ce else {
+            return self.gpu.read(&self.logits, real);
+        };
+        // A chunked-head build has no logits buffer: read them chunk by chunk.
+        let ta = self.train_acts.borrow();
+        let xn_final = &ta.as_ref().expect("qwen35moe: a head_ce build is a training build").xn_final;
+        let vocab = self.cfg.vocab as usize;
+        let mut out = Vec::with_capacity(self.t as usize * vocab);
+        for (r0, rows) in head.chunks(self.t) {
+            let mut s = Vec::new();
+            head.logits_steps(&self.ops, &mut s, xn_final, r0, rows, 1.0);
+            self.gpu.submit(&[], &s);
+            out.extend(self.gpu.read(head.logits(), rows as usize * vocab));
+        }
+        out.truncate(real);
+        out
     }
 
     // =========================================================================
@@ -3832,11 +3901,11 @@ impl model::Model for Qwen35 {
         match batch {
             model::Batch::Lm { tokens, targets } => {
                 Qwen35::set_batch(self, tokens, targets);
-                self.objectives.reset_weights(&self.gpu, (self.b * self.t) as usize);
+                self.reset_loss_weights();
             }
             model::Batch::LmWeighted { tokens, targets, weights } => {
                 Qwen35::set_batch(self, tokens, targets);
-                self.objectives.write_weights(&self.gpu, weights);
+                self.write_loss_weights(weights);
             }
             _ => panic!("qwen35moe::Qwen35 only supports Batch::Lm / Batch::LmWeighted"),
         }

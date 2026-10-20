@@ -13,12 +13,8 @@
 //! base (toy width, CPU backend): every weight trains in a full run, and a
 //! preference run trains mixer adapters over frozen experts.
 //!
-//! The two training tests run on a card (`--ignored`, e.g. through the
-//! reservation helper with a small reservation): this architecture's head
-//! backward uses the naive weight-gradient kernel over the full logits, which
-//! on the CPU backend grows steeply with the vocabulary (the tokenizer fixture
-//! needs the real 151936), so a CPU run takes minutes per step; see the
-//! knowledge entry on it. On a card both finish in seconds.
+//! Every run is on the CPU backend; the head is the shared chunked head, so a toy
+//! step at the real vocabulary takes seconds.
 
 use std::path::{Path, PathBuf};
 
@@ -56,7 +52,6 @@ fn write_dataset(dir: &Path) -> PathBuf {
 }
 
 #[test]
-#[ignore = "needs a card: the CPU backend takes minutes per step at this vocabulary"]
 fn a_qwen35moe_full_fine_tune_trains_every_weight_and_writes_a_base() {
     let model = qwen35moe_model_dir("moe-full");
     let outcome = ChatFullFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
@@ -66,6 +61,7 @@ fn a_qwen35moe_full_fine_tune_trains_every_weight_and_writes_a_base() {
         .steps(2)
         .lr(1e-2)
         .seed(7) // seed: runs compared with each other need the same stream
+        .device(cpu())
         .run()
         .expect("the full fine-tune runs");
 
@@ -80,7 +76,6 @@ fn a_qwen35moe_full_fine_tune_trains_every_weight_and_writes_a_base() {
 }
 
 #[test]
-#[ignore = "needs a card: the CPU backend takes minutes per step at this vocabulary"]
 fn a_qwen35moe_preference_fine_tune_trains_mixer_adapters_over_frozen_experts() {
     let model = qwen35moe_model_dir("moe-dpo");
     let pairs = model.join("pairs.jsonl");
@@ -105,6 +100,7 @@ fn a_qwen35moe_preference_fine_tune_trains_mixer_adapters_over_frozen_experts() 
         .steps(2)
         .lr(1e-1)
         .seed(7) // seed: runs compared with each other need the same stream
+        .device(cpu())
         .run()
         .expect("the preference fine-tune runs");
 
