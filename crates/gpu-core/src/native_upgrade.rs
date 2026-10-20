@@ -1143,7 +1143,7 @@ mod tests {
 
     #[test]
     fn the_int8_gemv_row_names_a_registry_entry_with_its_own_bindings() {
-        let row = &ROWS[0];
+        let row = ROWS.iter().find(|r| r.slow == "matmul_i8_gemv").expect("the row");
         let k = kernels_cuda::get("matmul_i8_gemv").expect("registry entry");
         assert_eq!(row.target.resolve(kernels_cuda::DP4A_MIN_CC).map(|r| r.name), Some(k.name));
         // Same binding list as the WGSL kernel's own declaration: one uniform
