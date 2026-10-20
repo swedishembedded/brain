@@ -172,7 +172,7 @@ pub fn adapters_never_share_kv_with_the_base<D: PagedDecoder>(c: &Conformance<D>
     let adapter = load(sched.decoder_mut());
     let other = load(sched.decoder_mut());
     let vocab = sched.decoder_mut().vocab();
-    let prompt = tokens(vocab, 5, 24);
+    let prompt = tokens(vocab, 5, c.prefix_prompt_tokens);
     let mut extended = prompt.clone();
     extended.extend(tokens(vocab, 6, 8));
     let hits = |sched: &Scheduler<D>| sched.prefix_stats().0;
