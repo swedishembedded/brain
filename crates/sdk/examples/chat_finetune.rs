@@ -13,7 +13,8 @@
 //! chat_finetune --base DIR|FILE --dataset FILE.jsonl --out DIR --arch qwen3|qwen35
 //!     [--models-dir DIR] [--tier f32|bf16|nf4|int8] [--rank R] [--alpha A] [--steps N]
 //!     [--lr X] [--seed S] [--grad-accum G] [--adapter-id ID] [--device cpu|gpu0|gpu1]
-//!     [--backend cuda|cpu|vulkan|wgpu]
+//!     [--backend cuda|cpu|vulkan|wgpu] [--max-block N] [--held-out FILE.jsonl] [--monitor FILE.jsonl]
+//!     [--eval-every N] [--keep-evaluations DIR]
 //! ```
 //!
 //! Prints one line per step and, at the end, the adapter path and digest.
@@ -25,6 +26,7 @@ fn main() {
     let (mut base, mut dataset, mut out, mut arch) = (None, None, None, "qwen3".to_string());
     let (mut models_dir, mut tier, mut adapter_id, mut device, mut backend) = (None, "f32".to_string(), None, "cpu".to_string(), None);
     let (mut rank, mut alpha, mut steps, mut lr, mut seed, mut accum) = (None, None, 100u32, 3e-4f32, None, 1u32);
+    let (mut max_block, mut held_out, mut monitor, mut eval_every, mut keep_evaluations) = (None, None, None, 0u32, None);
     while let Some(flag) = args.next() {
         let mut value = || args.next().unwrap_or_else(|| die(&format!("{flag} needs a value")));
         match flag.as_str() {
@@ -43,6 +45,11 @@ fn main() {
             "--lr" => lr = parse(&flag, &value()),
             "--seed" => seed = Some(parse(&flag, &value())),
             "--grad-accum" => accum = parse(&flag, &value()),
+            "--max-block" => max_block = Some(parse::<u32>(&flag, &value())),
+            "--held-out" => held_out = Some(value()),
+            "--monitor" => monitor = Some(value()),
+            "--eval-every" => eval_every = parse(&flag, &value()),
+            "--keep-evaluations" => keep_evaluations = Some(value()),
             other => die(&format!("unknown flag {other}")),
         }
     }
@@ -80,17 +87,32 @@ fn main() {
     if let Some(seed) = seed {
         run = run.seed(seed);
     }
+    if let Some(block) = max_block {
+        run = run.max_block(block);
+    }
+    if let Some(path) = held_out {
+        run = run.held_out(path);
+    }
+    if let Some(path) = monitor {
+        run = run.monitor(path);
+    }
+    if let Some(dir) = keep_evaluations {
+        run = run.keep_evaluations(dir);
+    }
+    run = run.eval_every(eval_every);
     let started = std::time::Instant::now();
     let outcome = run
         .run_with(&brain::CancelToken::default(), |p| eprintln!("step {}/{} loss {:.4} lr {:.2e} t={:.1}s", p.step, p.steps, p.loss, p.lr, started.elapsed().as_secs_f64()))
         .unwrap_or_else(|e| die(&format!("fine-tune failed: {e}")));
     println!(
-        "status={:?} steps={} block={} loss {:?} -> {:?} seed={} adapter={:?} digest={:?} wall={:.1}s",
+        "status={:?} steps={} block={} loss {:?} -> {:?} base_score={:?} tuned_score={:?} seed={} adapter={:?} digest={:?} wall={:.1}s",
         outcome.status,
         outcome.steps_completed,
         outcome.block,
         outcome.initial_loss,
         outcome.final_loss,
+        outcome.base_score,
+        outcome.tuned_score,
         outcome.seed,
         outcome.adapter,
         outcome.adapter_digest,

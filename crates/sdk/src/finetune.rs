@@ -169,18 +169,6 @@ impl ChatFamily {
         }
     }
 
-    /// Refuse what this family's trainer cannot do, before any file is read.
-    fn refuse_unsupported(&self, run: &ChatFineTune) -> Result<()> {
-        if let ChatFamily::Qwen35(_) = self {
-            // Scoring a base against held-out records and writing an adapter per
-            // evaluation are `qwen3::eval` and `qwen3` snapshot features.
-            if run.held_out.is_some() || run.held_out_text.is_some() || run.evaluations_dir.is_some() {
-                return Err(Error::Backend("ChatFineTune: qwen35 does not score held-out records or keep per-evaluation adapters yet; use .monitor() with .eval_every() for the loss curve".to_string()));
-            }
-        }
-        Ok(())
-    }
-
     /// The vocabulary the checkpoint at `open` was trained with.
     fn vocab(&self, open: &Path) -> Result<usize> {
         match self {
@@ -198,7 +186,17 @@ impl ChatFamily {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn train(&self, open: &Path, prepared_dir: &Path, opts: &model::FitOpts, rank: u32, alpha: f32, continue_from: Option<&Path>, control: model::FitControl<'_>) -> std::io::Result<(model::FitReport, TrainedLora)> {
+    fn train(
+        &self,
+        open: &Path,
+        prepared_dir: &Path,
+        opts: &model::FitOpts,
+        rank: u32,
+        alpha: f32,
+        continue_from: Option<&Path>,
+        control: model::FitControl<'_>,
+        held_out: &[&Path],
+    ) -> std::io::Result<(model::FitReport, TrainedLora, Vec<qwen35::finetune::ScoredSet>)> {
         match self {
             ChatFamily::Qwen3(tier) => {
                 let start = match continue_from {
@@ -207,12 +205,12 @@ impl ChatFamily {
                 };
                 let weights = open.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "checkpoint path is not UTF-8"))?;
                 let (report, trained) = qwen3::finetune::finetune_lora_controlled(weights, prepared_dir, opts, rank, alpha, &start, control, *tier)?;
-                Ok((report, TrainedLora::Qwen3(trained)))
+                Ok((report, TrainedLora::Qwen3(trained), Vec::new()))
             }
             ChatFamily::Qwen35(dtype) => {
                 let run = qwen35::finetune::StreamedRun { dtype: *dtype, recompute: dtype.is_frozen_only(), long: qwen35::finetune::LongSeqOverrides::default() };
-                let (report, trained) = qwen35::finetune::finetune_lora_controlled(open, prepared_dir, opts, rank, alpha, continue_from, &run, control)?;
-                Ok((report, TrainedLora::Qwen35(Box::new(trained))))
+                let (report, trained, scored) = qwen35::finetune::finetune_lora_scored(open, prepared_dir, opts, rank, alpha, continue_from, &run, control, held_out)?;
+                Ok((report, TrainedLora::Qwen35(Box::new(trained)), scored))
             }
         }
     }
@@ -587,7 +585,6 @@ impl ChatFineTune {
         let open = qwen3::store_checkpoint_path(&weights, &model_dir);
         let weights_str = utf8(&open)?;
         let family = ChatFamily::of(arch.id, self.bf16_base, self.int8_base, self.nf4_base)?;
-        family.refuse_unsupported(self)?;
 
         // Every file is checked against the base's own template before a
         // device is claimed.
@@ -625,7 +622,21 @@ impl ChatFineTune {
         let vocab = family.vocab(&open)?;
         let prepared_dir = out_dir.join(PREPARED_DIR);
         let prepared = data::chat::prepare_chat_samples(&training, val, &tok, &tmpl, render, vocab, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
-        let block = block_for(prepared.longest_example, self.max_block)?;
+        // The held-out sets of a family that scores them in the training process (qwen35) are prepared
+        // like the monitoring split, and the training row has to hold their longest example too.
+        let mut longest = prepared.longest_example;
+        let mut held_out_dirs: Vec<PathBuf> = Vec::new();
+        if matches!(family, ChatFamily::Qwen35(_)) {
+            for (name, records) in [("prepared-held-out", held_out.as_deref()), ("prepared-held-out-text", held_out_text.as_deref())] {
+                if let Some(records) = records {
+                    let dir = out_dir.join(name);
+                    let set = data::chat::prepare_chat_samples(records, records, &tok, &tmpl, render, vocab, &dir).map_err(|e| Error::Backend(format!("preparing {name}: {e}")))?;
+                    longest = longest.max(set.longest_example);
+                    held_out_dirs.push(dir);
+                }
+            }
+        }
+        let block = block_for(longest, self.max_block)?;
 
         crate::device::resolve(&self.device)?;
         let scoring_tier = family.scoring_tier();
@@ -677,7 +688,15 @@ impl ChatFineTune {
             None => None,
         };
         let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots };
-        let (report, trained) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.continue_from.as_deref(), control).map_err(|e| Error::Backend(format!("training: {e}")))?;
+        let held_out_refs: Vec<&Path> = held_out_dirs.iter().map(PathBuf::as_path).collect();
+        let (report, trained, scored) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.continue_from.as_deref(), control, &held_out_refs).map_err(|e| Error::Backend(format!("training: {e}")))?;
+        // In-process scores (qwen35): the sets come back in the order they were given.
+        let mut in_process = scored.into_iter();
+        let mut take_scored = |present: bool| if present { in_process.next() } else { None };
+        let (scored_held_out, scored_text) = (take_scored(held_out.is_some() && !held_out_dirs.is_empty()), take_scored(held_out_text.is_some() && !held_out_dirs.is_empty()));
+        let as_score = |loss: Option<f32>, set: &qwen35::finetune::ScoredSet| HeldOutScore { loss, token_accuracy: None, positions: set.positions, records: set.records, skipped: 0 };
+        let base_score = base_score.or(scored_held_out.as_ref().map(|set| as_score(set.base_loss, set)));
+        let base_text_score = base_text_score.or(scored_text.as_ref().map(|set| as_score(set.base_loss, set)));
 
         let (selected_step, selection) = match report.kept_best {
             Some(best) => (best.step, Selection::BestMonitorLoss),
@@ -756,8 +775,14 @@ impl ChatFineTune {
         drop(trained);
         outcome.adapter_digest = Some(digest(&adapter_path)?);
         let adapter_str = utf8(&adapter_path)?;
-        outcome.tuned_score = held_out.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render));
-        outcome.tuned_text_score = held_out_text.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render));
+        outcome.tuned_score = match scored_held_out {
+            Some(set) => Some(as_score(set.tuned_loss, &set)),
+            None => held_out.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render)),
+        };
+        outcome.tuned_text_score = match scored_text {
+            Some(set) => Some(as_score(set.tuned_loss, &set)),
+            None => held_out_text.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render)),
+        };
         outcome.adapter = Some(adapter_path);
 
         let record_path = out_dir.join(RECORD_FILE);

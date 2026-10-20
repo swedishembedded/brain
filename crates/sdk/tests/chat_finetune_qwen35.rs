@@ -133,12 +133,44 @@ fn a_cancelled_qwen35_run_resumes_to_the_uninterrupted_adapter() {
     assert_eq!(resumed.adapter_digest, straight.adapter_digest, "the same adapter file, byte for byte");
 }
 
+/// The monitoring pass, the held-out score and the per-evaluation adapters a 27B self-distillation run
+/// selects on: scored on the training process's own model (a second copy of the base does not fit
+/// beside it), over the positions training supervises.
 #[test]
-fn what_qwen35_cannot_score_is_refused_before_anything_is_read() {
+fn a_qwen35_fine_tune_scores_held_out_records_and_keeps_every_evaluation() {
+    let model = qwen35_chat_model_dir("q35-heldout");
+    let records = write_dataset(&model);
+    let evaluations = model.join("evaluations");
+    let outcome = fine_tune(&model, &model.join("run"))
+        .held_out(&records)
+        .held_out_text(&records)
+        .monitor(&records)
+        .eval_every(2)
+        .keep_evaluations(&evaluations)
+        .run()
+        .expect("the fine-tune runs");
+
+    assert_eq!(outcome.status, FineTuneStatus::Completed);
+    let (base, tuned) = (outcome.base_score.expect("the base is scored on the held-out set"), outcome.tuned_score.expect("the tuned model is too"));
+    let (base_loss, tuned_loss) = (base.loss.unwrap(), tuned.loss.unwrap());
+    assert!(base_loss.is_finite() && tuned_loss < base_loss, "records it trained on score better after training: {base_loss} -> {tuned_loss}");
+    assert_eq!((base.records, tuned.records), (4, 4));
+    assert!(base.positions > 0 && base.positions == tuned.positions, "the same supervised positions: {base:?} {tuned:?}");
+    assert!(outcome.base_text_score.is_some() && outcome.tuned_text_score.is_some(), "the second held-out set is scored apart");
+    // The untouched base on the monitoring set is what the loop measured before step 0.
+    assert!((outcome.initial_loss.unwrap() - base_loss).abs() < 1e-3 * base_loss.abs().max(1.0), "{:?} vs {base_loss}", outcome.initial_loss);
+
+    for step in [2, 4, 6] {
+        let file = evaluations.join(format!("step-{step}.safetensors"));
+        let card = checkpoint::st::read_card(file.to_str().unwrap()).unwrap().unwrap_or_else(|| panic!("{} has no card", file.display()));
+        assert_eq!(card.family, "qwen35", "step {step}");
+    }
+    assert_eq!(outcome.curve.iter().map(|p| p.step).collect::<Vec<_>>(), vec![2, 4, 6]);
+}
+
+#[test]
+fn what_qwen35_cannot_hold_is_refused_before_anything_is_read() {
     let model = qwen35_chat_model_dir("q35-refuse");
-    let held_out = write_dataset(&model);
-    let err = fine_tune(&model, &model.join("run")).held_out(held_out).run().unwrap_err().to_string();
-    assert!(err.contains("qwen35") && err.contains("held-out"), "{err}");
     let err = fine_tune(&model, &model.join("run")).int8_base(true).run().unwrap_err().to_string();
     assert!(err.contains("int8"), "{err}");
 }
