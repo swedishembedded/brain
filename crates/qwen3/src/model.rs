@@ -298,6 +298,10 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
     LIST.get_or_init(|| {
         let mut v = STATIC_PIPELINES.to_vec();
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
+        // Device AdamW over blockwise-int8 moments (`optim::Optim` resolves them by
+        // name and `Op::AdamWQ8` picks the cooperative form where barriers run).
+        v.push(("adamw_q8", kernels::ADAMW_Q8));
+        v.push(("adamw_q8_wg", kernels::ADAMW_Q8_WG));
         // `Ops::bind` resolves its `(RegisterTiled, F32)` kernel by the NAME
         // "matmul_reg2" - but `matmul_reg3` is the bit-identical, measurably
         // faster twin (identical `Params`, identical tiling, only the
@@ -1232,7 +1236,8 @@ impl Qwen {
             ps
         } else {
             model::offload::resolve_precisions(&plist, false).unwrap_or_else(|e| panic!("qwen3 full fine-tune: {e}"));
-            ParamStore::new_src(&gpu, plist, src)
+            let roles: Vec<_> = plist.into_iter().map(|(n, c)| (n, c, paramstore::Role::Trainable)).collect();
+            ParamStore::new_with_policy_src(&gpu, roles, src, &model::offload::precision_policy())
         };
         if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
             model::adapter::device::apply_groups(&mut ps, &lora.hp());

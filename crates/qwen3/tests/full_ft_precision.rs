@@ -6,7 +6,7 @@
 
 //! A full fine-tune of a tiny random Qwen3 takes a precision policy through the
 //! generic optimizer-state seam: int8 moments with the state host-offloaded train
-//! like the fp32 default, hold a quarter of the state, and an unsupported choice
+//! like the fp32 default (host-offloaded and on the device), and an unsupported choice
 //! is refused rather than ignored.
 
 use std::collections::HashMap;
@@ -83,12 +83,18 @@ fn int8_moments_offloaded_train_like_fp32_and_unsupported_choices_are_refused() 
     println!("loss after 12 steps: fp32 moments {base:.4}, int8 moments {q8:.4}");
     assert!(q8 < 1.2 * base + 0.05, "int8 moments {q8} should track fp32 {base}");
 
-    // int8 moments on the device optimiser and a master copy are refused, naming the reason
+    // int8 moments run on the device optimiser too (the fused adamw_q8 kernels)
+    let q8_dev = train(&int8, false, 12);
+    println!("device int8 moments {q8_dev:.4}");
+    assert!(q8_dev < 1.2 * base + 0.05, "device int8 moments {q8_dev} should track fp32 {base}");
+
+    // bf16 moments on the device optimiser and a master copy are refused, naming the reason
     let refuse = |policy: PrecisionPolicy, offload: bool| {
         let e = std::panic::catch_unwind(|| train(&policy, offload, 1)).expect_err("must be refused");
         e.downcast_ref::<String>().cloned().unwrap_or_default()
     };
-    let e = refuse(int8.clone(), false);
+    let bf16 = PrecisionPolicy::uniform(ParamPrecision { state: StateFormat::Bf16, ..ParamPrecision::FP32 });
+    let e = refuse(bf16, false);
     assert!(e.contains("host-offloaded"), "{e}");
     let master = PrecisionPolicy::uniform(ParamPrecision { master: MasterPolicy::F32, ..ParamPrecision::FP32 });
     let e = refuse(master, true);

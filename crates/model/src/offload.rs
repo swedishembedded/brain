@@ -74,7 +74,7 @@ pub fn precision_policy() -> PrecisionPolicy {
 
 /// The scope's precision for each of `params`, checked against what the
 /// device training paths run: weights and gradients are f32 device buffers
-/// and the device AdamW keeps f32 moments, so those are the only choices there;
+/// and the device AdamW keeps f32 or 64-element-block int8 moments, so those are the only choices there;
 /// with the moments offloaded to the host any state format (f32, bf16, int8
 /// blocks) is available. Anything else is an error naming the parameter,
 /// never a silent fp32 fallback.
@@ -87,8 +87,12 @@ pub fn resolve_precisions(params: &[(String, usize)], host_offload: bool) -> Res
             if p.value != ValueDtype::F32 || p.grad != GradDtype::F32 || p.master != MasterPolicy::None {
                 return Err(format!("{name}: this trainer keeps f32 device weights and gradients with no master copy; got {p:?}"));
             }
-            if !host_offload && p.state != StateFormat::F32 {
-                return Err(format!("{name}: the device optimiser keeps f32 moments; {:?} moments need the host-offloaded optimizer state", p.state));
+            let device_ok = matches!(p.state, StateFormat::F32) || p.state == (StateFormat::Int8Block { block: paramstore::DEVICE_INT8_BLOCK });
+            if !host_offload && !device_ok {
+                return Err(format!(
+                    "{name}: the device optimiser keeps f32 moments or int8 blocks of {}; {:?} moments need the host-offloaded optimizer state",
+                    paramstore::DEVICE_INT8_BLOCK, p.state
+                ));
             }
             Ok(p)
         })

@@ -1665,6 +1665,11 @@ impl Qwen35 {
         if train && cfg.lora.is_none() {
             // A full fine-tune keeps f32 device state; a policy asking for more is refused, not ignored.
             model::offload::resolve_precisions(&ps.params, false).unwrap_or_else(|e| panic!("qwen35 full fine-tune: {e}"));
+            // qwen35 registers no int8-moment AdamW kernel: f32 moments only, refused rather than ignored.
+            let policy = model::offload::precision_policy();
+            if let Some((n, _)) = ps.params.iter().find(|(n, c)| policy.resolve(n, *c).precision.state != paramstore::precision::StateFormat::F32) {
+                panic!("qwen35 full fine-tune: {n}: the device optimiser here keeps f32 moments");
+            }
         }
         if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
             model::adapter::device::apply_groups(&mut ps, &lora.hp());

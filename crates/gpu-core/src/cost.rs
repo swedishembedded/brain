@@ -1168,6 +1168,10 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // (`[lr, b1, b2, eps, wd, bc1, bc2, scale]`) and moved `numel` into a
         // per-tensor descriptor buffer `cost_of` has no params-based view of.
         "adamw" => f(12 * p(0)?, 28 * p(0)?),
+        // The int8-moment AdamW, reference and cooperative forms: the same
+        // update plus the codec work per element; traffic is w + g (8 B), the two
+        // code bytes read and written (4 B) and the w write (4 B), scales negligible.
+        "adamw_q8" | "adamw_q8_wg" => f(60 * p(0)?, 16 * p(0)?),
         // params [numel, slot].
         "gradnorm_sq" => f(2 * p(0)?, 4 * p(0)?),
         // The roofline probe itself (params [n, iters, c, d]): `iters` passes of

@@ -43,12 +43,12 @@ fn mean_loss(m: &qwen3::Qwen, seqs: &[(Vec<u32>, Vec<u32>)]) -> f32 {
     s / seqs.len() as f32
 }
 
-fn run(name: &str, path: &str, policy: &PrecisionPolicy) -> (f32, f32) {
+fn run(name: &str, path: &str, policy: &PrecisionPolicy, offload: bool) -> (f32, f32) {
     let (cfg, init) = qwen3::open_checkpoint(path).expect("open checkpoint");
     let vocab = cfg.vocab;
     let opts = model::FitOpts { batch_size: 1, block_size: T, ..Default::default() };
     let m = model::offload::with_precision_policy(policy, || {
-        model::offload::with_adam_offloaded(true, || qwen3::finetune::build_for_training(cfg, &opts, &*init, qwen3::Dtype::F32))
+        model::offload::with_adam_offloaded(offload, || qwen3::finetune::build_for_training(cfg, &opts, &*init, qwen3::Dtype::F32))
     })
     .expect("build");
     drop(init);
@@ -89,9 +89,13 @@ fn qwen3_0_6b_full_fine_tune_with_fp32_bf16_and_int8_moments() {
         return;
     }
     let with = |state| PrecisionPolicy::uniform(ParamPrecision { state, stochastic_rounding: true, ..ParamPrecision::FP32 });
-    let (f_train, f_held) = run("fp32 moments", &path, &with(StateFormat::F32));
-    let (b_train, b_held) = run("bf16 moments", &path, &with(StateFormat::Bf16));
-    let (q_train, q_held) = run("int8 moments", &path, &with(StateFormat::Int8Block { block: 64 }));
+    // moments on the device (the fused AdamW kernels) first: the default when the state fits
+    let (d_train, d_held) = run("device fp32 moments", &path, &with(StateFormat::F32), false);
+    let (dq_train, dq_held) = run("device int8 moments", &path, &with(StateFormat::Int8Block { block: 64 }), false);
+    assert!(dq_train < d_train + 0.5 && dq_held < d_held + 0.5, "device int8 moments fall behind: {dq_train}/{dq_held} vs {d_train}/{d_held}");
+    let (f_train, f_held) = run("host fp32 moments", &path, &with(StateFormat::F32), true);
+    let (b_train, b_held) = run("host bf16 moments", &path, &with(StateFormat::Bf16), true);
+    let (q_train, q_held) = run("host int8 moments", &path, &with(StateFormat::Int8Block { block: 64 }), true);
     for (n, tr, he) in [("bf16", b_train, b_held), ("int8", q_train, q_held)] {
         assert!(tr < f_train + 0.5 && he < f_held + 0.5, "{n} moments fall behind fp32: train {tr} vs {f_train}, held {he} vs {f_held}");
     }
