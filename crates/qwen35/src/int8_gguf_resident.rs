@@ -406,16 +406,51 @@ pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTie
     if model::shard::plan_fewest_devices(&cost, &caps).is_some() {
         return None;
     }
-    let state: u64 = cfg.layer_types().into_iter().map(|ty| max_batch.max(1) as u64 * cfg.layer_decode_state_bytes(ty, cap, kv)).sum();
+    // Placement said no: the global planner states the arithmetic per category and finds the
+    // smallest KV tier change (the only lever a serving configuration may pull for itself).
+    let demands = serving_demands(cfg, cap, tier, kv, max_batch, prefix_slots, kv_pool_rows);
+    let total_usable: u64 = usable.iter().sum();
+    let capacity = model::memplan::Capacity { device_bytes: total_usable, host_bytes: 0 };
+    let (report, fits_with) = match model::memplan::plan(&demands, capacity, &model::memplan::Authorized::only(&[model::memplan::Lever::CompactKv])) {
+        Ok(r) => (r, true),
+        Err(model::memplan::PlanError::DoesNotFit { best, .. }) => (best, false),
+        Err(e) => return Some(format!("serving sizing is inconsistent: {e}")),
+    };
+    // The aggregate says a tier fits; placement across the real cards has the last word.
+    let suggestion = report.decisions.iter().rev().find(|d| d.category == model::memplan::Category::Kv).map(|d| d.to.clone()).filter(|to| {
+        fits_with && KvTier::parse(to).is_ok_and(|t| model::shard::plan_fewest_devices(&layer_cost_with_prefix_slots(cfg, cap, tier, t, max_batch, prefix_slots, kv_pool_rows), &caps).is_some())
+    });
+    let bytes_of = |c: model::memplan::Category| {
+        // The request's own numbers, not the post-decision ones.
+        demands.iter().find(|d| d.category == c).map_or(0, |d| d.variants[0].device_bytes)
+    };
+    let (weights, kv_bytes, state) = (bytes_of(model::memplan::Category::Weights), bytes_of(model::memplan::Category::Kv), bytes_of(model::memplan::Category::DecodeState));
+    let advice = match suggestion {
+        Some(t) => format!("a more compact --qwen35-kv ({t}) would fit these cards"),
+        None => "lower --qwen35-max-batch or --qwen35-ctx, or choose a more compact --qwen35-kv".to_string(),
+    };
     Some(format!(
-        "--qwen35-max-batch {max_batch} x --qwen35-ctx {cap} with a {} KV cache needs {:.1} GiB ({:.1} GiB weights + {:.1} GiB decode state for {max_batch} sequences) but the {} budgeted GPU(s) offer {:.1} GiB; lower --qwen35-max-batch or --qwen35-ctx, or choose a more compact --qwen35-kv",
+        "--qwen35-max-batch {max_batch} x --qwen35-ctx {cap} with a {} KV cache needs {:.1} GiB ({:.1} GiB weights + {:.1} GiB KV cache + {:.1} GiB recurrent state for {max_batch} sequences) but the {} budgeted GPU(s) offer {:.1} GiB; {advice}",
         kv.as_str(),
-        gib(cost.total()),
-        gib(cost.total().saturating_sub(state)),
+        gib(weights + kv_bytes + state),
+        gib(weights),
+        gib(kv_bytes),
         gib(state),
         usable.len(),
-        gib(usable.iter().sum())
+        gib(total_usable)
     ))
+}
+
+/// The serving configuration as the global planner's categories: the stored weights, the KV cache
+/// (offering each smaller tier), and the GDN recurrent state, each with the byte count the placement
+/// cost ([`layer_cost_with_prefix_slots`]) charges for it.
+pub fn serving_demands(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32, kv_pool_rows: u32) -> Vec<model::memplan::Demand> {
+    use model::memplan::{kv_demand_with, Category, Demand};
+    let types = cfg.layer_types();
+    let by_type = |want: LayerType, kv: KvTier| -> u64 { types.iter().filter(|&&t| t == want).map(|&t| layer_state_bytes(cfg, t, cap, kv, max_batch, prefix_slots, kv_pool_rows)).sum() };
+    let weights: u64 = types.iter().map(|&t| cfg.layer_weight_bytes(t, tier)).sum::<u64>() + head_i8_bytes(cfg) + cfg.d_model as u64 * 4;
+    let kv_demand = kv_demand_with(kv, &KvTier::ALL, |t| by_type(LayerType::Full, t)).expect("a KV demand over supported tiers is consistent");
+    vec![Demand::fixed(Category::Weights, "as stored", weights), kv_demand, Demand::fixed(Category::DecodeState, "recurrent state", by_type(LayerType::Linear, kv))]
 }
 
 /// `(index into devices, capacity)` for every GPU in `devices`, each less
@@ -3334,6 +3369,23 @@ mod tests {
         }
         let why = sizing_refusal(&cfg, 131_072, &i8, KvTier::BF16, 40, 0, 0, &usable).expect("past the u32 plane index");
         assert!(why.contains("u32 element index"), "{why}");
+    }
+
+    /// The refusal states the planner's own arithmetic per category and names the smallest KV tier
+    /// that places on these cards; a batch no tier can hold gets no tier suggestion.
+    #[test]
+    fn a_refusal_names_the_kv_tier_that_would_fit_and_the_per_category_bytes() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let i8 = TierPolicy::uniform(Dtype::I8);
+        let usable = [(97_871u64 << 20) - (2 << 30)];
+        let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 200, 0, 0, &usable).expect("200 f32 sequences of 4096 tokens cannot fit");
+        assert!(why.contains("a more compact --qwen35-kv (bf16) would fit") || why.contains("a more compact --qwen35-kv (int8) would fit"), "{why}");
+        assert!(why.contains("GiB weights") && why.contains("GiB KV cache") && why.contains("GiB recurrent state"), "{why}");
+        let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 1000, 0, 0, &usable).unwrap();
+        assert!(!why.contains("would fit") && why.contains("choose a more compact --qwen35-kv"), "{why}");
+        // The categories add up to what the placement cost charges.
+        let total: u64 = serving_demands(&cfg, 4096, &i8, KvTier::F32, 200, 0, 0).iter().map(|d| d.variants[0].device_bytes).sum();
+        assert_eq!(total, layer_cost_with_prefix_slots(&cfg, 4096, &i8, KvTier::F32, 200, 0, 0).total());
     }
 
     /// The sizing a batch-serving deployment plans with: at the default

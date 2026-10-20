@@ -38,6 +38,8 @@ use crate::kv_tier::KvTier;
 pub enum Category {
     Weights,
     Grads,
+    /// Recurrent / decode state that is neither KV nor activations (a hybrid decoder's GDN state).
+    DecodeState,
     OptimizerState,
     Activations,
     Kv,
@@ -109,14 +111,26 @@ impl Demand {
     }
 }
 
-/// The KV cache of `n_layers` full-attention layers holding `rows` token rows, one variant per tier of
-/// `tiers` (largest first), each a [`Lever::CompactKv`] step after the first.
-pub fn kv_demand(n_layers: u64, rows: u64, kv_stride: u64, head_dim: u64, tiers: &[KvTier]) -> Result<Demand, PlanError> {
-    let mut tiers: Vec<KvTier> = tiers.to_vec();
-    let bytes = |t: &KvTier| n_layers * 2 * t.plane_bytes(rows, kv_stride, head_dim);
-    tiers.sort_by_key(|t| std::cmp::Reverse(bytes(t)));
-    let variants = tiers.iter().enumerate().map(|(i, t)| Variant::new(if i == 0 { Lever::Base } else { Lever::CompactKv }, t.as_str(), bytes(t), 0)).collect();
+/// The KV cache as variants over `tiers`: `bytes(tier)` is that tier's whole-cache device bytes
+/// (the caller knows its layout: windows per slot, a paged pool, a layer subset). The first tier
+/// is the requested one and the [`Lever::Base`]; only tiers strictly smaller than it follow, largest
+/// first, each a [`Lever::CompactKv`] step - the planner never proposes a bigger cache.
+pub fn kv_demand_with(requested: KvTier, tiers: &[KvTier], bytes: impl Fn(KvTier) -> u64) -> Result<Demand, PlanError> {
+    let base = bytes(requested);
+    let mut smaller: Vec<KvTier> = tiers.iter().copied().filter(|&t| bytes(t) < base).collect();
+    smaller.sort_by_key(|&t| std::cmp::Reverse(bytes(t)));
+    smaller.dedup_by_key(|t| bytes(*t));
+    let mut variants = vec![Variant::new(Lever::Base, requested.as_str(), base, 0)];
+    variants.extend(smaller.iter().map(|t| Variant::new(Lever::CompactKv, t.as_str(), bytes(*t), 0)));
     Demand::with_variants(Category::Kv, variants)
+}
+
+/// The KV cache of `n_layers` full-attention layers holding `rows` token rows, starting from the
+/// largest of `tiers` and offering each smaller one.
+pub fn kv_demand(n_layers: u64, rows: u64, kv_stride: u64, head_dim: u64, tiers: &[KvTier]) -> Result<Demand, PlanError> {
+    let bytes = |t: KvTier| n_layers * 2 * t.plane_bytes(rows, kv_stride, head_dim);
+    let Some(&largest) = tiers.iter().max_by_key(|&&t| bytes(t)) else { return Err(PlanError::InvalidDemand { category: Category::Kv, why: "no tiers".into() }) };
+    kv_demand_with(largest, tiers, bytes)
 }
 
 /// The staging demand of loads sharing `budget`: its configured host cap and pinned cap, charged in full
@@ -125,6 +139,19 @@ pub fn staging_variant(budget: &MemoryBudget) -> Demand {
     let host = budget.stats(Pool::HostStaging).capacity;
     let pinned = budget.stats(Pool::Pinned).capacity;
     Demand { category: Category::Staging, variants: vec![Variant::new(Lever::Base, "bounded staging", 0, host + pinned)] }
+}
+
+/// The device bytes of every demand at its preferred (stored) variant: what a sizing costs before
+/// any lever is pulled.
+pub fn device_total(demands: &[Demand]) -> u64 {
+    demands.iter().map(|d| d.variants[0].device_bytes).sum()
+}
+
+/// One line per category, for a log: `weights 12.00 GiB + kv 2.50 GiB + ... = 15.2 GiB`.
+pub fn summary(demands: &[Demand]) -> String {
+    let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    let parts: Vec<String> = demands.iter().map(|d| format!("{:?} {:.2} GiB ({})", d.category, gib(d.variants[0].device_bytes), d.variants[0].label)).collect();
+    format!("{} = {:.2} GiB", parts.join(" + "), gib(device_total(demands)))
 }
 
 /// What the machine offers.
@@ -361,7 +388,8 @@ mod tests {
         let bytes: Vec<(String, u64)> = d.variants.iter().map(|v| (v.label.clone(), v.device_bytes)).collect();
         assert_eq!(bytes[0].0, "f32");
         assert_eq!(bytes[1].1 * 2, bytes[0].1, "bf16 is half of f32");
-        assert_eq!(bytes[2].1, bytes[3].1, "int8 and fp8 have one footprint");
+        assert_eq!(bytes.len(), 3, "int8 and fp8 have one footprint, so only one is offered");
+        assert_eq!(bytes[2].1, 16 * 2 * KvTier::FP8.plane_bytes(131_072, 1024, 256));
         let r = plan(&[Demand::fixed(Category::Weights, "int8", 27 * GIB), d], Capacity { device_bytes: 80 * GIB, host_bytes: 0 }, &Authorized::only(&[Lever::CompactKv])).unwrap();
         assert!(r.decisions.iter().all(|d| d.lever == Lever::CompactKv));
         assert!(r.device_bytes <= 80 * GIB);

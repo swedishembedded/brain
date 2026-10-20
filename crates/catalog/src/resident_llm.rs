@@ -598,7 +598,7 @@ fn fleet_pool_tokens(checkpoint: &qwen3::config::QwenConfig, weight_bytes: u64, 
         // unfused worst case of `PoolProfile` overstates at ctx 32768, does not
         // change with it, so only the KV binding is checked beside the total.
         let kv_binding = qwen3::serve::kv_binding_bytes(checkpoint, 16, fleet.div_ceil(16) + max_batch, cfg.kv_int8);
-        if profile.total(weight_bytes) <= budget && kv_binding <= WGPU_MAX_REPORTABLE_BINDING_BYTES {
+        if profile.fits_budget(weight_bytes, budget) && kv_binding <= WGPU_MAX_REPORTABLE_BINDING_BYTES {
             return Some(fleet);
         }
         fleet /= 2;
@@ -667,9 +667,28 @@ impl PoolProfile {
         }
     }
 
-    /// Total device bytes, given the ctx-independent weight cost.
-    fn total(&self, weight_bytes: u64) -> u64 {
-        weight_bytes + self.kv_bytes + self.scratch_bytes + self.swap_staging_bytes
+    /// This sizing as the global planner's categories (`model::memplan`): the one place the serving
+    /// footprint is summed, so a budget decision, an estimate and a pre-load refusal cannot disagree.
+    /// `weight_bytes` is the ctx-independent weight cost, `bank_bytes` the adapter bank beside it.
+    fn demands(&self, weight_bytes: u64, bank_bytes: u64) -> Vec<model::memplan::Demand> {
+        use model::memplan::{Category, Demand};
+        vec![
+            Demand::fixed(Category::Weights, "weights", weight_bytes),
+            Demand::fixed(Category::Weights, "adapter bank", bank_bytes),
+            Demand::fixed(Category::Kv, "paged pool", self.kv_bytes),
+            Demand::fixed(Category::Activations, "attention scratch", self.scratch_bytes),
+            Demand::fixed(Category::Transfers, "kv swap staging", self.swap_staging_bytes),
+        ]
+    }
+
+    /// Whether the planner places this sizing beside `weight_bytes` within `budget_bytes` of device memory.
+    fn fits_budget(&self, weight_bytes: u64, budget_bytes: u64) -> bool {
+        self.plan(weight_bytes, 0, budget_bytes).is_ok()
+    }
+
+    /// The planner's verdict (and, refused, its arithmetic) for this sizing in `budget_bytes`.
+    fn plan(&self, weight_bytes: u64, bank_bytes: u64, budget_bytes: u64) -> Result<model::memplan::PlanReport, model::memplan::PlanError> {
+        model::memplan::plan(&self.demands(weight_bytes, bank_bytes), model::memplan::Capacity { device_bytes: budget_bytes, host_bytes: u64::MAX }, &model::memplan::Authorized::none())
     }
 
     /// Whether every single binding fits what a compliant device guarantees.
@@ -701,7 +720,7 @@ fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config
     let mut best = AUTO_CTX_TIERS[0];
     for &ctx in AUTO_CTX_TIERS.iter().take_while(|&&t| t <= cfg.max_position_embeddings.max(AUTO_CTX_TIERS[0])) {
         let profile = PoolProfile::at_ctx(cfg, ctx, max_batch, max_prefill_cap, kv_tokens, kv_int8, offload, qwen3::serve::FusedAttention::default());
-        if profile.total(weight_bytes) <= budget_bytes && profile.bindings_fit() {
+        if profile.fits_budget(weight_bytes, budget_bytes) && profile.bindings_fit() {
             best = ctx;
         } else {
             break;
@@ -1048,6 +1067,20 @@ impl QwenResident {
         ))
     }
 
+    /// The device bytes of the weights this resident will load, for the tier it requests:
+    /// `--weights-int8` reads them off `cfg` (the same canonical-name derivation
+    /// `decoder_param_list` builds the engine from), so the estimate and `activate()`
+    /// cannot disagree about which tensors are quantized.
+    fn weight_bytes(&self, cfg: &qwen3::config::QwenConfig) -> u64 {
+        if self.weights_bf16_requested {
+            weights_bf16_bytes(cfg)
+        } else if self.weights_int8_requested {
+            weights_int8_bytes(cfg)
+        } else {
+            weights_fp32_bytes(cfg)
+        }
+    }
+
     /// `Err` naming the checkpoint, the requested `ctx`/`max_prefill` and the
     /// worst single device buffer this sizing would allocate, when that
     /// buffer would exceed WebGPU's own spec-mandated
@@ -1152,53 +1185,23 @@ impl ResidentModel for QwenResident {
         };
         let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = Self::pool_sizing(self.ctx, self.max_batch, self.max_prefill_cap, self.kv_tokens);
         let kv_int8 = self.kv_int8_requested && qwen3::serve::kv_int8_supported(&cfg);
-        let kv_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
-        // The paged-attention scores/probs scratch (`Scratch::{scores,probs}`)
-        // is a real, often multi-GiB device allocation `activate()` makes
-        // alongside the KV pool - omitting it here left placement relying on
-        // `--reserve-gb`'s flat, model-agnostic headroom to accidentally
-        // cover a real, model-specific need it was never sized for, on top
-        // of an ALREADY doubly-conservative weight estimate (`est_vram`'s
-        // static 1.3x). the fused-attention answer needs the target device's
-        // own `DeviceCaps`, unknown at this pre-placement point - `false` is
-        // the larger of the two sizes `paged_attn_scratch_bytes` can return
-        // (see its own doc), so this stays a worst-case, never-under bound.
+        // The paged-attention scores/probs scratch (`Scratch::{scores,probs}`) is a real, often
+        // multi-GiB device allocation `activate()` makes alongside the KV pool. The fused-attention
+        // answer needs the target device's own `DeviceCaps`, unknown at this pre-placement point, so
+        // `FusedAttention::default()` (nothing fused) is the larger size `paged_attn_scratch_bytes`
+        // can return: a worst-case, never-under bound.
         let cap = max_blocks_per_seq * block_size;
-        let scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, qwen3::serve::FusedAttention::default());
-        // `--weights-int8`'s equivalent (`BRAIN_QWEN_WEIGHTS_INT8`): the
-        // weight term is by far the dominant one for any sizeable model, and
-        // `weights_int8_bytes` reads it precisely off `cfg` - the SAME
-        // canonical-name derivation `decoder_param_list` builds the engine
-        // from - rather than a flat fraction of `cost.vram`. `activate()`
-        // below requests the identical `weights_int8` value, so the two
-        // cannot silently disagree about which tensors are quantized.
-        let weight_bytes = if self.weights_bf16_requested {
-            weights_bf16_bytes(&cfg)
-        } else if self.weights_int8_requested {
-            weights_int8_bytes(&cfg)
-        } else {
-            weights_fp32_bytes(&cfg)
-        };
-        // The adapter bank is allocated beside the weights at activation, sized
-        // by the same settings, over the larger of the decode batch and the
-        // prefill chunk (the rows the engine sizes its row buffers for).
+        let weight_bytes = self.weight_bytes(&cfg);
+        // The adapter bank is allocated beside the weights at activation, sized by the same settings,
+        // over the larger of the decode batch and the prefill chunk.
         let bank_bytes = self.adapters.settings().map_or(0, |bank| bank.device_bytes(&cfg, max_batch.max(max_prefill)));
-        // Host-RAM KV offload moves blocks through device staging buffers the
-        // engine allocates when offload is enabled; they come out of the same
-        // budget as the pool.
-        let swap_bytes = if self.kv_offload_bytes > 0 { qwen3::serve::kv_swap_staging_bytes(&cfg, block_size, num_blocks, kv_int8) } else { 0 };
-        residency::log::info(&format!(
-            "{}: estimate weights={:.2}GiB(int8={}) kv={:.2}GiB scratch={:.2}GiB adapter-bank={:.2}GiB swap-staging={:.2}GiB total={:.2}GiB",
-            self.id,
-            weight_bytes as f64 / (1u64 << 30) as f64,
-            self.weights_int8_requested,
-            kv_bytes as f64 / (1u64 << 30) as f64,
-            scratch_bytes as f64 / (1u64 << 30) as f64,
-            bank_bytes as f64 / (1u64 << 30) as f64,
-            swap_bytes as f64 / (1u64 << 30) as f64,
-            (weight_bytes + kv_bytes + scratch_bytes + bank_bytes + swap_bytes) as f64 / (1u64 << 30) as f64,
-        ));
-        MemCost::new(weight_bytes + kv_bytes + scratch_bytes + bank_bytes + swap_bytes, cost.ram)
+        // Host-RAM KV offload moves blocks through device staging buffers the engine allocates when
+        // offload is enabled; they come out of the same budget as the pool.
+        let profile = PoolProfile::new(&cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, qwen3::serve::FusedAttention::default());
+        let profile = if self.kv_offload_bytes > 0 { profile.with_swap_staging(&cfg, block_size, num_blocks, kv_int8) } else { profile };
+        let demands = profile.demands(weight_bytes, bank_bytes);
+        residency::log::info(&format!("{}: estimate {}", self.id, model::memplan::summary(&demands)));
+        MemCost::new(model::memplan::device_total(&demands), cost.ram)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // Coarse stage progress -- NOT per-tensor (the actual weight upload
@@ -1286,6 +1289,15 @@ impl ResidentModel for QwenResident {
                 &self.path,
                 fused,
             )?;
+            // Refuse BEFORE loading when the whole footprint (weights, adapter bank, KV pool, attention
+            // scratch, swap staging) cannot fit the card this server was told it may use, with the
+            // planner's per-category arithmetic. `estimate()` charged the same demands for placement.
+            if let Some(card) = self.card_budget_bytes.filter(|&b| b > 0) {
+                let profile = PoolProfile::new(&checkpoint_cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, fused);
+                let profile = if self.kv_offload_bytes > 0 { profile.with_swap_staging(&checkpoint_cfg, block_size, num_blocks, kv_int8) } else { profile };
+                let bank_bytes = self.adapters.settings().map_or(0, |bank| bank.device_bytes(&checkpoint_cfg, max_batch.max(max_prefill)));
+                profile.plan(self.weight_bytes(&checkpoint_cfg), bank_bytes, card).map_err(|e| format!("qwen: {}: refusing to load, {e}; lower --qwen-ctx, --qwen-max-batch or --qwen-kv-tokens", self.path))?;
+            }
             // `--qwen-weights-int8` -- requested, not asserted: the real
             // capability gate (`caps.numeric.int8_dot`) lives inside
             // `Engine::from_map_with_gpu` itself, which degrades to fp32
@@ -1947,6 +1959,19 @@ mod tests {
     /// a budget that fits a context without it must not be allowed to choose
     /// that context with it, or the first preemption allocates past the budget.
     #[test]
+    fn a_sizing_that_does_not_fit_is_refused_with_the_per_category_arithmetic() {
+        let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
+        let profile = PoolProfile::at_ctx(&cfg, 8192, 16, 512, None, true, true, qwen3::serve::FusedAttention::default());
+        let weights = 1u64 << 30;
+        let need = model::memplan::device_total(&profile.demands(weights, 0));
+        assert!(profile.plan(weights, 0, need).is_ok(), "a budget of exactly the footprint fits");
+        let err = profile.plan(weights, 0, need - 1).unwrap_err().to_string();
+        for needle in ["does not fit", "Weights: weights", "Kv: paged pool", "Activations: attention scratch", "Transfers: kv swap staging"] {
+            assert!(err.contains(needle), "the refusal must show {needle:?}: {err}");
+        }
+    }
+
+    #[test]
     fn auto_sizing_leaves_room_for_the_swap_staging_when_offload_is_on() {
         let mut cfg = qwen3::config::QwenConfig::qwen3_0_6b();
         cfg.max_position_embeddings = 262144;
@@ -1954,7 +1979,7 @@ mod tests {
         let fused = qwen3::serve::FusedAttention::default();
         let tier = AUTO_CTX_TIERS[3];
         // A budget that holds `tier` exactly, with nothing to spare.
-        let budget = PoolProfile::at_ctx(&cfg, tier, max_batch, max_prefill_cap, None, true, false, fused).total(0);
+        let budget = model::memplan::device_total(&PoolProfile::at_ctx(&cfg, tier, max_batch, max_prefill_cap, None, true, false, fused).demands(0, 0));
         assert_eq!(auto_ctx_for_budget(0, budget, &cfg, max_batch, max_prefill_cap, None, true, false), tier);
         let with_offload = auto_ctx_for_budget(0, budget, &cfg, max_batch, max_prefill_cap, None, true, true);
         assert!(with_offload < tier, "offload staging must come out of the budget: chose ctx {with_offload}");
