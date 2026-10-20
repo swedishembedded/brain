@@ -173,6 +173,17 @@ repos:
         files: '(^crates/.*\.rs$|^scripts/gates/(adapter-naming\.|check-adapter-naming\.sh|ratchet\.py))'
         pass_filenames: false
         stages: [pre-commit]
+      - id: placement-accounting
+        name: "Placement charges physical bytes, not fp32 element counts"
+        description: >-
+          the placement-accounting ratchet fails on a new caller of an fp32-element sizing helper and on a stale entry, ignores the helper's own file, comments and tests. Allowlist: scripts/gates/placement-accounting.allow (path, count, reason;
+          shrink-only). See scripts/gates/check-placement-accounting.sh. Also run by
+          `make check/scripts`.
+        entry: bash scripts/gates/check-placement-accounting.sh
+        language: system
+        files: '(^crates/.*\.rs$|^scripts/gates/(placement-accounting\.|check-placement-accounting\.sh|ratchet\.py))'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: seed-literals
         name: "No new literal seeds in production code (every default seed is random)"
         description: >-

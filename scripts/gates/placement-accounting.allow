@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Callers of fp32-element sizing helpers (see check-placement-accounting.sh).
+# path<TAB>count<TAB>reason. Shrink-only: lower or delete the line in the commit
+# that charges physical destination bytes instead. A new match is a design
+# defect, not an allowlist addition.
+crates/catalog/src/resident_llm.rs	3	serving footprint estimate sized from an fp32 weight model; replace with descriptor-physical bytes per tier
+crates/catalog/src/resident_tts.rs	1	serving footprint estimate sized from an fp32 weight model; replace with descriptor-physical bytes per tier
+crates/cli/src/perf_longctx.rs	1	serving footprint estimate sized from an fp32 weight model; replace with descriptor-physical bytes per tier
+crates/qwen3/src/footprint.rs	2	serving footprint estimate sized from an fp32 weight model; replace with descriptor-physical bytes per tier
+crates/qwen3omnimoe/src/generate.rs	1	placement for the thinker charges the decoded fp32 size because int8_thinker_resident expands packed int8 on upload (upload_dequantized); charge packed bytes once that path keeps int8
+crates/qwen3omnimoe/src/int8_thinker_resident.rs	5	placement for the thinker charges the decoded fp32 size because int8_thinker_resident expands packed int8 on upload (upload_dequantized); charge packed bytes once that path keeps int8
+crates/qwen3omnimoe/src/thinker_plan.rs	3	placement for the thinker charges the decoded fp32 size because int8_thinker_resident expands packed int8 on upload (upload_dequantized); charge packed bytes once that path keeps int8
+crates/qwen3tts/src/pipeline.rs	1	serving footprint estimate sized from an fp32 weight model; replace with descriptor-physical bytes per tier
