@@ -345,7 +345,7 @@ impl Engine {
         DecodeCaches {
             gqa_kv: &self.gqa_kv,
             gqa_cap: self.block_size,
-            gqa_base_row: phys * self.block_size,
+            gqa_window: crate::model::KvWindow::Block(phys),
             gdn_state: &slot.state,
             gdn_hist: &slot.hist,
         }
@@ -383,7 +383,7 @@ impl Engine {
         let seqs: Vec<BatchSeq> = coords
             .iter()
             .zip(&slots)
-            .map(|(&(phys, offset), slot)| BatchSeq { phys, pos: offset, gdn_state: &slot.state, gdn_hist: &slot.hist })
+            .map(|(&(phys, offset), slot)| BatchSeq { window: crate::model::KvWindow::Block(phys), slot: phys, pos: offset, gdn_state: &slot.state, gdn_hist: &slot.hist })
             .collect();
         let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs, one_sequence: false, gdn_pool: None };
         adapters::set_rows(std::iter::once(&self.model), &row_slots);

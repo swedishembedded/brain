@@ -401,15 +401,18 @@ pub struct KvAppend {
 }
 
 /// The fused `head_dim <= 256` prefill dispatch's shape: `n` query rows of ONE
-/// sequence against a single-block pool window.
+/// sequence against its block table.
 #[derive(Clone, Copy, Debug)]
 pub struct PrefillShape {
     pub n: u32,
     pub n_heads: u32,
     pub n_kv_heads: u32,
     pub head_dim: u32,
-    /// Rows per physical block (the per-sequence capacity, `max_bt = 1`).
+    /// Rows per physical block.
     pub block_size: u32,
+    /// Entries of each row's block table (`1` when one physical block backs the
+    /// whole sequence).
+    pub max_bt: u32,
 }
 
 /// The fused decode's shape: `batch` sequences, one query row each, against a
@@ -570,7 +573,7 @@ impl KvKernels {
     pub fn flash_prefill_hd256(&self, g: &Gpu, q: &DeviceBuffer, k: &KvPlane, v: &KvPlane, block_ids: &DeviceBuffer, seq_lens: &DeviceBuffer, ctx: &DeviceBuffer, s: PrefillShape) -> Step {
         self.check(k);
         self.check(v);
-        let params = [s.n, s.n_heads, s.n_kv_heads, s.head_dim, s.n_heads / s.n_kv_heads, s.block_size, 1];
+        let params = [s.n, s.n_heads, s.n_kv_heads, s.head_dim, s.n_heads / s.n_kv_heads, s.block_size, s.max_bt];
         let grid = Dispatch::Workgroups(s.n_heads * s.n.div_ceil(64));
         match (&k.scales, &v.scales) {
             (None, None) => {

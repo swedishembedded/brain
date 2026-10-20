@@ -164,7 +164,7 @@ impl MtpDrafter {
         src.validate(&crate::model::shard_param_list(&cfg1, &shard))?;
         let src = GdnFixSource::new(src, cfg1.gdn_head_order());
         let stage = Qwen35::new_shard_dt(cfg1.clone(), 1, 1, &src, shard.clone(), tier);
-        let caches = ShardCaches::new(&stage.gpu, &cfg1, &shard, cap, slots, 0, kv_tier);
+        let caches = ShardCaches::new(&stage.gpu, &cfg1, &shard, cap, slots, 0, kv_tier, 0);
 
         let (w, s) = model::int8::upload_quantized(&mut paramstore::upload::Uploader::new(head_gpu), mg, &fc_name, d, 2 * d).map_err(|e| format!("{MODEL}: {e}"))?;
         let fc = Weight::I8 { w, s, n: d as u32, k: 2 * d as u32 };
@@ -251,7 +251,7 @@ impl MtpDrafter {
         let ehp = self.project(head_gpu, &x);
         let t1 = std::time::Instant::now();
         let seqs = self.caches.batch(slots, positions);
-        let caches = BatchDecodeCaches { gqa_kv: &self.caches.gqa_kv, gqa_cap: self.caches.cap, seqs: &seqs, one_sequence: false, gdn_pool: None };
+        let caches = BatchDecodeCaches { gqa_kv: &self.caches.gqa_kv, gqa_cap: self.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: None };
         let out = self.stage.decode_batch_stage(tokens, &caches, Some(&ehp));
         self.times[0] += t1 - t0;
         self.times[1] += t1.elapsed();

@@ -227,7 +227,7 @@ fn fused_prefill_over_compact_planes_equals_f32_over_their_decoded_values(g: &Gp
     let q = g.storage_init("q", &random(0xFEED, (n * s.n_heads * s.head_dim) as usize));
     let block_ids = u32s(g, &vec![phys; n as usize]);
     let seq_lens = u32s(g, &(0..n).map(|i| start + i + 1).collect::<Vec<_>>());
-    let shape = PrefillShape { n, n_heads: s.n_heads, n_kv_heads: s.n_kv, head_dim: s.head_dim, block_size: s.block_size };
+    let shape = PrefillShape { n, n_heads: s.n_heads, n_kv_heads: s.n_kv, head_dim: s.head_dim, block_size: s.block_size, max_bt: 1 };
     let words = (n * s.n_heads * s.head_dim) as u64;
     let (out_c, out_r) = (g.storage(words), g.storage(words));
     let (compact, reference) = (KvKernels::resolve(g, tier).unwrap(), KvKernels::resolve(g, KvTier::F32).unwrap().portable_prefill());

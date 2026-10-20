@@ -889,24 +889,69 @@ pub fn gqa_chunk_step_kv(
     seq_lens: &DeviceBuffer,
     ctx: &DeviceBuffer,
 ) -> Vec<Step> {
-    let t_max = start + n;
-    assert!(t_max <= cap, "gqa_chunk_step_kv: chunk end {t_max} exceeds the cache capacity {cap}");
     assert!(base_row.is_multiple_of(cap), "gqa_chunk_step_kv: base_row {base_row} is not a whole number of {cap}-row blocks, so no block_ids value can address it");
+    // One physical block backs the whole sequence: a row's block table is the
+    // single entry `block_ids` holds.
+    let paging = ChunkPaging { block_size: cap, max_bt: 1, blocks: block_ids, offsets, tables: block_ids };
+    gqa_chunk_step_kv_paged(g, kv, softmax, n_heads, n_kv_heads, head_dim, start, n, q, k_new, v_new, layer, &paging, seq_lens, ctx)
+}
+
+/// Where a chunk's rows live in the paged pool: each row's physical block and
+/// its offset inside it (the append address), and each row's block table (the
+/// attention's view of the sequence, `[n, max_bt]`).
+pub struct ChunkPaging<'a> {
+    /// Rows per physical block.
+    pub block_size: u32,
+    /// Entries of a row's block table: the sequence's capacity is
+    /// `block_size * max_bt`.
+    pub max_bt: u32,
+    /// `[n]` u32: the physical block row `i`'s K/V is appended to.
+    pub blocks: &'a DeviceBuffer,
+    /// `[n]` u32: row `i`'s offset inside that block (`(start + i) % block_size`).
+    pub offsets: &'a DeviceBuffer,
+    /// `[n, max_bt]` u32: the sequence's physical blocks in logical order (every
+    /// row of a 64-row query tile reads the first row's table).
+    pub tables: &'a DeviceBuffer,
+}
+
+/// [`gqa_chunk_step_kv`] for a sequence whose K/V may span several physical
+/// blocks: the append and the attention address rows through `paging` instead
+/// of a single block. With `max_bt = 1` and every row on the same block it is
+/// the very same dispatches.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_chunk_step_kv_paged(
+    g: &Gpu,
+    kv: &KvKernels,
+    softmax: usize,
+    n_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    start: u32,
+    n: u32,
+    q: &DeviceBuffer,
+    k_new: &DeviceBuffer,
+    v_new: &DeviceBuffer,
+    layer: &KvLayer,
+    paging: &ChunkPaging<'_>,
+    seq_lens: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Vec<Step> {
+    let t_max = start + n;
+    let ChunkPaging { block_size, max_bt, blocks, offsets, tables } = *paging;
+    assert!(t_max <= block_size * max_bt, "gqa_chunk_step_kv: chunk end {t_max} exceeds the cache capacity {}", block_size * max_bt);
     let kv_stride = n_kv_heads * head_dim;
-    let append = KvAppend { batch: n, kv_stride, block_size: cap, head_dim };
-    let mut steps = vec![kv.append(g, &layer.k, k_new, block_ids, offsets, append), kv.append(g, &layer.v, v_new, block_ids, offsets, append)];
+    let append = KvAppend { batch: n, kv_stride, block_size, head_dim };
+    let mut steps = vec![kv.append(g, &layer.k, k_new, blocks, offsets, append), kv.append(g, &layer.v, v_new, blocks, offsets, append)];
     if head_dim == 256 && paged_attention_fused(g, true, false, head_dim, 0) {
-        steps.push(kv.flash_prefill_hd256(g, q, &layer.k, &layer.v, block_ids, seq_lens, ctx, PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size: cap }));
+        steps.push(kv.flash_prefill_hd256(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt }));
         return steps;
     }
-    // `max_bt = 1`: one physical block backs the whole sequence, so a row's
-    // block table is the single entry `block_ids` holds.
-    let shape = PagedDecodeShape { batch: n, n_heads, group: n_heads / n_kv_heads, head_dim, block_size: cap, kv_stride, cap: t_max, max_bt: 1, scale: 1.0 / (head_dim as f32).sqrt() };
+    let shape = PagedDecodeShape { batch: n, n_heads, group: n_heads / n_kv_heads, head_dim, block_size, kv_stride, cap: t_max, max_bt, scale: 1.0 / (head_dim as f32).sqrt() };
     let scores = g.storage(n as u64 * n_heads as u64 * t_max as u64);
     let probs = g.storage(n as u64 * n_heads as u64 * t_max as u64);
-    steps.push(kv.scores(g, q, &layer.k, block_ids, seq_lens, &scores, shape));
+    steps.push(kv.scores(g, q, &layer.k, tables, seq_lens, &scores, shape));
     steps.push(g.step(softmax, &[&scores, seq_lens, &probs], &[n, n_heads, t_max], n * n_heads));
-    steps.push(kv.apply(g, &probs, &layer.v, block_ids, seq_lens, ctx, shape));
+    steps.push(kv.apply(g, &probs, &layer.v, tables, seq_lens, ctx, shape));
     steps
 }
 

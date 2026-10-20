@@ -169,7 +169,7 @@ use serde_json::json;
 
 use crate::adapter_serving as adapters;
 use crate::config::{LayerType, Qwen35Config};
-use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, PooledCaches, PrefillSeg, Qwen35, SpecDecodeStats};
+use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, KvWindow, PooledCaches, PrefillSeg, Qwen35, SpecDecodeStats};
 
 /// Catalog id. Names the real upstream release this resident loads, exactly
 /// (`https://huggingface.co/unsloth/Qwen3.8-27B-GGUF`, the `Q8_0` file) -
@@ -624,6 +624,13 @@ struct ShardCaches {
     full: Vec<bool>,
     slots: u32,
     cap: u32,
+    /// Rows per physical KV block when the sequences' KV is addressed through
+    /// block tables (`slot_tables` non-empty); `cap` when one block holds a
+    /// whole sequence.
+    block_rows: u32,
+    /// `[slot]`: the blocks of that slot's KV window in logical order. Empty when
+    /// one block (the slot itself) holds the whole sequence.
+    slot_tables: Vec<Vec<u32>>,
     /// `[layer]`: where a speculative verify step keeps the recurrent state
     /// between a sequence's rows (see [`speculate`]); empty until speculation
     /// is enabled.
@@ -636,7 +643,7 @@ struct ShardCaches {
 }
 
 impl ShardCaches {
-    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, snapshot_rows: u32, kv_tier: KvTier) -> ShardCaches {
+    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, snapshot_rows: u32, kv_tier: KvTier, kv_block_rows: u32) -> ShardCaches {
         assert!(slots > 0, "{MODEL}: ShardCaches needs at least one slot");
         let kv = cfg.kv_dim() as u64;
         let (state, hist) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
@@ -664,7 +671,14 @@ impl ShardCaches {
         let scatter = gpu.kernel_index("pool_rows_scatter2").expect("pool_rows_scatter2 is in the qwen35 kernel set");
         let gather = gpu.kernel_index("pool_rows_gather2").expect("pool_rows_gather2 is in the qwen35 kernel set");
         let splice = gpu.kernel_index("splice").expect("splice is in the qwen35 kernel set");
-        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, verify_snaps: Vec::new(), scatter, gather, splice };
+        assert!(kv_block_rows == 0 || cap.is_multiple_of(kv_block_rows), "{MODEL}: a KV block of {kv_block_rows} rows does not divide the {cap}-row sequence capacity");
+        // Static paging: slot `s` owns the contiguous blocks `s * per_slot ..` of the pool, so its rows
+        // are where the one-block layout puts them, but every kernel addresses them through a table.
+        let (block_rows, slot_tables) = match cap.checked_div(kv_block_rows) {
+            None => (cap, Vec::new()),
+            Some(per_slot) => (kv_block_rows, (0..slots).map(|s| (0..per_slot).map(|i| s * per_slot + i).collect()).collect()),
+        };
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, block_rows, slot_tables, verify_snaps: Vec::new(), scatter, gather, splice };
         caches.reset(gpu);
         caches
     }
@@ -763,10 +777,23 @@ impl ShardCaches {
         gpu.poll_wait();
     }
 
+    /// Rows per physical KV block: what the attention kernels' `block_size` is.
+    fn kv_block(&self) -> u32 {
+        self.block_rows
+    }
+
+    /// The physical KV blocks of `slot`'s sequence.
+    fn window(&self, slot: u32) -> KvWindow<'_> {
+        match self.slot_tables.get(slot as usize) {
+            Some(table) => KvWindow::Table(table),
+            None => KvWindow::Block(slot),
+        }
+    }
+
     /// The single-sequence view (prefill, and any single-token step): GQA
     /// window of `slot`, GDN state on the working copy.
     fn view(&self, slot: u32) -> DecodeCaches<'_> {
-        DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.cap, gqa_base_row: slot * self.cap, gdn_state: &self.work_state, gdn_hist: &self.work_hist }
+        DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.kv_block(), gqa_window: self.window(slot), gdn_state: &self.work_state, gdn_hist: &self.work_hist }
     }
 
     /// The pools as a multi-sequence prefill round works on them
@@ -774,7 +801,7 @@ impl ShardCaches {
     fn pooled(&self) -> PooledCaches<'_> {
         PooledCaches {
             gqa_kv: &self.gqa_kv,
-            gqa_cap: self.cap,
+            gqa_cap: self.kv_block(),
             gdn_state: &self.pool_state,
             gdn_hist: &self.pool_hist,
             work_state: &self.work_state,
@@ -790,7 +817,7 @@ impl ShardCaches {
     /// between steps without renumbering the ones that stay. The GDN state is
     /// the pool ([`Self::gdn_pool`]), found by slot.
     fn batch(&self, slots: &[u32], positions: &[u32]) -> Vec<BatchSeq<'_>> {
-        slots.iter().zip(positions).map(|(&slot, &pos)| BatchSeq { phys: slot, pos, gdn_state: &[], gdn_hist: &[] }).collect()
+        slots.iter().zip(positions).map(|(&slot, &pos)| BatchSeq { window: self.window(slot), slot, pos, gdn_state: &[], gdn_hist: &[] }).collect()
     }
 
     fn gdn_pool(&self) -> GdnPoolStore<'_> {
@@ -1321,7 +1348,7 @@ impl Qwen35GgufInstance {
         let mut carry = self.embed_rows(tokens)?;
         for s in &self.shards {
             let seqs = s.caches.batch(slots, positions);
-            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.cap, seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()) };
+            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()) };
             carry = s.qwen35.decode_batch_stage(tokens, &caches, Some(&carry));
         }
         Ok(carry)
@@ -1527,7 +1554,7 @@ impl Qwen35GgufInstance {
         let mut carry = self.embed_rows(&tokens)?;
         for s in &self.shards {
             let segs: Vec<PrefillSeg<'_>> =
-                jobs.iter().map(|j| PrefillSeg { tokens: &j.prompt[j.start..j.end], pos_start: j.start as u32, gqa_base_row: j.slot * self.cap, slot: j.slot }).collect();
+                jobs.iter().map(|j| PrefillSeg { tokens: &j.prompt[j.start..j.end], pos_start: j.start as u32, gqa_window: s.caches.window(j.slot), slot: j.slot }).collect();
             carry = s.qwen35.prefill_multi_stage(&segs, &s.caches.pooled(), &carry);
         }
         let mut row0 = 0usize;
@@ -2512,6 +2539,9 @@ pub struct Qwen35GgufResident {
     /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`]. Charged
     /// into [`layer_cost`] at the bytes that tier really occupies.
     kv_tier: KvTier,
+    /// Rows per KV block when the attention addresses each sequence's KV through a
+    /// block table ([`Self::with_kv_block_rows`]); 0 keeps one block per sequence.
+    kv_block_rows: u32,
     /// The id this resident is SERVED under (`Manifest::model`,
     /// `InstanceKey::model`) - set by the caller that resolved the
     /// checkpoint ([`Self::with_model_id`], what
@@ -2534,7 +2564,7 @@ pub struct Qwen35GgufResident {
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), prefill: PrefillPolicy::default(), plan: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), prefill: PrefillPolicy::default(), plan: OnceLock::new() }
     }
 
     /// How the serving engine spends prefill between decode steps - the slice one
@@ -2611,6 +2641,17 @@ impl Qwen35GgufResident {
     /// `estimate_multi`/`activate_multi` call.
     pub fn with_prefix_slots(mut self, n: u32) -> Qwen35GgufResident {
         self.prefix_slots = n;
+        self
+    }
+
+    /// Address every sequence's KV through a block table of `rows`-row blocks
+    /// instead of one block per sequence (0, the default). Each slot still owns
+    /// the contiguous blocks its one-block window was, so the memory and the
+    /// arithmetic are those of the default layout; what changes is that the
+    /// attention reads and writes through the table, the form block sharing and
+    /// on-demand block allocation need. `rows` must divide the capacity.
+    pub fn with_kv_block_rows(mut self, rows: u32) -> Qwen35GgufResident {
+        self.kv_block_rows = rows;
         self
     }
 
@@ -2924,7 +2965,7 @@ impl Qwen35GgufResident {
             // below, at `self.cap` - the same split `crate::serve::Engine`
             // makes for the same reason.
             let qwen35 = Qwen35::new_shard_dt(cfg.clone(), 1, 1, &src, shard.clone(), &self.tier);
-            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, self.max_batch + self.prefix_slots, self.prefix_slots, self.kv_tier);
+            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, self.max_batch + self.prefix_slots, self.prefix_slots, self.kv_tier, self.kv_block_rows);
             shards.push(DeviceShard { qwen35, caches });
         }
 

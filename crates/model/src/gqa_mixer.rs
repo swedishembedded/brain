@@ -416,6 +416,34 @@ pub fn gqa_mixer_chunk_kv_fwd(
     gate_ctx(g, ids, &ctx, &prep.q_gate, n, qd).1
 }
 
+/// [`gqa_mixer_chunk_kv_fwd`] for a sequence whose K/V may span several
+/// physical blocks (see [`crate::block::gqa_chunk_step_kv_paged`]).
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_mixer_chunk_kv_fwd_paged(
+    g: &Gpu,
+    ids: &GqaMixerIds,
+    kv: &KvKernels,
+    softmax: usize,
+    shape: &GqaMixerShape,
+    w: &GqaMixerWeights,
+    q_full: &DeviceBuffer,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    n: u32,
+    start: u32,
+    layer: &KvLayer,
+    paging: &crate::block::ChunkPaging<'_>,
+    seq_lens: &DeviceBuffer,
+) -> DeviceBuffer {
+    let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
+    let qd = shape.qd();
+    let prep = qkv_prepare(g, ids, shape, w, q_full, k, n);
+
+    let ctx = g.storage((n * qd) as u64);
+    g.submit(&[], &crate::block::gqa_chunk_step_kv_paged(g, kv, softmax, nh, nkv, hd, start, n, &prep.q_normed, &prep.k_normed, v, layer, paging, seq_lens, &ctx));
+    gate_ctx(g, ids, &ctx, &prep.q_gate, n, qd).1
+}
+
 /// [`gqa_mixer_decode_batched_fwd`] over a [`KvLayer`] in any [`KvTier`] - the
 /// attention run by [`crate::block::gqa_decode_batched_step_kv`].
 #[allow(clippy::too_many_arguments)]
