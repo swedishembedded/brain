@@ -1,100 +1,169 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+// Swedish Embedded AB implements memory-bounded low-precision training for its
+// clients. If your team needs expertise in training models larger than your
+// accelerator memory then you can procure our services by sending an email to
+// info@swedishembedded.com.
 
-//! Off-device AdamW: the optimiser state (`m`/`v` + a master copy of the
-//! weights) lives in **system RAM**, and the update runs on the CPU. Only the
-//! weight and gradient stay on the GPU — where the forward/backward need them.
+//! Off-device AdamW: the optimiser state (`m`/`v`) lives in **host memory or
+//! on disk**, and the update runs on the CPU. Only the weight and gradient stay
+//! on the device, where the forward/backward need them.
 //!
-//! Why: full fp32 AdamW keeps 4 buffers per parameter on the GPU
-//! (weight+grad+m+v = 4×model). The moments are touched **once per step**, never
-//! during forward/backward, so they don't need HBM bandwidth. Moving them to the
-//! box's 177 GB of RAM cuts GPU optimiser state to 2×model (weight+grad) and lets
-//! models far larger than 24 GB of VRAM train — the classic ZeRO-Offload idea.
+//! This is the streamed optimiser (`streamed`) behind the historical
+//! `OffloadAdam` interface. The state format is the parameter's own
+//! ([`ParamStore::set_precision`]): fp32 by default, blockwise int8 or bf16
+//! where the policy says so, so the host state costs 8, 2 or 4 bytes per
+//! element instead of the old fp32 master + m + v triple (12). The device
+//! weight is the value; no second host copy of it is kept.
 //!
-//! Per step: read each grad off the GPU, run the exact AdamW update (same math as
-//! `adamw.wgsl`) over host-resident `m`/`v`/master-weights with rayon across the
-//! 48 cores, and write the updated weight back. The 0.6B round-trip is ~4.8 GB
-//! over PCIe plus a memory-bound CPU pass - cheap next to a training step,
-//! and it removes the VRAM pressure that was throttling full fine-tuning.
+//! Per step each tensor is read off the device once (one tensor at a time, so
+//! the host staging is the largest tensor, not the model), updated in tiles,
+//! and written back once. A ranged device read in `gpu-core` would reduce the
+//! staging to a tile.
+
+use std::io;
+use std::path::Path;
 
 use gpu_core::Gpu;
+use paramstore::precision::{MasterPolicy, ParamPrecision, ValueDtype};
 use paramstore::ParamStore;
-use backend_cpu::par;
 
-/// Host-resident AdamW state for the offloaded parameters.
-/// One offloaded parameter's host-side state:
-/// `(name, master fp32 weights, Adam m, Adam v)`.
-pub type OffloadSlot = (String, Vec<f32>, Vec<f32>, Vec<f32>);
+use crate::codec::Rounding;
+use crate::rule::Rule;
+use crate::storage::{BlockStateStorage, FileBacking, MemBacking, OptimizerStateStorage};
+use crate::streamed::{state_layout, ParamTiles, StreamedOptimizer, TensorSpec};
 
-pub struct OffloadAdam {
-    /// Per param: (name, master weights, m, v). Order matches `ps.offload`.
-    state: Vec<OffloadSlot>,
+/// Tile size of the host update, in elements.
+const OFFLOAD_TILE: usize = 1 << 16;
+
+/// The device-resident values and gradients of the offloaded tensors, as tiles.
+/// Each tensor is read once per pass and cached while its tiles are processed;
+/// written values are flushed to the device when the tensor's last tile lands.
+struct DeviceTiles<'a> {
+    gpu: &'a Gpu,
+    ps: &'a ParamStore,
+    names: Vec<(String, usize)>,
+    value: Option<(usize, Vec<f32>)>,
+    grad: Option<(usize, Vec<f32>)>,
+}
+
+impl DeviceTiles<'_> {
+    fn load_value(&mut self, ti: usize) -> &mut Vec<f32> {
+        if self.value.as_ref().map(|v| v.0) != Some(ti) {
+            let (name, numel) = &self.names[ti];
+            self.value = Some((ti, self.gpu.read(self.ps.w(name), *numel)));
+        }
+        &mut self.value.as_mut().unwrap().1
+    }
+}
+
+impl ParamTiles for DeviceTiles<'_> {
+    fn read_value(&mut self, ti: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
+        out.copy_from_slice(&self.load_value(ti)[start..start + out.len()]);
+        Ok(())
+    }
+
+    fn write_value(&mut self, ti: usize, start: usize, vals: &[f32], _rnd: Rounding) -> io::Result<()> {
+        let n = vals.len();
+        self.load_value(ti)[start..start + n].copy_from_slice(vals);
+        let (name, numel) = &self.names[ti];
+        if start + n == *numel {
+            let w = &self.value.as_ref().unwrap().1;
+            self.gpu.write(self.ps.w(name), bytemuck::cast_slice(w));
+        }
+        Ok(())
+    }
+
+    fn read_grad(&mut self, ti: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
+        if self.grad.as_ref().map(|g| g.0) != Some(ti) {
+            let (name, numel) = &self.names[ti];
+            self.grad = Some((ti, self.gpu.read(self.ps.g(name), *numel)));
+        }
+        out.copy_from_slice(&self.grad.as_ref().unwrap().1[start..start + out.len()]);
+        Ok(())
+    }
+}
+
+/// Host-resident AdamW over the store's [`Role::Offload`](paramstore::Role)
+/// parameters, with state in `S` ([`MemBacking`] by default, or a file via
+/// [`OffloadAdam::on_disk`]).
+pub struct OffloadAdam<S: OptimizerStateStorage = BlockStateStorage<MemBacking>> {
+    opt: StreamedOptimizer<S>,
+}
+
+fn specs_of(ps: &ParamStore) -> Vec<TensorSpec> {
+    // LoRA (the only source of a non-1.0 lr_mult today) and Role::Offload
+    // never coexist in this tree (a LoRA-training ParamStore assigns every
+    // non-adapter tensor Role::Frozen, never Role::Offload) - guard the
+    // untested combination loudly rather than silently applying the GPU
+    // path's per-tensor lr but not this host path's, if that ever changes.
+    ps.offload
+        .iter()
+        .map(|(name, numel)| {
+            assert_eq!(ps.lr_mult_of(name), 1.0, "OffloadAdam: {name} has a non-1.0 lr_mult, which this host path does not yet apply");
+            let precision: ParamPrecision = ps.precision_of(name);
+            assert!(
+                precision.value == ValueDtype::F32 && precision.master == MasterPolicy::None,
+                "OffloadAdam: {name}: the device weight is the f32 value; a master copy or other value dtype is not applicable ({precision:?})"
+            );
+            TensorSpec { name: name.clone(), numel: *numel, precision }
+        })
+        .collect()
+}
+
+fn default_rule() -> Rule {
+    Rule::AdamW { adam: crate::Adam::default(), wd: 0.0 }
+}
+
+fn random_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new().build_hasher().finish()
 }
 
 impl OffloadAdam {
-    /// Initialise from the store's current (GPU-resident) offloaded weights.
-    pub fn new(gpu: &Gpu, ps: &ParamStore) -> OffloadAdam {
-        // LoRA (the only source of a non-1.0 lr_mult today) and Role::Offload
-        // never coexist in this tree (a LoRA-training ParamStore assigns
-        // every non-adapter tensor Role::Frozen, never Role::Offload) - guard
-        // the untested combination loudly rather than silently applying the
-        // GPU path's per-tensor lr but not this host path's, if that ever
-        // changes.
-        for (name, _) in &ps.offload {
-            assert_eq!(ps.lr_mult_of(name), 1.0, "OffloadAdam: {name} has a non-1.0 lr_mult, which this host path does not yet apply");
-        }
-        let state = ps
-            .offload
-            .iter()
-            .map(|(name, numel)| {
-                let w = gpu.read(ps.w(name), *numel); // master copy in RAM
-                (name.clone(), w, vec![0.0f32; *numel], vec![0.0f32; *numel])
-            })
-            .collect();
-        OffloadAdam { state }
+    /// Optimiser with its state in host memory.
+    pub fn new(_gpu: &Gpu, ps: &ParamStore) -> OffloadAdam {
+        let specs = specs_of(ps);
+        let layout = state_layout(&default_rule(), &specs);
+        let st = BlockStateStorage::new(layout.clone(), MemBacking::zeroed(layout.total_bytes()), OFFLOAD_TILE)
+            .expect("state layout and backing agree");
+        OffloadAdam { opt: StreamedOptimizer::new(default_rule(), specs, st, random_seed(), OFFLOAD_TILE).expect("valid specs") }
     }
+}
 
-    /// One AdamW step over the offloaded params. Every gradient is multiplied
-    /// by [`crate::grad_multiplier`] (the `extra_scale` average and the
-    /// global clip over exactly these params). Matches `adamw.wgsl`
-    /// element-wise.
+impl OffloadAdam<BlockStateStorage<FileBacking>> {
+    /// Optimiser with its state streamed from the file `path` (created; fails
+    /// if it exists): host memory is the staging workspace, not the state.
+    pub fn on_disk(_gpu: &Gpu, ps: &ParamStore, path: &Path) -> io::Result<Self> {
+        let specs = specs_of(ps);
+        let layout = state_layout(&default_rule(), &specs);
+        let st = BlockStateStorage::new(layout.clone(), FileBacking::create(path, layout.total_bytes())?, OFFLOAD_TILE)?;
+        Ok(OffloadAdam { opt: StreamedOptimizer::new(default_rule(), specs, st, random_seed(), OFFLOAD_TILE)? })
+    }
+}
+
+impl<S: OptimizerStateStorage> OffloadAdam<S> {
+    /// One AdamW step over the offloaded params at 1-based step `t`. Every
+    /// gradient is multiplied by [`crate::grad_multiplier`] (the `extra_scale`
+    /// average and the global clip over exactly these params). Matches
+    /// `adamw.wgsl` element-wise.
     #[allow(clippy::too_many_arguments)]
-    pub fn step(
-        &mut self,
-        gpu: &Gpu,
-        ps: &ParamStore,
-        t: u32,
-        lr: f32,
-        wd: f32,
-        adam: crate::Adam,
-        clip: Option<f32>,
-        extra_scale: f32,
-    ) {
-        let bc = adam.bias_corrections(t);
-
-        // Pull every grad to the host once (the only device->host traffic).
-        let grads: Vec<Vec<f32>> =
-            self.state.iter().map(|(name, w, _, _)| gpu.read(ps.g(name), w.len())).collect();
-
-        // Global grad-norm clip over the offloaded set, as the device path's.
-        let scale = crate::grad_multiplier(if clip.is_some() { par::sum_sq_f64(&grads) } else { 0.0 }, clip, extra_scale);
-
-        // Element-wise AdamW per param, parallel across the 48 cores.
-        par::zip_each(&mut self.state, &grads, |(_, w, m, v), g| {
-                for i in 0..w.len() {
-                    adam.update(bc, lr, wd, g[i] * scale, &mut w[i], &mut m[i], &mut v[i]);
-                }
-            });
-
-        // Push updated weights back to the GPU (the only host->device traffic).
-        for (name, w, _, _) in &self.state {
-            gpu.write(ps.w(name), bytemuck::cast_slice(w));
-        }
+    pub fn step(&mut self, gpu: &Gpu, ps: &ParamStore, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>, extra_scale: f32) {
+        self.opt.set_rule(Rule::AdamW { adam, wd });
+        let seed = self.opt.seed();
+        self.opt.set_position(t - 1, seed);
+        let names = self.opt.specs().iter().map(|s| (s.name.clone(), s.numel)).collect();
+        let mut tiles = DeviceTiles { gpu, ps, names, value: None, grad: None };
+        self.opt.step(&mut tiles, lr, clip, extra_scale).unwrap_or_else(|e| panic!("OffloadAdam step: {e}"));
     }
 
-    /// The current master weights (host copy), for saving a checkpoint without a
-    /// device read-back.
-    pub fn master(&self) -> impl Iterator<Item = (&str, &[f32])> {
-        self.state.iter().map(|(n, w, _, _)| (n.as_str(), w.as_slice()))
+    /// The streamed optimiser, for checkpointing its state and position.
+    pub fn streamed(&mut self) -> &mut StreamedOptimizer<S> {
+        &mut self.opt
+    }
+
+    /// Host bytes held by the optimiser state and staging.
+    pub fn host_bytes(&self) -> (u64, usize) {
+        (self.opt.state_physical_bytes(), self.opt.staging_bytes())
     }
 }

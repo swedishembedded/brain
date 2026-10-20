@@ -168,6 +168,11 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
         5 * self.tile * 4 + self.state.staging_bytes()
     }
 
+    /// Physical bytes of the optimiser state (scales included).
+    pub fn state_physical_bytes(&self) -> u64 {
+        self.state.physical_bytes()
+    }
+
     pub fn step_count(&self) -> u32 {
         self.step
     }
@@ -186,6 +191,14 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
 
     pub fn state_mut(&mut self) -> &mut S {
         &mut self.state
+    }
+
+    /// Change the update rule between steps (e.g. a schedule that moves
+    /// `wd`). The new rule must use the same state slots, since the state
+    /// layout was fixed at construction.
+    pub fn set_rule(&mut self, rule: Rule) {
+        assert_eq!(rule.slots(), self.rule.slots(), "set_rule: {} cannot replace {}: different state slots", rule.name(), self.rule.name());
+        self.rule = rule;
     }
 
     /// Restore the position in the run (checkpoint resume).

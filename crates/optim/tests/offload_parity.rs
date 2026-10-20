@@ -125,3 +125,52 @@ fn scale_and_clip_follow_torch_on_device_and_host() {
         assert!(worst < 1e-5, "{what} AdamW is off torch's scaled, clipped step by {worst}");
     }
 }
+
+/// The offloaded state can live on disk and in 8-bit blocks: the on-disk fp32
+/// optimiser is bit-identical to the in-memory one, and an int8-state policy
+/// shrinks the host state to about a quarter of the fp32 `m`+`v` while the
+/// weights stay close.
+#[test]
+fn offload_state_streams_from_disk_and_shrinks_with_int8_state() {
+    use paramstore::precision::{ParamPrecision, StateFormat};
+    let n = 4096usize;
+    let w0: Vec<f32> = (0..n).map(|i| ((i * 7 % 101) as f32 / 101.0) - 0.5).collect();
+    let init: HashMap<String, Vec<f32>> = [("w".to_string(), w0)].into_iter().collect();
+    let gpu = Gpu::new_cpu(&kernels());
+    let roles = vec![("w".to_string(), n, Role::Offload)];
+    let adam = optim::Adam::default();
+
+    let dir = std::env::temp_dir().join(format!("brain-offload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut stores = Vec::new();
+    for _ in 0..3 {
+        stores.push(ParamStore::new_with_roles(&gpu, roles.clone(), &init));
+    }
+    stores[2].set_precision("w", ParamPrecision { state: StateFormat::Int8Block { block: 64 }, stochastic_rounding: true, ..ParamPrecision::FP32 });
+    let mut mem = OffloadAdam::new(&gpu, &stores[0]);
+    let mut disk = OffloadAdam::on_disk(&gpu, &stores[1], &dir.join("state")).unwrap();
+    let mut q8 = OffloadAdam::new(&gpu, &stores[2]);
+
+    for t in 1..=5u32 {
+        let g: Vec<f32> = (0..n).map(|i| (((i as u32 + t) % 13) as f32 / 13.0 - 0.5) * 0.1).collect();
+        for ps in &stores {
+            gpu.write(ps.g("w"), bytemuck::cast_slice(&g));
+        }
+        mem.step(&gpu, &stores[0], t, 1e-3, 0.01, adam, Some(1.0), 1.0);
+        disk.step(&gpu, &stores[1], t, 1e-3, 0.01, adam, Some(1.0), 1.0);
+        q8.step(&gpu, &stores[2], t, 1e-3, 0.01, adam, Some(1.0), 1.0);
+    }
+    let (wm, wd_, wq) = (gpu.read(stores[0].w("w"), n), gpu.read(stores[1].w("w"), n), gpu.read(stores[2].w("w"), n));
+    assert_eq!(wm, wd_, "on-disk state must give the same weights as in-memory state");
+    let scale = wm.iter().fold(1e-6f32, |m, v| m.max(v.abs()));
+    let diff = wm.iter().zip(&wq).fold(0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
+    assert!(diff < 1e-2, "int8-state weights drift {diff}");
+    let (fp32_state, _) = mem.host_bytes();
+    let (int8_state, _) = q8.host_bytes();
+    eprintln!("host state: fp32 {fp32_state} B, int8 {int8_state} B");
+    assert_eq!(fp32_state, 8 * n as u64);
+    assert!(int8_state * 3 < fp32_state, "int8 state {int8_state} vs fp32 {fp32_state}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
