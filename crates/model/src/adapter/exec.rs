@@ -30,7 +30,7 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use paramstore::ParamStore;
 
 use super::device::{lora_names, LoraCfg};
-use crate::block::{self, pick_gemm};
+use crate::block;
 
 /// Read access to the adapter tensors of a model: weights, and gradients where
 /// a tensor trains. Implemented for [`ParamStore`]; a streamed trainer that
@@ -56,16 +56,17 @@ pub enum DeviceKind {
     Lora,
 }
 
-/// Kernel indices the runtime dispatches, resolved by name once. The `_reg`
-/// and gemv entries are optional: a model that did not register them keeps the
-/// reference kernels.
+/// Kernel indices the runtime dispatches, resolved by name once. The gemv entry
+/// is optional: a model that did not register it keeps the reference kernel.
+/// The weight and input gradients use the reference kernels: their contraction
+/// dimension is the adapter's small rank, where a register-tiled kernel has
+/// nothing to tile, and its shape contract is not one a rank-3 factor meets (a
+/// regression on a 4-bit base was the evidence).
 struct Kernels {
     matmul: usize,
     gemv: Option<usize>,
     dx: usize,
-    dx_reg: Option<usize>,
     dw: usize,
-    dw_reg: Option<usize>,
     axpy: usize,
     grad_scale: usize,
 }
@@ -77,9 +78,7 @@ impl Kernels {
             matmul: need("matmul"),
             gemv: gpu.kernel_index("matmul_gemv"),
             dx: need("matmul_dx"),
-            dx_reg: gpu.kernel_index("matmul_dx_reg"),
             dw: need("matmul_dw"),
-            dw_reg: gpu.kernel_index("matmul_dw_reg"),
             axpy: need("axpy"),
             grad_scale: need("grad_scale"),
         }
@@ -210,22 +209,16 @@ impl AdapterRuntime {
             s.append(&mut lib);
             return;
         }
-        let dw = |rows: u32, cols: u32| pick_gemm(rows as usize, cols as usize, self.k.dw, self.k.dw_reg.unwrap_or(self.k.dw), false);
-        let dxk = |rows: u32, cols: u32| pick_gemm(rows as usize, cols as usize, self.k.dx, self.k.dx_reg.unwrap_or(self.k.dx), false);
         // mid = scale * x A^t -> gB += d_out^t mid
         s.push(g.step(self.k.matmul, &[x, a, &self.mid], &[m, k, r], m * r));
         s.push(g.step(self.k.grad_scale, &[&self.mid], &[m * r, f(scale)], m * r));
-        let (kern, grid) = dw(nout, r);
-        s.push(g.dispatch(kern, &[d_out, &self.mid, gb], &[m, r, nout], grid));
+        s.push(g.step(self.k.dw, &[d_out, &self.mid, gb], &[m, r, nout], nout * r));
         // dmid = scale * d_out B -> gA += dmid^t x ; dx += dmid A
-        let (kern, grid) = dxk(m, r);
-        s.push(g.dispatch(kern, &[d_out, b, &self.dmid], &[m, r, nout, 0], grid));
+        s.push(g.step(self.k.dx, &[d_out, b, &self.dmid], &[m, r, nout, 0], m * r));
         s.push(g.step(self.k.grad_scale, &[&self.dmid], &[m * r, f(scale)], m * r));
         if let Some(ga) = ga {
-            let (kern, grid) = dw(r, k);
-            s.push(g.dispatch(kern, &[&self.dmid, x, ga], &[m, k, r], grid));
+            s.push(g.step(self.k.dw, &[&self.dmid, x, ga], &[m, k, r], r * k));
         }
-        let (kern, grid) = dxk(m, k);
-        s.push(g.dispatch(kern, &[&self.dmid, a, dx], &[m, k, r, 1], grid));
+        s.push(g.step(self.k.dx, &[&self.dmid, a, dx], &[m, k, r, 1], m * k));
     }
 }
