@@ -988,30 +988,58 @@ impl StreamTrainer {
     /// builds each layer via [`build_layer_f32`] against an already-resident
     /// host weight map - the tiny-scale equivalence gate's own loader (no
     /// disk I/O).
-    pub fn synthetic_loader<'a>(&'a self, cfg: &'a Qwen35Config, init: &'a HashMap<String, Vec<f32>>) -> impl Fn(usize) -> OwnedStreamedLayer + 'a {
+    pub fn synthetic_loader<'a>(&'a self, cfg: &'a Qwen35Config, init: &'a HashMap<String, Vec<f32>>) -> impl Fn(usize) -> OwnedStreamedLayer + Sync + 'a {
         self.synthetic_loader_at(cfg, init, Dtype::F32)
     }
 
     /// [`Self::synthetic_loader`] with every matrix of the layer resident at `tier` (quantized from the
     /// host map): the trainer then runs forward and backward through that tier packed.
-    pub fn synthetic_loader_at<'a>(&'a self, cfg: &'a Qwen35Config, init: &'a HashMap<String, Vec<f32>>, tier: Dtype) -> impl Fn(usize) -> OwnedStreamedLayer + 'a {
-        move |l| build_layer_host(&self.ops, &self.gpu, cfg, l, init, tier)
+    pub fn synthetic_loader_at<'a>(&'a self, cfg: &'a Qwen35Config, init: &'a HashMap<String, Vec<f32>>, tier: Dtype) -> impl Fn(usize) -> OwnedStreamedLayer + Sync + 'a {
+        let (ops, gpu) = (&self.ops, &self.gpu);
+        move |l| build_layer_host(ops, gpu, cfg, l, init, tier)
     }
 
     /// The loader of a real checkpoint directory: every layer's matrices go to the device in the encoding the
     /// checkpoint stores them in (FP8 stays FP8 with its block scales), one tile of host staging at a time.
     /// The FP8 block size is the checkpoint's own `weight_block_size`.
-    pub fn real_loader<'a>(&'a self, cfg: &'a Qwen35Config, dir: &'a Path) -> Result<impl Fn(usize) -> OwnedStreamedLayer + 'a, String> {
+    pub fn real_loader<'a>(&'a self, cfg: &'a Qwen35Config, dir: &'a Path) -> Result<impl Fn(usize) -> OwnedStreamedLayer + Sync + 'a, String> {
         let base = crate::fp8_source::PackedBase::open(dir, cfg, crate::fp8_source::hf_fp8_block_size(dir)?)?;
-        Ok(move |l| load_layer_packed(&self.ops, &self.gpu, &base, cfg, l))
+        let (ops, gpu) = (&self.ops, &self.gpu);
+        Ok(move |l| load_layer_packed(ops, gpu, &base, cfg, l))
     }
 
-    pub fn step<F: Fn(usize) -> OwnedStreamedLayer>(&self, cfg: &Qwen35Config, loader: F, x0: &[f32], targets: &[u32], lr: f32, adam_t: u32) -> f32 {
+    pub fn step<F: Fn(usize) -> OwnedStreamedLayer + Sync>(&self, cfg: &Qwen35Config, loader: F, x0: &[f32], targets: &[u32], lr: f32, adam_t: u32) -> f32 {
         self.lora.zero_grads(&self.gpu);
         let loss = self.forward_backward(cfg, loader, x0, targets);
         self.lora.adamw_step(&self.gpu, adam_t, lr);
         self.gpu.poll_wait();
         loss
+    }
+
+    /// Run `f(layer, weights)` over `order`, loading each layer on a producer thread while the previous one
+    /// computes: the packed read and device upload of layer `i + 1` overlap layer `i`'s kernels. At most
+    /// `window_budget` layers are resident at once (the one `f` holds, the ones queued, the one being
+    /// loaded); the queue is bounded, so a slow consumer stalls the loader instead of growing memory.
+    /// The device is synchronised before a finished layer is dropped, so no queued kernel still reads it.
+    fn for_each_streamed<L: Fn(usize) -> OwnedStreamedLayer + Sync>(&self, order: Vec<usize>, loader: &L, mut f: impl FnMut(usize, &OwnedStreamedLayer)) {
+        let queued = self.window_budget.saturating_sub(2) as usize;
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, OwnedStreamedLayer)>(queued);
+            let ids = order.clone();
+            scope.spawn(move || {
+                for l in ids {
+                    if tx.send((l, loader(l))).is_err() {
+                        return;
+                    }
+                }
+            });
+            for expected in order {
+                let (l, layer) = rx.recv().expect("stream_train: the layer loader stopped early");
+                debug_assert_eq!(l, expected);
+                f(l, &layer);
+                self.gpu.poll_wait();
+            }
+        });
     }
 
     /// Forward + backward only (no gradient zeroing, no optimizer step) -
@@ -1029,7 +1057,7 @@ impl StreamTrainer {
     /// cross-entropy loss. A caller MUST call [`LoraStore::zero_grads`]
     /// itself before this if it wants a fresh (not accumulated-on-top-of-
     /// the-previous-call's) gradient - [`Self::step`] does this for you.
-    pub fn forward_backward<F: Fn(usize) -> OwnedStreamedLayer>(&self, cfg: &Qwen35Config, loader: F, x0: &[f32], targets: &[u32]) -> f32 {
+    pub fn forward_backward<F: Fn(usize) -> OwnedStreamedLayer + Sync>(&self, cfg: &Qwen35Config, loader: F, x0: &[f32], targets: &[u32]) -> f32 {
         let g = &self.gpu;
         let n = self.n;
         let d = cfg.d_model;
@@ -1044,34 +1072,14 @@ impl StreamTrainer {
         xres_cache.push(x0.to_vec());
         let mut xres_buf = g.storage_init("stream_train.x0", x0);
 
-        {
-            let sched = weightset::Schedule::cyclic(n_layers, 1);
-            let mut ws = weightset::WeightSet::build(n_layers, self.window_budget, sched, Box::new(weightset::CyclicScan { lookahead: 1 }))
-                .unwrap_or_else(|e| panic!("stream_train: WeightSet::build (forward): {e}"));
-            let mut slots: Vec<Option<OwnedStreamedLayer>> = (0..self.window_budget).map(|_| None).collect();
-            for (i, slot) in ws.slot_contents().iter().enumerate() {
-                if let Some(gid) = slot {
-                    slots[i] = Some(loader(gid.0 as usize));
-                }
-            }
-            for cursor in 0..n_layers as usize {
-                let (slot_id, miss) = ws.advance(cursor);
-                let idx = slot_id.0 as usize;
-                if miss {
-                    slots[idx] = None;
-                    g.read(&xres_buf, 1);
-                    slots[idx] = Some(loader(cursor));
-                }
-                let layer = slots[idx].as_ref().expect("stream_train: WeightSet says this slot is resident");
-                let out = match layer {
-                    OwnedStreamedLayer::Linear(l) => gdn_layer_forward_lora(g, &self.ops, &self.ids, cfg, &self.lora, cursor, l, &xres_buf, n, &self.ones_khd).0,
-                    OwnedStreamedLayer::Full(l) => gqa_layer_forward_lora(g, &self.ops, &self.ids, cfg, &self.lora, cursor, l, &xres_buf, n, &self.cos, &self.sin).0,
-                };
-                let out_host = g.read(&out, (n * d) as usize);
-                xres_cache.push(out_host);
-                xres_buf = out;
-            }
-        }
+        self.for_each_streamed((0..n_layers as usize).collect(), &loader, |cursor, layer| {
+            let out = match layer {
+                OwnedStreamedLayer::Linear(l) => gdn_layer_forward_lora(g, &self.ops, &self.ids, cfg, &self.lora, cursor, l, &xres_buf, n, &self.ones_khd).0,
+                OwnedStreamedLayer::Full(l) => gqa_layer_forward_lora(g, &self.ops, &self.ids, cfg, &self.lora, cursor, l, &xres_buf, n, &self.cos, &self.sin).0,
+            };
+            xres_cache.push(g.read(&out, (n * d) as usize));
+            xres_buf = out;
+        });
 
         // ---- head forward + loss (resident, no re-streaming - read/
         // differentiated once per step, not once per layer). ----
@@ -1093,35 +1101,14 @@ impl StreamTrainer {
 
         // ---- BACKWARD: re-stream all layers in reverse, recomputing each
         // one's own forward internals from the cached residual. ----
-        {
-            let rev_order: Vec<weightset::GroupId> = (0..n_layers).rev().map(weightset::GroupId).collect();
-            let sched = weightset::Schedule { order: rev_order.clone() };
-            let mut ws = weightset::WeightSet::build(n_layers, self.window_budget, sched, Box::new(weightset::CyclicScan { lookahead: 1 }))
-                .unwrap_or_else(|e| panic!("stream_train: WeightSet::build (backward): {e}"));
-            let mut slots: Vec<Option<OwnedStreamedLayer>> = (0..self.window_budget).map(|_| None).collect();
-            for (i, slot) in ws.slot_contents().iter().enumerate() {
-                if let Some(gid) = slot {
-                    slots[i] = Some(loader(gid.0 as usize));
-                }
-            }
-            for (cursor, gid) in rev_order.iter().enumerate() {
-                let layer_idx = gid.0 as usize;
-                let (slot_id, miss) = ws.advance(cursor);
-                let idx = slot_id.0 as usize;
-                if miss {
-                    slots[idx] = None;
-                    g.read(&d_res_next, 1);
-                    slots[idx] = Some(loader(layer_idx));
-                }
-                let layer = slots[idx].as_ref().expect("stream_train: WeightSet says this slot is resident");
-                let xres_l = g.storage_init("stream_train.xres_l", &xres_cache[layer_idx]);
-                let d_res_l = match layer {
-                    OwnedStreamedLayer::Linear(l) => gdn_layer_backward_lora(g, &self.ops, &self.ids, cfg, &self.lora, layer_idx, l, &xres_l, &d_res_next, n, &self.ones_khd),
-                    OwnedStreamedLayer::Full(l) => gqa_layer_backward_lora(g, &self.ops, &self.ids, cfg, &self.lora, layer_idx, l, &xres_l, &d_res_next, n, &self.cos, &self.sin),
-                };
-                d_res_next = d_res_l;
-            }
-        }
+        self.for_each_streamed((0..n_layers as usize).rev().collect(), &loader, |layer_idx, layer| {
+            let xres_l = g.storage_init("stream_train.xres_l", &xres_cache[layer_idx]);
+            let d_res_l = match layer {
+                OwnedStreamedLayer::Linear(l) => gdn_layer_backward_lora(g, &self.ops, &self.ids, cfg, &self.lora, layer_idx, l, &xres_l, &d_res_next, n, &self.ones_khd),
+                OwnedStreamedLayer::Full(l) => gqa_layer_backward_lora(g, &self.ops, &self.ids, cfg, &self.lora, layer_idx, l, &xres_l, &d_res_next, n, &self.cos, &self.sin),
+            };
+            d_res_next = d_res_l;
+        });
 
         g.poll_wait();
         loss

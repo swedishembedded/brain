@@ -72,7 +72,7 @@ fn decoded(cfg: &Qwen35Config, init: &HashMap<String, Vec<f32>>, tier: Dtype) ->
     out
 }
 
-fn gradients(trainer: &StreamTrainer, cfg: &Qwen35Config, loader: &dyn Fn(usize) -> qwen35::stream::OwnedStreamedLayer, x0: &[f32], targets: &[u32]) -> (f32, Vec<(String, Vec<f32>)>) {
+fn gradients(trainer: &StreamTrainer, cfg: &Qwen35Config, loader: &(dyn Fn(usize) -> qwen35::stream::OwnedStreamedLayer + Sync), x0: &[f32], targets: &[u32]) -> (f32, Vec<(String, Vec<f32>)>) {
     trainer.lora.zero_grads(&trainer.gpu);
     let loss = trainer.forward_backward(cfg, loader, x0, targets);
     let mut grads = Vec::new();
