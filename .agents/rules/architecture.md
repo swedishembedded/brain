@@ -162,7 +162,10 @@ layer 6 - serving, front ends, SDK, samples
                            the KV storage descriptor (kv_tier: element codec x
                            scale hierarchy over the checkpoint crate's QuantEncoding;
                            f32/bf16/int8/fp8-E4M3 tiers) with
-                           its generic calibration interface (kvcalib), and
+                           its generic calibration interface (kvcalib), the
+                           global memory planner (memplan: per-category
+                           variants, fixed lever order, refuse-before-load),
+                           and
                            the multi-GPU parallelism layer (see below).
                            `ops::Weight` is the one resident-weight type (f32,
                            bf16, f16, int8, int4, NF4, FP8 E4M3/E5M2, K-quants)
