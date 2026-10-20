@@ -10,6 +10,10 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 - The environment variable `BRAIN_OFFLOAD_ADAM` is gone: whether a training build keeps the AdamW moments in host RAM is a scope of the building thread (`model::offload::with_adam_offloaded`), which the data-parallel and sharded trainers, the Qwen3 and Qwen3-TTS fine-tunes and the preference trainer now open themselves. Setting the variable no longer does anything (the Qwen35 and S3-DiT trainers that set it were never read by anything). The forecast residents select their card with a thread-scoped placement instead of writing `BRAIN_GPU_INDEX` into the process environment
 
+### Features
+
+- `make check/env-writes` fails on an `env::set_var` or `remove_var` outside test code that is not on `scripts/gates/env-writes.allow`, where every entry carries the reason its writer owns the process
+
 ## [3.0.0] - 2026-10-19
 
 ### Breaking Changes

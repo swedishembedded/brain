@@ -1,0 +1,10 @@
+crates/cli/src/forecast_cli.rs	3	the forecast command publishes its sampling flags to the kronos model, which reads them from the environment, before it starts any worker; the CLI owns its process
+crates/cli/src/main.rs	2	the CLI entry publishes --auto-fetch and --set KEY=VALUE overrides at start-up, before any worker thread exists
+crates/cli/src/supply.rs	2	the CLI's weight supply points the loaders it is about to run at the files it fetched (their environment contract), single-threaded, before loading
+crates/cli/src/wan_cli.rs	1	the wan command sets a longer GPU wait default for the one-submit forward before it starts work; the CLI owns its process
+crates/gpu-core/src/devices.rs	1	ComputeSet::apply narrows the CPU for the process (RAYON_NUM_THREADS plus affinity); documented as start-up only. The SDK also calls it per pipeline build - a known gap, tracked by this entry
+crates/ltxv/src/bin/ltxv_bench.rs	2	benchmark binary: sets its own knobs before any work starts and owns its process
+crates/npu/src/openvino/real.rs	1	LD_LIBRARY_PATH must contain the runtime's directory before the process dlopens it; the dynamic loader reads only the environment
+crates/qwen3vl/src/bin/qwen3vl_bench.rs	1	benchmark binary: sets its own knobs before any work starts and owns its process
+crates/sam1/src/bin/sam1_bench.rs	1	benchmark binary: sets its own knobs before any work starts and owns its process
+crates/wan/src/bin/wan_bench.rs	1	benchmark binary: sets its own knobs before any work starts and owns its process

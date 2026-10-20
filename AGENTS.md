@@ -2234,6 +2234,16 @@ a metric that isn't there was simply forgotten.
   from a `#[test]` in a lib unit-test binary (which has no command line of its
   own) is the one case that still needs documenting in
   `.agents/rules/testing.md` (`make check/scripts`, check-env-docs).
+- **Library code never writes the process environment.** The environment is
+  shared by every thread: setting a variable around a build and restoring it
+  let one training read another's setting, so one seed gave two runs. Pass the
+  value down the call path, or scope it to the building thread
+  (`model::offload::with_adam_offloaded`). `make check/env-writes`
+  (`scripts/gates/check-env-writes.sh`, also a pre-commit hook; spec
+  `make test/gates/env-writes`) fails on an `env::set_var`/`remove_var` outside
+  test code that is not on `scripts/gates/env-writes.allow`, where each entry
+  carries the reason its writer owns the process (a binary's `main`, a loader
+  that must set `LD_LIBRARY_PATH` before `dlopen`); the list only shrinks.
 - **Every default seed is random.** A literal seed in production code (a
   `seed: 1337` default, `Rng::new(7)`, a Python `--seed` default, a Makefile
   `SEED ?=`) is a bug unless it is a salt, a world constant, a frozen-artifact

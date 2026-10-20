@@ -113,6 +113,19 @@ repos:
         files: '(^crates/.*\.rs$|^scripts/gates/env-reads\.(allow|py)$)'
         pass_filenames: false
         stages: [pre-commit]
+      - id: env-writes
+        name: "No environment writes (set_var/remove_var) in library code"
+        description: >-
+          The process environment is shared by every thread, so library code
+          must pass a value down or scope it to its thread. Writes outside test
+          code are listed with a reason in scripts/gates/env-writes.allow and
+          the list only shrinks. See scripts/gates/check-env-writes.sh. Also run
+          by `make check/env-writes`.
+        entry: bash scripts/gates/check-env-writes.sh
+        language: system
+        files: '(^crates/.*\.rs$|^scripts/gates/env-writes\.(allow|py)$)'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: seed-literals
         name: "No new literal seeds in production code (every default seed is random)"
         description: >-

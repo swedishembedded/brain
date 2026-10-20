@@ -391,7 +391,7 @@ test/slow:
 # "green because skipped" risk.
 ## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + test/rl + test/gradcheck + every check/* gate
 ##   + test/parity + test/parity/strict (needs make testdata/fetch)
-test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck check/scripts check/env-reads check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
+test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck check/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -659,6 +659,14 @@ check:
 check/env-reads:
 	bash scripts/gates/check-env-reads.sh
 
+# The process environment is shared by every thread: library code that sets a
+# variable around a build lets a concurrent build read it. Writes outside test
+# code are listed per file, with a reason, in scripts/gates/env-writes.allow;
+# the list only shrinks. See scripts/gates/check-env-writes.sh.
+## check/env-writes - no environment writes (set_var/remove_var) in library code outside the reasoned allowlist; entries must still exist
+check/env-writes:
+	bash scripts/gates/check-env-writes.sh
+
 # A test that returns green without running its check certifies nothing:
 # every skip goes through brain_testutil (or #[ignore]), and the legacy ones on
 # scripts/gates/test-skips.allow only shrink. See scripts/gates/check-test-skips.sh.
@@ -691,8 +699,8 @@ check/seed-literals/tests:
 	bash scripts/gates/check-seed-literals.sh --tests
 
 # Spec for the gate above, run against throwaway trees (needs only bats).
-## test/gates - default: every gate self-test (env-reads, test-skips, seed-literals, group-kernels)
-test/gates: test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels
+## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels)
+test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels
 
 ## test/gates/test-skips - the silent-skip ratchet fails on a new bare skip and on a stale entry, passes on a match
 test/gates/test-skips:
@@ -701,6 +709,10 @@ test/gates/test-skips:
 ## test/gates/env-reads - the env-read ratchet fails on a new read and on a stale entry, passes on a match
 test/gates/env-reads:
 	bats tests/gates/env_reads.bats
+
+## test/gates/env-writes - the env-write ratchet fails on a new write, a missing reason and a stale entry, passes on a match, ignores test code
+test/gates/env-writes:
+	bats tests/gates/env_writes.bats
 
 ## test/gates/seed-literals - the seed-literal ratchet fails on a new literal, a stale entry and (in test mode) a bare test seed
 test/gates/seed-literals:
