@@ -70,14 +70,14 @@ crates/qwen3/src/finetune.rs	3	delegating TensorSource wrapper: forwards the cal
 crates/qwen3/src/gguf_import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/qwen3/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen3/src/serve.rs	3	class W: builds a whole-model fp32 host map for Engine::from_map (knowledge 337)
-crates/qwen35/src/base_source.rs	1	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
+crates/qwen35/src/base_source.rs	1	AdapterOverlay forwards with_tensor to its owner and materializes nothing itself; delete when Phase 1 gives TensorSource a descriptor-aware packed read (keep forwarding with_tensor_chunks and raw_blocks)
 crates/qwen35/src/bin/import_profile.rs	2	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/qwen35/src/caps.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen35/src/finetune.rs	4	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
-crates/qwen35/src/fp8_source.rs	4	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
+crates/qwen35/src/fp8_source.rs	4	4 calls: tensor_f32_range for each FP8 band (l.171), tensor_f32 of the scale tensor (l.181) and of unscaled/norm tensors (l.202), with_tensor fallback (l.220); FP8 naming, scale discovery and dequantization live in a model crate. Fix (Phase 1): block-scaled FP8 codec in checkpoint reading bands through the packed reader; this file shrinks to a declarative name map
 crates/qwen35/src/import.rs	3	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
-crates/qwen35/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/qwen35/src/stream.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
+crates/qwen35/src/model.rs	2	2 calls: the upload closure (l.1707) reads a whole tensor as f32 then Weight::upload, and Qwen35::load (l.5338) uses checkpoint::load for the whole container. Fix (Phase 1+2): Weight upload that consumes packed tiles from the reader; load via the planner
+crates/qwen35/src/stream.rs	2	2 calls, both bounded by one row or one vector: embedding row (l.974, tensor_f32_range of d elements) and final norm (l.988). Keep until the reader's range API replaces them; not a materialization risk
 crates/qwen35moe/src/caps.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen35moe/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen35moe/src/q8.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)

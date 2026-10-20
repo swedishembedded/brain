@@ -160,6 +160,25 @@ attention backward never forms the full probability matrix.
 Native FP8 and NVFP4 tensor-core GEMMs through the provider, LoHa/OFT/VeRA,
 masterless low-bit training.
 
+## Migration map for the files the phases rewrite first
+
+Each row says what the file does today and the change that removes it from the
+gate allowlists (or, where the file is exempt from a gate, what the gate cannot
+see). Entries in the allowlists carry the same fixes.
+
+| file | today | change (phase) |
+|---|---|---|
+| `checkpoint/src/lib.rs` `TensorSource` | `with_tensor_chunks` and `with_tensor_range` default to the whole tensor; no packed reader; exempt from the whole-tensor gate | packed tensor reader with no whole-tensor fallback; defaults removed so an unbounded wrapper fails to compile (1) |
+| `checkpoint/src/weightio.rs` `DerivedCheckpoint`, `Renamed`, `InMemory` | f32 and `U32` only, advertises F32, clones | descriptor-carrying derived views that pass packed bytes through (1) |
+| `checkpoint/src/mmap.rs` | whole-tensor `tensor_f32` reachable from production loaders | production callers move to tiled reads; the accessor stays for reference modes only (1) |
+| `qwen35/src/fp8_source.rs` | HF naming, FP8 scale discovery, dequantization and reading in one model-crate type | FP8 codec in the registry; the type becomes a declarative name map over the shared reader (1) |
+| `qwen35/src/base_source.rs` | rejects GGUF as a training base; `BaseDtype` {F32, Bf16, Nf4} frozen-only | any registered codec accepted; base precision from the descriptor policy (1, 5) |
+| `qwen35/src/stream_train.rs` | widens each layer's FP8 base to fp32 | packed-base backward through the generic quantized op (2) |
+| `paramstore/src/dtype.rs` | charges one fp32 per element (packed int8 as four) | physical bytes from the tensor descriptor; the planner shares it (1, 6) |
+| `optim/src/offload.rs` | `OffloadSlot = (String, Vec<f32> x3)` host master, m, v | bounded-tile state manager with independent state dtypes and a transactional on-disk form (5) |
+| `model/src/adapter/device.rs` | `is_adapter_param` hard-codes `.lora_a`/`.lora_b` | parameter-set driven (3); until then the adapter-naming gate keeps all other spellings out |
+| `model/src/kv_tier.rs` | closed `KvTier {F32, Bf16, Int8}` | storage descriptor on the shared encoding, FP8 tier added (6) |
+
 ## Experiments to run once the phases land
 A: full fine-tune with fp32 versus int8 versus streamed int8 AdamW versus
 Adafactor. B: long-context activation policies. C: rollouts with bf16, int8 and

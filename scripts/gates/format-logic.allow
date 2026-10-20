@@ -19,16 +19,16 @@ crates/npu/src/topology.rs	1	format-specific call in a model crate; route throug
 crates/qwen3/src/model.rs	10	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
 crates/qwen3/src/serve.rs	6	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
 crates/qwen35/src/bin/import_profile.rs	2	importer/FP8 source: decodes the checkpoint format while converting; belongs in a checkpoint codec (loader inventory, knowledge 337)
-crates/qwen35/src/config.rs	1	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/qwen35/src/config.rs	1	model::fp8::scale_shape (l.427) when estimating FP8 scale-plane bytes for the layer byte table. Fix (Phase 1): the descriptor reports physical bytes including its scale hierarchy
 crates/qwen35/src/dflash2.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
-crates/qwen35/src/fp8_source.rs	5	importer/FP8 source: decodes the checkpoint format while converting; belongs in a checkpoint codec (loader inventory, knowledge 337)
+crates/qwen35/src/fp8_source.rs	5	5: model::fp8::scale_shape and dequant_block128 (FP8 codec) called from a model crate. Fix (Phase 1): move FP8 block-scaled decode behind the checkpoint codec registry
 crates/qwen35/src/import.rs	6	importer/FP8 source: decodes the checkpoint format while converting; belongs in a checkpoint codec (loader inventory, knowledge 337)
 crates/qwen35/src/int8_gguf_resident/mtp.rs	1	per-model int8 upload helper duplicating model::int8 routing; collapse onto model::ops::Weight::upload
 crates/qwen35/src/int8_gguf_resident.rs	1	per-model int8 upload helper duplicating model::int8 routing; collapse onto model::ops::Weight::upload
-crates/qwen35/src/model.rs	4	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
-crates/qwen35/src/stream.rs	1	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
-crates/qwen35/src/stream_train.rs	2	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
-crates/qwen35/src/train_base.rs	7	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/qwen35/src/model.rs	4	4: Weight::F32 construction for the fp32 tier and head (l.1704, 1814) and two decode-fusion predicates matching all-F32 (l.3677, 3692). Fix (Phase 2): a Weight capability query (is_dense_f32 / supports_fused_decode) replaces variant matching
+crates/qwen35/src/stream.rs	1	1: builds Weight::I8 for the resident head (l.1222). Fix (Phase 2): Weight::from_packed constructor from a packed tensor, not a variant literal
+crates/qwen35/src/stream_train.rs	2	2: Weight::F32 extraction (l.173) and construction of the f32 head (l.272); the streamed trainer only accepts an fp32 base. Fix (Phase 2/5): packed-base backward through the generic op; remove f32_buf
+crates/qwen35/src/train_base.rs	7	7: frozen-base tier predicates (l.91), host read-back of F32/BF16/NF4 weights through lut4/half codecs (l.100-104) and bf16 write-back (l.124-125). Fix (Phase 2): read_weight/write_weight as generic Weight ops (decode/encode through the codec registry), tier predicates as Weight capability queries
 crates/qwen35moe/src/model.rs	5	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
 crates/qwen35moe/src/q8.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
 crates/qwen3omnimoe/src/import.rs	1	importer/FP8 source: decodes the checkpoint format while converting; belongs in a checkpoint codec (loader inventory, knowledge 337)

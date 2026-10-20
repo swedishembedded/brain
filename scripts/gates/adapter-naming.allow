@@ -27,12 +27,12 @@ crates/qwen3/src/export.rs	4	per-model adapter param list, init, export or rollo
 crates/qwen3/src/init.rs	4	per-model adapter param list, init, export or rollout spelling the suffix; derive from the adapter parameter specs
 crates/qwen3/src/model.rs	4	per-model device LoRA wiring spelling the .lora_a/.lora_b suffix in param lists, fold and training code; replace with parameter-set driven calls into model::adapter
 crates/qwen3/src/rollout.rs	3	per-model adapter param list, init, export or rollout spelling the suffix; derive from the adapter parameter specs
-crates/qwen35/src/adapter_sample.rs	1	per-model device LoRA wiring spelling the .lora_a/.lora_b suffix in param lists, fold and training code; replace with parameter-set driven calls into model::adapter
+crates/qwen35/src/adapter_sample.rs	1	1: finds lora_b tensors by suffix to check an adapter is non-trivial. Fix (Phase 3): adapter module exposes the parameter groups
 crates/qwen35/src/bin/qwen35_train_probe.rs	1	per-model device LoRA wiring spelling the .lora_a/.lora_b suffix in param lists, fold and training code; replace with parameter-set driven calls into model::adapter
-crates/qwen35/src/config.rs	2	per-model adapter param list, init, export or rollout spelling the suffix; derive from the adapter parameter specs
-crates/qwen35/src/init.rs	3	per-model adapter param list, init, export or rollout spelling the suffix; derive from the adapter parameter specs
-crates/qwen35/src/model.rs	4	per-model device LoRA wiring spelling the .lora_a/.lora_b suffix in param lists, fold and training code; replace with parameter-set driven calls into model::adapter
-crates/qwen35/src/stream_train.rs	5	per-model device LoRA wiring spelling the .lora_a/.lora_b suffix in param lists, fold and training code; replace with parameter-set driven calls into model::adapter
+crates/qwen35/src/config.rs	2	2 real uses (l.635-636) build the .lora_a/.lora_b param names in param_list; the rest are test asserts. Fix (Phase 3): param_list asks model::adapter parameter specs for the names of each target
+crates/qwen35/src/init.rs	3	3: initialization branches on the suffix (l.46,69,71,121: B zero, A random). Fix (Phase 3): adapter definition supplies init per parameter spec
+crates/qwen35/src/model.rs	4	4: lora_fwd/backward look up the A and B buffers by suffix (l.2030, 2278). Fix (Phase 3): execution asks the adapter parameter set for the target's buffers
+crates/qwen35/src/stream_train.rs	5	5: LoraStore and the streamed LoRA forward/backward address A and B by suffix (l.334-361). Fix (Phase 3): same parameter-set lookup as the resident trainer
 crates/qwen35moe/src/config.rs	2	per-model adapter param list, init, export or rollout spelling the suffix; derive from the adapter parameter specs
 crates/qwen35moe/src/init.rs	3	per-model adapter param list, init, export or rollout spelling the suffix; derive from the adapter parameter specs
 crates/qwen35moe/src/model.rs	4	per-model device LoRA wiring spelling the .lora_a/.lora_b suffix in param lists, fold and training code; replace with parameter-set driven calls into model::adapter
