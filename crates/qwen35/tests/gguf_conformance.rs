@@ -13,6 +13,7 @@
 //! has the real tensor names and layer kinds.
 
 use gpu_core::select::Dtype;
+use model::kv_tier::KvTier;
 use model::ops::TierPolicy;
 use model::adapter::bank::{AdapterBankRequest, AdapterTargets, VerifiedAdapter};
 use model::adapter::sites::LoraSites;
@@ -36,6 +37,10 @@ fn paged_engine() -> Qwen35GgufEngine {
 }
 
 fn engine_with(kv_block_rows: u32) -> Qwen35GgufEngine {
+    engine_with_kv(kv_block_rows, KvTier::F32)
+}
+
+fn engine_with_kv(kv_block_rows: u32, kv_tier: KvTier) -> Qwen35GgufEngine {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let path = std::env::temp_dir().join(format!("brain-gguf-conformance-{}-{n}.gguf", std::process::id())).to_string_lossy().into_owned();
@@ -43,7 +48,7 @@ fn engine_with(kv_block_rows: u32) -> Qwen35GgufEngine {
     let devices = budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, 2 << 30);
     let device = devices.first().expect("the suite needs a GPU").0;
     let bank = AdapterBankRequest { slots: 2, rank_cap: 4, targets: AdapterTargets::ALL, max_registered: 4 };
-    let resident = Qwen35GgufResident::new(path.clone(), devices, CAP, TierPolicy::uniform(Dtype::I8)).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(kv_block_rows).with_adapter_bank(bank);
+    let resident = Qwen35GgufResident::new(path.clone(), devices, CAP, TierPolicy::uniform(Dtype::I8)).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(kv_block_rows).with_kv_tier(kv_tier).with_adapter_bank(bank);
     let (engine, _, _) = resident.activate_engine(&[device]).expect("the tiny GGUF loads");
     std::fs::remove_file(path).ok();
     engine
@@ -116,11 +121,31 @@ fn greedy_tokens_are_the_recorded_ones_on(make: fn() -> Qwen35GgufEngine) {
     assert_eq!(got.each_ref().map(|t| t.as_slice()), RECORDED.each_ref().map(|t| t.as_slice()), "the engine's greedy tokens changed");
 }
 
+/// The compact KV tiers store a scale (int8) or packed words (bf16) beside the rows: paging must address
+/// those exactly as the rows, so each tier's tokens equal its own one-block tokens.
+fn paging_does_not_move_the_tokens_of_any_kv_tier() {
+    let long: Vec<u32> = (0..72u32).map(|i| 3 + (i * 7 + i * i) % 26).collect();
+    let mut extended = long.clone();
+    extended.extend([5, 9, 11, 4, 8, 20, 13, 6]);
+    for tier in KvTier::ALL {
+        let run = |rows: u32| {
+            let mut sched = Scheduler::new(engine_with_kv(rows, tier), 4);
+            let a = sched.submit(Request { prompt: long.clone(), max_new: 12, stop: Vec::new() });
+            let b = sched.submit(Request { prompt: (1..=20u32).map(|i| 3 + i % 26).collect(), max_new: 12, stop: Vec::new() });
+            let mut together = sched.run();
+            let warm = sched.submit(Request { prompt: extended.clone(), max_new: 12, stop: Vec::new() });
+            vec![together.remove(&a).unwrap(), together.remove(&b).unwrap(), sched.run().remove(&warm).unwrap()]
+        };
+        assert_eq!(run(16), run(0), "{tier}: paged tokens differ from the one-block layout's");
+    }
+}
+
 const RECORDED: [[u32; 12]; 3] = [[10, 9, 26, 17, 9, 10, 1, 8, 21, 12, 2, 4], [11, 9, 1, 19, 2, 13, 4, 26, 11, 18, 17, 22], [22, 12, 2, 12, 7, 17, 22, 14, 9, 1, 28, 16]];
 
 gpu_core::card_tests!(
     the_released_gguf_engine_conforms,
     the_released_gguf_engine_conforms_with_its_kv_paged,
     greedy_tokens_are_the_recorded_ones,
-    greedy_tokens_are_the_recorded_ones_with_its_kv_paged
+    greedy_tokens_are_the_recorded_ones_with_its_kv_paged,
+    paging_does_not_move_the_tokens_of_any_kv_tier
 );
