@@ -53,8 +53,9 @@ const CHECKPOINT_TAIL: usize = 16;
 /// partition as a cold prefill. A resume from a position inside a chunk rounded measurably differently.
 const CHECKPOINT_ALIGN: usize = 64;
 
-/// The prefix length a prompt of `len` tokens is cached at: short of its generation prompt (see [`CHECKPOINT_TAIL`]).
-fn checkpoint_len(len: usize) -> usize {
+/// The prefix length a prompt of `len` tokens is cached at: short of its generation prompt (see [`CHECKPOINT_TAIL`]),
+/// on a whole recurrent chunk. A later prompt sharing that prefix resumes from exactly this many tokens.
+pub fn checkpoint_len(len: usize) -> usize {
     len.saturating_sub(CHECKPOINT_TAIL) / CHECKPOINT_ALIGN * CHECKPOINT_ALIGN
 }
 

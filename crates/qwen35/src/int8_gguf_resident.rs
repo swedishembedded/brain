@@ -143,7 +143,7 @@ mod engine;
 mod mtp;
 mod speculate;
 pub use speculate::{SpecServing, SpeculativeMode};
-pub use engine::{PrefillPolicy, Qwen35GgufEngine, SpecTimes};
+pub use engine::{checkpoint_len, PrefillPolicy, Qwen35GgufEngine, SpecTimes};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

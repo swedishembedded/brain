@@ -891,9 +891,11 @@ fn scheduled_batches_reproduce_the_reference(kv_block_rows: u32) {
 
 /// Prefix reuse on the real checkpoint: a prompt that starts with an already
 /// served one (an agent resending its history plus a new turn) resumes from the
-/// cached KV rows and the recurrent-state snapshot taken at the end of that
-/// prefill, prefills only its new tokens, and continues token for token like a
-/// cold prefill of the whole prompt. An identical prompt needs no prefill.
+/// cached KV rows and the recurrent-state snapshot taken at that prompt's
+/// checkpoint (`checkpoint_len`: short of its generation prompt, on a whole
+/// recurrent chunk), prefills only the tokens after it, and continues token for
+/// token like a cold prefill of the whole prompt. An identical prompt resumes
+/// from its checkpoint the same way.
 #[test]
 fn a_prompt_extending_a_cached_one_prefills_only_its_new_tokens_and_continues_identically() {
     a_prompt_extending_a_cached_one_resumes_from_it(0);
@@ -949,13 +951,17 @@ fn a_prompt_extending_a_cached_one_resumes_from_it(kv_block_rows: u32) {
     let (got_second, warm_s) = run(&mut sched, &second);
     let (hit1, looked1, cached1) = sched.prefix_stats();
     println!("  prefix reuse: first {} tokens cold {cold_s:.2} s, second {} tokens resumed {warm_s:.2} s; hit {hit1}/{looked1} tokens, {cached1} cached", first.len(), second.len());
-    assert_eq!(hit1, first.len() as u64, "the whole first prompt was reused");
+    // What is cached is the first prompt's checkpoint (short of its generation prompt, on a whole recurrent chunk), and
+    // the extension shares it.
+    let checkpoint = qwen35::int8_gguf_resident::checkpoint_len(first.len());
+    assert!(checkpoint >= 64 && checkpoint <= shared, "the first prompt has a checkpoint the second shares ({checkpoint} of {shared})");
+    assert_eq!(hit1, checkpoint as u64, "the second prompt resumed from the first prompt's checkpoint");
     assert_eq!(got_second, want_second, "resuming from a cached prefix must continue like a cold prefill");
-    assert_eq!(cached1, 1, "the longer prompt supersedes the shorter one");
+    assert_eq!(cached1, 1, "one entry: the second prompt's own checkpoint is no longer than the one it resumed from");
 
     let (again, _) = run(&mut sched, &second);
-    assert_eq!(again, want_second, "an identical prompt is served from its cached state");
-    assert_eq!(sched.prefix_stats().0, hit1 + second.len() as u64);
+    assert_eq!(again, want_second, "an identical prompt resumed from the cached checkpoint continues like a cold prefill");
+    assert_eq!(sched.prefix_stats().0, hit1 + qwen35::int8_gguf_resident::checkpoint_len(second.len()) as u64);
 }
 
 /// With speculation from the checkpoint's own MTP head over a paged KV cache (16-row blocks), the drafts stay inside
