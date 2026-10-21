@@ -56,22 +56,78 @@ cell, is `docs/reference/training-capabilities.md`.
 A migration that removes a call site deletes or lowers its allowlist entry in
 the same commit. A new violation is a design defect, not an allowlist addition.
 
-## Status at the time of writing (read from source, not from memory)
+## Status (reconciled against origin/main on 2026-10-21)
 
-- Done: bf16, int8 (group-32) and NF4 frozen bases for adapter training in
-  `qwen35` (`Weight::{BF16, NF4}`, the decoded-weight scope) and bf16 and int8
-  in `qwen3` (and NF4 and block-scaled FP8 through the shared `model::ops::tiled`
-  contract); an int8-base device trainer for `flux2`; a 27B NF4 and bf16 LoRA
-  run on one card from an FP8 directory streamed tensor by tensor; the
-  base-tier choice from device capability (`choose_base_tier`); tensor-core
-  GEMMs selected by capability; `Weight::KQuant` execution and its host
-  relayout (no loader builds it yet).
-- Not done: a tensor descriptor and codec registry as the single description of
-  stored bytes (the first piece, `TensorDescriptor`/`QuantEncoding` in the
-  checkpoint crate, has just landed and has no consumer); a packed bounded
-  reader; any FP8, NVFP4 or MX `Weight`; a quantized or FP8 full fine-tune;
-  optimizer state below fp32 or off host RAM; a dtype-aware trainable
-  parameter; any adapter kind but LoRA.
+Each item is done (D), partial (P) or open (O), with the commit that landed it.
+The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
+
+### Done
+- D Descriptor and codec: `TensorDescriptor`/`QuantEncoding`, codec registry, bounded packed
+  reader, sink and tiled Preserve/Repack/Convert executor (8cbdec63a, f52600c8e, b94a78726);
+  `SafetensorsSink` writes a model tile by tile in each descriptor's encoding (56ae14f05);
+  `convert_to_file` is the one-off bounded conversion into a packed file (c5ddbfa02), and
+  qwen35 `write_converted_base` uses it so a streamed NF4 base never requantizes per step
+  (32976b9b5).
+- D Generic frozen-base forward, dX and dW for every `Weight` tier including FP8, NVFP4 and
+  MX (3ec33bb7e, 456190d2d, 892e263a1); `Ops::read_host` reads any tier back through the
+  bounded tile decode (cdf3dc135).
+- D Adapter runtime: definition, execution and optimization split; rsLoRA, LoRA+, LoRA-FA,
+  IA3, LoKr, DoRA (922d326b4, 27602fa70, 7d3de820d, 37da9d4ef); generic serving bank for LoRA.
+- D Base formats: LoRA bases are declared by the model and chosen by one `--base-format` flag
+  (da2cf8f8c); `ChatFineTune::base_format` and `PreferenceFineTune::base_format` spell it for
+  every architecture (b646cbbce, cc4abb2df); every declared base trains through `train_lora`
+  and an undeclared one is refused by name (09fd9bd0e, 9c7bdb9de); the qwen35 FP8 base trains
+  like its fp32 decoding (022079253); qwen3 trains over NF4 and FP8.
+- D Objectives and acceptance: DPO, GRPO and top-K distillation are `ModelFit` visitors in
+  `rl::fit` (06b285b65); the four-architecture acceptance workflow is `model::acceptance`
+  over qwen3, qwen35, qwen35moe and flux2 (3bb497b6a); conformance C8 holds the weighted loss
+  to the chunked-head check (ae94ecd6b).
+- D Full fine-tuning state: Adafactor, logarithmic 8-bit state, bf16 device moments and the
+  `TrainState` seam (6d3edf527); resident full fine-tune of qwen3 with bf16, FP8 and int8/NF4
+  quantization-aware weights, an off-device master, `Ops::weight_grad`, deferred publication,
+  planner refusal, streamed export and transactional resume (b87dd8e0d, 4ce2d9357); one typed
+  `FitOpts` precision, the planner narrowing optimizer state only when authorized, and exact
+  resume for every full fine-tune (24ada03fa, adab58541).
+- D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
+  priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
+  backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the
+  bidirectional kernels and `AttentionPath::{Flash,Auto}` (ce1456612, 5fce3f645, 4f3f5f9d0);
+  the streamed trainer draws scratch from a replay arena (bd495d218) and reports layer wait
+  against compute time (971757bfd).
+- D Serving: residents build from the stored checkpoint view, serve it packed and park it
+  packed when demoted (d3878f0cf, 61e30dc56, 37ab12718); FP8 KV tier with a descriptor
+  (9ae3ea5ca, 412dce436, fcf0c7690); `model::memplan` with the lever order (c135b6f86).
+- D Gates: G3 format-logic also matches `Weight::FP8` and `Weight::Micro` (7e7b6e86d).
+
+### Partial
+- P Layer-streamed full fine-tune: layer-streamed LoRA of the 27B and streamed optimizer
+  state exist; the full fine-tune with resident packed weights is qwen3 only, and qwen35,
+  qwen35moe and glmdsa still hold fp32 resident weights (see Open).
+- P LoRA bases: qwen35 and qwen3 take any declared format; DoRA is only over fp32-resident
+  bases (verify the refusal path before relying on it); the serving bank is LoRA-only.
+- P Memory planner levers: CompactKv, ConvertWeights, OptimizerState and the saved-tensor
+  policy have consumers; Offload and Microbatch levers do not.
+- P Whole-tensor loads: the LLM residents moved to packed sources; the allowlist still holds
+  the non-LLM crates and `TensorSource` still defaults to whole tensors.
+- P Mixed-format models: per-tensor tier from the descriptor on upload and refusal of mixed
+  fused concats are done; an end-to-end test with FP8, NF4, bf16 and f32 tensors in one
+  model through load, forward, backward, save and reload is missing.
+- P Speed of the packed paths: the NF4 loader is measured at about 2.6x the FP8 loader, but
+  end-to-end NF4 training step time against preserved FP8 is not shown at 2x (see Open).
+
+### Open (not done; do not read any item above as covering these)
+- O Layer-streamed full fine-tune of a 27B-class model (weights, gradients and state bounded
+  independent of parameter count on a real checkpoint).
+- O Pinned staging plus a dedicated transfer stream (`Pool::Pinned` has no consumer).
+- O NF4 at least 2x faster than preserved FP8 end to end: measured 1.25x to 1.4x on a
+  contended card; only the loader reaches 2.6x. Needs an uncontended measurement.
+- O flux2 int8 base onto `Ops` (its int8 trainer still has its own path).
+- O qwen35 int8 and int4 LoRA bases (qwen35 serves int8/int4 but trains over bf16, NF4, FP8).
+- O FP4 and INT4 KV tiers (FP8 KV is done; the rest waits for evidence).
+- O Native FP8 and NVFP4 tensor-core GEMMs through the provider (portable decode path today).
+- O Removal of the deprecated `--<architecture>-<option>` aliases (`model-flags.allow`).
+- O PiSSA, EVA and LoftQ initialization; LoHa, OFT and VeRA.
+- O Full fine-tune on qwen35, qwen35moe and glmdsa over resident packed weights.
 
 ## Phases
 
@@ -133,14 +189,11 @@ formats (`model::policy::TrainBases`), one `--base-format` flag parses them, and
 `LoraRequest::base` carries the choice through the generic trainers.
 
 ### Phase 5 - full fine-tuning state (paramstore, optim)
-Status: the state manager is landed (`paramstore::precision`, `optim::{codec, rule,
-storage, streamed, checkpoint, trainstate}`, `adamw_q8` fused device AdamW,
-`OffloadAdam` on the streamed state; see `docs/guides/training/optimizer-state.md`).
-Wave 2 pieces landed: values in any registered encoding with a master (QAT),
-layer-streamed updates with deferred publication, streamed export of masters.
-Open: Adafactor and logarithmic 8-bit state, bf16 device state kernel, the
-FP8 encoder moving into `checkpoint`, and the generic full trainer that wires
-these to the model-generic objectives.
+Status: the state manager, Adafactor, logarithmic 8-bit state, bf16 device moments, resident
+and QAT weights with an off-device master, deferred publication, streamed export and exact
+resume are landed (see the Status section above and `docs/guides/training/optimizer-state.md`).
+Open: the same trainer over qwen35, qwen35moe and glmdsa, and layer streaming for models
+larger than the card.
 A trainable parameter with independent value storage, gradient dtype, optimizer
 state dtype and optional master copy (none, bf16, fp32). A bounded-tile
 parameter update (decode tile, update, re-encode) with fp32, bf16 and 8-bit
