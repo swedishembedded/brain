@@ -470,6 +470,39 @@ pub fn read_moments_q8(gpu: &Gpu, ps: &ParamStore, name: &str) -> Option<(Vec<f3
     ))
 }
 
+/// Restore `name`'s blockwise-int8 moments from decoded values - the inverse of [`read_moments_q8`]. Values that
+/// were decoded from the device re-encode to the same codes (each block's scale is its largest decoded magnitude and
+/// nearest rounding returns every level to itself), so a read-back and restore is exact.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_moments_q8(gpu: &Gpu, ps: &ParamStore, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
+    use codec::{SlotKind, StateCodec};
+    use paramstore::precision::StateFormat;
+    let (Some(scales), Some(mb), Some(vb)) = (ps.moment_scales.get(name), ps.adam_m.get(name), ps.adam_v.get(name)) else {
+        return Err(format!("{name} has no int8 moments on the device"));
+    };
+    let n = ps.numel(name);
+    if m.len() != n || v.len() != n {
+        return Err(format!("{name}: moments of {}/{} values for a {n}-value parameter", m.len(), v.len()));
+    }
+    let nb = n.div_ceil(paramstore::DEVICE_INT8_BLOCK as usize);
+    let words = n.div_ceil(4);
+    let format = StateFormat::Int8Block { block: paramstore::DEVICE_INT8_BLOCK };
+    let mut sc = vec![0f32; 2 * nb];
+    let (first, second) = sc.split_at_mut(nb);
+    for (kind, vals, buf, scale) in [(SlotKind::Signed, m, mb, first), (SlotKind::NonNegative, v, vb, second)] {
+        let codec = StateCodec { format, kind };
+        let mut codes = vec![0u8; words * 4];
+        let mut scale_bytes = vec![0u8; 4 * nb];
+        codec.encode(vals, &mut codes[..n], &mut scale_bytes, codec::Rounding::NEAREST, 0);
+        for (s, c) in scale.iter_mut().zip(scale_bytes.as_chunks::<4>().0) {
+            *s = f32::from_le_bytes(*c);
+        }
+        gpu.write(buf, &codes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect::<Vec<u32>>());
+    }
+    gpu.write_f32(scales, &sc);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

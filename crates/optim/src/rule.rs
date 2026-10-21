@@ -23,6 +23,19 @@ pub struct StepScalars {
     pub lr: f32,
     /// Multiplier already folding the accumulation average and the clip.
     pub grad_scale: f32,
+    /// AdamW's bias corrections at step `t`, computed once per step instead of once per element.
+    pub bias_corrections: (f32, f32),
+}
+
+impl StepScalars {
+    /// The scalars of step `t` under `rule`.
+    pub fn new(rule: &Rule, t: u32, lr: f32, grad_scale: f32) -> StepScalars {
+        let bias_corrections = match rule {
+            Rule::AdamW { adam, .. } => adam.bias_corrections(t),
+            _ => (1.0, 1.0),
+        };
+        StepScalars { t, lr, grad_scale, bias_corrections }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,9 +86,8 @@ impl Rule {
         let g = g * s.grad_scale;
         match *self {
             Rule::AdamW { adam, wd } => {
-                let bc = adam.bias_corrections(s.t);
                 let [m, v] = st;
-                adam.update(bc, s.lr, wd, g, w, m, v);
+                adam.update(s.bias_corrections, s.lr, wd, g, w, m, v);
             }
             Rule::Lion { beta1, beta2, wd } => {
                 let m = &mut st[0];
@@ -108,7 +120,7 @@ mod tests {
     use super::*;
 
     fn scalars(t: u32) -> StepScalars {
-        StepScalars { t, lr: 0.1, grad_scale: 1.0 }
+        StepScalars::new(&Rule::SgdMomentum { momentum: 0.0, wd: 0.0, nesterov: false }, t, 0.1, 1.0)
     }
 
     /// Spec: the AdamW rule is exactly the existing `Adam::update` the GPU
@@ -118,7 +130,7 @@ mod tests {
         let adam = Adam::default();
         let rule = Rule::AdamW { adam, wd: 0.01 };
         let (mut w, mut st) = (0.5f32, [0.1f32, 0.2]);
-        rule.update(StepScalars { t: 3, lr: 0.01, grad_scale: 2.0 }, &mut w, 0.3, &mut st);
+        rule.update(StepScalars::new(&rule, 3, 0.01, 2.0), &mut w, 0.3, &mut st);
         let (mut w2, mut m2, mut v2) = (0.5f32, 0.1f32, 0.2f32);
         adam.update(adam.bias_corrections(3), 0.01, 0.01, 0.6, &mut w2, &mut m2, &mut v2);
         assert_eq!((w, st[0], st[1]), (w2, m2, v2));

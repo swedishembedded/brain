@@ -134,8 +134,38 @@ impl StateCodec {
     }
 
     /// Decode a tile. `data` and `scales` are the tile's own regions; `out.len()`
-    /// is the element count.
+    /// is the element count. A large tile of a block or bf16 format is cut into whole blocks and decoded on scoped
+    /// threads; the bits are those of the serial decode.
     pub fn decode(&self, data: &[u8], scales: &[u8], out: &mut [f32]) {
+        let (pieces, piece) = self.split(out.len());
+        if pieces <= 1 {
+            return self.decode_serial(data, scales, out);
+        }
+        std::thread::scope(|scope| {
+            for (i, chunk) in out.chunks_mut(piece).enumerate() {
+                let e0 = i * piece;
+                let (d0, s0) = (self.data_bytes(e0), self.scale_bytes(e0));
+                let (d1, s1) = (d0 + self.data_bytes(chunk.len()), s0 + self.scale_bytes(chunk.len()));
+                scope.spawn(move || self.decode_serial(&data[d0..d1], &scales[s0..s1], chunk));
+            }
+        });
+    }
+
+    /// Pieces (and their length in elements, a whole number of blocks) a tile of `n` elements is worked in:
+    /// one piece unless the tile is large and the format costs more than a copy.
+    fn split(&self, n: usize) -> (usize, usize) {
+        const MIN_ELEMS: usize = 1 << 16;
+        const MAX_THREADS: usize = 16;
+        let block = self.format.block().max(2);
+        let threads = std::thread::available_parallelism().map_or(1, |p| p.get()).min(MAX_THREADS).min(n / MIN_ELEMS);
+        if threads <= 1 {
+            return (1, n.max(1));
+        }
+        let piece = n.div_ceil(threads).div_ceil(block) * block;
+        (n.div_ceil(piece), piece)
+    }
+
+    fn decode_serial(&self, data: &[u8], scales: &[u8], out: &mut [f32]) {
         match self.format {
             StateFormat::F32 => {
                 for (o, c) in out.iter_mut().zip(data.as_chunks::<4>().0) {
@@ -161,8 +191,26 @@ impl StateCodec {
     }
 
     /// Encode a tile whose first element has absolute index `base` in its
-    /// tensor (the rounding randomness is keyed on it).
+    /// tensor (the rounding randomness is keyed on it). Large tiles are encoded in whole blocks on scoped threads;
+    /// the rounding draws are keyed on absolute element indices, so the bits do not depend on the cut.
     pub fn encode(&self, vals: &[f32], data: &mut [u8], scales: &mut [u8], rnd: Rounding, base: u64) {
+        let (pieces, piece) = self.split(vals.len());
+        if pieces <= 1 {
+            return self.encode_serial(vals, data, scales, rnd, base);
+        }
+        std::thread::scope(|scope| {
+            let (mut data, mut scales) = (data, scales);
+            for (i, chunk) in vals.chunks(piece).enumerate() {
+                let (d, rest_d) = std::mem::take(&mut data).split_at_mut(self.data_bytes(chunk.len()));
+                let (sc, rest_s) = std::mem::take(&mut scales).split_at_mut(self.scale_bytes(chunk.len()));
+                (data, scales) = (rest_d, rest_s);
+                let at = base + (i * piece) as u64;
+                scope.spawn(move || self.encode_serial(chunk, d, sc, rnd, at));
+            }
+        });
+    }
+
+    fn encode_serial(&self, vals: &[f32], data: &mut [u8], scales: &mut [u8], rnd: Rounding, base: u64) {
         let u = |i: usize| rnd.stochastic.then(|| unit(rnd.key, base + i as u64));
         match self.format {
             StateFormat::F32 => {
@@ -436,5 +484,30 @@ mod tests {
             sum += (out[1] as f64).log2();
         }
         assert!((sum / n as f64 - target).abs() < 2e-3, "mean log2 {} vs {target}", sum / n as f64);
+    }
+
+    /// Spec: a large tile is encoded and decoded in pieces on several threads and gives exactly the bits the serial
+    /// loop gives, stochastic rounding included (its draws are keyed on absolute element indices).
+    #[test]
+    fn large_tiles_are_worked_in_pieces_with_the_serial_bits() {
+        let n = 300_011usize;
+        let vals: Vec<f32> = (0..n).map(|i| (((i * 2_654_435_761) % 10_007) as f32 / 10_007.0 - 0.3) * 4.0).collect();
+        for format in [StateFormat::F32, StateFormat::Bf16, StateFormat::Int8Block { block: 64 }, StateFormat::Int8Block { block: 256 }, StateFormat::Log8Block { block: 64 }] {
+            for kind in [SlotKind::Signed, SlotKind::NonNegative] {
+                let c = StateCodec { format, kind };
+                let v: Vec<f32> = if kind == SlotKind::NonNegative { vals.iter().map(|x| x.abs()).collect() } else { vals.clone() };
+                for rnd in [Rounding::NEAREST, Rounding { stochastic: true, key: 99 }] {
+                    let (mut d1, mut s1) = (vec![0u8; c.data_bytes(n)], vec![0u8; c.scale_bytes(n)]);
+                    let (mut d2, mut s2) = (d1.clone(), s1.clone());
+                    c.encode(&v, &mut d1, &mut s1, rnd, 1234);
+                    c.encode_serial(&v, &mut d2, &mut s2, rnd, 1234);
+                    assert!(d1 == d2 && s1 == s2, "{format:?} {kind:?} {rnd:?}: encode");
+                    let (mut o1, mut o2) = (vec![0f32; n], vec![0f32; n]);
+                    c.decode(&d1, &s1, &mut o1);
+                    c.decode_serial(&d1, &s1, &mut o2);
+                    assert!(o1 == o2, "{format:?} {kind:?}: decode");
+                }
+            }
+        }
     }
 }

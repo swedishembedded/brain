@@ -50,16 +50,36 @@ impl MemBacking {
     }
 }
 
+/// Bytes below which a copy runs on the calling thread.
+const PARALLEL_COPY_MIN: usize = 1 << 20;
+/// Most threads one copy uses.
+const PARALLEL_COPY_THREADS: usize = 16;
+
+/// `dst.copy_from_slice(src)`, cut into contiguous pieces on scoped threads when it is large: one core does not saturate
+/// the memory system, and a tile of optimizer state is megabytes.
+fn copy_parallel(dst: &mut [u8], src: &[u8]) {
+    let threads = std::thread::available_parallelism().map_or(1, |p| p.get()).min(PARALLEL_COPY_THREADS).min(dst.len() / PARALLEL_COPY_MIN);
+    if threads <= 1 {
+        return dst.copy_from_slice(src);
+    }
+    let piece = dst.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (d, s) in dst.chunks_mut(piece).zip(src.chunks(piece)) {
+            scope.spawn(move || d.copy_from_slice(s));
+        }
+    });
+}
+
 impl Backing for MemBacking {
     fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<()> {
         let end = off as usize + buf.len();
-        buf.copy_from_slice(self.0.get(off as usize..end).ok_or_else(|| invalid(format!("read past end: {end} > {}", self.0.len())))?);
+        copy_parallel(buf, self.0.get(off as usize..end).ok_or_else(|| invalid(format!("read past end: {end} > {}", self.0.len())))?);
         Ok(())
     }
     fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
         let end = off as usize + buf.len();
         let len = self.0.len();
-        self.0.get_mut(off as usize..end).ok_or_else(|| invalid(format!("write past end: {end} > {len}")))?.copy_from_slice(buf);
+        copy_parallel(self.0.get_mut(off as usize..end).ok_or_else(|| invalid(format!("write past end: {end} > {len}")))?, buf);
         Ok(())
     }
     fn len(&self) -> u64 {

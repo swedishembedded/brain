@@ -22,19 +22,20 @@
 //! staging to a tile.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpu_core::Gpu;
 use paramstore::precision::{MasterPolicy, ParamPrecision, ValueDtype};
 use paramstore::ParamStore;
 
+use crate::checkpoint::{CheckpointDir, RunState};
 use crate::codec::Rounding;
 use crate::rule::Rule;
 use crate::storage::{BlockStateStorage, FileBacking, MemBacking, OptimizerStateStorage};
 use crate::streamed::{state_layout, ParamTiles, StreamedOptimizer, TensorSpec};
 
 /// Tile size of the host update, in elements.
-const OFFLOAD_TILE: usize = 1 << 16;
+const OFFLOAD_TILE: usize = 1 << 22;
 
 /// The device-resident values and gradients of the offloaded tensors, as tiles.
 /// Each tensor is read once per pass and cached while its tiles are processed;
@@ -155,6 +156,23 @@ impl<S: OptimizerStateStorage> OffloadAdam<S> {
         let names = self.opt.specs().iter().map(|s| (s.name.clone(), s.numel)).collect();
         let mut tiles = DeviceTiles { gpu, ps, names, value: None, grad: None };
         self.opt.step(&mut tiles, lr, clip, extra_scale).unwrap_or_else(|e| panic!("OffloadAdam step: {e}"));
+    }
+
+    /// Atomically commit the offloaded values (read off the device), the host state, the step and the rounding seed
+    /// as one generation of `dir`, keyed by the optimizer step.
+    pub fn commit(&mut self, gpu: &Gpu, ps: &ParamStore, dir: &CheckpointDir) -> io::Result<PathBuf> {
+        let names = self.opt.specs().iter().map(|s| (s.name.clone(), s.numel)).collect();
+        let mut tiles = DeviceTiles { gpu, ps, names, value: None, grad: None };
+        let run = RunState { step: self.opt.step_count(), seed: self.opt.seed(), rng_counter: 0, schedule: Vec::new() };
+        dir.commit(&mut self.opt, &mut tiles, &run)
+    }
+
+    /// Restore exactly the generation committed at optimizer step `step`: the values go back to the device, the state
+    /// and the position to this optimiser. `Ok(None)` when no such generation was committed.
+    pub fn restore_at(&mut self, gpu: &Gpu, ps: &ParamStore, dir: &CheckpointDir, step: u32) -> io::Result<Option<RunState>> {
+        let names = self.opt.specs().iter().map(|s| (s.name.clone(), s.numel)).collect();
+        let mut tiles = DeviceTiles { gpu, ps, names, value: None, grad: None };
+        dir.restore_at(&mut self.opt, &mut tiles, step)
     }
 
     /// The streamed optimiser, for checkpointing its state and position.

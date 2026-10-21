@@ -176,6 +176,35 @@ pub fn effective_tile(specs: &[TensorSpec], requested: usize) -> usize {
 
 const VALUE_ROUNDING_SLOT: usize = 255;
 
+/// Elements below which a tile's update runs on the calling thread: spawning costs more than the arithmetic.
+const PARALLEL_MIN_ELEMS: usize = 1 << 15;
+/// Most threads one tile's update uses.
+const PARALLEL_MAX_THREADS: usize = 16;
+
+/// Update every element of a tile with `rule`. The elements are independent, so the tile is cut into contiguous
+/// ranges run on scoped threads when it is large; the result is the same bits as the serial loop.
+fn apply_rule(rule: &Rule, scalars: StepScalars, w: &mut [f32], g: &[f32], s0: &mut [f32], s1: &mut [f32]) {
+    let serial = |w: &mut [f32], g: &[f32], s0: &mut [f32], s1: &mut [f32]| {
+        for i in 0..w.len() {
+            let mut st = [s0[i], s1[i]];
+            rule.update(scalars, &mut w[i], g[i], &mut st);
+            s0[i] = st[0];
+            s1[i] = st[1];
+        }
+    };
+    let n = w.len();
+    let threads = std::thread::available_parallelism().map_or(1, |p| p.get()).min(PARALLEL_MAX_THREADS).min(n / PARALLEL_MIN_ELEMS);
+    if threads <= 1 {
+        return serial(w, g, s0, s1);
+    }
+    let chunk = n.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (((w, g), s0), s1) in w.chunks_mut(chunk).zip(g.chunks(chunk)).zip(s0.chunks_mut(chunk)).zip(s1.chunks_mut(chunk)) {
+            scope.spawn(move || serial(w, g, s0, s1));
+        }
+    });
+}
+
 /// Streamed optimiser over a state storage.
 pub struct StreamedOptimizer<S: OptimizerStateStorage> {
     rule: Rule,
@@ -373,7 +402,7 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
         if let Rule::Adafactor { decay, eps, clip_threshold, wd } = self.rule {
             return self.update_factored(params, ti, lr, grad_multiplier, (decay, eps, clip_threshold, wd));
         }
-        let scalars = StepScalars { t: self.step, lr, grad_scale: grad_multiplier };
+        let scalars = StepScalars::new(&self.rule, self.step, lr, grad_multiplier);
         let nslots = self.rule.slots().len();
         let prec = self.specs[ti].precision;
         let numel = self.specs[ti].numel;
@@ -389,12 +418,8 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
             for s in 0..nslots {
                 self.state.read_tile(ti, s, start, &mut self.st[s][..n])?;
             }
-            for i in 0..n {
-                let mut st = [self.st[0][i], self.st[1][i]];
-                self.rule.update(scalars, &mut self.w[i], self.g[i], &mut st);
-                self.st[0][i] = st[0];
-                self.st[1][i] = st[1];
-            }
+            let [s0, s1] = &mut self.st;
+            apply_rule(&self.rule, scalars, &mut self.w[..n], &self.g[..n], &mut s0[..n], &mut s1[..n]);
             for s in 0..nslots {
                 let rnd = Rounding { stochastic: sr, key: rounding_key(self.seed, self.step, ti, s) };
                 self.state.write_tile(ti, s, start, &self.st[s][..n], rnd)?;
