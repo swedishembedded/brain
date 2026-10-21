@@ -150,12 +150,30 @@ pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
 /// How the joint bidirectional attention runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttentionPath {
+    /// [`AttentionPath::Flash`] where the GEMM attention's score slab (`nh * n^2` floats, three of them) does not
+    /// fit one allocation of the device, and where the device can run the trio; [`AttentionPath::Gemm`] otherwise.
+    /// At 512 px the two take the same time (measured); at 1024 px the slab is past the device limit and only the
+    /// flash path trains at all.
+    Auto,
     /// Per-head GEMMs over head-major packed operands: the fastest per step but it holds the `[nh, n, n]` scores,
     /// probabilities and score gradients (three slabs of `nh * n^2` floats).
     Gemm,
     /// The flash trio (`model::block::flash_bidir_kernels`): `O(n * d)` extra memory (a row log-sum-exp), no
     /// score slabs and no head-major copies. Needs [`kernel_list`] on a device with workgroup reductions.
     Flash,
+}
+
+impl AttentionPath {
+    /// The concrete path for a request: [`AttentionPath::Auto`] becomes Flash exactly when the GEMM attention's score
+    /// slab (`slab_bytes`) exceeds one allocation of the device (`max_allocation_bytes`) and the flash trio is
+    /// available; an explicit choice is returned as it is.
+    pub fn resolve(self, slab_bytes: u64, max_allocation_bytes: u64, flash_available: bool) -> AttentionPath {
+        match self {
+            AttentionPath::Auto if slab_bytes > max_allocation_bytes && flash_available => AttentionPath::Flash,
+            AttentionPath::Auto => AttentionPath::Gemm,
+            explicit => explicit,
+        }
+    }
 }
 
 /// LayerNorm / QK-RMSNorm epsilon - 1e-6 in every FLUX.2 variant, matching
@@ -389,7 +407,12 @@ impl BlockDev {
         BlockDev::from_gpu_attention(gpu, n_max, d, nh, mlp, rank, base, AttentionPath::Gemm)
     }
 
-    /// [`Self::from_gpu_with`] with the attention path chosen. [`AttentionPath::Flash`] panics, naming the
+    /// Bytes of one `[nh, n, n]` score slab of the GEMM attention (it keeps three: scores, probabilities, score gradients).
+    fn score_slab_bytes(nh: usize, n: usize) -> u64 {
+        nh as u64 * model::block::pad64((n * n) as u64) * 4
+    }
+
+    /// [`Self::from_gpu_with`] with the attention path chosen ([`AttentionPath::Auto`] resolves against this device). [`AttentionPath::Flash`] panics, naming the
     /// reason, on a device that cannot run the flash trio or was built without [`kernel_list`]; it allocates
     /// none of the score slabs or head-major operands.
     pub fn from_gpu_attention(gpu: Gpu, n_max: usize, d: usize, nh: usize, mlp: usize, rank: usize, base: BasePrecision, attention: AttentionPath) -> BlockDev {
@@ -405,6 +428,8 @@ impl BlockDev {
         });
         let hd = d / nh;
         assert!(d.is_multiple_of(nh), "hidden {d} must divide by n_heads {nh}");
+        let flash_available = model::block::FlashGqaIds::supported(&gpu, hd as u32) && model::block::flash_bidir_kernels(true).iter().all(|(name, _)| gpu.kernel_index(name).is_some());
+        let attention = attention.resolve(Self::score_slab_bytes(nh, n), gpu.memory_limits().max_allocation_bytes, flash_available);
         let flash = (attention == AttentionPath::Flash).then(|| {
             assert!(
                 model::block::FlashGqaIds::supported(&gpu, hd as u32),
@@ -1322,5 +1347,25 @@ impl BlockDev {
         self.modln_bwd(&mut s, x, 0, self.g("xh1"), self.g("dn1"), SITE_SGL, 0, n);
         s.push(self.gpu.step(K_ADD2, &[dout, self.g("dtmp"), dx], &[(n * d) as u32], (n * d) as u32));
         self.run(&self.single_clears(w), &s);
+    }
+}
+
+#[cfg(test)]
+mod attention_path_tests {
+    use super::*;
+
+    /// `Auto` picks the flash trio exactly when the score slab cannot be allocated and the trio can run; an explicit
+    /// choice is never overridden.
+    #[test]
+    fn auto_flashes_only_what_the_gemm_attention_cannot_allocate() {
+        let slab_1024px = BlockDev::score_slab_bytes(24, 8704);
+        let slab_512px = BlockDev::score_slab_bytes(24, 2560);
+        let device_max = 4094u64 << 20;
+        assert!(slab_1024px > device_max && slab_512px < device_max, "the two real sizes straddle the device limit: {slab_512px} and {slab_1024px} against {device_max}");
+        assert_eq!(AttentionPath::Auto.resolve(slab_1024px, device_max, true), AttentionPath::Flash);
+        assert_eq!(AttentionPath::Auto.resolve(slab_512px, device_max, true), AttentionPath::Gemm);
+        assert_eq!(AttentionPath::Auto.resolve(slab_1024px, device_max, false), AttentionPath::Gemm, "no trio, no choice");
+        assert_eq!(AttentionPath::Gemm.resolve(slab_1024px, device_max, true), AttentionPath::Gemm);
+        assert_eq!(AttentionPath::Flash.resolve(slab_512px, device_max, false), AttentionPath::Flash);
     }
 }
