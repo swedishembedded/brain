@@ -580,14 +580,25 @@ mod tests {
     /// downloaded directory: no converted copy, and the download untouched.
     #[test]
     fn a_pull_finishes_with_a_manifest_and_keeps_the_download() {
-        for (class, family) in [("Lfm2ForCausalLM", "lfm2"), ("Qwen3OmniMoeForConditionalGeneration", "qwen3omnimoe"), ("LlamaForCausalLM", "llama")] {
+        for (class, family) in [("Lfm2ForCausalLM", "lfm2"), ("Qwen3OmniMoeForConditionalGeneration", "qwen3omnimoe"), ("LlamaForCausalLM", "llama"), ("Qwen3_5MoeForConditionalGeneration", "qwen35moe"), ("GlmMoeDsaForCausalLM", "glmdsa")] {
             let store = store(&format!("loader-supply-test-manifest-{family}"));
             let reference = ModelRef::parse(&format!("test/{family}")).unwrap();
             let dir = store.repo_dir(&reference);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("config.json"), serde_json::json!({"architectures": [class]}).to_string()).unwrap();
             std::fs::write(dir.join("model.safetensors"), b"downloaded").unwrap();
+            let listing = || {
+                let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+                names.sort();
+                names
+            };
+            let before = listing();
             convert_transformers(&store, "test", family).unwrap();
+            // The pull adds the small manifest and nothing else: no weight-sized file is written.
+            let mut expected = before.clone();
+            expected.push(MANIFEST_FILE.to_string());
+            expected.sort();
+            assert_eq!(listing(), expected, "{family}: only the manifest is added");
             let manifest: CompoundManifest = serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_FILE)).unwrap()).unwrap();
             assert_eq!(manifest.family, family);
             assert_eq!(manifest.roles.get("weights").map(String::as_str), Some("."));

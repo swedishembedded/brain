@@ -461,6 +461,16 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, k, n) = (p(0)?, p(1)?, p(2)?);
             f(2 * m * k * n, 4 * (m * n + m * k + 2 * n * k))
         }
+        // Stored-format decode GEMVs: params [m, k, count, ..]. One byte per FP8 weight (plus its tile scales), 4.5 bits
+        // per NVFP4 weight (codes plus the E4M3 block scales); f32 activations and outputs.
+        "matmul_fp8_gemv" => {
+            let (m, k, count) = (p(0)?, p(1)?, p(2)?);
+            f(2 * m * k * count, count * k + 4 * (m * k + m * count))
+        }
+        "matmul_nvfp4_gemv" => {
+            let (m, k, count) = (p(0)?, p(1)?, p(2)?);
+            f(2 * m * k * count, count * k / 2 + count * k / 16 + 4 * (m * k + m * count))
+        }
         // int8 DP4A GEMMs: params [m, kg = K/4, n]. The MACs are INTEGER ops
         // (K = 4·kg of them per output); the dequant epilogue (acc·sx·sw) is fp32.
         // `matmul_i8` is the static-scale sibling of the two below and was the

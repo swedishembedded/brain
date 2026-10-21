@@ -1793,13 +1793,13 @@ impl Qwen35 {
         }
     }
 
-    /// The activation a linear reads: int8-packed rows when the int8 tier is on (its linears are DP4A products),
-    /// the f32 rows themselves for every float-read weight (f32, FP8, NVFP4), which would not read a quantised copy.
+    /// The activation a linear reads: the f32 rows themselves on the NVFP4 tier (its FP8 and NVFP4 weights are float-read
+    /// and would not read a quantised copy), the façade's activation (int8-packed where the weights are DP4A) elsewhere.
     fn linear_act(&self, s: &mut Vec<Step>, x: &DeviceBuffer, rows: u32, k: u32) -> Act {
-        if self.q8.is_some() {
-            self.ops.act(s, x, 0, rows, k)
-        } else {
+        if self.nv.is_some() {
             self.ops.act_f32(x, 0, rows, k)
+        } else {
+            self.ops.act(s, x, 0, rows, k)
         }
     }
 

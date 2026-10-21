@@ -10,7 +10,9 @@
 //! * the gather kernel is the decode regime's expert GEMV over a fused bank: its output is the f32 product of the
 //!   decoded weights (E2M1 code x E4M3 block scale x per-expert global scale, the layout of a ModelOpt
 //!   `W4A16_NVFP4` checkpoint; `k` a multiple of 64) with the unquantised activations, within f32 summation error of a host reference;
-//! * the grouped kernel is BIT-identical to the gather kernel on the same bank, ids and activations.
+//! * the grouped kernel agrees with the gather kernel on the same bank, ids and activations to f32 rounding of the
+//!   running sum (on a CUDA device the gather kernel is its native twin, which sums with fused multiply-adds in another
+//!   order; the bits are equal only where both are the WGSL tier).
 
 use data::rng::{random_seed, Lcg};
 use gpu_core::{Dispatch, Gpu};
@@ -124,7 +126,9 @@ fn run_case(gpu: &Gpu, c: &Case, seed: u64) {
     );
     gpu.poll_wait();
     let (gather_bits, grouped_bits) = (read_bits(gpu, &gather, slots * n), read_bits(gpu, &grouped, slots * n));
-    assert_eq!(grouped_bits, gather_bits, "grouped is not bit-identical to gather for slots={slots} k={k} n={n} xdiv={xdiv} experts={ne}");
+    if gpu.native_kernel_for(K_GATHER, &[slots as u32, k as u32, n as u32, xdiv as u32]).is_none() {
+        assert_eq!(grouped_bits, gather_bits, "on the WGSL tier grouped is bit-identical to gather (slots={slots} k={k} n={n})");
+    }
     for s in 0..slots {
         let e = ids[s] as usize;
         for col in 0..n {
@@ -132,7 +136,9 @@ fn run_case(gpu: &Gpu, c: &Case, seed: u64) {
             let want: f64 = (0..k).map(|i| weight(&bank, row, k, i) as f64 * x[(s / xdiv) * k + i] as f64).sum::<f64>() * bank.global[e] as f64;
             let got = f32::from_bits(gather_bits[s * n + col]) as f64;
             let tol = 1e-4 * (1.0 + want.abs()) + 2e-5 * (k as f64).sqrt();
-            assert!((got - want).abs() <= tol, "slot {s} col {col}: got {got}, host reference {want} (slots={slots} k={k} n={n})");
+            assert!((got - want).abs() <= tol, "slot {s} col {col}: gather {got}, host reference {want} (slots={slots} k={k} n={n})");
+            let grouped = f32::from_bits(grouped_bits[s * n + col]) as f64;
+            assert!((grouped - want).abs() <= tol, "slot {s} col {col}: grouped {grouped}, host reference {want} (slots={slots} k={k} n={n})");
         }
     }
 }

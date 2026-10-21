@@ -121,7 +121,8 @@ impl Ops {
     pub(super) fn small_m_gemv(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
         let (first, count) = rows;
         let (m, k) = (act.m, w.k());
-        if m == 0 || m > GEMV_MAX_ROWS {
+        // The kernels reduce across lanes through workgroup memory and barriers; the CPU JIT cannot run them.
+        if m == 0 || m > GEMV_MAX_ROWS || !self.gpu.caps().workgroup_reductions {
             return false;
         }
         // A workgroup covers 4 weight rows per round and amortises its decode table over `rpw` rounds, as many as keep
