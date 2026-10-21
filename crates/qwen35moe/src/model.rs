@@ -411,7 +411,13 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
         // The chunked LM head resolves its elementwise passes by name. Appended
         // unless already registered above.
-        for &(name, src) in model::ops::frozen_base_kernels().iter().chain(model::head_ce::kernels()) {
+        // Training attention runs the causal GQA flash trio at long sequences (no `[H,T,T]` probabilities).
+        let flash = [
+            ("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA),
+            ("flash_attn_causal_gqa_bwd_dq", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ),
+            ("flash_attn_causal_gqa_bwd_dkv", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DKV),
+        ];
+        for &(name, src) in model::ops::frozen_base_kernels().iter().chain(model::head_ce::kernels()).chain(&flash) {
             if !v.iter().any(|(have, _)| *have == name) {
                 v.push((name, src));
             }
@@ -908,6 +914,10 @@ pub struct Qwen35 {
     /// of panicking. `false` (the `new`/`new_i8` paths) keeps today's
     /// inference-only behaviour byte-for-byte.
     is_train: bool,
+    /// The causal GQA flash trio, when the pipeline set registers it (see [`Self::training_flash`]).
+    flash: Option<model::block::FlashGqaIds>,
+    /// Shortest sequence the training forward hands to [`Self::flash`] (see [`Self::set_flash_min_t`]).
+    flash_min_t: std::cell::Cell<u32>,
     opt: Optim,
 
     tokens: DeviceBuffer,
@@ -1548,6 +1558,10 @@ impl Qwen35 {
         // non-i8 case costs no extra VRAM or re-upload. Mirrors `qwen3::
         // model::Qwen::new_impl`'s own B7 `weights` construction exactly.
         let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen35moe: Ops::new: {e}"));
+        let flash = match (gpu.kernel_index("flash_attn_causal_gqa"), gpu.kernel_index("flash_attn_causal_gqa_bwd_dq"), gpu.kernel_index("flash_attn_causal_gqa_bwd_dkv")) {
+            (Some(fwd), Some(bwd_dq), Some(bwd_dkv)) => Some(model::block::FlashGqaIds { fwd, bwd_dq, bwd_dkv, native: !ops.tensor_gemm().is_reference_pinned() }),
+            _ => None,
+        };
         let (d_u, conv_dim_u, vdim_u, nvh_u, hqp_u, hkv_u, hq_u) = (
             cfg.d_model as usize,
             cfg.linear_conv_dim() as usize,
@@ -1695,6 +1709,8 @@ impl Qwen35 {
             t,
             chunk,
             is_train: train,
+            flash,
+            flash_min_t: std::cell::Cell::new(model::block::FlashGqaIds::MIN_TRAIN_T),
             opt,
             tokens,
             targets,
@@ -2065,6 +2081,26 @@ impl Qwen35 {
         KvKernels::resolve(&self.gpu, layer.k.tier()).unwrap_or_else(|e| panic!("qwen35moe: {e}"))
     }
 
+    /// The flash-attention trio a TRAINING forward over this instance's `t` tokens runs instead of
+    /// materialising the `[B,H,T,T]` scores and probabilities: on a device that can run it, from
+    /// [`model::block::FlashGqaIds::MIN_TRAIN_T`] tokens up (below that the chain is cheaper and is the
+    /// reference the trio is tested against). Inference keeps the chain.
+    fn training_flash(&self) -> Option<model::block::FlashGqaIds> {
+        let ids = self.flash?;
+        (self.is_train && self.t >= self.flash_min_t.get() && model::block::FlashGqaIds::supported(&self.gpu, self.cfg.head_dim)).then_some(ids)
+    }
+
+    /// Shortest sequence whose training attention runs the flash kernels; `u32::MAX` keeps the materialised chain,
+    /// which is what the trio is tested against.
+    pub fn set_flash_min_t(&self, min_t: u32) {
+        self.flash_min_t.set(min_t);
+    }
+
+    /// Whether this instance's training attention runs the flash kernels rather than the materialised chain.
+    pub fn attention_is_flash(&self) -> bool {
+        self.training_flash().is_some()
+    }
+
     fn layer_gqa_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32, cached: Option<GqaCached>) -> (DeviceBuffer, Option<GqaLayerActs>) {
         self.layer_gqa_fwd_pre(l, xn1, None, false, n, cached)
     }
@@ -2119,7 +2155,7 @@ impl Qwen35 {
         let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos, sin };
         let mut o_proj_act: Option<Act> = None;
         let (ctx_gated, internals) = match cached {
-            None => model::gqa_mixer::gqa_mixer_fwd(g, &gqa_mixer_ids(), &shape, &weights, &q_full, &k, &v, n, self.is_train),
+            None => model::gqa_mixer::gqa_mixer_fwd_tc(g, &gqa_mixer_ids(), self.training_flash(), Some(self.ops.tensor_gemm()), &shape, &weights, &q_full, &k, &v, n, self.is_train),
             Some(GqaCached::Chunk(ch)) => (
                 model::gqa_mixer::gqa_mixer_chunk_kv_fwd(
                     g,
