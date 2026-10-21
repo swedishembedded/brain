@@ -45,7 +45,7 @@ fn mean_loss(m: &Qwen, seqs: &[(Vec<u32>, Vec<u32>)]) -> f32 {
     s / seqs.len() as f32
 }
 
-fn run(name: &str, path: &str, value: ResidentValue, state: StateFormat, grad: GradDtype, export: QuantEncoding) {
+fn run(name: &str, path: &str, value: ResidentValue, state: StateFormat, grad: GradDtype, export: QuantEncoding, rule: Rule) {
     let (cfg, init) = qwen3::open_checkpoint(path).expect("open checkpoint");
     let vocab = cfg.vocab;
     let opts = model::FitOpts { batch_size: 1, block_size: T, ..Default::default() };
@@ -53,12 +53,13 @@ fn run(name: &str, path: &str, value: ResidentValue, state: StateFormat, grad: G
         value,
         master: MasterPolicy::F32,
         state,
-        rule: Rule::AdamW { adam: model::Adam::default(), wd: 0.0 },
+        rule,
         grad,
         stochastic_state: true,
         seed: Some(1),
         tile_elems: 1 << 23,
         state_dir: None,
+        defer_publication: false,
     };
     let m = qwen3::finetune::build_resident(cfg, &opts, &*init, &rcfg).expect("build");
     drop(init);
@@ -122,7 +123,8 @@ fn qwen3_0_6b_resident_bf16_and_fp8_full_fine_tune() {
         brain_testutil::skip_unavailable("Qwen/Qwen3-0.6B is not in the model store");
         return;
     }
-    run("resident bf16, f32 master, f32 moments", &path, ResidentValue::Bf16, StateFormat::F32, GradDtype::F32, QuantEncoding::bf16());
-    run("resident bf16, f32 master, int8 moments, bf16 grads", &path, ResidentValue::Bf16, StateFormat::Int8Block { block: 64 }, GradDtype::Bf16, QuantEncoding::bf16());
-    run("resident fp8, f32 master, f32 moments", &path, ResidentValue::Fp8E4M3 { block: 128 }, StateFormat::F32, GradDtype::F32, QuantEncoding::fp8_e4m3_tiled(128));
+    run("resident bf16, f32 master, f32 moments", &path, ResidentValue::Bf16, StateFormat::F32, GradDtype::F32, QuantEncoding::bf16(), Rule::AdamW { adam: model::Adam::default(), wd: 0.0 });
+    run("resident bf16, f32 master, int8 moments, bf16 grads", &path, ResidentValue::Bf16, StateFormat::Int8Block { block: 64 }, GradDtype::Bf16, QuantEncoding::bf16(), Rule::AdamW { adam: model::Adam::default(), wd: 0.0 });
+    run("resident fp8, f32 master, f32 moments", &path, ResidentValue::Fp8E4M3 { block: 128 }, StateFormat::F32, GradDtype::F32, QuantEncoding::fp8_e4m3_tiled(128), Rule::AdamW { adam: model::Adam::default(), wd: 0.0 });
+    run("resident bf16, f32 master, adafactor", &path, ResidentValue::Bf16, StateFormat::F32, GradDtype::F32, QuantEncoding::bf16(), Rule::adafactor(0.0));
 }

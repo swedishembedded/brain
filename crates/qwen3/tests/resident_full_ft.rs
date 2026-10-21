@@ -75,6 +75,7 @@ fn resident(value: ResidentValue, state: StateFormat) -> ResidentFtConfig {
         seed: Some(5),
         tile_elems: 256,
         state_dir: None,
+        defer_publication: false,
     }
 }
 
@@ -179,6 +180,26 @@ fn the_exported_model_reloads_and_computes_the_trained_loss() {
         eprintln!("{label}: trained loss {want}, reloaded loss {got}");
         assert!((got - want).abs() <= tol * want.abs().max(1.0), "{label}: reloaded {got} vs trained {want}");
     }
+    std::fs::remove_dir_all(&scratch).unwrap();
+}
+
+/// Spec: updating the tensors in backward order into a `DeferredPublish` store and publishing them together gives the
+/// run exactly the weights the direct update gives (the resident state is the consumer of both).
+#[test]
+fn a_run_with_deferred_publication_ends_exactly_where_the_direct_run_does() {
+    let scratch = tmp("defer");
+    write_dataset(&scratch);
+    let opts = opts(8);
+    let run = |defer: bool| {
+        let cfg = cfg();
+        let init = qwen3::init_weights(&cfg, 7);
+        let mut plan = plan(ResidentValue::Fp8E4M3 { block: 128 }, StateFormat::Int8Block { block: 64 });
+        plan.cfg.defer_publication = defer;
+        let m = Qwen::new_resident(cfg, 1, 16, &init, &plan, gpu_core::provider::library::GemmPrecision::Fp32Reference).unwrap();
+        let (_, m) = model::fit_controlled(m, objective::<Qwen>(&scratch, &opts), &opts, None, model::FitControl::default()).unwrap();
+        linears(&m)
+    };
+    assert_eq!(run(false), run(true));
     std::fs::remove_dir_all(&scratch).unwrap();
 }
 

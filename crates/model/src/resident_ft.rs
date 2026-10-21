@@ -117,6 +117,10 @@ pub struct ResidentFtConfig {
     pub tile_elems: usize,
     /// Directory for the on-disk optimizer state; `None` keeps it in memory.
     pub state_dir: Option<PathBuf>,
+    /// Hold the updated values in an [`optim::deferred::DeferredPublish`] store and publish them together once every
+    /// tensor of the step is updated, as a trainer that updates tensors while their gradients are still being
+    /// produced must. The result is the same bits; the price is one f32 copy of the resident weights in host memory.
+    pub defer_publication: bool,
 }
 
 impl ResidentFtConfig {
@@ -534,6 +538,12 @@ impl ResidentFullFt {
     /// [`Self::step`] with the gradient multiplier already decided, for a trainer whose global clip spans
     /// parameters this state does not hold (it adds its own [`Self::grad_sum_sq`] to theirs).
     pub fn step_scaled(&mut self, ops: &Ops, lr: f32, grad_multiplier: f32) -> io::Result<StepReport> {
+        if self.cfg.defer_publication {
+            // Backward order: the last tensor's gradient completes first.
+            let n = self.specs.len();
+            self.layered_step(ops, lr, grad_multiplier, |step| (0..n).rev().try_for_each(|i| step.update(i)))?;
+            return Ok(StepReport { step: self.state.step_count(), grad_multiplier });
+        }
         let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
         let t0 = std::time::Instant::now();
         let step = self.state.begin_step();
