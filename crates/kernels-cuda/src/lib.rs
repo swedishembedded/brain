@@ -66,6 +66,9 @@ pub const MMA_S8_MIN_CC: Cc = (8, 0);
 /// The compute capability that introduced the FP8 conversions (`cvt.rn.f16x2.e4m3x2`): Ada.
 pub const FP8_CVT_MIN_CC: Cc = (8, 9);
 
+/// The compute capability that introduced thread-block clusters and their distributed shared memory: Hopper.
+pub const CLUSTER_MIN_CC: Cc = (9, 0);
+
 /// Rows of x from which `matmul_i8_gemv` runs its int8 tensor-core block (see
 /// [`backend_api::select::I8_GEMV_MMA_MIN_ROWS`]); the source's `BRAIN_I8G_MMA_MIN_ROWS` is the
 /// same number and a test holds the two together.
@@ -1151,6 +1154,28 @@ pub const ALL: &[CudaKernel] = &[
         // 32 warp maxima + 1024 x 18 quantised bytes exchanged between threads.
         shared_bytes: 32 * 4 + 1024 * 18,
         src: include_str!("../cu/quant_epilogue.cu"),
+    },
+    CudaKernel {
+        name: "quant_epilogue_cluster",
+        // A fused kernel asked for by name, like `add_rms_quant`: the operator
+        // and tier say what it produces (per-row scales and a packed int8
+        // activation), and a fused kernel is always looked up through `get`,
+        // never through `find`, which is the matmul providers' selector.
+        op: Op::MaxAbsRow,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_quant_epilogue_cluster",
+        what: "quant_epilogue with each row split over a cluster of four blocks on four SMs, the row max exchanged through distributed shared memory; bit-identical to the one-block form",
+        reported: "native:quant_epilogue_cluster",
+        block_dim: 1024,
+        tile: (1, 1),
+        // 32 warp maxima + 1024 x 18 quantised bytes exchanged between threads.
+        shared_bytes: 32 * 4 + 1024 * 18,
+        src: concat!("#define BRAIN_QE_CLUSTER 4
+#define brain_quant_epilogue brain_quant_epilogue_cluster
+", include_str!("../cu/quant_epilogue.cu")),
     },
     CudaKernel {
         name: "gdn_decode",

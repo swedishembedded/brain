@@ -821,6 +821,9 @@ const GDN_COMMIT_TILE: u32 = 4096;
 /// Threads per block of [`Fused::Conv2dDwReduce`], one weight element each.
 const CONV_DW_REDUCE_BLOCK: u32 = 256;
 
+/// Blocks of one `quant_epilogue` row (`BRAIN_QE_CLUSTER` in its source).
+const QUANT_EPILOGUE_CLUSTER: u32 = 4;
+
 /// `add_rms_quant`'s bindings: params, `a`, `b`, `w`, `sum`, `xn`, `xq`, `sx`.
 const ADD_RMS_QUANT_BINDINGS: &[BindKind] = &[
     BindKind::Uniform,
@@ -1087,6 +1090,30 @@ impl Fused {
         }
     }
 
+    /// Whether `which` runs as clusters of [`QUANT_EPILOGUE_CLUSTER`] blocks per row on a device of capability `cc`:
+    /// `quant_epilogue` from Hopper, where a block cluster exists (`quant_epilogue_cluster`).
+    fn clustered(self, cc: kernels_cuda::Cc) -> bool {
+        self == Fused::QuantEpilogue && cc >= kernels_cuda::CLUSTER_MIN_CC
+    }
+
+    /// The registry entry this kernel resolves to on a device of capability `cc`.
+    fn registry_name_on(self, cc: kernels_cuda::Cc) -> &'static str {
+        if self.clustered(cc) { "quant_epilogue_cluster" } else { self.registry_name() }
+    }
+
+    /// How it is launched on a device of capability `cc`. A device that cannot launch clusters declines the
+    /// registration, and the caller keeps the WGSL chain.
+    fn launch_on(self, cc: kernels_cuda::Cc) -> CudaLaunch {
+        if self.clustered(cc) { CudaLaunch { cluster: Some([QUANT_EPILOGUE_CLUSTER, 1, 1]), ..CudaLaunch::NONE } } else { CudaLaunch::NONE }
+    }
+
+    /// Blocks a dispatch with these `params` launches on a device of capability `cc` ([`Self::blocks`], times the
+    /// cluster where the kernel runs as one).
+    pub(crate) fn blocks_on(self, params: &[u32], cc: Option<kernels_cuda::Cc>) -> u32 {
+        let per = if cc.is_some_and(|cc| self.clustered(cc)) { QUANT_EPILOGUE_CLUSTER } else { 1 };
+        self.blocks(params) * per
+    }
+
     /// The registry entry's output tile.
     fn tile(self) -> (u32, u32) {
         kernels_cuda::get(self.registry_name()).map_or((128, 128), |k| k.tile)
@@ -1100,7 +1127,7 @@ pub(crate) fn resolve_fused(backend: &dyn Backend, which: Fused) -> Option<Nativ
         return None;
     }
     let cc = backend.caps().arch.compute_capability?;
-    let k = kernels_cuda::get(which.registry_name())?;
+    let k = kernels_cuda::get(which.registry_name_on(cc))?;
     if k.min_cc > cc {
         return None;
     }
@@ -1110,7 +1137,7 @@ pub(crate) fn resolve_fused(backend: &dyn Backend, which: Fused) -> Option<Nativ
         block_dim: k.block_dim,
         bindings: which.bindings(),
         shared_bytes: k.shared_bytes,
-        launch: CudaLaunch::NONE,
+        launch: which.launch_on(cc),
     })
 }
 

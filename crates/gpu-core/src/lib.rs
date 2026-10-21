@@ -2032,7 +2032,7 @@ mod native_facade {
                 return None;
             }
             let id = self.fused_id(which)?;
-            self.step_native(id, bufs, params, which.blocks(params))
+            self.step_native(id, bufs, params, which.blocks_on(params, self.caps().arch.compute_capability))
         }
 
         /// [`Self::fused_step`] binding a sub-range of each buffer, with
@@ -2044,7 +2044,7 @@ mod native_facade {
                 return None;
             }
             let id = self.fused_id(which)?;
-            self.step_native_sliced(id, bufs, offsets, params, which.blocks(params))
+            self.step_native_sliced(id, bufs, offsets, params, which.blocks_on(params, self.caps().arch.compute_capability))
         }
 
         /// How the native dense-conv weight gradient of `params` (the ten-word
