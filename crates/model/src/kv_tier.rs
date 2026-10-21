@@ -605,8 +605,19 @@ const FLASH_TARGET_WORKGROUPS: u32 = 128;
 /// [`FLASH_TARGET_WORKGROUPS`]. A split past a sequence's live length costs one
 /// degenerate partial record, so over-splitting a short sequence is cheap.
 fn flash_splits(cap: u32, batch: u32, n_kv_heads: u32) -> (u32, u32) {
+    flash_splits_for(FLASH_TARGET_WORKGROUPS, cap, batch, n_kv_heads)
+}
+
+/// Blocks per multiprocessor a native decode dispatch aims for: the native
+/// kernel keeps several blocks resident per SM, and a decode read is latency
+/// bound until each SM has enough rows in flight, so its grid is cut finer than
+/// the WGSL tier's (which measured no gain from it: knowledge 350).
+const FLASH_NATIVE_BLOCKS_PER_SM: u32 = 2;
+
+/// [`flash_splits`] towards `target` workgroups.
+fn flash_splits_for(target: u32, cap: u32, batch: u32, n_kv_heads: u32) -> (u32, u32) {
     let tiles = cap.max(1).div_ceil(FLASH_TILE);
-    let wanted = FLASH_TARGET_WORKGROUPS.div_ceil((batch * n_kv_heads).max(1)).max(1);
+    let wanted = target.div_ceil((batch * n_kv_heads).max(1)).max(1);
     let per_split = tiles.div_ceil(wanted).clamp(1, FLASH_TILES_PER_SPLIT);
     (tiles.div_ceil(per_split), per_split)
 }
@@ -716,11 +727,19 @@ impl KvKernels {
         self.check(v);
         let group = s.n_heads / s.n_kv_heads;
         assert!(self.flash_decode_available(g, s.head_dim, group), "KvKernels::flash_decode: not available for head_dim {} group {group} on this device", s.head_dim);
-        let (n_splits, tiles_per_split) = flash_splits(s.cap, s.batch, s.n_kv_heads);
-        let part = g.storage(s.batch as u64 * s.n_heads as u64 * n_splits as u64 * (FLASH_HEAD_DIM as u64 + 2));
-        let params = [s.batch, s.n_heads, s.n_kv_heads, s.head_dim, group, s.block_size, s.max_bt, n_splits, tiles_per_split];
-        let grid = Dispatch::Workgroups(s.batch * s.n_kv_heads * n_splits);
         let decode = self.decode.iter().find(|&&(gr, _)| gr == group).expect("checked by flash_decode_available").1;
+        let (n_splits, tiles_per_split) = flash_splits(s.cap, s.batch, s.n_kv_heads);
+        let mut params = [s.batch, s.n_heads, s.n_kv_heads, s.head_dim, group, s.block_size, s.max_bt, n_splits, tiles_per_split];
+        // A native kernel's grid fills the device several blocks deep (the split count is a free choice: every split
+        // writes its own record, and the combine merges any number of them).
+        if g.native_kernel_for(decode, &params).is_some() {
+            let target = g.caps().compute_units.map_or(FLASH_TARGET_WORKGROUPS, |cu| cu * FLASH_NATIVE_BLOCKS_PER_SM);
+            (params[7], params[8]) = flash_splits_for(target, s.cap, s.batch, s.n_kv_heads);
+        }
+        let n_splits = params[7];
+        // Every (sequence, head, split) record is written, a split with no live key included, so the slab needs no clear.
+        let part = g.storage_uninit(s.batch as u64 * s.n_heads as u64 * n_splits as u64 * (FLASH_HEAD_DIM as u64 + 2));
+        let grid = Dispatch::Workgroups(s.batch * s.n_kv_heads * n_splits);
         let split = match (&k.scales, &v.scales) {
             (None, None) => g.dispatch(decode, &[q, &k.data, &v.data, block_tables, seq_lens, &part], &params, grid),
             (Some(ks), Some(vs)) => g.dispatch(decode, &[q, &k.data, &v.data, block_tables, seq_lens, &part, ks, vs], &params, grid),

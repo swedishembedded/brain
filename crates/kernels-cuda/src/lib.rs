@@ -664,6 +664,25 @@ pub const ALL: &[CudaKernel] = &[
         ),
     },
     CudaKernel {
+        name: "paged_flash_decode_gqa_hd256_kv8",
+        // Redirected to by name from the WGSL `paged_flash_decode_gqa_hd256#GRP=6#kv=int8` (`gpu_core::native_upgrade`).
+        op: Op::PagedAttentionFused,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // mma.sync.m16n8k16 with f16 inputs: the floor every fp16 tensor-core kernel here shares.
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_paged_flash_decode_gqa_hd256_kv8",
+        what: "split-key GQA decode attention at head_dim 256 and group 6 over an int8 paged pool on f16 tensor cores (int8 exact in f16, query and probabilities split into two f16 parts): each warp runs its own 16-key chunks, every head of the group from one read of each row; the partial records of the WGSL kernel",
+        reported: "native:paged_flash_decode_gqa_hd256_kv8",
+        block_dim: 128,
+        // One block per (sequence, kv head, key split).
+        tile: (1, 1),
+        // The query fragments (16 k-steps x 32 lanes x 16 bytes) plus the merge of 4 warps x 8 heads: 256 outputs, max, sum.
+        shared_bytes: 16 * 32 * 16 + 4 * 8 * (256 + 2) * 4,
+        src: concat!("#define BRAIN_GRP 6\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
+    },
+    CudaKernel {
         name: "kv_append_i8_clipped",
         // Redirected to by name from the WGSL `paged_kv_append_i8_clipped_batched` (`gpu_core::native_upgrade`).
         op: Op::Elementwise,

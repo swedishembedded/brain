@@ -285,6 +285,39 @@ fn kv_append_i8_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
     (p[0] * (p[1] / p[3])).div_ceil(tile.0)
 }
 
+/// `paged_flash_decode_gqa_hd256.wgsl`'s int8 bindings: params, `q`, the two
+/// pools, `block_tables`, `seq_lens`, the written partial records, then the key
+/// and value row scales.
+const FLASH_DECODE_KV8_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+];
+
+/// The query heads per kv head the native int8 decode kernel is compiled for
+/// (`BRAIN_GRP` in its registry entry).
+const FLASH_DECODE_GROUP: u32 = 6;
+
+/// `[batch, n_heads, n_kv_heads, head_dim, group, block_size, max_bt,
+/// n_splits, tiles_per_split]` at head_dim 256 and the compiled group, with a
+/// grid the 32-bit block index covers.
+fn serves_flash_decode_kv8(p: &[u32]) -> bool {
+    matches!(p, [batch, heads, nkv, 256, FLASH_DECODE_GROUP, bs, bt, splits, per]
+        if *batch >= 1 && *nkv >= 1 && *heads == nkv * FLASH_DECODE_GROUP && *bs >= 1 && *bt >= 1 && *splits >= 1 && *per >= 1
+            && u64::from(*batch) * u64::from(*nkv) * u64::from(*splits) <= u64::from(u32::MAX))
+}
+
+/// One block per (sequence, kv head, key split).
+fn flash_decode_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[0] * p[2] * p[7]
+}
+
 pub(crate) const ROWS: &[Row] = &[
     Row {
         slow: "paged_kv_append_i8_clipped_batched",
@@ -292,6 +325,14 @@ pub(crate) const ROWS: &[Row] = &[
         bindings: KV_APPEND_I8_BINDINGS,
         serves: serves_kv_append_i8,
         blocks: kv_append_i8_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=int8",
+        target: Target::Named("paged_flash_decode_gqa_hd256_kv8"),
+        bindings: FLASH_DECODE_KV8_BINDINGS,
+        serves: serves_flash_decode_kv8,
+        blocks: flash_decode_blocks,
         requires_wgsl_upgrade: false,
     },
     Row {
