@@ -31,4 +31,10 @@ fp16 at the shared-memory write, exactly where the int8 kernel widens). On a GH2
 behind 1792 cached) it takes 0.49 ms against the portable kernel's 4.3 ms (8.9x; int8 0.28 against 3.9 ms, 14x), and
 agrees with the portable fp8 kernel to rel-L2 4.4e-4 at unit scores and 1.6e-3 at score scale 16 (bar 3e-3).
 
+Real 27B (Q8_0 GGUF, one ~1.8k-token real prompt, 24 forced decode steps, f32 cache as the reference, runs/qkv/real27b.log):
+the numerics' own floor (f32 decode tape against f32 chunk tape) is rel-L2 mean 1.27e-1 with top-1 95.8%; bf16 is 1.52e-1
+(1.2x the floor, top-1 91.7%), int8 1.48e-1 (1.2x, 91.7%), fp8 1.50e-1 (1.2x, 87.5%). All three tiers sit at the floor; fp8
+flips one more position of 24 than the others (n = 24, one prompt, so not separable), and its flips are at f32 margins of
+0.25 to 0.56.
+
 Not done: the FP4/INT4 tiers are not started (the evidence above says fp8 is usable, int4 needs its own accuracy campaign).
