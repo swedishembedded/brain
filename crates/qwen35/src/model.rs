@@ -3279,13 +3279,14 @@ impl Qwen35 {
         };
         let d = self.cfg.d_model;
         let rows = self.mlp_rows.get().expect("qwen35: an MLP saved as rows needs mlp_rows");
-        // The row chunks tile all n rows, and each is written whole by put_rows.
+        // The row chunks tile all n rows, and each is copied in whole: a copy (`put_rows_copy`), because
+        // `put_rows` adds and an uncleared buffer holds whatever the allocator last freed there.
         let d_xn2 = self.gpu.storage_uninit((n * d) as u64);
         for row0 in (0..n).step_by(rows as usize) {
             let rc = rows.min(n - row0);
             let acts = self.mlp_acts_only(prefix, &self.take_rows(xn2, d, n, row0, rc), rc);
             let d_chunk = self.mlp_bwd(prefix, &acts, &self.take_rows(d_mlp_out, d, n, row0, rc), rc);
-            self.put_rows(&d_chunk, &d_xn2, d, row0, rc);
+            self.put_rows_copy(&d_chunk, &d_xn2, d, row0, rc);
         }
         self.gpu.poll_wait();
         d_xn2
