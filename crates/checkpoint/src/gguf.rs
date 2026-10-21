@@ -1121,12 +1121,20 @@ pub(crate) fn dequantize(ty: u32, raw: &[u8], numel: usize) -> Result<Vec<f32>, 
 /// this size it stays in cache, so the copy costs far less than the
 /// parallelism buys. On wasm (no threads, and `backend-cpu` does not build
 /// there) the serial walk is kept verbatim.
+///
+/// A range of at most [`SERIAL_MAX_BLOCKS`] blocks is walked serially here too: handing a few groups to the pool from
+/// a thread outside it costs a cold injection and a blocking wait, tens of microseconds, against about as many
+/// nanoseconds of decode per block. A served 27B prompt round gathered 512 embedding rows one `tensor_range` each,
+/// and that hand-off kept the device idle at the start of every round (`qwen35` `embedding_gather_timing_at_a_prompt_round`).
 #[cfg(not(target_arch = "wasm32"))]
 fn deq_blocks(raw: &[u8], numel: usize, block_bytes: usize, f: fn(&[u8], &mut Vec<f32>)) -> Vec<f32> {
     const GROUP: usize = 64;
     let nblocks = raw.len() / block_bytes;
     if nblocks == 0 {
         return Vec::new();
+    }
+    if nblocks <= SERIAL_MAX_BLOCKS {
+        return deq_blocks_serial(raw, numel, block_bytes, f);
     }
     // Element count per block, derived from this decoder rather than passed
     // in: the whole block stream produces the same count for every block, so
@@ -1147,10 +1155,18 @@ fn deq_blocks(raw: &[u8], numel: usize, block_bytes: usize, f: fn(&[u8], &mut Ve
     out
 }
 
-/// The serial walk [`deq_blocks`] documents - kept for wasm, which has neither
-/// threads nor `backend-cpu`.
+/// The serial walk [`deq_blocks`] documents - the whole of it on wasm, which has neither threads nor `backend-cpu`.
 #[cfg(target_arch = "wasm32")]
 fn deq_blocks(raw: &[u8], numel: usize, block_bytes: usize, f: fn(&[u8], &mut Vec<f32>)) -> Vec<f32> {
+    deq_blocks_serial(raw, numel, block_bytes, f)
+}
+
+/// Blocks at or under which [`deq_blocks`] decodes on the calling thread (four of its parallel groups).
+#[cfg(not(target_arch = "wasm32"))]
+const SERIAL_MAX_BLOCKS: usize = 256;
+
+/// [`deq_blocks`]' block walk on the calling thread.
+fn deq_blocks_serial(raw: &[u8], numel: usize, block_bytes: usize, f: fn(&[u8], &mut Vec<f32>)) -> Vec<f32> {
     let mut out = Vec::with_capacity(numel);
     for blk in raw.chunks_exact(block_bytes) {
         f(blk, &mut out);
@@ -1787,6 +1803,25 @@ impl MmapGguf {
         // leading partial block off is byte-identical to a full decode.
         let lead = start_elem - b0 * block_elems;
         Some(dequantize(ty, span, lead + len_elem).map(|v| v[lead..].to_vec()).map_err(|e| format!("gguf: {name}: {e}")))
+    }
+
+    /// Rows `rows` of a 2-D tensor `name` whose rows are `row_len` elements, decoded and concatenated in the order
+    /// given (`[rows.len(), row_len]`): [`Self::tensor_range`] for each row, the rows decoded in parallel with one
+    /// hand-off to the CPU pool rather than one per row. `None` if the name is unknown or a row is out of range.
+    pub fn tensor_rows(&self, name: &str, rows: &[usize], row_len: usize) -> Option<Result<Vec<f32>, String>> {
+        let &(_, _, _, _, numel) = self.index.get(name)?;
+        if row_len == 0 || rows.iter().any(|&r| r.checked_add(1).and_then(|e| e.checked_mul(row_len)).is_none_or(|e| e > numel)) {
+            return None;
+        }
+        let decoded = backend_cpu::par::map(rows.len(), |i| self.tensor_range(name, rows[i] * row_len, row_len).expect("the row was bounds-checked above"));
+        let mut out = Vec::with_capacity(rows.len() * row_len);
+        for row in decoded {
+            match row {
+                Ok(r) => out.extend_from_slice(&r),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        Some(Ok(out))
     }
 
     /// `name`'s RAW on-disk bytes (still quantized, if applicable) plus its
@@ -2764,6 +2799,16 @@ mod tests {
             assert!(mg.tensor_range(name, usize::MAX, 1).is_none());
         }
         assert!(mg.tensor_range("nope", 0, 1).is_none());
+
+        // A gather of whole rows, in any order and with repeats, is those rows of the whole-tensor decode.
+        let q = mg.tensor("q.weight").unwrap().unwrap();
+        let got = mg.tensor_rows("q.weight", &[1, 0, 1], 32).expect("in range").unwrap();
+        assert_eq!(got, [&q[32..64], &q[..32], &q[32..64]].concat());
+        let f = mg.tensor("f.weight").unwrap().unwrap();
+        assert_eq!(mg.tensor_rows("f.weight", &[2, 0], 4).expect("in range").unwrap(), [&f[8..12], &f[..4]].concat());
+        assert!(mg.tensor_rows("q.weight", &[2], 32).is_none(), "a row past the end is refused");
+        assert!(mg.tensor_rows("q.weight", &[0], 0).is_none(), "an empty row length is refused");
+        assert!(mg.tensor_rows("nope", &[0], 1).is_none());
 
         std::fs::remove_file(&path).ok();
     }

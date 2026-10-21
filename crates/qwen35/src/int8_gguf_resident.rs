@@ -1121,19 +1121,16 @@ impl Qwen35GgufInstance {
     /// [`Self::embed_row`]'s chunked form, and stage 0's `input_override` for
     /// [`Qwen35::prefill_chunk_stage`].
     ///
-    /// One [`MmapGguf::tensor_range`] call per row and no more: an arbitrary
-    /// set of token ids names an arbitrary set of ROWS, which are not
-    /// contiguous in the `[vocab, d_model]` table, so there is no wider range
-    /// to ask for. What the chunk actually saves is downstream - one host
-    /// round trip per stage per ROUND rather than per token - and the gather
-    /// itself stays at `embed_row`'s cost, one row's quant blocks at a time,
-    /// never the 5.09 GB table.
+    /// The rows are gathered by [`MmapGguf::tensor_rows`]: an arbitrary set of token ids names an arbitrary set of
+    /// ROWS, which are not contiguous in the `[vocab, d_model]` table, so each is its own range of quant blocks
+    /// (never the 5.09 GB table), and the rows decode in parallel with one hand-off to the CPU pool. One hand-off per
+    /// row, as this was, kept the device idle at the start of every 512-row prompt round.
     fn embed_rows(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
-        let mut out = Vec::with_capacity(tokens.len() * self.embed.d);
-        for &t in tokens {
-            out.extend_from_slice(&self.embed_row(t)?);
-        }
-        Ok(out)
+        let rows: Vec<usize> = tokens.iter().map(|&t| t as usize).collect();
+        self.mg.tensor_rows(&self.embed.name, &rows, self.embed.d).ok_or_else(|| {
+            let bad = tokens.iter().find(|&&t| self.mg.tensor_range(&self.embed.name, t as usize * self.embed.d, self.embed.d).is_none()).copied().unwrap_or(0);
+            format!("{MODEL}: token id {bad} is outside '{}'", self.embed.name)
+        })?
     }
 
     /// One token through EVERY stage in order, then the head - returning

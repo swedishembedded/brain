@@ -1007,3 +1007,20 @@ fn mtp_drafts_stay_inside_paged_blocks_and_a_resumed_checkpoint_still_drafts() {
     assert!(after.proposed > before.proposed, "a prompt resumed from a checkpoint drafts from the MTP head");
     assert!(after.accepted > before.accepted, "and the target accepts some of the head's proposals");
 }
+
+/// Host time of gathering a 512-token prompt round's embedding rows from the real checkpoint: one `tensor_range` per
+/// row (what a round did) against one `tensor_rows` gather (what it does now), best of several rounds. A timing
+/// report, not a spec; CPU only.
+#[test]
+#[ignore = "a timing report for host work, not a spec"]
+fn embedding_gather_timing_at_a_prompt_round() {
+    let Some(path) = gguf_path() else { return };
+    let mg = MmapGguf::open(&path).expect("open the real checkpoint");
+    let (name, d) = ("token_embd.weight", 5120usize);
+    let rows: Vec<usize> = (0..512usize).map(|i| (i * 7919 + 13) % 248_000).collect();
+    let best = |f: &dyn Fn() -> Vec<f32>| (0..5).map(|_| { let t = Instant::now(); std::hint::black_box(f()); t.elapsed().as_secs_f64() }).fold(f64::MAX, f64::min);
+    let per_row = best(&|| rows.iter().flat_map(|&r| mg.tensor_range(name, r * d, d).expect("in range").expect("decodes")).collect());
+    let gather = best(&|| mg.tensor_rows(name, &rows, d).expect("in range").expect("decodes"));
+    assert_eq!(rows.iter().flat_map(|&r| mg.tensor_range(name, r * d, d).unwrap().unwrap()).collect::<Vec<f32>>(), mg.tensor_rows(name, &rows, d).unwrap().unwrap());
+    println!("  512 embedding rows: one range per row {:.2} ms, one gather {:.2} ms", per_row * 1e3, gather * 1e3);
+}
