@@ -30,7 +30,7 @@ where it has none (they failed on the CPU backend); `paged_flash_prefill_hd256`'
 `@tpl pool_k, pool_v` header (space after the comma) was parsed as an empty binding
 by the dtype-tier gate; see #301 for the shared-prefix flake.
 
-Open: `caps::tests::an_unseeded_lora_train_echoes_the_seed_that_reproduces_it` failed
+Open (root cause in knowledge 353): `caps::tests::an_unseeded_lora_train_echoes_the_seed_that_reproduces_it` failed
 once under CPU load and could not be reproduced (about 15 runs under 48 to 60 busy
 loops, 3 full loaded lib runs: one passed twice, one run hung past 1400 s in the
 sibling `a_trained_adapter_blob_folds_into_the_base_and_changes_its_weights` and was

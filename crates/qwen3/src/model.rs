@@ -5031,21 +5031,15 @@ mod tests {
         if gpu_disabled() {
             return;
         }
-        let _guard = brain_testutil::env_lock();
-        let prev = std::env::var("BRAIN_TILE_BUDGET_WORDS").ok();
-        std::env::remove_var("BRAIN_TILE_BUDGET_WORDS");
         let cfg = QwenConfig::tiny();
         let init = crate::init::init_weights(&cfg, 7);
         let model = Qwen::new(cfg.clone(), 1, 8, &init);
         let tokens = [1u32, 5, 9, 2];
         let before = model.logits_all(&tokens);
-        // A budget that would split this head into several tiles.
-        std::env::set_var("BRAIN_TILE_BUDGET_WORDS", (cfg.vocab as u64 * cfg.d_model as u64 / 3).to_string());
-        let after = model.logits_all(&tokens);
-        match prev {
-            Some(v) => std::env::set_var("BRAIN_TILE_BUDGET_WORDS", v),
-            None => std::env::remove_var("BRAIN_TILE_BUDGET_WORDS"),
-        }
+        // A budget that would split this head into several tiles, in force on
+        // this thread only: a process-wide variable would re-tile every other
+        // test's model mid-run.
+        let after = ::model::block::with_tile_budget_words(cfg.vocab as u64 * cfg.d_model as u64 / 3, || model.logits_all(&tokens));
         assert_eq!(before, after, "the built model's head did not change with the budget");
     }
 

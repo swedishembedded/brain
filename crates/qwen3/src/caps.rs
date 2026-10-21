@@ -1626,6 +1626,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The tile budget picks how the LM head is tiled, which reorders its
+    /// sums, so a test that publishes it through the process environment
+    /// changes the bytes of every training running in the same process at that
+    /// moment: the seed test above trains twice and failed when one run fell
+    /// inside another test's window (`model::block::with_tile_budget_words` is
+    /// the thread-scoped form).
+    /// No test of this crate may write it.
+    #[test]
+    fn no_lib_test_publishes_the_tile_budget_through_the_process_environment() {
+        let var = "BRAIN_TILE_BUDGET_WORDS";
+        for (file, src) in [("model.rs", include_str!("model.rs")), ("serve.rs", include_str!("serve.rs"))] {
+            for call in ["set_var", "remove_var"] {
+                let write = format!("{call}(\"{var}\"");
+                assert!(!src.contains(&write), "{file} writes {var} to the process environment; scope it to the thread with model::block::with_tile_budget_words");
+            }
+        }
+    }
+
     /// The real round-trip: drive `lora_train` through the Registry on the
     /// tiny synthetic checkpoint, then fold the returned adapter blob into a
     /// fresh copy of that same base and assert it measurably moved a targeted

@@ -875,10 +875,8 @@ crates/qwen3/src/chat.rs	QWEN3_DIR
 crates/qwen3/src/eval.rs	QWEN_TOKENIZER
 crates/qwen3/src/gguf_import.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/src/model.rs	BRAIN_QWEN_NAIVE_MM
-crates/qwen3/src/model.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/src/model.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/src/sample.rs	MOE_SKIP_GPU_TESTS
-crates/qwen3/src/serve.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/src/serve.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/tests/batched_prefill.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/tests/bench_train_p40.rs	BRAIN_QWEN_NAIVE_MM

@@ -4999,13 +4999,15 @@ mod tests {
     /// one-tile case.
     #[test]
     fn head_matmul_tiled_matches_untiled_within_tolerance() {
-        let _guard = brain_testutil::env_lock();
-        let prev = std::env::var("BRAIN_TILE_BUDGET_WORDS").ok();
         // k=8 words/row -> a 128-word budget is 16 rows/tile; n=40 columns
         // splits into tiles [0,16) [16,32) [32,40) - two full boundaries and
         // a ragged last tile, all inside one small dispatch.
-        std::env::set_var("BRAIN_TILE_BUDGET_WORDS", "128");
+        // In force on this thread only (a process-wide variable would re-tile
+        // every other test's model while this one runs).
+        ::model::block::with_tile_budget_words(128, head_matmul_tiled_vs_untiled);
+    }
 
+    fn head_matmul_tiled_vs_untiled() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
         let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 32, 1, 12, 8, false, false);
@@ -5043,11 +5045,6 @@ mod tests {
                     reference[i]
                 );
             }
-        }
-
-        match prev {
-            Some(v) => std::env::set_var("BRAIN_TILE_BUDGET_WORDS", v),
-            None => std::env::remove_var("BRAIN_TILE_BUDGET_WORDS"),
         }
     }
 
