@@ -279,23 +279,24 @@ impl DecodeFormat {
     }
 }
 
-/// One `weight_decode` kernel per [`DecodeFormat`]: the template source with the NF4 codebook and the
-/// FP8 decode expressions rendered in (single sources: [`NF4_CODEBOOK`], [`f8e4m3_decode_expr`],
-/// [`f8e5m2_decode_expr`]) and `FMT` set. Named by [`DecodeFormat::kernel_name`].
+/// The NF4 codebook and FP8 decode functions `wgsl/weight_decode.wgsl` carries as ordinary WGSL, rendered from
+/// their single Rust sources ([`NF4_CODEBOOK`], [`f8e4m3_decode_expr`], [`f8e5m2_decode_expr`]). The file holds
+/// exactly this text (a test compares them), so every consumer of the source, the catalogue included, sees a kernel
+/// that compiles as it stands, and a change to a single source is a failing test until the file follows.
+pub fn weight_decode_embedded_functions() -> (String, String) {
+    let fp8 = format!(
+        "fn fp8_e4m3(b: u32) -> f32 {{ return {}; }}\n\nfn fp8_e5m2(b: u32) -> f32 {{ return {}; }}\n",
+        f8e4m3_decode_expr("b"),
+        f8e5m2_decode_expr("b")
+    );
+    (nf4_lut_fn(), fp8)
+}
+
+/// One `weight_decode` kernel per [`DecodeFormat`]: the source with `FMT` set. Named by [`DecodeFormat::kernel_name`].
 pub fn weight_decode_variants() -> Vec<Variant> {
-    static FILLED: OnceLock<&'static str> = OnceLock::new();
-    let filled: &'static str = FILLED.get_or_init(|| {
-        let fp8 = format!(
-            "fn fp8_e4m3(b: u32) -> f32 {{ return {}; }}\n\nfn fp8_e5m2(b: u32) -> f32 {{ return {}; }}\n",
-            f8e4m3_decode_expr("b"),
-            f8e5m2_decode_expr("b")
-        );
-        let src = crate::WEIGHT_DECODE.replace("//@NF4_LUT@", nf4_lut_fn().trim_end()).replace("//@FP8_FNS@", fp8.trim_end());
-        Box::leak(src.into_boxed_str())
-    });
     DecodeFormat::ALL
         .iter()
-        .map(|&f| interned("weight_decode", filled, &[("FMT", f as u32)]).expect("weight_decode.wgsl has the FMT constant"))
+        .map(|&f| interned("weight_decode", crate::WEIGHT_DECODE, &[("FMT", f as u32)]).expect("weight_decode.wgsl has the FMT constant"))
         .collect()
 }
 
@@ -1673,6 +1674,25 @@ pub fn f8e5m2_decode_expr(byte_expr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The NF4 codebook and FP8 decode functions in `weight_decode.wgsl` are exactly what their single Rust sources
+    /// render: a change to a source is a failing test until the file follows.
+    #[test]
+    fn weight_decode_embeds_the_single_source_functions() {
+        let (nf4, fp8) = weight_decode_embedded_functions();
+        for text in [nf4.trim_end(), fp8.trim_end()] {
+            assert!(crate::WEIGHT_DECODE.contains(text), "weight_decode.wgsl does not hold the rendered function:\n{text}");
+        }
+    }
+
+    /// Every catalogue entry is a source a backend can compile as it stands: no `//@NAME@` placeholder is left for a
+    /// textual fill that only some consumers perform.
+    #[test]
+    fn no_catalogue_kernel_carries_an_unfilled_placeholder() {
+        for (name, src) in crate::ALL {
+            assert!(!src.contains("//@"), "{name}: carries an unfilled `//@...@` placeholder");
+        }
+    }
 
     const K: &str = "const TILE: u32 = 8u;\n@compute @workgroup_size(64)\nfn main() { let x = TILE; }";
 

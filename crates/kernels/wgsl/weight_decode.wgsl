@@ -66,7 +66,7 @@ struct Params {
 
 const FMT: u32 = 0u;
 
-//@NF4_LUT@
+fn nf4_lut(c: u32) -> f32 { return select(select(select(select(-1.0, -0.6961928, (c & 1u) != 0u), select(-0.52507305, -0.3949175, (c & 1u) != 0u), (c & 2u) != 0u), select(select(-0.28444138, -0.18477343, (c & 1u) != 0u), select(-0.091050036, 0.0, (c & 1u) != 0u), (c & 2u) != 0u), (c & 4u) != 0u), select(select(select(0.0795803, 0.1609302, (c & 1u) != 0u), select(0.2461123, 0.33791524, (c & 1u) != 0u), (c & 2u) != 0u), select(select(0.44070983, 0.562617, (c & 1u) != 0u), select(0.72295684, 1.0, (c & 1u) != 0u), (c & 2u) != 0u), (c & 4u) != 0u), (c & 8u) != 0u); }
 
 fn f16_to_f32(h: u32) -> f32 {
     let sign = (h & 0x8000u) << 16u;
@@ -78,7 +78,9 @@ fn f16_to_f32(h: u32) -> f32 {
     return bitcast<f32>(bitcast<u32>(mag) | sign);
 }
 
-//@FP8_FNS@
+fn fp8_e4m3(b: u32) -> f32 { return bitcast<f32>(bitcast<u32>(select(select((bitcast<f32>(0x3C800000u | (((b & 0x7Fu)) << 20u)) - bitcast<f32>(0x3C800000u)), (bitcast<f32>(((b & 0x7Fu)) << 20u) * bitcast<f32>(0x7B800000u)), ((b & 0x7Fu)) >= 8u), bitcast<f32>(0x7FC00000u), ((b & 0x7Fu)) == 0x7Fu)) | ((b & 0x80u) << 24u)); }
+
+fn fp8_e5m2(b: u32) -> f32 { return bitcast<f32>(bitcast<u32>(select(select((bitcast<f32>(0x38800000u | (((b & 0x3u)) << 21u)) - bitcast<f32>(0x38800000u)), (bitcast<f32>(((b & 0x7Fu)) << 21u) * bitcast<f32>(0x77800000u)), (((b >> 2u) & 0x1Fu)) != 0u), bitcast<f32>(0x7F800000u | (((b & 0x3u)) << 21u)), (((b >> 2u) & 0x1Fu)) == 31u)) | ((b & 0x80u) << 24u)); }
 
 fn e2m1(c: u32) -> f32 {
     let m = c & 7u;
