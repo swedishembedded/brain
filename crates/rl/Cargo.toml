@@ -200,3 +200,8 @@ required-features = ["qwen3"]
 name = "lora_acceptance"
 path = "tests/lora_acceptance.rs"
 required-features = ["qwen3"]
+
+[[test]]
+name = "chat_trainer_bases"
+path = "tests/chat_trainer_bases.rs"
+required-features = ["qwen3"]
