@@ -112,7 +112,7 @@ pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 pub use shard::{plan_balanced, Pipeline, PipelineModel, Shard, ShardCost, Shardable, StreamPlan};
 
 pub use objective::{Objective, StepVerdict};
-pub use trainprec::TrainPrecision;
+pub use trainprec::{ResidentRequest, StateSupport, TrainPrecision, TrainPrecisionSupport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use score::{score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};

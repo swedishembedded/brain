@@ -346,7 +346,12 @@ fn tuning_desc(t: &model::adapter::device::AdapterTuning) -> String {
 
 const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|DIR --out F [--mode lora|full] [--lora-rank R --lora-alpha A --lora-variant V --lora-plus-ratio X --adapter-kind K] \
      [--base-format f32|bf16|nf4|fp8] [--seq-len T] [--recompute on|off] [--gdn-segment N] [--bf16-residuals on|off] [--mlp-rows N] \
-     [--eval-interval N --eval-batches N] [--steps N --lr X --batch B --grad-accum G --warmup W --weight-decay X --grad-clip X --save-secs S --seed S --mask = --align]
+     [--eval-interval N --eval-batches N] [--steps N --lr X --batch B --grad-accum G --warmup W --weight-decay X --grad-clip X --save-secs S --seed S --mask = --align] \
+     [--train-precision SPEC]
+  --train-precision  how a --mode full run stores what it trains, one model-agnostic value: state=f32|bf16|int8[:B] (device AdamW
+                moments), master=none|bf16|f32, grad=f32|bf16, sr=on|off, narrow=on|off (let the planner narrow the state), and for
+                the linears resident in a low-precision encoding weights=bf16|fp8[:B]|int8|nf4 with window=N (layers kept on the
+                device, the rest streamed) and clip=two-pass|running; a choice the model does not run is refused by name
   --base-format how the frozen base is held on the device: f32 (default, whole model resident; full or LoRA),
                 bf16 (half the bytes; LoRA only) or nf4 (4-bit QLoRA; LoRA only). bf16/nf4 stream the base from
                 a HuggingFace checkpoint directory (FP8 release included) tensor by tensor.
@@ -427,11 +432,16 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     let naming = qwen35::finetune::AdapterNaming { id: a.take_str("--adapter-id"), name: a.take_str("--name") };
     let block_size = parse_num("--seq-len", aliased(&mut a, "--seq-len", "--block")?, model::FitOpts::default().block_size)?;
 
+    let precision = match a.take_str(crate::args::TRAIN_PRECISION_FLAG) {
+        Some(spec) => model::TrainPrecision::parse(&spec).map_err(|e| format!("{} {spec:?}: {e}", crate::args::TRAIN_PRECISION_FLAG))?,
+        None => model::TrainPrecision::default(),
+    };
     let d = model::FitOpts::default();
     let steps = a.u32_or("--steps", d.steps);
     let lr = a.f32_or("--lr", d.lr);
     let mask = a.char_opt("--mask");
     let opts = model::FitOpts {
+        precision,
         steps,
         batch_size: a.u32_or("--batch", d.batch_size),
         block_size,
@@ -484,6 +494,9 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
             "--base-format {} holds the base frozen, so only --mode lora can train on it; full-parameter fine-tuning needs --base-format f32",
             model::policy::format_name(base_dtype)
         ));
+    }
+    if !opts.precision.is_default() && !matches!(mode, qwen35::finetune::Mode::FullOffload) {
+        return Err(format!("{} describes how a full fine-tune stores what it trains: use it with --mode full", crate::args::TRAIN_PRECISION_FLAG));
     }
     if recompute_flag == Some(true) && !is_frozen_only(base_dtype) {
         return Err("--recompute on: the f32 resident trainer keeps every layer's activations; recompute is available with a narrow --base-format (bf16, nf4 or fp8)".into());
@@ -628,6 +641,22 @@ mod finetune_cli_tests {
         assert_eq!(ft.opts.checkpoint_secs, d.checkpoint_secs);
         assert_eq!(ft.opts.seed, d.seed);
         assert_eq!(ft.opts.mask_before, None);
+    }
+
+    /// Spec: `--train-precision` is the one model-agnostic flag for how a full run stores what it trains; it parses into
+    /// the typed value the generic fit loop reads, names the key it cannot read, and is a full-fine-tune option.
+    #[test]
+    fn a_train_precision_is_one_typed_value_for_a_full_finetune_only() {
+        let base = ["corpus", "--base", "b", "--out", "o"];
+        let with = |extra: &[&str]| parse_finetune(&argv(&[&base[..], extra].concat()));
+        let ft = with(&["--train-precision", "state=int8,weights=fp8,window=2,clip=running"]).unwrap();
+        let r = ft.opts.precision.resident.expect("resident request");
+        assert_eq!((r.window, r.clip_pass), (Some(2), model::resident_ft::ClipPass::Running));
+        assert!(with(&[]).unwrap().opts.precision.is_default());
+        let e = with(&["--train-precision", "state=fp4"]).unwrap_err();
+        assert!(e.contains("--train-precision") && e.contains("state"), "{e}");
+        let e = with(&["--mode", "lora", "--train-precision", "state=bf16"]).unwrap_err();
+        assert!(e.contains("--mode full"), "{e}");
     }
 
     /// The cosine schedule has to be defined against the run the caller asked

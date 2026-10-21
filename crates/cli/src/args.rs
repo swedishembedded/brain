@@ -28,6 +28,27 @@ pub fn split_seed(args: &[String], what: &str) -> (u64, Vec<String>) {
     (seed, parsed.leftovers())
 }
 
+/// The flag every full fine-tune verb takes for how the run stores what it trains: `--train-precision SPEC`, one
+/// model-agnostic value parsed by [`model::TrainPrecision::parse`] (`state=int8,master=f32,sr=on,narrow=on`, and
+/// `weights=fp8,window=2,clip=two-pass` for the linears resident in a low-precision encoding, optionally streamed
+/// through a window of layers). A model that does not run a choice refuses it by name when the run starts
+/// ([`model::TrainPrecisionSupport::check`]); no model has a flag of its own for this.
+pub const TRAIN_PRECISION_FLAG: &str = "--train-precision";
+
+/// The usage line of [`TRAIN_PRECISION_FLAG`].
+pub const TRAIN_PRECISION_USAGE: &str = "[--train-precision state=f32|bf16|int8[:B]|log8[:B],master=none|bf16|f32,grad=f32|bf16,sr=on|off,narrow=on|off,weights=bf16|fp8[:B]|int8|nf4,window=N,clip=two-pass|running]";
+
+/// Take `--train-precision` off `args` for a verb that walks its own flag loop: the parsed value (the all-fp32
+/// default when the flag is absent) and the tokens it did not claim.
+pub fn split_train_precision(args: &[String]) -> Result<(model::TrainPrecision, Vec<String>), String> {
+    let mut parsed = Args::new(args);
+    let precision = match parsed.take_str(TRAIN_PRECISION_FLAG) {
+        Some(spec) => model::TrainPrecision::parse(&spec).map_err(|e| format!("{TRAIN_PRECISION_FLAG} {spec:?}: {e}"))?,
+        None => model::TrainPrecision::default(),
+    };
+    Ok((precision, parsed.leftovers()))
+}
+
 /// `--out`'s value, accepting either a dedicated command's own bare-path
 /// spelling (`--out out.png`) or the generic capability-manifest convention
 /// `brain caps <arch>` documents (`--out <blob_name>=<path>`, what `brain

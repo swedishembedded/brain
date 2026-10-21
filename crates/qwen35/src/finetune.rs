@@ -87,11 +87,66 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
         (cfg, init)
     };
 
-    let m = Qwen35::new_train_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &init);
+    let m = match mode {
+        Mode::FullOffload => build_full(cfg, opts, &init)?,
+        Mode::Lora { .. } => Qwen35::new_train_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &init),
+    };
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen35>(train, val, bcfg, itos);
     let (report, _) = model::fit_controlled(m, obj, opts, Some(Path::new(out)), step_progress_control(&mut step_progress()))?;
     Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
+}
+
+fn unsupported_precision(why: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Unsupported, why)
+}
+
+/// The full fine-tune of `cfg` as `opts.precision` asks: the plain trainer with its fp32 weights and device AdamW state
+/// (a choice no kernel runs is an error naming the parameter, before anything loads), or, when the precision asks for
+/// resident low-precision linears, the resident trainer ([`build_resident`]).
+fn build_full(cfg: Qwen35Config, opts: &FitOpts, src: &dyn checkpoint::TensorSource) -> std::io::Result<Qwen35> {
+    <Qwen35Trainer as model::finetune::ChatTrainer>::TRAIN_PRECISION.check(&opts.precision).map_err(unsupported_precision)?;
+    if let Some(resident) = opts.precision.resident_config(Some(opts.seed)).map_err(std::io::Error::other)? {
+        return build_resident(cfg, opts, src, &resident);
+    }
+    let params = crate::model::shard_param_list(&cfg, &model::Shard::whole(cfg.n_layers as usize));
+    opts.precision.resolve(&params, false).map_err(std::io::Error::other)?;
+    let train = TrainOpts { precision: opts.precision.clone(), gemm_precision: opts.gemm_precision, ..TrainOpts::default() };
+    Ok(Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, src, &train))
+}
+
+/// Planner estimate of the device bytes a full fine-tune's activations take: the layer-boundary residuals, the
+/// working set of the layers whose activations are alive at once (every layer when `recompute` is off, one when on)
+/// and the chunked head's logits. An upper-bound estimate for placement, not an allocation.
+pub fn activation_bytes(cfg: &Qwen35Config, b: u32, t: u32, recompute: bool) -> u64 {
+    let n = u64::from(b) * u64::from(t);
+    let (d, ff) = (u64::from(cfg.d_model), u64::from(cfg.intermediate_size));
+    let gdn = u64::from(cfg.linear_conv_dim()) + 3 * u64::from(cfg.linear_value_dim());
+    let gqa = u64::from(cfg.q_proj_dim()) + 3 * u64::from(cfg.q_dim()) + 2 * u64::from(cfg.kv_dim());
+    let layer_words = n * (3 * d + 3 * ff + gdn.max(gqa));
+    let alive = if recompute { 2 } else { u64::from(cfg.n_layers) };
+    let head_words = (n * u64::from(cfg.vocab)).min(1 << 28);
+    4 * ((u64::from(cfg.n_layers) + 1) * n * d + alive * layer_words + head_words)
+}
+
+/// The resident low-precision full fine-tune of `cfg` at `opts`' batch and context, placed through the planner: the
+/// linears (every layer, or the window's layers) and their gradients on the device, the master copy and optimizer
+/// state in host memory, the fp32 embedding, head and norms and the activations on the device. A window of layers
+/// recomputes each layer's activations in the backward. A configuration the machine cannot hold is refused here, with
+/// the planner's arithmetic, before anything is allocated.
+pub fn build_resident(cfg: Qwen35Config, opts: &FitOpts, src: &dyn checkpoint::TensorSource, resident: &model::resident_ft::ResidentFtConfig) -> std::io::Result<Qwen35> {
+    use model::memplan::{Capacity, Category, Demand};
+    let shard = model::Shard::whole(cfg.n_layers as usize);
+    let linear_numel: u64 = crate::model::resident_specs(&cfg, &shard).iter().map(|s| u64::from(s.n) * u64::from(s.k)).sum();
+    let all_numel: u64 = crate::model::shard_param_list(&cfg, &shard).iter().map(|(_, n)| *n as u64).sum();
+    let recompute = resident.window.is_some();
+    // fp32 remainder: value, gradient and the two AdamW moments on the device.
+    let remainder = Demand::fixed(Category::Weights, "fp32 embedding, head and norms (with gradients and moments)", (all_numel - linear_numel) * 4 * 4);
+    let activations = Demand::fixed(Category::Activations, "activations and scratch", activation_bytes(&cfg, opts.batch_size, opts.block_size, recompute));
+    let plan = model::resident_ft::ResidentPlan { cfg: resident.clone(), capacity: Capacity::measured(), others: vec![remainder, activations] };
+    let saved = if recompute { SavedPolicy::Recompute } else { SavedPolicy::Keep };
+    let train = TrainOpts { saved, gemm_precision: opts.gemm_precision, precision: opts.precision.clone(), resident: Some(plan), ..TrainOpts::default() };
+    Qwen35::new_resident(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, src, &train).map_err(std::io::Error::other)
 }
 
 /// An `on_step` callback printing one line per optimizer step to stderr: the
@@ -357,6 +412,7 @@ pub struct Qwen35Trainer;
 impl model::finetune::ChatTrainer for Qwen35Trainer {
     type Trained = Qwen35;
     const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35", bases: crate::base_source::LORA_BASES };
+    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen35", state: model::StateSupport::DeviceFused, resident: true, layer_streamed: true };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {
         qwen3::store_checkpoint_path(weights, model_dir)
@@ -374,6 +430,14 @@ impl model::finetune::ChatTrainer for Qwen35Trainer {
         opts.precision.resolve(&params, false).map_err(std::io::Error::other)?;
         let train = TrainOpts { precision: opts.precision.clone(), ..TrainOpts::default() };
         let m = state.scope(|| Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &*src, &train));
+        fit.fit(m)
+    }
+
+    /// The linears resident in `resident`'s encoding with a host-side master, every layer on the device or a window of
+    /// them streamed through it; the embedding, head and norms train in fp32 on the device.
+    fn train_full_resident(base: &Path, opts: &FitOpts, resident: &model::resident_ft::ResidentFtConfig, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Qwen35)> {
+        let BaseCheckpoint { cfg, src } = open_base(base).map_err(std::io::Error::other)?;
+        let m = build_resident(cfg, opts, &*src, resident)?;
         fit.fit(m)
     }
 

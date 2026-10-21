@@ -619,6 +619,13 @@ fn infer(args: &[String]) {
 /// Shared core for `train` (fresh) and `finetune` (seeded from `--weights`).
 fn train(args: &[String], base: Option<&str>) {
     let (seed, rest) = crate::args::split_seed(args, "qwen3 train");
+    let (precision, rest) = match crate::args::split_train_precision(&rest) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("brain qwen3 {}: {e}", if base.is_some() { "finetune" } else { "train" });
+            std::process::exit(2);
+        }
+    };
     let args = &rest[..];
     let mut data_dir = String::new();
     let mut out = "out/qwen.safetensors".to_string();
@@ -646,7 +653,7 @@ fn train(args: &[String], base: Option<&str>) {
         i += 1;
     }
     if data_dir.is_empty() {
-        eprintln!("usage: brain qwen3 {{train|finetune}} <data_dir> --out F [--steps N --batch B --block T --lr X --mask = --align]");
+        eprintln!("usage: brain qwen3 {{train|finetune}} <data_dir> --out F [--steps N --batch B --block T --lr X --mask = --align] {}", crate::args::TRAIN_PRECISION_USAGE);
         return;
     }
     let opts = model::FitOpts {
@@ -671,6 +678,7 @@ fn train(args: &[String], base: Option<&str>) {
         seed,
         adam: Default::default(),
         gemm_precision: Default::default(),
+        precision,
         ..Default::default()
     };
     // finetune: the trained model comes from the base as it is on disk, and
@@ -682,6 +690,10 @@ fn train(args: &[String], base: Option<&str>) {
             Err(e) => eprintln!("train error: {e}"),
         }
         return;
+    }
+    if !opts.precision.is_default() {
+        eprintln!("brain qwen3 train: {} describes how a full fine-tune of a base stores what it trains; a from-scratch run keeps fp32 (use `brain qwen3 finetune`)", crate::args::TRAIN_PRECISION_FLAG);
+        std::process::exit(2);
     }
     // A small default architecture for from-scratch training.
     let cfg = QwenConfig {

@@ -93,7 +93,17 @@ pub fn finetune_from(
 
     // Role::Offload vs Role::Trainable for a `FullOffload` build is read when
     // the model is built, whichever checkpoint supplied the weights.
-    let m = model::offload::with_adam_offloaded(matches!(mode, Mode::FullOffload), || build_for_training(cfg, opts, &*init, Dtype::F32))?;
+    let m = if matches!(mode, Mode::FullOffload) {
+        // What the run asked of the precision is checked against what this family runs before anything is built; a
+        // resident request places the linears in their low-precision encoding with an off-device master.
+        <Qwen3Trainer as model::finetune::ChatTrainer>::TRAIN_PRECISION.check(&opts.precision).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))?;
+        match opts.precision.resident_config(Some(opts.seed)).map_err(std::io::Error::other)? {
+            Some(resident) => build_resident(cfg, opts, &*init, &resident)?,
+            None => model::offload::with_adam_offloaded(true, || build_for_training(cfg, opts, &*init, Dtype::F32))?,
+        }
+    } else {
+        build_for_training(cfg, opts, &*init, Dtype::F32)?
+    };
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
     model::fit_with(m, obj, opts, Some(Path::new(out)))
@@ -776,6 +786,7 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
     type Trained = Trained;
     const SCORES_EXPORTED_PAIRS: bool = true;
     const LORA_BASES: model::policy::TrainBases = TRAIN_BASES;
+    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen3", state: model::StateSupport::Any, resident: true, layer_streamed: true };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {
         crate::store_checkpoint_path(weights, model_dir)

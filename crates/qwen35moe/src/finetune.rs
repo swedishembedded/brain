@@ -89,6 +89,7 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
     type Trained = Qwen35;
     /// The experts have no narrow training tier: the base is fp32.
     const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35moe", bases: &[gpu_core::select::Dtype::F32] };
+    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen35moe", state: model::StateSupport::Fp32, resident: false, layer_streamed: false };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> PathBuf {
         qwen3::store_checkpoint_path(weights, model_dir)
@@ -101,8 +102,9 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
     }
 
     fn train_full(base: &Path, opts: &FitOpts, state: OptimizerState, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Qwen35)> {
+        Self::TRAIN_PRECISION.check(&opts.precision).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))?;
         if !opts.precision.is_default() {
-            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "qwen35moe full fine-tuning keeps fp32 parameters and AdamW state; a train precision is not wired for it"));
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "qwen35moe full fine-tuning keeps fp32 parameters and AdamW state with no master copy; a train precision other than the default is not wired for it"));
         }
         check_before_load(base, None, state)?;
         let m = state.scope(|| Ok::<_, std::io::Error>(Qwen35::load_with_adapter(path_str(base)?, opts.batch_size, opts.block_size, None)))?;
@@ -141,5 +143,18 @@ mod tests {
         let big = vec![("w".to_string(), 35_000_000_000usize)];
         let refused = plan_before_load(&big, &[], OptimizerState::HostOffload, HOST_LOAD_BUDGET_BYTES).expect_err("a 35B base does not");
         assert!(refused.contains("does not fit") && refused.contains("no streamed loader"), "{refused}");
+    }
+
+    /// Spec: this family's full fine-tune keeps fp32 parameters and AdamW state, so a train precision it does not run is
+    /// refused by name, through the generic entry point, before the base is opened.
+    #[test]
+    fn a_train_precision_it_does_not_run_is_refused_by_name_before_anything_is_opened() {
+        let nowhere = Path::new("/nonexistent/qwen35moe-base");
+        for spec in ["state=int8", "weights=fp8", "weights=bf16,window=2"] {
+            let opts = FitOpts { precision: model::TrainPrecision::parse(spec).unwrap(), ..FitOpts::default() };
+            let e = model::finetune::fit_full::<Qwen35MoeTrainer>(nowhere, nowhere, &opts, nowhere, OptimizerState::HostOffload, model::FitControl::default()).expect_err(spec);
+            assert_eq!(e.kind(), std::io::ErrorKind::Unsupported, "{spec}: {e}");
+            assert!(e.to_string().contains("qwen35moe"), "{spec}: {e}");
+        }
     }
 }

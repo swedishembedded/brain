@@ -100,8 +100,10 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
 - D Gates: G3 format-logic also matches `Weight::FP8` and `Weight::Micro` (7e7b6e86d).
 
 ### Partial
-- P Layer-streamed full fine-tune: layer-streamed LoRA of the 27B and streamed optimizer
-  state exist; the full fine-tune with resident packed weights is qwen3 only, and qwen35,
+- P Layer-streamed full fine-tune: qwen3 and qwen35 train every weight with the stored values on
+  the host, a bounded window of layers on the device, per-layer updates between the backward
+  segments and a device-measured global clip (exact two-pass or running), bit-equal to the
+  resident step on tiny models and loss-equal on Qwen3-0.6B; a real 27B-class run is not done.
   qwen35moe and glmdsa still hold fp32 resident weights (see Open).
 - P LoRA bases: qwen35 and qwen3 take any declared format; DoRA is only over fp32-resident
   bases (verify the refusal path before relying on it); the serving bank is LoRA-only.
@@ -116,8 +118,9 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   end-to-end NF4 training step time against preserved FP8 is not shown at 2x (see Open).
 
 ### Open (not done; do not read any item above as covering these)
-- O Layer-streamed full fine-tune of a 27B-class model (weights, gradients and state bounded
-  independent of parameter count on a real checkpoint).
+- O Layer-streamed full fine-tune of a 27B-class model on a real checkpoint (the mechanism is
+  proven on tiny models and Qwen3-0.6B; the update is still host-bound, device Adafactor and
+  device master updates are not done).
 - O Pinned staging plus a dedicated transfer stream (`Pool::Pinned` has no consumer).
 - O NF4 at least 2x faster than preserved FP8 end to end: measured 1.25x to 1.4x on a
   contended card; only the loader reaches 2.6x. Needs an uncontended measurement.
@@ -127,7 +130,7 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
 - O Native FP8 and NVFP4 tensor-core GEMMs through the provider (portable decode path today).
 - O Removal of the deprecated `--<architecture>-<option>` aliases (`model-flags.allow`).
 - O PiSSA, EVA and LoftQ initialization; LoHa, OFT and VeRA.
-- O Full fine-tune on qwen35, qwen35moe and glmdsa over resident packed weights.
+- O Full fine-tune on qwen35moe and glmdsa over resident packed weights (qwen35 has it).
 
 ## Phases
 
@@ -192,8 +195,8 @@ formats (`model::policy::TrainBases`), one `--base-format` flag parses them, and
 Status: the state manager, Adafactor, logarithmic 8-bit state, bf16 device moments, resident
 and QAT weights with an off-device master, deferred publication, streamed export and exact
 resume are landed (see the Status section above and `docs/guides/training/optimizer-state.md`).
-Open: the same trainer over qwen35, qwen35moe and glmdsa, and layer streaming for models
-larger than the card.
+Open: the same trainer over qwen35moe and glmdsa, a real 27B-class layer-streamed run, and
+device kernels for the host-side master update.
 A trainable parameter with independent value storage, gradient dtype, optimizer
 state dtype and optional master copy (none, bf16, fp32). A bounded-tile
 parameter update (decode tile, update, re-encode) with fp32, bf16 and 8-bit

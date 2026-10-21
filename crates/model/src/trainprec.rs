@@ -15,11 +15,15 @@
 //! the report of that decision comes back with the effective precision.
 //!
 //! The textual form is model agnostic and parsed once, `state=int8,master=f32,value=bf16,grad=bf16,sr=on,narrow=on`
-//! ([`TrainPrecision::parse`]).
+//! ([`TrainPrecision::parse`]); `weights=fp8,window=2,clip=two-pass` additionally asks for the per-layer linears to
+//! live in a low-precision encoding with an off-device master ([`ResidentRequest`]), optionally streamed through a
+//! window of layers. Every model declares what it supports ([`TrainPrecisionSupport`]) and refuses the rest by name.
 
 use paramstore::precision::{GradDtype, MasterPolicy, ParamPrecision, PrecisionPolicy, StateFormat, ValueDtype};
 
 use crate::memplan::{self, Authorized, Capacity, Category, Lever, PlanReport, TrainingFootprint};
+use crate::resident_ft::{ClipPass, LayerWindow, ResidentFtConfig, ResidentValue};
+use optim::rule::Rule;
 
 /// What a full fine-tune stores each trainable parameter as, and whether the planner may narrow its optimizer state.
 #[derive(Clone, Debug)]
@@ -28,31 +32,73 @@ pub struct TrainPrecision {
     /// Let the memory planner pick a narrower optimizer-state format (bf16, then int8 blocks) when the requested one
     /// does not fit the device. The decision is reported; without this a run that does not fit is refused.
     pub narrow_state: bool,
+    /// Hold the per-layer linears in a low-precision encoding with an off-device master ([`crate::resident_ft`]).
+    pub resident: Option<ResidentRequest>,
+}
+
+/// How the per-layer linears of a full fine-tune are held: their encoding and, when the model is larger than the
+/// device, the window of layers kept on it (the rest streams through, see [`crate::resident_ft::LayerWindow`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResidentRequest {
+    pub weights: ResidentValue,
+    /// Layers resident at once; `None` keeps every layer on the device.
+    pub window: Option<u32>,
+    /// How a layer-streamed step clips by the global gradient norm.
+    pub clip_pass: ClipPass,
 }
 
 impl Default for TrainPrecision {
     /// The historical layout: everything fp32, no master, no narrowing.
     fn default() -> Self {
-        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision::FP32), narrow_state: false }
+        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision::FP32), narrow_state: false, resident: None }
     }
 }
 
 impl TrainPrecision {
     pub fn uniform(p: ParamPrecision) -> TrainPrecision {
-        TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state: false }
+        TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state: false, resident: None }
     }
 
     /// Whether this is the default (all fp32): a resume file only records a precision that departs from it.
     pub fn is_default(&self) -> bool {
-        self.policy.rules.is_empty() && self.policy.default == ParamPrecision::FP32 && !self.narrow_state
+        self.policy.rules.is_empty() && self.policy.default == ParamPrecision::FP32 && !self.narrow_state && self.resident.is_none()
+    }
+
+    /// The resident full fine-tune this precision asks for, `None` for a plain one: the encoding and window of the
+    /// linears, the master copy (an f32 master unless one was named: a low-precision weight cannot be trained without
+    /// one), the optimizer state and gradient dtype of the policy, AdamW with the run's hyper-parameters set at each
+    /// step. `seed` keys the stochastic rounding.
+    pub fn resident_config(&self, seed: Option<u64>) -> Result<Option<ResidentFtConfig>, String> {
+        let Some(r) = self.resident else { return Ok(None) };
+        if !self.policy.rules.is_empty() {
+            return Err("a resident full fine-tune takes one uniform precision (no per-group rules)".into());
+        }
+        let p = self.policy.default;
+        let master = if p.master == MasterPolicy::None { MasterPolicy::F32 } else { p.master };
+        Ok(Some(ResidentFtConfig {
+            value: r.weights,
+            master,
+            state: p.state,
+            rule: Rule::AdamW { adam: crate::Adam::default(), wd: 0.0 },
+            grad: p.grad,
+            stochastic_state: p.stochastic_rounding,
+            seed,
+            tile_elems: 1 << 22,
+            state_dir: None,
+            defer_publication: false,
+            window: r.window.map(|layers| LayerWindow { layers }),
+            clip_pass: r.clip_pass,
+        }))
     }
 
     /// Parse `key=value,...` with keys `state` (`f32`, `bf16`, `int8[:block]`, `log8[:block]`), `master`
-    /// (`none`, `bf16`, `f32`), `value` and `grad` (`f32`, `bf16`), `sr` and `narrow` (`on`, `off`). Unnamed keys keep
-    /// the fp32 default. The result is uniform over every parameter.
+    /// (`none`, `bf16`, `f32`), `value` and `grad` (`f32`, `bf16`), `sr` and `narrow` (`on`, `off`), and for a resident
+    /// full fine-tune `weights` (`bf16`, `fp8[:block]`, `int8`, `nf4`), `window` (layers resident at once) and `clip`
+    /// (`two-pass`, `running`). Unnamed keys keep the fp32 default. The result is uniform over every parameter.
     pub fn parse(spec: &str) -> Result<TrainPrecision, String> {
         let mut p = ParamPrecision::FP32;
         let mut narrow_state = false;
+        let (mut weights, mut window, mut clip_pass) = (None, None, ClipPass::TwoPass);
         for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             let (key, value) = item.split_once('=').ok_or_else(|| format!("train precision '{item}': expected key=value"))?;
             let flag = |v: &str| match v {
@@ -86,10 +132,25 @@ impl TrainPrecision {
                 }
                 "sr" => p.stochastic_rounding = flag(value)?,
                 "narrow" => narrow_state = flag(value)?,
-                other => return Err(format!("train precision: unknown key '{other}' (state, master, value, grad, sr, narrow)")),
+                "weights" => weights = Some(parse_resident_value(value)?),
+                "window" => {
+                    window = Some(value.parse::<u32>().ok().filter(|&n| n > 0).ok_or_else(|| format!("train precision 'window': '{value}' is not a layer count of at least 1"))?)
+                }
+                "clip" => {
+                    clip_pass = match value {
+                        "two-pass" => ClipPass::TwoPass,
+                        "running" => ClipPass::Running,
+                        other => return Err(format!("train precision 'clip': '{other}' is not two-pass or running")),
+                    }
+                }
+                other => return Err(format!("train precision: unknown key '{other}' (state, master, value, grad, sr, narrow, weights, window, clip)")),
             }
         }
-        Ok(TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state })
+        if weights.is_none() && (window.is_some() || item_named(spec, "clip")) {
+            return Err("train precision: 'window' and 'clip' describe a resident full fine-tune and need 'weights' (bf16, fp8, int8 or nf4)".into());
+        }
+        let resident = weights.map(|weights| ResidentRequest { weights, window, clip_pass });
+        Ok(TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state, resident })
     }
 
     /// The precision of each of `params` under this policy, checked against what the trainer runs. The device
@@ -118,7 +179,7 @@ impl TrainPrecision {
 
     /// This precision with the optimizer state in `state` for every parameter (a uniform policy only).
     fn with_state(&self, state: StateFormat) -> TrainPrecision {
-        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision { state, ..self.policy.default }), narrow_state: self.narrow_state }
+        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision { state, ..self.policy.default }), narrow_state: self.narrow_state, resident: self.resident }
     }
 
     /// Plan the device footprint of a full fine-tune before anything loads. The optimizer state is held in the
@@ -145,6 +206,97 @@ impl TrainPrecision {
 pub struct PlannedPrecision {
     pub precision: TrainPrecision,
     pub report: PlanReport,
+}
+
+/// The optimizer-state formats a model's plain (fp32 weights) full fine-tune runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StateSupport {
+    /// Only f32.
+    Fp32,
+    /// f32, bf16 or int8 blocks of [`paramstore::DEVICE_INT8_BLOCK`]: what the fused device kernels run.
+    DeviceFused,
+    /// Also the host-streamed formats (any block size, log8): the state is offloaded to host memory.
+    Any,
+}
+
+/// What a model family's full fine-tune supports of [`TrainPrecision`], declared once by the trainer
+/// ([`crate::finetune::ChatTrainer::TRAIN_PRECISION`]) so every surface (the SDK, the command line) validates a
+/// request the same way and refuses what the model does not run by naming the model and the key.
+#[derive(Clone, Copy, Debug)]
+pub struct TrainPrecisionSupport {
+    pub model: &'static str,
+    pub state: StateSupport,
+    /// The per-layer linears may live in a low-precision encoding with an off-device master (`weights=`).
+    pub resident: bool,
+    /// ... and be streamed through a window of layers (`window=`).
+    pub layer_streamed: bool,
+}
+
+impl TrainPrecisionSupport {
+    /// `Ok` when `p` asks for nothing this model does not run; otherwise the refusal, naming the model and the key.
+    /// Whether a particular parameter can take a choice is the later business of [`TrainPrecision::resolve`].
+    pub fn check(&self, p: &TrainPrecision) -> Result<(), String> {
+        let state = p.policy.default.state;
+        let state_ok = match self.state {
+            StateSupport::Fp32 => state == StateFormat::F32,
+            StateSupport::DeviceFused => matches!(state, StateFormat::F32 | StateFormat::Bf16) || state == (StateFormat::Int8Block { block: paramstore::DEVICE_INT8_BLOCK }),
+            StateSupport::Any => true,
+        };
+        if !state_ok {
+            let runs = match self.state {
+                StateSupport::Fp32 => "f32 optimizer state",
+                StateSupport::DeviceFused => "f32, bf16 or int8:64 optimizer state",
+                StateSupport::Any => "any optimizer state",
+            };
+            return Err(format!("{}: train precision 'state={}' is not supported: its full fine-tune runs {runs}", self.model, state_name(state)));
+        }
+        let Some(r) = p.resident else { return Ok(()) };
+        if !self.resident {
+            return Err(format!("{}: train precision 'weights={}' is not supported: its full fine-tune keeps fp32 weights (no resident low-precision linears)", self.model, resident_name(r.weights)));
+        }
+        if r.window.is_some() && !self.layer_streamed {
+            return Err(format!("{}: train precision 'window' is not supported: its resident full fine-tune keeps every layer on the device", self.model));
+        }
+        Ok(())
+    }
+}
+
+fn state_name(s: StateFormat) -> String {
+    match s {
+        StateFormat::F32 => "f32".into(),
+        StateFormat::Bf16 => "bf16".into(),
+        StateFormat::Int8Block { block } => format!("int8:{block}"),
+        StateFormat::Log8Block { block } => format!("log8:{block}"),
+    }
+}
+
+fn resident_name(v: ResidentValue) -> String {
+    match v {
+        ResidentValue::Bf16 => "bf16".into(),
+        ResidentValue::Fp8E4M3 { block } => format!("fp8:{block}"),
+        ResidentValue::Int8 => "int8".into(),
+        ResidentValue::Nf4 => "nf4".into(),
+    }
+}
+
+/// Whether `spec` names `key` (a `key=value` item).
+fn item_named(spec: &str, key: &str) -> bool {
+    spec.split(',').any(|item| item.trim().split_once('=').is_some_and(|(k, _)| k == key))
+}
+
+fn parse_resident_value(v: &str) -> Result<ResidentValue, String> {
+    let (kind, block) = match v.split_once(':') {
+        Some((k, b)) => (k, Some(b.parse::<u32>().ok().filter(|&b| b > 0).ok_or_else(|| format!("train precision 'weights': '{b}' is not a block size"))?)),
+        None => (v, None),
+    };
+    match (kind, block) {
+        ("bf16", None) => Ok(ResidentValue::Bf16),
+        ("fp8", b) => Ok(ResidentValue::Fp8E4M3 { block: b.unwrap_or(128) }),
+        ("int8", None) => Ok(ResidentValue::Int8),
+        ("nf4", None) => Ok(ResidentValue::Nf4),
+        ("bf16" | "int8" | "nf4", Some(_)) => Err(format!("train precision 'weights': '{kind}' has a fixed layout (only fp8 takes a block size)")),
+        (other, _) => Err(format!("train precision 'weights': '{other}' is not bf16, fp8, int8 or nf4")),
+    }
 }
 
 fn parse_state(v: &str) -> Result<StateFormat, String> {
@@ -191,6 +343,40 @@ mod tests {
         assert!(log8.resolve(&params, false).unwrap_err().contains("tok.weight"));
         assert!(log8.resolve(&params, true).is_ok());
         assert!(TrainPrecision::parse("state=bf16").unwrap().resolve(&params, false).is_ok());
+    }
+
+    /// Spec: the resident keys parse into one typed request, a resident full fine-tune takes an f32 master unless one
+    /// is named, and `window`/`clip` without `weights` are refused by name.
+    #[test]
+    fn resident_keys_parse_into_one_request_with_a_master() {
+        let t = TrainPrecision::parse("weights=fp8:64,window=2,clip=running,state=int8").unwrap();
+        assert_eq!(t.resident, Some(ResidentRequest { weights: ResidentValue::Fp8E4M3 { block: 64 }, window: Some(2), clip_pass: ClipPass::Running }));
+        let cfg = t.resident_config(Some(7)).unwrap().expect("resident");
+        assert_eq!((cfg.master, cfg.window, cfg.seed), (MasterPolicy::F32, Some(LayerWindow { layers: 2 }), Some(7)));
+        assert!(!t.is_default());
+        assert_eq!(TrainPrecision::parse("weights=bf16").unwrap().resident.unwrap().clip_pass, ClipPass::TwoPass);
+        assert!(TrainPrecision::default().resident_config(None).unwrap().is_none());
+        assert!(TrainPrecision::parse("window=2").unwrap_err().contains("weights"));
+        assert!(TrainPrecision::parse("weights=fp4").unwrap_err().contains("weights"));
+        assert!(TrainPrecision::parse("weights=bf16,window=0").unwrap_err().contains("window"));
+        assert!(TrainPrecision::parse("weights=bf16:8").unwrap_err().contains("fixed layout"));
+    }
+
+    /// Spec: a model's declared support decides a request, and a refusal names the model and the key.
+    #[test]
+    fn declared_support_refuses_what_a_model_does_not_run_by_name() {
+        let fused = TrainPrecisionSupport { model: "tiny", state: StateSupport::DeviceFused, resident: true, layer_streamed: false };
+        assert!(fused.check(&TrainPrecision::default()).is_ok());
+        assert!(fused.check(&TrainPrecision::parse("state=int8,weights=bf16").unwrap()).is_ok());
+        let e = fused.check(&TrainPrecision::parse("state=log8").unwrap()).unwrap_err();
+        assert!(e.contains("tiny") && e.contains("state=log8:64"), "{e}");
+        let e = fused.check(&TrainPrecision::parse("weights=nf4,window=2").unwrap()).unwrap_err();
+        assert!(e.contains("tiny") && e.contains("window"), "{e}");
+        let fp32 = TrainPrecisionSupport { model: "plain", state: StateSupport::Fp32, resident: false, layer_streamed: false };
+        assert!(fp32.check(&TrainPrecision::parse("state=bf16").unwrap()).unwrap_err().contains("plain"));
+        assert!(fp32.check(&TrainPrecision::parse("weights=fp8").unwrap()).unwrap_err().contains("weights=fp8:128"));
+        let any = TrainPrecisionSupport { model: "wide", state: StateSupport::Any, resident: false, layer_streamed: false };
+        assert!(any.check(&TrainPrecision::parse("state=log8:32").unwrap()).is_ok());
     }
 
     fn footprint(numel: usize) -> TrainingFootprint {

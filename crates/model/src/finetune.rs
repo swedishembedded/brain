@@ -86,8 +86,13 @@ impl ModelFit for CausalLmFit<'_, '_> {
 /// times the model), so the report says it was interrupted and `out` is left
 /// absent.
 pub fn fit_full<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, out: &Path, state: OptimizerState, control: FitControl<'_>) -> std::io::Result<FitReport> {
+    T::TRAIN_PRECISION.check(&opts.precision).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))?;
     let mut fit = CausalLmFit { dir, opts, out: Some(out), control: Some(control) };
-    let (report, _) = T::train_full(base, opts, state, &mut fit)?;
+    let resident = opts.precision.resident_config(Some(opts.seed)).map_err(std::io::Error::other)?;
+    let (report, _) = match &resident {
+        Some(resident) => T::train_full_resident(base, opts, resident, &mut fit)?,
+        None => T::train_full(base, opts, state, &mut fit)?,
+    };
     if report.interrupted {
         // fit_controlled does not write an interrupted run's model; make sure
         // a periodic save did not leave a partial one under the final name.
@@ -153,6 +158,10 @@ pub trait ChatTrainer {
 
     /// The frozen-base formats [`Self::train_lora`] can hold the base in.
     const LORA_BASES: crate::policy::TrainBases;
+
+    /// What of [`crate::TrainPrecision`] this family's full fine-tune runs. A request outside it is refused by
+    /// [`fit_full`] before anything is opened, naming the family and the key.
+    const TRAIN_PRECISION: crate::TrainPrecisionSupport;
 
     /// The weights file or directory to open for the base the caller named:
     /// `weights` is the resolved file, `model_dir` the directory it lives in.

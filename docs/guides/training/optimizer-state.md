@@ -144,9 +144,48 @@ held in a `DeferredPublish` and published together.
 A master is required (a resident low-precision value loses sub-spacing
 updates), and the planner refuses a configuration before loading
 (`resident_ft::check_fits` over the weights, gradients, host-side master and
-state and the caller's other demands). qwen3 wires it as
-`Qwen3Trainer::train_full_resident` / `Qwen::new_resident`; the embedding, head
-and norms train in fp32 on the device, and the clip spans both groups.
+state and the caller's other demands). qwen3 and qwen35 wire it as
+`train_full_resident` / `new_resident`; the embedding, head and norms train in
+fp32 on the device, and the clip spans both groups. The step itself is one
+generic function, `resident_ft::adamw_step`: a model supplies its backward and
+its device optimizer through `ResidentBackward`, and the global gradient norm
+is reduced on the device (`model::gradnorm`: `gradnorm_part`, with a bf16 twin
+for bf16 gradients), never read back to the host.
+
+### Layer-streamed full fine-tune
+
+When the weights do not all fit, `ResidentFtConfig::window` keeps only a window
+of layers on the device. The stored value of every tensor then lives on the host
+in its device encoding; a layer's tensors are copied into one of a bounded set of
+device slots when the forward or the backward reaches it
+(`ResidentFullFt::load_layer`), and the gradients of a layer go to one
+gradient lane per tensor shape that the next layer reuses. The device holds
+`window` layers of weights and one layer of gradients, whatever the depth, and
+the planner prices exactly that (`resident_ft::demands`).
+
+A layer is updated between the backward segments, as soon as its gradient is
+complete (`begin_pass` / `finish_layer` / `end_pass`): nothing later in the
+same step reads a finished layer's weights, so every gradient of a step is taken
+against one parameter version. With `defer_publication` the new values of a
+layer wait in a `DeferredPublish` store and reach the host copy together, so a
+layer is never half updated. No gradient outlives its layer, which makes a
+step one micro-batch (a second backward before the update is refused).
+
+The global clip needs the whole gradient norm before any update. Two forms:
+`ClipPass::TwoPass` (default) runs the backward twice, the first pass only
+measuring the norm on the device, so the update applies the exact global
+multiplier and the result equals the resident step bit for bit
+(`model/tests/layer_streamed_ft.rs`, `qwen3/tests/layer_streamed_full_ft.rs`,
+`qwen35/tests/layer_streamed_full_ft.rs`); `ClipPass::Running` runs it once and
+clips each layer by the norm accumulated so far (the head first), which never
+clips harder than the global clip and equals it when nothing clips. Without a
+clip there is one pass.
+
+The run asks for it with one model-agnostic value (the SDK's
+`train_precision`, the CLI's `--train-precision`):
+`state=int8,master=f32,weights=fp8,window=2,clip=two-pass`. Every trainer
+declares what it supports (`ChatTrainer::TRAIN_PRECISION`) and a request outside
+it is refused by name before anything loads.
 
 Resume is transactional: the model exposes `Model::off_device_state`, and the
 generic fit loop commits it (`<state>.offdevice/`, one generation per optimizer
