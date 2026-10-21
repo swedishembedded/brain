@@ -163,3 +163,22 @@ fn a_checkpoint_layer_loads_packed_and_equals_the_eager_importer() {
     assert!(fp8 > 0, "the fixture's linears are FP8 and must stay FP8 on the device");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The per-layer scratch is pooled (one replay arena per layer kind and direction): a second pass over the same
+/// trainer draws its buffers from the arenas the first filled, holding the first pass's stale contents, and
+/// still gives the loss and every adapter gradient bit for bit.
+#[test]
+fn a_pass_over_pooled_scratch_is_bit_identical_to_the_first_pass() {
+    let cfg = lora_config(Qwen35Config::tiny());
+    let init = qwen35::init::init_weights(&cfg, data::rng::random_seed());
+    let tokens: Vec<u32> = (0..N).map(|i| (i * 3 + 1) % cfg.vocab).collect();
+    let targets: Vec<u32> = (0..N).map(|i| (i * 5 + 2) % cfg.vocab).collect();
+    let trainer = StreamTrainer::new_synthetic(Gpu::new_cpu(pipelines()), &cfg, N, 2, &init);
+    let x0 = StreamTrainer::embed_synthetic(&init, &tokens, cfg.d_model as usize);
+    let loader = trainer.synthetic_loader_at(&cfg, &init, Dtype::F8E4M3);
+    let (first_loss, first) = gradients(&trainer, &cfg, &loader, &x0, &targets);
+    let (second_loss, second) = gradients(&trainer, &cfg, &loader, &x0, &targets);
+    assert_eq!(first_loss, second_loss);
+    assert_eq!(first, second, "adapter gradients differ between a fresh pass and a replayed one");
+    assert!(first.iter().any(|(_, g)| g.iter().any(|v| *v != 0.0)), "the pass produced gradient to compare");
+}

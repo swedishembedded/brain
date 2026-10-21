@@ -1083,6 +1083,11 @@ impl StreamTrainer {
         let mut xres_buf = g.storage_init("stream_train.x0", x0);
 
         self.for_each_streamed((0..n_layers as usize).collect(), &loader, |cursor, layer| {
+            // The scratch of a layer is the same shape sequence in every layer of its kind: replay one arena
+            // per kind instead of allocating and freeing ~30 buffers a layer. The layer is drained before the
+            // next scope opens (`for_each_streamed` polls), and the output the next layer reads is held by
+            // `xres_buf`, so the arena allocates a fresh slot for it.
+            let _scratch = g.scratch_scope_in(layer.scratch_arena(false));
             let out = match layer {
                 OwnedStreamedLayer::Linear(l) => gdn_layer_forward_lora(g, &self.ops, &self.ids, cfg, &self.lora, cursor, l, &xres_buf, n, &self.ones_khd).0,
                 OwnedStreamedLayer::Full(l) => gqa_layer_forward_lora(g, &self.ops, &self.ids, cfg, &self.lora, cursor, l, &xres_buf, n, &self.cos, &self.sin).0,
@@ -1112,6 +1117,7 @@ impl StreamTrainer {
         // ---- BACKWARD: re-stream all layers in reverse, recomputing each
         // one's own forward internals from the cached residual. ----
         self.for_each_streamed((0..n_layers as usize).rev().collect(), &loader, |layer_idx, layer| {
+            let _scratch = g.scratch_scope_in(layer.scratch_arena(true));
             let xres_l = g.storage_init("stream_train.xres_l", &xres_cache[layer_idx]);
             let d_res_l = match layer {
                 OwnedStreamedLayer::Linear(l) => gdn_layer_backward_lora(g, &self.ops, &self.ids, cfg, &self.lora, layer_idx, l, &xres_l, &d_res_next, n, &self.ones_khd),
@@ -1122,6 +1128,19 @@ impl StreamTrainer {
 
         g.poll_wait();
         loss
+    }
+}
+
+impl OwnedStreamedLayer {
+    /// The scratch arena a layer's forward (or backward) draws its buffers from: one per layer kind and
+    /// direction, because the buffer sequence is identical within a kind and different between kinds.
+    fn scratch_arena(&self, backward: bool) -> &'static str {
+        match (self, backward) {
+            (OwnedStreamedLayer::Linear(_), false) => "stream_train.gdn.fwd",
+            (OwnedStreamedLayer::Linear(_), true) => "stream_train.gdn.bwd",
+            (OwnedStreamedLayer::Full(_), false) => "stream_train.gqa.fwd",
+            (OwnedStreamedLayer::Full(_), true) => "stream_train.gqa.bwd",
+        }
     }
 }
 
