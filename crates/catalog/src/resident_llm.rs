@@ -250,6 +250,18 @@ pub(crate) fn on_device<R>(device: Device, f: impl FnOnce() -> R) -> Result<R, S
     }
 }
 
+/// A brain safetensors checkpoint opened for serving: its config and a source that serves every tensor in the
+/// encoding it is stored in ([`checkpoint::packed::stored_source`]), so a bf16 or int8 checkpoint reaches the
+/// engine - on a card or on the host tier - without a whole-model fp32 copy.
+pub(crate) fn open_stored_checkpoint(path: &str) -> Result<(serde_json::Value, Box<dyn checkpoint::TensorSource + Send + Sync>), String> {
+    let reader = checkpoint::weightio::WeightReader::open(path).map_err(|e| format!("cannot open {path}: {e}"))?;
+    if reader.gguf().is_some() {
+        return Err(format!("{path}: a GGUF is not a brain-native checkpoint (serve it through the GGUF resident of its family)"));
+    }
+    let config = reader.config();
+    Ok((config, checkpoint::packed::stored_source(reader)))
+}
+
 // ---------------------------------------------------------------- gpt
 
 /// The dense char-level GPT baseline behind the scheduler (`BRAIN_GPT2_WEIGHTS`).

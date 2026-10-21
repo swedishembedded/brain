@@ -5135,6 +5135,12 @@ impl Qwen35 {
         }
     }
 
+    /// The resident tier of linear `name`, `None` for a tensor held outside
+    /// the [`Weight`] table (embeddings and norms live in the parameter store).
+    pub fn weight_tier(&self, name: &str) -> Option<Dtype> {
+        self.weights.get(name).map(Weight::dtype)
+    }
+
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         match self.weights.get(name).filter(|_| !self.ps.weight.contains_key(name)) {
             Some(w) => self.ops.read_host(w),

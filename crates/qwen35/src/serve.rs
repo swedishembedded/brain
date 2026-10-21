@@ -244,6 +244,11 @@ pub struct Engine {
     gdn_slots: HashMap<u32, GdnSlot>,
 }
 
+/// The reference tier policy: every linear in f32.
+fn uniform_f32() -> model::ops::TierPolicy {
+    model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32)
+}
+
 impl Engine {
     /// Build from an in-memory weight map. `max_seq_len` is the hard cap on
     /// `prompt + max_new` for any ONE sequence (this engine's `block_size`,
@@ -259,31 +264,50 @@ impl Engine {
     /// scale per (token, kv-head) row) quarters it, so the same bytes hold
     /// more sequences. The GDN slots are not part of the pool and stay `f32`.
     pub fn from_map_kv(cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32, kv: KvTier) -> Engine {
-        Self::from_map_with_gpu(Gpu::new(pipelines()), cfg, weights, max_seq_len, max_concurrent, kv)
+        Self::from_map_with_gpu(Gpu::new(pipelines()), cfg, weights, max_seq_len, max_concurrent, kv, &uniform_f32())
     }
 
     /// [`Engine::from_map`] on an EXISTING device handle (warm start): the
     /// caller's `Gpu` parents this engine via `Gpu::new_like`, so building
     /// another engine on the same device costs pipeline compilation only.
     pub fn from_map_on(parent: &Gpu, cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32) -> Engine {
-        Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, KvTier::F32)
+        Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, KvTier::F32, &uniform_f32())
     }
 
     /// [`Engine::from_map_on`] from any [`checkpoint::TensorSource`] - a
     /// streaming checkpoint source loads tensor by tensor with no whole-model
     /// host map - with the GQA pool stored in `kv`.
     pub fn from_source_on(parent: &Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, kv: KvTier) -> Engine {
-        Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, kv)
+        Self::from_source_tier_on(parent, cfg, weights, max_seq_len, max_concurrent, kv, &model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32))
     }
 
-    fn from_map_with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, kv: KvTier) -> Engine {
+    /// [`Engine::from_source_tier_on`] on a device of its own.
+    pub fn from_source_tier(cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, kv: KvTier, tier: &model::ops::TierPolicy) -> Engine {
+        Self::from_map_with_gpu(Gpu::new(pipelines()), cfg, weights, max_seq_len, max_concurrent, kv, tier)
+    }
+
+    /// [`Engine::from_source_on`] with each linear held at the tier `tier`
+    /// names. A tier that is the encoding the source stores a tensor in
+    /// ([`model::ops::stored_tier_policy`]) is uploaded without a host f32
+    /// copy: a bf16 or int8 checkpoint stays bf16 or int8 on the device.
+    pub fn from_source_tier_on(parent: &Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, kv: KvTier, tier: &model::ops::TierPolicy) -> Engine {
+        Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, kv, tier)
+    }
+
+    /// The tier of the weight called `name` (a linear), `None` for a tensor
+    /// held outside the `Weight` table (embeddings, norms).
+    pub fn weight_tier(&self, name: &str) -> Option<gpu_core::select::Dtype> {
+        self.model.weight_tier(name)
+    }
+
+    fn from_map_with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, kv: KvTier, tier: &model::ops::TierPolicy) -> Engine {
         assert!(max_seq_len > 0, "max_seq_len must be > 0");
         assert!(max_concurrent > 0, "max_concurrent must be > 0");
         // b=1, t=1: this instance's own decode-state fields are dead weight
         // for `Engine` (see `Engine::model`'s own doc) - t=1 is the smallest
         // legal prefill length (`gdn_chunk_size(1) == 1`, so `t % chunk ==
         // 0` holds for every config).
-        let model = Qwen35::new_on_dt(gpu, cfg.clone(), 1, 1, weights, &model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32));
+        let model = Qwen35::new_on_dt(gpu, cfg.clone(), 1, 1, weights, tier);
         let kv_dim = cfg.kv_dim() as u64;
         let n_layers = cfg.n_layers as usize;
         let types = cfg.layer_types();

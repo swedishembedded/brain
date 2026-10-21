@@ -7,8 +7,6 @@
 # that migrates the call to a bounded packed reader. A new call is a design
 # defect; see check-whole-tensor-loads.sh. Classes are those of the
 # loader inventory in the knowledge base (entry 337).
-crates/catalog/src/resident_qwen35.rs	2	class W: checkpoint::load whole container as fp32 for the resident engine (knowledge 337)
-crates/catalog/src/resident_qwen35moe.rs	2	class W: checkpoint::load whole container as fp32 for the resident engine (knowledge 337)
 crates/chronos2/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/chronos2/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/cli/src/flops_cli.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)

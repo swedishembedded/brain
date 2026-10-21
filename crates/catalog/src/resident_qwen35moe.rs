@@ -6,9 +6,9 @@
 //! mirroring `crate::resident_llm::QwenResident`'s `Batched` arm — SCOPED
 //! DOWN to exactly what `qwen35moe::serve::Engine` actually is (see that
 //! module's own doc for the authoritative "deliberately deferred" list):
-//! **single-GPU**, **fp32 weights only** (`Engine::from_map`/`from_map_on`
-//! call `Qwen35::new_on`, never `new_on_i8` — weight quantization is
-//! explicitly named as deferred there), **fp32 KV** (no int8 KV path exists
+//! **single-GPU**, **f32 or packed-int8 expert weights as the
+//! checkpoint stores them** (`serving_engine` reads the file through its packed
+//! view; a bf16 checkpoint is decoded one tensor at a time to f32), **fp32 KV** (no int8 KV path exists
 //! for this engine, unlike `qwen3::serve::Engine`'s `kv_int8` default).
 //! Every resident sequence's decode row goes through one batched forward per
 //! scheduler iteration (the generic `model::serve::Scheduler`, driven by
@@ -21,7 +21,7 @@
 //! granularity `Engine`'s single-block-per-sequence layout allows (see
 //! `qwen35moe::serve`'s module doc on `block_size == max_seq_len`), and a
 //! `.gguf` serving path (`Engine` only loads brain-native safetensors via
-//! `checkpoint::load`, unlike `QwenResident`'s `Legacy` GGUF arm) — so unlike
+//! the packed source view of the file, unlike `QwenResident`'s `Legacy` GGUF arm) - so unlike
 //! `QwenResident` there is only ONE engine kind here, not a `Legacy`/`Batched`
 //! split.
 //!
@@ -34,7 +34,7 @@
 //!
 //! Env config follows `BRAIN_QWEN_*`'s naming convention:
 //!   * `BRAIN_QWEN35MOE_WEIGHTS` — a brain-format Qwen3.5-35B-A3B checkpoint
-//!     (`.safetensors`, `checkpoint::load`-compatible - what `brain
+//!     (`.safetensors`, f32, bf16 or packed int8 - what `brain
 //!     import-gguf` writes). The primary gate; unset ⇒ not served.
 //!   * `BRAIN_QWEN35MOE_TOKENIZER` - the sibling `tokenizer.json`. If unset,
 //!     `activate()` falls back to a GGUF checkpoint's own embedded
@@ -56,13 +56,15 @@
 //!     1 for this engine). Default 4.
 
 use capability::{Invocation, Manifest};
+use std::sync::Arc;
 use data::qwen_tokenizer::QwenBpe;
 use qwen3::chat::parse_request;
 use qwen35moe::config::{LayerType, Qwen35Config};
-use qwen35moe::serve::{Engine, Scheduler};
-use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
+use qwen35moe::serve::{Engine, EngineOptions, Scheduler};
+use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
-use crate::resident_llm::{est_vram, generate_spec, on_device};
+use crate::parkable::{Build, HostWeights, ParkableInstance};
+use crate::resident_llm::{est_vram, generate_spec, on_device, open_stored_checkpoint};
 use llmserve::{ScheduledInstance, TextFrontend};
 
 /// Catalog id: a `brain/`-prefixed synthetic id, matching `qwen35moe::caps::MODEL`
@@ -127,7 +129,7 @@ impl ResidentModel for Qwen35Resident {
         // maximum) — same reasoning as `QwenResident::manifest`.
         Manifest::new(
             &self.id,
-            "text generation (Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder; single-GPU, fp32 weights + fp32 KV, one active sequence at a time -- see crate::resident_qwen35moe's module doc)",
+            "text generation (Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder; single-GPU, f32 or packed-int8 weights as the checkpoint stores them + fp32 KV, one active sequence at a time -- see crate::resident_qwen35moe's module doc)",
             vec![generate_spec("generate text (Qwen3.5-35B-A3B; chat template optional)", true)],
         )
         .with_max_context_tokens(Self::ctx() as u64)
@@ -164,9 +166,9 @@ impl ResidentModel for Qwen35Resident {
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // Open first so a GGUF can supply its own embedded tokenizer, exactly
-        // like crate::resident_llm::QwenResident::activate. `Engine` itself
-        // still only loads brain-native safetensors below (see this module's
-        // own doc), so this reader exists purely for the tokenizer fallback.
+        // like crate::resident_llm::QwenResident::activate. The engine is built
+        // from the stored checkpoint view ([`engine_from`]); this reader
+        // exists for the tokenizer fallback.
         let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("qwen35moe: {e}"))?;
         // Tokenizer precedence: an explicit sibling tokenizer.json (or an
         // env override) wins; else a .gguf builds from its embedded
@@ -183,18 +185,38 @@ impl ResidentModel for Qwen35Resident {
         let stop = data::generation::stop_ids(tok_dir, &tok, gguf_eos, Some("<|im_end|>")).map_err(|e| format!("qwen35moe: {e}"))?;
         let ctx = Self::ctx();
         let max_concurrent = Self::max_concurrent();
-        let path = self.path.clone();
-        let sched = on_device(device, move || -> Scheduler {
-            // `Engine` only loads brain-native safetensors (`checkpoint::load`)
-            // -- see this module's own doc on why there is no GGUF arm here.
-            let container = checkpoint::load(&path);
-            let cfg = Qwen35Config::from_json(&container.header["config"]);
-            let weights = container.by_role("");
-            let engine = Engine::from_map(cfg, &weights, ctx, max_concurrent);
-            Scheduler::new(engine, max_concurrent as usize)
-        })?;
-        Ok(Box::new(ScheduledInstance::new(TextFrontend { tok, stop, label: "qwen35moe", parse: parse_request }, sched, max_concurrent as usize)))
+        let front = Arc::new(TextFrontend { tok, stop, label: "qwen35moe", parse: parse_request });
+        let (config, host) = HostWeights::open(&self.path, |config| Qwen35Config::from_json(config).param_list().into_iter().map(|(name, _)| name).collect())?;
+        let build: Build = Box::new(move |host, device| {
+            let sched = on_device(device, || engine_from(host.source(), &config, ctx, max_concurrent).map(|engine| Scheduler::new(engine, max_concurrent as usize)))??;
+            Ok(Box::new(ScheduledInstance::new(front.clone(), sched, max_concurrent as usize)))
+        });
+        Ok(Box::new(ParkableInstance::activate(Arc::new(host), device, build)?))
     }
+    /// A demoted instance keeps the checkpoint's packed bytes as a mapping of the file (evictable page cache), no
+    /// f32 copy and no device memory.
+    fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
+        match tier {
+            Tier::Hot => self.estimate(key),
+            Tier::Warm | Tier::Cold => MemCost::new(0, 0).with_mapped(std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)),
+        }
+    }
+}
+
+/// The serving engine over the brain checkpoint at `path` (see [`engine_from`]).
+pub fn serving_engine(path: &str, ctx: u32, max_concurrent: u32) -> Result<Engine, String> {
+    let (config, src) = open_stored_checkpoint(path)?;
+    engine_from(&*src, &config, ctx, max_concurrent)
+}
+
+/// The serving engine over `src`, a brain checkpoint of config `config`, read one tensor at a time as the file
+/// stores it: the routed experts stay packed int8 when the checkpoint holds them so (the engine implements the f32
+/// and int8 tiers), and every other tensor is decoded as it is uploaded, never as a whole-model fp32 host copy.
+fn engine_from(src: &dyn checkpoint::TensorSource, config: &serde_json::Value, ctx: u32, max_concurrent: u32) -> Result<Engine, String> {
+    let cfg = Qwen35Config::from_json(config);
+    let experts_stored = model::ops::stored_tier(src, "blocks.0.mlp.experts.0.gate.weight");
+    let tier = model::ops::TierPolicy::uniform(if experts_stored == Some(gpu_core::select::Dtype::I8) { gpu_core::select::Dtype::I8 } else { gpu_core::select::Dtype::F32 });
+    Ok(Engine::from_source(cfg, src, EngineOptions::new(ctx, max_concurrent).with_tier(tier)))
 }
 
 #[cfg(test)]

@@ -331,6 +331,20 @@ impl Qwen35Config {
         self.linear_conv_dim() as u64 * self.linear_conv_kernel_dim.saturating_sub(1) as u64
     }
 
+    /// The name of every mixer and MLP linear a serving build holds as a
+    /// resident `Weight` (the leaves of [`Self::layer_leaves`] of every layer, and
+    /// the extra MTP layer's): the tensors a weight tier applies to.
+    pub fn linear_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for (l, ty) in self.layer_types().iter().enumerate() {
+            names.extend(self.layer_leaves(*ty).into_iter().map(|(suffix, _, _)| format!("blocks.{l}.{suffix}")));
+        }
+        if self.mtp {
+            names.extend(self.layer_leaves(LayerType::Full).into_iter().map(|(suffix, _, _)| format!("mtp.layers.0.{suffix}")));
+        }
+        names
+    }
+
     /// The `(suffix, n, k)` triple for every quantizable per-layer leaf of
     /// `ty`: the 5 GDN or 4 GQA mixer-adjacent leaves, plus the 3 dense-MLP
     /// leaves every layer type owns (`n`, `k` in `Weight::upload`'s `[n, k]`

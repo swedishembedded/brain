@@ -48,6 +48,7 @@ pub mod adapter_registry;
 pub mod adapter_release;
 pub mod demo;
 pub mod imageops;
+mod parkable;
 pub mod resident_arcface;
 pub mod resident_asr;
 pub mod resident_clip;

@@ -62,6 +62,35 @@ pub trait Frontend {
     }
 }
 
+/// A shared front end is a front end: an instance that is rebuilt (a demoted one promoted again) keeps its tokenizer
+/// by sharing it.
+impl<F: Frontend + ?Sized> Frontend for std::sync::Arc<F> {
+    fn tok(&self) -> &QwenBpe {
+        (**self).tok()
+    }
+    fn stop(&self) -> &[u32] {
+        (**self).stop()
+    }
+    fn label(&self) -> &str {
+        (**self).label()
+    }
+    fn parse(&self, inv: &Invocation) -> Result<ParsedRequest, String> {
+        (**self).parse(inv)
+    }
+    fn route(&self, inv: &Invocation) -> Result<Option<(model::serve::AdapterId, AdapterIdentity)>, String> {
+        (**self).route(inv)
+    }
+    fn stale(&self) -> bool {
+        (**self).stale()
+    }
+    fn base_digest(&self) -> Option<String> {
+        (**self).base_digest()
+    }
+    fn rejection(&self, inv: &Invocation, reason: &RejectReason) -> String {
+        (**self).rejection(inv, reason)
+    }
+}
+
 /// One request in a [`Group`]: its parsed streaming state and the scheduler id
 /// it runs under.
 struct Job {
