@@ -85,6 +85,14 @@ history and exempt.
    in `model::memplan` (`TrainingFootprint::saved_boundaries`, read back with `memplan::saved_policy`) and obeyed by
    the qwen35 (`TrainOpts::saved`) and qwen3 (`Qwen::new_lora_dt_saved`, recompute-only) LoRA trainers; the stream
    is rounded at every boundary so forward and backward agree.
+   **Attention training memory**: the causal GQA flash trio (`block::flash_gqa_causal_*`, O(T * head_dim), no `[H,T,T]`
+   probabilities) trains qwen3, qwen35 and qwen35moe at long sequences; `block::flash_bidir_kernels` specialises the same three
+   kernels to bidirectional attention (`CAUSAL = 0`, optional `UNIT_SCALE`), which flux2's device trainer takes through
+   `devgrad::AttentionPath::{Gemm, Flash, Auto}` (Auto: flash where the GEMM attention's score slab exceeds one device allocation).
+   **Convert once, never per step**: `checkpoint::packed::convert_to_file` writes a bounded one-off conversion of a checkpoint to a
+   packed safetensors file (`brain.packed` metadata carries each tensor's encoding, so the packed reader needs no declaration);
+   `qwen35::fp8_source::write_converted_base` / `qwen35_convert_base` use it to turn the 27B FP8 release into an NF4 base that
+   `stream_train_step --base-dtype nf4` streams as a plain copy of half the bytes.
    `brain qwen3 {import,infer,serve,export,precompile,train,finetune,toolcall}`,
    plus the generic `brain import` for a `qwen3` GGUF.
 2b. **Qwen3.5-35B-A3B hybrid decoder** (`crates/qwen35moe`) - 40 layers, 3:1
