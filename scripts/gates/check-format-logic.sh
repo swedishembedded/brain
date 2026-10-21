@@ -38,7 +38,7 @@ while [ "$#" -gt 0 ]; do
 done
 exec python3 "$here/ratchet.py" --root "$root" --allow "$allow" --map "$map" --layers 4 --name check-format-logic \
   --pattern 'kernels_cuda::' \
-  --pattern 'Weight::(I8|Q4|NF4|KQuant|BF16|F16|F32)\b' \
+  --pattern 'Weight::(I8|Q4|NF4|KQuant|BF16|F16|F32|FP8|Micro)\b' \
   --pattern 'NF4_LUT' \
   --pattern '(int4|lut4|kquant|half|fp8)::[a-z_0-9]+\(' \
   --pattern '(^|[^a-z_])(quantize_weight[a-z0-9_]*|dequant[a-z0-9_]*|pack_bf16|pack_f16)\(' \

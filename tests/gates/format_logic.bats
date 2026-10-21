@@ -55,3 +55,11 @@ gate() { run bash "$REPO/scripts/gates/check-format-logic.sh" --root "$T" --allo
   [ "$status" -ne 0 ]
   [[ "$output" == *"STALE"* ]]
 }
+
+@test "every tier of the Weight enum is matched, including FP8 and Micro" {
+  for v in F32 BF16 F16 I8 Q4 NF4 KQuant FP8 Micro; do
+    printf 'fn f(w: Weight) { match w { Weight::%s { .. } => {} _ => {} } }\n' "$v" >"$T/crates/m/src/lib.rs"
+    gate
+    [ "$status" -ne 0 ] || { echo "Weight::$v escaped the gate"; false; }
+  done
+}
