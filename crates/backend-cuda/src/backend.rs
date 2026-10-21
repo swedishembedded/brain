@@ -785,14 +785,10 @@ impl CudaBackend {
             cache.retain(|_, s| s.keep.iter().all(|w| w.strong_count() > 0));
         }
         self.counters.uniform_allocs.fetch_add(1, Ordering::Relaxed);
+        // Not cleared: the allocation is exactly the `words` parameters, and every submission of the step uploads
+        // all of them in stream order before its dispatch, so a clear would only be overwritten (it was one
+        // memset per dispatch of a prefill round over fresh buffers, ~2,000 a round on a 27B hybrid model).
         let mem = Arc::new(self.alloc((words * 4).max(4) as u64, "a step's uniform stream"));
-        // Zeroed: a kernel that declares a uniform block wider than the
-        // parameters a caller supplied would otherwise read whatever the last
-        // tenant of this address left, and `cuMemAlloc` promises nothing.
-        self.ctx.zero(&mem).unwrap_or_else(|e| panic!("backend-cuda: zeroing a uniform failed: {e}"));
-        // A step records the uniform now and may be submitted on another
-        // handle, whose stream must not run it ahead of this zero.
-        self.fence_out([&mem]);
         cache.insert(
             key,
             UniformSlot { mem: mem.clone(), keep: bufs.iter().map(|(m, _)| Arc::downgrade(m)).collect() },
@@ -2267,7 +2263,7 @@ mod tests {
     }
 
     /// Whatever a handle creates and initialises on its own stream (zeroed
-    /// storage, a step's zeroed uniform block) is used by other handles on the
+    /// storage and buffers) is used by other handles on the
     /// same card - a model holds two, and steps recorded on one are submitted
     /// on the other. The initialising work is queued on the creator's stream,
     /// so unless it is fenced the other stream runs ahead of it and the zero
@@ -2283,11 +2279,5 @@ mod tests {
         assert!(fenced_by_a(&a.storage(4)), "zeroed storage");
         assert!(fenced_by_a(&a.buffer("b", 16, BufUsage::STORAGE)), "zeroed buffer");
         assert!(fenced_by_a(&a.uniform_dynamic(4)), "zeroed dynamic uniform");
-
-        let uniform = a.uniform_for(0, &[], 2);
-        assert!(
-            uniform.fence.lock().unwrap().as_ref().is_some_and(|f| f.stream_id == a.ctx.stream_id()),
-            "a step's zeroed uniform block"
-        );
     }
 }
