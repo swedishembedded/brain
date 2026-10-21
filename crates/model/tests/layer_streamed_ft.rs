@@ -196,7 +196,7 @@ fn the_layer_streamed_step_gives_the_resident_steps_bits() {
     let ops = ops();
     let task = task();
     for value in VALUES {
-        for clip in [None, Some(0.05f32)] {
+        for clip in [None, Some(1e-3f32)] {
             for window in [1u32, 2] {
                 let mut resident = build(&ops, config(value, None, ClipPass::TwoPass), &task);
                 let mut streamed = build(&ops, config(value, Some(window), ClipPass::TwoPass), &task);
@@ -220,8 +220,8 @@ fn deferred_publication_per_layer_changes_no_bits() {
     let mut direct = build(&ops, config(ResidentValue::Bf16, Some(1), ClipPass::TwoPass), &task);
     let mut deferred = build(&ops, ResidentFtConfig { defer_publication: true, ..config(ResidentValue::Bf16, Some(1), ClipPass::TwoPass) }, &task);
     for _ in 0..3 {
-        streamed_step(&ops, &mut direct, &task, Some(0.05), ClipPass::TwoPass);
-        streamed_step(&ops, &mut deferred, &task, Some(0.05), ClipPass::TwoPass);
+        streamed_step(&ops, &mut direct, &task, Some(1e-3), ClipPass::TwoPass);
+        streamed_step(&ops, &mut deferred, &task, Some(1e-3), ClipPass::TwoPass);
     }
     assert_eq!(masters(&ops, &mut direct), masters(&ops, &mut deferred));
 }
@@ -267,8 +267,8 @@ fn the_running_clip_never_clips_harder_than_the_global_clip() {
 
     let mut global = build(&ops, config(ResidentValue::Bf16, Some(1), ClipPass::TwoPass), &task);
     let mut running = build(&ops, config(ResidentValue::Bf16, Some(1), ClipPass::Running), &task);
-    let (_, global_mult) = streamed_step(&ops, &mut global, &task, Some(0.05), ClipPass::TwoPass);
-    let (_, running_min) = streamed_step(&ops, &mut running, &task, Some(0.05), ClipPass::Running);
+    let (_, global_mult) = streamed_step(&ops, &mut global, &task, Some(1e-3), ClipPass::TwoPass);
+    let (_, running_min) = streamed_step(&ops, &mut running, &task, Some(1e-3), ClipPass::Running);
     assert!(running_min >= global_mult, "running multiplier {running_min} must not be below the global {global_mult}");
     assert!(global_mult < 1.0, "the test clip must be active");
 }
@@ -287,19 +287,19 @@ fn a_restored_layer_streamed_run_continues_exactly() {
         let ckpt = CheckpointDir::new(dir.join(format!("{value:?}"))).unwrap();
         let mut a = build(&ops, cfg(), &task);
         for _ in 0..3 {
-            streamed_step(&ops, &mut a, &task, Some(0.05), ClipPass::TwoPass);
+            streamed_step(&ops, &mut a, &task, Some(1e-3), ClipPass::TwoPass);
         }
         a.commit(&ops, &ckpt, &a.run_state(0, vec![])).unwrap();
         for _ in 0..3 {
-            streamed_step(&ops, &mut a, &task, Some(0.05), ClipPass::TwoPass);
+            streamed_step(&ops, &mut a, &task, Some(1e-3), ClipPass::TwoPass);
         }
         let mut b = build(&ops, cfg(), &task);
         // A different history first, so the window holds stale layers when the checkpoint is restored.
-        streamed_step(&ops, &mut b, &task, Some(0.05), ClipPass::TwoPass);
+        streamed_step(&ops, &mut b, &task, Some(1e-3), ClipPass::TwoPass);
         let restored = b.restore(&ops, &ckpt).unwrap().expect("a checkpoint exists");
         assert_eq!((restored.step, b.step_count()), (3, 3));
         for _ in 0..3 {
-            streamed_step(&ops, &mut b, &task, Some(0.05), ClipPass::TwoPass);
+            streamed_step(&ops, &mut b, &task, Some(1e-3), ClipPass::TwoPass);
         }
         assert_eq!(masters(&ops, &mut a), masters(&ops, &mut b), "{value:?}");
         assert_eq!(a.step_count(), b.step_count());
