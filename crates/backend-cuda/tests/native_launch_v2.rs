@@ -83,7 +83,7 @@ fn spec(entry: &'static str, launch: CudaLaunch) -> NativeSpec {
 }
 
 fn launch(dynamic_bytes: u32, opt_in: bool, cluster: Option<[u32; 3]>) -> CudaLaunch {
-    CudaLaunch { dynamic_shared_bytes: dynamic_bytes, shared_opt_in: opt_in, cluster, scalars: SCALARS, arch: ArchFeatures::Portable }
+    CudaLaunch { dynamic_shared_bytes: dynamic_bytes, shared_opt_in: opt_in, cluster, scalars: SCALARS, arch: ArchFeatures::Portable, programmatic: false }
 }
 
 fn backend() -> Option<CudaBackend> {

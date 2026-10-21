@@ -51,6 +51,7 @@ static PEAK: kernels_cuda::CudaKernel = kernels_cuda::CudaKernel {
     block_dim: 256,
     tile: (1, 256),
     shared_bytes: 0,
+    programmatic: false,
     src: r#"
 extern "C" __global__ void brain_bench_fma_peak(const unsigned int* params, float* out) {
     const unsigned int iters = params[0];

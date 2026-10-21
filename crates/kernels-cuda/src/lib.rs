@@ -161,6 +161,10 @@ pub struct CudaKernel {
     /// device's QUERIED shared-memory-per-block limit before dispatch, so a
     /// kernel a card cannot host is declined rather than failing at launch.
     pub shared_bytes: u32,
+    /// Whether the kernel is written for programmatic dependent launch: it waits for its predecessor
+    /// (`griddepcontrol.wait`) before its first read and lets its own dependents launch at once
+    /// (`griddepcontrol.launch_dependents`), so the device overlaps its launch with the kernel before it.
+    pub programmatic: bool,
     /// The CUDA C++ source, `include_str!`ed from this crate's `cu/`
     /// directory.
     pub src: &'static str,
@@ -198,6 +202,7 @@ pub const ALL: &[CudaKernel] = &[
         // provider checks it against the device's own queried limit before it
         // ever asks the driver to launch.
         shared_bytes: 2 * 16 * (64 + 1) * 4,
+        programmatic: false,
         src: include_str!("../cu/matmul_f32_tiled.cu"),
     },
     CudaKernel {
@@ -219,6 +224,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 64),
         // 4 stages x (64x64 + 64x64 int8 tiles + 64x2 f32 group scales).
         shared_bytes: 4 * (64 * 64 + 64 * 64 + 64 * 2 * 4),
+        programmatic: false,
         src: include_str!("../cu/matmul_i8_mma.cu"),
     },
     CudaKernel {
@@ -243,6 +249,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 32,
         tile: (16, 16),
         shared_bytes: 8 * (16 * 64 + 16 * 64 + 16 * 2 * 4),
+        programmatic: false,
         src: concat!(
             "#define BRAIN_I8_BM 16\n#define BRAIN_I8_BN 16\n#define BRAIN_I8_WARPS_M 1\n#define BRAIN_I8_WARPS_N 1\n#define BRAIN_I8_STAGES 8\n",
             "#define brain_matmul_i8_mma brain_matmul_i8_mma_m16\n",
@@ -271,6 +278,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 64,
         tile: (32, 32),
         shared_bytes: 6 * (32 * 64 + 32 * 64 + 32 * 2 * 4),
+        programmatic: false,
         src: concat!(
             "#define BRAIN_I8_BM 32\n#define BRAIN_I8_BN 32\n#define BRAIN_I8_WARPS_M 2\n#define BRAIN_I8_WARPS_N 1\n#define BRAIN_I8_STAGES 6\n",
             "#define brain_matmul_i8_mma brain_matmul_i8_mma_m32\n",
@@ -299,6 +307,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 64,
         tile: (64, 32),
         shared_bytes: 4 * (64 * 64 + 32 * 64 + 32 * 2 * 4),
+        programmatic: false,
         src: concat!(
             "#define BRAIN_I8_BM 64\n#define BRAIN_I8_BN 32\n#define BRAIN_I8_WARPS_M 2\n#define BRAIN_I8_WARPS_N 1\n#define BRAIN_I8_STAGES 4\n",
             "#define brain_matmul_i8_mma brain_matmul_i8_mma_m128\n",
@@ -322,6 +331,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 1),
         // K and V tiles of 32 keys x (256 + 8 pad) fp16.
         shared_bytes: 2 * 32 * (256 + 8) * 2,
+        programmatic: false,
         src: include_str!("../cu/flash_prefill_f16_hd256.cu"),
     },
     CudaKernel {
@@ -338,6 +348,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (64, 1),
         shared_bytes: 2 * 32 * (256 + 8) * 2,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_KV_TIER 1\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd256_bf16\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu")
@@ -356,6 +367,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (64, 1),
         shared_bytes: 2 * 32 * (256 + 8) * 2,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_KV_TIER 2\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd256_kv8\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu")
@@ -374,6 +386,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (64, 1),
         shared_bytes: 2 * 32 * (256 + 8) * 2,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_KV_TIER 3\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd256_kvfp8\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu")
@@ -394,6 +407,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 1),
         // Everything is dynamic (opted in): Q, K and V tiles, see `FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES` in gpu-core.
         shared_bytes: 0,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 1\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu"),
@@ -416,6 +430,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 1),
         // Everything is dynamic (opted in): Q, K and V tiles, see `FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES` in gpu-core.
         shared_bytes: 0,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu"),
@@ -438,6 +453,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 1),
         // Everything is dynamic (opted in): Q, K and V tiles, see `FLASH_PREFILL_V2_DYNAMIC_SHARED_BYTES` in gpu-core.
         shared_bytes: 0,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 3\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu"),
@@ -460,6 +476,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 1),
         // K and V tiles of 32 keys x (128 + 8 pad) fp16.
         shared_bytes: 2 * 32 * (128 + 8) * 2,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_HD 128\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd128\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu")
@@ -480,6 +497,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 1),
         // K and V tiles of 32 keys x (128 + 8 pad) fp16.
         shared_bytes: 2 * 32 * (128 + 8) * 2,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_HD 128\n#define BRAIN_KV_TIER 1\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd128_bf16\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu")
@@ -500,6 +518,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 1),
         // K and V tiles of 32 keys x (128 + 8 pad) fp16.
         shared_bytes: 2 * 32 * (128 + 8) * 2,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_HD 128\n#define BRAIN_KV_TIER 2\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd128_kv8\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu")
@@ -520,6 +539,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 1),
         // K and V tiles of 32 keys x (128 + 8 pad) fp16.
         shared_bytes: 2 * 32 * (128 + 8) * 2,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_HD 128\n#define BRAIN_KV_TIER 3\n#define brain_flash_prefill_f16_hd256 brain_flash_prefill_f16_hd128_kvfp8\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu")
@@ -540,6 +560,7 @@ pub const ALL: &[CudaKernel] = &[
         // 64 query rows per block of one (sample, head).
         tile: (64, 1),
         shared_bytes: 2 * 32 * (128 + 8) * 2,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_DENSE 1\n#define BRAIN_HD 128\n#define brain_flash_prefill_f16_hd256 brain_flash_attn_fwd_f16_hd128\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu")
@@ -560,6 +581,7 @@ pub const ALL: &[CudaKernel] = &[
         // 64 query rows per block of one (sample, head).
         tile: (64, 1),
         shared_bytes: 2 * 32 * (256 + 8) * 2,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_DENSE 1\n#define BRAIN_HD 256\n#define brain_flash_prefill_f16_hd256 brain_flash_attn_fwd_f16_hd256\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu")
@@ -579,6 +601,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 512,
         tile: (64, 1),
         shared_bytes: 16 * 4,
+        programmatic: false,
         src: include_str!("../cu/flash_attn_bwd_f16.cu"),
     },
     CudaKernel {
@@ -595,6 +618,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (64, 1),
         shared_bytes: 8 * 4,
+        programmatic: false,
         src: include_str!("../cu/flash_attn_bwd_f16.cu"),
     },
     CudaKernel {
@@ -611,6 +635,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (64, 1),
         shared_bytes: 2 * 32 * (128 + 8) * 2,
+        programmatic: false,
         src: include_str!("../cu/flash_attn_bwd_f16.cu"),
     },
     CudaKernel {
@@ -627,6 +652,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (64, 1),
         shared_bytes: 2 * 32 * (128 + 8) * 2 + 2 * 32 * 4,
+        programmatic: false,
         src: include_str!("../cu/flash_attn_bwd_f16.cu"),
     },
     CudaKernel {
@@ -644,6 +670,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1),
         // Shared: 8 warps x 8 heads x (max, sum) plus the merge tile of 8 x 8 x 32 float4.
         shared_bytes: 8 * 8 * 4 * 2 + 8 * 8 * 32 * 16,
+        programmatic: false,
         src: concat!(
             "#define brain_decode_attn_batched brain_decode_attn_batched_f32\n",
             include_str!("../cu/decode_attn_batched.cu")
@@ -664,6 +691,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1),
         // Shared: 8 warps x 8 heads x (max, sum) plus the merge tile of 8 x 8 x 32 float4.
         shared_bytes: 8 * 8 * 4 * 2 + 8 * 8 * 32 * 16,
+        programmatic: false,
         src: concat!(
             "#define BRAIN_KV_INT8 1\n#define brain_decode_attn_batched brain_decode_attn_batched_i8\n",
             include_str!("../cu/decode_attn_batched.cu")
@@ -686,6 +714,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1),
         // The query fragments (16 k-steps x 32 lanes x 16 bytes) plus the merge of 4 warps x 8 heads: 256 outputs, max, sum.
         shared_bytes: 16 * 32 * 16 + 4 * 8 * (256 + 2) * 4,
+        programmatic: true,
         src: concat!("#define BRAIN_GRP 6\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
     },
     CudaKernel {
@@ -703,6 +732,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 128,
         tile: (1, 1),
         shared_bytes: 16 * 32 * 16 + 4 * 8 * (256 + 2) * 4,
+        programmatic: true,
         src: concat!(
             "#define BRAIN_GRP 6\n#define BRAIN_KV_FP8 1\n#define brain_paged_flash_decode_gqa_hd256_kv8 brain_paged_flash_decode_gqa_hd256_kvfp8\n",
             include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")
@@ -724,6 +754,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1),
         // The query fragments and, reusing their bytes, the merge of 4 warps x 8 heads x 256 outputs; the maxima and sums.
         shared_bytes: 4 * 8 * 256 * 4 + 2 * 4 * 8 * 4,
+        programmatic: true,
         src: concat!(
             "#define BRAIN_GRP 6\n#define brain_paged_flash_decode_gqa_hd256_tf32 brain_paged_flash_decode_gqa_hd256_f32\n",
             include_str!("../cu/paged_flash_decode_gqa_hd256_tf32.cu")
@@ -745,6 +776,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1),
         // The query fragments and, reusing their bytes, the merge of 4 warps x 8 heads x 256 outputs; the maxima and sums.
         shared_bytes: 4 * 8 * 256 * 4 + 2 * 4 * 8 * 4,
+        programmatic: true,
         src: concat!(
             "#define BRAIN_GRP 6\n#define BRAIN_KV_BF16 1\n#define brain_paged_flash_decode_gqa_hd256_tf32 brain_paged_flash_decode_gqa_hd256_bf16\n",
             include_str!("../cu/paged_flash_decode_gqa_hd256_tf32.cu")
@@ -766,6 +798,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1),
         // Split weights (at most 4096) + 2 warp partials + the max and the sum.
         shared_bytes: 4 * (4096 + 2 + 2),
+        programmatic: true,
         src: include_str!("../cu/paged_flash_decode_gqa_combine.cu"),
     },
     CudaKernel {
@@ -783,6 +816,7 @@ pub const ALL: &[CudaKernel] = &[
         // Four (token, kv head) pairs per block.
         tile: (4, 1),
         shared_bytes: 0,
+        programmatic: true,
         src: include_str!("../cu/kv_append_i8.cu"),
     },
     CudaKernel {
@@ -802,6 +836,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 32),
         // State slice 128x32 + v_new 64x32 + the staged A tile 32x(128+1), all f32.
         shared_bytes: (128 * 32 + 64 * 32 + 32 * 129) * 4,
+        programmatic: false,
         src: include_str!("../cu/gdn_chunk_loop_f32.cu"),
     },
     CudaKernel {
@@ -819,6 +854,7 @@ pub const ALL: &[CudaKernel] = &[
         // 8 rows of x by 16 weight rows per block.
         tile: (8, 16),
         shared_bytes: 0,
+        programmatic: true,
         src: include_str!("../cu/matmul_i8_gemv.cu"),
     },
     CudaKernel {
@@ -840,6 +876,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (8, 16),
         shared_bytes: 0,
+        programmatic: true,
         src: include_str!("../cu/matmul_i8_gemv.cu"),
     },
     CudaKernel {
@@ -860,6 +897,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (128, 128),
         // Double-buffered k-major tiles of 16 k x (128 + 4 pad) floats per operand.
         shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        programmatic: false,
         src: include_str!("../cu/matmul_f32_reg.cu"),
     },
     CudaKernel {
@@ -879,6 +917,7 @@ pub const ALL: &[CudaKernel] = &[
         // 128 rows of dY by 128 columns of W per block, row-tile-major.
         tile: (128, 128),
         shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        programmatic: false,
         src: include_str!("../cu/matmul_f32_reg.cu"),
     },
     CudaKernel {
@@ -897,6 +936,7 @@ pub const ALL: &[CudaKernel] = &[
         // 128 columns of A by 128 columns of B per block, row-tile-major.
         tile: (128, 128),
         shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        programmatic: false,
         src: include_str!("../cu/matmul_f32_reg.cu"),
     },
     CudaKernel {
@@ -914,6 +954,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (128, 128),
         shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        programmatic: false,
         src: include_str!("../cu/matmul_f32_reg.cu"),
     },
     CudaKernel {
@@ -931,6 +972,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (128, 128),
         shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        programmatic: false,
         src: include_str!("../cu/matmul_f32_reg.cu"),
     },
     CudaKernel {
@@ -948,6 +990,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (128, 128),
         shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        programmatic: false,
         src: include_str!("../cu/matmul_f32_reg.cu"),
     },
     CudaKernel {
@@ -967,6 +1010,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 128),
         // q: 64 x 128 floats; one k/v tile: 32 x 128 floats.
         shared_bytes: (64 * 128 + 32 * 128) * 4,
+        programmatic: false,
         src: include_str!("../cu/flash_attn_f32.cu"),
     },
     CudaKernel {
@@ -984,6 +1028,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 128,
         tile: (64, 128),
         shared_bytes: (64 * 128 + 32 * 128) * 4,
+        programmatic: false,
         src: include_str!("../cu/flash_attn_f32.cu"),
     },
     CudaKernel {
@@ -1002,6 +1047,7 @@ pub const ALL: &[CudaKernel] = &[
         // Four rows per block.
         tile: (4, 512),
         shared_bytes: 4 * 64 * 4,
+        programmatic: false,
         src: include_str!("../cu/softmax_rows_f32.cu"),
     },
     CudaKernel {
@@ -1020,6 +1066,7 @@ pub const ALL: &[CudaKernel] = &[
         // Four rows per block.
         tile: (4, 1024),
         shared_bytes: 4 * 64 * 4,
+        programmatic: false,
         src: include_str!("../cu/softmax_rows_f32.cu"),
     },
     CudaKernel {
@@ -1038,6 +1085,7 @@ pub const ALL: &[CudaKernel] = &[
         // Four rows per block.
         tile: (4, 2048),
         shared_bytes: 4 * 64 * 4,
+        programmatic: false,
         src: include_str!("../cu/softmax_rows_f32.cu"),
     },
     CudaKernel {
@@ -1056,6 +1104,7 @@ pub const ALL: &[CudaKernel] = &[
         // Four rows per block.
         tile: (4, 4096),
         shared_bytes: 4 * 64 * 4,
+        programmatic: false,
         src: include_str!("../cu/softmax_rows_f32.cu"),
     },
     CudaKernel {
@@ -1075,6 +1124,7 @@ pub const ALL: &[CudaKernel] = &[
         // Eight rows (one per warp) per block.
         tile: (8, 1),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/softmax_rows_dx.cu"),
     },
     CudaKernel {
@@ -1092,6 +1142,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 256),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/roof_dp4a.cu"),
     },
     CudaKernel {
@@ -1111,6 +1162,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (128, 128),
         shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        programmatic: false,
         src: include_str!("../cu/matmul_f32_reg.cu"),
     },
     CudaKernel {
@@ -1133,6 +1185,7 @@ pub const ALL: &[CudaKernel] = &[
         // Double-buffered k-major tiles of 16 words x (128 + 4 pad) for each
         // operand, and the chunk's two groups of 128 weight scales.
         shared_bytes: 2 * 2 * 16 * (128 + 4) * 4 + 2 * 2 * 128 * 4,
+        programmatic: false,
         src: include_str!("../cu/matmul_i8_dp4a.cu"),
     },
     CudaKernel {
@@ -1153,6 +1206,7 @@ pub const ALL: &[CudaKernel] = &[
         // rows per block (four warps of 16), tile-major.
         tile: (1, 64),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/moe_i8_grouped_mma.cu"),
     },
     CudaKernel {
@@ -1175,6 +1229,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1),
         // 64 lane partials + the 64 x 128 quantised bytes exchanged between lanes.
         shared_bytes: 4 * (64 + 64 + 256) + 64 * 80,
+        programmatic: true,
         src: include_str!("../cu/add_rms_quant.cu"),
     },
     CudaKernel {
@@ -1195,6 +1250,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1),
         // 32 warp maxima + 1024 x 18 quantised bytes exchanged between threads.
         shared_bytes: 32 * 4 + 1024 * 18,
+        programmatic: true,
         src: include_str!("../cu/quant_epilogue.cu"),
     },
     CudaKernel {
@@ -1215,6 +1271,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1),
         // 32 warp maxima + 1024 x 18 quantised bytes exchanged between threads.
         shared_bytes: 32 * 4 + 1024 * 18,
+        programmatic: true,
         src: concat!("#define BRAIN_QE_CLUSTER 4
 #define brain_quant_epilogue brain_quant_epilogue_cluster
 ", include_str!("../cu/quant_epilogue.cu")),
@@ -1238,6 +1295,7 @@ pub const ALL: &[CudaKernel] = &[
         // Per row (at most 8): q and k (128 each), three value heads' 128, and the
         // beta, decay and inverse-RMS of each of the three.
         shared_bytes: 8 * (2 * 128 * 4 + 3 * 128 * 4 + 3 * 3 * 4),
+        programmatic: true,
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
@@ -1259,6 +1317,7 @@ pub const ALL: &[CudaKernel] = &[
         // The shared body's staging, sized for `gdn_decode`'s at most 8 rows
         // (see that entry) though a pooled block walks a single one.
         shared_bytes: 8 * (2 * 128 * 4 + 3 * 128 * 4 + 3 * 3 * 4),
+        programmatic: true,
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
@@ -1278,6 +1337,7 @@ pub const ALL: &[CudaKernel] = &[
         // One block per (key head, sequence).
         tile: (1, 1),
         shared_bytes: 8 * (2 * 128 * 4 + 3 * 128 * 4 + 3 * 3 * 4),
+        programmatic: true,
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
@@ -1294,6 +1354,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 1),
         shared_bytes: 0,
+        programmatic: true,
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
@@ -1313,6 +1374,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1),
         // The head's 512 staged values and the shared inverse norm.
         shared_bytes: 512 * 4 + 4,
+        programmatic: true,
         src: include_str!("../cu/gqa_decode_prep.cu"),
     },
     CudaKernel {
@@ -1333,6 +1395,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 128),
         // Two A slices of 16 x (64 + 4) and two B slices of 16 x 128 floats.
         shared_bytes: (2 * 16 * (64 + 4) + 2 * 16 * 128) * 4,
+        programmatic: false,
         src: include_str!("../cu/conv2d_f32.cu"),
     },
     CudaKernel {
@@ -1349,6 +1412,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (64, 128),
         shared_bytes: (2 * 16 * (64 + 4) + 2 * 16 * 128) * 4,
+        programmatic: false,
         src: include_str!("../cu/conv2d_f32.cu"),
     },
     CudaKernel {
@@ -1369,6 +1433,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 256),
         // Two stages of a 4 x 18 x 20 input slice and 36 x 68 weights.
         shared_bytes: 2 * (4 * 18 * 20 + 4 * 9 * 68) * 4,
+        programmatic: false,
         src: include_str!("../cu/conv2d_f32.cu"),
     },
     CudaKernel {
@@ -1386,6 +1451,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (64, 256),
         shared_bytes: 2 * (4 * 18 * 20 + 4 * 9 * 68) * 4,
+        programmatic: false,
         src: include_str!("../cu/conv2d_f32.cu"),
     },
     CudaKernel {
@@ -1402,6 +1468,7 @@ pub const ALL: &[CudaKernel] = &[
         // Up to 64 input channels x 128 positions of one stride class.
         tile: (64, 128),
         shared_bytes: (2 * 16 * (64 + 4) + 2 * 16 * 128) * 4,
+        programmatic: false,
         src: include_str!("../cu/conv2d_f32.cu"),
     },
     CudaKernel {
@@ -1419,6 +1486,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 64),
         // Two A slices of 32 x (64 + 4) and two B slices of 32 x (64 + 4) floats.
         shared_bytes: (2 * 32 * (64 + 4) + 2 * 32 * (64 + 4)) * 4,
+        programmatic: false,
         src: include_str!("../cu/conv2d_f32.cu"),
     },
     CudaKernel {
@@ -1434,6 +1502,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 256),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/conv2d_f32.cu"),
     },
     CudaKernel {
@@ -1452,6 +1521,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1),
         // The warp partials and the block total, two floats each.
         shared_bytes: (512 / 32 + 1) * 8,
+        programmatic: false,
         src: include_str!("../cu/bn_f32.cu"),
     },
     CudaKernel {
@@ -1467,6 +1537,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 512,
         tile: (1, 1),
         shared_bytes: (512 / 32 + 1) * 8,
+        programmatic: false,
         src: include_str!("../cu/bn_f32.cu"),
     },
     CudaKernel {
@@ -1482,6 +1553,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 512,
         tile: (1, 1),
         shared_bytes: (512 / 32 + 1) * 8,
+        programmatic: false,
         src: include_str!("../cu/bn_f32.cu"),
     },
     CudaKernel {
@@ -1498,6 +1570,7 @@ pub const ALL: &[CudaKernel] = &[
         // 1024 elements of one plane per block.
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/bn_elem_f32.cu"),
     },
     CudaKernel {
@@ -1514,6 +1587,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/bn_elem_f32.cu"),
     },
     CudaKernel {
@@ -1529,6 +1603,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/bn_elem_f32.cu"),
     },
     CudaKernel {
@@ -1545,6 +1620,7 @@ pub const ALL: &[CudaKernel] = &[
         // 1024 elements of one plane per block.
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: true,
         src: include_str!("../cu/plumb_f32.cu"),
     },
     CudaKernel {
@@ -1560,6 +1636,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/plumb_f32.cu"),
     },
     CudaKernel {
@@ -1575,6 +1652,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/plumb_f32.cu"),
     },
     CudaKernel {
@@ -1590,6 +1668,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/plumb_f32.cu"),
     },
     CudaKernel {
@@ -1605,6 +1684,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/plumb_f32.cu"),
     },
     CudaKernel {
@@ -1620,6 +1700,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 512,
         tile: (1, 1),
         shared_bytes: (512 / 32 + 1) * 8,
+        programmatic: false,
         src: include_str!("../cu/bn_f32.cu"),
     },
     CudaKernel {
@@ -1636,6 +1717,7 @@ pub const ALL: &[CudaKernel] = &[
         // 1024 elements per block.
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/cast_f32_bf16.cu"),
     },
     CudaKernel {
@@ -1652,6 +1734,7 @@ pub const ALL: &[CudaKernel] = &[
         // 256 threads of eight weights (2048 weights) per block.
         tile: (1, 256),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/weight_dequant_bf16.cu"),
     },
     CudaKernel {
@@ -1669,6 +1752,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 128,
         tile: (64, 32),
         shared_bytes: (128 * 32 + 64 * 32 + 32 * 129) * 4,
+        programmatic: false,
         src: include_str!("../cu/gdn_chunk_loop_f32.cu"),
     },
     CudaKernel {
@@ -1688,6 +1772,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 128),
         // Everything is dynamic: see `GDN_BWD_SWEEP_DYNAMIC_SHARED_BYTES`.
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_bwd_sweep_f32.cu"),
     },
     CudaKernel {
@@ -1704,6 +1789,7 @@ pub const ALL: &[CudaKernel] = &[
         // One block per row.
         tile: (1, 1),
         shared_bytes: 8 * 4,
+        programmatic: false,
         src: include_str!("../cu/attn_softmax_f32.cu"),
     },
     CudaKernel {
@@ -1720,6 +1806,7 @@ pub const ALL: &[CudaKernel] = &[
         // One block per row.
         tile: (1, 1),
         shared_bytes: 8 * 4,
+        programmatic: false,
         src: include_str!("../cu/attn_softmax_f32.cu"),
     },
     CudaKernel {
@@ -1736,6 +1823,7 @@ pub const ALL: &[CudaKernel] = &[
         // One block per row.
         tile: (1, 1),
         shared_bytes: 8 * 4,
+        programmatic: false,
         src: include_str!("../cu/attn_softmax_f32.cu"),
     },
     CudaKernel {
@@ -1752,6 +1840,7 @@ pub const ALL: &[CudaKernel] = &[
         // One block per row.
         tile: (1, 1),
         shared_bytes: 8 * 4,
+        programmatic: false,
         src: include_str!("../cu/ce_stats_f32.cu"),
     },
     CudaKernel {
@@ -1768,6 +1857,7 @@ pub const ALL: &[CudaKernel] = &[
         // One block per head.
         tile: (1, 1),
         shared_bytes: 8 * 4,
+        programmatic: false,
         src: include_str!("../cu/gdn_state_decay_bwd_dscale_f32.cu"),
     },
     // ---- t-gdn: the tensor-core Gated DeltaNet chunk forward ----
@@ -1789,6 +1879,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 128),
         // Everything is dynamic: see `GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES` in gpu-core.
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
     },
     CudaKernel {
@@ -1804,6 +1895,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (64, 128),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
     },
     CudaKernel {
@@ -1821,6 +1913,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 32),
         // Everything is dynamic: see `GDN_CHUNK_LOOP_TC_DYNAMIC_SHARED_BYTES` in gpu-core.
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_chunk_loop_tc.cu"),
     },
     CudaKernel {
@@ -1836,6 +1929,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 128,
         tile: (64, 32),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_chunk_loop_tc.cu"),
     },
     CudaKernel {
@@ -1851,6 +1945,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (64, 128),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
     },
     CudaKernel {
@@ -1866,6 +1961,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (64, 128),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
     },
     // ---- t-gdn2: the tensor-core Gated DeltaNet chunk backward ----
@@ -1883,6 +1979,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 32),
         // Everything is dynamic: see `GDN_BWD_SWEEP_TC_DYNAMIC_SHARED_BYTES` in gpu-core.
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_bwd_sweep_tc.cu"),
     },
     CudaKernel {
@@ -1899,6 +1996,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 128),
         // Everything is dynamic: see `GDN_CHUNK_BWD_POST_TC_DYNAMIC_SHARED_BYTES` in gpu-core.
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_chunk_bwd_post_tc.cu"),
     },
     CudaKernel {
@@ -1914,6 +2012,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (8, 128),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_qk_bwd_tok.cu"),
     },
     CudaKernel {
@@ -1929,6 +2028,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 128,
         tile: (32, 128),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_conv_tok.cu"),
     },
     CudaKernel {
@@ -1944,6 +2044,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 128,
         tile: (1, 128),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_conv_tok.cu"),
     },
     CudaKernel {
@@ -1959,6 +2060,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 128,
         tile: (32, 128),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/gdn_conv_tok.cu"),
     },
     // ---- t4: element-wise glue outside the mixer ----
@@ -1975,6 +2077,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/swiglu_bwd_fused.cu"),
     },
     CudaKernel {
@@ -1990,6 +2093,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/rmsnorm_fused.cu"),
     },
     CudaKernel {
@@ -2005,6 +2109,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/rmsnorm_fused.cu"),
     },
     CudaKernel {
@@ -2021,6 +2126,7 @@ pub const ALL: &[CudaKernel] = &[
         // 1024 elements per block.
         tile: (1, 1024),
         shared_bytes: 0,
+        programmatic: false,
         src: include_str!("../cu/silu_mul_bf16.cu"),
     },
 ];
@@ -2222,6 +2328,7 @@ mod tests {
             block_dim: 64,
             tile: (1, 64),
             shared_bytes: 0,
+            programmatic: false,
             src: GENERIC,
         },
         CudaKernel {
@@ -2237,6 +2344,7 @@ mod tests {
             block_dim: 128,
             tile: (32, 32),
             shared_bytes: 1024,
+            programmatic: false,
             src: TUNED,
         },
     ];
@@ -2299,6 +2407,7 @@ mod tests {
             block_dim: 64,
             tile: (1, 64),
             shared_bytes: 0,
+            programmatic: false,
             src: "// no __restrict__ here, and no __dp4a either\n\
                   extern \"C\" __global__ void bk_prose(const float* a) {}\n",
         }];
@@ -2324,6 +2433,7 @@ mod tests {
             block_dim: 64,
             tile: (1, 64),
             shared_bytes: 0,
+            programmatic: false,
             src,
         };
         let joined = check_table(&[kernel(UNGATED)]).join("\n");
@@ -2347,6 +2457,7 @@ mod tests {
                 block_dim: 33,
                 tile: (0, 8),
                 shared_bytes: PORTABLE_SHARED_BYTES + 1,
+                programmatic: false,
                 src: TUNED,
             },
             CudaKernel {
@@ -2362,6 +2473,7 @@ mod tests {
                 block_dim: 64,
                 tile: (16, 16),
                 shared_bytes: 0,
+                programmatic: false,
                 src: TUNED,
             },
         ];

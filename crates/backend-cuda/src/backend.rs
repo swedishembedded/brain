@@ -1760,7 +1760,9 @@ impl backend_api::Backend for CudaBackend {
         let c = Arc::new(Compiled {
             func,
             block_dim: *block_dim,
-            shape: exec::Shape { shared_bytes: launch.dynamic_shared_bytes, cluster: launch.cluster },
+            // A device that cannot launch programmatically launches the kernel plainly: its `griddepcontrol` wait
+            // is then a no-op behind an already complete predecessor.
+            shape: exec::Shape { shared_bytes: launch.dynamic_shared_bytes, cluster: launch.cluster, programmatic: launch.programmatic && self.ctx.can_launch_programmatic() },
             scalars: launch.scalars,
             // STORAGE bindings only - the uniform is counted separately
             // below, exactly as it is for a generated kernel (whose

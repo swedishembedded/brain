@@ -460,13 +460,20 @@ pub struct CudaLaunch {
     /// Whether the source needs, can use or must not use the arch-specific
     /// target suffix.
     pub arch: ArchFeatures,
+    /// Programmatic dependent launch: the kernel's blocks may become resident
+    /// while the kernel before it in the stream is still running, and the
+    /// kernel waits for that predecessor (`griddepcontrol.wait`) before it
+    /// reads anything. Only for a kernel whose source does exactly that; a
+    /// device or driver without the launch attribute launches it plainly,
+    /// which is equally correct.
+    pub programmatic: bool,
 }
 
 impl CudaLaunch {
     /// A plain launch: static shared memory only, no cluster, no scalar
     /// arguments, portable code.
     pub const NONE: CudaLaunch =
-        CudaLaunch { dynamic_shared_bytes: 0, shared_opt_in: false, cluster: None, scalars: &[], arch: ArchFeatures::Portable };
+        CudaLaunch { dynamic_shared_bytes: 0, shared_opt_in: false, cluster: None, scalars: &[], arch: ArchFeatures::Portable, programmatic: false };
 
     /// How many `params` words [`Self::scalars`] consume.
     pub fn scalar_words(&self) -> usize {

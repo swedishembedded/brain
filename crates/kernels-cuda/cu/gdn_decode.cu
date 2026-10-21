@@ -386,10 +386,22 @@ __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params
     }
 }
 
+// Programmatic dependent launch (compute capability 9.0): wait until the kernel before this one in the stream has
+// finished and its writes are visible, then let the kernel after this one become resident at once. A launch without
+// the programmatic attribute has nothing to wait for and no early dependents, so both are no-ops there.
+#ifndef BRAIN_PDL_ENTRY
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#define BRAIN_PDL_ENTRY() do { asm volatile("griddepcontrol.wait;\n" ::: "memory"); asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory"); } while (0)
+#else
+#define BRAIN_PDL_ENTRY() do {} while (0)
+#endif
+#endif
+
 extern "C" __global__ void __launch_bounds__(BRAIN_GDN_MAX_GROUP * BRAIN_GDN_HD, 1)
 brain_gdn_decode(const unsigned int* params, const float* mixed, const float* conv_w, float* hist,
                  const float* bproj, const float* aproj, const float* a_log, const float* dt_bias,
                  float* state, const float* z, const float* norm_w, float* gated) {
+    BRAIN_PDL_ENTRY();
     const unsigned int kh = blockIdx.y * gridDim.x + blockIdx.x;  // key head
     if (kh >= params[0]) { return; }                               // block-uniform
     brain_gdn_decode_body(params, kh, params[6], mixed, conv_w, hist, bproj, aproj, a_log, dt_bias, state, z, norm_w,
@@ -402,6 +414,7 @@ extern "C" __global__ void __launch_bounds__(BRAIN_GDN_MAX_GROUP * BRAIN_GDN_HD,
 brain_gdn_decode_pool(const unsigned int* params, const float* mixed, const float* conv_w, float* hist,
                       const float* bproj, const float* aproj, const float* a_log, const float* dt_bias,
                       float* state, const float* z, const float* norm_w, float* gated, const unsigned int* rows) {
+    BRAIN_PDL_ENTRY();
     const unsigned int nkh = params[0];
     const unsigned int nvh = params[1];
     const unsigned int b = params[6];
@@ -426,6 +439,7 @@ brain_gdn_verify_pool(const unsigned int* params, const float* mixed, const floa
                       const float* bproj, const float* aproj, const float* a_log, const float* dt_bias,
                       float* state, const float* z, const float* norm_w, float* gated, const unsigned int* rows,
                       const unsigned int* counts, const unsigned int* offs, float* snap_state, float* snap_hist) {
+    BRAIN_PDL_ENTRY();
     const unsigned int nkh = params[0];
     const unsigned int nvh = params[1];
     const unsigned int b = params[6];
@@ -454,6 +468,7 @@ brain_gdn_verify_pool(const unsigned int* params, const float* mixed, const floa
 extern "C" __global__ void __launch_bounds__(256)
 brain_gdn_commit_pool(const unsigned int* params, float* pool_state, float* pool_hist, const float* snap_state,
                       const float* snap_hist, const unsigned int* rows, const unsigned int* sel) {
+    BRAIN_PDL_ENTRY();
     const unsigned int b = params[0];
     const unsigned long long state_len = params[1];
     const unsigned long long hist_len = params[2];

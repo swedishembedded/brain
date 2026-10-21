@@ -1158,7 +1158,7 @@ pub(crate) fn resolve_fused(backend: &dyn Backend, which: Fused) -> Option<Nativ
         block_dim: k.block_dim,
         bindings: which.bindings(),
         shared_bytes: k.shared_bytes,
-        launch: which.launch_on(cc),
+        launch: CudaLaunch { programmatic: k.programmatic, ..which.launch_on(cc) },
     })
 }
 
@@ -1229,7 +1229,7 @@ pub(crate) fn resolve(
                 block_dim: k.block_dim,
                 bindings: row.bindings,
                 shared_bytes: k.shared_bytes,
-                launch: CudaLaunch::NONE,
+                launch: CudaLaunch { programmatic: k.programmatic, ..CudaLaunch::NONE },
             })?;
             Some(Active { slow, id, kernel: k.name, tile: k.tile, serves: row.serves, blocks: row.blocks })
         })

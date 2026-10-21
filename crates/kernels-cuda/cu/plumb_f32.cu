@@ -70,7 +70,19 @@ __device__ __forceinline__ BrainPlRun brain_pl_run(unsigned planes, unsigned hw)
 #define BRAIN_PL_SMALL_PLANE 32u
 
 // da[n, c] = dy[n, c_off + c] over the da planes. params [N, Ctot, Csrc, c_off, H, W].
+// Programmatic dependent launch (compute capability 9.0): wait until the kernel before this one in the stream has
+// finished and its writes are visible, then let the kernel after this one become resident at once. A launch without
+// the programmatic attribute has nothing to wait for and no early dependents, so both are no-ops there.
+#ifndef BRAIN_PDL_ENTRY
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#define BRAIN_PDL_ENTRY() do { asm volatile("griddepcontrol.wait;\n" ::: "memory"); asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory"); } while (0)
+#else
+#define BRAIN_PDL_ENTRY() do {} while (0)
+#endif
+#endif
+
 extern "C" __global__ void __launch_bounds__(BRAIN_PL_THREADS) brain_concat_split(const unsigned int* params, const float* dy, float* da) {
+    BRAIN_PDL_ENTRY();
     const unsigned N = params[0], Ctot = params[1], Csrc = params[2], c_off = params[3], hw = params[4] * params[5];
     if (hw < BRAIN_PL_SMALL_PLANE) {
         const unsigned total = N * Csrc * hw;

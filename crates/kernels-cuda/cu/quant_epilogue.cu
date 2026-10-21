@@ -91,9 +91,21 @@ __device__ __forceinline__ void brain_cluster_sync() { __syncthreads(); }
 __device__ __forceinline__ float brain_cluster_load(const float* addr, unsigned int) { return *addr; }
 #endif
 
+// Programmatic dependent launch (compute capability 9.0): wait until the kernel before this one in the stream has
+// finished and its writes are visible, then let the kernel after this one become resident at once. A launch without
+// the programmatic attribute has nothing to wait for and no early dependents, so both are no-ops there.
+#ifndef BRAIN_PDL_ENTRY
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#define BRAIN_PDL_ENTRY() do { asm volatile("griddepcontrol.wait;\n" ::: "memory"); asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory"); } while (0)
+#else
+#define BRAIN_PDL_ENTRY() do {} while (0)
+#endif
+#endif
+
 extern "C" __global__ void __launch_bounds__(BRAIN_QE_THREADS)
 brain_quant_epilogue(const unsigned int* params, const float* a, const float* b, float* y,
                      unsigned int* xq, float* sx) {
+    BRAIN_PDL_ENTRY();
     const unsigned int k = params[0];
     const unsigned int rows = params[1];
     const unsigned int mode = params[2];

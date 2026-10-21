@@ -57,11 +57,23 @@
 #define BRAIN_GPREP_THREADS 256
 #define BRAIN_GPREP_MAX_HD 512
 
+// Programmatic dependent launch (compute capability 9.0): wait until the kernel before this one in the stream has
+// finished and its writes are visible, then let the kernel after this one become resident at once. A launch without
+// the programmatic attribute has nothing to wait for and no early dependents, so both are no-ops there.
+#ifndef BRAIN_PDL_ENTRY
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#define BRAIN_PDL_ENTRY() do { asm volatile("griddepcontrol.wait;\n" ::: "memory"); asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory"); } while (0)
+#else
+#define BRAIN_PDL_ENTRY() do {} while (0)
+#endif
+#endif
+
 extern "C" __global__ void __launch_bounds__(BRAIN_GPREP_THREADS)
 brain_gqa_decode_prep(const unsigned int* params, const float* q_full, const float* k, const float* v,
                       const float* q_norm, const float* k_norm, const float* cos_t, const float* sin_t,
                       const unsigned int* blocks, const unsigned int* offsets,
                       float* q_out, float* q_gate, float* pool_k, float* pool_v) {
+    BRAIN_PDL_ENTRY();
     const unsigned int nh = params[0];
     const unsigned int nkv = params[1];
     const unsigned int hd = params[2];

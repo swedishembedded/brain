@@ -225,7 +225,17 @@ pub struct CuLaunchAttribute {
 /// `CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION`.
 pub const LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION: u32 = 4;
 
+/// `CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION`.
+pub const LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION: u32 = 6;
+
 impl CuLaunchAttribute {
+    /// The programmatic-stream-serialization attribute: `value.programmaticStreamSerializationAllowed` is one int.
+    pub fn programmatic() -> CuLaunchAttribute {
+        let mut value = [0u64; 8];
+        value[0] = 1;
+        CuLaunchAttribute { id: LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION, pad: [0; 4], value }
+    }
+
     /// The cluster-dimension attribute: `value.clusterDim` is three
     /// consecutive `unsigned int`s, which on this little-endian layout are the
     /// first 12 bytes of the union.

@@ -525,9 +525,21 @@ __device__ __forceinline__ void brain_gemv_block(const unsigned int* xq, const u
     }
 }
 
+// Programmatic dependent launch (compute capability 9.0): wait until the kernel before this one in the stream has
+// finished and its writes are visible, then let the kernel after this one become resident at once. A launch without
+// the programmatic attribute has nothing to wait for and no early dependents, so both are no-ops there.
+#ifndef BRAIN_PDL_ENTRY
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#define BRAIN_PDL_ENTRY() do { asm volatile("griddepcontrol.wait;\n" ::: "memory"); asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory"); } while (0)
+#else
+#define BRAIN_PDL_ENTRY() do {} while (0)
+#endif
+#endif
+
 extern "C" __global__ void __launch_bounds__(BRAIN_I8G_THREADS, BRAIN_I8G_MIN_BLOCKS)
 brain_matmul_i8_gemv(const unsigned int* params, const unsigned int* xq, const unsigned int* wq,
                      const float* sx, const float* sw, float* out) {
+    BRAIN_PDL_ENTRY();
     const unsigned int m = params[0];
     const unsigned int kg = params[1];
     const unsigned int n = params[2];
@@ -570,6 +582,7 @@ brain_matmul_i8_gemv_multi(const unsigned int* params, const unsigned int* xq, c
                            const unsigned int* wq1, const float* sw1, float* out1,
                            const unsigned int* wq2, const float* sw2, float* out2,
                            const unsigned int* wq3, const float* sw3, float* out3) {
+    BRAIN_PDL_ENTRY();
     const unsigned int m = params[0];
     const unsigned int kg = params[1];
     const unsigned int tiles_m = (m + BRAIN_I8G_ROWS - 1u) / BRAIN_I8G_ROWS;

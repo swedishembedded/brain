@@ -107,9 +107,21 @@ __device__ __forceinline__ unsigned int brain_row(const unsigned int* bt, unsign
     return (bt[j / block_size] * block_size + (j % block_size)) * n_kv + kvh;
 }
 
+// Programmatic dependent launch (compute capability 9.0): wait until the kernel before this one in the stream has
+// finished and its writes are visible, then let the kernel after this one become resident at once. A launch without
+// the programmatic attribute has nothing to wait for and no early dependents, so both are no-ops there.
+#ifndef BRAIN_PDL_ENTRY
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#define BRAIN_PDL_ENTRY() do { asm volatile("griddepcontrol.wait;\n" ::: "memory"); asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory"); } while (0)
+#else
+#define BRAIN_PDL_ENTRY() do {} while (0)
+#endif
+#endif
+
 extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_gqa_hd256_kv8(
     const unsigned int* params, const float* q, const signed char* pool_k, const signed char* pool_v, const unsigned int* block_tables,
     const unsigned int* seq_lens, float* part, const float* k_scales, const float* v_scales) {
+    BRAIN_PDL_ENTRY();
     const unsigned int batch = params[0], n_heads = params[1], n_kv = params[2], block_size = params[5], max_bt = params[6];
     const unsigned int n_splits = params[7], tiles_per_split = params[8];
     const unsigned int wg = blockIdx.y * gridDim.x + blockIdx.x;

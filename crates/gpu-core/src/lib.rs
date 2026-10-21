@@ -2134,7 +2134,7 @@ mod native_facade {
                     block_dim: kernel.block_dim,
                     bindings,
                     shared_bytes: kernel.shared_bytes,
-                    launch,
+                    launch: backend_api::CudaLaunch { programmatic: launch.programmatic || kernel.programmatic, ..launch },
                 })
             })
         }

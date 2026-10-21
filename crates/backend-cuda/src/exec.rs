@@ -62,6 +62,8 @@ pub struct Shape {
     pub shared_bytes: u32,
     /// Cluster dimensions in blocks.
     pub cluster: Option<[u32; 3]>,
+    /// Programmatic dependent launch (`backend_api::CudaLaunch::programmatic`).
+    pub programmatic: bool,
 }
 
 /// What a kernel declares about how it must be compiled, beyond its source.
@@ -1074,7 +1076,7 @@ impl Context {
         let mut values: Vec<CuDevicePtr> = args.to_vec();
         let mut params: Vec<*mut c_void> =
             values.iter_mut().map(|v| v as *mut CuDevicePtr as *mut c_void).collect();
-        let Some(dims) = shape.cluster else {
+        if shape.cluster.is_none() && !shape.programmatic {
             // SAFETY: `params` names `args.len()` valid pointers to 64-bit
             // slots that outlive the call, and the function belongs to a module
             // still loaded in this context (the caller's obligation).
@@ -1096,9 +1098,15 @@ impl Context {
                 },
                 "cuLaunchKernel",
             );
-        };
-        let launch_ex = self.fns.launch_kernel_ex.ok_or("this driver has no cuLaunchKernelEx, so no cluster launch")?;
-        let mut attr = crate::driver::CuLaunchAttribute::cluster(dims);
+        }
+        let launch_ex = self.fns.launch_kernel_ex.ok_or("this driver has no cuLaunchKernelEx, so no cluster or programmatic launch")?;
+        let mut attrs: Vec<crate::driver::CuLaunchAttribute> = Vec::with_capacity(2);
+        if let Some(dims) = shape.cluster {
+            attrs.push(crate::driver::CuLaunchAttribute::cluster(dims));
+        }
+        if shape.programmatic {
+            attrs.push(crate::driver::CuLaunchAttribute::programmatic());
+        }
         let config = crate::driver::CuLaunchConfig {
             grid_dim_x: grid.0,
             grid_dim_y: grid.1,
@@ -1108,10 +1116,10 @@ impl Context {
             block_dim_z: block.2,
             shared_mem_bytes: shape.shared_bytes,
             stream: self.stream,
-            attrs: &mut attr,
-            num_attrs: 1,
+            attrs: attrs.as_mut_ptr(),
+            num_attrs: attrs.len() as u32,
         };
-        // SAFETY: as above, plus `config` and the one attribute it points at
+        // SAFETY: as above, plus `config` and the attributes it points at
         // outlive the call.
         self.d.check(
             unsafe { launch_ex(&config, f, params.as_mut_ptr(), std::ptr::null_mut()) },
@@ -1154,6 +1162,12 @@ impl Context {
     /// Whether this device and driver can launch thread-block clusters.
     pub fn can_launch_clusters(&self) -> bool {
         self.info.cluster_launch && self.fns.launch_kernel_ex.is_some()
+    }
+
+    /// Whether this device and driver can launch a kernel programmatically dependent on its predecessor
+    /// (`griddepcontrol`, compute capability 9.0, through `cuLaunchKernelEx`).
+    pub fn can_launch_programmatic(&self) -> bool {
+        self.compute_capability() >= (9, 0) && self.fns.launch_kernel_ex.is_some()
     }
 
     /// Whether this driver exposes the CUDA Graphs entry points at all, and if
