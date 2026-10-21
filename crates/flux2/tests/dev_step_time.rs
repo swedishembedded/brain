@@ -46,7 +46,7 @@
 //! set by its shapes and its dispatch sequence, and this test is about the
 //! shapes. Correctness lives in `dev_grad.rs` / `device_train.rs`.
 
-use flux2::devgrad::BasePrecision;
+use flux2::devgrad::{AttentionPath, BasePrecision};
 use flux2::devtrain::{step_flops, DeviceTrainer, TrainerSpec};
 use flux2::grad::{DoubleW, SingleW, StreamW};
 use flux2::lora::{LoraAdapter, LoraCfg};
@@ -74,11 +74,12 @@ struct StepCase {
     cards: usize,
     /// Timed steps after the warm-up.
     iters: usize,
+    attention: AttentionPath,
 }
 
 /// klein-4B at 512 px, rank 16, one card, fp32 base, three timed steps.
 const KLEIN_4B_512: StepCase =
-    StepCase { variant: "klein-4b", size: 512, rank: 16, refs: 0, blocks: None, base: BasePrecision::F32, cards: 1, iters: 3 };
+    StepCase { variant: "klein-4b", size: 512, rank: 16, refs: 0, blocks: None, base: BasePrecision::F32, cards: 1, iters: 3, attention: AttentionPath::Gemm };
 
 /// A constant fill of the right shape. Values do not affect the clock; the
 /// alternative (a per-element RNG over billions of parameters) would dominate
@@ -149,13 +150,28 @@ fn klein_4b_paired_512_int8_base_one_single_block() {
     measure(&StepCase { refs: 1, blocks: Some((0, 1)), base: BasePrecision::Int8, ..KLEIN_4B_512 });
 }
 
+/// The attention path is the only difference between these pairs: the per-block step time and the resident
+/// bytes of the GEMM attention against the flash trio, at the real 512 px and at 1024 px, where the
+/// `[heads, n, n]` score slabs are what limits a card.
+fn klein_4b_paired_1024_one_single_block() {
+    measure(&StepCase { refs: 1, size: 1024, blocks: Some((0, 1)), ..KLEIN_4B_512 });
+}
+
+fn klein_4b_paired_1024_one_single_block_flash() {
+    measure(&StepCase { refs: 1, size: 1024, blocks: Some((0, 1)), attention: AttentionPath::Flash, ..KLEIN_4B_512 });
+}
+
+fn klein_4b_paired_512_one_single_block_flash() {
+    measure(&StepCase { refs: 1, blocks: Some((0, 1)), attention: AttentionPath::Flash, ..KLEIN_4B_512 });
+}
+
 /// klein-9B's fp32 base is larger than one 24 GiB card.
 fn klein_9b_caption_512_two_cards() {
     measure(&StepCase { variant: "klein-9b", cards: 2, ..KLEIN_4B_512 });
 }
 
 fn measure(case: &StepCase) {
-    let StepCase { variant, size, rank, refs, blocks, base: base_at, cards, iters } = *case;
+    let StepCase { variant, size, rank, refs, blocks, base: base_at, cards, iters, attention } = *case;
     assert!(size.is_multiple_of(16), "size must be a multiple of 16");
     let mut fc = Flux2Config::from_name(variant).expect("variant");
     if let Some((d, s)) = blocks {
@@ -177,7 +193,7 @@ fn measure(case: &StepCase) {
     let base = weights(&c);
     eprintln!("  host weights built in {:.1}s", t0.elapsed().as_secs_f64());
     let t0 = std::time::Instant::now();
-    let spec = TrainerSpec { card: None, cards, base: base_at };
+    let spec = TrainerSpec { card: None, cards, base: base_at, attention };
     let tr = DeviceTrainer::build(&spec, c.clone(), rank, &base).expect("trainer");
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
     let per: Vec<String> = tr.weight_bytes_per_card().iter().map(|b| format!("{:.2}", gib(*b))).collect();
@@ -316,5 +332,8 @@ gpu_core::card_tests!(
     klein_4b_paired_512_int8_base,
     klein_4b_paired_512_one_single_block,
     klein_4b_paired_512_int8_base_one_single_block,
+    klein_4b_paired_512_one_single_block_flash,
+    klein_4b_paired_1024_one_single_block,
+    klein_4b_paired_1024_one_single_block_flash,
     klein_9b_caption_512_two_cards,
 );

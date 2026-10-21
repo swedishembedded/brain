@@ -998,7 +998,7 @@ pub fn run(
     if opts.trainer == Trainer::Device {
         progress(0, opts.steps + 1, "uploading the frozen base to the device".into());
         let base_at = base_precision(&paths.dit, opts)?;
-        let spec = crate::devtrain::TrainerSpec { card: opts.card, cards: opts.cards.max(1), base: base_at };
+        let spec = crate::devtrain::TrainerSpec { card: opts.card, cards: opts.cards.max(1), base: base_at, attention: crate::devgrad::AttentionPath::Gemm };
         let t = DeviceTrainer::build(&spec, cfg.clone(), opts.rank, host.as_ref().expect("base"))?;
         // The QK-RMSNorm scales are frozen in a LoRA run, so their gain
         // gradient is work nothing consumes. It stays on under the parity

@@ -24,7 +24,7 @@
 //! The device tests take their card as an argument:
 //! `cargo test -p brain-flux2 --release --test dev_grad -- --device gpu1 --backend cuda`; the `backend-cpu` twins run without one.
 
-use flux2::devgrad::{BlockDev, DoubleDev, SingleDev, N_SITES};
+use flux2::devgrad::{AttentionPath, BlockDev, DoubleDev, SingleDev, N_SITES};
 use flux2::grad::{double_backward, double_forward, single_backward, single_forward, Dims, DoubleMods, DoubleW, Mod, SingleW, StreamW};
 use model::lora::Pair;
 
@@ -157,11 +157,31 @@ fn rope_tables(n: usize, hd: usize) -> (Vec<f32>, Vec<f32>) {
 /// all-zero gradients on `backend-cpu` alone, and this graph is built almost
 /// entirely out of workgroup-tiled GEMMs - so the same gate runs on both
 /// backends, and the CPU one needs no hardware to reach.
-fn engine(n: usize, cpu: bool) -> BlockDev {
-    if cpu {
-        BlockDev::from_gpu(gpu_core::Gpu::new_cpu(flux2::devgrad::KERNELS), n, D, NH, MLP, RANK)
-    } else {
-        BlockDev::new(n, D, NH, MLP, RANK)
+fn engine(n: usize, mode: Mode) -> BlockDev {
+    match mode {
+        Mode::Cpu => BlockDev::from_gpu(gpu_core::Gpu::new_cpu(flux2::devgrad::KERNELS), n, D, NH, MLP, RANK),
+        Mode::Device => BlockDev::new(n, D, NH, MLP, RANK),
+        // The flash trio is barrier-cooperative: a device only.
+        Mode::DeviceFlash => BlockDev::from_gpu_attention(gpu_core::Gpu::new_gpu(flux2::devgrad::kernel_list()), n, D, NH, MLP, RANK, flux2::devgrad::BasePrecision::F32, AttentionPath::Flash),
+    }
+}
+
+/// Which engine a gate runs: the `backend-cpu` twin, the device on the GEMM attention, or the device on the
+/// flash attention (no score slabs).
+#[derive(Clone, Copy)]
+enum Mode {
+    Cpu,
+    Device,
+    DeviceFlash,
+}
+
+impl Mode {
+    fn label(self) -> &'static str {
+        match self {
+            Mode::Cpu => "backend-cpu",
+            Mode::Device => "device",
+            Mode::DeviceFlash => "device flash-attention",
+        }
     }
 }
 
@@ -206,16 +226,21 @@ fn stream_w64(s: &Stream) -> StreamW<f64> {
 }
 
 fn device_double_block_backward_matches_host() {
-    double_block_gate(false);
+    double_block_gate(Mode::Device);
+}
+
+/// The same gate with the attention on the flash trio: the adapter gradients still match the host reference.
+fn device_flash_double_block_backward_matches_host() {
+    double_block_gate(Mode::DeviceFlash);
 }
 
 /// The same gate on `backend-cpu` - no GPU needed, so it runs in the ordinary
 /// test pass.
 fn cpu_backend_double_block_backward_matches_host() {
-    double_block_gate(true);
+    double_block_gate(Mode::Cpu);
 }
 
-fn double_block_gate(cpu: bool) {
+fn double_block_gate(mode: Mode) {
     let dm = dims();
     let (n, hd) = (dm.n(), dm.hd());
     let scale = ALPHA / RANK as f32;
@@ -234,7 +259,7 @@ fn double_block_gate(cpu: bool) {
     let hg = double_backward(dm, &hw, &hm, &cache, &f64v(&dout));
 
     // ---- device ----
-    let eng = engine(n, cpu);
+    let eng = engine(n, mode);
     let mkstream = |s: &Stream| {
         eng.stream(&s.lin[0].base, &s.lin[1].base, &s.lin[2].base, &s.lin[3].base, &s.lin[4].base, &s.lin[5].base, &s.lin[6].base, &s.nq, &s.nk)
     };
@@ -277,21 +302,26 @@ fn double_block_gate(cpu: bool) {
         w.add(&format!("{name}.gate"), &f64v(&sg[i].gate), &hs.gate);
     }
     w.add("dx", &f64v(&eng.gpu().read(&dxb, n * D)), &hg.dx);
-    w.assert_within(0.9999999, 1e-5, &format!("FLUX.2 {} DOUBLE block backward", if cpu { "backend-cpu" } else { "device" }));
+    w.assert_within(0.9999999, 1e-5, &format!("FLUX.2 {} DOUBLE block backward", mode.label()));
 }
 
 // ---- single block ----
 
 fn device_single_block_backward_matches_host() {
-    single_block_gate(false);
+    single_block_gate(Mode::Device);
+}
+
+/// The same gate with the attention on the flash trio.
+fn device_flash_single_block_backward_matches_host() {
+    single_block_gate(Mode::DeviceFlash);
 }
 
 /// The `backend-cpu` twin of [`device_single_block_backward_matches_host`].
 fn cpu_backend_single_block_backward_matches_host() {
-    single_block_gate(true);
+    single_block_gate(Mode::Cpu);
 }
 
-fn single_block_gate(cpu: bool) {
+fn single_block_gate(mode: Mode) {
     let dm = dims();
     let (n, hd) = (dm.n(), dm.hd());
     let scale = ALPHA / RANK as f32;
@@ -328,7 +358,7 @@ fn single_block_gate(cpu: bool) {
     let (_o, cache) = single_forward(dm, &hw, &f64v(&x), &hm, &f64v(&cos), &f64v(&sin));
     let hg = single_backward(dm, &hw, &hm, &cache, &f64v(&dout));
 
-    let eng = engine(n, cpu);
+    let eng = engine(n, mode);
     let dev: SingleDev = eng.single(&lin[0].base, &lin[1].base, &lin[2].base, &lin[3].base, &lin[4].base, &lin[5].base, &lin[6].base, &nq, &nk);
     eng.upload_mods(&sites);
     eng.upload_rope(&cos, &sin);
@@ -360,11 +390,13 @@ fn single_block_gate(cpu: bool) {
     w.add("sgl.scale", &f64v(&sg[4].scale), &hg.m.scale);
     w.add("sgl.gate", &f64v(&sg[4].gate), &hg.m.gate);
     w.add("dx", &f64v(&eng.gpu().read(&dxb, n * D)), &hg.dx);
-    w.assert_within(0.9999999, 1e-5, &format!("FLUX.2 {} SINGLE block backward", if cpu { "backend-cpu" } else { "device" }));
+    w.assert_within(0.9999999, 1e-5, &format!("FLUX.2 {} SINGLE block backward", mode.label()));
 }
 
 gpu_core::card_tests!(
     device_double_block_backward_matches_host,
     device_single_block_backward_matches_host,
+    device_flash_double_block_backward_matches_host,
+    device_flash_single_block_backward_matches_host,
     ; host: cpu_backend_double_block_backward_matches_host, cpu_backend_single_block_backward_matches_host,
 );

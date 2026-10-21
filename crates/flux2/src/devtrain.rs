@@ -35,7 +35,7 @@
 
 use gpu_core::{DeviceBuffer, Gpu};
 
-use crate::devgrad::{BasePrecision, BlockDev, DoubleDev, SingleDev, N_SITES, SITE_FINAL, SITE_IMG1, SITE_IMG2, SITE_SGL, SITE_TXT1, SITE_TXT2};
+use crate::devgrad::{AttentionPath, BasePrecision, BlockDev, DoubleDev, SingleDev, N_SITES, SITE_FINAL, SITE_IMG1, SITE_IMG2, SITE_SGL, SITE_TXT1, SITE_TXT2};
 use crate::grad::{linear, silu, Dims, Mod, ModGrad};
 use crate::lora::LoraAdapter;
 use crate::modelgrad::{timestep_embedding, Batch, Cfg, ModelWeights, TDIM};
@@ -301,19 +301,21 @@ pub struct TrainerSpec {
     pub cards: usize,
     /// The frozen base's precision - see [`BasePrecision`].
     pub base: BasePrecision,
+    /// How the joint attention runs - see [`AttentionPath`].
+    pub attention: AttentionPath,
 }
 
 impl DeviceTrainer {
     /// Build a trainer on a single fresh device. `w` is uploaded in full, so
     /// the caller should drop its host copy afterwards.
     pub fn new(cfg: Cfg, rank: usize, w: &ModelWeights<f32>) -> DeviceTrainer {
-        DeviceTrainer::with_gpu(Gpu::new_gpu(crate::devgrad::KERNELS), cfg, rank, w)
+        DeviceTrainer::with_gpu(Gpu::new_gpu(crate::devgrad::kernel_list()), cfg, rank, w)
     }
 
     /// [`Self::new`] over an existing device (card selection, or sharing one
     /// device with the rest of a pipeline).
     pub fn with_gpu(gpu: Gpu, cfg: Cfg, rank: usize, w: &ModelWeights<f32>) -> DeviceTrainer {
-        DeviceTrainer::over(vec![gpu], cfg, rank, w, BasePrecision::F32)
+        DeviceTrainer::over(vec![gpu], cfg, rank, w, BasePrecision::F32, AttentionPath::Gemm)
     }
 
     /// Build across `cards` physical GPUs through a SINGLE device enumeration
@@ -321,7 +323,7 @@ impl DeviceTrainer {
     /// sharding uses). This is what makes klein-9B trainable at all: its fp32
     /// frozen base is larger than one 24 GiB card.
     pub fn new_multi(cards: usize, cfg: Cfg, rank: usize, w: &ModelWeights<f32>) -> DeviceTrainer {
-        let spec = TrainerSpec { card: None, cards, base: BasePrecision::F32 };
+        let spec = TrainerSpec { card: None, cards, base: BasePrecision::F32, attention: AttentionPath::Gemm };
         DeviceTrainer::build(&spec, cfg, rank, w).unwrap_or_else(|e| panic!("{e}"))
     }
 
@@ -331,20 +333,20 @@ impl DeviceTrainer {
     pub fn build(spec: &TrainerSpec, cfg: Cfg, rank: usize, w: &ModelWeights<f32>) -> Result<DeviceTrainer, String> {
         let gpus = match (spec.cards, spec.card) {
             (0, _) => return Err("flux2 device trainer: need at least one card".into()),
-            (1, Some(i)) => vec![Gpu::new_on_index(i, crate::devgrad::KERNELS)?],
+            (1, Some(i)) => vec![Gpu::new_on_index(i, crate::devgrad::kernel_list())?],
             // No card named: the enclosing placement scope decides (a served
             // request, placed by the residency layer).
-            (1, None) => vec![Gpu::new_gpu(crate::devgrad::KERNELS)],
-            (n, None) => Gpu::new_wgpu_multi(crate::devgrad::KERNELS, n),
+            (1, None) => vec![Gpu::new_gpu(crate::devgrad::kernel_list())],
+            (n, None) => Gpu::new_wgpu_multi(crate::devgrad::kernel_list(), n),
             (n, Some(i)) => return Err(format!("flux2 device trainer: a {n}-card split spans cards 0..{n}; it cannot also be pinned to card {i}")),
         };
-        Ok(DeviceTrainer::over(gpus, cfg, rank, w, spec.base))
+        Ok(DeviceTrainer::over(gpus, cfg, rank, w, spec.base, spec.attention))
     }
 
-    fn over(gpus: Vec<Gpu>, cfg: Cfg, rank: usize, w: &ModelWeights<f32>, base: BasePrecision) -> DeviceTrainer {
+    fn over(gpus: Vec<Gpu>, cfg: Cfg, rank: usize, w: &ModelWeights<f32>, base: BasePrecision, attention: AttentionPath) -> DeviceTrainer {
         let (d, mlp, cin) = (cfg.hidden, cfg.mlp, cfg.in_channels);
         let n = cfg.n();
-        let engs: Vec<BlockDev> = gpus.into_iter().map(|g| BlockDev::from_gpu_with(g, n, d, cfg.n_heads, mlp, rank, base)).collect();
+        let engs: Vec<BlockDev> = gpus.into_iter().map(|g| BlockDev::from_gpu_attention(g, n, d, cfg.n_heads, mlp, rank, base, attention)).collect();
         let blk_eng = place_blocks(w.dbl.len(), w.sgl.len(), engs.len());
         let depth = blk_eng.len();
         assert_eq!(depth, w.dbl.len() + w.sgl.len(), "placement covers every block");

@@ -167,7 +167,7 @@ fn worst(dg: &flux2::devtrain::StepGrads, hg: &modelgrad::ModelGrads<f32>, ad: &
 
 /// One card, placed by the test run's own device selection.
 fn spec(base: BasePrecision) -> TrainerSpec {
-    TrainerSpec { card: None, cards: 1, base }
+    TrainerSpec { card: None, cards: 1, base, attention: flux2::devgrad::AttentionPath::Gemm }
 }
 
 fn skip() -> bool {

@@ -139,6 +139,25 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),
 ];
 
+/// [`KERNELS`] plus the bidirectional flash-attention trio ([`AttentionPath::Flash`]), registered under the
+/// names [`model::block::flash_bidir_kernels`] gives them (attention scale 1: the `1/sqrt(head_dim)` is folded
+/// into the QK-RMSNorm weight). A device built from [`KERNELS`] alone still trains, on the GEMM attention.
+pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| KERNELS.iter().copied().chain(model::block::flash_bidir_kernels(true)).collect())
+}
+
+/// How the joint bidirectional attention runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttentionPath {
+    /// Per-head GEMMs over head-major packed operands: the fastest per step but it holds the `[nh, n, n]` scores,
+    /// probabilities and score gradients (three slabs of `nh * n^2` floats).
+    Gemm,
+    /// The flash trio (`model::block::flash_bidir_kernels`): `O(n * d)` extra memory (a row log-sum-exp), no
+    /// score slabs and no head-major copies. Needs [`kernel_list`] on a device with workgroup reductions.
+    Flash,
+}
+
 /// LayerNorm / QK-RMSNorm epsilon - 1e-6 in every FLUX.2 variant, matching
 /// `crate::grad`'s `EPS` and `model::EPS`. A backward that recomputes the
 /// normaliser with a different epsilon than the forward drifts silently, so
@@ -293,6 +312,8 @@ pub struct BlockDev {
     /// While armed ([`BlockDev::arm_profile`]): what the segments run since
     /// have cost.
     profile: std::cell::RefCell<Option<SegmentProfile>>,
+    /// The flash trio when the engine was built with [`AttentionPath::Flash`].
+    flash: Option<model::block::FlashGqaIds>,
 }
 
 /// A min-of-replays kernel profile being collected over the segments of a
@@ -352,7 +373,7 @@ impl BlockDev {
 
     /// Build an engine on a fresh wgpu device.
     pub fn new(n_max: usize, d: usize, nh: usize, mlp: usize, rank: usize) -> BlockDev {
-        BlockDev::from_gpu(Gpu::new_gpu(KERNELS), n_max, d, nh, mlp, rank)
+        BlockDev::from_gpu(Gpu::new_gpu(kernel_list()), n_max, d, nh, mlp, rank)
     }
 
     /// Build over an existing device (so a caller can place the trainer on a
@@ -365,6 +386,13 @@ impl BlockDev {
     /// the reason, for [`BasePrecision::Int8`] on a device without the native
     /// int8-weight input gradient, or widths that are not whole scale groups.
     pub fn from_gpu_with(gpu: Gpu, n_max: usize, d: usize, nh: usize, mlp: usize, rank: usize, base: BasePrecision) -> BlockDev {
+        BlockDev::from_gpu_attention(gpu, n_max, d, nh, mlp, rank, base, AttentionPath::Gemm)
+    }
+
+    /// [`Self::from_gpu_with`] with the attention path chosen. [`AttentionPath::Flash`] panics, naming the
+    /// reason, on a device that cannot run the flash trio or was built without [`kernel_list`]; it allocates
+    /// none of the score slabs or head-major operands.
+    pub fn from_gpu_attention(gpu: Gpu, n_max: usize, d: usize, nh: usize, mlp: usize, rank: usize, base: BasePrecision, attention: AttentionPath) -> BlockDev {
         let n = n_max.div_ceil(ALIGN) * ALIGN;
         let i8 = (base == BasePrecision::Int8).then(|| {
             assert!(
@@ -377,6 +405,17 @@ impl BlockDev {
         });
         let hd = d / nh;
         assert!(d.is_multiple_of(nh), "hidden {d} must divide by n_heads {nh}");
+        let flash = (attention == AttentionPath::Flash).then(|| {
+            assert!(
+                model::block::FlashGqaIds::supported(&gpu, hd as u32),
+                "flux2: flash attention needs a device with workgroup reductions and head_dim <= {}; this {} device with head_dim {hd} cannot, use AttentionPath::Gemm",
+                model::block::FLASH_GQA_MAX_HEAD_DIM,
+                gpu.kind()
+            );
+            let at = |name: &str| gpu.kernel_index(name).unwrap_or_else(|| panic!("flux2: flash attention kernel {name} is not registered: build the device from devgrad::kernel_list()"));
+            let [fwd, bwd_dq, bwd_dkv] = model::block::flash_bidir_kernels(true).map(|(name, _)| at(name));
+            model::block::FlashGqaIds { fwd, bwd_dq, bwd_dkv, native: false }
+        });
         assert!(hd.is_multiple_of(2), "head_dim {hd} must be even for interleaved RoPE");
         let mut b: HashMap<String, DeviceBuffer> = HashMap::new();
         {
@@ -396,14 +435,20 @@ impl BlockDev {
             }
             // Head-major GEMM-attention operands: `hstride` per head, padded so
             // every `h·hstride` binding offset stays 256-byte aligned.
+            // The flash path keeps none of them: it reads the row-major operands and holds a row log-sum-exp.
             let hstride = model::block::pad64((n * (d / nh)) as u64) as usize;
             let sstride = model::block::pad64((n * n) as u64) as usize;
-            for name in ["qpk", "kpk", "vpk", "vpkt", "ctxpk", "dcpk", "dqpk", "dkpk", "dvpk"] {
-                mk(name, nh * hstride);
+            if flash.is_none() {
+                for name in ["qpk", "kpk", "vpk", "vpkt", "ctxpk", "dcpk", "dqpk", "dkpk", "dvpk"] {
+                    mk(name, nh * hstride);
+                }
+                mk("scores", nh * sstride);
+                mk("probs", nh * sstride);
+                mk("dscores", nh * sstride);
+            } else {
+                mk("lse", nh * n);
+                mk("dsum", nh * n);
             }
-            mk("scores", nh * sstride);
-            mk("probs", nh * sstride);
-            mk("dscores", nh * sstride);
             // Low-rank intermediates. TWO slots of `n` rows each (slot 0 = the
             // text stream / the whole slab, slot 1 = the image stream), so a
             // stream's binding offset is `slot·n·r` - a multiple of 64 floats
@@ -430,7 +475,7 @@ impl BlockDev {
             mk("dgt", d);
         }
         let coop = gpu.caps().workgroup_reductions;
-        let eng = BlockDev { gpu, d, nh, hd, mlp, n_max: n, rank, coop, qk_grads: std::cell::Cell::new(true), b, i8, profile: std::cell::RefCell::new(None) };
+        let eng = BlockDev { gpu, d, nh, hd, mlp, n_max: n, rank, coop, qk_grads: std::cell::Cell::new(true), b, i8, profile: std::cell::RefCell::new(None), flash };
         eng.gpu.write_f32(&eng.b["ones"], &vec![1.0f32; d]);
         eng.gpu.write_f32(&eng.b["zeros"], &vec![0.0f32; d]);
         eng
@@ -663,7 +708,8 @@ impl BlockDev {
     /// `submit` clears so `matmul_dw_reg`/`rmsnorm_dw`'s `+=` starts from zero
     /// without a host round trip.
     fn double_clears<'a>(&'a self, w: &'a DoubleDev) -> Vec<&'a DeviceBuffer> {
-        let mut v = vec![self.g("dkpk"), self.g("dvpk")];
+        // The GEMM attention accumulates `dk`/`dv` into these; the flash trio overwrites its outputs.
+        let mut v: Vec<&DeviceBuffer> = if self.flash.is_none() { vec![self.g("dkpk"), self.g("dvpk")] } else { Vec::new() };
         for st in [&w.txt, &w.img] {
             for l in st.pairs() {
                 v.push(&l.ga);
@@ -677,7 +723,8 @@ impl BlockDev {
 
     /// [`Self::double_clears`] for a single block.
     fn single_clears<'a>(&'a self, w: &'a SingleDev) -> Vec<&'a DeviceBuffer> {
-        let mut v = vec![self.g("dkpk"), self.g("dvpk")];
+        // The GEMM attention accumulates `dk`/`dv` into these; the flash trio overwrites its outputs.
+        let mut v: Vec<&DeviceBuffer> = if self.flash.is_none() { vec![self.g("dkpk"), self.g("dvpk")] } else { Vec::new() };
         for l in w.pairs() {
             v.push(&l.ga);
             v.push(&l.gbt);
@@ -919,6 +966,11 @@ impl BlockDev {
     /// parameter) is the exact adjoint of `head_pack`.
     fn attn_fwd(&self, s: &mut Vec<Step>, n: usize) {
         let (nh, hd) = (self.nh, self.hd);
+        if let Some(ids) = &self.flash {
+            let ga = model::block::Gqa { b: 1, t: n as u32, n_heads: nh as u32, n_kv_heads: nh as u32, head_dim: hd as u32 };
+            s.push(model::block::flash_gqa_causal_fwd(&self.gpu, ids, &ga, self.g("qr"), self.g("kr"), self.g("v"), self.g("ctx"), self.g("lse")));
+            return;
+        }
         let (hs, ss) = (self.hstride(n), self.sstride(n));
         s.push(self.pack(self.g("qr"), "qpk", n, false));
         s.push(self.pack(self.g("kr"), "kpk", n, false));
@@ -943,6 +995,12 @@ impl BlockDev {
     /// Joint attention backward from `dctx` → `dqr`, `dkr`, `dv`, as GEMMs.
     fn attn_bwd(&self, s: &mut Vec<Step>, n: usize) {
         let (nh, hd) = (self.nh, self.hd);
+        if let Some(ids) = &self.flash {
+            let ga = model::block::Gqa { b: 1, t: n as u32, n_heads: nh as u32, n_kv_heads: nh as u32, head_dim: hd as u32 };
+            s.extend(model::block::flash_gqa_causal_bwd(&self.gpu, ids, &ga, self.g("qr"), self.g("kr"), self.g("v"), self.g("ctx"), self.g("lse"), self.g("dctx"), self.g("dsum"), self.g("dqr"), self.g("dkr"), self.g("dv")));
+            self.rope_bwd_qk(s, n);
+            return;
+        }
         let (hs, ss) = (self.hstride(n), self.sstride(n));
         s.push(self.pack(self.g("dctx"), "dcpk", n, false));
         for h in 0..nh {
@@ -984,6 +1042,12 @@ impl BlockDev {
         s.push(self.unpack("dqpk", self.g("dqr"), n));
         s.push(self.unpack("dkpk", self.g("dkr"), n));
         s.push(self.unpack("dvpk", self.g("dv"), n));
+        self.rope_bwd_qk(s, n);
+    }
+
+    /// The RoPE adjoint of `dqr`/`dkr` into `dqn`/`dkn`, closing the attention backward on either path.
+    fn rope_bwd_qk(&self, s: &mut Vec<Step>, n: usize) {
+        let (nh, hd) = (self.nh, self.hd);
         let half = (hd / 2) as u32;
         for (dr, dn) in [("dqr", "dqn"), ("dkr", "dkn")] {
             s.push(self.gpu.step(K_ROPE, &[self.g(dr), self.g("cos"), self.g("nsin"), self.g(dn)], &[n as u32, nh as u32, hd as u32, half], (n * nh * half as usize) as u32));
