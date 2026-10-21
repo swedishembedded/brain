@@ -1249,14 +1249,12 @@ impl FlashGqaIds {
 /// `O(T * head_dim)` per head, never the `[T, T]` scores and probabilities.
 pub fn flash_bidir_kernels(unit_scale: bool) -> [(&'static str, &'static str); 3] {
     let params = [("CAUSAL", 0), ("UNIT_SCALE", u32::from(unit_scale))];
-    [kernels::FLASH_ATTN_CAUSAL_GQA, kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ, kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DKV].map(|src| {
-        let base = match src {
-            s if std::ptr::eq(s, kernels::FLASH_ATTN_CAUSAL_GQA) => "flash_attn_causal_gqa",
-            s if std::ptr::eq(s, kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ) => "flash_attn_causal_gqa_bwd_dq",
-            _ => "flash_attn_causal_gqa_bwd_dkv",
-        };
-        kernels::template::interned(base, src, &params).expect("the flash kernels declare CAUSAL and UNIT_SCALE")
-    })
+    let specialise = |base: &'static str, src: &'static str| kernels::template::interned(base, src, &params).expect("the flash kernels declare CAUSAL and UNIT_SCALE");
+    [
+        specialise("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA),
+        specialise("flash_attn_causal_gqa_bwd_dq", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ),
+        specialise("flash_attn_causal_gqa_bwd_dkv", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DKV),
+    ]
 }
 
 /// Backward of [`flash_gqa_causal_fwd`]: `d_q`, `d_k`, `d_v` from the context

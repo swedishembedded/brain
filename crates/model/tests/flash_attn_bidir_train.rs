@@ -117,3 +117,15 @@ fn the_bidirectional_flash_trio_matches_the_full_matrix_reference() {
         assert_close(&format!("{tag} dv"), &g.read(&dv, want_dv.len()), &want_dv, 2e-4);
     }
 }
+
+/// The three specialisations are three different kernels registered under three different names, in
+/// forward, `dq`, `dkv` order (a name derived from the source's address once collapsed them in a release build).
+#[test]
+fn the_specialised_kernels_have_distinct_names_in_trio_order() {
+    for unit_scale in [false, true] {
+        let [fwd, dq, dkv] = flash_bidir_kernels(unit_scale).map(|(name, _)| name);
+        assert!(fwd.starts_with("flash_attn_causal_gqa#") && dq.starts_with("flash_attn_causal_gqa_bwd_dq#") && dkv.starts_with("flash_attn_causal_gqa_bwd_dkv#"), "{fwd} {dq} {dkv}");
+        assert!(fwd.contains("CAUSAL=0") && fwd.contains(&format!("UNIT_SCALE={}", u32::from(unit_scale))));
+    }
+    assert_ne!(flash_bidir_kernels(false)[0].0, flash_bidir_kernels(true)[0].0);
+}
