@@ -77,7 +77,7 @@ use crate::decode_state::DecodeState;
 mod objectives;
 #[path = "spec_verify.rs"]
 pub(crate) mod verify;
-use crate::train_base::{read_weight_host, reads_float_acts, table_tier, write_weight_host};
+use crate::train_base::{reads_float_acts, table_tier, write_weight_host};
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
 // Forward + backward subset of qwen35moe::model::STATIC_PIPELINES (no MoE -
@@ -5137,7 +5137,7 @@ impl Qwen35 {
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         match self.weights.get(name).filter(|_| !self.ps.weight.contains_key(name)) {
-            Some(w) => read_weight_host(&self.gpu, w),
+            Some(w) => self.ops.read_host(w),
             None => self.ps.read_weight(&self.gpu, name),
         }
     }

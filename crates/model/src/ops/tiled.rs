@@ -193,6 +193,30 @@ impl Ops {
         s.push(self.gpu.step(self.tiled_kernel("copy_cols"), &[src, dst], &[rows, cnt, src_stride, src_off, dst_stride, dst_off], rows * cnt));
     }
 
+    /// The values `w` stores, as host f32: a dense weight is read as it is, every other tier is
+    /// decoded on the device a bounded tile of rows at a time ([`Self::decode_tile`], the scratch is
+    /// [`Self::tile_budget_bytes`], not the size of the tensor), so one read serves every tier a
+    /// model can hold.
+    pub fn read_host(&self, w: &Weight) -> Vec<f32> {
+        let (n, k) = (w.n(), w.k());
+        if let Weight::F32 { w: dense, .. } = w {
+            return self.gpu.read(dense, n as usize * k as usize);
+        }
+        let tile = tile_rows(n, k, self.tile_budget_bytes, 4);
+        let scratch = self.gpu.storage_uninit(tile as u64 * k as u64);
+        let mut out = Vec::with_capacity(n as usize * k as usize);
+        let mut row = 0;
+        while row < n {
+            let rows = tile.min(n - row);
+            let mut steps = Vec::new();
+            self.decode_tile(&mut steps, w, row, rows, &scratch);
+            self.gpu.submit(&[], &steps);
+            out.extend(self.gpu.read(&scratch, rows as usize * k as usize));
+            row += rows;
+        }
+        out
+    }
+
     /// The tile loop shared by the forward and input-gradient products: one scratch sized by the plan,
     /// each tile of `rows` decoded into it as a dense weight view that `product` multiplies.
     fn for_each_tile(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), mut product: impl FnMut(&mut Vec<Step>, &Weight, u32, u32, u32)) {
