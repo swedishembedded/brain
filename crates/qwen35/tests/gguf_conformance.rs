@@ -240,6 +240,30 @@ fn a_prompt_diverging_in_its_last_tokens_resumes_from_the_cached_prompts_checkpo
     assert_eq!(warm, cold.run().remove(&id).unwrap(), "output after resuming from a checkpoint must equal a cold prefill's");
 }
 
+/// Single-stream greedy decoding is reproducible: the same prompt through two fresh engines yields the same tokens, and
+/// prefilling a prompt twice on one engine yields the same last hidden row bit for bit. (A served 27B repeated 6 times
+/// per prompt, thinking on and off, cache on and off, returned the same logprob bits at every step; a batch of
+/// several sequences is not batch-invariant and is not claimed here.)
+fn single_stream_greedy_decoding_is_reproducible() {
+    let prompt = prompt_of(4, 70);
+    let run = || {
+        let mut sched = Scheduler::new(paged_engine(), 4);
+        let id = sched.submit(Request { prompt: prompt.clone(), max_new: 24, stop: Vec::new() });
+        sched.run().remove(&id).expect("the request completes")
+    };
+    assert_eq!(run(), run(), "two fresh engines decoded the same prompt differently");
+    let mut e = paged_engine();
+    let short = prompt_of(5, 40); // below the cache minimum, so both prefills compute
+    let hidden = |e: &mut Qwen35GgufEngine| {
+        let mut table = BlockTable::new();
+        let h = e.prefill(&mut table, &short);
+        e.release_table(&mut table);
+        h
+    };
+    let (a, b) = (hidden(&mut e), hidden(&mut e));
+    assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "the same prompt prefilled twice gave different hidden rows");
+}
+
 const RECORDED: [[u32; 12]; 3] = [[10, 9, 26, 17, 9, 10, 1, 8, 21, 12, 2, 4], [11, 9, 1, 19, 2, 13, 4, 26, 11, 18, 17, 22], [22, 12, 2, 12, 7, 17, 22, 14, 9, 1, 28, 16]];
 
 gpu_core::card_tests!(
@@ -251,5 +275,6 @@ gpu_core::card_tests!(
     a_small_pool_serves_what_fits_and_preempts_what_does_not,
     a_prefix_hit_shares_the_cached_blocks,
     reclaim_spares_the_prefix_the_waiting_prompt_resumes_from,
+    single_stream_greedy_decoding_is_reproducible,
     a_prompt_diverging_in_its_last_tokens_resumes_from_the_cached_prompts_checkpoint
 );
