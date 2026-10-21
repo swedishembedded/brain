@@ -49,6 +49,7 @@ mod graph;
 pub mod live;
 pub mod nvrtc;
 pub mod policy;
+mod upload_ring;
 
 pub use backend::{CudaBackend, LaunchStats, PASS_FIRST_FLUSH_STEPS, PASS_FLUSH_STEPS};
 pub use driver::{driver, CudaDevice};

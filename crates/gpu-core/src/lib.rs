@@ -1593,6 +1593,32 @@ mod native_facade {
         pub fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {
             self.inner.write_at(buf, offset_words, data)
         }
+        /// A second handle onto this device for host->device transfers: its own stream, so an upload runs
+        /// while this handle's kernels do, and (on a backend that stages writes, today CUDA) a bounded
+        /// page-locked ring of `staging_bytes` the bytes are copied through. Allocate the destinations with
+        /// the returned handle's [`Self::storage_uninit`], fill them with [`Self::write_bytes_at`], and call
+        /// [`Self::flush_writes`] before any other handle uses them. The caller accounts `staging_bytes`
+        /// against its pinned-host budget (`checkpoint::packed::Pool::Pinned`). On a backend without
+        /// staging the handle still works, as plain synchronous writes.
+        pub fn upload_handle(&self, staging_bytes: u64) -> Result<Gpu, String> {
+            let handle = self.share();
+            handle.inner.enable_staged_writes(staging_bytes)?;
+            // A streamer allocates a layer's weights and frees them a pass later, over and over: held blocks are
+            // reused instead of freed, because a free waits for the whole device (every stream, the transfers
+            // still in flight included) and would stall the very compute the upload is meant to overlap.
+            handle.hold_freed_blocks(true);
+            Ok(handle)
+        }
+        /// [`Self::write_at`] for little-endian bytes (a whole number of words): the form a checkpoint tile
+        /// arrives in. Asynchronous on a handle from [`Self::upload_handle`]; see
+        /// `backend_api::Backend::write_bytes_at`.
+        pub fn write_bytes_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u8]) {
+            self.inner.write_bytes_at(buf, offset_words, data)
+        }
+        /// Order the staged writes to `bufs` before any other handle's later use of them.
+        pub fn flush_writes(&self, bufs: &[&DeviceBuffer]) {
+            self.inner.flush_writes(bufs)
+        }
         /// [`Self::write_at`] for a host `f32` slice.
         pub fn write_f32_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[f32]) {
             self.write_at(buf, offset_words, bytemuck::cast_slice(data))

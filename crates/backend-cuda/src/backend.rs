@@ -457,6 +457,9 @@ pub struct CudaBackend {
     uniforms_swept_at: AtomicU64,
     /// Page-locked staging for the unbatched path - see [`StagingPool`].
     staging: Mutex<StagingPool>,
+    /// The pinned ring [`backend_api::Backend::write_bytes_at`] stages through, once
+    /// [`backend_api::Backend::enable_staged_writes`] has built it.
+    upload_ring: std::sync::OnceLock<crate::upload_ring::UploadRing>,
     /// The capture state machine. `None` when this handle will never capture:
     /// either the caller turned it off, or this driver has no graph entry
     /// points, which costs launch batching and nothing else.
@@ -571,6 +574,7 @@ impl CudaBackend {
             uniforms: Mutex::new(HashMap::new()),
             uniforms_swept_at: AtomicU64::new(0),
             staging: Mutex::new(StagingPool::default()),
+            upload_ring: std::sync::OnceLock::new(),
             graph,
             capturing: AtomicBool::new(false),
             pass: Mutex::new(PassState::default()),
@@ -1482,6 +1486,36 @@ impl backend_api::Backend for CudaBackend {
             .upload_at(mem, (offset_words * 4) as usize, bytemuck_words(data))
             .unwrap_or_else(|e| panic!("backend-cuda: write failed: {e}"));
         self.fence_out([mem]);
+    }
+
+    fn enable_staged_writes(&self, bytes: u64) -> Result<bool, String> {
+        let ring = crate::upload_ring::UploadRing::new(&self.ctx, bytes)?;
+        // A second enable keeps the first ring: the budget the caller leased once is the budget in force.
+        let _ = self.upload_ring.set(ring);
+        Ok(true)
+    }
+
+    fn write_bytes_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u8]) {
+        assert!(data.len().is_multiple_of(4), "backend-cuda: {} bytes is not a whole number of words", data.len());
+        let Some(ring) = self.upload_ring.get() else {
+            // No ring: the plain synchronous path, converted in bounded chunks.
+            const CHUNK_WORDS: usize = 1 << 18;
+            for (i, chunk) in data.chunks(CHUNK_WORDS * 4).enumerate() {
+                let words: Vec<u32> = chunk.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
+                self.write_at(buf, offset_words + (i * CHUNK_WORDS) as u64, &words);
+            }
+            return;
+        };
+        self.issue_held();
+        self.counters.writes.fetch_add(1, Ordering::Relaxed);
+        let mem = &CudaBuf::of(buf).mem;
+        // The buffer's last user may be another handle (the allocation's own zeroing, a kernel that ran on it).
+        self.fence_in([mem]);
+        ring.write(&self.ctx, mem, (offset_words * 4) as usize, data).unwrap_or_else(|e| panic!("backend-cuda: staged write failed: {e}"));
+    }
+
+    fn flush_writes(&self, bufs: &[&DeviceBuffer]) {
+        self.fence_out(bufs.iter().map(|b| &CudaBuf::of(b).mem));
     }
 
     fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {

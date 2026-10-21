@@ -1278,6 +1278,37 @@ pub trait Backend: Send + Sync {
     /// Chunking through this method instead caps that resident staging cost at
     /// the chunk size, regardless of tensor count or size.
     fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]);
+    /// Give this handle a bounded staging ring of `bytes` for [`Self::write_bytes_at`]: page-locked host memory
+    /// the writes are copied through and uploaded from asynchronously, on this handle's own stream.
+    ///
+    /// Returns whether the backend stages writes at all (`Ok(false)`: [`Self::write_bytes_at`] stays a plain
+    /// synchronous write, which is always correct) and an error when `bytes` cannot hold one slot. The ring is
+    /// the ONLY host memory this adds, so the caller accounts `bytes` against its pinned budget.
+    fn enable_staged_writes(&self, bytes: u64) -> Result<bool, String> {
+        let _ = bytes;
+        Ok(false)
+    }
+    /// [`Self::write_at`] for little-endian bytes (`data.len()` a multiple of 4). With staging enabled the call
+    /// returns once `data` is copied into the ring - the upload itself overlaps whatever the caller does next,
+    /// and other handles' kernels - and the written buffer must not be used by another handle before
+    /// [`Self::flush_writes`] names it. Without staging it is a synchronous write.
+    ///
+    /// # Panics
+    /// If `data.len()` is not a multiple of 4 or the range lies outside `buf`.
+    fn write_bytes_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u8]) {
+        assert!(data.len().is_multiple_of(4), "write_bytes_at: {} bytes is not a whole number of words", data.len());
+        // Bounded conversion scratch: a multi-gigabyte write must not allocate a multi-gigabyte `Vec<u32>`.
+        const CHUNK_WORDS: usize = 1 << 18;
+        for (i, chunk) in data.chunks(CHUNK_WORDS * 4).enumerate() {
+            let words: Vec<u32> = chunk.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
+            self.write_at(buf, offset_words + (i * CHUNK_WORDS) as u64, &words);
+        }
+    }
+    /// Order every [`Self::write_bytes_at`] to `bufs` so far before any other handle's later use of them. A
+    /// no-op where the writes were synchronous.
+    fn flush_writes(&self, bufs: &[&DeviceBuffer]) {
+        let _ = bufs;
+    }
     /// Record a dispatch with a fresh single-use uniform buffer.
     fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step;
     /// Record a dispatch where each buffer binds the sub-range `offsets[i]`.

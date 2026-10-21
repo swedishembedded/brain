@@ -767,6 +767,31 @@ impl Context {
         )
     }
 
+    /// Enqueue a copy of `bytes` bytes of `src`, from `src_offset`, into `mem` at `dst_offset` on
+    /// [`Self::stream`]. The same lifetime rule as [`Self::upload_async`]: `src`'s range must stay alive and
+    /// unmodified until the stream has run the copy (the caller records an event to know).
+    pub fn upload_async_at(&self, mem: &DeviceMem, dst_offset: usize, src: &PinnedMem, src_offset: usize, bytes: usize) -> Result<(), String> {
+        let src_end = src_offset.checked_add(bytes).ok_or("async upload source range overflows")?;
+        let dst_end = dst_offset.checked_add(bytes).ok_or("async upload destination range overflows")?;
+        if src_end > src.words * 4 {
+            return Err(format!("async upload of bytes {src_offset}..{src_end} from a {}-byte pinned block", src.words * 4));
+        }
+        if dst_end > mem.len {
+            return Err(format!("async upload of {bytes} bytes at offset {dst_offset} into a {}-byte allocation", mem.len));
+        }
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.make_current()?;
+        // SAFETY: both ranges were bounds-checked above; `src` is page-locked, so the copy is truly asynchronous.
+        self.d.check(
+            unsafe {
+                (self.fns.memcpy_htod_async)(mem.ptr + dst_offset as CuDevicePtr, (src.ptr as *const u8).add(src_offset) as *const c_void, bytes, self.stream)
+            },
+            "cuMemcpyHtoDAsync",
+        )
+    }
+
     /// Copy device bytes back to the host.
     pub fn download(&self, mem: &DeviceMem, dst: &mut [u8]) -> Result<(), String> {
         if dst.len() > mem.len {
@@ -1430,6 +1455,20 @@ pub struct Event {
     _primary: Arc<PrimaryRef>,
 }
 
+impl Event {
+    /// Block the calling thread until everything enqueued before the event's last record has run.
+    pub fn synchronize(&self) -> Result<(), String> {
+        // SAFETY: the event is valid until dropped; the context is made current first, as in every other use.
+        unsafe {
+            let rc = (self.fns.ctx_set_current)(self.ctx);
+            if rc != 0 {
+                return Err(format!("cuCtxSetCurrent: {}", self.d.error_text(rc)));
+            }
+            self.d.check((self.fns.event_synchronize)(self.ev), "cuEventSynchronize")
+        }
+    }
+}
+
 impl Drop for Event {
     fn drop(&mut self) {
         // SAFETY: the event was created on this context and is destroyed once.
@@ -1479,6 +1518,23 @@ impl PinnedMem {
     /// If `src` is longer than the block.
     pub fn fill(&self, src: &[u32]) {
         self.fill_at(0, src);
+    }
+
+    /// Overwrite `src.len()` bytes starting `byte_offset` bytes into the block: the form a byte stream
+    /// (a checkpoint tile) is copied through without first becoming words.
+    ///
+    /// # Panics
+    /// If the range does not lie inside the block.
+    pub fn fill_bytes_at(&self, byte_offset: usize, src: &[u8]) {
+        assert!(
+            byte_offset.checked_add(src.len()).is_some_and(|end| end <= self.words * 4),
+            "backend-cuda: {} bytes written at byte {byte_offset} of a {}-byte pinned staging block",
+            src.len(),
+            self.words * 4
+        );
+        // SAFETY: the block owns `self.words * 4` bytes, the bound above proves the destination range lies inside
+        // it, and the regions cannot overlap (page-locked driver memory against the caller's slice).
+        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), (self.ptr as *mut u8).add(byte_offset), src.len()) };
     }
 
     /// [`Self::fill`] starting `word_offset` words into the block.
