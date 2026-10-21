@@ -48,8 +48,10 @@ sibling `tokenizer.json`) under the models directory and `brain serve` finds
 it with no env var at all - resolved through `qwen35::spec::Qwen35Spec` (a
 `ModelCard.family == "qwen35"` `.safetensors`, or a `general.architecture ==
 "qwen35"` GGUF, paired with a co-located, vocab-compatible tokenizer; the
-server's own fp32 resident takes the `.safetensors` side only, through
-`Qwen35Fp32Spec`, because each released GGUF is a model of its own). A
+server's own brain-checkpoint resident takes the `.safetensors` side only, through
+`Qwen35Fp32Spec`, because each released GGUF is a model of its own; it holds the
+weights as the file stores them, f32, bf16 or packed int8, and a demoted
+instance keeps only the mapped file). A
 `--weights`/`--tokenizer` flag on `brain qwen35 infer` still names either
 file outright, and prints every real candidate (with the flag to pick it) if
 the models directory holds more than one.
@@ -103,10 +105,10 @@ brain --device gpu0,gpu1 serve --openai
 #                            token and kv head, ~3.9x fewer bytes) or "fp8"
 #                            (E4M3, the same bytes and scales as int8)
 #   --max-batch N     concurrent decode slots (default 8)
-#   --ctx N      context for the fp32 resident served from a brain
+#   --ctx N      context for the resident served from a brain
 #                            checkpoint (default 4096)
 #   --max-batch N
-#                            decode slots for that fp32 resident (default 4)
+#                            decode slots for that resident (default 4)
 #   --speculative MODE       speculative decoding: auto (default: the checkpoint's
 #                            own MTP head when it has one, otherwise off), off,
 #                            mtp, ngram (prompt lookup, no second model), dflash

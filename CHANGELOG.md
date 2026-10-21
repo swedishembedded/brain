@@ -10,6 +10,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 - The environment variable `BRAIN_OFFLOAD_ADAM` is gone: whether a training build keeps the AdamW moments in host RAM is a scope of the building thread (`model::offload::with_adam_offloaded`), which the data-parallel and sharded trainers, the Qwen3 and Qwen3-TTS fine-tunes and the preference trainer now open themselves. Setting the variable no longer does anything (the Qwen35 and S3-DiT trainers that set it were never read by anything). The forecast residents select their card with a thread-scoped placement instead of writing `BRAIN_GPU_INDEX` into the process environment
 - `qwen35::base_source::BaseDtype` is gone: a LoRA base is held in a `gpu_core::select::Dtype`, parsed against the model's declared `model::policy::TrainBases`. `model::finetune::ChatTrainer` gains the required `LORA_BASES` and `LoraRequest` gains `base`. `brain {qwen3,qwen35,deepseekvl} finetune` take `--base-format` (`f32|bf16|int8|nf4|fp8`); `--base-dtype` is kept as the earlier spelling
+- `qwen3::serve::Engine::tensors_from` is gone (it built a whole-model f32 host map): build an engine from the opened source with `Engine::from_source_tier`, and fold an adapter into a source with `model::lora::device_adapter::FoldedSource`. `QuantEncoding::int8_blocked` names its scale sidecar `<name>.scale`, the name of brain's int8-native checkpoints, where it was `<name>_scale`.
 
 ### Bug Fixes
 
@@ -17,6 +18,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ### Features
 
+- The Qwen3.8 dense and mixture-of-experts serving residents read a brain checkpoint in the encoding it stores (f32, bf16 or packed int8) one tensor at a time, on a card and on the host tier, where they expanded the whole container to an f32 host map; a demoted resident keeps only a mapping of the packed file (`Instance::demote` to `Tier::Warm` or `Tier::Cold`) and promotion uploads it again at the stored tier. `checkpoint::packed::stored_source` and `model::ops::stored_tier_policy` are the shared pieces, and qwen3 evaluation, the long-context perf scenario and the vision-language decoders read through sources as well.
 - DPO, GRPO and top-K distillation are `ModelFit` visitors (`rl::fit::{DpoFit, GrpoFit, DistillFit}`) that run on every model family and frozen-base format its `ChatTrainer` declares; `model::acceptance` runs one LoRA workflow over qwen3, qwen35, qwen35moe and flux2 (`rl/tests/lora_acceptance.rs`)
 - qwen3 trains LoRA adapters over NF4 and block-scaled FP8 frozen bases and qwen35 over FP8 E4M3 and E5M2, through the shared quantized-execution contract; `ChatFineTune::base_format` and `PreferenceFineTune::base_format` name the format for any architecture and a format the architecture does not hold is refused by name. The conformance suite registers the nf4 and fp8 tiers and checks the weighted loss through the chunked head
 - `make check/env-writes` fails on an `env::set_var` or `remove_var` outside test code that is not on `scripts/gates/env-writes.allow`, where every entry carries the reason its writer owns the process
