@@ -92,7 +92,7 @@ fn bindings_for(reader: &PackedReader, cfg: &Qwen35Config, foreign: &[&str]) -> 
 }
 
 /// Host staging a [`PackedBase::weight`] load may hold at once (one tile of the destination encoding).
-const WEIGHT_STAGING_BYTES: u64 = 64 << 20;
+pub const WEIGHT_STAGING_BYTES: u64 = 64 << 20;
 
 /// A Qwen3.5/3.8 checkpoint directory served in two ways under brain-canonical names: small tensors (norm
 /// gains, conv and gate vectors) decoded to f32 on demand, and weight matrices PRESERVED in their stored
@@ -112,6 +112,13 @@ impl PackedBase {
     pub fn open(dir: &Path, cfg: &Qwen35Config, block: usize) -> Result<PackedBase, String> {
         let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(WEIGHT_STAGING_BYTES, 0));
         Ok(PackedBase { src: open_dir(dir, cfg, block)?, staging, convert: None })
+    }
+
+    /// Draw this base's host staging from `budget` instead of a private one, so one owner (a trainer) accounts the
+    /// staging of every load it makes, pinned upload ring included.
+    pub fn with_budget(mut self, budget: checkpoint::packed::MemoryBudget) -> PackedBase {
+        self.staging = checkpoint::packed::BoundedWorkspace::new(budget);
+        self
     }
 
     /// Convert every weight matrix to `tier` on the way to the device (an explicit, bounded, tiled requantization, e.g.

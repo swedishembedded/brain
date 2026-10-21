@@ -23,7 +23,7 @@
 //! ```text
 //! stream_train_step --dir <checkpoint dir> --phase before|step|after|load \
 //!     --tokenizer <tokenizer.json> [--adapter-in FILE] --adapter-out FILE \
-//!     [--device cpu|gpu|gpuN|vulkan|auto --base-dtype stored|nf4 --step N --lr X --window-budget N --n-tokens N \
+//!     [--device cpu|gpu|gpuN|vulkan|auto --base-dtype stored|nf4 --upload-staging-mib N --step N --lr X --window-budget N --n-tokens N \
 //!      --rank N --alpha X --prompt "..." --max-new N --corpus FILE]
 //! ```
 //!
@@ -74,6 +74,8 @@ fn main() {
     let prompt = arg(&args, "--prompt").unwrap_or_else(|| "The capital of France is".to_string());
     let max_new: usize = arg(&args, "--max-new").and_then(|s| s.parse().ok()).unwrap_or(3);
     let corpus = arg(&args, "--corpus");
+    // Pinned staging ring the layer uploads go through on a transfer stream (0: plain uploads on the compute stream).
+    let upload_staging_mib: u64 = arg(&args, "--upload-staging-mib").and_then(|s| s.parse().ok()).unwrap_or(64);
     let device = arg(&args, "--device").unwrap_or_else(|| "cpu".to_string());
 
     let mut cfg = Qwen35Config::qwen38_27b();
@@ -97,7 +99,7 @@ fn main() {
         other => panic!("unknown --device {other} (expected cpu|gpu|gpuN|vulkan|auto)"),
     };
     let t0 = Instant::now();
-    let trainer = StreamTrainer::new_real(gpu, &cfg, &dir, n_tokens, window_budget, &lora_init).unwrap_or_else(|e| panic!("new_real: {e}"));
+    let trainer = StreamTrainer::new_real_staged(gpu, &cfg, &dir, n_tokens, window_budget, &lora_init, upload_staging_mib << 20).unwrap_or_else(|e| panic!("new_real: {e}"));
     eprintln!("stream_train_step: trainer construction: {:.1}s", t0.elapsed().as_secs_f64());
     let convert = match arg(&args, "--base-dtype").as_deref() {
         None | Some("stored") => None,
@@ -141,16 +143,15 @@ fn main() {
             }
             save_adapter(&adapter_out, &out);
         }
-        // The loader alone: every layer read, converted if asked, and uploaded once, with no compute. Separates the
+        // The loader alone: every layer read, converted if asked, and uploaded once, with no compute, through the same
+        // bounded prefetch a step uses (`--window-budget` layers alive, one fewer loader threads). Separates the
         // streaming cost (disk, host staging, upload) from the device time of a step.
         "load" => {
             let t0 = Instant::now();
-            for l in 0..cfg.n_layers as usize {
-                let layer = loader(l);
-                trainer.gpu.poll_wait();
-                drop(layer);
-            }
-            println!("PHASE=load LAYERS={} SECONDS={:.2}", cfg.n_layers, t0.elapsed().as_secs_f64());
+            let window = window_budget.max(2) as usize;
+            let order: Vec<usize> = (0..cfg.n_layers as usize).collect();
+            let stats = model::layer_stream::for_each_prefetched(&order, window - 1, window, &loader, |_, _| trainer.gpu.poll_wait());
+            println!("PHASE=load LAYERS={} SECONDS={:.2} WAITED={:.2}", cfg.n_layers, t0.elapsed().as_secs_f64(), stats.waited.as_secs_f64());
         }
         other => panic!("unknown --phase {other} (expected before|step|after|load)"),
     }

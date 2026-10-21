@@ -182,3 +182,32 @@ fn a_pass_over_pooled_scratch_is_bit_identical_to_the_first_pass() {
     assert_eq!(first, second, "adapter gradients differ between a fresh pass and a replayed one");
     assert!(first.iter().any(|(_, g)| g.iter().any(|v| *v != 0.0)), "the pass produced gradient to compare");
 }
+
+/// Streaming the layer uploads (a transfer stream with a bounded pinned staging ring, so layer i + 1 uploads while
+/// layer i computes) moves bytes earlier, never different ones: a pass over a checkpoint directory gives the same
+/// loss and adapter gradients bit for bit with the ring as without it, and the pinned memory it held never exceeded
+/// its budget. Runs on whatever backend the environment selects; the ring is real on CUDA.
+#[test]
+fn a_pass_with_streamed_uploads_is_bit_identical_to_a_pass_without() {
+    let base = Qwen35Config { d_model: 96, intermediate_size: 112, vocab: 64, n_layers: 4, ..Qwen35Config::tiny() };
+    let dir = write_checkpoint(&base, "stream_staged", None);
+    let cfg = lora_config(base);
+    let tokens: Vec<u32> = (0..N).map(|i| (i * 3 + 1) % cfg.vocab).collect();
+    let targets: Vec<u32> = (0..N).map(|i| (i * 5 + 2) % cfg.vocab).collect();
+    let lora_init = qwen35::init::init_lora_only(&cfg, 7);
+
+    let run = |staging_bytes: u64| {
+        let trainer = StreamTrainer::new_real_staged(Gpu::new(pipelines()), &cfg, &dir, N, 3, &lora_init, staging_bytes).expect("new_real_staged");
+        let x0 = StreamTrainer::embed_real(&dir, &tokens, cfg.d_model as usize).expect("embed_real");
+        let loader = trainer.real_loader(&cfg, &dir).expect("real_loader");
+        let pass = gradients(&trainer, &cfg, &loader, &x0, &targets);
+        (pass, trainer.pinned_staging_high_water())
+    };
+    let ((plain_loss, plain), plain_pinned) = run(0);
+    let ((staged_loss, staged), staged_pinned) = run(256 << 10);
+    assert_eq!(plain_loss, staged_loss);
+    assert_eq!(plain, staged, "adapter gradients differ between plain and streamed uploads");
+    assert_eq!(plain_pinned, 0, "without a ring no pinned memory is leased");
+    assert!(staged_pinned > 0 && staged_pinned <= 256 << 10, "the ring's lease ({staged_pinned} bytes) must be inside its 256 KiB budget");
+    std::fs::remove_dir_all(&dir).ok();
+}

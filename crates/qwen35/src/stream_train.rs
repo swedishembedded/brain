@@ -88,11 +88,11 @@ use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu, Step};
-use model::block::{rmsnorm_bwd, rmsnorm_fwd, swiglu_bwd, swiglu_fwd, KernelIds};
+use model::block::{rmsnorm_bwd, rmsnorm_fwd, swiglu_bwd, swiglu_fwd, FlashGqaIds, KernelIds};
 use model::gdn::{gdn_chunk_size, GdnShape};
 use model::head_ce::{HeadCe, HeadCeConfig, HeadKernels};
 use model::gdn_mixer::{gdn_mixer_bwd, gdn_mixer_fwd, GdnMixerActs, GdnMixerGrads, GdnMixerIds, GdnMixerShape, GdnMixerWeights};
-use model::gqa_mixer::{gqa_mixer_bwd, gqa_mixer_fwd, GqaMixerActs, GqaMixerGrads, GqaMixerIds, GqaMixerShape, GqaMixerWeights};
+use model::gqa_mixer::{gqa_mixer_bwd, gqa_mixer_fwd_tc, GqaMixerActs, GqaMixerGrads, GqaMixerIds, GqaMixerShape, GqaMixerWeights};
 use model::ops::{Ops, Weight};
 use optim::Optim;
 use model::adapter::exec::AdapterRuntime;
@@ -112,14 +112,22 @@ struct TrainIds {
     kernels: KernelIds,
     gdn_mixer: GdnMixerIds,
     gqa_mixer: GqaMixerIds,
+    /// The causal GQA flash trio, when this device's pipelines carry it: attention without the `[H,T,T]` score
+    /// slabs, from [`FlashGqaIds::MIN_TRAIN_T`] tokens up, and (with a tensor-core provider) as bf16 GEMMs.
+    flash: Option<FlashGqaIds>,
     add2: usize,
 }
 
-fn train_ids(g: &Gpu) -> TrainIds {
+fn train_ids(g: &Gpu, ops: &Ops) -> TrainIds {
+    let flash = match (g.kernel_index("flash_attn_causal_gqa"), g.kernel_index("flash_attn_causal_gqa_bwd_dq"), g.kernel_index("flash_attn_causal_gqa_bwd_dkv")) {
+        (Some(fwd), Some(bwd_dq), Some(bwd_dkv)) => Some(FlashGqaIds { fwd, bwd_dq, bwd_dkv, native: !ops.tensor_gemm().is_reference_pinned() }),
+        _ => None,
+    };
     TrainIds {
         kernels: kernel_ids(g),
         gdn_mixer: gdn_mixer_ids(g),
         gqa_mixer: gqa_mixer_ids(g),
+        flash,
         add2: idx(g, "add2"),
     }
 }
@@ -315,7 +323,7 @@ fn proj_bwd_streamed(ops: &Ops, lora: &LoraStore, leaf: &str, d_out: &DeviceBuff
     debug_assert_eq!((base.n(), base.k()), (nout, k), "proj_bwd_streamed: weight shape does not match the linear");
     let base_dx = |s: &mut Vec<Step>, dy: &DeviceBuffer| ops.matmul_dx(s, base, dy, m, dx, acc != 0);
     if lora.rt.hits(leaf) {
-        lora.rt.backward(lora.rt.reference_gemm(), s, &lora.ps, wname, d_out, x, dx, m, k, nout, &base_dx);
+        lora.rt.backward(ops.tensor_gemm(), s, &lora.ps, wname, d_out, x, dx, m, k, nout, &base_dx);
     } else {
         base_dx(s, d_out);
     }
@@ -351,12 +359,12 @@ fn mlp_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lo
     }
     if lora.rt.hits("gate") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("gate.weight"), xn2, &gate_pre, n, d, ff);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("gate.weight"), xn2, &gate_pre, n, d, ff);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("up") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("up.weight"), xn2, &up, n, d, ff);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("up.weight"), xn2, &up, n, d, ff);
         gpu.submit(&[], &s);
     }
 
@@ -372,7 +380,7 @@ fn mlp_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lo
     }
     if lora.rt.hits("down") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("down.weight"), &h, &down, n, ff, d);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("down.weight"), &h, &down, n, ff, d);
         gpu.submit(&[], &s);
     }
 
@@ -457,7 +465,7 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     }
     if lora.rt.hits("in_proj_qkv") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("in_proj_qkv.weight"), &xn1, &mixed_qkv, n, d, conv_dim);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("in_proj_qkv.weight"), &xn1, &mixed_qkv, n, d, conv_dim);
         gpu.submit(&[], &s);
     }
 
@@ -474,17 +482,17 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     }
     if lora.rt.hits("in_proj_b") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("in_proj_b.weight"), &xn1, &bproj, n, d, nvh);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("in_proj_b.weight"), &xn1, &bproj, n, d, nvh);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("in_proj_a") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("in_proj_a.weight"), &xn1, &aproj, n, d, nvh);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("in_proj_a.weight"), &xn1, &aproj, n, d, nvh);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("in_proj_z") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("in_proj_z.weight"), &xn1, &z, n, d, value_dim);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("in_proj_z.weight"), &xn1, &z, n, d, value_dim);
         gpu.submit(&[], &s);
     }
 
@@ -502,7 +510,7 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     }
     if lora.rt.hits("out_proj") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("out_proj.weight"), &gated, &mixer_out, n, value_dim, d);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("out_proj.weight"), &gated, &mixer_out, n, value_dim, d);
         gpu.submit(&[], &s);
     }
 
@@ -633,23 +641,24 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     }
     if lora.rt.hits("q_proj") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("q_proj.weight"), &xn1, &q_full, n, d, qpd);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("q_proj.weight"), &xn1, &q_full, n, d, qpd);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("k_proj") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("k_proj.weight"), &xn1, &k, n, d, kvd);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("k_proj.weight"), &xn1, &k, n, d, kvd);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("v_proj") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("v_proj.weight"), &xn1, &v, n, d, kvd);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("v_proj.weight"), &xn1, &v, n, d, kvd);
         gpu.submit(&[], &s);
     }
 
     let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2, rms_eps: cfg.rms_eps };
     let mix_w = GqaMixerWeights { q_norm: &layer.q_norm, k_norm: &layer.k_norm, cos, sin };
-    let (ctx_gated, mixer_internals) = gqa_mixer_fwd(gpu, &ids.gqa_mixer, &shape, &mix_w, &q_full, &k, &v, n, true);
+    let flash = ids.flash.and_then(|f| f.for_training(gpu, hd, n));
+    let (ctx_gated, mixer_internals) = gqa_mixer_fwd_tc(gpu, &ids.gqa_mixer, flash, Some(ops.tensor_gemm()), &shape, &mix_w, &q_full, &k, &v, n, true);
     let mixer_internals = mixer_internals.expect("stream_train: gqa_mixer_fwd(is_train=true) must return acts");
 
     let mixer_out = gpu.storage((n * d) as u64);
@@ -661,7 +670,7 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     }
     if lora.rt.hits("o_proj") {
         let mut s = Vec::new();
-        lora.rt.forward(lora.rt.reference_gemm(), &mut s, &lora.ps, &p("o_proj.weight"), &ctx_gated, &mixer_out, n, shape.qd(), d);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("o_proj.weight"), &ctx_gated, &mixer_out, n, shape.qd(), d);
         gpu.submit(&[], &s);
     }
 
@@ -759,13 +768,25 @@ pub struct StreamTrainer {
     final_norm: DeviceBuffer,
     n: u32,
     window_budget: u32,
+    /// The host staging every load of this trainer draws on: one tile of the destination encoding, plus the
+    /// pinned ring the layer uploads are copied through ([`Self::new_real_staged`]).
+    budget: checkpoint::packed::MemoryBudget,
     /// Seconds the compute thread has waited for the next layer to arrive, and spent computing, over every pass
     /// of this trainer ([`Self::pass_timing`]).
     waited_for_load: std::cell::Cell<f64>,
     computed: std::cell::Cell<f64>,
 }
 
+/// Pinned host memory the layer uploads of [`StreamTrainer::new_real`] stage through: a few slots, each big enough
+/// to keep the copy engine streaming (the loader's tiles are a few MiB).
+const UPLOAD_STAGING_BYTES: u64 = 64 << 20;
+
 impl StreamTrainer {
+    /// The most pinned host memory this trainer's uploads held at once (0 without a staging ring).
+    pub fn pinned_staging_high_water(&self) -> u64 {
+        self.budget.stats(checkpoint::packed::Pool::Pinned).high_water
+    }
+
     /// `(seconds waiting for a layer to be loaded, seconds computing)` summed over every layer pass so far. A step
     /// whose wait dominates is bound by streaming the base; one whose compute dominates is bound by the device.
     pub fn pass_timing(&self) -> (f64, f64) {
@@ -780,7 +801,7 @@ impl StreamTrainer {
     /// trainers start from byte-identical weights.
     pub fn new_synthetic(gpu: Gpu, cfg: &Qwen35Config, n: u32, window_budget: u32, init: &HashMap<String, Vec<f32>>) -> StreamTrainer {
         let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("stream_train: Ops::new: {e}"));
-        let ids = train_ids(&gpu);
+        let ids = train_ids(&gpu, &ops);
         let d = cfg.d_model as usize;
         let v = cfg.vocab as usize;
         let ones_khd = gpu.storage_init("stream_train.ones_khd", &vec![1.0f32; cfg.linear_key_head_dim as usize]);
@@ -797,7 +818,8 @@ impl StreamTrainer {
 
         let head_ce = build_head_ce(&ops, &gpu, cfg, &head, n);
         let lora = LoraStore::new(&gpu, cfg, init, n);
-        StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, head_ce, final_norm, n, window_budget, waited_for_load: Default::default(), computed: Default::default() }
+        let budget = checkpoint::packed::MemoryBudget::new(crate::fp8_source::WEIGHT_STAGING_BYTES, 0);
+        StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, head_ce, final_norm, n, window_budget, budget, waited_for_load: Default::default(), computed: Default::default() }
     }
 
     /// Real per-token embedding rows for `ids` from a host-resident `tok.
@@ -822,6 +844,14 @@ impl StreamTrainer {
     /// loaded here - a caller streams those per step via [`Self::
     /// real_loader`].
     pub fn new_real(gpu: Gpu, cfg: &Qwen35Config, dir: &Path, n: u32, window_budget: u32, lora_init: &HashMap<String, Vec<f32>>) -> Result<StreamTrainer, String> {
+        Self::new_real_staged(gpu, cfg, dir, n, window_budget, lora_init, UPLOAD_STAGING_BYTES)
+    }
+
+    /// [`Self::new_real`] with an explicit pinned staging ring for the layer uploads: `staging_bytes` of page-locked
+    /// host memory the packed layers are copied through and uploaded from on a transfer stream, so layer `i + 1`
+    /// moves to the device while layer `i` computes (`Ops::enable_streamed_uploads`). `0` keeps the plain
+    /// synchronous upload on the compute stream - the reference the overlap is held bit-identical to.
+    pub fn new_real_staged(gpu: Gpu, cfg: &Qwen35Config, dir: &Path, n: u32, window_budget: u32, lora_init: &HashMap<String, Vec<f32>>, staging_bytes: u64) -> Result<StreamTrainer, String> {
         // The planner refuses before the head is read: a card whose memory is known must hold the footprint.
         if let memauth::Device::Gpu(i) = gpu.memory_device() {
             if let Some(card) = gpu_core::devices::gpus().get(i as usize).map(|d| d.identity.vram_bytes).filter(|&b| b > 0) {
@@ -829,7 +859,14 @@ impl StreamTrainer {
             }
         }
         let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("stream_train: Ops::new: {e}"));
-        let ids = train_ids(&gpu);
+        // The layers' weights are allocated by the loader and freed by the consumer once per pass: keep the freed
+        // blocks for the next layer instead of paying a device-wide wait per free.
+        ops.gpu().hold_freed_blocks(true);
+        let budget = checkpoint::packed::MemoryBudget::new(crate::fp8_source::WEIGHT_STAGING_BYTES, staging_bytes);
+        if staging_bytes > 0 {
+            ops.enable_streamed_uploads(&budget, staging_bytes)?;
+        }
+        let ids = train_ids(&gpu, &ops);
         let d = cfg.d_model as usize;
         let v = cfg.vocab as usize;
         let ones_khd = gpu.storage_init("stream_train.ones_khd", &vec![1.0f32; cfg.linear_key_head_dim as usize]);
@@ -840,14 +877,14 @@ impl StreamTrainer {
 
         // The shared head and final norm stay resident for the whole call: the head in the encoding the
         // checkpoint stores it in (bf16 for the real release), never expanded to fp32.
-        let base = crate::fp8_source::PackedBase::open(dir, cfg, crate::fp8_source::hf_fp8_block_size(dir)?)?;
+        let base = crate::fp8_source::PackedBase::open(dir, cfg, crate::fp8_source::hf_fp8_block_size(dir)?)?.with_budget(budget.clone());
         let head_name = if cfg.tie_embeddings { "tok.weight" } else { "lm_head.weight" };
         let head = base.weight(&ops, head_name, v, d)?;
         let final_norm = gpu.storage_init("stream_train.final_norm", &base.small_f32("norm.weight")?);
 
         let head_ce = build_head_ce(&ops, &gpu, cfg, &head, n);
         let lora = LoraStore::new(&gpu, cfg, lora_init, n);
-        Ok(StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, head_ce, final_norm, n, window_budget, waited_for_load: Default::default(), computed: Default::default() })
+        Ok(StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, head_ce, final_norm, n, window_budget, budget, waited_for_load: Default::default(), computed: Default::default() })
     }
 
     /// The streamed trainer's resident footprint as planner categories: `window_budget` layers of the stored
@@ -1023,7 +1060,7 @@ impl StreamTrainer {
     /// [`Self::real_loader`] converting every layer matrix to `convert` (an explicit tiled requantization such as
     /// FP8 to NF4) instead of keeping the stored encoding.
     pub fn real_loader_as<'a>(&'a self, cfg: &'a Qwen35Config, dir: &'a Path, convert: Option<Dtype>) -> Result<impl Fn(usize) -> OwnedStreamedLayer + Sync + 'a, String> {
-        let mut base = crate::fp8_source::PackedBase::open(dir, cfg, crate::fp8_source::hf_fp8_block_size(dir)?)?;
+        let mut base = crate::fp8_source::PackedBase::open(dir, cfg, crate::fp8_source::hf_fp8_block_size(dir)?)?.with_budget(self.budget.clone());
         if let Some(tier) = convert {
             base = base.converting_to(tier);
         }
@@ -1039,34 +1076,21 @@ impl StreamTrainer {
         loss
     }
 
-    /// Run `f(layer, weights)` over `order`, loading each layer on a producer thread while the previous one
-    /// computes: the packed read and device upload of layer `i + 1` overlap layer `i`'s kernels. At most
-    /// `window_budget` layers are resident at once (the one `f` holds, the ones queued, the one being
-    /// loaded); the queue is bounded, so a slow consumer stalls the loader instead of growing memory.
-    /// The device is synchronised before a finished layer is dropped, so no queued kernel still reads it.
+    /// Run `f(layer, weights)` over `order`, loading each layer on producer threads while the previous one
+    /// computes ([`model::layer_stream::for_each_prefetched`]): the packed read and device upload of the next
+    /// layers overlap layer `i`'s kernels. At most `window_budget` layers are resident at once (the one `f`
+    /// holds, the ones loaded ahead, the ones being loaded) and `window_budget - 1` threads load, so a pass
+    /// bound by the host's read rate scales with the window. The device is synchronised before a finished
+    /// layer is dropped, so no queued kernel still reads it.
     fn for_each_streamed<L: Fn(usize) -> OwnedStreamedLayer + Sync>(&self, order: Vec<usize>, loader: &L, mut f: impl FnMut(usize, &OwnedStreamedLayer)) {
-        let queued = self.window_budget.saturating_sub(2) as usize;
-        std::thread::scope(|scope| {
-            let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, OwnedStreamedLayer)>(queued);
-            let ids = order.clone();
-            scope.spawn(move || {
-                for l in ids {
-                    if tx.send((l, loader(l))).is_err() {
-                        return;
-                    }
-                }
-            });
-            for expected in order {
-                let waiting = std::time::Instant::now();
-                let (l, layer) = rx.recv().expect("stream_train: the layer loader stopped early");
-                self.waited_for_load.set(self.waited_for_load.get() + waiting.elapsed().as_secs_f64());
-                debug_assert_eq!(l, expected);
-                let computing = std::time::Instant::now();
-                f(l, &layer);
-                self.gpu.poll_wait();
-                self.computed.set(self.computed.get() + computing.elapsed().as_secs_f64());
-            }
+        let window = self.window_budget.max(2) as usize;
+        let stats = model::layer_stream::for_each_prefetched(&order, window - 1, window, loader, |l, layer| {
+            let computing = std::time::Instant::now();
+            f(l, layer);
+            self.gpu.poll_wait();
+            self.computed.set(self.computed.get() + computing.elapsed().as_secs_f64());
         });
+        self.waited_for_load.set(self.waited_for_load.get() + stats.waited.as_secs_f64());
     }
 
     /// Forward + backward only (no gradient zeroing, no optimizer step) -

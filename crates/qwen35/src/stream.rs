@@ -249,7 +249,10 @@ pub(crate) fn kernel_ids(g: &Gpu) -> KernelIds {
         rmsnorm: idx(g, "rmsnorm"),
         rms_inv: idx(g, "rms_inv"),
         rmsnorm_dx: idx(g, "rmsnorm_dx"),
-        rmsnorm_dx_rows: model::block::UNREGISTERED,
+        // The coalesced workgroup-per-row twins, as the resident model registers them: a streamed pass over a
+        // `[tokens, 5120]` residual otherwise runs one thread per row (`model::block::rms_variant` still checks the
+        // device can take a workgroup reduction).
+        rmsnorm_dx_rows: g.kernel_index("rmsnorm_dx_rows").unwrap_or(model::block::UNREGISTERED),
         rmsnorm_dw: idx(g, "rmsnorm_dw"),
         // M-RoPE (`rope2d`) is what rotates here, never `block::rope_fwd` -
         // so UNREGISTERED, not a stand-in `rmsnorm` index (see
@@ -266,7 +269,7 @@ pub(crate) fn kernel_ids(g: &Gpu) -> KernelIds {
         silu_mul: idx(g, "silu_mul"),
         silu_da: idx(g, "silu_bwd_da"),
         silu_db: idx(g, "silu_bwd_db"),
-        rmsnorm_rows: model::block::UNREGISTERED,
+        rmsnorm_rows: g.kernel_index("rmsnorm_rows").unwrap_or(model::block::UNREGISTERED),
     }
 }
 
@@ -290,7 +293,12 @@ pub(crate) fn gdn_mixer_ids(g: &Gpu) -> GdnMixerIds {
             sub: idx(g, "sub"),
             mul: idx(g, "mul"),
             region_copy: idx(g, "region_copy"),
-            fast: None,
+            // The same fast prefill kernels the resident model registers, when this device's pipeline set carries
+            // them (`model::gdn::use_fast_kernels` still decides whether the device takes them).
+            fast: match (g.kernel_index("gdn_ut_fwd"), g.kernel_index("bmm_tiled")) {
+                (Some(ut_fwd), Some(bmm_tiled)) => Some(model::gdn::GdnFastIds { ut_fwd, bmm_tiled, tensor_core: true }),
+                _ => None,
+            },
         },
         chunk_bwd: GdnBwdIds {
             splice_add: idx(g, "splice_add"),
