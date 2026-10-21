@@ -18,6 +18,9 @@ use data::rng::Lcg;
 use gpu_core::Gpu;
 use model::block::{flash_bidir_kernels, flash_gqa_causal_bwd, flash_gqa_causal_fwd, FlashGqaIds, Gqa};
 
+/// What the reference returns: context, row log-sum-exp, and the three gradients.
+type Outputs = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
+
 struct Case {
     b: usize,
     t: usize,
@@ -29,7 +32,7 @@ struct Case {
 
 /// `(ctx, lse, dq, dk, dv)` of bidirectional attention from `q [b*t, nh*hd]`, `k`/`v [b*t, nkv*hd]` and the
 /// context gradient, in f64 over the full score matrix.
-fn reference(c: &Case, q: &[f32], k: &[f32], v: &[f32], d_ctx: &[f32]) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+fn reference(c: &Case, q: &[f32], k: &[f32], v: &[f32], d_ctx: &[f32]) -> Outputs {
     let Case { b, t, nh, nkv, hd, unit_scale } = *c;
     let (group, scale) = (nh / nkv, if unit_scale { 1.0 } else { 1.0 / (hd as f64).sqrt() });
     let (qr, kr) = (nh * hd, nkv * hd);
