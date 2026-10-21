@@ -1031,6 +1031,11 @@ pub struct Qwen35 {
     t: u32,
     /// Tokens per sequence callers pass and read back.
     t_user: u32,
+    /// Tokens per sequence the last [`Self::set_batch`] computes: `t`, or, for a
+    /// one-sequence training batch whose supervised positions end early, just
+    /// past them (see [`Self::run_len`]). Every forward and backward of that
+    /// batch runs this many tokens; the buffers keep their `t`-sized layout.
+    t_run: Cell<u32>,
     /// The GDN chunk size this instance was built for - see [`gdn_chunk_size`].
     chunk: u32,
     /// `true` for a [`Self::new_train_on`] build: every weight is
@@ -1854,6 +1859,7 @@ impl Qwen35 {
             b,
             t,
             t_user,
+            t_run: Cell::new(t),
             chunk,
             is_train: train,
             opt,
@@ -2192,8 +2198,41 @@ impl Qwen35 {
         steps.extend(rmsnorm_bwd(&self.gpu, &kernel_ids(), x, self.w(wname), dy, dx, &inv, gw, dim, rows, self.cfg.rms_eps));
     }
 
+    /// Tokens per sequence the current batch computes (see the `t_run` field).
+    pub fn run_len(&self) -> u32 {
+        self.t_run.get()
+    }
+
+    /// The GDN chunk size of [`Self::run_len`] tokens.
+    fn run_chunk(&self) -> u32 {
+        if self.run_len() == self.t {
+            self.chunk
+        } else {
+            gdn_chunk_size(self.run_len())
+        }
+    }
+
+    /// The tokens per sequence worth computing for `targets` (`b` rows of `t_user`):
+    /// a training batch of ONE sequence needs nothing past its last supervised
+    /// position. The model is causal, so the tail changes no earlier activation,
+    /// and it adds no loss and no gradient; skipping it makes a record padded to
+    /// the longest one's block cost its own length. Rounded up to whole GDN
+    /// chunks (the same padding `new_impl_on` applies to an awkward `t`). Batches of
+    /// several sequences, MTP builds (their head shifts across the whole row),
+    /// weighted-loss builds (their weights are laid out at `t`) and inference
+    /// builds keep the full row.
+    fn needed_len(&self, targets: &[u32]) -> u32 {
+        let whole = self.is_train && self.b == 1 && !self.cfg.mtp && !self.objectives.is_weighted() && self.t > GDN_PAD_QUANTUM;
+        if !whole {
+            return self.t;
+        }
+        let last = targets.iter().rposition(|&v| v != model::IGNORE).map_or(1, |i| i + 1) as u32;
+        last.next_multiple_of(GDN_PAD_QUANTUM).min(self.t)
+    }
+
     pub fn set_batch(&self, tokens: &[u32], targets: &[u32]) {
         let c = targets.iter().filter(|&&v| v != model::IGNORE).count();
+        self.t_run.set(self.needed_len(targets));
         if self.t_user == self.t {
             self.gpu.write(&self.tokens, tokens);
             self.gpu.write(&self.targets, targets);
@@ -2397,7 +2436,7 @@ impl Qwen35 {
         // -time `t`); a batched decode step is `n` DIFFERENT sequences' one
         // token each; the whole-sequence forward keeps this instance's shape.
         let gdn_shape = match &call {
-            GdnCall::Whole => GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
+            GdnCall::Whole => GdnShape { b: self.b, h: nvh, t: self.run_len(), dk: khd, dv: vhd, chunk: self.run_chunk() },
             GdnCall::Chunk(_) | GdnCall::Segments(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) },
             GdnCall::Decode(_) | GdnCall::DecodePool(_) | GdnCall::VerifyPool { .. } => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
             GdnCall::Rows(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: 1 },
@@ -2565,7 +2604,7 @@ impl Qwen35 {
         // supply their OWN M-RoPE table (real absolute positions, not `0..t`)
         // and attend the persistent KV cache instead of an isolated `[T,T]`
         // causal block - see `GqaCached`.
-        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2, rms_eps: c.rms_eps };
+        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.run_len(), n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2, rms_eps: c.rms_eps };
         let (cos, sin) = match &cached {
             None => (&self.cos, &self.sin),
             Some(GqaCached::Chunk(ch)) => (ch.cos, ch.sin),
@@ -2977,7 +3016,7 @@ impl Qwen35 {
     /// replay stops after `xn2` and leaves `out` unwritten.
     fn layer_forward(&self, l: usize, xres: &DeviceBuffer, out: &DeviceBuffer, rebuild: bool) -> Option<LayerTrainActs> {
         let g = &self.gpu;
-        let n = self.b * self.t;
+        let n = self.b * self.run_len();
         let d = self.cfg.d_model;
         let xn1 = g.storage_uninit((n * d) as u64);
         g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), xres, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n, self.cfg.rms_eps)]);
@@ -3046,7 +3085,7 @@ impl Qwen35 {
 
     pub(crate) fn run_forward(&self) {
         let g = &self.gpu;
-        let n = self.b * self.t;
+        let n = self.b * self.run_len();
         let d = self.cfg.d_model;
         let res = self.res.borrow();
         let mut layer_acts: Vec<LayerTrainActs> = Vec::new();
@@ -3140,7 +3179,7 @@ impl Qwen35 {
 
         // Reverse of the hoisted `model::gdn_mixer::gdn_mixer_fwd` internals.
         let shape = model::gdn_mixer::GdnMixerShape {
-            gdn: GdnShape { b: self.b, h: nvh, t: self.t, dk: c.linear_key_head_dim, dv: c.linear_value_head_dim, chunk: self.chunk },
+            gdn: GdnShape { b: self.b, h: nvh, t: self.run_len(), dk: c.linear_key_head_dim, dv: c.linear_value_head_dim, chunk: self.run_chunk() },
             nkh: c.linear_num_key_heads,
             conv_kernel: c.linear_conv_kernel_dim,
             rms_eps: c.rms_eps,
@@ -3206,7 +3245,7 @@ impl Qwen35 {
         }
 
         // Reverse of the hoisted `model::gqa_mixer::gqa_mixer_fwd` internals.
-        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2, rms_eps: c.rms_eps };
+        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.run_len(), n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2, rms_eps: c.rms_eps };
         let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos: &self.cos, sin: &self.sin };
         let grads = model::gqa_mixer::GqaMixerGrads {
             q_norm: self.trainable(&p("q_norm.weight")).then(|| self.g(&p("q_norm.weight"))),
@@ -3340,7 +3379,7 @@ impl Qwen35 {
              own convention throughout), so backward() must run against the SAME call",
         );
         let g = &self.gpu;
-        let n = self.b * self.t;
+        let n = self.b * self.run_len();
         let d = self.cfg.d_model;
         let v = self.cfg.vocab;
 
@@ -3530,7 +3569,7 @@ impl Qwen35 {
     /// is the reference the trio is tested against). Inference keeps the chain.
     fn training_flash(&self) -> Option<model::block::FlashGqaIds> {
         let ids = self.flash?;
-        (self.is_train && self.t >= self.flash_min_t.get() && model::block::FlashGqaIds::supported(&self.gpu, self.cfg.head_dim)).then_some(ids)
+        (self.is_train && self.run_len() >= self.flash_min_t.get() && model::block::FlashGqaIds::supported(&self.gpu, self.cfg.head_dim)).then_some(ids)
     }
 
     /// Whether this instance's training attention runs the flash kernels
@@ -5111,7 +5150,7 @@ impl Qwen35 {
     /// Run the forward graph and return the scalar loss.
     pub fn forward(&self) -> f32 {
         self.run_forward();
-        let n = self.b * self.t;
+        let n = self.b * self.run_len();
         if let Some(head) = &self.head_ce {
             // Recorded on `self.gpu`, not through `HeadCe::forward`: that
             // submits on the `Ops` handle, a separate command stream that is

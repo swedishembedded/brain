@@ -52,6 +52,11 @@ struct Weighted {
 
 impl State {
     /// The head backward's row weights, when weighted loss is enabled.
+    /// Whether per-position loss weights are enabled (they are laid out at the full row length).
+    pub(super) fn is_weighted(&self) -> bool {
+        self.weighted.is_some()
+    }
+
     pub(super) fn row_weights(&self) -> Option<RowWeights<'_>> {
         self.weighted.as_ref().map(|w| RowWeights { weights: &w.weights, scratch: &w.scratch })
     }
@@ -132,7 +137,9 @@ impl TokenObjectives for Qwen35 {
     }
 
     fn batch_token_logprobs(&self) -> Vec<f32> {
-        let nll = self.gpu.read(&self.ce_buf, (self.b * self.t) as usize);
+        // Only the batch's computed prefix holds fresh values; the rest of the row is unsupervised.
+        let mut nll = self.gpu.read(&self.ce_buf, (self.b * self.run_len()) as usize);
+        nll.resize((self.b * self.t) as usize, 0.0);
         self.unpad(&nll).into_iter().map(|l| -l).collect()
     }
 

@@ -114,3 +114,34 @@ fn a_training_build_never_holds_tokens_times_vocab_logits() {
     let per_token = (m["long"] - m["short"]) / 256;
     assert!(per_token < 16 * 1024, "{per_token} B per token requested: a tokens x vocab buffer (32 KiB per token) is back");
 }
+
+/// A batch supervised only early computes only the tokens up to them (rounded
+/// up to whole GDN chunks): everything is causal, so the tail adds no loss and
+/// no gradient, and a held-out or training row padded to a 15k-token block costs
+/// what its real length costs. The loss and every gradient equal a build sized
+/// to the shorter row - also under the long-sequence settings a 27B run uses.
+#[test]
+fn a_batch_supervised_only_early_runs_only_its_prefix() {
+    let (long, short, supervised) = (256usize, 128usize, 100usize);
+    let cfg = Qwen35Config { block_size: long as u32, ..long_config(false) };
+    let init = weights(&cfg, 0.3);
+    let (x, mut y) = batch_of(long);
+    y[supervised..].fill(model::IGNORE);
+    let settings = [
+        TrainOpts::default(),
+        TrainOpts { recompute: true, gdn_segment_tokens: Some(64), mlp_rows: Some(64), bf16_residuals: true, ..TrainOpts::default() },
+    ];
+    for opts in &settings {
+        let full = build(&cfg, &init, long, opts);
+        let got = loss_and_grads_on(&full, &x, &y);
+        assert_eq!(full.run_len(), short as u32, "a row supervised up to {supervised} runs {short} tokens, not {long}");
+
+        let cfg_short = Qwen35Config { block_size: short as u32, ..cfg.clone() };
+        let want = loss_and_grads_on(&build(&cfg_short, &init, short, opts), &x[..short], &y[..short]);
+        assert_same_training_signal(got, want, 1e-5, 0.99999);
+
+        let (x, y) = batch_of(long);
+        loss_and_grads_on(&full, &x, &y);
+        assert_eq!(full.run_len(), long as u32, "the next, fully supervised batch runs the whole row again");
+    }
+}
