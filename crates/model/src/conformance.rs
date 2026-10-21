@@ -16,7 +16,8 @@
 //! * C6 save, reload, identical log-probabilities;
 //! * C9 every declared frozen-base tier gives gradients within its stated
 //!   tolerance of the f32 base;
-//! * C8 a chunked LM-head cross-entropy equals the unchunked one (loss,
+//! * C8 a chunked LM-head cross-entropy, plain and weighted (the loss every
+//!   post-training objective trains through), equals the unchunked one (loss,
 //!   log-probabilities, gradients), for a subject that provides the
 //!   [`ChunkedHead`] hook.
 //!
