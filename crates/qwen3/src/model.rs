@@ -585,22 +585,7 @@ struct Layer {
     h: DeviceBuffer,
 }
 
-/// A resident low-precision full fine-tune: the per-layer linears live on the device in the configured
-/// encoding with a master copy and optimizer state off it ([`model::resident_ft`]); everything else (embedding,
-/// head, norms) trains in fp32 on the device as in any full fine-tune. `others` are the planner demands of that
-/// remainder (activations, the fp32 parameters), `capacity` what the machine offers.
-#[derive(Clone)]
-pub struct ResidentPlan {
-    pub cfg: model::resident_ft::ResidentFtConfig,
-    pub capacity: model::memplan::Capacity,
-    pub others: Vec<model::memplan::Demand>,
-}
-
-impl ResidentPlan {
-    fn budget(&self) -> model::resident_ft::ResidentBudget<'_> {
-        model::resident_ft::ResidentBudget { capacity: self.capacity, others: &self.others, authorized: model::memplan::Authorized::none() }
-    }
-}
+pub use model::resident_ft::ResidentPlan;
 
 /// How a FULL fine-tune build holds its trainable state: the precision of every parameter
 /// ([`model::TrainPrecision`]), whether the AdamW moments live in host RAM, and - for a resident low-precision
@@ -889,23 +874,30 @@ impl Tape {
     }
 
     fn submit(&self, gpu: &Gpu) {
-        self.submit_hooked(gpu, &mut |_| {}, &mut |_| {});
+        self.submit_hooked(gpu, &mut |_| {});
     }
 
-    /// Submit the segments in order, calling `before(i)` ahead of segment `i` and `after(i)` once it has been
-    /// submitted, for every segment including an empty one (the segment index is what a layer-streamed trainer maps
-    /// to a layer: it loads weights between segments).
-    fn submit_hooked(&self, gpu: &Gpu, before: &mut dyn FnMut(usize), after: &mut dyn FnMut(usize)) {
+    /// Submit the segments in order, reporting [`SegmentEdge::Before`] ahead of segment `i` and
+    /// [`SegmentEdge::After`] once it has been submitted, for every segment including an empty one (the segment
+    /// index is what a layer-streamed trainer maps to a layer: it loads weights between segments).
+    fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(SegmentEdge)) {
         let mut start = 0;
         for (i, &end) in self.ends.iter().chain(std::iter::once(&self.steps.len())).enumerate() {
-            before(i);
+            edge(SegmentEdge::Before(i));
             if end > start {
                 gpu.submit(&[], &self.steps[start..end]);
                 start = end;
             }
-            after(i);
+            edge(SegmentEdge::After(i));
         }
     }
+}
+
+/// A boundary of a [`Tape`] segment, with the segment's index.
+#[derive(Clone, Copy)]
+enum SegmentEdge {
+    Before(usize),
+    After(usize),
 }
 
 /// What the queries of a batched layer forward attend
@@ -2538,40 +2530,19 @@ impl Qwen {
             return;
         }
         let layers = self.shard.end - self.shard.start;
-        self.fwd_steps.submit_hooked(
-            &self.gpu,
-            &mut |seg| {
+        self.fwd_steps.submit_hooked(&self.gpu, &mut |edge| {
+            if let SegmentEdge::Before(seg) = edge {
                 if seg < layers {
-                    self.stream_load(self.shard.start + seg, false);
+                    self.stream_load(self.shard.start + seg);
                 }
-            },
-            &mut |_| {},
-        );
+            }
+        });
     }
 
-    /// Load `layer` into its device slots (and clear its gradient lanes when `for_backward`).
-    fn stream_load(&self, layer: usize, for_backward: bool) {
+    /// Load `layer` into its device slots.
+    fn stream_load(&self, layer: usize) {
         let mut ft = self.resident.as_ref().expect("layer-streamed builds are resident").borrow_mut();
-        let loaded = if for_backward { ft.begin_layer_backward(&self.ops, layer) } else { ft.load_layer(&self.ops, layer) };
-        loaded.unwrap_or_else(|e| panic!("qwen3 layer-streamed full fine-tune: loading layer {layer}: {e}"));
-    }
-
-    /// One backward over the layers of a layer-streamed build, calling `finish(layer)` once a layer's gradients are
-    /// complete. The head and final norm come first (segment 0), then the layers from the last down.
-    fn streamed_backward(&self, mut after_head: impl FnMut(), mut finish: impl FnMut(usize)) {
-        let end = self.shard.end;
-        self.bwd_steps.submit_hooked(
-            &self.gpu,
-            &mut |seg| {
-                if seg >= 1 {
-                    self.stream_load(end - seg, true);
-                }
-            },
-            &mut |seg| match seg {
-                0 => after_head(),
-                seg => finish(end - seg),
-            },
-        );
+        ft.load_layer(&self.ops, layer).unwrap_or_else(|e| panic!("qwen3 layer-streamed full fine-tune: loading layer {layer}: {e}"));
     }
 
     /// The CE gradient's `1/count` for the current batch, which the recorded
@@ -2769,104 +2740,31 @@ impl Qwen {
         self.gpu.poll_wait();
     }
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        if self.layer_streamed() {
-            return self.streamed_adamw_step(t, lr, wd, adam, clip, extra_scale);
+        // A resident build updates its linears against their host masters through the generic resident step, whose
+        // global clip spans them and the device-optimised remainder; that step also updates the remainder.
+        if let Some(ft) = &self.resident {
+            assert!(!self.layer_streamed() || self.backward_pending.replace(false), "qwen3 layer-streamed full fine-tune: adamw_step without a backward before it");
+            let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+            let norm = model::resident_ft::adamw_step(self, ft, &self.ops, &args).unwrap_or_else(|e| panic!("qwen3 resident full fine-tune: update: {e}"));
+            self.resident_norm.set(norm);
+            return;
         }
-        // The resident linears update on the host against their masters; the global clip spans them and the
-        // device-optimised remainder, so the one multiplier is decided here from both norms.
-        let (clip_dev, scale_dev) = match &self.resident {
-            Some(ft) => {
-                let mut ft = ft.borrow_mut();
-                let sumsq = if clip.is_some() {
-                    let resident = ft.grad_sum_sq(&self.ops).unwrap_or_else(|e| panic!("qwen3 resident full fine-tune: reading the gradients: {e}"));
-                    resident + self.remainder_grad_sum_sq(&ft)
-                } else {
-                    0.0
-                };
-                let mult = optim::grad_multiplier(sumsq, clip, extra_scale);
-                // The run's AdamW hyper-parameters reach an AdamW state; an Adafactor state keeps its own.
-                if matches!(ft.rule(), optim::rule::Rule::AdamW { .. }) {
-                    ft.set_rule(optim::rule::Rule::AdamW { adam, wd });
-                }
-                debug_assert_eq!(ft.step_count() + 1, t, "the resident state and the run agree on the step index");
-                ft.step_scaled(&self.ops, lr, mult).unwrap_or_else(|e| panic!("qwen3 resident full fine-tune: update: {e}"));
-                self.resident_norm.set(clip.map(|_| (sumsq.sqrt() * f64::from(extra_scale)) as f32));
-                (None, mult)
-            }
-            None => (clip, extra_scale),
-        };
+        self.update_device_params(&model::resident_ft::StepArgs { step: t, lr, wd, adam, clip: None, extra_scale: 1.0 }, clip, extra_scale);
+    }
+
+    /// The device optimizer over the parameters held in the store (all of them for a plain full fine-tune; the
+    /// embedding, head and norms of a resident build), clipping by `clip` and scaling by `scale`; and the host
+    /// optimizer over the offloaded ones.
+    fn update_device_params(&self, args: &model::resident_ft::StepArgs, clip: Option<f32>, scale: f32) {
+        let model::resident_ft::StepArgs { step: t, lr, wd, adam, .. } = *args;
         // GPU optimiser for `Trainable` params.
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip_dev, scale_dev);
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, scale);
         // Host (RAM-resident) optimiser for the offloaded params - built lazily on the
         // first step from the store's current weights.
         if !self.ps.offload.is_empty() {
-            self.with_offload_opt(|o| o.step(&self.gpu, &self.ps, t, lr, wd, adam, clip_dev, scale_dev));
+            self.with_offload_opt(|o| o.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, scale));
         }
     }
-    /// Sum of squares of the device-optimised parameters' gradients (the embedding, head and norms of a resident
-    /// build), reduced on the device with `ft`'s kernels: the gradients stay where they are.
-    fn remainder_grad_sum_sq(&self, ft: &model::resident_ft::ResidentFullFt) -> f64 {
-        let items: Vec<model::gradnorm::NormItem<'_>> =
-            self.ps.opt_params().iter().map(|(name, numel)| model::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: model::ops::GradDtype::F32 }).collect();
-        ft.device_norm().sum_sq(&self.gpu, &items)
-    }
-
-    /// The update of a layer-streamed build: the backward runs here, layer by layer ([`Qwen::backward`] deferred
-    /// it), loading each layer and updating it as soon as its gradient is complete. With a clip the global norm is
-    /// measured first by a pass that updates nothing ([`model::resident_ft::ClipPass::TwoPass`]), or each layer is
-    /// clipped by the norm accumulated so far in the only pass ([`model::resident_ft::ClipPass::Running`]).
-    fn streamed_adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        use model::resident_ft::{ClipPass, StreamPass};
-        assert!(self.backward_pending.replace(false), "qwen3 layer-streamed full fine-tune: adamw_step without a backward before it");
-        let ft = self.resident.as_ref().expect("layer-streamed builds are resident");
-        let fail = |what: &str, e: std::io::Error| -> ! { panic!("qwen3 layer-streamed full fine-tune: {what}: {e}") };
-        let (clip_pass, rule) = {
-            let ft = ft.borrow();
-            (ft.clip_pass(), ft.rule())
-        };
-        if matches!(rule, optim::rule::Rule::AdamW { .. }) {
-            ft.borrow_mut().set_rule(optim::rule::Rule::AdamW { adam, wd });
-        }
-        debug_assert_eq!(ft.borrow().step_count() + 1, t, "the layer-streamed state and the run agree on the step index");
-        let remainder = || self.remainder_grad_sum_sq(&ft.borrow());
-        // One backward over the layers under `pass`; `after_head` runs when the head's gradients are complete.
-        let run = |pass: StreamPass, after_head: &dyn Fn()| {
-            self.ps.zero_grads(&self.gpu);
-            ft.borrow().zero_grads(&self.ops);
-            ft.borrow_mut().begin_pass(pass);
-            self.streamed_backward(after_head, |layer| ft.borrow_mut().finish_layer(&self.ops, layer).unwrap_or_else(|e| fail(&format!("updating layer {layer}"), e)));
-            ft.borrow_mut().end_pass().unwrap_or_else(|e| fail("closing the pass", e))
-        };
-        let (multiplier, sum_sq) = match (clip, clip_pass) {
-            (None, _) => {
-                run(StreamPass::Update { lr, grad_multiplier: extra_scale }, &|| {});
-                (extra_scale, 0.0)
-            }
-            (Some(_), ClipPass::TwoPass) => {
-                let measured = run(StreamPass::Measure, &|| {});
-                let sum_sq = measured.sum_sq + remainder();
-                let multiplier = optim::grad_multiplier(sum_sq, clip, extra_scale);
-                run(StreamPass::Update { lr, grad_multiplier: multiplier }, &|| {});
-                (multiplier, sum_sq)
-            }
-            (Some(_), ClipPass::Running) => {
-                // The head and final norm are complete after the first segment: they open the running norm.
-                let head = Cell::new(0.0);
-                let report = run(StreamPass::Running { lr, clip, extra_scale }, &|| {
-                    let sum = remainder();
-                    head.set(sum);
-                    ft.borrow_mut().add_external_sum_sq(sum);
-                });
-                let layers = report.sum_sq - head.get();
-                // The remainder (the embedding gradient completes last) is clipped by the full norm.
-                let sum_sq = layers + remainder();
-                (optim::grad_multiplier(sum_sq, clip, extra_scale), sum_sq)
-            }
-        };
-        self.resident_norm.set(clip.map(|_| (sum_sq.sqrt() * f64::from(extra_scale)) as f32));
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, None, multiplier);
-    }
-
     /// Physical bytes of the host-offloaded optimizer state and the host staging
     /// its update holds; `None` before the first offloaded step or when no
     /// parameter is offloaded.
@@ -4128,6 +4026,43 @@ impl Qwen {
             o
         });
         f(opt)
+    }
+}
+
+impl model::resident_ft::ResidentBackward for Qwen {
+    fn zero_remainder_grads(&self) {
+        self.ps.zero_grads(&self.gpu);
+    }
+
+    fn remainder_grad_sum_sq(&self, norm: &model::gradnorm::DeviceGradNorm) -> f64 {
+        let items: Vec<model::gradnorm::NormItem<'_>> =
+            self.ps.opt_params().iter().map(|(name, numel)| model::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: model::ops::GradDtype::F32 }).collect();
+        norm.sum_sq(&self.gpu, &items)
+    }
+
+    /// The batched backward tape, segment 0 the head and final norm, then one segment per layer from the last down
+    /// (the embedding gradient completes with the first layer's segment).
+    fn backward_pass(&self, on: &mut dyn FnMut(model::resident_ft::LayerEvent) -> std::io::Result<()>) -> std::io::Result<()> {
+        use model::resident_ft::LayerEvent;
+        let end = self.shard.end;
+        // The tape's hook cannot fail: the first error is kept and the remaining segments report nothing.
+        let mut failed: Option<std::io::Error> = None;
+        self.bwd_steps.submit_hooked(&self.gpu, &mut |edge| {
+            let event = match edge {
+                SegmentEdge::Before(seg) if seg >= 1 => LayerEvent::BeforeBackward(end - seg),
+                SegmentEdge::After(0) => LayerEvent::AfterHead,
+                SegmentEdge::After(seg) => LayerEvent::AfterBackward(end - seg),
+                SegmentEdge::Before(_) => return,
+            };
+            if failed.is_none() {
+                failed = on(event).err();
+            }
+        });
+        failed.map_or(Ok(()), Err)
+    }
+
+    fn update_remainder(&self, args: &model::resident_ft::StepArgs, grad_multiplier: f32) {
+        self.update_device_params(args, None, grad_multiplier);
     }
 }
 

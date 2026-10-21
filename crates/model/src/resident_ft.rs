@@ -41,6 +41,7 @@
 //! [`checkpoint::TensorSource`] of initial values; the planner refuses a configuration that does not fit
 //! before the first byte is allocated ([`ResidentFullFt::demands`]).
 
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
@@ -53,6 +54,7 @@ use optim::codec::Rounding;
 use optim::deferred::DeferredPublish;
 use optim::encoded::{aligned_tile, export_values, EncodedValues, ExportReport};
 use optim::rule::Rule;
+use optim::Adam;
 use optim::storage::{BlockStateStorage, MemBacking};
 use optim::streamed::{tensor_layout, ParamTiles, StepReport};
 use optim::trainstate::{TrainState, TrainStateConfig};
@@ -1096,6 +1098,137 @@ impl LayeredStep<'_, '_> {
     pub fn update(&mut self, i: usize) -> io::Result<()> {
         self.state.update_tensor(self.params, i, self.lr, self.grad_multiplier)
     }
+}
+
+/// A resident low-precision full fine-tune a model is built for: how the linears are held and updated
+/// (`cfg`), what the machine offers (`capacity`) and what else the run needs (`others`: the activations and the
+/// parameters outside the resident state). Shared by every model that builds on [`ResidentFullFt`].
+#[derive(Clone)]
+pub struct ResidentPlan {
+    pub cfg: ResidentFtConfig,
+    pub capacity: Capacity,
+    pub others: Vec<Demand>,
+}
+
+impl ResidentPlan {
+    pub fn budget(&self) -> ResidentBudget<'_> {
+        ResidentBudget { capacity: self.capacity, others: &self.others, authorized: Authorized::none() }
+    }
+}
+
+/// What happens inside a backward pass over the layers of a layer-streamed build (see [`ResidentBackward`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayerEvent {
+    /// The head and final norm gradients are complete; layers follow, the last first.
+    AfterHead,
+    /// The backward of `layer` is about to be submitted: load its weights and clear its gradients.
+    BeforeBackward(usize),
+    /// The backward of `layer` has been submitted: its gradients are complete.
+    AfterBackward(usize),
+}
+
+/// The part of a model the generic resident update drives: the parameters outside the resident state (embedding,
+/// head, norms), trained by the model's own device optimizer, and the model's backward.
+pub trait ResidentBackward {
+    /// Clear the gradients of the parameters outside the resident state.
+    fn zero_remainder_grads(&self);
+    /// Their sum of squares, reduced on the device with `norm`.
+    fn remainder_grad_sum_sq(&self, norm: &DeviceGradNorm) -> f64;
+    /// Run one backward over the layers of a layer-streamed build, reporting each [`LayerEvent`] in order; the first
+    /// error stops the pass.
+    fn backward_pass(&self, on: &mut dyn FnMut(LayerEvent) -> io::Result<()>) -> io::Result<()>;
+    /// Update the remainder with the device optimizer for the step `args` describes, its gradients multiplied by
+    /// `grad_multiplier` (the clip is already folded in: the optimizer must not clip again).
+    fn update_remainder(&self, args: &StepArgs, grad_multiplier: f32);
+}
+
+/// The run's per-step values of [`adamw_step`].
+#[derive(Clone, Copy, Debug)]
+pub struct StepArgs {
+    pub step: u32,
+    pub lr: f32,
+    pub wd: f32,
+    pub adam: Adam,
+    /// The global gradient-norm bound over the resident linears AND the remainder.
+    pub clip: Option<f32>,
+    /// The accumulation scale folded into every gradient.
+    pub extra_scale: f32,
+}
+
+/// One optimizer step of a resident build, whether its layers are all resident or streamed through a window: the
+/// global gradient norm spans the resident linears and the model's remainder, and one multiplier (the accumulation
+/// scale and the clip) reaches both. Returns the global norm the clip measured, `None` without a clip.
+///
+/// A resident build updates from the gradients the model's backward already left. A layer-streamed build runs the
+/// backward here, because its layers are loaded and updated as it goes: once without a clip, twice with the exact
+/// clip ([`ClipPass::TwoPass`]: the first pass measures the norm, the second updates), or once with the running clip.
+pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops: &Ops, args: &StepArgs) -> io::Result<Option<f32>> {
+    let StepArgs { step, lr, wd, adam, clip, extra_scale } = *args;
+    {
+        // The run's AdamW hyper-parameters reach an AdamW state; an Adafactor state keeps its own.
+        let mut ft = ft.borrow_mut();
+        if matches!(ft.rule(), Rule::AdamW { .. }) {
+            ft.set_rule(Rule::AdamW { adam, wd });
+        }
+        debug_assert_eq!(ft.step_count() + 1, step, "the resident state and the run agree on the step index");
+    }
+    let remainder = || host.remainder_grad_sum_sq(ft.borrow().device_norm());
+    let norm = |sum_sq: f64| clip.map(|_| (sum_sq.sqrt() * f64::from(extra_scale)) as f32);
+    if !ft.borrow().is_layer_streamed() {
+        let sum_sq = if clip.is_some() {
+            let resident = ft.borrow_mut().grad_sum_sq(ops)?;
+            resident + remainder()
+        } else {
+            0.0
+        };
+        let multiplier = optim::grad_multiplier(sum_sq, clip, extra_scale);
+        ft.borrow_mut().step_scaled(ops, lr, multiplier)?;
+        host.update_remainder(args, multiplier);
+        return Ok(norm(sum_sq));
+    }
+    // One backward over the layers under `pass`: layers are loaded as the backward reaches them, measured or updated
+    // as their gradients complete.
+    let run = |pass: StreamPass, after_head: &dyn Fn()| -> io::Result<PassReport> {
+        host.zero_remainder_grads();
+        ft.borrow().zero_grads(ops);
+        ft.borrow_mut().begin_pass(pass);
+        host.backward_pass(&mut |event| match event {
+            LayerEvent::AfterHead => {
+                after_head();
+                Ok(())
+            }
+            LayerEvent::BeforeBackward(layer) => ft.borrow_mut().begin_layer_backward(ops, layer),
+            LayerEvent::AfterBackward(layer) => ft.borrow_mut().finish_layer(ops, layer),
+        })?;
+        ft.borrow_mut().end_pass()
+    };
+    let clip_pass = ft.borrow().clip_pass();
+    let (multiplier, sum_sq) = match (clip, clip_pass) {
+        (None, _) => {
+            run(StreamPass::Update { lr, grad_multiplier: extra_scale }, &|| {})?;
+            (extra_scale, 0.0)
+        }
+        (Some(_), ClipPass::TwoPass) => {
+            let measured = run(StreamPass::Measure, &|| {})?;
+            let sum_sq = measured.sum_sq + remainder();
+            let multiplier = optim::grad_multiplier(sum_sq, clip, extra_scale);
+            run(StreamPass::Update { lr, grad_multiplier: multiplier }, &|| {})?;
+            (multiplier, sum_sq)
+        }
+        (Some(_), ClipPass::Running) => {
+            // The head and final norm are complete after the first segment: they open the running norm. The rest of
+            // the remainder (the embedding gradient completes last) is clipped by the full norm.
+            let head = Cell::new(0.0);
+            let report = run(StreamPass::Running { lr, clip, extra_scale }, &|| {
+                head.set(remainder());
+                ft.borrow_mut().add_external_sum_sq(head.get());
+            })?;
+            let sum_sq = report.sum_sq - head.get() + remainder();
+            (optim::grad_multiplier(sum_sq, clip, extra_scale), sum_sq)
+        }
+    };
+    host.update_remainder(args, multiplier);
+    Ok(norm(sum_sq))
 }
 
 fn lcm(a: u64, b: u64) -> u64 {
