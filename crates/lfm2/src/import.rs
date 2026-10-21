@@ -181,6 +181,7 @@ pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Res
 
 #[cfg(test)]
 mod tests {
+    // hf-fixture: lfm2
     use super::*;
 
     #[test]

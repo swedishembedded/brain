@@ -251,17 +251,8 @@ pub fn hf_config(dir: &Path) -> Result<Qwen35Config, String> {
 }
 
 
-/// The FP8 `weight_block_size` the checkpoint in `dir` declares in its
-/// `quantization_config` (128 for the real release); 128 when it declares
-/// none, as a bf16/fp32 release does not.
+/// The FP8 `weight_block_size` the checkpoint in `dir` declares in its quantization config (128 when it declares
+/// none, as a bf16/fp32 release does not). The declaration is parsed once, by `checkpoint::packed::HfQuant`.
 pub fn hf_fp8_block_size(dir: &Path) -> Result<usize, String> {
-    let path = dir.join("config.json");
-    let top: Value = serde_json::from_slice(&std::fs::read(&path).map_err(|e| format!("qwen35 config: read {}: {e}", path.display()))?)
-        .map_err(|e| format!("qwen35 config: {}: {e}", path.display()))?;
-    let q = if top["quantization_config"].is_object() { &top["quantization_config"] } else { &top["text_config"]["quantization_config"] };
-    match q["weight_block_size"].as_array().map(|a| a.iter().map(|v| v.as_u64()).collect::<Vec<_>>()) {
-        None => Ok(128),
-        Some(b) if b.len() == 2 && b[0] == b[1] && b[0].is_some_and(|n| n > 0) => Ok(b[0].unwrap_or(128) as usize),
-        Some(b) => Err(format!("qwen35 config: weight_block_size {b:?} is not a square block")),
-    }
+    Ok(checkpoint::packed::HfQuant::from_dir(dir)?.and_then(|q| q.fp8_block()).unwrap_or(128) as usize)
 }

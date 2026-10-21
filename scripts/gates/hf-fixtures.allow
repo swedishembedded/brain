@@ -1,0 +1,24 @@
+# Architectures that declare HuggingFace names in crates/arch with no tiny HF-layout fixture test yet. The list only
+# shrinks (scripts/gates/check-hf-fixtures.sh): write the fixture (random weights in the release's own layout, planned and
+# loaded through the model's reader), tag the test `hf-fixture: <id>`, and delete the line.
+# <id> <reason>
+gpt2 no HF reader: HF Conv1D weights are transposed against brain's layout (modelstore NO_CHECKPOINT_DIR_READER)
+deepseekvl no HF reader (modelstore NO_CHECKPOINT_DIR_READER)
+januspro no HF reader (modelstore NO_CHECKPOINT_DIR_READER)
+qwen3vlmoe the importer is a stub: no safetensors import exists yet
+gemma4 serves the LTX text-encoder bundle only, not a published Gemma-4 directory
+qwen3omnimoe fixture not written yet (reader exists, serving is through the multi-GPU path)
+qwen3vl fixture not written yet (reader exists)
+fastvlm fixture not written yet (reader exists)
+minicpmv fixture not written yet (reader exists)
+moondream3 fixture not written yet (reader exists)
+llava fixture not written yet (reader exists)
+deepseek2ocr fixture not written yet (reader exists)
+qwen3asr fixture not written yet (reader exists)
+nemotronasr fixture not written yet (reader exists)
+qwen3tts fixture not written yet (reader exists)
+minimaxmusic3 fixture not written yet (pipeline roles, not a single decoder)
+florence2 fixture not written yet (reader exists)
+wan diffusers pipeline roles, covered by its recipe tests
+ltxv diffusers pipeline roles, covered by its recipe tests
+decide fixture not written yet (reader exists)

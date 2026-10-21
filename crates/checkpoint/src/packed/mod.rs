@@ -14,10 +14,12 @@ pub mod encoding;
 #[cfg(unix)]
 pub mod convert;
 pub mod file_sink;
+pub mod hfquant;
 pub mod load;
 pub mod reader;
 pub mod report;
 pub mod sink;
+pub mod slice;
 pub mod source;
 #[cfg(test)]
 mod testfix;
@@ -29,7 +31,9 @@ pub use convert::{convert_to_file, ConversionReport};
 pub use encoding::{BlockGeometry, Codebook, Element, FloatFormat, Packing, QuantEncoding, ScaleGranularity, ScaleLevel, TensorDescriptor, INT8_SCALE_SUFFIX};
 pub use load::{LoadConfig, LoadOp, LoadPlan, LoadPolicy, LoadReport, LoadRequest, LoadStep, Loader};
 pub use report::{PrecisionReport, TensorFormat};
-pub use reader::{PackedReader, PackedTensorReader, PACKED_METADATA_KEY};
+pub use reader::{quant_sidecars, PackedReader, PackedTensorReader, PACKED_METADATA_KEY};
 pub use file_sink::SafetensorsSink;
+pub use hfquant::{DeclaredWeight, HfQuant};
 pub use sink::{MemorySink, TensorSink};
+pub use slice::SlicedReader;
 pub use source::{stored_source, Binding, PackedSource};

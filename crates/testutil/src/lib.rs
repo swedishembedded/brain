@@ -25,6 +25,7 @@
 
 pub mod adapters;
 pub mod golden;
+pub mod hfquant;
 pub mod parity;
 
 /// Name what a test is skipping, and let a caller demand it not be skipped.

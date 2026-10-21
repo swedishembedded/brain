@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// hf-fixture: qwen35
 //! `qwen35::fp8_source::open_dir`: the lazy, memory-bounded view of a
 //! HuggingFace Qwen3.5/3.8 checkpoint directory that the LoRA/QLoRA trainer
 //! loads its frozen base from.

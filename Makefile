@@ -857,6 +857,10 @@ check/paths:
 check/scope:
 	bash scripts/gates/check-repo-scope.sh
 
+## check/hf-fixtures - every architecture declaring HuggingFace names has a tiny HF-layout fixture test (or a shrinking allowlist entry)
+check/hf-fixtures:
+	bash scripts/gates/check-hf-fixtures.sh
+
 ## check/files - no video, model weights, or oversized files in git
 check/files:
 	bash scripts/gates/check-large-files.sh
@@ -1979,7 +1983,7 @@ help:
         test/e2e test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
-        check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/paths check/scope \
+        check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/paths check/scope check/hf-fixtures \
         check/files check/samples check/sdk-features check/make-targets \
         check/generated check/generated/kernels-wgsl-table check/generated/kernels-cuda-table \
         check/generated/samples-manifest \

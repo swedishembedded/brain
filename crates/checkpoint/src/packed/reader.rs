@@ -18,7 +18,8 @@ use std::ops::Range;
 use std::path::Path;
 
 use super::codec::TileBuf;
-use super::encoding::{Element, FloatFormat, QuantEncoding, TensorDescriptor, INT8_SCALE_SUFFIX};
+use super::encoding::{Element, FloatFormat, QuantEncoding, ScaleGranularity, TensorDescriptor, INT8_SCALE_SUFFIX};
+use super::hfquant::{DeclaredWeight, HfQuant};
 use crate::gguf::GgmlType;
 use crate::weightio::WeightReader;
 
@@ -53,6 +54,27 @@ pub struct PackedReader {
     /// The FP8 tile size the checkpoint declares (`weight_block_size`), tried
     /// before the inference candidates.
     fp8_block: Option<u32>,
+    /// What the release declares about its quantization (`config.json`, `hf_quant_config.json`).
+    declared: Option<HfQuant>,
+}
+
+/// The quantization sidecars of `reader`'s checkpoint: every `<w>_scale_inv`, `<w>_scale` and `<w>_scale_2` whose
+/// payload `<w>` is stored, and the `input_scale` of every such module. They describe the payload they sit beside
+/// and are never parameters of a model, so an importer that walks tensor names skips them (and reads the payload
+/// through [`PackedReader`], which applies the scales).
+pub fn quant_sidecars(reader: &WeightReader) -> HashSet<String> {
+    let names: HashSet<&str> = reader.names().collect();
+    let mut out = HashSet::new();
+    for n in &names {
+        let Some(stem) = n.strip_suffix(".weight") else { continue };
+        let has_scale = ["_scale_inv", "_scale"].iter().any(|s| names.contains(format!("{n}{s}").as_str()));
+        if has_scale {
+            out.extend(["_scale_inv", "_scale", "_scale_2"].iter().map(|s| format!("{n}{s}")));
+            out.insert(format!("{stem}.input_scale"));
+        }
+    }
+    out.retain(|n| names.contains(n.as_str()));
+    out
 }
 
 /// FP8 `weight_block_size` candidates tried when inferring the tile from the
@@ -67,12 +89,13 @@ impl PackedReader {
     /// Open a `.safetensors`/`.gguf` file or a HF checkpoint directory.
     pub fn open(path: &Path) -> Result<PackedReader, String> {
         let inner = WeightReader::open_hf_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(Self::new(inner))
+        let declared = if path.is_dir() { HfQuant::from_dir(path)? } else { None };
+        Ok(Self::new(inner).with_declaration(declared))
     }
 
     pub fn new(inner: WeightReader) -> PackedReader {
         let overrides = Self::declared_in_files(&inner);
-        let mut r = PackedReader { inner, overrides, hidden: HashSet::new(), fp8_block: None };
+        let mut r = PackedReader { inner, overrides, hidden: HashSet::new(), fp8_block: None, declared: None };
         r.hide_sidecars();
         r
     }
@@ -117,12 +140,29 @@ impl PackedReader {
         self
     }
 
+    /// Adopt the quantization the release declares: its FP8 block size, and which tensors are quantized.
+    pub fn with_declaration(mut self, declared: Option<HfQuant>) -> PackedReader {
+        if let Some(b) = declared.as_ref().and_then(HfQuant::fp8_block) {
+            self.fp8_block.get_or_insert(b);
+        }
+        self.declared = declared;
+        self.hide_sidecars();
+        self
+    }
+
     fn hide_sidecars(&mut self) {
         let mut hidden = HashSet::new();
         let names: Vec<String> = self.inner.names().map(str::to_string).collect();
         for n in &names {
             match self.descriptor_unchecked(n) {
-                Ok(d) => hidden.extend(d.encoding.scales.iter().map(|l| format!("{n}{}", l.suffix))),
+                Ok(d) => {
+                    hidden.extend(d.encoding.scales.iter().map(|l| format!("{n}{}", l.suffix)));
+                    // The activation scale of a W8A8 / W4A4 release belongs to the weight it was calibrated with;
+                    // brain runs float activations, so it is never a tensor of its own.
+                    if let Some(module) = n.strip_suffix(".weight").filter(|_| !d.encoding.scales.is_empty()) {
+                        hidden.insert(format!("{module}.input_scale"));
+                    }
+                }
                 // An FP8 weight whose scale grid cannot be interpreted still owns
                 // it: the error belongs to the weight, not to a stray tensor.
                 Err(_) if self.dtype_of(n).as_deref() == Some("F8_E4M3") && self.dtype_of(&format!("{n}_scale_inv")).is_some() => {
@@ -162,6 +202,7 @@ impl PackedReader {
         }
         let dtype = self.dtype_of(name).unwrap_or_default();
         let dtype = dtype.as_str();
+        self.check_declaration(name, dtype)?;
         let has = |suffix: &str, want: &str| self.dtype_of(&format!("{name}{suffix}")).as_deref() == Some(want);
         let enc = match dtype {
             "F32" => QuantEncoding::f32(),
@@ -176,6 +217,7 @@ impl PackedReader {
                 }
                 e
             }
+            "F8_E4M3" if self.has_weight_scale(name) => self.fp8_weight_scale_encoding(name, &shape)?,
             "F8_E4M3" => QuantEncoding::fp8(FloatFormat::E4M3Fn),
             "F8_E5M2" => QuantEncoding::fp8(FloatFormat::E5M2),
             "U8" if has("_scale", "F8_E4M3") && has("_scale_2", "F32") => {
@@ -195,6 +237,49 @@ impl PackedReader {
             other => return Err(format!("{name}: dtype {other} has no packed encoding; declare one with PackedReader::with_descriptor")),
         };
         Ok(TensorDescriptor::new(name, shape, enc))
+    }
+
+    /// The release declares `name` quantized: refuse what brain has no codec for, and a dtype that contradicts the
+    /// declaration (a stored tensor is never reinterpreted to fit a config).
+    fn check_declaration(&self, name: &str, dtype: &str) -> Result<(), String> {
+        let Some(q) = &self.declared else { return Ok(()) };
+        match q.declared(name) {
+            DeclaredWeight::Unsupported(why) if !dtype.starts_with('F') && !dtype.starts_with("BF") => Err(format!("{name}: {why} is not supported")),
+            DeclaredWeight::Fp8 { .. } if dtype != "F8_E4M3" && dtype != "F8_E5M2" && self.dtype_of(&format!("{name}_scale")).is_some() => {
+                Err(format!("{name}: declared FP8 but stored as {dtype}"))
+            }
+            DeclaredWeight::Nvfp4 { group } if dtype == "U8" && group != 16 => Err(format!("{name}: NVFP4 group size {group} is not supported (16)")),
+            _ => Ok(()),
+        }
+    }
+
+    /// An FP8 weight with a `<name>_scale` sibling: the ModelOpt / compressed-tensors layout (`weight_scale`).
+    fn has_weight_scale(&self, name: &str) -> bool {
+        matches!(self.dtype_of(&format!("{name}_scale")).as_deref(), Some("F32" | "BF16" | "F16"))
+    }
+
+    /// The encoding of an FP8 weight whose scale sibling is `<name>_scale`: one scale for the tensor (static
+    /// per-tensor quantization), one per output row (per-channel), or a 2-D tile grid (block scaled).
+    fn fp8_weight_scale_encoding(&self, name: &str, shape: &[u64]) -> Result<QuantEncoding, String> {
+        let side = format!("{name}_scale");
+        let grid = self.shape_of(&side).unwrap_or_default();
+        let numel: u64 = grid.iter().product();
+        let format = match self.dtype_of(&side).as_deref() {
+            Some("BF16") => FloatFormat::Bf16,
+            Some("F16") => FloatFormat::F16,
+            _ => FloatFormat::F32,
+        };
+        let mut enc = QuantEncoding::fp8(FloatFormat::E4M3Fn);
+        let granularity = if numel == 1 {
+            ScaleGranularity::Tensor
+        } else if shape.len() == 2 && (grid == [shape[0]] || grid == [shape[0], 1]) {
+            ScaleGranularity::Row
+        } else {
+            let block = infer_fp8_block(shape, &grid, self.fp8_block).ok_or_else(|| format!("{name}: {side} has shape {grid:?}, which fits no scale layout for shape {shape:?}"))?;
+            ScaleGranularity::Tile2d { rows: block, cols: block }
+        };
+        enc.scales.push(super::encoding::ScaleLevel { granularity, format, suffix: "_scale".into() });
+        Ok(enc)
     }
 
     fn sidecar_name(desc: &TensorDescriptor, level: usize) -> String {
@@ -437,5 +522,59 @@ mod tests {
         assert_eq!(d.encoding, QuantEncoding::fp8_e4m3_tiled(16), "the renamed tensor keeps its stored encoding, not f32");
         let buf = read_all(&r, &d);
         assert_eq!((buf.payload, buf.scales[0].clone()), (w, grid));
+    }
+
+    /// Spec: a ModelOpt mixed-precision release (FP8 with a per-tensor `weight_scale`, NVFP4 with block and global
+    /// scales, bf16 elsewhere) reads as each tensor's stored encoding; its `input_scale` sidecars are not tensors.
+    #[test]
+    fn a_modelopt_mixed_release_reads_each_tensor_in_its_stored_encoding() {
+        let dir = TmpDir::new("modelopt");
+        write_safetensors(
+            &dir.join("model.safetensors"),
+            &[
+                RawTensor { name: "a.weight", dtype: "F8_E4M3", shape: vec![4, 32], bytes: e4m3_bytes(1, 128) },
+                RawTensor { name: "a.weight_scale", dtype: "F32", shape: vec![], bytes: f32_bytes(&[0.25]) },
+                RawTensor { name: "a.input_scale", dtype: "F32", shape: vec![], bytes: f32_bytes(&[0.5]) },
+                RawTensor { name: "e.weight", dtype: "U8", shape: vec![2, 16], bytes: bytes(2, 32) },
+                RawTensor { name: "e.weight_scale", dtype: "F8_E4M3", shape: vec![2, 2], bytes: e4m3_bytes(3, 4) },
+                RawTensor { name: "e.weight_scale_2", dtype: "F32", shape: vec![], bytes: f32_bytes(&[0.01]) },
+                RawTensor { name: "e.input_scale", dtype: "F32", shape: vec![], bytes: f32_bytes(&[1.0]) },
+                RawTensor { name: "n.weight", dtype: "BF16", shape: vec![4], bytes: bf16_bytes(&[1.0; 4]) },
+            ],
+        );
+        let hf = serde_json::json!({"quantization": {"quant_algo": "MIXED_PRECISION", "quantized_layers": {"a": {"quant_algo": "FP8"}, "e": {"quant_algo": "W4A16_NVFP4", "group_size": 16}}}});
+        std::fs::write(dir.join("hf_quant_config.json"), hf.to_string()).unwrap();
+        let r = PackedReader::open(&dir.0).unwrap();
+        assert_eq!(r.names(), ["a.weight", "e.weight", "n.weight"]);
+        let a = r.descriptor("a.weight").unwrap();
+        assert_eq!(a.encoding.scales.len(), 1);
+        assert_eq!((a.encoding.scales[0].granularity, a.encoding.scales[0].suffix.as_str()), (ScaleGranularity::Tensor, "_scale"));
+        let got = read_all(&r, &a);
+        assert_eq!(got.scales[0], f32_bytes(&[0.25]));
+        let e = r.descriptor("e.weight").unwrap();
+        assert_eq!((e.shape.clone(), e.encoding.clone()), (vec![2, 32], QuantEncoding::nvfp4()));
+        assert_eq!(r.descriptor("n.weight").unwrap().encoding, QuantEncoding::bf16());
+    }
+
+    /// Spec: per-channel and block-grid `weight_scale` layouts are told apart by the scale tensor's shape, and a
+    /// release declaring a method brain has no codec for is refused by name on the tensors that need it.
+    #[test]
+    fn fp8_weight_scale_layouts_and_refused_methods() {
+        let dir = TmpDir::new("fp8layouts");
+        write_safetensors(
+            &dir.join("model.safetensors"),
+            &[
+                RawTensor { name: "c.weight", dtype: "F8_E4M3", shape: vec![4, 32], bytes: e4m3_bytes(1, 128) },
+                RawTensor { name: "c.weight_scale", dtype: "F32", shape: vec![4, 1], bytes: f32_bytes(&[1.0; 4]) },
+                RawTensor { name: "b.weight", dtype: "F8_E4M3", shape: vec![32, 32], bytes: e4m3_bytes(2, 1024) },
+                RawTensor { name: "b.weight_scale", dtype: "BF16", shape: vec![2, 2], bytes: bf16_bytes(&[1.0; 4]) },
+                RawTensor { name: "q.qweight", dtype: "I32", shape: vec![4, 4], bytes: bytes(3, 64) },
+            ],
+        );
+        std::fs::write(dir.join("config.json"), serde_json::json!({"quantization_config": {"quant_method": "gptq", "bits": 4}}).to_string()).unwrap();
+        let r = PackedReader::open(&dir.0).unwrap().with_fp8_block(16);
+        assert_eq!(r.descriptor("c.weight").unwrap().encoding.scales[0].granularity, ScaleGranularity::Row);
+        assert_eq!(r.descriptor("b.weight").unwrap().encoding.scales[0].granularity, ScaleGranularity::Tile2d { rows: 16, cols: 16 });
+        assert!(r.descriptor("q.qweight").unwrap_err().contains("gptq"));
     }
 }

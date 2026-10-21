@@ -162,7 +162,8 @@ pub fn source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &QwenConfig) -
 pub fn nested_source<'a>(r: &'a checkpoint::weightio::WeightReader, names: crate::hf::HfNames, cfg: &QwenConfig) -> Result<checkpoint::remap::RemapSource<'a>, String> {
     use crate::hf::HfTensor;
     let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
-    for name in r.names() {
+    let sidecars = checkpoint::packed::quant_sidecars(r);
+    for name in r.names().filter(|n| !sidecars.contains(*n)) {
         match names.to_brain(name, cfg) {
             HfTensor::Foreign | HfTensor::Dropped => {}
             HfTensor::Unknown => return Err(format!("import: '{name}' is under the decoder prefix '{}' but is not one of its parameters", names.prefix)),
@@ -217,7 +218,9 @@ fn plan_source<'a>(
         return Ok(checkpoint::remap::RemapSource::new(r, plan));
     }
     let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
-    for name in r.names() {
+    // A quantized release's scale tensors belong to the weight beside them, which the packed view decodes.
+    let sidecars = checkpoint::packed::quant_sidecars(r);
+    for name in r.names().filter(|n| !sidecars.contains(*n)) {
         let Some(bn) = naming.to_brain(name, cfg)? else { continue };
         if !allowed.contains(bn.as_str()) {
             return Err(format!("import: '{name}' maps to unexpected brain param '{bn}'"));
