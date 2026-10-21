@@ -877,6 +877,8 @@ pub const NLC_NCHW: &str = include_str!("../wgsl/nlc_nchw.wgsl");
 pub const NLC_NCHW_AT: &str = include_str!("../wgsl/nlc_nchw_at.wgsl");
 /// `wgsl/pack_bf16.wgsl`
 pub const PACK_BF16: &str = include_str!("../wgsl/pack_bf16.wgsl");
+/// `wgsl/pack_fp8_rows.wgsl`
+pub const PACK_FP8_ROWS: &str = include_str!("../wgsl/pack_fp8_rows.wgsl");
 /// `wgsl/pack_qkv.wgsl`
 pub const PACK_QKV: &str = include_str!("../wgsl/pack_qkv.wgsl");
 /// `wgsl/pad1d_edge.wgsl`
@@ -1281,6 +1283,8 @@ pub const TOPK_EXTRACT_STEP: &str = include_str!("../wgsl/topk_extract_step.wgsl
 pub const TOPK_MASK: &str = include_str!("../wgsl/topk_mask.wgsl");
 /// `wgsl/unpack_bf16.wgsl`
 pub const UNPACK_BF16: &str = include_str!("../wgsl/unpack_bf16.wgsl");
+/// `wgsl/unpack_fp8_rows.wgsl`
+pub const UNPACK_FP8_ROWS: &str = include_str!("../wgsl/unpack_fp8_rows.wgsl");
 /// `wgsl/unpack_qkv.wgsl`
 pub const UNPACK_QKV: &str = include_str!("../wgsl/unpack_qkv.wgsl");
 /// `wgsl/upsample2.wgsl`
@@ -1703,6 +1707,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("nlc_nchw", NLC_NCHW),
     ("nlc_nchw_at", NLC_NCHW_AT),
     ("pack_bf16", PACK_BF16),
+    ("pack_fp8_rows", PACK_FP8_ROWS),
     ("pack_qkv", PACK_QKV),
     ("pad1d_edge", PAD1D_EDGE),
     ("pad2d", PAD2D),
@@ -1870,6 +1875,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("topk_extract_step", TOPK_EXTRACT_STEP),
     ("topk_mask", TOPK_MASK),
     ("unpack_bf16", UNPACK_BF16),
+    ("unpack_fp8_rows", UNPACK_FP8_ROWS),
     ("unpack_qkv", UNPACK_QKV),
     ("upsample2", UPSAMPLE2),
     ("upsample2_dx", UPSAMPLE2_DX),

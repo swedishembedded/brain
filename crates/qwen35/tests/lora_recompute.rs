@@ -19,10 +19,11 @@ use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
 use qwen35::config::Qwen35Config;
+use model::saved::SavedPolicy;
 use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
 fn build(cfg: &Qwen35Config, init: &std::collections::HashMap<String, Vec<f32>>, base: Dtype, recompute: bool) -> Qwen35 {
-    let opts = TrainOpts { base: TierPolicy::uniform(base), recompute, ..TrainOpts::default() };
+    let opts = TrainOpts { base: TierPolicy::uniform(base), saved: SavedPolicy::recompute_if(recompute), ..TrainOpts::default() };
     Qwen35::new_train_opts_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, T as u32, init, &opts)
 }
 
@@ -78,7 +79,7 @@ fn a_chunked_mlp_gives_the_loss_and_gradients_of_the_whole_one() {
     let init = weights(&cfg, 0.3);
     for base in [Dtype::F32, Dtype::BF16] {
         let whole = loss_and_grads(&build(&cfg, &init, base, true));
-        let opts = TrainOpts { base: TierPolicy::uniform(base), recompute: true, mlp_rows: Some(5), ..TrainOpts::default() };
+        let opts = TrainOpts { base: TierPolicy::uniform(base), saved: SavedPolicy::Recompute, mlp_rows: Some(5), ..TrainOpts::default() };
         let chunked = Qwen35::new_train_opts_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, T as u32, &init, &opts);
         assert_same_training_signal(loss_and_grads(&chunked), whole, 1e-6, 0.999999);
     }
@@ -94,7 +95,7 @@ fn a_chunked_mlp_backward_does_no_more_gemm_work_than_the_whole_one() {
     let cfg = lora_config();
     let init = weights(&cfg, 0.3);
     let backward_flops = |mlp_rows: Option<u32>| {
-        let opts = TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: true, mlp_rows, ..TrainOpts::default() };
+        let opts = TrainOpts { base: TierPolicy::uniform(Dtype::F32), saved: SavedPolicy::Recompute, mlp_rows, ..TrainOpts::default() };
         let m = Qwen35::new_train_opts_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, T as u32, &init, &opts);
         m.set_batch(&TOKENS, &TARGETS);
         m.zero_grads();

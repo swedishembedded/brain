@@ -17,6 +17,7 @@ use std::path::Path;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
+use model::saved::{SavedFormat, SavedPolicy};
 use model::adapter::device::AdapterTuning;
 use model::FitOpts;
 
@@ -237,7 +238,12 @@ fn streamed_train_opts(run: &StreamedRun, batch: u32, block: u32, mtp: bool) -> 
         BaseDtype::Bf16 => Dtype::BF16,
         BaseDtype::Nf4 => Dtype::NF4,
     };
-    Ok(TrainOpts { base: TierPolicy::uniform(tier), recompute: run.recompute, gdn_segment_tokens, bf16_residuals, mlp_rows, ..TrainOpts::default() })
+    let saved = match (run.recompute, bf16_residuals) {
+        (false, _) => SavedPolicy::Keep,
+        (true, false) => SavedPolicy::Recompute,
+        (true, true) => SavedPolicy::Quantized(SavedFormat::Bf16),
+    };
+    Ok(TrainOpts { base: TierPolicy::uniform(tier), saved, gdn_segment_tokens, mlp_rows, ..TrainOpts::default() })
 }
 
 /// LoRA fine-tune on a frozen base that is STREAMED from `base` (a
@@ -340,12 +346,12 @@ fn build_lora_model(base: &Path, opts: &FitOpts, rank: u32, alpha: f32, tuning: 
     let t_load = std::time::Instant::now();
     let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &src, &train);
     eprintln!(
-        "qwen35 finetune: base loaded as {} in {:.1}s (gdn segment {:?}, mlp rows {:?}, bf16 residuals {})",
+        "qwen35 finetune: base loaded as {} in {:.1}s (gdn segment {:?}, mlp rows {:?}, saved activations {})",
         dtype.name(),
         t_load.elapsed().as_secs_f64(),
         train.gdn_segment_tokens,
         train.mlp_rows,
-        train.bf16_residuals
+        train.saved.label()
     );
     Ok(m)
 }
@@ -448,30 +454,34 @@ mod tests {
         StreamedRun { dtype: BaseDtype::Nf4, recompute, long }
     }
 
+    fn bf16_residuals(o: &TrainOpts) -> bool {
+        o.saved.boundary_format() == SavedFormat::Bf16
+    }
+
     #[test]
     fn long_rows_at_batch_one_default_to_the_long_sequence_settings() {
         let o = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2048, false).unwrap();
-        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, o.bf16_residuals), (Some(2048), Some(2048), true));
+        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, bf16_residuals(&o)), (Some(2048), Some(2048), true));
         let bf16 = StreamedRun { dtype: BaseDtype::Bf16, recompute: true, long: LongSeqOverrides::default() };
         let o = streamed_train_opts(&bf16, 1, 8192, false).unwrap();
         assert_eq!((o.gdn_segment_tokens, o.mlp_rows), (Some(2048), Some(2048)), "the bf16 base fits the same settings (67.1 GiB peak at 64 layers, 8K)");
         let short = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2047, false).unwrap();
-        assert_eq!((short.gdn_segment_tokens, short.mlp_rows, short.bf16_residuals), (None, None, false));
+        assert_eq!((short.gdn_segment_tokens, short.mlp_rows, bf16_residuals(&short)), (None, None, false));
         let mtp = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 4096, true).unwrap();
-        assert!(!mtp.bf16_residuals, "an MTP build keeps the fp32 stream");
+        assert!(!bf16_residuals(&mtp), "an MTP build keeps the fp32 stream");
     }
 
     #[test]
     fn explicit_settings_override_the_defaults_in_both_directions() {
         let big = LongSeqOverrides { gdn_segment: Some(256), bf16_residuals: Some(false), mlp_rows: Some(1024) };
         let o = streamed_train_opts(&run(true, big), 1, 8192, false).unwrap();
-        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, o.bf16_residuals), (Some(256), Some(1024), false));
+        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, bf16_residuals(&o)), (Some(256), Some(1024), false));
         let off = LongSeqOverrides { gdn_segment: Some(0), bf16_residuals: Some(false), mlp_rows: Some(0) };
         let o = streamed_train_opts(&run(true, off), 1, 8192, false).unwrap();
-        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, o.bf16_residuals), (None, None, false));
+        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, bf16_residuals(&o)), (None, None, false));
         let on = LongSeqOverrides { gdn_segment: Some(64), bf16_residuals: Some(true), mlp_rows: Some(128) };
         let o = streamed_train_opts(&run(true, on), 1, 256, false).unwrap();
-        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, o.bf16_residuals), (Some(64), Some(128), true));
+        assert_eq!((o.gdn_segment_tokens, o.mlp_rows, bf16_residuals(&o)), (Some(64), Some(128), true));
     }
 
     #[test]

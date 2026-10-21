@@ -2172,6 +2172,7 @@ dependencies = [
  "brain-gguf",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-memauth",
  "brain-model",
  "brain-modelstore",
  "brain-optim",

@@ -858,6 +858,7 @@ impl StreamTrainer {
             optimizer_state_on_host: false,
             activation_bytes: 0,
             recompute_activation_bytes: None,
+            saved_boundaries: None,
         };
         let mut demands = training_demands(&footprint).expect("the training categories are consistent");
         demands.retain(|d| d.category != Category::Activations);

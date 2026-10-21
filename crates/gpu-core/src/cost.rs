@@ -1088,6 +1088,22 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let total = p(0)?;
             f(total, 4 * (2 * total + p(1)?))
         }
+        // params [total]: bf16 pack reads 4 B and writes 2 B per element, unpack the reverse; integer rounding only.
+        "pack_bf16" | "unpack_bf16" => {
+            let total = p(0)?;
+            c(0, 3 * total, 6 * total)
+        }
+        // params [rows, width]: absmax pass, then scale + encode of every element; reads x twice, writes a byte
+        // per element and a scale per row.
+        "pack_fp8_rows" => {
+            let (rows, width) = (p(0)?, p(1)?);
+            Some(Cost { flops: 3 * rows * width, int_ops: 6 * rows * width, bytes: 4 * (2 * rows * width + rows) + rows * width })
+        }
+        // params [total, width]: one byte decode and one multiply per element.
+        "unpack_fp8_rows" => {
+            let total = p(0)?;
+            Some(Cost { flops: total, int_ops: 5 * total, bytes: total + 4 * total + 4 * total / p(1)?.max(1) })
+        }
         // params [total, m]: y[i] = s[i/m] * x[i] (per-row scalar scale, EDM
         // c_in/c_skip/c_out/lambda(sigma) row factors - see scale_row.wgsl).
         // One multiply per element; reads x (total) + the per-row scale array

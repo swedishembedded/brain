@@ -83,6 +83,7 @@ pub mod projector;
 /// Real per-device, per-dtype GEMM throughput measurement - see the module doc.
 pub mod probe;
 pub mod rollout;
+pub mod saved;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shard;
 pub mod train;

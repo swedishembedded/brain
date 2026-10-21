@@ -15,10 +15,11 @@ mod common;
 
 use common::*;
 use gpu_core::Gpu;
+use model::saved::SavedPolicy;
 use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
 fn build(init: &std::collections::HashMap<String, Vec<f32>>, gdn_segment_tokens: Option<u32>, recompute: bool) -> Qwen35 {
-    let opts = TrainOpts { gdn_segment_tokens, recompute, ..TrainOpts::default() };
+    let opts = TrainOpts { gdn_segment_tokens, saved: SavedPolicy::recompute_if(recompute), ..TrainOpts::default() };
     Qwen35::new_train_opts_on(Gpu::new_cpu(pipelines()), lora_config(), 1, T as u32, init, &opts)
 }
 

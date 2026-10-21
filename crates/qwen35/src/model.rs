@@ -66,6 +66,7 @@ use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
 use model::kv_tier::{KvKernels, KvLayer};
 pub use model::gdn::gdn_chunk_size;
 use model::ops::{Act, Ops, TierPolicy, Weight};
+use model::saved::SavedFormat;
 use model::Shard;
 use optim::Optim;
 
@@ -76,7 +77,7 @@ use crate::decode_state::DecodeState;
 mod objectives;
 #[path = "spec_verify.rs"]
 pub(crate) mod verify;
-use crate::train_base::{read_weight_host, PackedResidual, reads_float_acts, table_tier, write_weight_host};
+use crate::train_base::{read_weight_host, reads_float_acts, table_tier, write_weight_host};
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
 // Forward + backward subset of qwen35moe::model::STATIC_PIPELINES (no MoE -
@@ -308,15 +309,14 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // elementwise passes by name. Appended unless already registered above.
         // Training attention also runs the flash trio at long sequences, so
         // its three kernels are registered too.
-        // The bf16 layer-boundary residual stream packs and unpacks on the device.
+        // A quantized layer-boundary residual stream packs and unpacks on the device
+        // (`model::saved::kernels`).
         let flash = [
-            ("pack_bf16", kernels::PACK_BF16),
-            ("unpack_bf16", kernels::UNPACK_BF16),
             ("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA),
             ("flash_attn_causal_gqa_bwd_dq", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ),
             ("flash_attn_causal_gqa_bwd_dkv", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DKV),
         ];
-        for &(name, src) in model::ops::frozen_base_kernels().iter().chain(model::head_ce::kernels()).chain(&flash) {
+        for &(name, src) in model::ops::frozen_base_kernels().iter().chain(model::head_ce::kernels()).chain(model::saved::kernels()).chain(&flash) {
             if !v.iter().any(|(have, _)| *have == name) {
                 v.push((name, src));
             }
@@ -1072,10 +1072,10 @@ pub struct Qwen35 {
     /// residual output is independently readable via [`Self::debug_res`].
     res: RefCell<Vec<DeviceBuffer>>,
 
-    /// The layer-boundary residuals as bf16 when [`TrainOpts::bf16_residuals`]
-    /// is set; `res` then holds just two fp32 buffers, the current layer's
-    /// input (`res[0]`) and output (`res[1]`).
-    res_bf16: Option<PackedResidual>,
+    /// The layer-boundary residuals in a narrow format when [`TrainOpts::saved`]
+    /// is [`model::saved::SavedPolicy::Quantized`]; `res` then holds just two fp32 buffers,
+    /// the current layer's input (`res[0]`) and output (`res[1]`).
+    res_saved: Option<model::saved::BoundaryStore>,
 
     /// Backward's activation cache - see [`TrainActs`]'s own doc.
     train_acts: RefCell<Option<TrainActs>>,
@@ -1477,7 +1477,7 @@ impl Qwen35 {
     pub fn new_train_opts_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, opts: &TrainOpts) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
         let m = Qwen35::new_impl_on(gpu, cfg, b, t, src, &opts.base, Some(opts), shard);
-        m.set_recompute(opts.recompute);
+        m.set_recompute(opts.saved.recomputes());
         m.gdn_segment_tokens.set(opts.gdn_segment_tokens);
         m.mlp_rows.set(opts.mlp_rows);
         if let Some(min_t) = opts.flash_min_t {
@@ -1486,10 +1486,13 @@ impl Qwen35 {
         m
     }
 
-    /// Switch activation recompute (see [`TrainOpts::recompute`]) for the
-    /// next `forward()`. A forward and its backward must run under the same
-    /// setting: the backward follows what the forward kept.
+    /// Switch activation recompute ([`model::saved::SavedPolicy::Keep`] against
+    /// [`model::saved::SavedPolicy::Recompute`], see [`TrainOpts::saved`]) for the next
+    /// `forward()`. A forward and its backward must run under the same
+    /// setting: the backward follows what the forward kept. A build with
+    /// quantized boundaries has no kept activations to switch back to.
     pub fn set_recompute(&self, on: bool) {
+        assert!(on || self.res_saved.is_none(), "qwen35: a build that holds its boundary residuals quantized always recomputes");
         self.recompute.set(on);
     }
 
@@ -1815,13 +1818,13 @@ impl Qwen35 {
         let ce_buf = gpu.storage(n);
         let ce_grad_uni = gpu.uniform_dynamic(4);
         let d = cfg.d_model as u64;
-        let res_bf16 = train_opts.is_some_and(|o| o.bf16_residuals).then(|| {
-            assert!(shard.is_whole(cfg.n_layers as usize) && !cfg.mtp, "qwen35: bf16 residuals need a whole-model build without MTP (no stage seam or MTP head reads the fp32 stream)");
-            PackedResidual::new(&gpu, cfg.n_layers as usize + 1, b * t, cfg.d_model)
+        let res_saved = train_opts.map(|o| o.saved.boundary_format()).filter(|f| *f != SavedFormat::F32).map(|format| {
+            assert!(shard.is_whole(cfg.n_layers as usize) && !cfg.mtp, "qwen35: quantized boundary residuals need a whole-model build without MTP (no stage seam or MTP head reads the fp32 stream)");
+            model::saved::BoundaryStore::new(&gpu, format, cfg.n_layers as usize + 1, b * t, cfg.d_model).unwrap_or_else(|e| panic!("qwen35: {e}"))
         });
         // Two fp32 buffers (a layer's input and output) when the boundaries are
         // kept packed, one per boundary otherwise.
-        let res = RefCell::new((0..if res_bf16.is_some() { 2 } else { cfg.n_layers + 1 }).map(|_| gpu.storage(n * d)).collect());
+        let res = RefCell::new((0..if res_saved.is_some() { 2 } else { cfg.n_layers + 1 }).map(|_| gpu.storage(n * d)).collect());
 
         let mtp_input = gpu.storage(if cfg.mtp { n } else { 1 });
         let mtp_target = gpu.storage(if cfg.mtp { n } else { 1 });
@@ -1864,7 +1867,7 @@ impl Qwen35 {
             objectives: Default::default(),
             res,
             train_acts: RefCell::new(None),
-            res_bf16,
+            res_saved,
             recompute: Cell::new(false),
             flash,
             flash_min_t: Cell::new(model::block::FlashGqaIds::MIN_TRAIN_T),
@@ -3059,18 +3062,18 @@ impl Qwen35 {
         }
 
         let keep = self.is_train && !self.recompute.get();
-        if let Some(packed) = &self.res_bf16 {
+        if let Some(saved) = &self.res_saved {
             // Each boundary is stored as bf16 and the next layer reads it back
             // from there, so the forward and the backward's recompute agree.
-            packed.store(g, 0, &res[0]);
-            packed.load(g, 0, &res[0]);
+            saved.store(g, 0, &res[0]);
+            saved.load(g, 0, &res[0]);
         }
         for l in self.shard.start..self.shard.end {
-            let (x, y) = if self.res_bf16.is_some() { (&res[0], &res[1]) } else { (&res[l], &res[l + 1]) };
+            let (x, y) = if self.res_saved.is_some() { (&res[0], &res[1]) } else { (&res[l], &res[l + 1]) };
             let acts = self.layer_forward(l, x, y, false);
-            if let Some(packed) = &self.res_bf16 {
-                packed.store(g, l + 1, y);
-                packed.load(g, l + 1, &res[0]);
+            if let Some(saved) = &self.res_saved {
+                saved.store(g, l + 1, y);
+                saved.load(g, l + 1, &res[0]);
             }
             if keep {
                 layer_acts.push(acts.expect("qwen35: is_train but layer_forward returned no acts"));
@@ -3078,7 +3081,7 @@ impl Qwen35 {
         }
         // The stream entering the final norm: with packed boundaries it is the
         // last layer's rounded output, which the loop left in `res[0]`.
-        let last = if self.res_bf16.is_some() { &res[0] } else { &res[self.cfg.n_layers as usize] };
+        let last = if self.res_saved.is_some() { &res[0] } else { &res[self.cfg.n_layers as usize] };
 
         // Head epilogue (final norm + lm_head/logits) and MTP: head stage
         // only. `cfg.mtp` requires a whole shard (asserted in `new_impl_on`),
@@ -3378,9 +3381,9 @@ impl Qwen35 {
             {
                 let mut s = Vec::new();
                 let res = self.res.borrow();
-                let last = match &self.res_bf16 {
-                    Some(packed) => {
-                        packed.load(g, self.cfg.n_layers as usize, &res[0]);
+                let last = match &self.res_saved {
+                    Some(saved) => {
+                        saved.load(g, self.cfg.n_layers as usize, &res[0]);
                         &res[0]
                     }
                     None => &res[self.cfg.n_layers as usize],
@@ -3410,9 +3413,9 @@ impl Qwen35 {
         let recompute_out = ta.recomputed.then(|| g.storage((n * d) as u64));
         for l in (self.shard.start..self.shard.end).rev() {
             // This layer's input boundary (decoded into `res[0]` when packed).
-            let x = match &self.res_bf16 {
-                Some(packed) => {
-                    packed.load(g, l, &res[0]);
+            let x = match &self.res_saved {
+                Some(saved) => {
+                    saved.load(g, l, &res[0]);
                     &res[0]
                 }
                 None => &res[l],
@@ -5035,13 +5038,13 @@ impl Qwen35 {
 
     /// This stage's OUTPUT residual `res[shard.end]` (input to the next stage).
     pub fn read_out_res(&self) -> Vec<f32> {
-        assert!(self.res_bf16.is_none(), "qwen35: the residual stream is kept as packed bf16 boundaries in this build; there is no fp32 buffer to read or write");
+        assert!(self.res_saved.is_none(), "qwen35: the residual stream is kept as quantized boundaries in this build; there is no fp32 buffer to read or write");
         self.gpu.read(&self.res.borrow()[self.shard.end], self.res_numel())
     }
 
     /// This stage's INPUT residual `res[shard.start]` (from the previous stage).
     pub fn write_in_res(&self, data: &[f32]) {
-        assert!(self.res_bf16.is_none(), "qwen35: the residual stream is kept as packed bf16 boundaries in this build; there is no fp32 buffer to read or write");
+        assert!(self.res_saved.is_none(), "qwen35: the residual stream is kept as quantized boundaries in this build; there is no fp32 buffer to read or write");
         self.gpu.write_f32(&self.res.borrow()[self.shard.start], data);
     }
 
@@ -5134,7 +5137,7 @@ impl Qwen35 {
     /// parity-debugging introspection only, valid after a `run_forward()`
     /// call (via [`Self::logits_all`]).
     pub fn debug_res(&self, l: usize) -> Vec<f32> {
-        assert!(self.res_bf16.is_none(), "qwen35: the residual stream is kept as packed bf16 boundaries in this build; there is no fp32 buffer to read or write");
+        assert!(self.res_saved.is_none(), "qwen35: the residual stream is kept as quantized boundaries in this build; there is no fp32 buffer to read or write");
         let n = (self.b * self.t) as usize;
         let d = self.cfg.d_model as usize;
         self.gpu.read(&self.res.borrow()[l], n * d)

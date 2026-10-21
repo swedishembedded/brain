@@ -80,6 +80,11 @@ history and exempt.
    `Ops::tile_budget_bytes`, never the size of the tensor. `qops_frozen_lora_grad` is the gate
    (every tier against decoded fp32, tolerances per path); `qops_profile` the timing.
    Measured deviation on real Qwen3-8B weights: knowledge #326.
+   **What a training forward keeps for its backward is one policy** (`model::saved::SavedPolicy`: `Keep`,
+   `Recompute`, or `Quantized(bf16|fp8)` layer-boundary residuals, FP8 with one scale per row), priced rung by rung
+   in `model::memplan` (`TrainingFootprint::saved_boundaries`, read back with `memplan::saved_policy`) and obeyed by
+   the qwen35 (`TrainOpts::saved`) and qwen3 (`Qwen::new_lora_dt_saved`, recompute-only) LoRA trainers; the stream
+   is rounded at every boundary so forward and backward agree.
    `brain qwen3 {import,infer,serve,export,precompile,train,finetune,toolcall}`,
    plus the generic `brain import` for a `qwen3` GGUF.
 2b. **Qwen3.5-35B-A3B hybrid decoder** (`crates/qwen35moe`) - 40 layers, 3:1

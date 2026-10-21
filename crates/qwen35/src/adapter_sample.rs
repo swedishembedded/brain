@@ -22,6 +22,7 @@ use std::path::Path;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
+use model::saved::SavedPolicy;
 
 use crate::base_source::{lora_base, BaseDtype};
 use crate::model::{pipelines, Qwen35, TrainOpts};
@@ -60,7 +61,7 @@ impl AdapterSampler {
             BaseDtype::Bf16 => Dtype::BF16,
             BaseDtype::Nf4 => Dtype::NF4,
         };
-        let opts = TrainOpts { base: TierPolicy::uniform(tier), recompute: dtype.is_frozen_only(), ..TrainOpts::default() };
+        let opts = TrainOpts { base: TierPolicy::uniform(tier), saved: SavedPolicy::recompute_if(dtype.is_frozen_only()), ..TrainOpts::default() };
         let model = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, 1, len, &src, &opts);
         let lora_b = model.param_names().into_iter().filter(|n| model::adapter::device::init_of(n) == Some(model::adapter::ParamInit::Zeros)).map(|n| { let w = model.read_weight(&n); (n, w) }).collect();
         Ok(AdapterSampler { model, len, lora_b, enabled: true })

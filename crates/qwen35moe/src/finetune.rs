@@ -62,6 +62,7 @@ fn plan_before_load(params: &[(String, usize)], adapter_names: &[String], state:
         optimizer_state_on_host: state == OptimizerState::HostOffload,
         activation_bytes: 0,
         recompute_activation_bytes: None,
+        saved_boundaries: None,
     };
     let mut demands = training_demands(&footprint).map_err(|e| e.to_string())?;
     demands.retain(|d| d.category != Category::Activations);

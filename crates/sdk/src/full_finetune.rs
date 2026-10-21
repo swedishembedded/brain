@@ -397,6 +397,7 @@ fn plan_before_load(open: &Path, block: u32, set: &gpu_core::devices::ComputeSet
         optimizer_state_on_host: true,
         activation_bytes,
         recompute_activation_bytes: None,
+        saved_boundaries: None,
     };
     let mut demands = training_demands(&footprint).map_err(|e| Error::Backend(e.to_string()))?;
     demands.push(Demand { category: Category::Weights, variants: vec![model::memplan::Variant::new(model::memplan::Lever::Base, "master weights on the host", 0, 4 * numel)] });

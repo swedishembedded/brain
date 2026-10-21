@@ -32,6 +32,7 @@ use model::block::{self, Gqa, KernelIds};
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
 use gpu_core::provider::library::GemmPrecision;
 use model::ops::{Act, Ops, Weight};
+use model::saved::{BoundaryStore, SavedFormat, SavedPolicy};
 pub use model::Shard;
 use optim::Optim;
 use paramstore::ParamStore;
@@ -411,6 +412,12 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
+        // Quantized layer-boundary residuals (`model::saved`) pack and unpack on the device.
+        for &(name, src) in model::saved::kernels() {
+            if !v.iter().any(|(have, _)| *have == name) {
+                v.push((name, src));
+            }
+        }
         model::adapter::exec::add_kernels(&mut v);
         v
     })
@@ -591,6 +598,10 @@ pub struct Qwen {
     tokens: DeviceBuffer,
     targets: DeviceBuffer,
     res: Vec<DeviceBuffer>,
+    /// The layer-boundary residuals in a narrow format ([`SavedPolicy::Quantized`]). `res` then holds two
+    /// physical fp32 buffers shared by parity (`res[i]` is `pair[i % 2]`, as `dres`), and the backward decodes
+    /// boundary `l` back into `res[l]` before it rebuilds layer `l`.
+    res_saved: Option<BoundaryStore>,
     layers: Vec<Layer>,
 
     // Vision-language embedding splice (empty = off). The forward overwrites
@@ -930,7 +941,7 @@ impl Qwen {
     pub fn load(path: &str, b: u32, t: u32) -> Qwen {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &*src, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference)
+        Qwen::new_impl(cfg, b, t, &*src, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
     }
 
     /// Load an **inference-only** model: parameters are frozen (weights only, no
@@ -947,7 +958,7 @@ impl Qwen {
     pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Qwen {
         let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, reader, false, shard, Dtype::F32, false, GemmPrecision::Fp32Reference)
+        Qwen::new_impl(cfg, b, t, reader, false, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
     }
 
     /// Streaming **decode-only** load: like [`Self::from_reader_inference`]
@@ -964,7 +975,7 @@ impl Qwen {
     pub fn from_reader_decode(reader: &checkpoint::weightio::WeightReader, ctx: u32) -> Qwen {
         let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference)
+        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
     }
 
     /// [`Self::from_reader_decode`], but from an in-memory tensor map instead of
@@ -974,7 +985,7 @@ impl Qwen {
     /// without rebuilding, use [`Self::attach_adapter`] instead.
     pub fn from_tensors_decode(cfg: QwenConfig, tensors: &HashMap<String, Vec<f32>>, ctx: u32) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference)
+        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
     }
 
     /// [`Self::load_inference`] with the int8 numeric tier: group-wise weight
@@ -996,7 +1007,7 @@ impl Qwen {
     fn load_inference_with(path: &str, b: u32, t: u32, dt: Dtype) -> Qwen {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &*src, false, shard, dt, false, GemmPrecision::Fp32Reference)
+        Qwen::new_impl(cfg, b, t, &*src, false, shard, dt, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
     }
 
     /// The config of a brain checkpoint `reader` has open. The `from_reader_*`
@@ -1009,7 +1020,7 @@ impl Qwen {
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference)
+        Qwen::new_impl(cfg, b, t, init, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
     }
 
     /// A LoRA training build whose frozen base linears are held at the
@@ -1035,7 +1046,16 @@ impl Qwen {
     /// base) where the device has them, `Fp32Reference` the exact fp32 kernels. The tapes are
     /// recorded at construction, so the choice is made here, not afterwards.
     pub fn new_lora_shard_dt_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype, gemm: GemmPrecision) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false, gemm)
+        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false, gemm, SavedPolicy::Recompute)
+    }
+
+    /// [`Self::new_lora_dt_gemm`] with the saved-activation policy chosen (`model::saved`, normally the planner's
+    /// `memplan::saved_policy`): [`SavedPolicy::Recompute`] keeps fp32 layer-boundary residuals,
+    /// [`SavedPolicy::Quantized`] holds them in bf16 or FP8. This trainer rebuilds every layer in the backward,
+    /// so [`SavedPolicy::Keep`] is refused.
+    pub fn new_lora_dt_saved(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, dt: Dtype, gemm: GemmPrecision, saved: SavedPolicy) -> Qwen {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false, gemm, saved)
     }
 
     /// [`Self::new_lora_dt`] with the GEMM arithmetic chosen (see [`Self::new_lora_shard_dt_gemm`]).
@@ -1059,7 +1079,7 @@ impl Qwen {
 
     /// [`Self::new_shard`] with the GEMM arithmetic chosen (see [`Self::new_lora_shard_dt_gemm`]).
     pub fn new_shard_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, train: bool, shard: Shard, gemm: GemmPrecision) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, train, shard, Dtype::F32, false, gemm)
+        Qwen::new_impl(cfg, b, t, init, train, shard, Dtype::F32, false, gemm, SavedPolicy::Recompute)
     }
 
     /// Inference-only shard with the 7 per-layer linears quantized to int8 (DP4A).
@@ -1105,7 +1125,7 @@ impl Qwen {
     /// kernel variants. The per-layer RMSNorm/QK-norm gains stay fp32: they
     /// are `[d]`/`[head_dim]` vectors consumed by norm kernels, not GEMMs.
     pub fn new_shard_dt(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, false, shard, dt, false, GemmPrecision::Fp32Reference)
+        Qwen::new_impl(cfg, b, t, init, false, shard, dt, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
     }
 
     /// [`Self::new_shard_dt`] shaped for **KV-cache decode**, the way
@@ -1131,7 +1151,7 @@ impl Qwen {
     /// what landed. Calling a batched forward/backward entry point on the
     /// result panics loudly rather than running past the smaller buffers.
     pub fn new_shard_dt_decode(cfg: QwenConfig, ctx: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
-        Qwen::new_impl(cfg, 1, ctx, init, false, shard, dt, true, GemmPrecision::Fp32Reference)
+        Qwen::new_impl(cfg, 1, ctx, init, false, shard, dt, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
     }
 
     /// The shared builder behind every constructor. `decode_only` (set only by
@@ -1140,7 +1160,7 @@ impl Qwen {
     /// `scores`/`probs` at `n_heads·ctx` (not `n_heads·ctx²`), no backward
     /// scratch, no `logits`/`d_logits`/CE buffers.
     #[allow(clippy::too_many_arguments)]
-    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, dt: Dtype, decode_only: bool, gemm: GemmPrecision) -> Qwen {
+    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, dt: Dtype, decode_only: bool, gemm: GemmPrecision, saved: SavedPolicy) -> Qwen {
         // ONE reduced-precision build, parameterised by `dt` - the int8 tier
         // is not a second code path, it is this one at `Dtype::I8`. Every
         // non-fp32 tier is inference-only for the same reason int8 always
@@ -1152,6 +1172,13 @@ impl Qwen {
             "the {dt:?} weight tier is inference-only (a LoRA training build may hold a bf16 or int8 frozen base)"
         );
         assert!(!(decode_only && train), "decode-only build is inference-only");
+        // This trainer always rebuilds a layer in the backward from its saved input (`build_backward_steps`):
+        // the policies it can follow are Recompute and Quantized boundaries; Keep has no implementation here.
+        assert!(saved.recomputes(), "qwen3 training recomputes each layer in the backward; SavedPolicy::Keep is not available");
+        assert!(
+            saved.boundary_format() == SavedFormat::F32 || (train && shard.is_whole(cfg.n_layers as usize)),
+            "quantized boundary residuals need a whole-model training build (no stage seam or inference path reads the fp32 stream)"
+        );
         // An explicitly-placed shard binds its canonical card through the
         // device registry; `Shard::ANY_GPU` (the `Shard::whole` default) keeps
         // the ambient selection (`--device` / scoped `with_gpu`).
@@ -1289,9 +1316,17 @@ impl Qwen {
         // parity serve every index - the boundaries (`dres[start]`,
         // `dres[end]`) included, each still holding its final value when read.
         let dres_pair = if train { [st(n * d), st(n * d)] } else { [st(1), st(1)] };
+        let res_saved = (saved.boundary_format() != SavedFormat::F32).then(|| {
+            BoundaryStore::new(&gpu, saved.boundary_format(), cfg.n_layers as usize + 1, n as u32, d as u32).unwrap_or_else(|e| panic!("qwen: {e}"))
+        });
+        let res_pair = res_saved.as_ref().map(|_| [st(n * d), st(n * d)]);
         for i in 0..=cfg.n_layers as usize {
             let live = i >= shard.start && i <= shard.end;
-            res.push(if live { st(n * d) } else { st(1) });
+            res.push(match (&res_pair, live) {
+                (Some(pair), _) => pair[i % 2].clone(),
+                (None, true) => st(n * d),
+                (None, false) => st(1),
+            });
             // `dres[l]` is the gradient w.r.t. the residual entering layer
             // `l`, read only by `build_backward_steps` - never touched by a
             // pure forward pass. Gated on `train` (not `!decode_only`, which
@@ -1538,6 +1573,7 @@ impl Qwen {
             inv: bwd(inv_rows),
             adapter,
             attached: None,
+            res_saved,
             fwd_steps: Tape::default(),
             bwd_steps: Tape::default(),
             inv_count: bwd(1),
@@ -2146,8 +2182,10 @@ impl Qwen {
             s.extend(self.splice.fwd(&self.gpu, SPLICE, &self.res[0], 0, n));
         }
         let mut tape = Tape { steps: s, ends: Vec::new() };
+        self.round_trip_boundary(&mut tape.steps, self.shard.start, n);
         for l in self.shard.start..self.shard.end {
             self.layer_fwd_steps(&mut tape.steps, l, b_use, t_use, false, Attend::Causal);
+            self.round_trip_boundary(&mut tape.steps, l + 1, n);
             tape.mark();
         }
         if self.shard.head {
@@ -2155,6 +2193,17 @@ impl Qwen {
             tape.steps.push(self.rms_step(&self.res[last], self.w("norm.weight"), &self.xn_final, d, n));
         }
         tape
+    }
+
+    /// With quantized boundaries, store boundary `l` and read it back over itself, so the next layer starts
+    /// from the very value the backward will decode (the rounding is part of the model, not a forward/backward
+    /// mismatch). A no-op with fp32 boundaries.
+    fn round_trip_boundary(&self, s: &mut Vec<Step>, l: usize, n: u32) {
+        if let Some(store) = &self.res_saved {
+            assert_eq!(n, self.b * self.t, "quantized boundary residuals are sized for the build's own b*t rows");
+            s.push(store.store_step(&self.gpu, l, &self.res[l]));
+            s.push(store.load_step(&self.gpu, l, &self.res[l]));
+        }
     }
 
     /// Layer `l`'s forward from `res[l]` into the shared layer scratch and
@@ -2384,6 +2433,9 @@ impl Qwen {
                 );
             }
             let last = c.n_layers as usize;
+            if let Some(store) = &self.res_saved {
+                s.push(store.load_step(&self.gpu, last, &self.res[last]));
+            }
             self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
         }
 
@@ -2392,6 +2444,9 @@ impl Qwen {
             ends.push(s.len());
             // Rebuild this layer's activations from the saved `res[l]` (see
             // `new_impl`'s layer scratch) before differentiating it.
+            if let Some(store) = &self.res_saved {
+                s.push(store.load_step(&self.gpu, l, &self.res[l]));
+            }
             self.layer_fwd_steps(&mut s, l, b, t, true, Attend::Causal);
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
@@ -2802,6 +2857,7 @@ impl Qwen {
         let t_use = tokens.len() as u32;
         assert!(t_use <= self.t && self.b == 1, "qwen decoder sized too small");
         assert!(layer <= self.cfg.n_layers as usize, "layer {layer} > n_layers");
+        assert!(self.res_saved.is_none(), "qwen: a build with quantized boundary residuals keeps no per-layer hidden state to read");
         if self.decode_only {
             return self.encode_hidden_via_steps(tokens, &[layer]).swap_remove(0);
         }
@@ -2916,6 +2972,7 @@ impl Qwen {
         }
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
+        assert!(self.res_saved.is_none(), "qwen: a build with quantized boundary residuals keeps no per-layer hidden state to read");
         let tape = self.body_tape(1, t_use);
         gpu_core::profile::program_table(&self.gpu, "qwen3 encode", &tape.steps);
         tape.submit(&self.gpu);

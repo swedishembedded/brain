@@ -35,6 +35,7 @@ use checkpoint::packed::{MemoryBudget, Pool};
 pub use paramstore::precision::ParamPrecision;
 
 use crate::kv_tier::KvTier;
+use crate::saved::{SavedFormat, SavedLayout, SavedPolicy};
 
 /// What a block of memory is for. Reported separately, never merged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -328,6 +329,9 @@ pub struct TrainingFootprint {
     /// (`None`: this trainer cannot recompute).
     pub activation_bytes: u64,
     pub recompute_activation_bytes: Option<u64>,
+    /// The layer-boundary residual stream inside `recompute_activation_bytes` (full precision there). When the
+    /// trainer can hold it narrower ([`SavedPolicy::Quantized`]), the planner also offers those rungs.
+    pub saved_boundaries: Option<SavedLayout>,
 }
 
 /// The planner categories of a training run. Optimizer state is offered as the `optimizer_state_ladder` from the
@@ -356,12 +360,36 @@ pub fn training_demands(f: &TrainingFootprint) -> Result<Vec<Demand>, PlanError>
         Demand::with_variants(Category::OptimizerState, variants)?
     };
     demands.push(state);
-    let mut act = vec![Variant::new(Lever::Base, "keep activations", f.activation_bytes, 0)];
-    if let Some(r) = f.recompute_activation_bytes {
-        act.push(Variant::new(Lever::Recompute, "recompute per layer", r, 0));
-    }
-    demands.push(Demand::with_variants(Category::Activations, act)?);
+    demands.push(activation_demand(f)?);
     Ok(demands)
+}
+
+/// The activation rungs a [`SavedPolicy`] ladder prices, labelled with [`SavedPolicy::label`] so
+/// [`saved_policy`] reads the planner's choice back. A rung that would not be strictly smaller than the one
+/// before it (a few boundaries cannot repay the two full-precision working buffers of a quantized stream) is
+/// not offered: the planner never proposes growth.
+fn activation_demand(f: &TrainingFootprint) -> Result<Demand, PlanError> {
+    let mut act = vec![Variant::new(Lever::Base, SavedPolicy::Keep.label(), f.activation_bytes, 0)];
+    if let Some(r) = f.recompute_activation_bytes {
+        act.push(Variant::new(Lever::Recompute, SavedPolicy::Recompute.label(), r, 0));
+        if let Some(layout) = f.saved_boundaries {
+            for format in [SavedFormat::Bf16, SavedFormat::Fp8] {
+                // Full-precision boundaries out, the narrow stream and the two decode buffers in.
+                let bytes = (r + layout.stream_bytes(format) + layout.working_bytes()).saturating_sub(layout.stream_bytes(SavedFormat::F32));
+                if act.last().is_some_and(|prev| bytes < prev.device_bytes) {
+                    let rung = Variant::new(Lever::ActivationPrecision, SavedPolicy::Quantized(format).label(), bytes, 0);
+                    act.push(if format.validated() { rung } else { rung.unvalidated() });
+                }
+            }
+        }
+    }
+    Demand::with_variants(Category::Activations, act)
+}
+
+/// The saved-activation policy a plan chose for the [`Category::Activations`] demand of [`training_demands`],
+/// or `None` when the plan has no activation demand or labels it otherwise.
+pub fn saved_policy(report: &PlanReport) -> Option<SavedPolicy> {
+    SavedPolicy::parse(&report.variant(Category::Activations)?.label)
 }
 
 #[cfg(test)]
@@ -478,6 +506,7 @@ mod tests {
             optimizer_state_on_host: on_host,
             activation_bytes: 8 * GIB,
             recompute_activation_bytes: Some(GIB),
+            saved_boundaries: None,
         }
     }
 
@@ -495,7 +524,7 @@ mod tests {
         let room = total - (8 * n as u64 - int8) + 1;
         let r = plan(&demands, Capacity { device_bytes: room, host_bytes: 0 }, &Authorized::only(&[Lever::OptimizerState])).unwrap();
         assert_eq!(r.variant(Category::OptimizerState).unwrap().label, "Int8Block { block: 256 }");
-        assert_eq!(r.variant(Category::Activations).unwrap().label, "keep activations");
+        assert_eq!(r.variant(Category::Activations).unwrap().label, "keep");
         // Not authorized to narrow, but the host has room: the state moves there at the requested format.
         let r = plan(&demands, Capacity { device_bytes: room, host_bytes: 16 * GIB * 4 }, &Authorized::only(&[Lever::Offload])).unwrap();
         assert_eq!(r.variant(Category::OptimizerState).unwrap().label, "F32 on the host");
@@ -526,6 +555,36 @@ mod tests {
         assert_eq!(r.decisions.len(), 1);
         assert_eq!(r.decisions[0].lever, Lever::ConvertWeights);
         assert!(plan(&[weights, acts], room, &Authorized::none()).is_err());
+    }
+
+    /// A 64-layer, 16k-token, 5120-wide pass: the planner walks keep -> recompute -> bf16 boundaries as the card
+    /// shrinks, each rung strictly smaller, the choice reads back as a [`SavedPolicy`], and FP8 boundaries
+    /// (not yet validated) are priced but never chosen unasked.
+    #[test]
+    fn the_saved_activation_ladder_trades_recompute_and_precision_for_bytes() {
+        let layout = SavedLayout { boundaries: 65, rows: 16_384, width: 5_120 };
+        let recompute = layout.stream_bytes(SavedFormat::F32) + 3 * GIB;
+        let footprint = TrainingFootprint { activation_bytes: 80 * GIB, recompute_activation_bytes: Some(recompute), saved_boundaries: Some(layout), ..training(1000, false) };
+        let acts = activation_demand(&footprint).unwrap();
+        let rungs: Vec<(&str, u64)> = acts.variants.iter().map(|v| (v.label.as_str(), v.device_bytes)).collect();
+        assert_eq!(rungs.iter().map(|r| r.0).collect::<Vec<_>>(), ["keep", "recompute", "recompute+bf16", "recompute+fp8"]);
+        assert!(rungs.windows(2).all(|w| w[1].1 < w[0].1), "{rungs:?}");
+        assert!(!acts.variants[3].validated && acts.variants[2].validated, "only bf16 is validated");
+        let fixed = |d: &Demand| plan(std::slice::from_ref(d), Capacity { device_bytes: rungs[1].1 - 1, host_bytes: 0 }, &Authorized::only(&[Lever::Recompute, Lever::ActivationPrecision]));
+        let chosen = fixed(&acts).unwrap();
+        assert_eq!(saved_policy(&chosen), Some(SavedPolicy::Quantized(SavedFormat::Bf16)));
+        // Below the bf16 rung only the unvalidated fp8 one would fit: refused, not silently taken.
+        let tight = plan(std::slice::from_ref(&acts), Capacity { device_bytes: rungs[2].1 - 1, host_bytes: 0 }, &Authorized::only(&[Lever::Recompute, Lever::ActivationPrecision]));
+        assert!(matches!(tight, Err(PlanError::DoesNotFit { .. })));
+    }
+
+    /// Few boundaries cannot repay the two full-precision working buffers of a quantized stream: no such rung.
+    #[test]
+    fn a_quantized_rung_that_would_not_shrink_the_footprint_is_not_offered() {
+        let layout = SavedLayout { boundaries: 2, rows: 1024, width: 64 };
+        let footprint = TrainingFootprint { activation_bytes: 10 * GIB, recompute_activation_bytes: Some(GIB), saved_boundaries: Some(layout), ..training(1000, false) };
+        let labels: Vec<String> = activation_demand(&footprint).unwrap().variants.into_iter().map(|v| v.label).collect();
+        assert_eq!(labels, ["keep", "recompute"]);
     }
 
     #[test]

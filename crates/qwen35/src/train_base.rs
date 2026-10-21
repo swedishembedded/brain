@@ -18,6 +18,7 @@ use gpu_core::provider::library::GemmPrecision;
 use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::ops::{TierPolicy, Weight};
+use model::saved::SavedPolicy;
 
 use crate::config::Qwen35Config;
 
@@ -29,10 +30,13 @@ pub struct TrainOpts {
     /// all-fp32 requires `cfg.lora` (a full-parameter build trains the base,
     /// which only fp32 can hold).
     pub base: TierPolicy,
-    /// Keep only the layer-boundary residuals through the forward and rebuild
-    /// each layer's activations inside the backward (one layer's activations
-    /// alive at a time instead of all of them, for one extra forward).
-    pub recompute: bool,
+    /// What the forward keeps for the backward (`model::saved`): every layer's
+    /// activations ([`SavedPolicy::Keep`]); only the layer-boundary residuals,
+    /// each layer rebuilt inside the backward at the price of one extra
+    /// forward ([`SavedPolicy::Recompute`]); or those boundary residuals held
+    /// as bf16 / FP8 ([`SavedPolicy::Quantized`], whole-model non-MTP builds
+    /// only). Normally the planner's choice (`model::memplan::saved_policy`).
+    pub saved: SavedPolicy,
     /// Words of logits the chunked LM head keeps alive at once (it computes
     /// `rows x vocab` at a time instead of `tokens x vocab`); `None` takes
     /// the default of 2^28 words (1 GiB).
@@ -47,9 +51,6 @@ pub struct TrainOpts {
     /// activation memory follows the segment instead of the sequence. `None`
     /// keeps the whole sequence's intermediates; needs a batch of one.
     pub gdn_segment_tokens: Option<u32>,
-    /// Hold the layer-boundary residual stream in bf16 (half the bytes; see
-    /// `PackedResidual`). Whole-model, non-MTP builds only.
-    pub bf16_residuals: bool,
     /// Run each layer's dense MLP in chunks of this many tokens on a
     /// recomputing build, rebuilding a chunk's activations when its gradient
     /// is taken: the MLP's gate, up and hidden activations (and their three
@@ -66,7 +67,7 @@ pub struct TrainOpts {
 
 impl Default for TrainOpts {
     fn default() -> Self {
-        TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute: false, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None, bf16_residuals: false, mlp_rows: None, gemm_precision: GemmPrecision::Auto }
+        TrainOpts { base: TierPolicy::uniform(Dtype::F32), saved: SavedPolicy::Keep, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None, mlp_rows: None, gemm_precision: GemmPrecision::Auto }
     }
 }
 
@@ -163,44 +164,6 @@ pub(crate) fn check_batch_fits(cfg: &Qwen35Config, b: u32, t: u32, binding_bytes
         "qwen35: {b} x {t} = {n} tokens do not fit this device: {buffer} would not fit one storage binding of {binding_bytes} bytes \
          (or a u32 element index); at most {limit} tokens per pass"
     );
-}
-
-/// The layer-boundary residual stream of a training pass, held as bf16: one
-/// packed buffer per boundary (`n_layers + 1` of them, `rows * d_model / 2`
-/// words each) instead of the same count of fp32 `rows * d_model` buffers -
-/// half the bytes of what dominates training memory once a layer's activations
-/// are recomputed. A layer reads its input after the round trip through bf16
-/// (forward and backward alike), so the recompute sees the very values the
-/// forward did and the rounding is part of the model rather than a mismatch
-/// between the two passes.
-pub(crate) struct PackedResidual {
-    packed: Vec<DeviceBuffer>,
-    pack: usize,
-    unpack: usize,
-    total: u32,
-}
-
-impl PackedResidual {
-    pub(crate) fn new(gpu: &Gpu, boundaries: usize, rows: u32, d_model: u32) -> PackedResidual {
-        let total = rows.checked_mul(d_model).unwrap_or_else(|| panic!("qwen35: {rows} x {d_model} residual elements overflow a u32 index"));
-        let kernel = |name: &str| gpu.kernel_index(name).unwrap_or_else(|| panic!("qwen35: kernel {name} is not registered"));
-        PackedResidual {
-            packed: (0..boundaries).map(|_| gpu.storage(total.div_ceil(2) as u64)).collect(),
-            pack: kernel("pack_bf16"),
-            unpack: kernel("unpack_bf16"),
-            total,
-        }
-    }
-
-    /// Store `src` (fp32 `[rows, d_model]`) as boundary `l`.
-    pub(crate) fn store(&self, gpu: &Gpu, l: usize, src: &DeviceBuffer) {
-        gpu.submit(&[], &[gpu.step(self.pack, &[src, &self.packed[l]], &[self.total], self.total.div_ceil(2))]);
-    }
-
-    /// Decode boundary `l` into `dst` (fp32 `[rows, d_model]`).
-    pub(crate) fn load(&self, gpu: &Gpu, l: usize, dst: &DeviceBuffer) {
-        gpu.submit(&[], &[gpu.step(self.unpack, &[&self.packed[l], dst], &[self.total], self.total)]);
-    }
 }
 
 #[cfg(test)]

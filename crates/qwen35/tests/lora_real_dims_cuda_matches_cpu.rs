@@ -21,6 +21,7 @@ use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
 use qwen35::config::{lora_cfg, Qwen35Config};
+use model::saved::{SavedFormat, SavedPolicy};
 use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
 const ROWS: usize = 320;
@@ -58,16 +59,16 @@ fn the_cuda_trainer_matches_the_cpu_at_the_published_mixer_geometry() {
     let (x, y) = batch_of(ROWS);
     let long = [
         ("whole sequence", TrainOpts::default()),
-        ("recomputed", TrainOpts { recompute: true, ..TrainOpts::default() }),
-        ("recomputed, segmented", TrainOpts { recompute: true, gdn_segment_tokens: Some(128), ..TrainOpts::default() }),
-        ("recomputed, chunked", TrainOpts { recompute: true, mlp_rows: Some(128), ..TrainOpts::default() }),
-        ("segmented, recomputed, chunked", TrainOpts { recompute: true, gdn_segment_tokens: Some(128), mlp_rows: Some(128), ..TrainOpts::default() }),
+        ("recomputed", TrainOpts { saved: SavedPolicy::Recompute, ..TrainOpts::default() }),
+        ("recomputed, segmented", TrainOpts { saved: SavedPolicy::Recompute, gdn_segment_tokens: Some(128), ..TrainOpts::default() }),
+        ("recomputed, chunked", TrainOpts { saved: SavedPolicy::Recompute, mlp_rows: Some(128), ..TrainOpts::default() }),
+        ("segmented, recomputed, chunked", TrainOpts { saved: SavedPolicy::Recompute, gdn_segment_tokens: Some(128), mlp_rows: Some(128), ..TrainOpts::default() }),
         // The settings a 27B run at 15K tokens gets by itself; the bf16 stream rounds identically on both devices
         // up to the order of the fp32 sums that feed the rounding.
-        ("long-sequence settings with a bf16 residual stream", TrainOpts { recompute: true, gdn_segment_tokens: Some(128), mlp_rows: Some(128), bf16_residuals: true, ..TrainOpts::default() }),
+        ("long-sequence settings with a bf16 residual stream", TrainOpts { saved: SavedPolicy::Quantized(SavedFormat::Bf16), gdn_segment_tokens: Some(128), mlp_rows: Some(128), ..TrainOpts::default() }),
     ];
     for (name, extra) in long {
-        let min_cos = if extra.bf16_residuals { 0.999 } else { 0.99999 };
+        let min_cos = if extra.saved.boundary_format() == SavedFormat::Bf16 { 0.999 } else { 0.99999 };
         let opts = TrainOpts { base: TierPolicy::uniform(Dtype::F32), gemm_precision: GemmPrecision::Fp32Reference, ..extra };
         let on_cpu = Qwen35::new_train_opts_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, ROWS as u32, &init, &opts);
         let on_cuda = Qwen35::new_train_opts_on(cuda.share(), cfg.clone(), 1, ROWS as u32, &init, &opts);

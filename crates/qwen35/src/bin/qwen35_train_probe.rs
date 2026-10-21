@@ -20,7 +20,7 @@
 //! ```text
 //! BRAIN_BACKEND=cuda gpu qwen35_train_probe --tokens 4096 --base nf4 \
 //!     [--layers 4] [--rank 16] [--recompute on|off] [--gdn-segment N] \
-//!     [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N] [--steps 2] [--seed N] [--gemm-precision auto|fp32|bf16] [--profile]
+//!     [--head-budget WORDS] [--flash-min-t N] [--residuals f32|bf16|fp8] [--mlp-rows N] [--steps 2] [--seed N] [--gemm-precision auto|fp32|bf16] [--profile]
 //! ```
 //!
 //! `--gemm-precision` picks the arithmetic of the bf16-weight GEMMs: `auto`
@@ -52,11 +52,12 @@ use gpu_core::provider::library::GemmPrecision;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
+use model::saved::{SavedFormat, SavedPolicy};
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
 const USAGE: &str = "usage: qwen35_train_probe [--tokens N] [--layers N] [--base bf16|nf4|f32] [--rank R] [--steps N] \\
-     [--recompute on|off] [--gdn-segment N] [--head-budget WORDS] [--flash-min-t N] [--bf16-residuals on|off] [--mlp-rows N] \\
+     [--recompute on|off] [--gdn-segment N] [--head-budget WORDS] [--flash-min-t N] [--residuals f32|bf16|fp8] [--mlp-rows N] \\
      [--seed N] [--gemm-precision auto|fp32|bf16] [--profile] [--device gpuN|cpu] [--backend cuda|cpu|vulkan|wgpu]
   Builds the first --layers layers of the real Qwen3.8-27B shape with random weights and times --steps LoRA steps at --tokens
   tokens. Every result is a `PROBE key=value` line on stdout. With BRAIN_PROFILE set, each step also prints the device
@@ -75,7 +76,7 @@ const VALUE_FLAGS: [&str; 15] = [
     "--gdn-segment",
     "--head-budget",
     "--flash-min-t",
-    "--bf16-residuals",
+    "--residuals",
     "--mlp-rows",
     "--seed",
     "--gemm-precision",
@@ -212,13 +213,15 @@ fn main() {
     let seed = arg(&args, "--seed").map_or_else(|| Rng::random().next_u64(), |v| v.parse().expect("--seed N"));
     println!("PROBE seed={seed} layers={layers} tokens={tokens} base={base} rank={rank} recompute={recompute} gdn_segment={gdn_segment}");
     let src = SyntheticSource { sizes: cfg.param_list().into_iter().collect(), seed };
+    let residuals = arg(&args, "--residuals").map_or(SavedFormat::F32, |v| SavedFormat::parse(&v).unwrap_or_else(|| panic!("--residuals {v:?}: expected f32, bf16 or fp8")));
+    let saved = if recompute { SavedPolicy::recompute_with(residuals) } else { SavedPolicy::Keep };
+    assert!(recompute || residuals == SavedFormat::F32, "--residuals bf16|fp8 needs --recompute on");
     let opts = TrainOpts {
         base: TierPolicy::uniform(tier),
-        recompute,
+        saved,
         head_budget_words: arg(&args, "--head-budget").map(|v| v.parse().expect("--head-budget WORDS")),
         flash_min_t: arg(&args, "--flash-min-t").map(|v| v.parse().expect("--flash-min-t N")),
         gdn_segment_tokens: (gdn_segment > 0).then_some(gdn_segment),
-        bf16_residuals: arg(&args, "--bf16-residuals").is_some_and(|v| v == "on"),
         mlp_rows: arg(&args, "--mlp-rows").map(|v| v.parse().expect("--mlp-rows N")),
         gemm_precision: match arg(&args, "--gemm-precision").as_deref() {
             None | Some("auto") => GemmPrecision::Auto,

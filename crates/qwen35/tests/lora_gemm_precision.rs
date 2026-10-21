@@ -20,11 +20,12 @@ use gpu_core::provider::library::{GemmPath, GemmPrecision};
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
+use model::saved::SavedPolicy;
 use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
 fn build(gpu: &Gpu, init: &std::collections::HashMap<String, Vec<f32>>, base: Dtype, precision: GemmPrecision) -> Qwen35 {
     let cfg = lora_config();
-    let opts = TrainOpts { base: TierPolicy::uniform(base), recompute: true, gemm_precision: precision, ..TrainOpts::default() };
+    let opts = TrainOpts { base: TierPolicy::uniform(base), saved: SavedPolicy::Recompute, gemm_precision: precision, ..TrainOpts::default() };
     Qwen35::new_train_opts_on(gpu.share(), cfg, 1, T as u32, init, &opts)
 }
 

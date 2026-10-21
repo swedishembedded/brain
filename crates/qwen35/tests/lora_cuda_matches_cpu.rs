@@ -20,6 +20,7 @@ use gpu_core::provider::library::GemmPrecision;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
+use model::saved::SavedPolicy;
 use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
 #[test]
@@ -31,7 +32,7 @@ fn the_cuda_fp32_tier_trains_like_the_cpu_backend() {
     let cfg = lora_config();
     let init = weights(&cfg, 0.3);
     for recompute in [false, true] {
-        let opts = TrainOpts { base: TierPolicy::uniform(Dtype::F32), recompute, gemm_precision: GemmPrecision::Fp32Reference, ..TrainOpts::default() };
+        let opts = TrainOpts { base: TierPolicy::uniform(Dtype::F32), saved: SavedPolicy::recompute_if(recompute), gemm_precision: GemmPrecision::Fp32Reference, ..TrainOpts::default() };
         let on_cpu = Qwen35::new_train_opts_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, T as u32, &init, &opts);
         let on_cuda = Qwen35::new_train_opts_on(cuda.share(), cfg.clone(), 1, T as u32, &init, &opts);
         assert_same_training_signal(loss_and_grads(&on_cuda), loss_and_grads(&on_cpu), 1e-4, 0.99999);
