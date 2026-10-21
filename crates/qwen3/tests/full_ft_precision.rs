@@ -11,8 +11,10 @@
 
 use std::collections::HashMap;
 
-use paramstore::precision::{MasterPolicy, ParamPrecision, PrecisionPolicy, StateFormat};
-use qwen3::{Qwen, QwenConfig, Shard};
+use model::TrainPrecision;
+use paramstore::precision::{MasterPolicy, ParamPrecision, StateFormat};
+use qwen3::model::FullFtBuild;
+use qwen3::{Qwen, QwenConfig};
 
 fn tiny() -> QwenConfig {
     QwenConfig {
@@ -53,16 +55,15 @@ fn init(cfg: &QwenConfig) -> HashMap<String, Vec<f32>> {
         .collect()
 }
 
-/// Mean loss after `steps` AdamW steps on one fixed batch, and the host state bytes of the offloaded optimizer.
-fn train(policy: &PrecisionPolicy, offload: bool, steps: u32) -> f32 {
+/// Mean loss after `steps` AdamW steps on one fixed batch, or the builder's refusal.
+fn train(precision: &TrainPrecision, offload: bool, steps: u32) -> Result<f32, String> {
     let cfg = tiny();
     let w = init(&cfg);
     let t = 8u32;
     let x: Vec<u32> = (0..t).map(|i| (i * 7 + 3) % cfg.vocab).collect();
     let y: Vec<u32> = (0..t).map(|i| (i * 7 + 10) % cfg.vocab).collect();
-    let m = model::offload::with_precision_policy(policy, || {
-        model::offload::with_adam_offloaded(offload, || Qwen::new_shard(cfg.clone(), 1, t, &w, true, Shard::whole(cfg.n_layers as usize)))
-    });
+    let full = FullFtBuild { precision: precision.clone(), offload, resident: None };
+    let m = Qwen::new_full(cfg, 1, t, &w, gpu_core::provider::library::GemmPrecision::Fp32Reference, &full)?;
     let mut last = 0.0;
     for step in 1..=steps {
         m.zero_grads();
@@ -71,37 +72,33 @@ fn train(policy: &PrecisionPolicy, offload: bool, steps: u32) -> f32 {
         model::Model::backward(&m);
         m.adamw_step(step, 3e-3, 0.0, Default::default(), Some(1.0), 1.0);
     }
-    last
+    Ok(last)
 }
 
 #[test]
 fn int8_moments_offloaded_train_like_fp32_and_unsupported_choices_are_refused() {
-    let fp32 = PrecisionPolicy::uniform(ParamPrecision::FP32);
-    let int8 = PrecisionPolicy::uniform(ParamPrecision { state: StateFormat::Int8Block { block: 64 }, stochastic_rounding: true, ..ParamPrecision::FP32 });
-    let base = train(&fp32, true, 12);
-    let q8 = train(&int8, true, 12);
+    let fp32 = TrainPrecision::default();
+    let int8 = TrainPrecision::uniform(ParamPrecision { state: StateFormat::Int8Block { block: 64 }, stochastic_rounding: true, ..ParamPrecision::FP32 });
+    let base = train(&fp32, true, 12).unwrap();
+    let q8 = train(&int8, true, 12).unwrap();
     println!("loss after 12 steps: fp32 moments {base:.4}, int8 moments {q8:.4}");
     assert!(q8 < 1.2 * base + 0.05, "int8 moments {q8} should track fp32 {base}");
 
     // int8 moments run on the device optimiser too (the fused adamw_q8 kernels)
-    let q8_dev = train(&int8, false, 12);
+    let q8_dev = train(&int8, false, 12).unwrap();
     println!("device int8 moments {q8_dev:.4}");
     assert!(q8_dev < 1.2 * base + 0.05, "device int8 moments {q8_dev} should track fp32 {base}");
 
     // bf16 moments run on the device optimiser too (the fused adamw_bf16 kernel)
-    let bf16_dev = train(&PrecisionPolicy::uniform(ParamPrecision { state: StateFormat::Bf16, stochastic_rounding: true, ..ParamPrecision::FP32 }), false, 12);
+    let bf16_dev = train(&TrainPrecision::uniform(ParamPrecision { state: StateFormat::Bf16, stochastic_rounding: true, ..ParamPrecision::FP32 }), false, 12).unwrap();
     println!("device bf16 moments {bf16_dev:.4}");
     assert!(bf16_dev < 1.2 * base + 0.05, "device bf16 moments {bf16_dev} should track fp32 {base}");
 
-    // logarithmic 8-bit moments on the device optimiser and a master copy are refused, naming the reason
-    let refuse = |policy: PrecisionPolicy, offload: bool| {
-        let e = std::panic::catch_unwind(|| train(&policy, offload, 1)).expect_err("must be refused");
-        e.downcast_ref::<String>().cloned().unwrap_or_default()
-    };
-    let log8 = PrecisionPolicy::uniform(ParamPrecision { state: StateFormat::Log8Block { block: 64 }, ..ParamPrecision::FP32 });
-    let e = refuse(log8, false);
-    assert!(e.contains("host-offloaded"), "{e}");
-    let master = PrecisionPolicy::uniform(ParamPrecision { master: MasterPolicy::F32, ..ParamPrecision::FP32 });
-    let e = refuse(master, true);
-    assert!(e.contains("no master"), "{e}");
+    // logarithmic 8-bit moments on the device optimiser and a master copy are refused with an error naming the parameter
+    let log8 = TrainPrecision::uniform(ParamPrecision { state: StateFormat::Log8Block { block: 64 }, ..ParamPrecision::FP32 });
+    let e = train(&log8, false, 1).expect_err("refused");
+    assert!(e.contains("host-offloaded") && e.contains("tok.weight"), "{e}");
+    let master = TrainPrecision::uniform(ParamPrecision { master: MasterPolicy::F32, ..ParamPrecision::FP32 });
+    let e = train(&master, true, 1).expect_err("refused");
+    assert!(e.contains("no master") && e.contains("tok.weight"), "{e}");
 }

@@ -87,6 +87,31 @@ fn a_full_fine_tune_writes_a_checkpoint_directory_that_is_a_base_like_any_other(
     assert_eq!(on_it.status, FineTuneStatus::Completed);
 }
 
+/// The optimizer-state precision is one typed value on the builder: a full fine-tune with int8 AdamW state (held in
+/// host memory) trains like the fp32 default, and a choice the trainer does not run is refused by parameter name.
+#[test]
+fn a_full_fine_tune_takes_its_optimizer_state_precision_as_one_typed_value() {
+    let model = chat_model_dir("full-precision");
+    let train = write_dataset(&model, "train.jsonl", &TRAIN);
+    let run = |name: &str, spec: &str| {
+        ChatFullFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+            .dataset(&train)
+            .out_dir(model.join(name))
+            .steps(30)
+            .lr(5e-2)
+            .seed(7)
+            .train_precision(brain::TrainPrecision::parse(spec).unwrap())
+            .device(cpu())
+            .run()
+    };
+    let fp32 = run("fp32", "").expect("fp32 state");
+    let int8 = run("int8", "state=int8:64,sr=on").expect("int8 state");
+    let (f, q) = (fp32.final_loss.unwrap(), int8.final_loss.unwrap());
+    assert!(q < int8.initial_loss.unwrap() && q < 1.5 * f + 0.1, "int8 state trains like fp32: {q} vs {f}");
+    let err = run("master", "master=f32").unwrap_err().to_string();
+    assert!(err.contains("master"), "{err}");
+}
+
 /// A full fine-tune given no seed draws one and records it, on the outcome
 /// and in a training record beside the checkpoint; the same seed reproduces
 /// the weights.

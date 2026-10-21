@@ -63,11 +63,15 @@ pub struct TrainOpts {
     /// what gradient checks and cross-backend parity are stated against. The
     /// CPU and Vulkan backends have no tensor-core path and always run fp32.
     pub gemm_precision: GemmPrecision,
+    /// What a full-parameter build stores each trainable parameter as: the device AdamW state in f32, bf16 or int8
+    /// blocks (the fused kernels); anything else is refused by name ([`model::TrainPrecision::resolve`]). Ignored
+    /// by an adapter build, whose base is frozen.
+    pub precision: model::TrainPrecision,
 }
 
 impl Default for TrainOpts {
     fn default() -> Self {
-        TrainOpts { base: TierPolicy::uniform(Dtype::F32), saved: SavedPolicy::Keep, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None, mlp_rows: None, gemm_precision: GemmPrecision::Auto }
+        TrainOpts { base: TierPolicy::uniform(Dtype::F32), saved: SavedPolicy::Keep, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None, mlp_rows: None, gemm_precision: GemmPrecision::Auto, precision: model::TrainPrecision::default() }
     }
 }
 

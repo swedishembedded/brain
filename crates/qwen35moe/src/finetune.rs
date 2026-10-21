@@ -101,6 +101,9 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
     }
 
     fn train_full(base: &Path, opts: &FitOpts, state: OptimizerState, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Qwen35)> {
+        if !opts.precision.is_default() {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "qwen35moe full fine-tuning keeps fp32 parameters and AdamW state; a train precision is not wired for it"));
+        }
         check_before_load(base, None, state)?;
         let m = state.scope(|| Ok::<_, std::io::Error>(Qwen35::load_with_adapter(path_str(base)?, opts.batch_size, opts.block_size, None)))?;
         fit.fit(m)

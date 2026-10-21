@@ -234,6 +234,28 @@ impl ParamTiles for SourceTiles<'_> {
     }
 }
 
+/// Where the host time of the update went, accumulated over the steps of a run: reading gradients off the device, encoding
+/// the new stored values, writing them to the device, and the whole update (which contains the rest: the master and state
+/// tiles and the arithmetic). The profile a run is judged against the transfer ceiling by.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostTimes {
+    pub grad_read: std::time::Duration,
+    pub value_encode: std::time::Duration,
+    pub value_write: std::time::Duration,
+    pub update: std::time::Duration,
+    pub steps: u32,
+}
+
+impl HostTimes {
+    fn add(&mut self, o: &HostTimes) {
+        self.grad_read += o.grad_read;
+        self.value_encode += o.value_encode;
+        self.value_write += o.value_write;
+        self.update += o.update;
+        self.steps += o.steps;
+    }
+}
+
 /// The device end of [`ParamTiles`]: values decode from (and re-encode into) the resident weights, gradients
 /// read from the accumulating device buffers.
 struct DeviceTiles<'a> {
@@ -248,6 +270,7 @@ struct DeviceTiles<'a> {
     grad_cache: Option<(usize, Vec<f32>)>,
     value_cache: Option<(usize, Vec<u8>, Vec<Vec<u8>>)>,
     enc: TileBuf,
+    times: HostTimes,
 }
 
 fn buffers(w: &Weight) -> (&DeviceBuffer, Option<&DeviceBuffer>) {
@@ -318,9 +341,13 @@ impl ParamTiles for DeviceTiles<'_> {
         // the state it keeps beside it.
         let d = &self.descs[ti];
         let e = start as u64..(start + vals.len()) as u64;
+        let t0 = std::time::Instant::now();
         self.registry.encoder(&d.encoding).map_err(invalid)?.encode_tile(d, &e, vals, &checkpoint::packed::EncodeCtx::default(), &mut self.enc).map_err(invalid)?;
+        let t1 = std::time::Instant::now();
         let tile = Tile { elems: e, payload: &self.enc.payload, scales: self.enc.scales.iter().map(|s| s.as_slice()).collect() };
         rewrite_tile(self.ops, &self.weights[ti], d, &tile).map_err(invalid)?;
+        self.times.value_encode += t1 - t0;
+        self.times.value_write += t1.elapsed();
         if self.value_cache.as_ref().is_some_and(|c| c.0 == ti) {
             self.value_cache = None;
         }
@@ -329,6 +356,7 @@ impl ParamTiles for DeviceTiles<'_> {
 
     fn read_grad(&mut self, ti: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
         if self.grad_cache.as_ref().map(|c| c.0) != Some(ti) {
+            let t0 = std::time::Instant::now();
             let numel = self.descs[ti].numel() as usize;
             let g = match self.grad_dtype {
                 GradDtype::F32 => self.gpu().read(&self.grads[ti], numel),
@@ -338,6 +366,7 @@ impl ParamTiles for DeviceTiles<'_> {
                 }
             };
             self.grad_cache = Some((ti, g));
+            self.times.grad_read += t0.elapsed();
         }
         let g = &self.grad_cache.as_ref().expect("filled above").1;
         out.copy_from_slice(&g[start..start + out.len()]);
@@ -369,6 +398,7 @@ pub struct ResidentFullFt {
     state: TrainState,
     registry: CodecRegistry,
     tile: usize,
+    times: HostTimes,
 }
 
 impl ResidentFullFt {
@@ -425,7 +455,7 @@ impl ResidentFullFt {
                 gpu.storage(if cfg.grad == GradDtype::Bf16 { elems / 2 } else { elems })
             })
             .collect();
-        Ok(ResidentFullFt { cfg, specs, descs, weights, grads, state, registry, tile })
+        Ok(ResidentFullFt { cfg, specs, descs, weights, grads, state, registry, tile, times: HostTimes::default() })
     }
 
     pub fn specs(&self) -> &[ResidentSpec] {
@@ -481,7 +511,14 @@ impl ResidentFullFt {
     /// Sum of squares of every gradient (for the global clip of [`optim::grad_multiplier`]).
     pub fn grad_sum_sq(&mut self, ops: &Ops) -> io::Result<f64> {
         let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
-        self.state.grad_sum_sq(&mut tiles)
+        let sum = self.state.grad_sum_sq(&mut tiles);
+        self.times.add(&tiles.times);
+        sum
+    }
+
+    /// Host time spent in the updates of this run so far, by phase.
+    pub fn host_times(&self) -> HostTimes {
+        self.times
     }
 
     /// One update step over every tensor: the gradients are multiplied by [`optim::grad_multiplier`]
@@ -498,10 +535,14 @@ impl ResidentFullFt {
     /// parameters this state does not hold (it adds its own [`Self::grad_sum_sq`] to theirs).
     pub fn step_scaled(&mut self, ops: &Ops, lr: f32, grad_multiplier: f32) -> io::Result<StepReport> {
         let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
+        let t0 = std::time::Instant::now();
         let step = self.state.begin_step();
         for i in 0..self.specs.len() {
             self.state.update_tensor(&mut tiles, i, lr, grad_multiplier)?;
         }
+        tiles.times.update += t0.elapsed();
+        tiles.times.steps += 1;
+        self.times.add(&tiles.times);
         self.zero_grads(ops);
         Ok(StepReport { step, grad_multiplier })
     }
@@ -614,7 +655,7 @@ fn device_tiles<'a>(
     registry: &'a CodecRegistry,
     grad_dtype: GradDtype,
 ) -> DeviceTiles<'a> {
-    DeviceTiles { ops, weights, grads, descs, registry, grad_dtype, grad_cache: None, value_cache: None, enc: TileBuf::default() }
+    DeviceTiles { ops, weights, grads, descs, registry, grad_dtype, grad_cache: None, value_cache: None, enc: TileBuf::default(), times: HostTimes::default() }
 }
 
 /// The updates of one layer-at-a-time step. See [`ResidentFullFt::layered_step`].

@@ -229,6 +229,7 @@ fn main() {
             Some("bf16") => GemmPrecision::Bf16TensorCore,
             Some(other) => panic!("--gemm-precision {other:?}: expected auto, fp32 or bf16"),
         },
+        ..TrainOpts::default()
     };
 
     let peak = Arc::new(AtomicU64::new(0));

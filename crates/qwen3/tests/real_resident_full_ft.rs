@@ -57,7 +57,7 @@ fn run(name: &str, path: &str, value: ResidentValue, state: StateFormat, grad: G
         grad,
         stochastic_state: true,
         seed: Some(1),
-        tile_elems: 1 << 20,
+        tile_elems: 1 << 23,
         state_dir: None,
     };
     let m = qwen3::finetune::build_resident(cfg, &opts, &*init, &rcfg).expect("build");
@@ -67,19 +67,35 @@ fn run(name: &str, path: &str, value: ResidentValue, state: StateFormat, grad: G
     let (t0_train, t0_held) = (mean_loss(&m, &train), mean_loss(&m, &held));
     let mut vram = brain_testutil::own_gpu_memory_mib().unwrap_or(0);
     let t = Instant::now();
+    let mut optimizer = std::time::Duration::ZERO;
     for step in 1..=STEPS {
         let (x, y) = &train[(step as usize - 1) % train.len()];
         m.zero_grads();
         m.set_batch(x, y);
         m.forward();
         m.backward();
+        m.poll_wait();
+        let o = Instant::now();
         m.adamw_step(step, 1e-5, 0.0, Default::default(), Some(1.0), 1.0);
+        optimizer += o.elapsed();
         vram = vram.max(brain_testutil::own_gpu_memory_mib().unwrap_or(0));
     }
     m.poll_wait();
     let ms = t.elapsed().as_secs_f64() * 1e3 / STEPS as f64;
+    let opt_ms = optimizer.as_secs_f64() * 1e3 / STEPS as f64;
     let (t1_train, t1_held) = (mean_loss(&m, &train), mean_loss(&m, &held));
-    println!("{name}: train loss {t0_train:.3} -> {t1_train:.3}, held-out {t0_held:.3} -> {t1_held:.3}, {ms:.0} ms/step, device peak {vram} MiB");
+    println!("{name}: train loss {t0_train:.3} -> {t1_train:.3}, held-out {t0_held:.3} -> {t1_held:.3}, {ms:.0} ms/step ({opt_ms:.0} ms in the host optimizer step, {:.0} ms forward+backward), device peak {vram} MiB", ms - opt_ms);
+    if let Some(h) = m.resident_host_times() {
+        let per = |d: std::time::Duration| d.as_secs_f64() * 1e3 / h.steps.max(1) as f64;
+        println!(
+            "{name}: host update per step: gradient readback {:.0} ms, value encode {:.0} ms, device write {:.0} ms, whole update {:.0} ms ({} steps)",
+            per(h.grad_read),
+            per(h.value_encode),
+            per(h.value_write),
+            per(h.update),
+            h.steps
+        );
+    }
     brain_testutil::mem(name);
     assert!(t1_train < t0_train, "{name}: training loss must fall");
 

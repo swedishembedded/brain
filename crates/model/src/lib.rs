@@ -89,6 +89,7 @@ pub mod saved;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shard;
 pub mod train;
+pub mod trainprec;
 pub mod training;
 pub mod vit;
 pub mod vlm;
@@ -109,6 +110,7 @@ pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 pub use shard::{plan_balanced, Pipeline, PipelineModel, Shard, ShardCost, Shardable, StreamPlan};
 
 pub use objective::{Objective, StepVerdict};
+pub use trainprec::TrainPrecision;
 #[cfg(not(target_arch = "wasm32"))]
 pub use score::{score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
@@ -305,6 +307,11 @@ pub trait Model {
 
     /// Block until submitted device work completes (memory-aperture hygiene).
     fn poll_wait(&self);
+
+    /// Key the stochastic rounding of the optimizer state on the run's `seed` (a model whose optimizer rounds
+    /// stochastically draws from it), so a run resumed with the same seed replays the draws of the original. The
+    /// default is for a model with no stochastic state.
+    fn pin_rounding_seed(&self, _seed: u64) {}
 
     // ---- optimizer state (exact resume) ----
     /// The parameters [`Model::adamw_step`] optimises on the device, when

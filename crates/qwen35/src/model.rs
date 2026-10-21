@@ -1683,8 +1683,9 @@ impl Qwen35 {
             // A full fine-tune keeps its AdamW state on the device with the formats the run's policy names and
             // the fused kernels run (f32, bf16, int8 blocks); anything else is refused with the parameter's name.
             let params: Vec<(String, usize)> = roles.iter().map(|(n, c, _)| (n.clone(), *c)).collect();
-            model::offload::resolve_precisions(&params, false).unwrap_or_else(|e| panic!("qwen35 full fine-tune: {e}"));
-            ParamStore::new_with_policy_src(&gpu, roles, src, &model::offload::precision_policy())
+            let precision = train_opts.map(|o| o.precision.clone()).unwrap_or_default();
+            precision.resolve(&params, false).unwrap_or_else(|e| panic!("qwen35 full fine-tune (unvalidated build): {e}"));
+            ParamStore::new_with_policy_src(&gpu, roles, src, &precision.policy)
         } else {
             ParamStore::new_with_roles_src(&gpu, roles, src)
         };

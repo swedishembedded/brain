@@ -16,7 +16,8 @@
 
 use std::time::Instant;
 
-use paramstore::precision::{ParamPrecision, PrecisionPolicy, StateFormat};
+use model::TrainPrecision;
+use paramstore::precision::{ParamPrecision, StateFormat};
 
 const T: u32 = 64;
 const STEPS: u32 = 24;
@@ -43,14 +44,11 @@ fn mean_loss(m: &qwen3::Qwen, seqs: &[(Vec<u32>, Vec<u32>)]) -> f32 {
     s / seqs.len() as f32
 }
 
-fn run(name: &str, path: &str, policy: &PrecisionPolicy, offload: bool) -> (f32, f32) {
+fn run(name: &str, path: &str, precision: &TrainPrecision, offload: bool) -> (f32, f32) {
     let (cfg, init) = qwen3::open_checkpoint(path).expect("open checkpoint");
     let vocab = cfg.vocab;
-    let opts = model::FitOpts { batch_size: 1, block_size: T, ..Default::default() };
-    let m = model::offload::with_precision_policy(policy, || {
-        model::offload::with_adam_offloaded(offload, || qwen3::finetune::build_for_training(cfg, &opts, &*init, qwen3::Dtype::F32))
-    })
-    .expect("build");
+    let opts = model::FitOpts { batch_size: 1, block_size: T, precision: precision.clone(), ..Default::default() };
+    let m = qwen3::finetune::build_for_training_with(cfg, &opts, &*init, qwen3::Dtype::F32, offload).expect("build");
     drop(init);
     let train: Vec<_> = (0..8).map(|i| sequence(i, vocab)).collect();
     let held: Vec<_> = (100..108).map(|i| sequence(i, vocab)).collect();
@@ -88,7 +86,7 @@ fn qwen3_0_6b_full_fine_tune_with_fp32_bf16_and_int8_moments() {
         brain_testutil::skip_unavailable("Qwen/Qwen3-0.6B is not in the model store");
         return;
     }
-    let with = |state| PrecisionPolicy::uniform(ParamPrecision { state, stochastic_rounding: true, ..ParamPrecision::FP32 });
+    let with = |state| TrainPrecision::uniform(ParamPrecision { state, stochastic_rounding: true, ..ParamPrecision::FP32 });
     // moments on the device (the fused AdamW kernels) first: the default when the state fits
     let (d_train, d_held) = run("device fp32 moments", &path, &with(StateFormat::F32), false);
     let (dq_train, dq_held) = run("device int8 moments", &path, &with(StateFormat::Int8Block { block: 64 }), false);

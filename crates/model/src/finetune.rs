@@ -24,10 +24,10 @@
 //! have to name: the visitor is instantiated once per type. Adding a family is
 //! one [`ChatTrainer`] impl; nothing here, in `rl` or in the SDK names it.
 //!
-//! The optimizer state of a full fine-tune is chosen by [`OptimizerState`],
-//! the one place a run says where its moments live; the builder scopes the
-//! model's construction with it, so the model's parameter store never reads a
-//! process-wide flag.
+//! The optimizer state of a full fine-tune is chosen by [`OptimizerState`], where
+//! its moments live, and [`crate::FitOpts::precision`], the format of everything a
+//! run stores: both are passed to the model's builder, which refuses a choice it
+//! does not run.
 
 use std::path::{Path, PathBuf};
 
@@ -38,8 +38,7 @@ use crate::Model;
 
 /// Where the AdamW moments of a full-parameter run live.
 ///
-/// The precision of the moments is the run's [`paramstore::precision::PrecisionPolicy`]
-/// ([`OptimizerState::scope_with`]); fp32 unless a run says otherwise.
+/// The precision of the moments is the run's [`crate::FitOpts::precision`]; fp32 unless a run says otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OptimizerState {
     /// On the device beside the weights and gradients.
@@ -52,15 +51,6 @@ impl OptimizerState {
     /// Run `build` (a model's construction) with this state selected.
     pub fn scope<R>(self, build: impl FnOnce() -> R) -> R {
         crate::offload::with_adam_offloaded(self == OptimizerState::HostOffload, build)
-    }
-}
-
-impl OptimizerState {
-    /// [`Self::scope`] with `policy` as the precision of every trainable
-    /// parameter: value, gradient, optimizer-state format and master, resolved per
-    /// parameter group. The default policy (all fp32) is today's behaviour.
-    pub fn scope_with<R>(self, policy: &paramstore::precision::PrecisionPolicy, build: impl FnOnce() -> R) -> R {
-        crate::offload::with_precision_policy(policy, || self.scope(build))
     }
 }
 
@@ -91,26 +81,13 @@ impl ModelFit for CausalLmFit<'_, '_> {
 
 /// A full-parameter fine-tune of the checkpoint at `base` on the prepared
 /// dataset in `dir`, written to `out`: every weight trains in fp32 with the
-/// moments where `state` says. Always a fresh start from `base`; a run stopped
+/// moments where `state` says and in the format `opts.precision` names. Always a fresh start from `base`; a run stopped
 /// by `control` writes nothing (the optimizer state a resume needs is three
 /// times the model), so the report says it was interrupted and `out` is left
 /// absent.
 pub fn fit_full<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, out: &Path, state: OptimizerState, control: FitControl<'_>) -> std::io::Result<FitReport> {
-    fit_full_with::<T>(base, dir, opts, out, state, &paramstore::precision::PrecisionPolicy::uniform(paramstore::precision::ParamPrecision::FP32), control)
-}
-
-/// [`fit_full`] with a training precision policy (see [`OptimizerState::scope_with`]).
-pub fn fit_full_with<T: ChatTrainer>(
-    base: &Path,
-    dir: &Path,
-    opts: &FitOpts,
-    out: &Path,
-    state: OptimizerState,
-    policy: &paramstore::precision::PrecisionPolicy,
-    control: FitControl<'_>,
-) -> std::io::Result<FitReport> {
     let mut fit = CausalLmFit { dir, opts, out: Some(out), control: Some(control) };
-    let (report, _) = crate::offload::with_precision_policy(policy, || T::train_full(base, opts, state, &mut fit))?;
+    let (report, _) = T::train_full(base, opts, state, &mut fit)?;
     if report.interrupted {
         // fit_controlled does not write an interrupted run's model; make sure
         // a periodic save did not leave a partial one under the final name.

@@ -113,17 +113,74 @@ pub fn finetune_full_controlled(base: &str, dir: &Path, opts: &FitOpts, out: &Pa
 /// linears at `dt` (anything but fp32 needs a LoRA configuration), placed
 /// through the footprint check: a context the devices cannot hold is refused
 /// by name before anything is allocated, rather than by an arbitrary length
-/// cap.
+/// cap. A full fine-tune keeps its AdamW moments where the calling thread's
+/// [`model::offload::with_adam_offloaded`] scope says; use
+/// [`build_for_training_with`] to say it explicitly.
 pub fn build_for_training(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, dt: Dtype) -> std::io::Result<Qwen> {
+    build_for_training_with(cfg, opts, init, dt, model::offload::adam_offloaded())
+}
+
+/// [`build_for_training`] with the place of the AdamW moments of a full fine-tune given (`offload`: host RAM). A full
+/// fine-tune stores its parameters as `opts.precision` says: a choice this trainer does not run is an error naming
+/// the parameter, and the planner holds the optimizer state in the requested format, narrows it when `opts.precision`
+/// authorized that and the device cannot hold the requested one (the decision is printed), or refuses with its
+/// arithmetic - all before anything is allocated.
+pub fn build_for_training_with(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, dt: Dtype, offload: bool) -> std::io::Result<Qwen> {
     let shard = crate::model::Shard::whole(cfg.n_layers as usize);
-    crate::footprint::place_and_build(&cfg.clone(), &shard.clone(), dt, opts.batch_size, opts.block_size, true, false, "qwen3 finetune", || {
-        if dt == Dtype::F32 {
-            Qwen::new_shard_gemm(cfg, opts.batch_size, opts.block_size, init, true, shard, opts.gemm_precision)
-        } else {
-            Qwen::new_lora_dt_gemm(cfg, opts.batch_size, opts.block_size, init, dt, opts.gemm_precision)
+    let full_ft = dt == Dtype::F32 && cfg.lora.is_none();
+    let build = if full_ft {
+        let params = crate::shard_param_list(&cfg, &shard);
+        opts.precision.resolve(&params, offload).map_err(std::io::Error::other)?;
+        let planned = plan_full_precision(&cfg, opts, offload, model::memplan::Capacity::measured()).map_err(std::io::Error::other)?;
+        if !planned.report.decisions.is_empty() {
+            println!("full fine-tune memory plan:\n{}", planned.report);
         }
+        Some(crate::model::FullFtBuild { precision: planned.precision, offload, resident: None })
+    } else {
+        None
+    };
+    crate::footprint::place_and_build(&cfg.clone(), &shard.clone(), dt, opts.batch_size, opts.block_size, true, false, "qwen3 finetune", || match &build {
+        Some(full) => Qwen::new_full(cfg, opts.batch_size, opts.block_size, init, opts.gemm_precision, full),
+        None if dt == Dtype::F32 => Ok(Qwen::new_shard_gemm(cfg, opts.batch_size, opts.block_size, init, true, shard, opts.gemm_precision)),
+        None => Ok(Qwen::new_lora_dt_gemm(cfg, opts.batch_size, opts.block_size, init, dt, opts.gemm_precision)),
     })
+    .map_err(std::io::Error::other)?
     .map_err(std::io::Error::other)
+}
+
+/// What a full fine-tune of `cfg` at `opts`' batch and context asks of the device, as the planner's categories: the
+/// weights and gradients, the AdamW state in the requested format (on the host when `offload`) and one step's
+/// activations.
+fn full_ft_footprint(cfg: &QwenConfig, opts: &FitOpts, offload: bool) -> model::memplan::TrainingFootprint {
+    let shard = crate::model::Shard::whole(cfg.n_layers as usize);
+    let activation_bytes = crate::footprint::footprint_demands(cfg, &shard, Dtype::F32, opts.batch_size, opts.block_size, true, false)
+        .into_iter()
+        .find(|d| d.category == model::memplan::Category::Activations)
+        .map_or(0, |d| d.variants[0].device_bytes);
+    model::memplan::TrainingFootprint {
+        frozen_weight_bytes: 0,
+        trainable: crate::shard_param_list(cfg, &shard),
+        precision: opts.precision.policy.default,
+        moment_slots: 2,
+        int8_block: paramstore::DEVICE_INT8_BLOCK,
+        optimizer_state_on_host: offload,
+        activation_bytes,
+        recompute_activation_bytes: None,
+        saved_boundaries: None,
+    }
+}
+
+/// Device bytes a full fine-tune of `cfg` needs with the optimizer state in the format `opts.precision` requests.
+pub fn full_ft_footprint_bytes(cfg: &QwenConfig, opts: &FitOpts, offload: bool) -> u64 {
+    let demands = model::memplan::training_demands(&full_ft_footprint(cfg, opts, offload)).expect("the state ladder is ordered");
+    model::memplan::device_total(&demands)
+}
+
+/// Plan a full fine-tune against `capacity`: the requested precision when it fits, the narrower optimizer state the
+/// planner chose when `opts.precision` authorized narrowing (with the report of the decision), or the refusal with
+/// the arithmetic.
+pub fn plan_full_precision(cfg: &QwenConfig, opts: &FitOpts, offload: bool, capacity: model::memplan::Capacity) -> Result<model::trainprec::PlannedPrecision, String> {
+    opts.precision.plan(&full_ft_footprint(cfg, opts, offload), capacity)
 }
 
 /// The resident low-precision full fine-tune model of `cfg` at `opts`' batch and context, placed through the
@@ -140,7 +197,8 @@ pub fn build_resident(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, 
     let activations = crate::footprint::footprint_demands(&cfg, &shard, Dtype::F32, opts.batch_size, opts.block_size, true, false).into_iter().find(|d| d.category == Category::Activations).expect("a footprint always has activations");
     let plan = crate::model::ResidentPlan { cfg: resident.clone(), capacity: model::memplan::Capacity::measured(), others: vec![remainder, activations] };
     crate::model::check_resident_fits(&cfg, &shard, &plan).map_err(std::io::Error::other)?;
-    Qwen::new_resident(cfg, opts.batch_size, opts.block_size, init, &plan, opts.gemm_precision).map_err(std::io::Error::other)
+    let full = crate::model::FullFtBuild { precision: opts.precision.clone(), offload: false, resident: Some(plan) };
+    Qwen::new_full(cfg, opts.batch_size, opts.block_size, init, opts.gemm_precision, &full).map_err(std::io::Error::other)
 }
 
 /// `stages` contiguous stages whose largest estimated footprint
@@ -734,7 +792,7 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
     fn train_full(base: &Path, opts: &FitOpts, state: model::finetune::OptimizerState, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Trained)> {
         let base = path_str(base).map_err(std::io::Error::other)?;
         let (cfg, init) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
-        let m = state.scope(|| build_for_training(cfg, opts, &*init, Dtype::F32))?;
+        let m = build_for_training_with(cfg, opts, &*init, Dtype::F32, state == model::finetune::OptimizerState::HostOffload)?;
         let (report, m) = fit.fit(m)?;
         Ok((report, Trained::Single(Box::new(m))))
     }

@@ -97,13 +97,36 @@ returns the newest generation that verifies.
 
 ## Full fine-tune of a chat model
 
-`model::finetune::OptimizerState::scope_with` and `fit_full_with` take a
-`PrecisionPolicy`; the default is all fp32. qwen3 full fine-tunes honour the
-optimizer-state format when the moments are host-offloaded (`HostOffload`):
-f32, bf16 or int8 blocks per parameter group. The device optimizer keeps f32
-moments, weights and gradients stay f32 device buffers with no master copy, and
-a policy asking for anything else is refused with the parameter's name
-(`model::offload::resolve_precisions`), for qwen3 and qwen35 alike.
+What a full fine-tune stores each trainable parameter as is ONE typed value,
+`FitOpts::precision` (`model::TrainPrecision`; `ChatFullFineTune::train_precision`
+in the SDK). It is parsed once from `state=int8:64,master=f32,sr=on,narrow=on`
+(`TrainPrecision::parse`), carried to the model's builder, and part of the
+identity a saved training state is resumed under. Nothing is read from the
+calling thread (the old thread-scoped policy is gone); `OptimizerState` still
+says where the moments live.
+
+The builder resolves the precision parameter by parameter
+(`TrainPrecision::resolve`) and returns an error naming the parameter for a
+choice the trainer does not run: weights and gradients are f32 device buffers
+with no master copy on this path, the device AdamW keeps f32, bf16 or int8
+blocks of 64, and any state format (also log8) needs the host-offloaded state.
+qwen3 and qwen35 honour it; qwen35moe refuses a non-default precision.
+
+The memory planner decides the optimizer-state format before anything loads
+(`TrainPrecision::plan` over `memplan::training_demands`): the requested format
+when the run fits, a narrower one (bf16, then int8 blocks) only when the run
+authorized `narrow=on` (the report of the decision is printed), otherwise a
+refusal with the arithmetic.
+
+Resume is exact wherever the state lives. The generic fit loop writes the
+resume file (weights and moments of the device-optimised parameters, step, batch
+generator) and, for a model that keeps state off the device
+(`Model::off_device_state`: the host-offloaded AdamW state, the master copies of
+a resident build), commits it as one `CheckpointDir` generation keyed by the
+applied-step count first; a resume restores exactly the generation its file
+names and refuses (naming the generation) one that no longer verifies. The
+stochastic rounding of the device state is keyed on the run's seed
+(`Model::pin_rounding_seed`), so a resumed run replays the draws.
 
 ## Resident bf16 / FP8 full fine-tune
 

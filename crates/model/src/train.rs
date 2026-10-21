@@ -97,6 +97,11 @@ pub struct FitOpts {
     /// memory as its best-so-far copy. A larger set is written to disk instead (see
     /// [`FitControl::state`] and the `out` path of [`fit_controlled`]) and is never dropped.
     pub best_hold_floats: usize,
+    /// What a FULL fine-tune stores each trainable parameter as (value, gradient, optimizer state, master) and
+    /// whether the memory planner may narrow its optimizer state to fit. fp32 everywhere by default; a trainer that
+    /// does not run a choice refuses it by name ([`crate::TrainPrecision::resolve`]). Part of the identity a saved
+    /// training state is resumed under when it departs from the default.
+    pub precision: crate::TrainPrecision,
 }
 
 impl Default for FitOpts {
@@ -126,6 +131,7 @@ impl Default for FitOpts {
             adam: crate::Adam::default(),
             gemm_precision: gpu_core::provider::library::GemmPrecision::Auto,
             best_hold_floats: BEST_IN_MEMORY_FLOATS,
+            precision: crate::TrainPrecision::default(),
         }
     }
 }
@@ -1036,7 +1042,7 @@ const TRAIN_STATE_FORMAT: &str = "brain-train-state/1";
 /// bits: a decimal round trip through JSON is not guaranteed to give the
 /// same `f32` back, and "the same rate" here means the same bits.
 fn schedule_fingerprint(opts: &FitOpts) -> serde_json::Value {
-    serde_json::json!({
+    let mut fingerprint = serde_json::json!({
         "steps": opts.steps,
         "batch_size": opts.batch_size,
         "block_size": opts.block_size,
@@ -1055,7 +1061,13 @@ fn schedule_fingerprint(opts: &FitOpts) -> serde_json::Value {
         "eval_batches": opts.eval_batches,
         "patience": opts.patience,
         "cooldown_steps": opts.cooldown_steps,
-    })
+    });
+    // A state saved under another precision cannot be continued; the key is absent for the default so states
+    // written before the field existed still resume.
+    if !opts.precision.is_default() {
+        fingerprint["precision"] = serde_json::Value::String(format!("{:?}", opts.precision));
+    }
+    fingerprint
 }
 
 /// Where a model's [`crate::OffDeviceState`] is committed for the resume file at `path`.
@@ -1190,6 +1202,7 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
 /// part of the exact-resume state.
 pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitOpts, out: Option<&Path>, mut control: FitControl<'_>) -> std::io::Result<(FitReport, M)> {
     obj.prepare(&mut model)?;
+    model.pin_rounding_seed(opts.seed);
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
     let mut first_step = 0u32;
     // AdamW's step index `t` is the number of updates its moments have

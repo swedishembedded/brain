@@ -371,7 +371,10 @@ impl model::finetune::ChatTrainer for Qwen35Trainer {
     /// Every weight trains in fp32; the moments follow `state`.
     fn train_full(base: &Path, opts: &FitOpts, state: model::finetune::OptimizerState, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Qwen35)> {
         let BaseCheckpoint { cfg, src } = open_base(base).map_err(std::io::Error::other)?;
-        let train = TrainOpts::default();
+        // The device AdamW runs the fused kernels only: refuse by name what it does not before anything loads.
+        let params = crate::model::shard_param_list(&cfg, &model::Shard::whole(cfg.n_layers as usize));
+        opts.precision.resolve(&params, false).map_err(std::io::Error::other)?;
+        let train = TrainOpts { precision: opts.precision.clone(), ..TrainOpts::default() };
         let m = state.scope(|| Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &*src, &train));
         fit.fit(m)
     }

@@ -85,6 +85,7 @@ pub struct ChatFullFineTune {
     max_block: Option<u32>,
     device: Device,
     thinking: bool,
+    precision: model::TrainPrecision,
 }
 
 impl ChatFullFineTune {
@@ -110,7 +111,17 @@ impl ChatFullFineTune {
             max_block: None,
             device: Device::default(),
             thinking: true,
+            precision: model::TrainPrecision::default(),
         }
+    }
+
+    /// What the run stores each trainable parameter as: the format of the AdamW state (f32, bf16, int8 or logarithmic
+    /// 8-bit blocks, held in host memory here), whether the planner may narrow it, and so on - one typed value, parsed
+    /// once from `state=int8,sr=on,...` by [`model::TrainPrecision::parse`]. The default is fp32 everywhere. A choice
+    /// the architecture does not run is refused by parameter name before anything is loaded.
+    pub fn train_precision(mut self, precision: model::TrainPrecision) -> Self {
+        self.precision = precision;
+        self
     }
 
     /// The architecture of the base (a `brain_arch` id; default `qwen3`).
@@ -261,7 +272,7 @@ impl ChatFullFineTune {
         plan_before_load(&open, block, &set)?;
 
         let seed = resolve_seed(self.seed, None)?;
-        let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, ..fit_opts(self.steps, block, self.lr, seed) };
+        let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, precision: self.precision.clone(), ..fit_opts(self.steps, block, self.lr, seed) };
         let base_digest = base_digest(&open)?;
         let mut on_step = |s: &model::StepReport| {
             on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
