@@ -288,22 +288,45 @@ impl Device {
         gpu.read(&self.ctx, (p.c.n * N_HEADS * HD) as usize)
     }
 
-    fn device_ms(&self, gpu: &Gpu, step: &gpu_core::Step, name_part: &str) -> f64 {
+    /// Device ms of one dispatch of `step`: the mean of three back-to-back dispatches.
+    fn trial_ms(&self, gpu: &Gpu, step: &gpu_core::Step, name_part: &str) -> f64 {
+        gpu.reset_kernel_times();
+        for _ in 0..3 {
+            gpu.submit(&[], std::slice::from_ref(step));
+        }
+        gpu.poll_wait();
+        let ms: f64 = gpu.kernel_times().unwrap_or_default().iter().filter(|(n, _, _)| n.contains(name_part)).map(|(_, ms, _)| ms).sum();
+        ms / 3.0
+    }
+
+    /// The best device ms of the portable and the native step, `(portable, native)`, their trials INTERLEAVED.
+    ///
+    /// On a card shared with a neighbour's job, a burst of its work that lands on the trials of one side only made
+    /// that side look slow: timing every portable trial before every native one let a burst during the native half
+    /// fail the floor while the same kernels alone clear it with room to spare. Contention only
+    /// ever lengthens a trial, so the best of many interleaved trials is the stable estimate for each side, and a
+    /// burst now lengthens trials of both. A ratio still under the floor is measured again, up to
+    /// [`SPEEDUP_ATTEMPTS`] times, before the gate fails: a kernel that fell back to scalar work stays under it
+    /// every time.
+    fn best_ms_pair(&self, gpu: &Gpu, portable: &gpu_core::Step, native: &gpu_core::Step, floor: f64) -> (f64, f64) {
         assert!(gpu.set_kernel_timing(true));
-        let mut best = f64::MAX;
-        for _ in 0..TRIALS {
-            gpu.reset_kernel_times();
-            for _ in 0..3 {
-                gpu.submit(&[], std::slice::from_ref(step));
+        let (mut t_ref, mut t_tc) = (f64::MAX, f64::MAX);
+        for _ in 0..SPEEDUP_ATTEMPTS {
+            for _ in 0..TRIALS {
+                t_ref = t_ref.min(self.trial_ms(gpu, portable, "paged_flash_prefill_hd256"));
+                t_tc = t_tc.min(self.trial_ms(gpu, native, "flash_prefill_f16_hd256"));
             }
-            gpu.poll_wait();
-            let ms: f64 = gpu.kernel_times().unwrap_or_default().iter().filter(|(n, _, _)| n.contains(name_part)).map(|(_, ms, _)| ms).sum();
-            best = best.min(ms / 3.0);
+            if t_ref / t_tc >= floor {
+                break;
+            }
         }
         gpu.set_kernel_timing(false);
-        best
+        (t_ref, t_tc)
     }
 }
+
+/// Rounds of [`TRIALS`] interleaved trials a speed gate measures before it fails (see `Device::best_ms_pair`).
+const SPEEDUP_ATTEMPTS: usize = 3;
 
 fn device() -> Option<Gpu> {
     let Ok(gpu) = Gpu::try_new_cuda(kernel_list()) else {
@@ -400,8 +423,7 @@ fn the_tensor_core_flash_prefill_is_materially_faster_than_the_portable_kernel()
         let native = d.native(&gpu, &p).expect("native step");
         d.run(&gpu, &portable, &p); // compile outside the timed region
         d.run(&gpu, &native, &p);
-        let t_ref = d.device_ms(&gpu, &portable, "paged_flash_prefill_hd256");
-        let t_tc = d.device_ms(&gpu, &native, "flash_prefill_f16_hd256");
+        let (t_ref, t_tc) = d.best_ms_pair(&gpu, &portable, &native, if gate { SPEEDUP_FLOOR } else { 0.0 });
         // causal attention flops: 4 * sum_i len_i * hd * heads
         let flops: f64 = (0..n).map(|i| (start + i + 1) as f64).sum::<f64>() * 4.0 * HD as f64 * N_HEADS as f64;
         let speedup = t_ref / t_tc;
@@ -559,8 +581,7 @@ fn an_8_bit_cache_prefill_is_materially_faster_than_the_portable_kernel() {
         let native = d.native(&gpu, &seen).expect("native step");
         d.base.run(&gpu, &portable, &seen);
         d.base.run(&gpu, &native, &seen);
-        let t_ref = d.base.device_ms(&gpu, &portable, "paged_flash_prefill_hd256");
-        let t_tc = d.base.device_ms(&gpu, &native, "flash_prefill_f16_hd256");
+        let (t_ref, t_tc) = d.base.best_ms_pair(&gpu, &portable, &native, SPEEDUP_FLOOR);
         let speedup = t_ref / t_tc;
         eprintln!("cuda_flash_prefill: {kv:?} cache n={n} start={start}: portable {t_ref:.3} ms, tensor-core {t_tc:.3} ms, {speedup:.1}x");
         assert!(speedup >= SPEEDUP_FLOOR, "only {speedup:.1}x the portable kernel (floor {SPEEDUP_FLOOR}x)");
@@ -584,7 +605,9 @@ fn the_int8_cache_prefill_rates_at_the_serving_chunk() {
         gpu_core::provider::cuda::set_flash_prefill_v2(v2);
         let native = d.native(&gpu, &seen).expect("native step");
         let ctx = d.base.run(&gpu, &native, &seen);
-        let ms = d.base.device_ms(&gpu, &native, name);
+        assert!(gpu.set_kernel_timing(true));
+        let ms = (0..TRIALS).map(|_| d.base.trial_ms(&gpu, &native, name)).fold(f64::MAX, f64::min);
+        gpu.set_kernel_timing(false);
         eprintln!("cuda_flash_prefill: serving chunk int8 n={n} start={start}: {name} {ms:.3} ms");
         out.push(ctx);
     }
