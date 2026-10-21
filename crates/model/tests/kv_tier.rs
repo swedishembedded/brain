@@ -590,11 +590,11 @@ fn native_decode_is_exact_at_agent_contexts(g: &Gpu, tier: KvTier, lens: &[u32],
     let kernels = KvKernels::resolve(g, tier).unwrap();
     let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim: 256, block_size, max_bt, cap: *lens.iter().max().unwrap() };
     assert!(kernels.flash_decode_available(g, 256, n_heads / n_kv), "{label}: the fused decode must be available");
-    let (slow, native) = if tier == KvTier::INT8 {
-        ("paged_flash_decode_gqa_hd256#GRP=6#kv=int8", "paged_flash_decode_gqa_hd256_kv8")
-    } else {
-        assert_eq!(tier, KvTier::FP8, "the native decode serves the scaled 8-bit tiers");
-        ("paged_flash_decode_gqa_hd256#GRP=6#kv=fp8", "paged_flash_decode_gqa_hd256_kvfp8")
+    let (slow, native) = match () {
+        _ if tier == KvTier::INT8 => ("paged_flash_decode_gqa_hd256#GRP=6#kv=int8", "paged_flash_decode_gqa_hd256_kv8"),
+        _ if tier == KvTier::FP8 => ("paged_flash_decode_gqa_hd256#GRP=6#kv=fp8", "paged_flash_decode_gqa_hd256_kvfp8"),
+        _ if tier == KvTier::BF16 => ("paged_flash_decode_gqa_hd256#GRP=6#kv=bf16", "paged_flash_decode_gqa_hd256_bf16"),
+        _ => ("paged_flash_decode_gqa_hd256#GRP=6", "paged_flash_decode_gqa_hd256_f32"),
     };
     let kernel = g.kernel_index(slow).expect("the decode kernel is registered");
     let params = [batch, n_heads, n_kv, 256, n_heads / n_kv, block_size, max_bt, 1, 1];
@@ -631,7 +631,7 @@ fn native_decode_is_exact_at_agent_contexts(g: &Gpu, tier: KvTier, lens: &[u32],
 }
 
 #[test]
-fn native_8bit_decode_is_exact_at_agent_contexts_over_a_shared_prefix_on_cuda() {
+fn native_decode_of_every_tier_is_exact_at_agent_contexts_over_a_shared_prefix_on_cuda() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if brain_testutil::gpu_tests_skipped() {
         return;
@@ -646,7 +646,7 @@ fn native_8bit_decode_is_exact_at_agent_contexts_over_a_shared_prefix_on_cuda() 
     };
     // One sequence at 48k; 1k + 13k + 48k with the two long ones on one 10,240-token prefix; eight agents at 1-4k
     // on one 1,024-token prefix; sixteen short ones (partly empty splits, a one-key sequence).
-    for tier in [KvTier::INT8, KvTier::FP8] {
+    for tier in KvTier::ALL {
         native_decode_is_exact_at_agent_contexts(&g, tier, &[48_000], 0);
         native_decode_is_exact_at_agent_contexts(&g, tier, &[1024, 13_000, 48_000], 160);
         native_decode_is_exact_at_agent_contexts(&g, tier, &[4096, 1100, 2047, 3000, 1025, 4000, 1500, 2500], 16);
@@ -689,7 +689,7 @@ fn time_decode(g: &Gpu, tier: KvTier, batch: u32, len: u32) -> f64 {
 
 #[test]
 #[ignore = "a timing report for kernel work, not a spec"]
-fn eight_bit_decode_attention_timing_report() {
+fn decode_attention_timing_report() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(native) = Gpu::try_new_cuda(kernels()) else {
         return brain_testutil::skip_unavailable("int8 decode timing: no CUDA device");
@@ -697,7 +697,7 @@ fn eight_bit_decode_attention_timing_report() {
     gpu_core::set_native_kernels(false);
     let generated = Gpu::try_new_cuda(kernels()).expect("a second CUDA handle");
     gpu_core::set_native_kernels(true);
-    for tier in [KvTier::INT8, KvTier::FP8] {
+    for tier in KvTier::ALL {
     for (batch, len) in [(1u32, 1024u32), (1, 12_800), (1, 48_000), (8, 1024), (8, 12_800), (16, 12_800), (8, 48_000)] {
         // K and V 8-bit rows plus one f32 scale per (token, kv head) row each.
         let bytes = 2.0 * batch as f64 * len as f64 * 4.0 * (256.0 + 4.0);

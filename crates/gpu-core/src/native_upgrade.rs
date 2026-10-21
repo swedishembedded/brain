@@ -299,6 +299,11 @@ const FLASH_DECODE_KV8_BINDINGS: &[BindKind] = &[
     BindKind::StorageRead,
 ];
 
+/// `paged_flash_decode_gqa_hd256.wgsl`'s bindings for an unscaled tier (f32, bf16): params, `q`, the two pools,
+/// `block_tables`, `seq_lens`, the written partial records.
+const FLASH_DECODE_BINDINGS: &[BindKind] =
+    &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
 /// The query heads per kv head the native int8 decode kernel is compiled for
 /// (`BRAIN_GRP` in its registry entry).
 const FLASH_DECODE_GROUP: u32 = 6;
@@ -306,7 +311,7 @@ const FLASH_DECODE_GROUP: u32 = 6;
 /// `[batch, n_heads, n_kv_heads, head_dim, group, block_size, max_bt,
 /// n_splits, tiles_per_split]` at head_dim 256 and the compiled group, with a
 /// grid the 32-bit block index covers.
-fn serves_flash_decode_kv8(p: &[u32]) -> bool {
+fn serves_flash_decode(p: &[u32]) -> bool {
     matches!(p, [batch, heads, nkv, 256, FLASH_DECODE_GROUP, bs, bt, splits, per]
         if *batch >= 1 && *nkv >= 1 && *heads == nkv * FLASH_DECODE_GROUP && *bs >= 1 && *bt >= 1 && *splits >= 1 && *per >= 1
             && u64::from(*batch) * u64::from(*nkv) * u64::from(*splits) <= u64::from(u32::MAX))
@@ -344,7 +349,23 @@ pub(crate) const ROWS: &[Row] = &[
         slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=int8",
         target: Target::Named("paged_flash_decode_gqa_hd256_kv8"),
         bindings: FLASH_DECODE_KV8_BINDINGS,
-        serves: serves_flash_decode_kv8,
+        serves: serves_flash_decode,
+        blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_hd256#GRP=6",
+        target: Target::Named("paged_flash_decode_gqa_hd256_f32"),
+        bindings: FLASH_DECODE_BINDINGS,
+        serves: serves_flash_decode,
+        blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=bf16",
+        target: Target::Named("paged_flash_decode_gqa_hd256_bf16"),
+        bindings: FLASH_DECODE_BINDINGS,
+        serves: serves_flash_decode,
         blocks: flash_decode_blocks,
         requires_wgsl_upgrade: false,
     },
@@ -352,7 +373,7 @@ pub(crate) const ROWS: &[Row] = &[
         slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=fp8",
         target: Target::Named("paged_flash_decode_gqa_hd256_kvfp8"),
         bindings: FLASH_DECODE_KV8_BINDINGS,
-        serves: serves_flash_decode_kv8,
+        serves: serves_flash_decode,
         blocks: flash_decode_blocks,
         requires_wgsl_upgrade: false,
     },

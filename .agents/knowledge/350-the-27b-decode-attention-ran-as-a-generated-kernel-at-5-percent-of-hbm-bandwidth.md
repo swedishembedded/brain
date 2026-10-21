@@ -30,7 +30,7 @@ partial-record slab is `storage_uninit` (every record is written).
 Measured (ncu, card 1 shared with another job, so ranges, split pass only; generated -> native): batch 1 at 12.8k keys
 127.9 -> 28.8 us (0.93 TB/s on the KV bytes), batch 1 at 48k 276.6 -> 57.1 us (1.75 TB/s), batch 8 at 12.8k 372.6 ->
 131.0 us, batch 8 at 48k 988.1 -> 371.2 us (2.17 TB/s, 55 percent of the 4.0 TB/s spec). Gate:
-`native_8bit_decode_is_exact_at_agent_contexts_over_a_shared_prefix_on_cuda` (crates/model/tests/kv_tier.rs, CUDA opened
+`native_decode_of_every_tier_is_exact_at_agent_contexts_over_a_shared_prefix_on_cuda` (crates/model/tests/kv_tier.rs, CUDA opened
 explicitly - the ambient `Gpu::new_gpu` may be another backend, on which the test's nativity assertion would never run);
 timing report `int8_decode_attention_timing_report` (ignored).
 
@@ -49,3 +49,11 @@ served 27B. The same tensor-core kernel serves it (`BRAIN_KV_FP8`: `cvt.rn.f16x2
 exactly, the row scales fold as for int8), `paged_flash_decode_gqa_hd256_kvfp8`. ncu on a card shared with a 27B
 server, split pass, generated -> native: batch 1 at 12.8k keys 164 -> 28.5 us, at 48k 346 -> 55.6 us, batch 8 at
 12.8k 432 -> 126 us, at 48k 1,100 -> 361 us. Same gate, both tiers (worst relative error to exact f64 5.3e-5).
+
+Second follow-up: the f32 tier (the released Qwen3.8 GGUFs' DEFAULT `--kv-cache`) and the bf16 tier still ran the
+generated kernel. `paged_flash_decode_gqa_hd256_f32` / `_bf16` (one source, `BRAIN_KV_BF16`) run the same map on
+`mma.sync.m16n8k8` with TF32 operands: f32 values split into a TF32 high part and the TF32 rounding of the remainder,
+three products kept; bf16 is exact in TF32, so only the query and probabilities are split. ncu split pass on a shared
+card, generated -> native: f32 batch 1 at 12.8k keys 185 -> 73 us (1.4 TB/s), at 48k 493 -> 188 us, batch 8 at 48k
+3.62 -> 1.28 ms; bf16 151 -> 43 us, 340 -> 97 us, 1.34 -> 0.70 ms. The CUDA decode gate now runs all four tiers
+(worst relative error to exact f64: f32 8.5e-6, bf16 7.9e-6).

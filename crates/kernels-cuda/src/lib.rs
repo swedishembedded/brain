@@ -709,6 +709,48 @@ pub const ALL: &[CudaKernel] = &[
         ),
     },
     CudaKernel {
+        name: "paged_flash_decode_gqa_hd256_f32",
+        // Redirected to by name from the WGSL `paged_flash_decode_gqa_hd256#GRP=6` (`gpu_core::native_upgrade`).
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // mma.sync.m16n8k8 with TF32 operands.
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_paged_flash_decode_gqa_hd256_f32",
+        what: "split-key GQA decode attention at head_dim 256 and group 6 over an f32 paged pool on TF32 tensor cores (operands split hi/lo, three products): each warp runs its own 16-key chunks, every head of the group from one read; the partial records of the WGSL kernel",
+        reported: "native:paged_flash_decode_gqa_hd256_f32",
+        block_dim: 128,
+        tile: (1, 1),
+        // The query fragments and, reusing their bytes, the merge of 4 warps x 8 heads x 256 outputs; the maxima and sums.
+        shared_bytes: 4 * 8 * 256 * 4 + 2 * 4 * 8 * 4,
+        src: concat!(
+            "#define BRAIN_GRP 6\n#define brain_paged_flash_decode_gqa_hd256_tf32 brain_paged_flash_decode_gqa_hd256_f32\n",
+            include_str!("../cu/paged_flash_decode_gqa_hd256_tf32.cu")
+        ),
+    },
+    CudaKernel {
+        name: "paged_flash_decode_gqa_hd256_bf16",
+        // Redirected to by name from the WGSL `paged_flash_decode_gqa_hd256#GRP=6#kv=bf16` (`gpu_core::native_upgrade`).
+        op: Op::PagedAttentionFused,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // mma.sync.m16n8k8 with TF32 operands.
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_paged_flash_decode_gqa_hd256_bf16",
+        what: "paged_flash_decode_gqa_hd256_f32 over a bf16 pool: bf16 is exact in TF32, so only the query and probabilities are split",
+        reported: "native:paged_flash_decode_gqa_hd256_bf16",
+        block_dim: 128,
+        tile: (1, 1),
+        // The query fragments and, reusing their bytes, the merge of 4 warps x 8 heads x 256 outputs; the maxima and sums.
+        shared_bytes: 4 * 8 * 256 * 4 + 2 * 4 * 8 * 4,
+        src: concat!(
+            "#define BRAIN_GRP 6\n#define BRAIN_KV_BF16 1\n#define brain_paged_flash_decode_gqa_hd256_tf32 brain_paged_flash_decode_gqa_hd256_bf16\n",
+            include_str!("../cu/paged_flash_decode_gqa_hd256_tf32.cu")
+        ),
+    },
+    CudaKernel {
         name: "paged_flash_decode_gqa_combine",
         // Redirected to by name from the WGSL `paged_flash_decode_gqa_combine` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
