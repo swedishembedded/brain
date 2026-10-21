@@ -218,15 +218,27 @@ fn a_plan_with_no_warmup_reports_no_ramp() {
 /// order of magnitude. Not a tight bound (a shared CI box is noisy), but it
 /// catches the failure that would matter: a probe whose "measurement" is
 /// really submit overhead or a no-op dispatch would swing wildly.
+///
+/// On a card shared with a neighbour's saturating job a single probe can land
+/// in one of its bursts and read several times low, so each side is the best
+/// of a few probes: contention only ever lowers a rate, so the best of several
+/// is the stable estimate of what the device offers, while a probe that
+/// measures overhead still swings between the two sides.
 #[test]
 fn repeated_probes_of_the_same_tier_are_in_the_same_ballpark() {
+    const PROBES_PER_SIDE: usize = 3;
     let _probe = probe_lock();
     let ops = ops();
     let plan = Plan::default();
-    let a = probe::gemm(&ops, Dtype::F32, &plan).expect("f32 is always available");
-    let b = probe::gemm(&ops, Dtype::F32, &plan).expect("f32 is always available");
+    let best_of = || {
+        (0..PROBES_PER_SIDE)
+            .map(|_| probe::gemm(&ops, Dtype::F32, &plan).expect("f32 is always available"))
+            .max_by(|a, b| a.gops.total_cmp(&b.gops))
+            .expect("at least one probe")
+    };
+    let (a, b) = (best_of(), best_of());
     let ratio = a.gops.max(b.gops) / a.gops.min(b.gops);
-    assert!(ratio < 10.0, "two f32 probes disagreed by {ratio:.1}x: {a:?} vs {b:?}");
+    assert!(ratio < 10.0, "two f32 probes (best of {PROBES_PER_SIDE} each) disagreed by {ratio:.1}x: {a:?} vs {b:?}");
     assert!(a.gops > 0.0 && b.gops > 0.0, "{a:?} {b:?}");
 }
 
