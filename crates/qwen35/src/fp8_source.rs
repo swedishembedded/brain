@@ -137,6 +137,43 @@ impl PackedBase {
     }
 }
 
+/// Convert the layer matrices of the checkpoint in `dir` to `tier` ONCE, into a new checkpoint directory `out`:
+/// a single packed `model.safetensors` (every bound tensor under its stored name, the converted matrices as
+/// codes plus scales, the rest as stored) and the config and tokenizer files copied beside it, so that
+/// [`PackedBase::open`] on `out` serves the matrices already in `tier` and a streamed trainer never converts on
+/// the host again. The conversion is the checkpoint crate's bounded tiled `Convert`: one tile of host staging
+/// ([`WEIGHT_STAGING_BYTES`]) at a time, the output never in memory.
+///
+/// Only `Dtype::NF4` is a conversion target here; a matrix whose width is not a whole NF4 block stays as stored.
+pub fn write_converted_base(dir: &Path, cfg: &Qwen35Config, block: usize, out: &Path, tier: gpu_core::select::Dtype) -> Result<checkpoint::packed::ConversionReport, String> {
+    use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, Loader, MemoryBudget, QuantEncoding};
+    if tier != gpu_core::select::Dtype::NF4 {
+        return Err(format!("qwen35 conversion: {tier:?} is not a conversion target (NF4 is)"));
+    }
+    if out.join("model.safetensors").exists() {
+        return Err(format!("qwen35 conversion: {} already holds a converted base", out.display()));
+    }
+    let reader = PackedReader::open(dir).map_err(|e| format!("qwen35 source: {e}"))?.with_fp8_block(block as u32);
+    let bindings = bindings_for(&reader, cfg, &[])?;
+    let matrices: std::collections::HashSet<String> = cfg.layer_types().iter().enumerate().flat_map(|(l, ty)| cfg.layer_leaves(*ty).into_iter().map(move |(suffix, _, _)| format!("blocks.{l}.{suffix}"))).collect();
+    let nf4 = QuantEncoding::nf4_blocked(32);
+    let mut requests: Vec<(String, LoadPolicy)> = Vec::with_capacity(bindings.len());
+    for (canon, binding) in &bindings {
+        let desc = reader.descriptor(&binding.source)?;
+        let convertible = matrices.contains(canon) && desc.shape.len() == 2 && desc.shape[1] % 32 == 0;
+        requests.push((binding.source.clone(), if convertible { LoadPolicy::Convert(nf4.clone()) } else { LoadPolicy::Preserve }));
+    }
+    let codecs = CodecRegistry::reference();
+    let loader = Loader { reader: &reader, codecs: &codecs, workspace: BoundedWorkspace::new(MemoryBudget::new(WEIGHT_STAGING_BYTES, 0)), config: LoadConfig::default() };
+    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    for aux in ["config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json"] {
+        if dir.join(aux).exists() {
+            std::fs::copy(dir.join(aux), out.join(aux)).map_err(|e| format!("copy {aux}: {e}"))?;
+        }
+    }
+    checkpoint::packed::convert_to_file(&loader, &requests, &out.join("model.safetensors"), &serde_json::json!({}))
+}
+
 /// Two-way coverage against `cfg.param_list()` from shapes alone.
 fn check_coverage(src: &PackedSource, cfg: &Qwen35Config) -> Result<(), String> {
     let expected: Vec<(String, usize)> = cfg.param_list().into_iter().filter(|(n, _)| !model::adapter::device::is_adapter_param(n)).collect();
