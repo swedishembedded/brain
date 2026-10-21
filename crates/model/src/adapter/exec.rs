@@ -61,6 +61,19 @@ pub fn add_kernels(list: &mut Vec<(&'static str, &'static str)>) {
     }
 }
 
+/// Refuse, at configure time, an adapter whose runtime cannot read the frozen
+/// base it would be attached to. DoRA normalises by the row norms of the base
+/// weight, so it needs that weight resident as fp32 ([`ParamAccess::base`]); a
+/// quantized or half-precision base (`base_format`, e.g. `"int8"`) does not keep
+/// it, and the forward would otherwise stop on a panic mid-run. Every other kind
+/// reads only the activations and works over any base.
+pub fn check_base_format(kind: DeviceKind, base_format: &str, base_is_fp32: bool) -> Result<(), String> {
+    if kind == DeviceKind::Dora && !base_is_fp32 {
+        return Err(format!("a dora adapter reads the base weight as fp32 for its row norms, which a {base_format} base does not keep; train it over an f32 base"));
+    }
+    Ok(())
+}
+
 /// Read access to the adapter tensors of a model: weights, and gradients where
 /// a tensor trains. Implemented for [`ParamStore`]; a streamed trainer that
 /// keeps its adapters in a store of their own implements it for that.
@@ -471,7 +484,7 @@ impl AdapterRuntime {
 
     /// The base weight of `base`, resident as fp32: DoRA reads it for row norms.
     fn dora_base<'a>(p: &'a dyn ParamAccess, base: &str) -> &'a DeviceBuffer {
-        p.base(base).unwrap_or_else(|| panic!("adapter runtime: a dora adapter needs {base} resident as fp32; a quantized or half-precision base is not supported"))
+        p.base(base).unwrap_or_else(|| panic!("adapter runtime: a dora adapter needs {base} resident as fp32; the configure step (check_base_format) should have refused this base"))
     }
 
     /// DoRA's per-channel gain of `base`: `g = (1 + mu) * |W_o| / |W_o + s (BA)_o|`
@@ -592,6 +605,19 @@ impl AdapterRuntime {
 mod tests {
     use super::*;
     use gpu_core::Dispatch;
+
+    /// A DoRA run over a quantized or half-precision base is refused by name at
+    /// configure time instead of panicking in the first forward; every other
+    /// kind, and DoRA over fp32, passes.
+    #[test]
+    fn dora_over_a_non_fp32_base_is_refused_with_the_format_named() {
+        let err = check_base_format(DeviceKind::Dora, "int8", false).unwrap_err();
+        assert!(err.contains("dora") && err.contains("int8"), "{err}");
+        assert!(check_base_format(DeviceKind::Dora, "f32", true).is_ok());
+        for kind in [DeviceKind::Lora, DeviceKind::Ia3, DeviceKind::Lokr] {
+            assert!(check_base_format(kind, "nf4", false).is_ok(), "{} reads only activations", kind.name());
+        }
+    }
 
     /// A model that did not register the tiled kernel must get the reference
     /// kernel with one thread per output: pairing it with a tile-count grid

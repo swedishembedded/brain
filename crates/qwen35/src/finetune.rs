@@ -317,9 +317,8 @@ pub fn finetune_lora_tuned(
 /// The LoRA model of the base at `base`, its frozen linears held at
 /// `run.dtype` and streamed from disk, sized for `opts`' rows.
 fn build_lora_model(base: &Path, opts: &FitOpts, rank: u32, alpha: f32, tuning: AdapterTuning, resume_from: Option<&Path>, run: &StreamedRun) -> std::io::Result<Qwen35> {
-    if tuning.kind == model::adapter::DeviceKind::Dora {
-        return Err(unsupported(format!("a dora adapter reads the base weight, which a {} base does not keep as fp32; train it with --base-format f32", model::policy::format_name(run.dtype))));
-    }
+    // The streamed base is never held as fp32 on the device, whatever its format.
+    model::adapter::exec::check_base_format(tuning.kind, model::policy::format_name(run.dtype), false).map_err(unsupported)?;
     let (dtype, recompute) = (run.dtype, run.recompute);
     // One micro-step of more than a few thousand tokens only fits the card with
     // the long-sequence settings (segmented Gated-DeltaNet layers, a bf16
