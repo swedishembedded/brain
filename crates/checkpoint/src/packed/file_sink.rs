@@ -24,6 +24,7 @@ use serde_json::{json, Map, Value};
 
 use super::codec::Tile;
 use super::encoding::{Codebook, Element, FloatFormat, ScaleGranularity, TensorDescriptor};
+use super::reader::PACKED_METADATA_KEY;
 use super::sink::TensorSink;
 use crate::st::CONFIG_KEY;
 
@@ -40,8 +41,8 @@ fn dtype_tag(f: FloatFormat) -> Result<&'static str, String> {
 
 /// The safetensors dtype and shape a descriptor's payload is stored under. Float elements keep their own dtype and
 /// the logical shape. brain's packed integer layouts (int8 four to a word, NF4 eight to a word, little endian)
-/// are `U32` words along the innermost axis, the convention of its int8-native checkpoints; a reader needs the
-/// descriptor declared (`PackedReader::with_descriptor`) because the dtype alone does not say.
+/// are `U32` words along the innermost axis, the convention of its int8-native checkpoints; the file's `brain.packed`
+/// metadata declares the descriptor, so `PackedReader` needs no `with_descriptor` for it.
 fn payload_layout(d: &TensorDescriptor) -> Result<(&'static str, Vec<u64>), String> {
     let packed = |per_word: u64| -> Result<(&'static str, Vec<u64>), String> {
         let mut shape = d.shape.clone();
@@ -114,8 +115,17 @@ impl SafetensorsSink {
             placed.insert(d.name.clone(), Placed { payload, scales, written: 0 });
             order.push(d.name.clone());
         }
+        // What the dtype alone cannot say (NF4 codes in words, FP8 scale grids) rides in the file itself, so the packed
+        // reader needs no declaration from the caller (`PACKED_METADATA_KEY`).
+        let mut packed = Map::new();
+        for d in descs {
+            if let Some(spec) = d.encoding.spec() {
+                packed.insert(d.name.clone(), json!({"shape": d.shape, "encoding": spec}));
+            }
+        }
         let mut meta = Map::new();
         meta.insert(CONFIG_KEY.to_string(), Value::String(serde_json::to_string(config)?));
+        meta.insert(PACKED_METADATA_KEY.to_string(), Value::String(Value::Object(packed).to_string()));
         header.insert("__metadata__".to_string(), Value::Object(meta));
         let mut hbytes = serde_json::to_vec(&Value::Object(header))?;
         // Pad to a multiple of 8 so every 4-byte-wide tensor lands word aligned (see StWriter).

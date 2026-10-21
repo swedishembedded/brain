@@ -22,6 +22,10 @@ use super::encoding::{Element, FloatFormat, QuantEncoding, TensorDescriptor, INT
 use crate::gguf::GgmlType;
 use crate::weightio::WeightReader;
 
+/// The `__metadata__` key holding the JSON map of tensor name to logical shape and encoding spec that a packed
+/// file written by `convert_to_file` carries.
+pub const PACKED_METADATA_KEY: &str = "brain.packed";
+
 /// Read-only, tile-granular access to a checkpoint's quantized tensors.
 pub trait PackedTensorReader: Send + Sync {
     /// Payload tensor names. Sidecar scale tensors that belong to a payload
@@ -67,9 +71,33 @@ impl PackedReader {
     }
 
     pub fn new(inner: WeightReader) -> PackedReader {
-        let mut r = PackedReader { inner, overrides: HashMap::new(), hidden: HashSet::new(), fp8_block: None };
+        let overrides = Self::declared_in_files(&inner);
+        let mut r = PackedReader { inner, overrides, hidden: HashSet::new(), fp8_block: None };
         r.hide_sidecars();
         r
+    }
+
+    /// The encodings a packed file declares for itself (`brain.packed` in a safetensors file's metadata, as
+    /// written by `convert_to_file`): they say what the dtype alone cannot (NF4 codes in bytes).
+    fn declared_in_files(inner: &WeightReader) -> HashMap<String, TensorDescriptor> {
+        let mut out = HashMap::new();
+        let mut seen: Vec<*const crate::mmap::MmapSafetensors> = Vec::new();
+        for name in inner.names() {
+            let Some(file) = inner.st_for(name) else { continue };
+            if seen.contains(&(file as *const _)) {
+                continue;
+            }
+            seen.push(file as *const _);
+            let Some(map) = file.metadata().get(PACKED_METADATA_KEY).and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok()) else { continue };
+            for (tensor, v) in map.as_object().into_iter().flatten() {
+                let shape: Option<Vec<u64>> = v["shape"].as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).collect());
+                let encoding = v["encoding"].as_str().and_then(|e| QuantEncoding::from_spec(e).ok());
+                if let (Some(shape), Some(encoding)) = (shape, encoding) {
+                    out.insert(tensor.clone(), TensorDescriptor::new(tensor.clone(), shape, encoding));
+                }
+            }
+        }
+        out
     }
 
     /// Declare the encoding of a tensor whose dtype alone does not say (brain's

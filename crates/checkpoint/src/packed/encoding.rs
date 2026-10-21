@@ -242,6 +242,79 @@ impl QuantEncoding {
     }
 }
 
+impl FloatFormat {
+    fn tag(self) -> &'static str {
+        match self {
+            FloatFormat::F32 => "f32",
+            FloatFormat::F16 => "f16",
+            FloatFormat::Bf16 => "bf16",
+            FloatFormat::E4M3Fn => "e4m3",
+            FloatFormat::E5M2 => "e5m2",
+            FloatFormat::E2M1 => "e2m1",
+            FloatFormat::E8M0 => "e8m0",
+        }
+    }
+
+    fn from_tag(t: &str) -> Option<FloatFormat> {
+        [FloatFormat::F32, FloatFormat::F16, FloatFormat::Bf16, FloatFormat::E4M3Fn, FloatFormat::E5M2, FloatFormat::E2M1, FloatFormat::E8M0].into_iter().find(|f| f.tag() == t)
+    }
+}
+
+impl QuantEncoding {
+    /// The encoding as a self-describing string a checkpoint file can carry in its metadata
+    /// (`element;level;level...`, e.g. `codebook:nf4;block:32:f32:_scale`), so a reader needs no per-model
+    /// knowledge to interpret it. `None` for a GGUF block format, which a GGUF file already describes.
+    pub fn spec(&self) -> Option<String> {
+        let element = match self.element {
+            Element::Int { bits, signed } => format!("int:{bits}:{}", if signed { "s" } else { "u" }),
+            Element::Float(f) => format!("float:{}", f.tag()),
+            Element::Codebook(Codebook::Nf4) => "codebook:nf4".to_string(),
+            Element::Ggml(_) => return None,
+        };
+        let mut out = element;
+        for s in &self.scales {
+            let g = match s.granularity {
+                ScaleGranularity::Tensor => "tensor".to_string(),
+                ScaleGranularity::Block(n) => format!("block:{n}"),
+                ScaleGranularity::Row => "row".to_string(),
+                ScaleGranularity::Tile2d { rows, cols } => format!("tile:{rows}x{cols}"),
+            };
+            out.push_str(&format!(";{g}:{}:{}", s.format.tag(), s.suffix));
+        }
+        Some(out)
+    }
+
+    /// Inverse of [`Self::spec`].
+    pub fn from_spec(spec: &str) -> Result<QuantEncoding, String> {
+        let bad = || format!("unreadable quantization spec {spec:?}");
+        let mut parts = spec.split(';');
+        let element = parts.next().ok_or_else(bad)?;
+        let e: Vec<&str> = element.split(':').collect();
+        let element = match e.as_slice() {
+            ["int", bits, sign] => Element::Int { bits: bits.parse().map_err(|_| bad())?, signed: *sign == "s" },
+            ["float", f] => Element::Float(FloatFormat::from_tag(f).ok_or_else(bad)?),
+            ["codebook", "nf4"] => Element::Codebook(Codebook::Nf4),
+            _ => return Err(bad()),
+        };
+        let mut scales = Vec::new();
+        for level in parts {
+            let l: Vec<&str> = level.splitn(4, ':').collect();
+            let (granularity, fmt, suffix) = match l.as_slice() {
+                ["tensor", fmt, suffix] => (ScaleGranularity::Tensor, fmt, suffix),
+                ["row", fmt, suffix] => (ScaleGranularity::Row, fmt, suffix),
+                ["block", n, fmt, suffix] => (ScaleGranularity::Block(n.parse().map_err(|_| bad())?), fmt, suffix),
+                ["tile", rc, fmt, suffix] => {
+                    let (r, c) = rc.split_once('x').ok_or_else(bad)?;
+                    (ScaleGranularity::Tile2d { rows: r.parse().map_err(|_| bad())?, cols: c.parse().map_err(|_| bad())? }, fmt, suffix)
+                }
+                _ => return Err(bad()),
+            };
+            scales.push(ScaleLevel { granularity, format: FloatFormat::from_tag(fmt).ok_or_else(bad)?, suffix: suffix.to_string() });
+        }
+        Ok(QuantEncoding { element, scales })
+    }
+}
+
 impl fmt::Display for QuantEncoding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.element {
@@ -405,6 +478,16 @@ mod tests {
 
     fn desc(shape: &[u64], e: QuantEncoding) -> TensorDescriptor {
         TensorDescriptor::new("w", shape.to_vec(), e)
+    }
+
+    #[test]
+    fn every_non_ggml_encoding_round_trips_through_its_spec() {
+        for e in [QuantEncoding::f32(), QuantEncoding::bf16(), QuantEncoding::fp8_e4m3_tiled(128), QuantEncoding::int8_blocked(32), QuantEncoding::nf4_blocked(32), QuantEncoding::nvfp4(), QuantEncoding::mxfp4(), QuantEncoding::fp8(FloatFormat::E5M2)] {
+            let spec = e.spec().expect("a non-ggml encoding has a spec");
+            assert_eq!(QuantEncoding::from_spec(&spec).unwrap(), e, "{spec}");
+        }
+        assert!(QuantEncoding::ggml(GgmlType::Q8_0).spec().is_none());
+        assert!(QuantEncoding::from_spec("float:nonsense").is_err() && QuantEncoding::from_spec("codebook:nf4;block:x:f32:_s").is_err());
     }
 
     #[test]
