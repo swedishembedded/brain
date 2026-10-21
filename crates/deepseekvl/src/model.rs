@@ -159,14 +159,12 @@ impl Vlm {
     pub fn assemble(dir: &Path, rd: &WeightReader, parts: Parts, dtype: qwen3::Dtype, ctx: u32, adapter: Option<&Path>, kv_int8: bool) -> Result<Vlm, String> {
         let frontend = Frontend::open(dir, parts)?;
         let decoder_cfg = &frontend.decoder_cfg;
-        let src = qwen3::import::nested_source(rd, crate::import::DECODER, decoder_cfg)?;
-        let mut weights = Engine::tensors_from(decoder_cfg, &src)?;
-        drop(src);
+        let mut src: Box<dyn checkpoint::TensorSource + '_> = Box::new(qwen3::import::nested_source(rd, crate::import::DECODER, decoder_cfg)?);
         if let Some(a) = adapter {
-            qwen3::lora::fold_adapter_into(&mut weights, a.to_str().ok_or("path is not UTF-8")?).map_err(|e| format!("{}: {e}", a.display()))?;
+            src = Box::new(model::lora::device_adapter::FoldedSource::open(src, a.to_str().ok_or("path is not UTF-8")?).map_err(|e| format!("{}: {e}", a.display()))?);
         }
         let per_seq = ctx.div_ceil(BLOCK);
-        let decoder = Engine::from_map_tier(decoder_cfg.clone(), &weights, BLOCK, per_seq, MAX_BATCH, per_seq, MAX_PREFILL, kv_int8 && qwen3::serve::kv_int8_supported(decoder_cfg), dtype);
+        let decoder = Engine::from_source_tier(decoder_cfg.clone(), &*src, BLOCK, per_seq, MAX_BATCH, per_seq, MAX_PREFILL, kv_int8 && qwen3::serve::kv_int8_supported(decoder_cfg), dtype);
         Ok(Vlm { frontend, decoder })
     }
 

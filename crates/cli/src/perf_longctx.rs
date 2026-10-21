@@ -27,7 +27,6 @@
 //! All are GPU only: `plan` counts device memory and nothing else, and a
 //! sizing that does not fit ends the sweep rather than spilling to the host.
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 use capability::Invocation;
@@ -362,9 +361,10 @@ pub struct QwenPagedEngine {
     /// Device bytes of the first GPU after the reserve: the engine runs on one
     /// device.
     gpu: (u32, String, u64),
-    /// Checkpoint tensors decoded to f32, read once and reused by every
-    /// `load` so the ladder does not re-read the checkpoint per rung.
-    tensors: Option<HashMap<String, Vec<f32>>>,
+    /// The checkpoint, opened once and reused by every `load` so the ladder
+    /// does not reopen it per rung. Each engine reads its tensors from it one
+    /// at a time; no whole-model host copy is kept between rungs.
+    source: Option<Box<dyn checkpoint::TensorSource>>,
     /// The attention paths a loaded engine fused, which decide its scratch
     /// size; before the first load the planner assumes the larger unfused
     /// worst case.
@@ -379,7 +379,7 @@ impl QwenPagedEngine {
         let gpu = gpu_budget().into_iter().next().ok_or("no GPU with queryable memory: longctx is GPU-only and has no host fallback")?;
         let cfg = qwen3::checkpoint_config(weights)?;
         let kv_int8 = crate::perf_cli::resolve_kv_int8(&cfg, kv_fp32, weights);
-        Ok(QwenPagedEngine { weights: weights.to_string(), cfg, weights_int8, kv_int8, gpu, tensors: None, fused_attention: None, eng: None, tables: Vec::new() })
+        Ok(QwenPagedEngine { weights: weights.to_string(), cfg, weights_int8, kv_int8, gpu, source: None, fused_attention: None, eng: None, tables: Vec::new() })
     }
 
     /// `(blocks per sequence, pool blocks, prefill chunk)` for a sizing: room
@@ -423,17 +423,17 @@ impl LongContextEngine for QwenPagedEngine {
     fn load(&mut self, batch: u32, context: u32) -> Result<(), String> {
         self.eng = None;
         self.tables.clear();
-        if self.tensors.is_none() {
-            let (cfg, src) = qwen3::open_checkpoint(&self.weights)?;
-            self.tensors = Some(qwen3::serve::Engine::tensors_from(&cfg, &*src)?);
+        if self.source.is_none() {
+            self.source = Some(qwen3::open_checkpoint(&self.weights)?.1);
         }
-        let tensors = self.tensors.as_ref().expect("read above");
+        let source = self.source.as_deref().expect("opened above");
         let (per_seq, num_blocks, chunk) = Self::geometry(batch, context);
-        let (cfg, kv_int8, weights_int8) = (self.cfg.clone(), self.kv_int8, self.weights_int8);
+        let (cfg, kv_int8) = (self.cfg.clone(), self.kv_int8);
+        let tier = if self.weights_int8 { qwen3::Dtype::I8 } else { qwen3::Dtype::F32 };
         // Allocation failure on the device surfaces as a panic from the engine
         // constructor; it is the out-of-memory boundary, not a crash.
         let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            qwen3::serve::Engine::from_map(cfg, tensors, BLOCK_SIZE, num_blocks, batch, per_seq, chunk, kv_int8, weights_int8)
+            qwen3::serve::Engine::from_source_tier(cfg, source, BLOCK_SIZE, num_blocks, batch, per_seq, chunk, kv_int8, tier)
         }))
         .map_err(|p| {
             p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "engine construction panicked".into())

@@ -1439,6 +1439,95 @@ pub mod device_adapter {
         Ok((adapter.rank, adapter.alpha))
     }
 
+    /// Elements of one block a folded linear is read in when a whole tensor is asked for.
+    const FOLD_CHUNK_ELEMS: usize = 1 << 22;
+
+    /// A base [`checkpoint::TensorSource`] with an adapter's low-rank delta folded into each targeted linear AS THE
+    /// LINEAR IS READ: the per-tensor counterpart of [`fold_adapter_into`], for a base too large to hold as a host
+    /// map. Every other tensor is the base's own, packed views included; a folded linear has no packed view (its
+    /// values are no longer the stored ones) and is read as f32, one tensor at a time.
+    pub struct FoldedSource<'a> {
+        base: Box<dyn checkpoint::TensorSource + 'a>,
+        adapter: DeviceAdapter,
+    }
+
+    impl<'a> FoldedSource<'a> {
+        /// Fold the adapter at `adapter_path` into `base`. Every target is checked against the base's tensor size
+        /// where the base knows it, so an adapter for another shape is refused here, not at the first read.
+        pub fn open(base: Box<dyn checkpoint::TensorSource + 'a>, adapter_path: &str) -> std::io::Result<FoldedSource<'a>> {
+            let adapter = read_adapter(adapter_path)?;
+            for site in &adapter.sites {
+                let (out, inn) = site.dims(adapter.rank);
+                match base.numel(&site.base) {
+                    Some(n) if n != out * inn => return Err(invalid(adapter_path, format!("{}: adapter is [{out}, {inn}] but the base weight holds {n} values", site.base))),
+                    _ => {}
+                }
+            }
+            Ok(FoldedSource { base, adapter })
+        }
+
+        /// The `(rank, alpha)` of the folded adapter.
+        pub fn rank_alpha(&self) -> (u32, f32) {
+            (self.adapter.rank, self.adapter.alpha)
+        }
+
+        fn site(&self, name: &str) -> Option<&AdapterSite> {
+            self.adapter.sites.binary_search_by(|s| s.base.as_str().cmp(name)).ok().map(|i| &self.adapter.sites[i])
+        }
+    }
+
+    impl checkpoint::TensorSource for FoldedSource<'_> {
+        fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+            if self.site(name).is_none() {
+                return self.base.with_tensor(name, f);
+            }
+            let mut whole = Vec::new();
+            let found = self.with_tensor_chunks(name, FOLD_CHUNK_ELEMS, &mut |_, part| whole.extend_from_slice(part));
+            if found {
+                f(&whole);
+            }
+            found
+        }
+
+        /// A targeted linear is folded a block of whole rows at a time (row `o` of the delta needs only row `o` of
+        /// `B`), so reading it takes one block of host memory, not the matrix.
+        fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+            let Some(site) = self.site(name) else { return self.base.with_tensor_chunks(name, max_elems, f) };
+            let (rank, scale) = (self.adapter.rank as usize, self.adapter.scale());
+            let inn = site.a.len() / rank;
+            self.base.with_tensor_chunks(name, (max_elems / inn).max(1) * inn, &mut |off, chunk| {
+                assert!((off as usize).is_multiple_of(inn) && chunk.len().is_multiple_of(inn), "{name}: a chunk of {} values at {off} is not whole rows of {inn}", chunk.len());
+                let (row0, rows) = (off as usize / inn, chunk.len() / inn);
+                let mut folded = chunk.to_vec();
+                fold_delta(&mut folded, &site.a, &site.b[row0 * rank..(row0 + rows) * rank], rank, scale);
+                f(off, &folded);
+            })
+        }
+
+        fn raw_words(&self, name: &str) -> Option<&[u32]> {
+            if self.site(name).is_some() { None } else { self.base.raw_words(name) }
+        }
+
+        fn numel(&self, name: &str) -> Option<usize> {
+            self.base.numel(name)
+        }
+
+        fn advise_drop(&self, name: &str) {
+            self.base.advise_drop(name)
+        }
+
+        fn packed_descriptor(&self, name: &str) -> Option<checkpoint::packed::TensorDescriptor> {
+            if self.site(name).is_some() { None } else { self.base.packed_descriptor(name) }
+        }
+
+        fn load_packed(&self, names: &[&str], req: &checkpoint::packed::LoadRequest<'_>, sink: &mut dyn checkpoint::packed::TensorSink) -> Result<Option<checkpoint::packed::LoadReport>, String> {
+            if names.iter().any(|n| self.site(n).is_some()) {
+                return Ok(None);
+            }
+            self.base.load_packed(names, req, sink)
+        }
+    }
+
     /// `W[o,i] += scale * sum_k B[o,k] * A[k,i]`, `A` is `[r,in]`, `B` is
     /// `[out,r]`, both row-major - the convention every device-adapter
     /// model's unfolded LoRA forward computes.

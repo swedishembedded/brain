@@ -146,18 +146,14 @@ impl TextToImage {
         let (cfg, rd) = crate::model::open(dir)?;
         let dcfg = qwen3::hf::decoder_config_as(&cfg.language.to_string(), "llama")?;
         let rows = 2 * parallel;
-        let weights = {
-            let src = qwen3::import::nested_source(&rd, deepseekvl::import::DECODER, &dcfg)?;
-            let mut weights = Engine::tensors_from(&dcfg, &src)?;
-            if let Some(t) = tuned {
-                let adapter = t.join(deepseekvl::train::ADAPTER_FILE);
-                qwen3::lora::fold_adapter_into(&mut weights, adapter.to_str().ok_or("path is not UTF-8")?).map_err(|e| format!("{}: {e}", adapter.display()))?;
-            }
-            weights
-        };
+        let mut src: Box<dyn checkpoint::TensorSource + '_> = Box::new(qwen3::import::nested_source(&rd, deepseekvl::import::DECODER, &dcfg)?);
+        if let Some(t) = tuned {
+            let adapter = t.join(deepseekvl::train::ADAPTER_FILE);
+            src = Box::new(model::lora::device_adapter::FoldedSource::open(src, adapter.to_str().ok_or("path is not UTF-8")?).map_err(|e| format!("{}: {e}", adapter.display()))?);
+        }
         let per_seq = context.div_ceil(BLOCK);
-        let engine = Engine::from_map_tier(dcfg, &weights, BLOCK, rows * per_seq, rows, per_seq, MAX_PREFILL, false, tier);
-        drop(weights);
+        let engine = Engine::from_source_tier(dcfg, &*src, BLOCK, rows * per_seq, rows, per_seq, MAX_PREFILL, false, tier);
+        drop(src);
         let mut heads = GenHeads::load(&rd, &cfg, rows)?;
         if let Some(t) = tuned {
             let file = t.join(crate::train::GENERATION_FILE);

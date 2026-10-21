@@ -1256,10 +1256,9 @@ fn serve_accuracy(a: &[String]) {
     let ids = tok.encode(&std::fs::read_to_string(text_path).unwrap_or_else(|e| panic!("{text_path}: {e}")));
     assert!(ids.len() >= t * n_prompts, "{text_path} holds {} tokens, need {}", ids.len(), t * n_prompts);
     let (cfg, src) = qwen3::open_checkpoint(dir).unwrap_or_else(|e| panic!("{e}"));
-    let tensors = qwen3::serve::Engine::tensors_from(&cfg, &*src).unwrap_or_else(|e| panic!("{e}"));
-    drop(src);
     let (d, v) = (cfg.d_model as usize, cfg.vocab as usize);
-    let head = tensors.get(cfg.head_weight()).unwrap_or_else(|| panic!("no head weight")).clone();
+    let mut head: Vec<f32> = Vec::new();
+    assert!(src.with_tensor_chunks(cfg.head_weight(), 1 << 22, &mut |_, c| head.extend_from_slice(c)), "no head weight");
     let prompts: Vec<Vec<u32>> = (0..n_prompts).map(|i| ids[i * t..(i + 1) * t].to_vec()).collect();
     let kv_int8 = flag(a, "--kv") != Some("fp32");
     let bs = 16u32;
@@ -1285,7 +1284,7 @@ fn serve_accuracy(a: &[String]) {
     let mut reference: Option<Outcome> = None;
     for (label, tier, precision) in tiers {
         let t0 = Instant::now();
-        let mut eng = qwen3::serve::Engine::from_map_tier(cfg.clone(), &tensors, bs, num_blocks, 8, mbs, 512, kv_int8, tier);
+        let mut eng = qwen3::serve::Engine::from_source_tier(cfg.clone(), &*src, bs, num_blocks, 8, mbs, 512, kv_int8, tier);
         eng.set_gemm_precision(precision);
         let landed = eng.weights_tier();
         let mut logits = Vec::new();
@@ -1353,6 +1352,21 @@ fn serve_calls(a: &[String], cfg: &QwenConfig, model_name: &str) {
     );
 }
 
+/// The decoder tensors of `src` as an f32 host map, one tensor at a time: what a training init (which takes a
+/// map) is seeded from.
+fn host_tensors(cfg: &QwenConfig, src: &dyn checkpoint::TensorSource) -> std::collections::HashMap<String, Vec<f32>> {
+    let mut map = std::collections::HashMap::new();
+    for name in cfg.param_list().into_iter().map(|(n, _)| n).chain(std::iter::once(cfg.head_weight().to_string())) {
+        if map.contains_key(&name) {
+            continue;
+        }
+        let mut data = Vec::new();
+        assert!(src.with_tensor_chunks(&name, 1 << 22, &mut |_, c| data.extend_from_slice(c)), "checkpoint missing tensor {name}");
+        map.insert(name, data);
+    }
+    map
+}
+
 /// The value after `flag` in argv, if present.
 fn flag<'a>(a: &'a [String], flag: &str) -> Option<&'a str> {
     a.iter().position(|x| x == flag).and_then(|i| a.get(i + 1)).map(|s| s.as_str())
@@ -1400,11 +1414,10 @@ fn lora_decode_bench(a: &[String]) {
     let shard = qwen3::Shard::whole(cfg.n_layers as usize);
     let t0 = Instant::now();
     let mut base = Qwen::new_shard_dt_decode(cfg.clone(), ctx, &*src, shard.clone(), qwen3::Dtype::F32);
-    let mut tensors = qwen3::serve::Engine::tensors_from(&cfg, &*src).unwrap_or_else(|e| panic!("{e}"));
     drop(src);
-    qwen3::lora::fold_adapter_into(&mut tensors, adapter).unwrap_or_else(|e| panic!("{e}"));
-    let folded = Qwen::new_shard_dt_decode(cfg.clone(), ctx, &tensors, shard, qwen3::Dtype::F32);
-    drop(tensors);
+    let folded_src = model::lora::device_adapter::FoldedSource::open(qwen3::open_checkpoint(weights).unwrap_or_else(|e| panic!("{e}")).1, adapter).unwrap_or_else(|e| panic!("{e}"));
+    let folded = Qwen::new_shard_dt_decode(cfg.clone(), ctx, &folded_src, shard, qwen3::Dtype::F32);
+    drop(folded_src);
     eprintln!("built base + folded in {:.1}s", t0.elapsed().as_secs_f32());
     if step_cache {
         // The served path's entry count (`qwen3::caps`).
@@ -1477,7 +1490,7 @@ fn lora_train_bench(a: &[String], shape: QwenConfig, model_name: &str) {
         Some(w) => {
             // Any checkpoint `open_checkpoint` reads: a brain file, a Hugging Face directory or a GGUF.
             let (mut cfg, src) = qwen3::open_checkpoint(w).unwrap_or_else(|e| panic!("{e}"));
-            let base = qwen3::serve::Engine::tensors_from(&cfg, &*src).unwrap_or_else(|e| panic!("{e}"));
+            let base = host_tensors(&cfg, &*src);
             drop(src);
             cfg.lora = Some(lora);
             let mut init = qwen3::init_weights(&cfg, 7);

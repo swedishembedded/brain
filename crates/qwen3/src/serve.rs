@@ -1428,7 +1428,7 @@ impl Engine {
                     let mut parts: Vec<f32> = Vec::new();
                     for leaf in QKV_BIAS {
                         let name = format!("blocks.{l}.{leaf}");
-                        assert!(weights.with_tensor(&name, &mut |b| parts.extend_from_slice(b)), "serve: missing weight {name}");
+                        assert!(weights.with_tensor_chunks(&name, 1 << 20, &mut |_, b| parts.extend_from_slice(b)), "serve: missing weight {name}");
                     }
                     gpu.storage_init("qkv_bias", &parts)
                 })
@@ -1531,22 +1531,6 @@ impl Engine {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let tier = if weights_int8 { Dtype::I8 } else { Dtype::F32 };
         Engine::from_source_tier(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
-    }
-
-    /// The tensors an engine for `cfg` uploads, read from `src` (any checkpoint
-    /// [`crate::open_checkpoint`] opens), each decoded to f32 as it is read.
-    pub fn tensors_from(cfg: &QwenConfig, src: &dyn checkpoint::TensorSource) -> Result<HashMap<String, Vec<f32>>, String> {
-        let mut map = HashMap::new();
-        let names = decoder_param_list(cfg).into_iter().map(|(n, _)| n).chain(std::iter::once(cfg.head_weight().to_string()));
-        for name in names {
-            if map.contains_key(&name) {
-                continue;
-            }
-            let mut data = None;
-            src.with_tensor(&name, &mut |t| data = Some(t.to_vec()));
-            map.insert(name.clone(), data.ok_or_else(|| format!("serve: checkpoint missing tensor {name}"))?);
-        }
-        Ok(map)
     }
 
     /// Install a calibrated KV clip table, uploading its per-layer ceilings

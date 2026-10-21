@@ -18,8 +18,10 @@ use checkpoint::TensorSource;
 ///   ([`crate::gguf_import::open_source`]), with the shape its KV metadata
 ///   declares.
 /// - Any other file is a brain checkpoint, opened with
-///   [`checkpoint::weightio::WeightReader`] and configured by
-///   [`QwenConfig::from_reader`], which refuses a header missing a shape key.
+///   [`checkpoint::weightio::WeightReader`] (through its packed view when it
+///   stores bf16, FP8 or packed-int8 tensors, [`checkpoint::packed::stored_source`])
+///   and configured by [`QwenConfig::from_reader`], which refuses a header
+///   missing a shape key.
 pub fn open_checkpoint(path: &str) -> Result<(QwenConfig, Box<dyn TensorSource>), String> {
     let dir = std::path::Path::new(path);
     if dir.is_dir() {
@@ -35,14 +37,9 @@ pub fn open_checkpoint(path: &str) -> Result<(QwenConfig, Box<dyn TensorSource>)
         return Ok((cfg, Box::new(src)));
     }
     let cfg = QwenConfig::from_reader(&reader).map_err(|e| format!("{path}: {e}"))?;
-    // A file with block-scaled FP8 tensors carries their scales as sidecar tensors: only the packed view applies
-    // them, a plain read would hand back the raw 8-bit values.
-    let scaled_fp8 = reader.names().any(|n| reader.dtype(n).is_some_and(|d| d.starts_with("F8_")));
-    if scaled_fp8 {
-        let packed = checkpoint::packed::PackedSource::identity_lenient(Box::new(checkpoint::packed::PackedReader::new(reader)), checkpoint::packed::CodecRegistry::reference());
-        return Ok((cfg, Box::new(packed)));
-    }
-    Ok((cfg, Box::new(reader)))
+    // A file with reduced-precision, block-scaled FP8 or packed-int8 tensors is read through its packed view: the
+    // FP8 scales are sidecar tensors only that view applies, and the others upload in their stored encoding.
+    Ok((cfg, checkpoint::packed::stored_source(reader)))
 }
 
 /// The config of the checkpoint at `path`, as [`open_checkpoint`] resolves it,

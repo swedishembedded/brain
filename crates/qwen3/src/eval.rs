@@ -19,7 +19,6 @@
 //! policy prefers each pair's chosen turn over its rejected one than a
 //! reference does, over the same supervised positions.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use data::chat::{ChatSample, RenderOpts};
@@ -45,6 +44,18 @@ pub struct ChatScore {
     pub skipped: usize,
 }
 
+/// The scored model's configuration and its tensors under brain's names, read one at a time from whatever
+/// `weights` is on disk (a brain checkpoint, a GGUF or a `transformers` directory), with `adapter`'s LoRA delta
+/// folded into each targeted linear as it is read: the same zero-inference-overhead fold a resident serves a named
+/// adapter with, and no whole-model host map. A folded model has no separate adapter parameters (`cfg.lora` is `None`).
+fn scored_source(weights: &str, adapter: Option<&str>) -> (QwenConfig, Box<dyn checkpoint::TensorSource>) {
+    let (mut cfg, src) = crate::open_checkpoint(weights).unwrap_or_else(|e| panic!("{e}"));
+    let Some(a) = adapter else { return (cfg, src) };
+    let folded = model::lora::device_adapter::FoldedSource::open(src, a).expect("fold adapter into base tensors");
+    cfg.lora = None;
+    (cfg, Box::new(folded))
+}
+
 /// Build a servable [`Qwen`] from `weights`, optionally folding a LoRA
 /// `adapter` (an adapter-only safetensors file, `qwen3::lora::save_adapter`'s
 /// output) into the base tensors first -- the same zero-inference-overhead
@@ -53,38 +64,18 @@ pub struct ChatScore {
 /// tier both builds use; an fp32 master copy is kept nowhere when `dt`
 /// differs, so base and adapter scores must pass the SAME tier or the
 /// comparison crosses tiers.
-/// The base's configuration and every tensor under brain's names as host
-/// f32, from whatever `weights` is on disk (a brain checkpoint, a GGUF or a
-/// `transformers` directory).
-fn base_tensors(weights: &str) -> (QwenConfig, HashMap<String, Vec<f32>>) {
-    let (cfg, src) = crate::open_checkpoint(weights).unwrap_or_else(|e| panic!("{e}"));
-    let tensors = crate::serve::Engine::tensors_from(&cfg, &*src).unwrap_or_else(|e| panic!("{weights}: {e}"));
-    (cfg, tensors)
-}
-
 fn load_scored_model(weights: &str, adapter: Option<&str>, t: u32, dt: Dtype) -> Qwen {
-    match adapter {
-        None => {
-            let (cfg, src) = crate::open_checkpoint(weights).unwrap_or_else(|e| panic!("{e}"));
-            let shard = crate::Shard::whole(cfg.n_layers as usize);
-            Qwen::new_shard_dt(cfg, 1, t, &*src, shard, dt)
-        }
-        Some(a) => {
-            let (mut cfg, mut tensors) = base_tensors(weights);
-            crate::lora::fold_adapter_into(&mut tensors, a).expect("fold adapter into base tensors");
-            // Folded: the delta is already baked into the base tensors, so
-            // this Qwen has no separate lora_a/lora_b params to build.
-            cfg.lora = None;
-            cfg.block_size = t;
-            // Score on an INFERENCE build: the trainable constructor holds
-            // grad + optimizer buffers on top of the fp32 master copy that
-            // no scorer ever steps - about 7x the weights' device memory
-            // for zero benefit, and an OOM on any card too small for a
-            // training build.
-            let shard = crate::Shard::whole(cfg.n_layers as usize);
-            Qwen::new_shard_dt(cfg, 1, t, &tensors, shard, dt)
-        }
+    let (mut cfg, src) = scored_source(weights, adapter);
+    if adapter.is_some() {
+        // Folded: the delta is already baked into the base tensors, so this Qwen has no separate lora_a/lora_b
+        // params to build.
+        cfg.block_size = t;
     }
+    // Score on an INFERENCE build: the trainable constructor holds grad + optimizer buffers on top of the fp32
+    // master copy that no scorer ever steps - about 7x the weights' device memory for zero benefit, and an OOM on
+    // any card too small for a training build.
+    let shard = crate::Shard::whole(cfg.n_layers as usize);
+    Qwen::new_shard_dt(cfg, 1, t, &*src, shard, dt)
 }
 
 fn argmax(s: &[f32]) -> u32 {
@@ -249,20 +240,6 @@ impl KvMode {
     }
 }
 
-/// Load the raw decoder tensors for scoring, optionally folding a LoRA
-/// adapter in first — the same `c.by_role("")` + `fold_adapter_into` shape
-/// [`load_scored_model`]'s adapter branch already uses, shared here so the
-/// legacy (`Qwen`) and paged (`Engine`) scoring backends build from
-/// identical tensors.
-fn load_scored_tensors(weights: &str, adapter: Option<&str>) -> (QwenConfig, HashMap<String, Vec<f32>>) {
-    let (mut cfg, mut tensors) = base_tensors(weights);
-    if let Some(a) = adapter {
-        crate::lora::fold_adapter_into(&mut tensors, a).expect("fold adapter into base tensors");
-        cfg.lora = None;
-    }
-    (cfg, tensors)
-}
-
 /// Like [`score_chat`], but scores through the paged serving engine
 /// (`crate::serve::Engine`) at a chosen [`KvMode`] instead of the legacy
 /// single-sequence `Qwen` — the actual engine `brain serve` runs, so this is
@@ -276,12 +253,12 @@ fn load_scored_tensors(weights: &str, adapter: Option<&str>) -> (QwenConfig, Has
 /// samples are independent, so there is nothing to share between them and
 /// nothing for prefix reuse to change about the measurement.
 pub fn score_chat_paged(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, samples: &[ChatSample], block: u32, kv: KvMode) -> ChatScore {
-    let (cfg, tensors) = load_scored_tensors(weights, adapter);
+    let (cfg, src) = scored_source(weights, adapter);
     let block_size = 16u32;
     let max_blocks_per_seq = block.div_ceil(block_size).max(1);
     let num_blocks = max_blocks_per_seq + 1; // one sequence in flight at a time
     let kv_int8 = kv != KvMode::Fp32;
-    let mut eng = crate::serve::Engine::from_map(cfg.clone(), &tensors, block_size, num_blocks, 1, max_blocks_per_seq, block.max(1), kv_int8, false);
+    let mut eng = crate::serve::Engine::from_source_tier(cfg.clone(), &*src, block_size, num_blocks, 1, max_blocks_per_seq, block.max(1), kv_int8, Dtype::F32);
     if kv == KvMode::Int8Calib {
         let dir = Path::new(weights).parent().unwrap_or_else(|| Path::new("."));
         let calib = model::kvcalib::KvCalib::from_model_dir(dir, cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize);
