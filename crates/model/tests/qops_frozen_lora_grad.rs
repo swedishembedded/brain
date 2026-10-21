@@ -448,3 +448,36 @@ fn a_small_tile_budget_changes_nothing_but_the_scratch() {
     }
     println!("{}", report.join("\n"));
 }
+
+/// The row norms of a weight and its product with a small dense matrix, taken through the bounded tile
+/// decode, equal what the decoded fp32 weight gives - for every tier and whether the weight is decoded in
+/// one tile or in single rows. DoRA's magnitude normalisation reads exactly these two quantities of its
+/// frozen base.
+#[test]
+fn row_norms_and_projections_through_the_tile_decode_equal_the_decoded_weight_of_every_tier() {
+    const N: usize = 24;
+    const R: usize = 3;
+    for budget in [u64::MAX / 8, 3 * 4 * K as u64] {
+        for label in TIERS {
+            let mut ops = ops();
+            ops.set_tile_budget_bytes(budget);
+            let mut rng = Lcg::random();
+            let case = build_case(&ops, label, N, K, &mut rng);
+            let g = ops.gpu();
+            let x = rng.vec_scaled(R * K, 1.0);
+            let (xb, norms, proj) = (g.storage_init("x", &x), g.storage((N) as u64), g.storage((N * R) as u64));
+            let mut steps = Vec::new();
+            ops.row_sq_norms(&mut steps, &case.weight, &norms);
+            ops.project_rows(&mut steps, &case.weight, &xb, R as u32, &proj);
+            g.submit(&[], &steps);
+
+            let w = f64s(&case.decoded);
+            let want_norms: Vec<f64> = (0..N).map(|n| w[n * K..(n + 1) * K].iter().map(|v| v * v).sum()).collect();
+            let want_proj: Vec<f64> = (0..N * R).map(|i| (0..K).map(|t| w[(i / R) * K + t] * x[(i % R) * K + t] as f64).sum()).collect();
+            for (what, got, want) in [("row norms", g.read(&norms, N), want_norms), ("projection", g.read(&proj, N * R), want_proj)] {
+                let a = agreement(&got, &want);
+                assert!(a.nonfinite == 0 && a.rel_l2 < 1e-5, "{label} at a {budget} byte tile: {what} rel_l2 {} max_abs {}", a.rel_l2, a.max_abs);
+            }
+        }
+    }
+}

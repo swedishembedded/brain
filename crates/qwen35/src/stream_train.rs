@@ -95,7 +95,7 @@ use model::gdn_mixer::{gdn_mixer_bwd, gdn_mixer_fwd, GdnMixerActs, GdnMixerGrads
 use model::gqa_mixer::{gqa_mixer_bwd, gqa_mixer_fwd_tc, GqaMixerActs, GqaMixerGrads, GqaMixerIds, GqaMixerShape, GqaMixerWeights};
 use model::ops::{Ops, Weight};
 use optim::Optim;
-use model::adapter::exec::AdapterRuntime;
+use model::adapter::exec::{AdapterRuntime, BoundBase};
 use paramstore::ParamStore;
 
 use crate::config::Qwen35Config;
@@ -306,6 +306,12 @@ impl LoraStore {
     }
 }
 
+/// The adapter runtime's view of one streamed linear: the adapter tensors in `lora` and the frozen `base` in
+/// the tier it was streamed at, so a kind that reads its base (DoRA) works over any tier.
+fn bound<'a>(lora: &'a LoraStore, ops: &'a Ops, base: &'a Weight) -> BoundBase<'a> {
+    BoundBase { params: &lora.ps, ops, weight: base }
+}
+
 /// Backward for one (possibly-LoRA) streamed linear `y = x*Wᵀ`, accumulating
 /// the input gradient into `dx` (flag `acc`) - a direct kernel-dispatch
 /// transcription of `Qwen35::proj_bwd`'s own body (see this module's own
@@ -323,7 +329,7 @@ fn proj_bwd_streamed(ops: &Ops, lora: &LoraStore, leaf: &str, d_out: &DeviceBuff
     debug_assert_eq!((base.n(), base.k()), (nout, k), "proj_bwd_streamed: weight shape does not match the linear");
     let base_dx = |s: &mut Vec<Step>, dy: &DeviceBuffer| ops.matmul_dx(s, base, dy, m, dx, acc != 0);
     if lora.rt.hits(leaf) {
-        lora.rt.backward(ops.tensor_gemm(), s, &lora.ps, wname, d_out, x, dx, m, k, nout, &base_dx);
+        lora.rt.backward(ops.tensor_gemm(), s, &bound(lora, ops, base), wname, d_out, x, dx, m, k, nout, &base_dx);
     } else {
         base_dx(s, d_out);
     }
@@ -359,12 +365,12 @@ fn mlp_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lo
     }
     if lora.rt.hits("gate") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("gate.weight"), xn2, &gate_pre, n, d, ff);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, gate), &p("gate.weight"), xn2, &gate_pre, n, d, ff);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("up") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("up.weight"), xn2, &up, n, d, ff);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, up_w), &p("up.weight"), xn2, &up, n, d, ff);
         gpu.submit(&[], &s);
     }
 
@@ -380,7 +386,7 @@ fn mlp_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lo
     }
     if lora.rt.hits("down") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("down.weight"), &h, &down, n, ff, d);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, down_w), &p("down.weight"), &h, &down, n, ff, d);
         gpu.submit(&[], &s);
     }
 
@@ -465,7 +471,7 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     }
     if lora.rt.hits("in_proj_qkv") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("in_proj_qkv.weight"), &xn1, &mixed_qkv, n, d, conv_dim);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, &layer.in_proj_qkv), &p("in_proj_qkv.weight"), &xn1, &mixed_qkv, n, d, conv_dim);
         gpu.submit(&[], &s);
     }
 
@@ -482,17 +488,17 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     }
     if lora.rt.hits("in_proj_b") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("in_proj_b.weight"), &xn1, &bproj, n, d, nvh);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, &layer.in_proj_b), &p("in_proj_b.weight"), &xn1, &bproj, n, d, nvh);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("in_proj_a") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("in_proj_a.weight"), &xn1, &aproj, n, d, nvh);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, &layer.in_proj_a), &p("in_proj_a.weight"), &xn1, &aproj, n, d, nvh);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("in_proj_z") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("in_proj_z.weight"), &xn1, &z, n, d, value_dim);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, &layer.in_proj_z), &p("in_proj_z.weight"), &xn1, &z, n, d, value_dim);
         gpu.submit(&[], &s);
     }
 
@@ -510,7 +516,7 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     }
     if lora.rt.hits("out_proj") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("out_proj.weight"), &gated, &mixer_out, n, value_dim, d);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, &layer.out_proj), &p("out_proj.weight"), &gated, &mixer_out, n, value_dim, d);
         gpu.submit(&[], &s);
     }
 
@@ -641,17 +647,17 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     }
     if lora.rt.hits("q_proj") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("q_proj.weight"), &xn1, &q_full, n, d, qpd);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, &layer.q_proj), &p("q_proj.weight"), &xn1, &q_full, n, d, qpd);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("k_proj") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("k_proj.weight"), &xn1, &k, n, d, kvd);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, &layer.k_proj), &p("k_proj.weight"), &xn1, &k, n, d, kvd);
         gpu.submit(&[], &s);
     }
     if lora.rt.hits("v_proj") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("v_proj.weight"), &xn1, &v, n, d, kvd);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, &layer.v_proj), &p("v_proj.weight"), &xn1, &v, n, d, kvd);
         gpu.submit(&[], &s);
     }
 
@@ -670,7 +676,7 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     }
     if lora.rt.hits("o_proj") {
         let mut s = Vec::new();
-        lora.rt.forward(ops.tensor_gemm(), &mut s, &lora.ps, &p("o_proj.weight"), &ctx_gated, &mixer_out, n, shape.qd(), d);
+        lora.rt.forward(ops.tensor_gemm(), &mut s, &bound(lora, ops, &layer.o_proj), &p("o_proj.weight"), &ctx_gated, &mixer_out, n, shape.qd(), d);
         gpu.submit(&[], &s);
     }
 

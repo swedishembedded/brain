@@ -37,6 +37,7 @@ use paramstore::ParamStore;
 use super::device::{lora_names, param_name, LoraCfg};
 use super::kind::{lokr_factors, DeviceKind, DORA_A, DORA_B, DORA_M, IA3_D, LOKR_W1, LOKR_W2};
 use crate::block::{self, pick_gemm};
+use crate::ops::{Ops, Weight};
 
 /// Kernels the non-LoRA kinds dispatch beyond the ones every adapter model
 /// registers; a model that trains such a kind appends them to its pipelines
@@ -61,19 +62,6 @@ pub fn add_kernels(list: &mut Vec<(&'static str, &'static str)>) {
     }
 }
 
-/// Refuse, at configure time, an adapter whose runtime cannot read the frozen
-/// base it would be attached to. DoRA normalises by the row norms of the base
-/// weight, so it needs that weight resident as fp32 ([`ParamAccess::base`]); a
-/// quantized or half-precision base (`base_format`, e.g. `"int8"`) does not keep
-/// it, and the forward would otherwise stop on a panic mid-run. Every other kind
-/// reads only the activations and works over any base.
-pub fn check_base_format(kind: DeviceKind, base_format: &str, base_is_fp32: bool) -> Result<(), String> {
-    if kind == DeviceKind::Dora && !base_is_fp32 {
-        return Err(format!("a dora adapter reads the base weight as fp32 for its row norms, which a {base_format} base does not keep; train it over an f32 base"));
-    }
-    Ok(())
-}
-
 /// Read access to the adapter tensors of a model: weights, and gradients where
 /// a tensor trains. Implemented for [`ParamStore`]; a streamed trainer that
 /// keeps its adapters in a store of their own implements it for that.
@@ -82,10 +70,70 @@ pub trait ParamAccess {
     /// `None` for a frozen tensor (no gradient buffer exists).
     fn grad(&self, name: &str) -> Option<&DeviceBuffer>;
     /// The base weight `name` as a resident fp32 `[out, in]` buffer, when it
-    /// is one. A kind that reads the base itself (DoRA's row norms) needs it;
-    /// a quantized base answers `None` and the kind refuses.
+    /// is one. A kind that reads the base itself (DoRA's row norms) reads it
+    /// through this or [`Self::base_weight`].
     fn base(&self, _name: &str) -> Option<&DeviceBuffer> {
         None
+    }
+    /// The base weight `name` in the tier it is stored at, with the [`Ops`] that
+    /// reads it: any tier (bf16, int8, NF4, FP8, ...) is read through the
+    /// shared bounded tile decode, never expanded to fp32 as a whole. Preferred
+    /// over [`Self::base`] when both answer.
+    fn base_weight(&self, _name: &str) -> Option<BaseWeight<'_>> {
+        None
+    }
+}
+
+/// A frozen base weight in its storage tier and the ops that decode it.
+#[derive(Clone, Copy)]
+pub struct BaseWeight<'a> {
+    pub ops: &'a Ops,
+    pub weight: &'a Weight,
+}
+
+/// [`ParamAccess`] over adapter tensors in `params` and frozen base weights
+/// held in their storage tier in `weights`: what a model whose linears are
+/// quantized (or bf16) hands the runtime so a kind that reads the base
+/// (DoRA) works over any tier.
+pub struct TieredBase<'a> {
+    pub params: &'a dyn ParamAccess,
+    pub ops: &'a Ops,
+    /// The frozen linears held in a storage tier, by weight name.
+    pub weights: &'a HashMap<String, Weight>,
+}
+
+/// [`ParamAccess`] for the one linear a layer-streamed trainer has resident right now: `weight` is the
+/// frozen base of whichever linear is adapted, whatever tier it was streamed in at.
+pub struct BoundBase<'a> {
+    pub params: &'a dyn ParamAccess,
+    pub ops: &'a Ops,
+    pub weight: &'a Weight,
+}
+
+impl ParamAccess for BoundBase<'_> {
+    fn weight(&self, name: &str) -> &DeviceBuffer {
+        self.params.weight(name)
+    }
+    fn grad(&self, name: &str) -> Option<&DeviceBuffer> {
+        self.params.grad(name)
+    }
+    fn base_weight(&self, _name: &str) -> Option<BaseWeight<'_>> {
+        Some(BaseWeight { ops: self.ops, weight: self.weight })
+    }
+}
+
+impl ParamAccess for TieredBase<'_> {
+    fn weight(&self, name: &str) -> &DeviceBuffer {
+        self.params.weight(name)
+    }
+    fn grad(&self, name: &str) -> Option<&DeviceBuffer> {
+        self.params.grad(name)
+    }
+    fn base(&self, name: &str) -> Option<&DeviceBuffer> {
+        self.params.base(name)
+    }
+    fn base_weight(&self, name: &str) -> Option<BaseWeight<'_>> {
+        self.weights.get(name).map(|weight| BaseWeight { ops: self.ops, weight })
     }
 }
 
@@ -99,6 +147,14 @@ impl ParamAccess for ParamStore {
     fn base(&self, name: &str) -> Option<&DeviceBuffer> {
         self.weight.get(name)
     }
+}
+
+/// How DoRA reads the frozen base weight `[nout, k]` of an adapted linear.
+enum BaseRead<'a> {
+    /// A resident fp32 buffer, read by the runtime's own kernels.
+    Dense(&'a DeviceBuffer),
+    /// A storage tier (bf16, int8, NF4, FP8, ...), read by the shared tile decode.
+    Tiered(BaseWeight<'a>),
 }
 
 /// Kernel indices the runtime dispatches, resolved by name once. The gemv and
@@ -482,9 +538,44 @@ impl AdapterRuntime {
         self.gpu.step(kern, &[a, b, out], &[rows, d, 0, 0, f(1.0)], rows)
     }
 
-    /// The base weight of `base`, resident as fp32: DoRA reads it for row norms.
-    fn dora_base<'a>(p: &'a dyn ParamAccess, base: &str) -> &'a DeviceBuffer {
-        p.base(base).unwrap_or_else(|| panic!("adapter runtime: a dora adapter needs {base} resident as fp32; the configure step (check_base_format) should have refused this base"))
+    /// The base weight of `base` as DoRA reads it: through the shared tile decode when the model holds it
+    /// in a storage tier, else as the resident fp32 buffer.
+    fn dora_base<'a>(p: &'a dyn ParamAccess, base: &str) -> BaseRead<'a> {
+        if let Some(tiered) = p.base_weight(base) {
+            return BaseRead::Tiered(tiered);
+        }
+        match p.base(base) {
+            Some(dense) => BaseRead::Dense(dense),
+            None => panic!("adapter runtime: a dora adapter reads the base weight {base}: its model must answer ParamAccess::base_weight (any storage tier) or ParamAccess::base (resident fp32)"),
+        }
+    }
+
+    /// `out[n] = |W_n|^2` of the `[nout, k]` base.
+    fn base_sq_norms(&self, s: &mut Vec<Step>, w: &BaseRead, out: &DeviceBuffer, nout: u32, k: u32) {
+        match w {
+            BaseRead::Dense(w) => s.push(self.row_dot(DeviceKind::Dora, w, w, out, nout, k)),
+            BaseRead::Tiered(b) => b.ops.row_sq_norms(s, b.weight, out),
+        }
+    }
+
+    /// `cm[n, r] = sum_k W[n, k] A[r, k]` (`W A^t`).
+    fn base_project(&self, s: &mut Vec<Step>, w: &BaseRead, a: &DeviceBuffer, r: u32, k: u32, nout: u32, cm: &DeviceBuffer) {
+        match w {
+            BaseRead::Dense(w) => {
+                let ct = self.scratch(4, (r * nout) as u64);
+                s.push(self.gpu.step(self.k.matmul, &[a, w, &ct], &[r, k, nout], r * nout));
+                s.push(self.swap(&ct, cm, 1, r, nout));
+            }
+            BaseRead::Tiered(b) => b.ops.project_rows(s, b.weight, a, r, cm),
+        }
+    }
+
+    /// `f[r, k] = sum_n E^t[r, n] W[n, k]` for `et` of shape `[r, nout]`.
+    fn base_input_grad(&self, s: &mut Vec<Step>, w: &BaseRead, et: &DeviceBuffer, r: u32, k: u32, nout: u32, f: &DeviceBuffer) {
+        match w {
+            BaseRead::Dense(w) => s.push(self.gpu.step(self.k.dx, &[et, w, f], &[r, k, nout, 0], r * k)),
+            BaseRead::Tiered(b) => b.ops.matmul_dx(s, b.weight, et, r, f, false),
+        }
     }
 
     /// DoRA's per-channel gain of `base`: `g = (1 + mu) * |W_o| / |W_o + s (BA)_o|`
@@ -497,14 +588,13 @@ impl AdapterRuntime {
         let (a, b, mu) = (p.weight(&param_name(base, DORA_A)), p.weight(&param_name(base, DORA_B)), p.weight(&param_name(base, DORA_M)));
         let w = Self::dora_base(p, base);
         let rr = (r * nout) as u64;
-        let (ct, gm, bg, cm) = (self.scratch(4, rr), self.scratch(5, (r * r) as u64), self.scratch(6, rr), self.scratch(7, rr));
+        let (gm, bg, cm) = (self.scratch(5, (r * r) as u64), self.scratch(6, rr), self.scratch(7, rr));
         let (w2, s1, s2, gain) = (self.scratch(8, nout as u64), self.scratch(9, nout as u64), self.scratch(10, nout as u64), self.scratch(11, 3 * nout as u64));
         let g = &self.gpu;
-        s.push(g.step(self.k.matmul, &[a, w, &ct], &[r, k, nout], r * nout));
+        self.base_project(s, &w, a, r, k, nout, &cm);
         s.push(g.step(self.k.matmul, &[a, a, &gm], &[r, k, r], r * r));
         s.push(g.step(self.k.matmul, &[b, &gm, &bg], &[nout, r, r], nout * r));
-        s.push(self.swap(&ct, &cm, 1, r, nout));
-        s.push(self.row_dot(kind, w, w, &w2, nout, k));
+        self.base_sq_norms(s, &w, &w2, nout, k);
         s.push(self.row_dot(kind, b, &cm, &s1, nout, r));
         s.push(self.row_dot(kind, b, &bg, &s2, nout, r));
         let kern = Kernels::extra(self.k.dora_gain, "dora_gain", kind);
@@ -591,7 +681,7 @@ impl AdapterRuntime {
             s.push(self.chan(kind, b, &cvec, &e, nout * r, nout, r));
             s.push(self.swap(&e, &et, 1, nout, r));
             let (f1, f2, etb) = (self.scratch(21, (r * k) as u64), self.scratch(22, (r * k) as u64), self.scratch(23, (r * r) as u64));
-            s.push(self.gpu.step(self.k.dx, &[&et, w, &f1], &[r, k, nout, 0], r * k));
+            self.base_input_grad(s, &w, &et, r, k, nout, &f1);
             s.push(g.step(self.k.grad_scale, &[&etb], &[r * r, f(0.0)], r * r));
             s.push(self.gpu.step(self.k.dw, &[&e, b, &etb], &[nout, r, r], r * r));
             s.push(self.gpu.step(self.k.dx, &[&etb, a, &f2], &[r, k, r, 0], r * k));
@@ -605,19 +695,6 @@ impl AdapterRuntime {
 mod tests {
     use super::*;
     use gpu_core::Dispatch;
-
-    /// A DoRA run over a quantized or half-precision base is refused by name at
-    /// configure time instead of panicking in the first forward; every other
-    /// kind, and DoRA over fp32, passes.
-    #[test]
-    fn dora_over_a_non_fp32_base_is_refused_with_the_format_named() {
-        let err = check_base_format(DeviceKind::Dora, "int8", false).unwrap_err();
-        assert!(err.contains("dora") && err.contains("int8"), "{err}");
-        assert!(check_base_format(DeviceKind::Dora, "f32", true).is_ok());
-        for kind in [DeviceKind::Lora, DeviceKind::Ia3, DeviceKind::Lokr] {
-            assert!(check_base_format(kind, "nf4", false).is_ok(), "{} reads only activations", kind.name());
-        }
-    }
 
     /// A model that did not register the tiled kernel must get the reference
     /// kernel with one thread per output: pairing it with a tile-count grid

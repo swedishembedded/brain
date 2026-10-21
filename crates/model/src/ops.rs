@@ -480,6 +480,8 @@ pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
             // that gathers and scatters tiles, and the bf16 gradient accumulation.
             ("copy_cols", kernels::COPY_COLS),
             ("accum_bf16", kernels::ACCUM_BF16),
+            // The per-row reduction of `Ops::row_sq_norms`.
+            ("row_dot", kernels::ROW_DOT),
         ];
         list.extend(kernels::template::weight_decode_variants());
         list
@@ -1160,6 +1162,7 @@ struct StreamedUploads {
 mod sink;
 mod upload_source;
 mod tiled;
+mod decoded;
 pub use sink::{rewrite_tile, DeviceWeightSink};
 pub use upload_source::{stored_tier, stored_tier_policy, upload_fused_from_source, upload_from_source, upload_group_preserved, upload_preserved, FusedGroup};
 pub use upload_source::{conversion_policy, encoding_for};

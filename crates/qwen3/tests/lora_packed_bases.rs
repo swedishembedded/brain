@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use data::rng::Rng;
 use model::fp8::{dequantize_weight_fp8, quantize_weight_fp8, Fp8Format};
 use model::lut4::{dequantize_weight_lut4, quantize_weight_lut4, NF4_LUT};
+use model::adapter::DeviceKind;
 use model::ops::FP8_BLOCK;
 use qwen3::{Dtype, LoraCfg, Qwen, QwenConfig};
 
@@ -38,7 +39,12 @@ fn batch() -> (Vec<u32>, Vec<u32>) {
 
 /// Every contraction width a multiple of the NF4 group (32).
 fn config() -> QwenConfig {
-    QwenConfig { block_size: BLOCK, d_model: 64, n_heads: 4, n_kv_heads: 2, head_dim: 16, d_ff: 128, lora: Some(LoraCfg::attn(2, 4.0)), ..QwenConfig::tiny() }
+    config_of(DeviceKind::Lora)
+}
+
+/// [`config`] with the adapter kind chosen.
+fn config_of(kind: DeviceKind) -> QwenConfig {
+    QwenConfig { block_size: BLOCK, d_model: 64, n_heads: 4, n_kv_heads: 2, head_dim: 16, d_ff: 128, lora: Some(LoraCfg::attn(2, 4.0).with_kind(kind)), ..QwenConfig::tiny() }
 }
 
 /// One packed encoding: its dtype and how the weights are rounded through it.
@@ -73,7 +79,7 @@ fn weights(cfg: &QwenConfig, enc: &Encoding, adapter_b: f32) -> HashMap<String, 
     // seed: only the adapter values; the agreement bounds below do not depend on them
     let mut rng = Rng::new(5);
     for (name, v) in w.iter_mut() {
-        if name.ends_with(".lora_b") {
+        if name.ends_with(".lora_b") || name.ends_with(".dora_b") {
             v.iter_mut().for_each(|x| *x = (rng.next_f32() * 2.0 - 1.0) * adapter_b);
         } else if qwen3::q8::Q8::is_i8_linear(name) {
             let k = if name.ends_with("down.weight") { cfg.d_ff } else if name.ends_with("wo.weight") { cfg.q_dim() } else { cfg.d_model } as usize;
@@ -118,8 +124,35 @@ fn a_packed_base_trains_the_adapters_an_fp32_build_over_its_decoded_values_does(
 
 #[test]
 fn a_packed_base_still_overfits_a_fixed_batch() {
+    overfits(DeviceKind::Lora);
+}
+
+/// DoRA reads its frozen base's row norms through the tile decode, so it trains over the packed bases too.
+#[test]
+fn a_dora_adapter_over_a_packed_base_matches_the_decoded_fp32_build_and_overfits() {
     for enc in &ENCODINGS {
-        let cfg = config();
+        let cfg = config_of(DeviceKind::Dora);
+        let init = weights(&cfg, enc, 0.3);
+        let (want_loss, want) = loss_and_grads(&Qwen::new(cfg.clone(), 1, BLOCK, &init));
+        let (loss, got) = loss_and_grads(&Qwen::new_lora_dt(cfg, 1, BLOCK, &init, enc.dtype));
+        assert!((loss - want_loss).abs() < 1e-3 * want_loss.abs().max(1.0), "{}: loss {loss} vs {want_loss}", enc.name);
+        let mut checked = 0;
+        for ((name, g), (_, w)) in got.iter().zip(&want) {
+            if w.iter().all(|x| *x == 0.0) {
+                continue;
+            }
+            checked += 1;
+            let c = cosine(g, w);
+            assert!(c > 0.999, "{}: {name}: adapter gradient cosine {c}", enc.name);
+        }
+        assert!(checked >= 12, "{}: the dora factors and magnitudes all received gradient ({checked} tensors)", enc.name);
+    }
+    overfits(DeviceKind::Dora);
+}
+
+fn overfits(kind: DeviceKind) {
+    for enc in &ENCODINGS {
+        let cfg = config_of(kind);
         let init = weights(&cfg, enc, 0.0);
         let m = Qwen::new_lora_dt(cfg, 1, BLOCK, &init, enc.dtype);
         let (tokens, targets) = batch();
@@ -133,7 +166,7 @@ fn a_packed_base_still_overfits_a_fixed_batch() {
             m.poll_wait();
         }
         let after = m.forward();
-        assert!(after < before * 0.8, "{}: the packed base did not learn: {before} -> {after}", enc.name);
+        assert!(after < before * 0.8, "{} {}: the packed base did not learn: {before} -> {after}", kind.name(), enc.name);
     }
 }
 

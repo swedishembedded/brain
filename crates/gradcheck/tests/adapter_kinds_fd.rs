@@ -125,3 +125,33 @@ fn rslora_changes_the_scale_the_forward_applies() {
     let (plain, rs) = (loss_with(all[0].1.clone()), loss_with(all[1].1.clone()));
     assert!((plain - rs).abs() > 1e-6, "rsLoRA applied the plain scale: {plain} vs {rs}");
 }
+
+/// DoRA over a frozen base held in 4-bit NormalFloat or block-scaled FP8 (never expanded to fp32 on the device) is
+/// differentiated correctly: the norm of the adapted weight rows is formed from tile-decoded base
+/// values and the gradient reaches both factors and the magnitude vector.
+#[test]
+fn dora_over_a_packed_base_matches_finite_differences() {
+    // Every contraction width a multiple of the 4-bit group (32).
+    let cfg = QwenConfig {
+        d_model: 64,
+        n_heads: 4,
+        n_kv_heads: 2,
+        head_dim: 16,
+        d_ff: 128,
+        lora: Some(LoraCfg::new(2, 4.0, qwen3::finetune::LORA_TARGETS.iter().map(|t| t.to_string()).collect()).with_kind(DeviceKind::Dora)),
+        ..QwenConfig::tiny()
+    };
+    for dtype in [qwen3::Dtype::NF4, qwen3::Dtype::F8E4M3] {
+        let init = qwen3::init_weights(&cfg, SEED);
+        let model = Qwen::new_lora_dt(cfg.clone(), 2, 6, &init, dtype);
+        assert_eq!(model.linear_dtype(), Some(dtype), "the base is held as asked, not widened");
+        let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+        let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+        model.set_batch(&x, &y);
+        train(&model, 5);
+        let report = directional_check(&model, 1.25e-3, 4, SEED ^ 0x1234);
+        let fails = report.failures(4e-3, 8e-2);
+        assert!(fails.is_empty(), "{dtype:?}: {:?}", fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>());
+        assert!(report.dead_gradients().is_empty(), "{dtype:?}: dead gradients");
+    }
+}

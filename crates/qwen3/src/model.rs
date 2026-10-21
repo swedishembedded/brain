@@ -971,8 +971,8 @@ struct AttachedRuntime {
     rank: u32,
     alpha: f32,
     params: HashMap<String, DeviceBuffer>,
-    /// The fp32 base weights of the adapted linears, for the kinds that read
-    /// them (DoRA).
+    /// The fp32 base weights of the adapted linears the build holds as fp32 (not in
+    /// a storage tier), for the kinds that read them (DoRA).
     bases: HashMap<String, DeviceBuffer>,
 }
 
@@ -2025,6 +2025,12 @@ impl Qwen {
         self.gpu.kernel_index(name).unwrap_or_else(|| panic!("qwen: kernel {name} is not registered"))
     }
 
+    /// The adapter runtime's view of this build: the adapter tensors in the parameter store and the
+    /// frozen linears in the tier they are held at, so a kind that reads its base (DoRA) works over any tier.
+    fn adapter_params(&self) -> model::adapter::exec::TieredBase<'_> {
+        model::adapter::exec::TieredBase { params: &self.ps, ops: &self.ops, weights: &self.weights }
+    }
+
     /// Forward correction of a targeted linear: `y += scale * (x A^t) B^t`, or
     /// an attached adapter's runtime correction. No-op for an untargeted leaf.
     /// `m` x `k` is the input, `nout` the output.
@@ -2049,13 +2055,14 @@ impl Qwen {
             }
             (Some(AdapterOverride::Runtime(at)), false) => {
                 if at.has(wname) {
-                    at.rt.forward(self.ops.tensor_gemm(), s, &**at, wname, x, y, m, k, nout);
+                    let params = model::adapter::exec::TieredBase { params: &**at, ops: &self.ops, weights: &self.weights };
+                    at.rt.forward(self.ops.tensor_gemm(), s, &params, wname, x, y, m, k, nout);
                 }
             }
             (Some(AdapterOverride::BaseOnly), false) => {}
             _ => {
                 if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
-                    rt.forward(self.ops.tensor_gemm(), s, &self.ps, wname, x, y, m, k, nout);
+                    rt.forward(self.ops.tensor_gemm(), s, &self.adapter_params(), wname, x, y, m, k, nout);
                 }
             }
         }
@@ -2072,7 +2079,7 @@ impl Qwen {
                 // base: dx += d_out·W (frozen weight - no dW). d_out is NOT mutated
                 // here: for `wo` it is `dxmid`, reused downstream as the residual
                 // grad.
-                rt.backward(self.ops.tensor_gemm(), s, &self.ps, wname, d_out, x, dx, m, k, nout, &|s, dy| self.base_dx(s, dy, wname, dx, m, k, nout, acc));
+                rt.backward(self.ops.tensor_gemm(), s, &self.adapter_params(), wname, d_out, x, dx, m, k, nout, &|s, dy| self.base_dx(s, dy, wname, dx, m, k, nout, acc));
             }
             None => {
                 if self.trainable(wname) {
@@ -3740,12 +3747,14 @@ impl Qwen {
             if !linear_layer(&base, self.cfg.n_layers).is_some_and(|l| self.shard.owns(l)) {
                 continue;
             }
-            if file.kind == model::adapter::DeviceKind::Dora {
+            // DoRA reads its base: a linear held in a storage tier is read through the shared tile decode,
+            // an fp32 one from the parameter store.
+            if file.kind == model::adapter::DeviceKind::Dora && !self.weights.contains_key(&base) {
                 match self.ps.weight.get(&base) {
                     Some(w) => {
                         bases.insert(base.clone(), w.clone());
                     }
-                    None => return Err(format!("{base}: a dora adapter reads the base weight, which must be resident as fp32")),
+                    None => return Err(format!("{base}: a dora adapter reads the base weight, which this build holds neither in a storage tier nor as fp32")),
                 }
             }
             for suffix in file.kind.suffixes() {

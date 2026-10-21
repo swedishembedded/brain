@@ -2017,6 +2017,12 @@ impl Qwen35 {
         self.ps.grad.contains_key(name)
     }
 
+    /// The adapter runtime's view of this build: the adapter tensors in the parameter store and the
+    /// frozen linears in the tier they are held at, so a kind that reads its base (DoRA) works over any tier.
+    fn adapter_params(&self) -> model::adapter::exec::TieredBase<'_> {
+        model::adapter::exec::TieredBase { params: &self.ps, ops: &self.ops, weights: &self.weights }
+    }
+
     /// The training LoRA's correction of a targeted linear: `y += scale *
     /// (x A^t) B^t`. No-op for an untargeted leaf (including `fc_e`, `fc_h` and
     /// `lm_head`, which are never targetable). `m` x `k` is the input, `nout`
@@ -2024,7 +2030,7 @@ impl Qwen35 {
     #[allow(clippy::too_many_arguments)]
     fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
-            rt.forward(self.ops.tensor_gemm(), s, &self.ps, wname, x, y, m, k, nout);
+            rt.forward(self.ops.tensor_gemm(), s, &self.adapter_params(), wname, x, y, m, k, nout);
         }
     }
 
@@ -2310,7 +2316,7 @@ impl Qwen35 {
         match self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
             Some(rt) => {
                 // base: dx += d_out*W (frozen weight - no dW).
-                rt.backward(self.ops.tensor_gemm(), steps, &self.ps, wname, d_out, x, dx, m, k, nout, &|s, dy| self.base_dx(s, dy, wname, dx, m, k, nout, acc));
+                rt.backward(self.ops.tensor_gemm(), steps, &self.adapter_params(), wname, d_out, x, dx, m, k, nout, &|s, dy| self.base_dx(s, dy, wname, dx, m, k, nout, acc));
             }
             None => {
                 if self.trainable(wname) {

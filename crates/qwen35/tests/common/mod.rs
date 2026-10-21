@@ -50,9 +50,9 @@ pub fn weights(cfg: &Qwen35Config, adapter_b: f32) -> HashMap<String, Vec<f32>> 
     let mut w = qwen35::init::init_weights(cfg, 21);
     let mut rng = Rng::random();
     for (name, v) in w.iter_mut() {
-        if name.ends_with(".lora_b") {
+        if name.ends_with(".lora_b") || name.ends_with(".dora_b") {
             v.iter_mut().for_each(|x| *x = (rng.next_f32() * 2.0 - 1.0) * adapter_b);
-        } else if !name.contains(".lora_") {
+        } else if !name.contains(".lora_") && !name.contains(".dora_") {
             v.iter_mut().for_each(|x| *x = round_bf16(*x));
         }
     }

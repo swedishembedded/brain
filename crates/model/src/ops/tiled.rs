@@ -123,7 +123,7 @@ impl Ops {
         plan_linear(w.dtype(), rows, w.k(), self.tile_budget_bytes, self.gemm.can_dequant_bf16(1, w.k()))
     }
 
-    fn tiled_kernel(&self, name: &str) -> usize {
+    pub(super) fn tiled_kernel(&self, name: &str) -> usize {
         self.gpu.kernel_index(name).unwrap_or_else(|| {
             panic!(
                 "Ops: kernel '{name}' is not registered on this Gpu -- quantized products need \
@@ -189,7 +189,7 @@ impl Ops {
 
     /// `dst[r * dst_stride + dst_off + j] = src[r * src_stride + src_off + j]` for `r < rows`, `j < cnt`.
     #[allow(clippy::too_many_arguments)]
-    fn copy_cols(&self, s: &mut Vec<Step>, src: &DeviceBuffer, dst: &DeviceBuffer, rows: u32, cnt: u32, src_stride: u32, src_off: u32, dst_stride: u32, dst_off: u32) {
+    pub(super) fn copy_cols(&self, s: &mut Vec<Step>, src: &DeviceBuffer, dst: &DeviceBuffer, rows: u32, cnt: u32, src_stride: u32, src_off: u32, dst_stride: u32, dst_off: u32) {
         s.push(self.gpu.step(self.tiled_kernel("copy_cols"), &[src, dst], &[rows, cnt, src_stride, src_off, dst_stride, dst_off], rows * cnt));
     }
 
@@ -242,7 +242,7 @@ impl Ops {
         }
     }
 
-    fn for_each_tile_f32(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), mut product: impl FnMut(&mut Vec<Step>, &Weight, u32, u32, u32)) {
+    pub(super) fn for_each_tile_f32(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), mut product: impl FnMut(&mut Vec<Step>, &Weight, u32, u32, u32)) {
         let (first, count) = rows;
         let k = w.k();
         let LinearPlan::TileDecode { tile_rows: tile, .. } = plan_linear(Dtype::I8, count, k, self.tile_budget_bytes, false) else { unreachable!() };

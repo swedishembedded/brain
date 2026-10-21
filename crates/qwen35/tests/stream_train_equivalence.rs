@@ -48,8 +48,12 @@ const ALPHA: f32 = 4.0;
 const WINDOW_BUDGET: u32 = 2;
 
 fn tiny_lora_cfg() -> Qwen35Config {
+    tiny_adapter_cfg(model::adapter::DeviceKind::Lora)
+}
+
+fn tiny_adapter_cfg(kind: model::adapter::DeviceKind) -> Qwen35Config {
     let mut cfg = Qwen35Config::tiny();
-    cfg.lora = Some(lora_cfg(RANK, ALPHA));
+    cfg.lora = Some(lora_cfg(RANK, ALPHA).with_kind(kind));
     cfg
 }
 
@@ -63,16 +67,26 @@ fn batch(cfg: &Qwen35Config) -> (Vec<u32>, Vec<u32>) {
 }
 
 fn lora_names(cfg: &Qwen35Config) -> Vec<String> {
-    cfg.param_list().into_iter().map(|(n, _)| n).filter(|n| n.ends_with(".lora_a") || n.ends_with(".lora_b")).collect()
+    cfg.param_list().into_iter().map(|(n, _)| n).filter(|n| model::adapter::device::is_adapter_param(n)).collect()
 }
 
 #[test]
 fn streaming_lora_trainer_matches_the_resident_trainer_exactly() {
-    let cfg = tiny_lora_cfg();
+    streams_exactly_like_the_resident_trainer(model::adapter::DeviceKind::Lora);
+}
+
+/// DoRA reads each streamed linear's frozen base for its row norms: the same equivalence holds.
+#[test]
+fn streaming_dora_trainer_matches_the_resident_trainer_exactly() {
+    streams_exactly_like_the_resident_trainer(model::adapter::DeviceKind::Dora);
+}
+
+fn streams_exactly_like_the_resident_trainer(kind: model::adapter::DeviceKind) {
+    let cfg = tiny_adapter_cfg(kind);
     let init: HashMap<String, Vec<f32>> = qwen35::init::init_weights(&cfg, data::rng::random_seed());
     let (tokens, targets) = batch(&cfg);
     let names = lora_names(&cfg);
-    assert!(!names.is_empty(), "test setup bug: no .lora_a/.lora_b tensors found");
+    assert!(!names.is_empty(), "test setup bug: no adapter tensors found");
 
     // ---- resident trainer (existing, already-proven path) ----
     let resident = Qwen35::new_train_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, N, &init);
