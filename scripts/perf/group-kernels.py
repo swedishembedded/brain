@@ -42,7 +42,7 @@ RULES = [
 ]
 FALLBACK = "head, optimizer, misc"
 ORDER = ["GDN chain", "library GEMM", "element-wise glue", "attention element-wise",
-         "NF4 dequant", "RMSNorm", "head, optimizer, misc"]
+         "weight dequant", "RMSNorm", "head, optimizer, misc"]
 
 
 def group_of(name):

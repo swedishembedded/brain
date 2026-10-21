@@ -26,7 +26,7 @@ setup() {
   run python3 "$GROUP" "$FIXTURE"
   [[ "$output" == *"GDN chain"*"4944.0"* ]]
   [[ "$output" == *"library GEMM"*"2648.0"*"21896"* ]]
-  [[ "$output" == *"NF4 dequant"*"306.0"* ]]
+  [[ "$output" == *"weight dequant"*"306.0"* ]]
 }
 
 @test "a native GDN kernel is billed to the GDN chain, not to misc" {
