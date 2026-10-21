@@ -130,6 +130,8 @@ fn main() {
             trainer.lora.adamw_step(&trainer.gpu, step, lr);
             trainer.gpu.poll_wait();
             println!("PHASE=step STEP={step} LOSS={loss:.6} MINUTES={:.2}", t0.elapsed().as_secs_f64() / 60.0);
+            let (waited, computed) = trainer.pass_timing();
+            println!("PASS_TIMING waited_for_load_s={waited:.2} computed_s={computed:.2}");
 
             let mut out: HashMap<String, Vec<f32>> = HashMap::new();
             for (name, _) in cfg.param_list() {

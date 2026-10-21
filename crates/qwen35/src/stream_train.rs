@@ -759,9 +759,19 @@ pub struct StreamTrainer {
     final_norm: DeviceBuffer,
     n: u32,
     window_budget: u32,
+    /// Seconds the compute thread has waited for the next layer to arrive, and spent computing, over every pass
+    /// of this trainer ([`Self::pass_timing`]).
+    waited_for_load: std::cell::Cell<f64>,
+    computed: std::cell::Cell<f64>,
 }
 
 impl StreamTrainer {
+    /// `(seconds waiting for a layer to be loaded, seconds computing)` summed over every layer pass so far. A step
+    /// whose wait dominates is bound by streaming the base; one whose compute dominates is bound by the device.
+    pub fn pass_timing(&self) -> (f64, f64) {
+        (self.waited_for_load.get(), self.computed.get())
+    }
+
     /// Build against an already-resident host weight map (`init_weights`'s
     /// own shape) - no disk I/O, no real checkpoint needed. This is the
     /// tiny-scale equivalence gate's own construction path: the SAME
@@ -787,7 +797,7 @@ impl StreamTrainer {
 
         let head_ce = build_head_ce(&ops, &gpu, cfg, &head, n);
         let lora = LoraStore::new(&gpu, cfg, init, n);
-        StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, head_ce, final_norm, n, window_budget }
+        StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, head_ce, final_norm, n, window_budget, waited_for_load: Default::default(), computed: Default::default() }
     }
 
     /// Real per-token embedding rows for `ids` from a host-resident `tok.
@@ -837,7 +847,7 @@ impl StreamTrainer {
 
         let head_ce = build_head_ce(&ops, &gpu, cfg, &head, n);
         let lora = LoraStore::new(&gpu, cfg, lora_init, n);
-        Ok(StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, head_ce, final_norm, n, window_budget })
+        Ok(StreamTrainer { gpu, ops, ids, ones_khd, cos, sin, lora, head, head_ce, final_norm, n, window_budget, waited_for_load: Default::default(), computed: Default::default() })
     }
 
     /// The streamed trainer's resident footprint as planner categories: `window_budget` layers of the stored
@@ -1047,10 +1057,14 @@ impl StreamTrainer {
                 }
             });
             for expected in order {
+                let waiting = std::time::Instant::now();
                 let (l, layer) = rx.recv().expect("stream_train: the layer loader stopped early");
+                self.waited_for_load.set(self.waited_for_load.get() + waiting.elapsed().as_secs_f64());
                 debug_assert_eq!(l, expected);
+                let computing = std::time::Instant::now();
                 f(l, &layer);
                 self.gpu.poll_wait();
+                self.computed.set(self.computed.get() + computing.elapsed().as_secs_f64());
             }
         });
     }
