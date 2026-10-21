@@ -98,11 +98,19 @@ start_private_bus() {
   BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --openai "$PORT" --ready-file "$READY" >"$TDIR/log" 2>&1 &
   SERVER_PID=$!
 
-  # The stale marker must be gone almost immediately (removed at parse time,
-  # long before any bind) -- if it lingered, a waiter would see "ready" before
-  # the server ever started.
-  sleep 0.2
-  [ ! -s "$READY" ] || [ ! -e "$READY" ]
+  # The stale marker must go (it is removed at parse time, long before any
+  # bind) -- if it lingered, a waiter would see "ready" before the server ever
+  # started. Waited for on the condition, with the ready deadline, rather than a
+  # fixed sleep: a release binary's startup under load takes longer than any
+  # fixed guess, and a marker that never goes still fails here.
+  stale_gone=0
+  deadline=$((SECONDS + READY_DEADLINE_S))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ ! -e "$READY" ] || [ ! -s "$READY" ]; then stale_gone=1; break; fi
+    kill -0 "$SERVER_PID" 2>/dev/null || break
+    sleep 0.05
+  done
+  [ "$stale_gone" -eq 1 ] || { cat "$TDIR/log" >&3; false; }
 
   wait_for_ready_file "$READY" "$SERVER_PID" || { cat "$TDIR/log" >&3; skip "ready file never appeared"; }
   [ -e "$READY" ]
