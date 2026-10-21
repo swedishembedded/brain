@@ -1103,7 +1103,7 @@ impl LayeredStep<'_, '_> {
 /// A resident low-precision full fine-tune a model is built for: how the linears are held and updated
 /// (`cfg`), what the machine offers (`capacity`) and what else the run needs (`others`: the activations and the
 /// parameters outside the resident state). Shared by every model that builds on [`ResidentFullFt`].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ResidentPlan {
     pub cfg: ResidentFtConfig,
     pub capacity: Capacity,

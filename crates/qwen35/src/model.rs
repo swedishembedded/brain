@@ -1128,6 +1128,15 @@ pub struct Qwen35 {
     /// narrower tier AND the device caps support it, in which case
     /// `Weight::upload` promotes it to that tier (see [`Self::ops_linear`]).
     weights: HashMap<String, Weight>,
+    /// The per-layer linears of a resident low-precision full fine-tune, their master copies and state
+    /// ([`TrainOpts::resident`]); `weights` then holds handles to its device weights and the parameter store
+    /// holds none of them.
+    resident: Option<RefCell<model::resident_ft::ResidentFullFt>>,
+    /// The global gradient norm of the latest clipped resident step (it spans both parameter groups).
+    resident_norm: Cell<Option<f32>>,
+    /// A layer-streamed build defers its backward to [`Qwen35::adamw_step`], which runs it once per pass over the
+    /// layers; set by `backward`, cleared by the step and by `zero_grads`.
+    backward_pending: Cell<bool>,
 
     // ---- LoRA scratch (persistent, reused across every targeted linear) ----
     // Sized once at construction for `cfg.lora`'s rank and the widest output
@@ -1432,6 +1441,18 @@ pub(crate) fn is_quantizable_linear(name: &str) -> bool {
     LEAVES.iter().any(|leaf| name.ends_with(leaf))
 }
 
+/// The per-layer linears of `shard` a resident full fine-tune holds in its own encoding: every matrix
+/// [`Qwen35Config::layer_leaves`] names, layer by layer.
+pub fn resident_specs(cfg: &Qwen35Config, shard: &Shard) -> Vec<model::resident_ft::ResidentSpec> {
+    let mut specs = Vec::new();
+    for (l, ty) in cfg.layer_types().iter().enumerate().filter(|(l, _)| shard.owns(*l)) {
+        for (suffix, n, k) in cfg.layer_leaves(*ty) {
+            specs.push(model::resident_ft::ResidentSpec { name: format!("blocks.{l}.{suffix}"), n, k, layer: l as u32 });
+        }
+    }
+    specs
+}
+
 impl Qwen35 {
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
@@ -1493,6 +1514,18 @@ impl Qwen35 {
             m.flash_min_t.set(min_t);
         }
         m
+    }
+
+    /// A resident low-precision full fine-tune build (see [`TrainOpts::resident`]): the planner's arithmetic over the
+    /// resident weights, gradients, host-side master and state and the plan's other demands is checked before
+    /// anything is allocated, and a plan that does not fit is an `Err` naming the category.
+    pub fn new_resident(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, opts: &TrainOpts) -> Result<Qwen35, String> {
+        let plan = opts.resident.as_ref().ok_or("qwen35: new_resident needs TrainOpts::resident")?;
+        if cfg.lora.is_some() || cfg.mtp {
+            return Err("qwen35: a resident full fine-tune is adapter-free and has no multi-token head".into());
+        }
+        model::resident_ft::check_fits(&plan.cfg, &resident_specs(&cfg, &Shard::whole(cfg.n_layers as usize)), &plan.budget())?;
+        Ok(Qwen35::new_train_opts_on(gpu, cfg, b, t, src, opts))
     }
 
     /// Switch activation recompute ([`model::saved::SavedPolicy::Keep`] against
@@ -1607,6 +1640,11 @@ impl Qwen35 {
     ) -> Qwen35 {
         let train = train_opts.is_some();
         let head_budget = train_opts.and_then(|o| o.head_budget_words);
+        let resident_plan = train_opts.and_then(|o| o.resident.as_ref());
+        assert!(
+            resident_plan.is_none() || (train && cfg.lora.is_none() && !cfg.mtp && shard.is_whole(cfg.n_layers as usize)),
+            "qwen35: a resident low-precision full fine-tune is a whole-model, adapter-free build without a multi-token head"
+        );
         assert!(
             !(tier.quantizes_anything() && train && cfg.lora.is_none()),
             "qwen35: a narrow tier needs LoRA when training: without adapters there is no frozen base \
@@ -1667,7 +1705,7 @@ impl Qwen35 {
         // adapters are never quantizable leaves, so they stay in the store.
         let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
-            .filter(|(n, _)| !(is_quantizable_linear(n) && tier.want(n) != Dtype::F32) && table_tier(tier, &cfg, train, n).is_none())
+            .filter(|(n, _)| !(is_quantizable_linear(n) && (tier.want(n) != Dtype::F32 || resident_plan.is_some())) && table_tier(tier, &cfg, train, n).is_none())
             .map(|(n, c)| {
                 let role = if !train {
                     Role::Frozen
@@ -1722,11 +1760,18 @@ impl Qwen35 {
                 ops.gpu().hold_freed_blocks(true);
             }
         }
+        let resident_ft = resident_plan.map(|plan| {
+            let specs = resident_specs(&cfg, &shard);
+            model::resident_ft::ResidentFullFt::new(&ops, plan.cfg.clone(), specs, src, &plan.budget()).unwrap_or_else(|e| panic!("qwen35: {e}"))
+        });
         let mut weights: HashMap<String, Weight> = HashMap::new();
         // Host staging for tiled uploads: one tile at a time, independent of the largest tensor.
         let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(64 << 20, 0));
         let mut upload = |name: String, wn: u32, wk: u32, want: Dtype| {
-            let w = if want == Dtype::F32 {
+            let resident_weight = resident_ft.as_ref().and_then(|ft| ft.index_of(&name).map(|i| ft.weight(i).clone()));
+            let w = if let Some(w) = resident_weight {
+                w
+            } else if want == Dtype::F32 {
                 Weight::dense_f32(ps.w(&name).clone(), wn, wk)
             } else {
                 model::ops::upload_from_source(&ops, src, &name, wn as usize, wk as usize, want, &staging)
@@ -1896,6 +1941,9 @@ impl Qwen35 {
             mtp_acts: RefCell::new(None),
             ops,
             weights,
+            resident: resident_ft.map(RefCell::new),
+            resident_norm: Cell::new(None),
+            backward_pending: Cell::new(false),
             adapter,
             adapter_bank: RefCell::new(None),
             adapter_rows: Cell::new(0),
@@ -2321,6 +2369,12 @@ impl Qwen35 {
             None => {
                 if self.trainable(wname) {
                     steps.push(g.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
+                } else if let Some(ft) = &self.resident {
+                    // A resident low-precision linear: its dW comes from the shared op against the stored tier.
+                    let ft = ft.borrow();
+                    if let Some(i) = ft.index_of(wname) {
+                        ft.weight_grad(&self.ops, steps, i, x, d_out, m);
+                    }
                 }
                 self.base_dx(steps, d_out, wname, dx, m, k, nout, acc);
             }
@@ -3142,6 +3196,7 @@ impl Qwen35 {
             saved.load(g, 0, &res[0]);
         }
         for l in self.shard.start..self.shard.end {
+            self.stream_load(l);
             let (x, y) = if self.res_saved.is_some() { (&res[0], &res[1]) } else { (&res[l], &res[l + 1]) };
             let acts = self.layer_forward(l, x, y, false);
             if let Some(saved) = &self.res_saved {
@@ -3404,11 +3459,28 @@ impl Qwen35 {
     /// neither yet).
     pub fn backward(&self) {
         assert!(self.is_train, "qwen35: backward() requires a Qwen35::new_train_on build");
+        if self.layer_streamed() {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates. The forward's activations stay.
+            assert!(
+                !self.backward_pending.replace(true),
+                "qwen35 layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step"
+            );
+            return;
+        }
         let ta = self.train_acts.borrow_mut().take().expect(
             "qwen35: backward() called without an immediately preceding forward() -- \
              every forward() call reallocates its activation cache fresh (this file's \
              own convention throughout), so backward() must run against the SAME call",
         );
+        self.backward_over(&ta, &mut |_| Ok(())).unwrap_or_else(|e| panic!("qwen35: backward: {e}"));
+    }
+
+    /// The backward over the activations `ta` the forward kept: the head and final norm first, then the layers from
+    /// the last down, reporting a [`model::resident_ft::LayerEvent`] at each boundary (a layer-streamed build loads
+    /// a layer's weights before its backward and updates it after). The first error from `on` stops the pass.
+    fn backward_over(&self, ta: &TrainActs, on: &mut dyn FnMut(model::resident_ft::LayerEvent) -> std::io::Result<()>) -> std::io::Result<()> {
+        use model::resident_ft::LayerEvent;
         let g = &self.gpu;
         let n = self.b * self.run_len();
         let d = self.cfg.d_model;
@@ -3481,10 +3553,12 @@ impl Qwen35 {
             drop(res_borrow);
         }
 
+        on(LayerEvent::AfterHead)?;
         let res = self.res.borrow();
         // Where a recomputed layer writes its (unused) output residual.
         let recompute_out = ta.recomputed.then(|| g.storage((n * d) as u64));
         for l in (self.shard.start..self.shard.end).rev() {
+            on(LayerEvent::BeforeBackward(l))?;
             // This layer's input boundary (decoded into `res[0]` when packed).
             let x = match &self.res_saved {
                 Some(saved) => {
@@ -3532,6 +3606,7 @@ impl Qwen35 {
                 drop(rebuilt);
                 g.poll_wait();
             }
+            on(LayerEvent::AfterBackward(l))?;
         }
         drop(res);
 
@@ -3557,6 +3632,7 @@ impl Qwen35 {
                 g.submit(&[], &[g.step(EMB_BWD, &[&self.tokens, &d_res_next, self.g("tok.weight")], &[n, d, v], v * d)]);
             }
         }
+        Ok(())
     }
 
     // =========================================================================
@@ -5134,11 +5210,48 @@ impl Qwen35 {
     }
 
     pub fn zero_grads(&self) {
+        self.backward_pending.set(false);
         self.ps.zero_grads(&self.gpu);
+        if let Some(ft) = &self.resident {
+            ft.borrow().zero_grads(&self.ops);
+        }
     }
 
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        // A resident build updates its linears against their host masters through the generic resident step, whose
+        // global clip spans them and the device-optimised remainder; that step also updates the remainder.
+        if let Some(ft) = &self.resident {
+            let streamed = self.layer_streamed();
+            assert!(!streamed || self.backward_pending.replace(false), "qwen35 layer-streamed full fine-tune: adamw_step without a backward before it");
+            let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+            let norm = model::resident_ft::adamw_step(self, ft, &self.ops, &args).unwrap_or_else(|e| panic!("qwen35 resident full fine-tune: update: {e}"));
+            self.resident_norm.set(norm);
+            if streamed {
+                // The step consumed the forward's activations (it ran the backward itself).
+                *self.train_acts.borrow_mut() = None;
+            }
+            return;
+        }
         self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+    }
+
+    /// Whether this build streams its layers' weights through a bounded window of device slots.
+    fn layer_streamed(&self) -> bool {
+        self.resident.as_ref().is_some_and(|ft| ft.borrow().is_layer_streamed())
+    }
+
+    /// Load `layer` into its device slots before the forward or the backward reaches it (a no-op for a build whose
+    /// layers are all resident).
+    fn stream_load(&self, layer: usize) {
+        if let Some(ft) = self.resident.as_ref().filter(|ft| ft.borrow().is_layer_streamed()) {
+            ft.borrow_mut().load_layer(&self.ops, layer).unwrap_or_else(|e| panic!("qwen35 layer-streamed full fine-tune: loading layer {layer}: {e}"));
+        }
+    }
+
+    /// Device bytes of the resident linears' weights: every layer's, or the window's slots when layer-streamed
+    /// (`None` for a build with no resident state).
+    pub fn resident_device_weight_bytes(&self) -> Option<u64> {
+        self.resident.as_ref().map(|ft| ft.borrow().device_weight_bytes())
     }
 
     pub fn poll_wait(&self) {
@@ -5156,8 +5269,13 @@ impl Qwen35 {
         if self.is_train && self.cfg.lora.is_some() {
             self.ps.trainable.iter().map(|(n, _)| n.clone()).collect()
         } else {
-            self.ps.params.iter().map(|(n, _)| n.clone()).collect()
+            let resident = self.resident.iter().flat_map(|ft| ft.borrow().specs().iter().map(|s| s.name.clone()).collect::<Vec<_>>());
+            self.ps.params.iter().map(|(n, _)| n.clone()).chain(resident).collect()
         }
+    }
+
+    fn resident_index(&self, name: &str) -> Option<usize> {
+        self.resident.as_ref().and_then(|ft| ft.borrow().index_of(name))
     }
 
     /// The resident tier of linear `name`, `None` for a tensor held outside
@@ -5167,6 +5285,10 @@ impl Qwen35 {
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
+        if let Some(i) = self.resident_index(name) {
+            // The master copy: the highest-precision weight, which is what a saved checkpoint should carry.
+            return self.resident.as_ref().expect("indexed").borrow_mut().read_master(&self.ops, i).unwrap_or_else(|e| panic!("qwen35 resident full fine-tune: reading {name}: {e}"));
+        }
         match self.weights.get(name).filter(|_| !self.ps.weight.contains_key(name)) {
             Some(w) => self.ops.read_host(w),
             None => self.ps.read_weight(&self.gpu, name),
@@ -5174,6 +5296,10 @@ impl Qwen35 {
     }
 
     pub fn write_weight(&self, name: &str, data: &[f32]) {
+        if let Some(i) = self.resident_index(name) {
+            self.resident.as_ref().expect("indexed").borrow_mut().write_master(&self.ops, i, data).unwrap_or_else(|e| panic!("qwen35 resident full fine-tune: writing {name}: {e}"));
+            return;
+        }
         match self.weights.get(name).filter(|_| !self.ps.weight.contains_key(name)) {
             Some(w) => write_weight_host(&self.gpu, w, data),
             None => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
@@ -5340,10 +5466,61 @@ impl Qwen35 {
     }
 
     pub fn save(&self, path: &str) {
-        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+        let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
             self.ps.params.iter().map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name))).collect();
+        // A resident build keeps its linears outside the parameter store: they are saved from their masters.
+        if let Some(ft) = &self.resident {
+            let names: Vec<(String, u64)> = ft.borrow().specs().iter().map(|s| (s.name.clone(), s.n as u64 * s.k as u64)).collect();
+            tensors.extend(names.into_iter().map(|(name, numel)| (name.clone(), vec![numel], self.read_weight(&name))));
+        }
         let config = self.cfg.to_json();
         checkpoint::save_carded(path, config, &tensors, &checkpoint::st::ModelCard::new("brain/qwen35", "qwen35"));
+    }
+}
+
+impl model::resident_ft::ResidentBackward for Qwen35 {
+    fn zero_remainder_grads(&self) {
+        self.ps.zero_grads(&self.gpu);
+    }
+
+    fn remainder_grad_sum_sq(&self, norm: &model::gradnorm::DeviceGradNorm) -> f64 {
+        let items: Vec<model::gradnorm::NormItem<'_>> =
+            self.ps.opt_params().iter().map(|(name, numel)| model::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: model::ops::GradDtype::F32 }).collect();
+        norm.sum_sq(&self.gpu, &items)
+    }
+
+    /// The backward over the activations the forward kept (a layer-streamed build leaves them in place for every pass).
+    fn backward_pass(&self, on: &mut dyn FnMut(model::resident_ft::LayerEvent) -> std::io::Result<()>) -> std::io::Result<()> {
+        let ta = self.train_acts.borrow();
+        let ta = ta.as_ref().ok_or_else(|| std::io::Error::other("qwen35: a resident backward pass needs the activations of the forward before it"))?;
+        self.backward_over(ta, on)
+    }
+
+    fn update_remainder(&self, args: &model::resident_ft::StepArgs, grad_multiplier: f32) {
+        self.opt.step(&self.gpu, &self.ps, args.step, args.lr, args.wd, args.adam, None, grad_multiplier);
+    }
+}
+
+impl model::OffDeviceState for Qwen35 {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let ft = self.resident.as_ref().ok_or_else(|| std::io::Error::other("qwen35: no resident state to commit"))?;
+        let ckpt = optim::checkpoint::CheckpointDir::new(dir)?;
+        let mut ft = ft.borrow_mut();
+        let run = ft.run_state(0, Vec::new());
+        if run.step != step {
+            return Err(std::io::Error::other(format!("the run has absorbed {step} updates, the resident state {}", run.step)));
+        }
+        ft.commit(&self.ops, &ckpt, &run).map(drop)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let ft = self.resident.as_ref().ok_or_else(|| std::io::Error::other("qwen35: no resident state to restore"))?;
+        let ckpt = optim::checkpoint::CheckpointDir::new(dir)?;
+        if ft.borrow_mut().restore_at(&self.ops, &ckpt, step)?.is_some() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!("{}: no training state was committed at update {step}", dir.display())))
+        }
     }
 }
 
@@ -5425,7 +5602,17 @@ impl model::Model for Qwen35 {
         Qwen35::adamw_step(self, t, lr, wd, adam, clip, extra_scale)
     }
     fn last_grad_norm(&self) -> Option<f32> {
-        self.opt.last_grad_norm(&self.gpu, &self.ps)
+        match &self.resident {
+            Some(_) => self.resident_norm.get(),
+            None => self.opt.last_grad_norm(&self.gpu, &self.ps),
+        }
+    }
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.resident.is_some().then_some(self as &dyn model::OffDeviceState)
+    }
+    fn pin_rounding_seed(&self, seed: u64) {
+        // Domain-separated from the batch generator, which the run keys on the same seed.
+        self.opt.set_rounding_seed(seed ^ 0x5eed_0000_1234_9876);
     }
     fn poll_wait(&self) {
         Qwen35::poll_wait(self)

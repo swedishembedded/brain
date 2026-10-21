@@ -67,11 +67,26 @@ pub struct TrainOpts {
     /// blocks (the fused kernels); anything else is refused by name ([`model::TrainPrecision::resolve`]). Ignored
     /// by an adapter build, whose base is frozen.
     pub precision: model::TrainPrecision,
+    /// A resident low-precision full fine-tune ([`model::resident_ft`]): the per-layer linears live in the plan's
+    /// encoding (all of them on the device, or a window of layers streamed through it) with a master copy and the
+    /// optimizer state on the host; the embedding, head and norms train in fp32 on the device as in any full
+    /// fine-tune. Whole-model, no adapter, no multi-token head. `None` is the plain fp32 full fine-tune.
+    pub resident: Option<model::resident_ft::ResidentPlan>,
 }
 
 impl Default for TrainOpts {
     fn default() -> Self {
-        TrainOpts { base: TierPolicy::uniform(Dtype::F32), saved: SavedPolicy::Keep, head_budget_words: None, flash_min_t: None, gdn_segment_tokens: None, mlp_rows: None, gemm_precision: GemmPrecision::Auto, precision: model::TrainPrecision::default() }
+        TrainOpts {
+            base: TierPolicy::uniform(Dtype::F32),
+            saved: SavedPolicy::Keep,
+            head_budget_words: None,
+            flash_min_t: None,
+            gdn_segment_tokens: None,
+            mlp_rows: None,
+            gemm_precision: GemmPrecision::Auto,
+            precision: model::TrainPrecision::default(),
+            resident: None,
+        }
     }
 }
 
