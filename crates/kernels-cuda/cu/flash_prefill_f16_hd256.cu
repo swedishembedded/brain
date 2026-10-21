@@ -104,6 +104,23 @@ __device__ __forceinline__ float brain_kv8_value(unsigned int word, int i) {
 #endif
 }
 
+// Bytes `2h` and `2h + 1` of a packed 8-bit row word as f32, before the row scale: brain_kv8_value of both, bit for
+// bit. For FP8 the pair widens through the hardware conversion (`cvt.rn.f16x2.e4m3x2`, exact: every finite E4M3 value
+// is an f16), which replaces the per-byte field arithmetic that made the FP8 cache's staging the slowest part of its
+// prefill; an f16 widens to f32 exactly too.
+__device__ __forceinline__ float2 brain_kv8_pair(unsigned int word, int h) {
+#if BRAIN_KV_TIER == 3 && __CUDA_ARCH__ >= 890
+    const unsigned short bytes = static_cast<unsigned short>(word >> (16 * h));
+    unsigned int f16x2;
+    asm("cvt.rn.f16x2.e4m3x2 %0, %1;\n" : "=r"(f16x2) : "h"(bytes));
+    float lo, hi;
+    asm("{ .reg .f16 l, u;\n mov.b32 {l, u}, %2;\n cvt.f32.f16 %0, l;\n cvt.f32.f16 %1, u;\n }\n" : "=f"(lo), "=f"(hi) : "r"(f16x2));
+    return make_float2(lo, hi);
+#else
+    return make_float2(brain_kv8_value(word, 2 * h), brain_kv8_value(word, 2 * h + 1));
+#endif
+}
+
 #define BR 64              // query rows per block
 #define BC 32              // keys per tile
 #define THREADS 256
@@ -289,9 +306,9 @@ extern "C" __global__ void __launch_bounds__(THREADS, MIN_BLOCKS_PER_SM) brain_f
 #else
                 const uint2 w = *reinterpret_cast<const uint2*>(src);   // eight int8
                 const float sc = scales[row * n_kv_heads + hkv];
-                auto b = [&](unsigned int word, int i) { return brain_kv8_value(word, i) * sc; };
-                lo = make_float4(b(w.x, 0), b(w.x, 1), b(w.x, 2), b(w.x, 3));
-                hi = make_float4(b(w.y, 0), b(w.y, 1), b(w.y, 2), b(w.y, 3));
+                const float2 p0 = brain_kv8_pair(w.x, 0), p1 = brain_kv8_pair(w.x, 1), p2 = brain_kv8_pair(w.y, 0), p3 = brain_kv8_pair(w.y, 1);
+                lo = make_float4(p0.x * sc, p0.y * sc, p1.x * sc, p1.y * sc);
+                hi = make_float4(p2.x * sc, p2.y * sc, p3.x * sc, p3.y * sc);
 #endif
             }
             raw[c][0] = lo;

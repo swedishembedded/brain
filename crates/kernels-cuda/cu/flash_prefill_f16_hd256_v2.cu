@@ -164,11 +164,14 @@ extern "C" __global__ void __launch_bounds__(V2_THREADS, 2) brain_flash_prefill_
 #else
             const uint2 w = raw[c];
             const float sc = rsc[c];
-            auto b = [&](unsigned int word, int i) { return brain_kv8_value(word, i) * sc; };
-            v.x = brain_pack_f16x2(b(w.x, 0), b(w.x, 1));
-            v.y = brain_pack_f16x2(b(w.x, 2), b(w.x, 3));
-            v.z = brain_pack_f16x2(b(w.y, 0), b(w.y, 1));
-            v.w = brain_pack_f16x2(b(w.y, 2), b(w.y, 3));
+            auto b = [&](unsigned int word, int h) {
+                const float2 f = brain_kv8_pair(word, h);
+                return brain_pack_f16x2(f.x * sc, f.y * sc);
+            };
+            v.x = b(w.x, 0);
+            v.y = b(w.x, 1);
+            v.z = b(w.y, 0);
+            v.w = b(w.y, 1);
 #endif
             *reinterpret_cast<uint4*>(dst + kr * ROW_HALVES + cc * 8u) = v;
         }
