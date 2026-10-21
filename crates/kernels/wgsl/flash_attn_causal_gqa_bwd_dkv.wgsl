@@ -60,13 +60,20 @@ var<workgroup> part_p: array<f32, 2048>;  // BC*WG
 var<workgroup> lse_sh: array<f32, 8>;     // BC
 var<workgroup> d_sh:   array<f32, 8>;     // BC
 
+
+// Specialisation constants (kernels::template): CAUSAL 0 drops the mask and the early exit over K tiles
+// (bidirectional attention, e.g. a diffusion transformer); UNIT_SCALE 1 uses scale 1 for a model that folded
+// 1/sqrt(head_dim) into its query/key norm. The defaults are the causal, 1/sqrt(head_dim) kernel.
+const CAUSAL: u32 = 1u;
+const UNIT_SCALE: u32 = 0u;
+
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
     let T = p.tcols;
     let hd = p.head_dim;
-    let scale = inverseSqrt(f32(hd));
+    let scale = select(inverseSqrt(f32(hd)), 1.0, UNIT_SCALE == 1u);
     let lanes = select(4u, 8u, hd > 128u);   // threads per key row
     let BR = WG / lanes;                     // key rows per workgroup
     let hdt = lanes * CH;                    // Q/dO tile row width
@@ -109,7 +116,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
 
     // Causal: query i sees key j only when i >= j, so no query tile ending
     // before this workgroup's first key contributes.
-    let first_qt = (kt * BR) / BC;
+    let first_qt = select(0u, (kt * BR) / BC, CAUSAL == 1u);
     let ntiles_q = (T + BC - 1u) / BC;
 
     for (var g = 0u; g < p.group; g = g + 1u) {
@@ -157,7 +164,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
 
             for (var ir = 0u; ir < BC; ir = ir + 1u) {
                 let i = qt * BC + ir;
-                if (live && i < T && i >= j) {
+                if (live && i < T && (CAUSAL == 0u || i >= j)) {
                     let so = ir * WG + row * lanes;
                     var s_sum = 0.0;
                     var dp = 0.0;

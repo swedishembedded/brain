@@ -1240,6 +1240,25 @@ impl FlashGqaIds {
     }
 }
 
+/// The flash trio specialised for BIDIRECTIONAL attention (`CAUSAL = 0`: no mask, every query sees every key), for
+/// a transformer that attends over a joint token set (a diffusion transformer, an encoder). Register the three
+/// returned `(name, source)` pairs under their own names and build a [`FlashGqaIds`] from the pipelines they
+/// become with `native: false` (the native tensor-core kernels are causal-only); [`flash_gqa_causal_fwd`] and
+/// [`flash_gqa_causal_bwd`] then run them unchanged. `unit_scale` uses attention scale 1 instead of
+/// `1/sqrt(head_dim)`, for a model that folded that factor into its query/key norm weight. Memory is
+/// `O(T * head_dim)` per head, never the `[T, T]` scores and probabilities.
+pub fn flash_bidir_kernels(unit_scale: bool) -> [(&'static str, &'static str); 3] {
+    let params = [("CAUSAL", 0), ("UNIT_SCALE", u32::from(unit_scale))];
+    [kernels::FLASH_ATTN_CAUSAL_GQA, kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ, kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DKV].map(|src| {
+        let base = match src {
+            s if std::ptr::eq(s, kernels::FLASH_ATTN_CAUSAL_GQA) => "flash_attn_causal_gqa",
+            s if std::ptr::eq(s, kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ) => "flash_attn_causal_gqa_bwd_dq",
+            _ => "flash_attn_causal_gqa_bwd_dkv",
+        };
+        kernels::template::interned(base, src, &params).expect("the flash kernels declare CAUSAL and UNIT_SCALE")
+    })
+}
+
 /// Backward of [`flash_gqa_causal_fwd`]: `d_q`, `d_k`, `d_v` from the context
 /// gradient, the forward's `q`/`k`/`v`/`ctx` and its `lse` - never the
 /// `[H,T,T]` probabilities [`gqa_bwd`] reads. `dsum` (`[b, n_heads, t]`) is

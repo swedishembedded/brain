@@ -102,13 +102,20 @@ var<workgroup> ksh:  array<f32, 2048>;  // BC*256   -> 8 KiB
 var<workgroup> vsh:  array<f32, 2048>;  // BC*256   -> 8 KiB
 var<workgroup> part: array<f32, 2048>;  // BC*WG     -> 8 KiB
 
+
+// Specialisation constants (kernels::template): CAUSAL 0 drops the mask and the early exit over K tiles
+// (bidirectional attention, e.g. a diffusion transformer); UNIT_SCALE 1 uses scale 1 for a model that folded
+// 1/sqrt(head_dim) into its query/key norm. The defaults are the causal, 1/sqrt(head_dim) kernel.
+const CAUSAL: u32 = 1u;
+const UNIT_SCALE: u32 = 0u;
+
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
     let T = p.tcols;
     let hd = p.head_dim;
-    let scale = inverseSqrt(f32(hd));
+    let scale = select(inverseSqrt(f32(hd)), 1.0, UNIT_SCALE == 1u);
     let lanes = select(4u, 8u, hd > 128u);   // threads per query row
     let BR = WG / lanes;                     // query rows per workgroup
     let hdt = lanes * CH;                    // K/V tile row width
@@ -153,7 +160,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     // (`qt*BR + BR - 1`, clipped to T-1) -- so K tiles beyond that row need
     // never be loaded, let alone scored.
     let max_i_in_wg = min(qt * BR + BR - 1u, T - 1u);
-    let ntiles_k = (max_i_in_wg / BC) + 1u;
+    let ntiles_k = select((T + BC - 1u) / BC, (max_i_in_wg / BC) + 1u, CAUSAL == 1u);
 
     for (var kt = 0u; kt < ntiles_k; kt = kt + 1u) {
         // Stage the K,V tile [BC x HD] into shared, through the SHARED kv
@@ -198,7 +205,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         var tmax = -3.4e38;
         for (var j = 0u; j < BC; j = j + 1u) {
             var s = -3.4e38;
-            if (j < krows && (kt * BC + j) <= i) {
+            if (j < krows && (CAUSAL == 0u || (kt * BC + j) <= i)) {
                 let po = j * WG + row * lanes;
                 var sum = 0.0;
                 for (var l = 0u; l < lanes; l = l + 1u) { sum = sum + part[po + l]; }
