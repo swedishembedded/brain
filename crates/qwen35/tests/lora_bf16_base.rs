@@ -140,3 +140,13 @@ fn a_narrow_base_without_lora_is_refused() {
     let init = weights(&cfg, 0.0);
     let _ = build(&cfg, &init, Dtype::BF16);
 }
+
+/// A format whose training path does not exist is refused where the model is built, naming the
+/// formats that do train, not built into a model whose adapters never learn.
+#[test]
+#[should_panic(expected = "does not train")]
+fn a_base_format_without_a_training_path_is_refused_by_name() {
+    let cfg = lora_config();
+    let init = weights(&cfg, 0.0);
+    let _ = build(&cfg, &init, Dtype::I8);
+}

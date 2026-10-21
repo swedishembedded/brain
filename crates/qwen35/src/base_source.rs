@@ -38,9 +38,9 @@ use crate::fp8_source::{self, hf_config, hf_fp8_block_size};
 /// The formats a LoRA run holds the frozen base in on the device: fp32 (the
 /// resident trainer, which also trains in full; about 108 GB for the 27B),
 /// bf16, 4-bit NormalFloat blocks of 32 with fp32 scales ("QLoRA") and
-/// block-scaled FP8. Every narrow one freezes the base: it trains only through
+/// block-scaled FP8 (E4M3 or E5M2). Every narrow one freezes the base: it trains only through
 /// LoRA adapters, never itself.
-pub const LORA_BASES: &[Dtype] = &[Dtype::F32, Dtype::BF16, Dtype::NF4, Dtype::F8E4M3];
+pub const LORA_BASES: &[Dtype] = &[Dtype::F32, Dtype::BF16, Dtype::NF4, Dtype::F8E4M3, Dtype::F8E5M2];
 
 /// The `--base-format` of a qwen35 run.
 pub const TRAIN_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35", bases: LORA_BASES };

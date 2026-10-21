@@ -350,7 +350,7 @@ fn base_format_names_parse_and_refuse_unsupported_formats() {
         assert_eq!(TRAIN_BASES.parse(spec), Ok(dtype));
     }
     let err = TRAIN_BASES.parse("int8").unwrap_err();
-    assert!(err.contains("qwen35") && err.contains("f32, bf16, nf4, fp8"), "{err}");
+    assert!(err.contains("qwen35") && err.contains("f32, bf16, nf4, fp8, fp8e5m2"), "{err}");
 }
 
 /// Real-checkpoint gate: stream every tensor of the shipped 27B FP8 release

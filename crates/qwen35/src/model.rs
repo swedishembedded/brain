@@ -1612,6 +1612,12 @@ impl Qwen35 {
             "qwen35: a narrow tier needs LoRA when training: without adapters there is no frozen base \
              to hold at it (full-parameter training is fp32-only)"
         );
+        assert!(
+            !train || crate::base_source::LORA_BASES.contains(&tier.default_dtype()),
+            "qwen35: a {} frozen base does not train; the trainable formats are {:?}",
+            model::policy::format_name(tier.default_dtype()),
+            crate::base_source::LORA_BASES.iter().map(|d| model::policy::format_name(*d)).collect::<Vec<_>>()
+        );
         // A training sequence of an awkward length (4097 tokens would otherwise
         // run the Gated-DeltaNet recurrence in chunks of ONE token) is padded
         // at its end to a whole chunk of 64: everything is causal, so the
