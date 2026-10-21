@@ -1123,13 +1123,13 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_add_rms_quant",
-        what: "residual add + RMSNorm + per-row int8 scale + pack in one launch; 64 threads per row, bit-identical to add2 + rmsnorm_rows + max_abs_rows + quant_pack",
+        what: "residual add + RMSNorm + per-row int8 scale + pack in one launch; 256 threads per row (the reference's 64 lanes, four threads each), bit-identical to add2 + rmsnorm_rows + max_abs_rows + quant_pack",
         reported: "native:add_rms_quant",
-        block_dim: 64,
+        block_dim: 256,
         // One block per row of x.
         tile: (1, 1),
         // 64 lane partials + the 64 x 128 quantised bytes exchanged between lanes.
-        shared_bytes: 64 * 4 + 64 * 128,
+        shared_bytes: 4 * (64 + 64 + 256) + 64 * 80,
         src: include_str!("../cu/add_rms_quant.cu"),
     },
     CudaKernel {
