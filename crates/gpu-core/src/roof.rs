@@ -1123,9 +1123,9 @@ mod tests {
     /// The two rates come from ONE `measure()` call (both probes run on the
     /// same warmed-up device in the same pass, unlike the old bypass version
     /// which sampled fp32 and f16 seconds apart on separate handles), so a
-    /// single clock/thermal window decides the comparison - best-of-3 whole
-    /// `measure()` calls guards against a single depressed sample under
-    /// concurrent load.
+    /// single clock/thermal window decides the comparison - the best of each rate
+    /// over three whole `measure()` calls guards against a depressed sample of
+    /// either under concurrent load.
     #[test]
     fn f16_roof_runs_through_the_production_gate_and_is_never_slower_than_fp32_where_hardware_supports_it() {
         if skip_gpu() {
@@ -1153,26 +1153,25 @@ mod tests {
         }
         assert!(gpu.caps().arch.executes(backend_api::DType::F16), "executes(F16) must be true - this adapter has SHADER_F16");
 
-        let mut best: Option<Roofs> = None;
-        for _ in 0..3 {
-            if let Some(r) = measure(&gpu) {
-                if best.as_ref().is_none_or(|b| r.gflops > b.gflops) {
-                    best = Some(r);
-                }
-            }
-        }
-        let Some(r) = best else {
+        // Each rate is its own best over the passes: contention only ever lowers a rate, so the best sample of each is
+        // its stable estimate. Taking the fp32-best pass's f16 sample instead let one pass with a busy f16 probe fail
+        // the comparison on a card another job was using.
+        let runs: Vec<Roofs> = (0..3).filter_map(|_| measure(&gpu)).collect();
+        if runs.is_empty() {
             return; // unprobeable device - callers print `-`, never a guess
-        };
-        let fp16 = r.f16_gflops.expect("f16_gflops must be Some through the production gate on SHADER_F16 hardware");
+        }
+        let fp32 = runs.iter().map(|r| r.gflops).fold(f32::MIN, f32::max);
+        let fp16 = runs
+            .iter()
+            .map(|r| r.f16_gflops.expect("f16_gflops must be Some through the production gate on SHADER_F16 hardware"))
+            .fold(f32::MIN, f32::max);
         assert!(fp16.is_finite() && fp16 > 0.0, "f16 roof {fp16}");
         assert!(
-            fp16 >= r.gflops,
-            "native f16 measured {fp16:.0} GFLOP/s, SLOWER than fp32's {:.0} GFLOP/s on hardware \
-             that reports SHADER_F16 - a real f16 ALU cannot be slower than fp32 on the same silicon",
-            r.gflops
+            fp16 >= fp32,
+            "native f16 measured {fp16:.0} GFLOP/s, SLOWER than fp32's {fp32:.0} GFLOP/s on hardware \
+             that reports SHADER_F16 - a real f16 ALU cannot be slower than fp32 on the same silicon"
         );
-        eprintln!("native f16 roof: {fp16:.0} GFLOP/s vs fp32 {:.0} GFLOP/s ({:.2}x)", r.gflops, fp16 / r.gflops);
+        eprintln!("native f16 roof: {fp16:.0} GFLOP/s vs fp32 {fp32:.0} GFLOP/s ({:.2}x)", fp16 / fp32);
     }
 
     /// Two distinct physical GPUs (synthetic identities here - this sandbox
