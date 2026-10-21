@@ -598,7 +598,7 @@ mod tests {
         for kv in model::kv_tier::KvTier::ALL {
             let engine = Qwen35Engine { path: String::new(), tier: model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8), kv_tier: kv, gpus: Vec::new(), max_context: None, inst: None, prompt_seed: None };
             assert_eq!(engine.describe().kv_precision, kv_label(kv));
-            assert!(model::kv_tier::KvTier::ALL.iter().map(|k| kv_label(*k)).collect::<std::collections::HashSet<_>>().len() == 3, "every tier needs its own label");
+            assert!(model::kv_tier::KvTier::ALL.iter().map(|k| kv_label(*k)).collect::<std::collections::HashSet<_>>().len() == model::kv_tier::KvTier::ALL.len(), "every tier needs its own label");
         }
     }
 
