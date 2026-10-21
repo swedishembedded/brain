@@ -87,10 +87,10 @@ pub fn resolve_precisions(params: &[(String, usize)], host_offload: bool) -> Res
             if p.value != ValueDtype::F32 || p.grad != GradDtype::F32 || p.master != MasterPolicy::None {
                 return Err(format!("{name}: this trainer keeps f32 device weights and gradients with no master copy; got {p:?}"));
             }
-            let device_ok = matches!(p.state, StateFormat::F32) || p.state == (StateFormat::Int8Block { block: paramstore::DEVICE_INT8_BLOCK });
+            let device_ok = matches!(p.state, StateFormat::F32 | StateFormat::Bf16) || p.state == (StateFormat::Int8Block { block: paramstore::DEVICE_INT8_BLOCK });
             if !host_offload && !device_ok {
                 return Err(format!(
-                    "{name}: the device optimiser keeps f32 moments or int8 blocks of {}; {:?} moments need the host-offloaded optimizer state",
+                    "{name}: the device optimiser keeps f32 or bf16 moments or int8 blocks of {}; {:?} moments need the host-offloaded optimizer state",
                     paramstore::DEVICE_INT8_BLOCK, p.state
                 ));
             }

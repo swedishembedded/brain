@@ -83,7 +83,7 @@ struct Rig {
 
 fn rig(n: usize, precision: ParamPrecision, tile: usize, w0: &[f32]) -> Rig {
     let rule = Rule::AdamW { adam: Adam::default(), wd: 0.0 };
-    let specs = vec![TensorSpec { name: "w".into(), numel: n, precision }];
+    let specs = vec![TensorSpec { name: "w".into(), numel: n, precision, row_len: None }];
     let layout = state_layout(&rule, &specs);
     let st = BlockStateStorage::new(layout.clone(), MemBacking::zeroed(layout.total_bytes()), 4096).unwrap();
     let opt = StreamedOptimizer::new(rule, specs, st, 5, tile).unwrap();
@@ -189,7 +189,7 @@ fn stochastic_int8_step_is_independent_of_tile_size() {
 
 fn file_rig(dir: &std::path::Path, n: usize, p: ParamPrecision, w0: &[f32]) -> (StreamedOptimizer<BlockStateStorage<FileBacking>>, HostParams<FileBacking, FileBacking>) {
     let rule = Rule::AdamW { adam: Adam::default(), wd: 0.01 };
-    let specs = vec![TensorSpec { name: "w".into(), numel: n, precision: p }];
+    let specs = vec![TensorSpec { name: "w".into(), numel: n, precision: p, row_len: None }];
     let layout = state_layout(&rule, &specs);
     let st = BlockStateStorage::new(layout.clone(), FileBacking::create(&dir.join("opt.state"), layout.total_bytes()).unwrap(), 4096).unwrap();
     let opt = StreamedOptimizer::new(rule, specs, st, 99, TILE).unwrap();

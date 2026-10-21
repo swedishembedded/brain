@@ -219,10 +219,15 @@ impl CheckpointDir {
             Ok(())
         })?;
         let (slen, shash) = write("state.bin", &mut |w| opt.state_mut().export(w))?;
-        let files = json!({
+        let mut files = json!({
             "values.bin": {"len": vlen, "fnv": format!("{vhash:016x}")},
             "state.bin": {"len": slen, "fnv": format!("{shash:016x}")},
         });
+        // The factored second-moment statistics of an Adafactor run, beside the elementwise state.
+        if opt.rule().slots().is_empty() {
+            let (flen, fhash) = write("factored.bin", &mut |w| opt.export_factored(w))?;
+            files["factored.bin"] = json!({"len": flen, "fnv": format!("{fhash:016x}")});
+        }
         if stop < Stage::MetaWritten {
             return Ok(tmp);
         }
@@ -277,7 +282,8 @@ impl CheckpointDir {
         if meta["format"] != 1 || meta["rule"] != opt.rule().name() || meta["tensors"] != Self::tensor_table(opt) {
             return Err(bad(format!("{}: rule or tensor table differs from this run", dir.display())));
         }
-        for name in ["values.bin", "state.bin"] {
+        let factored = opt.rule().slots().is_empty();
+        for name in ["values.bin", "state.bin"].into_iter().chain(factored.then_some("factored.bin")) {
             let (len, hash) = hash_file(&dir.join(name))?;
             let f = &meta["files"][name];
             if f["len"] != len || f["fnv"] != format!("{hash:016x}") {
@@ -295,7 +301,20 @@ impl CheckpointDir {
         opt: &mut StreamedOptimizer<S>,
         params: &mut dyn ParamTiles,
     ) -> io::Result<Option<RunState>> {
-        let gens = self.entries("gen-")?;
+        self.restore_matching(opt, params, None)
+    }
+
+    /// [`Self::restore`] of exactly the generation committed at `step`: a trainer whose own resume file names
+    /// a step must not continue from a newer or older state. `Ok(None)` when no generation was committed at it.
+    pub fn restore_at<S: OptimizerStateStorage>(&self, opt: &mut StreamedOptimizer<S>, params: &mut dyn ParamTiles, step: u32) -> io::Result<Option<RunState>> {
+        self.restore_matching(opt, params, Some(step))
+    }
+
+    fn restore_matching<S: OptimizerStateStorage>(&self, opt: &mut StreamedOptimizer<S>, params: &mut dyn ParamTiles, only: Option<u32>) -> io::Result<Option<RunState>> {
+        let mut gens = self.entries("gen-")?;
+        if let Some(step) = only {
+            gens.retain(|p| p.file_name().is_some_and(|n| n == gen_name(step).as_str()));
+        }
         if gens.is_empty() {
             return Ok(None);
         }
@@ -324,6 +343,9 @@ impl CheckpointDir {
                 }
             }
             opt.state_mut().import(&mut BufReader::with_capacity(IO_CHUNK, File::open(dir.join("state.bin"))?))?;
+            if opt.rule().slots().is_empty() {
+                opt.import_factored(&mut BufReader::with_capacity(IO_CHUNK, File::open(dir.join("factored.bin"))?))?;
+            }
             let run = RunState {
                 step: meta["step"].as_u64().ok_or_else(|| bad("step".into()))? as u32,
                 seed: meta["seed"].as_u64().ok_or_else(|| bad("seed".into()))?,

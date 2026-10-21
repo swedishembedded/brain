@@ -33,6 +33,18 @@ pub enum Rule {
     Lion { beta1: f32, beta2: f32, wd: f32 },
     /// SGD with momentum (coupled L2 weight decay, as torch): slot 0 = buffer.
     SgdMomentum { momentum: f32, wd: f32, nesterov: bool },
+    /// Adafactor without a first moment (arXiv:1804.04235): a factored second moment, no elementwise state
+    /// slots. `decay` shapes `beta2 = 1 - t^-decay`, `eps` is added to the squared gradient, the update RMS is
+    /// clipped at `clip_threshold`, `wd` is decoupled weight decay. Runs through the streamed optimiser only
+    /// (see `factored`).
+    Adafactor { decay: f32, eps: f32, clip_threshold: f32, wd: f32 },
+}
+
+impl Rule {
+    /// The usual Adafactor settings (`decay` 0.8, `eps` 1e-30, `clip_threshold` 1).
+    pub fn adafactor(wd: f32) -> Rule {
+        Rule::Adafactor { decay: 0.8, eps: 1e-30, clip_threshold: 1.0, wd }
+    }
 }
 
 impl Rule {
@@ -41,6 +53,7 @@ impl Rule {
         match self {
             Rule::AdamW { .. } => &[SlotKind::Signed, SlotKind::NonNegative],
             Rule::Lion { .. } | Rule::SgdMomentum { .. } => &[SlotKind::Signed],
+            Rule::Adafactor { .. } => &[],
         }
     }
 
@@ -49,6 +62,7 @@ impl Rule {
             Rule::AdamW { .. } => "adamw",
             Rule::Lion { .. } => "lion",
             Rule::SgdMomentum { .. } => "sgd_momentum",
+            Rule::Adafactor { .. } => "adafactor",
         }
     }
 
@@ -76,6 +90,8 @@ impl Rule {
                 *w -= s.lr * (u + wd * *w);
                 *m = beta2 * *m + (1.0 - beta2) * g;
             }
+            // Not elementwise: the streamed optimiser dispatches it to `factored` before any element is visited.
+            Rule::Adafactor { .. } => unreachable!("Adafactor has no elementwise update; StreamedOptimizer::update_tensor runs it factored"),
             Rule::SgdMomentum { momentum, wd, nesterov } => {
                 let g = g + wd * *w;
                 let m = &mut st[0];

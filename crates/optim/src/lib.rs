@@ -71,6 +71,7 @@ pub mod codec;
 pub mod deferred;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod encoded;
+pub mod factored;
 pub mod rule;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod checkpoint;
@@ -299,9 +300,19 @@ impl Optim {
         // never called on, so an all-1.0 store is bit-identical to before
         // this field existed) - written once, here, never again (neither can
         // change for the life of this graph).
-        let q8 = ps.opt_params().iter().any(|(n, _)| ps.moment_scales.contains_key(n));
+        let is_bf16 = |n: &str| ps.precision_of(n).state == paramstore::precision::StateFormat::Bf16;
+        let q8 = ps.opt_params().iter().any(|(n, _)| ps.moment_scales.contains_key(n) || is_bf16(n));
         let hparams_q = q8.then(|| gpu.uniform_dynamic(12));
         for (ti, (name, numel)) in ps.opt_params().iter().enumerate() {
+            if is_bf16(name) {
+                let kernel = gpu.kernel_index("adamw_bf16").unwrap_or_else(|| panic!("{name} has bf16 moments but this device has no `adamw_bf16` kernel registered"));
+                let sr = ps.precision_of(name).stochastic_rounding as u32;
+                let desc = gpu.storage(4);
+                gpu.write(&desc, &[*numel as u32, f(ps.lr_mult_of(name)), ti as u32, sr]);
+                steps.push(gpu.step_buf(kernel, hparams_q.as_ref().unwrap(), &[ps.w(name), ps.g(name), &ps.adam_m[name], &ps.adam_v[name], &desc, &coef_buf], numel.div_ceil(2) as u32));
+                const_unis.push(desc);
+                continue;
+            }
             if let Some(scales) = ps.moment_scales.get(name) {
                 let kernel = self.q8_kernel(gpu).unwrap_or_else(|| panic!("{name} has int8 moments but this device has no `adamw_q8` kernel registered"));
                 let sr = ps.precision_of(name).stochastic_rounding as u32;

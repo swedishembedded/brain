@@ -121,14 +121,14 @@ impl StateCodec {
         match self.format {
             StateFormat::F32 => 4 * n,
             StateFormat::Bf16 => 2 * n,
-            StateFormat::Int8Block { .. } => n,
+            StateFormat::Int8Block { .. } | StateFormat::Log8Block { .. } => n,
         }
     }
 
     /// Bytes of the scale region for `n` elements (0 for unblocked formats).
     pub fn scale_bytes(&self, n: usize) -> usize {
         match self.format {
-            StateFormat::Int8Block { block } => 4 * n.div_ceil(block as usize),
+            StateFormat::Int8Block { block } | StateFormat::Log8Block { block } => 4 * n.div_ceil(block as usize),
             _ => 0,
         }
     }
@@ -147,12 +147,13 @@ impl StateCodec {
                     *o = bf16_to_f32(u16::from_le_bytes(*c));
                 }
             }
-            StateFormat::Int8Block { block } => {
+            StateFormat::Int8Block { block } | StateFormat::Log8Block { block } => {
+                let log = matches!(self.format, StateFormat::Log8Block { .. });
                 for (bi, chunk) in out.chunks_mut(block as usize).enumerate() {
                     let s = f32::from_le_bytes(scales[4 * bi..4 * bi + 4].try_into().unwrap());
                     let codes = &data[bi * block as usize..];
                     for (o, &q) in chunk.iter_mut().zip(codes) {
-                        *o = decode_code(self.kind, q, s);
+                        *o = if log { decode_log(self.kind, q, s) } else { decode_code(self.kind, q, s) };
                     }
                 }
             }
@@ -174,14 +175,16 @@ impl StateCodec {
                     *c = f32_to_bf16(*v, u(i)).to_le_bytes();
                 }
             }
-            StateFormat::Int8Block { block } => {
+            StateFormat::Int8Block { block } | StateFormat::Log8Block { block } => {
+                let log = matches!(self.format, StateFormat::Log8Block { .. });
                 let block = block as usize;
                 for (bi, chunk) in vals.chunks(block).enumerate() {
                     let absmax = chunk.iter().fold(0f32, |m, v| m.max(v.abs()));
                     scales[4 * bi..4 * bi + 4].copy_from_slice(&absmax.to_le_bytes());
                     let inv = if absmax > 0.0 { 1.0 / absmax } else { 0.0 };
                     for (j, v) in chunk.iter().enumerate() {
-                        data[bi * block + j] = encode_code(self.kind, *v, inv, u(bi * block + j));
+                        let rnd = u(bi * block + j);
+                        data[bi * block + j] = if log { encode_log(self.kind, *v, inv, rnd) } else { encode_code(self.kind, *v, inv, rnd) };
                     }
                 }
             }
@@ -243,6 +246,64 @@ pub fn encode_code(kind: SlotKind, v: f32, inv: f32, u: Option<f32>) -> u8 {
             let q = round_code((v * inv).min(1.0).sqrt().sqrt() * 255.0, u).clamp(1.0, 255.0);
             q as u8
         }
+    }
+}
+
+/// Log-code levels per octave: signed codes (7 magnitude bits) take 8 steps an octave, non-negative codes
+/// (8 bits) 16, so both span about 16 octaves below the block maximum.
+const LOG_STEPS_SIGNED: f32 = 8.0;
+const LOG_STEPS_NONNEG: f32 = 16.0;
+
+/// Code -> value for one logarithmic 8-bit element: `scale * 2^((q - top) / steps)`, with the lowest signed
+/// code (magnitude 0) meaning zero.
+#[inline]
+pub fn decode_log(kind: SlotKind, q: u8, scale: f32) -> f32 {
+    match kind {
+        SlotKind::Signed => {
+            let c = q as i8;
+            let m = c.unsigned_abs();
+            if m == 0 {
+                return 0.0;
+            }
+            let v = scale * ((m as f32 - 127.0) / LOG_STEPS_SIGNED).exp2();
+            if c < 0 {
+                -v
+            } else {
+                v
+            }
+        }
+        SlotKind::NonNegative => {
+            if q == 0 {
+                return 0.0;
+            }
+            scale * ((q as f32 - 255.0) / LOG_STEPS_NONNEG).exp2()
+        }
+    }
+}
+
+/// Value -> code for one logarithmic element of a block whose maximum has reciprocal `inv`; rounding is in the
+/// log domain (nearest, or stochastic with `u`). Values below the lowest level snap to it, never to zero, for
+/// a non-negative slot (a positive second moment must not vanish); a signed slot flushes them to zero.
+#[inline]
+pub fn encode_log(kind: SlotKind, v: f32, inv: f32, u: Option<f32>) -> u8 {
+    if inv <= 0.0 || !v.is_finite() {
+        return 0;
+    }
+    let (top, steps) = match kind {
+        SlotKind::Signed => (127.0, LOG_STEPS_SIGNED),
+        SlotKind::NonNegative => (255.0, LOG_STEPS_NONNEG),
+    };
+    let a = (v.abs() * inv).min(1.0);
+    if a <= 0.0 || (kind == SlotKind::NonNegative && v < 0.0) {
+        return 0;
+    }
+    let level = round_code(top + a.log2() * steps, u);
+    match kind {
+        SlotKind::Signed => {
+            let m = level.clamp(0.0, 127.0) as i8;
+            (if v < 0.0 { -m } else { m }) as u8
+        }
+        SlotKind::NonNegative => level.clamp(1.0, 255.0) as u8,
     }
 }
 
@@ -335,4 +396,45 @@ mod tests {
         assert_eq!(whole, parts);
     }
 
+    /// Spec: a logarithmic block keeps a constant RELATIVE step over its range: elements from the block maximum
+    /// down thirteen octaves round-trip within a few percent each, where the int8 map loses the small ones; a
+    /// positive second moment never decodes to zero.
+    #[test]
+    fn log8_has_constant_relative_precision_over_many_octaves() {
+        for (kind, bound) in [(SlotKind::NonNegative, 0.03f32), (SlotKind::Signed, 0.05)] {
+            let c = StateCodec { format: StateFormat::Log8Block { block: 64 }, kind };
+            let vals: Vec<f32> = (0..64).map(|i| (-(i as f32) * 13.0 / 63.0).exp2()).collect();
+            let out = roundtrip(c, &vals, Rounding::NEAREST);
+            for (a, b) in vals.iter().zip(&out) {
+                assert!(((a - b) / a).abs() < bound, "{kind:?}: {a} -> {b}");
+            }
+            let i8c = StateCodec { format: StateFormat::Int8Block { block: 64 }, kind };
+            let i8out = roundtrip(i8c, &vals, Rounding::NEAREST);
+            let worst_i8 = vals.iter().zip(&i8out).map(|(a, b)| ((a - b) / a).abs()).fold(0f32, f32::max);
+            assert!(worst_i8 > bound, "{kind:?}: the int8 map is the coarser one here ({worst_i8})");
+        }
+        let c = StateCodec { format: StateFormat::Log8Block { block: 4 }, kind: SlotKind::NonNegative };
+        assert!(roundtrip(c, &[1.0, 1e-30, 1e-12, 0.5], Rounding::NEAREST).iter().all(|&v| v > 0.0));
+        assert_eq!(roundtrip(c, &[0.0; 4], Rounding::NEAREST), [0.0; 4]);
+    }
+
+    /// Spec: logarithmic stochastic rounding is unbiased in the log domain: a value between two levels is
+    /// reached on average, which nearest rounding cannot do.
+    #[test]
+    fn log8_stochastic_rounding_averages_to_the_value_in_the_log_domain() {
+        let c = StateCodec { format: StateFormat::Log8Block { block: 4 }, kind: SlotKind::NonNegative };
+        let vals = [1.0f32, 0.5 * 1.021, 0.5, 0.25];
+        let target = vals[1].log2() as f64;
+        let n = 4000u64;
+        let mut sum = 0f64;
+        for k in 0..n {
+            let mut data = vec![0u8; 4];
+            let mut sc = vec![0u8; 4];
+            c.encode(&vals, &mut data, &mut sc, Rounding { stochastic: true, key: k }, 0);
+            let mut out = vec![0f32; 4];
+            c.decode(&data, &sc, &mut out);
+            sum += (out[1] as f64).log2();
+        }
+        assert!((sum / n as f64 - target).abs() < 2e-3, "mean log2 {} vs {target}", sum / n as f64);
+    }
 }

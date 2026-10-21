@@ -55,6 +55,16 @@ pub const DEVICE_INT8_BLOCK: u32 = 64;
 /// this crate allocates on the host to produce those calls.
 pub const UPLOAD_CHUNK_WORDS: usize = 1 << 20;
 
+/// `v` as bf16 bits, to nearest even (inf and NaN keep their class).
+fn bf16_bits(v: f32) -> u32 {
+    let b = v.to_bits();
+    if v.is_finite() {
+        (b.wrapping_add(0x7fff + ((b >> 16) & 1)) >> 16) & 0xffff
+    } else {
+        (b >> 16) | if v.is_nan() { 0x40 } else { 0 }
+    }
+}
+
 /// Workgroups — equivalently, partial sums — `gradnorm_part` uses for a tensor
 /// of `numel` elements. The single place this policy is written down; the
 /// buffer sizing (`ParamStore::norms`) and the dispatch (`optim::Optim`) both
@@ -234,12 +244,25 @@ impl ParamStore {
                         params.push((name.clone(), *numel));
                         continue;
                     }
+                    if pr.state == precision::StateFormat::Bf16 {
+                        assert!(
+                            pr.value == precision::ValueDtype::F32 && pr.grad == precision::GradDtype::F32 && pr.master == precision::MasterPolicy::None,
+                            "{name}: the device optimiser runs bf16 moments with f32 value and grad and no master; got {pr:?}"
+                        );
+                        let words = numel.div_ceil(2) as u64;
+                        grad.insert(name.clone(), gpu.storage(*numel as u64));
+                        adam_m.insert(name.clone(), gpu.storage(words));
+                        adam_v.insert(name.clone(), gpu.storage(words));
+                        trainable.push((name.clone(), *numel));
+                        params.push((name.clone(), *numel));
+                        continue;
+                    }
                     assert!(
                         pr.state == precision::StateFormat::F32
                             && pr.value == precision::ValueDtype::F32
                             && pr.grad == precision::GradDtype::F32
                             && pr.master == precision::MasterPolicy::None,
-                        "{name}: the device optimiser supports f32 moments or blockwise-int8 moments (f32 value/grad, no master); got {pr:?}"
+                        "{name}: the device optimiser supports f32 moments bf16 or blockwise-int8 moments (f32 value/grad, no master); got {pr:?}"
                     );
                     // `gpu.storage(numel)` - NOT `storage_init`, and no write
                     // at all - for the zero-initialized grad/Adam moment
@@ -407,6 +430,14 @@ impl ParamStore {
         }
         let (m, v) = (self.adam_m.get(name)?, self.adam_v.get(name)?);
         let n = self.numel(name);
+        if self.precision_of(name).state == precision::StateFormat::Bf16 {
+            // Two bf16 to a word, low half first: widening to f32 is exact.
+            let unpack = |buf: &gpu_core::DeviceBuffer| -> Vec<f32> {
+                let words = gpu.read(buf, n.div_ceil(2));
+                words.iter().flat_map(|w| [f32::from_bits(w.to_bits() << 16), f32::from_bits(w.to_bits() & 0xffff_0000)]).take(n).collect()
+            };
+            return Some((unpack(m), unpack(v)));
+        }
         Some((gpu.read(m, n), gpu.read(v, n)))
     }
 
@@ -423,6 +454,20 @@ impl ParamStore {
         let n = self.numel(name);
         if m.len() != n || v.len() != n {
             return Err(format!("{name}: moments of {}/{} values for a {n}-value parameter", m.len(), v.len()));
+        }
+        if self.precision_of(name).state == precision::StateFormat::Bf16 {
+            // The moments the kernel wrote are bf16, so rounding to nearest here restores them exactly.
+            let pack = |x: &[f32]| -> Vec<u32> {
+                x.chunks(2)
+                    .map(|c| {
+                        let h = |v: f32| bf16_bits(v);
+                        h(c[0]) | c.get(1).map_or(0, |&v| h(v) << 16)
+                    })
+                    .collect()
+            };
+            gpu.write(mb, &pack(m));
+            gpu.write(vb, &pack(v));
+            return Ok(());
         }
         gpu.write_f32(mb, m);
         gpu.write_f32(vb, v);

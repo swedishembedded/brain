@@ -1208,6 +1208,8 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // update plus the codec work per element; traffic is w + g (8 B), the two
         // code bytes read and written (4 B) and the w write (4 B), scales negligible.
         "adamw_q8" | "adamw_q8_wg" => f(60 * p(0)?, 16 * p(0)?),
+        // bf16 moments: per element the weight and gradient plus two bf16 moments read and written.
+        "adamw_bf16" => f(40 * p(0)?, 20 * p(0)?),
         // params [numel, slot].
         "gradnorm_sq" => f(2 * p(0)?, 4 * p(0)?),
         // The roofline probe itself (params [n, iters, c, d]): `iters` passes of

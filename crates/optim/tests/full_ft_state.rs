@@ -49,7 +49,7 @@ fn optimizer(specs: Vec<TensorSpec>, tile: usize) -> StreamedOptimizer<Mem> {
 }
 
 fn fp32_spec(name: &str, n: usize) -> TensorSpec {
-    TensorSpec { name: name.into(), numel: n, precision: ParamPrecision::FP32 }
+    TensorSpec { name: name.into(), numel: n, precision: ParamPrecision::FP32, row_len: None }
 }
 
 /// Coupled "model": the gradient of tensor i depends on the VALUES of the
@@ -158,7 +158,7 @@ fn train_encoded(enc: QuantEncoding, master: MasterPolicy, steps: usize, registr
     let grads = BlockStateStorage::new(gl.clone(), MemBacking::zeroed(gl.total_bytes()), tile).unwrap();
     let mut p = EncodedParams { values, grads };
     let precision = ParamPrecision { value: ValueDtype::Bf16, grad: GradDtype::F32, state: StateFormat::F32, master, stochastic_rounding: false };
-    let specs = vec![TensorSpec { name: "w".into(), numel: N, precision }];
+    let specs = vec![TensorSpec { name: "w".into(), numel: N, precision, row_len: None }];
     let rule = Rule::AdamW { adam: Adam::default(), wd: 0.0 };
     let l = state_layout(&rule, &specs);
     let st = BlockStateStorage::new(l.clone(), MemBacking::zeroed(l.total_bytes()), tile).unwrap();
@@ -228,7 +228,7 @@ fn export_streams_masters_into_a_chosen_encoding_within_a_fixed_staging() {
     let measure = |rows: usize| {
         let n = rows * 64;
         let precision = ParamPrecision { master: MasterPolicy::F32, ..ParamPrecision::FP32 };
-        let specs = vec![TensorSpec { name: "w".into(), numel: n, precision }];
+        let specs = vec![TensorSpec { name: "w".into(), numel: n, precision, row_len: None }];
         let mut opt = optimizer(specs, 256);
         let master: Vec<f32> = (0..n).map(|i| ((i * 29 % 101) as f32 - 50.0) * 0.01).collect();
         for (c, ch) in master.chunks(256).enumerate() {

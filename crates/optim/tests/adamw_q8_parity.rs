@@ -59,7 +59,7 @@ fn run(gpu: &Gpu, sr: bool, clip: Option<f32>, tol: f32) {
 
     // host reference, same codec and rounding keys (tensor index 0)
     let rule = Rule::AdamW { adam, wd };
-    let specs = vec![TensorSpec { name: "w".into(), numel: n, precision: int8(sr) }];
+    let specs = vec![TensorSpec { name: "w".into(), numel: n, precision: int8(sr), row_len: None }];
     let layout = state_layout(&rule, &specs);
     let st = BlockStateStorage::new(layout.clone(), MemBacking::zeroed(layout.total_bytes()), 256).unwrap();
     let mut host = StreamedOptimizer::new(rule, specs, st, seed, 256).unwrap();

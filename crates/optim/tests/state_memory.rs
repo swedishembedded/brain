@@ -57,7 +57,7 @@ fn step_peak(n: usize) -> (usize, usize) {
         stochastic_rounding: true,
     };
     let rule = Rule::AdamW { adam: Adam::default(), wd: 0.01 };
-    let specs = vec![TensorSpec { name: "w".into(), numel: n, precision }];
+    let specs = vec![TensorSpec { name: "w".into(), numel: n, precision, row_len: None }];
     let layout = state_layout(&rule, &specs);
     let tile = 1 << 14;
     let st = BlockStateStorage::new(layout.clone(), FileBacking::create(&dir.join("s"), layout.total_bytes()).unwrap(), tile).unwrap();

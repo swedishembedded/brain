@@ -106,7 +106,7 @@ fn specs_of(ps: &ParamStore) -> Vec<TensorSpec> {
                 precision.value == ValueDtype::F32 && precision.master == MasterPolicy::None,
                 "OffloadAdam: {name}: the device weight is the f32 value; a master copy or other value dtype is not applicable ({precision:?})"
             );
-            TensorSpec { name: name.clone(), numel: *numel, precision }
+            TensorSpec { name: name.clone(), numel: *numel, precision, row_len: None }
         })
         .collect()
 }

@@ -17,7 +17,7 @@
 //!
 //! ```ignore
 //! let mut ts = TrainState::create(TrainStateConfig { manifest, policy, rule, seed: None,
-//!                                                  tile_elems: 1 << 16, state_dir: None })?;
+//!                                                  tile_elems: 1 << 16, state_dir: None, row_len: vec![] })?;
 //! println!("{}", ts.report());
 //! let _ = ts.step(&mut params, lr, Some(1.0), 1.0)?;
 //! ts.commit(&ckpt_dir, &mut params, &run)?;
@@ -44,15 +44,18 @@ pub struct TrainStateConfig {
     pub tile_elems: usize,
     /// Directory for the streamed on-disk state file; `None` keeps it in memory.
     pub state_dir: Option<PathBuf>,
+    /// `(name, row length)` of the matrices a factored rule ([`Rule::Adafactor`]) keeps row and column statistics
+    /// for; a tensor not listed is treated as a vector. Ignored by elementwise rules.
+    pub row_len: Vec<(String, usize)>,
 }
 
 pub struct TrainState {
-    opt: StreamedOptimizer<Box<dyn OptimizerStateStorage>>,
+    opt: StreamedOptimizer<Box<dyn OptimizerStateStorage + Send>>,
     policy_report: String,
     bytes: ParamBytes,
 }
 
-impl OptimizerStateStorage for Box<dyn OptimizerStateStorage> {
+impl OptimizerStateStorage for Box<dyn OptimizerStateStorage + Send> {
     fn read_tile(&mut self, tensor: usize, slot: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
         (**self).read_tile(tensor, slot, start, out)
     }
@@ -81,12 +84,17 @@ impl TrainState {
         let specs: Vec<TensorSpec> = cfg
             .manifest
             .iter()
-            .map(|(name, numel)| TensorSpec { name: name.clone(), numel: *numel, precision: cfg.policy.resolve(name, *numel).precision })
+            .map(|(name, numel)| TensorSpec {
+                name: name.clone(),
+                numel: *numel,
+                precision: cfg.policy.resolve(name, *numel).precision,
+                row_len: cfg.row_len.iter().find(|(n, _)| n == name).map(|(_, k)| *k).filter(|_| matches!(cfg.rule, Rule::Adafactor { .. })),
+            })
             .collect();
         let (policy_report, bytes) = cfg.policy.report(&cfg.manifest, cfg.rule.slots().len());
         let layout = state_layout(&cfg.rule, &specs);
         let tile = effective_tile(&specs, cfg.tile_elems);
-        let state: Box<dyn OptimizerStateStorage> = match &cfg.state_dir {
+        let state: Box<dyn OptimizerStateStorage + Send> = match &cfg.state_dir {
             None => Box::new(BlockStateStorage::new(layout.clone(), MemBacking::zeroed(layout.total_bytes()), tile)?),
             Some(dir) => {
                 std::fs::create_dir_all(dir)?;
@@ -134,6 +142,35 @@ impl TrainState {
         self.opt.step(params, lr, clip, extra_scale)
     }
 
+    /// Sum of squares of every gradient (f64); with [`crate::grad_multiplier`] the global clip of a step
+    /// whose gradients are all complete.
+    pub fn grad_sum_sq(&mut self, params: &mut dyn ParamTiles) -> io::Result<f64> {
+        self.opt.grad_sum_sq(params)
+    }
+
+    /// Open the next step (1-based index): the first half of the layer-at-a-time form of [`Self::step`].
+    pub fn begin_step(&mut self) -> u32 {
+        self.opt.begin_step()
+    }
+
+    /// Update tensor `ti` of the step opened by [`Self::begin_step`], each tensor once, in any order.
+    pub fn update_tensor(&mut self, params: &mut dyn ParamTiles, ti: usize, lr: f32, grad_multiplier: f32) -> io::Result<()> {
+        self.opt.update_tensor(params, ti, lr, grad_multiplier)
+    }
+
+    /// Stream the highest-precision weights (the master where a tensor has one, else its value from
+    /// `values`) into `sink` encoded as `dst[i]`, a tile at a time.
+    pub fn export_masters(
+        &mut self,
+        values: &mut dyn ParamTiles,
+        dst: &[checkpoint::packed::TensorDescriptor],
+        registry: &checkpoint::packed::CodecRegistry,
+        sink: &mut dyn checkpoint::packed::TensorSink,
+        tile_elems: usize,
+    ) -> io::Result<crate::encoded::ExportReport> {
+        crate::encoded::export_values(&mut crate::streamed::MasterView { opt: &mut self.opt, values }, dst, registry, sink, tile_elems)
+    }
+
     /// Atomically commit values, state, step, seed and the trainer's schedule.
     /// `run.step` and `run.seed` should be [`Self::step_count`] and [`Self::seed`].
     pub fn commit(&mut self, dir: &CheckpointDir, params: &mut dyn ParamTiles, run: &RunState) -> io::Result<PathBuf> {
@@ -146,9 +183,39 @@ impl TrainState {
         RunState { step: self.opt.step_count(), seed: self.opt.seed(), rng_counter, schedule }
     }
 
-    /// Restore the newest valid checkpoint; `None` if there is none.
+    /// [`Self::restore`] of exactly the checkpoint committed at `step`.
+    pub fn restore_at(&mut self, dir: &CheckpointDir, params: &mut dyn ParamTiles, step: u32) -> io::Result<Option<RunState>> {
+        let run = dir.restore_at(&mut self.opt, params, step)?;
+        if run.is_some() {
+            self.opt.publish_masters(params)?;
+        }
+        Ok(run)
+    }
+
+    /// Use `rule` from the next step on; it must keep the same state slots.
+    pub fn set_rule(&mut self, rule: Rule) {
+        self.opt.set_rule(rule);
+    }
+
+    /// Overwrite the master copy of tensor `ti` from `start`; `false` when the tensor has none.
+    pub fn set_master(&mut self, ti: usize, start: usize, vals: &[f32]) -> io::Result<bool> {
+        self.opt.set_master(ti, start, vals)
+    }
+
+    /// Read `out.len()` elements of tensor `ti` from `start` as the highest-precision copy: the master where
+    /// the tensor has one, else its value from `values`.
+    pub fn read_master(&mut self, values: &mut dyn ParamTiles, ti: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
+        crate::streamed::MasterView { opt: &mut self.opt, values }.read_value(ti, start, out)
+    }
+
+    /// Restore the newest valid checkpoint; `None` if there is none. Tensors with a master copy have their
+    /// stored value rewritten from it, so the master stays the one source of truth.
     pub fn restore(&mut self, dir: &CheckpointDir, params: &mut dyn ParamTiles) -> io::Result<Option<RunState>> {
-        dir.restore(&mut self.opt, params)
+        let run = dir.restore(&mut self.opt, params)?;
+        if run.is_some() {
+            self.opt.publish_masters(params)?;
+        }
+        Ok(run)
     }
 }
 
@@ -192,6 +259,7 @@ mod tests {
             seed: Some(7),
             tile_elems: 100,
             state_dir: None,
+            row_len: Vec::new(),
         })
         .unwrap();
         let report = ts.report();

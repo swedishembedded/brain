@@ -45,6 +45,10 @@ pub enum StateFormat {
     /// 8-bit codes with one f32 scale per `block` consecutive elements. The
     /// code map depends on the slot's sign (see `optim::codec`).
     Int8Block { block: u32 },
+    /// 8-bit codes on a logarithmic scale with one f32 scale (the block maximum) per `block` consecutive
+    /// elements: a constant relative step over ~16 octaves below the maximum, where [`StateFormat::Int8Block`]
+    /// spends its levels near the maximum. For heavy-tailed second moments.
+    Log8Block { block: u32 },
 }
 
 /// Whether, and in which format, the optimiser keeps a higher-precision copy of
@@ -62,7 +66,7 @@ impl StateFormat {
     /// Block size of the scale hierarchy, or 1 for an unblocked format.
     pub fn block(self) -> usize {
         match self {
-            StateFormat::Int8Block { block } => block as usize,
+            StateFormat::Int8Block { block } | StateFormat::Log8Block { block } => block as usize,
             _ => 1,
         }
     }
@@ -72,7 +76,7 @@ impl StateFormat {
         match self {
             StateFormat::F32 => 4 * numel as u64,
             StateFormat::Bf16 => 2 * numel as u64,
-            StateFormat::Int8Block { block } => numel as u64 + 4 * numel.div_ceil(block as usize) as u64,
+            StateFormat::Int8Block { block } | StateFormat::Log8Block { block } => numel as u64 + 4 * numel.div_ceil(block as usize) as u64,
         }
     }
 }

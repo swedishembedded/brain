@@ -46,6 +46,8 @@ pub const ACCUM_BF16: &str = include_str!("../wgsl/accum_bf16.wgsl");
 pub const ADALN_ROW: &str = include_str!("../wgsl/adaln_row.wgsl");
 /// `wgsl/adamw.wgsl`
 pub const ADAMW: &str = include_str!("../wgsl/adamw.wgsl");
+/// `wgsl/adamw_bf16.wgsl`
+pub const ADAMW_BF16: &str = include_str!("../wgsl/adamw_bf16.wgsl");
 /// `wgsl/adamw_q8.wgsl`
 pub const ADAMW_Q8: &str = include_str!("../wgsl/adamw_q8.wgsl");
 /// `wgsl/adamw_q8_wg.wgsl`
@@ -1309,6 +1311,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("accum_bf16", ACCUM_BF16),
     ("adaln_row", ADALN_ROW),
     ("adamw", ADAMW),
+    ("adamw_bf16", ADAMW_BF16),
     ("adamw_q8", ADAMW_Q8),
     ("adamw_q8_wg", ADAMW_Q8_WG),
     ("adaptive_avgpool2d", ADAPTIVE_AVGPOOL2D),

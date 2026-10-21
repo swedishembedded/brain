@@ -32,6 +32,7 @@ use std::io;
 use paramstore::precision::{ParamPrecision, StateFormat, ValueDtype};
 
 use crate::codec::{rounding_key, Rounding, SlotKind, StateCodec};
+use crate::factored::{self, Factored, SqAccumulator};
 use crate::rule::{Rule, StepScalars};
 use crate::storage::{BlockStateStorage, Backing, OptimizerStateStorage, StateLayout};
 
@@ -41,6 +42,10 @@ pub struct TensorSpec {
     pub name: String,
     pub numel: usize,
     pub precision: ParamPrecision,
+    /// Row length `k` of a `[numel / k, k]` matrix whose second moment a factored rule
+    /// ([`Rule::Adafactor`]) keeps as row and column statistics; `None` for a vector (or a rule with
+    /// elementwise state). Tiles of such a tensor are whole rows.
+    pub row_len: Option<usize>,
 }
 
 /// Value and gradient access, in tiles. `start` is an element offset.
@@ -112,7 +117,15 @@ pub struct MasterView<'a, S: OptimizerStateStorage> {
 impl<S: OptimizerStateStorage> ParamTiles for MasterView<'_, S> {
     fn read_value(&mut self, tensor: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
         match self.opt.master_slot(tensor) {
-            Some(ms) => self.opt.state.read_tile(tensor, ms, start, out),
+            // An export may read tiles wider than the state's own tile (a destination encoding with a larger write
+            // quantum): the master is read in state-sized pieces.
+            Some(ms) => {
+                let piece = self.opt.tile_elems();
+                for (i, chunk) in out.chunks_mut(piece).enumerate() {
+                    self.opt.state.read_tile(tensor, ms, start + i * piece, chunk)?;
+                }
+                Ok(())
+            }
             None => self.values.read_value(tensor, start, out),
         }
     }
@@ -154,6 +167,9 @@ pub fn effective_tile(specs: &[TensorSpec], requested: usize) -> usize {
                 tile = lcm(tile, block as usize);
             }
         }
+        if let Some(k) = s.row_len {
+            tile = lcm(tile, k);
+        }
     }
     tile
 }
@@ -173,6 +189,8 @@ pub struct StreamedOptimizer<S: OptimizerStateStorage> {
     g: Vec<f32>,
     st: [Vec<f32>; 2],
     master: Vec<f32>,
+    /// Factored second-moment statistics, one per tensor, when the rule is [`Rule::Adafactor`]; empty otherwise.
+    factored: Vec<Factored>,
 }
 
 impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
@@ -189,6 +207,7 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{}: an 8-bit master is not supported", s.name)));
             }
         }
+        let factored = if matches!(rule, Rule::Adafactor { .. }) { specs.iter().map(|s| Factored::new(s.numel, s.row_len)).collect() } else { Vec::new() };
         Ok(StreamedOptimizer {
             rule,
             specs,
@@ -200,6 +219,7 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
             g: vec![0.0; tile],
             st: [vec![0.0; tile], vec![0.0; tile]],
             master: vec![0.0; tile],
+            factored,
         })
     }
 
@@ -215,7 +235,17 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
 
     /// Physical bytes of the optimiser state (scales included).
     pub fn state_physical_bytes(&self) -> u64 {
-        self.state.physical_bytes()
+        self.state.physical_bytes() + self.factored.iter().map(Factored::bytes).sum::<u64>()
+    }
+
+    /// Append the factored statistics (none unless the rule is [`Rule::Adafactor`]) to a checkpoint's state stream.
+    pub fn export_factored(&self, w: &mut dyn io::Write) -> io::Result<()> {
+        self.factored.iter().try_for_each(|f| factored::write_stats(f, w))
+    }
+
+    /// Read back what [`Self::export_factored`] wrote.
+    pub fn import_factored(&mut self, r: &mut dyn io::Read) -> io::Result<()> {
+        self.factored.iter_mut().try_for_each(|f| factored::read_stats(f, r))
     }
 
     pub fn step_count(&self) -> u32 {
@@ -273,6 +303,29 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
         Ok(())
     }
 
+    /// Overwrite tensor `ti`'s master copy from `start` with `vals` (a trainer restoring a weight it holds
+    /// elsewhere, e.g. the best evaluation of a run). Returns `false`, writing nothing, for a tensor with no master.
+    pub fn set_master(&mut self, ti: usize, start: usize, vals: &[f32]) -> io::Result<bool> {
+        let Some(slot) = self.master_slot(ti) else { return Ok(false) };
+        self.state.write_tile(ti, slot, start, vals, Rounding::NEAREST)?;
+        Ok(true)
+    }
+
+    /// Write every master copy into the stored values, rounded to nearest: the values a trainer resumes from
+    /// are then the quantization of the (authoritative) masters, whatever format the value file recorded.
+    pub fn publish_masters(&mut self, params: &mut dyn ParamTiles) -> io::Result<()> {
+        for ti in 0..self.specs.len() {
+            let Some(slot) = self.master_slot(ti) else { continue };
+            let numel = self.specs[ti].numel;
+            for start in (0..numel).step_by(self.tile) {
+                let n = self.tile.min(numel - start);
+                self.state.read_tile(ti, slot, start, &mut self.w[..n])?;
+                params.write_value(ti, start, &self.w[..n], Rounding::NEAREST)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Sum of squares of every gradient, f64, tile by tile. With
     /// [`crate::grad_multiplier`] this is the global clip; a layer-streamed
     /// trainer that cannot hold every gradient computes it as it goes and passes
@@ -317,6 +370,9 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
     /// gradient multiplied by `grad_multiplier`. Reads the tensor's value (or
     /// master), gradient and state, writes state, master and value.
     pub fn update_tensor(&mut self, params: &mut dyn ParamTiles, ti: usize, lr: f32, grad_multiplier: f32) -> io::Result<()> {
+        if let Rule::Adafactor { decay, eps, clip_threshold, wd } = self.rule {
+            return self.update_factored(params, ti, lr, grad_multiplier, (decay, eps, clip_threshold, wd));
+        }
         let scalars = StepScalars { t: self.step, lr, grad_scale: grad_multiplier };
         let nslots = self.rule.slots().len();
         let prec = self.specs[ti].precision;
@@ -358,6 +414,68 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
     }
 }
 
+impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
+    /// Tile length for tensor `ti`: the optimiser's tile, a whole number of rows for a factored matrix.
+    fn row_tile(&self, ti: usize) -> usize {
+        match self.specs[ti].row_len {
+            Some(k) => (self.tile / k).max(1) * k,
+            None => self.tile,
+        }
+    }
+
+    /// [`Rule::Adafactor`] on tensor `ti`: three streamed passes over its gradient (second-moment statistics,
+    /// update RMS for the clip, apply), the statistics held in host memory (`rows + cols` floats).
+    fn update_factored(&mut self, params: &mut dyn ParamTiles, ti: usize, lr: f32, mult: f32, (decay, eps, clip_threshold, wd): (f32, f32, f32, f32)) -> io::Result<()> {
+        let numel = self.specs[ti].numel;
+        let tile = self.row_tile(ti);
+        let prec = self.specs[ti].precision;
+        let master_slot = self.master_slot(ti);
+        let sr = prec.stochastic_rounding;
+        let scaled = |g: &mut [f32]| g.iter_mut().for_each(|x| *x *= mult);
+
+        let mut acc = SqAccumulator::new(&self.factored[ti], eps);
+        for start in (0..numel).step_by(tile) {
+            let n = tile.min(numel - start);
+            params.read_grad(ti, start, &mut self.g[..n])?;
+            scaled(&mut self.g[..n]);
+            acc.add(start, &self.g[..n]);
+        }
+        acc.finish(&mut self.factored[ti], factored::beta2(decay, self.step));
+
+        let mut sum_sq_u = 0f64;
+        for start in (0..numel).step_by(tile) {
+            let n = tile.min(numel - start);
+            params.read_grad(ti, start, &mut self.g[..n])?;
+            scaled(&mut self.g[..n]);
+            factored::precondition(&self.factored[ti], start, &mut self.g[..n]);
+            sum_sq_u += self.g[..n].iter().map(|&u| f64::from(u) * f64::from(u)).sum::<f64>();
+        }
+        let clip = factored::clip_scale(sum_sq_u, numel, clip_threshold);
+
+        for start in (0..numel).step_by(tile) {
+            let n = tile.min(numel - start);
+            match master_slot {
+                Some(ms) => self.state.read_tile(ti, ms, start, &mut self.w[..n])?,
+                None => params.read_value(ti, start, &mut self.w[..n])?,
+            }
+            params.read_grad(ti, start, &mut self.g[..n])?;
+            scaled(&mut self.g[..n]);
+            factored::precondition(&self.factored[ti], start, &mut self.g[..n]);
+            for (w, &u) in self.w[..n].iter_mut().zip(&self.g[..n]) {
+                *w -= lr * (clip * u + wd * *w);
+            }
+            if let Some(ms) = master_slot {
+                let rnd = Rounding { stochastic: sr, key: rounding_key(self.seed, self.step, ti, ms) };
+                self.master[..n].copy_from_slice(&self.w[..n]);
+                self.state.write_tile(ti, ms, start, &self.master[..n], rnd)?;
+            }
+            let vr = Rounding { stochastic: sr && prec.value != ValueDtype::F32, key: rounding_key(self.seed, self.step, ti, VALUE_ROUNDING_SLOT) };
+            params.write_value(ti, start, &self.w[..n], vr)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +487,7 @@ mod tests {
             name: name.into(),
             numel,
             precision: ParamPrecision { value, grad: GradDtype::F32, state, master, stochastic_rounding: false },
+            row_len: None,
         }
     }
 
