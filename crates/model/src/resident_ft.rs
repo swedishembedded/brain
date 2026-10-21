@@ -28,10 +28,20 @@
 //! [`optim::deferred::DeferredPublish`] store and reach the device together once every gradient of the step
 //! has been taken, so all gradients see one parameter version.
 //!
-//! Nothing here names a model. A model contributes the `(name, n, k)` of its linears and a
+//! **Layer streaming** ([`LayerWindow`]): when the weights do not all fit, only a window of layers is resident. The stored
+//! value of every tensor lives on the host in its device encoding; a layer is copied into one of a bounded set of
+//! device slots ([`ResidentFullFt::load_layer`]) when the forward or backward reaches it, and a layer's weights are
+//! updated between the backward segments, as soon as its gradient is complete ([`ResidentFullFt::finish_layer`]).
+//! The global clip norm is measured on the device. Two forms: [`ClipPass::TwoPass`] runs the backward twice (the first
+//! pass only measures, so the second applies the exact global multiplier and the result equals the resident step bit
+//! for bit), [`ClipPass::Running`] runs it once and clips each layer by the norm accumulated so far (never harder than
+//! the global clip). No gradient outlives its layer, so a step is one micro-batch.
+//!
+//! Nothing here names a model. A model contributes the `(name, n, k, layer)` of its linears and a
 //! [`checkpoint::TensorSource`] of initial values; the planner refuses a configuration that does not fit
 //! before the first byte is allocated ([`ResidentFullFt::demands`]).
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 
@@ -41,7 +51,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 use optim::checkpoint::{CheckpointDir, RunState};
 use optim::codec::Rounding;
 use optim::deferred::DeferredPublish;
-use optim::encoded::{aligned_tile, export_values, ExportReport};
+use optim::encoded::{aligned_tile, export_values, EncodedValues, ExportReport};
 use optim::rule::Rule;
 use optim::storage::{BlockStateStorage, MemBacking};
 use optim::streamed::{tensor_layout, ParamTiles, StepReport};
@@ -49,6 +59,7 @@ use optim::trainstate::{TrainState, TrainStateConfig};
 use paramstore::precision::{GradDtype, MasterPolicy, ParamPrecision, PrecisionPolicy, StateFormat, ValueDtype};
 use gpu_core::Step;
 
+use crate::gradnorm::{DeviceGradNorm, NormItem};
 use crate::memplan::{self, Authorized, Capacity, Category, Demand, Lever, PlanError, Variant};
 use crate::ops::{rewrite_tile, DeviceWeightSink, Ops, Weight};
 
@@ -121,6 +132,53 @@ pub struct ResidentFtConfig {
     /// tensor of the step is updated, as a trainer that updates tensors while their gradients are still being
     /// produced must. The result is the same bits; the price is one f32 copy of the resident weights in host memory.
     pub defer_publication: bool,
+    /// Layer streaming: keep only a window of layers on the device and the stored values on the host. `None` keeps
+    /// every layer resident.
+    pub window: Option<LayerWindow>,
+    /// How a layer-streamed step clips by the global gradient norm.
+    pub clip_pass: ClipPass,
+}
+
+/// The layers a layer-streamed build keeps on the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerWindow {
+    /// Layers resident per tensor shape (at least one); two lets a loader overlap the next layer with the current.
+    pub layers: u32,
+}
+
+/// How a layer-streamed step applies the global gradient-norm clip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipPass {
+    /// Measure the global norm in a first backward pass, update in a second: exact, one extra backward.
+    TwoPass,
+    /// Update in the only backward pass, clipping each layer by the norm accumulated so far: never harder than the
+    /// global clip, equal to it when nothing clips.
+    Running,
+}
+
+/// What a backward pass over the layers of a layer-streamed build does with each finished layer gradient.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StreamPass {
+    /// Measure the gradient norm on the device; no update.
+    Measure,
+    /// Update with a multiplier decided beforehand (the global clip of a [`StreamPass::Measure`] pass, and the
+    /// accumulation scale).
+    Update { lr: f32, grad_multiplier: f32 },
+    /// Update with the multiplier of the norm accumulated so far plus `base_sum_sq`, the squared norm of gradients
+    /// outside this state that are already complete.
+    Running { lr: f32, clip: Option<f32>, extra_scale: f32, base_sum_sq: f64 },
+}
+
+/// What a finished pass measured or did.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PassReport {
+    /// The optimizer step the pass applied (0 for a measuring pass).
+    pub step: u32,
+    /// Sum of squares of the gradients this state holds: all of them after a measuring pass, those of the layers
+    /// seen so far after a running one.
+    pub sum_sq: f64,
+    /// The smallest gradient multiplier a layer was updated with (1.0 for a measuring pass).
+    pub min_multiplier: f32,
 }
 
 impl ResidentFtConfig {
@@ -135,6 +193,8 @@ pub struct ResidentSpec {
     pub name: String,
     pub n: u32,
     pub k: u32,
+    /// The layer the tensor belongs to: tensors of a layer are loaded and updated together by a layer-streamed build.
+    pub layer: u32,
 }
 
 /// What the device and host offer, and what else the run already needs (activations, the other parameters).
@@ -148,22 +208,92 @@ fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg)
 }
 
+/// Which device weight slot and which gradient lane every tensor of a layer-streamed build uses.
+///
+/// Tensors are pooled by `(n, k, j)`, `j` counting the tensors of one shape inside a layer, so a model with
+/// several equal-shaped linears per layer (key and value projections) keeps them apart. A pool owns
+/// `min(window, layers holding the shape)` slots, handed out round-robin in layer order, and one gradient lane: a
+/// layer's gradients are consumed before the next layer's backward starts.
+struct Pools {
+    slot_of: Vec<usize>,
+    /// The tensor whose shape each slot has.
+    slot_rep: Vec<usize>,
+    lane_of: Vec<usize>,
+    lane_rep: Vec<usize>,
+}
+
+fn plan_pools(specs: &[ResidentSpec], window: u32) -> Pools {
+    let window = window.max(1) as usize;
+    let mut by_layer: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for (i, s) in specs.iter().enumerate() {
+        by_layer.entry(s.layer).or_default().push(i);
+    }
+    struct Pool {
+        lane: usize,
+        slots: Vec<usize>,
+        layers: usize,
+    }
+    let mut pools: BTreeMap<(u32, u32, usize), Pool> = BTreeMap::new();
+    let mut out = Pools { slot_of: vec![0; specs.len()], slot_rep: Vec::new(), lane_of: vec![0; specs.len()], lane_rep: Vec::new() };
+    for tensors in by_layer.values() {
+        let mut seen: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+        for &i in tensors {
+            let shape = (specs[i].n, specs[i].k);
+            let j = seen.entry(shape).or_insert(0);
+            let pool = pools.entry((shape.0, shape.1, *j)).or_insert_with(|| {
+                out.lane_rep.push(i);
+                Pool { lane: out.lane_rep.len() - 1, slots: Vec::new(), layers: 0 }
+            });
+            *j += 1;
+            if pool.slots.len() < window {
+                out.slot_rep.push(i);
+                pool.slots.push(out.slot_rep.len() - 1);
+            }
+            out.slot_of[i] = pool.slots[pool.layers % pool.slots.len()];
+            out.lane_of[i] = pool.lane;
+            pool.layers += 1;
+        }
+    }
+    out
+}
+
 /// The planner categories of the resident weights, gradients, master and optimizer state. The master and the
-/// optimizer state are host bytes (the offloaded layout); only the weights and gradients cost device memory.
+/// optimizer state are host bytes (the offloaded layout); only the weights and gradients cost device memory. A
+/// layer-streamed build keeps its window of weights and one layer of gradients on the device, and the stored values
+/// (in the device encoding) on the host.
 pub fn demands(cfg: &ResidentFtConfig, specs: &[ResidentSpec]) -> Result<Vec<Demand>, PlanError> {
     let numel: usize = specs.iter().map(|s| s.n as usize * s.k as usize).sum();
-    let weights: u64 = specs.iter().map(|s| cfg.value.device_bytes(s.n as u64, s.k as u64)).sum();
+    let stored: u64 = specs.iter().map(|s| cfg.value.device_bytes(s.n as u64, s.k as u64)).sum();
     let bytes = cfg.precision().bytes(numel, cfg.rule.slots().len());
+    let (weights, grads, stored_on_host) = match cfg.window {
+        None => (stored, bytes.grad, 0),
+        Some(w) => {
+            let pools = plan_pools(specs, w.layers);
+            let resident: u64 = pools.slot_rep.iter().map(|&i| cfg.value.device_bytes(specs[i].n as u64, specs[i].k as u64)).sum();
+            let lanes: u64 = pools.lane_rep.iter().map(|&i| cfg.grad.bytes(specs[i].n as usize * specs[i].k as usize)).sum();
+            (resident, lanes, stored)
+        }
+    };
     let manifest: Vec<(String, usize)> = specs.iter().map(|s| (s.name.clone(), s.n as usize * s.k as usize)).collect();
     let ladder = paramstore::precision::optimizer_state_ladder(&manifest, cfg.rule.slots().len(), 256);
     let requested = ladder.iter().position(|(f, _)| *f == cfg.state).map(|i| ladder[i].1).unwrap_or(bytes.moments);
     // An Adafactor run keeps row and column statistics (`n + k` floats a matrix) instead of elementwise moments.
     let factored: u64 = if matches!(cfg.rule, Rule::Adafactor { .. }) { specs.iter().map(|s| 4 * (s.n as u64 + s.k as u64)).sum() } else { 0 };
-    let label = format!("resident {:?} weights", cfg.value);
+    let label = match cfg.window {
+        None => format!("resident {:?} weights", cfg.value),
+        Some(w) => format!("{:?} weights of a {}-layer window", cfg.value, w.layers.max(1)),
+    };
+    let grad_label = match cfg.window {
+        None => format!("{:?} gradients", cfg.grad),
+        Some(_) => format!("{:?} gradients of one layer", cfg.grad),
+    };
     Ok(vec![
         Demand::fixed(Category::Weights, label, weights),
-        Demand::fixed(Category::Grads, format!("{:?} gradients", cfg.grad), bytes.grad),
-        Demand { category: Category::OptimizerState, variants: vec![Variant::new(Lever::Base, format!("{:?} master + {:?} state on the host", cfg.master, cfg.state), 0, bytes.master + requested + factored)] },
+        Demand::fixed(Category::Grads, grad_label, grads),
+        Demand {
+            category: Category::OptimizerState,
+            variants: vec![Variant::new(Lever::Base, format!("{:?} master + {:?} state on the host", cfg.master, cfg.state), 0, bytes.master + requested + factored + stored_on_host)],
+        },
     ])
 }
 
@@ -264,6 +394,8 @@ impl HostTimes {
 /// read from the accumulating device buffers.
 struct DeviceTiles<'a> {
     ops: &'a Ops,
+    /// The stored values of a layer-streamed build, on the host; `None` reads and writes the resident weights.
+    host: Option<HostValues<'a>>,
     weights: &'a [Weight],
     grads: &'a [DeviceBuffer],
     descs: &'a [TensorDescriptor],
@@ -275,6 +407,13 @@ struct DeviceTiles<'a> {
     value_cache: Option<(usize, Vec<u8>, Vec<Vec<u8>>)>,
     enc: TileBuf,
     times: HostTimes,
+}
+
+/// The host copy of the stored values of a layer-streamed build, with the version of each tensor (bumped by every
+/// write, so a device slot knows whether it still holds the current value).
+struct HostValues<'a> {
+    store: &'a mut EncodedValues<MemBacking>,
+    versions: &'a mut [u64],
 }
 
 fn buffers(w: &Weight) -> (&DeviceBuffer, Option<&DeviceBuffer>) {
@@ -319,6 +458,9 @@ impl DeviceTiles<'_> {
 
 impl ParamTiles for DeviceTiles<'_> {
     fn read_value(&mut self, ti: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
+        if let Some(host) = &mut self.host {
+            return host.store.read(ti, start, out);
+        }
         let d = self.descs[ti].clone();
         let e = start as u64..(start + out.len()) as u64;
         let pr = d.payload_range(&e);
@@ -343,6 +485,13 @@ impl ParamTiles for DeviceTiles<'_> {
     fn write_value(&mut self, ti: usize, start: usize, vals: &[f32], _rnd: Rounding) -> io::Result<()> {
         // The stored value is the nearest quantization of the master; the optimizer's stochastic request is for
         // the state it keeps beside it.
+        if let Some(host) = &mut self.host {
+            let t0 = std::time::Instant::now();
+            host.store.write(ti, start, vals)?;
+            host.versions[ti] += 1;
+            self.times.value_encode += t0.elapsed();
+            return Ok(());
+        }
         let d = &self.descs[ti];
         let e = start as u64..(start + vals.len()) as u64;
         let t0 = std::time::Instant::now();
@@ -382,6 +531,26 @@ impl ParamTiles for DeviceTiles<'_> {
     }
 }
 
+/// The [`ParamTiles`] of the build `$self` is: stored values from the host copy when layer-streamed, from the resident
+/// weights otherwise. A macro so the borrow covers only the fields it names (the optimizer state stays free).
+macro_rules! tiles {
+    ($self:ident, $ops:expr) => {
+        DeviceTiles {
+            ops: $ops,
+            host: $self.window.as_mut().map(|w| HostValues { store: &mut w.host, versions: &mut w.versions }),
+            weights: &$self.weights,
+            grads: &$self.grads,
+            descs: &$self.descs,
+            registry: &$self.registry,
+            grad_dtype: $self.cfg.grad,
+            grad_cache: None,
+            value_cache: None,
+            enc: TileBuf::default(),
+            times: HostTimes::default(),
+        }
+    };
+}
+
 /// What an export of a resident build wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResidentExport {
@@ -397,12 +566,43 @@ pub struct ResidentFullFt {
     cfg: ResidentFtConfig,
     specs: Vec<ResidentSpec>,
     descs: Vec<TensorDescriptor>,
+    /// Tensor `i`'s device weight: its own when resident, a handle to its slot's weight when layer-streamed.
     weights: Vec<Weight>,
+    /// Tensor `i`'s gradient buffer: its own when resident, its lane's when layer-streamed.
     grads: Vec<DeviceBuffer>,
     state: TrainState,
     registry: CodecRegistry,
+    norm: DeviceGradNorm,
     tile: usize,
     times: HostTimes,
+    /// Device bytes of the weights this build holds (every layer, or the window's slots).
+    weight_bytes: u64,
+    window: Option<WindowState>,
+}
+
+/// What a layer-streamed build holds besides the shared fields: the host copy of the stored values, the device slots
+/// and gradient lanes, and the backward pass in progress.
+struct WindowState {
+    host: EncodedValues<MemBacking>,
+    /// Bumped by every write of a tensor's stored value; a slot holding an older version is stale.
+    versions: Vec<u64>,
+    by_layer: BTreeMap<u32, Vec<usize>>,
+    slot_of: Vec<usize>,
+    slot_weights: Vec<Weight>,
+    /// The `(tensor, version)` each slot's device weight holds.
+    slot_holds: Vec<Option<(usize, u64)>>,
+    lane_buffers: Vec<DeviceBuffer>,
+    pass: Option<PassState>,
+}
+
+struct PassState {
+    pass: StreamPass,
+    /// Sum of squares of each tensor's gradient, once measured.
+    tensor_sum: Vec<Option<f64>>,
+    updated: Vec<bool>,
+    running: f64,
+    min_multiplier: f32,
+    step: u32,
 }
 
 impl ResidentFullFt {
@@ -432,13 +632,13 @@ impl ResidentFullFt {
         let tile = descs.iter().fold(aligned_tile(&descs, cfg.tile_elems.max(1)) as u64, |t, _| t);
         let tile = lcm(tile, 4) as usize;
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        let mut weights = Vec::with_capacity(specs.len());
         let mut sink = DeviceWeightSink::new(ops);
-        for (ti, d) in descs.iter().enumerate() {
+        let mut upload = |ti: usize| -> Result<Weight, String> {
+            let d = &descs[ti];
             let mut init = SourceTiles::new(src, names.clone(), ti);
             export_values(&mut init, std::slice::from_ref(d), &registry, &mut sink, tile).map_err(|e| e.to_string())?;
-            weights.push(sink.take_weight().ok_or_else(|| format!("{}: the upload produced no weight", d.name))?);
-        }
+            sink.take_weight().ok_or_else(|| format!("{}: the upload produced no weight", d.name))
+        };
         let manifest: Vec<(String, usize)> = specs.iter().map(|s| (s.name.clone(), s.n as usize * s.k as usize)).collect();
         let mut state = TrainState::create(TrainStateConfig {
             manifest,
@@ -450,16 +650,60 @@ impl ResidentFullFt {
             row_len: specs.iter().map(|s| (s.name.clone(), s.k as usize)).collect(),
         })
         .map_err(|e| e.to_string())?;
-        state.init_master(&mut SourceTiles::new(src, names, 0)).map_err(|e| e.to_string())?;
+        state.init_master(&mut SourceTiles::new(src, names.clone(), 0)).map_err(|e| e.to_string())?;
         let gpu = ops.gpu();
-        let grads = specs
-            .iter()
-            .map(|s| {
-                let elems = s.n as u64 * s.k as u64;
-                gpu.storage(if cfg.grad == GradDtype::Bf16 { elems / 2 } else { elems })
-            })
-            .collect();
-        Ok(ResidentFullFt { cfg, specs, descs, weights, grads, state, registry, tile, times: HostTimes::default() })
+        let grad_words = |s: &ResidentSpec| {
+            let elems = s.n as u64 * s.k as u64;
+            if cfg.grad == GradDtype::Bf16 {
+                elems / 2
+            } else {
+                elems
+            }
+        };
+        let norm = DeviceGradNorm::new(gpu)?;
+        let (weights, grads, window, weight_bytes) = match cfg.window {
+            None => {
+                let weights = (0..specs.len()).map(&mut upload).collect::<Result<Vec<_>, _>>()?;
+                let grads = specs.iter().map(|s| gpu.storage(grad_words(s))).collect();
+                let bytes = specs.iter().map(|s| cfg.value.device_bytes(s.n as u64, s.k as u64)).sum();
+                (weights, grads, None, bytes)
+            }
+            Some(w) => {
+                let pools = plan_pools(&specs, w.layers);
+                let mut host = EncodedValues::new(descs.clone(), CodecRegistry::reference(), MemBacking::zeroed(EncodedValues::<MemBacking>::required_bytes(&descs)), tile).map_err(|e| e.to_string())?;
+                let mut initial = SourceTiles::new(src, names.clone(), 0);
+                let mut values = vec![0f32; tile];
+                for (ti, d) in descs.iter().enumerate() {
+                    let numel = d.numel() as usize;
+                    for start in (0..numel).step_by(tile) {
+                        let n = tile.min(numel - start);
+                        initial.read_value(ti, start, &mut values[..n]).map_err(|e| e.to_string())?;
+                        host.write(ti, start, &values[..n]).map_err(|e| e.to_string())?;
+                    }
+                }
+                let slot_weights = pools.slot_rep.iter().map(|&ti| upload(ti)).collect::<Result<Vec<_>, _>>()?;
+                let lane_buffers: Vec<DeviceBuffer> = pools.lane_rep.iter().map(|&ti| gpu.storage(grad_words(&specs[ti]))).collect();
+                let weights = pools.slot_of.iter().map(|&s| slot_weights[s].clone()).collect();
+                let grads = pools.lane_of.iter().map(|&l| lane_buffers[l].clone()).collect();
+                let mut by_layer: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+                for (i, s) in specs.iter().enumerate() {
+                    by_layer.entry(s.layer).or_default().push(i);
+                }
+                let bytes = pools.slot_rep.iter().map(|&ti| cfg.value.device_bytes(specs[ti].n as u64, specs[ti].k as u64)).sum();
+                let window = WindowState {
+                    host,
+                    versions: vec![0; specs.len()],
+                    by_layer,
+                    slot_of: pools.slot_of,
+                    slot_holds: vec![None; slot_weights.len()],
+                    slot_weights,
+                    lane_buffers,
+                    pass: None,
+                };
+                (weights, grads, Some(window), bytes)
+            }
+        };
+        Ok(ResidentFullFt { cfg, specs, descs, weights, grads, state, registry, norm, tile, times: HostTimes::default(), weight_bytes, window })
     }
 
     pub fn specs(&self) -> &[ResidentSpec] {
@@ -495,8 +739,21 @@ impl ResidentFullFt {
 
     /// Zero every gradient: call once before the accumulating backward passes of a step.
     pub fn zero_grads(&self, ops: &Ops) {
-        let clears: Vec<&DeviceBuffer> = self.grads.iter().collect();
+        let clears: Vec<&DeviceBuffer> = match &self.window {
+            Some(w) => w.lane_buffers.iter().collect(),
+            None => self.grads.iter().collect(),
+        };
         ops.gpu().submit(&clears, &[]);
+    }
+
+    /// Device bytes of the weights this build holds: every layer's, or the window's slots.
+    pub fn device_weight_bytes(&self) -> u64 {
+        self.weight_bytes
+    }
+
+    /// Whether this build streams its layers through a bounded window.
+    pub fn is_layer_streamed(&self) -> bool {
+        self.window.is_some()
     }
 
     /// Per-tensor precision choices and the physical byte totals.
@@ -512,12 +769,22 @@ impl ResidentFullFt {
         self.state.seed()
     }
 
-    /// Sum of squares of every gradient (for the global clip of [`optim::grad_multiplier`]).
+    /// Sum of squares of every gradient, reduced on the device (for the global clip of [`optim::grad_multiplier`]).
+    /// Summed per tensor in tensor order, the order a layer-streamed measuring pass reports in.
     pub fn grad_sum_sq(&mut self, ops: &Ops) -> io::Result<f64> {
-        let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
-        let sum = self.state.grad_sum_sq(&mut tiles);
-        self.times.add(&tiles.times);
-        sum
+        self.require_resident("grad_sum_sq")?;
+        let items: Vec<NormItem<'_>> = self.grads.iter().zip(&self.specs).map(|(buf, s)| NormItem { buf, numel: s.n as usize * s.k as usize, dtype: self.cfg.grad }).collect();
+        let t0 = std::time::Instant::now();
+        let sum = self.norm.sum_sq_each(ops.gpu(), &items).iter().sum();
+        self.times.grad_read += t0.elapsed();
+        Ok(sum)
+    }
+
+    fn require_resident(&self, what: &str) -> io::Result<()> {
+        if self.window.is_some() {
+            return Err(invalid(format!("{what}: a layer-streamed build holds no whole-model gradient; use the layer pass API (begin_pass, finish_layer, end_pass)")));
+        }
+        Ok(())
     }
 
     /// Host time spent in the updates of this run so far, by phase.
@@ -529,7 +796,8 @@ impl ResidentFullFt {
     /// (`extra_scale`, and the global clip when `clip` is set), the master and state are updated tile by tile
     /// and the device weights re-encoded in place. The gradients are zeroed afterwards.
     pub fn step(&mut self, ops: &Ops, lr: f32, clip: Option<f32>, extra_scale: f32) -> io::Result<StepReport> {
-        let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
+        self.require_resident("step")?;
+        let mut tiles = tiles!(self, ops);
         let report = self.state.step(&mut tiles, lr, clip, extra_scale)?;
         self.zero_grads(ops);
         Ok(report)
@@ -538,13 +806,14 @@ impl ResidentFullFt {
     /// [`Self::step`] with the gradient multiplier already decided, for a trainer whose global clip spans
     /// parameters this state does not hold (it adds its own [`Self::grad_sum_sq`] to theirs).
     pub fn step_scaled(&mut self, ops: &Ops, lr: f32, grad_multiplier: f32) -> io::Result<StepReport> {
+        self.require_resident("step_scaled")?;
         if self.cfg.defer_publication {
             // Backward order: the last tensor's gradient completes first.
             let n = self.specs.len();
             self.layered_step(ops, lr, grad_multiplier, |step| (0..n).rev().try_for_each(|i| step.update(i)))?;
             return Ok(StepReport { step: self.state.step_count(), grad_multiplier });
         }
-        let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
+        let mut tiles = tiles!(self, ops);
         let t0 = std::time::Instant::now();
         let step = self.state.begin_step();
         for i in 0..self.specs.len() {
@@ -555,6 +824,148 @@ impl ResidentFullFt {
         self.times.add(&tiles.times);
         self.zero_grads(ops);
         Ok(StepReport { step, grad_multiplier })
+    }
+
+    // ---- layer streaming -------------------------------------------------------------------------------------
+
+    /// The tensors of `layer`, in specification order.
+    pub fn layer_tensors(&self, layer: usize) -> &[usize] {
+        self.window.as_ref().and_then(|w| w.by_layer.get(&(layer as u32))).map_or(&[], Vec::as_slice)
+    }
+
+    /// Copy `layer`'s stored values into the device slots its tensors use (a no-op where a slot already holds the
+    /// current value, and for a build with every layer resident). Call before the forward or the backward reaches the
+    /// layer.
+    pub fn load_layer(&mut self, ops: &Ops, layer: usize) -> io::Result<()> {
+        let Some(w) = &mut self.window else { return Ok(()) };
+        let Some(tensors) = w.by_layer.get(&(layer as u32)).cloned() else { return Ok(()) };
+        let mut waited = false;
+        let mut buf = TileBuf::default();
+        for ti in tensors {
+            let slot = w.slot_of[ti];
+            if w.slot_holds[slot] == Some((ti, w.versions[ti])) {
+                continue;
+            }
+            if !waited {
+                // Work queued by the layer that used the slot last still reads it.
+                ops.gpu().poll_wait();
+                waited = true;
+            }
+            let d = &self.descs[ti];
+            let numel = d.numel() as usize;
+            let t0 = std::time::Instant::now();
+            for start in (0..numel).step_by(self.tile) {
+                let n = self.tile.min(numel - start);
+                w.host.read_encoded(ti, start, n, &mut buf)?;
+                let tile = Tile { elems: start as u64..(start + n) as u64, payload: &buf.payload, scales: buf.scales.iter().map(|s| s.as_slice()).collect() };
+                rewrite_tile(ops, &w.slot_weights[slot], d, &tile).map_err(invalid)?;
+            }
+            self.times.value_write += t0.elapsed();
+            w.slot_holds[slot] = Some((ti, w.versions[ti]));
+        }
+        Ok(())
+    }
+
+    /// [`Self::load_layer`] for the backward of `layer`, and clear the gradient lanes its tensors accumulate into.
+    pub fn begin_layer_backward(&mut self, ops: &Ops, layer: usize) -> io::Result<()> {
+        self.load_layer(ops, layer)?;
+        if let Some(w) = &self.window {
+            let lanes: Vec<&DeviceBuffer> = w.by_layer.get(&(layer as u32)).into_iter().flatten().map(|&ti| &self.grads[ti]).collect();
+            ops.gpu().submit(&lanes, &[]);
+        }
+        Ok(())
+    }
+
+    /// Open a backward pass over the layers (see [`StreamPass`]). An updating pass opens the next optimizer step.
+    pub fn begin_pass(&mut self, pass: StreamPass) {
+        let n = self.specs.len();
+        let step = match pass {
+            StreamPass::Measure => 0,
+            StreamPass::Update { .. } | StreamPass::Running { .. } => self.state.begin_step(),
+        };
+        let base = match pass {
+            StreamPass::Running { base_sum_sq, .. } => base_sum_sq,
+            _ => 0.0,
+        };
+        if let Some(w) = &mut self.window {
+            w.pass = Some(PassState { pass, tensor_sum: vec![None; n], updated: vec![false; n], running: base, min_multiplier: f32::INFINITY, step });
+        }
+    }
+
+    /// `layer`'s gradients are complete (its backward has been submitted): measure them on the device, and in an
+    /// updating pass apply the update right away. The layer's new stored values are visible to the next load of it;
+    /// no later layer of this pass reads them. With `defer_publication` the layer's new values wait in a
+    /// [`DeferredPublish`] store and reach the host copy together, so a layer is never half updated.
+    pub fn finish_layer(&mut self, ops: &Ops, layer: usize) -> io::Result<()> {
+        let w = self.window.as_mut().ok_or_else(|| invalid("finish_layer: this build keeps every layer resident".into()))?;
+        let mut pass = w.pass.take().ok_or_else(|| invalid("finish_layer: no pass is open (call begin_pass)".into()))?;
+        let tensors = w.by_layer.get(&(layer as u32)).cloned().unwrap_or_default();
+        let result = self.finish_layer_in(ops, &mut pass, &tensors);
+        if let Some(w) = &mut self.window {
+            w.pass = Some(pass);
+        }
+        result
+    }
+
+    fn finish_layer_in(&mut self, ops: &Ops, pass: &mut PassState, tensors: &[usize]) -> io::Result<()> {
+        let items: Vec<NormItem<'_>> = tensors.iter().map(|&ti| NormItem { buf: &self.grads[ti], numel: self.specs[ti].n as usize * self.specs[ti].k as usize, dtype: self.cfg.grad }).collect();
+        let t0 = std::time::Instant::now();
+        let sums = self.norm.sum_sq_each(ops.gpu(), &items);
+        self.times.grad_read += t0.elapsed();
+        for (&ti, &sum) in tensors.iter().zip(&sums) {
+            pass.tensor_sum[ti] = Some(sum);
+            pass.running += sum;
+        }
+        let (lr, multiplier) = match pass.pass {
+            StreamPass::Measure => return Ok(()),
+            StreamPass::Update { lr, grad_multiplier } => (lr, grad_multiplier),
+            StreamPass::Running { lr, clip, extra_scale, .. } => (lr, optim::grad_multiplier(pass.running, clip, extra_scale)),
+        };
+        pass.min_multiplier = pass.min_multiplier.min(multiplier);
+        let t0 = std::time::Instant::now();
+        let mut tiles = tiles!(self, ops);
+        if self.cfg.defer_publication {
+            let numels: Vec<usize> = (0..self.specs.len()).map(|ti| if tensors.contains(&ti) { self.specs[ti].n as usize * self.specs[ti].k as usize } else { 0 }).collect();
+            let layout = tensor_layout(&numels, StateFormat::F32);
+            let pending = BlockStateStorage::new(layout.clone(), MemBacking::zeroed(layout.total_bytes()), self.tile).map_err(|e| invalid(e.to_string()))?;
+            let mut params = DeferredPublish::new(&mut tiles, pending, numels, self.tile);
+            for &ti in tensors {
+                self.state.update_tensor(&mut params, ti, lr, multiplier)?;
+            }
+            params.publish()?;
+        } else {
+            for &ti in tensors {
+                self.state.update_tensor(&mut tiles, ti, lr, multiplier)?;
+            }
+        }
+        tiles.times.update += t0.elapsed();
+        self.times.add(&tiles.times);
+        for &ti in tensors {
+            pass.updated[ti] = true;
+        }
+        Ok(())
+    }
+
+    /// Close the pass opened by [`Self::begin_pass`]: every tensor of the model must have been finished.
+    pub fn end_pass(&mut self) -> io::Result<PassReport> {
+        let w = self.window.as_mut().ok_or_else(|| invalid("end_pass: this build keeps every layer resident".into()))?;
+        let pass = w.pass.take().ok_or_else(|| invalid("end_pass: no pass is open".into()))?;
+        let updating = !matches!(pass.pass, StreamPass::Measure);
+        let missing = |i: usize| invalid(format!("end_pass: tensor '{}' (layer {}) was not finished before the pass ended", self.specs[i].name, self.specs[i].layer));
+        if let Some(i) = pass.tensor_sum.iter().position(Option::is_none) {
+            return Err(missing(i));
+        }
+        if let Some(i) = updating.then(|| pass.updated.iter().position(|u| !u)).flatten() {
+            return Err(missing(i));
+        }
+        if updating {
+            self.times.steps += 1;
+        }
+        let sum_sq = match pass.pass {
+            StreamPass::Running { .. } => pass.running,
+            _ => pass.tensor_sum.iter().flatten().sum(),
+        };
+        Ok(PassReport { step: pass.step, sum_sq, min_multiplier: if updating { pass.min_multiplier } else { 1.0 } })
     }
 
     /// The update rule in force.
@@ -572,7 +983,7 @@ impl ResidentFullFt {
     pub fn read_master(&mut self, ops: &Ops, i: usize) -> io::Result<Vec<f32>> {
         let numel = self.descs[i].numel() as usize;
         let mut out = vec![0f32; numel];
-        let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
+        let mut tiles = tiles!(self, ops);
         for start in (0..numel).step_by(self.tile) {
             let n = self.tile.min(numel - start);
             self.state.read_master(&mut tiles, i, start, &mut out[start..start + n])?;
@@ -586,7 +997,7 @@ impl ResidentFullFt {
         if data.len() != numel {
             return Err(invalid(format!("{}: {} values for {numel} elements", self.specs[i].name, data.len())));
         }
-        let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
+        let mut tiles = tiles!(self, ops);
         for start in (0..numel).step_by(self.tile) {
             let n = self.tile.min(numel - start);
             self.state.set_master(i, start, &data[start..start + n])?;
@@ -601,9 +1012,10 @@ impl ResidentFullFt {
     /// scale (a trainer that cannot hold every gradient computes the norm as it goes). Gradients are zeroed
     /// after the publication.
     pub fn layered_step<R>(&mut self, ops: &Ops, lr: f32, grad_multiplier: f32, body: impl FnOnce(&mut LayeredStep<'_, '_>) -> io::Result<R>) -> io::Result<R> {
+        self.require_resident("layered_step")?;
         let numels: Vec<usize> = self.specs.iter().map(|s| s.n as usize * s.k as usize).collect();
         let layout = tensor_layout(&numels, StateFormat::F32);
-        let mut live = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
+        let mut live = tiles!(self, ops);
         let pending = BlockStateStorage::new(layout.clone(), MemBacking::zeroed(layout.total_bytes()), self.tile).map_err(|e| invalid(e.to_string()))?;
         let mut params = DeferredPublish::new(&mut live, pending, numels, self.tile);
         self.state.begin_step();
@@ -621,7 +1033,7 @@ impl ResidentFullFt {
     /// already-quantized resident weights.
     pub fn export(&mut self, ops: &Ops, dst: &[QuantEncoding], sink: &mut dyn TensorSink) -> io::Result<ExportReport> {
         let descs = self.export_descriptors(dst)?;
-        let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
+        let mut tiles = tiles!(self, ops);
         self.state.export_masters(&mut tiles, &descs, &self.registry, sink, self.tile)
     }
 
@@ -635,7 +1047,7 @@ impl ResidentFullFt {
 
     /// Atomically commit values, master, moments, step, seed and the trainer's schedule.
     pub fn commit(&mut self, ops: &Ops, dir: &CheckpointDir, run: &RunState) -> io::Result<PathBuf> {
-        let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
+        let mut tiles = tiles!(self, ops);
         self.state.commit(dir, &mut tiles, run)
     }
 
@@ -646,26 +1058,15 @@ impl ResidentFullFt {
 
     /// Restore the newest valid checkpoint into the master, the state and the device weights.
     pub fn restore(&mut self, ops: &Ops, dir: &CheckpointDir) -> io::Result<Option<RunState>> {
-        let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
+        let mut tiles = tiles!(self, ops);
         self.state.restore(dir, &mut tiles)
     }
 
     /// [`Self::restore`] of exactly the checkpoint committed at optimizer step `step`.
     pub fn restore_at(&mut self, ops: &Ops, dir: &CheckpointDir, step: u32) -> io::Result<Option<RunState>> {
-        let mut tiles = device_tiles(ops, &self.weights, &self.grads, &self.descs, &self.registry, self.cfg.grad);
+        let mut tiles = tiles!(self, ops);
         self.state.restore_at(dir, &mut tiles, step)
     }
-}
-
-fn device_tiles<'a>(
-    ops: &'a Ops,
-    weights: &'a [Weight],
-    grads: &'a [DeviceBuffer],
-    descs: &'a [TensorDescriptor],
-    registry: &'a CodecRegistry,
-    grad_dtype: GradDtype,
-) -> DeviceTiles<'a> {
-    DeviceTiles { ops, weights, grads, descs, registry, grad_dtype, grad_cache: None, value_cache: None, enc: TileBuf::default(), times: HostTimes::default() }
 }
 
 /// The updates of one layer-at-a-time step. See [`ResidentFullFt::layered_step`].

@@ -642,7 +642,7 @@ pub fn resident_specs(cfg: &QwenConfig, shard: &Shard) -> Vec<model::resident_ft
     for l in shard.start..shard.end {
         for leaf in crate::q8::Q8::LINEARS {
             let (n, k) = linear_dims(cfg, leaf);
-            specs.push(model::resident_ft::ResidentSpec { name: format!("blocks.{l}.{leaf}"), n, k });
+            specs.push(model::resident_ft::ResidentSpec { name: format!("blocks.{l}.{leaf}"), n, k, layer: l as u32 });
         }
     }
     specs

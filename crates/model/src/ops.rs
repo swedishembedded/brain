@@ -482,6 +482,9 @@ pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
             ("accum_bf16", kernels::ACCUM_BF16),
             // The per-row reduction of `Ops::row_sq_norms`.
             ("row_dot", kernels::ROW_DOT),
+            // The cooperative device gradient norm of a full fine-tune's weight gradients (`model::gradnorm`).
+            ("gradnorm_part", kernels::GRADNORM_PART),
+            ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
         ];
         list.extend(kernels::template::weight_decode_variants());
         list

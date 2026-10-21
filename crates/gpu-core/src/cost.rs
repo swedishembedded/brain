@@ -1240,6 +1240,8 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // params [numel, out_off, n_wg] — same work as gradnorm_sq, spread over
         // n_wg workgroups; the n_wg partials it writes are the only extra bytes.
         "gradnorm_part" => f(2 * p(0)?, 4 * p(0)? + 4 * p(2)?),
+        // The bf16-gradient twin: the same work over half the bytes (two elements to a word).
+        "gradnorm_part_bf16" => f(2 * p(0)?, 2 * p(0)? + 4 * p(2)?),
         // params [n_params, max_norm, extra_scale].
         "clip_coef" => f(p(0)? + 5, 4 * p(0)?),
         // params [n_parts, max_norm, extra_scale] — same fold, 64 threads.

@@ -25,7 +25,7 @@ use gpu_core::provider::library::GemmPrecision;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::memplan::{Authorized, Capacity};
 use model::ops::{training_kernel_list, DeviceWeightSink, GradDtype, Ops, Weight};
-use model::resident_ft::{ResidentBudget, ResidentFtConfig, ResidentFullFt, ResidentSpec, ResidentValue};
+use model::resident_ft::{ClipPass, ResidentBudget, ResidentFtConfig, ResidentFullFt, ResidentSpec, ResidentValue};
 use optim::checkpoint::CheckpointDir;
 use optim::rule::Rule;
 use optim::Adam;
@@ -138,11 +138,11 @@ fn matmul_nn(dy: &[f32], w: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
 }
 
 fn config(value: ResidentValue, master: MasterPolicy, state: StateFormat, grad: GradDtype) -> ResidentFtConfig {
-    ResidentFtConfig { value, master, state, rule: Rule::AdamW { adam: ADAM, wd: 0.0 }, grad, stochastic_state: false, seed: Some(7), tile_elems: 128, state_dir: None, defer_publication: false }
+    ResidentFtConfig { value, master, state, rule: Rule::AdamW { adam: ADAM, wd: 0.0 }, grad, stochastic_state: false, seed: Some(7), tile_elems: 128, state_dir: None, defer_publication: false, window: None, clip_pass: ClipPass::TwoPass }
 }
 
 fn specs() -> Vec<ResidentSpec> {
-    vec![ResidentSpec { name: "l1.weight".into(), n: H as u32, k: K0 as u32 }, ResidentSpec { name: "l2.weight".into(), n: O as u32, k: H as u32 }]
+    vec![ResidentSpec { name: "l1.weight".into(), n: H as u32, k: K0 as u32, layer: 0 }, ResidentSpec { name: "l2.weight".into(), n: O as u32, k: H as u32, layer: 1 }]
 }
 
 fn roomy() -> ResidentBudget<'static> {

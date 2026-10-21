@@ -49,6 +49,7 @@ pub mod snapshot_prefix;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod distributed;
 pub mod fp8;
+pub mod gradnorm;
 pub mod gdn;
 pub mod gdn_mixer;
 pub mod gdn_segment;

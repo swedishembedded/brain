@@ -128,19 +128,29 @@ impl<B: Backing> EncodedValues<B> {
         Ok((d.clone(), e))
     }
 
-    /// Decode tile `[start, start + out.len())` of tensor `ti`.
-    pub fn read(&mut self, ti: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
-        let (d, e) = self.check(ti, start, out.len())?;
+    /// The stored bytes of tile `[start, start + n)` of tensor `ti` as they are encoded, undecoded: what a
+    /// device upload of the stored value copies word for word.
+    pub fn read_encoded(&mut self, ti: usize, start: usize, n: usize, out: &mut TileBuf) -> io::Result<()> {
+        let (d, e) = self.check(ti, start, n)?;
         let pr = d.payload_range(&e);
-        self.payload.resize((pr.end - pr.start) as usize, 0);
-        self.backing.read_at(self.at[ti].payload + pr.start, &mut self.payload)?;
-        self.scales.resize(d.encoding.scales.len(), Vec::new());
+        out.payload.resize((pr.end - pr.start) as usize, 0);
+        self.backing.read_at(self.at[ti].payload + pr.start, &mut out.payload)?;
+        out.scales.resize(d.encoding.scales.len(), Vec::new());
         for l in 0..d.encoding.scales.len() {
             let w = d.encoding.scales[l].format.bits() as u64 / 8;
             let r = d.scale_range(l, &e);
-            self.scales[l].resize(((r.end - r.start) * w) as usize, 0);
-            self.backing.read_at(self.at[ti].scales[l] + r.start * w, &mut self.scales[l])?;
+            out.scales[l].resize(((r.end - r.start) * w) as usize, 0);
+            self.backing.read_at(self.at[ti].scales[l] + r.start * w, &mut out.scales[l])?;
         }
+        Ok(())
+    }
+
+    /// Decode tile `[start, start + out.len())` of tensor `ti`.
+    pub fn read(&mut self, ti: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
+        let (d, e) = self.check(ti, start, out.len())?;
+        let mut raw = TileBuf { payload: std::mem::take(&mut self.payload), scales: std::mem::take(&mut self.scales) };
+        self.read_encoded(ti, start, out.len(), &mut raw)?;
+        (self.payload, self.scales) = (raw.payload, raw.scales);
         let tile = Tile { elems: e, payload: &self.payload, scales: self.scales.iter().map(|s| s.as_slice()).collect() };
         self.f32s.clear();
         self.registry.decoder(&d.encoding).map_err(err)?.decode_tile(&d, &tile, &mut self.f32s).map_err(err)?;

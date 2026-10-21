@@ -76,6 +76,8 @@ fn resident(value: ResidentValue, state: StateFormat) -> ResidentFtConfig {
         tile_elems: 256,
         state_dir: None,
         defer_publication: false,
+        window: None,
+        clip_pass: model::resident_ft::ClipPass::TwoPass,
     }
 }
 

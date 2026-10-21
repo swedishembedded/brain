@@ -568,6 +568,8 @@ pub const GRAD_SCALE: &str = include_str!("../wgsl/grad_scale.wgsl");
 pub const GRAD_SCALE_BUF: &str = include_str!("../wgsl/grad_scale_buf.wgsl");
 /// `wgsl/gradnorm_part.wgsl`
 pub const GRADNORM_PART: &str = include_str!("../wgsl/gradnorm_part.wgsl");
+/// `wgsl/gradnorm_part_bf16.wgsl`
+pub const GRADNORM_PART_BF16: &str = include_str!("../wgsl/gradnorm_part_bf16.wgsl");
 /// `wgsl/gradnorm_sq.wgsl`
 pub const GRADNORM_SQ: &str = include_str!("../wgsl/gradnorm_sq.wgsl");
 /// `wgsl/grid_sample.wgsl`
@@ -1569,6 +1571,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("grad_scale", GRAD_SCALE),
     ("grad_scale_buf", GRAD_SCALE_BUF),
     ("gradnorm_part", GRADNORM_PART),
+    ("gradnorm_part_bf16", GRADNORM_PART_BF16),
     ("gradnorm_sq", GRADNORM_SQ),
     ("grid_sample", GRID_SAMPLE),
     ("grid_sample_dgrid", GRID_SAMPLE_DGRID),

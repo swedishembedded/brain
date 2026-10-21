@@ -60,6 +60,8 @@ fn run(name: &str, path: &str, value: ResidentValue, state: StateFormat, grad: G
         tile_elems: 1 << 23,
         state_dir: None,
         defer_publication: false,
+        window: None,
+        clip_pass: model::resident_ft::ClipPass::TwoPass,
     };
     let m = qwen3::finetune::build_resident(cfg, &opts, &*init, &rcfg).expect("build");
     drop(init);
