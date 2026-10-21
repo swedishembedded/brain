@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use brain::{ChatFineTune, FineTuneStatus};
 
 mod chat_fixture;
-use chat_fixture::{chat_model_dir, cpu};
+use chat_fixture::{chat_model_dir, chat_model_dir_of, cpu};
 
 /// One JSONL chat record: a user turn and a supervised assistant answer.
 fn record(user: &str, assistant: &str) -> String {
@@ -99,6 +99,23 @@ fn a_fine_tune_exports_an_adapter_that_scores_and_serves() {
             .expect("the exported adapter serves"),
     );
     assert_eq!(chat.identity().adapter.as_ref().map(|a| a.digest.as_str()), outcome.adapter_digest.as_deref());
+}
+
+/// One `base_format` names the frozen base of every architecture: the run
+/// trains over it, reports it, and a format the trainer cannot hold is refused
+/// by name before anything is read.
+#[test]
+fn a_fine_tune_trains_over_the_base_format_it_is_given() {
+    let model = chat_model_dir_of("formats", qwen3::QwenConfig::tiny_i8());
+    for format in ["bf16", "nf4", "fp8"] {
+        let out = model.join(format!("run-{format}"));
+        let outcome = fine_tune(&model, &out).base_format(format).run().unwrap_or_else(|e| panic!("{format}: {e}"));
+        assert_eq!(outcome.status, FineTuneStatus::Completed, "{format}");
+        assert_eq!(outcome.base_tier, format, "the outcome reports the format the base was held in");
+        assert!(outcome.initial_loss.is_some_and(f32::is_finite) && outcome.final_loss.is_some_and(f32::is_finite), "{format}: {outcome:?}");
+    }
+    let err = fine_tune(&model, &model.join("run-refused")).base_format("fp3").run().unwrap_err().to_string();
+    assert!(err.contains("fp3") && err.contains("qwen3"), "{err}");
 }
 
 /// Continuing an adapter trains ITS factors, at its own rank, and records

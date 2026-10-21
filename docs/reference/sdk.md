@@ -230,11 +230,12 @@ let logprobs = brain::score_tokens(base, Some(adapter.as_path()), &tokens, &targ
 The three fine-tuners (`ChatFineTune`, `ChatFullFineTune`,
 `PreferenceFineTune`) take `.arch("qwen3")` or `.arch("qwen35")`, the
 architecture's `brain_arch` id. `ChatFineTune` on `qwen35`, the Qwen3.8-27B
-architecture: `.nf4_base(true)` (QLoRA) or `.bf16_base(true)` hold the frozen base
-on one card, and the adapter it writes is served by `brain serve` beside the
+architecture: `.base_format("nf4")` (QLoRA), `"bf16"` or `"fp8"` hold the frozen base
+on one card (`.nf4_base(true)` and `.bf16_base(true)` are the earlier spelling), and the adapter it writes is served by `brain serve` beside the
 base. Held-out scoring (`held_out`, `held_out_text`), `keep_evaluations`, the
 monitor curve, replay, `continue_from`, cancel and exact resume work as on
-`qwen3`; the int8 tier is a `qwen3` tier. `ChatFullFineTune` and
+`qwen3`; `qwen3` also holds an int8 base, and `.base_format` refuses a format the
+architecture does not hold, naming the formats it does. `ChatFullFineTune` and
 `PreferenceFineTune` run on any architecture that implements
 `model::finetune::ChatTrainer` (`qwen3` and `qwen35`): a `qwen35` full
 fine-tune writes its brain-format weights as the checkpoint's

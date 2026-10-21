@@ -114,6 +114,7 @@ pub struct ChatFineTune {
     int8_base: bool,
     nf4_base: bool,
     f32_base: bool,
+    base_format: Option<String>,
     gemm_precision: crate::GemmPrecision,
     thinking: bool,
     pack_answers: bool,
@@ -146,37 +147,38 @@ impl TrainedLora {
 }
 
 impl ChatFamily {
-    fn of(arch_id: &str, bf16: bool, int8: bool, nf4: bool) -> Result<ChatFamily> {
-        match arch_id {
-            "qwen3" if nf4 => Err(Error::Backend("ChatFineTune: nf4_base is a qwen35 tier; qwen3 holds its base at fp32, bf16 or int8".to_string())),
-            "qwen3" => Ok(ChatFamily::Qwen3(if int8 {
-                qwen3::Dtype::I8
-            } else if bf16 {
-                qwen3::Dtype::BF16
-            } else {
-                qwen3::Dtype::F32
-            })),
-            "qwen35" if int8 => Err(Error::Backend("ChatFineTune: int8_base is a qwen3 tier; qwen35 holds its base at fp32, bf16 or nf4".to_string())),
-            "qwen35" => {
-                Ok(ChatFamily::Qwen35(if nf4 {
+    /// The family of `arch_id` with its base held as the narrowest of the flags (nf4, then int8, then
+    /// bf16, else fp32), or as `format` when one is given; a format the family's trainer does not
+    /// hold is refused naming the family and its supported set.
+    fn of(arch_id: &str, bf16: bool, int8: bool, nf4: bool, format: Option<&str>) -> Result<ChatFamily> {
+        let bases = match arch_id {
+            "qwen3" => qwen3::finetune::TRAIN_BASES,
+            "qwen35" => qwen35::base_source::TRAIN_BASES,
+            other => return Err(Error::Unsupported(model::training::Unsupported::new(other, Capability::ChatLoraFineTune))),
+        };
+        let dtype = match format {
+            Some(_) if bf16 || int8 || nf4 => return Err(Error::Backend("ChatFineTune: base_format and the bf16_base, int8_base and nf4_base switches name the same setting; give one".to_string())),
+            Some(spec) => bases.parse(spec).map_err(Error::Backend)?,
+            None => {
+                let narrowest = if nf4 {
                     qwen3::Dtype::NF4
+                } else if int8 {
+                    qwen3::Dtype::I8
                 } else if bf16 {
                     qwen3::Dtype::BF16
                 } else {
                     qwen3::Dtype::F32
-                }))
+                };
+                bases.check(narrowest).map_err(|why| Error::Backend(format!("ChatFineTune: {why}")))?
             }
-            other => Err(Error::Unsupported(model::training::Unsupported::new(other, Capability::ChatLoraFineTune))),
-        }
+        };
+        Ok(if arch_id == "qwen3" { ChatFamily::Qwen3(dtype) } else { ChatFamily::Qwen35(dtype) })
     }
 
     /// The tier name recorded on an outcome.
     fn tier_name(&self) -> &'static str {
         match self {
-            ChatFamily::Qwen3(qwen3::Dtype::I8) => "int8",
-            ChatFamily::Qwen3(qwen3::Dtype::BF16) => "bf16",
-            ChatFamily::Qwen3(_) => "f32",
-            ChatFamily::Qwen35(dtype) => model::policy::format_name(*dtype),
+            ChatFamily::Qwen3(dtype) | ChatFamily::Qwen35(dtype) => model::policy::format_name(*dtype),
         }
     }
 
@@ -361,6 +363,7 @@ impl ChatFineTune {
             int8_base: false,
             nf4_base: false,
             f32_base: false,
+            base_format: None,
             gemm_precision: crate::GemmPrecision::Auto,
             thinking: true,
             pack_answers: false,
@@ -681,6 +684,14 @@ impl ChatFineTune {
         self
     }
 
+    /// Hold the frozen base in the named format (`f32`, `bf16`, `int8`, `nf4`, `fp8`, ...): the one
+    /// spelling for every architecture, refused naming the architecture and the formats its trainer
+    /// holds. Replaces the `bf16_base`, `int8_base` and `nf4_base` switches, which it excludes.
+    pub fn base_format(mut self, spec: impl Into<String>) -> Self {
+        self.base_format = Some(spec.into());
+        self
+    }
+
     /// Hold the frozen base at fp32, the exact reference tier, whatever the device could run natively.
     /// Without any of the `*_base` choices the tier is picked from what the device has and what fits
     /// ([`choose_base_tier`]) and recorded on the outcome ([`ChatFineTuneOutcome::base_tier`]).
@@ -729,7 +740,7 @@ impl ChatFineTune {
         };
         let open = qwen3::store_checkpoint_path(&weights, &model_dir);
         let weights_str = utf8(&open)?;
-        let family = ChatFamily::of(arch.id, self.bf16_base, self.int8_base, self.nf4_base)?;
+        let family = ChatFamily::of(arch.id, self.bf16_base, self.int8_base, self.nf4_base, self.base_format.as_deref())?;
 
         // Every file is checked against the base's own template before a
         // device is claimed.
@@ -784,7 +795,7 @@ impl ChatFineTune {
         let block = block_for(longest, self.max_block)?;
 
         let set = crate::device::resolve(&self.device)?;
-        let explicit = self.bf16_base || self.int8_base || self.nf4_base || self.f32_base;
+        let explicit = self.bf16_base || self.int8_base || self.nf4_base || self.f32_base || self.base_format.is_some();
         let (family, base_tier_reason) = if explicit {
             (family, "asked for".to_string())
         } else {
@@ -1635,14 +1646,14 @@ mod base_tier_tests {
     use qwen3::Dtype;
 
     fn qwen3_tier(bf16: bool, int8: bool) -> Dtype {
-        match ChatFamily::of("qwen3", bf16, int8, false).unwrap() {
+        match ChatFamily::of("qwen3", bf16, int8, false, None).unwrap() {
             ChatFamily::Qwen3(tier) => tier,
             ChatFamily::Qwen35(_) => unreachable!(),
         }
     }
 
     fn qwen35_tier(bf16: bool, nf4: bool) -> Dtype {
-        match ChatFamily::of("qwen35", bf16, false, nf4).unwrap() {
+        match ChatFamily::of("qwen35", bf16, false, nf4, None).unwrap() {
             ChatFamily::Qwen35(tier) => tier,
             ChatFamily::Qwen3(_) => unreachable!(),
         }
@@ -1660,9 +1671,22 @@ mod base_tier_tests {
     }
 
     #[test]
+    fn one_format_flag_names_the_base_of_every_architecture() {
+        let tier = |arch, spec| match ChatFamily::of(arch, false, false, false, Some(spec)).unwrap() {
+            ChatFamily::Qwen3(t) | ChatFamily::Qwen35(t) => t,
+        };
+        assert_eq!(tier("qwen3", "nf4"), Dtype::NF4);
+        assert_eq!(tier("qwen3", "fp8"), Dtype::F8E4M3);
+        assert_eq!(tier("qwen35", "fp8"), Dtype::F8E4M3);
+        assert_eq!(tier("qwen35", "bf16"), Dtype::BF16);
+    }
+
+    #[test]
     fn a_tier_the_architecture_lacks_is_refused() {
-        assert!(ChatFamily::of("qwen3", false, false, true).is_err());
-        assert!(ChatFamily::of("qwen35", false, true, false).is_err());
+        let err = ChatFamily::of("qwen35", false, true, false, None).err().expect("qwen35 holds no int8 base");
+        assert!(format!("{err:?}").contains("qwen35") && format!("{err:?}").contains("f32, bf16, nf4, fp8"), "{err:?}");
+        assert!(ChatFamily::of("qwen3", false, false, false, Some("fp3")).is_err());
+        assert!(ChatFamily::of("qwen3", true, false, false, Some("nf4")).is_err(), "a format and a switch name the same setting");
     }
 }
 

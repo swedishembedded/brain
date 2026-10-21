@@ -10,8 +10,15 @@ pub use common::{cpu, write_tokenizer, TempDir};
 /// The model directory: `model.safetensors`, `tokenizer.json`,
 /// `tokenizer_config.json` (carrying the chat template).
 pub fn chat_model_dir(tag: &str) -> TempDir {
+    chat_model_dir_of(tag, qwen3::QwenConfig::tiny())
+}
+
+/// [`chat_model_dir`] of the model shape `shape` (the vocabulary and context are the fixture's own).
+/// `QwenConfig::tiny_i8()` has every contraction width a whole number of quantisation groups, which
+/// the packed base formats need.
+pub fn chat_model_dir_of(tag: &str, shape: qwen3::QwenConfig) -> TempDir {
     let dir = TempDir::new(tag);
-    let cfg = qwen3::QwenConfig { vocab: 151_936, block_size: 128, max_position_embeddings: 128, ..qwen3::QwenConfig::tiny() };
+    let cfg = qwen3::QwenConfig { vocab: 151_936, block_size: 128, max_position_embeddings: 128, ..shape };
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
         .param_list()
         .into_iter()
