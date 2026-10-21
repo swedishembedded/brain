@@ -1,0 +1,1284 @@
+# About Swedish Embedded AB
+
+brain is built by **Swedish Embedded AB**.
+
+We are an engineering company that puts AI on hardware that ships. Not on a
+rented cluster, not behind somebody else's API: on the GPU already in the
+machine, on a CPU with no accelerator at all, on an Intel NPU, on an embedded
+Linux board in the field, or in a browser tab.
+
+Everything in this documentation is that work done in the open. The WGSL
+kernels, the finite-difference gradient checker that gates every backward pass
+before it is believed, the residency engine that keeps large models inside a
+fixed memory budget, the parity ladders that hold each imported model to its
+reference checkpoint, and the serving stack that puts all of it behind an API -
+these are the tools we build systems with, and brain is where they live.
+
+## What we can be hired for
+
+**Running models on the hardware you already have.** GPUs, CPUs with no
+accelerator, Intel NPUs, embedded Linux boards, WebGPU in the browser. One
+model, one implementation, every target - which is the entire design premise of
+this engine and not a claim we make lightly.
+
+**Getting a large model to fit.** Quantization, weight streaming, tiled and
+memory-bounded inference, multi-GPU sharding. This is usually the difference
+between "this needs a datacenter" and "this runs on the card in the machine",
+and it is most of what determines whether an AI feature is economically
+viable at all.
+
+**Porting a model from a paper or a PyTorch checkpoint** into a runtime with no
+Python, no CUDA and no framework underneath it - gated by measured numerical
+parity against the reference, stage by stage, rather than by hope. The model
+pages in this documentation each record what was actually measured, because a
+port that has not been checked against its reference is a port that does not
+work yet.
+
+**Writing and optimizing GPU compute kernels**, and proving the result is still
+correct afterwards. Both halves matter; a fast kernel that quietly changed the
+answer is worse than the slow one it replaced.
+
+**Production inference systems.** Concurrent serving, paged KV cache,
+continuous batching, admission control, model residency and scheduling across
+several accelerators, and the observability to see what the system is really
+doing under load.
+
+**Embedded and real-time firmware** alongside the AI. This is where the company
+started and where it still spends much of its time: Zephyr RTOS, device
+drivers, wire protocols, hardware bring-up, and the unglamorous work of making
+a device behave predictably in the field.
+
+## Talk to us
+
+Every capability listed above is implemented in this repository, in the open,
+and held to gates a reader can run: the gradient checker, the parity ladders,
+the cross-backend suite. That is deliberate. It means you do not have to take
+any of this on trust - read the code, run the tests, and judge the engineering
+before you send the first email.
+
+Then email **info@swedishembedded.com** and tell us what you are trying to
+build.
+
+Website: <https://swedishembedded.com>
+=====
+# Architecture
+
+brain is a Cargo workspace of small, single-responsibility crates (about a
+hundred). Each crate may depend only on crates in the layers above it, and
+`scripts/gates/check-crate-layers.sh` enforces the layering where a violation
+would be a hard Cargo cycle.
+
+## Layers
+
+1. **Kernels and the architecture registry.** `kernels` holds every compute
+   kernel as WGSL source, embedded as constants and looked up by name; nothing
+   duplicates kernel text. `arch` is the one table of architectures (id, display
+   name, domain, Hugging Face class names, GGUF spelling, default checkpoint)
+   that the CLI resolver, importers and model cards all read.
+2. **The accelerator seam.** `backend-api` defines the backend traits.
+   `gpu-core` is the device facade: one `Gpu`, buffer and step API, with the
+   backend chosen at run time by `--device` and `--backend`. There is no
+   per-backend model code.
+3. **Training substrate.** Parameter and optimizer state, the checkpoint
+   container (safetensors with a hashed manifest), data loading and tokenizers,
+   the architecture-agnostic `Model` trait and trainer, paged KV cache, and the
+   multi-GPU parallelism layer (see [scaling](scaling/overview.md)).
+4. **Models.** One crate per architecture, composed from the shared kernels and
+   blocks.
+5. **Cross-cutting services.** Evaluation, benchmarking, the finite-difference
+   gradient checker that gates every backward pass, federated expert shards, and
+   the ONNX export plus Intel NPU runtime.
+6. **Serving and front-ends.** Typed capability manifests shared by the CLI and
+   the event API, the served-model catalog, residency (weights tiered across
+   GPU, RAM and disk under a budget), the HTTP, D-Bus and stdio/TCP servers,
+   the public SDK (`brain`) and the `brain` binary.
+
+## Backends
+
+Four eager backends are compiled into every native build and share the same
+WGSL kernels:
+
+The Intel NPU is not a fifth backend. It is a separate whole-graph path
+(`onnx` exports, `npu` runs through OpenVINO) that exists for a subset of
+models and does not share the WGSL kernels. A browser is a build target of the
+wgpu backend (`crates/web`).
+
+The portable kernels are core-compute only: a single bind group, no atomics, no
+subgroups and no `f16`, so the same source runs on old desktop GPUs and on
+WebGPU. Activations are fp32; INT8 (including DP4A dot-product kernels) is a
+first-class compute path rather than storage-only quantization.
+
+## Conventions
+
+- WGSL is the source of truth for kernels; a generated catalogue is published
+  in the [kernel reference](../reference/kernels/index.md).
+- Backpropagation is gated by `gradcheck` (finite differences), not by a Python
+  oracle, and each hand-written CUDA kernel is checked against the portable
+  kernel it replaces.
+- Every model is reachable the same way: `brain <model> <action>` on the CLI,
+  and through HTTP, D-Bus and the SDK, because all of them dispatch the same
+  typed capability manifest.
+=====
+# Performance overview
+
+brain is built so performance claims are measured, not guessed. This page
+explains the pieces of that: per-kernel profiling with a hardware roofline, a
+runtime kernel selector, and INT8 inference support. It deliberately carries
+no specific timing/throughput numbers of its own - a measured number
+describes one specific machine, driver, and code revision at one point in
+time, and goes stale the moment any of those change. See the bottom of this
+page for where real, current numbers live.
+
+## Profiling and the roofline probe
+
+Set `BRAIN_PROFILE=1` on any `brain` run to get a per-kernel breakdown: time,
+call count, bytes moved, and - where the device supports it - the percentage
+of that device's own measured compute or memory-bandwidth ceiling the kernel
+is hitting.
+
+That ceiling is not a datasheet number. On first use, brain runs a small
+roofline probe against the actual device present (compute throughput, memory
+bandwidth, and the "ridge point" where a kernel stops being bandwidth-bound
+and starts being compute-bound), and grades every subsequent kernel against
+*that* measurement. A laptop iGPU and a datacenter GPU get different roofs,
+because they have different roofs - the profiler never assumes a vendor
+spec is what you actually have.
+
+This is also why a kernel report never silently reports zero utilization when
+the answer is unknown: an unmeasured or unmodeled cost is reported as such, not
+folded into the totals as if it were free.
+
+## The runtime kernel selector
+
+Most operations in brain (attention, normalization, matrix multiply, an
+optimizer's gradient-norm reduction, and others) have more than one
+implementation - different tilings, different thread-cooperation strategies,
+different fits for a given shape and device. brain does not pick one at
+compile time and hope. A selector inspects the device's capabilities (and,
+for some operations, the shape of the work) and dispatches to whichever
+registered variant is expected to be fastest there, falling back to a safe
+default when a device lacks what a faster variant needs. You do not choose
+kernels by hand; the engine does, and `BRAIN_PROFILE=1` shows you which one
+actually ran.
+
+## INT8 inference
+
+Several served models support INT8 inference for lower memory use and higher
+throughput than full-precision - check the specific model's own page under
+the reference pages (for example the reference pages or the reference pages)
+to see whether it's supported and how to enable it, since support and the
+exact accuracy trade-off are model-specific.
+
+## Cost accounting: `brain flops`
+
+`brain flops <model> <shape>` reports how many floating-point (or, for INT8
+paths, integer) operations a forward or backward pass actually costs, without
+running it. It's a coverage-honest cost registry: every kernel brain dispatches
+has either a registered cost formula or is explicitly listed as **not
+measured** - the tool never rounds an unmodeled cost down to zero and folds
+it into a total that looks complete. Run `brain flops --help` for the full
+set of flags and the accounting model.
+
+### A whole generation, by stage
+
+`--model flux2` and `--model ltxv` price an image or a video the way one
+actually happens: text encode, then N denoise evaluations, then a VAE decode,
+reported separately and then totalled - because *which stage dominates* is the
+question the number exists to answer. A video is reported per second of output
+as well as per clip.
+=====
+# Data-parallel training across GPUs
+
+A full replica of the model on each GPU, with each replica training on a
+different slice of the step's batch concurrently, then a gradient combine so
+every replica ends the step with the identical weights. This is the
+*throughput* path - a training speedup - for a model that already fits on
+one GPU. It composes with [pipeline parallelism](pipeline.md): shard a large
+model across a group of GPUs, then replicate that whole group data-parallel.
+
+## How it works
+
+Each GPU holds one full copy of the model and runs its own forward and
+backward pass on its own micro-batch, in parallel with the other replicas.
+Once every replica has computed its gradients, they're combined into one
+gradient (summed across replicas), a single optimizer step is applied, and
+the updated weights are sent back out to every replica - so every copy stays
+identical without a separate broadcast-then-update round trip. Reading every
+replica's gradients once and updating once, instead of doing a full
+all-reduce followed by an independent optimizer step per replica, is what
+makes the combine step cheap enough for the speedup to show up in practice.
+
+Optimizer state (the running moments AdamW keeps per parameter) can be kept
+off the GPUs and in host RAM instead, controlled by the `BRAIN_OFFLOAD_ADAM`
+environment variable - useful when a model's weights and gradients already
+use most of a card's VRAM.
+
+## Single machine or a network of machines
+
+The gradient combine step moves data through the same transport-generic
+interface used by every parallel dimension in brain: one implementation
+handles GPUs that are threads inside a single process on one machine, and a
+second implementation runs the identical operations over TCP sockets between
+separate processes - which may be on different machines. Both are real and
+tested. So data-parallel training already works whether your GPUs are all in
+one box or spread across a network of machines; it's the same mechanism
+either way, not a separate feature.
+
+## Which models support it
+
+Data-parallel training is generic - it's built once against the shared
+per-model training interface every trainable architecture implements, so it
+applies uniformly rather than being reimplemented per model. Today's
+trainable models are:
+
+- GPT
+- Qwen3
+- Qwen3.5-35B-A3B
+- GLM-5.2
+- Sparse MoE Transformer
+- PID event/effect Transformer
+- Seq2seq (encoder-decoder Transformer)
+- LFM2.5-Encoder
+- Bottleneck autoencoder
+- YOLOv8-style detector
+- Z-Image
+- Nemotron (streaming ASR - transducer and acoustic-model heads)
+
+Bit-exact gradient parity between a data-parallel run and the equivalent
+single-GPU run has been validated on architecturally distinct models covering
+both the language-model batch shape and a plain tensor-regression batch
+shape, so the guarantee isn't specific to one architecture family.
+
+## GPU selection
+
+Device selection for a training process is per-process: `BRAIN_GPU_INDEX`
+pins one process to one GPU card. See
+[Configuration](../../reference/configuration.md) for the full device-selection
+reference (`BRAIN_DEVICE`, `BRAIN_GPU_INDEX`, and related variables).
+
+## Current scope
+
+Data-parallel training is a real, tested mechanism in brain's training
+engine today, validated for both single-machine and networked GPU groups.
+What's not yet in place is a single command-line flag that launches a
+multi-GPU data-parallel run directly - driving it today means writing to
+brain's training entry points yourself rather than passing one flag to an
+existing `brain <model> train` command.
+
+## What to expect
+
+**Correctness is bit-exact**: a data-parallel run reproduces the single-GPU
+run's accumulated gradient, differing only by floating-point summation order
+in the combine step.
+=====
+# Scaling brain across GPUs
+
+How to train and run brain's models on more than one device. There are three
+independent ways to spread work across GPUs - **data**, **pipeline**, and
+**tensor** parallelism - plus a transport layer that works the same whether
+the GPUs are in one machine or spread across a network. This page is the
+umbrella; each dimension has its own page:
+
+- [Data parallelism](data-parallel.md) - replicate the model, split the batch
+- [Pipeline parallelism](pipeline.md) - split a model's layers across GPUs
+- [Tensor parallelism](tensor-parallel.md) - split one layer's math across GPUs
+
+## The three dimensions, in plain terms
+
+**Data parallel.** Put a full copy of the model on each GPU. Each copy trains
+on a different slice of the batch at the same time, then the copies combine
+their gradients so every copy ends the step with the identical update. This
+is a *speed* technique: it doesn't change how much model fits in memory, it
+changes how fast you get through training data.
+
+**Pipeline parallel.** Cut the model's layers into contiguous groups ("stages")
+and put each stage on its own GPU. Data flows stage 0 -> stage 1 -> stage 2 ...
+during the forward pass and back during the backward pass. This is a
+*capacity* technique: it lets you train or run a model whose weights don't
+fit on a single card, because no single GPU ever holds more than its own
+stage.
+
+**Tensor parallel.** Instead of splitting *between* layers, split *inside* one
+ -  e.g. give each GPU a slice of a layer's weight matrix, have it compute its
+slice of the output, then combine the partial results. This is also a
+*capacity* technique, for the case where even one layer is too large for one
+GPU, but it needs a round of communication in the middle of every layer
+instead of just at stage boundaries, so it's the most communication-hungry of
+the three.
+
+## Which to reach for
+
+1. **Model fits on one GPU and you want training to go faster** -> data
+   parallel. It's the simplest of the three, and the only one that raises
+   throughput on its own.
+2. **Model's weights don't fit on one GPU** -> pipeline parallel. Split the
+   layers across your cards; the only thing that crosses a stage boundary is
+   the residual stream, so it's cheap to communicate.
+3. **A single layer itself is too wide for one GPU** -> the tensor-parallel
+   communication primitives exist and are tested (splitting a weight matrix
+   column-wise or row-wise across GPUs and combining the partial results), but
+   as of today no shipped model wires that primitive into a full forward pass.
+   Treat tensor parallelism as a building block that's ready to be composed
+   into a model, not yet as a one-step capability for an existing one.
+
+## Single machine or a network of machines
+
+All three dimensions move data through the same abstraction: whichever GPUs
+are cooperating exchange sums, gathers, and broadcasts through one collective
+interface. That abstraction already has two implementations - one for GPUs
+that are threads inside a single process on one machine, and one that runs
+the identical operations over TCP sockets between separate processes, which
+may be on separate machines. Callers don't change: the same data-parallel (or
+pipeline) code that runs across the GPUs in one box also runs across GPUs on
+a network, because it never talks to the transport directly. So data-parallel
+training across a single machine or across a network of machines is a working
+capability today, not something planned for later.
+
+## What "correct" and "fast" mean here
+=====
+# Pipeline parallelism (multi-GPU model sharding)
+
+Split a model's **layers** across several GPUs so a model whose weights
+exceed a single card's memory fits across the pool. Each GPU holds and
+computes only its own contiguous range of layers ("stage"); data flows
+through the stages in order on the forward pass and back in reverse order on
+the backward pass.
+
+## Why this works cheaply
+
+In brain's transformer models, the only thing that crosses a layer boundary
+is the residual stream - everything else (attention scores, intermediate
+activations, per-layer weights) stays local to the layer that produced it.
+That means cutting the model into contiguous layer ranges has two nice
+properties:
+
+- each GPU only needs to allocate weights and activations for **its own
+  layers** (plus the input embedding on the first stage, and the output head
+  on the last stage);
+- the only cross-GPU traffic is one residual tensor per stage boundary per
+  pass - a small, fixed-size transfer, regardless of how big the model's
+  hidden layers are.
+
+Because the residual has the same size at every layer, the transfer cost is
+identical no matter where you make the cut. So deciding where to place the
+stage boundaries is purely a **load-balancing** problem - put roughly equal
+work on each GPU - not a problem of minimizing what crosses each boundary.
+
+## Automatic placement
+
+Stage boundaries are chosen automatically to balance per-stage cost (parameter
+count) across the available GPUs, exactly minimizing the maximum load on any
+one stage. Because the first and last stages also carry the embedding and
+output-head weights, they're given fewer transformer layers than the middle
+stages, which balances memory across cards and lets a bigger model fit.
+
+## Micro-batching (overlapping the stages)
+
+Run naively, a pipeline has only one stage doing real work at a time - the
+rest are idle waiting for data to arrive. Splitting a batch into
+micro-batches and pipelining them (a GPipe-style schedule) fixes that: while
+one stage is working on micro-batch *k*, the next stage works on
+micro-batch *k-1*, so all stages overlap. This is bit-exact with running the
+micro-batches sequentially and accumulating their gradients - pipelining
+changes only the schedule, not the result.
+
+## Which models support it
+
+Pipeline sharding is a small per-architecture integration, not something
+generic across every model (splitting a model's execution graph at
+arbitrary points is inherently architecture-specific). Implemented and
+tested today for:
+
+- GPT
+- Qwen3
+- Qwen3.5-35B-A3B
+
+Both bit-exact forward/backward parity against the equivalent single-GPU
+model and the automatic load-balanced placement are validated for each of
+these. Not yet supported: pipeline sharding for brain's other trainable
+architectures (GLM-5.2, the Sparse MoE Transformer, and the rest) - extending
+it to a new model is a small, well-scoped integration, not a redesign.
+
+## Streamed models: sharding without residency
+
+The pipeline above keeps every stage's weights **resident** on its card. Some
+models are too large for even one stage to be resident - a 33B diffusion
+transformer at fp32 is ~132 GB, and no single card holds a useful fraction of
+it. Those models *stream*: one layer's weights are uploaded, run, and
+overwritten by the next layer's, so the live weight footprint is one layer
+rather than one stage.
+=====
+# Tensor parallelism
+
+The third parallelism dimension: instead of splitting *between* layers
+(pipeline parallelism) or replicating the whole model (data parallelism),
+tensor parallelism splits **one matrix multiply inside a single layer**
+across GPUs. Where pipeline parallelism only needs to communicate at stage
+boundaries, tensor parallelism needs a round of communication in the middle
+of every layer's forward and backward pass - it's the most
+communication-hungry of the three dimensions, so it's meant for the narrow
+case where even one layer's weights are too large for one GPU, not as a
+general speedup technique.
+
+## What a column-parallel / row-parallel split means
+
+Take a layer that computes `Y = X - W` for some weight matrix `W`. Split `W`
+one of two ways:
+
+- **Column-parallel**: give each GPU a slice of `W`'s output columns. Each
+  GPU computes its own slice of `Y` directly from the full input `X` - no
+  communication needed for this step, because each GPU's output columns
+  don't depend on any other GPU's slice of `W`.
+- **Row-parallel**: give each GPU a slice of `W`'s input rows (paired with a
+  matching slice of the incoming activations). Each GPU computes a partial,
+  incomplete result, and the GPUs' partial results have to be **summed**
+  together to get the true `Y` - a communication step.
+
+A transformer layer's attention and feed-forward blocks are built from pairs
+of these: one column-parallel projection whose output feeds directly into a
+row-parallel projection, so the communication step only has to happen once
+per pair rather than after every individual matrix multiply. In the backward
+pass, the same pattern repeats in reverse for the input gradient, while each
+GPU's own weight-slice gradients stay local and need no communication at all.
+
+## Current scope
+
+The communication primitives (the combine operations described above) and
+the specific column-parallel/row-parallel arithmetic for a transformer's
+attention and feed-forward blocks are implemented and tested, including
+end-to-end forward and backward numerical parity against the equivalent
+single-GPU computation. What doesn't exist yet is a shipped model that wires
+this primitive into its own full forward and backward pass - today it's a
+proven, ready-to-use building block, not a capability any model exposes
+end-to-end. Composing it into a model is a per-architecture integration, the
+same shape of work as it took to add [pipeline sharding](pipeline.md) to a
+model, just not done yet for tensor parallelism.
+
+## Composing all three dimensions
+
+Data, pipeline, and tensor parallelism are designed to be orthogonal and
+combine: a group of GPUs can be tensor-parallel with each other for one
+stage's layers, that stage can be one of several pipeline stages, and the
+whole pipeline can be replicated data-parallel. Data-parallel and pipeline
+parallelism have each been validated independently; running all three
+together end-to-end isn't yet a shipped capability, since it depends on
+tensor parallelism first being woven into a real model as described above.
+
+## Choosing a degree, if you're extending a model
+=====
+# What is brain?
+
+brain trains and runs neural networks **locally**, in Rust. There is no PyTorch
+and no Python to build it, run it, or check that it learns correctly.
+
+## One set of kernels, every kind of hardware
+
+brain's operations are written once, as portable WGSL compute kernels, and the
+same kernels run on four backends. All four (wgpu, Vulkan, CUDA and CPU) are
+compiled into every native build and are chosen at run time with `--backend`:
+
+- **wgpu** (the default GPU backend) - any modern GPU through Vulkan, Metal or
+  DirectX 12, and the browser through WebGPU;
+- **native Vulkan** - Vulkan driven directly;
+- **CUDA** - NVIDIA GPUs through the NVIDIA driver: the portable kernels are
+  translated to CUDA and compiled on first use, and the paths that matter most
+  for speed have hand-written CUDA kernels beside them
+  ([Running on NVIDIA GPUs](../guides/hardware/cuda.md));
+- **CPU** - the same kernels compiled to native code for the CPU's cores, so no
+  GPU is needed at all.
+
+A **web browser** is a build target of the wgpu backend: a wasm build runs the
+same kernel source as the native one.
+
+A portable kernel either gives the same answer on every backend or it is a
+bug. Each hand-written CUDA kernel is checked against the portable kernel it
+replaces, or against a reference computation where it has no portable twin.
+
+Separately, an **Intel NPU** path exists for a subset of models, opt-in per
+model. It is not one of the four eager backends and does not share
+the WGSL kernels - OpenVINO is a whole-graph compiler, so reaching the NPU
+means exporting a model to ONNX, compiling it with OpenVINO, and running the
+compiled graph, rather than dispatching brain's own kernels op by op. See
+[Hardware](../guides/hardware/choosing-hardware.md) for which models have an NPU path today.
+
+## Correctness without a Python oracle
+
+Most from-scratch training code proves its backward pass is right by diffing
+against a PyTorch reference. brain doesn't have one to diff against - instead,
+the analytic gradients are checked against an in-repo
+finite-difference gradient checker (`make test/gradcheck`), on its own forward pass.
+That gate is what "correct" means here, and it runs as part of the normal test
+suite.
+
+## What it actually does
+
+Under one consistent toolset - a CLI, an HTTP API (OpenAI/Anthropic/OpenRouter-
+compatible), and a D-Bus surface - brain covers a lot of ground:
+
+- **Large language models** - training from scratch, LoRA fine-tuning, and
+  serving (chat, tool calls, batched inference with a paged KV cache).
+- **Vision** - object detection, segmentation, monocular depth, face
+  restoration, super-resolution.
+- **Speech** - text-to-speech voice cloning and speech-to-text.
+- **Image generation** - text-to-image and reference-image editing.
+- **Time-series forecasting** - probabilistic forecasting over OHLCV and
+  general time series.
+- **3D** - multi-view reconstruction and Gaussian-splatting fly-throughs.
+- **World models** - playable, action-conditioned video generation.
+
+Every one of these is reachable the same way: `brain <architecture> <action>`
+(or `brain <action> <architecture>` - both orders dispatch identically),
+whether that architecture has its own dedicated CLI module or reaches the
+generalized capability interface directly. See the model catalog for the
+full, current list of models and what each supports.
+
+## Who builds it
+
+brain is built by **Swedish Embedded AB**. We build AI that runs on hardware
+that ships - the GPU already in the machine, a CPU with no accelerator at all,
+an Intel NPU, an embedded Linux board, or a browser tab. This engine is that
+work done in the open.
+=====
+# Benchmarking your setup (`brain perf`)
+
+`brain perf` measures how brain performs on the hardware in front of it:
+latency, saturated throughput, and behavior under a realistic arrival of
+requests - plus a way to compare a result against a saved baseline over
+time. It is distinct from `brain bench`, which asks whether a model
+architecture learns a task; `perf` asks how much correct work the engine
+delivers per unit of hardware, memory, and time.
+
+## What it measures
+
+Every `perf` run reports against the same few axes, regardless of which
+model or scenario you're running:
+
+- **Latency** - time to first output artifact (a token, a detected frame, an
+  audio chunk, a denoise step - whatever the model's natural unit is) and the
+  time between subsequent artifacts, as full percentile distributions
+  (P50/P95/P99), not just an average.
+- **Throughput** - output artifacts per second under saturation, and
+  "goodput": how much of that throughput still lands inside a declared
+  latency budget.
+- **Serving behavior under load** - what happens at a given request
+  concurrency over the real transport, not just in a tight in-process loop.
+- **Correctness** - every run carries a validity gate against a reference;
+  a run whose output drifted outside tolerance is marked invalid and
+  excluded from comparisons, so a "faster" result can never quietly also be
+  a wrong one. Where a target genuinely cannot check itself, the result is
+  labelled unverified rather than counted as verified (see Self-verification
+  below).
+
+Every result records the hardware it ran on (device, backend, adapter
+string, core count, RAM) so a result from one machine is never silently
+compared against a result from another.
+
+## Basic usage
+
+`<scenario>` is one of `latency`, `throughput`, `serve`, or `sweep` (a
+concurrency ladder); `longctx` has its own section below. `--target` names what to measure, e.g.
+`qwen-synth:28x1024x16` (the real serving engine on randomly-initialized
+weights of that shape - no checkpoint needed, good for hardware comparison)
+or `qwen:out/qwen.safetensors` (a real checkpoint). Run `brain perf --help`
+for the full list of target specs (one per served model family).
+
+`--smoke` shrinks a run to a few seconds, useful for a quick sanity check
+rather than a real measurement.
+
+## Long context (`longctx`)
+
+`longctx` answers what one GPU sustains on one model at a long context. It is
+the same scenario for every model family that implements it, so two families
+are measured by identical code and their artifacts compare:
+
+Targets: `qwen35:<gguf>` (or `qwen35-gguf`, which reads `BRAIN_QWEN35_GGUF`; the
+weight tier comes from `BRAIN_QWEN35_GGUF_TIER`, the KV cache storage from
+`BRAIN_QWEN35_KV` = `f32` (default) | `bf16` | `int8`) for the Qwen3.8 GGUF
+resident, and `qwen:<weights>[:i8w][:kvf32]` for the Qwen3 paged serving engine.
+The planner charges the KV tier's real bytes, so the batch the sweep can reach
+at a long context, and the out-of-memory boundary it records, move with it.
+
+A long-context decode step on a card other processes share is better priced by
+kernel DEVICE time than by wall clock (the host records ~1250 dispatches per
+step and another tenant's CPU load stretches that): `qwen35_decode_profile <gguf>
+8 --context 131072 --batch 4 --kv int8` prints the wall and device ms per step,
+the aggregate tokens per second, the weight bandwidth reached and the per-kernel
+device ms per step (`--device` and `--backend` pick the cards and the API), and `cargo test --release -p brain-model --test
+kv_tier_decode_bench -- --ignored --nocapture` times one attention layer per KV
+tier, interleaved min-of-N, against the triad.
+
+It reports, in one artifact and one table:
+=====
+# Hardware support
+
+brain runs the same model code across a wide range of hardware: discrete
+GPUs old and new, plain CPU cores, Intel NPUs, and even a browser tab via
+WebGPU. This page covers what that portability rests on and how to pick a
+device for your workload.
+
+## Why one binary runs everywhere
+
+brain's architecture is a **portable baseline plus capability-gated fast
+tiers, with automatic fallback** - not a single fixed set of GPU features.
+Every kernel is written once, in WGSL, against a portable fp32 baseline that
+every backend (old desktop cards, current-generation GPUs, CPUs, and
+browsers alike) can run unchanged. Faster numeric tiers - bf16, f16, INT8,
+and block-quantized formats - are declared per kernel and dispatched only on
+a device that actually supports them; a device that can't run a given tier
+correctly falls back to the fp32 baseline rather than producing wrong
+results or failing outright. brain's capability layer
+(`backend-api::NumericSupport`) is what makes that selection mechanical
+instead of guessed: it records what a backend measured, not what a device's
+marketing claims, and a runtime selector reads it to pick the fastest tier
+that's actually safe on the hardware present.
+
+Beyond that baseline, `NumericSupport::int8_dot` is real and already
+load-bearing, not aspirational: the packed-int8 DP4A dot kernels
+(`matmul_i8*`, WGSL `dot4I8Packed`) execute on every wgpu-class backend, and
+several models default to them - Qwen3.5's paged KV cache serves in int8 by
+default, and `qwen3`/`s3dit`/`qwen35moe` all take `--precision int8` for a
+~4x smaller weight footprint on the same card. <!-- perf-number: 4 bytes per weight to 1 is the definition of int8, not a measured speedup --> `bf16`/`f16`/cooperative-matrix
+tiers are the ones still gated off (`NumericSupport::BASELINE` reports them
+unsupported and every such dtype promotes to fp32); wiring those is tracked
+separately. So "portable fp32 baseline" describes the *arithmetic contract*
+every kernel is written against, not a claim that fp32 is the only thing
+brain computes in today - see the reference pages for the same
+correction against the (also easy to misread) "fp32-only" phrasing.
+
+Within that fp32 baseline, the kernels also stay off a further set of GPU
+features - no atomics, no subgroup operations, no kernel that needs a large
+number of bindings - because those vary enough across old desktop cards,
+current GPUs, CPUs, and browsers that relying on any of them would break
+portability somewhere. That's a deliberately chosen baseline, not a ceiling
+on what brain will ever compute in: it's what lets the exact same baseline
+kernel source run on a decade-old GPU, a modern one, a CPU, or in WebGPU in a
+browser tab today, while the capability-gated tiers above it are where
+device-specific speed is meant to come from as they land.
+
+## Listing your hardware
+
+`brain devices` prints the canonical GPU table: index, PCI bus id, name,
+VRAM, and which backends can see the card.
+
+GPU indices are stable and PCI-bus-ordered, so `gpu0` and `gpu1` always name
+the same physical card, regardless of the order tools like `nvidia-smi`
+happen to report them in, and regardless of driver updates or reboots.
+
+## Selecting a device
+
+Pass `--device` to any command that runs a model:
+
+- `--device gpu0` - a specific GPU, by its canonical index.
+- `--device gpu` - all GPUs.
+- `--device cpu` - all CPU cores. brain JIT-compiles the same WGSL kernels
+  to native code for the CPU backend, so no GPU is required at all.
+- `--device npu` - the Intel NPU, via a separate compile path from the
+  GPU/CPU kernels.
+- `--device vulkan` - the native Vulkan backend instead of the default wgpu
+  backend.
+=====
+# Running on NVIDIA GPUs (CUDA)
+
+brain drives NVIDIA hardware through the CUDA Driver API. The backend loads
+`libcuda.so.1` at run time (nothing is linked at build time), so a build never
+needs a CUDA toolkit, and a machine without an NVIDIA driver simply does not
+offer the backend. It runs on Linux x86-64 and Linux aarch64, including Grace
+Hopper systems.
+
+> Swedish Embedded AB implements GPU compute stacks and the validation that
+> shows which parts of a model catalogue run on which accelerator. If your team
+> needs expertise in bringing models to NVIDIA hardware, you can procure our
+> services by sending an email to info@swedishembedded.com.
+
+## What it needs
+
+- **The NVIDIA driver.** That is all a model needs to *run* once its kernels
+  are compiled.
+- **NVRTC** (`libnvrtc`, part of the CUDA toolkit) to compile kernels the first
+  time each is used; the result is cached on disk (`BRAIN_PIPELINE_CACHE_DIR`).
+  Without it a machine can still run every catalogue kernel and native kernel
+  from ahead-of-time images (below); a kernel with no image and no NVRTC is
+  reported by name.
+
+brain finds NVRTC in this order: the library named by `BRAIN_NVRTC` (the only
+one tried when set), then the toolkit under `CUDA_PATH` (`lib64`, then `lib`),
+then the system loader, trying `libnvrtc.so.13`, `.12`, `.11` and the
+unversioned name.
+
+### Compile targets
+
+Kernels are compiled for the capability the driver reports, as real machine
+code (`sm_90`, not a virtual architecture). A kernel that uses
+architecture-specific instructions (Hopper's warpgroup MMA and TMA multicast)
+declares it, and is compiled for the suffixed target (`sm_90a`) only on a
+device and toolkit that provide it: a kernel that merely prefers the suffix
+falls back to the plain target elsewhere, and one that requires it is declined
+on any other device rather than failing inside the compiler. The on-disk
+cubin cache is keyed on the target (suffix included), the compiler version, the
+flags, any specialization macros and the launch ABI version, so changing any of
+them recompiles instead of reusing a stale binary.
+
+### Machines with a driver and no toolkit
+
+`make cuda/aot` compiles the whole WGSL catalogue (through the CUDA
+translation) and the hand-written kernels offline into one cubin per
+architecture, plus portable PTX, and a manifest. The CUDA backend reads that
+directory when it exists, so such a machine runs those kernels with the driver
+alone:
+
+Run both lanes to fill one directory for a mixed fleet; copy the directory to
+the target machine and point `BRAIN_CUDA_AOT_DIR` at it. The images are build
+products and are never written into the repository; the directory defaults to
+`cuda-aot` under `BRAIN_PIPELINE_CACHE_DIR`. For one kernel on one device the
+backend takes, in order: the cubin for the device's architecture (the
+arch-specific one first when the kernel asks for it), a cubin for a lower minor
+of the same major, the disk cache or NVRTC, and finally the PTX, which the
+driver compiles itself. Images are matched by a hash of the generated source,
+the entry point, the target, the flags and the launch ABI version, so a stale
+image is never used for edited source, and each image is checked against the
+manifest's checksum before the driver sees it. `BRAIN_CUDA_AOT=0` ignores the
+directory. Kernels created at run time by dtype or KV-tier specialisation are
+not in the catalogue and still need NVRTC.
+
+### Installing a toolkit without root
+
+`make cuda/install LANE=12` or `LANE=13` downloads NVIDIA's redistributable
+archives (checksum-verified) into `$BRAIN_CUDA_PREFIX` (default
+`~/.local/cuda`), with cuDNN and NCCL; `LANE=nsight` adds the profilers.
+Activate a lane in a shell with:
+=====
+# Imaging: segmentation, restoration, and upscaling
+
+Beyond generating images from a prompt, brain can operate *on* an existing
+image - cut out a region, find and embed a face, clean up a degraded face,
+upscale a result, or move an image in and out of a discrete codebook. These
+are separate model ids from image generation, each with its own `brain do`
+action, and they compose into one pipeline call so a multi-step edit doesn't
+need a round-trip per stage.
+
+## Capabilities
+
+### Promptable segmentation - `brain/sam2`
+
+Point or box prompts on an image produce a pixel-accurate mask (SAM 2.1-style).
+Use it whenever an edit needs to touch *only* one region - a mask from this
+model is what turns "only change the sky" into an exact operation instead of a
+prompt-engineering hope. See the [SAM 2.1 page](../../reference/models/sam2.md).
+
+### Face detection and identity embedding - `brain/scrfd`, `brain/arcface`
+
+`brain/scrfd` detects faces in a photo (boxes, scores, landmarks);
+`brain/arcface` produces a normalized identity embedding for a face, detecting
+and aligning it first unless you pass `--align false`. Use them for face
+search/verification, or to locate and align a face before restoring it. See the
+[SCRFD](../../reference/models/scrfd.md) and [ArcFace](../../reference/models/arcface.md) pages.
+
+### Blind face restoration - `brain/codeformer`
+
+Takes a degraded (ideally aligned) face and produces a restored version, with
+a continuous identity-fidelity dial: one end favors visual quality, the other
+favors staying close to the input. Use it after detection/alignment to clean
+up compression artifacts, blur, or low resolution on a face crop. See
+the [face restoration page](../../reference/models/codeformer.md).
+
+### Image upscaling - `brain/rrdbnet`
+
+Super-resolves an image (4x on the released checkpoint). Use it as a final
+step after generation, editing, or restoration to raise output resolution.
+See the [upscaling page](../../reference/models/rrdbnet.md).
+
+### Image / codebook encode-decode - `brain/vqgan`
+
+Encodes an image to a grid of discrete codebook indices, and decodes indices
+back to an image. This is the same discrete-codebook mechanism face
+restoration builds on; use it directly when you need the codes themselves
+(e.g. for downstream analysis) rather than a restored image. See
+the [VQGAN page](../../reference/models/vqgan.md).
+
+### Composed pipeline - `brain/imgpipe`
+
+Chains segment -> refine mask -> restore -> upscale as **one** call instead of
+four separate round-trips, so intermediates never cross the process/bus
+boundary and pixels outside the mask come back unchanged. Use it whenever an
+edit needs more than one of the above stages - it's the same providers `brain
+do` uses for each model, just composed server-side. See
+the [imgpipe page](../../reference/models/imgpipe.md).
+
+## Approximate VRAM needed
+
+Measured configuration, not a promise - actual usage depends on image size and
+batching:
+
+All of them are small enough to stay resident together on one GPU.
+`brain/imgpipe` holds no weights of its own - it composes whichever of the
+above stages a call asks for, so its cost is the sum of the stages it runs.
+=====
+# Models & weights
+
+Every servable model has a name, and getting its weights onto disk works one
+of two ways: some models fetch themselves automatically the first time you
+use them, others need you to point brain at a checkpoint you
+already have. This page covers both - how model ids are structured, and how
+to get weights in place either way.
+
+## Model naming
+
+Every model brain can serve is named `<vendor>/<repo>[-<QUANT>]`, matching its
+upstream URL exactly - case included. This is the same string a browser would
+resolve at `https://huggingface.co/<vendor>/<repo>`, plus an optional GGUF
+quant suffix. There is exactly one name per servable checkpoint; nothing gets
+a second, shorter alias going forward.
+
+### The grammar
+
+- Exactly one `/`. Byte-exact, case-sensitive comparison.
+- A trailing `-<QUANT>` is stripped from `repo` into a separate `quant` field
+  when the suffix is one of the closed set of GGUF quant tokens
+  (`Q8_0`, `Q6_K`, `Q5_K_M`, `Q4_K_M`, `Q2_K`, ...) matched in their exact
+  canonical uppercase form. `BF16`/`F16`/`F32`/`FP8` are deliberately **not**
+  quant tokens - they are base-repo dtype markers, which is what makes
+  `...-BF16-Q8_0` parse as repo `...-BF16` + quant `Q8_0` rather than ambiguously.
+- Two quant suffixes in a row (`...-Q8_0-Q4_0`) is a parse error with a message
+  explaining why.
+
+Parsing and validating a name does zero filesystem or network I/O - it's
+always safe and instant, which is what lets discovery endpoints (`GET
+/models`) stay offline.
+
+### Reserved vendors
+
+Three vendor prefixes are reserved and are **never** fetched from the
+network:
+
+### Legacy names
+
+Every built-in used to be named by its bare short form (`mock`, `yolo`,
+`qwen`, ...). Those names still work as **deprecations, not a second id** - an
+old client sending `"model":"mock"` still dispatches, resolved to its
+canonical `brain/<name>` form behind the scenes. `GET /models` never lists a
+legacy name, only the canonical id a model's manifest actually carries.
+
+### On disk
+
+Once fetched or imported, a model's files live under
+`<models-dir>/<vendor>/<base-repo>/` - the quant suffix is stripped, because
+a quant shares its base repo's tokenizer and config and belongs in the same
+directory:
+
+Every family is served from the files exactly as downloaded (safetensors,
+`pytorch_model*.bin`, a `.pt` or a GGUF): nothing is rewritten on disk,
+nothing downloaded is removed, and each tensor is converted in memory only as
+far as the device needs (bf16 or fp16 to fp32 on a GPU without half-precision
+compute, int8 packing where a model is served quantized).
+
+`<models-dir>` defaults to `$XDG_DATA_HOME/brain/models` (in practice, absent
+`XDG_DATA_HOME`, `$HOME/.local/share/brain/models` - **not**
+`~/.local/brain/models`) and is overridden by `--models-dir`, the global
+`--brain-data-dir <root>` (models land in `<root>/models`), or
+`BRAIN_MODELS_DIR` - see [Configuration](../../reference/configuration.md#paths) for the full
+precedence ladder.
+
+## Seeing what you have
+
+`brain models list` is the store's own view of itself: architecture ->
+provider repo -> quantization, joining what is actually on disk against each
+architecture's declared official quantizations (`brain_arch::Arch::variants`
+- a real, verified-against-upstream list, not a live probe) and a cached
+per-model cost.
+=====
+# Serving - `brain serve`
+
+`brain serve` loads whichever models are configured (see
+the reference pages), makes them resident under
+one scheduler, and exposes them over one or more transports at once.
+
+- `--openai[:PORT]` - serve an OpenAI-compatible HTTP API (default port if
+  omitted). Every route is served both with and without the `/v1` prefix -
+  either works as a client's `base_url`.
+- `--anthropic[:PORT]` - serve an Anthropic-compatible HTTP API (`/v1` only).
+- `--openrouter[:PORT]` - serve an OpenRouter-compatible HTTP API (with and
+  without `/v1`, same as OpenAI).
+- `--dbus` - serve the D-Bus control surface (`com.swedishembedded.Brain1`).
+- `--models-dir DIR` - the model store: scanned at startup, and the one store
+  every served model's weights are resolved from (overrides
+  `BRAIN_MODELS_DIR`).
+- `--api-keys-out FILE` - write the generated API keys to `FILE` (mode 0600). The stdout
+  `APIKEY` lines then name the file and omit the keys, so server logs on a shared
+  machine do not hold them.
+- `--ready-file PATH` - see **Readiness** below.
+- `--adapter FILE`, `--adapter-manifest FILE`, `--watch-adapters DIR`,
+  `--adapter-slots N`, `--adapter-rank-cap R`, `--adapter-targets LIST` - see
+  **Serving LoRA adapters** below. At most one of the first three may be given.
+- `--decision-model REF|DIR` (repeatable), `--decision-default ID` - serve
+  decision models beyond the ones found in the model store, and name the one
+  `auto` resolves to. See [Decision models](../../reference/models/decision.md).
+
+At least one surface flag is meaningful for a useful server; an unknown flag
+is a hard error (exit 2), not a warning. Run `brain serve --help` for the
+authoritative flag list.
+
+## The serving policy
+
+How a model is stored and sized is one model-agnostic policy, the same for
+every model that serves it; no flag is spelled with an architecture name.
+
+Each model declares which formats it supports. A choice a model cannot honour
+is refused by name with the supported set (for example `qwen3: KV cache bf16
+is not supported; supported: f32, int8, fp8`); the model does not serve, and
+the server refuses to start only when no served family can honour the policy.
+A limit that has no meaning for a model is reported as a note at startup.
+
+Only real choices are flags. The prefix-cache slots follow `--max-batch` (one warm conversation per concurrent sequence, never fewer than four). The KV pool size, the prefix-cache slots, the
+prefill slice, batch and row cap, and the residual-add and norm fusion are
+derived from the model's metadata, the device and the memory plan (the context
+window from the model's declared window and the free memory) and are not
+options; the values a server runs with are reported at startup. The old
+architecture-prefixed spellings (`--qwen-ctx`, `--qwen35-kv`,
+`--qwen-weights-int8`, `--kronos-decoder`, ...) still work with a deprecation
+warning until their callers have moved; the ones for derived settings still
+set them so existing launch lines behave as before.
+
+## Serving LoRA adapters
+
+One resident copy of a Qwen3's weights serves the base and any number of LoRA
+adapters **at the same time, in the same batches**. An adapter is a model: it
+is selected by its card id, `<vendor>/<repo>:<owner>:<name>:<tag>` (for
+example `Qwen/Qwen3-0.6B:lab:support:v3`), in the `model` field of any request
+over HTTP or D-Bus. The base keeps answering under its own id with no adapter.
+`GET /models` lists one entry per served adapter id, each with
+`adapter: {id, digest}` (see the reference pages), and the
+base's entry unchanged.
+=====
+# Forecast fine-tuning (Chronos-2 / Kronos)
+
+brain can adapt a released time-series forecasting model (the Chronos-2 or
+Kronos family) to your own market data via LoRA, producing a checkpoint
+tuned to recent behavior in the instruments you care about.
+
+Fine-tuning these forecasting models runs on CPU or GPU only - it is not
+NPU-capable. The NPU export path is inference-only and can't backpropagate,
+so a fine-tune always happens on CPU/GPU first; the resulting checkpoint
+remains NPU-exportable afterward for fast serving.
+
+## Input data
+
+Point the fine-tuner at a directory of your own OHLCV (Open/High/Low/Close/
+Volume) CSVs, one file per instrument, with columns:
+
+The fine-tuner builds `(context -> horizon)` windows across the whole
+universe, splits them temporally with an embargo/purge gap so no future bar
+leaks into a training window, and normalizes using only past data. You
+supply raw daily bars; the leak-safety handling is done for you. More
+liquid instruments and more history per instrument make for a better
+fine-tune - breadth across many instruments matters as much as depth in any
+one of them.
+
+### Validation
+
+Every file is validated before any weights are loaded, with the same checks
+`brain forecast predict` applies: the header names the six columns in order,
+every row has six fields that all parse, dates are strictly increasing,
+values are finite, prices are positive, `high >= max(open, close)`,
+`low <= min(open, close)`, and the file is long enough for at least one
+`context + horizon` window. Every rejection names the file and the 1-based
+line inside it.
+
+**A file that fails stops the run.** A fine-tune is a long job whose whole
+output is one promote/keep verdict about one universe, so a universe that
+quietly lost names would produce a verdict about an experiment you did not
+ask for - and nothing afterwards would tell you which. Validation takes
+milliseconds and happens before the checkpoint loads, so the refusal is
+immediate.
+
+If refusing the whole run is the wrong trade - a several-hundred-name vendor
+dump with one bad row in one file - pass `--skip-invalid`. It trains on the
+files that parsed, still lists every rejection with its file and line, and
+prints the loaded/rejected split either way:
+
+`--holdout-data` is validated the same way, up front, so a typo there cannot
+cost you the generalization report at the end of a finished run.
+
+## Running a fine-tune
+
+- `--tokenizer-dir` / `--decoder-dir` - local paths to the released
+  Kronos tokenizer and decoder checkpoints.
+- `--data` - your directory of OHLCV CSVs.
+- `--context` / `--horizon` - the window shape (history length / forecast
+  length).
+- `--epochs` / `--lr` - training length and learning rate.
+- `--lora RANK` - LoRA rank; omit for a full-parameter fine-tune.
+- `--out` - where to write the resulting checkpoint, if the fine-tune is
+  promoted (see below).
+- `--skip-invalid` - train on the files that passed validation instead of
+  refusing the run (see [Validation](#validation)).
+
+The tokenizer stays frozen throughout - only the decoder is fine-tuned.
+
+## The promotion gate
+
+A fine-tune is only kept if it demonstrably beats the un-tuned base model,
+out-of-sample, on held-out (embargoed) data. The command prints its
+decision:
+
+If the fine-tune does not beat the base, no checkpoint is written and the
+base model continues to serve. Many runs will not beat the base - that is
+correct, expected behavior, not a failure of the tool.
+
+## Backtesting a checkpoint across your whole universe
+
+`tools/forecast/full_backtest.sh` runs the same walk-forward evaluation the
+promotion gate uses, but across every instrument in a directory at once  - 
+useful for checking a checkpoint (promoted or not) more thoroughly than the
+gate's own single summary number before you trust it:
+=====
+# Labeling a dataset
+
+`brain label` captions a folder of images with a vision-language model and
+writes the caption file the image trainers already read. It is a **top-level
+verb over a model seam**, not an action on one model: the workflow is the same
+whichever model does the describing, so adding a captioning model must not add
+a labeling command.
+
+That writes `./my-dataset/captions.yaml`, which is exactly what
+`brain flux2 finetune ./my-dataset --out adapter.safetensors` consumes.
+
+## Why the captions matter more than the hyper-parameters
+
+The captions *are* the training signal. On a small dataset each one carries a
+large share of it, and a vague caption teaches an adapter almost nothing the
+base model did not already know. Prefer concrete, visible detail over the name
+of a style:
+
+> A low rattan bed with a woven headboard, layered with a rust-orange linen
+> throw and three kilim cushions in ochre and deep red.
+
+teaches far more than "boho bedding". The default `--prompt` asks for exactly
+that: room type, furniture and materials, textiles and patterns, colour
+palette, lighting direction and quality, camera viewpoint, architectural
+features, and mood, as one paragraph. Override it with `--prompt` for a
+non-interior dataset.
+
+## The trigger phrase
+
+`--trigger` weaves a phrase into every caption so an adapter trained on the
+folder binds the concept to it. There is a real trade-off in what you pick:
+
+- **A rare invented token** (`sks`, `TOK`) carries no prior, so the adapter
+  binds it cleanly to the new concept and the effect is easy to isolate. It is
+  also unreadable, composes badly with the rest of a prompt, and collides with
+  any other adapter that chose the same token.
+- **A natural phrase** (`bohemian style`) already means something to the base
+  model, so the adapter *shifts* an existing concept rather than creating one.
+  It reads naturally and composes well, but it leaks: every generation
+  mentioning the phrase drifts toward your dataset, and an A/B against the base
+  model is harder to read because the base already responds to the words.
+
+Neither is wrong. Decide which you want, then check that it actually bound by
+generating with and without the phrase at a fixed seed and comparing.
+
+## Resumable and idempotent
+
+Captions are written after **every** image, and a re-run only fills in what is
+missing:
+
+An image that already has a caption is left exactly as it is, so you can
+correct captions by hand and a later run will not overwrite the correction.
+`--overwrite` is the explicit opt-out. Re-running a finished folder is a no-op
+that does not even load the model.
+
+## The caption file
+
+`captions.yaml` is a flat `filename: caption` mapping, and a caption may be a
+YAML block scalar spanning as many lines as it needs:
+
+That is what makes a long caption editable: the text sits on its own lines with
+no quoting and no escaping, and `#` and `:` inside it are just characters.
+
+It is ordinary YAML, parsed by `serde_norway` into the typed
+`data::imageset::CaptionFile` schema - not by a caption-specific line scanner -
+so anchors, aliases, document markers, quoted colons, escapes and CRLF all
+behave as YAML says they should, and a file that does not parse is reported
+with a line and column instead of quietly looking like an uncaptioned folder.
+`captions.jsonl` is the same story with `serde_json` and `CaptionLine`, and
+still overrides `captions.yaml` entry by entry.
+
+The writer emits a block scalar for any caption containing a newline and a
+plain scalar otherwise; a caption a block scalar cannot represent exactly (one
+with trailing whitespace on a line, say) is quoted instead, because an exact
+round trip matters more than a pretty one.
+
+## Choosing a model
+=====
+# LoRA fine-tuning (Qwen)
+
+brain can fine-tune a Qwen3 model on your own chat-style data using LoRA
+(Low-Rank Adaptation), producing a small adapter rather than a full copy of
+the model's weights.
+
+`brain qwen3 finetune` trains LoRA adapters. Full-parameter retraining
+(`brain::ChatFullFineTune`) and preference optimization with DPO
+(`brain::PreferenceFineTune`) are available through the SDK; see
+the reference pages. Qwen3.8-27B has its own verb,
+described under [Qwen3.8-27B](#qwen38-27b-brain-qwen35-finetune).
+
+## Running a fine-tune
+
+- `--lora RANK` - the LoRA rank (higher = more capacity, more adapter
+  parameters).
+- `--weights BASE` - the base model to fine-tune from, either a model-store
+  reference or a direct path to a checkpoint.
+- `--adapter OWNER/NAME[:TAG]` - where to store the resulting adapter.
+  Running the same command again with the same `--adapter` overwrites that
+  tag in place, so retraining is just rerunning the command.
+- `--dataset DIR` - a directory of chat-template-driven supervised
+  fine-tuning (SFT) data. Each training example is a multi-turn
+  conversation (a sequence of role-tagged messages - user, assistant, and
+  optionally tool calls/results), rendered through the base model's own
+  chat template. Only the messages marked as trainable in a given example
+  contribute to the loss, so a dataset can mix turns you want the model to
+  learn from with context turns it shouldn't be scored against.
+
+This target is also wrapped by `make qwen/finetune DATASET=<dir>
+ADAPTER=<owner/name[:tag]>`, which builds the release binary first.
+
+## Qwen3.8-27B (`brain qwen35 finetune`)
+
+- `--base BASE` - a brain-native `.safetensors` checkpoint, or (with
+  `--base-format bf16`, `nf4` or `fp8`) a HuggingFace checkpoint directory such as
+  `Qwen/Qwen3.8-27B-FP8`, which is streamed from disk one tensor at a time
+  (about 1 GiB of host memory) and never held whole on the host.
+- `--base-format` - how the frozen base is held on the device (earlier
+  spelling `--base-dtype`; one flag for every model, an unsupported format is
+  refused naming the model and its supported set). `f32` (the default) keeps
+  the whole model resident in fp32 and can train in `--mode full` or
+  `--mode lora`, but the 27B does not fit; `bf16`, `nf4` (4-bit, QLoRA) and
+  `fp8` (block-scaled E4M3) shrink the base and train LoRA adapters only, so
+  combining them with `--mode full` is refused.
+- `--lora-rank`, `--lora-alpha` - adapter shape (aliases `--rank`, `--alpha`;
+  alpha defaults to twice the rank).
+- `--lora-variant V`, `--lora-plus-ratio X` - model-agnostic adapter variants,
+  the same for every LoRA-capable verb: `V` is a comma list of `rs` (rsLoRA:
+  the update is scaled by `alpha / sqrt(rank)`) and `fa` (LoRA-FA: the `A`
+  matrices stay at their initial values and only `B` trains); `X` makes the `B`
+  matrices train at `X` times the learning rate (LoRA+). Continue an adapter
+  with the same options. The SDK's `ChatFineTune` exposes `rank_stabilized`,
+  `lora_plus` and `freeze_a`.
+- `--seq-len` - training sequence length (alias `--block`).
+- `--recompute` - recompute layer activations in the backward pass instead of
+  keeping them; the default for `bf16` and `nf4`. The `f32` resident trainer
+  keeps all activations, so `--recompute on` is refused there.
+- `--backend cuda|cpu|vulkan` is the global backend flag, as for every command.
+=====
+# Optimizer state, precision and checkpoints for full fine-tuning
+
+Full fine-tuning keeps, per trainable parameter, a value, a gradient, optimizer
+state (moments) and optionally a master copy. brain chooses each independently,
+per parameter group, and accounts the physical bytes of every one.
+
+## Precision per parameter
+
+`paramstore::precision::ParamPrecision` has four independent fields: value
+dtype (`F32`, `Bf16`), gradient dtype, optimizer-state format
+(`F32`, `Bf16`, `Int8Block { block }`) and master policy (`None`, `Bf16`,
+`F32`), plus a stochastic-rounding switch for low-precision re-encodes.
+A `PrecisionPolicy` is an ordered list of matchers (name contains / suffix,
+minimum size) over a default; `report` prints, per parameter, which rule
+fired and the physical bytes. Nothing is chosen from hardware or memory
+pressure silently; `optimizer_state_ladder` gives a memory planner the byte
+cost of each candidate state format for a manifest.
+
+## State formats
+
+* `F32`, `Bf16`: plain.
+* `Int8Block { block }`: 8-bit codes with one f32 scale (the block maximum) per
+  block. First moments and momentum use sign plus a 7-bit square-root map,
+  second moments an 8-bit fourth-root map that never decodes a positive value
+  to zero. Cost is `1 + 4/block` bytes per element per slot.
+
+Stochastic rounding matters for 8-bit state: an exponential moving average
+with decay 0.999 changes a value by less than one code, and nearest rounding
+freezes it. The randomness is a function of `(seed, step, tensor, slot,
+element)`, so results do not depend on tiling or on resuming.
+
+## Update rules and where they run
+
+`optim::rule::Rule` is the single definition: `AdamW`, `Lion`, `SgdMomentum`.
+It runs
+
+* on the host, tile by tile, through `StreamedOptimizer` over an
+  `OptimizerStateStorage` (memory or a file, bounded staging independent of the
+  parameter count), used by `OffloadAdam` and by a generic trainer through
+  `TrainState`;
+* on the device, fused decode-update-encode for AdamW with bf16 moments
+  (`adamw_bf16.wgsl`, two moments to a word, stochastic rounding optional; qwen3 and
+  qwen35) or with int8 moments
+  (`adamw_q8.wgsl`, block 64; `adamw_q8_wg.wgsl`, the cooperative form the
+  selection policy picks where the device has workgroup reductions), reached through `Optim` when a `ParamStore` is
+  built with `new_with_policy_src`; the CUDA backend compiles the same source.
+  Both are gated against the host reference.
+
+Two further state forms run on the host streamed path:
+
+* `StateFormat::Log8Block`: 8-bit codes on a logarithmic scale per block
+  (constant relative step over ~16 octaves below the block maximum; 8 steps per
+  octave signed, 16 non-negative), for heavy-tailed second moments. A positive
+  second moment never decodes to zero.
+* `Rule::Adafactor` (arXiv:1804.04235, no first moment): the second moment of a
+  matrix is `rows + columns` floats (`TrainStateConfig::row_len` names the
+  matrices; other tensors keep a plain second moment). It runs in three
+  streamed passes over a tensor's gradient tiles, which are whole rows; the
+  statistics live in host memory and are checkpointed beside the state
+  (`factored.bin`).
+
+Neither has a device kernel: a device-optimised parameter asking for them is
+refused by name (`resolve_precisions`).
+
+## Values in a quantized encoding, layer streaming, export
+=====
+Nothing runs, and no checkpoint is needed. The denoise cost is derived from
+probe builds of the same config at one and zero blocks, which is exact because
+the graph is affine in the block count - and every run re-checks that at a
+point outside the basis rather than assuming it, refusing to print a total it
+could not verify. That is what lets a 22B video model be priced on a card that
+cannot hold it.
+
+Each stage also reports its arithmetic intensity against the device's own
+measured ridge point, so the output says whether a stage is compute- or
+memory-bound, and a roofline lower bound in seconds. That bound is a bound:
+what it is for is the *ratio* a real run achieves against it, which `--run`
+measures on a build small enough to execute. `--vae <dir>` additionally checks
+the weight-free VAE graph against the one the real checkpoint builds.
+
+## A number measured on one machine is not a number for yours
+
+Different clocks, different memory bandwidth, different driver, different
+model shape, and different concurrent load on a shared machine all change the
+answer. A result from someone else's GPU, CPU, or NPU - however carefully it
+was measured - is an illustration of what the profiling and selection tools
+above can find, never a prediction for your own hardware. The way to know
+your own numbers is to run them yourself.
+
+## Where the numbers are
+
+This page intentionally stops short of citing specific timings or
+throughputs. Real, current, reproducible numbers live in places that stay
+honest as the code and hardware change under them, not frozen in prose here:
+
+- **`make perf`** / **`make perf/scenario/<scenario>`** - run brain's own performance
+  harness (latency, throughput, serving-under-load, and a concurrency sweep)
+  against your own device. See [Benchmarking your setup](../../guides/hardware/benchmarking.md).
+- **`make perf/compare`** - a leaderboard over every saved run under
+  `results/*.json` on your machine, refusing to rank across incompatible
+  units or past a failed correctness gate.
+- **`results/*.json`** - the raw artifacts `brain perf` writes, one per run,
+  each carrying the hardware it ran on so it's never silently compared
+  against a different machine.
+- **The committed perf gates under `scripts/gates/`** (e.g.
+  `qwen-serving-perf-gate.sh`, `forecast-perf-gate.sh`, `wm-perf-gate.sh`) -
+  regression floors checked in CI against a saved baseline, the closest thing
+  in this repo to a durable performance number, because they're re-verified
+  on every run rather than quoted once and left to rot.
+- **Session-specific investigation logs** (a model's own performance pass,
+  with real measured numbers, caveats, and what was tried and killed) live in
+  the reference pages, not here - see that model's roadmap entry if
+  you want the detailed history behind a specific optimization.

@@ -161,8 +161,8 @@ What it does differently:
   recurrent state of the 48 GDN layers (150 MiB per sequence) is not part of the
   cache and stays f32. Default stays `f32`. Gates: per-kernel rounding bounds in
   `crates/model/tests/kv_tier.rs`, logits agreement through chunked prefill and
-  batched decode in `crates/qwen35/tests/kv_tier.rs`, and top-1 agreement on a
-  real prompt in `crates/qwen35/tests/gguf_kv_tier_real.rs`. `brain perf run
+  batched decode in `crates/qwen35/tests/kv_tier.rs`, and top-1 agreement over
+  20 real prompts x 64 steps in `crates/qwen35/tests/gguf_kv_tier_real.rs`. `brain perf run
   longctx` reports the tier as `kv_precision`.
 
 - **No fp32 intermediate anywhere.** `checkpoint::gguf::MmapGguf` is a

@@ -2686,7 +2686,8 @@ the fused head_dim-256 prefill gains bf16/int8 variants by template
   cache's own margin over its runner-up was 0.2 logits; int8 0.152 (1.13x),
   top-1 24/24. (Before the fused decode the same runs read bf16 0.152 / 24 of 24
   and int8 0.159 / 23 of 24: single-flip noise either way, which is why the gate
-  is 90% top-1 plus the floor multiple, not a perfect score.)
+  is 90% top-1 plus the floor multiple, not a perfect score. Over 20 prompts x 64 steps the three tiers agree
+  at 92.0% (bf16), 91.9% (int8) and 91.6% (fp8) against a floor of 92.4%; the bar is 89%, knowledge 340.)
 
 **The attention was the real problem.** Profiled on the idle card at 128k,
 batch 1, the triad cost 1.8 s per step: `decode_softmax_batched` is ONE thread

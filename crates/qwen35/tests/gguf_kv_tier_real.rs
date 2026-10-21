@@ -13,9 +13,9 @@
 //!
 //! Self-skips unless `BRAIN_QWEN35_GGUF` names the file. Each tier is a cold
 //! load of ~27 GiB of weights, one after the other (the previous instance is
-//! dropped first, so the card holds one model at a time), then a ~1.8k-token
-//! prompt through the chunked prefill tape and 24 forced decode steps through
-//! the decode tape:
+//! dropped first, so the card holds one model at a time), then each of 20 fixed
+//! real prompts (~1k tokens) through the chunked prefill tape and 64 forced
+//! decode steps through the decode tape:
 //!
 //! ```text
 //! BRAIN_QWEN35_GGUF=$HOME/.local/share/brain/models/unsloth/Qwen3.8-27B-GGUF/Q8_0.gguf //!   cargo test -p brain-qwen35 --test gguf_kv_tier_real -- --nocapture --test-threads=1
@@ -53,9 +53,33 @@ use residency::{Device, ResidentModel};
 /// Per-sequence `prompt + forced` ceiling the instances are built for.
 const CAP: u32 = 2048;
 /// Forced decode positions scored after the prompt.
-const STEPS: u32 = 24;
+const STEPS: u32 = 64;
+/// The bars below are derived from at least this many prompts; fewer cannot separate the tiers.
+const MIN_PROMPTS: usize = 20;
+/// Per tier: the most the pooled mean logits rel-L2 may be times the f32 cache's own floor.
+///
+/// Measured on the real Qwen3.8-27B Q8_0, 20 prompts x 64 forced steps = 1280
+/// positions (log kept under runs/qevid, 2026-10-21):
+/// perf-number: measured accuracy evidence, floor and tier rel-L2
+/// the floor is mean rel-L2 0.1168; bf16 / int8 / fp8 sit at 0.1389 / 0.1425 / 0.1389,
+/// perf-number: the same measurement as a multiple of the floor
+/// i.e. 1.19x / 1.22x / 1.19x of it. 1.5x leaves room for a rerun and fails a
+/// tier that really loses information.
+const MAX_FLOOR_MULTIPLE: f64 = 1.5;
+/// The least pooled top-1 agreement with the f32 cache any compact tier may have.
+///
+/// Measured over the same 1280 positions:
+/// perf-number: measured accuracy evidence, top-1 agreement
+/// the numerics' own floor agrees at 92.4%, bf16 / int8 / fp8 at 92.0% / 91.9% / 91.6%.
+/// One position in 1280 moves a pooled figure by under a tenth of a point and its
+/// binomial standard error is about 0.8 points, so the bf16 baseline minus a
+/// 3-point margin (about 4 standard errors) is the bar for every tier: fp8 must
+/// hold what bf16 holds, within noise. (The earlier bar was lowered after one
+/// failing prompt of 24 positions, where a single flip is 4 points.)
+const MIN_TOP1: f64 = 0.89;
 /// Bytes kept free per card, `brain serve`'s default reserve.
 const RESERVE: u64 = 2 << 30;
+const TIERS: [KvTier; 3] = [KvTier::BF16, KvTier::INT8, KvTier::FP8];
 
 fn load(path: &str, kv: KvTier) -> Option<Qwen35GgufInstance> {
     let devices: Vec<(Device, u64)> = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
@@ -84,15 +108,25 @@ fn argmax(v: &[f32]) -> u32 {
     v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).unwrap()
 }
 
-/// A real natural-language prompt of about 1k tokens: a fixed page of prose
-/// kept beside the test so the prompt cannot change underneath it.
-fn prompt_text() -> String {
-    let body = include_str!("fixtures/real_prompt.txt");
-    format!("{body}\n\nIn one sentence, what does the page above describe?")
+/// The fixed real prompts: the page the sweeps use plus 19 passages of this
+/// repository's own documentation, kept beside the test so the set cannot
+/// change underneath it. Each ends with the same one-sentence question.
+fn prompt_texts() -> Vec<String> {
+    let first = include_str!("fixtures/real_prompt.txt");
+    let rest = include_str!("fixtures/real_prompts.txt");
+    std::iter::once(first).chain(rest.split("\n=====\n")).map(|body| format!("{}\n\nIn one sentence, what does the page above describe?", body.trim())).collect()
+}
+
+/// One prompt's f32 reference: its greedy continuation, the decode-tape rows
+/// the tiers are scored against, and the numerics floor of that prompt.
+struct Reference {
+    ids: Vec<u32>,
+    decode: Vec<Vec<f32>>,
+    floor: Stats,
 }
 
 #[test]
-fn compact_kv_tiers_agree_with_the_f32_cache_on_a_real_prompt() {
+fn compact_kv_tiers_agree_with_the_f32_cache_on_real_prompts() {
     // Test-gating convention only - selects the real-checkpoint gate, it is
     // not a serving knob. The serving path finds its GGUFs in the model
     // store.
@@ -101,60 +135,65 @@ fn compact_kv_tiers_agree_with_the_f32_cache_on_a_real_prompt() {
         brain_testutil::skip(&format!("{REAL_GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
         return;
     };
-    let text = prompt_text();
+    let texts = prompt_texts();
+    assert!(texts.len() >= MIN_PROMPTS, "{} prompts is fewer than the {MIN_PROMPTS} the bars are derived from", texts.len());
 
     let Some(reference) = load(&path, KvTier::F32) else { return };
     assert_eq!(reference.kv_tier(), KvTier::F32);
-    let prompt = reference.tokenize(&text);
-    assert!(prompt.len() > 700 && prompt.len() + (STEPS as usize) < CAP as usize, "prompt of {} tokens is out of range for this test", prompt.len());
     // The floor needs two DIFFERENT renderings of the same cache, and a short
     // chunk round now IS the decode tape unless that is withdrawn; the decode
     // side of the trace is unaffected either way.
     reference.set_exact_rounds(false);
-    let trace = reference.tape_comparison_trace(&prompt, STEPS).expect("f32 trace");
+    let mut prompts: Vec<Vec<u32>> = Vec::new();
+    let mut refs: Vec<Reference> = Vec::new();
+    for (n, text) in texts.iter().enumerate() {
+        let prompt = reference.tokenize(text);
+        assert!(prompt.len() > 400 && prompt.len() + (STEPS as usize) < CAP as usize, "prompt {n} of {} tokens is out of range for this test", prompt.len());
+        let trace = reference.tape_comparison_trace(&prompt, STEPS).expect("f32 trace");
+        // The floor: the f32 cache through its two dispatch shapes, the decode
+        // tape and the chunk tape proper.
+        let floor = Stats::of(&trace.decode, &trace.chunk, &trace.ids);
+        println!("prompt {n}: {} tokens; f32 decode tape vs f32 chunk tape (the numerics' own floor): {floor}", prompt.len());
+        refs.push(Reference { ids: trace.ids, decode: trace.decode, floor });
+        prompts.push(prompt);
+    }
     drop(reference);
-    println!("prompt {} tokens; f32 greedy continuation: {:?}", prompt.len(), trace.ids);
+    let floor = Stats::pooled(refs.iter().map(|r| &r.floor));
+    println!("ALL {} prompts, f32 decode tape vs f32 chunk tape (the numerics' own floor): {floor}", refs.len());
 
-    // The floor: the f32 cache through its two dispatch shapes, the decode tape
-    // and the chunk tape proper.
-    let floor = Stats::of(&trace.decode, &trace.chunk, &trace.ids);
-    println!("f32 decode tape vs f32 chunk tape (the numerics' own floor): {floor}");
-
-    // fp8 sits one position of 24 below bf16 and int8 on this prompt (87.5% against 91.7%; the numerics floor itself is 95.8%): n = 24 on one prompt cannot separate them, so its top-1 bar is 85%.
-    for (tier, max_floor_multiple, min_top1) in [(KvTier::BF16, 2.0, 0.9), (KvTier::INT8, 3.0, 0.9), (KvTier::FP8, 3.0, 0.85)] {
+    for tier in TIERS {
         if std::env::var("KV_TIER_ONLY").is_ok_and(|only| only != tier.as_str()) {
             continue;
         }
         let Some(inst) = load(&path, tier) else { return };
         assert_eq!(inst.kv_tier(), tier);
-        let rows = inst.teacher_forced_logits(&prompt, &trace.ids).expect("forced logits");
-        drop(inst);
-        for (i, got) in rows.iter().enumerate() {
-            assert!(got.iter().all(|x| x.is_finite()), "{tier}: step {i} has non-finite logits");
-        }
-        let st = Stats::of(&trace.decode, &rows, &trace.ids);
-        println!("{tier} vs f32 cache: {st}");
-        // A flipped argmax is only informative next to how close the reference
-        // already was to flipping it.
-        for (i, (got, want)) in rows.iter().zip(&trace.decode).enumerate() {
-            if argmax(got) != trace.ids[i] {
-                let mut sorted: Vec<f32> = want.clone();
-                sorted.sort_by(|a, b| b.total_cmp(a));
-                println!("  {tier} step {i}: picks {} where f32 picked {}; the f32 margin over its runner-up was {:.3}", argmax(got), trace.ids[i], sorted[0] - sorted[1]);
+        let mut per_prompt = Vec::new();
+        for (n, (prompt, want)) in prompts.iter().zip(&refs).enumerate() {
+            let rows = inst.teacher_forced_logits(prompt, &want.ids).expect("forced logits");
+            for (i, got) in rows.iter().enumerate() {
+                assert!(got.iter().all(|x| x.is_finite()), "{tier}: prompt {n} step {i} has non-finite logits");
             }
+            let st = Stats::of(&want.decode, &rows, &want.ids);
+            println!("{tier} prompt {n} vs f32 cache: {st}");
+            per_prompt.push(st);
         }
+        drop(inst);
+        let st = Stats::pooled(per_prompt.iter());
+        println!("{tier} ALL {} prompts vs f32 cache: {st}", per_prompt.len());
         assert!(
-            st.mean_rel_l2 <= max_floor_multiple * floor.mean_rel_l2,
-            "{tier}: mean logits rel-L2 {:.3e} exceeds {max_floor_multiple}x the numerics' own floor {:.3e}",
+            st.mean_rel_l2 <= MAX_FLOOR_MULTIPLE * floor.mean_rel_l2,
+            "{tier}: mean logits rel-L2 {:.3e} exceeds {MAX_FLOOR_MULTIPLE}x the numerics' own floor {:.3e}",
             st.mean_rel_l2,
             floor.mean_rel_l2
         );
-        assert!(st.top1 >= min_top1, "{tier}: top-1 agrees with the f32 cache at only {:.1}% of positions (< {:.0}%)", st.top1 * 100.0, min_top1 * 100.0);
+        assert!(st.top1 >= MIN_TOP1, "{tier}: top-1 agrees with the f32 cache at only {:.1}% of positions (< {:.1}%)", st.top1 * 100.0, MIN_TOP1 * 100.0);
     }
 }
 
 /// How one set of logits rows differs from a reference set.
 struct Stats {
+    /// Positions scored.
+    n: usize,
     mean_rel_l2: f64,
     worst_rel_l2: f64,
     /// Fraction of positions whose argmax is the reference's greedy token.
@@ -164,6 +203,20 @@ struct Stats {
 }
 
 impl Stats {
+    /// The statistics of several runs taken together, each position counting once.
+    fn pooled<'a>(runs: impl IntoIterator<Item = &'a Stats>) -> Stats {
+        let runs: Vec<&Stats> = runs.into_iter().collect();
+        let n: usize = runs.iter().map(|s| s.n).sum();
+        let mean = |f: fn(&Stats) -> f64| runs.iter().map(|s| f(s) * s.n as f64).sum::<f64>() / n as f64;
+        Stats {
+            n,
+            mean_rel_l2: mean(|s| s.mean_rel_l2),
+            worst_rel_l2: runs.iter().map(|s| s.worst_rel_l2).fold(0.0, f64::max),
+            top1: mean(|s| s.top1),
+            top5_overlap: mean(|s| s.top5_overlap),
+        }
+    }
+
     fn of(want: &[Vec<f32>], got: &[Vec<f32>], greedy: &[u32]) -> Stats {
         let n = want.len() as f64;
         let rel: Vec<f64> = want.iter().zip(got).map(|(w, g)| rel_l2(w, g)).collect();
@@ -175,6 +228,7 @@ impl Stats {
         };
         let overlap: f64 = want.iter().zip(got).map(|(w, g)| top5(w).iter().filter(|t| top5(g).contains(t)).count() as f64 / 5.0).sum::<f64>() / n;
         Stats {
+            n: want.len(),
             mean_rel_l2: rel.iter().sum::<f64>() / n,
             worst_rel_l2: rel.iter().copied().fold(0.0, f64::max),
             top1: got.iter().zip(greedy).filter(|(g, &id)| argmax(g) == id).count() as f64 / n,
