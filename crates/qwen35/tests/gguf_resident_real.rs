@@ -957,3 +957,47 @@ fn a_prompt_extending_a_cached_one_resumes_from_it(kv_block_rows: u32) {
     assert_eq!(again, want_second, "an identical prompt is served from its cached state");
     assert_eq!(sched.prefix_stats().0, hit1 + second.len() as u64);
 }
+
+/// With speculation from the checkpoint's own MTP head over a paged KV cache (16-row blocks), the drafts stay inside
+/// the rows a sequence's blocks hold (the head writes its KV for proposal `j` at `len + j - 2` before the verify step
+/// appends any row; a sequence ending on a block boundary used to write past its table and panic the decode), and a
+/// prompt resumed from the previous turn's cached checkpoint still drafts from the head: the entry's head rows were
+/// filled by the feed of the whole earlier prompt (before, a resumed agent turn drafted nothing and decoded at the plain
+/// rate; knowledge 347).
+#[test]
+fn mtp_drafts_stay_inside_paged_blocks_and_a_resumed_checkpoint_still_drafts() {
+    use model::serve::{Request, Scheduler};
+    use qwen35::int8_gguf_resident::{SpecServing, SpeculativeMode};
+
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.is_empty() {
+        brain_testutil::skip_unavailable("this gate wants at least one usable GPU");
+        return;
+    }
+    let spec = SpecServing { mode: SpeculativeMode::Mtp, ..SpecServing::default() };
+    let r = Qwen35GgufResident::new(path, devices, 2048, TierPolicy::uniform(Dtype::I8)).with_max_batch(2).with_prefix_slots(2).with_kv_block_rows(16).with_speculation(spec);
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    let (engine, tok, _stop) = r.activate_engine(&placed).expect("activate the real checkpoint");
+    assert!(engine.instance().has_mtp(), "the released checkpoint carries its MTP head");
+
+    let lines: String = (1..=40).map(|i| format!("let value_{i} = compute(value_{}, {i});\n", i - 1)).collect();
+    let first = tok.encode(&format!("Copy this code exactly:\n{lines}\nCopy:\n"));
+    // The next turn agrees with the first prompt up to its last few tokens, as a re-rendered generation prompt does.
+    let mut second = first[..first.len() - 4].to_vec();
+    second.extend(tok.encode(" again, from the top:\n"));
+
+    let mut sched = Scheduler::new(engine, 2);
+    let id = sched.submit(Request { prompt: first.clone(), max_new: 96, stop: Vec::new() });
+    sched.run().remove(&id).expect("the first turn completes");
+    let (hit0, before) = (sched.prefix_stats().0, sched.spec_stats());
+    assert!(before.accepted > 0, "the head's proposals are accepted on copied code");
+    let id = sched.submit(Request { prompt: second.clone(), max_new: 96, stop: Vec::new() });
+    sched.run().remove(&id).expect("the second turn completes");
+    let (hit, after) = (sched.prefix_stats().0 - hit0, sched.spec_stats());
+    println!("  resumed from {hit} of {} cached tokens; second turn proposed {} accepted {} in {} rounds", first.len(), after.proposed - before.proposed, after.accepted - before.accepted, after.rounds - before.rounds);
+    assert!(hit > 0 && (hit as usize) < first.len(), "the second turn resumed from the first prompt's checkpoint, not the whole prompt (hit {hit})");
+    assert!(after.proposed > before.proposed, "a prompt resumed from a checkpoint drafts from the MTP head");
+    assert!(after.accepted > before.accepted, "and the target accepts some of the head's proposals");
+}

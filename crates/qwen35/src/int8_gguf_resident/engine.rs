@@ -840,8 +840,19 @@ impl PagedDecoder for Qwen35GgufEngine {
         let slots: Vec<u32> = queries.iter().map(|q| self.slot(q.table)).collect();
         let consumed: Vec<u32> = queries.iter().map(|q| q.table.len()).collect();
         let next: Vec<u32> = queries.iter().map(|q| *q.context.last().expect("a running sequence has context")).collect();
+        // Proposal `step` (from 2) writes the head's KV row at `consumed + step - 2`, and a paged table holds only the
+        // blocks it has: the verify step that follows appends the rows, the draft runs before it. A sequence whose
+        // rows end at a block boundary therefore drafts no further than the rows its blocks hold.
+        let ks: Vec<usize> = match self.inst.kv_layout {
+            KvLayout::OneBlock => ks.to_vec(),
+            KvLayout::Paged { block_rows, .. } => queries
+                .iter()
+                .zip(ks)
+                .map(|(q, &k)| k.min((q.table.blocks().len() as u32 * block_rows + 1).saturating_sub(q.table.len()) as usize))
+                .collect(),
+        };
         let t0 = std::time::Instant::now();
-        let out = self.inst.mtp_draft(&slots, &consumed, &next, ks);
+        let out = self.inst.mtp_draft(&slots, &consumed, &next, &ks);
         self.times.draft += t0.elapsed();
         out
     }
