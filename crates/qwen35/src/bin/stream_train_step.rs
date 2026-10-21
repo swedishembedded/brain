@@ -21,9 +21,9 @@
 //!
 //! Usage:
 //! ```text
-//! stream_train_step --dir <checkpoint dir> --phase before|step|after \
+//! stream_train_step --dir <checkpoint dir> --phase before|step|after|load \
 //!     --tokenizer <tokenizer.json> [--adapter-in FILE] --adapter-out FILE \
-//!     [--device cpu|gpu|vulkan|auto --base-dtype stored|nf4 --step N --lr X --window-budget N --n-tokens N \
+//!     [--device cpu|gpu|gpuN|vulkan|auto --base-dtype stored|nf4 --step N --lr X --window-budget N --n-tokens N \
 //!      --rank N --alpha X --prompt "..." --max-new N --corpus FILE]
 //! ```
 //!
@@ -63,7 +63,7 @@ fn main() {
     let dir = PathBuf::from(arg(&args, "--dir").expect("--dir required"));
     let phase = arg(&args, "--phase").expect("--phase required (before|step|after)");
     let tokenizer = PathBuf::from(arg(&args, "--tokenizer").unwrap_or_else(|| dir.join("tokenizer.json").to_string_lossy().into_owned()));
-    let adapter_out = arg(&args, "--adapter-out").expect("--adapter-out required");
+    let adapter_out = arg(&args, "--adapter-out").unwrap_or_default();
     let adapter_in = arg(&args, "--adapter-in");
     let step: u32 = arg(&args, "--step").and_then(|s| s.parse().ok()).unwrap_or(1);
     let lr: f32 = arg(&args, "--lr").and_then(|s| s.parse().ok()).unwrap_or(0.05);
@@ -89,7 +89,12 @@ fn main() {
         "gpu" => Gpu::new_gpu(pipelines()),
         "auto" => Gpu::new(pipelines()),
         "vulkan" => Gpu::try_new_vulkan(pipelines()).unwrap_or_else(|e| panic!("try_new_vulkan: {e}")),
-        other => panic!("unknown --device {other} (expected cpu|gpu|vulkan|auto)"),
+        // `gpuN`: the physical card the reservation helper granted (`bin/card` exports `--device gpuN`).
+        card if card.strip_prefix("gpu").is_some_and(|n| n.parse::<u32>().is_ok()) => {
+            let index: u32 = card["gpu".len()..].parse().expect("checked above");
+            Gpu::new_on_index(index, pipelines()).unwrap_or_else(|e| panic!("--device {card}: {e}"))
+        }
+        other => panic!("unknown --device {other} (expected cpu|gpu|gpuN|vulkan|auto)"),
     };
     let t0 = Instant::now();
     let trainer = StreamTrainer::new_real(gpu, &cfg, &dir, n_tokens, window_budget, &lora_init).unwrap_or_else(|e| panic!("new_real: {e}"));
@@ -108,6 +113,7 @@ fn main() {
             println!("PHASE={phase} MINUTES={:.2} PROMPT={prompt:?} OUTPUT={text:?}", t0.elapsed().as_secs_f64() / 60.0);
         }
         "step" => {
+            assert!(!adapter_out.is_empty(), "--adapter-out required for --phase step");
             let corpus = corpus.expect("--corpus required (path to the Step 2 dataset's corpus.txt) for --phase step");
             let text = std::fs::read_to_string(&corpus).unwrap_or_else(|e| panic!("read {corpus}: {e}"));
             let tok = data::qwen_tokenizer::QwenBpe::from_file(tokenizer.to_str().unwrap()).unwrap_or_else(|e| panic!("load tokenizer: {e}"));
@@ -133,6 +139,17 @@ fn main() {
             }
             save_adapter(&adapter_out, &out);
         }
-        other => panic!("unknown --phase {other} (expected before|step|after)"),
+        // The loader alone: every layer read, converted if asked, and uploaded once, with no compute. Separates the
+        // streaming cost (disk, host staging, upload) from the device time of a step.
+        "load" => {
+            let t0 = Instant::now();
+            for l in 0..cfg.n_layers as usize {
+                let layer = loader(l);
+                trainer.gpu.poll_wait();
+                drop(layer);
+            }
+            println!("PHASE=load LAYERS={} SECONDS={:.2}", cfg.n_layers, t0.elapsed().as_secs_f64());
+        }
+        other => panic!("unknown --phase {other} (expected before|step|after|load)"),
     }
 }

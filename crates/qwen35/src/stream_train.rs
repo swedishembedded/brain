@@ -877,7 +877,10 @@ impl StreamTrainer {
     /// real-checkpoint counterpart of [`Self::embed_synthetic`], reusing
     /// `crate::stream::embed_rows` (unchanged) directly.
     pub fn embed_real(dir: &Path, ids: &[u32], d: usize) -> Result<Vec<f32>, String> {
-        let outside = crate::stream::open_outside(&dir.join("outside.safetensors"))?;
+        // The release keeps the embedding in `outside.safetensors`; a base converted by
+        // `fp8_source::write_converted_base` is one `model.safetensors` holding it under the same name.
+        let file = ["outside.safetensors", "model.safetensors"].into_iter().map(|f| dir.join(f)).find(|p| p.exists()).ok_or_else(|| format!("{}: neither outside.safetensors nor model.safetensors holds the embedding", dir.display()))?;
+        let outside = crate::stream::open_outside(&file)?;
         crate::stream::embed_rows(&outside, "model.language_model.embed_tokens.weight", ids, d)
     }
 
