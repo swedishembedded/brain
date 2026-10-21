@@ -780,6 +780,10 @@ pub const MOE_GROUP_PERM_EMIT: &str = include_str!("../wgsl/moe_group_perm_emit.
 pub const MOE_I8_GEMV_GATHER: &str = include_str!("../wgsl/moe_i8_gemv_gather.wgsl");
 /// `wgsl/moe_i8_grouped.wgsl`
 pub const MOE_I8_GROUPED: &str = include_str!("../wgsl/moe_i8_grouped.wgsl");
+/// `wgsl/matmul_fp8_gemv.wgsl`
+pub const MATMUL_FP8_GEMV: &str = include_str!("../wgsl/matmul_fp8_gemv.wgsl");
+/// `wgsl/matmul_nvfp4_gemv.wgsl`
+pub const MATMUL_NVFP4_GEMV: &str = include_str!("../wgsl/matmul_nvfp4_gemv.wgsl");
 /// `wgsl/moe_nvfp4_gemv_gather.wgsl`
 pub const MOE_NVFP4_GEMV_GATHER: &str = include_str!("../wgsl/moe_nvfp4_gemv_gather.wgsl");
 /// `wgsl/moe_nvfp4_grouped.wgsl`

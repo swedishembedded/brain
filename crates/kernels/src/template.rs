@@ -292,6 +292,27 @@ pub fn weight_decode_embedded_functions() -> (String, String) {
     (nf4_lut_fn(), fp8)
 }
 
+/// Activation-row capacities the stored-format GEMV kernels (`matmul_fp8_gemv`, `matmul_nvfp4_gemv`) are specialised for.
+pub const GEMV_ROW_CAPACITIES: [u32; 4] = [1, 2, 4, 8];
+
+/// The registered name of GEMV kernel `base` carrying up to `rows` activation rows: the smallest capacity of
+/// [`GEMV_ROW_CAPACITIES`] that holds them (`rows` is at most the largest).
+pub fn gemv_kernel_name(base: &str, rows: u32) -> String {
+    let cap = GEMV_ROW_CAPACITIES.into_iter().find(|c| *c >= rows).unwrap_or(*GEMV_ROW_CAPACITIES.last().expect("capacities"));
+    variant_name(base, &[("MAXM", cap)])
+}
+
+/// Every row-capacity variant of the two stored-format GEMV kernels.
+pub fn gemv_variants() -> Vec<Variant> {
+    let mut out = Vec::new();
+    for (base, src) in [("matmul_fp8_gemv", crate::MATMUL_FP8_GEMV), ("matmul_nvfp4_gemv", crate::MATMUL_NVFP4_GEMV)] {
+        for cap in GEMV_ROW_CAPACITIES {
+            out.push(interned(base, src, &[("MAXM", cap)]).expect("the GEMV kernels declare MAXM"));
+        }
+    }
+    out
+}
+
 /// One `weight_decode` kernel per [`DecodeFormat`]: the source with `FMT` set. Named by [`DecodeFormat::kernel_name`].
 pub fn weight_decode_variants() -> Vec<Variant> {
     DecodeFormat::ALL

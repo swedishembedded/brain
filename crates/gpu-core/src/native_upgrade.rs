@@ -336,7 +336,124 @@ fn flash_combine_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
     p[0] * p[1] * p[2].div_ceil(64)
 }
 
+/// `matmul_fp8_gemv.wgsl`'s and `matmul_nvfp4_gemv.wgsl`'s bindings: params, `x`, `w`, `s`, `y`.
+const QGEMV_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// `moe_nvfp4_gemv_gather.wgsl`'s bindings: params, `x`, `ids`, `wq`, `sc`, `gl`, `out`.
+const MOE_NVFP4_GATHER_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
+/// Weight rows one block of the stored-format GEMV kernels covers (`BRAIN_QG_COLS`).
+const QGEMV_COLS: u32 = 16;
+
+/// The FP8 GEMV's `[m, k, count, first, block, cb, xr0, rpw]`: up to 8 activation rows, `k` and the scale block whole
+/// 16-weight chunks.
+fn serves_fp8_gemv(p: &[u32]) -> bool {
+    matches!(p, [m, k, count, _, block, _, _, _] if (1..=8).contains(m) && *count >= 1 && *k >= 16 && k % 16 == 0 && *block >= 16 && block % 16 == 0)
+}
+
+/// The NVFP4 GEMV's `[m, k, count, first, xr0, global_bits, rpw, pad]`: up to 8 activation rows, `k` whole 64-weight rows
+/// (the scale bytes of a row are four to a word).
+fn serves_nvfp4_gemv(p: &[u32]) -> bool {
+    matches!(p, [m, k, count, ..] if (1..=8).contains(m) && *count >= 1 && *k >= 64 && k % 64 == 0)
+}
+
+/// One block per 16 weight rows.
+fn qgemv_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[2].div_ceil(QGEMV_COLS)
+}
+
+/// The gather's `[slots, k, n, xdiv]`.
+fn serves_moe_nvfp4_gather(p: &[u32]) -> bool {
+    matches!(p, [slots, k, n, xdiv] if *slots >= 1 && *n >= 1 && *k >= 64 && k % 64 == 0 && *xdiv >= 1
+        && u64::from(*slots) * u64::from(n.div_ceil(QGEMV_COLS)) <= u64::from(u32::MAX))
+}
+
+/// One block per 16 weight rows of a slot, slot-major.
+fn moe_nvfp4_gather_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[0] * p[2].div_ceil(QGEMV_COLS)
+}
+
 pub(crate) const ROWS: &[Row] = &[
+    Row {
+        slow: "matmul_fp8_gemv#MAXM=1",
+        target: Target::Named("matmul_fp8_gemv_m1"),
+        bindings: QGEMV_BINDINGS,
+        serves: serves_fp8_gemv,
+        blocks: qgemv_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "matmul_fp8_gemv#MAXM=2",
+        target: Target::Named("matmul_fp8_gemv"),
+        bindings: QGEMV_BINDINGS,
+        serves: serves_fp8_gemv,
+        blocks: qgemv_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "matmul_fp8_gemv#MAXM=4",
+        target: Target::Named("matmul_fp8_gemv"),
+        bindings: QGEMV_BINDINGS,
+        serves: serves_fp8_gemv,
+        blocks: qgemv_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "matmul_fp8_gemv#MAXM=8",
+        target: Target::Named("matmul_fp8_gemv"),
+        bindings: QGEMV_BINDINGS,
+        serves: serves_fp8_gemv,
+        blocks: qgemv_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "matmul_nvfp4_gemv#MAXM=1",
+        target: Target::Named("matmul_nvfp4_gemv_m1"),
+        bindings: QGEMV_BINDINGS,
+        serves: serves_nvfp4_gemv,
+        blocks: qgemv_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "matmul_nvfp4_gemv#MAXM=2",
+        target: Target::Named("matmul_nvfp4_gemv"),
+        bindings: QGEMV_BINDINGS,
+        serves: serves_nvfp4_gemv,
+        blocks: qgemv_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "matmul_nvfp4_gemv#MAXM=4",
+        target: Target::Named("matmul_nvfp4_gemv"),
+        bindings: QGEMV_BINDINGS,
+        serves: serves_nvfp4_gemv,
+        blocks: qgemv_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "matmul_nvfp4_gemv#MAXM=8",
+        target: Target::Named("matmul_nvfp4_gemv"),
+        bindings: QGEMV_BINDINGS,
+        serves: serves_nvfp4_gemv,
+        blocks: qgemv_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "moe_nvfp4_gemv_gather",
+        target: Target::Named("moe_nvfp4_gemv_gather"),
+        bindings: MOE_NVFP4_GATHER_BINDINGS,
+        serves: serves_moe_nvfp4_gather,
+        blocks: moe_nvfp4_gather_blocks,
+        requires_wgsl_upgrade: false,
+    },
     Row {
         slow: "paged_kv_append_i8_clipped_batched",
         target: Target::Named("kv_append_i8_clipped"),

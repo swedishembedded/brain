@@ -106,7 +106,48 @@ impl Weight {
     }
 }
 
+/// Activation rows up to which a stored FP8 or NVFP4 weight is read by its own float-read GEMV kernel (decode batches)
+/// instead of the tile decode: the weight's bytes are streamed once for all of the rows.
+pub const GEMV_MAX_ROWS: u32 = 8;
+/// Workgroups the GEMV grid aims at (about four per multiprocessor of a large GPU) and the most 4-row rounds one
+/// workgroup walks.
+const GEMV_TARGET_WORKGROUPS: u32 = 528;
+const GEMV_MAX_ROUNDS: u32 = 16;
+
 impl Ops {
+    /// The decode-regime product of an FP8 (E4M3, block or tensor scales) or NVFP4 weight against `act`'s few rows by
+    /// the kernel that reads the stored bytes directly. `false` when the weight, its shape, the row count or the
+    /// registered kernels do not allow it; the caller then takes the tile decode.
+    pub(super) fn small_m_gemv(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
+        let (first, count) = rows;
+        let (m, k) = (act.m, w.k());
+        if m == 0 || m > GEMV_MAX_ROWS {
+            return false;
+        }
+        // A workgroup covers 4 weight rows per round and amortises its decode table over `rpw` rounds, as many as keep
+        // about 4 workgroups per multiprocessor busy: a tall weight (the LM head) walks many rounds, a short one few.
+        let tiles = count.div_ceil(4);
+        let rpw = (tiles / GEMV_TARGET_WORKGROUPS).clamp(1, GEMV_MAX_ROUNDS);
+        let grid = gpu_core::Dispatch::Workgroups(tiles.div_ceil(rpw));
+        let out = (yoff, m as u64 * count as u64);
+        match w {
+            Weight::FP8 { w: wb, s: sb, fmt: Fp8Format::E4M3, block, .. } if k.is_multiple_of(16) && block.is_multiple_of(16) => {
+                let Some(idx) = self.gpu.kernel_index(&kernels::template::gemv_kernel_name("matmul_fp8_gemv", m)) else { return false };
+                let cb = k.div_ceil(*block);
+                let params = [m, k, count, first, *block, cb, act.xr0, rpw];
+                s.push(self.gpu.dispatch_sliced(idx, &[&act.x, wb, sb, y], &[WHOLE, WHOLE, WHOLE, out], &params, grid));
+                true
+            }
+            Weight::Micro { w: wb, s: sb, kind: MicroScaled::Nvfp4, global, .. } if k.is_multiple_of(64) => {
+                let Some(idx) = self.gpu.kernel_index(&kernels::template::gemv_kernel_name("matmul_nvfp4_gemv", m)) else { return false };
+                let params = [m, k, count, first, act.xr0, global.to_bits(), rpw, 0];
+                s.push(self.gpu.dispatch_sliced(idx, &[&act.x, wb, sb, y], &[WHOLE, WHOLE, WHOLE, out], &params, grid));
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Bytes of decoded f32 scratch a quantized product may use per tile (see the module doc).
     pub fn tile_budget_bytes(&self) -> u64 {
         self.tile_budget_bytes

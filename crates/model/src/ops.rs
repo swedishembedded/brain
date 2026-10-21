@@ -487,6 +487,9 @@ pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
             ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
         ];
         list.extend(kernels::template::weight_decode_variants());
+        // The decode-regime GEMVs of the stored FP8 / NVFP4 tiers (`Ops::small_m_gemv`); optional: a list without them
+        // keeps the tile decode.
+        list.extend(kernels::template::gemv_variants());
         list
     })
 }
@@ -1169,7 +1172,7 @@ mod decoded;
 pub use sink::{rewrite_tile, upload_micro_bank, DeviceWeightSink, MicroBank};
 pub use upload_source::{stored_tier, stored_tier_policy, upload_fused_from_source, upload_from_source, upload_group_preserved, upload_preserved, FusedGroup};
 pub use upload_source::{conversion_policy, encoding_for};
-pub use tiled::{plan_linear, tile_rows, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES};
+pub use tiled::{plan_linear, tile_rows, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES, GEMV_MAX_ROWS};
 
 impl Ops {
     /// [`Ops::with_selector`] with the default policy
@@ -2309,6 +2312,9 @@ impl Ops {
         assert_eq!(act.k, k, "Ops::matmul_rows: activation width {} does not match weight K {k}", act.k);
         assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_rows: rows {first}+{count} outside the {n} rows of the weight");
         if matches!(self.linear_plan(w, count), LinearPlan::TileDecode { .. }) {
+            if self.small_m_gemv(s, w, rows, act, y, yoff) {
+                return;
+            }
             return self.forward_tiled(s, w, rows, act, y, yoff);
         }
         if self.library_forward(s, w, rows, act, y, yoff) {
