@@ -41,6 +41,19 @@ use model::snapshot_prefix::{Entry as CacheEntry, SnapshotPrefixCache};
 /// Prompts shorter than this are not worth a snapshot row and a retained block.
 const MIN_CACHED_TOKENS: usize = 64;
 
+/// Trailing prompt tokens an entry leaves out. A chat prompt ends with the generation prompt (the assistant's role
+/// header and, with thinking on, its opening tag); the next turn's prompt re-renders that position as the finished
+/// assistant message, whose tokens differ (`<think>` followed by one newline against `<think>` followed by a blank
+/// line). A recurrent layer resumes only from the state after exactly the cached tokens, so an entry for the whole
+/// prompt never matched the next turn and every turn prefilled its full history. The entry stops short of the
+/// header; the few tokens after it are recomputed.
+const CHECKPOINT_TAIL: usize = 16;
+
+/// The prefix length a prompt of `len` tokens is cached at: short of its generation prompt (see [`CHECKPOINT_TAIL`]).
+fn checkpoint_len(len: usize) -> usize {
+    len.saturating_sub(CHECKPOINT_TAIL)
+}
+
 /// What the engine needs to resume a prompt from a cache entry besides its KV
 /// rows and state snapshot.
 struct Resume {
@@ -430,33 +443,54 @@ impl Qwen35GgufEngine {
         p.done = end;
         p.fresh = false;
         if end < prompt.len() {
+            // The checkpoint is cached in place of the whole prompt. Its MTP head rows are not filled (that happens
+            // once the whole prompt is in), so a prompt resuming from it runs without them.
+            if p.cacheable && end == checkpoint_len(prompt.len()) {
+                self.file_prefix(slot, namespace, &prompt[..end], &hidden, false, state_in_pool);
+            }
             self.partial.insert(slot, p);
             return PrefillProgress::Partial { consumed };
         }
-        let mtp_valid = if p.mtp_feed {
+        if p.mtp_feed {
             let started = std::time::Instant::now();
-            let fed = self.inst.mtp_after_prefill(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden);
+            self.inst.mtp_after_prefill(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden);
             if self.inst.has_mtp() {
                 let secs = started.elapsed().as_secs_f64();
                 self.feed_secs = Some(self.feed_secs.map_or(secs, |m| m + FEED_EWMA * (secs - m)));
             }
-            fed || !self.inst.has_mtp()
         } else {
             self.inst.mtp_skip_prefill(slot);
-            false
-        };
-        if p.cacheable {
-            let (row, evicted) = self.cache.take_row(namespace, prompt);
-            self.release_retired(evicted);
-            if let Some(row) = row {
-                if state_in_pool {
-                    self.inst.load_work_state(slot);
-                }
-                self.inst.snapshot_prefill_state(row);
-                self.pending.insert(slot, Pending { tokens: prompt.to_vec(), snap_row: row, last_hidden: hidden.clone(), mtp_valid });
-            }
         }
+        // What is cached is the checkpoint, filed when the prefill passed it (see `slice_end`): a prompt that
+        // resumed from a checkpoint of its own length or later leaves that entry as it is.
         PrefillProgress::Done(hidden)
+    }
+
+    /// Where a slice of at most `budget` tokens ends: a slice that would run past the prompt's checkpoint stops there,
+    /// so the state at the checkpoint can be filed (see [`finish_slice`](Self::finish_slice)).
+    fn slice_end(&self, p: &PartialPrefill, prompt_len: usize, budget: usize) -> usize {
+        let end = p.done + budget.min(prompt_len - p.done);
+        let checkpoint = checkpoint_len(prompt_len);
+        if p.cacheable && p.done < checkpoint && end > checkpoint {
+            checkpoint
+        } else {
+            end
+        }
+    }
+
+    /// File `tokens` (a prompt, or its checkpoint) for reuse once the sequence is over: take a snapshot row, snapshot
+    /// the working recurrent state into it, and leave the entry pending. `hidden` is the last of `tokens`' rows.
+    /// `state_in_pool`: the state is in the slot's pool row and not in the working copy.
+    fn file_prefix(&mut self, slot: u32, namespace: KvNamespace, tokens: &[u32], hidden: &[f32], mtp_valid: bool, state_in_pool: bool) {
+        let (row, evicted) = self.cache.take_row(namespace, tokens);
+        self.release_retired(evicted);
+        if let Some(row) = row {
+            if state_in_pool {
+                self.inst.load_work_state(slot);
+            }
+            self.inst.snapshot_prefill_state(row);
+            self.pending.insert(slot, Pending { tokens: tokens.to_vec(), snap_row: row, last_hidden: hidden.to_vec(), mtp_valid });
+        }
     }
 
     fn prefill_slice(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
@@ -468,7 +502,7 @@ impl Qwen35GgufEngine {
         }
         let slot = table.state_row().expect("a prefill in progress has a state row");
         let mut p = self.partial.remove(&slot).expect("a prefill in progress has its state");
-        let end = p.done + budget.min(prompt.len() - p.done);
+        let end = self.slice_end(&p, prompt.len(), budget);
         let resume = !p.fresh && p.done > 0;
         let hidden = self.forward_slice(table, prompt, &mut p, end, resume);
         self.finish_slice(slot, table.kv_namespace(), prompt, p, end, hidden, false)
@@ -508,7 +542,7 @@ impl Qwen35GgufEngine {
         for (i, j) in jobs.iter().enumerate().filter(|(i, _)| answers[*i].is_none()) {
             let slot = self.slot(j.table);
             let p = self.partial.remove(&slot).expect("a prefill in progress has its state");
-            let end = p.done + j.budget.min(j.prompt.len() - p.done);
+            let end = self.slice_end(&p, j.prompt.len(), j.budget);
             live.push((i, slot, p, end));
         }
         let rows: usize = live.iter().map(|(_, _, p, end)| end - p.done).sum();
@@ -611,9 +645,10 @@ impl PagedDecoder for Qwen35GgufEngine {
     /// recurrent state is restored from the snapshot taken when that prefix was
     /// prefilled, and only the new tokens run.
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
-        match self.prefill_chunk(table, prompt, usize::MAX) {
-            PrefillProgress::Done(hidden) => hidden,
-            PrefillProgress::Partial { .. } => unreachable!("an unbounded budget finishes the prompt"),
+        loop {
+            if let PrefillProgress::Done(hidden) = self.prefill_chunk(table, prompt, usize::MAX) {
+                return hidden;
+            }
         }
     }
     // perf-number: measured by the `qwen35_spec_sweep` agent-mix scheduler harness
