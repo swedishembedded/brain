@@ -5,15 +5,16 @@
 // card carries. If your team needs expertise in decode attention that runs at the memory roofline over a compact KV
 // cache, you can procure our services by sending an email to info@swedishembedded.com.
 //
-// Split-key fused GQA decode attention at head_dim 256 over an int8 paged pool, on TENSOR CORES: the CUDA form of
-// the `kv=int8` variant of `paged_flash_decode_gqa_hd256.wgsl` at GRP = BRAIN_GRP (at most 8), with its whole
+// Split-key fused GQA decode attention at head_dim 256 over an 8-bit paged pool (int8, or FP8 E4M3 with
+// BRAIN_KV_FP8), on TENSOR CORES: the CUDA form of the `kv=int8` and `kv=fp8` variants of
+// `paged_flash_decode_gqa_hd256.wgsl` at GRP = BRAIN_GRP (at most 8), with their whole
 // contract - the same uniform, bindings, grid and partial records - so `paged_flash_decode_gqa_combine` merges
 // either kernel's output and the host cannot tell them apart.
 //
 //   params       : [batch, n_heads, n_kv_heads, head_dim (256), group (BRAIN_GRP), block_size, max_bt, n_splits,
 //                   tiles_per_split] u32
 //   q            : [batch, n_heads * 256]                          f32
-//   pool_k/pool_v: [num_blocks * block_size, n_kv_heads * 256]     int8
+//   pool_k/pool_v: [num_blocks * block_size, n_kv_heads * 256]     int8 or FP8 E4M3 bytes
 //   block_tables : [batch, max_bt] u32       seq_lens : [batch] u32 (live keys, the new token included)
 //   part         : [batch, n_heads, n_splits, 258] f32  the unnormalised output (256), the running max, the sum
 //   k_scales/v_scales: [num_blocks * block_size, n_kv_heads] f32, one scale per (token, kv head) row
@@ -46,6 +47,11 @@
 #ifndef BRAIN_GRP
 #define BRAIN_GRP 6
 #endif
+// The 8-bit element format of the pool: 0 = int8 (the `kv=int8` tier), 1 = FP8 E4M3 (`kv=fp8`). Both carry one f32
+// scale per (token, kv head) row and both are exact in f16; only the widening differs.
+#ifndef BRAIN_KV_FP8
+#define BRAIN_KV_FP8 0
+#endif
 
 #define HD 256
 #define TILE 128
@@ -61,6 +67,19 @@ __device__ __forceinline__ unsigned int brain_i8h2(unsigned int u, unsigned int 
     unsigned int r;
     asm("sub.rn.f16x2 %0, %1, %2;\n" : "=r"(r) : "r"(h), "r"(0x64806480u));
     return r;
+}
+
+// The four 8-bit elements of `w` (byte 0 first) as two f16 pairs: `lo` = (element 0, 1), `hi` = (element 2, 3).
+__device__ __forceinline__ void brain_8bit_pairs(unsigned int w, unsigned int& lo, unsigned int& hi) {
+#if BRAIN_KV_FP8
+    const unsigned short l = static_cast<unsigned short>(w & 0xffffu), h = static_cast<unsigned short>(w >> 16);
+    asm("cvt.rn.f16x2.e4m3x2 %0, %1;\n" : "=r"(lo) : "h"(l));
+    asm("cvt.rn.f16x2.e4m3x2 %0, %1;\n" : "=r"(hi) : "h"(h));
+#else
+    const unsigned int u = w ^ 0x80808080u;
+    lo = brain_i8h2(u, 0x5140u);
+    hi = brain_i8h2(u, 0x5342u);
+#endif
 }
 
 // f32 -> nearest f16 -> f32.
@@ -180,10 +199,9 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
         for (int st = 0; st < 16; ++st) {
             const uint4 a = qf[st][lane];
             // Key word of k-step st: channels 64 tig + 4 st .. + 3 of the lane's row.
-            const unsigned int w0 = reinterpret_cast<const unsigned int*>(&kw[0][st >> 2])[st & 3] ^ 0x80808080u;
-            const unsigned int w1 = reinterpret_cast<const unsigned int*>(&kw[1][st >> 2])[st & 3] ^ 0x80808080u;
-            const unsigned int b00 = brain_i8h2(w0, 0x5140u), b01 = brain_i8h2(w0, 0x5342u);
-            const unsigned int b10 = brain_i8h2(w1, 0x5140u), b11 = brain_i8h2(w1, 0x5342u);
+            unsigned int b00, b01, b10, b11;
+            brain_8bit_pairs(reinterpret_cast<const unsigned int*>(&kw[0][st >> 2])[st & 3], b00, b01);
+            brain_8bit_pairs(reinterpret_cast<const unsigned int*>(&kw[1][st >> 2])[st & 3], b10, b11);
             brain_mma(s0, a.x, 0u, a.y, 0u, b00, b01);
             brain_mma(s0, a.z, 0u, a.w, 0u, b00, b01);
             brain_mma(s1, a.x, 0u, a.y, 0u, b10, b11);
@@ -229,12 +247,13 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
             const int wi = t >> 1, sh = (t & 1) * 2;
             unsigned int x[4];
 #pragma unroll
-            for (int r = 0; r < 4; ++r) { x[r] = reinterpret_cast<const unsigned int*>(&vw[r][wi >> 2])[wi & 3] ^ 0x80808080u; }
+            for (int r = 0; r < 4; ++r) { x[r] = reinterpret_cast<const unsigned int*>(&vw[r][wi >> 2])[wi & 3]; }
             // [key r_a byte sh, key r_b byte sh, key r_a byte sh + 1, key r_b byte sh + 1]
             const unsigned int sel = static_cast<unsigned int>(sh) | ((sh + 4u) << 4) | ((sh + 1u) << 8) | ((sh + 5u) << 12);
             const unsigned int p01 = __byte_perm(x[0], x[1], sel), p23 = __byte_perm(x[2], x[3], sel);
-            const unsigned int a0 = brain_i8h2(p01, 0x5140u), a1 = brain_i8h2(p01, 0x5342u);
-            const unsigned int a2 = brain_i8h2(p23, 0x5140u), a3 = brain_i8h2(p23, 0x5342u);
+            unsigned int a0, a1, a2, a3;
+            brain_8bit_pairs(p01, a0, a1);
+            brain_8bit_pairs(p23, a2, a3);
             brain_mma(o[t], a0, a1, a2, a3, ph0, ph1);
             brain_mma(o[t], a0, a1, a2, a3, pl0, pl1);
         }

@@ -285,9 +285,8 @@ fn kv_append_i8_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
     (p[0] * (p[1] / p[3])).div_ceil(tile.0)
 }
 
-/// `paged_flash_decode_gqa_hd256.wgsl`'s int8 bindings: params, `q`, the two
-/// pools, `block_tables`, `seq_lens`, the written partial records, then the key
-/// and value row scales.
+/// `paged_flash_decode_gqa_hd256.wgsl`'s bindings for a scaled 8-bit tier (int8, FP8): params, `q`, the two pools,
+/// `block_tables`, `seq_lens`, the written partial records, then the key and value row scales.
 const FLASH_DECODE_KV8_BINDINGS: &[BindKind] = &[
     BindKind::Uniform,
     BindKind::StorageRead,
@@ -344,6 +343,14 @@ pub(crate) const ROWS: &[Row] = &[
     Row {
         slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=int8",
         target: Target::Named("paged_flash_decode_gqa_hd256_kv8"),
+        bindings: FLASH_DECODE_KV8_BINDINGS,
+        serves: serves_flash_decode_kv8,
+        blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=fp8",
+        target: Target::Named("paged_flash_decode_gqa_hd256_kvfp8"),
         bindings: FLASH_DECODE_KV8_BINDINGS,
         serves: serves_flash_decode_kv8,
         blocks: flash_decode_blocks,

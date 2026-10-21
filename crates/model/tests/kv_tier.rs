@@ -529,10 +529,9 @@ fn fused_decode_reads_compact_planes_as_exact_attention_reads_their_decoded_valu
 /// pool, and every sequence but the first resumes from one cached prefix (its first `shared_blocks` blocks are the
 /// SAME physical blocks, the way the prefix cache shares them). The output equals exact attention over the decoded
 /// planes at the bound the WGSL tier is held to.
-fn native_int8_decode_is_exact_at_agent_contexts(g: &Gpu, lens: &[u32], shared_blocks: u32) {
-    let tier = KvTier::INT8;
+fn native_decode_is_exact_at_agent_contexts(g: &Gpu, tier: KvTier, lens: &[u32], shared_blocks: u32) {
     let (n_heads, n_kv, block_size) = (24u32, 4u32, 64u32);
-    let label = format!("lens {lens:?}, {shared_blocks} shared blocks");
+    let label = format!("{tier} lens {lens:?}, {shared_blocks} shared blocks");
     let own_blocks: u32 = lens.iter().enumerate().map(|(b, &len)| len.div_ceil(block_size) - if b == 0 { 0 } else { shared_blocks }).sum();
     let num_blocks = (shared_blocks + own_blocks) * 2 + 1;
     let mut next = 0u32;
@@ -591,9 +590,15 @@ fn native_int8_decode_is_exact_at_agent_contexts(g: &Gpu, lens: &[u32], shared_b
     let kernels = KvKernels::resolve(g, tier).unwrap();
     let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim: 256, block_size, max_bt, cap: *lens.iter().max().unwrap() };
     assert!(kernels.flash_decode_available(g, 256, n_heads / n_kv), "{label}: the fused decode must be available");
-    let kernel = g.kernel_index("paged_flash_decode_gqa_hd256#GRP=6#kv=int8").expect("the int8 decode kernel is registered");
+    let (slow, native) = if tier == KvTier::INT8 {
+        ("paged_flash_decode_gqa_hd256#GRP=6#kv=int8", "paged_flash_decode_gqa_hd256_kv8")
+    } else {
+        assert_eq!(tier, KvTier::FP8, "the native decode serves the scaled 8-bit tiers");
+        ("paged_flash_decode_gqa_hd256#GRP=6#kv=fp8", "paged_flash_decode_gqa_hd256_kvfp8")
+    };
+    let kernel = g.kernel_index(slow).expect("the decode kernel is registered");
     let params = [batch, n_heads, n_kv, 256, n_heads / n_kv, block_size, max_bt, 1, 1];
-    assert_eq!(g.native_kernel_for(kernel, &params), Some("paged_flash_decode_gqa_hd256_kv8"), "{label}: the int8 decode attention must run the native kernel");
+    assert_eq!(g.native_kernel_for(kernel, &params), Some(native), "{label}: the decode attention must run the native kernel");
     let combine = g.kernel_index("paged_flash_decode_gqa_combine").expect("the combine is registered");
     assert_eq!(g.native_kernel_for(combine, &[batch, n_heads, 256, 64]), Some("paged_flash_decode_gqa_combine"), "{label}: the merge of the splits must run the native kernel");
     g.submit(&[], &kernels.flash_decode(g, &q, &kc, &vc, &table, &seq_lens, &ctx, shape));
@@ -622,11 +627,11 @@ fn native_int8_decode_is_exact_at_agent_contexts(g: &Gpu, lens: &[u32], shared_b
             }
         }
     }
-    eprintln!("native int8 decode at {label}: worst relative error to exact {worst:.2e}");
+    eprintln!("native decode at {label}: worst relative error to exact {worst:.2e}");
 }
 
 #[test]
-fn native_int8_decode_is_exact_at_agent_contexts_over_a_shared_prefix_on_cuda() {
+fn native_8bit_decode_is_exact_at_agent_contexts_over_a_shared_prefix_on_cuda() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if brain_testutil::gpu_tests_skipped() {
         return;
@@ -641,16 +646,17 @@ fn native_int8_decode_is_exact_at_agent_contexts_over_a_shared_prefix_on_cuda() 
     };
     // One sequence at 48k; 1k + 13k + 48k with the two long ones on one 10,240-token prefix; eight agents at 1-4k
     // on one 1,024-token prefix; sixteen short ones (partly empty splits, a one-key sequence).
-    native_int8_decode_is_exact_at_agent_contexts(&g, &[48_000], 0);
-    native_int8_decode_is_exact_at_agent_contexts(&g, &[1024, 13_000, 48_000], 160);
-    native_int8_decode_is_exact_at_agent_contexts(&g, &[4096, 1100, 2047, 3000, 1025, 4000, 1500, 2500], 16);
-    native_int8_decode_is_exact_at_agent_contexts(&g, &[1, 129, 64, 65, 300, 127, 128, 700, 5, 200, 333, 1000, 63, 2, 900, 450], 0);
+    for tier in [KvTier::INT8, KvTier::FP8] {
+        native_decode_is_exact_at_agent_contexts(&g, tier, &[48_000], 0);
+        native_decode_is_exact_at_agent_contexts(&g, tier, &[1024, 13_000, 48_000], 160);
+        native_decode_is_exact_at_agent_contexts(&g, tier, &[4096, 1100, 2047, 3000, 1025, 4000, 1500, 2500], 16);
+        native_decode_is_exact_at_agent_contexts(&g, tier, &[1, 129, 64, 65, 300, 127, 128, 700, 5, 200, 333, 1000, 63, 2, 900, 450], 0);
+    }
 }
 
 /// Device time of the 27B's int8 decode attention (split pass plus merge) per layer at agent context lengths, with the
 /// achieved rate on the KV bytes it must read, for the native kernel and for the generated WGSL tier.
-fn time_int8_decode(g: &Gpu, batch: u32, len: u32) -> f64 {
-    let tier = KvTier::INT8;
+fn time_decode(g: &Gpu, tier: KvTier, batch: u32, len: u32) -> f64 {
     let (n_heads, n_kv, block_size) = (24u32, 4u32, 64u32);
     let per = len.div_ceil(block_size);
     let num_blocks = batch * per;
@@ -683,7 +689,7 @@ fn time_int8_decode(g: &Gpu, batch: u32, len: u32) -> f64 {
 
 #[test]
 #[ignore = "a timing report for kernel work, not a spec"]
-fn int8_decode_attention_timing_report() {
+fn eight_bit_decode_attention_timing_report() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(native) = Gpu::try_new_cuda(kernels()) else {
         return brain_testutil::skip_unavailable("int8 decode timing: no CUDA device");
@@ -691,17 +697,19 @@ fn int8_decode_attention_timing_report() {
     gpu_core::set_native_kernels(false);
     let generated = Gpu::try_new_cuda(kernels()).expect("a second CUDA handle");
     gpu_core::set_native_kernels(true);
+    for tier in [KvTier::INT8, KvTier::FP8] {
     for (batch, len) in [(1u32, 1024u32), (1, 12_800), (1, 48_000), (8, 1024), (8, 12_800), (16, 12_800), (8, 48_000)] {
-        // K and V int8 rows plus one f32 scale per (token, kv head) row each.
+        // K and V 8-bit rows plus one f32 scale per (token, kv head) row each.
         let bytes = 2.0 * batch as f64 * len as f64 * 4.0 * (256.0 + 4.0);
-        let (tn, tg) = (time_int8_decode(&native, batch, len), time_int8_decode(&generated, batch, len));
+        let (tn, tg) = (time_decode(&native, tier, batch, len), time_decode(&generated, tier, batch, len));
         eprintln!(
-            "int8 decode attention batch {batch:2} x {len:6} keys: native {:8.1} us ({:6.0} GB/s), generated {:8.1} us ({:6.0} GB/s), {:.1}x",
+            "{tier} decode attention batch {batch:2} x {len:6} keys: native {:8.1} us ({:6.0} GB/s), generated {:8.1} us ({:6.0} GB/s), {:.1}x",
             tn * 1e3,
             bytes / (tn * 1e-3) / 1e9,
             tg * 1e3,
             bytes / (tg * 1e-3) / 1e9,
             tg / tn
         );
+    }
     }
 }

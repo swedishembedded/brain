@@ -63,6 +63,9 @@ pub const DP4A_MIN_CC: Cc = (6, 1);
 /// a kernel whose body issues them cannot declare a lower floor.
 pub const MMA_S8_MIN_CC: Cc = (8, 0);
 
+/// The compute capability that introduced the FP8 conversions (`cvt.rn.f16x2.e4m3x2`): Ada.
+pub const FP8_CVT_MIN_CC: Cc = (8, 9);
+
 /// Rows of x from which `matmul_i8_gemv` runs its int8 tensor-core block (see
 /// [`backend_api::select::I8_GEMV_MMA_MIN_ROWS`]); the source's `BRAIN_I8G_MMA_MIN_ROWS` is the
 /// same number and a test holds the two together.
@@ -681,6 +684,26 @@ pub const ALL: &[CudaKernel] = &[
         // The query fragments (16 k-steps x 32 lanes x 16 bytes) plus the merge of 4 warps x 8 heads: 256 outputs, max, sum.
         shared_bytes: 16 * 32 * 16 + 4 * 8 * (256 + 2) * 4,
         src: concat!("#define BRAIN_GRP 6\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
+    },
+    CudaKernel {
+        name: "paged_flash_decode_gqa_hd256_kvfp8",
+        // Redirected to by name from the WGSL `paged_flash_decode_gqa_hd256#GRP=6#kv=fp8` (`gpu_core::native_upgrade`).
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // mma.sync.m16n8k16 with f16 inputs, and the E4M3 pair conversion (`cvt.rn.f16x2.e4m3x2`, sm_89).
+        min_cc: FP8_CVT_MIN_CC,
+        entry: "brain_paged_flash_decode_gqa_hd256_kvfp8",
+        what: "paged_flash_decode_gqa_hd256_kv8 over an FP8 E4M3 pool with one scale per (token, kv head) row: the elements widen to f16 exactly",
+        reported: "native:paged_flash_decode_gqa_hd256_kvfp8",
+        block_dim: 128,
+        tile: (1, 1),
+        shared_bytes: 16 * 32 * 16 + 4 * 8 * (256 + 2) * 4,
+        src: concat!(
+            "#define BRAIN_GRP 6\n#define BRAIN_KV_FP8 1\n#define brain_paged_flash_decode_gqa_hd256_kv8 brain_paged_flash_decode_gqa_hd256_kvfp8\n",
+            include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")
+        ),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_combine",
