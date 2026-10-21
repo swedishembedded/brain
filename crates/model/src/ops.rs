@@ -901,7 +901,17 @@ impl TierPolicy {
     /// The tier leaf `name` should upload at: the LAST rule whose pattern is
     /// a substring of `name`, or [`Self::uniform`]'s default if none match.
     pub fn want(&self, name: &str) -> Dtype {
-        self.rules.iter().rev().find(|(pat, _)| name.contains(pat.as_str())).map(|(_, dt)| dt).copied().unwrap_or(self.default)
+        self.rule_for(name).unwrap_or(self.default)
+    }
+
+    /// The default tier and every rule's tier.
+    pub fn dtypes(&self) -> impl Iterator<Item = Dtype> + '_ {
+        std::iter::once(self.default).chain(self.rules.iter().map(|(_, dt)| *dt))
+    }
+
+    /// The tier a rule names for `name`, `None` when no rule matches (so the default would apply).
+    pub fn rule_for(&self, name: &str) -> Option<Dtype> {
+        self.rules.iter().rev().find(|(pat, _)| name.contains(pat.as_str())).map(|(_, dt)| *dt)
     }
 
     /// The tier every leaf without a rule takes.
@@ -1142,7 +1152,8 @@ mod sink;
 mod upload_source;
 mod tiled;
 pub use sink::{rewrite_tile, DeviceWeightSink};
-pub use upload_source::{stored_tier, stored_tier_policy, upload_fused_from_source, upload_from_source, upload_preserved};
+pub use upload_source::{stored_tier, stored_tier_policy, upload_fused_from_source, upload_from_source, upload_group_preserved, upload_preserved, FusedGroup};
+pub use upload_source::{conversion_policy, encoding_for};
 pub use tiled::{plan_linear, tile_rows, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES};
 
 impl Ops {

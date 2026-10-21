@@ -16,6 +16,7 @@ pub mod convert;
 pub mod file_sink;
 pub mod load;
 pub mod reader;
+pub mod report;
 pub mod sink;
 pub mod source;
 #[cfg(test)]
@@ -27,6 +28,7 @@ pub use codec::{Codec, CodecRegistry, EncodeCtx, Tile, TileBuf};
 pub use convert::{convert_to_file, ConversionReport};
 pub use encoding::{BlockGeometry, Codebook, Element, FloatFormat, Packing, QuantEncoding, ScaleGranularity, ScaleLevel, TensorDescriptor, INT8_SCALE_SUFFIX};
 pub use load::{LoadConfig, LoadOp, LoadPlan, LoadPolicy, LoadReport, LoadRequest, LoadStep, Loader};
+pub use report::{PrecisionReport, TensorFormat};
 pub use reader::{PackedReader, PackedTensorReader, PACKED_METADATA_KEY};
 pub use file_sink::SafetensorsSink;
 pub use sink::{MemorySink, TensorSink};

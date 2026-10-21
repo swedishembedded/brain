@@ -21,10 +21,11 @@ use std::ops::Range;
 
 use super::codec::{CodecRegistry, Tile, TileBuf};
 use super::concat::ConcatView;
-use super::load::{LoadReport, LoadRequest, Loader};
+use super::load::{LoadPolicy, LoadReport, LoadRequest, Loader};
 use super::sink::TensorSink;
-use super::encoding::{TensorDescriptor, INT8_SCALE_SUFFIX};
+use super::encoding::{ScaleGranularity, TensorDescriptor, INT8_SCALE_SUFFIX};
 use super::reader::{PackedReader, PackedTensorReader};
+use super::report::PrecisionReport;
 use crate::weightio::WeightReader;
 use crate::TensorSource;
 
@@ -120,6 +121,12 @@ impl PackedSource {
         Ok(Some(out[(start - span.start) as usize..(end - span.start) as usize].to_vec()))
     }
 
+    /// The format and bytes of every tensor served, as stored, under the names the model asks for.
+    pub fn precision_report(&self) -> PrecisionReport {
+        let renamed: Vec<TensorDescriptor> = self.tensors.iter().map(|(canonical, b)| TensorDescriptor { name: canonical.clone(), ..b.desc.clone() }).collect();
+        PrecisionReport::from_descriptors(&renamed)
+    }
+
     /// Decode tile `elems` of `b` into `out` (replacing its contents), with
     /// `read` as the staging buffer.
     fn decode_range(&self, b: &Bound, elems: &Range<u64>, read: &mut TileBuf, out: &mut Vec<f32>) -> Result<(), String> {
@@ -180,6 +187,84 @@ impl PackedSource {
     }
 }
 
+impl PackedSource {
+    /// A fused group whose parts are stored in different encodings (FP8 attention next to bf16, say) cannot
+    /// be joined byte for byte. Under an explicit destination encoding (`Repack` or `Convert`, the caller's
+    /// request to change the representation) each part is loaded on its own into its row range of one fused
+    /// destination, tile by tile, so the group still never passes through a whole f32 tensor. Under `Preserve`
+    /// there is no single encoding to join them in, and the group is declined: the caller loads the parts as
+    /// separate weights.
+    fn load_mixed_parts(&self, parts: &[TensorDescriptor], req: &LoadRequest<'_>, sink: &mut dyn TensorSink) -> Result<Option<LoadReport>, String> {
+        let (LoadPolicy::Repack(dst_enc) | LoadPolicy::Convert(dst_enc)) = req.policy else { return Ok(None) };
+        let k = parts[0].shape.last().copied().unwrap_or(0);
+        if parts.iter().any(|p| p.shape.len() != 2 || p.shape[1] != k) || dst_enc.scales.iter().any(|s| s.granularity == ScaleGranularity::Tensor) {
+            return Ok(None);
+        }
+        let rows: u64 = parts.iter().map(|p| p.shape[0]).sum();
+        let names = parts.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join("+");
+        let fused = TensorDescriptor::new(format!("fused({names})"), vec![rows, k], dst_enc.clone());
+        fused.validate()?;
+        // Every part must start and end on a tile of the destination, so its tiles and scale bands are its own.
+        let quantum = fused.encode_quantum();
+        if parts.iter().any(|p| !p.numel().is_multiple_of(quantum)) {
+            return Ok(None);
+        }
+        let loader = Loader { reader: &*self.reader, codecs: &self.codecs, workspace: req.workspace.clone(), config: req.config.clone() };
+        let Ok(steps) = parts.iter().map(|p| loader.plan(&p.name, req.policy)).collect::<Result<Vec<_>, _>>() else { return Ok(None) };
+        sink.begin(&fused)?;
+        let mut report: Option<LoadReport> = None;
+        let mut first_elem = 0;
+        for step in &steps {
+            let mut part_sink = RowRangeSink { inner: &mut *sink, fused: &fused, first_elem };
+            match loader.execute(step, &mut part_sink) {
+                Ok(r) => {
+                    report = Some(match report.take() {
+                        None => r,
+                        Some(mut total) => {
+                            total.tiles_written += r.tiles_written;
+                            total.bytes_read += r.bytes_read;
+                            total.peak_staging_bytes = total.peak_staging_bytes.max(r.peak_staging_bytes);
+                            total
+                        }
+                    })
+                }
+                Err(e) => {
+                    sink.abort(&fused);
+                    return Err(e);
+                }
+            }
+            first_elem += step.src.numel();
+        }
+        sink.finish(&fused)?;
+        Ok(report.map(|mut r| {
+            r.step.dst = fused;
+            r
+        }))
+    }
+}
+
+/// One part of a fused destination: forwards the part's tiles to the shared sink at the part's element
+/// offset, and leaves `begin`/`finish`/`abort` of the whole fused tensor to the caller.
+struct RowRangeSink<'a> {
+    inner: &'a mut dyn TensorSink,
+    fused: &'a TensorDescriptor,
+    first_elem: u64,
+}
+
+impl TensorSink for RowRangeSink<'_> {
+    fn begin(&mut self, _: &TensorDescriptor) -> Result<(), String> {
+        Ok(())
+    }
+    fn write_tile(&mut self, _: &TensorDescriptor, tile: &Tile<'_>) -> Result<(), String> {
+        let elems = tile.elems.start + self.first_elem..tile.elems.end + self.first_elem;
+        self.inner.write_tile(self.fused, &Tile { elems, payload: tile.payload, scales: tile.scales.clone() })
+    }
+    fn finish(&mut self, _: &TensorDescriptor) -> Result<(), String> {
+        Ok(())
+    }
+    fn abort(&mut self, _: &TensorDescriptor) {}
+}
+
 impl TensorSource for PackedSource {
     /// Panics on a read error after open validated the headers (a truncated or
     /// concurrently modified file): silently reporting "not found" would
@@ -233,9 +318,9 @@ impl TensorSource for PackedSource {
         match parts.as_slice() {
             [] => Ok(None),
             [one] => run(&*self.reader, &one.name),
-            _ => match ConcatView::new(&*self.reader, parts) {
+            _ => match ConcatView::new(&*self.reader, parts.clone()) {
                 Ok(view) => run(&view, &view.descriptor().name.clone()),
-                Err(_) => Ok(None),
+                Err(_) => self.load_mixed_parts(&parts, req, sink),
             },
         }
     }
@@ -351,5 +436,56 @@ mod tests {
         assert!(src.load_packed(&["a", "n"], &req, &mut untouched).unwrap().is_none());
         assert!(src.load_packed(&["a", "missing"], &req, &mut untouched).unwrap().is_none());
         assert_eq!(untouched.tiles, 0);
+    }
+
+    /// A fused group whose parts are stored differently (FP8 next to bf16) is never joined through f32: under
+    /// `Preserve` it is declined (the caller loads the parts as separate weights), and under an explicit
+    /// destination encoding each part is converted tile by tile into its rows of one fused tensor, byte for byte
+    /// what converting the parts separately and joining them gives.
+    #[test]
+    fn a_fused_group_of_mixed_encodings_is_split_or_explicitly_converted() {
+        use crate::packed::budget::{BoundedWorkspace, MemoryBudget};
+        use crate::packed::encoding::QuantEncoding;
+        use crate::packed::load::{LoadConfig, LoadPolicy};
+        use crate::packed::sink::MemorySink;
+        let dir = TmpDir::new("mixed-fuse");
+        let cols = 32usize;
+        let vals: Vec<f32> = (0..32 * cols).map(|i| ((i * 37 % 211) as f32 - 105.0) / 40.0).collect();
+        write_safetensors(
+            &dir.join("m.safetensors"),
+            &[
+                RawTensor { name: "a", dtype: "F8_E4M3", shape: vec![16, cols as u64], bytes: e4m3_bytes(41, 16 * cols) },
+                RawTensor { name: "a_scale_inv", dtype: "BF16", shape: vec![1, 2], bytes: bf16_bytes(&[1.0, 2.0]) },
+                RawTensor { name: "b", dtype: "BF16", shape: vec![32, cols as u64], bytes: bf16_bytes(&vals) },
+            ],
+        );
+        let reader = PackedReader::open(&dir.join("m.safetensors")).unwrap().with_fp8_block(16);
+        let src = PackedSource::identity(Box::new(reader), CodecRegistry::reference()).unwrap();
+        let (ws, cfg) = (BoundedWorkspace::new(MemoryBudget::new(1 << 20, 0)), LoadConfig { tile_bytes: 1024 });
+
+        let mut declined = MemorySink::default();
+        let preserve = LoadRequest { policy: &LoadPolicy::Preserve, workspace: &ws, config: &cfg };
+        assert!(src.load_packed(&["a", "b"], &preserve, &mut declined).unwrap().is_none(), "no single encoding to preserve both in");
+        assert_eq!(declined.tiles, 0);
+
+        for dst in [QuantEncoding::nf4_blocked(32), QuantEncoding::int8_blocked(32), QuantEncoding::bf16()] {
+            let policy = LoadPolicy::Convert(dst.clone());
+            let req = LoadRequest { policy: &policy, workspace: &ws, config: &cfg };
+            let mut fused = MemorySink::default();
+            let report = src.load_packed(&["a", "b"], &req, &mut fused).unwrap().expect("an explicit target joins mixed parts");
+            assert!(fused.finished && !fused.aborted && report.tiles_written > 2, "{dst}: {} tiles", report.tiles_written);
+            assert_eq!(report.step.dst.shape, vec![48, cols as u64]);
+            let (mut payload, mut scales) = (Vec::new(), vec![Vec::new(); dst.scales.len()]);
+            for part in ["a", "b"] {
+                let mut one = MemorySink::default();
+                src.load_packed(&[part], &req, &mut one).unwrap().unwrap();
+                payload.extend_from_slice(&one.payload);
+                for (l, s) in one.scales.iter().enumerate() {
+                    scales[l].extend_from_slice(s);
+                }
+            }
+            assert_eq!(fused.payload, payload, "{dst}: payload");
+            assert_eq!(fused.scales, scales, "{dst}: scales");
+        }
     }
 }

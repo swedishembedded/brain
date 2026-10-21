@@ -2134,6 +2134,24 @@ impl Qwen35 {
         self.ops.gemm_path()
     }
 
+    /// The format every parameter of this build is held in on the device, with its resident bytes: the tier of
+    /// each `Ops` weight (frozen linears, narrow embedding tables), f32 for everything the parameter store
+    /// holds (norms, recurrence parameters, adapters). A tier that is a storage encoding is named by its
+    /// encoding, so the rows compare directly with a checkpoint's
+    /// [`PackedSource::precision_report`](checkpoint::packed::PackedSource::precision_report).
+    pub fn precision_report(&self) -> checkpoint::packed::PrecisionReport {
+        let mut report = checkpoint::packed::PrecisionReport::default();
+        for (name, numel) in self.cfg.param_list() {
+            if let Some(w) = self.weights.get(&name).filter(|_| !self.ps.weight.contains_key(&name)) {
+                let format = model::ops::encoding_for(w.dtype()).map_or_else(|| w.dtype().name().to_string(), |e| e.to_string());
+                report.push(&name, vec![w.n() as u64, w.k() as u64], format, w.resident_bytes());
+            } else if self.ps.weight.contains_key(&name) {
+                report.push(&name, vec![numel as u64], checkpoint::packed::QuantEncoding::f32().to_string(), numel as u64 * 4);
+            }
+        }
+        report
+    }
+
     /// The dtype leaf `name` actually landed at after
     /// `want.promote(caps)` - what a test asserts to confirm a per-leaf
     /// [`TierPolicy`] was really PLACED, not silently collapsed to uniform

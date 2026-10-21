@@ -93,6 +93,11 @@ history and exempt.
    packed safetensors file (`brain.packed` metadata carries each tensor's encoding, so the packed reader needs no declaration);
    `qwen35::fp8_source::write_converted_base` / `qwen35_convert_base` use it to turn the 27B FP8 release into an NF4 base that
    `stream_train_step --base-dtype nf4` streams as a plain copy of half the bytes.
+   **Mixed formats in one model**: `write_converted_base(.., &TierPolicy)` converts every tensor to the tier a policy names (attention FP8, MLP
+   NF4, tables bf16, norms f32); `PackedSource::precision_report` / `Qwen35::precision_report` / `Qwen::precision_report` list each tensor's
+   format and bytes so the file and the resident model compare row by row; `Qwen::new_lora_tiers` and `Qwen35` build each frozen linear at its
+   own tier through `upload_from_source`; a fused group of parts stored differently converts per part under an explicit tier
+   (`upload_fused_from_source`) or loads as separate weights (`upload_group_preserved`). Acceptance: `{qwen3,qwen35}/tests/mixed_precision.rs`.
    `brain qwen3 {import,infer,serve,export,precompile,train,finetune,toolcall}`,
    plus the generic `brain import` for a `qwen3` GGUF.
 2b. **Qwen3.5-35B-A3B hybrid decoder** (`crates/qwen35moe`) - 40 layers, 3:1

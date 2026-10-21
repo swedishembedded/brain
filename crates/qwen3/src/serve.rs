@@ -1394,7 +1394,7 @@ impl Engine {
             let fused_weight = |leaves: &[&str], n_total: usize| -> Weight {
                 let names: Vec<String> = leaves.iter().map(|leaf| format!("blocks.{l}.{leaf}")).collect();
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                model::ops::upload_fused_from_source(&ops, weights, &names, n_total, dm, want, &staging).unwrap_or_else(|| panic!("serve: missing weight among {names:?}"))
+                model::ops::upload_fused_from_source(&ops, weights, &names, n_total, dm, want, &staging).unwrap_or_else(|e| panic!("serve: {e}"))
             };
             lin_weights.insert(format!("blocks.{l}.{WQKV}"), fused_weight(&["attn.wq.weight", "attn.wk.weight", "attn.wv.weight"], hqm + 2 * hkvm));
             lin_weights.insert(format!("blocks.{l}.{WGATEUP}"), fused_weight(&["mlp.gate.weight", "mlp.up.weight"], 2 * ffm));

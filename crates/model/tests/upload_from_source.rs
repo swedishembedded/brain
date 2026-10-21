@@ -15,14 +15,15 @@ use checkpoint::remap::{Fetch, RemapSource};
 use checkpoint::TensorSource;
 use gpu_core::Gpu;
 use gpu_core::select::Dtype;
-use model::ops::{training_kernel_list, upload_fused_from_source, upload_from_source, Ops, Weight};
+use model::ops::{training_kernel_list, upload_fused_from_source, upload_from_source, upload_group_preserved, FusedGroup, Ops, Weight};
 
 const N: usize = 256;
 const K: usize = 512;
 
 const N2: usize = 128;
 
-/// An FP8 safetensors file with a bf16 128x128 scale grid per tensor: `w` is `[N, K]`, `v` is `[N2, K]`.
+/// An FP8 safetensors file with a bf16 128x128 scale grid per tensor: `w` is `[N, K]`, `v` is `[N2, K]`;
+/// `u` is a plain bf16 `[N2, K]` tensor (a part stored differently from the other two).
 fn write_fp8_checkpoint(dir: &std::path::Path) {
     let mut s = 0x2545_f491_4f6c_dd1du64;
     let mut tensor = |rows: usize, grid0: f32| {
@@ -38,17 +39,18 @@ fn write_fp8_checkpoint(dir: &std::path::Path) {
     };
     let (w, wg) = tensor(N, 0.5);
     let (v, vg) = tensor(N2, 1.5);
+    let u: Vec<u8> = (0..N2 * K).flat_map(|i| half::bf16::from_f32(((i * 29 % 197) as f32 - 98.0) / 50.0).to_le_bytes()).collect();
     let mut header = serde_json::Map::new();
     let mut off = 0usize;
-    for (name, shape, bytes) in [("w", vec![N, K], &w), ("w_scale_inv", vec![N / 128, K / 128], &wg), ("v", vec![N2, K], &v), ("v_scale_inv", vec![N2 / 128, K / 128], &vg)] {
-        let dtype = if name.ends_with("scale_inv") { "BF16" } else { "F8_E4M3" };
+    for (name, shape, bytes) in [("w", vec![N, K], &w), ("w_scale_inv", vec![N / 128, K / 128], &wg), ("v", vec![N2, K], &v), ("v_scale_inv", vec![N2 / 128, K / 128], &vg), ("u", vec![N2, K], &u)] {
+        let dtype = if name.ends_with("scale_inv") || name == "u" { "BF16" } else { "F8_E4M3" };
         header.insert(name.into(), serde_json::json!({"dtype": dtype, "shape": shape, "data_offsets": [off, off + bytes.len()]}));
         off += bytes.len();
     }
     let h = serde_json::to_vec(&header).unwrap();
     let mut out = (h.len() as u64).to_le_bytes().to_vec();
     out.extend(h);
-    for b in [&w, &wg, &v, &vg] {
+    for b in [&w, &wg, &v, &vg, &u] {
         out.extend_from_slice(b);
     }
     std::fs::write(dir.join("m.safetensors"), out).unwrap();
@@ -69,7 +71,7 @@ fn a_packed_tensor_uploads_as_the_requested_tier_with_one_tile_of_staging() {
     std::fs::create_dir_all(&dir).unwrap();
     write_fp8_checkpoint(&dir);
     let reader = PackedReader::open(&dir.join("m.safetensors")).unwrap();
-    let src = PackedSource::new(Box::new(reader), CodecRegistry::reference(), [("blocks.0.w".to_string(), Binding::new("w")), ("blocks.0.v".to_string(), Binding::new("v"))]).unwrap();
+    let src = PackedSource::new(Box::new(reader), CodecRegistry::reference(), [("blocks.0.w".to_string(), Binding::new("w")), ("blocks.0.v".to_string(), Binding::new("v")), ("blocks.0.u".to_string(), Binding::new("u"))]).unwrap();
     let ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
 
     let mut whole = Vec::new();
@@ -106,6 +108,62 @@ fn a_packed_tensor_uploads_as_the_requested_tier_with_one_tile_of_staging() {
     let staging = BoundedWorkspace::new(MemoryBudget::new(300 << 10, 0));
     upload_from_source(&ops, &remap, "up", N, K, Dtype::BF16, &staging).expect("renamed tensor");
     assert!(staging.peak() > 0, "a Whole remap must forward the packed view");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Spec: a fused group of parts stored in different encodings (FP8 next to bf16) is converted part by part into
+/// one weight of the requested tier, equal to uploading the concatenated decoded rows, with bounded staging and no
+/// whole-tensor f32 copy; asked to keep the stored encodings, it is split into one weight per part instead.
+#[test]
+fn a_fused_group_of_mixed_encodings_is_converted_per_part_or_split() {
+    let dir = std::env::temp_dir().join(format!("upload_mixed_group_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_fp8_checkpoint(&dir);
+    let reader = PackedReader::open(&dir.join("m.safetensors")).unwrap();
+    let src = PackedSource::new(
+        Box::new(reader),
+        CodecRegistry::reference(),
+        [("w", "w"), ("v", "v"), ("u", "u")].map(|(canonical, stored)| (canonical.to_string(), Binding::new(stored))),
+    )
+    .unwrap();
+    let ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
+    let rows_of = |name: &str| {
+        let mut out = Vec::new();
+        assert!(src.with_tensor(name, &mut |d| out = d.to_vec()));
+        out
+    };
+    let mixed_ref = [rows_of("w"), rows_of("u")].concat();
+    for want in [Dtype::NF4, Dtype::BF16, Dtype::F8E4M3] {
+        // An FP8 tile is a whole 128-row scale band, so its smallest legal tile is larger than the others'.
+        let budget: u64 = if want == Dtype::F8E4M3 { 2 << 20 } else { 300 << 10 };
+        let staging = BoundedWorkspace::new(MemoryBudget::new(budget, 0));
+        let got = upload_fused_from_source(&ops, &src, &["w", "u"], N + N2, K, want, &staging).unwrap_or_else(|e| panic!("{want:?}: {e}"));
+        assert_eq!((got.n() as usize, got.dtype()), (N + N2, want), "{want:?}: the fused weight is held as asked");
+        assert!(staging.peak() > 0 && staging.peak() <= budget, "{want:?}: staging peak {} B", staging.peak());
+        // What converting each part on its own gives, joined: the fused weight is exactly that.
+        let separate: Vec<f32> = [("w", N), ("u", N2)].into_iter().flat_map(|(name, n)| decoded(&ops, &upload_from_source(&ops, &src, name, n, K, want, &staging).expect("part"))).collect();
+        let fused = decoded(&ops, &got);
+        assert!(fused.iter().zip(&separate).all(|(x, y)| x.to_bits() == y.to_bits()), "{want:?}: the fused conversion differs from converting the parts separately");
+        // And it is a faithful conversion of the stored values: the tier's own rounding error only (relative L2).
+        let norm = |v: &mut dyn Iterator<Item = f32>| v.map(|x| (x as f64).powi(2)).sum::<f64>().sqrt();
+        let rel = norm(&mut fused.iter().zip(&mixed_ref).map(|(x, y)| x - y)) / norm(&mut mixed_ref.iter().copied());
+        let bound = match want {
+            Dtype::BF16 => 5e-3,
+            Dtype::F8E4M3 => 4e-2,
+            _ => 0.2,
+        };
+        assert!(rel < bound, "{want:?}: relative L2 deviation from the stored values {rel}");
+    }
+
+    let staging = BoundedWorkspace::new(MemoryBudget::new(300 << 10, 0));
+    match upload_group_preserved(&ops, &src, &["w", "u"], &[N, N2], K, &staging).expect("a mixed group splits") {
+        FusedGroup::Split(parts) => assert_eq!(parts.iter().map(Weight::dtype).collect::<Vec<_>>(), [Dtype::F8E4M3, Dtype::BF16]),
+        FusedGroup::Joined(_) => panic!("FP8 and bf16 parts cannot be one weight in their stored encodings"),
+    }
+    match upload_group_preserved(&ops, &src, &["w", "v"], &[N, N2], K, &staging).expect("a uniform group joins") {
+        FusedGroup::Joined(w) => assert_eq!((w.n() as usize, w.dtype()), (N + N2, Dtype::F8E4M3)),
+        FusedGroup::Split(_) => panic!("two FP8 parts join in place"),
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 

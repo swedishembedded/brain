@@ -31,7 +31,7 @@ use model::adapter::sites::LoraSites;
 use model::block::{self, Gqa, KernelIds};
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
 use gpu_core::provider::library::GemmPrecision;
-use model::ops::{Act, Ops, Weight};
+use model::ops::{Act, Ops, TierPolicy, Weight};
 use model::saved::{BoundaryStore, SavedFormat, SavedPolicy};
 pub use model::Shard;
 use optim::Optim;
@@ -1025,7 +1025,7 @@ impl Qwen {
     pub fn load(path: &str, b: u32, t: u32) -> Qwen {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &*src, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, &*src, true, shard, &TierPolicy::uniform(Dtype::F32), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
     }
 
     /// Load an **inference-only** model: parameters are frozen (weights only, no
@@ -1042,7 +1042,7 @@ impl Qwen {
     pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Qwen {
         let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, reader, false, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, reader, false, shard, &TierPolicy::uniform(Dtype::F32), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
     }
 
     /// Streaming **decode-only** load: like [`Self::from_reader_inference`]
@@ -1059,7 +1059,7 @@ impl Qwen {
     pub fn from_reader_decode(reader: &checkpoint::weightio::WeightReader, ctx: u32) -> Qwen {
         let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, &TierPolicy::uniform(Dtype::F32), true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
     }
 
     /// [`Self::from_reader_decode`], but from an in-memory tensor map instead of
@@ -1069,7 +1069,7 @@ impl Qwen {
     /// without rebuilding, use [`Self::attach_adapter`] instead.
     pub fn from_tensors_decode(cfg: QwenConfig, tensors: &HashMap<String, Vec<f32>>, ctx: u32) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, &TierPolicy::uniform(Dtype::F32), true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
     }
 
     /// [`Self::load_inference`] with the int8 numeric tier: group-wise weight
@@ -1091,7 +1091,7 @@ impl Qwen {
     fn load_inference_with(path: &str, b: u32, t: u32, dt: Dtype) -> Qwen {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &*src, false, shard, dt, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, &*src, false, shard, &TierPolicy::uniform(dt), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
     }
 
     /// The config of a brain checkpoint `reader` has open. The `from_reader_*`
@@ -1104,7 +1104,7 @@ impl Qwen {
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(Dtype::F32), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
     }
 
     /// A LoRA training build whose frozen base linears are held at the
@@ -1130,7 +1130,7 @@ impl Qwen {
     /// base) where the device has them, `Fp32Reference` the exact fp32 kernels. The tapes are
     /// recorded at construction, so the choice is made here, not afterwards.
     pub fn new_lora_shard_dt_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype, gemm: GemmPrecision) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(dt), false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient())
     }
 
     /// [`Self::new_lora_dt_gemm`] with the saved-activation policy chosen (`model::saved`, normally the planner's
@@ -1139,13 +1139,22 @@ impl Qwen {
     /// so [`SavedPolicy::Keep`] is refused.
     pub fn new_lora_dt_saved(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, dt: Dtype, gemm: GemmPrecision, saved: SavedPolicy) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false, gemm, saved, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(dt), false, gemm, saved, &FullFtBuild::ambient())
     }
 
     /// [`Self::new_lora_dt`] with the GEMM arithmetic chosen (see [`Self::new_lora_shard_dt_gemm`]).
     pub fn new_lora_dt_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, dt: Dtype, gemm: GemmPrecision) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
         Qwen::new_lora_shard_dt_gemm(cfg, b, t, init, shard, dt, gemm)
+    }
+
+    /// A LoRA training build whose frozen base holds EACH linear at the tier `tiers` names for it (FP8 attention
+    /// next to NF4 MLP, say), the adapters and everything else staying fp32. Every tier must be a frozen LoRA tier
+    /// ([`FROZEN_LORA_TIERS`]) or fp32; a source that stores a tensor packed loads it tile by tile into its tier.
+    /// [`Self::linear_dtype_of`] and [`Self::precision_report`] state what landed.
+    pub fn new_lora_tiers(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, tiers: &TierPolicy, gemm: GemmPrecision) -> Qwen {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_impl(cfg, b, t, init, true, shard, tiers, false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient())
     }
 
     /// A FULL fine-tune build with an explicit [`FullFtBuild`]: the precision of every trainable parameter, the
@@ -1159,7 +1168,7 @@ impl Qwen {
         if let Some(plan) = &full.resident {
             check_resident_fits(&cfg, &shard, plan)?;
         }
-        Ok(Qwen::new_impl(cfg, b, t, init, true, shard, Dtype::F32, false, gemm, SavedPolicy::Recompute, full))
+        Ok(Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(Dtype::F32), false, gemm, SavedPolicy::Recompute, full))
     }
 
     /// A resident low-precision full fine-tune build (see [`ResidentPlan`]): whole model, fp32 remainder, the
@@ -1184,7 +1193,7 @@ impl Qwen {
 
     /// [`Self::new_shard`] with the GEMM arithmetic chosen (see [`Self::new_lora_shard_dt_gemm`]).
     pub fn new_shard_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, train: bool, shard: Shard, gemm: GemmPrecision) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, train, shard, Dtype::F32, false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, init, train, shard, &TierPolicy::uniform(Dtype::F32), false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient())
     }
 
     /// Inference-only shard with the 7 per-layer linears quantized to int8 (DP4A).
@@ -1230,7 +1239,7 @@ impl Qwen {
     /// kernel variants. The per-layer RMSNorm/QK-norm gains stay fp32: they
     /// are `[d]`/`[head_dim]` vectors consumed by norm kernels, not GEMMs.
     pub fn new_shard_dt(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, false, shard, dt, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, init, false, shard, &TierPolicy::uniform(dt), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
     }
 
     /// [`Self::new_shard_dt`] shaped for **KV-cache decode**, the way
@@ -1256,7 +1265,7 @@ impl Qwen {
     /// what landed. Calling a batched forward/backward entry point on the
     /// result panics loudly rather than running past the smaller buffers.
     pub fn new_shard_dt_decode(cfg: QwenConfig, ctx: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
-        Qwen::new_impl(cfg, 1, ctx, init, false, shard, dt, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, 1, ctx, init, false, shard, &TierPolicy::uniform(dt), true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
     }
 
     /// The shared builder behind every constructor. `decode_only` (set only by
@@ -1265,17 +1274,20 @@ impl Qwen {
     /// `scores`/`probs` at `n_heads·ctx` (not `n_heads·ctx²`), no backward
     /// scratch, no `logits`/`d_logits`/CE buffers.
     #[allow(clippy::too_many_arguments)]
-    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, dt: Dtype, decode_only: bool, gemm: GemmPrecision, saved: SavedPolicy, full: &FullFtBuild) -> Qwen {
+    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, tiers: &TierPolicy, decode_only: bool, gemm: GemmPrecision, saved: SavedPolicy, full: &FullFtBuild) -> Qwen {
         let resident = full.resident.as_ref();
-        // ONE reduced-precision build, parameterised by `dt` - the int8 tier
+        // ONE reduced-precision build, parameterised by the per-linear tier policy - the int8 tier
         // is not a second code path, it is this one at `Dtype::I8`. Every
         // non-fp32 tier is inference-only for the same reason int8 always
         // was: the trainable master copy lives in the fp32 `ParamStore`, and
         // a packed/quantized `Weight` is built ONCE at construction from the
-        // source tensor, never re-derived after an optimiser step.
+        // source tensor, never re-derived after an optimiser step. A LoRA
+        // build freezes the base, so it may hold each linear in any of the
+        // frozen tiers, a different one per tensor.
         assert!(
-            !(dt != Dtype::F32 && train) || (FROZEN_LORA_TIERS.contains(&dt) && cfg.lora.is_some()),
-            "the {dt:?} weight tier is inference-only (a LoRA training build may hold a frozen base in one of {FROZEN_LORA_TIERS:?})"
+            !(train && tiers.quantizes_anything()) || (cfg.lora.is_some() && tiers.dtypes().all(|dt| dt == Dtype::F32 || FROZEN_LORA_TIERS.contains(&dt))),
+            "the {} weight tier is inference-only (a LoRA training build may hold a frozen base in one of {FROZEN_LORA_TIERS:?})",
+            tiers.describe()
         );
         assert!(!(decode_only && train), "decode-only build is inference-only");
         // This trainer always rebuilds a layer in the backward from its saved input (`build_backward_steps`):
@@ -1325,14 +1337,14 @@ impl Qwen {
         // them out so no fp32 copy is ever uploaded alongside the packed one.
         // Without this filter an f16 build would be BIGGER than fp32 (1.0x
         // master copy + 0.5x packed), not half the size.
-        assert!(resident.is_none() || (train && cfg.lora.is_none() && dt == Dtype::F32 && !decode_only), "a resident low-precision build is a full fine-tune: training, no adapter, fp32 remainder");
-        let quantized = dt != Dtype::F32 || resident.is_some();
+        assert!(resident.is_none() || (train && cfg.lora.is_none() && !tiers.quantizes_anything() && !decode_only), "a resident low-precision build is a full fine-tune: training, no adapter, fp32 remainder");
+        let quantized = tiers.quantizes_anything() || resident.is_some();
         // A LoRA build freezes the embedding and the head, so a bf16 base
         // holds them in bf16 as well (on a device that runs the tier).
-        let lora_base_tier = train && cfg.lora.is_some() && FROZEN_LORA_TIERS.contains(&dt) && dt.promote(&ops.caps().numeric) == dt;
+        let lora_base_tier = train && cfg.lora.is_some() && tiers.dtypes().any(|dt| FROZEN_LORA_TIERS.contains(&dt) && dt.promote(&ops.caps().numeric) == dt);
         // An int8 base reads fp32 activations (its kernels decode the weight): the frozen int8 base of a LoRA build
         // and the resident int8 weights of a quantization-aware full fine-tune.
-        let int8_base = lora_base_tier && dt == Dtype::I8 || resident.is_some_and(|r| r.cfg.value == model::resident_ft::ResidentValue::Int8);
+        let int8_base = lora_base_tier && tiers.dtypes().any(|dt| dt == Dtype::I8) || resident.is_some_and(|r| r.cfg.value == model::resident_ft::ResidentValue::Int8);
         // The tables of a half-precision or int8 base are held in bf16.
         let half_tables = lora_base_tier && Dtype::BF16.promote(&ops.caps().numeric) == Dtype::BF16;
         assert!(!half_tables || cfg.d_model.is_multiple_of(2), "a bf16 table packs two values to a word, so d_model must be even");
@@ -1543,6 +1555,8 @@ impl Qwen {
             let specs = resident_specs(&cfg, &shard);
             model::resident_ft::ResidentFullFt::new(&ops, plan.cfg.clone(), specs, src, &plan.budget()).unwrap_or_else(|e| panic!("qwen: {e}"))
         });
+        // Host staging for tiled uploads: one tile at a time, whatever the tensor size.
+        let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(64 << 20, 0));
         let mut weights: HashMap<String, Weight> = HashMap::new();
         for l in shard.start..shard.end {
             for leaf in crate::q8::Q8::LINEARS {
@@ -1551,27 +1565,14 @@ impl Qwen {
                 let w = if let Some(ft) = &resident_ft {
                     ft.weight(ft.index_of(&name).expect("every per-layer linear is a resident tensor")).clone()
                 } else if quantized {
-                    let mut built: Option<Weight> = None;
-                    let found = src.with_tensor(&name, &mut |raw| {
-                        built = Some(Weight::upload(&ops, raw, wn, wk, dt));
-                    });
-                    if !found {
-                        panic!("qwen: missing init weight {name}");
-                    }
-                    // This tensor's f32 form was only ever needed transiently
-                    // to build `built` (`Weight::upload` already copied
-                    // whatever it needs into the device buffer) - an
-                    // mmap-backed source's pages behind it can go now. Unlike
-                    // `paramstore::new_with_roles_src`'s own per-tensor loop
-                    // (which drives EVERY quantized-off tensor, e.g. norms and
-                    // the embedding), this loop is the ONE place the 7
-                    // per-layer quantized linears - QKVO + MLP gate/up/down,
-                    // the overwhelming majority of a transformer's bytes -
-                    // are ever read, and it had no `advise_drop` call at all:
-                    // on a real int8 shard this was the dominant unreclaimed
-                    // page-cache source, not the (already-fixed) `ps` loop.
+                    // Each linear goes through the packed loader at ITS OWN tier: a checkpoint that stores it
+                    // packed streams tile by tile into the resident weight, never through a whole f32 tensor.
+                    let built = model::ops::upload_from_source(&ops, src, &name, wn, wk, tiers.want(&name), &staging).unwrap_or_else(|| panic!("qwen: missing init weight {name}"));
+                    // An mmap-backed source's pages behind this tensor can go now: this loop is the ONE place
+                    // the 7 per-layer quantized linears - QKVO + MLP gate/up/down, the overwhelming majority of
+                    // a transformer's bytes - are ever read.
                     src.advise_drop(&name);
-                    built.unwrap()
+                    built
                 } else {
                     Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
                 };
@@ -1582,9 +1583,8 @@ impl Qwen {
         let mut tables: HashMap<String, DeviceBuffer> = HashMap::new();
         if half_tables {
             for (name, _) in shard_param_list(&cfg, &shard).into_iter().filter(|(n, _)| is_table(n)) {
-                let mut built: Option<Weight> = None;
-                let found = src.with_tensor(&name, &mut |raw| built = Some(Weight::upload(&ops, raw, v as usize, d as usize, Dtype::BF16)));
-                assert!(found, "qwen: missing init weight {name}");
+                let built = model::ops::upload_from_source(&ops, src, &name, v as usize, d as usize, Dtype::BF16, &staging);
+                assert!(built.is_some(), "qwen: missing init weight {name}");
                 src.advise_drop(&name);
                 let Some(Weight::BF16 { w, .. }) = built else { unreachable!("a bf16 upload is a bf16 weight") };
                 tables.insert(name, w);
@@ -3877,6 +3877,31 @@ impl Qwen {
     /// linear whose tier could be reported.
     pub fn linear_dtype(&self) -> Option<Dtype> {
         self.weights.values().next().map(|w| w.dtype())
+    }
+
+    /// The tier of the per-layer linear `name` as it landed (`None` for a name that is not a linear of this stage).
+    pub fn linear_dtype_of(&self, name: &str) -> Option<Dtype> {
+        self.weights.get(name).map(Weight::dtype)
+    }
+
+    /// The format every resident per-layer linear and narrow table is held in, with its device bytes. A tier that
+    /// is a storage encoding is named by its encoding, so the rows compare directly with a checkpoint's
+    /// [`PackedSource::precision_report`](checkpoint::packed::PackedSource::precision_report). Parameters the
+    /// store holds (norms, adapters, fp32 tables) are f32.
+    pub fn precision_report(&self) -> checkpoint::packed::PrecisionReport {
+        let mut report = checkpoint::packed::PrecisionReport::default();
+        let tier_format = |dt: Dtype| model::ops::encoding_for(dt).map_or_else(|| dt.name().to_string(), |e| e.to_string());
+        for (name, w) in &self.weights {
+            report.push(name, vec![w.n() as u64, w.k() as u64], tier_format(w.dtype()), w.resident_bytes());
+        }
+        for (name, numel) in self.cfg.param_list() {
+            if self.tables.contains_key(&name) {
+                report.push(&name, vec![self.cfg.vocab as u64, self.cfg.d_model as u64], tier_format(Dtype::BF16), numel as u64 * 2);
+            } else if !self.weights.contains_key(&name) && self.ps.weight.contains_key(&name) {
+                report.push(&name, vec![numel as u64], tier_format(Dtype::F32), numel as u64 * 4);
+            }
+        }
+        report
     }
 
     /// Bytes the resident per-layer linears occupy on the device, at whatever

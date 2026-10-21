@@ -35,6 +35,8 @@ use checkpoint::packed::{Binding, CodecRegistry, PackedReader, PackedSource, Pac
 use checkpoint::TensorSource;
 use serde_json::Value;
 
+use model::ops::TierPolicy;
+
 use crate::config::Qwen35Config;
 use crate::import::{classify, is_plain_rmsnorm_weight};
 
@@ -137,31 +139,30 @@ impl PackedBase {
     }
 }
 
-/// Convert the layer matrices of the checkpoint in `dir` to `tier` ONCE, into a new checkpoint directory `out`:
-/// a single packed `model.safetensors` (every bound tensor under its stored name, the converted matrices as
+/// Convert the checkpoint in `dir` to the per-tensor formats of `tiers` ONCE, into a new checkpoint directory
+/// `out`: a single packed `model.safetensors` (every bound tensor under its stored name, converted tensors as
 /// codes plus scales, the rest as stored) and the config and tokenizer files copied beside it, so that
-/// [`PackedBase::open`] on `out` serves the matrices already in `tier` and a streamed trainer never converts on
-/// the host again. The conversion is the checkpoint crate's bounded tiled `Convert`: one tile of host staging
+/// [`PackedBase::open`] on `out` serves each tensor in its target format and a streamed trainer never converts
+/// on the host again. The conversion is the checkpoint crate's bounded tiled `Convert`: one tile of host staging
 /// ([`WEIGHT_STAGING_BYTES`]) at a time, the output never in memory.
 ///
-/// Only `Dtype::NF4` is a conversion target here; a matrix whose width is not a whole NF4 block stays as stored.
-pub fn write_converted_base(dir: &Path, cfg: &Qwen35Config, block: usize, out: &Path, tier: gpu_core::select::Dtype) -> Result<checkpoint::packed::ConversionReport, String> {
-    use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, Loader, MemoryBudget, QuantEncoding};
-    if tier != gpu_core::select::Dtype::NF4 {
-        return Err(format!("qwen35 conversion: {tier:?} is not a conversion target (NF4 is)"));
-    }
+/// A layer matrix takes `tiers.want(name)` (the policy's default applies); any other tensor (a norm gain, the
+/// embedding table, the head) is converted only when a rule of `tiers` names it, and is otherwise copied as
+/// stored. A tensor that cannot take its tier (a matrix whose width is not a whole block, a tier with no
+/// encoder) stays as stored; the report counts what changed.
+pub fn write_converted_base(dir: &Path, cfg: &Qwen35Config, block: usize, out: &Path, tiers: &TierPolicy) -> Result<checkpoint::packed::ConversionReport, String> {
+    use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, Loader, MemoryBudget};
     if out.join("model.safetensors").exists() {
         return Err(format!("qwen35 conversion: {} already holds a converted base", out.display()));
     }
     let reader = PackedReader::open(dir).map_err(|e| format!("qwen35 source: {e}"))?.with_fp8_block(block as u32);
     let bindings = bindings_for(&reader, cfg, &[])?;
     let matrices: std::collections::HashSet<String> = cfg.layer_types().iter().enumerate().flat_map(|(l, ty)| cfg.layer_leaves(*ty).into_iter().map(move |(suffix, _, _)| format!("blocks.{l}.{suffix}"))).collect();
-    let nf4 = QuantEncoding::nf4_blocked(32);
     let mut requests: Vec<(String, LoadPolicy)> = Vec::with_capacity(bindings.len());
     for (canon, binding) in &bindings {
         let desc = reader.descriptor(&binding.source)?;
-        let convertible = matrices.contains(canon) && desc.shape.len() == 2 && desc.shape[1] % 32 == 0;
-        requests.push((binding.source.clone(), if convertible { LoadPolicy::Convert(nf4.clone()) } else { LoadPolicy::Preserve }));
+        let tier = if matrices.contains(canon) { Some(tiers.want(canon)) } else { tiers.rule_for(canon) };
+        requests.push((binding.source.clone(), model::ops::conversion_policy(&desc, tier)));
     }
     let codecs = CodecRegistry::reference();
     let loader = Loader { reader: &reader, codecs: &codecs, workspace: BoundedWorkspace::new(MemoryBudget::new(WEIGHT_STAGING_BYTES, 0)), config: LoadConfig::default() };

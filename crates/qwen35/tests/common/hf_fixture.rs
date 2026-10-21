@@ -68,6 +68,22 @@ pub fn hf_leaf(suffix: &str) -> String {
 /// A fresh scratch dir holding the checkpoint; `skip` drops one canonical
 /// tensor (to test the refusal path).
 pub fn write_checkpoint(cfg: &Qwen35Config, tag: &str, skip: Option<&str>) -> PathBuf {
+    write_checkpoint_from(cfg, tag, skip, None)
+}
+
+/// [`write_checkpoint`] holding `values` (brain-canonical, as `qwen35::init::init_weights` makes them) in the
+/// same layout, every tensor bf16 (the recurrence's `A_log` f32) instead of random FP8 bytes: a model whose
+/// weights are sane enough to train, in a file the packed loader reads like the real release.
+pub fn write_dense_checkpoint(cfg: &Qwen35Config, tag: &str, values: &HashMap<String, Vec<f32>>) -> PathBuf {
+    write_checkpoint_from(cfg, tag, None, Some(values))
+}
+
+/// A plain RMSNorm gain is stored as `w` and applied as `1 + w` (`qwen35::import`).
+fn stored_as_offset_from_one(canon: &str) -> bool {
+    canon == "norm.weight" || canon.ends_with(".ln1.weight") || canon.ends_with(".ln2.weight") || canon.ends_with(".self_attn.q_norm.weight") || canon.ends_with(".self_attn.k_norm.weight")
+}
+
+fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dense: Option<&HashMap<String, Vec<f32>>>) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("qwen35_fp8_source_{tag}_{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
@@ -107,7 +123,7 @@ pub fn write_checkpoint(cfg: &Qwen35Config, tag: &str, skip: Option<&str>) -> Pa
         };
         // FP8-quantized in the real release: the big linears, except the GDN
         // in_proj_a/b gates (kept bf16, which also covers a mixed layer).
-        let fp8 = linear_shapes.contains_key(&canon) && !canon.contains("in_proj_a") && !canon.contains("in_proj_b");
+        let fp8 = dense.is_none() && linear_shapes.contains_key(&canon) && !canon.contains("in_proj_a") && !canon.contains("in_proj_b");
         let list = by_file.entry(file.clone()).or_default();
         weight_map.insert(hf.clone(), file.clone().into());
         if fp8 {
@@ -122,6 +138,14 @@ pub fn write_checkpoint(cfg: &Qwen35Config, tag: &str, skip: Option<&str>) -> Pa
             let sname = format!("{hf}_scale_inv");
             weight_map.insert(sname.clone(), file.clone().into());
             list.push(Raw { name: sname, dtype: "BF16", shape: vec![rb, cb], bytes: scales });
+        } else if let Some(values) = dense {
+            let offset = if stored_as_offset_from_one(&canon) { 1.0 } else { 0.0 };
+            let v = &values[&canon];
+            if canon.ends_with("A_log") {
+                list.push(Raw { name: hf, dtype: "F32", shape, bytes: v.iter().flat_map(|x| x.to_le_bytes()).collect() });
+            } else {
+                list.push(Raw { name: hf, dtype: "BF16", shape, bytes: v.iter().flat_map(|x| bf16(x - offset)).collect() });
+            }
         } else if canon.ends_with("A_log") {
             let bytes = (0..numel).flat_map(|_| rng.unit().to_le_bytes()).collect();
             list.push(Raw { name: hf, dtype: "F32", shape, bytes });

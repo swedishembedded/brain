@@ -16,13 +16,13 @@
 //! explicit Convert otherwise, never a whole-tensor f32 copy. A source without a packed view (or a tier
 //! the executor cannot produce) falls back to the f32 interface, which is bounded by one tensor.
 
-use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, LoadRequest, QuantEncoding};
+use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, LoadRequest, QuantEncoding, TensorDescriptor};
 use checkpoint::TensorSource;
 
 use super::{DeviceWeightSink, Dtype, Ops, TierPolicy, Weight, FP8_BLOCK};
 
 /// The encoding a resident tier holds, whatever the device: the tiers a tiled load can produce.
-fn encoding_for(want: Dtype) -> Option<QuantEncoding> {
+pub fn encoding_for(want: Dtype) -> Option<QuantEncoding> {
     Some(match want {
         Dtype::F32 => QuantEncoding::f32(),
         Dtype::BF16 => QuantEncoding::bf16(),
@@ -41,6 +41,14 @@ fn encoding_of(ops: &Ops, want: Dtype) -> Option<QuantEncoding> {
         return None;
     }
     encoding_for(want)
+}
+
+/// What a one-off conversion does to the stored tensor `desc` when asked for `tier`: `Convert` to the tier's
+/// encoding when the tier has one and `desc`'s shape can take it (a blocked encoding needs a whole number of
+/// blocks along the inner axis), otherwise `Preserve` (also for `None`, a tensor nobody asked to change).
+pub fn conversion_policy(desc: &TensorDescriptor, tier: Option<Dtype>) -> LoadPolicy {
+    let target = tier.and_then(encoding_for).filter(|enc| TensorDescriptor::new(&desc.name, desc.shape.clone(), enc.clone()).validate().is_ok());
+    target.map_or(LoadPolicy::Preserve, LoadPolicy::Convert)
 }
 
 /// The resident tier that holds tensor `name` of `src` exactly as the source stores it, or `None` when the source has
@@ -101,21 +109,53 @@ pub fn upload_from_source(ops: &Ops, src: &dyn TensorSource, name: &str, n: usiz
 }
 
 /// Upload the row-wise concatenation of tensors `names` (a fused `q|k|v` or `gate|up` projection) as one
-/// `[n_total, k]` weight of tier `want`. Packed sources join the parts' bytes without re-quantizing when
-/// their encodings agree; otherwise the parts are concatenated as f32 and uploaded. `None` when a part is
-/// missing.
-pub fn upload_fused_from_source(ops: &Ops, src: &dyn TensorSource, names: &[&str], n_total: usize, k: usize, want: Dtype, staging: &BoundedWorkspace) -> Option<Weight> {
-    if let Some(w) = upload_packed(ops, src, names, n_total, k, want, staging) {
-        return Some(w);
+/// `[n_total, k]` weight of tier `want`. Parts stored in one encoding join without re-quantizing; parts stored
+/// in different encodings are each converted to `want` tile by tile into their rows of the one weight (the
+/// explicit `Convert` request is `want` itself), so a fused group never passes through a whole f32 tensor.
+/// A source without a packed view of the parts concatenates them as f32 (each part is already f32 there).
+/// Errors name the group: a part is missing, or the packed parts cannot be joined as `want` (a part's rows
+/// are not whole tiles of the destination); load such a group as separate weights with
+/// [`upload_group_preserved`].
+pub fn upload_fused_from_source(ops: &Ops, src: &dyn TensorSource, names: &[&str], n_total: usize, k: usize, want: Dtype, staging: &BoundedWorkspace) -> Result<Weight, String> {
+    if names.iter().all(|n| src.packed_descriptor(n).is_some()) {
+        return upload_packed(ops, src, names, n_total, k, want, staging).ok_or_else(|| format!("{names:?} cannot be fused as {want:?} without an f32 round trip: load the parts as separate weights"));
     }
     let mut parts: Vec<Vec<f32>> = Vec::with_capacity(names.len());
     for name in names {
         let mut part = None;
         src.with_tensor(name, &mut |raw| part = Some(raw.to_vec()));
-        parts.push(part?);
+        parts.push(part.ok_or_else(|| format!("missing weight {name} among {names:?}"))?);
     }
     let refs: Vec<&[f32]> = parts.iter().map(Vec::as_slice).collect();
-    Some(Weight::upload(ops, &super::concat_rows_parallel(&refs), n_total, k, want))
+    Ok(Weight::upload(ops, &super::concat_rows_parallel(&refs), n_total, k, want))
+}
+
+/// A group of tensors that act as one fused projection, as resident weights.
+pub enum FusedGroup {
+    /// The parts share a stored encoding: one weight over all their rows.
+    Joined(Weight),
+    /// The parts are stored in different encodings: one weight per part, each in its stored encoding,
+    /// in the order of the names. A fused GEMM over them is not possible; the model runs the parts separately.
+    Split(Vec<Weight>),
+}
+
+/// Upload the group `names` (`ns[i]` rows each, `k` columns) in the encodings it is STORED in. Parts that
+/// share an encoding become one [`FusedGroup::Joined`] weight; a group of mixed encodings (FP8 attention next to
+/// bf16, NF4 `gate` next to FP8 `up`) is split into per-part weights, never widened to f32.
+pub fn upload_group_preserved(ops: &Ops, src: &dyn TensorSource, names: &[&str], ns: &[usize], k: usize, staging: &BoundedWorkspace) -> Result<FusedGroup, String> {
+    assert_eq!(names.len(), ns.len(), "one row count per part");
+    let config = LoadConfig::default();
+    let mut sink = DeviceWeightSink::new(ops);
+    let req = LoadRequest { policy: &LoadPolicy::Preserve, workspace: staging, config: &config };
+    if names.len() > 1 && src.load_packed(names, &req, &mut sink)?.is_some() {
+        let weight = sink.take_weight().ok_or_else(|| format!("{names:?}: a finished load produced no weight"))?;
+        if weight.n() as usize != ns.iter().sum::<usize>() || weight.k() as usize != k {
+            return Err(format!("{names:?}: fused shape [{}, {}], expected [{}, {k}]", weight.n(), weight.k(), ns.iter().sum::<usize>()));
+        }
+        return Ok(FusedGroup::Joined(weight));
+    }
+    let parts = names.iter().zip(ns).map(|(name, n)| upload_preserved(ops, src, name, *n, k, staging)).collect::<Result<Vec<_>, _>>()?;
+    Ok(if parts.len() == 1 { FusedGroup::Joined(parts.into_iter().next().expect("one part")) } else { FusedGroup::Split(parts) })
 }
 
 /// Upload tensor `name` of `src` as an `[n, k]` weight in the encoding it is STORED in - Preserve, no

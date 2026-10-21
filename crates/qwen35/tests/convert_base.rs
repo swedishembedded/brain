@@ -14,7 +14,7 @@
 
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
-use model::ops::{training_kernel_list, Ops, Weight};
+use model::ops::{training_kernel_list, Ops, TierPolicy, Weight};
 use qwen35::config::Qwen35Config;
 use qwen35::fp8_source::{write_converted_base, PackedBase};
 
@@ -33,7 +33,7 @@ fn a_base_converted_once_equals_the_base_converted_on_every_load() {
     let cfg = Qwen35Config { vocab: 64, n_layers: 4, ..Qwen35Config::tiny_i8() };
     let dir = write_checkpoint(&cfg, "convert_src", None);
     let out = std::env::temp_dir().join(format!("convert_base_out_{}", std::process::id()));
-    let report = write_converted_base(&dir, &cfg, BLOCK, &out, Dtype::NF4).expect("convert once");
+    let report = write_converted_base(&dir, &cfg, BLOCK, &out, &TierPolicy::uniform(Dtype::NF4)).expect("convert once");
     assert!(report.converted > 0 && report.converted < report.tensors, "the matrices convert, the norms and tables stay as stored: {report:?}");
 
     let ops = Ops::new(Gpu::new_cpu(training_kernel_list())).expect("Ops::new");
