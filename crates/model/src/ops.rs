@@ -1146,6 +1146,15 @@ pub struct Ops {
     tile_budget_bytes: u64,
     /// A tiny buffer bound to the `weight_decode` bindings a tier does not use.
     decode_dummy: std::sync::OnceLock<DeviceBuffer>,
+    /// The transfer handle tiled weight loads upload through, once [`Ops::enable_streamed_uploads`] set it.
+    uploads: std::sync::OnceLock<StreamedUploads>,
+}
+
+/// A transfer [`Gpu`] handle (own stream, bounded pinned staging ring) and the pinned-pool lease that pays for
+/// the ring; the lease goes back to the budget when the [`Ops`] drops.
+struct StreamedUploads {
+    gpu: Gpu,
+    _lease: checkpoint::packed::Lease,
 }
 
 mod sink;
@@ -1243,7 +1252,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm, tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new() })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new() })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
@@ -1361,6 +1370,25 @@ impl Ops {
 
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
+    }
+
+    /// The handle weight bytes are written through: the transfer handle once streamed uploads are enabled,
+    /// else the compute handle.
+    pub(crate) fn upload_gpu(&self) -> &Gpu {
+        self.uploads.get().map_or(&self.gpu, |u| &u.gpu)
+    }
+
+    /// Upload the weights of every tiled load ([`DeviceWeightSink`], so every `upload_*` call) through a transfer
+    /// handle of this device: its own stream, so a layer's bytes move while this handle's kernels run, and a
+    /// pinned staging ring of `staging_bytes` the bytes are copied through. The ring is leased from `budget`'s
+    /// [`Pool::Pinned`](checkpoint::packed::Pool::Pinned) for as long as this `Ops` lives, so the host memory a
+    /// streamed load adds is a configured number, not a function of the layer size. Results are bit-identical to
+    /// the plain path; on a device that cannot stage writes the handle uploads synchronously. Call it once,
+    /// before the first load; a second call is refused.
+    pub fn enable_streamed_uploads(&self, budget: &checkpoint::packed::MemoryBudget, staging_bytes: u64) -> Result<(), String> {
+        let lease = budget.lease(checkpoint::packed::Pool::Pinned, staging_bytes).map_err(|e| e.to_string())?;
+        let gpu = self.gpu.upload_handle(staging_bytes)?;
+        self.uploads.set(StreamedUploads { gpu, _lease: lease }).map_err(|_| "Ops::enable_streamed_uploads: uploads are already streamed".to_string())
     }
 
     /// Quantize rows `[xr0, xr0+rows)` of `x` (`[.., k]`) for every

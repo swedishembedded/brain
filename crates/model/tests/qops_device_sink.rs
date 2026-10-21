@@ -202,3 +202,44 @@ fn microscaling_tiers_preserve_their_bytes_and_decode_like_the_reference_codec()
         }
     }
 }
+
+/// Streaming the upload (a transfer handle with a bounded pinned staging ring, overlapping the compute stream)
+/// changes WHEN bytes move, never which: every tier loads to the same resident bytes as the plain path, odd tile
+/// cuts included, and the pinned memory the load held never exceeded the budget it leased.
+#[test]
+fn a_streamed_upload_is_bitwise_the_plain_upload_and_stays_inside_its_pinned_budget() {
+    use checkpoint::packed::{MemoryBudget, Pool};
+    let plain = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
+    let streamed = Ops::new(plain.gpu().share()).expect("Ops::new");
+    let budget = MemoryBudget::new(0, 64 << 10);
+    streamed.enable_streamed_uploads(&budget, 64 << 10).expect("a 64 KiB staging ring");
+    assert_eq!(budget.stats(Pool::Pinned).in_use, 64 << 10, "the ring is leased from the pinned pool for as long as the Ops lives");
+
+    let raw = Lcg::random().vec_scaled(N * K, 0.5);
+    let shape = vec![N as u64, K as u64];
+    let (n4p, n4s) = quantize_weight_lut4(&raw, N, K, &NF4_LUT);
+    let (f8p, f8s) = quantize_weight_fp8(&raw, N, K, Fp8Format::E4M3, 128);
+    let scale_bf16_bytes: Vec<u8> = f8s.iter().flat_map(|s| ((s.to_bits() >> 16) as u16).to_le_bytes()).collect();
+    type Case<'a> = (&'a str, QuantEncoding, Vec<u8>, Option<Vec<u8>>);
+    let cases: Vec<Case> = vec![
+        ("nf4", QuantEncoding::nf4_blocked(32), words_to_bytes(&n4p), Some(f32_bytes(&n4s))),
+        ("fp8 e4m3, bf16 tile scales", QuantEncoding::fp8_e4m3_tiled(128), words_to_bytes(&f8p), Some(scale_bf16_bytes)),
+        ("bf16", QuantEncoding::bf16(), words_to_bytes(&pack_bf16(&raw)), None),
+    ];
+    for (label, enc, payload, scale) in cases {
+        let desc = TensorDescriptor::new("w", shape.clone(), enc);
+        let quantum = desc.tile_quantum();
+        for tile in [desc.numel(), quantum, quantum * 5 + quantum * 3] {
+            let mut a = DeviceWeightSink::new(&plain);
+            load(&mut a, &desc, &payload, scale.as_deref(), tile).unwrap_or_else(|e| panic!("{label} plain: {e}"));
+            let mut b = DeviceWeightSink::new(&streamed);
+            load(&mut b, &desc, &payload, scale.as_deref(), tile).unwrap_or_else(|e| panic!("{label} streamed: {e}"));
+            let (wa, wb) = (a.take_weight().unwrap(), b.take_weight().unwrap());
+            let (da, db) = (decoded(&plain, &wa), decoded(&streamed, &wb));
+            assert!(da.iter().zip(&db).all(|(x, y)| x.to_bits() == y.to_bits()), "{label} (tile {tile}): the streamed weight differs from the plain one");
+        }
+    }
+    assert!(budget.stats(Pool::Pinned).high_water <= 64 << 10);
+    drop(streamed);
+    assert_eq!(budget.stats(Pool::Pinned).in_use, 0, "dropping the Ops returns the pinned lease");
+}

@@ -75,7 +75,8 @@ fn tier_of(enc: &QuantEncoding) -> Result<Tier, String> {
 }
 
 /// An in-order byte stream into a device buffer of whole words: tiles arrive ascending and contiguous, so a
-/// trailing partial word is carried to the next tile and only whole words are written.
+/// trailing partial word is carried to the next tile and only whole words are written. The buffer is allocated
+/// uninitialised: every word is written before the stream finishes.
 struct Stream {
     buf: DeviceBuffer,
     written: u64,
@@ -85,7 +86,7 @@ struct Stream {
 
 impl Stream {
     fn new(gpu: &Gpu, total_bytes: u64) -> Stream {
-        Stream { buf: gpu.storage(total_bytes.div_ceil(4)), written: 0, carry: Vec::new(), total_bytes }
+        Stream { buf: gpu.storage_uninit(total_bytes.div_ceil(4)), written: 0, carry: Vec::new(), total_bytes }
     }
 
     /// Where the next byte goes.
@@ -93,16 +94,24 @@ impl Stream {
         self.written + self.carry.len() as u64
     }
 
-    fn push(&mut self, gpu: &Gpu, bytes: &[u8]) {
-        let mut data = std::mem::take(&mut self.carry);
-        data.extend_from_slice(bytes);
-        let whole = data.len() / 4 * 4;
+    fn push(&mut self, gpu: &Gpu, mut bytes: &[u8]) {
+        if !self.carry.is_empty() {
+            let take = (4 - self.carry.len()).min(bytes.len());
+            self.carry.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if self.carry.len() < 4 {
+                return;
+            }
+            gpu.write_bytes_at(&self.buf, self.written / 4, &self.carry);
+            self.written += 4;
+            self.carry.clear();
+        }
+        let whole = bytes.len() / 4 * 4;
         if whole > 0 {
-            let words: Vec<u32> = data[..whole].as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
-            gpu.write_at(&self.buf, self.written / 4, &words);
+            gpu.write_bytes_at(&self.buf, self.written / 4, &bytes[..whole]);
             self.written += whole as u64;
         }
-        self.carry = data[whole..].to_vec();
+        self.carry.extend_from_slice(&bytes[whole..]);
     }
 
     /// Every byte arrived: flush a final partial word (zero padded, never read).
@@ -176,11 +185,11 @@ impl TensorSink for DeviceWeightSink<'_> {
         if k % group != 0 {
             return Err(format!("tensor '{}': K = {k} must be a multiple of {group} for this tier", dst.name));
         }
-        let gpu = self.ops.gpu();
+        let gpu = self.ops.upload_gpu();
         let scales = match (tier, dst.encoding.scales.last()) {
             (_, None) => None,
             (Tier::Micro(_), Some(_)) => Some(Scales::Bytes(Stream::new(gpu, dst.scale_bytes(dst.encoding.scales.len() - 1)))),
-            (_, Some(level)) => Some(Scales::F32 { buf: gpu.storage(dst.scale_numel(0)), from_bf16: level.format == FloatFormat::Bf16 }),
+            (_, Some(level)) => Some(Scales::F32 { buf: gpu.storage_uninit(dst.scale_numel(0)), from_bf16: level.format == FloatFormat::Bf16 }),
         };
         self.done = None;
         self.pending = Some(Pending { tier, n: n as u32, k: k as u32, payload: Stream::new(gpu, dst.payload_bytes()), scales, global: 1.0 });
@@ -189,7 +198,7 @@ impl TensorSink for DeviceWeightSink<'_> {
 
     fn write_tile(&mut self, dst: &TensorDescriptor, tile: &Tile<'_>) -> Result<(), String> {
         let mut p = self.pending.take().ok_or("DeviceWeightSink::write_tile before begin")?;
-        let gpu = self.ops.gpu();
+        let gpu = self.ops.upload_gpu();
         let range = dst.payload_range(&tile.elems);
         if range.start != p.payload.position() {
             return Err(format!("tensor '{}': tiles must arrive in order (tile starts at byte {}, expected {})", dst.name, range.start, p.payload.position()));
@@ -199,12 +208,12 @@ impl TensorSink for DeviceWeightSink<'_> {
             Some(Scales::F32 { buf, from_bf16 }) => {
                 let bytes = tile.scales.first().ok_or("a scaled tile carries its scales")?;
                 let at = dst.scale_range(0, &tile.elems).start;
-                let words: Vec<u32> = if *from_bf16 {
-                    bytes.as_chunks::<2>().0.iter().map(|c| (u16::from_le_bytes(*c) as u32) << 16).collect()
+                if *from_bf16 {
+                    let words: Vec<u32> = bytes.as_chunks::<2>().0.iter().map(|c| (u16::from_le_bytes(*c) as u32) << 16).collect();
+                    gpu.write_at(buf, at, &words);
                 } else {
-                    bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect()
-                };
-                gpu.write_at(buf, at, &words);
+                    gpu.write_bytes_at(buf, at, bytes);
+                }
             }
             Some(Scales::Bytes(stream)) => {
                 let last = dst.encoding.scales.len() - 1;
@@ -227,7 +236,7 @@ impl TensorSink for DeviceWeightSink<'_> {
 
     fn finish(&mut self, dst: &TensorDescriptor) -> Result<(), String> {
         let mut p = self.pending.take().ok_or("DeviceWeightSink::finish before begin")?;
-        let gpu = self.ops.gpu();
+        let gpu = self.ops.upload_gpu();
         let payload = p.payload.finish(gpu, "payload", &dst.name)?;
         let (n, k) = (p.n, p.k);
         let scales = match p.scales {
@@ -235,6 +244,9 @@ impl TensorSink for DeviceWeightSink<'_> {
             Some(Scales::Bytes(mut stream)) => Some(stream.finish(gpu, "scale", &dst.name)?),
             None => None,
         };
+        // The weight is complete: whatever handle uses it next waits for the writes (a no-op on the compute handle).
+        let written: Vec<&DeviceBuffer> = std::iter::once(&payload).chain(scales.as_ref()).collect();
+        gpu.flush_writes(&written);
         self.done = Some(match (p.tier, scales) {
             (Tier::F32, _) => Weight::F32 { w: payload, n, k },
             (Tier::Bf16, _) => Weight::BF16 { w: payload, n, k },
