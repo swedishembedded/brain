@@ -18,7 +18,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 ### Features
 
 - DPO, GRPO and top-K distillation are `ModelFit` visitors (`rl::fit::{DpoFit, GrpoFit, DistillFit}`) that run on every model family and frozen-base format its `ChatTrainer` declares; `model::acceptance` runs one LoRA workflow over qwen3, qwen35, qwen35moe and flux2 (`rl/tests/lora_acceptance.rs`)
-- qwen3 trains LoRA adapters over NF4 and block-scaled FP8 frozen bases and qwen35 over FP8 E4M3 and E5M2, through the shared quantized-execution contract; `ChatFineTune::base_format` names the format for any architecture and a format the architecture does not hold is refused by name. The conformance suite registers the nf4 and fp8 tiers and checks the weighted loss through the chunked head
+- qwen3 trains LoRA adapters over NF4 and block-scaled FP8 frozen bases and qwen35 over FP8 E4M3 and E5M2, through the shared quantized-execution contract; `ChatFineTune::base_format` and `PreferenceFineTune::base_format` name the format for any architecture and a format the architecture does not hold is refused by name. The conformance suite registers the nf4 and fp8 tiers and checks the weighted loss through the chunked head
 - `make check/env-writes` fails on an `env::set_var` or `remove_var` outside test code that is not on `scripts/gates/env-writes.allow`, where every entry carries the reason its writer owns the process
 
 ## [3.0.0] - 2026-10-19

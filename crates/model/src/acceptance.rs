@@ -105,6 +105,7 @@ pub fn run<A: LoraArch>(seed: u64) -> Result<(), String> {
         if !end.is_finite() || end >= A::overfit_ratio() * start {
             return Err(format!("{at}: loss {start} -> {end} after {} steps, wanted below {} of the start", A::steps(), A::overfit_ratio()));
         }
+        println!("acceptance: {at}: loss {start:.4} -> {end:.4} in {} steps", A::steps());
         if step.adapter_digest() == adapter {
             return Err(format!("{at}: no adapter tensor changed"));
         }

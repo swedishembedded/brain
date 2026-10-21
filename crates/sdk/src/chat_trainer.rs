@@ -59,6 +59,8 @@ pub(crate) struct ChatEntry {
     pub export: fn(&Path, &Path, &Path, Option<&Path>) -> Result<(), String>,
     pub preference: PreferenceFn,
     pub margins: MarginsFn,
+    /// The frozen-base formats the family's LoRA trainer holds.
+    pub lora_bases: model::policy::TrainBases,
     /// The family scores the exported adapter ([`Self::margins`]) rather than the resident model.
     pub scores_exported_pairs: bool,
 }
@@ -72,6 +74,7 @@ impl ChatEntry {
             export: T::export_checkpoint,
             preference: preference::<T>,
             margins: T::preference_margins,
+            lora_bases: T::LORA_BASES,
             scores_exported_pairs: T::SCORES_EXPORTED_PAIRS,
         }
     }

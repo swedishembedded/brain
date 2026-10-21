@@ -86,6 +86,7 @@ pub struct PreferenceFineTune {
     checkpoint_every: u32,
     cycle: u64,
     device: Device,
+    base_format: Option<String>,
 }
 
 impl PreferenceFineTune {
@@ -115,7 +116,18 @@ impl PreferenceFineTune {
             checkpoint_every: 0,
             cycle: 0,
             device: Device::default(),
+            base_format: None,
         }
+    }
+
+    /// Hold the frozen base in the named format (`f32`, `bf16`, `int8`, `nf4`, `fp8`; default
+    /// `f32`): the policy trains its adapter over that base, the starting policy being the
+    /// reference. A format the architecture's trainer does not hold is refused naming the
+    /// architecture and the formats it does. An architecture that scores pairs from the exported
+    /// adapter (qwen3) scores them on the fp32 base.
+    pub fn base_format(mut self, spec: impl Into<String>) -> Self {
+        self.base_format = Some(spec.into());
+        self
     }
 
     /// The architecture of the base (a `brain_arch` id; default `qwen3`).
@@ -297,6 +309,10 @@ impl PreferenceFineTune {
         let render = data::chat::RenderOpts { keep_reasoning: self.keep_reasoning };
         let train = encode_checked(dataset, &tok, &tmpl, self.max_block, render)?;
         let held_out = self.held_out.as_deref().map(|path| encode_checked(path, &tok, &tmpl, None, render)).transpose()?;
+        let base_format = match self.base_format.as_deref() {
+            Some(spec) => chat.lora_bases.parse(spec).map_err(Error::Backend)?,
+            None => gpu_core::select::Dtype::F32,
+        };
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha, Default::default())?;
         let block = block_for(longest(&train), self.max_block)?;
         let seq_len = block as usize;
@@ -376,7 +392,7 @@ impl PreferenceFineTune {
         };
         let job = PreferenceJob {
             base: &weights,
-            lora: model::finetune::LoraRequest { rank, alpha, continue_from: self.continue_from.as_deref(), base: gpu_core::select::Dtype::F32 },
+            lora: model::finetune::LoraRequest { rank, alpha, continue_from: self.continue_from.as_deref(), base: base_format },
             opts: &opts,
             dpo: rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight },
             pairs: packed,

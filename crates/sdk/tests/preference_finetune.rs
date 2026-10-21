@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use brain::{FineTuneStatus, PreferenceFineTune};
 
 mod chat_fixture;
-use chat_fixture::{chat_model_dir, cpu};
+use chat_fixture::{chat_model_dir, chat_model_dir_of, cpu};
 
 /// One `generic-preference-v1` line: a user turn, the preferred answer and
 /// the answer to prefer it over.
@@ -74,6 +74,25 @@ fn a_preference_dataset_is_validated_against_the_base() {
 
     let err = fine_tune(&model, &model.join("run")).max_block(4).run().unwrap_err();
     assert!(err.to_string().contains("max_block"), "{err}");
+}
+
+/// DPO over a quantized frozen base: the policy trains its adapter over the base held in the
+/// named format, the starting policy is the reference (the first loss is exactly `ln 2`), the
+/// margin on the training pairs rises, and a format the architecture does not hold is refused by
+/// name before anything is read.
+#[test]
+fn dpo_trains_over_the_base_format_it_is_given() {
+    let model = chat_model_dir_of("pref-formats", qwen3::QwenConfig::tiny_i8());
+    for format in ["bf16", "nf4", "fp8"] {
+        let outcome = fine_tune(&model, &model.join(format!("run-{format}"))).base_format(format).run().unwrap_or_else(|e| panic!("{format}: {e}"));
+        assert_eq!(outcome.status, FineTuneStatus::Completed, "{format}");
+        let initial = outcome.initial_loss.expect("measured");
+        assert!((initial - std::f32::consts::LN_2).abs() < 1e-3, "{format}: the starting policy is the reference: {initial}");
+        let last = outcome.final_loss.expect("measured");
+        assert!(last.is_finite() && last < initial, "{format}: DPO loss {initial} -> {last}");
+    }
+    let err = fine_tune(&model, &model.join("run-refused")).base_format("fp3").run().unwrap_err().to_string();
+    assert!(err.contains("fp3") && err.contains("qwen3"), "{err}");
 }
 
 /// DPO from a fresh adapter: the reference is the starting model, so the
