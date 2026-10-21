@@ -59,7 +59,7 @@ fn builds<M: 'static>(arch: &'static str, encodings: &[Dtype], make: fn(u32, u32
 }
 
 fn qwen3_builds() -> Vec<Build<qwen3::Qwen>> {
-    builds("qwen3", &[Dtype::BF16, Dtype::I8], arch_builds::qwen3)
+    builds("qwen3", &[Dtype::BF16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3], arch_builds::qwen3)
 }
 
 fn qwen35_builds() -> Vec<Build<qwen35::model::Qwen35>> {

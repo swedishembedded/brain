@@ -26,8 +26,8 @@ import re
 import sys
 from pathlib import Path
 
-CAPS = {"full_ft", "lora_f32", "lora_bf16", "lora_int8", "lora_nf4", "other", "adapter_serving", "quant_serving", "kv_tiers", "load"}
-TIER_CAP = {"bf16": "lora_bf16", "int8": "lora_int8", "nf4": "lora_nf4", "f32": "lora_f32"}
+CAPS = {"full_ft", "lora_f32", "lora_bf16", "lora_int8", "lora_nf4", "lora_fp8", "other", "adapter_serving", "quant_serving", "kv_tiers", "load"}
+TIER_CAP = {"bf16": "lora_bf16", "int8": "lora_int8", "nf4": "lora_nf4", "fp8": "lora_fp8", "f32": "lora_f32"}
 
 HEAD = """# Training and serving capability matrix
 
@@ -48,7 +48,7 @@ unit test). A test that needs a real checkpoint or a CUDA card is marked
 TABLES = [
     ("Language models", ["qwen3", "qwen35", "qwen35moe", "glmdsa"],
      [("full_ft", "Full fine-tune"), ("lora_f32", "LoRA, fp32 base"), ("lora_bf16", "LoRA, bf16 base"),
-      ("lora_int8", "LoRA, int8 base"), ("lora_nf4", "LoRA, NF4 base (QLoRA)"), ("other", "Other")],
+      ("lora_int8", "LoRA, int8 base"), ("lora_nf4", "LoRA, NF4 base (QLoRA)"), ("lora_fp8", "LoRA, FP8 base"), ("other", "Other")],
      "No architecture offers a full fine-tune over a quantized or fp8 base, and\nnone stores trainable parameters or optimizer moments below fp32.\n"),
     ("Image and video generators", ["flux2", "s3dit", "wan"],
      [("lora_f32", "LoRA, fp32 base"), ("lora_int8", "LoRA, int8 base"), ("other", "Other")], ""),
@@ -56,9 +56,10 @@ TABLES = [
      [("adapter_serving", "Adapters while serving"), ("quant_serving", "Quantized weights while serving"), ("kv_tiers", "KV tiers")], ""),
 ]
 TAIL = """
-Training over an FP8, NVFP4 or MX checkpoint without expanding it is not
-available: there is no such `Weight` variant. The contributor roadmap for these
-gaps is `.agents/roadmap/quantized-training.md`.
+A LoRA adapter trains over an FP8 base on qwen3 and qwen35. NVFP4 and MX
+checkpoints have `Weight` storage and execution but no model's LoRA trainer
+offers them as a base yet. The contributor roadmap for these gaps is
+`.agents/roadmap/quantized-training.md`.
 """
 
 

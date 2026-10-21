@@ -54,7 +54,7 @@ brain januspro finetune --mode understanding|generation --weights deepseek-ai/Ja
     --dataset DIR --out DIR [--rank 16 --steps 200 --lr 1e-4 --aligner-lr X --cfg-dropout 0.1 ...]
 ```
 
-Both modes train a LoRA over the frozen bf16 decoder (`--base-dtype f32` to
+Both modes train a LoRA over the frozen bf16 decoder (`--base-format f32` to
 hold it at fp32) and read the checkpoint as downloaded; nothing is written
 beside it. The flags are `brain deepseekvl finetune`'s.
 

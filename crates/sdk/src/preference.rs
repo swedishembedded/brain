@@ -376,7 +376,7 @@ impl PreferenceFineTune {
         };
         let job = PreferenceJob {
             base: &weights,
-            lora: model::finetune::LoraRequest { rank, alpha, continue_from: self.continue_from.as_deref() },
+            lora: model::finetune::LoraRequest { rank, alpha, continue_from: self.continue_from.as_deref(), base: gpu_core::select::Dtype::F32 },
             opts: &opts,
             dpo: rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight },
             pairs: packed,

@@ -1171,6 +1171,18 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let n = p(0)? * p(1)?;
             f(0, 8 * n)
         }
+        // Decode a window of rows of any packed tier to an f32 tile; params [row0, rows, k, ..]: one scale
+        // multiply and a few integer ops per decoded element, about a byte read and four written.
+        "weight_decode" => {
+            let n = p(1)? * p(2)?;
+            c(n, 4 * n, 5 * n)
+        }
+        // Add an f32 tile into a packed bf16 gradient and clear the tile; params [words, elem0]: one add and
+        // one rounding per packed word, the tile read and cleared and the gradient read and written.
+        "accum_bf16" => {
+            let words = p(0)?;
+            f(2 * words, 28 * words)
+        }
         // One read of each row for both outputs: an online max/sum-exp per
         // element, then the loss and the two statistics per row.
         "ce_value_stats_rows" => {
@@ -2114,6 +2126,15 @@ mod tests {
              A kernel without a formula makes every pass that dispatches it unable \
              to report a rate. Uncovered: {uncovered:?}"
         );
+    }
+
+    #[test]
+    fn the_quantized_execution_kernels_are_costed() {
+        // Every variant of the tile decode costs by its decoded elements: rows 8 x k 64.
+        let decode = kernel_cost("weight_decode#FMT=4", Some(&[0, 8, 64, 32, 2, 0, 0, 0]), 512).expect("weight_decode is costed");
+        assert_eq!(decode.flops, 512);
+        // The bf16 gradient accumulation costs by its packed words.
+        assert_eq!(kernel_cost("accum_bf16", Some(&[10, 0]), 10).expect("accum_bf16 is costed").flops, 20);
     }
 
     #[test]

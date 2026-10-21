@@ -127,7 +127,7 @@ enum ChatFamily {
     /// Int8 over bf16 over fp32.
     Qwen3(qwen3::Dtype),
     /// NF4 over bf16 over fp32 (the 27B trains on one card only at the first two).
-    Qwen35(qwen35::base_source::BaseDtype),
+    Qwen35(qwen3::Dtype),
 }
 
 /// A trained LoRA, whichever trainer produced it.
@@ -158,13 +158,12 @@ impl ChatFamily {
             })),
             "qwen35" if int8 => Err(Error::Backend("ChatFineTune: int8_base is a qwen3 tier; qwen35 holds its base at fp32, bf16 or nf4".to_string())),
             "qwen35" => {
-                use qwen35::base_source::BaseDtype;
                 Ok(ChatFamily::Qwen35(if nf4 {
-                    BaseDtype::Nf4
+                    qwen3::Dtype::NF4
                 } else if bf16 {
-                    BaseDtype::Bf16
+                    qwen3::Dtype::BF16
                 } else {
-                    BaseDtype::F32
+                    qwen3::Dtype::F32
                 }))
             }
             other => Err(Error::Unsupported(model::training::Unsupported::new(other, Capability::ChatLoraFineTune))),
@@ -177,7 +176,7 @@ impl ChatFamily {
             ChatFamily::Qwen3(qwen3::Dtype::I8) => "int8",
             ChatFamily::Qwen3(qwen3::Dtype::BF16) => "bf16",
             ChatFamily::Qwen3(_) => "f32",
-            ChatFamily::Qwen35(dtype) => dtype.name(),
+            ChatFamily::Qwen35(dtype) => model::policy::format_name(*dtype),
         }
     }
 
@@ -190,9 +189,9 @@ impl ChatFamily {
                 BaseTierChoice::F32 => qwen3::Dtype::F32,
             }),
             ChatFamily::Qwen35(_) => ChatFamily::Qwen35(match tier {
-                BaseTierChoice::Bf16 => qwen35::base_source::BaseDtype::Bf16,
-                BaseTierChoice::Quantised => qwen35::base_source::BaseDtype::Nf4,
-                BaseTierChoice::F32 => qwen35::base_source::BaseDtype::F32,
+                BaseTierChoice::Bf16 => qwen3::Dtype::BF16,
+                BaseTierChoice::Quantised => qwen3::Dtype::NF4,
+                BaseTierChoice::F32 => qwen3::Dtype::F32,
             }),
         }
     }
@@ -260,7 +259,7 @@ impl ChatFamily {
                 Ok((report, TrainedLora::Qwen3(trained), Vec::new()))
             }
             ChatFamily::Qwen35(dtype) => {
-                let run = qwen35::finetune::StreamedRun { dtype: *dtype, recompute: dtype.is_frozen_only(), long: qwen35::finetune::LongSeqOverrides::default() };
+                let run = qwen35::finetune::StreamedRun { dtype: *dtype, recompute: qwen35::base_source::is_frozen_only(*dtype), long: qwen35::finetune::LongSeqOverrides::default() };
                 let (report, trained, scored) = qwen35::finetune::finetune_lora_scored_tuned(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &run, control, held_out)?;
                 Ok((report, TrainedLora::Qwen35(Box::new(trained)), scored))
             }
@@ -1633,7 +1632,6 @@ mod tests {
 #[cfg(test)]
 mod base_tier_tests {
     use super::ChatFamily;
-    use qwen35::base_source::BaseDtype;
     use qwen3::Dtype;
 
     fn qwen3_tier(bf16: bool, int8: bool) -> Dtype {
@@ -1643,7 +1641,7 @@ mod base_tier_tests {
         }
     }
 
-    fn qwen35_tier(bf16: bool, nf4: bool) -> BaseDtype {
+    fn qwen35_tier(bf16: bool, nf4: bool) -> Dtype {
         match ChatFamily::of("qwen35", bf16, false, nf4).unwrap() {
             ChatFamily::Qwen35(tier) => tier,
             ChatFamily::Qwen3(_) => unreachable!(),
@@ -1656,9 +1654,9 @@ mod base_tier_tests {
         assert_eq!(qwen3_tier(true, false), Dtype::BF16);
         assert_eq!(qwen3_tier(true, true), Dtype::I8);
         assert_eq!(qwen3_tier(false, true), Dtype::I8);
-        assert_eq!(qwen35_tier(false, false), BaseDtype::F32);
-        assert_eq!(qwen35_tier(true, false), BaseDtype::Bf16);
-        assert_eq!(qwen35_tier(true, true), BaseDtype::Nf4);
+        assert_eq!(qwen35_tier(false, false), Dtype::F32);
+        assert_eq!(qwen35_tier(true, false), Dtype::BF16);
+        assert_eq!(qwen35_tier(true, true), Dtype::NF4);
     }
 
     #[test]

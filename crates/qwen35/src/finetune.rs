@@ -21,7 +21,7 @@ use model::saved::{SavedFormat, SavedPolicy};
 use model::adapter::device::AdapterTuning;
 use model::FitOpts;
 
-use crate::base_source::{lora_base_tuned, open_base, BaseCheckpoint, BaseDtype};
+use crate::base_source::{is_frozen_only, lora_base_tuned, open_base, BaseCheckpoint};
 use crate::config::{lora_targets, LoraCfg, Qwen35Config};
 use crate::model::{pipelines, Qwen35, TrainOpts};
 
@@ -129,11 +129,11 @@ const LONG_STEP_TOKENS: u32 = 8192;
 /// and at 65.8 GiB with 512/1024, while the larger settings cut the launches of a
 /// step from 214,927 to 74,191 (knowledge 311). Both are whole multiples
 /// of the 64-token chunk and of the convolution history the segments carry.
-fn long_settings(dtype: BaseDtype) -> (u32, u32) {
-    match dtype {
-        BaseDtype::Nf4 => (2048, 2048),
-        BaseDtype::Bf16 => (2048, 2048),
-        BaseDtype::F32 => (128, 512),
+fn long_settings(dtype: Dtype) -> (u32, u32) {
+    if is_frozen_only(dtype) {
+        (2048, 2048)
+    } else {
+        (128, 512)
     }
 }
 
@@ -155,7 +155,7 @@ pub struct LongSeqOverrides {
 #[derive(Clone, Copy, Debug)]
 pub struct StreamedRun {
     /// Device storage tier of the frozen base.
-    pub dtype: BaseDtype,
+    pub dtype: Dtype,
     /// Rebuild each layer's activations in the backward instead of keeping them.
     pub recompute: bool,
     /// Explicit long-sequence settings.
@@ -233,17 +233,12 @@ fn streamed_train_opts(run: &StreamedRun, batch: u32, block: u32, mtp: bool) -> 
     if (bf16_residuals || mlp_rows.is_some()) && !run.recompute {
         return Err("a bf16 residual stream and chunked MLP rows need --recompute on".into());
     }
-    let tier = match run.dtype {
-        BaseDtype::F32 => Dtype::F32,
-        BaseDtype::Bf16 => Dtype::BF16,
-        BaseDtype::Nf4 => Dtype::NF4,
-    };
     let saved = match (run.recompute, bf16_residuals) {
         (false, _) => SavedPolicy::Keep,
         (true, false) => SavedPolicy::Recompute,
         (true, true) => SavedPolicy::Quantized(SavedFormat::Bf16),
     };
-    Ok(TrainOpts { base: TierPolicy::uniform(tier), saved, gdn_segment_tokens, mlp_rows, ..TrainOpts::default() })
+    Ok(TrainOpts { base: TierPolicy::uniform(run.dtype), saved, gdn_segment_tokens, mlp_rows, ..TrainOpts::default() })
 }
 
 /// LoRA fine-tune on a frozen base that is STREAMED from `base` (a
@@ -269,7 +264,7 @@ pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, o
 pub fn finetune_streamed_named(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, run: &StreamedRun, naming: &AdapterNaming) -> std::io::Result<(f32, f32)> {
     let (card_id, base_id) = adapter_card(base, naming).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidInput, why))?;
     let Mode::Lora { rank, alpha, tuning } = mode else {
-        return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", run.dtype.name())));
+        return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", model::policy::format_name(run.dtype))));
     };
     let resume_from = resume.then(|| Path::new(out)).filter(|p| p.exists());
     let mut progress = step_progress();
@@ -323,7 +318,7 @@ pub fn finetune_lora_tuned(
 /// `run.dtype` and streamed from disk, sized for `opts`' rows.
 fn build_lora_model(base: &Path, opts: &FitOpts, rank: u32, alpha: f32, tuning: AdapterTuning, resume_from: Option<&Path>, run: &StreamedRun) -> std::io::Result<Qwen35> {
     if tuning.kind == model::adapter::DeviceKind::Dora {
-        return Err(unsupported(format!("a dora adapter reads the base weight, which a {} base does not keep as fp32; train it with --base-dtype f32", run.dtype.name())));
+        return Err(unsupported(format!("a dora adapter reads the base weight, which a {} base does not keep as fp32; train it with --base-format f32", model::policy::format_name(run.dtype))));
     }
     let (dtype, recompute) = (run.dtype, run.recompute);
     // One micro-step of more than a few thousand tokens only fits the card with
@@ -337,7 +332,7 @@ fn build_lora_model(base: &Path, opts: &FitOpts, rank: u32, alpha: f32, tuning: 
             "batch {} x seq-len {} is {tokens} tokens per micro-step; a {} base trains up to {LONG_STEP_TOKENS} tokens per micro-step in a batch wider than one. Use --batch 1 with --grad-accum {} for the same effective batch",
             opts.batch_size,
             opts.block_size,
-            dtype.name(),
+            model::policy::format_name(dtype),
             opts.batch_size * opts.grad_accum.max(1),
         )));
     }
@@ -347,7 +342,7 @@ fn build_lora_model(base: &Path, opts: &FitOpts, rank: u32, alpha: f32, tuning: 
     let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &src, &train);
     eprintln!(
         "qwen35 finetune: base loaded as {} in {:.1}s (gdn segment {:?}, mlp rows {:?}, saved activations {})",
-        dtype.name(),
+        model::policy::format_name(dtype),
         t_load.elapsed().as_secs_f64(),
         train.gdn_segment_tokens,
         train.mlp_rows,
@@ -363,6 +358,7 @@ pub struct Qwen35Trainer;
 
 impl model::finetune::ChatTrainer for Qwen35Trainer {
     type Trained = Qwen35;
+    const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35", bases: crate::base_source::LORA_BASES };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {
         qwen3::store_checkpoint_path(weights, model_dir)
@@ -381,7 +377,7 @@ impl model::finetune::ChatTrainer for Qwen35Trainer {
     }
 
     fn train_lora(base: &Path, lora: &model::finetune::LoraRequest<'_>, opts: &FitOpts, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Qwen35)> {
-        let run = StreamedRun { dtype: BaseDtype::F32, recompute: false, long: LongSeqOverrides::default() };
+        let run = StreamedRun { dtype: lora.checked::<Self>()?, recompute: false, long: LongSeqOverrides::default() };
         let m = model::finetune::OptimizerState::Device.scope(|| build_lora_model(base, opts, lora.rank, lora.alpha, AdapterTuning::default(), lora.continue_from, &run))?;
         fit.fit(m)
     }
@@ -451,7 +447,7 @@ mod tests {
     use super::*;
 
     fn run(recompute: bool, long: LongSeqOverrides) -> StreamedRun {
-        StreamedRun { dtype: BaseDtype::Nf4, recompute, long }
+        StreamedRun { dtype: Dtype::NF4, recompute, long }
     }
 
     fn bf16_residuals(o: &TrainOpts) -> bool {
@@ -462,7 +458,7 @@ mod tests {
     fn long_rows_at_batch_one_default_to_the_long_sequence_settings() {
         let o = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2048, false).unwrap();
         assert_eq!((o.gdn_segment_tokens, o.mlp_rows, bf16_residuals(&o)), (Some(2048), Some(2048), true));
-        let bf16 = StreamedRun { dtype: BaseDtype::Bf16, recompute: true, long: LongSeqOverrides::default() };
+        let bf16 = StreamedRun { dtype: Dtype::BF16, recompute: true, long: LongSeqOverrides::default() };
         let o = streamed_train_opts(&bf16, 1, 8192, false).unwrap();
         assert_eq!((o.gdn_segment_tokens, o.mlp_rows), (Some(2048), Some(2048)), "the bf16 base fits the same settings (67.1 GiB peak at 64 layers, 8K)");
         let short = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2047, false).unwrap();
@@ -537,7 +533,7 @@ mod tests {
     /// stay whole multiples of the 64-token GDN chunk.
     #[test]
     fn long_settings_follow_the_base_footprint() {
-        let (nf4, bf16, f32) = (long_settings(BaseDtype::Nf4), long_settings(BaseDtype::Bf16), long_settings(BaseDtype::F32));
+        let (nf4, bf16, f32) = (long_settings(Dtype::NF4), long_settings(Dtype::BF16), long_settings(Dtype::F32));
         assert!(nf4.0 >= bf16.0 && bf16.0 >= f32.0, "segments: {nf4:?} {bf16:?} {f32:?}");
         assert!(nf4.1 >= bf16.1 && bf16.1 >= f32.1, "MLP rows: {nf4:?} {bf16:?} {f32:?}");
         for (seg, rows) in [nf4, bf16, f32] {

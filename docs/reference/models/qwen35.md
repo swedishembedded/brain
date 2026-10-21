@@ -242,7 +242,7 @@ self-skipping loudly without either).
 Three LoRA paths exist, at very different scales:
 
 - **Frozen bf16 / NF4 base (the 27B on one GPU)** - `brain qwen35 finetune
-  --base-dtype bf16|nf4` streams the FP8 checkpoint directory tensor by tensor
+  --base-format bf16|nf4|fp8` streams the FP8 checkpoint directory tensor by tensor
   (`crate::fp8_source`, bit-identical to the eager importers, about 1 GiB of host
   memory for the whole 27B) into a frozen device base; the flags and tier limits
   are in [`docs/guides/training/lora.md`](../../guides/training/lora.md#qwen38-27b-brain-qwen35-finetune),

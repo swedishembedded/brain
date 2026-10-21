@@ -32,7 +32,7 @@ struct Qwen3;
 impl LoraArch for Qwen3 {
     const NAME: &'static str = "qwen3";
     fn encodings() -> Vec<Dtype> {
-        vec![Dtype::F32, Dtype::BF16, Dtype::I8]
+        vec![Dtype::F32, Dtype::BF16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3]
     }
     fn build(encoding: Dtype, seed: u64) -> Box<dyn LoraStep> {
         let (m, held) = arch_builds::qwen3(BATCH, SEQ, seed, encoding);

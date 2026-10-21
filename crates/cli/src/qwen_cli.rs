@@ -852,16 +852,13 @@ fn finetune_lora(args: &[String]) {
                 })
             }
             "--keep-reasoning" => keep_reasoning = true,
-            "--base-dtype" => {
-                base_dtype = match val(args, &mut i, "--base-dtype").as_str() {
-                    "f32" => gpu_core::select::Dtype::F32,
-                    "bf16" => gpu_core::select::Dtype::BF16,
-                    "int8" => gpu_core::select::Dtype::I8,
-                    other => {
-                        eprintln!("--base-dtype {other:?}: expected f32, bf16 or int8");
-                        std::process::exit(2)
-                    }
-                }
+            // `--base-dtype` is the earlier spelling of `--base-format`.
+            "--base-format" | "--base-dtype" => {
+                let flag = args[i].clone();
+                base_dtype = qwen3::finetune::TRAIN_BASES.parse(&val(args, &mut i, &flag)).unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(2)
+                })
             }
             "--weight-decay" => hyper.weight_decay = num(&mut i, "--weight-decay"),
             "--grad-clip" => hyper.grad_clip = num(&mut i, "--grad-clip"),
@@ -897,7 +894,7 @@ fn finetune_lora(args: &[String]) {
     if base.is_empty() || adapter_spec.is_empty() || dataset_dir.is_empty() {
         eprintln!(
             "usage: brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR \
-             [--patience N] [--lora-targets wq,wk,...] [--keep-reasoning] [--base-dtype f32|bf16|int8] [--grad-accum N] \
+             [--patience N] [--lora-targets wq,wk,...] [--keep-reasoning] [--base-format f32|bf16|int8|nf4|fp8] [--grad-accum N] \
              [--weight-decay W --grad-clip C --warmup N --min-lr X --beta1 B --beta2 B --adam-eps E] \
              [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID] [--fresh]"
         );

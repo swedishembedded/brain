@@ -215,11 +215,17 @@ impl PolicySupport {
 }
 
 /// The name a person writes for a weight format (`int8`, not the engine's `i8`).
-fn pretty(d: Dtype) -> &'static str {
+pub fn format_name(d: Dtype) -> &'static str {
     match d {
         Dtype::I8 => "int8",
+        Dtype::F8E4M3 => "fp8",
+        Dtype::F8E5M2 => "fp8e5m2",
         other => other.name(),
     }
+}
+
+fn pretty(d: Dtype) -> &'static str {
+    format_name(d)
 }
 
 fn names(d: &[Dtype]) -> String {
@@ -235,6 +241,8 @@ fn canonical_weights(spec: &str) -> String {
         "int4" => "q4".to_string(),
         "fp32" => "f32".to_string(),
         "fp16" => "f16".to_string(),
+        "fp8" | "fp8e4m3" => "f8e4m3".to_string(),
+        "fp8e5m2" => "f8e5m2".to_string(),
         other => other.to_string(),
     };
     spec.split(',')
@@ -244,6 +252,36 @@ fn canonical_weights(spec: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// The frozen-base formats a LoRA trainer holds its base in, declared by the
+/// model the way [`PolicySupport`] declares serving formats: one flag
+/// (`--base-format`) is parsed once, and a format the model cannot train over is
+/// refused naming the model and its supported set.
+#[derive(Clone, Copy, Debug)]
+pub struct TrainBases {
+    /// The model's display name, used in every error.
+    pub model: &'static str,
+    /// The formats its LoRA trainer can hold the frozen base in.
+    pub bases: &'static [Dtype],
+}
+
+impl TrainBases {
+    /// `base` if this model can train over it.
+    pub fn check(&self, base: Dtype) -> Result<Dtype, String> {
+        if self.bases.contains(&base) {
+            Ok(base)
+        } else {
+            Err(format!("{}: a LoRA base held as {} is not supported; supported: {}", self.model, format_name(base), names(self.bases)))
+        }
+    }
+
+    /// A `--base-format` value (`f32|bf16|f16|int8|q4|nf4|fp8|fp8e5m2`), checked.
+    pub fn parse(&self, spec: &str) -> Result<Dtype, String> {
+        let tier = canonical_weights(spec);
+        let base = Dtype::from_name(&tier).ok_or_else(|| format!("--base-format {spec:?}: not a weight format; {} supports {}", self.model, names(self.bases)))?;
+        self.check(base)
+    }
 }
 
 /// A deprecated architecture-prefixed flag and what replaces it.
@@ -310,6 +348,17 @@ pub fn deprecation_warning(old: &str, r: Replacement) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_train_base_is_parsed_once_and_an_unsupported_one_names_the_model_and_its_set() {
+        const BASES: TrainBases = TrainBases { model: "toy-llm", bases: &[Dtype::F32, Dtype::I8, Dtype::NF4, Dtype::F8E4M3] };
+        assert_eq!(BASES.parse("int8"), Ok(Dtype::I8));
+        assert_eq!(BASES.parse("fp8"), Ok(Dtype::F8E4M3));
+        assert_eq!(BASES.parse("NF4"), Ok(Dtype::NF4));
+        let err = BASES.parse("bf16").unwrap_err();
+        assert!(err.contains("toy-llm") && err.contains("bf16") && err.contains("f32, int8, nf4, fp8"), "{err}");
+        assert!(BASES.parse("fp3").unwrap_err().contains("not a weight format"));
+    }
 
     const LLM: PolicySupport = PolicySupport {
         model: "toy-llm",

@@ -27,7 +27,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use checkpoint::mmap::MmapSafetensors;
 use checkpoint::TensorSource;
 use qwen35::config::{LayerType, Qwen35Config};
-use qwen35::base_source::{lora_base, open_base, BaseDtype};
+use gpu_core::select::Dtype;
+use qwen35::base_source::{lora_base, open_base, TRAIN_BASES};
 use checkpoint::packed::PackedSource;
 use qwen35::fp8_source::{self, hf_config, hf_fp8_block_size};
 use qwen35::import::{import_dir, import_layer};
@@ -344,13 +345,12 @@ fn resuming_an_adapter_continues_its_factors_and_refuses_a_mismatched_one() {
 }
 
 #[test]
-fn base_dtype_names_round_trip_and_refuse_unknowns() {
-    for (s, d) in [("f32", BaseDtype::F32), ("bf16", BaseDtype::Bf16), ("nf4", BaseDtype::Nf4)] {
-        assert_eq!(s.parse::<BaseDtype>(), Ok(d));
-        assert_eq!(d.name(), s);
+fn base_format_names_parse_and_refuse_unsupported_formats() {
+    for (spec, dtype) in [("f32", Dtype::F32), ("bf16", Dtype::BF16), ("nf4", Dtype::NF4), ("fp8", Dtype::F8E4M3)] {
+        assert_eq!(TRAIN_BASES.parse(spec), Ok(dtype));
     }
-    let err = "fp8".parse::<BaseDtype>().unwrap_err();
-    assert!(err.contains("f32, bf16 or nf4"), "{err}");
+    let err = TRAIN_BASES.parse("int8").unwrap_err();
+    assert!(err.contains("qwen35") && err.contains("f32, bf16, nf4, fp8"), "{err}");
 }
 
 /// Real-checkpoint gate: stream every tensor of the shipped 27B FP8 release

@@ -29,6 +29,9 @@ use std::path::Path;
 
 use deepseekvl::train::{Options, StepInfo};
 
+/// The formats its LoRA run holds the frozen decoder in.
+const TRAIN_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "deepseekvl", bases: &[qwen3::Dtype::F32, qwen3::Dtype::BF16, qwen3::Dtype::I8] };
+
 pub fn run_deepseekvl(args: &[String]) {
     if args.first().map(String::as_str) != Some("finetune") {
         std::process::exit(
@@ -43,7 +46,7 @@ pub fn run_deepseekvl(args: &[String]) {
 
 pub(crate) const USAGE: &str = "usage: brain deepseekvl finetune --weights DIR|vendor/repo --dataset DIR --out DIR \
     [--rank N] [--alpha A] [--lora-targets wq,wk,...] [--steps N] [--lr X] [--aligner-lr X] [--block T] [--batch N] [--seed S] \
-    [--base-dtype f32|bf16|int8] [--weight-decay W] [--grad-clip C] [--warmup N] [--min-lr X] [--models-dir DIR]";
+    [--base-format f32|bf16|int8] [--weight-decay W] [--grad-clip C] [--warmup N] [--min-lr X] [--models-dir DIR]";
 
 /// The flags `finetune` takes, parsed once.
 pub struct Args {
@@ -94,14 +97,8 @@ impl Args {
                 "--aligner-lr" => o.aligner_lr = Some(number(value()?)?),
                 "--batch" => o.batch = value()?.parse().ok().filter(|&b| b > 0).ok_or_else(|| "--batch is not a positive whole number".to_string())?,
                 "--block" => o.block = Some(value()?.parse().map_err(|_| "--block is not a whole number".to_string())?),
-                "--base-dtype" => {
-                    o.dtype = match value()?.as_str() {
-                        "f32" => qwen3::Dtype::F32,
-                        "bf16" => qwen3::Dtype::BF16,
-                        "int8" => qwen3::Dtype::I8,
-                        other => return Err(format!("--base-dtype {other:?}: expected f32, bf16 or int8")),
-                    }
-                }
+                // `--base-dtype` is the earlier spelling of `--base-format`.
+                "--base-format" | "--base-dtype" => o.dtype = TRAIN_BASES.parse(&value()?)?,
                 "--weight-decay" => o.hyper.weight_decay = number(value()?)?,
                 "--grad-clip" => o.hyper.grad_clip = number(value()?)?,
                 "--warmup" => o.hyper.warmup = Some(number(value()?)? as u32),
@@ -173,8 +170,8 @@ mod tests {
         assert!(err(&["--weights", "w", "--out", "o"]).contains("--dataset"));
         assert!(err(&["--weights", "w", "--dataset", "d"]).contains("--out"));
         assert!(err(&["--weights", "w", "--dataset", "d", "--out", "o", "--rank", "0"]).contains("--rank"));
-        assert!(err(&["--weights", "w", "--dataset", "d", "--out", "o", "--base-dtype", "fp8"]).contains("f32, bf16 or int8"));
-        let a = Args::parse(&args(&["--weights", "w", "--dataset", "d", "--out", "o", "--seed", "1", "--base-dtype", "int8"])).unwrap();
+        assert!(err(&["--weights", "w", "--dataset", "d", "--out", "o", "--base-format", "fp8"]).contains("f32, bf16, int8"));
+        let a = Args::parse(&args(&["--weights", "w", "--dataset", "d", "--out", "o", "--seed", "1", "--base-format", "int8"])).unwrap();
         assert_eq!(a.options.dtype, qwen3::Dtype::I8);
         assert!(err(&["--weights", "w", "--dataset", "d", "--out", "o", "--steps"]).contains("needs a value"));
     }

@@ -24,7 +24,7 @@ use gpu_core::Gpu;
 use model::ops::TierPolicy;
 use model::saved::SavedPolicy;
 
-use crate::base_source::{lora_base, BaseDtype};
+use crate::base_source::{is_frozen_only, lora_base};
 use crate::model::{pipelines, Qwen35, TrainOpts};
 
 /// Rank and alpha of the zero-delta overlay used when no adapter is named;
@@ -48,7 +48,7 @@ impl AdapterSampler {
     /// by [`crate::lora::save_adapter`]) overlaid, or with an inert zero-delta
     /// overlay when `adapter` is `None`. `len` is the longest prompt plus
     /// generation [`Self::greedy`] will be asked for.
-    pub fn open(base: &Path, adapter: Option<&Path>, dtype: BaseDtype, len: u32) -> Result<AdapterSampler, String> {
+    pub fn open(base: &Path, adapter: Option<&Path>, dtype: Dtype, len: u32) -> Result<AdapterSampler, String> {
         let (rank, alpha) = match adapter {
             Some(file) => adapter_shape(file)?,
             None => (INERT_RANK, INERT_ALPHA),
@@ -56,12 +56,7 @@ impl AdapterSampler {
         // seed: only draws lora_a of the inert overlay; an adapter's own factors replace it
         let seed = data::rng::Rng::random().next_u64();
         let (cfg, src) = lora_base(base, rank, alpha, seed, adapter)?;
-        let tier = match dtype {
-            BaseDtype::F32 => Dtype::F32,
-            BaseDtype::Bf16 => Dtype::BF16,
-            BaseDtype::Nf4 => Dtype::NF4,
-        };
-        let opts = TrainOpts { base: TierPolicy::uniform(tier), saved: SavedPolicy::recompute_if(dtype.is_frozen_only()), ..TrainOpts::default() };
+        let opts = TrainOpts { base: TierPolicy::uniform(dtype), saved: SavedPolicy::recompute_if(is_frozen_only(dtype)), ..TrainOpts::default() };
         let model = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, 1, len, &src, &opts);
         let lora_b = model.param_names().into_iter().filter(|n| model::adapter::device::init_of(n) == Some(model::adapter::ParamInit::Zeros)).map(|n| { let w = model.read_weight(&n); (n, w) }).collect();
         Ok(AdapterSampler { model, len, lora_b, enabled: true })

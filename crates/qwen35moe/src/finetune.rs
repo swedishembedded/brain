@@ -87,6 +87,8 @@ fn check_before_load(path: &Path, adapter: Option<&LoraRequest<'_>>, state: Opti
 
 impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
     type Trained = Qwen35;
+    /// The experts have no narrow training tier: the base is fp32.
+    const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35moe", bases: &[gpu_core::select::Dtype::F32] };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> PathBuf {
         qwen3::store_checkpoint_path(weights, model_dir)
@@ -105,6 +107,7 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
     }
 
     fn train_lora(base: &Path, lora: &LoraRequest<'_>, opts: &FitOpts, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Qwen35)> {
+        lora.checked::<Self>()?;
         if lora.continue_from.is_some() {
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "qwen35moe does not continue an adapter yet"));
         }

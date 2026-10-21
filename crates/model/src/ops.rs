@@ -727,6 +727,28 @@ impl Weight {
         }
     }
 
+    /// Device bytes an `[n, k]` weight occupies once uploaded at `dtype`: the packed
+    /// elements (`Dtype::per_word` to a `u32` word) plus the scales the tier carries - one
+    /// f32 per group of 32 along `k` for int8, 4-bit and NF4, one per [`FP8_BLOCK`] x
+    /// [`FP8_BLOCK`] block for FP8, none for the 16- and 32-bit tiers. The one place a tier's
+    /// footprint is stated, so a planner's estimate and a built model's report agree.
+    #[must_use]
+    pub fn bytes_for(dtype: Dtype, n: usize, k: usize) -> u64 {
+        let packed = (n as u64 * k as u64).div_ceil(dtype.per_word() as u64) * 4;
+        let scales = match dtype {
+            Dtype::I8 | Dtype::Q4 | Dtype::NF4 => crate::int8::scale_len(n, k) as u64 * 4,
+            Dtype::F8E4M3 | Dtype::F8E5M2 => (n as u64).div_ceil(FP8_BLOCK as u64) * (k as u64).div_ceil(FP8_BLOCK as u64) * 4,
+            _ => 0,
+        };
+        packed + scales
+    }
+
+    /// Device bytes this weight occupies ([`Self::bytes_for`] at its own tier).
+    #[must_use]
+    pub fn resident_bytes(&self) -> u64 {
+        Weight::bytes_for(self.dtype(), self.n() as usize, self.k() as usize)
+    }
+
     /// The ONE upload path: quantizes/packs `raw` (`[n, k]`, row-major) per
     /// `want.promote(ops.caps().numeric)` - never narrower than what `want`
     /// asked for, never wider than what the device can execute - then

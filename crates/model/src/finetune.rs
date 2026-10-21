@@ -31,6 +31,8 @@
 
 use std::path::{Path, PathBuf};
 
+use gpu_core::select::Dtype;
+
 use crate::train::{causal_lm, load_dataset_with_itos, FitControl, FitOpts, FitReport};
 use crate::Model;
 
@@ -125,6 +127,17 @@ pub struct LoraRequest<'a> {
     /// An adapter file whose factors training continues; `None`: a fresh
     /// zero-delta adapter drawn from the run's seed.
     pub continue_from: Option<&'a Path>,
+    /// How the frozen base is held on the device; one of the trainer's
+    /// [`ChatTrainer::LORA_BASES`]. The generic fine-tuners refuse any other
+    /// before a checkpoint is opened ([`LoraRequest::checked`]).
+    pub base: Dtype,
+}
+
+impl LoraRequest<'_> {
+    /// The base format, if `T` can train over it.
+    pub fn checked<T: ChatTrainer>(&self) -> std::io::Result<Dtype> {
+        T::LORA_BASES.check(self.base).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))
+    }
 }
 
 /// What an adapter file records about where it came from.
@@ -139,6 +152,9 @@ pub struct AdapterLineage<'a> {
 pub trait ChatTrainer {
     /// What a run hands back (the model, or a wrapper that can save it).
     type Trained;
+
+    /// The frozen-base formats [`Self::train_lora`] can hold the base in.
+    const LORA_BASES: crate::policy::TrainBases;
 
     /// The weights file or directory to open for the base the caller named:
     /// `weights` is the resolved file, `model_dir` the directory it lives in.

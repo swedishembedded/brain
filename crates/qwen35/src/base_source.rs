@@ -24,9 +24,9 @@
 //! needs expertise in parameter-efficient or quantized fine-tuning then you
 //! can procure our services by sending an email to info@swedishembedded.com.
 
+use gpu_core::select::Dtype;
 use model::adapter::device::AdapterTuning;
 use std::path::Path;
-use std::str::FromStr;
 
 use checkpoint::remap::{Fetch, RemapSource};
 use checkpoint::weightio::WeightReader;
@@ -35,44 +35,20 @@ use checkpoint::TensorSource;
 use crate::config::{lora_cfg, LoraCfg, Qwen35Config};
 use crate::fp8_source::{self, hf_config, hf_fp8_block_size};
 
-/// Precision of the frozen base weights on the device during a fine-tune.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BaseDtype {
-    /// fp32: the legacy resident trainer. Needs ~108 GB for the 27B, so it
-    /// only fits small or truncated models.
-    F32,
-    /// bf16 ("normal LoRA"): half the fp32 footprint, LoRA adapters in fp32.
-    Bf16,
-    /// 4-bit NormalFloat blocks of 32 with fp32 scales ("QLoRA").
-    Nf4,
-}
+/// The formats a LoRA run holds the frozen base in on the device: fp32 (the
+/// resident trainer, which also trains in full; about 108 GB for the 27B),
+/// bf16, 4-bit NormalFloat blocks of 32 with fp32 scales ("QLoRA") and
+/// block-scaled FP8. Every narrow one freezes the base: it trains only through
+/// LoRA adapters, never itself.
+pub const LORA_BASES: &[Dtype] = &[Dtype::F32, Dtype::BF16, Dtype::NF4, Dtype::F8E4M3];
 
-impl BaseDtype {
-    pub fn name(self) -> &'static str {
-        match self {
-            BaseDtype::F32 => "f32",
-            BaseDtype::Bf16 => "bf16",
-            BaseDtype::Nf4 => "nf4",
-        }
-    }
+/// The `--base-format` of a qwen35 run.
+pub const TRAIN_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35", bases: LORA_BASES };
 
-    /// Whether the base is stored in a reduced-precision, frozen form: such a
-    /// base can only be trained through LoRA adapters, never updated itself.
-    pub fn is_frozen_only(self) -> bool {
-        self != BaseDtype::F32
-    }
-}
-
-impl FromStr for BaseDtype {
-    type Err = String;
-    fn from_str(s: &str) -> Result<BaseDtype, String> {
-        match s {
-            "f32" => Ok(BaseDtype::F32),
-            "bf16" => Ok(BaseDtype::Bf16),
-            "nf4" => Ok(BaseDtype::Nf4),
-            other => Err(format!("--base-dtype {other:?}: expected f32, bf16 or nf4")),
-        }
-    }
+/// Whether a base held as `dtype` is frozen: such a base can only be trained
+/// through LoRA adapters, never updated itself.
+pub fn is_frozen_only(dtype: Dtype) -> bool {
+    dtype != Dtype::F32
 }
 
 /// A base model opened for streaming: its configuration and its tensors,

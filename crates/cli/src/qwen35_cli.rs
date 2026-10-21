@@ -6,10 +6,10 @@
 //!   brain qwen35 infer  [--weights F] [--tokenizer tokenizer.json | --gguf G] --prompt "..."
 //!                     [--adapter adapter.safetensors] [--max-new N --temp X --top-k K --chat]
 //!   brain qwen35 finetune <data_dir> --base F --out F [--mode lora|full]
-//!                     [--lora-rank R --lora-alpha A] [--base-dtype f32|bf16|nf4]
+//!                     [--lora-rank R --lora-alpha A] [--base-format f32|bf16|nf4|fp8]
 //!                     [--seq-len T] [--recompute on|off] [--steps N --lr X ...]
 //!   brain qwen35 sample-adapter --base DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE]
-//!                     [--base-dtype nf4|bf16|f32] [--max-new N] [--no-adapter | --compare]
+//!                     [--base-format nf4|bf16|fp8|f32] [--max-new N] [--no-adapter | --compare]
 //!
 //! `infer`'s `--weights`/`--tokenizer` are optional: naming both explicitly
 //! (or `--weights` plus `--gguf`) uses exactly those files, unchanged; naming
@@ -42,7 +42,8 @@ use std::path::Path;
 use crate::args::Args;
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
-use qwen35::base_source::BaseDtype;
+use gpu_core::select::Dtype;
+use qwen35::base_source::{is_frozen_only, TRAIN_BASES};
 use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
 
@@ -198,9 +199,9 @@ fn infer(args: &[String]) {
 }
 
 const SAMPLE_USAGE: &str = "usage: brain qwen35 sample-adapter --base F|DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE] \
-     [--base-dtype nf4|bf16|f32] [--max-new N] [--tokenizer FILE] [--chat] [--no-adapter | --compare]
+     [--base-format nf4|bf16|fp8|f32] [--max-new N] [--tokenizer FILE] [--chat] [--no-adapter | --compare]
   --base        a HuggingFace checkpoint directory (FP8 release included) or a brain-native file; streamed onto
-                the device at --base-dtype with the adapter overlaid, never folded into a host copy
+                the device at --base-format with the adapter overlaid, never folded into a host copy
   --adapter     a LoRA adapter written by `brain qwen35 finetune` (omit for the base alone)
   --no-adapter  decode with the adapter switched off (the base model); --compare prints both answers per prompt
   --tokenizer   defaults to tokenizer.json inside the --base directory
@@ -213,7 +214,7 @@ struct SampleArgs {
     base: String,
     adapter: Option<String>,
     prompts: Vec<String>,
-    base_dtype: BaseDtype,
+    base_dtype: Dtype,
     max_new: usize,
     tokenizer: Option<String>,
     chat: bool,
@@ -236,7 +237,7 @@ fn parse_sample(args: &[String]) -> Result<SampleArgs, String> {
     while let Some(p) = a.take_str("--prompt") {
         prompts.push(p);
     }
-    let base_dtype: BaseDtype = a.str_or("--base-dtype", "nf4").parse()?;
+    let base_dtype = TRAIN_BASES.parse(&aliased(&mut a, "--base-format", "--base-dtype")?.unwrap_or_else(|| "nf4".into()))?;
     let max_new = parse_num("--max-new", a.take_str("--max-new"), 32usize)?;
     let tokenizer = a.take_str("--tokenizer");
     let chat = a.take_flag("--chat");
@@ -303,7 +304,7 @@ fn run_sample(sa: &SampleArgs) -> Result<(), String> {
     let t0 = std::time::Instant::now();
     let adapter = sa.adapter.as_deref().map(Path::new);
     let mut sampler = qwen35::adapter_sample::AdapterSampler::open(base, adapter, sa.base_dtype, (longest + sa.max_new) as u32)?;
-    eprintln!("qwen35 sample-adapter: base {} ({}) loaded in {:.1}s, forward length {}", sa.base, sa.base_dtype.name(), t0.elapsed().as_secs_f64(), longest + sa.max_new);
+    eprintln!("qwen35 sample-adapter: base {} ({}) loaded in {:.1}s, forward length {}", sa.base, model::policy::format_name(sa.base_dtype), t0.elapsed().as_secs_f64(), longest + sa.max_new);
     let modes: &[(&str, bool)] = match sa.which {
         SampleWhich::AdapterOnly => &[("adapter", true)],
         SampleWhich::BaseOnly => &[("base", false)],
@@ -344,9 +345,9 @@ fn tuning_desc(t: &model::adapter::device::AdapterTuning) -> String {
 }
 
 const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|DIR --out F [--mode lora|full] [--lora-rank R --lora-alpha A --lora-variant V --lora-plus-ratio X --adapter-kind K] \
-     [--base-dtype f32|bf16|nf4] [--seq-len T] [--recompute on|off] [--gdn-segment N] [--bf16-residuals on|off] [--mlp-rows N] \
+     [--base-format f32|bf16|nf4|fp8] [--seq-len T] [--recompute on|off] [--gdn-segment N] [--bf16-residuals on|off] [--mlp-rows N] \
      [--eval-interval N --eval-batches N] [--steps N --lr X --batch B --grad-accum G --warmup W --weight-decay X --grad-clip X --save-secs S --seed S --mask = --align]
-  --base-dtype  how the frozen base is held on the device: f32 (default, whole model resident; full or LoRA),
+  --base-format how the frozen base is held on the device: f32 (default, whole model resident; full or LoRA),
                 bf16 (half the bytes; LoRA only) or nf4 (4-bit QLoRA; LoRA only). bf16/nf4 stream the base from
                 a HuggingFace checkpoint directory (FP8 release included) tensor by tensor.
   --seq-len     training sequence length (alias of --block); --rank/--alpha are aliases of --lora-rank/--lora-alpha
@@ -374,7 +375,7 @@ struct FinetuneArgs {
     out: String,
     opts: model::FitOpts,
     mode: qwen35::finetune::Mode,
-    base_dtype: BaseDtype,
+    base_dtype: Dtype,
     /// Recompute activations in backward. Only a frozen-base tier has a
     /// recomputing trainer; the f32 resident one keeps every activation.
     recompute: bool,
@@ -406,7 +407,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     let rank = parse_num("--lora-rank", aliased(&mut a, "--lora-rank", "--rank")?, DEFAULT_LORA_RANK)?;
     let alpha = parse_num("--lora-alpha", aliased(&mut a, "--lora-alpha", "--alpha")?, rank as f32 * 2.0)?;
     let tuning = model::adapter::device::AdapterTuning::parse(a.take_str("--lora-variant").as_deref(), a.take_str("--lora-plus-ratio").as_deref(), a.take_str("--adapter-kind").as_deref())?;
-    let base_dtype: BaseDtype = a.str_or("--base-dtype", "f32").parse()?;
+    let base_dtype = TRAIN_BASES.parse(&aliased(&mut a, "--base-format", "--base-dtype")?.unwrap_or_else(|| "f32".into()))?;
     let recompute_flag = match a.take_str("--recompute").as_deref() {
         None => None,
         Some("on") => Some(true),
@@ -470,26 +471,26 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     // `full` is the default mode because that is what the sibling verbs mean
     // by a plain finetune: `brain qwen3 finetune` and `brain glm finetune`
     // are both full-parameter unless a LoRA rank is asked for explicitly.
-    if tuning.kind == model::adapter::DeviceKind::Dora && base_dtype.is_frozen_only() {
-        return Err(format!("--adapter-kind dora reads the base weight, so it needs --base-dtype f32 (a {} base is held narrow)", base_dtype.name()));
+    if tuning.kind == model::adapter::DeviceKind::Dora && is_frozen_only(base_dtype) {
+        return Err(format!("--adapter-kind dora reads the base weight, so it needs --base-format f32 (a {} base is held narrow)", model::policy::format_name(base_dtype)));
     }
     let mode = match mode_name.as_str() {
         "full" => qwen35::finetune::Mode::FullOffload,
         "lora" => qwen35::finetune::Mode::Lora { rank, alpha, tuning },
         other => return Err(format!("--mode {other:?}: expected \"lora\" or \"full\"")),
     };
-    if base_dtype.is_frozen_only() && !matches!(mode, qwen35::finetune::Mode::Lora { .. }) {
+    if is_frozen_only(base_dtype) && !matches!(mode, qwen35::finetune::Mode::Lora { .. }) {
         return Err(format!(
-            "--base-dtype {} holds the base frozen, so only --mode lora can train on it; full-parameter fine-tuning needs --base-dtype f32",
-            base_dtype.name()
+            "--base-format {} holds the base frozen, so only --mode lora can train on it; full-parameter fine-tuning needs --base-format f32",
+            model::policy::format_name(base_dtype)
         ));
     }
-    if recompute_flag == Some(true) && !base_dtype.is_frozen_only() {
-        return Err("--recompute on: the f32 resident trainer keeps every layer's activations; recompute is available with --base-dtype bf16 or nf4".into());
+    if recompute_flag == Some(true) && !is_frozen_only(base_dtype) {
+        return Err("--recompute on: the f32 resident trainer keeps every layer's activations; recompute is available with a narrow --base-format (bf16, nf4 or fp8)".into());
     }
-    let recompute = recompute_flag.unwrap_or(base_dtype.is_frozen_only());
-    if long != qwen35::finetune::LongSeqOverrides::default() && !base_dtype.is_frozen_only() {
-        return Err("--gdn-segment, --bf16-residuals and --mlp-rows apply to the streamed trainer: use --base-dtype bf16 or nf4".into());
+    let recompute = recompute_flag.unwrap_or(is_frozen_only(base_dtype));
+    if long != qwen35::finetune::LongSeqOverrides::default() && !is_frozen_only(base_dtype) {
+        return Err("--gdn-segment, --bf16-residuals and --mlp-rows apply to the streamed trainer: use a narrow --base-format (bf16, nf4 or fp8)".into());
     }
     if data_dir.is_empty() {
         return Err("the finetune corpus directory is required (a positional argument)".into());
@@ -532,7 +533,7 @@ fn finetune(args: &[String]) {
         "qwen35 finetune: {} on {} [{mode_desc}, base {}{}] steps={} batch={} block={} lr={} grad-accum={} seed={} -> {}",
         ft.base,
         ft.data_dir,
-        ft.base_dtype.name(),
+        model::policy::format_name(ft.base_dtype),
         if ft.recompute { ", recompute" } else { "" },
         ft.opts.steps,
         ft.opts.batch_size,
@@ -561,7 +562,7 @@ fn finetune(args: &[String]) {
 /// Returns `(initial_loss, final_loss)`.
 fn run_finetune(ft: &FinetuneArgs) -> std::io::Result<(f32, f32)> {
     let (base, data) = (Path::new(&ft.base), Path::new(&ft.data_dir));
-    if ft.base_dtype == BaseDtype::F32 && !base.is_dir() {
+    if ft.base_dtype == Dtype::F32 && !base.is_dir() {
         qwen35::finetune::finetune(&ft.base, data, &ft.opts, &ft.mode, &ft.out)
     } else {
         qwen35::finetune::finetune_streamed_named(base, data, &ft.opts, &ft.mode, &ft.out, false, &qwen35::finetune::StreamedRun { dtype: ft.base_dtype, recompute: ft.recompute, long: ft.long }, &ft.naming)
@@ -727,16 +728,16 @@ mod finetune_cli_tests {
             "corpus", "--base", "b", "--out", "o", "--mode", "lora", "--base-dtype", "nf4", "--lora-rank", "16", "--lora-alpha", "8", "--seq-len", "512",
         ]))
         .unwrap();
-        assert_eq!(ft.base_dtype, BaseDtype::Nf4);
+        assert_eq!(ft.base_dtype, Dtype::NF4);
         assert!(matches!(ft.mode, qwen35::finetune::Mode::Lora { rank: 16, alpha, .. } if alpha == 8.0), "{:?}", ft.mode);
         assert_eq!(ft.opts.block_size, 512, "--seq-len is the training sequence length");
         assert!(ft.recompute, "a frozen-base tier recomputes by default");
 
         let old = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o", "--mode", "lora", "--rank", "4", "--block", "64", "--base-dtype", "bf16", "--recompute", "off"])).unwrap();
-        assert_eq!((old.base_dtype, old.opts.block_size, old.recompute), (BaseDtype::Bf16, 64, false));
+        assert_eq!((old.base_dtype, old.opts.block_size, old.recompute), (Dtype::BF16, 64, false));
 
         let plain = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o"])).unwrap();
-        assert_eq!((plain.base_dtype, plain.recompute), (BaseDtype::F32, false), "the default keeps the classic f32 trainer");
+        assert_eq!((plain.base_dtype, plain.recompute), (Dtype::F32, false), "the default keeps the classic f32 trainer");
     }
 
     #[test]
@@ -746,8 +747,8 @@ mod finetune_cli_tests {
         let err = with(&["--base-dtype", "nf4"]);
         assert!(err.contains("frozen") && err.contains("--mode lora") && err.contains("f32"), "{err}");
         assert!(with(&["--base-dtype", "bf16", "--mode", "full"]).contains("frozen"));
-        assert!(with(&["--base-dtype", "fp8", "--mode", "lora"]).contains("f32, bf16 or nf4"));
-        assert!(with(&["--recompute", "on"]).contains("--base-dtype bf16 or nf4"));
+        assert!(with(&["--base-dtype", "int8", "--mode", "lora"]).contains("f32, bf16, nf4, fp8"));
+        assert!(with(&["--recompute", "on"]).contains("narrow --base-format"));
         assert!(with(&["--recompute", "maybe"]).contains("\"on\" or \"off\""));
         assert!(with(&["--mode", "lora", "--rank", "4", "--lora-rank", "4"]).contains("same setting"));
         assert!(with(&["--seq-len", "64", "--block", "64"]).contains("same setting"));
@@ -766,13 +767,13 @@ mod finetune_cli_tests {
         assert!(with(&["--bf16-residuals", "maybe"]).unwrap_err().contains("\"on\" or \"off\""));
         assert!(with(&["--mlp-rows", "many"]).unwrap_err().contains("not a valid number"));
         let resident = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o", "--gdn-segment", "128"])).unwrap_err();
-        assert!(resident.contains("--base-dtype bf16 or nf4"), "{resident}");
+        assert!(resident.contains("narrow --base-format"), "{resident}");
     }
 
     #[test]
     fn the_sample_flags_parse_and_refuse_contradictions() {
         let ok = parse_sample(&argv(&["--base", "dir", "--adapter", "a.safetensors", "--prompt", "one", "--prompt", "two", "--max-new", "9", "--compare"])).unwrap();
-        assert_eq!((ok.prompts.len(), ok.max_new, ok.which, ok.base_dtype), (2, 9, SampleWhich::Both, BaseDtype::Nf4));
+        assert_eq!((ok.prompts.len(), ok.max_new, ok.which, ok.base_dtype), (2, 9, SampleWhich::Both, Dtype::NF4));
         let base_only = parse_sample(&argv(&["--base", "dir", "--prompt", "q", "--no-adapter"])).unwrap();
         assert_eq!((base_only.which, base_only.adapter), (SampleWhich::BaseOnly, None));
         let with = |extra: &[&str]| parse_sample(&argv(&[&["--base", "dir", "--prompt", "q"][..], extra].concat())).unwrap_err();

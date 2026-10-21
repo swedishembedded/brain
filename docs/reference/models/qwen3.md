@@ -192,7 +192,7 @@ everything about HOW to serve it is a `brain serve` flag:
   --lora` run. On a model laid out as a pipeline across cards the stages work
   on neighbouring micro-batches at once instead of one after another, and the
   run ends where the sequential schedule would.
-- `--base-dtype f32|bf16|int8` - the storage dtype of the frozen base during
+- `--base-format f32|bf16|int8|nf4|fp8` (earlier spelling `--base-dtype`) - the storage format of the frozen base during
   a `finetune --lora` run (default `f32`). `bf16` halves the base's bytes - a
   7B decoder trains on one 24 GB card - and holds the frozen embedding and
   LM head in bf16 too, while the adapters, activations and optimiser stay
@@ -200,7 +200,10 @@ everything about HOW to serve it is a `brain serve` flag:
   (about 7.6 GB for a 7B decoder, against 15 GB), with the same bf16 tables:
   the matrix kernels decode the weight as they load it and multiply it with
   fp32 activations, in the forward and in the input gradient, so the only
-  approximation is the weight's own rounding. `--weights` may name a `transformers` checkpoint
+  approximation is the weight's own rounding. `nf4` (4-bit NormalFloat, a scale per 32)
+  and `fp8` (block-scaled E4M3) run through the shared quantized-execution
+  contract: a bounded tile decode feeds the dense product, forward and input
+  gradient. `--weights` may name a `transformers` checkpoint
   directory (a model-store `vendor/repo`): it is read as downloaded, one
   tensor at a time, and nothing is written beside it.
   A model that does not fit one card is laid out across the cards by what

@@ -412,8 +412,10 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
-        // Quantized layer-boundary residuals (`model::saved`) pack and unpack on the device.
-        for &(name, src) in model::saved::kernels() {
+        // Quantized layer-boundary residuals (`model::saved`) pack and unpack on the device; a frozen NF4 or FP8
+        // base trains through the quantized-execution contract: the tile decode of every tier and the column
+        // copies around it. Appended unless already registered above.
+        for &(name, src) in model::saved::kernels().iter().chain(model::ops::frozen_base_kernels()) {
             if !v.iter().any(|(have, _)| *have == name) {
                 v.push((name, src));
             }
@@ -931,6 +933,12 @@ enum AdapterOverride {
     BaseOnly,
 }
 
+/// The tiers a LoRA training build may hold its frozen base in besides fp32:
+/// the base is built once from the source tensor and only read afterwards, so
+/// any tier the shared quantized-execution contract (`model::ops::tiled`)
+/// multiplies forward and differentiates through is admissible.
+pub const FROZEN_LORA_TIERS: &[Dtype] = &[Dtype::BF16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3, Dtype::F8E5M2];
+
 impl Qwen {
     /// Load a trainable model (weights + grad + AdamW moments) from a checkpoint.
     /// Streams the weights one tensor at a time off a mmap-backed
@@ -1168,8 +1176,8 @@ impl Qwen {
         // a packed/quantized `Weight` is built ONCE at construction from the
         // source tensor, never re-derived after an optimiser step.
         assert!(
-            !(dt != Dtype::F32 && train) || (matches!(dt, Dtype::BF16 | Dtype::I8) && cfg.lora.is_some()),
-            "the {dt:?} weight tier is inference-only (a LoRA training build may hold a bf16 or int8 frozen base)"
+            !(dt != Dtype::F32 && train) || (FROZEN_LORA_TIERS.contains(&dt) && cfg.lora.is_some()),
+            "the {dt:?} weight tier is inference-only (a LoRA training build may hold a frozen base in one of {FROZEN_LORA_TIERS:?})"
         );
         assert!(!(decode_only && train), "decode-only build is inference-only");
         // This trainer always rebuilds a layer in the backward from its saved input (`build_backward_steps`):
@@ -1222,7 +1230,7 @@ impl Qwen {
         let quantized = dt != Dtype::F32;
         // A LoRA build freezes the embedding and the head, so a bf16 base
         // holds them in bf16 as well (on a device that runs the tier).
-        let lora_base_tier = train && cfg.lora.is_some() && matches!(dt, Dtype::BF16 | Dtype::I8) && dt.promote(&ops.caps().numeric) == dt;
+        let lora_base_tier = train && cfg.lora.is_some() && FROZEN_LORA_TIERS.contains(&dt) && dt.promote(&ops.caps().numeric) == dt;
         let int8_base = lora_base_tier && dt == Dtype::I8;
         // The tables of a half-precision or int8 base are held in bf16.
         let half_tables = lora_base_tier && Dtype::BF16.promote(&ops.caps().numeric) == Dtype::BF16;
@@ -1985,6 +1993,9 @@ impl Qwen {
                 let (kernel, grid) = dx_kernel_among(named("matmul_dx#w=w8"), named("matmul_dx_reg#w=w8"), m, k);
                 s.push(self.gpu.dispatch(kernel, &[d_out, w, dx, scales], &[m, k, nout, acc], grid));
             }
+            // Every other tier (NF4, block-scaled FP8, ...) runs the shared quantized-execution
+            // contract: a bounded tile decode feeding the dense product.
+            Some(w) if !matches!(w, Weight::F32 { .. }) => self.ops.matmul_dx(s, w, d_out, m, dx, acc != 0),
             _ => {
                 let (bk, bt) = dx_kernel_bw(m, k);
                 s.push(self.gpu.dispatch(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
@@ -3692,19 +3703,7 @@ impl Qwen {
     /// `model::int8::GROUP`), not a driver VRAM reading and not the fp32 size
     /// of the source tensor.
     pub fn linear_weight_bytes(&self) -> u64 {
-        self.weights
-            .values()
-            .map(|w| {
-                let elems = w.n() as u64 * w.k() as u64;
-                let per_word = w.dtype().per_word() as u64;
-                let packed = elems.div_ceil(per_word) * 4;
-                let scale = match w {
-                    Weight::I8 { .. } | Weight::Q4 { .. } => model::int8::scale_len(w.n() as usize, w.k() as usize) as u64 * 4,
-                    _ => 0,
-                };
-                packed + scale
-            })
-            .sum()
+        self.weights.values().map(Weight::resident_bytes).sum()
     }
 
     /// OFFLINE FLOP/OPS cost of the recorded batch forward - walks the step

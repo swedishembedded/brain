@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use data::rng::Rng;
 use gpu_core::Gpu;
 use qwen35::adapter_sample::AdapterSampler;
-use qwen35::base_source::BaseDtype;
+use gpu_core::select::Dtype;
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 
@@ -82,7 +82,7 @@ fn the_overlay_decodes_as_the_folded_adapter_and_switches_off_to_the_base() {
     let (want_on, want_off) = (kv_greedy(&folded, &prompt), kv_greedy(&plain, &prompt));
     assert_ne!(want_on, want_off, "the fixture adapter must change the base's greedy output, or this test proves nothing");
 
-    let mut s = AdapterSampler::open(&base, Some(&adapter), BaseDtype::F32, (PROMPT + NEW) as u32).expect("open");
+    let mut s = AdapterSampler::open(&base, Some(&adapter), Dtype::F32, (PROMPT + NEW) as u32).expect("open");
     assert_eq!(s.greedy(&prompt, NEW, &[]).unwrap(), want_on, "adapter on");
     s.set_adapter(false);
     assert_eq!(s.greedy(&prompt, NEW, &[]).unwrap(), want_off, "adapter off");
@@ -94,14 +94,14 @@ fn the_overlay_decodes_as_the_folded_adapter_and_switches_off_to_the_base() {
 fn a_sampler_without_an_adapter_is_the_base() {
     let (base, _adapter, prompt) = base_and_adapter();
     let plain = checkpoint::load(base.to_str().unwrap()).by_role("");
-    let s = AdapterSampler::open(&base, None, BaseDtype::F32, (PROMPT + NEW) as u32).expect("open");
+    let s = AdapterSampler::open(&base, None, Dtype::F32, (PROMPT + NEW) as u32).expect("open");
     assert_eq!(s.greedy(&prompt, NEW, &[]).unwrap(), kv_greedy(&plain, &prompt));
 }
 
 #[test]
 fn a_prompt_that_does_not_fit_the_built_length_is_refused() {
     let (base, _adapter, prompt) = base_and_adapter();
-    let s = AdapterSampler::open(&base, None, BaseDtype::F32, (PROMPT + NEW) as u32).expect("open");
+    let s = AdapterSampler::open(&base, None, Dtype::F32, (PROMPT + NEW) as u32).expect("open");
     let err = s.greedy(&prompt, NEW + 1, &[]).unwrap_err();
     assert!(err.contains("length"), "{err}");
 }

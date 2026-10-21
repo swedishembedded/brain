@@ -60,14 +60,9 @@ use crate::model::Shard;
 /// Bytes this shard's 7-per-owned-layer linears occupy at `dt`, packed
 /// exactly as [`crate::Qwen::linear_weight_bytes`] packs an already-built
 /// model's [`crate::model::Weight`]s: `elems.div_ceil(per_word) * 4` plus the
-/// `[n, k/32]` f32 group scale the `I8`/`Q4` tiers carry.
+/// scales its tier carries ([`model::ops::Weight::bytes_for`]).
 fn quantized_linear_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype) -> u64 {
-    let per_word = dt.per_word() as u64;
-    let pack = |n: u64, k: u64| -> u64 {
-        let packed = (n * k).div_ceil(per_word) * 4;
-        let scale = model::int8::scale_len(n as usize, k as usize) as u64 * 4;
-        packed + scale
-    };
+    let pack = |n: u64, k: u64| model::ops::Weight::bytes_for(dt, n as usize, k as usize);
     let d = cfg.d_model as u64;
     let hq = cfg.q_dim() as u64;
     let hkv = cfg.kv_dim() as u64;
@@ -91,8 +86,8 @@ fn quantized_linear_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype) -> u64 {
 /// is_i8_linear(name))` - nothing is filtered out when not quantized).
 fn weight_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype, train: bool) -> u64 {
     let quantized = dt != Dtype::F32;
-    // The embedding and the head of a LoRA build over a bf16 or int8 base are held in bf16.
-    let half_tables = train && cfg.lora.is_some() && matches!(dt, Dtype::BF16 | Dtype::I8);
+    // The embedding and the head of a LoRA build over a narrow base are held in bf16.
+    let half_tables = train && cfg.lora.is_some() && crate::model::FROZEN_LORA_TIERS.contains(&dt);
     let base: u64 = crate::shard_param_list(cfg, shard)
         .into_iter()
         .filter(|(name, _)| !(quantized && crate::q8::Q8::is_i8_linear(name)))

@@ -60,7 +60,8 @@ the same commit. A new violation is a design defect, not an allowlist addition.
 
 - Done: bf16, int8 (group-32) and NF4 frozen bases for adapter training in
   `qwen35` (`Weight::{BF16, NF4}`, the decoded-weight scope) and bf16 and int8
-  in `qwen3`; an int8-base device trainer for `flux2`; a 27B NF4 and bf16 LoRA
+  in `qwen3` (and NF4 and block-scaled FP8 through the shared `model::ops::tiled`
+  contract); an int8-base device trainer for `flux2`; a 27B NF4 and bf16 LoRA
   run on one card from an FP8 directory streamed tensor by tensor; the
   base-tier choice from device capability (`choose_base_tier`); tensor-core
   GEMMs selected by capability; `Weight::KQuant` execution and its host
@@ -124,6 +125,12 @@ takes a tensor/direction budget; all supported tiers registered. GRPO and
 distillation generic.
 Acceptance: the same workflow runs on `qwen3` (NF4, FP8, int8), `qwen35`,
 `qwen35moe` and `flux2`.
+Status: DPO, GRPO and top-K distillation are `ModelFit` visitors (`rl::fit`) and
+run on qwen3 (bf16, int8, NF4, FP8) and qwen35 (bf16, NF4, FP8); the acceptance
+workflow is `model::acceptance` (`LoraArch`/`LoraStep`), registered for all four
+architectures in `rl/tests/lora_acceptance.rs`. A LoRA trainer declares its base
+formats (`model::policy::TrainBases`), one `--base-format` flag parses them, and
+`LoraRequest::base` carries the choice through the generic trainers.
 
 ### Phase 5 - full fine-tuning state (paramstore, optim)
 Status: the state manager is landed (`paramstore::precision`, `optim::{codec, rule,
@@ -182,7 +189,7 @@ see). Entries in the allowlists carry the same fixes.
 | `checkpoint/src/weightio.rs` `DerivedCheckpoint`, `Renamed`, `InMemory` | f32 and `U32` only, advertises F32, clones | descriptor-carrying derived views that pass packed bytes through (1) |
 | `checkpoint/src/mmap.rs` | whole-tensor `tensor_f32` reachable from production loaders | production callers move to tiled reads; the accessor stays for reference modes only (1) |
 | `qwen35/src/fp8_source.rs` | HF naming, FP8 scale discovery, dequantization and reading in one model-crate type | FP8 codec in the registry; the type becomes a declarative name map over the shared reader (1) |
-| `qwen35/src/base_source.rs` | rejects GGUF as a training base; `BaseDtype` {F32, Bf16, Nf4} frozen-only | any registered codec accepted; base precision from the descriptor policy (1, 5) |
+| `qwen35/src/base_source.rs` | rejects GGUF as a training base; the base format is `model::policy::TrainBases` (F32, bf16, NF4, FP8), frozen-only below fp32 | any registered codec accepted; base precision from the descriptor policy (1, 5) |
 | `qwen35/src/stream_train.rs` | widens each layer's FP8 base to fp32 | packed-base backward through the generic quantized op (2) |
 | `paramstore/src/dtype.rs` | charges one fp32 per element (packed int8 as four) | physical bytes from the tensor descriptor; the planner shares it (1, 6) |
 | `optim/src/offload.rs` | `OffloadSlot = (String, Vec<f32> x3)` host master, m, v | bounded-tile state manager with independent state dtypes and a transactional on-disk form (5) |

@@ -689,6 +689,13 @@ fn lora_trained(cfg: QwenConfig, init: &dyn TensorSource, opts: &FitOpts, dt: Dt
     }
 }
 
+/// The formats a LoRA run holds the frozen base in: fp32 and every tier of
+/// [`crate::model::FROZEN_LORA_TIERS`].
+pub const LORA_BASE_FORMATS: &[Dtype] = &[Dtype::F32, Dtype::BF16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3, Dtype::F8E5M2];
+
+/// The `--base-format` of a qwen3 LoRA run.
+pub const TRAIN_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen3", bases: LORA_BASE_FORMATS };
+
 /// Qwen3 and its fine-tune variants as a [`model::finetune::ChatTrainer`]:
 /// the generic full-parameter, LoRA and preference fine-tuners run on it.
 pub struct Qwen3Trainer;
@@ -696,6 +703,7 @@ pub struct Qwen3Trainer;
 impl model::finetune::ChatTrainer for Qwen3Trainer {
     type Trained = Trained;
     const SCORES_EXPORTED_PAIRS: bool = true;
+    const LORA_BASES: model::policy::TrainBases = TRAIN_BASES;
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {
         crate::store_checkpoint_path(weights, model_dir)
@@ -719,8 +727,9 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
             Some(path) => LoraStart::Continue(path_str(path).map_err(std::io::Error::other)?),
             None => LoraStart::Fresh,
         };
+        let base_dtype = lora.checked::<Self>()?;
         let (cfg, init) = lora_start(path_str(base).map_err(std::io::Error::other)?, lora.rank, lora.alpha, opts.seed, &start)?;
-        lora_trained(cfg, &init, opts, Dtype::F32, fit)
+        lora_trained(cfg, &init, opts, base_dtype, fit)
     }
 
     fn save_adapter(trained: &Trained, path: &Path, lineage: &model::finetune::AdapterLineage<'_>) -> std::io::Result<()> {
@@ -757,6 +766,13 @@ mod tests {
 
     /// The defaults are the recipe every LoRA entry point used to spell out
     /// for itself; every knob a caller sets reaches the run.
+    #[test]
+    fn the_lora_base_formats_are_fp32_and_the_models_frozen_tiers() {
+        let mut want = vec![Dtype::F32];
+        want.extend_from_slice(crate::model::FROZEN_LORA_TIERS);
+        assert_eq!(LORA_BASE_FORMATS, want.as_slice());
+    }
+
     #[test]
     fn a_lora_schedule_defaults_to_the_recipe_and_takes_every_override() {
         let o = LoraHyper::default().fit_opts(400, 4, 256, 1e-4, 9);

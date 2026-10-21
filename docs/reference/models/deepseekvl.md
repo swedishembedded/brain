@@ -75,7 +75,7 @@ The towers stay frozen: each image's features are extracted once and the
 towers released, so the decoder gets the whole card. The aligner trains from
 the checkpoint's own weights (at `--aligner-lr`, a tenth of `--lr` unless
 set), and the decoder trains as a LoRA over its frozen base, held at `bf16`
-unless `--base-dtype f32`. Only the reply and its end-of-sentence are
+unless `--base-format f32`. Only the reply and its end-of-sentence are
 supervised, and the messages place one `<image_placeholder>` per image.
 `--batch N` averages the gradients of N examples into each step. A decoder
 that does not fit one card is split across the cards by what each has free,

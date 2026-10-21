@@ -35,6 +35,8 @@ fn qwen3_subject() -> Subject<qwen3::Qwen> {
         tiers: vec![
             Tier { name: "bf16", build: |cfg, rows, seq, init| qwen3::Qwen::new_lora_dt(cfg, rows, seq, init, qwen3::Dtype::BF16), grad_rel_tol: 5e-2 },
             Tier { name: "int8", build: |cfg, rows, seq, init| qwen3::Qwen::new_lora_dt(cfg, rows, seq, init, qwen3::Dtype::I8), grad_rel_tol: 2e-1 },
+            Tier { name: "nf4", build: |cfg, rows, seq, init| qwen3::Qwen::new_lora_dt(cfg, rows, seq, init, qwen3::Dtype::NF4), grad_rel_tol: 4e-1 },
+            Tier { name: "fp8", build: |cfg, rows, seq, init| qwen3::Qwen::new_lora_dt(cfg, rows, seq, init, qwen3::Dtype::F8E4M3), grad_rel_tol: 2e-1 },
         ],
         budget: Budget::default(),
         chunked_head: Some(ChunkedHead { seq: CHUNK_SEQ, build: chunked }),
@@ -98,6 +100,7 @@ fn qwen35_subject() -> Subject<qwen35::model::Qwen35> {
         tiers: vec![
             Tier { name: "bf16", build: |cfg, rows, seq, init| frozen(Dtype::BF16, cfg, rows, seq, init), grad_rel_tol: 5e-2 },
             Tier { name: "nf4", build: |cfg, rows, seq, init| frozen(Dtype::NF4, cfg, rows, seq, init), grad_rel_tol: 4e-1 },
+            Tier { name: "fp8", build: |cfg, rows, seq, init| frozen(Dtype::F8E4M3, cfg, rows, seq, init), grad_rel_tol: 2e-1 },
         ],
         // A finite-difference probe is two forward passes of a four-layer hybrid
         // decoder: ten tensors spread over the parameter list, two directions each.

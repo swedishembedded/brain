@@ -37,20 +37,22 @@ ADAPTER=<owner/name[:tag]>`, which builds the release binary first.
 ## Qwen3.8-27B (`brain qwen35 finetune`)
 
 ```
-brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-dtype f32|bf16|nf4]
+brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-format f32|bf16|nf4|fp8]
     [--lora-rank R] [--lora-alpha A] [--seq-len T] [--recompute on|off] [--steps N] [--lr X]
     [--gdn-segment N] [--bf16-residuals on|off] [--mlp-rows N] [--eval-interval N] ...
 ```
 
 - `--base BASE` - a brain-native `.safetensors` checkpoint, or (with
-  `--base-dtype bf16` or `nf4`) a HuggingFace checkpoint directory such as
+  `--base-format bf16`, `nf4` or `fp8`) a HuggingFace checkpoint directory such as
   `Qwen/Qwen3.8-27B-FP8`, which is streamed from disk one tensor at a time
   (about 1 GiB of host memory) and never held whole on the host.
-- `--base-dtype` - how the frozen base is held on the device. `f32` (the
-  default) keeps the whole model resident in fp32 and can train in `--mode full`
-  or `--mode lora`, but the 27B does not fit; `bf16` and `nf4` (4-bit, QLoRA)
-  shrink the base and train LoRA adapters only, so combining them with
-  `--mode full` is refused.
+- `--base-format` - how the frozen base is held on the device (earlier
+  spelling `--base-dtype`; one flag for every model, an unsupported format is
+  refused naming the model and its supported set). `f32` (the default) keeps
+  the whole model resident in fp32 and can train in `--mode full` or
+  `--mode lora`, but the 27B does not fit; `bf16`, `nf4` (4-bit, QLoRA) and
+  `fp8` (block-scaled E4M3) shrink the base and train LoRA adapters only, so
+  combining them with `--mode full` is refused.
 - `--lora-rank`, `--lora-alpha` - adapter shape (aliases `--rank`, `--alpha`;
   alpha defaults to twice the rank).
 - `--lora-variant V`, `--lora-plus-ratio X` - model-agnostic adapter variants,
@@ -84,10 +86,10 @@ with the equivalent `--batch 1 --grad-accum G`.
 
 ```
 brain qwen35 sample-adapter --base DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE]
-    [--base-dtype nf4|bf16|f32] [--max-new N] [--chat] [--no-adapter | --compare]
+    [--base-format nf4|bf16|fp8|f32] [--max-new N] [--chat] [--no-adapter | --compare]
 ```
 
-Streams the base onto the device at `--base-dtype` with the adapter overlaid
+Streams the base onto the device at `--base-format` with the adapter overlaid
 (no fold into a host copy, which the 27B does not fit) and decodes greedily by
 repeated full forwards at a fixed length, without a KV cache: slow, but exactly
 the forward the adapter was trained through. `--no-adapter` decodes the base

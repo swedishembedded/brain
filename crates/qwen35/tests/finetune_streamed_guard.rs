@@ -11,13 +11,13 @@
 //! batch. (A real run of 32 rows of 1024 tokens used to run out of device
 //! memory minutes into the load.)
 
-use qwen35::base_source::BaseDtype;
+use gpu_core::select::Dtype;
 use qwen35::finetune::{finetune_streamed, LongSeqOverrides, Mode, StreamedRun};
 use std::io::ErrorKind;
 use std::path::Path;
 
 fn nf4_recompute() -> StreamedRun {
-    StreamedRun { dtype: BaseDtype::Nf4, recompute: true, long: LongSeqOverrides::default() }
+    StreamedRun { dtype: Dtype::NF4, recompute: true, long: LongSeqOverrides::default() }
 }
 
 fn opts(batch: u32, block: u32, accum: u32) -> model::FitOpts {
