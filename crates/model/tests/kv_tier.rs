@@ -594,6 +594,8 @@ fn native_int8_decode_is_exact_at_agent_contexts(g: &Gpu, lens: &[u32], shared_b
     let kernel = g.kernel_index("paged_flash_decode_gqa_hd256#GRP=6#kv=int8").expect("the int8 decode kernel is registered");
     let params = [batch, n_heads, n_kv, 256, n_heads / n_kv, block_size, max_bt, 1, 1];
     assert_eq!(g.native_kernel_for(kernel, &params), Some("paged_flash_decode_gqa_hd256_kv8"), "{label}: the int8 decode attention must run the native kernel");
+    let combine = g.kernel_index("paged_flash_decode_gqa_combine").expect("the combine is registered");
+    assert_eq!(g.native_kernel_for(combine, &[batch, n_heads, 256, 64]), Some("paged_flash_decode_gqa_combine"), "{label}: the merge of the splits must run the native kernel");
     g.submit(&[], &kernels.flash_decode(g, &q, &kc, &vc, &table, &seq_lens, &ctx, shape));
     let got = g.read(&ctx, (batch * n_heads * 256) as usize);
 

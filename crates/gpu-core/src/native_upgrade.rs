@@ -318,6 +318,20 @@ fn flash_decode_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
     p[0] * p[2] * p[7]
 }
 
+/// Splits the native combine holds weights for in shared memory (`MAX_SPLITS` in its source).
+const FLASH_COMBINE_MAX_SPLITS: u32 = 4096;
+
+/// `[batch, n_heads, head_dim, n_splits]` with a head of at most one block's 256 channels and splits that fit.
+fn serves_flash_combine(p: &[u32]) -> bool {
+    matches!(p, [batch, heads, hd, splits] if *batch >= 1 && *heads >= 1 && (1..=256).contains(hd) && (1..=FLASH_COMBINE_MAX_SPLITS).contains(splits)
+        && u64::from(*batch) * u64::from(*heads) * 4 <= u64::from(u32::MAX))
+}
+
+/// One block per 64 channels (`THREADS` in the kernel) of a (sequence, head).
+fn flash_combine_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[0] * p[1] * p[2].div_ceil(64)
+}
+
 pub(crate) const ROWS: &[Row] = &[
     Row {
         slow: "paged_kv_append_i8_clipped_batched",
@@ -333,6 +347,14 @@ pub(crate) const ROWS: &[Row] = &[
         bindings: FLASH_DECODE_KV8_BINDINGS,
         serves: serves_flash_decode_kv8,
         blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_combine",
+        target: Target::Named("paged_flash_decode_gqa_combine"),
+        bindings: COPY_BINDINGS,
+        serves: serves_flash_combine,
+        blocks: flash_combine_blocks,
         requires_wgsl_upgrade: false,
     },
     Row {

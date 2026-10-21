@@ -683,6 +683,24 @@ pub const ALL: &[CudaKernel] = &[
         src: concat!("#define BRAIN_GRP 6\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
     },
     CudaKernel {
+        name: "paged_flash_decode_gqa_combine",
+        // Redirected to by name from the WGSL `paged_flash_decode_gqa_combine` (`gpu_core::native_upgrade`).
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_paged_flash_decode_gqa_combine",
+        what: "merge of the split-key decode attention's partial records: the global max first, every split's weight once in shared memory, then independent per-channel sums (no serial exp chain)",
+        reported: "native:paged_flash_decode_gqa_combine",
+        block_dim: 64,
+        // One block per 64 channels of a (sequence, head).
+        tile: (1, 1),
+        // Split weights (at most 4096) + 2 warp partials + the max and the sum.
+        shared_bytes: 4 * (4096 + 2 + 2),
+        src: include_str!("../cu/paged_flash_decode_gqa_combine.cu"),
+    },
+    CudaKernel {
         name: "kv_append_i8_clipped",
         // Redirected to by name from the WGSL `paged_kv_append_i8_clipped_batched` (`gpu_core::native_upgrade`).
         op: Op::Elementwise,
