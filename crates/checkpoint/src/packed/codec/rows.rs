@@ -263,26 +263,65 @@ fn absmax(xs: &[f32]) -> f32 {
     xs.iter().fold(0f32, |m, &v| if v.is_nan() { m } else { m.max(v.abs()) })
 }
 
+/// The geometry of a tiled-scale FP8 encoding: row length, code format, scale tile and scale format.
+#[derive(Clone, Copy)]
+struct Fp8Tiling {
+    inner: usize,
+    fmt: FloatFormat,
+    rows: usize,
+    cols: usize,
+    scale_fmt: FloatFormat,
+}
+
 /// FP8 with one scale per `rows x cols` tile: scale = tile absmax / largest finite code (floored to 1
 /// for an all-zero tile), stored at the scale format's precision and divided out with that stored value.
+///
+/// Row bands are independent (a band owns its payload rows and its run of scales), so a large tile is encoded by
+/// contiguous groups of bands on scoped threads; the bytes are those of the serial loop.
 fn encode_fp8_tiled(values: &[f32], inner: usize, fmt: FloatFormat, rows: usize, cols: usize, scale_fmt: FloatFormat, out: &mut TileBuf) {
-    let (g, top) = (grid(fmt), max_finite(fmt));
+    const PARALLEL_MIN_ELEMS: usize = 1 << 18;
+    const MAX_THREADS: usize = 16;
+    let tiling = Fp8Tiling { inner, fmt, rows, cols, scale_fmt };
     let n_rows = values.len() / inner;
-    let per_band = inner.div_ceil(cols);
+    let bands = n_rows.div_ceil(rows);
     out.payload.clear();
     out.payload.resize(values.len(), 0);
     out.scales.push(Vec::new());
-    for b in 0..n_rows.div_ceil(rows) {
-        let (r0, r1) = (b * rows, ((b + 1) * rows).min(n_rows));
+    let threads = if values.len() >= PARALLEL_MIN_ELEMS { std::thread::available_parallelism().map_or(1, |p| p.get()).min(MAX_THREADS).min(bands) } else { 1 };
+    let per_thread = bands.div_ceil(threads.max(1));
+    let mut parts: Vec<Vec<u8>> = vec![Vec::new(); bands.div_ceil(per_thread.max(1))];
+    std::thread::scope(|scope| {
+        let mut payload = out.payload.as_mut_slice();
+        for (t, part) in parts.iter_mut().enumerate() {
+            let (b0, b1) = (t * per_thread, ((t + 1) * per_thread).min(bands));
+            let (r0, r1) = (b0 * rows, (b1 * rows).min(n_rows));
+            let (mine, rest) = std::mem::take(&mut payload).split_at_mut((r1 - r0) * inner);
+            payload = rest;
+            scope.spawn(move || encode_fp8_bands(values, &tiling, (r0, r1), mine, part));
+        }
+    });
+    for part in parts {
+        out.scales[0].extend_from_slice(&part);
+    }
+}
+
+/// The bands covering rows `r0..r1` (a multiple of `rows` from the tile's start): their payload into `payload` (which
+/// starts at row `r0`) and their scales appended to `scales`.
+fn encode_fp8_bands(values: &[f32], t: &Fp8Tiling, (r0, r1): (usize, usize), payload: &mut [u8], scales: &mut Vec<u8>) {
+    let Fp8Tiling { inner, fmt, rows, cols, scale_fmt } = *t;
+    let (g, top) = (grid(fmt), max_finite(fmt));
+    let per_band = inner.div_ceil(cols);
+    for band_r0 in (r0..r1).step_by(rows) {
+        let band_r1 = (band_r0 + rows).min(r1);
         for cb in 0..per_band {
             let (c0, c1) = (cb * cols, ((cb + 1) * cols).min(inner));
-            let amax = (r0..r1).flat_map(|r| values[r * inner + c0..r * inner + c1].iter()).fold(0f32, |m, &v| if v.is_nan() { m } else { m.max(v.abs()) });
+            let amax = (band_r0..band_r1).flat_map(|r| values[r * inner + c0..r * inner + c1].iter()).fold(0f32, |m, &v| if v.is_nan() { m } else { m.max(v.abs()) });
             let s = if amax > 0.0 { as_scale(scale_fmt, amax / top) } else { 1.0 };
             let s = if s > 0.0 && s.is_finite() { s } else { 1.0 };
-            scale_bytes(scale_fmt, s, &mut out.scales[0]);
-            for r in r0..r1 {
+            scale_bytes(scale_fmt, s, scales);
+            for r in band_r0..band_r1 {
                 for c in c0..c1 {
-                    out.payload[r * inner + c] = nearest(g, values[r * inner + c] / s);
+                    payload[(r - r0) * inner + c] = nearest(g, values[r * inner + c] / s);
                 }
             }
         }

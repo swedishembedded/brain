@@ -447,4 +447,27 @@ mod tests {
         CodecRegistry::reference().encoder(&d2.encoding).unwrap().encode_tile(&d2, &(0..4), &[448.0, -448.0, 1000.0, 0.0], &EncodeCtx::default(), &mut buf).unwrap();
         assert_eq!(decode_all(&d2, &buf.payload, &[]), [448.0, -448.0, 448.0, 0.0], "values past the format maximum saturate");
     }
+
+    /// Spec: a large tile of tiled-scale FP8 is encoded by groups of row bands on several threads, and its payload and
+    /// scales are exactly those of encoding the bands one at a time.
+    #[test]
+    fn a_large_fp8_tile_encodes_in_parallel_with_the_bytes_of_band_by_band_encoding() {
+        let (rows, cols) = (1000u64, 512u64);
+        let desc = TensorDescriptor::new("w", vec![rows, cols], QuantEncoding::fp8_e4m3_tiled(128));
+        let values: Vec<f32> = (0..rows * cols).map(|i| (((i * 2_654_435_761) % 10_007) as f32 / 10_007.0 - 0.5) * (1.0 + (i / (cols * 128)) as f32)).collect();
+        let reg = CodecRegistry::reference();
+        let codec = reg.encoder(&desc.encoding).unwrap();
+        let mut whole = TileBuf::default();
+        codec.encode_tile(&desc, &(0..rows * cols), &values, &EncodeCtx::default(), &mut whole).unwrap();
+        let (mut payload, mut scales) = (Vec::new(), Vec::new());
+        let band = 128 * cols;
+        for start in (0..rows * cols).step_by(band as usize) {
+            let end = (start + band).min(rows * cols);
+            let mut part = TileBuf::default();
+            codec.encode_tile(&desc, &(start..end), &values[start as usize..end as usize], &EncodeCtx::default(), &mut part).unwrap();
+            payload.extend_from_slice(&part.payload);
+            scales.extend_from_slice(&part.scales[0]);
+        }
+        assert!(whole.payload == payload && whole.scales[0] == scales);
+    }
 }
