@@ -93,6 +93,10 @@ pub struct FitOpts {
     /// through [`crate::ops::Ops`] honours it). The default, `Auto`, takes tensor cores where the
     /// device has them (bf16 for bf16 bases, TF32 for fp32 bases); `Fp32Reference` pins the exact fp32 kernels.
     pub gemm_precision: gpu_core::provider::library::GemmPrecision,
+    /// Most floats of trainable parameters a run that selects on held-out loss keeps in host
+    /// memory as its best-so-far copy. A larger set is written to disk instead (see
+    /// [`FitControl::state`] and the `out` path of [`fit_controlled`]) and is never dropped.
+    pub best_hold_floats: usize,
 }
 
 impl Default for FitOpts {
@@ -121,6 +125,7 @@ impl Default for FitOpts {
             cooldown_steps: 0,
             adam: crate::Adam::default(),
             gemm_precision: gpu_core::provider::library::GemmPrecision::Auto,
+            best_hold_floats: BEST_IN_MEMORY_FLOATS,
         }
     }
 }
@@ -622,14 +627,15 @@ impl CausalLm {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// How much of the trainable set the best-checkpoint keeper will hold in host
-/// memory before giving up and writing a checkpoint instead.
+/// memory by default before writing it to disk instead.
 ///
 /// A full finetune's trainable set IS the model, and a second host-side copy
 /// of it is not free. A LoRA run's is the adapter alone - about 5M floats
 /// where the checkpoint it would otherwise rewrite is 600M - so the case that
-/// pays for this fits with room to spare.
+/// pays for this fits with room to spare. A 27B model's rank-16 adapter is not
+/// that case (117M floats): past the budget the best copy goes to disk
+/// (see `spill_path`), never away.
 const BEST_IN_MEMORY_FLOATS: usize = 64 << 20;
 
 /// The trainable parameters, if they fit `budget` floats.
@@ -651,6 +657,38 @@ fn hold_trainable<M: Model>(model: &M, budget: usize) -> Option<HashMap<String, 
         held.insert(name, w);
     }
     Some(held)
+}
+
+/// The file the best parameters of a run are spilled to when they are too large to hold in
+/// memory and the run has no checkpoint path: beside its training state, so it survives the
+/// process exactly as the state does.
+#[cfg(not(target_arch = "wasm32"))]
+fn spill_path(state: &Path) -> std::path::PathBuf {
+    state.with_extension("best")
+}
+
+/// Write the trainable parameters to `path`, atomically (a crash leaves the previous best).
+#[cfg(not(target_arch = "wasm32"))]
+fn write_spill<M: Model>(model: &M, path: &Path) -> std::io::Result<()> {
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = model
+        .param_names()
+        .into_iter()
+        .map(|name| {
+            let w = model.read_weight(&name);
+            (name, vec![w.len() as u64], w)
+        })
+        .collect();
+    let tmp = path.with_extension("best.tmp");
+    let tmp_str = tmp.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", tmp.display())))?;
+    checkpoint::st::save_safetensors(tmp_str, &tensors, &serde_json::json!({"format": "brain-best-parameters-v1"}), None)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// The parameters [`write_spill`] wrote.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_spill(path: &Path) -> std::io::Result<HashMap<String, Vec<f32>>> {
+    let path_str = path.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", path.display())))?;
+    Ok(checkpoint::st::load_safetensors(path_str)?.tensors)
 }
 
 /// What to do after one held-out evaluation.
@@ -760,6 +798,9 @@ struct Selection {
     watch: EarlyStop,
     /// The best parameters, held rather than written (see `hold_trainable`).
     held: Option<HashMap<String, Vec<f32>>>,
+    /// The best parameters are in the spill file beside the training state (see `spill_path`):
+    /// a set too large to hold, and with no checkpoint path to write it to.
+    spilled: bool,
     best_step: Option<u32>,
     evaluations: Vec<Evaluation>,
     /// The training losses since the last evaluation.
@@ -793,7 +834,7 @@ impl Cooldown {
 
 impl Selection {
     fn new(opts: &FitOpts) -> Selection {
-        Selection { watch: EarlyStop::new(opts.patience), held: None, best_step: None, evaluations: Vec::new(), interval_sum: 0.0, interval_count: 0, cooldown: None }
+        Selection { watch: EarlyStop::new(opts.patience), held: None, spilled: false, best_step: None, evaluations: Vec::new(), interval_sum: 0.0, interval_count: 0, cooldown: None }
     }
 
     /// Whether the run keeps its best evaluation's parameters.
@@ -821,6 +862,7 @@ impl Selection {
             "since_improved": self.watch.since_improved(),
             "best_step": self.best_step,
             "held": self.held.is_some(),
+            "spilled": self.spilled,
             "interval_sum_bits": self.interval_sum.to_bits(),
             "interval_count": self.interval_count,
             "cooldown": self.cooldown.map(|c| serde_json::json!([c.first_step, c.steps, c.from_lr.to_bits()])),
@@ -845,6 +887,7 @@ impl Selection {
         Some(Selection {
             watch: EarlyStop::resumed(opts.patience, bits(&value["best_bits"])?, count(&value["since_improved"])?),
             held,
+            spilled: value["spilled"].as_bool().unwrap_or(false),
             best_step: match &value["best_step"] {
                 serde_json::Value::Null => None,
                 step => Some(count(step)?),
@@ -896,6 +939,9 @@ pub struct StepReport {
     pub loss: f32,
     /// The learning rate this step ran at.
     pub lr: f32,
+    /// The global gradient norm the step's clip measured, when the model reports it
+    /// ([`Model::last_grad_norm`]).
+    pub grad_norm: Option<f32>,
 }
 
 /// What a caller controls about a [`fit_controlled`] run beyond [`FitOpts`].
@@ -1124,9 +1170,11 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
 /// held in host memory and restored into the model before it is handed back
 /// (and written to `out` when given), so what a caller exports is the
 /// checkpoint the best held-out loss was measured on, not the last one
-/// trained. A trainable set too large to hold is written to `out` at each
-/// improvement instead, as this always did; without an `out` to write it to
-/// the run is refused. The selection is part of the exact-resume state.
+/// trained. A trainable set too large to hold ([`FitOpts::best_hold_floats`]) is written to `out` at each
+/// improvement instead, as this always did, or - with no `out` - spilled beside [`FitControl::state`]
+/// and read back at the end; with neither the run is refused at the first improvement, since
+/// returning the last step as the selection would silently defeat early stopping. The selection is
+/// part of the exact-resume state.
 pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitOpts, out: Option<&Path>, mut control: FitControl<'_>) -> std::io::Result<(FitReport, M)> {
     obj.prepare(&mut model)?;
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
@@ -1147,6 +1195,9 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         if let Some(saved) = saved {
             selection = saved;
         }
+        if let Some(spill) = control.state.map(spill_path).filter(|spill| selection.spilled && !spill.exists()) {
+            return Err(std::io::Error::other(format!("{}: the training state names a spilled best-parameters file that is gone; resuming would lose the best evaluation", spill.display())));
+        }
     }
 
     obj.begin(opts.seed, u64::from(first_step) * u64::from(opts.grad_accum.max(1)) * opts.batch_size.max(1) as u64);
@@ -1166,9 +1217,6 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
     // The best parameters were written to `out` as they were found (a
     // trainable set too large to hold), so the final save must not overwrite them.
     let mut best_written = false;
-    // The best parameters were too large to hold and there was no path to
-    // write them to: the returned model is the last one.
-    let mut best_lost = false;
     let mut stopped_early = false;
 
     for step in first_step..opts.steps {
@@ -1187,7 +1235,11 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
             StepVerdict::Abort(e) => return Err(e),
         }
         model.poll_wait();
+        let grad_norm = model.last_grad_norm();
         let loss = step_loss / opts.grad_accum.max(1) as f32;
+        if let Some(norm) = grad_norm {
+            println!("step {:>6}  loss {loss:.4}  grad_norm {norm:.4}  lr {lr:.2e}", step + 1);
+        }
         last_train = Some(loss);
         completed = step + 1;
         selection.step_trained(loss);
@@ -1222,18 +1274,28 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
                         // run 19.8 GB of writes to preserve a 20 MB adapter. A
                         // trainable set too large to hold is written here, as
                         // this always did.
-                        match hold_trainable(&model, BEST_IN_MEMORY_FLOATS) {
+                        selection.held = None;
+                        selection.spilled = false;
+                        match hold_trainable(&model, opts.best_hold_floats) {
                             Some(held) => selection.held = Some(held),
-                            None => match out {
-                                Some(p) => {
+                            None => match (out, control.state) {
+                                (Some(p), _) => {
                                     model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
                                     best_written = true;
                                 }
-                                // Nowhere to keep the best parameters: the model
-                                // returned is the last one, and the run says so.
-                                None => {
-                                    selection.held = None;
-                                    best_lost = true;
+                                (None, Some(state)) => {
+                                    write_spill(&model, &spill_path(state))?;
+                                    selection.spilled = true;
+                                }
+                                // Nowhere to keep the best parameters: returning the
+                                // last step as the selection would defeat the early
+                                // stopping the run was asked for.
+                                (None, None) => {
+                                    return Err(std::io::Error::other(format!(
+                                        "the best parameters of step {} exceed the in-memory budget of {} floats and the run has neither a checkpoint path nor a training state to write them to",
+                                        step + 1,
+                                        opts.best_hold_floats
+                                    )))
                                 }
                             },
                         }
@@ -1296,7 +1358,7 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         }
 
         let keep_going = match control.on_step.as_mut() {
-            Some(on_step) => on_step(&StepReport { step: completed, steps: opts.steps, loss, lr }),
+            Some(on_step) => on_step(&StepReport { step: completed, steps: opts.steps, loss, lr, grad_norm }),
             None => true,
         };
         if let Some(state) = control.state {
@@ -1317,7 +1379,13 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
     // was measured on, not the last one trained. An interrupted run is not
     // finished: it is handed back as it stood, its selection in its state.
     let mut kept_best = best_written;
-    if let Some(held) = selection.held.take().filter(|_| !interrupted) {
+    let spill = control.state.map(spill_path).filter(|_| selection.spilled);
+    let restored = match (selection.held.take(), &spill) {
+        (Some(held), _) => Some(held),
+        (None, Some(path)) if !interrupted => Some(read_spill(path)?),
+        (None, _) => None,
+    };
+    if let Some(held) = restored.filter(|_| !interrupted) {
         for (name, w) in &held {
             model.write_weight(name, w);
         }
@@ -1328,6 +1396,9 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
             println!("restored the best parameters -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
         }
         kept_best = true;
+        if let Some(path) = &spill {
+            std::fs::remove_file(path)?;
+        }
     }
 
     // The final save would overwrite the best checkpoint with the last one,
@@ -1342,9 +1413,6 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
             selection.watch.best(),
             if stopped_early { ", stopped early" } else { "" }
         );
-    }
-    if best_lost {
-        println!("the best parameters were too large to hold and there is no checkpoint path: the model is the last step's");
     }
     let kept_best = kept_best.then(|| selection.best_step.map(|step| KeptBest { step, eval_loss: selection.watch.best() })).flatten();
     let report = FitReport { initial_loss: initial, final_loss: last_train, steps_completed: completed, resumed_at, interrupted, evaluations: selection.evaluations, kept_best, stopped_early };
@@ -1918,6 +1986,42 @@ mod tests {
         let opts = FitOpts { steps: 4, eval_interval: 2, eval_batches: 1, ..Default::default() };
         let (report, model) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: vec![1.0, 2.0], next: std::cell::Cell::new(0) }, &opts, None, FitControl::default()).expect("fit");
         assert_eq!((report.kept_best, model.read_weight("w"), report.evaluations.len()), (None, vec![4.0], 2));
+    }
+
+    /// A best-so-far copy too large for host memory is spilled to disk beside the training
+    /// state, never dropped: the 27B LoRA adapter (117M floats) is past the default budget, and
+    /// a run that "kept" its last, diverged step instead of its best silently defeated early
+    /// stopping.
+    #[test]
+    fn a_best_copy_too_large_to_hold_is_spilled_beside_the_state_and_restored() {
+        let dir = tmp("best-spilled");
+        let evals = vec![1.0f32, 0.8, 0.6, 0.4, 0.9, 1.1, 1.2, 1.3];
+        let opts = FitOpts { steps: 8, eval_interval: 1, eval_batches: 1, patience: 2, best_hold_floats: 0, ..Default::default() };
+        let state = dir.join("train.state");
+        let control = FitControl { state: Some(&state), identity: serde_json::json!({"run": 1}), ..Default::default() };
+        let (report, model) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: evals.clone(), next: std::cell::Cell::new(0) }, &opts, None, control).expect("fit");
+        assert_eq!(model.read_weight("w"), vec![4.0], "the best evaluation's parameters, not the last step's");
+        assert_eq!(report.kept_best, Some(KeptBest { step: 4, eval_loss: 0.4 }));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "the spill is removed once the best is restored");
+
+        // Stopped after the best evaluation, the spill outlives the process and the resumed run restores it.
+        let mut stop_at_five = |s: &StepReport| s.step < 5;
+        let control = FitControl { on_step: Some(&mut stop_at_five), state: Some(&state), identity: serde_json::json!({"run": 1}), ..Default::default() };
+        let (stopped, _) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: evals.clone(), next: std::cell::Cell::new(0) }, &opts, None, control).expect("fit");
+        assert!(stopped.interrupted && stopped.kept_best.is_none(), "{stopped:?}");
+        let control = FitControl { state: Some(&state), identity: serde_json::json!({"run": 1}), ..Default::default() };
+        let (resumed, model) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: evals[5..].to_vec(), next: std::cell::Cell::new(0) }, &opts, None, control).expect("fit");
+        assert_eq!((resumed.kept_best, model.read_weight("w")), (Some(KeptBest { step: 4, eval_loss: 0.4 }), vec![4.0]));
+    }
+
+    /// With nowhere to put a best copy that does not fit, the run fails at the first improvement
+    /// instead of returning the last step as if it were the selection.
+    #[test]
+    fn a_best_copy_with_nowhere_to_go_fails_the_run_loudly() {
+        let opts = FitOpts { steps: 4, eval_interval: 1, eval_batches: 1, patience: 2, best_hold_floats: 0, ..Default::default() };
+        let obj = Curve { evals: vec![1.0, 0.8, 0.6, 0.4], next: std::cell::Cell::new(0) };
+        let err = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), obj, &opts, None, FitControl::default()).err().expect("the run is refused");
+        assert!(err.to_string().contains("best parameters"), "{err}");
     }
 
     /// An objective whose training loss is the step count, and whose

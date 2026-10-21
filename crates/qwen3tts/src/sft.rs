@@ -213,6 +213,7 @@ impl FinetuneOpts {
             cooldown_steps: 0,
             adam: Default::default(),
             gemm_precision: Default::default(),
+            ..Default::default()
         }
     }
 }

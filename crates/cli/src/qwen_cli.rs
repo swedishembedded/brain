@@ -671,6 +671,7 @@ fn train(args: &[String], base: Option<&str>) {
         seed,
         adam: Default::default(),
         gemm_precision: Default::default(),
+        ..Default::default()
     };
     // finetune: the trained model comes from the base as it is on disk, and
     // continues `out` when that already exists.

@@ -193,6 +193,8 @@ pub struct Optim {
     /// Seed of the stochastic rounding of int8 moments. Random per `Optim`
     /// unless [`Optim::set_rounding_seed`] pins it (a resumed run restores it).
     rounding_seed: Cell<u64>,
+    /// The `extra_scale` of the latest clipped [`Self::step`], which scaled the norm it measured.
+    last_scale: Cell<f32>,
 }
 
 impl Optim {
@@ -205,7 +207,7 @@ impl Optim {
     ) -> Optim {
         use std::hash::{BuildHasher, Hasher};
         let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
-        Optim { adamw, gradnorm_sq, grad_scale, clip_coef, grad_scale_buf, cache: RefCell::new(None), rounding_seed: Cell::new(random) }
+        Optim { adamw, gradnorm_sq, grad_scale, clip_coef, grad_scale_buf, cache: RefCell::new(None), rounding_seed: Cell::new(random), last_scale: Cell::new(1.0) }
     }
 
     /// Pin the stochastic-rounding seed of int8 moments (checkpoint resume).
@@ -216,6 +218,16 @@ impl Optim {
     /// The seed in use; record it with the run so it can be resumed.
     pub fn rounding_seed(&self) -> u64 {
         self.rounding_seed.get()
+    }
+
+    /// The global gradient norm the latest clipped [`Self::step`] measured (of the gradient after its
+    /// `extra_scale`, the norm `clip` bounds); `None` before one, or when the step did not clip - an
+    /// unclipped step measures nothing. Reads the device's partial sums, so it waits for the step.
+    pub fn last_grad_norm(&self, gpu: &Gpu, ps: &ParamStore) -> Option<f32> {
+        let cache = self.cache.borrow();
+        let graph = cache.as_ref().filter(|g| g.clipped)?;
+        let sum_sq: f64 = gpu.read(&ps.norms, graph.n_norm_inputs as usize).iter().map(|&v| f64::from(v)).sum();
+        Some((sum_sq.sqrt() * f64::from(self.last_scale.get())) as f32)
     }
 
     /// Build the dispatch graph. `clipped` selects whether the grad-norm ->
@@ -399,6 +411,9 @@ impl Optim {
         // Refresh the per-step uniform contents in place (no allocation, and
         // exactly ONE write for AdamW's hyperparams regardless of how many
         // tensors this optimiser covers - see the module doc).
+        if clipped {
+            self.last_scale.set(extra_scale);
+        }
         if let Some(max_norm) = clip {
             gpu.write(g.clip_uni.as_ref().unwrap(), &[g.n_norm_inputs, f(max_norm), f(extra_scale)]);
         }

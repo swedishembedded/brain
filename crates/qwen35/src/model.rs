@@ -5341,6 +5341,9 @@ impl model::Model for Qwen35 {
     fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
         Qwen35::adamw_step(self, t, lr, wd, adam, clip, extra_scale)
     }
+    fn last_grad_norm(&self) -> Option<f32> {
+        self.opt.last_grad_norm(&self.gpu, &self.ps)
+    }
     fn poll_wait(&self) {
         Qwen35::poll_wait(self)
     }

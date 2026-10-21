@@ -283,6 +283,13 @@ pub trait Model {
     /// global-norm clip and a grad-accum scale).
     fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: Adam, clip: Option<f32>, extra_scale: f32);
 
+    /// The global gradient norm the latest clipped [`Model::adamw_step`] measured, after its
+    /// `extra_scale` (the norm the clip bounds). `None` (the default) for a model that does not
+    /// measure it or a step that did not clip.
+    fn last_grad_norm(&self) -> Option<f32> {
+        None
+    }
+
     /// Block until submitted device work completes (memory-aperture hygiene).
     fn poll_wait(&self);
 

@@ -1456,6 +1456,7 @@ pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::Fit
         cooldown_steps: 0,
         adam: Default::default(),
         gemm_precision: Default::default(),
+        ..Default::default()
     }
 }
 
