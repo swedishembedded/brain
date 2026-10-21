@@ -17,6 +17,7 @@ use common::*;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
+use model::saved::{SavedFormat, SavedPolicy};
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
@@ -129,7 +130,7 @@ fn a_batch_supervised_only_early_runs_only_its_prefix() {
     y[supervised..].fill(model::IGNORE);
     let settings = [
         TrainOpts::default(),
-        TrainOpts { recompute: true, gdn_segment_tokens: Some(64), mlp_rows: Some(64), bf16_residuals: true, ..TrainOpts::default() },
+        TrainOpts { saved: SavedPolicy::Quantized(SavedFormat::Bf16), gdn_segment_tokens: Some(64), mlp_rows: Some(64), ..TrainOpts::default() },
     ];
     for opts in &settings {
         let full = build(&cfg, &init, long, opts);
