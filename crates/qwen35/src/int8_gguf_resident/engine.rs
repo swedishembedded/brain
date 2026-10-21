@@ -447,26 +447,33 @@ impl Qwen35GgufEngine {
         p.done = end;
         p.fresh = false;
         if end < prompt.len() {
-            // The checkpoint is cached in place of the whole prompt. Its MTP head rows are not filled (that happens
-            // once the whole prompt is in), so a prompt resuming from it runs without them.
+            // The checkpoint is cached in place of the whole prompt. Its MTP head rows are filled once the whole
+            // prompt is in (below), so it is filed without them and marked once they are.
             if p.cacheable && end == checkpoint_len(prompt.len()) {
                 self.file_prefix(slot, namespace, &prompt[..end], &hidden, false, state_in_pool);
             }
             self.partial.insert(slot, p);
             return PrefillProgress::Partial { consumed };
         }
-        if p.mtp_feed {
+        let head_rows_filled = if p.mtp_feed {
             let started = std::time::Instant::now();
-            self.inst.mtp_after_prefill(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden);
+            let fed = self.inst.mtp_after_prefill(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden);
             if self.inst.has_mtp() {
                 let secs = started.elapsed().as_secs_f64();
                 self.feed_secs = Some(self.feed_secs.map_or(secs, |m| m + FEED_EWMA * (secs - m)));
             }
+            fed || !self.inst.has_mtp()
         } else {
             self.inst.mtp_skip_prefill(slot);
-        }
+            false
+        };
         // What is cached is the checkpoint, filed when the prefill passed it (see `slice_end`): a prompt that
-        // resumed from a checkpoint of its own length or later leaves that entry as it is.
+        // resumed from a checkpoint of its own length or later leaves that entry as it is. The feed above filled the
+        // head's rows of every position before the prompt's end, the checkpoint's among them, so a prompt resuming
+        // from it drafts with the head.
+        if let Some(pending) = self.pending.get_mut(&slot).filter(|e| e.tokens.len() == checkpoint_len(prompt.len())) {
+            pending.mtp_valid = head_rows_filled;
+        }
         PrefillProgress::Done(hidden)
     }
 

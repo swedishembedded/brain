@@ -18,8 +18,9 @@ off, time to first token 0.16 s (hit); thinking on, 2.09 s, the same as turn 1, 
 
 Fix: the prefill stops `CHECKPOINT_TAIL` (16) tokens short of the prompt, files the state there, and runs the rest; the entry
 is the checkpoint, so the next turn resumes from it and recomputes the tail and its new tokens. Entries of prompts resumed
-from a checkpoint of their own length are kept as they are. The checkpoint's MTP head rows are not filled, so a prompt
-resuming from it runs without them (speculation is off on the teacher; with `--speculative auto` this should be revisited).
+from a checkpoint of their own length are kept as they are. The checkpoint is filed before its MTP head rows are written; the
+feed of the whole prompt fills them, and the pending entry is then marked with that feed's outcome (a later fix: before it, a
+resumed turn drafted nothing and decoded at the plain rate with `--speculative auto`, 73-81 against 167-173 tok/s cold).
 Tests: `a_prompt_diverging_in_its_last_tokens_resumes_from_the_cached_prompts_checkpoint` (hit between 48 and 68 of a
 72-token prompt, output equal to a cold prefill's); the paged-block and recorded-token tests now name the 56-token checkpoint.
 
