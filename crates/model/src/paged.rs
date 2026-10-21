@@ -1109,6 +1109,18 @@ mod flash_tests {
         ("paged_flash_decode_combine_i8", kernels::PAGED_FLASH_DECODE_COMBINE_I8),
     ];
 
+    /// The shared test device for `pipes`, or `None` - reported as a skip with its reason - on a backend that does not
+    /// run workgroup-barrier kernels (the CPU JIT, `BRAIN_BACKEND=cpu`): every kernel these tests gate is `@cpu no`.
+    fn barrier_gpu(pipes: &'static [(&'static str, &'static str)]) -> Option<gpu_core::Gpu> {
+        let g = gpu_core::testgpu::dev(pipes);
+        if g.caps().workgroup_reductions {
+            Some(g)
+        } else {
+            brain_testutil::skip_unavailable("paged flash kernels: this backend does not run workgroup-barrier kernels (they are GPU-only)");
+            None
+        }
+    }
+
     fn fb(x: f32) -> u32 {
         x.to_bits()
     }
@@ -1143,7 +1155,7 @@ mod flash_tests {
     /// degenerating to a contiguous layout.
     #[test]
     fn paged_flash_decode_matches_batched_triad() {
-        let g = gpu_core::testgpu::dev(PIPES);
+        let Some(g) = barrier_gpu(PIPES) else { return };
         let (nh, nkv, hd) = (4u32, 2u32, 8u32);
         let group = nh / nkv;
         let (hkv, hq) = (nkv * hd, nh * hd);
@@ -1241,7 +1253,7 @@ mod flash_tests {
     /// tolerance class applies, not a tighter or looser one.
     #[test]
     fn paged_flash_decode_split_matches_batched_triad() {
-        let g = gpu_core::testgpu::dev(PIPES);
+        let Some(g) = barrier_gpu(PIPES) else { return };
         let (nh, nkv, hd) = (4u32, 2u32, 8u32);
         let group = nh / nkv;
         let (hkv, hq) = (nkv * hd, nh * hd);
@@ -1442,6 +1454,9 @@ mod flash_tests {
     /// head_dim 64.
     #[test]
     fn paged_flash_decode_split_i8_matches_int8_triad() {
+        if barrier_gpu(PIPES).is_none() {
+            return;
+        }
         let ragged = |n: u32| -> Vec<u32> {
             let fixed = [1u32, 2, 15, 16, 17, 127, 128, 129, 255, 256, 257, 700];
             (0..n).map(|i| fixed[(i as usize * 7 + 3) % fixed.len()]).collect()
@@ -1533,7 +1548,7 @@ mod flash_tests {
     /// not a synthetic one.
     #[test]
     fn paged_flash_decode_int8_matches_fp32_fused_kernel() {
-        let g = gpu_core::testgpu::dev(PIPES);
+        let Some(g) = barrier_gpu(PIPES) else { return };
         let (nh, nkv, hd) = (4u32, 2u32, 8u32);
         let group = nh / nkv;
         let (hkv, hq) = (nkv * hd, nh * hd);
@@ -1627,7 +1642,7 @@ mod flash_tests {
 
         let pipes: Vec<(&str, &str)> = vec![("paged_flash_decode", kernels::PAGED_FLASH_DECODE), (bf16_name, bf16_src)];
         let pipes: &'static [(&str, &str)] = Box::leak(pipes.into_boxed_slice());
-        let g = gpu_core::testgpu::dev(pipes);
+        let Some(g) = barrier_gpu(pipes) else { return };
 
         let (nh, nkv, hd) = (4u32, 2u32, 8u32);
         let group = nh / nkv;
@@ -1735,7 +1750,7 @@ mod flash_tests {
             ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
             ("paged_flash_prefill", kernels::PAGED_FLASH_PREFILL),
         ];
-        let g = gpu_core::testgpu::dev(PREFILL_PIPES);
+        let Some(g) = barrier_gpu(PREFILL_PIPES) else { return };
         let (nh, nkv, hd) = (4u32, 2u32, 8u32);
         let group = nh / nkv;
         let (kv_stride, hq) = (nkv * hd, nh * hd);
@@ -1843,7 +1858,7 @@ mod flash_tests {
             ("paged_flash_prefill_i8", kernels::PAGED_FLASH_PREFILL_I8),
             ("paged_flash_prefill", kernels::PAGED_FLASH_PREFILL),
         ];
-        let g = gpu_core::testgpu::dev(PREFILL_I8_PIPES);
+        let Some(g) = barrier_gpu(PREFILL_I8_PIPES) else { return };
         let (nh, nkv, hd) = (4u32, 2u32, 8u32); // head_dim % 4 == 0: the packed-word contract
         let group = nh / nkv;
         let (kv_stride, hq) = (nkv * hd, nh * hd);
@@ -1966,7 +1981,7 @@ mod flash_tests {
             ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
             ("paged_flash_prefill_hd256", kernels::PAGED_FLASH_PREFILL_HD256),
         ];
-        let g = gpu_core::testgpu::dev(PREFILL_HD256_PIPES);
+        let Some(g) = barrier_gpu(PREFILL_HD256_PIPES) else { return };
         let (nh, nkv, hd) = (4u32, 2u32, 256u32); // qwen38_27b's own head_dim
         let group = nh / nkv;
         let (kv_stride, hq) = (nkv * hd, nh * hd);
