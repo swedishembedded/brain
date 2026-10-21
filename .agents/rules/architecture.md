@@ -192,6 +192,11 @@ layer 6 - serving, front ends, SDK, samples
                            visitors in `rl::fit` (`DpoFit`, `GrpoFit`,
                            `DistillFit`), so each runs on every family and
                            frozen-base encoding a trainer offers.
+                           `acceptance.rs` is the one LoRA workflow every
+                           architecture is run through (`LoraArch`: its
+                           encodings and a tiny instance; `ModelStep` for any
+                           Model), so wiring a model in implements a trait and
+                           never edits the check.
                            `score.rs` is held-out scoring over any Model
    promote                 the model-agnostic promote/reject decision: the
                            Environment/Verifier reward seam, the exact paired

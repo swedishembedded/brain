@@ -2382,6 +2382,7 @@ dependencies = [
  "brain-bench",
  "brain-checkpoint",
  "brain-data",
+ "brain-flux2",
  "brain-gpt2",
  "brain-gpu-core",
  "brain-gradcheck",

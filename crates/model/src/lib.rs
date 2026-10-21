@@ -33,6 +33,7 @@ pub mod attninject;
 pub mod block;
 pub mod dispatch;
 pub mod collective;
+pub mod acceptance;
 pub mod conformance;
 pub mod conformance_adapter;
 pub mod conformance_grad;

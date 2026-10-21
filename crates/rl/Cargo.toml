@@ -66,6 +66,8 @@ brain-qwen35.workspace = true
 brain-gpu-core.workspace = true
 # `tests/conformance.rs` registers `qwen35moe::Qwen35` too.
 brain-qwen35moe.workspace = true
+# `tests/lora_acceptance.rs` runs the LoRA workflow over the diffusion trainer too.
+brain-flux2.workspace = true
 
 # Every integration test below trains a real (tiny) `qwen3::Qwen` - the only
 # `model::Model` in this repo with a full weighted-loss + `logits_all` +
@@ -192,4 +194,9 @@ required-features = ["qwen3"]
 [[test]]
 name = "objective_fits"
 path = "tests/objective_fits.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "lora_acceptance"
+path = "tests/lora_acceptance.rs"
 required-features = ["qwen3"]
