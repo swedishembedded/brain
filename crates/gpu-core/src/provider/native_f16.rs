@@ -178,7 +178,9 @@ impl NativeF16Provider {
             );
         }
 
-        ctx.steps.push(ctx.gpu.step_sliced(kind, &bufs, &offsets, req.attrs, threads));
+        // `dispatch_sliced`, not `step_sliced`: the register-tiled kernel shares its tiles through workgroup memory,
+        // so its handle refuses a raw thread count; the tile formula's count is the one the WGSL provider dispatches.
+        ctx.steps.push(ctx.gpu.dispatch_sliced(kind, &bufs, &offsets, req.attrs, crate::Dispatch::Threads(threads)));
         Ok(Lowered::new(1, vec![KERNEL_NAME]))
     }
 }

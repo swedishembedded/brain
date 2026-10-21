@@ -163,6 +163,17 @@ fn native_f16_matmul_subnormal_product_matches_documented_flush_to_zero() {
         );
         return;
     };
+    // The flush is a documented fact of one adapter family (PCI vendor 0x8086), not of f16 arithmetic: an NVIDIA
+    // GH200 under Vulkan keeps the subnormal product (measured 3.0009e-5 for the case below), so on any other
+    // adapter this pins nothing.
+    const DOCUMENTED_VENDOR: u32 = 0x8086;
+    if gpu.identity().is_none_or(|id| id.vendor_id != DOCUMENTED_VENDOR) {
+        brain_testutil::skip_unavailable(
+            "native_f16_matmul_subnormal_product_matches_documented_flush_to_zero: the flush-to-zero \
+             fact is documented for the Intel Arc iGPU only",
+        );
+        return;
+    }
     let provider = NativeF16Provider::probe(&gpu);
     if provider.measured_speedup().map(f64::from).is_none_or(|s| s < backend_api::arch::FAST_TIER_MIN_SPEEDUP) {
         brain_testutil::skip_unavailable(
