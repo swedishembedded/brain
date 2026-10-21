@@ -98,6 +98,10 @@ fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32, rng
 /// yet (that's `crates/qwen35moe/src/serve.rs`'s own, separate concern).
 #[allow(clippy::too_many_arguments)]
 pub fn generate_kv(model: &Qwen35, prompt: &[u32], max_new: usize, temperature: f32, top_k: usize, top_p: f32, eos: &[u32], rng: &mut Rng) -> Vec<u32> {
+    if model.head_is_quantized() {
+        // A head held as int8, FP8 or NVFP4 has no f32 copy to read back: the logits come from the resident head.
+        return generate_kv_with_logits(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &|hidden| model.head_logits(hidden));
+    }
     let head = model.read_weight(model.cfg.head_weight());
     generate_kv_with_head(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &head)
 }
@@ -119,8 +123,22 @@ pub fn generate_kv_with_head(
 ) -> Vec<u32> {
     let vocab = model.cfg.vocab as usize;
     let d = model.cfg.d_model as usize;
-    let logits_of = |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(head, hidden, vocab, d) };
+    generate_kv_with_logits(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &|hidden| model::hostmath::matvec_par(head, hidden, vocab, d))
+}
 
+/// [`generate_kv`] with the head applied by `logits_of` (a final-norm hidden row to its `[vocab]` logits).
+#[allow(clippy::too_many_arguments)]
+pub fn generate_kv_with_logits(
+    model: &Qwen35,
+    prompt: &[u32],
+    max_new: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    eos: &[u32],
+    rng: &mut Rng,
+    logits_of: &dyn Fn(&[f32]) -> Vec<f32>,
+) -> Vec<u32> {
     model.reset_decode_cache();
     let seed_prompt: &[u32] = if prompt.is_empty() { &[0] } else { prompt };
     let mut hidden = Vec::new();

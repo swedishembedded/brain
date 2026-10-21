@@ -88,7 +88,8 @@ impl Drop for Fixture {
 
 /// Write the release for random weights and return it with the decoded canonical weights.
 fn fixture(cfg: &Qwen35Config) -> Fixture {
-    let dir = std::env::temp_dir().join(format!("qwen35moe-hf-nvfp4-{}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!("qwen35moe-hf-nvfp4-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     std::fs::create_dir_all(&dir).unwrap();
     let init = qwen35moe::init::init_weights(cfg, 11);
     let (mut raws, mut decoded, mut layers) = (Vec::new(), HashMap::new(), serde_json::Map::new());
@@ -230,4 +231,57 @@ fn a_modelopt_mixed_precision_release_loads_as_stored_and_matches_its_decoded_we
     // Nothing was written next to the weights: pull and load create no weight-sized file.
     let after: Vec<_> = std::fs::read_dir(&fx.dir).unwrap().map(|e| (e.unwrap().file_name(), 0)).collect();
     assert_eq!(before, after, "loading wrote into the checkpoint directory");
+}
+
+/// Spec: the serving engine over the stored release (paged KV, recurrent state pool, the batched decode step with its
+/// fused norm fronts, the recorded and replayed decode tape) greedy-decodes several sequences of different lengths to
+/// exactly the tokens the single-sequence decode of the same stored model produces.
+#[test]
+fn the_engine_decodes_a_stored_release_as_the_single_sequence_path_does() {
+    use data::rng::Rng;
+    use model::paged::BlockTable;
+    use model::serve::PagedDecoder;
+    use qwen35moe::serve::{Engine, EngineOptions};
+
+    let gpu = Gpu::new(pipelines());
+    if !gpu.caps().workgroup_reductions {
+        return brain_testutil::skip_unavailable("the MoE router kernel needs workgroup barriers (not the CPU JIT)");
+    }
+    let cfg = cfg();
+    let fx = fixture(&cfg);
+    let src = qwen35moe::hf_source::open_dir(&fx.dir, &cfg).unwrap();
+    let prompts: Vec<Vec<u32>> = vec![vec![1, 5, 3], vec![2, 8], vec![4, 6, 1, 7, 3], vec![9, 2, 5, 8]];
+    let steps = 5usize;
+    let max_seq_len = 16u32;
+
+    let reference = Qwen35::new_on_src(gpu.share(), cfg.clone(), 1, max_seq_len, &src);
+    let want: Vec<Vec<u32>> = prompts
+        .iter()
+        .map(|p| {
+            reference.reset_decode_cache();
+            qwen35moe::sample::generate_kv(&reference, p, steps, 0.0, 0, 1.0, &[], &mut Rng::new(data::rng::random_seed()))
+        })
+        .collect();
+
+    let mut engine = Engine::from_source(cfg.clone(), &src, EngineOptions::new(max_seq_len, prompts.len() as u32));
+    let mut tables: Vec<BlockTable> = Vec::new();
+    let mut cur: Vec<u32> = Vec::new();
+    let mut got: Vec<Vec<u32>> = vec![Vec::new(); prompts.len()];
+    for p in &prompts {
+        let mut t = BlockTable::new();
+        let hidden = engine.prefill(&mut t, p);
+        cur.push(engine.admit_greedy(&hidden));
+        tables.push(t);
+    }
+    for (o, &tok) in got.iter_mut().zip(&cur) {
+        o.push(tok);
+    }
+    for _ in 1..steps {
+        let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+        cur = engine.forward_batched_greedy(&mut refs, &cur);
+        for (o, &tok) in got.iter_mut().zip(&cur) {
+            o.push(tok);
+        }
+    }
+    assert_eq!(got, want, "batched engine decode over the stored release differs from the single-sequence decode");
 }

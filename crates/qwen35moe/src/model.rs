@@ -1852,7 +1852,7 @@ impl Qwen35 {
         let coop = block::rms_variant(g, RMSNORM, Some(RMSNORM_ROWS), rows, d).0 == RMSNORM_ROWS;
         self.decode_fusion.get()
             && coop
-            && self.q8.is_some()
+            && (self.q8.is_some() || self.nv.is_some())
             && g.has_fused(gpu_core::Fused::AddRmsQuant)
             && gpu_core::Fused::AddRmsQuant.serves(&[d, rows, f(self.cfg.rms_eps), 1])
     }
@@ -1918,7 +1918,13 @@ impl Qwen35 {
 
     /// The [`Act`] of a [`Front`]'s packed rows, for the linears that read them.
     fn front_act(&self, front: &Front, rows: u32) -> Act {
-        self.ops.act_prequantized(&front.xn, &front.sx, &front.xq, rows, self.cfg.d_model)
+        if self.q8.is_some() {
+            self.ops.act_prequantized(&front.xn, &front.sx, &front.xq, rows, self.cfg.d_model)
+        } else {
+            // A float-read tier (FP8/NVFP4 weights) reads the normalised f32 rows themselves; the kernel's int8 packing
+            // is a by-product it does not use.
+            self.ops.act_f32(&front.xn, 0, rows, self.cfg.d_model)
+        }
     }
 
     /// Backward for a (possibly-LoRA) linear `y = x·Wᵀ`. Accumulates the input
@@ -2272,7 +2278,7 @@ impl Qwen35 {
             return (self.moe_sublayer_i8(l, xmid, front, n, q8), None);
         }
         if let Some(nv) = &self.nv {
-            return (self.moe_sublayer_nv(l, xmid, n, nv), None);
+            return (self.moe_sublayer_nv(l, xmid, front, n, nv), None);
         }
         let g = &self.gpu;
         let c = &self.cfg;
@@ -2548,14 +2554,22 @@ impl Qwen35 {
     /// gather GEMV (decode) or grouped GEMM (prefill) per projection over the fused NVFP4 banks - the routed experts a
     /// token picks plus the shared expert, which rides as bank block `n_experts` - and the slot combine. The router
     /// and the shared gate are one f32 matmul over `router_ext`; the experts' `weight_scale_2` is applied by the GEMM.
-    fn moe_sublayer_nv(&self, l: usize, xmid: &DeviceBuffer, n: u32, nv: &Qwen35Nv) -> DeviceBuffer {
+    fn moe_sublayer_nv(&self, l: usize, xmid: &DeviceBuffer, front: Option<&Front>, n: u32, nv: &Qwen35Nv) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
         let (d, e, ff, top_k) = (c.d_model, c.n_experts, c.moe_intermediate_size, c.top_k);
         let ml = &nv.moe[l];
         let (slots_per_row, width) = (top_k + 1, e + 1);
         let slots = n * slots_per_row;
-        let xn2 = g.storage((n * d) as u64);
+        // `xn2` from the fused front when there is one, else normalised here.
+        let own_xn2;
+        let xn2: &DeviceBuffer = match front {
+            Some(f) => &f.xn,
+            None => {
+                own_xn2 = g.storage((n * d) as u64);
+                &own_xn2
+            }
+        };
         let logits = g.storage((n * width) as u64);
         let (ids, weight) = (g.storage(slots as u64), g.storage(slots as u64));
         let (gate_out, up_out, h) = (g.storage((slots * ff) as u64), g.storage((slots * ff) as u64), g.storage((slots * ff) as u64));
@@ -2581,8 +2595,11 @@ impl Qwen35 {
                 )
             }
         };
-        let mut steps = vec![rmsnorm_fwd(g, &kernel_ids(), xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, n, c.rms_eps)];
-        self.ops.matmul(&mut steps, &ml.router_ext, &self.ops.act_f32(&xn2, 0, n, d), &logits, 0);
+        let mut steps = Vec::new();
+        if front.is_none() {
+            steps.push(rmsnorm_fwd(g, &kernel_ids(), xmid, self.w(&format!("blocks.{l}.ln2.weight")), xn2, d, n, c.rms_eps));
+        }
+        self.ops.matmul(&mut steps, &ml.router_ext, &self.ops.act_f32(xn2, 0, n, d), &logits, 0);
         steps.push(g.dispatch(MOE_ROUTER_TOPK, &[&logits, &ids, &weight], &[n, e, top_k, 1], Dispatch::Workgroups(n)));
         if grouped {
             let counts = g.storage(ne as u64);
@@ -2590,8 +2607,8 @@ impl Qwen35 {
             steps.push(g.dispatch(MOE_ROUTE_SCAN, &[&counts, &route_tab], &[ne, MOE_GROUPED_MR], Dispatch::Workgroups(1)));
             steps.push(g.dispatch(MOE_ROUTE_EMIT, &[&ids, &route_tab, &route_perm], &[slots, ne], Dispatch::Workgroups(ne)));
         }
-        steps.push(gather(&ml.gate, &xn2, &gate_out, slots_per_row));
-        steps.push(gather(&ml.up, &xn2, &up_out, slots_per_row));
+        steps.push(gather(&ml.gate, xn2, &gate_out, slots_per_row));
+        steps.push(gather(&ml.up, xn2, &up_out, slots_per_row));
         steps.push(g.step(SILU_MUL, &[&gate_out, &up_out, &h], &[slots * ff], slots * ff));
         steps.push(gather(&ml.down, &h, &y, 1));
         let moe_out = g.storage((n * d) as u64);
@@ -3952,6 +3969,26 @@ impl Qwen35 {
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         self.ps.read_weight(&self.gpu, name)
+    }
+
+    /// Whether the LM head is resident as a quantized weight (int8, FP8, NVFP4) instead of an f32 parameter: then
+    /// [`Self::read_weight`] has no f32 head to hand out and [`Self::head_logits`] is the way to apply it.
+    pub fn head_is_quantized(&self) -> bool {
+        self.weights.contains_key(self.cfg.head_weight())
+    }
+
+    /// The logits of a final-norm hidden row (`[d_model]`, as [`Self::step`] returns it) from the resident head, whatever
+    /// tier it is held in: one device product, one `[vocab]` readback.
+    pub fn head_logits(&self, hidden: &[f32]) -> Vec<f32> {
+        let g = &self.gpu;
+        let d = self.cfg.d_model;
+        assert_eq!(hidden.len(), d as usize, "qwen35moe::head_logits: a hidden row is d_model wide");
+        let x = g.storage_init("qwen35moe.head_logits.x", hidden);
+        let logits = g.storage(self.cfg.vocab as u64);
+        let mut steps = Vec::new();
+        self.head_matmul(&mut steps, &x, None, 1, &logits);
+        g.submit(&[], &steps);
+        g.read(&logits, self.cfg.vocab as usize)
     }
 
     pub fn write_weight(&self, name: &str, data: &[f32]) {
