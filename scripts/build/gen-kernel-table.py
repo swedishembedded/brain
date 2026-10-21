@@ -70,7 +70,7 @@ LEVELS = {
 CPU_CELL = {"yes": "✓", "no": "✗", "native": "native", "native-only": "native only"}
 GPU_CELL = {"yes": "✓", "yes-wg256": "✓ (256)", "no": "✗"}
 NPU_CELL = {"yes": "✓", "no": "-"}
-QUANT_CELL = {"int8": "int8", "q4": "q4", "fp8": "fp8", "none": "-"}
+QUANT_CELL = {"int8": "int8", "q4": "q4", "fp8": "fp8", "nvfp4": "nvfp4", "none": "-"}
 
 
 def parse_meta(text):
@@ -125,6 +125,10 @@ def cross_check(name, text, meta):
     # the name is the signature.
     if meta["quant"] == "fp8" and "fp8" not in name:
         errs.append("@quant fp8 declared but the kernel name has no 'fp8' marker")
+
+    # nvfp4 kernels decode E2M1 codes through a table and E4M3 scales by arithmetic: the name is the signature.
+    if meta["quant"] == "nvfp4" and "nvfp4" not in name:
+        errs.append("@quant nvfp4 declared but the kernel name has no 'nvfp4' marker")
 
     # A function-scope array in a work-group kernel IS a per-thread register
     # block - that is the only thing such an array can be. Without this the ragged

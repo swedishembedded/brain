@@ -780,6 +780,10 @@ pub const MOE_GROUP_PERM_EMIT: &str = include_str!("../wgsl/moe_group_perm_emit.
 pub const MOE_I8_GEMV_GATHER: &str = include_str!("../wgsl/moe_i8_gemv_gather.wgsl");
 /// `wgsl/moe_i8_grouped.wgsl`
 pub const MOE_I8_GROUPED: &str = include_str!("../wgsl/moe_i8_grouped.wgsl");
+/// `wgsl/moe_nvfp4_gemv_gather.wgsl`
+pub const MOE_NVFP4_GEMV_GATHER: &str = include_str!("../wgsl/moe_nvfp4_gemv_gather.wgsl");
+/// `wgsl/moe_nvfp4_grouped.wgsl`
+pub const MOE_NVFP4_GROUPED: &str = include_str!("../wgsl/moe_nvfp4_grouped.wgsl");
 /// `wgsl/moe_linear_gated.wgsl`
 pub const MOE_LINEAR_GATED: &str = include_str!("../wgsl/moe_linear_gated.wgsl");
 /// `wgsl/moe_linear_gated_dw.wgsl`
@@ -1674,6 +1678,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("moe_group_perm_emit", MOE_GROUP_PERM_EMIT),
     ("moe_i8_gemv_gather", MOE_I8_GEMV_GATHER),
     ("moe_i8_grouped", MOE_I8_GROUPED),
+    ("moe_nvfp4_gemv_gather", MOE_NVFP4_GEMV_GATHER),
+    ("moe_nvfp4_grouped", MOE_NVFP4_GROUPED),
     ("moe_linear_gated", MOE_LINEAR_GATED),
     ("moe_linear_gated_dw", MOE_LINEAR_GATED_DW),
     ("moe_linear_gated_dx", MOE_LINEAR_GATED_DX),

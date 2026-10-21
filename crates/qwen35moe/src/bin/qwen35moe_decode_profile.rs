@@ -19,6 +19,11 @@
 //!
 //! Usage:
 //!   BRAIN_QWEN35MOE_GGUF=<Q8_0.gguf> qwen35moe_decode_profile [passes]
+//!   qwen35moe_decode_profile [passes] --hf-dir <release dir> [--layers N]
+//!
+//! `--hf-dir` profiles a HuggingFace release (a ModelOpt FP8/NVFP4 export, bf16 safetensors) read where it lies,
+//! every tensor in its stored format; `--layers N` keeps only its first N layers (the embedding and head stay), to
+//! profile or bring up a release on a card too small for all of it - the per-layer cost then scales to the model.
 //!
 //! Environment:
 //!   BRAIN_PROFILE_CONTEXT  synthetic decode context, tokens (default 1024)
@@ -40,26 +45,51 @@ fn env_u32(name: &str, default: u32) -> u32 {
     std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
+/// The value of `--flag <value>` among the arguments.
+fn flag(name: &str) -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+}
+
 fn main() {
     let passes: u32 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(8);
-    let Ok(path) = std::env::var(gguf_load::GGUF_ENV) else {
-        eprintln!("set {} to the Qwen3.6-35B-A3B Q8_0 GGUF", gguf_load::GGUF_ENV);
+    let hf_dir = flag("--hf-dir");
+    let path = std::env::var(gguf_load::GGUF_ENV).unwrap_or_default();
+    if hf_dir.is_none() && path.is_empty() {
+        eprintln!("set {} to the Qwen3.6-35B-A3B Q8_0 GGUF, or pass --hf-dir <release directory>", gguf_load::GGUF_ENV);
         std::process::exit(2);
-    };
+    }
     let context = env_u32("BRAIN_PROFILE_CONTEXT", 1024);
     let batch = env_u32("BRAIN_PROFILE_BATCH", 1);
     let prefill = std::env::var("BRAIN_PROFILE_PREFILL").ok().and_then(|s| s.parse::<u32>().ok());
     let chunk = env_u32("BRAIN_PROFILE_CHUNK", 256);
-    let tier = gguf_load::tier_from_env();
+    // A release read in place keeps every tensor in its stored format: no tier is asked for.
+    let tier = if hf_dir.is_some() { model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32) } else { gguf_load::tier_from_env() };
     let kv = gguf_load::kv_tier_from_env().unwrap_or_else(|e| panic!("{e}"));
 
     let capacity = prefill.unwrap_or(context) + 2 * passes + 8;
-    let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
-    let cfg = gguf_load::resident_config(&mg, capacity).unwrap_or_else(|e| panic!("{e}"));
-    let src = gguf_load::source(&mg, &cfg).unwrap_or_else(|e| panic!("{e}"));
+    let gguf = hf_dir.is_none().then(|| MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")));
+    let (cfg, src): (_, Box<dyn checkpoint::TensorSource>) = match (&hf_dir, &gguf) {
+        (Some(dir), _) => {
+            let dir = std::path::Path::new(dir);
+            let mut cfg = qwen35moe::hf_source::hf_config(dir).unwrap_or_else(|e| panic!("{e}"));
+            cfg.block_size = capacity;
+            if let Some(n) = flag("--layers").and_then(|s| s.parse::<u32>().ok()) {
+                cfg.n_layers = n.min(cfg.n_layers);
+            }
+            let src = qwen35moe::hf_source::open_dir_truncated(dir, &cfg).unwrap_or_else(|e| panic!("{e}"));
+            (cfg, Box::new(src))
+        }
+        (None, Some(mg)) => {
+            let cfg = gguf_load::resident_config(mg, capacity).unwrap_or_else(|e| panic!("{e}"));
+            let src = gguf_load::source(mg, &cfg).unwrap_or_else(|e| panic!("{e}"));
+            (cfg, Box::new(src))
+        }
+        (None, None) => unreachable!("one of the two sources was opened"),
+    };
     let t0 = Instant::now();
     let opts = EngineOptions::new(capacity, if prefill.is_some() { 1 } else { batch }).with_tier(tier.clone()).with_kv_tier(kv).with_prefill_chunk(chunk).with_moe_grouped_min_rows(env_u32("BRAIN_PROFILE_GROUPED_MIN_ROWS", qwen35moe::model::MOE_GROUPED_MIN_ROWS));
-    let mut engine = Engine::from_source(cfg.clone(), &src, opts);
+    let mut engine = Engine::from_source(cfg.clone(), &*src, opts);
     println!("weight tier {}, kv {kv}, backend {}", tier.describe(), gpu_core::backend_name());
     println!("cold load {:.1} s, KV pool + recurrent state {:.2} GiB", t0.elapsed().as_secs_f64(), engine.kv_pool_bytes() as f64 / (1u64 << 30) as f64);
 

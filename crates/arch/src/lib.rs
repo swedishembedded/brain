@@ -341,7 +341,10 @@ pub const ARCHS: &[Arch] = &[
             Variant { reference: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", params: 1_777_088_000, quants: &[], license: Some("mit") },
             Variant { reference: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", params: 7_615_616_512, quants: &[], license: Some("mit") },
         ]),
-    arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: Some("qwen35moe")),
+    // `hf` carries the real `architectures[0]` classes of the Qwen3.5/3.6 MoE releases (the
+    // multimodal wrapper and the text-only class) and the `model_type` fallback spelling, same
+    // convention as the dense `qwen35` row below.
+    arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: Some("qwen35moe"), hf: &["Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM", "qwen3_5_moe"]),
     // The DENSE sibling of qwen35moe - llama.cpp registers the two as
     // separate architectures (`LLM_ARCH_QWEN35` vs `LLM_ARCH_QWEN35MOE`)
     // despite sharing one HF `model_type` ("qwen3_5"): same hybrid Gated
@@ -363,7 +366,7 @@ pub const ARCHS: &[Arch] = &[
     // `resolved_assembly_for`; the serving path finds a GGUF release in the
     // model store.
     arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8")),
-    arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa"),
+    arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa", hf: &["GlmMoeDsaForCausalLM", "glm_moe_dsa"]),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
     arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M"),
         variants: &[

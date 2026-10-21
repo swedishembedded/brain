@@ -1166,7 +1166,7 @@ mod sink;
 mod upload_source;
 mod tiled;
 mod decoded;
-pub use sink::{rewrite_tile, DeviceWeightSink};
+pub use sink::{rewrite_tile, upload_micro_bank, DeviceWeightSink, MicroBank};
 pub use upload_source::{stored_tier, stored_tier_policy, upload_fused_from_source, upload_from_source, upload_group_preserved, upload_preserved, FusedGroup};
 pub use upload_source::{conversion_policy, encoding_for};
 pub use tiled::{plan_linear, tile_rows, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES};

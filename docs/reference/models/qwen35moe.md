@@ -35,6 +35,24 @@ resident, which found it on real weights - see `.agents/knowledge/`
 checkpoint** (none is available on the development box); the synthetic-fixture
 import test covers the transform, real generation does not.
 
+## From a HuggingFace release (no conversion)
+
+```bash
+brain pull https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4
+brain serve --openai 8788
+```
+
+`brain pull` fetches the published files and writes the small manifest beside them; nothing is converted or repacked, and
+serving reads the safetensors shards where they lie. Every tensor reaches the card in the format it is stored in
+(invariant M): the release's own quantization declaration (`quantization_config` in `config.json`, or
+`hf_quant_config.json` for a NVIDIA ModelOpt export) and its sibling scale tensors are read once, by the checkpoint
+layer, into a per-tensor encoding. For the ModelOpt mixed-precision release that means FP8 attention/GDN projections with
+their per-tensor `weight_scale`, and the routed and shared experts (and the head) as NVFP4: E2M1 codes, an E4M3 scale per
+16, one f32 `weight_scale_2` per expert matrix. The experts live in fused NVFP4 banks that the gather/grouped
+GEMMs (`moe_nvfp4_gemv_gather`, `moe_nvfp4_grouped`) read directly with float activations (W4A16), so the stored
+`input_scale`s are unused. A bf16 release with fused `mlp.experts.gate_up_proj` tensors is read through per-expert views
+of the fused tensor. The vision tower and the MTP head are not part of the text decoder and are skipped by name.
+
 ## Running it
 
 ```bash

@@ -80,13 +80,16 @@ pub struct Qwen35Resident {
     id: String,
     path: String,
     tokenizer: String,
+    /// `path` is a HuggingFace checkpoint directory read in place (ModelOpt FP8/NVFP4, compressed-tensors or bf16
+    /// safetensors, as published), not a brain-native file.
+    hf_dir: bool,
 }
 
 impl Qwen35Resident {
     pub fn from_env() -> Option<Qwen35Resident> {
         let path = std::env::var("BRAIN_QWEN35MOE_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         let tokenizer = std::env::var("BRAIN_QWEN35MOE_TOKENIZER").ok().unwrap_or_default();
-        Some(Qwen35Resident { id: MODEL.to_string(), path, tokenizer })
+        Some(Qwen35Resident { id: MODEL.to_string(), path, tokenizer, hf_dir: false })
     }
 
     /// The model-dir counterpart of [`from_env`](Self::from_env): a checkpoint
@@ -101,7 +104,17 @@ impl Qwen35Resident {
     /// declined at discovery instead, exactly like the `lfm` family.
     pub fn from_card(path: &str, card: &checkpoint::st::ModelCard, tokenizer: Option<&str>) -> Result<Qwen35Resident, String> {
         let tokenizer = tokenizer.filter(|t| !t.is_empty()).ok_or("qwen35moe: no sibling tokenizer.json")?;
-        Ok(Qwen35Resident { id: card.id.clone(), path: path.to_string(), tokenizer: tokenizer.to_string() })
+        Ok(Qwen35Resident { id: card.id.clone(), path: path.to_string(), tokenizer: tokenizer.to_string(), hf_dir: false })
+    }
+
+    /// A HuggingFace checkpoint directory (`config.json`, `tokenizer.json` and safetensors shards, as pulled), served
+    /// where it lies: every tensor reaches the card in the format it is stored in.
+    pub fn from_hf_dir(dir: &str, card: &checkpoint::st::ModelCard) -> Result<Qwen35Resident, String> {
+        let tokenizer = std::path::Path::new(dir).join("tokenizer.json");
+        if !tokenizer.is_file() {
+            return Err(format!("qwen35moe: {dir} has no tokenizer.json"));
+        }
+        Ok(Qwen35Resident { id: card.id.clone(), path: dir.to_string(), tokenizer: tokenizer.to_string_lossy().into_owned(), hf_dir: true })
     }
 
     /// The hard per-sequence `prompt + max_new` cap, which this engine also
@@ -117,6 +130,46 @@ impl Qwen35Resident {
     /// step.
     fn max_concurrent() -> u32 {
         std::env::var("BRAIN_QWEN35MOE_MAX_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(4u32).max(1)
+    }
+}
+
+impl Qwen35Resident {
+    /// Device bytes of a directory-served checkpoint: the stored bytes of its shards (FP8 and NVFP4 stay as stored), the
+    /// embedding table widened to f32, plus the KV pool and recurrent state the engine allocates.
+    fn estimate_hf_dir(&self) -> MemCost {
+        let stored: u64 = std::fs::read_dir(&self.path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "safetensors"))
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum();
+        let Ok(cfg) = qwen35moe::hf_source::hf_config(std::path::Path::new(&self.path)) else {
+            return MemCost::new(stored, 0);
+        };
+        let weights = stored + cfg.vocab as u64 * cfg.d_model as u64 * 2;
+        let kv = qwen35moe::serve::kv_pool_bytes(&cfg, qwen35moe::serve::EngineOptions::new(Self::ctx(), Self::max_concurrent()).kv_tier, Self::max_concurrent(), Self::ctx());
+        MemCost::new(weights + kv, 0)
+    }
+
+    /// Build the scheduler from the directory, in place: the config and the tensors are read from the published files.
+    fn activate_hf_dir(&self, device: Device) -> Result<Box<dyn Instance>, String> {
+        let dir = std::path::Path::new(&self.path);
+        let cfg = qwen35moe::hf_source::hf_config(dir)?;
+        let tok = QwenBpe::from_file(&self.tokenizer)?;
+        let stop = data::generation::stop_ids(Some(dir), &tok, None, Some("<|im_end|>")).map_err(|e| format!("qwen35moe: {e}"))?;
+        let (ctx, max_concurrent) = (Self::ctx(), Self::max_concurrent());
+        let front = Arc::new(TextFrontend { tok, stop, label: "qwen35moe", parse: parse_request });
+        let src = qwen35moe::hf_source::open_dir(dir, &cfg)?;
+        let names = src.names().into_iter().map(str::to_string).collect();
+        let host = HostWeights::from_source(Box::new(src), names);
+        let config = cfg.to_json();
+        let build: Build = Box::new(move |host, device| {
+            let sched = on_device(device, || engine_from(host.source(), &config, ctx, max_concurrent).map(|engine| Scheduler::new(engine, max_concurrent as usize)))??;
+            Ok(Box::new(ScheduledInstance::new(front.clone(), sched, max_concurrent as usize)))
+        });
+        Ok(Box::new(ParkableInstance::activate(Arc::new(host), device, build)?))
     }
 }
 
@@ -141,6 +194,9 @@ impl ResidentModel for Qwen35Resident {
         Some(Self::max_concurrent() as usize)
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
+        if self.hf_dir {
+            return self.estimate_hf_dir();
+        }
         let cost = est_vram(&self.path);
         let Ok(reader) = checkpoint::weightio::WeightReader::open(&self.path) else {
             return cost;
@@ -165,6 +221,9 @@ impl ResidentModel for Qwen35Resident {
         MemCost::new(cost.vram + gqa_bytes, cost.ram)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        if self.hf_dir {
+            return self.activate_hf_dir(device);
+        }
         // Open first so a GGUF can supply its own embedded tokenizer, exactly
         // like crate::resident_llm::QwenResident::activate. The engine is built
         // from the stored checkpoint view ([`engine_from`]); this reader
@@ -198,6 +257,7 @@ impl ResidentModel for Qwen35Resident {
     fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
         match tier {
             Tier::Hot => self.estimate(key),
+            Tier::Warm | Tier::Cold if self.hf_dir => MemCost::new(0, 0).with_mapped(self.estimate_hf_dir().vram),
             Tier::Warm | Tier::Cold => MemCost::new(0, 0).with_mapped(std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)),
         }
     }
@@ -264,7 +324,7 @@ mod tests {
     /// needing a real checkpoint/tokenizer.
     #[test]
     fn brain_qwen35moe_is_auto_exposed_on_openai_and_anthropic_model_lists() {
-        let resident = Qwen35Resident { id: MODEL.to_string(), path: "/nonexistent/qwen35.safetensors".to_string(), tokenizer: String::new() };
+        let resident = Qwen35Resident { id: MODEL.to_string(), path: "/nonexistent/qwen35.safetensors".to_string(), tokenizer: String::new(), hf_dir: false };
         let models: Vec<std::sync::Arc<dyn ResidentModel>> = vec![std::sync::Arc::new(resident)];
         let mut budgets = residency::budget::Budgets::new();
         budgets.set(Device::Cpu, 8 << 30, 0);

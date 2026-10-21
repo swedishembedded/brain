@@ -243,3 +243,27 @@ fn a_streamed_upload_is_bitwise_the_plain_upload_and_stays_inside_its_pinned_bud
     drop(streamed);
     assert_eq!(budget.stats(Pool::Pinned).in_use, 0, "dropping the Ops returns the pinned lease");
 }
+
+/// A static per-tensor FP8 scale (the ModelOpt / compressed-tensors `weight_scale` of a W8A8 release) loads as the
+/// FP8 tier: the one scale is held on every tile of the grid, so the resident weight decodes to exactly the stored
+/// codes times that scale, whatever the tiling.
+#[test]
+fn an_fp8_weight_with_one_tensor_scale_becomes_the_fp8_tier() {
+    let ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
+    let raw = Lcg::random().vec_scaled(N * K, 0.5);
+    let (f8p, _) = quantize_weight_fp8(&raw, N, K, Fp8Format::E4M3, 128);
+    let scale = 0.37f32;
+    let grid = vec![scale; N.div_ceil(128) * K.div_ceil(128)];
+    let want = dequantize_weight_fp8(&f8p, &grid, N, K, Fp8Format::E4M3, 128);
+    let enc = QuantEncoding { element: Element::Float(FloatFormat::E4M3Fn), scales: vec![ScaleLevel { granularity: ScaleGranularity::Tensor, format: FloatFormat::F32, suffix: "_scale".into() }] };
+    let desc = TensorDescriptor::new("w", vec![N as u64, K as u64], enc);
+    desc.validate().unwrap();
+    for tile in [desc.numel(), desc.tile_quantum() * 3] {
+        let mut sink = DeviceWeightSink::new(&ops);
+        load(&mut sink, &desc, &words_to_bytes(&f8p), Some(&f32_bytes(&[scale])), tile).unwrap_or_else(|e| panic!("tile {tile}: {e}"));
+        let w = sink.take_weight().expect("a finished load yields a weight");
+        assert!(matches!(w, Weight::FP8 { .. }), "a per-tensor FP8 scale is the FP8 tier");
+        let got = decoded(&ops, &w);
+        assert!(got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()), "tile {tile}: the resident weight differs from codes x the tensor scale");
+    }
+}

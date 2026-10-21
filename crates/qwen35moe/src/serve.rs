@@ -497,7 +497,7 @@ impl Engine {
                 LayerType::Linear => KvLayer::placeholder(&model.gpu),
             });
         }
-        let decode_tapes = opts.decode_tapes && model.moe_int8_active();
+        let decode_tapes = opts.decode_tapes && model.moe_device_routed();
         let gdn = GdnPool::new(&model.gpu, gdn_slot_shape(&cfg), opts.max_concurrent);
         Engine {
             tapes: Vec::new(),
@@ -632,7 +632,7 @@ impl Engine {
     /// at a very different host cost. Drops what was recorded.
     pub fn set_decode_tapes(&mut self, on: bool) {
         self.tapes.clear();
-        self.decode_tapes = on && self.model.moe_int8_active();
+        self.decode_tapes = on && self.model.moe_device_routed();
     }
 
     pub fn free_blocks(&self) -> u32 {

@@ -31,6 +31,11 @@ impl HostWeights {
         Ok((config, HostWeights { source, names }))
     }
 
+    /// Host weights over an already-open `source` serving the tensors `names` (a HuggingFace directory read in place).
+    pub(crate) fn from_source(source: Box<dyn checkpoint::TensorSource + Send + Sync>, names: Vec<String>) -> HostWeights {
+        HostWeights { source, names }
+    }
+
     pub(crate) fn source(&self) -> &dyn checkpoint::TensorSource {
         &*self.source
     }

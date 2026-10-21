@@ -114,6 +114,11 @@ history and exempt.
    Gradient-checked (`gradcheck::check_qwen35moe`, `check_qwen35moe_lora`).
    `brain qwen35moe {infer,export}`; the GGUF
    conversion runs through the generic `brain import` (see below).
+   **HuggingFace releases load as published** (`qwen35moe::hf_source`: no conversion, no rewritten copy): a ModelOpt mixed-precision
+   release serves with FP8 mixers and NVFP4 expert banks exactly as stored (`qwen35moe::nvfp4`, `moe_nvfp4_*` kernels, W4A16).
+   The release's quantization declaration is parsed ONCE in `checkpoint::packed::hfquant` (`quantization_config`,
+   `hf_quant_config.json`); `scripts/gates/check-hf-fixtures.sh` requires a tiny HF-layout fixture test for every architecture
+   that declares HuggingFace names.
    See `.agents/roadmap/qwen35moe.md`.
 2c. **Qwen3.8-27B dense hybrid decoder** (`crates/qwen35`, upstream
    `Qwen/Qwen3.8-27B-FP8`) - the dense sibling of qwen35moe above: identical

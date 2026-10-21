@@ -742,6 +742,11 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
             _ => Err(format!("{} is served across GPUs: set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT={weights}", card.id)),
         };
     }
+    // A Qwen3.5/3.6 MoE release is served from its published directory, every tensor in the format it is stored in.
+    if implementation == Some("qwen35moe") {
+        let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
+        return catalog::resident_qwen35moe::Qwen35Resident::from_hf_dir(dir, card).map(|q| Built::Other(Arc::new(q)));
+    }
     // A pulled YOLOv8 is served from its downloaded `.pt`.
     if card.family == "yolo" {
         let pt = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;

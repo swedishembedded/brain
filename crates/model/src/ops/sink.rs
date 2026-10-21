@@ -25,7 +25,7 @@
 use checkpoint::packed::{Codebook, Element, FloatFormat, QuantEncoding, ScaleGranularity, TensorDescriptor, TensorSink, Tile};
 use gpu_core::{DeviceBuffer, Gpu};
 
-use super::{MicroScaled, Ops, Weight};
+use super::{MicroScaled, Ops, Weight, FP8_BLOCK};
 use crate::fp8::Fp8Format;
 
 /// The tier a destination encoding maps to.
@@ -58,6 +58,10 @@ fn tier_of(enc: &QuantEncoding) -> Result<Tier, String> {
         (Element::Int { bits: 8, signed: true }, 1) if level(0) == f32_per_32 => Ok(Tier::I8),
         (Element::Codebook(Codebook::Nf4), 1) if level(0) == f32_per_32 => Ok(Tier::Nf4),
         (Element::Float(f @ (FloatFormat::E4M3Fn | FloatFormat::E5M2)), 1) => match level(0) {
+            // One scale for the whole tensor (static per-tensor FP8): held as that scale on every tile of the grid.
+            Some((ScaleGranularity::Tensor, FloatFormat::F32 | FloatFormat::Bf16)) => {
+                Ok(Tier::Fp8(if *f == FloatFormat::E4M3Fn { Fp8Format::E4M3 } else { Fp8Format::E5M2 }, FP8_BLOCK))
+            }
             Some((ScaleGranularity::Tile2d { rows, cols }, FloatFormat::Bf16 | FloatFormat::F32)) if rows == cols => {
                 Ok(Tier::Fp8(if *f == FloatFormat::E4M3Fn { Fp8Format::E4M3 } else { Fp8Format::E5M2 }, rows))
             }
@@ -87,6 +91,12 @@ struct Stream {
 impl Stream {
     fn new(gpu: &Gpu, total_bytes: u64) -> Stream {
         Stream { buf: gpu.storage_uninit(total_bytes.div_ceil(4)), written: 0, carry: Vec::new(), total_bytes }
+    }
+
+    /// A stream filling bytes `start..start + len` of the existing buffer `buf` (`start` a whole word).
+    fn within(buf: &DeviceBuffer, start: u64, len: u64) -> Stream {
+        debug_assert!(start.is_multiple_of(4), "a bank stream starts on a word");
+        Stream { buf: buf.clone(), written: start, carry: Vec::new(), total_bytes: start + len }
     }
 
     /// Where the next byte goes.
@@ -133,6 +143,18 @@ enum Scales {
     F32 { buf: DeviceBuffer, from_bf16: bool },
     /// One byte per block (E4M3 or E8M0 codes), kept as bytes.
     Bytes(Stream),
+    /// One scale for the whole tensor (an FP8 weight with a per-tensor scale): the resident tier keeps a scale per
+    /// tile, so the value is replicated over the grid when the load finishes.
+    Uniform(f32),
+}
+
+/// A scale value of `bytes` in `format`, read as f32.
+fn scale_value(format: FloatFormat, bytes: &[u8]) -> Result<f32, String> {
+    match (format, bytes) {
+        (FloatFormat::F32, [a, b, c, d, ..]) => Ok(f32::from_le_bytes([*a, *b, *c, *d])),
+        (FloatFormat::Bf16, [a, b, ..]) => Ok(f32::from_bits((u16::from_le_bytes([*a, *b]) as u32) << 16)),
+        _ => Err(format!("a {format:?} tensor scale needs its bytes")),
+    }
 }
 
 struct Pending {
@@ -189,6 +211,7 @@ impl TensorSink for DeviceWeightSink<'_> {
         let scales = match (tier, dst.encoding.scales.last()) {
             (_, None) => None,
             (Tier::Micro(_), Some(_)) => Some(Scales::Bytes(Stream::new(gpu, dst.scale_bytes(dst.encoding.scales.len() - 1)))),
+            (Tier::Fp8(..), Some(level)) if level.granularity == ScaleGranularity::Tensor => Some(Scales::Uniform(1.0)),
             (_, Some(level)) => Some(Scales::F32 { buf: gpu.storage_uninit(dst.scale_numel(0)), from_bf16: level.format == FloatFormat::Bf16 }),
         };
         self.done = None;
@@ -205,6 +228,10 @@ impl TensorSink for DeviceWeightSink<'_> {
         }
         p.payload.push(gpu, tile.payload);
         match &mut p.scales {
+            Some(Scales::Uniform(value)) => {
+                let level = &dst.encoding.scales[0];
+                *value = scale_value(level.format, tile.scales.first().ok_or("a scaled tile carries its scales")?)?;
+            }
             Some(Scales::F32 { buf, from_bf16 }) => {
                 let bytes = tile.scales.first().ok_or("a scaled tile carries its scales")?;
                 let at = dst.scale_range(0, &tile.elems).start;
@@ -242,6 +269,10 @@ impl TensorSink for DeviceWeightSink<'_> {
         let scales = match p.scales {
             Some(Scales::F32 { buf, .. }) => Some(buf),
             Some(Scales::Bytes(mut stream)) => Some(stream.finish(gpu, "scale", &dst.name)?),
+            Some(Scales::Uniform(value)) => {
+                let tiles = (n as u64).div_ceil(FP8_BLOCK as u64) * (k as u64).div_ceil(FP8_BLOCK as u64);
+                Some(gpu.storage_init(&format!("{}.scale_grid", dst.name), &vec![value; tiles as usize]))
+            }
             None => None,
         };
         // The weight is complete: whatever handle uses it next waits for the writes (a no-op on the compute handle).
@@ -298,4 +329,121 @@ pub fn rewrite_tile(ops: &Ops, weight: &Weight, dst: &TensorDescriptor, tile: &T
         gpu.write_at(buf, at, &words);
     }
     Ok(())
+}
+
+
+/// A bank of `blocks` same-shape microscaled matrices (the routed experts of one MoE projection) in ONE resident
+/// buffer set: block `b`'s `[n, k]` matrix is rows `b * n .. (b + 1) * n` of the payload and scale planes, and its
+/// per-tensor scale is `global[b]`. One buffer per projection is what lets a single gather kernel serve every expert a
+/// token routes to; the bytes are the checkpoint's own (Preserve), one tile of host staging at a time.
+pub struct MicroBank {
+    /// Element codes of every block, back to back, in the tier's packing.
+    pub w: DeviceBuffer,
+    /// Scale bytes of every block, back to back, four to a word.
+    pub s: DeviceBuffer,
+    /// `[blocks]` f32 per-tensor scale of each block.
+    pub global: DeviceBuffer,
+    pub n: u32,
+    pub k: u32,
+    pub blocks: u32,
+    pub kind: MicroScaled,
+}
+
+/// Loads the matrices of a [`MicroBank`] one block at a time: [`Self::start_block`] then a tiled load into this sink.
+struct MicroBankSink<'a> {
+    ops: &'a Ops,
+    w: DeviceBuffer,
+    s: DeviceBuffer,
+    n: u32,
+    k: u32,
+    block: u32,
+    global: Vec<f32>,
+    payload: Option<Stream>,
+    scales: Option<Stream>,
+}
+
+impl MicroBankSink<'_> {
+    fn bytes(&self, dst: &TensorDescriptor) -> (u64, u64) {
+        (dst.payload_bytes(), dst.scale_bytes(dst.encoding.scales.len() - 1))
+    }
+}
+
+impl TensorSink for MicroBankSink<'_> {
+    fn begin(&mut self, dst: &TensorDescriptor) -> Result<(), String> {
+        let tier = tier_of(&dst.encoding).map_err(|e| format!("tensor '{}': {e}", dst.name))?;
+        if tier != Tier::Micro(MicroScaled::Nvfp4) || dst.shape != [self.n as u64, self.k as u64] {
+            return Err(format!("tensor '{}': a bank of NVFP4 [{}, {}] matrices cannot take {:?} of shape {:?}", dst.name, self.n, self.k, dst.encoding, dst.shape));
+        }
+        let (pb, sb) = self.bytes(dst);
+        self.payload = Some(Stream::within(&self.w, self.block as u64 * pb, pb));
+        self.scales = Some(Stream::within(&self.s, self.block as u64 * sb, sb));
+        Ok(())
+    }
+
+    fn write_tile(&mut self, dst: &TensorDescriptor, tile: &Tile<'_>) -> Result<(), String> {
+        let gpu = self.ops.upload_gpu();
+        let (pb, sb) = self.bytes(dst);
+        let (payload, scales) = self.payload.as_mut().zip(self.scales.as_mut()).ok_or("MicroBankSink::write_tile before begin")?;
+        let range = dst.payload_range(&tile.elems);
+        if self.block as u64 * pb + range.start != payload.position() {
+            return Err(format!("tensor '{}': tiles must arrive in order", dst.name));
+        }
+        payload.push(gpu, tile.payload);
+        let g = tile.scales.first().and_then(|b| b.as_chunks::<4>().0.first().copied()).ok_or("an NVFP4 tile carries the tensor scale")?;
+        self.global[self.block as usize] = f32::from_le_bytes(g);
+        let bytes = tile.scales.get(1).ok_or("an NVFP4 tile carries its block scales")?;
+        let at = self.block as u64 * sb + dst.scale_range(1, &tile.elems).start;
+        if at != scales.position() {
+            return Err(format!("tensor '{}': scale tiles must arrive in order", dst.name));
+        }
+        scales.push(gpu, bytes);
+        Ok(())
+    }
+
+    fn finish(&mut self, dst: &TensorDescriptor) -> Result<(), String> {
+        let gpu = self.ops.upload_gpu();
+        let (mut payload, mut scales) = self.payload.take().zip(self.scales.take()).ok_or("MicroBankSink::finish before begin")?;
+        payload.finish(gpu, "payload", &dst.name)?;
+        scales.finish(gpu, "scale", &dst.name)?;
+        Ok(())
+    }
+
+    fn abort(&mut self, _dst: &TensorDescriptor) {
+        self.payload = None;
+        self.scales = None;
+    }
+}
+
+/// Upload the NVFP4 matrices `names` (each `[n, k]`, in block order) of `src` as one [`MicroBank`], in the encoding
+/// they are stored in. `staging` bounds the host memory a tile may take. An encoding that is not NVFP4, a shape that
+/// differs, or a source without a packed view of a name is an error naming it: nothing is widened.
+pub fn upload_micro_bank(ops: &Ops, src: &dyn checkpoint::TensorSource, names: &[String], n: usize, k: usize, staging: &checkpoint::packed::BoundedWorkspace) -> Result<MicroBank, String> {
+    use checkpoint::packed::{LoadConfig, LoadPolicy, LoadRequest};
+    let blocks = names.len() as u32;
+    let first = names.first().ok_or("an empty expert bank")?;
+    let probe = src.packed_descriptor(first).ok_or_else(|| format!("{first}: the source has no packed view of this tensor"))?;
+    let (pb, sb) = (probe.payload_bytes(), probe.scale_bytes(probe.encoding.scales.len().saturating_sub(1)));
+    let gpu = ops.upload_gpu();
+    let mut sink = MicroBankSink {
+        ops,
+        w: gpu.storage_uninit((pb * blocks as u64).div_ceil(4)),
+        s: gpu.storage_uninit((sb * blocks as u64).div_ceil(4)),
+        n: n as u32,
+        k: k as u32,
+        block: 0,
+        global: vec![1.0; blocks as usize],
+        payload: None,
+        scales: None,
+    };
+    let config = LoadConfig::default();
+    let req = LoadRequest { policy: &LoadPolicy::Preserve, workspace: staging, config: &config };
+    for (b, name) in names.iter().enumerate() {
+        sink.block = b as u32;
+        match src.load_packed(&[name.as_str()], &req, &mut sink)? {
+            Some(_) => {}
+            None => return Err(format!("{name}: the source cannot serve this tensor packed")),
+        }
+    }
+    let global = gpu.storage_init("micro_bank.global", &sink.global);
+    Ok(MicroBank { w: sink.w, s: sink.s, global, n: n as u32, k: k as u32, blocks, kind: MicroScaled::Nvfp4 })
 }
