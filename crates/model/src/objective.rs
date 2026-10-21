@@ -166,6 +166,47 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for Box<O> {
     fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
         (**self).prepare(model)
     }
+    fn begin(&mut self, seed: u64, draws_done: u64) {
+        (**self).begin(seed, draws_done)
+    }
+    fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
+        (**self).micro_step(model, rng)
+    }
+    fn micro_steps(&mut self, model: &M, rng: &mut Rng, k: u32) -> f32 {
+        (**self).micro_steps(model, rng, k)
+    }
+    fn step_verdict(&mut self) -> StepVerdict {
+        (**self).step_verdict()
+    }
+    fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
+        (**self).loss_probe(model, rng)
+    }
+    fn eval(&mut self, model: &M, rng: &mut Rng, batches: u32) -> Option<f32> {
+        (**self).eval(model, rng, batches)
+    }
+    fn metrics(&self) -> Vec<(&'static str, f32)> {
+        (**self).metrics()
+    }
+    fn itos(&self) -> Option<&[char]> {
+        (**self).itos()
+    }
+    fn batch_shape(&self) -> Option<(u32, u32)> {
+        (**self).batch_shape()
+    }
+}
+
+/// A borrowed objective drives a run too, so the caller keeps it afterwards
+/// and can read what it recorded (statistics, logs) once the run is over.
+impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for &mut O {
+    fn regime(&self) -> &'static str {
+        (**self).regime()
+    }
+    fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
+        (**self).prepare(model)
+    }
+    fn begin(&mut self, seed: u64, draws_done: u64) {
+        (**self).begin(seed, draws_done)
+    }
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
         (**self).micro_step(model, rng)
     }

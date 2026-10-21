@@ -188,6 +188,10 @@ layer 6 - serving, front ends, SDK, samples
                            adapter) and hands its model to a `ModelFit`
                            visitor, so the loop, objectives and optimizer-state
                            choice (`OptimizerState`) never name a family.
+                           The post-training objectives are `ModelFit`
+                           visitors in `rl::fit` (`DpoFit`, `GrpoFit`,
+                           `DistillFit`), so each runs on every family and
+                           frozen-base encoding a trainer offers.
                            `score.rs` is held-out scoring over any Model
    promote                 the model-agnostic promote/reject decision: the
                            Environment/Verifier reward seam, the exact paired

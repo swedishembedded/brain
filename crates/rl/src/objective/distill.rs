@@ -90,6 +90,22 @@ pub struct TopK {
     pub probs: Vec<f32>,
 }
 
+impl TopK {
+    /// The `k` largest entries of one position's teacher `logits`, softmaxed
+    /// over the whole row (so the probabilities are the teacher's) and then
+    /// renormalized over the kept entries. Ties keep the lower id. `k` is
+    /// clamped to the row width.
+    pub fn from_logits(logits: &[f32], k: usize) -> TopK {
+        let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut order: Vec<u32> = (0..logits.len() as u32).collect();
+        order.sort_by(|&a, &b| logits[b as usize].total_cmp(&logits[a as usize]).then(a.cmp(&b)));
+        order.truncate(k);
+        let kept: Vec<f32> = order.iter().map(|&i| (logits[i as usize] - max).exp()).collect();
+        let sum: f32 = kept.iter().sum();
+        TopK { probs: kept.iter().map(|p| p / sum).collect(), ids: order }
+    }
+}
+
 /// One example DistillTopK trains on: `prompt` tokens (never scored, never
 /// carry a `TopK`) followed by `completion` tokens, with `teacher[i]` the
 /// top-K teacher distribution for the position that predicts
@@ -336,6 +352,18 @@ mod tests {
         assert_eq!(t1, vec![7, IGNORE, IGNORE]);
         assert_eq!(c1, 1.0, "only position 0 has a k=1 entry");
         assert!((w1[0] - 0.4 * 1.0).abs() < 1e-6, "{w1:?}");
+    }
+
+    #[test]
+    fn from_logits_keeps_the_largest_entries_renormalized_in_descending_order() {
+        let logits = [0.0f32, 2.0, 1.0, 2.0, -3.0];
+        let topk = TopK::from_logits(&logits, 3);
+        assert_eq!(topk.ids, vec![1, 3, 2], "ties keep the lower id first");
+        assert!((topk.probs.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        let (e2, e1) = (2.0f32.exp(), 1.0f32.exp());
+        assert!((topk.probs[0] - e2 / (2.0 * e2 + e1)).abs() < 1e-6, "{:?}", topk.probs);
+        assert!((topk.probs[2] - e1 / (2.0 * e2 + e1)).abs() < 1e-6, "{:?}", topk.probs);
+        assert_eq!(TopK::from_logits(&logits, 99).ids.len(), logits.len(), "k is clamped to the row");
     }
 
     #[test]

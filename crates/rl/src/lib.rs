@@ -36,6 +36,7 @@ pub mod conformance;
 pub mod continual;
 pub mod curriculum;
 pub mod document;
+pub mod fit;
 pub mod improve;
 pub mod reader;
 pub mod objective;

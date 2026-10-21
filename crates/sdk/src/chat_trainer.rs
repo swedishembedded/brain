@@ -20,9 +20,10 @@
 use std::path::{Path, PathBuf};
 
 use data::preference::EncodedTurn;
-use model::finetune::{AdapterLineage, ChatTrainer, LoraRequest, ModelFit, OptimizerState, PreferenceMargins};
-use model::{FitControl, FitOpts, FitReport, Model};
-use rl::objective::dpo::{Dpo, DpoConfig, PackedPair};
+use model::finetune::{AdapterLineage, ChatTrainer, LoraRequest, OptimizerState, PreferenceMargins};
+use model::{FitControl, FitOpts, FitReport};
+use rl::fit::DpoFit;
+use rl::objective::dpo::{DpoConfig, PackedPair};
 
 /// One preference fine-tune of a LoRA adapter, as the generic trainer takes it.
 pub(crate) struct PreferenceJob<'a> {
@@ -80,40 +81,11 @@ fn full<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, out: &Path, con
     model::finetune::fit_full::<T>(base, dir, opts, out, OptimizerState::HostOffload, control)
 }
 
-/// DPO over whichever model the trainer builds: the objective is made per
-/// concrete type from the packed pairs the job holds, and the pair sets to
-/// score are measured on that model before and after.
-struct DpoFit<'a, 'c> {
-    dpo: DpoConfig,
-    pairs: Option<Vec<PackedPair>>,
-    score_sets: Vec<Vec<PackedPair>>,
-    margins: ResidentMargins,
-    opts: &'a FitOpts,
-    control: Option<FitControl<'c>>,
-}
-
-impl ModelFit for DpoFit<'_, '_> {
-    fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(FitReport, M)> {
-        let (Some(pairs), Some(control)) = (self.pairs.take(), self.control.take()) else {
-            return Err(std::io::Error::other("a preference fit trains one model"));
-        };
-        // The starting policy is the reference, as it is for the training objective.
-        for set in &mut self.score_sets {
-            set.iter_mut().for_each(|pair| pair.score_reference(&model));
-        }
-        let (report, model) = model::fit_controlled(model, Dpo::from_dataset(self.dpo, pairs), self.opts, None, control)?;
-        if !report.interrupted {
-            self.margins = self.score_sets.iter().map(|set| set.iter().map(|pair| pair.margin(&model)).collect()).collect();
-        }
-        Ok((report, model))
-    }
-}
-
 fn preference<T: ChatTrainer>(job: PreferenceJob<'_>, control: FitControl<'_>) -> std::io::Result<(FitReport, ResidentMargins)> {
-    let mut fit = DpoFit { dpo: job.dpo, pairs: Some(job.pairs), score_sets: job.score_sets, margins: Vec::new(), opts: job.opts, control: Some(control) };
+    let mut fit = DpoFit::new(job.dpo, job.pairs, job.score_sets, job.opts, control);
     let (report, trained) = T::train_lora(job.base, &job.lora, job.opts, &mut fit)?;
     if !report.interrupted {
         T::save_adapter(&trained, job.adapter, &job.lineage).map_err(|e| std::io::Error::new(e.kind(), format!("{}: saving the adapter: {e}", job.adapter.display())))?;
     }
-    Ok((report, fit.margins))
+    Ok((report, fit.into_margins()))
 }

@@ -188,3 +188,8 @@ required-features = ["qwen3"]
 name = "oracle_capacity_check"
 path = "examples/oracle_capacity_check.rs"
 required-features = ["qwen3"]
+
+[[test]]
+name = "objective_fits"
+path = "tests/objective_fits.rs"
+required-features = ["qwen3"]
