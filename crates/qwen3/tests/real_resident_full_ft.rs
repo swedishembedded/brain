@@ -16,7 +16,7 @@
 use std::time::Instant;
 
 use checkpoint::packed::QuantEncoding;
-use model::resident_ft::{ResidentFtConfig, ResidentValue};
+use model::resident_ft::{ClipPass, LayerWindow, ResidentFtConfig, ResidentValue};
 use optim::rule::Rule;
 use paramstore::precision::{GradDtype, MasterPolicy, StateFormat};
 use qwen3::Qwen;
@@ -45,7 +45,25 @@ fn mean_loss(m: &Qwen, seqs: &[(Vec<u32>, Vec<u32>)]) -> f32 {
     s / seqs.len() as f32
 }
 
-fn run(name: &str, path: &str, value: ResidentValue, state: StateFormat, grad: GradDtype, export: QuantEncoding, rule: Rule) {
+/// One run: how the linears are held and updated, and the format the result is exported in.
+struct Case {
+    value: ResidentValue,
+    state: StateFormat,
+    grad: GradDtype,
+    export: QuantEncoding,
+    rule: Rule,
+    /// Layers of the linears kept on the device at once (`None`: every layer resident).
+    window: Option<u32>,
+}
+
+impl Case {
+    fn new(value: ResidentValue, state: StateFormat, grad: GradDtype, export: QuantEncoding, rule: Rule) -> Case {
+        Case { value, state, grad, export, rule, window: None }
+    }
+}
+
+fn run(name: &str, path: &str, case: Case) {
+    let Case { value, state, grad, export, rule, window } = case;
     let (cfg, init) = qwen3::open_checkpoint(path).expect("open checkpoint");
     let vocab = cfg.vocab;
     let opts = model::FitOpts { batch_size: 1, block_size: T, ..Default::default() };
@@ -60,10 +78,11 @@ fn run(name: &str, path: &str, value: ResidentValue, state: StateFormat, grad: G
         tile_elems: 1 << 23,
         state_dir: None,
         defer_publication: false,
-        window: None,
-        clip_pass: model::resident_ft::ClipPass::TwoPass,
+        window: window.map(|layers| LayerWindow { layers }),
+        clip_pass: ClipPass::TwoPass,
     };
     let m = qwen3::finetune::build_resident(cfg, &opts, &*init, &rcfg).expect("build");
+    println!("{name}: device bytes of the resident linears: {} MiB", m.resident_device_weight_bytes().unwrap_or(0) >> 20);
     drop(init);
     let train: Vec<_> = (0..8).map(|i| sequence(i, vocab)).collect();
     let held: Vec<_> = (100..108).map(|i| sequence(i, vocab)).collect();
@@ -125,8 +144,29 @@ fn qwen3_0_6b_resident_bf16_and_fp8_full_fine_tune() {
         brain_testutil::skip_unavailable("Qwen/Qwen3-0.6B is not in the model store");
         return;
     }
-    run("resident bf16, f32 master, f32 moments", &path, ResidentValue::Bf16, StateFormat::F32, GradDtype::F32, QuantEncoding::bf16(), Rule::AdamW { adam: model::Adam::default(), wd: 0.0 });
-    run("resident bf16, f32 master, int8 moments, bf16 grads", &path, ResidentValue::Bf16, StateFormat::Int8Block { block: 64 }, GradDtype::Bf16, QuantEncoding::bf16(), Rule::AdamW { adam: model::Adam::default(), wd: 0.0 });
-    run("resident fp8, f32 master, f32 moments", &path, ResidentValue::Fp8E4M3 { block: 128 }, StateFormat::F32, GradDtype::F32, QuantEncoding::fp8_e4m3_tiled(128), Rule::AdamW { adam: model::Adam::default(), wd: 0.0 });
-    run("resident bf16, f32 master, adafactor", &path, ResidentValue::Bf16, StateFormat::F32, GradDtype::F32, QuantEncoding::bf16(), Rule::adafactor(0.0));
+    let adamw = Rule::AdamW { adam: model::Adam::default(), wd: 0.0 };
+    run("resident bf16, f32 master, f32 moments", &path, Case::new(ResidentValue::Bf16, StateFormat::F32, GradDtype::F32, QuantEncoding::bf16(), adamw));
+    run("resident bf16, f32 master, int8 moments, bf16 grads", &path, Case::new(ResidentValue::Bf16, StateFormat::Int8Block { block: 64 }, GradDtype::Bf16, QuantEncoding::bf16(), adamw));
+    run("resident fp8, f32 master, f32 moments", &path, Case::new(ResidentValue::Fp8E4M3 { block: 128 }, StateFormat::F32, GradDtype::F32, QuantEncoding::fp8_e4m3_tiled(128), adamw));
+    run("resident bf16, f32 master, adafactor", &path, Case::new(ResidentValue::Bf16, StateFormat::F32, GradDtype::F32, QuantEncoding::bf16(), Rule::adafactor(0.0)));
+}
+
+/// The layer-streamed form against the resident one on the real model: the same loss, with the linears' device
+/// bytes bounded by the window (the loss of a run on a GPU is not bit-equal run to run, the embedding gradient is
+/// accumulated with atomics; the comparison is in the printed losses).
+#[test]
+#[ignore]
+fn qwen3_0_6b_layer_streamed_full_fine_tune_reaches_the_resident_loss() {
+    let Some(path) = brain_testutil::model_dir("Qwen/Qwen3-0.6B") else { return };
+    if !std::path::Path::new(&path).exists() {
+        brain_testutil::skip_unavailable("Qwen/Qwen3-0.6B is not in the model store");
+        return;
+    }
+    let adamw = Rule::AdamW { adam: model::Adam::default(), wd: 0.0 };
+    for (label, window) in [("resident (every layer)", None), ("layer-streamed, window of 1 layer", Some(1)), ("layer-streamed, window of 2 layers", Some(2))] {
+        let case = Case { window, ..Case::new(ResidentValue::Bf16, StateFormat::F32, GradDtype::F32, QuantEncoding::bf16(), adamw) };
+        run(&format!("bf16, f32 master, f32 moments, {label}"), &path, case);
+    }
+    let fp8 = Case { window: Some(2), ..Case::new(ResidentValue::Fp8E4M3 { block: 128 }, StateFormat::F32, GradDtype::F32, QuantEncoding::fp8_e4m3_tiled(128), adamw) };
+    run("fp8, f32 master, f32 moments, layer-streamed, window of 2 layers", &path, fp8);
 }

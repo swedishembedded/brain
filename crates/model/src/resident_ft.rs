@@ -164,9 +164,9 @@ pub enum StreamPass {
     /// Update with a multiplier decided beforehand (the global clip of a [`StreamPass::Measure`] pass, and the
     /// accumulation scale).
     Update { lr: f32, grad_multiplier: f32 },
-    /// Update with the multiplier of the norm accumulated so far plus `base_sum_sq`, the squared norm of gradients
-    /// outside this state that are already complete.
-    Running { lr: f32, clip: Option<f32>, extra_scale: f32, base_sum_sq: f64 },
+    /// Update with the multiplier of the norm accumulated so far: that of the layers finished and of any gradients
+    /// outside this state the trainer added with [`ResidentFullFt::add_external_sum_sq`].
+    Running { lr: f32, clip: Option<f32>, extra_scale: f32 },
 }
 
 /// What a finished pass measured or did.
@@ -883,13 +883,27 @@ impl ResidentFullFt {
             StreamPass::Measure => 0,
             StreamPass::Update { .. } | StreamPass::Running { .. } => self.state.begin_step(),
         };
-        let base = match pass {
-            StreamPass::Running { base_sum_sq, .. } => base_sum_sq,
-            _ => 0.0,
-        };
         if let Some(w) = &mut self.window {
-            w.pass = Some(PassState { pass, tensor_sum: vec![None; n], updated: vec![false; n], running: base, min_multiplier: f32::INFINITY, step });
+            w.pass = Some(PassState { pass, tensor_sum: vec![None; n], updated: vec![false; n], running: 0.0, min_multiplier: f32::INFINITY, step });
         }
+    }
+
+    /// Add `sum_sq`, the squared norm of gradients this state does not hold that are already complete (a trainer's
+    /// head), to the running norm of the open pass; layers finished after this clip by a norm that includes it.
+    pub fn add_external_sum_sq(&mut self, sum_sq: f64) {
+        if let Some(pass) = self.window.as_mut().and_then(|w| w.pass.as_mut()) {
+            pass.running += sum_sq;
+        }
+    }
+
+    /// How a layer-streamed step clips by the global norm.
+    pub fn clip_pass(&self) -> ClipPass {
+        self.cfg.clip_pass
+    }
+
+    /// The device gradient-norm reduction of this build, for a trainer measuring gradients it holds itself.
+    pub fn device_norm(&self) -> &DeviceGradNorm {
+        &self.norm
     }
 
     /// `layer`'s gradients are complete (its backward has been submitted): measure them on the device, and in an

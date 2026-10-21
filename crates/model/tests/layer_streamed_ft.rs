@@ -177,7 +177,7 @@ fn streamed_step(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Option<f
             backward(ft, StreamPass::Update { lr: LR, grad_multiplier: optim::grad_multiplier(measured.sum_sq, clip, 1.0) })
         }
         (None, _) => backward(ft, StreamPass::Update { lr: LR, grad_multiplier: 1.0 }),
-        (Some(_), ClipPass::Running) => backward(ft, StreamPass::Running { lr: LR, clip, extra_scale: 1.0, base_sum_sq: 0.0 }),
+        (Some(_), ClipPass::Running) => backward(ft, StreamPass::Running { lr: LR, clip, extra_scale: 1.0 }),
     };
     (loss(&acts.out, &task.target), report.min_multiplier)
 }

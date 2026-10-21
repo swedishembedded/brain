@@ -667,6 +667,9 @@ pub struct Qwen {
     resident: Option<std::cell::RefCell<model::resident_ft::ResidentFullFt>>,
     /// The global gradient norm of the latest clipped resident step (it spans both parameter groups).
     resident_norm: Cell<Option<f32>>,
+    /// A layer-streamed build defers its backward to [`Qwen::adamw_step`] (which runs it once per pass over the
+    /// layers); set by `backward`, cleared by the step and by `zero_grads`.
+    backward_pending: Cell<bool>,
     /// The run's stochastic-rounding seed once [`Model::pin_rounding_seed`](model::Model::pin_rounding_seed) set it.
     rounding_seed: Cell<Option<u64>>,
     b: u32,
@@ -886,12 +889,21 @@ impl Tape {
     }
 
     fn submit(&self, gpu: &Gpu) {
+        self.submit_hooked(gpu, &mut |_| {}, &mut |_| {});
+    }
+
+    /// Submit the segments in order, calling `before(i)` ahead of segment `i` and `after(i)` once it has been
+    /// submitted, for every segment including an empty one (the segment index is what a layer-streamed trainer maps
+    /// to a layer: it loads weights between segments).
+    fn submit_hooked(&self, gpu: &Gpu, before: &mut dyn FnMut(usize), after: &mut dyn FnMut(usize)) {
         let mut start = 0;
-        for &end in self.ends.iter().chain(std::iter::once(&self.steps.len())) {
+        for (i, &end) in self.ends.iter().chain(std::iter::once(&self.steps.len())).enumerate() {
+            before(i);
             if end > start {
                 gpu.submit(&[], &self.steps[start..end]);
                 start = end;
             }
+            after(i);
         }
     }
 }
@@ -1642,6 +1654,7 @@ impl Qwen {
             offload_opt,
             resident: resident_ft.map(std::cell::RefCell::new),
             resident_norm: Cell::new(None),
+            backward_pending: Cell::new(false),
             rounding_seed: Cell::new(None),
             opt,
             tokens,
@@ -2474,7 +2487,7 @@ impl Qwen {
 
     pub fn forward(&self) -> f32 {
         assert!(!self.decode_only, "Qwen::forward: batched forward called on a decode-only-built model; use step/prefill/step_embed instead");
-        self.fwd_steps.submit(&self.gpu);
+        self.submit_forward();
         let n = (self.b * self.t) as usize;
         let losses = self.gpu.read(&self.ce_buf, n);
         match &self.weighted_ce {
@@ -2504,7 +2517,61 @@ impl Qwen {
         assert!(!self.kmask_on.get(), "Qwen::backward: the padded-key mask is a forward-only encoder path; disarm it before training");
         self.assert_trainable_state("backward");
         self.write_inv_count();
+        if self.layer_streamed() {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "qwen3 layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
         self.bwd_steps.submit(&self.gpu);
+    }
+
+    fn layer_streamed(&self) -> bool {
+        self.resident.as_ref().is_some_and(|ft| ft.borrow().is_layer_streamed())
+    }
+
+    /// Submit the batched forward; a layer-streamed build loads each layer's weights into its device slots as the
+    /// forward reaches it.
+    fn submit_forward(&self) {
+        if !self.layer_streamed() {
+            self.fwd_steps.submit(&self.gpu);
+            return;
+        }
+        let layers = self.shard.end - self.shard.start;
+        self.fwd_steps.submit_hooked(
+            &self.gpu,
+            &mut |seg| {
+                if seg < layers {
+                    self.stream_load(self.shard.start + seg, false);
+                }
+            },
+            &mut |_| {},
+        );
+    }
+
+    /// Load `layer` into its device slots (and clear its gradient lanes when `for_backward`).
+    fn stream_load(&self, layer: usize, for_backward: bool) {
+        let mut ft = self.resident.as_ref().expect("layer-streamed builds are resident").borrow_mut();
+        let loaded = if for_backward { ft.begin_layer_backward(&self.ops, layer) } else { ft.load_layer(&self.ops, layer) };
+        loaded.unwrap_or_else(|e| panic!("qwen3 layer-streamed full fine-tune: loading layer {layer}: {e}"));
+    }
+
+    /// One backward over the layers of a layer-streamed build, calling `finish(layer)` once a layer's gradients are
+    /// complete. The head and final norm come first (segment 0), then the layers from the last down.
+    fn streamed_backward(&self, mut after_head: impl FnMut(), mut finish: impl FnMut(usize)) {
+        let end = self.shard.end;
+        self.bwd_steps.submit_hooked(
+            &self.gpu,
+            &mut |seg| {
+                if seg >= 1 {
+                    self.stream_load(end - seg, true);
+                }
+            },
+            &mut |seg| match seg {
+                0 => after_head(),
+                seg => finish(end - seg),
+            },
+        );
     }
 
     /// The CE gradient's `1/count` for the current batch, which the recorded
@@ -2654,10 +2721,16 @@ impl Qwen {
     }
 
     pub fn zero_grads(&self) {
+        self.backward_pending.set(false);
         self.ps.zero_grads(&self.gpu);
         if let Some(ft) = &self.resident {
             ft.borrow().zero_grads(&self.ops);
         }
+    }
+    /// Device bytes of the resident linears' weights: every layer's, or the window's slots when layer-streamed
+    /// (`None` for a build with no resident state).
+    pub fn resident_device_weight_bytes(&self) -> Option<u64> {
+        self.resident.as_ref().map(|ft| ft.borrow().device_weight_bytes())
     }
     /// Host time of the resident update by phase (`None` for a build with no resident state).
     pub fn resident_host_times(&self) -> Option<model::resident_ft::HostTimes> {
@@ -2696,6 +2769,9 @@ impl Qwen {
         self.gpu.poll_wait();
     }
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        if self.layer_streamed() {
+            return self.streamed_adamw_step(t, lr, wd, adam, clip, extra_scale);
+        }
         // The resident linears update on the host against their masters; the global clip spans them and the
         // device-optimised remainder, so the one multiplier is decided here from both norms.
         let (clip_dev, scale_dev) = match &self.resident {
@@ -2703,13 +2779,7 @@ impl Qwen {
                 let mut ft = ft.borrow_mut();
                 let sumsq = if clip.is_some() {
                     let resident = ft.grad_sum_sq(&self.ops).unwrap_or_else(|e| panic!("qwen3 resident full fine-tune: reading the gradients: {e}"));
-                    let remainder: f64 = self
-                        .ps
-                        .opt_params()
-                        .iter()
-                        .map(|(n, _)| self.ps.read_grad(&self.gpu, n).iter().map(|&g| f64::from(g) * f64::from(g)).sum::<f64>())
-                        .sum();
-                    resident + remainder
+                    resident + self.remainder_grad_sum_sq(&ft)
                 } else {
                     0.0
                 };
@@ -2733,6 +2803,70 @@ impl Qwen {
             self.with_offload_opt(|o| o.step(&self.gpu, &self.ps, t, lr, wd, adam, clip_dev, scale_dev));
         }
     }
+    /// Sum of squares of the device-optimised parameters' gradients (the embedding, head and norms of a resident
+    /// build), reduced on the device with `ft`'s kernels: the gradients stay where they are.
+    fn remainder_grad_sum_sq(&self, ft: &model::resident_ft::ResidentFullFt) -> f64 {
+        let items: Vec<model::gradnorm::NormItem<'_>> =
+            self.ps.opt_params().iter().map(|(name, numel)| model::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: model::ops::GradDtype::F32 }).collect();
+        ft.device_norm().sum_sq(&self.gpu, &items)
+    }
+
+    /// The update of a layer-streamed build: the backward runs here, layer by layer ([`Qwen::backward`] deferred
+    /// it), loading each layer and updating it as soon as its gradient is complete. With a clip the global norm is
+    /// measured first by a pass that updates nothing ([`model::resident_ft::ClipPass::TwoPass`]), or each layer is
+    /// clipped by the norm accumulated so far in the only pass ([`model::resident_ft::ClipPass::Running`]).
+    fn streamed_adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        use model::resident_ft::{ClipPass, StreamPass};
+        assert!(self.backward_pending.replace(false), "qwen3 layer-streamed full fine-tune: adamw_step without a backward before it");
+        let ft = self.resident.as_ref().expect("layer-streamed builds are resident");
+        let fail = |what: &str, e: std::io::Error| -> ! { panic!("qwen3 layer-streamed full fine-tune: {what}: {e}") };
+        let (clip_pass, rule) = {
+            let ft = ft.borrow();
+            (ft.clip_pass(), ft.rule())
+        };
+        if matches!(rule, optim::rule::Rule::AdamW { .. }) {
+            ft.borrow_mut().set_rule(optim::rule::Rule::AdamW { adam, wd });
+        }
+        debug_assert_eq!(ft.borrow().step_count() + 1, t, "the layer-streamed state and the run agree on the step index");
+        let remainder = || self.remainder_grad_sum_sq(&ft.borrow());
+        // One backward over the layers under `pass`; `after_head` runs when the head's gradients are complete.
+        let run = |pass: StreamPass, after_head: &dyn Fn()| {
+            self.ps.zero_grads(&self.gpu);
+            ft.borrow().zero_grads(&self.ops);
+            ft.borrow_mut().begin_pass(pass);
+            self.streamed_backward(after_head, |layer| ft.borrow_mut().finish_layer(&self.ops, layer).unwrap_or_else(|e| fail(&format!("updating layer {layer}"), e)));
+            ft.borrow_mut().end_pass().unwrap_or_else(|e| fail("closing the pass", e))
+        };
+        let (multiplier, sum_sq) = match (clip, clip_pass) {
+            (None, _) => {
+                run(StreamPass::Update { lr, grad_multiplier: extra_scale }, &|| {});
+                (extra_scale, 0.0)
+            }
+            (Some(_), ClipPass::TwoPass) => {
+                let measured = run(StreamPass::Measure, &|| {});
+                let sum_sq = measured.sum_sq + remainder();
+                let multiplier = optim::grad_multiplier(sum_sq, clip, extra_scale);
+                run(StreamPass::Update { lr, grad_multiplier: multiplier }, &|| {});
+                (multiplier, sum_sq)
+            }
+            (Some(_), ClipPass::Running) => {
+                // The head and final norm are complete after the first segment: they open the running norm.
+                let head = Cell::new(0.0);
+                let report = run(StreamPass::Running { lr, clip, extra_scale }, &|| {
+                    let sum = remainder();
+                    head.set(sum);
+                    ft.borrow_mut().add_external_sum_sq(sum);
+                });
+                let layers = report.sum_sq - head.get();
+                // The remainder (the embedding gradient completes last) is clipped by the full norm.
+                let sum_sq = layers + remainder();
+                (optim::grad_multiplier(sum_sq, clip, extra_scale), sum_sq)
+            }
+        };
+        self.resident_norm.set(clip.map(|_| (sum_sq.sqrt() * f64::from(extra_scale)) as f32));
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, None, multiplier);
+    }
+
     /// Physical bytes of the host-offloaded optimizer state and the host staging
     /// its update holds; `None` before the first offloaded step or when no
     /// parameter is offloaded.
@@ -2780,7 +2914,7 @@ impl Qwen {
     /// Run the forward graph without reading the loss (non-head stages).
     pub fn run_forward(&self) {
         assert!(!self.decode_only, "Qwen::run_forward: batched forward called on a decode-only-built model");
-        self.fwd_steps.submit(&self.gpu);
+        self.submit_forward();
     }
     /// Read this stage's OUTPUT residual `res[end]` (for the next stage's input).
     pub fn read_out_res(&self) -> Vec<f32> {
@@ -2850,7 +2984,7 @@ impl Qwen {
     pub fn forward_hidden(&self) -> Vec<f32> {
         assert!(self.external_head.get(), "Qwen::forward_hidden: call enable_external_head first");
         assert!(!self.decode_only, "Qwen::forward_hidden: batched forward called on a decode-only-built model");
-        self.fwd_steps.submit(&self.gpu);
+        self.submit_forward();
         self.gpu.read(&self.xn_final, (self.b * self.t) as usize * self.cfg.d_model as usize)
     }
 
