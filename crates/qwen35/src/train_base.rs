@@ -16,7 +16,7 @@
 
 use gpu_core::provider::library::GemmPrecision;
 use gpu_core::select::Dtype;
-use gpu_core::{DeviceBuffer, Gpu};
+use gpu_core::Gpu;
 use model::ops::{TierPolicy, Weight};
 use model::saved::SavedPolicy;
 
