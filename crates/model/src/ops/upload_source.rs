@@ -19,14 +19,10 @@
 use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, LoadRequest, QuantEncoding};
 use checkpoint::TensorSource;
 
-use super::{DeviceWeightSink, Dtype, Ops, Weight, FP8_BLOCK};
+use super::{DeviceWeightSink, Dtype, Ops, TierPolicy, Weight, FP8_BLOCK};
 
-/// The destination encoding of `want`, when a tiled load can produce that tier exactly on this device.
-fn encoding_of(ops: &Ops, want: Dtype) -> Option<QuantEncoding> {
-    if want.promote(&ops.caps.numeric) != want {
-        // The device would widen this tier: only the f32 path knows how to promote.
-        return None;
-    }
+/// The encoding a resident tier holds, whatever the device: the tiers a tiled load can produce.
+fn encoding_for(want: Dtype) -> Option<QuantEncoding> {
     Some(match want {
         Dtype::F32 => QuantEncoding::f32(),
         Dtype::BF16 => QuantEncoding::bf16(),
@@ -36,6 +32,34 @@ fn encoding_of(ops: &Ops, want: Dtype) -> Option<QuantEncoding> {
         Dtype::F8E4M3 => QuantEncoding::fp8_e4m3_tiled(FP8_BLOCK),
         _ => return None,
     })
+}
+
+/// The destination encoding of `want`, when a tiled load can produce that tier exactly on this device.
+fn encoding_of(ops: &Ops, want: Dtype) -> Option<QuantEncoding> {
+    if want.promote(&ops.caps.numeric) != want {
+        // The device would widen this tier: only the f32 path knows how to promote.
+        return None;
+    }
+    encoding_for(want)
+}
+
+/// The resident tier that holds tensor `name` of `src` exactly as the source stores it, or `None` when the source has
+/// no packed view of it or no tier is that encoding.
+pub fn stored_tier(src: &dyn TensorSource, name: &str) -> Option<Dtype> {
+    let stored = src.packed_descriptor(name)?.encoding;
+    [Dtype::F32, Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3].into_iter().find(|d| encoding_for(*d).as_ref() == Some(&stored))
+}
+
+/// The tier policy that keeps every tensor of `names` in the encoding `src` stores it in (so a bf16 or int8
+/// checkpoint stays bf16 or int8 on the device and in a host-tier copy), and anything else at f32.
+pub fn stored_tier_policy<'a>(src: &dyn TensorSource, names: impl IntoIterator<Item = &'a str>) -> TierPolicy {
+    let mut policy = TierPolicy::uniform(Dtype::F32);
+    for name in names {
+        if let Some(tier) = stored_tier(src, name).filter(|t| *t != Dtype::F32) {
+            policy = policy.with(&[name], tier);
+        }
+    }
+    policy
 }
 
 fn upload_packed(ops: &Ops, src: &dyn TensorSource, names: &[&str], n: usize, k: usize, want: Dtype, staging: &BoundedWorkspace) -> Option<Weight> {

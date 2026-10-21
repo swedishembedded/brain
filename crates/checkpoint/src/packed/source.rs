@@ -23,8 +23,9 @@ use super::codec::{CodecRegistry, Tile, TileBuf};
 use super::concat::ConcatView;
 use super::load::{LoadReport, LoadRequest, Loader};
 use super::sink::TensorSink;
-use super::encoding::TensorDescriptor;
-use super::reader::PackedTensorReader;
+use super::encoding::{TensorDescriptor, INT8_SCALE_SUFFIX};
+use super::reader::{PackedReader, PackedTensorReader};
+use crate::weightio::WeightReader;
 use crate::TensorSource;
 
 /// Tile length used to assemble a whole tensor for `with_tensor`.
@@ -243,6 +244,29 @@ impl TensorSource for PackedSource {
         if let Some(b) = self.tensors.get(name) {
             self.reader.release(&b.desc, &(0..b.desc.numel()));
         }
+    }
+}
+
+/// Does the file hold tensors a plain f32 read cannot interpret: reduced floats, FP8 with scale sidecars, or brain's
+/// packed int8 words? A file of f32 tensors alone has nothing packed to preserve.
+fn holds_packed_tensors(reader: &WeightReader) -> bool {
+    reader.names().any(|n| match reader.dtype(n) {
+        Some("BF16" | "F16") => true,
+        Some(d) if d.starts_with("F8_") => true,
+        Some("U32") => reader.dtype(&format!("{n}{INT8_SCALE_SUFFIX}")).is_some(),
+        _ => false,
+    })
+}
+
+/// The source that serves a brain-native or Hugging Face safetensors checkpoint in the encodings it stores: a file
+/// with reduced-precision, FP8 or packed-int8 tensors is read through its packed view (bf16, FP8 and int8 tensors
+/// stream into a resident tier without a whole-tensor f32 copy, and a tier that is the stored encoding is a byte
+/// copy), any other file is read directly. Tensors keep their stored names.
+pub fn stored_source(reader: WeightReader) -> Box<dyn TensorSource + Send + Sync> {
+    if holds_packed_tensors(&reader) {
+        Box::new(PackedSource::identity_lenient(Box::new(PackedReader::new(reader)), CodecRegistry::reference()))
+    } else {
+        Box::new(reader)
     }
 }
 

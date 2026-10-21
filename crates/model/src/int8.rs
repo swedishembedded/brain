@@ -322,6 +322,24 @@ pub fn q8_0_rect(
     Some((packed, sw))
 }
 
+/// `name` as `(packed words, group scales)` exactly as `source` stores it, when it stores an `[n, k]` tensor as
+/// packed int8 with [`GROUP`]-wise f32 scales (brain's int8-native layout): the codes are the checkpoint's own,
+/// not a requantization of their decode. `None` for any other source or encoding.
+fn stored_int8(source: &dyn checkpoint::TensorSource, name: &str, n: usize, k: usize) -> Option<(Vec<u32>, Vec<f32>)> {
+    use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, LoadRequest, MemorySink, MemoryBudget, QuantEncoding};
+    let desc = source.packed_descriptor(name)?;
+    if desc.encoding != QuantEncoding::int8_blocked(GROUP as u32) || desc.shape != [n as u64, k as u64] {
+        return None;
+    }
+    let staging = BoundedWorkspace::new(MemoryBudget::new(64 << 20, 0));
+    let (config, mut sink) = (LoadConfig::default(), MemorySink::default());
+    let req = LoadRequest { policy: &LoadPolicy::Preserve, workspace: &staging, config: &config };
+    source.load_packed(&[name], &req, &mut sink).ok()??;
+    let words = sink.payload.as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect();
+    let scales = sink.scales.first()?.as_chunks::<4>().0.iter().map(|w| f32::from_le_bytes(*w)).collect();
+    Some((words, scales))
+}
+
 /// Host-only quantization of a WHOLE `[n, k]` linear from `source`, choosing
 /// the cheapest route it can serve: [`q8_0_rect`]'s byte repack (no fp32
 /// anywhere) when the source offers Q8_0 blocks, else a bounded fp32 route -
@@ -335,6 +353,9 @@ pub fn q8_0_rect(
 pub fn quantize_from(source: &dyn checkpoint::TensorSource, name: &str, n: usize, k: usize) -> Option<(Vec<u32>, Vec<f32>)> {
     if let Some(direct) = q8_0_rect(source, name, k, 0, n, 0, k) {
         return Some(direct);
+    }
+    if let Some(stored) = stored_int8(source, name, n, k) {
+        return Some(stored);
     }
     assert!(k.is_multiple_of(GROUP), "quantize_from '{name}': k must be a multiple of {GROUP} (got {k})");
     let kg = k / 4;

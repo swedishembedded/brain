@@ -18,7 +18,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use super::codec::TileBuf;
-use super::encoding::{Element, FloatFormat, QuantEncoding, TensorDescriptor};
+use super::encoding::{Element, FloatFormat, QuantEncoding, TensorDescriptor, INT8_SCALE_SUFFIX};
 use crate::gguf::GgmlType;
 use crate::weightio::WeightReader;
 
@@ -55,6 +55,9 @@ pub struct PackedReader {
 /// scale grid's shape, most common first. The first that reproduces the grid
 /// exactly wins (a grid alone is ambiguous: 3 bands over 300 rows fits 100 and 128).
 const FP8_BLOCKS: [u32; 5] = [128, 64, 32, 256, 16];
+
+/// Elements per scale in brain's int8-native checkpoints (`weightio::PACKED_INT8_LAYOUT` 2, `model::int8::GROUP`).
+const INT8_NATIVE_GROUP: u32 = 32;
 
 impl PackedReader {
     /// Open a `.safetensors`/`.gguf` file or a HF checkpoint directory.
@@ -154,6 +157,12 @@ impl PackedReader {
                 return Ok(TensorDescriptor::new(name, logical, QuantEncoding::nvfp4()));
             }
             "U8" => QuantEncoding { element: Element::Int { bits: 8, signed: false }, scales: Vec::new() },
+            "U32" if has(INT8_SCALE_SUFFIX, "F32") => {
+                // brain's int8-native layout: four codes per stored word, so the logical row is four times as long.
+                let mut logical = shape.clone();
+                *logical.last_mut().ok_or_else(|| format!("{name}: scalar packed-int8 tensor"))? *= 4;
+                return Ok(TensorDescriptor::new(name, logical, QuantEncoding::int8_blocked(INT8_NATIVE_GROUP)));
+            }
             "U32" => QuantEncoding { element: Element::Int { bits: 32, signed: false }, scales: Vec::new() },
             other => return Err(format!("{name}: dtype {other} has no packed encoding; declare one with PackedReader::with_descriptor")),
         };
@@ -332,6 +341,28 @@ mod tests {
         assert_eq!((f.shape.clone(), f.encoding.clone()), (vec![2, 32], QuantEncoding::nvfp4()));
         let wrong = PackedReader::open(&dir.join("m.safetensors")).unwrap().with_descriptor(TensorDescriptor::new("q.weight", vec![4, 64], QuantEncoding::int8_blocked(32)));
         assert!(wrong.descriptor("q.weight").unwrap_err().contains("stored payload"), "a declared layout that disagrees with the stored size is refused");
+    }
+
+    /// Spec: brain's int8-native layout (`u32` words plus an f32 `<name>.scale` grid) is recognised from the file alone,
+    /// as the int8 encoding whose payload and scales are the stored bytes; its sidecar is not a tensor of its own.
+    #[test]
+    fn an_int8_native_tensor_is_recognised_without_a_declaration() {
+        let dir = TmpDir::new("int8native");
+        let words = bytes(5, 4 * 8 * 4); // [4, 32] int8 codes as [4, 8] u32 words
+        let scales = f32_bytes(&[0.5, 1.0, 1.5, 2.0]);
+        write_safetensors(
+            &dir.join("m.safetensors"),
+            &[
+                RawTensor { name: "q.weight", dtype: "U32", shape: vec![4, 8], bytes: words.clone() },
+                RawTensor { name: "q.weight.scale", dtype: "F32", shape: vec![4, 1], bytes: scales.clone() },
+            ],
+        );
+        let r = PackedReader::open(&dir.join("m.safetensors")).unwrap();
+        assert_eq!(r.names(), ["q.weight"]);
+        let d = r.descriptor("q.weight").unwrap();
+        assert_eq!((d.shape.clone(), d.encoding.clone()), (vec![4, 32], QuantEncoding::int8_blocked(32)));
+        let got = read_all(&r, &d);
+        assert_eq!((got.payload, got.scales), (words, vec![scales]));
     }
 
     #[test]

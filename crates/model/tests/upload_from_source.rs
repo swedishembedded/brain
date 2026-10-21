@@ -108,3 +108,70 @@ fn a_packed_tensor_uploads_as_the_requested_tier_with_one_tile_of_staging() {
     assert!(staging.peak() > 0, "a Whole remap must forward the packed view");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A brain checkpoint with a bf16 linear, a packed-int8 linear (`u32` words plus the `.scale` grid) and an f32 norm.
+fn write_mixed_brain_checkpoint(path: &std::path::Path) {
+    let bf16: Vec<u8> = (0..4 * 32).flat_map(|i| half::bf16::from_f32(i as f32 * 0.01).to_le_bytes()).collect();
+    let words: Vec<u8> = (0..4 * 8 * 4).map(|i| i as u8).collect();
+    let scales: Vec<u8> = [0.5f32, 1.0, 1.5, 2.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let norm: Vec<u8> = (0..32).flat_map(|i| (i as f32).to_le_bytes()).collect();
+    let mut header = serde_json::Map::new();
+    let mut off = 0usize;
+    for (name, dtype, shape, bytes) in [
+        ("blocks.0.mlp.gate.weight", "BF16", vec![4, 32], &bf16),
+        ("blocks.0.mlp.up.weight", "U32", vec![4, 8], &words),
+        ("blocks.0.mlp.up.weight.scale", "F32", vec![4, 1], &scales),
+        ("blocks.0.ln1.weight", "F32", vec![32], &norm),
+    ] {
+        header.insert(name.into(), serde_json::json!({"dtype": dtype, "shape": shape, "data_offsets": [off, off + bytes.len()]}));
+        off += bytes.len();
+    }
+    header.insert("__metadata__".into(), serde_json::json!({ "brain.config": "{}" }));
+    let h = serde_json::to_vec(&header).unwrap();
+    let mut out = (h.len() as u64).to_le_bytes().to_vec();
+    out.extend(h);
+    for b in [&bf16, &words, &scales, &norm] {
+        out.extend_from_slice(b);
+    }
+    std::fs::write(path, out).unwrap();
+}
+
+/// Spec: the tier policy of a checkpoint keeps each linear in the encoding the file stores it in - bf16 stays bf16,
+/// brain's packed int8 stays int8 - and everything else (an f32 tensor, a tensor the file lacks) at f32, so a
+/// serving build never widens what is stored narrow.
+#[test]
+fn the_stored_tier_policy_keeps_each_tensor_in_its_stored_encoding() {
+    let dir = std::env::temp_dir().join(format!("stored_tier_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("m.safetensors");
+    write_mixed_brain_checkpoint(&path);
+    let src = checkpoint::packed::stored_source(checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap());
+
+    assert_eq!(model::ops::stored_tier(&*src, "blocks.0.mlp.gate.weight"), Some(Dtype::BF16));
+    assert_eq!(model::ops::stored_tier(&*src, "blocks.0.mlp.up.weight"), Some(Dtype::I8));
+    assert_eq!(model::ops::stored_tier(&*src, "blocks.0.ln1.weight"), Some(Dtype::F32));
+    assert_eq!(model::ops::stored_tier(&*src, "blocks.0.absent.weight"), None);
+
+    let names = ["blocks.0.mlp.gate.weight", "blocks.0.mlp.up.weight", "blocks.0.ln1.weight", "blocks.0.absent.weight"];
+    let policy = model::ops::stored_tier_policy(&*src, names);
+    let tiers: Vec<Dtype> = names.iter().map(|n| policy.want(n)).collect();
+    assert_eq!(tiers, [Dtype::BF16, Dtype::I8, Dtype::F32, Dtype::F32]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Spec: a linear a checkpoint stores as packed int8 comes back from `quantize_from` as the stored codes and
+/// scales, not a requantization of their decode (which moves any group whose largest code is under 127).
+#[test]
+fn a_stored_int8_linear_is_quantized_from_as_its_own_codes() {
+    let dir = std::env::temp_dir().join(format!("stored_int8_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("m.safetensors");
+    write_mixed_brain_checkpoint(&path);
+    let src = checkpoint::packed::stored_source(checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap());
+
+    let (words, scales) = model::int8::quantize_from(&*src, "blocks.0.mlp.up.weight", 4, 32).expect("the tensor is stored");
+    let want_words: Vec<u32> = (0..4 * 8).map(|w| u32::from_le_bytes([4 * w as u8, 4 * w as u8 + 1, 4 * w as u8 + 2, 4 * w as u8 + 3])).collect();
+    assert_eq!(words, want_words);
+    assert_eq!(scales, [0.5f32, 1.0, 1.5, 2.0]);
+    std::fs::remove_dir_all(&dir).ok();
+}

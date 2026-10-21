@@ -128,6 +128,10 @@ pub struct BlockGeometry {
     pub bytes: u64,
 }
 
+/// The suffix of the group-scale sibling of a packed-int8 tensor in brain's int8-native checkpoints
+/// (`weightio::PACKED_INT8_LAYOUT`): `<name>` holds the int8 codes as `u32` words, `<name>.scale` the f32 scales.
+pub const INT8_SCALE_SUFFIX: &str = ".scale";
+
 /// How a tensor's bytes decode to values.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct QuantEncoding {
@@ -164,11 +168,13 @@ impl QuantEncoding {
         Self::plain(format)
     }
     /// Signed int8 with one f32 scale per `block` elements (brain's packed int8
-    /// storage uses `block = 32`; four int8 per little-endian `u32`).
+    /// storage uses `block = 32`; four int8 per little-endian `u32`). The scale
+    /// sidecar is `<name>.scale`, the name of brain's int8-native checkpoints
+    /// ([`INT8_SCALE_SUFFIX`]).
     pub fn int8_blocked(block: u32) -> QuantEncoding {
         QuantEncoding {
             element: Element::Int { bits: 8, signed: true },
-            scales: vec![ScaleLevel { granularity: ScaleGranularity::Block(block), format: FloatFormat::F32, suffix: "_scale".into() }],
+            scales: vec![ScaleLevel { granularity: ScaleGranularity::Block(block), format: FloatFormat::F32, suffix: INT8_SCALE_SUFFIX.into() }],
         }
     }
     /// NF4 codes with one f32 scale per `block` elements (brain uses 32; eight

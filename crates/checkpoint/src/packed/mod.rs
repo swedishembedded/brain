@@ -21,9 +21,9 @@ mod testfix;
 
 pub use budget::{BoundedWorkspace, BudgetError, Lease, MemoryBudget, Pool, PoolStats};
 pub use codec::{Codec, CodecRegistry, EncodeCtx, Tile, TileBuf};
-pub use encoding::{BlockGeometry, Codebook, Element, FloatFormat, Packing, QuantEncoding, ScaleGranularity, ScaleLevel, TensorDescriptor};
+pub use encoding::{BlockGeometry, Codebook, Element, FloatFormat, Packing, QuantEncoding, ScaleGranularity, ScaleLevel, TensorDescriptor, INT8_SCALE_SUFFIX};
 pub use load::{LoadConfig, LoadOp, LoadPlan, LoadPolicy, LoadReport, LoadRequest, LoadStep, Loader};
 pub use reader::{PackedReader, PackedTensorReader};
 pub use file_sink::SafetensorsSink;
 pub use sink::{MemorySink, TensorSink};
-pub use source::{Binding, PackedSource};
+pub use source::{stored_source, Binding, PackedSource};
