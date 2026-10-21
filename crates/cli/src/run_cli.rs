@@ -97,7 +97,8 @@ HTTP INFERENCE APIS  (each behind its own key)
   Auth:  Authorization: Bearer <key>   (openai, openrouter)
          x-api-key: <key>              (anthropic)
   A fresh key per DIALECT per launch by default, printed on stdout as
-  `APIKEY <provider> <key>`; --api-keys-out writes the same keys as JSON, 0600.
+  `APIKEY <provider> <key>`; --api-keys-out writes the keys as JSON, 0600, and the
+  lines then name that file instead of repeating the keys.
   $BRAIN_API_KEY pins a fixed key instead (e.g. via --config) - every dialect
   then shares that SAME key rather than each getting its own random one.
 
@@ -1100,19 +1101,25 @@ fn run_apis(a: RunApis) {
         // what lets a script wait on the ready file ALONE and then read the
         // keys with no retry. Do not move write_keys below serve_all.
         // Gate: tests/e2e/ready.bats.
+        // The keys file first: the APIKEY lines then name it instead of
+        // repeating the keys (stdout lands in logs other users of a shared
+        // node can read). A file that could not be written leaves the lines
+        // carrying the keys, the only place they remain.
+        let keys_file = a.api_keys_out.as_deref().map(std::path::Path::new).filter(|path| match apiserve::write_keys(&surfaces, path) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("brain serve: --api-keys-out {}: {e}", path.display());
+                false
+            }
+        });
         // One APIKEY line per DIALECT (never per address): every surface in
         // a dialect's group carries the identical key built above, so a
         // second, third, ... address would only reprint the same line.
         let mut announced: Vec<apiserve::Provider> = Vec::new();
         for s in &surfaces {
             if !announced.contains(&s.provider) {
-                s.announce();
+                s.announce(keys_file);
                 announced.push(s.provider);
-            }
-        }
-        if let Some(path) = &a.api_keys_out {
-            if let Err(e) = apiserve::write_keys(&surfaces, std::path::Path::new(path)) {
-                eprintln!("brain serve: --api-keys-out {path}: {e}");
             }
         }
         // `serve_all` takes the executor BY VALUE and would drop it - and with

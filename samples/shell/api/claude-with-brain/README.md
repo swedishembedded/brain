@@ -19,9 +19,8 @@ samples/shell/api/claude-with-brain/claude-with-brain.sh -p "hi"        # or pas
 2. Launches `brain serve --anthropic $PORT --ready-file PATH` in the
    background, waits for `PATH` to appear (touched only once the listener is
    actually bound; see `brain_shutdown::ready::Gate`), and reads the
-   freshly-generated per-launch API key from its log (`APIKEY anthropic
-   <key>`, printed once at startup, strictly before the ready file - see
-   `crates/apiserve/src/surface.rs`).
+   freshly-generated per-launch API key from the `--api-keys-out` file (0600,
+   written strictly before the ready file - see `crates/apiserve/src/surface.rs`).
 3. Exports `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY` and points every model
    alias (including the haiku-class background model) at `MODEL`, so nothing
    reaches the hosted API for the duration of the session.

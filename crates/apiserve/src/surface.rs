@@ -7,7 +7,8 @@
 //! surface on :8790, an OpenAI surface on :8791). Each has an independent random
 //! key so an agent pointed at one dialect can't drive another. Keys are surfaced
 //! two ways for test/automation harnesses: a machine-parseable `APIKEY <provider>
-//! <key>` line on stdout, and an optional `{provider: key}` JSON file.
+//! <key>` line on stdout, and an optional `{provider: key}` JSON file (with which
+//! the stdout line names the file instead of repeating the key).
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -68,10 +69,21 @@ impl Surface {
         Surface { provider, addr, api_key: random_key() }
     }
 
-    /// Print the key on a machine-parseable line (`APIKEY <provider> <key>`) so a
-    /// harness that launched brain can scrape it from stdout (P16).
-    pub fn announce(&self) {
-        println!("APIKEY {} {}", self.provider, self.api_key);
+    /// The stdout line announcing this surface's key. Without a keys file it is the
+    /// machine-parseable `APIKEY <provider> <key>` a harness can scrape (P16). With
+    /// one (`--api-keys-out`, owner-only) the key is already in the file, so the line
+    /// names the provider and the file instead: stdout ends up in server logs that
+    /// other users of a shared node can read, and a secret must not.
+    pub fn announcement(&self, keys_file: Option<&Path>) -> String {
+        match keys_file {
+            Some(file) => format!("APIKEY {} written to {}", self.provider, file.display()),
+            None => format!("APIKEY {} {}", self.provider, self.api_key),
+        }
+    }
+
+    /// Print [`Surface::announcement`] on stdout.
+    pub fn announce(&self, keys_file: Option<&Path>) {
+        println!("{}", self.announcement(keys_file));
     }
 }
 
@@ -140,6 +152,18 @@ mod tests {
         std::env::remove_var("BRAIN_API_KEY");
 
         assert_ne!(resolved_key(), resolved_key(), "with no fixed key, two calls must fall back to two fresh random ones");
+    }
+
+    /// With a keys file the stdout line must not carry the key (logs are group
+    /// readable on a shared node); without one it still does, so a quickstart
+    /// can copy it.
+    #[test]
+    fn the_announcement_omits_the_key_once_it_is_in_a_file() {
+        let s = Surface::new(Provider::OpenAI, "127.0.0.1:1".parse().unwrap(), "sk-brain-secret");
+        let line = s.announcement(Some(Path::new("/run/keys.json")));
+        assert!(!line.contains("sk-brain-secret"), "{line}");
+        assert!(line.contains(s.provider.as_str()) && line.contains("/run/keys.json"), "{line}");
+        assert_eq!(s.announcement(None), format!("APIKEY {} sk-brain-secret", s.provider));
     }
 
     /// An empty `BRAIN_API_KEY` (e.g. `BRAIN_API_KEY=` inherited from a

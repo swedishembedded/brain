@@ -32,9 +32,8 @@ python3 samples/python/api/openai-client/openai_client.py --base-url http://127.
   including the separate `reasoning_content` delta channel a reasoning model
   (Qwen3's whole family) uses.
 * `POST /v1/embeddings` and `POST /v1/images/generations`.
-* brain's auth contract: a fresh, per-launch API key printed as `APIKEY openai
-  <key>` before the listener binds - a client either scrapes that line or
-  reads it back from `--api-keys-out FILE`'s JSON (`--keys-file`).
+* brain's auth contract: a fresh, per-launch API key, written to `--api-keys-out FILE` (JSON, 0600; `--keys-file`) before
+  the listener binds. Without that flag it is printed as `APIKEY openai <key>`.
 * A model that doesn't serve a given route (e.g. a chat-only model hit
   against `/v1/embeddings`) is a per-demo skip, not a fatal error - every demo
   after it still runs.

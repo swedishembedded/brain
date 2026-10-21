@@ -22,7 +22,7 @@ them, so treat all request input as hostile.
 - [ ] Key comparison is **constant-time** (no early-return on first mismatched byte).
 - [ ] The key is never logged, echoed in an error body, or written to a world-readable
       file. `--api-keys-out` writes with restrictive permissions; the startup `APIKEY`
-      line goes to stderr only.
+      line carries the key only when no `--api-keys-out` file holds it.
 - [ ] Anthropic uses `x-api-key`; OpenAI/OpenRouter use `Authorization: Bearer`. A
       missing/blank/malformed header → 401 with a provider-shaped body, no stack/detail.
 - [ ] D-Bus: the bus name and (system-bus) method access policy are intentional; no

@@ -21,8 +21,9 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
 - `--models-dir DIR` - the model store: scanned at startup, and the one store
   every served model's weights are resolved from (overrides
   `BRAIN_MODELS_DIR`).
-- `--api-keys-out FILE` - also write the generated API keys to `FILE`, not
-  just stdout.
+- `--api-keys-out FILE` - write the generated API keys to `FILE` (mode 0600). The stdout
+  `APIKEY` lines then name the file and omit the keys, so server logs on a shared
+  machine do not hold them.
 - `--ready-file PATH` - see **Readiness** below.
 - `--adapter FILE`, `--adapter-manifest FILE`, `--watch-adapters DIR`,
   `--adapter-slots N`, `--adapter-rank-cap R`, `--adapter-targets LIST` - see
@@ -180,8 +181,8 @@ applied to adapter sequences as well, and the server says so once.
 
 There is no way to run `brain serve` without authentication. Every requested
 surface gets its own freshly generated API key at startup: printed to
-stdout as `APIKEY` lines, and - if `--api-keys-out FILE` is given - also
-written to `FILE`. Both the keys and the file are written before any socket
+stdout as `APIKEY <provider> <key>` lines, or - if `--api-keys-out FILE` is given -
+written to `FILE` (the lines then read `APIKEY <provider> written to FILE`). Both the keys and the file are written before any socket
 binds, so a client can never race the server up.
 
 ## Admission and backpressure

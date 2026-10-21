@@ -16,8 +16,9 @@ brain serve --dbus --openai[:PORT] --anthropic[:PORT] --openrouter[:PORT] \
 - Each selected surface binds `127.0.0.1` (localhost only) on its default port -
   **Anthropic 8787 / OpenAI 8788 / OpenRouter 8789** - or the `:PORT` you pass.
 - **Access control is always on.** A fresh per-provider API key is generated at startup
-  and printed as `APIKEY <provider> <key>` (stderr); `--api-keys-out FILE` also writes
-  `{provider: key}` JSON (mode 0600). Anthropic reads `x-api-key`; OpenAI/OpenRouter read
+  and printed on stdout as `APIKEY <provider> <key>`; `--api-keys-out FILE` writes
+  `{provider: key}` JSON (mode 0600) and the line then reads `APIKEY <provider> written to FILE`
+  - the key itself stays out of logs. Anthropic reads `x-api-key`; OpenAI/OpenRouter read
   `Authorization: Bearer`. No/blank/wrong key → 401 on every route (incl. the 404
   fallback - no route enumeration).
 - D-Bus and the HTTP surfaces share one scheduler; D-Bus runs on its own thread.

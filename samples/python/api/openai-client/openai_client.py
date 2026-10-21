@@ -75,13 +75,14 @@ class Server:
         rundir = Path(os.environ.get("RUNDIR") or "/tmp") / f"brain-openai-example-{os.getpid()}"
         rundir.mkdir(parents=True, exist_ok=True)
         self.log = rundir / "server.log"
+        self.keys = rundir / "keys.json"
         ready = rundir / "ready"
         env = dict(os.environ)
         if mock:
             env["BRAIN_MOCK"] = "1"
             env.setdefault("BRAIN_DEVICE", "cpu")
         with open(self.log, "wb") as f:
-            self.proc = subprocess.Popen([brain, "serve", "--openai", str(port), "--ready-file", str(ready)], stdout=f, stderr=subprocess.STDOUT, env=env)
+            self.proc = subprocess.Popen([brain, "serve", "--openai", str(port), "--api-keys-out", str(self.keys), "--ready-file", str(ready)], stdout=f, stderr=subprocess.STDOUT, env=env)
         for _ in range(60):
             if ready.exists():
                 break
@@ -95,11 +96,11 @@ class Server:
         self.api_key = self._read_key()
 
     def _read_key(self) -> str:
-        for line in self.log.read_text().splitlines():
-            if line.startswith("APIKEY openai "):
-                return line.split(" ", 2)[2].strip()
-        self.stop()
-        skip(f"could not find the 'APIKEY openai <key>' line in the server log:\n{self.log.read_text()}")
+        try:
+            return json.loads(self.keys.read_text())["openai"]
+        except (OSError, ValueError, KeyError):
+            self.stop()
+            skip(f"could not read the openai key from {self.keys}; server log:\n{self.log.read_text()}")
 
     def stop(self) -> None:
         self.proc.terminate()

@@ -58,10 +58,11 @@ fi
 LOG="$(mktemp)"
 RUNDIR="$(mktemp -d)"
 READY="$RUNDIR/ready"
+KEYS="$RUNDIR/keys.json"   # 0600; the key is kept out of the server log
 if [ "$MOCK" = "0" ]; then
-  "$BRAIN" serve --anthropic "$PORT" --ready-file "$READY" >"$LOG" 2>&1 &
+  "$BRAIN" serve --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
 else
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --anthropic "$PORT" --ready-file "$READY" >"$LOG" 2>&1 &
+  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
 fi
 BRAIN_PID=$!
 echo "brain serve --anthropic on http://127.0.0.1:$PORT  (pid $BRAIN_PID)"
@@ -71,7 +72,7 @@ cleanup() { kill "$BRAIN_PID" 2>/dev/null || true; rm -f "$LOG"; rm -rf "$RUNDIR
 trap cleanup EXIT INT TERM
 
 # Wait for the ready file: it is touched only once the listener is actually
-# bound AND (since it's written first) the APIKEY line below is already on
+# bound AND (since it's written first) the keys file below is already on
 # disk -- so once this loop exits, no retry is needed for either.
 for _ in $(seq 1 60); do
   [ -e "$READY" ] && break
@@ -80,8 +81,8 @@ for _ in $(seq 1 60); do
 done
 [ -e "$READY" ] || { echo "error: brain server never became ready:" >&2; cat "$LOG" >&2; exit 1; }
 
-# brain generates a fresh key each launch and prints it as: `APIKEY anthropic <key>`.
-API_KEY="$(grep -m1 '^APIKEY anthropic ' "$LOG" | awk '{print $3}')"
+# brain generates a fresh key each launch and writes it to $KEYS.
+API_KEY="$(sed -n 's/.*"anthropic": *"\([^"]*\)".*/\1/p' "$KEYS" 2>/dev/null | head -1)"
 [ -n "$API_KEY" ] || { echo "error: could not read the generated API key:" >&2; cat "$LOG" >&2; exit 1; }
 echo "generated Anthropic key: ${API_KEY:0:14}…  (model: $MODEL)"
 

@@ -319,13 +319,14 @@ fi
 step "9. local OpenAI-compatible API (brain serve)"
 if ! need "$IMG_DIR/serve.txt"; then
   "$BRAIN" infer qwen3 --prompt "warmup" --max-new 1 >/dev/null 2>&1 || true
-  "$BRAIN" serve --openai 8799 > "$IMG_DIR/.serve.log" 2>&1 &
+  rm -f "$IMG_DIR/.serve-keys.json"
+  "$BRAIN" serve --openai 8799 --api-keys-out "$IMG_DIR/.serve-keys.json" > "$IMG_DIR/.serve.log" 2>&1 &
   SERVE_PID=$!
   for _ in $(seq 1 30); do
-    grep -q "APIKEY openai" "$IMG_DIR/.serve.log" 2>/dev/null && break
+    [ -s "$IMG_DIR/.serve-keys.json" ] && break
     sleep 1
   done
-  APIKEY="$(grep "APIKEY openai" "$IMG_DIR/.serve.log" | awk '{print $3}')"
+  APIKEY="$(sed -n 's/.*"openai": *"\([^"]*\)".*/\1/p' "$IMG_DIR/.serve-keys.json")"
   # The APIKEY log line prints once the key is generated, slightly before
   # the HTTP listener is guaranteed ready to accept connections -- poll
   # with a real request instead of trusting a fixed extra sleep.
@@ -341,7 +342,7 @@ if ! need "$IMG_DIR/serve.txt"; then
   wait "$SERVE_PID" 2>/dev/null || true
   echo "$RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"].strip())' \
     > "$IMG_DIR/serve.txt" || { echo "serve: unexpected response: $RESPONSE" >&2; exit 1; }
-  rm -f "$IMG_DIR/.serve.log"
+  rm -f "$IMG_DIR/.serve.log" "$IMG_DIR/.serve-keys.json"
 fi
 
 step "done -- assets in $IMG_DIR"

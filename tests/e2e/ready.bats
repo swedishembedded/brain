@@ -85,6 +85,9 @@ start_private_bus() {
   [ -n "$key" ] && [ "$key" != "null" ]
   run curl -fsS --max-time 2 -o /dev/null -H "Authorization: Bearer $key" "http://127.0.0.1:$PORT/v1/models"
   [ "$status" -eq 0 ]
+  # The key lives in the file only: the log (group readable on a shared node) names the file.
+  ! grep -qF "$key" "$TDIR/log"
+  grep -qF "APIKEY openai written to $KEYS" "$TDIR/log"
 }
 
 @test "the ready file is empty, even over a stale marker from a previous run" {
