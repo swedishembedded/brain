@@ -34,6 +34,12 @@ Measured (ncu, card 1 shared with another job, so ranges, split pass only; gener
 explicitly - the ambient `Gpu::new_gpu` may be another backend, on which the test's nativity assertion would never run);
 timing report `int8_decode_attention_timing_report` (ignored).
 
-Open: batch 1 at 12.8k is at 27 percent of the spec bandwidth (one chunk's loads are not overlapped with the previous
+In the served 27B (nsys decode window, cached 10.5k-token prompt, 300 tokens, card 1 otherwise idle): the split pass
+25.0 us and the combine 10.9 us per layer, 0.58 ms of attention per token against 2.06 ms before (b27's window at
+12.8k: 122.3 + 7.1 us), 4.6 percent of the token against 14.7; 13.8 ms per token. Server A/B against the previous main
+(three runs each on a card shared with other jobs): 38k-context decode 52.9-58.7 -> 61.4-67.6 tok/s, an 8-conversation
+recorded-trajectory replay 73.6-77.4 -> 70.3-71.5 s wall; 1k and 10k contexts within the run-to-run noise.
+
+Open: the combine (still generated) is now a third of the attention time; batch 1 at 12.8k is at 23 percent of the spec bandwidth (one chunk's loads are not overlapped with the previous
 chunk's products; a cp.async double buffer per warp would). The bf16/fp8 tiers and group 8 (the 35B-A3B) still run the
 generated kernel.
