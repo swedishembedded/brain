@@ -49,9 +49,13 @@ const MIN_CACHED_TOKENS: usize = 64;
 /// header; the few tokens after it are recomputed.
 const CHECKPOINT_TAIL: usize = 16;
 
+/// A checkpoint sits on a whole Gated-DeltaNet chunk (64 tokens): a prompt resumed from it then runs the same chunk
+/// partition as a cold prefill. A resume from a position inside a chunk rounded measurably differently.
+const CHECKPOINT_ALIGN: usize = 64;
+
 /// The prefix length a prompt of `len` tokens is cached at: short of its generation prompt (see [`CHECKPOINT_TAIL`]).
 fn checkpoint_len(len: usize) -> usize {
-    len.saturating_sub(CHECKPOINT_TAIL)
+    len.saturating_sub(CHECKPOINT_TAIL) / CHECKPOINT_ALIGN * CHECKPOINT_ALIGN
 }
 
 /// What the engine needs to resume a prompt from a cache entry besides its KV

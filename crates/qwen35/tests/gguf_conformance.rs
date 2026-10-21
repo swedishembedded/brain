@@ -23,10 +23,10 @@ use model::paged::BlockTable;
 use model::serve::{AdapterId, PagedDecoder, Request, Scheduler};
 use qwen35::int8_gguf_resident::{budgeted_gpus, Qwen35GgufEngine, Qwen35GgufResident};
 
-/// Per-sequence capacity: the prefix test's 72-token prompt (the engine caches
-/// prompts of at least 64 tokens) plus its 8-token extension and decode.
-const CAP: u32 = 96;
-const PREFIX_PROMPT_TOKENS: usize = 72;
+/// Per-sequence capacity: the prefix test's 152-token prompt (the engine caches a checkpoint on a 64-token boundary
+/// at least 16 tokens short of the prompt's end) plus its 8-token extension and decode.
+const CAP: u32 = 192;
+const PREFIX_PROMPT_TOKENS: usize = 152;
 
 fn engine() -> Qwen35GgufEngine {
     engine_with(0)
@@ -47,6 +47,11 @@ fn engine_with_kv(kv_block_rows: u32, kv_tier: KvTier) -> Qwen35GgufEngine {
 
 /// `kv_pool_rows` 0 sizes the paged pool as the one-block layout's memory.
 fn engine_with_pool(kv_block_rows: u32, kv_tier: KvTier, kv_pool_rows: u32) -> Qwen35GgufEngine {
+    engine_with_cap(kv_block_rows, kv_tier, kv_pool_rows, CAP)
+}
+
+/// [`engine_with_pool`] with an explicit per-sequence capacity (a pool smaller than one `CAP` sequence needs a smaller one).
+fn engine_with_cap(kv_block_rows: u32, kv_tier: KvTier, kv_pool_rows: u32, cap: u32) -> Qwen35GgufEngine {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let path = std::env::temp_dir().join(format!("brain-gguf-conformance-{}-{n}.gguf", std::process::id())).to_string_lossy().into_owned();
@@ -54,7 +59,7 @@ fn engine_with_pool(kv_block_rows: u32, kv_tier: KvTier, kv_pool_rows: u32) -> Q
     let devices = budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, 2 << 30);
     let device = devices.first().expect("the suite needs a GPU").0;
     let bank = AdapterBankRequest { slots: 2, rank_cap: 4, targets: AdapterTargets::ALL, max_registered: 4 };
-    let resident = Qwen35GgufResident::new(path.clone(), devices, CAP, TierPolicy::uniform(Dtype::I8)).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(kv_block_rows).with_kv_pool_rows(kv_pool_rows).with_kv_tier(kv_tier).with_adapter_bank(bank);
+    let resident = Qwen35GgufResident::new(path.clone(), devices, cap, TierPolicy::uniform(Dtype::I8)).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(kv_block_rows).with_kv_pool_rows(kv_pool_rows).with_kv_tier(kv_tier).with_adapter_bank(bank);
     let (engine, _, _) = resident.activate_engine(&[device]).expect("the tiny GGUF loads");
     std::fs::remove_file(path).ok();
     engine
@@ -123,7 +128,7 @@ fn greedy_tokens_are_the_recorded_ones_on(make: fn() -> Qwen35GgufEngine) {
     let warm = sched.submit(Request { prompt: prompts[2].clone(), max_new: 12, stop: Vec::new() });
     let warm = sched.run().remove(&warm).expect("the extended prompt completes");
     let got = [together[&first[0]].clone(), together[&first[1]].clone(), warm];
-    assert_eq!(sched.prefix_stats().0, 56, "the extended prompt resumed from the 72-token prompt's checkpoint, 16 tokens short of it");
+    assert_eq!(sched.prefix_stats().0, 0, "a 72-token prompt is too short for a checkpoint (a whole 64-token chunk, 16 tokens short of its end), so nothing is resumed");
     assert_eq!(got.each_ref().map(|t| t.as_slice()), RECORDED.each_ref().map(|t| t.as_slice()), "the engine's greedy tokens changed");
 }
 
@@ -161,7 +166,7 @@ fn a_small_pool_serves_what_fits_and_preempts_what_does_not() {
     };
     let (want, _) = run(Scheduler::new(engine_with(0), 4));
     for pool_blocks in [8u32, 6] {
-        let engine = engine_with_pool(16, KvTier::F32, pool_blocks * 16);
+        let engine = engine_with_cap(16, KvTier::F32, pool_blocks * 16, 96);
         assert_eq!(engine.kv_pool_capacity_tokens(), pool_blocks as u64 * 16);
         let (got, mut sched) = run(Scheduler::new(engine, 4));
         assert_eq!(got, want, "{pool_blocks} blocks: tokens differ from the one-block layout's");
@@ -183,21 +188,21 @@ fn cache_prompt(e: &mut Qwen35GgufEngine, prompt: &[u32]) {
 }
 
 /// A prompt resuming a cached one does not copy the cached KV: it holds the same physical blocks. The entry of a
-/// 72-token prompt is its 56-token checkpoint: three 16-row blocks and half of a fourth; an 80-token prompt extending
-/// the prompt holds the three full ones as the entry's own and takes two blocks of its own for the rest (the shared
-/// half-full tail is copied before it is written), so the pool is short of six blocks, not nine.
+/// 152-token prompt is its 128-token checkpoint: eight 16-row blocks; a 160-token prompt extending the prompt holds
+/// the eight as the entry's own and takes two blocks of its own for the rest, so the pool is short of ten blocks, not
+/// eighteen.
 fn a_prefix_hit_shares_the_cached_blocks() {
     let mut e = paged_engine();
     let total = e.free_blocks();
-    let first = prompt_of(1, 72);
+    let first = prompt_of(1, 152);
     cache_prompt(&mut e, &first);
-    assert_eq!(e.free_blocks(), total - 4, "the entry retains its four blocks");
+    assert_eq!(e.free_blocks(), total - 8, "the entry retains its eight blocks");
     let mut extended = first.clone();
     extended.extend(prompt_of(2, 8));
     let mut table = BlockTable::new();
     e.prefill(&mut table, &extended);
-    assert_eq!(e.prefix_stats().0, 56, "the extended prompt resumed from the entry");
-    assert_eq!(e.free_blocks(), total - 6, "three blocks shared, two of its own");
+    assert_eq!(e.prefix_stats().0, 128, "the extended prompt resumed from the entry");
+    assert_eq!(e.free_blocks(), total - 10, "eight blocks shared, two of its own");
     e.release_table(&mut table);
 }
 
@@ -205,17 +210,17 @@ fn a_prefix_hit_shares_the_cached_blocks() {
 /// it is the least recently used: reclaiming in recency order would free exactly the rows the request came to reuse.
 fn reclaim_spares_the_prefix_the_waiting_prompt_resumes_from() {
     let mut e = paged_engine();
-    let (a, b) = (prompt_of(1, 72), prompt_of(3, 72));
+    let (a, b) = (prompt_of(1, 152), prompt_of(3, 152));
     cache_prompt(&mut e, &a);
     cache_prompt(&mut e, &b);
     let free = e.free_blocks();
     let mut a_next = a.clone();
     a_next.extend(prompt_of(2, 8));
-    assert_eq!(e.reclaim_prefix_keeping(4, &a_next, None), 4, "the other conversation's four blocks");
-    assert_eq!(e.free_blocks(), free + 4);
+    assert_eq!(e.reclaim_prefix_keeping(8, &a_next, None), 8, "the other conversation's eight blocks");
+    assert_eq!(e.free_blocks(), free + 8);
     let mut table = BlockTable::new();
     e.prefill(&mut table, &a_next);
-    assert_eq!(e.prefix_stats().0, 56, "the spared entry is still there to resume from");
+    assert_eq!(e.prefix_stats().0, 128, "the spared entry is still there to resume from");
     e.release_table(&mut table);
 }
 
@@ -224,8 +229,8 @@ fn reclaim_spares_the_prefix_the_waiting_prompt_resumes_from() {
 /// prompt, short of those tokens, and answer exactly as a cold prefill does (an entry for the whole prompt matched
 /// only a prompt that extended it, so a thinking-mode conversation prefilled its full history every turn).
 fn a_prompt_diverging_in_its_last_tokens_resumes_from_the_cached_prompts_checkpoint() {
-    let first = prompt_of(1, 72);
-    let mut next = first[..68].to_vec();
+    let first = prompt_of(1, 152);
+    let mut next = first[..148].to_vec();
     next.extend(prompt_of(2, 6));
     let mut sched = Scheduler::new(paged_engine(), 4);
     let id = sched.submit(Request { prompt: first.clone(), max_new: 4, stop: Vec::new() });
@@ -234,7 +239,7 @@ fn a_prompt_diverging_in_its_last_tokens_resumes_from_the_cached_prompts_checkpo
     let id = sched.submit(Request { prompt: next.clone(), max_new: 8, stop: Vec::new() });
     let warm = sched.run().remove(&id).expect("the next turn completes");
     let hit = sched.prefix_stats().0 - before;
-    assert!((48..68).contains(&hit), "the next turn resumed from {hit} cached tokens: expected the first prompt short of its generation prompt");
+    assert_eq!(hit, 128, "the next turn resumed from {hit} cached tokens: expected the first prompt's checkpoint, a whole 64-token chunk short of its end");
     let mut cold = Scheduler::new(paged_engine(), 4);
     let id = cold.submit(Request { prompt: next, max_new: 8, stop: Vec::new() });
     assert_eq!(warm, cold.run().remove(&id).unwrap(), "output after resuming from a checkpoint must equal a cold prefill's");
@@ -264,6 +269,26 @@ fn single_stream_greedy_decoding_is_reproducible() {
     assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "the same prompt prefilled twice gave different hidden rows");
 }
 
+/// A prompt resumed from a cached checkpoint prefills to the very hidden row a cold prefill of it does: the checkpoint
+/// sits on a whole recurrent-state chunk, so both walk the same chunks, and the cached state and KV rows are copies.
+fn a_resumed_prefill_is_bitwise_a_cold_one() {
+    let first = prompt_of(1, 152);
+    let mut extended = first.clone();
+    extended.extend(prompt_of(2, 8));
+    let mut warm_engine = paged_engine();
+    cache_prompt(&mut warm_engine, &first);
+    let mut table = BlockTable::new();
+    let warm = warm_engine.prefill(&mut table, &extended);
+    assert_eq!(warm_engine.prefix_stats().0, 128, "the extended prompt resumed from the checkpoint");
+    warm_engine.release_table(&mut table);
+    let mut cold_engine = paged_engine();
+    let mut table = BlockTable::new();
+    let cold = cold_engine.prefill(&mut table, &extended);
+    assert_eq!(cold_engine.prefix_stats().0, 0);
+    cold_engine.release_table(&mut table);
+    assert!(warm.iter().zip(&cold).all(|(w, c)| w.to_bits() == c.to_bits()), "a resumed prefill's hidden row differs from a cold prefill's");
+}
+
 const RECORDED: [[u32; 12]; 3] = [[10, 9, 26, 17, 9, 10, 1, 8, 21, 12, 2, 4], [11, 9, 1, 19, 2, 13, 4, 26, 11, 18, 17, 22], [22, 12, 2, 12, 7, 17, 22, 14, 9, 1, 28, 16]];
 
 gpu_core::card_tests!(
@@ -276,5 +301,6 @@ gpu_core::card_tests!(
     a_prefix_hit_shares_the_cached_blocks,
     reclaim_spares_the_prefix_the_waiting_prompt_resumes_from,
     single_stream_greedy_decoding_is_reproducible,
+    a_resumed_prefill_is_bitwise_a_cold_one,
     a_prompt_diverging_in_its_last_tokens_resumes_from_the_cached_prompts_checkpoint
 );
