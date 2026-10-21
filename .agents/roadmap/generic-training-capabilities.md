@@ -9,15 +9,19 @@ tensor/direction budget), `model::score` (held-out scoring over any `Model`),
 `model::finetune` (the `ChatTrainer` seam the generic full-parameter, LoRA and
 preference fine-tuners run on), the SDK's `ARCHS` table and `score_tokens`.
 qwen3, qwen35, qwen35moe and gpt2 are registered in the conformance suite
-(`rl/tests/conformance.rs`); qwen3 registers the bf16 and int8 frozen-base
-tiers, qwen35 bf16 and NF4. Status re-read against the source on 2026-10-20.
+(`rl/tests/conformance.rs`); qwen3 registers the bf16, int8, NF4 and FP8
+frozen-base tiers, qwen35 bf16, NF4 and FP8. DPO, GRPO and top-K distillation are
+`ModelFit` visitors in `rl::fit`; `model::acceptance` runs one LoRA workflow over
+qwen3, qwen35, qwen35moe and flux2 (`rl/tests/lora_acceptance.rs`); a trainer
+declares its base formats (`ChatTrainer::LORA_BASES`). Status re-read against the source on 2026-10-20.
 The tier, adapter and trainer work is part of the larger plan in
 `quantized-training.md`, which this file feeds.
 
 ## Not yet done
 
-- [ ] Conformance tiers: register the tiers still missing as they land (FP8; an
-      int8 tier for qwen35 once its trainer accepts one). `Subject::tiers` is the
+- [ ] Conformance tiers: register the tiers still missing as they land (an
+      int8 tier for qwen35 once its trainer accepts one: today it refuses I8 and
+      Q4 bases by name, and C8 now also holds the weighted loss). `Subject::tiers` is the
       hook; each tier carries its own gradient tolerance.
 - [x] The serving `AdapterBank` is `model::adapter::bank` over `LoraSites` /
       `AdapterServing`; qwen3 and qwen35 (fp32 and GGUF engines) serve adapters
