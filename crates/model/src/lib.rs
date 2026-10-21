@@ -83,6 +83,7 @@ pub mod plan;
 pub mod projector;
 /// Real per-device, per-dtype GEMM throughput measurement - see the module doc.
 pub mod probe;
+pub mod resident_ft;
 pub mod rollout;
 pub mod saved;
 #[cfg(not(target_arch = "wasm32"))]
@@ -183,6 +184,16 @@ pub enum Head {
     /// Project to `out_dim` floats + MSE. Used by the MAD compression
     /// autoencoder and future regression heads.
     Regression { out_dim: u32 },
+}
+
+/// Training state a model keeps off the device and commits transactionally: one generation per optimizer step,
+/// each atomically published, so a resume names the step it continues from and gets exactly that state or a
+/// refusal.
+pub trait OffDeviceState {
+    /// Atomically commit the state as of optimizer step `step` (the number of updates absorbed).
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()>;
+    /// Restore the state committed at exactly `step` into the model, or fail when no such generation exists.
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()>;
 }
 
 /// Config behaviour shared by all models: param layout + (de)serialization.
@@ -303,6 +314,13 @@ pub trait Model {
     /// than with its moments reset. `None` (the default) for a model that
     /// cannot, including one whose moments live off the device.
     fn optimized_params(&self) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Training state kept off the device that a resume must restore beside [`Model::optimized_params`]:
+    /// master copies and optimizer state of the parameters trained against them (resident low-precision full
+    /// fine-tuning). `None` (the default) when the model has none.
+    fn off_device_state(&self) -> Option<&dyn OffDeviceState> {
         None
     }
 

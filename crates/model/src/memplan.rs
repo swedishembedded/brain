@@ -177,6 +177,22 @@ pub struct Capacity {
     pub host_bytes: u64,
 }
 
+impl Capacity {
+    /// What the selected device and the host can give right now: the device's free bytes and the kernel's
+    /// `MemAvailable`. A quantity the platform does not report is unbounded here (the planner then cannot refuse on
+    /// it), never invented.
+    pub fn measured() -> Capacity {
+        Capacity { device_bytes: gpu_core::capacity::available_here().unwrap_or(u64::MAX), host_bytes: host_available_bytes().unwrap_or(u64::MAX) }
+    }
+}
+
+/// `MemAvailable` from `/proc/meminfo` in bytes; `None` off Linux or when it cannot be read.
+pub fn host_available_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib: u64 = text.lines().find_map(|l| l.strip_prefix("MemAvailable:"))?.split_whitespace().next()?.parse().ok()?;
+    Some(kib * 1024)
+}
+
 /// The levers the caller allows the planner to pull.
 #[derive(Clone, Debug)]
 pub struct Authorized(BTreeSet<Lever>);

@@ -119,6 +119,27 @@ pub fn fit_full_with<T: ChatTrainer>(
     Ok(report)
 }
 
+/// A resident low-precision full-parameter fine-tune of the checkpoint at `base` on the prepared dataset in
+/// `dir`, written to `out` as the family's brain checkpoint (from the master copies): the linears train as
+/// bf16 or FP8 weights resident on the device with their master and optimizer state off it
+/// ([`crate::resident_ft`]), the rest in fp32. Hands the trained model back so the caller can export it in the
+/// chosen format. Like [`fit_full`], always a fresh start from `base` (resume is through `control`'s state).
+pub fn fit_full_resident<T: ChatTrainer>(
+    base: &Path,
+    dir: &Path,
+    opts: &FitOpts,
+    out: &Path,
+    resident: &crate::resident_ft::ResidentFtConfig,
+    control: FitControl<'_>,
+) -> std::io::Result<(FitReport, T::Trained)> {
+    let mut fit = CausalLmFit { dir, opts, out: Some(out), control: Some(control) };
+    let (report, trained) = T::train_full_resident(base, opts, resident, &mut fit)?;
+    if report.interrupted {
+        let _ = std::fs::remove_file(out);
+    }
+    Ok((report, trained))
+}
+
 /// Where a LoRA adapter starts and its shape.
 #[derive(Clone, Copy, Debug)]
 pub struct LoraRequest<'a> {
@@ -170,6 +191,12 @@ pub trait ChatTrainer {
 
     /// Train every parameter of the checkpoint at `base` through `fit`.
     fn train_full(base: &Path, opts: &FitOpts, state: OptimizerState, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Self::Trained)>;
+
+    /// Train every parameter of the checkpoint at `base` with its linears resident in low precision
+    /// ([`crate::resident_ft`]). A family that has not wired the resident state refuses by name.
+    fn train_full_resident(_base: &Path, _opts: &FitOpts, _resident: &crate::resident_ft::ResidentFtConfig, _fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Self::Trained)> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "this model family has no resident low-precision full fine-tune"))
+    }
 
     /// Train a LoRA adapter over the frozen checkpoint at `base`.
     fn train_lora(base: &Path, lora: &LoraRequest<'_>, opts: &FitOpts, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Self::Trained)>;

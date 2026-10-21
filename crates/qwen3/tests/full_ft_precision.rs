@@ -5,7 +5,7 @@
 // info@swedishembedded.com.
 
 //! A full fine-tune of a tiny random Qwen3 takes a precision policy through the
-//! generic optimizer-state seam: int8 moments with the state host-offloaded train
+//! generic optimizer-state seam: int8 and bf16 moments with the state host-offloaded train
 //! like the fp32 default (host-offloaded and on the device), and an unsupported choice
 //! is refused rather than ignored.
 
@@ -88,13 +88,18 @@ fn int8_moments_offloaded_train_like_fp32_and_unsupported_choices_are_refused() 
     println!("device int8 moments {q8_dev:.4}");
     assert!(q8_dev < 1.2 * base + 0.05, "device int8 moments {q8_dev} should track fp32 {base}");
 
-    // bf16 moments on the device optimiser and a master copy are refused, naming the reason
+    // bf16 moments run on the device optimiser too (the fused adamw_bf16 kernel)
+    let bf16_dev = train(&PrecisionPolicy::uniform(ParamPrecision { state: StateFormat::Bf16, stochastic_rounding: true, ..ParamPrecision::FP32 }), false, 12);
+    println!("device bf16 moments {bf16_dev:.4}");
+    assert!(bf16_dev < 1.2 * base + 0.05, "device bf16 moments {bf16_dev} should track fp32 {base}");
+
+    // logarithmic 8-bit moments on the device optimiser and a master copy are refused, naming the reason
     let refuse = |policy: PrecisionPolicy, offload: bool| {
         let e = std::panic::catch_unwind(|| train(&policy, offload, 1)).expect_err("must be refused");
         e.downcast_ref::<String>().cloned().unwrap_or_default()
     };
-    let bf16 = PrecisionPolicy::uniform(ParamPrecision { state: StateFormat::Bf16, ..ParamPrecision::FP32 });
-    let e = refuse(bf16, false);
+    let log8 = PrecisionPolicy::uniform(ParamPrecision { state: StateFormat::Log8Block { block: 64 }, ..ParamPrecision::FP32 });
+    let e = refuse(log8, false);
     assert!(e.contains("host-offloaded"), "{e}");
     let master = PrecisionPolicy::uniform(ParamPrecision { master: MasterPolicy::F32, ..ParamPrecision::FP32 });
     let e = refuse(master, true);

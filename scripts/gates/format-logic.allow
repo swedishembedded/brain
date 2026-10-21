@@ -16,7 +16,7 @@ crates/moondream3/src/decoder.rs	1	format-specific call in a model crate; route 
 crates/npu/src/fold.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
 crates/npu/src/sim.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
 crates/npu/src/topology.rs	1	format-specific call in a model crate; route through model::ops (recorded by the integrator, shrink-only)
-crates/qwen3/src/model.rs	10	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
+crates/qwen3/src/model.rs	9	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
 crates/qwen3/src/serve.rs	6	model-side tier policy that names Weight variants (frozen-base tier predicates, per-leaf upload); move behind a capability query on Weight
 crates/qwen35/src/bin/import_profile.rs	2	importer/FP8 source: decodes the checkpoint format while converting; belongs in a checkpoint codec (loader inventory, knowledge 337)
 crates/qwen35/src/config.rs	1	model::fp8::scale_shape (l.427) when estimating FP8 scale-plane bytes for the layer byte table. Fix (Phase 1): the descriptor reports physical bytes including its scale hierarchy

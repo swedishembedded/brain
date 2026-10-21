@@ -224,6 +224,10 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // `gradnorm_sq` gives each tensor ONE thread to sum its elements, which for 118 M
         // adapter parameters is seconds of a single thread's time per step.
         v.extend(model::dispatch::LORA_BANK_PIPELINES);
+        // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
+        v.push(("adamw_q8", kernels::ADAMW_Q8));
+        v.push(("adamw_q8_wg", kernels::ADAMW_Q8_WG));
+        v.push(("adamw_bf16", kernels::ADAMW_BF16));
         v.push(("gradnorm_part", kernels::GRADNORM_PART));
         v.push(("clip_coef_wg", kernels::CLIP_COEF_WG));
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
@@ -1664,16 +1668,15 @@ impl Qwen35 {
                 (n, c, role)
             })
             .collect();
-        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
-        if train && cfg.lora.is_none() {
-            // A full fine-tune keeps f32 device state; a policy asking for more is refused, not ignored.
-            model::offload::resolve_precisions(&ps.params, false).unwrap_or_else(|e| panic!("qwen35 full fine-tune: {e}"));
-            // qwen35 registers no int8-moment AdamW kernel: f32 moments only, refused rather than ignored.
-            let policy = model::offload::precision_policy();
-            if let Some((n, _)) = ps.params.iter().find(|(n, c)| policy.resolve(n, *c).precision.state != paramstore::precision::StateFormat::F32) {
-                panic!("qwen35 full fine-tune: {n}: the device optimiser here keeps f32 moments");
-            }
-        }
+        let mut ps = if train && cfg.lora.is_none() {
+            // A full fine-tune keeps its AdamW state on the device with the formats the run's policy names and
+            // the fused kernels run (f32, bf16, int8 blocks); anything else is refused with the parameter's name.
+            let params: Vec<(String, usize)> = roles.iter().map(|(n, c, _)| (n.clone(), *c)).collect();
+            model::offload::resolve_precisions(&params, false).unwrap_or_else(|e| panic!("qwen35 full fine-tune: {e}"));
+            ParamStore::new_with_policy_src(&gpu, roles, src, &model::offload::precision_policy())
+        } else {
+            ParamStore::new_with_roles_src(&gpu, roles, src)
+        };
         if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
             model::adapter::device::apply_groups(&mut ps, &lora.hp());
         }

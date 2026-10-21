@@ -26,9 +26,10 @@ the fallback; it is never the only path:
 - **Training state is fp32 today**: `paramstore` holds weight, gradient and
   Adam moments as fp32 buffers, `optim::offload` keeps fp32 host moments, and
   placement charges 4 bytes per element except packed int8. A frozen base may
-  be held reduced (bf16, int8, NF4) only through `Weight`, i.e. for adapter
-  training. There is no FP8, NVFP4 or MX storage tier and no low-precision
-  full fine-tune yet; the planned placement of those concepts is in "Where the
+  be held reduced (bf16, int8, NF4, FP8, NVFP4, MX) through `Weight`, and a
+  full fine-tune may hold its linears resident in bf16 or FP8 with an
+  off-device master (`model::resident_ft`); everything else in a full
+  fine-tune is fp32. The placement of these concepts is in "Where the
   quantized load/train concepts live" below.
 
 `AGENTS.md` is the routing guide (which crate does what, task → file); this

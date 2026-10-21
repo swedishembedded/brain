@@ -253,3 +253,37 @@ impl TensorSink for DeviceWeightSink<'_> {
         self.done = None;
     }
 }
+
+/// Overwrite the elements of `tile` in the resident `weight` with a freshly encoded tile: the update half of
+/// training a quantized value in place (the load half is [`DeviceWeightSink`]). `dst` is the descriptor the
+/// weight was loaded from; the tile must start and end on a payload word boundary (a multiple of the descriptor's
+/// tile quantum satisfies this for every tier but the byte-scaled microscaling family, which this refuses: its
+/// per-tensor scale is not a buffer).
+pub fn rewrite_tile(ops: &Ops, weight: &Weight, dst: &TensorDescriptor, tile: &Tile<'_>) -> Result<(), String> {
+    let gpu = ops.gpu();
+    let (payload, scales) = match weight {
+        Weight::F32 { w, .. } | Weight::BF16 { w, .. } | Weight::F16 { w, .. } => (w, None),
+        Weight::I8 { w, s, .. } | Weight::NF4 { w, s, .. } | Weight::FP8 { w, s, .. } => (w, Some(s)),
+        Weight::Q4 { .. } | Weight::KQuant { .. } | Weight::Micro { .. } => {
+            return Err(format!("tensor '{}': a {:?} weight cannot be rewritten in place", dst.name, weight.dtype()));
+        }
+    };
+    let range = dst.payload_range(&tile.elems);
+    if !range.start.is_multiple_of(4) || !tile.payload.len().is_multiple_of(4) {
+        return Err(format!("tensor '{}': tile {:?} is not word aligned ({} payload bytes at byte {})", dst.name, tile.elems, tile.payload.len(), range.start));
+    }
+    let words: Vec<u32> = tile.payload.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
+    gpu.write_at(payload, range.start / 4, &words);
+    if let Some(buf) = scales {
+        let level = dst.encoding.scales.last().ok_or_else(|| format!("tensor '{}': a scaled weight needs a scale level", dst.name))?;
+        let bytes = tile.scales.first().ok_or("a scaled tile carries its scales")?;
+        let at = dst.scale_range(0, &tile.elems).start;
+        let words: Vec<u32> = if level.format == FloatFormat::Bf16 {
+            bytes.as_chunks::<2>().0.iter().map(|c| (u16::from_le_bytes(*c) as u32) << 16).collect()
+        } else {
+            bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect()
+        };
+        gpu.write_at(buf, at, &words);
+    }
+    Ok(())
+}

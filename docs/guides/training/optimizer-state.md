@@ -38,13 +38,29 @@ It runs
   `OptimizerStateStorage` (memory or a file, bounded staging independent of the
   parameter count), used by `OffloadAdam` and by a generic trainer through
   `TrainState`;
-* on the device, fused decode-update-encode for AdamW with int8 moments
+* on the device, fused decode-update-encode for AdamW with bf16 moments
+  (`adamw_bf16.wgsl`, two moments to a word, stochastic rounding optional; qwen3 and
+  qwen35) or with int8 moments
   (`adamw_q8.wgsl`, block 64; `adamw_q8_wg.wgsl`, the cooperative form the
   selection policy picks where the device has workgroup reductions), reached through `Optim` when a `ParamStore` is
   built with `new_with_policy_src`; the CUDA backend compiles the same source.
   Both are gated against the host reference.
 
-Adafactor and logarithmic 8-bit state are not implemented yet.
+Two further state forms run on the host streamed path:
+
+* `StateFormat::Log8Block`: 8-bit codes on a logarithmic scale per block
+  (constant relative step over ~16 octaves below the block maximum; 8 steps per
+  octave signed, 16 non-negative), for heavy-tailed second moments. A positive
+  second moment never decodes to zero.
+* `Rule::Adafactor` (arXiv:1804.04235, no first moment): the second moment of a
+  matrix is `rows + columns` floats (`TrainStateConfig::row_len` names the
+  matrices; other tensors keep a plain second moment). It runs in three
+  streamed passes over a tensor's gradient tiles, which are whole rows; the
+  statistics live in host memory and are checkpointed beside the state
+  (`factored.bin`).
+
+Neither has a device kernel: a device-optimised parameter asking for them is
+refused by name (`resolve_precisions`).
 
 ## Values in a quantized encoding, layer streaming, export
 
@@ -87,6 +103,32 @@ optimizer-state format when the moments are host-offloaded (`HostOffload`):
 f32, bf16 or int8 blocks per parameter group. The device optimizer keeps f32
 moments, weights and gradients stay f32 device buffers with no master copy, and
 a policy asking for anything else is refused with the parameter's name
-(`model::offload::resolve_precisions`), for qwen3 and qwen35 alike. Bf16/FP8
-device weights, a master copy and the streamed low-precision export of a
-full fine-tune need the quantized backward (dW) path and are not wired yet.
+(`model::offload::resolve_precisions`), for qwen3 and qwen35 alike.
+
+## Resident bf16 / FP8 full fine-tune
+
+`model::resident_ft::ResidentFullFt` trains the linears of a model while they
+live on the device in the encoding they are served in (bf16, or block-scaled
+FP8 E4M3 with 2-D tile scales) as the same `ops::Weight` tiers the forward and
+`dX` products already run. Per step the backward accumulates each tensor's `dW`
+with `Ops::weight_grad` (fp32 or bf16 gradient buffer); `step` multiplies by
+the clip and accumulation scale, updates the master (f32 or bf16) and the
+moments (f32, bf16 or int8 blocks) off the device through `TrainState`, and
+re-encodes the stored value in place (`ops::rewrite_tile`). `layered_step` is
+the layer-at-a-time form: `update(i)` as each gradient completes, new values
+held in a `DeferredPublish` and published together.
+
+A master is required (a resident low-precision value loses sub-spacing
+updates), and the planner refuses a configuration before loading
+(`resident_ft::check_fits` over the weights, gradients, host-side master and
+state and the caller's other demands). qwen3 wires it as
+`Qwen3Trainer::train_full_resident` / `Qwen::new_resident`; the embedding, head
+and norms train in fp32 on the device, and the clip spans both groups.
+
+Resume is transactional: the model exposes `Model::off_device_state`, and the
+generic fit loop commits it (`<state>.offdevice/`, one generation per optimizer
+step, keyed by the applied-step count) before it writes the resume file, and
+restores exactly that generation on resume. `Qwen::export_resident` streams the
+masters into a safetensors file in a chosen encoding
+(`checkpoint::packed::SafetensorsSink`), one tile of host staging; the
+`PackedReader` and `DeviceWeightSink` reload it byte-identically.

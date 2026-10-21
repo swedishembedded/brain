@@ -35,6 +35,13 @@ pub fn open_checkpoint(path: &str) -> Result<(QwenConfig, Box<dyn TensorSource>)
         return Ok((cfg, Box::new(src)));
     }
     let cfg = QwenConfig::from_reader(&reader).map_err(|e| format!("{path}: {e}"))?;
+    // A file with block-scaled FP8 tensors carries their scales as sidecar tensors: only the packed view applies
+    // them, a plain read would hand back the raw 8-bit values.
+    let scaled_fp8 = reader.names().any(|n| reader.dtype(n).is_some_and(|d| d.starts_with("F8_")));
+    if scaled_fp8 {
+        let packed = checkpoint::packed::PackedSource::identity_lenient(Box::new(checkpoint::packed::PackedReader::new(reader)), checkpoint::packed::CodecRegistry::reference());
+        return Ok((cfg, Box::new(packed)));
+    }
     Ok((cfg, Box::new(reader)))
 }
 

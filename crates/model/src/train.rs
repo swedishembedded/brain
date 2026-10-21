@@ -1058,6 +1058,11 @@ fn schedule_fingerprint(opts: &FitOpts) -> serde_json::Value {
     })
 }
 
+/// Where a model's [`crate::OffDeviceState`] is committed for the resume file at `path`.
+fn off_device_dir(path: &Path) -> std::path::PathBuf {
+    path.with_extension("offdevice")
+}
+
 /// Write the exact-resume state of a run that has completed `step` steps,
 /// atomically: a crash mid-write leaves the previous state, never half of
 /// this one. A run selecting on held-out loss saves its selection with it:
@@ -1089,6 +1094,11 @@ fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, applied: u32, r
         "identity": identity,
         "selection": selection.map(Selection::to_json),
     });
+    // The off-device generation first: the resume file below names `applied`, so a crash between the two leaves
+    // the previous resume file and a generation it does not use, never a file naming a state that is missing.
+    if let Some(off) = model.off_device_state() {
+        off.commit(&off_device_dir(path), applied)?;
+    }
     let tmp = path.with_extension("tmp");
     let tmp_str = tmp.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", tmp.display())))?;
     checkpoint::st::save_safetensors(tmp_str, &tensors, &header, None)?;
@@ -1149,6 +1159,9 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
         }
         model.write_weight(name, w);
         model.write_moments(name, m, v).map_err(std::io::Error::other)?;
+    }
+    if let Some(off) = model.off_device_state() {
+        off.restore(&off_device_dir(path), applied)?;
     }
     model.poll_wait();
     let selection = match (&header["selection"], opts.patience > 0) {

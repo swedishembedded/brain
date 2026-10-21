@@ -126,6 +126,23 @@ pub fn build_for_training(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSour
     .map_err(std::io::Error::other)
 }
 
+/// The resident low-precision full fine-tune model of `cfg` at `opts`' batch and context, placed through the
+/// planner: the resident weights and gradients on the device, the master copy and optimizer state in host memory,
+/// the fp32 embedding/head/norms and the activations on the device. A configuration the machine cannot hold is
+/// refused here, with the planner's arithmetic, before anything is allocated.
+pub fn build_resident(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, resident: &model::resident_ft::ResidentFtConfig) -> std::io::Result<Qwen> {
+    use model::memplan::{Category, Demand};
+    let shard = crate::model::Shard::whole(cfg.n_layers as usize);
+    let linear_numel: u64 = crate::model::resident_specs(&cfg, &shard).iter().map(|s| s.n as u64 * s.k as u64).sum();
+    let all_numel: u64 = crate::shard_param_list(&cfg, &shard).iter().map(|(_, n)| *n as u64).sum();
+    // fp32 remainder: value, gradient and the two AdamW moments on the device.
+    let remainder = Demand::fixed(Category::Weights, "fp32 embedding, head and norms (with gradients and moments)", (all_numel - linear_numel) * 4 * 4);
+    let activations = crate::footprint::footprint_demands(&cfg, &shard, Dtype::F32, opts.batch_size, opts.block_size, true, false).into_iter().find(|d| d.category == Category::Activations).expect("a footprint always has activations");
+    let plan = crate::model::ResidentPlan { cfg: resident.clone(), capacity: model::memplan::Capacity::measured(), others: vec![remainder, activations] };
+    crate::model::check_resident_fits(&cfg, &shard, &plan).map_err(std::io::Error::other)?;
+    Qwen::new_resident(cfg, opts.batch_size, opts.block_size, init, &plan, opts.gemm_precision).map_err(std::io::Error::other)
+}
+
 /// `stages` contiguous stages whose largest estimated footprint
 /// ([`crate::footprint::estimate_vram_bytes`]) is the smallest any cut can
 /// give (exact DP over the cut points). The parameter-count cut of
@@ -718,6 +735,16 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
         let base = path_str(base).map_err(std::io::Error::other)?;
         let (cfg, init) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
         let m = state.scope(|| build_for_training(cfg, opts, &*init, Dtype::F32))?;
+        let (report, m) = fit.fit(m)?;
+        Ok((report, Trained::Single(Box::new(m))))
+    }
+
+    /// The linears resident in `resident`'s encoding with a host-side master; the embedding, head and norms train
+    /// in fp32 on the device. Refused before loading when the planner finds it does not fit.
+    fn train_full_resident(base: &Path, opts: &FitOpts, resident: &model::resident_ft::ResidentFtConfig, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Trained)> {
+        let base = path_str(base).map_err(std::io::Error::other)?;
+        let (cfg, init) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
+        let m = build_resident(cfg, opts, &*init, resident)?;
         let (report, m) = fit.fit(m)?;
         Ok((report, Trained::Single(Box::new(m))))
     }

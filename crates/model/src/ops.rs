@@ -657,6 +657,12 @@ impl Weight {
         Weight::F32 { w, n, k }
     }
 
+    /// Whether a product against this tier reads the activations as f32 rows (every float-read tier). The
+    /// activation-quantizing tiers (int8 DP4A, int4, K-quants) need [`Ops::act`] to quantize them first.
+    pub fn reads_f32_activations(&self) -> bool {
+        matches!(self, Weight::F32 { .. } | Weight::BF16 { .. } | Weight::F16 { .. } | Weight::FP8 { .. } | Weight::NF4 { .. } | Weight::Micro { .. })
+    }
+
     pub fn dtype(&self) -> Dtype {
         match self {
             Weight::F32 { .. } => Dtype::F32,
@@ -1135,7 +1141,7 @@ pub struct Ops {
 mod sink;
 mod upload_source;
 mod tiled;
-pub use sink::DeviceWeightSink;
+pub use sink::{rewrite_tile, DeviceWeightSink};
 pub use upload_source::{upload_fused_from_source, upload_from_source, upload_preserved};
 pub use tiled::{plan_linear, tile_rows, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES};
 

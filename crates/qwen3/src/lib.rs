@@ -32,7 +32,7 @@ pub mod tp;
 pub use config::{LoraCfg, QwenConfig};
 pub use open::{checkpoint_config, open_checkpoint, store_checkpoint_path};
 pub use init::init_weights;
-pub use model::{shard_param_list, Qwen, Shard, IGNORE};
+pub use model::{check_resident_fits, resident_specs, shard_param_list, Qwen, ResidentPlan, Shard, IGNORE};
 /// The weight **storage tier** [`Qwen::new_shard_dt`] takes, re-exported so a
 /// caller naming one does not have to depend on `gpu-core` directly.
 pub use gpu_core::select::Dtype;

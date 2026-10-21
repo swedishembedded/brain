@@ -303,6 +303,14 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // name and `Op::AdamWQ8` picks the cooperative form where barriers run).
         v.push(("adamw_q8", kernels::ADAMW_Q8));
         v.push(("adamw_q8_wg", kernels::ADAMW_Q8_WG));
+        v.push(("adamw_bf16", kernels::ADAMW_BF16));
+        // The quantized-execution contract (`model::ops::tiled`): the resident FP8 full fine-tune multiplies,
+        // back-propagates and takes weight gradients against block-scaled weights through the tile decode.
+        for (name, src) in model::ops::frozen_base_kernels() {
+            if !v.iter().any(|(have, _)| have == name) {
+                v.push((name, src));
+            }
+        }
         // `Ops::bind` resolves its `(RegisterTiled, F32)` kernel by the NAME
         // "matmul_reg2" - but `matmul_reg3` is the bit-identical, measurably
         // faster twin (identical `Params`, identical tiling, only the
@@ -584,6 +592,55 @@ struct Layer {
     h: DeviceBuffer,
 }
 
+/// A resident low-precision full fine-tune: the per-layer linears live on the device in the configured
+/// encoding with a master copy and optimizer state off it ([`model::resident_ft`]); everything else (embedding,
+/// head, norms) trains in fp32 on the device as in any full fine-tune. `others` are the planner demands of that
+/// remainder (activations, the fp32 parameters), `capacity` what the machine offers.
+pub struct ResidentPlan {
+    pub cfg: model::resident_ft::ResidentFtConfig,
+    pub capacity: model::memplan::Capacity,
+    pub others: Vec<model::memplan::Demand>,
+}
+
+impl ResidentPlan {
+    fn budget(&self) -> model::resident_ft::ResidentBudget<'_> {
+        model::resident_ft::ResidentBudget { capacity: self.capacity, others: &self.others, authorized: model::memplan::Authorized::none() }
+    }
+}
+
+/// The `[n, k]` of the per-layer linear `leaf` of `cfg`.
+fn linear_dims(cfg: &QwenConfig, leaf: &str) -> (u32, u32) {
+    let (d, hq, hkv, ff) = (cfg.d_model, cfg.q_dim(), cfg.kv_dim(), cfg.d_ff);
+    match leaf {
+        "attn.wq.weight" => (hq, d),
+        "attn.wk.weight" => (hkv, d),
+        "attn.wv.weight" => (hkv, d),
+        "attn.wo.weight" => (d, hq),
+        "mlp.gate.weight" => (ff, d),
+        "mlp.up.weight" => (ff, d),
+        "mlp.down.weight" => (d, ff),
+        other => panic!("qwen: unexpected linear leaf {other}"),
+    }
+}
+
+/// The linears of `shard` a resident full fine-tune holds on the device in its own encoding.
+pub fn resident_specs(cfg: &QwenConfig, shard: &Shard) -> Vec<model::resident_ft::ResidentSpec> {
+    let mut specs = Vec::new();
+    for l in shard.start..shard.end {
+        for leaf in crate::q8::Q8::LINEARS {
+            let (n, k) = linear_dims(cfg, leaf);
+            specs.push(model::resident_ft::ResidentSpec { name: format!("blocks.{l}.{leaf}"), n, k });
+        }
+    }
+    specs
+}
+
+/// Refuse a resident full fine-tune that does not fit, before anything is loaded: the planner's arithmetic over the
+/// resident weights, gradients, host-side master and state, and the demands of the fp32 remainder.
+pub fn check_resident_fits(cfg: &QwenConfig, shard: &Shard, plan: &ResidentPlan) -> Result<model::memplan::PlanReport, String> {
+    model::resident_ft::check_fits(&plan.cfg, &resident_specs(cfg, shard), &plan.budget())
+}
+
 pub struct Qwen {
     pub gpu: Gpu,
     pub cfg: QwenConfig,
@@ -593,6 +650,10 @@ pub struct Qwen {
     opt: Optim,
     /// Host AdamW for offloaded params (RAM-resident moments); None otherwise.
     offload_opt: std::cell::RefCell<Option<optim::OffloadAdam>>,
+    /// The per-layer linears of a resident low-precision full fine-tune, their master copies and state.
+    resident: Option<std::cell::RefCell<model::resident_ft::ResidentFullFt>>,
+    /// The global gradient norm of the latest clipped resident step (it spans both parameter groups).
+    resident_norm: Cell<Option<f32>>,
     b: u32,
     t: u32,
     count: Cell<f32>,
@@ -949,7 +1010,7 @@ impl Qwen {
     pub fn load(path: &str, b: u32, t: u32) -> Qwen {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &*src, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
+        Qwen::new_impl(cfg, b, t, &*src, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, None)
     }
 
     /// Load an **inference-only** model: parameters are frozen (weights only, no
@@ -966,7 +1027,7 @@ impl Qwen {
     pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Qwen {
         let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, reader, false, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
+        Qwen::new_impl(cfg, b, t, reader, false, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, None)
     }
 
     /// Streaming **decode-only** load: like [`Self::from_reader_inference`]
@@ -983,7 +1044,7 @@ impl Qwen {
     pub fn from_reader_decode(reader: &checkpoint::weightio::WeightReader, ctx: u32) -> Qwen {
         let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
+        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, None)
     }
 
     /// [`Self::from_reader_decode`], but from an in-memory tensor map instead of
@@ -993,7 +1054,7 @@ impl Qwen {
     /// without rebuilding, use [`Self::attach_adapter`] instead.
     pub fn from_tensors_decode(cfg: QwenConfig, tensors: &HashMap<String, Vec<f32>>, ctx: u32) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
+        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, Dtype::F32, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, None)
     }
 
     /// [`Self::load_inference`] with the int8 numeric tier: group-wise weight
@@ -1015,7 +1076,7 @@ impl Qwen {
     fn load_inference_with(path: &str, b: u32, t: u32, dt: Dtype) -> Qwen {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &*src, false, shard, dt, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
+        Qwen::new_impl(cfg, b, t, &*src, false, shard, dt, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, None)
     }
 
     /// The config of a brain checkpoint `reader` has open. The `from_reader_*`
@@ -1028,7 +1089,7 @@ impl Qwen {
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
+        Qwen::new_impl(cfg, b, t, init, true, shard, Dtype::F32, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, None)
     }
 
     /// A LoRA training build whose frozen base linears are held at the
@@ -1054,7 +1115,7 @@ impl Qwen {
     /// base) where the device has them, `Fp32Reference` the exact fp32 kernels. The tapes are
     /// recorded at construction, so the choice is made here, not afterwards.
     pub fn new_lora_shard_dt_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype, gemm: GemmPrecision) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false, gemm, SavedPolicy::Recompute)
+        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false, gemm, SavedPolicy::Recompute, None)
     }
 
     /// [`Self::new_lora_dt_gemm`] with the saved-activation policy chosen (`model::saved`, normally the planner's
@@ -1063,13 +1124,22 @@ impl Qwen {
     /// so [`SavedPolicy::Keep`] is refused.
     pub fn new_lora_dt_saved(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, dt: Dtype, gemm: GemmPrecision, saved: SavedPolicy) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false, gemm, saved)
+        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false, gemm, saved, None)
     }
 
     /// [`Self::new_lora_dt`] with the GEMM arithmetic chosen (see [`Self::new_lora_shard_dt_gemm`]).
     pub fn new_lora_dt_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, dt: Dtype, gemm: GemmPrecision) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
         Qwen::new_lora_shard_dt_gemm(cfg, b, t, init, shard, dt, gemm)
+    }
+
+    /// A resident low-precision full fine-tune build (see [`ResidentPlan`]): whole model, fp32 remainder, the
+    /// per-layer linears at `plan.cfg.value` with their master copy off the device. Refuses, before allocating, a
+    /// plan that does not fit.
+    pub fn new_resident(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, plan: &ResidentPlan, gemm: GemmPrecision) -> Result<Qwen, String> {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        check_resident_fits(&cfg, &shard, plan)?;
+        Ok(Qwen::new_impl(cfg, b, t, init, true, shard, Dtype::F32, false, gemm, SavedPolicy::Recompute, Some(plan)))
     }
 
     /// Build a single pipeline **stage**: only the layers (and endpoint weights)
@@ -1087,7 +1157,7 @@ impl Qwen {
 
     /// [`Self::new_shard`] with the GEMM arithmetic chosen (see [`Self::new_lora_shard_dt_gemm`]).
     pub fn new_shard_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, train: bool, shard: Shard, gemm: GemmPrecision) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, train, shard, Dtype::F32, false, gemm, SavedPolicy::Recompute)
+        Qwen::new_impl(cfg, b, t, init, train, shard, Dtype::F32, false, gemm, SavedPolicy::Recompute, None)
     }
 
     /// Inference-only shard with the 7 per-layer linears quantized to int8 (DP4A).
@@ -1133,7 +1203,7 @@ impl Qwen {
     /// kernel variants. The per-layer RMSNorm/QK-norm gains stay fp32: they
     /// are `[d]`/`[head_dim]` vectors consumed by norm kernels, not GEMMs.
     pub fn new_shard_dt(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, false, shard, dt, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
+        Qwen::new_impl(cfg, b, t, init, false, shard, dt, false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, None)
     }
 
     /// [`Self::new_shard_dt`] shaped for **KV-cache decode**, the way
@@ -1159,7 +1229,7 @@ impl Qwen {
     /// what landed. Calling a batched forward/backward entry point on the
     /// result panics loudly rather than running past the smaller buffers.
     pub fn new_shard_dt_decode(cfg: QwenConfig, ctx: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
-        Qwen::new_impl(cfg, 1, ctx, init, false, shard, dt, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute)
+        Qwen::new_impl(cfg, 1, ctx, init, false, shard, dt, true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, None)
     }
 
     /// The shared builder behind every constructor. `decode_only` (set only by
@@ -1168,7 +1238,7 @@ impl Qwen {
     /// `scores`/`probs` at `n_heads·ctx` (not `n_heads·ctx²`), no backward
     /// scratch, no `logits`/`d_logits`/CE buffers.
     #[allow(clippy::too_many_arguments)]
-    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, dt: Dtype, decode_only: bool, gemm: GemmPrecision, saved: SavedPolicy) -> Qwen {
+    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, dt: Dtype, decode_only: bool, gemm: GemmPrecision, saved: SavedPolicy, resident: Option<&ResidentPlan>) -> Qwen {
         // ONE reduced-precision build, parameterised by `dt` - the int8 tier
         // is not a second code path, it is this one at `Dtype::I8`. Every
         // non-fp32 tier is inference-only for the same reason int8 always
@@ -1227,11 +1297,14 @@ impl Qwen {
         // them out so no fp32 copy is ever uploaded alongside the packed one.
         // Without this filter an f16 build would be BIGGER than fp32 (1.0x
         // master copy + 0.5x packed), not half the size.
-        let quantized = dt != Dtype::F32;
+        assert!(resident.is_none() || (train && cfg.lora.is_none() && dt == Dtype::F32 && !decode_only), "a resident low-precision build is a full fine-tune: training, no adapter, fp32 remainder");
+        let quantized = dt != Dtype::F32 || resident.is_some();
         // A LoRA build freezes the embedding and the head, so a bf16 base
         // holds them in bf16 as well (on a device that runs the tier).
         let lora_base_tier = train && cfg.lora.is_some() && FROZEN_LORA_TIERS.contains(&dt) && dt.promote(&ops.caps().numeric) == dt;
-        let int8_base = lora_base_tier && dt == Dtype::I8;
+        // An int8 base reads fp32 activations (its kernels decode the weight): the frozen int8 base of a LoRA build
+        // and the resident int8 weights of a quantization-aware full fine-tune.
+        let int8_base = lora_base_tier && dt == Dtype::I8 || resident.is_some_and(|r| r.cfg.value == model::resident_ft::ResidentValue::Int8);
         // The tables of a half-precision or int8 base are held in bf16.
         let half_tables = lora_base_tier && Dtype::BF16.promote(&ops.caps().numeric) == Dtype::BF16;
         assert!(!half_tables || cfg.d_model.is_multiple_of(2), "a bf16 table packs two values to a word, so d_model must be even");
@@ -1259,7 +1332,7 @@ impl Qwen {
                 })
                 .collect();
             ParamStore::new_with_roles_src(&gpu, roles, src)
-        } else if offload_adam() {
+        } else if offload_adam() && resident.is_none() {
             // Full fine-tuning with the AdamW moments in system RAM (Role::Offload):
             // GPU holds only weight+grad (2×model) instead of 4×model.
             let precisions = model::offload::resolve_precisions(&plist, true).unwrap_or_else(|e| panic!("qwen3 full fine-tune: {e}"));
@@ -1438,12 +1511,18 @@ impl Qwen {
                 other => panic!("qwen: unexpected linear leaf {other}"),
             }
         };
+        let resident_ft = resident.map(|plan| {
+            let specs = resident_specs(&cfg, &shard);
+            model::resident_ft::ResidentFullFt::new(&ops, plan.cfg.clone(), specs, src, &plan.budget()).unwrap_or_else(|e| panic!("qwen: {e}"))
+        });
         let mut weights: HashMap<String, Weight> = HashMap::new();
         for l in shard.start..shard.end {
             for leaf in crate::q8::Q8::LINEARS {
                 let name = format!("blocks.{l}.{leaf}");
                 let (wn, wk) = dims(leaf);
-                let w = if quantized {
+                let w = if let Some(ft) = &resident_ft {
+                    ft.weight(ft.index_of(&name).expect("every per-layer linear is a resident tensor")).clone()
+                } else if quantized {
                     let mut built: Option<Weight> = None;
                     let found = src.with_tensor(&name, &mut |raw| {
                         built = Some(Weight::upload(&ops, raw, wn, wk, dt));
@@ -1533,6 +1612,8 @@ impl Qwen {
             ps,
             shard,
             offload_opt,
+            resident: resident_ft.map(std::cell::RefCell::new),
+            resident_norm: Cell::new(None),
             opt,
             tokens,
             targets,
@@ -1884,8 +1965,7 @@ impl Qwen {
     /// fp32 gets the cheap path it deserves.
     fn ops_act(&self, s: &mut Vec<Step>, x: &DeviceBuffer, rows: u32, k: u32) -> Act {
         // An int8 base reads fp32 activations: its kernels decode the weight.
-        let reads_f32_rows = |w: &Weight| matches!(w, Weight::F32 { .. } | Weight::BF16 { .. } | Weight::F16 { .. });
-        if self.int8_base || self.weights.values().all(reads_f32_rows) {
+        if self.int8_base || self.weights.values().all(Weight::reads_f32_activations) {
             return self.ops.act_f32(x, 0, rows, k);
         }
         self.ops.act(s, x, 0, rows, k)
@@ -1969,6 +2049,11 @@ impl Qwen {
                 if self.trainable(wname) {
                     let (bk, bt) = dw_kernel_bw(nout, k);
                     s.push(self.gpu.dispatch(bk, &[d_out, x, self.g(wname)], &[m, k, nout], bt));
+                } else if let Some(ft) = &self.resident {
+                    // A resident low-precision linear: its dW comes from the shared op against the stored tier.
+                    let ft = ft.borrow();
+                    let i = ft.index_of(wname).unwrap_or_else(|| panic!("qwen: {wname} is neither optimised nor resident"));
+                    ft.weight_grad(&self.ops, s, i, x, d_out, m);
                 }
                 self.base_dx(s, d_out, wname, dx, m, k, nout, acc);
             }
@@ -2534,21 +2619,81 @@ impl Qwen {
 
     pub fn zero_grads(&self) {
         self.ps.zero_grads(&self.gpu);
+        if let Some(ft) = &self.resident {
+            ft.borrow().zero_grads(&self.ops);
+        }
     }
+    fn resident_index(&self, name: &str) -> Option<usize> {
+        self.resident.as_ref().and_then(|ft| ft.borrow().index_of(name))
+    }
+
+    /// Export the trained model in a low-precision format: every per-layer linear re-encoded from its master copy
+    /// as `encoding` (one tile of host staging at a time), the remaining parameters in fp32, as one safetensors
+    /// file a loader opens like any brain checkpoint. Only a resident build has masters to export from.
+    pub fn export_resident(&self, path: &std::path::Path, encoding: &checkpoint::packed::QuantEncoding) -> Result<model::resident_ft::ResidentExport, String> {
+        use checkpoint::packed::{QuantEncoding, TensorDescriptor, TensorSink};
+        let ft = self.resident.as_ref().ok_or("export_resident: this model was not built as a resident low-precision full fine-tune")?;
+        let mut ft = ft.borrow_mut();
+        let encodings = vec![encoding.clone(); ft.specs().len()];
+        let linear_descs = ft.export_descriptors(&encodings).map_err(|e| e.to_string())?;
+        let rest: Vec<TensorDescriptor> = self.ps.params.iter().map(|(n, numel)| TensorDescriptor::new(n.clone(), vec![*numel as u64], QuantEncoding::f32())).collect();
+        let all: Vec<TensorDescriptor> = linear_descs.iter().chain(&rest).cloned().collect();
+        let mut sink = checkpoint::packed::SafetensorsSink::create(path, &all, &self.cfg.to_json()).map_err(|e| e.to_string())?;
+        let report = ft.export(&self.ops, &encodings, &mut sink).map_err(|e| e.to_string())?;
+        for d in &rest {
+            let vals = self.ps.read_weight(&self.gpu, &d.name);
+            sink.begin(d)?;
+            let bytes: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+            sink.write_tile(d, &checkpoint::packed::Tile { elems: 0..vals.len() as u64, payload: &bytes, scales: Vec::new() })?;
+            sink.finish(d)?;
+        }
+        sink.commit().map_err(|e| e.to_string())?;
+        Ok(model::resident_ft::ResidentExport { linears: report, bytes: all.iter().map(|d| d.payload_bytes() + (0..d.encoding.scales.len()).map(|l| d.scale_bytes(l)).sum::<u64>()).sum() })
+    }
+
     pub fn poll_wait(&self) {
         self.gpu.poll_wait();
     }
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        // The resident linears update on the host against their masters; the global clip spans them and the
+        // device-optimised remainder, so the one multiplier is decided here from both norms.
+        let (clip_dev, scale_dev) = match &self.resident {
+            Some(ft) => {
+                let mut ft = ft.borrow_mut();
+                let sumsq = if clip.is_some() {
+                    let resident = ft.grad_sum_sq(&self.ops).unwrap_or_else(|e| panic!("qwen3 resident full fine-tune: reading the gradients: {e}"));
+                    let remainder: f64 = self
+                        .ps
+                        .opt_params()
+                        .iter()
+                        .map(|(n, _)| self.ps.read_grad(&self.gpu, n).iter().map(|&g| f64::from(g) * f64::from(g)).sum::<f64>())
+                        .sum();
+                    resident + remainder
+                } else {
+                    0.0
+                };
+                let mult = optim::grad_multiplier(sumsq, clip, extra_scale);
+                // The run's AdamW hyper-parameters reach an AdamW state; an Adafactor state keeps its own.
+                if matches!(ft.rule(), optim::rule::Rule::AdamW { .. }) {
+                    ft.set_rule(optim::rule::Rule::AdamW { adam, wd });
+                }
+                debug_assert_eq!(ft.step_count() + 1, t, "the resident state and the run agree on the step index");
+                ft.step_scaled(&self.ops, lr, mult).unwrap_or_else(|e| panic!("qwen3 resident full fine-tune: update: {e}"));
+                self.resident_norm.set(clip.map(|_| (sumsq.sqrt() * f64::from(extra_scale)) as f32));
+                (None, mult)
+            }
+            None => (clip, extra_scale),
+        };
         // GPU optimiser for `Trainable` params.
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
-        // Host (RAM-resident) optimiser for `Offload` params - built lazily on the
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip_dev, scale_dev);
+        // Host (RAM-resident) optimiser for the offloaded params - built lazily on the
         // first step from the store's current weights.
         if !self.ps.offload.is_empty() {
             let mut slot = self.offload_opt.borrow_mut();
             if slot.is_none() {
                 *slot = Some(optim::OffloadAdam::new(&self.gpu, &self.ps));
             }
-            slot.as_mut().unwrap().step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+            slot.as_mut().unwrap().step(&self.gpu, &self.ps, t, lr, wd, adam, clip_dev, scale_dev);
         }
     }
     /// Physical bytes of the host-offloaded optimizer state and the host staging
@@ -2561,6 +2706,10 @@ impl Qwen {
         self.ps.read_grad(&self.gpu, name)
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
+        if let Some(i) = self.resident_index(name) {
+            // The master copy: the highest-precision weight, which is what a saved checkpoint should carry.
+            return self.resident.as_ref().expect("indexed").borrow_mut().read_master(&self.ops, i).unwrap_or_else(|e| panic!("qwen3 resident full fine-tune: reading {name}: {e}"));
+        }
         match self.tables.get(name) {
             Some(packed) => {
                 let n = (self.cfg.vocab as usize * self.cfg.d_model as usize).div_ceil(2);
@@ -2571,6 +2720,10 @@ impl Qwen {
         }
     }
     pub fn write_weight(&self, name: &str, data: &[f32]) {
+        if let Some(i) = self.resident_index(name) {
+            self.resident.as_ref().expect("indexed").borrow_mut().write_master(&self.ops, i, data).unwrap_or_else(|e| panic!("qwen3 resident full fine-tune: writing {name}: {e}"));
+            return;
+        }
         match self.tables.get(name) {
             Some(packed) => self.gpu.write(packed, bytemuck::cast_slice(&model::half::pack_bf16(data))),
             None => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
@@ -2585,7 +2738,7 @@ impl Qwen {
     }
     /// Does this stage hold parameter `name` (weight buffer present)?
     pub fn has_param(&self, name: &str) -> bool {
-        self.ps.weight.contains_key(name) || self.tables.contains_key(name)
+        self.ps.weight.contains_key(name) || self.tables.contains_key(name) || self.resident_index(name).is_some()
     }
     /// Run the forward graph without reading the loss (non-head stages).
     pub fn run_forward(&self) {
@@ -3744,18 +3897,45 @@ impl Qwen {
     }
 
     pub fn save_with_itos(&self, path: &str, itos: Option<&[char]>) {
-        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = self
+        let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = self
             .ps
             .params
             .iter()
             .map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name)))
             .collect();
+        // A resident build keeps its linears outside the parameter store: they are saved from their masters.
+        if let Some(ft) = &self.resident {
+            let names: Vec<(String, u64)> = ft.borrow().specs().iter().map(|s| (s.name.clone(), s.n as u64 * s.k as u64)).collect();
+            tensors.extend(names.into_iter().map(|(name, numel)| (name.clone(), vec![numel], self.read_weight(&name))));
+        }
         let mut config = self.cfg.to_json();
         if let Some(itos) = itos {
             let arr: Vec<Value> = itos.iter().map(|c| Value::from(c.to_string())).collect();
             config["itos"] = Value::Array(arr);
         }
         checkpoint::save(path, config, &tensors);
+    }
+}
+
+impl model::OffDeviceState for Qwen {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let ft = self.resident.as_ref().expect("only a resident build exposes off-device state");
+        let ckpt = optim::checkpoint::CheckpointDir::new(dir)?;
+        let mut ft = ft.borrow_mut();
+        let run = ft.run_state(0, Vec::new());
+        if run.step != step {
+            return Err(std::io::Error::other(format!("the run has absorbed {step} updates, the resident state {}", run.step)));
+        }
+        ft.commit(&self.ops, &ckpt, &run).map(drop)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let ft = self.resident.as_ref().expect("only a resident build exposes off-device state");
+        let ckpt = optim::checkpoint::CheckpointDir::new(dir)?;
+        match ft.borrow_mut().restore_at(&self.ops, &ckpt, step)? {
+            Some(_) => Ok(()),
+            None => Err(std::io::Error::other(format!("{}: no resident training state was committed at update {step}", dir.display()))),
+        }
     }
 }
 
@@ -3904,6 +4084,12 @@ impl model::Model for Qwen {
     fn poll_wait(&self) {
         Qwen::poll_wait(self)
     }
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.resident.as_ref().map(|_| self as &dyn model::OffDeviceState)
+    }
+    fn last_grad_norm(&self) -> Option<f32> {
+        self.resident.as_ref().and_then(|_| self.resident_norm.get())
+    }
     fn optimized_params(&self) -> Option<Vec<String>> {
         // Offloaded params keep their moments in host RAM, out of reach here.
         self.ps.offload.is_empty().then(|| self.ps.opt_params().iter().map(|(n, _)| n.clone()).collect())
@@ -3917,11 +4103,13 @@ impl model::Model for Qwen {
     fn param_names(&self) -> Vec<String> {
         // The optimised set: full-training `trainable` plus any `offload` params
         // (both carry a gradient; frozen params do not). LoRA -> adapters only.
+        let resident: Vec<String> = self.resident.as_ref().map(|ft| ft.borrow().specs().iter().map(|s| s.name.clone()).collect()).unwrap_or_default();
         self.ps
             .trainable
             .iter()
             .chain(self.ps.offload.iter())
             .map(|(n, _)| n.clone())
+            .chain(resident)
             .collect()
     }
     fn frozen_adapter_param_names(&self) -> Vec<String> {

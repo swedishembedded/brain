@@ -40,14 +40,10 @@ use crate::fp8::Fp8Format;
 /// Decoded-f32 scratch one tile of a quantized product may use unless the caller asks otherwise.
 pub const DEFAULT_TILE_BUDGET_BYTES: u64 = 256 << 20;
 
-/// The dtype a weight gradient is accumulated into.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GradDtype {
-    /// fp32 elements, one word each.
-    F32,
-    /// bf16 elements, two per word (`crate::half::pack_bf16`'s layout), accumulated with round to nearest even.
-    Bf16,
-}
+/// The dtype a weight gradient is accumulated into: fp32 (one word per element) or bf16 (two per word,
+/// `crate::half::pack_bf16`'s layout, accumulated with round to nearest even). One type with the training
+/// precision descriptors of `paramstore`.
+pub use paramstore::precision::GradDtype;
 
 /// How a product against a weight runs, decided from formats, shapes and the device alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
