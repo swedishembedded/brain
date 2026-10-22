@@ -32,6 +32,16 @@ use super::{BatchDecodeCaches, Qwen35};
 /// of step time for replaying a recorded pass at a repeated row count.
 pub(crate) const VERIFY_ARENA: &str = "qwen35.verify";
 
+/// Whether the verify kernels serve this model's Gated DeltaNet layer shape -
+/// the half of [`Qwen35::verify_supported`] a plan can ask before a device exists.
+pub(crate) fn verify_shape_supported(c: &crate::Qwen35Config) -> bool {
+    c.linear_key_head_dim == 128
+        && c.linear_value_head_dim == 128
+        && c.linear_conv_kernel_dim == 4
+        && c.linear_num_value_heads.is_multiple_of(c.linear_num_key_heads)
+        && (1..=3).contains(&(c.linear_num_value_heads / c.linear_num_key_heads))
+}
+
 /// What a verify pass needs beyond a decode pass: the rows each sequence
 /// carries and, for every Gated DeltaNet layer, somewhere to keep the state
 /// between them.
@@ -152,14 +162,7 @@ impl Qwen35 {
     /// Whether this stage's device offers every kernel a verify pass runs and
     /// the layer shapes are ones they serve.
     pub(crate) fn verify_supported(&self) -> bool {
-        let c = &self.cfg;
-        self.gpu.has_fused(gpu_core::Fused::GdnVerifyPool)
-            && self.gpu.has_fused(gpu_core::Fused::GdnCommitPool)
-            && c.linear_key_head_dim == 128
-            && c.linear_value_head_dim == 128
-            && c.linear_conv_kernel_dim == 4
-            && c.linear_num_value_heads.is_multiple_of(c.linear_num_key_heads)
-            && (1..=3).contains(&(c.linear_num_value_heads / c.linear_num_key_heads))
+        self.gpu.has_fused(gpu_core::Fused::GdnVerifyPool) && self.gpu.has_fused(gpu_core::Fused::GdnCommitPool) && verify_shape_supported(&self.cfg)
     }
 
     /// Row snapshots for one Gated DeltaNet layer of this stage, with room for

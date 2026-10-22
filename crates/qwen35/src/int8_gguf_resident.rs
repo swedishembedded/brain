@@ -143,7 +143,7 @@ mod background;
 mod engine;
 mod mtp;
 mod speculate;
-pub use speculate::{SpecServing, SpeculativeMode};
+pub use speculate::{SpecCost, SpecServing, SpeculativeMode};
 pub use engine::{checkpoint_len, PrefillPolicy, Qwen35GgufEngine, SpecTimes};
 
 use std::cell::{Cell, RefCell};
@@ -332,43 +332,91 @@ fn head_i8_bytes(cfg: &Qwen35Config) -> u64 {
 /// this vocab a mis-charged endpoint is several GB, i.e. the difference
 /// between a plan that fits and a card that OOMs mid-load.
 pub fn layer_cost(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32) -> LayerBytes {
-    layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, 0, 0)
+    serving_cost(cfg, &ServingShape::new(cap, tier.clone(), kv, max_batch))
+}
+
+/// Everything a serving configuration holds on the cards besides the model's
+/// own weights - the one request the cost model ([`serving_cost`]), the sizing
+/// check ([`sizing_refusal`]) and the automatic context ([`auto_cap`]) answer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServingShape {
+    /// Per-sequence `prompt + max_new` capacity.
+    pub cap: u32,
+    /// The decoder body's weight tier.
+    pub tier: TierPolicy,
+    /// How the GQA layers' K/V are stored.
+    pub kv: KvTier,
+    /// Sequences decoding at once.
+    pub max_batch: u32,
+    /// Cached prompts kept for prefix reuse.
+    pub prefix_slots: u32,
+    /// Rows of the shared KV pool of the paged layout ([`KvLayout::Paged`]);
+    /// 0 for one `cap`-row window per slot.
+    pub kv_pool_rows: u32,
+    /// What speculative decoding keeps on the cards.
+    pub spec: SpecCost,
+}
+
+impl ServingShape {
+    /// `max_batch` sequences of `cap` tokens, no prompt cache, no speculation.
+    pub fn new(cap: u32, tier: TierPolicy, kv: KvTier, max_batch: u32) -> ServingShape {
+        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE }
+    }
+
+    /// The same shape at another context.
+    pub fn at(&self, cap: u32) -> ServingShape {
+        ServingShape { cap, ..self.clone() }
+    }
+
+    /// Sequence slots the one-window layout gives every GQA layer: running
+    /// sequences and cached prompts alike.
+    fn window_slots(&self) -> u32 {
+        self.max_batch.max(1) + if self.kv_pool_rows > 0 { 0 } else { self.prefix_slots }
+    }
 }
 
 /// Device bytes one layer of type `ty` holds for decode state: the GQA layers'
 /// K/V (a `cap`-row window per slot, or the shared pool of `kv_pool_rows` rows
 /// when that is non-zero) and the GDN layers' recurrent state (per running
-/// sequence, plus one snapshot per cached prompt). The one place both the
-/// placement planner and the engine's pool accounting get the figure from.
-pub(crate) fn layer_state_bytes(cfg: &Qwen35Config, ty: LayerType, cap: u32, kv: KvTier, max_batch: u32, prefix_slots: u32, kv_pool_rows: u32) -> u64 {
-    let paged = kv_pool_rows > 0;
-    let slots = max_batch.max(1) as u64 + if paged { 0 } else { prefix_slots as u64 };
+/// sequence, plus one snapshot per cached prompt, plus the speculative verify
+/// scratch). The one place the placement planner and the engine's pool
+/// accounting get the figure from.
+pub(crate) fn layer_state_bytes(cfg: &Qwen35Config, ty: LayerType, shape: &ServingShape) -> u64 {
+    let slots = shape.window_slots() as u64;
     match ty {
-        LayerType::Full if paged => 2 * kv.plane_bytes(kv_pool_rows as u64, cfg.kv_dim() as u64, cfg.head_dim as u64),
-        LayerType::Full => slots * cfg.layer_decode_state_bytes(ty, cap, kv),
-        LayerType::Linear => (slots + prefix_slots as u64) * cfg.layer_decode_state_bytes(ty, cap, kv),
+        LayerType::Full if shape.kv_pool_rows > 0 => 2 * shape.kv.plane_bytes(shape.kv_pool_rows as u64, cfg.kv_dim() as u64, cfg.head_dim as u64),
+        LayerType::Full => slots * cfg.layer_decode_state_bytes(ty, shape.cap, shape.kv),
+        LayerType::Linear => {
+            (slots + shape.prefix_slots as u64) * cfg.layer_decode_state_bytes(ty, shape.cap, shape.kv)
+                + shape.spec.scratch_rows as u64 * (cfg.gdn_state_len() + cfg.gdn_hist_len()) * 4
+        }
     }
 }
 
-/// [`layer_cost`] for a resident that also keeps `prefix_slots` cached prompts:
-/// each holds a whole sequence slot (the KV window of the prompt, and the GDN
-/// pool row that goes with the block) plus a snapshot row of every GDN layer's
-/// state, so the stage holds `max_batch + prefix_slots` slots and
-/// `prefix_slots` more recurrent states.
+/// The per-stage cost the planner places for `shape` ([`layer_cost`]'s full
+/// form): every layer's weights and decode state, and the head with, when
+/// speculation loads it, the MTP head on the same card.
 ///
-/// `kv_pool_rows > 0` is the paged layout ([`KvLayout::Paged`]): the GQA layers
-/// hold one pool of that many KV rows shared by all sequences and cached
-/// prompts, and the recurrent state is per running sequence (`max_batch`)
-/// plus one snapshot per cached prompt, since a cached prompt keeps only
-/// blocks. `0` is one `cap`-row window per slot.
-pub fn layer_cost_with_prefix_slots(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32, kv_pool_rows: u32) -> LayerBytes {
-    // Decode state is per SEQUENCE - a GQA layer's `[cap, kv_dim]` KV window
-    // (stored in `kv`) and a GDN layer's fixed-size recurrent state alike - so a stage holding
-    // `max_batch` concurrent sequences holds that many of each. Weights are
-    // shared by the whole batch and are counted once, which is the entire
-    // point of batching.
-    let per_layer = cfg.layer_types().into_iter().map(|ty| cfg.layer_weight_bytes(ty, tier) + layer_state_bytes(cfg, ty, cap, kv, max_batch, prefix_slots, kv_pool_rows)).collect();
-    LayerBytes { per_layer, embed: 0, head: head_i8_bytes(cfg) + cfg.d_model as u64 * 4 }
+/// A cached prompt of the one-window layout holds a whole sequence slot (the KV
+/// window of the prompt and the GDN pool row that goes with the block) plus a
+/// snapshot row of every GDN layer's state. In the paged layout the GQA layers
+/// hold one pool of `kv_pool_rows` rows shared by all sequences and cached
+/// prompts, and a cached prompt keeps only blocks and its snapshots.
+///
+/// Speculation is charged where it lives: the verify scratch beside each
+/// recurrent layer, on that layer's card, and the MTP head (one full-attention
+/// layer, its `eh_proj`, and a KV window per slot) beside the head.
+pub fn serving_cost(cfg: &Qwen35Config, shape: &ServingShape) -> LayerBytes {
+    // Decode state is per SEQUENCE; weights are shared by the whole batch and
+    // counted once, which is the entire point of batching.
+    let per_layer = cfg.layer_types().into_iter().map(|ty| cfg.layer_weight_bytes(ty, &shape.tier) + layer_state_bytes(cfg, ty, shape)).collect();
+    let mtp = if shape.spec.mtp_head {
+        let d = cfg.d_model as u64;
+        cfg.layer_weight_bytes(LayerType::Full, &shape.tier) + d * 2 * d + shape.window_slots() as u64 * cfg.layer_decode_state_bytes(LayerType::Full, shape.cap, shape.kv)
+    } else {
+        0
+    };
+    LayerBytes { per_layer, embed: 0, head: head_i8_bytes(cfg) + cfg.d_model as u64 * 4 + mtp }
 }
 
 /// Whether `max_batch` sequences of `cap` tokens make KV planes the kernels
@@ -392,8 +440,9 @@ fn kv_rows_addressable(cfg: &Qwen35Config, rows: u32) -> bool {
 /// (KV windows and recurrent state) is per sequence, so `max_batch` and `cap`
 /// are what a refusal tells the operator to lower, and a more compact KV tier
 /// what it suggests instead.
-pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32, kv_pool_rows: u32, usable: &[u64]) -> Option<String> {
+pub fn sizing_refusal(cfg: &Qwen35Config, shape: &ServingShape, usable: &[u64]) -> Option<String> {
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    let ServingShape { cap, kv, max_batch, prefix_slots, kv_pool_rows, .. } = *shape;
     if kv_pool_rows > 0 {
         if kv_pool_rows < cap {
             return Some(format!("a KV pool of {kv_pool_rows} rows cannot hold one sequence of {cap} tokens; raise the pool or lower --ctx"));
@@ -408,14 +457,13 @@ pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTie
             cfg.kv_dim()
         ));
     }
-    let cost = layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, prefix_slots, kv_pool_rows);
     let caps: Vec<(usize, u64)> = usable.iter().copied().enumerate().collect();
-    if model::shard::plan_fewest_devices(&cost, &caps).is_some() {
+    if model::shard::plan_fewest_devices(&serving_cost(cfg, shape), &caps).is_some() {
         return None;
     }
     // Placement said no: the global planner states the arithmetic per category and finds the
     // smallest KV tier change (the only lever a serving configuration may pull for itself).
-    let demands = serving_demands(cfg, cap, tier, kv, max_batch, prefix_slots, kv_pool_rows);
+    let demands = serving_demands(cfg, shape);
     let total_usable: u64 = usable.iter().sum();
     let capacity = model::memplan::Capacity { device_bytes: total_usable, host_bytes: 0 };
     let (report, fits_with) = match model::memplan::plan(&demands, capacity, &model::memplan::Authorized::only(&[model::memplan::Lever::CompactKv])) {
@@ -425,7 +473,7 @@ pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTie
     };
     // The aggregate says a tier fits; placement across the real cards has the last word.
     let suggestion = report.decisions.iter().rev().find(|d| d.category == model::memplan::Category::Kv).map(|d| d.to.clone()).filter(|to| {
-        fits_with && KvTier::parse(to).is_ok_and(|t| model::shard::plan_fewest_devices(&layer_cost_with_prefix_slots(cfg, cap, tier, t, max_batch, prefix_slots, kv_pool_rows), &caps).is_some())
+        fits_with && KvTier::parse(to).is_ok_and(|t| model::shard::plan_fewest_devices(&serving_cost(cfg, &ServingShape { kv: t, ..shape.clone() }), &caps).is_some())
     });
     let bytes_of = |c: model::memplan::Category| {
         // The request's own numbers, not the post-decision ones.
@@ -448,16 +496,18 @@ pub fn sizing_refusal(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTie
     ))
 }
 
-/// The serving configuration as the global planner's categories: the stored weights, the KV cache
-/// (offering each smaller tier), and the GDN recurrent state, each with the byte count the placement
-/// cost ([`layer_cost_with_prefix_slots`]) charges for it.
-pub fn serving_demands(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32, kv_pool_rows: u32) -> Vec<model::memplan::Demand> {
+/// The serving configuration as the global planner's categories: the stored weights (with the MTP
+/// head when speculation loads it), the KV cache (offering each smaller tier), and the GDN recurrent
+/// state with the verify scratch, each with the byte count [`serving_cost`] charges for it.
+pub fn serving_demands(cfg: &Qwen35Config, shape: &ServingShape) -> Vec<model::memplan::Demand> {
     use model::memplan::{kv_demand_with, Category, Demand};
     let types = cfg.layer_types();
-    let by_type = |want: LayerType, kv: KvTier| -> u64 { types.iter().filter(|&&t| t == want).map(|&t| layer_state_bytes(cfg, t, cap, kv, max_batch, prefix_slots, kv_pool_rows)).sum() };
-    let weights: u64 = types.iter().map(|&t| cfg.layer_weight_bytes(t, tier)).sum::<u64>() + head_i8_bytes(cfg) + cfg.d_model as u64 * 4;
-    let kv_demand = kv_demand_with(kv, &KvTier::ALL, |t| by_type(LayerType::Full, t)).expect("a KV demand over supported tiers is consistent");
-    vec![Demand::fixed(Category::Weights, "as stored", weights), kv_demand, Demand::fixed(Category::DecodeState, "recurrent state", by_type(LayerType::Linear, kv))]
+    let by_type = |want: LayerType, kv: KvTier| -> u64 { types.iter().filter(|&&t| t == want).map(|&t| layer_state_bytes(cfg, t, &ServingShape { kv, ..shape.clone() })).sum() };
+    let cost = serving_cost(cfg, shape);
+    let state: u64 = by_type(LayerType::Full, shape.kv) + by_type(LayerType::Linear, shape.kv);
+    let weights = cost.total() - state;
+    let kv_demand = kv_demand_with(shape.kv, &KvTier::ALL, |t| by_type(LayerType::Full, t)).expect("a KV demand over supported tiers is consistent");
+    vec![Demand::fixed(Category::Weights, "as stored", weights), kv_demand, Demand::fixed(Category::DecodeState, "recurrent state", by_type(LayerType::Linear, shape.kv))]
 }
 
 /// `(index into devices, capacity)` for every GPU in `devices`, each less
@@ -479,19 +529,21 @@ const AUTO_CAP_HEADROOM_PER_DEVICE: u64 = 1 << 30;
 /// result.
 const AUTO_CAP_GRANULE: u32 = 1024;
 
-/// The longest per-sequence context `max_batch` slots and `prefix_slots`
-/// cached prompts can have on `devices`:
-/// the largest cap whose [`layer_cost`] the planner still places, with
-/// [`AUTO_CAP_HEADROOM_PER_DEVICE`] kept free on every card, rounded down to
-/// [`AUTO_CAP_GRANULE`]. Nothing but memory (and the kernels' `u32` KV index,
-/// [`kv_pool_addressable`]) bounds it - not the checkpoint's trained context,
-/// which a longer cap extends with YaRN.
+/// The longest per-sequence context `shape` can have on `devices` (its own
+/// `cap` is ignored): the largest cap whose [`serving_cost`] the planner still
+/// places, with [`AUTO_CAP_HEADROOM_PER_DEVICE`] kept free on every card,
+/// rounded down to [`AUTO_CAP_GRANULE`]. Nothing but memory (and the kernels'
+/// `u32` KV index, [`kv_pool_addressable`]) bounds it - not the checkpoint's
+/// trained context, which a longer cap extends with YaRN.
 ///
 /// `None` when even a one-token context does not fit, i.e. the weights alone
 /// exceed the cards.
-pub fn auto_cap(cfg: &Qwen35Config, devices: &[(Device, u64)], tier: &TierPolicy, kv: KvTier, max_batch: u32, prefix_slots: u32) -> Option<u32> {
+pub fn auto_cap(cfg: &Qwen35Config, devices: &[(Device, u64)], shape: &ServingShape) -> Option<u32> {
     let caps = gpu_capacities(devices, AUTO_CAP_HEADROOM_PER_DEVICE);
-    let fits = |cap: u32| kv_pool_addressable(cfg, cap, max_batch + prefix_slots) && model::shard::plan_fewest_devices(&layer_cost_with_prefix_slots(cfg, cap, tier, kv, max_batch, prefix_slots, 0), &caps).is_some();
+    let fits = |cap: u32| {
+        let at = shape.at(cap);
+        kv_pool_addressable(cfg, cap, at.max_batch + at.prefix_slots) && model::shard::plan_fewest_devices(&serving_cost(cfg, &at), &caps).is_some()
+    };
     if caps.is_empty() || !fits(1) {
         return None;
     }
@@ -1084,6 +1136,8 @@ pub struct Qwen35GgufInstance {
     prefix_slots: u32,
     /// How every stage stores its GQA layers' K/V ([`KvTier`]).
     kv_tier: KvTier,
+    /// The decoder body's weight tier the stages were loaded at.
+    tier: TierPolicy,
     /// How the stages address a sequence's K/V rows.
     kv_layout: KvLayout,
     /// The per-layer residual tap a cross-attending drafter needs - `None`
@@ -2964,10 +3018,11 @@ impl Qwen35GgufResident {
         if caps.is_empty() {
             return refused("no GPU is budgeted for it (this model is GPU-only)".to_string());
         }
-        if let Some(why) = sizing_refusal(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots, self.paged_pool_rows(), &caps.iter().map(|&(_, c)| c).collect::<Vec<_>>()) {
+        let shape = self.serving_shape(&mg, &cfg);
+        if let Some(why) = sizing_refusal(&cfg, &shape, &caps.iter().map(|&(_, c)| c).collect::<Vec<_>>()) {
             return refused(why);
         }
-        let mut cost = layer_cost_with_prefix_slots(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots, self.paged_pool_rows());
+        let mut cost = serving_cost(&cfg, &shape);
         if let Some(request) = &self.bank {
             // The bank lives beside the weights of the layers it corrects, on
             // the card that holds them; each stage also carries the row
@@ -3007,7 +3062,31 @@ impl Qwen35GgufResident {
     pub fn total_device_bytes(&self) -> Result<u64, String> {
         let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
         let cfg = resident_config(&mg, self.cap)?;
-        Ok(layer_cost_with_prefix_slots(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch, self.prefix_slots, self.paged_pool_rows()).total())
+        Ok(serving_cost(&cfg, &self.serving_shape(&mg, &cfg)).total())
+    }
+
+    /// The longest per-sequence context this configuration places on its
+    /// cards ([`auto_cap`]), or why not even one token fits.
+    pub fn longest_cap(&self) -> Result<u32, String> {
+        let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
+        let cfg = resident_config(&mg, 1).map_err(|e| format!("'{}' is not a servable Qwen3.8 GGUF: {e}", self.gguf_path))?;
+        auto_cap(&cfg, &self.devices, &self.serving_shape(&mg, &cfg)).ok_or_else(|| format!("{} does not fit across the {} budgeted device(s) even with a one-token context", self.gguf_path, self.devices.len()))
+    }
+
+    /// What this resident will hold on the cards besides the weights, as
+    /// configured: speculation is charged only where loading will allocate it
+    /// ([`SpecServing::cost`]) - the verify kernels on every budgeted card and,
+    /// for the MTP modes, an MTP block in the checkpoint.
+    fn serving_shape(&self, mg: &MmapGguf, cfg: &Qwen35Config) -> ServingShape {
+        let cards: Vec<u32> = self.devices.iter().filter_map(|(d, _)| if let Device::Gpu(i) = d { Some(*i) } else { None }).collect();
+        let hw = gpu_core::defaults::Hardware::detected();
+        let verify = crate::model::verify::verify_shape_supported(cfg) && [gpu_core::Fused::GdnVerifyPool, gpu_core::Fused::GdnCommitPool].iter().all(|&k| hw.offers_fused(k, &cards));
+        ServingShape {
+            prefix_slots: self.prefix_slots,
+            kv_pool_rows: self.paged_pool_rows(),
+            spec: self.spec.cost(mtp::checkpoint_has_mtp(mg, cfg), verify),
+            ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch)
+        }
     }
 
     /// Which layer range and how many bytes each device holds, as planned -
@@ -3231,7 +3310,7 @@ impl Qwen35GgufResident {
         };
         let embed = EmbedTable { name: embed_name, d };
 
-        let mut inst = Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, prefix_slots: self.prefix_slots, kv_tier: self.kv_tier, kv_layout: layout, taps: RefCell::new(None), prefill_adapter_slot: Cell::new(LORA_SLOT_NONE), spec_rows: 0, mtp: None };
+        let mut inst = Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, prefix_slots: self.prefix_slots, kv_tier: self.kv_tier, tier: self.tier.clone(), kv_layout: layout, taps: RefCell::new(None), prefill_adapter_slot: Cell::new(LORA_SLOT_NONE), spec_rows: 0, mtp: None };
         let last_gpu = plan.stages.last().map(|(_, s, _)| s.gpu_index).unwrap_or(0);
         inst.enable_speculation(self.spec, &self.gguf_path, &self.tier, last_gpu)?;
         Ok(inst)
@@ -3424,12 +3503,12 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         let i8 = TierPolicy::uniform(Dtype::I8);
         let usable = [(97_871u64 << 20) - (2 << 30)];
-        assert_eq!(sizing_refusal(&cfg, 4096, &i8, KvTier::BF16, 64, 0, 0, &usable), None, "64 x 4096 with a bf16 cache fits one GH200");
-        let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 256, 0, 0, &usable).expect("256 f32 sequences of 4096 tokens cannot fit");
+        assert_eq!(sizing_refusal(&cfg, &ServingShape::new(4096, i8.clone(), KvTier::BF16, 64), &usable), None, "64 x 4096 with a bf16 cache fits one GH200");
+        let why = sizing_refusal(&cfg, &ServingShape::new(4096, i8.clone(), KvTier::F32, 256), &usable).expect("256 f32 sequences of 4096 tokens cannot fit");
         for needle in ["--max-batch 256", "--ctx 4096", "GiB weights", "more compact --kv-cache"] {
             assert!(why.contains(needle), "refusal must mention {needle:?}: {why}");
         }
-        let why = sizing_refusal(&cfg, 131_072, &i8, KvTier::BF16, 40, 0, 0, &usable).expect("past the u32 plane index");
+        let why = sizing_refusal(&cfg, &ServingShape::new(131_072, i8.clone(), KvTier::BF16, 40), &usable).expect("past the u32 plane index");
         assert!(why.contains("u32 element index"), "{why}");
     }
 
@@ -3440,14 +3519,14 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         let i8 = TierPolicy::uniform(Dtype::I8);
         let usable = [(97_871u64 << 20) - (2 << 30)];
-        let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 200, 0, 0, &usable).expect("200 f32 sequences of 4096 tokens cannot fit");
+        let why = sizing_refusal(&cfg, &ServingShape::new(4096, i8.clone(), KvTier::F32, 200), &usable).expect("200 f32 sequences of 4096 tokens cannot fit");
         assert!(why.contains("a more compact --kv-cache (bf16) would fit") || why.contains("a more compact --kv-cache (int8) would fit"), "{why}");
         assert!(why.contains("GiB weights") && why.contains("GiB KV cache") && why.contains("GiB recurrent state"), "{why}");
-        let why = sizing_refusal(&cfg, 4096, &i8, KvTier::F32, 1000, 0, 0, &usable).unwrap();
+        let why = sizing_refusal(&cfg, &ServingShape::new(4096, i8.clone(), KvTier::F32, 1000), &usable).unwrap();
         assert!(!why.contains("would fit") && why.contains("choose a more compact --kv-cache"), "{why}");
         // The categories add up to what the placement cost charges.
-        let total: u64 = serving_demands(&cfg, 4096, &i8, KvTier::F32, 200, 0, 0).iter().map(|d| d.variants[0].device_bytes).sum();
-        assert_eq!(total, layer_cost_with_prefix_slots(&cfg, 4096, &i8, KvTier::F32, 200, 0, 0).total());
+        let total: u64 = serving_demands(&cfg, &ServingShape::new(4096, i8.clone(), KvTier::F32, 200)).iter().map(|d| d.variants[0].device_bytes).sum();
+        assert_eq!(total, layer_cost(&cfg, 4096, &i8, KvTier::F32, 200).total());
     }
 
     /// The sizing a batch-serving deployment plans with: at the default
@@ -3460,7 +3539,7 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         let usable = (97_871u64 << 20) - (2 << 30);
         let i8 = TierPolicy::uniform(Dtype::I8);
-        let ceiling = |kv: KvTier| (1..=1024u32).take_while(|&b| sizing_refusal(&cfg, 4096, &i8, kv, b, 0, 0, &[usable]).is_none()).last().unwrap_or(0);
+        let ceiling = |kv: KvTier| (1..=1024u32).take_while(|&b| sizing_refusal(&cfg, &ServingShape::new(4096, i8.clone(), kv, b), &[usable]).is_none()).last().unwrap_or(0);
         let [f32b, bf16b, int8b, _fp8b] = KvTier::ALL.map(ceiling);
         println!("4096 tokens on one GH200: planner admits f32 {f32b}, bf16 {bf16b}, int8 {int8b} sequences");
         assert!(f32b >= 64, "64 f32 sequences of 4096 tokens must fit: {f32b}");
@@ -3641,7 +3720,7 @@ mod tests {
     fn auto_cap_is_the_largest_context_the_cards_hold() {
         let cfg = Qwen35Config::qwen38_27b();
         let devices = p40_pair();
-        let cap = auto_cap(&cfg, &devices, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1, 0).expect("27B INT8 fits two 24 GiB cards");
+        let cap = auto_cap(&cfg, &devices, &ServingShape::new(1, TierPolicy::uniform(Dtype::I8), KvTier::F32, 1)).expect("27B INT8 fits two 24 GiB cards");
         assert!(cap > 8192, "the leftover memory must buy far more than the old default context: {cap}");
         assert!(fits_at(&cfg, &devices, cap, KvTier::F32), "the chosen context must be placeable");
         assert!(!fits_at(&cfg, &devices, cap + AUTO_CAP_GRANULE, KvTier::F32), "one granule more must not be: the context is the memory bound, not below it");
@@ -3655,10 +3734,10 @@ mod tests {
         let i8 = TierPolicy::uniform(Dtype::I8);
         let pair = p40_pair();
         let roomier = vec![(Device::Gpu(0), 40 * GB), (Device::Gpu(1), 40 * GB)];
-        let f32_cap = auto_cap(&cfg, &pair, &i8, KvTier::F32, 1, 0).unwrap();
-        assert!(auto_cap(&cfg, &roomier, &i8, KvTier::F32, 1, 0).unwrap() > f32_cap);
-        assert!(auto_cap(&cfg, &pair, &i8, KvTier::INT8, 1, 0).unwrap() > f32_cap);
-        assert!(auto_cap(&cfg, &pair, &i8, KvTier::F32, 4, 0).unwrap() < f32_cap, "more concurrent slots share the same leftover");
+        let f32_cap = auto_cap(&cfg, &pair, &ServingShape::new(1, i8.clone(), KvTier::F32, 1)).unwrap();
+        assert!(auto_cap(&cfg, &roomier, &ServingShape::new(1, i8.clone(), KvTier::F32, 1)).unwrap() > f32_cap);
+        assert!(auto_cap(&cfg, &pair, &ServingShape::new(1, i8.clone(), KvTier::INT8, 1)).unwrap() > f32_cap);
+        assert!(auto_cap(&cfg, &pair, &ServingShape::new(1, i8.clone(), KvTier::F32, 4)).unwrap() < f32_cap, "more concurrent slots share the same leftover");
     }
 
     /// Weights that do not fit the cards at all leave no context to offer.
@@ -3666,8 +3745,8 @@ mod tests {
     fn auto_cap_is_none_when_the_weights_alone_do_not_fit() {
         let cfg = Qwen35Config::qwen38_27b();
         let one_card = [(Device::Gpu(0), 24 * GB)];
-        assert_eq!(auto_cap(&cfg, &one_card, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1, 0), None);
-        assert_eq!(auto_cap(&cfg, &[], &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1, 0), None);
+        assert_eq!(auto_cap(&cfg, &one_card, &ServingShape::new(1, TierPolicy::uniform(Dtype::I8), KvTier::F32, 1)), None);
+        assert_eq!(auto_cap(&cfg, &[], &ServingShape::new(1, TierPolicy::uniform(Dtype::I8), KvTier::F32, 1)), None);
     }
 
     // ---- a model is only worth listing if it can load

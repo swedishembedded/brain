@@ -242,8 +242,9 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          rules. Default: the model's own (a checkpoint that does
                          not fit its card in fp32 is served int8).
   --kv-cache TIER        KV-cache storage: f32|bf16|int8|fp8. Default: the
-                         model's own (int8 for the Qwen3 engine, f32 for the
-                         released Qwen3.8 GGUFs).
+                         model's own (int8 for the Qwen3 engine; for the
+                         released Qwen3.8 GGUFs the fastest that fits the
+                         cards, int8 first).
   --gemm auto|fp32       `fp32` pins exact fp32 arithmetic for the linears (the
                          reference tier); `auto` (default) uses tensor cores
                          where the device has them.
@@ -258,7 +259,9 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          allowed (default 0, off).
   --speculative MODE     speculative decoding for the Qwen3.8 GGUF models:
                          auto|off|mtp|dflash|ngram (default auto = the best
-                         drafter the checkpoint offers, off when it has none).
+                         drafter the checkpoint offers, off when it has none;
+                         off where the cards cannot run the CUDA verify
+                         kernels or its memory would squeeze the context).
                          The scheduler verifies each sequence's proposals in
                          one batched step and keeps the longest prefix the
                          model agrees with, so greedy output is unchanged; it

@@ -363,6 +363,9 @@ impl Scan {
         let ScanSettings { gpus, reserved, qwen35, .. } = &self.settings;
         match catalog::resident_qwen35::gguf_resident_banked(weights, id, gpus, *reserved, &qwen35.gguf, self.qwen35_bank.clone()) {
             Ok(resident) => {
+                for line in resident.chosen_defaults() {
+                    eprintln!("brain: {id}: default {line}");
+                }
                 let resident = Arc::new(resident);
                 self.qwen35_bases.insert(id.to_string(), resident.clone());
                 self.multi.push(resident);

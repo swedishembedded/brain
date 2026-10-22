@@ -222,10 +222,6 @@ fn prompt_ids(tok: &data::qwen_tokenizer::QwenBpe, workload: &str, i: usize) -> 
     qwen3::chat::parse_request(tok, &inv).expect("render the chat prompt").ids
 }
 
-fn gib(bytes: u64) -> f64 {
-    bytes as f64 / (1u64 << 30) as f64
-}
-
 fn main() {
     let a = parse_args();
     if let Some(backend) = &a.backend {
@@ -239,13 +235,6 @@ fn main() {
     }
     let tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
     let spec = SpecServing { mode: a.mode, mtp_normed_hidden: a.normed_hidden, scratch_rows: a.scratch_rows, batch_limit: a.batch_limit };
-    // The scratch and the drafter live outside the placement: leave their bytes free.
-    let probe_cfg = {
-        let mg = checkpoint::gguf::MmapGguf::open(&a.gguf).expect("open the GGUF");
-        qwen35::int8_gguf_resident::resident_config(&mg, a.ctx).expect("a Qwen3.8 GGUF")
-    };
-    let reserve = spec.reserve_bytes(&probe_cfg, a.ctx, max_batch, &tier, a.kv);
-    let devices: Vec<(Device, u64)> = devices.into_iter().map(|(d, c)| (d, c.saturating_sub(reserve))).collect();
     // Without --prefill-slice a prompt goes in whole (and, the default being one sequence at a time, alone).
     let sliced = a.prefill_slice != u32::MAX;
     let batch_tokens = a.prefill_batch.unwrap_or(PrefillPolicy::default().batch_tokens);
@@ -257,7 +246,7 @@ fn main() {
         eprintln!("ctx {} x max_batch {max_batch} does not fit (see the placement message above)", a.ctx);
         std::process::exit(1);
     }
-    println!("qwen35 spec sweep: mode {}, ctx {}, kv {}, {} new tokens, max_batch {max_batch}, speculation reserve {:.2} GiB", a.mode.as_str(), a.ctx, a.kv.as_str(), a.new_tokens, gib(reserve));
+    println!("qwen35 spec sweep: mode {}, ctx {}, kv {}, {} new tokens, max_batch {max_batch}", a.mode.as_str(), a.ctx, a.kv.as_str(), a.new_tokens);
     let t0 = Instant::now();
     let (engine, tok, stop) = r.activate_engine(&placed).expect("activate the real checkpoint");
     println!("cold load {:.1} s; MTP head loaded: {}; verify rows {}", t0.elapsed().as_secs_f64(), engine.instance().has_mtp(), engine.instance().speculation_rows());

@@ -49,6 +49,7 @@ use qwen3::chat::parse_request;
 use qwen35::caps::with_template_flavor_default;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::serve::{Engine, Scheduler};
+use gpu_core::defaults::{Hardware, Rule};
 use std::sync::Arc;
 
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
@@ -296,20 +297,19 @@ pub struct Qwen35GgufServeConfig {
     /// Per-leaf weight-tier policy (`model::ops::TierPolicy::parse`'s
     /// grammar). `None` keeps the historical default (uniform INT8).
     pub tier: Option<model::ops::TierPolicy>,
-    /// GQA KV-cache storage tier. `None` keeps the historical default
-    /// (f32).
+    /// GQA KV-cache storage tier. `None` takes the best of [`KV_DEFAULTS`]
+    /// that fits.
     pub kv: Option<model::kv_tier::KvTier>,
     /// How many sequences one batched decode step carries (the resident's
     /// decode slots, charged into the placement). `None` takes
     /// [`DEFAULT_MAX_BATCH`].
     pub max_batch: Option<u32>,
     /// Cached prompts kept for prefix reuse (see
-    /// `Qwen35GgufResident::with_prefix_slots`). `None` takes
-    /// [`DEFAULT_PREFIX_SLOTS`]; 0 turns the cache off.
+    /// `Qwen35GgufResident::with_prefix_slots`). `None` takes the best of
+    /// [`PREFIX_SLOT_DEFAULTS`] that fits; 0 turns the cache off.
     pub prefix_slots: Option<u32>,
-    /// Speculative decoding (`--speculative`). `None` takes
-    /// [`SpeculativeMode::Auto`](qwen35::int8_gguf_resident::SpeculativeMode::Auto):
-    /// the best drafter the checkpoint carries, plain decoding when it has none.
+    /// Speculative decoding (`--speculative`). `None` takes the best of
+    /// [`SPECULATION_DEFAULTS`] that fits.
     pub speculative: Option<qwen35::int8_gguf_resident::SpeculativeMode>,
     /// Prompt tokens one sequence gets of each scheduler iteration's prefill
     /// while others wait (`the prefill-slice setting`). `None` takes the engine's
@@ -393,10 +393,9 @@ impl Qwen35GgufServeConfig {
         let l = &p.limits;
         self.ctx = l.ctx.or(self.ctx);
         self.max_batch = l.max_batch.or(self.max_batch);
-        // A server asked to carry N concurrent sequences keeps N conversations'
-        // prefixes warm (never fewer than the default): the prefix-cache size is
-        // derived from the concurrency, not a separate option.
-        self.prefix_slots = l.prefix_slots.or(self.prefix_slots).or(l.max_batch.map(|b| b.max(DEFAULT_PREFIX_SLOTS)));
+        // Unset, the prompt cache follows the concurrency where it fits
+        // ([`PREFIX_SLOT_DEFAULTS`]).
+        self.prefix_slots = l.prefix_slots.or(self.prefix_slots);
         self.prefill_slice = l.prefill_slice.or(self.prefill_slice);
         self.prefill_batch = l.prefill_batch.or(self.prefill_batch);
         let mut notes = Vec::new();
@@ -415,16 +414,6 @@ impl Qwen35GgufServeConfig {
         self.tier.clone().unwrap_or_else(|| model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8))
     }
 
-    /// The KV-tier knob with its historical default filled in.
-    pub fn kv_or_default(&self) -> model::kv_tier::KvTier {
-        self.kv.unwrap_or(model::kv_tier::KvTier::F32)
-    }
-
-    /// The prefix-cache knob with its default filled in.
-    pub fn prefix_slots_or_default(&self) -> u32 {
-        self.prefix_slots.unwrap_or(DEFAULT_PREFIX_SLOTS)
-    }
-
     /// The prefill knobs with their defaults filled in.
     pub fn prefill_policy_or_default(&self) -> qwen35::int8_gguf_resident::PrefillPolicy {
         let default = qwen35::int8_gguf_resident::PrefillPolicy::default();
@@ -432,11 +421,6 @@ impl Qwen35GgufServeConfig {
             slice_tokens: self.prefill_slice.map_or(default.slice_tokens, |n| n as usize),
             batch_tokens: self.prefill_batch.map_or(default.batch_tokens, |n| n as usize),
         }
-    }
-
-    /// The speculation knob with its default filled in.
-    pub fn speculative_or_default(&self) -> qwen35::int8_gguf_resident::SpeculativeMode {
-        self.speculative.unwrap_or(qwen35::int8_gguf_resident::SpeculativeMode::Auto)
     }
 
     /// The batch knob with its default filled in.
@@ -452,11 +436,71 @@ impl Qwen35GgufServeConfig {
 /// two-24-GiB-card placement unchanged.
 pub const DEFAULT_MAX_BATCH: u32 = 8;
 
-/// Prompts a GGUF resident keeps for prefix reuse when `the prefix-slot setting`
-/// is not given. An agent resends its whole history every turn; each cached
-/// prompt costs one sequence slot of KV (charged into the placement), so a few
-/// conversations stay warm without crowding out the batch.
-pub const DEFAULT_PREFIX_SLOTS: u32 = 4;
+/// The KV-cache tier a GGUF resident takes when `--kv-cache` is not given,
+/// fastest first. Decode reads every cached row of every GQA layer each step,
+/// so the most compact tier is also the fastest, and it holds the most context.
+pub const KV_DEFAULTS: &[Rule<model::kv_tier::KvTier>] = &[Rule {
+    when: |_| true,
+    ranked: &[model::kv_tier::KvTier::INT8, model::kv_tier::KvTier::BF16, model::kv_tier::KvTier::F32],
+    why: "decode reads every cached K/V row each step: the most compact tier is the fastest and holds the most context",
+}];
+
+/// Speculation a GGUF resident takes when `--speculative` is not given. Its
+/// verify kernels are CUDA's, so elsewhere the verify scratch would be memory
+/// that no step uses.
+pub const SPECULATION_DEFAULTS: &[Rule<qwen35::int8_gguf_resident::SpeculativeMode>] = &[
+    Rule {
+        when: Hardware::cuda_everywhere,
+        ranked: &[qwen35::int8_gguf_resident::SpeculativeMode::Auto, qwen35::int8_gguf_resident::SpeculativeMode::Off],
+        why: "the CUDA verify kernels accept several tokens per weight read: the checkpoint's own drafter when it has one",
+    },
+    Rule { when: |_| true, ranked: &[qwen35::int8_gguf_resident::SpeculativeMode::Off], why: "speculation verifies with CUDA kernels only" },
+];
+
+/// How many prompts a GGUF resident keeps for prefix reuse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefixCache {
+    /// One per concurrent sequence, and never fewer than [`PrefixCache::FLOOR`]:
+    /// every conversation the server carries stays warm.
+    PerSequence,
+    Slots(u32),
+}
+
+impl PrefixCache {
+    /// The fewest prompts [`PrefixCache::PerSequence`] keeps.
+    pub const FLOOR: u32 = 4;
+
+    /// Cached prompts beside `max_batch` running sequences.
+    pub fn slots(self, max_batch: u32) -> u32 {
+        match self {
+            PrefixCache::PerSequence => max_batch.max(PrefixCache::FLOOR),
+            PrefixCache::Slots(n) => n,
+        }
+    }
+}
+
+impl std::fmt::Display for PrefixCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrefixCache::PerSequence => write!(f, "one per sequence (at least {})", PrefixCache::FLOOR),
+            PrefixCache::Slots(n) => write!(f, "{n}"),
+        }
+    }
+}
+
+/// The prompt cache a GGUF resident keeps when the prefix-slot setting is not
+/// given. An agent resends its whole history every turn, so each cached prompt
+/// saves that prefill; each also holds memory a sequence could use.
+pub const PREFIX_SLOT_DEFAULTS: &[Rule<PrefixCache>] = &[Rule {
+    when: |_| true,
+    ranked: &[PrefixCache::PerSequence, PrefixCache::Slots(4), PrefixCache::Slots(2), PrefixCache::Slots(1), PrefixCache::Slots(0)],
+    why: "an agent resends its whole history every turn: a cached prompt saves its prefill",
+}];
+
+/// The shortest automatic context a default may leave (or the checkpoint's
+/// own trained window, when shorter): a default that would squeeze the
+/// context below it gives way to the next-ranked one.
+pub const DEFAULT_CONTEXT_FLOOR: u32 = 32_768;
 
 /// Build the multi-GPU resident for one released GGUF, to be registered with
 /// `Executor::register_multi` under `id`.
@@ -483,58 +527,68 @@ pub fn gguf_resident(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u
 /// (its device bytes are part of the placement), so adapters can be offered
 /// on it ([`AdapterHost`]).
 pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35GgufServeConfig, bank: Option<AdapterBankSettings>) -> Result<Qwen35GgufServed, String> {
-    use qwen35::int8_gguf_resident::{auto_cap, resident_config, Qwen35GgufResident, SpecServing};
+    use qwen35::int8_gguf_resident::{resident_config, Qwen35GgufResident, SpecServing, SpeculativeMode};
     if let Some(why) = &cfg.refused {
         return Err(why.clone());
     }
-    let (tier, kv, max_batch, prefix_slots) = (cfg.tier_or_default(), cfg.kv_or_default(), cfg.max_batch_or_default(), cfg.prefix_slots_or_default());
-    let spec = SpecServing { mode: cfg.speculative_or_default(), ..SpecServing::default() };
+    let (tier, max_batch) = (cfg.tier_or_default(), cfg.max_batch_or_default());
     let mg = checkpoint::gguf::MmapGguf::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
     let model_cfg = resident_config(&mg, 1).map_err(|e| format!("'{gguf_path}' is not a servable Qwen3.8 GGUF: {e}"))?;
-    let devices_for = |cap: u32| -> Vec<(Device, u64)> {
-        // Speculation's scratch and drafter live outside the planned placement,
-        // so the budget handed to the planner leaves their bytes free.
-        let spec_bytes = spec.reserve_bytes(&model_cfg, cap, max_batch + prefix_slots, &tier, kv);
-        gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved).saturating_sub(spec_bytes))).collect()
-    };
-    let cap = match cfg.ctx {
-        Some(ctx) => ctx.max(1),
-        None => {
-            let devices = devices_for(1);
-            if devices.is_empty() {
-                return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
-            }
-            // The speculation reserve grows with the context (the drafter's KV), so
-            // the context is the largest one that fits beside ITS OWN reserve.
-            let upper = auto_cap(&model_cfg, &devices, &tier, kv, max_batch, prefix_slots).ok_or_else(|| format!("{gguf_path} does not fit across the {} budgeted device(s) even with a one-token context", devices.len()))?;
-            
-            largest_fitting(upper, |c| auto_cap(&model_cfg, &devices_for(c), &tier, kv, max_batch, prefix_slots).is_some_and(|fit| fit >= c))
+    let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
+    if devices.is_empty() {
+        return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
+    }
+    let build = |kv, mode, prefix_slots, cap| {
+        let spec = SpecServing { mode, ..SpecServing::default() };
+        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec);
+        match &bank {
+            Some(bank) => r.with_adapter_bank(bank.request()),
+            None => r,
         }
     };
-    let mut resident = Qwen35GgufResident::new(gguf_path.to_string(), devices_for(cap), cap, tier).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_prefill_policy(cfg.prefill_policy_or_default()).with_model_id(id);
-    if let Some(bank) = &bank {
-        resident = resident.with_adapter_bank(bank.request());
-    }
+    // A candidate fits when the operator's context places, or, with the context
+    // left to the cards, when it leaves at least the floor.
+    let floor = DEFAULT_CONTEXT_FLOOR.min(model_cfg.max_position_embeddings.max(1));
+    let fits = |r: Qwen35GgufResident| -> Result<(), String> {
+        match cfg.ctx {
+            Some(_) => r.unservable_reason().map_or(Ok(()), Err),
+            None => match r.longest_cap()? {
+                c if c >= floor => Ok(()),
+                c => Err(format!("it leaves a {c}-token context, under {floor}")),
+            },
+        }
+    };
+    // Chosen in the order they matter to throughput, each with the ones not yet
+    // chosen at their leanest: the KV tier, then speculation, then the prompt cache.
+    let hw = Hardware::detected();
+    let probe_cap = cfg.ctx.unwrap_or(1).max(1);
+    let mut chosen = Vec::new();
+    let kv = given_or_chosen(cfg.kv, "--kv-cache", KV_DEFAULTS, hw, &mut chosen, |kv| fits(build(kv, SpeculativeMode::Off, 0, probe_cap)));
+    let mode = given_or_chosen(cfg.speculative, "--speculative", SPECULATION_DEFAULTS, hw, &mut chosen, |mode| fits(build(kv, mode, 0, probe_cap)));
+    let prefix_slots = given_or_chosen(cfg.prefix_slots.map(PrefixCache::Slots), "prefix slots", PREFIX_SLOT_DEFAULTS, hw, &mut chosen, |cache| fits(build(kv, mode, cache.slots(max_batch), probe_cap))).slots(max_batch);
+    let resident = match cfg.ctx {
+        Some(_) => build(kv, mode, prefix_slots, probe_cap),
+        None => {
+            let cap = build(kv, mode, prefix_slots, 1).longest_cap()?;
+            chosen.push(format!("--ctx {cap}: the longest context the cards hold beside everything above"));
+            build(kv, mode, prefix_slots, cap)
+        }
+    };
+    let resident = resident.with_prefill_policy(cfg.prefill_policy_or_default()).with_model_id(id);
     match resident.unservable_reason() {
         Some(reason) => Err(reason),
-        None => Ok(Qwen35GgufServed::new(resident, bank, gguf_path, id)),
+        None => Ok(Qwen35GgufServed::new(resident, bank, gguf_path, id, chosen)),
     }
 }
 
-/// The largest `c` in `1..=upper` for which `fits(c)` holds, given that it
-/// holds for small `c` and never again once it fails (a context that does not
-/// fit does not fit with a bigger reserve either). 1 when nothing larger fits.
-fn largest_fitting(upper: u32, fits: impl Fn(u32) -> bool) -> u32 {
-    let (mut lo, mut hi) = (1, upper.max(1));
-    while lo < hi {
-        let mid = lo + (hi - lo).div_ceil(2);
-        if fits(mid) {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    lo
+/// The operator's value, else the best-ranked default of `rules` that `fits`,
+/// recorded in `chosen` with the reason.
+fn given_or_chosen<T: Copy + std::fmt::Display>(given: Option<T>, knob: &str, rules: &[Rule<T>], hw: &Hardware, chosen: &mut Vec<String>, fits: impl FnMut(T) -> Result<(), String>) -> T {
+    given.unwrap_or_else(|| {
+        let c = gpu_core::defaults::choose_or_leanest(rules, hw, fits);
+        chosen.push(format!("{knob} {}: {}", c.value, c.why));
+        c.value
+    })
 }
 
 /// A released Qwen3.8 GGUF resident with the adapters offered beside it.
@@ -548,14 +602,23 @@ fn largest_fitting(upper: u32, fits: impl Fn(u32) -> bool) -> u32 {
 pub struct Qwen35GgufServed {
     inner: qwen35::int8_gguf_resident::Qwen35GgufResident,
     adapters: Arc<AdapterRegistry>,
+    /// Each serving default taken from the hardware, with why.
+    chosen: Vec<String>,
 }
 
 impl Qwen35GgufServed {
-    fn new(inner: qwen35::int8_gguf_resident::Qwen35GgufResident, bank: Option<AdapterBankSettings>, gguf_path: &str, id: &str) -> Qwen35GgufServed {
+    fn new(inner: qwen35::int8_gguf_resident::Qwen35GgufResident, bank: Option<AdapterBankSettings>, gguf_path: &str, id: &str, chosen: Vec<String>) -> Qwen35GgufServed {
         // An adapter trains on the full-precision release and serves on its
         // quantisation: the card names the release, not this file.
         let base = ServedBase::of_family(QWEN35_FAMILY, gguf_path, Some(id.to_string())).quantizing(&QWEN35_SOURCES);
-        Qwen35GgufServed { inner, adapters: AdapterRegistry::new(bank, base) }
+        Qwen35GgufServed { inner, adapters: AdapterRegistry::new(bank, base), chosen }
+    }
+
+    /// Each setting the operator left unset, as `knob value: why` - what the
+    /// hardware's rules chose ([`KV_DEFAULTS`], [`SPECULATION_DEFAULTS`],
+    /// [`PREFIX_SLOT_DEFAULTS`]) and the context the cards hold.
+    pub fn chosen_defaults(&self) -> &[String] {
+        &self.chosen
     }
 }
 
@@ -639,12 +702,7 @@ mod tests {
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(cfg.gguf.tier.as_ref().unwrap().describe(), "q4,in_proj_a.weight=f32");
         assert_eq!((cfg.gguf.kv.unwrap().as_str(), cfg.gguf.ctx, cfg.gguf.max_batch), ("fp8", Some(8192), Some(6)));
-        assert_eq!(cfg.gguf.prefix_slots, Some(6), "prefix slots follow the concurrency");
-        let mut wide = Qwen35ServeConfig::default();
-        let mut p16 = model::policy::ServePolicy::default();
-        p16.set("--max-batch", "16").unwrap();
-        wide.apply_policy(&p16).unwrap();
-        assert_eq!(wide.gguf.prefix_slots, Some(16));
+        assert_eq!(cfg.gguf.prefix_slots, None, "left to the hardware's rules, which follow the concurrency where it fits");
         assert!(cfg.gguf.refused.is_none() && cfg.fp32.refused, "the fp32 resident cannot honour q4/fp8");
         assert!(cfg.fp32_refused.as_deref().unwrap().contains("brain checkpoint"));
 
@@ -866,34 +924,50 @@ mod tests {
     }
 
     /// An all-`None` config: the context sized from the memory the placement
-    /// leaves, uniform INT8 weights, an f32 KV cache, [`DEFAULT_MAX_BATCH`]
-    /// decode slots so concurrent requests share every weight read, and
-    /// [`DEFAULT_PREFIX_SLOTS`] cached prompts.
+    /// leaves, uniform INT8 weights, [`DEFAULT_MAX_BATCH`] decode slots so
+    /// concurrent requests share every weight read, and the best-ranked KV tier
+    /// and prompt cache of the hardware's rules - each reported with its reason.
     #[test]
     fn config_defaults_size_the_context_and_batch_the_requests() {
         let path = write_servable_gguf("defaults");
         let r = gguf_resident(&path, "t/defaults", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).expect("builds");
         assert!(r.cap() > 2048, "sized by memory, not a fixed default: {}", r.cap());
-        assert_eq!(r.kv_tier(), model::kv_tier::KvTier::F32);
+        assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8, "the most compact, fastest tier fits");
         assert_eq!(r.max_batch(), DEFAULT_MAX_BATCH);
-        assert_eq!(r.prefix_slots(), DEFAULT_PREFIX_SLOTS);
-        assert_eq!(r.speculation().mode, qwen35::int8_gguf_resident::SpeculativeMode::Auto, "speculation is on by default and falls back to plain decode without a drafter");
+        assert_eq!(r.prefix_slots(), DEFAULT_MAX_BATCH, "a warm prompt per concurrent sequence fits");
+        let (modes, _) = gpu_core::defaults::candidates(SPECULATION_DEFAULTS, gpu_core::defaults::Hardware::detected());
+        assert_eq!(r.speculation().mode, modes[0], "the hardware's best-ranked speculation");
+        let said = r.chosen_defaults().join("\n");
+        for knob in ["--kv-cache int8", "--speculative", "prefix slots", "--ctx"] {
+            assert!(said.contains(knob), "every default is reported with its reason; missing {knob}:\n{said}");
+        }
         assert_eq!(r.manifest().max_context_tokens, Some(r.cap() as u64));
         std::fs::remove_file(path).ok();
     }
 
-    /// A reserve that grows with the context must not drag the sized context
-    /// down to a fixed point of "shrink to what fit at the previous size": the
-    /// result is the largest context that fits beside its own reserve.
+    /// A default that does not fit falls back to the next-ranked one that
+    /// does: at a fixed context that only fits without a prompt cache, the
+    /// prompt cache is what gives way, and the report says why.
     #[test]
-    fn the_context_is_the_largest_that_fits_beside_its_own_reserve() {
-        // A budget of 2000 units; a context costs one per token plus a reserve of a quarter more.
-        let fits = |c: u32| c + c / 4 <= 2000;
-        let upper = 2000; // what fits with no reserve at all
-        let best = largest_fitting(upper, fits);
-        assert_eq!(best, 1600);
-        assert!(fits(best) && !fits(best + 1));
-        assert_eq!(largest_fitting(upper, |c| c <= 1), 1, "nothing beyond one token fits");
+    fn a_default_that_does_not_fit_gives_way_to_one_that_does() {
+        let path = write_servable_gguf("give-way");
+        let gpus = vec![(0, 4 * GIB)];
+        // The longest fixed context that places with no prompt cache.
+        let places = |ctx: u32| gguf_resident(&path, "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(ctx), prefix_slots: Some(0), ..Default::default() }).is_ok();
+        let (mut longest, mut over) = (1u32, 1u32 << 30);
+        while over - longest > 1 {
+            let mid = longest + (over - longest) / 2;
+            *(if places(mid) { &mut longest } else { &mut over }) = mid;
+        }
+        let r = gguf_resident(&path, "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(longest), ..Default::default() }).expect("the leaner default fits");
+        assert_eq!(r.cap(), longest);
+        assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8);
+        assert_eq!(r.prefix_slots(), 0, "no cached prompt fits beside {longest}-token sequences");
+        let said = r.chosen_defaults().join("\n");
+        assert!(said.contains("passed over"), "{said}");
+        let wide = gguf_resident(&path, "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { max_batch: Some(16), ..Default::default() }).expect("builds");
+        assert_eq!(wide.prefix_slots(), 16, "the prompt cache follows the concurrency where it fits");
+        std::fs::remove_file(path).ok();
     }
 
     /// Everything that would make the first request fail is refused here,

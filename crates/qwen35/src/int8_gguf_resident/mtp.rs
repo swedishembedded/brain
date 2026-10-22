@@ -137,7 +137,7 @@ impl MtpDrafter {
         normed_hidden: bool,
     ) -> Result<Option<MtpDrafter>, String> {
         let prefix = format!("blk.{}.", cfg.n_layers);
-        let fc_name = format!("{prefix}nextn.eh_proj.weight");
+        let fc_name = mtp_projection_name(cfg);
         let d = cfg.d_model as usize;
         match mg.shape(&fc_name) {
             None => return Ok(None),
@@ -269,6 +269,18 @@ impl MtpDrafter {
         self.stage.prefill_chunk_stage(tokens, from, &view, Some(&ehp));
         Ok(())
     }
+}
+
+/// The MTP block's `eh_proj`: the tensor whose presence says the checkpoint
+/// carries a multi-token-prediction head.
+fn mtp_projection_name(cfg: &Qwen35Config) -> String {
+    format!("blk.{}.nextn.eh_proj.weight", cfg.n_layers)
+}
+
+/// Whether the checkpoint carries an MTP block - what a plan charges for the
+/// head before anything is loaded.
+pub(crate) fn checkpoint_has_mtp(mg: &MmapGguf, cfg: &Qwen35Config) -> bool {
+    mg.shape(&mtp_projection_name(cfg)).is_some()
 }
 
 impl Qwen35GgufInstance {

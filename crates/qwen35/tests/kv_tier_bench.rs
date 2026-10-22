@@ -72,7 +72,7 @@ fn decode_step_time_and_concurrency_per_kv_tier_at_the_27b_attention_shape() {
         let counts: Vec<String> = KvTier::ALL
             .iter()
             .map(|&kv| {
-                let n = (1..=1024u32).take_while(|&b| qwen35::int8_gguf_resident::sizing_refusal(&full, cap, &tier_policy, kv, b, 0, 0, &[usable]).is_none()).last().unwrap_or(0);
+                let n = (1..=1024u32).take_while(|&b| qwen35::int8_gguf_resident::sizing_refusal(&full, &qwen35::int8_gguf_resident::ServingShape::new(cap, tier_policy.clone(), kv, b), &[usable]).is_none()).last().unwrap_or(0);
                 format!("{kv} {n}")
             })
             .collect();

@@ -100,20 +100,35 @@ brain --device gpu0,gpu1 serve --openai
 #                            to pin specific tensors at fp32; a malformed
 #                            grammar is refused rather than served at a
 #                            silently wrong precision
-#   --kv-cache int8         how the 16 GQA layers store K/V: "f32" (default),
-#                            "bf16" (half the bytes), "int8" (one scale per
-#                            token and kv head, ~3.9x fewer bytes) or "fp8"
-#                            (E4M3, the same bytes and scales as int8)
+#   --kv-cache int8         how the 16 GQA layers store K/V: "f32", "bf16"
+#                            (half the bytes), "int8" (one scale per token and
+#                            kv head, ~3.9x fewer bytes) or "fp8" (E4M3, the
+#                            same bytes and scales as int8). Default: chosen
+#                            from the hardware (see "Defaults" below)
 #   --max-batch N     concurrent decode slots (default 8)
 #   --ctx N      context for the resident served from a brain
 #                            checkpoint (default 4096)
 #   --max-batch N
 #                            decode slots for that resident (default 4)
-#   --speculative MODE       speculative decoding: auto (default: the checkpoint's
-#                            own MTP head when it has one, otherwise off), off,
+#   --speculative MODE       speculative decoding: auto (the checkpoint's own
+#                            MTP head when it has one, otherwise off), off,
 #                            mtp, ngram (prompt lookup, no second model), dflash
-#                            (refused: no DFlash2 draft checkpoint is configured)
+#                            (refused: no DFlash2 draft checkpoint is configured).
+#                            Default: chosen from the hardware
 ```
+
+**Defaults.** A setting left unset is chosen from the detected hardware by the
+rules in `catalog::resident_qwen35` (`KV_DEFAULTS`, `SPECULATION_DEFAULTS`,
+`PREFIX_SLOT_DEFAULTS`, over `gpu_core::defaults`): each rule ranks its
+candidates by expected throughput, and the first one whose memory plan fits is
+kept - the KV tier first (int8, then bf16, then f32), then speculation (`auto`
+where every card runs the CUDA verify kernels, else `off`), then the prompt
+cache (one per concurrent sequence, at least 4; then 4, 2, 1, 0). "Fits" means
+the plan places at a fixed `--ctx`, or, with the context left to the cards,
+that at least 32768 tokens (or the trained window, when shorter) remain. The
+context is then the longest the cards hold beside all of it. `brain serve`
+logs each choice and why (`brain: <id>: default ...`). Adding a default is
+adding a rule or a candidate where its throughput ranks it.
 
 What it does differently:
 
@@ -137,8 +152,9 @@ What it does differently:
   prompts, and speculative decode differs from plain at that rate and no more.
   Sampled requests use rejection sampling, which leaves the distribution
   unchanged. The recurrent-state scratch costs 150 MB per verify row
-  (`SpecServing::scratch_rows`, 32 rows by default) and is left free of the
-  card budget. Measurements: `.agents/knowledge/` entry on speculative decoding
+  (`SpecServing::scratch_rows`, 32 rows by default), charged beside each
+  recurrent layer on its card, and the MTP head beside the head; neither is
+  charged where it will not be allocated (`SpecServing::cost`). Measurements: `.agents/knowledge/` entry on speculative decoding
   and `qwen35_spec_sweep`.
 
 - **A compact KV cache** (`model::kv_tier`, `--kv-cache`). At 128k
@@ -212,7 +228,8 @@ What it does differently:
   context length) wastes the unused tail of a short sequence's window;
   sequences are not paged below context granularity.
 - **Prefix reuse.** An agent resends its whole history every turn. The
-  resident keeps the prefix-slot setting (default 4, 0 = off) finished
+  resident keeps the prefix-slot setting (default chosen from the hardware, see
+  "Defaults"; 0 = off) finished
   prompts: the sequence's KV rows (decoding never rewrites the prompt's rows, so
   the block is simply retained) plus a snapshot of every Gated-DeltaNet layer's
   recurrent state and conv history taken the moment the prefill ended, which a

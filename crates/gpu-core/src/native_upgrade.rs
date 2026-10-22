@@ -1358,6 +1358,12 @@ impl Fused {
         self.blocks(params) * per
     }
 
+    /// Whether a CUDA device of capability `cc` is offered this kernel - what a
+    /// memory plan asks before any device is opened.
+    pub fn offered_at(self, cc: kernels_cuda::Cc) -> bool {
+        !disabled() && kernels_cuda::get(self.registry_name_on(cc)).is_some_and(|k| k.min_cc <= cc)
+    }
+
     /// The registry entry's output tile.
     fn tile(self) -> (u32, u32) {
         kernels_cuda::get(self.registry_name()).map_or((128, 128), |k| k.tile)
@@ -1371,10 +1377,10 @@ pub(crate) fn resolve_fused(backend: &dyn Backend, which: Fused) -> Option<Nativ
         return None;
     }
     let cc = backend.caps().arch.compute_capability?;
-    let k = kernels_cuda::get(which.registry_name_on(cc))?;
-    if k.min_cc > cc {
+    if !which.offered_at(cc) {
         return None;
     }
+    let k = kernels_cuda::get(which.registry_name_on(cc))?;
     backend.register_native(&NativeSpec::Cuda {
         src: k.src,
         entry: k.entry,

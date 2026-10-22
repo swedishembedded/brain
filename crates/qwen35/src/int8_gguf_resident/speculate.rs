@@ -19,8 +19,8 @@
 //! state back to the last accepted row without a second forward pass. The
 //! snapshots live in per-layer scratch sized once for [`SpecServing::scratch_rows`]
 //! packed rows (`state_len + hist_len` floats per row per Gated DeltaNet
-//! layer, 150 MB per row at the 27B shape), charged to the card the operator
-//! gave the resident ([`SpecServing::reserve_bytes`]).
+//! layer, 150 MB per row at the 27B shape), charged into the placement beside
+//! each recurrent layer ([`SpecServing::cost`], [`super::serving_cost`]).
 
 use super::*;
 use model::gdn_verify::GdnRowSnapshots;
@@ -92,6 +92,12 @@ impl Default for SpecServing {
     }
 }
 
+impl std::fmt::Display for SpeculativeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Tokens of context the n-gram drafter matches on.
 const NGRAM_ORDER: usize = 3;
 
@@ -99,32 +105,42 @@ const NGRAM_ORDER: usize = 3;
 /// a window of 3, or 4 at a window of 7.
 pub const DEFAULT_SCRATCH_ROWS: u32 = 32;
 
+/// What speculative decoding keeps on the cards, for the placement
+/// ([`super::serving_cost`]): verify scratch rows beside every recurrent layer,
+/// and whether the MTP head is resident beside the head.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpecCost {
+    pub scratch_rows: u32,
+    pub mtp_head: bool,
+}
+
+impl SpecCost {
+    /// Nothing: speculation off, or nothing it would run with.
+    pub const NONE: SpecCost = SpecCost { scratch_rows: 0, mtp_head: false };
+}
+
 impl SpecServing {
-    /// Device bytes speculation occupies beyond the placement for a model shaped
-    /// `cfg` served at context `cap` with `slots` sequence slots: the recurrent
-    /// state scratch and, for a mode that may load it, the MTP head (one
-    /// full-attention layer, its `eh_proj`, and its KV cache). The operator's
-    /// card budget has to leave this free. Zero when speculation is off.
-    pub fn reserve_bytes(&self, cfg: &Qwen35Config, cap: u32, slots: u32, tier: &TierPolicy, kv: KvTier) -> u64 {
-        if matches!(self.mode, SpeculativeMode::Off | SpeculativeMode::Dflash) {
-            return 0;
+    /// What this configuration will really allocate: nothing when it decodes
+    /// plainly - speculation off, the device without the verify kernels
+    /// (`verify_kernels`), or `auto` on a checkpoint with no MTP block
+    /// (`has_mtp`) - else the verify scratch, and the MTP head for a mode that
+    /// loads it. `mtp` on a checkpoint without one is refused when it loads.
+    pub fn cost(&self, has_mtp: bool, verify_kernels: bool) -> SpecCost {
+        let scratch = SpecCost { scratch_rows: self.scratch_rows, mtp_head: false };
+        match self.mode {
+            SpeculativeMode::Off | SpeculativeMode::Dflash => SpecCost::NONE,
+            _ if !verify_kernels || self.scratch_rows == 0 => SpecCost::NONE,
+            SpeculativeMode::Ngram => scratch,
+            SpeculativeMode::Auto | SpeculativeMode::Mtp if has_mtp => SpecCost { mtp_head: true, ..scratch },
+            SpeculativeMode::Auto | SpeculativeMode::Mtp => SpecCost::NONE,
         }
-        let linear = cfg.layer_types().into_iter().filter(|t| *t == LayerType::Linear).count() as u64;
-        let scratch = self.scratch_rows as u64 * linear * (cfg.gdn_state_len() + cfg.gdn_hist_len()) * 4;
-        let head = if self.mode == SpeculativeMode::Ngram {
-            0
-        } else {
-            let d = cfg.d_model as u64;
-            cfg.layer_weight_bytes(LayerType::Full, tier) + d * 2 * d + slots as u64 * cfg.layer_decode_state_bytes(LayerType::Full, cap, kv)
-        };
-        scratch + head
     }
 }
 
 impl Qwen35GgufResident {
-    /// Speculative decoding for this resident ([`SpecServing`]). The scratch is
-    /// NOT part of the placement: the caller's device budget must already leave
-    /// [`SpecServing::reserve_bytes`] free. Must be set before activation.
+    /// Speculative decoding for this resident ([`SpecServing`]). What it will
+    /// allocate is part of the placement ([`SpecServing::cost`]). Must be set
+    /// before activation.
     pub fn with_speculation(mut self, spec: SpecServing) -> Qwen35GgufResident {
         self.spec = spec;
         self
@@ -252,15 +268,25 @@ mod tests {
     }
 
     #[test]
-    fn speculation_off_reserves_nothing_and_on_reserves_the_scratch_and_the_head() {
+    fn speculation_costs_only_what_it_will_allocate() {
+        let spec = |mode| SpecServing { mode, scratch_rows: 4, ..SpecServing::default() };
+        let scratch = SpecCost { scratch_rows: 4, mtp_head: false };
+        assert_eq!(spec(SpeculativeMode::Off).cost(true, true), SpecCost::NONE);
+        assert_eq!(spec(SpeculativeMode::Ngram).cost(true, true), scratch);
+        assert_eq!(spec(SpeculativeMode::Auto).cost(true, true), SpecCost { mtp_head: true, ..scratch }, "the MTP head on top of the scratch");
+        assert_eq!(spec(SpeculativeMode::Auto).cost(false, true), SpecCost::NONE, "auto on a checkpoint with no MTP block decodes plainly");
+        assert_eq!(spec(SpeculativeMode::Auto).cost(true, false), SpecCost::NONE, "nor on a device without the verify kernels");
+    }
+
+    #[test]
+    fn the_scratch_sits_beside_each_recurrent_layer_and_the_head_beside_the_head() {
         let cfg = Qwen35Config::tiny();
-        let tier = TierPolicy::uniform(gpu_core::select::Dtype::I8);
-        let off = SpecServing { mode: SpeculativeMode::Off, ..SpecServing::default() };
-        assert_eq!(off.reserve_bytes(&cfg, 128, 2, &tier, KvTier::F32), 0);
-        let ngram = SpecServing { mode: SpeculativeMode::Ngram, scratch_rows: 4, ..SpecServing::default() };
-        let auto = SpecServing { mode: SpeculativeMode::Auto, scratch_rows: 4, ..SpecServing::default() };
-        let scratch = ngram.reserve_bytes(&cfg, 128, 2, &tier, KvTier::F32);
-        assert!(scratch > 0, "the recurrent-state scratch is charged");
-        assert!(auto.reserve_bytes(&cfg, 128, 2, &tier, KvTier::F32) > scratch, "the MTP head is charged on top of it");
+        let shape = ServingShape::new(128, TierPolicy::uniform(gpu_core::select::Dtype::I8), KvTier::F32, 2);
+        let plain = serving_cost(&cfg, &shape);
+        let spec = serving_cost(&cfg, &ServingShape { spec: SpecCost { scratch_rows: 4, mtp_head: true }, ..shape });
+        for ((ty, a), b) in cfg.layer_types().into_iter().zip(&plain.per_layer).zip(&spec.per_layer) {
+            assert_eq!(b > a, ty == LayerType::Linear, "{ty:?}: only a recurrent layer carries verify scratch");
+        }
+        assert!(spec.head > plain.head, "the MTP head is charged on the head's card");
     }
 }

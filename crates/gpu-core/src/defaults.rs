@@ -23,12 +23,14 @@
 //!   the hardware could run but whose bytes do not fit falls through to the
 //!   next instead of failing. Two 8 GB cards and two 24 GB cards are not two
 //!   tables: they are the same list, with the planner deciding where each stops.
+//! * A ranked list ends in its leanest candidate, which [`choose_or_leanest`]
+//!   settles on when none fits, so a default never refuses a machine on its own.
 //!
 //! Adding a default is adding a rule (or a candidate) where its throughput
 //! ranks it. What was chosen and why is returned, so a server reports it.
 
 use crate::devices::Backend;
-use std::fmt::Debug;
+use std::fmt::Display;
 
 /// One card, as far as a default may depend on it.
 #[derive(Clone, Debug, PartialEq)]
@@ -86,6 +88,16 @@ impl Hardware {
         self.cuda_unusable.is_none() && !self.cards.is_empty() && self.cards.iter().all(|c| c.vendor_id == NVIDIA && c.compute_capability.is_some())
     }
 
+    /// Whether the native fused kernel `which` will run on every one of the
+    /// cards `indices` under the backend this process serves with - what a
+    /// memory plan asks before any device is opened, so it charges only what
+    /// loading will allocate.
+    pub fn offers_fused(&self, which: crate::Fused, indices: &[u32]) -> bool {
+        crate::backend_name() == "cuda"
+            && !indices.is_empty()
+            && indices.iter().all(|i| self.cards.iter().find(|c| c.index == *i).and_then(|c| c.compute_capability).is_some_and(|cc| which.offered_at(cc)))
+    }
+
     /// The lowest compute capability among the cards, when every card has one.
     pub fn min_compute_capability(&self) -> Option<(u32, u32)> {
         self.cards.iter().map(|c| c.compute_capability).collect::<Option<Vec<_>>>()?.into_iter().min()
@@ -120,17 +132,27 @@ pub fn candidates<T>(rules: &[Rule<T>], hw: &Hardware) -> (&'static [T], &'stati
 
 /// The best-ranked candidate of the rule that holds on `hw` that `fits`
 /// accepts; `Err` lists why each was refused.
-pub fn choose<T: Copy + Debug>(rules: &[Rule<T>], hw: &Hardware, mut fits: impl FnMut(T) -> Result<(), String>) -> Result<Chosen<T>, String> {
+pub fn choose<T: Copy + Display>(rules: &[Rule<T>], hw: &Hardware, mut fits: impl FnMut(T) -> Result<(), String>) -> Result<Chosen<T>, String> {
     let (ranked, why) = candidates(rules, hw);
     let mut passed = Vec::new();
     for &value in ranked {
         match fits(value) {
             Ok(()) if passed.is_empty() => return Ok(Chosen { value, why: why.to_string() }),
             Ok(()) => return Ok(Chosen { value, why: format!("{why}; {}", passed.join("; ")) }),
-            Err(e) => passed.push(format!("{value:?} passed over: {e}")),
+            Err(e) => passed.push(format!("{value} passed over: {e}")),
         }
     }
     Err(passed.join("; "))
+}
+
+/// [`choose`], settling on the rule's last (leanest) candidate when none fits,
+/// with why each was refused - the caller's own checks then say what to change.
+pub fn choose_or_leanest<T: Copy + Display>(rules: &[Rule<T>], hw: &Hardware, fits: impl FnMut(T) -> Result<(), String>) -> Chosen<T> {
+    choose(rules, hw, fits).unwrap_or_else(|refused| {
+        let (ranked, why) = candidates(rules, hw);
+        let value = *ranked.last().expect("a rule ranks at least one candidate");
+        Chosen { value, why: format!("{why}; none fits, so the leanest: {refused}") }
+    })
 }
 
 /// The backend that drives the GPUs when none was asked for: the native
@@ -175,6 +197,9 @@ mod tests {
         assert_eq!(choose(RULES, &Hardware::default(), |_| Ok(())).unwrap(), Chosen { value: 4, why: "one card".into() });
         let none = choose(RULES, &two, |v| Err(format!("{v} no"))).unwrap_err();
         assert!(none.contains("16 passed over") && none.contains("4 passed over"), "{none}");
+        let leanest = choose_or_leanest(RULES, &two, |v| Err(format!("{v} no")));
+        assert_eq!(leanest.value, 4, "nothing fits: the leanest candidate, never a refusal");
+        assert!(leanest.why.contains("none fits") && leanest.why.contains("16 passed over"), "{}", leanest.why);
     }
 
     #[test]
