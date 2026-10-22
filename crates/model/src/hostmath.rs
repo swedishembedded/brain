@@ -520,9 +520,35 @@ pub fn softmax(x: &mut [f32]) {
     }
 }
 
+/// Index of the largest value in `row`, ties broken toward the LOWEST index -
+/// the convention every argmax reduction in this tree uses (the
+/// `argmax_part`/`argmax_final` pair states it in its own header), so a host
+/// readout of a model's pick and the device's agree on a near tie.
+///
+/// Panics on an empty row: there is no index to return.
+pub fn argmax_row(row: &[f32]) -> u32 {
+    let mut best = 0usize;
+    for (i, &v) in row.iter().enumerate() {
+        if v > row[best] {
+            best = i;
+        }
+    }
+    assert!(!row.is_empty(), "hostmath::argmax_row: empty row");
+    best as u32
+}
+
 #[cfg(test)]
 mod embed_tests {
     use super::*;
+
+    #[test]
+    fn argmax_row_picks_the_largest_and_breaks_ties_to_the_lowest_index() {
+        assert_eq!(argmax_row(&[0.5, 3.0, -1.0, 2.0]), 1);
+        // A device reduction breaks a tie to the lowest index; so does this.
+        assert_eq!(argmax_row(&[1.0, 4.0, 4.0, 0.0]), 1);
+        assert_eq!(argmax_row(&[-3.0]), 0);
+    }
+
 
     #[test]
     fn l2_normalize_gives_a_unit_vector_and_leaves_zero_alone() {

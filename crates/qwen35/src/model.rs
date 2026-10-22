@@ -5321,7 +5321,7 @@ impl Qwen35 {
             let ta = self.train_acts.borrow();
             let xn_final = &ta.as_ref().expect("qwen35: a head_ce build is a training build").xn_final;
             let mut s = Vec::new();
-            head.forward_steps(&self.ops, &mut s, xn_final, n, &self.targets, &self.ce_buf, 1.0);
+            head.forward_steps_with(&self.ops, &mut s, xn_final, n, &self.targets, &self.ce_buf, self.objectives.argmax_out(), 1.0);
             self.gpu.submit(&[], &s);
             return self.objectives.loss(&self.gpu, &self.gpu.read(&self.ce_buf, n as usize), self.count.get());
         }

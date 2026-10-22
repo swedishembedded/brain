@@ -31,6 +31,7 @@ pub mod lora;
 mod lora_sites;
 pub mod model;
 pub mod sample;
+pub mod score;
 pub mod serve;
 pub mod shard;
 /// [`brain_modelstore::resolve::ArchSpec`] - which on-disk artifacts satisfy

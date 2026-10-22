@@ -507,6 +507,64 @@ pub fn finetune_lora_scored_tuned(
     Ok((report, trained, scored))
 }
 
+/// The `(rank, alpha)` a saved adapter file was trained with, and the tuning its
+/// scale has to be reproduced under.
+///
+/// `rank` and the card's scale come from the file; `tuning` supplies what the
+/// card does not carry - the adapter method and whether the scale is rsLoRA's
+/// (`alpha/sqrt(rank)`) rather than LoRA's (`alpha/rank`). A `kind` that
+/// disagrees with the card, or a file with no adapter card, is refused: the
+/// scale a scoring pass applies must be the one the adapter trained at, and a
+/// wrong `rank_stabilized` is not detectable from the file afterwards.
+pub fn adapter_shape(path: &Path, tuning: AdapterTuning) -> Result<(u32, f32), String> {
+    let name = path.to_str().ok_or_else(|| format!("{}: not a UTF-8 path", path.display()))?;
+    let card = checkpoint::st::read_card(name).map_err(|e| format!("{name}: {e}"))?;
+    let adapter = card.and_then(|c| c.adapter).ok_or_else(|| format!("{name}: not an adapter file (no adapter card)"))?;
+    if adapter.kind != tuning.kind.name() {
+        return Err(format!("{name}: a {:?} adapter, asked to score as {:?}", adapter.kind, tuning.kind.name()));
+    }
+    let rank = adapter.rank.ok_or_else(|| format!("{name}: the adapter card has no rank"))?;
+    let card_alpha = adapter.alpha.unwrap_or(rank as f32);
+    // The card holds the SCALE the adapter trained at; under rsLoRA the training
+    // alpha that reproduces it is that scale times sqrt(rank) (see the SDK's own
+    // `lora_shape`, which reads a continued adapter the same way).
+    let alpha = if tuning.rank_stabilized { card_alpha / (rank as f32).sqrt() } else { card_alpha };
+    Ok((rank, alpha))
+}
+
+/// Teacher-forced per-position readouts of `records` from the training forward:
+/// the frozen base at `run.dtype` with `adapter`'s factors loaded (or a fresh
+/// zero-delta adapter, which leaves the base's logits unchanged exactly) and NO
+/// optimizer step.
+///
+/// The model is [`build_lora_model`]'s - the same build a fine-tune trains - so
+/// the scores are the trainer's own, and the records are laid out and walked by
+/// [`crate::score::score_records`], the batching a training step uses. `opts`
+/// sizes the scoring row (`block_size` must hold the longest record) exactly as
+/// it sizes a training row.
+pub fn score_records_streamed(
+    base: &Path,
+    adapter: Option<&Path>,
+    tuning: AdapterTuning,
+    records: &[crate::score::ScoredRecord],
+    opts: &FitOpts,
+    run: &StreamedRun,
+) -> std::io::Result<crate::score::TokenScores> {
+    let (rank, alpha, resume_from) = match adapter {
+        Some(path) => {
+            let (rank, alpha) = adapter_shape(path, tuning).map_err(std::io::Error::other)?;
+            (rank, alpha, Some(path))
+        }
+        // A fresh adapter initialises `lora_b` to zero, so the base's logits are
+        // unchanged: the base arm needs no second build path, and its numbers are
+        // the tier's own.
+        None => (1, 1.0, None),
+    };
+    let mut m = build_lora_model(base, opts, rank, alpha, tuning, resume_from, run)?;
+    m.enable_token_argmax().map_err(std::io::Error::other)?;
+    crate::score::score_records(&m, records, opts.batch_size, opts.block_size).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -41,6 +41,14 @@ use super::Qwen35;
 pub(super) struct State {
     weighted: Option<Weighted>,
     scale: Option<LogitScale>,
+    argmax: Option<Argmax>,
+}
+
+/// The per-row argmax readout's buffers: `[b*t]` token ids (as the reduction's
+/// own f32 output) and the `[rows_per_chunk * ARGMAX_CHUNKS * 2]` scratch.
+struct Argmax {
+    ids: DeviceBuffer,
+    scratch: DeviceBuffer,
 }
 
 /// The per-token weight row (`[b*t]`, padded positions included) and the
@@ -76,6 +84,11 @@ impl State {
             }
             None => nll.iter().sum::<f32>() / count,
         }
+    }
+
+    /// The argmax readout buffers, when the model opted into it.
+    pub(super) fn argmax_out(&self) -> Option<model::head_ce::ArgmaxOut<'_>> {
+        self.argmax.as_ref().map(|a| model::head_ce::ArgmaxOut { ids: &a.ids, scratch: &a.scratch })
     }
 }
 
@@ -118,6 +131,46 @@ impl Qwen35 {
     pub(super) fn write_loss_weights(&self, weights: &[f32]) {
         let w = self.objectives.weighted.as_ref().expect("qwen35: set_loss_weights requires enable_weighted_loss() first");
         self.gpu.write_f32(&w.weights, &self.pad(weights, 0.0));
+    }
+
+    /// Turn on the per-token argmax readout ([`Self::batch_token_argmax`]): from
+    /// the next forward on, each chunk's argmax row is reduced on the device
+    /// before the chunk's logits are reused.
+    ///
+    /// Refused - not silently ignored - on a build that cannot produce it: an
+    /// inference build (no chunked head) or a device whose kernel set does not
+    /// register the reduction. Off by default because it costs two small
+    /// dispatches per head chunk that ordinary training never reads.
+    pub fn enable_token_argmax(&mut self) -> Result<(), String> {
+        if self.objectives.argmax.is_some() {
+            return Ok(());
+        }
+        let head = self.head_ce.as_ref().ok_or("qwen35: the per-token argmax readout needs the chunked head of a training build")?;
+        if !head.argmax_supported() {
+            return Err("qwen35: this device's kernel set does not register 'argmax_part'/'argmax_final', so the per-token argmax readout is unavailable".to_string());
+        }
+        let ids = self.gpu.storage((self.b * self.t) as u64);
+        let scratch = head.argmax_scratch(&self.gpu);
+        self.objectives.argmax = Some(Argmax { ids, scratch });
+        Ok(())
+    }
+
+    /// Per-position argmax token id of the batch most recently forwarded, length
+    /// `b*t_user` (padded positions dropped, matching
+    /// [`model::training::TokenObjectives::batch_token_logprobs`]); `None` when
+    /// the readout is off.
+    ///
+    /// The ids are the ones the chunked head itself reduced, so on a device that
+    /// breaks ties toward the lowest index they agree with
+    /// [`Self::logits_all`]'s argmax exactly - the property the readout exists
+    /// to be checked by.
+    pub fn batch_token_argmax(&self) -> Option<Vec<u32>> {
+        let a = self.objectives.argmax.as_ref()?;
+        // Same layout as `batch_token_logprobs`: only the computed prefix holds
+        // fresh ids, and the rest of the row was never forwarded.
+        let mut ids: Vec<u32> = self.gpu.read(&a.ids, (self.b * self.run_len()) as usize).into_iter().map(|v| v as u32).collect();
+        ids.resize((self.b * self.t) as usize, 0);
+        Some(self.unpad(&ids))
     }
 }
 

@@ -183,6 +183,24 @@ pub struct HeadCe {
     /// run time so a recorded tape follows a scale set later (see
     /// [`Self::set_scale_buffer`]).
     scale_buf: Option<DeviceBuffer>,
+    /// The per-row argmax readout's `(argmax_part, argmax_final)` kernels, looked
+    /// up by their canonical names on this head's device; `None` on a model that
+    /// does not register them, where the readout is simply unavailable.
+    argmax: Option<(usize, usize)>,
+}
+
+/// Partial `(value, index)` pairs per row the argmax readout reduces a logits row
+/// through - the same split `argmax_part`/`argmax_final` are dispatched with
+/// everywhere else in this tree.
+pub const ARGMAX_CHUNKS: u32 = 256;
+
+/// Where a per-row argmax readout goes: `[n]` token ids as f32 (the reduction's
+/// own output format), and the `[rows_per_chunk * ARGMAX_CHUNKS * 2]` scratch
+/// from [`HeadCe::argmax_scratch`].
+#[derive(Clone, Copy)]
+pub struct ArgmaxOut<'a> {
+    pub ids: &'a DeviceBuffer,
+    pub scratch: &'a DeviceBuffer,
 }
 
 /// Elements of a `[V, d]` weight per 4-byte word of its densest binding, and the
@@ -281,6 +299,7 @@ impl HeadCe {
             k,
             coop,
             scale_buf: None,
+            argmax: gpu.kernel_index("argmax_part").zip(gpu.kernel_index("argmax_final")),
         })
     }
 
@@ -365,10 +384,54 @@ impl HeadCe {
     /// token (`0` at [`IGNORE`]), one chunk at a time. `hidden` is `[n, d]`,
     /// `labels` and `nll` are `[n]`.
     pub fn forward_steps(&self, ops: &Ops, s: &mut Vec<Step>, hidden: &DeviceBuffer, n: u32, labels: &DeviceBuffer, nll: &DeviceBuffer, logit_scale: f32) {
+        self.forward_steps_with(ops, s, hidden, n, labels, nll, None, logit_scale);
+    }
+
+    /// [`Self::forward_steps`], and - when `argmax` is given - each row's greedy
+    /// token as well, taken from the chunk's logits BEFORE the next chunk
+    /// overwrites them.
+    ///
+    /// This is the readout a caller needs to compare a model's own pick with a
+    /// recorded token at every position: `nll` alone says how surprised the model
+    /// was, never what it would have said. The steps are added after the chunk's
+    /// cross-entropy and touch nothing the loss reads, so a head asked for the
+    /// readout produces exactly the loss and log-probabilities it produced
+    /// without it.
+    ///
+    /// # Panics
+    /// If `argmax` is given on a device whose kernel set does not register
+    /// `argmax_part`/`argmax_final` (see [`Self::argmax_supported`]).
+    pub fn forward_steps_with(&self, ops: &Ops, s: &mut Vec<Step>, hidden: &DeviceBuffer, n: u32, labels: &DeviceBuffer, nll: &DeviceBuffer, argmax: Option<ArgmaxOut<'_>>, logit_scale: f32) {
         for (r0, rows) in self.chunks(n) {
             self.logits_steps(ops, s, hidden, r0, rows, logit_scale);
             s.push(self.ce_value_step(ops.gpu(), labels, nll, r0, rows));
+            if let Some(a) = argmax {
+                self.argmax_steps(ops.gpu(), s, rows, a, r0);
+            }
         }
+    }
+
+    /// Whether this head's device registers the per-row argmax kernels, so
+    /// [`Self::forward_steps_with`] can produce token ids.
+    #[must_use]
+    pub fn argmax_supported(&self) -> bool {
+        self.argmax.is_some()
+    }
+
+    /// The reduction scratch [`ArgmaxOut`] needs: one `(value, index)` pair per
+    /// row and chunk of the largest chunk this head computes.
+    #[must_use]
+    pub fn argmax_scratch(&self, gpu: &Gpu) -> DeviceBuffer {
+        gpu.storage(self.rows as u64 * ARGMAX_CHUNKS as u64 * 2)
+    }
+
+    /// Steps reducing the chunk logits (rows `0..rows` of [`Self::logits`]) to
+    /// each row's argmax token id, written as f32 into `out[r0..r0 + rows]`.
+    fn argmax_steps(&self, gpu: &Gpu, s: &mut Vec<Step>, rows: u32, out: ArgmaxOut<'_>, r0: u32) {
+        let (part, fin) = self.argmax.expect("HeadCe: the argmax readout needs the 'argmax_part'/'argmax_final' kernels registered on this Gpu");
+        let chunk = self.vocab.div_ceil(ARGMAX_CHUNKS);
+        s.push(gpu.step(part, &[&self.logits, out.scratch], &[rows, self.vocab, ARGMAX_CHUNKS, chunk], rows * ARGMAX_CHUNKS));
+        s.push(gpu.step_sliced(fin, &[out.scratch, out.ids], &[(0, 0), (r0 as u64, rows as u64)], &[rows, ARGMAX_CHUNKS], rows));
     }
 
     fn ce_value_step(&self, gpu: &Gpu, labels: &DeviceBuffer, nll: &DeviceBuffer, r0: u32, rows: u32) -> Step {
