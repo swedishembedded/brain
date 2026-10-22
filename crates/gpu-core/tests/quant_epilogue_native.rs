@@ -73,7 +73,8 @@ fn run(gpu: &Gpu, rows: u32, k: u32, mode: u32, a: &[f32], b: &[f32]) -> (Out, O
 
     // Reference chain.
     let y_r = gpu.storage(n as u64);
-    let sx_r = gpu.storage(rows as u64);
+    let groups = (rows * k / 32) as usize;
+    let sx_r = gpu.storage(groups as u64);
     let xq_r = gpu.storage(words as u64);
     let mut steps = Vec::new();
     let produced = match mode {
@@ -99,7 +100,7 @@ fn run(gpu: &Gpu, rows: u32, k: u32, mode: u32, a: &[f32], b: &[f32]) -> (Out, O
 
     // Native: one launch.
     let y_n = gpu.storage(n as u64);
-    let sx_n = gpu.storage(rows as u64);
+    let sx_n = gpu.storage(groups as u64);
     let xq_n = gpu.storage(words as u64);
     let step = gpu
         .fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y_n, &xq_n, &sx_n], &[k, rows, mode, 0])
@@ -111,8 +112,8 @@ fn run(gpu: &Gpu, rows: u32, k: u32, mode: u32, a: &[f32], b: &[f32]) -> (Out, O
     // Mode 0 produces no `y`: the activation is `a` itself.
     let y = |buf: &backend_api::DeviceBuffer| if mode == 0 { vec![] } else { read(buf, n) };
     (
-        Out { y: y(&y_n), xq: read(&xq_n, words), sx: read(&sx_n, rows as usize) },
-        Out { y: y(&y_r), xq: read(&xq_r, words), sx: read(&sx_r, rows as usize) },
+        Out { y: y(&y_n), xq: read(&xq_n, words), sx: read(&sx_n, groups) },
+        Out { y: y(&y_r), xq: read(&xq_r, words), sx: read(&sx_r, groups) },
     )
 }
 
@@ -120,7 +121,7 @@ fn check(gpu: &Gpu, rows: u32, k: u32, mode: u32, a: &[f32], b: &[f32], what: &s
     let (n, r) = run(gpu, rows, k, mode, a, b);
     let ctx = format!("rows={rows} k={k} mode={mode} ({what})");
     assert_eq!(n.y, r.y, "produced activation differs: {ctx}");
-    assert_eq!(n.sx, r.sx, "per-row scale differs: {ctx}");
+    assert_eq!(n.sx, r.sx, "group scales differ: {ctx}");
     assert_eq!(n.xq, r.xq, "packed int8 activation differs: {ctx}");
 }
 
@@ -134,7 +135,7 @@ fn the_fused_kernel_is_offered_only_where_it_can_run() {
     }
     assert!(gpu.has_fused(Fused::QuantEpilogue));
     assert!(Fused::QuantEpilogue.serves(&[17408, 1, 1, 0]));
-    assert!(!Fused::QuantEpilogue.serves(&[17410, 1, 1, 0]), "k not a multiple of 4 cannot be packed");
+    assert!(!Fused::QuantEpilogue.serves(&[17392, 1, 1, 0]), "k not a multiple of 32 is not whole scale groups");
     assert!(!Fused::QuantEpilogue.serves(&[1024 * 19, 1, 1, 0]), "wider than the registers hold");
     assert!(!Fused::QuantEpilogue.serves(&[64, 1, 3, 0]), "unknown mode");
     assert!(!Fused::QuantEpilogue.serves(&[64, 0, 1, 0]), "no rows");
@@ -148,9 +149,9 @@ fn byte_identical_to_the_wgsl_chain_in_every_mode() {
         return;
     }
     // 17408 and 6144 are the real decode widths (MLP hidden, GDN/attention
-    // value width); the rest are tails shorter and longer than the 256-thread
-    // stride and a ragged word count.
-    for (rows, k) in [(1u32, 17408u32), (1, 6144), (1, 4), (1, 60), (1, 1020), (2, 4100), (3, 256), (8, 6144), (1, 18432), (2, 2052)] {
+    // value width); the rest are tails shorter and longer than a warp's
+    // stride and partial last slices.
+    for (rows, k) in [(1u32, 17408u32), (1, 6144), (1, 32), (1, 96), (1, 1024), (2, 4128), (3, 256), (8, 6144), (1, 18432), (2, 2080)] {
         let n = (rows * k) as usize;
         let seed = u64::from(rows) * 977 + u64::from(k);
         let a = values(n, seed, 4.0);
@@ -200,7 +201,7 @@ fn random_shapes_are_byte_identical() {
     let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for _ in 0..40 {
         let rows = 1 + r.next_u32() % 8;
-        let k = 4 * (1 + r.next_u32() % 4608);
+        let k = 32 * (1 + r.next_u32() % 576);
         let n = (rows * k) as usize;
         let a = values(n, u64::from(r.next_u32()), 3.0);
         let b = values(n, u64::from(r.next_u32()), 3.0);

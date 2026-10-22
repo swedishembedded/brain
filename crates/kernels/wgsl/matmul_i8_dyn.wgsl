@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Tiled int8 (DP4A) GEMM with a DYNAMIC per-token activation scale and a GROUP-WISE (32-element) weight scale, both read from buffers - the prefill/DiT int8 GEMM
+// @what  Tiled int8 (DP4A) GEMM with GROUP-WISE (32-element) activation and weight scales, both read from buffers - the prefill/DiT int8 GEMM
 // @how   DP4A packed int8, vec4 shared tiles, TMxTN register block per thread, staged group scales, per-k-chunk group dequant, 256-thread workgroup tile, 3 barriers
 // @opt   5
 // @cpu   no
@@ -16,9 +16,9 @@
 //
 //   x_q : [M, K/4] u32   - 4 int8 activations packed along K per u32 (row-major)
 //   w_q : [N, K/4] u32   - 4 int8 weights    packed along K per u32 (row-major)
-//   sx  : [M]      f32   - per-token activation scale
+//   sx  : [M, K/32] f32  - GROUP-WISE activation scale (`max_abs_row`'s)
 //   sw  : [N, K/32] f32  - GROUP-WISE weight scale (`model::int8::GROUP` = 32)
-//   out : [M, N]   f32   - out[m,n] = sx[m] * Σ_g acc_i32[m,n,g] * sw[n,g]
+//   out : [M, N]   f32   - out[m,n] = Σ_g acc_i32[m,n,g] * (sw[n,g] * sx[m,g])
 //
 // K must be a multiple of 32 (the group), which subsumes the multiple of 4 the
 // packing needs.
@@ -59,8 +59,9 @@
 // template knob, default 2) quads' worth of weight-scale groups. At the
 // default `QPG=2` one k-chunk is one quantization group (group=32 - Q8_0,
 // Q5_0, Q4_0): the TM*TN integer accumulators sum a chunk exactly, then fold
-// into f32 running totals scaled by that chunk's `sw[n, sg]`. `QPG=1` folds
-// twice per chunk (group=16 - Q6_K). The integer sum inside a group is exact
+// into f32 running totals scaled by that chunk's `sw[n, sg] * sx[m, ch]` (a
+// chunk is always one 32-element activation group). `QPG=1` folds twice per
+// chunk (group=16 - Q6_K), both with the chunk's activation scale. The integer sum inside a group is exact
 // and re-orderable; the cross-group folds are floating point, in ascending
 // group order.
 //
@@ -76,7 +77,7 @@
 // @workgroup_size(256). Not CPU-JIT'able (multi-barrier work-group); the CPU
 // int8 reference lives in the validation test, so parity is still gated.
 
-struct Params { m: u32, kg: u32, n: u32 };  // dynamic sx + group-wise sw, kg = K/4
+struct Params { m: u32, kg: u32, n: u32 };  // group-wise sx and sw, kg = K/4
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       x:   array<u32>;
 @group(0) @binding(2) var<storage, read>       w:   array<u32>;
@@ -101,6 +102,7 @@ const MAGIC_F: f32 = 12582912.0;
 var<workgroup> As: array<vec4<u32>, BM * SP4>;
 var<workgroup> Bs: array<vec4<u32>, BN * SP4>;
 var<workgroup> Ss: array<f32, GPC * BN>;  // [group][col] weight scales of the live chunk
+var<workgroup> Sx: array<f32, BM>;        // [row] activation scales of the live chunk (one group)
 
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wgid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -123,6 +125,11 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>, @builtin(local_invocation_id) li
   // col0 + t and fetches a chunk's scales one chunk ahead.
   let sc_ok = tid < BN && col0 + tid < p.n; let sc_base = (col0 + tid) * ng;
   var rS = vec2<f32>(0.0, 0.0);
+  // Activation scales likewise: thread t < BM owns row row0 + t; a chunk is
+  // exactly one activation group, so it is scale `ch` of that row.
+  let ng_x = p.kg / 8u;
+  let sx_ok = tid < BM && row0 + tid < p.m; let sx_base = (row0 + tid) * ng_x;
+  var rX = 0.0;
   {
     let g0 = sq * 4u;
     var av = vec4<u32>(0u); var bv = vec4<u32>(0u);
@@ -136,6 +143,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>, @builtin(local_invocation_id) li
       Ss[tid] = select(0.0, sw[sc_base], sc_ok && 0u < ng);
       if (GPC > 1u) { Ss[BN + tid] = select(0.0, sw[sc_base + 1u], sc_ok && 1u < ng); }
     }
+    if (tid < BM) { Sx[tid] = select(0.0, sx[sx_base], sx_ok && 0u < ng_x); }
   }
   workgroupBarrier();
   for (var ch = 0u; ch < nchunks; ch = ch + 1u) {
@@ -144,6 +152,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>, @builtin(local_invocation_id) li
       let g1 = (ch + 1u) * BKG + sq * 4u;
       let sg1 = (ch + 1u) * GPC;
       rS = vec2<f32>(select(0.0, sw[sc_base + sg1], sc_ok && sg1 < ng), select(0.0, sw[sc_base + sg1 + 1u], sc_ok && GPC > 1u && sg1 + 1u < ng));
+      rX = select(0.0, sx[sx_base + ch + 1u], sx_ok && ch + 1u < ng_x);
       rA = vec4<u32>(0u); rB = vec4<u32>(0u);
       if (a_ok && g1 + 3u < p.kg) { rA = vec4<u32>(x[a_base + g1], x[a_base + g1 + 1u], x[a_base + g1 + 2u], x[a_base + g1 + 3u]); }
       else if (a_ok) { if (g1 < p.kg) { rA.x = x[a_base + g1]; } if (g1 + 1u < p.kg) { rA.y = x[a_base + g1 + 1u]; } if (g1 + 2u < p.kg) { rA.z = x[a_base + g1 + 2u]; } }
@@ -162,10 +171,12 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>, @builtin(local_invocation_id) li
       }
       if ((q + 1u) % QPG == 0u) {
         let sb = (q / QPG) * BN + tx;
+        var xs: array<f32, TM>;
+        for (var i = 0u; i < TM; i++) { xs[i] = Sx[ty + i * LN]; }
         for (var j = 0u; j < TN; j++) {
           let e = Ss[sb + j * LN];
           for (var i = 0u; i < TM; i++) {
-            d[i * TN + j] += (bitcast<f32>(c[i * TN + j]) - MAGIC_F) * e;
+            d[i * TN + j] += (bitcast<f32>(c[i * TN + j]) - MAGIC_F) * (e * xs[i]);
             c[i * TN + j] = MAGIC;
           }
         }
@@ -176,16 +187,16 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>, @builtin(local_invocation_id) li
       if (tid < BM * BKQ) { As[sh_idx] = rA; }
       if (tid < BN * BKQ) { Bs[sh_idx] = rB; }
       if (tid < BN) { Ss[tid] = rS.x; if (GPC > 1u) { Ss[BN + tid] = rS.y; } }
+      if (tid < BM) { Sx[tid] = rX; }
     }
     workgroupBarrier();
   }
   for (var i = 0u; i < TM; i++) {
     let mi = row0 + ty + i * LN;
     if (mi < p.m) {
-      let sv = sx[mi];
       let r = mi * p.n + col0 + tx;
       for (var j = 0u; j < TN; j++) {
-        if (col0 + tx + j * LN < p.n) { out[r + j * LN] = d[i * TN + j] * sv; }
+        if (col0 + tx + j * LN < p.n) { out[r + j * LN] = d[i * TN + j]; }
       }
     }
   }

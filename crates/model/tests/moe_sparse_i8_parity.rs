@@ -102,7 +102,7 @@ fn int8_matches_fp32_sparse_within_quant_tolerance() {
 
     // int8 sparse path: quantize x once (shared across every expert), then loop.
     let xq = g.storage((m * d / 4) as u64);
-    let sx = g.storage(m as u64);
+    let sx = g.storage(model::int8::act_scale_len(m as usize, d as usize) as u64);
     g.submit(&[], &quant_rows_steps(&g, QuantRows { kernels: ids8.quant, x: &x, sx: &sx, xq: &xq, xgs: None }, 0, m, d));
 
     let scratch8 = ExpertScratch8 {
@@ -110,7 +110,7 @@ fn int8_matches_fp32_sparse_within_quant_tolerance() {
         up: &g.storage((m * ff) as u64),
         h: &g.storage((m * ff) as u64),
         hq: &g.storage((m * ff / 4) as u64),
-        sh: &g.storage(m as u64),
+        sh: &g.storage(model::int8::act_scale_len(m as usize, ff as usize) as u64),
         expert_out: &g.storage((m * d) as u64),
     };
     let acc_i8 = g.storage((m * d) as u64);

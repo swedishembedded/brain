@@ -66,8 +66,8 @@ const ARGMAX_FINAL: usize = 16;
 // Decode-regime kernels: selected per dispatch by row count.
 const RMSNORM_ROWS: usize = 17;
 const MATMUL_GEMV: usize = 18;
-// Int8 weight path (A0): per-token activation quant + DP4A GEMMs with
-// per-token x per-group dequant scales - the tile GEMM for prefill shapes,
+// Int8 weight path (A0): group-wise activation quant + DP4A GEMMs with
+// per-group activation x weight dequant scales - the tile GEMM for prefill shapes,
 // the packed GEMV for decode row counts.
 const MAX_ABS_ROW: usize = 19;
 const QUANT_PACK: usize = 20;
@@ -5468,7 +5468,8 @@ mod tests {
         g.submit(&[], &fused_steps);
         g.poll_wait();
         let scratch = eng.i8_scratch.as_ref().expect("weights_int8() true implies i8_scratch is Some");
-        let got_sx = g.read(&scratch.sx, rows as usize);
+        let groups = model::int8::act_scale_len(rows as usize, d as usize);
+        let got_sx = g.read(&scratch.sx, groups);
         let got_xq = g.read(scratch.xq_for(d), (rows * d / 4) as usize);
 
         // Reference: the ORIGINAL three-dispatch sequence over the SAME `x`/`w`,
@@ -5477,7 +5478,7 @@ mod tests {
         let rms_step = eng.rms(&x, &w, &xn_ref, d, rows);
         g.submit(&[], &[rms_step]);
         g.poll_wait();
-        let sx_ref = g.storage(rows as u64);
+        let sx_ref = g.storage(groups as u64);
         let xq_ref = g.storage((rows * d / 4) as u64);
         let quant_steps = model::int8::quant_rows_steps(
             g,
@@ -5488,10 +5489,10 @@ mod tests {
         );
         g.submit(&[], &quant_steps);
         g.poll_wait();
-        let want_sx = g.read(&sx_ref, rows as usize);
+        let want_sx = g.read(&sx_ref, groups);
         let want_xq = g.read(&xq_ref, (rows * d / 4) as usize);
 
-        assert_eq!(got_sx, want_sx, "M4.3: fused per-row scale must be bit-identical to the unfused triad");
+        assert_eq!(got_sx, want_sx, "M4.3: fused group scales must be bit-identical to the unfused triad");
         assert_eq!(got_xq, want_xq, "M4.3: fused packed int8 activation must be bit-identical to the unfused triad");
     }
 

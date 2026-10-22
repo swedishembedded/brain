@@ -84,7 +84,7 @@ fn run_single(gpu: &Gpu, m: u32, k: u32, n: u32, lead: [u64; 5]) {
     let seed = u64::from(m) * 31 + u64::from(k) * 7 + u64::from(n);
     let x = Windowed::new(gpu, &words(mu * ku / 4, seed + 1), lead[0]);
     let w = Windowed::new(gpu, &words(nu * ku / 8, seed + 2), lead[1]);
-    let sx = Windowed::new(gpu, &scales(mu, seed + 3), lead[2]);
+    let sx = Windowed::new(gpu, &scales(mu * ku / 32, seed + 3), lead[2]);
     let sw = Windowed::new(gpu, &scales(nu * ku / 32, seed + 4), lead[3]);
     let outs = [Windowed::new(gpu, &vec![SENTINEL; mu * nu], lead[4]), Windowed::new(gpu, &vec![SENTINEL; mu * nu], lead[4])];
     let steps: Vec<_> = [K_GEMV, K_REF]
@@ -118,7 +118,7 @@ fn run_single(gpu: &Gpu, m: u32, k: u32, n: u32, lead: [u64; 5]) {
 fn run_multi(gpu: &Gpu, m: u32, k: u32, ns: &[u32], seed: u64) {
     let as_f32 = |v: Vec<u32>| v.into_iter().map(f32::from_bits).collect::<Vec<_>>();
     let xq = gpu.storage_init("xq", &as_f32(words((m * k / 4) as usize, seed + 1)));
-    let sx = gpu.storage_init("sx", &as_f32(scales(m as usize, seed + 2)));
+    let sx = gpu.storage_init("sx", &as_f32(scales((m * k / 32) as usize, seed + 2)));
     let mats: Vec<(DeviceBuffer, DeviceBuffer)> = ns
         .iter()
         .enumerate()

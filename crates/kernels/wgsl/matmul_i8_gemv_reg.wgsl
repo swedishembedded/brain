@@ -18,7 +18,7 @@
 // it at dispatch, so a change to either that is not mirrored in the other
 // silently changes results on exactly one backend.
 //
-//   x_q : [M, K/4] u32   w_q : [N, K/4] u32   sx: [M]   sw: [N, K/32]
+//   x_q : [M, K/4] u32   w_q : [N, K/4] u32   sx: [M, K/32]   sw: [N, K/32]
 //   out : [M, N] f32     params: m, kg (=K/4), n. REQUIRES m <= MREG and K a
 //   multiple of 32.
 //   Dispatch: n * 64 invocations - the SAME thread count `matmul_i8_gemv`
@@ -83,7 +83,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, kg]
 @group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, kg]
-@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M]
+@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M, kg/8]
 @group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N, kg/8]
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
 
@@ -109,11 +109,13 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
 
     var acc: array<f32, MREG>;
     var xoff: array<u32, MREG>;
+    var soff: array<u32, MREG>;
     for (var m = 0u; m < MREG; m = m + 1u) {
         acc[m] = 0.0;
         // Rows past `p.m` are computed and thrown away (see the header); point
         // them at row 0, which is already hot, instead of past the binding.
         xoff[m] = select(0u, m * p.kg, m < p.m);
+        soff[m] = select(0u, m * (p.kg / 8u), m < p.m);
     }
 
     let wbase = col * p.kg;
@@ -122,7 +124,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         let wv = wq[wbase + g];
         let s = sw[swbase + g / WPG];
         for (var m = 0u; m < MREG; m = m + 1u) {
-            acc[m] = acc[m] + f32(dot4I8Packed(xq[xoff[m] + g], wv)) * s;
+            let sm = s * sx[soff[m] + g / 8u]; // activation scale: 8 words per 32-element group
+            acc[m] = acc[m] + f32(dot4I8Packed(xq[xoff[m] + g], wv)) * sm;
         }
     }
 
@@ -130,8 +133,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         partial[m * 64u + t] = acc[m];
     }
     workgroupBarrier();
-    // Threads 0..m each fold one row's 64 partials and dequantize - the same
-    // ascending order `matmul_i8_gemv` folds in.
+    // Threads 0..m each fold one row's 64 partials - the same ascending order
+    // `matmul_i8_gemv` folds in.
     //
     // `min(p.m, MREG)`, not `p.m`, is a memory-safety floor, not a feature:
     // `partial` is only `MREG * 64` long, so a caller (or a selector bug)
@@ -143,6 +146,6 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         for (var i = 0u; i < 64u; i = i + 1u) {
             s = s + partial[t * 64u + i];
         }
-        out[t * p.n + col] = s * sx[t];
+        out[t * p.n + col] = s;
     }
 }

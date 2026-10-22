@@ -18,8 +18,8 @@
 //! resident pipeline.
 //!
 //! Same recipe as the DiT's `s3dit::int8`: weights quantized once at build;
-//! activations quantized on-device each forward with a dynamic per-token scale
-//! (`max_abs_row` → `quant_pack`), then the DP4A GEMM (`matmul_i8`, four int8
+//! activations quantized on-device each forward with dynamic scales per 32
+//! elements (`max_abs_row` → `quant_pack`), then the DP4A GEMM (`matmul_i8`, four int8
 //! MACs per instruction on Pascal) dequantizes with `sx·sw`. Norms/RoPE/attention stay f32 (not
 //! matmuls). Inference-only (frozen, no LoRA, no backward).
 
@@ -57,7 +57,7 @@ pub struct Q8Layer {
 /// Resident int8 linears for every owned layer + shared activation-quant scratch.
 pub struct Q8 {
     pub layers: HashMap<usize, Q8Layer>,
-    pub sx: DeviceBuffer, // [n_tokens] per-token activation scale
+    pub sx: DeviceBuffer, // [n_tokens, max_k/32] activation group scales
     pub xq: DeviceBuffer, // [n_tokens * max_k/4] packed activation (reused per linear)
     // kernel indices in the model's pipeline table.
     k_max_abs_row: usize,
@@ -139,12 +139,12 @@ impl Q8 {
                 },
             );
         }
-        let sx = gpu.storage(n_tokens.max(1) as u64);
+        let sx = gpu.storage(model::int8::act_scale_len(n_tokens as usize, max_k as usize).max(1) as u64);
         let xq = gpu.storage((n_tokens * max_k / 4).max(1) as u64);
         Q8 { layers, sx, xq, k_max_abs_row, k_quant_pack, k_matmul_i8 }
     }
 
-    /// Quantize activation `x` `[n_tokens · k]` into `self.xq` with fresh per-token
+    /// Quantize activation `x` `[n_tokens · k]` into `self.xq` with fresh group
     /// scales `self.sx`. Emits the two prep steps; call once per distinct input
     /// (shared by all linears reading that input, e.g. xn1 → q/k/v).
     pub fn quant(&self, gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, k: u32, n_tokens: u32) {
@@ -152,8 +152,8 @@ impl Q8 {
         s.push(gpu.step(self.k_quant_pack, &[x, &self.sx, &self.xq], &[n_tokens, k], n_tokens * k / 4));
     }
 
-    /// `out = dequant(xq @ wᵀ)`: dynamic per-token scale `self.sx` × group-wise
-    /// weight scale. Must be preceded by a matching [`Q8::quant`] on the same input.
+    /// `out = dequant(xq @ wᵀ)`: group-wise activation scales `self.sx` × group-wise
+    /// weight scales. Must be preceded by a matching [`Q8::quant`] on the same input.
     pub fn mm8(&self, gpu: &Gpu, s: &mut Vec<Step>, w: &Lin8, out: &DeviceBuffer, n_tokens: u32) {
         s.push(gpu.dispatch(
             self.k_matmul_i8,

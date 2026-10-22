@@ -6,9 +6,10 @@
 //!
 //! One implementation for every model that runs the DP4A path (zimage DiT,
 //! Qwen encoder/decoder, FLUX.2 DiT): weights are quantized ONCE at build with
-//! [`quantize_weight`]; activations are quantized on-device each forward with a
-//! dynamic per-token scale (`max_abs_row` → `quant_pack`), then the DP4A GEMM
-//! (`matmul_i8_dyn`, ~4× the fp32 rate on Pascal) dequantizes with `sx·sw`.
+//! [`quantize_weight`]; activations are quantized on-device each forward with
+//! dynamic scales, one per [`GROUP`] elements of a row (`max_abs_row` →
+//! `quant_pack`), then the DP4A GEMM (`matmul_i8_dyn`, ~4× the fp32 rate on
+//! Pascal) dequantizes each group with `sw·sx`.
 //! The packed layout here is exactly what `matmul_i8*.wgsl` consume — if it
 //! changes, it changes for every model at once, which is the point.
 //!
@@ -47,6 +48,26 @@ pub const WORDS_PER_GROUP: usize = GROUP / 4;
 #[inline]
 pub const fn scale_len(n: usize, k: usize) -> usize {
     n * (k / GROUP)
+}
+
+/// Elements in the scale tensor of an `[rows, k]` int8 ACTIVATION: one per
+/// [`GROUP`] elements of a row, `[rows, k/GROUP]` row-major - the weight
+/// scale's granularity, so a kernel applies `sw[n, g] * sx[m, g]` once per
+/// group. One scale per row would let a single outlier channel set the step
+/// for the whole row: LLM activations carry such channels, and on Qwen3-0.6B
+/// a per-row scale cost a next-token KL of 2.8e-2 against 1.9e-3 for this
+/// layout (bf16 weights: 2.7e-3).
+#[inline]
+pub const fn act_scale_len(rows: usize, k: usize) -> usize {
+    rows * (k / GROUP)
+}
+
+/// The `(offset, len)` binding range, in f32 elements, of the activation
+/// scales of rows `r0 .. r0 + rows` of a `k`-wide activation.
+#[inline]
+pub const fn act_scale_range(r0: u32, rows: u32, k: u32) -> (u64, u64) {
+    let groups = (k / GROUP as u32) as u64;
+    (r0 as u64 * groups, rows as u64 * groups)
 }
 
 /// Reject a scale tensor whose length is not [`scale_len`] - and say so in the
@@ -481,7 +502,7 @@ pub struct QuantRows<'a> {
     pub kernels: [usize; 2],
     /// `[.., k]` f32 activation to quantize.
     pub x: &'a gpu_core::DeviceBuffer,
-    /// `[rows]` per-token scale (written).
+    /// `[rows, k/GROUP]` activation scales (written, [`act_scale_len`]).
     pub sx: &'a gpu_core::DeviceBuffer,
     /// `[.., k/4]` packed u32 activation (written).
     pub xq: &'a gpu_core::DeviceBuffer,
@@ -493,14 +514,15 @@ pub struct QuantRows<'a> {
     pub xgs: Option<(usize, &'a gpu_core::DeviceBuffer)>,
 }
 
-/// The DEVICE half of the same tier: dynamic per-token activation quantization
-/// of rows `r0..r1` of `q.x` — `max_abs_row` writes `q.sx[r0..r1]`,
-/// `quant_pack` writes the packed rows of `q.xq`. Returns the steps in order;
-/// ONE call feeds every linear that reads that activation.
+/// The DEVICE half of the same tier: dynamic group-wise activation
+/// quantization of rows `r0..r1` of `q.x` - `max_abs_row` writes those rows'
+/// scales into `q.sx` ([`act_scale_range`]), `quant_pack` writes the packed
+/// rows of `q.xq`. Returns the steps in order; ONE call feeds every linear
+/// that reads that activation.
 ///
 /// This exists so the *offset units* live in one place. Every buffer is bound
-/// as a sub-range and the units differ per buffer — `x` and `xq` are offset in
-/// ELEMENTS of their own width (`k` vs `k/4`) while `sx` is offset in ROWS.
+/// as a sub-range and the units differ per buffer - `x`, `xq` and `sx` are
+/// offset in ELEMENTS of their own width (`k`, `k/4` and `k/GROUP`).
 /// Getting one wrong is silently wrong arithmetic, not a crash; `step_sliced`'s
 /// element-vs-byte contract already cost this repo a SIGSEGV.
 ///
@@ -508,35 +530,32 @@ pub struct QuantRows<'a> {
 /// `BufferBinding::offset`, so every one must clear
 /// `min_storage_buffer_offset_alignment` (256 B = 64 floats on a P40). `k` is
 /// normally a multiple of 64, so `x`/`xq` are safe for any `r0`; `sx` is offset
-/// by `r0` itself, so **`r0` must be a multiple of 64** — asserted here rather
+/// by `r0 * k/GROUP`, which a multiple of 64 `r0` keeps aligned for every `k`,
+/// so **`r0` must be a multiple of 64** - asserted here rather
 /// than left to each caller to remember (a violation is a wgpu validation
 /// error, not a wrong number, so it hides until someone changes a text length).
 ///
 /// When `q.xgs` is `Some((kernel, xgs))`, a THIRD step (`quant_group_sum`,
 /// `crate::kquant`'s `S[m,g] = Σ_{k in g} xq[m,k]` correction term) is
-/// appended, reading the SAME `xq` rows the second step just wrote. `xgs` is
-/// offset in ROWS of `k/32` (its own width, one f32 per 32-element group) -
-/// the same "own width" convention `x`/`xq` already follow, just at group
-/// granularity instead of element or row-count granularity. `q.xgs` being
-/// `None` is byte-identical to this function's original two-step form - no
-/// existing caller's dispatch changes.
+/// appended, reading the SAME `xq` rows the second step just wrote. `xgs` has
+/// the scales' layout (one f32 per 32-element group) and is offset the same
+/// way.
 pub fn quant_rows_steps(g: &gpu_core::Gpu, q: QuantRows, r0: u32, r1: u32, k: u32) -> Vec<gpu_core::Step> {
-    assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
+    assert_eq!(k % GROUP as u32, 0, "int8 activation K must be a multiple of {GROUP} (got {k})");
     assert!(
         r0.is_multiple_of(64),
-        "int8 activation quant: row base {r0} breaks the 64-float storage-binding alignment of the per-token scale buffer"
+        "int8 activation quant: row base {r0} breaks the 64-float storage-binding alignment of the activation scale buffer"
     );
     let m = r1 - r0;
     let xo = (r0 as u64 * k as u64, m as u64 * k as u64);
-    let so = (r0 as u64, m as u64);
+    let so = act_scale_range(r0, m, k);
     let qo = (r0 as u64 * (k as u64 / 4), m as u64 * (k as u64 / 4));
     let mut steps = vec![
         g.step_sliced(q.kernels[0], &[q.x, q.sx], &[xo, so], &[m, k], m),
         g.step_sliced(q.kernels[1], &[q.x, q.sx, q.xq], &[xo, so, qo], &[m, k], m * k / 4),
     ];
     if let Some((kernel, xgs)) = q.xgs {
-        assert_eq!(k % GROUP as u32, 0, "int8 K-quant group sum: K must be a multiple of {GROUP} (got {k})");
-        let go = (r0 as u64 * (k as u64 / GROUP as u64), m as u64 * (k as u64 / GROUP as u64));
+        let go = act_scale_range(r0, m, k);
         steps.push(g.step_sliced(kernel, &[q.xq, xgs], &[qo, go], &[m, k], m * k / GROUP as u32));
     }
     steps

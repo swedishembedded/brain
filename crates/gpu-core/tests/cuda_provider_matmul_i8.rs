@@ -100,12 +100,12 @@ struct Problem {
 
 impl Problem {
     /// Q8_0-like data: full-range int8, per-group weight scales around the
-    /// magnitude real checkpoints carry, per-token activation scales.
+    /// magnitude real checkpoints carry, per-group (32 along K) activation scales.
     fn new(m: u32, n: u32, k: u32, seed: u64) -> Problem {
         let mut r = Rng(seed);
         let xq = (0..m * k).map(|_| r.i8()).collect();
         let wq = (0..n * k).map(|_| r.i8()).collect();
-        let sx = (0..m).map(|_| r.f32(0.001, 0.02)).collect();
+        let sx = (0..m * (k / 32)).map(|_| r.f32(0.001, 0.02)).collect();
         let sw = (0..n * (k / 32)).map(|_| r.f32(0.0005, 0.01)).collect();
         Problem { m, n, k, xq, wq, sx, sw }
     }
@@ -119,9 +119,9 @@ impl Problem {
             for i in g * 32..g * 32 + 32 {
                 s += self.xq[row * k + i] as i64 * self.wq[col * k + i] as i64;
             }
-            acc += s as f64 * self.sw[col * ng + g] as f64;
+            acc += s as f64 * (self.sw[col * ng + g] * self.sx[row * ng + g]) as f64;
         }
-        acc * self.sx[row] as f64
+        acc
     }
 }
 
@@ -169,7 +169,7 @@ impl<'a> Device<'a> {
         let operands = [
             Operand { role: Role::Act, buf: &self.x, range: (0, m as u64 * kg), dtype: DType::I8 },
             Operand { role: Role::Weight, buf: &self.w, range: (0, 0), dtype: DType::I8 },
-            Operand { role: Role::ActScale, buf: &self.sx, range: (0, m as u64), dtype: DType::F32 },
+            Operand { role: Role::ActScale, buf: &self.sx, range: (0, m as u64 * (k as u64 / 32)), dtype: DType::F32 },
             Operand { role: Role::WeightScale, buf: &self.sw, range: (0, 0), dtype: DType::F32 },
             Operand { role: Role::Out, buf: &self.y, range: (0, m as u64 * n as u64), dtype: DType::F32 },
         ];
@@ -304,7 +304,7 @@ fn run_named(gpu: &Gpu, name: &str, p: &Problem) -> Vec<f32> {
     let id = gpu.native_kernel(kernel, BINDINGS).unwrap_or_else(|| panic!("{name} is offered on this device"));
     let d = Device::upload(gpu, p);
     let kg = p.k as u64 / 4;
-    let operands = [(&d.x, (0, p.m as u64 * kg)), (&d.w, (0, 0)), (&d.sx, (0, p.m as u64)), (&d.sw, (0, 0)), (&d.y, (0, p.m as u64 * p.n as u64))];
+    let operands = [(&d.x, (0, p.m as u64 * kg)), (&d.w, (0, 0)), (&d.sx, (0, p.m as u64 * (p.k as u64 / 32))), (&d.sw, (0, 0)), (&d.y, (0, p.m as u64 * p.n as u64))];
     let bufs: Vec<&backend_api::DeviceBuffer> = operands.iter().map(|o| o.0).collect();
     let offs: Vec<(u64, u64)> = operands.iter().map(|o| o.1).collect();
     let blocks = p.m.div_ceil(kernel.tile.0) * p.n.div_ceil(kernel.tile.1);

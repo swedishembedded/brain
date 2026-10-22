@@ -10,8 +10,8 @@
 //
 //   sum  = a + b                                   (optional residual add)
 //   xn   = rmsnorm(sum) * w
-//   sx   = max(max|xn|, 1e-8) / 127                (per-row activation scale)
-//   xq   = pack4(clamp(rint(xn / sx), -127, 127))  (four int8 per u32)
+//   sx   = max(max|xn|, 1e-8) / 127 per 32 elements (the activation group scales)
+//   xq   = pack4(clamp(rint(xn / sx), -127, 127))  (four int8 per u32, each by its group's scale)
 //
 // It replaces `add2` + `rmsnorm_rows` + `max_abs_rows` + `quant_pack`, which a
 // decode token runs 128 times back to back on a 5120-wide row, and produces
@@ -23,7 +23,7 @@
 //   sum    : [rows, d] f32     a + b, the residual stream's next value
 //   xn     : [rows, d] f32     the normalised activation (an fp32 linear reads it)
 //   xq     : [rows, d/4] u32   packed int8 activation
-//   sx     : [rows] f32        per-row scale
+//   sx     : [rows, d/32] f32  per-group scale
 //
 // Why a decode token wanted this
 // ------------------------------
@@ -44,7 +44,9 @@
 // same lane ownership, four threads to a lane (each a contiguous quarter of the
 // lane's elements, the lane's running sum handed from quarter to quarter), so
 // an element stays in one thread's registers from the load to the quantiser
-// and the accumulation order is the reference's by construction. The max is exact in any order, the scale and
+// and the accumulation order is the reference's by construction. Element c = lane + 64j of a thread lies in
+// group 2j + lane/32, so a group's 32 elements are one warp's element j and its max is a warp reduction. The max
+// is exact in any order, the scale and
 // the quantiser are the reference's expressions (`/` and `rint` are correctly
 // rounded; WGSL `round` is half-to-even, which is `rintf`), and
 // `--fmad=false` is the backend's default and every product and sum below is
@@ -115,8 +117,7 @@ brain_add_rms_quant(const unsigned int* params, const float* a, const float* b, 
     // Shared memory is static (a native launch requests no dynamic shared
     // memory), sized for the widest served row.
     __shared__ float carry[BRAIN_ARQ_LANES];     // a lane's running sum of squares, handed quarter to quarter
-    __shared__ float partial[BRAIN_ARQ_LANES];   // the lanes' sums, then the threads' max |xn| (below)
-    __shared__ float tmax[BRAIN_ARQ_THREADS];
+    __shared__ float partial[BRAIN_ARQ_LANES];   // the lanes' sums
     __shared__ unsigned int qwords[BRAIN_ARQ_LANES * BRAIN_ARQ_MAX_ELEMS / 4];
     signed char* qbytes = reinterpret_cast<signed char*>(qwords);
 
@@ -174,23 +175,22 @@ brain_add_rms_quant(const unsigned int* params, const float* a, const float* b, 
         }
     }
 
-    // Normalise in registers and track this thread's max |xn| (exact in any order).
-    float mx = 0.0f;
+    // Normalise in registers; then each element's group scale. Element i of this thread is element
+    // j = quarter * PER + i of its lane, in group 2j + lane / 32: the same group as element i of every lane of
+    // its warp, so the group's max is a warp reduction (exact in any order).
+    const unsigned int groups = d >> 5;
+    float rscale[BRAIN_ARQ_PER];
 #pragma unroll
     for (int i = 0; i < BRAIN_ARQ_PER; ++i) {
         const float y = __fmul_rn(__fmul_rn(v[i], inv), g[i]);
         v[i] = y;
-        mx = fmaxf(mx, fabsf(y));
+        float mx = fabsf(y);
+        for (int o = 16; o > 0; o >>= 1) { mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o)); }
+        const float scale = __fdiv_rn(fmaxf(mx, 1e-8f), 127.0f);
+        const unsigned int c = lane + BRAIN_ARQ_LANES * (quarter * BRAIN_ARQ_PER + i);
+        if ((lane & 31u) == 0u && c < d) { sx[(unsigned long long)row * groups + (c >> 5)] = scale; }
+        rscale[i] = __fdiv_rn(1.0f, scale);
     }
-    for (int o = 16; o > 0; o >>= 1) { mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o)); }
-    if ((tid & 31u) == 0u) { tmax[tid >> 5] = mx; }
-    __syncthreads();
-    float rowmax = 0.0f;
-#pragma unroll
-    for (int i = 0; i < BRAIN_ARQ_THREADS / 32; ++i) { rowmax = fmaxf(rowmax, tmax[i]); }
-    const float scale = __fdiv_rn(fmaxf(rowmax, 1e-8f), 127.0f);
-    if (tid == 0) { sx[row] = scale; }
-    const float rscale = __fdiv_rn(1.0f, scale);
 
     // Phase 3: quantise from registers into shared bytes, then store.
 #pragma unroll
@@ -198,7 +198,7 @@ brain_add_rms_quant(const unsigned int* params, const float* a, const float* b, 
         const unsigned int c = lane + BRAIN_ARQ_LANES * (quarter * BRAIN_ARQ_PER + i);
         if (c < d) {
             xn[base + c] = v[i];
-            const float q = fminf(fmaxf(rintf(__fmul_rn(v[i], rscale)), -127.0f), 127.0f);
+            const float q = fminf(fmaxf(rintf(__fmul_rn(v[i], rscale[i])), -127.0f), 127.0f);
             qbytes[c] = static_cast<signed char>(static_cast<int>(q));
         }
     }

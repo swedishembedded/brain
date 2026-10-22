@@ -85,7 +85,7 @@ impl Case {
             n,
             xq: (0..mu * ku / 4).map(|_| r.next_u32()).collect(),
             wq: (0..nu * ku * bits as usize / 32).map(|_| r.next_u32() & code_mask).collect(),
-            sx: (0..mu).map(|_| 1e-3 + (r.next_u32() % 1000) as f32 * 1e-5).collect(),
+            sx: (0..mu * groups).map(|_| 1e-3 + (r.next_u32() % 1000) as f32 * 1e-5).collect(),
             // Q4_K/Q5_K sub-scales and mins are 6-bit.
             wsm: (0..nu * groups.div_ceil(2)).map(|_| r.next_u32() & 0x3f3f_3f3f).collect(),
             wd: (0..nu * groups.div_ceil(8)).map(|_| f16(1e-4 + (r.next_u32() % 100) as f32 * 1e-5) | (f16((r.next_u32() % 100) as f32 * 1e-5) << 16)).collect(),
@@ -112,11 +112,11 @@ impl Case {
                     let (ds, dm) = (f16(d & 0xffff) * f64::from(sm & 0xff), f16(d >> 16) * f64::from((sm >> 8) & 0xff));
                     let a: f64 = (0..32).map(|i| x(m, 32 * g + i) * code(row, 32 * g + i)).sum();
                     let s: f64 = (0..32).map(|i| x(m, 32 * g + i)).sum();
-                    v += ds * a - dm * s;
-                    mag += (ds * a).abs() + (dm * s).abs();
+                    let sx = f64::from(self.sx[m * groups + g]);
+                    v += sx * (ds * a - dm * s);
+                    mag += sx * ((ds * a).abs() + (dm * s).abs());
                 }
-                let sx = f64::from(self.sx[m]);
-                (v * sx, mag * sx)
+                (v, mag)
             })
             .collect()
     }

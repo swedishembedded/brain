@@ -123,7 +123,7 @@ fn run(gpu: &Gpu, c: &Case) -> (Vec<u32>, Vec<u32>) {
     let seed = u64::from(c.m) * 31 + u64::from(c.kg) * 7 + u64::from(c.n);
     let x = Windowed::new(gpu, &packed(m * kg, seed + 1), c.lead[0]);
     let w = Windowed::new(gpu, &packed(n * kg, seed + 2), c.lead[1]);
-    let sx = Windowed::new(gpu, &f32_words(&scales(m, seed + 3, 1e-3, 1e-5)), c.lead[2]);
+    let sx = Windowed::new(gpu, &f32_words(&scales(m * ng, seed + 3, 1e-3, 1e-5)), c.lead[2]);
     let sw = Windowed::new(gpu, &f32_words(&scales(n * ng, seed + 4, 1e-3, 1e-5)), c.lead[3]);
     let a = Windowed::new(gpu, &vec![SENTINEL; m * n], c.lead[4]);
     let b = Windowed::new(gpu, &vec![SENTINEL; m * n], c.lead[4]);
@@ -302,7 +302,7 @@ fn a_profiled_pass_reports_the_native_kernels_time() {
     let (m, kg, n) = (1u32, 1280u32, 5120u32);
     let x = gpu.storage(u64::from(m * kg));
     let w = gpu.storage(u64::from(n * kg));
-    let sx = gpu.storage(u64::from(m));
+    let sx = gpu.storage(u64::from(m * kg / 8));
     let sw = gpu.storage(u64::from(n * kg / 8));
     let out = gpu.storage(u64::from(m * n));
     let steps = [gpu.dispatch(K_GEMV, &[&x, &w, &sx, &sw, &out], &[m, kg, n], Dispatch::Workgroups(n))];

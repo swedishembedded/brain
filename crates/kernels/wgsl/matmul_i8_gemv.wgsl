@@ -15,9 +15,9 @@
 //
 //   x_q : [M, K/4] u32  — 4 int8 activations packed along K per u32
 //   w_q : [N, K/4] u32  — 4 int8 weights    packed along K per u32
-//   sx  : [M]      f32  - per-token activation scale
+//   sx  : [M, K/32] f32 - GROUP-WISE activation scale, one per 32 int8 along K
 //   sw  : [N, K/32] f32 - GROUP-WISE weight scale, one per 32 int8 along K
-//   out : [M, N]   f32  - out[m,n] = sx[m] * Σ_g acc_i32[m,n,g] * sw[n,g]
+//   out : [M, N]   f32  - out[m,n] = Σ_g acc_i32[m,n,g] * (sw[n,g] * sx[m,g])
 //   params: m, kg (=K/4), n. REQUIRES m <= 32 and K a multiple of 32.
 //
 // Why this exists: the tiled `matmul_i8_dyn` owns the large-M regime (prefill),
@@ -55,7 +55,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, kg]
 @group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, kg]
-@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M]
+@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M, kg/8]
 @group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N, kg/8]
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
 
@@ -82,17 +82,17 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         let wv = wq[wbase + g];
         let s = sw[swbase + g / WPG];
         for (var m = 0u; m < p.m; m = m + 1u) {
-            partial[m * 64u + t] = partial[m * 64u + t] + f32(dot4I8Packed(xq[m * p.kg + g], wv)) * s;
+            let sm = s * sx[m * (p.kg / 8u) + g / 8u]; // activation scale: 8 words per 32-element group
+            partial[m * 64u + t] = partial[m * 64u + t] + f32(dot4I8Packed(xq[m * p.kg + g], wv)) * sm;
         }
     }
     workgroupBarrier();
-    // Threads 0..m each fold one row's 64 partials and apply the per-token
-    // activation scale (the only scale left - the weight side is already in).
+    // Threads 0..m each fold one row's 64 partials, both scales already in.
     if (t < p.m) {
         var s = 0.0;
         for (var i = 0u; i < 64u; i = i + 1u) {
             s = s + partial[t * 64u + i];
         }
-        out[t * p.n + col] = s * sx[t];
+        out[t * p.n + col] = s;
     }
 }

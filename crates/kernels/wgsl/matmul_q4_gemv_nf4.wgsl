@@ -21,9 +21,9 @@
 //
 //   x_q : [M, K/4] u32  -- 4 int8 activations packed along K per u32
 //   w_q : [N, K/8] u32  -- 8 NF4 codes (UNSIGNED, 0..16) packed along K per u32
-//   sx  : [M] per-token activation scale
+//   sx  : [M, k/32] group-wise activation scale
 //   sw  : [N, K/32] GROUP-WISE weight scale (`model::int8::GROUP`)
-//   out : [M, N] f32    -- out[m,n] = sx[m] * sum_g NF4_LUT[code] * sw[n,g] * x[m,...]
+//   out : [M, N] f32    -- out[m,n] = sum_g NF4_LUT[code] * x[m,...] * (sw[n,g] * sx[m,g])
 //   params: m, k (LOGICAL K, a multiple of 32). REQUIRES m <= 32.
 //
 // **Why the accumulator is f32 MAC per nibble, not an i32 dot-then-scale
@@ -60,7 +60,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, k/4]
 @group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, k/8]
-@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M]
+@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M, k/32]
 @group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N, k/32]
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
 
@@ -114,17 +114,16 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
                 }
                 local = local + wn * f32(xb);
             }
-            partial[m * 64u + t] = partial[m * 64u + t] + local * s;
+            partial[m * 64u + t] = partial[m * 64u + t] + local * (s * sx[m * (p.k / 32u) + g / 4u]);
         }
     }
     workgroupBarrier();
-    // Threads 0..m each fold one row's 64 partials and apply the per-token
-    // activation scale (the weight side is already in).
+    // Threads 0..m each fold one row's 64 partials, both scales already in.
     if (t < p.m) {
         var s = 0.0;
         for (var i = 0u; i < 64u; i = i + 1u) {
             s = s + partial[t * 64u + i];
         }
-        out[t * p.n + col] = s * sx[t];
+        out[t * p.n + col] = s;
     }
 }

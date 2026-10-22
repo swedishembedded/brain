@@ -15,9 +15,9 @@
 //   x_q    : [M, K/4] u32      activations, 4 signed int8 per word
 //   w_q    : [N, K/8] u32      weights, 8 signed int4 per word (nibble b of
 //                              word g is element 8g + b)
-//   sx     : [M]      f32      per-row activation scale
+//   sx     : [M, K/32] f32     per-group activation scale
 //   sw     : [N, K/32] f32     per-32-element-group weight scale
-//   out    : [M, N]   f32      out[m, n] = sx[m] * sum_k x_q[m,k] * w_q[n,k] * sw[n, k/32]
+//   out    : [M, N]   f32      out[m, n] = sum_k x_q[m,k] * w_q[n,k] * (sw[n, k/32] * sx[m, k/32])
 //
 // Why this kernel exists
 // ----------------------
@@ -39,9 +39,9 @@
 // How it stays bit-identical to the WGSL kernel
 // ---------------------------------------------
 // The WGSL kernel gives each of 64 lanes the weight words g = t, t+64, ...,
-// adds `f32(dot4(x[2g], lo(w)) + dot4(x[2g+1], hi(w))) * sw[g/4]` to one f32
-// accumulator per lane in ascending g, then folds the 64 partials in
-// ascending lane order and multiplies by sx. Here 16 threads serve one weight
+// adds `f32(dot4(x[2g], lo(w)) + dot4(x[2g+1], hi(w))) * (sw[g/4] * sx[m, g/4])`
+// to one f32 accumulator per lane in ascending g, then folds the 64 partials
+// in ascending lane order. Here 16 threads serve one weight
 // row and thread j owns virtual lanes 4j..4j+3: in iteration i the words
 // 64i+4j .. 64i+4j+3 are one 16-byte vector, so the vector load IS the four
 // virtual lanes' words, and their group (16i + j) is one scale. The two dot
@@ -172,7 +172,7 @@ __device__ __forceinline__ void brain_q4g_load_stage(BrainQ4Stage<UNROLL>& st, u
 // Every lane of the warp runs the shuffles; only the first thread of a live
 // row writes.
 template <int MR>
-__device__ __forceinline__ void brain_q4g_fold(const float (&acc)[MR][4], const float* sx, float* out, unsigned int lane,
+__device__ __forceinline__ void brain_q4g_fold(const float (&acc)[MR][4], float* out, unsigned int lane,
                                                bool live, unsigned int mrows, unsigned int m0, unsigned int n, unsigned int col) {
 #pragma unroll
     for (int r = 0; r < MR; ++r) {
@@ -185,7 +185,7 @@ __device__ __forceinline__ void brain_q4g_fold(const float (&acc)[MR][4], const 
             }
         }
         if (lane == 0 && live && static_cast<unsigned int>(r) < mrows) {
-            out[(unsigned long long)(m0 + r) * n + col] = __fmul_rn(total, sx[m0 + r]);
+            out[(unsigned long long)(m0 + r) * n + col] = total;
         }
     }
 }
@@ -219,6 +219,12 @@ __device__ __forceinline__ void brain_q4g_tile(BrainQ4XTile xs, const unsigned i
 
     const unsigned int* wrow = wq + (unsigned long long)(live ? col : 0u) * (k >> 3);
     const float* srow = sw + (unsigned long long)(live ? col : 0u) * groups;
+    const float* sxrow[MR];
+#pragma unroll
+    for (int r = 0; r < MR; ++r) {
+        const unsigned int row = (static_cast<unsigned int>(r) < mrows) ? m0 + r : m0;
+        sxrow[r] = sx + (unsigned long long)row * groups;
+    }
 
     float acc[MR][4];
 #pragma unroll
@@ -250,11 +256,11 @@ __device__ __forceinline__ void brain_q4g_tile(BrainQ4XTile xs, const unsigned i
                 const int v = 2 * (u * BRAIN_Q4G_LANES + static_cast<int>(lane));
                 const BrainQ4W w = brain_q4g_unpack(st.w[u]);
 #pragma unroll
-                for (int r = 0; r < MR; ++r) { brain_q4g_vec(acc[r], xs[buf][r][v], xs[buf][r][v + 1], w, st.s[u]); }
+                for (int r = 0; r < MR; ++r) { brain_q4g_vec(acc[r], xs[buf][r][v], xs[buf][r][v + 1], w, __fmul_rn(st.s[u], __ldg(sxrow[r] + g))); }
             }
         }
     }
-    brain_q4g_fold<MR>(acc, sx, out, lane, live, mrows, m0, n, col);
+    brain_q4g_fold<MR>(acc, out, lane, live, mrows, m0, n, col);
 }
 
 template <bool VEC>
@@ -325,7 +331,7 @@ brain_matmul_q4_gemv(const unsigned int* params, const unsigned int* xq, const u
 // every output is bit-identical to a separate `brain_matmul_q4_gemv`.
 //
 //   params : u32 [m, k, n0, n1, n2, n3]    n_i = 0 leaves set i unused
-//   xq, sx : the shared packed activation and its per-row scales
+//   xq, sx : the shared packed activation and its group scales
 //   wq_i, sw_i, out_i : set i's packed weights, group scales and output
 extern "C" __global__ void __launch_bounds__(BRAIN_Q4G_THREADS, BRAIN_Q4G_MIN_BLOCKS)
 brain_matmul_q4_gemv_multi(const unsigned int* params, const unsigned int* xq, const float* sx,

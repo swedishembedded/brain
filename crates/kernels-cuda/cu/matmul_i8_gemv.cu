@@ -20,9 +20,9 @@
 //   params : u32 [m, kg, n]   kg = K/4 packed words per row, K a multiple of 32
 //   x_q    : [M, kg] u32      activations, 4 signed int8 per word
 //   w_q    : [N, kg] u32      weights, 4 signed int8 per word
-//   sx     : [M]     f32      per-row activation scale
+//   sx     : [M, K/32] f32    group-wise activation scale
 //   sw     : [N, kg/8] f32    per-32-element-group weight scale
-//   out    : [M, N]  f32      out[m, n] = sx[m] * sum_k x_q[m,k] * w_q[n,k] * sw[n, k/32]
+//   out    : [M, N]  f32      out[m, n] = sum_k x_q[m,k] * w_q[n,k] * (sw[n, k/32] * sx[m, k/32])
 //
 // Why this kernel exists
 // ----------------------
@@ -58,9 +58,10 @@
 // How it stays bit-identical to the WGSL kernel
 // ---------------------------------------------
 // The WGSL kernel gives each of 64 lanes the words g = t, t+64, t+128, ...,
-// keeps one f32 accumulator per lane that adds `f32(dot4(x, w)) * sw[g/8]`
-// in ascending g, then folds the 64 partials in ascending lane order and
-// multiplies by sx. f32 addition is not associative, so matching it means
+// keeps one f32 accumulator per lane that adds
+// `f32(dot4(x, w)) * (sw[g/8] * sx[m, g/8])` in ascending g, then folds the
+// 64 partials in ascending lane order. f32 addition is not associative, so
+// matching it means
 // keeping those 64 virtual accumulators and that fold order exactly. Here 16
 // threads serve one weight row and thread j owns virtual lanes 4j..4j+3: in
 // iteration i the words 64i+4j .. 64i+4j+3 are one 16-byte vector, so the
@@ -189,10 +190,12 @@ __device__ __forceinline__ void brain_gemv_tile(const unsigned int* xq, const un
     const unsigned int* wrow = wq + (unsigned long long)(live ? col : 0u) * kg;
     const float* srow = sw + (unsigned long long)(live ? col : 0u) * (kg >> 3);
     const unsigned int* xrow[MR];
+    const float* sxrow[MR];
 #pragma unroll
     for (int r = 0; r < MR; ++r) {
         const unsigned int row = (static_cast<unsigned int>(r) < mrows) ? m0 + r : m0;
         xrow[r] = xq + (unsigned long long)row * kg;
+        sxrow[r] = sx + (unsigned long long)row * (kg >> 3);
     }
 
     float acc[MR][4];
@@ -212,10 +215,11 @@ __device__ __forceinline__ void brain_gemv_tile(const unsigned int* xq, const un
 #pragma unroll
                 for (int r = 0; r < MR; ++r) {
                     const uint4 xv = (r < XROWS) ? st.x[r < XROWS ? r : 0][u] : brain_load_x<VEC>(xrow[r] + 4ull * g);
-                    acc[r][0] = brain_term(acc[r][0], xv.x, st.w[u].x, st.s[u]);
-                    acc[r][1] = brain_term(acc[r][1], xv.y, st.w[u].y, st.s[u]);
-                    acc[r][2] = brain_term(acc[r][2], xv.z, st.w[u].z, st.s[u]);
-                    acc[r][3] = brain_term(acc[r][3], xv.w, st.w[u].w, st.s[u]);
+                    const float sm = __fmul_rn(st.s[u], __ldg(sxrow[r] + (g >> 1)));
+                    acc[r][0] = brain_term(acc[r][0], xv.x, st.w[u].x, sm);
+                    acc[r][1] = brain_term(acc[r][1], xv.y, st.w[u].y, sm);
+                    acc[r][2] = brain_term(acc[r][2], xv.z, st.w[u].z, sm);
+                    acc[r][3] = brain_term(acc[r][3], xv.w, st.w[u].w, sm);
                 }
             }
         }
@@ -235,7 +239,7 @@ __device__ __forceinline__ void brain_gemv_tile(const unsigned int* xq, const un
             }
         }
         if (lane == 0 && live && static_cast<unsigned int>(r) < mrows) {
-            out[(unsigned long long)(m0 + r) * n + col] = __fmul_rn(total, sx[m0 + r]);
+            out[(unsigned long long)(m0 + r) * n + col] = total;
         }
     }
 }
@@ -273,6 +277,12 @@ __device__ __forceinline__ void brain_gemv_tile_shared_x(uint4 (*xs)[BRAIN_I8G_R
 
     const unsigned int* wrow = wq + (unsigned long long)(live ? col : 0u) * kg;
     const float* srow = sw + (unsigned long long)(live ? col : 0u) * (kg >> 3);
+    const float* sxrow[MR];
+#pragma unroll
+    for (int r = 0; r < MR; ++r) {
+        const unsigned int row = (static_cast<unsigned int>(r) < mrows) ? m0 + r : m0;
+        sxrow[r] = sx + (unsigned long long)row * (kg >> 3);
+    }
 
     float acc[MR][4];
 #pragma unroll
@@ -304,10 +314,11 @@ __device__ __forceinline__ void brain_gemv_tile_shared_x(uint4 (*xs)[BRAIN_I8G_R
 #pragma unroll
                 for (int r = 0; r < MR; ++r) {
                     const uint4 xv = xs[buf][r][u * BRAIN_I8G_LANES + lane];
-                    acc[r][0] = brain_term(acc[r][0], xv.x, st.w[u].x, st.s[u]);
-                    acc[r][1] = brain_term(acc[r][1], xv.y, st.w[u].y, st.s[u]);
-                    acc[r][2] = brain_term(acc[r][2], xv.z, st.w[u].z, st.s[u]);
-                    acc[r][3] = brain_term(acc[r][3], xv.w, st.w[u].w, st.s[u]);
+                    const float sm = __fmul_rn(st.s[u], __ldg(sxrow[r] + (g >> 1)));
+                    acc[r][0] = brain_term(acc[r][0], xv.x, st.w[u].x, sm);
+                    acc[r][1] = brain_term(acc[r][1], xv.y, st.w[u].y, sm);
+                    acc[r][2] = brain_term(acc[r][2], xv.z, st.w[u].z, sm);
+                    acc[r][3] = brain_term(acc[r][3], xv.w, st.w[u].w, sm);
                 }
             }
         }
@@ -325,7 +336,7 @@ __device__ __forceinline__ void brain_gemv_tile_shared_x(uint4 (*xs)[BRAIN_I8G_R
             }
         }
         if (lane == 0 && live && static_cast<unsigned int>(r) < mrows) {
-            out[(unsigned long long)(m0 + r) * n + col] = __fmul_rn(total, sx[m0 + r]);
+            out[(unsigned long long)(m0 + r) * n + col] = total;
         }
     }
 }
@@ -371,7 +382,7 @@ __device__ __forceinline__ void brain_gemv_select(BrainXTile xs, const unsigned 
 // contiguous stretch, so its loads of a weight row are adjacent) and every
 // warp runs `mma.m16n8k32` (s8 x s8 -> s32) per scale group with the 16
 // weight rows as the rows of A and the rows of x as the eight columns of B. A
-// group is exactly one MMA, so the group scale is folded per MMA: the
+// group is exactly one MMA, so the group's two scales are folded per MMA: the
 // accumulator is seeded with 1.5 * 2^23 so the integer sum comes back as a
 // float bit pattern (exact for the group's |sum| <= 32 * 128 * 128), one FADD
 // removes the bias and one FFMA applies the scale to the running f32 total -
@@ -432,6 +443,9 @@ __device__ __forceinline__ void brain_gemv_block_mma(const unsigned int* xq, con
     const unsigned int rlo = min(n0 + g, n - 1u);
     const unsigned int rhi = min(n0 + g + 8u, n - 1u);
     const unsigned int xrow = m0 + (g < mrows ? g : 0u);
+    // The two rows of x whose outputs this thread's accumulators hold (B's columns 2*t4 and 2*t4 + 1).
+    const float* sxa = sx + (unsigned long long)(m0 + (2u * t4 < mrows ? 2u * t4 : 0u)) * groups;
+    const float* sxb = sx + (unsigned long long)(m0 + (2u * t4 + 1u < mrows ? 2u * t4 + 1u : 0u)) * groups;
 
     const unsigned int* wlo = wq + (unsigned long long)rlo * kg + 2u * t4;
     const unsigned int* whi = wq + (unsigned long long)rhi * kg + 2u * t4;
@@ -446,7 +460,7 @@ __device__ __forceinline__ void brain_gemv_block_mma(const unsigned int* xq, con
     const unsigned int per_warp = min(chunk, groups - first);
     for (unsigned int i0 = 0; i0 < per_warp; i0 += U) {
         uint2 wl[U], wh[U], x[U];
-        float sl[U], sh[U];
+        float sl[U], sh[U], xa[U], xb[U];
 #pragma unroll
         for (int u = 0; u < U; ++u) {
             const unsigned int gi = first + i0 + u;
@@ -456,6 +470,8 @@ __device__ __forceinline__ void brain_gemv_block_mma(const unsigned int* xq, con
                 x[u] = brain_mma_ld_x<VEC>(xp + 8ull * gi);
                 sl[u] = slo[gi];
                 sh[u] = shi[gi];
+                xa[u] = sxa[gi];
+                xb[u] = sxb[gi];
             }
         }
 #pragma unroll
@@ -463,10 +479,10 @@ __device__ __forceinline__ void brain_gemv_block_mma(const unsigned int* xq, con
             if (i0 + u < per_warp) {
                 unsigned int d[4];
                 brain_mma_s8_m16n8k32(d, wl[u].x, wh[u].x, wl[u].y, wh[u].y, x[u].x, x[u].y);
-                f0 = fmaf(__uint_as_float(d[0]) - 12582912.0f, sl[u], f0);  // weight row g, row of x 2*t4
-                f1 = fmaf(__uint_as_float(d[1]) - 12582912.0f, sl[u], f1);  // weight row g, row of x 2*t4 + 1
-                f2 = fmaf(__uint_as_float(d[2]) - 12582912.0f, sh[u], f2);  // weight row g + 8
-                f3 = fmaf(__uint_as_float(d[3]) - 12582912.0f, sh[u], f3);
+                f0 = fmaf(__uint_as_float(d[0]) - 12582912.0f, sl[u] * xa[u], f0);  // weight row g, row of x 2*t4
+                f1 = fmaf(__uint_as_float(d[1]) - 12582912.0f, sl[u] * xb[u], f1);  // weight row g, row of x 2*t4 + 1
+                f2 = fmaf(__uint_as_float(d[2]) - 12582912.0f, sh[u] * xa[u], f2);  // weight row g + 8
+                f3 = fmaf(__uint_as_float(d[3]) - 12582912.0f, sh[u] * xb[u], f3);
             }
         }
     }
@@ -482,7 +498,7 @@ __device__ __forceinline__ void brain_gemv_block_mma(const unsigned int* xq, con
         for (int w = 0; w < BRAIN_I8G_MMA_WARPS; ++w) { total += red[w][l][j]; }
         const unsigned int orow = n0 + (l >> 2) + 8u * (j >> 1);
         const unsigned int ocol = 2u * (l & 3u) + (j & 1u);
-        if (orow < n && ocol < mrows) { out[(unsigned long long)(m0 + ocol) * n + orow] = total * sx[m0 + ocol]; }
+        if (orow < n && ocol < mrows) { out[(unsigned long long)(m0 + ocol) * n + orow] = total; }
     }
 }
 #endif
@@ -561,7 +577,7 @@ brain_matmul_i8_gemv(const unsigned int* params, const unsigned int* xq, const u
 // this file).
 //
 //   params : u32 [m, kg, n0, n1, n2, n3]    n_i = 0 leaves set i unused
-//   xq, sx : the shared packed activation and its per-row scales
+//   xq, sx : the shared packed activation and its group scales
 //   wq_i, sw_i, out_i : set i's packed weights, group scales and output,
 //                       exactly the buffers a single `matmul_i8_gemv` takes
 //

@@ -45,7 +45,7 @@ pub enum Op {
     /// AdamW over blockwise-int8 moments (`adamw_q8` vs `adamw_q8_wg`). Shape
     /// is `m = 1`, `n = numel`; the cooperative form wins at every size.
     AdamWQ8,
-    /// Per-row max|x| for the int8 dynamic activation quant (`max_abs_row` vs
+    /// Per-group max|x| for the int8 dynamic activation quant (`max_abs_row` vs
     /// `max_abs_rows`). `m` rows of `n = k` — see [`candidates`] for why
     /// neither gates it.
     MaxAbsRow,
@@ -913,15 +913,14 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
                 vec![Reference]
             }
         }
-        // The int8 activation quant's per-row max. `max_abs_row` is
+        // The int8 activation quant's group maxima. `max_abs_row` is
         // `Op::RmsNorm`'s bug verbatim — thread `t` owns row `t` and walks the
         // whole row — so it takes RmsNorm's rule, and for the same measured
-        // reason: the loss is per-access efficiency (each 32-byte sector serves
-        // one useful float) plus a serial chain of `k` dependent loads, and
-        // neither is fixed by having more rows. `max_abs_rows` is BIT-identical
+        // reason: the loss is a serial chain of `k` dependent loads per thread,
+        // which having more rows does not fix. `max_abs_rows` is BIT-identical
         // (max is exact under reassociation), so there is no accuracy side to
-        // trade either. `workgroup_reductions` is the correctness gate: the CPU
-        // JIT mis-executes the barrier.
+        // trade either. It keeps the `workgroup_reductions` gate of the
+        // workgroup-per-output family.
         Op::MaxAbsRow => vec![WorkgroupPerOutput, Reference],
         // AdamW with int8 moments: the reference gives one thread a whole
         // 64-element block (lanes 256 bytes apart, a measured fraction of the
@@ -1889,7 +1888,7 @@ mod tests {
         }
     }
 
-    /// The int8 activation quant's per-row max has NO shape gate either: it is
+    /// The int8 activation quant's group maxima have NO shape gate either: it is
     /// `Op::RmsNorm`'s one-thread-per-row bug on the int8 path, so neither the
     /// row count nor the row width can make the per-element kernel win. This
     /// test exists so an `m <= 32` gate cannot creep in the way `Op::RmsNorm`'s

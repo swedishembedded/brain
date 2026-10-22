@@ -80,8 +80,8 @@ fn run(gpu: &Gpu, tokens: u32, k: u32, n: u32, xdiv_per_row: bool) {
     let rows = slots.div_ceil(xdiv);
     let xq = gpu.storage(u64::from(rows * kg));
     gpu.write(&xq, &vec![0x01020304u32; (rows * kg) as usize]);
-    let sx = gpu.storage(u64::from(rows));
-    gpu.write_f32(&sx, &vec![1.0; rows as usize]);
+    let sx = gpu.storage(u64::from(rows * (kg / 8)));
+    gpu.write_f32(&sx, &vec![1.0; (rows * (kg / 8)) as usize]);
     let wq = gpu.storage(u64::from(NE) * u64::from(n) * u64::from(kg));
     let sw = gpu.storage(u64::from(NE) * u64::from(n) * u64::from(kg / 8));
     let out = gpu.storage(u64::from(slots) * u64::from(n));

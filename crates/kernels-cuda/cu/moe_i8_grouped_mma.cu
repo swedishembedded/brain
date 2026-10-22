@@ -13,14 +13,14 @@
 //
 //   params : u32 [tiles, kg, n, xdiv, ne]
 //   xq     : [rows, kg] u32          4 int8 per word
-//   sx     : [rows] f32              per-row activation scale
+//   sx     : [rows, kg/8] f32        one activation scale per 32 elements
 //   tab    : [2 * (ne + 1)] u32      expert offsets, then each expert's first tile
 //   perm   : [slots] u32             slots in expert-major order
 //   wq     : [ne * n, kg] u32        the bank
 //   sw     : [ne * n, kg/8] f32      one scale per 32 weights
 //   out    : [slots, n] f32          slot-major
 //
-//   out[s, col] = sx[s / xdiv] * sum_g f32(dot_g) * sw[row_w, g],  row_w = expert(s) * n + col
+//   out[s, col] = sum_g f32(dot_g) * (sw[row_w, g] * sx[s / xdiv, g]),  row_w = expert(s) * n + col
 //
 // A "tile" is up to 8 slots of one expert (the routing tables of
 // `moe_route_*.wgsl` are built for that size). A warp computes 16 weight rows
@@ -34,7 +34,7 @@
 // A group's integer dot product is exact however it is summed, so the MMA gives
 // the WGSL kernel's `dot32` bit for bit. What is not free is the f32 arithmetic
 // around it, which the WGSL kernel fixes: every output has 16 lane accumulators,
-// lane l adding `f32(dot_g) * sw[g]` for the groups g = l, l+16, ... in ascending
+// lane l adding `f32(dot_g) * (sw[g] * sx[g])` for the groups g = l, l+16, ... in ascending
 // order, and the 16 are folded in ascending lane order from 0.0. Here each
 // thread owns four outputs of a warp's tile and keeps their 16 lane accumulators
 // (64 registers); the group number picks the accumulator at compile time because
@@ -129,6 +129,11 @@ __device__ __forceinline__ void brain_moe_grouped(const unsigned int* params, co
     // This thread's activation row: slot `g` of the tile (an empty one reads slot 0's).
     const unsigned int xrow = perm[first + (g < cnt ? g : 0u)] / xdiv;
     const unsigned int* xp = xq + static_cast<unsigned long long>(xrow) * kg + tq * 2u;
+    // The activation rows of the two slots whose outputs this thread holds
+    // (B's columns 2*tq and 2*tq + 1): their group scales.
+    const unsigned int sa_slot = 2u * tq, sb_slot = 2u * tq + 1u;
+    const float* xsa = sx + static_cast<unsigned long long>(perm[first + (sa_slot < cnt ? sa_slot : 0u)] / xdiv) * ng;
+    const float* xsb = sx + static_cast<unsigned long long>(perm[first + (sb_slot < cnt ? sb_slot : 0u)] / xdiv) * ng;
 
     float acc[BRAIN_MG_LANES][4];
 #pragma unroll
@@ -141,7 +146,7 @@ __device__ __forceinline__ void brain_moe_grouped(const unsigned int* params, co
 #pragma unroll
         for (int blk4 = 0; blk4 < BRAIN_MG_LANES / BRAIN_MG_UNROLL; ++blk4) {
             uint2 wa[BRAIN_MG_UNROLL], wb[BRAIN_MG_UNROLL], xb[BRAIN_MG_UNROLL];
-            float sa[BRAIN_MG_UNROLL], sbv[BRAIN_MG_UNROLL];
+            float sa[BRAIN_MG_UNROLL], sbv[BRAIN_MG_UNROLL], xa[BRAIN_MG_UNROLL], xbs[BRAIN_MG_UNROLL];
             // Every load of the stage before any is consumed.
 #pragma unroll
             for (int u = 0; u < BRAIN_MG_UNROLL; ++u) {
@@ -153,6 +158,8 @@ __device__ __forceinline__ void brain_moe_grouped(const unsigned int* params, co
                     xb[u] = brain_ld8<VEC>(xp + off);
                     sa[u] = __ldg(s0p + gi);
                     sbv[u] = __ldg(s1p + gi);
+                    xa[u] = __ldg(xsa + gi);
+                    xbs[u] = __ldg(xsb + gi);
                 }
             }
 #pragma unroll
@@ -163,10 +170,10 @@ __device__ __forceinline__ void brain_moe_grouped(const unsigned int* params, co
                     unsigned int d[4];
                     brain_mma_s8(d, a, xb[u].x, xb[u].y);
                     const int l = blk4 * BRAIN_MG_UNROLL + u;   // group gi's lane accumulator
-                    acc[l][0] = __fadd_rn(acc[l][0], __fmul_rn(__fsub_rn(__uint_as_float(d[0]), FLOAT_BIAS), sa[u]));
-                    acc[l][1] = __fadd_rn(acc[l][1], __fmul_rn(__fsub_rn(__uint_as_float(d[1]), FLOAT_BIAS), sa[u]));
-                    acc[l][2] = __fadd_rn(acc[l][2], __fmul_rn(__fsub_rn(__uint_as_float(d[2]), FLOAT_BIAS), sbv[u]));
-                    acc[l][3] = __fadd_rn(acc[l][3], __fmul_rn(__fsub_rn(__uint_as_float(d[3]), FLOAT_BIAS), sbv[u]));
+                    acc[l][0] = __fadd_rn(acc[l][0], __fmul_rn(__fsub_rn(__uint_as_float(d[0]), FLOAT_BIAS), __fmul_rn(sa[u], xa[u])));
+                    acc[l][1] = __fadd_rn(acc[l][1], __fmul_rn(__fsub_rn(__uint_as_float(d[1]), FLOAT_BIAS), __fmul_rn(sa[u], xbs[u])));
+                    acc[l][2] = __fadd_rn(acc[l][2], __fmul_rn(__fsub_rn(__uint_as_float(d[2]), FLOAT_BIAS), __fmul_rn(sbv[u], xa[u])));
+                    acc[l][3] = __fadd_rn(acc[l][3], __fmul_rn(__fsub_rn(__uint_as_float(d[3]), FLOAT_BIAS), __fmul_rn(sbv[u], xbs[u])));
                 }
             }
         }
@@ -188,10 +195,9 @@ __device__ __forceinline__ void brain_moe_grouped(const unsigned int* params, co
         const unsigned int s = 2u * tq + j;
         if (s < cnt) {
             const unsigned int slot = perm[first + s];
-            const float scale = sx[slot / xdiv];
             float* o = out + static_cast<unsigned long long>(slot) * n;
-            if (ok0) { o[col0] = __fmul_rn(total[j], scale); }
-            if (ok1) { o[col1] = __fmul_rn(total[2 + j], scale); }
+            if (ok0) { o[col0] = total[j]; }
+            if (ok1) { o[col1] = total[2 + j]; }
         }
     }
 }

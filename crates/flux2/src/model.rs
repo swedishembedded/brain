@@ -58,7 +58,7 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
     ("silu_mul", kernels::SILU_MUL),
     ("gate_row", kernels::GATE_ROW),
-    // int8 DP4A path (GPU only): per-token activation quant + DP4A GEMM.
+    // int8 DP4A path (GPU only): group-wise activation quant + DP4A GEMM.
     // Listing them is harmless off-GPU — only dispatched under Precision::Int8.
     ("max_abs_row", kernels::MAX_ABS_ROW),
     ("quant_pack", kernels::QUANT_PACK),
@@ -544,11 +544,11 @@ impl Flux2Model {
             .collect();
 
         // The three boundary linears stay fp32 at every tier (~97 MB -
-        // negligible). Measured on the parity fixture (t2i, 1536 tokens):
-        // quantizing txt_in costs cosine 0.9946 → 0.9843 alone - its input
-        // is raw concatenated Qwen3 hidden states whose channel outliers
-        // (the ~6e3 magnitudes the masking experiment measured) crush a
-        // per-token int8 scale. img_in/final_layer are cheap insurance at
+        // negligible). Measured on the parity fixture (t2i, 1536 tokens) with
+        // one int8 activation scale per token: quantizing txt_in cost cosine
+        // 0.9946 → 0.9843 alone - its input is raw concatenated Qwen3 hidden
+        // states whose channel outliers (the ~6e3 magnitudes the masking
+        // experiment measured) crushed that scale. img_in/final_layer are cheap insurance at
         // the in/out boundaries (0.9946 → 0.9955 together).
         let img_in_w = lin_f32("img_in.weight", d, cfg.in_channels);
         let txt_in_w = lin_f32("txt_in.weight", d, cfg.context_in_dim);
@@ -794,7 +794,7 @@ impl Flux2Model {
     }
 
     /// Int8 only (no-op under fp32): quantize rows `r0..r1` of `x` `[.., k]`
-    /// into the K-matched packed scratch with fresh per-token scales
+    /// into the K-matched packed scratch with fresh group scales
     /// (`max_abs_row` → `quant_pack`). ONE quant feeds every linear reading
     /// that activation (n1 → q/k/v and w1/w3, ctx → wo, hs → w2).
     fn quant_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) {
@@ -1042,7 +1042,7 @@ impl Flux2Model {
             al("n_img * in_channels", ni as u64 * cin as u64);
             al("n_pred * in_channels", n_pred as u64 * cin as u64);
             if self.precision == Precision::Int8 {
-                al("joint tokens (int8 per-token scale offset)", n as u64);
+                al("joint tokens (int8 activation scale offset)", n as u64);
             }
         }
 

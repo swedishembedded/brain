@@ -56,7 +56,7 @@ pub(crate) const KERNELS: [(&str, &str); 17] = [
     // GPU-only fast GEMM (software-pipelined register tiling). The CPU JIT can't
     // compile its barrier, so CPU uses the naive `matmul` (native AVX2 path).
     ("matmul_reg3", kernels::MATMUL_REG3),
-    // int8 DP4A path (GPU only): per-token activation quant (max_abs_row) + DP4A GEMM.
+    // int8 DP4A path (GPU only): group-wise activation quant (max_abs_row) + DP4A GEMM.
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
     ("max_abs_row", kernels::MAX_ABS_ROW),
@@ -779,7 +779,7 @@ impl HostInt8Block {
 /// the same reason: one slab sized for the largest stage serves every stage.
 #[derive(Clone)]
 pub(crate) struct Int8Scratch {
-    sx: DeviceBuffer, // [t] per-token activation scale
+    sx: DeviceBuffer, // [t, hidden/32] activation scales of the widest activation
     xq_dim: DeviceBuffer,
     xq_hid: DeviceBuffer,
 }
@@ -787,7 +787,7 @@ pub(crate) struct Int8Scratch {
 impl Int8Scratch {
     pub fn new(gpu: &Gpu, d: BlockDims, t: u32) -> Int8Scratch {
         Int8Scratch {
-            sx: gpu.storage(t as u64),
+            sx: gpu.storage(model::int8::act_scale_len(t as usize, d.dim.max(d.hidden) as usize) as u64),
             xq_dim: gpu.storage((t * d.dim / 4) as u64),
             xq_hid: gpu.storage((t * d.hidden / 4) as u64),
         }
@@ -815,12 +815,12 @@ pub(crate) fn build_block_steps_i8(
 ) {
     let (dim, nh, hd, hidden) = (d.dim, d.n_heads, d.head_dim, d.hidden);
     let half = hd / 2;
-    // Quantize activation `x` [t·k] → `xq` with fresh per-token scales i8.sx[t].
+    // Quantize activation `x` [t·k] → `xq` with fresh group scales i8.sx[t, k/32].
     let quant = |s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, k: u32| {
         s.push(gpu.step(K_MAX_ABS_ROW, &[x, &i8.sx], &[t, k], t));
         s.push(gpu.step(K_QUANT_PACK, &[x, &i8.sx, xq], &[t, k], t * k / 4));
     };
-    // out = dequant(xq @ wᵀ): dynamic activation scale i8.sx × per-channel wp.1.
+    // out = dequant(xq @ wᵀ): group activation scales i8.sx × group weight scales wp.1.
     let mm8 = |s: &mut Vec<Step>, xq: &DeviceBuffer, wp: &(DeviceBuffer, DeviceBuffer), o: &DeviceBuffer, k: u32, n: u32| {
         s.push(gpu.dispatch(K_MATMUL_I8, &[xq, &wp.0, &i8.sx, &wp.1, o], &[t, k / 4, n], gpu_core::Dispatch::Workgroups(t.div_ceil(128) * n.div_ceil(128))));
     };

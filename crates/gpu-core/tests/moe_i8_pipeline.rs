@@ -12,7 +12,7 @@
 //! * `moe_i8_gemv_gather` - a slot reads ITS expert's rows out of one fused
 //!   bank. The reference is a host loop that performs the kernel's documented
 //!   arithmetic in its documented order (integer sum per 32-group, converted
-//!   once, scaled, ascending lane accumulation, ascending 16-lane fold), so the
+//!   once, scaled by the combined `sw * sx` group scale, ascending lane accumulation, ascending 16-lane fold), so the
 //!   comparison is on raw BITS, not a tolerance: the order is the contract a
 //!   native kernel must keep.
 //! * `moe_router_topk` - the same routing as `router_gate` +
@@ -103,14 +103,14 @@ fn gather_reference(slots: usize, kg: usize, n: usize, xdiv: usize, xq: &[u32], 
             let mut lane_acc = [0f32; 16];
             for g in 0..ng {
                 let d: i32 = (0..8).map(|j| dot4(xq[(s / xdiv) * kg + g * 8 + j], wq[row_w * kg + g * 8 + j])).sum();
-                let term = d as f32 * sw[row_w * ng + g];
+                let term = d as f32 * (sw[row_w * ng + g] * sx[(s / xdiv) * ng + g]);
                 lane_acc[g % 16] += term;
             }
             let mut total = 0f32;
             for a in lane_acc {
                 total += a;
             }
-            out[s * n + col] = total * sx[s / xdiv];
+            out[s * n + col] = total;
         }
     }
     out
@@ -120,7 +120,7 @@ fn run_gather(gpu: &Gpu, slots: usize, k: usize, n: usize, xdiv: usize, blocks: 
     let kg = k / 4;
     let rows = slots.div_ceil(xdiv);
     let xq = random_packed(rows * kg, seed + 1);
-    let sx = random_scales(rows, seed + 2);
+    let sx = random_scales(rows * (kg / 8), seed + 2);
     let mut rng = Lcg::new(seed + 3);
     let ids: Vec<u32> = (0..slots).map(|_| rng.next_u32() % blocks as u32).collect();
     let wq = random_packed(blocks * n * kg, seed + 4);
@@ -247,12 +247,12 @@ fn swiglu_quant_is_bit_identical_to_silu_mul_then_row_quantisation() {
     }
     for &(rows, k) in &[(9usize, 512usize), (1, 512), (3, 64), (5, 1024)] {
         let mut rng = Lcg::new(random_seed());
-        // Spread over magnitudes, with an occasional large value so the row scale is set by an outlier.
+        // Spread over magnitudes, with an occasional large value so a group scale is set by an outlier.
         let g: Vec<f32> = (0..rows * k).map(|i| ((rng.next_u32() % 4000) as f32 - 2000.0) * 1e-3 * if i % 97 == 0 { 8.0 } else { 1.0 }).collect();
         let u: Vec<f32> = (0..rows * k).map(|_| ((rng.next_u32() % 4000) as f32 - 2000.0) * 1e-3).collect();
         let (gb, ub) = (upload_f32(&gpu, &g), upload_f32(&gpu, &u));
-        let (h, sx_ref, xq_ref) = (gpu.storage((rows * k) as u64), gpu.storage(rows as u64), gpu.storage((rows * k / 4) as u64));
-        let (xq, sh) = (gpu.storage((rows * k / 4) as u64), gpu.storage(rows as u64));
+        let (h, sx_ref, xq_ref) = (gpu.storage((rows * k) as u64), gpu.storage((rows * (k / 32)) as u64), gpu.storage((rows * k / 4) as u64));
+        let (xq, sh) = (gpu.storage((rows * k / 4) as u64), gpu.storage((rows * (k / 32)) as u64));
         gpu.submit(
             &[],
             &[
@@ -263,7 +263,7 @@ fn swiglu_quant_is_bit_identical_to_silu_mul_then_row_quantisation() {
             ],
         );
         gpu.poll_wait();
-        assert_eq!(read_u32(&gpu, &sh, rows), read_u32(&gpu, &sx_ref, rows), "rows={rows} k={k}: the row scales");
+        assert_eq!(read_u32(&gpu, &sh, rows * (k / 32)), read_u32(&gpu, &sx_ref, rows * (k / 32)), "rows={rows} k={k}: the group scales");
         assert_eq!(read_u32(&gpu, &xq, rows * k / 4), read_u32(&gpu, &xq_ref, rows * k / 4), "rows={rows} k={k}: the packed activations");
     }
 }

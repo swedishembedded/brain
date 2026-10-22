@@ -483,7 +483,7 @@ impl CpuBackend {
                 let ng = kg / 8;
                 let xq = std::slice::from_raw_parts(bufs[0] as *const u32, m * kg);
                 let wq = std::slice::from_raw_parts(bufs[1] as *const u32, n * kg);
-                let sx = std::slice::from_raw_parts(bufs[2] as *const f32, m);
+                let sx = std::slice::from_raw_parts(bufs[2] as *const f32, m * ng);
                 let sw = std::slice::from_raw_parts(bufs[3] as *const f32, n * ng);
                 let out = std::slice::from_raw_parts_mut(bufs[4] as *mut f32, m * n);
                 fast_ops::matmul_i8_dyn(xq, wq, sx, sw, out, m, kg, n);

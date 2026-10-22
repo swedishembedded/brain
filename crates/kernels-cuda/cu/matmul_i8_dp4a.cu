@@ -14,16 +14,16 @@
 //   params : u32 [m, kg, n]   kg = K/4 packed words per row, K a multiple of 32
 //   x_q    : [M, kg] u32      activations, 4 signed int8 per word
 //   w_q    : [N, kg] u32      weights, 4 signed int8 per word
-//   sx     : [M]     f32      per-row activation scale
+//   sx     : [M, kg/8] f32    per-32-element-group activation scale
 //   sw     : [N, kg/8] f32    per-32-element-group weight scale
-//   out    : [M, N]  f32      out[m, n] = sx[m] * sum_g f32(sum_{k in g} x*w) * sw[n, g]
+//   out    : [M, N]  f32      out[m, n] = sum_g f32(sum_{k in g} x*w) * (sw[n, g] * sx[m, g])
 //
 // What it computes, exactly
 // -------------------------
 // The WGSL kernel sums each 32-element weight-scale group in int32 (exact in
 // any order), then folds the groups into one fp32 running total per output
-// in ascending group order as `d = d + f32(c) * sw` with the product and the
-// sum individually rounded, and multiplies by `sx` last. This kernel does
+// in ascending group order as `d = d + f32(c) * (sw * sx)` with each product
+// and the sum individually rounded. This kernel does
 // the same operations in the same order with explicit round-to-nearest
 // intrinsics, so no contraction can move a bit; the backend also compiles
 // with `--fmad=false`.
@@ -73,14 +73,14 @@
 //   wsm    : [N, ceil(K/64)] u32  per-group (sc, m) byte pairs, two groups a word
 //   wd     : [N, ceil(K/256)] u32 per-super-block (d, dmin) f16 pair
 //   xgs    : bound, not read      (the block sums its staged activations)
-//   out[m, n] = sx[m] * sum_g( ds[n,g]*A[m,n,g] - dm[n,g]*S[m,g] )
+//   out[m, n] = sum_g sx[m,g] * ( ds[n,g]*A[m,n,g] - dm[n,g]*S[m,g] )
 //
 // Staging turns a chunk's codes into the int8 words the inner loop already
 // multiplies (4-bit codes unpacked by two byte permutes; 8-bit codes are
 // already words), so the dp4a loop is the int8 one, unchanged. It also forms
 // each staged row's group sums S - exact int32 dp4a sums against a word of
 // ones, two threads per group joined by a shuffle - and each column's ds and
-// dm. The fold adds `ds*A - dm*S` with two fused multiply-adds: the K-quant
+// dm. The fold adds `(ds*A - dm*S) * sx` with fused multiply-adds: the K-quant
 // instances are held to the fp32 summation bound against an f64 oracle
 // (`tests/kq_native.rs`), not to the WGSL tier's bits.
 
@@ -117,6 +117,7 @@ struct BrainI8dShared {
     unsigned int a[2][BRAIN_I8D_BKW][BRAIN_I8D_SP];
     unsigned int b[2][BRAIN_I8D_BKW][BRAIN_I8D_SP];
     float s[2][2][BRAIN_I8D_BN];
+    float ax[2][2][BRAIN_I8D_BM];
 };
 
 // The K-quant block's tiles: the int8 ones plus each column's group mins and
@@ -127,6 +128,7 @@ struct BrainKqdShared {
     float s[2][2][BRAIN_I8D_BN];
     float dm[2][2][BRAIN_I8D_BN];
     float xs[2][2][BRAIN_I8D_BM];
+    float ax[2][2][BRAIN_I8D_BM];
 };
 
 // An f16 bit pattern as f32 (exact).
@@ -216,6 +218,10 @@ __device__ __forceinline__ void brain_i8d_block(Shared& sh, unsigned int m, unsi
         sh.s[b][sg][scol] = v.x;
         if constexpr (KQ) { sh.dm[b][sg][scol] = v.y; }
     };
+    // Row `row0 + scol`'s activation scale for group `g`, staged by the same
+    // threads as the weight scales.
+    const bool x_ok = row0 + scol < m;
+    auto fetch_act_scale = [&](unsigned int g) { return (x_ok && g < ng) ? __ldg(sx + (size_t)(row0 + scol) * ng + g) : 0.0f; };
     // The staged rows' activation group sums: the two threads holding a
     // row's half-groups join their exact partial sums.
     auto stage_sums = [&](unsigned int b, const uint4& va0, const uint4& va1) {
@@ -259,6 +265,7 @@ __device__ __forceinline__ void brain_i8d_block(Shared& sh, unsigned int m, unsi
         store(0, va0, va1, vb0, vb1);
         stage_sums(0, va0, va1);
         store_scales(0, fetch_scales(sg));
+        sh.ax[0][sg][scol] = fetch_act_scale(sg);
     }
     __syncthreads();
 
@@ -267,6 +274,7 @@ __device__ __forceinline__ void brain_i8d_block(Shared& sh, unsigned int m, unsi
         const bool has_next = ch + 1 < nchunks;
         uint4 na0, na1, nb0, nb1;
         float2 ns = make_float2(0.0f, 0.0f);
+        float nx = 0.0f;
         if (has_next) {
             const unsigned int k1 = (ch + 1) * BRAIN_I8D_BKW + sq;
             na0 = brain_i8d_load<VEC>(a0_base, a0_ok, k1, kg);
@@ -274,6 +282,7 @@ __device__ __forceinline__ void brain_i8d_block(Shared& sh, unsigned int m, unsi
             nb0 = brain_i8d_load_w<FMT, VEC>(b0_base, b0_ok, k1, kg);
             nb1 = brain_i8d_load_w<FMT, VEC>(b1_base, b1_ok, k1, kg);
             ns = fetch_scales((ch + 1) * 2 + sg);
+            nx = fetch_act_scale((ch + 1) * 2 + sg);
         }
 
 #pragma unroll
@@ -304,6 +313,9 @@ __device__ __forceinline__ void brain_i8d_block(Shared& sh, unsigned int m, unsi
                 const float4 s0 = *reinterpret_cast<const float4*>(&sh.s[buf][half][tx * 4]);
                 const float4 s1 = *reinterpret_cast<const float4*>(&sh.s[buf][half][64 + tx * 4]);
                 const float sv[8] = {s0.x, s0.y, s0.z, s0.w, s1.x, s1.y, s1.z, s1.w};
+                const float4 ax0 = *reinterpret_cast<const float4*>(&sh.ax[buf][half][ty * 4]);
+                const float4 ax1 = *reinterpret_cast<const float4*>(&sh.ax[buf][half][64 + ty * 4]);
+                const float axv[8] = {ax0.x, ax0.y, ax0.z, ax0.w, ax1.x, ax1.y, ax1.z, ax1.w};
                 if constexpr (KQ) {
                     const float4 m0 = *reinterpret_cast<const float4*>(&sh.dm[buf][half][tx * 4]);
                     const float4 m1 = *reinterpret_cast<const float4*>(&sh.dm[buf][half][64 + tx * 4]);
@@ -316,7 +328,7 @@ __device__ __forceinline__ void brain_i8d_block(Shared& sh, unsigned int m, unsi
 #pragma unroll
                         for (int j = 0; j < 8; ++j) {
                             const float cf = __fsub_rn(__int_as_float(c[i][j]), BRAIN_I8D_BIAS_F);
-                            d[i][j] = __fmaf_rn(-mv[j], xv[i], __fmaf_rn(cf, sv[j], d[i][j]));
+                            d[i][j] = __fmaf_rn(__fmaf_rn(-mv[j], xv[i], __fmul_rn(cf, sv[j])), axv[i], d[i][j]);
                         }
                     }
                 } else {
@@ -325,7 +337,7 @@ __device__ __forceinline__ void brain_i8d_block(Shared& sh, unsigned int m, unsi
 #pragma unroll
                         for (int j = 0; j < 8; ++j) {
                             const float cf = __fsub_rn(__int_as_float(c[i][j]), BRAIN_I8D_BIAS_F);
-                            d[i][j] = __fadd_rn(d[i][j], __fmul_rn(cf, sv[j]));
+                            d[i][j] = __fadd_rn(d[i][j], __fmul_rn(cf, __fmul_rn(sv[j], axv[i])));
                         }
                     }
                 }
@@ -337,23 +349,23 @@ __device__ __forceinline__ void brain_i8d_block(Shared& sh, unsigned int m, unsi
             store(nb, na0, na1, nb0, nb1);
             stage_sums(nb, na0, na1);
             store_scales(nb, ns);
+            sh.ax[nb][sg][scol] = nx;
         }
         __syncthreads();
     }
 
-    // Epilogue: the per-row activation scale, then guarded stores.
+    // Epilogue: guarded stores (both scales are already in).
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
         const unsigned int r = row0 + (i < 4 ? ty * 4 + i : 64 + ty * 4 + (i - 4));
         if (r >= m) { continue; }
-        const float sv = sx[r];
         float* orow = out + (size_t)r * n;
 #pragma unroll
         for (int h = 0; h < 2; ++h) {
             const unsigned int cbase = col0 + h * 64 + tx * 4;
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
-                if (cbase + j < n) { orow[cbase + j] = __fmul_rn(d[i][h * 4 + j], sv); }
+                if (cbase + j < n) { orow[cbase + j] = d[i][h * 4 + j]; }
             }
         }
     }

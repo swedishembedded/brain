@@ -26,14 +26,14 @@
 // `moe_linear_gated.wgsl` already makes for the fp32 tier. Promoting both to
 // a tiled/gathered design is one future change, not two.
 //
-// Same dequant contract as `matmul_i8_dyn`: dynamic per-token activation
+// Same dequant contract as `matmul_i8_dyn`: dynamic GROUP-WISE activation
 // scale (`sx`, from `model::int8::quant_rows_steps`) times the GROUP-WISE
 // weight scale (`sw`, from `model::int8::quantize_weight` - one per 32 int8
 // along K, `model::int8::GROUP`).
 //
 //   x_q  : [m, k/4]  u32   4 int8 activations packed along K per u32
 //   w_q  : [n, k/4]  u32   4 int8 weights    packed along K per u32
-//   sx   : [m]       f32   per-token activation scale
+//   sx   : [m, k/32] f32   group-wise activation scale
 //   sw   : [n, k/32] f32   group-wise weight scale
 //   gate : [m, n_experts]  dense per-token-per-expert weight (0 = not routed)
 //   out  : [m, n]    f32   out[row,:] = 0 for a non-routed row
@@ -87,7 +87,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         for (var j: u32 = 0u; j < WPG; j = j + 1u) {
             acc = acc + dot4I8Packed(xq[x_base + g0 + j], wq[w_base + g0 + j]);
         }
-        accf = accf + f32(acc) * sw[s_base + gr];
+        accf = accf + f32(acc) * (sw[s_base + gr] * sx[row * (p.kg / 8u) + gr * WPG / 8u]);
     }
-    out[idx] = accf * sx[row];
+    out[idx] = accf;
 }

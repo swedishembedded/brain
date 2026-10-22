@@ -202,7 +202,7 @@ fn host_group_sums(codes_x: &[i8], m: usize, k: usize, group: usize) -> Vec<f32>
     out
 }
 
-/// The f64 host oracle: `out[m,n] = sx[m] * Σ_g( ds[n,g]*A[m,n,g] -
+/// The f64 host oracle: `out[m,n] = Σ_g sx[m,g] * ( ds[n,g]*A[m,n,g] -
 /// dm[n,g]*S[m,g] )`, `A`/`S` from the SAME int8 codes the device consumes.
 #[allow(clippy::too_many_arguments)]
 fn host_oracle_affine(codes_x: &[i8], sx: &[f32], codes_w: &[i32], ds: &[f32], dm: &[f32], m: usize, k: usize, n: usize, group: usize) -> Vec<f32> {
@@ -220,9 +220,9 @@ fn host_oracle_affine(codes_x: &[i8], sx: &[f32], codes_w: &[i32], ds: &[f32], d
                     a += i64::from(codes_w[c * k + kk]) * xv;
                     s += xv;
                 }
-                acc += a as f64 * f64::from(ds[c * ng + g]) - s as f64 * f64::from(dm[c * ng + g]);
+                acc += f64::from(sx[r * ng + g]) * (a as f64 * f64::from(ds[c * ng + g]) - s as f64 * f64::from(dm[c * ng + g]));
             }
-            out[r * n + c] = (acc * f64::from(sx[r])) as f32;
+            out[r * n + c] = acc as f32;
         }
     }
     out
@@ -313,7 +313,7 @@ impl Scenario {
         assert_eq!(k % group, 0);
         let ng = k / group;
         let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
-        let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
+        let sx_h = rand_pos_f32(seed ^ 0x52, m * (k / 32), 0.3, 1.7);
         let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
         let (sc, mn, d_super, dmin_super) = rand_kq_scale(seed, n, ng, dmin_nonzero);
         Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc, mn, d_super, dmin_super }
@@ -481,7 +481,7 @@ fn case1_dmin_zero_vs_nonzero_are_genuinely_different() {
     let ng = k / group;
     let seed = data::rng::random_seed();
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
-    let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
+    let sx_h = rand_pos_f32(seed ^ 0x52, m * (k / 32), 0.3, 1.7);
     // Upper half of the nibble range (8..15): `ds*code` alone is already
     // sizeable, so a missing `dm` term is a systematic shift, not noise.
     let mut state = seed ^ 0x53;
@@ -549,7 +549,7 @@ fn case2_sub_block_scale_variation_across_groups() {
     let ng = k / group; // 8 groups
     let seed = data::rng::random_seed();
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
-    let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
+    let sx_h = rand_pos_f32(seed ^ 0x52, m * (k / 32), 0.3, 1.7);
     let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
     // `ng == GPS == 8` here (one whole super-block), so a single shared
     // `d_super = base` with `sc[gi] = 2^gi` reproduces `ds[gi] = base*2^gi`
@@ -597,7 +597,7 @@ fn case3_mixed_sign_activation_full_range_codes() {
     let seed = data::rng::random_seed();
     // Full [-127, 127] range - guarantees both signs are well represented.
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -127, 127);
-    let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
+    let sx_h = rand_pos_f32(seed ^ 0x52, m * (k / 32), 0.3, 1.7);
     // Full nibble range, including the upper half a sign-extension bug
     // would corrupt.
     let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
@@ -623,7 +623,7 @@ fn case4_all_zero_subblock_no_nan() {
     let ng = k / group;
     let seed = data::rng::random_seed();
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
-    let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
+    let sx_h = rand_pos_f32(seed ^ 0x52, m * (k / 32), 0.3, 1.7);
     let mut codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
     let (mut sc_bytes, mut mn, d_super, dmin_super) = rand_kq_scale(seed, n, ng, true);
     // Zero out group 3 entirely, for every output row: `sc=0` makes
@@ -660,7 +660,7 @@ fn case5_subrectangle_nonzero_origin_two_superblocks() {
     let ng = k / group; // 16
     let seed = data::rng::random_seed();
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
-    let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
+    let sx_h = rand_pos_f32(seed ^ 0x52, m * (k / 32), 0.3, 1.7);
     let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
     // `ng == 16 == 2*GPS` - two genuinely different super-blocks' worth of
     // `d_super` (the "exercises two genuinely different d values" this

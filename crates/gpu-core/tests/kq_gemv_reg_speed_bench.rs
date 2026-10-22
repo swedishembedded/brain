@@ -168,7 +168,7 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
             let m = 32u32;
             let codes_x = rand_i8_codes(9999, (m * k) as usize);
             let codes_w = rand_unsigned_codes(9998, (n * k) as usize, bits);
-            let sx = rand_pos_f32(9997, m as usize, 0.3, 1.7);
+            let sx = rand_pos_f32(9997, m as usize * ng, 0.3, 1.7);
             let (sc, mn, d_super, dmin_super) = rand_kq_scale(9996, n as usize, ng);
             let xq_words = pack_i8_words(&codes_x);
             let xq = g.storage(xq_words.len() as u64);
@@ -199,7 +199,7 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
 
             let codes_x = rand_i8_codes(9200 + u64::from(m), (m * k) as usize);
             let codes_w = rand_unsigned_codes(9300 + u64::from(m), (n * k) as usize, bits);
-            let sx = rand_pos_f32(9400 + u64::from(m), m as usize, 0.3, 1.7);
+            let sx = rand_pos_f32(9400 + u64::from(m), m as usize * ng, 0.3, 1.7);
             let (sc, mn, d_super, dmin_super) = rand_kq_scale(9500 + u64::from(m), n as usize, ng);
 
             let xq_words = pack_i8_words(&codes_x);

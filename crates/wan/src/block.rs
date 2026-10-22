@@ -74,7 +74,7 @@ pub(crate) const K_XSCORES_KT: usize = 20;
 /// between all four from the device's queried caps.
 pub(crate) const K_FLASH_REG: usize = 21;
 pub(crate) const K_FLASH_REG2: usize = 22;
-/// The quantized-storage tier (int8/int4, see [`QTier`]): dynamic per-token
+/// The quantized-storage tier (int8/int4, see [`QTier`]): dynamic group-wise
 /// activation quantization (`max_abs_row` -> `quant_pack`, unchanged from
 /// every other model's int8 path) plus the two DP4A-family GEMMs. Appended so
 /// every index above is unchanged; unused (and therefore free) on an
@@ -851,24 +851,24 @@ impl QBlockWeights {
 }
 
 /// Reused dynamic-activation-quantization scratch for the quantized block
-/// path - one (packed-int8, per-token-scale) pair per DISTINCT `(rows, width)`
+/// path - one (packed-int8, group-scale) pair per DISTINCT `(rows, width)`
 /// shape a block quantizes, reused sequentially across every linear that
 /// shape feeds (mirrors [`Scratch`]'s "allocate once, reuse across the whole
 /// stack" discipline).
 pub(crate) struct QScratch {
-    /// `[t]` / `[t·dim/4]` - every `dim`-wide, `t`-row activation: `n1` (feeds
+    /// `[t, ffn_dim/32]` / `[t·dim/4]` - every `dim`-wide, `t`-row activation: `n1` (feeds
     /// q/k/v), the self-attention context (feeds `o`), `n3` (feeds cq), the
     /// cross-attention context (feeds `co`), `n2` (feeds `ff1`).
     sx_t: DeviceBuffer,
     xq_t_dim: DeviceBuffer,
-    /// `[te]` / `[te·dim/4]` - the shared text context `ctx` (feeds ck/cv).
+    /// `[te, dim/32]` / `[te·dim/4]` - the shared text context `ctx` (feeds ck/cv).
     /// Separate from `sx_t`/`xq_t_dim`: `te` (`text_len`) and `t` (the video
     /// token count) are different row counts.
     sx_te: DeviceBuffer,
     xq_te_dim: DeviceBuffer,
     /// `[t·ffn_dim/4]` - the post-GELU FFN hidden activation (feeds `ff2`).
-    /// `sx_t` is reused for its per-row scale (same `t` rows, only the width
-    /// differs, and a scale is one value per row regardless of width).
+    /// `sx_t` is reused for its group scales (same `t` rows; it is sized for
+    /// this, the widest activation).
     xq_t_ffn: DeviceBuffer,
     /// `[t·rank]` / `[text_len·rank]` - the LoRA intermediate `h = x·Aᵀ`, one
     /// per ROW COUNT for the same reason `sx_t`/`sx_te` are two buffers. Both
@@ -885,9 +885,9 @@ impl QScratch {
     /// unadapted build, which then allocates no `h` at all.
     pub fn new(gpu: &Gpu, d: BlockDims, t: u32, rank: u32) -> QScratch {
         QScratch {
-            sx_t: gpu.storage(t as u64),
+            sx_t: gpu.storage(model::int8::act_scale_len(t as usize, d.dim.max(d.ffn_dim) as usize) as u64),
             xq_t_dim: gpu.storage((t * d.dim / 4) as u64),
-            sx_te: gpu.storage(d.text_len as u64),
+            sx_te: gpu.storage(model::int8::act_scale_len(d.text_len as usize, d.dim as usize) as u64),
             xq_te_dim: gpu.storage((d.text_len * d.dim / 4) as u64),
             xq_t_ffn: gpu.storage((t * d.ffn_dim / 4) as u64),
             // `.max(1)`: a zero-length storage buffer is not a thing every
@@ -898,8 +898,8 @@ impl QScratch {
     }
 }
 
-/// Quantize `x` (`[rows, k]`) into `(xq, sx)` with a fresh dynamic per-row
-/// scale - the shared activation-quant step both int8 and int4 (W4A8) read.
+/// Quantize `x` (`[rows, k]`) into `(xq, sx)` with fresh dynamic group
+/// scales - the shared activation-quant step both int8 and int4 (W4A8) read.
 fn qquant(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, sx: &DeviceBuffer, rows: u32, k: u32) {
     s.push(gpu.step(K_MAX_ABS_ROW, &[x, sx], &[rows, k], rows));
     s.push(gpu.step(K_QUANT_PACK, &[x, sx, xq], &[rows, k], rows * k / 4));

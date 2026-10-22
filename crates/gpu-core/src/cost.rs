@@ -472,15 +472,15 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(2 * m * k * count, count * k / 2 + count * k / 16 + 4 * (m * k + m * count))
         }
         // int8 DP4A GEMMs: params [m, kg = K/4, n]. The MACs are INTEGER ops
-        // (K = 4·kg of them per output); the dequant epilogue (acc·sx·sw) is fp32.
+        // (K = 4·kg of them per output); the per-group dequant (acc·sw·sx) is fp32.
         // `matmul_i8` is the static-scale sibling of the two below and was the
         // one member of the family without a formula — so any pass using it
         // (the batched int8 forward) could not report a rate at all.
         "matmul_i8" | "matmul_i8_dyn" | "matmul_i8_gemv" => {
             let (m, kg, n) = (p(0)?, p(1)?, p(2)?);
-            // Weight scales are GROUP-wise (`model::int8::GROUP` = 32 int8 =
-            // 8 packed words), so the `sw` term is `n * kg/8`, not `n`.
-            c(2 * m * n, 8 * m * kg * n, 4 * (m * kg + n * kg + m * n + m + n * kg / 8))
+            // Both scales are GROUP-wise (`model::int8::GROUP` = 32 int8 =
+            // 8 packed words): `sw` is `n * kg/8` words and `sx` `m * kg/8`.
+            c(2 * m * n, 8 * m * kg * n, 4 * (m * kg + n * kg + m * n + m * kg / 8 + n * kg / 8))
         }
         // M11's affine K-quant (Q4_K/Q5_K) GEMM/GEMV - `matmul_i8_dyn`'s own
         // family above, but this kernel's own param contract passes the RAW
@@ -503,7 +503,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             c(
                 2 * m * n,
                 2 * m * k * n,
-                4 * (m * (k / 4) + n * (k / 4) + m * n + m + 2 * n * (k / 32) + m * (k / 32)),
+                4 * (m * (k / 4) + n * (k / 4) + m * n + 2 * n * (k / 32) + 2 * m * (k / 32)),
             )
         }
         // q4 W4A8 GEMMs (int8 activation, int4 weight): params [m, k, n] with
@@ -516,19 +516,19 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // w's HALF-that [n, k/8] u32 footprint.
         "matmul_q4_dyn" | "matmul_q4_dyn_reg" | "matmul_q4_gemv" => {
             let (m, k, n) = (p(0)?, p(1)?, p(2)?);
-            c(2 * m * n, 2 * m * k * n, 4 * (m * (k / 4) + n * (k / 8) + m * n + m + n * (k / 32)))
+            c(2 * m * n, 2 * m * k * n, 4 * (m * (k / 4) + n * (k / 8) + m * n + m * (k / 32) + n * (k / 32)))
         }
         // Activation quantization: params [m, k]; q = clamp(round(x/sx)).
         "quant_pack" => {
             let (m, k) = (p(0)?, p(1)?);
-            f(3 * m * k, 5 * m * k + 4 * m)
+            f(3 * m * k, 5 * m * k + 4 * m * (k / 32))
         }
-        // Per-row max|x| scale: params [m, k]. `max_abs_rows` is the
+        // Per-group max|x| scales: params [m, k]. `max_abs_rows` is the
         // cooperative (workgroup-per-row) variant of the same op — same reads,
         // same writes, only the thread mapping differs.
         "max_abs_row" | "max_abs_rows" => {
             let (m, k) = (p(0)?, p(1)?);
-            f(m * k, 4 * (m * k + m))
+            f(m * k, 4 * (m * k + m * (k / 32)))
         }
         // M9's affine K-quant activation-only correction prepass: params
         // [m, k]; one thread per (row, GROUP=32-element group) output,

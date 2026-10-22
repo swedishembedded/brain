@@ -38,13 +38,13 @@
 //
 //   xq   : [m, k/4]              u32 - 4 int8 activations packed along K per u32
 //   wq   : [n, k*CODE_BITS/32]   u32 - K-CONTIGUOUS unsigned codes, `32/CODE_BITS` codes per word, low bits first
-//   sx   : [m]                   f32 - per-token activation scale
+//   sx   : [m, k/32]             f32 - group-wise activation scale
 //   wsm  : [n, ceil(k/32/2)]     u32 - (M14) packed per-group (sc, m) sub-scale byte pairs - see matmul_kq_dyn.wgsl's own header for the exact bit layout
 //   wd   : [n, ceil(k/32/GPS)]   u32 - (M14) packed per-super-block (d, dmin) f16 bit-pattern pairs, GPS=8 groups/super-block
 //   xgs  : [m, k/32]             f32 - activation group sums (quant_group_sum.wgsl)
 //   gate : [m, n_experts]        f32 - dense per-token-per-expert weight (0 = not routed)
 //   out  : [m, n]                f32 - out[row,:] = 0 for a non-routed row, else
-//                                       sx[row] * Σ_g( ds[n,g]*A[row,n,g] - dm[n,g]*S[row,g] )
+//                                       Σ_g sx[row,g] * ( ds[n,g]*A[row,n,g] - dm[n,g]*S[row,g] )
 //
 // (M14) this is the kernel whose extra `wd` binding was checked against the
 // engine's <=8-storage-buffer budget: `xq, wq, sx, wsm, wd, xgs, gate, out`
@@ -81,7 +81,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       xq:   array<u32>;  // [m, k/4]
 @group(0) @binding(2) var<storage, read>       wq:   array<u32>;  // [n, k*CODE_BITS/32]
-@group(0) @binding(3) var<storage, read>       sx:   array<f32>;  // [m]
+@group(0) @binding(3) var<storage, read>       sx:   array<f32>;  // [m, k/32]
 @group(0) @binding(4) var<storage, read>       wsm:  array<u32>;  // [n, ceil(k/32/2)] packed (sc, m) pairs
 @group(0) @binding(5) var<storage, read>       wd:   array<u32>;  // [n, ceil(k/32/GPS)] packed (d, dmin) f16 pairs
 @group(0) @binding(6) var<storage, read>       xgs:  array<f32>;  // [m, k/32]
@@ -176,7 +176,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
         let ds = dh_f32 * f32((sword >> shift) & 0xFFu);
         let dm = dmh_f32 * f32((sword >> (shift + 8u)) & 0xFFu);
-        accf = accf + f32(acc) * ds - dm * xgs[g_base + gr];
+        accf = accf + (f32(acc) * ds - dm * xgs[g_base + gr]) * sx[row * (p.k / 32u) + gr * WPGK / 8u];
     }
-    out[idx] = accf * sx[row];
+    out[idx] = accf;
 }

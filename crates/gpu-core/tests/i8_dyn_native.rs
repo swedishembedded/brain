@@ -16,7 +16,8 @@
 //! the int32 sum of one 32-element weight-scale group is exact in any order,
 //! and the native kernel then folds the groups into its fp32 running sum in
 //! ascending order with the same two individually rounded operations
-//! (`d + f32(c) * sw`) and applies `sx` last, exactly as the WGSL kernel does.
+//! (`d + f32(c) * (sw * sx)`, the scale product rounded first), exactly as the
+//! WGSL kernel does.
 //! The reference is `matmul_i8_dyn_ref`, the same WGSL source under a name the
 //! upgrade table does not know, so both sides run on one device from the same
 //! inputs and differ only in which kernel ran.
@@ -119,7 +120,7 @@ fn run(gpu: &Gpu, c: &Case) -> (Vec<u32>, Vec<u32>) {
     let seed = u64::from(c.m) * 131 + u64::from(c.kg) * 7 + u64::from(c.n);
     let x = Windowed::new(gpu, &packed(m * kg, seed + 1), c.lead[0]);
     let w = Windowed::new(gpu, &packed(n * kg, seed + 2), c.lead[1]);
-    let sx = Windowed::new(gpu, &scales(m, seed + 3), c.lead[2]);
+    let sx = Windowed::new(gpu, &scales(m * ng, seed + 3), c.lead[2]);
     let sw = Windowed::new(gpu, &scales(n * ng, seed + 4), c.lead[3]);
     let a = Windowed::new(gpu, &vec![SENTINEL; m * n], c.lead[4]);
     let b = Windowed::new(gpu, &vec![SENTINEL; m * n], c.lead[4]);

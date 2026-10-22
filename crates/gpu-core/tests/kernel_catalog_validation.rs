@@ -63,21 +63,25 @@ fn diff(want: &[f32], got: &[f32]) -> (f32, f32) {
 /// `bench_matmul.rs`'s own `quant_rows` duplicates the quantizer).
 const GROUP: usize = 32;
 
-/// Per-row symmetric quantization of an ACTIVATION, matching what
-/// `max_abs_row`/`quant_pack` do on device: one scale per row, 4 int8 per u32.
-/// Returns packed `[rows, k/4]` u32, the per-row scale, and the UNPACKED
+/// Per-group symmetric quantization of an ACTIVATION, matching what
+/// `max_abs_row`/`quant_pack` do on device: one scale per 32-element group of
+/// each row, 4 int8 per u32. Returns packed `[rows, k/4]` u32, the `[rows, k/32]` scale, and the UNPACKED
 /// signed values for an exact host reference.
 fn quant_act(x: &[f32], rows: usize, k: usize) -> (Vec<u32>, Vec<f32>, Vec<i8>) {
     let kg = k / 4;
     let mut packed = vec![0u32; rows * kg];
-    let mut scale = vec![0f32; rows];
+    let gs = k / GROUP;
+    let mut scale = vec![0f32; rows * gs];
     let mut q = vec![0i8; rows * k];
     for r in 0..rows {
         let row = &x[r * k..r * k + k];
-        let s = row.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / 127.0;
-        scale[r] = s;
-        for c in 0..k {
-            q[r * k + c] = (row[c] / s).round().clamp(-127.0, 127.0) as i8;
+        for g in 0..gs {
+            let blk = &row[g * GROUP..g * GROUP + GROUP];
+            let s = blk.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / 127.0;
+            scale[r * gs + g] = s;
+            for c in 0..GROUP {
+                q[r * k + g * GROUP + c] = (blk[c] / s).round().clamp(-127.0, 127.0) as i8;
+            }
         }
         for g in 0..kg {
             let mut word = 0u32;
@@ -125,7 +129,7 @@ fn quant_weight(x: &[f32], rows: usize, k: usize, per_word: usize, qmax: f32) ->
 }
 
 /// Exact reference for the group-wise contract:
-/// `out[m,n] = sx[m] * sum_g (sum_{k in g} xq*wq) * sw[n,g]`. The inner sum is
+/// `out[m,n] = sum_g (sum_{k in g} xq*wq) * (sw[n,g] * sx[m,g])`. The inner sum is
 /// integer and exact; only the cross-group fold is floating point, which is
 /// exactly what the kernels do.
 fn host_group_gemm(xq: &[i8], wq: &[i8], sx: &[f32], sw: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
@@ -139,9 +143,9 @@ fn host_group_gemm(xq: &[i8], wq: &[i8], sx: &[f32], sw: &[f32], m: usize, k: us
                 for ki in g * GROUP..g * GROUP + GROUP {
                     ia += xq[mi * k + ki] as i32 * wq[ni * k + ki] as i32;
                 }
-                acc += ia as f32 * sw[ni * gs + g];
+                acc += ia as f32 * (sw[ni * gs + g] * sx[mi * gs + g]);
             }
-            out[mi * n + ni] = acc * sx[mi];
+            out[mi * n + ni] = acc;
         }
     }
     out

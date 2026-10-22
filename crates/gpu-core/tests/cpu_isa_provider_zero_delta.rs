@@ -135,7 +135,7 @@ fn cpu_isa_i8_matmul_reaches_the_native_avx2_gemm() {
     let caps = gpu.caps();
     assert_eq!(caps.class, backend_api::DeviceClass::Cpu, "this test must actually run on the CPU backend");
 
-    // out[m,n] = sx[m] * Σ_g dot_g(m,n) * sw[n,g]; one group (kg=8 words).
+    // out[m,n] = Σ_g dot_g(m,n) * (sw[n,g] * sx[m,g]); one group (kg=8 words).
     // This test only needs the ABI plumbing right (operand order, native id
     // resolution), not interesting numerics - constructed directly as raw
     // packed `u32` words (bit-reinterpreted as `f32` for `storage_init`, the
@@ -184,7 +184,7 @@ fn cpu_isa_i8_matmul_reaches_the_native_avx2_gemm() {
     assert_eq!(lowered.kernels, vec!["cpu_matmul_i8_dyn"]);
     gpu.submit(&[], &steps);
     let got = gpu.read(&out, (m * n) as usize);
-    // out[m,n] = sx[m]*1*wq[n,word0,lane0]*xq[m,word0,lane0] (every other
+    // out[m,n] = sx[m,0]*1*wq[n,word0,lane0]*xq[m,word0,lane0] (every other
     // lane/word is 0): out = [[1*3, 1*4], [2*3, 2*4]] = [3, 4, 6, 8].
     assert_eq!(got, vec![3.0, 4.0, 6.0, 8.0]);
 }

@@ -348,7 +348,7 @@ pub enum BasePrecision {
     /// fp32, `matmul_reg3` forward and `matmul_dx_reg` input gradient.
     F32,
     /// Packed int8 with group-32 scales, exactly as `crate::model` serves a
-    /// Q8_0 checkpoint: the forward quantises each activation per row and
+    /// Q8_0 checkpoint: the forward quantises each activation per 32 elements and
     /// runs the DP4A GEMM (`matmul_i8_dyn`) - the served arithmetic - and the
     /// input gradient runs through the dequantised weight in fp32
     /// (`gpu_core::Fused::I8wDx`, the activation quantisation passed straight
@@ -799,7 +799,7 @@ impl BlockDev {
                 s.push(self.mm_rows((x, xr0), w, (y, (yr0 * out) as u64), m, inn, out));
             }
             (Base::I8 { wq, sw }, Some(scr)) => {
-                // The served forward: this activation quantised per row, then
+                // The served forward: this activation quantised per group, then
                 // the DP4A GEMM. Re-quantised per linear rather than shared
                 // between the linears that read it, which costs a pass over
                 // `x` each and changes nothing they compute.

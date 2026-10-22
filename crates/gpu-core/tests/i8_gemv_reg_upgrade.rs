@@ -67,7 +67,7 @@ fn scales(n: usize, seed: u64) -> Vec<f32> {
 /// Packed `u32` words per weight-scale group (`model::int8::GROUP` / 4).
 const WPG: usize = 8;
 
-/// `out[m,n] = sx[m] * sum_g (sum_{k in g} xq . wq) * sw[n,g]`, the inner sums
+/// `out[m,n] = sum_g (sum_{k in g} xq . wq) * (sw[n,g] * sx[m,g])`, the inner sums
 /// in `i64` and the fold in `f64`. Returns `(value, magnitude)` per element,
 /// the magnitude being `sum_g |term|` - what a floating-point fold of these
 /// terms can be off by, per unit of rounding.
@@ -85,12 +85,12 @@ fn oracle(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], m: usize, kg: usize, n
                 for g in gr * WPG..gr * WPG + WPG {
                     ia += lanes(xq[mi * kg + g]).zip(lanes(wq[ni * kg + g])).map(|(a, b)| a * b).sum::<i64>();
                 }
-                let term = ia as f64 * sw[ni * ng + gr] as f64;
+                let term = ia as f64 * (sw[ni * ng + gr] * sx[mi * ng + gr]) as f64;
                 acc += term;
                 amag += term.abs();
             }
-            out[mi * n + ni] = (acc * sx[mi] as f64) as f32;
-            mag[mi * n + ni] = (amag * sx[mi] as f64) as f32;
+            out[mi * n + ni] = acc as f32;
+            mag[mi * n + ni] = amag as f32;
         }
     }
     (out, mag)
@@ -103,12 +103,12 @@ fn run(gpu: &Gpu, m: u32, kg: u32, n: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec
     let ng = kg / WPG as u32;
     let xq = packed((m * kg) as usize, u64::from(m) * 7 + 1);
     let wq = packed((n * kg) as usize, u64::from(n) * 13 + 3);
-    let sx = scales(m as usize, u64::from(m) + 101);
+    let sx = scales((m * ng) as usize, u64::from(m) + 101);
     let sw = scales((n * ng) as usize, u64::from(n) + 202);
 
     let xb = gpu.storage(u64::from(m * kg));
     let wb = gpu.storage(u64::from(n * kg));
-    let sxb = gpu.storage(u64::from(m));
+    let sxb = gpu.storage(u64::from(m * ng));
     let swb = gpu.storage(u64::from(n * ng));
     gpu.write(&xb, &xq);
     gpu.write(&wb, &wq);

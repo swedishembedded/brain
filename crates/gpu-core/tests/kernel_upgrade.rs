@@ -29,7 +29,8 @@ fn fill(m: u32, k: u32) -> Vec<f32> {
         .collect()
 }
 
-/// Host reference for `sx[r] = max(max|x[r,:]|, 1e-8) / 127`.
+/// Host reference for `sx[r, g] = max(max|x[r, 32g..32g+32]|, 1e-8) / 127`,
+/// row-major `[m, k/32]` (`k` a multiple of 32).
 ///
 /// Compared with a small relative tolerance, NOT bit-exactly: the shader's
 /// `/ 127.0` is not required to round like the host's, so a host reference can
@@ -37,11 +38,9 @@ fn fill(m: u32, k: u32) -> Vec<f32> {
 /// equal is the two KERNELS against each other, since `max` is associative and
 /// exact — that is asserted in `bench_max_abs_row.rs`, which can register both.
 fn host_scales(x: &[f32], m: u32, k: u32) -> Vec<f32> {
-    (0..m as usize)
-        .map(|r| {
-            let a = x[r * k as usize..(r + 1) * k as usize].iter().fold(0f32, |a, &v| a.max(v.abs()));
-            a.max(1e-8) / 127.0
-        })
+    x[..(m * k) as usize]
+        .chunks_exact(32)
+        .map(|group| group.iter().fold(0f32, |a, &v| a.max(v.abs())).max(1e-8) / 127.0)
         .collect()
 }
 
@@ -49,7 +48,7 @@ fn host_scales(x: &[f32], m: u32, k: u32) -> Vec<f32> {
 fn assert_close(got: &[f32], want: &[f32], what: &str) {
     assert_eq!(got.len(), want.len(), "{what}: length");
     for (i, (&g, &w)) in got.iter().zip(want).enumerate() {
-        assert!((g - w).abs() <= 1e-6 * w.abs().max(1e-6), "{what}: row {i}: {g} vs {w}");
+        assert!((g - w).abs() <= 1e-6 * w.abs().max(1e-6), "{what}: group {i}: {g} vs {w}");
     }
 }
 
@@ -75,14 +74,14 @@ fn fast_variant_is_appended_without_moving_indices() {
 #[test]
 fn unchanged_dispatch_site_gets_correct_scales() {
     let gpu = gpu_core::testgpu::dev(AS_A_MODEL_REGISTERS_IT);
-    for &(m, k) in &[(1u32, 3072u32), (7, 65), (64, 300), (512, 1024), (129, 3072)] {
+    for &(m, k) in &[(1u32, 3072u32), (7, 96), (64, 320), (512, 1024), (129, 3072)] {
         let x = fill(m, k);
         let xb = gpu.storage_init("x", &x);
-        let sx = gpu.storage((m * 4) as u64);
+        let sx = gpu.storage((m * (k / 32)) as u64);
         // Verbatim the shape of `qwen3::q8` / `s3dit::block` / flux2's call.
         let s = gpu.step(0, &[&xb, &sx], &[m, k], m);
         gpu.submit(&[], &[s]);
-        assert_close(&gpu.read(&sx, m as usize), &host_scales(&x, m, k), &format!("{m}x{k}"));
+        assert_close(&gpu.read(&sx, (m * (k / 32)) as usize), &host_scales(&x, m, k), &format!("{m}x{k}"));
     }
 }
 
@@ -95,7 +94,7 @@ fn unchanged_dispatch_site_gets_correct_scales() {
 fn meta_stays_in_the_callers_index_space() {
     let gpu = gpu_core::testgpu::dev(AS_A_MODEL_REGISTERS_IT);
     let x = gpu.storage_init("x", &fill(8, 64));
-    let sx = gpu.storage(8 * 4);
+    let sx = gpu.storage(8 * 2);
     let s = gpu.step(0, &[&x, &sx], &[8, 64], 8);
     let m = s.meta().expect("step built through the facade");
     assert_eq!(m.kernel, 0, "meta must name the slot the CALLER dispatched");
@@ -118,16 +117,16 @@ fn sliced_dispatch_site_gets_correct_scales() {
     let (r0, m) = (64u32, 96u32);
     let x = fill(rows, k);
     let xb = gpu.storage_init("x", &x);
-    let sx = gpu.storage((rows * 4) as u64);
+    let sx = gpu.storage((rows * (k / 32)) as u64);
     let s = gpu.step_sliced(
         0,
         &[&xb, &sx],
-        &[(r0 as u64 * k as u64, m as u64 * k as u64), (r0 as u64, m as u64)],
+        &[(r0 as u64 * k as u64, m as u64 * k as u64), (r0 as u64 * (k / 32) as u64, m as u64 * (k / 32) as u64)],
         &[m, k],
         m,
     );
     gpu.submit(&[], &[s]);
-    let got = gpu.read(&sx, rows as usize);
+    let got = gpu.read(&sx, (rows * (k / 32)) as usize);
     let want = host_scales(&x[(r0 * k) as usize..((r0 + m) * k) as usize], m, k);
-    assert_close(&got[r0 as usize..(r0 + m) as usize], &want, "sliced rows");
+    assert_close(&got[(r0 * (k / 32)) as usize..((r0 + m) * (k / 32)) as usize], &want, "sliced rows");
 }

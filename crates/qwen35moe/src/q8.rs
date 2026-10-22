@@ -223,13 +223,13 @@ impl Qwen35Q8 {
         // `d_model` is the only width this module's sole quant call site
         // (`xn2`, feeding every expert's gate/up) ever reads -- the expert's
         // own `h` is quantized separately by `moe_swiglu_quant`.
-        let sx = gpu.storage(n_tokens.max(1) as u64);
+        let sx = gpu.storage(model::int8::act_scale_len(n_tokens as usize, d).max(1) as u64);
         let xq = gpu.storage(((n_tokens as u64) * (d as u64) / 4).max(1));
         Qwen35Q8 { moe, sx, xq, k_max_abs_row, k_quant_pack }
     }
 
     /// Quantize activation `x` `[n_tokens · k]` into `self.xq` with fresh
-    /// per-token scales `self.sx`. Call once per distinct input (shared by
+    /// group scales `self.sx`. Call once per distinct input (shared by
     /// every linear that reads that SAME input, e.g. xn1 -> q/k/v-proj); a
     /// later `quant` call for a DIFFERENT input safely overwrites `xq`/`sx`
     /// once every earlier consumer's step has already been pushed ahead of it

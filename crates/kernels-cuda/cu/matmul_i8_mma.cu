@@ -7,16 +7,16 @@
 // group-wise scales, then you can procure our services by sending an email to
 // info@swedishembedded.com.
 //
-// out = diag(sx) . (x_q . W_q^T) with GROUP-WISE weight scales, on int8
+// out = x_q . W_q^T with GROUP-WISE activation and weight scales, on int8
 // TENSOR CORES (`mma.sync.m16n8k32` s8 x s8 -> s32). The CUDA form of the
 // portable `matmul_i8_dyn.wgsl`, with the identical argument contract:
 //
 //   params : [M, KG, N] u32   KG = K/4 (packed int8 words along K)
 //   x_q    : [M, K/4]   u32   4 int8 activations per word, row-major
 //   w_q    : [N, K/4]   u32   4 int8 weights per word, row-major
-//   sx     : [M]        f32   per-token activation scale
+//   sx     : [M, K/32]  f32   per-(row, 32-element group) activation scale
 //   sw     : [N, K/32]  f32   per-(row, 32-element group) weight scale
-//   out    : [M, N]     f32   out[m,n] = sx[m] * sum_g sw[n,g] * (sum_{k in g} xq[m,k]*wq[n,k])
+//   out    : [M, N]     f32   out[m,n] = sum_g (sw[n,g] * sx[m,g]) * (sum_{k in g} xq[m,k]*wq[n,k])
 //
 // Requires K % 64 == 0 (two scale groups per staged k-tile); the provider
 // declines any other K and the portable kernel serves it.
@@ -30,7 +30,7 @@
 // scale only per output row/column. Folding the scale into the int32 sum is
 // legal only at a group boundary - which is exactly one `k32` MMA. So every
 // MMA here starts from a fresh accumulator, and its result is folded into
-// an f32 running total through that group's scale before the next MMA.
+// an f32 running total through that group's two scales before the next MMA.
 //
 // The fold is the bottleneck, not the MMA, so it is built from the two
 // cheapest instructions available:
@@ -52,8 +52,8 @@
 // k-tile. Tiles are stored 64 bytes per row with the 16-byte chunk index
 // XOR-swizzled by (row >> 1) & 3, which makes every ldmatrix phase (8 rows,
 // same logical chunk) touch eight distinct 16-byte bank groups. The per-
-// group weight scales ride the same pipeline (two floats per weight row per
-// stage).
+// group weight and activation scales ride the same pipeline (two floats per
+// weight row and per row of x per stage).
 //
 // No `__restrict__`: brain's device buffers alias by design (sliced steps bind
 // ranges of one allocation).
@@ -84,6 +84,7 @@
 #define A_STAGE_BYTES (BRAIN_I8_BM * BK)
 #define B_STAGE_BYTES (BRAIN_I8_BN * BK)
 #define S_STAGE_FLOATS (BRAIN_I8_BN * 2)
+#define X_STAGE_FLOATS (BRAIN_I8_BM * 2)
 
 #define FLOAT_BIAS_BITS 0x4B400000u              // 1.5 * 2^23
 #define FLOAT_BIAS 12582912.0f
@@ -153,6 +154,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_matmul_i8_mma(const 
     __shared__ __align__(128) unsigned char As[BRAIN_I8_STAGES][A_STAGE_BYTES];
     __shared__ __align__(128) unsigned char Bs[BRAIN_I8_STAGES][B_STAGE_BYTES];
     __shared__ __align__(16) float Ss[BRAIN_I8_STAGES][S_STAGE_FLOATS];
+    __shared__ __align__(16) float Xs[BRAIN_I8_STAGES][X_STAGE_FLOATS];
 
     const unsigned int tid = threadIdx.x;
     const unsigned int lane = tid & 31u;
@@ -194,6 +196,10 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_matmul_i8_mma(const 
     const bool s_ok = tid < BRAIN_I8_BN && col0 + tid < N;
     const float* s_src = sw + (unsigned long long)(s_ok ? col0 + tid : 0u) * ng;
     const unsigned int s_dst = brain_smem_addr(&Ss[0][0]) + tid * 8u;
+    // Likewise one 8-byte copy of two activation group scales per row of x.
+    const bool x_ok = tid < BRAIN_I8_BM && row0 + tid < M;
+    const float* x_src = sx + (unsigned long long)(x_ok ? row0 + tid : 0u) * ng;
+    const unsigned int x_dst = brain_smem_addr(&Xs[0][0]) + tid * 8u;
     const unsigned int a_smem = brain_smem_addr(&As[0][0]);
     const unsigned int b_smem = brain_smem_addr(&Bs[0][0]);
 
@@ -212,6 +218,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_matmul_i8_mma(const 
             // ng is even (K % 64 == 0) and kt*2 is even: 8-byte aligned.
             brain_cp8(s_dst + s * (S_STAGE_FLOATS * 4u), s_src + kt * 2u, s_ok ? 8u : 0u);
         }
+        if (tid < BRAIN_I8_BM) { brain_cp8(x_dst + s * (X_STAGE_FLOATS * 4u), x_src + kt * 2u, x_ok ? 8u : 0u); }
     };
 
     float f[MT][NT][4];
@@ -261,6 +268,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_matmul_i8_mma(const 
         const unsigned int a_base = a_smem + s_rd * A_STAGE_BYTES;
         const unsigned int b_base = b_smem + s_rd * B_STAGE_BYTES;
         const float* ss = &Ss[s_rd][sc_off];
+        const float* xs = &Xs[s_rd][0];
         s_rd = (s_rd + 1 == BRAIN_I8_STAGES) ? 0u : s_rd + 1;
 
         // Both k32 scales of both columns of every n8 tile this thread folds
@@ -286,10 +294,14 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_matmul_i8_mma(const 
                     brain_mma_s8(d, a, b[nt][0], b[nt][1]);
                     const float s0 = ks == 0 ? sc[nt].x : sc[nt].y;   // column 2t
                     const float s1 = ks == 0 ? sc[nt].z : sc[nt].w;   // column 2t + 1
-                    f[mt][nt][0] = fmaf(__uint_as_float(d[0]) - FLOAT_BIAS, s0, f[mt][nt][0]);
-                    f[mt][nt][1] = fmaf(__uint_as_float(d[1]) - FLOAT_BIAS, s1, f[mt][nt][1]);
-                    f[mt][nt][2] = fmaf(__uint_as_float(d[2]) - FLOAT_BIAS, s0, f[mt][nt][2]);
-                    f[mt][nt][3] = fmaf(__uint_as_float(d[3]) - FLOAT_BIAS, s1, f[mt][nt][3]);
+                    // Rows g and g + 8 of the m16 tile.
+                    const unsigned int xr = wm * WM + mt * 16u + (lane >> 2);
+                    const float xa = xs[xr * 2u + ks];
+                    const float xb = xs[(xr + 8u) * 2u + ks];
+                    f[mt][nt][0] = fmaf(__uint_as_float(d[0]) - FLOAT_BIAS, s0 * xa, f[mt][nt][0]);
+                    f[mt][nt][1] = fmaf(__uint_as_float(d[1]) - FLOAT_BIAS, s1 * xa, f[mt][nt][1]);
+                    f[mt][nt][2] = fmaf(__uint_as_float(d[2]) - FLOAT_BIAS, s0 * xb, f[mt][nt][2]);
+                    f[mt][nt][3] = fmaf(__uint_as_float(d[3]) - FLOAT_BIAS, s1 * xb, f[mt][nt][3]);
                 }
             }
         }
@@ -305,16 +317,15 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_matmul_i8_mma(const 
         for (int half = 0; half < 2; ++half) {
             const unsigned int r = row0 + wm * WM + mt * 16u + g + half * 8u;
             if (r >= M) { continue; }
-            const float s = sx[r];
 #pragma unroll
             for (int nt = 0; nt < NT; ++nt) {
                 const unsigned int c = col0 + wn * WN + nt * 8u + t4 * 2u;
                 float* o = out + (unsigned long long)r * N + c;
                 if (c + 1u < N && (N & 1u) == 0u) {
-                    *reinterpret_cast<float2*>(o) = make_float2(f[mt][nt][half * 2] * s, f[mt][nt][half * 2 + 1] * s);
+                    *reinterpret_cast<float2*>(o) = make_float2(f[mt][nt][half * 2], f[mt][nt][half * 2 + 1]);
                 } else {
-                    if (c < N) { o[0] = f[mt][nt][half * 2] * s; }
-                    if (c + 1u < N) { o[1] = f[mt][nt][half * 2 + 1] * s; }
+                    if (c < N) { o[0] = f[mt][nt][half * 2]; }
+                    if (c + 1u < N) { o[1] = f[mt][nt][half * 2 + 1]; }
                 }
             }
         }

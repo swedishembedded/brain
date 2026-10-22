@@ -66,7 +66,7 @@ fn check(gpu: &Gpu, m: u32, kg: u32, ns: &[u32], seed: u64) {
     assert!(ns.len() <= 4);
     let ng = (kg / 8) as usize;
     let xq = gpu.storage_init("xq", &packed((m * kg) as usize, seed + 1).iter().map(|w| f32::from_bits(*w)).collect::<Vec<_>>());
-    let sx = gpu.storage_init("sx", &scales(m as usize, seed + 2));
+    let sx = gpu.storage_init("sx", &scales(m as usize * ng, seed + 2));
     let mats: Vec<(DeviceBuffer, DeviceBuffer)> = ns
         .iter()
         .enumerate()

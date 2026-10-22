@@ -122,7 +122,7 @@ const K_ROPE2D: usize = 9;
 /// gated attention needs, so it composes from `matmul`+`sigmoid`+`mul`
 /// instead - see [`attention`]'s doc).
 const K_SIGMOID: usize = 10;
-/// The quantized-compute tier (int8/int4 - see [`QTier`]): dynamic per-token
+/// The quantized-compute tier (int8/int4 - see [`QTier`]): dynamic group-wise
 /// activation quantization (`max_abs_row` -> `quant_pack`, the same recipe
 /// `crates/wan/src/block.rs`'s `QTier` path and `crates/model/src/int8.rs`'s
 /// `QuantRows` use) plus the two DP4A-family GEMMs. Appended so every index
@@ -1526,7 +1526,7 @@ impl LtxAvBlock {
 // set stays fp32, unchanged) is packed per-output-row (`model::int8::
 // quantize_weight`, 4 int8 lanes/u32) with one fp32 scale per 32-element
 // group of K (`model::int8::GROUP`); activations are
-// quantized dynamically per row each forward (`max_abs_row` -> `quant_pack`,
+// quantized dynamically per 32-element group each forward (`max_abs_row` -> `quant_pack`,
 // the SAME recipe `crates/wan/src/block.rs`'s `QTier` path uses) and the
 // DP4A GEMM (`matmul_i8_dyn`) dequantizes with `sx*sw` on the way out -
 // brain's established "quantized storage, fp32 arithmetic result" contract.
@@ -1876,11 +1876,10 @@ impl QBlockWeights {
     }
 }
 
-/// Quantize `x` (`[rows, k]`) into `(xq, sx)` with a fresh dynamic per-row
-/// scale - the shared activation-quant step every quantized linear below
-/// reads. `k` must be a multiple of 4 (`quant_pack` writes four int8 per
-/// `u32`); the WEIGHT side additionally needs `k % 32 == 0`
-/// (`model::int8::GROUP`).
+/// Quantize `x` (`[rows, k]`) into `(xq, sx)` with fresh dynamic group
+/// scales - the shared activation-quant step every quantized linear below
+/// reads. `k` must be a multiple of 32 (`model::int8::GROUP`), the scale
+/// group of both sides.
 fn qquant(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, sx: &DeviceBuffer, rows: u32, k: u32) {
     s.push(gpu.step(K_MAX_ABS_ROW, &[x, sx], &[rows, k], rows));
     s.push(gpu.step(K_QUANT_PACK, &[x, sx, xq], &[rows, k], rows * k / 4));
@@ -1912,7 +1911,7 @@ fn qlinear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &De
 #[allow(clippy::too_many_arguments)]
 fn qquant_linear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, x: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
     let xq = gpu.storage((rows * k / 4) as u64);
-    let sx = gpu.storage(rows as u64);
+    let sx = gpu.storage(model::int8::act_scale_len(rows as usize, k as usize) as u64);
     qquant(gpu, s, x, &xq, &sx, rows, k);
     qlinear(gpu, s, tier, &xq, &sx, w, out, rows, k, n);
 }

@@ -21,7 +21,7 @@
 // so the GEMM's per-output value needs a second reduction alongside the usual
 // int8 dot product:
 //
-//   out[m,n] = sx[m] * Σ_g( ds[n,g]*A[m,n,g] - dm[n,g]*S[m,g] )
+//   out[m,n] = Σ_g sx[m,g] * ( ds[n,g]*A[m,n,g] - dm[n,g]*S[m,g] )
 //
 // A[m,n,g] = Σ_{k in g}( q[n,k]*xq[m,k] ) is the existing dot4I8Packed-shaped
 // term every int8 GEMM already computes in its k-loop. S[m,g] = Σ_{k in g}(

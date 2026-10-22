@@ -119,7 +119,7 @@ const GROUP: usize = 32;
 fn run(g: &Gpu, name: &str, m: usize, k: usize, n: usize, bits: u32, seed: u64) -> Vec<f32> {
     let ng = k / GROUP;
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k);
-    let sx = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
+    let sx = rand_pos_f32(seed ^ 0x52, m * ng, 0.3, 1.7);
     let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
     let (sc, mn, d_super, dmin_super) = rand_kq_scale(seed, n, ng);
 
@@ -199,6 +199,10 @@ fn the_upgrade_is_active_for_both_code_bits_independently() {
 /// real `assert_eq!` on the bits, not a tolerance.
 #[test]
 fn the_register_kernel_is_byte_identical_to_the_plain_gemv() {
+    // Both sides must be the WGSL tiers: on a CUDA device the plain kernel's
+    // slot would otherwise run the native K-quant GEMV, which is held to an
+    // f64 oracle (`kq_native.rs`), not to these kernels' bits.
+    gpu_core::set_native_kernels(false);
     for &bits in &[4u32, 8u32] {
         let mut kernels_list = Vec::new();
         // Registering ONLY the plain kernel is deliberate - the bucket ladder

@@ -81,7 +81,8 @@ fn run(gpu: &Gpu, rows: u32, d: u32, add: bool, a: &[f32], b: &[f32], w: &[f32])
     // Reference: add2 -> rmsnorm_rows -> max_abs_rows -> quant_pack.
     let sum_r = gpu.storage(n as u64);
     let xn_r = gpu.storage(n as u64);
-    let sx_r = gpu.storage(rows as u64);
+    let groups = (rows * d / 32) as usize;
+    let sx_r = gpu.storage(groups as u64);
     let xq_r = gpu.storage(words as u64);
     let mut steps = Vec::new();
     let src = if add {
@@ -98,7 +99,7 @@ fn run(gpu: &Gpu, rows: u32, d: u32, add: bool, a: &[f32], b: &[f32], w: &[f32])
     // Native: one launch.
     let sum_n = gpu.storage(n as u64);
     let xn_n = gpu.storage(n as u64);
-    let sx_n = gpu.storage(rows as u64);
+    let sx_n = gpu.storage(groups as u64);
     let xq_n = gpu.storage(words as u64);
     let step = gpu
         .fused_step(Fused::AddRmsQuant, &[&ab, &bb, &wb, &sum_n, &xn_n, &xq_n, &sx_n], &[d, rows, EPS.to_bits(), add as u32])
@@ -107,8 +108,8 @@ fn run(gpu: &Gpu, rows: u32, d: u32, add: bool, a: &[f32], b: &[f32], w: &[f32])
     gpu.poll_wait();
 
     let read = |buf: &backend_api::DeviceBuffer, len: usize| bits(gpu.read(buf, len));
-    let reference = Out { sum: if add { read(&sum_r, n) } else { vec![] }, xn: read(&xn_r, n), xq: read(&xq_r, words), sx: read(&sx_r, rows as usize) };
-    let native = Out { sum: if add { read(&sum_n, n) } else { vec![] }, xn: read(&xn_n, n), xq: read(&xq_n, words), sx: read(&sx_n, rows as usize) };
+    let reference = Out { sum: if add { read(&sum_r, n) } else { vec![] }, xn: read(&xn_r, n), xq: read(&xq_r, words), sx: read(&sx_r, groups) };
+    let native = Out { sum: if add { read(&sum_n, n) } else { vec![] }, xn: read(&xn_n, n), xq: read(&xq_n, words), sx: read(&sx_n, groups) };
     (native, reference)
 }
 
@@ -117,7 +118,7 @@ fn check(gpu: &Gpu, rows: u32, d: u32, add: bool, a: &[f32], b: &[f32], w: &[f32
     let ctx = format!("rows={rows} d={d} add={add} ({what})");
     assert_eq!(n.sum, r.sum, "residual sum differs: {ctx}");
     assert_eq!(n.xn, r.xn, "normalised activation differs: {ctx}");
-    assert_eq!(n.sx, r.sx, "per-row scale differs: {ctx}");
+    assert_eq!(n.sx, r.sx, "group scales differ: {ctx}");
     assert_eq!(n.xq, r.xq, "packed int8 activation differs: {ctx}");
 }
 
@@ -131,7 +132,7 @@ fn the_fused_kernel_is_offered_only_where_it_can_run() {
     }
     assert!(gpu.has_fused(Fused::AddRmsQuant));
     assert!(Fused::AddRmsQuant.serves(&[5120, 1, 1e-6f32.to_bits(), 1]));
-    assert!(!Fused::AddRmsQuant.serves(&[5122, 1, 1e-6f32.to_bits(), 1]), "d not a multiple of 4 cannot be packed");
+    assert!(!Fused::AddRmsQuant.serves(&[5104, 1, 1e-6f32.to_bits(), 1]), "d not a multiple of 32 is not whole scale groups");
     assert!(!Fused::AddRmsQuant.serves(&[64 * 81, 1, 1e-6f32.to_bits(), 1]), "wider than the registers hold");
     assert!(!Fused::AddRmsQuant.serves(&[5120, 0, 1e-6f32.to_bits(), 1]), "no rows");
 }
@@ -143,7 +144,7 @@ fn byte_identical_to_the_wgsl_chain_over_shapes() {
         brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
         return;
     }
-    for (rows, d) in [(1u32, 5120u32), (1, 4), (1, 60), (1, 68), (2, 1000), (3, 4096), (8, 5120), (1, 4224), (2, 2048), (1, 17 * 64)] {
+    for (rows, d) in [(1u32, 5120u32), (1, 32), (1, 96), (1, 160), (2, 992), (3, 4096), (8, 5120), (1, 4224), (2, 2048), (1, 17 * 64)] {
         let n = (rows * d) as usize;
         let seed = u64::from(rows) * 131 + u64::from(d);
         let a = values(n, seed, 1.0);
@@ -192,7 +193,7 @@ fn random_shapes_are_byte_identical() {
     let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for _ in 0..40 {
         let rows = 1 + r.next_u32() % 8;
-        let d = 4 * (1 + r.next_u32() % 1280);
+        let d = 32 * (1 + r.next_u32() % 160);
         let n = (rows * d) as usize;
         let a = values(n, u64::from(r.next_u32()), 1.0);
         let b = values(n, u64::from(r.next_u32()), 2.0);

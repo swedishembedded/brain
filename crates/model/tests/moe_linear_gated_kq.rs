@@ -170,9 +170,9 @@ fn host_oracle_affine(codes_x: &[i8], sx: &[f32], codes_w: &[i32], ds: &[f32], d
                     a += i64::from(codes_w[c * k + kk]) * xv;
                     s += xv;
                 }
-                acc += a as f64 * f64::from(ds[c * ng + g]) - s as f64 * f64::from(dm[c * ng + g]);
+                acc += f64::from(sx[r * ng + g]) * (a as f64 * f64::from(ds[c * ng + g]) - s as f64 * f64::from(dm[c * ng + g]));
             }
-            out[r * n + c] = (acc * f64::from(sx[r])) as f32;
+            out[r * n + c] = acc as f32;
         }
     }
     out
@@ -244,7 +244,7 @@ fn moe_matches_dyn_and_gemv_when_fully_routed_both_code_bits() {
         let g = Gpu::new(&kernels_list);
 
         let codes_x = rand_i8_codes(0xB0_0000 | bits as u64, m * k, -100, 100);
-        let sx = rand_pos_f32(0xB0_0001 | bits as u64, m, 0.3, 1.7);
+        let sx = rand_pos_f32(0xB0_0001 | bits as u64, m * (k / 32), 0.3, 1.7);
         let codes_w = rand_unsigned_codes(0xB0_0002 | bits as u64, n * k, bits);
         let (sc_bytes, mn, d_super, dmin_super) = rand_kq_scale(0xB0_0003 | bits as u64, n, ng, true);
         let (ds, dm) = effective_ds_dm(&sc_bytes, &mn, &d_super, &dmin_super, n, ng);
@@ -385,7 +385,7 @@ fn expert_fwd_kq_zeroes_a_non_routed_row() {
     let xq_words = pack_i8_words(&codes_x);
     let xq = g.storage(xq_words.len() as u64);
     g.write(&xq, &xq_words);
-    let sx = g.storage_init("sx", &rand_pos_f32(0x7771, m, 0.3, 1.7));
+    let sx = g.storage_init("sx", &rand_pos_f32(0x7771, m * (d / 32), 0.3, 1.7));
     let xgs = g.storage_init("xgs", &host_group_sums(&codes_x, m, d, 32));
 
     // Row 0 is NOT routed (gate = 0); every other row IS.
@@ -426,7 +426,7 @@ fn expert_fwd_kq_combines_two_experts_by_plain_addition() {
     let xq_words = pack_i8_words(&codes_x);
     let xq = g.storage(xq_words.len() as u64);
     g.write(&xq, &xq_words);
-    let sx = g.storage_init("sx", &rand_pos_f32(0x8881, m, 0.3, 1.7));
+    let sx = g.storage_init("sx", &rand_pos_f32(0x8881, m * (d / 32), 0.3, 1.7));
     let xgs = g.storage_init("xgs", &host_group_sums(&codes_x, m, d, 32));
     // Both columns routed for every row.
     let gate = g.storage_init("gate", &vec![1.0f32; m * shape.n_experts as usize]);

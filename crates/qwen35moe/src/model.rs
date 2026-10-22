@@ -1884,7 +1884,7 @@ impl Qwen35 {
         let n = (rows * k) as u64;
         let y = (mode != 0).then(|| g.storage(n));
         let xq = g.storage(n / 4);
-        let sx = g.storage(rows as u64);
+        let sx = g.storage(model::int8::act_scale_len(rows as usize, k as usize) as u64);
         // Mode 0 reads no `b` and writes no `y`; the slots are still bound, and
         // alias what is already there.
         let step = g
@@ -1896,7 +1896,7 @@ impl Qwen35 {
     }
 
     /// One launch of the fused front end of an int8 linear: `sum = a + b` (when
-    /// `b` is given), `xn = rmsnorm(sum) * w`, and the per-row int8 packing of
+    /// `b` is given), `xn = rmsnorm(sum) * w`, and the group-scaled int8 packing of
     /// `xn` as a ready [`Act`]. Returns `(sum, front)`; `sum` is `None` when
     /// there was no `b`, and the caller keeps `a` as the residual. Only call after
     /// [`Self::fused_front_ok`].
@@ -1907,7 +1907,7 @@ impl Qwen35 {
         let sum = b.map(|_| g.storage(n));
         let xn = g.storage(n);
         let xq = g.storage(n / 4);
-        let sx = g.storage(rows as u64);
+        let sx = g.storage(model::int8::act_scale_len(rows as usize, d as usize) as u64);
         // Without an addend the kernel reads neither `b` nor writes `sum`; the
         // slots still have to be bound, so they alias what is already there.
         let step = g
@@ -2485,7 +2485,7 @@ impl Qwen35 {
         let logits = g.storage((n * width) as u64);
         let (ids, weight) = (g.storage(slots as u64), g.storage(slots as u64));
         let (gate_out, up_out) = (g.storage((slots * ff) as u64), g.storage((slots * ff) as u64));
-        let (hq, sh) = (g.storage((slots * ff / 4) as u64), g.storage(slots as u64));
+        let (hq, sh) = (g.storage((slots * ff / 4) as u64), g.storage(model::int8::act_scale_len(slots as usize, ff as usize) as u64));
         let y = g.storage((slots * d) as u64);
         let own_router;
         let router_w: &Weight = match &ml.router_ext {

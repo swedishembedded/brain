@@ -62,10 +62,10 @@ fn main_rows(gpu: &Gpu, m: u32, k: u32, n: u32) -> (String, Vec<f64>, u64) {
     let wbytes = (wwords + swords) * 4;
     let copies = FOOTPRINT_BYTES.div_ceil(wbytes).max(1) as usize;
     let xq = gpu.storage(u64::from(m * k / 4));
-    let sx = gpu.storage(u64::from(m));
+    let sx = gpu.storage(u64::from(m * k / 32));
     let out = gpu.storage(u64::from(m * n));
     gpu.write(&xq, &vec![0x01020304u32; (m * k / 4) as usize]);
-    gpu.write_f32(&sx, &vec![1.0; m as usize]);
+    gpu.write_f32(&sx, &vec![1.0; (m * k / 32) as usize]);
     // Weight bytes are arbitrary; only their placement matters.
     let weights: Vec<_> = (0..copies)
         .map(|i| {

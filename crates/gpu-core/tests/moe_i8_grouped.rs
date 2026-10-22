@@ -136,7 +136,7 @@ fn grouped_matches_gather(gpu: &Gpu, slots: usize, k: usize, n: usize, xdiv: usi
     let kg = k / 4;
     let rows = slots.div_ceil(xdiv);
     let xq = random_packed(rows * kg, seed + 1);
-    let sx = random_scales(rows, seed + 2);
+    let sx = random_scales(rows * (kg / 8), seed + 2);
     let mut rng = Lcg::new(seed + 3);
     // `skew` > 0 sends that percentage of the slots to expert 0, leaving others empty or thin.
     let ids: Vec<u32> = (0..slots).map(|_| if (rng.next_u32() % 100) < skew as u32 { 0 } else { rng.next_u32() % ne as u32 }).collect();

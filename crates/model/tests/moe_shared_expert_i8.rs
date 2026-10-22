@@ -115,7 +115,7 @@ fn shared_expert_i8_matches_fp32_within_quant_tolerance() {
     let dw8 = Lin8 { wq: &upload_u32(&g, &dwq), sw: &g.storage_init("dws", &dws) };
 
     let xq = g.storage((rows * d / 4) as u64);
-    let sx = g.storage(rows as u64);
+    let sx = g.storage(model::int8::act_scale_len(rows, d) as u64);
     let mut steps8 = quant_rows_steps(&g, QuantRows { kernels: ids8.quant, x: &x, sx: &sx, xq: &xq, xgs: None }, 0, rows as u32, d as u32).to_vec();
 
     let scratch8 = SharedExpertScratch8 {
@@ -123,7 +123,7 @@ fn shared_expert_i8_matches_fp32_within_quant_tolerance() {
         up: &g.storage((rows * ff) as u64),
         h: &g.storage((rows * ff) as u64),
         hq: &g.storage((rows * ff / 4) as u64),
-        sh: &g.storage(rows as u64),
+        sh: &g.storage(model::int8::act_scale_len(rows, ff) as u64),
         mlp_out: &g.storage((rows * d) as u64),
         gate_logits: &g.storage(rows as u64),
         gate_scalar: &g.storage(rows as u64),
@@ -198,7 +198,7 @@ fn shared_expert_i8_unweighted_matches_fp32_within_quant_tolerance() {
     let dw8 = Lin8 { wq: &upload_u32(&g, &dwq), sw: &g.storage_init("dws", &dws) };
 
     let xq = g.storage((rows * d / 4) as u64);
-    let sx = g.storage(rows as u64);
+    let sx = g.storage(model::int8::act_scale_len(rows, d) as u64);
     let mut steps8 = quant_rows_steps(&g, QuantRows { kernels: ids8.quant, x: &x, sx: &sx, xq: &xq, xgs: None }, 0, rows as u32, d as u32).to_vec();
 
     let scratch8 = SharedExpertScratch8 {
@@ -206,7 +206,7 @@ fn shared_expert_i8_unweighted_matches_fp32_within_quant_tolerance() {
         up: &g.storage((rows * ff) as u64),
         h: &g.storage((rows * ff) as u64),
         hq: &g.storage((rows * ff / 4) as u64),
-        sh: &g.storage(rows as u64),
+        sh: &g.storage(model::int8::act_scale_len(rows, ff) as u64),
         mlp_out: &g.storage((rows * d) as u64),
         gate_logits: &g.storage(rows as u64),
         gate_scalar: &g.storage(rows as u64),

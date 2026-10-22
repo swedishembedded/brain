@@ -14,13 +14,13 @@
 //   xq     : [M, K/4] u32        activations, 4 signed int8 per word
 //   wq     : [N, K*BITS/32] u32  unsigned codes, K-contiguous, low bits first
 //                                (code b of word w is element w*(32/BITS) + b)
-//   sx     : [M] f32             per-row activation scale
+//   sx     : [M, K/32] f32       per-group activation scale
 //   wsm    : [N, ceil(K/64)] u32 per-group (sc, m) byte pairs, two groups a
 //                                word: group g at bits 16*(g%2), sc low byte
 //   wd     : [N, ceil(K/256)] u32 per-super-block (d, dmin) f16 pair, d low
 //   xgs    : [M, K/32] f32       activation group sums (bound, not read: the
 //                                kernel sums the same int8 bytes itself)
-//   out    : [M, N] f32          out[m, n] = sx[m] * sum_g( ds*A[m,n,g] - dm*S[m,g] )
+//   out    : [M, N] f32          out[m, n] = sum_g sx[m,g] * ( ds*A[m,n,g] - dm*S[m,g] )
 //
 // with ds = d*sc and dm = dmin*m of weight row n's group g, A the int8 dot of
 // the group's 32 activations with its 32 codes, and S the sum of the group's
@@ -244,9 +244,12 @@ __device__ __forceinline__ void brain_kqg_tile(BrainKqXShared<ROWS, UNROLL>& xs,
 #pragma unroll
                     for (int j = 0; j < 8; ++j) { sum = __dp4a(static_cast<int>(x[j]), 0x01010101, sum); }
                     const float sf = static_cast<float>(sum);
+                    // Rows past `mrows` fold zeros and are never stored.
+                    const float ax = static_cast<unsigned int>(r) < mrows ? __ldg(sx + (unsigned long long)(m0 + r) * groups + g) : 0.0f;
 #pragma unroll
                     for (int c = 0; c < C; ++c) {
-                        acc[r][c] = __fmaf_rn(-s[c].y, sf, __fmaf_rn(s[c].x, static_cast<float>(brain_kqg_dot(x, op[c])), acc[r][c]));
+                        const float term = __fmaf_rn(-s[c].y, sf, __fmul_rn(s[c].x, static_cast<float>(brain_kqg_dot(x, op[c]))));
+                        acc[r][c] = __fmaf_rn(term, ax, acc[r][c]);
                     }
                 }
             }
@@ -261,7 +264,7 @@ __device__ __forceinline__ void brain_kqg_tile(BrainKqXShared<ROWS, UNROLL>& xs,
             float total = acc[r][c];
 #pragma unroll
             for (int off = BRAIN_KQG_LANES / 2; off > 0; off >>= 1) { total += __shfl_xor_sync(0xffffffffu, total, off, BRAIN_KQG_LANES); }
-            if (lane == 0 && live[c] && static_cast<unsigned int>(r) < mrows) { out[(unsigned long long)(m0 + r) * n + col] = __fmul_rn(total, sx[m0 + r]); }
+            if (lane == 0 && live[c] && static_cast<unsigned int>(r) < mrows) { out[(unsigned long long)(m0 + r) * n + col] = total; }
         }
     }
 }

@@ -66,7 +66,7 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 /// `quant_x` (this is a byte-for-byte copy, kept local since these two test
 /// files must not depend on each other).
 fn quant_x(g: &Gpu, k_maxr: usize, k_qp: usize, x: &gpu_core::DeviceBuffer, m: u32, k: u32) -> (gpu_core::DeviceBuffer, gpu_core::DeviceBuffer) {
-    let sx = g.storage(m as u64);
+    let sx = g.storage(u64::from(m) * u64::from(k / 32));
     let xq = g.storage((m * k / 4) as u64);
     let steps = [g.step(k_maxr, &[x, &sx], &[m, k], m), g.step(k_qp, &[x, &sx, &xq], &[m, k], m * k / 4)];
     g.submit(&[], &steps);

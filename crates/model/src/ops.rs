@@ -1450,7 +1450,7 @@ impl Ops {
     }
 
     /// The [`Act`] for rows `[0, rows)` of `x` (`[rows, k]`) that something
-    /// else has already quantised: `sx` holds the `[rows]` per-row scales and
+    /// else has already quantised: `sx` holds the `[rows, k/32]` group scales and
     /// `xq` the `[rows, k/4]` packed int8 rows, exactly what [`Ops::act`]'s two
     /// dispatches would have written. This is the seam a fused kernel uses to
     /// hand a linear its activation without the `max_abs_row` and `quant_pack`
@@ -1707,7 +1707,7 @@ impl Ops {
                 let per_word = Dtype::I8.per_word() as u64;
                 let kg = k as u64 / per_word;
                 let xo = (act.xr0 as u64 * kg, m as u64 * kg);
-                let so = (act.xr0 as u64, m as u64);
+                let so = crate::int8::act_scale_range(act.xr0, m, k);
                 // The kernel's own `k` PARAM (not a buffer offset) is a
                 // SEPARATE contract per dtype, and the two disagree:
                 // `matmul_i8_{dyn,gemv}.wgsl` take the packed word count
@@ -1790,12 +1790,12 @@ impl Ops {
                 let per_word = Dtype::I8.per_word() as u64;
                 let kg = k as u64 / per_word;
                 let xo = (act.xr0 as u64 * kg, m as u64 * kg);
-                let so = (act.xr0 as u64, m as u64);
+                let so = crate::int8::act_scale_range(act.xr0, m, k);
                 // `xgs` is `[.., k/GROUP]` f32 - one group sum per row, the
                 // SAME "own width" offset convention `so`/`xo` already
                 // follow (see `crate::int8::quant_rows_steps`'s own doc
                 // comment on `xgs`'s offset units).
-                let go = (act.xr0 as u64 * (k as u64 / crate::int8::GROUP as u64), m as u64 * (k as u64 / crate::int8::GROUP as u64));
+                let go = crate::int8::act_scale_range(act.xr0, m, k);
                 let quant = act.quant.as_ref().expect(
                     "Ops::matmul: this activation was built with Ops::act_f32, which promises no \
                      quantized weight reads it - build it with Ops::act or Ops::act_kq instead",

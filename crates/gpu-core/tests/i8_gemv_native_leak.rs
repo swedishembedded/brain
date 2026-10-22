@@ -27,7 +27,7 @@ const M: u32 = 3;
 const KG: u32 = 1280;
 const N: u32 = 4096;
 /// Device bytes one cycle's buffers occupy.
-const CYCLE_BYTES: u64 = 4 * (N as u64 * KG as u64 + N as u64 * (KG as u64 / 8)) + 4 * (M as u64 * KG as u64);
+const CYCLE_BYTES: u64 = 4 * (N as u64 * KG as u64 + N as u64 * (KG as u64 / 8)) + 4 * (M as u64 * KG as u64) + 4 * (M as u64 * (KG as u64 / 8));
 /// Free memory may drift by this much from other processes without it meaning
 /// anything; a per-cycle leak of even one weight buffer is `CYCLES` times
 /// larger than the slack.
@@ -36,7 +36,7 @@ const SLACK_BYTES: u64 = 4 * CYCLE_BYTES;
 fn one_cycle(gpu: &Gpu) {
     let xq = gpu.storage(u64::from(M * KG));
     let wq = gpu.storage(u64::from(N * KG));
-    let sx = gpu.storage(u64::from(M));
+    let sx = gpu.storage(u64::from(M * KG / 8));
     let sw = gpu.storage(u64::from(N * KG / 8));
     let out = gpu.storage(u64::from(M * N));
     let params = [M, KG, N];

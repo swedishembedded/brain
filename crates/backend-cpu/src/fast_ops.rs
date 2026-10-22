@@ -544,12 +544,13 @@ unsafe fn row_abt_avx512(a: &[f32], b: &[f32], c: &mut [f32], k: usize, n: usize
 /// Reproduces `matmul_i8_gemv.wgsl`/`matmul_i8_dyn.wgsl`'s shared math EXACTLY,
 /// not merely within tolerance:
 ///
-///   out[m,n] = sx[m] * Σ_g  dot_g(m,n) * sw[n,g]
+///   out[m,n] = Σ_g  dot_g(m,n) * (sw[n,g] * sx[m,g])
 ///   dot_g(m,n) = Σ_{i=0}^{31} i8(xq[m, 32g+i]) * i8(wq[n, 32g+i])     (INTEGER)
 ///
 /// `xq`/`wq` are `[rows, kg]` `u32` with `kg = K/4` (4 signed int8 lanes per
 /// word, `dot4I8Packed`'s own packing); `sw` is `[n, kg/8]` (one scale per
-/// 8-word = 32-int8 GROUP, `model::int8::GROUP`); `sx` is `[m]`.
+/// 8-word = 32-int8 GROUP, `model::int8::GROUP`); `sx` is `[m, kg/8]`, the
+/// activation's scales per group.
 ///
 /// **Why this is bit-identical to the WGSL reference, not "reassociation
 /// tolerance" like `fast_conv`'s conv2d/matmul_abt**: the per-group inner sum
@@ -594,8 +595,9 @@ pub fn matmul_i8_dyn(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], out: &mut [
         for ni in 0..n {
             let wrow = &wq[ni * kg..ni * kg + kg];
             let swrow = &sw[ni * ng..ni * ng + ng];
+            let sxrow = &sx[mi * ng..mi * ng + ng];
             let mut acc_f = 0.0f32;
-            for (g, &sw_g) in swrow.iter().enumerate().take(ng) {
+            for (g, (&sw_g, &sx_g)) in swrow.iter().zip(sxrow).enumerate() {
                 let off = g * WPG;
                 let xg = &xrow[off..off + WPG];
                 let wg_ = &wrow[off..off + WPG];
@@ -608,9 +610,9 @@ pub fn matmul_i8_dyn(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], out: &mut [
                     Int8IsaTier::Neon => unsafe { dot32_i8_neon(xg, wg_) },
                     Int8IsaTier::Scalar => dot_group_scalar(xg, wg_),
                 };
-                acc_f += acc_i as f32 * sw_g;
+                acc_f += acc_i as f32 * (sw_g * sx_g);
             }
-            orow[ni] = acc_f * sx[mi];
+            orow[ni] = acc_f;
         }
     };
     if m * n * kg < 65_536 {
@@ -3623,9 +3625,9 @@ mod tests {
                             acc_i += ai * bi;
                         }
                     }
-                    acc_f += acc_i as f32 * sw[ni * ng + g];
+                    acc_f += acc_i as f32 * (sw[ni * ng + g] * sx[mi * ng + g]);
                 }
-                out[mi * n + ni] = acc_f * sx[mi];
+                out[mi * n + ni] = acc_f;
             }
         }
         out
@@ -3662,7 +3664,7 @@ mod tests {
             let xq = random_packed_i8(m * kg, &mut s);
             let wq = random_packed_i8(n * kg, &mut s);
             let ng = kg / 8;
-            let sx: Vec<f32> = (0..m).map(|_| lcg(&mut s).abs() + 0.01).collect();
+            let sx: Vec<f32> = (0..m * ng).map(|_| lcg(&mut s).abs() + 0.01).collect();
             let sw: Vec<f32> = (0..n * ng).map(|_| lcg(&mut s).abs() + 0.01).collect();
 
             let want = matmul_i8_ref(&xq, &wq, &sx, &sw, m, kg, n);
@@ -3769,7 +3771,7 @@ mod tests {
         let xq = random_packed_i8(m * kg, &mut s);
         let wq = random_packed_i8(n * kg, &mut s);
         let ng = kg / 8;
-        let sx: Vec<f32> = (0..m).map(|_| lcg(&mut s).abs() + 0.01).collect();
+        let sx: Vec<f32> = (0..m * ng).map(|_| lcg(&mut s).abs() + 0.01).collect();
         let sw: Vec<f32> = (0..n * ng).map(|_| lcg(&mut s).abs() + 0.01).collect();
         let mut out = vec![0.0f32; m * n];
 
@@ -3784,9 +3786,9 @@ mod tests {
                     let mut acc_f = 0.0f32;
                     for (g, &sw_g) in swrow.iter().enumerate().take(ng) {
                         let off = g * 8;
-                        acc_f += dot_group_scalar(&xrow[off..off + 8], &wrow[off..off + 8]) as f32 * sw_g;
+                        acc_f += dot_group_scalar(&xrow[off..off + 8], &wrow[off..off + 8]) as f32 * (sw_g * sx[mi * ng + g]);
                     }
-                    out[mi * n + ni] = acc_f * sx[mi];
+                    out[mi * n + ni] = acc_f;
                 }
             }
         }

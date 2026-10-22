@@ -146,7 +146,7 @@ fn throughput() {
         let kg = k / 4;
         let x = gpu.storage(u64::from(m) * u64::from(kg));
         let w = gpu.storage(u64::from(n) * u64::from(kg));
-        let sx = gpu.storage(u64::from(m));
+        let sx = gpu.storage(u64::from(m) * u64::from(kg / 8));
         let sw = gpu.storage(u64::from(n) * u64::from(kg / 8));
         let out = gpu.storage(u64::from(m) * u64::from(n));
         let step = gpu.dispatch(0, &[&x, &w, &sx, &sw, &out], &[m, kg, n], Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128)));

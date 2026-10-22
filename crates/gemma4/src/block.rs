@@ -310,19 +310,19 @@ impl MlpWeights {
 /// this crate (`attention_bias=false`, MLP linears are always bias-free per
 /// `Gemma4TextMLP`/`Gemma3MLP`).
 ///
-/// The int8 arm quantizes the ACTIVATION per row on the fly
+/// The int8 arm quantizes the ACTIVATION per 32-element group on the fly
 /// (`max_abs_row` -> `quant_pack`) and lets the packed-dot GEMM dequantize
 /// with `sx*sw` on the way out - the same recipe `ltxv::block`'s own
 /// quantized linears use, at this model's shapes. Every `k` here (hidden
 /// 3840, q_dim 4096, kv_dim 2048/512, intermediate 15360) is a multiple of
-/// 4, which is the packing width the kernel requires.
+/// 32, the activation scale group the kernels require.
 fn linear(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &Proj, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
     match w {
         Proj::F32(wb) => s.push(gpu.step(K_MATMUL, &[x, wb, out], &[m, k, n], m * n)),
         Proj::I8 { w: wb, sw } => {
-            debug_assert_eq!(k % 4, 0, "matmul_i8_dyn packs 4 int8 lanes per u32");
+            debug_assert_eq!(k % 32, 0, "int8 activations are scaled per 32 elements");
             let xq = gpu.storage((m * k / 4) as u64);
-            let sx = gpu.storage(m as u64);
+            let sx = gpu.storage(model::int8::act_scale_len(m as usize, k as usize) as u64);
             s.push(gpu.step(K_MAX_ABS_ROW, &[x, &sx], &[m, k], m));
             s.push(gpu.step(K_QUANT_PACK, &[x, &sx, &xq], &[m, k], m * k / 4));
             s.push(gpu.dispatch(K_MATMUL_I8_DYN, &[&xq, wb, &sx, sw, out], &[m, k / 4, n], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128))));

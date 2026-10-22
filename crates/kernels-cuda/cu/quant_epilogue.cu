@@ -10,8 +10,8 @@
 // produce the activation that feeds the next int8 linear AND quantise it.
 //
 //   y  = f(a, b)                                   f picked by `mode`
-//   sx = max(max|y|, 1e-8) / 127                   (per-row activation scale)
-//   xq = pack4(clamp(rint(y / sx), -127, 127))     (four int8 per u32)
+//   sx = max(max|y|, 1e-8) / 127 per 32 elements   (the activation group scales)
+//   xq = pack4(clamp(rint(y / sx), -127, 127))     (four int8 per u32, each by its group's scale)
 //
 //   mode 0 : y = a                    (a plain activation that only needs quantising)
 //   mode 1 : y = silu(a) * b          (the SwiGLU product feeding `down_proj`)
@@ -25,7 +25,7 @@
 //   a, b   : [rows, k] f32   (b is not read in mode 0)
 //   y      : [rows, k] f32   the activation itself (an fp32 linear reads it)
 //   xq     : [rows, k/4] u32 packed int8 activation
-//   sx     : [rows] f32      per-row scale
+//   sx     : [rows, k/32] f32 per-group scale
 //
 // The arithmetic is the reference kernels' own expressions: silu is
 // `x / (1.0 + exp(-x))` and sigmoid `1.0 / (1.0 + exp(-x))` with `expf` (the
@@ -55,10 +55,9 @@
 
 // The row is split over a CLUSTER of BRAIN_QE_CLUSTER blocks (one per SM): block r of a row owns the slices
 // i = r, r + CLUSTER, ... of the element map c = t + THREADS * i, so a packed output word (four consecutive elements of
-// one slice) belongs to one block. Each block reduces its own max, the cluster exchanges the per-block maxima through
-// distributed shared memory, and every block quantises its slices against the row's max - the same numbers as one
-// block per row, since the max is exact in any order. One 1024-thread block per row took 5-6 us on the 17408-wide MLP
-// product, issue-bound on its exponentials and divisions on one SM.
+// one slice) belongs to one block, and a 32-element scale group (one warp's elements of one slice) to one warp. Each
+// group's max is that warp's reduction - exact in any order - so no block needs another's. One 1024-thread block per
+// row took 5-6 us on the 17408-wide MLP product, issue-bound on its exponentials and divisions on one SM.
 // 1 (the default, any device) is one block per row; the registry's `quant_epilogue_cluster` compiles 4 (Hopper).
 #ifndef BRAIN_QE_CLUSTER
 #define BRAIN_QE_CLUSTER 1
@@ -72,23 +71,8 @@ __device__ __forceinline__ unsigned int brain_cluster_rank() {
     return r;
 }
 
-__device__ __forceinline__ void brain_cluster_sync() {
-    asm volatile("barrier.cluster.arrive.release.aligned;\nbarrier.cluster.wait.acquire.aligned;\n" ::: "memory");
-}
-
-// `addr` (this block's shared memory) as seen in block `rank` of the cluster, read as f32.
-__device__ __forceinline__ float brain_cluster_load(const float* addr, unsigned int rank) {
-    const unsigned int local = static_cast<unsigned int>(__cvta_generic_to_shared(addr));
-    unsigned int remote;
-    float v;
-    asm volatile("mapa.shared::cluster.u32 %0, %1, %2;\n" : "=r"(remote) : "r"(local), "r"(rank));
-    asm volatile("ld.shared::cluster.f32 %0, [%1];\n" : "=f"(v) : "r"(remote) : "memory");
-    return v;
-}
 #else
 __device__ __forceinline__ unsigned int brain_cluster_rank() { return 0u; }
-__device__ __forceinline__ void brain_cluster_sync() { __syncthreads(); }
-__device__ __forceinline__ float brain_cluster_load(const float* addr, unsigned int) { return *addr; }
 #endif
 
 // Programmatic dependent launch (compute capability 9.0): wait until the kernel before this one in the stream has
@@ -119,8 +103,6 @@ brain_quant_epilogue(const unsigned int* params, const float* a, const float* b,
     const unsigned int t = threadIdx.x;
     const unsigned long long base = (unsigned long long)row * k;
 
-    __shared__ float warp_max[BRAIN_QE_THREADS / 32];
-    __shared__ float block_max;
     __shared__ unsigned int qwords[BRAIN_QE_THREADS * BRAIN_QE_MAX_ELEMS / 4];
     signed char* qbytes = reinterpret_cast<signed char*>(qwords);
 
@@ -141,8 +123,10 @@ brain_quant_epilogue(const unsigned int* params, const float* a, const float* b,
         w[j] = (live && two) ? b[base + c] : 0.0f;
     }
 
-    // Phase 2: the producer and the running max, in registers.
-    float mx = 0.0f;
+    // Phase 2: the producer, then each slice's group scale: element c = t + THREADS * i lies in group c / 32, the
+    // same group as slice i of every lane of its warp, so the group's max is a warp reduction.
+    const unsigned int groups = k >> 5;
+    float rscale[BRAIN_QE_SLICES];
 #pragma unroll
     for (int j = 0; j < BRAIN_QE_SLICES; ++j) {
         float r = v[j];
@@ -154,28 +138,15 @@ brain_quant_epilogue(const unsigned int* params, const float* a, const float* b,
             r = __fmul_rn(r, __fdiv_rn(1.0f, __fadd_rn(1.0f, expf(-w[j]))));
         }
         v[j] = r;
-        mx = fmaxf(mx, fabsf(r));
+        float mx = fabsf(r);
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) { mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o)); }
+        const float scale = __fdiv_rn(fmaxf(mx, 1e-8f), 127.0f);
+        const unsigned int i = rank + BRAIN_QE_CLUSTER * j;
+        const unsigned int c = t + BRAIN_QE_THREADS * i;
+        if ((t & 31u) == 0u && i < BRAIN_QE_MAX_ELEMS && c < k) { sx[(unsigned long long)row * groups + (c >> 5)] = scale; }
+        rscale[j] = __fdiv_rn(1.0f, scale);
     }
-
-    // Row max: exact in any order - the warps, then the block, then the cluster's blocks.
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) { mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o)); }
-    if ((t & 31u) == 0u) { warp_max[t >> 5] = mx; }
-    __syncthreads();
-    if (t == 0) {
-        float bm = warp_max[0];
-#pragma unroll
-        for (int i = 1; i < BRAIN_QE_THREADS / 32; ++i) { bm = fmaxf(bm, warp_max[i]); }
-        block_max = bm;
-    }
-    brain_cluster_sync();  // every block's max is in place
-    float rowmax = 0.0f;
-#pragma unroll
-    for (unsigned int r = 0; r < BRAIN_QE_CLUSTER; ++r) { rowmax = fmaxf(rowmax, brain_cluster_load(&block_max, r)); }
-    brain_cluster_sync();  // no block leaves while another may still read its max
-    const float scale = __fdiv_rn(fmaxf(rowmax, 1e-8f), 127.0f);
-    if (t == 0 && rank == 0) { sx[row] = scale; }
-    const float rscale = __fdiv_rn(1.0f, scale);
 
     // Phase 3: the stores - the product, the quantised bytes into shared
     // memory, then whole packed words of this block's slices.
@@ -185,7 +156,7 @@ brain_quant_epilogue(const unsigned int* params, const float* a, const float* b,
         const unsigned int c = t + BRAIN_QE_THREADS * i;
         if (i < BRAIN_QE_MAX_ELEMS && c < k) {
             if (two) { y[base + c] = v[j]; }
-            const float q = fminf(fmaxf(rintf(__fmul_rn(v[j], rscale)), -127.0f), 127.0f);
+            const float q = fminf(fmaxf(rintf(__fmul_rn(v[j], rscale[j])), -127.0f), 127.0f);
             qbytes[c] = static_cast<signed char>(static_cast<int>(q));
         }
     }

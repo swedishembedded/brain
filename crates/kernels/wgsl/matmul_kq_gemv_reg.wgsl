@@ -27,11 +27,11 @@
 //
 //   xq  : [M, k/4]              u32 - 4 int8 activations packed along K per u32
 //   wq  : [N, k*CODE_BITS/32]   u32 - K-CONTIGUOUS unsigned codes, `32/CODE_BITS` codes per word, low bits first
-//   sx  : [M]                   f32 - per-token activation scale
+//   sx  : [M, k/32]             f32 - group-wise activation scale
 //   wsm : [N, ceil(k/32/2)]     u32 - (M14) packed per-group (sc, m) sub-scale byte pairs - see matmul_kq_dyn.wgsl's own header for the exact bit layout
 //   wd  : [N, ceil(k/32/GPS)]   u32 - (M14) packed per-super-block (d, dmin) f16 bit-pattern pairs, GPS=8 groups/super-block
 //   xgs : [M, k/32]             f32 - activation group sums (quant_group_sum.wgsl)
-//   out : [M, N]                f32 - out[m,n] = sx[m] * Σ_g( ds[n,g]*A[m,n,g] - dm[n,g]*S[m,g] )
+//   out : [M, N]                f32 - out[m,n] = Σ_g sx[m,g] * ( ds[n,g]*A[m,n,g] - dm[n,g]*S[m,g] )
 //   params: m, k (RAW LOGICAL K), n. REQUIRES m <= MREG and k a multiple of 32.
 //   Dispatch: n * 64 invocations - the SAME thread count `matmul_kq_gemv` takes,
 //   so a caller needs no change at all.
@@ -87,7 +87,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, k/4]
 @group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, k*CODE_BITS/32]
-@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M]
+@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M, k/32]
 @group(0) @binding(4) var<storage, read>       wsm: array<u32>;  // [N, ceil(k/32/2)] packed (sc, m) pairs
 @group(0) @binding(5) var<storage, read>       wd:  array<u32>;  // [N, ceil(k/32/GPS)] packed (d, dmin) f16 pairs
 @group(0) @binding(6) var<storage, read>       xgs: array<f32>;  // [M, k/32]
@@ -184,7 +184,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
             let xw = xq[xoff[m] + g];
             var contrib = f32(dot4I8Packed(xw, wv)) * ds;
             contrib = contrib - dmv * xgs[goff[m] + grp];
-            acc[m] = acc[m] + contrib;
+            acc[m] = acc[m] + contrib * sx[goff[m] + g / 8u];
         }
     }
 
@@ -192,9 +192,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         partial[m * 64u + t] = acc[m];
     }
     workgroupBarrier();
-    // Threads 0..m each fold one row's 64 partials and apply the per-token
-    // activation scale (the only scale left - the weight side is already in),
-    // the same ascending order `matmul_kq_gemv` folds in.
+    // Threads 0..m each fold one row's 64 partials, both scales already in,
+    // in the same ascending order `matmul_kq_gemv` folds in.
     //
     // `min(p.m, MREG)`, not `p.m`, is a memory-safety floor, not a feature -
     // see `matmul_i8_gemv_reg.wgsl`'s own comment on the identical line.
@@ -203,6 +202,6 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         for (var i = 0u; i < 64u; i = i + 1u) {
             s = s + partial[t * 64u + i];
         }
-        out[t * p.n + col] = s * sx[t];
+        out[t * p.n + col] = s;
     }
 }

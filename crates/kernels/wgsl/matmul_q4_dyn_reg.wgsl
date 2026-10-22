@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Tiled W4A8 GEMM with a DYNAMIC per-token activation scale and a GROUP-WISE (32-element) weight scale - the prefill/DiT q4 GEMM, register-tiled + DP4A
+// @what  Tiled W4A8 GEMM with DYNAMIC GROUP-WISE activation scales and a GROUP-WISE (32-element) weight scale - the prefill/DiT q4 GEMM, register-tiled + DP4A
 // @how   nibble-unpack into DP4A packed int8, k-major shared tiles, register block per thread, per-chunk group dequant, 256-thread workgroup tile, 3 barriers
 // @opt   5
 // @cpu   no
@@ -26,10 +26,10 @@
 //
 //   x_q : [M, K/4] u32   - 4 int8 activations packed along K per u32 (row-major)
 //   w_q : [N, K/8] u32   - 8 int4 weights    packed along K per u32 (row-major)
-//   sx  : [M]      f32   - per-token activation scale
+//   sx  : [M, K/32] f32  - group-wise activation scale
 //   sw  : [N, K/32] f32  - GROUP-WISE weight scale (`model::int8::GROUP` = 32,
 //         shared with the int8 tier - Q4_0's block is Q8_0's)
-//   out : [M, N]   f32   - out[m,n] = sx[m] * sum_g acc_i32[m,n,g] * sw[n,g]
+//   out : [M, N]   f32   - out[m,n] = sum_g acc_i32[m,n,g] * (sw[n,g] * sx[m,g])
 //
 // K must be a multiple of 32 (the group), which subsumes the multiple-of-8
 // (weight packing) and multiple-of-4 (activation packing) both operands need.
@@ -82,8 +82,7 @@
 // nibbles = 32 logical K = one group), so the dequantize lands on the chunk
 // boundary exactly as `matmul_i8_dyn`'s does: 64 i32 accumulators sum a
 // chunk exactly (integer, exact, re-orderable), then fold into 64 f32
-// running totals scaled by that chunk's `sw[n, c]`. The per-token `sx[m]`
-// scale is applied once, in the epilogue.
+// running totals scaled by that chunk's `sw[n, c] * sx[m, c]`.
 //
 // @workgroup_size(256). Not CPU-JIT'able (multi-barrier work-group); the
 // naive `matmul_q4_dyn.wgsl` is the CPU-side / correctness-oracle kernel this
@@ -94,7 +93,7 @@ struct Params { m: u32, k: u32, n: u32 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, k/4]
 @group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, k/8]
-@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M]
+@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M, k/32]
 @group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N, k/32]
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
 
@@ -263,9 +262,9 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             c70 += dot4I8Packed(a7l, wlo0) + dot4I8Packed(a7h, whi0); c71 += dot4I8Packed(a7l, wlo1) + dot4I8Packed(a7h, whi1); c72 += dot4I8Packed(a7l, wlo2) + dot4I8Packed(a7h, whi2); c73 += dot4I8Packed(a7l, wlo3) + dot4I8Packed(a7h, whi3); c74 += dot4I8Packed(a7l, wlo4) + dot4I8Packed(a7h, whi4); c75 += dot4I8Packed(a7l, wlo5) + dot4I8Packed(a7h, whi5); c76 += dot4I8Packed(a7l, wlo6) + dot4I8Packed(a7h, whi6); c77 += dot4I8Packed(a7l, wlo7) + dot4I8Packed(a7h, whi7);
         }
 
-        // One chunk == one weight-scale group: fold this group's exact
-        // integer sums into the f32 running totals through the group's own
-        // scale, then clear them for the next group.
+        // One chunk == one scale group: fold this group's exact integer sums
+        // into the f32 running totals through the group's weight and
+        // activation scales, then clear them for the next group.
         {
             let sg = select(0u, c, c < ng);
             let e0 = select(0.0, sw[(cc +   0u) * ng + sg], cc +   0u < p.n);
@@ -276,14 +275,15 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             let e5 = select(0.0, sw[(cc +  80u) * ng + sg], cc +  80u < p.n);
             let e6 = select(0.0, sw[(cc +  96u) * ng + sg], cc +  96u < p.n);
             let e7 = select(0.0, sw[(cc + 112u) * ng + sg], cc + 112u < p.n);
-            d00 += f32(c00) * e0; d01 += f32(c01) * e1; d02 += f32(c02) * e2; d03 += f32(c03) * e3; d04 += f32(c04) * e4; d05 += f32(c05) * e5; d06 += f32(c06) * e6; d07 += f32(c07) * e7;
-            d10 += f32(c10) * e0; d11 += f32(c11) * e1; d12 += f32(c12) * e2; d13 += f32(c13) * e3; d14 += f32(c14) * e4; d15 += f32(c15) * e5; d16 += f32(c16) * e6; d17 += f32(c17) * e7;
-            d20 += f32(c20) * e0; d21 += f32(c21) * e1; d22 += f32(c22) * e2; d23 += f32(c23) * e3; d24 += f32(c24) * e4; d25 += f32(c25) * e5; d26 += f32(c26) * e6; d27 += f32(c27) * e7;
-            d30 += f32(c30) * e0; d31 += f32(c31) * e1; d32 += f32(c32) * e2; d33 += f32(c33) * e3; d34 += f32(c34) * e4; d35 += f32(c35) * e5; d36 += f32(c36) * e6; d37 += f32(c37) * e7;
-            d40 += f32(c40) * e0; d41 += f32(c41) * e1; d42 += f32(c42) * e2; d43 += f32(c43) * e3; d44 += f32(c44) * e4; d45 += f32(c45) * e5; d46 += f32(c46) * e6; d47 += f32(c47) * e7;
-            d50 += f32(c50) * e0; d51 += f32(c51) * e1; d52 += f32(c52) * e2; d53 += f32(c53) * e3; d54 += f32(c54) * e4; d55 += f32(c55) * e5; d56 += f32(c56) * e6; d57 += f32(c57) * e7;
-            d60 += f32(c60) * e0; d61 += f32(c61) * e1; d62 += f32(c62) * e2; d63 += f32(c63) * e3; d64 += f32(c64) * e4; d65 += f32(c65) * e5; d66 += f32(c66) * e6; d67 += f32(c67) * e7;
-            d70 += f32(c70) * e0; d71 += f32(c71) * e1; d72 += f32(c72) * e2; d73 += f32(c73) * e3; d74 += f32(c74) * e4; d75 += f32(c75) * e5; d76 += f32(c76) * e6; d77 += f32(c77) * e7;
+            let xs = array<f32, 8>(select(0.0, sx[(row0 + ty + 0u) * ng + sg], row0 + ty + 0u < p.m), select(0.0, sx[(row0 + ty + 16u) * ng + sg], row0 + ty + 16u < p.m), select(0.0, sx[(row0 + ty + 32u) * ng + sg], row0 + ty + 32u < p.m), select(0.0, sx[(row0 + ty + 48u) * ng + sg], row0 + ty + 48u < p.m), select(0.0, sx[(row0 + ty + 64u) * ng + sg], row0 + ty + 64u < p.m), select(0.0, sx[(row0 + ty + 80u) * ng + sg], row0 + ty + 80u < p.m), select(0.0, sx[(row0 + ty + 96u) * ng + sg], row0 + ty + 96u < p.m), select(0.0, sx[(row0 + ty + 112u) * ng + sg], row0 + ty + 112u < p.m));
+            d00 += f32(c00) * (e0 * xs[0]); d01 += f32(c01) * (e1 * xs[0]); d02 += f32(c02) * (e2 * xs[0]); d03 += f32(c03) * (e3 * xs[0]); d04 += f32(c04) * (e4 * xs[0]); d05 += f32(c05) * (e5 * xs[0]); d06 += f32(c06) * (e6 * xs[0]); d07 += f32(c07) * (e7 * xs[0]);
+            d10 += f32(c10) * (e0 * xs[1]); d11 += f32(c11) * (e1 * xs[1]); d12 += f32(c12) * (e2 * xs[1]); d13 += f32(c13) * (e3 * xs[1]); d14 += f32(c14) * (e4 * xs[1]); d15 += f32(c15) * (e5 * xs[1]); d16 += f32(c16) * (e6 * xs[1]); d17 += f32(c17) * (e7 * xs[1]);
+            d20 += f32(c20) * (e0 * xs[2]); d21 += f32(c21) * (e1 * xs[2]); d22 += f32(c22) * (e2 * xs[2]); d23 += f32(c23) * (e3 * xs[2]); d24 += f32(c24) * (e4 * xs[2]); d25 += f32(c25) * (e5 * xs[2]); d26 += f32(c26) * (e6 * xs[2]); d27 += f32(c27) * (e7 * xs[2]);
+            d30 += f32(c30) * (e0 * xs[3]); d31 += f32(c31) * (e1 * xs[3]); d32 += f32(c32) * (e2 * xs[3]); d33 += f32(c33) * (e3 * xs[3]); d34 += f32(c34) * (e4 * xs[3]); d35 += f32(c35) * (e5 * xs[3]); d36 += f32(c36) * (e6 * xs[3]); d37 += f32(c37) * (e7 * xs[3]);
+            d40 += f32(c40) * (e0 * xs[4]); d41 += f32(c41) * (e1 * xs[4]); d42 += f32(c42) * (e2 * xs[4]); d43 += f32(c43) * (e3 * xs[4]); d44 += f32(c44) * (e4 * xs[4]); d45 += f32(c45) * (e5 * xs[4]); d46 += f32(c46) * (e6 * xs[4]); d47 += f32(c47) * (e7 * xs[4]);
+            d50 += f32(c50) * (e0 * xs[5]); d51 += f32(c51) * (e1 * xs[5]); d52 += f32(c52) * (e2 * xs[5]); d53 += f32(c53) * (e3 * xs[5]); d54 += f32(c54) * (e4 * xs[5]); d55 += f32(c55) * (e5 * xs[5]); d56 += f32(c56) * (e6 * xs[5]); d57 += f32(c57) * (e7 * xs[5]);
+            d60 += f32(c60) * (e0 * xs[6]); d61 += f32(c61) * (e1 * xs[6]); d62 += f32(c62) * (e2 * xs[6]); d63 += f32(c63) * (e3 * xs[6]); d64 += f32(c64) * (e4 * xs[6]); d65 += f32(c65) * (e5 * xs[6]); d66 += f32(c66) * (e6 * xs[6]); d67 += f32(c67) * (e7 * xs[6]);
+            d70 += f32(c70) * (e0 * xs[7]); d71 += f32(c71) * (e1 * xs[7]); d72 += f32(c72) * (e2 * xs[7]); d73 += f32(c73) * (e3 * xs[7]); d74 += f32(c74) * (e4 * xs[7]); d75 += f32(c75) * (e5 * xs[7]); d76 += f32(c76) * (e6 * xs[7]); d77 += f32(c77) * (e7 * xs[7]);
             c00 = 0i; c01 = 0i; c02 = 0i; c03 = 0i; c04 = 0i; c05 = 0i; c06 = 0i; c07 = 0i;
             c10 = 0i; c11 = 0i; c12 = 0i; c13 = 0i; c14 = 0i; c15 = 0i; c16 = 0i; c17 = 0i;
             c20 = 0i; c21 = 0i; c22 = 0i; c23 = 0i; c24 = 0i; c25 = 0i; c26 = 0i; c27 = 0i;
@@ -301,9 +301,8 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         workgroupBarrier();
     }
 
-    // Guarded stores: thread (ty,tx) owns rows ty+16i and columns tx+16j. The
-    // weight scale is already inside `dXY` (applied per k-chunk above), so
-    // the epilogue only has the per-token activation scale left to apply.
+    // Guarded stores: thread (ty,tx) owns rows ty+16i and columns tx+16j. Both
+    // scales are already inside `dXY` (applied per k-chunk above).
     let m0 = row0 + ty + 0u;
     let m1 = row0 + ty + 16u;
     let m2 = row0 + ty + 32u;
@@ -312,97 +311,93 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let m5 = row0 + ty + 80u;
     let m6 = row0 + ty + 96u;
     let m7 = row0 + ty + 112u;
-    let sv0 = select(0.0, sx[m0], m0 < p.m); let sv1 = select(0.0, sx[m1], m1 < p.m);
-    let sv2 = select(0.0, sx[m2], m2 < p.m); let sv3 = select(0.0, sx[m3], m3 < p.m);
-    let sv4 = select(0.0, sx[m4], m4 < p.m); let sv5 = select(0.0, sx[m5], m5 < p.m);
-    let sv6 = select(0.0, sx[m6], m6 < p.m); let sv7 = select(0.0, sx[m7], m7 < p.m);
 
     if (m0 < p.m) {
         let r0 = m0 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r0 + 0u]   = d00 * sv0; }
-        if (col0 + tx + 16u < p.n) { out[r0 + 16u]  = d01 * sv0; }
-        if (col0 + tx + 32u < p.n) { out[r0 + 32u]  = d02 * sv0; }
-        if (col0 + tx + 48u < p.n) { out[r0 + 48u]  = d03 * sv0; }
-        if (col0 + tx + 64u < p.n) { out[r0 + 64u]  = d04 * sv0; }
-        if (col0 + tx + 80u < p.n) { out[r0 + 80u]  = d05 * sv0; }
-        if (col0 + tx + 96u < p.n) { out[r0 + 96u]  = d06 * sv0; }
-        if (col0 + tx + 112u < p.n) { out[r0 + 112u] = d07 * sv0; }
+        if (col0 + tx + 0u < p.n)   { out[r0 + 0u]   = d00; }
+        if (col0 + tx + 16u < p.n) { out[r0 + 16u]  = d01; }
+        if (col0 + tx + 32u < p.n) { out[r0 + 32u]  = d02; }
+        if (col0 + tx + 48u < p.n) { out[r0 + 48u]  = d03; }
+        if (col0 + tx + 64u < p.n) { out[r0 + 64u]  = d04; }
+        if (col0 + tx + 80u < p.n) { out[r0 + 80u]  = d05; }
+        if (col0 + tx + 96u < p.n) { out[r0 + 96u]  = d06; }
+        if (col0 + tx + 112u < p.n) { out[r0 + 112u] = d07; }
     }
     if (m1 < p.m) {
         let r1 = m1 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r1 + 0u]   = d10 * sv1; }
-        if (col0 + tx + 16u < p.n) { out[r1 + 16u]  = d11 * sv1; }
-        if (col0 + tx + 32u < p.n) { out[r1 + 32u]  = d12 * sv1; }
-        if (col0 + tx + 48u < p.n) { out[r1 + 48u]  = d13 * sv1; }
-        if (col0 + tx + 64u < p.n) { out[r1 + 64u]  = d14 * sv1; }
-        if (col0 + tx + 80u < p.n) { out[r1 + 80u]  = d15 * sv1; }
-        if (col0 + tx + 96u < p.n) { out[r1 + 96u]  = d16 * sv1; }
-        if (col0 + tx + 112u < p.n) { out[r1 + 112u] = d17 * sv1; }
+        if (col0 + tx + 0u < p.n)   { out[r1 + 0u]   = d10; }
+        if (col0 + tx + 16u < p.n) { out[r1 + 16u]  = d11; }
+        if (col0 + tx + 32u < p.n) { out[r1 + 32u]  = d12; }
+        if (col0 + tx + 48u < p.n) { out[r1 + 48u]  = d13; }
+        if (col0 + tx + 64u < p.n) { out[r1 + 64u]  = d14; }
+        if (col0 + tx + 80u < p.n) { out[r1 + 80u]  = d15; }
+        if (col0 + tx + 96u < p.n) { out[r1 + 96u]  = d16; }
+        if (col0 + tx + 112u < p.n) { out[r1 + 112u] = d17; }
     }
     if (m2 < p.m) {
         let r2 = m2 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r2 + 0u]   = d20 * sv2; }
-        if (col0 + tx + 16u < p.n) { out[r2 + 16u]  = d21 * sv2; }
-        if (col0 + tx + 32u < p.n) { out[r2 + 32u]  = d22 * sv2; }
-        if (col0 + tx + 48u < p.n) { out[r2 + 48u]  = d23 * sv2; }
-        if (col0 + tx + 64u < p.n) { out[r2 + 64u]  = d24 * sv2; }
-        if (col0 + tx + 80u < p.n) { out[r2 + 80u]  = d25 * sv2; }
-        if (col0 + tx + 96u < p.n) { out[r2 + 96u]  = d26 * sv2; }
-        if (col0 + tx + 112u < p.n) { out[r2 + 112u] = d27 * sv2; }
+        if (col0 + tx + 0u < p.n)   { out[r2 + 0u]   = d20; }
+        if (col0 + tx + 16u < p.n) { out[r2 + 16u]  = d21; }
+        if (col0 + tx + 32u < p.n) { out[r2 + 32u]  = d22; }
+        if (col0 + tx + 48u < p.n) { out[r2 + 48u]  = d23; }
+        if (col0 + tx + 64u < p.n) { out[r2 + 64u]  = d24; }
+        if (col0 + tx + 80u < p.n) { out[r2 + 80u]  = d25; }
+        if (col0 + tx + 96u < p.n) { out[r2 + 96u]  = d26; }
+        if (col0 + tx + 112u < p.n) { out[r2 + 112u] = d27; }
     }
     if (m3 < p.m) {
         let r3 = m3 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r3 + 0u]   = d30 * sv3; }
-        if (col0 + tx + 16u < p.n) { out[r3 + 16u]  = d31 * sv3; }
-        if (col0 + tx + 32u < p.n) { out[r3 + 32u]  = d32 * sv3; }
-        if (col0 + tx + 48u < p.n) { out[r3 + 48u]  = d33 * sv3; }
-        if (col0 + tx + 64u < p.n) { out[r3 + 64u]  = d34 * sv3; }
-        if (col0 + tx + 80u < p.n) { out[r3 + 80u]  = d35 * sv3; }
-        if (col0 + tx + 96u < p.n) { out[r3 + 96u]  = d36 * sv3; }
-        if (col0 + tx + 112u < p.n) { out[r3 + 112u] = d37 * sv3; }
+        if (col0 + tx + 0u < p.n)   { out[r3 + 0u]   = d30; }
+        if (col0 + tx + 16u < p.n) { out[r3 + 16u]  = d31; }
+        if (col0 + tx + 32u < p.n) { out[r3 + 32u]  = d32; }
+        if (col0 + tx + 48u < p.n) { out[r3 + 48u]  = d33; }
+        if (col0 + tx + 64u < p.n) { out[r3 + 64u]  = d34; }
+        if (col0 + tx + 80u < p.n) { out[r3 + 80u]  = d35; }
+        if (col0 + tx + 96u < p.n) { out[r3 + 96u]  = d36; }
+        if (col0 + tx + 112u < p.n) { out[r3 + 112u] = d37; }
     }
     if (m4 < p.m) {
         let r4 = m4 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r4 + 0u]   = d40 * sv4; }
-        if (col0 + tx + 16u < p.n) { out[r4 + 16u]  = d41 * sv4; }
-        if (col0 + tx + 32u < p.n) { out[r4 + 32u]  = d42 * sv4; }
-        if (col0 + tx + 48u < p.n) { out[r4 + 48u]  = d43 * sv4; }
-        if (col0 + tx + 64u < p.n) { out[r4 + 64u]  = d44 * sv4; }
-        if (col0 + tx + 80u < p.n) { out[r4 + 80u]  = d45 * sv4; }
-        if (col0 + tx + 96u < p.n) { out[r4 + 96u]  = d46 * sv4; }
-        if (col0 + tx + 112u < p.n) { out[r4 + 112u] = d47 * sv4; }
+        if (col0 + tx + 0u < p.n)   { out[r4 + 0u]   = d40; }
+        if (col0 + tx + 16u < p.n) { out[r4 + 16u]  = d41; }
+        if (col0 + tx + 32u < p.n) { out[r4 + 32u]  = d42; }
+        if (col0 + tx + 48u < p.n) { out[r4 + 48u]  = d43; }
+        if (col0 + tx + 64u < p.n) { out[r4 + 64u]  = d44; }
+        if (col0 + tx + 80u < p.n) { out[r4 + 80u]  = d45; }
+        if (col0 + tx + 96u < p.n) { out[r4 + 96u]  = d46; }
+        if (col0 + tx + 112u < p.n) { out[r4 + 112u] = d47; }
     }
     if (m5 < p.m) {
         let r5 = m5 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r5 + 0u]   = d50 * sv5; }
-        if (col0 + tx + 16u < p.n) { out[r5 + 16u]  = d51 * sv5; }
-        if (col0 + tx + 32u < p.n) { out[r5 + 32u]  = d52 * sv5; }
-        if (col0 + tx + 48u < p.n) { out[r5 + 48u]  = d53 * sv5; }
-        if (col0 + tx + 64u < p.n) { out[r5 + 64u]  = d54 * sv5; }
-        if (col0 + tx + 80u < p.n) { out[r5 + 80u]  = d55 * sv5; }
-        if (col0 + tx + 96u < p.n) { out[r5 + 96u]  = d56 * sv5; }
-        if (col0 + tx + 112u < p.n) { out[r5 + 112u] = d57 * sv5; }
+        if (col0 + tx + 0u < p.n)   { out[r5 + 0u]   = d50; }
+        if (col0 + tx + 16u < p.n) { out[r5 + 16u]  = d51; }
+        if (col0 + tx + 32u < p.n) { out[r5 + 32u]  = d52; }
+        if (col0 + tx + 48u < p.n) { out[r5 + 48u]  = d53; }
+        if (col0 + tx + 64u < p.n) { out[r5 + 64u]  = d54; }
+        if (col0 + tx + 80u < p.n) { out[r5 + 80u]  = d55; }
+        if (col0 + tx + 96u < p.n) { out[r5 + 96u]  = d56; }
+        if (col0 + tx + 112u < p.n) { out[r5 + 112u] = d57; }
     }
     if (m6 < p.m) {
         let r6 = m6 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r6 + 0u]   = d60 * sv6; }
-        if (col0 + tx + 16u < p.n) { out[r6 + 16u]  = d61 * sv6; }
-        if (col0 + tx + 32u < p.n) { out[r6 + 32u]  = d62 * sv6; }
-        if (col0 + tx + 48u < p.n) { out[r6 + 48u]  = d63 * sv6; }
-        if (col0 + tx + 64u < p.n) { out[r6 + 64u]  = d64 * sv6; }
-        if (col0 + tx + 80u < p.n) { out[r6 + 80u]  = d65 * sv6; }
-        if (col0 + tx + 96u < p.n) { out[r6 + 96u]  = d66 * sv6; }
-        if (col0 + tx + 112u < p.n) { out[r6 + 112u] = d67 * sv6; }
+        if (col0 + tx + 0u < p.n)   { out[r6 + 0u]   = d60; }
+        if (col0 + tx + 16u < p.n) { out[r6 + 16u]  = d61; }
+        if (col0 + tx + 32u < p.n) { out[r6 + 32u]  = d62; }
+        if (col0 + tx + 48u < p.n) { out[r6 + 48u]  = d63; }
+        if (col0 + tx + 64u < p.n) { out[r6 + 64u]  = d64; }
+        if (col0 + tx + 80u < p.n) { out[r6 + 80u]  = d65; }
+        if (col0 + tx + 96u < p.n) { out[r6 + 96u]  = d66; }
+        if (col0 + tx + 112u < p.n) { out[r6 + 112u] = d67; }
     }
     if (m7 < p.m) {
         let r7 = m7 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r7 + 0u]   = d70 * sv7; }
-        if (col0 + tx + 16u < p.n) { out[r7 + 16u]  = d71 * sv7; }
-        if (col0 + tx + 32u < p.n) { out[r7 + 32u]  = d72 * sv7; }
-        if (col0 + tx + 48u < p.n) { out[r7 + 48u]  = d73 * sv7; }
-        if (col0 + tx + 64u < p.n) { out[r7 + 64u]  = d74 * sv7; }
-        if (col0 + tx + 80u < p.n) { out[r7 + 80u]  = d75 * sv7; }
-        if (col0 + tx + 96u < p.n) { out[r7 + 96u]  = d76 * sv7; }
-        if (col0 + tx + 112u < p.n) { out[r7 + 112u] = d77 * sv7; }
+        if (col0 + tx + 0u < p.n)   { out[r7 + 0u]   = d70; }
+        if (col0 + tx + 16u < p.n) { out[r7 + 16u]  = d71; }
+        if (col0 + tx + 32u < p.n) { out[r7 + 32u]  = d72; }
+        if (col0 + tx + 48u < p.n) { out[r7 + 48u]  = d73; }
+        if (col0 + tx + 64u < p.n) { out[r7 + 64u]  = d74; }
+        if (col0 + tx + 80u < p.n) { out[r7 + 80u]  = d75; }
+        if (col0 + tx + 96u < p.n) { out[r7 + 96u]  = d76; }
+        if (col0 + tx + 112u < p.n) { out[r7 + 112u] = d77; }
     }
 }

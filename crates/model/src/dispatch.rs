@@ -7,7 +7,7 @@
 //! map"). The models genuinely differ (per-block vs global modulation,
 //! 3- vs 4-axis RoPE, biased vs bias-free linears), but the NUMERIC-TIER
 //! machinery - the Precision map, the packed-int8 resident weight, the
-//! K-keyed packed-activation scratch, per-token activation quant, and the
+//! K-keyed packed-activation scratch, group-wise activation quant, and the
 //! DP4A GEMM dispatch with `sx·sw` dequant - is model-agnostic; an int8 fix
 //! previously had to land twice.
 //!
@@ -384,25 +384,27 @@ pub fn lora_bank_group_rows(g: &Gpu, kernels: LoraBankKernels, bank: &LoraGroupB
 /// linear reading that activation. The widths are distinct within a model,
 /// so K keys the buffer.
 pub struct I8Scratch {
-    /// `[rows]` per-token activation scale (`max_abs_row` output).
+    /// `[rows, K/32]` activation scales (`max_abs_row` output) of whichever
+    /// width was quantized last, sized for the widest.
     pub sx: DeviceBuffer,
     slots: Vec<(u32, DeviceBuffer)>,
 }
 
 impl I8Scratch {
-    /// `sx_rows` per-token scales; one `rows·K/4`-word packed buffer per
-    /// width in `widths`.
+    /// Scales for `sx_rows` rows of the widest of `widths`; one `rows·K/4`-word
+    /// packed buffer per width in `widths`.
     pub fn new(g: &Gpu, sx_rows: u64, rows: u64, widths: &[u32]) -> I8Scratch {
+        let widest = widths.iter().copied().max().unwrap_or(0) as usize;
         I8Scratch {
-            sx: g.storage(sx_rows),
+            sx: g.storage(crate::int8::act_scale_len(sx_rows as usize, widest) as u64),
             slots: widths.iter().map(|&k| (k, g.storage(rows * k as u64 / 4))).collect(),
         }
     }
 
-    /// A scratch whose per-row scales and packed activation were produced by
+    /// A scratch whose scales and packed activation were produced by
     /// something other than [`Self::quant_rows`] - a fused kernel that quantises
-    /// as part of the step that made the activation. `sx` is `[rows]` and `xq`
-    /// `[rows, k/4]`, the layout [`Self::new`] sizes for.
+    /// as part of the step that made the activation. `sx` is `[rows, k/32]` and
+    /// `xq` `[rows, k/4]`, the layout [`Self::new`] sizes for.
     pub fn from_parts(sx: DeviceBuffer, k: u32, xq: DeviceBuffer) -> I8Scratch {
         I8Scratch { sx, slots: vec![(k, xq)] }
     }
@@ -417,7 +419,7 @@ impl I8Scratch {
     }
 
     /// Quantize rows `r0..r1` of `x` `[.., k]` into the K-matched packed
-    /// scratch with fresh per-token scales (`max_abs_row` → `quant_pack`;
+    /// scratch with fresh group scales (`max_abs_row` → `quant_pack`;
     /// `quant` is those two kernel indices).
     pub fn quant_rows(&self, g: &Gpu, quant: [usize; 2], s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) {
         s.extend(quant_rows_steps(g, QuantRows { kernels: quant, x, sx: &self.sx, xq: self.xq_for(k), xgs: None }, r0, r1, k));
@@ -437,15 +439,15 @@ pub fn mm_rows_off(g: &Gpu, tier: GemmVariants, x: &DeviceBuffer, w: &DeviceBuff
 
 /// Int8 DP4A matmul over pre-quantized rows `xr0..xr0+m` of the K-matched
 /// packed scratch, writing the `m·n` floats of `o` at float offset `ooff`.
-/// Dequantizes with the per-token `sx` (sliced at `xr0`) × the group-wise
-/// `sw` (bound whole; the kernel derives the group count from `k/4`).
+/// Dequantizes each group with `sw` (bound whole; the kernel derives the group
+/// count from `k/4`) × `sx` (sliced at row `xr0`).
 /// `i8_tier` is the DP4A GEMM family (same selection rule and dispatch
 /// geometry as the fp32 tier; GPU-only, hence always a `Fast` arm).
 #[allow(clippy::too_many_arguments)]
 pub fn mm8_rows_off(g: &Gpu, i8_tier: GemmVariants, scr: &I8Scratch, wq: &DeviceBuffer, sw: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, ooff: u64, m: u32, k: u32, n: u32) -> Step {
     let kg = k as u64 / 4;
     let xo = (xr0 as u64 * kg, m as u64 * kg);
-    let so = (xr0 as u64, m as u64);
+    let so = crate::int8::act_scale_range(xr0, m, k);
     let oo = (ooff, m as u64 * n as u64);
     let (kind, grid) = gemm_variant(i8_tier, m, n);
     g.dispatch_sliced(kind, &[scr.xq_for(k), wq, &scr.sx, sw, o], &[xo, (0, 0), so, (0, 0), oo], &[m, k / 4, n], grid)
@@ -489,7 +491,7 @@ pub fn mm8_rows_off(g: &Gpu, i8_tier: GemmVariants, scr: &I8Scratch, wq: &Device
 pub fn mm4_rows_off(g: &Gpu, q4_tier: GemmVariants, scr: &I8Scratch, wq: &DeviceBuffer, sw: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, ooff: u64, m: u32, k: u32, n: u32) -> Step {
     let kg = k as u64 / 4;
     let xo = (xr0 as u64 * kg, m as u64 * kg);
-    let so = (xr0 as u64, m as u64);
+    let so = crate::int8::act_scale_range(xr0, m, k);
     let oo = (ooff, m as u64 * n as u64);
     let (kind, tile_grid) = gemm_variant(q4_tier, m, n);
     let grid = match q4_tier {

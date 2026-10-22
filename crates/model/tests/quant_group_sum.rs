@@ -100,18 +100,18 @@ fn quant_rows_steps_wires_the_xgs_seam() {
 
     let g = dev(PIPES);
     let (m, k) = (3usize, 64usize);
-    // Integer values in [-100, 100], plus one element per row forced to
-    // exactly 127 so `max_abs_row` computes sx[r] = 127/127 = 1.0 EXACTLY
+    // Integer values in [-100, 100], plus one element per 32-group forced to
+    // exactly 127 so `max_abs_row` computes every group scale sx[r,g] = 127/127 = 1.0 EXACTLY
     // (no floating remainder). With sx == 1.0, `quant_pack`'s
     // `round(x * (1/sx))` is `round` of an already-integer value: never a
     // tie, so the packed bytes are known exactly without reimplementing
     // quant_pack's rounding on the host.
     let mut x_vals: Vec<f32> = (0..m * k).map(|i| (((i as i64 * 53) % 201) - 100) as f32).collect();
-    for r in 0..m {
-        x_vals[r * k] = 127.0;
+    for group_start in (0..m * k).step_by(32) {
+        x_vals[group_start] = 127.0;
     }
     let x = g.storage_init("x", &x_vals);
-    let sx = g.storage(m as u64);
+    let sx = g.storage((m * (k / 32)) as u64);
 
     let xq_none = g.storage((m * k / 4) as u64);
     let steps_none = quant_rows_steps(&g, QuantRows { kernels: [1, 2], x: &x, sx: &sx, xq: &xq_none, xgs: None }, 0, m as u32, k as u32);

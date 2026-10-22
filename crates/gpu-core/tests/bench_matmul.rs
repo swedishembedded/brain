@@ -302,23 +302,27 @@ fn bench_matmul_quant() {
     /// Weight-scale group along K, mirroring `model::int8::GROUP`.
     const GROUP: usize = 32;
 
-    /// Per-row symmetric quantization of an ACTIVATION (scale = max|row|/127),
+    /// Per-group symmetric quantization of an ACTIVATION (scale = max|group|/127),
     /// matching what `max_abs_row`/`quant_pack` do on device, duplicated here
     /// (gpu-core has no dependency on `brain-model`) - returns packed
-    /// `[rows, k/4]` u32, per-row scale, and the UNPACKED signed values (kept
+    /// `[rows, k/4]` u32, `[rows, k/32]` scale, and the UNPACKED signed values (kept
     /// for the exact host reference below; round-tripping through f32 dequant
     /// would launder a packing bug).
     fn quant_act(x: &[f32], rows: usize, k: usize) -> (Vec<u32>, Vec<f32>, Vec<i8>) {
         let kg = k / 4;
         let mut packed = vec![0u32; rows * kg];
-        let mut scale = vec![0f32; rows];
+        let gs = k / GROUP;
+        let mut scale = vec![0f32; rows * gs];
         let mut q = vec![0i8; rows * k];
         for r in 0..rows {
             let row = &x[r * k..r * k + k];
-            let s = row.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / 127.0;
-            scale[r] = s;
-            for c in 0..k {
-                q[r * k + c] = (row[c] / s).round().clamp(-127.0, 127.0) as i8;
+            for g in 0..gs {
+                let blk = &row[g * GROUP..g * GROUP + GROUP];
+                let s = blk.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / 127.0;
+                scale[r * gs + g] = s;
+                for c in 0..GROUP {
+                    q[r * k + g * GROUP + c] = (blk[c] / s).round().clamp(-127.0, 127.0) as i8;
+                }
             }
             for g in 0..kg {
                 let mut word = 0u32;
@@ -366,7 +370,7 @@ fn bench_matmul_quant() {
     }
 
     /// Reference for the group-wise contract:
-    /// `out[m,n] = sx[m] * sum_g (sum_{k in g} xq*wq) * sw[n,g]`. Each group's
+    /// `out[m,n] = sum_g (sum_{k in g} xq*wq) * (sw[n,g] * sx[m,g])`. Each group's
     /// sum is exact integer; only the cross-group fold is floating point,
     /// which is what every kernel below does too.
     fn host_group_gemm(xq: &[i8], wq: &[i8], sx: &[f32], sw: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
@@ -380,9 +384,9 @@ fn bench_matmul_quant() {
                     for ki in g * GROUP..g * GROUP + GROUP {
                         ia += xq[mi * k + ki] as i32 * wq[ni * k + ki] as i32;
                     }
-                    acc += ia as f32 * sw[ni * gs + g];
+                    acc += ia as f32 * (sw[ni * gs + g] * sx[mi * gs + g]);
                 }
-                out[mi * n + ni] = acc * sx[mi];
+                out[mi * n + ni] = acc;
             }
         }
         out

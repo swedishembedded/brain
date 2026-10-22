@@ -78,7 +78,7 @@ fn run(gpu: &Gpu, c: &Case, seed: u64) -> (Vec<u32>, Vec<u32>) {
     let mut rng = Lcg::new(seed);
     let ids: Vec<u32> = (0..slots).map(|_| if rng.next_u32() % 100 < c.skew { 0 } else { rng.next_u32() % c.ne }).collect();
     let xq = upload_u32(gpu, &packed(rows * kg, seed + 1));
-    let sx = gpu.storage_init("sx", &scales(rows, seed + 2));
+    let sx = gpu.storage_init("sx", &scales(rows * (kg / 8), seed + 2));
     let wq = upload_u32(gpu, &packed(ne * n * kg, seed + 3));
     let sw = gpu.storage_init("sw", &scales(ne * n * (kg / 8), seed + 4));
 

@@ -80,8 +80,8 @@ fn scales(n: usize, seed: u64) -> Vec<f32> {
 /// nibbles-per-word), matching `matmul_q4_gemv.wgsl`'s own `WPG4`.
 const WPG4: usize = 4;
 
-/// `out[m,n] = sx[m] * sum_g (sum_{k in g} xq . wq_nibbles) * sw[n,g]`, group
-/// sums exact in `i64`, folded in `f64`. Returns `(value, magnitude)` per
+/// `out[m,n] = sum_g (sum_{k in g} xq . wq_nibbles) * (sw[n,g] * sx[m,g])`, group
+/// sums exact in `i64`, the combined scale rounded to `f32` first, folded in `f64`. Returns `(value, magnitude)` per
 /// element, `magnitude` being `sum_g |term|`.
 fn oracle(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], m: usize, k: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
     let kgx = k / 4; // x words per row
@@ -110,12 +110,12 @@ fn oracle(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], m: usize, k: usize, n:
                         ia += w_nibble(wv, b) * xb;
                     }
                 }
-                let term = ia as f64 * sw[ni * ng + gr] as f64;
+                let term = ia as f64 * (sw[ni * ng + gr] * sx[mi * ng + gr]) as f64;
                 acc += term;
                 amag += term.abs();
             }
-            out[mi * n + ni] = (acc * sx[mi] as f64) as f32;
-            mag[mi * n + ni] = (amag * sx[mi] as f64) as f32;
+            out[mi * n + ni] = acc as f32;
+            mag[mi * n + ni] = amag as f32;
         }
     }
     (out, mag)
@@ -129,12 +129,12 @@ fn run(gpu: &Gpu, m: u32, k: u32, n: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<
     let ng = kgw / WPG4 as u32;
     let xq = packed_x((m * kgx) as usize, u64::from(m) * 7 + 1);
     let wq = packed_w((n * kgw) as usize, u64::from(n) * 13 + 3);
-    let sx = scales(m as usize, u64::from(m) + 101);
+    let sx = scales((m * ng) as usize, u64::from(m) + 101);
     let sw = scales((n * ng) as usize, u64::from(n) + 202);
 
     let xb = gpu.storage(u64::from(m * kgx));
     let wb = gpu.storage(u64::from(n * kgw));
-    let sxb = gpu.storage(u64::from(m));
+    let sxb = gpu.storage(u64::from(m * ng));
     let swb = gpu.storage(u64::from(n * ng));
     gpu.write(&xb, &xq);
     gpu.write(&wb, &wq);

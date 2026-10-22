@@ -289,14 +289,14 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &De
             // own doc: "every expert reads the same quantized activation, so
             // quantizing it 128 times would be pure waste."
             let xq = g.storage((n * d / 4) as u64);
-            let sx = g.storage(n as u64);
+            let sx = g.storage(model::int8::act_scale_len(n as usize, d as usize) as u64);
             steps.extend(quant_rows_steps(g, QuantRows { kernels: mids8.quant, x: &xn2, sx: &sx, xq: &xq, xgs: None }, 0, n, d));
             let scratch8 = ExpertScratch8 {
                 gate_pre: &g.storage((n * moe_ff) as u64),
                 up: &g.storage((n * moe_ff) as u64),
                 h: &g.storage((n * moe_ff) as u64),
                 hq: &g.storage((n * moe_ff / 4) as u64),
-                sh: &g.storage(n as u64),
+                sh: &g.storage(model::int8::act_scale_len(n as usize, moe_ff as usize) as u64),
                 expert_out: &g.storage((n * d) as u64),
             };
             for e in 0..cfg.n_experts as usize {
@@ -408,7 +408,7 @@ pub struct LmHeadIds8 {
 /// the CONTRACTED dimension, matching every other int8 GEMM in this crate).
 pub fn lm_head_fwd_i8(g: &Gpu, ids: &LmHeadIds8, lm_head_w: model::moe::Lin8, hidden: &DeviceBuffer, n: u32, d: u32, vocab: u32) -> DeviceBuffer {
     let xq = g.storage((n * d / 4) as u64);
-    let sx = g.storage(n as u64);
+    let sx = g.storage(model::int8::act_scale_len(n as usize, d as usize) as u64);
     let mut steps = quant_rows_steps(g, QuantRows { kernels: ids.quant, x: hidden, sx: &sx, xq: &xq, xgs: None }, 0, n, d).to_vec();
     let out = g.storage((n * vocab) as u64);
     steps.push(g.dispatch(ids.matmul_i8, &[&xq, lm_head_w.wq, &sx, lm_head_w.sw, &out], &[n, d / 4, vocab], gpu_core::Dispatch::Workgroups(n.div_ceil(128) * vocab.div_ceil(128))));

@@ -73,8 +73,8 @@ fn time(gpu: &Gpu, f: &Format, kernel: usize, m: u32, k: u32, n: u32) -> (f64, u
     let copies = FOOTPRINT_BYTES.div_ceil(bytes).max(1) as usize;
     let xq = gpu.storage(u64::from(m * k / 4));
     gpu.write(&xq, &vec![0x01020304u32; (m * k / 4) as usize]);
-    let sx = gpu.storage(u64::from(m));
-    gpu.write_f32(&sx, &vec![1.0; m as usize]);
+    let sx = gpu.storage(u64::from(m * k / 32));
+    gpu.write_f32(&sx, &vec![1.0; (m * k / 32) as usize]);
     let xgs = gpu.storage(u64::from(m * k / 32));
     let out = gpu.storage(u64::from(m * n));
     let weights: Vec<Vec<DeviceBuffer>> = (0..copies).map(|_| planes.iter().map(|&w| gpu.storage(w)).collect()).collect();

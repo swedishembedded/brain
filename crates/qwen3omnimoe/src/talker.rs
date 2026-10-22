@@ -274,7 +274,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, xmid: &Dev
             // xn2 quantized ONCE, shared by every routed expert AND the
             // shared expert -- see this function's doc.
             let xq = g.storage((n * d / 4) as u64);
-            let sx = g.storage(n as u64);
+            let sx = g.storage(model::int8::act_scale_len(n as usize, d as usize) as u64);
             steps.extend(quant_rows_steps(g, QuantRows { kernels: mids8.quant, x: &xn2, sx: &sx, xq: &xq, xgs: None }, 0, n, d));
 
             let scratch8 = ExpertScratch8 {
@@ -282,7 +282,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, xmid: &Dev
                 up: &g.storage((n * moe_ff) as u64),
                 h: &g.storage((n * moe_ff) as u64),
                 hq: &g.storage((n * moe_ff / 4) as u64),
-                sh: &g.storage(n as u64),
+                sh: &g.storage(model::int8::act_scale_len(n as usize, moe_ff as usize) as u64),
                 expert_out: &g.storage((n * d) as u64),
             };
             let routed_out = g.storage((n * d) as u64);
@@ -297,7 +297,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, xmid: &Dev
                 up: &g.storage((n * se_ff) as u64),
                 h: &g.storage((n * se_ff) as u64),
                 hq: &g.storage((n * se_ff / 4) as u64),
-                sh: &g.storage(n as u64),
+                sh: &g.storage(model::int8::act_scale_len(n as usize, se_ff as usize) as u64),
                 mlp_out: &g.storage((n * d) as u64),
                 gate_logits: &g.storage(n as u64),
                 gate_scalar: &g.storage(n as u64),

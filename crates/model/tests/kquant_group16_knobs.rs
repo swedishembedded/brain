@@ -91,15 +91,19 @@ fn pack_i8_words(codes: &[i8]) -> Vec<u32> {
 }
 
 /// The host oracle: exact int8 codes in, f64 accumulation throughout --
-/// `out[m,n] = sx[m] * Σ_g( sw[n,g] * Σ_{k in g}(codes_w[n,k] * codes_x[m,k]) )`,
-/// `group` elements per `g`. The ONLY difference from the device is
+/// `out[m,n] = Σ_g( Σ_{k in g}(codes_w[n,k] * codes_x[m,k]) * (sw[n,g] * sx[m,g32(g)]) )`,
+/// `group` elements per `g`; `sx` holds one scale per 32 activation
+/// elements, so a weight group of 16 uses `sx[m, 16*g/32]`. The ONLY difference from the device is
 /// accumulation ORDER (sequential f64 here, grouped-then-folded f32 on
 /// device), never the operation or the operands.
+/// Returns the outputs and, per output, `Σ_g |term_g|` - the magnitude the
+/// device's f32 rounding error is proportional to.
 #[allow(clippy::too_many_arguments)]
-fn host_oracle(codes_x: &[i8], sx: &[f32], codes_w: &[i8], sw: &[f32], m: usize, k: usize, n: usize, group: usize) -> Vec<f32> {
+fn host_oracle(codes_x: &[i8], sx: &[f32], codes_w: &[i8], sw: &[f32], m: usize, k: usize, n: usize, group: usize) -> Oracle {
     assert_eq!(k % group, 0);
     let groups = k / group;
     let mut out = vec![0f32; m * n];
+    let mut mag = vec![0f64; m * n];
     for r in 0..m {
         for c in 0..n {
             let mut acc = 0f64;
@@ -109,12 +113,22 @@ fn host_oracle(codes_x: &[i8], sx: &[f32], codes_w: &[i8], sw: &[f32], m: usize,
                     let kk = g * group + j;
                     isum += i64::from(codes_x[r * k + kk]) * i64::from(codes_w[c * k + kk]);
                 }
-                acc += isum as f64 * f64::from(sw[c * groups + g]);
+                let scale = f64::from(sw[c * groups + g] * sx[r * (k / 32) + g * group / 32]);
+                acc += isum as f64 * scale;
+                mag[r * n + c] += (isum as f64 * scale).abs();
             }
-            out[r * n + c] = (acc * f64::from(sx[r])) as f32;
+            out[r * n + c] = acc as f32;
         }
     }
-    out
+    Oracle { out, mag, terms: groups }
+}
+
+/// [`host_oracle`]'s answer: the outputs, each output's term magnitude, and
+/// how many terms (scale groups) each output sums.
+struct Oracle {
+    out: Vec<f32>,
+    mag: Vec<f64>,
+    terms: usize,
 }
 
 fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
@@ -137,46 +151,34 @@ fn cosine(got: &[f32], want: &[f32]) -> f64 {
     d / (na.sqrt() * nb.sqrt())
 }
 
-/// `max |got-want| / max(|want|, 1)` -- relative where the reference has
-/// scale, matching `crates/diffusion/tests/discrete_parity.rs::max_rel`'s
-/// convention; every oracle value in this file is well above that floor, so
-/// it never masks a real error.
-fn max_rel(got: &[f32], want: &[f32]) -> f64 {
-    got.iter().zip(want).map(|(&g, &w)| (f64::from(g) - f64::from(w)).abs() / f64::from(w).abs().max(1.0)).fold(0.0, f64::max)
-}
-
-fn assert_matches_oracle(what: &str, got: &[f32], want: &[f32]) {
+fn assert_matches_oracle(what: &str, got: &[f32], oracle: &Oracle) {
+    let want = &oracle.out;
     let l2 = rel_l2(got, want);
     let cos = cosine(got, want);
-    let mr = max_rel(got, want);
     assert!(l2 <= 1e-6, "{what}: rel_l2 {l2:e} > 1e-6");
     assert!(cos >= 1.0 - 1e-9, "{what}: cosine {cos:.12} < 1 - 1e-9");
-    // `group=16` folds the integer-sum-into-f32 accumulation TWICE as often
-    // as `group=32` (QPG=1 vs QPG=2, WPG=4 vs WPG=8 - see `matmul_i8_dyn
-    // .wgsl`'s own `QPG` comment), so its worst-case single-element error
-    // against the f64 host oracle is a real, measured property of doing
-    // twice as many f32 accumulation steps, not a correctness bug: on a
-    // real device (Intel Arc iGPU, Vulkan) this file's own three group=16
-    // host-oracle gates measured `rel_l2` in `8e-8..2e-7` and `cosine`
-    // at `1.0` to 12 decimals (both UNCHANGED from this bound, and both
-    // still the primary, tight gates) while `max_rel` ranged up to
-    // `3.34e-4` - `1e-5` (calibrated against the group=32/single-fold
-    // kernels this suite's other tests and `matmul_kq.rs` share) is too
-    // tight for a worst-case SINGLE element under twice the accumulation
-    // steps. `5e-4` keeps real margin above the measured worst case while
-    // staying far below a magnitude that would indicate an actual wrong
-    // group/index rather than accumulation-order noise.
-    assert!(mr <= 5e-4, "{what}: max relative error {mr:e} > 5e-4");
+    // Per element, the fp32 summation bound of what the device does: each
+    // group's term takes two rounded products (`sw * sx`, then the integer
+    // sum times it) and one rounded add into a running total, and a GEMV
+    // folds up to 64 such partial totals, so no output is off by more than
+    // `(terms + 64 + 3) * eps` of the magnitude of its terms. A wrong group,
+    // scale or index breaks it by orders of magnitude.
+    let steps = (oracle.terms + 64 + 3) as f64;
+    for (i, (&g, &w)) in got.iter().zip(want).enumerate() {
+        let bound = steps * f64::from(f32::EPSILON) * oracle.mag[i];
+        let err = (f64::from(g) - f64::from(w)).abs();
+        assert!(err <= bound, "{what}: output {i} = {g} off the oracle's {w} by {err:e}, past the summation bound {bound:e}");
+    }
 }
 
 /// Uniform int8 activation buffer for `m` rows of `k`, packed and uploaded,
-/// plus its per-row f32 scale.
+/// plus its per-32-group `[m, k/32]` f32 scale.
 fn upload_activation(g: &Gpu, seed: u64, m: usize, k: usize) -> (Vec<i8>, DeviceBuffer, DeviceBuffer) {
     let codes = rand_i8_codes(seed, m * k, -100, 100);
     let words = pack_i8_words(&codes);
     let xq = g.storage(words.len() as u64);
     g.write(&xq, &words);
-    let sx_h = rand_pos_f32(seed ^ 0x5A5A, m, 0.3, 1.7);
+    let sx_h = rand_pos_f32(seed ^ 0x5A5A, m * (k / 32), 0.3, 1.7);
     let sx = g.storage_init("sx", &sx_h);
     (codes, xq, sx)
 }
@@ -262,7 +264,7 @@ fn matmul_i8_dyn_register_block_variants_are_bit_identical_to_default_tile() {
             let got_variant = g.read(&out_variant, m * n);
             assert_eq!(got_variant, got_default, "{name} diverged from the default tile at m={m} k={k} n={n}");
 
-            let want = host_oracle(&codes_x, &g.read(&sx, m), &codes_w, &g.read(&sw, n * (k / 32)), m, k, n, 32);
+            let want = host_oracle(&codes_x, &g.read(&sx, m * (k / 32)), &codes_w, &g.read(&sw, n * (k / 32)), m, k, n, 32);
             assert_matches_oracle(&format!("{name} m={m} k={k} n={n}"), &got_variant, &want);
         }
     }
@@ -288,7 +290,7 @@ fn matmul_i8_dyn_qpg1_group16_matches_host_oracle() {
     g.submit(&[], &[g.dispatch(idx(&g, name), &[&xq, &wq, &sx, &sw, &out], &params, gpu_core::Dispatch::Workgroups(tiles))]);
     let got = g.read(&out, m * n);
 
-    let sx_h = g.read(&sx, m);
+    let sx_h = g.read(&sx, m * (k / 32));
     let want = host_oracle(&codes_x, &sx_h, &codes_w, &g.read(&sw, n * (k / 16)), m, k, n, 16);
     assert_matches_oracle("matmul_i8_dyn#QPG=1 (group=16)", &got, &want);
 }
@@ -309,7 +311,7 @@ fn matmul_i8_gemv_wpg4_group16_matches_host_oracle() {
     g.submit(&[], &[g.dispatch(idx(&g, name), &[&xq, &wq, &sx, &sw, &out], &params, gpu_core::Dispatch::Workgroups(n as u32))]);
     let got = g.read(&out, m * n);
 
-    let sx_h = g.read(&sx, m);
+    let sx_h = g.read(&sx, m * (k / 32));
     let want = host_oracle(&codes_x, &sx_h, &codes_w, &g.read(&sw, n * (k / 16)), m, k, n, 16);
     assert_matches_oracle("matmul_i8_gemv#WPG=4 (group=16)", &got, &want);
 }
@@ -334,7 +336,7 @@ fn matmul_i8_gemv_reg_wpg4_group16_matches_host_oracle() {
     g.submit(&[], &[g.dispatch(idx(&g, name), &[&xq, &wq, &sx, &sw, &out], &params, gpu_core::Dispatch::Workgroups(n as u32))]);
     let got = g.read(&out, m * n);
 
-    let sx_h = g.read(&sx, m);
+    let sx_h = g.read(&sx, m * (k / 32));
     let want = host_oracle(&codes_x, &sx_h, &codes_w, &g.read(&sw, n * (k / 16)), m, k, n, 16);
     assert_matches_oracle("matmul_i8_gemv_reg#WPG=4 (group=16)", &got, &want);
 }
@@ -357,7 +359,7 @@ fn moe_linear_gated_i8_wpg4_group16_matches_host_oracle() {
     g.submit(&[], &[g.step(idx(&g, name), &[&xq, &wq, &sx, &sw, &gate, &out], &params, (m * n) as u32)]);
     let got = g.read(&out, m * n);
 
-    let sx_h = g.read(&sx, m);
+    let sx_h = g.read(&sx, m * (k / 32));
     let want = host_oracle(&codes_x, &sx_h, &codes_w, &g.read(&sw, n * (k / 16)), m, k, n, 16);
     assert_matches_oracle("moe_linear_gated_i8#WPG=4 (group=16)", &got, &want);
 }

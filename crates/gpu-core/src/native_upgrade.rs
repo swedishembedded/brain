@@ -1350,11 +1350,11 @@ impl Fused {
         match self {
             // One 64-thread block per row keeps `d / 64` elements per thread in
             // registers: up to 80 of them (5120 wide), and a whole number of
-            // int8 words.
-            Fused::AddRmsQuant => matches!(params, [d, rows, _, _] if *rows >= 1 && *d >= 4 && d % 4 == 0 && *d <= 64 * 80),
+            // 32-element scale groups.
+            Fused::AddRmsQuant => matches!(params, [d, rows, _, _] if *rows >= 1 && *d >= 32 && d % 32 == 0 && *d <= 64 * 80),
             // 1024 threads per row keep `k / 1024` elements each in registers:
-            // up to 18 of them.
-            Fused::QuantEpilogue => matches!(params, [k, rows, mode, _] if *rows >= 1 && *k >= 4 && k % 4 == 0 && *k <= 1024 * 18 && *mode <= 2),
+            // up to 18 of them, in whole 32-element scale groups.
+            Fused::QuantEpilogue => matches!(params, [k, rows, mode, _] if *rows >= 1 && *k >= 32 && k % 32 == 0 && *k <= 1024 * 18 && *mode <= 2),
             // A block is one key head's `group` value heads, 128 threads each
             // (3 is what one SM's registers hold at 128 live state words).
             Fused::GdnDecode => {

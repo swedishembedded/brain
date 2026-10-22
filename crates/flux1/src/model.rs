@@ -83,7 +83,7 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("film_row", kernels::FILM_ROW),
     ("gate_row", kernels::GATE_ROW),
     ("bias_add", kernels::BIAS_ADD),
-    // int8 DP4A path (GPU only): per-token activation quant + DP4A GEMM.
+    // int8 DP4A path (GPU only): group-wise activation quant + DP4A GEMM.
     ("max_abs_row", kernels::MAX_ABS_ROW),
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
@@ -601,7 +601,7 @@ impl Flux1Model {
     }
 
     /// Int8 only (a no-op under fp32): quantize rows `r0..r1` of `x` `[.., k]`
-    /// into the K-matched packed scratch with fresh per-token scales. ONE quant
+    /// into the K-matched packed scratch with fresh group scales. ONE quant
     /// feeds every linear reading that activation.
     fn quant_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) {
         let Some(i8s) = self.i8scr.as_ref() else { return };
@@ -833,13 +833,14 @@ impl Flux1Model {
         // `[.., D]` slabs the offset is nt·D, which `D % 64 == 0` (checked in
         // `new_with`) already satisfies for ANY nt — so that is NOT the binding
         // constraint. The binding that actually constrains `nt` is the int8
-        // per-token scale `sx`, offset by `nt` ROWS, hence `nt % 64 == 0`.
+        // activation scales `sx`, offset by `nt` rows of `D/32` scales, which
+        // `nt % 64 == 0` keeps aligned.
         // `model::int8::quant_rows_steps` re-asserts it at the dispatch; this
         // one fails at the top of the forward instead of 40 layers in.
         // nt is the T5 length (256 / 512 in every released pipeline).
         assert!(
             self.precision != Precision::Int8 || nt.is_multiple_of(64),
-            "int8: txt rows {nt} must be a multiple of 64 (the per-token scale buffer is bound at row {nt})"
+            "int8: txt rows {nt} must be a multiple of 64 (the activation scale buffer is bound at row {nt})"
         );
 
         // ---- host conditioning + device modulation ---------------------------

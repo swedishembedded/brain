@@ -216,7 +216,7 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: MMA_S8_MIN_CC,
         entry: "brain_matmul_i8_mma",
-        what: "int8 tensor-core GEMM (mma.sync m16n8k32), dynamic per-token activation scale, group-32 weight scale folded per MMA",
+        what: "int8 tensor-core GEMM (mma.sync m16n8k32), group-32 activation and weight scales folded per MMA",
         reported: "native:matmul_i8_mma",
         block_dim: 128,
         // 64 activation rows x 64 weight rows per block (four warps of 32x32);
@@ -1292,7 +1292,7 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: DP4A_MIN_CC,
         entry: "brain_matmul_i8_dp4a",
-        what: "packed-int8 GEMM (dp4a), dynamic per-row activation scale, group-32 weight scale folded per group in ascending order; 128x128 tile, 8x8 per thread, bit-identical to matmul_i8_dyn",
+        what: "packed-int8 GEMM (dp4a), group-32 activation and weight scales folded per group in ascending order; 128x128 tile, 8x8 per thread, bit-identical to matmul_i8_dyn",
         reported: "native:matmul_i8_dp4a",
         block_dim: 256,
         // 128 rows of x by 128 weight rows per block, row-tile-major.
@@ -1519,20 +1519,20 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_add_rms_quant",
-        what: "residual add + RMSNorm + per-row int8 scale + pack in one launch; 256 threads per row (the reference's 64 lanes, four threads each), bit-identical to add2 + rmsnorm_rows + max_abs_rows + quant_pack",
+        what: "residual add + RMSNorm + per-group int8 scales + pack in one launch; 256 threads per row (the reference's 64 lanes, four threads each), bit-identical to add2 + rmsnorm_rows + max_abs_rows + quant_pack",
         reported: "native:add_rms_quant",
         block_dim: 256,
         // One block per row of x.
         tile: (1, 1),
-        // 64 lane partials + the 64 x 128 quantised bytes exchanged between lanes.
-        shared_bytes: 4 * (64 + 64 + 256) + 64 * 80,
+        // 64 carried and 64 final lane sums + the 64 x 80 quantised bytes exchanged between lanes.
+        shared_bytes: 4 * (64 + 64) + 64 * 80,
         programmatic: true,
         src: include_str!("../cu/add_rms_quant.cu"),
     },
     CudaKernel {
         name: "quant_epilogue",
         // A fused kernel asked for by name, like `add_rms_quant`: the operator
-        // and tier say what it produces (per-row scales and a packed int8
+        // and tier say what it produces (group scales and a packed int8
         // activation), and a fused kernel is always looked up through `get`,
         // never through `find`, which is the matmul providers' selector.
         op: Op::MaxAbsRow,
@@ -1541,19 +1541,19 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_quant_epilogue",
-        what: "silu_mul / sigmoid-gate / plain producer + per-row int8 scale + pack in one launch; 1024 threads per row, bit-identical to the chain it replaces",
+        what: "silu_mul / sigmoid-gate / plain producer + per-group int8 scales + pack in one launch; 1024 threads per row, bit-identical to the chain it replaces",
         reported: "native:quant_epilogue",
         block_dim: 1024,
         tile: (1, 1),
-        // 32 warp maxima + 1024 x 18 quantised bytes exchanged between threads.
-        shared_bytes: 32 * 4 + 1024 * 18,
+        // 1024 x 18 quantised bytes exchanged between threads.
+        shared_bytes: 1024 * 18,
         programmatic: true,
         src: include_str!("../cu/quant_epilogue.cu"),
     },
     CudaKernel {
         name: "quant_epilogue_cluster",
         // A fused kernel asked for by name, like `add_rms_quant`: the operator
-        // and tier say what it produces (per-row scales and a packed int8
+        // and tier say what it produces (group scales and a packed int8
         // activation), and a fused kernel is always looked up through `get`,
         // never through `find`, which is the matmul providers' selector.
         op: Op::MaxAbsRow,
@@ -1562,12 +1562,12 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: CLUSTER_MIN_CC,
         entry: "brain_quant_epilogue_cluster",
-        what: "quant_epilogue with each row split over a cluster of four blocks on four SMs, the row max exchanged through distributed shared memory; bit-identical to the one-block form",
+        what: "quant_epilogue with each row split over a cluster of four blocks on four SMs, each quantising its own slices' groups; bit-identical to the one-block form",
         reported: "native:quant_epilogue_cluster",
         block_dim: 1024,
         tile: (1, 1),
-        // 32 warp maxima + 1024 x 18 quantised bytes exchanged between threads.
-        shared_bytes: 32 * 4 + 1024 * 18,
+        // 1024 x 18 quantised bytes exchanged between threads.
+        shared_bytes: 1024 * 18,
         programmatic: true,
         src: concat!("#define BRAIN_QE_CLUSTER 4
 #define brain_quant_epilogue brain_quant_epilogue_cluster

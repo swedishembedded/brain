@@ -53,8 +53,8 @@ impl Operands {
         gpu.write(&x, &words(m * k / 4, &mut r));
         let w = gpu.storage(u64::from(n) * u64::from(k / 4));
         gpu.write(&w, &words(n * (k / 4), &mut r));
-        let sx = gpu.storage(u64::from(m));
-        gpu.write_f32(&sx, &vec![0.01; m as usize]);
+        let sx = gpu.storage(u64::from(m * (k / 32)));
+        gpu.write_f32(&sx, &vec![0.01; (m * (k / 32)) as usize]);
         let sw = gpu.storage(u64::from(n * (k / 32)));
         gpu.write_f32(&sw, &vec![0.02; (n * (k / 32)) as usize]);
         Operands { x, sx, w, sw, out: gpu.storage(u64::from(m * n)), m, k, n }

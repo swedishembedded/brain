@@ -18,7 +18,7 @@
 // up to `MR` of them per pass, as `matmul_i8_gemv` does for rows of a dense
 // activation.
 //
-//   out[s, col] = sx[s / xdiv] * sum_g  f32( dot_g ) * sw[row_w, g],   row_w = expert(s) * n + col
+//   out[s, col] = sum_g  f32( dot_g ) * (sw[row_w, g] * sx[s / xdiv, g]),   row_w = expert(s) * n + col
 //
 // The ARITHMETIC IS THE GATHER KERNEL'S, to the bit: per slot the same 16-lane
 // accumulation over 32-groups in ascending group order and the same ascending
@@ -30,7 +30,7 @@
 //            the router's real count, `ne + ceil(slots / 8)`); ne = experts
 //            (n_experts + shared)
 //   xq     : [rows, kg] u32           4 int8 per word
-//   sx     : [rows] f32               per-row activation scale
+//   sx     : [rows, kg/8] f32         one activation scale per 32 elements
 //   tab    : [2 * (ne + 1)] u32       `moe_route_scan.wgsl`
 //   perm   : [slots] u32              `moe_route_emit.wgsl`
 //   wq     : [ne * n, kg] u32         the bank
@@ -104,10 +104,15 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
 
     var acc: array<f32, 8>;
     var xbase: array<u32, 8>;
+    var xsbase: array<u32, 8>;
     for (var r = 0u; r < MR; r = r + 1u) {
         acc[r] = 0.0;
         xbase[r] = 0u;
-        if (r < cnt) { xbase[r] = (perm[first + r] / p.xdiv) * (p.kg / 4u); }
+        xsbase[r] = 0u;
+        if (r < cnt) {
+            xbase[r] = (perm[first + r] / p.xdiv) * (p.kg / 4u);
+            xsbase[r] = (perm[first + r] / p.xdiv) * (p.kg / 8u);
+        }
     }
     if (live) {
         let kg4 = p.kg / 4u;
@@ -122,7 +127,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
             for (var r = 0u; r < MR; r = r + 1u) {
                 if (r < cnt) {
                     let d = dot32(xq[xbase[r] + 2u * g], xq[xbase[r] + 2u * g + 1u], w0, w1);
-                    acc[r] = acc[r] + f32(d) * s;
+                    acc[r] = acc[r] + f32(d) * (s * sx[xsbase[r] + g]);
                 }
             }
         }
@@ -150,7 +155,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
             var s = 0.0;
             for (var i = 0u; i < LANES; i = i + 1u) { s = s + partial[(c + i) * MR + r]; }
             let slot = perm[first2 + r];
-            out[slot * p.n + col2] = s * sx[slot / p.xdiv];
+            out[slot * p.n + col2] = s;
         }
     }
 }

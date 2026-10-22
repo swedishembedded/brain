@@ -18,7 +18,7 @@
 // row. The 256 experts a dense per-expert loop would visit - 5 dispatches
 // each - become the 8 (+1 shared) a token really uses, in one.
 //
-//   out[s, col] = sx[s / xdiv] * sum_g  f32( dot_g ) * sw[row_w, g],   row_w = ids[s] * n + col
+//   out[s, col] = sum_g  f32( dot_g ) * (sw[row_w, g] * sx[s / xdiv, g]),   row_w = ids[s] * n + col
 //
 // `xdiv` picks the activation row a slot reads: `top_k + shared` for the
 // gate/up projections (every slot of a token reads that token's one quantised
@@ -28,7 +28,7 @@
 //
 //   params : u32 [slots, kg, n, xdiv]   kg = k/4 words per row, k a multiple of 32
 //   xq     : [rows, kg] u32             4 int8 per word
-//   sx     : [rows]     f32             per-row activation scale
+//   sx     : [rows, kg/8] f32           one activation scale per 32 elements
 //   ids    : [slots]    u32             expert (bank block) of each slot
 //   wq     : [n_blocks * n, kg] u32     the bank
 //   sw     : [n_blocks * n, kg/8] f32   one scale per 32 weights
@@ -39,9 +39,9 @@
 // A weight row is `kg/8` groups of 32 int8. Sixteen lanes serve a row: lane `l`
 // owns groups `l, l+16, l+32, ...`. For a group the 8 `dot4` products are summed
 // in i32 (exact, so their order is free), converted once to f32 and multiplied
-// by the group's scale; a lane adds its groups' terms in ascending group order
+// by the group's two scales (`sw * sx`); a lane adds its groups' terms in ascending group order
 // into one f32 accumulator. The 16 lane accumulators are then folded in
-// ascending lane order, `((a0 + a1) + a2) + ...`, and multiplied by `sx`. f32
+// ascending lane order, `((a0 + a1) + a2) + ...`. f32
 // addition is not associative, so that order IS the contract:
 // `kernels_cuda`'s `moe_i8_gemv_gather` reproduces it with warp shuffles and is
 // gated on the raw bits against this kernel.
@@ -94,9 +94,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         let wbase = row_w * kg4;
         let xbase = (slot / p.xdiv) * kg4;
         let sbase = row_w * ng;
+        let xsbase = (slot / p.xdiv) * ng;
         for (var g = lane; g < ng; g = g + LANES) {
             let d = dot32(xq[xbase + 2u * g], xq[xbase + 2u * g + 1u], wq[wbase + 2u * g], wq[wbase + 2u * g + 1u]);
-            acc = acc + f32(d) * sw[sbase + g];
+            acc = acc + f32(d) * (sw[sbase + g] * sx[xsbase + g]);
         }
     }
     partial[li.x] = acc;
@@ -105,6 +106,6 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         var s = 0.0;
         let c = (li.x / LANES) * LANES;
         for (var i = 0u; i < LANES; i = i + 1u) { s = s + partial[c + i]; }
-        out[slot * p.n + col] = s * sx[slot / p.xdiv];
+        out[slot * p.n + col] = s;
     }
 }

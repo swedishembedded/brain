@@ -22,7 +22,7 @@
 // that file's doc. Promoting both int8 and q4 sparse-expert kernels to a
 // tiled/gathered design is one future change, not two.
 //
-// Same dequant contract as `matmul_q4_dyn`: dynamic per-token activation
+// Same dequant contract as `matmul_q4_dyn`: dynamic GROUP-WISE activation
 // scale (`sx`, from `model::int8::quant_rows_steps` -- q4 is W4A8, activations
 // stay int8) times the GROUP-WISE weight scale (`sw`, from
 // `model::int4::quantize_weight_q4` -- one per 32 int4 along K,
@@ -30,7 +30,7 @@
 //
 //   x_q  : [m, k/4]  u32   4 int8 activations packed along K per u32
 //   w_q  : [n, k/8]  u32   8 int4 weights    packed along K per u32
-//   sx   : [m]       f32   per-token activation scale
+//   sx   : [m, k/32] f32   group-wise activation scale
 //   sw   : [n, k/32] f32   group-wise weight scale
 //   gate : [m, n_experts]  dense per-token-per-expert weight (0 = not routed)
 //   out  : [m, n]    f32   out[row,:] = 0 for a non-routed row
@@ -105,7 +105,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
                 acc = acc + wn * xb;
             }
         }
-        accf = accf + f32(acc) * sw[s_base + gr];
+        accf = accf + f32(acc) * (sw[s_base + gr] * sx[row * (p.k / 32u) + gr * WPG4 / 4u]);
     }
-    out[idx] = accf * sx[row];
+    out[idx] = accf;
 }
