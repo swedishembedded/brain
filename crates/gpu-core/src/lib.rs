@@ -272,6 +272,11 @@ pub mod tape;
 /// Replay arena for the per-iteration scratch of a repeated pass.
 pub mod scratch;
 
+/// Which stream of a device work runs on: the urgent lane a decode step takes
+/// while a prefill keeps the device busy.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod lane;
+
 /// Per-iteration device objects that reclaim their own memory - the one
 /// correct shape for a loop that streams a layer at a time. See the module
 /// doc for why polling without dropping first is the trap it removes.
@@ -750,12 +755,19 @@ mod native_facade {
         /// toward over-counting is the safe direction for a ceiling. Empty,
         /// never locked and never allocated when no ceiling is set.
         grants: Mutex<Vec<memauth::Grant>>,
-        /// The scratch replay arena for THIS handle, live only between
-        /// [`Gpu::scratch_scope`] and the returned guard's drop. `None` - the
-        /// state every handle is built in and the only one a model that has
-        /// not opted in ever sees - makes [`Gpu::storage`] allocate exactly as
-        /// it always did. See [`crate::scratch`] for the aliasing argument.
-        arena: Mutex<Vec<(&'static str, crate::scratch::Arena)>>,
+        /// The scratch replay arenas of THIS handle, by lane and name, one live
+        /// only between [`Gpu::scratch_scope`] and the returned guard's drop.
+        /// None live - the state every handle is built in and the only one a
+        /// model that has not opted in ever sees - makes [`Gpu::storage`]
+        /// allocate exactly as it always did. See [`crate::scratch`] for the
+        /// aliasing argument; the lane is part of the key because the two
+        /// streams run concurrently, and a slot one is still using must never
+        /// be handed to the other.
+        arena: Mutex<Vec<(crate::lane::Lane, &'static str, crate::scratch::Arena)>>,
+        /// This handle's second, high-priority handle on the same device, opened
+        /// the first time work is issued in the urgent lane (see [`crate::lane`]);
+        /// `None` inside when the backend cannot prioritise.
+        urgent: std::sync::OnceLock<Option<Box<dyn backend_api::Backend>>>,
         /// Native kernels already offered to this handle's backend, by registry
         /// name, with the backend's answer - see [`Gpu::native_kernel`].
         natives: Mutex<std::collections::HashMap<&'static str, Option<backend_api::NativeId>>>,
@@ -803,6 +815,7 @@ mod native_facade {
                 mem_device,
                 grants: Mutex::new(Vec::new()),
                 arena: Mutex::new(Vec::new()),
+                urgent: std::sync::OnceLock::new(),
                 natives: Mutex::new(Default::default()),
                 memo_enabled: std::sync::atomic::AtomicBool::new(false),
                 memo: Mutex::new(None),
@@ -817,6 +830,32 @@ mod native_facade {
         /// else lands on the canonically-indexed card the ambient selection
         /// resolves to (index 0 when nothing is selected, matching
         /// `selected_device`'s own fallback).
+        /// The backend work issued now goes to: the urgent handle inside
+        /// [`crate::lane::urgent`] where the device has one, this handle's own
+        /// otherwise.
+        fn be(&self) -> &dyn backend_api::Backend {
+            if crate::lane::current() == crate::lane::Lane::Urgent {
+                if let Some(urgent) = self.urgent.get_or_init(|| self.inner.share_urgent()).as_deref() {
+                    return urgent;
+                }
+            }
+            self.inner.as_ref()
+        }
+
+        /// Whether this device can run work ahead of other work: a backend
+        /// that can, work issued in [`crate::lane::urgent`] goes to a stream
+        /// of its own; one that cannot runs it in order with everything else.
+        pub fn has_urgent_lane(&self) -> bool {
+            self.urgent.get_or_init(|| self.inner.share_urgent()).is_some()
+        }
+
+        /// Whether everything this handle submitted in the current lane has
+        /// finished, without waiting where the backend can tell (see
+        /// `backend_api::Backend::is_idle`).
+        pub fn is_idle(&self) -> bool {
+            self.be().is_idle()
+        }
+
         fn ambient_mem_device(kind: &str) -> memauth::Device {
             match kind {
                 "cpu" => memauth::Device::Cpu,
@@ -1340,7 +1379,7 @@ mod native_facade {
                 let grant = auth.request_tiered(pool, size, "placed", tier).map_err(|d| memauth::denial_message(pool, "placed", size, d))?;
                 self.grants.lock().unwrap_or_else(|e| e.into_inner()).push(grant);
             }
-            self.inner.alloc_placed(label, size, policy)
+            self.be().alloc_placed(label, size, policy)
         }
 
         /// The memory device an allocation under `policy` is charged to: the
@@ -1356,13 +1395,13 @@ mod native_facade {
         /// Move a byte range of a managed or system buffer toward `target`; see
         /// `backend_api::Backend::prefetch`.
         pub fn prefetch(&self, buf: &DeviceBuffer, offset_bytes: u64, bytes: u64, target: backend_api::PrefetchTarget) -> Result<(), String> {
-            self.inner.prefetch(buf, offset_bytes, bytes, target)
+            self.be().prefetch(buf, offset_bytes, bytes, target)
         }
 
         /// Advise the driver about a managed or system buffer; see
         /// `backend_api::Backend::advise`.
         pub fn advise(&self, buf: &DeviceBuffer, advice: backend_api::MemAdvice) -> Result<(), String> {
-            self.inner.advise(buf, advice)
+            self.be().advise(buf, advice)
         }
 
         /// [`Self::try_charge`] for the infallible facade methods. Allocation
@@ -1395,7 +1434,8 @@ mod native_facade {
 
         fn storage_with(&self, n: u64, uninit: bool) -> DeviceBuffer {
             let mut g = self.arena.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((_, a)) = g.iter_mut().find(|(_, a)| a.active()) {
+            let lane = crate::lane::current();
+            if let Some((_, _, a)) = g.iter_mut().find(|(l, _, a)| *l == lane && a.active()) {
                 match a.take(n) {
                     crate::scratch::Slot::Hit(b) => return b,
                     crate::scratch::Slot::Miss(i) => {
@@ -1415,9 +1455,9 @@ mod native_facade {
         fn fresh_storage(&self, n: u64, uninit: bool) -> DeviceBuffer {
             self.charge("storage", storage_bytes(n));
             if uninit {
-                self.inner.storage_uninit(n)
+                self.be().storage_uninit(n)
             } else {
-                self.inner.storage(n)
+                self.be().storage(n)
             }
         }
 
@@ -1446,23 +1486,24 @@ mod native_facade {
         /// per handle: scopes do not nest, under any names.
         pub fn scratch_scope_in(&self, name: &'static str) -> ScratchScope<'_> {
             let mut g = self.arena.lock().unwrap_or_else(|e| e.into_inner());
+            let lane = crate::lane::current();
             assert!(
-                !g.iter().any(|(_, a)| a.active()),
+                !g.iter().any(|(l, _, a)| *l == lane && a.active()),
                 "gpu_core::scratch: a scope is already open on this handle. Scopes do not nest, and two THREADS sharing one handle would interleave one cursor - give each its own `Gpu::share`"
             );
-            let at = match g.iter().position(|(n, _)| *n == name) {
+            let at = match g.iter().position(|(l, n, _)| *l == lane && *n == name) {
                 Some(i) => i,
                 None => {
-                    g.push((name, crate::scratch::Arena::default()));
+                    g.push((lane, name, crate::scratch::Arena::default()));
                     g.len() - 1
                 }
             };
-            g[at].1.enter();
+            g[at].2.enter();
             drop(g);
             // A repeated pass is exactly the workload that frees and reallocates
             // the same sizes every iteration; let the backend hold the freed
             // blocks until `scratch_release`.
-            self.inner.hold_freed_blocks(true);
+            self.be().hold_freed_blocks(true);
             ScratchScope { gpu: self }
         }
 
@@ -1479,7 +1520,7 @@ mod native_facade {
         /// arena scope FIRST so the pass ends (and issues) before the scope
         /// does.
         pub fn pass_scope(&self) -> PassScope<'_> {
-            self.inner.begin_pass();
+            self.be().begin_pass();
             PassScope { gpu: self }
         }
 
@@ -1490,8 +1531,8 @@ mod native_facade {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
-                .find(|(n, _)| *n == DEFAULT_ARENA)
-                .map(|(_, a)| a.held())
+                .find(|(l, n, _)| *l == crate::lane::current() && *n == DEFAULT_ARENA)
+                .map(|(_, _, a)| a.held())
                 .unwrap_or((0, 0))
         }
 
@@ -1502,7 +1543,7 @@ mod native_facade {
         /// than one handle (a `share`d ops handle allocates the quantised
         /// activations) switches it on for those too.
         pub fn hold_freed_blocks(&self, on: bool) {
-            self.inner.hold_freed_blocks(on);
+            self.be().hold_freed_blocks(on);
         }
 
         /// See [`backend_api::Backend::submissions_ordered`].
@@ -1522,13 +1563,14 @@ mod native_facade {
         /// Drop the arena called `name` and every buffer it is holding. The
         /// other arenas of this handle are untouched.
         pub fn scratch_release_in(&self, name: &'static str) {
-            self.arena.lock().unwrap_or_else(|e| e.into_inner()).retain(|(n, _)| *n != name);
+            self.arena.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, n, _)| *n != name);
         }
 
         /// Close the open scope. The arena and its buffers stay - that is what
         /// the next scope replays.
         fn scratch_leave(&self) {
-            for (_, a) in self.arena.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
+            let lane = crate::lane::current();
+            for (_, _, a) in self.arena.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().filter(|(l, _, _)| *l == lane) {
                 a.leave();
             }
         }
@@ -1537,40 +1579,40 @@ mod native_facade {
         /// panicking on it.
         pub fn try_storage(&self, n: u64) -> Result<DeviceBuffer, memauth::Denied> {
             self.try_charge("storage", storage_bytes(n))?;
-            Ok(self.inner.storage(n))
+            Ok(self.be().storage(n))
         }
         pub fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
             self.charge("storage_init", storage_bytes(data.len() as u64));
-            self.inner.storage_init(name, data)
+            self.be().storage_init(name, data)
         }
         /// [`Self::storage_init`], returning the ceiling's refusal instead of
         /// panicking on it.
         pub fn try_storage_init(&self, name: &str, data: &[f32]) -> Result<DeviceBuffer, memauth::Denied> {
             self.try_charge("storage_init", storage_bytes(data.len() as u64))?;
-            Ok(self.inner.storage_init(name, data))
+            Ok(self.be().storage_init(name, data))
         }
         pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> DeviceBuffer {
             self.charge("buffer", size);
-            self.inner.buffer(label, size, usage)
+            self.be().buffer(label, size, usage)
         }
         /// [`Self::buffer`], returning the ceiling's refusal instead of
         /// panicking on it.
         pub fn try_buffer(&self, label: &str, size: u64, usage: BufUsage) -> Result<DeviceBuffer, memauth::Denied> {
             self.try_charge("buffer", size)?;
-            Ok(self.inner.buffer(label, size, usage))
+            Ok(self.be().buffer(label, size, usage))
         }
         pub fn uniform_dynamic(&self, len: usize) -> DeviceBuffer {
             self.charge("uniform", uniform_bytes(len));
-            self.inner.uniform_dynamic(len)
+            self.be().uniform_dynamic(len)
         }
         /// [`Self::uniform_dynamic`], returning the ceiling's refusal instead
         /// of panicking on it.
         pub fn try_uniform_dynamic(&self, len: usize) -> Result<DeviceBuffer, memauth::Denied> {
             self.try_charge("uniform", uniform_bytes(len))?;
-            Ok(self.inner.uniform_dynamic(len))
+            Ok(self.be().uniform_dynamic(len))
         }
         pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
-            self.inner.write(buf, data)
+            self.be().write(buf, data)
         }
         /// [`Self::write`] for a host `f32` slice - the bit reinterpretation the
         /// backend's `u32` upload wants.
@@ -1594,7 +1636,7 @@ mod native_facade {
         /// a large upload should chunk through this (or [`Self::write_f32_chunked`])
         /// instead of one `write_f32` for the whole tensor.
         pub fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {
-            self.inner.write_at(buf, offset_words, data)
+            self.be().write_at(buf, offset_words, data)
         }
         /// A second handle onto this device for host->device transfers: its own stream, so an upload runs
         /// while this handle's kernels do, and (on a backend that stages writes, today CUDA) a bounded
@@ -1616,16 +1658,16 @@ mod native_facade {
         /// arrives in. Asynchronous on a handle from [`Self::upload_handle`]; see
         /// `backend_api::Backend::write_bytes_at`.
         pub fn write_bytes_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u8]) {
-            self.inner.write_bytes_at(buf, offset_words, data)
+            self.be().write_bytes_at(buf, offset_words, data)
         }
         /// Order the staged writes to `bufs` before any other handle's later use of them.
         pub fn flush_writes(&self, bufs: &[&DeviceBuffer]) {
-            self.inner.flush_writes(bufs)
+            self.be().flush_writes(bufs)
         }
         /// See `backend_api::Backend::share_rows`: the handles using `buf` touch disjoint parts of it, so
         /// their work on it is not ordered against each other.
         pub fn share_rows(&self, buf: &DeviceBuffer) {
-            self.inner.share_rows(buf)
+            self.be().share_rows(buf)
         }
         /// [`Self::write_at`] for a host `f32` slice.
         pub fn write_f32_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[f32]) {
@@ -1646,11 +1688,11 @@ mod native_facade {
         }
         pub fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
             assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::read while a tape is being recorded: the recorded dispatches have not run, so the data would be stale");
-            self.inner.read(buf, n)
+            self.be().read(buf, n)
         }
         pub fn poll_wait(&self) {
             assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::poll_wait while a tape is being recorded: nothing recorded has been submitted");
-            self.inner.poll_wait()
+            self.be().poll_wait()
         }
         /// Bytes of device memory already dropped by their last host handle
         /// but not yet reclaimed - what the next [`Self::poll_wait`] hands
@@ -1662,7 +1704,7 @@ mod native_facade {
         /// where `backend_wgpu::WgpuBackend::track` gives up. See
         /// [`crate::transient`].
         pub fn pending_reclaim_bytes(&self) -> u64 {
-            self.inner.pending_reclaim_bytes()
+            self.be().pending_reclaim_bytes()
         }
         /// How many dropped-but-unreclaimed bytes this device tolerates before
         /// it refuses the next allocation - the ceiling
@@ -1685,7 +1727,7 @@ mod native_facade {
         /// (currently only `backend-wgpu`) versus inheriting the
         /// always-blocking default.
         pub fn poll_wait_timeout(&self, timeout: std::time::Duration) -> bool {
-            self.inner.poll_wait_timeout(timeout)
+            self.be().poll_wait_timeout(timeout)
         }
         /// Largest single storage-buffer binding this device allows, in bytes -
         /// the hardware ceiling a kernel's biggest buffer must fit under. Used to
@@ -1710,27 +1752,27 @@ mod native_facade {
         /// pipelining: overlap host work with device compute; a later `read`
         /// synchronises). No-op on eager backends (CPU).
         pub fn flush(&self) {
-            self.inner.flush()
+            self.be().flush()
         }
         /// Bytes currently buried (dropped, not yet actually freed on-device)
         /// by a backend whose reclaim is deferred - see
         /// `backend_api::Backend::buried_bytes`'s doc. 0 on backends that
         /// reclaim eagerly.
         pub fn buried_bytes(&self) -> u64 {
-            self.inner.buried_bytes()
+            self.be().buried_bytes()
         }
         /// Total queue submissions (each a blocking submit + fence wait) since
         /// construction - see `backend_api::Backend::queue_submits`'s doc. 0 on
         /// backends that don't count (CPU/eager backends have no separate
         /// submit step).
         pub fn queue_submits(&self) -> u64 {
-            self.inner.queue_submits()
+            self.be().queue_submits()
         }
         /// Count of actual deferred-reclaim events since construction - see
         /// `backend_api::Backend::reclaim_event_count`'s doc. 0 on backends
         /// that reclaim eagerly.
         pub fn reclaim_event_count(&self) -> u64 {
-            self.inner.reclaim_event_count()
+            self.be().reclaim_event_count()
         }
         /// Record one dispatch of pipeline `kind`.
         ///
@@ -1836,7 +1878,7 @@ mod native_facade {
                 None => {
                     let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
                     crate::refuse_short_params(self.names.get(k).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(k), params);
-                    self.inner.step(k, bufs, params, t).with_meta(meta)
+                    self.be().step(k, bufs, params, t).with_meta(meta)
                 }
             };
             if armed {
@@ -1942,7 +1984,7 @@ mod native_facade {
                 None => {
                     let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
                     crate::refuse_short_params(self.names.get(k).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(k), params);
-                    self.inner.step_sliced(k, bufs, offsets, params, t).with_meta(meta)
+                    self.be().step_sliced(k, bufs, offsets, params, t).with_meta(meta)
                 }
             };
             if armed {
@@ -1956,7 +1998,7 @@ mod native_facade {
             // The uniform lives in a caller-owned buffer: shape params unknown
             // here, so the cost side gets only kernel + threads.
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, None, threads);
-            self.inner
+            self.be()
                 .step_buf(k, ubuf, bufs, t)
                 .with_meta(StepMeta { kernel: kind, params: None, threads })
         }
@@ -1977,7 +2019,7 @@ mod native_facade {
             threads: u32,
         ) -> Step {
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(shape), threads);
-            self.inner
+            self.be()
                 .step_buf(k, ubuf, bufs, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(shape.to_vec()), threads })
         }
@@ -2159,7 +2201,7 @@ mod native_facade {
         /// `id`.
         pub fn step_native(&self, id: backend_api::NativeId, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Option<Step> {
             crate::assert_no_output_alias(bufs);
-            self.inner.step_native(id, bufs, params, threads)
+            self.be().step_native(id, bufs, params, threads)
         }
 
         /// [`backend_api::Backend::step_library_gemm`]: one product served by the
@@ -2168,12 +2210,12 @@ mod native_facade {
             if self.declines_library() {
                 return None;
             }
-            self.inner.step_library_gemm(gemm, bufs, offsets)
+            self.be().step_library_gemm(gemm, bufs, offsets)
         }
 
         /// [`backend_api::Backend::library_gemm_unavailable`].
         pub fn library_gemm_unavailable(&self) -> Option<String> {
-            self.inner.library_gemm_unavailable()
+            self.be().library_gemm_unavailable()
         }
 
         /// [`backend_api::Backend::step_native_sliced`] - [`Self::step_native`]
@@ -2192,7 +2234,7 @@ mod native_facade {
             threads: u32,
         ) -> Option<Step> {
             crate::assert_no_output_alias(bufs);
-            self.inner.step_native_sliced(id, bufs, offsets, params, threads)
+            self.be().step_native_sliced(id, bufs, offsets, params, threads)
         }
 
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
@@ -2223,7 +2265,7 @@ mod native_facade {
             if crate::cost::record_submitted(&self.names, steps) {
                 return;
             }
-            self.inner.submit(clears, steps)
+            self.be().submit(clears, steps)
         }
 
         /// Start recording: until [`Self::end_tape`], `submit` appends to a tape
@@ -2260,8 +2302,8 @@ mod native_facade {
             assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::replay_tape while a tape is being recorded");
             // A backend that can freeze the recording launches it as one
             // program: nothing is re-resolved or re-matched per replay.
-            if let Some(program) = tape.frozen(|segs| self.inner.freeze(segs)) {
-                if self.inner.launch_program(program) {
+            if let Some(program) = tape.frozen(|segs| self.be().freeze(segs)) {
+                if self.be().launch_program(program) {
                     if self.cost_enabled.load(std::sync::atomic::Ordering::Relaxed) {
                         let mut ctr = self.counters.lock().unwrap_or_else(|e| e.into_inner());
                         for (_, steps) in tape.segments() {
@@ -2286,7 +2328,7 @@ mod native_facade {
         pub fn profile_tape(&self, tape: &crate::tape::Tape, reps: u32) -> Option<Vec<(String, f64, u64)>> {
             assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::profile_tape while a tape is being recorded");
             let segs: Vec<(Vec<&DeviceBuffer>, &[Step])> = tape.segments().collect();
-            self.inner.profile_program(&segs, reps)
+            self.be().profile_program(&segs, reps)
         }
 
         // ---- FLOP/OPS accounting (see `gpu_core::cost`) ---------------------
@@ -2353,8 +2395,8 @@ mod native_facade {
         fn native_step(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: Option<&[(u64, u64)]>, params: &[u32]) -> Option<Step> {
             let (id, blocks) = crate::native_upgrade::apply(&self.native_upgrades, kind, params)?;
             match offsets {
-                None => self.inner.step_native(id, bufs, params, blocks),
-                Some(o) => self.inner.step_native_sliced(id, bufs, o, params, blocks),
+                None => self.be().step_native(id, bufs, params, blocks),
+                Some(o) => self.be().step_native_sliced(id, bufs, o, params, blocks),
             }
         }
 

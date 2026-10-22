@@ -1316,6 +1316,18 @@ pub trait Backend: Send + Sync {
     fn flush_writes(&self, bufs: &[&DeviceBuffer]) {
         let _ = bufs;
     }
+    /// A second handle on this device, like [`Self::share`], whose work the device runs AHEAD of other
+    /// handles' whenever both have work ready: the lane a latency-bound loop (a decode step) uses while a
+    /// throughput-bound one (a prefill) keeps the device busy. `None` where the backend cannot prioritise.
+    fn share_urgent(&self) -> Option<Box<dyn Backend>> {
+        None
+    }
+    /// Whether everything submitted on this handle has finished, without waiting where the backend can tell.
+    /// A backend that cannot ask waits, and answers `true`.
+    fn is_idle(&self) -> bool {
+        self.poll_wait();
+        true
+    }
     /// Declare that the handles using `buf` from now on touch DISJOINT parts of it - a KV pool or a
     /// recurrent-state pool whose rows belong to different sequences, written by a decode stream and a prefill
     /// stream at once - so no use of it is ordered against another handle's. Everything already pending on it

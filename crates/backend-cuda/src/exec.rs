@@ -180,6 +180,18 @@ impl Context {
     /// a particular physical card resolve it through the device registry's
     /// UUID first.
     pub fn open(ordinal: u32) -> Result<Context, String> {
+        Context::open_with(ordinal, false)
+    }
+
+    /// [`Context::open`] with a stream at the device's greatest priority: when
+    /// it and other handles' streams all have blocks ready, the device starts
+    /// this one's first. Work already running is not preempted, so another
+    /// stream's long kernel delays it by a block, not by the whole kernel.
+    pub fn open_urgent(ordinal: u32) -> Result<Context, String> {
+        Context::open_with(ordinal, true)
+    }
+
+    fn open_with(ordinal: u32, urgent: bool) -> Result<Context, String> {
         let d = crate::driver::driver().map_err(str::to_string)?;
         let fns = d.exec().map_err(str::to_string)?;
         let devices = d.devices()?;
@@ -223,7 +235,15 @@ impl Context {
         // SAFETY: `stream` is a valid out-parameter and the context is
         // current. Non-blocking, so handles do not synchronise through the
         // legacy default stream - see `ExecFns::stream_create`.
-        d.check(unsafe { (fns.stream_create)(&mut c.stream, CU_STREAM_NON_BLOCKING) }, "cuStreamCreate")?;
+        if urgent {
+            let (mut least, mut greatest) = (0i32, 0i32);
+            // SAFETY: two valid out-parameters; the context is current.
+            d.check(unsafe { (fns.ctx_get_stream_priority_range)(&mut least, &mut greatest) }, "cuCtxGetStreamPriorityRange")?;
+            // SAFETY: as for `cuStreamCreate` below.
+            d.check(unsafe { (fns.stream_create_with_priority)(&mut c.stream, CU_STREAM_NON_BLOCKING, greatest) }, "cuStreamCreateWithPriority")?;
+        } else {
+            d.check(unsafe { (fns.stream_create)(&mut c.stream, CU_STREAM_NON_BLOCKING) }, "cuStreamCreate")?;
+        }
         crate::live::stream_created();
         c.stream_guard = Some(Arc::new(StreamGuard { fns, ctx, stream: c.stream, _primary: c.primary.clone() }));
         // The count went up BEFORE this drain, so any handle that submits after
@@ -1259,6 +1279,20 @@ impl Context {
         // SAFETY: the context is current on this thread and the stream was
         // created on it.
         self.d.check(unsafe { (self.fns.stream_synchronize)(self.stream) }, "cuStreamSynchronize")
+    }
+
+    /// Whether everything enqueued on this handle's stream has run, without
+    /// waiting for it.
+    pub fn stream_idle(&self) -> Result<bool, String> {
+        /// `CUDA_ERROR_NOT_READY`: work is still pending, which is an answer, not a failure.
+        const NOT_READY: crate::driver::CuResult = 600;
+        self.make_current()?;
+        // SAFETY: the context is current on this thread and the stream was
+        // created on it.
+        match unsafe { (self.fns.stream_query)(self.stream) } {
+            NOT_READY => Ok(false),
+            rc => self.d.check(rc, "cuStreamQuery").map(|()| true),
+        }
     }
 }
 

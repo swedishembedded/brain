@@ -2119,6 +2119,28 @@ impl backend_api::Backend for CudaBackend {
     /// address space and the same loaded modules, with its own stream, uniform
     /// pool, staging and graph cache. Cheap by design: nothing is recompiled
     /// and no device memory moves.
+    fn share_urgent(&self) -> Option<Box<dyn backend_api::Backend>> {
+        let ctx = exec::Context::open_urgent(self.ordinal)
+            .map_err(|e| tracing::warn!(reason = %e, "backend-cuda: cannot open an urgent handle on this device"))
+            .ok()?;
+        let graph = self.graph.as_ref().map(|_| Mutex::new(GraphCache::default()));
+        Some(Box::new(CudaBackend::assemble(
+            ctx,
+            self.ordinal,
+            self.caps.clone(),
+            self.identity.clone(),
+            graph,
+            Arc::clone(&self.kernels),
+            Arc::clone(&self.compiled),
+            Arc::clone(&self.native),
+        )))
+    }
+
+    fn is_idle(&self) -> bool {
+        self.issue_held();
+        self.ctx.stream_idle().unwrap_or_else(|e| panic!("backend-cuda: asking whether the stream is idle failed: {e}"))
+    }
+
     fn share(&self) -> Option<Box<dyn backend_api::Backend>> {
         let ctx = exec::Context::open(self.ordinal)
             .map_err(|e| tracing::warn!(reason = %e, "backend-cuda: cannot open a second handle on this device"))

@@ -37,7 +37,7 @@ use std::ffi::{c_char, c_int, c_void, CStr};
 
 /// `CUresult`. `CUDA_SUCCESS` is 0; every other value is an error whose text
 /// comes from the driver itself via `cuGetErrorString`.
-type CuResult = c_int;
+pub(crate) type CuResult = c_int;
 /// `CUcontext`/`CUmodule`/`CUfunction`/`CUstream` are all opaque handles.
 pub type CuContext = *mut c_void;
 pub type CuModule = *mut c_void;
@@ -174,6 +174,15 @@ pub struct ExecFns {
     /// (`cuMemcpyHtoDAsync`, `cuMemcpyDtoHAsync`, `cuMemsetD8Async`), which is
     /// what keeps host writes ordered against the dispatches that read them.
     pub(crate) stream_create: unsafe extern "C" fn(*mut CuStream, u32) -> CuResult,
+    /// `cuStreamCreateWithPriority`: [`Self::stream_create`] for a stream whose
+    /// blocks the device schedules ahead of lower-priority streams' pending ones.
+    pub(crate) stream_create_with_priority: unsafe extern "C" fn(*mut CuStream, u32, i32) -> CuResult,
+    /// `cuCtxGetStreamPriorityRange(&least, &greatest)`: numerically lower is
+    /// more urgent, and the default priority is the least.
+    pub(crate) ctx_get_stream_priority_range: unsafe extern "C" fn(*mut i32, *mut i32) -> CuResult,
+    /// `cuStreamQuery`: `CUDA_SUCCESS` once everything enqueued has run,
+    /// `CUDA_ERROR_NOT_READY` while work is pending - without waiting.
+    pub(crate) stream_query: unsafe extern "C" fn(CuStream) -> CuResult,
     pub(crate) stream_destroy: unsafe extern "C" fn(CuStream) -> CuResult,
     pub(crate) memcpy_htod_async:
         unsafe extern "C" fn(CuDevicePtr, *const c_void, usize, CuStream) -> CuResult,
@@ -508,6 +517,9 @@ unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
         module_get_function: sym(lib, b"cuModuleGetFunction\0")?,
         launch_kernel: sym(lib, b"cuLaunchKernel\0")?,
         stream_create: sym(lib, b"cuStreamCreate\0")?,
+        stream_create_with_priority: sym(lib, b"cuStreamCreateWithPriority\0")?,
+        ctx_get_stream_priority_range: sym(lib, b"cuCtxGetStreamPriorityRange\0")?,
+        stream_query: sym(lib, b"cuStreamQuery\0")?,
         stream_destroy: sym(lib, b"cuStreamDestroy_v2\0")?,
         memcpy_htod_async: sym(lib, b"cuMemcpyHtoDAsync_v2\0")?,
         memset_d8_async: sym(lib, b"cuMemsetD8Async\0")?,
