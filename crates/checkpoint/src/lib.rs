@@ -169,6 +169,14 @@ pub trait TensorSource {
         None
     }
 
+    /// The layout [`raw_blocks`](Self::raw_blocks) would lend `name` in,
+    /// without producing the bytes - what a memory plan asks before loading.
+    /// A source whose lend is a computed copy overrides this to answer
+    /// without making one.
+    fn raw_block_layout(&self, name: &str) -> Option<gguf::BlockLayout> {
+        self.raw_blocks(name).map(|(layout, _)| layout)
+    }
+
     /// Best-effort hint that the caller is done with `name` and any
     /// page-cache-backed pages behind it may be dropped now rather than
     /// waiting for memory-pressure-triggered reclaim. Default: a no-op -

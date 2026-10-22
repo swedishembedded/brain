@@ -119,7 +119,7 @@ impl GdnHeadOrder {
     /// parameter because `in_proj_a`/`in_proj_b` project to ONE scalar per
     /// head, not a `linear_value_head_dim`-wide block. Rows outside the
     /// v-portion (the q|k prefix, for the leaves that have one) pass through.
-    pub fn degroup_rows(&self, v: &[f32], row_offset: usize, row_width: usize, head_dim: usize) -> Vec<f32> {
+    pub fn degroup_rows<T: Copy>(&self, v: &[T], row_offset: usize, row_width: usize, head_dim: usize) -> Vec<T> {
         let nvh = self.num_k_heads * self.group;
         let mut out = v.to_vec();
         for h in 0..nvh {
@@ -137,17 +137,51 @@ impl GdnHeadOrder {
     /// CONSECUTIVE columns each - `out_proj.weight`, whose input axis is the
     /// value dimension.
     pub fn degroup_cols(&self, v: &[f32], n_rows: usize, total_cols: usize) -> Vec<f32> {
+        self.degroup_col_chunks(v, n_rows, total_cols, self.head_dim)
+    }
+
+    /// [`Self::degroup_cols`] with `head_width` columns per value head.
+    fn degroup_col_chunks<T: Copy>(&self, v: &[T], n_rows: usize, total_cols: usize, head_width: usize) -> Vec<T> {
         let nvh = self.num_k_heads * self.group;
         let mut out = v.to_vec();
         for row in 0..n_rows {
             for h in 0..nvh {
-                let src_head = self.src_head(h);
-                for c in 0..self.head_dim {
-                    out[row * total_cols + h * self.head_dim + c] = v[row * total_cols + src_head * self.head_dim + c];
-                }
+                let (dst, src) = (row * total_cols + h * head_width, row * total_cols + self.src_head(h) * head_width);
+                out[dst..dst + head_width].copy_from_slice(&v[src..src + head_width]);
             }
         }
         out
+    }
+
+    /// How [`Self::fix`] moves a leaf's quantized blocks, for the leaves whose
+    /// fix moves whole blocks: the row-permuted projections (each row is whole
+    /// blocks when the row width is), and `out_proj` when a value head spans
+    /// whole blocks. `None` when the fix would split a block, or is not a move
+    /// at all (`A_log`'s).
+    fn block_move(&self, leaf: GdnLeaf, layout: &BlockLayout) -> Option<BlockMove> {
+        let (be, bb) = (layout.block_elems(), layout.block_bytes());
+        // Bytes holding `elems` consecutive elements, when they are whole blocks.
+        let bytes_of = |elems: usize| (elems > 0 && elems.is_multiple_of(be)).then_some(elems / be * bb);
+        let rows = |row_offset: usize, head_rows: usize| Some(BlockMove::Rows { row_offset, row_bytes: bytes_of(self.d_model)?, head_rows });
+        let moved = match leaf {
+            GdnLeaf::InProjQkv => rows(2 * self.key_dim, self.head_dim)?,
+            GdnLeaf::InProjA | GdnLeaf::InProjB => rows(0, 1)?,
+            GdnLeaf::InProjZ => rows(0, self.head_dim)?,
+            GdnLeaf::OutProj => BlockMove::Cols { row_bytes: bytes_of(self.num_k_heads * self.group * self.head_dim)?, head_bytes: bytes_of(self.head_dim)? },
+            GdnLeaf::ALog | GdnLeaf::DtBias | GdnLeaf::Conv1d => return None,
+        };
+        let row_bytes = match moved {
+            BlockMove::Rows { row_bytes, .. } | BlockMove::Cols { row_bytes, .. } => row_bytes,
+        };
+        layout.numel.is_multiple_of(be).then_some(()).filter(|_| (layout.numel / be * bb).is_multiple_of(row_bytes)).map(|_| moved)
+    }
+
+    /// [`Self::fix`] applied to a leaf's quantized blocks (see [`Self::block_move`]).
+    pub fn fix_blocks(&self, leaf: GdnLeaf, layout: &BlockLayout, raw: &[u8]) -> Option<Vec<u8>> {
+        Some(match self.block_move(leaf, layout)? {
+            BlockMove::Rows { row_offset, row_bytes, head_rows } => self.degroup_rows(raw, row_offset, row_bytes, head_rows),
+            BlockMove::Cols { row_bytes, head_bytes } => self.degroup_col_chunks(raw, raw.len() / row_bytes, row_bytes, head_bytes),
+        })
     }
 
     /// One leaf's fix, dispatched by its shape. The only place that decision
@@ -172,14 +206,24 @@ impl GdnHeadOrder {
     }
 }
 
+/// How a leaf's fix moves its quantized blocks, in bytes.
+#[derive(Clone, Copy)]
+enum BlockMove {
+    /// Value heads are `head_rows` whole rows each, from `row_offset` on.
+    Rows { row_offset: usize, row_bytes: usize, head_rows: usize },
+    /// Value heads are `head_bytes` of every row.
+    Cols { row_bytes: usize, head_bytes: usize },
+}
+
 /// A [`TensorSource`] over brain-named tensors that applies the GDN
 /// value-head fix to the eight leaves that need it, on read, and passes
 /// everything else through - including the zero-copy paths.
 ///
-/// A transformed leaf is NEVER lent as `raw_words`/`raw_blocks`: a zero-copy
-/// borrow would hand the caller llama.cpp's untransformed bytes and bypass the
-/// fix entirely, the silent wrong-weights failure this type exists to prevent.
-/// A transformed leaf is also never streamed past the transform
+/// A transformed leaf is NEVER lent as stored: a zero-copy borrow would hand
+/// the caller llama.cpp's untransformed bytes and bypass the fix entirely, the
+/// silent wrong-weights failure this type exists to prevent. `raw_blocks` lends
+/// a copy with the fix applied to whole blocks where the fix only moves blocks
+/// ([`GdnHeadOrder::fix_blocks`]), and nothing otherwise. A transformed leaf is also never streamed past the transform
 /// (`with_tensor_chunks` serves it whole): the largest, `in_proj_qkv`, is a few
 /// hundred MB of fp32 at the real shapes.
 pub struct GdnFixSource<'a> {
@@ -217,11 +261,23 @@ impl TensorSource for GdnFixSource<'_> {
         self.inner.raw_words(name)
     }
 
+    /// A reordered leaf lends its blocks reordered ([`GdnHeadOrder::fix_blocks`]),
+    /// never as stored; one whose fix would split a block lends nothing.
     fn raw_blocks(&self, name: &str) -> Option<(BlockLayout, Cow<'_, [u8]>)> {
-        if GdnLeaf::of(name).is_some() {
-            return None;
+        let Some(leaf) = GdnLeaf::of(name) else {
+            return self.inner.raw_blocks(name);
+        };
+        let (layout, raw) = self.inner.raw_blocks(name)?;
+        let fixed = self.order.fix_blocks(leaf, &layout, &raw)?;
+        Some((layout, Cow::Owned(fixed)))
+    }
+
+    fn raw_block_layout(&self, name: &str) -> Option<BlockLayout> {
+        let layout = self.inner.raw_block_layout(name)?;
+        match GdnLeaf::of(name) {
+            Some(leaf) => self.order.block_move(leaf, &layout).map(|_| layout),
+            None => Some(layout),
         }
-        self.inner.raw_blocks(name)
     }
 
     /// The packed view of every tensor this wrapper leaves untouched; the
@@ -420,6 +476,56 @@ mod tests {
         assert!(src.raw_blocks("blocks.0.linear_attn.A_log").is_none(), "a block lend would bypass LnNeg and the degroup");
         assert!(src.raw_blocks("blocks.0.linear_attn.dt_bias").is_none(), "a block lend would bypass the degroup");
         assert!(src.raw_blocks("blocks.0.linear_attn.norm.weight").is_some(), "an untransformed leaf keeps its block path");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The row-permuted leaves lend their quantized blocks with whole rows
+    /// moved, and `out_proj` its blocks with column chunks moved wherever a
+    /// value head spans whole blocks: either way the lent bytes decode to
+    /// exactly what the fixed `with_tensor` read gives. A head narrower than a
+    /// block cannot be moved without splitting it, so that lend is refused.
+    #[test]
+    fn a_reordered_leaf_lends_its_blocks_reordered_exactly_as_the_values() {
+        use checkpoint::gguf::{block_expand, GgmlType, MmapGguf};
+        use checkpoint::gguf_write::{write, TensorOut};
+        use checkpoint::remap::{Fetch, RemapSource};
+
+        // 2 key heads x 2 value heads each; 32-wide value heads; rows 256 wide (one Q4_K super-block).
+        let (nkh, group, head_dim, key_dim, d_model) = (2, 2, 32, 64, 256);
+        let nvh = nkh * group;
+        let o = GdnHeadOrder { num_k_heads: nkh, group, head_dim, key_dim, d_model, conv_kernel: 4 };
+        let values = |n: usize, seed: f32| (0..n).map(|i| (i as f32 * 0.37 + seed).sin() * 2.0).collect::<Vec<f32>>();
+        let tensor = |name: &str, rows: usize, cols: usize, ty: GgmlType, seed: f32| TensorOut {
+            name: name.to_string(),
+            shape: vec![cols, rows],
+            ty: ty.id(),
+            data: checkpoint::quant::quantize_par(ty.id(), &values(rows * cols, seed)).unwrap(),
+        };
+        let leaves = [
+            ("blocks.0.linear_attn.in_proj_qkv.weight", 2 * key_dim + nvh * head_dim, d_model, GgmlType::Q4K),
+            ("blocks.0.linear_attn.in_proj_z.weight", nvh * head_dim, d_model, GgmlType::Q4K),
+            ("blocks.0.linear_attn.in_proj_a.weight", nvh, d_model, GgmlType::Q4K),
+            ("blocks.0.linear_attn.out_proj.weight", 3, nvh * head_dim, GgmlType::Q8_0),
+            ("blocks.1.linear_attn.out_proj.weight", 3, 2 * nvh * head_dim, GgmlType::Q4K),
+        ];
+        let path = std::env::temp_dir().join(format!("brain-gdn-order-rawperm-{}.gguf", std::process::id())).to_string_lossy().into_owned();
+        let tensors: Vec<TensorOut> = leaves.iter().enumerate().map(|(i, &(n, r, c, ty))| tensor(n, r, c, ty, i as f32)).collect();
+        write(&path, &[], &tensors, 32).unwrap();
+        let mg = MmapGguf::open(&path).unwrap();
+        let plan: HashMap<String, Fetch> = leaves.iter().map(|(n, ..)| (n.to_string(), Fetch::Whole(n.to_string()))).collect();
+        let src = GdnFixSource::new(RemapSource::new(&mg, plan), o);
+        for &(name, rows, cols, ty) in &leaves[..4] {
+            let (layout, raw) = src.raw_blocks(name).unwrap_or_else(|| panic!("{name} lends its {} blocks", ty.name()));
+            assert_eq!(layout.ty, ty);
+            let mut lent = Vec::new();
+            block_expand(ty, &raw, 0, rows * cols, &mut lent).unwrap();
+            let mut fixed = Vec::new();
+            assert!(src.with_tensor(name, &mut |d| fixed = d.to_vec()));
+            assert_eq!(lent, fixed, "{name}: the lent blocks decode to the fixed values");
+        }
+        // blocks.1's out_proj: 64-wide value heads inside 256-element super-blocks.
+        let wide = GdnFixSource::new(RemapSource::new(&mg, [(leaves[4].0.to_string(), Fetch::Whole(leaves[4].0.to_string()))].into()), GdnHeadOrder { head_dim: 2 * head_dim, ..o });
+        assert!(wide.raw_blocks(leaves[4].0).is_none(), "a head narrower than a block cannot move without splitting the block");
         std::fs::remove_file(&path).ok();
     }
 }
