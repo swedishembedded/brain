@@ -408,12 +408,20 @@ impl Qwen35Config {
     /// layer's own footprint) and never selected by a `TierPolicy` rule
     /// (they are not in [`Self::layer_leaves`]'s table).
     pub fn layer_weight_bytes(&self, ty: LayerType, tier: &model::ops::TierPolicy) -> u64 {
+        self.layer_weight_bytes_at("", ty, tier)
+    }
+
+    /// [`Self::layer_weight_bytes`] of the layer whose leaves are named
+    /// `{prefix}{suffix}` (`blocks.{l}.`, `mtp.layers.0.`): what a policy whose
+    /// rules name one layer's leaves (a checkpoint quantized per layer)
+    /// charges that layer.
+    pub fn layer_weight_bytes_at(&self, prefix: &str, ty: LayerType, tier: &model::ops::TierPolicy) -> u64 {
         let group = model::int8::GROUP as u64;
         self.layer_leaves(ty)
             .into_iter()
             .map(|(suffix, n, k)| {
                 let (n, k) = (u64::from(n), u64::from(k));
-                match tier.want(suffix) {
+                match tier.want(&format!("{prefix}{suffix}")) {
                     gpu_core::select::Dtype::F32 => n * k * 4,
                     gpu_core::select::Dtype::BF16 | gpu_core::select::Dtype::F16 => n * k * 2,
                     gpu_core::select::Dtype::I8 => n * k + n * k.div_ceil(group) * 4,

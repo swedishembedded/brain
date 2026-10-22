@@ -95,11 +95,13 @@ brain --device gpu0,gpu1 serve --openai
 # Server-wide defaults for all of them (all optional):
 #   --ctx 24576       fix the context. Default: the longest the cards
 #                            hold once the weights are placed
-#   --weight-format q4         per-leaf quantization tier: "i8" (default), "q4",
-#                            or "q4,in_proj_a.weight=f32,in_proj_b.weight=f32"
+#   --weight-format q4         per-leaf quantization tier: "i8", "q4", or
+#                            "q4,in_proj_a.weight=f32,in_proj_b.weight=f32"
 #                            to pin specific tensors at fp32; a malformed
 #                            grammar is refused rather than served at a
-#                            silently wrong precision
+#                            silently wrong precision. Default: each tensor as
+#                            the checkpoint stores it - Q4_K and Q5_K stay
+#                            K-quants, every other format is held at int8
 #   --kv-cache int8         how the 16 GQA layers store K/V: "f32", "bf16"
 #                            (half the bytes), "int8" (one scale per token and
 #                            kv head, ~3.9x fewer bytes) or "fp8" (E4M3, the
@@ -116,6 +118,16 @@ brain --device gpu0,gpu1 serve --openai
 #                            (refused: no DFlash2 draft checkpoint is configured).
 #                            Default: chosen from the hardware
 ```
+
+**Weights as stored.** Without `--weight-format` every linear is held in the
+encoding the checkpoint stores it in (`int8_gguf_resident::held_tiers`, over
+`gguf::upload`): a Q4_K tensor stays a K-quant (about 4.6 bits a weight, served
+by the native `matmul_kq4_gemv` at decode), a Q8_0 tensor repacks to int8
+exactly, and a Q6_K or float tensor is held at int8. A Q4_K_M release mixes
+Q4_K and Q6_K by layer and is held per tensor, about 16 GiB of layers where
+int8 would need 25.5. The Gated-DeltaNet input projections move their blocks
+whole into brain's value-head order; `out_proj`'s value heads are narrower than
+a Q4_K super-block, so a Q4_K `out_proj` is held at int8.
 
 **Defaults.** A setting left unset is chosen from the detected hardware by the
 rules in `catalog::resident_qwen35` (`KV_DEFAULTS`, `SPECULATION_DEFAULTS`,

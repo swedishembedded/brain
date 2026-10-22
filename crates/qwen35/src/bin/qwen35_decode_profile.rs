@@ -23,7 +23,8 @@
 //!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda] [--weight-format SPEC]
 //!
 //! `steps` defaults to 8 profiled decode passes per region. `--weight-format`
-//! takes `brain serve`'s weight-tier grammar (default uniform `int8`). `json-out`, when
+//! takes `brain serve`'s weight-tier grammar (default: each tensor as the checkpoint
+//! stores it, `held_tiers`). `json-out`, when
 //! given, writes a `brain perf`-shaped baseline artifact to that path.
 //! `--device` and `--backend` take `brain serve`'s grammar and default to every
 //! GPU on the backend the machine prefers.
@@ -82,8 +83,13 @@ fn main() {
     if let Some(v) = flag("--weight-format") {
         policy.set("--weight-format", &v).unwrap_or_else(|e| panic!("{e}"));
     }
-    let tier = policy.weights.unwrap_or_else(|| model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8));
-    println!("weight tier: {}", tier.describe());
+    // Unset, every tensor as the checkpoint stores it - `brain serve`'s default.
+    let tier = policy.weights.unwrap_or_else(|| {
+        let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
+        let cfg = resident_config(&mg, CAP).expect("resident_config");
+        qwen35::int8_gguf_resident::held_tiers(&mg, &cfg).unwrap_or_else(|e| panic!("{e}"))
+    });
+    println!("weight tier: {} ({} per-tensor exceptions)", tier.default_dtype().name(), tier.rule_count());
     if batch.is_some() || context.is_some() {
         return synthetic_context(&path, devices, &tier, kv, context.unwrap_or(CAP), batch.unwrap_or(1), steps);
     }

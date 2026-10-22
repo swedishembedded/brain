@@ -1774,8 +1774,8 @@ impl Qwen35 {
             } else if want == Dtype::F32 {
                 Weight::dense_f32(ps.w(&name).clone(), wn, wk)
             } else {
-                model::ops::upload_from_source(&ops, src, &name, wn as usize, wk as usize, want, &staging)
-                    .unwrap_or_else(|| panic!("qwen35: missing init weight {name}"))
+                gguf::upload_weight(&ops, src, &name, wn as usize, wk as usize, want, &staging)
+                    .unwrap_or_else(|| panic!("qwen35: {name} is missing, or not stored in a format {want:?} can hold"))
             };
             weights.insert(name, w);
         };

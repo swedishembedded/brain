@@ -409,10 +409,10 @@ pub(crate) fn layer_state_bytes(cfg: &Qwen35Config, ty: LayerType, shape: &Servi
 pub fn serving_cost(cfg: &Qwen35Config, shape: &ServingShape) -> LayerBytes {
     // Decode state is per SEQUENCE; weights are shared by the whole batch and
     // counted once, which is the entire point of batching.
-    let per_layer = cfg.layer_types().into_iter().map(|ty| cfg.layer_weight_bytes(ty, &shape.tier) + layer_state_bytes(cfg, ty, shape)).collect();
+    let per_layer = cfg.layer_types().into_iter().enumerate().map(|(l, ty)| cfg.layer_weight_bytes_at(&format!("blocks.{l}."), ty, &shape.tier) + layer_state_bytes(cfg, ty, shape)).collect();
     let mtp = if shape.spec.mtp_head {
         let d = cfg.d_model as u64;
-        cfg.layer_weight_bytes(LayerType::Full, &shape.tier) + d * 2 * d + shape.window_slots() as u64 * cfg.layer_decode_state_bytes(LayerType::Full, shape.cap, shape.kv)
+        cfg.layer_weight_bytes_at(mtp::MTP_PREFIX, LayerType::Full, &shape.tier) + d * 2 * d + shape.window_slots() as u64 * cfg.layer_decode_state_bytes(LayerType::Full, shape.cap, shape.kv)
     } else {
         0
     };
@@ -661,6 +661,30 @@ pub fn shard_source<'a>(mg: &'a MmapGguf, cfg: &Qwen35Config, shard: &Shard) -> 
     let src = RemapSource::new(mg, plan);
     src.validate(&crate::model::shard_param_list(cfg, shard))?;
     Ok(GdnFixSource::new(src, cfg.gdn_head_order()))
+}
+
+/// The weight-tier policy that holds every linear of the checkpoint as it is
+/// stored ([`gguf::held_tier_of`]): a Q4_K tensor as a K-quant, anything else
+/// at int8 - the main layers under `blocks.{l}.`, the MTP layer's under
+/// [`mtp::MTP_PREFIX`]. What the resident serves when no weight format is asked for.
+pub fn held_tiers(mg: &MmapGguf, cfg: &Qwen35Config) -> Result<TierPolicy, String> {
+    let all = Shard { start: 0, end: cfg.n_layers as usize, embed: false, head: false, gpu_index: 0 };
+    let src = shard_source(mg, cfg, &all)?;
+    let mut leaves = Vec::new();
+    for (l, ty) in cfg.layer_types().into_iter().enumerate() {
+        for (suffix, n, k) in cfg.layer_leaves(ty) {
+            let name = format!("blocks.{l}.{suffix}");
+            leaves.push((name.clone(), gguf::held_tier_of(&src, &name), n as u64 * k as u64));
+        }
+    }
+    if mtp::checkpoint_has_mtp(mg, cfg) {
+        let mtp::MtpSource { shard, src, .. } = mtp::mtp_source(mg, cfg, 0)?;
+        for (suffix, n, k) in cfg.layer_leaves(LayerType::Full) {
+            let tier = gguf::held_tier_of(&src, &format!("blocks.{}.{suffix}", shard.start));
+            leaves.push((format!("{}{suffix}", mtp::MTP_PREFIX), tier, n as u64 * k as u64));
+        }
+    }
+    Ok(TierPolicy::per_leaf(leaves))
 }
 
 /// [`crate::gguf_import::config_from_gguf`] with the two adjustments a

@@ -295,7 +295,8 @@ pub struct Qwen35GgufServeConfig {
     /// memory the placement leaves ([`qwen35::int8_gguf_resident::auto_cap`]).
     pub ctx: Option<u32>,
     /// Per-leaf weight-tier policy (`model::ops::TierPolicy::parse`'s
-    /// grammar). `None` keeps the historical default (uniform INT8).
+    /// grammar). `None` holds every tensor as the checkpoint stores it
+    /// (`qwen35::int8_gguf_resident::held_tiers`).
     pub tier: Option<model::ops::TierPolicy>,
     /// GQA KV-cache storage tier. `None` takes the best of [`KV_DEFAULTS`]
     /// that fits.
@@ -409,11 +410,6 @@ impl Qwen35GgufServeConfig {
 }
 
 impl Qwen35GgufServeConfig {
-    /// The weight-tier knob with its historical default filled in.
-    pub fn tier_or_default(&self) -> model::ops::TierPolicy {
-        self.tier.clone().unwrap_or_else(|| model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8))
-    }
-
     /// The prefill knobs with their defaults filled in.
     pub fn prefill_policy_or_default(&self) -> qwen35::int8_gguf_resident::PrefillPolicy {
         let default = qwen35::int8_gguf_resident::PrefillPolicy::default();
@@ -527,13 +523,22 @@ pub fn gguf_resident(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u
 /// (its device bytes are part of the placement), so adapters can be offered
 /// on it ([`AdapterHost`]).
 pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35GgufServeConfig, bank: Option<AdapterBankSettings>) -> Result<Qwen35GgufServed, String> {
-    use qwen35::int8_gguf_resident::{resident_config, Qwen35GgufResident, SpecServing, SpeculativeMode};
+    use qwen35::int8_gguf_resident::{held_tiers, resident_config, Qwen35GgufResident, SpecServing, SpeculativeMode};
     if let Some(why) = &cfg.refused {
         return Err(why.clone());
     }
-    let (tier, max_batch) = (cfg.tier_or_default(), cfg.max_batch_or_default());
+    let max_batch = cfg.max_batch_or_default();
     let mg = checkpoint::gguf::MmapGguf::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
     let model_cfg = resident_config(&mg, 1).map_err(|e| format!("'{gguf_path}' is not a servable Qwen3.8 GGUF: {e}"))?;
+    let mut chosen = Vec::new();
+    let tier = match &cfg.tier {
+        Some(tier) => tier.clone(),
+        None => {
+            let held = held_tiers(&mg, &model_cfg).map_err(|e| format!("'{gguf_path}': {e}"))?;
+            chosen.push(format!("--weight-format {} with {} tensors at other tiers: each tensor as the checkpoint stores it", held.default_dtype().name(), held.rule_count()));
+            held
+        }
+    };
     let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
     if devices.is_empty() {
         return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
@@ -562,7 +567,6 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     // chosen at their leanest: the KV tier, then speculation, then the prompt cache.
     let hw = Hardware::detected();
     let probe_cap = cfg.ctx.unwrap_or(1).max(1);
-    let mut chosen = Vec::new();
     let kv = given_or_chosen(cfg.kv, "--kv-cache", KV_DEFAULTS, hw, &mut chosen, |kv| fits(build(kv, SpeculativeMode::Off, 0, probe_cap)));
     let mode = given_or_chosen(cfg.speculative, "--speculative", SPECULATION_DEFAULTS, hw, &mut chosen, |mode| fits(build(kv, mode, 0, probe_cap)));
     let prefix_slots = given_or_chosen(cfg.prefix_slots.map(PrefixCache::Slots), "prefix slots", PREFIX_SLOT_DEFAULTS, hw, &mut chosen, |cache| fits(build(kv, mode, cache.slots(max_batch), probe_cap))).slots(max_batch);
@@ -938,7 +942,7 @@ mod tests {
         let (modes, _) = gpu_core::defaults::candidates(SPECULATION_DEFAULTS, gpu_core::defaults::Hardware::detected());
         assert_eq!(r.speculation().mode, modes[0], "the hardware's best-ranked speculation");
         let said = r.chosen_defaults().join("\n");
-        for knob in ["--kv-cache int8", "--speculative", "prefix slots", "--ctx"] {
+        for knob in ["--weight-format i8", "--kv-cache int8", "--speculative", "prefix slots", "--ctx"] {
             assert!(said.contains(knob), "every default is reported with its reason; missing {knob}:\n{said}");
         }
         assert_eq!(r.manifest().max_context_tokens, Some(r.cap() as u64));

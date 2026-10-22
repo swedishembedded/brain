@@ -1138,3 +1138,24 @@ fn embedding_gather_timing_at_a_prompt_round() {
     assert_eq!(rows.iter().flat_map(|&r| mg.tensor_range(name, r * d, d).unwrap().unwrap()).collect::<Vec<f32>>(), mg.tensor_rows(name, &rows, d).unwrap().unwrap());
     println!("  512 embedding rows: one range per row {:.2} ms, one gather {:.2} ms", per_row * 1e3, gather * 1e3);
 }
+
+/// The released checkpoint is held as it is stored: a 4-bit release (its MLP
+/// gate in Q4_K) costs well under two thirds of the int8 bytes, and every
+/// other release exactly the int8 bytes. Reads headers only.
+#[test]
+fn the_checkpoint_is_held_as_it_is_stored() {
+    let Some(path) = gguf_path() else { return };
+    let mg = MmapGguf::open(&path).expect("open the GGUF");
+    let cfg = resident_config(&mg, CAP).expect("a Qwen3.8 GGUF");
+    let held = qwen35::int8_gguf_resident::held_tiers(&mg, &cfg).expect("the held tiers");
+    let bytes = |tier: &TierPolicy| -> u64 { cfg.layer_types().into_iter().enumerate().map(|(l, ty)| cfg.layer_weight_bytes_at(&format!("blocks.{l}."), ty, tier)).sum() };
+    let (held_bytes, i8_bytes) = (bytes(&held), bytes(&TierPolicy::uniform(Dtype::I8)));
+    let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    println!("held as stored: {} with {} per-tensor exceptions, {:.2} GiB of layers (int8: {:.2} GiB)", held.default_dtype().name(), held.rule_count(), gib(held_bytes), gib(i8_bytes));
+    if mg.dtype("blk.0.ffn_gate.weight") == Some("Q4_K") {
+        assert_eq!(held.default_dtype(), Dtype::Q4K);
+        assert!(held_bytes * 3 < i8_bytes * 2, "a 4-bit release is held near 4 bits: {:.2} of {:.2} GiB", gib(held_bytes), gib(i8_bytes));
+    } else {
+        assert_eq!(held_bytes, i8_bytes, "every other release is held at int8");
+    }
+}

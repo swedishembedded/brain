@@ -144,27 +144,8 @@ impl MtpDrafter {
             Some(s) if s == [d, 2 * d] => {}
             Some(s) => return Err(format!("{MODEL}: {fc_name} has shape {s:?}, expected [{d}, {}]", 2 * d)),
         }
-        // The head's layer is the one full-attention layer of a truncated config.
-        let mut cfg1 = cfg.clone();
-        cfg1.n_layers = cfg.full_attention_interval;
-        cfg1.mtp = false;
-        let layer = (cfg.full_attention_interval - 1) as usize;
-        let shard = Shard { start: layer, end: layer + 1, embed: false, head: false, gpu_index };
-        let mut plan = HashMap::new();
-        for name in mg.names() {
-            let Some(leaf) = name.strip_prefix(&prefix) else { continue };
-            if leaf.starts_with("nextn.") {
-                continue;
-            }
-            let suffix = gguf::leaf::role(leaf)
-                .and_then(|role| block_leaf_suffix(role, LayerType::Full))
-                .ok_or_else(|| format!("{MODEL}: unrecognized leaf '{leaf}' in the MTP block"))?;
-            plan.insert(format!("blocks.{layer}.{suffix}"), Fetch::Whole(name.clone()));
-        }
-        let src = RemapSource::new(mg, plan);
-        src.validate(&crate::model::shard_param_list(&cfg1, &shard))?;
-        let src = GdnFixSource::new(src, cfg1.gdn_head_order());
-        let stage = Qwen35::new_shard_dt(cfg1.clone(), 1, 1, &src, shard.clone(), tier);
+        let MtpSource { cfg1, shard, src } = mtp_source(mg, cfg, gpu_index)?;
+        let stage = Qwen35::new_shard_dt(cfg1.clone(), 1, 1, &src, shard.clone(), &stage_tier(cfg, tier, shard.start));
         let caches = ShardCaches::new(&stage.gpu, &cfg1, &shard, cap, slots, 0, kv_tier, layout);
 
         let (w, s) = model::int8::upload_quantized(&mut paramstore::upload::Uploader::new(head_gpu), mg, &fc_name, d, 2 * d).map_err(|e| format!("{MODEL}: {e}"))?;
@@ -276,6 +257,50 @@ impl MtpDrafter {
 fn mtp_projection_name(cfg: &Qwen35Config) -> String {
     format!("blk.{}.nextn.eh_proj.weight", cfg.n_layers)
 }
+
+/// The MTP block as one stage: its one full-attention layer is that layer
+/// of a truncated config, read from `blk.{n_layers}.*` under that layer's names.
+pub(crate) struct MtpSource<'a> {
+    pub cfg1: Qwen35Config,
+    pub shard: Shard,
+    pub src: GdnFixSource<'a>,
+}
+
+pub(crate) fn mtp_source<'a>(mg: &'a MmapGguf, cfg: &Qwen35Config, gpu_index: usize) -> Result<MtpSource<'a>, String> {
+    let prefix = format!("blk.{}.", cfg.n_layers);
+    let mut cfg1 = cfg.clone();
+    cfg1.n_layers = cfg.full_attention_interval;
+    cfg1.mtp = false;
+    let layer = (cfg.full_attention_interval - 1) as usize;
+    let shard = Shard { start: layer, end: layer + 1, embed: false, head: false, gpu_index };
+    let mut plan = HashMap::new();
+    for name in mg.names() {
+        let Some(leaf) = name.strip_prefix(&prefix) else { continue };
+        if leaf.starts_with("nextn.") {
+            continue;
+        }
+        let suffix = gguf::leaf::role(leaf)
+            .and_then(|role| block_leaf_suffix(role, LayerType::Full))
+            .ok_or_else(|| format!("{MODEL}: unrecognized leaf '{leaf}' in the MTP block"))?;
+        plan.insert(format!("blocks.{layer}.{suffix}"), Fetch::Whole(name.clone()));
+    }
+    let src = RemapSource::new(mg, plan);
+    src.validate(&crate::model::shard_param_list(&cfg1, &shard))?;
+    let src = GdnFixSource::new(src, cfg1.gdn_head_order());
+    Ok(MtpSource { cfg1, shard, src })
+}
+
+/// The MTP layer's leaves are named `mtp.layers.0.*` in a weight-tier policy
+/// (what the placement charges) and `blocks.{layer}.*` in its stage: the
+/// policy for the stage, each leaf at the tier its `mtp.layers.0.` name wants.
+fn stage_tier(cfg: &Qwen35Config, tier: &TierPolicy, layer: usize) -> TierPolicy {
+    cfg.layer_leaves(LayerType::Full)
+        .into_iter()
+        .fold(TierPolicy::uniform(tier.default_dtype()), |p, (suffix, ..)| p.with(&[&format!("blocks.{layer}.{suffix}")], tier.want(&format!("{MTP_PREFIX}{suffix}"))))
+}
+
+/// How a weight-tier policy names the MTP layer's leaves.
+pub(crate) const MTP_PREFIX: &str = "mtp.layers.0.";
 
 /// Whether the checkpoint carries an MTP block - what a plan charges for the
 /// head before anything is loaded.
