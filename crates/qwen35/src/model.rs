@@ -4317,6 +4317,12 @@ impl Qwen35 {
         self.cfg.lora.is_none()
     }
 
+    /// Whether everything this stage submitted in the current lane has finished -
+    /// on its own handle and on the one its linears run on - without waiting for it.
+    pub(crate) fn lane_idle(&self) -> bool {
+        self.gpu.is_idle() && self.ops.gpu().is_idle()
+    }
+
     /// **One forward over several sequences' prefill rounds**: `segs[i].tokens` are
     /// consecutive prompt tokens of sequence `i` starting at `segs[i].pos_start`, the
     /// sequences' rows laid out one after another. Every projection, the MLP and the

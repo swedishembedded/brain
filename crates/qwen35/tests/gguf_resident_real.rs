@@ -603,6 +603,73 @@ fn decode_throughput_at_a_real_long_context() {
     assert!(!text.trim().is_empty(), "the generated text must not be empty at long context");
 }
 
+/// A sequence that is generating keeps generating while a long prompt is read
+/// in: with background prefill (each card's normal stream reads the prompt, its
+/// urgent stream runs the decode steps) the longest gap between the running
+/// sequence's tokens while the prompt goes in is a fraction of the gap the
+/// sliced baseline leaves (a whole slice of prefill between two steps), and the
+/// prompt's own continuation is the same either way.
+#[test]
+fn a_generating_sequence_keeps_generating_while_a_long_prompt_is_read_in() {
+    use model::serve::{PagedDecoder, Request, Scheduler};
+
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.is_empty() {
+        brain_testutil::skip_unavailable("this gate wants at least one usable GPU");
+        return;
+    }
+    let r = Qwen35GgufResident::new(path, devices, 4096, TierPolicy::uniform(Dtype::I8)).with_max_batch(2);
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    let (mut engine, tok, _stop) = r.activate_engine(&placed).expect("activate the real checkpoint");
+    engine.set_background_prefill(true);
+    if !engine.background_prefill() {
+        brain_testutil::skip_unavailable("background prefill needs devices that can prioritise a stream");
+        return;
+    }
+    let short = tok.encode("The capital city of France is");
+    let long = tok.encode(&long_factual_prompt());
+
+    // (the gaps between the running sequence's tokens while the long prompt went
+    // in, sorted; seconds the prompt took to go in; the long prompt's continuation)
+    let run = |engine: model::serve::Scheduler<_>| -> (Vec<f64>, f64, Vec<u32>, _) {
+        let mut sched = engine;
+        let runner = sched.submit(Request { prompt: short.clone(), max_new: 2000, stop: Vec::new() });
+        while sched.running_len() == 0 {
+            sched.step_report();
+        }
+        let t0 = std::time::Instant::now();
+        let reader = sched.submit(Request { prompt: long.clone(), max_new: 6, stop: Vec::new() });
+        let (mut last, mut gaps) = (std::time::Instant::now(), Vec::new());
+        let mut read_in = None;
+        let mut out = None;
+        while out.is_none() {
+            let report = sched.step_report();
+            if report.produced.iter().any(|&(id, n)| id == runner && n > 0) && read_in.is_none() {
+                gaps.push(last.elapsed().as_secs_f64());
+                last = std::time::Instant::now();
+            }
+            if report.admitted.contains(&reader) {
+                read_in = Some(t0.elapsed().as_secs_f64());
+            }
+            out = report.completed.into_iter().find(|(id, _)| *id == reader).map(|(_, t)| t);
+        }
+        sched.cancel(runner);
+        sched.run();
+        gaps.sort_by(f64::total_cmp);
+        (gaps, read_in.expect("the long prompt was admitted"), out.expect("finished"), sched.into_decoder())
+    };
+    let summary = |g: &[f64]| format!("median {:.2} s, p90 {:.2} s, longest {:.2} s over {} tokens", g[g.len() / 2], g[g.len() * 9 / 10], g[g.len() - 1], g.len());
+    let (bg_gap, bg_read, bg_out, mut engine) = run(Scheduler::new(engine, 2));
+    engine.set_background_prefill(false);
+    let (sl_gap, sl_read, sl_out, _) = run(Scheduler::new(engine, 2));
+    println!("  {}-token prompt read in: background {bg_read:.1} s (decode gaps {}), sliced {sl_read:.1} s (decode gaps {})", long.len(), summary(&bg_gap), summary(&sl_gap));
+    assert_eq!(bg_out, sl_out, "the long prompt's continuation must not depend on how it was read in");
+    let (bg_worst, sl_worst) = (bg_gap[bg_gap.len() - 1], sl_gap[sl_gap.len() - 1]);
+    assert!(bg_worst < 0.5 * sl_worst, "the running sequence still waited for the prompt: longest gap {bg_worst:.2} s against {sl_worst:.2} s sliced");
+}
+
 /// A ~1550-token raw prompt that ENDS on the same factual cue
 /// [`the_two_card_stack_continues_a_factual_prompt_correctly`] uses, so the
 /// same "did it answer Paris?" question can be asked at a length that takes

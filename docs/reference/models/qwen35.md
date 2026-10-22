@@ -415,9 +415,12 @@ reading claims below, they have very different capabilities:
   the file's store id, behind HTTP/D-Bus/`brain serve`) - the path that
   actually serves the REAL checkpoint on real hardware: INT8 weights read
   straight from the released GGUF, layer-sharded across as many cards as
-  its real per-layer bytes need, host-staged residual between cards. Also one
-  sequence per dispatch and per-token prefill; no MTP, no vision, no LoRA.
-  See "Serving the real checkpoint from its GGUF" above.
+  its real per-layer bytes need, host-staged residual between cards. The
+  running sequences decode in one batched step and prompts prefill in chunked
+  rounds. On CUDA devices a prompt is read in on each card's normal stream
+  while the decode steps run on a high-priority one, so the sequences already
+  generating keep generating while a new prompt is prefilled. Text only (no
+  vision). See "Serving the real checkpoint from its GGUF" above.
 - **The streaming path** (`crate::stream`/`crate::stream_train`, behind
   `generate --streaming true` and the standalone `stream_train_step`
   binary - see "LoRA training" above) runs the REAL checkpoint on a machine

@@ -216,6 +216,34 @@ pub trait PagedDecoder {
         jobs.iter_mut().map(|j| self.prefill_chunk(j.table, j.prompt, j.budget)).collect()
     }
 
+    // ---- prefill in the background (optional) ----
+    //
+    // A decoder that can read prompts in on another stream of its device while
+    // decode steps run says so with `background_prefill`; the scheduler then
+    // hands it every prompt still being read, every iteration, and decodes
+    // without waiting for them - a prompt is never what holds a running
+    // sequence's next token back. The default keeps the slices above.
+
+    /// Whether this decoder reads prompts in while it decodes
+    /// ([`Self::prefill_background`] instead of the slices above).
+    fn background_prefill(&self) -> bool {
+        false
+    }
+
+    /// Advance the prompts of `jobs` (every sequence still being prefilled,
+    /// oldest first; `table` empty on a sequence's first call, `budget` its
+    /// tokens still to read): start, continue or finish them on the decoder's
+    /// background work, without waiting for it while `wait` is false - the
+    /// scheduler decodes this iteration. `wait` is true when nothing decodes:
+    /// the decoder then waits until a job has advanced, so the scheduler never
+    /// spins. One answer per job in job order: `Partial { consumed }` with the
+    /// tokens read in since the last call (0 for a job not reached yet), or
+    /// `Done`. The default is [`Self::prefill_chunks`].
+    fn prefill_background(&mut self, jobs: &mut [PrefillJob<'_>], wait: bool) -> Vec<PrefillProgress> {
+        let _ = wait;
+        self.prefill_chunks(jobs)
+    }
+
     // ---- speculative decoding (optional; see [`speculate`]) ----
     //
     // Every method below defaults to "this decoder does not speculate", so an
@@ -1676,6 +1704,39 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
     }
 
+    /// One iteration's prefill for a decoder that reads prompts in while it
+    /// decodes ([`PagedDecoder::background_prefill`]): admit every waiting
+    /// request that fits, then hand the decoder every prompt still being read,
+    /// oldest first, each with what it has left. It waits for them only when
+    /// nothing will decode this iteration.
+    fn prefill_in_background(&mut self, report: &mut StepReport) {
+        while self.admit_one(report, |_| true) {}
+        if self.prefilling.is_empty() {
+            return;
+        }
+        let wait = self.running.iter().all(|r| r.done);
+        let mut jobs: Vec<PrefillJob<'_>> =
+            self.prefilling.iter_mut().map(|p| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: p.prompt.len() - p.done }).collect();
+        let progress = self.dec.prefill_background(&mut jobs, wait);
+        drop(jobs);
+        assert_eq!(progress.len(), self.prefilling.len(), "prefill_background answers every job");
+        let mut finished = Vec::new();
+        for (idx, (p, answer)) in self.prefilling.iter_mut().zip(progress).enumerate() {
+            match answer {
+                PrefillProgress::Partial { consumed } => p.done += consumed,
+                PrefillProgress::Done(hidden) => finished.push((idx, hidden)),
+            }
+        }
+        // Oldest first, as the other prefill paths start them.
+        let mut starting: Vec<(Prefilling, Vec<f32>)> = Vec::new();
+        for (idx, hidden) in finished.into_iter().rev() {
+            starting.push((self.prefilling.remove(idx).expect("index just visited"), hidden));
+        }
+        for (p, hidden) in starting.into_iter().rev() {
+            self.start_running(p, hidden, report);
+        }
+    }
+
     fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
         // 0. Resume preempted sequences before anything else touches the pool:
         //    work already in flight outranks work still queued.
@@ -1697,7 +1758,9 @@ impl<D: PagedDecoder> Scheduler<D> {
         let mut budget_left = self.prefill_budget as usize;
         let mut worked = false;
         let batched = self.dec.prefill_batch_tokens().is_some();
-        if batched {
+        if self.dec.background_prefill() {
+            self.prefill_in_background(report);
+        } else if batched {
             self.prefill_batched(report);
         } else {
             loop {

@@ -359,6 +359,17 @@ pub struct KvLayer {
 }
 
 impl KvLayer {
+    /// Let a decode stream and a prefill stream write this layer's pool at once,
+    /// in the disjoint rows of their own sequences (see `Gpu::share_rows`).
+    pub fn share_rows(&self, gpu: &Gpu) {
+        for plane in [&self.k, &self.v] {
+            gpu.share_rows(&plane.data);
+            if let Some(scales) = &plane.scales {
+                gpu.share_rows(scales);
+            }
+        }
+    }
+
     /// Both planes of a layer that keeps `rows` token rows.
     pub fn new(gpu: &Gpu, tier: KvTier, rows: u64, kv_stride: u64, head_dim: u64) -> KvLayer {
         KvLayer { k: KvPlane::new(gpu, tier, rows, kv_stride, head_dim), v: KvPlane::new(gpu, tier, rows, kv_stride, head_dim) }

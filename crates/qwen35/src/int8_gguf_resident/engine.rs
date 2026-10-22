@@ -73,6 +73,7 @@ struct Resume {
 }
 
 type PrefixCache = SnapshotPrefixCache<Resume>;
+use super::background::{PrefillDone, PrefillTask, TaskStart};
 use super::{KvLayout, KvWindow, MultiPrefillJob, Qwen35GgufInstance, MODEL};
 
 /// Candidates a non-greedy pick can sample from. Real sampling is exact
@@ -116,6 +117,33 @@ pub struct Qwen35GgufEngine {
     /// Wall time spent in the speculation hooks, for the benchmark.
     times: SpecTimes,
     prefill: PrefillPolicy,
+    /// Whether prompts are read in on each card's normal stream while decode
+    /// steps run on its urgent one (see [`super::background`]): set when every
+    /// stage's device can prioritise. Decode then never waits for a prompt.
+    background_on: bool,
+    /// The prompt slice being read in that way, if any.
+    background: Option<Background>,
+}
+
+/// A prompt slice read in while sequences decode, and what finishing it needs.
+struct Background {
+    task: PrefillTask,
+    p: PartialPrefill,
+    end: usize,
+    namespace: KvNamespace,
+    /// The slice's rows, once a pump between decode steps found it finished; the
+    /// scheduler's next prefill call files it.
+    done: Option<PrefillDone>,
+}
+
+/// Run decode-side device work on the urgent lane when prompts are read in
+/// beside it, so a decode step never queues behind a prefill round.
+fn decode_lane<R>(background: bool, f: impl FnOnce() -> R) -> R {
+    if background {
+        gpu_core::lane::urgent(f)
+    } else {
+        f()
+    }
 }
 
 /// Where a speculating engine spends its time: the drafter, the verify
@@ -212,7 +240,26 @@ impl Qwen35GgufEngine {
             KvLayout::Paged { block_rows, pool_rows } => (BlockAllocator::new(pool_rows / block_rows, block_rows), (0..inst.max_batch).rev().collect()),
         };
         let cache = PrefixCache::new(inst.prefix_slots);
-        Qwen35GgufEngine { inst, alloc, free_rows, cache, pending: HashMap::new(), partial: HashMap::new(), verifying: None, spec_batch_limit: usize::MAX, spec_prefill: true, feed_secs: None, times: SpecTimes::default(), prefill: PrefillPolicy::default() }
+        let background_on = inst.background_prefill_available();
+        if background_on {
+            inst.share_pools_across_lanes();
+        }
+        Qwen35GgufEngine {
+            inst,
+            alloc,
+            free_rows,
+            cache,
+            pending: HashMap::new(),
+            partial: HashMap::new(),
+            verifying: None,
+            spec_batch_limit: usize::MAX,
+            spec_prefill: true,
+            feed_secs: None,
+            times: SpecTimes::default(),
+            prefill: PrefillPolicy::default(),
+            background_on,
+            background: None,
+        }
     }
 
     /// Free the blocks of entries the cache retired.
@@ -351,6 +398,19 @@ impl Qwen35GgufEngine {
         self.prefill = policy;
     }
 
+    /// Read prompts in on each card's normal stream while decode runs on its
+    /// urgent one (`true`, the default wherever every stage's device can
+    /// prioritise), or in slices between decode steps on one stream (`false`, the
+    /// A/B baseline). Asking for it where it is unavailable keeps the slices.
+    /// Call before the engine is handed to a scheduler.
+    pub fn set_background_prefill(&mut self, on: bool) {
+        assert!(self.background.is_none(), "{MODEL}: the prefill mode changed with a prompt being read in");
+        self.background_on = on && self.inst.background_prefill_available();
+        if self.background_on {
+            self.inst.share_pools_across_lanes();
+        }
+    }
+
     /// Set the batch size past which the scheduler decodes plainly instead of
     /// speculating (the measured crossover; unbounded by default).
     pub fn set_spec_batch_limit(&mut self, limit: usize) {
@@ -388,8 +448,10 @@ impl Qwen35GgufEngine {
         let adapter_slots: Vec<u32> = tables.iter().map(|t| adapters::slot_of(self.inst.stage_models(), t.kv_namespace())).collect();
         let (slots, positions) = self.next_positions(tables);
         self.inst.set_adapter_rows(&adapter_slots);
+        self.pump_background();
         let hidden = self.inst.stack_decode_hidden(inputs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
         self.inst.set_adapter_rows(&[]);
+        self.pump_background();
         // A batch the scheduler will not speculate over (past the crossover or the
         // verify scratch) is not worth tracking for the drafter either.
         if slots.len() > self.spec_batch_limit.min(self.inst.speculation_rows() as usize) {
@@ -634,6 +696,80 @@ impl Qwen35GgufEngine {
     }
 }
 
+impl Qwen35GgufEngine {
+    /// Make `job` the prompt read in in the background: its first slice reserves
+    /// the slot and seeds from the prefix cache as [`Self::prefill_slice`] does,
+    /// then its rows go to a [`PrefillTask`]. `Some` when there is nothing to
+    /// read (the whole prompt was cached).
+    fn start_background(&mut self, job: &mut PrefillJob<'_>) -> Option<PrefillProgress> {
+        assert!(!job.prompt.is_empty(), "{MODEL}: empty prompt");
+        if job.table.is_empty() {
+            if let Some(hidden) = self.begin_prefill(job.table, job.prompt) {
+                return Some(PrefillProgress::Done(hidden));
+            }
+        }
+        let slot = self.slot(job.table);
+        let p = self.partial.remove(&slot).expect("a prefill in progress has its state");
+        let end = self.slice_end(&p, job.prompt.len(), usize::MAX);
+        // The working copy holds the state after `p.done` tokens: cleared for a
+        // cold prompt, seeded from a cached prefix, or left by the previous slice.
+        let from = if p.done == 0 { TaskStart::Fresh } else { TaskStart::Continue };
+        let collect = self.inst.has_mtp() && p.mtp_feed;
+        let task = self.inst.prefill_task(job.prompt, p.done, end, slot, from, collect);
+        self.background = Some(Background { task, p, end, namespace: job.table.kv_namespace(), done: None });
+        None
+    }
+
+    /// Hand each card whose prefill round has finished its next one, without
+    /// waiting for any: called around every decode step, so a card does not sit
+    /// idle until the scheduler's next prefill call.
+    fn pump_background(&mut self) {
+        if let Some(bg) = self.background.as_mut().filter(|b| b.done.is_none()) {
+            // The rounds belong on the normal lane even when this runs inside a decode step.
+            let inst = &self.inst;
+            bg.done = gpu_core::lane::normal(|| inst.pump_prefill(&mut bg.task, false)).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    /// See [`PagedDecoder::prefill_background`]: one prompt at a time, oldest
+    /// first, each slice handing over to the next (or to the next prompt) as
+    /// soon as it is in, without waiting for a card unless `wait`.
+    fn read_prompts_in(&mut self, jobs: &mut [PrefillJob<'_>], wait: bool) -> Vec<PrefillProgress> {
+        let mut answers: Vec<Option<PrefillProgress>> = (0..jobs.len()).map(|_| None).collect();
+        let mut consumed = vec![0usize; jobs.len()];
+        loop {
+            if self.background.is_none() {
+                let Some(i) = answers.iter().position(Option::is_none) else { break };
+                if let Some(done) = self.start_background(&mut jobs[i]) {
+                    answers[i] = Some(done);
+                    continue;
+                }
+            }
+            let bg = self.background.as_mut().expect("a prompt is being read in");
+            let slot = bg.task.slot();
+            let i = jobs.iter().position(|j| j.table.state_row() == Some(slot)).unwrap_or_else(|| panic!("{MODEL}: the prompt read in for slot {slot} is not among the scheduler's prefilling sequences"));
+            let finished = match bg.done.take() {
+                Some(done) => Some(done),
+                None => self.inst.pump_prefill(&mut bg.task, wait).unwrap_or_else(|e| panic!("{e}")),
+            };
+            let Some(done) = finished else { break };
+            let Background { mut p, end, namespace, .. } = self.background.take().expect("checked above");
+            p.rows_hidden.extend_from_slice(&done.all);
+            match self.finish_slice(slot, namespace, jobs[i].prompt, p, end, done.last, false) {
+                PrefillProgress::Partial { consumed: c } => consumed[i] += c,
+                finished => {
+                    answers[i] = Some(finished);
+                    // Nothing decodes yet: hand the scheduler the sequence that can.
+                    if wait {
+                        break;
+                    }
+                }
+            }
+        }
+        answers.into_iter().zip(consumed).map(|(a, c)| a.unwrap_or(PrefillProgress::Partial { consumed: c })).collect()
+    }
+}
+
 impl BankedEngine for Qwen35GgufEngine {
     fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
         Qwen35GgufEngine::load_adapter(self, adapter)
@@ -687,6 +823,9 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn release_table(&mut self, t: &mut BlockTable) {
         let row = t.take_state_row();
         if let Some(slot) = row {
+            if let Some(bg) = self.background.take_if(|b| b.task.slot() == slot) {
+                gpu_core::lane::normal(|| self.inst.abandon_prefill(bg.task));
+            }
             self.inst.mtp_release(slot);
             self.partial.remove(&slot);
         }
@@ -742,22 +881,35 @@ impl PagedDecoder for Qwen35GgufEngine {
         self.times.prefill += started.elapsed();
         progress
     }
+    /// Prompts are read in on each card's normal stream while decode steps run
+    /// on its urgent one, wherever every stage's device can prioritise.
+    fn background_prefill(&self) -> bool {
+        self.background_on && self.inst.background_prefill_available()
+    }
+    fn prefill_background(&mut self, jobs: &mut [PrefillJob<'_>], wait: bool) -> Vec<PrefillProgress> {
+        let started = std::time::Instant::now();
+        let progress = self.read_prompts_in(jobs, wait);
+        self.times.prefill += started.elapsed();
+        progress
+    }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
-        self.inst.head_logits_rows(hidden, 1)
+        decode_lane(self.background_on, || self.inst.head_logits_rows(hidden, 1))
     }
     fn admit_greedy(&self, hidden: &[f32]) -> u32 {
-        self.inst.head_argmax_rows(hidden, 1)[0]
+        decode_lane(self.background_on, || self.inst.head_argmax_rows(hidden, 1)[0])
     }
     fn admit_topk(&self, hidden: &[f32], k: usize) -> Vec<(u32, f32)> {
         let k = k.clamp(1, TOPK_CAPACITY) as u32;
-        self.inst.head_topk_rows(hidden, 1, k).pop().expect("one row in, one row out")
+        decode_lane(self.background_on, || self.inst.head_topk_rows(hidden, 1, k).pop().expect("one row in, one row out"))
     }
     fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
         if tables.is_empty() {
             return Vec::new();
         }
-        let hidden = self.decode_hidden(tables, inputs);
-        self.inst.head_argmax_rows(&hidden, inputs.len() as u32)
+        decode_lane(self.background_on, || {
+            let hidden = self.decode_hidden(tables, inputs);
+            self.inst.head_argmax_rows(&hidden, inputs.len() as u32)
+        })
     }
     fn forward_batched_greedy_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<u32>> {
         assert!((1..=self.decode_window_capacity()).contains(&k), "window {k} exceeds this engine's decode_window_capacity {}", self.decode_window_capacity());
@@ -768,8 +920,10 @@ impl PagedDecoder for Qwen35GgufEngine {
             return Vec::new();
         }
         let k = k.clamp(1, TOPK_CAPACITY) as u32;
-        let hidden = self.decode_hidden(tables, inputs);
-        self.inst.head_topk_rows(&hidden, inputs.len() as u32, k)
+        decode_lane(self.background_on, || {
+            let hidden = self.decode_hidden(tables, inputs);
+            self.inst.head_topk_rows(&hidden, inputs.len() as u32, k)
+        })
     }
     fn prefix_stats(&self) -> (u64, u64, usize) {
         self.cache.stats()
@@ -842,6 +996,21 @@ impl PagedDecoder for Qwen35GgufEngine {
     /// consecutive positions of each sequence's own block, so the table just
     /// grows by `rows[i].len()`.
     fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
+        decode_lane(self.background_on, || self.verify_rows(tables, rows, cands))
+    }
+    fn commit_verified(&mut self, _tables: &mut [&mut BlockTable], keep: &[usize]) {
+        decode_lane(self.background_on, || self.commit_rows(keep))
+    }
+    /// The checkpoint's own MTP head, when it is loaded; otherwise no proposals
+    /// (the scheduler's installed drafter, if any, supplies them instead).
+    fn draft(&mut self, queries: &[DraftQuery], ks: &[usize]) -> Vec<Vec<u32>> {
+        decode_lane(self.background_on, || self.draft_rows(queries, ks))
+    }
+}
+
+impl Qwen35GgufEngine {
+    /// [`PagedDecoder::forward_batched_verify`]'s work.
+    fn verify_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
         assert_eq!(tables.len(), rows.len(), "{MODEL}: tables/rows length mismatch");
         let t0 = std::time::Instant::now();
         let mut slots = Vec::with_capacity(tables.len());
@@ -876,7 +1045,8 @@ impl PagedDecoder for Qwen35GgufEngine {
         let mut flat = flat.into_iter();
         rows.iter().map(|r| flat.by_ref().take(r.len()).collect()).collect()
     }
-    fn commit_verified(&mut self, _tables: &mut [&mut BlockTable], keep: &[usize]) {
+    /// [`PagedDecoder::commit_verified`]'s work.
+    fn commit_rows(&mut self, keep: &[usize]) {
         let t0 = std::time::Instant::now();
         let v = self.verifying.take().expect("commit_verified without a verify step");
         let counts: Vec<u32> = v.rows.iter().map(|r| r.len() as u32).collect();
@@ -884,9 +1054,8 @@ impl PagedDecoder for Qwen35GgufEngine {
         self.inst.mtp_record_verified(&v.slots, &v.rows, keep, &v.hidden);
         self.times.commit += t0.elapsed();
     }
-    /// The checkpoint's own MTP head, when it is loaded; otherwise no proposals
-    /// (the scheduler's installed drafter, if any, supplies them instead).
-    fn draft(&mut self, queries: &[DraftQuery], ks: &[usize]) -> Vec<Vec<u32>> {
+    /// [`PagedDecoder::draft`]'s work.
+    fn draft_rows(&mut self, queries: &[DraftQuery], ks: &[usize]) -> Vec<Vec<u32>> {
         if !self.inst.has_mtp() {
             return vec![Vec::new(); queries.len()];
         }

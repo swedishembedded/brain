@@ -139,6 +139,7 @@
 //!   is `crate::serve::Scheduler`'s job.
 //! * **Text only.** `crate::vl`'s vision front-end is not spliced in here.
 
+mod background;
 mod engine;
 mod mtp;
 mod speculate;
