@@ -86,6 +86,17 @@ repos:
         language: system
         pass_filenames: true
         stages: [pre-commit]
+      - id: agents-md
+        name: "AGENTS.md stays a short routing guide whose paths exist"
+        description: >-
+          AGENTS.md routes to the files that own a subject and holds no
+          status; scripts/gates/check-agents-md.sh enforces its line budget
+          and that every repository path it names exists.
+        entry: bash scripts/gates/check-agents-md.sh
+        language: system
+        files: ^AGENTS\.md$
+        pass_filenames: false
+        stages: [pre-commit]
       - id: make-targets
         name: "Make targets are a documented concept/subconcept/action tree"
         description: >-

@@ -4,7 +4,7 @@
 
 """Refresh the vendored upstream OpenAPI specs and report drift.
 
-Single-source-of-truth policy (AGENTS.md): brain has at most TWO sources of truth —
+Single-source-of-truth policy: brain has at most TWO sources of truth -
 its code, and the *vendored upstream* provider specs under
 `crates/apiserve/tests/specs/` (a cached copy of what the providers publish). The
 jsonschema conformance tests in `crates/apiserve/tests/api.rs` validate brain's

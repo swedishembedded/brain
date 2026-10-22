@@ -67,6 +67,9 @@ BRAIN_BIN ?= ./target/debug/brain
 # version is the actual build-time source of truth (--version, D-Bus, the
 # .deb); this mirrors it for the release machinery only.
 BRAIN_VERSION := 3.0.0
+# The git remote whose GitHub repository receives a release (release/publish,
+# package/deb/publish).
+RELEASE_REMOTE ?= origin
 PIP    ?= python3 -m pip
 DATA   ?= data
 OUT    ?= out
@@ -146,6 +149,16 @@ package/deb/debug: build/debug
 ## package/deb/release - Debian package of the release build
 package/deb/release: build/release
 	bash scripts/build/build-deb.sh
+
+# Checks every precondition (gh, its login, the tag checked out and on GitHub,
+# a signing key) before the release build, so a missing one costs seconds.
+## package/deb/publish - sign the release package and attach it to the GitHub release of v<version> (created if missing; an earlier upload is replaced); needs gh, a GnuPG key and the tag on GitHub (RELEASE_REMOTE, default origin)
+package/deb/publish: release/notes
+	bash scripts/build/publish-deb.sh --check --version $(BRAIN_VERSION) --remote $(RELEASE_REMOTE)
+	$(MAKE) package/deb/release
+	bash scripts/build/publish-deb.sh --version $(BRAIN_VERSION) --remote $(RELEASE_REMOTE) \
+		--notes-file target/release-notes-v$(BRAIN_VERSION).md \
+		target/debian/brain_$(BRAIN_VERSION)_$$(dpkg --print-architecture).deb
 
 # The aarch64 CUDA image and its CI-equivalent gates; see
 # tools/container/aarch64-cuda.Containerfile and scripts/build/container.sh.
@@ -348,6 +361,10 @@ test:
 test/nextest:
 	cargo nextest run --release --offline --lib --bins --tests
 
+## test/package - the spec of the release publishing script against a scratch repository and a fake gh (bats; no build, seconds)
+test/package:
+	bats tests/package/publish_deb.bats
+
 # Doc-tests: real coverage, but each crate links its own binary, so this is
 # minutes of linking for a handful of examples. Separate lane, not the default.
 ## test/doc - doc-tests (slow: one link per crate)
@@ -389,9 +406,9 @@ test/slow:
 # registration - see `.agents/rules/.agents/knowledge/`). Needs no external
 # fixtures, so unlike `test/parity/strict` it carries no narrowing knob and no
 # "green because skipped" risk.
-## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + test/rl + test/gradcheck + every check/* gate
+## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + test/rl + test/gradcheck + test/package + every check/* gate
 ##   + test/parity + test/parity/strict (needs make testdata/fetch)
-test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck check/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/paths check/scope check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
+test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck test/package check/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/paths check/scope check/agents-md check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -861,6 +878,12 @@ check/paths:
 ## check/scope - no tracked file names a project brain does not depend on
 check/scope:
 	bash scripts/gates/check-repo-scope.sh
+
+# AGENTS.md is read by every agent session: a line budget keeps detail in the
+# file that owns it, and every path it names must exist.
+## check/agents-md - AGENTS.md is within its line budget and every path it names exists
+check/agents-md:
+	bash scripts/gates/check-agents-md.sh
 
 ## check/hf-fixtures - every architecture declaring HuggingFace names has a tiny HF-layout fixture test (or a shrinking allowlist entry)
 check/hf-fixtures:
@@ -1956,25 +1979,14 @@ release/notes:
 		{ echo "error: v$(BRAIN_VERSION) section not found in CHANGELOG.md"; exit 1; }
 	@echo "wrote target/release-notes-v$(BRAIN_VERSION).md"
 
-# Create the GitHub release for the tag just cut, attaching the release .deb.
-# Needs `gh` installed and authenticated (`gh auth login`) - neither is
-# assumed here, this just fails loudly if either is missing.
-## release/github - create the GitHub release for the tag just cut, attaching the release .deb (needs gh)
-release/github: release/notes package/deb/release
-	@command -v gh >/dev/null 2>&1 || \
-		{ echo "error: gh (GitHub CLI) not found - install it and run 'gh auth login'"; exit 1; }
-	gh release create "v$(BRAIN_VERSION)" \
-		--title "v$(BRAIN_VERSION)" \
-		--notes-file target/release-notes-v$(BRAIN_VERSION).md \
-		target/debian/brain_$(BRAIN_VERSION)_$$(dpkg --print-architecture).deb
-
 # The one target in this section that touches the remote: push the tagged
-# bump commit + tag, then create the GitHub release. Deliberately not part of
-# release/{patch,minor,major} - see that section's note above.
-## release/publish - push the tagged bump commit + tag, then create the GitHub release
+# bump commit and its tag (only that tag), then publish the signed package to
+# the tag's GitHub release. Deliberately not part of release/{patch,minor,major}
+# - see that section's note above.
+## release/publish - push HEAD and the tag v<version> to RELEASE_REMOTE, then package/deb/publish
 release/publish:
-	git push origin HEAD --tags
-	$(MAKE) release/github
+	git push $(RELEASE_REMOTE) HEAD "v$(BRAIN_VERSION)"
+	$(MAKE) package/deb/publish
 
 # ---------------------------------------------------------------------------
 ##@ Housekeeping
@@ -1990,12 +2002,12 @@ help:
 
 # Declared last so every generated list above is already defined.
 .PHONY: build build/debug build/release \
-        package package/deb package/deb/debug package/deb/release \
+        package package/deb package/deb/debug package/deb/release package/deb/publish \
         container container/runtime container/ci container/smoke \
         cuda cuda/aot cuda/install cuda/coverage gh200 gh200/probe gh200/placement \
         environment environment/requirements environment/full environment/openvino \
         npu npu/diagnose \
-        test test/nextest test/doc test/slow test/full test/times test/capability-report \
+        test test/nextest test/package test/doc test/slow test/full test/times test/capability-report \
         test/gradcheck test/rl test/conformance test/cuda-matrix \
         test/parity test/parity/strict test/parity/forecast test/parity/wan \
         test/e2e test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready \
@@ -2029,5 +2041,5 @@ help:
         generate/knowledge generate/knowledge/index \
         testdata testdata/fetch hooks hooks/install \
         release release/patch release/minor release/major release/changelog release/notes \
-        release/github release/publish _release/preflight _release/finalize \
+        release/publish _release/preflight _release/finalize \
         clean help
