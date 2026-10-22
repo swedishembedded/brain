@@ -112,13 +112,21 @@ pub fn upload_from_source(ops: &Ops, src: &dyn TensorSource, name: &str, n: usiz
 /// `[n_total, k]` weight of tier `want`. Parts stored in one encoding join without re-quantizing; parts stored
 /// in different encodings are each converted to `want` tile by tile into their rows of the one weight (the
 /// explicit `Convert` request is `want` itself), so a fused group never passes through a whole f32 tensor.
-/// A source without a packed view of the parts concatenates them as f32 (each part is already f32 there).
+/// A source without a packed view of the parts, or whose parts are all stored as f32, concatenates them as f32.
 /// Errors name the group: a part is missing, or the packed parts cannot be joined as `want` (a part's rows
 /// are not whole tiles of the destination); load such a group as separate weights with
 /// [`upload_group_preserved`].
 pub fn upload_fused_from_source(ops: &Ops, src: &dyn TensorSource, names: &[&str], n_total: usize, k: usize, want: Dtype, staging: &BoundedWorkspace) -> Result<Weight, String> {
-    if names.iter().all(|n| src.packed_descriptor(n).is_some()) {
-        return upload_packed(ops, src, names, n_total, k, want, staging).ok_or_else(|| format!("{names:?} cannot be fused as {want:?} without an f32 round trip: load the parts as separate weights"));
+    let descs: Option<Vec<TensorDescriptor>> = names.iter().map(|n| src.packed_descriptor(n)).collect();
+    if let Some(descs) = descs {
+        if let Some(w) = upload_packed(ops, src, names, n_total, k, want, staging) {
+            return Ok(w);
+        }
+        // Parts stored as f32 (a flat 1-D tensor the tiled load declines, say)
+        // widen nothing on the f32 route below; a quantized part would.
+        if !descs.iter().all(|d| d.encoding == QuantEncoding::f32()) {
+            return Err(format!("{names:?} cannot be fused as {want:?} without an f32 round trip: load the parts as separate weights"));
+        }
     }
     let mut parts: Vec<Vec<f32>> = Vec::with_capacity(names.len());
     for name in names {
