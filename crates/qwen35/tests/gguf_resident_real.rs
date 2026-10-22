@@ -670,6 +670,53 @@ fn a_generating_sequence_keeps_generating_while_a_long_prompt_is_read_in() {
     assert!(bg_worst < 0.5 * sl_worst, "the running sequence still waited for the prompt: longest gap {bg_worst:.2} s against {sl_worst:.2} s sliced");
 }
 
+/// With nothing decoding, a prompt read in the background runs its rounds as a
+/// pipeline across the cards (the next card takes a round as soon as the
+/// previous one hands it over), so on a multi-card stack it goes in clearly
+/// faster than in slices, which run each round through the cards in turn, and
+/// on one card no slower.
+#[test]
+fn a_lone_prompt_reads_in_at_least_as_fast_in_the_background() {
+    use model::serve::{PagedDecoder, Request, Scheduler};
+
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.is_empty() {
+        brain_testutil::skip_unavailable("this gate wants at least one usable GPU");
+        return;
+    }
+    let r = Qwen35GgufResident::new(path, devices, 4096, TierPolicy::uniform(Dtype::I8)).with_max_batch(2);
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    let (mut engine, tok, _stop) = r.activate_engine(&placed).expect("activate the real checkpoint");
+    engine.set_background_prefill(true);
+    if !engine.background_prefill() {
+        brain_testutil::skip_unavailable("background prefill needs devices that can prioritise a stream");
+        return;
+    }
+    let stages = engine.instance().stages();
+    let long = tok.encode(&long_factual_prompt());
+    // Seconds from submission to the first token, best of two (the first also warms the kernels).
+    let first_token = |engine| -> (f64, _) {
+        let mut sched = Scheduler::new(engine, 2);
+        let mut best = f64::INFINITY;
+        for _ in 0..2 {
+            let t = std::time::Instant::now();
+            let id = sched.submit(Request { prompt: long.clone(), max_new: 1, stop: Vec::new() });
+            while !sched.step_report().admitted.contains(&id) {}
+            best = best.min(t.elapsed().as_secs_f64());
+            sched.run();
+        }
+        (best, sched.into_decoder())
+    };
+    let (bg, mut engine) = first_token(engine);
+    engine.set_background_prefill(false);
+    let (sliced, _) = first_token(engine);
+    println!("  {}-token prompt alone over {stages} card(s): background {bg:.2} s, sliced {sliced:.2} s ({:.0} against {:.0} tok/s)", long.len(), long.len() as f64 / bg, long.len() as f64 / sliced);
+    let bound = if stages > 1 { 0.85 } else { 1.05 };
+    assert!(bg <= bound * sliced, "a lone prompt over {stages} card(s) went in at {bg:.2} s in the background against {sliced:.2} s in slices");
+}
+
 /// A ~1550-token raw prompt that ENDS on the same factual cue
 /// [`the_two_card_stack_continues_a_factual_prompt_correctly`] uses, so the
 /// same "did it answer Paris?" question can be asked at a length that takes
