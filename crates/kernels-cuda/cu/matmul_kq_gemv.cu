@@ -42,18 +42,26 @@
 // No `__restrict__` anywhere, deliberately: brain's device buffers alias by
 // design (a sliced step binds ranges of one allocation).
 
-// Output columns (weight rows) one block covers, and threads per weight row.
-#define BRAIN_KQG_COLS 16
+// Threads per weight row (each owns every 16th group of it) and threads per
+// block; a thread carries C weight rows, so a block covers 16 * C of them.
 #define BRAIN_KQG_LANES 16
-#define BRAIN_KQG_THREADS (BRAIN_KQG_COLS * BRAIN_KQG_LANES)
-// Rows of x one block covers; larger m is split over blocks by the grid.
-#define BRAIN_KQG_ROWS 8
-// Groups per thread in one stage of loads.
-#define BRAIN_KQG_UNROLL 2
-// Blocks per SM the register budget is sized for.
-#define BRAIN_KQG_MIN_BLOCKS 3
+#define BRAIN_KQG_THREADS 256
+#define BRAIN_KQG_COL_THREADS (BRAIN_KQG_THREADS / BRAIN_KQG_LANES)
 // Weight-scale groups per `wd` entry (a 256-element super-block).
 #define BRAIN_KQG_GPS 8
+// The two block shapes, as `ROWS` of x, `UNROLL` groups per thread per
+// stage, `C` weight rows per thread and blocks per SM the registers allow.
+// Up to 8 rows: one weight row a thread, deep prefetch - the weights'
+// bandwidth is the limit. Past 8: each staged vector of x and its sum serve
+// four weight rows from registers - the math and shared reads per row are the
+// limit there, and more row tiles of one weight tile run together (L2).
+#define BRAIN_KQG_ROWS 8
+#define BRAIN_KQG_UNROLL 2
+#define BRAIN_KQG_MIN_BLOCKS 3
+#define BRAIN_KQG_WIDE_ROWS 8
+#define BRAIN_KQG_WIDE_UNROLL 1
+#define BRAIN_KQG_WIDE_C 4
+#define BRAIN_KQG_WIDE_MIN_BLOCKS 2
 
 // 16-byte load that does not allocate in L1 where the part has the qualifier
 // (the weights stream through once), plain read-only load elsewhere.
@@ -87,13 +95,13 @@ struct BrainKqCodes {
     uint4 v[BITS / 4];
 };
 
-// What one thread has in flight for `UNROLL` groups of its row: the codes and
-// the two words their scales are packed in.
-template <int BITS>
+// What one thread has in flight for `UNROLL` groups of each of its C weight
+// rows: the codes and the two words their scales are packed in.
+template <int BITS, int UNROLL, int C>
 struct BrainKqStage {
-    BrainKqCodes<BITS> w[BRAIN_KQG_UNROLL];
-    unsigned int sm[BRAIN_KQG_UNROLL];
-    unsigned int d[BRAIN_KQG_UNROLL];
+    BrainKqCodes<BITS> w[UNROLL][C];
+    unsigned int sm[UNROLL][C];
+    unsigned int d[UNROLL][C];
 };
 
 // A group's 32 codes as the eight dp4a operands x's eight words meet: operand
@@ -135,108 +143,145 @@ __device__ __forceinline__ float2 brain_kqg_scales(unsigned int g, unsigned int 
     return make_float2(__fmul_rn(d, static_cast<float>((sm >> shift) & 0xffu)), __fmul_rn(dmin, static_cast<float>((sm >> (shift + 8u)) & 0xffu)));
 }
 
-// One group against one row's 32 activations (two 16-byte vectors).
-__device__ __forceinline__ float brain_kqg_group(float acc, const uint4& xa, const uint4& xb, const unsigned int (&op)[8], float2 s) {
-    const unsigned int x[8] = {xa.x, xa.y, xa.z, xa.w, xb.x, xb.y, xb.z, xb.w};
+// The int8 dot of 32 activations (two 16-byte vectors) with a group's codes.
+__device__ __forceinline__ int brain_kqg_dot(const unsigned int (&x)[8], const unsigned int (&op)[8]) {
     int a = 0;
-    int sum = 0;
 #pragma unroll
-    for (int j = 0; j < 8; ++j) {
-        a = __dp4a(static_cast<int>(x[j]), static_cast<int>(op[j]), a);
-        sum = __dp4a(static_cast<int>(x[j]), 0x01010101, sum);
-    }
-    return __fmaf_rn(-s.y, static_cast<float>(sum), __fmaf_rn(s.x, static_cast<float>(a), acc));
+    for (int j = 0; j < 8; ++j) { a = __dp4a(static_cast<int>(x[j]), static_cast<int>(op[j]), a); }
+    return a;
 }
 
-// Vectors of x (16 bytes) per row of x in one stage of the shared tile: two
-// per group.
-#define BRAIN_KQG_XVECS (2 * BRAIN_KQG_UNROLL * BRAIN_KQG_LANES)
-typedef uint4 BrainKqXTile[2][BRAIN_KQG_ROWS][BRAIN_KQG_XVECS];
+// The staged x of a block: `[2][ROWS][XVECS]` 16-byte vectors (two buffers,
+// `2 * UNROLL` per lane of a stage).
+template <int ROWS, int UNROLL>
+struct BrainKqXShared {
+    static constexpr int XVECS = 2 * UNROLL * BRAIN_KQG_LANES;
+    uint4 x[2][ROWS][XVECS];
+};
 
-// `MR` rows of x against one weight row per 16 threads; lane j of a row owns
-// groups j, j + 16, ...
-template <int BITS, int MR, bool VEC>
-__device__ __forceinline__ void brain_kqg_tile(BrainKqXTile xs, const unsigned int* xq, const unsigned int* wq, const float* sx,
+// `MR` rows of x (of a block of ROWS) against C weight rows per thread,
+// sixteen threads per weight row; lane j owns groups j, j + 16, ... of its
+// rows. Weight row c of col-thread t is `col0 + c * 16 + t`.
+template <int BITS, int ROWS, int UNROLL, int C, int MR, bool VEC>
+__device__ __forceinline__ void brain_kqg_tile(BrainKqXShared<ROWS, UNROLL>& xs, const unsigned int* xq, const unsigned int* wq, const float* sx,
                                                const unsigned int* wsm, const unsigned int* wd, float* out, unsigned int mrows,
-                                               unsigned int m0, unsigned int k, unsigned int n, unsigned int col) {
-    constexpr int UNROLL = BRAIN_KQG_UNROLL;
-    static_assert(MR <= BRAIN_KQG_ROWS, "the shared tile is sized for the widest instance");
+                                               unsigned int m0, unsigned int k, unsigned int n, unsigned int col0) {
+    constexpr int XVECS = BrainKqXShared<ROWS, UNROLL>::XVECS;
+    static_assert(MR <= ROWS, "the shared tile is sized for the block's rows");
     const unsigned int lane = threadIdx.x % BRAIN_KQG_LANES;
-    const bool live = col < n;
+    const unsigned int t = threadIdx.x / BRAIN_KQG_LANES;
     const unsigned int groups = k >> 5;
     const unsigned int xvecs = groups * 2u;
     const unsigned int iters = (groups + BRAIN_KQG_LANES - 1) / BRAIN_KQG_LANES;
-    const unsigned long long row = live ? col : 0u;
-    const unsigned int* wrow = wq + row * ((unsigned long long)k * BITS / 32u);
-    const unsigned int* smrow = wsm + row * ((groups + 1u) / 2u);
-    const unsigned int* drow = wd + row * ((groups + BRAIN_KQG_GPS - 1u) / BRAIN_KQG_GPS);
-
-    float acc[MR];
+    bool live[C];
+    const unsigned int* wrow[C];
+    const unsigned int* smrow[C];
+    const unsigned int* drow[C];
 #pragma unroll
-    for (int r = 0; r < MR; ++r) { acc[r] = 0.0f; }
+    for (int c = 0; c < C; ++c) {
+        const unsigned int col = col0 + c * BRAIN_KQG_COL_THREADS + t;
+        live[c] = col < n;
+        const unsigned long long row = live[c] ? col : 0u;
+        wrow[c] = wq + row * ((unsigned long long)k * BITS / 32u);
+        smrow[c] = wsm + row * ((groups + 1u) / 2u);
+        drow[c] = wd + row * ((groups + BRAIN_KQG_GPS - 1u) / BRAIN_KQG_GPS);
+    }
+
+    float acc[MR][C];
+#pragma unroll
+    for (int r = 0; r < MR; ++r) {
+#pragma unroll
+        for (int c = 0; c < C; ++c) { acc[r][c] = 0.0f; }
+    }
 
     int buf = 0;
     for (unsigned int i0 = 0; i0 < iters; i0 += UNROLL, buf ^= 1) {
         // Issue every weight load of the stage before any is consumed.
-        BrainKqStage<BITS> st;
+        BrainKqStage<BITS, UNROLL, C> st;
 #pragma unroll
         for (int u = 0; u < UNROLL; ++u) {
             const unsigned int g = (i0 + u) * BRAIN_KQG_LANES + lane;
-            if (live && g < groups) {
 #pragma unroll
-                for (int v = 0; v < BITS / 4; ++v) { st.w[u].v[v] = brain_kqg_load_w<VEC>(wrow + (unsigned long long)g * BITS + 4u * v); }
-                st.sm[u] = __ldg(smrow + g / 2u);
-                st.d[u] = __ldg(drow + g / BRAIN_KQG_GPS);
+            for (int c = 0; c < C; ++c) {
+                if (live[c] && g < groups) {
+#pragma unroll
+                    for (int v = 0; v < BITS / 4; ++v) { st.w[u][c].v[v] = brain_kqg_load_w<VEC>(wrow[c] + (unsigned long long)g * BITS + 4u * v); }
+                    st.sm[u][c] = __ldg(smrow[c] + g / 2u);
+                    st.d[u][c] = __ldg(drow[c] + g / BRAIN_KQG_GPS);
+                }
             }
         }
         // Rows of x past `mrows` are not loaded: their outputs are discarded.
 #pragma unroll
-        for (int e0 = 0; e0 < MR * BRAIN_KQG_XVECS; e0 += BRAIN_KQG_THREADS) {
+        for (int e0 = 0; e0 < MR * XVECS; e0 += BRAIN_KQG_THREADS) {
             const int e = e0 + threadIdx.x;
-            const int r = e / BRAIN_KQG_XVECS;
-            const int v = e - r * BRAIN_KQG_XVECS;
+            const int r = e / XVECS;
+            const int v = e - r * XVECS;
             const unsigned int gv = 2u * i0 * BRAIN_KQG_LANES + v;
-            if (static_cast<unsigned int>(r) < mrows && gv < xvecs) {
-                xs[buf][r][v] = brain_kqg_load_x<VEC>(xq + (unsigned long long)(m0 + r) * (k >> 2) + 4ull * gv);
+            if (r < MR && static_cast<unsigned int>(r) < mrows && gv < xvecs) {
+                xs.x[buf][r][v] = brain_kqg_load_x<VEC>(xq + (unsigned long long)(m0 + r) * (k >> 2) + 4ull * gv);
             }
         }
         __syncthreads();
 #pragma unroll
         for (int u = 0; u < UNROLL; ++u) {
             const unsigned int g = (i0 + u) * BRAIN_KQG_LANES + lane;
-            if (live && g < groups) {
+            if (g < groups) {
                 const int v = 2 * (u * BRAIN_KQG_LANES + static_cast<int>(lane));
-                unsigned int op[8];
-                brain_kqg_operands<BITS>(st.w[u], op);
-                const float2 s = brain_kqg_scales(g, st.sm[u], st.d[u]);
+                unsigned int op[C][8];
+                float2 s[C];
 #pragma unroll
-                for (int r = 0; r < MR; ++r) { acc[r] = brain_kqg_group(acc[r], xs[buf][r][v], xs[buf][r][v + 1], op, s); }
+                for (int c = 0; c < C; ++c) {
+                    brain_kqg_operands<BITS>(st.w[u][c], op[c]);
+                    s[c] = brain_kqg_scales(g, st.sm[u][c], st.d[u][c]);
+                }
+#pragma unroll
+                for (int r = 0; r < MR; ++r) {
+                    const uint4 xa = xs.x[buf][r][v];
+                    const uint4 xb = xs.x[buf][r][v + 1];
+                    const unsigned int x[8] = {xa.x, xa.y, xa.z, xa.w, xb.x, xb.y, xb.z, xb.w};
+                    int sum = 0;
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) { sum = __dp4a(static_cast<int>(x[j]), 0x01010101, sum); }
+                    const float sf = static_cast<float>(sum);
+#pragma unroll
+                    for (int c = 0; c < C; ++c) {
+                        acc[r][c] = __fmaf_rn(-s[c].y, sf, __fmaf_rn(s[c].x, static_cast<float>(brain_kqg_dot(x, op[c])), acc[r][c]));
+                    }
+                }
             }
         }
     }
-    // Fold the row's sixteen lanes; every lane runs the shuffles.
+    // Fold each weight row's sixteen lanes; every lane runs the shuffles.
 #pragma unroll
-    for (int r = 0; r < MR; ++r) {
-        float total = acc[r];
+    for (int c = 0; c < C; ++c) {
+        const unsigned int col = col0 + c * BRAIN_KQG_COL_THREADS + t;
 #pragma unroll
-        for (int off = BRAIN_KQG_LANES / 2; off > 0; off >>= 1) { total += __shfl_xor_sync(0xffffffffu, total, off, BRAIN_KQG_LANES); }
-        if (lane == 0 && live && static_cast<unsigned int>(r) < mrows) { out[(unsigned long long)(m0 + r) * n + col] = __fmul_rn(total, sx[m0 + r]); }
+        for (int r = 0; r < MR; ++r) {
+            float total = acc[r][c];
+#pragma unroll
+            for (int off = BRAIN_KQG_LANES / 2; off > 0; off >>= 1) { total += __shfl_xor_sync(0xffffffffu, total, off, BRAIN_KQG_LANES); }
+            if (lane == 0 && live[c] && static_cast<unsigned int>(r) < mrows) { out[(unsigned long long)(m0 + r) * n + col] = __fmul_rn(total, sx[m0 + r]); }
+        }
     }
 }
 
-template <int BITS, bool VEC>
-__device__ __forceinline__ void brain_kqg_select(BrainKqXTile xs, const unsigned int* xq, const unsigned int* wq, const float* sx,
+template <int BITS, int ROWS, int UNROLL, int C, bool VEC>
+__device__ __forceinline__ void brain_kqg_select(BrainKqXShared<ROWS, UNROLL>& xs, const unsigned int* xq, const unsigned int* wq, const float* sx,
                                                  const unsigned int* wsm, const unsigned int* wd, float* out, unsigned int mrows,
-                                                 unsigned int m0, unsigned int k, unsigned int n, unsigned int col) {
-    if (mrows <= 1u)      { brain_kqg_tile<BITS, 1, VEC>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col); }
-    else if (mrows <= 2u) { brain_kqg_tile<BITS, 2, VEC>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col); }
-    else if (mrows <= 4u) { brain_kqg_tile<BITS, 4, VEC>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col); }
-    else                  { brain_kqg_tile<BITS, 8, VEC>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col); }
+                                                 unsigned int m0, unsigned int k, unsigned int n, unsigned int col0) {
+    if (ROWS > 8) {
+        if (mrows <= 12u) { brain_kqg_tile<BITS, ROWS, UNROLL, C, (ROWS > 12 ? 12 : ROWS), VEC>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col0); }
+        else              { brain_kqg_tile<BITS, ROWS, UNROLL, C, ROWS, VEC>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col0); }
+    } else if (mrows <= 1u) { brain_kqg_tile<BITS, ROWS, UNROLL, C, 1, VEC>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col0); }
+    else if (mrows <= 2u) { brain_kqg_tile<BITS, ROWS, UNROLL, C, 2, VEC>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col0); }
+    else if (mrows <= 4u) { brain_kqg_tile<BITS, ROWS, UNROLL, C, 4, VEC>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col0); }
+    else                  { brain_kqg_tile<BITS, ROWS, UNROLL, C, ROWS, VEC>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col0); }
 }
 
-// One block's share: the `tile_m`-th group of up to BRAIN_KQG_ROWS rows of x
-// against the `tile_n`-th group of BRAIN_KQG_COLS weight rows.
-template <int BITS>
+// One block's share: the `tile_m`-th group of up to ROWS rows of x against
+// the `tile_n`-th group of 16 * C weight rows.
+template <int BITS, int ROWS, int UNROLL, int C>
 __device__ __forceinline__ void brain_kqg_block(const unsigned int* params, const unsigned int* xq, const unsigned int* wq, const float* sx,
                                                 const unsigned int* wsm, const unsigned int* wd, float* out) {
     const unsigned int m = params[0];
@@ -246,21 +291,21 @@ __device__ __forceinline__ void brain_kqg_block(const unsigned int* params, cons
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
     // Row tiles of one weight tile are adjacent in launch order, so they
     // run together and the weights they share are read from memory once.
-    const unsigned int tiles_m = (m + BRAIN_KQG_ROWS - 1u) / BRAIN_KQG_ROWS;
+    const unsigned int tiles_m = (m + ROWS - 1u) / ROWS;
     if (tiles_m == 0u || n == 0u) { return; }
     const unsigned int tile_n = blk / tiles_m;
     const unsigned int tile_m = blk - tile_n * tiles_m;
-    const unsigned int m0 = tile_m * BRAIN_KQG_ROWS;
+    const unsigned int m0 = tile_m * ROWS;
     if (m0 >= m) { return; }  // block-uniform
-    const unsigned int mrows = min(m - m0, (unsigned int)BRAIN_KQG_ROWS);
-    const unsigned int col = tile_n * BRAIN_KQG_COLS + threadIdx.x / BRAIN_KQG_LANES;
+    const unsigned int mrows = min(m - m0, (unsigned int)ROWS);
+    const unsigned int col0 = tile_n * BRAIN_KQG_COL_THREADS * C;
 
-    __shared__ BrainKqXTile xs;
+    __shared__ BrainKqXShared<ROWS, UNROLL> xs;
     const bool aligned = ((reinterpret_cast<unsigned long long>(xq) | reinterpret_cast<unsigned long long>(wq)) & 15ull) == 0ull;
     if (aligned) {
-        brain_kqg_select<BITS, true>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col);
+        brain_kqg_select<BITS, ROWS, UNROLL, C, true>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col0);
     } else {
-        brain_kqg_select<BITS, false>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col);
+        brain_kqg_select<BITS, ROWS, UNROLL, C, false>(xs, xq, wq, sx, wsm, wd, out, mrows, m0, k, n, col0);
     }
 }
 
@@ -275,20 +320,37 @@ __device__ __forceinline__ void brain_kqg_block(const unsigned int* params, cons
 #endif
 #endif
 
-// Q4_K: 4-bit codes.
+// Q4_K: 4-bit codes, up to 8 rows of x a block.
 extern "C" __global__ void __launch_bounds__(BRAIN_KQG_THREADS, BRAIN_KQG_MIN_BLOCKS)
 brain_matmul_kq4_gemv(const unsigned int* params, const unsigned int* xq, const unsigned int* wq, const float* sx,
                       const unsigned int* wsm, const unsigned int* wd, const float* xgs, float* out) {
     BRAIN_PDL_ENTRY();
     (void)xgs;
-    brain_kqg_block<4>(params, xq, wq, sx, wsm, wd, out);
+    brain_kqg_block<4, BRAIN_KQG_ROWS, BRAIN_KQG_UNROLL, 1>(params, xq, wq, sx, wsm, wd, out);
 }
 
-// Q5_K: 5-bit codes held in 8-bit slots.
+// Q5_K: 5-bit codes held in 8-bit slots, up to 8 rows of x a block.
 extern "C" __global__ void __launch_bounds__(BRAIN_KQG_THREADS, BRAIN_KQG_MIN_BLOCKS)
 brain_matmul_kq8_gemv(const unsigned int* params, const unsigned int* xq, const unsigned int* wq, const float* sx,
                       const unsigned int* wsm, const unsigned int* wd, const float* xgs, float* out) {
     BRAIN_PDL_ENTRY();
     (void)xgs;
-    brain_kqg_block<8>(params, xq, wq, sx, wsm, wd, out);
+    brain_kqg_block<8, BRAIN_KQG_ROWS, BRAIN_KQG_UNROLL, 1>(params, xq, wq, sx, wsm, wd, out);
+}
+
+// The wide blocks: four weight rows a thread, for 9 to 32 rows of x.
+extern "C" __global__ void __launch_bounds__(BRAIN_KQG_THREADS, BRAIN_KQG_WIDE_MIN_BLOCKS)
+brain_matmul_kq4_gemv_wide(const unsigned int* params, const unsigned int* xq, const unsigned int* wq, const float* sx,
+                           const unsigned int* wsm, const unsigned int* wd, const float* xgs, float* out) {
+    BRAIN_PDL_ENTRY();
+    (void)xgs;
+    brain_kqg_block<4, BRAIN_KQG_WIDE_ROWS, BRAIN_KQG_WIDE_UNROLL, BRAIN_KQG_WIDE_C>(params, xq, wq, sx, wsm, wd, out);
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_KQG_THREADS, BRAIN_KQG_WIDE_MIN_BLOCKS)
+brain_matmul_kq8_gemv_wide(const unsigned int* params, const unsigned int* xq, const unsigned int* wq, const float* sx,
+                           const unsigned int* wsm, const unsigned int* wd, const float* xgs, float* out) {
+    BRAIN_PDL_ENTRY();
+    (void)xgs;
+    brain_kqg_block<8, BRAIN_KQG_WIDE_ROWS, BRAIN_KQG_WIDE_UNROLL, BRAIN_KQG_WIDE_C>(params, xq, wq, sx, wsm, wd, out);
 }

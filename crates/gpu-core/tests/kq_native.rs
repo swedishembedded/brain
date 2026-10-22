@@ -170,7 +170,7 @@ fn check(gpu: &Gpu, kernel: Kernel, bits: u32, m: u32, k: u32, n: u32, seed: u64
 
 #[test]
 fn the_native_kernels_are_offered_exactly_where_they_serve() {
-    for (bits, gemv, gemm) in [(4u32, "matmul_kq4_gemv", "matmul_kq4_dp4a"), (8, "matmul_kq8_gemv", "matmul_kq8_dp4a")] {
+    for (bits, gemv, wide, gemm) in [(4u32, "matmul_kq4_gemv", "matmul_kq4_gemv_wide", "matmul_kq4_dp4a"), (8, "matmul_kq8_gemv", "matmul_kq8_gemv_wide", "matmul_kq8_dp4a")] {
         let gpu = device(Kernel::Gemv, bits);
         if !is_cuda(&gpu) {
             assert_eq!(gpu.native_kernel_for(0, &[1, 5120, 1024]), None, "only a CUDA device takes a native kernel");
@@ -178,7 +178,8 @@ fn the_native_kernels_are_offered_exactly_where_they_serve() {
             return;
         }
         for m in 1..=NATIVE_ROWS {
-            assert_eq!(gpu.native_kernel_for(0, &[m, 5120, 1024]), Some(gemv), "bits={bits} m={m}");
+            let want = if m <= 8 { gemv } else { wide };
+            assert_eq!(gpu.native_kernel_for(0, &[m, 5120, 1024]), Some(want), "bits={bits} m={m}");
         }
         assert_eq!(gpu.native_kernel_for(0, &[NATIVE_ROWS + 1, 5120, 1024]), None, "past the decode regime");
         assert_eq!(gpu.native_kernel_for(0, &[1, 5136, 1024]), None, "K not a whole number of groups");
@@ -202,7 +203,7 @@ fn the_native_kernels_meet_the_oracle_over_shapes() {
         // 32 and 96 are under one stride or chunk (96: an odd group count);
         // 544 and 1056 leave ragged strides and chunks; 2624 spans several.
         for (k, n) in [(32u32, 1u32), (96, 7), (544, 17), (1056, 33), (2624, 16)] {
-            for m in [1u32, 2, 3, 5, 8, 9, 17, NATIVE_ROWS] {
+            for m in [1u32, 2, 3, 5, 8, 9, 12, 16, 17, 31, NATIVE_ROWS] {
                 check(&gpu, Kernel::Gemv, bits, m, k, n, u64::from(bits * 1000 + m * 31 + k + n));
             }
         }
@@ -226,7 +227,7 @@ fn the_real_27b_shapes_meet_the_oracle() {
     }
     let gemm = device(Kernel::Dyn, 4);
     for (k, n) in [(5120u32, 48u32), (5120, 1024), (5120, 6144), (6144, 5120), (5120, 10240), (17408, 5120), (5120, 17408)] {
-        for m in [1u32, 8] {
+        for m in [1u32, 8, 32] {
             check(&gemv, Kernel::Gemv, 4, m, k, n, u64::from(k + n + m));
         }
         check(&gemm, Kernel::Dyn, 4, 256, k, n, u64::from(k + n));

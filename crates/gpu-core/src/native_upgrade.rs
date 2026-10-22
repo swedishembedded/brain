@@ -138,6 +138,22 @@ fn serves_q4_gemv(p: &[u32]) -> bool {
     }
 }
 
+/// Rows of x from which the K-quant GEMV runs its wide block (four weight rows
+/// a thread): below it the weights' bandwidth bounds the narrow block, above
+/// it the math and shared reads per row do (`tests/quant_crossover_bench.rs`).
+pub(crate) const KQ_GEMV_WIDE_MIN_ROWS: u32 = 9;
+
+/// The K-quant GEMV's narrow block: [`serves_q4_gemv`] below
+/// [`KQ_GEMV_WIDE_MIN_ROWS`].
+fn serves_kq_gemv_narrow(p: &[u32]) -> bool {
+    serves_q4_gemv(p) && p[0] < KQ_GEMV_WIDE_MIN_ROWS
+}
+
+/// The K-quant GEMV's wide block: [`serves_q4_gemv`] from [`KQ_GEMV_WIDE_MIN_ROWS`].
+fn serves_kq_gemv_wide(p: &[u32]) -> bool {
+    serves_q4_gemv(p) && p[0] >= KQ_GEMV_WIDE_MIN_ROWS
+}
+
 /// `matmul_kq_dyn`'s `Params { m, k, n }` with the RAW `k`: any non-empty
 /// output whose `K` is a whole number of 32-element groups, inside the
 /// kernel's 32-bit row arithmetic.
@@ -626,12 +642,22 @@ pub(crate) const ROWS: &[Row] = &[
     // 32-element group where the WGSL tier rounds per quad, so they are held
     // to the fp32 summation bound against an f64 oracle rather than to the
     // WGSL tier's bits (`tests/kq_native.rs`). No WGSL upgrade precedes
-    // them: the WGSL kernel is already the GEMV.
+    // them: the WGSL kernel is already the GEMV. Few rows take the block with
+    // one weight row a thread; batched rows the one with four
+    // ([`KQ_GEMV_WIDE_MIN_ROWS`]).
     Row {
         slow: "matmul_kq_gemv#CODE_BITS=4",
         target: Target::Operator { op: Op::MatMul, weight: Dtype::Q4K },
         bindings: KQ_GEMV_BINDINGS,
-        serves: serves_q4_gemv,
+        serves: serves_kq_gemv_narrow,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "matmul_kq_gemv#CODE_BITS=4",
+        target: Target::Named("matmul_kq4_gemv_wide"),
+        bindings: KQ_GEMV_BINDINGS,
+        serves: serves_kq_gemv_wide,
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
     },
@@ -639,7 +665,15 @@ pub(crate) const ROWS: &[Row] = &[
         slow: "matmul_kq_gemv#CODE_BITS=8",
         target: Target::Operator { op: Op::MatMul, weight: Dtype::Q8K },
         bindings: KQ_GEMV_BINDINGS,
-        serves: serves_q4_gemv,
+        serves: serves_kq_gemv_narrow,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "matmul_kq_gemv#CODE_BITS=8",
+        target: Target::Named("matmul_kq8_gemv_wide"),
+        bindings: KQ_GEMV_BINDINGS,
+        serves: serves_kq_gemv_wide,
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
     },

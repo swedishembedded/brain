@@ -931,7 +931,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         // 8 rows of x by 16 weight rows per block.
         tile: (8, 16),
-        // The double-buffered tile of x the batched rows read (`BrainKqXTile`).
+        // The double-buffered tile of x the batched rows read (`BrainKqXShared<8, 2>`).
         shared_bytes: 2 * 8 * 64 * 16,
         programmatic: true,
         src: include_str!("../cu/matmul_kq_gemv.cu"),
@@ -949,8 +949,48 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         // 8 rows of x by 16 weight rows per block.
         tile: (8, 16),
-        // The double-buffered tile of x the batched rows read (`BrainKqXTile`).
+        // The double-buffered tile of x the batched rows read (`BrainKqXShared<8, 2>`).
         shared_bytes: 2 * 8 * 64 * 16,
+        programmatic: true,
+        src: include_str!("../cu/matmul_kq_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_kq4_gemv_wide",
+        // The Q4_K GEMV's block with four weight rows a thread, for batched
+        // decode; asked for by name by `gpu_core::native_upgrade`.
+        op: Op::MatMul,
+        weight: Dtype::Q4K,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_matmul_kq4_gemv_wide",
+        what: "affine K-quant (Q4_K) GEMV for batched decode (9 to 32 rows of x): four weight rows a thread, so each staged activation vector and its sum serve four weight rows",
+        reported: "native:matmul_kq4_gemv_wide",
+        block_dim: 256,
+        // 8 rows of x by 64 weight rows per block.
+        tile: (8, 64),
+        // The double-buffered 8-row tile of x (`BrainKqXShared<8, 1>`).
+        shared_bytes: 2 * 8 * 32 * 16,
+        programmatic: true,
+        src: include_str!("../cu/matmul_kq_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_kq8_gemv_wide",
+        // The Q5_K GEMV's block with four weight rows a thread, for batched
+        // decode; asked for by name by `gpu_core::native_upgrade`.
+        op: Op::MatMul,
+        weight: Dtype::Q8K,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_matmul_kq8_gemv_wide",
+        what: "affine K-quant (Q5_K) GEMV for batched decode (9 to 32 rows of x): four weight rows a thread, so each staged activation vector and its sum serve four weight rows",
+        reported: "native:matmul_kq8_gemv_wide",
+        block_dim: 256,
+        // 8 rows of x by 64 weight rows per block.
+        tile: (8, 64),
+        // The double-buffered 8-row tile of x (`BrainKqXShared<8, 1>`).
+        shared_bytes: 2 * 8 * 32 * 16,
         programmatic: true,
         src: include_str!("../cu/matmul_kq_gemv.cu"),
     },
