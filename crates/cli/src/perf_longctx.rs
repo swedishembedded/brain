@@ -344,6 +344,15 @@ impl LongContextEngine for Qwen35MoeEngine {
         self.tables.clear();
         self.eng = None;
     }
+
+    fn release_batch(&mut self) {
+        if let Some(eng) = self.eng.as_mut() {
+            for t in &mut self.tables {
+                eng.release_table(t);
+            }
+        }
+        self.tables.clear();
+    }
 }
 
 // ------------------------------------------------------------- qwen3 paged
@@ -494,6 +503,15 @@ impl LongContextEngine for QwenPagedEngine {
     fn unload(&mut self) {
         self.tables.clear();
         self.eng = None;
+    }
+
+    fn release_batch(&mut self) {
+        if let Some(eng) = self.eng.as_mut() {
+            for t in &mut self.tables {
+                eng.release_table(t);
+            }
+        }
+        self.tables.clear();
     }
 }
 

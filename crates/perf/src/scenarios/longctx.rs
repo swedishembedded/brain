@@ -24,6 +24,11 @@
 //! boundary. There is no host-memory fallback to spill to, and every artifact
 //! records `host_offload: false`.
 //!
+//! **One load.** Every rung is planned before anything is built, and the
+//! weights are loaded once, for the largest rung that fits; each smaller rung
+//! and the prefill table run on that instance. A many-gigabyte model read again
+//! per rung would make the sweep cost minutes of disk per point measured.
+//!
 //! **Context.** An engine states whether the context its decode step attends
 //! over is [`ContextKind::Real`] (built by prefilling) or
 //! [`ContextKind::Synthetic`] (fresh caches, decode work at a real position).
@@ -125,6 +130,11 @@ pub trait LongContextEngine {
 
     /// Free everything `load` built.
     fn unload(&mut self);
+
+    /// Forget the sequences the last batch of [`Self::decode_step`]s brought to
+    /// their positions, keeping the loaded model: the next batch size starts at
+    /// the measured position again. A no-op for an engine that keeps none.
+    fn release_batch(&mut self) {}
 }
 
 /// How to run the scenario.
@@ -212,25 +222,46 @@ pub fn run(engine: &mut dyn LongContextEngine, opt: &Options) -> Result<Artifact
 
     let position = opt.context - (opt.steps + WARMUP_STEPS);
 
-    let prefill = run_prefill(engine, opt);
-
-    let mut rows: Vec<Value> = Vec::new();
+    // Every rung is planned first: the planner allocates nothing, so the
+    // weights are loaded ONCE, for the largest rung that fits, and every smaller
+    // rung decodes on that instance. A rung whose load fails is the boundary,
+    // and the next smaller one is loaded instead.
+    let mut fitting: Vec<(u32, Fit)> = Vec::new();
     let mut boundary: Option<Boundary> = None;
-    let mut last_fit: Option<u32> = None;
     for &batch in &ladder {
         let fit = engine.plan(batch, opt.context)?;
         if !fit.fits {
             boundary = Some(Boundary { batch, reason: "planned_over_capacity", needed_bytes: Some(fit.needed_bytes), usable_bytes: Some(fit.usable_bytes), error: None });
             break;
         }
-        if let Err(e) = engine.load(batch, opt.context) {
-            engine.unload();
-            boundary = Some(Boundary { batch, reason: "load_failed", needed_bytes: Some(fit.needed_bytes), usable_bytes: Some(fit.usable_bytes), error: Some(e) });
-            break;
+        fitting.push((batch, fit));
+    }
+    let mut loaded = false;
+    while let Some(&(batch, fit)) = fitting.last() {
+        match engine.load(batch, opt.context) {
+            Ok(()) => {
+                loaded = true;
+                break;
+            }
+            Err(e) => {
+                engine.unload();
+                boundary = Some(Boundary { batch, reason: "load_failed", needed_bytes: Some(fit.needed_bytes), usable_bytes: Some(fit.usable_bytes), error: Some(e) });
+                fitting.pop();
+            }
         }
+    }
+
+    // The prefill table runs on the same instance when its lengths fit the
+    // context the instance was built for; a longer one needs its own.
+    let longest = opt.prefill.iter().copied().max().unwrap_or(0);
+    let prefill = if loaded && longest <= opt.context { prefill_table(engine, opt) } else { Value::Null };
+
+    let mut rows: Vec<Value> = Vec::new();
+    let mut last_fit: Option<u32> = None;
+    for &(batch, fit) in &fitting {
         let measured = measure_batch(engine, batch, position, opt.steps);
         let used = engine.device_used_bytes();
-        engine.unload();
+        engine.release_batch();
         match measured {
             Ok(mut times) => {
                 let min = times.iter().copied().fold(f64::INFINITY, f64::min);
@@ -254,6 +285,8 @@ pub fn run(engine: &mut dyn LongContextEngine, opt: &Options) -> Result<Artifact
             }
         }
     }
+    engine.unload();
+    let prefill = if prefill.is_null() { run_prefill(engine, opt) } else { prefill };
 
     // Between the last rung that ran and the first that did not, the planner
     // can still say how far the real limit is, without loading anything.
@@ -285,8 +318,10 @@ fn validate(engine: &dyn LongContextEngine, opt: &Options) -> Result<(), String>
     Ok(())
 }
 
-/// Warm up, then time a cold prefill of each requested length. `Null` when no
-/// lengths were asked for; a table that stopped early says why in `error`.
+/// The prefill table on an instance of its own: what runs when the sweep had no
+/// instance to share (not even batch 1 fit) or a prompt is longer than the
+/// sweep's context. `Null` when no lengths were asked for; a table that stopped
+/// early says why in `error`.
 fn run_prefill(engine: &mut dyn LongContextEngine, opt: &Options) -> Value {
     let Some(&longest) = opt.prefill.iter().max() else {
         return Value::Null;
@@ -303,6 +338,14 @@ fn run_prefill(engine: &mut dyn LongContextEngine, opt: &Options) -> Value {
         engine.unload();
         return json!({ "rows": [], "error": e });
     }
+    let table = prefill_table(engine, opt);
+    engine.unload();
+    table
+}
+
+/// Warm up, then time a cold prefill of each requested length on the instance
+/// already loaded.
+fn prefill_table(engine: &mut dyn LongContextEngine, opt: &Options) -> Value {
     let mut rows = Vec::new();
     let mut error = Value::Null;
     // One short pass first: kernel compilation is not prefill time.
@@ -317,7 +360,6 @@ fn run_prefill(engine: &mut dyn LongContextEngine, opt: &Options) -> Value {
     if let Err(e) = result {
         error = Value::from(e);
     }
-    engine.unload();
     json!({ "rows": rows, "error": error })
 }
 
@@ -516,7 +558,7 @@ mod tests {
             Ok(prompt_tokens as f64 / 1000.0)
         }
         fn decode_step(&mut self, positions: &[u32]) -> Result<f64, String> {
-            assert_eq!(Some(positions.len() as u32), self.loaded, "decode batch must match what was loaded");
+            assert!(self.loaded.is_some_and(|b| positions.len() as u32 <= b), "decode batch {} past what was loaded ({:?})", positions.len(), self.loaded);
             Ok(10.0 + positions.len() as f64)
         }
         fn device_used_bytes(&self) -> Option<u64> {
@@ -555,7 +597,7 @@ mod tests {
         let art = run(&mut e, &opts()).unwrap();
         let curve = art.curve.as_ref().unwrap();
         assert_eq!(curve.iter().map(|r| r["batch"].as_u64().unwrap()).collect::<Vec<_>>(), vec![1, 2, 4]);
-        assert_eq!(e.loads, vec![1, 2, 4], "a batch that does not fit is never loaded");
+        assert_eq!(e.loads, vec![4], "the weights are loaded once, for the largest batch the planner admits");
         let b = &art.performance["oom_boundary"];
         assert_eq!(b["first_failing_batch"], 8);
         assert_eq!(b["reason"], "planned_over_capacity");
@@ -574,6 +616,7 @@ mod tests {
         assert_eq!(b["reason"], "load_failed");
         assert_eq!(b["error"], "allocation failed");
         assert_eq!(art.curve.as_ref().unwrap().len(), 2);
+        assert_eq!(e.loads, vec![2], "a failed load falls back to the next smaller rung, loaded once");
     }
 
     #[test]
@@ -687,6 +730,7 @@ mod tests {
         // One sequence fits, so prefill runs; a second does not.
         assert_eq!(art.performance["prefill"]["rows"].as_array().unwrap().len(), 1);
         assert_eq!(art.performance["oom_boundary"]["first_failing_batch"], 2);
+        assert_eq!(e.loads, vec![1], "the prefill table and the decode sweep share one load");
     }
 
     #[test]
