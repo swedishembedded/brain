@@ -30,11 +30,27 @@
 //! * [`adapters_never_share_kv_with_the_base`]: K/V computed under an adapter
 //!   is never served to the base or to another adapter, in either direction.
 //!
+//! * [`speculation_equals_plain_greedy`]: a decoder that declares speculation
+//!   ([`PagedDecoder::spec_max_draft`] above 0) decodes, under a drafter that
+//!   is right, half right and always wrong, exactly the tokens plain greedy
+//!   decode produces, with both accepted and rejected proposals exercised. A
+//!   decoder that does not speculate passes it trivially (nothing to verify);
+//!   once it does, the property applies with no change to its factory.
+//!
+//!   Bit identity: the property compares token streams exactly, so a verify
+//!   kernel whose floating-point order differs from plain decode may flip an
+//!   argmax that is a near tie. The contract is that verify rows are computed
+//!   to the same numerics as plain decode for the same position (the
+//!   decoder's `forward_batched_verify` documents any exception, and its
+//!   tiny-engine factory then builds weights with a clear top-1 margin so the
+//!   suite does not depend on a tie). Tolerance is not added here: a
+//!   tolerant comparison would hide a verify that really diverges.
+//!
 //! A server that receives SIGTERM with nothing in flight exits within a bound:
 //! that lives in the process layer (`brain_shutdown::bound_drain`), not the
 //! decoder, and has its own test there.
 
-use super::{AdapterId, PagedDecoder, Request, SampleParams, Scheduler};
+use super::{AdapterId, DraftQuery, Drafter, PagedDecoder, Request, SampleParams, Scheduler, SpecPolicy};
 
 /// How a decoder is brought to the suite.
 pub struct Conformance<D: PagedDecoder> {
@@ -91,6 +107,7 @@ pub fn run_all<D: PagedDecoder>(c: &Conformance<D>) {
     if c.load_adapter.is_some() {
         adapters_never_share_kv_with_the_base(c);
     }
+    speculation_equals_plain_greedy(c);
 }
 
 pub fn batched_output_equals_single_request_output<D: PagedDecoder>(c: &Conformance<D>) {
@@ -192,4 +209,73 @@ pub fn adapters_never_share_kv_with_the_base<D: PagedDecoder>(c: &Conformance<D>
     }
     let again = sched.submit(request(prompt, 4));
     assert_eq!(complete(&mut sched, again), base_out, "the base's answer changed after adapter requests ran");
+}
+
+/// Proposes the plain-greedy continuation of the prompt it recognises for its
+/// first `right` tokens, then deliberately wrong ones (the token after the
+/// true one), so a verify sees full accepts, partial accepts and rejects.
+struct ScriptedDrafter {
+    /// `(prompt, plain greedy output, right)` per sequence.
+    scripts: Vec<(Vec<u32>, Vec<u32>, usize)>,
+    vocab: u32,
+}
+
+impl Drafter for ScriptedDrafter {
+    fn draft(&mut self, queries: &[DraftQuery], ks: &[usize]) -> Vec<Vec<u32>> {
+        queries
+            .iter()
+            .zip(ks)
+            .map(|(q, &k)| {
+                let Some((prompt, plain, right)) = self.scripts.iter().find(|(p, plain, _)| q.context.starts_with(p) && plain.starts_with(&q.context[p.len()..])) else {
+                    return Vec::new();
+                };
+                let generated = q.context.len() - prompt.len();
+                plain.iter().skip(generated).take(k).enumerate().map(|(i, &t)| if i < *right { t } else { (t + 1) % self.vocab }).collect()
+            })
+            .collect()
+    }
+}
+
+/// Speculation never changes what greedy decoding emits. Repetitive prompts
+/// run together under three drafters (all right, one right then wrong, all
+/// wrong); every output must equal the plain greedy output of the same
+/// request alone, and the run must really have accepted and rejected proposals.
+pub fn speculation_equals_plain_greedy<D: PagedDecoder>(c: &Conformance<D>) {
+    let mut sched = Scheduler::new((c.make)(), 4);
+    if sched.decoder_mut().spec_max_draft() == 0 {
+        return;
+    }
+    let vocab = sched.decoder_mut().vocab();
+    // The scheduler speculates only up to the decoder's crossover batch size.
+    let seqs = sched.decoder_mut().spec_max_batch().clamp(1, 4);
+    let rights = [usize::MAX, 1, 0, usize::MAX];
+    let max_new = 14;
+    let scripts: Vec<(Vec<u32>, Vec<u32>, usize)> = (0..seqs)
+        .map(|i| {
+            let period = tokens(vocab, i + 11, 3 + i);
+            let prompt: Vec<u32> = period.iter().cycle().take(10 + 4 * i).copied().collect();
+            let plain = plain_greedy(c, &prompt, max_new);
+            (prompt, plain, rights[i])
+        })
+        .collect();
+    sched.set_drafter(Box::new(ScriptedDrafter { scripts: scripts.clone(), vocab: vocab as u32 }));
+    let ids: Vec<u64> = scripts.iter().map(|(p, _, _)| sched.submit(request(p.clone(), max_new))).collect();
+    let done = sched.run();
+    for ((prompt, plain, right), id) in scripts.iter().zip(ids) {
+        assert_eq!(done[&id], *plain, "speculative output differs from plain greedy (prompt of {} tokens, drafter right for {right} tokens)", prompt.len());
+    }
+    let stats = sched.spec_stats();
+    assert!(stats.verify_steps > 0 && stats.proposed > 0, "the decoder declares speculation but no step verified a proposal: {stats:?}");
+    assert!(stats.accepted > 0, "no proposal was ever accepted, so accept handling was not exercised: {stats:?}");
+    if seqs > 1 {
+        assert!(stats.accepted < stats.proposed, "no proposal was ever rejected, so rollback was not exercised: {stats:?}");
+    }
+}
+
+/// Greedy output of one request alone with speculation off.
+fn plain_greedy<D: PagedDecoder>(c: &Conformance<D>, prompt: &[u32], max_new: usize) -> Vec<u32> {
+    let mut sched = Scheduler::new((c.make)(), 4);
+    sched.set_speculation(SpecPolicy { enabled: false, ..SpecPolicy::default() });
+    let id = sched.submit(request(prompt.to_vec(), max_new));
+    complete(&mut sched, id)
 }

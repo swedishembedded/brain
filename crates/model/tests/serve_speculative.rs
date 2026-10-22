@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use model::paged::{BlockAllocator, BlockTable};
+use model::serve::conformance::{self, Conformance};
 use model::serve::{verify_proposals, AdapterAvailability, AdapterId, DraftQuery, Drafter, NgramDrafter, PagedDecoder, Request, SampleParams, Scheduler, SpecPolicy};
 
 const VOCAB: u32 = 32;
@@ -119,11 +120,13 @@ struct Toy {
     feed_secs: Option<f64>,
     /// Whether `adapter_availability` answers `Resident` (the toy applies no adapter itself).
     serves_adapters: bool,
+    /// A deliberately wrong commit: it keeps the state after the LAST verified row whatever was accepted.
+    broken_commit: bool,
 }
 
 impl Toy {
     fn new(probe: Shared, verifies: bool) -> Toy {
-        Toy { alloc: BlockAllocator::new(512, BLOCK), state: HashMap::new(), pending: HashMap::new(), probe, verifies, batch_limit: usize::MAX, row_budget: usize::MAX, clock: Arc::new(AtomicU64::new(0)), plain_us: 0, row_us: 0, cost_aware: false, feed_us: 0, spec_prefill: true, feed_secs: None, serves_adapters: false }
+        Toy { alloc: BlockAllocator::new(512, BLOCK), state: HashMap::new(), pending: HashMap::new(), probe, verifies, batch_limit: usize::MAX, row_budget: usize::MAX, clock: Arc::new(AtomicU64::new(0)), plain_us: 0, row_us: 0, cost_aware: false, feed_us: 0, spec_prefill: true, feed_secs: None, serves_adapters: false, broken_commit: false }
     }
     fn slot(t: &BlockTable) -> u32 {
         t.blocks()[0]
@@ -279,7 +282,8 @@ impl PagedDecoder for Toy {
         self.probe.borrow_mut().commits += 1;
         for (t, &k) in tables.iter().zip(keep) {
             let slot = Self::slot(t);
-            let s = self.pending.remove(&slot).expect("commit without a verify")[k - 1];
+            let states = self.pending.remove(&slot).expect("commit without a verify");
+            let s = if self.broken_commit { *states.last().unwrap() } else { states[k - 1] };
             self.state.insert(slot, s);
         }
     }
@@ -660,4 +664,38 @@ fn sampled_speculation_matches_the_sampled_distribution_end_to_end() {
     let keys: std::collections::HashSet<_> = a.keys().chain(b.keys()).cloned().collect();
     let tv: f64 = keys.iter().map(|k| ((*a.get(k).unwrap_or(&0) as f64) - (*b.get(k).unwrap_or(&0) as f64)).abs() / 3000.0).sum::<f64>() / 2.0;
     assert!(tv < 0.05, "total variation between sampled plain and speculative output is {tv:.4}");
+}
+
+fn conformance_of(make: fn() -> Toy) -> Conformance<Toy> {
+    Conformance { make, prefix_reuse: false, prefix_prompt_tokens: 36, load_adapter: None }
+}
+
+fn toy_verifying() -> Toy {
+    Toy::new(Shared::default(), true)
+}
+
+fn toy_plain_only() -> Toy {
+    Toy::new(Shared::default(), false)
+}
+
+fn toy_broken_commit() -> Toy {
+    let mut t = Toy::new(Shared::default(), true);
+    t.broken_commit = true;
+    t
+}
+
+#[test]
+fn the_generic_suite_passes_a_correct_speculating_decoder() {
+    conformance::run_all(&conformance_of(toy_verifying));
+}
+
+#[test]
+fn the_speculation_property_passes_trivially_without_speculation() {
+    conformance::speculation_equals_plain_greedy(&conformance_of(toy_plain_only));
+}
+
+#[test]
+#[should_panic(expected = "speculative output differs from plain greedy")]
+fn the_speculation_property_catches_a_verify_that_does_not_roll_back() {
+    conformance::speculation_equals_plain_greedy(&conformance_of(toy_broken_commit));
 }
