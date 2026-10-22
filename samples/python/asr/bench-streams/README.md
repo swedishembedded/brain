@@ -32,8 +32,8 @@ throughput.
 
 ## What it needs
 
-- `BRAIN_NEMOTRONASR` and/or `BRAIN_QWENASR` pointed at checkpoint weights
-  before `brain serve --dbus`.
+- `BRAIN_NEMOTRONASR` pointed at Nemotron weights and/or Qwen3-ASR in the
+  model store (`brain pull Qwen/Qwen3-ASR-1.7B`) before `brain serve --dbus`.
 - A 16 kHz mono 16-bit PCM `--wav` clip to replay.
 - `pip install -e brain-py` (jeepney with fd passing) - the only dependency;
   no `sounddevice` needed here.

@@ -17,8 +17,8 @@ surfaces report for the same request.
 
 Run it against a private session bus:
 
-    BRAIN_DEEPSEEK_OCR_DIR=<dir with both DeepSeek-OCR GGUFs> \\
-      tools/dbus-session.sh --serve "--dbus" -- \
+    brain pull ggml-org/DeepSeek-OCR-GGUF
+    tools/dbus-session.sh --serve "--dbus" -- \
         python3 samples/python/vision/deepseek-ocr/ocr_document.py --image page.ppm --max-new 8
 
 The first call pays the model's activation (the mmproj import, the decoder's

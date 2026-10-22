@@ -23,8 +23,8 @@ fit.
 
 Run it against a private session bus:
 
-    BRAIN_MOONDREAM3_WEIGHTS=<moondream3-preview checkpoint dir> \\
-      tools/dbus-session.sh --serve "--dbus" -- \
+    brain pull moondream/moondream3-preview
+    tools/dbus-session.sh --serve "--dbus" -- \
         python3 samples/python/vision/moondream3-caption/moondream3_caption.py --image photo.ppm --max-new 16
 
 The first call pays the activation (the checkpoint load and the expert
@@ -58,7 +58,7 @@ def main() -> int:
 
     brain = BrainDBus()
     if MODEL not in brain.models():
-        print(f"FATAL: '{MODEL}' not served (set BRAIN_MOONDREAM3_WEIGHTS)", file=sys.stderr)
+        print(f"FATAL: '{MODEL}' not served (brain pull moondream/moondream3-preview)", file=sys.stderr)
         return 2
 
     t0 = time.time()

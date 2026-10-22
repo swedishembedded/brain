@@ -63,10 +63,9 @@ brain perf run longctx --target qwen35:/path/to/model.gguf \
 brain perf run longctx --target qwen:/path/to/Qwen3-8B --context 32768
 ```
 
-Targets: `qwen35:<gguf>` (or `qwen35-gguf`, which reads `BRAIN_QWEN35_GGUF`; the
-weight tier comes from `BRAIN_QWEN35_GGUF_TIER`, the KV cache storage from
-`BRAIN_QWEN35_KV` = `f32` (default) | `bf16` | `int8`) for the Qwen3.8 GGUF
-resident, and `qwen:<weights>[:i8w][:kvf32]` for the Qwen3 paged serving engine.
+Targets: `qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]` for the Qwen3.8 GGUF resident
+(int8 weights, as released; the suffix picks the KV cache storage, f32 when
+absent), and `qwen:<weights>[:i8w][:kvf32]` for the Qwen3 paged serving engine.
 The planner charges the KV tier's real bytes, so the batch the sweep can reach
 at a long context, and the out-of-memory boundary it records, move with it.
 

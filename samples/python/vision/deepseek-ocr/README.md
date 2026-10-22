@@ -10,7 +10,7 @@ marshalled through D-Bus.
 ## v1 - `deepseek-ai/DeepSeek-OCR`
 
 ```bash
-BRAIN_DEEPSEEK_OCR_DIR=<dir with both DeepSeek-OCR GGUFs> \
+brain pull ggml-org/DeepSeek-OCR-GGUF
 tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/vision/deepseek-ocr/ocr_document.py --image page.ppm --max-new 8
 ```

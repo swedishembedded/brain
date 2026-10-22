@@ -20,9 +20,10 @@ all-reduce followed by an independent optimizer step per replica, is what
 makes the combine step cheap enough for the speedup to show up in practice.
 
 Optimizer state (the running moments AdamW keeps per parameter) can be kept
-off the GPUs and in host RAM instead, controlled by the `BRAIN_OFFLOAD_ADAM`
-environment variable — useful when a model's weights and gradients already
-use most of a card's VRAM.
+off the GPUs and in host RAM instead - useful when a model's weights and
+gradients already use most of a card's VRAM. A full fine-tune
+(`brain qwen3 finetune`, `brain qwen35 finetune --mode full`) does this by
+default.
 
 ## Single machine or a network of machines
 

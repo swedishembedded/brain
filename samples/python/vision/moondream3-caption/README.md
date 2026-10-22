@@ -5,18 +5,17 @@ action: an image plus an instruction in, generated text out, streamed
 token by token.
 
 ```bash
-BRAIN_MOONDREAM3_WEIGHTS=<moondream3-preview checkpoint dir> \
+brain pull moondream/moondream3-preview
 tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/vision/moondream3-caption/moondream3_caption.py --image photo.ppm --max-new 16
 ```
 
 ## What it demonstrates
 
-* **The stream matters here more than for most models.** Moondream 3's
-  decoder has no KV cache, so every generated token re-runs the whole
-  sequence through all 24 layers over a 730-row image prefix - `Subscribe`
-  delivers progress while the run is still going; waiting for the final
-  `Outcome` means waiting for all of them.
+* **Streaming.** `Subscribe` delivers each token while the run is still
+  going; waiting for the final `Outcome` means waiting for all of them.
+  The prompt, including a 730-row image prefix, is prefilled once and
+  every later token reuses its KV cache.
 * **`--precision`.** `int8` (the default) quantizes the 1280 expert
   tensors onto one shared activation set (~9 GiB); `fp32` is ~43 GiB of
   weights plus per-block scratch. The scheduler budgets them as two

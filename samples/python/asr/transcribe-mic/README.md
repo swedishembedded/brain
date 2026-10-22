@@ -44,7 +44,8 @@ python3 samples/python/asr/transcribe-mic/transcribe_mic.py --wav /tmp/tts16k.wa
 
 ## What it needs
 
-- `BRAIN_NEMOTRONASR` and/or `BRAIN_QWENASR` pointed at checkpoint weights.
+- `BRAIN_NEMOTRONASR` pointed at Nemotron weights and/or Qwen3-ASR in the
+  model store (`brain pull Qwen/Qwen3-ASR-1.7B`).
 - `jeepney` (D-Bus with fd passing, always required) - `pip install -e brain-py`.
 - `sounddevice` + `numpy` only for live mic capture (`pip install sounddevice
   numpy`); not needed for `--wav`.
