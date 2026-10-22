@@ -45,7 +45,7 @@ them recompiles instead of reusing a stale binary.
 ### Machines with a driver and no toolkit
 
 `make cuda/aot` compiles the whole WGSL catalogue (through the CUDA
-translation) and the hand-written kernels offline into one cubin per
+translation) and the native CUDA kernels offline into one cubin per
 architecture, plus portable PTX, and a manifest. The CUDA backend reads that
 directory when it exists, so such a machine runs those kernels with the driver
 alone:
@@ -129,7 +129,7 @@ last element of the buffer range it was bound to (the slice, for a sliced
 dispatch), the same as the reference backends do. Kernels rely on this at
 ragged tile edges, where they read a little past the end and mask the result.
 
-A few hot kernels also have a hand-written CUDA version that replaces the
+A few hot kernels also have a native CUDA version that replaces the
 generated one on a CUDA device (`docs/reference/kernels/cuda.md` lists them).
 The int8 decode GEMV reads weights at about three times the rate of the
 generated kernel, and a handful of fused kernels each replace a whole chain of
@@ -270,7 +270,7 @@ binaries reports no leaked allocations.
 
 ## Native kernel launch contract
 
-A hand-written CUDA kernel registers with `NativeSpec::Cuda` and a
+A native CUDA kernel registers with `NativeSpec::Cuda` and a
 `CudaLaunch` that declares how it is launched, beyond its source:
 
 - `dynamic_shared_bytes` and `shared_opt_in`: dynamic shared memory per block,

@@ -8,7 +8,7 @@ drifting to meet whatever came out. Freezing an UNVALIDATED one is worse than
 not freezing at all, because it locks in a number nobody can reach and then
 reads the failure as a property of the method.
 
-A control sample's criteria were frozen at "beat 71%". Seven hand-written
+A control sample's criteria were frozen at "beat 71%". Seven scripted
 policies were then measured on the same game and **the one that ignored the
 observation won**, at 63.7%; every policy that read range, target type or
 health did worse. The ceiling WAS the naive policy. Three training runs, a
@@ -16,7 +16,7 @@ minibatching bug and a missing critic were all diagnosed against a bar no
 policy could clear.
 
 THE MISSING STEP. Before setting any threshold, measure a LADDER of
-hand-written policies and require that one which reads the observation beats
+scripted policies and require that one which reads the observation beats
 one that ignores it, by a wide margin. If that gap does not exist, the
 environment cannot demonstrate learning and no result on it is interpretable -
 whatever the learning curve looks like. It is now an assertion

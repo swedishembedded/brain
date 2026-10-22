@@ -165,7 +165,7 @@ the query row. `Mixer` says what each block mixes with:
   slots and padding are never keys.
 - `Mixer::GatedDeltaNet`: the matrix-state delta rule of `model::gdn` (the
   recurrence the Qwen3.5 mixer trains with, on the same chunked kernels and
-  their hand-written backward), per head, with unit-norm `q` and `k`:
+  their explicit backward), per head, with unit-norm `q` and `k`:
   `S_t = exp(g_t) S_{t-1} (I - beta_t k_t k_t^T) + beta_t v_t k_t^T`,
   `o_t = S_t q_t / sqrt(d_head)`. The decay is gap-aware:
   `g_t = -softplus(rate_h) * dt_t`, with `dt_t` the physical time since the

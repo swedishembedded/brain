@@ -40,7 +40,7 @@ Three things generalize, and the third is the fix:
 * **Make the banner DERIVED, not written.** The CLI used to spell the arm out
   itself from `(dit_config, audio)`; it now calls the same pure function the
   factory routes on (`ltxv::pipeline::av_arm_label`), so the line a reader
-  checks and the object the run builds cannot disagree. A hand-written status
+  checks and the object the run builds cannot disagree. A separately maintained status
   line is a duplicate of a fact the code already decides, and it goes stale in
   exactly the direction that hides the defect (see also §54).
 

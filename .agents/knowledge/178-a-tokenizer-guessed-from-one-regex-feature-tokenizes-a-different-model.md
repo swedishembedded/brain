@@ -4,7 +4,7 @@
 # 178. A tokenizer guessed from one regex feature tokenizes a different model
 
 `QwenBpe` did not read a `tokenizer.json`'s `pre_tokenizer`. It
-reconstructed one. A hand-written scanner implemented Qwen's split pattern,
+reconstructed one. A custom scanner implemented Qwen's split pattern,
 and the file was consulted for exactly one fact: the `K` in `\p{N}{1,K}`,
 found by searching the JSON text. A bare `ByteLevel` switched to a second
 scanner. Every other declared step was dropped without a word:

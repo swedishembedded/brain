@@ -165,7 +165,7 @@ def render(entries):
     ]
     if not entries:
         lines += [
-            "**No hand-written CUDA kernel ships yet.** The native CUDA backend "
+            "**No native CUDA kernel ships yet.** The native CUDA backend "
             "enumerates devices and states its tier policy, but cannot yet compile "
             "or launch anything, so there is no kernel to list. This page, its "
             "registry and its gate exist first on purpose: the first kernel to land "
@@ -188,7 +188,7 @@ def render(entries):
         "A kernel is resolved by operator AND weights: two kernels for one operator "
         "bind different operand bundles and must never stand in for each other.",
         "",
-        "**tier** - `tuned` is hand-written for this backend, optionally "
+        "**tier** - `tuned` is a native kernel for this backend, optionally "
         "specialised to a queried device capability. It is the only tier a file "
         "in this tree can claim: a `generated` kernel is emitted from the "
         "portable WGSL reference at run time and has no source file here, and "

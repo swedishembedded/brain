@@ -5,7 +5,7 @@
 
 `kernels-cuda`'s registry check refuses a kernel whose source contains
 `__restrict__`, because brain's device buffers alias by design. The first
-hand-written kernel to land failed that check - for a sentence in its own
+native CUDA kernel to land failed that check - for a sentence in its own
 header explaining that it deliberately carries no aliasing promise, and why.
 The scan could not tell an explanation from a declaration.
 

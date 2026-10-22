@@ -662,7 +662,7 @@ token fails loudly.
       (`WindowPlan`/`WindowIndex`/`RelPosAxis`/`RelPos`), `model::block`
       (`chunked_bidir_{fwd,bwd}` with the rel-pos `Option`, `LayerNormIds`)
       and `vision::blocks` (`Conv`, `LayerNorm2d`) compose the whole thing.
-      Forward AND a full hand-written backward, gradient-checked over **all 39
+      Forward AND a full explicit backward, gradient-checked over **all 39
       tensors, none frozen** (`crates/sam1/tests/gradcheck.rs`): worst rel
       **1.359e-3** on an Intel Arc (Vulkan) and **1.245e-3** on the CPU
       Cranelift JIT, with **no `not JIT-compiled` fallback** for any kernel

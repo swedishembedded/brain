@@ -110,7 +110,7 @@ that card beside the language model.
 
 ### Depth decoder on the CPU
 
-`BRAIN_DEVICE=cpu` keeps the depth decoder on a hand-written AVX2+FMA+rayon
+`BRAIN_DEVICE=cpu` keeps the depth decoder on a native AVX2+FMA+rayon
 host path rather than routing its dispatch graph through the CPU backend's
 JIT. That is a measured choice, not a missing port: at this component's shapes
 the host path is the faster of the two on the same cores. Both compute the

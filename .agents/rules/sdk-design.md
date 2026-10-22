@@ -161,7 +161,7 @@ it got, and - where there is one - the corrective action. `crates/sdk`'s
 `Error::Ambiguous`/`Error::Missing` carry the resolver's full structured
 answer (every candidate, the exact flag to pass) rather than a flattened
 string, specifically so a caller can act on it instead of re-parsing
-`Display`'s text. Follow that shape for new variants: a hand-rolled enum
+`Display`'s text. Follow that shape for new variants: an explicit enum
 (not `thiserror`) is the workspace's convention here because an SDK's error
 type IS its public API surface, and a derive macro can leak a dependency's
 error type into every caller.

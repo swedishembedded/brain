@@ -54,7 +54,7 @@ work sits on.
 
 The nervous system drives [flybody](https://github.com/TuragaLab/flybody)'s
 *Drosophila* model in MuJoCo. The map from neuron to actuator is built from the
-connectome's own published `Sub Class` annotations rather than a hand-written
+connectome's own published `Sub Class` annotations rather than a curated
 list: **330 leg motor neurons reach 44 actuators**, and every neuron that does
 not reach one is reported with a reason.
 

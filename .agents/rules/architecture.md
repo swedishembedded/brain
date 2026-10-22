@@ -1,10 +1,11 @@
 # brain - workspace architecture
 
 brain is a Cargo **workspace** of many small, single-responsibility crates
-(the layer table below lists them all). The engine is pure Rust + raw WGSL,
-**core-compute-only** (single bind group, <=8 storage buffers/kernel, no
-atomics/subgroups, no `shader-f16` extension, `@workgroup_size(64)` apart from
-the register-tiled matmuls at 256) so the exact same kernels run on old desktop
+(the layer table below lists them all). The engine is pure Rust with WGSL and
+CUDA kernels. The portable WGSL is **core-compute-only** (single bind group,
+<=8 storage buffers/kernel, no atomics/subgroups, no `shader-f16` extension,
+`@workgroup_size(64)` apart from the register-tiled matmuls at 256) so the
+exact same kernels run on old desktop
 GPUs and on WebGPU in the browser. The portable WGSL path is the reference and
 the fallback; it is never the only path:
 
@@ -108,7 +109,7 @@ layer 6 - serving, front ends, SDK, samples
         │   │   │                      wgsl-cuda (naga IR -> CUDA C++) + NVRTC,
         │   │   │                      compiled lazily per kernel on first
         │   │   │                      dispatch; kernels-cuda holds the
-        │   │   │                      hand-written tier and its registry
+        │   │   │                      native (tuned) tier and its registry
         │   │   └────── backend-vulkan ash + naga (WGSL -> SPIR-V)
         │   └────────── backend-cpu    wgsl-cpu (naga IR -> Cranelift JIT),
         │                              rayon across cores, AVX2 fast paths

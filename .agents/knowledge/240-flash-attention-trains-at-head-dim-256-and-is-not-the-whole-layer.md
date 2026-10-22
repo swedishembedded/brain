@@ -27,7 +27,7 @@ hd 256, batch 1, mixer forward+backward for one layer:
 
 Card memory growth at T = 16384 for the layer, inputs included: 6.5 GiB.
 Time scales as T^2, as expected; the trio runs at roughly 4 TFLOPS fp32, a few
-percent of the card, so a hand-written tiled (or tensor-core) kernel is the
+percent of the card, so a native tiled (or tensor-core) kernel is the
 next lever and is not done.
 
 At T = 4096 the mixer's non-attention kernels cost 118 ms against the trio's

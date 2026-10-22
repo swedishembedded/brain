@@ -30,7 +30,7 @@ redistributable) - see `docs/reference/models/timesfm3.md`.
       docs for why that is a real boundary, not a shortcut).
 
       The graph: an SSA forward bitwise-locked against `core_forward`, and a
-      full hand-written backward (both attention sublayers including the
+      full explicit backward (both attention sublayers including the
       PerDimScale fold's closed-form split, RoPE, QK-norm, FF, the resblock,
       the output head). `set_input` re-points it at the next batch in place
       (the input plus BOTH additive key-mask layouts), and `adamw_step` is

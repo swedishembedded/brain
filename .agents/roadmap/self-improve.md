@@ -351,7 +351,7 @@ live server before there was something real to justify the risk.
 `log softmax(row)[idx]`) and `token_logprobs::<M>(m, tokens, targets)`, an
 always-correct oracle over `Model::logits_all` - O(T·V) host work and a full
 re-prefill, so it is the fallback/oracle, not the fast path. Migrated the
-two hand-rolled log-softmax loops at `crates/qwen3/src/eval.rs:118,249` onto
+two ad-hoc log-softmax loops at `crates/qwen3/src/eval.rs:118,249` onto
 one implementation.
 
 `Model` gains two defaulted methods: `batch_token_logprobs(&self) ->

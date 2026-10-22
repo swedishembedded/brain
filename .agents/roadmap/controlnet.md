@@ -58,7 +58,7 @@ comparisons / 0 failed, worst 1−cos 1.914e-11, on both a P40 and
       contract), which severs the tape between the two models. Closing this
       needed a genuine second trainer (`ControlNetTrainer`), not a mirror of
       `SupirTrainer` with different tensor names - specifically a
-      hand-rolled copy of `record_into`'s up-path tail (~40 lines) wired
+      ad-hoc copy of `record_into`'s up-path tail (~40 lines) wired
       against ControlNet's own zero-conv outputs instead of `record_into`'s
       internal buffers, because there is no `pub fn` seam to hand
       `record_into` externally-produced, still-on-the-tape buffers.

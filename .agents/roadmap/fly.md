@@ -89,7 +89,7 @@ chosen by measuring MANC rather than by copying a number:
 ## Decisions taken
 
 1. **Physics is MuJoCo, runtime-linked.** `mujoco-rs` (MIT OR Apache-2.0,
-   tracking MuJoCo 3.12) rather than a hand-written articulated-body solver.
+   tracking MuJoCo 3.12) rather than a custom articulated-body solver.
    flybody's walking depends on MuJoCo's adhesion model and its flight on
    MuJoCo's fluid-force model; reimplementing both and revalidating them is a
    project of its own, and doing so would also forfeit direct comparability
@@ -367,7 +367,7 @@ it against the scan+sort reference at `max|d| == 0`.
   mutation and a truncated partial fold. Mutation-verify a new gate: one that
   has never been seen to fail has not been tested.
 * **M2 - connectome import. LANDED.** `crates/connectome` reads the Codex CSV
-  schema (hand-rolled RFC 4180, because a quoted annotation field would
+  schema (a minimal RFC 4180 reader, because a quoted annotation field would
   otherwise shift every later column and a neuron would get a transmitter from
   its cell-type cell), aggregates per-neuropil rows into neuron-pair edges,
   carries the NT prior with its confidence and the verified type where there is
@@ -394,7 +394,7 @@ it against the scan+sort reference at `max|d| == 0`.
   needed after all, `dlopen` keeps it out of the build entirely and absence is
   a runtime skip. `crates/flybody` maps MANC's motor neurons onto flybody's
   actuators from the connectome's own `Sub Class` (`MN-LegNpT2-Ti_flexor`
-  carries segment and muscle), so no Arrow dependency and no hand-written
+  carries segment and muscle), so no Arrow dependency and no bespoke
   neuron list. The real fly loads at nq=109 / nv=108 / nu=78 and integrates
   stably; 330 of 396 leg motor neurons attach, the other 66 reported by name.
 
@@ -667,7 +667,7 @@ it against the scan+sort reference at `max|d| == 0`.
   every negative result so far shares an untested assumption - that this body,
   driven through this actuation path, is capable of locomotion at all.
   `examples/scripted_gait` tests exactly that with NO connectome involved: a
-  hand-written alternating-tripod gait writes the actuators directly and sweeps
+  scripted alternating-tripod gait writes the actuators directly and sweeps
   frequency, swing and lift. If a scripted gait walks, the limit is in the cord
   or the coupling; if it does not, no controller was ever going to make this
   body walk and the actuation path is the thing to fix.
@@ -684,7 +684,7 @@ it against the scan+sort reference at `max|d| == 0`.
   frozen - because a body that recovers on its own looks identical to a nervous
   system that re-adapted.
   **Then the walking body was tested WITHOUT a nervous system, and it walks.**
-  A hand-written alternating tripod written straight to the actuators - fore-aft
+  A scripted alternating tripod written straight to the actuators - fore-aft
   swing on the coxa, levation on the femur a quarter cycle ahead - reaches
   **+2.67 body lengths per second** at 12 Hz and finishes upright. A real fruit
   fly walks at one to three. The body, the actuators and the ground contact are
@@ -1013,7 +1013,7 @@ it against the scan+sort reference at `max|d| == 0`.
   sign across the gain sweep, which is exactly what a connectome without fitted
   synaptic strengths should be expected to do. The pathway is what M10
   establishes. `--smell` on the sample runs it, against `--seek` which is the
-  hand-written control.
+  scripted control.
 
   This crate has had a sensory channel that was connected and silent before -
   current flowed into the proprioceptors every tick, none reached threshold,
@@ -1179,7 +1179,7 @@ Verified while scoping it:
   this toolchain is 1.94; the 5.x line that would build targets MuJoCo 3.9, and
   binding a 3.9 struct layout against a 3.12 library is a silent-corruption
   bug, not a version warning.
-* So the binding is **hand-rolled over `dlopen`**, which is this repo's house
+* So the binding is **a minimal binding over `dlopen`**, which is this repo's house
   style rather than a workaround: `crates/capture` hand-rolls V4L2 ioctl FFI,
   `crates/wm-display` hand-rolls minimal SDL2 FFI, and `backend-cuda` dlopens
   `libcuda.so.1` specifically so there is no build-time dependency. A dlopened

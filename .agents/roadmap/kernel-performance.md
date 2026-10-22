@@ -410,7 +410,7 @@ was added mirroring `rms_variant`/`ln_variant`/`softmax_variant`'s shape
 (the thread-count formula differs from those three: the cooperative kernel
 owns `PAGED_SCORES_PER_WORKGROUP` scores per workgroup, not one row, so the
 helper takes `batch_heads`/`cap` rather than a row count), and `qwen3::
-serve`'s hand-rolled check was migrated onto it - the same shape as `Op::
+serve`'s ad-hoc check was migrated onto it - the same shape as `Op::
 Softmax`'s wan/ltxv migration. Pure refactor, verified via three repeated
 full `brain-qwen3` runs (98 passed each; an intermittent SIGSEGV-on-exit
 seen once during iteration reproduced with BOTH the old and new dispatch
@@ -2182,7 +2182,7 @@ source per this campaign's own rule:
   `head_topk_dev` (device `MATMUL` + the shared `argmax_part`/`argmax_final`
   split-reduction + `topk_extract_step` - all three already-cataloged
   kernels, newly REGISTERED in `qwen35::model::pipelines()`, never
-  hand-written); `Engine::forward_batched_greedy`/`forward_batched_topk` now
+  explicit); `Engine::forward_batched_greedy`/`forward_batched_topk` now
   chain `decode_one`'s returned `DeviceBuffer` straight into them without an
   intermediate host readback, and the `PagedDecoder::admit_greedy`/
   `admit_topk` overrides (added per M3.2's own trait seam) upload the
@@ -2976,7 +2976,7 @@ Per `kernels.md` §A ("does a good kernel already exist") every existing
 `conv3d*`, `convtr*`, `dwconv3d*` - 17 `@opt-1` + 16 `@opt-2` in the
 3+-nested-serial-reduction class) was checked against source before writing
 anything new. Two already-shipped, already-measured GEMM lowerings turned
-up sitting on a LOCAL hand-rolled threshold instead of the shared
+up sitting on a LOCAL ad-hoc threshold instead of the shared
 selector - exactly the pattern §A warns about, and the same asymmetry
 `Op::Conv2d`'s own forward migration (M1.1) already closed for conv2d's
 forward half:
@@ -5623,7 +5623,7 @@ does). Unlike B5's f16 tier, no GPU flush-to-zero surprise turned up in the
 dual-backend run (see below) - the exhaustive host check and the real-
 hardware run agreed from the first draft.
 
-**Device kernels** (hand-written, NOT templated through `dtype_variant` -
+**Device kernels** (explicit, NOT templated through `dtype_variant` -
 that rewrite pipeline is hardcoded to 2-per-`u32` packing with no second
 binding, and FP8 here needs BOTH 4-per-`u32` packing AND an extra BLOCKWISE
 scale binding, neither of which fits): `matmul_gemv_f8e4m3.wgsl`/
@@ -5817,7 +5817,7 @@ end to end (or reports exactly why the device declined) - proving the moved
 plumbing works, not just that it compiles.
 
 **The `f32_to_f16_bits` precision bug, fixed while touching this code.** The
-old hand-rolled conversion flushed every f32 value whose magnitude falls
+old ad-hoc conversion flushed every f32 value whose magnitude falls
 below f16's smallest NORMAL (`2^-14`) to a signed zero - discarding every f16
 SUBNORMAL (down to `2^-24`) as a silent, unflagged truncation. Replaced with
 `half::f16::from_f32` (round-to-nearest-even, correct for subnormals and
@@ -6038,7 +6038,7 @@ point `matmul_i8_gemv.wgsl`/`matmul_i8_dyn.wgsl` both use (`WPG=8`/`QPG=2`
 respectively, both folding every 8 words). Because the per-group sum is
 INTEGER (associative regardless of SIMD-vs-scalar reduction order) and the
 outer fold across groups runs in the identical ascending order both WGSL
-kernels use, the AVX2 path is BIT-IDENTICAL to a hand-written scalar oracle
+kernels use, the AVX2 path is BIT-IDENTICAL to an independent scalar oracle
 reproducing the WGSL formula directly - not "fp-reassociation tolerance"
 like `fast_conv`'s conv2d/matmul_abt - proven by
 `avx2_int8_gemm_matches_scalar_reference` (exact `assert_eq!`, four shapes
@@ -6254,7 +6254,7 @@ Confirmed the landed shapes directly against source before writing anything
 `Requirement`) - all real, all as described. `kernels::template::
 native_f16_variant`/`native_f16_poc` (B11) had proven the mechanism (narrow
 `f16` registers, `f32` accumulate) but shipped no production dispatch class;
-this milestone closes that gap with ONE hand-written kernel and ONE new
+this milestone closes that gap with ONE native kernel and ONE new
 provider, nothing more.
 
 **The kernel**: `kernels::template::native_f16_matmul::MATMUL_REG3_F16N`
@@ -6776,14 +6776,14 @@ at that shape 1/2/4/8 gave 4455 / 4184 / 4529 / 5088.
 - *Toolchain, not algorithm, sets the rest.* cuBLAS SGEMM reaches ~85% of
   peak on Pascal GP100 (https://arxiv.org/pdf/1802.05371) and
   ~88.6% on GP104 (arXiv:1903.07486 Table 4.3); maxas reaches 96-98% on Maxwell
-  but **only in hand-written SASS** - its author is explicit that it is "not
+  but **only in SASS assembly** - its author is explicit that it is "not
   possible with ptxas", and a 2015 study states flatly that it is "not possible to
   create a GPU kernel with greater than 80% computational efficiency using
   the CUDA Toolkit" (https://arxiv.org/pdf/1501.06633). WGSL/naga sits a
   further step below CUDA C: no instruction placement, no dual-issue control
   (Pascal's dual issue is same-warp superscalar, expressed in SASS control
   codes), no register-allocation control, no unroll pragma, no subgroup ops
-  in the portable dialect. **A defensible band for a hand-written WGSL SGEMM
+  in the portable dialect. **A defensible band for a WGSL SGEMM
   on GP102 is 40-65% of peak, with 50-60% realistic and >70% out of reach.**
   The 58.5% measured here sits at the top of that band, which says the
   remaining headroom is small and structural rather than algorithmic.

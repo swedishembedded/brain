@@ -670,7 +670,7 @@ past-the-end, `usize::MAX`, unknown name) all return `None` cleanly.
   (fast, CPU backend, NOT `#[ignore]`d - no real checkpoint needed):
   directly proves the causality assumption design decision 2 depends on,
   against the REAL code path (`StreamState::build_layer` +
-  `layer_forward`, not a hand-rolled parallel replay) - two residual
+  `layer_forward`, not a separate parallel replay) - two residual
   streams that agree on the first 5 rows but differ arbitrarily in a
   64-row padded tail produce IDENTICAL layer output on those first 5 rows
   (max abs diff < 1e-5), while the padded tail itself genuinely differs

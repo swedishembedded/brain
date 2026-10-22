@@ -700,7 +700,7 @@ discovers capabilities generically.
       builders the forward uses: `rmsnorm_bwd` (trainable-gain arm, so all
       four per-block norms and the final one get gradients), `gqa_bwd`,
       `rope_bwd`, `swiglu_bwd`, plus a plain `matmul_dx`/`matmul_dw` pair for
-      the seven per-layer linears. Nothing there was hand-rolled. The
+      the seven per-layer linears. Nothing there was bespoke. The
       genuinely new code is the HOST half - exactly where the MTP differs from
       every decoder already gated here: the `num_code_groups - 1` separate
       per-position output heads (head `i-1` reads decoder position `i` and
@@ -1087,7 +1087,7 @@ discovers capabilities generically.
         at all - they override a half that is already on. `--residual-temp 0`
         is the residual stream's `--temp 0`, i.e. back to greedy.
       - **`mtp.rs::sample_residual` is deleted.** It was an independent
-        hand-rolled temperature/top-k/top-p/inverse-CDF, which is exactly the
+        bespoke temperature/top-k/top-p/inverse-CDF, which is exactly the
         duplication the `sampling.rs` extraction was supposed to prevent, and
         it still carried the inverse-CDF boundary bug the cb0 walk was fixed
         for (a masked index reachable at `r == 0.0` and on an `r == sum`

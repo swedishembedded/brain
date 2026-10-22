@@ -1,6 +1,6 @@
 # backend-cuda - roadmap
 
-Scope: The native CUDA backend and hand-written CUDA kernels (`crates/backend-cuda`, `kernels-cuda`, `wgsl-cuda`, `cuda-aot`).
+Scope: The native CUDA backend and native CUDA kernels (`crates/backend-cuda`, `kernels-cuda`, `wgsl-cuda`, `cuda-aot`).
 
 Ledger for native CUDA support. brain reaches NVIDIA hardware today through
 WGSL -> SPIR-V (`backend-wgpu`/`backend-vulkan`); the goal is a real
@@ -104,11 +104,11 @@ test fails and prints both sides.
 The instrumentation that makes a silent slow fallback impossible landed
 BEFORE the first native kernel, on purpose: numerically the tiers are
 interchangeable, so a backend serving a mechanically translated kernel where a
-hand-written one was promised is indistinguishable from a backend that is
+native one was promised is indistinguishable from a backend that is
 simply slower than hoped. Four pieces:
 
 **`backend_api::ImplSource`** - `Reference` (the portable WGSL) < `Generated`
-(mechanically derived from it) < `Tuned` (hand-written, optionally specialised
+(mechanically derived from it) < `Tuned` (native, optionally specialised
 to a queried capability). The ORDERING is the contract - `satisfies` is the one
 comparison a policy makes - not an incidental derive.
 
@@ -393,7 +393,7 @@ zeroing stays and the test says what it is worth (lesson #117).
 ### The first tuned (T2) kernel, and the provider that dispatches it
 
 `crates/kernels-cuda/cu/matmul_f32_tiled.cu` - fp32 `out = x @ Wt`, the
-hand-written form of the portable `matmul.wgsl`, reading the identical
+native form of the portable `matmul.wgsl`, reading the identical
 buffers and the identical `[m, k, n]` uniform. 64x64 output tile per block,
 16-deep staged reduction, 256 threads each owning a 4x4 register block; both
 operands staged through `__shared__` with one float of row padding so the
@@ -404,7 +404,7 @@ running an unrelated job throughout), 512x512x512 f32, median of five trials
 of eight dispatches:** the generated tier took 33.6 ms and the tuned kernel
 779 us - a **43.1x** ratio. A second run under heavier contention measured
 27.4x. The gate asserts a floor of 8x, well under both, because the number
-worth defending is "the hand-written kernel was worth writing", not one box's
+worth defending is "the native kernel was worth adding", not one box's
 best minute; both sides contend equally so the RATIO is far steadier than
 either absolute.
 
@@ -586,7 +586,7 @@ written then, against that provider's actual operand bundle.
 Qwen3.8-27B INT8 decode streams 27 GiB of weights once per token and ~55% of its
 device time was `matmul_i8_gemv_reg#MREG=1` reading them at about a quarter of
 HBM bandwidth: the generated tier loads one 32-bit word per lane per step.
-`crates/kernels-cuda/cu/matmul_i8_gemv.cu` is the hand-written replacement, and
+`crates/kernels-cuda/cu/matmul_i8_gemv.cu` is the native replacement, and
 it is the first native kernel that is dispatched through the *transparent
 upgrade seam* (`gpu_core::native_upgrade`) rather than through an
 `OperatorProvider`: the int8 linears bind `matmul_i8_gemv` by kernel index and
@@ -1036,7 +1036,7 @@ tuned kernel are deferred.**
   pool of pinned blocks, and a captured graph shares a keyed uniform allocation.
   What is still missing is a device allocator in the shape a decode loop wants
   (and any device free discards every captured graph).
-- **One hand-written kernel.** `crates/kernels-cuda` registers
+- **One native kernel.** `crates/kernels-cuda` registers
   `matmul_f32_tiled` (FP32 forward GEMM, preserving the reference reduction
   order); every other dispatch is `Generated`, and `POLICY` is empty. A native
   tensor-core kernel does not exist. `make check/generated/kernels-cuda-table` is a structure
@@ -1139,7 +1139,7 @@ last:
    and per-generation tuning "for free" - the vendor has already written and
    tuned the kernel for every architecture brain would otherwise have to
    hand-port one at a time.
-2. **Tuned (native)** - brain's own hand-written `.cu`, for whatever a
+2. **Tuned (native)** - brain's own native `.cu`, for whatever a
    library does not cover well: brain's own `PagedAttention` KV layout,
    decode-shaped GEMV the general GEMM libraries do not specialise for, or
    any op a library simply has no kernel for.
@@ -1154,7 +1154,7 @@ declines every op it would have claimed, in the record, and `CudaProvider`
 or the generated tier answers instead - never a silent gap. `ImplSource`
 gains a fourth value, **`Library`**, ranked above `Tuned` (`Reference <
 Generated < Tuned < Library`): tier reporting must be able to say "a vendor
-kernel answered this," not fold it into the same bucket as a hand-written
+kernel answered this," not fold it into the same bucket as a native
 one, because the two have different maintenance and portability properties.
 
 Net effect on duplication: brain hand-writes a kernel only for what a queried
@@ -1168,7 +1168,7 @@ generation, and not a WGSL translation for anything performance-critical.
 | **6** | Real allocator: a suballocating arena per device, replacing one `cuMemAlloc` per step/buffer; `cuModuleGetFunction` cached at compile time, not per launch | an allocation-churn test asserting no repeated `cuMemAlloc` for a repeated size class across N churn cycles, plus a graph-replay run across a churn cycle that stays within one `alloc_epoch` |
 | **7** | Backward pass: `brain-gradcheck`'s finite-difference suite runs on `--backend cuda` (skip-if-absent) for every op the forward gate already covers | the suite, currently unable to select CUDA at all, turns green for the covered subset and is wired into `.agents/roadmap/cuda.md`'s ledger the same commit it turns green |
 | **8** | `CudaLibraryProvider`: cuBLASLt for the GEMM family (plain, register-tiled, and quantized), `dlopen`ed and declined cleanly where absent | golden agreement vs the WGSL reference at the project's 1e-6 floor, skip-if-library-absent, plus a decline-is-recorded test with the library deliberately not loaded |
-| **9** | Attention family: cuDNN's fused attention where the operand layout matches its contract; a hand-written flash-attention/paged-attention T2 kernel as the fallback that always exists, retiring every `flash_attn_*`/`paged_flash_*` refusal | decode-shaped and long-context shapes at 1e-6 vs the WGSL reference, run through whichever of the two answered, recorded distinctly in the dispatch trace |
+| **9** | Attention family: cuDNN's fused attention where the operand layout matches its contract; a native flash-attention/paged-attention T2 kernel as the fallback that always exists, retiring every `flash_attn_*`/`paged_flash_*` refusal | decode-shaped and long-context shapes at 1e-6 vs the WGSL reference, run through whichever of the two answered, recorded distinctly in the dispatch trace |
 | **10** | Quantized tiers: `PolicyEntry` grows a dtype axis; a DP4A int8 T2 kernel; Q4/K-quant register-tiled kernels mirroring their WGSL counterparts | parity fixtures at each dtype's existing WGSL tolerance (not 1e-6 - the quant tiers already accept a looser bar there), plus the now-non-empty `POLICY` ratchet exercising a real entry for the first time |
 | **11** | Per-generation tensor-core packs (WMMA sm_70+, MMA sm_80+, WGMMA/TMA sm_90+) for the hottest kernels, each a `kernels-cuda` entry with its own `min_cc` floor, resolved automatically by `best_for` - no branch anywhere names an architecture | `make check/generated/kernels-cuda-table` gains an NVRTC/nvcc compile-only check per declared floor via `-arch=compute_XX`, including floors above any card present; a numeric golden test runs wherever hardware exists to run it and the entry is marked "compiles, unverified numerically" otherwise - never claimed as verified `Tuned` parity that never ran |
 | **12** | Multi-GPU: NCCL as a `dlopen`ed provider for `Collective`; `Shard.gpu_index`/`check-multi-gpu-sharding.sh` cover CUDA-identified devices; one `memauth::PoolId` shared between a CUDA and a Vulkan handle on the same physical card | a two-device collective test (skip-if-fewer-than-2) and a memauth test asserting one `PoolId` per physical card across both backend handles, so `--limit-vram-total` stops double-counting |
@@ -1178,9 +1178,9 @@ Ordering rationale: the allocator (M6, done for transient lifetimes as an owned 
 pool behind `hold_freed_blocks`, see `mem_pool.rs`) is a prerequisite for everything after
 it - graph replay, backward's extra live buffers and every library call all
 need address-stable, reusable memory, not a `cuMemAlloc` per step. Backward
-(M7) comes before the fast hand-written kernels so correctness gates exist
+(M7) comes before the fast native kernels so correctness gates exist
 before anything gets exotic. Library providers (M8-M9) precede the
-hand-written quantized/tensor-core work (M10-M11) because a vendor's kernel
+native quantized/tensor-core work (M10-M11) because a vendor's kernel
 is the cheapest correct answer wherever it applies, and only writing brain's
 own kernel for what a library leaves uncovered keeps hand-ported surface
 area to the minimum the "no silent slow fallback" rule can still make fast.
@@ -1271,7 +1271,7 @@ again at the point it is used.
   whole-model parity test is weak evidence about a backend's plumbing - with
   the MEASURED list of mutations it does not catch), #117 (some contract
   assertions cannot be given teeth, and must say so), #118 (a metadata gate
-  that scans source text reads the header prose as code), #119 (a hand-written
+  that scans source text reads the header prose as code), #119 (a native
   kernel can be much faster without reassociating anything) #120
   (`threads` means invocations to a catalogue kernel and blocks to a native
   one), #121 (two providers agreeing on a tail neither of them wrote is not

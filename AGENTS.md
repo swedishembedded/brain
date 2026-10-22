@@ -1,7 +1,7 @@
 # AGENTS.md - brain
 
 brain trains and serves neural networks on CPU, GPU and NPU from one engine:
-pure Rust plus hand-written WGSL kernels, a Cargo workspace of small crates
+pure Rust with WGSL and CUDA kernels, a Cargo workspace of small crates
 under `crates/`, no Python in the build or test path. Backprop correctness is
 gated by an in-repo finite-difference checker (`crates/gradcheck`), and every
 imported model is parity-gated against its reference.

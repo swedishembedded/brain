@@ -58,7 +58,7 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
   real checkpoint and a throughput pass are open. Throughput could not be tuned on this shared card: the same
   probe step varied 4x with a neighbour job (knowledge 281). Start from the launch counts there (segment-128
   GDN issues thousands of tiny `concat_split`/`bmm_tiled` launches per layer-step) and measure on a quiet
-  card or with `program_table` replays. A hand-tuned CUDA flash kernel for head_dim 256 is also open.
+  card or with `program_table` replays. A tuned native CUDA flash kernel for head_dim 256 is also open.
 - Embedding table and head are always bf16, never NF4; MTP builds keep the old fp32 head
   and cannot use the bf16 residual stream; host offload of residuals for 64K and beyond.
 - `TokenObjectives` and `LoraSites` are implemented for qwen35 and qwen35moe

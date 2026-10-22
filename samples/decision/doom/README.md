@@ -49,7 +49,7 @@ mission text is prepended to every option:
 Train with `--mix` and the mission is sampled per episode, so one policy has to
 read what it was asked to do.
 
-**Search, then compression.** Imitating a hand-written teacher cannot exceed
+**Search, then compression.** Imitating a scripted teacher cannot exceed
 that teacher, and no teacher worth writing by hand plays DOOM to 100%. So the
 loop has two halves: a search that keeps an archive of places reached and
 returns to them to explore further, and a cloning phase that compresses what

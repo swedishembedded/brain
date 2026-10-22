@@ -1,7 +1,7 @@
 # brain documentation
 
 brain is a local AI training and inference framework written in pure Rust,
-with hand-written GPU compute kernels instead of a bundled deep-learning
+with its own WGSL and CUDA compute kernels instead of a bundled deep-learning
 framework. These pages are the full documentation: the same files render on
 GitHub, on the website at <https://swedishembedded.com/docs/brain>, and as one
 PDF (`make docs/pdf`).

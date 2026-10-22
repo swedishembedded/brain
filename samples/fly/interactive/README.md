@@ -15,7 +15,7 @@ make samples/fly/interactive/run ARGS="--connectome $BRAIN_CONNECTOME_DIR \
   every control tick.
 * **The body is driven through the animal's own motor neurons.** The map from
   neuron to actuator is built from the connectome's published `Sub Class`
-  annotations, not from a hand-written list - 330 leg motor neurons reach 44
+  annotations, not from a curated list - 330 leg motor neurons reach 44
   flybody actuators, and every one that does not is reported with a reason.
 * **The keyboard only gets the descending command.** W and S change how hard
   the brain is telling the cord to go; A and D bias the two halves of the

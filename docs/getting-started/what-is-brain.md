@@ -14,7 +14,7 @@ compiled into every native build and are chosen at run time with `--backend`:
 - **native Vulkan** - Vulkan driven directly;
 - **CUDA** - NVIDIA GPUs through the NVIDIA driver: the portable kernels are
   translated to CUDA and compiled on first use, and the paths that matter most
-  for speed have hand-written CUDA kernels beside them
+  for speed have native CUDA kernels beside them
   ([Running on NVIDIA GPUs](../guides/hardware/cuda.md));
 - **CPU** - the same kernels compiled to native code for the CPU's cores, so no
   GPU is needed at all.
@@ -23,7 +23,7 @@ A **web browser** is a build target of the wgpu backend: a wasm build runs the
 same kernel source as the native one.
 
 A portable kernel either gives the same answer on every backend or it is a
-bug. Each hand-written CUDA kernel is checked against the portable kernel it
+bug. Each native CUDA kernel is checked against the portable kernel it
 replaces, or against a reference computation where it has no portable twin.
 
 Separately, an **Intel NPU** path exists for a subset of models, opt-in per

@@ -7,7 +7,7 @@ Symptom: in the served 27B (Q8_0 GGUF, int8 paged KV), `paged_flash_decode_gqa_h
 layer at 12.8k context (26 MB of keys and values, about 215 GB/s): 1.95 ms of a 14 ms token, about 6 ms at 48k. Cutting the
 keys into 4x more splits (400 instead of 104 blocks) gained only 4-8 percent.
 
-Cause: on CUDA that kernel was the GENERATED tier (WGSL -> CUDA C++), not a hand-written one: no `native_upgrade` row
+Cause: on CUDA that kernel was the GENERATED tier (WGSL -> CUDA C++), not a native one: no `native_upgrade` row
 named it. Its WGSL design gives one key to one thread (a 16-byte piece of a 256-byte row per load, 32 lanes on 32 rows),
 widens every int8 with a convert and merges each tile through five barriers; on the CUDA backend that is bound by
 instruction latency, not by memory. A census of b27's nsys windows shows it is the only generated kernel that matters on

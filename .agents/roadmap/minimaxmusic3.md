@@ -292,7 +292,7 @@ untouched, loss reduced 40%+).
 
 `crates/minimaxmusic3::dit` - a real device (WGSL) forward, unlike the
 condition encoder/depth decoder: 36 layers at `inner_dim=2048` is genuinely
-compute-heavy, and unlike the vocoder's hand-rolled conv stack this IS a
+compute-heavy, and unlike the vocoder's bespoke conv stack this IS a
 standard transformer block shape with existing reusable device primitives -
 `model::block`'s `Bidir`/`rope2d_partial`/`LayerNorm`/`swiglu`/`kv_expand`
 Step-builders cover the whole block (bidirectional partial-RoPE attention +
@@ -452,7 +452,7 @@ already landed in Phases 2-9):
   derives the CFG-unconditional variant by replacing `ids[1:-2]` with
   `AUDIO_CFG_TOKEN_ID`. `clean_caption`/`normalize_lyrics` (markdown-
   stripping and lyrics-tag normalization, ported byte-for-byte from the
-  Python reference, no `regex` crate available so hand-written char
+  Python reference, no `regex` crate available so an explicit char
   scanning) landed earlier alongside the token contract; both are unit-
   tested against literal Python reference output (19 + 11 assertions).
 - `pipeline::generate_frames` - the CFG-guided AR sampling loop: two
@@ -1492,7 +1492,7 @@ row in `gpu_core::upgrade`. No model crate changed at all.
   `array<f32, MREG>` whose every index is a compile-time-bounded loop
   (checklist §C1), and `partial` sized `MREG * 64` - **both limiters from the
   one `MREG` constant**, which is exactly the `kernels::template` shape
-  (`interned(stem, src, &[("MREG", b)])`), so there is no hand-written per-`m`
+  (`interned(stem, src, &[("MREG", b)])`), so there is no per-`m`
   file.
 * It is a genuine second FILE, not a template variant of `matmul_gemv`, because
   a function-local accumulator array is a different body. Both are `@cpu yes`

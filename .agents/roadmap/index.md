@@ -28,7 +28,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`continual-reader`](continual-reader.md) | continual-reader | The self-driving continual-learner sample. |
 | [`controlnet`](controlnet.md) | controlnet | The backbone-agnostic control seam and its SDXL ControlNet producer (`crates/controlnet`). |
 | [`cosyvoice`](cosyvoice.md) | cosyvoice | CosyVoice 2/3 zero-shot voice cloning (`crates/cosyvoice`, `s3tokenizer`, `campplus`). |
-| [`cuda`](cuda.md) | backend-cuda | The native CUDA backend and hand-written CUDA kernels (`crates/backend-cuda`, `kernels-cuda`, `wgsl-cuda`, `cuda-aot`). |
+| [`cuda`](cuda.md) | backend-cuda | The native CUDA backend and native CUDA kernels (`crates/backend-cuda`, `kernels-cuda`, `wgsl-cuda`, `cuda-aot`). |
 | [`decide`](decide.md) | decide | The decision model (`crates/decide`, `crates/decisions`). |
 | [`deepseek2ocr`](deepseek2ocr.md) | deepseek2ocr | DeepSeek-OCR (`crates/deepseek2ocr`, `deepseek2`, `sam1`). |
 | [`deepseekocr2`](deepseekocr2.md) | deepseekocr2 | DeepSeek-OCR-2 (`crates/deepseekocr2`). |

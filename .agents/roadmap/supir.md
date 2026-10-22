@@ -50,7 +50,7 @@ code: `vae::VaeEncoder` with a second set of weights.
 
 ### `GLVControl` - the trunk
 
-A hand-written copy of SDXL's 9 input blocks + middle block, same depths
+A separate copy of SDXL's 9 input blocks + middle block, same depths
 (`transformer_depth [1,2,10]`, `context_dim 2048`, `adm_in_channels 2816`,
 `model_channels 320`, `channel_mult [1,2,4]`), with its own `time_embed` and
 `label_emb`. Two differences from a vanilla SDXL ControlNet:
@@ -222,7 +222,7 @@ distinguish "weights present" from "commercial-use cleared" at runtime.
       `sdxlunet::train::UnetTrainer` exactly rather than a from-scratch host
       f64 oracle - this graph is already `vae::blocks::Builder`/`Trace`
       differentiable end to end, the same situation `check_unet` closed, so
-      an independent hand-written backward would duplicate that gate's
+      an independent explicit backward would duplicate that gate's
       coverage rather than add a new signal; see `train.rs`'s own module doc
       for the full reasoning). `gradcheck::check_supir` (directional, 185
       trunk+adaptor tensors, `SupirConfig::tiny` at `H=W=8`, max_rel 9.9e-2,

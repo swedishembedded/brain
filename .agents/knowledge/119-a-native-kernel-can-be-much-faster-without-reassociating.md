@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 <!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
 
-# 119. A hand-written kernel can be much faster without reassociating anything
+# 119. A native kernel can be much faster without reassociating anything
 
 The CUDA milestone was planned around a tuned matmul agreeing with the
 portable reference only to a tolerance, on the reasoning that a `__shfl`

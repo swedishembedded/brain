@@ -223,7 +223,7 @@ self-consistent.
   normalized `[x0,y0,x1,y1]` + phrase text) - covers both
   `<CAPTION_TO_PHRASE_GROUNDING>` and `<OD>`/`<DENSE_REGION_CAPTION>`'s
   output shape (same `box_pattern` in the reference's own post-processor).
-  Hand-written scanner over decoded text, no regex dependency, no Gpu/model
+  Custom scanner over decoded text, no regex dependency, no Gpu/model
   dependency - 7 unit tests, no real-checkpoint gate needed since it has no
   checkpoint dependency at all.
 

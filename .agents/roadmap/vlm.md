@@ -964,7 +964,7 @@ naming a function absent from `tools` is rejected before any weights are
 touched - proven with a nonexistent weights path in
 `caps::tests::tool_choice_named_function_must_exist_in_tools_before_touching_weights`),
 and `qwen3::chat::SeqState` now drives the whole per-token decode loop that
-used to be hand-rolled here (`stream_delta` inlined by hand, no tool-call
+used to be open-coded here (`stream_delta` inlined by hand, no tool-call
 scanning at all). `SeqState::finish` is what resolves
 `prompt_tokens`/`completion_tokens`/`finish_reason`/`reasoning_content`/
 `tool_calls` - the identical `Outcome` shape `qwen3::caps`'s `GenerateAction`

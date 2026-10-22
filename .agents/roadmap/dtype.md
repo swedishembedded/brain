@@ -781,7 +781,7 @@ exactly one production implementor, `DepthNpuModel`
 (`crates/catalog/src/resident_depth.rs`). `resident_forecast.rs`'s chronos2 and
 fincast NPU paths were drift from that proven pattern, not a different
 design: they called `npu::openvino::{Chronos2Session, FincastSession}`
-directly - bespoke hand-rolled `set_tensor`/`get_output_tensor` session types
+directly - bespoke `set_tensor`/`get_output_tensor` session types
 in `crates/npu/src/openvino/real.rs` (~290 lines) duplicating exactly what
 the generic, object-safe `NpuGraph::run(&[(&str, Feed)])` (also in
 `real.rs`) already does generically.
@@ -1320,7 +1320,7 @@ real generalized runner and deleted the fake `GraphBackend` trait; C2 proved
 the pattern end to end for Chronos-2/FinCast via the `NpuModel` trait seam,
 but explicitly left `real.rs`'s bespoke session types in place as
 "a separate, deliberate cleanup call". Before this phase, `real.rs` (1671
-lines) still hand-rolled `compile -> set N tensors -> infer -> read M
+lines) still open-coded `compile -> set N tensors -> infer -> read M
 tensors` via OpenVINO's raw `InferRequest` API in 9 separate session structs,
 each duplicating logic `NpuGraph::run(&[(&str, Feed)])` already does
 generically: `NpuSession` (YOLO 4-D vision), `DecoderSession` (Qwen/GLM
@@ -1364,7 +1364,7 @@ split into `compile_model` + `from_compiled` so both the top-level
 `NpuGraph::compile_bytes`/`compile_path` callers and these thin sessions
 share the same infer-request-creation/name-introspection tail without a
 second `compile_model` call). Each `run*` method now builds a `Feed` array
-with the exact same tensor names the hand-rolled code used
+with the exact same tensor names the open-coded version used
 (`"emb"`/`"kmask"`/`"ids"`/`"amask"`/`"ctx"`/`"sib"`/`"x"`/`"codes"`) and
 calls `self.graph.run(&feeds)`, then unpacks the named-tensor result into the
 session's typed return shape - for single-output sessions, `out.into_iter()
@@ -1452,7 +1452,7 @@ deferred, unchanged by this phase, per the plan:**
 - **TTS's four stateful sessions** (`KvSession`/`PrefillSession`/
   `FusedMtpSession`/`BackStreamSession`) - confirmed above, still need a
   larger per-step-state design before they can adopt a build-once seam.
-- **The ~20 hand-written `*_topology.rs` ONNX emitters** (`chronos2_topology`,
+- **The ~20 per-model `*_topology.rs` ONNX emitters** (`chronos2_topology`,
   `fincast_topology`, `kronos_topology`, `qwen_topology`, `glm_topology`,
   `codec_topology`, etc.) - out of scope for the whole program: they build
   the ONNX graphs the sessions/`NpuModel`s compile, a different layer from
@@ -1773,12 +1773,12 @@ dependencies]` entry (`Cargo.toml:246`) and already a direct dependency of
 `f32_to_f16` to `::half::f16::from_f32(f).to_bits()` - a well-tested library
 implementation of this real, fiddly conversion (round-to-nearest-even,
 correct overflow-to-infinity, correct underflow-to-subnormal/zero) is
-strictly preferable to a second hand-rolled one for the HOST side, per the
+strictly preferable to a second bespoke one for the HOST side, per the
 phase brief's own explicit preference. **`pack_f16`** uses the SAME low-half-
 is-even-index/high-half-is-odd-index packed-`u32` convention `pack_bf16`
 already established, for consistency - checked against `dtype_variant`'s
 `IDENT >> 1u`/`IDENT & 1u` selection by construction (both tiers share the
-same extraction code). The WGSL DEVICE-side decode is still 100% hand-written
+same extraction code). The WGSL DEVICE-side decode is still 100% bespoke
 (no crate can help inside a shader) and independently verified as described
 above.
 
@@ -2157,7 +2157,7 @@ forward+backward)** - FULL migration, batched forward AND KV-cache decode:
   unquantized base weight - matching the pre-B7 shape exactly: LoRA used to
   live only in the fp32 arm of the fork this replaces).
 - **The decode path's `mm`/`mm8` local closures in `decode_steps`** (a
-  SEPARATE, independently-hand-written fp32-GEMV-or-naive / hardcoded-int8-
+  SEPARATE, independently-written fp32-GEMV-or-naive / hardcoded-int8-
   GEMV pair, at the always-`m=1` shape) - deleted outright, replaced by the
   same `self.ops.act`/`self.ops_linear` calls (no LoRA gate needed here -
   decode never applies LoRA; see "Real finding" list, item 3, below).
@@ -2440,7 +2440,7 @@ GEMV unconditionally (never consulting `select::candidates`, so it could
 never fall back to anything else even where that would be wrong) while its
 OWN batched-forward sibling (`Q8::mm8`) hardcoded the OPPOSITE choice - the
 TILED kernel, unconditionally, even at small `n` - meaning `model.rs` had
-TWO independently-hand-written int8 dispatch rules that already disagreed
+TWO independently-written int8 dispatch rules that already disagreed
 WITH EACH OTHER, not just with `serve.rs`. Since `I8_GEMV_MAX_ROWS` (the
 REAL, measured int8 GEMV cutoff, `= 8`, deliberately smaller than the fp32
 `DECODE_REGIME_MAX_ROWS = 32` - confirmed by reading `backend_api::select`
@@ -2453,7 +2453,7 @@ row count fell at or below `I8_GEMV_MAX_ROWS` - exactly the kind of
 regime `select::candidates` exists to get right, and pre-B7 code could not
 reach at all. **Fixed by construction**: both paths now call `Ops::matmul`,
 which resolves `select::candidates(Op::MatMul, shape, caps)` for the REAL
-shape every time - no hand-written regime rule survives in `model.rs` to
+shape every time - no ad-hoc regime rule survives in `model.rs` to
 disagree with anything. This is a real, positive discovery about `select::
 candidates`'s own crossover constant (`I8_GEMV_MAX_ROWS = 8`, distinct from
 `DECODE_REGIME_MAX_ROWS = 32`) surfacing during `flops.rs` debugging (see the
@@ -3594,7 +3594,7 @@ have gone either direction; it did not go the P40 direction (see Results).
    `enable f16;` to a kernel body already written with real `f16`-typed
    locals - a genuinely different mechanism from `dtype_variant`'s storage
    rewrite (which edits an *existing* f32 declaration/loads; this wraps a
-   *hand-written* native-f16 body, since a correct general f32-local-to-f16
+   *explicit* native-f16 body, since a correct general f32-local-to-f16
    rewrite would need to reason about which locals are safe to narrow - the
    "third `Ops` dispatch class" explicitly out of scope). Two bodies:
    `ELEMENTWISE_FMA` (`out = f16(a)*f16(b)+f16(c)`, one native FMA per
@@ -3753,7 +3753,7 @@ neither existing mechanism fits "compute natively in the narrower type" -
 the same scope call B3's own module doc already anticipated when it said a
 `BF16`/`F16` `Weight` arm was deliberately absent until "the kernel
 templater" grew this capability, (c) extending the templated kernel set
-past the two hand-written PoC bodies to something a real linear layer
+past the two explicit PoC bodies to something a real linear layer
 actually dispatches (`matmul_gemv`/`matmul_reg3`-shaped, not a synthetic FMA
 chain or a single elementwise op), and (d) deciding what a caller does about
 this phase's own subnormal-flush-to-zero finding for near-zero

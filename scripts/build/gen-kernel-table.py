@@ -241,7 +241,7 @@ def build_table():
         "**cpu** - `backend-cpu`'s Cranelift JIT splits a kernel body at ONE top-level",
         "`workgroupBarrier()` and no more; with two or more it does not fail cleanly, it",
         "**corrupts memory**, so those are `✗`, cross-checked against the barrier count on",
-        "every run. `native` marks the kernels with a hand-written AVX2 path that runs instead",
+        "every run. `native` marks the kernels with a native AVX2 path that runs instead",
         "of the JIT; `native only` means that path is the *only* way it works there, because",
         "its WGSL has >1 barrier - under `BRAIN_NO_FASTCONV=1` or on a non-AVX2 host it would",
         "fall back to the JIT and corrupt memory. A `✓` says the JIT *can* run it, not that the",

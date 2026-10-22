@@ -12,7 +12,7 @@ Nobody noticed because the failure mode is *silent at the level that matters*:
 you add a `.wgsl`, the regen fails, and you hand-append the two lines to
 `crates/kernels/src/lib.rs` instead. The registry stays correct, so no test ever
 fails - it just stops being mechanically derivable. Re-running the fixed script
-produced a nontrivial diff over kernels added since the breakage: hand-written
+produced a nontrivial diff over kernels added since the breakage: the older
 doc comments replaced by the generated form, and several consts out of sort
 order.
 

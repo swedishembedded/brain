@@ -187,7 +187,7 @@ which one it picked, which one was played, and the running counts.
 
 **The cube engine is derived, not typed in.** Each of the 54 facelets knows
 where it sits and which way it faces; a move rotates the coordinates of one
-layer and looks up which facelet now occupies that place. Six hand-written
+layer and looks up which facelet now occupies that place. Six scripted
 permutation tables would be six chances to transpose a pair of digits and get a
 thing that turns plausibly and is not a cube - and a solver on top of it would
 still "solve" its own broken group. The tests are the group laws: every face

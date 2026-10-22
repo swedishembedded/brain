@@ -10,7 +10,7 @@ are exact: every state is labelled by the moves that actually followed it),
 then at each step rank the candidates by `macro length + V(child)`.
 
 Fitted on episodes from a RANDOM chooser it worked, partly: 213 moves per
-solve against 356 for choosing randomly and 211 for a hand-written tiebreak.
+solve against 356 for choosing randomly and 211 for a fixed-rule tiebreak.
 So the obvious next step was policy iteration - regenerate episodes with the
 improved chooser, refit, repeat, each round moving the target from "cost of
 behaving randomly" toward "cost of behaving well".

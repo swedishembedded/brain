@@ -10,7 +10,7 @@ result**. If a number below turns out to be unreachable, the honest report is
 ## Why there is a second freeze
 
 The first freeze was applied to a **different game**, and the game was broken:
-seven hand-written policies were measured on it and the one that ignored the
+seven scripted policies were measured on it and the one that ignored the
 observation entirely won. Its ceiling was ~64%, which was also what the naive
 policy scored, so the primary criterion (>71%) asked the learner to exceed a
 bar no policy could reach.
@@ -26,7 +26,7 @@ It is not carried over.
 
 Before any threshold is set:
 
-* hand-written policies are measured on a ladder (`policy_ladder`), and
+* scripted policies are measured on a ladder (`policy_ladder`), and
 * **at least one policy that reads the observation must beat one that ignores
   it, by a wide margin.**
 
@@ -62,7 +62,7 @@ is in the option text.
 | random, sampled | 11.0% | −2.86 |
 | **untrained head, greedy - MEDIAN over 8 init seeds** | **~0%** | - |
 | **teacher (always shoot), = what cloning starts from** | **39.0%** | −0.50 |
-| best hand-written | 78.0% | +2.49 |
+| best scripted | 78.0% | +2.49 |
 
 **The untrained bar is a median, and it has to be.** A greedy untrained head is
 deterministic - it prefers one kind of option forever - so it is usually
@@ -151,4 +151,4 @@ episodes, greedy:
 L5 is the one that carries the claim: 14 points clear of converged behaviour
 cloning, four standard errors, frozen before the baseline that invalidated L1
 was known to be wrong. Policy gradient added **+35 points over cloning** and
-matched the best hand-written policy.
+matched the best scripted policy.

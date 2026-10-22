@@ -425,7 +425,7 @@ was already numerically correct, not merely finite. Fixture:
 `testdata/golden/minimaxh3/audio_vae/{minimaxh3_audio_vae.safetensors,manifest.json}`
 (gitignored under `/testdata/`, like every other golden in this workspace -
 regenerate with the dumper above). The dumper's own two self-checks (a
-hand-rolled stage-by-stage replay vs. the library's own `vae.decode(z)`, and
+stage-by-stage replay vs. the library's own `vae.decode(z)`, and
 a freshly re-instantiated model) both landed at exactly `0.0` max-abs
 difference before anything was written, so the golden's own correctness
 does not rest on trusting either code path alone.

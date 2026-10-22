@@ -56,7 +56,7 @@ kernels; pick a device with `--device` and a backend with `--backend`:
 |---|---|
 | `wgpu` (default) | any GPU with a Vulkan, Metal or DirectX 12 driver: NVIDIA, AMD, Intel, Apple; also WebGPU in a browser |
 | `vulkan` | Vulkan driven directly |
-| `cuda` | NVIDIA GPUs through the driver, with hand-written kernels for the hottest paths ([details](docs/guides/hardware/cuda.md)) |
+| `cuda` | NVIDIA GPUs through the driver, with native CUDA kernels for the hottest paths ([details](docs/guides/hardware/cuda.md)) |
 | `cpu` | the CPU's cores; slower, but nothing else needed |
 
 The **Intel NPU** is a separate path for a subset of models: they are exported

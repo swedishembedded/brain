@@ -39,7 +39,7 @@ WGSL kernels:
 |---|---|---|
 | wgpu (default) | `backend-wgpu` | Vulkan, Metal, DirectX 12, OpenGL and WebGPU |
 | Vulkan | `backend-vulkan` | Vulkan driven directly through `ash`; WGSL is compiled to SPIR-V |
-| CUDA | `backend-cuda` | the CUDA driver API loaded at run time (no build-time CUDA dependency); WGSL is translated to CUDA C++ and compiled lazily, with hand-written kernels in `kernels-cuda` for the hottest operations |
+| CUDA | `backend-cuda` | the CUDA driver API loaded at run time (no build-time CUDA dependency); WGSL is translated to CUDA C++ and compiled lazily, with native CUDA kernels in `kernels-cuda` for the hottest operations |
 | CPU | `backend-cpu` | WGSL compiled to native code with a Cranelift JIT, spread across cores |
 
 The Intel NPU is not a fifth backend. It is a separate whole-graph path
@@ -57,7 +57,7 @@ first-class compute path rather than storage-only quantization.
 - WGSL is the source of truth for kernels; a generated catalogue is published
   in the [kernel reference](../reference/kernels/index.md).
 - Backpropagation is gated by `gradcheck` (finite differences), not by a Python
-  oracle, and each hand-written CUDA kernel is checked against the portable
+  oracle, and each native CUDA kernel is checked against the portable
   kernel it replaces.
 - Every model is reachable the same way: `brain <model> <action>` on the CLI,
   and through HTTP, D-Bus and the SDK, because all of them dispatch the same

@@ -33,7 +33,7 @@ section 8; the entry that records the runs is knowledge #310.
 | K2 NF4 through the same GEMM | landed | decode into a bf16 scratch per call; no weight-reuse cache |
 | K3 LoRA on library GEMMs | partly | the five products per linear are single fp32 library GEMMs with the scale in alpha and the accumulation in beta; the shared-input A concatenation is not done |
 | K4 fused head CE gradient | not done | the head GEMMs themselves run on the library (windows are whole 64-row groups) |
-| K5 tensor-core flash | landed in a different form | blockwise attention around library GEMMs plus three small element-wise kernels (softmax with causal block skipping, score gradient, row dot) instead of a fused `mma.sync` kernel: memory bounded by `SCORE_BLOCK_BYTES`, no hand-tuned MMA code |
+| K5 tensor-core flash | landed in a different form | blockwise attention around library GEMMs plus three small element-wise kernels (softmax with causal block skipping, score gradient, row dot) instead of a fused `mma.sync` kernel: memory bounded by `SCORE_BLOCK_BYTES`, no bespoke MMA code |
 | K6 native GDN training kernels | forward (fp32 and, per T1 below, tensor-core) and the backward sweep landed | the forward recurrence and both histories are one native launch (bit-identical to the walk); the backward computes everything that does not depend on the running state gradient for all chunks at once, and its sequential state-gradient sweep is one native launch per layer (`gdn_bwd_sweep_f32`, one block per head, state in dynamic shared memory; the host walk of six dispatches per chunk remains the fallback; knowledge 311). The whole-tensor backward phases are not fused |
 | T1 tensor-core GDN chunk forward | landed (forward) | not the plan's bf16 `mma.sync`: three-pass TF32 (`a_hi*b_hi + a_hi*b_lo + a_lo*b_hi`, fp32 accumulate), which keeps the products within about 1e-6 of fp32 so the plan's loose bf16 tolerances are not needed. Three native kernels, all behind `GdnFastIds::tensor_core` (a caller flag, qwen35 only) and the provider's compute-capability floor 8.0: `gdn_chunk_prep_tc` (steps 1-9 and the intra scores in one launch per (head, chunk)), its token-major forms `gdn_chunk_prep_tok(_train)_tc` (query/key L2 norm, head repeat and the five chunk-major permutes folded into the loads) and `gdn_chunk_loop(_train)_tc` (the across-chunk recurrence, four 32-column blocks per head). Older devices, the CPU and Vulkan backends, `BRAIN_NO_PROVIDER=cuda` and any declined launch keep the portable sequence unchanged (knowledge 314) |
 | T2 tensor-core GDN chunk backward | landed | two launches per layer pass instead of about sixty: `gdn_bwd_sweep_tc` (the reverse sweep restated so a head splits over four 32-column blocks, 192 blocks; the one product that contracts over columns, `d_decayed_k`, moves out because it does not feed the recurrence, fed by a history of the state gradient the sweep writes) and `gdn_chunk_bwd_post_tc` (everything independent across chunks, one block per (head, chunk)). Same opt-in and fallback as T1 (`GdnFastIds::tensor_core`, `GdnBwdScratchBufs::new_for` allocates the history only then). Parity: every gradient within 3.1e-6 of the portable path (`gdn_chunk_fwd_train_tc`). Knowledge 316 |
@@ -56,7 +56,7 @@ layer (both including the 267.4 M MLP), 24.36 G for the stack, plus the 1.27 G L
 head.
 
 **GEMMs never touch a tensor core.** Every float GEMM (f32, bf16 and NF4 base;
-forward, dX, LoRA, head) runs generated or hand-written fp32 code on the CUDA cores,
+forward, dX, LoRA, head) runs generated or native fp32 code on the CUDA cores,
 compiled with `--fmad=false`, so each multiply-add is a separate `mul` and `add`
 (`crates/backend-cuda/src/nvrtc.rs:263-272`). The bf16 and NF4 tiers are
 `kernels::template::dtype_variant` / `nf4_weight_variant`
@@ -398,7 +398,7 @@ This is the single largest item and gates every milestone past 100.
 - **Gain (DERIVED).** It adds 7 us/token at the target (23 MB/token at 3.4 TB/s) and makes the
   NF4 and bf16 tiers equal-speed.
 - **Why not a fused mixed-input tensor-core kernel?** A fused W4A16 `mma.sync` GEMM saves the
-  7 us, at the cost of a hand-written, hand-tuned kernel at 60-70% of what cuBLASLt reaches
+  7 us, at the cost of a native, tuned kernel at 60-70% of what cuBLASLt reaches
   with wgmma. Defer it (section 5).
 - **Risk.** Low.
 - **Gates.** A new unit test that the dequant is bit-exact against

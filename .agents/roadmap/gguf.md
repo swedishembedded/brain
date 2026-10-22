@@ -220,7 +220,7 @@ review of this codebase assumed:
       - but its inner `q` closure still forced every linear through the fp32
       route unconditionally (`t.with_tensor(&name, &mut |data| .. quantize_
       weight(data, no, k))`), never trying the zero-fp32 Q8_0 byte repack even
-      when `t` could serve one directly. Swapped that hand-rolled `with_tensor`
+      when `t` could serve one directly. Swapped that open-coded `with_tensor`
       + `quantize_weight` dance for a single call to `model::int8::quantize_
       from(t, &name, no, k)`, which tries the byte repack first and only falls
       back to the bounded fp32 route when the source can't serve one - the
@@ -228,7 +228,7 @@ review of this codebase assumed:
       this crate too. `crate::int8::quantize_weight`'s re-export
       (`crates/s3dit/src/int8.rs`) stays - `tests/int8_matmul.rs` calls it
       directly and nothing else in the crate needed touching; grepped for any
-      other hand-rolled `with_tensor` + `quantize_weight`/`quantize_weight_q4`
+      other open-coded `with_tensor` + `quantize_weight`/`quantize_weight_q4`
       pattern outside `quantize_block` and found none. `make test -p
       brain-s3dit`: green, 0 failed. ltxv and gemma4 still need their own
       `&Tensors` → `&dyn TensorSource` migration (plus this same `quantize_
@@ -244,7 +244,7 @@ review of this codebase assumed:
       `QBlockWeights::quantize_host`/`quantize_host_stream`, all still typed
       `&Tensors`) kept compiling unchanged - Rust unsize-coerces `&Tensors`
       to `&dyn TensorSource` at the call site, no caller edits needed. Inside
-      the function, the `QTier::Int8` arm's hand-rolled `tget` (Tensors-only)
+      the function, the `QTier::Int8` arm's open-coded `tget` (Tensors-only)
       + `model::int8::quantize_weight(data, out_dim, in_dim)` pair became one
       call to `model::int8::quantize_from(t, &weight_name, out_dim, in_dim)`,
       which tries the zero-fp32 `Q8_0` byte repack first and only falls back
@@ -262,7 +262,7 @@ review of this codebase assumed:
       the checkpoint is a real bug, not a normal absence). Grepped
       `crates/ltxv/src/dit.rs` and `crates/ltxv/src/na_decoder.rs` (each
       defines its own local `tget` over the same `Tensors` type) for the same
-      hand-rolled `with_tensor` + `quantize_weight`-by-hand shape and found
+      open-coded `with_tensor` + `quantize_weight`-by-hand shape and found
       none - every `tget` call in both files is a plain fp32 norm/bias read,
       no quantization involved. `make test -p brain-ltxv`: green, 0 failed
       (47 test binaries; the quantization-relevant suites - `gguf_quant_real`,
@@ -645,7 +645,7 @@ All three M7 slices (s3dit, ltxv, gemma4) are now done - M7 is closed.
       ever touches that pair. Wired into `model::moe` (NOT
       `model::ops::Ops::moe_linear`, which explicitly refuses `I8`/`Q4`/
       `KQuant` today - the real dispatch site for every quantized MoE tier is
-      `model::moe`'s own hand-written `expert_fwd_*` family, `MoeIds8`/
+      `model::moe`'s own `expert_fwd_*` family, `MoeIds8`/
       `expert_fwd_i8` being the precedent): `MoeIdsKQ` (kernel indices,
       including the `quant_group_sum` prepass `h`'s own re-quantization
       needs - `h` is a fresh tensor per expert, so it cannot share the
@@ -1045,7 +1045,7 @@ this box yet.
       flat-layout scan gained the identical split-grouping shape the
       pre-existing `.safetensors` shard grouping already had (both now go
       through the one shared `split_name` parser instead of two separate
-      hand-rolled ones) - registers once, from part 1's path.
+      open-coded ones) - registers once, from part 1's path.
       Gated: `crates/modelstore/src/recipe.rs` (3 new tests: a complete
       3-part split resolves as one candidate with correct upstream/local
       names; an incomplete 2-of-3 split declares nothing and its stray

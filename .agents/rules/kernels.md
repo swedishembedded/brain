@@ -336,7 +336,7 @@ existing caller. Assume nothing about units.
   against a register block).
 - **The WGSL rules above constrain the on-disk WGSL, which is the reference
   provider - not every implementation an operator may have.** Tensor-core
-  library GEMMs, hand-written CUDA (`crates/kernels-cuda`), cooperative-matrix
+  library GEMMs, native CUDA (`crates/kernels-cuda`), cooperative-matrix
   and native-f16 providers are reached through the `gpu_core::provider` seam,
   are selected on queried capability, and are gated for correctness against
   the WGSL reference. A call site reaches a non-WGSL provider only once it is

@@ -26,7 +26,7 @@ would go red the next time `Weight::I8`'s layout changes, instead of staying
 green while quietly disagreeing with it.
 
 The general shape: any formula whose whole job is to predict a real
-function's output size, kept as a SEPARATE hand-written expression instead of
+function's output size, kept as a SEPARATE expression instead of
 calling that function (or a cheap stand-in for it) and measuring, is a copy
 with no way to notice the original moved. If the real cost is affordable to
 compute directly, compute it; if it must stay a formula (too expensive to

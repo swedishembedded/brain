@@ -1,6 +1,6 @@
 # brain-codec — Qwen3-TTS 12 Hz neural audio codec (Mimi/Moshi-style)
 
-Pure Rust + raw WGSL, fp32, forward-exact against the official
+Pure Rust on brain's WGSL kernels, fp32, forward-exact against the official
 `Qwen3-TTS-Tokenizer-12Hz` checkpoint. Both directions are implemented:
 
 ```

@@ -1,6 +1,6 @@
 # Native CUDA kernel catalogue
 
-Every hand-written CUDA kernel brain ships, generated directly from the
+Every native CUDA kernel brain ships, generated directly from the
 registry that defines them - nothing here is inferred or hand-maintained.
 Regenerate with `make generate/kernels/cuda-table`; `make check/generated/kernels-cuda-table` fails the build if
 this page has drifted from that registry, or if a kernel source file sits in
@@ -138,7 +138,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 
-**tier** - `tuned` is hand-written for this backend, optionally specialised to a queried device capability. It is the only tier a file in this tree can claim: a `generated` kernel is emitted from the portable WGSL reference at run time and has no source file here, and the `reference` tier IS that WGSL.
+**tier** - `tuned` is a native kernel for this backend, optionally specialised to a queried device capability. It is the only tier a file in this tree can claim: a `generated` kernel is emitted from the portable WGSL reference at run time and has no source file here, and the `reference` tier IS that WGSL.
 
 **min cc** - the lowest compute capability the kernel's own TEXT is valid on, decided by the instructions it uses. It is not a statement about any card: which kernel a device gets is resolved at run time against the capability the driver was asked for, highest eligible floor first.
 

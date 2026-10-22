@@ -20,7 +20,7 @@ that simply never talk to each other on this path. The existing test
 (`generate_is_deterministic_and_respects_eos`) passed throughout, because it
 only checks determinism and EOS-stopping, never a numerical value that would
 reveal a missing contribution - the same shape of gap this file's own
-"gates that lie" pattern describes, just for a hand-written test instead of
+"gates that lie" pattern describes, just for a bespoke test instead of
 an automated gate.
 
 Found by asking a narrow, specific question while wiring an UNRELATED

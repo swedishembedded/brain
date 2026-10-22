@@ -121,7 +121,7 @@ make samples/decision/arena/run ARGS="--iterations 4 --episodes 8 --batch"
 arena: reference band on the evaluation seeds
          random                  11.0%  return -2.862
          teacher (always shoot)  39.0%  return -0.496   <- what cloning starts from
-         best hand-written       78.0%  return +2.488   <- the ceiling worth chasing
+         best scripted           78.0%  return +2.488   <- the ceiling worth chasing
 ```
 
 Printed before anything trains, measured on **exactly the seeds `evaluate`
@@ -294,7 +294,7 @@ asymmetry is the whole design. An earlier version had a tanky demon that hit
 hard and a weak imp that hit softly, which sounds like it demands target
 priority and does not: the right answer is always "shoot whatever dies soonest",
 which is what firing at the first thing in the list already does. Seven
-hand-written policies were measured on it and the one that **ignored the
+scripted policies were measured on it and the one that **ignored the
 observation won**. That game could not demonstrate learning by anything, so it
 was replaced.
 
@@ -319,7 +319,7 @@ in when one of its baselines turned out to be wrong.
 | random | 11.0% | −2.86 |
 | untrained head (median of 8 init seeds) | ~0% | - |
 | behaviour cloning alone | 44.0% | −0.13 |
-| best hand-written policy | 78.0% | +2.49 |
+| best scripted policy | 78.0% | +2.49 |
 | **cloning + PPO, head seed 1** | **79.0%** | **+2.47** |
 | **cloning + PPO, head seed 2** | **78.0%** | **+2.50** |
 

@@ -6903,7 +6903,7 @@ The reader-cannot-tell problem is solved by making the arm a DERIVED label
 rather than a documented convention: `pipeline::av_arm_label(real, audio,
 fp32)` is a pure function, `build_denoiser` routes on the same predicate, and
 `ltxv_cli`'s banner prints the label instead of spelling the arm out itself.
-The previous banner was hand-written from `(dit_config, audio)` and had gone
+The previous banner was composed separately from `(dit_config, audio)` and had gone
 stale the moment the routing changed underneath it - which is exactly the
 failure this replaces.
 
