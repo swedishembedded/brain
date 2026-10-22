@@ -233,7 +233,7 @@ fn main() {
         eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
         std::process::exit(2);
     }
-    let tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
+    let tier = qwen35::int8_gguf_resident::held_tiers_at(&a.gguf).unwrap_or_else(|e| panic!("{e}"));
     let spec = SpecServing { mode: a.mode, mtp_normed_hidden: a.normed_hidden, scratch_rows: a.scratch_rows, batch_limit: a.batch_limit };
     // Without --prefill-slice a prompt goes in whole (and, the default being one sequence at a time, alone).
     let sliced = a.prefill_slice != u32::MAX;

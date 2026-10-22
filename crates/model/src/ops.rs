@@ -957,6 +957,21 @@ impl TierPolicy {
         self.default != Dtype::F32 || self.rules.iter().any(|(_, dt)| *dt != Dtype::F32)
     }
 
+    /// A short label for logs and result fingerprints: the default tier, and
+    /// how many leaves rules put at each other tier (`"q4k, i8 x114"`) -
+    /// [`Self::describe`] spells out every rule, which a per-leaf policy has
+    /// by the hundred.
+    pub fn summary(&self) -> String {
+        let mut others: Vec<(Dtype, usize)> = Vec::new();
+        for (_, dt) in &self.rules {
+            match others.iter_mut().find(|(t, _)| t == dt) {
+                Some((_, n)) => *n += 1,
+                None => others.push((*dt, 1)),
+            }
+        }
+        others.iter().fold(self.default.name().to_string(), |s, (dt, n)| format!("{s}, {} x{n}", dt.name()))
+    }
+
     /// Round-trippable string form: `"q4"` (uniform), or
     /// `"q4,in_proj_a.weight=f32,in_proj_b.weight=f32"` (default, then
     /// `pattern=tier` rules in declaration order) - what the serving CLI's

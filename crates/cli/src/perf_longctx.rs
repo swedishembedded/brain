@@ -99,8 +99,8 @@ fn kv_label(kv: model::kv_tier::KvTier) -> &'static str {
 impl Qwen35Engine {
     /// Open a Qwen3.8 GGUF for long-context measurement. `kv_tier` is the
     /// parsed KV storage choice (f32 when unset - the historical default
-    /// the removed `BRAIN_QWEN35_KV` reader used); the weight tier stays
-    /// uniform INT8, what the checkpoints are released as.
+    /// the removed `BRAIN_QWEN35_KV` reader used); every weight is held as
+    /// the checkpoint stores it, as `brain serve` holds it.
     pub fn open(path: &str, kv_tier: model::kv_tier::KvTier) -> Result<Qwen35Engine, String> {
         let gpus = gpu_budget();
         if gpus.is_empty() {
@@ -112,7 +112,7 @@ impl Qwen35Engine {
         let cfg = resident_config(&mg, 1)?;
         Ok(Qwen35Engine {
             path: path.to_string(),
-            tier: model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8),
+            tier: qwen35::int8_gguf_resident::held_tiers(&mg, &cfg)?,
             kv_tier,
             gpus,
             max_context: Some(cfg.max_position_embeddings).filter(|&n| n > 0),
@@ -140,7 +140,7 @@ impl LongContextEngine for Qwen35Engine {
     fn describe(&self) -> EngineInfo {
         EngineInfo {
             model: qwen35::int8_gguf_resident::MODEL.to_string(),
-            weight_tier: self.tier.describe(),
+            weight_tier: self.tier.summary(),
             // The GQA window is stored in the chosen KV tier; the recurrent
             // state is fp32 words whatever it is.
             kv_precision: kv_label(self.kv_tier).into(),
@@ -264,7 +264,7 @@ impl LongContextEngine for Qwen35MoeEngine {
     fn describe(&self) -> EngineInfo {
         EngineInfo {
             model: qwen35moe::gguf_load::MODEL.to_string(),
-            weight_tier: self.tier.describe(),
+            weight_tier: self.tier.summary(),
             kv_precision: kv_label(self.kv_tier).into(),
             backend: gpu_core::backend_name().to_string(),
             devices: vec![format!("gpu{} {}", self.gpu.0, self.gpu.1)],

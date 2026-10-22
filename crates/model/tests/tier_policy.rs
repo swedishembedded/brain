@@ -105,4 +105,6 @@ fn a_per_leaf_policy_holds_every_leaf_at_its_own_tier() {
         assert_eq!(p.want(name), tier, "{name}");
     }
     assert_eq!(TierPolicy::per_leaf(std::iter::empty()), TierPolicy::uniform(DType::I8), "no leaves: the int8 default");
+    assert_eq!(p.summary(), "q4k, i8 x2");
+    assert_eq!(TierPolicy::uniform(DType::Q4).summary(), "q4");
 }

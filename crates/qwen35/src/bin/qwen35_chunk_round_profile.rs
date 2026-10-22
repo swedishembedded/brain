@@ -40,7 +40,8 @@ fn main() {
         eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
         std::process::exit(2);
     }
-    let r = Qwen35GgufResident::new(path, devices, CAP, model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8));
+    let tier = qwen35::int8_gguf_resident::held_tiers_at(&path).unwrap_or_else(|e| panic!("{e}"));
+    let r = Qwen35GgufResident::new(path, devices, CAP, tier);
     let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
     let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
 

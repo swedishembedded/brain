@@ -687,6 +687,13 @@ pub fn held_tiers(mg: &MmapGguf, cfg: &Qwen35Config) -> Result<TierPolicy, Strin
     Ok(TierPolicy::per_leaf(leaves))
 }
 
+/// [`held_tiers`] of the checkpoint at `path`.
+pub fn held_tiers_at(path: &str) -> Result<TierPolicy, String> {
+    let mg = MmapGguf::open(path)?;
+    let cfg = resident_config(&mg, 1)?;
+    held_tiers(&mg, &cfg)
+}
+
 /// [`crate::gguf_import::config_from_gguf`] with the two adjustments a
 /// multi-card resident needs, in one place so the resident and its tests
 /// cannot disagree:

@@ -59,14 +59,14 @@ fn main() {
         std::process::exit(2);
     }
 
-    let tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
+    let tier = qwen35::int8_gguf_resident::held_tiers_at(&path).unwrap_or_else(|e| panic!("{e}"));
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
     let cfg = resident_config(&mg, cap).expect("resident_config");
     drop(mg);
     let kv = model::kv_tier::KvTier::parse(flag("--kv").as_deref().unwrap_or("f32")).unwrap_or_else(|e| panic!("{e}"));
     let r = Qwen35GgufResident::new(path, devices, cap, tier.clone()).with_kv_tier(kv);
     let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
-    println!("qwen35 prefill profile: {} layers, weight tier {}, kv {kv}, {} stage(s), backend {}", cfg.n_layers, tier.describe(), placed.len(), gpu_core::backend_name());
+    println!("qwen35 prefill profile: {} layers, weight tier {}, kv {kv}, {} stage(s), backend {}", cfg.n_layers, tier.summary(), placed.len(), gpu_core::backend_name());
     let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
 
     // A/B switch: `BRAIN_PREFILL_ARENA=0` runs the rounds without the scratch arena

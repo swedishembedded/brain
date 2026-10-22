@@ -37,10 +37,8 @@
 use checkpoint::gguf::MmapGguf;
 use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
-use gpu_core::select::Dtype;
 use model::adapter::bank::{AdapterBankConfig, AdapterTargets, VerifiedAdapter};
 use model::kv_tier::KvTier;
-use model::ops::TierPolicy;
 use model::serve::AdapterId;
 use qwen35::int8_gguf_resident::{budgeted_gpus, Qwen35GgufResident};
 use residency::multi::MultiDeviceResidentModel;
@@ -93,7 +91,7 @@ fn main() {
     // The stored Q8_0 tier, which is what the evaluation server holds its
     // weights at when no `--weights` override is given: a scoring pass must see
     // the arithmetic the served request sees.
-    let tier = TierPolicy::uniform(Dtype::I8);
+    let tier = qwen35::int8_gguf_resident::held_tiers_at(gguf).unwrap_or_else(|e| panic!("{e}"));
     let resident = Qwen35GgufResident::new(gguf.clone(), devices, cap, tier).with_kv_tier(kv);
     let key = resident.instance_key("generate", &capability::Invocation::new());
     let placed: Vec<Device> = resident.estimate_multi(&key).devices().collect();

@@ -100,7 +100,7 @@ fn main() {
         eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
         std::process::exit(2);
     }
-    let tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
+    let tier = qwen35::int8_gguf_resident::held_tiers_at(&args.gguf).unwrap_or_else(|e| panic!("{e}"));
     let r = Qwen35GgufResident::new(args.gguf.clone(), devices, args.ctx, tier).with_kv_tier(args.kv).with_max_batch(max_batch);
     let cost = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new()));
     let placed: Vec<Device> = cost.devices().collect();

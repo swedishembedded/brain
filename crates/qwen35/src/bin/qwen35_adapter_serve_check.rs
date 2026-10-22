@@ -25,9 +25,7 @@
 use std::time::Instant;
 
 use data::tokenizer::Tokenizer;
-use gpu_core::select::Dtype;
 use model::adapter::bank::{AdapterBankConfig, AdapterServing, AdapterTargets, VerifiedAdapter};
-use model::ops::TierPolicy;
 use model::serve::{AdapterId, Request, SampleParams, Scheduler};
 use qwen35::int8_gguf_resident::{Qwen35GgufEngine, Qwen35GgufResident};
 use residency::multi::MultiDeviceResidentModel;
@@ -74,7 +72,8 @@ fn main() {
         eprintln!("qwen35_adapter_serve_check: no usable GPU");
         std::process::exit(2);
     }
-    let r = Qwen35GgufResident::new(gguf, devices, CAP, TierPolicy::uniform(Dtype::I8)).with_max_batch(BATCH as u32);
+    let tier = qwen35::int8_gguf_resident::held_tiers_at(&gguf).unwrap_or_else(|e| panic!("{e}"));
+    let r = Qwen35GgufResident::new(gguf, devices, CAP, tier).with_max_batch(BATCH as u32);
     let key = r.instance_key("generate", &capability::Invocation::new());
     let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
     let (mut engine, tok, _stop) = r.activate_engine(&placed).expect("activate the real checkpoint");

@@ -84,12 +84,8 @@ fn main() {
         policy.set("--weight-format", &v).unwrap_or_else(|e| panic!("{e}"));
     }
     // Unset, every tensor as the checkpoint stores it - `brain serve`'s default.
-    let tier = policy.weights.unwrap_or_else(|| {
-        let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
-        let cfg = resident_config(&mg, CAP).expect("resident_config");
-        qwen35::int8_gguf_resident::held_tiers(&mg, &cfg).unwrap_or_else(|e| panic!("{e}"))
-    });
-    println!("weight tier: {} ({} per-tensor exceptions)", tier.default_dtype().name(), tier.rule_count());
+    let tier = policy.weights.unwrap_or_else(|| qwen35::int8_gguf_resident::held_tiers_at(&path).unwrap_or_else(|e| panic!("{e}")));
+    println!("weight tier: {}", tier.summary());
     if batch.is_some() || context.is_some() {
         return synthetic_context(&path, devices, &tier, kv, context.unwrap_or(CAP), batch.unwrap_or(1), steps);
     }
@@ -224,8 +220,8 @@ fn baseline_json(
     let ms_per_token = 1e3 * p.wall_s / p.steps as f64;
     serde_json::json!({
         "scenario": "latency",
-        "target": format!("qwen35:{}-gguf-resident", tier.describe()),
-        "notes": format!("weight tier: {}", tier.describe()),
+        "target": format!("qwen35:{}-gguf-resident", tier.summary()),
+        "notes": format!("weight tier: {}", tier.summary()),
         "workload": "decode",
         "best_of_n": 1,
         "env": {
