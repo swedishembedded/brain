@@ -139,9 +139,9 @@ const TARGET_LIST: &str = "
 targets (--target):
   qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]][:i8w][:kvf32]   the real paged serving engine on random weights
   qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]
-                                     `longctx` only: the Qwen3.8 GGUF resident; weights are int8
-                                     (what the checkpoints are released as), the `:kv` suffix picks
-                                     the GQA cache storage (f32 when absent)
+                                     `longctx` only: the Qwen3.8 GGUF resident; weights held as the
+                                     checkpoint stores them (as `brain serve` holds them), the `:kv`
+                                     suffix picks the GQA cache storage (f32 when absent)
   qwen:<weights.brain>[:i8w][:kvf32]         the paged serving engine on a real checkpoint (also `longctx`)
                                      (:i8w opts IN to int8 weights, off by default; :kvf32 opts
                                      OUT of int8 KV, which is ON by default -- either order, both optional.

@@ -136,10 +136,19 @@ impl Qwen35Engine {
     }
 }
 
+/// A checkpoint's name in a result: its last three path components without
+/// the extension - `<org>/<repo>/<file>` for a file in the model store - so
+/// two releases of one model are told apart.
+fn checkpoint_label(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    let parts: Vec<String> = p.with_extension("").components().rev().take(3).map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    parts.into_iter().rev().collect::<Vec<_>>().join("/")
+}
+
 impl LongContextEngine for Qwen35Engine {
     fn describe(&self) -> EngineInfo {
         EngineInfo {
-            model: qwen35::int8_gguf_resident::MODEL.to_string(),
+            model: checkpoint_label(&self.path),
             weight_tier: self.tier.summary(),
             // The GQA window is stored in the chosen KV tier; the recurrent
             // state is fp32 words whatever it is.
@@ -606,6 +615,14 @@ mod tests {
         assert!(options(&Args { ladder: Some("1,zero".into()), ..Default::default() }, "gpu", false).is_err());
         let d = options(&Args::default(), "gpu", false).unwrap();
         assert!(d.prefill.is_empty() && d.ladder.first() == Some(&1));
+    }
+
+    /// A result names the checkpoint it ran, so two releases of one model
+    /// are told apart.
+    #[test]
+    fn a_qwen35_result_is_named_by_its_checkpoint() {
+        assert_eq!(checkpoint_label("/m/Abiray/Qwen3.8-27B-Q4_K_M-GGUF/Q4_K_M.gguf"), "Abiray/Qwen3.8-27B-Q4_K_M-GGUF/Q4_K_M");
+        assert_eq!(checkpoint_label("Q8_0.gguf"), "Q8_0");
     }
 
     /// The artifact's fingerprint must say how the KV cache was stored: a
