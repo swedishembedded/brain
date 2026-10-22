@@ -535,6 +535,24 @@ pub struct TextGenerationPipelineBuilder {
     precision: Option<Precision>,
 }
 
+/// The device bytes a chat load of the Qwen3 checkpoint in `dir` holds with
+/// a `context`-token KV cache: its weights at the tier a load picks on this
+/// machine's largest card (`qwen3::footprint::int8_weights_default`), the cache
+/// and the decode scratch - the figure the load places by, read from the
+/// checkpoint's `config.json` without opening its weights. `None` when `dir`
+/// holds no Qwen3 config.
+#[must_use]
+pub fn chat_footprint_bytes(dir: &Path, context: u32) -> Option<u64> {
+    let text = std::fs::read_to_string(dir.join("config.json")).ok()?;
+    if qwen3::hf::decoder_arch(&text).ok()?.id != "qwen3" {
+        return None;
+    }
+    let cfg = qwen3::hf::decoder_config(&text).ok()?;
+    let precision = if qwen3::footprint::int8_weights_default(&cfg, largest_device_bytes()) { Precision::Int8 } else { Precision::Fp32 };
+    let shard = qwen3::Shard::whole(cfg.n_layers as usize);
+    Some(qwen3::footprint::estimate_vram_bytes(&cfg, &shard, precision.dtype(), 1, context, false, true))
+}
+
 /// The decoder's storage tier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Precision {

@@ -299,6 +299,15 @@ pub use error::{Error, ForecastFailure};
 /// writes one with [`AdapterManifest::write_atomically`] cannot drift from it.
 pub use brain_modelstore::adapter_manifest::AdapterManifest;
 
+/// The model store `brain pull` fills and `brain serve` scans when no
+/// directory is named: the same answer the CLI gives, so an application that
+/// looks for a pulled checkpoint looks where brain put it. `None` only when
+/// this user has no home directory.
+#[must_use]
+pub fn default_models_dir() -> Option<std::path::PathBuf> {
+    brain_modelstore::default_root()
+}
+
 /// A device/backend selection. Re-exported, not reinvented: the SAME type
 /// `--device` parses into (`gpu_core::devices::DeviceSpec`). An empty
 /// [`Device::default`] is the existing "auto" concept -- schedule on
@@ -365,7 +374,7 @@ pub use restore::{RestoreOptions, RestorePipeline, RestorePipelineBuilder};
 #[cfg(feature = "vision")]
 pub use segment::{Mask, Prompt, SegmentOptions, SegmentPipeline, SegmentPipelineBuilder};
 #[cfg(feature = "text")]
-pub use text::{GeneratedText, TextGenerationOptions, TextGenerationPipeline, TextGenerationPipelineBuilder};
+pub use text::{chat_footprint_bytes, GeneratedText, TextGenerationOptions, TextGenerationPipeline, TextGenerationPipelineBuilder};
 #[cfg(feature = "text")]
 pub use chat::{ChatMessage, ChatPipeline, ChatRequest, ChatResponse};
 #[cfg(feature = "text")]

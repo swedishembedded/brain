@@ -217,3 +217,34 @@ fn a_fully_synthetic_checkpoint_and_tokenizer_reach_a_real_generate() {
     assert_eq!(out.finish_reason, "length");
     assert!(out.text.chars().all(|c| VOCAB_LETTERS.clone().any(|b| b as char == c)), "every decoded char must come from the fixture's own vocab, got {:?}", out.text);
 }
+
+/// The footprint of a chat load is read from a checkpoint's `config.json`
+/// alone: a bigger model and a longer context hold more, and a directory
+/// whose config is not a Qwen3 is no answer, not a guess.
+#[test]
+fn a_chat_footprint_is_read_from_the_checkpoint_config_alone() {
+    let root = std::env::temp_dir().join(format!("brain-chat-footprint-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let write = |name: &str, config: serde_json::Value| {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+        dir
+    };
+    let qwen3 = |hidden: u64, layers: u64, ff: u64| {
+        serde_json::json!({"architectures": ["Qwen3ForCausalLM"], "head_dim": 128, "hidden_size": hidden,
+            "intermediate_size": ff, "max_position_embeddings": 40960, "model_type": "qwen3",
+            "num_attention_heads": 16, "num_hidden_layers": layers, "num_key_value_heads": 8,
+            "rms_norm_eps": 1e-06, "rope_theta": 1000000, "tie_word_embeddings": true, "vocab_size": 151936})
+    };
+    let small = write("small", qwen3(1024, 28, 3072));
+    let large = write("large", qwen3(2048, 28, 6144));
+    let other = write("other", serde_json::json!({"architectures": ["LlamaForCausalLM"]}));
+    let small_bytes = brain::chat_footprint_bytes(&small, 4096).expect("a Qwen3 config");
+    assert!(small_bytes > 1 << 30, "the 0.6B at fp32 holds over a GiB: {small_bytes}");
+    assert!(brain::chat_footprint_bytes(&large, 4096).unwrap() > small_bytes);
+    assert!(brain::chat_footprint_bytes(&small, 32768).unwrap() > small_bytes, "a longer context holds more KV");
+    assert_eq!(brain::chat_footprint_bytes(&other, 4096), None);
+    assert_eq!(brain::chat_footprint_bytes(&root.join("absent"), 4096), None);
+    std::fs::remove_dir_all(&root).ok();
+}
