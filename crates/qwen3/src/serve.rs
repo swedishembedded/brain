@@ -3743,6 +3743,29 @@ impl KvOffload for Engine {
     }
 }
 
+impl model::serve::rows::RowsForward for Engine {
+    /// One batched forward per sequence over its `1 + proposals` rows (the
+    /// `spec_decode` verify), reading the top-`cands` of every row from the
+    /// device. Sequences are forwarded one after another: each row set is a
+    /// causal chunk of a single block table.
+    fn forward_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
+        assert_eq!(tables.len(), rows.len(), "forward_rows: one row set per table");
+        tables
+            .iter_mut()
+            .zip(rows)
+            .map(|(table, inputs)| {
+                let n = inputs.len() as u32;
+                assert!(n >= 1 && n <= self.max_batch, "forward_rows: {n} rows for a decoder sized for {} rows per step", self.max_batch);
+                let base = table.len();
+                table.reserve(n, &mut self.alloc).expect("KV pool exhausted");
+                let meta = self.chunk_meta(table, base, n);
+                self.run_batched_submit(&meta, Input::Tokens(inputs), false);
+                self.topk_from_hidden(n, cands as u32)
+            })
+            .collect()
+    }
+}
+
 impl model::serve::PagedDecoder for Engine {
     fn alloc_mut(&mut self) -> &mut BlockAllocator {
         &mut self.alloc
@@ -3810,6 +3833,13 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY as usize
+    }
+    fn spec_max_draft(&self) -> usize {
+        // A verify forwards 1 + proposals rows of one sequence in one batch.
+        model::serve::rows::DEFAULT_MAX_DRAFT.min((self.max_batch as usize).saturating_sub(1))
+    }
+    fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
+        model::serve::rows::RowsForward::forward_rows(self, tables, rows, cands)
     }
     fn kv_offload_bytes(&self) -> u64 {
         Engine::kv_offload_bytes(self)
