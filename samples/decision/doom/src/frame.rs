@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn base64_matches_the_encoder_on_every_tail_length() {
-        // The three residues are where a hand-rolled codec goes wrong, and the
+        // The three residues are where an ad-hoc codec goes wrong, and the
         // symptom is a frame that is right except for its last pixels - which
         // reads as a rendering artefact rather than as a decoder bug.
         for (encoded, expect) in [

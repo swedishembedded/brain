@@ -90,9 +90,9 @@ pub struct DetectionPipeline {
     model: yolov8::Yolo,
 }
 
-/// Hand-written, not derived: `yolov8::Yolo` holds a live GPU device handle
+/// Explicit, not derived: `yolov8::Yolo` holds a live GPU device handle
 /// (no `Debug` impl), the same reason [`crate::UpscalePipeline`]'s own
-/// `Debug` is hand-written.
+/// `Debug` is explicit.
 impl std::fmt::Debug for DetectionPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DetectionPipeline").finish()

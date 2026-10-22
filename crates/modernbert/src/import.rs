@@ -33,7 +33,7 @@
 //! from the checkpoint (`nn.Identity()` on the real model, matching
 //! `ModernBertConfig::has_attn_norm`), not merely unmapped.
 //!
-//! Follows the hand-rolled `hf_to_brain(name) -> Option<Dest>` name-mapper
+//! Follows the ad-hoc `hf_to_brain(name) -> Option<Dest>` name-mapper
 //! precedent (`crates/lfm2/src/import.rs`, `crates/decide/src/import.rs`):
 //! [`hf_to_encoder`] feeds `ModernBertConfig::tensor_manifest`'s names,
 //! [`hf_to_head`] feeds `laya::tensor_manifest`'s (a SEPARATE `ParamStore`,

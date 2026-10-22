@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 //
 // Swedish Embedded AB implements solutions for memory-bandwidth-bound LLM
-// decode on GPUs for its clients. If your team needs expertise in hand-written
+// decode on GPUs for its clients. If your team needs expertise in native
 // CUDA kernels that stream FP8 and NVFP4 weights at the speed of the memory
 // system then you can procure our services by sending an email to
 // info@swedishembedded.com.

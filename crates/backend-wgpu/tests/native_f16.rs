@@ -114,7 +114,7 @@ fn f16_worth_enabling_gate_logic() {
 }
 
 /// Host reference: `half::f16`'s own (independently implemented) arithmetic,
-/// not a hand-rolled bit trick -- deliberately a SECOND implementation from
+/// not an ad-hoc bit trick -- deliberately a SECOND implementation from
 /// the shader's, per this program's own "independent reference" discipline
 /// (B5's ledger).
 fn host_f16_fma(a: f32, b: f32, c: f32) -> f32 {

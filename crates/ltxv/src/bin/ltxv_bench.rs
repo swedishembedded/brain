@@ -9,7 +9,7 @@
 //!
 //! Method follows the shared `gpu_core::profile`/`gpu_core::roof` facility
 //! (`crates/vqgan/src/bin/vqgan_bench.rs`, `crates/qwen3/src/bin/qwen_bench.rs`
-//! are the precedent) rather than a hand-rolled per-kind loop: one whole-pass
+//! are the precedent) rather than an ad-hoc per-kind loop: one whole-pass
 //! timing plus a per-kind breakdown, graded against the selected DEVICE's own
 //! measured roofline (never a hardcoded peak - an integrated GPU with no
 //! discrete card present would make a P40 literal a statement about

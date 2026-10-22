@@ -314,7 +314,7 @@ fn clean(text: &str) -> String {
     out.to_lowercase()
 }
 
-/// Hand-written reproduction of CLIP's pre-tokenization pattern
+/// Bespoke reproduction of CLIP's pre-tokenization pattern
 /// `<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+`.
 ///
 /// Three differences from [`crate::bpe`]'s GPT-2 scanner, each load-bearing:

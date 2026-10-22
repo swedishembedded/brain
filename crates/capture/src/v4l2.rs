@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Minimal V4L2 mmap-streaming capture over a hand-rolled ioctl FFI.
+//! Minimal V4L2 mmap-streaming capture over a minimal ioctl FFI.
 //!
 //! No `v4l`/`nokhwa` crate: those pull `bindgen` -> libclang at build time, which
 //! would break brain's self-contained `cargo build`. The V4L2 surface is 6 libc
-//! symbols + 8 ioctls — smaller than the SDL surface already hand-rolled in
+//! symbols + 8 ioctls - smaller than the SDL surface already bound in
 //! `wm-display`.
 //!
 //! ## ABI discipline

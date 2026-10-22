@@ -14,7 +14,7 @@
 use crate::Model;
 
 /// Numerically-stable `log(softmax(row))[idx]` - the same three-line
-/// reduction previously hand-rolled independently in `qwen3::eval::
+/// reduction previously written independently in `qwen3::eval::
 /// score_chat`/`score_chat_paged`; both now call this instead of carrying
 /// their own copy.
 pub fn row_logprob(row: &[f32], idx: usize) -> f32 {

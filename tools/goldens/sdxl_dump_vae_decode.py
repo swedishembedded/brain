@@ -8,7 +8,7 @@ Writes `<mirror>/vae/sdxl_vae_decode.safetensors`, which `make testdata/fetch`
 links to `testdata/golden/vae/`: a fixed `[1,4,16,16]` latent and
 diffusers' `vae.decode(z).sample` `[1,3,128,128]`.
 
-Why a hand-rolled load instead of `AutoencoderKL.from_pretrained`: SDXL base
+Why an ad-hoc load instead of `AutoencoderKL.from_pretrained`: SDXL base
 ships only `diffusion_pytorch_model.fp16.safetensors`, and `from_pretrained`
 looks for the un-suffixed name. brain reads that same fp16 file and upcasts to
 f32, so the golden is baked from exactly the tensors brain consumes.

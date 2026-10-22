@@ -143,7 +143,7 @@ impl OperatorProvider for CpuIsaProvider {
     }
 
     fn source(&self, _req: &OpRequest) -> ImplSource {
-        // Hand-written AVX2 GEMMs reached through `register_native`, chosen
+        // Native AVX2 GEMMs reached through `register_native`, chosen
         // against a runtime ISA probe - the CPU's equivalent of an
         // architecture-specialised kernel.
         ImplSource::Tuned

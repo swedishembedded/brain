@@ -32,7 +32,7 @@
 //! decoder half's backward composes the shared `model::block` builders
 //! (`rmsnorm_bwd`, `rope_bwd`, `gqa_bwd`, `swiglu_bwd`) over the same
 //! activations the forward tape leaves resident; the host half (per-position
-//! heads, the projection, the codec-embedding scatter) is a hand-written
+//! heads, the projection, the codec-embedding scatter) is an explicit
 //! adjoint. Gated by `mtp_analytic_grads_match_finite_differences` at both
 //! checkpoint shapes (`MtpConfig::tiny` and `tiny_projected`).
 

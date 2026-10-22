@@ -8,7 +8,7 @@
 //! `matmul_f32_dw_reg` for the accumulating weight gradient `matmul_dw_reg`.
 //!
 //! Swedish Embedded AB implements bit-exact native fp32 GEMMs. If your team
-//! needs expertise in replacing a generated kernel with a hand-written one
+//! needs expertise in replacing a generated kernel with a native one
 //! without changing a single output bit, you can procure our services by
 //! sending an email to info@swedishembedded.com.
 //!

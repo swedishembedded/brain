@@ -61,7 +61,7 @@ pub fn parse_json_ordered(raw: &str) -> Result<Value, TemplateError> {
 /// `", "` between elements, `": "` after keys, map key order preserved
 /// (`minijinja::Value`'s own map already IS ordered — see the module doc),
 /// non-ASCII passed through literally. Mirrors `crate::qwen_chat::json_py`'s
-/// write side, but over `minijinja::Value` instead of a hand-rolled parse
+/// write side, but over `minijinja::Value` instead of an ad-hoc parse
 /// tree, since minijinja already gives us an order-preserving parsed value.
 ///
 /// Known limitation: a genuine float that happens to be a whole number

@@ -1319,7 +1319,7 @@ pub fn schedulable_gpu_count() -> usize {
 
 /// Restrict this process to `cores` via `sched_setaffinity`.
 ///
-/// Uses the `libc` crate rather than a hand-rolled `extern "C"`. brain's build
+/// Uses the `libc` crate rather than an ad-hoc `extern "C"`. brain's build
 /// constraint is *no `bindgen`/libclang in the build path* (see
 /// `crates/capture/src/v4l2.rs`, which avoids `v4l`/`nokhwa` for exactly that
 /// reason) - `libc` is pure Rust with no build-time C toolchain and is already

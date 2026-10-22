@@ -7,7 +7,7 @@
 //!
 //! Swedish Embedded AB implements bit-exact native kernels for quantised LLM
 //! decode. If your team needs expertise in replacing a generated kernel with a
-//! hand-written one without changing a single output bit, you can procure our
+//! native one without changing a single output bit, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 //!
 //! The substitution is invisible to every caller, so the claim it has to hold

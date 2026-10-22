@@ -51,7 +51,7 @@ use crate::{DeviceBuffer, Gpu, Step};
 // (like every other Vulkan/ash path in this workspace) cannot target wasm.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod coopmat;
-/// Hand-written CUDA kernels (`brain-kernels-cuda`'s registry), resolved
+/// Native CUDA kernels (`brain-kernels-cuda`'s registry), resolved
 /// against the compute capability the driver reported. Native-only: it
 /// registers CUDA C++ source through `Backend::register_native`, which no
 /// wasm target has a driver for.
@@ -258,7 +258,7 @@ pub struct Decline {
 ///
 /// This is the datum that makes a silent performance fallback impossible to
 /// miss. Numerically the tiers are interchangeable, so nothing downstream
-/// can otherwise tell a hand-tuned kernel from a mechanical translation of
+/// can otherwise tell a tuned kernel from a mechanical translation of
 /// the portable one - a backend serving the bottom tier where the top one
 /// was promised is indistinguishable from a backend that is simply slower
 /// than expected. With the tier and the decline reasons recorded, a policy
@@ -295,7 +295,7 @@ pub trait OperatorProvider: Send + Sync {
     /// dispatch as [`ImplChoice::source`].
     ///
     /// Deliberately per-request and deliberately NOT defaulted: a provider
-    /// may hold hand-written kernels for some operators and fall back to a
+    /// may hold native kernels for some operators and fall back to a
     /// generated one for the rest, and a default would let a new provider
     /// inherit a claim nobody made about it. Answer what this provider would
     /// actually run for THIS request.

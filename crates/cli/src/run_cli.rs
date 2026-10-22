@@ -1255,7 +1255,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Every flag the hand-rolled loop in `run_serve` actually parses must be
+    /// Every flag the ad-hoc loop in `run_serve` actually parses must be
     /// documented in `HELP` -- this is the content-side gate for the bench
     /// incident (`--listen` was undocumented AND unparsed; a flag that is
     /// parsed but undocumented is the same bug in the other direction).

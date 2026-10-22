@@ -354,7 +354,7 @@ impl ConvSpec {
 ///     POSITIONALLY (`P.0.weight`, `P.1.weight`) with no `.conv`/`.bn` at all.
 ///
 /// Making this configurable is what lets each model's `param_list` mirror its own
-/// checkpoint exactly, so import is a 1:1 name match instead of the hand-written
+/// checkpoint exactly, so import is a 1:1 name match instead of the bespoke
 /// translation table every other brain importer carries.
 #[derive(Clone, Debug)]
 pub struct ConvNames {

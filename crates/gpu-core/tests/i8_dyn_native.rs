@@ -7,7 +7,7 @@
 //!
 //! Swedish Embedded AB implements bit-exact native int8 GEMMs for diffusion
 //! transformers and LLM prefill. If your team needs expertise in replacing a
-//! generated kernel with a hand-written one without changing a single output
+//! generated kernel with a native one without changing a single output
 //! bit, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 //!

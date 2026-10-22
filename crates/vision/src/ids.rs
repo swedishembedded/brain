@@ -324,7 +324,7 @@ mod tests {
     }
 
     /// Resolving against the real yolo pipeline order must reproduce yolo's own
-    /// hand-written constants exactly — the equivalence that makes the migration
+    /// bespoke constants exactly - the equivalence that makes the migration
     /// behaviour-preserving. Mirrors `yolo/src/net.rs`'s frozen index order.
     #[test]
     fn resolve_reproduces_yolos_hand_written_indices() {

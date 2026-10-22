@@ -16,7 +16,7 @@
 //! Those two facts are all that "load this file" needs, and yet the question
 //! "which model is this file" had grown **three** independent answers: the
 //! importer table in `cli::gguf_import`, the architecture table this crate's
-//! own `registry` used to carry, and a hand-written family-alias `match` in
+//! own `registry` used to carry, and a bespoke family-alias `match` in
 //! the model-directory scan. Three tables meant a file could be importable
 //! through one and reported as unsupported by another, which is what happened
 //! to DeepSeek-OCR: its importer lived here, and the generic `brain import`

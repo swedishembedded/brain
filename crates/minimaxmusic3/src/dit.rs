@@ -13,7 +13,7 @@
 //! dims is genuinely compute-heavy, and unlike the vocoder's DAC decoder
 //! this IS a standard transformer block shape with existing reusable
 //! device primitives (`model::block`'s `Bidir`/`rope2d_partial`/
-//! `LayerNorm`/`swiglu`/`kv_expand`), so nothing here is hand-rolled from
+//! `LayerNorm`/`swiglu`/`kv_expand`), so nothing here is ad-hoc from
 //! raw dispatches the way the vocoder's conv stack had to be.
 //!
 //! Scope: batch=1 only (every fixture and every real caller in the

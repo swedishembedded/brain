@@ -3,7 +3,7 @@
 
 //! A minimal RFC 4180 reader, because the fields we need are quoted.
 //!
-//! Hand-rolled rather than pulled in, which is this workspace's habit for
+//! Ad-hoc rather than pulled in, which is this workspace's habit for
 //! small parsers (`crates/capture`'s V4L2 ioctls, `crates/wm-display`'s SDL2,
 //! `crates/onnx`'s protobuf). The reason it cannot be a `split(',')` is
 //! concrete: a Codex `neurons.csv` community-label field looks like

@@ -191,7 +191,7 @@ impl OperatorProvider for NativeF16Provider {
     }
 
     fn source(&self, _req: &OpRequest) -> ImplSource {
-        // A hand-written kernel variant selected only where this provider
+        // A native kernel variant selected only where this provider
         // MEASURED the narrower arithmetic to be fast on the device in
         // front of it - a tuned alternative to the reference GEMM, not the
         // reference itself.

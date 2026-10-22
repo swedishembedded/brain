@@ -4,7 +4,7 @@
 //! The face stack on the NPU: ArcFace needs **no topology**, SCRFD needs shape
 //! freezing.
 //!
-//! Every other model in this tree needs a hand-written `*_topology` because
+//! Every other model in this tree needs a bespoke `*_topology` because
 //! brain holds its weights as tensors and has to emit a graph. The antelopev2
 //! face stack is the exception: it SHIPS as ONNX, and
 //! `npu::openvino::load(onnx_path)` takes a plain `.onnx`. So the question is

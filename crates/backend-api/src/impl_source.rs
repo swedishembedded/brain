@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Which *implementation family* answered an operator - the one fact that
-//! distinguishes "this ran on the hand-written kernel the backend exists for"
+//! distinguishes "this ran on the native kernel the backend exists for"
 //! from "this ran on the portable translation of it".
 //!
 //! Swedish Embedded AB implements accelerator backends whose performance
@@ -39,7 +39,7 @@ pub enum ImplSource {
     /// without it a native backend cannot run a whole model at all. It is
     /// never evidence that a native backend is worth having.
     Generated,
-    /// Hand-written for this backend, optionally specialised to a queried
+    /// Native to this backend, optionally specialised to a queried
     /// device capability. The only tier whose existence is an argument for
     /// the backend.
     Tuned,

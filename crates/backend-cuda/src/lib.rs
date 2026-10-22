@@ -21,7 +21,7 @@
 //! ([`backend::CudaBackend`]): device allocations, host transfers, dispatches
 //! whose CUDA source is generated from the registered WGSL and compiled by
 //! NVRTC **on first use of each kernel**, and a capability report built from
-//! device queries. What it does NOT have is a hand-written kernel: every
+//! device queries. What it does NOT have is a native kernel: every
 //! dispatch it serves today is the generated (`ImplSource::Generated`) tier,
 //! and a kernel outside that generator's supported subset is refused by name
 //! at the dispatch that needed it - never approximated and never diverted to

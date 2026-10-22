@@ -2717,7 +2717,7 @@ impl Engine {
                     // useful float in eight: measured at a small fraction of the
                     // bandwidth roof while taking about half of a served step.
                     // Gated via `model::block::paged_scores_variant`
-                    // (`Op::PagedAttention`), not a hand-rolled
+                    // (`Op::PagedAttention`), not an ad-hoc
                     // `caps.workgroup_reductions` check - this engine registers
                     // both kernels unconditionally, so `coop` is always `Some`.
                     let (sk, st) = model::block::paged_scores_variant(g, SCORES_B, Some(SCORES_B_WG), b * nh, cap);

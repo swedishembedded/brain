@@ -3,7 +3,7 @@
 
 //! SUPIR ("Scaling Up to Excellence", CVPR 2024) - photo-realistic blind image
 //! restoration, driven by a **frozen SDXL 1.0 base UNet** plus a 1.24B control
-//! trunk (`GLVControl`, a hand-written copy of SDXL's encoder + middle block)
+//! trunk (`GLVControl`, a bespoke copy of SDXL's encoder + middle block)
 //! and 12 adaptor modules (10 `ZeroSFT` + 2 `ZeroCrossAttn`).
 //!
 //! This crate started as an id-reservation placeholder, fixing the crate

@@ -108,7 +108,7 @@ pub struct VisionLanguagePipeline {
     resident: qwen3vl::caps::Resident,
 }
 
-/// Hand-written, not derived: `qwen3vl::caps::Resident` carries no `Debug`
+/// Explicit, not derived: `qwen3vl::caps::Resident` carries no `Debug`
 /// impl (it holds a live GPU-resident model), so a derive here would not
 /// compile.
 impl std::fmt::Debug for VisionLanguagePipeline {

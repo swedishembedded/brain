@@ -19,7 +19,7 @@
 //!
 //! Naming note: the design brief for this file named it `grad.rs`/
 //! `modelgrad.rs`, the pattern `s3dit`/`flux2`/`wan` use for a model whose
-//! forward is a HAND-WRITTEN device kernel sequence with no automatic
+//! forward is a NATIVE device kernel sequence with no automatic
 //! differentiation - those crates need an independent host f64
 //! forward-plus-analytic-backward reimplementation as ground truth, because
 //! nothing else exercises their backward math. SUPIR's trainable path is not

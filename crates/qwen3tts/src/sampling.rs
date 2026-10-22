@@ -33,7 +33,7 @@
 //! vocabulary - there is no shared token history for a repetition penalty to
 //! read, and no single stream that can lock onto a repeat the way codebook 0
 //! did. The reference configures none for them either. The
-//! residual sampler USED to be a second, hand-rolled copy of temperature/top-k/
+//! residual sampler USED to be a second, ad-hoc copy of temperature/top-k/
 //! top-p living in `mtp.rs`; that is the same shape of duplication that let
 //! `repetition_penalty` drift, so there is now exactly one implementation.
 //!
@@ -502,7 +502,7 @@ mod tests {
     }
 
     /// The residual codebooks must be filtered by the SAME top-k/top-p stages
-    /// codebook 0 is, not by a second hand-rolled copy.
+    /// codebook 0 is, not by a second ad-hoc copy.
     ///
     /// Asserted as a set equality on what each sampler can EVER return under one
     /// shared config: the survivors of `apply_top_k` + `apply_top_p` computed

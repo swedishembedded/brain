@@ -50,9 +50,9 @@ pub fn scale_shape(rows: usize, cols: usize, block: usize) -> (usize, usize) {
 /// is a 128x reduction in integer divisions on the hot path, before any
 /// parallelism or vectorization. The per-block inner loop is then a plain
 /// contiguous `out[c] = raw[c] * scale` - exactly the shape LLVM
-/// auto-vectorizes into packed SIMD multiplies without any hand-written
+/// auto-vectorizes into packed SIMD multiplies without any bespoke
 /// intrinsics, matching this crate's `matvec`/`hostmath.rs` precedent of
-/// preferring an already-vectorizable loop shape over a hand-rolled kernel
+/// preferring an already-vectorizable loop shape over an ad-hoc kernel
 /// when the compiler already gets there.
 #[inline]
 fn dequant_row(raw_row: &[f32], scale_inv: &[f32], cb: usize, br: usize, block: usize, cols: usize, out_row: &mut [f32]) {

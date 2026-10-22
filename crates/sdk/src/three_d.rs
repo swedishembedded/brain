@@ -40,7 +40,7 @@ pub struct Reconstruction {
     gpu: gpu_core::Gpu,
 }
 
-/// Hand-written, not derived: [`gpu_core::Gpu`] holds a live device handle.
+/// Explicit, not derived: [`gpu_core::Gpu`] holds a live device handle.
 impl std::fmt::Debug for Reconstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reconstruction")

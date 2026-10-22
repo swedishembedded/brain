@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The VQGAN **training** graph: SSA forward + hand-written reverse, with the
+//! The VQGAN **training** graph: SSA forward + explicit reverse, with the
 //! vector-quantiser straight-through estimator.
 //!
 //! Composition again, not a second model. The encoder and generator are the

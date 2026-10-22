@@ -3095,7 +3095,7 @@ pub fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: 
 /// never registered `softmax_rows` at all (walks straight to `reference`,
 /// same as a model with no GEMV kernel falling through `Op::MatMul`'s head),
 /// and the policy itself lives in `backend_api::select` (`Op::Softmax`),
-/// keyed on `DeviceCaps`, never a backend name or a hand-rolled
+/// keyed on `DeviceCaps`, never a backend name or an ad-hoc
 /// `caps.workgroup_reductions` check at the call site - two of which
 /// (`wan::block::Sel::new`, `ltxv::block::attn_softmax`) had independently
 /// reimplemented this exact rule before this seam existed.
@@ -3137,7 +3137,7 @@ pub const PAGED_SCORES_PER_WORKGROUP: u32 = 16;
 /// workgroup, so this takes the TOTAL score count (`batch * n_heads`) and
 /// the key axis (`cap`) rather than a plain row count, and computes the
 /// dispatch accordingly. The policy itself lives in `backend_api::select`
-/// (`Op::PagedAttention`), keyed on `DeviceCaps`, never a hand-rolled
+/// (`Op::PagedAttention`), keyed on `DeviceCaps`, never an ad-hoc
 /// `caps.workgroup_reductions` check at the call site -
 /// `qwen3::serve::Engine::run_batched`'s own scores dispatch had
 /// independently reimplemented exactly this rule before this seam existed.

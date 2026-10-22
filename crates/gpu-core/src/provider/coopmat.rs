@@ -99,7 +99,7 @@ impl OperatorProvider for CoopMatProvider {
     }
 
     fn source(&self, _req: &OpRequest) -> ImplSource {
-        // A hand-written SPIR-V pipeline against a matrix-engine shape the
+        // A bespoke SPIR-V pipeline against a matrix-engine shape the
         // device was QUERIED to support - specialised to real hardware, not
         // a translation of the reference.
         ImplSource::Tuned

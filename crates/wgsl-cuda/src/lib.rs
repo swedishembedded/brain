@@ -36,7 +36,7 @@
 //!
 //! It is not a performance tier. A mechanically translated kernel inherits the
 //! WGSL execution model - no warp intrinsics, no register blocking, no
-//! vectorised loads - and reports itself as `Generated` so a hand-written
+//! vectorised loads - and reports itself as `Generated` so a native
 //! kernel it should have lost to cannot be quietly replaced by it.
 //!
 //! # Correctness hazards this emitter exists to handle

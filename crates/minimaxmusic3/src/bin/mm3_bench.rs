@@ -715,7 +715,7 @@ fn oracle_bwd(gpu: &Gpu) {
 /// Analytic FLOPs and streamed bytes of one `depth_decoder::step` at position
 /// `pos` (0-based), from the shapes in `depth_decoder`'s own code.
 ///
-/// Hand-written because `gpu_core::cost` costs DISPATCHES, and this component
+/// Bespoke because `gpu_core::cost` costs DISPATCHES, and this component
 /// issues none: there is no `Step` to look up. Same conventions as that module
 /// so the two numbers are comparable - 1 MAC = 2 ops, transcendentals count 1,
 /// bytes are streaming traffic at 4 B/element.

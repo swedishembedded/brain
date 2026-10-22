@@ -4,7 +4,7 @@
 //! `qwen35moe::sample::generate_kv` — greedy decoding must be deterministic,
 //! stop at any EOS id, and (since it is a thin loop around the
 //! already-validated `Qwen35::step`, `crates/qwen35moe/tests/decode_step.rs`)
-//! must match a hand-rolled step-by-step argmax over the same prompt exactly.
+//! must match an ad-hoc step-by-step argmax over the same prompt exactly.
 //! Mirrors `qwenvl`'s own `generate_is_deterministic_and_respects_eos`
 //! pattern (`crates/qwenvl/src/model.rs`'s test module) for the analogous
 //! claim on this crate's own generation entry point.

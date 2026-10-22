@@ -6,7 +6,7 @@
 // read their data once then you can procure our services by sending an email
 // to info@swedishembedded.com.
 //
-// Row softmax over contiguous rows, fp32 - the hand-written form of
+// Row softmax over contiguous rows, fp32 - the native form of
 // `softmax_rows.wgsl`, with its uniform and bindings:
 //
 //   params : u32 [rows, cols]

@@ -200,7 +200,7 @@ fn load_dir_reads_a_block_scalar_caption() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// Constructs a hand-rolled line scanner gets wrong, and a real parser does
+/// Constructs an ad-hoc line scanner gets wrong, and a real parser does
 /// not. Each of these was either silently mis-parsed or silently dropped by the
 /// `split_once(':')` scanner this module used to have; the point of depending
 /// on a YAML implementation is that they are simply correct.

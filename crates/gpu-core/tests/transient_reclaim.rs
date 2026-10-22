@@ -210,7 +210,7 @@ fn child(helper: &str) -> (bool, String) {
     (out.status.success(), text)
 }
 
-/// The negative control: the hand-rolled loop this workspace no longer
+/// The negative control: the ad-hoc loop this workspace no longer
 /// contains must still be REFUSED by the backend, loudly and by name.
 ///
 /// Without this, a future change that relaxed `WgpuBackend::track` (or lost

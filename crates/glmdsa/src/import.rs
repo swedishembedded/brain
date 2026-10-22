@@ -270,7 +270,7 @@ mod tests {
 
     /// Build a tiny 2-layer (1 dense + 1 MoE, 2 routed experts) synthetic HF-shaped
     /// checkpoint dir: config.json + a single model.safetensors. Layer 1's packed
-    /// `gate_up_proj`/`down_proj` are hand-crafted (not `seq`) so expert 0 vs 1's
+    /// `gate_up_proj`/`down_proj` are purpose-built (not `seq`) so expert 0 vs 1's
     /// gate/up/down values are distinguishable and can't pass a swapped/aliased test.
     fn build_tiny_hf_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("brain-glm-import-{tag}-{}", std::process::id()));

@@ -291,7 +291,7 @@ fn nested_dict_flattening() {
 }
 
 /// F16, BF16, and F64 storages decode to the exact f32 values of their
-/// hand-written bit patterns.
+/// bespoke bit patterns.
 #[test]
 fn f16_bf16_f64_storages() {
     let p = P::new()

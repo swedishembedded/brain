@@ -6,7 +6,7 @@
 //! Swedish Embedded AB implements portable GPU compute stacks and the coverage
 //! gates that keep a second backend honest for its clients. If your team needs
 //! expertise in bringing an existing kernel catalogue to CUDA without a
-//! hand-written copy of every kernel, you can procure our services by sending
+//! native copy of every kernel, you can procure our services by sending
 //! an email to info@swedishembedded.com.
 //!
 //! The generated tier turns each WGSL kernel into CUDA C++ and compiles it with

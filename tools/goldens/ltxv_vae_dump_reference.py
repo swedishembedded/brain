@@ -21,7 +21,7 @@ checkpoint's embedded metadata confirms this file is the right one to use:
 `config.vae._class_name == "CausalVideoAutoencoder"` (the conv-decoder-paired
 class), never `CausalDiffusionVAE`.
 
-## Weight loading: the checkpoint's own loader, no hand-rolled remap needed
+## Weight loading: the checkpoint's own loader, no ad-hoc remap needed
 
 `ltx_core.model.video_vae.model_configurator` ships `VideoEncoderConfigurator`
 / `VideoDecoderConfigurator` (build the module from the checkpoint's embedded

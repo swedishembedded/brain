@@ -8,7 +8,7 @@
 //! based driver loop around it (dataset loading, weight-file attachment,
 //! LR schedule, batching, checkpoint save/resume) produces a model that
 //! actually learns, run through `rl::fit_weighted` exactly as a real caller
-//! would use it - not a hand-rolled training loop in the test itself.
+//! would use it - not an ad-hoc training loop in the test itself.
 //!
 //! Task: a small deterministic bigram - `next = (cur + 1) mod vocab` - over
 //! the whole corpus, with NO `train.weight.bin` present (every position

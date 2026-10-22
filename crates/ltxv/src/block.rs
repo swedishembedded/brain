@@ -446,7 +446,7 @@ fn attn_scores_kt(gpu: &Gpu, s: &mut Vec<Step>, q: &DeviceBuffer, k: &DeviceBuff
 /// per row) when the device supports workgroup reductions, else
 /// `attn_softmax_cross` (one thread per row, the CPU JIT's native fast
 /// path) - see [`K_SOFTMAX_ROWS`]'s doc. Gated via `model::block::
-/// softmax_variant` (`Op::Softmax`), not a hand-rolled `caps.
+/// softmax_variant` (`Op::Softmax`), not an ad-hoc `caps.
 /// workgroup_reductions` check - this crate registers both kernels
 /// unconditionally, so `coop` is always `Some`.
 fn attn_softmax(gpu: &Gpu, s: &mut Vec<Step>, scores: &DeviceBuffer, probs: &DeviceBuffer, heads: u32, nq: u32, nk: u32) {

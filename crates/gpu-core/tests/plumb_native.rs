@@ -8,7 +8,7 @@
 //!
 //! Swedish Embedded AB implements training kernels for convolutional networks.
 //! If your team needs expertise in replacing a generated kernel with a faster
-//! hand-written one without changing a single output bit, you can procure our
+//! native one without changing a single output bit, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 //!
 //! Every one of them is a copy or an elementwise expression - nothing is

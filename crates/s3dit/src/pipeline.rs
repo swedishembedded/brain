@@ -406,7 +406,7 @@ pub fn int8_dit_device_bytes(cfg: &ZImageConfig, width: u32, height: u32, cap_le
 /// any) and `vae` all resident for its whole life - never staggered phases -
 /// so declaring them together lets the planner see every resident byte at
 /// once and naturally prefer whichever card has the most room left, which is
-/// what the retired hand-written "VAE follows the encoder's now-idle card"
+/// what the retired bespoke "VAE follows the encoder's now-idle card"
 /// rule was approximating without ever checking real bytes.
 ///
 /// `.apart()` on `dit`/`te` means the placer only puts them on the same card
@@ -853,7 +853,7 @@ impl HotPipeline {
         // `place_pipeline_parts` call as `dit_gpu`/`enc_gpu` above (or, on the
         // fp32-split path, is pinned to `dit_gpu` - unchanged from before),
         // so it already accounts for real remaining budget on every card
-        // rather than a hand-written "follow the encoder's idle card" rule.
+        // rather than a scripted "follow the encoder's idle card" rule.
         progress(&format!("building VAE decoder (GPU {vae_gpu})"));
         // `VaeDecoder::from_diffusers`'s `Some("cpu")`/`Some("gpu")` already pick
         // the device explicitly regardless of the ambient default backend, so no

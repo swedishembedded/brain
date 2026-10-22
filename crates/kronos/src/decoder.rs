@@ -628,7 +628,7 @@ mod tests {
     }
 
     /// The GPU/CPU-portable incremental `kv_step` (S1) + `kv_dep_step` (S2) must
-    /// reproduce BOTH the hand-rolled host oracle (`kvcache::HostW::step_token` /
+    /// reproduce BOTH the ad-hoc host oracle (`kvcache::HostW::step_token` /
     /// `dep_step`) AND the `O(T²)` full recompute (`decode_s1`), per token, to
     /// maxabs < 3e-3. Runs on whatever backend `Gpu` picked (GPU or
     /// `BRAIN_DEVICE=cpu`) — one op set, any device. Sequence < `max_context`, so

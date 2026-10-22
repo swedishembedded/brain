@@ -25,7 +25,7 @@
 //!
 //! [`interned`] caches specialisations process-wide by `(source ptr, params)`
 //! and returns `'static` strings, so variants compose with kernel-set consts
-//! and the test-device pool exactly like hand-written kernels.
+//! and the test-device pool exactly like native kernels.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -1201,7 +1201,7 @@ fn rewrite_workgroup_size(src: &str, value: u32) -> Result<String, String> {
 /// gated on `wgpu::Features::SHADER_F16` (requested by `backend-wgpu`
 /// wherever the adapter reports it, a no-op everywhere else).
 ///
-/// This function's whole job is the ONE textual step a hand-written native-f16
+/// This function's whole job is the ONE textual step an explicit native-f16
 /// kernel body needs to become a registrable `Variant`: prepending the
 /// `enable f16;` directive `wgpu`/naga require before any `f16`-typed
 /// declaration is legal, and giving it the same `(name, source)` shape
@@ -1342,12 +1342,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 "#;
 }
 
-/// M8.7 - the ONE hand-written, production (not PoC) native-f16 dispatch
+/// M8.7 - the ONE bespoke, production (not PoC) native-f16 dispatch
 /// kernel: a native-f16 sibling of `matmul_reg3.wgsl`, registered via
 /// [`native_f16_variant`] and dispatched through
 /// `gpu_core::provider::native_f16::NativeF16Provider`. Deliberately NOT a
 /// general f32-to-f16 source rewrite (see [`native_f16_variant`]'s own doc
-/// comment for why that is out of scope) - this is a second, hand-written
+/// comment for why that is out of scope) - this is a second, native
 /// kernel body, kept in lock-step with `matmul_reg3.wgsl` by construction:
 /// identical `Params`, identical 128x128 tile / 8x8-per-thread register
 /// block / 256-thread workgroup / software-pipelined K-chunk staging (every
@@ -1623,10 +1623,10 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
 /// binding; FP8 here packs 4 bytes/`u32` AND needs a blockwise scale binding
 /// indexed `(row/128, col/128)`, neither of which that generic rewrite
 /// supports. So the FP8 matmul kernels (`matmul_gemv_f8e4m3.wgsl`/
-/// `matmul_gemv_f8e5m2.wgsl`) are hand-written, not templated - these two
+/// `matmul_gemv_f8e5m2.wgsl`) are bespoke, not templated - these two
 /// functions exist so the decode EXPRESSION itself (the fiddly, easy-to-get-
 /// wrong part) has exactly one implementation, pasted verbatim into both the
-/// hand-written kernel and this module's own exhaustive test, instead of a
+/// native kernel and this module's own exhaustive test, instead of a
 /// second hand-copy that could silently drift. `byte_expr` must already
 /// evaluate to a `u32` holding the raw byte in bits `[0,8)` (upper bits
 /// zero). Unlike [`bf16_decode_expr`]/[`f16_decode_expr`] this does not

@@ -6,7 +6,7 @@
 // layers onto the memory roofline of a GPU, you can procure our services by
 // sending an email to info@swedishembedded.com.
 //
-// BatchNorm's elementwise passes over an NCHW map, fp32: the hand-written
+// BatchNorm's elementwise passes over an NCHW map, fp32: the native
 // forms of `bn_train.wgsl` (normalise with batch statistics) and `bn_dx.wgsl`
 // (the input gradient), reading the identical buffers and the identical
 // uniform `[N, C, H, W]` - and GroupNorm's apply pass, `gn_apply.wgsl`

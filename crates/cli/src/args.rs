@@ -4,7 +4,7 @@
 //! Shared CLI argument grammar for the model commands (`gpt`/`qwen`/`glm`).
 //!
 //! The grammar itself now lives in `crates/appopts`, because the samples need
-//! the same one and a second hand-rolled parser per application is how
+//! the same one and a second ad-hoc parser per application is how
 //! `--flag` at the end of a line comes to mean two different things. It is
 //! re-exported here so every `crate::args::Args` call site is unchanged.
 //!
@@ -54,7 +54,7 @@ pub fn split_train_precision(args: &[String]) -> Result<(model::TrainPrecision, 
 /// `brain caps <arch>` documents (`--out <blob_name>=<path>`, what `brain
 /// do`/D-Bus callers actually type) - the manifest line is the only place a
 /// caller learns an action's `--out` syntax from, and typing it against a
-/// dedicated command whose own hand-rolled parser only knew the bare form
+/// dedicated command whose own ad-hoc parser only knew the bare form
 /// used to silently write a file literally named `image=out.png` (or worse,
 /// turn a path VALUE into a nested `image=/...` directory tree), with no
 /// error at all - found live on `brain flux2 generate`. Strips `blob_name=`

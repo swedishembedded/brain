@@ -857,7 +857,7 @@ impl Weight {
             }
             // M8.6 added `F8E4M3`/`F8E5M2` as `DType` tiers, `kernels::
             // template::f8e4m3_decode_expr`/`f8e5m2_decode_expr`, and a
-            // hand-written blockwise-scale device kernel
+            // native blockwise-scale device kernel
             // (`matmul_gemv_f8e4m3`/`matmul_gemv_f8e5m2`), but deliberately
             // did NOT wire a `Weight::F8E4M3`/`Weight::F8E5M2` arm into this
             // façade this session either - same clearly-scoped follow-up
@@ -1193,7 +1193,7 @@ impl Ops {
     /// **Why this exists.** Before this constructor, `Ops::matmul` always
     /// resolved through a hard-wired `CachedSelector<DefaultSelector>` with
     /// no injection point - which is exactly why `qwen3::serve::Engine` kept
-    /// its own hand-rolled int8 GEMM dispatch (`Self::mm8`/`Self::tune_i8`)
+    /// its own ad-hoc int8 GEMM dispatch (`Self::mm8`/`Self::tune_i8`)
     /// entirely OUTSIDE this façade instead of calling `Ops::matmul`: its
     /// `tuned_i8` selector is a REAL, per-device MEASURED policy
     /// (`AutoTuner`+`FileTuneStore`), and routing through the old fixed

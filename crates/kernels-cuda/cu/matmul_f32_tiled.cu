@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 //
-// out = x @ W^T, fp32 - the hand-written CUDA form of the portable
+// out = x @ W^T, fp32 - the native CUDA form of the portable
 // `matmul.wgsl` reference, with the identical buffer layout, the identical
 // uniform (`m, k, n`) and the identical REDUCTION ORDER.
 //

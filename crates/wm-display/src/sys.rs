@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Minimal hand-rolled SDL2 FFI — exactly the calls the world-model window
+//! Minimal SDL2 FFI - exactly the calls the world-model window
 //! needs, linked against the system libSDL2 (see build.rs). No sdl2/sdl2-sys
 //! crate: brain hand-rolls small FFI surfaces (cf. the vendored ONNX protobuf)
 //! and needs ~15 functions.

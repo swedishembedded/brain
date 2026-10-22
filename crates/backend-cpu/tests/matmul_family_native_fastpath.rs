@@ -9,7 +9,7 @@
 //! than a hard error, leaving that kernel's compiled slot `None`.
 //! `wgsl_cpu::Jit::run` panics if anything ever dispatches one of those
 //! `None` slots, so on the CPU backend these kernels are ONLY safe to
-//! register if `backend-cpu`'s own `dispatch()` routes them to a hand-written
+//! register if `backend-cpu`'s own `dispatch()` routes them to a native
 //! Rust fast path (`fast_ops`/`fast_conv`) by kernel identity, bypassing the
 //! JIT entirely - see `crates/backend-cpu/src/lib.rs`'s `FastIdx`.
 //!

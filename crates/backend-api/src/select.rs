@@ -226,7 +226,7 @@ pub enum Op {
     /// Forward 3D convolution, NCTHW (`conv3d` direct vs the `im2col3d_at` +
     /// `matmul_reg3` + `nlc_bias_nchw` GEMM lowering) - the exact
     /// [`Op::Conv2d`] shape one dimension up, migrated from
-    /// `vae::blocks3d::Builder3d::conv_step`'s own hand-rolled
+    /// `vae::blocks3d::Builder3d::conv_step`'s own ad-hoc
     /// `cout < GEMM_CONV3D_MIN_COUT || pos_n < GEMM_CONV3D_MIN_POS` check
     /// (Phase 5, M5.3 - found by the same "does a good kernel already exist"
     /// question `Op::Conv2d` itself was found by, still unmigrated a phase
@@ -1287,7 +1287,7 @@ pub enum TileShape {
 /// pipeline-depth, derived from tunable consts rather than a second hand-
 /// unrolled kernel file) needs new kernel-generation engineering that is
 /// still a real, documented follow-up, not attempted here; M8.15 instead
-/// ships ONE additional hand-written tile size (`TileShape::Narrow64`,
+/// ships ONE additional bespoke tile size (`TileShape::Narrow64`,
 /// `matmul_reg3_64.wgsl`) rather than an exhaustive search space. Split-K is
 /// different: `matmul_reg3_splitk.wgsl` already takes its slice count as a
 /// RUNTIME `Params` field (`p.slices`), so varying it needs no recompilation

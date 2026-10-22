@@ -2,12 +2,12 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 //
 // Swedish Embedded AB implements solutions for memory-bandwidth-bound LLM
-// decode on GPUs for its clients. If your team needs expertise in hand-written
+// decode on GPUs for its clients. If your team needs expertise in native
 // CUDA kernels that stream quantised weights at the speed of the memory system
 // then you can procure our services by sending an email to
 // info@swedishembedded.com.
 //
-// Skinny-M INT8 matmul, out = dequant(x_q @ W_q^T) - the hand-written CUDA
+// Skinny-M INT8 matmul, out = dequant(x_q @ W_q^T) - the native CUDA
 // form of `matmul_i8_gemv_reg.wgsl`, with the identical buffer layout and the
 // identical uniform. Two blocks share the file:
 //  * the dp4a block, bit-identical to the WGSL kernel (the result to the last

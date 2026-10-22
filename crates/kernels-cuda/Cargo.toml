@@ -5,7 +5,7 @@ name = "brain-kernels-cuda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Hand-written CUDA C++ kernel sources and their tier metadata - a registry of its own, deliberately separate from the WGSL catalogue."
+description = "Native CUDA C++ kernel sources and their tier metadata - a registry of its own, deliberately separate from the WGSL catalogue."
 
 [lib]
 name = "kernels_cuda"

@@ -12,7 +12,7 @@
 //!    builds a `qwen3::Qwen` whose `.lora_a`/`.lora_b` are the only trainable
 //!    parameters - the exact mechanism `qwen3::finetune::Mode::Lora` drives);
 //!  - `data::imageset::load_dir` for the captioned-image folder format (never a
-//!    hand-rolled scanner - see that module's own doc);
+//!    ad-hoc scanner - see that module's own doc);
 //!  - `qwen3::lora::save_adapter` (via [`Qwen3Vl::save_lora_adapter`]) for the
 //!    adapter-only checkpoint.
 //!

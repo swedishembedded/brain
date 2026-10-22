@@ -204,7 +204,7 @@ fn run_do_impl(argv: &[String], assembly: Option<&capability::Assembly>) -> i32 
     };
     let spec = act.spec();
 
-    // Build a clap parser *from the action's schema* - no hand-rolled arg loop.
+    // Build a clap parser *from the action's schema* - no ad-hoc arg loop.
     // Each param becomes a typed `--name`, plus `--in`/`--out name=path` and `--json`.
     let matches = match build_parser(&model, &action, &spec).try_get_matches_from(&argv[2..]) {
         Ok(m) => m,

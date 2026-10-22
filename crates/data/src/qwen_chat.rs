@@ -153,7 +153,7 @@ impl Default for TemplateOpts {
 
 // ===================== json_py: Python json.dumps(ensure_ascii=False) =====================
 
-/// A hand-rolled, order-preserving JSON re-serializer matching Python's
+/// An ad-hoc, order-preserving JSON re-serializer matching Python's
 /// `json.dumps(x, ensure_ascii=False)` byte-for-byte (given `x = json.loads(raw)`
 /// with no numeric renormalization — see [`dumps`]).
 ///

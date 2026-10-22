@@ -108,14 +108,14 @@ impl Rng {
 /// The deterministic LCG that fixtures, parity probes and kernel tests use to
 /// fill buffers without pulling in `rand` — and the sanctioned home for
 /// PRODUCTION deterministic init too (e.g. seeding a LoRA/adapter weight):
-/// audit F40 found post-unification hand-rolled copies growing back precisely
+/// audit F40 found post-unification ad-hoc copies growing back precisely
 /// because this doc used to scope the type to tests only, leaving production
 /// init with no named home. If a stream must be *statistically stronger* than
 /// an LCG, use [`Rng`] (SplitMix64) — never a fresh local copy of either.
 ///
 /// It is a **separate type from [`Rng`] on purpose**: [`Rng`] is SplitMix64 and
 /// defines the on-disk datasets, so its stream must never move. This one exists
-/// so the ~40 hand-rolled copies of
+/// so the ~40 ad-hoc copies of
 ///
 /// ```text
 /// *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -138,7 +138,7 @@ pub struct Lcg {
 
 impl Lcg {
     /// Seed the generator. The first value returned is the seed *advanced once*,
-    /// matching the hand-rolled helpers this replaces.
+    /// matching the ad-hoc helpers this replaces.
     pub fn new(seed: u64) -> Self {
         Lcg { state: seed }
     }

@@ -8,7 +8,7 @@
 //! headers and dequantizes every mainstream GGML quant to fp32, and
 //! [`crate::model_dir`] scans `$BRAIN_MODELS_DIR`, synthesizes a `ModelCard`
 //! from each file's KV, and dispatches BY FAMILY. What was NOT generic was
-//! architecture-specific *conversion*: `qwen35moe` had a hand-written importer
+//! architecture-specific *conversion*: `qwen35moe` had a bespoke importer
 //! reachable only through its own bespoke `brain qwen35moe import` subcommand,
 //! invisible to auto-discovery. Adding a second architecture that way would
 //! mean inventing a second subcommand and separately remembering to wire it

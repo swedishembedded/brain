@@ -11,7 +11,7 @@
 //! difference is measurable in moves.
 //!
 //! There are a median of 59 admissible macros at each step, so the decision
-//! is real. The library currently settles it with a hand-written tiebreak
+//! is real. The library currently settles it with a scripted tiebreak
 //! (most cubies home, then least displacement, then fewest moves), which is
 //! a reasonable guess and nothing more.
 //!
@@ -315,7 +315,7 @@ pub fn cost_under_rule(book: &Playbook, cube: &Cube) -> Option<usize> {
 /// off it by construction. So the states recorded here are the candidates
 /// themselves, including the rejected ones.
 ///
-/// Each is labelled by solving FROM it under the hand-written rule. That
+/// Each is labelled by solving FROM it under the scripted rule. That
 /// makes the label exact rather than bootstrapped, and it makes the resulting
 /// chooser one step of policy improvement over that rule: picking the
 /// successor with the least `macro length + cost-to-go under the rule` is,

@@ -106,7 +106,7 @@ pub fn manifest_resident() -> Manifest {
 /// layout [`Mirror::forward`] expects. `pub` so
 /// `tests/t9_caps_matches_direct.rs`'s own "direct" comparison path builds
 /// its `Mirror::forward` input through the identical conversion this action
-/// uses, rather than a second hand-written copy that could silently drift.
+/// uses, rather than a second bespoke copy that could silently drift.
 pub fn hwc_to_chw(hwc: &[f32], w: u32, h: u32) -> Vec<f32> {
     let (w, h) = (w as usize, h as usize);
     let mut chw = vec![0.0f32; 3 * w * h];

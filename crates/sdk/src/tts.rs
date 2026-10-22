@@ -263,7 +263,7 @@ pub struct TtsPipeline {
     backend: Backend,
 }
 
-/// Hand-written, not derived: neither `qwen3tts::pipeline::TtsPaths` nor
+/// Explicit, not derived: neither `qwen3tts::pipeline::TtsPaths` nor
 /// `cosyvoice::pipeline::CosyVoicePaths` carries a `Debug` impl (both are
 /// plain path bundles, not live device handles the way most other
 /// pipelines' wrapped types are), so this reflects the one field per backend

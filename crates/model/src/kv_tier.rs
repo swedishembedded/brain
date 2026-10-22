@@ -689,7 +689,7 @@ impl KvKernels {
         let threads = s.batch * s.n_heads * s.cap;
         match (&k.scales, self.tier.element) {
             (None, _) => g.step(self.scores, &[q, &k.data, block_tables, seq_lens, scores], &params, threads),
-            // The int8 kernel is hand-written with its scales before the output; the fp8 one is a
+            // The int8 kernel is written with its scales before the output; the fp8 one is a
             // template rewrite of the f32 kernel, which appends the scales binding last.
             (Some(sc), KvElement::Fp8E4m3) => g.step(self.scores, &[q, &k.data, block_tables, seq_lens, scores, sc], &params, threads),
             (Some(sc), _) => g.step(self.scores, &[q, &k.data, block_tables, seq_lens, sc, scores], &params, threads),

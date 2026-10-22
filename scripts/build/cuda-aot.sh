@@ -11,7 +11,7 @@
 # sending an email to info@swedishembedded.com.
 #
 # Compiles the generated tier (the whole WGSL catalogue through wgsl-cuda) and
-# the hand-written kernels of crates/kernels-cuda into per-architecture cubins
+# the native kernels of crates/kernels-cuda into per-architecture cubins
 # plus portable PTX, with a manifest, in the AOT directory the CUDA backend
 # reads at run time. A machine that has the NVIDIA driver and no CUDA toolkit
 # then runs those kernels without NVRTC.

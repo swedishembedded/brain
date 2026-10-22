@@ -68,7 +68,7 @@
 //!
 //! Two backends is not redundancy here. This decode path's dominant kernels -
 //! `moe_linear_gated`, `silu_mul`, `scale_add`, `concat_split`, the `matmul`
-//! family - are hand-written Rust siblings on `backend-cpu`, selected by
+//! family - are bespoke Rust siblings on `backend-cpu`, selected by
 //! kernel NAME in its dispatch ladder and validated against scalar references
 //! that live beside them; wgpu runs the WGSL. They are two implementations of
 //! the same contract, and a gate on one says nothing about the other. The
@@ -162,7 +162,7 @@ fn real_lm_decoder_matches_llamacpp() {
 /// This is not a duplicate of the test above: the two backends do not share an
 /// implementation of this decode path's dominant kernels. `moe_linear_gated`,
 /// `silu_mul`, `scale_add`, `concat_split` and the `matmul` family are
-/// hand-written Rust siblings on `backend-cpu` (selected by kernel NAME in its
+/// bespoke Rust siblings on `backend-cpu` (selected by kernel NAME in its
 /// dispatch ladder), while wgpu runs the WGSL itself. Gating only one of them
 /// against llama.cpp leaves the other's ~12 GB real-weight behaviour unproven,
 /// and this decoder is served on both.

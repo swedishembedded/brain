@@ -13,7 +13,7 @@
 //! # Why this is a `const`, not a configuration file
 //!
 //! A tier table is a status ledger: "this operator is supposed to be
-//! hand-written by now". Ledgers rot exactly when nothing reads them. As a
+//! native by now". Ledgers rot exactly when nothing reads them. As a
 //! `.toml` this table would be parsed at run time by a backend that has no
 //! reason to fail if it disagrees with reality, and a claim nothing checks
 //! is indistinguishable from a claim that is false. As a `const` it is
@@ -53,7 +53,7 @@ pub struct PolicyEntry {
 /// brain's CUDA tier requirements.
 ///
 /// **Still empty, and for a precise reason that is not "no kernel exists".**
-/// A hand-written `Op::MatMul` kernel now ships and is dispatched, but it
+/// A native `Op::MatMul` kernel now ships and is dispatched, but it
 /// covers exactly ONE weight tier - plain f32. Every quantized tier
 /// (`I8`/`Q4`/K-quant) and both backward GEMMs are still answered by the
 /// generated tier, correctly and by design.

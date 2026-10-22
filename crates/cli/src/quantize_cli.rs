@@ -9,7 +9,7 @@
 //! our services by sending an email to info@swedishembedded.com.
 //!
 //! `brain import` reads a quantized GGUF and produces brain's internal
-//! format, picking a hand-written per-architecture importer from the file's
+//! format, picking a bespoke per-architecture importer from the file's
 //! own `general.architecture`. This goes the other way and needs no
 //! per-architecture code at all: `checkpoint::quantize` decides each tensor's
 //! fate from its shape plus a name list supplied on the command line, so a

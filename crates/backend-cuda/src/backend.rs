@@ -1357,7 +1357,7 @@ fn query_caps(ctx: &exec::Context) -> Result<DeviceCaps, String> {
     // level is `Emulated`. Reporting `Native` here would tell a selector this
     // backend has dedicated int8 hardware behind that kernel when what it
     // actually has is a loop, which is precisely the conflation `TierLevel`
-    // exists to prevent. A hand-written tuned kernel that really does issue
+    // exists to prevent. A native tuned kernel that really does issue
     // the instruction is what raises this, on the capability that was queried.
     for dt in [DType::I8, DType::Q4, DType::Q4K, DType::Q8K] {
         arch.set_tier(dt, TierSupport { level: TierLevel::Emulated, ..TierSupport::default() });

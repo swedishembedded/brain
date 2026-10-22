@@ -10,7 +10,7 @@
 //! import_gguf`], so this loader and the ahead-of-time converter share one
 //! naming table and cannot silently drift apart. The actual `TensorSource`
 //! forwarding is `checkpoint::gguf_src::GgufSource` - shared with `ltxv` and
-//! `gemma4`'s equivalents rather than a fourth hand-rolled copy - which is
+//! `gemma4`'s equivalents rather than a fourth ad-hoc copy - which is
 //! what makes an F32 tensor in the file (city96's release leaves every 1-D
 //! tensor plain F32) zero-copy all the way to a device upload, and a
 //! quantized one (Q3_K, …) dequantize on demand, one tensor at a time.

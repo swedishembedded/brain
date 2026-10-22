@@ -70,9 +70,9 @@ pub struct DepthPipeline {
     session: zipdepth::caps::Session,
 }
 
-/// Hand-written, not derived: `zipdepth::caps::Session` holds a live GPU
+/// Explicit, not derived: `zipdepth::caps::Session` holds a live GPU
 /// device handle (no `Debug` impl), the same reason
-/// [`crate::UpscalePipeline`]'s own `Debug` is hand-written.
+/// [`crate::UpscalePipeline`]'s own `Debug` is explicit.
 impl std::fmt::Debug for DepthPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DepthPipeline").field("native_input", &self.session.native_input()).finish()

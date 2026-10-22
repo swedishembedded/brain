@@ -15,7 +15,7 @@
 //! 2. **Text tokenization, against HF ground truth.** The expected ids were
 //!    produced by `tokenizers` on `deepseek-ai/DeepSeek-OCR`'s own
 //!    `tokenizer.json` (the vocab and merges in the GGUF are the same table;
-//!    what is under test is brain's hand-written pre-tokenizer + merge loop).
+//!    what is under test is brain's bespoke pre-tokenizer + merge loop).
 //!    `"Hello" -> [19923]` is independently the tokenization
 //!    `crates/deepseekv2/tests/generate.rs` anchors its llama.cpp comparison
 //!    on, so the two agree on at least one point by construction.

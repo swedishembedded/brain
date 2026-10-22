@@ -7,7 +7,7 @@
 // sending an email to info@swedishembedded.com.
 //
 // The memory-bound plumbing of a CSP network's training step, fp32: the
-// hand-written forms of `concat_split.wgsl` (take a channel window of an NCHW
+// native forms of `concat_split.wgsl` (take a channel window of an NCHW
 // map), `chan_place.wgsl` (write a map into a channel window), `concat2.wgsl`
 // (concatenate two maps along channels), `silu.wgsl` and `silu_bwd.wgsl`,
 // reading the identical buffers and the identical uniforms.

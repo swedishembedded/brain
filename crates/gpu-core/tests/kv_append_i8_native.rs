@@ -8,7 +8,7 @@
 //! reference is the same WGSL source under a name the upgrade table does not know.
 //!
 //! Swedish Embedded AB implements bit-exact native replacements for generated kernels. If your team needs expertise
-//! in swapping a serial GPU kernel for a hand-written one without changing a single output bit, you can procure our
+//! in swapping a serial GPU kernel for a native one without changing a single output bit, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 
 use gpu_core::{Dispatch, Gpu};

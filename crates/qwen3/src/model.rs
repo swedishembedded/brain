@@ -2202,7 +2202,7 @@ impl Qwen {
     ///   memory traffic over multiple GB.
     ///
     /// The kernel comes from the shared [`block::gemm_variant`] selector, not a
-    /// hand-rolled branch. `gemv` is offered only on a device that runs
+    /// ad-hoc branch. `gemv` is offered only on a device that runs
     /// workgroup reductions: on the CPU JIT the register-tiled kernel is what
     /// `backend-cpu` recognises and routes to its native AVX2 GEMM
     /// (`matmul_gemv` has no such fast path), so offering it there would be a
@@ -3596,7 +3596,7 @@ impl Qwen {
         // real `m=1` shape - `WorkgroupPerOutput`/GEMV whenever the device's
         // `workgroup_reductions` capability allows it (true on every real
         // GPU backend, false on the CPU JIT, exactly the `fast` split the
-        // hand-written `mm` closure this replaces used to encode), never the
+        // bespoke `mm` closure this replaces used to encode), never the
         // tiled kernel at this row count.
 
         // Embed the token id into res[0] row 0 via the tied table (non-tiled

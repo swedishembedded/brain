@@ -9,7 +9,7 @@
 //! no whole-model host materialization, then you can procure our services by
 //! sending an email to info@swedishembedded.com.
 //!
-//! Three model crates (`wan`, `ltxv`, `gemma4`) each hand-rolled a
+//! Three model crates (`wan`, `ltxv`, `gemma4`) each wrote a
 //! `TensorSource` wrapper over [`crate::gguf::MmapGguf`] that translates a
 //! canonical (model-native) tensor name to the name the GGUF actually stores
 //! it under, and forwards every read through. The three differed in exactly
@@ -154,7 +154,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    /// The capability the three original hand-rolled wrappers did not all
+    /// The capability the three original minimal wrappers did not all
     /// have (one of them had neither `raw_words` nor `with_tensor_chunks`,
     /// and none had `raw_blocks` - it did not exist yet): a Q8_0 tensor's
     /// already-quantized blocks are reachable through the rename, not just

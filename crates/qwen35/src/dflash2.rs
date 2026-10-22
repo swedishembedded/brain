@@ -921,7 +921,7 @@ impl<'a> Dflash2Drafter<'a> {
 mod tests {
     use super::top_k_ids;
 
-    /// [`top_k_ids`] is hand-rolled index arithmetic over a 248320-wide row,
+    /// [`top_k_ids`] is ad-hoc index arithmetic over a 248320-wide row,
     /// and it decides which candidates the selector ever sees - a wrong one
     /// shows up only as an acceptance rate slightly lower than it should be.
     /// So it is checked against the obvious (and far slower) sort, on a

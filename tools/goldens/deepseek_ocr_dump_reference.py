@@ -1066,7 +1066,7 @@ def dump_tiny(out_dir, manifest, seed):
     }
 
     save(out_dir, "tiny/ckpt/model.safetensors", p.t, manifest, extra={
-        "reference": "hand-written DeepSeek-OCR reference forward (randomly "
+        "reference": "explicit DeepSeek-OCR reference forward (randomly "
                      "initialised, no checkpoint involved)",
         "why": "dims break the real model's coincidences: clip_width == c_out == "
                "1024, head_dim == 64 == compressor channels, square grids and "

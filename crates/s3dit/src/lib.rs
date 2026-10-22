@@ -6,7 +6,7 @@
 //!
 //! Forward-first: latent-diffusion **inference** is the immediate goal (the DiT
 //! runs a few flow-matching steps over Qwen3-4B caption features + a noisy
-//! latent, then the VAE decodes). Training (hand-written backward + gradcheck +
+//! latent, then the VAE decodes). Training (explicit backward + gradcheck +
 //! `Shardable` + LoRA) builds on the same forward graph.
 //!
 //! Assembled from the shared crates — `dit` (multi-axis RoPE), `diffusion`

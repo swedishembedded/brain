@@ -14,7 +14,7 @@
 #      NPU == CPU for inference. Runs on the OpenVINO CPU device by default (set
 #      BRAIN_QWEN3TTS_NPU_DEVICE=npu to exercise the real NPU); skipped without codec
 #      weights.
-#   4. The CUDA backend's hand-written (tuned) kernels agree with the WGSL
+#   4. The CUDA backend's native (tuned) kernels agree with the WGSL
 #      reference provider on the same device - CUDA's second implementation of
 #      an operator == the portable one. Skips itself where no CUDA device is
 #      present, which is most machines.
@@ -65,7 +65,7 @@ run "model FD suites (MoE/ViT backward) — Vulkan backend" \
 run "qwen serve suite — CPU backend (int8 KV is the serving default)" \
                                        env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-qwen3 --lib serve::
 
-# The CUDA backend's hand-written kernels are a SECOND implementation of
+# The CUDA backend's native kernels are a SECOND implementation of
 # operators the WGSL catalogue already implements, so "CPU == Vulkan" is no
 # longer the whole parity question on an NVIDIA box: a tuned kernel that
 # disagrees with the reference produces plausible numbers everywhere else in

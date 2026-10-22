@@ -9,7 +9,7 @@
 // Dense fp32 2D convolution, NCHW, square K x K kernel, any stride and zero
 // padding: the forward, the input gradient and the weight gradient as
 // implicit GEMMs, and the 3x3 / stride 1 / pad 1 forward of a layer at least
-// 64 channels wide as a direct convolution with the same bits. The hand-written forms of `conv2d.wgsl`, `conv2d_dx.wgsl`
+// 64 channels wide as a direct convolution with the same bits. The native forms of `conv2d.wgsl`, `conv2d_dx.wgsl`
 // and `conv2d_dw.wgsl`, reading the identical buffers and the identical
 // uniform `[N, Cin, H, W, Cout, K, stride, pad, Ho, Wo]`:
 //

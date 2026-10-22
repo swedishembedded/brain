@@ -6,7 +6,7 @@
 //!
 //! The forward is parity-proven against the real checkpoint (M4); nothing
 //! proves the BACKWARD except this. Same reasoning `decide_fd.rs`'s own
-//! module doc gives: a hand-written adjoint that is wrong in residual order,
+//! module doc gives: an explicit adjoint that is wrong in residual order,
 //! in which activation it differentiates, or in a transposed GEMM still
 //! produces finite, plausible gradients and still trains - to the wrong
 //! place.

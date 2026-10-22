@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The SDXL UNet **training** graph: SSA forward + hand-written reverse.
+//! The SDXL UNet **training** graph: SSA forward + explicit reverse.
 //!
 //! **Composition, again.** This module adds no kernel, no block and no second
 //! model. The forward is exactly [`crate::model::Unet`]'s, recorded by the same

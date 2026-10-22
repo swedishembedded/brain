@@ -996,7 +996,7 @@ impl Assembly {
     /// (`flux2::pipeline::Paths`, say): every architecture whose loader takes
     /// just one path/directory (most of them - a single `"weights"` role)
     /// needs exactly this lookup with exactly this error shape, so it lives
-    /// here once rather than being hand-written per architecture.
+    /// here once rather than being bespoke per architecture.
     pub fn role_path(&self, role: &str) -> Result<String, String> {
         self.roles.get(role).map(|p| p.to_string_lossy().into_owned()).ok_or_else(|| format!("{}: assembly '{}' has no {role} role", self.arch, self.id))
     }

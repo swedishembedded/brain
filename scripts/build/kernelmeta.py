@@ -47,7 +47,7 @@ def strip_comments(text):
 
 
 def native_cpu_kernels():
-    """Kernels with a hand-written AVX2 path, read from `backend_cpu`'s
+    """Kernels with a native AVX2 path, read from `backend_cpu`'s
     `FastIdx` so this cannot drift from the backend."""
     src = (ROOT / "crates" / "backend-cpu" / "src" / "lib.rs").read_text()
     block = re.search(r"struct FastIdx \{(.*?)\n\}", src, re.S)

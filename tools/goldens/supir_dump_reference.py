@@ -668,7 +668,7 @@ def run_pipeline(model, x, args, store, manifest):
     record(store, "steps.cfg_scale_used", torch.tensor(cfg_scale_used_rows, dtype=torch.float32))
 
     # ---- sigma schedule: sampler's own path vs a hand-computed path -------
-    # Self-validation #3: `sqrt((1-abar)/abar)` from a hand-rolled linear-beta
+    # Self-validation #3: `sqrt((1-abar)/abar)` from an ad-hoc linear-beta
     # schedule (independent of `sgm.modules.diffusionmodules.util.
     # make_beta_schedule`, which the real discretizer calls), compared to
     # what `sampler.discretization` - the exact call `prepare_sampling_loop`

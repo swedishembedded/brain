@@ -212,7 +212,7 @@ pub const MAX_TXT_LEN: u32 = 512;
 fn te_bytes(max_len: u64) -> u64 {
     let c = T5Config::xxl();
     let (d, ff, layers) = (c.d_model as u64, c.d_ff as u64, c.layers as u64);
-    // The authoritative tensor manifest, not a hand-rolled re-derivation: a
+    // The authoritative tensor manifest, not an ad-hoc re-derivation: a
     // T5 block has THREE feed-forward matrices (`wi_0`/`wi_1`/`wo`), and a
     // formula that only counted two silently undercounted real weight bytes
     // by roughly one `d_ff x d_model` matrix per layer (~5 GiB for XXL) -
@@ -661,7 +661,7 @@ mod placement_tests {
     /// `te_bytes` used to hand-derive T5-XXL's weight bytes instead of
     /// reading `T5Config::xxl().param_count()` (the crate's own count,
     /// tested against a real reference dump: "4.762 B - matches the
-    /// reference dump"), and the hand-rolled formula counted only two of the
+    /// reference dump"), and the ad-hoc formula counted only two of the
     /// three feed-forward matrices a T5 block actually has
     /// (`wi_0`/`wi_1`/`wo` - `t5encoder::config`'s own `tensor_manifest`),
     /// undercounting real weight bytes by roughly one `d_ff x d_model`

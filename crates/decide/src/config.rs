@@ -126,7 +126,7 @@ impl EncoderConfig {
     /// Read a config this crate itself wrote, from its JSON text.
     ///
     /// Every field REQUIRED. [`EncoderConfig::from_json`] fills a missing one
-    /// from a default, which is right for a hand-written test fixture and
+    /// from a default, which is right for a bespoke test fixture and
     /// wrong for a checkpoint: a config that lost `n_layers` would load as a
     /// six-layer model, mismatch the weights, and the first thing to notice
     /// would be a shape error somewhere far away - or, if the numbers

@@ -23,7 +23,7 @@ fn tiny() -> ZipConfig {
 
 fn init_store(gpu: &Gpu, m: &ZipDepth) -> ParamStore {
     // Use the model's OWN initializer (fan-out-scaled initialization for ReLU, head bias 0.5,
-    // BN gamma 1 / beta 0, ImageNet mean/std), NOT a hand-rolled fixture. An
+    // BN gamma 1 / beta 0, ImageNet mean/std), NOT an ad-hoc fixture. An
     // ad-hoc small-symmetric init can leave a ReLU dead — e.g. SE's excite path,
     // whose `fc.0(pooled)` came out all-negative under 0.05*U(-1,1), zeroing
     // `h_act` and hence both fc weight gradients. That is a real property of a

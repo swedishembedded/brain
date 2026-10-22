@@ -83,7 +83,7 @@ pub struct RolloutParams {
 /// The seam objectives (GRPO, RFT/STaR, best-of-n) sample completions
 /// through: draw `n` i.i.d. completions of `prompt` under `params`, advancing
 /// `rng` once per token actually sampled (so `n == 1` costs exactly the same
-/// draws a hand-written single-sample loop would - this is what lets
+/// draws a bespoke single-sample loop would - this is what lets
 /// [`crate::train::generate`] wrap [`ModelRollout::sample_n`] and stay
 /// byte-identical to its pre-rollout implementation).
 pub trait Rollout {

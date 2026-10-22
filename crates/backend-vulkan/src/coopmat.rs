@@ -56,7 +56,7 @@ pub fn is_tile_aligned(m: u32, n: u32, k: u32) -> bool {
 /// Pack `x` to IEEE-754 binary16 bits, round-to-nearest-even, correct for
 /// subnormals and infinities alike.
 ///
-/// **The bug this replaces.** The pre-M8.9 hand-rolled version
+/// **The bug this replaces.** The pre-M8.9 ad-hoc version
 /// (`vulkan::matmul::f32_to_f16_bits`) flushed every subnormal-in-f16-range
 /// f32 value (`exp <= 0` after rebiasing, i.e. magnitude below f16's smallest
 /// normal, ~6.1e-5) to a SIGNED ZERO instead of an f16 subnormal or a

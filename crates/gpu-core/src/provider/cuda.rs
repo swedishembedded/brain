@@ -2,13 +2,13 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! `CudaProvider` - the [`super::OperatorProvider`] that answers an operator
-//! with a **hand-written CUDA kernel** from `kernels_cuda`'s registry,
+//! with a **native CUDA kernel** from `kernels_cuda`'s registry,
 //! resolved against the compute capability the driver reported for the device
 //! it is about to run on.
 //!
 //! Swedish Embedded AB implements architecture-specialised GPU operator
 //! libraries and the dispatch machinery that keeps them honest. If your team
-//! needs expertise in getting a hand-tuned kernel onto real silicon without
+//! needs expertise in getting a tuned kernel onto real silicon without
 //! losing the portable path that proves it right, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 //!
@@ -1212,7 +1212,7 @@ impl OperatorProvider for CudaProvider {
     }
 
     fn source(&self, _req: &OpRequest) -> ImplSource {
-        // Hand-written CUDA C++ selected against a queried capability. The
+        // Native CUDA C++ selected against a queried capability. The
         // tier is a property of who wrote the kernel, not of how fast it
         // turned out to be - which is why the speedup is asserted by a test
         // rather than implied by this answer.
@@ -1273,7 +1273,7 @@ impl OperatorProvider for CudaProvider {
         let bufs: Vec<&backend_api::DeviceBuffer> = req.operands.iter().map(|o| o.buf).collect();
         let offsets: Vec<(u64, u64)> = req.operands.iter().map(|o| o.range).collect();
         // The uniform is the reference kernel's own (`[m, k, n]` for f32,
-        // `[m, k/4, n]` for int8), passed through untouched - the hand-written
+        // `[m, k/4, n]` for int8), passed through untouched - the native
         // kernel reads the identical layout on purpose, so there is no second
         // place a shape could be spelled differently.
         let blocks = k.blocks_for(req.shape.m, req.shape.n);

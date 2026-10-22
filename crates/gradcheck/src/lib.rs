@@ -4,7 +4,7 @@
 //! Numerical gradient checker - brain's backprop correctness gate.
 //!
 //! Swedish Embedded AB implements correctness gates for numerical code, for
-//! teams who need to know their hand-written maths is right rather than
+//! teams who need to know their own maths is right rather than
 //! plausible. A wrong gradient does not crash; it trains slightly worse and
 //! costs weeks before anyone suspects it. If your team needs expertise in
 //! validating numerical kernels, backward passes or ported models against a
@@ -1071,7 +1071,7 @@ pub fn check_wan(seed: u64) -> Report {
 /// * `text_embedding.2.bias` - its gradient is `dctx` summed over every block's
 ///   cross-attention and every text row.
 ///
-/// This is [`elementwise_check`]'s recipe, hand-rolled because the host f64
+/// This is [`elementwise_check`]'s recipe, ad-hoc because the host f64
 /// reference is not a [`CheckModel`] (it has no device parameter store): every
 /// entry is its own comparison, so a missing share cannot hide behind a
 /// contraction. Cost is `2·Σnumel` forwards, which is why it is restricted to
@@ -1215,7 +1215,7 @@ pub fn check_ltxv(seed: u64) -> Report {
 /// * `transformer_blocks.{l}.scale_shift_table` - the nine-site modulation
 ///   fold the device path exploits via `dit::adaln::add_table`, per block.
 ///
-/// This is [`elementwise_check`]'s recipe, hand-rolled the same way
+/// This is [`elementwise_check`]'s recipe, ad-hoc the same way
 /// [`check_wan_conditioning`] is (the host f64 reference has no device
 /// parameter store): every entry is its own comparison, so a missing share
 /// cannot hide behind a contraction.
@@ -2016,7 +2016,7 @@ mod tests {
     /// the shape the atol floor waves through; see Report::dead_gradients).
     fn assert_grad_gate(report: &Report, what: &str) {
         // (1) Every tensor within the shared workspace tolerance - the same
-        // `(atol, rtol)` the hand-written checks in this module and the
+        // `(atol, rtol)` the bespoke checks in this module and the
         // `brain gradcheck` CLI both use.
         let (atol, rtol) = (4e-3, 8e-2);
         let fails = report.failures(atol, rtol);

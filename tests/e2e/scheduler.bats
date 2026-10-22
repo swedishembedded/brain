@@ -12,7 +12,7 @@
 # (batching/eviction) is `scheduler_asserts.py`, next to this file.
 #
 # Needs BRAIN_E2E=1, a GPU, and real z-image AND yolo weights (detect_pipeline.py
-# hard-requires both - it has no "skip detection" mode, unlike the hand-written
+# hard-requires both - it has no "skip detection" mode, unlike the bespoke
 # driver this file used to run instead), so this is NOT part of the fast harness:
 # `tests/e2e/samples.bats` runs the SAME samples against the weight-free mock
 # model instead, on every `make test/e2e`. Run:

@@ -4,7 +4,7 @@
 //! Host reference forward + analytic backward for ONE S³-DiT block, the unit the
 //! whole DiT training step is built from. This is the correctness anchor: a
 //! finite-difference gradcheck (`tests/block_grad.rs`) gates the analytic
-//! gradients, exactly as brain gates every hand-written backward.
+//! gradients, exactly as brain gates every explicit backward.
 //!
 //! The forward mirrors [`crate::block::build_block_steps`] op-for-op (bias-free
 //! linears; double-RMSNorm sandwich with adaLN scale/gate folded into the norm

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! CodeFormer's **code-prediction Transformer**: SSA forward + hand-written
+//! CodeFormer's **code-prediction Transformer**: SSA forward + explicit
 //! reverse under the cross-entropy objective the reference trains it with.
 //! Gated by `gradcheck::check_codeformer`.
 //!

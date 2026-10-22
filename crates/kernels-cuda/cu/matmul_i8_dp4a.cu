@@ -7,7 +7,7 @@
 // roof of the hardware they already own then you can procure our services by
 // sending an email to info@swedishembedded.com.
 //
-// Tiled INT8 GEMM, out = dequant(x_q @ W_q^T) - the hand-written CUDA form of
+// Tiled INT8 GEMM, out = dequant(x_q @ W_q^T) - the native CUDA form of
 // `matmul_i8_dyn.wgsl`, with the identical buffer layout, the identical
 // uniform and the identical RESULT TO THE LAST BIT.
 //

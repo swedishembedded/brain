@@ -246,7 +246,7 @@ mod stepcache;
 /// Drop-in fast kernels a model inherits without editing its dispatch sites.
 mod upgrade;
 
-/// [`upgrade`]'s second tier: a hand-written native kernel in place of the
+/// [`upgrade`]'s second tier: a native kernel in place of the
 /// WGSL fast variant, on a backend that can compile it. Native-only, like the
 /// `register_native` seam it dispatches through.
 #[cfg(not(target_arch = "wasm32"))]
@@ -2100,7 +2100,7 @@ mod native_facade {
             ])
         }
 
-        /// The id under which this handle's backend holds the hand-written CUDA
+        /// The id under which this handle's backend holds the native CUDA
         /// kernel `kernel`, offering it on the first ask and remembering the
         /// answer. `None` is the backend declining - it cannot compile CUDA C++
         /// (every backend but CUDA), has no NVRTC, or the device cannot host the

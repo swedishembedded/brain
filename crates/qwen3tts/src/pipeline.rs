@@ -160,7 +160,7 @@ pub struct GenOpts {
     /// yet", which [`GenOpts::plan`] answers with the reference recipe.
     ///
     /// Set it through [`GenOpts::resolve`], never by hand: it is a CACHE of
-    /// resolving [`GenOpts::sampling`], and a hand-written value that disagrees
+    /// resolving [`GenOpts::sampling`], and a bespoke value that disagrees
     /// with `sampling` is exactly the second source of truth this whole module
     /// exists to remove. It is `pub` only because struct-update syntax
     /// (`..GenOpts::default()`) across crate boundaries requires every field to

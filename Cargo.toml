@@ -403,7 +403,7 @@ minijinja-contrib = { version = "2", features = ["pycompat"] }
 # SentencePiece `Precompiled` normalizer, which segments its input by grapheme
 # before consulting the charsmap - the same crate, and the same
 # `graphemes(true)`, that HuggingFace's own `spm_precompiled` uses, because the
-# boundaries decide real token ids and a hand-rolled approximation of UAX #29
+# boundaries decide real token ids and an ad-hoc approximation of UAX #29
 # would silently disagree on exactly the scripts the 32k/256k vocabularies
 # exist for. Already resolved in this workspace's lock as a transitive of the
 # braintop TUI's unicode-truncate, so promoting it to a direct dependency adds
@@ -508,7 +508,7 @@ lto = "thin"
 # `gpu-allocator` pools freed blocks rather than returning them to the driver.
 # Uploading N bytes of weights costs N bytes of VRAM for the destination plus N
 # more: an exact, reproducible 2.00x, measured through `nvidia-smi` deltas.
-# With the fix, 1.00x - equal to a hand-written Vulkan backend on the same
+# With the fix, 1.00x - equal to a native Vulkan backend on the same
 # card. The gate is `crates/gpu-core/tests/vram_overhead.rs`; the full
 # root-cause ledger is `.agents/roadmap/backend-vulkan.md`.
 #

@@ -16,7 +16,7 @@
 //! `crate::resolve::dispatch_arch`'s generic `ARCH_TO_MODEL` capability
 //! dispatch - it wires the same two primitives into
 //! `crate::caps_cli::run_do_with_assembly` so a migrated architecture needs
-//! one row in its own `with_arch_spec` match, not a hand-written command.
+//! one row in its own `with_arch_spec` match, not a bespoke command.
 //!
 //! The non-exiting resolver core ([`try_resolve`]/[`resolve_structured`]/
 //! [`ResolveFailure`]) now lives in `loader::resolver` - any embedder

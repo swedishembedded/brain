@@ -6,7 +6,7 @@
 //! For each weight tier the façade supports (`F32`, `I8`, `Q4`) and a
 //! representative `m` sweep spanning the decode regime, the GEMV/tile
 //! crossover, and the register-tiled regime, `Ops::matmul` must reproduce
-//! EXACTLY what today's hand-written dispatch already produces on the SAME
+//! EXACTLY what today's bespoke dispatch already produces on the SAME
 //! input - driven by hand with `model::dispatch::mm_rows_off`/`mm8_rows_off`
 //! plus `model::int8::quantize_weight`/`model::int4::quantize_weight_q4`, the
 //! same helpers `crates/flux1`/`crates/flux2`/`crates/qwen3` call today. Not

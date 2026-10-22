@@ -16,7 +16,7 @@ brain-seed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # captions.yaml is parsed by a real YAML implementation into a typed schema
-# (imageset::CaptionFile), never by a hand-rolled line scanner: the caption
+# (imageset::CaptionFile), never by an ad-hoc line scanner: the caption
 # file is hand-edited, so it meets every corner of the grammar eventually.
 serde_norway.workspace = true
 minijinja.workspace = true

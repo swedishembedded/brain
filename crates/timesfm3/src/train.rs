@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! TimesFM-3 **training** graph: the SSA forward and a hand-written reverse.
+//! TimesFM-3 **training** graph: the SSA forward and an explicit reverse.
 //!
 //! Verified by [`tests::backward_matches_finite_difference_across_representative_tensors`],
 //! a whole-model directional FD gradcheck, tight across every tensor kind

@@ -38,7 +38,7 @@ pub mod arch;
 pub mod select;
 
 /// Which implementation FAMILY answered a dispatch (portable reference,
-/// generated, hand-tuned) - the tier a performance policy is stated in.
+/// generated, tuned) - the tier a performance policy is stated in.
 pub mod impl_source;
 
 /// Shared device-contention and wedge-containment primitives: the one
@@ -394,7 +394,7 @@ pub enum BindKind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ArchFeatures {
     /// Valid on every target from its floor upward; compiled for the plain
-    /// `sm_XY`. What the generated tier and most hand-written kernels are.
+    /// `sm_XY`. What the generated tier and most native kernels are.
     #[default]
     Portable,
     /// Has an arch-specific fast path guarded by the feature macros
@@ -1635,7 +1635,7 @@ pub trait Backend: Send + Sync {
     /// `gpu_core::provider::LowerCtx`, submitted and timed by the same
     /// machinery every WGSL dispatch already uses, never executed out of
     /// band. These are the trait methods a non-WGSL provider (native f16,
-    /// cooperative-matrix, a CPU ISA pack, a hand-written CUDA kernel) needs
+    /// cooperative-matrix, a CPU ISA pack, a native CUDA kernel) needs
     /// to exist before it can be written at all.
     fn register_native(&self, _spec: &NativeSpec) -> Option<NativeId> {
         None

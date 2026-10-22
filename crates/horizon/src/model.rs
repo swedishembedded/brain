@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The device model: set encoder, hazard head and value head, forward and
-//! backward as WGSL dispatch lists (the engine's hand-written-backward idiom),
+//! backward as WGSL dispatch lists (the engine's explicit-backward idiom),
 //! gradient-checked through the blanket `gradcheck::CheckModel`.
 //!
 //! ```text

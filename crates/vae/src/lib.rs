@@ -8,7 +8,7 @@
 //! Decoder-first: latent-diffusion inference only needs `decode` (the VAE runs
 //! frozen), so that is what lands first and is parity-gated against the
 //! reference. The encoder, KL diagonal-Gaussian sampling, and the trainable
-//! `Model` impl (with hand-written backward + gradcheck) land alongside as the
+//! `Model` impl (with explicit backward + gradcheck) land alongside as the
 //! training path is wired.
 //!
 //! Everything is composed from brain's existing kernels — conv (`conv_bias_reg`),

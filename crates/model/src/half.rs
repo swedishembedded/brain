@@ -24,15 +24,15 @@
 //! real re-biasing, done device-side by `dtype_variant`'s magic-multiply
 //! decode expression), but the two-per-`u32`, low-half-is-even-index
 //! packing is identical to bf16's, for consistency. Unlike [`f32_to_bf16`]
-//! (hand-rolled - bf16 narrowing is a one-shift RNE truncation with no
+//! (ad-hoc - bf16 narrowing is a one-shift RNE truncation with no
 //! crate needed), [`f32_to_f16`] delegates to the `half` crate's
 //! `f16::from_f32` - already a workspace dependency (`crates/checkpoint`
 //! uses it for the safetensors f16 reader/writer) and a well-tested library
-//! implementation is strictly preferable to a second hand-rolled
+//! implementation is strictly preferable to a second ad-hoc
 //! round-to-nearest-even/overflow/subnormal routine for the HOST side of
 //! this conversion. The WGSL DEVICE-side decode
 //! (`kernels::template::dtype_variant`'s f16 arm, `crates/kernels/src/
-//! template.rs`) is still hand-written and verified independently (an
+//! template.rs`) is still bespoke and verified independently (an
 //! exhaustive 65536-pattern host-side check against a non-bit-trick
 //! reference) - no crate can help inside a shader.
 

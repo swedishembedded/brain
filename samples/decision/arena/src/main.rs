@@ -222,7 +222,7 @@ fn main() {
         "arena: reference band on the evaluation seeds\n\
          \x20        random                 {:5.1}%  return {:+.3}\n\
          \x20        teacher (always shoot) {:5.1}%  return {:+.3}   <- what cloning starts from\n\
-         \x20        best hand-written      {:5.1}%  return {:+.3}   <- the ceiling worth chasing",
+         \x20        best scripted          {:5.1}%  return {:+.3}   <- the ceiling worth chasing",
         random.0 * 100.0,
         random.1,
         teacher.0 * 100.0,

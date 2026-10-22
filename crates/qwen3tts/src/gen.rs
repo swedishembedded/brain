@@ -733,7 +733,7 @@ mod kv_tests {
         }
     }
 
-    /// The shared-engine KV `step` must also match the INDEPENDENT hand-rolled
+    /// The shared-engine KV `step` must also match the INDEPENDENT ad-hoc
     /// `CpuTalker` KV oracle on the same weights — the direct evidence that the two
     /// tts engines (GPU `TalkerGen` + CPU `CpuTalker`) can collapse into this one.
     #[test]

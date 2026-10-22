@@ -9,7 +9,7 @@
 //! needs **no checkpoint on disk**: the tensor manifests (`import::dit_manifest`,
 //! `WanVaeConfig::tensor_manifest`) name every tensor and its shape, and a
 //! zero-filled source of exactly those shapes builds the same graph the real
-//! weights would. That is deliberately a step further than a hand-written
+//! weights would. That is deliberately a step further than a bespoke
 //! replay: the graph profiled here is the production one, recorded by
 //! `WanDitDev::build` / `WanVaeDecoder::build` themselves, so it cannot drift
 //! from what a generation runs.

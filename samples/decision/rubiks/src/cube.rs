@@ -6,7 +6,7 @@
 //! The move tables are DERIVED, not typed in. Each of the 54 facelets knows
 //! where it sits and which way it faces; a move rotates the coordinates of
 //! every facelet in one layer and looks up which facelet now occupies that
-//! place. Six hand-written 54-entry permutation tables would be six chances
+//! place. Six bespoke 54-entry permutation tables would be six chances
 //! to transpose a pair of digits and get a cube that turns plausibly and is
 //! not a cube - and a solver on top of it would still "solve" its own broken
 //! group, which is the failure this file exists to avoid.

@@ -223,7 +223,7 @@ mod tests {
     /// The contract: the header walker must report exactly what a full
     /// `prost` decode of the same file reports, for the fields it claims to
     /// read. Written as a round-trip against the generated types so the
-    /// hand-written field numbers above cannot drift from the vendored
+    /// bespoke field numbers above cannot drift from the vendored
     /// `.proto` without this failing.
     #[test]
     fn header_names_and_shapes_match_a_full_decode() {

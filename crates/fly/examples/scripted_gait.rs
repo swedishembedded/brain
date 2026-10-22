@@ -8,7 +8,7 @@
 //! the body, driven through this actuation path, is capable of locomotion in
 //! the first place.
 //!
-//! This tests it with no connectome at all. A hand-written tripod gait writes
+//! This tests it with no connectome at all. A scripted tripod gait writes
 //! the actuators directly: alternating triangles of legs swing and stance at a
 //! chosen frequency, which is what an insect does and what a central pattern
 //! generator would produce. If a scripted gait walks, the body is fine and the

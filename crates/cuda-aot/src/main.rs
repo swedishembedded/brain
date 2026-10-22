@@ -10,7 +10,7 @@
 //! our services by sending an email to info@swedishembedded.com.
 //!
 //! Builds every kernel the CUDA backend can be asked to run - the whole WGSL
-//! catalogue through `wgsl-cuda`, and the hand-written kernels of
+//! catalogue through `wgsl-cuda`, and the native kernels of
 //! `kernels-cuda` - for each target of the toolkit lane in use, plus portable
 //! PTX, and writes them with a manifest into the AOT directory. The CUDA
 //! backend loads that directory at run time when it exists, so a machine with

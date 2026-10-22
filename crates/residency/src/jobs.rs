@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! A generic in-flight job registry: armed [`capability::CancelToken`]s keyed
-//! by a per-request id. Previously hand-rolled identically in two places —
+//! by a per-request id. Previously written identically in two places -
 //! `apiserve::state::AppState` (keyed by `Uuid`) and `dbus::service::Manager`
 //! (keyed by `u64`) — both wrapping an `Arc<Mutex<HashMap<K, CancelToken>>>`
 //! with the same insert-on-submit / remove-on-finish shape. Factored here so

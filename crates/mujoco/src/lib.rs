@@ -3,7 +3,7 @@
 
 //! A minimal binding to the MuJoCo physics library.
 //!
-//! Hand-rolled and `dlopen`ed, which is this workspace's established shape for
+//! Minimal and `dlopen`ed, which is this workspace's established shape for
 //! an optional native dependency: `backend-cuda` reaches `libcuda.so.1` the
 //! same way, `crates/capture` hand-rolls V4L2 ioctls, `crates/wm-display`
 //! hand-rolls SDL2. The consequence that matters is that **this crate builds

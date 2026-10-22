@@ -6,7 +6,7 @@
 //! A connectome names its motor neurons by the MUSCLE they innervate; a MuJoCo
 //! model names its actuators by the JOINT they move. This crate is the map
 //! between those two vocabularies, and it is built from the connectome's own
-//! annotations rather than from a hand-written list of neuron ids - so a
+//! annotations rather than from a bespoke list of neuron ids - so a
 //! dataset revision that adds motor neurons picks them up, and one that
 //! renames a muscle fails loudly instead of silently dropping it.
 //!

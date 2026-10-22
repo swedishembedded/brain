@@ -4,7 +4,7 @@
 //! `qwen35::sample::generate_kv` - greedy decoding must be deterministic,
 //! stop at any EOS id, and (since it is a thin loop around the
 //! already-validated `Qwen35::step`, `crates/qwen35/tests/decode_step.rs`)
-//! must match a hand-rolled step-by-step argmax over the same prompt
+//! must match an ad-hoc step-by-step argmax over the same prompt
 //! exactly. Mirrors `qwen35moe/tests/sample_generate.rs` exactly.
 
 use data::rng::Rng;

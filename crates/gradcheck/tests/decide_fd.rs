@@ -4,7 +4,7 @@
 //! The decision encoder's backward, finite-difference checked.
 //!
 //! The forward is parity-proven against the released checkpoint; nothing proves
-//! the BACKWARD except this. A hand-written adjoint that is wrong in the
+//! the BACKWARD except this. An explicit adjoint that is wrong in the
 //! residual order, in which activation it differentiates, or in a transposed
 //! GEMM still produces finite, plausible gradients and still trains - to the
 //! wrong place.

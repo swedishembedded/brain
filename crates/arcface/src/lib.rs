@@ -33,7 +33,7 @@
 //!
 //! The forward port (goldens, import, stage parity) plus the TRAINING half:
 //! [`train::ArcFaceTrainer`] is the IResNet embedding backbone with an
-//! additive-angular-margin head and a hand-written device backward, gated by
+//! additive-angular-margin head and an explicit device backward, gated by
 //! `gradcheck::check_arcface`. Training covers the **embedding backbone only** -
 //! detection and the alignment warp are preprocessing and carry no recognition
 //! gradient, which is how the reference recipe trains too.

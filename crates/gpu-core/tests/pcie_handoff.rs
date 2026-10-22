@@ -149,7 +149,7 @@ fn one_activation_across_the_host_bus() {
 /// Placement is `gpu_core::devices::with_gpu`, the workspace's own scoped
 /// device selection - the same mechanism `model::shard::Pipeline` and
 /// `ltxv/tests/av_shard_2gpu_real.rs` use, so this measures the boundary a
-/// real sharded forward would take and not a hand-rolled one.
+/// real sharded forward would take and not an ad-hoc one.
 #[test]
 #[ignore = "hardware probe: needs TWO discrete GPUs and an idle bus"]
 fn one_activation_from_card_to_card() {

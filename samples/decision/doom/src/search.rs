@@ -71,7 +71,7 @@ const REPEAT: f32 = 0.95;
 /// Operators differ in only two things - how long they act for, and how often
 /// they take the scripted player's choice rather than a random one - and that
 /// is deliberate: a table of two numbers is something a campaign can be
-/// honest about, where four hand-written walk functions would drift into four
+/// honest about, where four bespoke walk functions would drift into four
 /// slightly different definitions of what a walk is.
 ///
 /// Which of them is worth running is [`Allocator`]'s problem, measured on

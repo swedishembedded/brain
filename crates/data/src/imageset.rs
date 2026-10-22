@@ -28,7 +28,7 @@
 //! for the YAML, `serde_json` for the JSONL - never by a line scanner of our
 //! own. This file is hand-edited, which means it eventually meets every corner
 //! of the YAML grammar: anchors, aliases, multiple documents, quoted colons,
-//! tabs, CRLF, and the block scalars below. A hand-rolled subset silently
+//! tabs, CRLF, and the block scalars below. An ad-hoc subset silently
 //! mis-parses the first construct it does not implement, which is how `key: |`
 //! once produced the literal one-character prompt `"|"` instead of a multi-line
 //! caption. A real parser either understands the input or says where it failed.

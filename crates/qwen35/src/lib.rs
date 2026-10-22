@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Qwen3.5/3.8-27B: a dense hybrid Gated-DeltaNet / GQA decoder Transformer,
-//! forward + backprop as hand-written WGSL compute kernels - the dense
+//! forward + backprop as native WGSL compute kernels - the dense
 //! sibling of `crates/qwen35moe` (llama.cpp registers the two as separate
 //! architectures, `LLM_ARCH_QWEN35` vs `LLM_ARCH_QWEN35MOE`, despite sharing
 //! one HF `model_type`, `"qwen3_5"`).

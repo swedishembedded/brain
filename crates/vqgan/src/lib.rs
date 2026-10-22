@@ -28,7 +28,7 @@
 //! two-way-validated [`import`], and the graph wiring in [`model`].
 //!
 //! Scope: the forward graph ([`model`]) plus the **training** graph ([`train`]) —
-//! an SSA forward, a hand-written reverse over `vae::blocks::grad`, and the VQ
+//! an SSA forward, an explicit reverse over `vae::blocks::grad`, and the VQ
 //! straight-through estimator, gated by `gradcheck::check_vqgan`. The
 //! CodeFormer transformer / controllable feature transformation / fidelity dial
 //! are `crates/codeformer`.

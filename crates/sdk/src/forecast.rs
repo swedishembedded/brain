@@ -41,7 +41,7 @@ pub struct ForecastPipeline {
     model: Box<dyn ForecastModel>,
 }
 
-/// Hand-written, not derived: `Box<dyn ForecastModel>` carries no `Debug`
+/// Explicit, not derived: `Box<dyn ForecastModel>` carries no `Debug`
 /// bound (the trait doesn't require one - a model may hold live GPU
 /// handles, the same reason `ImagePipeline` isn't derived either). A short
 /// summary is still worth printing.

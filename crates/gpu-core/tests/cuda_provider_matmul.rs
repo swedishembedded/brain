@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The first hand-written CUDA kernel has to earn its place: it must be
+//! The first native CUDA kernel has to earn its place: it must be
 //! **faster than the generated tier it displaces** and it must still agree
 //! with the portable WGSL reference to the absolute bar this project asserts
 //! everywhere else.
 //!
 //! Swedish Embedded AB implements measured performance contracts for GPU
-//! compute stacks. If your team needs expertise in proving that a hand-tuned
+//! compute stacks. If your team needs expertise in proving that a tuned
 //! kernel is both faster AND still correct - rather than assuming it - you can
 //! procure our services by sending an email to info@swedishembedded.com.
 //!
@@ -57,7 +57,7 @@ static KERNELS: &[(&str, &str)] = &[("matmul", kernels::MATMUL)];
 /// identical dispatch.
 ///
 /// Measured on a GH200, repeatedly, with a tight spread; the
-/// floor is set well below that so it states "a hand-written kernel replaced a
+/// floor is set well below that so it states "a native kernel replaced a
 /// mechanical translation and it was worth doing", not "this box was idle".
 ///
 /// Device time rather than host wall time, and the reason is a measurement:
@@ -175,7 +175,7 @@ fn fastest(runs: &[Timed]) -> Timed {
     }
 }
 
-/// **The milestone's red test.** One hand-written CUDA `Op::MatMul` kernel,
+/// **The milestone's red test.** One native CUDA `Op::MatMul` kernel,
 /// selected against the compute capability the driver was ASKED for, must
 /// clear a measured speedup floor against the generated tier and still agree
 /// with it to `MAXABS`.
@@ -210,7 +210,7 @@ fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with
         bind: &bind,
     };
     assert!(provider.accepts(&probe, false), "a plain f32 MatMul is what this provider exists for");
-    assert_eq!(provider.source(&probe), ImplSource::Tuned, "a hand-written kernel is the Tuned tier");
+    assert_eq!(provider.source(&probe), ImplSource::Tuned, "a native kernel is the Tuned tier");
     eprintln!("cuda_provider_matmul: tuned kernel {:?}", provider.kernel_name(select::Op::MatMul, Dtype::F32));
 
     let x = gpu.storage_init("x", &seeded(1, (m * k) as usize));
@@ -249,13 +249,13 @@ fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with
     assert!(
         speedup >= SPEEDUP_FLOOR,
         "tuned CUDA matmul is only {speedup:.2}x the generated tier (floor {SPEEDUP_FLOOR:.2}x) - \
-         a hand-written kernel that is not materially faster is a maintenance cost with a Tuned tier claim attached"
+         a native kernel that is not materially faster is a maintenance cost with a Tuned tier claim attached"
     );
 }
 
 /// **The production wiring.** `ProviderRegistry::for_gpu` is what every
 /// model's `Ops` is built with, so this is the assertion that a real forward
-/// pass on this device reaches the hand-written kernel - not merely that the
+/// pass on this device reaches the native kernel - not merely that the
 /// provider works when a test constructs one by hand.
 ///
 /// Asserted from the DISPATCH RECORD rather than from the output, because

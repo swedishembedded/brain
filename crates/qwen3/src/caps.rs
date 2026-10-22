@@ -2150,7 +2150,7 @@ mod tests {
     /// chat-serving parse (`crate::chat::{parse_request, SeqState}`) the
     /// HTTP/D-Bus path runs — a `messages` + `tools` request must validate,
     /// stream, and resolve a `finish_reason` exactly like the old
-    /// hand-rolled `apply_chat_template`-only implementation this replaces,
+    /// ad-hoc `apply_chat_template`-only implementation this replaces,
     /// but now with tool-call/stop-string/cancellation parity it never had.
     ///
     /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) --

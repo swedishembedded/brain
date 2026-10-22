@@ -121,12 +121,12 @@ pub struct MusicPipeline {
     paths: minimaxmusic3::generate::Paths,
 }
 
-/// Hand-written, not derived: `minimaxmusic3::generate::Paths` carries no
+/// Explicit, not derived: `minimaxmusic3::generate::Paths` carries no
 /// GPU/device handle itself (every `generate()` call builds and drops its
 /// own, stage by stage - see `minimaxmusic3::caps`'s own module doc), but is
 /// still just plain file paths with no `Debug` impl of its own convenient to
 /// derive through; a short summary is worth having for the same reason
-/// [`crate::ImagePipeline`]'s own hand-written `Debug` is.
+/// [`crate::ImagePipeline`]'s own explicit `Debug` is.
 impl std::fmt::Debug for MusicPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MusicPipeline").field("lm", &self.paths.lm).finish()

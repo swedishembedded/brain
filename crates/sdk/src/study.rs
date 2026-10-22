@@ -325,7 +325,7 @@ fn run_improve_dyn<A: StudyArch>(imp: &Improve, env: DynEnv<'_>, verifier: DynVe
 // ---------------------------------------------------------------------------
 
 /// A document-study dataset as it crosses into brain from outside - an
-/// application's extraction step, or a hand-written batch.
+/// application's extraction step, or a bespoke batch.
 ///
 /// `deny_unknown_fields` and plain (non-`Option`) members throughout, here
 /// and in [`FactProbe`] itself: serde is then the structural validator, so a

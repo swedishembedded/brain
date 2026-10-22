@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Qwen3.5-35B-A3B: a hybrid Gated-DeltaNet / GQA sparse-MoE decoder
-//! Transformer, forward + backprop as hand-written WGSL compute kernels.
+//! Transformer, forward + backprop as native WGSL compute kernels.
 //!
 //! See `crates/qwen35moe/src/config.rs` for the architecture summary.
 //! Built against the real `Qwen/Qwen3.5-35B-A3B` checkpoint's

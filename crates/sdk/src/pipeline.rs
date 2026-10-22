@@ -272,7 +272,7 @@ pub struct ImagePipeline {
     backend: Backend,
 }
 
-/// Hand-written, not derived: neither `flux2::pipeline::Pipeline` nor
+/// Explicit, not derived: neither `flux2::pipeline::Pipeline` nor
 /// `s3dit::pipeline::HotPipeline` carries a `Debug` impl (both hold live GPU
 /// device handles), so a derive here would not compile. A short summary is
 /// still worth printing -- and worth having at all, since `Result<

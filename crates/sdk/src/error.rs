@@ -3,10 +3,10 @@
 
 //! [`Error`]: this crate's one error type.
 //!
-//! Hand-rolled (manual `Display` + `impl std::error::Error`) rather than
+//! Explicit (manual `Display` + `impl std::error::Error`) rather than
 //! `thiserror`, for the same reason `brain_modelstore::plan::PlanError`
 //! (`crates/modelstore/src/plan.rs`) is: an SDK facade's error surface is
-//! part of its PUBLIC API, and a hand-rolled enum keeps that surface exactly
+//! part of its PUBLIC API, and an explicit enum keeps that surface exactly
 //! what this crate chooses to expose, with no derive-macro-generated trait
 //! bound leaking a dependency's own error type into callers who never
 //! imported it themselves. The two structured variants

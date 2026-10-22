@@ -6,7 +6,7 @@
 //!
 //! ## Why storage, not compute
 //!
-//! `crates/s3dit`/`crates/flux2`/`crates/flux1` are hand-rolled DiTs: every
+//! `crates/s3dit`/`crates/flux2`/`crates/flux1` are bespoke DiTs: every
 //! linear is their own `Rec`/`model::dispatch` dispatch, so threading a
 //! `Precision` through construction (`flux1::model::Flux1Model::new_with`)
 //! also swaps the GEMM kernel for the DP4A one - a genuine compute-time

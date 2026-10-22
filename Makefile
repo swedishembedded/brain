@@ -43,7 +43,7 @@ export CARGO_HOME
 
 # sccache caches rustc invocations by (source, flags, deps) hash across
 # separate `cargo` processes - auto-enabled here so every developer/CI box
-# with it installed benefits by default, not just a machine that happens to have hand-written it into a
+# with it installed benefits by default, not just a machine that happens to set it in a
 # local, gitignored `.cargo/config.toml`. A machine that also wants the
 # faster `mold` linker or a capped job count (see that file's own comment
 # for why - 22 concurrent thin-LTO test-binary links exceeded this box's

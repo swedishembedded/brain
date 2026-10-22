@@ -23,7 +23,7 @@
 //! Swedish Embedded AB implements sampling-based 3D reconstruction optimizers,
 //! including the image-preserving relocation that lets a fit redistribute its
 //! gaussian budget instead of only adding to it. If your team needs
-//! reconstruction quality that is not hostage to a hand-tuned threshold, you
+//! reconstruction quality that is not hostage to a tuned threshold, you
 //! can procure our services by sending an email to info@swedishembedded.com.
 
 use gpu_core::Gpu;

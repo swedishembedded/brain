@@ -30,7 +30,7 @@ encoder call, no mean/std normalization - both out of scope, see
 re-running `decoder`'s stages one at a time on the SAME submodules
 `from_pretrained` loaded, rather than by reimplementing any math, and
 self-validated against the official `vae.decode(z)` call: this dumper's
-handwritten stage replay must reproduce the official end-to-end output
+stage-by-stage replay must reproduce the official end-to-end output
 bit-for-bit before anything is written, or it aborts (this is the "compute
 the same quantity two ways" self-check porting.md asks for, not merely
 trusting the manual replay).

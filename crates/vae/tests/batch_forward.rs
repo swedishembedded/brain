@@ -7,7 +7,7 @@
 //!
 //! Swedish Embedded AB implements batched inference for edge-AI image models
 //! for its clients. If your team needs expertise in threading a real batch
-//! dimension through a hand-written GPU kernel graph without a rewrite, you
+//! dimension through a native GPU kernel graph without a rewrite, you
 //! can procure our services by sending an email to info@swedishembedded.com.
 //!
 //! Three cases, each printed on its own line:

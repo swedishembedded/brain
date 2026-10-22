@@ -11,7 +11,7 @@
 //!
 //! # Why this test exists before any tuned CUDA kernel does
 //!
-//! A generated (WGSL-translated) CUDA kernel and a hand-tuned one are
+//! A generated (WGSL-translated) CUDA kernel and a tuned one are
 //! indistinguishable from the outside: both produce the right numbers, and
 //! only one of them is why the backend exists. A backend that quietly runs
 //! the generated tier where the tuned tier was promised is not a slow
@@ -40,7 +40,7 @@ use gpu_core::provider::{
 };
 
 /// **Test fixture, not a shipped policy.** `backend_cuda::policy::POLICY` is
-/// the real table; it is deliberately empty while no hand-written CUDA
+/// the real table; it is deliberately empty while no native CUDA
 /// kernel exists, so this file states its own synthetic requirement in order
 /// to exercise the mechanism at all. A compute capability of `(6, 0)` here
 /// is an arbitrary fixture *floor*, chosen because every CUDA-capable device
@@ -268,7 +268,7 @@ fn a_failed_lower_is_recorded_on_the_choice_not_only_warned() {
 /// from becoming a wish list - and what stops a tuned kernel from being
 /// deleted while the claim that it exists stays behind.
 fn the_shipped_policy_is_backed_by_the_shipped_cuda_registry() {
-    // Measured 2026-09-13: 0. No hand-written CUDA kernel exists yet, so the
+    // Measured 2026-09-13: 0. No native CUDA kernel exists yet, so the
     // shipped policy honestly demands nothing of any device.
     //
     // An equality rather than `cost.rs`'s floor, on purpose: a kernel cost

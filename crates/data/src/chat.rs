@@ -400,7 +400,7 @@ impl ChatSample {
     /// text and concatenating -- so tool-call/tool-response framing,
     /// think-block placement, the BOS the template writes and the end-of-turn
     /// token closing each assistant turn all come from the checkpoint's OWN
-    /// template, not a hand-rolled approximation. A message's whole range is
+    /// template, not an ad-hoc approximation. A message's whole range is
     /// masked by its `train` flag, so a trained assistant turn trains its
     /// end-of-turn token too: that token is how the model learns to stop.
     /// Refuses a conversation that breaks [`check_tool_pairing`], so no

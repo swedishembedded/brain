@@ -112,7 +112,7 @@ const SLOT_STATES: usize = 24;
 /// DERIVED from [`facelet_geometry`], never typed in: facelets that share a
 /// cubie coordinate are the same physical piece, and how many share it says
 /// what that piece is - three for a corner, two for an edge, one for a
-/// centre. A hand-written table of "corner slot 0 is facelets 0, 9 and 38"
+/// centre. A bespoke table of "corner slot 0 is facelets 0, 9 and 38"
 /// is twenty chances to transpose a digit and get a slot map that encodes
 /// something plausible which is not a cube, and a policy trained on it would
 /// still converge on its own broken picture.

@@ -7,7 +7,7 @@
 //! These were private to yolo's `model.rs`. They are not detection-specific:
 //! any FPN-shaped decoder needs exactly this trio, and ZipDepth's decoder needs
 //! all three. The FPN *topology* stays with each model — yolo's PAN-FPN is 34
-//! lines of straight-line stage wiring plus a hand-written backward, and
+//! lines of straight-line stage wiring plus an explicit backward, and
 //! ZipDepth's is a different shape — so the right granularity to share is the
 //! stages, not an `Fpn` abstraction neither model would fit.
 

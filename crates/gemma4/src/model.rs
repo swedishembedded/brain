@@ -210,7 +210,7 @@ fn forward_core(
 }
 
 /// Every tensor name layer `l` owns, from the manifest itself rather than a
-/// second hand-written list - so a layer-shape change (a `full_attention`
+/// second bespoke list - so a layer-shape change (a `full_attention`
 /// layer's absent `v_proj`, say) cannot be right in one place and wrong here.
 pub fn layer_tensor_names(cfg: &Gemma4Config, l: u32) -> Vec<(String, Vec<usize>)> {
     let prefix = format!("layers.{l}.");

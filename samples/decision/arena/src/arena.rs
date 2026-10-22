@@ -47,7 +47,7 @@ impl Rng {
 /// An earlier version had a tanky demon that hit hard and a weak imp that hit
 /// softly - which sounds like it demands priority and does not, because the
 /// right answer is always "shoot whatever dies soonest" and that is what
-/// firing at the first thing in the list already does. Seven hand-written
+/// firing at the first thing in the list already does. Seven scripted
 /// policies were measured on it and the one that ignored the observation won.
 ///
 /// So: the imp is a **glass cannon** - one shot kills it, and while it lives
@@ -363,7 +363,7 @@ impl Arena {
 /// `(random, teacher, ceiling)` - the three numbers any learned result has to
 /// be read between.
 ///
-/// The `ceiling` is the best hand-written policy found, which is what says
+/// The `ceiling` is the best scripted policy found, which is what says
 /// whether a success threshold is reachable at all. Setting one without it is
 /// how a previous version of this sample asked the learner to exceed a bar no
 /// policy could reach.
@@ -395,7 +395,7 @@ fn shoot_by(opts: &[String], key: &mut dyn FnMut(&str) -> i32) -> Option<usize> 
         .map(|(i, _)| i)
 }
 
-/// How well several hand-written policies do - the ceiling probe.
+/// How well several scripted policies do - the ceiling probe.
 ///
 /// A success threshold set above what ANY policy can reach is not a demanding
 /// criterion, it is a broken one, and the only way to know which is to write
@@ -638,7 +638,7 @@ mod tests {
         wins
     }
 
-    /// The game must be winnable, and not by accident: a hand-written policy
+    /// The game must be winnable, and not by accident: a scripted policy
     /// that shoots the nearest thing should clear the corridor far more often
     /// than one that always takes the first option.
     #[test]

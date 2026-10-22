@@ -6,7 +6,7 @@
 //! safetensors file on disk.
 //!
 //! Built on `checkpoint::gguf_src::GgufSource` - shared with `wan` and
-//! `gemma4`'s equivalents rather than a hand-rolled copy - via its
+//! `gemma4`'s equivalents rather than an ad-hoc copy - via its
 //! [`GgufSource::identity`] constructor: LTX-2.5's real checkpoint carries
 //! only ONE tensor-name spelling, its own, which IS
 //! `crate::block::LtxBlock`/`LtxAvBlock`'s `tget` names verbatim (confirmed

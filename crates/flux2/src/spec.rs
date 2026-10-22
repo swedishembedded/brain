@@ -85,7 +85,7 @@ fn classify_hfdir(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String
 /// `crate::import::dit_shapes` - the same canonicalizing shape reader
 /// [`dit_config_from_path`]/`validate()`'s `dit_context_in_dim` use, so a
 /// diffusers-renamed release classifies exactly as consistently as a
-/// BFL-named one, not through a second, narrower hand-rolled reader.
+/// BFL-named one, not through a second, narrower ad-hoc reader.
 fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(m) = checkpoint::mmap::MmapSafetensors::open(rec.path.to_string_lossy().as_ref()) else { return };
     // `decoder`/`encoder`.conv_in.weight are generic autoencoder tensor

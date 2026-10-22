@@ -16,7 +16,7 @@
 //!    still being able to represent arbitrary bytes.
 //! 2. **Pre-tokenization** — a regex splits the text into chunks (contractions,
 //!    space-prefixed word/number/symbol runs, whitespace runs). We have no
-//!    regex crate, so [`pre_tokenize`] is a hand-written scanner reproducing
+//!    regex crate, so [`pre_tokenize`] is a bespoke scanner reproducing
 //!    the exact GPT-2 pattern:
 //!    `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`
 //! 3. **BPE merges** — each pre-token's bytes are mapped through
@@ -248,7 +248,7 @@ fn is_space(c: char) -> bool {
     c.is_whitespace()
 }
 
-/// Hand-written reproduction of the GPT-2 pre-tokenization regex:
+/// Bespoke reproduction of the GPT-2 pre-tokenization regex:
 /// `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`
 ///
 /// Returns the list of substrings (pre-tokens), in order, that together

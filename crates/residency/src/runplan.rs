@@ -98,9 +98,9 @@ impl RunPlan {
 impl RunPlan {
     /// This plan as JSON, for a caller on the other side of a wire.
     ///
-    /// Hand-written rather than derived: this crate has `serde_json` but not
+    /// Explicit rather than derived: this crate has `serde_json` but not
     /// `serde`, `MemCost`/`Device`/`Tier` carry no derives of their own, and
-    /// the same hand-written convention is what `capability::Manifest`
+    /// the same bespoke convention is what `capability::Manifest`
     /// already uses for every manifest this host serves. One less derive is
     /// also one less way for a field rename to silently change a wire shape.
     #[must_use]

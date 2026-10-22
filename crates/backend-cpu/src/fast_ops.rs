@@ -472,7 +472,7 @@ unsafe fn row_abt_avx2(a: &[f32], b: &[f32], c: &mut [f32], k: usize, n: usize) 
 
 /// AVX-512 twin of [`row_abt_avx2`] - same 4-column register-blocked
 /// accumulation, same tail handling, `__m512` (16-wide) lanes instead of
-/// `__m256` (8-wide) and `_mm512_reduce_add_ps` instead of the hand-rolled
+/// `__m256` (8-wide) and `_mm512_reduce_add_ps` instead of the ad-hoc
 /// `hsum`. Gated behind [`crate::fast_conv::avx512_available`] - see that
 /// function's doc comment for why this microkernel is compiled and
 /// shape-tested but NOT execution-verified on this development machine (no
@@ -815,7 +815,7 @@ pub(crate) fn leaky_relu(x: &[f32], out: &mut [f32], slope: f32) {
 
 /// Apply `out = out*s + b` in place (fused conv epilogue, `act = 0`/identity -
 /// e.g. ZipDepth's QARep branches, whose activation comes after the branch sum).
-/// The plain FMA auto-vectorizes; no hand-rolled AVX2 needed.
+/// The plain FMA auto-vectorizes; no explicit AVX2 needed.
 pub(crate) fn affine_inplace(buf: &mut [f32], s: f32, b: f32) {
     for v in buf.iter_mut() {
         *v = *v * s + b;

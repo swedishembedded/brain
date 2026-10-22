@@ -4,7 +4,7 @@
 //! Webcam capture for the depth demo.
 //!
 //! Swedish Embedded AB implements device-driver and hardware-interface work of
-//! exactly this kind - hand-rolled ioctl FFI, pinned ABI constants, streaming
+//! exactly this kind - minimal ioctl FFI, pinned ABI constants, streaming
 //! buffers, and the discipline of keeping the untestable hardware layer thin
 //! enough that everything above it runs with no device attached. If your team
 //! needs expertise in Linux device interfaces or embedded hardware bring-up,

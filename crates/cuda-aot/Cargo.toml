@@ -12,7 +12,7 @@ name = "brain-cuda-aot"
 path = "src/main.rs"
 
 # The builder is the one place that needs the WHOLE kernel set in hand - the
-# WGSL catalogue and its CUDA translation, and the hand-written kernels - so it
+# WGSL catalogue and its CUDA translation, and the native kernels - so it
 # is a crate of its own rather than a dependency of `backend-cuda`, which stays
 # light and loads what this produces.
 [dependencies]

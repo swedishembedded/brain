@@ -56,9 +56,9 @@ pub struct UpscalePipeline {
     session: rrdbnet::caps::Session,
 }
 
-/// Hand-written, not derived: `rrdbnet::caps::Session` holds a live GPU
+/// Explicit, not derived: `rrdbnet::caps::Session` holds a live GPU
 /// device handle (no `Debug` impl), the same reason
-/// [`crate::ImagePipeline`]'s own `Debug` is hand-written.
+/// [`crate::ImagePipeline`]'s own `Debug` is explicit.
 impl std::fmt::Debug for UpscalePipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let cfg = self.session.config();

@@ -248,7 +248,7 @@ pub const LTX2_MAX_SHIFT_ANCHOR: f64 = 4096.0;
 
 /// The real LTX-2.5 distilled-8-step sigma schedule, read verbatim from
 /// `ltx_pipelines.utils.constants.DISTILLED_SIGMA_VALUES` (not derived from
-/// [`ltx2_sigmas`] - this is a separate, hand-tuned constant table upstream
+/// [`ltx2_sigmas`] - this is a separate, tuned constant table upstream
 /// ships for its distilled checkpoint, cross-checked bit-for-bit against
 /// `testdata/golden/ltxv/schedule/schedule.safetensors`'s
 /// `distilled_8step.sigmas`).

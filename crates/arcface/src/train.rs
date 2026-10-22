@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The ArcFace training graph: the IResNet embedding backbone plus an
-//! additive-angular-margin softmax head, with a hand-written device backward.
+//! additive-angular-margin softmax head, with an explicit device backward.
 //!
 //! # Scope - read this before trusting a number out of here
 //!

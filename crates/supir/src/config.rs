@@ -10,7 +10,7 @@
 //! [`SupirConfig`] holds a [`UNetConfig`] for the frozen backbone AND one for
 //! the trunk, rather than restating either's `block_out_channels`,
 //! `transformer_layers_per_block`, `cross_attention_dim`, GroupNorm epsilons
-//! or added-conditioning chain. The trunk is `GLVControl`, a hand-written
+//! or added-conditioning chain. The trunk is `GLVControl`, a bespoke
 //! copy of the SAME down+mid schedule (verified against the real checkpoint
 //! headers - see [`trunk_manifest`]'s doc), so its tensor manifest is
 //! [`UNetConfig::tensor_manifest`] filtered to the down+mid half and
@@ -64,7 +64,7 @@ pub struct SupirConfig {
     /// own tensors - loaded via `sdxlunet::import::load` against this field,
     /// exactly as `crates/controlnet` loads its backbone.
     pub backbone: UNetConfig,
-    /// `GLVControl`: a hand-written copy of the backbone's down blocks +
+    /// `GLVControl`: a bespoke copy of the backbone's down blocks +
     /// middle block (own `time_embed`/`label_emb`, plus the hint embedder).
     /// Numerically identical to `backbone` for the released SUPIR-v0Q
     /// checkpoint (both are SDXL-shaped), but named and manifested

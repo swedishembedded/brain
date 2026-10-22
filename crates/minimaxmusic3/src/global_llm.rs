@@ -479,7 +479,7 @@ fn bold_pass(line: &str) -> (String, bool) {
 
 /// Single pass replacing every `\*([^*\n]+)\*` NOT immediately preceded or
 /// followed by another `*` with its captured content - the reference's own
-/// lookaround (`(?<!\*)...(?!\*)`), hand-rolled: since content may not
+/// lookaround (`(?<!\*)...(?!\*)`), written out: since content may not
 /// contain `*`, the only candidate closing star is the first `*` reached
 /// after the opening one, so there is nothing to backtrack into - either
 /// that candidate satisfies both lookarounds or the whole attempt at this

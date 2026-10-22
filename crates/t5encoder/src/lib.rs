@@ -62,7 +62,7 @@
 //! `tests/umt5_parity.rs` gates the two against one golden so the ids brain
 //! encodes with and the ids the reference ran on cannot drift.
 //!
-//! [`train`] adds the SSA forward + hand-written reverse over **every** tensor
+//! [`train`] adds the SSA forward + explicit reverse over **every** tensor
 //! in the manifest (including the learned relative-position bias), gated by
 //! `gradcheck::check_t5` on both the P40 and `backend-cpu`. It is honest about
 //! two limits: it caches the softmax probabilities **per block** (the inference

@@ -43,7 +43,7 @@
 //! 4. **Capability-gated through `backend_api::select`** — the policy lives
 //!    there with everything else, never in a backend-name test here.
 //!
-//! A row resolved here may be superseded one tier up by a hand-written native
+//! A row resolved here may be superseded one tier up by a native
 //! kernel on a backend that can compile it - see [`crate::native_upgrade`].
 //!
 //! `BRAIN_NO_KERNEL_UPGRADE=1` disables the whole table (the A/B switch every
@@ -523,7 +523,7 @@ mod tests {
     }
 
     /// One appended pipeline per `MREG` bucket, each a `kernels::template`
-    /// variant of the ONE source file - never a hand-written per-`m` kernel.
+    /// variant of the ONE source file - never a native per-`m` kernel.
     #[test]
     fn a_shape_specialised_row_appends_one_variant_per_bucket() {
         let out = expand(&[("matmul_gemv", "b")], false).unwrap();

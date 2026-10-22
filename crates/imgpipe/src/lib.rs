@@ -55,7 +55,7 @@ use serde_json::Value;
 /// Parsed by hand from `serde_json::Value` rather than with a derive: this
 /// workspace declares `serde_json` but deliberately not `serde`'s derive macro,
 /// and one stage enum is not worth widening the dependency closure for. The
-/// hand-written parser also lets an unknown `op` or a misspelled parameter be an
+/// bespoke parser also lets an unknown `op` or a misspelled parameter be an
 /// error naming the offender, which is what the tests pin.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Stage {

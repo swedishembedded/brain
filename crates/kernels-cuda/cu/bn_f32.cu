@@ -6,7 +6,7 @@
 // layers onto the memory roofline of a GPU, you can procure our services by
 // sending an email to info@swedishembedded.com.
 //
-// BatchNorm's per-channel reductions over an NCHW map, fp32: the hand-written
+// BatchNorm's per-channel reductions over an NCHW map, fp32: the native
 // forms of `bn_stats.wgsl`, `bn_dstats.wgsl`, `bn_dgamma.wgsl` and
 // `bn_dbeta.wgsl`, reading the identical buffers and the identical uniform
 // `[N, C, H, W]`, writing the identical outputs.

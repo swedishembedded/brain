@@ -14,7 +14,7 @@
 //! literal content via the tokenizer's ordinary special-token decode path
 //! (see `tokenizer.rs`), so a run of 4 adjacent `<loc_N>` tags in the
 //! decoded string is exactly the model's box notation - no token-id-level
-//! bookkeeping needed. A hand-written scanner, not a regex dependency,
+//! bookkeeping needed. A bespoke scanner, not a regex dependency,
 //! matching this repo's tokenizer code's own style.
 
 /// One grounded box: the phrase (or object category) text immediately

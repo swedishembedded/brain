@@ -31,7 +31,7 @@
 //!
 //! ## Buffer/step layout (SSA)
 //!
-//! Each stage writes a fresh buffer (the shape a hand-written backward will
+//! Each stage writes a fresh buffer (the shape an explicit backward will
 //! cache). Two submits with one host round-trip between them, because the
 //! assignment is an integer the `embed` gather needs as `u32` and because it
 //! is the natural seam for CodeFormer, whose transformer *replaces* the argmin:

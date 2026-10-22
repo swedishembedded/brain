@@ -235,7 +235,7 @@ impl<'de> serde::Deserialize<'de> for OrderedJson {
 /// array/object items, `": "` between an object's key and value, JSON string
 /// escaping via `serde_json`'s own string serializer (matches
 /// `ensure_ascii=False`: only the JSON-mandatory characters are escaped, not
-/// non-ASCII), reused rather than hand-rolled so it cannot drift from
+/// non-ASCII), reused rather than ad-hoc so it cannot drift from
 /// `serde_json`'s own escaping rules.
 pub fn write_json(v: &OrderedJson, out: &mut String) {
     match v {

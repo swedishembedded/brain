@@ -94,8 +94,8 @@ fn parse_bus(spec: Option<&str>) -> brain_dbus::BusKind {
 /// Renders a `residency::RunPlan`'s JSON as the aligned block a person reads.
 ///
 /// Reads the document field by field rather than through a typed parse: the
-/// producing side (`residency::RunPlan::to_json`) is hand-written too, and a
-/// hand-written reader beside it is symmetric. A field this build does not
+/// producing side (`residency::RunPlan::to_json`) is bespoke too, and a
+/// bespoke reader beside it is symmetric. A field this build does not
 /// know about is simply not printed, which is the same tolerance every other
 /// brain wire reader has.
 fn render(plan: &Value) -> String {
@@ -171,7 +171,7 @@ mod tests {
     use serde_json::json;
 
     /// **Non-vacuity for every fixture below.** The three cases above are
-    /// hand-written JSON, which can only prove the renderer is consistent
+    /// bespoke JSON, which can only prove the renderer is consistent
     /// with itself. This one renders a plan produced by the REAL
     /// `residency::RunPlan::to_json`, through a real `Executor`, so a field
     /// renamed on the producing side fails here rather than silently

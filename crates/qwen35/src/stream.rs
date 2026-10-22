@@ -1450,7 +1450,7 @@ mod tests {
     /// dispatches (`pad: kw - 1`, left-padded) already say this holds - this
     /// test proves it directly against the REAL code path [`generate`]
     /// drives ([`StreamState::build_layer`] + [`StreamState::layer_forward`],
-    /// not a hand-rolled parallel replay), rather than trusting the doc
+    /// not an ad-hoc parallel replay), rather than trusting the doc
     /// comments alone.
     ///
     /// If this ever fails, `generate`'s whole end-padding strategy is

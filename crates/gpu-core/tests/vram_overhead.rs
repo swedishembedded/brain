@@ -224,7 +224,7 @@ enum How {
 ///   one of them until the next submission, so N chunks still means N chunks'
 ///   worth of staging resident and, in host memory, page-pinned.
 /// * [`How::ChunkedFlushed`] submits after each chunk, so at most one chunk of
-///   staging is ever live. This is what a hand-written backend does with one
+///   staging is ever live. This is what a native backend does with one
 ///   reused staging buffer, and it is the probe that says whether the cost of
 ///   host-memory staging is the placement itself or merely the volume of it.
 fn probe_upload_gbs(gpu: &Gpu, mib: u64, reps: usize, how: How) -> f64 {

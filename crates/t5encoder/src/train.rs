@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The T5 encoder **training** graph: SSA forward + the hand-written reverse,
+//! The T5 encoder **training** graph: SSA forward + the explicit reverse,
 //! gated by `gradcheck::check_t5`.
 //!
 //! # What is trainable and what is frozen

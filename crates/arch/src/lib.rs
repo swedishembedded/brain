@@ -4,7 +4,7 @@
 //! The canonical model-architecture registry.
 //!
 //! brain used to have **four separate, drifting** answers to "which
-//! architecture is this": the CLI's hand-written subcommand names, the
+//! architecture is this": the CLI's bespoke subcommand names, the
 //! substring-matching HF-class-name scan in `modelstore::plan`, the GGUF
 //! importer table in `cli::gguf_import`, and `ModelCard::family`. All four
 //! read this crate's [`ARCHS`] table instead.

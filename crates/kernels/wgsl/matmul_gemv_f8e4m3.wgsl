@@ -17,7 +17,7 @@
 // templated `#w=...` variant (`kernels::template::dtype_variant`'s
 // declaration/load rewrite is hardcoded to 2-per-`u32` packing with no
 // second binding - neither fits FP8's 4-per-`u32` packing AND its extra
-// BLOCKWISE scale binding), so this is hand-written; the decode expression
+// BLOCKWISE scale binding), so this is bespoke; the decode expression
 // itself is `kernels::template::f8e4m3_decode_expr`'s exact output, pasted
 // verbatim (see that function's own doc for the full bit derivation and its
 // module's exhaustive 256-byte-pattern test) - a

@@ -283,7 +283,7 @@ pub fn finetune_full(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
 /// LoRA-extended config with the base frozen vs. the base config with every
 /// tensor trainable) - the dataset/optimizer loop is identical either way, so
 /// it is [`model::fit_with`] over the shared causal-LM [`model::causal_lm`]
-/// objective rather than a fourth hand-rolled copy of it.
+/// objective rather than a fourth ad-hoc copy of it.
 ///
 /// Deliberately does **not** go through [`model::load_dataset`]: this crate's
 /// `text->codes` datasets (`data::gen_tts`) carry no `meta.json`/`.mask.bin` -
@@ -487,7 +487,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The defect this collapse onto `fit_with` fixes (a): the hand-rolled
+    /// The defect this collapse onto `fit_with` fixes (a): the ad-hoc
     /// loop applied `opts.lr` as a flat constant rate at every step, ignoring
     /// `warmup`/`min_lr`/`decay_iters` entirely. Two single-step runs, same
     /// seed/data/model, differing only in `warmup`: at step 0 a `warmup: 0`
@@ -536,7 +536,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The defect this collapse fixes (b): the hand-rolled loop drew exactly
+    /// The defect this collapse fixes (b): the ad-hoc loop drew exactly
     /// one micro-batch per step no matter what `grad_accum` said. Two
     /// single-step runs, same seed/data/model, differing only in
     /// `grad_accum`: `fit_with` returns the step's average forward loss
@@ -581,7 +581,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The defect this collapse fixes (c): the hand-rolled loop never saved a
+    /// The defect this collapse fixes (c): the ad-hoc loop never saved a
     /// checkpoint until the run finished, no matter how long it took - a slow
     /// or interrupted run had nothing to resume from. A background thread
     /// polls `out`'s mtime while a long-enough (`checkpoint_secs: 1`,

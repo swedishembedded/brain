@@ -103,7 +103,7 @@ mod tests {
     }
 
     /// [`Image::save`] round-trips through the real `imaging` codec (never a
-    /// hand-rolled encoder) -- a `.png` written here must be readable back.
+    /// ad-hoc encoder) -- a `.png` written here must be readable back.
     #[test]
     fn save_writes_a_real_png_via_the_shared_codec() {
         let img = Image::from_rgb8(4, 3, tiny_gradient(4, 3)).unwrap();
@@ -136,7 +136,7 @@ mod tests {
     /// [`Image::from_hwc_unit`]: s3dit's own float-HWC `[0,1]` shape
     /// normalizes to the SAME RGB8 a caller would get from the flux2
     /// backend -- clamped and quantized via `imaging::pixels::hwc_to_rgb8`,
-    /// not a second, hand-rolled rounding rule.
+    /// not a second, ad-hoc rounding rule.
     #[test]
     fn from_hwc_unit_normalizes_float_hwc_to_rgb8() {
         // 1x2 pixels, RGB: black and (over-range, clamped) white.
@@ -154,7 +154,7 @@ mod tests {
 
     /// [`Image::open`] is [`Image::save`]'s symmetric counterpart: a real
     /// PNG this crate wrote must read back byte-identical, through the SAME
-    /// shared `imaging` codec on both ends -- never a hand-rolled decoder.
+    /// shared `imaging` codec on both ends -- never an ad-hoc decoder.
     #[test]
     fn open_round_trips_a_real_png_this_crate_wrote() {
         let img = Image::from_rgb8(4, 3, tiny_gradient(4, 3)).unwrap();

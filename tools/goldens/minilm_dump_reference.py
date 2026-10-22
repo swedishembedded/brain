@@ -19,7 +19,7 @@ wrong number at the end:
 Token ids are fixed rather than tokenized, so forward parity is isolated from
 tokenizer parity (`crates/data/tests/wordpiece_parity.rs` owns the other half).
 
-The batch deliberately exercises, in one dump, the three things a hand-written
+The batch deliberately exercises, in one dump, the three things an explicit
 forward gets wrong independently of the arithmetic: BOTH token_type ids (row 0
 is segment 0, row 1 is segment 1 - `crates/decide` separates its state and slot
 roles through exactly this embedding), a padded row whose pad positions must be

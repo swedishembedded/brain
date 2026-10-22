@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Hand-written CUDA C++ kernels and the metadata that says what each one
+//! Native CUDA C++ kernels and the metadata that says what each one
 //! is - a registry of brain's NATIVE kernels, entirely separate from the
 //! portable WGSL catalogue in `kernels`.
 //!
 //! Swedish Embedded AB implements native GPU kernel libraries and the
 //! metadata discipline that keeps them honest. If your team needs expertise
-//! in hand-written CUDA kernels that stay checkable rather than becoming
+//! in native CUDA kernels that stay checkable rather than becoming
 //! folklore, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 //!
@@ -95,7 +95,7 @@ pub const BASELINE_MIN_CC: Cc = (5, 0);
 /// this file may assume.
 pub const PORTABLE_SHARED_BYTES: u32 = 48 * 1024;
 
-/// One hand-written CUDA kernel: its source text plus the metadata that
+/// One native CUDA kernel: its source text plus the metadata that
 /// decides when it is eligible and what claim it makes.
 #[derive(Clone, Copy, Debug)]
 pub struct CudaKernel {
@@ -120,7 +120,7 @@ pub struct CudaKernel {
     /// win on table order.
     pub by_name: bool,
     /// The tier this kernel claims. Only [`ImplSource::Tuned`] is meaningful
-    /// here: a kernel with a `.cu` file in this tree is hand-written by
+    /// here: a kernel with a `.cu` file in this tree is native by
     /// definition, and a generated kernel has no file to list (it is emitted
     /// from the WGSL reference at run time). [`check_table`] rejects
     /// anything else rather than letting a generated kernel be filed as if
@@ -177,7 +177,7 @@ impl CudaKernel {
     }
 }
 
-/// Every hand-written CUDA kernel brain ships.
+/// Every native CUDA kernel brain ships.
 ///
 /// Each entry says only what is true of it. A floor is what the kernel's own
 /// text needs (the toolchain baseline for plain fp32, the packed dot product
@@ -2348,7 +2348,7 @@ pub fn check_table(table: &[CudaKernel]) -> Vec<String> {
         }
         if k.source != ImplSource::Tuned {
             errs.push(format!(
-                "{}: declares tier {:?}; a kernel with source text in this tree is hand-written, \
+                "{}: declares tier {:?}; a kernel with source text in this tree is native, \
                  and a generated kernel has no file to list",
                 k.name, k.source
             ));
@@ -2432,7 +2432,7 @@ mod tests {
     fn the_shipped_registry_is_well_formed() {
         let errs = check_table(ALL);
         assert!(errs.is_empty(), "kernels-cuda registry violations:\n  {}", errs.join("\n  "));
-        assert!(!ALL.is_empty(), "the registry ships at least one hand-written kernel");
+        assert!(!ALL.is_empty(), "the registry ships at least one native kernel");
     }
 
     /// A block count must COVER the output, at shapes that divide the tile

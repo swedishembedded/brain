@@ -188,9 +188,9 @@ pub struct VideoPipeline {
     hot: Mutex<Option<wan::pipeline::HotDit>>,
 }
 
-/// Hand-written, not derived: the resident `HotDit` behind the `Mutex` has
+/// Explicit, not derived: the resident `HotDit` behind the `Mutex` has
 /// no `Debug` impl (a live device handle), the same reason
-/// [`crate::UpscalePipeline`]'s own `Debug` is hand-written.
+/// [`crate::UpscalePipeline`]'s own `Debug` is explicit.
 impl std::fmt::Debug for VideoPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VideoPipeline").field("variant", &self.cfg.name).finish()

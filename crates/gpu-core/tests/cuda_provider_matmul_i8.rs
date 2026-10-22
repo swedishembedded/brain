@@ -339,7 +339,7 @@ fn every_tile_of_the_int8_gemm_gives_the_same_bits() {
     }
 }
 
-/// A hand-written tensor-core kernel that is not materially faster than the
+/// A native tensor-core kernel that is not materially faster than the
 /// DP4A kernel it displaces is a maintenance cost with a `Tuned` claim
 /// attached. Device time, at the real prefill round shape.
 fn the_int8_tensor_core_gemm_is_materially_faster_than_the_portable_kernel() {

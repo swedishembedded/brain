@@ -223,7 +223,7 @@ pub type FetchPlan = HashMap<String, Fetch>;
 /// by the brain-side name.
 ///
 /// One pass over the SOURCE names (rather than looking each manifest entry up
-/// by a hand-written inverse map) is what makes the coverage check meaningful
+/// by a bespoke inverse map) is what makes the coverage check meaningful
 /// in both directions: an upstream tensor this crate does not understand is an
 /// error here, and a manifest entry no upstream tensor produced is caught by
 /// the per-half `validate` below.

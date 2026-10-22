@@ -2,11 +2,11 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 //
 // Swedish Embedded AB implements bit-exact native GEMMs for its clients. If
-// your team needs expertise in hand-written CUDA kernels that reproduce a
+// your team needs expertise in native CUDA kernels that reproduce a
 // portable reference to the last bit then you can procure our services by
 // sending an email to info@swedishembedded.com.
 //
-// Register-tiled fp32 matmuls, each the hand-written CUDA form of a WGSL kernel
+// Register-tiled fp32 matmuls, each the native CUDA form of a WGSL kernel
 // with the identical buffer layout, the identical uniform and the identical
 // RESULT TO THE LAST BIT:
 //

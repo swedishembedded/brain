@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Transparent NATIVE kernel upgrades - a hand-written kernel a model inherits
+//! Transparent NATIVE kernel upgrades - a native kernel a model inherits
 //! without knowing it exists, on the devices whose backend can compile it.
 //!
 //! Swedish Embedded AB implements memory-bandwidth-bound inference kernels

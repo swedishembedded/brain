@@ -4,7 +4,7 @@
 //! Host reference forward + analytic backward for ONE FLUX.2 block (double and
 //! single stream), the units the whole DiT training step is built from. This is
 //! the correctness anchor: a finite-difference gradcheck (`tests/block_grad.rs`)
-//! gates the analytic gradients, exactly as brain gates every hand-written
+//! gates the analytic gradients, exactly as brain gates every explicit
 //! backward.
 //!
 //! The forward mirrors [`crate::model::Flux2Model::forward`] op-for-op, but in

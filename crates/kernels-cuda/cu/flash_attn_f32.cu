@@ -9,7 +9,7 @@
 // Flash attention in fp32 at head_dim 128, one core and two entry points:
 //
 // brain_flash_bidir_f32 - bidirectional attention over a packed qkv slab, the
-// hand-written form of `flash_attn_bidir_reg2.wgsl` (its uniform, its two
+// native form of `flash_attn_bidir_reg2.wgsl` (its uniform, its two
 // bindings, its output layout; `gpu_core::native_upgrade` redirects it):
 //
 //   params : u32 [bsz, n_heads, T, head_dim, qkv_stride, q_off, k_off, v_off, d_model]

@@ -2161,7 +2161,7 @@ mod tests {
     /// in the graph.
     ///
     /// Elementwise central differences (`gradcheck::elementwise_check`'s own
-    /// recipe, hand-rolled here rather than pulling in the `gradcheck` crate:
+    /// recipe, ad-hoc here rather than pulling in the `gradcheck` crate:
     /// `Qwen3Vl::forward` takes extra arguments `gradcheck::CheckModel::loss`
     /// does not, so the fixed batch is closed over instead) on a HANDFUL of
     /// entries of one targeted projection's `lora_a`, not every entry - the

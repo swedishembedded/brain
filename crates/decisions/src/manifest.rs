@@ -76,7 +76,7 @@ impl Validation {
 
 /// Where the weights came from.
 ///
-/// A run of `brain decide train` fills every field; a hand-written manifest
+/// A run of `brain decide train` fills every field; a bespoke manifest
 /// may name only some.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Lineage {

@@ -165,7 +165,7 @@ fn an_adapter_round_trips_through_the_checkpoint_container() {
 // This is a SMOKE-scale gate, not a statistically powered one: real umT5-XXL
 // (CPU) + the real 1.3B DiT are both genuinely expensive per call, so
 // everything here is sized to finish in low single-digit minutes on this
-// host - ONE umT5 session (not two: the training loop is hand-rolled with
+// host - ONE umT5 session (not two: the training loop is written out with
 // the exact math `finetune::run` uses, `grads`+`adapter.step`, rather than
 // calling `finetune::run` and paying a second umT5 load for its own internal
 // encode), a handful of clips, and few steps. The full-power version of this
@@ -310,7 +310,7 @@ fn a_concept_only_lora_lowers_held_out_concept_loss_more_than_distractor_loss() 
     let before_concept = mean_loss(&tcfg, &base, &fresh, heldout_s, c_sigmas, c_noises);
     let before_distractor = mean_loss(&tcfg, &base, &fresh, distractor_s, d_sigmas, d_noises);
 
-    // ---- hand-rolled training loop: the exact math `finetune::run` uses ----
+    // ---- ad-hoc training loop: the exact math `finetune::run` uses ----
     let steps = 15u32;
     let mut trng = data::rng::Rng::new(4242); // seed: the held-out concept-versus-distractor loss margin was measured on the real weights at this draw (ignored, needs weights; not run)
     let t2 = std::time::Instant::now();

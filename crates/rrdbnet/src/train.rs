@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! RRDBNet **training** graph: SSA forward + hand-written reverse.
+//! RRDBNet **training** graph: SSA forward + explicit reverse.
 //!
 //! Composition, not a second model: the forward is exactly [`crate::model::
 //! Rrdb`]'s, recorded by [`crate::model::Rrdb::new_train`] with [`vae::blocks::

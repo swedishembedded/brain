@@ -1369,7 +1369,7 @@ fn macro_main(argv: &[String]) -> Result<(), String> {
         // Every choice below is the model's. The library still decides which
         // macros are ADMISSIBLE - that is legal-move generation, and it is
         // what keeps the solve guaranteed however the model ranks them - but
-        // no hand-written tiebreak runs, and there is no fallback: if the
+        // no scripted tiebreak runs, and there is no fallback: if the
         // model is asked and cannot answer, the run fails rather than
         // quietly reverting to the rule it is meant to replace.
         let spc = space::CubeSpace::new();
@@ -1642,7 +1642,7 @@ fn compare(book: &macros::Playbook, net: Option<&brain::solve::Net>, cubes: usiz
     let (s, m, k) = chooser::measure(&space, book, None, cubes, scramble, seed, true);
     println!("{:>22}  {:>4}/{:<3}  {:>10.1}  {:>8.1}", "random admissible", s, cubes, m, k);
     let (s, m, k) = chooser::measure(&space, book, None, cubes, scramble, seed, false);
-    println!("{:>22}  {:>4}/{:<3}  {:>10.1}  {:>8.1}", "hand-written rule", s, cubes, m, k);
+    println!("{:>22}  {:>4}/{:<3}  {:>10.1}  {:>8.1}", "scripted rule", s, cubes, m, k);
     if let Some(n) = net {
         let (s, m, k) = chooser::measure(&space, book, Some(n), cubes, scramble, seed, false);
         println!("{:>22}  {:>4}/{:<3}  {:>10.1}  {:>8.1}", "learned cost-to-go", s, cubes, m, k);

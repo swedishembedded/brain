@@ -10,7 +10,7 @@ name = "viewport"
 path = "src/lib.rs"
 
 [dependencies]
-# The SDL2 window itself, already hand-rolled once in this workspace. This
+# The SDL2 window itself, already bound once in this workspace. This
 # crate adds the canvas and the headless half; it does not open a second FFI
 # surface onto SDL.
 brain-wm-display.workspace = true
