@@ -8,7 +8,9 @@
 //! Spec: a stored FP8 or NVFP4 weight multiplied against up to `GEMV_MAX_ROWS` activation rows is read by its own
 //! float-read kernel (no decoded scratch), and the product equals the host product of the exact decoded weight, for
 //! every row count, a row window that does not start at 0 and a ragged row count; above the row cap the tile decode
-//! answers instead and agrees.
+//! answers instead and agrees. Where the vendor library has the tile product (the default) the cap is two rows, since
+//! the tile product reads the weight once for more rows than that; while the library declines (a recording that is
+//! replayed as a graph) the GEMVs serve all `GEMV_MAX_ROWS`.
 
 use checkpoint::packed::{CodecRegistry, QuantEncoding, TensorDescriptor, TensorSink, Tile};
 use data::rng::Lcg;
@@ -39,6 +41,7 @@ fn host_product(x: &[f32], m: usize, k: usize, wd: &[f32], first: usize, count: 
 }
 
 fn check(ops: &Ops, w: &Weight, label: &str) {
+    let gemv_rows = if ops.gpu().declines_library() { GEMV_MAX_ROWS as usize } else { 2 };
     let (n, k) = (w.n() as usize, w.k() as usize);
     let g = ops.gpu();
     let wd = decode_weight(ops, w);
@@ -55,7 +58,7 @@ fn check(ops: &Ops, w: &Weight, label: &str) {
         let want = host_product(&x, m, k, &wd, first, count);
         for (i, (a, (b, scale))) in got.iter().zip(&want).enumerate() {
             // The GEMV accumulates in f32; the tile decode above the row cap multiplies on bf16 tensor cores.
-            let tol = if m > GEMV_MAX_ROWS as usize { 2e-2 * scale } else { 1e-5 * scale } + 1e-6;
+            let tol = if m > gemv_rows { 2e-2 * scale } else { 1e-5 * scale } + 1e-6;
             assert!((*a as f64 - b).abs() <= tol, "{label} m={m} first={first}: element {i} is {a}, host product {b} (scale {scale})");
         }
     }
@@ -71,11 +74,18 @@ fn stored_fp8_and_nvfp4_weights_multiply_few_rows_by_their_own_kernels() {
     if !ops.gpu().caps().workgroup_reductions {
         return brain_testutil::skip_unavailable("the GEMV kernels need workgroup barriers (not the CPU JIT)");
     }
+    for declines_library in [false, true] {
+        ops.gpu().set_declines_library(declines_library);
+        check_shapes(&ops);
+    }
+}
+
+fn check_shapes(ops: &Ops) {
     for (n, k) in SHAPES {
         let raw = Lcg::new(5).vec_scaled(n * k, 0.5);
-        let fp8 = Weight::upload(&ops, &raw, n, k, gpu_core::select::Dtype::F8E4M3);
+        let fp8 = Weight::upload(ops, &raw, n, k, gpu_core::select::Dtype::F8E4M3);
         assert!(matches!(fp8, Weight::FP8 { .. }));
-        check(&ops, &fp8, &format!("fp8 [{n}, {k}]"));
+        check(ops, &fp8, &format!("fp8 [{n}, {k}]"));
 
         // NVFP4 from random valid bytes: E2M1 codes anywhere, E4M3 scales of ordinary magnitude, a tensor scale.
         let enc = QuantEncoding::nvfp4();
@@ -84,7 +94,7 @@ fn stored_fp8_and_nvfp4_weights_multiply_few_rows_by_their_own_kernels() {
         let payload: Vec<u8> = (0..desc.payload_bytes()).map(|_| rng.next_u32() as u8).collect();
         let scales = [1.5f32.to_le_bytes().to_vec(), (0..desc.scale_bytes(1)).map(|_| 0x30 + (rng.next_u32() % 0x20) as u8).collect::<Vec<u8>>()];
         let tile = Tile { elems: 0..desc.numel(), payload: &payload, scales: vec![&scales[0], &scales[1]] };
-        let mut sink = DeviceWeightSink::new(&ops);
+        let mut sink = DeviceWeightSink::new(ops);
         sink.begin(&desc).unwrap();
         sink.write_tile(&desc, &tile).unwrap();
         sink.finish(&desc).unwrap();
@@ -92,7 +102,7 @@ fn stored_fp8_and_nvfp4_weights_multiply_few_rows_by_their_own_kernels() {
         // The oracle of the tier is the reference codec: the device decode and the GEMV agree with it.
         let mut want = Vec::new();
         CodecRegistry::reference().decoder(&enc).unwrap().decode_tile(&desc, &tile, &mut want).unwrap();
-        assert!(decode_weight(&ops, &nvfp4).iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()));
-        check(&ops, &nvfp4, &format!("nvfp4 [{n}, {k}]"));
+        assert!(decode_weight(ops, &nvfp4).iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()));
+        check(ops, &nvfp4, &format!("nvfp4 [{n}, {k}]"));
     }
 }

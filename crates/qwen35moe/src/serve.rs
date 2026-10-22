@@ -574,7 +574,11 @@ impl Engine {
     fn decode(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], head: DecodeHead) -> DecodeOut {
         assert_eq!(tables.len(), inputs.len(), "qwen35moe::serve::Engine: tables/inputs length mismatch");
         let coords = self.advance_tables(tables);
-        if !self.decode_tapes {
+        // A recording holds no vendor-library product, so the NVFP4 tier's stored-format GEMVs (up to GEMV_MAX_ROWS rows)
+        // are what a recorded step runs; a taller batch decodes unrecorded, where the tile product serves it.
+        let unrecordable =
+            self.model.moe_nvfp4_active() && inputs.len() as u32 > model::ops::GEMV_MAX_ROWS;
+        if !self.decode_tapes || unrecordable {
             let rows = inputs.len() as u32;
             let seqs = self.seqs_for(&coords);
             let caches = self.batch_caches(&seqs);

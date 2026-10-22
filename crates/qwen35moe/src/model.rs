@@ -576,6 +576,8 @@ const MOE_GROUPED_COLS: u32 = 4;
 // perf-number: measured by `qwen35moe_decode_profile` on the real 35B-A3B Q8_0 GGUF
 /// kernel from 7 (15.4 against 14.4), and by 16 rows it is 18.0 ms against 28.1.
 pub const MOE_GROUPED_MIN_ROWS: u32 = 7;
+/// Rows from which the NVFP4 expert tier groups slots by expert (below it the native gather reads each slot's rows).
+const NV_GROUPED_MIN_ROWS: u32 = 64;
 
 /// Every slot is a REAL kernel now (backward is wired, see [`Qwen35::backward`]):
 /// `rope`/`rope_bwd` still point at `rmsnorm` (index 0) because qwen35 never
@@ -1018,6 +1020,8 @@ pub struct Qwen35 {
     /// Rows from which the int8 expert GEMMs run grouped - see
     /// [`Self::set_moe_grouped_min_rows`].
     moe_grouped_min_rows: Cell<u32>,
+    /// The same threshold for the NVFP4 expert tier ([`NV_GROUPED_MIN_ROWS`] by default).
+    nv_grouped_min_rows: Cell<u32>,
     /// Per-layer persistent Gated DeltaNet recurrent state, `[bh, dk, dv]`
     /// (`bh = linear_num_value_heads`, single sequence) for GDN layers; a
     /// size-1 dummy at GQA layer indices. Threaded across `step` calls by
@@ -1754,6 +1758,7 @@ impl Qwen35 {
             gqa_kv,
             chunk_arena_min_rows: Cell::new(CHUNK_ARENA_MIN_ROWS),
             moe_grouped_min_rows: Cell::new(MOE_GROUPED_MIN_ROWS),
+            nv_grouped_min_rows: Cell::new(NV_GROUPED_MIN_ROWS),
             decode_fusion: Cell::new(true),
             gdn_state,
             gdn_hist,
@@ -2575,7 +2580,9 @@ impl Qwen35 {
         let (gate_out, up_out, h) = (g.storage((slots * ff) as u64), g.storage((slots * ff) as u64), g.storage((slots * ff) as u64));
         let y = g.storage((slots * d) as u64);
         let ne = e + 1;
-        let grouped = n >= self.moe_grouped_min_rows.get();
+        // The NVFP4 gather streams each slot's expert rows at memory speed, so grouping slots by expert only pays once
+        // experts are shared by many rows: well past the int8 tier's crossover.
+        let grouped = n >= self.nv_grouped_min_rows.get();
         let (route_tab, route_perm) = if grouped { (g.storage(2 * (ne as u64 + 1)), g.storage(slots as u64)) } else { (g.storage(1), g.storage(1)) };
         let gather = |bank: &model::ops::MicroBank, x: &DeviceBuffer, out: &DeviceBuffer, xdiv: u32| {
             if grouped {
@@ -2607,9 +2614,21 @@ impl Qwen35 {
             steps.push(g.dispatch(MOE_ROUTE_SCAN, &[&counts, &route_tab], &[ne, MOE_GROUPED_MR], Dispatch::Workgroups(1)));
             steps.push(g.dispatch(MOE_ROUTE_EMIT, &[&ids, &route_tab, &route_perm], &[slots, ne], Dispatch::Workgroups(ne)));
         }
-        steps.push(gather(&ml.gate, xn2, &gate_out, slots_per_row));
-        steps.push(gather(&ml.up, xn2, &up_out, slots_per_row));
-        steps.push(g.step(SILU_MUL, &[&gate_out, &up_out, &h], &[slots * ff], slots * ff));
+        // One launch for both projections and the SwiGLU where the device offers it (decode rows).
+        let fused = if grouped {
+            None
+        } else {
+            let (gate, up) = (&ml.gate, &ml.up);
+            g.fused_step(gpu_core::Fused::MoeNvfp4GateUp, &[xn2, &ids, &gate.w, &gate.s, &gate.global, &up.w, &up.s, &up.global, &h], &[slots, gate.k, gate.n, slots_per_row])
+        };
+        match fused {
+            Some(step) => steps.push(step),
+            None => {
+                steps.push(gather(&ml.gate, xn2, &gate_out, slots_per_row));
+                steps.push(gather(&ml.up, xn2, &up_out, slots_per_row));
+                steps.push(g.step(SILU_MUL, &[&gate_out, &up_out, &h], &[slots * ff], slots * ff));
+            }
+        }
         steps.push(gather(&ml.down, &h, &y, 1));
         let moe_out = g.storage((n * d) as u64);
         steps.push(g.step(MOE_SLOT_COMBINE, &[&y, &weight, &moe_out], &[n, d, slots_per_row], n * d));
@@ -3560,6 +3579,8 @@ impl Qwen35 {
         let meta = self.alloc_decode_meta(bsz);
         self.write_decode_meta(&meta, tokens, caches.seqs);
         let g = &self.gpu;
+        // The NVFP4 tier records without vendor-library products (see `Gpu::set_declines_library`).
+        self.ops.gpu().set_declines_library(self.moe_nvfp4_active());
         g.begin_tape();
         let hidden = self.decode_layers(&meta, bsz, caches, caches.gqa_cap);
         let out = match head {
@@ -3569,7 +3590,9 @@ impl Qwen35 {
                 TapeOut::TopK { vals, idx, cap }
             }
         };
-        DecodeTape { tape: g.end_tape(), meta, bsz, out }
+        let tape = g.end_tape();
+        self.ops.gpu().set_declines_library(false);
+        DecodeTape { tape, meta, bsz, out }
     }
 
     /// Run a recorded decode step for `tokens` at the positions in `seqs` (the
@@ -3594,6 +3617,11 @@ impl Qwen35 {
     /// Both compute every slot identically, so this is a speed choice - and a test
     /// hook, since the tiny configs the tests run are far below any useful
     /// threshold.
+    /// [`Self::set_moe_grouped_min_rows`] for the NVFP4 expert tier (a test hook: grouped and gather answer alike).
+    pub fn set_nv_grouped_min_rows(&self, rows: u32) {
+        self.nv_grouped_min_rows.set(rows.max(1));
+    }
+
     pub fn set_moe_grouped_min_rows(&self, rows: u32) {
         self.moe_grouped_min_rows.set(rows.max(1));
     }

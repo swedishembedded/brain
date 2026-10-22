@@ -117,6 +117,16 @@ fn run_case(gpu: &Gpu, c: &Case, seed: u64) {
     gpu.write(&grouped, &vec![0x7fc0_dead; slots * n]);
     let (tab, perm) = route(gpu, &ids, ne as u32);
     let max_tiles = ne as u32 + (slots as u32).div_ceil(MR);
+    if gpu.kind() == "cuda" {
+        assert_eq!(
+            gpu.native_kernel_for(
+                K_GROUPED,
+                &[max_tiles, k as u32, n as u32, xdiv as u32, ne as u32]
+            ),
+            Some("moe_nvfp4_grouped"),
+            "the native grouped kernel must be the one that runs"
+        );
+    }
     gpu.submit(
         &[],
         &[

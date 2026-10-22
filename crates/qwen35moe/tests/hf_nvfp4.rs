@@ -45,7 +45,7 @@ fn cfg() -> Qwen35Config {
         linear_value_head_dim: 16,
         linear_conv_kernel_dim: 4,
         n_experts: 6,
-        top_k: 2,
+        top_k: 4,
         moe_intermediate_size: 64,
         shared_expert_intermediate_size: 64,
         lora: None,
@@ -215,6 +215,12 @@ fn a_modelopt_mixed_precision_release_loads_as_stored_and_matches_its_decoded_we
     assert!(cosine(&got, &want) > 0.99995, "cosine {}", cosine(&got, &want));
     // The reference multiplies f32 weights on the TF32 tensor cores; the stored path reads exact decoded values.
     assert!(max_abs_diff(&got, &want) < 5e-3 * scale.max(1.0), "max abs diff {} for logits up to {scale}", max_abs_diff(&got, &want));
+
+    // The grouped expert GEMM (what a long prefill takes) answers like the per-slot gather the short rounds take.
+    stored.set_nv_grouped_min_rows(1);
+    let grouped = stored.logits_all(&tokens);
+    assert!(cosine(&grouped, &want) > 0.99995 && max_abs_diff(&grouped, &want) < 5e-3 * scale.max(1.0), "grouped prefill differs: {}", max_abs_diff(&grouped, &want));
+    stored.set_nv_grouped_min_rows(64);
 
     // Decode (one row) takes the gather kernels, prefill the grouped ones: same logits for the last prompt token.
     let step = |m: &Qwen35| {

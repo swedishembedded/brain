@@ -53,6 +53,10 @@ GEMMs (`moe_nvfp4_gemv_gather`, `moe_nvfp4_grouped`) read directly with float ac
 `input_scale`s are unused. A bf16 release with fused `mlp.experts.gate_up_proj` tensors is read through per-expert views
 of the fused tensor. The vision tower and the MTP head are not part of the text decoder and are skipped by name.
 
+The serving engine records a decode step once and replays it as a graph. On the NVFP4 tier a recording holds no vendor-library
+product (the library returned zeros inside a replayed graph, knowledge #356), so the stored-format GEMVs serve every row of a
+batch of up to 8 sequences; a taller batch decodes unrecorded.
+
 ## Running it
 
 ```bash

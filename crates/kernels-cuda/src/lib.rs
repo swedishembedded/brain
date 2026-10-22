@@ -1224,7 +1224,7 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         // 16 weight rows per block, row-tile order.
         tile: (1, 16),
-        shared_bytes: 0,
+        shared_bytes: 8 * 1024 * 4,
         programmatic: false,
         src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
     },
@@ -1258,7 +1258,7 @@ pub const ALL: &[CudaKernel] = &[
         reported: "native:matmul_nvfp4_gemv",
         block_dim: 256,
         tile: (1, 16),
-        shared_bytes: 0,
+        shared_bytes: 8 * 1024 * 4,
         programmatic: false,
         src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
     },
@@ -1294,6 +1294,62 @@ pub const ALL: &[CudaKernel] = &[
         // 16 weight rows of one slot per block, slot-major.
         tile: (1, 16),
         shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
+    },
+    CudaKernel {
+        name: "moe_nvfp4_gateup_silu",
+        // A fused kernel asked for by name (`gpu_core::Fused::MoeNvfp4GateUp`): no WGSL twin, the model keeps its chain of
+        // two gathers and a SwiGLU for devices that are not offered it.
+        op: Op::MoeExpertLinear,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_moe_nvfp4_gateup_silu",
+        what: "the gate and up NVFP4 expert projections of each slot and silu(gate) * up in one launch: both banks stream through the same block, the activation row is read once, and the gate/up intermediates never reach memory",
+        reported: "native:moe_nvfp4_gateup_silu",
+        block_dim: 256,
+        // 16 weight rows of one slot per block, slot-major.
+        tile: (1, 16),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
+    },
+    CudaKernel {
+        name: "moe_router_topk",
+        // The native twin of `moe_router_topk.wgsl`, redirected to by name by `gpu_core::native_upgrade`.
+        op: Op::ArgMaxRow,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_moe_router_topk",
+        what: "MoE router head: softmax over the experts, the top_k largest (ties to the lower expert) renormalised, the shared expert's sigmoid weight last; warp-shuffle reductions, the reference's selection order",
+        reported: "native:moe_router_topk",
+        block_dim: 256,
+        // One block per row.
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/moe_router_topk.cu"),
+    },
+    CudaKernel {
+        name: "moe_nvfp4_grouped",
+        // The native twin of `moe_nvfp4_grouped.wgsl`, redirected to by name by `gpu_core::native_upgrade`: the prefill regime's
+        // expert GEMM over an NVFP4 bank.
+        op: Op::MoeExpertLinear,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_moe_nvfp4_grouped",
+        what: "sparse-MoE NVFP4 GEMM over a fused expert bank with each expert's slots grouped: every weight chunk is loaded and decoded once and applied to up to 8 slots whose activations are staged in shared memory; fused multiply-adds, f32 rounding of the running sum against the WGSL tier",
+        reported: "native:moe_nvfp4_grouped",
+        block_dim: 128,
+        // One tile of the router's tables (8 slots of one expert) by 64 weight rows per block, tile-major.
+        tile: (1, 64),
+        shared_bytes: 8 * 512 * 4 + 8 * 4,
         programmatic: false,
         src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
     },

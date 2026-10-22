@@ -350,6 +350,59 @@ const MOE_NVFP4_GATHER_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// `moe_nvfp4_gateup_silu`'s bindings: params, `x`, `ids`, `wg`, `sg`, `gg`, `wu`, `su`, `gu`, `h`.
+const MOE_NVFP4_GATEUP_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
+/// `moe_router_topk.wgsl`'s bindings: params, `logits`, `ids`, `weight`.
+const MOE_ROUTER_TOPK_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
+
+/// The router head's `[rows, n_experts, top_k, has_shared]`: one 256-thread block holds at most 4 experts per thread and 16 picks.
+fn serves_moe_router_topk(p: &[u32]) -> bool {
+    matches!(p, [rows, n, k, shared] if *rows >= 1 && (1..=1024).contains(n) && (1..=16).contains(k) && *shared <= 1)
+}
+
+/// One block per row.
+fn moe_router_topk_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[0]
+}
+
+/// `moe_nvfp4_grouped.wgsl`'s bindings: params, `x`, `tab`, `perm`, `wq`, `sc`, `gl`, `out`.
+const MOE_NVFP4_GROUPED_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
+/// Weight rows one block of the native grouped NVFP4 kernel covers.
+const MOE_NVFP4_GROUPED_COLS: u32 = 64;
+
+/// The grouped kernel's `[tiles, k, n, xdiv, ne]`, with the grid the 32-bit block index covers.
+fn serves_moe_nvfp4_grouped(p: &[u32]) -> bool {
+    matches!(p, [tiles, k, n, xdiv, ne] if *tiles >= 1 && *n >= 1 && *k >= 64 && k % 64 == 0 && *xdiv >= 1 && *ne >= 1
+        && u64::from(*tiles) * u64::from(n.div_ceil(MOE_NVFP4_GROUPED_COLS)) <= u64::from(u32::MAX))
+}
+
+/// Tiles x column tiles of 64 weight rows.
+fn moe_nvfp4_grouped_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[0] * p[2].div_ceil(MOE_NVFP4_GROUPED_COLS)
+}
+
 /// Weight rows one block of the stored-format GEMV kernels covers (`BRAIN_QG_COLS`).
 const QGEMV_COLS: u32 = 16;
 
@@ -444,6 +497,22 @@ pub(crate) const ROWS: &[Row] = &[
         bindings: QGEMV_BINDINGS,
         serves: serves_nvfp4_gemv,
         blocks: qgemv_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "moe_router_topk",
+        target: Target::Named("moe_router_topk"),
+        bindings: MOE_ROUTER_TOPK_BINDINGS,
+        serves: serves_moe_router_topk,
+        blocks: moe_router_topk_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "moe_nvfp4_grouped",
+        target: Target::Named("moe_nvfp4_grouped"),
+        bindings: MOE_NVFP4_GROUPED_BINDINGS,
+        serves: serves_moe_nvfp4_grouped,
+        blocks: moe_nvfp4_grouped_blocks,
         requires_wgsl_upgrade: false,
     },
     Row {
@@ -858,6 +927,9 @@ pub enum Fused {
     /// norm gains carry one row per token), `q_out, q_gate, pool_k, pool_v`
     /// written.
     GqaDecodePrep,
+    /// `moe_nvfp4_gateup_silu`: the gate and up projections of an NVFP4 expert bank for the same slots, and `silu(gate) * up`,
+    /// in one launch. Params `[slots, k, n, xdiv]`; bindings `x, ids, wg, sg, gg, wu, su, gu` read, `h` written.
+    MoeNvfp4GateUp,
     /// `matmul_i8_gemv_multi`: up to four int8 matrices that read ONE packed
     /// activation, multiplied in a single launch - each output bit-identical to
     /// the single `matmul_i8_gemv` on that matrix. Params `[m, kg, n0, n1, n2,
@@ -1116,6 +1188,7 @@ impl Fused {
             Fused::GdnVerifyPool => "gdn_verify_pool",
             Fused::GdnCommitPool => "gdn_commit_pool",
             Fused::GqaDecodePrep => "gqa_decode_prep",
+            Fused::MoeNvfp4GateUp => "moe_nvfp4_gateup_silu",
             Fused::I8GemvMulti => "matmul_i8_gemv_multi",
             Fused::Conv2dDwPartial => "conv2d_dw_partial_f32",
             Fused::Conv2dDwReduce => "conv2d_dw_reduce_f32",
@@ -1137,6 +1210,7 @@ impl Fused {
             Fused::GdnVerifyPool => GDN_VERIFY_POOL_BINDINGS,
             Fused::GdnCommitPool => GDN_COMMIT_POOL_BINDINGS,
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
+            Fused::MoeNvfp4GateUp => MOE_NVFP4_GATEUP_BINDINGS,
             Fused::I8GemvMulti => I8_GEMV_MULTI_BINDINGS,
             Fused::Conv2dDwPartial => CONV2D_DW_PARTIAL_BINDINGS,
             Fused::Conv2dDwReduce => CONV2D_DW_REDUCE_BINDINGS,
@@ -1195,6 +1269,7 @@ impl Fused {
             Fused::SoftmaxRowsDx => {
                 matches!(params, [rows, k] if *rows >= 1 && *k >= 1 && u64::from(*rows) * u64::from(*k) <= u64::from(u32::MAX))
             }
+            Fused::MoeNvfp4GateUp => serves_moe_nvfp4_gather(params),
             Fused::FlashGqaKmask => matches!(params, [bsz, nh, nkv, t, hd, group]
                 if *bsz >= 1 && *nkv >= 1 && *t >= 1 && *hd == FLASH_BIDIR_HEAD_DIM && nh % nkv == 0 && *group == nh / nkv && *group >= 1
                     && u64::from(*bsz) * u64::from(*nh) * u64::from(t.div_ceil(FLASH_BIDIR_ROWS)) <= u64::from(u32::MAX)),
@@ -1209,6 +1284,7 @@ impl Fused {
             Fused::GdnDecodePool | Fused::GdnVerifyPool => params[0] * params[6],
             Fused::GdnCommitPool => params[0] * params[1].div_ceil(GDN_COMMIT_TILE),
             Fused::GqaDecodePrep => (params[0] + params[1]) * params[6],
+            Fused::MoeNvfp4GateUp => params[0] * params[2].div_ceil(QGEMV_COLS),
             Fused::I8GemvMulti => {
                 let (rows, cols) = kernels_cuda::get("matmul_i8_gemv").map_or((1, 1), |k| k.tile);
                 params[0].div_ceil(rows) * params[2..6].iter().map(|n| n.div_ceil(cols)).sum::<u32>()

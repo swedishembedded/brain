@@ -774,6 +774,8 @@ mod native_facade {
         /// Mirrors `tape.is_some()` so the hot paths that must refuse to run
         /// during a recording (`read`, `poll_wait`) pay a relaxed load, not a lock.
         taping: std::sync::atomic::AtomicBool,
+        /// Whether the vendor library declines products (see [`Gpu::set_declines_library`]).
+        declines_library_flag: std::sync::atomic::AtomicBool,
     }
 
     impl Gpu {
@@ -806,6 +808,7 @@ mod native_facade {
                 memo: Mutex::new(None),
                 tape: Mutex::new(None),
                 taping: std::sync::atomic::AtomicBool::new(false),
+                declines_library_flag: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -2157,6 +2160,9 @@ mod native_facade {
         /// [`backend_api::Backend::step_library_gemm`]: one product served by the
         /// device's vendor GEMM library, or `None` when it declines.
         pub fn step_library_gemm(&self, gemm: &backend_api::LibraryGemm, bufs: &[&DeviceBuffer; 3], offsets: &[(u64, u64); 3]) -> Option<Step> {
+            if self.declines_library() {
+                return None;
+            }
             self.inner.step_library_gemm(gemm, bufs, offsets)
         }
 
@@ -2223,6 +2229,18 @@ mod native_facade {
             assert!(t.is_none(), "Gpu::begin_tape: a tape is already being recorded on this handle");
             *t = Some(crate::tape::Tape::default());
             self.taping.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// While `on`, the vendor library declines every product on this handle, so each is built from the in-house
+        /// kernels. A recording that is replayed as a graph sets it around the build: the in-house kernels are the
+        /// dispatches a replay runs identically every time.
+        pub fn set_declines_library(&self, on: bool) {
+            self.declines_library_flag.store(on, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Whether the vendor library is declining products right now ([`Self::set_declines_library`]).
+        pub fn declines_library(&self) -> bool {
+            self.declines_library_flag.load(std::sync::atomic::Ordering::Relaxed)
         }
 
         /// Stop recording and return what was recorded. Panics if none is open.

@@ -265,3 +265,77 @@ fn the_native_nvfp4_expert_gather_matches_the_oracle() {
         run_gather(&gpu, slots, k, n, xdiv, experts, base.wrapping_add(i as u64 * 19));
     }
 }
+
+/// The fused gate + up + SwiGLU kernel equals `silu(gate) * up` of two gathers' oracles.
+#[test]
+fn the_fused_gate_up_silu_matches_the_oracle() {
+    let gpu = gpu_core::testgpu::dev(kernel_list());
+    if !is_cuda(&gpu) || !gpu.caps().workgroup_reductions || !gpu.has_fused(gpu_core::Fused::MoeNvfp4GateUp) {
+        return brain_testutil::skip_unavailable("the fused gate/up kernel needs a CUDA device");
+    }
+    let base = data::rng::random_seed();
+    for (i, &(slots, k, n, xdiv, experts)) in [(9usize, 2048usize, 64usize, 9usize, 17usize), (18, 576, 37, 9, 5), (1, 64, 1, 1, 1)].iter().enumerate() {
+        let seed = base.wrapping_add(i as u64 * 23);
+        let rows = slots.div_ceil(xdiv);
+        let mut r = Lcg::new(seed);
+        let bank = |salt: u64| -> (Vec<u32>, Vec<u8>, Vec<f32>) {
+            let mut r = Lcg::new(seed + salt);
+            ((0..experts * n * k / 8).map(|_| r.next_u32()).collect(), scale_bytes(experts * n * k / 16, seed + salt + 1), (0..experts).map(|e| 0.002 + 0.0007 * e as f32 + salt as f32 * 1e-4).collect())
+        };
+        let (cg, sg, gg) = bank(100);
+        let (cu, su, gu) = bank(200);
+        let x = Lcg::new(seed + 2).vec_scaled(rows * k, 1.0);
+        let ids: Vec<u32> = (0..slots).map(|_| r.next_u32() % experts as u32).collect();
+        let (xb, ib) = (gpu.storage_init("x", &x), upload_u32(&gpu, &ids));
+        let (wg, sgb, ggb) = (upload_u32(&gpu, &cg), upload_u32(&gpu, &words_of(&sg)), gpu.storage_init("gg", &gg));
+        let (wu, sub, gub) = (upload_u32(&gpu, &cu), upload_u32(&gpu, &words_of(&su)), gpu.storage_init("gu", &gu));
+        let out = gpu.storage((slots * n) as u64);
+        let step = gpu.fused_step(gpu_core::Fused::MoeNvfp4GateUp, &[&xb, &ib, &wg, &sgb, &ggb, &wu, &sub, &gub, &out], &[slots as u32, k as u32, n as u32, xdiv as u32]).expect("offered");
+        gpu.submit(&[], &[step]);
+        gpu.poll_wait();
+        let got = gpu.read(&out, slots * n);
+        for s in 0..slots {
+            let e = ids[s] as usize;
+            for col in 0..n {
+                let dot = |codes: &[u32], scales: &[u8], global: f32| -> (f64, f64) {
+                    let terms: Vec<f64> = (0..k).map(|t| f64::from(x[(s / xdiv) * k + t]) * fp4_weight(codes, scales, global, k, e * n + col, t)).collect();
+                    (terms.iter().sum(), terms.iter().map(|v| v * v).sum::<f64>().sqrt())
+                };
+                let ((g, gs), (u, us)) = (dot(&cg, &sg, gg[e]), dot(&cu, &su, gu[e]));
+                let want = g / (1.0 + (-g).exp()) * u;
+                // silu is 1-Lipschitz-ish times u: the error scale is the larger of the two terms' scales.
+                let tol = 2e-5 * (gs * u.abs() + us * (g / (1.0 + (-g).exp())).abs() + gs * us * 0.5) + 1e-9;
+                assert!((f64::from(got[s * n + col]) - want).abs() <= tol, "slot {s} col {col}: fused {} oracle {want} (k={k})", got[s * n + col]);
+            }
+        }
+    }
+}
+
+/// The native router head selects the reference's experts and agrees with its weights to f32 rounding.
+#[test]
+fn the_native_router_topk_selects_the_reference_experts() {
+    let list: &[(&str, &str)] = &[("moe_router_topk", kernels::MOE_ROUTER_TOPK), ("moe_router_topk_ref", kernels::MOE_ROUTER_TOPK)];
+    let gpu = gpu_core::testgpu::dev(list);
+    if !is_cuda(&gpu) || !gpu.caps().workgroup_reductions {
+        return brain_testutil::skip_unavailable("the native router head needs a CUDA device");
+    }
+    let mut r = Lcg::new(data::rng::random_seed());
+    for &(rows, n, top_k, shared) in &[(1usize, 256usize, 8usize, 1usize), (5, 256, 8, 1), (3, 17, 2, 0), (40, 1000, 16, 1), (2, 256, 1, 1)] {
+        let width = n + shared;
+        let logits: Vec<f32> = (0..rows * width).map(|_| (r.next_u32() % 20001) as f32 / 2500.0 - 4.0).collect();
+        let lb = gpu.storage_init("l", &logits);
+        let out_w = top_k + shared;
+        let (ia, wa) = (gpu.storage((rows * out_w) as u64), gpu.storage((rows * out_w) as u64));
+        let (ib, wb) = (gpu.storage((rows * out_w) as u64), gpu.storage((rows * out_w) as u64));
+        let params = [rows as u32, n as u32, top_k as u32, shared as u32];
+        assert_eq!(gpu.native_kernel_for(0, &params), Some("moe_router_topk"));
+        assert_eq!(gpu.native_kernel_for(1, &params), None);
+        gpu.submit(&[], &[gpu.dispatch(0, &[&lb, &ia, &wa], &params, Dispatch::Workgroups(rows as u32)), gpu.dispatch(1, &[&lb, &ib, &wb], &params, Dispatch::Workgroups(rows as u32))]);
+        gpu.poll_wait();
+        let (ids_n, ids_r) = (gpu.read(&ia, rows * out_w), gpu.read(&ib, rows * out_w));
+        assert_eq!(ids_n.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), ids_r.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "rows={rows} n={n} k={top_k}: chosen experts differ");
+        for (a, b) in gpu.read(&wa, rows * out_w).iter().zip(gpu.read(&wb, rows * out_w)) {
+            assert!((a - b).abs() <= 1e-5 * b.abs() + 1e-9, "rows={rows} n={n}: weight {a} vs {b}");
+        }
+    }
+}
