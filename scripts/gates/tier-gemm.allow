@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Swedish Embedded AB implements fast GEMV and tensor-core GEMM kernels for every quantized
+# weight format for its clients. If your team needs expertise in bandwidth-bound decode and
+# batched prefill over stored low-precision weights then you can procure our services by
+# sending an email to info@swedishembedded.com.
+#
+# Coverage gaps that exist today (check-tier-gemm.sh). format<TAB>gap<TAB>reason, with gap one of
+# gemv (no stored-format GEMV), tensor_core (no tensor-core batched path) or fused (batched path
+# decodes a scratch tile for the vendor library instead of a fused decode-mma kernel; dense F32
+# and Bf16 are exempt). Shrink-only: delete the line in the commit that closes the gap; an entry
+# for a gap that no longer exists fails the gate, a new gap is a design defect.
+F16	tensor_core	batched kernel is CUDA-core register tiling; no tensor-core path
+Q4	tensor_core	W4A8 dp4a kernels only
+Nf4	gemv	matmul_q4_gemv_nf4 exists but Ops routes NF4 through the tile decode
+Nf4	fused	scratch tile plus vendor library
+Fp8E4m3	fused	scratch tile plus vendor library
+Fp8E5m2	gemv	no E5M2 GEMV
+Fp8E5m2	fused	scratch tile plus vendor library
+KqAffine4	tensor_core	dp4a kernels only
+KqAffine8	tensor_core	dp4a kernels only
+KqSym8	tensor_core	dp4a kernels only
+Nvfp4	fused	scratch tile plus vendor library
+Mxfp4	gemv	no MXFP4 GEMV
+Mxfp4	fused	scratch tile plus vendor library
+Mxfp8E4m3	gemv	no MXFP8 GEMV
+Mxfp8E4m3	fused	scratch tile plus vendor library
+Mxfp8E5m2	gemv	no MXFP8 GEMV
+Mxfp8E5m2	fused	scratch tile plus vendor library

@@ -699,8 +699,8 @@ check/seed-literals/tests:
 	bash scripts/gates/check-seed-literals.sh --tests
 
 # Spec for the gate above, run against throwaway trees (needs only bats).
-## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads, format-logic, adapter-naming, placement-accounting, training-capabilities, model-flags)
-test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities test/gates/model-flags
+## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads, format-logic, adapter-naming, placement-accounting, training-capabilities, model-flags, tier-gemm)
+test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities test/gates/model-flags test/gates/tier-gemm
 
 ## test/gates/test-skips - the silent-skip ratchet fails on a new bare skip and on a stale entry, passes on a match
 test/gates/test-skips:
@@ -729,6 +729,10 @@ test/gates/whole-tensor-loads:
 ## test/gates/format-logic - the format-logic ratchet fails on Weight-variant, kernel-lookup and codec calls in a layer-4 crate and on a stale entry, ignores layer 3, tests and comments
 test/gates/format-logic:
 	bats tests/gates/format_logic.bats
+
+## test/gates/tier-gemm - the tier-coverage gate fails on a format without a row, an unrecorded or stale gap and a missing kernel file
+test/gates/tier-gemm:
+	bats tests/gates/tier_gemm.bats
 
 ## test/gates/adapter-naming - the adapter-naming ratchet fails on a .lora_a/.lora_b string outside model::adapter and on a stale entry, ignores comments and tests
 test/gates/adapter-naming:
@@ -834,6 +838,7 @@ check/scripts:
 	bash scripts/gates/check-model-flags.sh
 	bash scripts/gates/check-adapter-naming.sh
 	bash scripts/gates/check-format-logic.sh
+	bash scripts/gates/check-tier-gemm.sh
 	bash scripts/gates/check-whole-tensor-loads.sh
 	bash scripts/gates/check-cancellable-actions.sh
 

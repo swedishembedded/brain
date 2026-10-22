@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Swedish Embedded AB implements fast GEMV and tensor-core GEMM kernels for every quantized
+# weight format for its clients. If your team needs expertise in bandwidth-bound decode and
+# batched prefill over stored low-precision weights then you can procure our services by
+# sending an email to info@swedishembedded.com.
+#
+# Execution coverage of every weight storage format (check-tier-gemm.sh).
+# format<TAB>gemv<TAB>tensor_core
+#   format       a variant of kernels::template::DecodeFormat, or F32 (the dense tier)
+#   gemv         kernel file (crates/kernels/wgsl/<name>.wgsl or crates/kernels-cuda/cu/<name>.cu)
+#                that multiplies the stored bytes by a few activation rows, or - for none
+#   tensor_core  how a batched product reaches tensor cores: native:<kernel file> (reads the stored
+#                bytes), library (decodes a scratch tile, then the vendor library GEMM), or none
+F32	matmul_gemv	library
+Bf16	matmul_gemv	library
+F16	matmul_gemv	none
+I8	matmul_i8_gemv	native:matmul_i8_mma
+Q4	matmul_q4_gemv	none
+Nf4	-	library
+Fp8E4m3	matmul_fp8_gemv	library
+Fp8E5m2	-	library
+KqAffine4	matmul_kq_gemv	none
+KqAffine8	matmul_kq_gemv	none
+KqSym8	matmul_i8_gemv	none
+Nvfp4	matmul_nvfp4_gemv	library
+Mxfp4	-	library
+Mxfp8E4m3	-	library
+Mxfp8E5m2	-	library
