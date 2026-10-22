@@ -87,6 +87,10 @@ const SHAPES: &[(&str, u32, u32, u32)] = &[
     ("te kv 512x2560x1024", 512, 2560, 1024),
     ("te gate/up 512x2560x9728", 512, 2560, 9728),
     ("te down 512x9728x2560", 512, 9728, 2560),
+    ("qwen3.8 gdn qkv 256x5120x10240", 256, 5120, 10240),
+    ("qwen3.8 gate/up 256x5120x17408", 256, 5120, 17408),
+    ("qwen3.8 down 256x17408x5120", 256, 17408, 5120),
+    ("qwen3.8 gate/up 1024x5120x17408", 1024, 5120, 17408),
 ];
 
 /// Device milliseconds of everything submitted in `steps`, one trial.
