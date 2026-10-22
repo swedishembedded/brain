@@ -84,3 +84,25 @@ fn substring_matching_is_not_anchored_to_a_full_path_segment() {
     assert_eq!(p.want("blocks.0.mlp.up.weight"), DType::Q4, "the intended match");
     assert_eq!(p.want("blocks.0.mlp.group.weight"), DType::Q4, "an unintended substring match -- by design, documented");
 }
+
+/// A checkpoint quantized per tensor (a GGUF Q4_K_M mixes Q4_K and Q6_K by
+/// layer) is held leaf by leaf: the tier of the most weights is the default
+/// and every other leaf a rule naming it, so each leaf wants its own tier -
+/// including names that are prefixes of one another by layer number.
+#[test]
+fn a_per_leaf_policy_holds_every_leaf_at_its_own_tier() {
+    let leaves = [
+        ("blocks.1.mlp.down.weight", DType::I8, 100),
+        ("blocks.11.mlp.down.weight", DType::Q4K, 100),
+        ("blocks.1.mlp.up.weight", DType::Q4K, 100),
+        ("blocks.2.mlp.up.weight", DType::Q4K, 100),
+        ("blocks.2.mlp.down.weight", DType::I8, 150),
+    ];
+    let p = TierPolicy::per_leaf(leaves.iter().map(|&(n, t, w)| (n.to_string(), t, w)));
+    assert_eq!(p.default_dtype(), DType::Q4K, "300 of 550 weights are Q4K");
+    assert_eq!(p.rule_count(), 2, "one rule per leaf off the default");
+    for (name, tier, _) in leaves {
+        assert_eq!(p.want(name), tier, "{name}");
+    }
+    assert_eq!(TierPolicy::per_leaf(std::iter::empty()), TierPolicy::uniform(DType::I8), "no leaves: the int8 default");
+}

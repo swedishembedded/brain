@@ -906,6 +906,25 @@ impl TierPolicy {
         self
     }
 
+    /// Each named leaf at its own tier (`(name, tier, weights)`): the tier
+    /// holding the most weights is the default, and every other leaf a rule
+    /// naming it in full - how a checkpoint quantized tensor by tensor is held
+    /// as it is stored. Full names never match one another by substring when
+    /// they differ only in a layer number (`blocks.1.` is not inside
+    /// `blocks.11.`). No leaves: uniform int8.
+    pub fn per_leaf(leaves: impl IntoIterator<Item = (String, Dtype, u64)>) -> TierPolicy {
+        let leaves: Vec<(String, Dtype, u64)> = leaves.into_iter().collect();
+        let mut weights: Vec<(Dtype, u64)> = Vec::new();
+        for &(_, tier, w) in &leaves {
+            match weights.iter_mut().find(|(t, _)| *t == tier) {
+                Some((_, total)) => *total += w,
+                None => weights.push((tier, w)),
+            }
+        }
+        let default = weights.iter().max_by_key(|(_, w)| *w).map_or(Dtype::I8, |(t, _)| *t);
+        leaves.iter().filter(|(_, tier, _)| *tier != default).fold(TierPolicy::uniform(default), |p, (name, tier, _)| p.with(&[name], *tier))
+    }
+
     /// The tier leaf `name` should upload at: the LAST rule whose pattern is
     /// a substring of `name`, or [`Self::uniform`]'s default if none match.
     pub fn want(&self, name: &str) -> Dtype {
@@ -1108,13 +1127,13 @@ pub struct Act {
     /// rather than merely unused.
     quant: Option<I8Scratch>,
     /// `crate::kquant`'s `S[m,g] = Σ_{k in g} xq[m,k]` affine correction
-    /// prepass (M9's `quant_group_sum.wgsl`), `[xr0+rows, k/GROUP]` f32 -
-    /// `Some` only when built by [`Ops::act_kq`]. `None` for every other
-    /// constructor: an activation feeding only `F32`/`BF16`/`F16`/`I8`/`Q4`
-    /// weights never needs this term, and building it unconditionally would
-    /// pay for a third dispatch (`quant_group_sum`) no matmul call reads,
-    /// same reasoning as `quant`'s own `None` case in [`Ops::act_f32`].
-    xgs: Option<DeviceBuffer>,
+    /// prepass (M9's `quant_group_sum.wgsl`), `[xr0+rows, k/GROUP]` f32. Made
+    /// by the first [`Weight::KQuant`] product that reads these rows and
+    /// shared by the rest (or up front by [`Ops::act_kq`]), so an activation
+    /// that only `F32`/`BF16`/`F16`/`I8`/`Q4` weights read never pays for the
+    /// dispatch, and a model holding K-quant weights needs no activation of
+    /// its own. Ordering is the `bf16` cast's below.
+    xgs: std::cell::RefCell<Option<DeviceBuffer>>,
     /// These rows rounded to bf16, made by the first product on the vendor
     /// library that reads them and shared by the rest: the linears of a group
     /// that read one activation (a GDN layer's four projections, attention's
@@ -1412,7 +1431,7 @@ impl Ops {
         let total = (xr0 + rows) as u64;
         let quant = I8Scratch::new(&self.gpu, total, total, &[k]);
         quant.quant_rows(&self.gpu, [self.idx[kname::MAX_ABS_ROW], self.idx[kname::QUANT_PACK]], s, x, xr0, xr0 + rows, k);
-        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: None, bf16: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: Default::default(), bf16: Default::default() }
     }
 
     /// The [`Act`] for rows `[0, rows)` of `x` (`[rows, k]`) that something
@@ -1424,7 +1443,7 @@ impl Ops {
     pub fn act_prequantized(&self, x: &DeviceBuffer, sx: &DeviceBuffer, xq: &DeviceBuffer, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_prequantized: rows must be > 0 (got 0)");
         assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Some(I8Scratch::from_parts(sx.clone(), k, xq.clone())), xgs: None, bf16: Default::default() }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Some(I8Scratch::from_parts(sx.clone(), k, xq.clone())), xgs: Default::default(), bf16: Default::default() }
     }
 
     /// [`Ops::act`], plus the affine K-quant group-sum prepass
@@ -1460,7 +1479,7 @@ impl Ops {
             xr0 + rows,
             k,
         ));
-        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: Some(xgs), bf16: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: std::cell::RefCell::new(Some(xgs)), bf16: Default::default() }
     }
 
     /// [`Ops::act`] for a caller whose weights are ALL fp32-family, so the
@@ -1479,7 +1498,7 @@ impl Ops {
     /// whatever a missing buffer would have held.
     pub fn act_f32(&self, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_f32: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0, m: rows, k, quant: None, xgs: None, bf16: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: None, xgs: Default::default(), bf16: Default::default() }
     }
 
     /// [`Self::act_f32`] for all `rows` rows of `x` whose bf16 rounding a fused kernel has already produced
@@ -1487,7 +1506,7 @@ impl Ops {
     /// read this activation take it instead of casting it again.
     pub fn act_f32_with_bf16(&self, x: &DeviceBuffer, rows: u32, k: u32, bf16: DeviceBuffer) -> Act {
         assert!(rows > 0, "Ops::act_f32_with_bf16: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: None, xgs: None, bf16: std::cell::RefCell::new(Some(bf16)) }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: None, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)) }
     }
 
     /// The f32 rows of an activation built by [`Self::act_f32`]: the buffer, its
@@ -1766,14 +1785,16 @@ impl Ops {
                     "Ops::matmul: this activation was built with Ops::act_f32, which promises no \
                      quantized weight reads it - build it with Ops::act or Ops::act_kq instead",
                 );
-                let xgs = act.xgs.as_ref().unwrap_or_else(|| {
-                    panic!(
-                        "Ops::matmul: this Weight::KQuant weight (dtype {dt:?}) needs the activation's \
-                         xgs group-sum prepass (crate::kquant's affine correction term), but this \
-                         activation was built without one -- build it with Ops::act_kq, not Ops::act \
-                         or Ops::act_f32"
-                    )
-                });
+                let xgs = act
+                    .xgs
+                    .borrow_mut()
+                    .get_or_insert_with(|| {
+                        let xgs = self.gpu.storage((act.xr0 + m) as u64 * (k as u64 / crate::int8::GROUP as u64));
+                        s.push(self.gpu.step_sliced(self.idx[kname::QUANT_GROUP_SUM], &[quant.xq_for(k), &xgs], &[xo, go], &[m, k], m * k / crate::int8::GROUP as u32));
+                        xgs
+                    })
+                    .clone();
+                let xgs = &xgs;
                 // `k` (RAW LOGICAL K, not a packed word count) - see the
                 // long comment on the `I8`/`Q4` arm above for why this is
                 // the correct param here too.

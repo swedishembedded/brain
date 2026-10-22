@@ -209,6 +209,17 @@ fn check_kquant(dtype: Dtype, bits: u32, dyn_kname: &'static str, gemv_kname: &'
     let want = g.read(&out_want, m * n);
 
     assert_eq!(got, want, "{dtype:?} tier m={m} n={n} k={k} dmin_nonzero={dmin_nonzero}: facade output != hand-dispatched M11 kernel output (bit-for-bit)");
+
+    // ---- Path C: a plain `Ops::act`, whose group sum the first K-quant product makes ----
+    let mut lazy_steps = Vec::new();
+    let plain = ops.act(&mut lazy_steps, &x, 0, m as u32, k as u32);
+    let out_lazy = g.storage((m * n) as u64);
+    ops.matmul(&mut lazy_steps, &weight, &plain, &out_lazy, 0);
+    let out_again = g.storage((m * n) as u64);
+    ops.matmul(&mut lazy_steps, &weight, &plain, &out_again, 0);
+    g.submit(&[], &lazy_steps);
+    assert_eq!(g.read(&out_lazy, m * n), got, "{dtype:?}: a plain activation's lazily built group sum must equal act_kq's");
+    assert_eq!(g.read(&out_again, m * n), got, "{dtype:?}: the second product shares the first one's group sum");
 }
 
 /// `m ∈ {8, 192}` covers the GEMV decode regime (`m <= 32`) and the tiled
@@ -247,14 +258,13 @@ fn kname_kq_gemv_8() -> &'static str {
     "matmul_kq_gemv#CODE_BITS=8"
 }
 
-/// `Ops::matmul` must refuse LOUDLY, not silently read a zero/missing
-/// buffer, when a `Weight::KQuant` is paired with an activation built via
-/// `Ops::act` (no `xgs`) or `Ops::act_f32` (no packed activation at all) -
-/// the exact "affine weight without an xgs-built activation" mistake M12's
-/// own task brief calls out.
+/// `Ops::matmul` must refuse LOUDLY, not silently read a missing buffer,
+/// when a `Weight::KQuant` is paired with an activation built via
+/// `Ops::act_f32`, which promised that no quantized weight reads it (there
+/// is no packed activation to sum).
 #[test]
-#[should_panic(expected = "xgs")]
-fn kquant_matmul_refuses_an_activation_built_without_xgs() {
+#[should_panic(expected = "act_f32")]
+fn kquant_matmul_refuses_an_activation_built_with_act_f32() {
     let _device = gpu_core::testgpu::exclusive();
     let g = Gpu::new(kernel_list());
     let ops = Ops::new(g).expect("Ops::new");
@@ -273,8 +283,7 @@ fn kquant_matmul_refuses_an_activation_built_without_xgs() {
     let weight = Weight::KQuant { w: wq, sz: KqScale::Packed { wsm, wd }, n: n as u32, k: k as u32, group: GROUP as u32, bits: 4, affine: true };
 
     let mut s = Vec::new();
-    // Built with `Ops::act` (no xgs), not `Ops::act_kq` - must panic.
-    let act = ops.act(&mut s, &x, 0, m as u32, k as u32);
+    let act = ops.act_f32(&x, 0, m as u32, k as u32);
     let out = g.storage((m * n) as u64);
     ops.matmul(&mut s, &weight, &act, &out, 0);
 }
