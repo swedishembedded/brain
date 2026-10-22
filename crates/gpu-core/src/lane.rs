@@ -54,13 +54,23 @@ pub fn current() -> Lane {
 /// Run `f` with this thread's work on every device going to its urgent lane.
 /// Scopes nest; the outer lane returns when `f` does, including by unwinding.
 pub fn urgent<R>(f: impl FnOnce() -> R) -> R {
+    within(Lane::Urgent, f)
+}
+
+/// Run `f` on the normal lane, also from inside [`urgent`]: bulk work a
+/// latency-bound loop advances between its own steps.
+pub fn normal<R>(f: impl FnOnce() -> R) -> R {
+    within(Lane::Normal, f)
+}
+
+fn within<R>(lane: Lane, f: impl FnOnce() -> R) -> R {
     struct Restore(Lane);
     impl Drop for Restore {
         fn drop(&mut self) {
             CURRENT.with(|c| c.set(self.0));
         }
     }
-    let _restore = Restore(CURRENT.with(|c| c.replace(Lane::Urgent)));
+    let _restore = Restore(CURRENT.with(|c| c.replace(lane)));
     f()
 }
 
@@ -75,6 +85,7 @@ mod tests {
             assert_eq!(current(), Lane::Urgent);
             assert_eq!(std::thread::spawn(current).join().unwrap(), Lane::Normal, "another thread keeps its own lane");
             urgent(|| assert_eq!(current(), Lane::Urgent));
+            normal(|| assert_eq!(current(), Lane::Normal));
             assert_eq!(current(), Lane::Urgent, "a nested scope restores the outer lane");
         });
         assert_eq!(current(), Lane::Normal);

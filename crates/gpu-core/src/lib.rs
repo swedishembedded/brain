@@ -1504,7 +1504,7 @@ mod native_facade {
             // the same sizes every iteration; let the backend hold the freed
             // blocks until `scratch_release`.
             self.be().hold_freed_blocks(true);
-            ScratchScope { gpu: self }
+            ScratchScope { gpu: self, lane }
         }
 
         /// Bracket one iteration of a repeating loop - a decode step - as a
@@ -1520,8 +1520,9 @@ mod native_facade {
         /// arena scope FIRST so the pass ends (and issues) before the scope
         /// does.
         pub fn pass_scope(&self) -> PassScope<'_> {
-            self.be().begin_pass();
-            PassScope { gpu: self }
+            let backend = self.be();
+            backend.begin_pass();
+            PassScope { backend }
         }
 
         /// Buffers the default scratch arena is holding, and the words they
@@ -1568,8 +1569,7 @@ mod native_facade {
 
         /// Close the open scope. The arena and its buffers stay - that is what
         /// the next scope replays.
-        fn scratch_leave(&self) {
-            let lane = crate::lane::current();
+        fn scratch_leave(&self, lane: crate::lane::Lane) {
             for (_, _, a) in self.arena.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().filter(|(l, _, _)| *l == lane) {
                 a.leave();
             }
@@ -2429,23 +2429,27 @@ mod native_facade {
     /// the scope but KEEPS the buffers, which is what the next scope reuses.
     pub struct ScratchScope<'a> {
         gpu: &'a Gpu,
+        /// The lane the scope was opened in, which it closes whatever lane is
+        /// current when it drops.
+        lane: crate::lane::Lane,
     }
 
     /// The open pass returned by [`Gpu::pass_scope`]; dropping it ends the
     /// pass and issues anything the backend held for it.
     pub struct PassScope<'a> {
-        gpu: &'a Gpu,
+        /// The backend the pass began on - the lane's - which ends it.
+        backend: &'a dyn backend_api::Backend,
     }
 
     impl Drop for PassScope<'_> {
         fn drop(&mut self) {
-            self.gpu.inner.end_pass();
+            self.backend.end_pass();
         }
     }
 
     impl Drop for ScratchScope<'_> {
         fn drop(&mut self) {
-            self.gpu.scratch_leave();
+            self.gpu.scratch_leave(self.lane);
         }
     }
 }

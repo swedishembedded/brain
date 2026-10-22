@@ -78,9 +78,15 @@ fn a_lane_changes_where_work_runs_not_what_it_computes() {
     normal.submit(&gpu, K_GEMV);
     let want = normal.bits(&gpu);
     // The same operands, made in the normal lane, multiplied in the urgent one.
+    // Inside a scratch scope and a pass, as a decode step records itself: both
+    // must close on the lane they opened in.
     let got = lane::urgent(|| {
         gpu.write(&normal.out, &vec![0u32; 1024]);
-        normal.submit(&gpu, K_GEMV);
+        {
+            let _scratch = gpu.scratch_scope_in("urgent-lane-test");
+            let _pass = gpu.pass_scope();
+            normal.submit(&gpu, K_GEMV);
+        }
         normal.bits(&gpu)
     });
     assert_eq!(got, want, "the urgent lane computed a different product");
