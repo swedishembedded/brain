@@ -44,8 +44,7 @@ Implement `capability::Action` for each action and advertise them in a
   A dataset folder (`data`), an output path (`save`), an adapter to load
   (`adapter`), a conditioning image (`start_frame`), a reference clip (`ref`):
   each is a path only a caller standing on this machine can answer, and from
-  anyone else it is a probe of the host's disk. Declare it `.host_resolved()`
-  (or `.host_env("BRAIN_…")` when one variable answers it), so
+  anyone else it is a probe of the host's disk. Declare it `.host_resolved()`, so
   `for_serving` drops it and every off-machine surface (`/v1/run`,
   `/v1/jobs`, `/v1/capabilities`, D-Bus `Manifests`/`Run`/`Subscribe`/`Plan`)
   refuses it as an unknown param through `ActionSpec::validate_served`; the
@@ -54,24 +53,28 @@ Implement `capability::Action` for each action and advertise them in a
   dataset as a JSONL blob). `crates/catalog/tests/served_paths.rs` reads every
   catalog manifest and fails on a served param whose name or help text says
   path, file, folder or directory.
-- **A checkpoint location is `.host_env("BRAIN_…")`, never a plain param.** If an
-  action needs to know where its weights/tokenizer live, that is a fact about the
-  MACHINE the action runs on, not a request the caller composes. Declare it
-  `ParamSpec::new("weights", …).host_env("BRAIN_<MODEL>_WEIGHTS")` and
-  `capability` does the rest for you: `ActionSpec::validate` fills it from that
-  variable (so `run` still reads `inv.get_str("weights")` unchanged, and an
-  unconfigured machine gets an error naming the VARIABLE), while
-  `Manifest::for_serving`/`catalog::serving_manifests()` project it out of every
-  off-machine surface - a scheduler, a remote client, a graph editor. Without
-  this, the param is published to callers who share no filesystem with this
-  machine and therefore cannot answer it; that is not cosmetic, it makes the
-  action unusable from anywhere but a local shell. Do NOT hand-roll the
-  projection with `params.retain(…)` and do NOT bake the env value into
-  `.default(…)` - a default is served to every caller, so it also leaks this
-  operator's directory layout. `manifest_resident()` is one line over
-  `for_serving()` in every model that has one. Reference: `glmdsa::caps`,
-  `qwen3::caps`, and `crates/catalog`'s own tests, which pin over the REAL
-  catalog that no served manifest carries a checkpoint path.
+- **A checkpoint location is resolved from the model store, never a plain
+  param and never a new environment variable.** Where an action's
+  weights/tokenizer live is a fact about the MACHINE the action runs on, not a
+  request the caller composes, and `brain pull <vendor>/<repo>` is how a
+  machine comes to hold them. Declare the param `.host_resolved()` and give the
+  catalog entry a resolver spec (the crate's `spec::<Model>Spec`, found through
+  `catalog::resolver_spec_for`): the spec names the artifact roles (weights,
+  tokenizer, components) the store resolves, so `brain serve` and `brain do`
+  find a pulled model with no setting, and `Manifest::for_serving` projects the
+  param out of every off-machine surface. An explicit path for a checkpoint
+  outside the store is a `brain serve` flag (`--checkpoint`), never a variable.
+  `.host_env("BRAIN_…")` remains only on architectures not yet moved onto the
+  store; adding one is refused by `make check/env-reads`. Without the
+  projection the param is published to callers who share no filesystem with
+  this machine and therefore cannot answer it; that is not cosmetic, it makes
+  the action unusable from anywhere but a local shell. Do NOT hand-roll the
+  projection with `params.retain(…)` and do NOT bake a path into `.default(…)` -
+  a default is served to every caller, so it also leaks this operator's
+  directory layout. `manifest_resident()` is one line over `for_serving()` in
+  every model that has one. Reference: `qwen3::caps` with
+  `qwen3::spec::Qwen3Spec`, and `crates/catalog`'s own tests, which pin over the
+  REAL catalog that no served manifest carries a checkpoint path.
 - **Long-running actions must be cancellable.** Every [`Invocation`] carries a
   `capability::CancelToken` (`inv.cancel`; the `Default` token is unarmed and never
   fires, so short actions can ignore it). An action whose run is longer than a few
@@ -109,8 +112,10 @@ Implement `capability::Action` for each action and advertise them in a
 
 ### 2. Residency — be scheduled, budgeted, swappable
 Add a `residency::ResidentModel` adapter under `crates/catalog/src/resident_*.rs` and
-register it in `serving::build_executor` (env-gated, `from_env` → `None` when its
-weights var is unset). `activate` **builds the model once** (weights uploaded once)
+make the model-store scan build it (`serving::model_dir::resident_for` maps a
+card's family to its resident), so a pulled checkpoint is served with no
+setting; a family the scan cannot build is counted at startup, never a
+failure. `activate` **builds the model once** (weights uploaded once)
 and the `Instance` owns it so dropping frees the memory; `estimate` reports the Hot
 footprint the manager budgets against.
 - Reference: `crates/residency/src/{model,executor}.rs`; ASR:
@@ -189,7 +194,7 @@ demonstrated by a sample under `samples/python/<pipeline>/` or
 
 ## Quick self-audit
 
-> Can a fresh process, given only the weights path in an env var, do
+> Can a fresh process, after only `brain pull <vendor>/<repo>`, do
 > `brain serve --dbus` and have this model show up in `Manifests`, run its action over
 > `Run`/`Subscribe`/`StreamTranscribe`, batch when two requests arrive at once, and be
 > driven by a `samples/python/` or `samples/shell/` script - with no model-specific code in the transport?

@@ -149,9 +149,9 @@ enforces it.
   the CLI, D-Bus and Python call too (`sdk-design.md`).
 - **A capability is an `Action` in a `Provider`, never a new subcommand.**
 - **A file location on the serving machine is the host's fact:** a
-  `.host_env(..)` or `.host_resolved()` param, never a plain one. Served models
-  are named `<vendor>/<repo>[-<QUANT>]` (`crates/modelref`). See
-  `serving-contract.md`.
+  `.host_resolved()` param resolved from the model store, never a plain one and
+  never a new variable. Served models are named `<vendor>/<repo>[-<QUANT>]`
+  (`crates/modelref`). See `serving-contract.md`.
 - **The HTTP and D-Bus API stays watertight:** every change audits the whole API
   and adds automated security tests. See `api-security.md`.
 - **Validate everything entering brain at the boundary,** structurally (typed
